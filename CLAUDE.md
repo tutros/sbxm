@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-Pre-implementation. No Rust crate exists yet. Sources of truth:
+Milestone 1 in progress (slice 0, scaffold, done). Sources of truth:
 - `idea.md`: original brief
 - `milestone-1.md`: current implementation plan (crate layout, config schema, kit mapping, commands, build order).
 - `decisions.md`: numbered design decisions and open research spikes. **Read it before designing anything**, and add new decisions there instead of silently departing from it.
@@ -15,7 +15,26 @@ Each SDLC phase has a project skill in `.claude/skills/`; follow it for that pha
 - `sdlc-planning`: interview rounds, numbered decisions, spikes, milestone plan.
 - `sdlc-implementation`: vertical slices, TDD (red first), smallest change per step, commit after every green step (`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`).
 
-Update this file with real `cargo` commands and module layout once the crate is scaffolded.
+## Commands
+
+```
+cargo build
+cargo run -- --help                          # run the CLI
+cargo test                                   # all tests (no Docker needed)
+cargo test --test cli help_prints_usage      # a single test
+cargo test -- --ignored                      # real-sbx tests (base dir outside %TEMP%/AppData)
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+```
+
+## Code layout
+
+Single binary crate (edition 2024). Modules grow slice by slice, following the crate layout table in `milestone-1.md`.
+- `src/main.rs`: entry point.
+- `src/cli.rs`: `clap` derive definitions.
+- `tests/cli.rs`: `assert_cmd` tests of the binary's observable behavior.
+
+On Windows, cargo can print `error finalizing incremental compilation session directory … Access is denied`. It's a harmless filesystem-lock warning, not a lint failure.
 
 ## What `sbxm` is
 
