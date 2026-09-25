@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-Milestone 1 in progress (slices 0–1 done). Sources of truth:
+Milestone 1 in progress (slices 0–2 done). Sources of truth:
 - `idea.md`: original brief
 - `milestone-1.md`: current implementation plan (crate layout, config schema, kit mapping, commands, build order).
 - `decisions.md`: numbered design decisions and open research spikes. **Read it before designing anything**, and add new decisions there instead of silently departing from it.
@@ -33,7 +33,8 @@ Single binary crate (edition 2024). Modules grow slice by slice, following the c
 - `src/main.rs`: entry point; dispatches subcommands.
 - `src/cli.rs`: `clap` derive definitions.
 - `src/config.rs`: config dir resolution (`SBXM_CONFIG_DIR` or `~/.config/sbxm`).
-- `src/commands/`: one file per subcommand (`config_init.rs`).
+- `src/project.rs`: project name validation (decisions 33, 44).
+- `src/commands/`: one file per subcommand (`config_init.rs`, `new.rs`).
 - `tests/`: `assert_cmd` tests of the binary's observable behavior, one file per command. Tests set `SBXM_CONFIG_DIR` to a `tempfile` dir and never touch the real config.
 
 On Windows, cargo can print `error finalizing incremental compilation session directory … Access is denied`. It's a harmless filesystem-lock warning, not a lint failure.
