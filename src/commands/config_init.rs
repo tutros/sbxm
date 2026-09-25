@@ -72,3 +72,14 @@ fn toml_path(path: &Path) -> Result<String> {
         .with_context(|| format!("path is not valid UTF-8: {}", path.display()))?;
     Ok(toml::Value::String(path.to_owned()).to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::Profile;
+
+    #[test]
+    fn starter_profile_parses_as_a_profile() {
+        toml::from_str::<Profile>(STARTER_PROFILE).unwrap();
+    }
+}

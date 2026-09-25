@@ -8,10 +8,14 @@ use sbxm::confirm::Terminal;
 
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
-        Command::New { project, seed } => commands::new::run(
+        Command::New {
+            project,
+            seed,
+            profile,
+        } => commands::new::run(
             &config::config_dir()?,
             &project,
-            &commands::new::Options { seed },
+            &commands::new::Options { seed, profile },
             &SbxBackend,
         ),
         Command::List { json } => {

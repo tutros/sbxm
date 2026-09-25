@@ -61,6 +61,14 @@ fn lifecycle_against_real_sbx() {
         format!("base_dir = {base}\n\n[resources]\ncpus = 2\nmemory = \"2g\"\n"),
     )
     .unwrap();
+    // The default profile, at the default `<config_dir>/profiles` location.
+    let profile_dir = config_dir.path().join("profiles").join("default");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    std::fs::write(
+        profile_dir.join("profile.toml"),
+        "description = \"real sbx test\"\n",
+    )
+    .unwrap();
 
     new::run(
         config_dir.path(),

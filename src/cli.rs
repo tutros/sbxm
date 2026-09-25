@@ -19,6 +19,9 @@ pub enum Command {
         /// Copy this directory's contents into the new project.
         #[arg(long)]
         seed: Option<PathBuf>,
+        /// Profile to apply (default: `default_profile` in the global config).
+        #[arg(long)]
+        profile: Option<String>,
     },
     /// List sbxm sandboxes and flag orphans.
     List {

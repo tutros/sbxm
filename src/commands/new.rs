@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 
 use super::HARNESS;
 use crate::backend::{CreateSpec, SandboxBackend};
-use crate::config::GlobalConfig;
+use crate::config::{GlobalConfig, Profile};
 use crate::project;
 use crate::seed;
 use crate::state::{SandboxState, State};
@@ -15,6 +15,8 @@ use crate::state::{SandboxState, State};
 pub struct Options {
     /// Directory whose contents are copied into a new workspace.
     pub seed: Option<PathBuf>,
+    /// Profile to apply; `default_profile` from the global config if `None`.
+    pub profile: Option<String>,
 }
 
 pub fn run(
@@ -25,6 +27,11 @@ pub fn run(
 ) -> Result<()> {
     project::validate_name(name)?;
     let config = GlobalConfig::load(config_dir)?;
+    let profile_name = options
+        .profile
+        .as_deref()
+        .unwrap_or(&config.default_profile);
+    let _profile = Profile::load(config.profiles_dir(), profile_name)?;
 
     if !config.base_dir.is_dir() {
         bail!(

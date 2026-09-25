@@ -120,7 +120,10 @@ fn failed_create_writes_no_state() {
 }
 
 fn seeded(seed: PathBuf) -> new::Options {
-    new::Options { seed: Some(seed) }
+    new::Options {
+        seed: Some(seed),
+        ..Default::default()
+    }
 }
 
 #[test]
