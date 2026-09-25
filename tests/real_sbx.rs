@@ -36,6 +36,15 @@ impl Drop for Cleanup {
 
 /// The HTTP status a request from inside the sandbox gets. The egress proxy
 /// answers blocked hosts with 403, reported by curl as the CONNECT status.
+/// `printenv <name>` inside the sandbox, trimmed.
+fn printenv(sandbox: &str, name: &str) -> String {
+    let output = Command::new("sbx")
+        .args(["exec", sandbox, "printenv", name])
+        .output()
+        .unwrap();
+    String::from_utf8_lossy(&output.stdout).trim().to_owned()
+}
+
 fn http_status(sandbox: &str, url: &str) -> String {
     let output = Command::new("sbx")
         .args(["exec", sandbox, "curl", "-s", "-o", "/dev/null", "-w"])
@@ -85,7 +94,7 @@ fn lifecycle_against_real_sbx() {
     std::fs::create_dir_all(&profile_dir).unwrap();
     std::fs::write(
         profile_dir.join("profile.toml"),
-        "description = \"real sbx test\"\n\n[network]\nallow = [\"example.org\"]\n\n[env]\nSBXM_REAL_TEST = \"hello from the profile\"\n",
+        "description = \"real sbx test\"\n\n[network]\nallow = [\"example.org\"]\n\n[env]\nREAL_TEST_GREETING = \"hello from the profile\"\n",
     )
     .unwrap();
 
@@ -109,14 +118,21 @@ fn lifecycle_against_real_sbx() {
     assert_eq!(http_status(&sandbox, "https://example.com"), "403");
 
     // Slice 10c: the profile's env is set inside the sandbox.
-    let printenv = Command::new("sbx")
-        .args(["exec", &sandbox, "printenv", "SBXM_REAL_TEST"])
-        .output()
-        .unwrap();
     assert_eq!(
-        String::from_utf8_lossy(&printenv.stdout).trim(),
+        printenv(&sandbox, "REAL_TEST_GREETING"),
         "hello from the profile"
     );
+
+    // Slice 11: the sandbox records the profile and config hash from state.
+    let state: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(base_dir.join(".sbxm").join(&project).join("state.json")).unwrap(),
+    )
+    .unwrap();
+    let hash = state["sandboxes"]["claude"]["config_hash"]
+        .as_str()
+        .unwrap();
+    assert_eq!(printenv(&sandbox, "SBXM_CONFIG_HASH"), hash);
+    assert_eq!(printenv(&sandbox, "SBXM_PROFILE"), "default");
 
     // Slice 5: `list` sees it through the real `sbx ls --json`, joined with state.
     let entries = list::entries(config_dir.path(), &SbxBackend).unwrap();
