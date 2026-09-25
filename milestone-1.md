@@ -128,7 +128,7 @@ Follow the `sdlc-implementation` skill. Each slice is one user-observable behavi
 
 Every slice is tested against `FakeBackend`. "Real `sbx`" means an `#[ignore]` test or manual check, run when the slice is done, on a base dir outside `%TEMP%`/AppData.
 
-Between slices 3 and 10, sandboxes are created without sbxm kits. That's safe: `sbx`'s global deny-all egress still applies (S3).
+Between slices 3 and 10b, sandboxes are created without sbxm kits. That's safe: `sbx`'s global deny-all egress still applies (S3).
 
 | # | After this slice… | Test focus | Real `sbx` |
 |---|---|---|---|
@@ -142,8 +142,10 @@ Between slices 3 and 10, sandboxes are created without sbxm kits. That's safe: `
 | 7 | `sbxm rm demo` removes the sandbox and its state, and keeps the workspace. | Backend `rm -f` call; state gone; workspace untouched. | Gone from `sbx ls`. |
 | 8 | `sbxm rm demo --purge` also deletes the workspace and `.sbxm/demo` after confirmation. | Confirm yes/no; non-TTY without `--yes` refuses; prompt shows the path [32]. | none |
 | 9 | `sbxm open demo` attaches if the sandbox exists (running or stopped) and creates then attaches if it doesn't [31]. | Backend call sequence for each of the three states. | Manual attach works. |
-| 10 | The profile's `network` and `env` reach the sandbox through a generated `common` mixin, validated before create. | `insta` snapshot of `spec.yaml`; `kit_validate` called before `create`; validation failure aborts with no sandbox created. | `sbx kit validate` passes; allowed host 200, other 403. |
-| 10a | The profile's `skills.store` becomes `--skills` on `sbx create`; `readwrite` is rejected with a clear error [46]. | Backend call args for `readonly`/`off`/default; `readwrite` error with no sandbox created. | Store skills visible with `readonly`, absent with `off`. |
+| 10a | `sbxm new demo [--profile p]` loads `<profiles_dir>/<p>/profile.toml` (default `default_profile`); a missing or invalid profile is a clear error and nothing is created. | Profile parsed; missing/invalid profile errors with no dirs and no backend calls. | none |
+| 10b | The profile's `network` reaches the sandbox through a generated `common` mixin, validated before create. | `insta` snapshot of `spec.yaml`; `kit_validate` called before `create`; validation failure aborts with no sandbox created. | `sbx kit validate` passes; allowed host 200, other 403. |
+| 10c | The profile's `env` reaches the sandbox through the same `common` mixin. | Snapshot with `environment.variables`. | Env var visible in the sandbox. |
+| 10d | The profile's `skills.store` becomes `--skills` on `sbx create`; `readwrite` is rejected with a clear error [46]. | Backend call args for `readonly`/`off`/default; `readwrite` error with no sandbox created. | Store skills visible with `readonly`, absent with `off`. |
 | 11 | The config hash is stored in state and injected as `SBXM_CONFIG_HASH`/`SBXM_PROFILE`. After a profile change, `open` refuses; `open --rebuild` recreates, warning that session history is lost; `list` shows drift [28][31]. | Hash stable across runs; changes when a referenced file changes; refuse/rebuild/drift paths. | Env vars present in sandbox; workspace survives rebuild. |
 | 12 | `.sbxm/demo/sandbox.toml` overrides the profile: lists append, scalars and maps override [27]. | Merge semantics; reflected in kit snapshot and hash. | none |
 | 13 | `new`/`open` fail clearly when a profile's `secrets.services` entry isn't stored in `sbx` [30]. | Parse the captured `sbx secret ls --json` shape; message names the missing secret; no sandbox created. | Missing vs. present `anthropic`. |
