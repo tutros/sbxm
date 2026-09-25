@@ -1,7 +1,7 @@
 //! Shared test helpers. Each test crate uses only some of them.
 #![allow(dead_code)]
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use sbxm::backend::FakeBackend;
 use sbxm::commands::new;
@@ -56,4 +56,23 @@ impl Env {
         std::fs::write(seed.join("sub").join("b.txt"), "b").unwrap();
         seed
     }
+}
+
+/// A directory link that needs no admin rights: a junction on Windows.
+pub fn dir_link(link: &Path, target: &Path) {
+    #[cfg(windows)]
+    {
+        let status = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(link)
+            .arg(target)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "mklink /J failed");
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
 }

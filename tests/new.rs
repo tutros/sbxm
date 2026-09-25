@@ -2,7 +2,7 @@ use std::path::{Path, PathBuf};
 
 mod common;
 
-use common::Env;
+use common::{Env, dir_link};
 use sbxm::backend::{CreateSpec, FakeBackend};
 use sbxm::commands::new;
 
@@ -197,25 +197,6 @@ fn seed_containing_the_base_dir_is_an_error() {
     assert!(message.contains("contains the base dir"), "{message}");
     assert!(!env.base_dir().join("demo").exists());
     assert!(backend.creates().is_empty());
-}
-
-/// A directory link that needs no admin rights: a junction on Windows.
-fn dir_link(link: &Path, target: &Path) {
-    #[cfg(windows)]
-    {
-        let status = std::process::Command::new("cmd")
-            .arg("/C")
-            .arg("mklink")
-            .arg("/J")
-            .arg(link)
-            .arg(target)
-            .stdout(std::process::Stdio::null())
-            .status()
-            .unwrap();
-        assert!(status.success(), "mklink /J failed");
-    }
-    #[cfg(unix)]
-    std::os::unix::fs::symlink(target, link).unwrap();
 }
 
 #[test]
