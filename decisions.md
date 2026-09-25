@@ -65,6 +65,7 @@ Running log of design decisions for model_compare. See `idea.md` for the origina
 ## Implementation (2026-09-24)
 
 43. **Starter config (`config init`, slice 1):** Writes `<config_dir>/config.toml` and `<config_dir>/profiles/default/profile.toml`, where `<config_dir>` is `SBXM_CONFIG_DIR` or `~/.config/sbxm`. `profiles_dir` defaults to `<config_dir>/profiles` (so the config dir is the directory to version), and `base_dir` defaults to `~/sbxm-projects` (under home, not AppData). The starter profile references no files. If either file exists, nothing is written.
+44. **Project name length (slice 2):** At most 40 characters, so `sbxm-<project>-<harness>` stays well under the 63-character hostname limit (longest harness today: `gemini`, 52 characters total).
 
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.

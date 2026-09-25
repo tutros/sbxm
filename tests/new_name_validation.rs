@@ -63,3 +63,13 @@ fn rejects_leading_hyphen() {
 fn rejects_empty_name() {
     assert_rejected("", "must not be empty");
 }
+
+#[test]
+fn accepts_names_up_to_40_characters() {
+    assert_valid(&"a".repeat(40));
+}
+
+#[test]
+fn rejects_names_longer_than_40_characters() {
+    assert_rejected(&"a".repeat(41), "at most 40 characters");
+}
