@@ -85,7 +85,7 @@ fn lifecycle_against_real_sbx() {
     std::fs::create_dir_all(&profile_dir).unwrap();
     std::fs::write(
         profile_dir.join("profile.toml"),
-        "description = \"real sbx test\"\n\n[network]\nallow = [\"example.org\"]\n",
+        "description = \"real sbx test\"\n\n[network]\nallow = [\"example.org\"]\n\n[env]\nSBXM_REAL_TEST = \"hello from the profile\"\n",
     )
     .unwrap();
 
@@ -107,6 +107,16 @@ fn lifecycle_against_real_sbx() {
     // Slice 10b: the profile's allow list reaches the sandbox; other hosts stay blocked.
     assert_eq!(http_status(&sandbox, "https://example.org"), "200");
     assert_eq!(http_status(&sandbox, "https://example.com"), "403");
+
+    // Slice 10c: the profile's env is set inside the sandbox.
+    let printenv = Command::new("sbx")
+        .args(["exec", &sandbox, "printenv", "SBXM_REAL_TEST"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&printenv.stdout).trim(),
+        "hello from the profile"
+    );
 
     // Slice 5: `list` sees it through the real `sbx ls --json`, joined with state.
     let entries = list::entries(config_dir.path(), &SbxBackend).unwrap();
