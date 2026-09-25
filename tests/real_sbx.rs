@@ -34,6 +34,25 @@ impl Drop for Cleanup {
     }
 }
 
+/// The HTTP status a request from inside the sandbox gets. The egress proxy
+/// answers blocked hosts with 403, reported by curl as the CONNECT status.
+fn http_status(sandbox: &str, url: &str) -> String {
+    let output = Command::new("sbx")
+        .args(["exec", sandbox, "curl", "-s", "-o", "/dev/null", "-w"])
+        .arg("%{http_code} %{http_connect}")
+        .arg(url)
+        .output()
+        .unwrap();
+    let codes = String::from_utf8_lossy(&output.stdout).into_owned();
+    println!("{url}: {codes}");
+    let mut parts = codes.split_whitespace();
+    match (parts.next(), parts.next()) {
+        (Some("000"), Some(connect)) => connect.to_owned(),
+        (Some(code), _) => code.to_owned(),
+        _ => codes,
+    }
+}
+
 fn real_base_dir() -> PathBuf {
     let dir = std::env::var_os("SBXM_REAL_BASE_DIR")
         .expect("set SBXM_REAL_BASE_DIR to an existing dir outside %TEMP%/AppData");
@@ -66,7 +85,7 @@ fn lifecycle_against_real_sbx() {
     std::fs::create_dir_all(&profile_dir).unwrap();
     std::fs::write(
         profile_dir.join("profile.toml"),
-        "description = \"real sbx test\"\n",
+        "description = \"real sbx test\"\n\n[network]\nallow = [\"example.org\"]\n",
     )
     .unwrap();
 
@@ -84,6 +103,10 @@ fn lifecycle_against_real_sbx() {
         ls.contains(&format!("\"{sandbox}\"")),
         "sbx ls --json: {ls}"
     );
+
+    // Slice 10b: the profile's allow list reaches the sandbox; other hosts stay blocked.
+    assert_eq!(http_status(&sandbox, "https://example.org"), "200");
+    assert_eq!(http_status(&sandbox, "https://example.com"), "403");
 
     // Slice 5: `list` sees it through the real `sbx ls --json`, joined with state.
     let entries = list::entries(config_dir.path(), &SbxBackend).unwrap();
