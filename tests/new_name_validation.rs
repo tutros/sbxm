@@ -53,3 +53,13 @@ fn rejects_characters_outside_lowercase_digits_and_hyphen() {
         assert_rejected(name, "only lowercase letters, digits and '-'");
     }
 }
+
+#[test]
+fn rejects_leading_hyphen() {
+    assert_rejected("-demo", "must start with a letter or digit");
+}
+
+#[test]
+fn rejects_empty_name() {
+    assert_rejected("", "must not be empty");
+}
