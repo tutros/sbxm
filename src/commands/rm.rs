@@ -1,21 +1,70 @@
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use super::HARNESS;
 use crate::backend::SandboxBackend;
 use crate::config::GlobalConfig;
+use crate::confirm::Confirm;
 use crate::{project, state};
 
-/// Removes the project's sandbox and its state. The workspace is kept.
-pub fn run(config_dir: &Path, name: &str, backend: &dyn SandboxBackend) -> Result<()> {
+#[derive(Debug, Default)]
+pub struct Options {
+    /// Also delete the workspace and `.sbxm/<project>/`.
+    pub purge: bool,
+    /// Skip the confirmation (required for `purge` without a terminal).
+    pub yes: bool,
+}
+
+/// Removes the project's sandbox and its state. The workspace is kept unless
+/// `purge` is set and the user confirms (decision 32).
+pub fn run(
+    config_dir: &Path,
+    name: &str,
+    options: &Options,
+    backend: &dyn SandboxBackend,
+    confirm: &dyn Confirm,
+) -> Result<()> {
     project::validate_name(name)?;
     let config = GlobalConfig::load(config_dir)?;
     let metadata_dir = project::metadata_dir(&config.base_dir, name);
     let state = state::load(&metadata_dir)?;
-    let Some(sandbox) = state.as_ref().and_then(|s| s.sandboxes.get(HARNESS)) else {
-        bail!("no sbxm sandbox for project '{name}'; `sbxm list` shows existing ones");
-    };
-    backend.remove(&sandbox.sandbox)?;
-    state::remove_sandbox(&metadata_dir, HARNESS)
+    let sandbox = state
+        .as_ref()
+        .and_then(|s| s.sandboxes.get(HARNESS))
+        .map(|s| s.sandbox.clone());
+
+    if !options.purge {
+        let Some(sandbox) = sandbox else {
+            bail!("no sbxm sandbox for project '{name}'; `sbxm list` shows existing ones");
+        };
+        backend.remove(&sandbox)?;
+        return state::remove_sandbox(&metadata_dir, HARNESS);
+    }
+
+    let dirs: Vec<PathBuf> = [config.base_dir.join(name), metadata_dir]
+        .into_iter()
+        .filter(|dir| dir.symlink_metadata().is_ok())
+        .collect();
+    let listing: Vec<String> = dirs.iter().map(|d| format!("  {}", d.display())).collect();
+    let listing = listing.join("\n");
+    if !options.yes {
+        if !confirm.is_interactive() {
+            bail!("refusing to purge without a terminal; pass --yes to delete:\n{listing}");
+        }
+        if !confirm.confirm(&format!(
+            "Permanently delete these directories?\n{listing}\n"
+        ))? {
+            bail!("purge cancelled; nothing was deleted");
+        }
+    }
+
+    if let Some(sandbox) = &sandbox {
+        backend.remove(sandbox)?;
+    }
+    for dir in &dirs {
+        fs::remove_dir_all(dir).with_context(|| format!("cannot delete {}", dir.display()))?;
+    }
+    Ok(())
 }

@@ -6,6 +6,7 @@ use std::process::{Command, Stdio};
 
 use sbxm::backend::SbxBackend;
 use sbxm::commands::{list, new, rm, stop};
+use sbxm::confirm::Terminal;
 use tempfile::TempDir;
 
 /// Removes the sandbox, workspace and metadata even if the test fails.
@@ -94,7 +95,14 @@ fn lifecycle_against_real_sbx() {
     assert_eq!(entry.status, "stopped");
 
     // Slice 7: `rm` removes the sandbox and state but keeps the workspace.
-    rm::run(config_dir.path(), &project, &SbxBackend).unwrap();
+    rm::run(
+        config_dir.path(),
+        &project,
+        &rm::Options::default(),
+        &SbxBackend,
+        &Terminal,
+    )
+    .unwrap();
     let entries = list::entries(config_dir.path(), &SbxBackend).unwrap();
     assert!(!entries.iter().any(|e| e.sandbox == sandbox), "{entries:?}");
     assert!(base_dir.join(&project).is_dir());

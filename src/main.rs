@@ -4,6 +4,7 @@ use sbxm::backend::SbxBackend;
 use sbxm::cli::{Cli, Command, ConfigCommand};
 use sbxm::commands;
 use sbxm::config;
+use sbxm::confirm::Terminal;
 
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
@@ -26,7 +27,13 @@ fn main() -> anyhow::Result<()> {
         Command::Stop { project } => {
             commands::stop::run(&config::config_dir()?, &project, &SbxBackend)
         }
-        Command::Rm { project } => commands::rm::run(&config::config_dir()?, &project, &SbxBackend),
+        Command::Rm { project } => commands::rm::run(
+            &config::config_dir()?,
+            &project,
+            &commands::rm::Options::default(),
+            &SbxBackend,
+            &Terminal,
+        ),
         Command::Config {
             command: ConfigCommand::Init,
         } => commands::config_init::run(),
