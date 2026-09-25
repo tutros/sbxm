@@ -2,7 +2,7 @@ mod common;
 
 use common::Env;
 use sbxm::backend::{FakeBackend, SandboxInfo};
-use sbxm::commands::open;
+use sbxm::commands::{new, open};
 
 fn kit_dir(env: &Env) -> std::path::PathBuf {
     env.kit_dir("demo")
@@ -109,4 +109,50 @@ fn invalid_name_makes_no_backend_calls() {
     open::run(&env.config_dir(), "Demo", &backend).unwrap_err();
 
     assert!(backend.log().is_empty());
+}
+
+fn state_entry(env: &Env) -> serde_json::Value {
+    let path = env.base_dir().join(".sbxm").join("demo").join("state.json");
+    let state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    state["sandboxes"]["claude"].clone()
+}
+
+#[test]
+fn missing_sandbox_is_recreated_with_the_stored_profile() {
+    let env = Env::new();
+    env.write_profile("strict", "description = \"strict\"\n");
+    let options = new::Options {
+        profile: Some("strict".into()),
+        ..new::Options::default()
+    };
+    env.run_with("demo", &options, &FakeBackend::default())
+        .unwrap();
+    // Loading the default profile now fails, so success means it wasn't used.
+    env.write_profile("default", "not valid toml [");
+    let backend = FakeBackend::default();
+
+    open::run(&env.config_dir(), "demo", &backend).unwrap();
+
+    assert_eq!(backend.creates().len(), 1);
+    assert_eq!(state_entry(&env)["profile"], "strict");
+}
+
+#[test]
+fn missing_sandbox_without_a_stored_profile_uses_the_default() {
+    let env = Env::new();
+    let metadata = env.base_dir().join(".sbxm").join("demo");
+    std::fs::create_dir_all(&metadata).unwrap();
+    // State as written before slice 11: no profile or hash.
+    std::fs::write(
+        metadata.join("state.json"),
+        r#"{"sandboxes": {"claude": {"sandbox": "sbxm-demo-claude", "workspace": "unused", "created_at": 0}}}"#,
+    )
+    .unwrap();
+    let backend = FakeBackend::default();
+
+    open::run(&env.config_dir(), "demo", &backend).unwrap();
+
+    assert_eq!(backend.creates().len(), 1);
+    assert_eq!(state_entry(&env)["profile"], "default");
 }
