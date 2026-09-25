@@ -15,6 +15,8 @@ pub trait SandboxBackend {
     fn create(&self, spec: &CreateSpec) -> Result<()>;
     fn list(&self) -> Result<Vec<SandboxInfo>>;
     fn stop(&self, name: &str) -> Result<()>;
+    /// Removes the sandbox without prompting (`sbx rm -f`).
+    fn remove(&self, name: &str) -> Result<()>;
 }
 
 /// One entry of `sbx ls --json`; other fields are ignored.

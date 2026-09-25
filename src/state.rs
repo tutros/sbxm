@@ -45,6 +45,26 @@ pub fn load(metadata_dir: &Path) -> Result<Option<State>> {
     Ok(Some(state))
 }
 
+/// Removes `harness`'s entry. When no entries are left, deletes
+/// `state.json`, and then the metadata dir if nothing else is in it (it may
+/// hold the user's `sandbox.toml`).
+pub fn remove_sandbox(metadata_dir: &Path, harness: &str) -> Result<()> {
+    let Some(mut state) = load(metadata_dir)? else {
+        return Ok(());
+    };
+    state.sandboxes.remove(harness);
+    if !state.sandboxes.is_empty() {
+        return state.save(metadata_dir);
+    }
+    let path = metadata_dir.join("state.json");
+    fs::remove_file(&path).with_context(|| format!("cannot delete {}", path.display()))?;
+    if fs::read_dir(metadata_dir)?.next().is_none() {
+        fs::remove_dir(metadata_dir)
+            .with_context(|| format!("cannot delete {}", metadata_dir.display()))?;
+    }
+    Ok(())
+}
+
 /// Every project's state under `<base>/.sbxm/`, as `(project, state)`.
 /// A missing `.sbxm` dir means no state yet.
 pub fn load_all(base_dir: &Path) -> Result<Vec<(String, State)>> {

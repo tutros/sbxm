@@ -9,6 +9,8 @@ use super::{CreateSpec, SandboxBackend, SandboxInfo};
 pub struct FakeBackend {
     creates: RefCell<Vec<CreateSpec>>,
     stops: RefCell<Vec<String>>,
+    removes: RefCell<Vec<String>>,
+    fail_remove: bool,
     fail_create: bool,
     sandboxes: Vec<SandboxInfo>,
 }
@@ -18,6 +20,14 @@ impl FakeBackend {
     pub fn failing_create() -> Self {
         Self {
             fail_create: true,
+            ..Self::default()
+        }
+    }
+
+    /// A backend whose `remove` records the call and then fails.
+    pub fn failing_remove() -> Self {
+        Self {
+            fail_remove: true,
             ..Self::default()
         }
     }
@@ -37,6 +47,10 @@ impl FakeBackend {
     pub fn stops(&self) -> Vec<String> {
         self.stops.borrow().clone()
     }
+
+    pub fn removes(&self) -> Vec<String> {
+        self.removes.borrow().clone()
+    }
 }
 
 impl SandboxBackend for FakeBackend {
@@ -54,6 +68,14 @@ impl SandboxBackend for FakeBackend {
 
     fn stop(&self, name: &str) -> Result<()> {
         self.stops.borrow_mut().push(name.to_owned());
+        Ok(())
+    }
+
+    fn remove(&self, name: &str) -> Result<()> {
+        self.removes.borrow_mut().push(name.to_owned());
+        if self.fail_remove {
+            bail!("fake remove failure");
+        }
         Ok(())
     }
 }

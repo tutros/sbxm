@@ -1,6 +1,7 @@
 pub mod config_init;
 pub mod list;
 pub mod new;
+pub mod rm;
 pub mod stop;
 
 /// Only Claude until `--harness` arrives (milestone 1, slice 18).

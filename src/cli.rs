@@ -31,6 +31,11 @@ pub enum Command {
         /// Project name.
         project: String,
     },
+    /// Remove a project's sandbox and state; the workspace is kept.
+    Rm {
+        /// Project name.
+        project: String,
+    },
     /// Manage sbxm configuration.
     Config {
         #[command(subcommand)]
