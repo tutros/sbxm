@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-Milestone 1 in progress (slices 0–10b done). Sources of truth:
+Milestone 1 in progress (slices 0–10c done). Sources of truth:
 - `idea.md`: original brief
 - `milestone-1.md`: current implementation plan (crate layout, config schema, kit mapping, commands, build order).
 - `decisions.md`: numbered design decisions and open research spikes. **Read it before designing anything**, and add new decisions there instead of silently departing from it.
@@ -40,7 +40,7 @@ Crate `sbxm` (edition 2024), lib + bin. Modules grow slice by slice, following t
 - `src/seed.rs`: copying a seed dir into a new workspace (rejects links).
 - `src/confirm.rs`: `Confirm` trait for destructive prompts; `Terminal` asks on the TTY. Tests use a scripted fake.
 - `src/commands/`: one file per subcommand (`config_init.rs`, `new.rs`, `list.rs`, `stop.rs`, `rm.rs`, `open.rs`); the harness is fixed to `commands::HARNESS` (`claude`) until slice 18.
-- `tests/`: one file per command. CLI-level tests use `assert_cmd` with `SBXM_CONFIG_DIR` pointing at a `tempfile` dir; tests that reach the backend call command functions in-process with `FakeBackend`, using the `Env` and `dir_link` helpers in `tests/common/`. `tests/real_sbx.rs` walks one sandbox through new (incl. egress 200/403) → list → stop → rm. Never touch the real config.
+- `tests/`: one file per command. CLI-level tests use `assert_cmd` with `SBXM_CONFIG_DIR` pointing at a `tempfile` dir; tests that reach the backend call command functions in-process with `FakeBackend`, using the `Env` and `dir_link` helpers in `tests/common/`. `tests/real_sbx.rs` walks one sandbox through new (incl. egress 200/403 and profile env) → list → stop → rm. Never touch the real config.
 
 On Windows, cargo can print `error finalizing incremental compilation session directory … Access is denied`. It's a harmless filesystem-lock warning, not a lint failure.
 
