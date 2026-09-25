@@ -156,3 +156,48 @@ fn missing_sandbox_without_a_stored_profile_uses_the_default() {
     assert_eq!(backend.creates().len(), 1);
     assert_eq!(state_entry(&env)["profile"], "default");
 }
+
+#[test]
+fn changed_config_is_refused_without_rebuild() {
+    let env = Env::new();
+    env.run("demo", &FakeBackend::default()).unwrap();
+    env.write_profile("default", "[network]\nallow = [\"github.com\"]\n");
+    let backend = FakeBackend::with_sandboxes(vec![sandbox("running")]);
+
+    let err = open::run(&env.config_dir(), "demo", &backend).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains(
+            "the config of sbxm-demo-claude (profile 'default') changed since it was created; \
+             run `sbxm open demo --rebuild` to recreate it"
+        ),
+        "{message}"
+    );
+    assert!(backend.log().is_empty());
+}
+
+#[test]
+fn state_without_a_hash_is_refused_without_rebuild() {
+    let env = Env::new();
+    let metadata = env.base_dir().join(".sbxm").join("demo");
+    std::fs::create_dir_all(&metadata).unwrap();
+    std::fs::write(
+        metadata.join("state.json"),
+        r#"{"sandboxes": {"claude": {"sandbox": "sbxm-demo-claude", "workspace": "unused", "created_at": 0}}}"#,
+    )
+    .unwrap();
+    let backend = FakeBackend::with_sandboxes(vec![sandbox("running")]);
+
+    let err = open::run(&env.config_dir(), "demo", &backend).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains(
+            "sbxm-demo-claude was created before sbxm recorded config hashes; \
+             run `sbxm open demo --rebuild` to recreate it"
+        ),
+        "{message}"
+    );
+    assert!(backend.log().is_empty());
+}
