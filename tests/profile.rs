@@ -108,3 +108,21 @@ fn starter_profile_sections_parse() {
 
     new_with_profile(&env, None, &backend).unwrap();
 }
+
+#[test]
+fn default_profile_setting_picks_a_non_default_name() {
+    let env = Env::new();
+    let config = env.config_dir().join("config.toml");
+    let text = std::fs::read_to_string(&config).unwrap().replace(
+        "default_profile = \"default\"",
+        "default_profile = \"team\"",
+    );
+    std::fs::write(&config, text).unwrap();
+    env.write_profile("default", "not valid toml [");
+    env.write_profile("team", "description = \"team\"\n");
+    let backend = FakeBackend::default();
+
+    new_with_profile(&env, None, &backend).unwrap();
+
+    assert_eq!(backend.creates().len(), 1);
+}
