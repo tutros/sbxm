@@ -22,3 +22,19 @@ fn help_prints_usage() {
         "unexpected help output:\n{stdout}"
     );
 }
+
+#[test]
+fn list_without_config_points_to_config_init() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    for args in [&["list"][..], &["list", "--json"][..]] {
+        let output = sbxm()
+            .env("SBXM_CONFIG_DIR", tmp.path())
+            .args(args)
+            .assert()
+            .failure()
+            .get_output()
+            .clone();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("sbxm config init"), "{args:?}: {stderr}");
+    }
+}

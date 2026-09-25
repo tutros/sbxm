@@ -13,6 +13,16 @@ fn main() -> anyhow::Result<()> {
             &commands::new::Options { seed },
             &SbxBackend,
         ),
+        Command::List { json } => {
+            let entries = commands::list::entries(&config::config_dir()?, &SbxBackend)?;
+            let render = if json {
+                commands::list::render_json
+            } else {
+                commands::list::render_table
+            };
+            print!("{}", render(&entries));
+            Ok(())
+        }
         Command::Config {
             command: ConfigCommand::Init,
         } => commands::config_init::run(),

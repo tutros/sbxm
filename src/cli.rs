@@ -20,6 +20,12 @@ pub enum Command {
         #[arg(long)]
         seed: Option<PathBuf>,
     },
+    /// List sbxm sandboxes and flag orphans.
+    List {
+        /// Print JSON instead of a table.
+        #[arg(long)]
+        json: bool,
+    },
     /// Manage sbxm configuration.
     Config {
         #[command(subcommand)]
