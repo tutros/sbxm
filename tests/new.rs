@@ -190,3 +190,45 @@ fn seed_is_copied_into_a_new_workspace() {
     );
     assert_eq!(backend.creates(), vec![expected_create(&workspace)]);
 }
+
+#[test]
+fn seed_on_existing_project_is_an_error_and_changes_nothing() {
+    let env = Env::new();
+    let workspace = env.base_dir().join("demo");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("notes.md"), "keep me").unwrap();
+    let backend = FakeBackend::default();
+
+    let err = env
+        .run_with("demo", &seeded(env.seed()), &backend)
+        .unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("already exists"), "{message}");
+    assert!(message.contains("without --seed"), "{message}");
+    assert!(backend.creates().is_empty());
+    let names: Vec<_> = std::fs::read_dir(&workspace)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(names, ["notes.md"]);
+}
+
+#[test]
+fn missing_seed_is_an_error_and_creates_nothing() {
+    let env = Env::new();
+    let missing = env.tmp.path().join("no-such-seed");
+    let backend = FakeBackend::default();
+
+    let err = env
+        .run_with("demo", &seeded(missing.clone()), &backend)
+        .unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains(&missing.display().to_string()),
+        "{message}"
+    );
+    assert!(!env.base_dir().join("demo").exists());
+    assert!(backend.creates().is_empty());
+}

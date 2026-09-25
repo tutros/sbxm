@@ -36,6 +36,17 @@ pub fn run(
         );
     }
     let workspace = config.base_dir.join(name);
+    if let Some(seed_dir) = &options.seed {
+        if workspace.exists() {
+            bail!(
+                "project {} already exists; run without --seed to reuse it",
+                workspace.display()
+            );
+        }
+        if !seed_dir.is_dir() {
+            bail!("seed {} is not a directory", seed_dir.display());
+        }
+    }
     match &options.seed {
         Some(seed_dir) => seed::copy(seed_dir, &workspace)?,
         None => fs::create_dir_all(&workspace)
