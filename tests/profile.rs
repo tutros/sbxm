@@ -126,3 +126,36 @@ fn default_profile_setting_picks_a_non_default_name() {
 
     assert_eq!(backend.creates().len(), 1);
 }
+
+#[test]
+fn invalid_env_name_is_rejected_with_the_profile_named() {
+    let env = Env::new();
+    env.write_profile("default", "[env]\n\"MY-VAR\" = \"1\"\n");
+    let backend = FakeBackend::default();
+
+    let err = new_with_profile(&env, None, &backend).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("invalid env name 'MY-VAR' in profile 'default'"),
+        "{message}"
+    );
+    assert!(message.contains("letters, digits and '_'"), "{message}");
+    assert_nothing_created(&env, &backend);
+}
+
+#[test]
+fn env_value_with_kit_expression_is_rejected() {
+    let env = Env::new();
+    env.write_profile("default", "[env]\nGREETING = \"${{ kit.args.name }}\"\n");
+    let backend = FakeBackend::default();
+
+    let err = new_with_profile(&env, None, &backend).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("env value for 'GREETING' in profile 'default' contains '${{'"),
+        "{message}"
+    );
+    assert_nothing_created(&env, &backend);
+}

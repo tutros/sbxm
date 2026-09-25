@@ -108,7 +108,37 @@ impl Profile {
         }
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("cannot read {}", path.display()))?;
-        toml::from_str(&text).with_context(|| format!("invalid profile {}", path.display()))
+        let profile: Self =
+            toml::from_str(&text).with_context(|| format!("invalid profile {}", path.display()))?;
+        profile.check_env(name, &path)?;
+        Ok(profile)
+    }
+
+    /// `sbx` rejects these too, but with messages that blame "the kit's author";
+    /// sbxm points at the profile instead.
+    fn check_env(&self, name: &str, path: &Path) -> Result<()> {
+        for (key, value) in &self.env {
+            let mut chars = key.chars();
+            let valid = chars
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if !valid {
+                bail!(
+                    "invalid env name '{key}' in profile '{name}' ({}); use letters, digits and '_', \
+                     not starting with a digit",
+                    path.display()
+                );
+            }
+            if value.contains("${{") {
+                bail!(
+                    "env value for '{key}' in profile '{name}' contains '${{{{', which sbx reads as a \
+                     kit expression; remove it from {}",
+                    path.display()
+                );
+            }
+        }
+        Ok(())
     }
 }
 

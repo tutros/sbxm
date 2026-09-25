@@ -2,3 +2,7 @@
 
 # Agent worktrees (see sdlc-implementation rule 6)
 /.claude/worktrees/
+
+# insta snapshot review files
+*.pending-snap
+*.snap.new

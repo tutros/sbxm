@@ -2,6 +2,7 @@
 //! the kit format (decisions 36, 39). Spec:
 //! <https://github.com/docker/sbx-kits-contrib/blob/main/spec/SPEC-v2.md>.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -19,6 +20,14 @@ pub struct Spec {
     name: &'static str,
     description: String,
     permissions: Permissions,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    environment: Option<Environment>,
+}
+
+#[derive(Debug, Serialize)]
+struct Environment {
+    /// Sorted, so the same profile always gives byte-identical output.
+    variables: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -45,6 +54,9 @@ pub fn common(profile_name: &str, profile: &Profile) -> Spec {
                 deny: profile.network.deny.clone(),
             },
         },
+        environment: (!profile.env.is_empty()).then(|| Environment {
+            variables: profile.env.clone(),
+        }),
     }
 }
 
