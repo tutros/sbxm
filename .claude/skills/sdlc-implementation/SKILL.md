@@ -5,7 +5,7 @@ description: How code is written in this project - vertical slices, test-first (
 
 # Implementation phase
 
-Four rules govern every code change. They apply to features, milestone steps and bug fixes alike.
+Five rules govern every code change. They apply to features, milestone steps and bug fixes alike.
 
 ## 1. Build in vertical slices
 
@@ -55,6 +55,35 @@ commit that step. One commit = one small, working change.
 - If a step needs more than about one screen of new production code, split it.
 - Don't refactor unrelated code, rename things or add dependencies "while you're there". Put it on a list and raise it as its own step.
 - Prefer a hard-coded or simple implementation first, and generalize only when the next test forces it.
+
+## 5. Unattended work needs a written, approved task spec
+
+Rules 1–4 assume the user can see every step. Before any work that the user won't check off step by step, write a
+task spec and get the user's approval **before** starting. This applies when:
+- launching a subagent or background task (spike, research, parallel slice),
+- skipping the interactive loop (e.g. running several slices without reporting between them),
+- making a change larger than rule 4 allows (many files, several behaviors, or a big refactor in one step).
+
+The spec is a file (e.g. `spikes/<id>.md` for spikes) and must contain:
+
+| Section | Contents |
+|---|---|
+| **Why** | What it unblocks (slices, decisions) and what to read first. |
+| **Environment facts** | Verified facts the worker would otherwise rediscover or get wrong: available credentials, paths to use and to avoid, tool versions, known gotchas. Mark hypotheses as unverified. |
+| **Questions or tasks** | Each with a method (concrete commands, in order) and the **acceptance criteria**: what evidence proves it done. |
+| **Statuses** | Each item ends as Answered/Done, Partial (gap stated) or Blocked (reason stated). A belief without evidence is not an answer. |
+| **Budget** | Hard limits: tool calls, wall time, model or paid API calls, concurrent sandboxes, disk. What to do when one is hit (stop, clean up, report). |
+| **Stop rules** | Same error twice → record as Blocked and move on. Forbidden commands (interactive auth, anything that changes global or shared state). Limits on web research. No scope creep: new questions go to a Follow-ups list. |
+| **Side effects** | Allowed write locations and files; naming prefix for anything created; no git state changes unless the spec says so; nothing outside the prefix is deleted. |
+| **Cleanup** | Steps that always run, including after failure, plus commands whose output proves it. |
+| **Output contract** | One results file with a fixed template (create it with the spec), plus the shape of the final message. The worker doesn't edit `decisions.md`, `milestone-1.md` or `CLAUDE.md`; the main session merges conclusions. |
+| **Exit criteria** | When the work is done: every item has a status, cleanup is confirmed, the results file is complete. |
+
+Pre-decide every judgment call the worker would otherwise have to ask about: a background worker can't ask questions
+mid-run. If a decision can't be pre-decided, the answer is Blocked with the question stated, not a guess.
+
+When the work returns: check the claims against the evidence in the results file, report to the user what was
+answered, what's blocked and whether cleanup was confirmed, and only then record decisions.
 
 ## Loop summary
 
