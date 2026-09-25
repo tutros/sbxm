@@ -3,7 +3,7 @@ mod common;
 use std::cell::RefCell;
 use std::path::PathBuf;
 
-use common::Env;
+use common::{Env, dir_link};
 use sbxm::backend::FakeBackend;
 use sbxm::commands::rm;
 use sbxm::confirm::Confirm;
@@ -212,4 +212,25 @@ fn purge_with_yes_skips_the_prompt() {
     assert!(confirm.prompts().is_empty());
     assert!(!workspace(&env).exists());
     assert!(!metadata_dir(&env).exists());
+}
+
+#[test]
+fn purge_refuses_a_linked_workspace_and_deletes_nothing() {
+    let env = setup();
+    let outside = env.tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("keep.txt"), "keep").unwrap();
+    std::fs::remove_dir_all(workspace(&env)).unwrap();
+    dir_link(&workspace(&env), &outside);
+    let backend = FakeBackend::default();
+    let confirm = FakeConfirm::new(true, true);
+
+    let err = purge(&env, true, &backend, &confirm).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("is a symlink or junction"), "{message}");
+    assert!(backend.removes().is_empty());
+    assert!(outside.join("keep.txt").exists());
+    assert!(workspace(&env).symlink_metadata().is_ok());
+    assert!(metadata_dir(&env).join("state.json").exists());
 }

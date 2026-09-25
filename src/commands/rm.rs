@@ -47,6 +47,9 @@ pub fn run(
         .into_iter()
         .filter(|dir| dir.symlink_metadata().is_ok())
         .collect();
+    for dir in &dirs {
+        check_deletable(dir)?;
+    }
     let listing: Vec<String> = dirs.iter().map(|d| format!("  {}", d.display())).collect();
     let listing = listing.join("\n");
     if !options.yes {
@@ -65,6 +68,28 @@ pub fn run(
     }
     for dir in &dirs {
         fs::remove_dir_all(dir).with_context(|| format!("cannot delete {}", dir.display()))?;
+    }
+    Ok(())
+}
+
+/// Refuses links (deleting through one could reach outside the base dir) and
+/// anything whose real location isn't directly under its expected parent.
+fn check_deletable(dir: &Path) -> Result<()> {
+    if dir.symlink_metadata()?.file_type().is_symlink() {
+        bail!(
+            "{} is a symlink or junction; remove the link yourself if you want it gone",
+            dir.display()
+        );
+    }
+    let parent = dir.parent().context("path has no parent")?;
+    let real = fs::canonicalize(dir)?;
+    if real.parent() != Some(fs::canonicalize(parent)?.as_path()) {
+        bail!(
+            "{} resolves to {}, outside {}; not deleting it",
+            dir.display(),
+            real.display(),
+            parent.display()
+        );
     }
     Ok(())
 }
