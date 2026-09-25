@@ -93,3 +93,27 @@ fn missing_base_dir_is_a_clear_error_and_creates_nothing() {
     assert!(!env.base_dir().exists());
     assert!(backend.creates().is_empty());
 }
+
+#[test]
+fn missing_config_points_to_config_init() {
+    let env = Env::new();
+    std::fs::remove_file(env.config_dir().join("config.toml")).unwrap();
+    let backend = FakeBackend::default();
+
+    let err = env.run("demo", &backend).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("sbxm config init"), "{message}");
+    assert!(backend.creates().is_empty());
+}
+
+#[test]
+fn invalid_name_makes_no_backend_calls() {
+    let env = Env::new();
+    let backend = FakeBackend::default();
+
+    env.run("Demo", &backend).unwrap_err();
+
+    assert!(backend.creates().is_empty());
+    assert!(std::fs::read_dir(env.base_dir()).unwrap().next().is_none());
+}

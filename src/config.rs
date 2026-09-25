@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
 /// `SBXM_CONFIG_DIR` if set, otherwise `~/.config/sbxm` on every platform.
@@ -31,6 +31,12 @@ pub struct Resources {
 impl GlobalConfig {
     pub fn load(config_dir: &Path) -> Result<Self> {
         let path = config_dir.join("config.toml");
+        if !path.exists() {
+            bail!(
+                "no config at {}; run `sbxm config init` first",
+                path.display()
+            );
+        }
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("cannot read {}", path.display()))?;
         toml::from_str(&text).with_context(|| format!("invalid config {}", path.display()))
