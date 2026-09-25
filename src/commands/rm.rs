@@ -87,7 +87,7 @@ pub fn run(
 
 /// Refuses links (deleting through one could reach outside the base dir) and
 /// anything whose real location isn't directly under its expected parent.
-fn check_deletable(dir: &Path) -> Result<()> {
+pub(crate) fn check_deletable(dir: &Path) -> Result<()> {
     if dir.symlink_metadata()?.file_type().is_symlink() {
         bail!(
             "{} is a symlink or junction; remove the link yourself if you want it gone",

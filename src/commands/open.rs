@@ -1,9 +1,10 @@
+use std::fs;
 use std::io::Write;
 use std::path::Path;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
-use super::{HARNESS, new};
+use super::{HARNESS, new, rm};
 use crate::backend::SandboxBackend;
 use crate::config::{self, GlobalConfig, Profile};
 use crate::{project, state};
@@ -26,8 +27,9 @@ pub fn run(
     project::validate_name(name)?;
     let config = GlobalConfig::load(config_dir)?;
     let sandbox = project::sandbox_name(name, HARNESS);
-    let entry = state::load(&project::metadata_dir(&config.base_dir, name))?
-        .and_then(|mut s| s.sandboxes.remove(HARNESS));
+    let metadata_dir = project::metadata_dir(&config.base_dir, name);
+    let mut state = state::load(&metadata_dir)?.unwrap_or_default();
+    let entry = state.sandboxes.remove(HARNESS);
     let exists = backend.list()?.iter().any(|s| s.name == sandbox);
 
     match (entry, exists) {
@@ -43,7 +45,16 @@ pub fn run(
                 replace: true,
                 ..new::Options::default()
             };
-            new::run(config_dir, name, &options, backend)?
+            new::run(config_dir, name, &options, backend)?;
+            if let Some(old_hash) = &entry.config_hash {
+                let in_use = state
+                    .sandboxes
+                    .values()
+                    .any(|other| other.config_hash.as_ref() == Some(old_hash));
+                if !in_use {
+                    delete_old_kit(&metadata_dir, old_hash)?;
+                }
+            }
         }
         (Some(entry), true) => check_unchanged(&config, name, &sandbox, &entry)?,
         (None, true) => bail!(
@@ -87,4 +98,27 @@ fn check_unchanged(
         );
     }
     Ok(())
+}
+
+/// Deletes `kits/<prefix>` of the hash a rebuilt sandbox was built with,
+/// unless the rebuild produced the same prefix (decision 55).
+fn delete_old_kit(metadata_dir: &Path, old_hash: &str) -> Result<()> {
+    // Read from state.json, so check it before building a path from it.
+    let Some(prefix) = old_hash.get(..12) else {
+        return Ok(());
+    };
+    if !prefix.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(());
+    }
+    let current =
+        state::load(metadata_dir)?.and_then(|s| s.sandboxes.get(HARNESS)?.config_hash.clone());
+    if current.as_deref().and_then(|h| h.get(..12)) == Some(prefix) {
+        return Ok(());
+    }
+    let dir = metadata_dir.join("kits").join(prefix);
+    if dir.symlink_metadata().is_err() {
+        return Ok(());
+    }
+    rm::check_deletable(&dir)?;
+    fs::remove_dir_all(&dir).with_context(|| format!("cannot delete {}", dir.display()))
 }

@@ -292,3 +292,70 @@ fn rebuild_with_an_invalid_kit_keeps_the_old_sandbox() {
     assert!(backend.removes().is_empty());
     assert!(backend.creates().is_empty());
 }
+
+fn kits_dir(env: &Env) -> std::path::PathBuf {
+    env.base_dir().join(".sbxm").join("demo").join("kits")
+}
+
+#[test]
+fn rebuild_deletes_the_old_kit_dir() {
+    let env = Env::new();
+    env.run("demo", &FakeBackend::default()).unwrap();
+    env.write_profile("default", "[network]\nallow = [\"github.com\"]\n");
+    let backend = FakeBackend::with_sandboxes(vec![sandbox("running")]);
+
+    rebuild_demo(&env, &backend).0.unwrap();
+
+    assert_eq!(env.kit_dir("demo"), state_kit_dir(&env));
+}
+
+#[test]
+fn rebuild_without_a_change_keeps_the_kit_dir() {
+    let env = Env::new();
+    env.run("demo", &FakeBackend::default()).unwrap();
+    let backend = FakeBackend::with_sandboxes(vec![sandbox("running")]);
+
+    rebuild_demo(&env, &backend).0.unwrap();
+
+    assert!(state_kit_dir(&env).join("spec.yaml").is_file());
+}
+
+#[test]
+fn rebuild_keeps_an_old_kit_dir_another_harness_uses() {
+    let env = Env::new();
+    env.run("demo", &FakeBackend::default()).unwrap();
+    let old_kit = env.kit_dir("demo");
+    let path = env.base_dir().join(".sbxm").join("demo").join("state.json");
+    let mut state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    let codex = state["sandboxes"]["claude"].clone();
+    state["sandboxes"]["codex"] = codex;
+    std::fs::write(&path, state.to_string()).unwrap();
+    env.write_profile("default", "[network]\nallow = [\"github.com\"]\n");
+    let backend = FakeBackend::with_sandboxes(vec![sandbox("running")]);
+
+    rebuild_demo(&env, &backend).0.unwrap();
+
+    assert!(old_kit.join("spec.yaml").is_file());
+    assert_eq!(std::fs::read_dir(kits_dir(&env)).unwrap().count(), 2);
+}
+
+#[test]
+fn rebuild_refuses_to_delete_an_old_kit_dir_that_is_a_link() {
+    let env = Env::new();
+    env.run("demo", &FakeBackend::default()).unwrap();
+    let old_dir = env.kit_dir("demo").parent().unwrap().to_path_buf();
+    let target = env.tmp.path().join("elsewhere");
+    std::fs::rename(&old_dir, &target).unwrap();
+    common::dir_link(&old_dir, &target);
+    env.write_profile("default", "[network]\nallow = [\"github.com\"]\n");
+    let backend = FakeBackend::with_sandboxes(vec![sandbox("running")]);
+
+    let err = rebuild_demo(&env, &backend).0.unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains("is a symlink or junction"),
+        "{err:#}"
+    );
+    assert!(target.join("common").join("spec.yaml").is_file());
+}
