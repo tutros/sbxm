@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use sbxm::backend::SbxBackend;
-use sbxm::commands::{list, new};
+use sbxm::commands::{list, new, stop};
 use tempfile::TempDir;
 
 /// Removes the sandbox, workspace and metadata even if the test fails.
@@ -38,7 +38,7 @@ fn real_base_dir() -> PathBuf {
 
 #[test]
 #[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
-fn new_creates_a_real_sandbox() {
+fn lifecycle_against_real_sbx() {
     let base_dir = real_base_dir();
     let project = format!("sbxm-it-{}", std::process::id());
     let sandbox = format!("sbxm-{project}-claude");
@@ -83,4 +83,10 @@ fn new_creates_a_real_sandbox() {
     assert_eq!(entry.harness, "claude");
     assert_eq!(entry.problem, None);
     println!("list status for {sandbox}: {}", entry.status);
+
+    // Slice 6: `stop` stops it, and `list` shows that.
+    stop::run(config_dir.path(), &project, &SbxBackend).unwrap();
+    let entries = list::entries(config_dir.path(), &SbxBackend).unwrap();
+    let entry = entries.iter().find(|e| e.sandbox == sandbox).unwrap();
+    assert_eq!(entry.status, "stopped");
 }
