@@ -232,3 +232,18 @@ fn missing_seed_is_an_error_and_creates_nothing() {
     assert!(!env.base_dir().join("demo").exists());
     assert!(backend.creates().is_empty());
 }
+
+#[test]
+fn seed_containing_the_base_dir_is_an_error() {
+    let env = Env::new();
+    let backend = FakeBackend::default();
+
+    let err = env
+        .run_with("demo", &seeded(env.tmp.path().to_path_buf()), &backend)
+        .unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("contains the base dir"), "{message}");
+    assert!(!env.base_dir().join("demo").exists());
+    assert!(backend.creates().is_empty());
+}

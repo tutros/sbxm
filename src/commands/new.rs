@@ -46,6 +46,14 @@ pub fn run(
         if !seed_dir.is_dir() {
             bail!("seed {} is not a directory", seed_dir.display());
         }
+        let seed_abs = fs::canonicalize(seed_dir)?;
+        if fs::canonicalize(&config.base_dir)?.starts_with(&seed_abs) {
+            bail!(
+                "seed {} contains the base dir {}; copying it would recurse into itself",
+                seed_dir.display(),
+                config.base_dir.display()
+            );
+        }
     }
     match &options.seed {
         Some(seed_dir) => seed::copy(seed_dir, &workspace)?,
