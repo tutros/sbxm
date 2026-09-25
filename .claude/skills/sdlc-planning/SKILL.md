@@ -44,6 +44,7 @@ After each round, before asking the next, append to `decisions.md`:
 For each open question that depends on how an external tool or system actually behaves, define a spike (`S1`, `S2`, …) and run it before writing the plan when it affects the plan.
 
 Spike rules:
+- **Spec first when unattended:** if a spike runs in a subagent or background task, or the user won't watch each step, write `spikes/<id>.md` (task spec) and `spikes/<id>-results.md` (template) as defined in rule 5 of the `sdlc-implementation` skill, and get the user's approval before launching. The worker fills in only the results file; the main session checks the evidence and records the results in `decisions.md`.
 - **Check reality, not docs alone.** Read `--help` and the specs, then test the behavior live.
 - **Isolate:** throwaway resources with an obvious prefix (e.g. `sbxm-spike-*`), fake secret values scoped to the throwaway resource, temp work dirs. Change narrow things first, then widen.
 - **When something fails, bisect:** remove one variable at a time until the cause is clear (e.g. "fails even without our kit → environment, not our config").
