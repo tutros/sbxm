@@ -134,6 +134,26 @@ fn lifecycle_against_real_sbx() {
     assert_eq!(printenv(&sandbox, "SBXM_CONFIG_HASH"), hash);
     assert_eq!(printenv(&sandbox, "SBXM_PROFILE"), "default");
 
+    // Slice 11c: a rebuild (what `open --rebuild` does before attaching)
+    // recreates the sandbox with the changed config and keeps the workspace.
+    let workspace = base_dir.join(&project);
+    std::fs::write(workspace.join("keep.txt"), "kept").unwrap();
+    std::fs::write(
+        profile_dir.join("profile.toml"),
+        "[network]\nallow = [\"example.org\"]\n\n[env]\nREAL_TEST_GREETING = \"rebuilt\"\n",
+    )
+    .unwrap();
+    let rebuild = new::Options {
+        replace: true,
+        ..new::Options::default()
+    };
+    new::run(config_dir.path(), &project, &rebuild, &SbxBackend).unwrap();
+    assert_eq!(printenv(&sandbox, "REAL_TEST_GREETING"), "rebuilt");
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("keep.txt")).unwrap(),
+        "kept"
+    );
+
     // Slice 5: `list` sees it through the real `sbx ls --json`, joined with state.
     let entries = list::entries(config_dir.path(), &SbxBackend).unwrap();
     let entry = entries
