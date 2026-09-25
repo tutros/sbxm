@@ -85,6 +85,14 @@ mid-run. If a decision can't be pre-decided, the answer is Blocked with the ques
 When the work returns: check the claims against the evidence in the results file, report to the user what was
 answered, what's blocked and whether cleanup was confirmed, and only then record decisions.
 
+**Lighter form for in-session batches.** Running several small slices back to back in the main session, where every
+step is still a TDD commit the user can review, doesn't need a spec file. Agree these stop conditions in chat instead,
+and post a short report after each slice:
+- Stop and ask if a slice needs a new decision, departs from the plan, or needs a new dependency.
+- Stop if any real-`sbx` check fails, or if anything would touch paths outside temp dirs and the real-test base dir.
+- Stop if a slice's scope grows beyond its row in the plan.
+- Checks only the user can do (e.g. attaching to an interactive agent) end the batch with exact steps for the user.
+
 ## 6. Merging worktrees
 
 Unattended work runs in a git worktree. Nothing merges automatically; the main session does it, the same way every time.
@@ -119,3 +127,13 @@ When a slice is done, report to the user: what now works, the commits made, and 
 
 - The plan and constraints are in `milestone-1.md` and `decisions.md`. Follow them; if code needs to depart from a decision, stop and ask, then record the new decision.
 - Tests never need Docker by default. Tests against real `sbx` are `#[ignore]` and must use a base dir **outside** `%TEMP%`/AppData (see Spike results S1).
+
+## Code conventions from past decisions
+
+- **Check before acting.** Validate every input and precondition before the first write or backend call, so a failed command changes nothing. Each rejection gets a test asserting that nothing was created and no backend call was made (decisions 33, 47).
+- **Error messages say what's wrong and how to fix it,** in one line: `<problem>; <fix>`, naming the exact path, setting or command (e.g. `base dir X does not exist; create it or change base_dir in Y`). Hints in normal output follow the same form (decision 48).
+- **sbxm never changes `sbx` settings or other global state** (settings, secrets, skills store, policies). When they block something, tell the user the exact command and what it trusts or changes (decision 48).
+- **Deleting or overwriting user files** needs extra guards, each with a test: the path is re-derived from validated input, must sit where expected (canonical parent check), must not be a symlink or junction, and the user confirms with the exact path shown. Tests delete only inside temp dirs.
+- **Parsers of `sbx` output** are unit-tested against output captured from the real `sbx` (`src/backend/fixtures/`), noting the `sbx` version.
+- **Real-`sbx` tests** create only uniquely named resources (`sbxm-sbxm-it-<pid>-…`), clean up in `Drop` even on failure, and never touch other sandboxes. Checks that need an interactive terminal are done by the user, with exact steps in the report.
+- **Escape characters:** write files containing `\\` (JSON fixtures, Windows paths, escapes in generated code) with the Write/Edit tools, not shell heredocs (see CLAUDE.md).
