@@ -1,0 +1,7 @@
+{
+  "reference": "./bad",
+  "kind": "directory",
+  "valid": false,
+  "error": "manifest: invalid name \"Bad_Name\" (must be lowercase alphanumeric with hyphens, 1-64 chars)",
+  "warnings": []
+}

@@ -4,6 +4,14 @@ use common::Env;
 use sbxm::backend::{FakeBackend, SandboxInfo};
 use sbxm::commands::open;
 
+fn kit_dir(env: &Env) -> std::path::PathBuf {
+    env.base_dir()
+        .join(".sbxm")
+        .join("demo")
+        .join("kits")
+        .join("common")
+}
+
 fn sandbox(status: &str) -> SandboxInfo {
     SandboxInfo {
         name: "sbxm-demo-claude".into(),
@@ -43,7 +51,11 @@ fn new_project_is_created_then_attached() {
 
     assert_eq!(
         backend.log(),
-        ["create sbxm-demo-claude", "attach sbxm-demo-claude"]
+        [
+            format!("validate {}", kit_dir(&env).display()),
+            "create sbxm-demo-claude".to_owned(),
+            "attach sbxm-demo-claude".to_owned()
+        ]
     );
     assert!(env.base_dir().join("demo").is_dir());
     assert!(
@@ -66,7 +78,11 @@ fn missing_sandbox_is_recreated_keeping_the_workspace() {
 
     assert_eq!(
         backend.log(),
-        ["create sbxm-demo-claude", "attach sbxm-demo-claude"]
+        [
+            format!("validate {}", kit_dir(&env).display()),
+            "create sbxm-demo-claude".to_owned(),
+            "attach sbxm-demo-claude".to_owned()
+        ]
     );
     assert_eq!(
         std::fs::read_to_string(env.base_dir().join("demo").join("notes.md")).unwrap(),

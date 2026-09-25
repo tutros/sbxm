@@ -65,6 +65,22 @@ pub fn run(
         .join("kits")
         .join("common");
     kit::write(&kit_dir, &kit::common(profile_name, &profile))?;
+    let validation = backend.validate_kit(&kit_dir)?;
+    for warning in &validation.warnings {
+        eprintln!("warning: kit {}: {warning}", kit_dir.display());
+    }
+    if !validation.valid {
+        bail!(
+            "generated kit {} is invalid: {}; check the network entries in profile '{profile_name}' ({})",
+            kit_dir.display(),
+            validation.error.as_deref().unwrap_or("no details from sbx"),
+            config
+                .profiles_dir()
+                .join(profile_name)
+                .join("profile.toml")
+                .display()
+        );
+    }
 
     match &options.seed {
         Some(seed_dir) => seed::copy(seed_dir, &workspace)?,

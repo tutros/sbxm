@@ -64,3 +64,39 @@ fn profile_without_network_gets_empty_lists() {
         deny: []
     ");
 }
+
+#[test]
+fn kit_is_validated_before_the_sandbox_is_created() {
+    let env = Env::new();
+    let backend = FakeBackend::default();
+
+    env.run("demo", &backend).unwrap();
+
+    assert_eq!(
+        backend.log(),
+        [
+            format!("validate {}", kit_dir(&env).display()),
+            "create sbxm-demo-claude".to_owned()
+        ]
+    );
+}
+
+#[test]
+fn invalid_kit_aborts_before_anything_is_created() {
+    let env = Env::new();
+    let backend = FakeBackend::with_invalid_kit("manifest: bad network pattern");
+
+    let err = env.run("demo", &backend).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains(&format!(
+            "generated kit {} is invalid: manifest: bad network pattern;",
+            kit_dir(&env).display()
+        )),
+        "{message}"
+    );
+    assert!(message.contains("profile 'default'"), "{message}");
+    assert!(backend.creates().is_empty());
+    assert!(!env.base_dir().join("demo").exists());
+}

@@ -2,7 +2,9 @@ use std::cell::RefCell;
 
 use anyhow::{Result, bail};
 
-use super::{CreateSpec, SandboxBackend, SandboxInfo};
+use std::path::Path;
+
+use super::{CreateSpec, KitValidation, SandboxBackend, SandboxInfo};
 
 /// Records calls instead of running `sbx`. Used by tests.
 #[derive(Debug, Default)]
@@ -12,6 +14,7 @@ pub struct FakeBackend {
     removes: RefCell<Vec<String>>,
     fail_remove: bool,
     log: RefCell<Vec<String>>,
+    invalid_kit: Option<String>,
     fail_create: bool,
     sandboxes: Vec<SandboxInfo>,
 }
@@ -29,6 +32,14 @@ impl FakeBackend {
     pub fn failing_remove() -> Self {
         Self {
             fail_remove: true,
+            ..Self::default()
+        }
+    }
+
+    /// A backend whose `validate_kit` reports every kit invalid with `error`.
+    pub fn with_invalid_kit(error: &str) -> Self {
+        Self {
+            invalid_kit: Some(error.to_owned()),
             ..Self::default()
         }
     }
@@ -95,5 +106,14 @@ impl SandboxBackend for FakeBackend {
     fn attach(&self, name: &str) -> Result<()> {
         self.record("attach", name);
         Ok(())
+    }
+
+    fn validate_kit(&self, dir: &Path) -> Result<KitValidation> {
+        self.record("validate", &dir.display().to_string());
+        Ok(KitValidation {
+            valid: self.invalid_kit.is_none(),
+            error: self.invalid_kit.clone(),
+            warnings: Vec::new(),
+        })
     }
 }

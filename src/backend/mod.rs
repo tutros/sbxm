@@ -3,7 +3,7 @@
 mod fake;
 mod sbx;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use serde::Deserialize;
@@ -19,6 +19,19 @@ pub trait SandboxBackend {
     fn remove(&self, name: &str) -> Result<()>;
     /// Attaches the terminal to the sandbox's agent, starting it if stopped.
     fn attach(&self, name: &str) -> Result<()>;
+    /// Checks a kit directory (`sbx kit validate --json`).
+    fn validate_kit(&self, dir: &Path) -> Result<KitValidation>;
+}
+
+/// Result of `sbx kit validate --json`.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+pub struct KitValidation {
+    pub valid: bool,
+    #[serde(default)]
+    pub error: Option<String>,
+    /// Shown to the user as-is; the shape isn't documented.
+    #[serde(default)]
+    pub warnings: Vec<serde_json::Value>,
 }
 
 /// One entry of `sbx ls --json`; other fields are ignored.

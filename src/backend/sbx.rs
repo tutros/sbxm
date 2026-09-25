@@ -5,7 +5,9 @@ use anyhow::{Context, Result, bail};
 
 use serde::Deserialize;
 
-use super::{CreateSpec, SandboxBackend, SandboxInfo};
+use std::path::Path;
+
+use super::{CreateSpec, KitValidation, SandboxBackend, SandboxInfo};
 
 /// Shells out to the `sbx` CLI on PATH.
 #[derive(Debug, Default)]
@@ -42,6 +44,30 @@ impl SandboxBackend for SbxBackend {
     fn attach(&self, name: &str) -> Result<()> {
         run_sbx(attach_args(name), name)
     }
+
+    fn validate_kit(&self, dir: &Path) -> Result<KitValidation> {
+        // Exits non-zero for an invalid kit but still prints the JSON result.
+        let output = Command::new("sbx")
+            .args(validate_args(dir))
+            .output()
+            .context(SBX_MISSING)?;
+        parse_validate(&String::from_utf8_lossy(&output.stdout)).with_context(|| {
+            format!(
+                "`sbx kit validate` failed for {} ({}): {}",
+                dir.display(),
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            )
+        })
+    }
+}
+
+fn validate_args(dir: &Path) -> Vec<OsString> {
+    vec!["kit".into(), "validate".into(), "--json".into(), dir.into()]
+}
+
+fn parse_validate(json: &str) -> Result<KitValidation> {
+    serde_json::from_str(json).context("unexpected `sbx kit validate --json` output")
 }
 
 const SBX_MISSING: &str = "cannot run `sbx`; is Docker Sandboxes installed and on PATH?";
@@ -184,6 +210,37 @@ mod stop_tests {
         assert_eq!(
             remove_args("sbxm-demo-claude"),
             ["rm", "-f", "sbxm-demo-claude"]
+        );
+    }
+}
+
+#[cfg(test)]
+mod validate_tests {
+    use super::*;
+
+    // Captured from `sbx kit validate --json` (v0.43.0).
+    const VALID: &str = include_str!("fixtures/kit-validate-valid.json");
+    const INVALID: &str = include_str!("fixtures/kit-validate-invalid.json");
+
+    #[test]
+    fn parses_valid_result() {
+        let result = parse_validate(VALID).unwrap();
+        assert!(result.valid);
+        assert_eq!(result.error, None);
+    }
+
+    #[test]
+    fn parses_invalid_result_with_error() {
+        let result = parse_validate(INVALID).unwrap();
+        assert!(!result.valid);
+        assert!(result.error.unwrap().starts_with("manifest: invalid name"));
+    }
+
+    #[test]
+    fn validate_args_match_sbx_cli() {
+        assert_eq!(
+            validate_args(Path::new("/k/common")),
+            ["kit", "validate", "--json", "/k/common"].map(std::ffi::OsString::from)
         );
     }
 }
