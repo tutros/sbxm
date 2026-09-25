@@ -17,6 +17,8 @@ pub trait SandboxBackend {
     fn stop(&self, name: &str) -> Result<()>;
     /// Removes the sandbox without prompting (`sbx rm -f`).
     fn remove(&self, name: &str) -> Result<()>;
+    /// Attaches the terminal to the sandbox's agent, starting it if stopped.
+    fn attach(&self, name: &str) -> Result<()>;
 }
 
 /// One entry of `sbx ls --json`; other fields are ignored.

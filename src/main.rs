@@ -24,6 +24,9 @@ fn main() -> anyhow::Result<()> {
             print!("{}", render(&entries));
             Ok(())
         }
+        Command::Open { project } => {
+            commands::open::run(&config::config_dir()?, &project, &SbxBackend)
+        }
         Command::Stop { project } => {
             commands::stop::run(&config::config_dir()?, &project, &SbxBackend)
         }

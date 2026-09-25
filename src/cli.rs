@@ -26,6 +26,11 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Attach to a project's sandbox, creating it if needed.
+    Open {
+        /// Project name.
+        project: String,
+    },
     /// Stop a project's sandbox.
     Stop {
         /// Project name.

@@ -11,6 +11,7 @@ pub struct FakeBackend {
     stops: RefCell<Vec<String>>,
     removes: RefCell<Vec<String>>,
     fail_remove: bool,
+    log: RefCell<Vec<String>>,
     fail_create: bool,
     sandboxes: Vec<SandboxInfo>,
 }
@@ -51,11 +52,21 @@ impl FakeBackend {
     pub fn removes(&self) -> Vec<String> {
         self.removes.borrow().clone()
     }
+
+    /// Every state-changing call in order, e.g. `"create sbxm-demo-claude"`.
+    pub fn log(&self) -> Vec<String> {
+        self.log.borrow().clone()
+    }
+
+    fn record(&self, call: &str, name: &str) {
+        self.log.borrow_mut().push(format!("{call} {name}"));
+    }
 }
 
 impl SandboxBackend for FakeBackend {
     fn create(&self, spec: &CreateSpec) -> Result<()> {
         self.creates.borrow_mut().push(spec.clone());
+        self.record("create", &spec.name);
         if self.fail_create {
             bail!("fake create failure");
         }
@@ -68,14 +79,21 @@ impl SandboxBackend for FakeBackend {
 
     fn stop(&self, name: &str) -> Result<()> {
         self.stops.borrow_mut().push(name.to_owned());
+        self.record("stop", name);
         Ok(())
     }
 
     fn remove(&self, name: &str) -> Result<()> {
         self.removes.borrow_mut().push(name.to_owned());
+        self.record("rm", name);
         if self.fail_remove {
             bail!("fake remove failure");
         }
+        Ok(())
+    }
+
+    fn attach(&self, name: &str) -> Result<()> {
+        self.record("attach", name);
         Ok(())
     }
 }

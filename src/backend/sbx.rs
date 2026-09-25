@@ -38,6 +38,10 @@ impl SandboxBackend for SbxBackend {
     fn remove(&self, name: &str) -> Result<()> {
         run_sbx(remove_args(name), name)
     }
+
+    fn attach(&self, name: &str) -> Result<()> {
+        run_sbx(attach_args(name), name)
+    }
 }
 
 const SBX_MISSING: &str = "cannot run `sbx`; is Docker Sandboxes installed and on PATH?";
@@ -67,6 +71,11 @@ fn stop_args(name: &str) -> [&str; 2] {
 
 fn remove_args(name: &str) -> [&str; 3] {
     ["rm", "-f", name]
+}
+
+/// `--name` only: `sbx run` would otherwise create a sandbox without sbxm's config.
+fn attach_args(name: &str) -> [&str; 3] {
+    ["run", "--name", name]
 }
 
 fn parse_ls(json: &str) -> Result<Vec<SandboxInfo>> {
@@ -160,6 +169,14 @@ mod stop_tests {
     #[test]
     fn stop_args_match_sbx_cli() {
         assert_eq!(stop_args("sbxm-demo-claude"), ["stop", "sbxm-demo-claude"]);
+    }
+
+    #[test]
+    fn attach_args_match_sbx_cli() {
+        assert_eq!(
+            attach_args("sbxm-demo-claude"),
+            ["run", "--name", "sbxm-demo-claude"]
+        );
     }
 
     #[test]
