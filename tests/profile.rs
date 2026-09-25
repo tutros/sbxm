@@ -160,6 +160,24 @@ fn env_value_with_kit_expression_is_rejected() {
     assert_nothing_created(&env, &backend);
 }
 
+#[test]
+fn env_name_with_reserved_sbxm_prefix_is_rejected() {
+    let env = Env::new();
+    env.write_profile("default", "[env]\nSBXM_PROFILE = \"other\"\n");
+    let backend = FakeBackend::default();
+
+    let err = new_with_profile(&env, None, &backend).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains(
+            "env name 'SBXM_PROFILE' in profile 'default' uses the reserved prefix SBXM_"
+        ),
+        "{message}"
+    );
+    assert_nothing_created(&env, &backend);
+}
+
 fn created_skills(env: &Env, profile: &str) -> anyhow::Result<SkillsStore> {
     env.write_profile("default", profile);
     let backend = FakeBackend::default();

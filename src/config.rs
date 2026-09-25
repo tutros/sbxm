@@ -145,6 +145,13 @@ impl Profile {
                     path.display()
                 );
             }
+            if key.starts_with("SBXM_") {
+                bail!(
+                    "env name '{key}' in profile '{name}' uses the reserved prefix SBXM_ \
+                     (sbxm sets its own SBXM_ variables); rename it in {}",
+                    path.display()
+                );
+            }
             if value.contains("${{") {
                 bail!(
                     "env value for '{key}' in profile '{name}' contains '${{{{', which sbx reads as a \
