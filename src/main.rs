@@ -1,11 +1,7 @@
-mod cli;
-mod commands;
-mod config;
-mod project;
-
 use clap::Parser;
 
-use cli::{Cli, Command, ConfigCommand};
+use sbxm::cli::{Cli, Command, ConfigCommand};
+use sbxm::commands;
 
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
