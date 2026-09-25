@@ -10,6 +10,11 @@ pub struct Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
+    /// Create a project and its sandbox.
+    New {
+        /// Project name: lowercase letters, digits and '-'.
+        project: String,
+    },
     /// Manage sbxm configuration.
     Config {
         #[command(subcommand)]
