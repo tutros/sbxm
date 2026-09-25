@@ -6,12 +6,22 @@ mod sbx;
 use std::path::PathBuf;
 
 use anyhow::Result;
+use serde::Deserialize;
 
 pub use fake::FakeBackend;
 pub use sbx::SbxBackend;
 
 pub trait SandboxBackend {
     fn create(&self, spec: &CreateSpec) -> Result<()>;
+    fn list(&self) -> Result<Vec<SandboxInfo>>;
+}
+
+/// One entry of `sbx ls --json`; other fields are ignored.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SandboxInfo {
+    pub name: String,
+    pub agent: String,
+    pub status: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

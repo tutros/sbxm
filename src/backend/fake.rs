@@ -2,13 +2,14 @@ use std::cell::RefCell;
 
 use anyhow::{Result, bail};
 
-use super::{CreateSpec, SandboxBackend};
+use super::{CreateSpec, SandboxBackend, SandboxInfo};
 
 /// Records calls instead of running `sbx`. Used by tests.
 #[derive(Debug, Default)]
 pub struct FakeBackend {
     creates: RefCell<Vec<CreateSpec>>,
     fail_create: bool,
+    sandboxes: Vec<SandboxInfo>,
 }
 
 impl FakeBackend {
@@ -16,6 +17,14 @@ impl FakeBackend {
     pub fn failing_create() -> Self {
         Self {
             fail_create: true,
+            ..Self::default()
+        }
+    }
+
+    /// A backend whose `list` returns these sandboxes.
+    pub fn with_sandboxes(sandboxes: Vec<SandboxInfo>) -> Self {
+        Self {
+            sandboxes,
             ..Self::default()
         }
     }
@@ -32,5 +41,9 @@ impl SandboxBackend for FakeBackend {
             bail!("fake create failure");
         }
         Ok(())
+    }
+
+    fn list(&self) -> Result<Vec<SandboxInfo>> {
+        Ok(self.sandboxes.clone())
     }
 }

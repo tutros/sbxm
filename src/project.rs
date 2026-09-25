@@ -51,6 +51,16 @@ pub fn sandbox_name(project: &str, harness: &str) -> String {
     format!("sbxm-{project}-{harness}")
 }
 
+/// Splits `sbxm-<project>-<harness>` into project and harness. Harness names
+/// contain no `-`, so the last `-` separates them. `None` for other names.
+pub fn parse_sandbox_name(name: &str) -> Option<(String, String)> {
+    let (project, harness) = name.strip_prefix("sbxm-")?.rsplit_once('-')?;
+    if harness.is_empty() || validate_name(project).is_err() {
+        return None;
+    }
+    Some((project.to_owned(), harness.to_owned()))
+}
+
 /// `<base>/.sbxm/<project>/`: sbxm's metadata, never mounted (decision 40).
 pub fn metadata_dir(base_dir: &Path, project: &str) -> PathBuf {
     base_dir.join(".sbxm").join(project)

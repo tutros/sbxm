@@ -1,0 +1,24 @@
+{
+  "sandboxes": [
+    {
+      "name": "spike-s6-codex",
+      "id": "0ed3f8e6-5a21-4ebb-a765-6106f6ff139c",
+      "agent": "codex",
+      "status": "stopped",
+      "last_used_at": "2026-09-25T02:46:50.6653803Z",
+      "workspaces": [
+        "E:\\sbxm-it\\spike-s6\\ws-codex"
+      ]
+    },
+    {
+      "name": "sbxm-demo-claude",
+      "id": "11111111-2222-3333-4444-555555555555",
+      "agent": "claude",
+      "status": "running",
+      "last_used_at": "2026-09-25T03:00:00Z",
+      "workspaces": [
+        "E:\\sbxm-projects\\demo"
+      ]
+    }
+  ]
+}

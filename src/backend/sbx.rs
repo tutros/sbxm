@@ -3,7 +3,9 @@ use std::process::Command;
 
 use anyhow::{Context, Result, bail};
 
-use super::{CreateSpec, SandboxBackend};
+use serde::Deserialize;
+
+use super::{CreateSpec, SandboxBackend, SandboxInfo};
 
 /// Shells out to the `sbx` CLI on PATH.
 #[derive(Debug, Default)]
@@ -20,6 +22,30 @@ impl SandboxBackend for SbxBackend {
         }
         Ok(())
     }
+
+    fn list(&self) -> Result<Vec<SandboxInfo>> {
+        let output = Command::new("sbx")
+            .args(["ls", "--json"])
+            .output()
+            .context("cannot run `sbx`; is Docker Sandboxes installed and on PATH?")?;
+        if !output.status.success() {
+            bail!(
+                "`sbx ls --json` failed ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        parse_ls(&String::from_utf8_lossy(&output.stdout))
+    }
+}
+
+fn parse_ls(json: &str) -> Result<Vec<SandboxInfo>> {
+    #[derive(Deserialize)]
+    struct Ls {
+        sandboxes: Vec<SandboxInfo>,
+    }
+    let ls: Ls = serde_json::from_str(json).context("unexpected `sbx ls --json` output")?;
+    Ok(ls.sandboxes)
 }
 
 fn create_args(spec: &CreateSpec) -> Vec<OsString> {
@@ -66,6 +92,33 @@ mod tests {
                 "/work/demo"
             ]
             .map(std::ffi::OsString::from)
+        );
+    }
+}
+
+#[cfg(test)]
+mod ls_tests {
+    use super::*;
+
+    /// First entry captured from `sbx ls --json` (v0.43.0); second added in the same shape.
+    const SBX_LS: &str = include_str!("fixtures/sbx-ls.json");
+
+    #[test]
+    fn parses_sbx_ls_json() {
+        assert_eq!(
+            parse_ls(SBX_LS).unwrap(),
+            vec![
+                SandboxInfo {
+                    name: "spike-s6-codex".into(),
+                    agent: "codex".into(),
+                    status: "stopped".into(),
+                },
+                SandboxInfo {
+                    name: "sbxm-demo-claude".into(),
+                    agent: "claude".into(),
+                    status: "running".into(),
+                },
+            ]
         );
     }
 }
