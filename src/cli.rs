@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Parser, Subcommand};
 
 /// Per-project Docker Sandboxes from a shared, versioned config.
@@ -14,6 +16,9 @@ pub enum Command {
     New {
         /// Project name: lowercase letters, digits and '-'.
         project: String,
+        /// Copy this directory's contents into the new project.
+        #[arg(long)]
+        seed: Option<PathBuf>,
     },
     /// Manage sbxm configuration.
     Config {

@@ -33,7 +33,25 @@ impl Env {
     }
 
     fn run(&self, project: &str, backend: &FakeBackend) -> anyhow::Result<()> {
-        new::run(&self.config_dir(), project, backend)
+        self.run_with(project, &new::Options::default(), backend)
+    }
+
+    fn run_with(
+        &self,
+        project: &str,
+        options: &new::Options,
+        backend: &FakeBackend,
+    ) -> anyhow::Result<()> {
+        new::run(&self.config_dir(), project, options, backend)
+    }
+
+    /// A seed dir with `a.txt` and `sub/b.txt`, outside the base dir.
+    fn seed(&self) -> PathBuf {
+        let seed = self.tmp.path().join("seed");
+        std::fs::create_dir_all(seed.join("sub")).unwrap();
+        std::fs::write(seed.join("a.txt"), "a").unwrap();
+        std::fs::write(seed.join("sub").join("b.txt"), "b").unwrap();
+        seed
     }
 }
 
@@ -148,4 +166,27 @@ fn failed_create_writes_no_state() {
     env.run("demo", &backend).unwrap_err();
 
     assert!(!state_path(&env).exists());
+}
+
+fn seeded(seed: PathBuf) -> new::Options {
+    new::Options { seed: Some(seed) }
+}
+
+#[test]
+fn seed_is_copied_into_a_new_workspace() {
+    let env = Env::new();
+    let backend = FakeBackend::default();
+
+    env.run_with("demo", &seeded(env.seed()), &backend).unwrap();
+
+    let workspace = env.base_dir().join("demo");
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("a.txt")).unwrap(),
+        "a"
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("sub").join("b.txt")).unwrap(),
+        "b"
+    );
+    assert_eq!(backend.creates(), vec![expected_create(&workspace)]);
 }

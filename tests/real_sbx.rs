@@ -58,7 +58,13 @@ fn new_creates_a_real_sandbox() {
     )
     .unwrap();
 
-    new::run(config_dir.path(), &project, &SbxBackend).unwrap();
+    new::run(
+        config_dir.path(),
+        &project,
+        &new::Options::default(),
+        &SbxBackend,
+    )
+    .unwrap();
 
     let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
     let ls = String::from_utf8(ls.stdout).unwrap();
