@@ -73,3 +73,19 @@ fn accepts_names_up_to_40_characters() {
 fn rejects_names_longer_than_40_characters() {
     assert_rejected(&"a".repeat(41), "at most 40 characters");
 }
+
+#[test]
+fn rejects_reserved_windows_device_names() {
+    for name in [
+        "con", "prn", "aux", "nul", "com0", "com1", "com9", "lpt1", "lpt9",
+    ] {
+        assert_rejected(name, "reserved Windows device name");
+    }
+}
+
+#[test]
+fn accepts_names_that_only_start_like_device_names() {
+    for name in ["console", "com10", "null", "lpt"] {
+        assert_valid(name);
+    }
+}

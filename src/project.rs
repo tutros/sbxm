@@ -19,7 +19,22 @@ pub fn validate_name(name: &str) -> Result<()> {
     if name.starts_with('-') {
         return invalid(name, "the name must start with a letter or digit");
     }
+    if is_windows_device_name(name) {
+        return invalid(name, "it is a reserved Windows device name");
+    }
     Ok(())
+}
+
+/// `con`, `prn`, `aux`, `nul`, `com0`–`com9`, `lpt0`–`lpt9`. Names are already
+/// lowercase and dot-free, so only exact matches matter.
+fn is_windows_device_name(name: &str) -> bool {
+    match name {
+        "con" | "prn" | "aux" | "nul" => true,
+        _ => match name.strip_prefix("com").or(name.strip_prefix("lpt")) {
+            Some(n) => n.len() == 1 && n.as_bytes()[0].is_ascii_digit(),
+            None => false,
+        },
+    }
 }
 
 fn invalid(name: &str, reason: &str) -> Result<()> {
