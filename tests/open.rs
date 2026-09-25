@@ -5,11 +5,7 @@ use sbxm::backend::{FakeBackend, SandboxInfo};
 use sbxm::commands::open;
 
 fn kit_dir(env: &Env) -> std::path::PathBuf {
-    env.base_dir()
-        .join(".sbxm")
-        .join("demo")
-        .join("kits")
-        .join("common")
+    env.kit_dir("demo")
 }
 
 fn sandbox(status: &str) -> SandboxInfo {

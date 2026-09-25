@@ -95,3 +95,28 @@ fn profile_name_is_part_of_the_hash() {
     assert_eq!(other["profile"], "other");
     assert_ne!(default["config_hash"], other["config_hash"]);
 }
+
+#[test]
+fn kit_dir_is_named_after_the_hash_prefix() {
+    let env = Env::new();
+    let backend = FakeBackend::default();
+
+    env.run("demo", &backend).unwrap();
+
+    let state: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(env.base_dir().join(".sbxm/demo/state.json")).unwrap(),
+    )
+    .unwrap();
+    let hash = state["sandboxes"]["claude"]["config_hash"]
+        .as_str()
+        .unwrap();
+    let expected = env
+        .base_dir()
+        .join(".sbxm")
+        .join("demo")
+        .join("kits")
+        .join(&hash[..12])
+        .join("common");
+    assert!(expected.join("spec.yaml").is_file());
+    assert_eq!(backend.creates()[0].kits, vec![expected]);
+}

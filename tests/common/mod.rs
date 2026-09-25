@@ -64,6 +64,17 @@ impl Env {
         new::run(&self.config_dir(), project, options, backend)
     }
 
+    /// `.sbxm/<project>/kits/<hash-prefix>/common`: the one generated kit.
+    pub fn kit_dir(&self, project: &str) -> PathBuf {
+        let kits = self.base_dir().join(".sbxm").join(project).join("kits");
+        let dirs: Vec<PathBuf> = std::fs::read_dir(&kits)
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(dirs.len(), 1, "expected one hash dir in {}", kits.display());
+        dirs[0].join("common")
+    }
+
     /// A seed dir with `a.txt` and `sub/b.txt`, outside the base dir.
     pub fn seed(&self) -> PathBuf {
         let seed = self.tmp.path().join("seed");

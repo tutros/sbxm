@@ -62,8 +62,11 @@ pub fn run(
             );
         }
     }
+    // Named after the hash, so a changed config never overwrites the kit an
+    // existing sandbox was built from (decision 55).
     let kit_dir = project::metadata_dir(&config.base_dir, name)
         .join("kits")
+        .join(&config_hash[..12])
         .join("common");
     kit::write(&kit_dir, &kit::common(profile_name, &profile))?;
     let validation = backend.validate_kit(&kit_dir)?;

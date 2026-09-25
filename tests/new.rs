@@ -6,7 +6,7 @@ use common::{Env, dir_link};
 use sbxm::backend::{CreateSpec, FakeBackend, SkillsStore};
 use sbxm::commands::new;
 
-fn expected_create(workspace: &Path) -> CreateSpec {
+fn expected_create(env: &Env, workspace: &Path) -> CreateSpec {
     CreateSpec {
         name: "sbxm-demo-claude".into(),
         agent: "claude".into(),
@@ -14,15 +14,7 @@ fn expected_create(workspace: &Path) -> CreateSpec {
         cpus: 4,
         memory: "8g".into(),
         skills: SkillsStore::ReadOnly,
-        kits: vec![
-            workspace
-                .parent()
-                .unwrap()
-                .join(".sbxm")
-                .join("demo")
-                .join("kits")
-                .join("common"),
-        ],
+        kits: vec![env.kit_dir("demo")],
     }
 }
 
@@ -35,7 +27,7 @@ fn creates_workspace_and_sandbox() {
 
     let workspace = env.base_dir().join("demo");
     assert!(workspace.is_dir());
-    assert_eq!(backend.creates(), vec![expected_create(&workspace)]);
+    assert_eq!(backend.creates(), vec![expected_create(&env, &workspace)]);
 }
 
 #[test]
@@ -52,7 +44,7 @@ fn reuses_existing_workspace_and_keeps_its_contents() {
         std::fs::read_to_string(workspace.join("notes.md")).unwrap(),
         "keep me"
     );
-    assert_eq!(backend.creates(), vec![expected_create(&workspace)]);
+    assert_eq!(backend.creates(), vec![expected_create(&env, &workspace)]);
 }
 
 #[test]
@@ -152,7 +144,7 @@ fn seed_is_copied_into_a_new_workspace() {
         std::fs::read_to_string(workspace.join("sub").join("b.txt")).unwrap(),
         "b"
     );
-    assert_eq!(backend.creates(), vec![expected_create(&workspace)]);
+    assert_eq!(backend.creates(), vec![expected_create(&env, &workspace)]);
 }
 
 #[test]

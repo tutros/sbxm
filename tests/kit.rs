@@ -9,11 +9,7 @@ use common::Env;
 use sbxm::backend::FakeBackend;
 
 fn kit_dir(env: &Env) -> PathBuf {
-    env.base_dir()
-        .join(".sbxm")
-        .join("demo")
-        .join("kits")
-        .join("common")
+    env.kit_dir("demo")
 }
 
 fn spec(env: &Env) -> String {
