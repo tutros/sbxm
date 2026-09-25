@@ -165,6 +165,19 @@ Between slices 3 and 10b, sandboxes are created without sbxm kits. That's safe: 
     - `list` shows drift and status. `stop`, `rm`, `rm --purge` behave as specified.
     - Repeat `new` with `--harness codex`, `gemini`, `pi`.
 
+## Progress and carry-over items
+
+**Progress (2026-09-24):** slices 0–10d done, each with its real-`sbx` check (slices 8–9 and 10a also checked manually by the user). Next: slice 11. Spike S6b (spec first, user approval) runs before slice 14.
+
+Gaps found while building, to handle in the slice named:
+- **Slice 11:** `open` recreates a missing sandbox with the *default* profile, not the one the project was created with. Store the profile in `state.json` (planned for 11) and reuse it in `open`.
+- **Slice 11:** the kit dir moves from `.sbxm/<project>/kits/common/` to `kits/<hash-prefix>/common/` [52].
+- **Slice 18:** `new` rewrites `state.json` instead of merging per harness. Merge when `--harness` lands; `rm`'s "last sandbox → delete kits" depends on it.
+- **Any slice (small fix):** `rm` when state exists but the sandbox is already gone: `sbx rm` fails, so the state stays and only `rm --purge` clears it. Treat `sbx`'s "not found" as already removed.
+- **Test gaps (low risk):** printing `sbx kit validate` warnings is untested (never seen non-empty); the terminal confirm prompt is only covered by the user's manual check.
+- **Housekeeping:** the S6 spike worktree `.claude/worktrees/agent-a48594dfc53404a8f` (branch `worktree-agent-a48594dfc53404a8f`) is still on disk, locked by the session that launched it. Its only change is already committed. Once no Claude session holds it: `git worktree remove --force --force <path>` and `git branch -D <branch>`.
+- **Optional:** a `.gitattributes` (`* text=auto eol=lf`) would stop the LF/CRLF warnings on every commit.
+
 ## Out of scope for M1
 
 Comparisons, runs, `--repeat`, evals, Jev, headless `exec` (all M2); `sbx env` [38]; `bollard` [17]; profile-owned skills (`skills.dir`, after spike S6) [46]; cloud sandboxes; config-variant profiles in comparisons (the profile mechanism built here is what M2 will reference [10]).
