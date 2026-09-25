@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-Milestone 1 in progress (slices 0–10c done). Sources of truth:
+Milestone 1 in progress (slices 0–10d done). Sources of truth:
 - `idea.md`: original brief
 - `milestone-1.md`: current implementation plan (crate layout, config schema, kit mapping, commands, build order).
 - `decisions.md`: numbered design decisions and open research spikes. **Read it before designing anything**, and add new decisions there instead of silently departing from it.
@@ -32,7 +32,7 @@ cargo clippy --all-targets -- -D warnings
 Crate `sbxm` (edition 2024), lib + bin. Modules grow slice by slice, following the crate layout table in `milestone-1.md`.
 - `src/lib.rs` / `src/main.rs`: everything lives in the lib; `main` parses args and passes `SbxBackend` to commands.
 - `src/cli.rs`: `clap` derive definitions.
-- `src/config.rs`: config dir resolution (`SBXM_CONFIG_DIR` or `~/.config/sbxm`) `GlobalConfig` loading, and `Profile` loading (unknown keys are errors).
+- `src/config.rs`: config dir resolution (`SBXM_CONFIG_DIR` or `~/.config/sbxm`) `GlobalConfig` loading, and `Profile` loading (unknown keys are errors; env names/values and `skills.store` are checked on load).
 - `src/project.rs`: project name validation (decisions 33, 44), sandbox name, metadata dir.
 - `src/backend/`: `SandboxBackend` trait (`create`, `list`, `stop`, `remove`, `attach`, `validate_kit`), `SbxBackend` (shells out to `sbx`; parsers unit-tested against captured output in `src/backend/fixtures/`), `FakeBackend` (records calls, plus an ordered `log()`; `failing_create()`, `failing_remove()`, `with_sandboxes()`, `with_invalid_kit()`).
 - `src/state.rs`: `.sbxm/<project>/state.json`; `load_all` scans every project.
