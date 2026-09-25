@@ -6,7 +6,7 @@ mod sbx;
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 pub use fake::FakeBackend;
 pub use sbx::SbxBackend;
@@ -58,7 +58,8 @@ pub struct CreateSpec {
 
 /// How `sbx`'s shared skills store is mounted (decision 46). sbxm never uses
 /// `readwrite`: an agent could plant skills that every other sandbox loads.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
+#[serde(rename_all = "lowercase")]
 pub enum SkillsStore {
     #[default]
     ReadOnly,

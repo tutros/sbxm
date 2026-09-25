@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 
 use super::HARNESS;
 use crate::backend::{CreateSpec, SandboxBackend};
-use crate::config::{GlobalConfig, Profile};
+use crate::config::{self, GlobalConfig, Profile};
 use crate::kit;
 use crate::project;
 use crate::seed;
@@ -33,6 +33,7 @@ pub fn run(
         .as_deref()
         .unwrap_or(&config.default_profile);
     let profile = Profile::load(config.profiles_dir(), profile_name)?;
+    let config_hash = config::config_hash(profile_name, &profile, &config.resources);
 
     if !config.base_dir.is_dir() {
         bail!(
@@ -107,6 +108,8 @@ pub fn run(
             sandbox,
             workspace,
             created_at,
+            profile: Some(profile_name.to_owned()),
+            config_hash: Some(config_hash),
         },
     );
     state.save(&project::metadata_dir(&config.base_dir, name))

@@ -20,6 +20,13 @@ pub struct SandboxState {
     pub workspace: PathBuf,
     /// Unix seconds.
     pub created_at: u64,
+    /// `None` in state written before slice 11 (decision 55).
+    #[serde(default)]
+    pub profile: Option<String>,
+    /// [`crate::config::config_hash`] at creation; `None` before slice 11,
+    /// which counts as changed (decision 55).
+    #[serde(default)]
+    pub config_hash: Option<String>,
 }
 
 impl State {

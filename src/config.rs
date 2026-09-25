@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::backend::SkillsStore;
 
@@ -34,7 +35,7 @@ fn default_profile_name() -> String {
     "default".into()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Resources {
     pub cpus: u32,
     pub memory: String,
@@ -69,10 +70,11 @@ impl GlobalConfig {
 /// `<profiles_dir>/<name>/profile.toml`. Unknown keys are errors, so a typo
 /// (or a section a later slice will support) is never silently ignored
 /// (decision 11).
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
-    #[serde(default)]
+    /// Left out of the hash: it never reaches the sandbox (decision 55).
+    #[serde(default, skip_serializing)]
     pub description: String,
     #[serde(default)]
     pub network: Network,
@@ -80,10 +82,11 @@ pub struct Profile {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub secrets: Secrets,
-    #[serde(default)]
+    #[serde(default, skip_serializing)]
     skills: Skills,
-    /// `skills.store`, checked by [`Profile::load`].
-    #[serde(skip)]
+    /// `skills.store`, checked by [`Profile::load`]. Hashed instead of the raw
+    /// value, so an unset store and `"readonly"` hash the same.
+    #[serde(skip_deserializing)]
     pub skills_store: SkillsStore,
 }
 
@@ -94,7 +97,7 @@ struct Skills {
     store: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Network {
     #[serde(default)]
@@ -103,7 +106,7 @@ pub struct Network {
     pub deny: Vec<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Secrets {
     #[serde(default)]
@@ -162,6 +165,30 @@ impl Profile {
         }
         Ok(())
     }
+}
+
+/// SHA-256 (lowercase hex) over canonical JSON of everything that shapes the
+/// sandbox: profile name and settings, resources and sbxm's version
+/// (decision 55). Maps are `BTreeMap`s, so the JSON is deterministic.
+pub fn config_hash(profile_name: &str, profile: &Profile, resources: &Resources) -> String {
+    #[derive(Serialize)]
+    struct Input<'a> {
+        sbxm_version: &'a str,
+        profile_name: &'a str,
+        profile: &'a Profile,
+        resources: &'a Resources,
+    }
+    let json = serde_json::to_vec(&Input {
+        sbxm_version: env!("CARGO_PKG_VERSION"),
+        profile_name,
+        profile,
+        resources,
+    })
+    .expect("config serializes");
+    Sha256::digest(json)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// `readonly` when unset (decision 46).
