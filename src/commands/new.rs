@@ -68,7 +68,7 @@ pub fn run(
         .join("kits")
         .join(&config_hash[..12])
         .join("common");
-    kit::write(&kit_dir, &kit::common(profile_name, &profile))?;
+    kit::write(&kit_dir, &kit::common(profile_name, &profile, &config_hash))?;
     let validation = backend.validate_kit(&kit_dir)?;
     for warning in &validation.warnings {
         eprintln!("warning: kit {}: {warning}", kit_dir.display());

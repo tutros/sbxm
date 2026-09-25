@@ -20,8 +20,7 @@ pub struct Spec {
     name: &'static str,
     description: String,
     permissions: Permissions,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    environment: Option<Environment>,
+    environment: Environment,
 }
 
 #[derive(Debug, Serialize)]
@@ -41,8 +40,13 @@ struct Network {
     deny: Vec<String>,
 }
 
-/// The `common` mixin: everything in the profile that applies to any harness.
-pub fn common(profile_name: &str, profile: &Profile) -> Spec {
+/// The `common` mixin: everything in the profile that applies to any harness,
+/// plus `SBXM_CONFIG_HASH`/`SBXM_PROFILE` so every sandbox records where it
+/// came from (decision 55; the profile can't set `SBXM_` names).
+pub fn common(profile_name: &str, profile: &Profile, config_hash: &str) -> Spec {
+    let mut variables = profile.env.clone();
+    variables.insert("SBXM_CONFIG_HASH".into(), config_hash.into());
+    variables.insert("SBXM_PROFILE".into(), profile_name.into());
     Spec {
         schema_version: "2",
         kind: "mixin",
@@ -54,9 +58,7 @@ pub fn common(profile_name: &str, profile: &Profile) -> Spec {
                 deny: profile.network.deny.clone(),
             },
         },
-        environment: (!profile.env.is_empty()).then(|| Environment {
-            variables: profile.env.clone(),
-        }),
+        environment: Environment { variables },
     }
 }
 

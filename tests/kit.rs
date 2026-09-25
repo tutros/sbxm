@@ -1,5 +1,6 @@
-//! Slice 10b: the profile's network rules reach the sandbox through a
-//! generated `common` mixin kit.
+//! Slices 10b–11: the profile's network rules and env, plus sbxm's
+//! `SBXM_CONFIG_HASH`/`SBXM_PROFILE`, reach the sandbox through a generated
+//! `common` mixin kit.
 
 mod common;
 
@@ -12,8 +13,19 @@ fn kit_dir(env: &Env) -> PathBuf {
     env.kit_dir("demo")
 }
 
+/// The generated `spec.yaml`, with the config hash (which changes with
+/// sbxm's version) replaced by `<hash>`.
 fn spec(env: &Env) -> String {
-    std::fs::read_to_string(kit_dir(env).join("spec.yaml")).unwrap()
+    let state: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(env.base_dir().join(".sbxm/demo/state.json")).unwrap(),
+    )
+    .unwrap();
+    let hash = state["sandboxes"]["claude"]["config_hash"]
+        .as_str()
+        .unwrap();
+    std::fs::read_to_string(kit_dir(env).join("spec.yaml"))
+        .unwrap()
+        .replace(hash, "<hash>")
 }
 
 #[test]
@@ -40,6 +52,10 @@ fn profile_network_becomes_the_common_mixin() {
         - '*.githubusercontent.com'
         deny:
         - telemetry.example.com
+    environment:
+      variables:
+        SBXM_CONFIG_HASH: <hash>
+        SBXM_PROFILE: default
     ");
 }
 
@@ -58,6 +74,10 @@ fn profile_without_network_gets_empty_lists() {
       network:
         allow: []
         deny: []
+    environment:
+      variables:
+        SBXM_CONFIG_HASH: <hash>
+        SBXM_PROFILE: default
     ");
 }
 
@@ -116,6 +136,8 @@ fn profile_env_becomes_environment_variables() {
     environment:
       variables:
         EXAMPLE_FLAG: '1'
+        SBXM_CONFIG_HASH: <hash>
+        SBXM_PROFILE: default
         ZED: last
     ");
 }
