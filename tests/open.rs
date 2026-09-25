@@ -8,6 +8,16 @@ fn kit_dir(env: &Env) -> std::path::PathBuf {
     env.kit_dir("demo")
 }
 
+fn open_demo(env: &Env, backend: &FakeBackend) -> anyhow::Result<()> {
+    open::run(
+        &env.config_dir(),
+        "demo",
+        &open::Options::default(),
+        backend,
+        &mut std::io::sink(),
+    )
+}
+
 fn sandbox(status: &str) -> SandboxInfo {
     SandboxInfo {
         name: "sbxm-demo-claude".into(),
@@ -22,7 +32,7 @@ fn running_sandbox_is_attached() {
     env.run("demo", &FakeBackend::default()).unwrap();
     let backend = FakeBackend::with_sandboxes(vec![sandbox("running")]);
 
-    open::run(&env.config_dir(), "demo", &backend).unwrap();
+    open_demo(&env, &backend).unwrap();
 
     assert_eq!(backend.log(), ["attach sbxm-demo-claude"]);
 }
@@ -33,7 +43,7 @@ fn stopped_sandbox_is_attached() {
     env.run("demo", &FakeBackend::default()).unwrap();
     let backend = FakeBackend::with_sandboxes(vec![sandbox("stopped")]);
 
-    open::run(&env.config_dir(), "demo", &backend).unwrap();
+    open_demo(&env, &backend).unwrap();
 
     assert_eq!(backend.log(), ["attach sbxm-demo-claude"]);
 }
@@ -43,7 +53,7 @@ fn new_project_is_created_then_attached() {
     let env = Env::new();
     let backend = FakeBackend::default();
 
-    open::run(&env.config_dir(), "demo", &backend).unwrap();
+    open_demo(&env, &backend).unwrap();
 
     assert_eq!(
         backend.log(),
@@ -70,7 +80,7 @@ fn missing_sandbox_is_recreated_keeping_the_workspace() {
     std::fs::write(env.base_dir().join("demo").join("notes.md"), "keep me").unwrap();
     let backend = FakeBackend::default();
 
-    open::run(&env.config_dir(), "demo", &backend).unwrap();
+    open_demo(&env, &backend).unwrap();
 
     assert_eq!(
         backend.log(),
@@ -91,7 +101,7 @@ fn sandbox_without_state_is_refused() {
     let env = Env::new();
     let backend = FakeBackend::with_sandboxes(vec![sandbox("running")]);
 
-    let err = open::run(&env.config_dir(), "demo", &backend).unwrap_err();
+    let err = open_demo(&env, &backend).unwrap_err();
 
     let message = format!("{err:#}");
     assert!(
@@ -106,7 +116,14 @@ fn invalid_name_makes_no_backend_calls() {
     let env = Env::new();
     let backend = FakeBackend::default();
 
-    open::run(&env.config_dir(), "Demo", &backend).unwrap_err();
+    open::run(
+        &env.config_dir(),
+        "Demo",
+        &open::Options::default(),
+        &backend,
+        &mut std::io::sink(),
+    )
+    .unwrap_err();
 
     assert!(backend.log().is_empty());
 }
@@ -132,7 +149,7 @@ fn missing_sandbox_is_recreated_with_the_stored_profile() {
     env.write_profile("default", "not valid toml [");
     let backend = FakeBackend::default();
 
-    open::run(&env.config_dir(), "demo", &backend).unwrap();
+    open_demo(&env, &backend).unwrap();
 
     assert_eq!(backend.creates().len(), 1);
     assert_eq!(state_entry(&env)["profile"], "strict");
@@ -151,7 +168,7 @@ fn missing_sandbox_without_a_stored_profile_uses_the_default() {
     .unwrap();
     let backend = FakeBackend::default();
 
-    open::run(&env.config_dir(), "demo", &backend).unwrap();
+    open_demo(&env, &backend).unwrap();
 
     assert_eq!(backend.creates().len(), 1);
     assert_eq!(state_entry(&env)["profile"], "default");
@@ -164,13 +181,14 @@ fn changed_config_is_refused_without_rebuild() {
     env.write_profile("default", "[network]\nallow = [\"github.com\"]\n");
     let backend = FakeBackend::with_sandboxes(vec![sandbox("running")]);
 
-    let err = open::run(&env.config_dir(), "demo", &backend).unwrap_err();
+    let err = open_demo(&env, &backend).unwrap_err();
 
     let message = format!("{err:#}");
     assert!(
         message.contains(
             "the config of sbxm-demo-claude (profile 'default') changed since it was created; \
-             run `sbxm open demo --rebuild` to recreate it"
+             run `sbxm open demo --rebuild` to recreate it (its session history is lost; \
+             the workspace is kept)"
         ),
         "{message}"
     );
@@ -189,7 +207,7 @@ fn state_without_a_hash_is_refused_without_rebuild() {
     .unwrap();
     let backend = FakeBackend::with_sandboxes(vec![sandbox("running")]);
 
-    let err = open::run(&env.config_dir(), "demo", &backend).unwrap_err();
+    let err = open_demo(&env, &backend).unwrap_err();
 
     let message = format!("{err:#}");
     assert!(
@@ -200,4 +218,77 @@ fn state_without_a_hash_is_refused_without_rebuild() {
         "{message}"
     );
     assert!(backend.log().is_empty());
+}
+
+/// `open demo --rebuild`, returning what it wrote to `warn`.
+fn rebuild_demo(env: &Env, backend: &FakeBackend) -> (anyhow::Result<()>, String) {
+    let mut warn = Vec::new();
+    let result = open::run(
+        &env.config_dir(),
+        "demo",
+        &open::Options { rebuild: true },
+        backend,
+        &mut warn,
+    );
+    (result, String::from_utf8(warn).unwrap())
+}
+
+/// `kits/<prefix>/common` for the hash in state.
+fn state_kit_dir(env: &Env) -> std::path::PathBuf {
+    let hash = state_entry(env)["config_hash"].as_str().unwrap().to_owned();
+    env.base_dir()
+        .join(".sbxm")
+        .join("demo")
+        .join("kits")
+        .join(&hash[..12])
+        .join("common")
+}
+
+#[test]
+fn rebuild_recreates_the_sandbox_from_the_current_config() {
+    let env = Env::new();
+    env.run("demo", &FakeBackend::default()).unwrap();
+    let old_hash = state_entry(&env)["config_hash"].clone();
+    let workspace = env.base_dir().join("demo");
+    std::fs::write(workspace.join("notes.md"), "keep me").unwrap();
+    env.write_profile("default", "[network]\nallow = [\"github.com\"]\n");
+    let backend = FakeBackend::with_sandboxes(vec![sandbox("running")]);
+
+    let (result, warn) = rebuild_demo(&env, &backend);
+
+    result.unwrap();
+    assert_ne!(state_entry(&env)["config_hash"], old_hash);
+    assert_eq!(
+        backend.log(),
+        [
+            format!("validate {}", state_kit_dir(&env).display()),
+            "rm sbxm-demo-claude".to_owned(),
+            "create sbxm-demo-claude".to_owned(),
+            "attach sbxm-demo-claude".to_owned()
+        ]
+    );
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("notes.md")).unwrap(),
+        "keep me"
+    );
+    assert!(
+        warn.contains(&format!(
+            "rebuilding sbxm-demo-claude: its session history will be lost; the workspace {} is kept",
+            workspace.display()
+        )),
+        "{warn}"
+    );
+}
+
+#[test]
+fn rebuild_with_an_invalid_kit_keeps_the_old_sandbox() {
+    let env = Env::new();
+    env.run("demo", &FakeBackend::default()).unwrap();
+    let backend = FakeBackend::with_invalid_kit("bad").and_sandboxes(vec![sandbox("running")]);
+
+    let (result, _) = rebuild_demo(&env, &backend);
+
+    result.unwrap_err();
+    assert!(backend.removes().is_empty());
+    assert!(backend.creates().is_empty());
 }

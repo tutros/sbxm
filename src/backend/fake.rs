@@ -52,6 +52,11 @@ impl FakeBackend {
         }
     }
 
+    /// Makes `list` return these sandboxes, on top of another constructor.
+    pub fn and_sandboxes(self, sandboxes: Vec<SandboxInfo>) -> Self {
+        Self { sandboxes, ..self }
+    }
+
     pub fn creates(&self) -> Vec<CreateSpec> {
         self.creates.borrow().clone()
     }

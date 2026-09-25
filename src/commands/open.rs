@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::Path;
 
 use anyhow::{Result, bail};
@@ -7,9 +8,21 @@ use crate::backend::SandboxBackend;
 use crate::config::{self, GlobalConfig, Profile};
 use crate::{project, state};
 
+#[derive(Debug, Default)]
+pub struct Options {
+    /// Recreate the sandbox from the current config.
+    pub rebuild: bool,
+}
+
 /// Attaches to the project's sandbox, creating it first (via `new`) if it
-/// doesn't exist (decision 31).
-pub fn run(config_dir: &Path, name: &str, backend: &dyn SandboxBackend) -> Result<()> {
+/// doesn't exist (decision 31). Warnings go to `warn`.
+pub fn run(
+    config_dir: &Path,
+    name: &str,
+    options: &Options,
+    backend: &dyn SandboxBackend,
+    warn: &mut dyn Write,
+) -> Result<()> {
     project::validate_name(name)?;
     let config = GlobalConfig::load(config_dir)?;
     let sandbox = project::sandbox_name(name, HARNESS);
@@ -18,6 +31,20 @@ pub fn run(config_dir: &Path, name: &str, backend: &dyn SandboxBackend) -> Resul
     let exists = backend.list()?.iter().any(|s| s.name == sandbox);
 
     match (entry, exists) {
+        (Some(entry), true) if options.rebuild => {
+            writeln!(
+                warn,
+                "rebuilding {sandbox}: its session history will be lost; the workspace {} is kept",
+                entry.workspace.display()
+            )?;
+            // `new` removes the old sandbox only once the new kit validates.
+            let options = new::Options {
+                profile: entry.profile,
+                replace: true,
+                ..new::Options::default()
+            };
+            new::run(config_dir, name, &options, backend)?
+        }
         (Some(entry), true) => check_unchanged(&config, name, &sandbox, &entry)?,
         (None, true) => bail!(
             "sandbox {sandbox} exists but sbxm has no state for it; it may lack sbxm's config, \
@@ -46,7 +73,8 @@ fn check_unchanged(
     entry: &state::SandboxState,
 ) -> Result<()> {
     let fix = format!(
-        "run `sbxm open {name} --rebuild` to recreate it (its session history is lost;          the workspace is kept)"
+        "run `sbxm open {name} --rebuild` to recreate it (its session history is lost; \
+         the workspace is kept)"
     );
     let Some(stored) = &entry.config_hash else {
         bail!("{sandbox} was created before sbxm recorded config hashes; {fix}");

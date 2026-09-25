@@ -15,7 +15,11 @@ fn main() -> anyhow::Result<()> {
         } => commands::new::run(
             &config::config_dir()?,
             &project,
-            &commands::new::Options { seed, profile },
+            &commands::new::Options {
+                seed,
+                profile,
+                ..Default::default()
+            },
             &SbxBackend,
         ),
         Command::List { json } => {
@@ -28,9 +32,13 @@ fn main() -> anyhow::Result<()> {
             print!("{}", render(&entries));
             Ok(())
         }
-        Command::Open { project } => {
-            commands::open::run(&config::config_dir()?, &project, &SbxBackend)
-        }
+        Command::Open { project, rebuild } => commands::open::run(
+            &config::config_dir()?,
+            &project,
+            &commands::open::Options { rebuild },
+            &SbxBackend,
+            &mut std::io::stderr(),
+        ),
         Command::Stop { project } => {
             commands::stop::run(&config::config_dir()?, &project, &SbxBackend)
         }

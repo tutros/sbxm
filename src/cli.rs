@@ -33,6 +33,10 @@ pub enum Command {
     Open {
         /// Project name.
         project: String,
+        /// Recreate the sandbox from the current config; its session history is lost,
+        /// the workspace is kept.
+        #[arg(long)]
+        rebuild: bool,
     },
     /// Stop a project's sandbox.
     Stop {

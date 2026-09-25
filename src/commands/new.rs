@@ -18,6 +18,9 @@ pub struct Options {
     pub seed: Option<PathBuf>,
     /// Profile to apply; `default_profile` from the global config if `None`.
     pub profile: Option<String>,
+    /// Remove the existing sandbox after the new kit validates and before
+    /// creating (`open --rebuild`), so an invalid kit leaves it untouched.
+    pub replace: bool,
 }
 
 pub fn run(
@@ -93,6 +96,9 @@ pub fn run(
     }
 
     let sandbox = project::sandbox_name(name, HARNESS);
+    if options.replace {
+        backend.remove(&sandbox)?;
+    }
     backend.create(&CreateSpec {
         name: sandbox.clone(),
         agent: HARNESS.into(),

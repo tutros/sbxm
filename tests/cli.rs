@@ -30,6 +30,7 @@ fn commands_without_config_point_to_config_init() {
         &["list"][..],
         &["list", "--json"][..],
         &["stop", "demo"][..],
+        &["open", "demo", "--rebuild"][..],
     ] {
         let output = sbxm()
             .env("SBXM_CONFIG_DIR", tmp.path())
