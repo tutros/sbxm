@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use crate::backend::SkillsStore;
+
 /// `SBXM_CONFIG_DIR` if set, otherwise `~/.config/sbxm` on every platform.
 pub fn config_dir() -> Result<PathBuf> {
     if let Some(dir) = std::env::var_os("SBXM_CONFIG_DIR") {
@@ -78,6 +80,18 @@ pub struct Profile {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub secrets: Secrets,
+    #[serde(default)]
+    skills: Skills,
+    /// `skills.store`, checked by [`Profile::load`].
+    #[serde(skip)]
+    pub skills_store: SkillsStore,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Skills {
+    #[serde(default)]
+    store: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -108,9 +122,10 @@ impl Profile {
         }
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("cannot read {}", path.display()))?;
-        let profile: Self =
+        let mut profile: Self =
             toml::from_str(&text).with_context(|| format!("invalid profile {}", path.display()))?;
         profile.check_env(name, &path)?;
+        profile.skills_store = parse_skills_store(profile.skills.store.as_deref(), name, &path)?;
         Ok(profile)
     }
 
@@ -139,6 +154,23 @@ impl Profile {
             }
         }
         Ok(())
+    }
+}
+
+/// `readonly` when unset (decision 46).
+fn parse_skills_store(value: Option<&str>, name: &str, path: &Path) -> Result<SkillsStore> {
+    match value {
+        None | Some("readonly") => Ok(SkillsStore::ReadOnly),
+        Some("off") => Ok(SkillsStore::Off),
+        Some("readwrite") => bail!(
+            "skills.store = \"readwrite\" in profile '{name}' is not allowed: an agent could plant \
+             skills that every other sandbox loads (decision 46); use \"readonly\" or \"off\" in {}",
+            path.display()
+        ),
+        Some(other) => bail!(
+            "skills.store = \"{other}\" in profile '{name}' is not valid; use \"readonly\" or \"off\" in {}",
+            path.display()
+        ),
     }
 }
 

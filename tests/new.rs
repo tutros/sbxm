@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 mod common;
 
 use common::{Env, dir_link};
-use sbxm::backend::{CreateSpec, FakeBackend};
+use sbxm::backend::{CreateSpec, FakeBackend, SkillsStore};
 use sbxm::commands::new;
 
 fn expected_create(workspace: &Path) -> CreateSpec {
@@ -13,6 +13,7 @@ fn expected_create(workspace: &Path) -> CreateSpec {
         workspace: workspace.to_path_buf(),
         cpus: 4,
         memory: "8g".into(),
+        skills: SkillsStore::ReadOnly,
         kits: vec![
             workspace
                 .parent()

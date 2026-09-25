@@ -95,6 +95,7 @@ pub fn run(
         workspace: workspace.clone(),
         cpus: config.resources.cpus,
         memory: config.resources.memory,
+        skills: profile.skills_store,
         kits: vec![kit_dir],
     })?;
 

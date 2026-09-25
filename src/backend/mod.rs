@@ -49,6 +49,27 @@ pub struct CreateSpec {
     pub workspace: PathBuf,
     pub cpus: u32,
     pub memory: String,
+    /// Always passed explicitly: without `--skills`, `sbx` falls back to its
+    /// own `skills.defaultMode` setting, which could be `readwrite`.
+    pub skills: SkillsStore,
     /// Mixin kit directories, passed as `--kit` in this order.
     pub kits: Vec<PathBuf>,
+}
+
+/// How `sbx`'s shared skills store is mounted (decision 46). sbxm never uses
+/// `readwrite`: an agent could plant skills that every other sandbox loads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SkillsStore {
+    #[default]
+    ReadOnly,
+    Off,
+}
+
+impl SkillsStore {
+    pub fn as_arg(self) -> &'static str {
+        match self {
+            SkillsStore::ReadOnly => "readonly",
+            SkillsStore::Off => "off",
+        }
+    }
 }

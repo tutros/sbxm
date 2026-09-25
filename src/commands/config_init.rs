@@ -18,6 +18,10 @@ deny = []
 # Secret services that must exist in `sbx secret ls`. Values stay in sbx.
 [secrets]
 services = []
+
+# sbx's shared skills store: "readonly" or "off". "readwrite" is rejected.
+[skills]
+store = "readonly"
 "#;
 
 pub fn run() -> Result<()> {
@@ -81,5 +85,11 @@ mod tests {
     #[test]
     fn starter_profile_parses_as_a_profile() {
         toml::from_str::<Profile>(STARTER_PROFILE).unwrap();
+    }
+
+    #[test]
+    fn starter_profile_sets_the_skills_store_explicitly() {
+        let table: toml::Table = STARTER_PROFILE.parse().unwrap();
+        assert_eq!(table["skills"]["store"].as_str(), Some("readonly"));
     }
 }

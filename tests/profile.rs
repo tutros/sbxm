@@ -3,7 +3,7 @@
 mod common;
 
 use common::Env;
-use sbxm::backend::FakeBackend;
+use sbxm::backend::{FakeBackend, SkillsStore};
 use sbxm::commands::new;
 
 fn new_with_profile(env: &Env, profile: Option<&str>, backend: &FakeBackend) -> anyhow::Result<()> {
@@ -157,5 +157,59 @@ fn env_value_with_kit_expression_is_rejected() {
         message.contains("env value for 'GREETING' in profile 'default' contains '${{'"),
         "{message}"
     );
+    assert_nothing_created(&env, &backend);
+}
+
+fn created_skills(env: &Env, profile: &str) -> anyhow::Result<SkillsStore> {
+    env.write_profile("default", profile);
+    let backend = FakeBackend::default();
+    new_with_profile(env, None, &backend)?;
+    Ok(backend.creates()[0].skills)
+}
+
+#[test]
+fn skills_store_defaults_to_readonly() {
+    let env = Env::new();
+    assert_eq!(created_skills(&env, "").unwrap(), SkillsStore::ReadOnly);
+}
+
+#[test]
+fn skills_store_can_be_off() {
+    let env = Env::new();
+    assert_eq!(
+        created_skills(&env, "[skills]\nstore = \"off\"\n").unwrap(),
+        SkillsStore::Off
+    );
+}
+
+#[test]
+fn skills_store_readwrite_is_rejected_with_the_reason() {
+    let env = Env::new();
+    env.write_profile("default", "[skills]\nstore = \"readwrite\"\n");
+    let backend = FakeBackend::default();
+
+    let err = new_with_profile(&env, None, &backend).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("skills.store = \"readwrite\" in profile 'default' is not allowed"),
+        "{message}"
+    );
+    assert!(message.contains("every other sandbox"), "{message}");
+    assert!(message.contains("use \"readonly\" or \"off\""), "{message}");
+    assert_nothing_created(&env, &backend);
+}
+
+#[test]
+fn skills_store_unknown_value_lists_the_allowed_ones() {
+    let env = Env::new();
+    env.write_profile("default", "[skills]\nstore = \"maybe\"\n");
+    let backend = FakeBackend::default();
+
+    let err = new_with_profile(&env, None, &backend).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("\"maybe\""), "{message}");
+    assert!(message.contains("use \"readonly\" or \"off\""), "{message}");
     assert_nothing_created(&env, &backend);
 }

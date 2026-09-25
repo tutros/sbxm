@@ -122,6 +122,8 @@ fn create_args(spec: &CreateSpec) -> Vec<OsString> {
         spec.cpus.to_string().into(),
         "-m".into(),
         spec.memory.clone().into(),
+        "--skills".into(),
+        spec.skills.as_arg().into(),
     ];
     for kit in &spec.kits {
         args.push("--kit".into());
@@ -145,6 +147,7 @@ mod tests {
             workspace: PathBuf::from("/work/demo"),
             cpus: 4,
             memory: "8g".into(),
+            skills: crate::backend::SkillsStore::Off,
             kits: vec![PathBuf::from("/k/common")],
         };
 
@@ -158,6 +161,8 @@ mod tests {
                 "4",
                 "-m",
                 "8g",
+                "--skills",
+                "off",
                 "--kit",
                 "/k/common",
                 "claude",
