@@ -82,3 +82,26 @@ fn existing_profile_alone_blocks_writing_config() {
     assert!(!tmp.path().join("config.toml").exists());
     assert_eq!(std::fs::read_to_string(&profile_path).unwrap(), "# mine\n");
 }
+
+#[test]
+fn reports_the_files_it_wrote() {
+    let tmp = TempDir::new().unwrap();
+
+    let output = config_init(tmp.path()).success().get_output().clone();
+
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let config_path = tmp.path().join("config.toml");
+    let profile_path = tmp
+        .path()
+        .join("profiles")
+        .join("default")
+        .join("profile.toml");
+    assert!(
+        stdout.contains(&config_path.display().to_string()),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains(&profile_path.display().to_string()),
+        "stdout: {stdout}"
+    );
+}
