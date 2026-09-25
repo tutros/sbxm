@@ -12,6 +12,8 @@ use tempfile::TempDir;
 struct Cleanup {
     sandbox: String,
     dirs: Vec<PathBuf>,
+    /// Removed only if empty.
+    shared_dirs: Vec<PathBuf>,
 }
 
 impl Drop for Cleanup {
@@ -21,6 +23,9 @@ impl Drop for Cleanup {
             .status();
         for dir in &self.dirs {
             let _ = std::fs::remove_dir_all(dir);
+        }
+        for dir in &self.shared_dirs {
+            let _ = std::fs::remove_dir(dir);
         }
     }
 }
@@ -43,6 +48,7 @@ fn new_creates_a_real_sandbox() {
             base_dir.join(&project),
             base_dir.join(".sbxm").join(&project),
         ],
+        shared_dirs: vec![base_dir.join(".sbxm")],
     };
     let config_dir = TempDir::new().unwrap();
     let base = toml::Value::String(base_dir.to_str().unwrap().to_owned());
