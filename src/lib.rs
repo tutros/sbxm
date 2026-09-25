@@ -3,6 +3,7 @@ pub mod cli;
 pub mod commands;
 pub mod config;
 pub mod confirm;
+pub mod kit;
 pub mod project;
 pub mod seed;
 pub mod state;

@@ -7,6 +7,7 @@ use anyhow::{Context, Result, bail};
 use super::HARNESS;
 use crate::backend::{CreateSpec, SandboxBackend};
 use crate::config::{GlobalConfig, Profile};
+use crate::kit;
 use crate::project;
 use crate::seed;
 use crate::state::{SandboxState, State};
@@ -31,7 +32,7 @@ pub fn run(
         .profile
         .as_deref()
         .unwrap_or(&config.default_profile);
-    let _profile = Profile::load(config.profiles_dir(), profile_name)?;
+    let profile = Profile::load(config.profiles_dir(), profile_name)?;
 
     if !config.base_dir.is_dir() {
         bail!(
@@ -60,6 +61,11 @@ pub fn run(
             );
         }
     }
+    let kit_dir = project::metadata_dir(&config.base_dir, name)
+        .join("kits")
+        .join("common");
+    kit::write(&kit_dir, &kit::common(profile_name, &profile))?;
+
     match &options.seed {
         Some(seed_dir) => seed::copy(seed_dir, &workspace)?,
         None => fs::create_dir_all(&workspace)
