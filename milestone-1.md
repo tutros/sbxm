@@ -79,6 +79,9 @@ home_files = "harness/claude/home"   # copied to kit files/home/ (e.g. .claude/s
 [harness.gemini]
 [harness.pi]
 kit = "git+https://github.com/docker/sbx-kits-contrib.git#ref=<40-hex-sha>&dir=pi"
+
+[skills]
+store = "readonly"   # sbx skills store mount: "readonly" or "off"; "readwrite" is rejected [46]
 ```
 
 **Project** `<base>/.sbxm/<project>/sandbox.toml` (optional): same keys as a profile, merged on top. Lists (`network.allow`, `secrets.services`, `setup.install`) are *appended*; scalars and maps override.
@@ -97,6 +100,8 @@ Output: `<base>/.sbxm/<project>/kits/<hash-prefix>/{common,harness-<h>}/spec.yam
 | `instructions.reference` | `agentInstructions.content` | none |
 | `instructions.mandatory` | none | `files/home/<adapter's user-level file>` |
 | `harness.<h>.home_files` | none | copied into `files/home/` |
+
+`skills.store` isn't a kit field: it becomes `sbx create --skills <value>` [46].
 
 Unsupported feature for a harness (e.g. hooks configured, adapter has no hook location) → **loud warning** [11], never silently dropped.
 
@@ -138,6 +143,7 @@ Between slices 3 and 10, sandboxes are created without sbxm kits. That's safe: `
 | 8 | `sbxm rm demo --purge` also deletes the workspace and `.sbxm/demo` after confirmation. | Confirm yes/no; non-TTY without `--yes` refuses; prompt shows the path [32]. | none |
 | 9 | `sbxm open demo` attaches if the sandbox exists (running or stopped) and creates then attaches if it doesn't [31]. | Backend call sequence for each of the three states. | Manual attach works. |
 | 10 | The profile's `network` and `env` reach the sandbox through a generated `common` mixin, validated before create. | `insta` snapshot of `spec.yaml`; `kit_validate` called before `create`; validation failure aborts with no sandbox created. | `sbx kit validate` passes; allowed host 200, other 403. |
+| 10a | The profile's `skills.store` becomes `--skills` on `sbx create`; `readwrite` is rejected with a clear error [46]. | Backend call args for `readonly`/`off`/default; `readwrite` error with no sandbox created. | Store skills visible with `readonly`, absent with `off`. |
 | 11 | The config hash is stored in state and injected as `SBXM_CONFIG_HASH`/`SBXM_PROFILE`. After a profile change, `open` refuses; `open --rebuild` recreates, warning that session history is lost; `list` shows drift [28][31]. | Hash stable across runs; changes when a referenced file changes; refuse/rebuild/drift paths. | Env vars present in sandbox; workspace survives rebuild. |
 | 12 | `.sbxm/demo/sandbox.toml` overrides the profile: lists append, scalars and maps override [27]. | Merge semantics; reflected in kit snapshot and hash. | none |
 | 13 | `new`/`open` fail clearly when a profile's `secrets.services` entry isn't stored in `sbx` [30]. | Parse the captured `sbx secret ls --json` shape; message names the missing secret; no sandbox created. | Missing vs. present `anthropic`. |
@@ -159,7 +165,7 @@ Between slices 3 and 10, sandboxes are created without sbxm kits. That's safe: `
 
 ## Out of scope for M1
 
-Comparisons, runs, `--repeat`, evals, Jev, headless `exec` (all M2); `sbx env` [38]; `bollard` [17]; cloud sandboxes; config-variant profiles in comparisons (the profile mechanism built here is what M2 will reference [10]).
+Comparisons, runs, `--repeat`, evals, Jev, headless `exec` (all M2); `sbx env` [38]; `bollard` [17]; profile-owned skills (`skills.dir`, after spike S6) [46]; cloud sandboxes; config-variant profiles in comparisons (the profile mechanism built here is what M2 will reference [10]).
 
 ## Risks
 
