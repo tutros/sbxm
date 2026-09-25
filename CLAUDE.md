@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-Milestone 1 in progress (slices 0–2 done). Sources of truth:
+Milestone 1 in progress (slices 0–3 done). Sources of truth:
 - `idea.md`: original brief
 - `milestone-1.md`: current implementation plan (crate layout, config schema, kit mapping, commands, build order).
 - `decisions.md`: numbered design decisions and open research spikes. **Read it before designing anything**, and add new decisions there instead of silently departing from it.
@@ -22,20 +22,22 @@ cargo build
 cargo run -- --help                          # run the CLI
 cargo test                                   # all tests (no Docker needed)
 cargo test --test cli help_prints_usage      # a single test
-cargo test -- --ignored                      # real-sbx tests (base dir outside %TEMP%/AppData)
+$env:SBXM_REAL_BASE_DIR='E:\sbxm-it'; cargo test --test real_sbx -- --ignored   # real sbx; needs `sbx login`, dir outside %TEMP%/AppData
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 ```
 
 ## Code layout
 
-Single binary crate (edition 2024). Modules grow slice by slice, following the crate layout table in `milestone-1.md`.
-- `src/main.rs`: entry point; dispatches subcommands.
+Crate `sbxm` (edition 2024), lib + bin. Modules grow slice by slice, following the crate layout table in `milestone-1.md`.
+- `src/lib.rs` / `src/main.rs`: everything lives in the lib; `main` parses args and passes `SbxBackend` to commands.
 - `src/cli.rs`: `clap` derive definitions.
-- `src/config.rs`: config dir resolution (`SBXM_CONFIG_DIR` or `~/.config/sbxm`).
-- `src/project.rs`: project name validation (decisions 33, 44).
+- `src/config.rs`: config dir resolution (`SBXM_CONFIG_DIR` or `~/.config/sbxm`) and `GlobalConfig` loading.
+- `src/project.rs`: project name validation (decisions 33, 44), sandbox name, metadata dir.
+- `src/backend/`: `SandboxBackend` trait, `SbxBackend` (shells out to `sbx`), `FakeBackend` (records calls; `failing_create()`).
+- `src/state.rs`: `.sbxm/<project>/state.json`.
 - `src/commands/`: one file per subcommand (`config_init.rs`, `new.rs`).
-- `tests/`: `assert_cmd` tests of the binary's observable behavior, one file per command. Tests set `SBXM_CONFIG_DIR` to a `tempfile` dir and never touch the real config.
+- `tests/`: one file per command. CLI-level tests use `assert_cmd` with `SBXM_CONFIG_DIR` pointing at a `tempfile` dir; tests that reach the backend call command functions in-process with `FakeBackend`. Never touch the real config.
 
 On Windows, cargo can print `error finalizing incremental compilation session directory … Access is denied`. It's a harmless filesystem-lock warning, not a lint failure.
 
