@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Status
 
-Milestone 1 in progress (slices 0–4 done). Sources of truth:
+Milestone 1 in progress (slices 0–5 done). Sources of truth:
 - `idea.md`: original brief
 - `milestone-1.md`: current implementation plan (crate layout, config schema, kit mapping, commands, build order).
 - `decisions.md`: numbered design decisions and open research spikes. **Read it before designing anything**, and add new decisions there instead of silently departing from it.
@@ -34,13 +34,16 @@ Crate `sbxm` (edition 2024), lib + bin. Modules grow slice by slice, following t
 - `src/cli.rs`: `clap` derive definitions.
 - `src/config.rs`: config dir resolution (`SBXM_CONFIG_DIR` or `~/.config/sbxm`) and `GlobalConfig` loading.
 - `src/project.rs`: project name validation (decisions 33, 44), sandbox name, metadata dir.
-- `src/backend/`: `SandboxBackend` trait, `SbxBackend` (shells out to `sbx`), `FakeBackend` (records calls; `failing_create()`).
-- `src/state.rs`: `.sbxm/<project>/state.json`.
+- `src/backend/`: `SandboxBackend` trait (`create`, `list`), `SbxBackend` (shells out to `sbx`; parsers unit-tested against captured output in `src/backend/fixtures/`), `FakeBackend` (records calls; `failing_create()`, `with_sandboxes()`).
+- `src/state.rs`: `.sbxm/<project>/state.json`; `load_all` scans every project.
 - `src/seed.rs`: copying a seed dir into a new workspace (rejects links).
-- `src/commands/`: one file per subcommand (`config_init.rs`, `new.rs`).
-- `tests/`: one file per command. CLI-level tests use `assert_cmd` with `SBXM_CONFIG_DIR` pointing at a `tempfile` dir; tests that reach the backend call command functions in-process with `FakeBackend`. Never touch the real config.
+- `src/commands/`: one file per subcommand (`config_init.rs`, `new.rs`, `list.rs`).
+- `tests/`: one file per command. CLI-level tests use `assert_cmd` with `SBXM_CONFIG_DIR` pointing at a `tempfile` dir; tests that reach the backend call command functions in-process with `FakeBackend`, using the `Env` helper in `tests/common/`. Never touch the real config.
 
 On Windows, cargo can print `error finalizing incremental compilation session directory … Access is denied`. It's a harmless filesystem-lock warning, not a lint failure.
+
+Git Bash heredocs here collapse `\` to `\`, even with a quoted delimiter. Write files that contain backslashes (JSON fixtures, Windows paths, Rust `
+` escapes inside generated code) with the Write/Edit tools, not heredocs.
 
 ## What `sbxm` is
 
