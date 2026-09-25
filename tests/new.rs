@@ -247,3 +247,41 @@ fn seed_containing_the_base_dir_is_an_error() {
     assert!(!env.base_dir().join("demo").exists());
     assert!(backend.creates().is_empty());
 }
+
+/// A directory link that needs no admin rights: a junction on Windows.
+fn dir_link(link: &Path, target: &Path) {
+    #[cfg(windows)]
+    {
+        let status = std::process::Command::new("cmd")
+            .arg("/C")
+            .arg("mklink")
+            .arg("/J")
+            .arg(link)
+            .arg(target)
+            .stdout(std::process::Stdio::null())
+            .status()
+            .unwrap();
+        assert!(status.success(), "mklink /J failed");
+    }
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(target, link).unwrap();
+}
+
+#[test]
+fn seed_containing_a_link_is_an_error_and_copies_nothing() {
+    let env = Env::new();
+    let secret = env.tmp.path().join("secret");
+    std::fs::create_dir_all(&secret).unwrap();
+    std::fs::write(secret.join("key.txt"), "secret").unwrap();
+    let seed = env.seed();
+    dir_link(&seed.join("sub").join("linked"), &secret);
+    let backend = FakeBackend::default();
+
+    let err = env.run_with("demo", &seeded(seed), &backend).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("is a symlink or junction"), "{message}");
+    assert!(message.contains("linked"), "{message}");
+    assert!(!env.base_dir().join("demo").exists());
+    assert!(backend.creates().is_empty());
+}
