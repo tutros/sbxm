@@ -62,6 +62,10 @@ Running log of design decisions for model_compare. See `idea.md` for the origina
 41. **Sandbox names (P2):** `sbxm-<project>-<harness>`. One project can have one sandbox per harness.
 42. **Repo directory (P3):** Rename `model_compare/` to `sbxm/` (done by the user outside the session, since VS Code holds the folder open). Git repo initialized on `main` (2026-09-24); no commits yet. The scaffold in milestone 1 step 1 will be the first commit, together with the planning docs.
 
+## Implementation (2026-09-24)
+
+43. **Starter config (`config init`, slice 1):** Writes `<config_dir>/config.toml` and `<config_dir>/profiles/default/profile.toml`, where `<config_dir>` is `SBXM_CONFIG_DIR` or `~/.config/sbxm`. `profiles_dir` defaults to `<config_dir>/profiles` (so the config dir is the directory to version), and `base_dir` defaults to `~/sbxm-projects` (under home, not AppData). The starter profile references no files. If either file exists, nothing is written.
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S5 (M2):** Headless runs per harness inside `sbx` (Claude Code, Codex, Gemini CLI, Pi): prompt in, run to completion, extract answer + transcript + token usage (decision 13). Leads: the v3 kit spec has `agent-sessions@1` (`prompt: ["-p", "{{.Prompt}}"]` for claude), but `sbx` 0.43 has no CLI verb for it. Likely route is `sbx exec <sandbox> <harness-cli> <headless flags>`.
