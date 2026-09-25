@@ -234,3 +234,29 @@ fn purge_refuses_a_linked_workspace_and_deletes_nothing() {
     assert!(workspace(&env).symlink_metadata().is_ok());
     assert!(metadata_dir(&env).join("state.json").exists());
 }
+
+#[test]
+fn purge_after_plain_rm_deletes_the_workspace() {
+    let env = setup();
+    plain_rm(&env, "demo", &FakeBackend::default()).unwrap();
+    let backend = FakeBackend::default();
+
+    purge(&env, true, &backend, &FakeConfirm::never()).unwrap();
+
+    assert!(backend.removes().is_empty());
+    assert!(!workspace(&env).exists());
+}
+
+#[test]
+fn purge_with_nothing_to_delete_is_an_error() {
+    let env = Env::new();
+    let backend = FakeBackend::default();
+
+    let err = purge(&env, true, &backend, &FakeConfirm::never()).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("nothing to purge for project 'demo'; `sbxm list` shows existing ones"),
+        "{message}"
+    );
+}

@@ -47,6 +47,9 @@ pub fn run(
         .into_iter()
         .filter(|dir| dir.symlink_metadata().is_ok())
         .collect();
+    if dirs.is_empty() && sandbox.is_none() {
+        bail!("nothing to purge for project '{name}'; `sbxm list` shows existing ones");
+    }
     for dir in &dirs {
         check_deletable(dir)?;
     }
