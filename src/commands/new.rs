@@ -95,6 +95,7 @@ pub fn run(
         workspace: workspace.clone(),
         cpus: config.resources.cpus,
         memory: config.resources.memory,
+        kits: vec![kit_dir],
     })?;
 
     let created_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();

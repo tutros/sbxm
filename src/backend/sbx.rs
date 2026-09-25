@@ -114,7 +114,7 @@ fn parse_ls(json: &str) -> Result<Vec<SandboxInfo>> {
 }
 
 fn create_args(spec: &CreateSpec) -> Vec<OsString> {
-    vec![
+    let mut args: Vec<OsString> = vec![
         "create".into(),
         "--name".into(),
         spec.name.clone().into(),
@@ -122,9 +122,13 @@ fn create_args(spec: &CreateSpec) -> Vec<OsString> {
         spec.cpus.to_string().into(),
         "-m".into(),
         spec.memory.clone().into(),
-        spec.agent.clone().into(),
-        spec.workspace.clone().into(),
-    ]
+    ];
+    for kit in &spec.kits {
+        args.push("--kit".into());
+        args.push(kit.into());
+    }
+    args.extend([spec.agent.clone().into(), spec.workspace.clone().into()]);
+    args
 }
 
 #[cfg(test)]
@@ -141,6 +145,7 @@ mod tests {
             workspace: PathBuf::from("/work/demo"),
             cpus: 4,
             memory: "8g".into(),
+            kits: vec![PathBuf::from("/k/common")],
         };
 
         assert_eq!(
@@ -153,6 +158,8 @@ mod tests {
                 "4",
                 "-m",
                 "8g",
+                "--kit",
+                "/k/common",
                 "claude",
                 "/work/demo"
             ]

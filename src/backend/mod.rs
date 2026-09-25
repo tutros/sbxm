@@ -49,4 +49,6 @@ pub struct CreateSpec {
     pub workspace: PathBuf,
     pub cpus: u32,
     pub memory: String,
+    /// Mixin kit directories, passed as `--kit` in this order.
+    pub kits: Vec<PathBuf>,
 }

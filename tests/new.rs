@@ -13,6 +13,15 @@ fn expected_create(workspace: &Path) -> CreateSpec {
         workspace: workspace.to_path_buf(),
         cpus: 4,
         memory: "8g".into(),
+        kits: vec![
+            workspace
+                .parent()
+                .unwrap()
+                .join(".sbxm")
+                .join("demo")
+                .join("kits")
+                .join("common"),
+        ],
     }
 }
 
