@@ -105,7 +105,10 @@ fn note(entry: &Entry) -> String {
     match entry.problem {
         None => String::new(),
         Some(Problem::NoSandbox) => {
-            format!("sandbox missing; `sbxm new {}` recreates it", entry.project)
+            format!(
+                "sandbox missing; `sbxm open {}` recreates it",
+                entry.project
+            )
         }
         Some(Problem::NoState) => "no sbxm state; not created by sbxm here".into(),
     }

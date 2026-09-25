@@ -125,7 +125,7 @@ fn table_aligns_columns_and_explains_orphans() {
         list::render_table(&entries),
         "PROJECT  HARNESS  STATUS   NOTE\n\
          demo     claude   running\n\
-         demo     codex    missing  sandbox missing; `sbxm new demo` recreates it\n\
+         demo     codex    missing  sandbox missing; `sbxm open demo` recreates it\n\
          website  claude   stopped  no sbxm state; not created by sbxm here\n"
     );
 }
