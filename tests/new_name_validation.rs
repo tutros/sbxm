@@ -89,3 +89,8 @@ fn accepts_names_that_only_start_like_device_names() {
         assert_valid(name);
     }
 }
+
+#[test]
+fn rejects_default_reserved_by_sbx() {
+    assert_rejected("default", "reserved by sbx");
+}

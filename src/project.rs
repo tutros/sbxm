@@ -22,6 +22,9 @@ pub fn validate_name(name: &str) -> Result<()> {
     if is_windows_device_name(name) {
         return invalid(name, "it is a reserved Windows device name");
     }
+    if name == "default" {
+        return invalid(name, "'default' is reserved by sbx");
+    }
     Ok(())
 }
 
