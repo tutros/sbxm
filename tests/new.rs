@@ -58,3 +58,38 @@ fn creates_workspace_and_sandbox() {
     assert!(workspace.is_dir());
     assert_eq!(backend.creates(), vec![expected_create(&workspace)]);
 }
+
+#[test]
+fn reuses_existing_workspace_and_keeps_its_contents() {
+    let env = Env::new();
+    let workspace = env.base_dir().join("demo");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("notes.md"), "keep me").unwrap();
+    let backend = FakeBackend::default();
+
+    env.run("demo", &backend).unwrap();
+
+    assert_eq!(
+        std::fs::read_to_string(workspace.join("notes.md")).unwrap(),
+        "keep me"
+    );
+    assert_eq!(backend.creates(), vec![expected_create(&workspace)]);
+}
+
+#[test]
+fn missing_base_dir_is_a_clear_error_and_creates_nothing() {
+    let env = Env::new();
+    std::fs::remove_dir(env.base_dir()).unwrap();
+    let backend = FakeBackend::default();
+
+    let err = env.run("demo", &backend).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("base dir"), "{message}");
+    assert!(
+        message.contains(&env.base_dir().display().to_string()),
+        "{message}"
+    );
+    assert!(!env.base_dir().exists());
+    assert!(backend.creates().is_empty());
+}
