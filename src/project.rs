@@ -43,3 +43,8 @@ fn is_windows_device_name(name: &str) -> bool {
 fn invalid(name: &str, reason: &str) -> Result<()> {
     bail!("invalid project name '{name}': {reason}")
 }
+
+/// `sbxm-<project>-<harness>` (decision 41).
+pub fn sandbox_name(project: &str, harness: &str) -> String {
+    format!("sbxm-{project}-{harness}")
+}
