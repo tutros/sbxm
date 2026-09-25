@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use sbxm::backend::SbxBackend;
-use sbxm::commands::new;
+use sbxm::commands::{list, new};
 use tempfile::TempDir;
 
 /// Removes the sandbox, workspace and metadata even if the test fails.
@@ -72,4 +72,15 @@ fn new_creates_a_real_sandbox() {
         ls.contains(&format!("\"{sandbox}\"")),
         "sbx ls --json: {ls}"
     );
+
+    // Slice 5: `list` sees it through the real `sbx ls --json`, joined with state.
+    let entries = list::entries(config_dir.path(), &SbxBackend).unwrap();
+    let entry = entries
+        .iter()
+        .find(|e| e.sandbox == sandbox)
+        .unwrap_or_else(|| panic!("{sandbox} not in {entries:?}"));
+    assert_eq!(entry.project, project);
+    assert_eq!(entry.harness, "claude");
+    assert_eq!(entry.problem, None);
+    println!("list status for {sandbox}: {}", entry.status);
 }
