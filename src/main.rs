@@ -27,10 +27,14 @@ fn main() -> anyhow::Result<()> {
         Command::Stop { project } => {
             commands::stop::run(&config::config_dir()?, &project, &SbxBackend)
         }
-        Command::Rm { project } => commands::rm::run(
+        Command::Rm {
+            project,
+            purge,
+            yes,
+        } => commands::rm::run(
             &config::config_dir()?,
             &project,
-            &commands::rm::Options::default(),
+            &commands::rm::Options { purge, yes },
             &SbxBackend,
             &Terminal,
         ),

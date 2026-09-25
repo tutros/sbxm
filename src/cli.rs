@@ -31,10 +31,16 @@ pub enum Command {
         /// Project name.
         project: String,
     },
-    /// Remove a project's sandbox and state; the workspace is kept.
+    /// Remove a project's sandbox and state; the workspace is kept unless --purge.
     Rm {
         /// Project name.
         project: String,
+        /// Also delete the workspace and sbxm's metadata, after confirmation.
+        #[arg(long)]
+        purge: bool,
+        /// Don't ask for confirmation (needed for --purge without a terminal).
+        #[arg(long, requires = "purge")]
+        yes: bool,
     },
     /// Manage sbxm configuration.
     Config {
