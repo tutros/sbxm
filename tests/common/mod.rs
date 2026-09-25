@@ -19,12 +19,28 @@ impl Env {
         std::fs::create_dir_all(env.config_dir()).unwrap();
         std::fs::create_dir_all(env.base_dir()).unwrap();
         let base = toml::Value::String(env.base_dir().to_str().unwrap().to_owned());
+        let profiles = toml::Value::String(env.profiles_dir().to_str().unwrap().to_owned());
         std::fs::write(
             env.config_dir().join("config.toml"),
-            format!("base_dir = {base}\n\n[resources]\ncpus = 4\nmemory = \"8g\"\n"),
+            format!(
+                "base_dir = {base}\nprofiles_dir = {profiles}\ndefault_profile = \"default\"\n\n\
+                 [resources]\ncpus = 4\nmemory = \"8g\"\n"
+            ),
         )
         .unwrap();
+        env.write_profile("default", "description = \"test default\"\n");
         env
+    }
+
+    pub fn profiles_dir(&self) -> PathBuf {
+        self.tmp.path().join("profiles")
+    }
+
+    /// Writes `<profiles_dir>/<name>/profile.toml`.
+    pub fn write_profile(&self, name: &str, contents: &str) {
+        let dir = self.profiles_dir().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("profile.toml"), contents).unwrap();
     }
 
     pub fn config_dir(&self) -> PathBuf {
