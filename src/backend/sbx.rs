@@ -13,21 +13,14 @@ pub struct SbxBackend;
 
 impl SandboxBackend for SbxBackend {
     fn create(&self, spec: &CreateSpec) -> Result<()> {
-        let status = Command::new("sbx")
-            .args(create_args(spec))
-            .status()
-            .context("cannot run `sbx`; is Docker Sandboxes installed and on PATH?")?;
-        if !status.success() {
-            bail!("`sbx create` failed for sandbox {} ({status})", spec.name);
-        }
-        Ok(())
+        run_sbx(create_args(spec), &spec.name)
     }
 
     fn list(&self) -> Result<Vec<SandboxInfo>> {
         let output = Command::new("sbx")
             .args(["ls", "--json"])
             .output()
-            .context("cannot run `sbx`; is Docker Sandboxes installed and on PATH?")?;
+            .context(SBX_MISSING)?;
         if !output.status.success() {
             bail!(
                 "`sbx ls --json` failed ({}): {}",
@@ -39,15 +32,29 @@ impl SandboxBackend for SbxBackend {
     }
 
     fn stop(&self, name: &str) -> Result<()> {
-        let status = Command::new("sbx")
-            .args(stop_args(name))
-            .status()
-            .context("cannot run `sbx`; is Docker Sandboxes installed and on PATH?")?;
-        if !status.success() {
-            bail!("`sbx stop` failed for sandbox {name} ({status})");
-        }
-        Ok(())
+        run_sbx(stop_args(name), name)
     }
+}
+
+const SBX_MISSING: &str = "cannot run `sbx`; is Docker Sandboxes installed and on PATH?";
+
+/// Runs `sbx <args>` with the terminal attached, so `sbx`'s own progress
+/// and errors reach the user.
+fn run_sbx<I, S>(args: I, sandbox: &str) -> Result<()>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let args: Vec<OsString> = args.into_iter().map(|a| a.as_ref().to_owned()).collect();
+    let verb = args[0].to_string_lossy().into_owned();
+    let status = Command::new("sbx")
+        .args(&args)
+        .status()
+        .context(SBX_MISSING)?;
+    if !status.success() {
+        bail!("`sbx {verb}` failed for sandbox {sandbox} ({status})");
+    }
+    Ok(())
 }
 
 fn stop_args(name: &str) -> [&str; 2] {
