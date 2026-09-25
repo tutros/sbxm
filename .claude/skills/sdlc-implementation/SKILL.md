@@ -5,7 +5,7 @@ description: How code is written in this project - vertical slices, test-first (
 
 # Implementation phase
 
-Five rules govern every code change. They apply to features, milestone steps and bug fixes alike.
+Six rules govern every code change. They apply to features, milestone steps and bug fixes alike.
 
 ## 1. Build in vertical slices
 
@@ -84,6 +84,26 @@ mid-run. If a decision can't be pre-decided, the answer is Blocked with the ques
 
 When the work returns: check the claims against the evidence in the results file, report to the user what was
 answered, what's blocked and whether cleanup was confirmed, and only then record decisions.
+
+## 6. Merging worktrees
+
+Unattended work runs in a git worktree. Nothing merges automatically; the main session does it, the same way every time.
+
+**Spike or research worktrees** (the worker doesn't commit):
+1. Check scope: `git -C <worktree> status` shows only the results file changed. Anything else → tell the user before using the results.
+2. Check the evidence behind every Answered claim, and re-run the cleanup checks yourself instead of trusting pasted output.
+3. Copy the results file into the main tree and commit it. Record conclusions in `decisions.md` (and the plan, if slices change) after showing the user.
+4. `git worktree remove <path>` and `git branch -D <branch>`; confirm with `git worktree list`.
+
+**Coding worktrees** (the worker commits green TDD steps):
+1. Merge-ready means: the spec's exit criteria are met, the branch is clean, and it doesn't touch `decisions.md`, `milestone-1.md` or `CLAUDE.md` (the main session owns those).
+2. Rebase onto the latest `main`, checking every commit:
+   `git rebase main --exec "cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test"`.
+   Fix a conflict or a red commit in *that* commit, so each commit stays green.
+3. `git merge --ff-only <branch>`. No merge commits, no squashing (it erases the red → green record).
+4. Re-run the checks on `main`, plus the `#[ignore]` real-`sbx` tests if the work touched `sbx`.
+5. Update docs, report to the user (commits, tests, deferred items), then remove the worktree and branch.
+6. Merge one branch at a time; rebase each remaining branch onto the new `main` before it lands.
 
 ## Loop summary
 
