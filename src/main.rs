@@ -23,6 +23,9 @@ fn main() -> anyhow::Result<()> {
             print!("{}", render(&entries));
             Ok(())
         }
+        Command::Stop { project } => {
+            commands::stop::run(&config::config_dir()?, &project, &SbxBackend)
+        }
         Command::Config {
             command: ConfigCommand::Init,
         } => commands::config_init::run(),

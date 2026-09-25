@@ -26,6 +26,11 @@ pub enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Stop a project's sandbox.
+    Stop {
+        /// Project name.
+        project: String,
+    },
     /// Manage sbxm configuration.
     Config {
         #[command(subcommand)]

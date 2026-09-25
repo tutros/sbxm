@@ -32,6 +32,19 @@ impl State {
     }
 }
 
+/// The state in `<metadata_dir>/state.json`, or `None` if there is none.
+pub fn load(metadata_dir: &Path) -> Result<Option<State>> {
+    let path = metadata_dir.join("state.json");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text =
+        fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
+    let state = serde_json::from_str(&text)
+        .with_context(|| format!("invalid state file {}", path.display()))?;
+    Ok(Some(state))
+}
+
 /// Every project's state under `<base>/.sbxm/`, as `(project, state)`.
 /// A missing `.sbxm` dir means no state yet.
 pub fn load_all(base_dir: &Path) -> Result<Vec<(String, State)>> {
@@ -42,15 +55,9 @@ pub fn load_all(base_dir: &Path) -> Result<Vec<(String, State)>> {
     let mut states = Vec::new();
     for entry in fs::read_dir(&root).with_context(|| format!("cannot read {}", root.display()))? {
         let entry = entry?;
-        let path = entry.path().join("state.json");
-        if !path.is_file() {
-            continue;
+        if let Some(state) = load(&entry.path())? {
+            states.push((entry.file_name().to_string_lossy().into_owned(), state));
         }
-        let text =
-            fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
-        let state = serde_json::from_str(&text)
-            .with_context(|| format!("invalid state file {}", path.display()))?;
-        states.push((entry.file_name().to_string_lossy().into_owned(), state));
     }
     Ok(states)
 }

@@ -4,14 +4,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 
+use super::HARNESS;
 use crate::backend::{CreateSpec, SandboxBackend};
 use crate::config::GlobalConfig;
 use crate::project;
 use crate::seed;
 use crate::state::{SandboxState, State};
-
-/// Only Claude until `--harness` arrives (milestone 1, slice 18).
-const HARNESS: &str = "claude";
 
 #[derive(Debug, Default)]
 pub struct Options {

@@ -14,6 +14,7 @@ pub use sbx::SbxBackend;
 pub trait SandboxBackend {
     fn create(&self, spec: &CreateSpec) -> Result<()>;
     fn list(&self) -> Result<Vec<SandboxInfo>>;
+    fn stop(&self, name: &str) -> Result<()>;
 }
 
 /// One entry of `sbx ls --json`; other fields are ignored.

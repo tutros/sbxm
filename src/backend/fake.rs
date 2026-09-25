@@ -8,6 +8,7 @@ use super::{CreateSpec, SandboxBackend, SandboxInfo};
 #[derive(Debug, Default)]
 pub struct FakeBackend {
     creates: RefCell<Vec<CreateSpec>>,
+    stops: RefCell<Vec<String>>,
     fail_create: bool,
     sandboxes: Vec<SandboxInfo>,
 }
@@ -32,6 +33,10 @@ impl FakeBackend {
     pub fn creates(&self) -> Vec<CreateSpec> {
         self.creates.borrow().clone()
     }
+
+    pub fn stops(&self) -> Vec<String> {
+        self.stops.borrow().clone()
+    }
 }
 
 impl SandboxBackend for FakeBackend {
@@ -45,5 +50,10 @@ impl SandboxBackend for FakeBackend {
 
     fn list(&self) -> Result<Vec<SandboxInfo>> {
         Ok(self.sandboxes.clone())
+    }
+
+    fn stop(&self, name: &str) -> Result<()> {
+        self.stops.borrow_mut().push(name.to_owned());
+        Ok(())
     }
 }

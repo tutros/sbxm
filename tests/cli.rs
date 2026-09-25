@@ -24,9 +24,13 @@ fn help_prints_usage() {
 }
 
 #[test]
-fn list_without_config_points_to_config_init() {
+fn commands_without_config_point_to_config_init() {
     let tmp = tempfile::TempDir::new().unwrap();
-    for args in [&["list"][..], &["list", "--json"][..]] {
+    for args in [
+        &["list"][..],
+        &["list", "--json"][..],
+        &["stop", "demo"][..],
+    ] {
         let output = sbxm()
             .env("SBXM_CONFIG_DIR", tmp.path())
             .args(args)

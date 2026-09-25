@@ -37,6 +37,21 @@ impl SandboxBackend for SbxBackend {
         }
         parse_ls(&String::from_utf8_lossy(&output.stdout))
     }
+
+    fn stop(&self, name: &str) -> Result<()> {
+        let status = Command::new("sbx")
+            .args(stop_args(name))
+            .status()
+            .context("cannot run `sbx`; is Docker Sandboxes installed and on PATH?")?;
+        if !status.success() {
+            bail!("`sbx stop` failed for sandbox {name} ({status})");
+        }
+        Ok(())
+    }
+}
+
+fn stop_args(name: &str) -> [&str; 2] {
+    ["stop", name]
 }
 
 fn parse_ls(json: &str) -> Result<Vec<SandboxInfo>> {
@@ -120,5 +135,15 @@ mod ls_tests {
                 },
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod stop_tests {
+    use super::*;
+
+    #[test]
+    fn stop_args_match_sbx_cli() {
+        assert_eq!(stop_args("sbxm-demo-claude"), ["stop", "sbxm-demo-claude"]);
     }
 }
