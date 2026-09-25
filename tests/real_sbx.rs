@@ -2,10 +2,10 @@
 //! `SBXM_REAL_BASE_DIR=<dir outside %TEMP%/AppData> cargo test --test real_sbx -- --ignored`
 
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 use sbxm::backend::SbxBackend;
-use sbxm::commands::{list, new, stop};
+use sbxm::commands::{list, new, rm, stop};
 use tempfile::TempDir;
 
 /// Removes the sandbox, workspace and metadata even if the test fails.
@@ -18,8 +18,11 @@ struct Cleanup {
 
 impl Drop for Cleanup {
     fn drop(&mut self) {
+        // Usually already gone (the test removes it), so hide sbx's "not found".
         let _ = Command::new("sbx")
             .args(["rm", "-f", &self.sandbox])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .status();
         for dir in &self.dirs {
             let _ = std::fs::remove_dir_all(dir);
@@ -89,4 +92,11 @@ fn lifecycle_against_real_sbx() {
     let entries = list::entries(config_dir.path(), &SbxBackend).unwrap();
     let entry = entries.iter().find(|e| e.sandbox == sandbox).unwrap();
     assert_eq!(entry.status, "stopped");
+
+    // Slice 7: `rm` removes the sandbox and state but keeps the workspace.
+    rm::run(config_dir.path(), &project, &SbxBackend).unwrap();
+    let entries = list::entries(config_dir.path(), &SbxBackend).unwrap();
+    assert!(!entries.iter().any(|e| e.sandbox == sandbox), "{entries:?}");
+    assert!(base_dir.join(&project).is_dir());
+    assert!(!base_dir.join(".sbxm").join(&project).exists());
 }
