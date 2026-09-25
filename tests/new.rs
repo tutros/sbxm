@@ -117,3 +117,35 @@ fn invalid_name_makes_no_backend_calls() {
     assert!(backend.creates().is_empty());
     assert!(std::fs::read_dir(env.base_dir()).unwrap().next().is_none());
 }
+
+fn state_path(env: &Env) -> PathBuf {
+    env.base_dir().join(".sbxm").join("demo").join("state.json")
+}
+
+#[test]
+fn writes_state_for_the_sandbox() {
+    let env = Env::new();
+    let backend = FakeBackend::default();
+
+    env.run("demo", &backend).unwrap();
+
+    let state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(state_path(&env)).unwrap()).unwrap();
+    let claude = &state["sandboxes"]["claude"];
+    assert_eq!(claude["sandbox"], "sbxm-demo-claude");
+    assert_eq!(
+        claude["workspace"],
+        env.base_dir().join("demo").to_str().unwrap()
+    );
+    assert!(claude["created_at"].as_u64().unwrap() > 0);
+}
+
+#[test]
+fn failed_create_writes_no_state() {
+    let env = Env::new();
+    let backend = FakeBackend::failing_create();
+
+    env.run("demo", &backend).unwrap_err();
+
+    assert!(!state_path(&env).exists());
+}

@@ -1,11 +1,13 @@
 use std::fs;
 use std::path::Path;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 
 use crate::backend::{CreateSpec, SandboxBackend};
 use crate::config::GlobalConfig;
 use crate::project;
+use crate::state::{SandboxState, State};
 
 /// Only Claude until `--harness` arrives (milestone 1, slice 18).
 const HARNESS: &str = "claude";
@@ -25,11 +27,24 @@ pub fn run(config_dir: &Path, name: &str, backend: &dyn SandboxBackend) -> Resul
     fs::create_dir_all(&workspace)
         .with_context(|| format!("cannot create {}", workspace.display()))?;
 
+    let sandbox = project::sandbox_name(name, HARNESS);
     backend.create(&CreateSpec {
-        name: project::sandbox_name(name, HARNESS),
+        name: sandbox.clone(),
         agent: HARNESS.into(),
-        workspace,
+        workspace: workspace.clone(),
         cpus: config.resources.cpus,
         memory: config.resources.memory,
-    })
+    })?;
+
+    let created_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let mut state = State::default();
+    state.sandboxes.insert(
+        HARNESS.into(),
+        SandboxState {
+            sandbox,
+            workspace,
+            created_at,
+        },
+    );
+    state.save(&project::metadata_dir(&config.base_dir, name))
 }

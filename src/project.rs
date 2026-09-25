@@ -1,3 +1,5 @@
+use std::path::{Path, PathBuf};
+
 use anyhow::{Result, bail};
 
 /// Keeps `sbxm-<project>-<harness>` well under the 63-character hostname
@@ -47,4 +49,9 @@ fn invalid(name: &str, reason: &str) -> Result<()> {
 /// `sbxm-<project>-<harness>` (decision 41).
 pub fn sandbox_name(project: &str, harness: &str) -> String {
     format!("sbxm-{project}-{harness}")
+}
+
+/// `<base>/.sbxm/<project>/`: sbxm's metadata, never mounted (decision 40).
+pub fn metadata_dir(base_dir: &Path, project: &str) -> PathBuf {
+    base_dir.join(".sbxm").join(project)
 }
