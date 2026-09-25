@@ -42,8 +42,7 @@ Crate `sbxm` (edition 2024), lib + bin. Modules grow slice by slice, following t
 
 On Windows, cargo can print `error finalizing incremental compilation session directory … Access is denied`. It's a harmless filesystem-lock warning, not a lint failure.
 
-Git Bash heredocs here collapse `\` to `\`, even with a quoted delimiter. Write files that contain backslashes (JSON fixtures, Windows paths, Rust `
-` escapes inside generated code) with the Write/Edit tools, not heredocs.
+Git Bash heredocs here collapse `\\` to `\`, even with a quoted delimiter. Write files that contain backslashes (JSON fixtures, Windows paths, Rust `\n` escapes inside generated code) with the Write/Edit tools, not heredocs.
 
 ## What `sbxm` is
 
