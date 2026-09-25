@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::config;
 
@@ -28,6 +28,11 @@ pub fn run() -> Result<()> {
     let profile_path = profile_dir.join("profile.toml");
     let base_dir = config::home_dir()?.join("sbxm-projects");
 
+    for path in [&config_path, &profile_path] {
+        if path.exists() {
+            bail!("{} already exists; not overwriting it", path.display());
+        }
+    }
     fs::create_dir_all(&profile_dir)
         .with_context(|| format!("cannot create {}", profile_dir.display()))?;
     fs::write(&config_path, starter_config(&base_dir, &profiles_dir)?)

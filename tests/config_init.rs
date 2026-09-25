@@ -43,3 +43,42 @@ fn writes_starter_global_config_and_default_profile() {
     assert!(profile["description"].as_str().is_some());
     assert!(profile["network"]["allow"].as_array().is_some());
 }
+
+#[test]
+fn second_run_refuses_and_leaves_files_unchanged() {
+    let tmp = TempDir::new().unwrap();
+    let config_path = tmp.path().join("config.toml");
+    let profile_path = tmp.path().join("profiles/default/profile.toml");
+    config_init(tmp.path()).success();
+    std::fs::write(&config_path, "# edited config\n").unwrap();
+    std::fs::write(&profile_path, "# edited profile\n").unwrap();
+
+    let output = config_init(tmp.path()).failure().get_output().clone();
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("already exists"), "stderr: {stderr}");
+    assert!(stderr.contains("config.toml"), "stderr: {stderr}");
+    assert_eq!(
+        std::fs::read_to_string(&config_path).unwrap(),
+        "# edited config\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&profile_path).unwrap(),
+        "# edited profile\n"
+    );
+}
+
+#[test]
+fn existing_profile_alone_blocks_writing_config() {
+    let tmp = TempDir::new().unwrap();
+    let profile_path = tmp.path().join("profiles/default/profile.toml");
+    std::fs::create_dir_all(profile_path.parent().unwrap()).unwrap();
+    std::fs::write(&profile_path, "# mine\n").unwrap();
+
+    let output = config_init(tmp.path()).failure().get_output().clone();
+
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("profile.toml"), "stderr: {stderr}");
+    assert!(!tmp.path().join("config.toml").exists());
+    assert_eq!(std::fs::read_to_string(&profile_path).unwrap(), "# mine\n");
+}
