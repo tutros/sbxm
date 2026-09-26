@@ -131,6 +131,7 @@ impl Profile {
             .with_context(|| format!("cannot read {}", path.display()))?;
         let project: Self = toml::from_str(&text)
             .with_context(|| format!("invalid project config {}", path.display()))?;
+        project.check_env("project config", &path)?;
         self.network.allow.extend(project.network.allow);
         self.network.deny.extend(project.network.deny);
         self.env.extend(project.env);

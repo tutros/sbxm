@@ -80,3 +80,67 @@ fn profile_skills_store_is_kept_when_the_project_sets_none() {
 
     assert_eq!(created_skills(&env), SkillsStore::Off);
 }
+
+/// Runs `new demo`, expecting an error; checks nothing was created.
+fn rejected(env: &Env) -> String {
+    let backend = FakeBackend::default();
+    let err = env.run("demo", &backend).unwrap_err();
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert!(!env.base_dir().join("demo").exists());
+    assert!(!env.base_dir().join(".sbxm/demo/kits").exists());
+    format!("{err:#}")
+}
+
+fn project_config_path(env: &Env) -> String {
+    env.base_dir()
+        .join(".sbxm")
+        .join("demo")
+        .join("sandbox.toml")
+        .display()
+        .to_string()
+}
+
+#[test]
+fn unknown_key_in_project_config_is_an_error() {
+    let env = Env::new();
+    write_project_config(&env, "[netwrk]\nallow = [\"github.com\"]\n");
+
+    let message = rejected(&env);
+
+    assert!(
+        message.contains(&format!(
+            "invalid project config {}",
+            project_config_path(&env)
+        )),
+        "{message}"
+    );
+}
+
+#[test]
+fn readwrite_skills_store_in_project_config_is_rejected() {
+    let env = Env::new();
+    write_project_config(&env, "[skills]\nstore = \"readwrite\"\n");
+
+    let message = rejected(&env);
+
+    assert!(
+        message.contains("skills.store = \"readwrite\" in project config is not allowed"),
+        "{message}"
+    );
+    assert!(message.contains(&project_config_path(&env)), "{message}");
+}
+
+#[test]
+fn reserved_env_name_in_project_config_is_rejected() {
+    let env = Env::new();
+    write_project_config(&env, "[env]\nSBXM_PROFILE = \"x\"\n");
+
+    let message = rejected(&env);
+
+    assert!(
+        message
+            .contains("env name 'SBXM_PROFILE' in project config uses the reserved prefix SBXM_"),
+        "{message}"
+    );
+    assert!(message.contains(&project_config_path(&env)), "{message}");
+}
