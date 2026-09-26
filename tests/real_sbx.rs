@@ -95,7 +95,12 @@ fn lifecycle_against_real_sbx() {
     std::fs::create_dir_all(&profile_dir).unwrap();
     std::fs::write(
         profile_dir.join("profile.toml"),
-        "description = \"real sbx test\"\n\n[network]\nallow = [\"example.org\"]\n\n[env]\nREAL_TEST_GREETING = \"hello from the profile\"\n\n[secrets]\nservices = [\"anthropic\"]\n",
+        "description = \"real sbx test\"\n\n[network]\nallow = [\"example.org\"]\n\n[env]\nREAL_TEST_GREETING = \"hello from the profile\"\n\n[secrets]\nservices = [\"anthropic\"]\n\n[instructions]\nmandatory = \"mandatory.md\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        profile_dir.join("mandatory.md"),
+        "REAL TEST CANARY: the word is QUINCE-5\n",
     )
     .unwrap();
 
@@ -117,6 +122,16 @@ fn lifecycle_against_real_sbx() {
     // Slice 10b: the profile's allow list reaches the sandbox; other hosts stay blocked.
     assert_eq!(http_status(&sandbox, "https://example.org"), "200");
     assert_eq!(http_status(&sandbox, "https://example.com"), "403");
+
+    // Slice 14: the mandatory instructions are Claude's user-level CLAUDE.md.
+    let claude_md = Command::new("sbx")
+        .args(["exec", &sandbox, "cat", "/home/agent/.claude/CLAUDE.md"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&claude_md.stdout).trim(),
+        "REAL TEST CANARY: the word is QUINCE-5"
+    );
 
     // Slice 10c: the profile's env is set inside the sandbox.
     assert_eq!(
