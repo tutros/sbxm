@@ -32,7 +32,7 @@ pub struct Spec {
     agent_instructions: Option<AgentInstructions>,
     /// Written to `files/home/<path>`, not to `spec.yaml`.
     #[serde(skip)]
-    home_files: Vec<(PathBuf, String)>,
+    home_files: Vec<(PathBuf, Vec<u8>)>,
 }
 
 #[derive(Debug, Serialize)]
@@ -122,13 +122,17 @@ pub fn common(profile_name: &str, profile: &Profile, config_hash: &str) -> Spec 
 
 /// The `harness-claude` mixin: what only applies to Claude Code. Mandatory
 /// instructions go in the always-loaded `~/.claude/CLAUDE.md` (decisions 37,
-/// 62).
+/// 62), next to the profile's `harness.claude.home_files` (decision 63).
 pub fn harness_claude(profile_name: &str, profile: &Profile) -> Spec {
-    let home_files = profile
-        .mandatory_instructions
+    let mandatory = profile.mandatory_instructions.iter().map(|text| {
+        let path = PathBuf::from(".claude").join("CLAUDE.md");
+        (path, text.clone().into_bytes())
+    });
+    let copied = profile
+        .claude_home_files
         .iter()
-        .map(|text| (PathBuf::from(".claude").join("CLAUDE.md"), text.clone()))
-        .collect();
+        .map(|(relative, bytes)| (relative.split('/').collect(), bytes.clone()));
+    let home_files = mandatory.chain(copied).collect();
     Spec {
         schema_version: "2",
         kind: "mixin",
@@ -151,12 +155,12 @@ pub fn write(dir: &Path, spec: &Spec) -> Result<()> {
     let path = dir.join("spec.yaml");
     fs::write(&path, serde_norway::to_string(spec)?)
         .with_context(|| format!("cannot write {}", path.display()))?;
-    for (relative, text) in &spec.home_files {
+    for (relative, bytes) in &spec.home_files {
         let path = dir.join("files").join("home").join(relative);
         let parent = path.parent().expect("home file has a parent");
         fs::create_dir_all(parent)
             .with_context(|| format!("cannot create {}", parent.display()))?;
-        fs::write(&path, text).with_context(|| format!("cannot write {}", path.display()))?;
+        fs::write(&path, bytes).with_context(|| format!("cannot write {}", path.display()))?;
     }
     Ok(())
 }

@@ -108,6 +108,37 @@ pub struct Profile {
     /// `mandatory_instructions`.
     #[serde(skip_deserializing)]
     pub reference_instructions: Option<String>,
+    #[serde(default, skip_serializing)]
+    harness: HarnessPaths,
+    /// Files under `harness.claude.home_files`, read by [`Profile::load`] and
+    /// keyed by `/`-separated relative path. Hashed as path → SHA-256 of the
+    /// contents (decision 63).
+    #[serde(skip_deserializing, serialize_with = "serialize_file_hashes")]
+    pub claude_home_files: BTreeMap<String, Vec<u8>>,
+    /// The folder `claude_home_files` came from, for error messages.
+    #[serde(skip)]
+    claude_home_dir: Option<PathBuf>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HarnessPaths {
+    #[serde(default)]
+    claude: ClaudePaths,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ClaudePaths {
+    #[serde(default)]
+    home_files: Option<PathBuf>,
+}
+
+fn serialize_file_hashes<S: serde::Serializer>(
+    files: &BTreeMap<String, Vec<u8>>,
+    serializer: S,
+) -> std::result::Result<S::Ok, S::Error> {
+    serializer.collect_map(files.iter().map(|(path, bytes)| (path, sha256_hex(bytes))))
 }
 
 /// Paths relative to the file that names them (decision 62).
@@ -195,6 +226,12 @@ impl Profile {
         if let Some(text) = read("reference", reference)? {
             self.reference_instructions = Some(text);
         }
+        if let Some(relative) = project.harness.claude.home_files.as_deref() {
+            let (dir, files) = read_home_files(relative, metadata_dir, "project config", &path)?;
+            self.claude_home_dir = Some(dir);
+            self.claude_home_files = files;
+        }
+        self.check_home_files()?;
         Ok(self)
     }
 
@@ -229,7 +266,40 @@ impl Profile {
             &source,
             &path,
         )?;
+        if let Some(relative) = profile.harness.claude.home_files.clone() {
+            let (home, files) = read_home_files(&relative, &dir, &source, &path)?;
+            profile.claude_home_dir = Some(home);
+            profile.claude_home_files = files;
+        }
+        profile.check_home_files()?;
         Ok(profile)
+    }
+
+    /// Home files the Claude kit would replace, or that would replace the
+    /// mandatory instructions, are errors: either way something is silently
+    /// dropped (decisions 11, 61, 63).
+    fn check_home_files(&self) -> Result<()> {
+        let Some(dir) = &self.claude_home_dir else {
+            return Ok(());
+        };
+        if self.claude_home_files.contains_key(".claude/settings.json") {
+            bail!(
+                ".claude/settings.json in harness.claude.home_files ({}) would be replaced by \
+                 the Claude kit; remove it, and configure hooks through managed settings \
+                 (decision 59) instead",
+                dir.display()
+            );
+        }
+        if self.claude_home_files.contains_key(".claude/CLAUDE.md")
+            && self.mandatory_instructions.is_some()
+        {
+            bail!(
+                ".claude/CLAUDE.md in harness.claude.home_files ({}) would replace the \
+                 instructions.mandatory file; remove one of them",
+                dir.display()
+            );
+        }
+        Ok(())
     }
 
     /// `sbx` rejects these too, but with messages that blame "the kit's author";
@@ -285,7 +355,11 @@ pub fn config_hash(profile_name: &str, profile: &Profile, resources: &Resources)
         resources,
     })
     .expect("config serializes");
-    Sha256::digest(json)
+    sha256_hex(&json)
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
@@ -301,22 +375,10 @@ fn read_instructions(
     source: &str,
     file: &Path,
 ) -> Result<Option<String>> {
-    use std::path::Component;
     let Some(relative) = relative else {
         return Ok(None);
     };
-    let inside = relative
-        .components()
-        .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
-    if !inside {
-        bail!(
-            "instructions.{key} = \"{}\" in {source} must be a relative path inside {}; fix it in {}",
-            relative.display(),
-            dir.display(),
-            file.display()
-        );
-    }
-    let path = dir.join(relative);
+    let path = resolve_inside(&format!("instructions.{key}"), relative, dir, source, file)?;
     if !path.is_file() {
         bail!(
             "instructions.{key} file {} ({source}) is missing or not a file; create it or fix {}",
@@ -327,6 +389,76 @@ fn read_instructions(
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("cannot read {}", path.display()))?;
     Ok(Some(text))
+}
+
+/// `dir.join(relative)`, where `relative` must stay inside `dir`, so a
+/// profile is self-contained (decisions 62, 63).
+fn resolve_inside(
+    key: &str,
+    relative: &Path,
+    dir: &Path,
+    source: &str,
+    file: &Path,
+) -> Result<PathBuf> {
+    use std::path::Component;
+    let inside = relative
+        .components()
+        .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
+    if !inside {
+        bail!(
+            "{key} = \"{}\" in {source} must be a relative path inside {}; fix it in {}",
+            relative.display(),
+            dir.display(),
+            file.display()
+        );
+    }
+    Ok(dir.join(relative))
+}
+
+/// The folder named by `harness.claude.home_files` and every file in it,
+/// keyed by `/`-separated relative path. Links are refused, since following
+/// one could copy files from outside the profile into the sandbox.
+fn read_home_files(
+    relative: &Path,
+    dir: &Path,
+    source: &str,
+    file: &Path,
+) -> Result<(PathBuf, BTreeMap<String, Vec<u8>>)> {
+    let root = resolve_inside("harness.claude.home_files", relative, dir, source, file)?;
+    if !root.is_dir() {
+        bail!(
+            "harness.claude.home_files folder {} ({source}) is missing or not a folder; \
+             create it or fix {}",
+            root.display(),
+            file.display()
+        );
+    }
+    let mut files = BTreeMap::new();
+    collect_files(&root, "", &mut files)?;
+    Ok((root, files))
+}
+
+fn collect_files(dir: &Path, prefix: &str, files: &mut BTreeMap<String, Vec<u8>>) -> Result<()> {
+    for entry in std::fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        let file_type = entry.file_type()?;
+        let key = format!("{prefix}{}", entry.file_name().to_string_lossy());
+        if file_type.is_symlink() {
+            bail!(
+                "home file {} is a symlink or junction; replace it with a regular file or folder",
+                path.display()
+            );
+        }
+        if file_type.is_dir() {
+            collect_files(&path, &format!("{key}/"), files)?;
+        } else {
+            let bytes =
+                std::fs::read(&path).with_context(|| format!("cannot read {}", path.display()))?;
+            files.insert(key, bytes);
+        }
+    }
+    Ok(())
 }
 
 /// `readonly` when unset (decision 46).
