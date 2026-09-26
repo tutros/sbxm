@@ -6,7 +6,7 @@ use anyhow::{Context, Result, bail};
 
 use super::{HARNESS, new, rm};
 use crate::backend::SandboxBackend;
-use crate::config::{self, GlobalConfig, Profile};
+use crate::config::GlobalConfig;
 use crate::{project, state};
 
 #[derive(Debug, Default)]
@@ -91,8 +91,7 @@ fn check_unchanged(
         bail!("{sandbox} was created before sbxm recorded config hashes; {fix}");
     };
     let profile_name = entry.profile.as_deref().unwrap_or(&config.default_profile);
-    let profile = Profile::load(config.profiles_dir(), profile_name)?;
-    if *stored != config::config_hash(profile_name, &profile, &config.resources) {
+    if *stored != config.current_hash(profile_name)? {
         bail!(
             "the config of {sandbox} (profile '{profile_name}') changed since it was created; {fix}"
         );

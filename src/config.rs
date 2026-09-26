@@ -60,6 +60,12 @@ impl GlobalConfig {
         Ok(config)
     }
 
+    /// [`config_hash`] of `profile_name` as it is now on disk.
+    pub fn current_hash(&self, profile_name: &str) -> Result<String> {
+        let profile = Profile::load(self.profiles_dir(), profile_name)?;
+        Ok(config_hash(profile_name, &profile, &self.resources))
+    }
+
     pub fn profiles_dir(&self) -> &Path {
         self.profiles_dir
             .as_deref()
