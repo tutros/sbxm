@@ -135,3 +135,44 @@ fn instructions_path_outside_the_profile_is_rejected() {
         );
     }
 }
+
+/// Runs `new <project>` and returns the config hash from its state.
+fn created_hash(env: &Env, project: &str) -> String {
+    env.run(project, &FakeBackend::default()).unwrap();
+    let path = env
+        .base_dir()
+        .join(".sbxm")
+        .join(project)
+        .join("state.json");
+    let state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    state["sandboxes"]["claude"]["config_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn editing_an_instructions_file_changes_the_hash() {
+    let env = Env::new();
+    env.write_profile("default", "[instructions]\nmandatory = \"rules.md\"\n");
+    write_profile_file(&env, "rules.md", "Rule one.\n");
+    let before = created_hash(&env, "one");
+
+    write_profile_file(&env, "rules.md", "Rule one.\nRule two.\n");
+
+    assert_ne!(before, created_hash(&env, "two"));
+}
+
+#[test]
+fn moving_an_instructions_file_keeps_the_hash() {
+    let env = Env::new();
+    env.write_profile("default", "[instructions]\nmandatory = \"rules.md\"\n");
+    write_profile_file(&env, "rules.md", "Rule one.\n");
+    let before = created_hash(&env, "one");
+
+    env.write_profile("default", "[instructions]\nmandatory = \"docs/rules.md\"\n");
+    write_profile_file(&env, "docs/rules.md", "Rule one.\n");
+
+    assert_eq!(before, created_hash(&env, "two"));
+}
