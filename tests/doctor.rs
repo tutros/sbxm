@@ -258,3 +258,145 @@ fn cli_exits_non_zero_on_failure() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("FAIL config: no config at"), "{stdout}");
 }
+
+/// Writes `.sbxm/demo/sandbox.toml`.
+fn write_project_config(env: &Env, contents: &str) {
+    let dir = env.base_dir().join(".sbxm").join("demo");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("sandbox.toml"), contents).unwrap();
+}
+
+#[test]
+fn every_profile_is_checked() {
+    let env = Env::new();
+    env.write_profile("other", "[env]\nA = \"1\"\n");
+
+    let report = report(&env, &FakeBackend::default());
+
+    let text = report.render();
+    assert!(text.contains("ok   profile 'default'\n"), "{text}");
+    assert!(text.contains("ok   profile 'other'\n"), "{text}");
+}
+
+#[test]
+fn broken_profile_fails() {
+    let env = Env::new();
+    env.write_profile("broken", "[netwrk]\n");
+
+    let report = report(&env, &FakeBackend::default());
+
+    assert!(report.failed());
+    let text = report.render();
+    assert!(
+        text.contains("FAIL profile 'broken': invalid profile "),
+        "{text}"
+    );
+    assert!(text.contains("ok   profile 'default'\n"), "{text}");
+}
+
+#[test]
+fn missing_secret_fails() {
+    let env = Env::new();
+    env.write_profile("default", "[secrets]\nservices = [\"github\"]\n");
+
+    let report = report(&env, &FakeBackend::with_secrets(&["anthropic"]));
+
+    assert!(report.failed());
+    assert!(
+        report
+            .render()
+            .contains("FAIL profile 'default': secret 'github' (secrets.services) is not stored"),
+        "{}",
+        report.render()
+    );
+}
+
+#[test]
+fn invalid_kit_fails() {
+    let env = Env::new();
+
+    let report = report(&env, &FakeBackend::with_invalid_kit("bad network pattern"));
+
+    assert!(report.failed());
+    assert!(
+        report.render().contains(
+            "FAIL profile 'default': generated kit common is invalid: bad network pattern"
+        ),
+        "{}",
+        report.render()
+    );
+}
+
+#[test]
+fn kits_are_validated_in_a_temp_dir_that_is_removed() {
+    let env = Env::new();
+    let backend = FakeBackend::default();
+
+    report(&env, &backend);
+
+    let log = backend.log();
+    assert_eq!(log.len(), 2, "{log:?}");
+    assert!(log[0].starts_with("validate ") && log[0].ends_with("common"));
+    assert!(log[1].starts_with("validate ") && log[1].ends_with("harness-claude"));
+    for line in &log {
+        let dir = std::path::Path::new(line.strip_prefix("validate ").unwrap());
+        assert!(!dir.exists(), "{} was left behind", dir.display());
+    }
+    assert!(!env.base_dir().join(".sbxm").exists());
+}
+
+#[test]
+fn projects_are_checked_with_their_recorded_profile() {
+    let env = Env::new();
+    env.write_profile("other", "[env]\nA = \"1\"\n");
+    let options = sbxm::commands::new::Options {
+        profile: Some("other".into()),
+        ..Default::default()
+    };
+    env.run_with("demo", &options, &FakeBackend::default())
+        .unwrap();
+
+    let text = report(&env, &FakeBackend::default()).render();
+
+    assert!(
+        text.contains("ok   project demo (profile 'other')\n"),
+        "{text}"
+    );
+}
+
+#[test]
+fn broken_project_config_fails() {
+    let env = Env::new();
+    env.run("demo", &FakeBackend::default()).unwrap();
+    write_project_config(&env, "[env]\n1BAD = \"x\"\n");
+
+    let report = report(&env, &FakeBackend::default());
+
+    assert!(report.failed());
+    assert!(
+        report
+            .render()
+            .contains("FAIL project demo (profile 'default'): invalid env name '1BAD'"),
+        "{}",
+        report.render()
+    );
+}
+
+#[test]
+fn missing_profiles_dir_fails() {
+    let env = Env::new();
+    std::fs::remove_dir_all(env.profiles_dir()).unwrap();
+
+    let report = report(&env, &FakeBackend::default());
+
+    assert!(report.failed());
+    assert!(
+        report.render().contains(&format!(
+            "FAIL profiles dir {} does not exist; run `sbxm config init` or change profiles_dir in {}",
+            env.profiles_dir().display(),
+            env.config_dir().join("config.toml").display()
+        )),
+        "{}",
+        report.render()
+    );
+}

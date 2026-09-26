@@ -1,7 +1,13 @@
+use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
 
+use anyhow::{Result, bail};
+
+use super::new;
 use crate::backend::SandboxBackend;
-use crate::config::GlobalConfig;
+use crate::config::{self, GlobalConfig, Profile};
+use crate::{kit, project, state};
 
 const GIB: u64 = 1024 * 1024 * 1024;
 /// Sandbox images and workspaces take several GB each (decision 67).
@@ -99,7 +105,115 @@ pub fn run(config_dir: &Path, backend: &dyn SandboxBackend, host: &Host) -> Repo
     }
 
     check_base_dir(&mut report, &config.base_dir, &config_path, host);
+    check_configs(&mut report, &config, &config_path, backend);
     report
+}
+
+/// Every profile, then every project merged over its recorded profile
+/// (decision 66): each must load, have its secrets stored and give valid
+/// kits.
+fn check_configs(
+    report: &mut Report,
+    config: &GlobalConfig,
+    config_path: &Path,
+    backend: &dyn SandboxBackend,
+) {
+    let profiles_dir = config.profiles_dir();
+    let mut names: Vec<String> = match fs::read_dir(profiles_dir) {
+        Ok(entries) => entries
+            .filter_map(|e| e.ok())
+            .filter(|e| e.path().is_dir())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect(),
+        Err(_) => {
+            report.fail(format!(
+                "profiles dir {} does not exist; run `sbxm config init` or change profiles_dir in {}",
+                profiles_dir.display(),
+                config_path.display()
+            ));
+            Vec::new()
+        }
+    };
+    names.sort();
+    let mut stored = None;
+    for name in names {
+        let result = Profile::load(profiles_dir, &name)
+            .and_then(|profile| check_sandbox(&name, &profile, config, backend, &mut stored));
+        match result {
+            Ok(()) => report.pass(format!("profile '{name}'")),
+            Err(err) => report.fail(format!("profile '{name}': {err:#}")),
+        }
+    }
+
+    let states = match state::load_all(&config.base_dir) {
+        Ok(states) => states,
+        Err(err) => {
+            report.fail(format!("project state: {err:#}"));
+            return;
+        }
+    };
+    for (name, state) in states {
+        for entry in state.sandboxes.into_values() {
+            let profile_name = entry
+                .profile
+                .unwrap_or_else(|| config.default_profile.clone());
+            let label = format!("project {name} (profile '{profile_name}')");
+            let result = Profile::load(profiles_dir, &profile_name)
+                .and_then(|p| p.with_project(&project::metadata_dir(&config.base_dir, &name)))
+                .and_then(|p| check_sandbox(&profile_name, &p, config, backend, &mut stored));
+            match result {
+                Ok(()) => report.pass(label),
+                Err(err) => report.fail(format!("{label}: {err:#}")),
+            }
+        }
+    }
+}
+
+/// Secrets are fetched from `sbx` once, into `stored`. Kits are written to a
+/// fresh temp dir for `sbx kit validate`, which is removed afterwards.
+fn check_sandbox(
+    profile_name: &str,
+    profile: &Profile,
+    config: &GlobalConfig,
+    backend: &dyn SandboxBackend,
+    stored: &mut Option<Vec<String>>,
+) -> Result<()> {
+    let services = &profile.secrets.services;
+    if !services.is_empty() {
+        if stored.is_none() {
+            *stored = Some(backend.secret_services()?);
+        }
+        new::require_secrets(services, stored.as_deref().unwrap_or_default())?;
+    }
+    static RUN: AtomicUsize = AtomicUsize::new(0);
+    let root = std::env::temp_dir().join(format!(
+        "sbxm-doctor-{}-{}",
+        std::process::id(),
+        RUN.fetch_add(1, Ordering::Relaxed)
+    ));
+    let hash = config::config_hash(profile_name, profile, &config.resources);
+    let result = validate_kits(&root, kit::all(profile_name, profile, &hash), backend);
+    let _ = fs::remove_dir_all(&root);
+    result
+}
+
+fn validate_kits(
+    root: &Path,
+    kits: [(&str, kit::Spec); 2],
+    backend: &dyn SandboxBackend,
+) -> Result<()> {
+    for (name, spec) in kits {
+        let dir = root.join(name);
+        kit::write(&dir, &spec)?;
+        let validation = backend.validate_kit(&dir)?;
+        if !validation.valid {
+            bail!(
+                "generated kit {name} is invalid: {}",
+                validation.error.as_deref().unwrap_or("no details from sbx")
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Free space is only checked for a base dir that exists.

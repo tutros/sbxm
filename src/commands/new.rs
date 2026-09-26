@@ -137,7 +137,11 @@ fn check_secrets(services: &[String], backend: &dyn SandboxBackend) -> Result<()
     if services.is_empty() {
         return Ok(());
     }
-    let stored = backend.secret_services()?;
+    require_secrets(services, &backend.secret_services()?)
+}
+
+/// Fails naming the first of `services` that isn't in `stored`.
+pub(super) fn require_secrets(services: &[String], stored: &[String]) -> Result<()> {
     if let Some(missing) = services.iter().find(|s| !stored.contains(s)) {
         bail!(
             "secret '{missing}' (secrets.services) is not stored in sbx; add it with \
