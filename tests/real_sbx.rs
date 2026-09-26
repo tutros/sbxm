@@ -163,6 +163,8 @@ fn lifecycle_against_real_sbx() {
     assert_eq!(entry.project, project);
     assert_eq!(entry.harness, "claude");
     assert_eq!(entry.problem, None);
+    // Slice 11d: the rebuilt sandbox matches the current config.
+    assert_eq!(entry.config, Some(list::ConfigStatus::Current));
     println!("list status for {sandbox}: {}", entry.status);
 
     // Slice 6: `stop` stops it, and `list` shows that.
