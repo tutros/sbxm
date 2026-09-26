@@ -95,7 +95,7 @@ fn lifecycle_against_real_sbx() {
     std::fs::create_dir_all(&profile_dir).unwrap();
     std::fs::write(
         profile_dir.join("profile.toml"),
-        "description = \"real sbx test\"\n\n[network]\nallow = [\"example.org\"]\n\n[env]\nREAL_TEST_GREETING = \"hello from the profile\"\n\n[secrets]\nservices = [\"anthropic\"]\n\n[instructions]\nmandatory = \"mandatory.md\"\n",
+        "description = \"real sbx test\"\n\n[network]\nallow = [\"example.org\"]\n\n[env]\nREAL_TEST_GREETING = \"hello from the profile\"\n\n[secrets]\nservices = [\"anthropic\"]\n\n[instructions]\nmandatory = \"mandatory.md\"\n\n[[setup.install]]\ncommand = \"echo ran-as-$(id -un) > /tmp/sbxm-install\"\nuser = \"agent\"\n",
     )
     .unwrap();
     std::fs::write(
@@ -131,6 +131,16 @@ fn lifecycle_against_real_sbx() {
     assert_eq!(
         String::from_utf8_lossy(&claude_md.stdout).trim(),
         "REAL TEST CANARY: the word is QUINCE-5"
+    );
+
+    // Slice 15a: the profile's install step ran, as the user it names.
+    let install = Command::new("sbx")
+        .args(["exec", &sandbox, "cat", "/tmp/sbxm-install"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&install.stdout).trim(),
+        "ran-as-agent"
     );
 
     // Slice 10c: the profile's env is set inside the sandbox.
