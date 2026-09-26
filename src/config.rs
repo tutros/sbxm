@@ -90,6 +90,8 @@ pub struct Profile {
     pub env: BTreeMap<String, String>,
     #[serde(default)]
     pub secrets: Secrets,
+    #[serde(default)]
+    pub setup: Setup,
     #[serde(default, skip_serializing)]
     skills: Skills,
     /// `skills.store`, checked by [`Profile::load`]. Hashed instead of the raw
@@ -141,6 +143,25 @@ pub struct Secrets {
     pub services: Vec<String>,
 }
 
+#[derive(Debug, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Setup {
+    #[serde(default)]
+    pub install: Vec<InstallStep>,
+}
+
+/// One `[[setup.install]]` step, run once at create (kit SPEC-v2).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallStep {
+    pub command: String,
+    /// `sbx` runs the step as root (`"0"`) when unset.
+    #[serde(default)]
+    pub user: Option<String>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
 impl Profile {
     /// Merges `<metadata_dir>/sandbox.toml` over this profile, if the project
     /// has one (decision 57).
@@ -158,6 +179,7 @@ impl Profile {
         self.network.deny.extend(project.network.deny);
         self.env.extend(project.env);
         self.secrets.services.extend(project.secrets.services);
+        self.setup.install.extend(project.setup.install);
         if project.skills.store.is_some() {
             self.skills_store =
                 parse_skills_store(project.skills.store.as_deref(), "project config", &path)?;

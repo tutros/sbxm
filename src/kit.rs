@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use crate::config::Profile;
+use crate::config::{InstallStep, Profile};
 
 /// The fields sbxm emits; field order is the order in `spec.yaml`.
 #[derive(Debug, Serialize)]
@@ -25,6 +25,8 @@ pub struct Spec {
     permissions: Option<Permissions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     environment: Option<Environment>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    setup: Option<Setup>,
     /// Reference material only: `sbx` surfaces it on demand (decision 37).
     #[serde(skip_serializing_if = "Option::is_none")]
     agent_instructions: Option<AgentInstructions>,
@@ -42,6 +44,32 @@ struct AgentInstructions {
 #[derive(Debug, Serialize)]
 struct Requires {
     agent: &'static str,
+}
+
+#[derive(Debug, Serialize)]
+struct Setup {
+    install: Vec<Install>,
+}
+
+/// Run via `sh -c` once at create, after the agent kit's own steps, in
+/// `--kit` order.
+#[derive(Debug, Serialize)]
+struct Install {
+    command: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    user: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+}
+
+impl From<&InstallStep> for Install {
+    fn from(step: &InstallStep) -> Self {
+        Install {
+            command: step.command.clone(),
+            user: step.user.clone(),
+            description: step.description.clone(),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -81,6 +109,9 @@ pub fn common(profile_name: &str, profile: &Profile, config_hash: &str) -> Spec 
             },
         }),
         environment: Some(Environment { variables }),
+        setup: (!profile.setup.install.is_empty()).then(|| Setup {
+            install: profile.setup.install.iter().map(Install::from).collect(),
+        }),
         agent_instructions: profile
             .reference_instructions
             .clone()
@@ -108,6 +139,7 @@ pub fn harness_claude(profile_name: &str, profile: &Profile) -> Spec {
         requires: Some(Requires { agent: "claude" }),
         permissions: None,
         environment: None,
+        setup: None,
         agent_instructions: None,
         home_files,
     }

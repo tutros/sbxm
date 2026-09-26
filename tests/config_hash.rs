@@ -65,6 +65,15 @@ fn network_change_changes_the_hash() {
 }
 
 #[test]
+fn install_step_change_changes_the_hash() {
+    let env = Env::new();
+    let before = hash(&env, "one");
+    env.write_profile("default", "[[setup.install]]\ncommand = \"echo hi\"\n");
+
+    assert_ne!(before, hash(&env, "two"));
+}
+
+#[test]
 fn description_change_keeps_the_hash() {
     let env = Env::new();
     let before = hash(&env, "one");
