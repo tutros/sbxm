@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::path::PathBuf;
 
 use common::{Env, dir_link};
-use sbxm::backend::FakeBackend;
+use sbxm::backend::{FakeBackend, SandboxInfo};
 use sbxm::commands::rm;
 use sbxm::confirm::Confirm;
 
@@ -130,14 +130,47 @@ fn invalid_name_makes_no_backend_calls() {
     assert!(backend.removes().is_empty());
 }
 
+fn demo_sandbox() -> SandboxInfo {
+    SandboxInfo {
+        name: "sbxm-demo-claude".into(),
+        agent: "claude".into(),
+        status: "running".into(),
+    }
+}
+
 #[test]
 fn failed_remove_keeps_state() {
     let env = setup();
-    let backend = FakeBackend::failing_remove();
+    // The sandbox is still there, so the failure is real.
+    let backend = FakeBackend::failing_remove().and_sandboxes(vec![demo_sandbox()]);
 
     plain_rm(&env, "demo", &backend).unwrap_err();
 
     assert!(metadata_dir(&env).join("state.json").exists());
+}
+
+#[test]
+fn sandbox_already_gone_still_clears_state() {
+    let env = setup();
+    // `sbx rm` fails for a sandbox that no longer exists.
+    let backend = FakeBackend::failing_remove();
+
+    plain_rm(&env, "demo", &backend).unwrap();
+
+    assert_eq!(backend.removes(), ["sbxm-demo-claude"]);
+    assert!(!metadata_dir(&env).exists());
+    assert!(workspace(&env).join("notes.md").exists());
+}
+
+#[test]
+fn purge_works_when_the_sandbox_is_already_gone() {
+    let env = setup();
+    let backend = FakeBackend::failing_remove();
+
+    purge(&env, true, &backend, &FakeConfirm::never()).unwrap();
+
+    assert!(!workspace(&env).exists());
+    assert!(!metadata_dir(&env).exists());
 }
 
 fn workspace(env: &Env) -> PathBuf {

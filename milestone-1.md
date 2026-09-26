@@ -172,7 +172,6 @@ Between slices 3 and 10b, sandboxes are created without sbxm kits. That's safe: 
 Gaps found while building, to handle in the slice named:
 - **Slice 17 (or sooner, small fix):** workspaces on `C:` fail, not only AppData [56]. `config init`'s starter `base_dir` (`~/sbxm-projects`, on `C:` on Windows) needs a different default or a prompt, and `doctor` should flag a base dir on `C:` (ideally by probing whether `sbx` can mount it, since the cause is unverified).
 - **Slice 18:** `new` rewrites `state.json` instead of merging per harness. Merge when `--harness` lands; `rm`'s "last sandbox → delete kits" depends on it.
-- **Any slice (small fix):** `rm` when state exists but the sandbox is already gone: `sbx rm` fails, so the state stays and only `rm --purge` clears it. Treat `sbx`'s "not found" as already removed.
 - **Test gaps (low risk):** printing `sbx kit validate` warnings is untested (never seen non-empty); the terminal confirm prompt is only covered by the user's manual check.
 - **Housekeeping:** the S6 spike worktree `.claude/worktrees/agent-a48594dfc53404a8f` (branch `worktree-agent-a48594dfc53404a8f`) is still on disk, locked by the session that launched it. Its only change is already committed. Once no Claude session holds it: `git worktree remove --force --force <path>` and `git branch -D <branch>`.
 - **Optional:** a `.gitattributes` (`* text=auto eol=lf`) would stop the LF/CRLF warnings on every commit.
