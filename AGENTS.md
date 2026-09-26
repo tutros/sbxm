@@ -4,7 +4,7 @@ This file provides guidance to coding agents (Claude Code reads it through `CLAU
 
 ## Status
 
-Milestone 1 in progress (slices 0–12 done). Sources of truth:
+Milestone 1 in progress (slices 0–13 done). Sources of truth:
 - `idea.md`: original brief
 - `milestone-1.md`: current implementation plan (crate layout, config schema, kit mapping, commands, build order).
 - `decisions.md`: numbered design decisions and open research spikes. **Read it before designing anything**, and add new decisions there instead of silently departing from it.
@@ -34,13 +34,13 @@ Crate `sbxm` (edition 2024), lib + bin. Modules grow slice by slice, following t
 - `src/cli.rs`: `clap` derive definitions.
 - `src/config.rs`: config dir resolution (`SBXM_CONFIG_DIR` or `~/.config/sbxm`) `GlobalConfig` loading, and `Profile` loading (unknown keys are errors; env names/values and `skills.store` are checked on load, `SBXM_` env names are reserved), `Profile::with_project` merging `.sbxm/<project>/sandbox.toml` over it (decision 57), plus the config hash (`config_hash`, `GlobalConfig::current_hash`; decision 55).
 - `src/project.rs`: project name validation (decisions 33, 44), sandbox name, metadata dir.
-- `src/backend/`: `SandboxBackend` trait (`create`, `list`, `stop`, `remove`, `attach`, `validate_kit`), `SbxBackend` (shells out to `sbx`; parsers unit-tested against captured output in `src/backend/fixtures/`), `FakeBackend` (records calls, plus an ordered `log()`; `failing_create()`, `failing_remove()`, `with_sandboxes()`, `with_invalid_kit()`, chainable `and_sandboxes()`).
+- `src/backend/`: `SandboxBackend` trait (`create`, `list`, `stop`, `remove`, `attach`, `validate_kit`, `secret_services`), `SbxBackend` (shells out to `sbx`; parsers unit-tested against captured output in `src/backend/fixtures/`), `FakeBackend` (records calls, plus an ordered `log()`; `failing_create()`, `failing_remove()`, `with_sandboxes()`, `with_invalid_kit()`, `with_secrets()`, chainable `and_sandboxes()`).
 - `src/state.rs`: `.sbxm/<project>/state.json` (per harness: sandbox, workspace, created_at, profile, config_hash); `load_all` scans every project.
 - `src/kit.rs`: the only module that knows the v2 kit format; builds the `common` mixin from a profile (plus `SBXM_CONFIG_HASH`/`SBXM_PROFILE`) and writes `spec.yaml` (`serde_norway`) to `kits/<hash-prefix>/common/`. Kit tests use `insta` inline snapshots.
 - `src/seed.rs`: copying a seed dir into a new workspace (rejects links).
 - `src/confirm.rs`: `Confirm` trait for destructive prompts; `Terminal` asks on the TTY. Tests use a scripted fake.
 - `src/commands/`: one file per subcommand (`config_init.rs`, `new.rs`, `list.rs`, `stop.rs`, `rm.rs`, `open.rs`); the harness is fixed to `commands::HARNESS` (`claude`) until slice 18. `open` refuses on config drift; `open --rebuild` goes through `new` with `replace`, which removes the old sandbox only after the new kit validates.
-- `tests/`: one file per command (plus `config_hash.rs`, `kit.rs`, `profile.rs`, `project_config.rs`). CLI-level tests use `assert_cmd` with `SBXM_CONFIG_DIR` pointing at a `tempfile` dir; tests that reach the backend call command functions in-process with `FakeBackend`, using the `Env` and `dir_link` helpers in `tests/common/`. `tests/real_sbx.rs` walks one sandbox through new (incl. egress 200/403, profile env and the hash env vars) → rebuild → list → stop → rm. Never touch the real config.
+- `tests/`: one file per command (plus `config_hash.rs`, `kit.rs`, `profile.rs`, `project_config.rs`, `secrets.rs`). CLI-level tests use `assert_cmd` with `SBXM_CONFIG_DIR` pointing at a `tempfile` dir; tests that reach the backend call command functions in-process with `FakeBackend`, using the `Env` and `dir_link` helpers in `tests/common/`. `tests/real_sbx.rs` walks one sandbox through new (incl. egress 200/403, profile env and the hash env vars) → rebuild → list → stop → rm (needs the `anthropic` secret stored), plus a missing-secret refusal. Never touch the real config.
 
 On Windows, cargo can print `error finalizing incremental compilation session directory … Access is denied`. It's a harmless filesystem-lock warning, not a lint failure.
 
