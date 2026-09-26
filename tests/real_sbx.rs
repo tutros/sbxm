@@ -1,10 +1,11 @@
 //! Tests against the real `sbx`. Run with:
-//! `SBXM_REAL_BASE_DIR=<dir outside %TEMP%/AppData> cargo test --test real_sbx -- --ignored`
+//! `SBXM_REAL_BASE_DIR=<existing dir, not on C: (decision 56)> cargo test --test real_sbx -- --ignored`
+//! Needs a logged-in `sbx` with the `anthropic` secret stored.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 
-use sbxm::backend::SbxBackend;
+use sbxm::backend::{SandboxBackend, SbxBackend};
 use sbxm::commands::{list, new, rm, stop};
 use sbxm::confirm::Terminal;
 use tempfile::TempDir;
@@ -34,8 +35,6 @@ impl Drop for Cleanup {
     }
 }
 
-/// The HTTP status a request from inside the sandbox gets. The egress proxy
-/// answers blocked hosts with 403, reported by curl as the CONNECT status.
 /// `printenv <name>` inside the sandbox, trimmed.
 fn printenv(sandbox: &str, name: &str) -> String {
     let output = Command::new("sbx")
@@ -45,6 +44,8 @@ fn printenv(sandbox: &str, name: &str) -> String {
     String::from_utf8_lossy(&output.stdout).trim().to_owned()
 }
 
+/// The HTTP status a request from inside the sandbox gets. The egress proxy
+/// answers blocked hosts with 403, reported by curl as the CONNECT status.
 fn http_status(sandbox: &str, url: &str) -> String {
     let output = Command::new("sbx")
         .args(["exec", sandbox, "curl", "-s", "-o", "/dev/null", "-w"])
@@ -64,7 +65,7 @@ fn http_status(sandbox: &str, url: &str) -> String {
 
 fn real_base_dir() -> PathBuf {
     let dir = std::env::var_os("SBXM_REAL_BASE_DIR")
-        .expect("set SBXM_REAL_BASE_DIR to an existing dir outside %TEMP%/AppData");
+        .expect("set SBXM_REAL_BASE_DIR to an existing dir, not on C: (decision 56)");
     PathBuf::from(dir)
 }
 
@@ -94,7 +95,7 @@ fn lifecycle_against_real_sbx() {
     std::fs::create_dir_all(&profile_dir).unwrap();
     std::fs::write(
         profile_dir.join("profile.toml"),
-        "description = \"real sbx test\"\n\n[network]\nallow = [\"example.org\"]\n\n[env]\nREAL_TEST_GREETING = \"hello from the profile\"\n",
+        "description = \"real sbx test\"\n\n[network]\nallow = [\"example.org\"]\n\n[env]\nREAL_TEST_GREETING = \"hello from the profile\"\n\n[secrets]\nservices = [\"anthropic\"]\n",
     )
     .unwrap();
 
@@ -186,4 +187,67 @@ fn lifecycle_against_real_sbx() {
     assert!(!entries.iter().any(|e| e.sandbox == sandbox), "{entries:?}");
     assert!(base_dir.join(&project).is_dir());
     assert!(!base_dir.join(".sbxm").join(&project).exists());
+}
+
+#[test]
+#[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
+fn missing_secret_is_refused_before_create() {
+    let stored = SbxBackend.secret_services().unwrap();
+    // Services `sbx secret set` accepts (v0.43.0); use one that isn't stored.
+    let missing = ["xai", "groq", "mistral", "nebius", "openrouter", "devin"]
+        .into_iter()
+        .find(|s| !stored.iter().any(|t| t == s))
+        .expect("every candidate service is stored; add another candidate");
+    let base_dir = real_base_dir();
+    let project = format!("sbxm-it-secret-{}", std::process::id());
+    let _cleanup = Cleanup {
+        sandbox: format!("sbxm-{project}-claude"),
+        dirs: vec![
+            base_dir.join(&project),
+            base_dir.join(".sbxm").join(&project),
+        ],
+        shared_dirs: vec![base_dir.join(".sbxm")],
+    };
+    let config_dir = TempDir::new().unwrap();
+    let base = toml::Value::String(base_dir.to_str().unwrap().to_owned());
+    std::fs::write(
+        config_dir.path().join("config.toml"),
+        format!(
+            r#"base_dir = {base}
+
+[resources]
+cpus = 2
+memory = "2g"
+"#
+        ),
+    )
+    .unwrap();
+    let profile_dir = config_dir.path().join("profiles").join("default");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    std::fs::write(
+        profile_dir.join("profile.toml"),
+        format!(
+            r#"[secrets]
+services = ["{missing}"]
+"#
+        ),
+    )
+    .unwrap();
+
+    let err = new::run(
+        config_dir.path(),
+        &project,
+        &new::Options::default(),
+        &SbxBackend,
+    )
+    .unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains(&format!(
+            "secret '{missing}' (secrets.services) is not stored in sbx"
+        )),
+        "{message}"
+    );
+    assert!(!base_dir.join(&project).exists());
 }
