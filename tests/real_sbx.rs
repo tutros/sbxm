@@ -95,7 +95,7 @@ fn lifecycle_against_real_sbx() {
     std::fs::create_dir_all(&profile_dir).unwrap();
     std::fs::write(
         profile_dir.join("profile.toml"),
-        "description = \"real sbx test\"\n\n[network]\nallow = [\"example.org\"]\n\n[env]\nREAL_TEST_GREETING = \"hello from the profile\"\n\n[secrets]\nservices = [\"anthropic\"]\n\n[instructions]\nmandatory = \"mandatory.md\"\n\n[[setup.install]]\ncommand = \"echo ran-as-$(id -un) > /tmp/sbxm-install\"\nuser = \"agent\"\n\n[harness.claude]\nhome_files = \"home\"\n",
+        "description = \"real sbx test\"\n\n[network]\nallow = [\"example.org\"]\n\n[env]\nREAL_TEST_GREETING = \"hello from the profile\"\n\n[secrets]\nservices = [\"anthropic\"]\n\n[instructions]\nmandatory = \"mandatory.md\"\n\n[[setup.install]]\ncommand = \"echo ran-as-$(id -un) > /tmp/sbxm-install\"\nuser = \"agent\"\n\n[harness.claude]\nhome_files = \"home\"\nmanaged_settings = \"managed.json\"\n",
     )
     .unwrap();
     std::fs::write(
@@ -106,6 +106,11 @@ fn lifecycle_against_real_sbx() {
     let agents_dir = profile_dir.join("home").join(".claude").join("agents");
     std::fs::create_dir_all(&agents_dir).unwrap();
     std::fs::write(agents_dir.join("real-test.md"), "REAL TEST HOME FILE\n").unwrap();
+    std::fs::write(
+        profile_dir.join("managed.json"),
+        r#"{"hooks": {"SessionStart": [{"hooks": [{"type": "command", "command": "echo $HOME > /tmp/sbxm-hook"}]}]}}"#,
+    )
+    .unwrap();
 
     new::run(
         config_dir.path(),
@@ -159,6 +164,29 @@ fn lifecycle_against_real_sbx() {
     assert_eq!(
         String::from_utf8_lossy(&home_file.stdout).trim(),
         "REAL TEST HOME FILE"
+    );
+
+    // Slice 15c: managed settings are root-owned, and the escaped `$` decodes.
+    let managed = "/etc/claude-code/managed-settings.json";
+    let owner = Command::new("sbx")
+        .args(["exec", &sandbox, "stat", "-c", "%U:%a", managed])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&owner.stdout).trim(), "root:644");
+    let hook = Command::new("sbx")
+        .args([
+            "exec",
+            &sandbox,
+            "jq",
+            "-r",
+            ".hooks.SessionStart[0].hooks[0].command",
+            managed,
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&hook.stdout).trim(),
+        "echo $HOME > /tmp/sbxm-hook"
     );
 
     // Slice 10c: the profile's env is set inside the sandbox.
