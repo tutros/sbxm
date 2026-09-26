@@ -75,6 +75,11 @@ impl Env {
         dirs[0].join("common")
     }
 
+    /// `.sbxm/<project>/kits/<hash-prefix>/harness-claude`, next to `kit_dir`.
+    pub fn harness_kit_dir(&self, project: &str) -> PathBuf {
+        self.kit_dir(project).with_file_name("harness-claude")
+    }
+
     /// A seed dir with `a.txt` and `sub/b.txt`, outside the base dir.
     pub fn seed(&self) -> PathBuf {
         let seed = self.tmp.path().join("seed");

@@ -118,5 +118,6 @@ fn kit_dir_is_named_after_the_hash_prefix() {
         .join(&hash[..12])
         .join("common");
     assert!(expected.join("spec.yaml").is_file());
-    assert_eq!(backend.creates()[0].kits, vec![expected]);
+    let harness = expected.with_file_name("harness-claude");
+    assert_eq!(backend.creates()[0].kits, vec![expected, harness]);
 }

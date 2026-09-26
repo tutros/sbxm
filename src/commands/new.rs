@@ -69,26 +69,40 @@ pub fn run(
     check_secrets(&profile.secrets.services, backend)?;
     // Named after the hash, so a changed config never overwrites the kit an
     // existing sandbox was built from (decision 55).
-    let kit_dir = project::metadata_dir(&config.base_dir, name)
+    let kits_dir = project::metadata_dir(&config.base_dir, name)
         .join("kits")
-        .join(&config_hash[..12])
-        .join("common");
-    kit::write(&kit_dir, &kit::common(profile_name, &profile, &config_hash))?;
-    let validation = backend.validate_kit(&kit_dir)?;
-    for warning in &validation.warnings {
-        eprintln!("warning: kit {}: {warning}", kit_dir.display());
+        .join(&config_hash[..12]);
+    // Passed to `sbx create` in this order (decision 62).
+    let kits = [
+        (
+            kits_dir.join("common"),
+            kit::common(profile_name, &profile, &config_hash),
+        ),
+        (
+            kits_dir.join("harness-claude"),
+            kit::harness_claude(profile_name),
+        ),
+    ];
+    for (dir, spec) in &kits {
+        kit::write(dir, spec)?;
     }
-    if !validation.valid {
-        bail!(
-            "generated kit {} is invalid: {}; check the network entries in profile '{profile_name}' ({})",
-            kit_dir.display(),
-            validation.error.as_deref().unwrap_or("no details from sbx"),
-            config
-                .profiles_dir()
-                .join(profile_name)
-                .join("profile.toml")
-                .display()
-        );
+    for (dir, _) in &kits {
+        let validation = backend.validate_kit(dir)?;
+        for warning in &validation.warnings {
+            eprintln!("warning: kit {}: {warning}", dir.display());
+        }
+        if !validation.valid {
+            bail!(
+                "generated kit {} is invalid: {}; check the network entries in profile '{profile_name}' ({})",
+                dir.display(),
+                validation.error.as_deref().unwrap_or("no details from sbx"),
+                config
+                    .profiles_dir()
+                    .join(profile_name)
+                    .join("profile.toml")
+                    .display()
+            );
+        }
     }
 
     match &options.seed {
@@ -108,7 +122,7 @@ pub fn run(
         cpus: config.resources.cpus,
         memory: config.resources.memory,
         skills: profile.skills_store,
-        kits: vec![kit_dir],
+        kits: kits.into_iter().map(|(dir, _)| dir).collect(),
     })?;
 
     let created_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();

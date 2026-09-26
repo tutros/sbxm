@@ -59,6 +59,7 @@ fn new_project_is_created_then_attached() {
         backend.log(),
         [
             format!("validate {}", kit_dir(&env).display()),
+            format!("validate {}", env.harness_kit_dir("demo").display()),
             "create sbxm-demo-claude".to_owned(),
             "attach sbxm-demo-claude".to_owned()
         ]
@@ -86,6 +87,7 @@ fn missing_sandbox_is_recreated_keeping_the_workspace() {
         backend.log(),
         [
             format!("validate {}", kit_dir(&env).display()),
+            format!("validate {}", env.harness_kit_dir("demo").display()),
             "create sbxm-demo-claude".to_owned(),
             "attach sbxm-demo-claude".to_owned()
         ]
@@ -262,6 +264,12 @@ fn rebuild_recreates_the_sandbox_from_the_current_config() {
         backend.log(),
         [
             format!("validate {}", state_kit_dir(&env).display()),
+            format!(
+                "validate {}",
+                state_kit_dir(&env)
+                    .with_file_name("harness-claude")
+                    .display()
+            ),
             "rm sbxm-demo-claude".to_owned(),
             "create sbxm-demo-claude".to_owned(),
             "attach sbxm-demo-claude".to_owned()

@@ -92,6 +92,7 @@ fn kit_is_validated_before_the_sandbox_is_created() {
         backend.log(),
         [
             format!("validate {}", kit_dir(&env).display()),
+            format!("validate {}", env.harness_kit_dir("demo").display()),
             "create sbxm-demo-claude".to_owned()
         ]
     );
