@@ -1,0 +1,13 @@
+{
+  "client": {
+    "version": "v0.43.0",
+    "revision": "79805a6e3c6667520dc2da4f6bdeddae9b700969",
+    "build_tags": "cloud"
+  },
+  "server": {
+    "state": "running",
+    "version": "v0.43.0",
+    "revision": "79805a6e3c6667520dc2da4f6bdeddae9b700969",
+    "api_version": "0.31.0"
+  }
+}

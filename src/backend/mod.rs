@@ -24,6 +24,9 @@ pub trait SandboxBackend {
     /// Names of the service secrets a new sandbox gets (`sbx secret ls
     /// --json`, global service entries only; decision 58).
     fn secret_services(&self) -> Result<Vec<String>>;
+    /// The `sbx` client version without the leading `v`, e.g. `0.43.0`
+    /// (`sbx version --json`).
+    fn version(&self) -> Result<String>;
 }
 
 /// Result of `sbx kit validate --json`.

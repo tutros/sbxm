@@ -1,5 +1,6 @@
 pub mod config_init;
 pub mod config_show;
+pub mod doctor;
 pub mod list;
 pub mod new;
 pub mod open;

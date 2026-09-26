@@ -60,6 +60,21 @@ impl SandboxBackend for SbxBackend {
         parse_secret_ls(&String::from_utf8_lossy(&output.stdout))
     }
 
+    fn version(&self) -> Result<String> {
+        let output = Command::new("sbx")
+            .args(version_args())
+            .output()
+            .context(SBX_MISSING)?;
+        if !output.status.success() {
+            bail!(
+                "`sbx version --json` failed ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        parse_version(&String::from_utf8_lossy(&output.stdout))
+    }
+
     fn validate_kit(&self, dir: &Path) -> Result<KitValidation> {
         // Exits non-zero for an invalid kit but still prints the JSON result.
         let output = Command::new("sbx")
@@ -146,6 +161,26 @@ fn parse_secret_ls(json: &str) -> Result<Vec<String>> {
         .filter(|s| s.scope == "global" && s.kind == "service")
         .map(|s| s.name)
         .collect())
+}
+
+fn version_args() -> [&'static str; 2] {
+    ["version", "--json"]
+}
+
+/// The client version; the server part is left to `sbx ls` (daemon check).
+fn parse_version(json: &str) -> Result<String> {
+    #[derive(Deserialize)]
+    struct Version {
+        client: Client,
+    }
+    #[derive(Deserialize)]
+    struct Client {
+        version: String,
+    }
+    let version: Version =
+        serde_json::from_str(json).context("unexpected `sbx version --json` output")?;
+    let client = version.client.version;
+    Ok(client.strip_prefix('v').unwrap_or(&client).to_owned())
 }
 
 fn parse_ls(json: &str) -> Result<Vec<SandboxInfo>> {
@@ -318,5 +353,18 @@ mod secret_tests {
     #[test]
     fn secret_ls_args_match_sbx_cli() {
         assert_eq!(secret_ls_args(), ["secret", "ls", "--json"]);
+    }
+
+    /// Captured from `sbx version --json`, sbx v0.43.0.
+    const VERSION: &str = include_str!("fixtures/sbx-version.json");
+
+    #[test]
+    fn parses_the_client_version() {
+        assert_eq!(parse_version(VERSION).unwrap(), "0.43.0");
+    }
+
+    #[test]
+    fn version_args_match_sbx_cli() {
+        assert_eq!(version_args(), ["version", "--json"]);
     }
 }

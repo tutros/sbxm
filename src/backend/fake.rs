@@ -18,6 +18,10 @@ pub struct FakeBackend {
     fail_create: bool,
     sandboxes: Vec<SandboxInfo>,
     secrets: Vec<String>,
+    /// `0.43.0` when `None`.
+    version: Option<String>,
+    no_sbx: bool,
+    fail_list: bool,
 }
 
 impl FakeBackend {
@@ -66,6 +70,30 @@ impl FakeBackend {
         Self { sandboxes, ..self }
     }
 
+    /// Makes `version` report this `sbx` version.
+    pub fn with_version(self, version: &str) -> Self {
+        Self {
+            version: Some(version.to_owned()),
+            ..self
+        }
+    }
+
+    /// Makes `version` and `list` fail as if `sbx` weren't on PATH.
+    pub fn without_sbx(self) -> Self {
+        Self {
+            no_sbx: true,
+            ..self
+        }
+    }
+
+    /// Makes `list` fail as if the daemon weren't running.
+    pub fn failing_list(self) -> Self {
+        Self {
+            fail_list: true,
+            ..self
+        }
+    }
+
     pub fn creates(&self) -> Vec<CreateSpec> {
         self.creates.borrow().clone()
     }
@@ -99,7 +127,20 @@ impl SandboxBackend for FakeBackend {
     }
 
     fn list(&self) -> Result<Vec<SandboxInfo>> {
+        if self.no_sbx {
+            bail!("fake: sbx not found");
+        }
+        if self.fail_list {
+            bail!("fake: daemon not running");
+        }
         Ok(self.sandboxes.clone())
+    }
+
+    fn version(&self) -> Result<String> {
+        if self.no_sbx {
+            bail!("fake: sbx not found");
+        }
+        Ok(self.version.clone().unwrap_or_else(|| "0.43.0".into()))
     }
 
     fn stop(&self, name: &str) -> Result<()> {

@@ -54,6 +54,8 @@ pub enum Command {
         #[arg(long, requires = "purge")]
         yes: bool,
     },
+    /// Check sbx, the config and the base dir; exits non-zero if any check fails.
+    Doctor,
     /// Manage sbxm configuration.
     Config {
         #[command(subcommand)]

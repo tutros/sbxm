@@ -53,6 +53,14 @@ fn main() -> anyhow::Result<()> {
             &SbxBackend,
             &Terminal,
         ),
+        Command::Doctor => {
+            let report = commands::doctor::run(&config::config_dir()?, &SbxBackend);
+            print!("{}", report.render());
+            if report.failed() {
+                std::process::exit(1);
+            }
+            Ok(())
+        }
         Command::Config {
             command: ConfigCommand::Init,
         } => commands::config_init::run(),

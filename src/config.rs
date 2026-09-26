@@ -28,11 +28,18 @@ pub struct GlobalConfig {
     profiles_dir: Option<PathBuf>,
     #[serde(default = "default_profile_name")]
     pub default_profile: String,
+    /// Checked by `doctor`; the version sbxm was verified against when unset.
+    #[serde(default = "default_min_sbx_version")]
+    pub min_sbx_version: String,
     pub resources: Resources,
 }
 
 fn default_profile_name() -> String {
     "default".into()
+}
+
+fn default_min_sbx_version() -> String {
+    "0.43.0".into()
 }
 
 #[derive(Debug, Serialize, Deserialize)]
