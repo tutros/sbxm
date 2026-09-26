@@ -7,8 +7,142 @@ use common::Env;
 use sbxm::backend::FakeBackend;
 use sbxm::commands::doctor;
 
+const GIB: u64 = 1024 * 1024 * 1024;
+
+/// A host with 20 GiB free, a writable base dir and no temp dirs (the test
+/// dirs themselves are under `%TEMP%`).
+fn host() -> doctor::Host {
+    doctor::Host {
+        free_space: |_| Ok(20 * GIB),
+        writable: |_| Ok(()),
+        temp_dirs: Vec::new(),
+    }
+}
+
 fn report(env: &Env, backend: &FakeBackend) -> doctor::Report {
-    doctor::run(&env.config_dir(), backend)
+    doctor::run(&env.config_dir(), backend, &host())
+}
+
+fn report_with(env: &Env, host: &doctor::Host) -> doctor::Report {
+    doctor::run(&env.config_dir(), &FakeBackend::default(), host)
+}
+
+#[test]
+fn healthy_base_dir_passes() {
+    let env = Env::new();
+
+    let text = report(&env, &FakeBackend::default()).render();
+
+    let base = env.base_dir().display().to_string();
+    assert!(text.contains(&format!("ok   base dir {base}\n")), "{text}");
+    assert!(
+        text.contains(&format!("ok   20.0 GiB free for base dir {base}\n")),
+        "{text}"
+    );
+}
+
+#[test]
+fn missing_base_dir_fails_and_skips_its_other_checks() {
+    let env = Env::new();
+    std::fs::remove_dir(env.base_dir()).unwrap();
+
+    let report = report(&env, &FakeBackend::default());
+
+    assert!(report.failed());
+    let text = report.render();
+    assert!(
+        text.contains(&format!(
+            "FAIL base dir {} does not exist; create it or change base_dir in {}",
+            env.base_dir().display(),
+            env.config_dir().join("config.toml").display()
+        )),
+        "{text}"
+    );
+    assert!(!text.contains("free for base dir"), "{text}");
+}
+
+#[test]
+fn unwritable_base_dir_fails() {
+    let env = Env::new();
+    let host = doctor::Host {
+        writable: |_| Err(std::io::Error::other("access denied")),
+        ..host()
+    };
+
+    let report = report_with(&env, &host);
+
+    assert!(report.failed());
+    assert!(
+        report.render().contains(&format!(
+            "FAIL base dir {} is not writable (access denied); fix its permissions or change base_dir",
+            env.base_dir().display()
+        )),
+        "{}",
+        report.render()
+    );
+}
+
+#[test]
+fn base_dir_under_a_temp_dir_fails() {
+    let env = Env::new();
+    let host = doctor::Host {
+        temp_dirs: vec![env.tmp.path().to_owned()],
+        ..host()
+    };
+
+    let report = report_with(&env, &host);
+
+    assert!(report.failed());
+    assert!(
+        report.render().contains(&format!(
+            "FAIL base dir {} is under {}, where sbx can't mount workspaces; change base_dir",
+            env.base_dir().display(),
+            env.tmp.path().display()
+        )),
+        "{}",
+        report.render()
+    );
+}
+
+#[test]
+fn low_free_space_fails() {
+    let env = Env::new();
+    let host = doctor::Host {
+        free_space: |_| Ok(5 * GIB / 2),
+        ..host()
+    };
+
+    let report = report_with(&env, &host);
+
+    assert!(report.failed());
+    assert!(
+        report.render().contains(&format!(
+            "FAIL only 2.5 GiB free for base dir {}; free up space to at least 10 GiB",
+            env.base_dir().display()
+        )),
+        "{}",
+        report.render()
+    );
+}
+
+#[test]
+fn unknown_free_space_fails() {
+    let env = Env::new();
+    let host = doctor::Host {
+        free_space: |_| Err(std::io::Error::other("no statvfs")),
+        ..host()
+    };
+
+    let report = report_with(&env, &host);
+
+    assert!(report.failed());
+    assert!(
+        report
+            .render()
+            .contains("FAIL free space for base dir: no statvfs"),
+        "{}",
+        report.render()
+    );
 }
 
 /// Appends `line` to the test config.

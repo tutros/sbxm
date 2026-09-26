@@ -54,7 +54,11 @@ fn main() -> anyhow::Result<()> {
             &Terminal,
         ),
         Command::Doctor => {
-            let report = commands::doctor::run(&config::config_dir()?, &SbxBackend);
+            let report = commands::doctor::run(
+                &config::config_dir()?,
+                &SbxBackend,
+                &commands::doctor::Host::real(),
+            );
             print!("{}", report.render());
             if report.failed() {
                 std::process::exit(1);
