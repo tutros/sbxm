@@ -176,3 +176,35 @@ fn moving_an_instructions_file_keeps_the_hash() {
 
     assert_eq!(before, created_hash(&env, "two"));
 }
+
+#[test]
+fn project_instructions_override_the_profile_and_resolve_in_its_folder() {
+    let env = Env::new();
+    env.write_profile(
+        "default",
+        "[instructions]\nmandatory = \"rules.md\"\nreference = \"ref.md\"\n",
+    );
+    write_profile_file(&env, "rules.md", "Profile rules.\n");
+    write_profile_file(&env, "ref.md", "Profile reference.\n");
+    let metadata = env.base_dir().join(".sbxm").join("demo");
+    std::fs::create_dir_all(&metadata).unwrap();
+    std::fs::write(
+        metadata.join("sandbox.toml"),
+        "[instructions]\nmandatory = \"project-rules.md\"\n",
+    )
+    .unwrap();
+    std::fs::write(metadata.join("project-rules.md"), "Project rules.\n").unwrap();
+
+    env.run("demo", &FakeBackend::default()).unwrap();
+
+    let claude_md = env
+        .harness_kit_dir("demo")
+        .join("files/home/.claude/CLAUDE.md");
+    assert_eq!(
+        std::fs::read_to_string(claude_md).unwrap(),
+        "Project rules.\n"
+    );
+    let text = std::fs::read_to_string(env.kit_dir("demo").join("spec.yaml")).unwrap();
+    let spec: serde_json::Value = serde_norway::from_str(&text).unwrap();
+    assert_eq!(spec["agentInstructions"]["content"], "Profile reference.\n");
+}

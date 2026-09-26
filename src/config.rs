@@ -162,6 +162,17 @@ impl Profile {
             self.skills_store =
                 parse_skills_store(project.skills.store.as_deref(), "project config", &path)?;
         }
+        // Paths resolve in the project's own folder (decision 62).
+        let mandatory = project.instructions.mandatory.as_deref();
+        let reference = project.instructions.reference.as_deref();
+        let read =
+            |key, relative| read_instructions(key, relative, metadata_dir, "project config", &path);
+        if let Some(text) = read("mandatory", mandatory)? {
+            self.mandatory_instructions = Some(text);
+        }
+        if let Some(text) = read("reference", reference)? {
+            self.reference_instructions = Some(text);
+        }
         Ok(self)
     }
 
