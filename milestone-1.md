@@ -170,6 +170,7 @@ Between slices 3 and 10b, sandboxes are created without sbxm kits. That's safe: 
 **Progress (2026-09-25):** slices 0–11 done (11 was cut into 11a–d: hash in state and env, stored profile reused by `open`, drift refusal and `--rebuild`, drift in `list`), each with its real-`sbx` check (slices 8–9, 10a and 11c also checked manually by the user). Next: slice 12. Spike S6b (spec first, user approval) runs before slice 14.
 
 Gaps found while building, to handle in the slice named:
+- **Slice 17 (or sooner, small fix):** workspaces on `C:` fail, not only AppData [56]. `config init`'s starter `base_dir` (`~/sbxm-projects`, on `C:` on Windows) needs a different default or a prompt, and `doctor` should flag a base dir on `C:` (ideally by probing whether `sbx` can mount it, since the cause is unverified).
 - **Slice 18:** `new` rewrites `state.json` instead of merging per harness. Merge when `--harness` lands; `rm`'s "last sandbox → delete kits" depends on it.
 - **Any slice (small fix):** `rm` when state exists but the sandbox is already gone: `sbx rm` fails, so the state stays and only `rm --purge` clears it. Treat `sbx`'s "not found" as already removed.
 - **Test gaps (low risk):** printing `sbx kit validate` warnings is untested (never seen non-empty); the terminal confirm prompt is only covered by the user's manual check.
