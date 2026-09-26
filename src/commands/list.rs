@@ -15,6 +15,19 @@ pub struct Entry {
     pub sandbox: String,
     pub status: String,
     pub problem: Option<Problem>,
+    /// `None` when sbxm has no state for the sandbox.
+    pub config: Option<ConfigStatus>,
+}
+
+/// Whether the config a sandbox was built from still matches (decision 55).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigStatus {
+    Current,
+    /// Changed since creation, or created before sbxm recorded hashes.
+    Changed,
+    /// The profile doesn't load, so the hash can't be computed.
+    Unknown,
 }
 
 /// An orphan: `sbx` and sbxm's state disagree.
@@ -29,10 +42,11 @@ pub enum Problem {
 
 pub fn entries(config_dir: &Path, backend: &dyn SandboxBackend) -> Result<Vec<Entry>> {
     let config = GlobalConfig::load(config_dir)?;
-    let mut known: Vec<(String, String, String)> = Vec::new();
+    let mut known: Vec<(String, String, String, ConfigStatus)> = Vec::new();
     for (project, state) in state::load_all(&config.base_dir)? {
         for (harness, sandbox) in state.sandboxes {
-            known.push((project.clone(), harness, sandbox.sandbox));
+            let status = config_status(&config, &sandbox);
+            known.push((project.clone(), harness, sandbox.sandbox, status));
         }
     }
 
@@ -41,16 +55,20 @@ pub fn entries(config_dir: &Path, backend: &dyn SandboxBackend) -> Result<Vec<En
         let Some((project, harness)) = project::parse_sandbox_name(&sandbox.name) else {
             continue;
         };
-        let has_state = known.iter().any(|(_, _, name)| *name == sandbox.name);
+        let config = known
+            .iter()
+            .find(|(_, _, name, _)| *name == sandbox.name)
+            .map(|(_, _, _, status)| *status);
         entries.push(Entry {
             project,
             harness,
             sandbox: sandbox.name,
             status: sandbox.status,
-            problem: (!has_state).then_some(Problem::NoState),
+            problem: config.is_none().then_some(Problem::NoState),
+            config,
         });
     }
-    for (project, harness, sandbox) in known {
+    for (project, harness, sandbox, config) in known {
         if !entries.iter().any(|e| e.sandbox == sandbox) {
             entries.push(Entry {
                 project,
@@ -58,11 +76,29 @@ pub fn entries(config_dir: &Path, backend: &dyn SandboxBackend) -> Result<Vec<En
                 sandbox,
                 status: "missing".into(),
                 problem: Some(Problem::NoSandbox),
+                config: Some(config),
             });
         }
     }
     entries.sort_by(|a, b| (&a.project, &a.harness).cmp(&(&b.project, &b.harness)));
     Ok(entries)
+}
+
+/// A profile that doesn't load is `Unknown`, not an error, so one broken
+/// profile doesn't hide every other sandbox.
+fn config_status(config: &GlobalConfig, sandbox: &state::SandboxState) -> ConfigStatus {
+    let Some(stored) = &sandbox.config_hash else {
+        return ConfigStatus::Changed;
+    };
+    let profile = sandbox
+        .profile
+        .as_deref()
+        .unwrap_or(&config.default_profile);
+    match config.current_hash(profile) {
+        Ok(current) if current == *stored => ConfigStatus::Current,
+        Ok(_) => ConfigStatus::Changed,
+        Err(_) => ConfigStatus::Unknown,
+    }
 }
 
 /// Aligned columns; orphan rows get a note saying how to fix them.

@@ -2,7 +2,7 @@ mod common;
 
 use common::Env;
 use sbxm::backend::{FakeBackend, SandboxInfo};
-use sbxm::commands::list::{self, Entry, Problem};
+use sbxm::commands::list::{self, ConfigStatus, Entry, Problem};
 
 fn sandbox(name: &str, agent: &str, status: &str) -> SandboxInfo {
     SandboxInfo {
@@ -34,6 +34,7 @@ fn shows_sbxm_sandbox_with_state() {
             sandbox: "sbxm-demo-claude".into(),
             status: "running".into(),
             problem: None,
+            config: Some(ConfigStatus::Current),
         }]
     );
 }
@@ -63,6 +64,7 @@ fn flags_sandbox_without_state() {
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].project, "demo");
     assert_eq!(entries[0].problem, Some(Problem::NoState));
+    assert_eq!(entries[0].config, None);
 }
 
 #[test]
@@ -81,6 +83,7 @@ fn flags_state_without_sandbox() {
             sandbox: "sbxm-demo-claude".into(),
             status: "missing".into(),
             problem: Some(Problem::NoSandbox),
+            config: Some(ConfigStatus::Current),
         }]
     );
 }
@@ -92,6 +95,8 @@ fn entry(project: &str, harness: &str, status: &str, problem: Option<Problem>) -
         sandbox: format!("sbxm-{project}-{harness}"),
         status: status.into(),
         problem,
+        // Only entries with state have a config to check.
+        config: (problem != Some(Problem::NoState)).then_some(ConfigStatus::Current),
     }
 }
 
@@ -147,8 +152,48 @@ fn json_has_one_object_per_entry() {
     assert_eq!(
         json,
         serde_json::json!([
-            {"project": "demo", "harness": "claude", "sandbox": "sbxm-demo-claude", "status": "running", "problem": null},
-            {"project": "demo", "harness": "codex", "sandbox": "sbxm-demo-codex", "status": "missing", "problem": "no_sandbox"}
+            {"project": "demo", "harness": "claude", "sandbox": "sbxm-demo-claude", "status": "running", "problem": null, "config": "current"},
+            {"project": "demo", "harness": "codex", "sandbox": "sbxm-demo-codex", "status": "missing", "problem": "no_sandbox", "config": "current"}
         ])
     );
+}
+
+/// The config status `list` reports for `sbxm-demo-claude`.
+fn demo_config(env: &Env) -> Option<ConfigStatus> {
+    let backend =
+        FakeBackend::with_sandboxes(vec![sandbox("sbxm-demo-claude", "claude", "running")]);
+    let entries = list::entries(&env.config_dir(), &backend).unwrap();
+    entries[0].config
+}
+
+#[test]
+fn changed_profile_shows_as_changed() {
+    let env = Env::new();
+    with_state(&env, "demo");
+    env.write_profile("default", "[network]\nallow = [\"github.com\"]\n");
+
+    assert_eq!(demo_config(&env), Some(ConfigStatus::Changed));
+}
+
+#[test]
+fn state_without_a_hash_shows_as_changed() {
+    let env = Env::new();
+    let metadata = env.base_dir().join(".sbxm").join("demo");
+    std::fs::create_dir_all(&metadata).unwrap();
+    std::fs::write(
+        metadata.join("state.json"),
+        r#"{"sandboxes": {"claude": {"sandbox": "sbxm-demo-claude", "workspace": "unused", "created_at": 0}}}"#,
+    )
+    .unwrap();
+
+    assert_eq!(demo_config(&env), Some(ConfigStatus::Changed));
+}
+
+#[test]
+fn profile_that_no_longer_loads_shows_as_unknown() {
+    let env = Env::new();
+    with_state(&env, "demo");
+    env.write_profile("default", "not valid toml [");
+
+    assert_eq!(demo_config(&env), Some(ConfigStatus::Unknown));
 }
