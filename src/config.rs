@@ -102,6 +102,10 @@ pub struct Profile {
     /// [`Profile::load`]. Hashed instead of the path (decision 62).
     #[serde(skip_deserializing)]
     pub mandatory_instructions: Option<String>,
+    /// Contents of the `instructions.reference` file, like
+    /// `mandatory_instructions`.
+    #[serde(skip_deserializing)]
+    pub reference_instructions: Option<String>,
 }
 
 /// Paths relative to the file that names them (decision 62).
@@ -110,6 +114,8 @@ pub struct Profile {
 struct InstructionPaths {
     #[serde(default)]
     mandatory: Option<PathBuf>,
+    #[serde(default)]
+    reference: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -178,6 +184,8 @@ impl Profile {
         let dir = profiles_dir.join(name);
         profile.mandatory_instructions =
             read_instructions(profile.instructions.mandatory.as_deref(), &dir)?;
+        profile.reference_instructions =
+            read_instructions(profile.instructions.reference.as_deref(), &dir)?;
         Ok(profile)
     }
 

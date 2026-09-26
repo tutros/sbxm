@@ -56,3 +56,19 @@ fn mandatory_instructions_become_the_claude_home_file() {
         "Always run the tests.\n"
     );
 }
+
+#[test]
+fn reference_instructions_become_agent_instructions() {
+    let env = Env::new();
+    env.write_profile(
+        "default",
+        "[instructions]\nreference = \"instructions/reference.md\"\n",
+    );
+    write_profile_file(&env, "instructions/reference.md", "Style guide.\n");
+
+    env.run("demo", &FakeBackend::default()).unwrap();
+
+    let text = std::fs::read_to_string(env.kit_dir("demo").join("spec.yaml")).unwrap();
+    let spec: serde_json::Value = serde_norway::from_str(&text).unwrap();
+    assert_eq!(spec["agentInstructions"]["content"], "Style guide.\n");
+}

@@ -25,9 +25,17 @@ pub struct Spec {
     permissions: Option<Permissions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     environment: Option<Environment>,
+    /// Reference material only: `sbx` surfaces it on demand (decision 37).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_instructions: Option<AgentInstructions>,
     /// Written to `files/home/<path>`, not to `spec.yaml`.
     #[serde(skip)]
     home_files: Vec<(PathBuf, String)>,
+}
+
+#[derive(Debug, Serialize)]
+struct AgentInstructions {
+    content: String,
 }
 
 /// Pins a mixin to one harness; composing it with another is an error.
@@ -73,6 +81,10 @@ pub fn common(profile_name: &str, profile: &Profile, config_hash: &str) -> Spec 
             },
         }),
         environment: Some(Environment { variables }),
+        agent_instructions: profile
+            .reference_instructions
+            .clone()
+            .map(|content| AgentInstructions { content }),
         home_files: Vec::new(),
     }
 }
@@ -96,6 +108,7 @@ pub fn harness_claude(profile_name: &str, profile: &Profile) -> Spec {
         requires: Some(Requires { agent: "claude" }),
         permissions: None,
         environment: None,
+        agent_instructions: None,
         home_files,
     }
 }
