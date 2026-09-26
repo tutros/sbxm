@@ -80,7 +80,7 @@ pub fn run(
         ),
         (
             kits_dir.join("harness-claude"),
-            kit::harness_claude(profile_name),
+            kit::harness_claude(profile_name, &profile),
         ),
     ];
     for (dir, spec) in &kits {

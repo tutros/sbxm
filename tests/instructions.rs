@@ -26,3 +26,33 @@ fn every_sandbox_gets_a_harness_claude_mixin() {
       agent: claude
     ");
 }
+
+/// Writes `<profiles_dir>/default/<relative>`.
+fn write_profile_file(env: &Env, relative: &str, contents: &str) {
+    let path = env.profiles_dir().join("default").join(relative);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, contents).unwrap();
+}
+
+#[test]
+fn mandatory_instructions_become_the_claude_home_file() {
+    let env = Env::new();
+    env.write_profile(
+        "default",
+        "[instructions]\nmandatory = \"instructions/mandatory.md\"\n",
+    );
+    write_profile_file(&env, "instructions/mandatory.md", "Always run the tests.\n");
+
+    env.run("demo", &FakeBackend::default()).unwrap();
+
+    let home_file = env
+        .harness_kit_dir("demo")
+        .join("files")
+        .join("home")
+        .join(".claude")
+        .join("CLAUDE.md");
+    assert_eq!(
+        std::fs::read_to_string(home_file).unwrap(),
+        "Always run the tests.\n"
+    );
+}

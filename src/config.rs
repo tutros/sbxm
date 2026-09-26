@@ -96,6 +96,20 @@ pub struct Profile {
     /// value, so an unset store and `"readonly"` hash the same.
     #[serde(skip_deserializing)]
     pub skills_store: SkillsStore,
+    #[serde(default, skip_serializing)]
+    instructions: InstructionPaths,
+    /// Contents of the `instructions.mandatory` file, read by
+    /// [`Profile::load`]. Hashed instead of the path (decision 62).
+    #[serde(skip_deserializing)]
+    pub mandatory_instructions: Option<String>,
+}
+
+/// Paths relative to the file that names them (decision 62).
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstructionPaths {
+    #[serde(default)]
+    mandatory: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -161,6 +175,9 @@ impl Profile {
         let source = format!("profile '{name}'");
         profile.check_env(&source, &path)?;
         profile.skills_store = parse_skills_store(profile.skills.store.as_deref(), &source, &path)?;
+        let dir = profiles_dir.join(name);
+        profile.mandatory_instructions =
+            read_instructions(profile.instructions.mandatory.as_deref(), &dir)?;
         Ok(profile)
     }
 
@@ -221,6 +238,17 @@ pub fn config_hash(profile_name: &str, profile: &Profile, resources: &Resources)
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
+}
+
+/// The contents of an instructions file, `None` when unset.
+fn read_instructions(relative: Option<&Path>, dir: &Path) -> Result<Option<String>> {
+    let Some(relative) = relative else {
+        return Ok(None);
+    };
+    let path = dir.join(relative);
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    Ok(Some(text))
 }
 
 /// `readonly` when unset (decision 46).

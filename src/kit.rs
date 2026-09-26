@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -25,6 +25,9 @@ pub struct Spec {
     permissions: Option<Permissions>,
     #[serde(skip_serializing_if = "Option::is_none")]
     environment: Option<Environment>,
+    /// Written to `files/home/<path>`, not to `spec.yaml`.
+    #[serde(skip)]
+    home_files: Vec<(PathBuf, String)>,
 }
 
 /// Pins a mixin to one harness; composing it with another is an error.
@@ -70,12 +73,19 @@ pub fn common(profile_name: &str, profile: &Profile, config_hash: &str) -> Spec 
             },
         }),
         environment: Some(Environment { variables }),
+        home_files: Vec::new(),
     }
 }
 
-/// The `harness-claude` mixin: what only applies to Claude Code
-/// (decision 62).
-pub fn harness_claude(profile_name: &str) -> Spec {
+/// The `harness-claude` mixin: what only applies to Claude Code. Mandatory
+/// instructions go in the always-loaded `~/.claude/CLAUDE.md` (decisions 37,
+/// 62).
+pub fn harness_claude(profile_name: &str, profile: &Profile) -> Spec {
+    let home_files = profile
+        .mandatory_instructions
+        .iter()
+        .map(|text| (PathBuf::from(".claude").join("CLAUDE.md"), text.clone()))
+        .collect();
     Spec {
         schema_version: "2",
         kind: "mixin",
@@ -86,13 +96,22 @@ pub fn harness_claude(profile_name: &str) -> Spec {
         requires: Some(Requires { agent: "claude" }),
         permissions: None,
         environment: None,
+        home_files,
     }
 }
 
-/// Writes `<dir>/spec.yaml`, creating `dir`.
+/// Writes `<dir>/spec.yaml` and `<dir>/files/home/…`, creating `dir`.
 pub fn write(dir: &Path, spec: &Spec) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
     let path = dir.join("spec.yaml");
     fs::write(&path, serde_norway::to_string(spec)?)
-        .with_context(|| format!("cannot write {}", path.display()))
+        .with_context(|| format!("cannot write {}", path.display()))?;
+    for (relative, text) in &spec.home_files {
+        let path = dir.join("files").join("home").join(relative);
+        let parent = path.parent().expect("home file has a parent");
+        fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+        fs::write(&path, text).with_context(|| format!("cannot write {}", path.display()))?;
+    }
+    Ok(())
 }
