@@ -95,7 +95,7 @@ fn lifecycle_against_real_sbx() {
     std::fs::create_dir_all(&profile_dir).unwrap();
     std::fs::write(
         profile_dir.join("profile.toml"),
-        "description = \"real sbx test\"\n\n[network]\nallow = [\"example.org\"]\n\n[env]\nREAL_TEST_GREETING = \"hello from the profile\"\n\n[secrets]\nservices = [\"anthropic\"]\n\n[instructions]\nmandatory = \"mandatory.md\"\n\n[[setup.install]]\ncommand = \"echo ran-as-$(id -un) > /tmp/sbxm-install\"\nuser = \"agent\"\n",
+        "description = \"real sbx test\"\n\n[network]\nallow = [\"example.org\"]\n\n[env]\nREAL_TEST_GREETING = \"hello from the profile\"\n\n[secrets]\nservices = [\"anthropic\"]\n\n[instructions]\nmandatory = \"mandatory.md\"\n\n[[setup.install]]\ncommand = \"echo ran-as-$(id -un) > /tmp/sbxm-install\"\nuser = \"agent\"\n\n[harness.claude]\nhome_files = \"home\"\n",
     )
     .unwrap();
     std::fs::write(
@@ -103,6 +103,9 @@ fn lifecycle_against_real_sbx() {
         "REAL TEST CANARY: the word is QUINCE-5\n",
     )
     .unwrap();
+    let agents_dir = profile_dir.join("home").join(".claude").join("agents");
+    std::fs::create_dir_all(&agents_dir).unwrap();
+    std::fs::write(agents_dir.join("real-test.md"), "REAL TEST HOME FILE\n").unwrap();
 
     new::run(
         config_dir.path(),
@@ -141,6 +144,21 @@ fn lifecycle_against_real_sbx() {
     assert_eq!(
         String::from_utf8_lossy(&install.stdout).trim(),
         "ran-as-agent"
+    );
+
+    // Slice 15b: the profile's home files are in the agent's home.
+    let home_file = Command::new("sbx")
+        .args([
+            "exec",
+            &sandbox,
+            "cat",
+            "/home/agent/.claude/agents/real-test.md",
+        ])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&home_file.stdout).trim(),
+        "REAL TEST HOME FILE"
     );
 
     // Slice 10c: the profile's env is set inside the sandbox.
