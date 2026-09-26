@@ -133,6 +133,7 @@ impl Profile {
             .with_context(|| format!("invalid project config {}", path.display()))?;
         self.network.allow.extend(project.network.allow);
         self.network.deny.extend(project.network.deny);
+        self.env.extend(project.env);
         Ok(self)
     }
 

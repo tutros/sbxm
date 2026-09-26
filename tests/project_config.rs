@@ -43,3 +43,17 @@ fn project_network_lists_are_appended_to_the_profile() {
         serde_json::json!(["a.example.com", "b.example.com"])
     );
 }
+
+#[test]
+fn project_env_is_merged_per_key_with_the_project_winning() {
+    let env = Env::new();
+    env.write_profile("default", "[env]\nA = \"1\"\nB = \"2\"\n");
+    write_project_config(&env, "[env]\nB = \"9\"\nC = \"3\"\n");
+
+    env.run("demo", &FakeBackend::default()).unwrap();
+
+    let variables = &spec(&env)["environment"]["variables"];
+    assert_eq!(variables["A"], "1");
+    assert_eq!(variables["B"], "9");
+    assert_eq!(variables["C"], "3");
+}
