@@ -45,6 +45,21 @@ impl SandboxBackend for SbxBackend {
         run_sbx(attach_args(name), name)
     }
 
+    fn secret_services(&self) -> Result<Vec<String>> {
+        let output = Command::new("sbx")
+            .args(secret_ls_args())
+            .output()
+            .context(SBX_MISSING)?;
+        if !output.status.success() {
+            bail!(
+                "`sbx secret ls --json` failed ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        parse_secret_ls(&String::from_utf8_lossy(&output.stdout))
+    }
+
     fn validate_kit(&self, dir: &Path) -> Result<KitValidation> {
         // Exits non-zero for an invalid kit but still prints the JSON result.
         let output = Command::new("sbx")
@@ -102,6 +117,35 @@ fn remove_args(name: &str) -> [&str; 3] {
 /// `--name` only: `sbx run` would otherwise create a sandbox without sbxm's config.
 fn attach_args(name: &str) -> [&str; 3] {
     ["run", "--name", name]
+}
+
+fn secret_ls_args() -> [&'static str; 3] {
+    ["secret", "ls", "--json"]
+}
+
+/// Names of global service secrets. Sandbox-scoped secrets and host env vars
+/// `sbx` hasn't imported don't reach a new sandbox, so they don't count
+/// (decision 58). The masked values are never read.
+fn parse_secret_ls(json: &str) -> Result<Vec<String>> {
+    #[derive(Deserialize)]
+    struct SecretLs {
+        secrets: Vec<Secret>,
+    }
+    #[derive(Deserialize)]
+    struct Secret {
+        scope: String,
+        #[serde(rename = "type")]
+        kind: String,
+        name: String,
+    }
+    let ls: SecretLs =
+        serde_json::from_str(json).context("unexpected `sbx secret ls --json` output")?;
+    Ok(ls
+        .secrets
+        .into_iter()
+        .filter(|s| s.scope == "global" && s.kind == "service")
+        .map(|s| s.name)
+        .collect())
 }
 
 fn parse_ls(json: &str) -> Result<Vec<SandboxInfo>> {
@@ -254,5 +298,25 @@ mod validate_tests {
             validate_args(Path::new("/k/common")),
             ["kit", "validate", "--json", "/k/common"].map(std::ffi::OsString::from)
         );
+    }
+}
+
+#[cfg(test)]
+mod secret_tests {
+    use super::*;
+
+    /// Reconstructed (decision 58): field names and the global `anthropic`
+    /// entry match `sbx secret ls --json` (v0.43.0) read with values redacted;
+    /// the sandbox-scoped `github` entry is made up in the same shape.
+    const SECRET_LS: &str = include_str!("fixtures/sbx-secret-ls.json");
+
+    #[test]
+    fn keeps_only_global_service_secrets() {
+        assert_eq!(parse_secret_ls(SECRET_LS).unwrap(), ["anthropic"]);
+    }
+
+    #[test]
+    fn secret_ls_args_match_sbx_cli() {
+        assert_eq!(secret_ls_args(), ["secret", "ls", "--json"]);
     }
 }

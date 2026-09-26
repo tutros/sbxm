@@ -21,6 +21,9 @@ pub trait SandboxBackend {
     fn attach(&self, name: &str) -> Result<()>;
     /// Checks a kit directory (`sbx kit validate --json`).
     fn validate_kit(&self, dir: &Path) -> Result<KitValidation>;
+    /// Names of the service secrets a new sandbox gets (`sbx secret ls
+    /// --json`, global service entries only; decision 58).
+    fn secret_services(&self) -> Result<Vec<String>>;
 }
 
 /// Result of `sbx kit validate --json`.

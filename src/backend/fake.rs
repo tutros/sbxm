@@ -17,6 +17,7 @@ pub struct FakeBackend {
     invalid_kit: Option<String>,
     fail_create: bool,
     sandboxes: Vec<SandboxInfo>,
+    secrets: Vec<String>,
 }
 
 impl FakeBackend {
@@ -40,6 +41,14 @@ impl FakeBackend {
     pub fn with_invalid_kit(error: &str) -> Self {
         Self {
             invalid_kit: Some(error.to_owned()),
+            ..Self::default()
+        }
+    }
+
+    /// A backend whose `secret_services` returns these names.
+    pub fn with_secrets(names: &[&str]) -> Self {
+        Self {
+            secrets: names.iter().map(|n| n.to_string()).collect(),
             ..Self::default()
         }
     }
@@ -111,6 +120,10 @@ impl SandboxBackend for FakeBackend {
     fn attach(&self, name: &str) -> Result<()> {
         self.record("attach", name);
         Ok(())
+    }
+
+    fn secret_services(&self) -> Result<Vec<String>> {
+        Ok(self.secrets.clone())
     }
 
     fn validate_kit(&self, dir: &Path) -> Result<KitValidation> {

@@ -165,7 +165,8 @@ fn project_secrets_are_part_of_the_hash() {
     let env = Env::new();
     env.run("one", &FakeBackend::default()).unwrap();
     write_project_config(&env, "[secrets]\nservices = [\"github\"]\n");
-    env.run("demo", &FakeBackend::default()).unwrap();
+    env.run("demo", &FakeBackend::with_secrets(&["github"]))
+        .unwrap();
 
     assert_ne!(state_hash(&env, "one"), state_hash(&env, "demo"));
 }

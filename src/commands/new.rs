@@ -66,6 +66,7 @@ pub fn run(
             );
         }
     }
+    check_secrets(&profile.secrets.services, backend)?;
     // Named after the hash, so a changed config never overwrites the kit an
     // existing sandbox was built from (decision 55).
     let kit_dir = project::metadata_dir(&config.base_dir, name)
@@ -123,4 +124,20 @@ pub fn run(
         },
     );
     state.save(&project::metadata_dir(&config.base_dir, name))
+}
+
+/// Every named service must be a stored `sbx` secret, or the sandbox would
+/// start without it (decisions 30, 58). sbxm never sets secrets itself.
+fn check_secrets(services: &[String], backend: &dyn SandboxBackend) -> Result<()> {
+    if services.is_empty() {
+        return Ok(());
+    }
+    let stored = backend.secret_services()?;
+    if let Some(missing) = services.iter().find(|s| !stored.contains(s)) {
+        bail!(
+            "secret '{missing}' (secrets.services) is not stored in sbx; add it with \
+             `sbx secret set {missing}` or import it with `sbx setup`"
+        );
+    }
+    Ok(())
 }
