@@ -35,7 +35,8 @@ pub fn run(
         .profile
         .as_deref()
         .unwrap_or(&config.default_profile);
-    let profile = Profile::load(config.profiles_dir(), profile_name)?;
+    let profile = Profile::load(config.profiles_dir(), profile_name)?
+        .with_project(&project::metadata_dir(&config.base_dir, name))?;
     let config_hash = config::config_hash(profile_name, &profile, &config.resources);
 
     if !config.base_dir.is_dir() {

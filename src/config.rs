@@ -120,6 +120,22 @@ pub struct Secrets {
 }
 
 impl Profile {
+    /// Merges `<metadata_dir>/sandbox.toml` over this profile, if the project
+    /// has one (decision 57).
+    pub fn with_project(mut self, metadata_dir: &Path) -> Result<Self> {
+        let path = metadata_dir.join("sandbox.toml");
+        if !path.is_file() {
+            return Ok(self);
+        }
+        let text = std::fs::read_to_string(&path)
+            .with_context(|| format!("cannot read {}", path.display()))?;
+        let project: Self = toml::from_str(&text)
+            .with_context(|| format!("invalid project config {}", path.display()))?;
+        self.network.allow.extend(project.network.allow);
+        self.network.deny.extend(project.network.deny);
+        Ok(self)
+    }
+
     pub fn load(profiles_dir: &Path, name: &str) -> Result<Self> {
         validate_profile_name(name)?;
         let path = profiles_dir.join(name).join("profile.toml");
