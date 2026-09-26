@@ -167,7 +167,7 @@ Between slices 3 and 10b, sandboxes are created without sbxm kits. That's safe: 
 
 ## Progress and carry-over items
 
-**Progress (2026-09-25):** slices 0–11 done (11 was cut into 11a–d: hash in state and env, stored profile reused by `open`, drift refusal and `--rebuild`, drift in `list`), each with its real-`sbx` check (slices 8–9, 10a and 11c also checked manually by the user). Next: slice 12. Spike S6b (spec first, user approval) runs before slice 14.
+**Progress (2026-09-25):** slices 0–12 done (11 was cut into 11a–d: hash in state and env, stored profile reused by `open`, drift refusal and `--rebuild`, drift in `list`), each with its real-`sbx` check where the plan has one (slices 8–9, 10a and 11c also checked manually by the user). Next: slice 13. Spike S6b (spec first, user approval) runs before slice 14.
 
 Gaps found while building, to handle in the slice named:
 - **Slice 17 (or sooner, small fix):** workspaces on `C:` fail, not only AppData [56]. `config init`'s starter `base_dir` (`~/sbxm-projects`, on `C:` on Windows) needs a different default or a prompt, and `doctor` should flag a base dir on `C:` (ideally by probing whether `sbx` can mount it, since the cause is unverified).

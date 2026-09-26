@@ -26,7 +26,7 @@ pub enum ConfigStatus {
     Current,
     /// Changed since creation, or created before sbxm recorded hashes.
     Changed,
-    /// The profile doesn't load, so the hash can't be computed.
+    /// The profile or project config doesn't load, so the hash can't be computed.
     Unknown,
 }
 
