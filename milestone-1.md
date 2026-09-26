@@ -149,13 +149,13 @@ Between slices 3 and 10b, sandboxes are created without sbxm kits. That's safe: 
 | 11 | The config hash is stored in state and injected as `SBXM_CONFIG_HASH`/`SBXM_PROFILE`. After a profile change, `open` refuses; `open --rebuild` recreates, warning that session history is lost; `list` shows drift [28][31]. | Hash stable across runs; changes when a referenced file changes; refuse/rebuild/drift paths. | Env vars present in sandbox; workspace survives rebuild. |
 | 12 | `.sbxm/demo/sandbox.toml` overrides the profile: lists append, scalars and maps override [27]. | Merge semantics; reflected in kit snapshot and hash. | none |
 | 13 | `new`/`open` fail clearly when a profile's `secrets.services` entry isn't stored in `sbx` [30]. | Parse the captured `sbx secret ls --json` shape; message names the missing secret; no sandbox created. | Missing vs. present `anthropic`. |
-| 14 | *(Run spike S6b first.)* Instructions: `reference` → `agentInstructions` in the common mixin; `mandatory` → `harness-claude` mixin (`requires.agent: claude`) at `files/home/.claude/CLAUDE.md` [37]. | Snapshots of both kits; both `--kit` args in order. | Mandatory file present in the sandbox and loaded by Claude. |
-| 15 | `setup.install` and `harness.claude.home_files` reach the sandbox; configuring a feature the harness adapter can't support warns loudly [11]. | Snapshots; warning text. | Install ran; home file present. Hooks route per S6b: the Claude kit replaces a mixin's `settings.json` [49]. |
+| 14 | Instructions: `reference` → `agentInstructions` in the common mixin; `mandatory` → `harness-claude` mixin (`requires.agent: claude`) at `files/home/.claude/CLAUDE.md` [37]. | Snapshots of both kits; both `--kit` args in order. | Mandatory file present in the sandbox and loaded by Claude. |
+| 15 | `setup.install` and `harness.claude.home_files` reach the sandbox; `home_files` containing a harness kit's own config file is an error [61]; Claude hooks from the profile become `/etc/claude-code/managed-settings.json`, written by a root `setup.install` step in the `harness-claude` mixin [59] (profile key to be decided in the slice); configuring a feature the harness adapter can't support warns loudly [11]. | Snapshots; rejection and warning text. | Install ran; home file present; a `SessionStart` hook fires in `claude -p`. |
 | 16 | `sbxm config show [project] [--kits]` prints the merged config, hash and generated kits without creating anything. | Output snapshot; zero backend create calls. | none |
 | 17 | `sbxm doctor` reports every check in the Commands table and exits non-zero on any failure. | One test per check, pass and fail (incl. base dir under AppData, `sbx` too old, Pi needed but `github.com/docker/` not in `kit.allowedSources` [48]). | Clean on a correct setup. |
 | 18 | `sbxm new demo --harness codex` works, including mandatory instructions. | Adapter snapshot. | Mandatory file at `~/.codex/AGENTS.md` [49]; confirm with `codex debug prompt-input` (no credentials needed). |
 | 19 | Same for `--harness gemini`. | Adapter snapshot. | Mandatory file at `~/.gemini/GEMINI.md` [49]; loading unverified without Google credentials. |
-| 20 | Same for `--harness pi`, using the Pi kit ref pinned to a commit SHA. If `kit.allowedSources` doesn't allow the kit, fail before creating anything with a message saying how to allow it [48]. | Adapter snapshot; pinned-ref validation; allowlist error text. | Needs `github.com/docker/` allowed; Pi paths from S6b. |
+| 20 | Same for `--harness pi`, using the Pi kit ref pinned to a commit SHA. If `kit.allowedSources` doesn't allow the kit, fail before creating anything with a message saying how to allow it [48]. | Adapter snapshot; pinned-ref validation; allowlist error text. | Needs `github.com/docker/` allowed; Pi paths from a Pi spike run before this slice (moved out of S6b). |
 | 21 | **End-to-end check (manual, real `sbx`)**, see below. | none | All items pass. |
 
 **End-to-end check (slice 21)**, on a base dir outside AppData:
@@ -167,7 +167,7 @@ Between slices 3 and 10b, sandboxes are created without sbxm kits. That's safe: 
 
 ## Progress and carry-over items
 
-**Progress (2026-09-25):** slices 0–13 done (11 was cut into 11a–d: hash in state and env, stored profile reused by `open`, drift refusal and `--rebuild`, drift in `list`), each with its real-`sbx` check where the plan has one (slices 8–9, 10a and 11c also checked manually by the user). Next: slice 14, after spike S6b (spec first, user approval).
+**Progress (2026-09-25):** slices 0–13 done (11 was cut into 11a–d: hash in state and env, stored profile reused by `open`, drift refusal and `--rebuild`, drift in `list`), each with its real-`sbx` check where the plan has one (slices 8–9, 10a and 11c also checked manually by the user). Spike S6b done (decisions 59–61). Next: slice 14.
 
 Gaps found while building, to handle in the slice named:
 - **Slice 17 (or sooner, small fix):** workspaces on `C:` fail, not only AppData [56]. `config init`'s starter `base_dir` (`~/sbxm-projects`, on `C:` on Windows) needs a different default or a prompt, and `doctor` should flag a base dir on `C:` (ideally by probing whether `sbx` can mount it, since the cause is unverified).
@@ -183,5 +183,5 @@ Comparisons, runs, `--repeat`, evals, Jev, headless `exec` (all M2); `sbx env` [
 ## Risks
 
 - **v2 kit format and `sbx kit` are experimental** [39]. Mitigation: one module, snapshot tests, `sbx kit validate` gate, and a `min_sbx_version` check.
-- **`files/home/` collides with files the harness kit writes at install.** Verified in S6 [49]: the Claude kit replaces `~/.claude/settings.json`, while `~/.claude/CLAUDE.md` and skills survive. Hooks need another route, found in S6b before slice 14.
+- **`files/home/` collides with files the harness kit writes at install.** Verified in S6 [49]: the Claude kit replaces `~/.claude/settings.json`, while `~/.claude/CLAUDE.md` and skills survive. S6b [59][61]: Claude hooks go through managed settings; `.codex/config.toml` is replaced too and a mixin's `.gemini/settings.json` drops the kit's defaults, so `home_files` rejects those paths.
 - **Rebuild loses harness session history.** It's shown to the user; `sbx kit add` (which keeps volumes) could be investigated later.
