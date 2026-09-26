@@ -45,7 +45,7 @@ pub fn entries(config_dir: &Path, backend: &dyn SandboxBackend) -> Result<Vec<En
     let mut known: Vec<(String, String, String, ConfigStatus)> = Vec::new();
     for (project, state) in state::load_all(&config.base_dir)? {
         for (harness, sandbox) in state.sandboxes {
-            let status = config_status(&config, &sandbox);
+            let status = config_status(&config, &project, &sandbox);
             known.push((project.clone(), harness, sandbox.sandbox, status));
         }
     }
@@ -84,9 +84,13 @@ pub fn entries(config_dir: &Path, backend: &dyn SandboxBackend) -> Result<Vec<En
     Ok(entries)
 }
 
-/// A profile that doesn't load is `Unknown`, not an error, so one broken
-/// profile doesn't hide every other sandbox.
-fn config_status(config: &GlobalConfig, sandbox: &state::SandboxState) -> ConfigStatus {
+/// A profile or project config that doesn't load is `Unknown`, not an error,
+/// so one broken file doesn't hide every other sandbox.
+fn config_status(
+    config: &GlobalConfig,
+    project: &str,
+    sandbox: &state::SandboxState,
+) -> ConfigStatus {
     let Some(stored) = &sandbox.config_hash else {
         return ConfigStatus::Changed;
     };
@@ -94,7 +98,7 @@ fn config_status(config: &GlobalConfig, sandbox: &state::SandboxState) -> Config
         .profile
         .as_deref()
         .unwrap_or(&config.default_profile);
-    match config.current_hash(profile) {
+    match config.current_hash(project, profile) {
         Ok(current) if current == *stored => ConfigStatus::Current,
         Ok(_) => ConfigStatus::Changed,
         Err(_) => ConfigStatus::Unknown,

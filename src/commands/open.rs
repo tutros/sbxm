@@ -91,7 +91,7 @@ fn check_unchanged(
         bail!("{sandbox} was created before sbxm recorded config hashes; {fix}");
     };
     let profile_name = entry.profile.as_deref().unwrap_or(&config.default_profile);
-    if *stored != config.current_hash(profile_name)? {
+    if *stored != config.current_hash(name, profile_name)? {
         bail!(
             "the config of {sandbox} (profile '{profile_name}') changed since it was created; {fix}"
         );

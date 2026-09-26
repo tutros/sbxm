@@ -60,9 +60,11 @@ impl GlobalConfig {
         Ok(config)
     }
 
-    /// [`config_hash`] of `profile_name` as it is now on disk.
-    pub fn current_hash(&self, profile_name: &str) -> Result<String> {
-        let profile = Profile::load(self.profiles_dir(), profile_name)?;
+    /// [`config_hash`] of `profile_name` merged with `project`'s
+    /// `sandbox.toml`, as they are now on disk.
+    pub fn current_hash(&self, project: &str, profile_name: &str) -> Result<String> {
+        let profile = Profile::load(self.profiles_dir(), profile_name)?
+            .with_project(&crate::project::metadata_dir(&self.base_dir, project))?;
         Ok(config_hash(profile_name, &profile, &self.resources))
     }
 
@@ -135,6 +137,7 @@ impl Profile {
         self.network.allow.extend(project.network.allow);
         self.network.deny.extend(project.network.deny);
         self.env.extend(project.env);
+        self.secrets.services.extend(project.secrets.services);
         if project.skills.store.is_some() {
             self.skills_store =
                 parse_skills_store(project.skills.store.as_deref(), "project config", &path)?;

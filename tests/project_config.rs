@@ -4,7 +4,8 @@
 mod common;
 
 use common::Env;
-use sbxm::backend::{FakeBackend, SkillsStore};
+use sbxm::backend::{FakeBackend, SandboxInfo, SkillsStore};
+use sbxm::commands::{list, open};
 
 /// Writes `.sbxm/demo/sandbox.toml`.
 fn write_project_config(env: &Env, contents: &str) {
@@ -143,4 +144,56 @@ fn reserved_env_name_in_project_config_is_rejected() {
         "{message}"
     );
     assert!(message.contains(&project_config_path(&env)), "{message}");
+}
+
+fn state_hash(env: &Env, project: &str) -> String {
+    let path = env
+        .base_dir()
+        .join(".sbxm")
+        .join(project)
+        .join("state.json");
+    let state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    state["sandboxes"]["claude"]["config_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned()
+}
+
+#[test]
+fn project_secrets_are_part_of_the_hash() {
+    let env = Env::new();
+    env.run("one", &FakeBackend::default()).unwrap();
+    write_project_config(&env, "[secrets]\nservices = [\"github\"]\n");
+    env.run("demo", &FakeBackend::default()).unwrap();
+
+    assert_ne!(state_hash(&env, "one"), state_hash(&env, "demo"));
+}
+
+#[test]
+fn editing_project_config_is_drift_for_list_and_open() {
+    let env = Env::new();
+    env.run("demo", &FakeBackend::default()).unwrap();
+    write_project_config(&env, "[network]\nallow = [\"example.org\"]\n");
+    let backend = FakeBackend::with_sandboxes(vec![SandboxInfo {
+        name: "sbxm-demo-claude".into(),
+        agent: "claude".into(),
+        status: "running".into(),
+    }]);
+
+    let entries = list::entries(&env.config_dir(), &backend).unwrap();
+    assert_eq!(entries[0].config, Some(list::ConfigStatus::Changed));
+
+    let err = open::run(
+        &env.config_dir(),
+        "demo",
+        &open::Options::default(),
+        &backend,
+        &mut std::io::sink(),
+    )
+    .unwrap_err();
+    assert!(
+        format!("{err:#}").contains("changed since it was created"),
+        "{err:#}"
+    );
 }
