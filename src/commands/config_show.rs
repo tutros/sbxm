@@ -46,14 +46,7 @@ pub fn render(config_dir: &Path, project: Option<&str>, options: &Options) -> Re
     out += &format!("# config hash: {hash}\n\n");
     out += &config::hash_input_toml(&profile_name, &profile, &config.resources)?;
     if options.kits {
-        let kits = [
-            ("common", kit::common(&profile_name, &profile, &hash)),
-            (
-                "harness-claude",
-                kit::harness_claude(&profile_name, &profile),
-            ),
-        ];
-        for (name, spec) in kits {
+        for (name, spec) in kit::all(&profile_name, &profile, &hash) {
             out += &format!("\n# kit: {name}\n");
             out += &spec.yaml()?;
             for path in spec.home_paths() {

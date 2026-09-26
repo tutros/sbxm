@@ -72,17 +72,8 @@ pub fn run(
     let kits_dir = project::metadata_dir(&config.base_dir, name)
         .join("kits")
         .join(&config_hash[..12]);
-    // Passed to `sbx create` in this order (decision 62).
-    let kits = [
-        (
-            kits_dir.join("common"),
-            kit::common(profile_name, &profile, &config_hash),
-        ),
-        (
-            kits_dir.join("harness-claude"),
-            kit::harness_claude(profile_name, &profile),
-        ),
-    ];
+    let kits = kit::all(profile_name, &profile, &config_hash)
+        .map(|(name, spec)| (kits_dir.join(name), spec));
     for (dir, spec) in &kits {
         kit::write(dir, spec)?;
     }

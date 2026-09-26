@@ -175,6 +175,15 @@ fn write_managed_settings(json: &str) -> Install {
     }
 }
 
+/// Every mixin for a sandbox, named by its kit subdirectory, in the order
+/// they're passed to `sbx create` (decision 62).
+pub fn all(profile_name: &str, profile: &Profile, config_hash: &str) -> [(&'static str, Spec); 2] {
+    [
+        ("common", common(profile_name, profile, config_hash)),
+        ("harness-claude", harness_claude(profile_name, profile)),
+    ]
+}
+
 impl Spec {
     /// The contents of `spec.yaml`.
     pub fn yaml(&self) -> Result<String> {
