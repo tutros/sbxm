@@ -120,18 +120,36 @@ fn entries_are_sorted_by_project_then_harness() {
 
 #[test]
 fn table_aligns_columns_and_explains_orphans() {
+    let with_config = |mut e: Entry, config| {
+        e.config = Some(config);
+        e
+    };
     let entries = vec![
-        entry("demo", "claude", "running", None),
-        entry("demo", "codex", "missing", Some(Problem::NoSandbox)),
+        entry("api", "claude", "running", None),
+        with_config(
+            entry("demo", "claude", "stopped", None),
+            ConfigStatus::Changed,
+        ),
+        // A missing sandbox is recreated from the current config anyway.
+        with_config(
+            entry("demo", "codex", "missing", Some(Problem::NoSandbox)),
+            ConfigStatus::Changed,
+        ),
+        with_config(
+            entry("web", "claude", "running", None),
+            ConfigStatus::Unknown,
+        ),
         entry("website", "claude", "stopped", Some(Problem::NoState)),
     ];
 
     assert_eq!(
         list::render_table(&entries),
-        "PROJECT  HARNESS  STATUS   NOTE\n\
-         demo     claude   running\n\
-         demo     codex    missing  sandbox missing; `sbxm open demo` recreates it\n\
-         website  claude   stopped  no sbxm state; not created by sbxm here\n"
+        "PROJECT  HARNESS  STATUS   CONFIG   NOTE\n\
+         api      claude   running  current\n\
+         demo     claude   stopped  changed  config changed; `sbxm open demo --rebuild` recreates it\n\
+         demo     codex    missing  changed  sandbox missing; `sbxm open demo` recreates it\n\
+         web      claude   running  unknown  its profile doesn't load; `sbxm open web` shows why\n\
+         website  claude   stopped           no sbxm state; not created by sbxm here\n"
     );
 }
 

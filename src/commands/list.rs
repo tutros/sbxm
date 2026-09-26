@@ -101,23 +101,25 @@ fn config_status(config: &GlobalConfig, sandbox: &state::SandboxState) -> Config
     }
 }
 
-/// Aligned columns; orphan rows get a note saying how to fix them.
+/// Aligned columns; orphans and changed configs get a note saying how to fix
+/// them.
 pub fn render_table(entries: &[Entry]) -> String {
     if entries.is_empty() {
         return "No sbxm sandboxes.\n".into();
     }
-    let rows: Vec<[String; 4]> = entries
+    let rows: Vec<[String; 5]> = entries
         .iter()
         .map(|e| {
             [
                 e.project.clone(),
                 e.harness.clone(),
                 e.status.clone(),
+                e.config.map(ConfigStatus::label).unwrap_or_default().into(),
                 note(e),
             ]
         })
         .collect();
-    let header = ["PROJECT", "HARNESS", "STATUS", "NOTE"].map(String::from);
+    let header = ["PROJECT", "HARNESS", "STATUS", "CONFIG", "NOTE"].map(String::from);
     let mut widths = header.clone().map(|h| h.len());
     for row in &rows {
         for (width, cell) in widths.iter_mut().zip(row) {
@@ -137,16 +139,32 @@ pub fn render_table(entries: &[Entry]) -> String {
     out
 }
 
-fn note(entry: &Entry) -> String {
-    match entry.problem {
-        None => String::new(),
-        Some(Problem::NoSandbox) => {
-            format!(
-                "sandbox missing; `sbxm open {}` recreates it",
-                entry.project
-            )
+impl ConfigStatus {
+    fn label(self) -> &'static str {
+        match self {
+            ConfigStatus::Current => "current",
+            ConfigStatus::Changed => "changed",
+            ConfigStatus::Unknown => "unknown",
         }
-        Some(Problem::NoState) => "no sbxm state; not created by sbxm here".into(),
+    }
+}
+
+/// Orphan problems come first: a missing sandbox is recreated from the
+/// current config anyway.
+fn note(entry: &Entry) -> String {
+    let project = &entry.project;
+    match (entry.problem, entry.config) {
+        (None, Some(ConfigStatus::Changed)) => {
+            format!("config changed; `sbxm open {project} --rebuild` recreates it")
+        }
+        (None, Some(ConfigStatus::Unknown)) => {
+            format!("its profile doesn't load; `sbxm open {project}` shows why")
+        }
+        (None, _) => String::new(),
+        (Some(Problem::NoSandbox), _) => {
+            format!("sandbox missing; `sbxm open {project}` recreates it")
+        }
+        (Some(Problem::NoState), _) => "no sbxm state; not created by sbxm here".into(),
     }
 }
 
