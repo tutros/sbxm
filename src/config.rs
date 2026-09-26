@@ -134,6 +134,10 @@ impl Profile {
         self.network.allow.extend(project.network.allow);
         self.network.deny.extend(project.network.deny);
         self.env.extend(project.env);
+        if project.skills.store.is_some() {
+            self.skills_store =
+                parse_skills_store(project.skills.store.as_deref(), "project config", &path)?;
+        }
         Ok(self)
     }
 
@@ -150,14 +154,15 @@ impl Profile {
             .with_context(|| format!("cannot read {}", path.display()))?;
         let mut profile: Self =
             toml::from_str(&text).with_context(|| format!("invalid profile {}", path.display()))?;
-        profile.check_env(name, &path)?;
-        profile.skills_store = parse_skills_store(profile.skills.store.as_deref(), name, &path)?;
+        let source = format!("profile '{name}'");
+        profile.check_env(&source, &path)?;
+        profile.skills_store = parse_skills_store(profile.skills.store.as_deref(), &source, &path)?;
         Ok(profile)
     }
 
     /// `sbx` rejects these too, but with messages that blame "the kit's author";
     /// sbxm points at the profile instead.
-    fn check_env(&self, name: &str, path: &Path) -> Result<()> {
+    fn check_env(&self, source: &str, path: &Path) -> Result<()> {
         for (key, value) in &self.env {
             let mut chars = key.chars();
             let valid = chars
@@ -166,21 +171,21 @@ impl Profile {
                 && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
             if !valid {
                 bail!(
-                    "invalid env name '{key}' in profile '{name}' ({}); use letters, digits and '_', \
+                    "invalid env name '{key}' in {source} ({}); use letters, digits and '_', \
                      not starting with a digit",
                     path.display()
                 );
             }
             if key.starts_with("SBXM_") {
                 bail!(
-                    "env name '{key}' in profile '{name}' uses the reserved prefix SBXM_ \
+                    "env name '{key}' in {source} uses the reserved prefix SBXM_ \
                      (sbxm sets its own SBXM_ variables); rename it in {}",
                     path.display()
                 );
             }
             if value.contains("${{") {
                 bail!(
-                    "env value for '{key}' in profile '{name}' contains '${{{{', which sbx reads as a \
+                    "env value for '{key}' in {source} contains '${{{{', which sbx reads as a \
                      kit expression; remove it from {}",
                     path.display()
                 );
@@ -215,17 +220,17 @@ pub fn config_hash(profile_name: &str, profile: &Profile, resources: &Resources)
 }
 
 /// `readonly` when unset (decision 46).
-fn parse_skills_store(value: Option<&str>, name: &str, path: &Path) -> Result<SkillsStore> {
+fn parse_skills_store(value: Option<&str>, source: &str, path: &Path) -> Result<SkillsStore> {
     match value {
         None | Some("readonly") => Ok(SkillsStore::ReadOnly),
         Some("off") => Ok(SkillsStore::Off),
         Some("readwrite") => bail!(
-            "skills.store = \"readwrite\" in profile '{name}' is not allowed: an agent could plant \
+            "skills.store = \"readwrite\" in {source} is not allowed: an agent could plant \
              skills that every other sandbox loads (decision 46); use \"readonly\" or \"off\" in {}",
             path.display()
         ),
         Some(other) => bail!(
-            "skills.store = \"{other}\" in profile '{name}' is not valid; use \"readonly\" or \"off\" in {}",
+            "skills.store = \"{other}\" in {source} is not valid; use \"readonly\" or \"off\" in {}",
             path.display()
         ),
     }

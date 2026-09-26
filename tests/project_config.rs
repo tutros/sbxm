@@ -4,7 +4,7 @@
 mod common;
 
 use common::Env;
-use sbxm::backend::FakeBackend;
+use sbxm::backend::{FakeBackend, SkillsStore};
 
 /// Writes `.sbxm/demo/sandbox.toml`.
 fn write_project_config(env: &Env, contents: &str) {
@@ -56,4 +56,27 @@ fn project_env_is_merged_per_key_with_the_project_winning() {
     assert_eq!(variables["A"], "1");
     assert_eq!(variables["B"], "9");
     assert_eq!(variables["C"], "3");
+}
+
+fn created_skills(env: &Env) -> SkillsStore {
+    let backend = FakeBackend::default();
+    env.run("demo", &backend).unwrap();
+    backend.creates()[0].skills
+}
+
+#[test]
+fn project_skills_store_overrides_the_profile() {
+    let env = Env::new();
+    write_project_config(&env, "[skills]\nstore = \"off\"\n");
+
+    assert_eq!(created_skills(&env), SkillsStore::Off);
+}
+
+#[test]
+fn profile_skills_store_is_kept_when_the_project_sets_none() {
+    let env = Env::new();
+    env.write_profile("default", "[skills]\nstore = \"off\"\n");
+    write_project_config(&env, "[env]\nA = \"1\"\n");
+
+    assert_eq!(created_skills(&env), SkillsStore::Off);
 }
