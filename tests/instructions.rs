@@ -72,3 +72,66 @@ fn reference_instructions_become_agent_instructions() {
     let spec: serde_json::Value = serde_norway::from_str(&text).unwrap();
     assert_eq!(spec["agentInstructions"]["content"], "Style guide.\n");
 }
+
+/// Runs `new demo` with `mandatory = <path>`, expecting an error; checks
+/// nothing was created.
+fn rejected_mandatory(env: &Env, path: &str) -> String {
+    let path = toml::Value::String(path.to_owned());
+    env.write_profile("default", &format!("[instructions]\nmandatory = {path}\n"));
+    let backend = FakeBackend::default();
+    let err = env.run("demo", &backend).unwrap_err();
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert!(!env.base_dir().join("demo").exists());
+    assert!(!env.base_dir().join(".sbxm").exists());
+    format!("{err:#}")
+}
+
+fn profile_toml(env: &Env) -> String {
+    env.profiles_dir()
+        .join("default")
+        .join("profile.toml")
+        .display()
+        .to_string()
+}
+
+#[test]
+fn missing_instructions_file_is_an_error() {
+    let env = Env::new();
+
+    let message = rejected_mandatory(&env, "instructions/missing.md");
+
+    let missing = env
+        .profiles_dir()
+        .join("default")
+        .join("instructions/missing.md");
+    assert!(
+        message.contains(&format!(
+            "instructions.mandatory file {} (profile 'default') is missing or not a file; \
+             create it or fix {}",
+            missing.display(),
+            profile_toml(&env)
+        )),
+        "{message}"
+    );
+}
+
+#[test]
+fn instructions_path_outside_the_profile_is_rejected() {
+    let env = Env::new();
+    let outside = env.tmp.path().join("outside.md");
+    std::fs::write(&outside, "x").unwrap();
+
+    for path in ["../outside.md", outside.to_str().unwrap()] {
+        let message = rejected_mandatory(&env, path);
+
+        assert!(
+            message.contains(&format!(
+                "instructions.mandatory = \"{path}\" in profile 'default' must be a relative \
+                 path inside {}; fix it in {}",
+                env.profiles_dir().join("default").display(),
+                profile_toml(&env)
+            )),
+            "{path}: {message}"
+        );
+    }
+}

@@ -182,10 +182,20 @@ impl Profile {
         profile.check_env(&source, &path)?;
         profile.skills_store = parse_skills_store(profile.skills.store.as_deref(), &source, &path)?;
         let dir = profiles_dir.join(name);
-        profile.mandatory_instructions =
-            read_instructions(profile.instructions.mandatory.as_deref(), &dir)?;
-        profile.reference_instructions =
-            read_instructions(profile.instructions.reference.as_deref(), &dir)?;
+        profile.mandatory_instructions = read_instructions(
+            "mandatory",
+            profile.instructions.mandatory.as_deref(),
+            &dir,
+            &source,
+            &path,
+        )?;
+        profile.reference_instructions = read_instructions(
+            "reference",
+            profile.instructions.reference.as_deref(),
+            &dir,
+            &source,
+            &path,
+        )?;
         Ok(profile)
     }
 
@@ -248,12 +258,39 @@ pub fn config_hash(profile_name: &str, profile: &Profile, resources: &Resources)
         .collect()
 }
 
-/// The contents of an instructions file, `None` when unset.
-fn read_instructions(relative: Option<&Path>, dir: &Path) -> Result<Option<String>> {
+/// The contents of `instructions.<key>`, `None` when unset. The path is
+/// relative to `dir` (the folder of `file`, which names it) and must stay
+/// inside it, so a profile is self-contained (decision 62).
+fn read_instructions(
+    key: &str,
+    relative: Option<&Path>,
+    dir: &Path,
+    source: &str,
+    file: &Path,
+) -> Result<Option<String>> {
+    use std::path::Component;
     let Some(relative) = relative else {
         return Ok(None);
     };
+    let inside = relative
+        .components()
+        .all(|c| matches!(c, Component::Normal(_) | Component::CurDir));
+    if !inside {
+        bail!(
+            "instructions.{key} = \"{}\" in {source} must be a relative path inside {}; fix it in {}",
+            relative.display(),
+            dir.display(),
+            file.display()
+        );
+    }
     let path = dir.join(relative);
+    if !path.is_file() {
+        bail!(
+            "instructions.{key} file {} ({source}) is missing or not a file; create it or fix {}",
+            path.display(),
+            file.display()
+        );
+    }
     let text = std::fs::read_to_string(&path)
         .with_context(|| format!("cannot read {}", path.display()))?;
     Ok(Some(text))
