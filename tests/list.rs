@@ -148,7 +148,7 @@ fn table_aligns_columns_and_explains_orphans() {
          api      claude   running  current\n\
          demo     claude   stopped  changed  config changed; `sbxm open demo --rebuild` recreates it\n\
          demo     codex    missing  changed  sandbox missing; `sbxm open demo` recreates it\n\
-         web      claude   running  unknown  its profile doesn't load; `sbxm open web` shows why\n\
+         web      claude   running  unknown  its profile or sandbox.toml doesn't load; `sbxm open web` shows why\n\
          website  claude   stopped           no sbxm state; not created by sbxm here\n"
     );
 }

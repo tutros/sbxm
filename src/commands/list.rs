@@ -162,7 +162,7 @@ fn note(entry: &Entry) -> String {
             format!("config changed; `sbxm open {project} --rebuild` recreates it")
         }
         (None, Some(ConfigStatus::Unknown)) => {
-            format!("its profile doesn't load; `sbxm open {project}` shows why")
+            format!("its profile or sandbox.toml doesn't load; `sbxm open {project}` shows why")
         }
         (None, _) => String::new(),
         (Some(Problem::NoSandbox), _) => {
