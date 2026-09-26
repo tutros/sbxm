@@ -167,10 +167,11 @@ Between slices 3 and 10b, sandboxes are created without sbxm kits. That's safe: 
 
 ## Progress and carry-over items
 
-**Progress (2026-09-25):** slices 0–14 done (11 was cut into 11a–d: hash in state and env, stored profile reused by `open`, drift refusal and `--rebuild`, drift in `list`), each with its real-`sbx` check where the plan has one (slices 8–9, 10a and 11c also checked manually by the user; slice 14's Claude loading checked once with `claude -p`, answer `QUINCE-5`). Spike S6b done (decisions 59–61). Next: slice 15.
+**Progress (2026-09-26):** slices 0–15 done (11 was cut into 11a–d: hash in state and env, stored profile reused by `open`, drift refusal and `--rebuild`, drift in `list`), each with its real-`sbx` check where the plan has one (slices 8–9, 10a and 11c also checked manually by the user; slice 14's Claude loading checked once with `claude -p`, answer `QUINCE-5`). Spike S6b done (decisions 59–61). Slice 15 was cut into 15a–c (`setup.install`, `home_files`, `managed_settings`; decisions 63–64), each checked against real `sbx`; 15c's `SessionStart` hook also confirmed firing once in `claude -p`. Next: slice 16.
 
 Gaps found while building, to handle in the slice named:
 - **Slice 17 (or sooner, small fix):** workspaces on `C:` fail, not only AppData [56]. `config init`'s starter `base_dir` (`~/sbxm-projects`, on `C:` on Windows) needs a different default or a prompt, and `doctor` should flag a base dir on `C:` (ideally by probing whether `sbx` can mount it, since the cause is unverified).
+- **Slice 18 (moved from 15, agreed 2026-09-26):** the loud warning for a configured feature the harness can't support [11]. Nothing triggers it until a second harness exists (e.g. `harness.claude.managed_settings` set for a Codex sandbox, or hooks with no Codex route).
 - **Slice 18:** `new` rewrites `state.json` instead of merging per harness. Merge when `--harness` lands; `rm`'s "last sandbox → delete kits" depends on it.
 - **Test gaps (low risk):** printing `sbx kit validate` warnings is untested (never seen non-empty); the terminal confirm prompt is only covered by the user's manual check.
 - **Housekeeping:** the S6 spike worktree `.claude/worktrees/agent-a48594dfc53404a8f` (branch `worktree-agent-a48594dfc53404a8f`) is still on disk, locked by the session that launched it. Its only change is already committed. Once no Claude session holds it: `git worktree remove --force --force <path>` and `git branch -D <branch>`.
