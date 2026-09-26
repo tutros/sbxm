@@ -360,21 +360,38 @@ impl Profile {
 /// sandbox: profile name and settings, resources and sbxm's version
 /// (decision 55). Maps are `BTreeMap`s, so the JSON is deterministic.
 pub fn config_hash(profile_name: &str, profile: &Profile, resources: &Resources) -> String {
-    #[derive(Serialize)]
-    struct Input<'a> {
-        sbxm_version: &'a str,
-        profile_name: &'a str,
-        profile: &'a Profile,
-        resources: &'a Resources,
+    let input = HashInput::new(profile_name, profile, resources);
+    sha256_hex(&serde_json::to_vec(&input).expect("config serializes"))
+}
+
+/// What [`config_hash`] hashes, as TOML, so `config show` explains drift
+/// (decision 65).
+pub fn hash_input_toml(
+    profile_name: &str,
+    profile: &Profile,
+    resources: &Resources,
+) -> Result<String> {
+    let input = HashInput::new(profile_name, profile, resources);
+    toml::to_string(&input).context("cannot render the config as TOML")
+}
+
+#[derive(Serialize)]
+struct HashInput<'a> {
+    sbxm_version: &'a str,
+    profile_name: &'a str,
+    profile: &'a Profile,
+    resources: &'a Resources,
+}
+
+impl<'a> HashInput<'a> {
+    fn new(profile_name: &'a str, profile: &'a Profile, resources: &'a Resources) -> Self {
+        HashInput {
+            sbxm_version: env!("CARGO_PKG_VERSION"),
+            profile_name,
+            profile,
+            resources,
+        }
     }
-    let json = serde_json::to_vec(&Input {
-        sbxm_version: env!("CARGO_PKG_VERSION"),
-        profile_name,
-        profile,
-        resources,
-    })
-    .expect("config serializes");
-    sha256_hex(&json)
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {

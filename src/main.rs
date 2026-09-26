@@ -56,5 +56,22 @@ fn main() -> anyhow::Result<()> {
         Command::Config {
             command: ConfigCommand::Init,
         } => commands::config_init::run(),
+        Command::Config {
+            command:
+                ConfigCommand::Show {
+                    project,
+                    profile,
+                    kits,
+                },
+        } => {
+            let options = commands::config_show::Options { profile, kits };
+            let output = commands::config_show::render(
+                &config::config_dir()?,
+                project.as_deref(),
+                &options,
+            )?;
+            print!("{output}");
+            Ok(())
+        }
     }
 }

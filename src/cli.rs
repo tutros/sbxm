@@ -65,4 +65,15 @@ pub enum Command {
 pub enum ConfigCommand {
     /// Write a starter global config and `default` profile.
     Init,
+    /// Print the merged config and its hash, without creating anything.
+    Show {
+        /// Merge this project's sandbox.toml and use its recorded profile.
+        project: Option<String>,
+        /// Profile to show (default: the project's recorded one, then `default_profile`).
+        #[arg(long)]
+        profile: Option<String>,
+        /// Also print the kits `sbxm new` would generate.
+        #[arg(long)]
+        kits: bool,
+    },
 }

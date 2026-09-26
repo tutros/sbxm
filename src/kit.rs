@@ -175,12 +175,26 @@ fn write_managed_settings(json: &str) -> Install {
     }
 }
 
+impl Spec {
+    /// The contents of `spec.yaml`.
+    pub fn yaml(&self) -> Result<String> {
+        Ok(serde_norway::to_string(self)?)
+    }
+
+    /// Paths under `files/home/`, `/`-separated.
+    pub fn home_paths(&self) -> impl Iterator<Item = String> + '_ {
+        self.home_files.iter().map(|(relative, _)| {
+            let parts: Vec<_> = relative.iter().map(|p| p.to_string_lossy()).collect();
+            parts.join("/")
+        })
+    }
+}
+
 /// Writes `<dir>/spec.yaml` and `<dir>/files/home/…`, creating `dir`.
 pub fn write(dir: &Path, spec: &Spec) -> Result<()> {
     fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
     let path = dir.join("spec.yaml");
-    fs::write(&path, serde_norway::to_string(spec)?)
-        .with_context(|| format!("cannot write {}", path.display()))?;
+    fs::write(&path, spec.yaml()?).with_context(|| format!("cannot write {}", path.display()))?;
     for (relative, bytes) in &spec.home_files {
         let path = dir.join("files").join("home").join(relative);
         let parent = path.parent().expect("home file has a parent");
