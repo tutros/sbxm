@@ -118,6 +118,11 @@ pub struct Profile {
     /// The folder `claude_home_files` came from, for error messages.
     #[serde(skip)]
     claude_home_dir: Option<PathBuf>,
+    /// The `harness.claude.managed_settings` JSON object, read by
+    /// [`Profile::load`] and re-serialized compactly, so reformatting the file
+    /// doesn't change the hash (decision 64).
+    #[serde(skip_deserializing)]
+    pub claude_managed_settings: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -132,6 +137,8 @@ struct HarnessPaths {
 struct ClaudePaths {
     #[serde(default)]
     home_files: Option<PathBuf>,
+    #[serde(default)]
+    managed_settings: Option<PathBuf>,
 }
 
 fn serialize_file_hashes<S: serde::Serializer>(
@@ -231,6 +238,14 @@ impl Profile {
             self.claude_home_dir = Some(dir);
             self.claude_home_files = files;
         }
+        if let Some(relative) = project.harness.claude.managed_settings.as_deref() {
+            self.claude_managed_settings = Some(read_managed_settings(
+                relative,
+                metadata_dir,
+                "project config",
+                &path,
+            )?);
+        }
         self.check_home_files()?;
         Ok(self)
     }
@@ -271,6 +286,10 @@ impl Profile {
             profile.claude_home_dir = Some(home);
             profile.claude_home_files = files;
         }
+        if let Some(relative) = profile.harness.claude.managed_settings.clone() {
+            profile.claude_managed_settings =
+                Some(read_managed_settings(&relative, &dir, &source, &path)?);
+        }
         profile.check_home_files()?;
         Ok(profile)
     }
@@ -285,8 +304,8 @@ impl Profile {
         if self.claude_home_files.contains_key(".claude/settings.json") {
             bail!(
                 ".claude/settings.json in harness.claude.home_files ({}) would be replaced by \
-                 the Claude kit; remove it, and configure hooks through managed settings \
-                 (decision 59) instead",
+                 the Claude kit; remove it, and configure hooks through \
+                 harness.claude.managed_settings instead",
                 dir.display()
             );
         }
@@ -459,6 +478,30 @@ fn collect_files(dir: &Path, prefix: &str, files: &mut BTreeMap<String, Vec<u8>>
         }
     }
     Ok(())
+}
+
+/// The JSON object in the file named by `harness.claude.managed_settings`,
+/// as compact JSON (decision 64).
+fn read_managed_settings(relative: &Path, dir: &Path, source: &str, file: &Path) -> Result<String> {
+    let key = "harness.claude.managed_settings";
+    let path = resolve_inside(key, relative, dir, source, file)?;
+    if !path.is_file() {
+        bail!(
+            "{key} file {} ({source}) is missing or not a file; create it or fix {}",
+            path.display(),
+            file.display()
+        );
+    }
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(value @ serde_json::Value::Object(_)) => Ok(value.to_string()),
+        _ => bail!(
+            "{key} file {} ({source}) is not a JSON object; fix it to hold Claude \
+             managed settings, e.g. {{\"hooks\": {{…}}}}",
+            path.display()
+        ),
+    }
 }
 
 /// `readonly` when unset (decision 46).

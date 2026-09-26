@@ -143,9 +143,35 @@ pub fn harness_claude(profile_name: &str, profile: &Profile) -> Spec {
         requires: Some(Requires { agent: "claude" }),
         permissions: None,
         environment: None,
-        setup: None,
+        setup: profile
+            .claude_managed_settings
+            .as_deref()
+            .map(|json| Setup {
+                install: vec![write_managed_settings(json)],
+            }),
         agent_instructions: None,
         home_files,
+    }
+}
+
+/// A root step writing Claude's managed settings, which take precedence over
+/// the settings the agent can edit without `sudo` (decisions 59, 64). `files/`
+/// can't target `/etc`. `json` is one line, so it can't end the quoted
+/// heredoc early, and escaping `$` keeps `${{` (a kit expression) out.
+fn write_managed_settings(json: &str) -> Install {
+    let json = json.replace('$', "\\u0024");
+    let file = "/etc/claude-code/managed-settings.json";
+    Install {
+        command: format!(
+            "set -e\n\
+             mkdir -p /etc/claude-code\n\
+             cat > {file} <<'SBXM_EOF'\n\
+             {json}\n\
+             SBXM_EOF\n\
+             chmod 644 {file}\n"
+        ),
+        user: Some("0".into()),
+        description: Some("sbxm: write Claude managed settings".into()),
     }
 }
 

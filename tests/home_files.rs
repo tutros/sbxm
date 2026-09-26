@@ -167,7 +167,10 @@ fn claude_settings_json_is_refused() {
 
     assert!(message.contains(".claude/settings.json"), "{message}");
     assert!(message.contains("replaced by the Claude kit"), "{message}");
-    assert!(message.contains("managed settings"), "{message}");
+    assert!(
+        message.contains("harness.claude.managed_settings"),
+        "{message}"
+    );
 }
 
 #[test]
