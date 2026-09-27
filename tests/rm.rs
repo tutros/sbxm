@@ -5,8 +5,9 @@ use std::path::PathBuf;
 
 use common::{Env, dir_link};
 use sbxm::backend::{FakeBackend, SandboxInfo};
-use sbxm::commands::rm;
+use sbxm::commands::{new, rm};
 use sbxm::confirm::Confirm;
+use sbxm::harness::Harness;
 
 /// Answers prompts from a script and records them.
 struct FakeConfirm {
@@ -59,7 +60,11 @@ fn plain_rm(env: &Env, project: &str, backend: &FakeBackend) -> anyhow::Result<(
 }
 
 fn purge(env: &Env, yes: bool, backend: &FakeBackend, confirm: &FakeConfirm) -> anyhow::Result<()> {
-    let options = rm::Options { purge: true, yes };
+    let options = rm::Options {
+        purge: true,
+        yes,
+        ..Default::default()
+    };
     rm::run(&env.config_dir(), "demo", &options, backend, confirm)
 }
 
@@ -292,4 +297,68 @@ fn purge_with_nothing_to_delete_is_an_error() {
         message.contains("nothing to purge for project 'demo'; `sbxm list` shows existing ones"),
         "{message}"
     );
+}
+
+/// `new demo` for Claude, then for Codex.
+fn setup_both() -> Env {
+    let env = setup();
+    let codex = new::Options {
+        harness: Harness::Codex,
+        ..Default::default()
+    };
+    env.run_with("demo", &codex, &FakeBackend::default())
+        .unwrap();
+    env
+}
+
+fn rm_codex(env: &Env, backend: &FakeBackend) -> anyhow::Result<()> {
+    let options = rm::Options {
+        harness: Harness::Codex,
+        ..Default::default()
+    };
+    rm::run(
+        &env.config_dir(),
+        "demo",
+        &options,
+        backend,
+        &FakeConfirm::never(),
+    )
+}
+
+#[test]
+fn rm_one_harness_keeps_the_other_and_its_kit() {
+    let env = setup_both();
+    let backend = FakeBackend::default();
+
+    rm_codex(&env, &backend).unwrap();
+
+    assert_eq!(backend.removes(), ["sbxm-demo-codex"]);
+    let state: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(metadata_dir(&env).join("state.json")).unwrap(),
+    )
+    .unwrap();
+    let harnesses: Vec<_> = state["sandboxes"].as_object().unwrap().keys().collect();
+    assert_eq!(harnesses, ["claude"]);
+    let kits: Vec<_> = std::fs::read_dir(metadata_dir(&env).join("kits"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(kits.len(), 1, "{kits:?}");
+    assert!(kits[0].join("harness-claude").is_dir(), "{kits:?}");
+}
+
+#[test]
+fn rm_missing_harness_names_it() {
+    let env = setup();
+    let backend = FakeBackend::default();
+
+    let err = rm_codex(&env, &backend).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(
+        message
+            .contains("no sbxm codex sandbox for project 'demo'; `sbxm list` shows existing ones"),
+        "{message}"
+    );
+    assert!(backend.removes().is_empty());
 }

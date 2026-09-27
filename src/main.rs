@@ -49,10 +49,15 @@ fn main() -> anyhow::Result<()> {
             project,
             purge,
             yes,
+            harness,
         } => commands::rm::run(
             &config::config_dir()?,
             &project,
-            &commands::rm::Options { purge, yes },
+            &commands::rm::Options {
+                purge,
+                yes,
+                harness,
+            },
             &SbxBackend,
             &Terminal,
         ),

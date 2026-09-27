@@ -3,10 +3,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use super::HARNESS;
+use super::harness_label;
 use crate::backend::SandboxBackend;
 use crate::config::GlobalConfig;
 use crate::confirm::Confirm;
+use crate::harness::Harness;
 use crate::{project, state};
 
 #[derive(Debug, Default)]
@@ -15,6 +16,8 @@ pub struct Options {
     pub purge: bool,
     /// Skip the confirmation (required for `purge` without a terminal).
     pub yes: bool,
+    /// Which of the project's sandboxes plain `rm` removes.
+    pub harness: Harness,
 }
 
 /// Removes the project's sandbox and its state. The workspace is kept unless
@@ -30,15 +33,18 @@ pub fn run(
     let config = GlobalConfig::load(config_dir)?;
     let metadata_dir = project::metadata_dir(&config.base_dir, name);
     let state = state::load(&metadata_dir)?;
-    let sandbox = state
-        .as_ref()
-        .and_then(|s| s.sandboxes.get(HARNESS))
-        .map(|s| s.sandbox.clone());
+    let harness = options.harness.as_str();
+    let entry = state.as_ref().and_then(|s| s.sandboxes.get(harness));
+    let sandbox = entry.map(|s| s.sandbox.clone());
 
     if !options.purge {
         let Some(sandbox) = sandbox else {
-            bail!("no sbxm sandbox for project '{name}'; `sbxm list` shows existing ones");
+            bail!(
+                "no sbxm {}sandbox for project '{name}'; `sbxm list` shows existing ones",
+                harness_label(options.harness)
+            );
         };
+        let hash = entry.and_then(|s| s.config_hash.clone());
         let last = state.as_ref().is_some_and(|s| s.sandboxes.len() == 1);
         let kits = metadata_dir.join("kits");
         if last && kits.symlink_metadata().is_ok() {
@@ -50,7 +56,11 @@ pub fn run(
             fs::remove_dir_all(&kits)
                 .with_context(|| format!("cannot delete {}", kits.display()))?;
         }
-        return state::remove_sandbox(&metadata_dir, HARNESS);
+        state::remove_sandbox(&metadata_dir, harness)?;
+        if let Some(hash) = &hash {
+            delete_unused_kit(&metadata_dir, hash)?;
+        }
+        return Ok(());
     }
 
     let dirs: Vec<PathBuf> = [config.base_dir.join(name), metadata_dir]
@@ -95,6 +105,29 @@ fn remove_sandbox(backend: &dyn SandboxBackend, sandbox: &str) -> Result<()> {
         Ok(sandboxes) if !sandboxes.iter().any(|s| s.name == sandbox) => Ok(()),
         _ => Err(err),
     }
+}
+
+/// Deletes `kits/<prefix>` of `hash` unless a sandbox in the project's state
+/// still uses it (decisions 55, 70).
+pub(crate) fn delete_unused_kit(metadata_dir: &Path, hash: &str) -> Result<()> {
+    // Read from state.json, so check it before building a path from it.
+    let Some(prefix) = hash.get(..12) else {
+        return Ok(());
+    };
+    if !prefix.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Ok(());
+    }
+    let in_use = state::load(metadata_dir)?.is_some_and(|s| {
+        s.sandboxes
+            .values()
+            .any(|e| e.config_hash.as_deref().and_then(|h| h.get(..12)) == Some(prefix))
+    });
+    let dir = metadata_dir.join("kits").join(prefix);
+    if in_use || dir.symlink_metadata().is_err() {
+        return Ok(());
+    }
+    check_deletable(&dir)?;
+    fs::remove_dir_all(&dir).with_context(|| format!("cannot delete {}", dir.display()))
 }
 
 /// Refuses links (deleting through one could reach outside the base dir) and
