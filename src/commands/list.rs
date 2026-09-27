@@ -1,10 +1,12 @@
 use std::path::Path;
 
 use anyhow::Result;
+use clap::ValueEnum;
 use serde::Serialize;
 
 use crate::backend::SandboxBackend;
 use crate::config::GlobalConfig;
+use crate::harness::Harness;
 use crate::{project, state};
 
 /// One row of `sbxm list`.
@@ -45,7 +47,7 @@ pub fn entries(config_dir: &Path, backend: &dyn SandboxBackend) -> Result<Vec<En
     let mut known: Vec<(String, String, String, ConfigStatus)> = Vec::new();
     for (project, state) in state::load_all(&config.base_dir)? {
         for (harness, sandbox) in state.sandboxes {
-            let status = config_status(&config, &project, &sandbox);
+            let status = config_status(&config, &project, &harness, &sandbox);
             known.push((project.clone(), harness, sandbox.sandbox, status));
         }
     }
@@ -89,6 +91,7 @@ pub fn entries(config_dir: &Path, backend: &dyn SandboxBackend) -> Result<Vec<En
 fn config_status(
     config: &GlobalConfig,
     project: &str,
+    harness: &str,
     sandbox: &state::SandboxState,
 ) -> ConfigStatus {
     let Some(stored) = &sandbox.config_hash else {
@@ -98,7 +101,10 @@ fn config_status(
         .profile
         .as_deref()
         .unwrap_or(&config.default_profile);
-    match config.current_hash(project, profile) {
+    let Ok(harness) = Harness::from_str(harness, false) else {
+        return ConfigStatus::Unknown;
+    };
+    match config.current_hash(project, profile, harness) {
         Ok(current) if current == *stored => ConfigStatus::Current,
         Ok(_) => ConfigStatus::Changed,
         Err(_) => ConfigStatus::Unknown,

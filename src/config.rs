@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -6,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::backend::SkillsStore;
+use crate::harness::Harness;
 
 /// `SBXM_CONFIG_DIR` if set, otherwise `~/.config/sbxm` on every platform.
 pub fn config_dir() -> Result<PathBuf> {
@@ -69,10 +71,20 @@ impl GlobalConfig {
 
     /// [`config_hash`] of `profile_name` merged with `project`'s
     /// `sandbox.toml`, as they are now on disk.
-    pub fn current_hash(&self, project: &str, profile_name: &str) -> Result<String> {
+    pub fn current_hash(
+        &self,
+        project: &str,
+        profile_name: &str,
+        harness: Harness,
+    ) -> Result<String> {
         let profile = Profile::load(self.profiles_dir(), profile_name)?
             .with_project(&crate::project::metadata_dir(&self.base_dir, project))?;
-        Ok(config_hash(profile_name, &profile, &self.resources))
+        Ok(config_hash(
+            profile_name,
+            &profile,
+            &self.resources,
+            harness,
+        ))
     }
 
     pub fn profiles_dir(&self) -> &Path {
@@ -85,7 +97,7 @@ impl GlobalConfig {
 /// `<profiles_dir>/<name>/profile.toml`. Unknown keys are errors, so a typo
 /// (or a section a later slice will support) is never silently ignored
 /// (decision 11).
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
     /// Left out of the hash: it never reaches the sandbox (decision 55).
@@ -132,14 +144,14 @@ pub struct Profile {
     pub claude_managed_settings: Option<String>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct HarnessPaths {
     #[serde(default)]
     claude: ClaudePaths,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ClaudePaths {
     #[serde(default)]
@@ -156,7 +168,7 @@ fn serialize_file_hashes<S: serde::Serializer>(
 }
 
 /// Paths relative to the file that names them (decision 62).
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct InstructionPaths {
     #[serde(default)]
@@ -165,14 +177,14 @@ struct InstructionPaths {
     reference: Option<PathBuf>,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Skills {
     #[serde(default)]
     store: Option<String>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Network {
     #[serde(default)]
@@ -181,14 +193,14 @@ pub struct Network {
     pub deny: Vec<String>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Secrets {
     #[serde(default)]
     pub services: Vec<String>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Setup {
     #[serde(default)]
@@ -364,10 +376,16 @@ impl Profile {
 }
 
 /// SHA-256 (lowercase hex) over canonical JSON of everything that shapes the
-/// sandbox: profile name and settings, resources and sbxm's version
-/// (decision 55). Maps are `BTreeMap`s, so the JSON is deterministic.
-pub fn config_hash(profile_name: &str, profile: &Profile, resources: &Resources) -> String {
-    let input = HashInput::new(profile_name, profile, resources);
+/// sandbox: harness, profile name and the settings that reach that harness,
+/// resources and sbxm's version (decisions 55, 69). Maps are `BTreeMap`s, so
+/// the JSON is deterministic.
+pub fn config_hash(
+    profile_name: &str,
+    profile: &Profile,
+    resources: &Resources,
+    harness: Harness,
+) -> String {
+    let input = HashInput::new(profile_name, profile, resources, harness);
     sha256_hex(&serde_json::to_vec(&input).expect("config serializes"))
 }
 
@@ -377,23 +395,41 @@ pub fn hash_input_toml(
     profile_name: &str,
     profile: &Profile,
     resources: &Resources,
+    harness: Harness,
 ) -> Result<String> {
-    let input = HashInput::new(profile_name, profile, resources);
+    let input = HashInput::new(profile_name, profile, resources, harness);
     toml::to_string(&input).context("cannot render the config as TOML")
 }
 
 #[derive(Serialize)]
 struct HashInput<'a> {
     sbxm_version: &'a str,
+    harness: &'a str,
     profile_name: &'a str,
-    profile: &'a Profile,
+    profile: Cow<'a, Profile>,
     resources: &'a Resources,
 }
 
 impl<'a> HashInput<'a> {
-    fn new(profile_name: &'a str, profile: &'a Profile, resources: &'a Resources) -> Self {
+    fn new(
+        profile_name: &'a str,
+        profile: &'a Profile,
+        resources: &'a Resources,
+        harness: Harness,
+    ) -> Self {
+        // Claude-only settings don't reach other harnesses, so editing them
+        // mustn't show as drift there (decision 69).
+        let profile = if harness == Harness::Claude {
+            Cow::Borrowed(profile)
+        } else {
+            let mut other = profile.clone();
+            other.claude_home_files.clear();
+            other.claude_managed_settings = None;
+            Cow::Owned(other)
+        };
         HashInput {
             sbxm_version: env!("CARGO_PKG_VERSION"),
+            harness: harness.as_str(),
             profile_name,
             profile,
             resources,

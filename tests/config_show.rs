@@ -77,6 +77,7 @@ fn prints_the_hash_input_of_a_profile() {
     # config hash: <hash>
 
     sbxm_version = "<version>"
+    harness = "claude"
     profile_name = "default"
 
     [profile]

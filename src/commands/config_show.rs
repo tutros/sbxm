@@ -38,14 +38,14 @@ pub fn render(config_dir: &Path, project: Option<&str>, options: &Options) -> Re
     if let Some(dir) = &metadata_dir {
         profile = profile.with_project(dir)?;
     }
-    let hash = config::config_hash(&profile_name, &profile, &config.resources);
+    let hash = config::config_hash(&profile_name, &profile, &config.resources, Harness::Claude);
 
     let mut out = format!("# profile: {profile_name}\n");
     if let Some(name) = project {
         out += &format!("# project: {name}\n");
     }
     out += &format!("# config hash: {hash}\n\n");
-    out += &config::hash_input_toml(&profile_name, &profile, &config.resources)?;
+    out += &config::hash_input_toml(&profile_name, &profile, &config.resources, Harness::Claude)?;
     if options.kits {
         for (name, spec) in kit::all(&profile_name, &profile, &hash, Harness::Claude) {
             out += &format!("\n# kit: {name}\n");

@@ -192,7 +192,7 @@ fn check_sandbox(
         std::process::id(),
         RUN.fetch_add(1, Ordering::Relaxed)
     ));
-    let hash = config::config_hash(profile_name, profile, &config.resources);
+    let hash = config::config_hash(profile_name, profile, &config.resources, Harness::Claude);
     let result = validate_kits(
         &root,
         kit::all(profile_name, profile, &hash, Harness::Claude),

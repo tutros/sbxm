@@ -40,7 +40,8 @@ pub fn run(
         .unwrap_or(&config.default_profile);
     let profile = Profile::load(config.profiles_dir(), profile_name)?
         .with_project(&project::metadata_dir(&config.base_dir, name))?;
-    let config_hash = config::config_hash(profile_name, &profile, &config.resources);
+    let config_hash =
+        config::config_hash(profile_name, &profile, &config.resources, options.harness);
 
     if !config.base_dir.is_dir() {
         bail!(

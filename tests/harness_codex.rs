@@ -6,7 +6,8 @@ mod common;
 
 use assert_cmd::Command;
 use common::Env;
-use sbxm::backend::{CreateSpec, FakeBackend, SkillsStore};
+use sbxm::backend::{CreateSpec, FakeBackend, SandboxInfo, SkillsStore};
+use sbxm::commands::list::{self, ConfigStatus};
 use sbxm::commands::new;
 use sbxm::harness::Harness;
 
@@ -162,6 +163,61 @@ fn claude_only_settings_on_claude_dont_warn() {
     let warnings = warnings(&env, &new::Options::default(), &FakeBackend::default());
 
     assert_eq!(warnings, "");
+}
+
+/// Slice 18c: each harness has its own hash, over what reaches it (decision 69).
+#[test]
+fn claude_and_codex_hashes_differ() {
+    let env = Env::new();
+    let backend = FakeBackend::default();
+
+    env.run("demo", &backend).unwrap();
+    env.run_with("demo", &codex(), &backend).unwrap();
+
+    let path = env.base_dir().join(".sbxm").join("demo").join("state.json");
+    let state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_ne!(
+        state["sandboxes"]["claude"]["config_hash"],
+        state["sandboxes"]["codex"]["config_hash"]
+    );
+}
+
+#[test]
+fn claude_only_edit_shows_drift_on_the_claude_sandbox_only() {
+    let env = Env::new();
+    write_claude_only_profile(&env);
+    let backend = FakeBackend::default();
+    env.run("demo", &backend).unwrap();
+    env.run_with("demo", &codex(), &backend).unwrap();
+
+    std::fs::write(
+        env.profiles_dir().join("default").join("managed.json"),
+        r#"{"model": "changed"}"#,
+    )
+    .unwrap();
+
+    let running = |name: &str, agent: &str| SandboxInfo {
+        name: name.into(),
+        agent: agent.into(),
+        status: "running".into(),
+    };
+    let backend = FakeBackend::with_sandboxes(vec![
+        running("sbxm-demo-claude", "claude"),
+        running("sbxm-demo-codex", "codex"),
+    ]);
+    let configs: Vec<_> = list::entries(&env.config_dir(), &backend)
+        .unwrap()
+        .into_iter()
+        .map(|e| (e.harness, e.config))
+        .collect();
+    assert_eq!(
+        configs,
+        vec![
+            ("claude".to_owned(), Some(ConfigStatus::Changed)),
+            ("codex".to_owned(), Some(ConfigStatus::Current)),
+        ]
+    );
 }
 
 #[test]
