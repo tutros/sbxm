@@ -405,5 +405,22 @@ fn codex_mandatory_instructions_against_real_sbx() {
         "codex debug prompt-input: {}",
         String::from_utf8_lossy(&prompt.stderr)
     );
-    // `Cleanup` removes the sandbox: `rm --harness` arrives in slice 18c.
+
+    // Slice 18c: stop and rm act on the Codex sandbox.
+    let codex = sbxm::harness::Harness::Codex;
+    stop::run(config_dir.path(), &project, codex, &SbxBackend).unwrap();
+    let rm_codex = rm::Options {
+        harness: codex,
+        ..Default::default()
+    };
+    rm::run(
+        config_dir.path(),
+        &project,
+        &rm_codex,
+        &SbxBackend,
+        &Terminal,
+    )
+    .unwrap();
+    let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
+    assert!(!String::from_utf8_lossy(&ls.stdout).contains(&sandbox));
 }
