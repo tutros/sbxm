@@ -99,7 +99,7 @@ Running log of design decisions for model_compare. See `idea.md` for the origina
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `spikes/S6.md`, evidence `spikes/S6-results.md`, conclusions in decisions 48 and 49.
 - **S6b:** Done 2026-09-25 (partial); spec `spikes/S6b.md`, evidence `spikes/S6b-results.md`, conclusions in decisions 59–61. Q1 (non-empty skills store) blocked and left open [60]. Pi moved to a later spike before slice 20 (needs `kit.allowedSources` [48]).
-- **S7 (Pi):** spec `spikes/S7.md` approved 2026-09-27; needs `kit.allowedSources` to include `github.com/docker/`, set by the user before the run [48].
+- **S7 (Pi):** Done 2026-09-27 (all questions answered); spec `spikes/S7.md`, evidence `spikes/S7-results.md`. Conclusions pending the user's decisions.
 - **S5 (M2):** Headless runs per harness inside `sbx` (Claude Code, Codex, Gemini CLI, Pi): prompt in, run to completion, extract answer + transcript + token usage (decision 13). Leads: the v3 kit spec has `agent-sessions@1` (`prompt: ["-p", "{{.Prompt}}"]` for claude), but `sbx` 0.43 has no CLI verb for it. Likely route is `sbx exec <sandbox> <harness-cli> <headless flags>`.
 
 ## Spike results (2026-09-24, sbx v0.43.0, Windows)
