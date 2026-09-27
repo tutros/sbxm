@@ -433,7 +433,7 @@ fn unknown_harness_in_state_fails() {
     std::fs::create_dir_all(&metadata).unwrap();
     std::fs::write(
         metadata.join("state.json"),
-        r#"{"sandboxes": {"gemini": {"sandbox": "sbxm-demo-gemini", "workspace": "unused", "created_at": 0}}}"#,
+        r#"{"sandboxes": {"pi": {"sandbox": "sbxm-demo-pi", "workspace": "unused", "created_at": 0}}}"#,
     )
     .unwrap();
 
@@ -442,7 +442,7 @@ fn unknown_harness_in_state_fails() {
     assert!(report.failed());
     assert!(
         report.render().contains(&format!(
-            "FAIL project demo (gemini, profile 'default'): sbxm doesn't know this harness; \
+            "FAIL project demo (pi, profile 'default'): sbxm doesn't know this harness; \
              use an sbxm version that does, or remove its entry from {}",
             metadata.join("state.json").display()
         )),

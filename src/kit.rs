@@ -139,6 +139,7 @@ pub fn harness(profile_name: &str, profile: &Profile, harness: Harness) -> Spec 
     let (name, agent) = match harness {
         Harness::Claude => ("sbxm-harness-claude", "claude"),
         Harness::Codex => ("sbxm-harness-codex", "codex"),
+        Harness::Gemini => ("sbxm-harness-gemini", "gemini"),
     };
     Spec {
         schema_version: "2",
@@ -193,6 +194,7 @@ pub fn all(
     let harness_dir = match harness {
         Harness::Claude => "harness-claude",
         Harness::Codex => "harness-codex",
+        Harness::Gemini => "harness-gemini",
     };
     [
         ("common", common(profile_name, profile, config_hash)),

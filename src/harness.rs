@@ -11,6 +11,7 @@ pub enum Harness {
     #[default]
     Claude,
     Codex,
+    Gemini,
 }
 
 impl Harness {
@@ -19,6 +20,7 @@ impl Harness {
         match self {
             Harness::Claude => "claude",
             Harness::Codex => "codex",
+            Harness::Gemini => "gemini",
         }
     }
 
@@ -28,6 +30,7 @@ impl Harness {
         match self {
             Harness::Claude => PathBuf::from(".claude").join("CLAUDE.md"),
             Harness::Codex => PathBuf::from(".codex").join("AGENTS.md"),
+            Harness::Gemini => PathBuf::from(".gemini").join("GEMINI.md"),
         }
     }
 

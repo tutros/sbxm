@@ -100,18 +100,18 @@ fn unsupported_harness_is_rejected_and_creates_nothing() {
     let output = Command::cargo_bin("sbxm")
         .unwrap()
         .env("SBXM_CONFIG_DIR", env.config_dir())
-        .args(["new", "demo", "--harness", "gemini"])
+        .args(["new", "demo", "--harness", "pi"])
         .output()
         .unwrap();
 
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        stderr.contains("invalid value 'gemini' for '--harness"),
+        stderr.contains("invalid value 'pi' for '--harness"),
         "{stderr}"
     );
     assert!(
-        stderr.contains("[possible values: claude, codex]"),
+        stderr.contains("[possible values: claude, codex, gemini]"),
         "{stderr}"
     );
     assert!(!env.base_dir().join("demo").exists());
