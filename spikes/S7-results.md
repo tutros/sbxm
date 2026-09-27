@@ -274,6 +274,22 @@ In a sandbox without the mixin, Pi itself creates `~/.pi/agent/auth.json` and `~
 - Pi floats with the image (`pi-image:latest`, rebuilt nightly): pinning the kit SHA doesn't pin Pi's version (0.87.1 today). The Pi image is on `docker.io/sbx/`, not checked against any image allowlist.
 - Pi's default `--provider` is `google`; with an Anthropic key the effective model was `anthropic/claude-opus-4-8`. sbxm's Pi adapter should pass `--model` explicitly.
 
+## Follow-up check by the main session (2026-09-27): the Docker Hub kit ref
+
+- Tags (`https://hub.docker.com/v2/repositories/sbx/pi-kit/tags?ordering=last_updated`): `latest` and
+  `20260924-d058fedc156325f87612d9bcd9bd313ab74ba100` share digest `sha256:7b38738e4412…`; older tags follow the same
+  `<YYYYMMDD>-<full repo SHA>` form. No tag for `869c8399…` (the repo HEAD in Q1), presumably because `pi/` didn't
+  change after `d058fedc`.
+- With `DOCKER_SANDBOXES_KIT_ALLOWED_SOURCES='["docker.io/"]'` (the default list, set for these commands only):
+  `sbx create --name spike-s7-check --cpus 2 -m 2g --skills readonly --kit <mixin, requires.agent: pi> 'docker.io/sbx/pi-kit:20260924-d058fedc156325f87612d9bcd9bd313ab74ba100' E:\sbxm-it\s7check\ws`
+  → exit 0, `agent pi`, `copy 1 home file(s)`, the same install step and credential note as Q3;
+  `cat /home/agent/.pi/agent/AGENTS.md` → the mixin's canary.
+- Same override, the GitHub ref at `869c8399…` → refused, `Your current kit.allowedSources: - docker.io/`. So the
+  override was in effect, and the Docker Hub ref needs no allowlist change. (`sbx settings get` doesn't show the env
+  override.)
+- Cleanup: `sbx rm -f spike-s7-check` → removed; `sbx ls --json` → `[]`; `E:\sbxm-it\s7check` removed;
+  `kit.allowedSources` unchanged.
+
 ## Cleanup
 
 `sbx rm -f spike-s7-pi` → `Sandbox 'spike-s7-pi' removed`; `sbx rm -f spike-s7-pi-config` → `Sandbox 'spike-s7-pi-config' removed`. `Remove-Item -Recurse -Force E:\sbxm-it\spike-s7`. `spike-s7-refused` was never created.
