@@ -322,3 +322,66 @@ services = ["{missing}"]
     );
     assert!(!base_dir.join(&project).exists());
 }
+
+/// Slice 18a: a Codex sandbox gets the mandatory instructions as
+/// `~/.codex/AGENTS.md`, and Codex renders them into its prompt.
+/// `codex debug prompt-input` makes no model call, so no secret is needed.
+#[test]
+#[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
+fn codex_mandatory_instructions_against_real_sbx() {
+    let base_dir = real_base_dir();
+    let project = format!("sbxm-it-{}-codex", std::process::id());
+    let sandbox = format!("sbxm-{project}-codex");
+    let _cleanup = Cleanup {
+        sandbox: sandbox.clone(),
+        dirs: vec![
+            base_dir.join(&project),
+            base_dir.join(".sbxm").join(&project),
+        ],
+        shared_dirs: vec![base_dir.join(".sbxm")],
+    };
+    let config_dir = TempDir::new().unwrap();
+    let base = toml::Value::String(base_dir.to_str().unwrap().to_owned());
+    std::fs::write(
+        config_dir.path().join("config.toml"),
+        format!("base_dir = {base}\n\n[resources]\ncpus = 2\nmemory = \"2g\"\n"),
+    )
+    .unwrap();
+    let profile_dir = config_dir.path().join("profiles").join("default");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    std::fs::write(
+        profile_dir.join("profile.toml"),
+        "[instructions]\nmandatory = \"mandatory.md\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        profile_dir.join("mandatory.md"),
+        "REAL TEST CANARY: the word is DAMSON-7\n",
+    )
+    .unwrap();
+
+    let options = new::Options {
+        harness: sbxm::harness::Harness::Codex,
+        ..Default::default()
+    };
+    new::run(config_dir.path(), &project, &options, &SbxBackend).unwrap();
+
+    let agents_md = Command::new("sbx")
+        .args(["exec", &sandbox, "cat", "/home/agent/.codex/AGENTS.md"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&agents_md.stdout).trim(),
+        "REAL TEST CANARY: the word is DAMSON-7"
+    );
+    let prompt = Command::new("sbx")
+        .args(["exec", &sandbox, "codex", "debug", "prompt-input", "hi"])
+        .output()
+        .unwrap();
+    assert!(
+        String::from_utf8_lossy(&prompt.stdout).contains("DAMSON-7"),
+        "codex debug prompt-input: {}",
+        String::from_utf8_lossy(&prompt.stderr)
+    );
+    // `Cleanup` removes the sandbox: `rm --harness` arrives in slice 18c.
+}
