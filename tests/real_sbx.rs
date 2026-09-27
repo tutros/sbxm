@@ -248,7 +248,13 @@ fn lifecycle_against_real_sbx() {
     println!("list status for {sandbox}: {}", entry.status);
 
     // Slice 6: `stop` stops it, and `list` shows that.
-    stop::run(config_dir.path(), &project, &SbxBackend).unwrap();
+    stop::run(
+        config_dir.path(),
+        &project,
+        sbxm::harness::Harness::Claude,
+        &SbxBackend,
+    )
+    .unwrap();
     let entries = list::entries(config_dir.path(), &SbxBackend).unwrap();
     let entry = entries.iter().find(|e| e.sandbox == sandbox).unwrap();
     assert_eq!(entry.status, "stopped");

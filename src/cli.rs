@@ -47,6 +47,9 @@ pub enum Command {
     Stop {
         /// Project name.
         project: String,
+        /// Which of the project's sandboxes to stop.
+        #[arg(long, value_enum, default_value_t)]
+        harness: Harness,
     },
     /// Remove a project's sandbox and state; the workspace is kept unless --purge.
     Rm {

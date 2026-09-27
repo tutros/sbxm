@@ -42,8 +42,8 @@ fn main() -> anyhow::Result<()> {
             &SbxBackend,
             &mut std::io::stderr(),
         ),
-        Command::Stop { project } => {
-            commands::stop::run(&config::config_dir()?, &project, &SbxBackend)
+        Command::Stop { project, harness } => {
+            commands::stop::run(&config::config_dir()?, &project, harness, &SbxBackend)
         }
         Command::Rm {
             project,
