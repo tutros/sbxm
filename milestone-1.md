@@ -155,7 +155,7 @@ Between slices 3 and 10b, sandboxes are created without sbxm kits. That's safe: 
 | 17 | `sbxm doctor` reports every check in the Commands table and exits non-zero on any failure. | One test per check, pass and fail (incl. base dir under AppData, `sbx` too old, Pi needed but `github.com/docker/` not in `kit.allowedSources` [48]). | Clean on a correct setup. |
 | 18 | `sbxm new demo --harness codex` works, including mandatory instructions. | Adapter snapshot. | Mandatory file at `~/.codex/AGENTS.md` [49]; confirm with `codex debug prompt-input` (no credentials needed). |
 | 19 | Same for `--harness gemini`. | Adapter snapshot. | Mandatory file at `~/.gemini/GEMINI.md` [49]; loading unverified without Google credentials. |
-| 20 | Same for `--harness pi`, using the Pi kit ref pinned to a commit SHA. If `kit.allowedSources` doesn't allow the kit, fail before creating anything with a message saying how to allow it [48]. | Adapter snapshot; pinned-ref validation; allowlist error text. | Needs `github.com/docker/` allowed; Pi paths from a Pi spike run before this slice (moved out of S6b). |
+| 20 | Same for `--harness pi`, using the Docker Hub Pi kit pinned to an immutable tag [73] (no allowlist check). | Adapter snapshot; the pinned kit ref in `sbx create`. | Mandatory file at `~/.pi/agent/AGENTS.md` and in Pi's rendered prompt (S7). |
 | 21 | **End-to-end check (manual, real `sbx`)**, see below. | none | All items pass. |
 
 **End-to-end check (slice 21)**, on a base dir outside AppData:
