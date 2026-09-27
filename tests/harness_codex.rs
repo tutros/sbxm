@@ -1,5 +1,6 @@
 //! Slice 18a: `new --harness codex` creates a Codex sandbox with a
 //! `harness-codex` mixin, and state keeps one entry per harness (decision 68).
+//! Slice 18b: Claude-only settings on a Codex sandbox warn loudly (decision 11).
 
 mod common;
 
@@ -114,4 +115,60 @@ fn unsupported_harness_is_rejected_and_creates_nothing() {
     );
     assert!(!env.base_dir().join("demo").exists());
     assert!(!env.base_dir().join(".sbxm").exists());
+}
+
+/// A profile setting both Claude-only settings, with their files.
+fn write_claude_only_profile(env: &Env) {
+    env.write_profile(
+        "default",
+        "[harness.claude]\nhome_files = \"home\"\nmanaged_settings = \"managed.json\"\n",
+    );
+    let dir = env.profiles_dir().join("default");
+    std::fs::create_dir_all(dir.join("home").join(".claude")).unwrap();
+    std::fs::write(dir.join("home").join(".claude").join("notes.md"), "notes\n").unwrap();
+    std::fs::write(dir.join("managed.json"), "{}").unwrap();
+}
+
+/// Runs `new demo` and returns what it wrote to its warning output.
+fn warnings(env: &Env, options: &new::Options, backend: &FakeBackend) -> String {
+    let mut warn = Vec::new();
+    new::run(&env.config_dir(), "demo", options, backend, &mut warn).unwrap();
+    String::from_utf8(warn).unwrap()
+}
+
+#[test]
+fn claude_only_settings_on_codex_warn_and_still_create() {
+    let env = Env::new();
+    write_claude_only_profile(&env);
+    let backend = FakeBackend::default();
+
+    let warnings = warnings(&env, &codex(), &backend);
+
+    assert_eq!(
+        warnings,
+        "warning: harness.claude.home_files is set, but codex sandboxes don't support it: \
+         none of its files reach sbxm-demo-codex\n\
+         warning: harness.claude.managed_settings is set, but codex sandboxes don't support it: \
+         its settings (hooks included) don't reach sbxm-demo-codex\n"
+    );
+    assert_eq!(backend.creates().len(), 1);
+}
+
+#[test]
+fn claude_only_settings_on_claude_dont_warn() {
+    let env = Env::new();
+    write_claude_only_profile(&env);
+
+    let warnings = warnings(&env, &new::Options::default(), &FakeBackend::default());
+
+    assert_eq!(warnings, "");
+}
+
+#[test]
+fn codex_without_claude_only_settings_doesnt_warn() {
+    let env = Env::new();
+
+    let warnings = warnings(&env, &codex(), &FakeBackend::default());
+
+    assert_eq!(warnings, "");
 }
