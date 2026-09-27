@@ -7,6 +7,7 @@ mod common;
 use common::Env;
 use sbxm::backend::FakeBackend;
 use sbxm::commands::{config_show, new};
+use sbxm::harness::Harness;
 
 fn show(env: &Env, project: Option<&str>, options: &config_show::Options) -> String {
     config_show::render(&env.config_dir(), project, options).unwrap()
@@ -231,4 +232,53 @@ fn cli_prints_the_config() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("# config hash: "), "{stdout}");
     assert!(stdout.contains("# kit: harness-claude"), "{stdout}");
+}
+
+/// Slice 18c: `--harness` shows that harness's hash input and kits (decision 69).
+#[test]
+fn codex_uses_its_own_recorded_profile_and_hash() {
+    let env = Env::new();
+    env.write_profile("other", "[env]\nOTHER = \"1\"\n");
+    env.run("demo", &FakeBackend::default()).unwrap();
+    let codex = new::Options {
+        profile: Some("other".into()),
+        harness: Harness::Codex,
+        ..new::Options::default()
+    };
+    env.run_with("demo", &codex, &FakeBackend::default())
+        .unwrap();
+    let options = config_show::Options {
+        harness: Harness::Codex,
+        ..config_show::Options::default()
+    };
+
+    let output = show(&env, Some("demo"), &options);
+
+    assert!(output.contains("# profile: other"), "{output}");
+    assert!(output.contains("harness = \"codex\""), "{output}");
+    let path = env.base_dir().join(".sbxm").join("demo").join("state.json");
+    let state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(
+        printed_hash(&output),
+        state["sandboxes"]["codex"]["config_hash"].as_str().unwrap()
+    );
+}
+
+#[test]
+fn codex_kits_are_printed() {
+    let env = Env::new();
+    env.write_profile("default", "[instructions]\nmandatory = \"mandatory.md\"\n");
+    write_profile_file(&env, "mandatory.md", "Run the tests.\n");
+    let options = config_show::Options {
+        kits: true,
+        harness: Harness::Codex,
+        ..config_show::Options::default()
+    };
+
+    let output = show(&env, None, &options);
+
+    assert!(output.contains("# kit: harness-codex"), "{output}");
+    assert!(output.contains("# files/home/.codex/AGENTS.md"), "{output}");
+    assert!(!output.contains("harness-claude"), "{output}");
 }

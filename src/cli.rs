@@ -91,5 +91,8 @@ pub enum ConfigCommand {
         /// Also print the kits `sbxm new` would generate.
         #[arg(long)]
         kits: bool,
+        /// Which harness's config and kits to show.
+        #[arg(long, value_enum, default_value_t)]
+        harness: Harness,
     },
 }

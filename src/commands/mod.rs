@@ -9,9 +9,6 @@ pub mod stop;
 
 use crate::harness::Harness;
 
-/// Only Claude until `--harness` arrives (milestone 1, slice 18).
-pub(crate) const HARNESS: &str = "claude";
-
 /// The `--harness` argument selecting `harness` in a hint, empty for the
 /// default, so Claude-only users see the commands they already know.
 fn harness_flag(harness: Harness) -> String {

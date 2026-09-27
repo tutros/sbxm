@@ -86,9 +86,14 @@ fn main() -> anyhow::Result<()> {
                     project,
                     profile,
                     kits,
+                    harness,
                 },
         } => {
-            let options = commands::config_show::Options { profile, kits };
+            let options = commands::config_show::Options {
+                profile,
+                kits,
+                harness,
+            };
             let output = commands::config_show::render(
                 &config::config_dir()?,
                 project.as_deref(),
