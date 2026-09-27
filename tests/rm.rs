@@ -362,3 +362,21 @@ fn rm_missing_harness_names_it() {
     );
     assert!(backend.removes().is_empty());
 }
+
+#[test]
+fn purge_removes_every_sandbox_of_the_project() {
+    let env = setup_both();
+    let backend = FakeBackend::default();
+    let confirm = FakeConfirm::new(true, true);
+
+    purge(&env, false, &backend, &confirm).unwrap();
+
+    assert_eq!(backend.removes(), ["sbxm-demo-claude", "sbxm-demo-codex"]);
+    assert!(!workspace(&env).exists());
+    assert!(!metadata_dir(&env).exists());
+    let prompts = confirm.prompts();
+    assert!(
+        prompts[0].contains("sbxm-demo-claude") && prompts[0].contains("sbxm-demo-codex"),
+        "{prompts:?}"
+    );
+}

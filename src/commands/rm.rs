@@ -67,26 +67,35 @@ pub fn run(
         .into_iter()
         .filter(|dir| dir.symlink_metadata().is_ok())
         .collect();
-    if dirs.is_empty() && sandbox.is_none() {
+    // Project-wide: the workspace is shared by every harness (decision 70).
+    let sandboxes: Vec<String> = state
+        .iter()
+        .flat_map(|s| s.sandboxes.values().map(|e| e.sandbox.clone()))
+        .collect();
+    if dirs.is_empty() && sandboxes.is_empty() {
         bail!("nothing to purge for project '{name}'; `sbxm list` shows existing ones");
     }
     for dir in &dirs {
         check_deletable(dir)?;
     }
-    let listing: Vec<String> = dirs.iter().map(|d| format!("  {}", d.display())).collect();
+    let listing: Vec<String> = dirs
+        .iter()
+        .map(|d| format!("  {}", d.display()))
+        .chain(sandboxes.iter().map(|s| format!("  sandbox {s}")))
+        .collect();
     let listing = listing.join("\n");
     if !options.yes {
         if !confirm.is_interactive() {
             bail!("refusing to purge without a terminal; pass --yes to delete:\n{listing}");
         }
         if !confirm.confirm(&format!(
-            "Permanently delete these directories?\n{listing}\n"
+            "Permanently delete these directories and sandboxes?\n{listing}\n"
         ))? {
             bail!("purge cancelled; nothing was deleted");
         }
     }
 
-    if let Some(sandbox) = &sandbox {
+    for sandbox in &sandboxes {
         remove_sandbox(backend, sandbox)?;
     }
     for dir in &dirs {

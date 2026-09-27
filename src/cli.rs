@@ -61,8 +61,8 @@ pub enum Command {
         /// Don't ask for confirmation (needed for --purge without a terminal).
         #[arg(long, requires = "purge")]
         yes: bool,
-        /// Which of the project's sandboxes to remove.
-        #[arg(long, value_enum, default_value_t)]
+        /// Which of the project's sandboxes to remove (--purge removes all).
+        #[arg(long, value_enum, default_value_t, conflicts_with = "purge")]
         harness: Harness,
     },
     /// Check sbx, the config and the base dir; exits non-zero if any check fails.
