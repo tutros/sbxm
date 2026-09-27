@@ -11,7 +11,13 @@ fn new_with_profile(env: &Env, profile: Option<&str>, backend: &FakeBackend) -> 
         profile: profile.map(String::from),
         ..Default::default()
     };
-    new::run(&env.config_dir(), "demo", &options, backend)
+    new::run(
+        &env.config_dir(),
+        "demo",
+        &options,
+        backend,
+        &mut std::io::sink(),
+    )
 }
 
 fn assert_nothing_created(env: &Env, backend: &FakeBackend) {

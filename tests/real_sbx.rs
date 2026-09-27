@@ -117,6 +117,7 @@ fn lifecycle_against_real_sbx() {
         &project,
         &new::Options::default(),
         &SbxBackend,
+        &mut std::io::stderr(),
     )
     .unwrap();
 
@@ -219,7 +220,14 @@ fn lifecycle_against_real_sbx() {
         replace: true,
         ..new::Options::default()
     };
-    new::run(config_dir.path(), &project, &rebuild, &SbxBackend).unwrap();
+    new::run(
+        config_dir.path(),
+        &project,
+        &rebuild,
+        &SbxBackend,
+        &mut std::io::stderr(),
+    )
+    .unwrap();
     assert_eq!(printenv(&sandbox, "REAL_TEST_GREETING"), "rebuilt");
     assert_eq!(
         std::fs::read_to_string(workspace.join("keep.txt")).unwrap(),
@@ -310,6 +318,7 @@ services = ["{missing}"]
         &project,
         &new::Options::default(),
         &SbxBackend,
+        &mut std::io::stderr(),
     )
     .unwrap_err();
 
@@ -364,7 +373,14 @@ fn codex_mandatory_instructions_against_real_sbx() {
         harness: sbxm::harness::Harness::Codex,
         ..Default::default()
     };
-    new::run(config_dir.path(), &project, &options, &SbxBackend).unwrap();
+    new::run(
+        config_dir.path(),
+        &project,
+        &options,
+        &SbxBackend,
+        &mut std::io::stderr(),
+    )
+    .unwrap();
 
     let agents_md = Command::new("sbx")
         .args(["exec", &sandbox, "cat", "/home/agent/.codex/AGENTS.md"])

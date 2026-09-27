@@ -45,7 +45,7 @@ pub fn run(
                 replace: true,
                 ..new::Options::default()
             };
-            new::run(config_dir, name, &options, backend)?;
+            new::run(config_dir, name, &options, backend, warn)?;
             if let Some(old_hash) = &entry.config_hash {
                 let in_use = state
                     .sandboxes
@@ -69,7 +69,7 @@ pub fn run(
                 profile: entry.and_then(|e| e.profile),
                 ..new::Options::default()
             };
-            new::run(config_dir, name, &options, backend)?
+            new::run(config_dir, name, &options, backend, warn)?
         }
     }
     backend.attach(&sandbox)

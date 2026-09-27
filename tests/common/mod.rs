@@ -61,7 +61,13 @@ impl Env {
         options: &new::Options,
         backend: &FakeBackend,
     ) -> anyhow::Result<()> {
-        new::run(&self.config_dir(), project, options, backend)
+        new::run(
+            &self.config_dir(),
+            project,
+            options,
+            backend,
+            &mut std::io::sink(),
+        )
     }
 
     /// `.sbxm/<project>/kits/<hash-prefix>/common`: the one generated kit.

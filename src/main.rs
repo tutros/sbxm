@@ -23,6 +23,7 @@ fn main() -> anyhow::Result<()> {
                 ..Default::default()
             },
             &SbxBackend,
+            &mut std::io::stderr(),
         ),
         Command::List { json } => {
             let entries = commands::list::entries(&config::config_dir()?, &SbxBackend)?;

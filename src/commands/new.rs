@@ -1,4 +1,5 @@
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -29,6 +30,7 @@ pub fn run(
     name: &str,
     options: &Options,
     backend: &dyn SandboxBackend,
+    warn: &mut dyn Write,
 ) -> Result<()> {
     project::validate_name(name)?;
     let config = GlobalConfig::load(config_dir)?;
@@ -81,7 +83,7 @@ pub fn run(
     for (dir, _) in &kits {
         let validation = backend.validate_kit(dir)?;
         for warning in &validation.warnings {
-            eprintln!("warning: kit {}: {warning}", dir.display());
+            writeln!(warn, "warning: kit {}: {warning}", dir.display())?;
         }
         if !validation.valid {
             bail!(
