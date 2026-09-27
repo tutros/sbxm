@@ -417,16 +417,8 @@ impl<'a> HashInput<'a> {
         resources: &'a Resources,
         harness: Harness,
     ) -> Self {
-        // Claude-only settings don't reach other harnesses, so editing them
-        // mustn't show as drift there (decision 69).
-        let profile = if harness == Harness::Claude {
-            Cow::Borrowed(profile)
-        } else {
-            let mut other = profile.clone();
-            other.claude_home_files.clear();
-            other.claude_managed_settings = None;
-            Cow::Owned(other)
-        };
+        // Settings that don't reach the harness mustn't show as drift there.
+        let profile = harness.applied(profile);
         HashInput {
             sbxm_version: env!("CARGO_PKG_VERSION"),
             harness: harness.as_str(),

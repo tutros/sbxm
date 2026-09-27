@@ -1,5 +1,6 @@
 //! The harnesses sbxm can create sandboxes for (decision 68).
 
+use std::borrow::Cow;
 use std::path::PathBuf;
 
 use crate::config::Profile;
@@ -47,5 +48,18 @@ impl Harness {
             ));
         }
         unsupported
+    }
+
+    /// `profile` without the settings in [`Harness::unsupported`]: what
+    /// reaches this harness's sandbox, and so what its kit and hash cover
+    /// (decision 69).
+    pub fn applied(self, profile: &Profile) -> Cow<'_, Profile> {
+        if self == Harness::Claude {
+            return Cow::Borrowed(profile);
+        }
+        let mut applied = profile.clone();
+        applied.claude_home_files.clear();
+        applied.claude_managed_settings = None;
+        Cow::Owned(applied)
     }
 }

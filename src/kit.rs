@@ -126,15 +126,14 @@ pub fn common(profile_name: &str, profile: &Profile, config_hash: &str) -> Spec 
 /// For Claude, the profile's `harness.claude.home_files` (decision 63) and
 /// managed settings (decision 64) join them.
 pub fn harness(profile_name: &str, profile: &Profile, harness: Harness) -> Spec {
+    let profile = harness.applied(profile);
     let mandatory = profile
         .mandatory_instructions
         .iter()
         .map(|text| (harness.instructions_file(), text.clone().into_bytes()));
-    let claude = harness == Harness::Claude;
     let copied = profile
         .claude_home_files
         .iter()
-        .filter(|_| claude)
         .map(|(relative, bytes)| (relative.split('/').collect(), bytes.clone()));
     let home_files = mandatory.chain(copied).collect();
     let (name, agent) = match harness {
@@ -154,7 +153,6 @@ pub fn harness(profile_name: &str, profile: &Profile, harness: Harness) -> Spec 
         setup: profile
             .claude_managed_settings
             .as_deref()
-            .filter(|_| claude)
             .map(|json| Setup {
                 install: vec![write_managed_settings(json)],
             }),
