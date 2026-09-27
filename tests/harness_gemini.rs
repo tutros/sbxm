@@ -101,6 +101,43 @@ fn claude_only_settings_on_gemini_warn() {
     assert_eq!(
         String::from_utf8(warn).unwrap(),
         "warning: harness.claude.managed_settings is set, but gemini sandboxes don't support \
-         it: its settings (hooks included) don't reach sbxm-demo-gemini\n"
+         it: its settings (hooks included) don't reach sbxm-demo-gemini\n\
+         warning: skills.store is \"readonly\", but gemini sandboxes don't support it: \
+         the sbx skills store's skills don't reach sbxm-demo-gemini; \
+         set skills.store = \"off\" to silence this\n"
     );
+}
+
+/// Decision 72: the `sbx` skills store doesn't serve Gemini CLI (decision 46).
+fn gemini_warnings(env: &Env) -> String {
+    let mut warn = Vec::new();
+    new::run(
+        &env.config_dir(),
+        "demo",
+        &gemini(),
+        &FakeBackend::default(),
+        &mut warn,
+    )
+    .unwrap();
+    String::from_utf8(warn).unwrap()
+}
+
+#[test]
+fn skills_store_on_gemini_warns() {
+    let env = Env::new();
+
+    assert_eq!(
+        gemini_warnings(&env),
+        "warning: skills.store is \"readonly\", but gemini sandboxes don't support it: \
+         the sbx skills store's skills don't reach sbxm-demo-gemini; \
+         set skills.store = \"off\" to silence this\n"
+    );
+}
+
+#[test]
+fn skills_store_off_on_gemini_doesnt_warn() {
+    let env = Env::new();
+    env.write_profile("default", "[skills]\nstore = \"off\"\n");
+
+    assert_eq!(gemini_warnings(&env), "");
 }

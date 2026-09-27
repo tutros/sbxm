@@ -108,11 +108,8 @@ pub fn run(
 
     let harness = options.harness.as_str();
     let sandbox = project::sandbox_name(name, harness);
-    for (key, lost) in options.harness.unsupported(&profile) {
-        writeln!(
-            warn,
-            "warning: {key} is set, but {harness} sandboxes don't support it: {lost} {sandbox}"
-        )?;
+    for warning in options.harness.unsupported(&profile, &sandbox) {
+        writeln!(warn, "warning: {warning}")?;
     }
     if options.replace {
         backend.remove(&sandbox)?;
