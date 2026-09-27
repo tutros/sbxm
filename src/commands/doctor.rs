@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::{Result, bail};
+use clap::ValueEnum;
 
 use super::new;
 use crate::backend::SandboxBackend;
@@ -138,8 +139,17 @@ fn check_configs(
     names.sort();
     let mut stored = None;
     for name in names {
-        let result = Profile::load(profiles_dir, &name)
-            .and_then(|profile| check_sandbox(&name, &profile, config, backend, &mut stored));
+        let result = Profile::load(profiles_dir, &name).and_then(|profile| {
+            // Until a profile names its harnesses, Claude stands in (decision 71).
+            check_sandbox(
+                &name,
+                &profile,
+                Harness::Claude,
+                config,
+                backend,
+                &mut stored,
+            )
+        });
         match result {
             Ok(()) => report.pass(format!("profile '{name}'")),
             Err(err) => report.fail(format!("profile '{name}': {err:#}")),
@@ -154,14 +164,26 @@ fn check_configs(
         }
     };
     for (name, state) in states {
-        for entry in state.sandboxes.into_values() {
+        for (harness, entry) in state.sandboxes {
             let profile_name = entry
                 .profile
                 .unwrap_or_else(|| config.default_profile.clone());
-            let label = format!("project {name} (profile '{profile_name}')");
+            let label = format!("project {name} ({harness}, profile '{profile_name}')");
+            let Ok(harness) = Harness::from_str(&harness, false) else {
+                report.fail(format!(
+                    "{label}: sbxm doesn't know this harness; use an sbxm version that does, \
+                     or remove its entry from {}",
+                    project::metadata_dir(&config.base_dir, &name)
+                        .join("state.json")
+                        .display()
+                ));
+                continue;
+            };
             let result = Profile::load(profiles_dir, &profile_name)
                 .and_then(|p| p.with_project(&project::metadata_dir(&config.base_dir, &name)))
-                .and_then(|p| check_sandbox(&profile_name, &p, config, backend, &mut stored));
+                .and_then(|p| {
+                    check_sandbox(&profile_name, &p, harness, config, backend, &mut stored)
+                });
             match result {
                 Ok(()) => report.pass(label),
                 Err(err) => report.fail(format!("{label}: {err:#}")),
@@ -175,6 +197,7 @@ fn check_configs(
 fn check_sandbox(
     profile_name: &str,
     profile: &Profile,
+    harness: Harness,
     config: &GlobalConfig,
     backend: &dyn SandboxBackend,
     stored: &mut Option<Vec<String>>,
@@ -192,10 +215,10 @@ fn check_sandbox(
         std::process::id(),
         RUN.fetch_add(1, Ordering::Relaxed)
     ));
-    let hash = config::config_hash(profile_name, profile, &config.resources, Harness::Claude);
+    let hash = config::config_hash(profile_name, profile, &config.resources, harness);
     let result = validate_kits(
         &root,
-        kit::all(profile_name, profile, &hash, Harness::Claude),
+        kit::all(profile_name, profile, &hash, harness),
         backend,
     );
     let _ = fs::remove_dir_all(&root);

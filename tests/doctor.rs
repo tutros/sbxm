@@ -359,7 +359,7 @@ fn projects_are_checked_with_their_recorded_profile() {
     let text = report(&env, &FakeBackend::default()).render();
 
     assert!(
-        text.contains("ok   project demo (profile 'other')\n"),
+        text.contains("ok   project demo (claude, profile 'other')\n"),
         "{text}"
     );
 }
@@ -376,7 +376,7 @@ fn broken_project_config_fails() {
     assert!(
         report
             .render()
-            .contains("FAIL project demo (profile 'default'): invalid env name '1BAD'"),
+            .contains("FAIL project demo (claude, profile 'default'): invalid env name '1BAD'"),
         "{}",
         report.render()
     );
@@ -395,6 +395,56 @@ fn missing_profiles_dir_fails() {
             "FAIL profiles dir {} does not exist; run `sbxm config init` or change profiles_dir in {}",
             env.profiles_dir().display(),
             env.config_dir().join("config.toml").display()
+        )),
+        "{}",
+        report.render()
+    );
+}
+
+/// Decision 71: every harness recorded for a project is checked with its own kits.
+#[test]
+fn every_recorded_harness_of_a_project_is_checked() {
+    let env = Env::new();
+    let codex = sbxm::commands::new::Options {
+        harness: sbxm::harness::Harness::Codex,
+        ..Default::default()
+    };
+    env.run_with("demo", &codex, &FakeBackend::default())
+        .unwrap();
+    let backend = FakeBackend::default();
+
+    let text = report(&env, &backend).render();
+
+    assert!(
+        text.contains("ok   project demo (codex, profile 'default')\n"),
+        "{text}"
+    );
+    assert!(
+        backend.log().iter().any(|l| l.ends_with("harness-codex")),
+        "{:?}",
+        backend.log()
+    );
+}
+
+#[test]
+fn unknown_harness_in_state_fails() {
+    let env = Env::new();
+    let metadata = env.base_dir().join(".sbxm").join("demo");
+    std::fs::create_dir_all(&metadata).unwrap();
+    std::fs::write(
+        metadata.join("state.json"),
+        r#"{"sandboxes": {"gemini": {"sandbox": "sbxm-demo-gemini", "workspace": "unused", "created_at": 0}}}"#,
+    )
+    .unwrap();
+
+    let report = report(&env, &FakeBackend::default());
+
+    assert!(report.failed());
+    assert!(
+        report.render().contains(&format!(
+            "FAIL project demo (gemini, profile 'default'): sbxm doesn't know this harness; \
+             use an sbxm version that does, or remove its entry from {}",
+            metadata.join("state.json").display()
         )),
         "{}",
         report.render()
