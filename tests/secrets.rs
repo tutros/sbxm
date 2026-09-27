@@ -83,7 +83,10 @@ fn rebuild_with_a_missing_secret_keeps_the_old_sandbox() {
     let err = open::run(
         &env.config_dir(),
         "demo",
-        &open::Options { rebuild: true },
+        &open::Options {
+            rebuild: true,
+            ..Default::default()
+        },
         &backend,
         &mut std::io::sink(),
     )

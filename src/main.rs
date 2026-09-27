@@ -35,10 +35,14 @@ fn main() -> anyhow::Result<()> {
             print!("{}", render(&entries));
             Ok(())
         }
-        Command::Open { project, rebuild } => commands::open::run(
+        Command::Open {
+            project,
+            rebuild,
+            harness,
+        } => commands::open::run(
             &config::config_dir()?,
             &project,
-            &commands::open::Options { rebuild },
+            &commands::open::Options { rebuild, harness },
             &SbxBackend,
             &mut std::io::stderr(),
         ),

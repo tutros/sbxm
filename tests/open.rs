@@ -3,6 +3,7 @@ mod common;
 use common::Env;
 use sbxm::backend::{FakeBackend, SandboxInfo};
 use sbxm::commands::{new, open};
+use sbxm::harness::Harness;
 
 fn kit_dir(env: &Env) -> std::path::PathBuf {
     env.kit_dir("demo")
@@ -228,7 +229,10 @@ fn rebuild_demo(env: &Env, backend: &FakeBackend) -> (anyhow::Result<()>, String
     let result = open::run(
         &env.config_dir(),
         "demo",
-        &open::Options { rebuild: true },
+        &open::Options {
+            rebuild: true,
+            ..Default::default()
+        },
         backend,
         &mut warn,
     );
@@ -366,4 +370,101 @@ fn rebuild_refuses_to_delete_an_old_kit_dir_that_is_a_link() {
         "{err:#}"
     );
     assert!(target.join("common").join("spec.yaml").is_file());
+}
+
+/// Slice 18c: `open --harness codex` works on the Codex sandbox only.
+fn open_codex(env: &Env, rebuild: bool, backend: &FakeBackend) -> anyhow::Result<()> {
+    let options = open::Options {
+        rebuild,
+        harness: Harness::Codex,
+    };
+    open::run(
+        &env.config_dir(),
+        "demo",
+        &options,
+        backend,
+        &mut std::io::sink(),
+    )
+}
+
+fn codex_sandbox() -> SandboxInfo {
+    SandboxInfo {
+        name: "sbxm-demo-codex".into(),
+        agent: "codex".into(),
+        status: "running".into(),
+    }
+}
+
+/// `new demo` for Claude, then for Codex.
+fn both(env: &Env) {
+    env.run("demo", &FakeBackend::default()).unwrap();
+    let codex = new::Options {
+        harness: Harness::Codex,
+        ..Default::default()
+    };
+    env.run_with("demo", &codex, &FakeBackend::default())
+        .unwrap();
+}
+
+#[test]
+fn codex_is_created_next_to_claude_then_attached() {
+    let env = Env::new();
+    env.run("demo", &FakeBackend::default()).unwrap();
+    let backend = FakeBackend::with_sandboxes(vec![sandbox("running")]);
+
+    open_codex(&env, false, &backend).unwrap();
+
+    let log = backend.log();
+    assert_eq!(
+        log[log.len() - 2..],
+        ["create sbxm-demo-codex", "attach sbxm-demo-codex"]
+    );
+    assert!(backend.removes().is_empty());
+}
+
+#[test]
+fn existing_codex_is_attached() {
+    let env = Env::new();
+    both(&env);
+    let backend = FakeBackend::with_sandboxes(vec![sandbox("running"), codex_sandbox()]);
+
+    open_codex(&env, false, &backend).unwrap();
+
+    assert_eq!(backend.log(), ["attach sbxm-demo-codex"]);
+}
+
+#[test]
+fn changed_codex_config_hint_names_the_harness() {
+    let env = Env::new();
+    both(&env);
+    env.write_profile("default", "[network]\nallow = [\"github.com\"]\n");
+    let backend = FakeBackend::with_sandboxes(vec![sandbox("running"), codex_sandbox()]);
+
+    let err = open_codex(&env, false, &backend).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains(
+            "the config of sbxm-demo-codex (profile 'default') changed since it was created; \
+             run `sbxm open demo --harness codex --rebuild` to recreate it"
+        ),
+        "{message}"
+    );
+}
+
+#[test]
+fn rebuild_codex_leaves_claude_alone() {
+    let env = Env::new();
+    both(&env);
+    env.write_profile("default", "[network]\nallow = [\"github.com\"]\n");
+    let backend = FakeBackend::with_sandboxes(vec![sandbox("running"), codex_sandbox()]);
+
+    open_codex(&env, true, &backend).unwrap();
+
+    assert_eq!(backend.removes(), ["sbxm-demo-codex"]);
+    let log = backend.log();
+    assert_eq!(
+        log[log.len() - 2..],
+        ["create sbxm-demo-codex", "attach sbxm-demo-codex"]
+    );
 }

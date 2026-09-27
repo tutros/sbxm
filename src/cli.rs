@@ -42,6 +42,9 @@ pub enum Command {
         /// the workspace is kept.
         #[arg(long)]
         rebuild: bool,
+        /// Which of the project's sandboxes to open.
+        #[arg(long, value_enum, default_value_t)]
+        harness: Harness,
     },
     /// Stop a project's sandbox.
     Stop {
