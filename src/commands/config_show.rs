@@ -4,6 +4,7 @@ use anyhow::Result;
 
 use super::HARNESS;
 use crate::config::{self, GlobalConfig, Profile};
+use crate::harness::Harness;
 use crate::{kit, project, state};
 
 #[derive(Debug, Default)]
@@ -46,7 +47,7 @@ pub fn render(config_dir: &Path, project: Option<&str>, options: &Options) -> Re
     out += &format!("# config hash: {hash}\n\n");
     out += &config::hash_input_toml(&profile_name, &profile, &config.resources)?;
     if options.kits {
-        for (name, spec) in kit::all(&profile_name, &profile, &hash) {
+        for (name, spec) in kit::all(&profile_name, &profile, &hash, Harness::Claude) {
             out += &format!("\n# kit: {name}\n");
             out += &spec.yaml()?;
             for path in spec.home_paths() {

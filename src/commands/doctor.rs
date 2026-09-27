@@ -7,6 +7,7 @@ use anyhow::{Result, bail};
 use super::new;
 use crate::backend::SandboxBackend;
 use crate::config::{self, GlobalConfig, Profile};
+use crate::harness::Harness;
 use crate::{kit, project, state};
 
 const GIB: u64 = 1024 * 1024 * 1024;
@@ -192,7 +193,11 @@ fn check_sandbox(
         RUN.fetch_add(1, Ordering::Relaxed)
     ));
     let hash = config::config_hash(profile_name, profile, &config.resources);
-    let result = validate_kits(&root, kit::all(profile_name, profile, &hash), backend);
+    let result = validate_kits(
+        &root,
+        kit::all(profile_name, profile, &hash, Harness::Claude),
+        backend,
+    );
     let _ = fs::remove_dir_all(&root);
     result
 }

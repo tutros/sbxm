@@ -2,6 +2,8 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand};
 
+use crate::harness::Harness;
+
 /// Per-project Docker Sandboxes from a shared, versioned config.
 #[derive(Debug, Parser)]
 #[command(name = "sbxm", bin_name = "sbxm", version)]
@@ -22,6 +24,9 @@ pub enum Command {
         /// Profile to apply (default: `default_profile` in the global config).
         #[arg(long)]
         profile: Option<String>,
+        /// Agent harness to run in the sandbox.
+        #[arg(long, value_enum, default_value_t)]
+        harness: Harness,
     },
     /// List sbxm sandboxes and flag orphans.
     List {

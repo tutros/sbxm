@@ -12,12 +12,14 @@ fn main() -> anyhow::Result<()> {
             project,
             seed,
             profile,
+            harness,
         } => commands::new::run(
             &config::config_dir()?,
             &project,
             &commands::new::Options {
                 seed,
                 profile,
+                harness,
                 ..Default::default()
             },
             &SbxBackend,

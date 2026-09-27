@@ -4,13 +4,13 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 
-use super::HARNESS;
 use crate::backend::{CreateSpec, SandboxBackend};
 use crate::config::{self, GlobalConfig, Profile};
+use crate::harness::Harness;
 use crate::kit;
 use crate::project;
 use crate::seed;
-use crate::state::{SandboxState, State};
+use crate::state::{self, SandboxState, State};
 
 #[derive(Debug, Default)]
 pub struct Options {
@@ -21,6 +21,7 @@ pub struct Options {
     /// Remove the existing sandbox after the new kit validates and before
     /// creating (`open --rebuild`), so an invalid kit leaves it untouched.
     pub replace: bool,
+    pub harness: Harness,
 }
 
 pub fn run(
@@ -72,7 +73,7 @@ pub fn run(
     let kits_dir = project::metadata_dir(&config.base_dir, name)
         .join("kits")
         .join(&config_hash[..12]);
-    let kits = kit::all(profile_name, &profile, &config_hash)
+    let kits = kit::all(profile_name, &profile, &config_hash, options.harness)
         .map(|(name, spec)| (kits_dir.join(name), spec));
     for (dir, spec) in &kits {
         kit::write(dir, spec)?;
@@ -102,13 +103,14 @@ pub fn run(
             .with_context(|| format!("cannot create {}", workspace.display()))?,
     }
 
-    let sandbox = project::sandbox_name(name, HARNESS);
+    let harness = options.harness.as_str();
+    let sandbox = project::sandbox_name(name, harness);
     if options.replace {
         backend.remove(&sandbox)?;
     }
     backend.create(&CreateSpec {
         name: sandbox.clone(),
-        agent: HARNESS.into(),
+        agent: harness.into(),
         workspace: workspace.clone(),
         cpus: config.resources.cpus,
         memory: config.resources.memory,
@@ -117,9 +119,10 @@ pub fn run(
     })?;
 
     let created_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let mut state = State::default();
+    let metadata_dir = project::metadata_dir(&config.base_dir, name);
+    let mut state = state::load(&metadata_dir)?.unwrap_or_else(State::default);
     state.sandboxes.insert(
-        HARNESS.into(),
+        harness.into(),
         SandboxState {
             sandbox,
             workspace,
@@ -128,7 +131,7 @@ pub fn run(
             config_hash: Some(config_hash),
         },
     );
-    state.save(&project::metadata_dir(&config.base_dir, name))
+    state.save(&metadata_dir)
 }
 
 /// Every named service must be a stored `sbx` secret, or the sandbox would
