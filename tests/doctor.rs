@@ -137,9 +137,9 @@ fn unknown_free_space_fails() {
 
     assert!(report.failed());
     assert!(
-        report
-            .render()
-            .contains("FAIL free space for base dir: no statvfs"),
+        report.render().contains(
+            "FAIL free space for base dir: no statvfs; check that base_dir is on a drive sbx can use"
+        ),
         "{}",
         report.render()
     );

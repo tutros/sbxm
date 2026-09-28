@@ -319,7 +319,9 @@ fn check_base_dir(report: &mut Report, base: &Path, config_path: &Path, host: &H
             gib(bytes),
             base.display()
         )),
-        Err(err) => report.fail(format!("free space for base dir: {err}")),
+        Err(err) => report.fail(format!(
+            "free space for base dir: {err}; check that base_dir is on a drive sbx can use"
+        )),
     }
 }
 
