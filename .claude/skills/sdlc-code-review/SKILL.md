@@ -138,6 +138,9 @@ Labels: must-fix | should-fix | question
 **What happens:** the behavior, with evidence (the command or test, and its output trimmed to the lines that prove it)
 **Why it matters:** the decision or convention it breaks (e.g. "decision 47", "`<problem>; <fix>` convention")
 **Fix:** the smallest change that resolves it
+**Depends on:** issues that must be done first, each with why (e.g. "#4: this message must match the one #4 sets"),
+  or "none known"
+**Related:** issues touching the same code or behavior, with the order that avoids rework (optional)
 **Acceptance criteria:**
 - [ ] <observable result that proves the fix, e.g. "`new` with a linked seed makes no backend calls and creates no `.sbxm/`">
 - [ ] A test covering it fails before the fix and passes after (name it, or say which file it goes in)
@@ -152,6 +155,11 @@ author: a command and its expected output, a test name, a message's exact text, 
 exist. No criterion like "works better" or "is cleaner". The first criteria are specific to the finding; the
 standard ones (test, checks, docs, real `sbx`) follow and are dropped only when they can't apply, with a reason. The
 issue is done when every box is ticked with its evidence, as described in the implementation skill.
+
+**Dependencies.** Look for them across the whole set of findings, not one issue at a time: two issues editing the
+same function, one message that must match another, or a fix that only makes sense after a decision. A question
+issue blocks the issues that depend on its answer. Write the link on both issues (`Depends on` on one, `Related` on
+the other) so either one leads to the other.
 
 **Content rules:**
 - Never include secret values, tokens, credential files or their contents; redact any that appear in output.

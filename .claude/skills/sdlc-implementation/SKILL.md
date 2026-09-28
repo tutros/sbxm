@@ -119,7 +119,9 @@ Review findings are GitHub issues with acceptance criteria (code review skill, s
 
 1. **Read it and check it still applies.** Re-run its evidence on the current code (the permalinks point at the
    reviewed commit, not `HEAD`). If it no longer reproduces, say so on the issue with the evidence and ask the user
-   before closing it.
+   before closing it. **Check its dependencies:** every issue under "Depends on" must be closed first; if one is
+   open, work that one first or ask the user. Read the "Related" issues too, so the change doesn't undo or duplicate
+   theirs.
 2. **The acceptance criteria are the test cases.** List them as the slice's test cases (rule 2) and start red: the
    issue's test fails for the reason the issue describes. A criterion that can't become an automated test needs its
    manual check spelled out (exact command, expected output).
