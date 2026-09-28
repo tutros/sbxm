@@ -5,6 +5,7 @@ mod common;
 use common::{Env, dir_link};
 use sbxm::backend::{CreateSpec, FakeBackend, SkillsStore};
 use sbxm::commands::new;
+use sbxm::harness::Harness;
 
 fn expected_create(env: &Env, workspace: &Path) -> CreateSpec {
     CreateSpec {
@@ -283,4 +284,38 @@ fn unknown_config_keys_are_errors_and_create_nothing() {
         assert!(backend.log().is_empty());
         assert!(!env.base_dir().join("demo").exists());
     }
+}
+
+fn assert_refuses_existing(harness: Harness, hint: &str) {
+    let env = Env::new();
+    let options = new::Options {
+        harness,
+        ..Default::default()
+    };
+    env.run_with("demo", &options, &FakeBackend::default())
+        .unwrap();
+    let kits = env.base_dir().join(".sbxm").join("demo").join("kits");
+    let kits_before = std::fs::read_dir(&kits).unwrap().count();
+    env.write_profile("default", "[env]\nCHANGED = \"since\"\n");
+    let backend = FakeBackend::default();
+
+    let err = env.run_with("demo", &options, &backend).unwrap_err();
+
+    let sandbox = format!("sbxm-demo-{}", harness.as_str());
+    assert_eq!(
+        format!("{err:#}"),
+        format!("sandbox {sandbox} already exists; open it with `{hint}`")
+    );
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert_eq!(std::fs::read_dir(&kits).unwrap().count(), kits_before);
+}
+
+#[test]
+fn existing_sandbox_is_refused_before_any_write_or_call() {
+    assert_refuses_existing(Harness::Claude, "sbxm open demo");
+}
+
+#[test]
+fn existing_codex_sandbox_is_refused_with_the_harness_in_the_hint() {
+    assert_refuses_existing(Harness::Codex, "sbxm open demo --harness codex");
 }

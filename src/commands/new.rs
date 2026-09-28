@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 
+use super::harness_flag;
 use crate::backend::{CreateSpec, SandboxBackend};
 use crate::config::{self, GlobalConfig, Profile};
 use crate::harness::Harness;
@@ -22,6 +23,9 @@ pub struct Options {
     /// Remove the existing sandbox after the new kit validates and before
     /// creating (`open --rebuild`), so an invalid kit leaves it untouched.
     pub replace: bool,
+    /// The project's state entry for this harness is stale: its sandbox is
+    /// gone from `sbx` (`open` recreating it), so the entry doesn't block.
+    pub recreate: bool,
     pub harness: Harness,
 }
 
@@ -48,6 +52,18 @@ pub fn run(
             "base dir {} does not exist; create it or change base_dir in {}",
             config.base_dir.display(),
             config_dir.join("config.toml").display()
+        );
+    }
+    let harness = options.harness.as_str();
+    let sandbox = project::sandbox_name(name, harness);
+    let metadata_dir = project::metadata_dir(&config.base_dir, name);
+    if !options.replace
+        && !options.recreate
+        && state::load(&metadata_dir)?.is_some_and(|s| s.sandboxes.contains_key(harness))
+    {
+        bail!(
+            "sandbox {sandbox} already exists; open it with `sbxm open {name}{}`",
+            harness_flag(options.harness)
         );
     }
     let workspace = config.base_dir.join(name);
@@ -107,8 +123,6 @@ pub fn run(
             .with_context(|| format!("cannot create {}", workspace.display()))?,
     }
 
-    let harness = options.harness.as_str();
-    let sandbox = project::sandbox_name(name, harness);
     for warning in options.harness.unsupported(&profile, &sandbox) {
         writeln!(warn, "warning: {warning}")?;
     }
@@ -126,7 +140,6 @@ pub fn run(
     })?;
 
     let created_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let metadata_dir = project::metadata_dir(&config.base_dir, name);
     let mut state = state::load(&metadata_dir)?.unwrap_or_else(State::default);
     state.sandboxes.insert(
         harness.into(),
