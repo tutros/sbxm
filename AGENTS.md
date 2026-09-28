@@ -11,7 +11,7 @@ Milestone 1 complete (slices 0–21, end-to-end check passed 2026-09-27); milest
 
 ## Workflow
 
-The repo is `tutros/sbxm` on GitHub (private, `origin`, branch `main`). Code review findings are GitHub issues there (decision 79); close them from fix commits with `Fixes #n`.
+The repo is `tutros/sbxm` on GitHub (public since 2026-09-27, `MIT OR Apache-2.0`; `origin`, branch `main`). Code review findings are GitHub issues there (decision 79); close them from fix commits with `Fixes #n`.
 
 
 Each SDLC phase has a project skill in `.claude/skills/`; follow it for that phase:

@@ -163,8 +163,8 @@ the other) so either one leads to the other.
 
 **Content rules:**
 - Never include secret values, tokens, credential files or their contents; redact any that appear in output.
-- Quote output only as far as it proves the point. Machine-specific paths are fine in this private repo, but trim
-  them where they add nothing.
+- Quote output only as far as it proves the point. The repo is public: replace personal paths and names (e.g.
+  your user folder) with placeholders like `<base_dir>` or `~` unless the exact path is the evidence.
 - A **question** issue replaces "Fix" and the first criteria with the options and a recommendation. When the user
   answers, edit the issue: record the answer and the new decision number, relabel it `must-fix` or `should-fix`, and
   add its acceptance criteria. A question still open blocks nothing else.
