@@ -318,13 +318,49 @@ fn invalid_kit_fails() {
     let report = report(&env, &FakeBackend::with_invalid_kit("bad network pattern"));
 
     assert!(report.failed());
+    let profile_toml = env
+        .profiles_dir()
+        .join("default")
+        .join("profile.toml")
+        .display()
+        .to_string();
+    let text = report.render();
     assert!(
-        report.render().contains(
-            "FAIL profile 'default': generated kit common is invalid: bad network pattern"
-        ),
-        "{}",
-        report.render()
+        text.contains(&format!(
+            "FAIL profile 'default': generated kit common is invalid: bad network pattern; \
+             check profile 'default' ({profile_toml})"
+        )),
+        "{text}"
     );
+}
+
+/// Decision from #4/#6: a project's invalid-kit failure names its recorded
+/// profile and, when it has one, its `sandbox.toml`, the same way `new` does.
+#[test]
+fn invalid_kit_for_a_project_names_its_sandbox_toml() {
+    let env = Env::new();
+    env.run("demo", &FakeBackend::default()).unwrap();
+    write_project_config(&env, "");
+
+    let report = report(&env, &FakeBackend::with_invalid_kit("manifest: bad host"));
+
+    assert!(report.failed());
+    let profile_toml = env
+        .profiles_dir()
+        .join("default")
+        .join("profile.toml")
+        .display()
+        .to_string();
+    let sandbox_toml = env
+        .base_dir()
+        .join(".sbxm")
+        .join("demo")
+        .join("sandbox.toml")
+        .display()
+        .to_string();
+    let text = report.render();
+    assert!(text.contains(&profile_toml), "{text}");
+    assert!(text.contains(&sandbox_toml), "{text}");
 }
 
 #[test]

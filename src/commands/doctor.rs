@@ -146,6 +146,7 @@ fn check_configs(
                 &profile,
                 Harness::Claude,
                 config,
+                None,
                 backend,
                 &mut stored,
             )
@@ -179,10 +180,19 @@ fn check_configs(
                 ));
                 continue;
             };
+            let metadata_dir = project::metadata_dir(&config.base_dir, &name);
             let result = Profile::load(profiles_dir, &profile_name)
-                .and_then(|p| p.with_project(&project::metadata_dir(&config.base_dir, &name)))
+                .and_then(|p| p.with_project(&metadata_dir))
                 .and_then(|p| {
-                    check_sandbox(&profile_name, &p, harness, config, backend, &mut stored)
+                    check_sandbox(
+                        &profile_name,
+                        &p,
+                        harness,
+                        config,
+                        Some(&metadata_dir),
+                        backend,
+                        &mut stored,
+                    )
                 });
             match result {
                 Ok(()) => report.pass(label),
@@ -199,6 +209,7 @@ fn check_sandbox(
     profile: &Profile,
     harness: Harness,
     config: &GlobalConfig,
+    metadata_dir: Option<&Path>,
     backend: &dyn SandboxBackend,
     stored: &mut Option<Vec<String>>,
 ) -> Result<()> {
@@ -220,6 +231,9 @@ fn check_sandbox(
         &root,
         kit::all(profile_name, profile, &hash, harness),
         backend,
+        config.profiles_dir(),
+        profile_name,
+        metadata_dir,
     );
     let _ = fs::remove_dir_all(&root);
     result
@@ -229,15 +243,29 @@ fn validate_kits(
     root: &Path,
     kits: [(&str, kit::Spec); 2],
     backend: &dyn SandboxBackend,
+    profiles_dir: &Path,
+    profile_name: &str,
+    metadata_dir: Option<&Path>,
 ) -> Result<()> {
     for (name, spec) in kits {
         let dir = root.join(name);
         kit::write(&dir, &spec)?;
         let validation = backend.validate_kit(&dir)?;
         if !validation.valid {
+            let profile_toml = profiles_dir.join(profile_name).join("profile.toml");
+            let mut checked = format!("profile '{profile_name}' ({})", profile_toml.display());
+            if let Some(metadata_dir) = metadata_dir {
+                let sandbox_toml = metadata_dir.join("sandbox.toml");
+                if sandbox_toml.is_file() {
+                    checked.push_str(&format!(
+                        " and the project's sandbox.toml ({})",
+                        sandbox_toml.display()
+                    ));
+                }
+            }
             bail!(
-                "generated kit {name} is invalid: {}",
-                validation.error.as_deref().unwrap_or("no details from sbx")
+                "generated kit {name} is invalid: {}; check {checked}",
+                validation.error.as_deref().unwrap_or("no details from sbx"),
             );
         }
     }
