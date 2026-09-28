@@ -11,6 +11,9 @@ Milestone 1 complete (slices 0–21, end-to-end check passed 2026-09-27); milest
 
 ## Workflow
 
+The repo is `tutros/sbxm` on GitHub (private, `origin`, branch `main`). Code review findings are GitHub issues there (decision 79); close them from fix commits with `Fixes #n`.
+
+
 Each SDLC phase has a project skill in `.claude/skills/`; follow it for that phase:
 - `sdlc-planning`: interview rounds, numbered decisions, spikes, milestone plan.
 - `sdlc-implementation`: vertical slices, TDD (red first), smallest change per step, commit after every green step (`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`).

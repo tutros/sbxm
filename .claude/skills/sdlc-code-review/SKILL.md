@@ -108,6 +108,12 @@ Rank each finding:
 Write each as: severity, `file:line`, what happens (with the evidence), why it matters (decision or convention), and
 the smallest fix. For more than five findings, put them in `reviews/<date>-<scope>.md` and keep the chat report short.
 
+**File every finding as a GitHub issue** on `tutros/sbxm` (decision 79): title `<id>: <what happens>`, label
+`must-fix`, `should-fix` or `question`, and a body with the evidence, why, the fix, permalinks to the lines at the
+reviewed commit (`blob/<full sha>/<file>#L<a>-L<b>`) and the review file section. Write bodies to temp files with the
+file-write tool and pass `--body-file` (Windows paths contain backslashes). Put the issue numbers in the review file.
+Fix commits end with `Fixes #<n>`; a question stays open until the user answers it, then becomes a decision.
+
 Report to the user: the scope, the counts per severity, each must-fix in one line, and the first question if there is
 one. Then fix must-fix items through the implementation skill (test first, one commit each) and re-run the review on
 the fix commits only.
