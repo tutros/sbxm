@@ -62,6 +62,11 @@ The most common miss in this project is a change applied in one place but not in
 
 - Tests were written first: each behavior commit contains its tests, and the report showed them failing for the
   expected reason.
+- **Every changed behavior has a test that fails without it.** For each production hunk, name the test that exercises
+  it. Where practical, prove it: revert or break the hunk (e.g. flip a condition, drop a line), run that test, and
+  confirm it fails. A test that still passes doesn't cover the change. When a test isn't feasible, the finding must
+  state why (e.g. an interactive terminal prompt, or real `sbx` needing Docker), and a real-`sbx` test or a manual
+  step with exact commands covers it instead.
 - Tests check public behavior (CLI output, return values, files written, `FakeBackend` calls), not internals.
 - No test was weakened, deleted or `#[ignore]`d to get green. An existing expectation that changed was changed on
   purpose and says why in the commit (e.g. it encoded the bug).
@@ -75,6 +80,10 @@ The most common miss in this project is a change applied in one place but not in
 - **Security.** Secret values never reach output, files or tests. sbxm changes no global `sbx` state. Paths from
   config or state are re-validated before use; deletions keep the guards (canonical parent check, no links,
   confirmation with the exact path). Nothing sbxm-owned lands inside a mounted workspace.
+- **Minimal diff.** The diff is the smallest one that produces the intended behavior. Every changed line is needed for
+  that behavior or its tests. Findings include reformatting or renaming untouched code, refactors mixed into a
+  behavior commit, and abstractions, options or parameters no test needs. **Check:** for each hunk, ask what breaks if
+  it's reverted. If no test fails and no agreed behavior is lost, the hunk is a finding.
 - **Code.** Matches the surrounding code's naming, comment density and idioms; no dead code, no unrelated refactors,
   no new dependency without a decision. Duplicated knowledge (the same list or rule in two places) is a finding.
 - **Commits.** Each commit is one green step with `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`
