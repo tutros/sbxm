@@ -179,7 +179,12 @@ fn note(entry: &Entry) -> String {
         (Some(Problem::NoSandbox), _) => {
             format!("sandbox missing; `{open}` recreates it")
         }
-        (Some(Problem::NoState), _) => "no sbxm state; not created by sbxm here".into(),
+        (Some(Problem::NoState), _) => {
+            format!(
+                "no sbxm state under this base_dir; remove it with `sbx rm {}` if it's stale",
+                entry.sandbox
+            )
+        }
     }
 }
 

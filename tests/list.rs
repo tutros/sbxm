@@ -155,7 +155,7 @@ fn table_aligns_columns_and_explains_orphans() {
          demo     codex    missing  changed  sandbox missing; `sbxm open demo --harness codex` recreates it\n\
          demo     gemini   running  changed  config changed; `sbxm open demo --harness gemini --rebuild` recreates it\n\
          web      claude   running  unknown  its profile or sandbox.toml doesn't load; `sbxm open web` shows why\n\
-         website  claude   stopped           no sbxm state; not created by sbxm here\n"
+         website  claude   stopped           no sbxm state under this base_dir; remove it with `sbx rm sbxm-website-claude` if it's stale\n"
     );
 }
 
