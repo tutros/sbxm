@@ -232,12 +232,15 @@ the clone's `.claude/skills/`. The sandbox has no GitHub access: the agent commi
 `.sbxm-issue/result.md` with evidence for each acceptance criterion, and you push from the host.
 
 A worker never reviews its own change. `review` first runs `cargo fmt --check`, clippy and `cargo test` on the host,
-then a fresh Claude session in its own sandbox (`sbxm-review-<n>`, on its own clone, so it can't change the branch)
-writes `review.md`. If that has must-fix findings, the worker gets one round to fix them and the review runs once
-more. Whatever is still open goes into the PR description; nothing is filed as an issue.
+then a fresh reviewer in its own sandbox (`sbxm-review-<n>`, on its own clone, so it can't change the branch)
+writes `review.md`. The reviewer is Codex with `gpt-5.6-sol` at high reasoning effort, so it doesn't share the Claude
+workers' blind spots; `-ReviewHarness claude` and `-ReviewModel <model>` change that. If the review has must-fix
+findings, the worker gets one round to fix them and the review runs once more. Whatever is still open goes into the
+PR description; nothing is filed as an issue.
 
 One-time setup: copy `profiles/sbxm-dev` into your `profiles_dir`. It installs Rust and a C toolchain, allows
-crates.io, and needs the `anthropic` secret. Also check that `gh auth status` shows you logged in.
+crates.io, and needs the `anthropic` secret; the Codex reviewer also needs the `openai` one (`sbx secret ls`). Also
+check that `gh auth status` shows you logged in.
 
 ```powershell
 ./scripts/issue-workers.ps1 start -Workers 2 -DryRun   # which issues would be picked

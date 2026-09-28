@@ -37,17 +37,18 @@ param(
     [string]$SbxmProfile = 'sbxm-dev',
     [string]$Repo = 'tutros/sbxm',
     [string]$TimeLimit = '2h',
-    [string]$ReviewHarness = 'claude',
+    # Only Claude's and Codex's headless commands are known; spike S5 covers Gemini and Pi (decision 85).
+    [ValidateSet('claude', 'codex')]
+    [string]$ReviewHarness = 'codex',
+    # Default: gpt-5.6-sol for Codex, Claude Code's own default for Claude.
+    [string]$ReviewModel,
     [string]$ReviewTimeLimit = '45m',
     [switch]$DryRun
 )
 
 $ErrorActionPreference = 'Stop'
 $labelOrder = @{ 'must-fix' = 0; 'should-fix' = 1 }
-# Only Claude's headless command is known; spike S5 covers the other harnesses (decision 84).
-if ($ReviewHarness -ne 'claude') {
-    throw "-ReviewHarness ${ReviewHarness}: only claude can review until spike S5 finds the other harnesses' headless commands; use -ReviewHarness claude"
-}
+if (-not $ReviewModel -and $ReviewHarness -eq 'codex') { $ReviewModel = 'gpt-5.6-sol' }
 
 function Invoke-Native {
     param([string]$What, [scriptblock]$Command)
@@ -136,14 +137,26 @@ When you stop, write .sbxm-issue/result.md: each acceptance criterion as done or
 "@
 }
 
-# Writes <workspace>/<dir>/<name>, which runs Claude headless on <dir>/<prompt>, and returns its sandbox path.
+# The headless command for a harness, reading the prompt from a file (decision 85).
+function Get-AgentCommand([string]$harness, [string]$model, [string]$promptFile) {
+    $prompt = "`"`$(cat $promptFile)`""
+    switch ($harness) {
+        'claude' { "claude -p $prompt --output-format text" + ($model ? " --model $model" : '') }
+        # Codex's default reasoning effort is low, too light for a review.
+        'codex' { "codex exec" + ($model ? " -m $model" : '') + " -c 'model_reasoning_effort=`"high`"' $prompt" }
+    }
+}
+
+# Writes <workspace>/<dir>/<name>, which runs an agent headless on <dir>/<prompt> (Claude unless $harness says
+# otherwise), and returns its sandbox path.
 # The time limit is enforced inside the sandbox: killing sbx exec on the host leaves the agent running.
-function Write-RunScript([string]$workspace, [string]$dir, [string]$prompt, [string]$name, [string]$limit) {
+function Write-RunScript([string]$workspace, [string]$dir, [string]$prompt, [string]$name, [string]$limit,
+    [string]$harness = 'claude', [string]$model) {
     $sandboxWorkspace = ConvertTo-SandboxPath $workspace
     $run = @(
         '#!/usr/bin/env bash'
         "cd '$sandboxWorkspace' || exit 1"
-        "timeout --kill-after=60s $limit claude -p `"`$(cat $dir/$prompt)`" --output-format text < /dev/null"
+        "timeout --kill-after=60s $limit $(Get-AgentCommand $harness $model "$dir/$prompt") < /dev/null"
         'echo "agent exit code: $?"'
     ) -join "`n"
     [IO.File]::WriteAllText((Join-Path $workspace "$dir/$name"), "$run`n")
@@ -219,7 +232,7 @@ You are reviewing the change on branch issue-$n of this repository ($Repo), made
 is in .sbxm-review/issue.md; you have no GitHub access. Someone else wrote the change, and you can't change it:
 don't edit tracked files, commit, push or file issues. You may build and run tests.
 
-Follow the sdlc-code-review skill. Scope: the branch's commits (git log origin/main..HEAD, and
+Follow the sdlc-code-review skill (.claude/skills/sdlc-code-review/SKILL.md). Scope: the branch's commits (git log origin/main..HEAD, and
 git diff origin/main...HEAD). Check the change against the issue's acceptance criteria, decisions.md and the
 project conventions. The host has already run cargo fmt --check, clippy and cargo test on Windows: they pass.
 $rereview
@@ -270,7 +283,8 @@ function Invoke-Reviewer([int]$n, [int]$round) {
         Move-Item -Force (Join-Path $reviewDir 'review.md') (Join-Path $reviewDir 'previous-review.md')
     }
     Set-Content (Join-Path $reviewDir 'prompt.md') (New-ReviewPrompt $n ($round -gt 1))
-    $runScript = Write-RunScript $reviewWorkspace '.sbxm-review' 'prompt.md' 'run.sh' $ReviewTimeLimit
+    $runScript = Write-RunScript $reviewWorkspace '.sbxm-review' 'prompt.md' 'run.sh' $ReviewTimeLimit `
+        $ReviewHarness $ReviewModel
     if ($round -eq 1) {
         Invoke-Native 'sbxm new' { sbxm new $reviewProject --profile $SbxmProfile --harness $ReviewHarness }
     }
@@ -279,8 +293,10 @@ function Invoke-Reviewer([int]$n, [int]$round) {
     sbx exec "sbxm-$reviewProject-$ReviewHarness" bash $runScript *> (Join-Path $issueDir "review-$round.log")
     $review = Join-Path $reviewDir 'review.md'
     if (-not (Test-Path $review)) { throw "#${n}: the reviewer wrote no review.md; see $issueDir\review-$round.log" }
-    Copy-Item $review (Join-Path $issueDir "review-$round.md")
-    Copy-Item $review (Join-Path $issueDir 'review.md')
+    $reviewer = "Reviewer: $ReviewHarness ($($ReviewModel ? $ReviewModel : 'default model'))"
+    $text = "$reviewer`n`n" + (Get-Content -Raw $review)
+    Set-Content (Join-Path $issueDir "review-$round.md") $text
+    Set-Content (Join-Path $issueDir 'review.md') $text
 }
 
 function Invoke-FixRound([int]$n) {

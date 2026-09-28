@@ -18,7 +18,7 @@ for each acceptance criterion. You push and open the PR from the host.
 4. **Answer questions:** workers skip `question` issues until you've answered them.
 5. **Work the issues:** `start` gives each picked issue its own clone and sandbox; the agent works test first, commits
    locally and writes `result.md`. Watch with `status`.
-6. **Review the work:** `review` runs the host checks, then an independent reviewer writes `review.md`; must-fix
+6. **Review the work:** `review` runs the host checks, then an independent reviewer (Codex by default) writes `review.md`; must-fix
    findings get one fix round and a second review (decision 84).
 7. **Read** `result.md` and `review.md`. Small should-fix items can be fixed by hand on the branch.
 8. **Open the PR:** `finish` pushes the branch and opens a PR with `Fixes #<n>`, the result and the review.
