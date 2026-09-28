@@ -93,7 +93,10 @@ fn mandatory_instructions_become_the_pi_home_file() {
 #[test]
 fn reference_instructions_on_pi_warn() {
     let env = Env::new();
-    env.write_profile("default", "[instructions]\nreference = \"reference.md\"\n");
+    env.write_profile(
+        "default",
+        "[instructions]\nreference = \"reference.md\"\n[skills]\nstore = \"off\"\n",
+    );
     std::fs::write(
         env.profiles_dir().join("default").join("reference.md"),
         "Background.\n",
@@ -111,6 +114,28 @@ fn reference_instructions_on_pi_warn() {
 #[test]
 fn pi_without_reference_instructions_doesnt_warn() {
     let env = Env::new();
+    env.write_profile("default", "[skills]\nstore = \"off\"\n");
+
+    assert_eq!(pi_warnings(&env), "");
+}
+
+/// Decision 78: the `sbx` skills store doesn't serve Pi (decisions 46, 72).
+#[test]
+fn skills_store_on_pi_warns() {
+    let env = Env::new();
+
+    assert_eq!(
+        pi_warnings(&env),
+        "warning: skills.store is \"readonly\", but pi sandboxes don't support it: \
+         the sbx skills store's skills don't reach sbxm-demo-pi; \
+         set skills.store = \"off\" to silence this\n"
+    );
+}
+
+#[test]
+fn skills_store_off_on_pi_doesnt_warn() {
+    let env = Env::new();
+    env.write_profile("default", "[skills]\nstore = \"off\"\n");
 
     assert_eq!(pi_warnings(&env), "");
 }

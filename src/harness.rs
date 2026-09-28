@@ -70,8 +70,10 @@ impl Harness {
                 ));
             }
         }
-        // The sbx skills store doesn't serve Gemini CLI (decisions 46, 72).
-        if self == Harness::Gemini && profile.skills_store != SkillsStore::Off {
+        // The sbx skills store doesn't serve Gemini CLI or Pi (decisions 46, 72, 78).
+        if (self == Harness::Gemini || self == Harness::Pi)
+            && profile.skills_store != SkillsStore::Off
+        {
             warnings.push(format!(
                 "skills.store is \"{}\", but {name} sandboxes don't support it: the sbx skills \
                  store's skills don't reach {sandbox}; set skills.store = \"off\" to silence this",
