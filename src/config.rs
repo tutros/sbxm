@@ -21,8 +21,10 @@ pub fn home_dir() -> Result<PathBuf> {
     dirs::home_dir().context("cannot determine the home directory")
 }
 
-/// The global `config.toml`. Only the keys used so far are read.
+/// The global `config.toml`. Unknown keys are errors, as in profiles, so a
+/// typo never silently falls back to a default (decisions 51, 77).
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct GlobalConfig {
     pub base_dir: PathBuf,
     /// Defaults to `<config_dir>/profiles`; see [`GlobalConfig::profiles_dir`].
@@ -49,6 +51,7 @@ fn default_min_sbx_version() -> String {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Resources {
     pub cpus: u32,
     pub memory: String,

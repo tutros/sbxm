@@ -247,3 +247,38 @@ fn default_harness_in_config_is_an_error_and_creates_nothing() {
     assert!(backend.log().is_empty());
     assert!(!env.base_dir().join("demo").exists());
 }
+
+/// Decision 77: unknown keys in config.toml are errors, as in profiles
+/// (decision 51), so a typo never silently falls back to a default.
+#[test]
+fn unknown_config_keys_are_errors_and_create_nothing() {
+    for (line, key) in [
+        ("default_profle = \"strict\"\n", "default_profle"),
+        ("[resources]\ncpu = 2\n", "cpu"),
+    ] {
+        let env = Env::new();
+        let path = env.config_dir().join("config.toml");
+        let config = std::fs::read_to_string(&path).unwrap();
+        let config = if line.starts_with("[resources]") {
+            config.replace("[resources]\n", line)
+        } else {
+            format!("{line}{config}")
+        };
+        std::fs::write(&path, config).unwrap();
+        let backend = FakeBackend::default();
+
+        let err = env.run("demo", &backend).unwrap_err();
+
+        let message = format!("{err:#}");
+        assert!(
+            message.contains(&format!("invalid config {}", path.display())),
+            "{message}"
+        );
+        assert!(
+            message.contains(&format!("unknown field `{key}`")),
+            "{message}"
+        );
+        assert!(backend.log().is_empty());
+        assert!(!env.base_dir().join("demo").exists());
+    }
+}
