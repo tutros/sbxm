@@ -500,3 +500,82 @@ fn gemini_mandatory_instructions_against_real_sbx() {
     let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
     assert!(!String::from_utf8_lossy(&ls.stdout).contains(&sandbox));
 }
+
+/// Slice 20: a Pi sandbox from the pinned Docker Hub kit gets the mandatory
+/// instructions as `~/.pi/agent/AGENTS.md` (S7 showed Pi renders that file into
+/// its prompt). Run from a terminal before the user has a credential binding,
+/// `sbx create` may ask about it (decision 74).
+#[test]
+#[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
+fn pi_mandatory_instructions_against_real_sbx() {
+    let base_dir = real_base_dir();
+    let project = format!("sbxm-it-{}-pi", std::process::id());
+    let sandbox = format!("sbxm-{project}-pi");
+    let _cleanup = Cleanup {
+        sandbox: sandbox.clone(),
+        dirs: vec![
+            base_dir.join(&project),
+            base_dir.join(".sbxm").join(&project),
+        ],
+        shared_dirs: vec![base_dir.join(".sbxm")],
+    };
+    let config_dir = TempDir::new().unwrap();
+    let base = toml::Value::String(base_dir.to_str().unwrap().to_owned());
+    std::fs::write(
+        config_dir.path().join("config.toml"),
+        format!("base_dir = {base}\n\n[resources]\ncpus = 2\nmemory = \"2g\"\n"),
+    )
+    .unwrap();
+    let profile_dir = config_dir.path().join("profiles").join("default");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    std::fs::write(
+        profile_dir.join("profile.toml"),
+        "[instructions]\nmandatory = \"mandatory.md\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        profile_dir.join("mandatory.md"),
+        "REAL TEST CANARY: the word is ROWAN-4\n",
+    )
+    .unwrap();
+    let pi = sbxm::harness::Harness::Pi;
+    let options = new::Options {
+        harness: pi,
+        ..Default::default()
+    };
+
+    new::run(
+        config_dir.path(),
+        &project,
+        &options,
+        &SbxBackend,
+        &mut std::io::stderr(),
+    )
+    .unwrap();
+
+    let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
+    let ls: serde_json::Value = serde_json::from_slice(&ls.stdout).unwrap();
+    let entry = ls["sandboxes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == sandbox.as_str())
+        .expect("sandbox listed");
+    assert_eq!(entry["agent"], "pi");
+    let agents_md = Command::new("sbx")
+        .args(["exec", &sandbox, "cat", "/home/agent/.pi/agent/AGENTS.md"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&agents_md.stdout).trim(),
+        "REAL TEST CANARY: the word is ROWAN-4"
+    );
+    stop::run(config_dir.path(), &project, pi, &SbxBackend).unwrap();
+    let rm_pi = rm::Options {
+        harness: pi,
+        ..Default::default()
+    };
+    rm::run(config_dir.path(), &project, &rm_pi, &SbxBackend, &Terminal).unwrap();
+    let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
+    assert!(!String::from_utf8_lossy(&ls.stdout).contains(&sandbox));
+}
