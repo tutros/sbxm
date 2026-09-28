@@ -211,6 +211,9 @@ fn seed_that_is_a_file_is_an_error_and_creates_nothing() {
     );
     assert!(!env.base_dir().join("demo").exists());
     assert!(backend.creates().is_empty());
+    // Decision 47: the seed is checked before any kit is written or validated.
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert!(!env.base_dir().join(".sbxm").exists());
 }
 
 #[test]
