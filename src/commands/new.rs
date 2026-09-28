@@ -75,10 +75,16 @@ pub fn run(
             );
         }
         if !seed_dir.is_dir() {
-            bail!("seed {} is not a directory", seed_dir.display());
+            bail!(
+                "seed {} is not a directory; pass a folder with --seed",
+                seed_dir.display()
+            );
         }
-        let seed_abs = fs::canonicalize(seed_dir)?;
-        if fs::canonicalize(&config.base_dir)?.starts_with(&seed_abs) {
+        let seed_abs = fs::canonicalize(seed_dir)
+            .with_context(|| format!("cannot resolve seed {}", seed_dir.display()))?;
+        let base_abs = fs::canonicalize(&config.base_dir)
+            .with_context(|| format!("cannot resolve base dir {}", config.base_dir.display()))?;
+        if base_abs.starts_with(&seed_abs) {
             bail!(
                 "seed {} contains the base dir {}; copying it would recurse into itself",
                 seed_dir.display(),

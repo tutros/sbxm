@@ -191,6 +191,29 @@ fn missing_seed_is_an_error_and_creates_nothing() {
 }
 
 #[test]
+fn seed_that_is_a_file_is_an_error_and_creates_nothing() {
+    let env = Env::new();
+    let seed_file = env.tmp.path().join("seed.txt");
+    std::fs::write(&seed_file, "not a dir").unwrap();
+    let backend = FakeBackend::default();
+
+    let err = env
+        .run_with("demo", &seeded(seed_file.clone()), &backend)
+        .unwrap_err();
+
+    let message = format!("{err:#}");
+    assert_eq!(
+        message,
+        format!(
+            "seed {} is not a directory; pass a folder with --seed",
+            seed_file.display()
+        )
+    );
+    assert!(!env.base_dir().join("demo").exists());
+    assert!(backend.creates().is_empty());
+}
+
+#[test]
 fn seed_containing_the_base_dir_is_an_error() {
     let env = Env::new();
     let backend = FakeBackend::default();
