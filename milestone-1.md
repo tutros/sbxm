@@ -111,7 +111,7 @@ Each generated kit goes through `sbx kit validate --json` before `sbx create`. A
 | Command | Behavior |
 |---|---|
 | `sbxm config init` | Writes a starter global config and `default` profile. Refuses to overwrite. |
-| `sbxm new <project> [--harness h] [--profile p] [--seed dir]` | Validate name → create `<base>/<project>` if missing (copy `--seed` contents if given; existing dir is reused as-is and `--seed` is then an error) → merge config → check secrets → generate + validate kits → `sbx create --name … --cpus … -m … --kit common --kit harness-<h> <agent> <workspace>` → write state. Doesn't attach. |
+| `sbxm new <project> [--harness h] [--profile p] [--seed dir]` | Validate name → refuse if the project's state already has this harness (hint: `sbxm open`; skipped when `open` rebuilds or recreates it) → create `<base>/<project>` if missing (copy `--seed` contents if given; existing dir is reused as-is and `--seed` is then an error) → merge config → check secrets → generate + validate kits → `sbx create --name … --cpus … -m … --kit common --kit harness-<h> <agent> <workspace>` → write state. Doesn't attach. |
 | `sbxm open <project> [--harness h] [--rebuild]` | [31]: running → attach (`sbx run --name`); stopped → attach (`sbx run` restarts it); missing → `new` then attach. If the current hash ≠ the stored one → warn and refuse unless `--rebuild`. `--rebuild` = `sbx rm -f` + create. The workspace is kept, **but harness session history (kit volumes) is lost**, and the command says so. |
 | `sbxm list [--json]` | `sbx ls --json` filtered to `sbxm-*`, joined with state: project, harness, profile, status, hash drift (✓/changed), orphans (state without a sandbox, or a sandbox without state). |
 | `sbxm stop <project> [--harness h]` | `sbx stop`. |
