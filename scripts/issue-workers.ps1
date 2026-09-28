@@ -12,6 +12,8 @@ status  Shows each worker: agent running or finished, commits on its branch, and
 review  After the agent finishes (decision 84): runs fmt, clippy and tests on the host, then a fresh reviewer in
         its own sandbox (sbxm-review-<n>, on its own clone) writes review.md. If it has must-fix findings, the
         worker gets one fix round and the review runs once more. Blocks until done; removes the reviewer after.
+        With -Pr <n> it reviews an open PR's branch instead and posts the review as a PR comment, with no fix
+        round (decisions 86, 87). PRs from forks are refused, since the host checks run their code.
 finish  Pushes branch issue-<n> and opens a PR that fixes the issue, with result.md and review.md in its body.
 remove  Removes the sandbox and the clone (sbxm rm --purge asks you to confirm).
 
@@ -24,6 +26,7 @@ and writes .sbxm-issue/result.md. Needs PowerShell 7, git, gh (logged in), cargo
 ./scripts/issue-workers.ps1 start -Issue 1,2
 ./scripts/issue-workers.ps1 status
 ./scripts/issue-workers.ps1 review -Issue 1
+./scripts/issue-workers.ps1 review -Pr 12
 ./scripts/issue-workers.ps1 finish -Issue 1
 ./scripts/issue-workers.ps1 remove -Issue 1
 #>
@@ -32,21 +35,29 @@ param(
     [ValidateSet('start', 'status', 'review', 'finish', 'remove')]
     [string]$Action,
     [int[]]$Issue,
+    [int]$Pr,
     [int]$Workers = 2,
     [string]$BaseDir = 'E:\sbxm-projects',
     [string]$SbxmProfile = 'sbxm-dev',
     [string]$Repo = 'tutros/sbxm',
     [string]$TimeLimit = '2h',
-    [string]$ReviewHarness = 'claude',
+    # Only Claude's and Codex's headless commands are known; spike S5 covers Gemini and Pi (decision 85).
+    [ValidateSet('claude', 'codex')]
+    [string]$ReviewHarness = 'codex',
+    # Default: gpt-5.6-sol for Codex, Claude Code's own default for Claude.
+    [string]$ReviewModel,
     [string]$ReviewTimeLimit = '45m',
     [switch]$DryRun
 )
 
 $ErrorActionPreference = 'Stop'
 $labelOrder = @{ 'must-fix' = 0; 'should-fix' = 1 }
-# Only Claude's headless command is known; spike S5 covers the other harnesses (decision 84).
-if ($ReviewHarness -ne 'claude') {
-    throw "-ReviewHarness ${ReviewHarness}: only claude can review until spike S5 finds the other harnesses' headless commands; use -ReviewHarness claude"
+if (-not $ReviewModel -and $ReviewHarness -eq 'codex') { $ReviewModel = 'gpt-5.6-sol' }
+# -Pr is a review target only, and an explicit one: never ignored, never mixed with -Issue.
+if ($PSBoundParameters.ContainsKey('Pr')) {
+    if ($Action -ne 'review') { throw "-Pr works only with review; use: review -Pr $Pr" }
+    if ($Issue) { throw '-Pr and -Issue both name what to review; give one of them' }
+    if ($Pr -lt 1) { throw "-Pr $Pr isn't a PR number; give a positive number" }
 }
 
 function Invoke-Native {
@@ -136,15 +147,30 @@ When you stop, write .sbxm-issue/result.md: each acceptance criterion as done or
 "@
 }
 
-# Writes <workspace>/<dir>/<name>, which runs Claude headless on <dir>/<prompt>, and returns its sandbox path.
+# The headless command for a harness, reading the prompt from a file (decision 85).
+function Get-AgentCommand([string]$harness, [string]$model, [string]$promptFile) {
+    $prompt = "`"`$(cat $promptFile)`""
+    switch ($harness) {
+        'claude' { "claude -p $prompt --output-format text" + ($model ? " --model $model" : '') }
+        # Codex's default reasoning effort is low, too light for a review.
+        'codex' { "codex exec" + ($model ? " -m $model" : '') + " -c 'model_reasoning_effort=`"high`"' $prompt" }
+    }
+}
+
+# Writes <workspace>/<dir>/<name>, which runs an agent headless on <dir>/<prompt> (Claude unless $harness says
+# otherwise), and returns its sandbox path.
 # The time limit is enforced inside the sandbox: killing sbx exec on the host leaves the agent running.
-function Write-RunScript([string]$workspace, [string]$dir, [string]$prompt, [string]$name, [string]$limit) {
+function Write-RunScript([string]$workspace, [string]$dir, [string]$prompt, [string]$name, [string]$limit,
+    [string]$harness = 'claude', [string]$model) {
     $sandboxWorkspace = ConvertTo-SandboxPath $workspace
     $run = @(
         '#!/usr/bin/env bash'
         "cd '$sandboxWorkspace' || exit 1"
-        "timeout --kill-after=60s $limit claude -p `"`$(cat $dir/$prompt)`" --output-format text < /dev/null"
-        'echo "agent exit code: $?"'
+        "timeout --kill-after=60s $limit $(Get-AgentCommand $harness $model "$dir/$prompt") < /dev/null"
+        # Exits with the agent's status (124: timed out), so the host can tell a failed run from a finished one.
+        'status=$?'
+        'echo "agent exit code: $status"'
+        'exit $status'
     ) -join "`n"
     [IO.File]::WriteAllText((Join-Path $workspace "$dir/$name"), "$run`n")
     "$sandboxWorkspace/$dir/$name"
@@ -188,8 +214,7 @@ function Test-AgentRunning([int]$n) {
 }
 
 # fmt, clippy and tests on the host (Windows), since the agents only test on Linux. Throws on the first failure.
-function Invoke-Gates([int]$n, [string]$log) {
-    $workspace = Get-Workspace $n
+function Invoke-Gates([string]$label, [string]$workspace, [string]$log) {
     # Two jobs: with sandboxes running, a full parallel build ran the host out of memory (2026-09-28).
     $env:CARGO_BUILD_JOBS = '2'
     $gates = @(
@@ -198,15 +223,16 @@ function Invoke-Gates([int]$n, [string]$log) {
         @('cargo test', @('test'))
     )
     foreach ($gate in $gates) {
-        Write-Host "#${n}: $($gate[0])"
+        Write-Host "${label}: $($gate[0])"
         Push-Location $workspace
         try { & cargo @($gate[1]) *>> $log }
         finally { Pop-Location }
-        if ($LASTEXITCODE -ne 0) { throw "#${n}: $($gate[0]) failed on the host (exit code $LASTEXITCODE); see $log" }
+        if ($LASTEXITCODE -ne 0) { throw "${label}: $($gate[0]) failed on the host (exit code $LASTEXITCODE); see $log" }
     }
 }
 
-function New-ReviewPrompt([int]$n, [bool]$again) {
+# $subject says what's reviewed and where its description (.sbxm-review/context.md) comes from.
+function New-ReviewPrompt([string]$subject, [bool]$again) {
     $rereview = if ($again) {
         @"
 
@@ -215,13 +241,15 @@ Check each earlier finding is fixed, and review the new commits too.
 "@
     }
     @"
-You are reviewing the change on branch issue-$n of this repository ($Repo), made for GitHub issue #$n. The issue
-is in .sbxm-review/issue.md; you have no GitHub access. Someone else wrote the change, and you can't change it:
-don't edit tracked files, commit, push or file issues. You may build and run tests.
+You are reviewing $subject of this repository ($Repo). Its description is in .sbxm-review/context.md; you have no
+GitHub access. Someone else wrote the change, and you can't change it: don't edit tracked files, commit, push or
+file issues. You may build and run tests.
 
-Follow the sdlc-code-review skill. Scope: the branch's commits (git log origin/main..HEAD, and
-git diff origin/main...HEAD). Check the change against the issue's acceptance criteria, decisions.md and the
-project conventions. The host has already run cargo fmt --check, clippy and cargo test on Windows: they pass.
+Follow the sdlc-code-review skill (.claude/skills/sdlc-code-review/SKILL.md). Scope: the branch's commits
+(git log origin/main..HEAD, and git diff origin/main...HEAD). Check the change against the acceptance criteria of
+the issues in context.md (if any), decisions.md and the project conventions. origin/main is current and may be
+newer than the branch's base: read decisions there (git show origin/main:decisions.md). The host has already run
+cargo fmt --check, clippy and cargo test on Windows: they pass.
 $rereview
 Write .sbxm-review/review.md. Its first line is exactly "Must-fix findings: <count>". Then list each finding with
 its rank (must-fix, should-fix or nit), file:line, evidence (a command and its trimmed output, or the quoted code)
@@ -244,43 +272,93 @@ reason).
 "@
 }
 
-# Must-fix count from the reviewer's first line, or $null if the line is missing.
+# Must-fix count from the reviewer's first line, or $null if that line isn't "Must-fix findings: <count>".
 function Get-MustFixCount([string]$reviewFile) {
-    $m = [regex]::Match((Get-Content -Raw $reviewFile), '(?m)^Must-fix findings: (\d+)')
+    $m = [regex]::Match((Get-Content -TotalCount 1 $reviewFile), '^Must-fix findings: (\d+)\s*$')
     if ($m.Success) { [int]$m.Groups[1].Value } else { $null }
 }
 
-function Invoke-Reviewer([int]$n, [int]$round) {
-    $issueDir = Get-IssueDir $n
-    $reviewProject = "sbxm-review-$n"
+# Clones $source (a path or URL) at $branch into the review project's workspace, with $context as context.md.
+function Initialize-ReviewWorkspace([string]$reviewProject, [string]$source, [string]$branch, [string[]]$context) {
+    $reviewWorkspace = Join-Path $BaseDir $reviewProject
+    Invoke-Native 'git clone' { git clone -q -c core.autocrlf=false --branch $branch $source $reviewWorkspace }
+    Add-Content (Join-Path $reviewWorkspace '.git/info/exclude') '.sbxm-review/'
+    $reviewDir = Join-Path $reviewWorkspace '.sbxm-review'
+    New-Item -ItemType Directory $reviewDir | Out-Null
+    Set-Content (Join-Path $reviewDir 'context.md') $context
+}
+
+# Runs the reviewer on the review project's workspace (created on round 1), copies review.md, headed with the
+# reviewer's harness and model, to $outDir as review.md and review-<round>.md, and returns its must-fix count.
+# A failed or timed-out reviewer, or a review.md without its count line, throws: nothing is used or posted.
+function Invoke-Reviewer([string]$label, [string]$reviewProject, [string]$subject, [int]$round, [string]$outDir) {
     $reviewWorkspace = Join-Path $BaseDir $reviewProject
     $reviewDir = Join-Path $reviewWorkspace '.sbxm-review'
-    if ($round -eq 1) {
-        # Cloned from the worker's clone: the reviewer sees exactly the local commits, which aren't pushed yet.
-        Invoke-Native 'git clone' {
-            git clone -q -c core.autocrlf=false --branch "issue-$n" (Get-Workspace $n) $reviewWorkspace
-        }
-        Add-Content (Join-Path $reviewWorkspace '.git/info/exclude') '.sbxm-review/'
-        New-Item -ItemType Directory $reviewDir | Out-Null
-        Copy-Item (Join-Path $issueDir 'issue.md') $reviewDir
-    }
-    else {
-        Invoke-Native 'git fetch' { git -C $reviewWorkspace fetch -q origin }
-        Invoke-Native 'git reset' { git -C $reviewWorkspace reset -q --hard "origin/issue-$n" }
+    # A review.md left from an earlier run must never stand in for this one.
+    Remove-Item (Join-Path $outDir 'review.md') -ErrorAction SilentlyContinue
+    if ($round -gt 1) {
         Move-Item -Force (Join-Path $reviewDir 'review.md') (Join-Path $reviewDir 'previous-review.md')
     }
-    Set-Content (Join-Path $reviewDir 'prompt.md') (New-ReviewPrompt $n ($round -gt 1))
-    $runScript = Write-RunScript $reviewWorkspace '.sbxm-review' 'prompt.md' 'run.sh' $ReviewTimeLimit
+    Set-Content (Join-Path $reviewDir 'prompt.md') (New-ReviewPrompt $subject ($round -gt 1))
+    $runScript = Write-RunScript $reviewWorkspace '.sbxm-review' 'prompt.md' 'run.sh' $ReviewTimeLimit `
+        $ReviewHarness $ReviewModel
     if ($round -eq 1) {
-        Invoke-Native 'sbxm new' { sbxm new $reviewProject --profile $SbxmProfile --harness $ReviewHarness }
+        Invoke-Native 'sbxm new' { sbxm new $reviewProject --profile $SbxmProfile --harness $ReviewHarness } | Out-Host
     }
 
-    Write-Host "#${n}: review round $round (log: $issueDir\review-$round.log)"
-    sbx exec "sbxm-$reviewProject-$ReviewHarness" bash $runScript *> (Join-Path $issueDir "review-$round.log")
+    $log = Join-Path $outDir "review-$round.log"
+    Write-Host "${label}: review round $round (log: $log)"
+    sbx exec "sbxm-$reviewProject-$ReviewHarness" bash $runScript *> $log
+    $status = $LASTEXITCODE
+    Save-Transcripts $label $reviewProject $outDir
+    if ($status -ne 0) {
+        throw "${label}: the reviewer exited with $status (124: it hit -ReviewTimeLimit), so its review isn't used; see $log"
+    }
     $review = Join-Path $reviewDir 'review.md'
-    if (-not (Test-Path $review)) { throw "#${n}: the reviewer wrote no review.md; see $issueDir\review-$round.log" }
-    Copy-Item $review (Join-Path $issueDir "review-$round.md")
-    Copy-Item $review (Join-Path $issueDir 'review.md')
+    if (-not (Test-Path $review)) { throw "${label}: the reviewer wrote no review.md; see $log" }
+    $mustFix = Get-MustFixCount $review
+    $reviewer = "Reviewer: $ReviewHarness ($($ReviewModel ? $ReviewModel : 'default model'))"
+    $text = "$reviewer`n`n" + (Get-Content -Raw $review)
+    Set-Content (Join-Path $outDir "review-$round.md") $text
+    if ($null -eq $mustFix) {
+        throw "${label}: review.md doesn't start with 'Must-fix findings: <count>', so it isn't used; see $outDir\review-$round.md"
+    }
+    Set-Content (Join-Path $outDir 'review.md') $text
+    $mustFix
+}
+
+# Copies the reviewer's session transcripts to $outDir\transcripts, since the sandbox (and its home) is removed
+# after the review. They go through the mounted workspace; a failed copy only warns.
+function Save-Transcripts([string]$label, [string]$reviewProject, [string]$outDir) {
+    $sessions = @{ claude = '~/.claude/projects'; codex = '~/.codex/sessions' }[$ReviewHarness]
+    $reviewDir = Join-Path (Join-Path $BaseDir $reviewProject) '.sbxm-review'
+    $copy = "rm -rf '$(ConvertTo-SandboxPath $reviewDir)/transcripts' && cp -r $sessions/. '$(ConvertTo-SandboxPath $reviewDir)/transcripts'"
+    sbx exec "sbxm-$reviewProject-$ReviewHarness" bash -c $copy | Out-Host
+    $source = Join-Path $reviewDir 'transcripts'
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $source)) {
+        Write-Warning "${label}: couldn't copy the reviewer's transcripts from $sessions"
+        return
+    }
+    $target = Join-Path $outDir 'transcripts'
+    Remove-Item -Recurse -Force $target -ErrorAction SilentlyContinue
+    Copy-Item -Recurse $source $target
+}
+
+# The reviewer's provider secret must be stored before any host code runs. sbxm checks only the profile's
+# secrets.services, and sbxm-dev names anthropic, which the Claude workers need.
+function Assert-ReviewSecret {
+    $service = @{ claude = 'anthropic'; codex = 'openai' }[$ReviewHarness]
+    $secrets = (sbx secret ls --json | ConvertFrom-Json).secrets
+    if ($LASTEXITCODE -ne 0) { throw 'sbx secret ls failed' }
+    if (-not ($secrets | Where-Object { $_.scope -eq 'global' -and $_.type -eq 'service' -and $_.name -eq $service })) {
+        throw "the $ReviewHarness reviewer needs the '$service' secret, which sbx doesn't have; add it with: sbx secret set $service"
+    }
+}
+
+function Remove-ReviewProject([string]$reviewProject) {
+    if (Test-Path (Join-Path $BaseDir $reviewProject)) {
+        Invoke-Native 'sbxm rm' { sbxm rm $reviewProject --purge --yes }
+    }
 }
 
 function Invoke-FixRound([int]$n) {
@@ -302,28 +380,79 @@ function Invoke-Review([int]$n) {
     if (Test-Path (Join-Path $BaseDir $reviewProject)) {
         throw "#${n}: $BaseDir\$reviewProject is left from an earlier review; remove it with: sbxm rm $reviewProject --purge"
     }
+    Assert-ReviewSecret
     $log = Join-Path $issueDir 'gates.log'
     Remove-Item $log -ErrorAction SilentlyContinue
+    $subject = "the change on branch issue-$n, made for GitHub issue #$n (the issue is context.md)"
     try {
         foreach ($round in 1, 2) {
-            Invoke-Gates $n $log
-            Invoke-Reviewer $n $round
-            $mustFix = Get-MustFixCount (Join-Path $issueDir 'review.md')
-            if ($null -eq $mustFix) {
-                Write-Warning "#${n}: review.md has no 'Must-fix findings:' line; no fix round. Read it before finish."
-                break
+            Invoke-Gates "#$n" $workspace $log
+            if ($round -eq 1) {
+                # Cloned from the worker's clone: the reviewer sees exactly the local commits, which aren't pushed yet.
+                $issueText = Get-Content (Join-Path $issueDir 'issue.md')
+                Initialize-ReviewWorkspace $reviewProject $workspace "issue-$n" $issueText
+                # The worker's clone has main as of its start; the review compares against today's.
+                Invoke-Native 'git fetch main' {
+                    git -C (Join-Path $BaseDir $reviewProject) fetch -q "https://github.com/$Repo" '+main:refs/remotes/origin/main'
+                }
             }
+            else {
+                $reviewWorkspace = Join-Path $BaseDir $reviewProject
+                # Only the branch: fetching all of origin would reset origin/main to the worker's old main.
+                Invoke-Native 'git fetch' { git -C $reviewWorkspace fetch -q origin "issue-$n" }
+                Invoke-Native 'git reset' { git -C $reviewWorkspace reset -q --hard "origin/issue-$n" }
+            }
+            $mustFix = Invoke-Reviewer "#$n" $reviewProject $subject $round $issueDir
             Write-Host "#${n}: $mustFix must-fix finding(s)"
             if ($mustFix -eq 0 -or $round -eq 2) { break }
             Invoke-FixRound $n
         }
     }
-    finally {
-        if (Test-Path (Join-Path $BaseDir $reviewProject)) {
-            Invoke-Native 'sbxm rm' { sbxm rm $reviewProject --purge --yes }
-        }
-    }
+    finally { Remove-ReviewProject $reviewProject }
     Write-Host "#${n}: review done; read $issueDir\review.md, then run finish"
+}
+
+# Reviews a PR's branch and posts the review as a PR comment (decision 87). No fix round: the author fixes and
+# runs it again.
+function Invoke-PrReview([int]$pr) {
+    $label = "PR #$pr"
+    $reviewProject = "sbxm-review-pr-$pr"
+    $outDir = Join-Path $BaseDir "sbxm-pr-$pr-review"
+    $info = gh pr view $pr --repo $Repo --json headRefName,isCrossRepository,state,title,body,closingIssuesReferences |
+        ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0) { throw "gh pr view $pr failed" }
+    # The host gates run the PR's code (cargo test, build scripts) on this machine.
+    if ($info.isCrossRepository) { throw "${label} comes from a fork; its code would run on this host, so it isn't reviewed here" }
+    if ($info.state -ne 'OPEN') { throw "${label} is $($info.state.ToLower()), not open" }
+    if (Test-Path (Join-Path $BaseDir $reviewProject)) {
+        throw "${label}: $BaseDir\$reviewProject is left from an earlier review; remove it with: sbxm rm $reviewProject --purge"
+    }
+    Assert-ReviewSecret
+    # The linked issues' acceptance criteria are what the reviewer checks against, so a failed lookup stops here.
+    $context = @("# PR #${pr}: $($info.title)", '', $info.body)
+    foreach ($ref in $info.closingIssuesReferences) {
+        $issueText = gh issue view $ref.number --repo $Repo
+        if ($LASTEXITCODE -ne 0) { throw "${label}: gh issue view $($ref.number) (an issue the PR closes) failed" }
+        $context += @('', '---', '') + $issueText
+    }
+    New-Item -ItemType Directory -Force $outDir | Out-Null
+    $log = Join-Path $outDir 'gates.log'
+    Remove-Item $log -ErrorAction SilentlyContinue
+
+    $subject = "pull request #$pr (branch $($info.headRefName))"
+    try {
+        Initialize-ReviewWorkspace $reviewProject "https://github.com/$Repo" $info.headRefName $context
+        Invoke-Gates $label (Join-Path $BaseDir $reviewProject) $log
+        $mustFix = Invoke-Reviewer $label $reviewProject $subject 1 $outDir
+    }
+    finally { Remove-ReviewProject $reviewProject }
+
+    Write-Host "${label}: $mustFix must-fix finding(s)"
+    $bodyFile = New-TemporaryFile
+    Set-Content $bodyFile ("## Independent review (decision 87)`n`nHost checks (fmt, clippy, cargo test) passed on Windows.`n`n" +
+        (Get-Content -Raw (Join-Path $outDir 'review.md')))
+    try { Invoke-Native 'gh pr comment' { gh pr comment $pr --repo $Repo --body-file $bodyFile } }
+    finally { Remove-Item $bodyFile }
 }
 
 function Show-Status {
@@ -373,7 +502,8 @@ switch ($Action) {
     }
     'status' { Show-Status }
     'review' {
-        if (-not $Issue) { throw 'review needs -Issue' }
+        if ($PSBoundParameters.ContainsKey('Pr')) { Invoke-PrReview $Pr; return }
+        if (-not $Issue) { throw 'review needs -Issue or -Pr' }
         foreach ($n in $Issue) { Invoke-Review $n }
     }
     'finish' {
