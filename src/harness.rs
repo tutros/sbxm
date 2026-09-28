@@ -6,14 +6,19 @@ use std::path::PathBuf;
 use crate::backend::SkillsStore;
 use crate::config::Profile;
 
-/// `sbx`'s built-in agent of the same name.
+/// `sbx`'s built-in agent of the same name, or Pi's kit (decision 73).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
 pub enum Harness {
     #[default]
     Claude,
     Codex,
     Gemini,
+    Pi,
 }
+
+/// The Pi kit on Docker Hub, pinned to an immutable tag (decision 73). `sbx`
+/// allows `docker.io/` by default, so no `kit.allowedSources` change is needed.
+const PI_KIT: &str = "docker.io/sbx/pi-kit:20260924-d058fedc156325f87612d9bcd9bd313ab74ba100";
 
 impl Harness {
     /// The `sbx` agent name, also used in sandbox names and state keys.
@@ -22,6 +27,16 @@ impl Harness {
             Harness::Claude => "claude",
             Harness::Codex => "codex",
             Harness::Gemini => "gemini",
+            Harness::Pi => "pi",
+        }
+    }
+
+    /// The agent argument of `sbx create`: the kit ref for Pi, which isn't
+    /// built into `sbx`.
+    pub fn agent_arg(self) -> &'static str {
+        match self {
+            Harness::Pi => PI_KIT,
+            other => other.as_str(),
         }
     }
 
@@ -32,6 +47,7 @@ impl Harness {
             Harness::Claude => PathBuf::from(".claude").join("CLAUDE.md"),
             Harness::Codex => PathBuf::from(".codex").join("AGENTS.md"),
             Harness::Gemini => PathBuf::from(".gemini").join("GEMINI.md"),
+            Harness::Pi => PathBuf::from(".pi").join("agent").join("AGENTS.md"),
         }
     }
 
@@ -60,6 +76,15 @@ impl Harness {
                 "skills.store is \"{}\", but {name} sandboxes don't support it: the sbx skills \
                  store's skills don't reach {sandbox}; set skills.store = \"off\" to silence this",
                 profile.skills_store.as_arg()
+            ));
+        }
+        // sbx writes agentInstructions above the workspace, and Pi reads
+        // parent folders (decision 75).
+        if self == Harness::Pi && profile.reference_instructions.is_some() {
+            warnings.push(format!(
+                "instructions.reference is set, and {name} sandboxes always load it (sbx writes \
+                 it as AGENTS.md above the workspace, and Pi reads parent folders): it takes up \
+                 context in every prompt in {sandbox}, not only on demand"
             ));
         }
         warnings

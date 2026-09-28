@@ -116,7 +116,7 @@ pub fn run(
     }
     backend.create(&CreateSpec {
         name: sandbox.clone(),
-        agent: harness.into(),
+        agent: options.harness.agent_arg().into(),
         workspace: workspace.clone(),
         cpus: config.resources.cpus,
         memory: config.resources.memory,
