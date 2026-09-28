@@ -1,0 +1,14 @@
+description = "Slice 21 end-to-end check. Delete after the check."
+
+[network]
+allow = ["example.org"]
+
+[env]
+E2E_GREETING = "changed"
+
+[secrets]
+services = ["anthropic"]
+
+[instructions]
+mandatory = "mandatory.md"
+reference = "reference.md"
