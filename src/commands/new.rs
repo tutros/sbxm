@@ -75,10 +75,16 @@ pub fn run(
             );
         }
         if !seed_dir.is_dir() {
-            bail!("seed {} is not a directory", seed_dir.display());
+            bail!(
+                "seed {} is not a directory; pass a folder with --seed",
+                seed_dir.display()
+            );
         }
-        let seed_abs = fs::canonicalize(seed_dir)?;
-        if fs::canonicalize(&config.base_dir)?.starts_with(&seed_abs) {
+        let seed_abs = fs::canonicalize(seed_dir)
+            .with_context(|| format!("cannot resolve seed {}", seed_dir.display()))?;
+        let base_abs = fs::canonicalize(&config.base_dir)
+            .with_context(|| format!("cannot resolve base dir {}", config.base_dir.display()))?;
+        if base_abs.starts_with(&seed_abs) {
             bail!(
                 "seed {} contains the base dir {}; copying it would recurse into itself",
                 seed_dir.display(),
@@ -104,18 +110,8 @@ pub fn run(
             writeln!(warn, "warning: kit {}: {warning}", dir.display())?;
         }
         if !validation.valid {
-            let profile_toml = config
-                .profiles_dir()
-                .join(profile_name)
-                .join("profile.toml");
-            let sandbox_toml = metadata_dir.join("sandbox.toml");
-            let mut checked = format!("profile '{profile_name}' ({})", profile_toml.display());
-            if sandbox_toml.is_file() {
-                checked.push_str(&format!(
-                    " and the project's sandbox.toml ({})",
-                    sandbox_toml.display()
-                ));
-            }
+            let checked =
+                super::invalid_kit_check(config.profiles_dir(), profile_name, Some(&metadata_dir));
             bail!(
                 "generated kit {} is invalid: {}; check {checked}",
                 dir.display(),

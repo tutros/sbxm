@@ -5,7 +5,7 @@ mod common;
 
 use common::Env;
 use sbxm::backend::FakeBackend;
-use sbxm::commands::doctor;
+use sbxm::commands::{doctor, new};
 
 const GIB: u64 = 1024 * 1024 * 1024;
 
@@ -137,9 +137,9 @@ fn unknown_free_space_fails() {
 
     assert!(report.failed());
     assert!(
-        report
-            .render()
-            .contains("FAIL free space for base dir: no statvfs"),
+        report.render().contains(
+            "FAIL free space for base dir: no statvfs; check that base_dir is on a drive sbx can use"
+        ),
         "{}",
         report.render()
     );
@@ -318,12 +318,70 @@ fn invalid_kit_fails() {
     let report = report(&env, &FakeBackend::with_invalid_kit("bad network pattern"));
 
     assert!(report.failed());
+    let profile_toml = env
+        .profiles_dir()
+        .join("default")
+        .join("profile.toml")
+        .display()
+        .to_string();
+    let text = report.render();
     assert!(
-        report.render().contains(
-            "FAIL profile 'default': generated kit common is invalid: bad network pattern"
-        ),
-        "{}",
-        report.render()
+        text.contains(&format!(
+            "FAIL profile 'default': generated kit common is invalid: bad network pattern; \
+             check profile 'default' ({profile_toml})"
+        )),
+        "{text}"
+    );
+}
+
+/// Decision from #4/#6: a project's invalid-kit failure names its recorded
+/// profile and, when it has one, its `sandbox.toml`, the same way `new` does.
+/// Uses a non-default profile so the profile name in the message can only
+/// have come from the project's own recorded profile, not the bare-profile
+/// check that also runs (and also fails) against `default`.
+#[test]
+fn invalid_kit_for_a_project_names_its_sandbox_toml() {
+    let env = Env::new();
+    env.write_profile("custom", "description = \"test custom\"\n");
+    env.run_with(
+        "demo",
+        &new::Options {
+            profile: Some("custom".into()),
+            ..new::Options::default()
+        },
+        &FakeBackend::default(),
+    )
+    .unwrap();
+    write_project_config(&env, "");
+
+    let report = report(&env, &FakeBackend::with_invalid_kit("manifest: bad host"));
+
+    assert!(report.failed());
+    let profile_toml = env
+        .profiles_dir()
+        .join("custom")
+        .join("profile.toml")
+        .display()
+        .to_string();
+    let sandbox_toml = env
+        .base_dir()
+        .join(".sbxm")
+        .join("demo")
+        .join("sandbox.toml")
+        .display()
+        .to_string();
+    let text = report.render();
+    // The full line, not just each path's presence anywhere in the report:
+    // the bare `profile 'custom'` check also fails and also names
+    // profile_toml, so checking each path independently wouldn't catch a
+    // regression that drops one of them from the project's own line.
+    assert!(
+        text.contains(&format!(
+            "FAIL project demo (claude, profile 'custom'): generated kit common is invalid: \
+             manifest: bad host; check profile 'custom' ({profile_toml}) and the project's \
+             sandbox.toml ({sandbox_toml})"
+        )),
+        "{text}"
     );
 }
 
