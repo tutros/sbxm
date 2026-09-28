@@ -13,7 +13,9 @@ pub fn copy(seed: &Path, dest: &Path) -> Result<()> {
     copy_tree(seed, dest)
 }
 
-fn reject_links(dir: &Path) -> Result<()> {
+/// Fails naming the first symlink or junction under `dir`. `new` calls it
+/// with the other seed checks, before anything is written (decision 47).
+pub fn reject_links(dir: &Path) -> Result<()> {
     for entry in fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))? {
         let entry = entry?;
         let file_type = entry.file_type()?;

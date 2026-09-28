@@ -69,6 +69,7 @@ pub fn run(
                 config.base_dir.display()
             );
         }
+        seed::reject_links(seed_dir)?;
     }
     check_secrets(&profile.secrets.services, backend)?;
     // Named after the hash, so a changed config never overwrites the kit an
