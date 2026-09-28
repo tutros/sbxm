@@ -4,7 +4,7 @@ This file provides guidance to coding agents (Claude Code reads it through `CLAU
 
 ## Status
 
-Milestone 1 complete (slices 0–21, end-to-end check passed 2026-09-27); milestone 2 not planned yet (the user wants to try sbxm first), but its first decisions (80–83, parallel issue workers) are recorded. Before milestone 2, the open review issues get fixed, ideally with `scripts/issue-workers.ps1` (one sbxm sandbox per issue; `sandbox-issues.md`). `README.md` is the user-facing documentation: keep it in step with behavior changes. Sources of truth:
+Milestone 1 complete (slices 0–21, end-to-end check passed 2026-09-27); milestone 2 not planned yet (the user wants to try sbxm first), but its first decisions (80–83, parallel issue workers) are recorded. Before milestone 2, the open issues get fixed: #3–#9 with `scripts/issue-workers.ps1` (one sbxm sandbox per issue, two at a time; `sandbox-issues.md`), and #13 (Pester tests for the script) on the host, since the `sbxm-dev` sandbox has no PowerShell. The script is frozen to bug fixes and #13 (decision 88). Milestone 2 planning starts only when the user asks, from inside an sbxm sandbox. `README.md` is the user-facing documentation: keep it in step with behavior changes. Sources of truth:
 - `idea.md`: original brief
 - `milestone-1.md`: current implementation plan (crate layout, config schema, kit mapping, commands, build order).
 - `decisions.md`: numbered design decisions and open research spikes. **Read it before designing anything**, and add new decisions there instead of silently departing from it.
