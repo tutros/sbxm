@@ -4,6 +4,8 @@
 
 mod common;
 
+#[cfg(unix)]
+use common::file_link;
 use common::{Env, dir_link};
 use sbxm::backend::FakeBackend;
 
@@ -224,6 +226,36 @@ fn project_managed_settings_through_a_link_are_refused() {
             "harness.claude.managed_settings = \"linked/managed.json\" in project config \
              passes through the symlink or junction {}",
             metadata.join("linked").display()
+        )),
+        "{message}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn managed_settings_file_itself_a_link_is_refused() {
+    let env = Env::new();
+    env.write_profile(
+        "default",
+        "[harness.claude]\nmanaged_settings = \"managed.json\"\n",
+    );
+    let outside = env.tmp.path().join("outside.json");
+    std::fs::write(&outside, "{}").unwrap();
+    file_link(
+        &env.profiles_dir().join("default").join("managed.json"),
+        &outside,
+    );
+
+    let message = refused(&env);
+
+    assert!(
+        message.contains(&format!(
+            "harness.claude.managed_settings = \"managed.json\" in profile 'default' passes \
+             through the symlink or junction {}",
+            env.profiles_dir()
+                .join("default")
+                .join("managed.json")
+                .display()
         )),
         "{message}"
     );

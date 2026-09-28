@@ -114,3 +114,11 @@ pub fn dir_link(link: &Path, target: &Path) {
     #[cfg(unix)]
     std::os::unix::fs::symlink(target, link).unwrap();
 }
+
+/// A symlink to a file. Unlike `dir_link`'s junction, a Windows file symlink
+/// needs admin rights or Developer Mode, so tests using this helper are
+/// unix-only.
+#[cfg(unix)]
+pub fn file_link(link: &Path, target: &Path) {
+    std::os::unix::fs::symlink(target, link).unwrap();
+}

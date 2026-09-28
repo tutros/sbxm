@@ -4,6 +4,8 @@
 
 mod common;
 
+#[cfg(unix)]
+use common::file_link;
 use common::{Env, dir_link};
 use sbxm::backend::FakeBackend;
 
@@ -73,17 +75,23 @@ fn reference_instructions_become_agent_instructions() {
     assert_eq!(spec["agentInstructions"]["content"], "Style guide.\n");
 }
 
-/// Runs `new demo` with `mandatory = <path>`, expecting an error; checks
-/// nothing was created.
-fn rejected_mandatory(env: &Env, path: &str) -> String {
+/// Runs `new demo` with `instructions.<field> = <path>`, expecting an
+/// error; checks nothing was created.
+fn rejected_instructions(env: &Env, field: &str, path: &str) -> String {
     let path = toml::Value::String(path.to_owned());
-    env.write_profile("default", &format!("[instructions]\nmandatory = {path}\n"));
+    env.write_profile("default", &format!("[instructions]\n{field} = {path}\n"));
     let backend = FakeBackend::default();
     let err = env.run("demo", &backend).unwrap_err();
     assert!(backend.log().is_empty(), "{:?}", backend.log());
     assert!(!env.base_dir().join("demo").exists());
     assert!(!env.base_dir().join(".sbxm").exists());
     format!("{err:#}")
+}
+
+/// Runs `new demo` with `mandatory = <path>`, expecting an error; checks
+/// nothing was created.
+fn rejected_mandatory(env: &Env, path: &str) -> String {
+    rejected_instructions(env, "mandatory", path)
 }
 
 fn profile_toml(env: &Env) -> String {
@@ -182,6 +190,52 @@ fn project_mandatory_instructions_through_a_link_are_refused() {
             "instructions.mandatory = \"linked/mandatory.md\" in project config passes \
              through the symlink or junction {}",
             metadata.join("linked").display()
+        )),
+        "{message}"
+    );
+}
+
+#[test]
+fn reference_instructions_through_a_link_are_refused() {
+    let env = Env::new();
+    let outside = env.tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("reference.md"), "Style guide.\n").unwrap();
+    dir_link(&env.profiles_dir().join("default").join("linked"), &outside);
+
+    let message = rejected_instructions(&env, "reference", "linked/reference.md");
+
+    assert!(
+        message.contains(&format!(
+            "instructions.reference = \"linked/reference.md\" in profile 'default' passes \
+             through the symlink or junction {}",
+            env.profiles_dir().join("default").join("linked").display()
+        )),
+        "{message}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn mandatory_instructions_file_itself_a_link_is_refused() {
+    let env = Env::new();
+    let outside = env.tmp.path().join("outside.md");
+    std::fs::write(&outside, "Always run the tests.\n").unwrap();
+    file_link(
+        &env.profiles_dir().join("default").join("mandatory.md"),
+        &outside,
+    );
+
+    let message = rejected_mandatory(&env, "mandatory.md");
+
+    assert!(
+        message.contains(&format!(
+            "instructions.mandatory = \"mandatory.md\" in profile 'default' passes \
+             through the symlink or junction {}",
+            env.profiles_dir()
+                .join("default")
+                .join("mandatory.md")
+                .display()
         )),
         "{message}"
     );
