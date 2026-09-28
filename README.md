@@ -257,8 +257,10 @@ check that `gh auth status` shows you logged in.
 ./scripts/issue-workers.ps1 remove -Issue 1            # after merging: sandbox and clone (asks first)
 ```
 
-Agents run for up to `-TimeLimit` (default `2h`), reviewers for up to `-ReviewTimeLimit` (default `45m`), and their
-output goes to `.sbxm-issue/agent.log` (`review-<round>.log`, `fix.log`) in the clone.
+Agents run for up to `-TimeLimit` (default `2h`), reviewers for up to `-ReviewTimeLimit` (default `45m`). For a
+worker, the output goes to `.sbxm-issue/` in its clone (`agent.log`, `gates.log`, `review-<round>.log` and `.md`,
+`review.md`, `fix.log`); for `review -Pr <n>`, to `<base_dir>\sbxm-pr-<n>-review\` (`gates.log`, `review-1.log`,
+`review.md`).
 To take over one interactively, run `sbxm open sbxm-issue-<n>`. `-BaseDir` (default `E:\sbxm-projects`) must match
 `base_dir` in `config.toml`. [`sandbox-issues.md`](sandbox-issues.md) has the steps with the expected output.
 

@@ -53,6 +53,12 @@ param(
 $ErrorActionPreference = 'Stop'
 $labelOrder = @{ 'must-fix' = 0; 'should-fix' = 1 }
 if (-not $ReviewModel -and $ReviewHarness -eq 'codex') { $ReviewModel = 'gpt-5.6-sol' }
+# -Pr is a review target only, and an explicit one: never ignored, never mixed with -Issue.
+if ($PSBoundParameters.ContainsKey('Pr')) {
+    if ($Action -ne 'review') { throw "-Pr works only with review; use: review -Pr $Pr" }
+    if ($Issue) { throw '-Pr and -Issue both name what to review; give one of them' }
+    if ($Pr -lt 1) { throw "-Pr $Pr isn't a PR number; give a positive number" }
+}
 
 function Invoke-Native {
     param([string]$What, [scriptblock]$Command)
@@ -305,6 +311,17 @@ function Invoke-Reviewer([string]$label, [string]$reviewProject, [string]$subjec
     Set-Content (Join-Path $outDir 'review.md') $text
 }
 
+# The reviewer's provider secret must be stored before any host code runs. sbxm checks only the profile's
+# secrets.services, and sbxm-dev names anthropic, which the Claude workers need.
+function Assert-ReviewSecret {
+    $service = @{ claude = 'anthropic'; codex = 'openai' }[$ReviewHarness]
+    $secrets = (sbx secret ls --json | ConvertFrom-Json).secrets
+    if ($LASTEXITCODE -ne 0) { throw 'sbx secret ls failed' }
+    if (-not ($secrets | Where-Object { $_.scope -eq 'global' -and $_.type -eq 'service' -and $_.name -eq $service })) {
+        throw "the $ReviewHarness reviewer needs the '$service' secret, which sbx doesn't have; add it with: sbx secret set $service"
+    }
+}
+
 function Remove-ReviewProject([string]$reviewProject) {
     if (Test-Path (Join-Path $BaseDir $reviewProject)) {
         Invoke-Native 'sbxm rm' { sbxm rm $reviewProject --purge --yes }
@@ -330,6 +347,7 @@ function Invoke-Review([int]$n) {
     if (Test-Path (Join-Path $BaseDir $reviewProject)) {
         throw "#${n}: $BaseDir\$reviewProject is left from an earlier review; remove it with: sbxm rm $reviewProject --purge"
     }
+    Assert-ReviewSecret
     $log = Join-Path $issueDir 'gates.log'
     Remove-Item $log -ErrorAction SilentlyContinue
     $subject = "the change on branch issue-$n, made for GitHub issue #$n (the issue is context.md)"
@@ -381,15 +399,18 @@ function Invoke-PrReview([int]$pr) {
     if (Test-Path (Join-Path $BaseDir $reviewProject)) {
         throw "${label}: $BaseDir\$reviewProject is left from an earlier review; remove it with: sbxm rm $reviewProject --purge"
     }
+    Assert-ReviewSecret
+    # The linked issues' acceptance criteria are what the reviewer checks against, so a failed lookup stops here.
+    $context = @("# PR #${pr}: $($info.title)", '', $info.body)
+    foreach ($ref in $info.closingIssuesReferences) {
+        $issueText = gh issue view $ref.number --repo $Repo
+        if ($LASTEXITCODE -ne 0) { throw "${label}: gh issue view $($ref.number) (an issue the PR closes) failed" }
+        $context += @('', '---', '') + $issueText
+    }
     New-Item -ItemType Directory -Force $outDir | Out-Null
     $log = Join-Path $outDir 'gates.log'
     Remove-Item $log -ErrorAction SilentlyContinue
 
-    $context = @("# PR #${pr}: $($info.title)", '', $info.body)
-    foreach ($ref in $info.closingIssuesReferences) {
-        $context += '', '---', ''
-        $context += gh issue view $ref.number --repo $Repo
-    }
     $subject = "pull request #$pr (branch $($info.headRefName))"
     try {
         Initialize-ReviewWorkspace $reviewProject "https://github.com/$Repo" $info.headRefName $context
@@ -454,7 +475,7 @@ switch ($Action) {
     }
     'status' { Show-Status }
     'review' {
-        if ($Pr) { Invoke-PrReview $Pr; return }
+        if ($PSBoundParameters.ContainsKey('Pr')) { Invoke-PrReview $Pr; return }
         if (-not $Issue) { throw 'review needs -Issue or -Pr' }
         foreach ($n in $Issue) { Invoke-Review $n }
     }

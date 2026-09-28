@@ -36,7 +36,8 @@ for each acceptance criterion. You push and open the PR from the host.
    ```
 
    Expected: `<profiles_dir>\sbxm-dev\profile.toml` exists. It installs Rust 1.93.0 and a C toolchain, allows
-   crates.io, and needs the `anthropic` secret (`sbx secret ls` shows it).
+   crates.io, and needs the `anthropic` secret (`sbx secret ls` shows it). The Codex reviewer also needs the
+   `openai` secret; `review` checks for it before running anything.
 
 2. Check `gh` is logged in: `gh auth status`.
 
