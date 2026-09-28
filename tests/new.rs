@@ -222,3 +222,28 @@ fn seed_containing_a_link_is_an_error_and_copies_nothing() {
     assert!(!env.base_dir().join("demo").exists());
     assert!(backend.creates().is_empty());
 }
+
+/// Decision 76: `default_harness` was written by `config init` but never read,
+/// so a config that still has it fails instead of being silently ignored.
+#[test]
+fn default_harness_in_config_is_an_error_and_creates_nothing() {
+    let env = Env::new();
+    let path = env.config_dir().join("config.toml");
+    let config = std::fs::read_to_string(&path).unwrap();
+    std::fs::write(&path, format!("default_harness = \"codex\"\n{config}")).unwrap();
+    let backend = FakeBackend::default();
+
+    let err = env.run("demo", &backend).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains(&format!(
+            "default_harness in {} isn't an sbxm setting (use --harness; the default is claude); \
+             delete that line",
+            path.display()
+        )),
+        "{message}"
+    );
+    assert!(backend.log().is_empty());
+    assert!(!env.base_dir().join("demo").exists());
+}

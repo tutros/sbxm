@@ -34,6 +34,10 @@ pub struct GlobalConfig {
     #[serde(default = "default_min_sbx_version")]
     pub min_sbx_version: String,
     pub resources: Resources,
+    /// Written by `config init` before decision 76 but never read; refused
+    /// by [`GlobalConfig::load`] rather than silently ignored.
+    #[serde(default)]
+    default_harness: Option<toml::Value>,
 }
 
 fn default_profile_name() -> String {
@@ -63,6 +67,13 @@ impl GlobalConfig {
             .with_context(|| format!("cannot read {}", path.display()))?;
         let mut config: Self =
             toml::from_str(&text).with_context(|| format!("invalid config {}", path.display()))?;
+        if config.default_harness.is_some() {
+            bail!(
+                "default_harness in {} isn't an sbxm setting (use --harness; the default is \
+                 claude); delete that line",
+                path.display()
+            );
+        }
         config
             .profiles_dir
             .get_or_insert_with(|| config_dir.join("profiles"));

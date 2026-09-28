@@ -34,7 +34,8 @@ fn writes_starter_global_config_and_default_profile() {
         config_dir.join("profiles")
     );
     assert_eq!(config["default_profile"].as_str(), Some("default"));
-    assert_eq!(config["default_harness"].as_str(), Some("claude"));
+    // Decision 76: sbxm has no default_harness setting.
+    assert!(config.get("default_harness").is_none());
     assert_eq!(config["min_sbx_version"].as_str(), Some("0.43.0"));
     assert!(config["resources"]["cpus"].as_integer().unwrap() > 0);
     assert!(config["resources"]["memory"].as_str().is_some());

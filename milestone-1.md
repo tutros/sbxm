@@ -42,7 +42,6 @@ Dependencies: `clap` (derive), `serde`, `toml`, `serde_json`, a *maintained* ser
 base_dir = 'E:\sbxm-projects'
 profiles_dir = 'E:\sbxm-config\profiles'   # the versioned common-config repo [28]
 default_profile = "default"
-default_harness = "claude"
 min_sbx_version = "0.43.0"
 
 [resources]            # sbx defaults to all CPUs / 16 GiB, so be explicit

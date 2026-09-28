@@ -56,7 +56,6 @@ base_dir = {base_dir}
 # Profiles are <profiles_dir>/<name>/profile.toml. Keep this directory in git.
 profiles_dir = {profiles_dir}
 default_profile = "default"
-default_harness = "claude"
 min_sbx_version = "0.43.0"
 
 # sbx defaults to all CPUs and 16 GiB, so be explicit.
