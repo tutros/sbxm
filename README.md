@@ -222,6 +222,30 @@ settings, the *contents* of referenced files, resources and sbxm's version. A se
 real `sbx`. Design decisions are numbered in `decisions.md`, the milestone plan is `milestone-1.md`, and
 `AGENTS.md` describes the code layout and workflow for coding agents.
 
+### Working on issues with sbxm sandboxes
+
+`scripts/issue-workers.ps1` (PowerShell 7) hands open GitHub issues to Claude Code agents running in parallel, one
+sbxm sandbox per issue. The host picks the issues, so no two workers get the same one. It skips questions, issues
+whose **Depends on** issues are still open, and issues **Related** to one that already has a worker. Each worker is a
+clone at `<base_dir>\sbxm-issue-<n>` on branch `issue-<n>`, and the agent follows the `sdlc-implementation` skill from
+the clone's `.claude/skills/`. The sandbox has no GitHub access: the agent commits locally and writes
+`.sbxm-issue/result.md` with evidence for each acceptance criterion, and you push from the host.
+
+One-time setup: copy `profiles/sbxm-dev` into your `profiles_dir`. It installs Rust and a C toolchain, allows
+crates.io, and needs the `anthropic` secret. Also check that `gh auth status` shows you logged in.
+
+```powershell
+./scripts/issue-workers.ps1 start -Workers 2 -DryRun   # which issues would be picked
+./scripts/issue-workers.ps1 start -Workers 2           # or choose them: -Issue 1,2
+./scripts/issue-workers.ps1 status                     # agent running/finished, commits, result.md
+./scripts/issue-workers.ps1 finish -Issue 1            # push issue-1 and open a PR with "Fixes #1"
+./scripts/issue-workers.ps1 remove -Issue 1            # after merging: sandbox and clone (asks first)
+```
+
+Agents run for up to `-TimeLimit` (default `2h`), and their output goes to `.sbxm-issue/agent.log` in the clone.
+To take over one interactively, run `sbxm open sbxm-issue-<n>`. `-BaseDir` (default `E:\sbxm-projects`) must match
+`base_dir` in `config.toml`. [`sandbox-issues.md`](sandbox-issues.md) has the steps with the expected output.
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT), at your
