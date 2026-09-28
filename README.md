@@ -221,3 +221,8 @@ settings, the *contents* of referenced files, resources and sbxm's version. A se
 `just check` runs formatting, lints and the tests (no Docker needed); `just real-test` runs the tests against the
 real `sbx`. Design decisions are numbered in `decisions.md`, the milestone plan is `milestone-1.md`, and
 `AGENTS.md` describes the code layout and workflow for coding agents.
+
+## License
+
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT), at your
+option.
