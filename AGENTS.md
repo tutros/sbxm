@@ -4,7 +4,7 @@ This file provides guidance to coding agents (Claude Code reads it through `CLAU
 
 ## Status
 
-Milestone 1 in progress (slices 0–20 done). Sources of truth:
+Milestone 1 complete (slices 0–21, end-to-end check passed 2026-09-27); milestone 2 not planned yet. Sources of truth:
 - `idea.md`: original brief
 - `milestone-1.md`: current implementation plan (crate layout, config schema, kit mapping, commands, build order).
 - `decisions.md`: numbered design decisions and open research spikes. **Read it before designing anything**, and add new decisions there instead of silently departing from it.
