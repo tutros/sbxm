@@ -231,18 +231,25 @@ clone at `<base_dir>\sbxm-issue-<n>` on branch `issue-<n>`, and the agent follow
 the clone's `.claude/skills/`. The sandbox has no GitHub access: the agent commits locally and writes
 `.sbxm-issue/result.md` with evidence for each acceptance criterion, and you push from the host.
 
+A worker never reviews its own change. `review` first runs `cargo fmt --check`, clippy and `cargo test` on the host,
+then a fresh Claude session in its own sandbox (`sbxm-review-<n>`, on its own clone, so it can't change the branch)
+writes `review.md`. If that has must-fix findings, the worker gets one round to fix them and the review runs once
+more. Whatever is still open goes into the PR description; nothing is filed as an issue.
+
 One-time setup: copy `profiles/sbxm-dev` into your `profiles_dir`. It installs Rust and a C toolchain, allows
 crates.io, and needs the `anthropic` secret. Also check that `gh auth status` shows you logged in.
 
 ```powershell
 ./scripts/issue-workers.ps1 start -Workers 2 -DryRun   # which issues would be picked
 ./scripts/issue-workers.ps1 start -Workers 2           # or choose them: -Issue 1,2
-./scripts/issue-workers.ps1 status                     # agent running/finished, commits, result.md
-./scripts/issue-workers.ps1 finish -Issue 1            # push issue-1 and open a PR with "Fixes #1"
+./scripts/issue-workers.ps1 status                     # agent running/finished, commits, result.md, review
+./scripts/issue-workers.ps1 review -Issue 1            # host checks, independent review, one fix round
+./scripts/issue-workers.ps1 finish -Issue 1            # push issue-1 and open a PR with "Fixes #1" and the review
 ./scripts/issue-workers.ps1 remove -Issue 1            # after merging: sandbox and clone (asks first)
 ```
 
-Agents run for up to `-TimeLimit` (default `2h`), and their output goes to `.sbxm-issue/agent.log` in the clone.
+Agents run for up to `-TimeLimit` (default `2h`), reviewers for up to `-ReviewTimeLimit` (default `45m`), and their
+output goes to `.sbxm-issue/agent.log` (`review-<round>.log`, `fix.log`) in the clone.
 To take over one interactively, run `sbxm open sbxm-issue-<n>`. `-BaseDir` (default `E:\sbxm-projects`) must match
 `base_dir` in `config.toml`. [`sandbox-issues.md`](sandbox-issues.md) has the steps with the expected output.
 

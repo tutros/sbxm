@@ -27,10 +27,14 @@ for each acceptance criterion. You push and open the PR from the host.
 2. Start them: `./scripts/issue-workers.ps1 start -Workers 2` (or pick them: `-Issue 1,2`).
    Each sandbox takes about a minute to create; the agents then run in the background, up to `-TimeLimit` (2h).
 3. Check progress: `./scripts/issue-workers.ps1 status`
-   Expected per issue: `#1: agent running|finished, <k> commit(s), result.md written|no result.md`.
+   Expected per issue: `#1: agent running|finished, <k> commit(s), result.md written|no result.md, reviewed|not reviewed`.
    The agent's output is in `<base_dir>\sbxm-issue-<n>\.sbxm-issue\agent.log`.
-4. Read `result.md` and the commits. To take over interactively: `sbxm open sbxm-issue-<n>`.
-5. Push and open the PR (its body is `Fixes #<n>` plus `result.md`): `./scripts/issue-workers.ps1 finish -Issue 1`
-6. After merging: `./scripts/issue-workers.ps1 remove -Issue 1` (asks you to confirm the paths it deletes).
+4. When the agent has finished, review it (decision 84): `./scripts/issue-workers.ps1 review -Issue 1`
+   Expected: `cargo fmt --check`, `cargo clippy` and `cargo test` lines, `review round 1`, then
+   `#1: <k> must-fix finding(s)`; with k > 0 a `fix round` and `review round 2`; last line `#1: review done; …`.
+   A failing host check stops it with the log path (`.sbxm-issue\gates.log`). The reviewer sandbox is removed at the end.
+5. Read `result.md`, `review.md` and the commits. To take over interactively: `sbxm open sbxm-issue-<n>`.
+6. Push and open the PR (its body is `Fixes #<n>`, `result.md` and `review.md`): `./scripts/issue-workers.ps1 finish -Issue 1`
+7. After merging: `./scripts/issue-workers.ps1 remove -Issue 1` (asks you to confirm the paths it deletes).
 
 `-BaseDir` (default `E:\sbxm-projects`) must match `base_dir` in sbxm's `config.toml`.
