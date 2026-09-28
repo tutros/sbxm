@@ -65,6 +65,7 @@ pub fn run(
         // slice 11 has none, so the default applies.
         (entry, false) => {
             let options = new::Options {
+                recreate: entry.is_some(),
                 profile: entry.and_then(|e| e.profile),
                 harness,
                 ..new::Options::default()

@@ -57,7 +57,7 @@ that).
 | Command | What it does |
 |---|---|
 | `sbxm config init` | Writes a starter `config.toml` and `default` profile. Refuses to overwrite either. |
-| `sbxm new <project> [--harness h] [--profile p] [--seed dir]` | Creates `<base_dir>/<project>` if missing (or reuses it), builds the kits from the profile and the project's `sandbox.toml`, checks them with `sbx kit validate`, and creates the sandbox. Doesn't attach. `--seed` copies a folder into a *new* project. |
+| `sbxm new <project> [--harness h] [--profile p] [--seed dir]` | Creates `<base_dir>/<project>` if missing (or reuses it), builds the kits from the profile and the project's `sandbox.toml`, checks them with `sbx kit validate`, and creates the sandbox. Doesn't attach. Refuses a harness that already has a sandbox for the project, before writing anything; open that one with `sbxm open <project> [--harness h]` (or `--rebuild` it). `--seed` copies a folder into a *new* project. |
 | `sbxm open <project> [--harness h] [--rebuild]` | Attaches to the sandbox, starting it if it's stopped and creating it if it's missing. Refuses if the config changed since the sandbox was built; `--rebuild` recreates it. |
 | `sbxm list [--json]` | Lists sbxm's sandboxes with project, harness, status and whether their config is `current` or `changed`. Flags orphans (a sandbox sbxm has no record of, or a record without a sandbox) and says how to fix each. |
 | `sbxm stop <project> [--harness h]` | Stops the sandbox. |

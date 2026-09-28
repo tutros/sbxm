@@ -121,6 +121,20 @@ fn lifecycle_against_real_sbx() {
     )
     .unwrap();
 
+    // Issue #2: a second `new` is refused by sbxm, before `sbx create` runs.
+    let again = new::run(
+        config_dir.path(),
+        &project,
+        &new::Options::default(),
+        &SbxBackend,
+        &mut std::io::stderr(),
+    )
+    .unwrap_err();
+    assert_eq!(
+        format!("{again:#}"),
+        format!("sandbox {sandbox} already exists; open it with `sbxm open {project}`")
+    );
+
     let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
     let ls = String::from_utf8(ls.stdout).unwrap();
     assert!(
