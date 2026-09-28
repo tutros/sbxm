@@ -477,7 +477,9 @@ fn read_instructions(
 }
 
 /// `dir.join(relative)`, where `relative` must stay inside `dir`, so a
-/// profile is self-contained (decisions 62, 63).
+/// profile is self-contained (decisions 62, 63). No component on the way
+/// (a folder or the file itself) may be a symlink or junction, since
+/// following one could read or write outside the profile folder.
 fn resolve_inside(
     key: &str,
     relative: &Path,
@@ -496,6 +498,26 @@ fn resolve_inside(
             dir.display(),
             file.display()
         );
+    }
+    let mut walked = dir.to_path_buf();
+    for component in relative.components() {
+        if matches!(component, Component::CurDir) {
+            continue;
+        }
+        walked.push(component);
+        let path = &walked;
+        let is_link = path
+            .symlink_metadata()
+            .is_ok_and(|metadata| metadata.file_type().is_symlink());
+        if is_link {
+            bail!(
+                "{key} = \"{}\" in {source} passes through the symlink or junction {}; \
+                 replace it with a regular file or folder in {}",
+                relative.display(),
+                path.display(),
+                file.display()
+            );
+        }
     }
     Ok(dir.join(relative))
 }

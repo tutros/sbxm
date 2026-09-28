@@ -4,7 +4,7 @@
 
 mod common;
 
-use common::Env;
+use common::{Env, dir_link};
 use sbxm::backend::FakeBackend;
 
 fn harness_spec(env: &Env) -> String {
@@ -134,6 +134,57 @@ fn instructions_path_outside_the_profile_is_rejected() {
             "{path}: {message}"
         );
     }
+}
+
+#[test]
+fn mandatory_instructions_through_a_link_are_refused() {
+    let env = Env::new();
+    let outside = env.tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("mandatory.md"), "Always run the tests.\n").unwrap();
+    dir_link(&env.profiles_dir().join("default").join("linked"), &outside);
+
+    let message = rejected_mandatory(&env, "linked/mandatory.md");
+
+    assert!(
+        message.contains(&format!(
+            "instructions.mandatory = \"linked/mandatory.md\" in profile 'default' passes \
+             through the symlink or junction {}",
+            env.profiles_dir().join("default").join("linked").display()
+        )),
+        "{message}"
+    );
+}
+
+#[test]
+fn project_mandatory_instructions_through_a_link_are_refused() {
+    let env = Env::new();
+    let outside = env.tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("mandatory.md"), "Project rules.\n").unwrap();
+    let metadata = env.base_dir().join(".sbxm").join("demo");
+    std::fs::create_dir_all(&metadata).unwrap();
+    std::fs::write(
+        metadata.join("sandbox.toml"),
+        "[instructions]\nmandatory = \"linked/mandatory.md\"\n",
+    )
+    .unwrap();
+    dir_link(&metadata.join("linked"), &outside);
+
+    let backend = FakeBackend::default();
+    let err = env.run("demo", &backend).unwrap_err();
+    let message = format!("{err:#}");
+
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert!(!env.base_dir().join("demo").exists());
+    assert!(
+        message.contains(&format!(
+            "instructions.mandatory = \"linked/mandatory.md\" in project config passes \
+             through the symlink or junction {}",
+            metadata.join("linked").display()
+        )),
+        "{message}"
+    );
 }
 
 /// Runs `new <project>` and returns the config hash from its state.
