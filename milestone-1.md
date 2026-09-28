@@ -171,7 +171,7 @@ Between slices 3 and 10b, sandboxes are created without sbxm kits. That's safe: 
 Gaps found while building, to handle in the slice named:
 - **Deferred (2026-09-26):** workspaces on `C:` failing [56]. The user reproduced it, suspects low free space on their `C:` drive, and decided not to change sbxm for it yet: no new starter `base_dir`, no `C:` check in `doctor`. Revisit if it shows up on another machine or with free space on `C:`.
 - **Test gaps (low risk):** printing `sbx kit validate` warnings is untested (never seen non-empty); the terminal confirm prompt is only covered by the user's manual check.
-- **Housekeeping:** the S6 spike worktree `.claude/worktrees/agent-a48594dfc53404a8f` (branch `worktree-agent-a48594dfc53404a8f`) is still on disk, locked by the session that launched it. Its only change is already committed. Once no Claude session holds it: `git worktree remove --force --force <path>` and `git branch -D <branch>`.
+- **Housekeeping (done 2026-09-27):** the S6 spike worktree and its branch are removed; its only change was already in `main`.
 - **Optional:** a `.gitattributes` (`* text=auto eol=lf`) would stop the LF/CRLF warnings on every commit.
 
 ## Out of scope for M1
