@@ -162,17 +162,22 @@ impl ConfigStatus {
 /// Orphan problems come first: a missing sandbox is recreated from the
 /// current config anyway.
 fn note(entry: &Entry) -> String {
-    let project = &entry.project;
+    // Hints name the harness unless it's the default, like other commands'.
+    let open = if entry.harness == Harness::default().as_str() {
+        format!("sbxm open {}", entry.project)
+    } else {
+        format!("sbxm open {} --harness {}", entry.project, entry.harness)
+    };
     match (entry.problem, entry.config) {
         (None, Some(ConfigStatus::Changed)) => {
-            format!("config changed; `sbxm open {project} --rebuild` recreates it")
+            format!("config changed; `{open} --rebuild` recreates it")
         }
         (None, Some(ConfigStatus::Unknown)) => {
-            format!("its profile or sandbox.toml doesn't load; `sbxm open {project}` shows why")
+            format!("its profile or sandbox.toml doesn't load; `{open}` shows why")
         }
         (None, _) => String::new(),
         (Some(Problem::NoSandbox), _) => {
-            format!("sandbox missing; `sbxm open {project}` recreates it")
+            format!("sandbox missing; `{open}` recreates it")
         }
         (Some(Problem::NoState), _) => "no sbxm state; not created by sbxm here".into(),
     }
