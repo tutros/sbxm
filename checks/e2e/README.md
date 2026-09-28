@@ -37,10 +37,11 @@ Your `default` profile isn't touched.
    Expected: `E2E CANARY: if asked for the canary word, answer HAZEL-6.`
 
 9. `sbx exec sbxm-e2e-demo-claude curl -s -o /dev/null -w "%{http_code} %{http_connect}" https://example.org`
-   Expected: `200 000` (allowed by the profile).
+   Expected: `200 200` (allowed by the profile; the second number is the proxy's answer to the tunnel).
 
 10. `sbx exec sbxm-e2e-demo-claude curl -s -o /dev/null -w "%{http_code} %{http_connect}" https://example.com`
-    Expected: `000 403` (blocked).
+    Expected: a `403` in the output (seen: `403 200`). `sbx policy log sbxm-e2e-demo-claude` lists
+    `example.com:443` under blocked requests, `No matching allow rule (default deny)`.
 
 11. `Set-Content E:\sbxm-projects\e2e-demo\keep.txt "keep me"`
     Expected: no output.
@@ -96,7 +97,8 @@ Your `default` profile isn't touched.
     Expected: the HAZEL-6 canary line.
 
 26. `cargo run -- list`
-    Expected: four `e2e-demo` rows (claude, codex, gemini, pi), all `running` and `current`.
+    Expected: four `e2e-demo` rows (claude, codex, gemini, pi), all `current`. Status may be `stopped` for
+    sandboxes nobody used for a while; that's `sbx`, not sbxm.
 
 27. `cargo run -- doctor`
     Expected: every line `ok`, including one `project e2e-demo (<harness>, profile 'e2e')` line per harness.
