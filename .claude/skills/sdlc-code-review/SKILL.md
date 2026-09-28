@@ -84,6 +84,12 @@ The most common miss in this project is a change applied in one place but not in
   that behavior or its tests. Findings include reformatting or renaming untouched code, refactors mixed into a
   behavior commit, and abstractions, options or parameters no test needs. **Check:** for each hunk, ask what breaks if
   it's reverted. If no test fails and no agreed behavior is lost, the hunk is a finding.
+- **Simple code.** Each needed change takes the simplest form that works: plain functions and data over new traits,
+  generics, builders or layers; straightforward control flow over clever chains; an existing helper or the standard
+  library over new machinery. Added complexity needs a present reason, such as a second real caller or a stated
+  requirement, not an anticipated one. **Check:** could the same tests pass with fewer types, branches or
+  indirection? If an obviously simpler version exists, the current code is a finding, and the simpler version is the
+  fix.
 - **Code.** Matches the surrounding code's naming, comment density and idioms; no dead code, no unrelated refactors,
   no new dependency without a decision. Duplicated knowledge (the same list or rule in two places) is a finding.
 - **Commits.** Each commit is one green step with `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`
