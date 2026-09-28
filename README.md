@@ -238,6 +238,11 @@ workers' blind spots; `-ReviewHarness claude` and `-ReviewModel <model>` change 
 findings, the worker gets one round to fix them and the review runs once more. Whatever is still open goes into the
 PR description; nothing is filed as an issue.
 
+Every change to sbxm goes through a PR, including ones not made by workers, and gets the same review:
+`review -Pr <n>` clones the PR's branch, runs the host checks and the reviewer, and posts the review as a comment on
+the PR. There's no fix round; the author fixes the findings and runs it again. PRs from forks are refused, because
+the host checks run the PR's code on your machine.
+
 One-time setup: copy `profiles/sbxm-dev` into your `profiles_dir`. It installs Rust and a C toolchain, allows
 crates.io, and needs the `anthropic` secret; the Codex reviewer also needs the `openai` one (`sbx secret ls`). Also
 check that `gh auth status` shows you logged in.
@@ -247,6 +252,7 @@ check that `gh auth status` shows you logged in.
 ./scripts/issue-workers.ps1 start -Workers 2           # or choose them: -Issue 1,2
 ./scripts/issue-workers.ps1 status                     # agent running/finished, commits, result.md, review
 ./scripts/issue-workers.ps1 review -Issue 1            # host checks, independent review, one fix round
+./scripts/issue-workers.ps1 review -Pr 12              # review any open PR and comment the result on it
 ./scripts/issue-workers.ps1 finish -Issue 1            # push issue-1 and open a PR with "Fixes #1" and the review
 ./scripts/issue-workers.ps1 remove -Issue 1            # after merging: sandbox and clone (asks first)
 ```

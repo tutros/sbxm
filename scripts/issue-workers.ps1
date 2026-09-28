@@ -238,7 +238,9 @@ file issues. You may build and run tests.
 
 Follow the sdlc-code-review skill (.claude/skills/sdlc-code-review/SKILL.md). Scope: the branch's commits
 (git log origin/main..HEAD, and git diff origin/main...HEAD). Check the change against the acceptance criteria of
-the issues in context.md (if any), decisions.md and the project conventions. The host has already run cargo fmt --check, clippy and cargo test on Windows: they pass.
+the issues in context.md (if any), decisions.md and the project conventions. origin/main is current and may be
+newer than the branch's base: read decisions there (git show origin/main:decisions.md). The host has already run
+cargo fmt --check, clippy and cargo test on Windows: they pass.
 $rereview
 Write .sbxm-review/review.md. Its first line is exactly "Must-fix findings: <count>". Then list each finding with
 its rank (must-fix, should-fix or nit), file:line, evidence (a command and its trimmed output, or the quoted code)
@@ -336,11 +338,17 @@ function Invoke-Review([int]$n) {
             Invoke-Gates "#$n" $workspace $log
             if ($round -eq 1) {
                 # Cloned from the worker's clone: the reviewer sees exactly the local commits, which aren't pushed yet.
-                Initialize-ReviewWorkspace $reviewProject $workspace "issue-$n" (Get-Content (Join-Path $issueDir 'issue.md'))
+                $issueText = Get-Content (Join-Path $issueDir 'issue.md')
+                Initialize-ReviewWorkspace $reviewProject $workspace "issue-$n" $issueText
+                # The worker's clone has main as of its start; the review compares against today's.
+                Invoke-Native 'git fetch main' {
+                    git -C (Join-Path $BaseDir $reviewProject) fetch -q "https://github.com/$Repo" '+main:refs/remotes/origin/main'
+                }
             }
             else {
                 $reviewWorkspace = Join-Path $BaseDir $reviewProject
-                Invoke-Native 'git fetch' { git -C $reviewWorkspace fetch -q origin }
+                # Only the branch: fetching all of origin would reset origin/main to the worker's old main.
+                Invoke-Native 'git fetch' { git -C $reviewWorkspace fetch -q origin "issue-$n" }
                 Invoke-Native 'git reset' { git -C $reviewWorkspace reset -q --hard "origin/issue-$n" }
             }
             Invoke-Reviewer "#$n" $reviewProject $subject $round $issueDir
