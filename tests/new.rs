@@ -319,3 +319,52 @@ fn existing_sandbox_is_refused_before_any_write_or_call() {
 fn existing_codex_sandbox_is_refused_with_the_harness_in_the_hint() {
     assert_refuses_existing(Harness::Codex, "sbxm open demo --harness codex");
 }
+
+#[test]
+fn invalid_kit_names_the_profile_and_the_project_sandbox_toml() {
+    let env = Env::new();
+    let metadata_dir = env.base_dir().join(".sbxm").join("demo");
+    std::fs::create_dir_all(&metadata_dir).unwrap();
+    std::fs::write(metadata_dir.join("sandbox.toml"), "").unwrap();
+    let backend = FakeBackend::with_invalid_kit("manifest: bad host");
+
+    let err = env.run("demo", &backend).unwrap_err();
+
+    let message = format!("{err:#}");
+    let profile_toml = env
+        .profiles_dir()
+        .join("default")
+        .join("profile.toml")
+        .display()
+        .to_string();
+    let sandbox_toml = metadata_dir.join("sandbox.toml").display().to_string();
+    assert!(message.contains(&profile_toml), "{message}");
+    assert!(message.contains(&sandbox_toml), "{message}");
+    assert!(!message.contains("network entries"), "{message}");
+}
+
+#[test]
+fn invalid_kit_without_a_sandbox_toml_names_only_the_profile() {
+    let env = Env::new();
+    let backend = FakeBackend::with_invalid_kit("manifest: bad host");
+
+    let err = env.run("demo", &backend).unwrap_err();
+
+    let message = format!("{err:#}");
+    let profile_toml = env
+        .profiles_dir()
+        .join("default")
+        .join("profile.toml")
+        .display()
+        .to_string();
+    let sandbox_toml = env
+        .base_dir()
+        .join(".sbxm")
+        .join("demo")
+        .join("sandbox.toml")
+        .display()
+        .to_string();
+    assert!(message.contains(&profile_toml), "{message}");
+    assert!(!message.contains(&sandbox_toml), "{message}");
+    assert!(!message.contains("network entries"), "{message}");
+}

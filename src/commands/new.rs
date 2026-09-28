@@ -104,15 +104,22 @@ pub fn run(
             writeln!(warn, "warning: kit {}: {warning}", dir.display())?;
         }
         if !validation.valid {
+            let profile_toml = config
+                .profiles_dir()
+                .join(profile_name)
+                .join("profile.toml");
+            let sandbox_toml = metadata_dir.join("sandbox.toml");
+            let mut checked = format!("profile '{profile_name}' ({})", profile_toml.display());
+            if sandbox_toml.is_file() {
+                checked.push_str(&format!(
+                    " and the project's sandbox.toml ({})",
+                    sandbox_toml.display()
+                ));
+            }
             bail!(
-                "generated kit {} is invalid: {}; check the network entries in profile '{profile_name}' ({})",
+                "generated kit {} is invalid: {}; check {checked}",
                 dir.display(),
                 validation.error.as_deref().unwrap_or("no details from sbx"),
-                config
-                    .profiles_dir()
-                    .join(profile_name)
-                    .join("profile.toml")
-                    .display()
             );
         }
     }
