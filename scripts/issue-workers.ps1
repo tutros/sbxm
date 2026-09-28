@@ -167,7 +167,10 @@ function Write-RunScript([string]$workspace, [string]$dir, [string]$prompt, [str
         '#!/usr/bin/env bash'
         "cd '$sandboxWorkspace' || exit 1"
         "timeout --kill-after=60s $limit $(Get-AgentCommand $harness $model "$dir/$prompt") < /dev/null"
-        'echo "agent exit code: $?"'
+        # Exits with the agent's status (124: timed out), so the host can tell a failed run from a finished one.
+        'status=$?'
+        'echo "agent exit code: $status"'
+        'exit $status'
     ) -join "`n"
     [IO.File]::WriteAllText((Join-Path $workspace "$dir/$name"), "$run`n")
     "$sandboxWorkspace/$dir/$name"
@@ -269,9 +272,9 @@ reason).
 "@
 }
 
-# Must-fix count from the reviewer's first line, or $null if the line is missing.
+# Must-fix count from the reviewer's first line, or $null if that line isn't "Must-fix findings: <count>".
 function Get-MustFixCount([string]$reviewFile) {
-    $m = [regex]::Match((Get-Content -Raw $reviewFile), '(?m)^Must-fix findings: (\d+)')
+    $m = [regex]::Match((Get-Content -TotalCount 1 $reviewFile), '^Must-fix findings: (\d+)\s*$')
     if ($m.Success) { [int]$m.Groups[1].Value } else { $null }
 }
 
@@ -285,11 +288,14 @@ function Initialize-ReviewWorkspace([string]$reviewProject, [string]$source, [st
     Set-Content (Join-Path $reviewDir 'context.md') $context
 }
 
-# Runs the reviewer on the review project's workspace (created on round 1), and copies review.md, headed with the
-# reviewer's harness and model, to $outDir as review.md and review-<round>.md.
+# Runs the reviewer on the review project's workspace (created on round 1), copies review.md, headed with the
+# reviewer's harness and model, to $outDir as review.md and review-<round>.md, and returns its must-fix count.
+# A failed or timed-out reviewer, or a review.md without its count line, throws: nothing is used or posted.
 function Invoke-Reviewer([string]$label, [string]$reviewProject, [string]$subject, [int]$round, [string]$outDir) {
     $reviewWorkspace = Join-Path $BaseDir $reviewProject
     $reviewDir = Join-Path $reviewWorkspace '.sbxm-review'
+    # A review.md left from an earlier run must never stand in for this one.
+    Remove-Item (Join-Path $outDir 'review.md') -ErrorAction SilentlyContinue
     if ($round -gt 1) {
         Move-Item -Force (Join-Path $reviewDir 'review.md') (Join-Path $reviewDir 'previous-review.md')
     }
@@ -297,19 +303,28 @@ function Invoke-Reviewer([string]$label, [string]$reviewProject, [string]$subjec
     $runScript = Write-RunScript $reviewWorkspace '.sbxm-review' 'prompt.md' 'run.sh' $ReviewTimeLimit `
         $ReviewHarness $ReviewModel
     if ($round -eq 1) {
-        Invoke-Native 'sbxm new' { sbxm new $reviewProject --profile $SbxmProfile --harness $ReviewHarness }
+        Invoke-Native 'sbxm new' { sbxm new $reviewProject --profile $SbxmProfile --harness $ReviewHarness } | Out-Host
     }
 
     $log = Join-Path $outDir "review-$round.log"
     Write-Host "${label}: review round $round (log: $log)"
     sbx exec "sbxm-$reviewProject-$ReviewHarness" bash $runScript *> $log
+    $status = $LASTEXITCODE
     Save-Transcripts $label $reviewProject $outDir
+    if ($status -ne 0) {
+        throw "${label}: the reviewer exited with $status (124: it hit -ReviewTimeLimit), so its review isn't used; see $log"
+    }
     $review = Join-Path $reviewDir 'review.md'
     if (-not (Test-Path $review)) { throw "${label}: the reviewer wrote no review.md; see $log" }
+    $mustFix = Get-MustFixCount $review
     $reviewer = "Reviewer: $ReviewHarness ($($ReviewModel ? $ReviewModel : 'default model'))"
     $text = "$reviewer`n`n" + (Get-Content -Raw $review)
     Set-Content (Join-Path $outDir "review-$round.md") $text
+    if ($null -eq $mustFix) {
+        throw "${label}: review.md doesn't start with 'Must-fix findings: <count>', so it isn't used; see $outDir\review-$round.md"
+    }
     Set-Content (Join-Path $outDir 'review.md') $text
+    $mustFix
 }
 
 # Copies the reviewer's session transcripts to $outDir\transcripts, since the sandbox (and its home) is removed
@@ -318,7 +333,7 @@ function Save-Transcripts([string]$label, [string]$reviewProject, [string]$outDi
     $sessions = @{ claude = '~/.claude/projects'; codex = '~/.codex/sessions' }[$ReviewHarness]
     $reviewDir = Join-Path (Join-Path $BaseDir $reviewProject) '.sbxm-review'
     $copy = "rm -rf '$(ConvertTo-SandboxPath $reviewDir)/transcripts' && cp -r $sessions/. '$(ConvertTo-SandboxPath $reviewDir)/transcripts'"
-    sbx exec "sbxm-$reviewProject-$ReviewHarness" bash -c $copy
+    sbx exec "sbxm-$reviewProject-$ReviewHarness" bash -c $copy | Out-Host
     $source = Join-Path $reviewDir 'transcripts'
     if ($LASTEXITCODE -ne 0 -or -not (Test-Path $source)) {
         Write-Warning "${label}: couldn't copy the reviewer's transcripts from $sessions"
@@ -387,12 +402,7 @@ function Invoke-Review([int]$n) {
                 Invoke-Native 'git fetch' { git -C $reviewWorkspace fetch -q origin "issue-$n" }
                 Invoke-Native 'git reset' { git -C $reviewWorkspace reset -q --hard "origin/issue-$n" }
             }
-            Invoke-Reviewer "#$n" $reviewProject $subject $round $issueDir
-            $mustFix = Get-MustFixCount (Join-Path $issueDir 'review.md')
-            if ($null -eq $mustFix) {
-                Write-Warning "#${n}: review.md has no 'Must-fix findings:' line; no fix round. Read it before finish."
-                break
-            }
+            $mustFix = Invoke-Reviewer "#$n" $reviewProject $subject $round $issueDir
             Write-Host "#${n}: $mustFix must-fix finding(s)"
             if ($mustFix -eq 0 -or $round -eq 2) { break }
             Invoke-FixRound $n
@@ -433,12 +443,11 @@ function Invoke-PrReview([int]$pr) {
     try {
         Initialize-ReviewWorkspace $reviewProject "https://github.com/$Repo" $info.headRefName $context
         Invoke-Gates $label (Join-Path $BaseDir $reviewProject) $log
-        Invoke-Reviewer $label $reviewProject $subject 1 $outDir
+        $mustFix = Invoke-Reviewer $label $reviewProject $subject 1 $outDir
     }
     finally { Remove-ReviewProject $reviewProject }
 
-    $mustFix = Get-MustFixCount (Join-Path $outDir 'review.md')
-    Write-Host "${label}: $($mustFix ?? 'unknown number of') must-fix finding(s)"
+    Write-Host "${label}: $mustFix must-fix finding(s)"
     $bodyFile = New-TemporaryFile
     Set-Content $bodyFile ("## Independent review (decision 87)`n`nHost checks (fmt, clippy, cargo test) passed on Windows.`n`n" +
         (Get-Content -Raw (Join-Path $outDir 'review.md')))
