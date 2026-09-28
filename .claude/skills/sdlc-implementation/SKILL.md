@@ -113,6 +113,25 @@ Unattended work runs in a git worktree. Nothing merges automatically; the main s
 5. Update docs, report to the user (commits, tests, deferred items), then remove the worktree and branch.
 6. Merge one branch at a time; rebase each remaining branch onto the new `main` before it lands.
 
+## 7. Working a GitHub issue
+
+Review findings are GitHub issues with acceptance criteria (code review skill, section 8). To work one:
+
+1. **Read it and check it still applies.** Re-run its evidence on the current code (the permalinks point at the
+   reviewed commit, not `HEAD`). If it no longer reproduces, say so on the issue with the evidence and ask the user
+   before closing it.
+2. **The acceptance criteria are the test cases.** List them as the slice's test cases (rule 2) and start red: the
+   issue's test fails for the reason the issue describes. A criterion that can't become an automated test needs its
+   manual check spelled out (exact command, expected output).
+3. **Work it like any slice:** smallest change, green, checks, one commit per step. The commit that completes the
+   issue ends its message with `Fixes #<n>` on its own line, so the push closes it.
+4. **Done means every criterion is met, with evidence.** Before the last commit, go through the criteria one by one:
+   run each check and keep the output. After pushing, comment on the issue with one line per criterion and its
+   evidence (test name, command output, commit), and tick the boxes. If a criterion turns out wrong or impossible,
+   don't quietly drop it: say why on the issue and get the user's OK first.
+5. **No GitHub access** (e.g. inside a sandbox): work from the issue text the user or review file provides, keep
+   `Fixes #<n>` in the commit, and report the per-criterion evidence in chat so it can be posted later.
+
 ## Loop summary
 
 ```

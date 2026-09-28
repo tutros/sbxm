@@ -108,15 +108,60 @@ Rank each finding:
 Write each as: severity, `file:line`, what happens (with the evidence), why it matters (decision or convention), and
 the smallest fix. For more than five findings, put them in `reviews/<date>-<scope>.md` and keep the chat report short.
 
-**File every finding as a GitHub issue** on `tutros/sbxm` (decision 79): title `<id>: <what happens>`, label
-`must-fix`, `should-fix` or `question`, and a body with the evidence, why, the fix, permalinks to the lines at the
-reviewed commit (`blob/<full sha>/<file>#L<a>-L<b>`) and the review file section. Write bodies to temp files with the
-file-write tool and pass `--body-file` (Windows paths contain backslashes). Put the issue numbers in the review file.
-Fix commits end with `Fixes #<n>`; a question stays open until the user answers it, then becomes a decision.
+Then file them as GitHub issues (section 8) and put the issue numbers in the review file.
 
 Report to the user: the scope, the counts per severity, each must-fix in one line, and the first question if there is
 one. Then fix must-fix items through the implementation skill (test first, one commit each) and re-run the review on
 the fix commits only.
+
+## 8. GitHub issues
+
+Every finding becomes a GitHub issue (decision 79), so the work to fix it has a place and a clear end.
+
+**Check access first**, before writing any issue:
+1. `git remote get-url origin` names a GitHub repo, and `gh repo view --json nameWithOwner` gives its name. Use that
+   name; don't hard-code one.
+2. `gh auth status` shows a logged-in account with `repo` scope.
+
+If either fails (e.g. inside a sandbox with no `gh` login, no `github` secret or no `github.com` egress), don't file
+anything and don't try to set up a remote or log in: that's the user's call. Write the findings to the review file,
+mark it `Issues: pending (no GitHub access from <where>)`, tell the user, and file them later from where access
+works.
+
+**Template.** Every issue has exactly these parts:
+
+```
+Title:  <id>: <what happens, in plain words>          e.g. "M1: seed with a link is refused only after kits are written"
+Labels: must-fix | should-fix | question
+
+**Where:** permalinks at the reviewed commit: https://github.com/<repo>/blob/<full sha>/<file>#L<a>-L<b>
+**What happens:** the behavior, with evidence (the command or test, and its output trimmed to the lines that prove it)
+**Why it matters:** the decision or convention it breaks (e.g. "decision 47", "`<problem>; <fix>` convention")
+**Fix:** the smallest change that resolves it
+**Acceptance criteria:**
+- [ ] <observable result that proves the fix, e.g. "`new` with a linked seed makes no backend calls and creates no `.sbxm/`">
+- [ ] A test covering it fails before the fix and passes after (name it, or say which file it goes in)
+- [ ] `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass
+- [ ] Docs updated where behavior users see changed (`README.md`), or "no user-visible change"
+- [ ] <for sbx-facing changes> the `#[ignore]` real-sbx test covering it passes and cleans up
+**Review:** link to the section in `reviews/<date>-<scope>.md`
+```
+
+**Acceptance criteria** say when the work is done. Each one is observable and checkable by someone other than the
+author: a command and its expected output, a test name, a message's exact text, or a file that must or mustn't
+exist. No criterion like "works better" or "is cleaner". The first criteria are specific to the finding; the
+standard ones (test, checks, docs, real `sbx`) follow and are dropped only when they can't apply, with a reason. The
+issue is done when every box is ticked with its evidence, as described in the implementation skill.
+
+**Content rules:**
+- Never include secret values, tokens, credential files or their contents; redact any that appear in output.
+- Quote output only as far as it proves the point. Machine-specific paths are fine in this private repo, but trim
+  them where they add nothing.
+- A **question** issue replaces "Fix" and the first criteria with the options and a recommendation. When the user
+  answers, edit the issue: record the answer and the new decision number, relabel it `must-fix` or `should-fix`, and
+  add its acceptance criteria. A question still open blocks nothing else.
+- Write bodies to temp files with the file-write tool and pass `--body-file` (Windows paths contain backslashes, which
+  the Bash tool mangles). Delete the temp files afterwards.
 
 ## Independent reviews
 
