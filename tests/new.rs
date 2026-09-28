@@ -220,7 +220,9 @@ fn seed_containing_a_link_is_an_error_and_copies_nothing() {
     assert!(message.contains("is a symlink or junction"), "{message}");
     assert!(message.contains("linked"), "{message}");
     assert!(!env.base_dir().join("demo").exists());
-    assert!(backend.creates().is_empty());
+    // Decision 47: the seed is checked before any kit is written or validated.
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert!(!env.base_dir().join(".sbxm").exists());
 }
 
 /// Decision 76: `default_harness` was written by `config init` but never read,
