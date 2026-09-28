@@ -8,6 +8,23 @@ Each worker is a clone at `<base_dir>\sbxm-issue-<n>` on branch `issue-<n>`. The
 agent reads the issue from `.sbxm-issue/issue.md`, commits locally, and writes `.sbxm-issue/result.md` with evidence
 for each acceptance criterion. You push and open the PR from the host.
 
+## The whole workflow
+
+1. **Edit code** in the host session, following `sdlc-implementation`: one slice, test first, a commit after every
+   green step (fmt, clippy, tests).
+2. **Review** at the end of a slice or milestone with `sdlc-code-review`. The findings, with evidence, go to `reviews/`.
+3. **Open issues:** each finding becomes a GitHub issue labeled `must-fix`, `should-fix` or `question`, with acceptance
+   criteria and **Depends on** / **Related** links (decision 79).
+4. **Answer questions:** workers skip `question` issues until you've answered them.
+5. **Work the issues:** `start` gives each picked issue its own clone and sandbox; the agent works test first, commits
+   locally and writes `result.md`. Watch with `status`.
+6. **Review the work:** `review` runs the host checks, then an independent reviewer writes `review.md`; must-fix
+   findings get one fix round and a second review (decision 84).
+7. **Read** `result.md` and `review.md`. Small should-fix items can be fixed by hand on the branch.
+8. **Open the PR:** `finish` pushes the branch and opens a PR with `Fixes #<n>`, the result and the review.
+9. **Merge:** you merge, which closes the issue. Issues that depended on it can now be picked in step 5.
+10. **Clean up:** `remove` deletes the sandbox and the clone.
+
 ## One-time setup
 
 1. Copy the profile into your sbxm profiles folder (`profiles_dir` in `config.toml`):
