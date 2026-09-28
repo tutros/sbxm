@@ -118,7 +118,8 @@ Unattended work runs in a git worktree. Nothing merges automatically; the main s
 ```
 pick slice (1 sentence) → list test cases →
   for each case: red (see it fail) → green (minimal code) → refactor → checks pass → commit
-→ slice done: run the #[ignore] real-sbx test if the slice touches sbx → report
+→ slice done: run the #[ignore] real-sbx test if the slice touches sbx
+→ review the slice's commits (sdlc-code-review skill) → fix must-fix findings (TDD) → report
 ```
 
 When a slice is done, report to the user: what now works, the commits made, and anything deferred.
