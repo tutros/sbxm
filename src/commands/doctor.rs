@@ -252,17 +252,7 @@ fn validate_kits(
         kit::write(&dir, &spec)?;
         let validation = backend.validate_kit(&dir)?;
         if !validation.valid {
-            let profile_toml = profiles_dir.join(profile_name).join("profile.toml");
-            let mut checked = format!("profile '{profile_name}' ({})", profile_toml.display());
-            if let Some(metadata_dir) = metadata_dir {
-                let sandbox_toml = metadata_dir.join("sandbox.toml");
-                if sandbox_toml.is_file() {
-                    checked.push_str(&format!(
-                        " and the project's sandbox.toml ({})",
-                        sandbox_toml.display()
-                    ));
-                }
-            }
+            let checked = super::invalid_kit_check(profiles_dir, profile_name, metadata_dir);
             bail!(
                 "generated kit {name} is invalid: {}; check {checked}",
                 validation.error.as_deref().unwrap_or("no details from sbx"),

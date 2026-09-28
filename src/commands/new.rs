@@ -110,18 +110,8 @@ pub fn run(
             writeln!(warn, "warning: kit {}: {warning}", dir.display())?;
         }
         if !validation.valid {
-            let profile_toml = config
-                .profiles_dir()
-                .join(profile_name)
-                .join("profile.toml");
-            let sandbox_toml = metadata_dir.join("sandbox.toml");
-            let mut checked = format!("profile '{profile_name}' ({})", profile_toml.display());
-            if sandbox_toml.is_file() {
-                checked.push_str(&format!(
-                    " and the project's sandbox.toml ({})",
-                    sandbox_toml.display()
-                ));
-            }
+            let checked =
+                super::invalid_kit_check(config.profiles_dir(), profile_name, Some(&metadata_dir));
             bail!(
                 "generated kit {} is invalid: {}; check {checked}",
                 dir.display(),
