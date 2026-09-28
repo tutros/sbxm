@@ -40,6 +40,17 @@ impl Harness {
         }
     }
 
+    /// The name of this harness's mixin, e.g. `sbxm-harness-claude`.
+    pub fn mixin_name(self) -> String {
+        format!("sbxm-harness-{}", self.as_str())
+    }
+
+    /// The kit subdirectory holding this harness's mixin, e.g.
+    /// `harness-claude`.
+    pub fn kit_dir(self) -> String {
+        format!("harness-{}", self.as_str())
+    }
+
     /// The always-loaded user-level instructions file, relative to home
     /// (decisions 37, 49).
     pub fn instructions_file(self) -> PathBuf {
