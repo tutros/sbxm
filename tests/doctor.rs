@@ -5,7 +5,7 @@ mod common;
 
 use common::Env;
 use sbxm::backend::FakeBackend;
-use sbxm::commands::doctor;
+use sbxm::commands::{doctor, new};
 
 const GIB: u64 = 1024 * 1024 * 1024;
 
@@ -336,10 +336,22 @@ fn invalid_kit_fails() {
 
 /// Decision from #4/#6: a project's invalid-kit failure names its recorded
 /// profile and, when it has one, its `sandbox.toml`, the same way `new` does.
+/// Uses a non-default profile so the profile name in the message can only
+/// have come from the project's own recorded profile, not the bare-profile
+/// check that also runs (and also fails) against `default`.
 #[test]
 fn invalid_kit_for_a_project_names_its_sandbox_toml() {
     let env = Env::new();
-    env.run("demo", &FakeBackend::default()).unwrap();
+    env.write_profile("custom", "description = \"test custom\"\n");
+    env.run_with(
+        "demo",
+        &new::Options {
+            profile: Some("custom".into()),
+            ..new::Options::default()
+        },
+        &FakeBackend::default(),
+    )
+    .unwrap();
     write_project_config(&env, "");
 
     let report = report(&env, &FakeBackend::with_invalid_kit("manifest: bad host"));
@@ -347,7 +359,7 @@ fn invalid_kit_for_a_project_names_its_sandbox_toml() {
     assert!(report.failed());
     let profile_toml = env
         .profiles_dir()
-        .join("default")
+        .join("custom")
         .join("profile.toml")
         .display()
         .to_string();
@@ -359,8 +371,18 @@ fn invalid_kit_for_a_project_names_its_sandbox_toml() {
         .display()
         .to_string();
     let text = report.render();
-    assert!(text.contains(&profile_toml), "{text}");
-    assert!(text.contains(&sandbox_toml), "{text}");
+    // The full line, not just each path's presence anywhere in the report:
+    // the bare `profile 'custom'` check also fails and also names
+    // profile_toml, so checking each path independently wouldn't catch a
+    // regression that drops one of them from the project's own line.
+    assert!(
+        text.contains(&format!(
+            "FAIL project demo (claude, profile 'custom'): generated kit common is invalid: \
+             manifest: bad host; check profile 'custom' ({profile_toml}) and the project's \
+             sandbox.toml ({sandbox_toml})"
+        )),
+        "{text}"
+    );
 }
 
 #[test]
