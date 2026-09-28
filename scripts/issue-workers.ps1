@@ -303,12 +303,30 @@ function Invoke-Reviewer([string]$label, [string]$reviewProject, [string]$subjec
     $log = Join-Path $outDir "review-$round.log"
     Write-Host "${label}: review round $round (log: $log)"
     sbx exec "sbxm-$reviewProject-$ReviewHarness" bash $runScript *> $log
+    Save-Transcripts $label $reviewProject $outDir
     $review = Join-Path $reviewDir 'review.md'
     if (-not (Test-Path $review)) { throw "${label}: the reviewer wrote no review.md; see $log" }
     $reviewer = "Reviewer: $ReviewHarness ($($ReviewModel ? $ReviewModel : 'default model'))"
     $text = "$reviewer`n`n" + (Get-Content -Raw $review)
     Set-Content (Join-Path $outDir "review-$round.md") $text
     Set-Content (Join-Path $outDir 'review.md') $text
+}
+
+# Copies the reviewer's session transcripts to $outDir\transcripts, since the sandbox (and its home) is removed
+# after the review. They go through the mounted workspace; a failed copy only warns.
+function Save-Transcripts([string]$label, [string]$reviewProject, [string]$outDir) {
+    $sessions = @{ claude = '~/.claude/projects'; codex = '~/.codex/sessions' }[$ReviewHarness]
+    $reviewDir = Join-Path (Join-Path $BaseDir $reviewProject) '.sbxm-review'
+    $copy = "rm -rf '$(ConvertTo-SandboxPath $reviewDir)/transcripts' && cp -r $sessions/. '$(ConvertTo-SandboxPath $reviewDir)/transcripts'"
+    sbx exec "sbxm-$reviewProject-$ReviewHarness" bash -c $copy
+    $source = Join-Path $reviewDir 'transcripts'
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path $source)) {
+        Write-Warning "${label}: couldn't copy the reviewer's transcripts from $sessions"
+        return
+    }
+    $target = Join-Path $outDir 'transcripts'
+    Remove-Item -Recurse -Force $target -ErrorAction SilentlyContinue
+    Copy-Item -Recurse $source $target
 }
 
 # The reviewer's provider secret must be stored before any host code runs. sbxm checks only the profile's
