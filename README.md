@@ -163,10 +163,16 @@ Rules sbxm checks when a profile loads (before anything is created):
 
 - Env names are shell identifiers and can't start with `SBXM_` (sbxm sets `SBXM_CONFIG_HASH` and `SBXM_PROFILE` in
   every sandbox). Env values can't contain `${{`.
-- Every file or folder path must be relative and stay inside the profile's folder, and must exist.
+- Every file or folder path must be relative and stay inside the profile's folder, and must exist. No symlink or
+  junction may sit on the way to it, whether the file itself or a folder above it: `instructions.mandatory`,
+  `instructions.reference`, `home_files` and `managed_settings` are all checked, and the same applies when these
+  keys are set in a project's `sandbox.toml`.
 - `skills.store = "readwrite"` is refused: an agent could plant skills that every other sandbox then loads.
-- `home_files` may not contain links, `.claude/settings.json` (the Claude kit replaces it; use `managed_settings`),
-  or `.claude/CLAUDE.md` while `instructions.mandatory` is set.
+- `home_files` must name a subfolder of the profile's (or project's) folder; it can't resolve to that folder
+  itself (e.g. `"."` or `""`).
+- `home_files` may not contain links anywhere in its tree (in addition to the check above on the way to the
+  folder itself), `.claude/settings.json` (the Claude kit replaces it; use `managed_settings`), or
+  `.claude/CLAUDE.md` while `instructions.mandatory` is set.
 - `managed_settings` must hold a JSON object in Claude Code's settings format, e.g. hooks or permission rules. It's
   written to `/etc/claude-code/managed-settings.json`, which takes precedence over settings the agent can edit. It's
   a strong default, not a lock: the agent has passwordless `sudo` in the Claude image.

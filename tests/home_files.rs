@@ -141,6 +141,67 @@ fn missing_home_files_folder_is_refused() {
 }
 
 #[test]
+fn home_files_as_the_profile_folder_itself_is_refused() {
+    let env = Env::new();
+    env.write_profile("default", "[harness.claude]\nhome_files = \".\"\n");
+
+    let message = refused(&env);
+
+    assert!(
+        message.contains("harness.claude.home_files = \".\""),
+        "{message}"
+    );
+    assert!(message.contains("use a subfolder instead"), "{message}");
+}
+
+#[test]
+fn home_files_as_an_empty_string_is_refused() {
+    let env = Env::new();
+    env.write_profile("default", "[harness.claude]\nhome_files = \"\"\n");
+
+    let message = refused(&env);
+
+    assert!(message.contains("use a subfolder instead"), "{message}");
+}
+
+#[test]
+fn project_home_files_as_the_metadata_folder_itself_is_refused() {
+    let env = Env::new();
+    with_home_files(&env);
+    write_profile_file(&env, "home/from-profile.txt", "profile");
+    write_project_file(
+        &env,
+        "sandbox.toml",
+        "[harness.claude]\nhome_files = \".\"\n",
+    );
+
+    let message = refused(&env);
+
+    assert!(message.contains("use a subfolder instead"), "{message}");
+}
+
+#[test]
+fn home_files_root_itself_a_link_is_refused() {
+    let env = Env::new();
+    let outside = env.tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    std::fs::write(outside.join("ok.txt"), "ok").unwrap();
+    dir_link(&env.profiles_dir().join("default").join("linked"), &outside);
+    env.write_profile("default", "[harness.claude]\nhome_files = \"linked\"\n");
+
+    let message = refused(&env);
+
+    assert!(
+        message.contains(&format!(
+            "harness.claude.home_files = \"linked\" in profile 'default' passes through the \
+             symlink or junction {}",
+            env.profiles_dir().join("default").join("linked").display()
+        )),
+        "{message}"
+    );
+}
+
+#[test]
 fn link_inside_home_files_is_refused() {
     let env = Env::new();
     with_home_files(&env);
