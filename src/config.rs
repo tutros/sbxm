@@ -510,6 +510,14 @@ fn read_home_files(
     file: &Path,
 ) -> Result<(PathBuf, BTreeMap<String, Vec<u8>>)> {
     let root = resolve_inside("harness.claude.home_files", relative, dir, source, file)?;
+    if root == dir {
+        bail!(
+            "harness.claude.home_files = \"{}\" in {source} resolves to the folder of {} \
+             itself; use a subfolder instead",
+            relative.display(),
+            file.display()
+        );
+    }
     if !root.is_dir() {
         bail!(
             "harness.claude.home_files folder {} ({source}) is missing or not a folder; \
