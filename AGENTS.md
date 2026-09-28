@@ -4,7 +4,7 @@ This file provides guidance to coding agents (Claude Code reads it through `CLAU
 
 ## Status
 
-Milestone 1 complete (slices 0–21, end-to-end check passed 2026-09-27); milestone 2 not planned yet. Sources of truth:
+Milestone 1 complete (slices 0–21, end-to-end check passed 2026-09-27); milestone 2 not planned yet (the user wants to try sbxm first). `README.md` is the user-facing documentation: keep it in step with behavior changes. Sources of truth:
 - `idea.md`: original brief
 - `milestone-1.md`: current implementation plan (crate layout, config schema, kit mapping, commands, build order).
 - `decisions.md`: numbered design decisions and open research spikes. **Read it before designing anything**, and add new decisions there instead of silently departing from it.
@@ -27,12 +27,14 @@ cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 ```
 
+The `justfile` wraps these (`just check`, `just real-test`) plus representative sbxm commands (`just` lists them).
+
 ## Code layout
 
 Crate `sbxm` (edition 2024), lib + bin. Modules grow slice by slice, following the crate layout table in `milestone-1.md`.
 - `src/lib.rs` / `src/main.rs`: everything lives in the lib; `main` parses args and passes `SbxBackend` to commands.
 - `src/cli.rs`: `clap` derive definitions.
-- `src/config.rs`: config dir resolution (`SBXM_CONFIG_DIR` or `~/.config/sbxm`) `GlobalConfig` loading, and `Profile` loading (unknown keys are errors; env names/values and `skills.store` are checked on load, `SBXM_` env names are reserved), `Profile::with_project` merging `.sbxm/<project>/sandbox.toml` over it (decision 57), plus instruction files (read at load, contents hashed, paths must stay inside the defining file's folder; decision 62), `setup.install` steps, `harness.claude.home_files` (folder read at load, no links, kit-owned files refused; decision 63) and `harness.claude.managed_settings` (a JSON object, stored compact; decision 64), and the config hash per harness (`config_hash`, `GlobalConfig::current_hash`; decisions 55, 69).
+- `src/config.rs`: config dir resolution (`SBXM_CONFIG_DIR` or `~/.config/sbxm`), `GlobalConfig` loading (unknown keys are errors, `default_harness` has its own message; decisions 76, 77), and `Profile` loading (unknown keys are errors; env names/values and `skills.store` are checked on load, `SBXM_` env names are reserved), `Profile::with_project` merging `.sbxm/<project>/sandbox.toml` over it (decision 57), plus instruction files (read at load, contents hashed, paths must stay inside the defining file's folder; decision 62), `setup.install` steps, `harness.claude.home_files` (folder read at load, no links, kit-owned files refused; decision 63) and `harness.claude.managed_settings` (a JSON object, stored compact; decision 64), and the config hash per harness (`config_hash`, `GlobalConfig::current_hash`; decisions 55, 69).
 - `src/harness.rs`: `Harness` (`claude`, `codex`, `gemini`, `pi`; a `clap::ValueEnum` for `--harness`, default `claude`): `sbx` agent name and `agent_arg` (for Pi, the Docker Hub kit pinned to a tag; decision 73), always-loaded instructions file, `unsupported` settings (warned about) and `applied` (the profile without them, which the kit and hash use; decision 69).
 - `src/project.rs`: project name validation (decisions 33, 44), sandbox name, metadata dir.
 - `src/backend/`: `SandboxBackend` trait (`create`, `list`, `stop`, `remove`, `attach`, `validate_kit`, `secret_services`, `version`), `SbxBackend` (shells out to `sbx`; parsers unit-tested against captured output in `src/backend/fixtures/`), `FakeBackend` (records calls, plus an ordered `log()`; `failing_create()`, `failing_remove()`, `with_sandboxes()`, `with_invalid_kit()`, `with_secrets()`, chainable `and_sandboxes()`, `with_version()`, `without_sbx()`, `failing_list()`).
