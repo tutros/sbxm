@@ -1,0 +1,34 @@
+description = "Working on sbxm itself: Rust toolchain matching the host, crates.io egress"
+
+# Egress is deny-by-default: list the hosts sandboxes may reach.
+[network]
+allow = [
+  "archive.ubuntu.com",   # apt: build-essential (cargo needs a C linker)
+  "security.ubuntu.com",
+  "sh.rustup.rs",         # rustup installer
+  "static.rust-lang.org", # toolchain downloads
+  "crates.io",
+  "index.crates.io",
+  "static.crates.io",
+]
+deny = []
+
+# Environment variables set inside the sandbox.
+[env]
+
+# Secret services that must exist in `sbx secret ls`. Values stay in sbx.
+[secrets]
+services = ["anthropic"]
+
+# The Claude kit runs its own `apt-get update` at startup, so wait for its lock. The image's
+# download.docker.com source isn't allowed and makes `update` fail; Ubuntu's own sources still refresh.
+[[setup.install]]
+command = "apt-get -o DPkg::Lock::Timeout=300 update || true; apt-get -o DPkg::Lock::Timeout=300 install -y build-essential"
+user = "0"
+description = "install a C toolchain for cargo"
+
+# Pinned to the host's version so fmt and clippy agree with `just check` there.
+[[setup.install]]
+command = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.93.0 --component rustfmt,clippy"
+user = "agent"
+description = "install Rust 1.93.0 with rustfmt and clippy"
