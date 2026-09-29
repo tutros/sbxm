@@ -14,6 +14,7 @@ every fix goes back through the `sdlc-implementation` skill (a bug fix starts wi
 |---|---|---|
 | A slice is done, before reporting it | The slice's commits: `git log --oneline <before-slice>..HEAD` | Checklist sections 3–6 on the diff |
 | Before merging a coding worktree (implementation rule 6) | `main..<branch>` | Full checklist, plus the merge-ready criteria in rule 6 |
+| A plan or docs-only branch (milestone plan, decisions) | `main..<branch>` | Sections 2 and 3, judged by the must-fix bar in section 7 |
 | End of a milestone, or the user asks | The milestone's commits, or what the user names | Full checklist, plus the cross-cutting sweep in section 4 |
 
 State the scope in one line before starting: *"Reviewing `abc123..def456` (slice 18c, 7 commits)."*
@@ -101,9 +102,41 @@ Rank each finding:
 
 | Severity | Meaning | What happens next |
 |---|---|---|
-| **Must fix** | Wrong behavior, a silent drop, a security or data-loss risk, a missing test for a stated rule | Fixed before the slice is reported or the branch merged |
+| **Must fix** | Meets the bar in "What counts as must-fix" below | Fixed before the slice is reported or the branch merged |
 | **Should fix** | Incomplete sweep, misleading message or doc, duplicated knowledge | Fixed now, or put in `milestone-1.md` carry-over items with the user's OK |
 | **Question** | Suspicion without evidence, or a gap no decision covers | Asked the user, one at a time, with a recommendation |
+
+### What counts as must-fix
+
+A finding is **must fix** only if it has evidence *and* at least one of these holds:
+
+1. **Wrong behavior now:** the code or plan produces a wrong result, a silent drop (decision 11), a security or
+   data-loss risk, or contradicts a decision the user confirmed.
+2. **Costly to reverse:** left alone, it locks in a schema, data model, on-disk layout, public CLI/config surface or
+   dependency that is expensive to change once code, tests or users depend on it.
+3. **Nothing later will catch it:** the slice's own TDD, real-`sbx` check or review wouldn't surface it.
+
+Everything else is **should fix** (or a nit), however true it is. These are never must-fix:
+
+- A missing test case for a rule the change already states. Tests are written first in each slice, so this is
+  should-fix at most in a plan, and must-fix only in code that ships without a test for a stated rule.
+- Wording, stale numbers or ranges, formatting, naming preferences, and "the plan could say more here".
+- A detail an implementer would settle naturally inside the slice (an exact field list, an internal helper, an
+  error message), unless the gap forces a wrong or costly-to-reverse design.
+- Speculative edge cases with no failing input, or hardening beyond the stated requirements.
+- Anything that is a preference between two workable designs: that is a **question**, not a finding.
+
+When reviewing a **plan or docs**, apply this bar to design consequences, not completeness: a plan is allowed to
+leave slice-level detail to the slice. Cite the criterion (1, 2 or 3) on every must-fix. A review with zero
+must-fix findings is a good result, so don't pad. Put each nit in one closing line, not its own finding.
+
+### When to stop reviewing
+
+Re-review only the fix commits, not the whole change again. Run another round only if the last one found a
+must-fix, or the fixes themselves introduced a contradiction, a regression or a new must-fix. Stop, and let the
+user merge, when a round finds no must-fix: file the remaining should-fix items and nits as issues instead of
+looping. If three rounds in a row keep finding must-fix in the same document, stop and ask the user whether the
+scope or the design needs rethinking; more review won't converge it.
 
 Write each as: severity, `file:line`, what happens (with the evidence), why it matters (decision or convention), and
 the smallest fix. For more than five findings, put them in `reviews/<date>-<scope>.md` and keep the chat report short.
