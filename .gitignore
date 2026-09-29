@@ -6,3 +6,6 @@
 # insta snapshot review files
 *.pending-snap
 *.snap.new
+
+# Pester (just script-test)
+testResults.xml
