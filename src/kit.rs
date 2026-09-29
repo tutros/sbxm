@@ -137,7 +137,7 @@ pub fn harness(profile_name: &str, profile: &Profile, harness: Harness) -> Spec 
         .map(|(relative, bytes)| (relative.split('/').collect(), bytes.clone()));
     let home_files = mandatory.chain(copied).collect();
     let agent = harness.as_str();
-    let name = harness.mixin_name();
+    let name = format!("sbxm-harness-{agent}");
     Spec {
         schema_version: "2",
         kind: "mixin",
@@ -188,7 +188,7 @@ pub fn all(
     config_hash: &str,
     harness: Harness,
 ) -> [(String, Spec); 2] {
-    let harness_dir = harness.kit_dir();
+    let harness_dir = format!("harness-{}", harness.as_str());
     [
         ("common".into(), common(profile_name, profile, config_hash)),
         (harness_dir, self::harness(profile_name, profile, harness)),
