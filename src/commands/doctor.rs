@@ -241,14 +241,14 @@ fn check_sandbox(
 
 fn validate_kits(
     root: &Path,
-    kits: [(&str, kit::Spec); 2],
+    kits: [(String, kit::Spec); 2],
     backend: &dyn SandboxBackend,
     profiles_dir: &Path,
     profile_name: &str,
     metadata_dir: Option<&Path>,
 ) -> Result<()> {
     for (name, spec) in kits {
-        let dir = root.join(name);
+        let dir = root.join(&name);
         kit::write(&dir, &spec)?;
         let validation = backend.validate_kit(&dir)?;
         if !validation.valid {

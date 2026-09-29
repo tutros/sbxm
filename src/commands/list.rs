@@ -4,6 +4,7 @@ use anyhow::Result;
 use clap::ValueEnum;
 use serde::Serialize;
 
+use super::harness_flag;
 use crate::backend::SandboxBackend;
 use crate::config::GlobalConfig;
 use crate::harness::Harness;
@@ -163,10 +164,9 @@ impl ConfigStatus {
 /// current config anyway.
 fn note(entry: &Entry) -> String {
     // Hints name the harness unless it's the default, like other commands'.
-    let open = if entry.harness == Harness::default().as_str() {
-        format!("sbxm open {}", entry.project)
-    } else {
-        format!("sbxm open {} --harness {}", entry.project, entry.harness)
+    let open = match Harness::from_str(&entry.harness, false) {
+        Ok(harness) => format!("sbxm open {}{}", entry.project, harness_flag(harness)),
+        Err(_) => format!("sbxm open {} --harness {}", entry.project, entry.harness),
     };
     match (entry.problem, entry.config) {
         (None, Some(ConfigStatus::Changed)) => {
