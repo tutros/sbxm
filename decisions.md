@@ -194,6 +194,7 @@ Recorded early at the user's request; planning proper starts later and may refin
     - **Identifiers:** run IDs validated for `run show` and atomically reserved on both trees; contestant directories are zero-based indices, never model text.
     - **Judge-only harnesses** get kits generated and validated in the same preflight; **per-contestant profiles [115]** get slice 12b; **M2b's outline** gains a parity inventory (status/finish/remove, PR review [87], CI triggers [83]).
     Also: `AGENTS.md`'s decision range is now 92–121.
+122. **Fifth external review (Codex gpt-5.6-sol on PR #29, 2026-09-29): seven must-fix findings, six applied, one deferred, judged against the new must-fix bar (`sdlc-code-review`, PR #30).** Applied: the config hash input gains the external agent-kit ref, so a re-pin changes the hash (verified: `HashInput` in `src/config.rs` had none); the seeded diff stages everything and diffs against the recorded baseline commit ID, so agent-created files aren't dropped; repeats run as sequential waves so concurrency never exceeds the contestant count [6]; the secrets preflight includes every effective profile's `secrets.services` [58]; the judge harness gets the contestant allowlist; slice 3 gains a real Antigravity timeout/kill check [114]; the stale decision range is fixed. **Deferred as should-fix:** acceptance tests for `run show` id validation and root-collision rollback (P2), which slices 8 and 9 write test-first anyway.
 
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
