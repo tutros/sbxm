@@ -47,7 +47,7 @@ function Select-Issues {
     Get-InProgress | ForEach-Object { $taken.Add($_) }
     # "Related" is often written on one of the two issues only, so look both ways.
     $relatedOf = @{}
-    foreach ($o in $open) { $relatedOf[$o.number] = @(Get-IssueNumbers $o.body 'Related') }
+    foreach ($o in $open) { $relatedOf[[int]$o.number] = @(Get-IssueNumbers $o.body 'Related') }
 
     $candidates = $open | Where-Object { -not $Issue -or $Issue -contains $_.number } | ForEach-Object {
         $labels = $_.labels.name
@@ -69,7 +69,7 @@ function Select-Issues {
     foreach ($c in $candidates) {
         if (-not $Issue -and $picked.Count -ge $Workers) { break }
         $blockers = $c.DependsOn | Where-Object { $openNumbers -contains $_ }
-        $clash = $taken | Where-Object { $relatedOf[$c.Number] -contains $_ -or $relatedOf[$_] -contains $c.Number }
+        $clash = $taken | Where-Object { $relatedOf[[int]$c.Number] -contains $_ -or $relatedOf[$_] -contains $c.Number }
         if ($taken -contains $c.Number) { Write-Host "#$($c.Number): already has a worker; skipped" }
         elseif ($c.IsQuestion) { Write-Host "#$($c.Number): a question, needs your answer first; skipped" }
         elseif ($blockers) { Write-Host "#$($c.Number): blocked by open #$($blockers -join ', #'); skipped" }
