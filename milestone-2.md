@@ -1,0 +1,238 @@
+# Milestone 2: comparisons, then folding issue-workers into sbxm
+
+Goal: run 2–4 contestants (harness × model, [10]) headlessly and in parallel on the same task ([6]),
+each in a fresh throwaway sandbox ([95]) seeded or empty ([5]), capturing answer, diff, transcript and
+usage ([3]), then evaluating with executable checks, a rubric-based LLM judge, cosine similarity and a
+human-readable report — Jev is added once that pipeline works end to end ([99]). This is **M2a**. Once
+it ships, **M2b** folds `scripts/issue-workers.ps1`'s dispatch/review/fix-round workflow into sbxm
+itself, reusing M2a's headless-execution primitive instead of the script's raw `sbx exec` calls ([88][90][94]).
+One plan, two sub-milestones ([92][110]); M2b's detail here is a rough outline, refined once M2a's
+primitive exists to build on.
+
+Constraints come from `decisions.md` (numbers in brackets refer to it), especially the milestone-2
+planning round [92]–[121] and the S5 spike results under "Spike results".
+
+## Plan-level choices
+
+**P1. `run` subcommand set**
+→ `sbxm run <config>` (launch a comparison), `sbxm run init [path]` (write a starter run-config,
+completing [96]), `sbxm run show <run-id>` (print a run's results as a human-readable report, [100]).
+A `run list` (past runs under `.sbxm/runs/`) can be added later if it turns out to be needed; the first
+three cover launch → inspect end to end.
+
+**P2. Run ID format and filesystem identifiers**
+→ `<date>-<6 lowercase hex>`, e.g. `2026-09-29-a1b2c3`: sortable by date, collision-resistant enough for
+one host, short enough to type in `run show <run-id>`. `run show` validates its argument against exactly this format before touching the filesystem (no separators or traversal). Creating a run atomically reserves both roots (`.sbxm/runs/<run-id>/` and `runs/<run-id>/`, via create-dir-that-must-not-exist); on collision it regenerates a few times, then refuses, and never touches existing files. Contestant directories are named from the contestant's zero-based index in the run-config (`0`, `1`, `2`), never from harness or model text, so duplicate or hostile model strings can't collide or escape; the display metadata (harness, model, profile) lives in `run.json`. Every path in this plan written `<contestant>` means that index.
+
+**P3. The LLM judge runs through the same shared headless primitive as contestants — confirmed**
+The judge needs an LLM call (rubric + answer + diff, per [20]; the diff is always included, empty if there is none) but no tools or multi-turn
+behavior. Rather than writing a second, provider-specific HTTP client with its own auth, the judge runs
+as a throwaway sandbox too — same primitive, same `sbx`-managed secrets and egress, just a different
+prompt and a harness/model named in `[eval.judge]`. This keeps sbxm's "no enforcement, no credential
+handling of its own" role [36] intact for the judge as much as for contestants, and it fits the existing
+`sbx`-managed auth/egress model directly. No longer open: settled as decision [116], ahead of slice 11
+(the LLM-judge slice) where it's built.
+
+**P4. Cosine similarity is local and out of the sandbox model entirely**
+`fastembed` ([23]) runs on the host, no network, no secrets, text answers only ([23]). It doesn't touch
+`SandboxBackend` at all.
+
+**P5. Antigravity's mandatory-instructions file path is unverified**
+Decision 37's per-harness convention (an always-loaded home file) was checked for Claude, Codex, Gemini
+and Pi in M1, but never for Antigravity — the S5 spike only exercised its headless `-p` mode, not the
+kit's `files/home/` behavior. → Verify empirically in the slice that adds the `Antigravity` harness
+adapter (slice 3 below), the same way M1 slices 18–20 each did their own real-`sbx` check.
+
+**P6. Executable checks run inside the contestant's sandbox before it's removed**
+A `[[eval.checks]]` entry is `{id, command}`; each runs via `SandboxBackend::exec` inside the still-alive
+contestant sandbox (after the headless run, before teardown) and is scored pass/fail by exit code. Each check runs under the same in-sandbox `timeout --kill-after` wrapper [114] with a per-check `timeout` (an optional `[[eval.checks]]` field, default derived from the run's `timeout`); a check that times out is a failed check with a `timed_out` note, and never blocks result persistence or sandbox removal.
+Running it in the same sandbox (not a fresh one) means it sees exactly the files the agent left behind,
+with no extra copy step.
+
+**P7. `reqwest` is added in blocking mode**
+The crate is entirely synchronous today (no `tokio`). Jev's HTTP client ([9], "HTTP API only... use
+`reqwest`") uses `reqwest`'s blocking feature so no async runtime is introduced crate-wide. Only
+`src/eval/jev.rs` touches it.
+
+**P8. Keeping the pinned kit tags fresh (Pi and Antigravity) — a manual, warn-only process**
+Pinning must not mean rotting, but sbxm never resolves a tag at run time: that would change the config hash under a user and break [104]'s "same kit forever". Instead a `just kit-tags` recipe queries Docker Hub's tag list for `sbx/pi-kit` and `sbx/antigravity-kit` and prints, per kit, the pinned tag versus the newest dated tag (and flags a mismatch); it changes nothing and isn't part of `doctor`, which stays offline. To update: run it, and if a newer tag exists, re-pin the constant in `src/harness.rs`, run that harness's real-`sbx` checks (`tests/real_sbx.rs`, plus the slice 3 check for Antigravity), and log a decision. The new tag changes the config hash [55], so existing sandboxes need `open --rebuild` (M1 semantics) while runs are unaffected (each run builds fresh kits [95]). Re-check whenever a harness misbehaves or roughly monthly. A scheduled reminder or an issue-worker chore could automate the check later, but never the re-pin.
+
+**P9. Scoring and ranking are provisional [19]** (repeat pairing: decision 121)
+Contestants are scored independently and ranked in code (`eval::score`). Each criterion maps to 0–1 (`pass_fail`: 0 or 1; `scale` with n levels: `index/(n-1)`); a contestant's score is the weight-normalized mean over its judged criteria, and executable checks are reported alongside (pass counts), not folded in. Evaluators never mix repeats: the judge and cosine compare contestants **with the same repeat index** (repeat `k` of every contestant is judged together, with its own A/B/C mapping stored in that repeat's evals), then each contestant's per-repeat scores are averaged. A timed-out pair is scored on its partial output, marked `timed_out` in the report. A criterion the judge failed to score is excluded and listed, never counted as 0. Ties rank equal. Raw per-criterion scores stay in `evals.json`, so the ranking can be recomputed with different rules once real results are seen (decision 120).
+
+## Structure
+
+New and changed modules, in dependency order. Everything in the existing crate layout (`milestone-1.md`)
+is unchanged except where noted.
+
+| Module | Responsibility |
+|---|---|
+| `backend` (changed) | `SandboxBackend` gains `Send + Sync` (needed for slice 6's parallel orchestration — `FakeBackend`'s current `RefCell` fields move to `Mutex`, `SbxBackend` is already a stateless unit struct) and two methods: `fn exec(&self, sandbox: &str, spec: &ExecSpec) -> Result<ExecOutput>`, shelling to `sbx exec [-w <workdir>] <sandbox> <argv...>` in `SbxBackend` (`ExecSpec { argv: Vec<String>, workdir: Option<String>, stdin: Stdin }`, `Stdin { Closed, Piped(String) }` — Codex needs `Piped(String::new())` to unblock its stdin read, [S5]; a shell one-liner like an `eval.checks` command is wrapped by the caller as `argv: vec!["sh", "-c", command]`, not a separate mode on `ExecSpec`), and `fn skills(&self) -> Result<serde_json::Value>` (`sbx skills ls --json`, opaque like `KitValidation.warnings` — sbxm only needs to record it verbatim, [46]). `FakeBackend` gets a scriptable exec log and a scriptable `skills` response. `exec` is the one primitive every headless run, executable check and judge call is built on. |
+| `harness` (changed) | `Harness` gains `Antigravity` [103], pinned to the immutable kit tag `docker.io/sbx/antigravity-kit:20260928-7da9425e640d172e36abe6de3499a1c75d416c0f` [104] (digest `sha256:dfa66e5c5f6f05f1d2f0200724ab59b0d172661e8aa3034520315a8c13b4ea10`; the same image as `latest` on 2026-09-28, looked up from Docker Hub 2026-09-29 and used in the S5 spike; slice 3 confirms a sandbox actually creates from it). Gains the headless-execution surface [94]: `headless_argv(prompt, opts) -> Vec<String>` (the inner command `exec` runs), `stdin(opts) -> Stdin` (Codex: `Piped(String::new())`, others: `Closed`, [S5]), `git_repo_workaround(is_git_repo) -> Option<&'static str>` (Codex: `"--skip-git-repo-check"` when not a repo, [113]), `budget_flag(budget_usd) -> Option<Vec<String>>` (Claude: `["--max-budget-usd", ...]`; Codex/Antigravity: `None`, [S5] — the orchestrator warns loudly when a run sets `budget_usd` and this returns `None` for a contestant, the same warning pattern as `Harness::unsupported` [11][98]), `parse_headless_output(raw: &str) -> Result<HeadlessResult>` per harness's actual event shape ([S5]: Claude's `stream-json`, Codex's and Antigravity's NDJSON). `HeadlessResult { status: RunStatus, answer: String, transcript: String (raw NDJSON/stream-json, kept as-is), usage: Usage }`, `RunStatus { Completed, TimedOut, Failed(String) }` — a timeout is detected from `timeout -v`'s own stderr line ("sending signal") rather than from the exit code, because 137 is also what an OOM or `SIGKILL` crash returns, so a timeout is `TimedOut` and a bare 137 is `Failed`, and neither is an error: `parse_headless_output` is best-effort on truncated output (the last assistant text seen so far as `answer`, whatever usage events arrived, both possibly empty) so [16]'s partial output is returned and still evaluated; `Failed` covers a non-timeout non-zero exit or unparseable output, and like a timeout it keeps whatever partial answer/transcript/usage could be parsed — [16] covers "timeout/crash", so checks, the judge and the report treat a `Failed` pair exactly as they treat a `TimedOut` one, just labelled with its status, `Usage { input_tokens, output_tokens, cost_usd: Option<f64> }` ([105]: `None` for Codex/Antigravity). |
+| `headless` (new) | The shared primitive [94] itself: `run(backend, sandbox, workdir, harness, prompt, opts, timeout) -> Result<HeadlessResult>`, returning `Ok` with `status: TimedOut` (never `Err`) on a timeout, and composing `Harness::headless_argv` + `stdin`/`git_repo_workaround`/`budget_flag` + the uniform `timeout --kill-after` wrapper [114] + `SandboxBackend::exec` (via `ExecSpec { argv, workdir: Some(workdir), stdin }`) + `Harness::parse_headless_output`. Used by contestants, the judge (P3) and, in M2b, issue workers. |
+| `run::config` (new) | `RunConfig` schema (below): `Task`, `Contestant`, `RunLimits { timeout, budget_usd, cpus, memory, repeat: u32 }` (`repeat` defaults to 1, in the data model from day one per [15], not bolted on later), `EvalConfig`. Parsing and validation: contestant count 2–4 [109], `repeat >= 1`, harness restricted to `{Claude, Codex, Antigravity}` [103] (a config-time error naming the excluded harness and why, same pattern as [11]), seed dir checks reusing `src/seed.rs`'s `reject_links` [102]. |
+| `run::kits` (new) | Per-run kit generation, reusing `kit::all`/`kit::write` and `backend.validate_kit` exactly as `commands/new.rs` does ([95]: a run always gets a fresh kit from the current merged config). The config hash input gains the harness's external agent-kit ref (Pi's `PI_KIT`, Antigravity's pinned tag; `HashInput` in `src/config.rs` has none today), so a re-pin changes the hash as P8 and [104] assume (this also shifts existing Pi sandboxes' hash once, which `open --rebuild` clears). Runs for the union of the contestants' harnesses and the optional judge harness, so a judge-only harness also gets a generated, validated, hashed kit before any contestant sandbox exists. Computes the effective config hash per harness with the run's `cpus`/`memory` overrides applied [55][108], writes the `common` and `harness-<h>` mixins to `.sbxm/runs/<run-id>/kits/<hash-prefix>/` (never mounted [112]), validates each before any sandbox exists, and hands `run::orchestrate` (and, in slice 11, `eval::judge`) the ordered kit args for `CreateSpec`. The kit refs recorded in `run.json` come from here. |
+| `run::orchestrate` (new) | Repeats run as sequential waves: for each repeat index in turn, that index's 2–4 contestants run in parallel, and the next wave starts only after every pair in the current one has finished, so concurrency never exceeds the contestant count [6] however large `repeat` is (`std::thread::scope`, needing `SandboxBackend: Send + Sync` above; with the default `repeat = 1` this is exactly one sandbox per contestant, same as before repeat existed): create a throwaway sandbox [95] from `run::kits`' validated kits, named `sbxm-run-<run-id>-<contestant-idx>-<repeat-idx>` sized from `GlobalConfig.resources`, overridable per run [108]; prepare the workspace (seeded: copy, then **delete the copied root `.git`** (`seed`'s copy preserves it, [47]), then a fresh `git init` and exactly one baseline commit via a new `seed::seed_contestant`, [102][14]; unseeded: empty directory, [113]); run the headless primitive; run executable checks (P6) before teardown; remove the sandbox always, including on timeout ([16]: partial output is kept and still evaluated). **From slice 8 onward**, as soon as a `(contestant, repeat)` pair's headless run and checks finish (success, timeout or error alike), `run::results` writes its `answer.md`/`diff.patch`/`transcript.jsonl` to disk immediately — before the judge or cosine evaluators run at all, so a failure in evaluation (or in another pair) never loses already-captured output [16][25]. Evaluators append to `evals.json` afterward. Slices 6–7 build the orchestration and workspace-prep logic itself without persistence yet — see the slice table. |
+| `run::results` (new, writing starts in slice 8) | Writes, per `(contestant, repeat index)`, `answer.md`, `diff.patch`, `result.json` (`status` and `usage`, so a timed-out pair is marked `timed_out` [16]), `transcript.jsonl` (or `.txt` if a harness's raw output isn't NDJSON) — written immediately per pair, not batched to the end of the run — and later `evals.json`, all under `.sbxm/runs/<run-id>/<contestant>/<repeat-idx>/`; a copy of the run-config (rubric included) at `.sbxm/runs/<run-id>/run-config.toml`; and one `run.json` for the whole run, **written early** (right after the run ID is generated, before any sandbox exists) with the merged config hash per harness [55], profile name, kit refs, `sbx version()`, `sbx skills()` output [46] and `started_at`, then **updated in place** with `completed_at` once every pair and evaluator has finished — so an interrupted or partially-evaluated run still keeps its identity and config hash on disk, the same "never lose what's already captured" principle as the per-contestant results [16][25]. This extends decision 28's "every sandbox and run records a hash of the fully merged config" to runs. None of this is mounted [112]. Diff: seeded contestants record the baseline commit ID at seeding, then `git add -A` and `git diff --cached <baseline-id>` (plain `git diff` would drop files the agent created, and the agent may move `HEAD`; ignored files stay excluded) [14]; unseeded ones use `git diff --no-index` between an empty snapshot and the final workspace (excluding any `.git` the agent created, e.g. by diffing a copy of the workspace with its `.git` removed), without the workspace ever becoming a git repo [113] — **exit code 1 from `git diff --no-index` means differences were found, not a command failure**; only other exit codes are errors. |
+| `eval::rubric` (new) | Shared criterion types [18]: `Criterion { id, kind: PassFail | Scale { levels }, weight, notes }`, used by both the LLM judge and (in a later milestone) human review scoring. |
+| `eval::judge` (new) | Runs the rubric through the shared `headless` primitive in a throwaway sandbox (P3), anonymizing contestants as A/B/C [21] and warning when the judge's harness/provider matches a contestant's. Parses the judge's structured JSON response into per-criterion scores. |
+| `eval::score` (new) | Code-side scoring and ranking per P9 [19]; consumes `evals.json`, no I/O of its own beyond reading it, used by `run show` and the run summary. |
+| `eval::cosine` (new) | `fastembed`-based similarity between contestants' text answers only [23], no sandbox involved (P4). |
+| `eval::jev` (new, added after slice 11) | `reqwest` blocking client to Jev's HTTP API [9], mapping rubric criteria to Noul/Choice/Score questions [20], splitting diffs per file to stay under the 32k-token budget. |
+| `cli` (changed) | `Run { config: PathBuf }`, `RunInit { path: Option<PathBuf> }`, `RunShow { run_id: String }` under a `Run`/top-level trio (P1). |
+| `commands::run`, `commands::run_init`, `commands::run_show` (new) | One file per new subcommand, following the existing one-file-per-command convention. |
+
+## Interfaces
+
+### Run-config schema
+
+A standalone file [107], not merged with any profile or project config:
+
+```toml
+[task]
+prompt = "Implement feature X per spec.md"
+seed = "./seed-dir"              # optional; omit for an empty workspace [5]
+
+[run]
+profile = "default"              # applies to every contestant unless it sets its own [115]
+timeout = "10m"
+budget_usd = 2.00                # best-effort per contestant [98]
+cpus = 2                         # optional override of GlobalConfig.resources [108]
+memory = "4g"                    # optional override [108]
+repeat = 1                       # optional; default 1, in the data model from day one [15]
+
+[[contestants]]
+harness = "claude"
+model = "claude-opus-5-5"
+# profile = "strict"             # optional per-contestant override, slice 12b [115]
+
+[[contestants]]
+harness = "codex"
+model = "gpt-5.6-sol"
+
+[[contestants]]
+harness = "antigravity"
+model = "gemini-3-pro"
+
+[[eval.checks]]
+id = "tests-pass"
+command = "cargo test"
+
+[[eval.rubric]]
+id = "correctness"
+kind = "pass_fail"
+weight = 1.0
+
+[[eval.rubric]]
+id = "code-quality"
+kind = "scale"
+levels = ["poor", "fair", "good", "excellent"]
+weight = 0.5
+notes = "Idiomatic for the language, no dead code"
+
+[eval.judge]
+harness = "claude"
+model = "claude-opus-5-5"
+```
+
+The same allowlist `{claude, codex, antigravity}` applies to `[eval.judge].harness` (no headless adapter exists for the others) [103]; `gemini` and `pi` are config
+errors naming why (Gemini: deprecated upstream and blocked by egress on this setup, [103]; Pi: deferred,
+[93]). Contestant count must be 2–4 [109]. Every run-config struct denies unknown keys, and rubric/check ids and scale levels are validated (see slice 4). Evaluators are selected by table presence: `[eval.judge]` runs the LLM judge (requires a non-empty rubric), `[eval.cosine]` (an empty table, no options) runs cosine similarity, and `[eval.jev]` runs Jev (below, slice 14); each is independently optional, so cosine works without a judge. `eval.checks` and `eval.rubric` are both optional lists (a run
+can use either, both or neither — an empty `eval` just captures answer/diff/transcript with no scoring).
+
+Jev is configured with `[eval.jev]` (enables Jev over the shared rubric's criteria; credentials per spike S9) and optional `[[eval.jev.questions]]` entries for Jev-specific raw questions [20]: `{id, kind = "noul" | "choice" | "score", text, ...}` with kind-specific fields (options for choice, 2–10 levels for score per the Jev facts in `decisions.md`). The exact field list is fixed in slice 14 once S9 lands, and is validated like the shared rubric. An empty `eval` (or none) runs nothing but capture.
+
+### Command behavior
+
+| Command | Behavior |
+|---|---|
+| `sbxm run init [path]` | Writes a starter run-config (default path `./run.toml`) that's valid as written: two contestants uncommented (e.g. Claude and Codex, satisfying the 2–4 minimum, [109]) plus a third, Antigravity, commented out with a note on how to enable it. Refuses to overwrite, like `config init` [43]. |
+| `sbxm run <config>` | Validate (incl. `repeat >= 1`, [15]) → check every needed secret exists before anything is written or created — the deduplicated union of each contestant's provider [98], **the `[eval.judge]` harness's provider** (it may name one no contestant uses) **and every effective profile's `secrets.services`** [30][58], as `new` does → generate run ID [P2] → **generate and validate the run's kits** (`run::kits`; an invalid kit refuses the run with zero sandboxes created) → **write initial `run.json`** (config hash, profile, kit refs, `sbx` version, skills snapshot [46][28], `started_at`) before any sandbox exists → for each repeat index in turn (a wave), for that wave's contestants in parallel: create throwaway sandbox [95], prepare workspace [102][113], run headless [94], run executable checks [P6], capture diff, **write that pair's results to disk**, remove sandbox → once every pair is done, run the judge/cosine evaluators [P3][P4] and append their scores to each `evals.json` → **update `run.json`** with `completed_at` → print the run ID and a one-line summary per contestant (aggregated across repeats when `repeat > 1`). |
+| `sbxm run show <run-id>` | Reads `.sbxm/runs/<run-id>/` and prints a human-readable report: per contestant, the answer, eval scores and a diff summary; the anonymized A/B/C mapping [21] is revealed here, not during evaluation. Nothing is created or called. |
+
+## Work order: vertical slices
+
+Follows `sdlc-implementation`: one user-observable behavior end to end per slice, test-first, smallest
+steps, commit after every green step. `FakeBackend` gets the new `exec` method before anything depends
+on it.
+
+| # | After this slice… | Test focus | Real `sbx` |
+|---|---|---|---|
+| 0 | `SandboxBackend` gains `Send + Sync`, `exec(sandbox, &ExecSpec) -> Result<ExecOutput>` and `skills() -> Result<serde_json::Value>`; `SbxBackend` shells to `sbx exec [-w <workdir>] <sandbox> <argv...>` (stdin closed or piped per `ExecSpec::stdin`) and `sbx skills ls --json`; `FakeBackend`'s `RefCell` fields move to `Mutex` so it can be shared across threads, and it records `exec`/`skills` calls with scripted `ExecOutput`/JSON responses. | Backend call args (including workdir and stdin mode) and captured stdout/stderr/exit code; existing tests unaffected; a `FakeBackend` shared across two `std::thread::scope` threads compiles and records both calls. | `sbx exec <existing sandbox> echo hi` matches; `sbx skills ls --json` matches. |
+| 1 | The `headless` primitive runs a Claude contestant headlessly: builds the argv, wraps with `timeout --kill-after` [114], calls `exec` via `ExecSpec`, parses `stream-json` into `HeadlessResult`. | Snapshot the argv/`ExecSpec` for a given prompt/model/budget/timeout; parse fixtures of captured `stream-json` output ([S5]) into `HeadlessResult`; a scripted exit-124 `exec` with truncated partial stdout plus the `timeout -v` marker returns `Ok` with `status: TimedOut`, while the same stdout with a bare exit 137 and no marker is `Failed` and the partial answer/usage. | Real PONG-style prompt via the primitive, not raw `sbx exec`. |
+| 2 | Same for Codex: `Stdin::Piped(String::new())` (not `Closed`: the spike showed `codex exec` blocks on an attached stdin, S5), `--skip-git-repo-check` when the workspace isn't a git repo [113], NDJSON parsing (`thread.started`/`item.completed`/`turn.completed`, [S5]). | Fixtures of captured Codex NDJSON; argv/`ExecSpec` snapshot asserting the exact `Piped("")` variant, plus the git-repo flag logic; exit-124 with truncated NDJSON gives `TimedOut` plus the partial answer. | Real prompt via the primitive. |
+| 3 | `Harness::Antigravity` [103][104]: pinned kit ref (the exact tag above; the snapshot asserts it), kit-generation mixin (`requires.agent: antigravity`), headless argv/parsing for `agy -p --model <configured-model> --output-format stream-json --dangerously-skip-permissions` (the model flag is always passed and asserted in the argv snapshot) [S5]. Mandatory-instructions path and skills-store behavior determined empirically [P5]; if no always-loaded file works, Antigravity gets the loud `Harness::unsupported` warning (mandatory instructions and skills don't reach it), like Pi's and Gemini's skills, rather than a refusal (mandatory instructions are always configured, so refusing would ban the harness). | Kit snapshot; a hash-input test proving that changing the pinned kit ref (Antigravity and Pi) changes the config hash; NDJSON parsing fixture; argv snapshot; exit-124 with truncated NDJSON gives `TimedOut` plus the partial answer. | Sandbox creates from the pinned tag; PONG via the primitive; a real timeout check: a deliberately long Antigravity prompt under `timeout --kill-after` exits the timeout marker and no `agy` child remains in the sandbox [114]; `just kit-tags` (below) runs; confirm (or refute) a mandatory-instructions file location and whether the skills store reaches it; an `unsupported` test for whichever is refuted. |
+| 4 | Run-config parsing and validation: contestant count 2–4 [109], `repeat >= 1` with a default of 1 [15], harness restriction for contestants and the judge (`gemini` and `pi` judges are rejected too) [103], secrets check (union of contestant and judge providers and every effective profile's `secrets.services`, deduplicated) [98][30][58], seed dir validation reusing `src/seed.rs` [102]; a contestant whose harness has no budget flag ([S5]: Codex, Antigravity) gets a loud warning when `budget_usd` is set, same pattern as `Harness::unsupported` [11][98]. Nothing is created yet. | One test per validation rule, including `repeat` and the budget-flag warning; unknown keys at the top level and in every nested table/array entry are errors naming the run-config path (`deny_unknown_fields` on every run-config struct, as in `src/config.rs`, [11]); rubric/check validation (non-empty unique ids; every scale has at least 2 distinct levels; weights finite and positive; a scored rubric's weights sum to nonzero); every rejection happens before any filesystem write or backend call; the preflight collects every `Harness::unsupported` warning for the run profile against each contestant and the judge harness [11]; a run whose contestants' provider secrets exist but the judge's, or a profile-named service such as `github`, doesn't fails with a one-line actionable error, no filesystem writes and no create/exec calls; valid config parses into `RunConfig`. | none |
+| 5 | `sbxm run init` writes a starter run-config that's valid as written (two contestants uncommented, one commented, per P1's fixed scaffold); refuses to overwrite. | The written config passes slice 4's validation unmodified; second run errors. | none |
+| 5a | Run kits: `run::kits` generates and validates the `common` and `harness-<h>` mixins per harness from the run's profile before anything is created, stored under `.sbxm/runs/<run-id>/kits/`. Nothing is created in `sbx` yet beyond kit validation. | Effective hash includes `cpus`/`memory` overrides and differs per harness; both kit args passed in order (common, then harness); validation happens before any create; an invalid kit fails with zero creates; two same-harness contestants plus a different judge harness yields kits and hashes for both harnesses (an invalid judge kit fails before any contestant sandbox is created); kit refs are returned for `run.json`. | `sbx` validates a generated run kit (same check as `new`). |
+| 6 | `sbxm run <config>` creates one throwaway sandbox per `(contestant, repeat index)` pair, contestants in parallel and repeats as sequential waves [95] (using the validated kits from slice 5a and `SandboxBackend: Send + Sync` from slice 0; the loop is written for `repeat` from the start, [15], even though every test here uses the default of 1), runs each headlessly, always removes the sandbox afterward (including on error) — no eval yet, no results files yet, just proof the orchestration and cleanup work. | `FakeBackend` call sequence per pair, including a `repeat = 2` case producing two sandboxes per contestant; a failing pair doesn't block or leave behind the others'; sandboxes always removed; with `repeat = 2` and blocked fake executions, no wave-two sandbox exists until every wave-one pair has finished. | Three real sandboxes appear and disappear; workspace directories remain. |
+| 7 | Workspace seeding: seeded contestants get a copied `.git` removed, then a fresh git repo and exactly one baseline commit [14][102]; unseeded stay a plain directory [113]. Diff capture: `git diff` for seeded, `git diff --no-index` for unseeded (exit 1 means differences found, not failure). | An unseeded agent that runs `git init` and commits: `diff.patch` has its files and no `.git/` paths; an agent-created new file appears in `diff.patch`, and still does if the agent committed; a seed with prior commits and a remote yields one commit and an empty `git remote`; diff correctness for both cases; the exit-1 case doesn't surface as an error; seed validation errors surface before any sandbox is created. | Diff matches what the agent actually changed. |
+| 8 | `run.json` is written right after the run ID is generated (config hash per harness [55], profile, kit refs, `sbx` version, `sbx skills ls --json` [46], `started_at`), before any sandbox exists. Each `(contestant, repeat index)` pair's `answer.md`/`diff.patch`/`result.json`/`transcript.jsonl` is written under `.sbxm/runs/<run-id>/<contestant>/<repeat-idx>/` **as soon as that pair finishes** (not batched to the end of the run), plus `.sbxm/runs/<run-id>/run-config.toml` (rubric included). `run.json` is updated with `completed_at` once everything is done. The mounted workspace stays at `runs/<run-id>/<contestant>/<repeat-idx>/` [111][112]. `sbxm run` prints the run ID. | File contents and locations, including the repeat-index path segment and `result.json`'s `status`; `run.json` exists with identity fields even when a later pair or evaluator fails, and gains `completed_at` only on a full run; run-config copy includes the rubric. | Inspect both trees after a real run; kill one contestant mid-run and confirm `run.json` and the others' results are already written. |
+| 9 | `sbxm run show <run-id>` prints answers and diffs (no eval yet). | Output snapshot for a fixture run directory. | none |
+| 10 | Executable checks [P6]: run inside the contestant's sandbox before removal, pass/fail by exit code, recorded in `evals.json`. | `FakeBackend` exec sequence includes the check command wrapped in `timeout`; pass/fail mapping; a scripted non-terminating check times out, is recorded as failed/`timed_out`, the pair's results are still written and the sandbox removed; a `TimedOut` and a `Failed` (non-zero exit, truncated output) pair both still run their checks and get an `evals.json` entry. | A real `cargo test`-style check against a seeded contestant. |
+| 11 | Rubric + LLM judge [P3]: a throwaway judge sandbox runs the headless primitive with the rubric and every same-repeat answer and diff, each under its blind label, as its prompt, contestants anonymized A/B/C [21], a warning when the judge shares a provider with a contestant. Parses structured JSON into per-criterion scores in `evals.json`. `run show` reveals the A/B/C mapping. | The prompt fixture contains every same-repeat answer and diff under its blind label; judge sandbox removed on success, parse failure, timeout and backend error; anonymization mapping (stored per repeat index); with `repeat = 2` the judge is called once per index and never sees answers from two indices together; provider-sharing warning; judge-response parsing (fixture); a `TimedOut` and a `Failed` contestant are still judged on their partial output (status shown in the run report, not to the judge). | A real 2-contestant run with a real judge call. |
+| 12 | Cosine similarity [P4]: `fastembed` similarity between contestants' text answers, added to `evals.json`; skipped (not an error) for non-text/diff-only answers. | Similarity score determinism for fixed inputs; with `repeat = 2` only same-index answers are compared. | none (fully local). |
+| 12a | Scoring and ranking [19][P9]: `eval::score` computes each contestant's weighted 0–1 score, with repeats averaged, timed-out pairs included and marked, unscored criteria excluded and listed, and ties equal; `run show` and the run summary print the ranking. | Weighted mean for pass_fail and scale criteria; ties; a missing judge score; a timed-out pair; `repeat = 2` averaging; ranking output snapshot. | none |
+| 12b | Per-contestant profile override [115][10]: optional `contestants.profile` (falls back to `[run].profile`); `run::kits` builds kits and hashes per (profile, harness) pair, and `run.json` and each pair's `result.json` record the profile used. | Two contestants with different profiles get different kits/hashes and each pair's metadata names its profile; an unknown profile is a validation error before any write; the run-level profile still applies when unset. | A real run where two contestants differ in a visible profile setting (e.g. an env var). |
+| 13 | **End-to-end check (manual, real `sbx`)**, see below. | none | All items pass. |
+| 14 | Blocked on spike S9 (below). Jev evaluator [99] with the `[eval.jev]` config and Jev-specific questions [20]: `reqwest` blocking client [P7], rubric criteria mapped to Noul/Choice/Score questions [20], diffs split per file to fit the 32k-token budget. | Mocked HTTP responses (no live Jev calls in CI); composite scoring in code; config tests for every evaluator subset (empty `eval`, cosine without a judge, judge without cosine, Jev over shared criteria, Jev with specific questions). | One real Jev call against a small rubric. |
+
+**End-to-end check (slice 13)**, on a base dir outside AppData:
+- `sbxm run init` → edit the starter config to a real 3-contestant task (Claude, Codex, Antigravity) with
+  a seed dir, executable checks and a rubric.
+- `sbxm run my-task.toml` (default `repeat = 1`) → all three sandboxes appear and are removed;
+  `.sbxm/runs/<run-id>/run.json` has `started_at` and `completed_at`; `.sbxm/runs/<run-id>/<contestant>/0/`
+  has all three contestants' `answer.md`/`diff.patch`/`transcript.jsonl`/`evals.json`; the mounted
+  workspaces at `runs/<run-id>/*/0/` show the actual edited files.
+- Re-run with `repeat = 2` (a run-level setting, so every contestant repeats): two sandboxes per contestant, results under both `0/` and `1/`.
+- `sbxm run show <run-id>` prints a readable report with real scores and the revealed A/B/C mapping.
+- Kill one contestant's task artificially (a deliberately slow prompt) to confirm the timeout path: exit
+  124 inside that sandbox, partial output still captured and evaluated [16], the other contestants
+  unaffected.
+- Confirm no run-config or rubric content is readable from inside any contestant's sandbox.
+
+## M2b (rough outline — refine once M2a ships)
+
+Folds `scripts/issue-workers.ps1` into sbxm ([88][90]), reusing the `headless` primitive (slices 0–3
+above) for a worker's own agent run instead of the script's raw `sbx exec claude -p` calls.
+
+- Run spike S8 (GitHub access from a sandbox, written but not run) once M2a is done — it decides whether
+  workers can push/PR/comment themselves through `sbx`'s proxy, or keep M1's host-push model [82].
+- Port the dispatcher (host picks issues by label/dependency order, [81]) into an sbxm command, replacing
+  the PowerShell script's issue-selection logic.
+- Reuse `headless` for the worker's agent run; keep the independent-reviewer step [84][85] as a second
+  `headless` call (a different harness/model) rather than a second bespoke code path.
+- Streamline what decisions [88] and [90] deferred here: must-fix vs. should-fix handling, the one-fix-round
+  policy, and turning every surviving finding into its own GitHub issue automatically (needs S8 or the
+  host-push model, depending on what S8 finds).
+- Feature parity inventory, so nothing is dropped by accident: `start` (issue selection [81], clone/branch/sandbox, headless worker), `status` (running/finished, commits, result/review present), `review -Issue` (host checks, independent reviewer, one fix round [84][85]), `review -Pr <n>` (review an open PR and comment, fork PRs refused [86][87]), `finish` (push and open the PR with result/review in the body), `remove`, plus decision 83's CI triggers (label, schedule, manual, on a self-hosted runner). Each is either ported or explicitly deferred with a user-confirmed decision at M2b refinement; nothing is silently lost.
+- Decide `scripts/issue-workers.ps1`'s fate once sbxm covers its job: retire it, or keep it as a thin
+  wrapper calling the new sbxm commands.
+
+### Spike S9 (before slice 14): how does the Jev token reach the Jev call?
+Decision 36 keeps secret values in `sbx`, which never reveals them to the host, so a host-side `reqwest` client has no token source. Test whether `sbx secret` supports a custom service and host (a `jev` secret injected by the proxy for `api.typesafe.ai`-style traffic) so the call can run from a throwaway evaluator sandbox (a fixed command, not an agent). If yes, slice 14 does that and the token never touches the host. If no, fall back to a host-side client reading the token from an environment variable named in `[eval.jev] token_env`, an explicit and deliberate exception to [36] that needs the user's sign-off, with the value redacted from results and errors and a test proving it. An MCP server was considered and rejected (decision 120): it adds an agent layer to a deterministic HTTP call, and a scorer reachable from a contestant's sandbox breaks [112].
+
+## Out of scope for M2
+
+- Pi as a contestant harness (S5 deferred it, [93]).
+- Gemini CLI's egress gap / deprecation fallout in `--harness gemini` — separate GitHub issue [103], not
+  M2 work.
+- A local web page for human review [100]; CLI/report stays the interface for both milestones.
+- `bollard` backend, `sbx env`, profile-owned skills (carried over from M1's out-of-scope).
+
+## Risks
+
+- **Antigravity is a fast-moving, non-built-in kit.** Mitigation: pin an immutable tag like Pi [104][73] and follow P8;
+  if the tag falls behind (Antigravity itself warns Gemini CLI is deprecated in favor of it, so the
+  ecosystem is actively shifting), re-pin is a small, isolated change.
+- **No dollar-cost reporting for Codex/Antigravity.** Mitigation: token-only usage, no estimation [105] —
+  simpler than a price table that goes stale every model release.
+- **Judge fairness.** Mitigation: anonymized labels and a provider-sharing warning [21], unchanged from
+  the original design.
+- **Parallel sandboxes exceeding host resources.** Mitigation: per-contestant sizing from
+  `GlobalConfig.resources`, overridable per run [108], not sbx's all-CPUs/16GiB default [S1].
+- **Eval rubric leaking into a contestant's own workspace**, letting an agent game its own scoring.
+  Mitigation: the workspace/results split mirrors decision 40's project-config isolation exactly [112].
+- **The `headless` primitive's abstraction outliving M2a's needs**, per the user's framing in [94]: this
+  is treated as a design input (generic naming, no "contestant"-specific coupling in `harness.rs` or
+  `headless.rs`), not as license to build speculative features M2a and M2b don't need yet.
