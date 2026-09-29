@@ -4,8 +4,8 @@
 mod common;
 
 use common::Env;
-use sbxm::backend::{CreateSpec, FakeBackend, SkillsStore};
-use sbxm::commands::new;
+use sbxm::backend::{CreateSpec, FakeBackend, SandboxInfo, SkillsStore};
+use sbxm::commands::{new, open};
 use sbxm::harness::Harness;
 
 fn pi() -> new::Options {
@@ -138,4 +138,57 @@ fn skills_store_off_on_pi_doesnt_warn() {
     env.write_profile("default", "[skills]\nstore = \"off\"\n");
 
     assert_eq!(pi_warnings(&env), "");
+}
+
+fn pi_sandbox() -> SandboxInfo {
+    SandboxInfo {
+        name: "sbxm-demo-pi".into(),
+        agent: "pi".into(),
+        status: "running".into(),
+    }
+}
+
+/// Runs `open demo --harness pi` against an already-running sandbox and
+/// returns its warnings.
+fn open_pi_warnings(env: &Env, backend: &FakeBackend) -> String {
+    let mut warn = Vec::new();
+    open::run(
+        &env.config_dir(),
+        "demo",
+        &open::Options {
+            harness: Harness::Pi,
+            ..Default::default()
+        },
+        backend,
+        &mut warn,
+    )
+    .unwrap();
+    String::from_utf8(warn).unwrap()
+}
+
+/// Decision 78: `open` must warn too, not only `new`.
+#[test]
+fn opening_an_existing_pi_sandbox_warns_about_the_skills_store() {
+    let env = Env::new();
+    env.run_with("demo", &pi(), &FakeBackend::default())
+        .unwrap();
+    let backend = FakeBackend::with_sandboxes(vec![pi_sandbox()]);
+
+    assert_eq!(
+        open_pi_warnings(&env, &backend),
+        "warning: skills.store is \"readonly\", but pi sandboxes don't support it: \
+         the sbx skills store's skills don't reach sbxm-demo-pi; \
+         set skills.store = \"off\" to silence this\n"
+    );
+}
+
+#[test]
+fn opening_an_existing_pi_sandbox_with_store_off_doesnt_warn() {
+    let env = Env::new();
+    env.write_profile("default", "[skills]\nstore = \"off\"\n");
+    env.run_with("demo", &pi(), &FakeBackend::default())
+        .unwrap();
+    let backend = FakeBackend::with_sandboxes(vec![pi_sandbox()]);
+
+    assert_eq!(open_pi_warnings(&env, &backend), "");
 }

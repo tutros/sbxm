@@ -7,8 +7,12 @@ pub mod open;
 pub mod rm;
 pub mod stop;
 
+use std::io::Write;
 use std::path::Path;
 
+use anyhow::Result;
+
+use crate::config::Profile;
 use crate::harness::Harness;
 
 /// What to check for an invalid generated kit: the profile's `profile.toml`,
@@ -50,4 +54,19 @@ fn harness_label(harness: Harness) -> String {
     } else {
         format!("{} ", harness.as_str())
     }
+}
+
+/// Warns about every setting in `profile` that `harness` can't apply in
+/// `sandbox`, shared by `new` and `open` so the message and ordering can't
+/// diverge (decisions 11, 78).
+fn write_unsupported_warnings(
+    harness: Harness,
+    profile: &Profile,
+    sandbox: &str,
+    warn: &mut dyn Write,
+) -> Result<()> {
+    for warning in harness.unsupported(profile, sandbox) {
+        writeln!(warn, "warning: {warning}")?;
+    }
+    Ok(())
 }
