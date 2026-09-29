@@ -57,3 +57,13 @@ Describe 'Get-IssueNumbers' {
         Get-IssueNumbers '**Related:** #5' 'Depends on' | Should -BeNullOrEmpty
     }
 }
+
+Describe 'New-Prompt' {
+    BeforeAll { Set-WorkerConfig ([pscustomobject]@{ Repo = 'o/r' }) }
+
+    It 'tells the worker to run the checks in the foreground and not to end its turn while waiting' {
+        $prompt = New-Prompt 4
+        $prompt | Should -Match 'in the foreground'
+        $prompt | Should -Match 'never end your turn'
+    }
+}

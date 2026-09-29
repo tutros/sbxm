@@ -92,6 +92,9 @@ Follow the sdlc-implementation skill: test first, smallest steps, and a commit a
 criterion is met or you are blocked. Stay within this issue; don't push or change git remotes. Criteria you
 can't check here (real sbx tests, anything needing GitHub) stay unticked, with the reason.
 
+Run fmt, clippy and the tests in the foreground and wait for them. This is a headless run: it ends when you
+end your turn and nothing resumes it, so never end your turn while waiting on a background command.
+
 The last commit message must contain "Fixes #$n".
 
 When you stop, write .sbxm-issue/result.md: each acceptance criterion as done or not done with its evidence
@@ -418,7 +421,12 @@ function Show-Status {
         $commits = @(git -C $workspace log --oneline "origin/main..issue-$n").Count
         $result = if (Test-Path (Join-Path $issueDir 'result.md')) { 'result.md written' } else { 'no result.md' }
         $review = if (Test-Path (Join-Path $issueDir 'review.md')) { 'reviewed' } else { 'not reviewed' }
-        Write-Host ("#{0}: agent {1}, {2} commit(s), {3}, {4}" -f $n, ($running ? 'running' : 'finished'), $commits, $result, $review)
+        $notes = @()
+        if (-not $running -and (git -C $workspace status --porcelain --untracked-files=all -- . ':!.sbxm-issue')) {
+            $notes += 'uncommitted changes in the clone (the agent may have ended its turn early, #16)'
+        }
+        if (Test-Path (Join-Path $BaseDir "sbxm-review-$n")) { $notes += 'review in progress' }
+        Write-Host ((@("#{0}: agent {1}, {2} commit(s), {3}, {4}" -f $n, ($running ? 'running' : 'finished'), $commits, $result, $review) + $notes) -join '; ')
     }
 }
 
