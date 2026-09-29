@@ -593,3 +593,74 @@ fn pi_mandatory_instructions_against_real_sbx() {
     let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
     assert!(!String::from_utf8_lossy(&ls.stdout).contains(&sandbox));
 }
+
+#[test]
+#[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
+fn exec_and_skills_against_real_sbx() {
+    use sbxm::backend::{CreateSpec, ExecSpec, SkillsStore, Stdin};
+
+    let base_dir = real_base_dir();
+    let name = format!("sbxm-it-{}-exec", std::process::id());
+    let workspace = base_dir.join(&name);
+    let _cleanup = Cleanup {
+        sandbox: name.clone(),
+        dirs: vec![workspace.clone()],
+        shared_dirs: vec![],
+    };
+    std::fs::create_dir_all(&workspace).unwrap();
+    SbxBackend
+        .create(&CreateSpec {
+            name: name.clone(),
+            agent: "claude".into(),
+            workspace,
+            cpus: 2,
+            memory: "2g".into(),
+            skills: SkillsStore::Off,
+            kits: vec![],
+        })
+        .unwrap();
+
+    let run = |workdir: Option<&str>, argv: &[&str], stdin: Stdin| {
+        SbxBackend
+            .exec(
+                &name,
+                &ExecSpec {
+                    workdir: workdir.map(PathBuf::from),
+                    argv: argv.iter().map(|a| a.to_string()).collect(),
+                    stdin,
+                },
+            )
+            .unwrap()
+    };
+
+    let out = run(None, &["echo", "hi"], Stdin::Closed);
+    assert_eq!((out.stdout.trim(), out.exit_code), ("hi", Some(0)));
+
+    // The working directory is passed through.
+    let out = run(Some("/tmp"), &["pwd"], Stdin::Closed);
+    assert_eq!(out.stdout.trim(), "/tmp");
+
+    // stdout and stderr stay separate, and a non-zero exit is data, not an error.
+    let out = run(
+        None,
+        &["sh", "-c", "echo out; echo err >&2; exit 3"],
+        Stdin::Closed,
+    );
+    assert_eq!(
+        (out.stdout.trim(), out.stderr.trim(), out.exit_code),
+        ("out", "err", Some(3))
+    );
+
+    // Closed stdin and empty piped stdin both give EOF at once; piped text arrives.
+    let out = run(None, &["cat"], Stdin::Closed);
+    assert_eq!((out.stdout.as_str(), out.exit_code), ("", Some(0)));
+    let out = run(None, &["cat"], Stdin::Piped(String::new()));
+    assert_eq!((out.stdout.as_str(), out.exit_code), ("", Some(0)));
+    let out = run(None, &["cat"], Stdin::Piped("piped input".into()));
+    assert_eq!(
+        (out.stdout.as_str(), out.exit_code),
+        ("piped input", Some(0))
+    );
+
+    assert!(SbxBackend.skills().unwrap().is_object());
+}
