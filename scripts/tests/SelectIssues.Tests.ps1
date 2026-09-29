@@ -32,6 +32,12 @@ Describe 'Select-Issues' {
         @(Select-Issues).Number | Should -Be @(2, 1)
     }
 
+    It 'picks an issue with no labels after the labelled ones (rank 9), without error' {
+        $script:issues = @((New-Issue 1 @()), (New-Issue 2 @('should-fix')))
+
+        @(Select-Issues).Number | Should -Be @(2, 1)
+    }
+
     It 'skips a question and says why' {
         $script:issues = @((New-Issue 1 @('question', 'must-fix')), (New-Issue 2))
 
