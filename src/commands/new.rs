@@ -126,9 +126,7 @@ pub fn run(
             .with_context(|| format!("cannot create {}", workspace.display()))?,
     }
 
-    for warning in options.harness.unsupported(&profile, &sandbox) {
-        writeln!(warn, "warning: {warning}")?;
-    }
+    super::write_unsupported_warnings(options.harness, &profile, &sandbox, warn)?;
     if options.replace {
         backend.remove(&sandbox)?;
     }

@@ -91,7 +91,7 @@ development.
 | `claude` (default) | Claude Code | `~/.claude/CLAUDE.md` | Supports `harness.claude.home_files` and `harness.claude.managed_settings`. |
 | `codex` | Codex | `~/.codex/AGENTS.md` | |
 | `gemini` | Gemini CLI | `~/.gemini/GEMINI.md` | `sbx`'s skills store doesn't serve Gemini: sbxm warns unless `skills.store = "off"`. |
-| `pi` | Pi | `~/.pi/agent/AGENTS.md` | Uses the Pi kit from Docker Hub, pinned to a fixed tag. See below. |
+| `pi` | Pi | `~/.pi/agent/AGENTS.md` | Uses the Pi kit from Docker Hub, pinned to a fixed tag. See below. `sbx`'s skills store doesn't serve Pi either: sbxm warns unless `skills.store = "off"`. |
 
 Settings a harness can't use are never dropped silently: `sbxm new`/`open` print a `warning:` line for each, e.g.
 `harness.claude.managed_settings` on a Codex sandbox.

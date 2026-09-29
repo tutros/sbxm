@@ -5,7 +5,7 @@ use anyhow::{Result, bail};
 
 use super::{harness_flag, new, rm};
 use crate::backend::SandboxBackend;
-use crate::config::GlobalConfig;
+use crate::config::{self, GlobalConfig, Profile};
 use crate::harness::Harness;
 use crate::{project, state};
 
@@ -54,7 +54,10 @@ pub fn run(
                 rm::delete_unused_kit(&metadata_dir, old_hash)?;
             }
         }
-        (Some(entry), true) => check_unchanged(&config, name, harness, &sandbox, &entry)?,
+        (Some(entry), true) => {
+            let profile = check_unchanged(&config, name, harness, &sandbox, &entry)?;
+            super::write_unsupported_warnings(harness, &profile, &sandbox, warn)?;
+        }
         (None, true) => bail!(
             "sandbox {sandbox} exists but sbxm has no state for it; it may lack sbxm's config, \
              so remove it with `sbx rm {sandbox}` (this deletes its session history) and run \
@@ -77,14 +80,16 @@ pub fn run(
 }
 
 /// Refuses when the config hash differs from the one the sandbox was built
-/// with, or when none was recorded (decisions 31, 55).
+/// with, or when none was recorded (decisions 31, 55). Otherwise returns the
+/// profile it was built from, so the caller can warn about anything this
+/// harness can't apply before attaching (decisions 11, 78).
 fn check_unchanged(
     config: &GlobalConfig,
     name: &str,
     harness: Harness,
     sandbox: &str,
     entry: &state::SandboxState,
-) -> Result<()> {
+) -> Result<Profile> {
     let fix = format!(
         "run `sbxm open {name}{} --rebuild` to recreate it (its session history is lost; \
          the workspace is kept)",
@@ -94,10 +99,12 @@ fn check_unchanged(
         bail!("{sandbox} was created before sbxm recorded config hashes; {fix}");
     };
     let profile_name = entry.profile.as_deref().unwrap_or(&config.default_profile);
-    if *stored != config.current_hash(name, profile_name, harness)? {
+    let profile = Profile::load(config.profiles_dir(), profile_name)?
+        .with_project(&project::metadata_dir(&config.base_dir, name))?;
+    if *stored != config::config_hash(profile_name, &profile, &config.resources, harness) {
         bail!(
             "the config of {sandbox} (profile '{profile_name}') changed since it was created; {fix}"
         );
     }
-    Ok(())
+    Ok(profile)
 }
