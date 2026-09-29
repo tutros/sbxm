@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 pub use fake::FakeBackend;
 pub use sbx::SbxBackend;
 
-pub trait SandboxBackend {
+pub trait SandboxBackend: Send + Sync {
     fn create(&self, spec: &CreateSpec) -> Result<()>;
     fn list(&self) -> Result<Vec<SandboxInfo>>;
     fn stop(&self, name: &str) -> Result<()>;
@@ -27,6 +27,38 @@ pub trait SandboxBackend {
     /// The `sbx` client version without the leading `v`, e.g. `0.43.0`
     /// (`sbx version --json`).
     fn version(&self) -> Result<String>;
+    /// Runs a command inside a running sandbox (`sbx exec`). A non-zero exit
+    /// code is reported in [`ExecOutput`], not as an error; `Err` means `sbx`
+    /// itself couldn't run.
+    fn exec(&self, sandbox: &str, spec: &ExecSpec) -> Result<ExecOutput>;
+    /// The skills store listing (`sbx skills ls --json`), shape undocumented.
+    fn skills(&self) -> Result<serde_json::Value>;
+}
+
+/// How stdin is wired for [`SandboxBackend::exec`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Stdin {
+    /// Closed (null device).
+    Closed,
+    /// A pipe that receives this text and is then closed; an empty string
+    /// gives EOF straight away, which `codex exec` needs.
+    Piped(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecSpec {
+    /// `sbx exec -w`; the sandbox's default when `None`.
+    pub workdir: Option<PathBuf>,
+    pub argv: Vec<String>,
+    pub stdin: Stdin,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExecOutput {
+    pub stdout: String,
+    pub stderr: String,
+    /// `None` when the process was killed by a signal.
+    pub exit_code: Option<i32>,
 }
 
 /// Result of `sbx kit validate --json`.

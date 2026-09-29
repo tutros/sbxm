@@ -1,19 +1,20 @@
-use std::cell::RefCell;
+use std::collections::VecDeque;
+use std::sync::Mutex;
 
 use anyhow::{Result, bail};
 
 use std::path::Path;
 
-use super::{CreateSpec, KitValidation, SandboxBackend, SandboxInfo};
+use super::{CreateSpec, ExecOutput, ExecSpec, KitValidation, SandboxBackend, SandboxInfo};
 
 /// Records calls instead of running `sbx`. Used by tests.
 #[derive(Debug, Default)]
 pub struct FakeBackend {
-    creates: RefCell<Vec<CreateSpec>>,
-    stops: RefCell<Vec<String>>,
-    removes: RefCell<Vec<String>>,
+    creates: Mutex<Vec<CreateSpec>>,
+    stops: Mutex<Vec<String>>,
+    removes: Mutex<Vec<String>>,
     fail_remove: bool,
-    log: RefCell<Vec<String>>,
+    log: Mutex<Vec<String>>,
     invalid_kit: Option<String>,
     fail_create: bool,
     sandboxes: Vec<SandboxInfo>,
@@ -22,6 +23,9 @@ pub struct FakeBackend {
     version: Option<String>,
     no_sbx: bool,
     fail_list: bool,
+    execs: Mutex<Vec<(String, ExecSpec)>>,
+    exec_outputs: Mutex<VecDeque<ExecOutput>>,
+    skills: Option<serde_json::Value>,
 }
 
 impl FakeBackend {
@@ -94,31 +98,52 @@ impl FakeBackend {
         }
     }
 
+    /// Makes `exec` return these outputs in order, then empty successes.
+    pub fn with_exec_outputs(self, outputs: Vec<ExecOutput>) -> Self {
+        Self {
+            exec_outputs: Mutex::new(outputs.into()),
+            ..self
+        }
+    }
+
+    /// Makes `skills` return this JSON (`null` otherwise).
+    pub fn with_skills(self, skills: serde_json::Value) -> Self {
+        Self {
+            skills: Some(skills),
+            ..self
+        }
+    }
+
+    /// Every `exec` call: sandbox name and spec.
+    pub fn execs(&self) -> Vec<(String, ExecSpec)> {
+        self.execs.lock().unwrap().clone()
+    }
+
     pub fn creates(&self) -> Vec<CreateSpec> {
-        self.creates.borrow().clone()
+        self.creates.lock().unwrap().clone()
     }
 
     pub fn stops(&self) -> Vec<String> {
-        self.stops.borrow().clone()
+        self.stops.lock().unwrap().clone()
     }
 
     pub fn removes(&self) -> Vec<String> {
-        self.removes.borrow().clone()
+        self.removes.lock().unwrap().clone()
     }
 
     /// Every state-changing call in order, e.g. `"create sbxm-demo-claude"`.
     pub fn log(&self) -> Vec<String> {
-        self.log.borrow().clone()
+        self.log.lock().unwrap().clone()
     }
 
     fn record(&self, call: &str, name: &str) {
-        self.log.borrow_mut().push(format!("{call} {name}"));
+        self.log.lock().unwrap().push(format!("{call} {name}"));
     }
 }
 
 impl SandboxBackend for FakeBackend {
     fn create(&self, spec: &CreateSpec) -> Result<()> {
-        self.creates.borrow_mut().push(spec.clone());
+        self.creates.lock().unwrap().push(spec.clone());
         self.record("create", &spec.name);
         if self.fail_create {
             bail!("fake create failure");
@@ -144,13 +169,13 @@ impl SandboxBackend for FakeBackend {
     }
 
     fn stop(&self, name: &str) -> Result<()> {
-        self.stops.borrow_mut().push(name.to_owned());
+        self.stops.lock().unwrap().push(name.to_owned());
         self.record("stop", name);
         Ok(())
     }
 
     fn remove(&self, name: &str) -> Result<()> {
-        self.removes.borrow_mut().push(name.to_owned());
+        self.removes.lock().unwrap().push(name.to_owned());
         self.record("rm", name);
         if self.fail_remove {
             bail!("fake remove failure");
@@ -174,5 +199,28 @@ impl SandboxBackend for FakeBackend {
             error: self.invalid_kit.clone(),
             warnings: Vec::new(),
         })
+    }
+
+    fn exec(&self, sandbox: &str, spec: &ExecSpec) -> Result<ExecOutput> {
+        self.execs
+            .lock()
+            .unwrap()
+            .push((sandbox.to_owned(), spec.clone()));
+        self.record("exec", sandbox);
+        Ok(self
+            .exec_outputs
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(ExecOutput {
+                stdout: String::new(),
+                stderr: String::new(),
+                exit_code: Some(0),
+            }))
+    }
+
+    fn skills(&self) -> Result<serde_json::Value> {
+        self.log.lock().unwrap().push("skills".to_owned());
+        Ok(self.skills.clone().unwrap_or(serde_json::Value::Null))
     }
 }
