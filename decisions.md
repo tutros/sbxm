@@ -176,6 +176,13 @@ Recorded early at the user's request; planning proper starts later and may refin
     - **The plan's Structure section said results are written "as soon as a contestant finishes," but slice 6 explicitly has "no results files yet" (slice 8 adds them) — an apparent conflict:** confirmed by re-reading both sections side by side. Resolved by clarifying, not by changing the build order: slices 6–7 build orchestration and workspace-prep without persistence (as originally planned), and the Structure table now says the immediate-write behavior applies "from slice 8 onward," matching the slice table exactly.
     - **`run.json` was written only after evaluation completed, so an evaluator failure could lose the run's identity/config-hash record even though per-contestant raw results already survived:** confirmed by re-reading the command-behavior table's original ordering. Fixed: `run.json` is written early, right after the run ID is generated and before any sandbox is created (identity, config hash, profile, kit refs, `sbx` version, skills snapshot, `started_at`), then updated in place with `completed_at` once everything finishes — the same "never lose what's already captured" principle [16][25] now applies to run-level metadata, not just per-contestant results.
 
+119. **Third external review of `milestone-2.md` (Codex gpt-5.6-sol on PR #29, 2026-09-29): four must-fix findings applied, three await the user.** Applied:
+    - **Timed-out runs couldn't be represented:** `HeadlessResult` gains `status: RunStatus { Completed, TimedOut, Failed }`; exit 124/137 returns `Ok(TimedOut)` with best-effort partial answer/usage rather than an error, so [16] holds; persisted in a per-pair `result.json`; slices 1–3, 10 and 11 gain exit-124 tests.
+    - **No slice generated and validated run kits [95]:** new `run::kits` module and slice 5a (kits under `.sbxm/runs/<run-id>/kits/`, effective hash including resource overrides, validation before any create, kit refs into `run.json`).
+    - **The judge's secret wasn't preflighted:** the preflight and slice 4 cover `[eval.judge]`'s provider as well as contestants'.
+    - **Repeat wording:** `repeat` is run-level, so the end-to-end check now repeats every contestant.
+    Still open, needing the user: code-side ranking/aggregation semantics [19] (incl. repeat pairing for judge/cosine), the exact immutable Antigravity kit tag [104] (needs a live check), and how host-side Jev authenticates given `sbx` never reveals secret values.
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `spikes/S6.md`, evidence `spikes/S6-results.md`, conclusions in decisions 48 and 49.
