@@ -51,7 +51,7 @@ function Select-Issues {
 
     $candidates = $open | Where-Object { -not $Issue -or $Issue -contains $_.number } | ForEach-Object {
         $labels = $_.labels.name
-        $rank = ($labels | ForEach-Object { $labelOrder[$_] } | Where-Object { $null -ne $_ } | Measure-Object -Minimum).Minimum
+        $rank = ($labels | Where-Object { $_ } | ForEach-Object { $labelOrder[$_] } | Where-Object { $null -ne $_ } | Measure-Object -Minimum).Minimum
         [pscustomobject]@{
             Number     = $_.number
             Title      = $_.title
