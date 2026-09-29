@@ -37,6 +37,11 @@ Describe 'Get-MustFixCount' {
         Get-MustFixCount $file | Should -Be 0
     }
 
+    It 'returns null when the first line only mentions the count' {
+        Set-Content $file 'Summary: Must-fix findings: 1'
+        Get-MustFixCount $file | Should -BeNullOrEmpty
+    }
+
     It 'returns null when the line is missing' {
         Set-Content $file "Looks good`nMust-fix findings: 1"
         Get-MustFixCount $file | Should -BeNullOrEmpty
