@@ -12,7 +12,7 @@ use crate::config::GlobalConfig;
 use crate::headless::RunStatus;
 use crate::run::config::RunConfig;
 use crate::run::orchestrate::{self, PairOutcome};
-use crate::run::{id, kits, preflight};
+use crate::run::{id, kits, preflight, results};
 
 #[derive(Debug)]
 pub struct Summary {
@@ -45,16 +45,55 @@ pub fn run(
 
     let roots = id::reserve(&global.base_dir)?;
     let run_kits = kits::build(config_dir, &run_config, &roots.meta.join("kits"), backend)?;
+
+    // The run's identity goes to disk before any sandbox exists, so an
+    // interrupted run still keeps its config hashes (decisions 28, 55).
+    let started_at = results::now();
+    let sbx_version = match backend.version() {
+        Ok(version) => Some(version),
+        Err(e) => {
+            writeln!(
+                warn,
+                "warning: cannot read the sbx version for run.json: {e:#}"
+            )?;
+            None
+        }
+    };
+    let skills = backend.skills().unwrap_or_else(|e| {
+        let _ = writeln!(
+            warn,
+            "warning: cannot list the sbx skills for run.json: {e:#}"
+        );
+        serde_json::Value::Null
+    });
+    results::write_run_start(
+        &roots.meta,
+        &results::RunStart {
+            run_id: &roots.id,
+            started_at,
+            sbx_version,
+            skills,
+            run_config: &run_config,
+            kits: &run_kits,
+        },
+    )?;
+
     writeln!(out, "Run {}", roots.id)?;
-    let outcomes = orchestrate::execute(backend, &run_config, &run_kits, &roots);
+    // Each pair's files are saved the moment it finishes (decision 16).
+    let save = |outcome: &PairOutcome| {
+        results::write_pair(&roots.meta, &run_config, outcome).map_err(|e| {
+            format!(
+                "cannot save the results of contestants[{}]{}: {e:#}",
+                outcome.contestant,
+                repeat_label(&run_config, outcome.repeat)
+            )
+        })
+    };
+    let outcomes = orchestrate::execute_with(backend, &run_config, &run_kits, &roots, &save);
 
     for outcome in &outcomes {
         let contestant = &run_config.contestants[outcome.contestant];
-        let repeat = if run_config.run.repeat > 1 {
-            format!(" repeat {}/{}", outcome.repeat + 1, run_config.run.repeat)
-        } else {
-            String::new()
-        };
+        let repeat = repeat_label(&run_config, outcome.repeat);
         writeln!(
             out,
             "contestants[{}] {}/{}{repeat}: {}",
@@ -87,11 +126,36 @@ pub fn run(
             }
             _ => {}
         }
+        if let Some(problem) = &outcome.save_error {
+            writeln!(warn, "warning: {problem}")?;
+        }
     }
+
+    // Complete only if every pair's results are on disk.
+    if outcomes.iter().all(|o| o.save_error.is_none()) {
+        if let Err(e) = results::mark_completed(&roots.meta, results::now()) {
+            writeln!(warn, "warning: cannot mark the run completed: {e:#}")?;
+        }
+    } else {
+        writeln!(
+            warn,
+            "warning: some results could not be saved, so run.json has no completed_at"
+        )?;
+    }
+    writeln!(out, "Results: {}", roots.meta.display())?;
     Ok(Summary {
         run_id: roots.id,
         outcomes,
     })
+}
+
+/// ` repeat 2/3` when the run repeats, empty otherwise.
+fn repeat_label(run_config: &RunConfig, repeat: u32) -> String {
+    if run_config.run.repeat > 1 {
+        format!(" repeat {}/{}", repeat + 1, run_config.run.repeat)
+    } else {
+        String::new()
+    }
 }
 
 fn describe(result: &Result<crate::headless::HeadlessResult, String>) -> String {

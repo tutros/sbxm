@@ -988,6 +988,33 @@ fn run_against_real_sbx() {
         // The workspace stays after the sandbox is gone.
         assert!(outcome.workspace.is_dir());
     }
+    // The results are on disk: run.json is complete, each pair has its files.
+    let meta = base.join(".sbxm").join("runs").join(&summary.run_id);
+    let record: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(meta.join("run.json")).unwrap()).unwrap();
+    assert_eq!(record["run_id"], summary.run_id.as_str());
+    assert!(record["completed_at"].is_string(), "{record}");
+    assert!(record["sbx_version"].is_string(), "{record}");
+    assert_eq!(record["harnesses"].as_array().unwrap().len(), 2);
+    for i in 0..2 {
+        let dir = meta.join(i.to_string()).join("0");
+        let result: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("result.json")).unwrap())
+                .unwrap();
+        assert_eq!(result["status"], "completed", "{result}");
+        assert!(
+            std::fs::read_to_string(dir.join("answer.md"))
+                .unwrap()
+                .contains("PONG")
+        );
+        assert!(
+            !std::fs::read_to_string(dir.join("transcript.jsonl"))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(dir.join("diff.patch").is_file());
+    }
+    assert!(meta.join("run-config.toml").is_file());
     // No run sandbox is left behind.
     let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
     let ls = String::from_utf8_lossy(&ls.stdout).into_owned();

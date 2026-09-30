@@ -81,6 +81,8 @@ pub struct FakeBackend {
     fail_create_for: Vec<String>,
     fail_exec_for: Vec<String>,
     gate: Option<ExecGate>,
+    /// Only sandboxes whose name ends with this are held at the gate.
+    gate_suffix: Option<String>,
     exec_hook: Option<ExecHook>,
 }
 
@@ -227,6 +229,19 @@ impl FakeBackend {
         }
     }
 
+    /// Like [`FakeBackend::with_exec_gate`], but only holds `exec` in sandboxes
+    /// whose name ends with `suffix` (e.g. `-1-0`); the others run freely.
+    pub fn with_exec_gate_for(self, suffix: &str) -> (Self, ExecGate) {
+        let (fake, gate) = self.with_exec_gate();
+        (
+            Self {
+                gate_suffix: Some(suffix.to_owned()),
+                ..fake
+            },
+            gate,
+        )
+    }
+
     /// Holds every `exec` (after recording it) until the returned gate is opened.
     pub fn with_exec_gate(self) -> (Self, ExecGate) {
         let gate = ExecGate::default();
@@ -332,7 +347,12 @@ impl SandboxBackend for FakeBackend {
             .unwrap()
             .push((sandbox.to_owned(), spec.clone()));
         self.record("exec", sandbox);
-        if let Some(gate) = &self.gate {
+        if let Some(gate) = &self.gate
+            && self
+                .gate_suffix
+                .as_ref()
+                .is_none_or(|s| sandbox.ends_with(s))
+        {
             gate.pass();
         }
         if self.fail_exec_for.iter().any(|s| s == sandbox) {

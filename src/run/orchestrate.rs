@@ -38,16 +38,36 @@ pub struct PairOutcome {
     pub diff: Option<Result<Diff, String>>,
     /// The sandbox couldn't be removed; the result is kept.
     pub remove_error: Option<String>,
+    /// The per-pair callback (see [`execute_with`]) failed, e.g. the results
+    /// couldn't be written; the result above is still returned.
+    pub save_error: Option<String>,
 }
 
-/// Runs every pair, wave by wave, and returns the outcomes ordered by repeat,
-/// then contestant. Pair workspaces are `<roots.workspaces>/<contestant>/<repeat>`;
-/// scratch state (the host's baseline repos) lives under `<roots.meta>/work`.
+/// Called with each pair's outcome the moment that pair is done (from the
+/// pair's own thread), before the rest of the wave finishes.
+pub type OnPairDone<'a> = &'a (dyn Fn(&PairOutcome) -> Result<(), String> + Sync);
+
+/// [`execute_with`] without a callback.
 pub fn execute(
     backend: &dyn SandboxBackend,
     run_config: &RunConfig,
     kits: &RunKits,
     roots: &RunRoots,
+) -> Vec<PairOutcome> {
+    execute_with(backend, run_config, kits, roots, &|_| Ok(()))
+}
+
+/// Runs every pair, wave by wave, and returns the outcomes ordered by repeat,
+/// then contestant. Pair workspaces are `<roots.workspaces>/<contestant>/<repeat>`;
+/// scratch state (the host's baseline repos) lives under `<roots.meta>/work`.
+/// `on_pair_done` runs as soon as a pair finishes, so its results can be
+/// saved before any other pair or evaluator has a chance to fail (decision 16).
+pub fn execute_with(
+    backend: &dyn SandboxBackend,
+    run_config: &RunConfig,
+    kits: &RunKits,
+    roots: &RunRoots,
+    on_pair_done: OnPairDone,
 ) -> Vec<PairOutcome> {
     let mut outcomes = Vec::new();
     for repeat in 0..run_config.run.repeat {
@@ -74,6 +94,7 @@ pub fn execute(
                             .join("work")
                             .join(i.to_string())
                             .join(repeat.to_string()),
+                        on_pair_done,
                     };
                     let (sandbox, workspace) = (pair.sandbox.clone(), pair.workspace.clone());
                     (i, sandbox, workspace, scope.spawn(move || pair.run()))
@@ -85,7 +106,7 @@ pub fn execute(
                 .map(|(i, sandbox, workspace, handle)| {
                     handle.join().unwrap_or_else(|_| {
                         let remove_error = remove(backend, &sandbox);
-                        PairOutcome {
+                        let mut outcome = PairOutcome {
                             contestant: i,
                             repeat,
                             sandbox,
@@ -93,7 +114,10 @@ pub fn execute(
                             result: Err("the pair's thread panicked".into()),
                             diff: None,
                             remove_error,
-                        }
+                            save_error: None,
+                        };
+                        outcome.save_error = on_pair_done(&outcome).err();
+                        outcome
                     })
                 })
                 .collect()
@@ -116,6 +140,7 @@ struct Pair<'a> {
     workspace: PathBuf,
     /// Scratch space for this pair, outside the mounted workspace.
     work_dir: PathBuf,
+    on_pair_done: OnPairDone<'a>,
 }
 
 /// What `attempt` learned, besides the headless result.
@@ -137,7 +162,7 @@ impl Pair<'_> {
             None
         };
         let _ = std::fs::remove_dir_all(&self.work_dir);
-        PairOutcome {
+        let mut outcome = PairOutcome {
             contestant: self.index,
             repeat: self.repeat,
             sandbox: self.sandbox,
@@ -145,7 +170,10 @@ impl Pair<'_> {
             result: attempt.result,
             diff: attempt.diff,
             remove_error,
-        }
+            save_error: None,
+        };
+        outcome.save_error = (self.on_pair_done)(&outcome).err();
+        outcome
     }
 
     fn attempt(&self) -> Attempt {

@@ -96,7 +96,16 @@ dir. Sandboxes created by this batch are named `sbxm-it-<pid>-*` or `sbxm-run-*`
 
 | 7 | Done | see `git log` ("Add hardened seeding and diff capture", "Wire seeding and diffs into the orchestrator") | see commit | `run_diffs_against_real_sbx` passed: Claude + Codex, seeded and unseeded, diffs match their edits, one commit and no remote in seeded workspaces, no sandbox or scratch left | Decision 127: git runs against a host-owned git dir because a planted `.git/config` runs commands on the host (control-tested). |
 
+| 8 | Done | see `git log` ("Save each pair's results and run.json as they happen") | see commit | `run_against_real_sbx` (extended) passed: run.json has completed_at and both harness hashes, each pair has result/answer/transcript/diff | Decision 128. "Kill one contestant mid-run" covered by a gated fake test, not a real kill. |
+
 ### Manual test steps
+
+**Slice 8** (results on disk): after any `sbxm run <config>` (see slice 6's steps), the last line printed is `Results: <folder>`.
+1. `dir <folder>`: `run.json`, `run-config.toml`, `kits\`, and one folder per contestant index with a folder per repeat inside.
+2. `Get-Content <folder>\run.json` shows `started_at`, `completed_at`, `sbx_version`, `harnesses[].config_hash`. `Get-Content <folder>\0\0\result.json` shows `status`, `usage`.
+3. `Get-Content <folder>\0\0\answer.md` is the contestant's final answer; `diff.patch` its changes; `transcript.jsonl` the raw agent output.
+4. Interrupt a run (Ctrl+C while contestants are running): `run.json` exists with `"completed_at": null`, and any pair that had finished already has its files. (A Ctrl+C can leave `sbxm-run-<id>-*` sandboxes behind: `sbx ls`, then `sbx rm -f <name>`.)
+5. Automated: `cargo test --test run_results` and `$env:SBXM_REAL_BASE_DIR='E:\sbxm-it'; cargo test --test real_sbx run_against_real_sbx -- --ignored`.
 
 **Slice 7** (seeding and diffs; results are not saved to disk until slice 8, so use the automated real test):
 1. `$env:SBXM_REAL_BASE_DIR='E:\sbxm-it'; cargo test --test real_sbx run_diffs_against_real_sbx -- --ignored --nocapture` (about 70 s; needs the `anthropic` and `openai` secrets). It prints two runs; both must show `completed` for both contestants.

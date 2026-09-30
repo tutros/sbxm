@@ -72,7 +72,9 @@ fn a_run_prints_its_id_and_one_line_per_contestant() {
         "{}",
         lines[1]
     );
-    assert_eq!(lines.len(), 3, "{}", ran.out);
+    // The run ID, one line per contestant, and where the results are.
+    assert_eq!(lines.len(), 4, "{}", ran.out);
+    assert!(lines[3].starts_with("Results: "), "{}", lines[3]);
     assert_eq!(ran.warn, "");
 }
 
