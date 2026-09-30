@@ -9,7 +9,7 @@ use anyhow::{Result, bail};
 
 use crate::backend::SandboxBackend;
 use crate::config::GlobalConfig;
-use crate::eval::judge;
+use crate::eval::{judge, score};
 use crate::headless::RunStatus;
 use crate::run::config::RunConfig;
 use crate::run::orchestrate::{self, PairOutcome};
@@ -178,6 +178,21 @@ pub fn run(
                 )?;
             }
         }
+    }
+
+    // The ranking is computed from what was just saved, exactly as `run show`
+    // will later, so the two can't disagree (decisions 19, 120).
+    match score::load(&roots.meta) {
+        Ok(Some(ranking)) => {
+            let labels: Vec<String> = run_config
+                .contestants
+                .iter()
+                .map(|c| format!("{}/{}", c.harness.as_str(), c.model))
+                .collect();
+            write!(out, "{}", score::render(&ranking, &labels))?;
+        }
+        Ok(None) => {}
+        Err(e) => writeln!(warn, "warning: cannot rank the run: {e:#}")?,
     }
 
     // Complete only if every pair's results (and the judge's) are on disk.

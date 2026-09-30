@@ -305,7 +305,8 @@ fn run_show_reveals_the_label_scores_and_reasons() {
     let a_contestant = (0..2)
         .find(|&i| judge_of(&ran, i, 0)["label"] == "A")
         .unwrap();
-    let block = shown.split("contestants[").nth(a_contestant + 1).unwrap();
+    // Contestant blocks start at a line beginning `contestants[`; the ranking's lines are indented.
+    let block = shown.split("\ncontestants[").nth(a_contestant + 1).unwrap();
     assert!(
         block.contains("    Judge (candidate A): correctness true (1.00), quality good (1.00)\n      correctness: works\n      quality: tidy\n"),
         "{shown}"

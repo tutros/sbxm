@@ -104,7 +104,15 @@ dir. Sandboxes created by this batch are named `sbxm-it-<pid>-*` or `sbxm-run-*`
 
 | 11 | Done | see `git log` ("Add the LLM judge") | see commit | `run_judge_against_real_sbx` passed: Claude + Codex judged by a real Claude judge in its own sandbox; A/B mapping stored, all criteria scored, provider-sharing warning shown, no sandbox left | Decision 131. The prompt travels as a file (Windows command-line limit). The judge keeps its harness's tools (not enforceable to remove). |
 
+| 12a | Done | see `git log` ("Rank contestants from the judge's scores") | see commit | none (plan: none) | Decision 132. |
+
 ### Manual test steps
+
+**Slice 12a** (ranking): needs a run with a judge (slice 11 steps).
+1. After `cargo run -- run <config>` the block `Ranking (judge scores 0-1, repeats averaged)` is printed before `Results:`, best contestant first, e.g. `1. contestants[1] codex/gpt-5.6-luna: 1.00 (1/1 repeats scored)`.
+2. `cargo run -- run show <run-id>` prints the same block under its header.
+3. Re-rank without re-running: open `<Results folder>\run-config.toml`, change a rubric `weight`, then run `cargo run -- run show <run-id>` again: the scores change, nothing else is touched.
+4. Automated: `cargo test --test eval_score`.
 
 **Slice 11** (LLM judge): needs the `anthropic` and `openai` secrets.
 1. Add to a run-config (after the contestants): two `[[eval.rubric]]` entries (one `kind = "pass_fail"`, one `kind = "scale"` with `levels = ["poor", "fair", "good"]`) and `[eval.judge]` with `harness = "claude"` and a model. Use a small prompt such as "In one sentence, explain what a mutex is."

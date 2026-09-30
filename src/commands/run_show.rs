@@ -10,6 +10,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use crate::config::GlobalConfig;
+use crate::eval::score;
 use crate::run::id;
 
 #[derive(Debug, Default)]
@@ -62,6 +63,17 @@ pub fn render(config_dir: &Path, run_id: &str, options: &Options) -> Result<Stri
         text(&record["sbx_version"]),
         contestants.len()
     )?;
+
+    // The ranking, recomputed from the saved files (decision 120); a run
+    // without a judge has none, and a damaged config copy only loses this block.
+    if let Ok(Some(ranking)) = score::load(&meta) {
+        let labels: Vec<String> = contestants
+            .iter()
+            .map(|c| format!("{}/{}", text(&c["harness"]), text(&c["model"])))
+            .collect();
+        writeln!(out)?;
+        write!(out, "{}", score::render(&ranking, &labels))?;
+    }
 
     for (n, contestant) in contestants.iter().enumerate() {
         let i = contestant["index"].as_u64().unwrap_or(n as u64);
