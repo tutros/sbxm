@@ -17,8 +17,8 @@ The repo is `tutros/sbxm` on GitHub (public since 2026-09-27, `MIT OR Apache-2.0
 
 Each SDLC phase has a project skill in `.claude/skills/`; follow it for that phase:
 - `sdlc-planning`: interview rounds, numbered decisions, spikes, milestone plan.
-- `sdlc-implementation`: vertical slices, TDD (red first), smallest change per step, commit after every green step (`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`).
-- `sdlc-code-review`: review a slice before reporting it, a worktree before merging, or a milestone at its end; findings need evidence, fixes go back through TDD.
+- `sdlc-implementation`: vertical slices, TDD (red first), smallest change per step, commit after every green step (`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`). A milestone is built as one batch on one branch (rule 8): a short report per slice, one full review at the end.
+- `sdlc-code-review`: review a milestone at its end (the normal review), a worktree before merging, or a slice when asked or risky; findings need evidence, fixes go back through TDD.
 
 ## Commands
 
