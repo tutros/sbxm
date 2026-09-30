@@ -18,6 +18,16 @@ const KILL_AFTER_SECS: u64 = 10;
 const NO_RESULT: &str = "no result event in the output";
 const NO_TURN_COMPLETED: &str = "no turn.completed event in the output";
 
+/// Whether a command run under `timeout -v` was stopped by it. 137 is also
+/// what an OOM kill returns, so the exit code alone can't say "timeout":
+/// `timeout -v` announces the signals it sends on stderr.
+pub(crate) fn hit_timeout(exit_code: Option<i32>, stderr: &str) -> bool {
+    matches!(exit_code, Some(124 | 137))
+        && stderr
+            .lines()
+            .any(|line| line.starts_with("timeout: sending signal"))
+}
+
 /// Whether the status is a failure the harness reported, not just the parser
 /// noticing that the stream stopped early.
 fn reported_failure(status: &RunStatus) -> bool {
@@ -91,14 +101,7 @@ pub fn run(
         },
     )?;
     let mut result = harness.parse_headless_output(&output.stdout)?;
-    // 137 is also what an OOM kill returns, so the exit code alone can't say
-    // "timeout": `timeout -v` announces the signals it sends on stderr.
-    let timed_out = matches!(output.exit_code, Some(124 | 137))
-        && output
-            .stderr
-            .lines()
-            .any(|line| line.starts_with("timeout: sending signal"));
-    if timed_out {
+    if hit_timeout(output.exit_code, &output.stderr) {
         result.status = RunStatus::TimedOut;
     } else if output.exit_code != Some(0) && !reported_failure(&result.status) {
         // A failure the harness itself reported says more than stderr does, so

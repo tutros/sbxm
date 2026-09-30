@@ -10,6 +10,7 @@
 use std::path::{Path, PathBuf};
 use std::thread;
 
+use super::checks::{self, CheckOutcome};
 use super::config::{Contestant, RunConfig};
 use super::diff::{self, Diff};
 use super::id::RunRoots;
@@ -36,6 +37,9 @@ pub struct PairOutcome {
     /// never got a sandbox (seeding or create failed); `Some(Err)` when the
     /// diff itself couldn't be captured, which doesn't discard `result`.
     pub diff: Option<Result<Diff, String>>,
+    /// The `[[eval.checks]]` verdicts, in config order; empty when there are
+    /// none or the pair never got a sandbox to run them in.
+    pub checks: Vec<CheckOutcome>,
     /// The sandbox couldn't be removed; the result is kept.
     pub remove_error: Option<String>,
     /// The per-pair callback (see [`execute_with`]) failed, e.g. the results
@@ -113,6 +117,7 @@ pub fn execute_with(
                             workspace,
                             result: Err("the pair's thread panicked".into()),
                             diff: None,
+                            checks: Vec::new(),
                             remove_error,
                             save_error: None,
                         };
@@ -147,6 +152,7 @@ struct Pair<'a> {
 struct Attempt {
     result: Result<HeadlessResult, String>,
     diff: Option<Result<Diff, String>>,
+    checks: Vec<CheckOutcome>,
     /// `create` was called, so there may be a sandbox to remove.
     created: bool,
 }
@@ -169,6 +175,7 @@ impl Pair<'_> {
             workspace: self.workspace,
             result: attempt.result,
             diff: attempt.diff,
+            checks: attempt.checks,
             remove_error,
             save_error: None,
         };
@@ -180,6 +187,7 @@ impl Pair<'_> {
         let failed = |why: String, created: bool| Attempt {
             result: Err(why),
             diff: None,
+            checks: Vec::new(),
             created,
         };
         let harness = self.contestant.harness;
@@ -258,9 +266,21 @@ impl Pair<'_> {
             None => diff::unseeded(&self.workspace),
         }
         .map_err(|e| format!("cannot capture the diff: {e:#}"));
+
+        // Checks come after the diff, so what they build (a `target/`, caches)
+        // can't end up in it; they run in the still-alive sandbox, whatever
+        // became of the agent's own command (P6).
+        let checks = checks::run_checks(
+            self.backend,
+            &self.sandbox,
+            &in_sandbox_path(&self.workspace),
+            &self.run_config.eval.checks,
+            self.run_config.run.timeout,
+        );
         Attempt {
             result,
             diff: Some(diff),
+            checks,
             created: true,
         }
     }

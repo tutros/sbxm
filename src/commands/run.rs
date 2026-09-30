@@ -96,11 +96,12 @@ pub fn run(
         let repeat = repeat_label(&run_config, outcome.repeat);
         writeln!(
             out,
-            "contestants[{}] {}/{}{repeat}: {}",
+            "contestants[{}] {}/{}{repeat}: {}{}",
             outcome.contestant,
             contestant.harness.as_str(),
             contestant.model,
-            describe(&outcome.result)
+            describe(&outcome.result),
+            checks_suffix(&outcome.checks)
         )?;
         if let Some(problem) = &outcome.remove_error {
             writeln!(warn, "warning: {problem}")?;
@@ -156,6 +157,15 @@ fn repeat_label(run_config: &RunConfig, repeat: u32) -> String {
     } else {
         String::new()
     }
+}
+
+/// `; checks 1/2 passed`, or nothing when the pair had no checks.
+fn checks_suffix(checks: &[crate::run::checks::CheckOutcome]) -> String {
+    if checks.is_empty() {
+        return String::new();
+    }
+    let passed = checks.iter().filter(|c| c.passed).count();
+    format!("; checks {passed}/{} passed", checks.len())
 }
 
 fn describe(result: &Result<crate::headless::HeadlessResult, String>) -> String {

@@ -87,6 +87,7 @@ pub fn render(config_dir: &Path, run_id: &str, options: &Options) -> Result<Stri
             writeln!(out, "{label}: {}", describe(&result))?;
             write_answer(&mut out, &dir)?;
             write_diff(&mut out, &dir, &result["diff"], options.full_diff)?;
+            write_checks(&mut out, &dir)?;
         }
     }
     Ok(out)
@@ -182,6 +183,43 @@ fn write_diff(out: &mut String, dir: &Path, diff: &Value, full: bool) -> Result<
             diff["error"].as_str().unwrap_or("no details")
         )?,
         _ => writeln!(out, "    Diff: none (the pair never got a sandbox)")?,
+    }
+    Ok(())
+}
+
+/// The executable checks' verdicts, if the pair has any (slice 10).
+fn write_checks(out: &mut String, dir: &Path) -> Result<()> {
+    let path = dir.join("evals.json");
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    let evals: Value = serde_json::from_str(&text)
+        .with_context(|| format!("{} is not valid JSON", path.display()))?;
+    let Some(checks) = evals["checks"].as_array().filter(|c| !c.is_empty()) else {
+        return Ok(());
+    };
+    let passed = checks.iter().filter(|c| c["passed"] == true).count();
+    writeln!(out, "    Checks: {passed}/{} passed", checks.len())?;
+    for check in checks {
+        let id = check["id"].as_str().unwrap_or("?");
+        if check["passed"] == true {
+            writeln!(out, "      passed {id}")?;
+            continue;
+        }
+        let why = if check["timed_out"] == true {
+            format!(
+                "timed out after {}s",
+                check["timeout_secs"].as_u64().unwrap_or(0)
+            )
+        } else if let Some(code) = check["exit_code"].as_i64() {
+            format!("exit code {code}")
+        } else {
+            format!(
+                "could not run: {}",
+                check["error"].as_str().unwrap_or("no details")
+            )
+        };
+        writeln!(out, "      failed {id} ({why})")?;
     }
     Ok(())
 }

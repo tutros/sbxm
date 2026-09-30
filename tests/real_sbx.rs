@@ -1154,6 +1154,113 @@ fn run_diffs_against_real_sbx() {
 
 #[test]
 #[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
+fn run_checks_against_real_sbx() {
+    use sbxm::commands::run;
+    use sbxm::headless::RunStatus;
+
+    let base = real_base_dir().join(format!("sbxm-it-{}-checks", std::process::id()));
+    let _cleanup = Cleanup {
+        sandbox: String::new(),
+        dirs: vec![base.clone()],
+        shared_dirs: vec![],
+    };
+    std::fs::create_dir_all(&base).unwrap();
+    let config_dir = TempDir::new().unwrap();
+    let base_toml = toml::Value::String(base.to_str().unwrap().to_owned());
+    std::fs::write(
+        config_dir.path().join("config.toml"),
+        format!("base_dir = {base_toml}\n\n[resources]\ncpus = 2\nmemory = \"2g\"\n"),
+    )
+    .unwrap();
+    let profile_dir = config_dir.path().join("profiles").join("default");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    std::fs::write(
+        profile_dir.join("profile.toml"),
+        "description = \"real checks test\"\n\n[skills]\nstore = \"off\"\n",
+    )
+    .unwrap();
+    let seed = config_dir.path().join("seed");
+    std::fs::create_dir_all(&seed).unwrap();
+    std::fs::write(seed.join("a.txt"), "alpha\n").unwrap();
+    let seed_toml = toml::Value::String(seed.to_str().unwrap().to_owned());
+    let run_config = config_dir.path().join("run.toml");
+    std::fs::write(
+        &run_config,
+        format!(
+            "[task]\nprompt = \"Create a file hello.txt containing the word hi. Do not use git.\"\nseed = {seed_toml}\n\n\
+             [run]\ntimeout = \"4m\"\n\n\
+             [[contestants]]\nharness = \"claude\"\nmodel = \"claude-haiku-4-5-20251001\"\n\n\
+             [[contestants]]\nharness = \"codex\"\nmodel = \"gpt-5.6-luna\"\n\n\
+             [[eval.checks]]\nid = \"has-hello\"\ncommand = \"test -f hello.txt && grep -q hi hello.txt\"\n\n\
+             [[eval.checks]]\nid = \"seed-intact\"\ncommand = \"test -f a.txt\"\n\n\
+             [[eval.checks]]\nid = \"deliberate-fail\"\ncommand = \"echo nope >&2; test -f does-not-exist.txt\"\n\n\
+             [[eval.checks]]\nid = \"slow\"\ncommand = \"sleep 120\"\ntimeout = \"3s\"\n"
+        ),
+    )
+    .unwrap();
+
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let summary = run::run(
+        config_dir.path(),
+        &run_config,
+        &SbxBackend,
+        &mut out,
+        &mut warn,
+    )
+    .unwrap();
+    println!(
+        "{}{}",
+        String::from_utf8_lossy(&out),
+        String::from_utf8_lossy(&warn)
+    );
+
+    let meta = base.join(".sbxm").join("runs").join(&summary.run_id);
+    for outcome in &summary.outcomes {
+        let result = outcome.result.as_ref().unwrap();
+        assert_eq!(result.status, RunStatus::Completed, "{result:?}");
+        // The checks ran in the sandbox and were judged by exit code.
+        let verdicts: Vec<(&str, bool, bool)> = outcome
+            .checks
+            .iter()
+            .map(|c| (c.id.as_str(), c.passed, c.timed_out))
+            .collect();
+        assert_eq!(
+            verdicts,
+            [
+                ("has-hello", true, false),
+                ("seed-intact", true, false),
+                ("deliberate-fail", false, false),
+                ("slow", false, true)
+            ],
+            "{:?}",
+            outcome.checks
+        );
+        assert!(outcome.checks[2].output_tail.contains("nope"));
+        // Saved next to the pair's other results, and the run finished normally.
+        let evals: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                meta.join(outcome.contestant.to_string())
+                    .join("0")
+                    .join("evals.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(evals["checks"].as_array().unwrap().len(), 4);
+        // The checks' side effects stay out of the diff.
+        let patch = &outcome.diff.as_ref().unwrap().as_ref().unwrap().patch;
+        assert!(patch.contains("hello.txt"), "{patch}");
+    }
+    let record: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(meta.join("run.json")).unwrap()).unwrap();
+    assert!(record["completed_at"].is_string());
+    let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
+    let ls = String::from_utf8_lossy(&ls.stdout).into_owned();
+    assert!(!ls.contains("sbxm-run-"), "{ls}");
+}
+
+#[test]
+#[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
 fn run_kits_validate_against_real_sbx() {
     use sbxm::run::config::RunConfig;
     use sbxm::run::kits;

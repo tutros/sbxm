@@ -135,6 +135,26 @@ pub fn write_pair(meta: &Path, run_config: &RunConfig, outcome: &PairOutcome) ->
         None => json!({"status": "none"}),
     };
 
+    if !outcome.checks.is_empty() {
+        let checks: Vec<Value> = outcome
+            .checks
+            .iter()
+            .map(|c| {
+                json!({
+                    "id": c.id,
+                    "command": c.command,
+                    "passed": c.passed,
+                    "exit_code": c.exit_code,
+                    "timed_out": c.timed_out,
+                    "timeout_secs": c.timeout_secs,
+                    "error": c.error,
+                    "output_tail": c.output_tail,
+                })
+            })
+            .collect();
+        merge_evals(&dir, "checks", Value::Array(checks))?;
+    }
+
     let contestant = &run_config.contestants[outcome.contestant];
     let record = json!({
         "contestant": outcome.contestant,
@@ -150,6 +170,19 @@ pub fn write_pair(meta: &Path, run_config: &RunConfig, outcome: &PairOutcome) ->
     });
     // Last: its presence means the pair's other files are all in place.
     write_json(&dir.join("result.json"), &record)
+}
+
+/// Sets `key` in the pair's `evals.json` (creating it), keeping the other
+/// evaluators' entries: checks, judge and cosine each own one key.
+pub fn merge_evals(pair_dir: &Path, key: &str, value: Value) -> Result<()> {
+    let path = pair_dir.join("evals.json");
+    let mut evals = match fs::read_to_string(&path) {
+        Ok(text) => serde_json::from_str(&text)
+            .with_context(|| format!("{} is not valid JSON", path.display()))?,
+        Err(_) => json!({}),
+    };
+    evals[key] = value;
+    write_json(&path, &evals)
 }
 
 fn pair_dir(meta: &Path, contestant: usize, repeat: u32) -> PathBuf {

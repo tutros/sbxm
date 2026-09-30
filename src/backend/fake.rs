@@ -83,6 +83,9 @@ pub struct FakeBackend {
     gate: Option<ExecGate>,
     /// Only sandboxes whose name ends with this are held at the gate.
     gate_suffix: Option<String>,
+    /// Scripted by what the command line contains, in any sandbox.
+    exec_outputs_matching: Vec<(String, ExecOutput)>,
+    fail_exec_matching: Vec<String>,
     exec_hook: Option<ExecHook>,
 }
 
@@ -197,6 +200,20 @@ impl FakeBackend {
     /// independent of the order parallel calls arrive in).
     pub fn with_exec_output_for(mut self, sandbox: &str, output: ExecOutput) -> Self {
         self.exec_outputs_for.insert(sandbox.to_owned(), output);
+        self
+    }
+
+    /// Makes every `exec` whose argv has an element containing `needle`
+    /// return `output`, in any sandbox (before the per-sandbox scripts), e.g.
+    /// to give one check command its own exit code.
+    pub fn with_exec_output_matching(mut self, needle: &str, output: ExecOutput) -> Self {
+        self.exec_outputs_matching.push((needle.to_owned(), output));
+        self
+    }
+
+    /// Makes every `exec` whose argv contains `needle` record the call and fail.
+    pub fn with_failing_exec_matching(mut self, needle: &str) -> Self {
+        self.fail_exec_matching.push(needle.to_owned());
         self
     }
 
@@ -358,8 +375,15 @@ impl SandboxBackend for FakeBackend {
         if self.fail_exec_for.iter().any(|s| s == sandbox) {
             bail!("fake exec failure");
         }
+        let mentions = |needle: &String| spec.argv.iter().any(|a| a.contains(needle.as_str()));
+        if self.fail_exec_matching.iter().any(mentions) {
+            bail!("fake exec failure");
+        }
         if let Some(hook) = &self.exec_hook {
             (hook.0)(sandbox, spec);
+        }
+        if let Some((_, output)) = self.exec_outputs_matching.iter().find(|(n, _)| mentions(n)) {
+            return Ok(output.clone());
         }
         if let Some(output) = self.exec_outputs_for.get(sandbox) {
             return Ok(output.clone());

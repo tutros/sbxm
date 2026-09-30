@@ -100,7 +100,15 @@ dir. Sandboxes created by this batch are named `sbxm-it-<pid>-*` or `sbxm-run-*`
 
 | 9 | Done | see `git log` ("Add 'sbxm run show'") | see commit | none (plan: none) | Decision 129 (added a `--diff` flag). |
 
+| 10 | Done | see `git log` ("Run executable checks in each pair's sandbox") | see commit | `run_checks_against_real_sbx` passed: Claude + Codex seeded; two checks passed, one failed with its stderr captured, one timed out at 3 s; diffs unaffected; nothing left behind | Decision 130. The plan's "cargo test-style" check is shell-based because the sandboxes have no Rust toolchain. |
+
 ### Manual test steps
+
+**Slice 10** (executable checks):
+1. Add to a run-config (after the contestants): `[[eval.checks]]` with `id = "has-hello"` and `command = "test -f hello.txt"`, and one with `command = "sleep 120"` and `timeout = "3s"`. Use a prompt like "Create a file hello.txt containing the word hi".
+2. `cargo run -- run <config>`: each contestant's line ends with `; checks 1/2 passed`.
+3. `cargo run -- run show <run-id>` lists `passed has-hello` and `failed <id> (timed out after 3s)`; `Get-Content <Results folder>\0\0\evals.json` has the details and the output tail.
+4. Automated: `cargo test --test run_checks` and `$env:SBXM_REAL_BASE_DIR='E:\sbxm-it'; cargo test --test real_sbx run_checks_against_real_sbx -- --ignored --nocapture` (about 45 s).
 
 **Slice 9** (`sbxm run show`): needs a finished run (slice 6/8 steps) or use the demo below.
 1. Take the run id from a run (`Run <id>` on the first line), then `cargo run -- run show <id>`; add `--diff` for the full patches.
