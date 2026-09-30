@@ -70,6 +70,11 @@ pub enum Command {
     },
     /// Check sbx, the config and the base dir; exits non-zero if any check fails.
     Doctor,
+    /// Run comparisons between coding agents.
+    Run {
+        #[command(subcommand)]
+        command: RunCommand,
+    },
     /// Manage sbxm configuration.
     Config {
         #[command(subcommand)]
@@ -94,5 +99,14 @@ pub enum ConfigCommand {
         /// Which harness's config and kits to show.
         #[arg(long, value_enum, default_value_t)]
         harness: Harness,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RunCommand {
+    /// Write a starter run-config (default: ./run.toml); refuses to overwrite.
+    Init {
+        /// Where to write it.
+        path: Option<PathBuf>,
     },
 }

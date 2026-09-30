@@ -1,7 +1,7 @@
 use clap::Parser;
 
 use sbxm::backend::SbxBackend;
-use sbxm::cli::{Cli, Command, ConfigCommand};
+use sbxm::cli::{Cli, Command, ConfigCommand, RunCommand};
 use sbxm::commands;
 use sbxm::config;
 use sbxm::confirm::Terminal;
@@ -75,6 +75,17 @@ fn main() -> anyhow::Result<()> {
             if report.failed() {
                 std::process::exit(1);
             }
+            Ok(())
+        }
+        Command::Run {
+            command: RunCommand::Init { path },
+        } => {
+            let written = commands::run_init::run(path.as_deref())?;
+            println!("Wrote {}", written.display());
+            println!(
+                "Edit the task and contestants, then run: sbxm run {}",
+                written.display()
+            );
             Ok(())
         }
         Command::Config {
