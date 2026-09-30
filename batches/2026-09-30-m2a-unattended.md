@@ -91,3 +91,15 @@ dir. Sandboxes created by this batch are named `sbxm-it-<pid>-*` or `sbxm-run-*`
 
 | Slice | Status | Commit | Tests (ok/failed binaries) | Real check | Notes |
 |---|---|---|---|---|---|
+| 5a | Done (before the batch) | 7b0be8b | 34 / 0 | `run_kits_validate_against_real_sbx` passed | |
+| 6 | Done | see `git log` (3 commits, "Script the fake backend", "Add run IDs and the per-pair sandbox orchestrator", "Add 'sbxm run <config>'") | 37 / 0 | `run_against_real_sbx` passed: Claude + Codex in 2 parallel sandboxes, both PONG, both removed, scratch folder gone | Decision 126. Fixed a slice-2 gap (crash with no output reported "no result event"). |
+
+### Manual test steps
+
+**Slice 6** (`sbxm run <config>`): needs the `anthropic` and `openai` secrets (`sbx secret ls`).
+1. `cargo run -- run init E:\sbxm-it\demo\run.toml`, then edit the prompt to something small and put cheap models in (`claude-haiku-4-5-20251001`, `gpt-5.6-luna`) and `timeout = "3m"`.
+2. `cargo run -- run E:\sbxm-it\demo\run.toml` prints `Run <id>` and one line per contestant (completed, timed out or failed).
+3. While it runs, `sbx ls` in a second terminal shows two `sbxm-run-<id>-<n>-0` sandboxes; afterwards they are gone.
+4. Workspaces stay: `dir <base_dir>\runs\<id>\`. Kits: `dir <base_dir>\.sbxm\runs\<id>\kits\`.
+5. Clean up: `Remove-Item -Recurse <base_dir>\runs, <base_dir>\.sbxm\runs` (only those two), and `E:\sbxm-it\demo`.
+6. Automated version: `$env:SBXM_REAL_BASE_DIR='E:\sbxm-it'; cargo test --test real_sbx run_against_real_sbx -- --ignored --nocapture`.

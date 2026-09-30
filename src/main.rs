@@ -1,7 +1,7 @@
 use clap::Parser;
 
 use sbxm::backend::SbxBackend;
-use sbxm::cli::{Cli, Command, ConfigCommand, RunCommand};
+use sbxm::cli::{Cli, Command, ConfigCommand, RunArgs, RunCommand};
 use sbxm::commands;
 use sbxm::config;
 use sbxm::confirm::Terminal;
@@ -77,9 +77,10 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
-        Command::Run {
-            command: RunCommand::Init { path },
-        } => {
+        Command::Run(RunArgs {
+            command: Some(RunCommand::Init { path }),
+            ..
+        }) => {
             let written = commands::run_init::run(path.as_deref())?;
             println!("Wrote {}", written.display());
             println!(
@@ -88,6 +89,20 @@ fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
+        Command::Run(RunArgs {
+            command: None,
+            config: Some(config_path),
+        }) => {
+            commands::run::run(
+                &config::config_dir()?,
+                &config_path,
+                &SbxBackend,
+                &mut std::io::stdout(),
+                &mut std::io::stderr(),
+            )?;
+            Ok(())
+        }
+        Command::Run(_) => unreachable!("clap requires a config or a subcommand"),
         Command::Config {
             command: ConfigCommand::Init,
         } => commands::config_init::run(),

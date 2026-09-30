@@ -928,6 +928,77 @@ fn antigravity_sandbox_against_real_sbx() {
 
 #[test]
 #[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
+fn run_against_real_sbx() {
+    use sbxm::commands::run;
+    use sbxm::headless::RunStatus;
+
+    // A base dir of its own, so the whole run vanishes with it.
+    let base = real_base_dir().join(format!("sbxm-it-{}-run", std::process::id()));
+    let _cleanup = Cleanup {
+        sandbox: String::new(),
+        dirs: vec![base.clone()],
+        shared_dirs: vec![],
+    };
+    std::fs::create_dir_all(&base).unwrap();
+    let config_dir = TempDir::new().unwrap();
+    let base_toml = toml::Value::String(base.to_str().unwrap().to_owned());
+    std::fs::write(
+        config_dir.path().join("config.toml"),
+        format!("base_dir = {base_toml}\n\n[resources]\ncpus = 2\nmemory = \"2g\"\n"),
+    )
+    .unwrap();
+    let profile_dir = config_dir.path().join("profiles").join("default");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    std::fs::write(
+        profile_dir.join("profile.toml"),
+        "description = \"real run test\"\n\n[skills]\nstore = \"off\"\n",
+    )
+    .unwrap();
+    let run_config = config_dir.path().join("run.toml");
+    std::fs::write(
+        &run_config,
+        "[task]\nprompt = \"Reply with exactly: PONG\"\n\n[run]\ntimeout = \"3m\"\n\n\
+         [[contestants]]\nharness = \"claude\"\nmodel = \"claude-haiku-4-5-20251001\"\n\n\
+         [[contestants]]\nharness = \"codex\"\nmodel = \"gpt-5.6-luna\"\n",
+    )
+    .unwrap();
+
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let summary = run::run(
+        config_dir.path(),
+        &run_config,
+        &SbxBackend,
+        &mut out,
+        &mut warn,
+    )
+    .unwrap();
+    println!(
+        "{}{}",
+        String::from_utf8_lossy(&out),
+        String::from_utf8_lossy(&warn)
+    );
+
+    // Both contestants ran in their own sandbox and answered.
+    assert_eq!(summary.outcomes.len(), 2);
+    for outcome in &summary.outcomes {
+        let result = outcome.result.as_ref().unwrap();
+        assert_eq!(result.status, RunStatus::Completed, "{result:?}");
+        assert!(result.answer.contains("PONG"), "{result:?}");
+        assert!(outcome.remove_error.is_none(), "{outcome:?}");
+        // The workspace stays after the sandbox is gone.
+        assert!(outcome.workspace.is_dir());
+    }
+    // No run sandbox is left behind.
+    let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
+    let ls = String::from_utf8_lossy(&ls.stdout).into_owned();
+    assert!(
+        !ls.contains(&format!("sbxm-run-{}", summary.run_id)),
+        "{ls}"
+    );
+}
+
+#[test]
+#[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
 fn run_kits_validate_against_real_sbx() {
     use sbxm::run::config::RunConfig;
     use sbxm::run::kits;

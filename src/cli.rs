@@ -71,10 +71,7 @@ pub enum Command {
     /// Check sbx, the config and the base dir; exits non-zero if any check fails.
     Doctor,
     /// Run comparisons between coding agents.
-    Run {
-        #[command(subcommand)]
-        command: RunCommand,
-    },
+    Run(RunArgs),
     /// Manage sbxm configuration.
     Config {
         #[command(subcommand)]
@@ -100,6 +97,18 @@ pub enum ConfigCommand {
         #[arg(long, value_enum, default_value_t)]
         harness: Harness,
     },
+}
+
+/// `sbxm run <config>` launches a comparison; `sbxm run init` writes a starter
+/// config. (A config file named `init` is written `./init`.)
+#[derive(Debug, clap::Args)]
+#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+pub struct RunArgs {
+    #[command(subcommand)]
+    pub command: Option<RunCommand>,
+    /// The run-config file (create one with `sbxm run init`).
+    #[arg(required = true)]
+    pub config: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]

@@ -5,6 +5,7 @@ pub mod list;
 pub mod new;
 pub mod open;
 pub mod rm;
+pub mod run;
 pub mod run_init;
 pub mod stop;
 
