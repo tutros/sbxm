@@ -136,12 +136,44 @@ function Format-Field([string]$Label, [string]$Value) {
     if ($Value.Contains("`n")) { "**${Label}:**`n$Value" } else { "**${Label}:** $Value" }
 }
 
+# The standard criteria from the skill's template, each with a pattern that tells whether a finding has it already.
+$standardChecklist = @(
+    @{ Pattern = 'fails before the fix'; Text = 'A test covering it fails before the fix and passes after (name it, or say which file it goes in)' }
+    @{ Pattern = 'cargo fmt'; Text = '`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass' }
+    @{ Pattern = 'Docs updated'; Text = 'Docs updated where behavior users see changed (`README.md`), or "no user-visible change"' }
+)
+$missingCriterion = '<the specific check is missing from the review: add one before working this issue>'
+
+# The criteria an issue gets: the finding's own, plus the standard ones it lacks. A must-fix or should-fix with none
+# is an error unless -StandardCriteria says to file it with only the standard ones. Questions get none.
+function Get-AcceptanceCriteria {
+    param([Parameter(Mandatory)]$Finding, [switch]$StandardCriteria)
+    if ($Finding.Label -eq 'question') { return [pscustomobject]@{ Items = @(); Error = $null } }
+    $own = @($Finding.Criteria)
+    if ($own.Count -eq 0 -and -not $StandardCriteria) {
+        return [pscustomobject]@{
+            Items = @()
+            Error = "$($Finding.Id) has no acceptance criteria; add them to the review file, or rerun with -StandardCriteria to file it with only the standard ones"
+        }
+    }
+    $items = [System.Collections.Generic.List[string]]::new()
+    if ($own.Count -eq 0) { $items.Add($missingCriterion) }
+    foreach ($item in $own) { $items.Add($item) }
+    foreach ($std in $standardChecklist) {
+        if (-not ($own | Where-Object { $_ -match $std.Pattern })) { $items.Add($std.Text) }
+    }
+    [pscustomobject]@{ Items = $items.ToArray(); Error = $null }
+}
+
 # The issue text for one finding: the skill's template in order, the marker on the last line.
 function New-IssueBody {
     param(
         [Parameter(Mandatory)]$Review, [Parameter(Mandatory)]$Finding, [Parameter(Mandatory)][string]$Repo,
-        [Parameter(Mandatory)][string]$ReviewName, [string]$HeadSha, [hashtable]$IdMap = @{}
+        [Parameter(Mandatory)][string]$ReviewName, [string]$HeadSha, [hashtable]$IdMap = @{},
+        [switch]$StandardCriteria
     )
+    $criteria = Get-AcceptanceCriteria $Finding -StandardCriteria:$StandardCriteria
+    if ($criteria.Error) { throw $criteria.Error }
     $f = $Finding.Fields
     $isQuestion = $Finding.Label -eq 'question'
     $depends = if ($f.Contains('depends on')) { $f['depends on'] } else { 'none known' }
@@ -159,7 +191,7 @@ function New-IssueBody {
     $parts.Add((Format-Field 'Depends on' (Convert-FindingIds $depends $IdMap)))
     if ($related) { $parts.Add((Format-Field 'Related' (Convert-FindingIds $related $IdMap))) }
     if (-not $isQuestion) {
-        $parts.Add("**Acceptance criteria:**`n" + (($Finding.Criteria | ForEach-Object { "- [ ] $_" }) -join "`n"))
+        $parts.Add("**Acceptance criteria:**`n" + (($criteria.Items | ForEach-Object { "- [ ] $_" }) -join "`n"))
     }
     $range = if ($Review.Range) { $Review.Range } else { $Review.Scope }
     $parts.Add("**Review:** ``reviews/$ReviewName``, finding $($Finding.Id), reviewed commits ``$range``")
