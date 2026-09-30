@@ -16,7 +16,7 @@ function ConvertFrom-ReviewFile {
     $review = [ordered]@{
         Findings = [System.Collections.Generic.List[object]]::new()
         NotFiled = [ordered]@{ Sections = 0; Nits = 0 }
-        HeadSha = $null; Range = $null; Scope = $null; IssuesLine = $null; IssuesLineCount = 0
+        HeadSha = $null; Range = $null; Scope = $null; ScopeLine = $null; IssuesLine = $null; IssuesLineCount = 0
     }
     $section = $null     # @{ Label; Findings = count }
     $finding = $null
@@ -25,6 +25,7 @@ function ConvertFrom-ReviewFile {
         $line = $lines[$i]
         if ($line -match '^Scope:\s*(.*)$' -and -not $review.Scope) {
             $review.Scope = $Matches[1]
+            $review.ScopeLine = $i + 1
             $sha = [regex]::Match($Matches[1], '\b[0-9a-f]{7,40}\.\.([0-9a-f]{7,40})\b')
             if ($sha.Success) { $review.HeadSha = $sha.Groups[1].Value; $review.Range = $sha.Value }
         }
@@ -103,6 +104,15 @@ $secretPatterns = [ordered]@{
     'a password or token assignment' = '(?i)\b(?:password|token)\s*=\s*["'']?[^\s"'']{4,}'
 }
 
+# The kind of secret a piece of text matches, or nothing. Used both per line (Find-Secrets) and for text that
+# isn't tied to a finding's line range, such as the Scope line's fallback text or the review file name.
+function Find-SecretKind([string]$Text) {
+    foreach ($kind in $secretPatterns.Keys) {
+        if ($Text -match $secretPatterns[$kind]) { return $kind }
+    }
+    $null
+}
+
 # Lines of a finding that look like a secret: id, line number in the review file and what it looks like, never
 # the value. The caller refuses the finding.
 function Find-Secrets {
@@ -110,11 +120,9 @@ function Find-Secrets {
     $lines = $Text -replace "`r`n", "`n" -split "`n"
     $last = [Math]::Min($Finding.EndLine, $lines.Count)
     for ($n = $Finding.StartLine; $n -le $last; $n++) {
-        foreach ($kind in $secretPatterns.Keys) {
-            if ($lines[$n - 1] -match $secretPatterns[$kind]) {
-                [pscustomobject]@{ Id = $Finding.Id; Line = $n; Kind = $kind }
-                break
-            }
+        $kind = Find-SecretKind $lines[$n - 1]
+        if ($kind) {
+            [pscustomobject]@{ Id = $Finding.Id; Line = $n; Kind = $kind }
         }
     }
 }
@@ -420,6 +428,21 @@ function Invoke-ReviewFiling {
 
     $headSha = Resolve-HeadSha $parsed.HeadSha
     $problems = [System.Collections.Generic.List[string]]::new()
+
+    # The review file name and, when there is no commit sha, the Scope line's fallback text both go into every
+    # issue body (the "Review:" line, and the review file name into the marker too), so they get the same
+    # refusal and protection as a finding's own fields, before any of it is written anywhere.
+    $nameSecret = Find-SecretKind $reviewName
+    if ($nameSecret) { $problems.Add("the review file name looks like $nameSecret; rename the file") }
+    $postedReviewName = if ($nameSecret) { $reviewName } else { Protect-Text $reviewName -Id 'the review file name' -KeepPaths:$KeepPaths }
+
+    $scopeFallback = $null
+    if (-not $parsed.Range) {
+        $scopeSecret = Find-SecretKind $parsed.Scope
+        if ($scopeSecret) { $problems.Add("Scope line $($parsed.ScopeLine) looks like $scopeSecret; remove it from the review file") }
+        else { $scopeFallback = Protect-Text $parsed.Scope -Id 'Scope' -KeepPaths:$KeepPaths }
+    }
+
     $prepared = [System.Collections.Generic.List[object]]::new()
     foreach ($finding in $selected) {
         $before = $problems.Count
@@ -446,7 +469,7 @@ function Invoke-ReviewFiling {
     }
     $numbers = @{}
     foreach ($finding in $parsed.Findings) {
-        $marker = "<!-- review-finding: $reviewName#$($finding.Id) -->"
+        $marker = "<!-- review-finding: $postedReviewName#$($finding.Id) -->"
         $hit = @($listed | Where-Object { $_.body -and $_.body.Contains($marker) })
         if ($hit) { $numbers[$finding.Id] = [int]$hit[0].number }
     }
@@ -455,9 +478,10 @@ function Invoke-ReviewFiling {
 
     $view = $parsed.PSObject.Copy()
     $view.Findings = $prepared.ToArray()
+    if ($scopeFallback) { $view.Scope = $scopeFallback }
     $render = {
         param($finding)
-        New-IssueBody -Review $view -Finding $finding -Repo $repoName -ReviewName $reviewName -HeadSha $headSha `
+        New-IssueBody -Review $view -Finding $finding -Repo $repoName -ReviewName $postedReviewName -HeadSha $headSha `
             -IdMap $numbers -StandardCriteria:$StandardCriteria
     }
     if (-not $Create) {

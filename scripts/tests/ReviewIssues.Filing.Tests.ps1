@@ -125,6 +125,74 @@ Describe 'The review file needs exactly one Issues: line' {
     }
 }
 
+Describe 'A no-SHA Scope line and the review file name get the same protection as a finding''s fields' {
+    # Secret-shaped values are built here, so the repo holds no literal that looks like one (see
+    # ReviewIssues.Scrub.Tests.ps1, which has the same list for Find-Secrets).
+    BeforeAll {
+        $script:secretCases = @(
+            @{ Name = 'a GitHub token'; Value = 'ghp_' + ('a' * 30) }
+            @{ Name = 'an sk- key'; Value = 'sk-' + ('e' * 24) }
+            @{ Name = 'an AWS key'; Value = 'AKIA' + ('F' * 16) }
+            @{ Name = 'a bearer token'; Value = 'Bearer ' + ('g' * 30) }
+            @{ Name = 'a private key'; Value = '-----BEGIN RSA PRIVATE KEY-----' }
+            @{ Name = 'a password or token assignment'; Value = 'token = "abcd1234efgh"' }
+        )
+
+        function New-ScopeReview([string]$ScopeLine) {
+            (Get-Content -Raw (Join-Path $script:fixtures 'review-small.md')) -replace '(?m)^Scope:.*$', $ScopeLine
+        }
+        function Add-ReviewText([string]$Name, [string]$Text) {
+            $dir = Join-Path $TestDrive 'reviews'
+            New-Item -ItemType Directory $dir -Force | Out-Null
+            Set-Content (Join-Path $dir $Name) $Text
+        }
+    }
+    BeforeEach { Initialize-Fake }
+
+    It 'replaces a personal path in a no-SHA Scope with ~ and warns, like any other field' {
+        Add-ReviewText 'review-scope-path.md' (New-ScopeReview 'Scope: reviewed by hand, notes in /home/alice/project')
+        $run = Invoke-Filing -Fixture 'review-scope-path.md'
+        $run.Code | Should -Be 0
+        $run.Text | Should -BeLike '*reviewed commits `reviewed by hand, notes in ~/project`*'
+        $run.Text | Should -BeLike '*replaced 1 personal path*'
+        $run.Text | Should -Not -BeLike '*/home/alice*'
+    }
+
+    It 'keeps the path with -KeepPaths' {
+        Add-ReviewText 'review-scope-path-keep.md' (New-ScopeReview 'Scope: reviewed by hand, notes in /home/alice/project')
+        $run = Invoke-Filing -Fixture 'review-scope-path-keep.md' -Arguments @{ KeepPaths = $true }
+        $run.Text | Should -BeLike '*reviewed commits `reviewed by hand, notes in /home/alice/project`*'
+    }
+
+    It 'warns about an e-mail address in a no-SHA Scope without changing it' {
+        Add-ReviewText 'review-scope-email.md' (New-ScopeReview 'Scope: reviewed by alice@example.com')
+        $run = Invoke-Filing -Fixture 'review-scope-email.md'
+        $run.Code | Should -Be 0
+        $run.Text | Should -BeLike '*reviewed commits `reviewed by alice@example.com`*'
+        $run.Text | Should -BeLike '*e-mail address*'
+    }
+
+    It 'refuses <name> in a no-SHA Scope, naming it but not the value, before any gh write' -ForEach $secretCases {
+        Add-ReviewText 'review-scope-secret.md' (New-ScopeReview "Scope: reviewed by hand, output: $Value")
+        $run = Invoke-Filing -Fixture 'review-scope-secret.md'
+        $run.Code | Should -Be 1
+        $run.Text | Should -BeLike "*Scope line 3 looks like $Name*"
+        $run.Text | Should -Not -Match ([regex]::Escape($Value.Substring(6)))
+        $script:fake.Writes | Should -BeNullOrEmpty
+    }
+
+    It 'refuses a review file name that looks like a secret, before any gh call' {
+        $dir = Join-Path $TestDrive 'reviews'
+        New-Item -ItemType Directory $dir -Force | Out-Null
+        $name = 'sk-' + ('e' * 24) + '.md'
+        Copy-Item (Join-Path $script:fixtures 'review-small.md') (Join-Path $dir $name) -Force
+        $run = Invoke-Filing -Fixture $name
+        $run.Code | Should -Be 1
+        $run.Text | Should -BeLike '*review file name looks like an sk- key*'
+        $script:fake.Writes | Should -BeNullOrEmpty
+    }
+}
+
 Describe 'Access checks stop before any write' {
     BeforeEach { Initialize-Fake }
 
