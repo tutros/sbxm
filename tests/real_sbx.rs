@@ -132,7 +132,9 @@ fn lifecycle_against_real_sbx() {
     .unwrap_err();
     assert_eq!(
         format!("{again:#}"),
-        format!("sandbox {sandbox} already exists; open it with `sbxm open {project}`")
+        format!(
+            "sandbox {sandbox} already exists; open it with `sbxm open {project} --harness claude`"
+        )
     );
 
     let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();

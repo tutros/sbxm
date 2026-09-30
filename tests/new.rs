@@ -338,7 +338,7 @@ fn assert_refuses_existing(harness: Harness, hint: &str) {
 
 #[test]
 fn existing_sandbox_is_refused_before_any_write_or_call() {
-    assert_refuses_existing(Harness::Claude, "sbxm open demo");
+    assert_refuses_existing(Harness::Claude, "sbxm open demo --harness claude");
 }
 
 #[test]

@@ -4,7 +4,7 @@ use anyhow::Result;
 use clap::ValueEnum;
 use serde::Serialize;
 
-use super::harness_flag;
+use super::open_harness_flag;
 use crate::backend::SandboxBackend;
 use crate::config::GlobalConfig;
 use crate::harness::Harness;
@@ -113,7 +113,8 @@ fn config_status(
 }
 
 /// Aligned columns; orphans and changed configs get a note saying how to fix
-/// them.
+/// them. Hints always name `--harness` explicitly, including the default
+/// (claude), since `open` requires it.
 pub fn render_table(entries: &[Entry]) -> String {
     if entries.is_empty() {
         return "No sbxm sandboxes.\n".into();
@@ -165,7 +166,7 @@ impl ConfigStatus {
 fn note(entry: &Entry) -> String {
     // Hints name the harness unless it's the default, like other commands'.
     let open = match Harness::from_str(&entry.harness, false) {
-        Ok(harness) => format!("sbxm open {}{}", entry.project, harness_flag(harness)),
+        Ok(harness) => format!("sbxm open {}{}", entry.project, open_harness_flag(harness)),
         Err(_) => format!("sbxm open {} --harness {}", entry.project, entry.harness),
     };
     match (entry.problem, entry.config) {

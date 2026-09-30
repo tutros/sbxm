@@ -48,7 +48,7 @@ that).
 4. Create a project and its Claude Code sandbox, then attach to it:
    ```
    sbxm new demo
-   sbxm open demo
+   sbxm open demo --harness claude
    ```
    The workspace is `<base_dir>\demo`, mounted read-write into the sandbox.
 
@@ -57,16 +57,16 @@ that).
 | Command | What it does |
 |---|---|
 | `sbxm config init` | Writes a starter `config.toml` and `default` profile. Refuses to overwrite either. |
-| `sbxm new <project> [--harness h] [--profile p] [--seed dir]` | Creates `<base_dir>/<project>` if missing (or reuses it), builds the kits from the profile and the project's `sandbox.toml`, checks them with `sbx kit validate`, and creates the sandbox. Doesn't attach. Refuses a harness that already has a sandbox for the project, before writing anything; open that one with `sbxm open <project> [--harness h]` (or `--rebuild` it). `--seed` copies a folder into a *new* project. |
-| `sbxm open <project> [--harness h] [--rebuild]` | Attaches to the sandbox, starting it if it's stopped and creating it if it's missing. Refuses if the config changed since the sandbox was built; `--rebuild` recreates it. |
+| `sbxm new <project> [--harness h] [--profile p] [--seed dir]` | Creates `<base_dir>/<project>` if missing (or reuses it), builds the kits from the profile and the project's `sandbox.toml`, checks them with `sbx kit validate`, and creates the sandbox. Doesn't attach. Refuses a harness that already has a sandbox for the project, before writing anything; open that one with `sbxm open <project> --harness h` (or `--rebuild` it). `--seed` copies a folder into a *new* project. |
+| `sbxm open <project> --harness h [--rebuild]` | Attaches to the sandbox, starting it if it's stopped and creating it if it's missing. Refuses if the config changed since the sandbox was built; `--rebuild` recreates it. |
 | `sbxm list [--json]` | Lists sbxm's sandboxes with project, harness, status and whether their config is `current` or `changed`. Flags orphans (a sandbox sbxm has no record of, or a record without a sandbox) and says how to fix each. |
-| `sbxm stop <project> [--harness h]` | Stops the sandbox. |
-| `sbxm rm <project> [--harness h]` | Removes the sandbox and sbxm's record of it. The workspace is kept. |
+| `sbxm stop <project> --harness h` | Stops the sandbox. |
+| `sbxm rm <project> --harness h` | Removes the sandbox and sbxm's record of it. The workspace is kept. |
 | `sbxm rm <project> --purge [--yes]` | Removes **every** sandbox of the project, then deletes the workspace and its metadata, after you confirm the exact paths. Without a terminal it needs `--yes`. Can't be combined with `--harness`. |
 | `sbxm config show [project] [--profile p] [--harness h] [--kits]` | Prints the merged config exactly as it's hashed, the hash, and with `--kits` the generated kits. Creates nothing. |
 | `sbxm doctor` | Checks `sbx` (on `PATH`, new enough, daemon answering), the config, every profile, every project with each of its sandboxes (secrets stored, kits valid), and the base dir (exists, writable, not a temp folder, at least 10 GiB free). Exits non-zero if anything fails. |
 
-`--harness` defaults to `claude` everywhere. `sbxm <command> --help` shows every option.
+`--harness` defaults to `claude` for `new` and `config show`; `open`, `stop` and `rm` (without `--purge`) require it, so they never act on the wrong sandbox by default (issue #33). `sbxm <command> --help` shows every option.
 
 ### The `justfile`
 
@@ -196,7 +196,7 @@ settings, the *contents* of referenced files, resources and sbxm's version. A se
 
 - `sbxm list` shows `changed` when the current config no longer matches, with the command to fix it.
 - `sbxm open` refuses a changed sandbox instead of attaching to something built from an old config.
-- `sbxm open <project> --rebuild` recreates it. The workspace is kept, but the agent's **session history in that
+- `sbxm open <project> --harness h --rebuild` recreates it. The workspace is kept, but the agent's **session history in that
   sandbox is lost**. The old sandbox is removed only after the new kits validate.
 - `sbxm config show <project> --harness <h>` prints exactly what's hashed, so you can see what changed.
 
@@ -215,7 +215,7 @@ settings, the *contents* of referenced files, resources and sbxm's version. A se
 - **Start with `sbxm doctor`.** Each failure says what's wrong and how to fix it.
 - **`sbx create` fails with `failed to run sandbox container`:** check the workspace isn't on a drive `sbx` can't
   mount (on the development machine, anything on `C:`), or under `%TEMP%`/`AppData`.
-- **A host is blocked:** add it to `network.allow`, then `sbxm open <project> --rebuild`.
+- **A host is blocked:** add it to `network.allow`, then `sbxm open <project> --harness h --rebuild`.
 - **`secret '…' (secrets.services) is not stored in sbx`:** `sbx secret set <service>`, or `sbx setup` to import it
   from your environment.
 - **Pi answers `401`:** approve the credential binding (see *Harnesses*).
@@ -268,7 +268,7 @@ worker, the output goes to `.sbxm-issue/` in its clone (`agent.log`, `gates.log`
 `review.md`, `fix.log`); for `review -Pr <n>`, to `<base_dir>\sbxm-pr-<n>-review\` (`gates.log`, `review-1.log`,
 `review.md`). Both keep the reviewer's full session transcripts in `transcripts\`, copied out before its sandbox is
 removed.
-To take over one interactively, run `sbxm open sbxm-issue-<n>`. `-BaseDir` (default `E:\sbxm-projects`) must match
+To take over one interactively, run `sbxm open sbxm-issue-<n> --harness claude`. `-BaseDir` (default `E:\sbxm-projects`) must match
 `base_dir` in `config.toml`. [`sandbox-issues.md`](sandbox-issues.md) has the steps with the expected output.
 
 ## License

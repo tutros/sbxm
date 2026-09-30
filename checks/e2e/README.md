@@ -46,7 +46,7 @@ Your `default` profile isn't touched.
 11. `Set-Content E:\sbxm-projects\e2e-demo\keep.txt "keep me"`
     Expected: no output.
 
-12. `cargo run -- open e2e-demo`
+12. `cargo run -- open e2e-demo --harness claude`
     Expected: Claude Code opens. Ask `What is the canary word?`. Expected answer: `HAZEL-6`. Exit Claude (`/exit`).
 
 13. `cargo run -- list`
@@ -58,13 +58,14 @@ Your `default` profile isn't touched.
     Expected: no output.
 
 15. `cargo run -- list`
-    Expected: the `e2e-demo claude` row shows `changed` and ``config changed; `sbxm open e2e-demo --rebuild` recreates it``.
+    Expected: the `e2e-demo claude` row shows `changed` and
+    ``config changed; `sbxm open e2e-demo --harness claude --rebuild` recreates it``.
 
-16. `cargo run -- open e2e-demo`
+16. `cargo run -- open e2e-demo --harness claude`
     Expected: an error: `the config of sbxm-e2e-demo-claude (profile 'e2e') changed since it was created; run
-    ``sbxm open e2e-demo --rebuild`` …`. Nothing opens.
+    ``sbxm open e2e-demo --harness claude --rebuild`` …`. Nothing opens.
 
-17. `cargo run -- open e2e-demo --rebuild`
+17. `cargo run -- open e2e-demo --harness claude --rebuild`
     Expected: `rebuilding sbxm-e2e-demo-claude: its session history will be lost; the workspace … is kept`, then
     Claude Code opens. Exit it (`/exit`).
 

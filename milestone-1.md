@@ -112,10 +112,11 @@ Each generated kit goes through `sbx kit validate --json` before `sbx create`. A
 |---|---|
 | `sbxm config init` | Writes a starter global config and `default` profile. Refuses to overwrite. |
 | `sbxm new <project> [--harness h] [--profile p] [--seed dir]` | Validate name → refuse if the project's state already has this harness (hint: `sbxm open`; skipped when `open` rebuilds or recreates it) → create `<base>/<project>` if missing (copy `--seed` contents if given; existing dir is reused as-is and `--seed` is then an error) → merge config → check secrets → generate + validate kits → `sbx create --name … --cpus … -m … --kit common --kit harness-<h> <agent> <workspace>` → write state. Doesn't attach. |
-| `sbxm open <project> [--harness h] [--rebuild]` | [31]: running → attach (`sbx run --name`); stopped → attach (`sbx run` restarts it); missing → `new` then attach. If the current hash ≠ the stored one → warn and refuse unless `--rebuild`. `--rebuild` = `sbx rm -f` + create. The workspace is kept, **but harness session history (kit volumes) is lost**, and the command says so. |
+| `sbxm open <project> --harness h [--rebuild]` | [31][135]: running → attach (`sbx run --name`); stopped → attach (`sbx run` restarts it); missing → `new` then attach. If the current hash ≠ the stored one → warn and refuse unless `--rebuild`. `--rebuild` = `sbx rm -f` + create. The workspace is kept, **but harness session history (kit volumes) is lost**, and the command says so. |
 | `sbxm list [--json]` | `sbx ls --json` filtered to `sbxm-*`, joined with state: project, harness, profile, status, hash drift (✓/changed), orphans (state without a sandbox, or a sandbox without state). |
-| `sbxm stop <project> [--harness h]` | `sbx stop`. |
-| `sbxm rm <project> [--harness h] [--purge]` | `sbx rm -f` + delete state/kits. `--purge` also deletes `<base>/<project>` and `.sbxm/<project>`, after an interactive confirmation that shows the path. Refuses `--purge` when not attached to a terminal unless `--yes` is also given [32]. |
+| `sbxm stop <project> --harness h` | [135]: `sbx stop`. Naming a harness the project has no sandbox for also names the harness(es) it does have. |
+| `sbxm rm <project> --harness h` | [135]: `sbx rm -f` + delete state/kits, naming the project's other harnesses when the given one has no sandbox. |
+| `sbxm rm <project> --purge` | [135]: removes every harness's sandbox and also deletes `<base>/<project>` and `.sbxm/<project>`, after an interactive confirmation that shows the path. Refuses when not attached to a terminal unless `--yes` is also given [32]. `--purge` needs no `--harness` and can't be combined with it. |
 | `sbxm config show [project] [--profile p] [--harness h] [--kits]` | Prints the merged TOML and hash. `--kits` prints generated `spec.yaml`s without creating anything. |
 | `sbxm doctor` | Checks: `sbx` on PATH and ≥ `min_sbx_version`; daemon reachable (`sbx ls --json` succeeds); base dir exists, is writable and **not under `%TEMP%`/AppData** (S1); free disk space; config and profiles parse; referenced files exist; required secrets exist; generated kits pass `sbx kit validate`. Exit code is non-zero on any failure. |
 
@@ -137,10 +138,10 @@ Between slices 3 and 10b, sandboxes are created without sbxm kits. That's safe: 
 | 3 | `sbxm new demo` creates `<base>/demo` (or reuses it), calls `sbx create` for `sbxm-demo-claude` with workspace and `--cpus`/`-m`, and writes `.sbxm/demo/state.json` [40][41]. | Backend call recorded with exact args; existing dir reused and its contents kept; missing base dir → clear error; state contents. | Sandbox appears in `sbx ls`. |
 | 4 | `sbxm new demo --seed <dir>` copies the seed into a new project; `--seed` on an existing project is an error. | Files copied; error path creates nothing. | none |
 | 5 | `sbxm list` shows sbxm sandboxes with project, harness and status, and flags orphans. | Parse the captured `sbx ls --json` shape; non-`sbxm-` sandboxes hidden; orphans both ways. | Matches `sbx ls`. |
-| 6 | `sbxm stop demo` stops the sandbox. | Backend call; unknown project → clear error. | Status becomes stopped. |
-| 7 | `sbxm rm demo` removes the sandbox and its state, and keeps the workspace. | Backend `rm -f` call; state gone; workspace untouched. | Gone from `sbx ls`. |
-| 8 | `sbxm rm demo --purge` also deletes the workspace and `.sbxm/demo` after confirmation. | Confirm yes/no; non-TTY without `--yes` refuses; prompt shows the path [32]. | none |
-| 9 | `sbxm open demo` attaches if the sandbox exists (running or stopped) and creates then attaches if it doesn't [31]. | Backend call sequence for each of the three states. | Manual attach works. |
+| 6 | `sbxm stop demo --harness claude` stops the sandbox ([135]: `--harness` became required only once other harnesses existed, from slice 18 on). | Backend call; unknown project → clear error. | Status becomes stopped. |
+| 7 | `sbxm rm demo --harness claude` removes the sandbox and its state, and keeps the workspace ([135], as above). | Backend `rm -f` call; state gone; workspace untouched. | Gone from `sbx ls`. |
+| 8 | `sbxm rm demo --purge` also deletes the workspace and `.sbxm/demo` after confirmation; `--purge` needs no `--harness` [135]. | Confirm yes/no; non-TTY without `--yes` refuses; prompt shows the path [32]. | none |
+| 9 | `sbxm open demo --harness claude` attaches if the sandbox exists (running or stopped) and creates then attaches if it doesn't [31] ([135], as above). | Backend call sequence for each of the three states. | Manual attach works. |
 | 10a | `sbxm new demo [--profile p]` loads `<profiles_dir>/<p>/profile.toml` (default `default_profile`); a missing or invalid profile is a clear error and nothing is created. | Profile parsed; missing/invalid profile errors with no dirs and no backend calls. | none |
 | 10b | The profile's `network` reaches the sandbox through a generated `common` mixin, validated before create. | `insta` snapshot of `spec.yaml`; `kit_validate` called before `create`; validation failure aborts with no sandbox created. | `sbx kit validate` passes; allowed host 200, other 403. |
 | 10c | The profile's `env` reaches the sandbox through the same `common` mixin. | Snapshot with `environment.variables`. | Env var visible in the sandbox. |
@@ -160,8 +161,8 @@ Between slices 3 and 10b, sandboxes are created without sbxm kits. That's safe: 
 **End-to-end check (slice 21)**, on a base dir outside AppData:
     - `config init` → `doctor` is clean.
     - `new demo` → sandbox exists, `SBXM_CONFIG_HASH` set, mandatory instructions file present, allowed host returns 200 and a non-listed host 403 (`sbx policy log`).
-    - `open demo` attaches. Edit the profile → `open demo` refuses → `open demo --rebuild` recreates it, and workspace files survive.
-    - `list` shows drift and status. `stop`, `rm`, `rm --purge` behave as specified.
+    - `open demo --harness claude` attaches. Edit the profile → `open demo --harness claude` refuses → `open demo --harness claude --rebuild` recreates it, and workspace files survive.
+    - `list` shows drift and status. `stop --harness claude`, `rm --harness claude`, `rm --purge` behave as specified ([135]: `--harness` is required on `open`, `stop` and non-purge `rm`).
     - Repeat `new` with `--harness codex`, `gemini`, `pi`.
 
 ## Progress and carry-over items

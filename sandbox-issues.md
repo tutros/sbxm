@@ -53,7 +53,7 @@ for each acceptance criterion. You push and open the PR from the host.
    Expected: `cargo fmt --check`, `cargo clippy` and `cargo test` lines, `review round 1`, then
    `#1: <k> must-fix finding(s)`; with k > 0 a `fix round` and `review round 2`; last line `#1: review done; …`.
    A failing host check stops it with the log path (`.sbxm-issue\gates.log`). The reviewer sandbox is removed at the end.
-5. Read `result.md`, `review.md` and the commits. To take over interactively: `sbxm open sbxm-issue-<n>`.
+5. Read `result.md`, `review.md` and the commits. To take over interactively: `sbxm open sbxm-issue-<n> --harness claude`.
 6. Push and open the PR (its body is `Fixes #<n>`, `result.md` and `review.md`): `./scripts/issue-workers.ps1 finish -Issue 1`
 7. After merging: `./scripts/issue-workers.ps1 remove -Issue 1` (asks you to confirm the paths it deletes).
 

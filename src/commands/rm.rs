@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use super::harness_label;
+use super::{harness_label, requested_harness_label};
 use crate::backend::SandboxBackend;
 use crate::config::GlobalConfig;
 use crate::confirm::Confirm;
@@ -39,6 +39,18 @@ pub fn run(
 
     if !options.purge {
         let Some(sandbox) = sandbox else {
+            let others: Vec<&str> = state
+                .iter()
+                .flat_map(|s| s.sandboxes.keys().map(String::as_str))
+                .collect();
+            if !others.is_empty() {
+                bail!(
+                    "no sbxm {}sandbox for project '{name}', which has a {} sandbox; use `--harness {}`",
+                    requested_harness_label(options.harness),
+                    others.join("/"),
+                    others.join("` or `--harness ")
+                );
+            }
             bail!(
                 "no sbxm {}sandbox for project '{name}'; `sbxm list` shows existing ones",
                 harness_label(options.harness)
