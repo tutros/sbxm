@@ -925,3 +925,76 @@ fn antigravity_sandbox_against_real_sbx() {
     let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
     assert!(!String::from_utf8_lossy(&ls.stdout).contains(&sandbox));
 }
+
+#[test]
+#[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
+fn run_kits_validate_against_real_sbx() {
+    use sbxm::run::config::RunConfig;
+    use sbxm::run::kits;
+
+    let base_dir = real_base_dir();
+    let run_dir = base_dir.join(format!("sbxm-it-{}-runkits", std::process::id()));
+    let _cleanup = Cleanup {
+        sandbox: String::new(),
+        dirs: vec![run_dir.clone()],
+        shared_dirs: vec![],
+    };
+    let config_dir = TempDir::new().unwrap();
+    let base = toml::Value::String(base_dir.to_str().unwrap().to_owned());
+    std::fs::write(
+        config_dir.path().join("config.toml"),
+        format!("base_dir = {base}\n\n[resources]\ncpus = 2\nmemory = \"2g\"\n"),
+    )
+    .unwrap();
+    let profile_dir = config_dir.path().join("profiles").join("default");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    std::fs::write(
+        profile_dir.join("profile.toml"),
+        "[network]\nallow = [\"example.org\"]\n\n[env]\nREAL_TEST = \"run-kit\"\n\n[instructions]\nmandatory = \"mandatory.md\"\n",
+    )
+    .unwrap();
+    std::fs::write(profile_dir.join("mandatory.md"), "Real test canary.\n").unwrap();
+    // Contestants: Claude and Codex; the judge is Antigravity, a harness no contestant uses.
+    let run_config = config_dir.path().join("run.toml");
+    std::fs::write(
+        &run_config,
+        "[task]\nprompt = \"p\"\n\n[run]\ncpus = 1\nmemory = \"1g\"\n\n\
+         [[contestants]]\nharness = \"claude\"\nmodel = \"m\"\n\n\
+         [[contestants]]\nharness = \"codex\"\nmodel = \"m\"\n\n\
+         [[eval.rubric]]\nid = \"a\"\nkind = \"pass_fail\"\nweight = 1.0\n\n\
+         [eval.judge]\nharness = \"antigravity\"\nmodel = \"m\"\n",
+    )
+    .unwrap();
+    let run_config = RunConfig::load(&run_config).unwrap();
+
+    let before = Command::new("sbx")
+        .args(["ls", "--json"])
+        .output()
+        .unwrap()
+        .stdout;
+    let run = kits::build(
+        config_dir.path(),
+        &run_config,
+        &run_dir.join("kits"),
+        &SbxBackend,
+    )
+    .unwrap();
+
+    // `sbx kit validate` accepted a common and a harness mixin for each of the three harnesses.
+    assert_eq!(run.harnesses.len(), 3);
+    for kit in &run.harnesses {
+        assert_eq!(kit.dirs.len(), 2);
+        assert!(kit.dirs.iter().all(|d| d.join("spec.yaml").is_file()));
+    }
+    assert_eq!(
+        (run.resources.cpus, run.resources.memory.as_str()),
+        (1, "1g")
+    );
+    // Validation only: no sandbox was created.
+    let after = Command::new("sbx")
+        .args(["ls", "--json"])
+        .output()
+        .unwrap()
+        .stdout;
+    assert_eq!(before, after);
+}
