@@ -57,18 +57,43 @@ impl Harness {
     /// The headless command `headless::run` executes in the sandbox (S5).
     pub fn headless_argv(self, prompt: &str, opts: &HeadlessOpts) -> Result<Vec<String>> {
         self.require_headless()?;
-        let mut argv: Vec<String> = ["claude", "-p", prompt, "--model", &opts.model]
-            .into_iter()
-            .chain(["--output-format", "stream-json", "--verbose"])
-            .map(str::to_owned)
-            .collect();
+        let mut argv: Vec<String> = match self {
+            Harness::Codex => ["codex", "exec", "-m", &opts.model, "--json"]
+                .map(str::to_owned)
+                .into(),
+            _ => ["claude", "-p", prompt, "--model", &opts.model]
+                .into_iter()
+                .chain(["--output-format", "stream-json", "--verbose"])
+                .map(str::to_owned)
+                .collect(),
+        };
+        argv.extend(
+            self.git_repo_workaround(opts.is_git_repo)
+                .map(str::to_owned),
+        );
         argv.extend(self.budget_flag(opts.budget_usd).unwrap_or_default());
+        if self == Harness::Codex {
+            argv.push(prompt.to_owned());
+        }
         Ok(argv)
     }
 
-    /// How stdin is wired for the headless command.
+    /// How stdin is wired for the headless command. `codex exec` blocks on a
+    /// stdin that is attached but never closed, so it gets an empty pipe (S5).
     pub fn stdin(self) -> Stdin {
-        Stdin::Closed
+        match self {
+            Harness::Codex => Stdin::Piped(String::new()),
+            _ => Stdin::Closed,
+        }
+    }
+
+    /// The flag that lets the command run outside a git repository, needed
+    /// for an unseeded workspace (decision 113).
+    pub fn git_repo_workaround(self, is_git_repo: bool) -> Option<&'static str> {
+        match (self, is_git_repo) {
+            (Harness::Codex, false) => Some("--skip-git-repo-check"),
+            _ => None,
+        }
     }
 
     /// The flag that caps a run's cost, if the harness has one (S5).
@@ -84,12 +109,18 @@ impl Harness {
     /// Parses the headless command's stdout, best-effort on truncated output.
     pub fn parse_headless_output(self, raw: &str) -> Result<HeadlessResult> {
         self.require_headless()?;
-        Ok(headless::parse_claude(raw))
+        Ok(match self {
+            Harness::Codex => headless::parse_codex(raw),
+            _ => headless::parse_claude(raw),
+        })
     }
 
     fn require_headless(self) -> Result<()> {
-        if self != Harness::Claude {
-            bail!("{} has no headless adapter; use claude", self.as_str());
+        if !matches!(self, Harness::Claude | Harness::Codex) {
+            bail!(
+                "{} has no headless adapter; use claude or codex",
+                self.as_str()
+            );
         }
         Ok(())
     }

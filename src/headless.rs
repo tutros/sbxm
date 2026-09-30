@@ -20,6 +20,9 @@ pub struct HeadlessOpts {
     pub model: String,
     /// Best-effort cost cap; only harnesses with a budget flag apply it.
     pub budget_usd: Option<f64>,
+    /// Whether the workspace is a git repository (seeded runs); unseeded
+    /// ones aren't (decision 113).
+    pub is_git_repo: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -87,7 +90,8 @@ pub fn run(
             .any(|line| line.starts_with("timeout: sending signal"));
     if timed_out {
         result.status = RunStatus::TimedOut;
-    } else if output.exit_code != Some(0) {
+    } else if output.exit_code != Some(0) && !matches!(result.status, RunStatus::Failed(_)) {
+        // A parsed failure says more than stderr does, so it stays.
         let code = match output.exit_code {
             Some(code) => format!("exit code {code}"),
             None => "killed by a signal".to_owned(),
@@ -160,5 +164,47 @@ fn claude_usage(usage: &Value, cost_usd: Option<f64>) -> Usage {
             + count("cache_read_input_tokens"),
         output_tokens: count("output_tokens"),
         cost_usd,
+    }
+}
+
+/// Codex's `exec --json`: NDJSON with `thread.started`, `turn.started`,
+/// `item.completed` (`agent_message` items carry the text; the last one is
+/// the answer), `turn.completed` (usage) and `turn.failed`. An `error` *item*
+/// is only a warning. Best-effort on a truncated stream, like Claude's.
+pub(crate) fn parse_codex(raw: &str) -> HeadlessResult {
+    let mut answer = String::new();
+    let mut usage = Usage {
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usd: None,
+    };
+    let mut status = RunStatus::Failed("no turn.completed event in the output".into());
+    for event in raw
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+    {
+        match event["type"].as_str() {
+            Some("item.completed") if event["item"]["type"] == "agent_message" => {
+                if let Some(text) = event["item"]["text"].as_str() {
+                    answer = text.to_owned();
+                }
+            }
+            Some("turn.completed") => {
+                usage.input_tokens += event["usage"]["input_tokens"].as_u64().unwrap_or(0);
+                usage.output_tokens += event["usage"]["output_tokens"].as_u64().unwrap_or(0);
+                status = RunStatus::Completed;
+            }
+            Some("turn.failed") => {
+                let message = event["error"]["message"].as_str().unwrap_or("turn failed");
+                status = RunStatus::Failed(message.to_owned());
+            }
+            _ => {}
+        }
+    }
+    HeadlessResult {
+        status,
+        answer,
+        transcript: raw.to_owned(),
+        usage,
     }
 }

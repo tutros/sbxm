@@ -18,6 +18,7 @@ fn opts() -> HeadlessOpts {
     HeadlessOpts {
         model: "claude-haiku-4-5-20251001".into(),
         budget_usd: None,
+        is_git_repo: false,
     }
 }
 
@@ -199,7 +200,7 @@ fn a_harness_without_an_adapter_is_refused_before_any_exec() {
     .unwrap_err();
     assert_eq!(
         err.to_string(),
-        "gemini has no headless adapter; use claude"
+        "gemini has no headless adapter; use claude or codex"
     );
     assert!(fake.execs().is_empty());
 }

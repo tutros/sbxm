@@ -701,6 +701,7 @@ fn claude_headless_against_real_sbx() {
     let opts = HeadlessOpts {
         model: "claude-haiku-4-5-20251001".into(),
         budget_usd: None,
+        is_git_repo: false,
     };
 
     let result = headless::run(
@@ -741,4 +742,82 @@ fn claude_headless_against_real_sbx() {
         )
         .unwrap();
     assert_eq!(left.exit_code, Some(1), "claude still running: {left:?}");
+}
+
+#[test]
+#[ignore = "needs a logged-in sbx, the openai secret and SBXM_REAL_BASE_DIR"]
+fn codex_headless_against_real_sbx() {
+    use std::time::Duration;
+
+    use sbxm::backend::{CreateSpec, ExecSpec, SkillsStore, Stdin};
+    use sbxm::harness::Harness;
+    use sbxm::headless::{self, HeadlessOpts, RunStatus};
+
+    let base_dir = real_base_dir();
+    let name = format!("sbxm-it-{}-codex-headless", std::process::id());
+    let workspace = base_dir.join(&name);
+    let _cleanup = Cleanup {
+        sandbox: name.clone(),
+        dirs: vec![workspace.clone()],
+        shared_dirs: vec![],
+    };
+    std::fs::create_dir_all(&workspace).unwrap();
+    SbxBackend
+        .create(&CreateSpec {
+            name: name.clone(),
+            agent: "codex".into(),
+            workspace: workspace.clone(),
+            cpus: 2,
+            memory: "2g".into(),
+            skills: SkillsStore::Off,
+            kits: vec![],
+        })
+        .unwrap();
+    // E:\sbxm-it\x is mounted as /e/sbxm-it/x.
+    let path = workspace.to_string_lossy().replace(char::from(92), "/");
+    let in_sandbox = PathBuf::from(format!("/{}{}", path[..1].to_lowercase(), &path[2..]));
+    // An unseeded workspace isn't a git repo (decision 113).
+    let opts = HeadlessOpts {
+        model: "gpt-5.6-luna".into(),
+        budget_usd: None,
+        is_git_repo: false,
+    };
+
+    let result = headless::run(
+        &SbxBackend,
+        &name,
+        &in_sandbox,
+        Harness::Codex,
+        "Reply with exactly: PONG",
+        &opts,
+        Duration::from_secs(180),
+    )
+    .unwrap();
+    assert_eq!(result.status, RunStatus::Completed, "{result:?}");
+    assert!(result.answer.contains("PONG"), "{result:?}");
+    assert!(result.usage.output_tokens > 0 && result.usage.cost_usd.is_none());
+
+    // Killed inside the sandbox after 3 s: TimedOut, and no `codex` process left.
+    let result = headless::run(
+        &SbxBackend,
+        &name,
+        &in_sandbox,
+        Harness::Codex,
+        "Run `sleep 60` in the shell, then reply DONE.",
+        &opts,
+        Duration::from_secs(3),
+    )
+    .unwrap();
+    assert_eq!(result.status, RunStatus::TimedOut, "{result:?}");
+    let left = SbxBackend
+        .exec(
+            &name,
+            &ExecSpec {
+                workdir: None,
+                argv: vec!["pgrep".into(), "-x".into(), "codex".into()],
+                stdin: Stdin::Closed,
+            },
+        )
+        .unwrap();
+    assert_eq!(left.exit_code, Some(1), "codex still running: {left:?}");
 }
