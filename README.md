@@ -48,7 +48,7 @@ that).
 4. Create a project and its Claude Code sandbox, then attach to it:
    ```
    sbxm new demo
-   sbxm open demo
+   sbxm open demo --harness claude
    ```
    The workspace is `<base_dir>\demo`, mounted read-write into the sandbox.
 
@@ -196,7 +196,7 @@ settings, the *contents* of referenced files, resources and sbxm's version. A se
 
 - `sbxm list` shows `changed` when the current config no longer matches, with the command to fix it.
 - `sbxm open` refuses a changed sandbox instead of attaching to something built from an old config.
-- `sbxm open <project> --rebuild` recreates it. The workspace is kept, but the agent's **session history in that
+- `sbxm open <project> --harness h --rebuild` recreates it. The workspace is kept, but the agent's **session history in that
   sandbox is lost**. The old sandbox is removed only after the new kits validate.
 - `sbxm config show <project> --harness <h>` prints exactly what's hashed, so you can see what changed.
 
@@ -215,7 +215,7 @@ settings, the *contents* of referenced files, resources and sbxm's version. A se
 - **Start with `sbxm doctor`.** Each failure says what's wrong and how to fix it.
 - **`sbx create` fails with `failed to run sandbox container`:** check the workspace isn't on a drive `sbx` can't
   mount (on the development machine, anything on `C:`), or under `%TEMP%`/`AppData`.
-- **A host is blocked:** add it to `network.allow`, then `sbxm open <project> --rebuild`.
+- **A host is blocked:** add it to `network.allow`, then `sbxm open <project> --harness h --rebuild`.
 - **`secret '…' (secrets.services) is not stored in sbx`:** `sbx secret set <service>`, or `sbx setup` to import it
   from your environment.
 - **Pi answers `401`:** approve the credential binding (see *Harnesses*).
@@ -268,7 +268,7 @@ worker, the output goes to `.sbxm-issue/` in its clone (`agent.log`, `gates.log`
 `review.md`, `fix.log`); for `review -Pr <n>`, to `<base_dir>\sbxm-pr-<n>-review\` (`gates.log`, `review-1.log`,
 `review.md`). Both keep the reviewer's full session transcripts in `transcripts\`, copied out before its sandbox is
 removed.
-To take over one interactively, run `sbxm open sbxm-issue-<n>`. `-BaseDir` (default `E:\sbxm-projects`) must match
+To take over one interactively, run `sbxm open sbxm-issue-<n> --harness claude`. `-BaseDir` (default `E:\sbxm-projects`) must match
 `base_dir` in `config.toml`. [`sandbox-issues.md`](sandbox-issues.md) has the steps with the expected output.
 
 ## License
