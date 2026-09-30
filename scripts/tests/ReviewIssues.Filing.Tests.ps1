@@ -54,7 +54,8 @@ BeforeAll {
         $dir = Join-Path $TestDrive 'reviews'
         New-Item -ItemType Directory $dir -Force | Out-Null
         $path = Join-Path $dir $Fixture
-        if (-not (Test-Path $path)) { Copy-Item (Join-Path $script:fixtures $Fixture) $path }
+        $source = Join-Path $script:fixtures $Fixture
+        if (Test-Path $source) { Copy-Item $source $path -Force }   # a fresh copy; other names are files the test made
         $all = Invoke-ReviewFiling -Review $path @Arguments 6>&1 3>&1
         [pscustomobject]@{
             Code = @($all | Where-Object { $_ -is [int] })[-1]
@@ -264,5 +265,67 @@ Describe 'Create' {
         $run.Code | Should -Be 1
         $script:fake.Writes | Should -BeNullOrEmpty
         $run.Text | Should -BeLike '*nothing was filed*'
+    }
+}
+
+Describe 'Write-back of the Issues line' {
+    BeforeEach { Initialize-Fake }
+
+    BeforeAll {
+        function Get-FixtureText { (Get-Content -Raw (Join-Path $script:fixtures 'review-small.md')) -replace "`r`n", "`n" }
+        function Add-ReviewFile([string]$Name, [byte[]]$Bytes) {
+            $dir = Join-Path $TestDrive 'reviews'
+            New-Item -ItemType Directory $dir -Force | Out-Null
+            [IO.File]::WriteAllBytes((Join-Path $dir $Name), $Bytes)
+        }
+    }
+
+    It 'replaces the Issues line and changes nothing else (byte for byte)' {
+        $original = Get-FixtureText
+        Add-ReviewFile 'r-lf.md' ([Text.Encoding]::UTF8.GetBytes($original))
+        $run = Invoke-Filing -Fixture 'r-lf.md' -Arguments @{ Create = $true }
+        $expected = $original.Replace('Issues: pending (test)', 'Issues: S-1 #41, S-2 #40, S-Q1 #42')
+        [IO.File]::ReadAllBytes($run.Path) | Should -Be ([Text.Encoding]::UTF8.GetBytes($expected))
+    }
+
+    It 'keeps CRLF line endings' {
+        $original = (Get-FixtureText) -replace "`n", "`r`n"
+        Add-ReviewFile 'r-crlf.md' ([Text.Encoding]::UTF8.GetBytes($original))
+        $run = Invoke-Filing -Fixture 'r-crlf.md' -Arguments @{ Create = $true }
+        $expected = $original.Replace('Issues: pending (test)', 'Issues: S-1 #41, S-2 #40, S-Q1 #42')
+        [IO.File]::ReadAllBytes($run.Path) | Should -Be ([Text.Encoding]::UTF8.GetBytes($expected))
+    }
+
+    It 'keeps a byte order mark' {
+        $original = Get-FixtureText
+        $bytes = [byte[]](0xEF, 0xBB, 0xBF) + [Text.Encoding]::UTF8.GetBytes($original)
+        Add-ReviewFile 'r-bom.md' $bytes
+        $run = Invoke-Filing -Fixture 'r-bom.md' -Arguments @{ Create = $true }
+        $after = [IO.File]::ReadAllBytes($run.Path)
+        $after[0..2] | Should -Be @(0xEF, 0xBB, 0xBF)
+        [Text.Encoding]::UTF8.GetString($after, 3, $after.Length - 3) | Should -BeLike '*Issues: S-1 #41, S-2 #40, S-Q1 #42*'
+    }
+
+    It 'leaves findings that were not filed as pending' {
+        $run = Invoke-Filing -Arguments @{ Create = $true; Only = @('S-1') }
+        (Get-Content $run.Path | Where-Object { $_ -like 'Issues:*' }) | Should -Be 'Issues: S-1 #40, S-2 pending, S-Q1 pending'
+    }
+
+    It 'writes the numbers that exist after an interrupted run' {
+        $script:fake.FailCreateAt = 2
+        $run = Invoke-Filing -Arguments @{ Create = $true }
+        $run.Code | Should -Be 2
+        (Get-Content $run.Path | Where-Object { $_ -like 'Issues:*' }) | Should -Be 'Issues: S-1 pending, S-2 #40, S-Q1 pending'
+    }
+
+    It 'rewrites the Codex review''s long Issues line to the short form' {
+        $run = Invoke-Filing -Fixture 'review-m2a-codex.md' -Arguments @{ Create = $true; StandardCriteria = $true }
+        (Get-Content $run.Path | Where-Object { $_ -like 'Issues:*' }).Count | Should -Be 1
+        (Get-Content $run.Path | Where-Object { $_ -like 'Issues:*' }) | Should -BeLike 'Issues: M2A-1 #*, M2A-2 #*, M2A-3 #*, M2A-Q1 #*'
+    }
+
+    It 'does not touch the file on a dry run' {
+        $run = Invoke-Filing
+        [IO.File]::ReadAllBytes($run.Path) | Should -Be ([IO.File]::ReadAllBytes((Join-Path $script:fixtures 'review-small.md')))
     }
 }

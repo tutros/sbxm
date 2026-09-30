@@ -316,6 +316,23 @@ function Invoke-GhWithBody([scriptblock]$Command, [string]$Body) {
     finally { Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue }
 }
 
+# Replaces the first `Issues:` line and nothing else: the file's line endings and byte order mark stay.
+function Set-IssuesLine([string]$Path, [string]$Line) {
+    $bytes = [IO.File]::ReadAllBytes($Path)
+    $bom = $bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF
+    $skip = if ($bom) { 3 } else { 0 }
+    $text = [Text.UTF8Encoding]::new($false).GetString($bytes, $skip, $bytes.Length - $skip)
+    $pattern = [regex]::new('(?m)^Issues:[^\r\n]*')
+    if (-not $pattern.IsMatch($text)) {
+        Write-Warning "$(Split-Path -Leaf $Path) has no 'Issues:' line to update; add one so the issue numbers are recorded"
+        return
+    }
+    $new = $pattern.Replace($text, { param($m) $Line }, 1)
+    $out = [Text.UTF8Encoding]::new($false).GetBytes($new)
+    if ($bom) { $out = [byte[]](0xEF, 0xBB, 0xBF) + $out }
+    [IO.File]::WriteAllBytes($Path, $out)
+}
+
 function Get-Plural([int]$n, [string]$word) { if ($n -eq 1) { "$n $word" } else { "$n ${word}s" } }
 
 # `Issues: S-1 #33, S-2 pending`: a number where the finding has an issue, `Unknown` where it would get one.
@@ -439,6 +456,8 @@ function Invoke-ReviewFiling {
             catch { $failure = "#$($entry.Number) links: $($_.Exception.Message)" }
         }
     }
+
+    Set-IssuesLine (Resolve-Path -LiteralPath $Review).Path (Format-IssuesLine $parsed.Findings $numbers)
 
     foreach ($finding in $prepared) {
         $status = if ($created.Contains($finding.Id)) { 'created' } elseif ($numbers.ContainsKey($finding.Id)) { 'skipped (exists)' } else { 'not filed' }
