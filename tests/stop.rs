@@ -73,8 +73,8 @@ fn missing_harness_says_how_to_create_it() {
     let message = format!("{err:#}");
     assert!(
         message.contains(
-            "no sbxm codex sandbox for project 'demo'; create one with \
-             `sbxm new demo --harness codex`"
+            "no sbxm codex sandbox for project 'demo', which has a claude sandbox; \
+             use `--harness claude`"
         ),
         "{message}"
     );

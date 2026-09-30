@@ -21,6 +21,18 @@ pub fn run(
         .as_ref()
         .and_then(|s| s.sandboxes.get(harness.as_str()))
     else {
+        let others: Vec<&str> = state
+            .iter()
+            .flat_map(|s| s.sandboxes.keys().map(String::as_str))
+            .collect();
+        if !others.is_empty() {
+            bail!(
+                "no sbxm {}sandbox for project '{name}', which has a {} sandbox; use `--harness {}`",
+                harness_label(harness),
+                others.join("/"),
+                others.join("` or `--harness ")
+            );
+        }
         bail!(
             "no sbxm {}sandbox for project '{name}'; create one with `sbxm new {name}{}`",
             harness_label(harness),
