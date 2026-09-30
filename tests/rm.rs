@@ -139,9 +139,10 @@ fn wrong_harness_names_the_harnesses_the_project_has() {
     let err = plain_rm(&env, "demo", &backend).unwrap_err();
 
     let message = format!("{err:#}");
-    assert!(
-        message.contains("has a codex sandbox; use `--harness codex`"),
-        "{message}"
+    assert_eq!(
+        message,
+        "no sbxm claude sandbox for project 'demo', which has a codex sandbox; \
+         use `--harness codex`"
     );
     assert!(backend.removes().is_empty());
 }

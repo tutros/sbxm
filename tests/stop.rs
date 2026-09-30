@@ -63,6 +63,24 @@ fn stops_the_selected_harness_only() {
 }
 
 #[test]
+fn requested_claude_names_the_existing_codex_sandbox() {
+    let env = Env::new();
+    env.run_with("demo", &codex(), &FakeBackend::default())
+        .unwrap();
+    let backend = FakeBackend::default();
+
+    let err = stop::run(&env.config_dir(), "demo", Harness::Claude, &backend).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert_eq!(
+        message,
+        "no sbxm claude sandbox for project 'demo', which has a codex sandbox; \
+         use `--harness codex`"
+    );
+    assert!(backend.stops().is_empty());
+}
+
+#[test]
 fn missing_harness_says_how_to_create_it() {
     let env = Env::new();
     env.run("demo", &FakeBackend::default()).unwrap();

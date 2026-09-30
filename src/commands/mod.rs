@@ -65,6 +65,13 @@ fn open_harness_flag(harness: Harness) -> String {
     format!(" --harness {}", harness.as_str())
 }
 
+/// `harness` followed by a space, always explicit: decision 135 requires
+/// `stop`/`rm` to always name the harness they were asked for, so a "no
+/// sandbox for X, but Y has one" message can't hide X while naming Y.
+fn requested_harness_label(harness: Harness) -> String {
+    format!("{} ", harness.as_str())
+}
+
 /// Warns about every setting in `profile` that `harness` can't apply in
 /// `sandbox`, shared by `new` and `open` so the message and ordering can't
 /// diverge (decisions 11, 78).
