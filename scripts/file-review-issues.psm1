@@ -16,7 +16,7 @@ function ConvertFrom-ReviewFile {
     $review = [ordered]@{
         Findings = [System.Collections.Generic.List[object]]::new()
         NotFiled = [ordered]@{ Sections = 0; Nits = 0 }
-        HeadSha = $null; Scope = $null; IssuesLine = $null
+        HeadSha = $null; Range = $null; Scope = $null; IssuesLine = $null
     }
     $section = $null     # @{ Label; Findings = count }
     $finding = $null
@@ -26,7 +26,7 @@ function ConvertFrom-ReviewFile {
         if ($line -match '^Scope:\s*(.*)$' -and -not $review.Scope) {
             $review.Scope = $Matches[1]
             $sha = [regex]::Match($Matches[1], '\b[0-9a-f]{7,40}\.\.([0-9a-f]{7,40})\b')
-            if ($sha.Success) { $review.HeadSha = $sha.Groups[1].Value }
+            if ($sha.Success) { $review.HeadSha = $sha.Groups[1].Value; $review.Range = $sha.Value }
         }
         elseif ($line -match '^Issues:' -and -not $review.IssuesLine) { $review.IssuesLine = $line }
         if ($line -match '^##\s+(.+?)\s*$' -and $line -notmatch '^###') {
@@ -88,4 +88,81 @@ function Complete-Finding([hashtable]$finding) {
     $finding.Missing = @($required | Where-Object { -not $fields.Contains($_) })
     $finding.Remove('Body')
     $finding
+}
+
+# A full sha stays as it is, a short one is resolved by git; nothing in, nothing out.
+function Resolve-HeadSha([string]$Sha) {
+    if (-not $Sha) { return $null }
+    if ($Sha -match '^[0-9a-f]{40}$') { return $Sha }
+    $full = git rev-parse --verify "$Sha^{commit}"
+    if ($LASTEXITCODE -ne 0 -or -not $full) {
+        Write-Warning "git can't resolve the reviewed commit $Sha here; Where links stay plain text"
+        return $null
+    }
+    "$full".Trim()
+}
+
+# `src/a.rs:10-20` becomes a permalink at the reviewed commit. Plain words are left alone.
+function ConvertTo-WhereLinks {
+    param([string]$Text, [string]$Repo, [string]$Sha)
+    $known = 'rs|toml|md|ps1|psm1|json|ya?ml|lock|txt|sh|py|js|ts'
+    $pattern = '(?<![\w/.:-])(`?)((?:[\w.-]+/)*[\w.-]+\.\w+)(?::(\d+)(?:-(\d+))?)?(`?)'
+    if (-not $Sha) {
+        if ($Text -match $pattern) { Write-Warning 'no commit sha found in the Scope line; Where links stay plain text' }
+        return $Text
+    }
+    [regex]::Replace($Text, $pattern, {
+            param($m)
+            $path = $m.Groups[2].Value
+            $from = $m.Groups[3].Value
+            $to = $m.Groups[4].Value
+            if (-not ($path -match "\.($known)$" -or $path.Contains('/') -or $from)) { return $m.Value }
+            $label = $path + $(if ($from) { ":$from" }) + $(if ($to) { "-$to" })
+            $anchor = if ($to) { "#L$from-L$to" } elseif ($from) { "#L$from" } else { '' }
+            $url = "https://github.com/$Repo/blob/$Sha/$path$anchor"
+            if ($m.Groups[1].Value) { "[``$label``]($url)" } else { "[$label]($url)" }
+        })
+}
+
+# Finding ids in a Depends on / Related text become issue numbers where they are known.
+function Convert-FindingIds([string]$Text, [hashtable]$IdMap) {
+    foreach ($id in $IdMap.Keys) {
+        $Text = $Text -replace "(?<![\w-])$([regex]::Escape($id))(?![\w-])", "#$($IdMap[$id])"
+    }
+    $Text
+}
+
+function Format-Field([string]$Label, [string]$Value) {
+    if ($Value.Contains("`n")) { "**${Label}:**`n$Value" } else { "**${Label}:** $Value" }
+}
+
+# The issue text for one finding: the skill's template in order, the marker on the last line.
+function New-IssueBody {
+    param(
+        [Parameter(Mandatory)]$Review, [Parameter(Mandatory)]$Finding, [Parameter(Mandatory)][string]$Repo,
+        [Parameter(Mandatory)][string]$ReviewName, [string]$HeadSha, [hashtable]$IdMap = @{}
+    )
+    $f = $Finding.Fields
+    $isQuestion = $Finding.Label -eq 'question'
+    $depends = if ($f.Contains('depends on')) { $f['depends on'] } else { 'none known' }
+    $pointsBack = @($Review.Findings | Where-Object {
+            $_.Id -ne $Finding.Id -and $_.Fields.Contains('depends on') -and
+            $_.Fields['depends on'] -match "(?<![\w-])$([regex]::Escape($Finding.Id))(?![\w-])"
+        } | ForEach-Object { "$($_.Id) depends on this one" })
+    $related = (@(if ($f.Contains('related')) { $f['related'] }) + $pointsBack) -join '; '
+
+    $parts = [System.Collections.Generic.List[string]]::new()
+    $parts.Add((Format-Field 'Where' (ConvertTo-WhereLinks $f['where'] $Repo $HeadSha)))
+    $parts.Add((Format-Field 'What happens' $f['what happens']))
+    $parts.Add((Format-Field 'Why it matters' $f['why it matters']))
+    $parts.Add((Format-Field $(if ($isQuestion) { 'Options and recommendation' } else { 'Fix' }) $f['fix']))
+    $parts.Add((Format-Field 'Depends on' (Convert-FindingIds $depends $IdMap)))
+    if ($related) { $parts.Add((Format-Field 'Related' (Convert-FindingIds $related $IdMap))) }
+    if (-not $isQuestion) {
+        $parts.Add("**Acceptance criteria:**`n" + (($Finding.Criteria | ForEach-Object { "- [ ] $_" }) -join "`n"))
+    }
+    $range = if ($Review.Range) { $Review.Range } else { $Review.Scope }
+    $parts.Add("**Review:** ``reviews/$ReviewName``, finding $($Finding.Id), reviewed commits ``$range``")
+    $parts.Add("<!-- review-finding: $ReviewName#$($Finding.Id) -->")
+    ($parts -join "`n") + "`n"
 }
