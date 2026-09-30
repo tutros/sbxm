@@ -86,8 +86,63 @@ function Complete-Finding([hashtable]$finding) {
     $finding.Fields = $fields
     $finding.Criteria = $criteria.ToArray()
     $finding.Missing = @($required | Where-Object { -not $fields.Contains($_) })
+    $finding.EndLine = $finding.StartLine + $finding.Body.Count
     $finding.Remove('Body')
     $finding
+}
+
+$secretPatterns = [ordered]@{
+    'a GitHub token'                = '\b(?:gh[pos]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})'
+    'an sk- key'                    = '\bsk-[A-Za-z0-9_-]{20,}'
+    'an AWS key'                    = '\bAKIA[0-9A-Z]{16}\b'
+    'a bearer token'                = 'Bearer\s+[A-Za-z0-9._~+/=-]{20,}'
+    'a private key'                 = '-----BEGIN [A-Z ]*PRIVATE KEY-----'
+    'a password or token assignment' = '(?i)\b(?:password|token)\s*=\s*["'']?[^\s"'']{4,}'
+}
+
+# Lines of a finding that look like a secret: id, line number in the review file and what it looks like, never
+# the value. The caller refuses the finding.
+function Find-Secrets {
+    param([Parameter(Mandatory)][string]$Text, [Parameter(Mandatory)]$Finding)
+    $lines = $Text -replace "`r`n", "`n" -split "`n"
+    $last = [Math]::Min($Finding.EndLine, $lines.Count)
+    for ($n = $Finding.StartLine; $n -le $last; $n++) {
+        foreach ($kind in $secretPatterns.Keys) {
+            if ($lines[$n - 1] -match $secretPatterns[$kind]) {
+                [pscustomobject]@{ Id = $Finding.Id; Line = $n; Kind = $kind }
+                break
+            }
+        }
+    }
+}
+
+# Personal paths become ~ (unless -KeepPaths) and e-mail addresses are flagged, each with a warning.
+function Protect-Text {
+    param([Parameter(Mandatory, Position = 0)][AllowEmptyString()][string]$Text, [Parameter(Mandatory)][string]$Id, [switch]$KeepPaths)
+    if (-not $KeepPaths) {
+        $replacements = @{ '(?i)\b[A-Z]:\\Users\\[^\\\s`''"]+' = '~'; '/home/[^/\s`''"]+' = '~' }
+        foreach ($pattern in $replacements.Keys) {
+            $hits = [regex]::Matches($Text, $pattern).Count
+            if ($hits) {
+                Write-Warning "${Id}: replaced $hits personal path(s) with ~; use -KeepPaths to keep them"
+                $Text = [regex]::Replace($Text, $pattern, $replacements[$pattern])
+            }
+        }
+    }
+    if ($Text -match '[\w.+-]+@[\w-]+(\.[\w-]+)+') { Write-Warning "${Id}: contains an e-mail address (left as is)" }
+    $Text
+}
+
+# A copy of the finding with every text protected.
+function Protect-Finding {
+    param([Parameter(Mandatory)]$Finding, [switch]$KeepPaths)
+    $copy = $Finding.PSObject.Copy()
+    $copy.Title = Protect-Text $Finding.Title -Id $Finding.Id -KeepPaths:$KeepPaths
+    $fields = [ordered]@{}
+    foreach ($name in $Finding.Fields.Keys) { $fields[$name] = Protect-Text $Finding.Fields[$name] -Id $Finding.Id -KeepPaths:$KeepPaths }
+    $copy.Fields = $fields
+    $copy.Criteria = @($Finding.Criteria | ForEach-Object { Protect-Text $_ -Id $Finding.Id -KeepPaths:$KeepPaths })
+    $copy
 }
 
 # A full sha stays as it is, a short one is resolved by git; nothing in, nothing out.
