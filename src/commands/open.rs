@@ -3,7 +3,7 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 
-use super::{harness_flag, new, rm};
+use super::{new, open_harness_flag, rm};
 use crate::backend::SandboxBackend;
 use crate::config::{self, GlobalConfig, Profile};
 use crate::harness::Harness;
@@ -62,7 +62,7 @@ pub fn run(
             "sandbox {sandbox} exists but sbxm has no state for it; it may lack sbxm's config, \
              so remove it with `sbx rm {sandbox}` (this deletes its session history) and run \
              `sbxm open {name}{}` again",
-            harness_flag(harness)
+            open_harness_flag(harness)
         ),
         // Recreate with the profile it was built from; state from before
         // slice 11 has none, so the default applies.
@@ -93,7 +93,7 @@ fn check_unchanged(
     let fix = format!(
         "run `sbxm open {name}{} --rebuild` to recreate it (its session history is lost; \
          the workspace is kept)",
-        harness_flag(harness)
+        open_harness_flag(harness)
     );
     let Some(stored) = &entry.config_hash else {
         bail!("{sandbox} was created before sbxm recorded config hashes; {fix}");

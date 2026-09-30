@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 
-use super::harness_flag;
+use super::open_harness_flag;
 use crate::backend::{CreateSpec, SandboxBackend};
 use crate::config::{self, GlobalConfig, Profile};
 use crate::harness::Harness;
@@ -63,7 +63,7 @@ pub fn run(
     {
         bail!(
             "sandbox {sandbox} already exists; open it with `sbxm open {name}{}`",
-            harness_flag(options.harness)
+            open_harness_flag(options.harness)
         );
     }
     let workspace = config.base_dir.join(name);
