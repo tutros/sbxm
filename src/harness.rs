@@ -3,8 +3,11 @@
 use std::borrow::Cow;
 use std::path::PathBuf;
 
-use crate::backend::SkillsStore;
+use anyhow::{Result, bail};
+
+use crate::backend::{SkillsStore, Stdin};
 use crate::config::Profile;
+use crate::headless::{self, HeadlessOpts, HeadlessResult};
 
 /// `sbx`'s built-in agent of the same name, or Pi's kit (decision 73).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, clap::ValueEnum)]
@@ -49,6 +52,46 @@ impl Harness {
             Harness::Gemini => PathBuf::from(".gemini").join("GEMINI.md"),
             Harness::Pi => PathBuf::from(".pi").join("agent").join("AGENTS.md"),
         }
+    }
+
+    /// The headless command `headless::run` executes in the sandbox (S5).
+    pub fn headless_argv(self, prompt: &str, opts: &HeadlessOpts) -> Result<Vec<String>> {
+        self.require_headless()?;
+        let mut argv: Vec<String> = ["claude", "-p", prompt, "--model", &opts.model]
+            .into_iter()
+            .chain(["--output-format", "stream-json", "--verbose"])
+            .map(str::to_owned)
+            .collect();
+        argv.extend(self.budget_flag(opts.budget_usd).unwrap_or_default());
+        Ok(argv)
+    }
+
+    /// How stdin is wired for the headless command.
+    pub fn stdin(self) -> Stdin {
+        Stdin::Closed
+    }
+
+    /// The flag that caps a run's cost, if the harness has one (S5).
+    pub fn budget_flag(self, budget_usd: Option<f64>) -> Option<Vec<String>> {
+        match (self, budget_usd) {
+            (Harness::Claude, Some(usd)) => {
+                Some(vec!["--max-budget-usd".to_owned(), usd.to_string()])
+            }
+            _ => None,
+        }
+    }
+
+    /// Parses the headless command's stdout, best-effort on truncated output.
+    pub fn parse_headless_output(self, raw: &str) -> Result<HeadlessResult> {
+        self.require_headless()?;
+        Ok(headless::parse_claude(raw))
+    }
+
+    fn require_headless(self) -> Result<()> {
+        if self != Harness::Claude {
+            bail!("{} has no headless adapter; use claude", self.as_str());
+        }
+        Ok(())
     }
 
     /// A warning for each configured setting this harness can't apply in

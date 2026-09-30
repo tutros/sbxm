@@ -664,3 +664,81 @@ fn exec_and_skills_against_real_sbx() {
 
     assert!(SbxBackend.skills().unwrap().is_object());
 }
+
+#[test]
+#[ignore = "needs a logged-in sbx, the anthropic secret and SBXM_REAL_BASE_DIR"]
+fn claude_headless_against_real_sbx() {
+    use std::time::Duration;
+
+    use sbxm::backend::{CreateSpec, ExecSpec, SkillsStore, Stdin};
+    use sbxm::harness::Harness;
+    use sbxm::headless::{self, HeadlessOpts, RunStatus};
+
+    let base_dir = real_base_dir();
+    let name = format!("sbxm-it-{}-headless", std::process::id());
+    let workspace = base_dir.join(&name);
+    let _cleanup = Cleanup {
+        sandbox: name.clone(),
+        dirs: vec![workspace.clone()],
+        shared_dirs: vec![],
+    };
+    std::fs::create_dir_all(&workspace).unwrap();
+    SbxBackend
+        .create(&CreateSpec {
+            name: name.clone(),
+            agent: "claude".into(),
+            workspace: workspace.clone(),
+            cpus: 2,
+            memory: "2g".into(),
+            skills: SkillsStore::Off,
+            kits: vec![],
+        })
+        .unwrap();
+    // The workspace is mounted at its host path in forward-slash form, drive
+    // letter first and lowercase: E:\sbxm-it\x is /e/sbxm-it/x.
+    let path = workspace.to_string_lossy().replace(char::from(92), "/");
+    let in_sandbox = PathBuf::from(format!("/{}{}", path[..1].to_lowercase(), &path[2..]));
+    let opts = HeadlessOpts {
+        model: "claude-haiku-4-5-20251001".into(),
+        budget_usd: None,
+    };
+
+    let result = headless::run(
+        &SbxBackend,
+        &name,
+        &in_sandbox,
+        Harness::Claude,
+        "Reply with exactly: PONG",
+        &opts,
+        Duration::from_secs(120),
+    )
+    .unwrap();
+    assert_eq!(result.status, RunStatus::Completed, "{result:?}");
+    assert!(result.answer.contains("PONG"), "{result:?}");
+    assert!(result.usage.output_tokens > 0 && result.usage.cost_usd.is_some());
+
+    // A run that can't finish in 3 s is killed inside the sandbox: TimedOut,
+    // and no `claude` process is left behind (decision 114).
+    let result = headless::run(
+        &SbxBackend,
+        &name,
+        &in_sandbox,
+        Harness::Claude,
+        "Run `sleep 60` in the shell, then reply DONE.",
+        &opts,
+        Duration::from_secs(3),
+    )
+    .unwrap();
+    assert_eq!(result.status, RunStatus::TimedOut, "{result:?}");
+    let left = SbxBackend
+        .exec(
+            &name,
+            &ExecSpec {
+                workdir: None,
+                argv: vec!["pgrep".into(), "-x".into(), "claude".into()],
+                stdin: Stdin::Closed,
+            },
+        )
+        .unwrap();
+    assert_eq!(left.exit_code, Some(1), "claude still running: {left:?}");
+}

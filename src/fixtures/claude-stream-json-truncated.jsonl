@@ -1,0 +1,3 @@
+{"type":"system","subtype":"init","cwd":"/e/sbxm-it/s1-fixtures","session_id":"92ae7cb6-403a-4abc-a295-072f335d20cb","model":"claude-haiku-4-5-20251001","permissionMode":"bypassPermissions","apiKeySource":"none","claude_code_version":"2.1.280"}
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20251001","role":"assistant","content":[{"type":"text","text":"PONG"}],"usage":{"input_tokens":10,"cache_creation_input_tokens":13952,"cache_read_input_tokens":13689,"output_tokens":6}},"session_id":"92ae7cb6-403a-4abc-a295-072f335d20cb"}
+{"type":"assistant","message":{"model":"claude-haiku-4-5-20
