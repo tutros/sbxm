@@ -14,6 +14,16 @@ use crate::harness::Harness;
 /// Seconds between `timeout`'s TERM and its KILL.
 const KILL_AFTER_SECS: u64 = 10;
 
+/// What a parser reports when the stream ended without its closing event.
+const NO_RESULT: &str = "no result event in the output";
+const NO_TURN_COMPLETED: &str = "no turn.completed event in the output";
+
+/// Whether the status is a failure the harness reported, not just the parser
+/// noticing that the stream stopped early.
+fn reported_failure(status: &RunStatus) -> bool {
+    matches!(status, RunStatus::Failed(why) if why != NO_RESULT && why != NO_TURN_COMPLETED)
+}
+
 /// What [`run`] passes to the harness's command.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HeadlessOpts {
@@ -90,8 +100,9 @@ pub fn run(
             .any(|line| line.starts_with("timeout: sending signal"));
     if timed_out {
         result.status = RunStatus::TimedOut;
-    } else if output.exit_code != Some(0) && !matches!(result.status, RunStatus::Failed(_)) {
-        // A parsed failure says more than stderr does, so it stays.
+    } else if output.exit_code != Some(0) && !reported_failure(&result.status) {
+        // A failure the harness itself reported says more than stderr does, so
+        // it stays; a parser's "no result event" says less than the exit code.
         let code = match output.exit_code {
             Some(code) => format!("exit code {code}"),
             None => "killed by a signal".to_owned(),
@@ -117,7 +128,7 @@ pub(crate) fn parse_claude(raw: &str) -> HeadlessResult {
         output_tokens: 0,
         cost_usd: None,
     };
-    let mut status = RunStatus::Failed("no result event in the output".into());
+    let mut status = RunStatus::Failed(NO_RESULT.into());
     for event in raw
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -178,7 +189,7 @@ pub(crate) fn parse_codex(raw: &str) -> HeadlessResult {
         output_tokens: 0,
         cost_usd: None,
     };
-    let mut status = RunStatus::Failed("no turn.completed event in the output".into());
+    let mut status = RunStatus::Failed(NO_TURN_COMPLETED.into());
     for event in raw
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
@@ -277,11 +288,7 @@ pub(crate) fn parse_antigravity(raw: &str) -> HeadlessResult {
             };
             (status, answer, usage)
         }
-        None => (
-            RunStatus::Failed("no result event in the output".into()),
-            partial,
-            steps_usage,
-        ),
+        None => (RunStatus::Failed(NO_RESULT.into()), partial, steps_usage),
     };
     HeadlessResult {
         status,

@@ -179,6 +179,23 @@ fn bare_137_without_the_marker_is_failed_not_timed_out() {
 }
 
 #[test]
+fn a_crash_with_no_output_reports_the_exit_code_and_stderr_not_a_missing_event() {
+    let (_, result) = run_with(exec_output("", "boom\n", 1));
+    assert_eq!(result.status, RunStatus::Failed("exit code 1: boom".into()));
+}
+
+#[test]
+fn a_truncated_stream_with_a_bad_exit_reports_the_exit_code() {
+    let (_, result) = run_with(exec_output(TRUNCATED, "Killed\n", 137));
+    assert_eq!(
+        result.status,
+        RunStatus::Failed("exit code 137: Killed".into())
+    );
+    // The partial answer is still kept.
+    assert_eq!(result.answer, "PONG");
+}
+
+#[test]
 fn a_non_zero_exit_overrides_a_completed_stream() {
     let (_, result) = run_with(exec_output(PONG, "boom\n", 1));
     assert_eq!(result.status, RunStatus::Failed("exit code 1: boom".into()));

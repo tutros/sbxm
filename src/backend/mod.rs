@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-pub use fake::FakeBackend;
+pub use fake::{ExecGate, FakeBackend};
 pub use sbx::SbxBackend;
 
 pub trait SandboxBackend: Send + Sync {

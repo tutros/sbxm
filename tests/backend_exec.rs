@@ -70,3 +70,88 @@ fn fake_can_be_shared_across_threads() {
     names.sort();
     assert_eq!(names, ["a", "b"]);
 }
+
+// ---- per-sandbox scripting and the exec gate (slice 6) --------------------
+
+fn out(stdout: &str) -> ExecOutput {
+    ExecOutput {
+        stdout: stdout.into(),
+        stderr: String::new(),
+        exit_code: Some(0),
+    }
+}
+
+#[test]
+fn fake_scripts_exec_output_per_sandbox_regardless_of_call_order() {
+    let fake = FakeBackend::default()
+        .with_exec_output_for("a", out("from a"))
+        .with_exec_output_for("b", out("from b"))
+        .with_default_exec_output(out("default"));
+
+    assert_eq!(
+        fake.exec("b", &spec(None, Stdin::Closed)).unwrap().stdout,
+        "from b"
+    );
+    assert_eq!(
+        fake.exec("a", &spec(None, Stdin::Closed)).unwrap().stdout,
+        "from a"
+    );
+    // Persistent, not consumed; other sandboxes get the default.
+    assert_eq!(
+        fake.exec("a", &spec(None, Stdin::Closed)).unwrap().stdout,
+        "from a"
+    );
+    assert_eq!(
+        fake.exec("c", &spec(None, Stdin::Closed)).unwrap().stdout,
+        "default"
+    );
+}
+
+#[test]
+fn fake_can_fail_create_or_exec_for_one_sandbox_only() {
+    let fake = FakeBackend::default()
+        .with_failing_create_for("bad")
+        .with_failing_exec_for("worse");
+    let create = |name: &str| {
+        fake.create(&sbxm::backend::CreateSpec {
+            name: name.into(),
+            agent: "claude".into(),
+            workspace: PathBuf::from("/w"),
+            cpus: 1,
+            memory: "1g".into(),
+            skills: sbxm::backend::SkillsStore::Off,
+            kits: vec![],
+        })
+    };
+
+    assert!(create("bad").is_err());
+    assert!(create("good").is_ok());
+    // A failed create is still recorded.
+    assert_eq!(fake.creates().len(), 2);
+    assert!(fake.exec("worse", &spec(None, Stdin::Closed)).is_err());
+    assert!(fake.exec("good", &spec(None, Stdin::Closed)).is_ok());
+}
+
+#[test]
+fn the_exec_gate_blocks_execs_until_opened() {
+    let (fake, gate) = FakeBackend::default().with_exec_gate();
+    std::thread::scope(|s| {
+        let handles: Vec<_> = ["a", "b"]
+            .into_iter()
+            .map(|name| {
+                let fake = &fake;
+                s.spawn(move || fake.exec(name, &spec(None, Stdin::Closed)).unwrap())
+            })
+            .collect();
+
+        gate.wait_for_blocked(2);
+        // Both are inside exec and recorded, but neither has returned.
+        assert_eq!(fake.execs().len(), 2);
+        assert!(handles.iter().all(|h| !h.is_finished()));
+
+        gate.open();
+        for h in handles {
+            h.join().unwrap();
+        }
+    });
+}

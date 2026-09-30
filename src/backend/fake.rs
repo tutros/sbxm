@@ -1,11 +1,61 @@
-use std::collections::VecDeque;
-use std::sync::Mutex;
+use std::collections::{HashMap, VecDeque};
+use std::sync::{Arc, Condvar, Mutex};
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 
 use std::path::Path;
 
 use super::{CreateSpec, ExecOutput, ExecSpec, KitValidation, SandboxBackend, SandboxInfo};
+
+/// Holds every `exec` of a [`FakeBackend`] until [`ExecGate::open`], so a test
+/// can look at what exists while runs are "in progress".
+#[derive(Debug, Clone, Default)]
+pub struct ExecGate {
+    inner: Arc<(Mutex<GateState>, Condvar)>,
+}
+
+#[derive(Debug, Default)]
+struct GateState {
+    open: bool,
+    blocked: usize,
+}
+
+/// A test that waits longer than this has hung; fail it instead.
+const GATE_TIMEOUT: Duration = Duration::from_secs(10);
+
+impl ExecGate {
+    /// Waits until `n` execs are blocked at the gate.
+    pub fn wait_for_blocked(&self, n: usize) {
+        let (state, cv) = &*self.inner;
+        let (_guard, timeout) = cv
+            .wait_timeout_while(state.lock().unwrap(), GATE_TIMEOUT, |s| s.blocked < n)
+            .unwrap();
+        assert!(
+            !timeout.timed_out(),
+            "fewer than {n} execs reached the gate"
+        );
+    }
+
+    /// Lets every blocked and future exec through.
+    pub fn open(&self) {
+        let (state, cv) = &*self.inner;
+        state.lock().unwrap().open = true;
+        cv.notify_all();
+    }
+
+    fn pass(&self) {
+        let (state, cv) = &*self.inner;
+        let mut guard = state.lock().unwrap();
+        guard.blocked += 1;
+        cv.notify_all();
+        let (mut guard, timeout) = cv
+            .wait_timeout_while(guard, GATE_TIMEOUT, |s| !s.open)
+            .unwrap();
+        assert!(!timeout.timed_out(), "the exec gate was never opened");
+        guard.blocked -= 1;
+    }
+}
 
 /// Records calls instead of running `sbx`. Used by tests.
 #[derive(Debug, Default)]
@@ -26,6 +76,11 @@ pub struct FakeBackend {
     execs: Mutex<Vec<(String, ExecSpec)>>,
     exec_outputs: Mutex<VecDeque<ExecOutput>>,
     skills: Option<serde_json::Value>,
+    exec_outputs_for: HashMap<String, ExecOutput>,
+    default_exec_output: Option<ExecOutput>,
+    fail_create_for: Vec<String>,
+    fail_exec_for: Vec<String>,
+    gate: Option<ExecGate>,
 }
 
 impl FakeBackend {
@@ -58,6 +113,14 @@ impl FakeBackend {
         Self {
             secrets: names.iter().map(|n| n.to_string()).collect(),
             ..Self::default()
+        }
+    }
+
+    /// Makes `secret_services` return these names, on top of another constructor.
+    pub fn and_secrets(self, names: &[&str]) -> Self {
+        Self {
+            secrets: names.iter().map(|n| n.to_string()).collect(),
+            ..self
         }
     }
 
@@ -114,6 +177,45 @@ impl FakeBackend {
         }
     }
 
+    /// Makes every `exec` in `sandbox` return `output` (not consumed, so it is
+    /// independent of the order parallel calls arrive in).
+    pub fn with_exec_output_for(mut self, sandbox: &str, output: ExecOutput) -> Self {
+        self.exec_outputs_for.insert(sandbox.to_owned(), output);
+        self
+    }
+
+    /// What `exec` returns in a sandbox with no other scripted output.
+    pub fn with_default_exec_output(self, output: ExecOutput) -> Self {
+        Self {
+            default_exec_output: Some(output),
+            ..self
+        }
+    }
+
+    /// Makes `create` of this one sandbox record the call and then fail.
+    pub fn with_failing_create_for(mut self, sandbox: &str) -> Self {
+        self.fail_create_for.push(sandbox.to_owned());
+        self
+    }
+
+    /// Makes `exec` in this one sandbox record the call and then fail.
+    pub fn with_failing_exec_for(mut self, sandbox: &str) -> Self {
+        self.fail_exec_for.push(sandbox.to_owned());
+        self
+    }
+
+    /// Holds every `exec` (after recording it) until the returned gate is opened.
+    pub fn with_exec_gate(self) -> (Self, ExecGate) {
+        let gate = ExecGate::default();
+        (
+            Self {
+                gate: Some(gate.clone()),
+                ..self
+            },
+            gate,
+        )
+    }
+
     /// Every `exec` call: sandbox name and spec.
     pub fn execs(&self) -> Vec<(String, ExecSpec)> {
         self.execs.lock().unwrap().clone()
@@ -145,7 +247,7 @@ impl SandboxBackend for FakeBackend {
     fn create(&self, spec: &CreateSpec) -> Result<()> {
         self.creates.lock().unwrap().push(spec.clone());
         self.record("create", &spec.name);
-        if self.fail_create {
+        if self.fail_create || self.fail_create_for.contains(&spec.name) {
             bail!("fake create failure");
         }
         Ok(())
@@ -207,11 +309,18 @@ impl SandboxBackend for FakeBackend {
             .unwrap()
             .push((sandbox.to_owned(), spec.clone()));
         self.record("exec", sandbox);
-        Ok(self
-            .exec_outputs
-            .lock()
-            .unwrap()
-            .pop_front()
+        if let Some(gate) = &self.gate {
+            gate.pass();
+        }
+        if self.fail_exec_for.iter().any(|s| s == sandbox) {
+            bail!("fake exec failure");
+        }
+        if let Some(output) = self.exec_outputs_for.get(sandbox) {
+            return Ok(output.clone());
+        }
+        let queued = self.exec_outputs.lock().unwrap().pop_front();
+        Ok(queued
+            .or_else(|| self.default_exec_output.clone())
             .unwrap_or(ExecOutput {
                 stdout: String::new(),
                 stderr: String::new(),
