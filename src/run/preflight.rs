@@ -97,6 +97,26 @@ pub fn check(
             }
         }
     }
+    // A judge from a contestant's own provider may favour its own model
+    // family (decision 21): allowed, but said out loud.
+    if let Some(judge) = &run_config.eval.judge {
+        let provider = judge.harness.provider_secret();
+        let sharing: Vec<String> = run_config
+            .contestants
+            .iter()
+            .enumerate()
+            .filter(|(_, c)| c.harness.provider_secret() == provider)
+            .map(|(i, c)| format!("contestants[{i}] ({})", c.harness.as_str()))
+            .collect();
+        if !sharing.is_empty() {
+            warnings.push(format!(
+                "the judge ({}) uses the same provider ({provider}) as {}; it may favour its \
+                 own model family",
+                judge.harness.as_str(),
+                sharing.join(", ")
+            ));
+        }
+    }
     let profile_named = |name: &str| &profiles.iter().find(|(n, _)| n == name).unwrap().1;
     let mut unsupported = |harness: Harness, profile: &str, at: String| {
         for warning in harness.unsupported(profile_named(profile), &at) {

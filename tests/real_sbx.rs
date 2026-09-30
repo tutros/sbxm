@@ -1261,6 +1261,131 @@ fn run_checks_against_real_sbx() {
 
 #[test]
 #[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
+fn run_judge_against_real_sbx() {
+    use sbxm::commands::{run, run_show};
+    use sbxm::headless::RunStatus;
+
+    let base = real_base_dir().join(format!("sbxm-it-{}-judge", std::process::id()));
+    let _cleanup = Cleanup {
+        sandbox: String::new(),
+        dirs: vec![base.clone()],
+        shared_dirs: vec![],
+    };
+    std::fs::create_dir_all(&base).unwrap();
+    let config_dir = TempDir::new().unwrap();
+    let base_toml = toml::Value::String(base.to_str().unwrap().to_owned());
+    std::fs::write(
+        config_dir.path().join("config.toml"),
+        format!("base_dir = {base_toml}\n\n[resources]\ncpus = 2\nmemory = \"2g\"\n"),
+    )
+    .unwrap();
+    let profile_dir = config_dir.path().join("profiles").join("default");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    std::fs::write(
+        profile_dir.join("profile.toml"),
+        "description = \"real judge test\"\n\n[skills]\nstore = \"off\"\n",
+    )
+    .unwrap();
+    let run_config = config_dir.path().join("run.toml");
+    std::fs::write(
+        &run_config,
+        "[task]\nprompt = \"In one sentence, explain what a mutex is. Reply with just that sentence.\"\n\n\
+         [run]\ntimeout = \"4m\"\n\n\
+         [[contestants]]\nharness = \"claude\"\nmodel = \"claude-haiku-4-5-20251001\"\n\n\
+         [[contestants]]\nharness = \"codex\"\nmodel = \"gpt-5.6-luna\"\n\n\
+         [[eval.rubric]]\nid = \"correct\"\nkind = \"pass_fail\"\nweight = 1.0\nnotes = \"Says a mutex gives one thread at a time exclusive access\"\n\n\
+         [[eval.rubric]]\nid = \"clarity\"\nkind = \"scale\"\nlevels = [\"poor\", \"fair\", \"good\"]\nweight = 0.5\n\n\
+         [eval.judge]\nharness = \"claude\"\nmodel = \"claude-haiku-4-5-20251001\"\n",
+    )
+    .unwrap();
+
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let summary = run::run(
+        config_dir.path(),
+        &run_config,
+        &SbxBackend,
+        &mut out,
+        &mut warn,
+    )
+    .unwrap();
+    let (out, warn) = (
+        String::from_utf8_lossy(&out).into_owned(),
+        String::from_utf8_lossy(&warn).into_owned(),
+    );
+    println!("{out}{warn}");
+
+    for outcome in &summary.outcomes {
+        assert_eq!(
+            outcome.result.as_ref().unwrap().status,
+            RunStatus::Completed,
+            "{outcome:?}"
+        );
+    }
+    // The judge ran in its own sandbox, once, and scored both contestants.
+    assert!(
+        out.contains("Judge claude/claude-haiku-4-5-20251001: repeat 1/1 scored 2 contestants"),
+        "{out}"
+    );
+    let meta = base.join(".sbxm").join("runs").join(&summary.run_id);
+    let read = |path: std::path::PathBuf| -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    };
+    let record = read(meta.join("judge").join("0").join("judge.json"));
+    assert_eq!(record["status"], "ok", "{record}");
+    let mut labels: Vec<String> = record["labels"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    labels.sort();
+    assert_eq!(labels, ["A", "B"]);
+    assert!(
+        !std::fs::read_to_string(meta.join("judge").join("0").join("reply.txt"))
+            .unwrap()
+            .is_empty()
+    );
+    for contestant in 0..2 {
+        let evals = read(
+            meta.join(contestant.to_string())
+                .join("0")
+                .join("evals.json"),
+        );
+        let judge = &evals["judge"];
+        assert_eq!(judge["status"], "ok", "{judge}");
+        assert_eq!(judge["unscored"], serde_json::json!([]), "{judge}");
+        assert!(
+            judge["criteria"]["correct"]["value"].is_boolean(),
+            "{judge}"
+        );
+        let clarity = judge["criteria"]["clarity"]["value"].as_str().unwrap();
+        assert!(["poor", "fair", "good"].contains(&clarity), "{judge}");
+        let score = judge["criteria"]["clarity"]["score"].as_f64().unwrap();
+        assert!((0.0..=1.0).contains(&score));
+    }
+    // `run show` reveals which contestant was which candidate.
+    let shown = run_show::render(
+        config_dir.path(),
+        &summary.run_id,
+        &run_show::Options { full_diff: false },
+    )
+    .unwrap();
+    assert!(
+        shown.contains("Judge (candidate A):") && shown.contains("Judge (candidate B):"),
+        "{shown}"
+    );
+    // The claude judge shares a provider with a claude contestant: warned, not refused.
+    assert!(
+        warn.contains("the judge (claude) uses the same provider (anthropic)"),
+        "{warn}"
+    );
+    let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
+    let ls = String::from_utf8_lossy(&ls.stdout).into_owned();
+    assert!(!ls.contains("sbxm-run-"), "{ls}");
+}
+
+#[test]
+#[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
 fn run_kits_validate_against_real_sbx() {
     use sbxm::run::config::RunConfig;
     use sbxm::run::kits;

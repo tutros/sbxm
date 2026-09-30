@@ -88,6 +88,7 @@ pub fn render(config_dir: &Path, run_id: &str, options: &Options) -> Result<Stri
             write_answer(&mut out, &dir)?;
             write_diff(&mut out, &dir, &result["diff"], options.full_diff)?;
             write_checks(&mut out, &dir)?;
+            write_judge(&mut out, &dir)?;
         }
     }
     Ok(out)
@@ -220,6 +221,60 @@ fn write_checks(out: &mut String, dir: &Path) -> Result<()> {
             )
         };
         writeln!(out, "      failed {id} ({why})")?;
+    }
+    Ok(())
+}
+
+/// The judge's verdict on the pair, with the blind label it was judged under
+/// (the mapping is revealed here, not during evaluation; decision 21).
+fn write_judge(out: &mut String, dir: &Path) -> Result<()> {
+    let path = dir.join("evals.json");
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    let evals: Value = serde_json::from_str(&text)
+        .with_context(|| format!("{} is not valid JSON", path.display()))?;
+    let judge = &evals["judge"];
+    if !judge.is_object() {
+        return Ok(());
+    }
+    let label = judge["label"].as_str().unwrap_or("?");
+    if judge["status"] != "ok" {
+        writeln!(
+            out,
+            "    Judge (candidate {label}): not scored: {}",
+            judge["error"].as_str().unwrap_or("no details")
+        )?;
+        return Ok(());
+    }
+    let criteria = judge["criteria"].as_object().cloned().unwrap_or_default();
+    let mut line = format!("    Judge (candidate {label}):");
+    let scored: Vec<String> = criteria
+        .iter()
+        .map(|(id, c)| {
+            let value = match &c["value"] {
+                Value::String(text) => text.clone(),
+                other => other.to_string(),
+            };
+            format!("{id} {value} ({:.2})", c["score"].as_f64().unwrap_or(0.0))
+        })
+        .collect();
+    if !scored.is_empty() {
+        line.push(' ');
+        line.push_str(&scored.join(", "));
+    }
+    let unscored: Vec<&str> = judge["unscored"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    if !unscored.is_empty() {
+        line.push_str(&format!("; unscored: {}", unscored.join(", ")));
+    }
+    writeln!(out, "{line}")?;
+    for (id, c) in &criteria {
+        if let Some(reason) = c["reason"].as_str().filter(|r| !r.is_empty()) {
+            writeln!(out, "      {id}: {reason}")?;
+        }
     }
     Ok(())
 }

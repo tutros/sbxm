@@ -25,6 +25,7 @@ use super::config::RunConfig;
 use super::id::date_from_days;
 use super::kits::RunKits;
 use super::orchestrate::PairOutcome;
+use crate::eval::judge::JudgeRun;
 use crate::headless::RunStatus;
 
 /// Seconds since the epoch.
@@ -170,6 +171,77 @@ pub fn write_pair(meta: &Path, run_config: &RunConfig, outcome: &PairOutcome) ->
     });
     // Last: its presence means the pair's other files are all in place.
     write_json(&dir.join("result.json"), &record)
+}
+
+/// Saves one judge call: `<meta>/judge/<repeat>/{judge.json, reply.txt,
+/// transcript.jsonl}` (with the label mapping for that repeat index), and each
+/// judged pair's verdict under the key `judge` of its `evals.json`. Every
+/// judged pair gets an entry, an error included, so the mapping is never lost.
+pub fn write_judge(meta: &Path, run_config: &RunConfig, run: &JudgeRun) -> Result<()> {
+    let judge = run_config
+        .eval
+        .judge
+        .as_ref()
+        .context("a judge run without a judge in the config")?;
+    let who = json!({"harness": judge.harness.as_str(), "model": judge.model});
+    let dir = meta.join("judge").join(run.repeat.to_string());
+    fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    if let Some(answer) = &run.answer {
+        fs::write(dir.join("reply.txt"), answer)
+            .with_context(|| format!("cannot write {}", dir.join("reply.txt").display()))?;
+    }
+    if let Some(transcript) = &run.transcript {
+        fs::write(dir.join("transcript.jsonl"), transcript)
+            .with_context(|| format!("cannot write {}", dir.join("transcript.jsonl").display()))?;
+    }
+
+    let labels: serde_json::Map<String, Value> = run
+        .labels
+        .iter()
+        .map(|(contestant, label)| (label.to_string(), json!(contestant)))
+        .collect();
+    let error = run.result.as_ref().err();
+    write_json(
+        &dir.join("judge.json"),
+        &json!({
+            "repeat": run.repeat,
+            "sandbox": run.sandbox,
+            "judge": who,
+            "status": if error.is_none() { "ok" } else { "error" },
+            "error": error,
+            "labels": labels,
+            "remove_error": run.remove_error,
+        }),
+    )?;
+
+    for &(contestant, label) in &run.labels {
+        let entry = match &run.result {
+            Ok(parsed) => {
+                let scores = &parsed.candidates[&label];
+                let criteria: serde_json::Map<String, Value> = scores
+                    .criteria
+                    .iter()
+                    .map(|(id, s)| {
+                        (
+                            id.clone(),
+                            json!({"value": s.value, "score": s.score, "reason": s.reason}),
+                        )
+                    })
+                    .collect();
+                json!({
+                    "label": label.to_string(), "status": "ok", "error": null, "judge": who,
+                    "criteria": criteria, "unscored": scores.unscored,
+                })
+            }
+            Err(why) => json!({
+                "label": label.to_string(), "status": "error", "error": why, "judge": who,
+            }),
+        };
+        let pair = pair_dir(meta, contestant, run.repeat);
+        fs::create_dir_all(&pair).with_context(|| format!("cannot create {}", pair.display()))?;
+        merge_evals(&pair, "judge", entry)?;
+    }
+    Ok(())
 }
 
 /// Sets `key` in the pair's `evals.json` (creating it), keeping the other

@@ -102,7 +102,16 @@ dir. Sandboxes created by this batch are named `sbxm-it-<pid>-*` or `sbxm-run-*`
 
 | 10 | Done | see `git log` ("Run executable checks in each pair's sandbox") | see commit | `run_checks_against_real_sbx` passed: Claude + Codex seeded; two checks passed, one failed with its stderr captured, one timed out at 3 s; diffs unaffected; nothing left behind | Decision 130. The plan's "cargo test-style" check is shell-based because the sandboxes have no Rust toolchain. |
 
+| 11 | Done | see `git log` ("Add the LLM judge") | see commit | `run_judge_against_real_sbx` passed: Claude + Codex judged by a real Claude judge in its own sandbox; A/B mapping stored, all criteria scored, provider-sharing warning shown, no sandbox left | Decision 131. The prompt travels as a file (Windows command-line limit). The judge keeps its harness's tools (not enforceable to remove). |
+
 ### Manual test steps
+
+**Slice 11** (LLM judge): needs the `anthropic` and `openai` secrets.
+1. Add to a run-config (after the contestants): two `[[eval.rubric]]` entries (one `kind = "pass_fail"`, one `kind = "scale"` with `levels = ["poor", "fair", "good"]`) and `[eval.judge]` with `harness = "claude"` and a model. Use a small prompt such as "In one sentence, explain what a mutex is."
+2. `cargo run -- run <config>`: after the contestant lines there is `Judge claude/<model>: repeat 1/1 scored 2 contestants`, and a `warning:` that the judge shares a provider with a Claude contestant.
+3. `cargo run -- run show <run-id>` prints under each contestant `Judge (candidate A): ...` with scores and reasons: that is the anonymous label the contestant was judged under.
+4. Files: `<Results folder>\judge\0\judge.json` (label to contestant), `reply.txt` (the judge's reply), `0\0\evals.json` (the `judge` key). While it runs, `sbx ls` shows one `sbxm-run-<id>-judge-0` sandbox after the contestants' are gone.
+5. Automated: `cargo test --test eval_judge --test eval_judge_run --test run_judge_command` and `$env:SBXM_REAL_BASE_DIR='E:\sbxm-it'; cargo test --test real_sbx run_judge_against_real_sbx -- --ignored --nocapture` (about 45 s).
 
 **Slice 10** (executable checks):
 1. Add to a run-config (after the contestants): `[[eval.checks]]` with `id = "has-hello"` and `command = "test -f hello.txt"`, and one with `command = "sleep 120"` and `timeout = "3s"`. Use a prompt like "Create a file hello.txt containing the word hi".

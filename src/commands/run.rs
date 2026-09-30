@@ -9,6 +9,7 @@ use anyhow::{Result, bail};
 
 use crate::backend::SandboxBackend;
 use crate::config::GlobalConfig;
+use crate::eval::judge;
 use crate::headless::RunStatus;
 use crate::run::config::RunConfig;
 use crate::run::orchestrate::{self, PairOutcome};
@@ -132,8 +133,55 @@ pub fn run(
         }
     }
 
-    // Complete only if every pair's results are on disk.
-    if outcomes.iter().all(|o| o.save_error.is_none()) {
+    // Once every pair is done, the judge scores each repeat index on its own
+    // (P9); a judge that fails is recorded and warned about, not fatal.
+    let mut judge_saved = true;
+    if let Some(judge) = &run_config.eval.judge {
+        let repeats = run_config.run.repeat;
+        for repeat in 0..repeats {
+            let pairs: Vec<&PairOutcome> = outcomes.iter().filter(|o| o.repeat == repeat).collect();
+            let Some(judged) =
+                judge::judge_repeat(backend, &run_config, &run_kits, &roots, repeat, &pairs)
+            else {
+                continue;
+            };
+            let who = format!("{}/{}", judge.harness.as_str(), judge.model);
+            match &judged.result {
+                Ok(_) => writeln!(
+                    out,
+                    "Judge {who}: repeat {}/{repeats} scored {} contestants",
+                    repeat + 1,
+                    judged.labels.len()
+                )?,
+                Err(why) => {
+                    writeln!(
+                        out,
+                        "Judge {who}: repeat {}/{repeats} failed: {why}",
+                        repeat + 1
+                    )?;
+                    writeln!(
+                        warn,
+                        "warning: the judge failed for repeat {}/{repeats}: {why}",
+                        repeat + 1
+                    )?;
+                }
+            }
+            if let Some(problem) = &judged.remove_error {
+                writeln!(warn, "warning: {problem}")?;
+            }
+            if let Err(e) = results::write_judge(&roots.meta, &run_config, &judged) {
+                judge_saved = false;
+                writeln!(
+                    warn,
+                    "warning: cannot save the judge's results for repeat {}/{repeats}: {e:#}",
+                    repeat + 1
+                )?;
+            }
+        }
+    }
+
+    // Complete only if every pair's results (and the judge's) are on disk.
+    if outcomes.iter().all(|o| o.save_error.is_none()) && judge_saved {
         if let Err(e) = results::mark_completed(&roots.meta, results::now()) {
             writeln!(warn, "warning: cannot mark the run completed: {e:#}")?;
         }
