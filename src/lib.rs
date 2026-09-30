@@ -3,6 +3,7 @@ pub mod cli;
 pub mod commands;
 pub mod config;
 pub mod confirm;
+pub(crate) mod git;
 pub mod harness;
 pub mod headless;
 pub mod kit;
