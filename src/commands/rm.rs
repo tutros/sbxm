@@ -39,6 +39,18 @@ pub fn run(
 
     if !options.purge {
         let Some(sandbox) = sandbox else {
+            let others: Vec<&str> = state
+                .iter()
+                .flat_map(|s| s.sandboxes.keys().map(String::as_str))
+                .collect();
+            if !others.is_empty() {
+                bail!(
+                    "no sbxm {}sandbox for project '{name}', which has a {} sandbox; use `--harness {}`",
+                    harness_label(options.harness),
+                    others.join("/"),
+                    others.join("` or `--harness ")
+                );
+            }
             bail!(
                 "no sbxm {}sandbox for project '{name}'; `sbxm list` shows existing ones",
                 harness_label(options.harness)

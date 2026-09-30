@@ -126,6 +126,27 @@ fn unknown_project_points_to_list() {
 }
 
 #[test]
+fn wrong_harness_names_the_harnesses_the_project_has() {
+    let env = Env::new();
+    let codex = new::Options {
+        harness: Harness::Codex,
+        ..Default::default()
+    };
+    env.run_with("demo", &codex, &FakeBackend::default())
+        .unwrap();
+    let backend = FakeBackend::default();
+
+    let err = plain_rm(&env, "demo", &backend).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("has a codex sandbox; use `--harness codex`"),
+        "{message}"
+    );
+    assert!(backend.removes().is_empty());
+}
+
+#[test]
 fn invalid_name_makes_no_backend_calls() {
     let env = Env::new();
     let backend = FakeBackend::default();
@@ -356,8 +377,9 @@ fn rm_missing_harness_names_it() {
 
     let message = format!("{err:#}");
     assert!(
-        message
-            .contains("no sbxm codex sandbox for project 'demo'; `sbxm list` shows existing ones"),
+        message.contains(
+            "no sbxm codex sandbox for project 'demo', which has a claude sandbox; use `--harness claude`"
+        ),
         "{message}"
     );
     assert!(backend.removes().is_empty());

@@ -57,16 +57,16 @@ that).
 | Command | What it does |
 |---|---|
 | `sbxm config init` | Writes a starter `config.toml` and `default` profile. Refuses to overwrite either. |
-| `sbxm new <project> [--harness h] [--profile p] [--seed dir]` | Creates `<base_dir>/<project>` if missing (or reuses it), builds the kits from the profile and the project's `sandbox.toml`, checks them with `sbx kit validate`, and creates the sandbox. Doesn't attach. Refuses a harness that already has a sandbox for the project, before writing anything; open that one with `sbxm open <project> [--harness h]` (or `--rebuild` it). `--seed` copies a folder into a *new* project. |
-| `sbxm open <project> [--harness h] [--rebuild]` | Attaches to the sandbox, starting it if it's stopped and creating it if it's missing. Refuses if the config changed since the sandbox was built; `--rebuild` recreates it. |
+| `sbxm new <project> [--harness h] [--profile p] [--seed dir]` | Creates `<base_dir>/<project>` if missing (or reuses it), builds the kits from the profile and the project's `sandbox.toml`, checks them with `sbx kit validate`, and creates the sandbox. Doesn't attach. Refuses a harness that already has a sandbox for the project, before writing anything; open that one with `sbxm open <project> --harness h` (or `--rebuild` it). `--seed` copies a folder into a *new* project. |
+| `sbxm open <project> --harness h [--rebuild]` | Attaches to the sandbox, starting it if it's stopped and creating it if it's missing. Refuses if the config changed since the sandbox was built; `--rebuild` recreates it. |
 | `sbxm list [--json]` | Lists sbxm's sandboxes with project, harness, status and whether their config is `current` or `changed`. Flags orphans (a sandbox sbxm has no record of, or a record without a sandbox) and says how to fix each. |
-| `sbxm stop <project> [--harness h]` | Stops the sandbox. |
-| `sbxm rm <project> [--harness h]` | Removes the sandbox and sbxm's record of it. The workspace is kept. |
+| `sbxm stop <project> --harness h` | Stops the sandbox. |
+| `sbxm rm <project> --harness h` | Removes the sandbox and sbxm's record of it. The workspace is kept. |
 | `sbxm rm <project> --purge [--yes]` | Removes **every** sandbox of the project, then deletes the workspace and its metadata, after you confirm the exact paths. Without a terminal it needs `--yes`. Can't be combined with `--harness`. |
 | `sbxm config show [project] [--profile p] [--harness h] [--kits]` | Prints the merged config exactly as it's hashed, the hash, and with `--kits` the generated kits. Creates nothing. |
 | `sbxm doctor` | Checks `sbx` (on `PATH`, new enough, daemon answering), the config, every profile, every project with each of its sandboxes (secrets stored, kits valid), and the base dir (exists, writable, not a temp folder, at least 10 GiB free). Exits non-zero if anything fails. |
 
-`--harness` defaults to `claude` everywhere. `sbxm <command> --help` shows every option.
+`--harness` defaults to `claude` for `new` and `config show`; `open`, `stop` and `rm` (without `--purge`) require it, so they never act on the wrong sandbox by default (issue #33). `sbxm <command> --help` shows every option.
 
 ### The `justfile`
 

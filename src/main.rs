@@ -60,7 +60,7 @@ fn main() -> anyhow::Result<()> {
             &commands::rm::Options {
                 purge,
                 yes,
-                harness,
+                harness: harness.unwrap_or_default(),
             },
             &SbxBackend,
             &Terminal,
