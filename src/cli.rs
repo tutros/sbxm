@@ -118,4 +118,12 @@ pub enum RunCommand {
         /// Where to write it.
         path: Option<PathBuf>,
     },
+    /// Print a saved run: status, answer and diff summary per contestant.
+    Show {
+        /// The run id `sbxm run` printed, e.g. 2026-09-30-a1b2c3.
+        run_id: String,
+        /// Also print every full patch.
+        #[arg(long)]
+        diff: bool,
+    },
 }

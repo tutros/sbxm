@@ -102,6 +102,18 @@ fn main() -> anyhow::Result<()> {
             )?;
             Ok(())
         }
+        Command::Run(RunArgs {
+            command: Some(RunCommand::Show { run_id, diff }),
+            ..
+        }) => {
+            let text = commands::run_show::render(
+                &config::config_dir()?,
+                &run_id,
+                &commands::run_show::Options { full_diff: diff },
+            )?;
+            print!("{text}");
+            Ok(())
+        }
         Command::Run(_) => unreachable!("clap requires a config or a subcommand"),
         Command::Config {
             command: ConfigCommand::Init,

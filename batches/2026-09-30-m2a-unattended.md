@@ -98,7 +98,15 @@ dir. Sandboxes created by this batch are named `sbxm-it-<pid>-*` or `sbxm-run-*`
 
 | 8 | Done | see `git log` ("Save each pair's results and run.json as they happen") | see commit | `run_against_real_sbx` (extended) passed: run.json has completed_at and both harness hashes, each pair has result/answer/transcript/diff | Decision 128. "Kill one contestant mid-run" covered by a gated fake test, not a real kill. |
 
+| 9 | Done | see `git log` ("Add 'sbxm run show'") | see commit | none (plan: none) | Decision 129 (added a `--diff` flag). |
+
 ### Manual test steps
+
+**Slice 9** (`sbxm run show`): needs a finished run (slice 6/8 steps) or use the demo below.
+1. Take the run id from a run (`Run <id>` on the first line), then `cargo run -- run show <id>`; add `--diff` for the full patches.
+2. Expect the header, then each contestant with `repeat 1/1: completed (...)`, `Answer:` and `Diff:` blocks.
+3. Errors: `cargo run -- run show ../x` says it isn't a run id; `cargo run -- run show 2026-01-01-aaaaaa` says no such run.
+4. Automated: `cargo test --test run_show`.
 
 **Slice 8** (results on disk): after any `sbxm run <config>` (see slice 6's steps), the last line printed is `Results: <folder>`.
 1. `dir <folder>`: `run.json`, `run-config.toml`, `kits\`, and one folder per contestant index with a folder per repeat inside.
