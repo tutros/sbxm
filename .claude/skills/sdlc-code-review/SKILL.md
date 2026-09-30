@@ -159,7 +159,8 @@ Every finding becomes a GitHub issue (decision 79), so the work to fix it has a 
 If either fails (e.g. inside a sandbox with no `gh` login, no `github` secret or no `github.com` egress), don't file
 anything and don't try to set up a remote or log in: that's the user's call. Write the findings to the review file,
 mark it `Issues: pending (no GitHub access from <where>)`, tell the user, and file them later from where access
-works.
+works. From a host with access, `scripts/file-review-issues.ps1` does the filing from the review file
+(decision 134; format below).
 
 **Template.** Every issue has exactly these parts:
 
@@ -204,8 +205,62 @@ the other) so either one leads to the other.
 - Write bodies to temp files with the file-write tool and pass `--body-file` (Windows paths contain backslashes, which
   the Bash tool mangles). Delete the temp files afterwards.
 
+### Review file format (what `scripts/file-review-issues.ps1` parses)
+
+A review file in `reviews/` uses this shape, so its findings can be filed without rewriting them. The script also
+accepts the small variations real reviewers produce (see `scripts/tests/fixtures/review-m2a-codex.md`), but a review
+should follow this.
+
+```
+# <title>
+
+Scope: `<base sha>..<head sha>` (<n> commits)        the reviewed commits; permalinks use the head sha
+Issues: pending (<why>)                              the script rewrites this line to "Issues: <id> #<n>, ..."
+
+## Must fix                   then "## Should fix" and "## Questions"; each heading is the label of its findings
+
+### <ID> - <what happens, in plain words>            one finding; <ID> is unique in the file, e.g. M2A-1
+
+**Where:** `path/file.rs:10-20`, `other.rs:5`         file:line at the reviewed commit; each becomes a permalink
+**What happens:** <behavior, with the evidence: the command or test and its trimmed output>
+**Why it matters:** <the decision or convention it breaks, and the must-fix criterion it meets>
+**Fix:** <the smallest change that resolves it>      questions: **Recommendation:** with the options
+**Depends on:** <ID or #n, with why>, or "none known"
+**Related:** <ID or #n, with the order that avoids rework>            optional
+**Acceptance criteria:**
+- [ ] <observable result that proves the fix>
+- [ ] A test covering it fails before the fix and passes after (name it)
+- [ ] `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass
+- [ ] Docs updated where behavior users see changed, or "no user-visible change"
+```
+
+Text under other `##` headings (Summary, Verification and checklist notes, nits) is not filed. **Acceptance criteria
+are required for must-fix and should-fix findings**: a reviewer that leaves them out makes the finding impossible to
+file as written (the script refuses it, or files it with only the standard criteria when told to).
+
 ## Independent reviews
 
 When the user asks for a fresh-eyes review, run it as a read-only subagent: give it the scope, this skill, and the
 output format above. It doesn't edit files or commit; the main session checks its evidence before reporting any of
 its findings (as with spike results).
+
+**In a Codex sandbox (a different model reviews).** Use this when a review should come from another model family, or
+when it needs to build and run the tests. Nothing here needs GitHub access.
+
+1. A fresh clone of the branch, so the sandbox copies no `target/` and can't touch the working tree:
+   `git clone --branch <branch> <repo path> <base_dir>\<project>-review`.
+2. Create and attach with the `sbxm-dev` profile (it provides the Rust 1.93.0 toolchain and crates.io egress; without
+   `--profile sbxm-dev` the sandbox has no `cargo` and the reviewer can't run the checks):
+   `sbxm new <project>-review --harness codex --profile sbxm-dev`, then
+   `sbxm open <project>-review --harness codex`. Codex needs the `openai` secret stored (`sbx secret ls`); the
+   profile lists only `anthropic`, so a missing `openai` shows up as a runtime error, not a refusal.
+3. Give Codex this prompt (it reads `AGENTS.md` but not `.claude/skills/`, so it names the skill file):
+   "Review <scope, e.g. milestone 2a> of this repo. Follow `.claude/skills/sdlc-code-review/SKILL.md`: the checklist
+   plus the cross-cutting sweep, and run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
+   `cargo test`. Scope: `git diff origin/main..HEAD`. Read `milestone-2.md`, `decisions.md` and `AGENTS.md` first. Write
+   `reviews/<date>-<scope>.md` in the **Review file format** of section 8, including acceptance criteria for every
+   must-fix and should-fix finding. Don't edit code."
+4. Copy the review file out of the clone into the real repo's `reviews/`, check its evidence yourself (the main
+   session verifies every must-fix claim by reproducing it), then file the issues from the host:
+   `./scripts/file-review-issues.ps1 -Review reviews/<file>` (dry run), then again with `-Create`.
+5. Remove the sandbox and the clone: `sbxm rm <project>-review --harness codex`, then delete the clone folder.
