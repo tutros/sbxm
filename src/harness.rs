@@ -47,6 +47,17 @@ impl Harness {
         self.agent_kit().unwrap_or_else(|| self.as_str())
     }
 
+    /// The `sbx` service secret this harness's provider calls need (decision
+    /// 98). Antigravity's is unverified: `agy` signs in with OAuth inside the
+    /// sandbox and ignored the `google` placeholder (decision 124).
+    pub fn provider_secret(self) -> &'static str {
+        match self {
+            Harness::Claude | Harness::Pi => "anthropic",
+            Harness::Codex => "openai",
+            Harness::Gemini | Harness::Antigravity => "google",
+        }
+    }
+
     /// The pinned external kit this harness's sandbox is created from, if it
     /// isn't an `sbx` built-in. Part of the config hash, so a re-pin shows as
     /// drift (decisions 73, 104).

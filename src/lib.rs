@@ -7,5 +7,6 @@ pub mod harness;
 pub mod headless;
 pub mod kit;
 pub mod project;
+pub mod run;
 pub mod seed;
 pub mod state;
