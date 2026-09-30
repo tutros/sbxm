@@ -282,6 +282,40 @@ function Test-ReviewAccess {
     $name
 }
 
+$issueListLimit = 1000
+
+# Findings in an order where each comes after the ones it depends on (file order otherwise; a cycle keeps file order).
+function Get-FilingOrder([object[]]$Findings) {
+    $ordered = [System.Collections.Generic.List[object]]::new()
+    $left = [System.Collections.Generic.List[object]]($Findings)
+    while ($left.Count) {
+        $ready = $left | Where-Object {
+            $me = $_
+            -not ($left | Where-Object {
+                    $_.Id -ne $me.Id -and $me.Fields.Contains('depends on') -and
+                    $me.Fields['depends on'] -match "(?<![\w-])$([regex]::Escape($_.Id))(?![\w-])"
+                })
+        } | Select-Object -First 1
+        if (-not $ready) { $ready = $left[0] }
+        $ordered.Add($ready)
+        $left.Remove($ready) | Out-Null
+    }
+    $ordered
+}
+
+# Runs a gh command that takes --body-file with the text in a temp file, and deletes the file afterwards. Returns what
+# the command printed; throws if it failed.
+function Invoke-GhWithBody([scriptblock]$Command, [string]$Body) {
+    $file = New-TemporaryFile
+    try {
+        [IO.File]::WriteAllText($file.FullName, $Body, [Text.UTF8Encoding]::new($false))
+        $out = & $Command $file.FullName
+        if ($LASTEXITCODE -ne 0) { throw "gh failed (exit code $LASTEXITCODE)" }
+        $out
+    }
+    finally { Remove-Item -LiteralPath $file.FullName -Force -ErrorAction SilentlyContinue }
+}
+
 function Get-Plural([int]$n, [string]$word) { if ($n -eq 1) { "$n $word" } else { "$n ${word}s" } }
 
 # `Issues: S-1 #33, S-2 pending`: a number where the finding has an issue, `Unknown` where it would get one.
@@ -298,8 +332,8 @@ function Format-IssuesLine {
 # 1 nothing filed. Everything it prints goes to the information stream.
 function Invoke-ReviewFiling {
     param(
-        [Parameter(Mandatory)][string]$Review, [string]$Repo, [switch]$StandardCriteria, [switch]$KeepPaths,
-        [string[]]$Only
+        [Parameter(Mandatory)][string]$Review, [string]$Repo, [switch]$Create, [switch]$StandardCriteria,
+        [switch]$KeepPaths, [string[]]$Only
     )
     if (-not (Test-Path -LiteralPath $Review -PathType Leaf)) {
         Write-Host "review file $Review not found; give the path of a file in reviews/"
@@ -342,19 +376,80 @@ function Invoke-ReviewFiling {
     }
     if ($problems.Count) {
         $problems | ForEach-Object { Write-Host "refused: $_" }
-        Write-Host "nothing would be filed: $(Get-Plural $problems.Count 'problem') to fix in $reviewName first"
+        $verb = if ($Create) { 'nothing was filed' } else { 'nothing would be filed' }
+        Write-Host "${verb}: $(Get-Plural $problems.Count 'problem') to fix in $reviewName first"
         return 1
     }
 
+    # What exists already: a finding whose marker is in an issue body keeps that number (idempotency).
+    $listed = @(ConvertFrom-GhJson (gh issue list --repo $repoName --state all --limit $issueListLimit --json number,title,body))
+    if ($listed.Count -ge $issueListLimit) {
+        Write-Host "the issue list has $($listed.Count) issues, the most this script reads at once, so it can't tell what is already filed; nothing was filed"
+        return 1
+    }
+    $numbers = @{}
+    foreach ($finding in $parsed.Findings) {
+        $marker = "<!-- review-finding: $reviewName#$($finding.Id) -->"
+        $hit = @($listed | Where-Object { $_.body -and $_.body.Contains($marker) })
+        if ($hit) { $numbers[$finding.Id] = [int]$hit[0].number }
+    }
+    $existing = @($numbers.Keys)
+    $toCreate = @($prepared | Where-Object { $existing -notcontains $_.Id })
+
     $view = $parsed.PSObject.Copy()
     $view.Findings = $prepared.ToArray()
+    $render = {
+        param($finding)
+        New-IssueBody -Review $view -Finding $finding -Repo $repoName -ReviewName $reviewName -HeadSha $headSha `
+            -IdMap $numbers -StandardCriteria:$StandardCriteria
+    }
+    if (-not $Create) {
+        foreach ($finding in $prepared) {
+            if ($numbers.ContainsKey($finding.Id)) {
+                Write-Host "$($finding.Id) skipped (exists #$($numbers[$finding.Id]))"
+                continue
+            }
+            Write-Host "would create [$($finding.Label)] $($finding.Id): $($finding.Title)"
+            Write-Host (& $render $finding)
+            Write-Host '---'
+        }
+        Write-Host "not filed: $(Get-Plural $parsed.NotFiled.Sections 'section'), $(Get-Plural $parsed.NotFiled.Nits 'nit')"
+        Write-Host ('would write: ' + (Format-IssuesLine $parsed.Findings $numbers $toCreate.Id))
+        return 0
+    }
+
+    $created = [ordered]@{}
+    $failure = $null
+    foreach ($finding in (Get-FilingOrder $toCreate)) {
+        $body = & $render $finding
+        try {
+            $url = Invoke-GhWithBody { param($file) gh issue create --repo $repoName --title "$($finding.Id): $($finding.Title)" --label $finding.Label --body-file $file } $body
+        }
+        catch { $failure = "$($finding.Id): $($_.Exception.Message)"; break }
+        $number = [int]([regex]::Match("$url", '/issues/(\d+)\s*$').Groups[1].Value)
+        $numbers[$finding.Id] = $number
+        $created[$finding.Id] = @{ Number = $number; Url = "$url".Trim(); Body = $body; Finding = $finding }
+    }
+    # Every number is known now: bodies that held an id for a later issue are rewritten with the #n.
+    foreach ($id in $created.Keys) {
+        $entry = $created[$id]
+        $final = & $render $entry.Finding
+        if ($final -ne $entry.Body) {
+            try { Invoke-GhWithBody { param($file) gh issue edit $entry.Number --repo $repoName --body-file $file } $final | Out-Null }
+            catch { $failure = "#$($entry.Number) links: $($_.Exception.Message)" }
+        }
+    }
+
     foreach ($finding in $prepared) {
-        Write-Host "would create [$($finding.Label)] $($finding.Id): $($finding.Title)"
-        Write-Host (New-IssueBody -Review $view -Finding $finding -Repo $repoName -ReviewName $reviewName `
-                -HeadSha $headSha -StandardCriteria:$StandardCriteria)
-        Write-Host '---'
+        $status = if ($created.Contains($finding.Id)) { 'created' } elseif ($numbers.ContainsKey($finding.Id)) { 'skipped (exists)' } else { 'not filed' }
+        $number = if ($numbers.ContainsKey($finding.Id)) { "#$($numbers[$finding.Id])" } else { '-' }
+        $url = if ($numbers.ContainsKey($finding.Id)) { "https://github.com/$repoName/issues/$($numbers[$finding.Id])" } else { '-' }
+        Write-Host ("{0,-8} {1,-11} {2,-5} {3} {4}" -f $finding.Id, $finding.Label, $number, $url, $status)
     }
     Write-Host "not filed: $(Get-Plural $parsed.NotFiled.Sections 'section'), $(Get-Plural $parsed.NotFiled.Nits 'nit')"
-    Write-Host ('would write: ' + (Format-IssuesLine $parsed.Findings @{} $prepared.Id))
+    if ($failure) {
+        Write-Host "stopped early: $failure; rerun to file the rest (existing issues are skipped)"
+        if ($created.Count) { return 2 } else { return 1 }
+    }
     0
 }

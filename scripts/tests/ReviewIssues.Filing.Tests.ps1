@@ -9,6 +9,7 @@ BeforeAll {
             Remote = 'https://github.com/o/r.git'; LoggedIn = $true; Scopes = "'repo', 'read:org'"
             Labels = @('must-fix', 'should-fix', 'question'); Issues = [System.Collections.Generic.List[object]]::new()
             Next = 40; Writes = [System.Collections.Generic.List[string]]::new(); FailCreateAt = 0; Created = 0
+            BodyFiles = [System.Collections.Generic.List[string]]::new()
         }
         Mock git {
             $global:LASTEXITCODE = 0
@@ -29,6 +30,7 @@ BeforeAll {
                 'issue list' { return (@($script:fake.Issues) | ConvertTo-Json -Depth 4 -AsArray) }
                 'issue create' {
                     $script:fake.Writes.Add('create')
+                    $script:fake.BodyFiles.Add((& $get '--body-file'))
                     $script:fake.Created++
                     if ($script:fake.FailCreateAt -eq $script:fake.Created) { $global:LASTEXITCODE = 1; return }
                     $number = $script:fake.Next++
@@ -37,6 +39,7 @@ BeforeAll {
                 }
                 'issue edit' {
                     $script:fake.Writes.Add("edit $($a[2])")
+                    $script:fake.BodyFiles.Add((& $get '--body-file'))
                     $issue = $script:fake.Issues | Where-Object { $_.number -eq [int]$a[2] }
                     $issue.body = Get-Content -Raw (& $get '--body-file')
                     return "https://github.com/o/r/issues/$($a[2])"
@@ -173,5 +176,93 @@ Describe 'Dry run' {
     It 'fails on a review file that does not exist' {
         $all = Invoke-ReviewFiling -Review (Join-Path $TestDrive 'nope.md') 6>&1
         @($all | Where-Object { $_ -is [int] })[-1] | Should -Be 1
+    }
+}
+
+Describe 'Create' {
+    BeforeEach { Initialize-Fake }
+
+    It 'creates issues in dependency order with the label and title' {
+        $run = Invoke-Filing -Arguments @{ Create = $true }
+        $run.Code | Should -Be 0
+        @($script:fake.Issues | ForEach-Object { $_.title }) | Should -Be @('S-2: Message is wrong', 'S-1: Thing breaks', 'S-Q1: Keep the thing?')
+        @($script:fake.Issues | ForEach-Object { $_.label }) | Should -Be @('must-fix', 'must-fix', 'question')
+        @($script:fake.Issues | ForEach-Object { $_.number }) | Should -Be @(40, 41, 42)
+    }
+
+    It 'writes Depends on as #n in the dependent and the reverse Related in the dependency' {
+        Invoke-Filing -Arguments @{ Create = $true } | Out-Null
+        $s1 = $script:fake.Issues | Where-Object { $_.number -eq 41 }
+        $s2 = $script:fake.Issues | Where-Object { $_.number -eq 40 }
+        $s1.body | Should -BeLike '*Depends on:** #40 (the message must match)*'
+        $s2.body | Should -BeLike '*Related:** #41 depends on this one*'
+        @($script:fake.Writes) | Should -Be @('create', 'create', 'create', 'edit 40')
+    }
+
+    It 'prints a table with id, label, number, url and what happened' {
+        $run = Invoke-Filing -Arguments @{ Create = $true }
+        $run.Text | Should -BeLike '*S-1*must-fix*41*https://github.com/o/r/issues/41*created*'
+    }
+
+    It 'removes its temp body files' {
+        Invoke-Filing -Arguments @{ Create = $true } | Out-Null
+        $script:fake.BodyFiles.Count | Should -Be 4   # three creates and one edit
+        foreach ($file in $script:fake.BodyFiles) { Test-Path $file | Should -BeFalse }
+    }
+
+    It 'a second run creates nothing and reuses the numbers' {
+        Invoke-Filing -Arguments @{ Create = $true } | Out-Null
+        $script:fake.Writes.Clear()
+        $run = Invoke-Filing -Arguments @{ Create = $true }
+        $run.Code | Should -Be 0
+        $script:fake.Writes | Should -BeNullOrEmpty
+        $script:fake.Issues.Count | Should -Be 3
+        $run.Text | Should -BeLike '*S-1*41*skipped (exists)*'
+    }
+
+    It 'reuses the number of a finding filed earlier in links' {
+        $script:fake.Issues.Add(@{ number = 99; title = 'S-2: old'; body = "x`n<!-- review-finding: review-small.md#S-2 -->`n" })
+        Invoke-Filing -Arguments @{ Create = $true } | Out-Null
+        $s1 = $script:fake.Issues | Where-Object { $_.title -eq 'S-1: Thing breaks' }
+        $s1.body | Should -BeLike '*Depends on:** #99 (the message must match)*'
+        $script:fake.Issues.Count | Should -Be 3   # the old one, S-1 and S-Q1
+    }
+
+    It 'shows skipped findings in the dry run too' {
+        $script:fake.Issues.Add(@{ number = 99; title = 'S-2: old'; body = "x`n<!-- review-finding: review-small.md#S-2 -->`n" })
+        (Invoke-Filing).Text | Should -BeLike '*S-2*skipped (exists #99)*'
+    }
+
+    It 'resumes after an interruption with only the findings that are missing' {
+        $script:fake.FailCreateAt = 3
+        $first = Invoke-Filing -Fixture 'review-m2a-codex.md' -Arguments @{ Create = $true; StandardCriteria = $true }
+        $first.Code | Should -Be 2
+        $script:fake.Issues.Count | Should -Be 2
+        $script:fake.FailCreateAt = 0
+        $second = Invoke-Filing -Fixture 'review-m2a-codex.md' -Arguments @{ Create = $true; StandardCriteria = $true }
+        $second.Code | Should -Be 0
+        $script:fake.Issues.Count | Should -Be 4
+        @($script:fake.Issues | ForEach-Object { $_.title } | Sort-Object -Unique).Count | Should -Be 4
+    }
+
+    It 'stops with an error when the issue list is as long as the limit' {
+        1..1000 | ForEach-Object { $script:fake.Issues.Add(@{ number = $_; title = "t$_"; body = '' }) }
+        $run = Invoke-Filing -Arguments @{ Create = $true }
+        $run.Code | Should -Be 1
+        $run.Text | Should -BeLike '*1000*'
+        $script:fake.Writes | Should -BeNullOrEmpty
+    }
+
+    It 'files only the findings named by -Only' {
+        $run = Invoke-Filing -Arguments @{ Create = $true; Only = @('S-1') }
+        $run.Code | Should -Be 0
+        @($script:fake.Issues | ForEach-Object { $_.title }) | Should -Be @('S-1: Thing breaks')
+    }
+
+    It 'files nothing when any finding is refused' {
+        $run = Invoke-Filing -Fixture 'review-m2a-codex.md' -Arguments @{ Create = $true }
+        $run.Code | Should -Be 1
+        $script:fake.Writes | Should -BeNullOrEmpty
+        $run.Text | Should -BeLike '*nothing was filed*'
     }
 }
