@@ -111,7 +111,7 @@ fn unsupported_harness_is_rejected_and_creates_nothing() {
         "{stderr}"
     );
     assert!(
-        stderr.contains("[possible values: claude, codex, gemini, pi]"),
+        stderr.contains("[possible values: claude, codex, gemini, pi, antigravity]"),
         "{stderr}"
     );
     assert!(!env.base_dir().join("demo").exists());

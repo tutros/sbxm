@@ -200,7 +200,7 @@ fn a_harness_without_an_adapter_is_refused_before_any_exec() {
     .unwrap_err();
     assert_eq!(
         err.to_string(),
-        "gemini has no headless adapter; use claude or codex"
+        "gemini has no headless adapter; use claude, codex or antigravity"
     );
     assert!(fake.execs().is_empty());
 }

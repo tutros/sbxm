@@ -208,3 +208,94 @@ pub(crate) fn parse_codex(raw: &str) -> HeadlessResult {
         usage,
     }
 }
+
+/// Antigravity's `agy -p --output-format stream-json`: one JSON event per
+/// line, `{"event": "init" | "step_update" | "result", ...}`. `agent_response`
+/// steps carry `text_delta` and per-step `usage`; the final `result` has the
+/// answer (`response`), the summed `usage` and `status` (`SUCCESS` or
+/// `ERROR` with an `error` message). Best-effort on a truncated stream: the
+/// last agent text and the step usages summed so far stand in for the result.
+pub(crate) fn parse_antigravity(raw: &str) -> HeadlessResult {
+    let mut steps: Vec<(u64, String)> = Vec::new();
+    let mut steps_usage = Usage {
+        input_tokens: 0,
+        output_tokens: 0,
+        cost_usd: None,
+    };
+    let mut result: Option<(RunStatus, String, Usage)> = None;
+    for event in raw
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+    {
+        match event["event"].as_str() {
+            Some("step_update") => {
+                let step = &event["step_update"];
+                if step["step_type"] == "agent_response" {
+                    let index = step["step_index"].as_u64().unwrap_or(0);
+                    if let Some(delta) = step["text_delta"].as_str() {
+                        match steps.last_mut() {
+                            Some((last, text)) if *last == index => text.push_str(delta),
+                            _ => steps.push((index, delta.to_owned())),
+                        }
+                    }
+                }
+                if step["usage"].is_object() {
+                    let usage = antigravity_usage(&step["usage"]);
+                    steps_usage.input_tokens += usage.input_tokens;
+                    steps_usage.output_tokens += usage.output_tokens;
+                }
+            }
+            Some("result") => {
+                let r = &event["result"];
+                let status = if r["status"] == "SUCCESS" {
+                    RunStatus::Completed
+                } else {
+                    let error = r["error"].as_str().unwrap_or("agy reported an error");
+                    RunStatus::Failed(error.to_owned())
+                };
+                let answer = r["response"].as_str().unwrap_or("").trim_end().to_owned();
+                result = Some((status, answer, antigravity_usage(&r["usage"])));
+            }
+            _ => {}
+        }
+    }
+    let partial = steps
+        .iter()
+        .rev()
+        .map(|(_, text)| text.trim_end())
+        .find(|text| !text.is_empty())
+        .unwrap_or("")
+        .to_owned();
+    let (status, answer, usage) = match result {
+        Some((status, answer, usage)) => {
+            // An interrupted or failed run has an empty response; keep the partial text.
+            let answer = if answer.is_empty() { partial } else { answer };
+            let usage = if usage.input_tokens + usage.output_tokens == 0 {
+                steps_usage
+            } else {
+                usage
+            };
+            (status, answer, usage)
+        }
+        None => (
+            RunStatus::Failed("no result event in the output".into()),
+            partial,
+            steps_usage,
+        ),
+    };
+    HeadlessResult {
+        status,
+        answer,
+        transcript: raw.to_owned(),
+        usage,
+    }
+}
+
+fn antigravity_usage(usage: &Value) -> Usage {
+    let count = |key: &str| usage[key].as_u64().unwrap_or(0);
+    Usage {
+        input_tokens: count("input_tokens") + count("cache_read_tokens"),
+        output_tokens: count("output_tokens"),
+        cost_usd: None,
+    }
+}

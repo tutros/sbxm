@@ -17,11 +17,17 @@ pub enum Harness {
     Codex,
     Gemini,
     Pi,
+    Antigravity,
 }
 
 /// The Pi kit on Docker Hub, pinned to an immutable tag (decision 73). `sbx`
 /// allows `docker.io/` by default, so no `kit.allowedSources` change is needed.
 const PI_KIT: &str = "docker.io/sbx/pi-kit:20260924-d058fedc156325f87612d9bcd9bd313ab74ba100";
+
+/// The Antigravity kit on Docker Hub, pinned to an immutable tag (decision
+/// 104; the same image as `latest` on 2026-09-28, looked up 2026-09-29).
+const ANTIGRAVITY_KIT: &str =
+    "docker.io/sbx/antigravity-kit:20260928-7da9425e640d172e36abe6de3499a1c75d416c0f";
 
 impl Harness {
     /// The `sbx` agent name, also used in sandbox names and state keys.
@@ -31,15 +37,24 @@ impl Harness {
             Harness::Codex => "codex",
             Harness::Gemini => "gemini",
             Harness::Pi => "pi",
+            Harness::Antigravity => "antigravity",
         }
     }
 
     /// The agent argument of `sbx create`: the kit ref for Pi, which isn't
     /// built into `sbx`.
     pub fn agent_arg(self) -> &'static str {
+        self.agent_kit().unwrap_or_else(|| self.as_str())
+    }
+
+    /// The pinned external kit this harness's sandbox is created from, if it
+    /// isn't an `sbx` built-in. Part of the config hash, so a re-pin shows as
+    /// drift (decisions 73, 104).
+    pub fn agent_kit(self) -> Option<&'static str> {
         match self {
-            Harness::Pi => PI_KIT,
-            other => other.as_str(),
+            Harness::Pi => Some(PI_KIT),
+            Harness::Antigravity => Some(ANTIGRAVITY_KIT),
+            _ => None,
         }
     }
 
@@ -51,6 +66,9 @@ impl Harness {
             Harness::Codex => PathBuf::from(".codex").join("AGENTS.md"),
             Harness::Gemini => PathBuf::from(".gemini").join("GEMINI.md"),
             Harness::Pi => PathBuf::from(".pi").join("agent").join("AGENTS.md"),
+            // Verified on real sbx (M2a P5): `agy -p` loads `~/.gemini/AGENTS.md`
+            // (and GEMINI.md), but not the same names in `~/.gemini/antigravity-cli/`.
+            Harness::Antigravity => PathBuf::from(".gemini").join("AGENTS.md"),
         }
     }
 
@@ -61,6 +79,12 @@ impl Harness {
             Harness::Codex => ["codex", "exec", "-m", &opts.model, "--json"]
                 .map(str::to_owned)
                 .into(),
+            Harness::Antigravity => ["agy", "-p", prompt, "--model", &opts.model]
+                .into_iter()
+                .chain(["--output-format", "stream-json"])
+                .chain(["--dangerously-skip-permissions"])
+                .map(str::to_owned)
+                .collect(),
             _ => ["claude", "-p", prompt, "--model", &opts.model]
                 .into_iter()
                 .chain(["--output-format", "stream-json", "--verbose"])
@@ -111,14 +135,18 @@ impl Harness {
         self.require_headless()?;
         Ok(match self {
             Harness::Codex => headless::parse_codex(raw),
+            Harness::Antigravity => headless::parse_antigravity(raw),
             _ => headless::parse_claude(raw),
         })
     }
 
     fn require_headless(self) -> Result<()> {
-        if !matches!(self, Harness::Claude | Harness::Codex) {
+        if !matches!(
+            self,
+            Harness::Claude | Harness::Codex | Harness::Antigravity
+        ) {
             bail!(
-                "{} has no headless adapter; use claude or codex",
+                "{} has no headless adapter; use claude, codex or antigravity",
                 self.as_str()
             );
         }
@@ -144,8 +172,10 @@ impl Harness {
                 ));
             }
         }
-        // The sbx skills store doesn't serve Gemini CLI or Pi (decisions 46, 72, 78).
-        if (self == Harness::Gemini || self == Harness::Pi)
+        // The sbx skills store doesn't serve Gemini CLI or Pi (decisions 46, 72, 78),
+        // and isn't known to serve Antigravity (not on decision 46's list; an empty
+        // store can't be observed without changing it).
+        if matches!(self, Harness::Gemini | Harness::Pi | Harness::Antigravity)
             && profile.skills_store != SkillsStore::Off
         {
             warnings.push(format!(

@@ -89,6 +89,10 @@ check:
 real-test base_dir='E:\sbxm-it':
     $env:SBXM_REAL_BASE_DIR = '{{base_dir}}'; cargo test --test real_sbx -- --ignored
 
+# Compare the pinned Pi and Antigravity kit tags in src/harness.rs with the newest dated tag on Docker Hub (M2a P8). Changes nothing; re-pinning is a manual step.
+kit-tags:
+    foreach ($kit in 'pi-kit', 'antigravity-kit') { $pinned = (Select-String -Path src/harness.rs -Pattern "docker.io/sbx/$kit`:([0-9a-z-]+)").Matches[0].Groups[1].Value; $tags = (Invoke-RestMethod "https://hub.docker.com/v2/repositories/sbx/$kit/tags?page_size=25&ordering=last_updated").results.name | Where-Object { $_ -match '^[0-9]{8}-' }; $newest = $tags | Select-Object -First 1; $note = if ($pinned -eq $newest) { 'up to date' } else { 'NEWER TAG AVAILABLE: re-pin by hand, run the real-sbx checks, log a decision' }; Write-Host "$kit pinned $pinned, newest $newest ($note)" }
+
 # Install `sbxm` on your PATH from this checkout.
 install:
     cargo install --path .

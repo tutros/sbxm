@@ -821,3 +821,107 @@ fn codex_headless_against_real_sbx() {
         .unwrap();
     assert_eq!(left.exit_code, Some(1), "codex still running: {left:?}");
 }
+
+#[test]
+#[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
+fn antigravity_sandbox_against_real_sbx() {
+    use std::time::Duration;
+
+    use sbxm::headless::{self, HeadlessOpts, RunStatus};
+
+    let base_dir = real_base_dir();
+    let project = format!("sbxm-it-{}-agy", std::process::id());
+    let sandbox = format!("sbxm-{project}-antigravity");
+    let _cleanup = Cleanup {
+        sandbox: sandbox.clone(),
+        dirs: vec![
+            base_dir.join(&project),
+            base_dir.join(".sbxm").join(&project),
+        ],
+        shared_dirs: vec![base_dir.join(".sbxm")],
+    };
+    let config_dir = TempDir::new().unwrap();
+    let base = toml::Value::String(base_dir.to_str().unwrap().to_owned());
+    std::fs::write(
+        config_dir.path().join("config.toml"),
+        format!("base_dir = {base}\n\n[resources]\ncpus = 2\nmemory = \"2g\"\n"),
+    )
+    .unwrap();
+    let profile_dir = config_dir.path().join("profiles").join("default");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    std::fs::write(
+        profile_dir.join("profile.toml"),
+        "[instructions]\nmandatory = \"mandatory.md\"\n\n[skills]\nstore = \"off\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        profile_dir.join("mandatory.md"),
+        "REAL TEST CANARY: the word is QUINCE-7\n",
+    )
+    .unwrap();
+    let agy = sbxm::harness::Harness::Antigravity;
+    let options = new::Options {
+        harness: agy,
+        ..Default::default()
+    };
+
+    // The sandbox is created from the pinned kit, with the harness mixin.
+    new::run(
+        config_dir.path(),
+        &project,
+        &options,
+        &SbxBackend,
+        &mut std::io::stderr(),
+    )
+    .unwrap();
+
+    let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
+    let ls: serde_json::Value = serde_json::from_slice(&ls.stdout).unwrap();
+    let entry = ls["sandboxes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == sandbox.as_str())
+        .expect("sandbox listed");
+    assert_eq!(entry["agent"], "antigravity");
+
+    // Mandatory instructions land where `agy -p` loads them (P5).
+    let agents_md = Command::new("sbx")
+        .args(["exec", &sandbox, "cat", "/home/agent/.gemini/AGENTS.md"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&agents_md.stdout).trim(),
+        "REAL TEST CANARY: the word is QUINCE-7"
+    );
+
+    // Nobody signed in to this fresh sandbox, so `agy -p` fails at auth. The
+    // primitive reports that as `Failed`, not an error and not a timeout.
+    let workspace = base_dir.join(&project);
+    let path = workspace.to_string_lossy().replace(char::from(92), "/");
+    let in_sandbox = PathBuf::from(format!("/{}{}", path[..1].to_lowercase(), &path[2..]));
+    let result = headless::run(
+        &SbxBackend,
+        &sandbox,
+        &in_sandbox,
+        agy,
+        "Reply with exactly: PONG",
+        &HeadlessOpts {
+            model: "gemini-3.8-flash-low".into(),
+            budget_usd: None,
+            is_git_repo: false,
+        },
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    assert!(matches!(result.status, RunStatus::Failed(_)), "{result:?}");
+
+    stop::run(config_dir.path(), &project, agy, &SbxBackend).unwrap();
+    let rm_agy = rm::Options {
+        harness: agy,
+        ..Default::default()
+    };
+    rm::run(config_dir.path(), &project, &rm_agy, &SbxBackend, &Terminal).unwrap();
+    let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
+    assert!(!String::from_utf8_lossy(&ls.stdout).contains(&sandbox));
+}
