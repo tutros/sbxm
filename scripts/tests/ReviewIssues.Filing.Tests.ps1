@@ -82,6 +82,49 @@ Describe 'Duplicate finding ids are refused before any GitHub call' {
     }
 }
 
+Describe 'The review file needs exactly one Issues: line' {
+    BeforeEach { Initialize-Fake }
+
+    It 'refuses a file with no Issues: line, before any gh call' {
+        $text = (Get-Content -Raw (Join-Path $script:fixtures 'review-small.md')) -replace '(?m)^Issues:.*\r?\n', ''
+        $dir = Join-Path $TestDrive 'reviews'
+        New-Item -ItemType Directory $dir -Force | Out-Null
+        Set-Content (Join-Path $dir 'review-noissues.md') $text
+        $run = Invoke-Filing -Fixture 'review-noissues.md'
+        $run.Code | Should -Be 1
+        $run.Text | Should -BeLike '*has no*Issues:*line*keep exactly one*'
+        Should -Invoke gh -ModuleName file-review-issues -Times 0
+    }
+
+    It 'refuses a file with two Issues: lines, before any gh call' {
+        $text = (Get-Content -Raw (Join-Path $script:fixtures 'review-small.md')) -replace 'Issues: pending \(test\)', "Issues: pending (test)`nIssues: pending (again)"
+        $dir = Join-Path $TestDrive 'reviews'
+        New-Item -ItemType Directory $dir -Force | Out-Null
+        Set-Content (Join-Path $dir 'review-dupissues.md') $text
+        $run = Invoke-Filing -Fixture 'review-dupissues.md'
+        $run.Code | Should -Be 1
+        $run.Text | Should -BeLike '*has 2*Issues:*line*keep exactly one*'
+        Should -Invoke gh -ModuleName file-review-issues -Times 0
+    }
+
+    It 'checks the file can be updated before the first gh issue create' -Skip {
+        # Skipped: this needs a real pwsh run to confirm that Set-ItemProperty -Name IsReadOnly actually makes
+        # [IO.File]::OpenWrite throw on the host's OS (none available in this sandbox); see .sbxm-fix/result.md.
+        $dir = Join-Path $TestDrive 'reviews'
+        New-Item -ItemType Directory $dir -Force | Out-Null
+        $path = Join-Path $dir 'review-readonly.md'
+        Copy-Item (Join-Path $script:fixtures 'review-small.md') $path
+        Set-ItemProperty -Path $path -Name IsReadOnly -Value $true
+        try {
+            $all = Invoke-ReviewFiling -Review $path -Create 6>&1 3>&1
+            $code = @($all | Where-Object { $_ -is [int] })[-1]
+            $code | Should -Be 1
+            $script:fake.Writes | Should -BeNullOrEmpty
+        }
+        finally { Set-ItemProperty -Path $path -Name IsReadOnly -Value $false }
+    }
+}
+
 Describe 'Access checks stop before any write' {
     BeforeEach { Initialize-Fake }
 

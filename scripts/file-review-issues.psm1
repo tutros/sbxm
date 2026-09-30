@@ -16,7 +16,7 @@ function ConvertFrom-ReviewFile {
     $review = [ordered]@{
         Findings = [System.Collections.Generic.List[object]]::new()
         NotFiled = [ordered]@{ Sections = 0; Nits = 0 }
-        HeadSha = $null; Range = $null; Scope = $null; IssuesLine = $null
+        HeadSha = $null; Range = $null; Scope = $null; IssuesLine = $null; IssuesLineCount = 0
     }
     $section = $null     # @{ Label; Findings = count }
     $finding = $null
@@ -28,7 +28,10 @@ function ConvertFrom-ReviewFile {
             $sha = [regex]::Match($Matches[1], '\b[0-9a-f]{7,40}\.\.([0-9a-f]{7,40})\b')
             if ($sha.Success) { $review.HeadSha = $sha.Groups[1].Value; $review.Range = $sha.Value }
         }
-        elseif ($line -match '^Issues:' -and -not $review.IssuesLine) { $review.IssuesLine = $line }
+        elseif ($line -match '^Issues:') {
+            $review.IssuesLineCount++
+            if (-not $review.IssuesLine) { $review.IssuesLine = $line }
+        }
         if ($line -match '^##\s+(.+?)\s*$' -and $line -notmatch '^###') {
             if ($finding) { $review.Findings.Add([pscustomobject](Complete-Finding $finding)); $finding = $null }
             $name = ($Matches[1] -replace ':+\s*$', '').Trim().ToLowerInvariant()
@@ -333,6 +336,17 @@ function Set-IssuesLine([string]$Path, [string]$Line) {
     [IO.File]::WriteAllBytes($Path, $out)
 }
 
+# Whether the review file can be written to right now, checked before the first `gh issue create` so a file a
+# rerun can't update is caught up front instead of after issues are already published.
+function Test-ReviewFileWritable([string]$Path) {
+    try {
+        $stream = [IO.File]::OpenWrite($Path)
+        $stream.Close()
+        $true
+    }
+    catch { $false }
+}
+
 function Get-Plural([int]$n, [string]$word) { if ($n -eq 1) { "$n $word" } else { "$n ${word}s" } }
 
 # `Issues: S-1 #33, S-2 pending`: a number where the finding has an issue, `Unknown` where it would get one.
@@ -356,7 +370,8 @@ function Invoke-ReviewFiling {
         Write-Host "review file $Review not found; give the path of a file in reviews/"
         return 1
     }
-    $text = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $Review).Path)
+    $resolvedPath = (Resolve-Path -LiteralPath $Review).Path
+    $text = [IO.File]::ReadAllText($resolvedPath)
     $reviewName = Split-Path -Leaf $Review
     $parsed = ConvertFrom-ReviewFile $text
 
@@ -369,6 +384,18 @@ function Invoke-ReviewFiling {
             Write-Host "refused: $($dup.Name) is used by more than one finding in $reviewName, at lines $lines"
         }
         Write-Host "nothing was filed or changed: make finding ids unique in $reviewName first"
+        return 1
+    }
+
+    # Also checked up front: the write-back needs exactly one 'Issues:' line to replace, and (with -Create) a
+    # file it can actually write to, so a malformed or read-only review is never noticed only after issues exist.
+    if ($parsed.IssuesLineCount -ne 1) {
+        $what = if ($parsed.IssuesLineCount -eq 0) { 'has no' } else { "has $($parsed.IssuesLineCount)" }
+        Write-Host "$reviewName $what 'Issues:' line(s); keep exactly one so issue numbers can be written back"
+        return 1
+    }
+    if ($Create -and -not (Test-ReviewFileWritable $resolvedPath)) {
+        Write-Host "can't update $reviewName to record issue numbers; check its file permissions and rerun"
         return 1
     }
 
@@ -470,7 +497,7 @@ function Invoke-ReviewFiling {
         }
     }
 
-    Set-IssuesLine (Resolve-Path -LiteralPath $Review).Path (Format-IssuesLine $parsed.Findings $numbers)
+    Set-IssuesLine $resolvedPath (Format-IssuesLine $parsed.Findings $numbers)
 
     foreach ($finding in $prepared) {
         $status = if ($created.Contains($finding.Id)) { 'created' } elseif ($numbers.ContainsKey($finding.Id)) { 'skipped (exists)' } else { 'not filed' }
