@@ -1,17 +1,22 @@
 //! Runs a comparison's pairs: one throwaway sandbox per (contestant, repeat
 //! index) pair (decision 95). Contestants of a wave run in parallel; repeats
 //! are sequential waves, so at most one sandbox per contestant is alive at a
-//! time however large `repeat` is (decisions 6, 15). Every sandbox is removed
-//! afterwards, including after an error (decision 16). Results are only
+//! time however large `repeat` is (decisions 6, 15). Every sandbox that was
+//! asked for is removed afterwards, including after an error (decision 16).
+//! Each pair's workspace is seeded first when the run has a seed (decision
+//! 14) and its diff is captured before the sandbox goes. Results are only
 //! returned here; writing them to disk is slice 8's job.
 
 use std::path::{Path, PathBuf};
 use std::thread;
 
 use super::config::{Contestant, RunConfig};
+use super::diff::{self, Diff};
+use super::id::RunRoots;
 use super::kits::RunKits;
 use crate::backend::{CreateSpec, SandboxBackend};
 use crate::headless::{self, HeadlessOpts, HeadlessResult};
+use crate::seed;
 
 /// What became of one (contestant, repeat) pair.
 #[derive(Debug)]
@@ -23,23 +28,26 @@ pub struct PairOutcome {
     pub sandbox: String,
     /// The host folder mounted into the sandbox; kept after the run.
     pub workspace: PathBuf,
-    /// `Err` means the pair couldn't run at all (create or exec failed); a
-    /// timed-out or failed command is `Ok` with that status and its partial
-    /// output (decision 16).
+    /// `Err` means the pair couldn't run at all (seeding, create or exec
+    /// failed); a timed-out or failed command is `Ok` with that status and its
+    /// partial output (decision 16).
     pub result: Result<HeadlessResult, String>,
+    /// What the contestant changed in its workspace. `None` when the pair
+    /// never got a sandbox (seeding or create failed); `Some(Err)` when the
+    /// diff itself couldn't be captured, which doesn't discard `result`.
+    pub diff: Option<Result<Diff, String>>,
     /// The sandbox couldn't be removed; the result is kept.
     pub remove_error: Option<String>,
 }
 
 /// Runs every pair, wave by wave, and returns the outcomes ordered by repeat,
-/// then contestant. `workspaces_root` is `<base>/runs/<run-id>`; pair
-/// workspaces are created under it as `<contestant>/<repeat>`.
+/// then contestant. Pair workspaces are `<roots.workspaces>/<contestant>/<repeat>`;
+/// scratch state (the host's baseline repos) lives under `<roots.meta>/work`.
 pub fn execute(
     backend: &dyn SandboxBackend,
     run_config: &RunConfig,
     kits: &RunKits,
-    run_id: &str,
-    workspaces_root: &Path,
+    roots: &RunRoots,
 ) -> Vec<PairOutcome> {
     let mut outcomes = Vec::new();
     for repeat in 0..run_config.run.repeat {
@@ -56,8 +64,16 @@ pub fn execute(
                         contestant,
                         index: i,
                         repeat,
-                        sandbox: format!("sbxm-run-{run_id}-{i}-{repeat}"),
-                        workspace: workspaces_root.join(i.to_string()).join(repeat.to_string()),
+                        sandbox: format!("sbxm-run-{}-{i}-{repeat}", roots.id),
+                        workspace: roots
+                            .workspaces
+                            .join(i.to_string())
+                            .join(repeat.to_string()),
+                        work_dir: roots
+                            .meta
+                            .join("work")
+                            .join(i.to_string())
+                            .join(repeat.to_string()),
                     };
                     let (sandbox, workspace) = (pair.sandbox.clone(), pair.workspace.clone());
                     (i, sandbox, workspace, scope.spawn(move || pair.run()))
@@ -75,6 +91,7 @@ pub fn execute(
                             sandbox,
                             workspace,
                             result: Err("the pair's thread panicked".into()),
+                            diff: None,
                             remove_error,
                         }
                     })
@@ -83,6 +100,8 @@ pub fn execute(
         });
         outcomes.extend(wave);
     }
+    // The host's baseline repos are only needed until each diff is captured.
+    let _ = std::fs::remove_dir_all(roots.meta.join("work"));
     outcomes
 }
 
@@ -95,49 +114,100 @@ struct Pair<'a> {
     repeat: u32,
     sandbox: String,
     workspace: PathBuf,
+    /// Scratch space for this pair, outside the mounted workspace.
+    work_dir: PathBuf,
+}
+
+/// What `attempt` learned, besides the headless result.
+struct Attempt {
+    result: Result<HeadlessResult, String>,
+    diff: Option<Result<Diff, String>>,
+    /// `create` was called, so there may be a sandbox to remove.
+    created: bool,
 }
 
 impl Pair<'_> {
     fn run(self) -> PairOutcome {
-        let result = self.attempt();
-        // Always, so a failed create or exec can't leave a sandbox behind.
-        let remove_error = remove(self.backend, &self.sandbox);
+        let attempt = self.attempt();
+        // Cleans up a failed create too, but only if create was asked for:
+        // removing a sandbox that never existed would only add noise.
+        let remove_error = if attempt.created {
+            remove(self.backend, &self.sandbox)
+        } else {
+            None
+        };
+        let _ = std::fs::remove_dir_all(&self.work_dir);
         PairOutcome {
             contestant: self.index,
             repeat: self.repeat,
             sandbox: self.sandbox,
             workspace: self.workspace,
-            result,
+            result: attempt.result,
+            diff: attempt.diff,
             remove_error,
         }
     }
 
-    fn attempt(&self) -> Result<HeadlessResult, String> {
+    fn attempt(&self) -> Attempt {
+        let failed = |why: String, created: bool| Attempt {
+            result: Err(why),
+            diff: None,
+            created,
+        };
         let harness = self.contestant.harness;
-        let harness_kits = self
-            .kits
-            .get(harness)
-            .ok_or_else(|| format!("no kits were built for {}", harness.as_str()))?;
-        std::fs::create_dir_all(&self.workspace)
-            .map_err(|e| format!("cannot create workspace {}: {e}", self.workspace.display()))?;
-        self.backend
-            .create(&CreateSpec {
-                name: self.sandbox.clone(),
-                agent: harness.agent_arg().into(),
-                workspace: self.workspace.clone(),
-                cpus: self.kits.resources.cpus,
-                memory: self.kits.resources.memory.clone(),
-                skills: self.kits.skills_store,
-                kits: harness_kits.dirs.clone(),
-            })
-            .map_err(|e| format!("cannot create sandbox {}: {e:#}", self.sandbox))?;
+        let Some(harness_kits) = self.kits.get(harness) else {
+            return failed(
+                format!("no kits were built for {}", harness.as_str()),
+                false,
+            );
+        };
+
+        // Prepare the workspace: seeded (a fresh repo, one baseline commit) or
+        // a plain empty folder (decision 113).
+        let git_dir = self.work_dir.join("baseline.git");
+        let seed = self.run_config.task.seed.as_deref();
+        let baseline = match seed {
+            Some(seed) => match seed::seed_contestant(seed, &self.workspace, &git_dir) {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    return failed(
+                        format!("cannot seed workspace {}: {e:#}", self.workspace.display()),
+                        false,
+                    );
+                }
+            },
+            None => {
+                if let Err(e) = std::fs::create_dir_all(&self.workspace) {
+                    return failed(
+                        format!("cannot create workspace {}: {e}", self.workspace.display()),
+                        false,
+                    );
+                }
+                None
+            }
+        };
+
+        if let Err(e) = self.backend.create(&CreateSpec {
+            name: self.sandbox.clone(),
+            agent: harness.agent_arg().into(),
+            workspace: self.workspace.clone(),
+            cpus: self.kits.resources.cpus,
+            memory: self.kits.resources.memory.clone(),
+            skills: self.kits.skills_store,
+            kits: harness_kits.dirs.clone(),
+        }) {
+            return failed(
+                format!("cannot create sandbox {}: {e:#}", self.sandbox),
+                true,
+            );
+        }
+
         let opts = HeadlessOpts {
             model: self.contestant.model.clone(),
             budget_usd: self.run_config.run.budget_usd,
-            // Unseeded workspaces aren't git repos (decision 113); seeded ones come with slice 7.
-            is_git_repo: false,
+            is_git_repo: seed.is_some(),
         };
-        headless::run(
+        let result = headless::run(
             self.backend,
             &self.sandbox,
             &in_sandbox_path(&self.workspace),
@@ -151,7 +221,20 @@ impl Pair<'_> {
                 "cannot run the headless command (exec) in {}: {e:#}",
                 self.sandbox
             )
-        })
+        });
+
+        // The workspace is final whether the command finished, timed out or
+        // failed, so its diff is captured in every case (decision 16).
+        let diff = match &baseline {
+            Some(id) => diff::seeded(&git_dir, &self.workspace, id),
+            None => diff::unseeded(&self.workspace),
+        }
+        .map_err(|e| format!("cannot capture the diff: {e:#}"));
+        Attempt {
+            result,
+            diff: Some(diff),
+            created: true,
+        }
     }
 }
 

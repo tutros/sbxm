@@ -94,7 +94,14 @@ dir. Sandboxes created by this batch are named `sbxm-it-<pid>-*` or `sbxm-run-*`
 | 5a | Done (before the batch) | 7b0be8b | 34 / 0 | `run_kits_validate_against_real_sbx` passed | |
 | 6 | Done | see `git log` (3 commits, "Script the fake backend", "Add run IDs and the per-pair sandbox orchestrator", "Add 'sbxm run <config>'") | 37 / 0 | `run_against_real_sbx` passed: Claude + Codex in 2 parallel sandboxes, both PONG, both removed, scratch folder gone | Decision 126. Fixed a slice-2 gap (crash with no output reported "no result event"). |
 
+| 7 | Done | see `git log` ("Add hardened seeding and diff capture", "Wire seeding and diffs into the orchestrator") | see commit | `run_diffs_against_real_sbx` passed: Claude + Codex, seeded and unseeded, diffs match their edits, one commit and no remote in seeded workspaces, no sandbox or scratch left | Decision 127: git runs against a host-owned git dir because a planted `.git/config` runs commands on the host (control-tested). |
+
 ### Manual test steps
+
+**Slice 7** (seeding and diffs; results are not saved to disk until slice 8, so use the automated real test):
+1. `$env:SBXM_REAL_BASE_DIR='E:\sbxm-it'; cargo test --test real_sbx run_diffs_against_real_sbx -- --ignored --nocapture` (about 70 s; needs the `anthropic` and `openai` secrets). It prints two runs; both must show `completed` for both contestants.
+2. Offline: `cargo test --test run_workspace` (seeding, diffs, and the hostile-`.git/config` test) and `cargo test --test run_seeded`.
+3. By hand, the seeding part: `cargo run -- run E:\sbxm-it\demo\run.toml` with `seed = "<a folder with a git repo>"` in the file, then look at `<base_dir>\runs\<id>\0\0`: `git log` shows one commit `baseline`, `git remote` is empty.
 
 **Slice 6** (`sbxm run <config>`): needs the `anthropic` and `openai` secrets (`sbx secret ls`).
 1. `cargo run -- run init E:\sbxm-it\demo\run.toml`, then edit the prompt to something small and put cheap models in (`claude-haiku-4-5-20251001`, `gpt-5.6-luna`) and `timeout = "3m"`.

@@ -999,6 +999,134 @@ fn run_against_real_sbx() {
 
 #[test]
 #[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
+fn run_diffs_against_real_sbx() {
+    use sbxm::commands::run;
+    use sbxm::headless::RunStatus;
+
+    let base = real_base_dir().join(format!("sbxm-it-{}-diff", std::process::id()));
+    let _cleanup = Cleanup {
+        sandbox: String::new(),
+        dirs: vec![base.clone()],
+        shared_dirs: vec![],
+    };
+    std::fs::create_dir_all(&base).unwrap();
+    let config_dir = TempDir::new().unwrap();
+    let base_toml = toml::Value::String(base.to_str().unwrap().to_owned());
+    std::fs::write(
+        config_dir.path().join("config.toml"),
+        format!("base_dir = {base_toml}\n\n[resources]\ncpus = 2\nmemory = \"2g\"\n"),
+    )
+    .unwrap();
+    let profile_dir = config_dir.path().join("profiles").join("default");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    std::fs::write(
+        profile_dir.join("profile.toml"),
+        "description = \"real diff test\"\n\n[skills]\nstore = \"off\"\n",
+    )
+    .unwrap();
+    // A seed with history and a remote, to check it arrives as one clean commit.
+    let seed = config_dir.path().join("seed");
+    std::fs::create_dir_all(&seed).unwrap();
+    std::fs::write(seed.join("a.txt"), "alpha\n").unwrap();
+    let seed_git = |args: &[&str]| {
+        let ok = Command::new("git")
+            .current_dir(&seed)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    };
+    seed_git(&["init", "-q"]);
+    seed_git(&["add", "-A"]);
+    seed_git(&["commit", "-q", "-m", "old history"]);
+    seed_git(&["remote", "add", "origin", "https://example.com/private.git"]);
+
+    let contestants = "[[contestants]]\nharness = \"claude\"\nmodel = \"claude-haiku-4-5-20251001\"\n\n\
+                       [[contestants]]\nharness = \"codex\"\nmodel = \"gpt-5.6-luna\"\n";
+    let go = |name: &str, task: &str| {
+        let run_config = config_dir.path().join(name);
+        std::fs::write(
+            &run_config,
+            format!("{task}\n[run]\ntimeout = \"4m\"\n\n{contestants}"),
+        )
+        .unwrap();
+        let (mut out, mut warn) = (Vec::new(), Vec::new());
+        let summary = run::run(
+            config_dir.path(),
+            &run_config,
+            &SbxBackend,
+            &mut out,
+            &mut warn,
+        )
+        .unwrap();
+        println!(
+            "{}{}",
+            String::from_utf8_lossy(&out),
+            String::from_utf8_lossy(&warn)
+        );
+        summary
+    };
+
+    // Seeded: each agent edits the seed's file and adds one.
+    let toml_seed = toml::Value::String(seed.to_str().unwrap().to_owned());
+    let seeded = go(
+        "seeded.toml",
+        &format!(
+            "[task]\nprompt = \"Append the line 'edited by agent' to a.txt, and create hello.txt containing the word hi. Do not use git.\"\nseed = {toml_seed}\n"
+        ),
+    );
+    for outcome in &seeded.outcomes {
+        let result = outcome.result.as_ref().unwrap();
+        assert_eq!(result.status, RunStatus::Completed, "{result:?}");
+        let patch = &outcome.diff.as_ref().unwrap().as_ref().unwrap().patch;
+        assert!(
+            patch.contains("diff --git a/a.txt b/a.txt") && patch.contains("+edited by agent"),
+            "{patch}"
+        );
+        assert!(
+            patch.contains("diff --git a/hello.txt b/hello.txt"),
+            "{patch}"
+        );
+        assert!(!patch.contains(".git/"), "{patch}");
+        // One commit, no remote, in the workspace the agent had.
+        let git_out = |args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(&outcome.workspace)
+                .args(args)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        };
+        assert_eq!(git_out(&["remote"]), "");
+    }
+
+    // Unseeded: a plain folder, every new file in the diff, no `.git/` paths.
+    let unseeded = go(
+        "unseeded.toml",
+        "[task]\nprompt = \"Create a file hello.txt containing the word hi. Do not use git.\"\n",
+    );
+    for outcome in &unseeded.outcomes {
+        assert_eq!(
+            outcome.result.as_ref().unwrap().status,
+            RunStatus::Completed,
+            "{outcome:?}"
+        );
+        let patch = &outcome.diff.as_ref().unwrap().as_ref().unwrap().patch;
+        assert!(
+            patch.contains("diff --git a/hello.txt b/hello.txt") && patch.contains("+hi"),
+            "{patch}"
+        );
+        assert!(!outcome.workspace.join(".git").exists());
+    }
+    let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
+    let ls = String::from_utf8_lossy(&ls.stdout).into_owned();
+    assert!(!ls.contains("sbxm-run-"), "{ls}");
+}
+
+#[test]
+#[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
 fn run_kits_validate_against_real_sbx() {
     use sbxm::run::config::RunConfig;
     use sbxm::run::kits;

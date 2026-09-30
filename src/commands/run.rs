@@ -30,12 +30,6 @@ pub fn run(
     warn: &mut dyn Write,
 ) -> Result<Summary> {
     let run_config = RunConfig::load(config_path)?;
-    if run_config.task.seed.is_some() {
-        bail!(
-            "run-config {}: task.seed is not supported yet; remove it for now",
-            config_path.display()
-        );
-    }
     let checked = preflight::check(config_dir, &run_config, backend)?;
     for warning in &checked.warnings {
         writeln!(warn, "warning: {warning}")?;
@@ -52,13 +46,7 @@ pub fn run(
     let roots = id::reserve(&global.base_dir)?;
     let run_kits = kits::build(config_dir, &run_config, &roots.meta.join("kits"), backend)?;
     writeln!(out, "Run {}", roots.id)?;
-    let outcomes = orchestrate::execute(
-        backend,
-        &run_config,
-        &run_kits,
-        &roots.id,
-        &roots.workspaces,
-    );
+    let outcomes = orchestrate::execute(backend, &run_config, &run_kits, &roots);
 
     for outcome in &outcomes {
         let contestant = &run_config.contestants[outcome.contestant];
@@ -77,6 +65,27 @@ pub fn run(
         )?;
         if let Some(problem) = &outcome.remove_error {
             writeln!(warn, "warning: {problem}")?;
+        }
+        match &outcome.diff {
+            Some(Err(problem)) => writeln!(
+                warn,
+                "warning: contestants[{}]{repeat}: {problem}",
+                outcome.contestant
+            )?,
+            Some(Ok(diff)) if !diff.skipped.is_empty() => {
+                let links: Vec<String> = diff
+                    .skipped
+                    .iter()
+                    .map(|p| p.display().to_string())
+                    .collect();
+                writeln!(
+                    warn,
+                    "warning: contestants[{}]{repeat}: left links out of the diff: {}",
+                    outcome.contestant,
+                    links.join(", ")
+                )?;
+            }
+            _ => {}
         }
     }
     Ok(Summary {

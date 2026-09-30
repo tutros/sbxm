@@ -11,6 +11,7 @@ use sbxm::backend::{ExecOutput, FakeBackend, SkillsStore, Stdin};
 use sbxm::harness::Harness;
 use sbxm::headless::RunStatus;
 use sbxm::run::config::RunConfig;
+use sbxm::run::id::RunRoots;
 use sbxm::run::kits::{self, RunKits};
 use sbxm::run::orchestrate::{self, PairOutcome, in_sandbox_path};
 
@@ -39,6 +40,7 @@ struct Setup {
     _env: Env,
     config: RunConfig,
     kits: RunKits,
+    roots: RunRoots,
     workspaces: PathBuf,
 }
 
@@ -63,11 +65,18 @@ fn setup(run_table: &str) -> Setup {
     )
     .unwrap();
     let workspaces = env.tmp.path().join("runs").join(RUN_ID);
+    let meta = env.tmp.path().join("meta").join(RUN_ID);
     std::fs::create_dir_all(&workspaces).unwrap();
+    std::fs::create_dir_all(&meta).unwrap();
     Setup {
         _env: env,
         config,
         kits,
+        roots: RunRoots {
+            id: RUN_ID.into(),
+            meta,
+            workspaces: workspaces.clone(),
+        },
         workspaces,
     }
 }
@@ -79,7 +88,7 @@ fn scripted() -> FakeBackend {
 }
 
 fn execute(s: &Setup, backend: &FakeBackend) -> Vec<PairOutcome> {
-    orchestrate::execute(backend, &s.config, &s.kits, RUN_ID, &s.workspaces)
+    orchestrate::execute(backend, &s.config, &s.kits, &s.roots)
 }
 
 /// The calls made for one sandbox, in order, from the backend's log.

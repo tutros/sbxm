@@ -81,6 +81,20 @@ pub struct FakeBackend {
     fail_create_for: Vec<String>,
     fail_exec_for: Vec<String>,
     gate: Option<ExecGate>,
+    exec_hook: Option<ExecHook>,
+}
+
+/// Runs inside every `exec` (after the gate), so a test can play the agent
+/// by changing files on the host while the "sandbox" is busy.
+type HookFn = dyn Fn(&str, &ExecSpec) + Send + Sync;
+
+#[derive(Clone)]
+struct ExecHook(Arc<HookFn>);
+
+impl std::fmt::Debug for ExecHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ExecHook")
+    }
 }
 
 impl FakeBackend {
@@ -204,6 +218,15 @@ impl FakeBackend {
         self
     }
 
+    /// Calls `hook(sandbox, spec)` inside every successful `exec`, before it
+    /// returns, e.g. to write files into the workspace like an agent would.
+    pub fn with_exec_hook(self, hook: impl Fn(&str, &ExecSpec) + Send + Sync + 'static) -> Self {
+        Self {
+            exec_hook: Some(ExecHook(Arc::new(hook))),
+            ..self
+        }
+    }
+
     /// Holds every `exec` (after recording it) until the returned gate is opened.
     pub fn with_exec_gate(self) -> (Self, ExecGate) {
         let gate = ExecGate::default();
@@ -314,6 +337,9 @@ impl SandboxBackend for FakeBackend {
         }
         if self.fail_exec_for.iter().any(|s| s == sandbox) {
             bail!("fake exec failure");
+        }
+        if let Some(hook) = &self.exec_hook {
+            (hook.0)(sandbox, spec);
         }
         if let Some(output) = self.exec_outputs_for.get(sandbox) {
             return Ok(output.clone());

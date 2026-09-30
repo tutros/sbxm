@@ -276,7 +276,7 @@ fn an_invalid_kit_creates_no_sandbox() {
 }
 
 #[test]
-fn a_seed_is_refused_until_seeding_exists() {
+fn a_seeded_run_gives_every_contestant_its_own_repo_with_the_seed() {
     let env = Env::new();
     let seed = env.seed();
     let body = format!(
@@ -286,10 +286,53 @@ fn a_seed_is_refused_until_seeding_exists() {
 
     let ran = go(&env, &body, &pong());
 
-    let err = ran.result.unwrap_err().to_string();
+    let summary = ran.result.unwrap();
+    assert_eq!(ran.warn, "");
+    for i in 0..2 {
+        let ws = env
+            .base_dir()
+            .join("runs")
+            .join(&summary.run_id)
+            .join(i.to_string())
+            .join("0");
+        assert_eq!(std::fs::read_to_string(ws.join("a.txt")).unwrap(), "a");
+        assert!(ws.join(".git").is_dir());
+        // The diff was captured, empty because the fake agent changed nothing.
+        assert_eq!(
+            summary.outcomes[i]
+                .diff
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .patch,
+            ""
+        );
+    }
+}
+
+#[test]
+fn a_seed_that_fails_preflight_writes_nothing() {
+    let env = Env::new();
+    let body = format!(
+        "[task]\nprompt = \"p\"\nseed = {}\n\n{TWO_CLAUDES}",
+        toml::Value::String(
+            env.tmp
+                .path()
+                .join("no-such-seed")
+                .to_str()
+                .unwrap()
+                .to_owned()
+        )
+    );
+
+    let ran = go(&env, &body, &pong());
+
     assert!(
-        err.contains("task.seed") && err.contains("not supported yet"),
-        "{err}"
+        ran.result
+            .unwrap_err()
+            .to_string()
+            .contains("is not a directory")
     );
     nothing_written(&env);
 }
