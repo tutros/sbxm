@@ -72,10 +72,11 @@ pub fn write_run_start(meta: &Path, start: &RunStart) -> Result<()> {
             "index": i,
             "harness": c.harness.as_str(),
             "model": c.model,
-            // Per-contestant profiles arrive in slice 12b; until then it is the run's.
-            "profile": kits.profile_name,
+            // Its own profile, else the run's (decision 115).
+            "profile": c.profile.as_deref().unwrap_or(&kits.profile_name),
         })).collect::<Vec<_>>(),
         "harnesses": kits.harnesses.iter().map(|h| json!({
+            "profile": h.profile,
             "harness": h.harness.as_str(),
             "config_hash": h.config_hash,
             "kits": h.dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>(),
@@ -162,6 +163,7 @@ pub fn write_pair(meta: &Path, run_config: &RunConfig, outcome: &PairOutcome) ->
         "repeat": outcome.repeat,
         "harness": contestant.harness.as_str(),
         "model": contestant.model,
+        "profile": outcome.profile,
         "sandbox": outcome.sandbox,
         "status": status,
         "error": error,

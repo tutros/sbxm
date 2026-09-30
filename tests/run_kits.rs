@@ -243,27 +243,9 @@ fn the_run_profile_option_selects_the_profile() {
     assert!(common.contains("WHO"), "{common}");
 }
 
-#[test]
-fn a_contestant_profile_that_differs_is_refused_until_slice_12b() {
-    // Per-contestant profiles need kits per (profile, harness); until then
-    // they are refused loudly instead of being dropped (decision 11).
-    let env = Env::new();
-    env.write_profile("strict", "");
-    let body = format!(
-        "{TASK}[[contestants]]\nharness = \"claude\"\nmodel = \"m\"\nprofile = \"strict\"\n\n{}",
-        contestant("codex")
-    );
-    let backend = FakeBackend::default();
-
-    let err = build(&env, &body, &backend).unwrap_err().to_string();
-
-    assert!(
-        err.contains("contestants[0].profile") && err.contains("not supported yet"),
-        "{err}"
-    );
-    assert!(backend.log().is_empty());
-    assert!(!kits_root(&env).exists());
-}
+// A contestant profile that differs from the run's was refused here until
+// slice 12b; per-contestant profiles are now built per (profile, harness) and
+// covered by `tests/run_profiles.rs`.
 
 #[test]
 fn a_contestant_profile_equal_to_the_run_profile_is_fine() {

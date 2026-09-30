@@ -1,6 +1,7 @@
-//! A run's kits: generated once, up front, for every harness in use, and
-//! validated before any sandbox exists (decisions 55, 95, 108, 112). The
-//! same `kit` functions as `sbxm new` build them, from the run's profile.
+//! A run's kits: generated once, up front, for every (profile, harness) pair
+//! in use, and validated before any sandbox exists (decisions 55, 95, 108,
+//! 112, 115). The same `kit` functions as `sbxm new` build them. A contestant
+//! without its own `profile` uses the run's, and so does the judge.
 
 use std::path::{Path, PathBuf};
 
@@ -13,32 +14,45 @@ use crate::config::{self, GlobalConfig, Profile, Resources};
 use crate::harness::Harness;
 use crate::kit;
 
-/// The kits of one harness, ready for `CreateSpec::kits`.
+/// The kits of one (profile, harness) pair, ready for `CreateSpec::kits`.
 #[derive(Debug, Clone)]
 pub struct HarnessKits {
+    /// The profile these kits were built from.
+    pub profile: String,
     pub harness: Harness,
     /// Hash of the merged config for this harness, with the run's `cpus` and
     /// `memory` overrides applied (decisions 55, 108).
     pub config_hash: String,
     /// `common` then `harness-<h>`, the order `sbx create --kit` needs.
     pub dirs: Vec<PathBuf>,
+    /// This profile's `skills.store`, passed to `sbx create --skills`.
+    pub skills_store: SkillsStore,
 }
 
 #[derive(Debug)]
 pub struct RunKits {
+    /// The run-level profile: the default for contestants and the judge.
     pub profile_name: String,
     /// The global `[resources]` with the run's overrides applied: what every
     /// sandbox of the run is created with.
     pub resources: Resources,
-    /// The profile's `skills.store`, passed to `sbx create --skills`.
+    /// The run-level profile's `skills.store`.
     pub skills_store: SkillsStore,
-    /// One entry per harness used by a contestant or the judge, in first-use order.
+    /// One entry per (profile, harness) used by a contestant or the judge, in
+    /// first-use order.
     pub harnesses: Vec<HarnessKits>,
 }
 
 impl RunKits {
+    /// The kits of `harness` under the run-level profile.
     pub fn get(&self, harness: Harness) -> Option<&HarnessKits> {
-        self.harnesses.iter().find(|h| h.harness == harness)
+        self.get_for(&self.profile_name, harness)
+    }
+
+    pub fn get_for(&self, profile: &str, harness: Harness) -> Option<&HarnessKits> {
+        self.harnesses
+            .iter()
+            .find(|h| h.harness == harness && h.profile == profile)
     }
 }
 
@@ -52,20 +66,11 @@ pub fn build(
     backend: &dyn SandboxBackend,
 ) -> Result<RunKits> {
     let global = GlobalConfig::load(config_dir)?;
-    let profile_name = run_config
+    let run_profile = run_config
         .run
         .profile
         .clone()
         .unwrap_or_else(|| global.default_profile.clone());
-    for (i, c) in run_config.contestants.iter().enumerate() {
-        if c.profile.as_ref().is_some_and(|p| *p != profile_name) {
-            bail!(
-                "contestants[{i}].profile is set, but per-contestant profiles are not supported \
-                 yet; remove it and use run.profile for all contestants"
-            );
-        }
-    }
-    let profile = Profile::load(global.profiles_dir(), &profile_name)?;
     let resources = Resources {
         cpus: run_config.run.cpus.unwrap_or(global.resources.cpus),
         memory: run_config
@@ -75,24 +80,42 @@ pub fn build(
             .unwrap_or_else(|| global.resources.memory.clone()),
     };
 
-    let mut harnesses: Vec<Harness> = Vec::new();
-    let judge = run_config.eval.judge.as_ref().map(|j| j.harness);
-    for harness in run_config
-        .contestants
-        .iter()
-        .map(|c| c.harness)
-        .chain(judge)
-    {
-        if !harnesses.contains(&harness) {
-            harnesses.push(harness);
+    // The (profile, harness) pairs in first-use order: each contestant under
+    // its own profile or the run's, then the judge under the run's.
+    let mut wanted: Vec<(String, Harness)> = Vec::new();
+    let judge = run_config
+        .eval
+        .judge
+        .as_ref()
+        .map(|j| (run_profile.clone(), j.harness));
+    let contestants = run_config.contestants.iter().map(|c| {
+        (
+            c.profile.clone().unwrap_or_else(|| run_profile.clone()),
+            c.harness,
+        )
+    });
+    for pair in contestants.chain(judge) {
+        if !wanted.contains(&pair) {
+            wanted.push(pair);
         }
     }
 
+    // Every profile loads before anything is written, so an unknown one
+    // leaves no trace.
+    let mut profiles: Vec<(String, Profile)> = Vec::new();
+    for (name, _) in &wanted {
+        if !profiles.iter().any(|(n, _)| n == name) {
+            profiles.push((name.clone(), Profile::load(global.profiles_dir(), name)?));
+        }
+    }
+    let profile_named = |name: &str| &profiles.iter().find(|(n, _)| n == name).unwrap().1;
+
     let mut all = Vec::new();
-    for harness in harnesses {
-        let config_hash = config::config_hash(&profile_name, &profile, &resources, harness);
+    for (profile_name, harness) in wanted {
+        let profile = profile_named(&profile_name);
+        let config_hash = config::config_hash(&profile_name, profile, &resources, harness);
         let dir = kits_root.join(&config_hash[..12]);
-        let specs: Vec<_> = kit::all(&profile_name, &profile, &config_hash, harness)
+        let specs: Vec<_> = kit::all(&profile_name, profile, &config_hash, harness)
             .map(|(name, spec)| (dir.join(name), spec))
             .into_iter()
             .collect();
@@ -100,27 +123,31 @@ pub fn build(
             kit::write(path, spec)?;
         }
         all.push(HarnessKits {
+            profile: profile_name,
             harness,
             config_hash,
             dirs: specs.into_iter().map(|(path, _)| path).collect(),
+            skills_store: profile.skills_store,
         });
     }
 
-    for dir in all.iter().flat_map(|h| &h.dirs) {
-        let validation = backend.validate_kit(dir)?;
-        if !validation.valid {
-            let checked = invalid_kit_check(global.profiles_dir(), &profile_name, None);
-            bail!(
-                "generated kit {} is invalid: {}; check {checked}",
-                dir.display(),
-                validation.error.as_deref().unwrap_or("no details from sbx"),
-            );
+    for kits in &all {
+        for dir in &kits.dirs {
+            let validation = backend.validate_kit(dir)?;
+            if !validation.valid {
+                let checked = invalid_kit_check(global.profiles_dir(), &kits.profile, None);
+                bail!(
+                    "generated kit {} is invalid: {}; check {checked}",
+                    dir.display(),
+                    validation.error.as_deref().unwrap_or("no details from sbx"),
+                );
+            }
         }
     }
     Ok(RunKits {
-        profile_name,
+        skills_store: profile_named(&run_profile).skills_store,
+        profile_name: run_profile,
         resources,
-        skills_store: profile.skills_store,
         harnesses: all,
     })
 }

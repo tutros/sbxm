@@ -33,6 +33,7 @@ timeout = "10m"
 
 # Each contestant needs its provider's secret stored in sbx (see `sbx secret ls`):
 # claude -> anthropic, codex -> openai, antigravity -> google.
+# A contestant can also set `profile = "<name>"` to use a different profile than [run].
 [[contestants]]
 harness = "claude"
 model = "claude-opus-5-5"

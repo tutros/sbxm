@@ -106,7 +106,25 @@ dir. Sandboxes created by this batch are named `sbxm-it-<pid>-*` or `sbxm-run-*`
 
 | 12a | Done | see `git log` ("Rank contestants from the judge's scores") | see commit | none (plan: none) | Decision 132. |
 
+| 12b | Done | see `git log` ("Build kits per profile for per-contestant profiles") | see commit | `run_profiles_against_real_sbx` passed: two Claude contestants with different `env.WHO` profiles each read their own value; run.json/result.json record the profiles; nothing left behind | Decision 133. Removed the obsolete test that asserted the "refused until 12b" limitation (its coverage is now `tests/run_profiles.rs`). |
+
 ### Manual test steps
+
+**Slice 12b** (per-contestant profiles):
+1. Create a second profile, e.g. `<config_dir>\profiles\strict\profile.toml` with `[env]` `WHO = "strict"`, and give the `default` profile `WHO = "default"`.
+2. In a run-config, give the second contestant `profile = "strict"`, and use the prompt "Run `printenv WHO` in the shell and reply with exactly its output."
+3. `cargo run -- run <config>`: contestant 0 answers `default`, contestant 1 answers `strict`. `cargo run -- run show <run-id>` marks `contestants[1] ... (profile strict)`.
+4. `Get-Content <Results folder>\run.json` lists both kit sets (`harnesses[]` with `profile` and different `config_hash`).
+5. An unknown profile name is refused before anything is written.
+6. Automated: `cargo test --test run_profiles` and `$env:SBXM_REAL_BASE_DIR='E:\sbxm-it'; cargo test --test real_sbx run_profiles_against_real_sbx -- --ignored --nocapture`.
+
+## Batch result (2026-09-30)
+
+All eight slices in scope (6, 7, 8, 9, 10, 11, 12a, 12b) met the per-slice criteria; no stop rule fired. Not attempted, as planned: slice 12 (cosine; needs the new `fastembed` dependency), 13 (your manual end-to-end check) and 14 (Jev; blocked on spike S9).
+
+Open for you (from decisions 124 and 125): how run sandboxes authenticate Antigravity (124f) and, until then, the provisional `google` secret requirement for an Antigravity contestant.
+
+Departures worth a look: decision 127 (host `git` runs against a host-owned git dir because a contestant can plant a `.git/config` that runs commands on the host; the plan's literal commands run the same way but against that dir), decision 131's limit (the judge keeps its harness's tools), and the first commit of slice 7 not compiling on its own (the tip of each slice is green).
 
 **Slice 12a** (ranking): needs a run with a judge (slice 11 steps).
 1. After `cargo run -- run <config>` the block `Ranking (judge scores 0-1, repeats averaged)` is printed before `Results:`, best contestant first, e.g. `1. contestants[1] codex/gpt-5.6-luna: 1.00 (1/1 repeats scored)`.

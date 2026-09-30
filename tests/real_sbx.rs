@@ -1386,6 +1386,99 @@ fn run_judge_against_real_sbx() {
 
 #[test]
 #[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
+fn run_profiles_against_real_sbx() {
+    use sbxm::commands::run;
+    use sbxm::headless::RunStatus;
+
+    let base = real_base_dir().join(format!("sbxm-it-{}-profiles", std::process::id()));
+    let _cleanup = Cleanup {
+        sandbox: String::new(),
+        dirs: vec![base.clone()],
+        shared_dirs: vec![],
+    };
+    std::fs::create_dir_all(&base).unwrap();
+    let config_dir = TempDir::new().unwrap();
+    let base_toml = toml::Value::String(base.to_str().unwrap().to_owned());
+    std::fs::write(
+        config_dir.path().join("config.toml"),
+        format!("base_dir = {base_toml}\n\n[resources]\ncpus = 2\nmemory = \"2g\"\n"),
+    )
+    .unwrap();
+    // Two profiles that differ in a visible setting: an environment variable.
+    for (name, who) in [
+        ("default", "from-the-default-profile"),
+        ("strict", "from-the-strict-profile"),
+    ] {
+        let dir = config_dir.path().join("profiles").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("profile.toml"),
+            format!("description = \"real profiles test\"\n\n[env]\nWHO = \"{who}\"\n\n[skills]\nstore = \"off\"\n"),
+        )
+        .unwrap();
+    }
+    let run_config = config_dir.path().join("run.toml");
+    std::fs::write(
+        &run_config,
+        "[task]\nprompt = \"Run `printenv WHO` in the shell and reply with exactly its output and nothing else.\"\n\n\
+         [run]\ntimeout = \"4m\"\n\n\
+         [[contestants]]\nharness = \"claude\"\nmodel = \"claude-haiku-4-5-20251001\"\n\n\
+         [[contestants]]\nharness = \"claude\"\nmodel = \"claude-haiku-4-5-20251001\"\nprofile = \"strict\"\n",
+    )
+    .unwrap();
+
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let summary = run::run(
+        config_dir.path(),
+        &run_config,
+        &SbxBackend,
+        &mut out,
+        &mut warn,
+    )
+    .unwrap();
+    println!(
+        "{}{}",
+        String::from_utf8_lossy(&out),
+        String::from_utf8_lossy(&warn)
+    );
+
+    // Each contestant's sandbox got its own profile's environment.
+    let answers: Vec<String> = summary
+        .outcomes
+        .iter()
+        .map(|o| {
+            let result = o.result.as_ref().unwrap();
+            assert_eq!(result.status, RunStatus::Completed, "{result:?}");
+            result.answer.clone()
+        })
+        .collect();
+    assert!(
+        answers[0].contains("from-the-default-profile"),
+        "{answers:?}"
+    );
+    assert!(
+        answers[1].contains("from-the-strict-profile"),
+        "{answers:?}"
+    );
+    // And the run recorded which profile each pair used.
+    let meta = base.join(".sbxm").join("runs").join(&summary.run_id);
+    let read = |path: std::path::PathBuf| -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    };
+    let record = read(meta.join("run.json"));
+    assert_eq!(record["contestants"][0]["profile"], "default");
+    assert_eq!(record["contestants"][1]["profile"], "strict");
+    assert_eq!(record["harnesses"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        read(meta.join("1").join("0").join("result.json"))["profile"],
+        "strict"
+    );
+    let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
+    assert!(!String::from_utf8_lossy(&ls.stdout).contains("sbxm-run-"));
+}
+
+#[test]
+#[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
 fn run_kits_validate_against_real_sbx() {
     use sbxm::run::config::RunConfig;
     use sbxm::run::kits;

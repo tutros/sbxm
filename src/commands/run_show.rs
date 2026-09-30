@@ -78,9 +78,16 @@ pub fn render(config_dir: &Path, run_id: &str, options: &Options) -> Result<Stri
     for (n, contestant) in contestants.iter().enumerate() {
         let i = contestant["index"].as_u64().unwrap_or(n as u64);
         writeln!(out)?;
+        // Only a contestant that differs from the run's profile is marked.
+        let own_profile = match contestant["profile"].as_str() {
+            Some(profile) if record["profile"].as_str() != Some(profile) => {
+                format!(" (profile {profile})")
+            }
+            _ => String::new(),
+        };
         writeln!(
             out,
-            "contestants[{i}] {}/{}",
+            "contestants[{i}] {}/{}{own_profile}",
             text(&contestant["harness"]),
             text(&contestant["model"])
         )?;

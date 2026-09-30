@@ -266,7 +266,7 @@ pub fn judge_repeat(
                 workspace: workspace.clone(),
                 cpus: kits.resources.cpus,
                 memory: kits.resources.memory.clone(),
-                skills: kits.skills_store,
+                skills: harness_kits.skills_store,
                 kits: harness_kits.dirs.clone(),
             })
             .map_err(|e| format!("cannot create the judge sandbox {sandbox}: {e:#}"))?;

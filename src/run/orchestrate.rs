@@ -26,6 +26,8 @@ pub struct PairOutcome {
     pub contestant: usize,
     /// Zero-based repeat index (the wave).
     pub repeat: u32,
+    /// The profile the pair's kits were built from: the contestant's own or the run's.
+    pub profile: String,
     pub sandbox: String,
     /// The host folder mounted into the sandbox; kept after the run.
     pub workspace: PathBuf,
@@ -113,6 +115,7 @@ pub fn execute_with(
                         let mut outcome = PairOutcome {
                             contestant: i,
                             repeat,
+                            profile: effective_profile(&run_config.contestants[i], kits),
                             sandbox,
                             workspace,
                             result: Err("the pair's thread panicked".into()),
@@ -171,6 +174,7 @@ impl Pair<'_> {
         let mut outcome = PairOutcome {
             contestant: self.index,
             repeat: self.repeat,
+            profile: effective_profile(self.contestant, self.kits),
             sandbox: self.sandbox,
             workspace: self.workspace,
             result: attempt.result,
@@ -191,9 +195,13 @@ impl Pair<'_> {
             created,
         };
         let harness = self.contestant.harness;
-        let Some(harness_kits) = self.kits.get(harness) else {
+        let profile = effective_profile(self.contestant, self.kits);
+        let Some(harness_kits) = self.kits.get_for(&profile, harness) else {
             return failed(
-                format!("no kits were built for {}", harness.as_str()),
+                format!(
+                    "no kits were built for {} under profile {profile}",
+                    harness.as_str()
+                ),
                 false,
             );
         };
@@ -229,7 +237,7 @@ impl Pair<'_> {
             workspace: self.workspace.clone(),
             cpus: self.kits.resources.cpus,
             memory: self.kits.resources.memory.clone(),
-            skills: self.kits.skills_store,
+            skills: harness_kits.skills_store,
             kits: harness_kits.dirs.clone(),
         }) {
             return failed(
@@ -284,6 +292,14 @@ impl Pair<'_> {
             created: true,
         }
     }
+}
+
+/// The contestant's own profile, else the run's (decision 115).
+fn effective_profile(contestant: &Contestant, kits: &RunKits) -> String {
+    contestant
+        .profile
+        .clone()
+        .unwrap_or_else(|| kits.profile_name.clone())
 }
 
 fn remove(backend: &dyn SandboxBackend, sandbox: &str) -> Option<String> {
