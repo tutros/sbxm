@@ -359,6 +359,19 @@ function Invoke-ReviewFiling {
     $text = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $Review).Path)
     $reviewName = Split-Path -Leaf $Review
     $parsed = ConvertFrom-ReviewFile $text
+
+    # Checked before Test-ReviewAccess or any gh call: a duplicate id would otherwise let two blocks both reach
+    # `gh issue create`, with the second overwriting the first's number in the write-back.
+    $dupes = @($parsed.Findings | Group-Object Id | Where-Object Count -gt 1)
+    if ($dupes) {
+        foreach ($dup in $dupes) {
+            $lines = ($dup.Group | ForEach-Object { $_.StartLine }) -join ' and '
+            Write-Host "refused: $($dup.Name) is used by more than one finding in $reviewName, at lines $lines"
+        }
+        Write-Host "nothing was filed or changed: make finding ids unique in $reviewName first"
+        return 1
+    }
+
     $selected = @($parsed.Findings)
     if ($Only) {
         $unknown = @($Only | Where-Object { $parsed.Findings.Id -notcontains $_ })

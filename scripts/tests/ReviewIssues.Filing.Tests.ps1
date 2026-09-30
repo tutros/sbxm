@@ -65,6 +65,23 @@ BeforeAll {
     }
 }
 
+Describe 'Duplicate finding ids are refused before any GitHub call' {
+    BeforeEach { Initialize-Fake }
+
+    It 'names the id and both review lines, and calls gh not at all' {
+        $text = (Get-Content -Raw (Join-Path $script:fixtures 'review-small.md')) -replace '### S-2 - Message is wrong', '### S-1 - Message is wrong'
+        $dir = Join-Path $TestDrive 'reviews'
+        New-Item -ItemType Directory $dir -Force | Out-Null
+        Set-Content (Join-Path $dir 'review-dup.md') $text
+        $run = Invoke-Filing -Fixture 'review-dup.md'
+        $run.Code | Should -Be 1
+        $run.Text | Should -BeLike '*refused: S-1 is used by more than one finding*at lines 8 and 21*'
+        $run.Text | Should -BeLike '*make finding ids unique*'
+        $script:fake.Writes | Should -BeNullOrEmpty
+        Should -Invoke gh -ModuleName file-review-issues -Times 0
+    }
+}
+
 Describe 'Access checks stop before any write' {
     BeforeEach { Initialize-Fake }
 
