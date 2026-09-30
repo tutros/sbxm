@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 
 use super::config::RunConfig;
-use crate::backend::SandboxBackend;
+use crate::backend::{SandboxBackend, SkillsStore};
 use crate::commands::invalid_kit_check;
 use crate::config::{self, GlobalConfig, Profile, Resources};
 use crate::harness::Harness;
@@ -30,6 +30,8 @@ pub struct RunKits {
     /// The global `[resources]` with the run's overrides applied: what every
     /// sandbox of the run is created with.
     pub resources: Resources,
+    /// The profile's `skills.store`, passed to `sbx create --skills`.
+    pub skills_store: SkillsStore,
     /// One entry per harness used by a contestant or the judge, in first-use order.
     pub harnesses: Vec<HarnessKits>,
 }
@@ -118,6 +120,7 @@ pub fn build(
     Ok(RunKits {
         profile_name,
         resources,
+        skills_store: profile.skills_store,
         harnesses: all,
     })
 }
