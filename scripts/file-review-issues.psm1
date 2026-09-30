@@ -253,3 +253,108 @@ function New-IssueBody {
     $parts.Add("<!-- review-finding: $ReviewName#$($Finding.Id) -->")
     ($parts -join "`n") + "`n"
 }
+
+function ConvertFrom-GhJson($Raw) { ($Raw -join "`n") | ConvertFrom-Json }
+
+# Checks what the skill's section 8 asks for before anything is written. Returns the repo name, or throws one line
+# that says what to fix.
+function Test-ReviewAccess {
+    param([string]$Repo, [string[]]$Labels)
+    if ($Repo) { $view = gh repo view $Repo --json nameWithOwner }
+    else {
+        $remote = git remote get-url origin
+        if ($LASTEXITCODE -ne 0 -or "$remote" -notmatch 'github\.com[:/]') {
+            throw "origin isn't a GitHub repo here ($remote); run this from a checkout whose origin is on GitHub, or pass -Repo <owner/name>"
+        }
+        $view = gh repo view --json nameWithOwner
+    }
+    if ($LASTEXITCODE -ne 0) { throw "gh can't read the repo; check the name and run ``gh auth status``" }
+    $name = (ConvertFrom-GhJson $view).nameWithOwner
+    $auth = gh auth status 2>&1 | Out-String
+    if ($LASTEXITCODE -ne 0) { throw "gh isn't logged in; run ``gh auth login`` and rerun" }
+    if ($auth -match 'Token scopes:' -and $auth -notmatch "'repo'") {
+        throw "the gh token lacks the repo scope; run ``gh auth refresh -s repo`` and rerun"
+    }
+    $existing = @((ConvertFrom-GhJson (gh label list --repo $name --json name --limit 200)).name)
+    foreach ($label in $Labels) {
+        if ($existing -notcontains $label) { throw "label '$label' doesn't exist in $name; create it (this script creates no labels)" }
+    }
+    $name
+}
+
+function Get-Plural([int]$n, [string]$word) { if ($n -eq 1) { "$n $word" } else { "$n ${word}s" } }
+
+# `Issues: S-1 #33, S-2 pending`: a number where the finding has an issue, `Unknown` where it would get one.
+function Format-IssuesLine {
+    param([object[]]$Findings, [hashtable]$Numbers, [string[]]$WouldFile = @(), [string]$Unknown = '#?')
+    'Issues: ' + (($Findings | ForEach-Object {
+                if ($Numbers.ContainsKey($_.Id)) { "$($_.Id) #$($Numbers[$_.Id])" }
+                elseif ($WouldFile -contains $_.Id) { "$($_.Id) $Unknown" }
+                else { "$($_.Id) pending" }
+            }) -join ', ')
+}
+
+# Files (or, without -Create, only shows) the issues for a review file's findings. Returns the exit code: 0 done,
+# 1 nothing filed. Everything it prints goes to the information stream.
+function Invoke-ReviewFiling {
+    param(
+        [Parameter(Mandatory)][string]$Review, [string]$Repo, [switch]$StandardCriteria, [switch]$KeepPaths,
+        [string[]]$Only
+    )
+    if (-not (Test-Path -LiteralPath $Review -PathType Leaf)) {
+        Write-Host "review file $Review not found; give the path of a file in reviews/"
+        return 1
+    }
+    $text = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $Review).Path)
+    $reviewName = Split-Path -Leaf $Review
+    $parsed = ConvertFrom-ReviewFile $text
+    $selected = @($parsed.Findings)
+    if ($Only) {
+        $unknown = @($Only | Where-Object { $parsed.Findings.Id -notcontains $_ })
+        if ($unknown) {
+            Write-Host "-Only names $($unknown -join ', '), which isn't in $reviewName; its findings are $($parsed.Findings.Id -join ', ')"
+            return 1
+        }
+        $selected = @($selected | Where-Object { $Only -contains $_.Id })
+    }
+    if (-not $selected) {
+        Write-Host "no findings found in $reviewName; check its headings against the review file format in the code review skill"
+        return 1
+    }
+    try { $repoName = Test-ReviewAccess -Repo $Repo -Labels @($selected.Label | Sort-Object -Unique) }
+    catch {
+        Write-Host "$($_.Exception.Message)`nnothing was filed or changed; the review stays marked 'Issues: pending (no GitHub access from this host)'"
+        return 1
+    }
+
+    $headSha = Resolve-HeadSha $parsed.HeadSha
+    $problems = [System.Collections.Generic.List[string]]::new()
+    $prepared = [System.Collections.Generic.List[object]]::new()
+    foreach ($finding in $selected) {
+        $before = $problems.Count
+        if ($finding.Missing.Count) { $problems.Add("$($finding.Id) is missing: $($finding.Missing -join ', ')") }
+        $criteria = Get-AcceptanceCriteria $finding -StandardCriteria:$StandardCriteria
+        if ($criteria.Error) { $problems.Add($criteria.Error) }
+        foreach ($secret in @(Find-Secrets -Text $text -Finding $finding)) {
+            $problems.Add("$($secret.Id) line $($secret.Line) looks like $($secret.Kind); remove it from the review file")
+        }
+        if ($problems.Count -eq $before) { $prepared.Add((Protect-Finding $finding -KeepPaths:$KeepPaths)) }
+    }
+    if ($problems.Count) {
+        $problems | ForEach-Object { Write-Host "refused: $_" }
+        Write-Host "nothing would be filed: $(Get-Plural $problems.Count 'problem') to fix in $reviewName first"
+        return 1
+    }
+
+    $view = $parsed.PSObject.Copy()
+    $view.Findings = $prepared.ToArray()
+    foreach ($finding in $prepared) {
+        Write-Host "would create [$($finding.Label)] $($finding.Id): $($finding.Title)"
+        Write-Host (New-IssueBody -Review $view -Finding $finding -Repo $repoName -ReviewName $reviewName `
+                -HeadSha $headSha -StandardCriteria:$StandardCriteria)
+        Write-Host '---'
+    }
+    Write-Host "not filed: $(Get-Plural $parsed.NotFiled.Sections 'section'), $(Get-Plural $parsed.NotFiled.Nits 'nit')"
+    Write-Host ('would write: ' + (Format-IssuesLine $parsed.Findings @{} $prepared.Id))
+    0
+}
