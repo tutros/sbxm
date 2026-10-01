@@ -392,44 +392,59 @@ impl Validator<'_> {
         Ok(())
     }
 
-    /// Only claude, codex and antigravity have headless adapters (decision 103).
     fn harness(&self, at: &str, name: &str) -> Result<Harness> {
-        let allowed = "use claude, codex or antigravity";
-        match Harness::from_str(name, false) {
-            Ok(h @ (Harness::Claude | Harness::Codex | Harness::Antigravity)) => Ok(h),
-            Ok(Harness::Gemini) => Err(self.err(format!(
-                "{at} \"gemini\" can't run comparisons: Gemini CLI is deprecated upstream and \
-                 blocked by egress on this setup; use antigravity for Google models"
-            ))),
-            Ok(Harness::Pi) => Err(self.err(format!(
-                "{at} \"pi\" can't run comparisons yet: its headless mode is deferred; {allowed}"
-            ))),
-            Err(_) => Err(self.err(format!("{at} \"{name}\" is not a harness; {allowed}"))),
-        }
+        headless_harness(at, name, "comparisons").map_err(|problem| self.err(problem))
     }
 
     /// `<n>s`, `<n>m` or `<n>h`, above zero.
     fn duration(&self, at: &str, text: &str) -> Result<Duration> {
-        let parsed = text
-            .len()
-            .checked_sub(1)
-            .filter(|_| text.is_char_boundary(text.len() - 1))
-            .and_then(|split| {
-                let (digits, unit) = text.split_at(split);
-                let n: u64 = digits.parse().ok()?;
-                let secs = match unit {
-                    "s" => n,
-                    "m" => n.checked_mul(60)?,
-                    "h" => n.checked_mul(3600)?,
-                    _ => return None,
-                };
-                (secs > 0).then_some(Duration::from_secs(secs))
-            });
-        parsed.ok_or_else(|| {
-            self.err(format!(
-                "{at} \"{text}\" isn't a duration; write a whole number and a unit, e.g. \"90s\", \
-                 \"10m\" or \"2h\""
-            ))
-        })
+        parse_duration(at, text).map_err(|problem| self.err(problem))
     }
+}
+
+/// Only claude, codex and antigravity have headless adapters (decision 103).
+/// `what` names the feature in the refusal (`comparisons`, `tasks`). The error
+/// is the problem text, `<at> ...; <fix>`, for the caller to prefix.
+pub(crate) fn headless_harness(
+    at: &str,
+    name: &str,
+    what: &str,
+) -> std::result::Result<Harness, String> {
+    let allowed = "use claude, codex or antigravity";
+    match Harness::from_str(name, false) {
+        Ok(h @ (Harness::Claude | Harness::Codex | Harness::Antigravity)) => Ok(h),
+        Ok(Harness::Gemini) => Err(format!(
+            "{at} \"gemini\" can't run {what}: Gemini CLI is deprecated upstream and \
+             blocked by egress on this setup; use antigravity for Google models"
+        )),
+        Ok(Harness::Pi) => Err(format!(
+            "{at} \"pi\" can't run {what} yet: its headless mode is deferred; {allowed}"
+        )),
+        Err(_) => Err(format!("{at} \"{name}\" is not a harness; {allowed}")),
+    }
+}
+
+/// `<n>s`, `<n>m` or `<n>h`, above zero. The error is the problem text.
+pub(crate) fn parse_duration(at: &str, text: &str) -> std::result::Result<Duration, String> {
+    let parsed = text
+        .len()
+        .checked_sub(1)
+        .filter(|_| text.is_char_boundary(text.len() - 1))
+        .and_then(|split| {
+            let (digits, unit) = text.split_at(split);
+            let n: u64 = digits.parse().ok()?;
+            let secs = match unit {
+                "s" => n,
+                "m" => n.checked_mul(60)?,
+                "h" => n.checked_mul(3600)?,
+                _ => return None,
+            };
+            (secs > 0).then_some(Duration::from_secs(secs))
+        });
+    parsed.ok_or_else(|| {
+        format!(
+            "{at} \"{text}\" isn't a duration; write a whole number and a unit, e.g. \"90s\", \
+             \"10m\" or \"2h\""
+        )
+    })
 }
