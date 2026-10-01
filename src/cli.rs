@@ -147,4 +147,16 @@ pub enum TaskCommand {
         /// The repo's root folder.
         path: Option<PathBuf>,
     },
+    /// Show the tasks: stage, status, and whether one was interrupted.
+    Status {
+        /// Only the task for this issue.
+        #[arg(long, conflicts_with = "pr")]
+        issue: Option<u32>,
+        /// Only the task for this PR.
+        #[arg(long)]
+        pr: Option<u32>,
+        /// Print the task records as JSON.
+        #[arg(long)]
+        json: bool,
+    },
 }

@@ -5,6 +5,7 @@ use sbxm::cli::{Cli, Command, ConfigCommand, RunArgs, RunCommand, TaskCommand};
 use sbxm::commands;
 use sbxm::config;
 use sbxm::confirm::Terminal;
+use sbxm::task;
 
 fn main() -> anyhow::Result<()> {
     match Cli::parse().command {
@@ -120,6 +121,26 @@ fn main() -> anyhow::Result<()> {
             let written = commands::task_init::run(path.as_deref())?;
             println!("Wrote {}", written.display());
             println!("Check the profile and gates, then run: sbxm task gates --dry-run");
+            Ok(())
+        }
+        Command::Task {
+            command: TaskCommand::Status { issue, pr, json },
+        } => {
+            let which = match (issue, pr) {
+                (Some(n), _) => Some((task::record::Kind::Issue, n)),
+                (None, Some(n)) => Some((task::record::Kind::Pr, n)),
+                (None, None) => None,
+            };
+            let global = config::GlobalConfig::load(&config::config_dir()?)?;
+            print!(
+                "{}",
+                commands::task_status::render(
+                    &global.base_dir,
+                    which,
+                    json,
+                    &task::record::SystemProbe,
+                )?
+            );
             Ok(())
         }
         Command::Run(_) => unreachable!("clap requires a config or a subcommand"),

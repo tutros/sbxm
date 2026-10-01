@@ -41,7 +41,7 @@ pub enum Stage {
 }
 
 impl Stage {
-    fn name(self) -> &'static str {
+    pub fn name(self) -> &'static str {
         match self {
             Self::Prepared => "prepared",
             Self::Working => "working",

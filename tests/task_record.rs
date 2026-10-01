@@ -258,7 +258,10 @@ fn the_real_probe_sees_this_process_and_not_a_missing_one() {
     record
         .advance(Stage::Working, T0, Process::current(&SystemProbe))
         .unwrap();
-    assert!(!record.is_interrupted(&SystemProbe), "this very process is running it");
+    assert!(
+        !record.is_interrupted(&SystemProbe),
+        "this very process is running it"
+    );
 
     record.process = Some(Process::new(u32::MAX - 1, T0));
     assert!(record.is_interrupted(&SystemProbe), "no such pid");
