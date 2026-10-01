@@ -107,9 +107,7 @@ Describe 'The review file needs exactly one Issues: line' {
         Should -Invoke gh -ModuleName file-review-issues -Times 0
     }
 
-    It 'checks the file can be updated before the first gh issue create' -Skip {
-        # Skipped: this needs a real pwsh run to confirm that Set-ItemProperty -Name IsReadOnly actually makes
-        # [IO.File]::OpenWrite throw on the host's OS (none available in this sandbox); see .sbxm-fix/result.md.
+    It 'checks the file can be updated before the first gh issue create' {
         $dir = Join-Path $TestDrive 'reviews'
         New-Item -ItemType Directory $dir -Force | Out-Null
         $path = Join-Path $dir 'review-readonly.md'
@@ -153,7 +151,8 @@ Describe 'A no-SHA Scope line and the review file name get the same protection a
         Add-ReviewText 'review-scope-path.md' (New-ScopeReview 'Scope: reviewed by hand, notes in /home/alice/project')
         $run = Invoke-Filing -Fixture 'review-scope-path.md'
         $run.Code | Should -Be 0
-        $run.Text | Should -BeLike '*reviewed commits `reviewed by hand, notes in ~/project`*'
+        # -BeLike would treat the backticks as its escape character.
+        $run.Text | Should -Match ([regex]::Escape('reviewed commits `reviewed by hand, notes in ~/project`'))
         $run.Text | Should -BeLike '*replaced 1 personal path*'
         $run.Text | Should -Not -BeLike '*/home/alice*'
     }
@@ -161,14 +160,14 @@ Describe 'A no-SHA Scope line and the review file name get the same protection a
     It 'keeps the path with -KeepPaths' {
         Add-ReviewText 'review-scope-path-keep.md' (New-ScopeReview 'Scope: reviewed by hand, notes in /home/alice/project')
         $run = Invoke-Filing -Fixture 'review-scope-path-keep.md' -Arguments @{ KeepPaths = $true }
-        $run.Text | Should -BeLike '*reviewed commits `reviewed by hand, notes in /home/alice/project`*'
+        $run.Text | Should -Match ([regex]::Escape('reviewed commits `reviewed by hand, notes in /home/alice/project`'))
     }
 
     It 'warns about an e-mail address in a no-SHA Scope without changing it' {
         Add-ReviewText 'review-scope-email.md' (New-ScopeReview 'Scope: reviewed by alice@example.com')
         $run = Invoke-Filing -Fixture 'review-scope-email.md'
         $run.Code | Should -Be 0
-        $run.Text | Should -BeLike '*reviewed commits `reviewed by alice@example.com`*'
+        $run.Text | Should -Match ([regex]::Escape('reviewed commits `reviewed by alice@example.com`'))
         $run.Text | Should -BeLike '*e-mail address*'
     }
 
