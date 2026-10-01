@@ -17,6 +17,28 @@ use sbxm::task::repo::Identity;
 /// Claude's stream-json for a run that finished (a real capture).
 pub const CLAUDE_DONE: &str = include_str!("../../src/fixtures/claude-stream-json-pong.jsonl");
 
+/// Codex's ndjson for a run that finished (a real capture).
+pub const CODEX_DONE: &str = include_str!("../../src/fixtures/codex-ndjson-pong.jsonl");
+
+/// What the reviewer does in its clone when the fake backend is asked to run its headless command:
+/// writes `.sbxm-task/review.md` (nothing when `review` is `None`), and notes what it could see.
+pub fn play_reviewer(
+    base_dir: &Path,
+    task: &str,
+    review: Option<String>,
+) -> impl Fn(&str, &ExecSpec) + Send + Sync + use<> {
+    let clone = base_dir.join("tasks").join(format!("{task}-review"));
+    move |_sandbox: &str, spec: &ExecSpec| {
+        if spec.argv.iter().any(|a| a == "codex")
+            && let Some(text) = &review
+        {
+            let dir = clone.join(".sbxm-task");
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("review.md"), text).unwrap();
+        }
+    }
+}
+
 pub struct Probe;
 
 impl ProcessProbe for Probe {

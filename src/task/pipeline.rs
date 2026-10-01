@@ -15,10 +15,12 @@ use super::record::{
     self, Agent, GateResult, Kind, NewTask, Process, ProcessProbe, Record, RunInfo, Stage, Status,
 };
 use super::repo::{self, AgentFile, BUNDLE_CAP, Identity};
+use super::review;
 use super::select::{self, Selection};
 use crate::backend::{CreateSpec, ExecSpec, SandboxBackend, Stdin};
 use crate::config::{GlobalConfig, Profile};
 use crate::github::{GitHubBackend, IssueText};
+use crate::harness::Harness;
 use crate::headless::{self, HeadlessOpts, RunStatus};
 use crate::run::kits::{self, HarnessKits, Overrides};
 use crate::run::orchestrate::in_sandbox_path;
@@ -166,6 +168,35 @@ pub fn select_issues(ctx: &Ctx, explicit: Option<&[u32]>, workers: usize) -> Res
     Ok(selection)
 }
 
+/// The harness's provider secret and the profile's own `secrets.services` must all be stored in
+/// `sbx` before anything is created; the error says which and how to add it.
+fn check_secrets(
+    backend: &dyn SandboxBackend,
+    harness: Harness,
+    who: &str,
+    profile_name: &str,
+    profile: &Profile,
+) -> Result<()> {
+    let stored = backend.secret_services()?;
+    let mut needed = vec![(
+        harness.provider_secret().to_owned(),
+        format!("{who}, {}", harness.as_str()),
+    )];
+    needed.extend(profile.secrets.services.iter().map(|s| {
+        (
+            s.clone(),
+            format!("secrets.services of profile '{profile_name}'"),
+        )
+    }));
+    if let Some((missing, reason)) = needed.iter().find(|(s, _)| !stored.contains(s)) {
+        bail!(
+            "secret '{missing}' (needed by {reason}) is not stored in sbx; add it with \
+             `sbx secret set {missing}` or import it with `sbx setup`"
+        );
+    }
+    Ok(())
+}
+
 fn bullets(commands: &[String]) -> String {
     if commands.is_empty() {
         "(none configured)".to_owned()
@@ -208,26 +239,13 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
     }
     let worker = &ctx.config.worker;
     let profile = Profile::load(global.profiles_dir(), &ctx.config.sandbox.profile)?;
-    let stored = ctx.backend.secret_services()?;
-    let mut needed = vec![(
-        worker.harness.provider_secret().to_owned(),
-        format!("the worker, {}", worker.harness.as_str()),
-    )];
-    needed.extend(profile.secrets.services.iter().map(|s| {
-        (
-            s.clone(),
-            format!(
-                "secrets.services of profile '{}'",
-                ctx.config.sandbox.profile
-            ),
-        )
-    }));
-    if let Some((missing, reason)) = needed.iter().find(|(s, _)| !stored.contains(s)) {
-        bail!(
-            "secret '{missing}' (needed by {reason}) is not stored in sbx; add it with \
-             `sbx secret set {missing}` or import it with `sbx setup`"
-        );
-    }
+    check_secrets(
+        ctx.backend,
+        worker.harness,
+        "the worker",
+        &ctx.config.sandbox.profile,
+        &profile,
+    )?;
     let mut warnings = ctx.config.warnings.clone();
     warnings.extend(worker.harness.unsupported(&profile, "the worker's sandbox"));
     let template = prompts::template(Role::Worker, &ctx.config.prompts)?;
@@ -808,4 +826,236 @@ fn collect(
         Err(e) => notes.push(format!("result.md was refused: {e:#}")),
     }
     Ok(commits)
+}
+
+/// The biggest `review.md` read from the reviewer's clone.
+const REVIEW_CAP: u64 = 1024 * 1024;
+
+/// What a reviewer round found.
+#[derive(Debug)]
+pub struct Reviewed {
+    pub round: u32,
+    pub must_fix: u32,
+}
+
+/// Checks before a review creates anything (spec §5.2): the reviewer's provider secret and the
+/// profile's secrets are stored, and the profile loads. Returns the warnings to print.
+pub fn check_reviewer(ctx: &Ctx, _task: &Prepared) -> Result<Vec<String>> {
+    let global = GlobalConfig::load(ctx.config_dir)?;
+    let reviewer = &ctx.config.reviewer;
+    let profile = Profile::load(global.profiles_dir(), &ctx.config.sandbox.profile)?;
+    check_secrets(
+        ctx.backend,
+        reviewer.harness,
+        "the reviewer",
+        &ctx.config.sandbox.profile,
+        &profile,
+    )?;
+    let mut warnings = ctx.config.warnings.clone();
+    warnings.extend(
+        reviewer
+            .harness
+            .unsupported(&profile, "the reviewer's sandbox"),
+    );
+    Ok(warnings)
+}
+
+/// One reviewer round (spec §5.2): the reviewer runs in its own sandbox on its own clone of the
+/// task branch (made from `repo.git`, so it sees exactly the collected commits and can change
+/// nothing of the worker's), writes `review.md`, and sbxm saves it as `review-<round>.md` (and
+/// `review.md`) under the reviewer's name. The sandbox and the clone are removed afterwards,
+/// also when the round fails; a failed round leaves the task `reviewing/failed` and nothing used.
+pub fn run_reviewer(ctx: &Ctx, prepared: &mut Prepared, round: u32) -> Result<Reviewed> {
+    let id = prepared.record.id.clone();
+    let reviewer = &ctx.config.reviewer;
+    let clone = prepared.workspace.with_file_name(format!("{id}-review"));
+    let sandbox = format!("sbxm-task-{id}-review-{}", reviewer.harness.as_str());
+
+    // Round 2 reads round 1's review; a stale `review.md` must never stand in for this round's.
+    let previous = (round > 1)
+        .then(|| fs::read_to_string(prepared.meta.join(format!("review-{}.md", round - 1))).ok())
+        .flatten();
+    let _ = fs::remove_file(prepared.meta.join("review.md"));
+
+    prepared
+        .record
+        .advance(Stage::Reviewing, now(), Process::current(ctx.probe))?;
+    record::write(&prepared.meta, &prepared.record)?;
+
+    let result = review_round(ctx, prepared, round, &clone, &sandbox, previous.as_deref());
+
+    // Always: the reviewer's sandbox and clone are gone, whatever happened.
+    let _ = ctx.backend.remove(&sandbox);
+    if let Err(e) = remove_with_retries(&clone) {
+        prepared
+            .record
+            .notes
+            .push(format!("could not remove {}: {e}", clone.display()));
+    }
+    match result {
+        Ok(reviewed) => {
+            prepared.record.finish(Status::Completed)?;
+            record::write(&prepared.meta, &prepared.record)?;
+            Ok(reviewed)
+        }
+        Err(e) => {
+            prepared
+                .record
+                .notes
+                .push(format!("review round {round}: {e:#}"));
+            prepared.record.finish(Status::Failed)?;
+            record::write(&prepared.meta, &prepared.record)?;
+            Err(e)
+        }
+    }
+}
+
+fn review_round(
+    ctx: &Ctx,
+    prepared: &mut Prepared,
+    round: u32,
+    clone: &Path,
+    sandbox: &str,
+    previous: Option<&str>,
+) -> Result<Reviewed> {
+    let reviewer = &ctx.config.reviewer;
+    let repo_git = prepared.meta.join("repo.git");
+    let branch = prepared.record.branch.clone();
+
+    // A clone left by a killed run (and its sandbox) goes first.
+    if clone.exists() {
+        let _ = ctx.backend.remove(sandbox);
+        remove_with_retries(clone)
+            .with_context(|| format!("cannot clear {}, left by an earlier run", clone.display()))?;
+    }
+    let kit_set = kits::build_for(
+        ctx.config_dir,
+        &ctx.config.sandbox.profile,
+        &[reviewer.harness],
+        &Overrides {
+            cpus: ctx.config.sandbox.cpus,
+            memory: ctx.config.sandbox.memory.clone(),
+        },
+        &prepared.meta.join("kits-review"),
+        ctx.backend,
+    )?;
+    let harness_kits = kit_set
+        .get(reviewer.harness)
+        .cloned()
+        .context("no kits were built for the reviewer's harness")?;
+
+    repo::clean_checkout(&repo_git, &branch, clone)?;
+    let info = clone.join(".git").join("info");
+    fs::create_dir_all(&info)?;
+    fs::write(info.join("exclude"), format!("# sbxm\n{AGENT_DIR}/\n"))?;
+    let agent_dir = clone.join(AGENT_DIR);
+    fs::create_dir_all(&agent_dir)?;
+    let issue = fs::read_to_string(prepared.meta.join("issue.md")).unwrap_or_default();
+    fs::write(agent_dir.join("issue.md"), &issue)?;
+    if let Some(text) = previous {
+        fs::write(agent_dir.join("previous-review.md"), text)?;
+    }
+    let template = prompts::template(Role::Reviewer, &ctx.config.prompts)?;
+    let prompt = prompts::render(
+        &template.name,
+        &template.text,
+        &[
+            ("issue", &issue),
+            ("number", &prepared.record.number.to_string()),
+            ("branch", &branch),
+            ("base", &prepared.record.base),
+            ("repo", &prepared.record.repo),
+            ("gates_sandbox", &bullets(&ctx.config.gates.sandbox)),
+            ("gates_host", &bullets(&ctx.config.gates.host)),
+            ("review_path", ".sbxm-task/review.md"),
+            ("previous_review_path", ".sbxm-task/previous-review.md"),
+        ],
+    )?;
+    fs::write(agent_dir.join("prompt.md"), &prompt)?;
+    fs::write(
+        prepared.meta.join(format!("reviewer-prompt-{round}.md")),
+        &prompt,
+    )?;
+
+    ctx.backend
+        .create(&CreateSpec {
+            name: sandbox.to_owned(),
+            agent: reviewer.harness.agent_arg().into(),
+            workspace: clone.to_path_buf(),
+            cpus: kit_set.resources.cpus,
+            memory: kit_set.resources.memory.clone(),
+            skills: harness_kits.skills_store,
+            kits: harness_kits.dirs.clone(),
+        })
+        .with_context(|| format!("cannot create sandbox {sandbox}"))?;
+    prepared.record.reviewer = Some(Agent {
+        harness: reviewer.harness.as_str().to_owned(),
+        model: reviewer.model.clone(),
+        sandbox: sandbox.to_owned(),
+        workspace: slashes(clone),
+        run: None,
+    });
+    record::write(&prepared.meta, &prepared.record)?;
+
+    let started = Instant::now();
+    let result = headless::run(
+        ctx.backend,
+        sandbox,
+        &in_sandbox_path(clone),
+        reviewer.harness,
+        AGENT_PROMPT,
+        &HeadlessOpts {
+            model: reviewer.model.clone(),
+            // A review is worth the model's best effort (Codex defaults to a low one).
+            high_effort: true,
+            budget_usd: None,
+            is_git_repo: true,
+        },
+        reviewer.time_limit,
+    )
+    .with_context(|| format!("cannot run the reviewer in {sandbox}"))?;
+
+    let transcripts = prepared.meta.join("transcripts");
+    fs::create_dir_all(&transcripts)?;
+    fs::write(
+        transcripts.join(format!("review-{round}.jsonl")),
+        &result.transcript,
+    )?;
+    if let Some(agent) = prepared.record.reviewer.as_mut() {
+        agent.run = Some(RunInfo {
+            status: run_label(&result.status),
+            usage: serde_json::json!({
+                "input_tokens": result.usage.input_tokens,
+                "output_tokens": result.usage.output_tokens,
+                "cost_usd": result.usage.cost_usd,
+            }),
+            duration_s: started.elapsed().as_secs(),
+        });
+    }
+    match &result.status {
+        RunStatus::Completed => {}
+        RunStatus::TimedOut => bail!(
+            "the reviewer hit its time limit ({}s), so its review isn't used",
+            reviewer.time_limit.as_secs()
+        ),
+        RunStatus::Failed(why) => bail!("the reviewer failed ({why}), so its review isn't used"),
+    }
+
+    let text = match repo::read_agent_file(clone, "review.md", REVIEW_CAP)? {
+        AgentFile::Text(text) => text,
+        AgentFile::Missing => bail!("the reviewer wrote no review.md"),
+        AgentFile::TooLarge(_) => {
+            bail!("the reviewer's review.md is larger than 1 MiB, so it isn't used")
+        }
+    };
+    let saved = review::with_header(reviewer.harness.as_str(), reviewer.model.as_deref(), &text);
+    fs::write(prepared.meta.join(format!("review-{round}.md")), &saved)?;
+    let Some(must_fix) = review::must_fix_count(&text) else {
+        bail!(
+            "the reviewer's review.md doesn't start with 'Must-fix findings: <count>', so it isn't \
+             used; read it in review-{round}.md"
+        );
+    };
+    fs::write(prepared.meta.join("review.md"), &saved)?;
+    Ok(Reviewed { round, must_fix })
 }
