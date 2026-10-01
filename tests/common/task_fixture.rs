@@ -127,6 +127,28 @@ pub fn is_bundle(spec: &ExecSpec) -> bool {
     spec.argv.iter().any(|a| a == "bundle")
 }
 
+/// Like [`play`], for several tasks at once: the sandbox name (`sbxm-task-issue-<n>-<harness>`)
+/// says which workspace under `<base_dir>/tasks/` the agent is working in.
+pub fn play_tasks(
+    base_dir: &Path,
+    base: &str,
+    what: Play,
+) -> impl Fn(&str, &ExecSpec) + Send + Sync + use<> {
+    let base_dir = base_dir.to_path_buf();
+    let base = base.to_owned();
+    move |sandbox: &str, spec: &ExecSpec| {
+        let Some(number) = sandbox
+            .strip_prefix("sbxm-task-issue-")
+            .and_then(|rest| rest.split('-').next())
+        else {
+            return;
+        };
+        let branch = format!("issue-{number}");
+        let workspace = base_dir.join("tasks").join(&branch);
+        play(&workspace, &base, &branch, what.clone())(sandbox, spec);
+    }
+}
+
 /// A hook for `FakeBackend::with_exec_hook` that plays the agent in `workspace`: on the headless
 /// command it commits files and writes `result.md`; on the fixed bundle command it runs the real
 /// `git bundle create` there (as the sandbox's git would).

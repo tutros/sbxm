@@ -148,7 +148,7 @@ impl Process {
 }
 
 /// Looks a process up by pid (faked in tests).
-pub trait ProcessProbe {
+pub trait ProcessProbe: Send + Sync {
     /// The start time (seconds since the epoch) of the process with this pid, if it exists.
     fn start_time(&self, pid: u32) -> Option<u64>;
 }

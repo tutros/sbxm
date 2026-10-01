@@ -265,6 +265,57 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
     }
 }
 
+/// What happened to one pick of `start`.
+#[derive(Debug)]
+pub struct TaskReport {
+    pub number: u32,
+    /// Lines to print before the run (unsupported settings, same-harness reviewer).
+    pub warnings: Vec<String>,
+    /// `Err` is a refusal or a failure before or while running; the task's own folders are
+    /// already cleaned up when it happened before the record existed.
+    pub result: Result<Worked>,
+}
+
+/// Starts a task for each of `numbers` at the same time (`--workers`, decision 144): each gets
+/// its own folders and sandbox on its own thread, and one failing does not stop the others.
+/// Reports come back in the order of `numbers`.
+pub fn start(ctx: &Ctx, numbers: &[u32]) -> Vec<TaskReport> {
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = numbers
+            .iter()
+            .map(|&number| scope.spawn(move || start_one(ctx, number)))
+            .collect();
+        handles
+            .into_iter()
+            .zip(numbers)
+            .map(|(handle, &number)| {
+                handle.join().unwrap_or_else(|_| TaskReport {
+                    number,
+                    warnings: Vec::new(),
+                    result: Err(anyhow::anyhow!(
+                        "the task for issue #{number} stopped unexpectedly"
+                    )),
+                })
+            })
+            .collect()
+    })
+}
+
+fn start_one(ctx: &Ctx, number: u32) -> TaskReport {
+    let mut warnings = Vec::new();
+    let result = (|| {
+        let issue = ctx.github.issue(ctx.repo, number)?;
+        let mut prepared = prepare(ctx, &issue)?;
+        warnings.clone_from(&prepared.warnings);
+        run_worker(ctx, &mut prepared)
+    })();
+    TaskReport {
+        number,
+        warnings,
+        result,
+    }
+}
+
 /// What the worker is told on its command line; the real prompt is a file (decision 131), since
 /// a rendered prompt carries the whole issue and can outgrow a command line.
 const AGENT_PROMPT: &str =
