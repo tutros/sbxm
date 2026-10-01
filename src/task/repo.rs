@@ -154,6 +154,11 @@ pub fn fetch_pr_head(repo_git: &Path, number: u32) -> Result<String> {
         &[
             "--git-dir",
             text(repo_git)?,
+            // A PR author's objects are as untrusted as an agent's bundle: have git check them.
+            "-c",
+            "fetch.fsckObjects=true",
+            "-c",
+            "transfer.fsckObjects=true",
             "fetch",
             "--no-tags",
             "--no-recurse-submodules",

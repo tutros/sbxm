@@ -279,6 +279,69 @@ fn a_pr_head_is_fetched_into_a_local_branch() {
     assert_eq!(git(&f.repo_git, &["rev-parse", "refs/heads/pr-7"]), main);
 }
 
+/// `git <args>` with `input` on stdin; returns trimmed stdout (for planting objects git won't build normally).
+fn git_stdin(dir: &Path, args: &[&str], input: &[u8]) -> String {
+    use std::io::Write;
+    use std::process::Stdio;
+    let mut child = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(input).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+#[test]
+fn a_pr_head_with_a_malformed_tree_is_refused_by_fsck() {
+    let f = fixture();
+    // Cloned first: a local clone copies every object, which would leave nothing to fetch.
+    repo::clone_bare(&source(&f), &f.repo_git).unwrap();
+    // A PR author can push any object GitHub accepts. Here: a tree with a `.git` entry,
+    // which a checkout must never see (it would overwrite the repo's own metadata).
+    let blob = git_stdin(&f.origin, &["hash-object", "-w", "--stdin"], b"payload\n");
+    let mut raw = b"100644 .git\0".to_vec();
+    raw.extend(
+        (0..blob.len())
+            .step_by(2)
+            .map(|i| u8::from_str_radix(&blob[i..i + 2], 16).unwrap()),
+    );
+    let tree = git_stdin(
+        &f.origin,
+        &["hash-object", "-t", "tree", "-w", "--literally", "--stdin"],
+        &raw,
+    );
+    let commit = git(&f.origin, &["commit-tree", &tree, "-m", "evil"]);
+    git(&f.origin, &["update-ref", "refs/pull/7/head", &commit]);
+
+    let message = format!("{:#}", repo::fetch_pr_head(&f.repo_git, 7).unwrap_err());
+
+    assert!(message.contains("PR #7"), "{message}");
+    let branches = git(
+        &f.repo_git,
+        &["for-each-ref", "--format=%(refname)", "refs/heads"],
+    );
+    assert!(
+        !branches.contains("pr-7"),
+        "the malformed head must not become a branch: {branches}"
+    );
+}
+
 #[test]
 fn a_missing_pr_head_is_an_error_naming_the_pr() {
     let f = fixture();
