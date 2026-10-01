@@ -8,7 +8,7 @@ BeforeAll {
         $script:fake = @{
             Remote = 'https://github.com/o/r.git'; LoggedIn = $true; Scopes = "'repo', 'read:org'"
             Labels = @('must-fix', 'should-fix', 'question'); Issues = [System.Collections.Generic.List[object]]::new()
-            Next = 40; Writes = [System.Collections.Generic.List[string]]::new(); FailCreateAt = 0; Created = 0
+            Next = 40; Writes = [System.Collections.Generic.List[string]]::new(); FailCreateAt = 0; Created = 0; FailList = $false; ThrowList = $false; FailEditAt = 0; Edited = 0
             BodyFiles = [System.Collections.Generic.List[string]]::new()
         }
         Mock git {
@@ -27,7 +27,11 @@ BeforeAll {
                     return "Logged in to github.com`n  - Token scopes: $($script:fake.Scopes)"
                 }
                 'label list' { return (($script:fake.Labels | ForEach-Object { @{ name = $_ } }) | ConvertTo-Json -AsArray) }
-                'issue list' { return (@($script:fake.Issues) | ConvertTo-Json -Depth 4 -AsArray) }
+                'issue list' {
+                    if ($script:fake.ThrowList) { throw 'gh crashed' }
+                    if ($script:fake.FailList) { $global:LASTEXITCODE = 1; return }
+                    return (@($script:fake.Issues) | ConvertTo-Json -Depth 4 -AsArray)
+                }
                 'issue create' {
                     $script:fake.Writes.Add('create')
                     $script:fake.BodyFiles.Add((& $get '--body-file'))
@@ -371,6 +375,21 @@ Describe 'Create' {
         $second.Code | Should -Be 0
         $script:fake.Issues.Count | Should -Be 4
         @($script:fake.Issues | ForEach-Object { $_.title } | Sort-Object -Unique).Count | Should -Be 4
+    }
+
+    It 'files nothing when the issue list cannot be read (exit code)' {
+        $script:fake.FailList = $true
+        $run = Invoke-Filing -Arguments @{ Create = $true }
+        $run.Code | Should -Be 1
+        $run.Text | Should -BeLike "*can't read the issue list*nothing was filed*"
+        $script:fake.Writes | Should -BeNullOrEmpty
+    }
+
+    It 'files nothing when the issue list call throws' {
+        $script:fake.ThrowList = $true
+        $run = Invoke-Filing -Arguments @{ Create = $true }
+        $run.Code | Should -Be 1
+        $script:fake.Writes | Should -BeNullOrEmpty
     }
 
     It 'stops with an error when the issue list is as long as the limit' {

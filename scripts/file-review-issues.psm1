@@ -470,7 +470,15 @@ function Invoke-ReviewFiling {
     }
 
     # What exists already: a finding whose marker is in an issue body keeps that number (idempotency).
-    $listed = @(ConvertFrom-GhJson (gh issue list --repo $repoName --state all --limit $issueListLimit --json number,title,body))
+    try {
+        $raw = gh issue list --repo $repoName --state all --limit $issueListLimit --json number,title,body
+        if ($LASTEXITCODE -ne 0) { throw "gh failed (exit code $LASTEXITCODE)" }
+        $listed = @(ConvertFrom-GhJson $raw)
+    }
+    catch {
+        Write-Host "can't read the issue list of ${repoName}: $($_.Exception.Message); without it a rerun could duplicate issues, so nothing was filed"
+        return 1
+    }
     if ($listed.Count -ge $issueListLimit) {
         Write-Host "the issue list has $($listed.Count) issues, the most this script reads at once, so it can't tell what is already filed; nothing was filed"
         return 1
