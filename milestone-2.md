@@ -191,23 +191,75 @@ on it.
   unaffected.
 - Confirm no run-config or rubric content is readable from inside any contestant's sandbox.
 
-## M2b (rough outline — refine once M2a ships)
+## M2b: folding `issue-workers.ps1` into sbxm as `sbxm task` (refined 2026-10-01)
 
-Folds `scripts/issue-workers.ps1` into sbxm ([88][90]), reusing the `headless` primitive (slices 0–3
-above) for a worker's own agent run instead of the script's raw `sbx exec claude -p` calls.
+**Read first:** `prd-m2b.md` (what and why, success criteria S1-S9), `spec-m2b.md` (exact behavior; every rule there
+becomes a test), decisions 139-161 (this milestone's choices) and 80-91, 134 (the workflow being ported). Decision
+140 makes the PRD/spec split an experiment: at the end, report whether it paid off (less duplication, fewer review
+findings about missing behavior) before anyone edits the `sdlc-*` skills.
 
-- Run spike S8 (GitHub access from a sandbox, written but not run) once M2a is done — it decides whether
-  workers can push/PR/comment themselves through `sbx`'s proxy, or keep M1's host-push model [82].
-- Port the dispatcher (host picks issues by label/dependency order, [81]) into an sbxm command, replacing
-  the PowerShell script's issue-selection logic.
-- Reuse `headless` for the worker's agent run; keep the independent-reviewer step [84][85] as a second
-  `headless` call (a different harness/model) rather than a second bespoke code path.
-- Streamline what decisions [88] and [90] deferred here: must-fix vs. should-fix handling, the one-fix-round
-  policy, and turning every surviving finding into its own GitHub issue automatically (needs S8 or the
-  host-push model, depending on what S8 finds).
-- Feature parity inventory, so nothing is dropped by accident: `start` (issue selection [81], clone/branch/sandbox, headless worker), `status` (running/finished, commits, result/review present), `review -Issue` (host checks, independent reviewer, one fix round [84][85]), `review -Pr <n>` (review an open PR and comment, fork PRs refused [86][87]), `finish` (push and open the PR with result/review in the body), `remove`, plus decision 83's CI triggers (label, schedule, manual, on a self-hosted runner). Each is either ported or explicitly deferred with a user-confirmed decision at M2b refinement; nothing is silently lost.
-- Decide `scripts/issue-workers.ps1`'s fate once sbxm covers its job: retire it, or keep it as a thin
-  wrapper calling the new sbxm commands.
+**Goal:** `sbxm task` carries a GitHub issue or PR through worker, gates, independent review, one fix round and hand-off,
+with a durable task record, on the `headless` primitive, behind `SandboxBackend` and `GitHubBackend` fakes. The
+frozen script [88] is marked deprecated when S1-S4 pass; deleting it is a separate decision. Out of scope: see the
+PRD's non-goals (CI triggers, auto-filing, GitHub access for sandboxes, batching/templates, planning/release/learn
+stages, tasks without an issue, auto-resume).
+
+**Spikes:** S8 (GitHub from a sandbox) is out of M2b [141]. S10 (a `git bundle` made in a sandbox can be verified and
+fetched on the host with hooks off) was run 2026-10-01 and passed [161]. Nothing else blocks the slices; the items
+under "Details to verify first" in the spec are checked inside the slice that needs them.
+
+### Work order (vertical slices, each TDD, each ends with fmt, clippy, cargo test and a commit)
+
+| # | After this slice, … | Tests (red first) | Real check |
+|---|---|---|---|
+| 0 | `headless::run` takes an optional model (no `--model` when absent) and Codex runs with `model_reasoning_effort=high` for reviewers | argv snapshots per harness with and without a model; effort flag present for Codex | none |
+| 1 | `sbxm task init` writes a valid starter `sbxm-task.toml` and refuses to overwrite; the loader enforces the schema, defaults and errors of spec §2 | every §2 rule: unknown key, missing profile, no gates in a non-Rust repo, explicit empty list, prompt path escape or link, reviewer default differs from worker, same-harness warning | none |
+| 2 | `GitHubBackend` with `GhBackend`, `FakeGitHub` and fixtures captured from the real `gh` | parsers against captured output (note the `gh` version); fake records calls | `gh` fixtures captured by hand |
+| 3 | The selection function returns the script's picks and skip reasons | golden cases from `scripts/tests/SelectIssues.Tests.ps1` plus both-direction `Related`, explicit list, `--workers` cap | none |
+| 4 | `task.json` is written atomically with stages; `sbxm task status` prints tasks and shows `interrupted` | transitions, schema version refusal, pid/start-time probe via a fake, `--json` | none |
+| 5 | Kits can be built from a profile and a harness list (extracted from `run::kits::build`), and the host-owned repo works: bare clone, bundle verify and fetch, clean checkout, push | `run` still passes unchanged; hostile-bundle tests mirroring #41 (hooks, fsmonitor, filters cannot run on the fetch path); size cap; push goes to the fake remote | S10 re-run as an `#[ignore]` test |
+| 6 | `sbxm task start --issue N` prepares, runs the worker, collects the bundle and `result.md`, writes the record; `--workers N` runs picks in parallel; worker prompt template (embedded) | `FakeBackend` call sequence; every check-before-act refusal changes nothing; restart/exists refusal; uncommitted-changes note; timeout and failure statuses; two workers do not overlap names | real `sbx` worker (Claude) on a scratch issue |
+| 7 | Gates run in two tiers: `task gates [--tier] [--dry-run]`, and `start` gates after the worker | sandbox tier through `FakeBackend`; host tier through `HostRunner` fake in a clean checkout; first failure stops; `gates-failed` recorded; `--dry-run` changes nothing; host tier off by default | real sandbox gate on a scratch repo |
+| 8 | `task review --issue`: gates, reviewer in its own sandbox and clone, one fix round, re-review; reviewer prompt and fix prompt templates | must-fix count parsing from `review.md`; fix round at most once; reviewer sandbox and clone removed also on error; same-harness warning; secret preflight before creating anything | real Codex reviewer on slice 6's task |
+| 9 | `task review --pr` posts the review as a PR comment; fork PRs are refused; the PR task links a related issue task | `FakeGitHub` comment recorded; fork and closed PR refusals create nothing; `related` field | real PR comment on a scratch PR |
+| 10 | `task finish`, `task rm`, `task run` | finish pushes from `repo.git` and opens the PR with `Fixes #N`, result and review in the body; refuses when not `ready` or a PR exists; `rm`/`--restart` show exact paths, confirm, and touch only the task's own folders; `run` stops before `finish` | scratch repo end to end |
+| 11 | `task file-findings` files findings as issues (dry run default) | golden inputs from `scripts/tests/ReviewIssues.*.Tests.ps1` fixtures: parse, render, secret refusal, path scrub, marker skip, dependency order, `Issues:` line rewrite | dry run on a real `reviews/*.md` |
+| 12 | Docs and hand-over: README section for `sbxm task`, `AGENTS.md` code layout and status, script deprecation note, parity table filled in | none (docs); parity table has a test or manual check per row | none |
+| 13 | **End-to-end check (manual, real `sbx` and GitHub)**, below | none | all items pass |
+
+Slices 0-5 have no sandbox cost. Slices 6-10 each end with a small real check on a scratch repo (never `tutros/sbxm`'s
+real issues). Keep each slice's commits small and green (implementation rules 3-4); stop and ask if a slice needs a new
+decision, departs from the spec, or grows past its row.
+
+### End-to-end checklist (slice 13)
+
+On a scratch GitHub repo with a few issues (one with `Depends on`, one labelled `question`), `sbxm-task.toml`
+committed, and a profile deployed:
+1. `sbxm task init` in a fresh checkout; the starter file is valid; `task gates --dry-run` lists the commands.
+2. `sbxm task start --workers 2`: the picks and every skip reason are printed; two sandboxes appear; `status` from
+   another terminal shows `working`; each task folder has the layout in spec §3 when done.
+3. Kill one `sbxm` mid-run: `status` shows `interrupted`; `start` without `--restart` refuses; `--restart` works.
+4. A deliberate gate failure (a failing test in the worker's change) marks `gates-failed` and stops.
+5. `task review --issue N` with a Claude worker and a Codex reviewer; then a Codex worker and a Claude reviewer;
+   then Antigravity as worker and as reviewer. Must-fix findings trigger exactly one fix round.
+6. `task review --pr N` on a scratch PR posts a comment; a fork PR is refused.
+7. `task finish` opens a PR with `Fixes #N`; `task file-findings` dry run, then `--create` on the scratch repo.
+8. `task rm` shows the paths and confirms; afterwards `sbx ls` and the base dir hold nothing from the tasks.
+9. Confirm no GitHub token, secret value or run-config text is readable from inside any task sandbox, and that no
+   git command ran inside an agent's clone (the host-owned repo is the only one the host touched).
+
+### Risks (M2b)
+
+| Risk | Mitigation |
+|---|---|
+| Scope creep toward a full factory | Hooks only for later stages [139]; warn when a slice grows; PRD non-goals |
+| Drift from the script's behavior | Golden tests from the Pester cases; parity table; script stays frozen until retired |
+| `gh` output or flags change | Fixtures with the `gh` version; parsers isolated in `gh.rs` |
+| Hostile objects through the bundle path | Hooks off, size cap, verify first, no checkout in the host repo, #41-style tests (slice 5) |
+| Host gates run agent code on the host | Off unless listed, only after the sandbox tier passes, documented [160] |
+| ~2.5 min `sbxm-dev` setup per sandbox | Accepted; templates are the planned fix, before any batching [147] |
+| Windows file locks on git calls (#39) | Reuse `git.rs`'s retry for every host git call |
+
 
 ### Spike S9 (before slice 14): how does the Jev token reach the Jev call?
 Decision 36 keeps secret values in `sbx`, which never reveals them to the host, so a host-side `reqwest` client has no token source. Test whether `sbx secret` supports a custom service and host (a `jev` secret injected by the proxy for `api.typesafe.ai`-style traffic) so the call can run from a throwaway evaluator sandbox (a fixed command, not an agent). If yes, slice 14 does that and the token never touches the host. If no, fall back to a host-side client reading the token from an environment variable named in `[eval.jev] token_env`, an explicit and deliberate exception to [36] that needs the user's sign-off, with the value redacted from results and errors and a test proving it. An MCP server was considered and rejected (decision 120): it adds an agent layer to a deterministic HTTP call, and a scorer reachable from a contestant's sandbox breaks [112].

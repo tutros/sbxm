@@ -282,9 +282,13 @@ timeouts are enforced inside the sandbox.
 
 ## Details to verify first (before the slice that relies on them)
 
-1. `headless::run` with no model (`HeadlessOpts.model` is a `String`): the script ran `claude -p` without `--model`.
-   If unsupported, make it optional with a test.
-2. Codex's `model_reasoning_effort=high` for the reviewer (the script passes it): check `Harness::headless_argv`.
-3. `sbx exec` can run `git bundle` inside the workspace and the bundle is readable from the host path.
-4. `gh pr view --json` field set, `gh issue list --json labels,body` output: capture fixtures and note the `gh` version.
-5. The Pester tests in `scripts/tests/` for selection and `file-review-issues` are the source of golden cases.
+Checked 2026-10-01 [161]: (1) `HeadlessOpts.model` is a `String` and `--model` is always passed, so an absent model needs
+a code change (slice 0); (2) Codex gets no `model_reasoning_effort=high` (slice 0); (3) `git bundle` in a sandbox,
+verify and fetch on the host with hooks off: works (spike S10).
+
+Still to check inside the slice that needs it:
+1. `gh pr view --json` field set and `gh issue list --json labels,body` output: capture fixtures and note the `gh`
+   version (slice 2).
+2. The Pester tests in `scripts/tests/` for selection and `file-review-issues` are the source of golden cases
+   (slices 3 and 11).
+3. Bundle behavior when the agent rewrites history or deletes the base ref (slice 5 tests it).
