@@ -61,6 +61,7 @@ impl Setup {
             source: Source::File(path.to_path_buf()),
             repo_root: self.dir.path().to_path_buf(),
             repo: Some("o/r".into()),
+            create: false,
             standard_criteria: false,
             keep_paths: false,
             only: Vec::new(),

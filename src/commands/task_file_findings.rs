@@ -7,15 +7,17 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use anyhow::{Context, Result, anyhow, bail};
+use regex::Regex;
 
 use crate::commands::task_start::{check_repo, github_repo};
 use crate::git;
-use crate::github::GitHubBackend;
+use crate::github::{GitHubBackend, IssueRequest};
 use crate::task::findings::{
-    self, Finding, Render, acceptance_criteria, find_secrets, issue_body, issues_line, marker,
-    protect_finding, protect_text, secret_kind,
+    self, Finding, Render, acceptance_criteria, filing_order, find_secrets, issue_body,
+    issues_line, marker, protect_finding, protect_text, secret_kind, update_link_fields,
 };
 
 /// How many issues one listing reads. A repo with this many or more can't be checked for
@@ -33,6 +35,8 @@ pub struct Options {
     pub repo_root: PathBuf,
     /// `owner/name`. Default: the `origin` of the checkout at `repo_root`.
     pub repo: Option<String>,
+    /// Publish the issues. Without it nothing is created or edited.
+    pub create: bool,
     /// File findings with no acceptance criteria with only the standard ones.
     pub standard_criteria: bool,
     /// Keep personal paths instead of replacing them with `~`.
@@ -167,6 +171,11 @@ fn file(
         );
     }
 
+    // A file a rerun can't update is caught before any issue is published.
+    if opts.create && fs::OpenOptions::new().write(true).open(path).is_err() {
+        bail!("can't update {name} to record issue numbers; check its file permissions and rerun");
+    }
+
     let ids: Vec<&str> = parsed.findings.iter().map(|f| f.id.as_str()).collect();
     let unknown: Vec<&str> = opts
         .only
@@ -283,8 +292,13 @@ fn file(
         for problem in &problems {
             writeln!(out, "refused: {problem}")?;
         }
+        let verb = if opts.create {
+            "nothing was filed"
+        } else {
+            "nothing would be filed"
+        };
         bail!(
-            "nothing would be filed: {} to fix in {name} first",
+            "{verb}: {} to fix in {name} first",
             plural(problems.len(), "problem")
         );
     }
@@ -347,18 +361,109 @@ fn file(
         issue_body(&view, finding, &context, warnings).map_err(|e| anyhow!(e))
     };
 
-    for finding in &prepared {
-        if let Some(number) = numbers.get(&finding.id) {
-            writeln!(out, "{} skipped (exists #{number})", finding.id)?;
-            continue;
+    if !opts.create {
+        for finding in &prepared {
+            if let Some(number) = numbers.get(&finding.id) {
+                writeln!(out, "{} skipped (exists #{number})", finding.id)?;
+                continue;
+            }
+            writeln!(
+                out,
+                "would create [{}] {}: {}",
+                finding.label, finding.id, finding.title
+            )?;
+            writeln!(out, "{}", render(finding, &numbers)?)?;
+            writeln!(out, "---")?;
         }
         writeln!(
             out,
-            "would create [{}] {}: {}",
-            finding.label, finding.id, finding.title
+            "not filed: {}, {}",
+            plural(parsed.not_filed_sections, "section"),
+            plural(parsed.not_filed_nits, "nit")
         )?;
-        writeln!(out, "{}", render(finding, &numbers)?)?;
-        writeln!(out, "---")?;
+        let would: Vec<String> = to_create.iter().map(|f| f.id.clone()).collect();
+        writeln!(
+            out,
+            "would write: {}",
+            issues_line(&parsed.findings, &numbers, &would, "#?")
+        )?;
+        return Ok(());
+    }
+
+    // The bodies of issues that exist already, as listed, for patching their links at the end.
+    let existing: BTreeMap<u32, String> = listed
+        .iter()
+        .filter(|i| numbers.values().any(|n| *n == i.number))
+        .map(|i| (i.number, i.body.clone()))
+        .collect();
+
+    let mut created: Vec<(Finding, u32, String)> = Vec::new();
+    let mut failure: Option<String> = None;
+    let todo: Vec<Finding> = to_create.iter().map(|f| (*f).clone()).collect();
+    for finding in filing_order(&todo) {
+        let body = render(finding, &numbers)?;
+        let request = IssueRequest {
+            title: format!("{}: {}", finding.id, finding.title),
+            body: body.clone(),
+            labels: vec![finding.label.clone()],
+        };
+        match github.issue_create(&repo, &request) {
+            Ok(number) => {
+                numbers.insert(finding.id.clone(), number);
+                created.push((finding.clone(), number, body));
+            }
+            Err(e) => {
+                failure = Some(format!("{}: {e:#}", finding.id));
+                break;
+            }
+        }
+    }
+    // Every number is known now: bodies that held an id for a later issue are rewritten with #n.
+    for (finding, number, body) in &created {
+        let last = render(finding, &numbers)?;
+        if last != *body
+            && let Err(e) = github.issue_edit(&repo, *number, &last)
+        {
+            failure = Some(format!("#{number} links: {e:#}"));
+        }
+    }
+    // Issues that existed before this run get only their link fields patched, from the body as
+    // listed.
+    for (number, body) in &existing {
+        let patched = update_link_fields(body, &numbers);
+        if patched != *body
+            && let Err(e) = github.issue_edit(&repo, *number, &patched)
+        {
+            failure = Some(format!("#{number} links: {e:#}"));
+        }
+    }
+
+    set_issues_line(
+        path,
+        &issues_line(&parsed.findings, &numbers, &[], "#?"),
+        warnings,
+    )?;
+
+    for finding in &prepared {
+        let status = if created.iter().any(|(f, ..)| f.id == finding.id) {
+            "created"
+        } else if numbers.contains_key(&finding.id) {
+            "skipped (exists)"
+        } else {
+            "not filed"
+        };
+        let (number, url) = match numbers.get(&finding.id) {
+            Some(n) => (
+                format!("#{n}"),
+                format!("https://github.com/{repo}/issues/{n}"),
+            ),
+            None => ("-".to_owned(), "-".to_owned()),
+        };
+        writeln!(
+            out,
+            "{:<8} {:<11} {:<5} {url} {status}",
+            finding.id, finding.label, number
+        )?;
     }
     writeln!(
         out,
@@ -366,11 +471,38 @@ fn file(
         plural(parsed.not_filed_sections, "section"),
         plural(parsed.not_filed_nits, "nit")
     )?;
-    let would: Vec<String> = to_create.iter().map(|f| f.id.clone()).collect();
-    writeln!(
-        out,
-        "would write: {}",
-        issues_line(&parsed.findings, &numbers, &would, "#?")
-    )?;
+    if let Some(failure) = failure {
+        bail!("stopped early: {failure}; rerun to file the rest (existing issues are skipped)");
+    }
     Ok(())
+}
+
+/// Replaces the first `Issues:` line and nothing else: the file's line endings and byte order
+/// mark stay.
+fn set_issues_line(path: &Path, line: &str, warnings: &mut Vec<String>) -> Result<()> {
+    static ISSUES: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"(?m)^Issues:[^\r\n]*").expect("a valid pattern"));
+    let bytes = fs::read(path).with_context(|| format!("cannot read {}", path.display()))?;
+    let bom = bytes.starts_with(&[0xEF, 0xBB, 0xBF]);
+    let text = std::str::from_utf8(&bytes[if bom { 3 } else { 0 }..])
+        .with_context(|| format!("{} isn't UTF-8", path.display()))?;
+    if !ISSUES.is_match(text) {
+        warnings.push(format!(
+            "{} has no 'Issues:' line to update; add one so the issue numbers are recorded",
+            path.display()
+        ));
+        return Ok(());
+    }
+    let new = ISSUES.replace(text, regex::NoExpand(line));
+    let mut out = Vec::with_capacity(bytes.len());
+    if bom {
+        out.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+    }
+    out.extend_from_slice(new.as_bytes());
+    fs::write(path, out).with_context(|| {
+        format!(
+            "cannot update {} to record the issue numbers; check its file permissions",
+            path.display()
+        )
+    })
 }

@@ -180,6 +180,7 @@ fn main() -> anyhow::Result<()> {
             command:
                 TaskCommand::FileFindings {
                     file,
+                    create,
                     only,
                     standard_criteria,
                     keep_paths,
@@ -190,6 +191,7 @@ fn main() -> anyhow::Result<()> {
                 source: commands::task_file_findings::Source::File(file),
                 repo_root: std::env::current_dir()?,
                 repo,
+                create,
                 standard_criteria,
                 keep_paths,
                 only,
