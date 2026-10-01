@@ -275,6 +275,24 @@ removed.
 To take over one interactively, run `sbxm open sbxm-issue-<n>`. `-BaseDir` (default `E:\sbxm-projects`) must match
 `base_dir` in `config.toml`. [`sandbox-issues.md`](sandbox-issues.md) has the steps with the expected output.
 
+### Filing review findings as issues
+
+Reviews run in sandboxes without GitHub access, so their findings sit in `reviews/<date>-<scope>.md` marked
+`Issues: pending`. `scripts/file-review-issues.ps1` (PowerShell 7, run from a host where `gh` works) files one issue
+per finding. It is a dry run unless you pass `-Create`, so read the dry run first: it prints every issue body, and
+path and secret scrubbing is heuristic (personal paths become `~`; a secret-looking line refuses the finding).
+
+```powershell
+./scripts/file-review-issues.ps1 reviews/2026-09-30-milestone-2a.md                     # dry run
+./scripts/file-review-issues.ps1 reviews/2026-09-30-milestone-2a.md -Create             # file the issues
+./scripts/file-review-issues.ps1 reviews/2026-09-30-milestone-2a.md -Create -Only M2A-1 # just these finding ids
+```
+
+`-StandardCriteria` files a finding that has no acceptance criteria with only the standard ones, `-KeepPaths` keeps
+personal paths as they are, and `-Repo <owner/name>` overrides the repo taken from `origin`. A rerun never
+duplicates issues (a hidden marker in each body); it also fills in the `#n` links of issues filed earlier. Afterwards
+the review's `Issues:` line is rewritten to `Issues: <id> #<n>, ...`. Decision 134 has the details.
+
 ## License
 
 Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT), at your

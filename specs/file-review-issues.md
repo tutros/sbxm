@@ -71,7 +71,7 @@ Scope: `<base sha>..<head sha>` ...          first paragraph line naming the rev
 Issues: pending (...)                         or: Issues: M2A-1 #33, M2A-2 #34
 
 ## Must fix                                   also "## Should fix", "## Question" or "## Questions"
-### M2A-1 - <title>                           ids are any non-space token; "-", an em dash or ":" separate id and title
+### M2A-1 - <title>                           ids use only A-Za-z0-9._- ; "-", an em dash or ":" separate id and title
 **Where:** `src/git.rs:50-72`, `src/run/diff.rs:23-34`
 **What happens:** ...
 **Why it matters:** ...
@@ -88,6 +88,8 @@ Rules:
   `should-fix`, `Question`/`Questions` is `question`). Case and trailing colons are ignored.
 - Text under `##` headings that hold no `###` findings (Summary, Verification and checklist notes, a `Nit:` bullet)
   is not filed. Say so in the dry-run output ("not filed: 2 sections, 1 nit").
+- **Id** is limited to `[A-Za-z0-9._-]+`, because it goes into titles, bodies, markers and the `Issues:` line. Any
+  other id (a path such as `C:\Users\alice`, say) is refused with exit 1, naming it, before any `gh` call.
 - **Title** of the issue is `<id>: <title>`.
 - **Field names are matched case-insensitively** and may be followed by text on the same line or by a paragraph or
   bullets below. A finding is **invalid** (reported with its id and what is missing, never silently dropped) when it
@@ -111,7 +113,8 @@ Rules:
 Exactly the skill's template, in this order: **Where**, **What happens**, **Why it matters**, **Fix** (a question
 has **Options and recommendation** instead), **Depends on**, **Related**, **Acceptance criteria**, **Review**
 (`reviews/<file name>`, finding id, and the reviewed commit range). A hidden marker
-`<!-- review-finding: <review file name>#<id> -->` is the last line. Missing Depends on becomes `none known`.
+`<!-- review-finding: <review file name>#<id> -->` is the last line. The **Review** field is text, not a link:
+the review file may not be committed or pushed yet, so a link could point nowhere (decided 2026-09-30). Missing Depends on becomes `none known`.
 Missing Related is omitted.
 
 ## Idempotency
@@ -119,7 +122,8 @@ Missing Related is omitted.
 Before creating anything, list existing issues once: `gh issue list --repo <repo> --state all --limit 1000 --json
 number,title,body` and scan the bodies for each finding's marker. A finding whose marker exists is **skipped** and its
 number is reused for links and the write-back. Re-running after a failure or after hand edits never duplicates. If
-the list has exactly the limit's worth of issues, stop with an error (the scan could be incomplete).
+the list has exactly the limit's worth of issues, stop with an error (the scan could be incomplete). If the list
+can't be read (a non-zero exit code or a thrown error), exit 1 with a clear message and make no create or edit call.
 
 ## Creating (with `-Create`)
 
@@ -132,6 +136,11 @@ the list has exactly the limit's worth of issues, stop with an error (the scan c
 4. After every issue exists, rewrite `Depends on` and `Related` ids to `#n` (an edit pass with `gh issue edit` where
    the number wasn't known at creation, for cycles or forward references). Write the link on **both** issues, as the
    skill requires: a `Depends on` on one implies a `Related` back-reference on the other.
+   Existing issues of this review (found by the marker) are patched too, narrowly: once every current number is
+   known, only finding-id tokens inside the `Depends on` and `Related` fields of the listed body are rewritten to
+   `#n`, so hand edits elsewhere survive. An issue that needs no change gets no `gh issue edit` call. This also
+   finishes the links of an interrupted earlier run and of split `-Only` batches. A failed edit is reported and the
+   exit code is non-zero; a rerun retries it.
 5. Print a table: id, label, number, URL, `created` or `skipped (exists)`.
 
 ## Write-back
@@ -141,12 +150,17 @@ Replace the review file's `Issues:` line with `Issues: M2A-1 #33, M2A-2 #34, ...
 
 ## Scrubbing (the repo is public)
 
+Scrubbing is best-effort: path and secret detection is heuristic, and the dry run is the safety net (read it before
+`-Create`). A further heuristic gap is a should-fix issue, not a blocker.
+
 - **Refuse** (finding is invalid, nothing is filed) any text matching a secret pattern: GitHub tokens
   (`ghp_`, `gho_`, `ghs_`, `github_pat_`), `sk-` followed by 20 or more characters, AWS `AKIA` keys, `Bearer ` followed
-  by a long token, private-key headers, and `password =`/`token =` assignments with a value. Print the finding id
+  by a long token, private-key headers, and `password =`/`token =`/`secret =` assignments with any non-empty value,
+  quoted or not and of any length (an empty value, `==` and prose such as "the token is missing" are allowed). Print the finding id
   and the line number, never the value.
 - **Replace** personal paths by default: `C:\Users\<name>\...` and `/home/<name>/...` become `~\...` / `~/...`;
-  warn for each. `-KeepPaths` turns this off. Project paths such as `E:\sbxm-projects\...` are left alone.
+  warn for each. A profile folder with spaces is replaced whole, however many words it has, when a separator, quote
+  or backtick ends it (`/Users/<name>/...` too). `-KeepPaths` turns this off. Project paths such as `E:\sbxm-projects\...` are left alone.
 - **Warn** on e-mail addresses (don't change them).
 
 ## Tasks, methods and acceptance criteria
