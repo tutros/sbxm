@@ -71,13 +71,9 @@ pub fn build(
         .profile
         .clone()
         .unwrap_or_else(|| global.default_profile.clone());
-    let resources = Resources {
-        cpus: run_config.run.cpus.unwrap_or(global.resources.cpus),
-        memory: run_config
-            .run
-            .memory
-            .clone()
-            .unwrap_or_else(|| global.resources.memory.clone()),
+    let overrides = Overrides {
+        cpus: run_config.run.cpus,
+        memory: run_config.run.memory.clone(),
     };
 
     // The (profile, harness) pairs in first-use order: each contestant under
@@ -99,6 +95,59 @@ pub fn build(
             wanted.push(pair);
         }
     }
+    build_pairs(&global, run_profile, &overrides, wanted, kits_root, backend)
+}
+
+/// `cpus` and `memory` that replace the global `[resources]` for one set of kits.
+#[derive(Debug, Default, Clone)]
+pub struct Overrides {
+    pub cpus: Option<u32>,
+    pub memory: Option<String>,
+}
+
+/// Kits for `harnesses` under one `profile`, for callers with no run-config (`sbxm task`).
+/// Same writing, hashing and validation as [`build`].
+pub fn build_for(
+    config_dir: &Path,
+    profile: &str,
+    harnesses: &[Harness],
+    overrides: &Overrides,
+    kits_root: &Path,
+    backend: &dyn SandboxBackend,
+) -> Result<RunKits> {
+    let global = GlobalConfig::load(config_dir)?;
+    let mut wanted: Vec<(String, Harness)> = Vec::new();
+    for harness in harnesses {
+        let pair = (profile.to_owned(), *harness);
+        if !wanted.contains(&pair) {
+            wanted.push(pair);
+        }
+    }
+    build_pairs(
+        &global,
+        profile.to_owned(),
+        overrides,
+        wanted,
+        kits_root,
+        backend,
+    )
+}
+
+fn build_pairs(
+    global: &GlobalConfig,
+    run_profile: String,
+    overrides: &Overrides,
+    wanted: Vec<(String, Harness)>,
+    kits_root: &Path,
+    backend: &dyn SandboxBackend,
+) -> Result<RunKits> {
+    let resources = Resources {
+        cpus: overrides.cpus.unwrap_or(global.resources.cpus),
+        memory: overrides
+            .memory
+            .clone()
+            .unwrap_or_else(|| global.resources.memory.clone()),
+    };
 
     // Every profile loads before anything is written, so an unknown one
     // leaves no trace.
