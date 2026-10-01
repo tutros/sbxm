@@ -2,6 +2,7 @@
 //! task's `review.md`, and later render, check and file them. Ported from
 //! `scripts/file-review-issues.psm1`; its Pester cases are the golden tests.
 
+use std::collections::BTreeMap;
 use std::sync::LazyLock;
 
 use regex::Regex;
@@ -339,4 +340,330 @@ pub fn protect_finding(finding: &Finding, keep_paths: bool, warnings: &mut Vec<S
         *item = protect_text(item, &finding.id, keep_paths, warnings);
     }
     copy
+}
+
+fn is_id_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '-'
+}
+
+/// The byte ranges where `id` appears as a whole word (not inside a longer id), ignoring case
+/// like the script's `-match`/`-replace`.
+fn id_spans(text: &str, id: &str) -> Vec<std::ops::Range<usize>> {
+    let pattern = re(&format!("(?i){}", regex::escape(id)));
+    pattern
+        .find_iter(text)
+        .filter(|m| {
+            let before = text[..m.start()].chars().next_back();
+            let after = text[m.end()..].chars().next();
+            !before.is_some_and(is_id_char) && !after.is_some_and(is_id_char)
+        })
+        .map(|m| m.range())
+        .collect()
+}
+
+fn mentions(text: &str, id: &str) -> bool {
+    !id_spans(text, id).is_empty()
+}
+
+/// Finding ids in a Depends on / Related text become issue numbers where they are known.
+pub fn link_ids(text: &str, ids: &BTreeMap<String, u32>) -> String {
+    let mut text = text.to_owned();
+    for (id, number) in ids {
+        for span in id_spans(&text, id).into_iter().rev() {
+            text.replace_range(span, &format!("#{number}"));
+        }
+    }
+    text
+}
+
+/// An existing issue's body with finding ids rewritten to `#n` inside its `Depends on` and
+/// `Related` fields, and nothing else, so hand edits elsewhere stay. A field runs to the next
+/// bold field, comment or blank line.
+pub fn update_link_fields(body: &str, ids: &BTreeMap<String, u32>) -> String {
+    let mut out = String::with_capacity(body.len());
+    let mut in_field = false;
+    for raw in body.split_inclusive('\n') {
+        let line = raw.trim_end_matches('\n');
+        let content = line.strip_suffix('\r').unwrap_or(line);
+        let start = content.starts_with("**Depends on:**") || content.starts_with("**Related:**");
+        if start {
+            in_field = true;
+        } else if content.is_empty() || content.starts_with("**") || content.starts_with("<!--") {
+            in_field = false;
+        }
+        if in_field {
+            out.push_str(&link_ids(content, ids));
+            out.push_str(&raw[content.len()..]);
+        } else {
+            out.push_str(raw);
+        }
+    }
+    out
+}
+
+/// `src/a.rs:10-20` or `justfile:76` becomes a permalink at the reviewed commit. Plain words are
+/// left alone. Without a sha the text stays and `warnings` says so.
+pub fn where_links(
+    text: &str,
+    repo: &str,
+    sha: Option<&str>,
+    warnings: &mut Vec<String>,
+) -> String {
+    // Extensionless names count only when they are a well-known file name and carry a line
+    // suffix, so words such as "step:3" or "ratio 3:1" stay text.
+    static LINK: LazyLock<Regex> = LazyLock::new(|| {
+        re(concat!(
+            r"(`?)((?:[\w.-]+/)*)(?:([\w.-]+\.\w+)(?::(\d+)(?:-(\d+))?)?",
+            r"|((?:justfile|Dockerfile|Containerfile|Makefile|Rakefile|Gemfile|Procfile|Brewfile|Vagrantfile|Jenkinsfile|LICENSE)):(\d+)(?:-(\d+))?)(`?)"
+        ))
+    });
+    static KNOWN: LazyLock<Regex> =
+        LazyLock::new(|| re(r"(?i)\.(rs|toml|md|ps1|psm1|json|ya?ml|lock|txt|sh|py|js|ts)$"));
+    let mut out = String::new();
+    let mut pos = 0;
+    let mut at = 0;
+    while at <= text.len() {
+        let Some(c) = LINK.captures_at(text, at) else {
+            break;
+        };
+        let whole = c.get(0).expect("group 0");
+        // The match may not follow a word character, `/`, `.`, `:` or `-` (no look-behind in `regex`).
+        let before = text[..whole.start()].chars().next_back();
+        if before.is_some_and(|b| b.is_alphanumeric() || "_/.:-".contains(b)) {
+            at = whole.start()
+                + text[whole.start()..]
+                    .chars()
+                    .next()
+                    .map_or(1, char::len_utf8);
+            continue;
+        }
+        let name = c.get(3).or_else(|| c.get(6)).map_or("", |m| m.as_str());
+        let path = format!("{}{name}", c.get(2).map_or("", |m| m.as_str()));
+        let (from, to) = match c.get(3) {
+            Some(_) => (c.get(4), c.get(5)),
+            None => (c.get(7), c.get(8)),
+        };
+        let from = from.map_or("", |m| m.as_str());
+        let to = to.map_or("", |m| m.as_str());
+        at = whole.end().max(whole.start() + 1);
+        if !(KNOWN.is_match(&path) || path.contains('/') || !from.is_empty()) {
+            continue;
+        }
+        let Some(sha) = sha else {
+            warnings.push(
+                "no commit sha found in the Scope line; Where links stay plain text".to_owned(),
+            );
+            return text.to_owned();
+        };
+        let mut label = path.clone();
+        if !from.is_empty() {
+            label.push_str(&format!(":{from}"));
+        }
+        if !to.is_empty() {
+            label.push_str(&format!("-{to}"));
+        }
+        let anchor = if !to.is_empty() {
+            format!("#L{from}-L{to}")
+        } else if !from.is_empty() {
+            format!("#L{from}")
+        } else {
+            String::new()
+        };
+        let url = format!("https://github.com/{repo}/blob/{sha}/{path}{anchor}");
+        out.push_str(&text[pos..whole.start()]);
+        if c.get(1).is_some_and(|m| !m.as_str().is_empty()) {
+            out.push_str(&format!("[`{label}`]({url})"));
+        } else {
+            out.push_str(&format!("[{label}]({url})"));
+        }
+        pos = whole.end();
+    }
+    out.push_str(&text[pos..]);
+    out
+}
+
+fn format_field(label: &str, value: &str) -> String {
+    if value.contains('\n') {
+        format!("**{label}:**\n{value}")
+    } else {
+        format!("**{label}:** {value}")
+    }
+}
+
+/// The standard criteria from the skill's template, each with a lower-case fragment that tells
+/// whether a finding has it already.
+const STANDARD_CHECKLIST: [(&str, &str); 3] = [
+    (
+        "fails before the fix",
+        "A test covering it fails before the fix and passes after (name it, or say which file it goes in)",
+    ),
+    (
+        "cargo fmt",
+        "`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass",
+    ),
+    (
+        "docs updated",
+        "Docs updated where behavior users see changed (`README.md`), or \"no user-visible change\"",
+    ),
+];
+const MISSING_CRITERION: &str =
+    "<the specific check is missing from the review: add one before working this issue>";
+
+/// The criteria an issue gets: the finding's own, plus the standard ones it lacks. A must-fix or
+/// should-fix with none is an error unless `standard` says to file it with only the standard
+/// ones. Questions get none.
+pub fn acceptance_criteria(finding: &Finding, standard: bool) -> Result<Vec<String>, String> {
+    if finding.label == "question" {
+        return Ok(Vec::new());
+    }
+    if finding.criteria.is_empty() && !standard {
+        return Err(format!(
+            "{} has no acceptance criteria; add them to the review file, or rerun with --standard-criteria to file it with only the standard ones",
+            finding.id
+        ));
+    }
+    let mut items = Vec::new();
+    if finding.criteria.is_empty() {
+        items.push(MISSING_CRITERION.to_owned());
+    }
+    items.extend(finding.criteria.iter().cloned());
+    for (fragment, text) in STANDARD_CHECKLIST {
+        if !finding
+            .criteria
+            .iter()
+            .any(|c| c.to_lowercase().contains(fragment))
+        {
+            items.push(text.to_owned());
+        }
+    }
+    Ok(items)
+}
+
+/// What an issue body needs besides the finding.
+pub struct Render<'a> {
+    /// `owner/name`, for permalinks.
+    pub repo: &'a str,
+    /// The review's name in the marker (`review-small.md`).
+    pub review_name: &'a str,
+    /// What the `Review:` field names (`sdlc/reviews/review-small.md`).
+    pub review_ref: &'a str,
+    /// The reviewed commit, full; none leaves `Where` as text.
+    pub head_sha: Option<&'a str>,
+    /// Issue numbers known so far, by finding id.
+    pub ids: &'a BTreeMap<String, u32>,
+    pub standard_criteria: bool,
+}
+
+/// The hidden marker that says which finding of which review an issue is.
+pub fn marker(review_name: &str, id: &str) -> String {
+    format!("<!-- review-finding: {review_name}#{id} -->")
+}
+
+/// The issue text for one finding: the skill's template in order, the marker on the last line.
+pub fn issue_body(
+    review: &Review,
+    finding: &Finding,
+    render: &Render,
+    warnings: &mut Vec<String>,
+) -> Result<String, String> {
+    let criteria = acceptance_criteria(finding, render.standard_criteria)?;
+    let is_question = finding.label == "question";
+    let depends = finding.field("depends on").unwrap_or("none known");
+    let mut related: Vec<String> = finding
+        .field("related")
+        .map(str::to_owned)
+        .into_iter()
+        .collect();
+    related.extend(
+        review
+            .findings
+            .iter()
+            .filter(|f| {
+                f.id != finding.id
+                    && f.field("depends on")
+                        .is_some_and(|d| mentions(d, &finding.id))
+            })
+            .map(|f| format!("{} depends on this one", f.id)),
+    );
+    let field = |name: &str| finding.field(name).unwrap_or("");
+
+    let mut parts = vec![
+        format_field(
+            "Where",
+            &where_links(field("where"), render.repo, render.head_sha, warnings),
+        ),
+        format_field("What happens", field("what happens")),
+        format_field("Why it matters", field("why it matters")),
+        format_field(
+            if is_question {
+                "Options and recommendation"
+            } else {
+                "Fix"
+            },
+            field("fix"),
+        ),
+        format_field("Depends on", &link_ids(depends, render.ids)),
+    ];
+    if !related.is_empty() {
+        parts.push(format_field(
+            "Related",
+            &link_ids(&related.join("; "), render.ids),
+        ));
+    }
+    if !is_question {
+        let items: Vec<String> = criteria.iter().map(|c| format!("- [ ] {c}")).collect();
+        parts.push(format!("**Acceptance criteria:**\n{}", items.join("\n")));
+    }
+    let range = review
+        .range
+        .as_deref()
+        .or(review.scope.as_deref())
+        .unwrap_or("");
+    parts.push(format!(
+        "**Review:** `{}`, finding {}, reviewed commits `{range}`",
+        render.review_ref, finding.id
+    ));
+    parts.push(marker(render.review_name, &finding.id));
+    Ok(format!("{}\n", parts.join("\n")))
+}
+
+/// Findings in an order where each comes after the ones it depends on (file order otherwise; a
+/// cycle keeps file order).
+pub fn filing_order(findings: &[Finding]) -> Vec<&Finding> {
+    let mut left: Vec<&Finding> = findings.iter().collect();
+    let mut ordered = Vec::new();
+    while !left.is_empty() {
+        let ready = left
+            .iter()
+            .position(|me| {
+                !left.iter().any(|other| {
+                    other.id != me.id
+                        && me
+                            .field("depends on")
+                            .is_some_and(|d| mentions(d, &other.id))
+                })
+            })
+            .unwrap_or(0);
+        ordered.push(left.remove(ready));
+    }
+    ordered
+}
+
+/// `Issues: S-1 #33, S-2 pending`: a number where the finding has an issue, `unknown` where it
+/// would get one (a dry run), `pending` for the rest.
+pub fn issues_line(
+    findings: &[Finding],
+    numbers: &BTreeMap<String, u32>,
+    would_file: &[String],
+    unknown: &str,
+) -> String {
+    let items: Vec<String> = findings
+        .iter()
+        .map(|f| match numbers.get(&f.id) {
+            Some(n) => format!("{} #{n}", f.id),
+            None if would_file.contains(&f.id) => format!("{} {unknown}", f.id),
+            None => format!("{} pending", f.id),
+        })
+        .collect();
+    format!("Issues: {}", items.join(", "))
 }
