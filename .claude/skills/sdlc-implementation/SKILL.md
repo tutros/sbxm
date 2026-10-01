@@ -136,14 +136,20 @@ Review findings are GitHub issues with acceptance criteria (code review skill, s
 
 ## 8. The milestone flow (how M1 was built; M2 follows it)
 
-A milestone is built as one batch, reviewed once at the end. It is the lighter form of rule 5 applied to a whole milestone:
+A milestone is built as one batch, reviewed once at the end, plus a parallel review of each risky slice (step 3). It is the lighter form of rule 5 applied to a whole milestone:
 
 1. **One branch per milestone** (M2a: `m2a-implementation`), pushed for backup. Slices are commits on it in plan
    order, not one branch or PR per slice.
 2. **Each slice** runs the loop below (red → green → checks → commit, real-`sbx` test if it touches `sbx`) and ends with a
    short report: what now works, the commits, deferred items. No per-slice review and no per-slice PR.
-3. **Rule 5's stop conditions apply throughout.** Also stop for a slice-level review when the user asks, or when a slice
-   is risky enough (security guards, destructive operations) that waiting for the end isn't safe.
+3. **Rule 5's stop conditions apply throughout.** Also stop for a slice-level review when the user asks.
+   - **Risky slices get a parallel review (decision 162).** A slice is risky when it holds a security guard (trust
+     boundary, hostile input), runs agent-written code on the host, or does destructive operations. The milestone plan
+     marks them (M2b: slices 5, 7, 10). When one is committed and its report is posted, spawn an independent reviewer
+     (a subagent, or Codex in its own sandbox) in the background on that slice's commits only, using the
+     `sdlc-code-review` slice scope, and **keep building the next slice**; don't wait. A must-fix in the finished slice
+     becomes a fix commit (TDD) on the milestone branch once the current step is green; the rest are collected for the
+     end-of-milestone review. The next slice report says what the reviewer found.
 4. **At the end of the milestone,** one full review of `main..<milestone branch>` with the `sdlc-code-review` skill
    (full checklist plus the cross-cutting sweep), written to `sdlc/reviews/<date>-milestone-<n>.md`. Its findings become
    GitHub issues (`must-fix`, `should-fix`, `question`).
@@ -157,7 +163,8 @@ A milestone is built as one batch, reviewed once at the end. It is the lighter f
 ```
 pick slice (1 sentence) → list test cases →
   for each case: red (see it fail) → green (minimal code) → refactor → checks pass → commit
-→ slice done: run the #[ignore] real-sbx test if the slice touches sbx → report (no per-slice review, rule 8)
+→ slice done: run the #[ignore] real-sbx test if the slice touches sbx → report; if the slice is risky, start a
+  background review of its commits (rule 8, step 3) and carry on with the next slice
 … next slice …
 → milestone done: one full review (sdlc-code-review, end-of-milestone row) → issues → fix each (rule 7) → PR
 ```

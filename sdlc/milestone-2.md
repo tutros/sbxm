@@ -208,6 +208,8 @@ stages, tasks without an issue, auto-resume).
 fetched on the host with hooks off) was run 2026-10-01 and passed [161]. Nothing else blocks the slices; the items
 under "Details to verify first" in the spec are checked inside the slice that needs them.
 
+**Risky slices [162]:** slices 5 (hostile bundles, host-owned repo), 7 (host gates run agent-written code) and 10 (`finish`, `rm`, `--restart` are destructive or outward-facing) get a background independent review of their commits while the next slice is built; every other slice waits for the end-of-milestone review.
+
 ### Work order (vertical slices, each TDD, each ends with fmt, clippy, cargo test and a commit)
 
 | # | After this slice, … | Tests (red first) | Real check |

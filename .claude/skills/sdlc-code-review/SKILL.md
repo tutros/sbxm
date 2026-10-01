@@ -12,7 +12,7 @@ every fix goes back through the `sdlc-implementation` skill (a bug fix starts wi
 
 | Trigger | Scope (`<base>..<head>`) | Depth |
 |---|---|---|
-| A slice is done, only when the user asks or the slice is risky (implementation rule 8; milestones are reviewed once, at the end) | The slice's commits: `git log --oneline <before-slice>..HEAD` | Checklist sections 3–6 on the diff |
+| A slice is done, when the user asks or the slice is risky (implementation rule 8, step 3: a risky slice is reviewed in the background by an independent reviewer while the next slice is built; other slices wait for the end-of-milestone review) | The slice's commits: `git log --oneline <before-slice>..HEAD` | Checklist sections 3–6 on the diff |
 | Before merging a coding worktree (implementation rule 6) | `main..<branch>` | Full checklist, plus the merge-ready criteria in rule 6 |
 | A plan or docs-only branch (milestone plan, decisions) | `main..<branch>` | Sections 2 and 3, judged by the must-fix bar in section 7 |
 | End of a milestone (the normal review; implementation rule 8), or the user asks | `main..<milestone branch>`, or what the user names | Full checklist, plus the cross-cutting sweep in section 4; record in `sdlc/reviews/<date>-milestone-<n>.md` |
