@@ -44,6 +44,8 @@ BeforeAll {
                 'issue edit' {
                     $script:fake.Writes.Add("edit $($a[2])")
                     $script:fake.BodyFiles.Add((& $get '--body-file'))
+                    $script:fake.Edited++
+                    if ($script:fake.FailEditAt -eq $script:fake.Edited) { $global:LASTEXITCODE = 1; return }
                     $issue = $script:fake.Issues | Where-Object { $_.number -eq [int]$a[2] }
                     $issue.body = Get-Content -Raw (& $get '--body-file')
                     return "https://github.com/o/r/issues/$($a[2])"
@@ -406,17 +408,61 @@ Describe 'Create' {
         @($script:fake.Issues | ForEach-Object { $_.title }) | Should -Be @('S-1: Thing breaks')
     }
 
-    It 'gives a later -Only batch the backlink to a dependent filed in an earlier batch' {
+    It 'completes the links of both issues when the findings are filed in split -Only batches' {
         (Invoke-Filing -Arguments @{ Create = $true; Only = @('S-1') }).Code | Should -Be 0
-        $first = $script:fake.Issues | Where-Object { $_.title -like 'S-1:*' }
-        $firstBody = $first.body
         $script:fake.Writes.Clear()
         (Invoke-Filing -Arguments @{ Create = $true; Only = @('S-2') }).Code | Should -Be 0
-        $second = $script:fake.Issues | Where-Object { $_.title -like 'S-2:*' }
-        $second.body | Should -Match '\*\*Related:\*\* #40 depends on this one'
-        @($script:fake.Writes) | Should -Be @('create')
+        @($script:fake.Writes) | Should -Be @('create', 'edit 40')
+        $s1 = ($script:fake.Issues | Where-Object { $_.title -like 'S-1:*' }).body
+        $s2 = ($script:fake.Issues | Where-Object { $_.title -like 'S-2:*' }).body
+        $s1 | Should -Match '\*\*Depends on:\*\* #41 \(the message must match\)'
+        $s2 | Should -Match '\*\*Related:\*\* #40 depends on this one'
         @($script:fake.Issues).Count | Should -Be 2
-        ($script:fake.Issues | Where-Object { $_.title -like 'S-1:*' }).body | Should -Be $firstBody
+    }
+
+    It 'finishes the links on a rerun after an interrupted edit, and reports the failed edit' {
+        $script:fake.FailEditAt = 1
+        $first = Invoke-Filing -Arguments @{ Create = $true }
+        $first.Code | Should -Not -Be 0
+        $first.Text | Should -BeLike '*links*'
+        ($script:fake.Issues | Where-Object { $_.title -like 'S-2:*' }).body | Should -Match 'S-1 depends on this one'
+        $script:fake.FailEditAt = 0
+        $script:fake.Writes.Clear()
+        $second = Invoke-Filing -Arguments @{ Create = $true }
+        $second.Code | Should -Be 0
+        @($script:fake.Writes) | Should -Be @('edit 40')
+        ($script:fake.Issues | Where-Object { $_.title -like 'S-2:*' }).body | Should -Match '\*\*Related:\*\* #41 depends on this one'
+    }
+
+    It 'patches only the ids in Depends on and Related, so a hand edit elsewhere survives' {
+        (Invoke-Filing -Arguments @{ Create = $true; Only = @('S-1') }).Code | Should -Be 0
+        $s1 = $script:fake.Issues | Where-Object { $_.title -like 'S-1:*' }
+        $s1.body = $s1.body.Replace('It breaks.', 'It breaks, see S-2 in my notes.') + "`nHand note about S-2`n"
+        (Invoke-Filing -Arguments @{ Create = $true; Only = @('S-2') }).Code | Should -Be 0
+        $s1.body | Should -Match 'It breaks, see S-2 in my notes\.'
+        $s1.body | Should -Match 'Hand note about S-2'
+        $s1.body | Should -Match '\*\*Depends on:\*\* #41 \(the message must match\)'
+    }
+
+    It 'makes no edit call for an existing issue that already has the numbers' {
+        (Invoke-Filing -Arguments @{ Create = $true; Only = @('S-1') }).Code | Should -Be 0
+        (Invoke-Filing -Arguments @{ Create = $true; Only = @('S-2') }).Code | Should -Be 0
+        $script:fake.Writes.Clear()
+        (Invoke-Filing -Arguments @{ Create = $true }).Code | Should -Be 0
+        @($script:fake.Writes | Where-Object { $_ -like 'edit*' }) | Should -BeNullOrEmpty
+    }
+
+    It 'reports a failed edit of an existing issue, exits non-zero, and a rerun fixes it' {
+        (Invoke-Filing -Arguments @{ Create = $true; Only = @('S-1') }).Code | Should -Be 0
+        $script:fake.Edited = 0
+        $script:fake.FailEditAt = 1
+        $bad = Invoke-Filing -Arguments @{ Create = $true; Only = @('S-2') }
+        $bad.Code | Should -Not -Be 0
+        $bad.Text | Should -BeLike '*#40 links*'
+        ($script:fake.Issues | Where-Object { $_.title -like 'S-1:*' }).body | Should -Match 'Depends on:\*\* S-2'
+        $script:fake.FailEditAt = 0
+        (Invoke-Filing -Arguments @{ Create = $true }).Code | Should -Be 0
+        ($script:fake.Issues | Where-Object { $_.title -like 'S-1:*' }).body | Should -Match 'Depends on:\*\* #41'
     }
 
     It 'keeps unsafe text of an excluded finding out of the backlink' {

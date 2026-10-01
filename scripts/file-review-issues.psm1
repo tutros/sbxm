@@ -206,6 +206,13 @@ function Convert-FindingIds([string]$Text, [hashtable]$IdMap) {
     $Text
 }
 
+# An existing issue's body with finding ids rewritten to #n inside its `Depends on` and `Related` fields, and
+# nothing else, so hand edits elsewhere in the body stay. A field runs to the next bold field, comment or blank line.
+function Update-LinkFields([string]$Body, [hashtable]$IdMap) {
+    $pattern = '(?m)^\*\*(?:Depends on|Related):\*\*[^\r\n]*(?:\r?\n(?!\*\*|<!--|\r?$)[^\r\n]*)*'
+    [regex]::Replace($Body, $pattern, { param($m) Convert-FindingIds $m.Value $IdMap })
+}
+
 function Format-Field([string]$Label, [string]$Value) {
     if ($Value.Contains("`n")) { "**${Label}:**`n$Value" } else { "**${Label}:** $Value" }
 }
@@ -490,6 +497,11 @@ function Invoke-ReviewFiling {
         if ($hit) { $numbers[$finding.Id] = [int]$hit[0].number }
     }
     $existing = @($numbers.Keys)
+    $listedByNumber = @{}
+    foreach ($id in $existing) {
+        $issue = $listed | Where-Object { [int]$_.number -eq $numbers[$id] } | Select-Object -First 1
+        $listedByNumber["$($numbers[$id])"] = [string]$issue.body
+    }
     $toCreate = @($prepared | Where-Object { $existing -notcontains $_.Id })
 
     $view = $parsed.PSObject.Copy()
@@ -546,6 +558,14 @@ function Invoke-ReviewFiling {
             try { Invoke-GhWithBody { param($file) gh issue edit $entry.Number --repo $repoName --body-file $file } $final | Out-Null }
             catch { $failure = "#$($entry.Number) links: $($_.Exception.Message)" }
         }
+    }
+
+    # Issues that existed before this run get only their link fields patched, from the body as listed.
+    foreach ($item in ($listedByNumber.GetEnumerator() | Sort-Object Name)) {
+        $patched = Update-LinkFields $item.Value $numbers
+        if ($patched -eq $item.Value) { continue }
+        try { Invoke-GhWithBody { param($file) gh issue edit ([int]$item.Name) --repo $repoName --body-file $file } $patched | Out-Null }
+        catch { $failure = "#$($item.Name) links: $($_.Exception.Message)" }
     }
 
     Set-IssuesLine $resolvedPath (Format-IssuesLine $parsed.Findings $numbers)
