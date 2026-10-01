@@ -22,6 +22,10 @@ Each SDLC phase has a project skill in `.claude/skills/`; follow it for that pha
 - `sdlc-implementation`: vertical slices, TDD (red first), smallest change per step, commit after every green step (`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`). A milestone is built as one batch on one branch (rule 8): a short report per slice, one full review at the end.
 - `sdlc-code-review`: review a milestone at its end (the normal review), a worktree before merging, or a slice when asked or risky; findings need evidence, fixes go back through TDD.
 
+## Working rules
+
+- **Show progress as `[current] of [total]` (user rule, 2026-10-01).** Whenever you mention a step that is complete or in progress, give its position and the total: "slice 4 of 13", "test case 3 of 7", "step 2 of 5". This covers milestone slices, test cases within a slice, review rounds, manual steps for the user, and any other sub-step whose total is known. If the total isn't known yet, say so rather than leaving it out.
+
 ## Commands
 
 ```
