@@ -1,4 +1,4 @@
-# The functions behind file-review-issues.ps1 (decision 134): parse a review file from reviews/, render one issue
+# The functions behind file-review-issues.ps1 (decision 134): parse a review file from sdlc/reviews/, render one issue
 # per finding, and file them from a host where `gh` works. Nothing here is specific to this host, so M2b can move
 # the parser and renderer into sbxm.
 $ErrorActionPreference = 'Stop'
@@ -276,7 +276,7 @@ function New-IssueBody {
         $parts.Add("**Acceptance criteria:**`n" + (($criteria.Items | ForEach-Object { "- [ ] $_" }) -join "`n"))
     }
     $range = if ($Review.Range) { $Review.Range } else { $Review.Scope }
-    $parts.Add("**Review:** ``reviews/$ReviewName``, finding $($Finding.Id), reviewed commits ``$range``")
+    $parts.Add("**Review:** ``sdlc/reviews/$ReviewName``, finding $($Finding.Id), reviewed commits ``$range``")
     $parts.Add("<!-- review-finding: $ReviewName#$($Finding.Id) -->")
     ($parts -join "`n") + "`n"
 }
@@ -391,7 +391,7 @@ function Invoke-ReviewFiling {
         [switch]$KeepPaths, [string[]]$Only
     )
     if (-not (Test-Path -LiteralPath $Review -PathType Leaf)) {
-        Write-Host "review file $Review not found; give the path of a file in reviews/"
+        Write-Host "review file $Review not found; give the path of a file in sdlc/reviews/"
         return 1
     }
     $resolvedPath = (Resolve-Path -LiteralPath $Review).Path

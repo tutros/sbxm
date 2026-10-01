@@ -2,7 +2,7 @@
 
 Scope: `origin/main..HEAD` (`8aec45b1ecdede447a7e594c447d7d6530e40ec8..82659a26614c58da671641ffa6e62264cb9038ce`, 22 commits).
 
-Review type: end-of-milestone full checklist plus the cross-cutting sweep from `sdlc-code-review`. Read first: `AGENTS.md`, `milestone-2.md`, `decisions.md` (especially 124–133), and `batches/2026-09-30-m2a-unattended.md`. The changed production functions were then read as whole functions, with focused sweeps over harness matches, validation-before-write, persistence, cleanup, paths, config hashing, evaluator siblings, docs, and tests.
+Review type: end-of-milestone full checklist plus the cross-cutting sweep from `sdlc-code-review`. Read first: `AGENTS.md`, `sdlc/milestone-2.md`, `sdlc/decisions.md` (especially 124–133), and `sdlc/batches/2026-09-30-m2a-unattended.md`. The changed production functions were then read as whole functions, with focused sweeps over harness matches, validation-before-write, persistence, cleanup, paths, config hashing, evaluator siblings, docs, and tests.
 
 Issues: M2A-1 #41, M2A-2 #42, M2A-3 pending, M2A-Q1 pending
 
@@ -57,7 +57,7 @@ This branch is not yet a complete M2a delivery: the batch record says slice 12 (
 
 ### M2A-3 — One implementation commit is not a green step
 
-**Where:** `batches/2026-09-30-m2a-unattended.md:127`; commit `8db96f4` (`Add hardened seeding and diff capture`) precedes its wiring commit `d99f53c`.
+**Where:** `sdlc/batches/2026-09-30-m2a-unattended.md:127`; commit `8db96f4` (`Add hardened seeding and diff capture`) precedes its wiring commit `d99f53c`.
 
 **What happens:** the batch report explicitly records “the first commit of slice 7 not compiling on its own.” That conflicts with the implementation and review rules requiring every behavior commit to be a green step after formatting, clippy, and tests.
 
@@ -69,7 +69,7 @@ This branch is not yet a complete M2a delivery: the batch record says slice 12 (
 
 ### M2A-Q1 — Should comparison configs continue accepting Antigravity while fresh run sandboxes cannot authenticate?
 
-**Where:** `decisions.md:199-200` (decisions 124f and 125), `src/run/config.rs:395-410`, and `src/run/preflight.rs:61-78`.
+**Where:** `sdlc/decisions.md:199-200` (decisions 124f and 125), `src/run/config.rs:395-410`, and `src/run/preflight.rs:61-78`.
 
 **What happens:** decision 124f records that a fresh Antigravity sandbox fails authentication, and that the provisional required `google` secret is ignored by `agy`. Nevertheless Antigravity is an allowed comparison harness; preflight requires that ineffective secret and the run then predictably records an authentication failure. The batch leaves the authentication route explicitly open.
 

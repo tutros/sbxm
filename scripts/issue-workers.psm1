@@ -202,8 +202,8 @@ file issues. You may build and run tests.
 
 Follow the sdlc-code-review skill (.claude/skills/sdlc-code-review/SKILL.md). Scope: the branch's commits
 (git log origin/main..HEAD, and git diff origin/main...HEAD). Check the change against the acceptance criteria of
-the issues in context.md (if any), decisions.md and the project conventions. origin/main is current and may be
-newer than the branch's base: read decisions there (git show origin/main:decisions.md). The host has already run
+the issues in context.md (if any), sdlc/decisions.md and the project conventions. origin/main is current and may be
+newer than the branch's base: read decisions there (git show origin/main:sdlc/decisions.md). The host has already run
 cargo fmt --check, clippy and cargo test on Windows: they pass.
 $rereview
 Write .sbxm-review/review.md. Its first line is exactly "Must-fix findings: <count>". Then list each finding with

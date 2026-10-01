@@ -9,7 +9,7 @@ itself, reusing M2a's headless-execution primitive instead of the script's raw `
 One plan, two sub-milestones ([92][110]); M2b's detail here is a rough outline, refined once M2a's
 primitive exists to build on.
 
-Constraints come from `decisions.md` (numbers in brackets refer to it), especially the milestone-2
+Constraints come from `sdlc/decisions.md` (numbers in brackets refer to it), especially the milestone-2
 planning round [92]–[121] and the S5 spike results under "Spike results".
 
 ## Plan-level choices
@@ -62,7 +62,7 @@ Contestants are scored independently and ranked in code (`eval::score`). Each cr
 
 ## Structure
 
-New and changed modules, in dependency order. Everything in the existing crate layout (`milestone-1.md`)
+New and changed modules, in dependency order. Everything in the existing crate layout (`sdlc/milestone-1.md`)
 is unchanged except where noted.
 
 | Module | Responsibility |
@@ -140,7 +140,7 @@ errors naming why (Gemini: deprecated upstream and blocked by egress on this set
 [93]). Contestant count must be 2–4 [109]. Every run-config struct denies unknown keys, and rubric/check ids and scale levels are validated (see slice 4). Evaluators are selected by table presence: `[eval.judge]` runs the LLM judge (requires a non-empty rubric), `[eval.cosine]` (an empty table, no options) runs cosine similarity, and `[eval.jev]` runs Jev (below, slice 14); each is independently optional, so cosine works without a judge. `eval.checks` and `eval.rubric` are both optional lists (a run
 can use either, both or neither — an empty `eval` just captures answer/diff/transcript with no scoring).
 
-Jev is configured with `[eval.jev]` (enables Jev over the shared rubric's criteria; credentials per spike S9) and optional `[[eval.jev.questions]]` entries for Jev-specific raw questions [20]: `{id, kind = "noul" | "choice" | "score", text, ...}` with kind-specific fields (options for choice, 2–10 levels for score per the Jev facts in `decisions.md`). The exact field list is fixed in slice 14 once S9 lands, and is validated like the shared rubric. An empty `eval` (or none) runs nothing but capture.
+Jev is configured with `[eval.jev]` (enables Jev over the shared rubric's criteria; credentials per spike S9) and optional `[[eval.jev.questions]]` entries for Jev-specific raw questions [20]: `{id, kind = "noul" | "choice" | "score", text, ...}` with kind-specific fields (options for choice, 2–10 levels for score per the Jev facts in `sdlc/decisions.md`). The exact field list is fixed in slice 14 once S9 lands, and is validated like the shared rubric. An empty `eval` (or none) runs nothing but capture.
 
 ### Command behavior
 
@@ -193,7 +193,7 @@ on it.
 
 ## M2b: folding `issue-workers.ps1` into sbxm as `sbxm task` (refined 2026-10-01)
 
-**Read first:** `prd-m2b.md` (what and why, success criteria S1-S9), `spec-m2b.md` (exact behavior; every rule there
+**Read first:** `sdlc/prd-m2b.md` (what and why, success criteria S1-S9), `sdlc/spec-m2b.md` (exact behavior; every rule there
 becomes a test), decisions 139-161 (this milestone's choices) and 80-91, 134 (the workflow being ported). Decision
 140 makes the PRD/spec split an experiment: at the end, report whether it paid off (less duplication, fewer review
 findings about missing behavior) before anyone edits the `sdlc-*` skills.
@@ -223,7 +223,7 @@ under "Details to verify first" in the spec are checked inside the slice that ne
 | 8 | `task review --issue`: gates, reviewer in its own sandbox and clone, one fix round, re-review; reviewer prompt and fix prompt templates | must-fix count parsing from `review.md`; fix round at most once; reviewer sandbox and clone removed also on error; same-harness warning; secret preflight before creating anything | real Codex reviewer on slice 6's task |
 | 9 | `task review --pr` posts the review as a PR comment; fork PRs are refused; the PR task links a related issue task | `FakeGitHub` comment recorded; fork and closed PR refusals create nothing; `related` field | real PR comment on a scratch PR |
 | 10 | `task finish`, `task rm`, `task run` | finish pushes from `repo.git` and opens the PR with `Fixes #N`, result and review in the body; refuses when not `ready` or a PR exists; `rm`/`--restart` show exact paths, confirm, and touch only the task's own folders; `run` stops before `finish` | scratch repo end to end |
-| 11 | `task file-findings` files findings as issues (dry run default) | golden inputs from `scripts/tests/ReviewIssues.*.Tests.ps1` fixtures: parse, render, secret refusal, path scrub, marker skip, dependency order, `Issues:` line rewrite | dry run on a real `reviews/*.md` |
+| 11 | `task file-findings` files findings as issues (dry run default) | golden inputs from `scripts/tests/ReviewIssues.*.Tests.ps1` fixtures: parse, render, secret refusal, path scrub, marker skip, dependency order, `Issues:` line rewrite | dry run on a real `sdlc/reviews/*.md` |
 | 12 | Docs and hand-over: README section for `sbxm task`, `AGENTS.md` code layout and status, script deprecation note, parity table filled in | none (docs); parity table has a test or manual check per row | none |
 | 13 | **End-to-end check (manual, real `sbx` and GitHub)**, below | none | all items pass |
 

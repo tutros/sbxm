@@ -1,7 +1,7 @@
 # PRD: milestone 2b, `sbxm task`
 
 Status: draft for the PRD/spec experiment [140]. Written 2026-10-01 after interview rounds 1-6 (decisions 139-156).
-The spec (`spec-m2b.md`) holds the exact behavior; this file says what and why. Decisions are cited by number.
+The spec (`sdlc/spec-m2b.md`) holds the exact behavior; this file says what and why. Decisions are cited by number.
 
 ## Problem
 

@@ -64,7 +64,7 @@ task spec and get the user's approval **before** starting. This applies when:
 - skipping the interactive loop (e.g. running several slices without reporting between them),
 - making a change larger than rule 4 allows (many files, several behaviors, or a big refactor in one step).
 
-The spec is a file (e.g. `spikes/<id>.md` for spikes) and must contain:
+The spec is a file (e.g. `sdlc/spikes/<id>.md` for spikes) and must contain:
 
 | Section | Contents |
 |---|---|
@@ -76,7 +76,7 @@ The spec is a file (e.g. `spikes/<id>.md` for spikes) and must contain:
 | **Stop rules** | Same error twice → record as Blocked and move on. Forbidden commands (interactive auth, anything that changes global or shared state). Limits on web research. No scope creep: new questions go to a Follow-ups list. |
 | **Side effects** | Allowed write locations and files; naming prefix for anything created; no git state changes unless the spec says so; nothing outside the prefix is deleted. |
 | **Cleanup** | Steps that always run, including after failure, plus commands whose output proves it. |
-| **Output contract** | One results file with a fixed template (create it with the spec), plus the shape of the final message. The worker doesn't edit `decisions.md`, `milestone-1.md` or `CLAUDE.md`; the main session merges conclusions. |
+| **Output contract** | One results file with a fixed template (create it with the spec), plus the shape of the final message. The worker doesn't edit `sdlc/decisions.md`, `sdlc/milestone-1.md` or `CLAUDE.md`; the main session merges conclusions. |
 | **Exit criteria** | When the work is done: every item has a status, cleanup is confirmed, the results file is complete. |
 
 Pre-decide every judgment call the worker would otherwise have to ask about: a background worker can't ask questions
@@ -100,11 +100,11 @@ Unattended work runs in a git worktree. Nothing merges automatically; the main s
 **Spike or research worktrees** (the worker doesn't commit):
 1. Check scope: `git -C <worktree> status` shows only the results file changed. Anything else → tell the user before using the results.
 2. Check the evidence behind every Answered claim, and re-run the cleanup checks yourself instead of trusting pasted output.
-3. Copy the results file into the main tree and commit it. Record conclusions in `decisions.md` (and the plan, if slices change) after showing the user.
+3. Copy the results file into the main tree and commit it. Record conclusions in `sdlc/decisions.md` (and the plan, if slices change) after showing the user.
 4. `git worktree remove <path>` and `git branch -D <branch>`; confirm with `git worktree list`.
 
 **Coding worktrees** (the worker commits green TDD steps):
-1. Merge-ready means: the spec's exit criteria are met, the branch is clean, and it doesn't touch `decisions.md`, `milestone-1.md` or `CLAUDE.md` (the main session owns those).
+1. Merge-ready means: the spec's exit criteria are met, the branch is clean, and it doesn't touch `sdlc/decisions.md`, `sdlc/milestone-1.md` or `CLAUDE.md` (the main session owns those).
 2. Rebase onto the latest `main`, checking every commit:
    `git rebase main --exec "cargo fmt --check && cargo clippy --all-targets -- -D warnings && cargo test"`.
    Fix a conflict or a red commit in *that* commit, so each commit stays green.
@@ -145,7 +145,7 @@ A milestone is built as one batch, reviewed once at the end. It is the lighter f
 3. **Rule 5's stop conditions apply throughout.** Also stop for a slice-level review when the user asks, or when a slice
    is risky enough (security guards, destructive operations) that waiting for the end isn't safe.
 4. **At the end of the milestone,** one full review of `main..<milestone branch>` with the `sdlc-code-review` skill
-   (full checklist plus the cross-cutting sweep), written to `reviews/<date>-milestone-<n>.md`. Its findings become
+   (full checklist plus the cross-cutting sweep), written to `sdlc/reviews/<date>-milestone-<n>.md`. Its findings become
    GitHub issues (`must-fix`, `should-fix`, `question`).
 5. **Fixes go through rule 7,** one issue at a time, TDD, `Fixes #<n>`, each through a branch and PR that the independent
    reviewer checks before the user merges (never push to `main`).
@@ -166,7 +166,7 @@ When a slice is done, report to the user: what now works, the commits made, and 
 
 ## Project context
 
-- The plan and constraints are in `milestone-1.md` and `decisions.md`. Follow them; if code needs to depart from a decision, stop and ask, then record the new decision.
+- The plan and constraints are in `sdlc/milestone-1.md` and `sdlc/decisions.md`. Follow them; if code needs to depart from a decision, stop and ask, then record the new decision.
 - Tests never need Docker by default. Tests against real `sbx` are `#[ignore]` and must use a base dir **outside** `%TEMP%`/AppData (see Spike results S1).
 
 ## Code conventions from past decisions

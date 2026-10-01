@@ -314,7 +314,7 @@ for a worker. Finished review folders are small and can stay or go. Check `sbx l
 ## Development
 
 `just check` runs formatting, lints, the Rust tests and the script (Pester) tests, with no Docker needed;
-`just real-test` runs the tests against the real `sbx`. See [The `justfile`](#the-justfile) for every recipe. Design decisions are numbered in `decisions.md`, the milestone plan is `milestone-1.md`, and
+`just real-test` runs the tests against the real `sbx`. See [The `justfile`](#the-justfile) for every recipe. Design decisions are numbered in `sdlc/decisions.md`, the milestone plan is `sdlc/milestone-1.md`, and
 `AGENTS.md` describes the code layout and workflow for coding agents.
 
 ### Working on issues with sbxm sandboxes
@@ -364,15 +364,15 @@ To take over one interactively, run `sbxm open sbxm-issue-<n> --harness claude`.
 
 ### Filing review findings as issues
 
-Reviews run in sandboxes without GitHub access, so their findings sit in `reviews/<date>-<scope>.md` marked
+Reviews run in sandboxes without GitHub access, so their findings sit in `sdlc/reviews/<date>-<scope>.md` marked
 `Issues: pending`. `scripts/file-review-issues.ps1` (PowerShell 7, run from a host where `gh` works) files one issue
 per finding. It is a dry run unless you pass `-Create`, so read the dry run first: it prints every issue body, and
 path and secret scrubbing is heuristic (personal paths become `~`; a secret-looking line refuses the finding).
 
 ```powershell
-./scripts/file-review-issues.ps1 reviews/2026-09-30-milestone-2a.md                     # dry run
-./scripts/file-review-issues.ps1 reviews/2026-09-30-milestone-2a.md -Create             # file the issues
-./scripts/file-review-issues.ps1 reviews/2026-09-30-milestone-2a.md -Create -Only M2A-1 # just these finding ids
+./scripts/file-review-issues.ps1 sdlc/reviews/2026-09-30-milestone-2a.md                     # dry run
+./scripts/file-review-issues.ps1 sdlc/reviews/2026-09-30-milestone-2a.md -Create             # file the issues
+./scripts/file-review-issues.ps1 sdlc/reviews/2026-09-30-milestone-2a.md -Create -Only M2A-1 # just these finding ids
 ```
 
 `-StandardCriteria` files a finding that has no acceptance criteria with only the standard ones, `-KeepPaths` keeps

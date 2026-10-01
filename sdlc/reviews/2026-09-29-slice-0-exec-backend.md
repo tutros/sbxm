@@ -26,7 +26,7 @@ Scope: `HEAD~1..1517f18` (`1517f18 Add exec and skills to SandboxBackend; make b
 - [ ] The ignored integration test passes with the dedicated real-`sbx` base dir and leaves no sandbox behind.
 - [ ] No user-visible change.
 
-**Review:** `reviews/2026-09-29-slice-0-exec-backend.md`.
+**Review:** `sdlc/reviews/2026-09-29-slice-0-exec-backend.md`.
 
 Issues: filed as #32 (https://github.com/tutros/sbxm/issues/32); fixed in `2cef778`.
 

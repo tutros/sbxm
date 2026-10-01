@@ -8,7 +8,7 @@ const DEFAULT_PATH: &str = "run.toml";
 
 /// Valid as written: two contestants are live, the third (Antigravity) is a
 /// commented block to switch on. Everything under `[eval]` is optional
-/// (milestone-2.md, P1). Models are ones verified on real `sbx`; `agy models`
+/// (sdlc/milestone-2.md, P1). Models are ones verified on real `sbx`; `agy models`
 /// lists Antigravity's.
 const STARTER: &str = r##"# A comparison: the same task, run headless and in parallel by 2 to 4 contestants.
 # Run it with: sbxm run <this file>

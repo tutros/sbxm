@@ -1,6 +1,6 @@
 # Spike S8 results
 
-Spec: `spikes/S8.md`. Fill in every section. Status is one of **Answered**, **Partial**, **Blocked**.
+Spec: `sdlc/spikes/S8.md`. Fill in every section. Status is one of **Answered**, **Partial**, **Blocked**.
 
 - Run date:
 - Run by (human who met the precondition, or "no one: Q3–Q4 not run"):

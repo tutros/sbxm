@@ -5,20 +5,20 @@ user doesn't check step by step). Decision 134 records why this exists and where
 
 ## Start here
 
-1. Read, in order: this file, `decisions.md` 79, 86–88, 134, `.claude/skills/sdlc-code-review/SKILL.md` section 8
+1. Read, in order: this file, `sdlc/decisions.md` 79, 86–88, 134, `.claude/skills/sdlc-code-review/SKILL.md` section 8
    (the issue template and the "Review file format" this script parses), `.claude/skills/sdlc-implementation/SKILL.md`,
    and `AGENTS.md`.
 2. Branch from `m2a-implementation` (it has the newest skills and decisions): `git switch -c feat/file-review-issues`.
    Never push to `main` (decision 86). Do not touch `scripts/issue-workers.ps1` or `.psm1` (decision 88: frozen).
 3. Work the tasks below in order, test first, one commit per green step. The Pester suite is `just script-test`.
 4. The real sample the parser must handle is `scripts/tests/fixtures/review-m2a-codex.md` (Codex's actual review of
-   milestone 2a). Do not edit that fixture; `reviews/2026-09-30-milestone-2a.md` is the same text, the file the
+   milestone 2a). Do not edit that fixture; `sdlc/reviews/2026-09-30-milestone-2a.md` is the same text, the file the
    script will later write issue numbers back into.
 
 ## Why
 
 Reviews run in sandboxes with no GitHub access (decision 79 and the skill's access check), so their findings stay in
-`reviews/<date>-<scope>.md` marked `Issues: pending`. Filing them by hand is slow and inconsistent: the template has
+`sdlc/reviews/<date>-<scope>.md` marked `Issues: pending`. Filing them by hand is slow and inconsistent: the template has
 ten parts, dependencies must be linked both ways, and the repo is public so content must be scrubbed. This script
 turns a review file into issues, deterministically and repeatably, from the host where `gh` works.
 
@@ -40,7 +40,7 @@ turns a review file into issues, deterministically and repeatably, from the host
 - Run one heavy command at a time. Overlapping `cargo` runs corrupted `target/` once (only relevant if you run
   `just check`; the script work itself needs no Rust).
 - The worker flow's `review.md` (first line `Must-fix findings: N`, written by `issue-workers.ps1`) is a different,
-  PR-scoped format. Leave it alone. This script handles the milestone and slice review files in `reviews/`. Unifying
+  PR-scoped format. Leave it alone. This script handles the milestone and slice review files in `sdlc/reviews/`. Unifying
   the two is M2b's job.
 - Unverified: whether `gh issue list --search` finds text inside an HTML comment. Do not rely on it; list issues as
   JSON and scan the bodies (see Idempotency).
@@ -48,7 +48,7 @@ turns a review file into issues, deterministically and repeatably, from the host
 ## Interface
 
 ```
-./scripts/file-review-issues.ps1 -Review reviews/2026-09-30-milestone-2a.md [-Repo tutros/sbxm] [-Create]
+./scripts/file-review-issues.ps1 -Review sdlc/reviews/2026-09-30-milestone-2a.md [-Repo tutros/sbxm] [-Create]
     [-StandardCriteria] [-KeepPaths] [-Only M2A-1,M2A-2]
 ```
 
@@ -112,7 +112,7 @@ Rules:
 
 Exactly the skill's template, in this order: **Where**, **What happens**, **Why it matters**, **Fix** (a question
 has **Options and recommendation** instead), **Depends on**, **Related**, **Acceptance criteria**, **Review**
-(`reviews/<file name>`, finding id, and the reviewed commit range). A hidden marker
+(`sdlc/reviews/<file name>`, finding id, and the reviewed commit range). A hidden marker
 `<!-- review-finding: <review file name>#<id> -->` is the last line. The **Review** field is text, not a link:
 the review file may not be committed or pushed yet, so a link could point nowhere (decided 2026-09-30). Missing Depends on becomes `none known`.
 Missing Related is omitted.
@@ -176,12 +176,12 @@ Each task is one or a few red-to-green commits. Every criterion needs a Pester t
 | T5 | Access checks and dry run | Each failure (no GitHub remote and no `-Repo`, `gh` not logged in, missing label) stops with a message naming the fix and exit 1, with no write call made (asserted on the mocks). The dry run prints every issue and the `Issues:` line and calls no `gh` write command. |
 | T6 | Create, dependencies, idempotency | With mocked `gh`: issues are created in dependency order; `Depends on M2A-2` becomes `#<number>` in both bodies and the reverse `Related` is added; a second run creates nothing and reuses numbers; a run interrupted after 2 of 4 creations resumes with the other 2; a full issue list at the limit stops with an error; `-Only` files just those. |
 | T7 | Write-back | The `Issues:` line becomes `Issues: M2A-1 #33, ...`; nothing else in the file changes (byte-compare the rest, CRLF kept); findings not filed stay `pending`; the dry run leaves the file untouched. |
-| T8 | Docs and wiring | `AGENTS.md` code layout lists the script and module; `scripts/tests/` has the test files; `just script-test` passes from a clean checkout; the script's comment-based help matches the Interface section; `decisions.md` 134 is marked built. |
+| T8 | Docs and wiring | `AGENTS.md` code layout lists the script and module; `scripts/tests/` has the test files; `just script-test` passes from a clean checkout; the script's comment-based help matches the Interface section; `sdlc/decisions.md` 134 is marked built. |
 | T9 | Live check (needs the user) | See below. |
 
 ## T9: live check (Blocked until the user approves each step)
 
-1. Dry run on `reviews/2026-09-30-milestone-2a.md` with the real `gh`: show the user the full output. No approval is
+1. Dry run on `sdlc/reviews/2026-09-30-milestone-2a.md` with the real `gh`: show the user the full output. No approval is
    needed for this step.
 2. The user decides which findings to file (the review's own questions and must-fix items first need triage, and the
    file has no acceptance criteria: expect the `-StandardCriteria` path or edits to the review file by the user).
@@ -207,7 +207,7 @@ belief without a passing test is not Done.
 ## Side effects
 
 Creates `scripts/file-review-issues.ps1`, `scripts/file-review-issues.psm1`, `scripts/tests/ReviewIssues*.Tests.ps1`
-and more fixtures under `scripts/tests/fixtures/`. Edits `AGENTS.md` (code layout), `decisions.md` (134 status) and
+and more fixtures under `scripts/tests/fixtures/`. Edits `AGENTS.md` (code layout), `sdlc/decisions.md` (134 status) and
 the skill only if a rule here turns out wrong (say so in the commit). Temp files go in `$TestDrive` or the system
 temp dir and are removed.
 
@@ -215,7 +215,7 @@ temp dir and are removed.
 
 The work is commits on `feat/file-review-issues` and a final message with: each task's status and evidence, the
 `just script-test` result, what the dry run on the Codex review printed, anything deferred, and the exact steps for
-the user to run T9. Do not edit `decisions.md` beyond the status of 134; new decisions are proposed in the message.
+the user to run T9. Do not edit `sdlc/decisions.md` beyond the status of 134; new decisions are proposed in the message.
 
 ## Follow-ups (not part of this task)
 

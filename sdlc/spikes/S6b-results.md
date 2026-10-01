@@ -1,6 +1,6 @@
 # Spike S6b results
 
-Spec: `spikes/S6b.md`. Fill in every section. Status is one of **Answered**, **Partial**, **Blocked**.
+Spec: `sdlc/spikes/S6b.md`. Fill in every section. Status is one of **Answered**, **Partial**, **Blocked**.
 
 - Run date: 2026-09-25 (about 19:49 to 19:56 local)
 - `sbx` version: `sbx version: v0.43.0 79805a6e3c6667520dc2da4f6bdeddae9b700969`
