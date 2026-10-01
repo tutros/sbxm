@@ -1554,3 +1554,96 @@ fn run_kits_validate_against_real_sbx() {
         .stdout;
     assert_eq!(before, after);
 }
+
+/// Spike S10 as a test (decision 161): a bundle an agent makes in its sandbox is verified and
+/// fetched into the host-owned repo, with the sandbox's own `git` and no host git in the workspace.
+#[test]
+#[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
+fn task_bundle_round_trip_against_real_sbx() {
+    use sbxm::backend::{CreateSpec, ExecSpec, SkillsStore, Stdin};
+    use sbxm::run::orchestrate::in_sandbox_path;
+    use sbxm::task::repo::{self, BUNDLE_CAP, Identity};
+
+    let base_dir = real_base_dir();
+    let name = format!("sbxm-it-{}-bundle", std::process::id());
+    let root = base_dir.join(&name);
+    let _cleanup = Cleanup {
+        sandbox: name.clone(),
+        dirs: vec![root.clone()],
+        shared_dirs: vec![],
+    };
+    let git = |dir: &std::path::Path, args: &[&str]| {
+        let out = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+
+    // A local bare repo plays GitHub; the task repo and the agent's clone come from it.
+    let origin = root.join("origin.git");
+    let seed = root.join("seed");
+    std::fs::create_dir_all(&origin).unwrap();
+    std::fs::create_dir_all(&seed).unwrap();
+    git(&origin, &["init", "--bare", "-b", "main"]);
+    git(&seed, &["init", "-b", "main"]);
+    std::fs::write(seed.join("README.md"), "hello\n").unwrap();
+    git(&seed, &["add", "-A"]);
+    git(&seed, &["commit", "-m", "first"]);
+    git(&seed, &["push", origin.to_str().unwrap(), "main"]);
+    let repo_git = root.join("task").join("repo.git");
+    let workspace = root.join("task").join("workspace");
+    repo::clone_bare(origin.to_str().unwrap(), &repo_git).unwrap();
+    repo::create_branch(&repo_git, "issue-4", "main").unwrap();
+    let identity = Identity {
+        name: "Dev Person".into(),
+        email: "dev@example.com".into(),
+    };
+    repo::clone_workspace(&repo_git, &workspace, "issue-4", &identity).unwrap();
+
+    SbxBackend
+        .create(&CreateSpec {
+            name: name.clone(),
+            agent: "claude".into(),
+            workspace: workspace.clone(),
+            cpus: 2,
+            memory: "2g".into(),
+            skills: SkillsStore::Off,
+            kits: vec![],
+        })
+        .unwrap();
+
+    // What the agent does, then the fixed bundle command (spec §6): all inside the sandbox.
+    let sandbox_ws = in_sandbox_path(&workspace);
+    let script = "echo agent > agent.txt && git add -A && git commit -q -m 'agent work' \
+                  && mkdir -p .sbxm-task \
+                  && git bundle create .sbxm-task/branch.bundle issue-4 ^origin/main";
+    let out = SbxBackend
+        .exec(
+            &name,
+            &ExecSpec {
+                workdir: Some(sandbox_ws),
+                argv: vec!["sh".into(), "-c".into(), script.into()],
+                stdin: Stdin::Closed,
+            },
+        )
+        .unwrap();
+    assert_eq!(out.exit_code, Some(0), "sandbox git failed: {}", out.stderr);
+
+    let bundle = workspace.join(".sbxm-task").join("branch.bundle");
+    repo::fetch_bundle(&repo_git, &bundle, "issue-4", BUNDLE_CAP).unwrap();
+
+    assert_eq!(
+        repo::commits_ahead(&repo_git, "main", "issue-4").unwrap(),
+        1
+    );
+}
