@@ -90,6 +90,10 @@ check:
 real-test base_dir='E:\sbxm-it':
     $env:SBXM_REAL_BASE_DIR = '{{base_dir}}'; cargo test --test real_sbx -- --ignored
 
+# Copy profiles/* into the profiles_dir sbxm reads (see scripts/deploy-profiles.ps1).
+deploy-profiles:
+    ./scripts/deploy-profiles.ps1
+
 # Install `sbxm` on your PATH from this checkout.
 install:
     cargo install --path .

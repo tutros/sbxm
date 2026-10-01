@@ -31,6 +31,7 @@ $env:SBXM_REAL_BASE_DIR='E:\sbxm-it'; cargo test --test real_sbx -- --ignored   
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 just script-test                             # Pester 5 tests for scripts/issue-workers.ps1 (decision 91)
+just deploy-profiles                         # copy profiles/* into the profiles_dir sbxm reads
 ```
 
 The `justfile` wraps these (`just check`, `just real-test`) plus representative sbxm commands (`just` lists them).

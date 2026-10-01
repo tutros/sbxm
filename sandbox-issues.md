@@ -29,10 +29,11 @@ for each acceptance criterion. You push and open the PR from the host.
 
 ## One-time setup
 
-1. Copy the profile into your sbxm profiles folder (`profiles_dir` in `config.toml`):
+1. Copy the profile into your sbxm profiles folder (`profiles_dir` in `config.toml`); rerun this after the profile
+   changes:
 
    ```
-   Copy-Item -Recurse profiles\sbxm-dev (Join-Path $HOME '.config\sbxm\profiles\')
+   just deploy-profiles
    ```
 
    Expected: `<profiles_dir>\sbxm-dev\profile.toml` exists. It installs Rust 1.93.0, a C toolchain, PowerShell 7.6.6,
