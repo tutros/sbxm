@@ -141,6 +141,107 @@ fn the_worker_prompt_says_not_to_push_and_that_there_is_no_github_access() {
     assert!(text.to_lowercase().contains("don't push"), "{text}");
 }
 
+fn review_values() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("number", "41"),
+        ("repo", "o/r"),
+        ("branch", "issue-41"),
+        ("base", "main"),
+        ("gates_sandbox", "- `cargo test`"),
+        ("review_path", ".sbxm-task/review.md"),
+        ("previous_review_path", ".sbxm-task/previous-review.md"),
+    ]
+}
+
+#[test]
+fn the_embedded_reviewer_prompt_renders_and_forbids_changing_anything() {
+    let template = prompts::template(Role::Reviewer, &Prompts::default()).unwrap();
+
+    let text = prompts::render(&template.name, &template.text, &review_values()).unwrap();
+
+    assert!(
+        text.contains("issue-41") && text.contains("o/r") && text.contains("#41"),
+        "{text}"
+    );
+    assert!(
+        text.contains("origin/main..HEAD") && text.contains("origin/main...HEAD"),
+        "{text}"
+    );
+    assert!(text.contains(".sbxm-task/issue.md"), "{text}");
+    assert!(
+        text.contains("don't edit tracked files, commit, push or file issues"),
+        "{text}"
+    );
+    assert!(text.contains("no GitHub access"), "{text}");
+    // The reviewer must write the file sbxm reads, with the count on the first line.
+    assert!(text.contains(".sbxm-task/review.md"), "{text}");
+    assert!(text.contains("Must-fix findings: <count>"), "{text}");
+    assert!(text.contains("- `cargo test`"), "{text}");
+    assert!(!text.contains("{{"), "{text}");
+}
+
+#[test]
+fn the_reviewer_prompt_covers_a_re_review_through_the_previous_review_file() {
+    let template = prompts::template(Role::Reviewer, &Prompts::default()).unwrap();
+    let text = prompts::render(&template.name, &template.text, &review_values()).unwrap();
+    assert!(text.contains(".sbxm-task/previous-review.md"), "{text}");
+    assert!(text.contains("re-review"), "{text}");
+}
+
+#[test]
+fn the_embedded_fix_prompt_renders_and_asks_for_a_review_section_in_result_md() {
+    let template = prompts::template(Role::Fix, &Prompts::default()).unwrap();
+
+    let text = prompts::render(&template.name, &template.text, &review_values()).unwrap();
+
+    assert!(text.contains("#41") && text.contains("issue-41"), "{text}");
+    assert!(text.contains(".sbxm-task/review.md"), "{text}");
+    assert!(
+        text.contains("must-fix") && text.contains("should-fix"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Review\" section") && text.contains(".sbxm-task/result.md"),
+        "{text}"
+    );
+    assert!(text.contains("- `cargo test`"), "{text}");
+    assert!(
+        text.to_lowercase()
+            .contains("don't rewrite existing commits"),
+        "{text}"
+    );
+    assert!(!text.contains("{{"), "{text}");
+}
+
+#[test]
+fn reviewer_and_fix_overrides_are_read_from_their_own_keys() {
+    let dir = tempfile::tempdir().unwrap();
+    let reviewer = dir.path().join("r.md");
+    let fix = dir.path().join("f.md");
+    fs::write(&reviewer, "R {{number}}").unwrap();
+    fs::write(&fix, "F {{number}}").unwrap();
+    let config = Prompts {
+        reviewer: Some(reviewer),
+        fix: Some(fix),
+        ..Prompts::default()
+    };
+    assert_eq!(
+        prompts::template(Role::Reviewer, &config).unwrap().text,
+        "R {{number}}"
+    );
+    assert_eq!(
+        prompts::template(Role::Fix, &config).unwrap().text,
+        "F {{number}}"
+    );
+    // The worker is unaffected by them.
+    assert!(
+        prompts::template(Role::Worker, &config)
+            .unwrap()
+            .name
+            .ends_with("worker.md")
+    );
+}
+
 #[test]
 fn a_repo_override_replaces_the_embedded_template() {
     let dir = tempfile::tempdir().unwrap();

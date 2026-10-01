@@ -24,6 +24,9 @@ const KNOWN: [&str; 9] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
     Worker,
+    Reviewer,
+    /// The one fix round after a review.
+    Fix,
 }
 
 /// A template and the name errors are reported under (the embedded name, or the override's path).
@@ -34,11 +37,15 @@ pub struct Template {
 }
 
 const WORKER: &str = include_str!("../../prompts/worker.md");
+const REVIEWER: &str = include_str!("../../prompts/reviewer.md");
+const FIX: &str = include_str!("../../prompts/fix.md");
 
 /// The template for `role`: the repo's override when configured, else the embedded one.
 pub fn template(role: Role, prompts: &Prompts) -> Result<Template> {
     let (embedded_name, embedded, custom) = match role {
         Role::Worker => ("worker.md", WORKER, prompts.worker.as_deref()),
+        Role::Reviewer => ("reviewer.md", REVIEWER, prompts.reviewer.as_deref()),
+        Role::Fix => ("fix.md", FIX, prompts.fix.as_deref()),
     };
     match custom {
         Some(path) => read_override(path),

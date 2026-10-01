@@ -8,4 +8,5 @@ pub mod pipeline;
 pub mod prompts;
 pub mod record;
 pub mod repo;
+pub mod review;
 pub mod select;
