@@ -70,9 +70,42 @@ that).
 
 ### The `justfile`
 
-`just` lists the recipes: `just new demo codex`, `just open demo codex`, `just rebuild demo`, `just show demo pi`,
-`just demo` (one project with all four harnesses), `just purge demo`, plus `just check` and `just real-test` for
-development.
+`just` lists the recipes. Recipes run sbxm through `cargo run`, so they always use the current code, and the
+`justfile` uses PowerShell 7 (`pwsh`) as its shell on every platform.
+
+**Setting up**
+
+| Recipe | What it does |
+|---|---|
+| `just deploy-profiles` | Copies the repo's `profiles/*` into the `profiles_dir` sbxm reads (from `config.toml`, else `<config dir>\profiles`). Each repo profile replaces its copy there; profiles that exist only in `profiles_dir` are left alone. It prints `new`, `updated` or `unchanged` per profile. Run it after `git pull` changes a profile; sandboxes built from the old one show config drift until you rebuild them. |
+| `just init` | Writes a starter config and `default` profile (refuses to overwrite). |
+| `just doctor` | Checks `sbx`, the config, every profile and project, and the base dir. |
+| `just install` | Installs `sbxm` on your PATH from this checkout. |
+
+**Using sbxm** (harness defaults to `claude`, as in the recipes' arguments)
+
+| Recipe | What it does |
+|---|---|
+| `just new <project> [harness] [profile]` | Creates a project and its sandbox, e.g. `just new demo codex`. |
+| `just seed <project> <dir> [harness]` | Creates a project from a seed folder. |
+| `just open <project> [harness]` | Attaches to the sandbox, creating it if needed. |
+| `just rebuild <project> [harness]` | Recreates the sandbox from the current config (session history is lost; the workspace is kept). |
+| `just stop <project> [harness]` | Stops the sandbox. |
+| `just rm <project> [harness]` | Removes the sandbox and state; the workspace is kept. |
+| `just purge <project>` | Removes every sandbox of the project and deletes its workspace (asks first). |
+| `just list` | Lists sandboxes with status, config drift and orphans. |
+| `just show [project] [harness]` | Prints the merged config, its hash and the kits, without creating anything. |
+| `just demo [project]` | Creates one project with a sandbox for every harness, then lists them. |
+
+**Developing sbxm**
+
+| Recipe | What it does |
+|---|---|
+| `just build` | Builds the debug binary. |
+| `just test` | Runs the Rust tests (no Docker needed). |
+| `just script-test` | Runs the Pester tests for the scripts in `scripts/` (needs Pester 5). |
+| `just check` | Everything that must pass before a commit: `cargo fmt --check`, clippy, `cargo test` and `just script-test`. |
+| `just real-test [base_dir]` | Runs the tests against the real `sbx` (needs `sbx login` and a base dir not on `C:`). |
 
 ## Projects, sandboxes and where things live
 
@@ -224,8 +257,8 @@ settings, the *contents* of referenced files, resources and sbxm's version. A se
 
 ## Development
 
-`just check` runs formatting, lints and the tests (no Docker needed); `just real-test` runs the tests against the
-real `sbx`. Design decisions are numbered in `decisions.md`, the milestone plan is `milestone-1.md`, and
+`just check` runs formatting, lints, the Rust tests and the script (Pester) tests, with no Docker needed;
+`just real-test` runs the tests against the real `sbx`. See [The `justfile`](#the-justfile) for every recipe. Design decisions are numbered in `decisions.md`, the milestone plan is `milestone-1.md`, and
 `AGENTS.md` describes the code layout and workflow for coding agents.
 
 ### Working on issues with sbxm sandboxes
