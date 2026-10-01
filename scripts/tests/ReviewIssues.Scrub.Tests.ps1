@@ -78,6 +78,12 @@ Describe 'Protect-Text' {
         Protect-Text 'in /home/Jane Doe/project/x.rs' -Id 'S-1' 3>$null | Should -Be 'in ~/project/x.rs'
     }
 
+    It 'removes a profile name of four words, however many spaces it has' {
+        Protect-Text 'C:\Users\Mary Jane Watson Parker\repo' -Id 'S-1' 3>$null | Should -Be '~\repo'
+        Protect-Text 'at /home/Mary Jane Watson Parker/repo/x' -Id 'S-1' 3>$null | Should -Be 'at ~/repo/x'
+        Protect-Text 'in /Users/Mary Jane Watson Parker Smith/repo' -Id 'S-1' 3>$null | Should -Be 'in ~/repo'
+    }
+
     It 'stops a spaced profile name at a quote, a backtick or a newline' {
         Protect-Text 'a "C:\Users\Jane Doe" b' -Id 'S-1' 3>$null | Should -Be 'a "~" b'
         Protect-Text "x /home/Jane Doe``y/z" -Id 'S-1' 3>$null | Should -Be "x ~``y/z"
