@@ -202,34 +202,60 @@ pub fn push(repo_git: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
+/// Where the sandbox writes the bundle (spec §6), relative to the workspace.
+const BUNDLE_DIR: &str = ".sbxm-task";
+const BUNDLE_FILE: &str = ".sbxm-task/branch.bundle";
+
 /// The default size cap for a bundle collected from a sandbox: 500 MB.
 pub const BUNDLE_CAP: u64 = 500 * 1024 * 1024;
 
 /// Brings the agent's commits on `branch` into `repo_git` from the bundle the sandbox wrote at
-/// `bundle` (a path inside the agent's workspace, so nothing about it is trusted).
+/// `<workspace>/.sbxm-task/branch.bundle` (inside the agent's workspace, so nothing about it is
+/// trusted).
 ///
-/// The bundle must be a plain file of at most `cap` bytes. It is copied to a host-owned
-/// folder, checked with `git bundle verify` (including that `repo_git` has everything it builds
-/// on), and only `refs/heads/<branch>` is fetched: fast-forward only, hooks switched off, objects
-/// fsck-checked, no submodules, no other refs. Nothing runs `git` inside the workspace.
-pub fn fetch_bundle(repo_git: &Path, bundle: &Path, branch: &str, cap: u64) -> Result<()> {
+/// The bundle's folder must resolve to a real folder inside the workspace (not a link out of it),
+/// and the bundle must be a plain file of at most `cap` bytes: it is opened once, its size is
+/// read from the open file, and at most `cap + 1` bytes are copied, so a file that grows or is
+/// swapped during the copy cannot fill the disk. The copy goes to a host-owned folder, is checked
+/// with `git bundle verify` (including that `repo_git` has everything it builds on), and only
+/// `refs/heads/<branch>` is fetched: fast-forward only, hooks switched off, objects fsck-checked,
+/// no submodules, no other refs. Nothing runs `git` inside the workspace.
+pub fn fetch_bundle(repo_git: &Path, workspace: &Path, branch: &str, cap: u64) -> Result<()> {
+    use std::io::Read;
+
     check_ref("branch", branch)?;
-    let meta = std::fs::symlink_metadata(bundle).with_context(|| {
-        format!(
-            "cannot read the bundle {}; did the agent's sandbox write it?",
-            bundle.display()
-        )
-    })?;
+    let missing =
+        || format!("cannot find {BUNDLE_FILE} in the workspace; did the agent's sandbox write it?");
+    let folder = workspace.join(BUNDLE_DIR);
+    let real_workspace = std::fs::canonicalize(workspace)
+        .with_context(|| format!("cannot read the workspace {}", workspace.display()))?;
+    let real_folder = std::fs::canonicalize(&folder).with_context(missing)?;
+    if real_folder != real_workspace.join(BUNDLE_DIR) {
+        bail!(
+            "the bundle folder {} doesn't resolve to a folder inside the workspace; refusing to read it",
+            folder.display()
+        );
+    }
+    let bundle = real_folder.join("branch.bundle");
+    let meta = std::fs::symlink_metadata(&bundle).with_context(missing)?;
     if !meta.file_type().is_file() {
         bail!(
             "the bundle {} is not a plain file; refusing to read it",
             bundle.display()
         );
     }
-    if meta.len() > cap {
+    let mut source = std::fs::File::open(&bundle).with_context(missing)?;
+    let opened = source.metadata()?;
+    if !opened.is_file() {
+        bail!(
+            "the bundle {} is not a plain file; refusing to read it",
+            bundle.display()
+        );
+    }
+    if opened.len() > cap {
         bail!(
             "the bundle is too large ({} bytes, the limit is {cap}); ask the agent for smaller changes",
-            meta.len()
+            opened.len()
         );
     }
 
@@ -237,11 +263,17 @@ pub fn fetch_bundle(repo_git: &Path, bundle: &Path, branch: &str, cap: u64) -> R
     let work = task_dir.join("bundle");
     std::fs::create_dir_all(&work).with_context(|| format!("cannot create {}", work.display()))?;
     let copy = work.join("branch.bundle");
-    std::fs::copy(bundle, &copy)
-        .with_context(|| format!("cannot copy the bundle to {}", copy.display()))?;
-    if std::fs::metadata(&copy)?.len() > cap {
+    let copied = {
+        let mut target = std::fs::File::create(&copy)
+            .with_context(|| format!("cannot write {}", copy.display()))?;
+        std::io::copy(&mut (&mut source).take(cap.saturating_add(1)), &mut target)
+            .with_context(|| format!("cannot copy the bundle to {}", copy.display()))?
+    };
+    if copied > cap {
         let _ = std::fs::remove_file(&copy);
-        bail!("the bundle grew past the {cap}-byte limit while it was being copied");
+        bail!(
+            "the bundle is too large (it grew past the {cap}-byte limit while it was being copied)"
+        );
     }
     let copy_text = text(&copy)?;
 

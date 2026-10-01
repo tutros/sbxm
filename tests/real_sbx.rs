@@ -1639,8 +1639,7 @@ fn task_bundle_round_trip_against_real_sbx() {
         .unwrap();
     assert_eq!(out.exit_code, Some(0), "sandbox git failed: {}", out.stderr);
 
-    let bundle = workspace.join(".sbxm-task").join("branch.bundle");
-    repo::fetch_bundle(&repo_git, &bundle, "issue-4", BUNDLE_CAP).unwrap();
+    repo::fetch_bundle(&repo_git, &workspace, "issue-4", BUNDLE_CAP).unwrap();
 
     assert_eq!(
         repo::commits_ahead(&repo_git, "main", "issue-4").unwrap(),

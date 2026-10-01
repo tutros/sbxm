@@ -11,17 +11,29 @@ use sbxm::task::repo::{self, Identity};
 
 /// Plain `git` for building fixtures (not the code under test).
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .current_dir(dir)
-        .args(args)
-        .env("GIT_CONFIG_GLOBAL", "/dev/null")
-        .env("GIT_CONFIG_NOSYSTEM", "1")
-        .env("GIT_AUTHOR_NAME", "t")
-        .env("GIT_AUTHOR_EMAIL", "t@t")
-        .env("GIT_COMMITTER_NAME", "t")
-        .env("GIT_COMMITTER_EMAIL", "t@t")
-        .output()
-        .unwrap();
+    // Windows can briefly refuse git a file an indexer or antivirus holds (issue #39); the
+    // production runner retries that, so the fixture does too.
+    let mut out = None;
+    for attempt in 0..5 {
+        let run = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
+        let denied = String::from_utf8_lossy(&run.stderr).contains("Permission denied");
+        out = Some(run);
+        if !denied {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50 << attempt));
+    }
+    let out = out.unwrap();
     assert!(
         out.status.success(),
         "git {args:?}: {}",
@@ -453,14 +465,26 @@ fn tip(repo_git: &Path, branch: &str) -> String {
     git(repo_git, &["rev-parse", &format!("refs/heads/{branch}")])
 }
 
+/// Collects the bundle the sandbox left in the workspace at `.sbxm-task/branch.bundle`.
+fn collect(f: &Fixture, cap: u64) -> anyhow::Result<()> {
+    repo::fetch_bundle(&f.repo_git, &f.workspace, "issue-4", cap)
+}
+
+/// The path the sandbox writes the bundle to, with its folder made.
+fn bundle_path(f: &Fixture) -> PathBuf {
+    let dir = f.workspace.join(".sbxm-task");
+    fs::create_dir_all(&dir).unwrap();
+    dir.join("branch.bundle")
+}
+
 #[test]
 fn a_good_bundle_advances_the_task_branch() {
     let f = fixture();
     prepared(&f);
     agent_commits(&f, &["a.txt", "b.txt"]);
-    let bundle = make_bundle(&f, &["issue-4"]);
+    make_bundle(&f, &["issue-4"]);
 
-    repo::fetch_bundle(&f.repo_git, &bundle, "issue-4", CAP).unwrap();
+    collect(&f, CAP).unwrap();
 
     assert_eq!(
         tip(&f.repo_git, "issue-4"),
@@ -477,10 +501,12 @@ fn a_second_bundle_on_top_of_the_first_is_accepted() {
     let f = fixture();
     prepared(&f);
     agent_commits(&f, &["a.txt"]);
-    repo::fetch_bundle(&f.repo_git, &make_bundle(&f, &["issue-4"]), "issue-4", CAP).unwrap();
+    make_bundle(&f, &["issue-4"]);
+    collect(&f, CAP).unwrap();
 
     agent_commits(&f, &["fix.txt"]);
-    repo::fetch_bundle(&f.repo_git, &make_bundle(&f, &["issue-4"]), "issue-4", CAP).unwrap();
+    make_bundle(&f, &["issue-4"]);
+    collect(&f, CAP).unwrap();
 
     assert_eq!(
         repo::commits_ahead(&f.repo_git, "main", "issue-4").unwrap(),
@@ -493,13 +519,9 @@ fn garbage_that_is_not_a_bundle_is_refused() {
     let f = fixture();
     prepared(&f);
     let before = tip(&f.repo_git, "issue-4");
-    let bundle = f.workspace.join("branch.bundle");
-    fs::write(&bundle, "this is not a bundle").unwrap();
+    fs::write(bundle_path(&f), "this is not a bundle").unwrap();
 
-    let message = format!(
-        "{:#}",
-        repo::fetch_bundle(&f.repo_git, &bundle, "issue-4", CAP).unwrap_err()
-    );
+    let message = format!("{:#}", collect(&f, CAP).unwrap_err());
 
     assert!(message.contains("bundle"), "{message}");
     assert_eq!(tip(&f.repo_git, "issue-4"), before);
@@ -519,7 +541,7 @@ fn a_bundle_built_on_commits_repo_git_lacks_is_refused() {
     fs::write(alien.join("y"), "2").unwrap();
     git(&alien, &["add", "-A"]);
     git(&alien, &["commit", "-q", "-m", "two"]);
-    let bundle = alien.join("alien.bundle");
+    let bundle = bundle_path(&f);
     git(
         &alien,
         &[
@@ -531,10 +553,7 @@ fn a_bundle_built_on_commits_repo_git_lacks_is_refused() {
         ],
     );
 
-    let message = format!(
-        "{:#}",
-        repo::fetch_bundle(&f.repo_git, &bundle, "issue-4", CAP).unwrap_err()
-    );
+    let message = format!("{:#}", collect(&f, CAP).unwrap_err());
 
     assert!(message.contains("bundle"), "{message}");
 }
@@ -545,12 +564,9 @@ fn a_bundle_without_the_task_branch_is_refused_naming_it() {
     prepared(&f);
     git(&f.workspace, &["checkout", "-q", "-b", "other"]);
     agent_commits(&f, &["a.txt"]);
-    let bundle = make_bundle(&f, &["other"]);
+    make_bundle(&f, &["other"]);
 
-    let message = format!(
-        "{:#}",
-        repo::fetch_bundle(&f.repo_git, &bundle, "issue-4", CAP).unwrap_err()
-    );
+    let message = format!("{:#}", collect(&f, CAP).unwrap_err());
 
     assert!(message.contains("issue-4"), "{message}");
 }
@@ -562,9 +578,9 @@ fn other_branches_in_a_bundle_are_not_imported() {
     agent_commits(&f, &["a.txt"]);
     git(&f.workspace, &["branch", "evil"]);
     git(&f.workspace, &["tag", "v-evil"]);
-    let bundle = make_bundle(&f, &["issue-4", "evil", "v-evil"]);
+    make_bundle(&f, &["issue-4", "evil", "v-evil"]);
 
-    repo::fetch_bundle(&f.repo_git, &bundle, "issue-4", CAP).unwrap();
+    collect(&f, CAP).unwrap();
 
     let refs = git(&f.repo_git, &["for-each-ref", "--format=%(refname)"]);
     assert!(!refs.contains("evil"), "{refs}");
@@ -576,13 +592,10 @@ fn a_bundle_over_the_size_cap_is_refused_and_nothing_changes() {
     let f = fixture();
     prepared(&f);
     agent_commits(&f, &["a.txt"]);
-    let bundle = make_bundle(&f, &["issue-4"]);
+    make_bundle(&f, &["issue-4"]);
     let before = tip(&f.repo_git, "issue-4");
 
-    let message = format!(
-        "{:#}",
-        repo::fetch_bundle(&f.repo_git, &bundle, "issue-4", 10).unwrap_err()
-    );
+    let message = format!("{:#}", collect(&f, 10).unwrap_err());
 
     assert!(
         message.contains("too large") && message.contains("10"),
@@ -597,15 +610,53 @@ fn a_bundle_path_that_is_not_a_plain_file_is_refused() {
     prepared(&f);
     let target = f.root.join("somewhere");
     fs::create_dir_all(&target).unwrap();
-    let link = f.workspace.join("branch.bundle");
-    common::dir_link(&link, &target);
+    common::dir_link(&bundle_path(&f), &target);
 
-    let message = format!(
-        "{:#}",
-        repo::fetch_bundle(&f.repo_git, &link, "issue-4", CAP).unwrap_err()
-    );
+    let message = format!("{:#}", collect(&f, CAP).unwrap_err());
 
     assert!(message.contains("not a plain file"), "{message}");
+}
+
+#[test]
+fn a_bundle_folder_that_is_a_link_out_of_the_workspace_is_refused() {
+    let f = fixture();
+    prepared(&f);
+    agent_commits(&f, &["a.txt"]);
+    // A perfectly good bundle, but reached through a link the agent made to another folder.
+    make_bundle(&f, &["issue-4"]);
+    let elsewhere = f.root.join("elsewhere");
+    fs::rename(f.workspace.join(".sbxm-task"), &elsewhere).unwrap();
+    common::dir_link(&f.workspace.join(".sbxm-task"), &elsewhere);
+    let before = tip(&f.repo_git, "issue-4");
+
+    let message = format!("{:#}", collect(&f, CAP).unwrap_err());
+
+    assert!(message.contains("inside the workspace"), "{message}");
+    assert_eq!(tip(&f.repo_git, "issue-4"), before);
+}
+
+#[test]
+fn a_missing_bundle_says_the_sandbox_did_not_write_one() {
+    let f = fixture();
+    prepared(&f);
+    let message = format!("{:#}", collect(&f, CAP).unwrap_err());
+    assert!(
+        message.contains("branch.bundle") && message.contains("sandbox"),
+        "{message}"
+    );
+}
+
+#[test]
+fn the_cap_is_exact_a_bundle_of_exactly_that_size_passes_one_byte_over_does_not() {
+    let f = fixture();
+    prepared(&f);
+    agent_commits(&f, &["a.txt"]);
+    let size = fs::metadata(make_bundle(&f, &["issue-4"])).unwrap().len();
+
+    let message = format!("{:#}", collect(&f, size - 1).unwrap_err());
+    assert!(message.contains("too large"), "{message}");
+
+    collect(&f, size).unwrap();
 }
 
 #[cfg(unix)]
@@ -615,13 +666,9 @@ fn a_bundle_that_is_a_symlink_to_a_host_file_is_refused() {
     prepared(&f);
     let secret = f.root.join("host-secret.txt");
     fs::write(&secret, "top secret").unwrap();
-    let link = f.workspace.join("branch.bundle");
-    common::file_link(&link, &secret);
+    common::file_link(&bundle_path(&f), &secret);
 
-    let message = format!(
-        "{:#}",
-        repo::fetch_bundle(&f.repo_git, &link, "issue-4", CAP).unwrap_err()
-    );
+    let message = format!("{:#}", collect(&f, CAP).unwrap_err());
 
     assert!(message.contains("not a plain file"), "{message}");
 }
@@ -631,18 +678,16 @@ fn rewritten_history_is_refused_and_the_branch_keeps_its_commits() {
     let f = fixture();
     prepared(&f);
     agent_commits(&f, &["a.txt"]);
-    repo::fetch_bundle(&f.repo_git, &make_bundle(&f, &["issue-4"]), "issue-4", CAP).unwrap();
+    make_bundle(&f, &["issue-4"]);
+    collect(&f, CAP).unwrap();
     let kept = tip(&f.repo_git, "issue-4");
 
     // The agent throws its commit away and writes a different one on the base.
     git(&f.workspace, &["reset", "-q", "--hard", "origin/main"]);
     agent_commits(&f, &["different.txt"]);
-    let bundle = make_bundle(&f, &["issue-4"]);
+    make_bundle(&f, &["issue-4"]);
 
-    let message = format!(
-        "{:#}",
-        repo::fetch_bundle(&f.repo_git, &bundle, "issue-4", CAP).unwrap_err()
-    );
+    let message = format!("{:#}", collect(&f, CAP).unwrap_err());
 
     assert!(message.contains("history"), "{message}");
     assert_eq!(tip(&f.repo_git, "issue-4"), kept);
@@ -658,7 +703,7 @@ fn a_hostile_workspace_config_is_never_executed_by_collecting_the_bundle() {
     let f = fixture();
     prepared(&f);
     agent_commits(&f, &["a.txt"]);
-    let bundle = make_bundle(&f, &["issue-4"]);
+    make_bundle(&f, &["issue-4"]);
     // The agent plants commands in its own .git/config and hooks (the #41 attack).
     let ran = sentinel(&f, "ran-config");
     let command = format!("echo ran > '{}'", ran.to_str().unwrap().replace('\\', "/"));
@@ -687,7 +732,7 @@ fn a_hostile_workspace_config_is_never_executed_by_collecting_the_bundle() {
         fs::write(hooks.join(hook), format!("#!/bin/sh\n{command}\n")).unwrap();
     }
 
-    repo::fetch_bundle(&f.repo_git, &bundle, "issue-4", CAP).unwrap();
+    collect(&f, CAP).unwrap();
 
     assert!(
         !ran.exists(),
@@ -700,7 +745,7 @@ fn hooks_in_repo_git_do_not_run_on_the_fetch_path() {
     let f = fixture();
     prepared(&f);
     agent_commits(&f, &["a.txt"]);
-    let bundle = make_bundle(&f, &["issue-4"]);
+    make_bundle(&f, &["issue-4"]);
     let ran = sentinel(&f, "ran-hook");
     let command = format!("echo ran > '{}'", ran.to_str().unwrap().replace('\\', "/"));
     let hooks = f.repo_git.join("hooks");
@@ -714,7 +759,7 @@ fn hooks_in_repo_git_do_not_run_on_the_fetch_path() {
         fs::write(hooks.join(hook), format!("#!/bin/sh\n{command}\n")).unwrap();
     }
 
-    repo::fetch_bundle(&f.repo_git, &bundle, "issue-4", CAP).unwrap();
+    collect(&f, CAP).unwrap();
 
     assert!(!ran.exists(), "a hook ran during the fetch");
 }
@@ -744,9 +789,9 @@ fn hostile_committed_content_runs_nothing_when_fetched() {
     .unwrap();
     git(&f.workspace, &["add", "-A"]);
     git(&f.workspace, &["commit", "-q", "-m", "hostile content"]);
-    let bundle = make_bundle(&f, &["issue-4"]);
+    make_bundle(&f, &["issue-4"]);
 
-    repo::fetch_bundle(&f.repo_git, &bundle, "issue-4", CAP).unwrap();
+    collect(&f, CAP).unwrap();
 
     assert!(
         !ran.exists(),
