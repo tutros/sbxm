@@ -200,6 +200,49 @@ fn main() -> anyhow::Result<()> {
             &task::gates::ShellHostRunner,
             &mut std::io::stdout(),
         ),
+        Command::Task {
+            command:
+                TaskCommand::FileFindings {
+                    issue,
+                    pr,
+                    file,
+                    create,
+                    only,
+                    standard_criteria,
+                    keep_paths,
+                    repo,
+                },
+        } => {
+            use commands::task_file_findings::Source;
+            let source = match (issue, pr, file) {
+                (Some(number), ..) => Source::Task {
+                    base_dir: config::GlobalConfig::load(&config::config_dir()?)?.base_dir,
+                    kind: task::record::Kind::Issue,
+                    number,
+                },
+                (None, Some(number), _) => Source::Task {
+                    base_dir: config::GlobalConfig::load(&config::config_dir()?)?.base_dir,
+                    kind: task::record::Kind::Pr,
+                    number,
+                },
+                (None, None, Some(file)) => Source::File(file),
+                (None, None, None) => unreachable!("clap requires one of --issue, --pr, --file"),
+            };
+            commands::task_file_findings::run(
+                &commands::task_file_findings::Options {
+                    source,
+                    repo_root: std::env::current_dir()?,
+                    repo,
+                    create,
+                    standard_criteria,
+                    keep_paths,
+                    only,
+                },
+                &sbxm::github::gh::GhBackend::default(),
+                &mut std::io::stdout(),
+                &mut std::io::stderr(),
+            )
+        }
         Command::Run(_) => unreachable!("clap requires a config or a subcommand"),
         Command::Config {
             command: ConfigCommand::Init,

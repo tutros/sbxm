@@ -73,6 +73,30 @@ impl GhBackend {
         serde_json::from_str(&out)
             .with_context(|| format!("could not parse the output of `gh {command}`"))
     }
+
+    fn list_issues(&self, repo: &str, state: &str, limit: u32) -> Result<Vec<Issue>> {
+        let raw: Vec<RawIssue> = self.json(&strings(&[
+            "issue",
+            "list",
+            "--repo",
+            repo,
+            "--state",
+            state,
+            "--limit",
+            &limit.to_string(),
+            "--json",
+            "number,title,labels,body",
+        ]))?;
+        Ok(raw
+            .into_iter()
+            .map(|i| Issue {
+                number: i.number,
+                title: i.title,
+                labels: i.labels.into_iter().map(|l| l.name).collect(),
+                body: i.body,
+            })
+            .collect())
+    }
 }
 
 #[derive(Deserialize)]
@@ -132,29 +156,28 @@ impl GitHubBackend for GhBackend {
     }
 
     fn issues_open(&self, repo: &str) -> Result<Vec<Issue>> {
-        let raw: Vec<RawIssue> = self.json(&strings(&[
-            "issue",
-            "list",
-            "--repo",
-            repo,
-            "--state",
-            "open",
-            "--limit",
-            "200",
-            "--json",
-            "number,title,labels,body",
-        ]))?;
-        Ok(raw
-            .into_iter()
-            .map(|i| Issue {
-                number: i.number,
-                title: i.title,
-                labels: i.labels.into_iter().map(|l| l.name).collect(),
-                body: i.body,
-            })
-            .collect())
+        self.list_issues(repo, "open", 200)
     }
 
+    fn issues_all(&self, repo: &str, limit: u32) -> Result<Vec<Issue>> {
+        self.list_issues(repo, "all", limit)
+    }
+
+    fn issue_edit(&self, repo: &str, number: u32, body: &str) -> Result<()> {
+        self.run(
+            &strings(&[
+                "issue",
+                "edit",
+                &number.to_string(),
+                "--repo",
+                repo,
+                "--body-file",
+                "-",
+            ]),
+            Some(body),
+        )?;
+        Ok(())
+    }
     fn issue(&self, repo: &str, number: u32) -> Result<IssueText> {
         let text = self.run(
             &strings(&["issue", "view", &number.to_string(), "--repo", repo]),

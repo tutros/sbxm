@@ -210,4 +210,33 @@ pub enum TaskCommand {
         #[arg(long)]
         json: bool,
     },
+    /// File the findings of a review as GitHub issues, one per finding. A dry run unless
+    /// --create: it shows every issue and changes nothing.
+    #[command(group(clap::ArgGroup::new("source").required(true).args(["issue", "pr", "file"])))]
+    FileFindings {
+        /// The review of this issue's task (review.md in its task folder).
+        #[arg(long, value_name = "N")]
+        issue: Option<u32>,
+        /// The review of this PR's task (review.md in its task folder).
+        #[arg(long, value_name = "N")]
+        pr: Option<u32>,
+        /// Any review file, e.g. sdlc/reviews/2026-10-01-milestone-2b.md.
+        #[arg(long, value_name = "F")]
+        file: Option<PathBuf>,
+        /// Publish the issues, then record their numbers on the review's Issues line.
+        #[arg(long)]
+        create: bool,
+        /// File only these finding ids (repeatable, or comma-separated).
+        #[arg(long = "only", value_name = "ID", value_delimiter = ',')]
+        only: Vec<String>,
+        /// File findings that have no acceptance criteria with only the standard ones.
+        #[arg(long)]
+        standard_criteria: bool,
+        /// Keep personal paths instead of replacing them with ~.
+        #[arg(long)]
+        keep_paths: bool,
+        /// The GitHub repo, owner/name (default: this checkout's origin).
+        #[arg(long)]
+        repo: Option<String>,
+    },
 }

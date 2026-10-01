@@ -72,7 +72,7 @@ pub fn github_repo(url: &str) -> Result<String> {
     }
 }
 
-fn check_repo(repo: &str) -> Result<()> {
+pub(crate) fn check_repo(repo: &str) -> Result<()> {
     match repo.split('/').collect::<Vec<_>>().as_slice() {
         [owner, name] if name_ok(owner) && name_ok(name) => Ok(()),
         _ => bail!("--repo {repo:?} isn't owner/name; write it like tutros/sbxm"),

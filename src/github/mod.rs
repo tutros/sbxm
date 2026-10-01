@@ -70,4 +70,8 @@ pub trait GitHubBackend: Send + Sync {
     /// Returns the new issue's number.
     fn issue_create(&self, repo: &str, request: &IssueRequest) -> Result<u32>;
     fn labels(&self, repo: &str) -> Result<Vec<String>>;
+    /// Every issue in any state, up to `limit`, newest first (`gh issue list --state all`).
+    fn issues_all(&self, repo: &str, limit: u32) -> Result<Vec<Issue>>;
+    /// Replaces an issue's body.
+    fn issue_edit(&self, repo: &str, number: u32, body: &str) -> Result<()>;
 }
