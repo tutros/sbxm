@@ -1,20 +1,20 @@
 # Spike S6b: Claude hooks route, non-empty skills store, Codex/Gemini mixin home files
 
 **Status:** approved by the user 2026-09-25, including the temporary skills-store canary (Q1) and leaving Pi out.
-Run in a git worktree. **Output:** fill in `spikes/S6b-results.md`
+Run in a git worktree. **Output:** fill in `sdlc/spikes/S6b-results.md`
 (template provided). Nothing else.
 
 ## Why
 
 Slice 14 (mandatory instructions via the `harness-claude` mixin) and slice 15 (`harness.claude.home_files`, hooks)
-need three facts S6 left open (`spikes/S6-results.md`, "Follow-ups"):
+need three facts S6 left open (`sdlc/spikes/S6-results.md`, "Follow-ups"):
 1. The Claude kit **replaces** a mixin's `~/.claude/settings.json` (S6 Q2), so hooks need another route.
 2. S6 only tested an **empty** skills store, where `--skills readonly` mounts nothing. Whether a non-empty store is
    mounted over `~/.claude/skills` and hides mixin skills is unknown (decision 46 depends on it).
 3. S6 wrote Codex/Gemini files with `sbx exec`, not through a mixin. Whether a mixin's `files/home/` instructions and
    config files survive the Codex and Gemini kits is unknown (slices 18–19).
 
-Read first: `spikes/S6.md`, `spikes/S6-results.md`, and decisions 37, 46, 49, 54, 56 in `decisions.md`.
+Read first: `sdlc/spikes/S6.md`, `sdlc/spikes/S6-results.md`, and decisions 37, 46, 49, 54, 56 in `sdlc/decisions.md`.
 
 **Not in scope: Pi.** Its kit needs `kit.allowedSources` changed (decision 48), and nothing before slice 20 needs it.
 It moves to a later spike.
@@ -122,8 +122,8 @@ Each hook writes a marker file, so no tool use is needed.
   changes, or any interactive command (`sbx run`, attaching to an agent TUI).
 - The skills store: only adding and removing `spike-s6b-store-canary` as Q1 describes. Never `import` from a host
   harness directory, never touch other skills.
-- Never modify files outside `E:\sbxm-it\spike-s6b\` and `spikes/S6b-results.md`. No changes to `src/`, `tests/`,
-  `decisions.md`, `milestone-1.md`, `AGENTS.md`, `CLAUDE.md`, `.claude/`. No git commands that change state.
+- Never modify files outside `E:\sbxm-it\spike-s6b\` and `sdlc/spikes/S6b-results.md`. No changes to `src/`, `tests/`,
+  `sdlc/decisions.md`, `sdlc/milestone-1.md`, `AGENTS.md`, `CLAUDE.md`, `.claude/`. No git commands that change state.
 - Web: at most **2 fetches**, only the pinned SPEC-v2 above and Claude Code's official settings/hooks docs
   (`https://docs.anthropic.com/en/docs/claude-code/settings` or `/hooks`).
 - Don't widen scope: questions not listed here go under "Follow-ups" in the results, uninvestigated.
@@ -140,5 +140,5 @@ Each hook writes a marker file, so no tool use is needed.
 ## Exit criteria
 
 The spike is done when every question has a status with evidence or a reason, cleanup is confirmed (store empty
-again), and `spikes/S6b-results.md` is complete. Final message: one line per question (`Q1: Answered, …`), budget
+again), and `sdlc/spikes/S6b-results.md` is complete. Final message: one line per question (`Q1: Answered, …`), budget
 used, cleanup confirmed yes/no, store restored yes/no.

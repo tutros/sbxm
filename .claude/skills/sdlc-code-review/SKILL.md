@@ -15,7 +15,7 @@ every fix goes back through the `sdlc-implementation` skill (a bug fix starts wi
 | A slice is done, only when the user asks or the slice is risky (implementation rule 8; milestones are reviewed once, at the end) | The slice's commits: `git log --oneline <before-slice>..HEAD` | Checklist sections 3–6 on the diff |
 | Before merging a coding worktree (implementation rule 6) | `main..<branch>` | Full checklist, plus the merge-ready criteria in rule 6 |
 | A plan or docs-only branch (milestone plan, decisions) | `main..<branch>` | Sections 2 and 3, judged by the must-fix bar in section 7 |
-| End of a milestone (the normal review; implementation rule 8), or the user asks | `main..<milestone branch>`, or what the user names | Full checklist, plus the cross-cutting sweep in section 4; record in `reviews/<date>-milestone-<n>.md` |
+| End of a milestone (the normal review; implementation rule 8), or the user asks | `main..<milestone branch>`, or what the user names | Full checklist, plus the cross-cutting sweep in section 4; record in `sdlc/reviews/<date>-milestone-<n>.md` |
 
 State the scope in one line before starting: *"Reviewing `abc123..def456` (slice 18c, 7 commits)."*
 
@@ -35,7 +35,7 @@ change, not in it.
 ## 3. Checklist: does it do what was agreed?
 
 - **Plan and decisions.** The change does what its slice row says, and nothing it doesn't. Any departure from
-  `decisions.md` has a new numbered decision the user confirmed. New behavior no decision covers is a finding, even
+  `sdlc/decisions.md` has a new numbered decision the user confirmed. New behavior no decision covers is a finding, even
   if it looks right.
 - **Silent drops (decision 11).** Every configured setting either takes effect or produces a loud warning. Look for:
   settings that are written or accepted but never read (e.g. a key `config init` writes that no code uses), unknown
@@ -56,8 +56,8 @@ The most common miss in this project is a change applied in one place but not in
   same thing, e.g. `new` and `open` both create sandboxes; `doctor` must check what `new` would do.
 - **State and hash.** Anything that changes what a sandbox is built from joins the config hash (decisions 55, 69), and
   anything stored in `state.json` survives old state files (`#[serde(default)]`).
-- **Docs.** `README.md` (user-facing behavior), `AGENTS.md` (code layout), `milestone-1.md` (progress) and
-  `decisions.md` are updated in the same change. Example commands in docs are ones that actually run.
+- **Docs.** `README.md` (user-facing behavior), `AGENTS.md` (code layout), `sdlc/milestone-1.md` (progress) and
+  `sdlc/decisions.md` are updated in the same change. Example commands in docs are ones that actually run.
 
 ## 5. Checklist: tests
 
@@ -103,7 +103,7 @@ Rank each finding:
 | Severity | Meaning | What happens next |
 |---|---|---|
 | **Must fix** | Meets the bar in "What counts as must-fix" below | Fixed before the slice is reported or the branch merged |
-| **Should fix** | Incomplete sweep, misleading message or doc, duplicated knowledge | Fixed now, or put in `milestone-1.md` carry-over items with the user's OK |
+| **Should fix** | Incomplete sweep, misleading message or doc, duplicated knowledge | Fixed now, or put in `sdlc/milestone-1.md` carry-over items with the user's OK |
 | **Question** | Suspicion without evidence, or a gap no decision covers | Asked the user, one at a time, with a recommendation |
 
 ### What counts as must-fix
@@ -139,7 +139,7 @@ looping. If three rounds in a row keep finding must-fix in the same document, st
 scope or the design needs rethinking; more review won't converge it.
 
 Write each as: severity, `file:line`, what happens (with the evidence), why it matters (decision or convention), and
-the smallest fix. For more than five findings, put them in `reviews/<date>-<scope>.md` and keep the chat report short.
+the smallest fix. For more than five findings, put them in `sdlc/reviews/<date>-<scope>.md` and keep the chat report short.
 
 Then file them as GitHub issues (section 8) and put the issue numbers in the review file.
 
@@ -181,7 +181,7 @@ Labels: must-fix | should-fix | question
 - [ ] `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass
 - [ ] Docs updated where behavior users see changed (`README.md`), or "no user-visible change"
 - [ ] <for sbx-facing changes> the `#[ignore]` real-sbx test covering it passes and cleans up
-**Review:** link to the section in `reviews/<date>-<scope>.md`
+**Review:** link to the section in `sdlc/reviews/<date>-<scope>.md`
 ```
 
 **Acceptance criteria** say when the work is done. Each one is observable and checkable by someone other than the
@@ -207,7 +207,7 @@ the other) so either one leads to the other.
 
 ### Review file format (what `scripts/file-review-issues.ps1` parses)
 
-A review file in `reviews/` uses this shape, so its findings can be filed without rewriting them. The script also
+A review file in `sdlc/reviews/` uses this shape, so its findings can be filed without rewriting them. The script also
 accepts the small variations real reviewers produce (see `scripts/tests/fixtures/review-m2a-codex.md`), but a review
 should follow this.
 
@@ -257,10 +257,10 @@ when it needs to build and run the tests. Nothing here needs GitHub access.
 3. Give Codex this prompt (it reads `AGENTS.md` but not `.claude/skills/`, so it names the skill file):
    "Review <scope, e.g. milestone 2a> of this repo. Follow `.claude/skills/sdlc-code-review/SKILL.md`: the checklist
    plus the cross-cutting sweep, and run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
-   `cargo test`. Scope: `git diff origin/main..HEAD`. Read `milestone-2.md`, `decisions.md` and `AGENTS.md` first. Write
-   `reviews/<date>-<scope>.md` in the **Review file format** of section 8, including acceptance criteria for every
+   `cargo test`. Scope: `git diff origin/main..HEAD`. Read `sdlc/milestone-2.md`, `sdlc/decisions.md` and `AGENTS.md` first. Write
+   `sdlc/reviews/<date>-<scope>.md` in the **Review file format** of section 8, including acceptance criteria for every
    must-fix and should-fix finding. Don't edit code."
-4. Copy the review file out of the clone into the real repo's `reviews/`, check its evidence yourself (the main
+4. Copy the review file out of the clone into the real repo's `sdlc/reviews/`, check its evidence yourself (the main
    session verifies every must-fix claim by reproducing it), then file the issues from the host:
-   `./scripts/file-review-issues.ps1 -Review reviews/<file>` (dry run), then again with `-Create`.
+   `./scripts/file-review-issues.ps1 -Review sdlc/reviews/<file>` (dry run), then again with `-Create`.
 5. Remove the sandbox and the clone: `sbxm rm <project>-review --harness codex`, then delete the clone folder.

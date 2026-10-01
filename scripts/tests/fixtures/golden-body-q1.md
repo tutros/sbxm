@@ -3,5 +3,5 @@
 **Why it matters:** it blocks S-1.
 **Options and recommendation:** Remove it; the other option is to finish it.
 **Depends on:** none known
-**Review:** `reviews/review-small.md`, finding S-Q1, reviewed commits `1111111111111111111111111111111111111111..2222222222222222222222222222222222222222`
+**Review:** `sdlc/reviews/review-small.md`, finding S-Q1, reviewed commits `1111111111111111111111111111111111111111..2222222222222222222222222222222222222222`
 <!-- review-finding: review-small.md#S-Q1 -->

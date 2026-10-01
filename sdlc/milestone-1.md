@@ -2,7 +2,7 @@
 
 Goal: `sbxm` creates, reuses, lists, stops and removes per-project Docker Sandboxes built from a shared, versioned config. Comparisons, runs and evals are milestone 2.
 
-Constraints come from `decisions.md` (numbers in brackets refer to it). Verified `sbx` behavior is in its "Spike results" section.
+Constraints come from `sdlc/decisions.md` (numbers in brackets refer to it). Verified `sbx` behavior is in its "Spike results" section.
 
 ## Plan-level choices
 
@@ -10,7 +10,7 @@ Confirmed 2026-09-24 as decisions 40–42. P3 changed: the directory is renamed 
 
 **P1. Where sbxm metadata lives (changes the paths in [5], [24], [27])**
 The sandbox mounts `<base>/<project>` read-write. Anything sbxm keeps inside that directory (project `sandbox.toml`, state, later `runs/`) can be read by the agent, and **edited by the agent, which could widen the next sandbox's egress**. `sbx env` has this problem too and solves it with read-only binds.
-→ Proposal: the workspace stays `<base>/<project>` (as in `idea.md`, and existing folders work unchanged). All sbxm metadata goes in `<base>/.sbxm/<project>/` (`sandbox.toml`, `state.json`, generated kits, and in M2 `runs/`). That directory is never mounted. Project names can't start with `.`, so it can't collide with a project.
+→ Proposal: the workspace stays `<base>/<project>` (as in `sdlc/idea.md`, and existing folders work unchanged). All sbxm metadata goes in `<base>/.sbxm/<project>/` (`sandbox.toml`, `state.json`, generated kits, and in M2 `runs/`). That directory is never mounted. Project names can't start with `.`, so it can't collide with a project.
 
 **P2. Sandbox naming**
 → Proposal: `sbxm-<project>-<harness>`, so one project can have a Claude sandbox and a Codex sandbox side by side, and `list` can filter on the `sbxm-` prefix. Names stay within `sbx`'s rules (letters, digits, `-`, `.`).

@@ -1,9 +1,9 @@
 <#
 .SYNOPSIS
-Files the findings of a code review file from reviews/ as GitHub issues (decision 134).
+Files the findings of a code review file from sdlc/reviews/ as GitHub issues (decision 134).
 
 .DESCRIPTION
-Reviews run in sandboxes with no GitHub access, so their findings wait in reviews/<date>-<scope>.md marked
+Reviews run in sandboxes with no GitHub access, so their findings wait in sdlc/reviews/<date>-<scope>.md marked
 "Issues: pending". Run this from a host where gh works. It parses the file (the format is in the code review skill,
 section 8; Codex's variants are accepted too), checks access, scrubs each finding, and files one issue per finding
 with the skill's template, dependencies linked both ways and permalinks at the reviewed commit.
@@ -18,7 +18,7 @@ No labels are created: must-fix, should-fix and question must exist.
 Exit codes: 0 all done; 1 nothing filed (parse error, access failure, refused content); 2 some filed, some not.
 
 .PARAMETER Review
-Path of the review file, e.g. reviews/2026-09-30-milestone-2a.md.
+Path of the review file, e.g. sdlc/reviews/2026-09-30-milestone-2a.md.
 
 .PARAMETER Repo
 owner/name. Defaults to the repo that gh reports for this checkout's GitHub origin.
@@ -37,12 +37,12 @@ Keep personal paths as they are instead of replacing them with ~.
 File only these finding ids, e.g. -Only M2A-1,M2A-2.
 
 .EXAMPLE
-./scripts/file-review-issues.ps1 reviews/2026-09-30-milestone-2a.md -StandardCriteria
+./scripts/file-review-issues.ps1 sdlc/reviews/2026-09-30-milestone-2a.md -StandardCriteria
 
 Dry run: shows the four issues and the Issues line, files nothing.
 
 .EXAMPLE
-./scripts/file-review-issues.ps1 reviews/2026-09-30-milestone-2a.md -StandardCriteria -Create -Only M2A-1
+./scripts/file-review-issues.ps1 sdlc/reviews/2026-09-30-milestone-2a.md -StandardCriteria -Create -Only M2A-1
 
 Files one finding; run it again to see "skipped (exists)", then drop -Only for the rest.
 #>

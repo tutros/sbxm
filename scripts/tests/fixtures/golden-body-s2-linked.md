@@ -9,5 +9,5 @@
 - [ ] A test covering it fails before the fix and passes after (name it)
 - [ ] `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass
 - [ ] Docs updated where behavior users see changed, or "no user-visible change"
-**Review:** `reviews/review-small.md`, finding S-2, reviewed commits `1111111111111111111111111111111111111111..2222222222222222222222222222222222222222`
+**Review:** `sdlc/reviews/review-small.md`, finding S-2, reviewed commits `1111111111111111111111111111111111111111..2222222222222222222222222222222222222222`
 <!-- review-finding: review-small.md#S-2 -->

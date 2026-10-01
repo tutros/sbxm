@@ -34,13 +34,13 @@ A slice depends on the previous ones: if one stops, the batch stops there. Nothi
 ## Success criteria
 
 **Per slice (all must hold before its commit):**
-1. The slice's row in `milestone-2.md` ("Test focus" column) is covered by tests that were seen failing first for the
+1. The slice's row in `sdlc/milestone-2.md` ("Test focus" column) is covered by tests that were seen failing first for the
    expected reason, and now pass.
 2. `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test --no-fail-fast` all pass
    (evidence: the counts, "N ok, 0 failed").
 3. If the slice touches `sbx`: its `#[ignore]` real test passes once (one fix and one re-run allowed), leaves no
    sandbox (`sbx ls --json` lists only pre-existing ones) and no folder under `E:\sbxm-it`.
-4. Docs in step: `AGENTS.md` layout, `README.md` if user-visible, `decisions.md` for details the plan left open.
+4. Docs in step: `AGENTS.md` layout, `README.md` if user-visible, `sdlc/decisions.md` for details the plan left open.
 5. Committed (imperative subject, `Co-Authored-By` line) and pushed to `origin/m2a-implementation`. No merge, no PR,
    nothing on `main`.
 6. The log below has the slice's commit, test counts and the **manual test steps for the user**.
@@ -50,7 +50,7 @@ which rule, the evidence and the exact question for the user). Either way the ba
 
 ## Pre-decided judgment calls
 
-- Details the plan left open (like decision 125) are recorded as new numbered decisions in `decisions.md` and listed in
+- Details the plan left open (like decision 125) are recorded as new numbered decisions in `sdlc/decisions.md` and listed in
   the log. Anything that contradicts an existing decision, changes security posture, adds cost, or is a preference only
   the user can give is a **stop**, not a decision.
 - Real checks use 2 sandboxes (Claude, Codex) where the plan says 3, because Antigravity can't authenticate (124f).

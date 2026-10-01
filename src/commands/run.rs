@@ -1,5 +1,5 @@
 //! `sbxm run <config>`: validate, check secrets, reserve the run, build and
-//! validate the kits, then run the pairs (milestone-2.md, "Command behavior").
+//! validate the kits, then run the pairs (sdlc/milestone-2.md, "Command behavior").
 //! Everything that can be refused is refused before the first write.
 
 use std::io::Write;

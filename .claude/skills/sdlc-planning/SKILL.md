@@ -5,11 +5,11 @@ description: How to take a project or milestone from an idea to an implementatio
 
 # Planning phase
 
-Planning turns a brief (e.g. `idea.md`) into three artifacts:
+Planning turns a brief (e.g. `sdlc/idea.md`) into three artifacts:
 
 | Artifact | Contents |
 |---|---|
-| `decisions.md` | Numbered decisions, grouped by round with dates; spike results; open spikes |
+| `sdlc/decisions.md` | Numbered decisions, grouped by round with dates; spike results; open spikes |
 | `milestone-N.md` | The implementation plan for one milestone |
 | `CLAUDE.md` | The durable constraints that future sessions must know (points to the two files above) |
 
@@ -34,7 +34,7 @@ Also:
 
 ## Step 3: Log decisions right away
 
-After each round, before asking the next, append to `decisions.md`:
+After each round, before asking the next, append to `sdlc/decisions.md`:
 - `## Round N (YYYY-MM-DD)` with one numbered entry per decision. Include the user's actual choice, not the lean, when they differ, plus any nuance they added.
 - Facts learned from docs or research that affect the design, as a separate subsection, with source links.
 - Never rewrite a past decision silently. When one changes, add a new numbered decision that says which earlier numbers it supersedes.
@@ -44,12 +44,12 @@ After each round, before asking the next, append to `decisions.md`:
 For each open question that depends on how an external tool or system actually behaves, define a spike (`S1`, `S2`, …) and run it before writing the plan when it affects the plan.
 
 Spike rules:
-- **Spec first when unattended:** if a spike runs in a subagent or background task, or the user won't watch each step, write `spikes/<id>.md` (task spec) and `spikes/<id>-results.md` (template) as defined in rule 5 of the `sdlc-implementation` skill, and get the user's approval before launching. The worker fills in only the results file; the main session checks the evidence and records the results in `decisions.md`.
+- **Spec first when unattended:** if a spike runs in a subagent or background task, or the user won't watch each step, write `sdlc/spikes/<id>.md` (task spec) and `sdlc/spikes/<id>-results.md` (template) as defined in rule 5 of the `sdlc-implementation` skill, and get the user's approval before launching. The worker fills in only the results file; the main session checks the evidence and records the results in `sdlc/decisions.md`.
 - **Check reality, not docs alone.** Read `--help` and the specs, then test the behavior live.
 - **Isolate:** throwaway resources with an obvious prefix (e.g. `sbxm-spike-*`), fake secret values scoped to the throwaway resource, temp work dirs. Change narrow things first, then widen.
 - **When something fails, bisect:** remove one variable at a time until the cause is clear (e.g. "fails even without our kit → environment, not our config").
 - **Clean up** everything the spike created, and confirm global state matches its starting point.
-- **Record** results in `decisions.md` under "Spike results": what was tested, what was observed, and what it means for the design. Mark anything not verified as unverified.
+- **Record** results in `sdlc/decisions.md` under "Spike results": what was tested, what was observed, and what it means for the design. Mark anything not verified as unverified.
 - Report surprises as design consequences, and turn them into new numbered questions for the user when they change a decision.
 
 ## Step 5: Write the milestone plan
@@ -67,7 +67,7 @@ Reference decisions by number (`[27]`) instead of restating them.
 
 ## Step 6: Update CLAUDE.md
 
-Put in `CLAUDE.md` only what every future session needs: the project's purpose, pointers to `decisions.md` and the current milestone plan, cross-cutting constraints, and gotchas discovered in spikes. No task lists, and nothing a reader could find in the code.
+Put in `CLAUDE.md` only what every future session needs: the project's purpose, pointers to `sdlc/decisions.md` and the current milestone plan, cross-cutting constraints, and gotchas discovered in spikes. No task lists, and nothing a reader could find in the code.
 
 ## Planning is done when
 

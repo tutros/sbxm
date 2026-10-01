@@ -1,6 +1,6 @@
 # Spec: milestone 2b, `sbxm task`
 
-Part of the PRD/spec experiment [140]. What and why: `prd-m2b.md`. This file is the exact behavior, written so that
+Part of the PRD/spec experiment [140]. What and why: `sdlc/prd-m2b.md`. This file is the exact behavior, written so that
 each rule can become a test (implementation rule 2). Decisions are cited by number. Where the code must be checked
 before relying on it, the item is listed under "Details to verify first" at the end.
 
@@ -254,7 +254,7 @@ error naming the template. The rendered prompt is written to the task folder so 
 
 ## 11. File-findings [134][149]
 
-`task file-findings` is `scripts/file-review-issues.ps1`'s behavior behind `GitHubBackend`: parse a `reviews/*.md` or a
+`task file-findings` is `scripts/file-review-issues.ps1`'s behavior behind `GitHubBackend`: parse a `sdlc/reviews/*.md` or a
 task's `review.md`, render the issue template with permalinks, refuse secrets and replace personal paths, check
 repo/login/labels first, file in dependency order, skip a finding whose hidden marker already exists, rewrite the
 file's `Issues:` line. Dry run by default. The PowerShell script's Pester fixtures become the golden inputs.

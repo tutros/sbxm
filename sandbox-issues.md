@@ -12,7 +12,7 @@ for each acceptance criterion. You push and open the PR from the host.
 
 1. **Edit code** on a branch in the host session, following `sdlc-implementation`: one slice, test first, a commit
    after every green step (fmt, clippy, tests).
-2. **Review** at the end of a slice or milestone with `sdlc-code-review`. The findings, with evidence, go to `reviews/`.
+2. **Review** at the end of a slice or milestone with `sdlc-code-review`. The findings, with evidence, go to `sdlc/reviews/`.
    Then open a PR and run `./scripts/issue-workers.ps1 review -Pr <n>`: the independent reviewer comments on the PR
    (decisions 86, 87). Fix what it finds on the branch and run it again, then merge.
 3. **Open issues:** each finding becomes a GitHub issue labeled `must-fix`, `should-fix` or `question`, with acceptance
