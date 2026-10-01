@@ -4,7 +4,7 @@ Scope: `origin/main..HEAD` (`8aec45b1ecdede447a7e594c447d7d6530e40ec8..82659a266
 
 Review type: end-of-milestone full checklist plus the cross-cutting sweep from `sdlc-code-review`. Read first: `AGENTS.md`, `milestone-2.md`, `decisions.md` (especially 124–133), and `batches/2026-09-30-m2a-unattended.md`. The changed production functions were then read as whole functions, with focused sweeps over harness matches, validation-before-write, persistence, cleanup, paths, config hashing, evaluator siblings, docs, and tests.
 
-Issues: pending. This checkout's `origin` is the local path `E:\sbxm-projects\sbxm-m2`, not a GitHub remote, and `gh auth status` reports that `GH_TOKEN` is invalid, so the review skill forbids filing issues from here.
+Issues: M2A-1 #41, M2A-2 #42, M2A-3 pending, M2A-Q1 pending
 
 ## Summary
 
