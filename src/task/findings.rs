@@ -226,3 +226,117 @@ fn complete(open: Open) -> Finding {
         missing,
     }
 }
+
+/// Secret patterns in the order they are reported. Like the script's `-match`, case-insensitive.
+const SECRET_PATTERNS: [(&str, &str); 5] = [
+    (
+        "a GitHub token",
+        r"(?i)\b(?:gh[pos]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,})",
+    ),
+    ("an sk- key", r"(?i)\bsk-[A-Za-z0-9_-]{20,}"),
+    ("an AWS key", r"(?i)\bAKIA[0-9A-Z]{16}\b"),
+    ("a bearer token", r"(?i)Bearer\s+[A-Za-z0-9._~+/=-]{20,}"),
+    ("a private key", r"(?i)-----BEGIN [A-Z ]*PRIVATE KEY-----"),
+];
+
+const ASSIGNMENT_KIND: &str = "a password or token assignment";
+
+/// `password = x`, `api_token = "abc"`: a name, `=` (not `==`) and a non-empty value.
+fn has_secret_assignment(text: &str) -> bool {
+    static NAME: LazyLock<Regex> =
+        LazyLock::new(|| re(r"(?i)(?:^|[^A-Za-z])(?:password|passwd|token|secret)\s*="));
+    static VALUE: LazyLock<Regex> = LazyLock::new(|| re(r#"^\s*(?:"[^"]+"|'[^']+'|[^\s"']+)"#));
+    NAME.find_iter(text).any(|m| {
+        let rest = &text[m.end()..];
+        !rest.starts_with('=') && VALUE.is_match(rest)
+    })
+}
+
+/// The kind of secret a piece of text looks like, or nothing. Used per line and for text that
+/// isn't tied to a finding's lines, such as the Scope line's fallback text or the file name.
+pub fn secret_kind(text: &str) -> Option<&'static str> {
+    static COMPILED: LazyLock<Vec<(&'static str, Regex)>> = LazyLock::new(|| {
+        SECRET_PATTERNS
+            .iter()
+            .map(|(kind, pattern)| (*kind, re(pattern)))
+            .collect()
+    });
+    COMPILED
+        .iter()
+        .find(|(_, regex)| regex.is_match(text))
+        .map(|(kind, _)| *kind)
+        .or_else(|| has_secret_assignment(text).then_some(ASSIGNMENT_KIND))
+}
+
+/// A line of a finding that looks like a secret: never the value itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SecretHit {
+    pub id: String,
+    /// 1-based line in the review file.
+    pub line: usize,
+    pub kind: &'static str,
+}
+
+/// Lines of a finding (heading to last body line) that look like a secret.
+pub fn find_secrets(text: &str, finding: &Finding) -> Vec<SecretHit> {
+    let lines = lines_of(text);
+    let last = finding.end_line.min(lines.len());
+    (finding.start_line..=last)
+        .filter_map(|n| {
+            secret_kind(lines[n - 1]).map(|kind| SecretHit {
+                id: finding.id.clone(),
+                line: n,
+                kind,
+            })
+        })
+        .collect()
+}
+
+/// Personal paths become `~` (unless `keep_paths`) and e-mail addresses are flagged, each with a
+/// warning. The profile folder may hold spaces ("Mary Jane Watson Parker"): when a separator,
+/// quote or backtick ends it, the whole segment goes, however many words it has; otherwise only
+/// the first word does, so prose after a bare path is left alone. A newline always ends it.
+pub fn protect_text(text: &str, id: &str, keep_paths: bool, warnings: &mut Vec<String>) -> String {
+    static PATHS: LazyLock<[Regex; 2]> = LazyLock::new(|| {
+        [
+            re(r#"(?i)\b[A-Z]:\\Users\\(?:([^\\\s`'"]+(?: [^\\\s`'"]+)*)([\\`'"])|[^\\\s`'"]+)"#),
+            re(r#"/(?:home|Users)/(?:([^/\s`'"]+(?: [^/\s`'"]+)*)([/`'"])|[^/\s`'"]+)"#),
+        ]
+    });
+    static EMAIL: LazyLock<Regex> = LazyLock::new(|| re(r"[\w.+-]+@[\w-]+(\.[\w-]+)+"));
+    let mut text = text.to_owned();
+    if !keep_paths {
+        for pattern in PATHS.iter() {
+            let hits = pattern.find_iter(&text).count();
+            if hits > 0 {
+                warnings.push(format!(
+                    "{id}: replaced {hits} personal path(s) with ~; use --keep-paths to keep them"
+                ));
+                // The terminator is part of the match (no look-ahead in `regex`): put it back.
+                text = pattern
+                    .replace_all(&text, |c: &regex::Captures| match c.get(2) {
+                        Some(end) => format!("~{}", end.as_str()),
+                        None => "~".to_owned(),
+                    })
+                    .into_owned();
+            }
+        }
+    }
+    if EMAIL.is_match(&text) {
+        warnings.push(format!("{id}: contains an e-mail address (left as is)"));
+    }
+    text
+}
+
+/// A copy of the finding with every text protected.
+pub fn protect_finding(finding: &Finding, keep_paths: bool, warnings: &mut Vec<String>) -> Finding {
+    let mut copy = finding.clone();
+    copy.title = protect_text(&finding.title, &finding.id, keep_paths, warnings);
+    for (_, value) in &mut copy.fields {
+        *value = protect_text(value, &finding.id, keep_paths, warnings);
+    }
+    for item in &mut copy.criteria {
+        *item = protect_text(item, &finding.id, keep_paths, warnings);
+    }
+    copy
+}
