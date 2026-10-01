@@ -1555,43 +1555,60 @@ fn run_kits_validate_against_real_sbx() {
     assert_eq!(before, after);
 }
 
-/// `sbxm task start` with a real sandbox and a real (small) Claude worker, against a local
-/// bare repo standing in for GitHub and a scripted GitHub: the worker's commit is collected
-/// into the host-owned repo. Spends a few cents of Anthropic credit.
-#[test]
-#[ignore = "needs a logged-in sbx, the anthropic secret and SBXM_REAL_BASE_DIR; spends API credit"]
-fn task_start_against_real_sbx() {
-    use sbxm::commands::task_start::{self, Options};
+/// A scratch world for `sbxm task` tests against a real `sbx`: a base dir on E:, a config with an
+/// empty profile, a local bare repo standing in for GitHub, a target repo holding
+/// `sbxm-task.toml` (and `files`), and a scripted GitHub with one open issue, #41. Everything is
+/// removed when the test ends, sandboxes included.
+struct RealTask {
+    base_dir: PathBuf,
+    config_dir: PathBuf,
+    target: PathBuf,
+    origin: PathBuf,
+    github: sbxm::github::fake::FakeGitHub,
+    _tmp: TempDir,
+    _cleanups: Vec<Cleanup>,
+}
+
+fn real_git(dir: &std::path::Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+fn real_task_world(
+    tag: &str,
+    task_toml: &str,
+    files: &[(&str, &str)],
+    sandboxes: &[&str],
+) -> RealTask {
     use sbxm::github::fake::FakeGitHub;
     use sbxm::github::{Issue, IssueText};
-    use sbxm::task::record::{self, Stage, Status, SystemProbe};
-    use sbxm::task::repo::{self, Identity};
 
-    let base_dir = real_base_dir().join(format!("sbxm-it-{}-task", std::process::id()));
-    let _cleanup = Cleanup {
-        sandbox: "sbxm-task-issue-41-claude".into(),
+    let base_dir = real_base_dir().join(format!("sbxm-it-{}-{tag}", std::process::id()));
+    let mut cleanups = vec![Cleanup {
+        sandbox: String::new(),
         dirs: vec![base_dir.clone()],
         shared_dirs: vec![],
-    };
+    }];
+    cleanups.extend(sandboxes.iter().map(|name| Cleanup {
+        sandbox: (*name).to_owned(),
+        dirs: vec![],
+        shared_dirs: vec![],
+    }));
     std::fs::create_dir_all(&base_dir).unwrap();
     let tmp = TempDir::new().unwrap();
-    let git = |dir: &std::path::Path, args: &[&str]| -> String {
-        let out = Command::new("git")
-            .current_dir(dir)
-            .args(args)
-            .env("GIT_AUTHOR_NAME", "t")
-            .env("GIT_AUTHOR_EMAIL", "t@t")
-            .env("GIT_COMMITTER_NAME", "t")
-            .env("GIT_COMMITTER_EMAIL", "t@t")
-            .output()
-            .unwrap();
-        assert!(
-            out.status.success(),
-            "git {args:?}: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-        String::from_utf8_lossy(&out.stdout).trim().to_owned()
-    };
 
     // The config: base dir on E:, an empty profile.
     let config_dir = tmp.path().join("config");
@@ -1615,33 +1632,23 @@ fn task_start_against_real_sbx() {
     )
     .unwrap();
 
-    // GitHub's stand-in, and the target repo's config with a tiny worker prompt.
+    // GitHub's stand-in, and the target repo's config.
     let origin = tmp.path().join("origin.git");
     let seed = tmp.path().join("seed");
     std::fs::create_dir_all(&origin).unwrap();
     std::fs::create_dir_all(&seed).unwrap();
-    git(&origin, &["init", "--bare", "-b", "main"]);
-    git(&seed, &["init", "-b", "main"]);
+    real_git(&origin, &["init", "--bare", "-b", "main"]);
+    real_git(&seed, &["init", "-b", "main"]);
     std::fs::write(seed.join("README.md"), "hello\n").unwrap();
-    git(&seed, &["add", "-A"]);
-    git(&seed, &["commit", "-m", "first"]);
-    git(&seed, &["push", origin.to_str().unwrap(), "main"]);
+    real_git(&seed, &["add", "-A"]);
+    real_git(&seed, &["commit", "-m", "first"]);
+    real_git(&seed, &["push", origin.to_str().unwrap(), "main"]);
     let target = tmp.path().join("target");
     std::fs::create_dir_all(&target).unwrap();
-    std::fs::write(
-        target.join("sbxm-task.toml"),
-        "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = []\n\n[prompts]\nworker = \"worker.md\"\n",
-    )
-    .unwrap();
-    std::fs::write(
-        target.join("worker.md"),
-        "This is issue #{{number}}, branch {{branch}}. Do exactly this and nothing else:\n\
-         1. Create a file hello.txt containing the word hi.\n\
-         2. Run: git add hello.txt && git commit -m \"Add hello.txt. Fixes #{{number}}\"\n\
-         3. Write .sbxm-task/result.md saying: hello.txt added.\n\
-         4. Stop.\n",
-    )
-    .unwrap();
+    std::fs::write(target.join("sbxm-task.toml"), task_toml).unwrap();
+    for (name, text) in files {
+        std::fs::write(target.join(name), text).unwrap();
+    }
     let github = FakeGitHub::default()
         .with_default_branch("main")
         .with_open_issues(vec![Issue {
@@ -1654,14 +1661,36 @@ fn task_start_against_real_sbx() {
             number: 41,
             title: "Add hello.txt".into(),
             state: "OPEN".into(),
-            text: "title:\tAdd hello.txt\nstate:\tOPEN\n--\nAdd a hello.txt file.\n".into(),
+            text: "title:\tAdd hello.txt\nstate:\tOPEN\n--\nAdd a hello.txt file that contains the word hi.\n".into(),
         });
+    RealTask {
+        base_dir,
+        config_dir,
+        target,
+        origin,
+        github,
+        _tmp: tmp,
+        _cleanups: cleanups,
+    }
+}
+
+const REAL_WORKER_PROMPT: &str = "This is issue #{{number}}, branch {{branch}}. Do exactly this and nothing else:\n\
+     1. Create a file hello.txt containing the word hi.\n\
+     2. Run: git add hello.txt && git commit -m \"Add hello.txt. Fixes #{{number}}\"\n\
+     3. Write .sbxm-task/result.md saying: hello.txt added.\n\
+     4. Stop.\n";
+
+/// Runs `sbxm task start --issue 41` for the world with a small real Claude worker.
+fn real_task_start(world: &RealTask) {
+    use sbxm::commands::task_start::{self, Options};
+    use sbxm::task::record::SystemProbe;
+    use sbxm::task::repo::Identity;
 
     let (mut out, mut warn) = (Vec::new(), Vec::new());
     let result = task_start::run(
-        &config_dir,
+        &world.config_dir,
         &Options {
-            repo_root: target,
+            repo_root: world.target.clone(),
             issues: vec![41],
             workers: None,
             worker_harness: None,
@@ -1670,35 +1699,55 @@ fn task_start_against_real_sbx() {
             profile: None,
             base: None,
             repo: Some("o/r".into()),
-            clone_source: Some(origin.to_str().unwrap().to_owned()),
+            clone_source: Some(world.origin.to_str().unwrap().to_owned()),
             identity: Some(Identity {
                 name: "Dev".into(),
                 email: "dev@example.com".into(),
             }),
         },
         &SbxBackend,
-        &github,
+        &world.github,
         &SystemProbe,
         &mut out,
         &mut warn,
     );
-    let (out, warn) = (
+    println!(
+        "{}\n{}",
         String::from_utf8_lossy(&out),
-        String::from_utf8_lossy(&warn),
+        String::from_utf8_lossy(&warn)
     );
-    println!("{out}\n{warn}");
     result.unwrap();
+}
 
-    let meta = record::task_dir(&base_dir, "issue-41");
+/// `sbxm task start` with a real sandbox and a real (small) Claude worker, against a local
+/// bare repo standing in for GitHub and a scripted GitHub: the worker's commit is collected
+/// into the host-owned repo and its (empty) gates pass. Spends a few cents of Anthropic credit.
+#[test]
+#[ignore = "needs a logged-in sbx, the anthropic secret and SBXM_REAL_BASE_DIR; spends API credit"]
+fn task_start_against_real_sbx() {
+    use sbxm::task::record::{self, Stage, Status};
+    use sbxm::task::repo;
+
+    let world = real_task_world(
+        "task",
+        "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = []\n\n[prompts]\nworker = \"worker.md\"\n",
+        &[("worker.md", REAL_WORKER_PROMPT)],
+        &["sbxm-task-issue-41-claude"],
+    );
+
+    real_task_start(&world);
+
+    let meta = record::task_dir(&world.base_dir, "issue-41");
     let task = record::read(&meta.join("task.json")).unwrap();
+    // The worker finished, and `start` gated it (there are no gates, so they pass).
     assert_eq!(
         (task.stage, task.status),
-        (Stage::Working, Status::Completed),
+        (Stage::Gating, Status::Passed),
         "{task:?}"
     );
     let repo_git = meta.join("repo.git");
     assert!(repo::commits_ahead(&repo_git, "main", "issue-41").unwrap() >= 1);
-    assert!(git(&repo_git, &["show", "issue-41:hello.txt"]).contains("hi"));
+    assert!(real_git(&repo_git, &["show", "issue-41:hello.txt"]).contains("hi"));
     assert!(meta.join("result.md").is_file(), "{task:?}");
     assert!(meta.join("transcripts").join("worker.jsonl").is_file());
     // The clone's files match what the sandbox's git expects: no line-ending noise.
@@ -1706,6 +1755,82 @@ fn task_start_against_real_sbx() {
         !task.notes.iter().any(|n| n.contains("uncommitted")),
         "{:?}",
         task.notes
+    );
+}
+
+/// The whole path of `sbxm task start` then `sbxm task review` with a real sandbox, a real
+/// (small) Claude worker, a real sandbox gate and a real Codex reviewer: the reviewer follows
+/// the embedded prompt, writes `review.md` with its count line, and its sandbox and clone are
+/// gone afterwards. Spends a little Anthropic and OpenAI credit.
+#[test]
+#[ignore = "needs a logged-in sbx, the anthropic and openai secrets and SBXM_REAL_BASE_DIR; spends API credit"]
+fn task_review_against_real_sbx() {
+    use sbxm::commands::task_review::{self, Options};
+    use sbxm::task::gates::ShellHostRunner;
+    use sbxm::task::record::{self, Stage, Status, SystemProbe};
+
+    let world = real_task_world(
+        "review",
+        "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = [\"test -f hello.txt\"]\n\n\
+         [reviewer]\nharness = \"codex\"\n\n[prompts]\nworker = \"worker.md\"\n",
+        &[("worker.md", REAL_WORKER_PROMPT)],
+        &[
+            "sbxm-task-issue-41-claude",
+            "sbxm-task-issue-41-review-codex",
+        ],
+    );
+    real_task_start(&world);
+
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let result = task_review::run(
+        &world.config_dir,
+        &Options {
+            repo_root: world.target.clone(),
+            issue: 41,
+            reviewer_harness: None,
+            reviewer_model: None,
+            reviewer_time_limit: Some("10m".into()),
+            time_limit: Some("5m".into()),
+            profile: None,
+        },
+        &SbxBackend,
+        &SystemProbe,
+        &ShellHostRunner,
+        &mut out,
+        &mut warn,
+    );
+    println!(
+        "{}\n{}",
+        String::from_utf8_lossy(&out),
+        String::from_utf8_lossy(&warn)
+    );
+    result.unwrap();
+
+    let meta = record::task_dir(&world.base_dir, "issue-41");
+    let task = record::read(&meta.join("task.json")).unwrap();
+    assert_eq!(
+        (task.stage, task.status),
+        (Stage::Ready, Status::Ok),
+        "{task:?}"
+    );
+    let review = std::fs::read_to_string(meta.join("review.md")).unwrap();
+    println!("{review}");
+    assert!(review.starts_with("Reviewer: codex ("), "{review}");
+    assert!(review.contains("Must-fix findings: "), "{review}");
+    assert!(meta.join("review-1.md").is_file());
+    assert!(meta.join("transcripts").join("review-1.jsonl").is_file());
+    // The reviewer's clone is gone, and so is its sandbox.
+    assert!(
+        !world
+            .base_dir
+            .join("tasks")
+            .join("issue-41-review")
+            .exists()
+    );
+    let listing = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
+    assert!(
+        !String::from_utf8_lossy(&listing.stdout).contains("sbxm-task-issue-41-review-codex"),
+        "the reviewer's sandbox is still there"
     );
 }
 
