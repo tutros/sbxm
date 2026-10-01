@@ -1,0 +1,301 @@
+//! `sbxm-task.toml` at the target repo's root (spec §2, decisions 148, 151,
+//! 155, 160): parsed and checked without touching `sbx`, `gh` or the profiles.
+//! Every struct denies unknown keys, as in the run-config.
+
+use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+use anyhow::{Context, Result, bail};
+use serde::Deserialize;
+
+use crate::config::resolve_inside;
+use crate::harness::Harness;
+use crate::run::config::{headless_harness, parse_duration};
+
+pub const FILE_NAME: &str = "sbxm-task.toml";
+
+const DEFAULT_WORKER_LIMIT: Duration = Duration::from_secs(2 * 3600);
+const DEFAULT_REVIEWER_LIMIT: Duration = Duration::from_secs(45 * 60);
+const DEFAULT_GATE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+/// Applied when the repo has a `Cargo.toml` and `[gates] sandbox` is absent.
+const RUST_GATES: [&str; 3] = [
+    "cargo fmt --check",
+    "cargo clippy --all-targets -- -D warnings",
+    "cargo test",
+];
+/// The reviewer default is the first of these that differs from the worker's [148].
+const REVIEWER_ORDER: [Harness; 3] = [Harness::Codex, Harness::Claude, Harness::Antigravity];
+
+#[derive(Debug, Clone)]
+pub struct TaskConfig {
+    pub worker: Role,
+    pub reviewer: Role,
+    pub sandbox: Sandbox,
+    pub gates: Gates,
+    pub prompts: Prompts,
+    /// Things to say once and carry on (the same harness for both roles).
+    pub warnings: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Role {
+    pub harness: Harness,
+    /// The harness's own default when absent.
+    pub model: Option<String>,
+    pub time_limit: Duration,
+}
+
+#[derive(Debug, Clone)]
+pub struct Sandbox {
+    pub profile: String,
+    pub cpus: Option<u32>,
+    pub memory: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Gates {
+    /// Run inside the sandbox; empty means none.
+    pub sandbox: Vec<String>,
+    /// The optional Windows tier; empty means off (decision 160).
+    pub host: Vec<String>,
+    /// Per command.
+    pub timeout: Duration,
+}
+
+/// Override files, as absolute paths inside the repo, checked to exist.
+#[derive(Debug, Clone, Default)]
+pub struct Prompts {
+    pub worker: Option<PathBuf>,
+    pub reviewer: Option<PathBuf>,
+    pub fix: Option<PathBuf>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawConfig {
+    #[serde(default)]
+    worker: RawRole,
+    #[serde(default)]
+    reviewer: RawRole,
+    sandbox: Option<RawSandbox>,
+    #[serde(default)]
+    gates: RawGates,
+    #[serde(default)]
+    prompts: RawPrompts,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawRole {
+    harness: Option<String>,
+    model: Option<String>,
+    time_limit: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSandbox {
+    profile: Option<String>,
+    cpus: Option<u32>,
+    memory: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawGates {
+    sandbox: Option<Vec<String>>,
+    host: Option<Vec<String>>,
+    timeout: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawPrompts {
+    worker: Option<PathBuf>,
+    reviewer: Option<PathBuf>,
+    fix: Option<PathBuf>,
+}
+
+impl TaskConfig {
+    /// Reads and validates `<repo_root>/sbxm-task.toml`.
+    pub fn load(repo_root: &Path) -> Result<Self> {
+        let path = repo_root.join(FILE_NAME);
+        let text = std::fs::read_to_string(&path).with_context(|| {
+            format!(
+                "cannot read {}; create one with `sbxm task init` or run from the repo's root",
+                path.display()
+            )
+        })?;
+        let raw: RawConfig = toml::from_str(&text).map_err(|e| {
+            let line = e
+                .span()
+                .map(|s| format!(" (line {})", text[..s.start].matches('\n').count() + 1))
+                .unwrap_or_default();
+            anyhow::anyhow!(
+                "task config {}{line}: {}",
+                path.display(),
+                e.message().replace('\n', " ")
+            )
+        })?;
+        Validator {
+            path: &path,
+            repo_root,
+        }
+        .validate(raw)
+    }
+}
+
+struct Validator<'a> {
+    path: &'a Path,
+    repo_root: &'a Path,
+}
+
+impl Validator<'_> {
+    /// `task config <file>: <problem>; <fix>`, on one line (decision 48).
+    fn err(&self, problem: impl std::fmt::Display) -> anyhow::Error {
+        anyhow::anyhow!("task config {}: {problem}", self.path.display())
+    }
+
+    fn validate(&self, raw: RawConfig) -> Result<TaskConfig> {
+        let mut warnings = Vec::new();
+
+        let worker_harness = self.harness("worker.harness", raw.worker.harness.as_deref())?;
+        let worker_harness = worker_harness.unwrap_or(Harness::Claude);
+        let reviewer_harness =
+            match self.harness("reviewer.harness", raw.reviewer.harness.as_deref())? {
+                Some(h) => {
+                    if h == worker_harness {
+                        warnings.push(format!(
+                            "worker and reviewer use the same harness ({}); the review is less \
+                         independent, set [reviewer] harness to another to avoid it",
+                            h.as_str()
+                        ));
+                    }
+                    h
+                }
+                None => REVIEWER_ORDER
+                    .into_iter()
+                    .find(|h| *h != worker_harness)
+                    .expect("the order has several harnesses"),
+            };
+        let worker = self.role("worker", worker_harness, raw.worker, DEFAULT_WORKER_LIMIT)?;
+        let reviewer = self.role(
+            "reviewer",
+            reviewer_harness,
+            raw.reviewer,
+            DEFAULT_REVIEWER_LIMIT,
+        )?;
+
+        let sandbox = self.sandbox(raw.sandbox)?;
+        let gates = self.gates(raw.gates)?;
+        let prompts = Prompts {
+            worker: self.prompt("worker", raw.prompts.worker)?,
+            reviewer: self.prompt("reviewer", raw.prompts.reviewer)?,
+            fix: self.prompt("fix", raw.prompts.fix)?,
+        };
+        Ok(TaskConfig {
+            worker,
+            reviewer,
+            sandbox,
+            gates,
+            prompts,
+            warnings,
+        })
+    }
+
+    fn harness(&self, at: &str, name: Option<&str>) -> Result<Option<Harness>> {
+        name.map(|n| headless_harness(at, n, "tasks"))
+            .transpose()
+            .map_err(|problem| self.err(problem))
+    }
+
+    fn role(
+        &self,
+        table: &str,
+        harness: Harness,
+        raw: RawRole,
+        default_limit: Duration,
+    ) -> Result<Role> {
+        if raw.model.as_deref().is_some_and(|m| m.trim().is_empty()) {
+            return Err(self.err(format!(
+                "{table}.model is empty; name a model or remove the key for {}'s default",
+                harness.as_str()
+            )));
+        }
+        Ok(Role {
+            harness,
+            model: raw.model,
+            time_limit: self.duration(
+                &format!("{table}.time_limit"),
+                raw.time_limit,
+                default_limit,
+            )?,
+        })
+    }
+
+    fn sandbox(&self, raw: Option<RawSandbox>) -> Result<Sandbox> {
+        let missing = || {
+            self.err(
+                "sandbox.profile is missing; name a profile from your profiles dir in \
+                 [sandbox] profile (see `sbxm config profiles-dir`)",
+            )
+        };
+        let raw = raw.ok_or_else(missing)?;
+        let profile = raw
+            .profile
+            .filter(|p| !p.trim().is_empty())
+            .ok_or_else(missing)?;
+        if raw.cpus == Some(0) {
+            return Err(self.err("sandbox.cpus is 0; it must be at least 1"));
+        }
+        Ok(Sandbox {
+            profile,
+            cpus: raw.cpus,
+            memory: raw.memory,
+        })
+    }
+
+    fn gates(&self, raw: RawGates) -> Result<Gates> {
+        let sandbox = match raw.sandbox {
+            Some(commands) => commands,
+            None if self.repo_root.join("Cargo.toml").is_file() => {
+                RUST_GATES.map(str::to_owned).into()
+            }
+            None => {
+                return Err(self.err(
+                    "no gates configured for this repo; list the commands in [gates] sandbox \
+                     in sbxm-task.toml",
+                ));
+            }
+        };
+        Ok(Gates {
+            sandbox,
+            host: raw.host.unwrap_or_default(),
+            timeout: self.duration("gates.timeout", raw.timeout, DEFAULT_GATE_TIMEOUT)?,
+        })
+    }
+
+    /// An override file: inside the repo, no links, and it must exist.
+    fn prompt(&self, name: &str, relative: Option<PathBuf>) -> Result<Option<PathBuf>> {
+        let Some(relative) = relative else {
+            return Ok(None);
+        };
+        let key = format!("prompts.{name}");
+        let path = resolve_inside(&key, &relative, self.repo_root, FILE_NAME, self.path)?;
+        if !path.is_file() {
+            bail!(
+                "{key} file {} is missing or not a file; create it or fix {}",
+                path.display(),
+                self.path.display()
+            );
+        }
+        Ok(Some(path))
+    }
+
+    fn duration(&self, at: &str, text: Option<String>, default: Duration) -> Result<Duration> {
+        match text {
+            Some(text) => parse_duration(at, &text).map_err(|problem| self.err(problem)),
+            None => Ok(default),
+        }
+    }
+}

@@ -12,3 +12,4 @@ pub mod project;
 pub mod run;
 pub mod seed;
 pub mod state;
+pub mod task;

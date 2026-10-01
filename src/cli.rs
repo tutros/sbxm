@@ -77,6 +77,11 @@ pub enum Command {
     Doctor,
     /// Run comparisons between coding agents.
     Run(RunArgs),
+    /// Carry GitHub issues and PRs through worker, gates, review and hand-off.
+    Task {
+        #[command(subcommand)]
+        command: TaskCommand,
+    },
     /// Manage sbxm configuration.
     Config {
         #[command(subcommand)]
@@ -132,5 +137,14 @@ pub enum RunCommand {
         /// Also print every full patch.
         #[arg(long)]
         diff: bool,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TaskCommand {
+    /// Write a starter sbxm-task.toml (default: in the working directory); refuses to overwrite.
+    Init {
+        /// The repo's root folder.
+        path: Option<PathBuf>,
     },
 }

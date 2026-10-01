@@ -1,7 +1,7 @@
 use clap::Parser;
 
 use sbxm::backend::SbxBackend;
-use sbxm::cli::{Cli, Command, ConfigCommand, RunArgs, RunCommand};
+use sbxm::cli::{Cli, Command, ConfigCommand, RunArgs, RunCommand, TaskCommand};
 use sbxm::commands;
 use sbxm::config;
 use sbxm::confirm::Terminal;
@@ -112,6 +112,14 @@ fn main() -> anyhow::Result<()> {
                 &commands::run_show::Options { full_diff: diff },
             )?;
             print!("{text}");
+            Ok(())
+        }
+        Command::Task {
+            command: TaskCommand::Init { path },
+        } => {
+            let written = commands::task_init::run(path.as_deref())?;
+            println!("Wrote {}", written.display());
+            println!("Check the profile and gates, then run: sbxm task gates --dry-run");
             Ok(())
         }
         Command::Run(_) => unreachable!("clap requires a config or a subcommand"),
