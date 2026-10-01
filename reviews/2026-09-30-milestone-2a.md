@@ -4,7 +4,7 @@ Scope: `origin/main..HEAD` (`8aec45b1ecdede447a7e594c447d7d6530e40ec8..82659a266
 
 Review type: end-of-milestone full checklist plus the cross-cutting sweep from `sdlc-code-review`. Read first: `AGENTS.md`, `milestone-2.md`, `decisions.md` (especially 124–133), and `batches/2026-09-30-m2a-unattended.md`. The changed production functions were then read as whole functions, with focused sweeps over harness matches, validation-before-write, persistence, cleanup, paths, config hashing, evaluator siblings, docs, and tests.
 
-Issues: pending. This checkout's `origin` is the local path `E:\sbxm-projects\sbxm-m2`, not a GitHub remote, and `gh auth status` reports that `GH_TOKEN` is invalid, so the review skill forbids filing issues from here.
+Issues: M2A-1 #41, M2A-2 #42, M2A-3 pending, M2A-Q1 pending
 
 ## Summary
 
@@ -26,6 +26,15 @@ This branch is not yet a complete M2a delivery: the batch record says slice 12 (
 
 **Smallest fix:** construct the Git child with a cleared environment and restore only the non-Git variables Git actually needs, or remove every inherited variable whose name starts with `GIT_` before setting the fixed safe values. Add a test that sets `GIT_CONFIG_COUNT`/key/value in-process, plants the filter attribute, runs the public seeded-diff behavior, and proves no host command runs while the diff still succeeds.
 
+**Acceptance criteria:**
+- [ ] With `GIT_CONFIG_COUNT=1`, `GIT_CONFIG_KEY_0=filter.probe.clean` and `GIT_CONFIG_VALUE_0` set to a command that creates a marker file, plus a workspace `.gitattributes` containing `* filter=probe`, the seeded diff (`run::diff::seeded`) succeeds with the expected patch and the marker file does not exist.
+- [ ] The same holds for the baseline commit (`git::baseline_commit` runs the same `git add -A`, `src/git.rs:99-100`), so the seeding path is covered too.
+- [ ] The same holds for the unseeded diff (`git diff --no-index`), or the issue records why it cannot run a config-defined command.
+- [ ] A unit test on the built command shows that no inherited `GIT_*` variable survives except the fixed values sbxm sets; it sets `GIT_CONFIG_PARAMETERS` as well as `GIT_CONFIG_COUNT`, so the whole family is covered, not only the variables the review names.
+- [ ] `git` still runs on the Windows host after the change (it needs `SystemRoot` and `PATH`); the real `cargo test` run on the host is the evidence.
+- [ ] A test covering it fails before the fix and passes after (name it)
+- [ ] `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass
+- [ ] Docs updated where behavior users see changed, or "no user-visible change"
 ### M2A-2 — `[eval.cosine]` is accepted but silently does nothing
 
 **Where:** `src/run/config.rs:53-59`, `src/run/config.rs:133-142`, and `src/run/config.rs:366-371`; the acceptance is asserted at `tests/run_config.rs:65-90`.
@@ -36,6 +45,14 @@ This branch is not yet a complete M2a delivery: the batch record says slice 12 (
 
 **Smallest fix:** until slice 12 is implemented, reject `[eval.cosine]` with the same explicit “not supported yet” pattern used for unimplemented schema such as Jev. Slice 12 can then make the config valid together with the evaluator and tests proving `evals.json` receives its output.
 
+**Acceptance criteria:**
+- [ ] `RunConfig::load` on a config with `[eval.cosine]` fails with one line naming the file, in the `<problem>; <fix>` form, for example `run.toml: [eval.cosine] isn't implemented yet; remove it`; the exact text is fixed in the test.
+- [ ] The test at `tests/run_config.rs:65-90`, which asserts acceptance today, is changed first to assert that rejection, and the test at `tests/run_config.rs:153` (an unknown key inside `[eval.cosine]`) is updated or removed.
+- [ ] `sbxm run` with such a config exits non-zero before any write: no `.sbxm/runs/` folder, no kits and no backend call (asserted with `FakeBackend`).
+- [ ] `README.md` does not describe `[eval.cosine]` as working (it does not mention it today, so this is a check).
+- [ ] A test covering it fails before the fix and passes after (name it)
+- [ ] `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass
+- [ ] Docs updated where behavior users see changed, or "no user-visible change"
 ## Should fix
 
 ### M2A-3 — One implementation commit is not a green step
