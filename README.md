@@ -249,8 +249,9 @@ Every change to sbxm goes through a PR, including ones not made by workers, and 
 the PR. There's no fix round; the author fixes the findings and runs it again. PRs from forks are refused, because
 the host checks run the PR's code on your machine.
 
-One-time setup: copy `profiles/sbxm-dev` into your `profiles_dir`. It installs Rust and a C toolchain, allows
-crates.io, and needs the `anthropic` secret; the Codex reviewer also needs the `openai` one (`sbx secret ls`). Also
+One-time setup: copy `profiles/sbxm-dev` into your `profiles_dir`. It installs Rust, a C toolchain, PowerShell 7,
+Pester 5 and `just` (so `just script-test` runs in the sandbox), allows crates.io, Microsoft's package host and the
+PowerShell Gallery, and needs the `anthropic` secret; the Codex reviewer also needs the `openai` one (`sbx secret ls`). Also
 check that `gh auth status` shows you logged in.
 
 ```powershell

@@ -35,8 +35,8 @@ for each acceptance criterion. You push and open the PR from the host.
    Copy-Item -Recurse profiles\sbxm-dev (Join-Path $HOME '.config\sbxm\profiles\')
    ```
 
-   Expected: `<profiles_dir>\sbxm-dev\profile.toml` exists. It installs Rust 1.93.0 and a C toolchain, allows
-   crates.io, and needs the `anthropic` secret (`sbx secret ls` shows it). The Codex reviewer also needs the
+   Expected: `<profiles_dir>\sbxm-dev\profile.toml` exists. It installs Rust 1.93.0, a C toolchain, PowerShell 7.6.6,
+   Pester 5.5.0 and `just` 1.58.0, allows crates.io, Microsoft's package host and the PowerShell Gallery, and needs the `anthropic` secret (`sbx secret ls` shows it). The Codex reviewer also needs the
    `openai` secret; `review` checks for it before running anything.
 
 2. Check `gh` is logged in: `gh auth status`.

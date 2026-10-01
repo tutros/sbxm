@@ -2,6 +2,7 @@
 # Recipes run sbxm through `cargo run`, so they always use the current code.
 # Run `just install` for a plain `sbxm` command on your PATH.
 
+set shell := ["pwsh", "-NoLogo", "-NoProfile", "-Command"]
 set windows-shell := ["pwsh.exe", "-NoLogo", "-NoProfile", "-Command"]
 
 sbxm := "cargo run --quiet --"
