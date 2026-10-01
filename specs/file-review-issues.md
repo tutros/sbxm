@@ -71,7 +71,7 @@ Scope: `<base sha>..<head sha>` ...          first paragraph line naming the rev
 Issues: pending (...)                         or: Issues: M2A-1 #33, M2A-2 #34
 
 ## Must fix                                   also "## Should fix", "## Question" or "## Questions"
-### M2A-1 - <title>                           ids are any non-space token; "-", an em dash or ":" separate id and title
+### M2A-1 - <title>                           ids use only A-Za-z0-9._- ; "-", an em dash or ":" separate id and title
 **Where:** `src/git.rs:50-72`, `src/run/diff.rs:23-34`
 **What happens:** ...
 **Why it matters:** ...
@@ -88,6 +88,8 @@ Rules:
   `should-fix`, `Question`/`Questions` is `question`). Case and trailing colons are ignored.
 - Text under `##` headings that hold no `###` findings (Summary, Verification and checklist notes, a `Nit:` bullet)
   is not filed. Say so in the dry-run output ("not filed: 2 sections, 1 nit").
+- **Id** is limited to `[A-Za-z0-9._-]+`, because it goes into titles, bodies, markers and the `Issues:` line. Any
+  other id (a path such as `C:\Users\alice`, say) is refused with exit 1, naming it, before any `gh` call.
 - **Title** of the issue is `<id>: <title>`.
 - **Field names are matched case-insensitively** and may be followed by text on the same line or by a paragraph or
   bullets below. A finding is **invalid** (reported with its id and what is missing, never silently dropped) when it

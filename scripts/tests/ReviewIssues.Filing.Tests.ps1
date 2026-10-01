@@ -88,6 +88,24 @@ Describe 'Duplicate finding ids are refused before any GitHub call' {
     }
 }
 
+Describe 'Finding ids are limited to letters, digits, dot, underscore and hyphen' {
+    BeforeEach { Initialize-Fake }
+
+    It 'refuses a path-shaped id, naming it, before any gh call' {
+        $id = 'C:\Users\alice'
+        $text = (Get-Content -Raw (Join-Path $script:fixtures 'review-small.md')).Replace('### S-2 - Message is wrong', "### $id - Message is wrong")
+        $dir = Join-Path $TestDrive 'reviews'
+        New-Item -ItemType Directory $dir -Force | Out-Null
+        Set-Content (Join-Path $dir 'review-badid.md') $text
+        foreach ($extra in @{}, @{ Create = $true }, @{ Create = $true; Only = @("S-1") }) {
+            $run = Invoke-Filing -Fixture "review-badid.md" -Arguments $extra
+            $run.Code | Should -Be 1
+            $run.Text | Should -BeLike '*refused: finding id C:\Users\alice*A-Za-z0-9._-*'
+        }
+        Should -Invoke gh -ModuleName file-review-issues -Times 0
+    }
+}
+
 Describe 'The review file needs exactly one Issues: line' {
     BeforeEach { Initialize-Fake }
 

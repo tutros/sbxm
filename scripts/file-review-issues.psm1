@@ -399,6 +399,17 @@ function Invoke-ReviewFiling {
     $reviewName = Split-Path -Leaf $Review
     $parsed = ConvertFrom-ReviewFile $text
 
+    # An id goes into titles, bodies, markers and the Issues line, so it can't be a way to carry a path or a secret
+    # into an issue. Checked before any gh call, for every finding, not only the selected ones.
+    $badIds = @($parsed.Findings | Where-Object { $_.Id -notmatch '^[A-Za-z0-9._-]+$' })
+    if ($badIds) {
+        foreach ($bad in $badIds) {
+            Write-Host "refused: finding id $($bad.Id) (line $($bad.StartLine) of $reviewName) has characters outside A-Za-z0-9._-; rename it in the review file"
+        }
+        Write-Host "nothing was filed or changed: fix the finding ids in $reviewName first"
+        return 1
+    }
+
     # Checked before Test-ReviewAccess or any gh call: a duplicate id would otherwise let two blocks both reach
     # `gh issue create`, with the second overwriting the first's number in the write-back.
     $dupes = @($parsed.Findings | Group-Object Id | Where-Object Count -gt 1)
