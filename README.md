@@ -244,6 +244,51 @@ settings, the *contents* of referenced files, resources and sbxm's version. A se
   tells you the command to run.
 - Deleting files needs `rm --purge` plus a confirmation showing the exact paths; links and junctions are refused.
 
+## Checking on a sandbox
+
+**Which sandboxes exist and are they running?**
+
+| Command | Shows |
+|---|---|
+| `sbxm list` | sbxm's sandboxes with status, config drift and orphans (`--json` for scripts). |
+| `sbx ls` | Every sandbox `sbx` knows about, with agent, `running`/`stopped` and workspace. A sandbox that has gone from this list is finished and removed. |
+| `./scripts/issue-workers.ps1 status` | Issue workers: agent running or finished, commits, `result.md` and `review.md`. |
+
+Sandbox names are `sbxm-<project>-<harness>`, so the scripted ones follow from their project names: a worker is
+`sbxm-sbxm-issue-<n>-claude`, a PR reviewer `sbxm-sbxm-review-pr-<n>-codex`.
+
+**What is it doing right now?**
+
+- `sbx exec <sandbox> bash -c 'ps aux'` runs a command inside it (this starts a stopped sandbox). Attach to the agent
+  with `sbx run --name <sandbox>`.
+- `sbx policy log <sandbox>` lists the hosts the sandbox reached and the ones the proxy blocked. A host under
+  *Blocked requests* needs adding to `network.allow` (see *Troubleshooting*).
+- Inside the sandbox, `/var/log/sbx-kit-startup.log` has the kit's startup commands. The profile's `setup.install`
+  steps run when the sandbox is created and print as `✓`/`✗` lines; the `sbxm-dev` profile's take about two and a half
+  minutes (mostly `just`, which is compiled).
+- `sbxm config show <project> --harness <h> --kits` prints exactly what was applied, and `sbxm config profiles-dir`
+  prints the folder profiles are read from.
+
+**A scripted run (worker or `review -Pr`): which file changes when**
+
+A worker's files are in `.sbxm-issue\` in its clone; a PR review's are in `<base_dir>\sbxm-pr-<n>-review\`. Follow one
+live with `Get-Content <file> -Tail 20 -Wait`.
+
+| File | Written while | Meaning |
+|---|---|---|
+| `gates.log` | the host checks run (first) | `cargo fmt`, clippy and `cargo test` on the host. A failure here stops the run before any sandbox starts. |
+| `review-1.log` | the reviewer runs | The reviewer's live log. It stays old until the reviewer's sandbox has started. |
+| `review.md`, `review-1.md` | the end | The review itself. Until then they are the **previous** run's files, so check their times. |
+| `agent.log` | a worker runs | The worker's own output; it ends with `agent exit code: <n>`. |
+| `transcripts\` | the end | The reviewer's session transcripts, copied out before its sandbox is removed. |
+
+A review normally takes 6 to 12 minutes after its sandbox has started. The command's own output says which stage it is
+in (`cargo fmt`, `cargo test`, `review round 1`).
+
+**Cleaning up.** Each sandbox that builds the project keeps its own `target\`, which is 3 to 4 GB. `sbxm rm <project>
+--purge` removes every sandbox of a project and its workspace (asks first); `issue-workers.ps1 remove -Issue <n>` does it
+for a worker. Finished review folders are small and can stay or go. Check `sbx ls` for stopped leftovers.
+
 ## Troubleshooting
 
 - **Start with `sbxm doctor`.** Each failure says what's wrong and how to fix it.
@@ -255,6 +300,12 @@ settings, the *contents* of referenced files, resources and sbxm's version. A se
 - **Pi answers `401`:** approve the credential binding (see *Harnesses*).
 - **`sandbox … exists but sbxm has no state for it`:** it wasn't created by sbxm here; remove it with `sbx rm` (this
   deletes its session history) and run `sbxm open` again.
+- **A profile change isn't taking effect:** sbxm reads the copy in `profiles_dir`, not the one in the repo. Run
+  `just deploy-profiles` (it refuses to write if `config.toml` is invalid), then rebuild the sandbox.
+- **`git` fails with `Permission denied` on Windows (`.git/config`, `.git/objects/…`):** antivirus or the file indexer
+  briefly holds a file git just created. It passes by itself, so run the command again.
+- **`sbx exec`/`sbx run` print `context deadline exceeded` after the sandbox was created:** the sandbox exists; only
+  the attach step timed out in a non-interactive shell. Check `sbx ls`.
 
 ## Development
 
