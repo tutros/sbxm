@@ -50,12 +50,15 @@ function Get-ProfilesDir([scriptblock]$command, [string]$configDir) {
         throw "sbxm config profiles-dir failed (exit code $code): $($output -join ' '); nothing was changed."
     }
     # Only the folder itself is a string; progress text from `cargo run` arrives as error records.
+    # Trim only to tell an empty line from a folder: a folder name may start or end with spaces, and sbxm
+    # reads it exactly as printed.
     $dir = $output | Where-Object { $_ -is [string] -and $_.Trim() } | Select-Object -First 1
     if (-not $dir) { throw 'sbxm config profiles-dir printed no folder; nothing was changed.' }
-    $dir.Trim()
+    $dir
 }
 
-# Hash every file by relative path, so "unchanged" means the whole folder matches.
+# Hash every file by relative path, so "unchanged" means the whole folder matches. Compare the result with
+# -ceq: a file renamed only in case is a change (-eq ignores case).
 function Get-FolderState([string]$dir) {
     if (-not (Test-Path -LiteralPath $dir)) { return $null }
     $root = (Resolve-Path -LiteralPath $dir).Path
@@ -74,7 +77,7 @@ Write-Host "Deploying to $target"
 foreach ($profile in $profiles) {
     $dest = Join-Path $target $profile.Name
     $before = Get-FolderState $dest
-    $state = if ($null -eq $before) { 'new' } elseif ($before -eq (Get-FolderState $profile.FullName)) { 'unchanged' } else { 'updated' }
+    $state = if ($null -eq $before) { 'new' } elseif ($before -ceq (Get-FolderState $profile.FullName)) { 'unchanged' } else { 'updated' }
     if ($state -ne 'unchanged') {
         $id = [guid]::NewGuid().ToString('N')
         $staged = Join-Path $target ".deploy-$($profile.Name)-$id"

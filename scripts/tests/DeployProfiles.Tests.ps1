@@ -61,6 +61,32 @@ Describe 'deploy-profiles.ps1' {
         (& $script:deploy -Source $script:source -ProfilesDirCommand $script:stub 6>&1 | Out-String) | Should -Match 'dev: updated'
     }
 
+    It 'uses the folder sbxm prints exactly, spaces at the ends of the name included' {
+        # Windows can't create a folder with a trailing space, so look at what the script hands to the copier.
+        $log = Join-Path $TestDrive ([guid]::NewGuid())
+        $recorder = [scriptblock]::Create("param(`$from, `$to) Set-Content -LiteralPath '$log' -Value `$to -NoNewline; throw 'stop here'")
+        $spaced = "$($script:target) "
+
+        { & $script:deploy -Source $script:source -ProfilesDirCommand (New-Stub $spaced) -Copier $recorder 6>$null } | Should -Throw '*stop here*'
+
+        (Get-Content -LiteralPath $log -Raw).StartsWith("$spaced$([IO.Path]::DirectorySeparatorChar).deploy-") | Should -BeTrue
+    }
+
+    It 'treats a change of file name case as an update and keeps the source casing' {
+        Set-Content (Join-Path $script:source 'dev\Rules.md') 'same text'
+        New-Item -ItemType Directory (Join-Path $script:target 'dev') | Out-Null
+        Copy-Item (Join-Path $script:source 'dev\profile.toml') (Join-Path $script:target 'dev\profile.toml')
+        Set-Content (Join-Path $script:target 'dev\rules.md') 'same text'
+
+        $out = & $script:deploy -Source $script:source -ProfilesDirCommand $script:stub 6>&1 | Out-String
+
+        $out | Should -Match 'dev: updated'
+        # -ccontains: Pester's Contain ignores case.
+        $names = @(Get-ChildItem (Join-Path $script:target 'dev')).Name
+        ($names -ccontains 'Rules.md') | Should -BeTrue
+        ($names -ccontains 'rules.md') | Should -BeFalse
+    }
+
     It 'ignores folders without a profile.toml' {
         New-Item -ItemType Directory (Join-Path $script:source 'not-a-profile') | Out-Null
 
