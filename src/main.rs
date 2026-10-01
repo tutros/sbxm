@@ -143,6 +143,39 @@ fn main() -> anyhow::Result<()> {
             );
             Ok(())
         }
+        Command::Task {
+            command:
+                TaskCommand::Start {
+                    issues,
+                    workers,
+                    worker_harness,
+                    worker_model,
+                    time_limit,
+                    profile,
+                    base,
+                    repo,
+                },
+        } => commands::task_start::run(
+            &config::config_dir()?,
+            &commands::task_start::Options {
+                repo_root: std::env::current_dir()?,
+                issues,
+                workers,
+                worker_harness,
+                worker_model,
+                time_limit,
+                profile,
+                base,
+                repo,
+                clone_source: None,
+                identity: None,
+            },
+            &SbxBackend,
+            &sbxm::github::gh::GhBackend::default(),
+            &task::record::SystemProbe,
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+        ),
         Command::Run(_) => unreachable!("clap requires a config or a subcommand"),
         Command::Config {
             command: ConfigCommand::Init,

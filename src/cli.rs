@@ -147,6 +147,35 @@ pub enum TaskCommand {
         /// The repo's root folder.
         path: Option<PathBuf>,
     },
+    /// Start a task for each chosen GitHub issue: a worker agent in its own sandbox, then its
+    /// commits are collected. Blocks until the workers finish.
+    Start {
+        /// Start this issue (repeatable).
+        #[arg(long = "issue", value_name = "N", conflicts_with = "workers")]
+        issues: Vec<u32>,
+        /// Start up to N issues, chosen by label (must-fix first), skipping questions, blocked
+        /// and related ones.
+        #[arg(long, value_name = "N", conflicts_with = "issues")]
+        workers: Option<usize>,
+        /// The worker's harness (default: sbxm-task.toml, else claude).
+        #[arg(long, value_enum)]
+        worker_harness: Option<Harness>,
+        /// The worker's model (default: the harness's own).
+        #[arg(long)]
+        worker_model: Option<String>,
+        /// The worker's time limit, e.g. 90s, 45m, 2h.
+        #[arg(long)]
+        time_limit: Option<String>,
+        /// The sandbox profile (default: sbxm-task.toml).
+        #[arg(long)]
+        profile: Option<String>,
+        /// The branch to start from (default: the repo's default branch).
+        #[arg(long)]
+        base: Option<String>,
+        /// The GitHub repo, owner/name (default: this checkout's origin).
+        #[arg(long)]
+        repo: Option<String>,
+    },
     /// Show the tasks: stage, status, and whether one was interrupted.
     Status {
         /// Only the task for this issue.
