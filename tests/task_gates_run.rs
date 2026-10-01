@@ -240,6 +240,36 @@ fn host_gates_run_in_a_clean_checkout_of_the_committed_branch_which_is_removed_a
 }
 
 #[test]
+fn a_gates_log_that_cannot_be_written_does_not_strand_the_task_in_running() {
+    let f = config("\"cargo test\"", "");
+    let backend = playing(&f);
+    let mut prepared = worked(&f, &backend);
+    // A folder where the log file should be: every write to it fails.
+    fs::create_dir_all(meta(&f).join("gates.log")).unwrap();
+
+    let gated = run_gates(
+        &f,
+        &backend,
+        &FakeHostRunner::default(),
+        &mut prepared,
+        "after-worker",
+        Tiers::ALL,
+    );
+
+    assert!(gated.passed);
+    let record = saved(&f);
+    assert_eq!(
+        (record.stage, record.status),
+        (Stage::Gating, Status::Passed)
+    );
+    assert!(
+        record.notes.iter().any(|n| n.contains("gates.log")),
+        "{:?}",
+        record.notes
+    );
+}
+
+#[test]
 fn a_leftover_checkout_from_an_earlier_run_is_cleared_not_reported_as_a_gate_failure() {
     let f = config("\"cargo test\"", "\"cargo build\"");
     let backend = playing(&f);

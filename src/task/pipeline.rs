@@ -105,6 +105,8 @@ pub fn check_can_gate(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
                 "the worker failed for task {id}, so there is nothing to gate; see `sbxm task status --issue {number}`"
             )
         }
+        // Gates whose sbxm process is gone never finished: `run_gates` gives them up and re-runs.
+        (Stage::Gating, Status::Running) if task.is_interrupted(probe) => Ok(()),
         (Stage::Gating, _) => bail!(
             "gates are running for task {id}, or were interrupted; see `sbxm task status --issue {number}`"
         ),
@@ -482,6 +484,12 @@ pub fn run_gates(
         .context("the task has no worker")?
         .sandbox
         .clone();
+    if prepared.record.abandon_interrupted_gates(env.probe) {
+        prepared
+            .record
+            .notes
+            .push("earlier gates were interrupted before they finished".to_owned());
+    }
     prepared
         .record
         .begin_gating(now(), Process::current(env.probe))?;
@@ -559,7 +567,13 @@ pub fn run_gates(
     let log_path = prepared.meta.join("gates.log");
     let mut log = fs::read_to_string(&log_path).unwrap_or_default();
     log.push_str(&gates_log_entry(phase, &outcomes));
-    fs::write(&log_path, log)?;
+    // The log is a convenience: failing to write it must not leave the task stuck in `running`.
+    if let Err(e) = fs::write(&log_path, log) {
+        prepared
+            .record
+            .notes
+            .push(format!("could not write {}: {e}", log_path.display()));
+    }
     prepared
         .record
         .gates

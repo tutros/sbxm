@@ -366,6 +366,65 @@ fn a_task_past_the_gates_is_refused_with_the_stage() {
 }
 
 #[test]
+fn interrupted_gates_can_be_run_again_and_the_interruption_is_noted() {
+    let f = config("\"cargo test\"", "");
+    let backend = playing(&f);
+    let mut prepared = worked_task(&f, &backend);
+    // sbxm died while the gates were running: Gating/Running with a process that is gone.
+    prepared
+        .record
+        .begin_gating(1, sbxm::task::record::Process::new(1, 1))
+        .unwrap();
+    record::write(&prepared.meta, &prepared.record).unwrap();
+
+    let out = go(
+        &f,
+        &options(&f, Tiers::ALL, false),
+        &backend,
+        &Dead,
+        &FakeHostRunner::default(),
+    );
+
+    out.result.unwrap();
+    let record = saved(&f);
+    assert_eq!(
+        (record.stage, record.status),
+        (Stage::Gating, Status::Passed)
+    );
+    assert!(
+        record.notes.iter().any(|n| n.contains("interrupted")),
+        "{:?}",
+        record.notes
+    );
+}
+
+#[test]
+fn gates_that_are_really_still_running_are_refused() {
+    let f = config("\"cargo test\"", "");
+    let backend = playing(&f);
+    let mut prepared = worked_task(&f, &backend);
+    prepared
+        .record
+        .begin_gating(0, sbxm::task::record::Process::new(1, 0))
+        .unwrap();
+    record::write(&prepared.meta, &prepared.record).unwrap();
+    let before = backend.execs().len();
+
+    // The probe says that process exists and started when the record says it did.
+    let out = go(
+        &f,
+        &options(&f, Tiers::ALL, false),
+        &backend,
+        &Probe,
+        &FakeHostRunner::default(),
+    );
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("gates are running"), "{message}");
+    assert_eq!(backend.execs().len(), before);
+}
+
+#[test]
 fn gates_can_be_run_again_after_a_failure() {
     let f = config("\"cargo test\"", "");
     let backend = playing(&f);
