@@ -9,6 +9,7 @@
 
 use std::path::Path;
 use std::process::{Command, Output};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
@@ -16,9 +17,57 @@ use anyhow::{Context, Result, bail};
 /// agent-visible repo get the same commit id.
 const BASELINE_DATE: &str = "2000-01-01T00:00:00+0000";
 
+/// How often a git call that Windows refused with "Permission denied" is tried,
+/// and how long to wait before the second try (it doubles after each failure).
+const TRIES: u32 = 5;
+const FIRST_DELAY: Duration = Duration::from_millis(50);
+
+/// Runs `attempt` until it succeeds, fails for any reason but git being refused
+/// access to a file, or `tries` is used up; then returns the last result.
+///
+/// On Windows another process (antivirus, the file indexer) can briefly hold a
+/// file git just created, and git exits 128 with "Permission denied" when it
+/// replaces that file. It goes away on its own, so waiting and trying again is
+/// right; a seeded contestant would otherwise fail with "cannot seed workspace"
+/// (issue #39). Every call sbxm makes is safe to repeat after that failure,
+/// because git changed nothing when it couldn't write.
+fn retry(
+    tries: u32,
+    first_delay: Duration,
+    mut attempt: impl FnMut() -> Result<Output>,
+) -> Result<Output> {
+    let mut delay = first_delay;
+    for _ in 1..tries {
+        let out = attempt()?;
+        if out.status.success() || !permission_denied(&out) {
+            return Ok(out);
+        }
+        std::thread::sleep(delay);
+        delay *= 2;
+    }
+    attempt()
+}
+
+fn permission_denied(out: &Output) -> bool {
+    out.status.code() == Some(128)
+        && String::from_utf8_lossy(&out.stderr).contains("Permission denied")
+}
+
 /// `git <args>` with a hardened environment. `git_dir` and `work_tree` are
 /// passed as `--git-dir`/`--work-tree` when given; `cwd` is where it runs.
+/// Retries when git is refused access to a file (see [`retry`]).
 pub(crate) fn output(
+    cwd: &Path,
+    git_dir: Option<&Path>,
+    work_tree: Option<&Path>,
+    args: &[&str],
+) -> Result<Output> {
+    retry(TRIES, FIRST_DELAY, || {
+        output_once(cwd, git_dir, work_tree, args)
+    })
+}
+
+fn output_once(
     cwd: &Path,
     git_dir: Option<&Path>,
     work_tree: Option<&Path>,
@@ -114,4 +163,108 @@ pub(crate) fn baseline_commit(cwd: &Path, git_dir: &Path, work_tree: &Path) -> R
     )?;
     let id = run(cwd, Some(git_dir), Some(work_tree), &["rev-parse", "HEAD"])?;
     Ok(id.trim().to_owned())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    fn exit(code: i32) -> std::process::ExitStatus {
+        #[cfg(windows)]
+        {
+            use std::os::windows::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(code as u32)
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            std::process::ExitStatus::from_raw(code << 8)
+        }
+    }
+
+    fn failed(code: i32, stderr: &str) -> Output {
+        Output {
+            status: exit(code),
+            stdout: Vec::new(),
+            stderr: stderr.as_bytes().to_vec(),
+        }
+    }
+
+    const DENIED: &str = "error: could not write config file .git/config: Permission denied\nfatal: could not set 'core.bare' to 'false'";
+
+    #[test]
+    fn a_permission_denied_failure_is_retried_until_it_works() {
+        let calls = Cell::new(0);
+
+        let out = retry(3, Duration::ZERO, || {
+            calls.set(calls.get() + 1);
+            Ok(if calls.get() < 3 {
+                failed(128, DENIED)
+            } else {
+                failed(0, "")
+            })
+        })
+        .unwrap();
+
+        assert!(out.status.success());
+        assert_eq!(calls.get(), 3);
+    }
+
+    #[test]
+    fn it_gives_up_after_the_last_try_and_returns_gits_own_failure() {
+        let calls = Cell::new(0);
+
+        let out = retry(4, Duration::ZERO, || {
+            calls.set(calls.get() + 1);
+            Ok(failed(128, DENIED))
+        })
+        .unwrap();
+
+        assert!(!out.status.success());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("Permission denied"));
+        assert_eq!(calls.get(), 4);
+    }
+
+    #[test]
+    fn other_failures_are_not_retried() {
+        let calls = Cell::new(0);
+
+        let out = retry(4, Duration::ZERO, || {
+            calls.set(calls.get() + 1);
+            Ok(failed(128, "fatal: not a git repository"))
+        })
+        .unwrap();
+
+        assert!(!out.status.success());
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn a_failure_to_run_git_at_all_is_not_retried() {
+        let calls = Cell::new(0);
+
+        let err = retry(4, Duration::ZERO, || {
+            calls.set(calls.get() + 1);
+            Err(anyhow::anyhow!("cannot run `git`"))
+        })
+        .unwrap_err();
+
+        assert!(err.to_string().contains("cannot run"));
+        assert_eq!(calls.get(), 1);
+    }
+
+    #[test]
+    fn success_is_returned_at_once() {
+        let calls = Cell::new(0);
+
+        retry(4, Duration::ZERO, || {
+            calls.set(calls.get() + 1);
+            Ok(failed(0, ""))
+        })
+        .unwrap();
+
+        assert_eq!(calls.get(), 1);
+    }
 }
