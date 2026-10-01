@@ -17,6 +17,8 @@ pub enum GhCall {
     PrComment(String, u32, String),
     IssueCreate(String, IssueRequest),
     Labels(String),
+    IssuesAll(String, u32),
+    IssueEdit(String, u32, String),
 }
 
 #[derive(Default)]
@@ -27,7 +29,14 @@ pub struct FakeGitHub {
     issue_texts: Vec<IssueText>,
     prs: Vec<PrInfo>,
     labels: Vec<String>,
+    /// Every issue in any state: the scripted ones, then those created through the fake.
+    all_issues: Mutex<Vec<Issue>>,
     next_issue: Mutex<u32>,
+    creates: Mutex<usize>,
+    edits: Mutex<usize>,
+    fail_create_at: Option<usize>,
+    fail_edit_at: Option<usize>,
+    fail_issues_all: bool,
     failure: Option<String>,
     calls: Mutex<Vec<GhCall>>,
 }
@@ -60,6 +69,28 @@ impl FakeGitHub {
 
     pub fn with_labels(mut self, labels: &[&str]) -> Self {
         self.labels = labels.iter().map(|l| (*l).to_owned()).collect();
+        self
+    }
+
+    pub fn with_issues(self, issues: Vec<Issue>) -> Self {
+        *self.all_issues.lock().unwrap() = issues;
+        self
+    }
+
+    /// The nth `issue_create` (1-based) fails and creates nothing.
+    pub fn failing_issue_create_at(mut self, n: usize) -> Self {
+        self.fail_create_at = Some(n);
+        self
+    }
+
+    /// The nth `issue_edit` (1-based) fails and changes nothing.
+    pub fn failing_issue_edit_at(mut self, n: usize) -> Self {
+        self.fail_edit_at = Some(n);
+        self
+    }
+
+    pub fn failing_issues_all(mut self) -> Self {
+        self.fail_issues_all = true;
         self
     }
 
@@ -135,14 +166,63 @@ impl GitHubBackend for FakeGitHub {
 
     fn issue_create(&self, repo: &str, request: &IssueRequest) -> Result<u32> {
         self.record(GhCall::IssueCreate(repo.to_owned(), request.clone()))?;
+        let attempt = {
+            let mut creates = self.creates.lock().unwrap();
+            *creates += 1;
+            *creates
+        };
+        if self.fail_create_at == Some(attempt) {
+            return Err(anyhow!("FakeGitHub: issue create {attempt} fails"));
+        }
         let mut next = self.next_issue.lock().unwrap();
         let number = *next;
         *next += 1;
+        self.all_issues.lock().unwrap().push(Issue {
+            number,
+            title: request.title.clone(),
+            labels: request.labels.clone(),
+            body: request.body.clone(),
+        });
         Ok(number)
     }
 
     fn labels(&self, repo: &str) -> Result<Vec<String>> {
         self.record(GhCall::Labels(repo.to_owned()))?;
         Ok(self.labels.clone())
+    }
+
+    fn issues_all(&self, repo: &str, limit: u32) -> Result<Vec<Issue>> {
+        self.record(GhCall::IssuesAll(repo.to_owned(), limit))?;
+        if self.fail_issues_all {
+            return Err(anyhow!("FakeGitHub: `gh issue list` fails"));
+        }
+        Ok(self
+            .all_issues
+            .lock()
+            .unwrap()
+            .iter()
+            .take(limit as usize)
+            .cloned()
+            .collect())
+    }
+
+    fn issue_edit(&self, repo: &str, number: u32, body: &str) -> Result<()> {
+        self.record(GhCall::IssueEdit(repo.to_owned(), number, body.to_owned()))?;
+        let attempt = {
+            let mut edits = self.edits.lock().unwrap();
+            *edits += 1;
+            *edits
+        };
+        if self.fail_edit_at == Some(attempt) {
+            return Err(anyhow!("FakeGitHub: issue edit {attempt} fails"));
+        }
+        let mut all = self.all_issues.lock().unwrap();
+        match all.iter_mut().find(|i| i.number == number) {
+            Some(issue) => {
+                issue.body = body.to_owned();
+                Ok(())
+            }
+            None => Err(anyhow!("FakeGitHub: issue {number} does not exist")),
+        }
     }
 }
