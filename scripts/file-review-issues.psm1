@@ -101,7 +101,7 @@ $secretPatterns = [ordered]@{
     'an AWS key'                    = '\bAKIA[0-9A-Z]{16}\b'
     'a bearer token'                = 'Bearer\s+[A-Za-z0-9._~+/=-]{20,}'
     'a private key'                 = '-----BEGIN [A-Z ]*PRIVATE KEY-----'
-    'a password or token assignment' = '(?i)\b(?:password|token)\s*=\s*["'']?[^\s"'']{4,}'
+    'a password or token assignment' = '(?i)(?<![A-Za-z])(?:password|passwd|token|secret)\s*=(?!=)\s*(?:"[^"]+"|''[^'']+''|[^\s"'']+)'
 }
 
 # The kind of secret a piece of text matches, or nothing. Used both per line (Find-Secrets) and for text that

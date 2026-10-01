@@ -48,6 +48,25 @@ Describe 'Find-Secrets' {
         ($found | Out-String) | Should -Not -Match ([regex]::Escape($Value.Substring(6)))
     }
 
+    It 'refuses the short assignment <text>' -ForEach @(
+        @{ Text = 'token = a' }, @{ Text = 'token = ab' }, @{ Text = 'token = abc' },
+        @{ Text = 'password = x' }, @{ Text = 'password=xy' }, @{ Text = 'secret = xyz' }, @{ Text = 'api_token = abc' },
+        @{ Text = 'token = "a"' }, @{ Text = "password = 'ab'" }, @{ Text = 'token = "abc"' }
+    ) {
+        $text = New-ReviewWith "output: $Text"
+        $found = @(Find-Secrets -Text $text -Finding (ConvertFrom-ReviewFile $text).Findings[0])
+        $found.Count | Should -Be 1
+        $found[0].Kind | Should -Be 'a password or token assignment'
+    }
+
+    It 'lets the empty assignment <text> and a comparison through' -ForEach @(
+        @{ Text = 'token =' }, @{ Text = 'password = ' }, @{ Text = 'token = ""' }, @{ Text = 'if token == other then' },
+        @{ Text = 'the token is missing' }, @{ Text = 'tokens = 5 of them' }
+    ) {
+        $text = New-ReviewWith "output: $Text"
+        @(Find-Secrets -Text $text -Finding (ConvertFrom-ReviewFile $text).Findings[0]) | Should -BeNullOrEmpty
+    }
+
     It 'finds nothing in the Codex review' {
         $text = Get-Content -Raw (Join-Path $PSScriptRoot 'fixtures\review-m2a-codex.md')
         foreach ($finding in (ConvertFrom-ReviewFile $text).Findings) { @(Find-Secrets -Text $text -Finding $finding) | Should -BeNullOrEmpty }
