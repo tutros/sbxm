@@ -485,7 +485,18 @@ function Invoke-ReviewFiling {
     $toCreate = @($prepared | Where-Object { $existing -notcontains $_.Id })
 
     $view = $parsed.PSObject.Copy()
-    $view.Findings = $prepared.ToArray()
+    # Backlinks (Related: S-1 depends on this one) come from the whole parsed review, not only the selected
+    # findings, so a later -Only batch still links an earlier-filed dependent. An excluded finding is never
+    # refused, so only its protected id can reach a body; one whose id looks like a secret is left out.
+    $preparedById = @{}
+    foreach ($p in $prepared) { $preparedById[$p.Id] = $p }
+    $view.Findings = @(foreach ($finding in $parsed.Findings) {
+            if ($preparedById.ContainsKey($finding.Id)) { $preparedById[$finding.Id]; continue }
+            if (Find-SecretKind $finding.Id) { continue }
+            $other = Protect-Finding $finding -KeepPaths:$KeepPaths 3>$null
+            $other.Id = Protect-Text $finding.Id -Id $finding.Id -KeepPaths:$KeepPaths 3>$null
+            $other
+        })
     if ($scopeFallback) { $view.Scope = $scopeFallback }
     $render = {
         param($finding)

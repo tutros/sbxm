@@ -387,6 +387,32 @@ Describe 'Create' {
         @($script:fake.Issues | ForEach-Object { $_.title }) | Should -Be @('S-1: Thing breaks')
     }
 
+    It 'gives a later -Only batch the backlink to a dependent filed in an earlier batch' {
+        (Invoke-Filing -Arguments @{ Create = $true; Only = @('S-1') }).Code | Should -Be 0
+        $first = $script:fake.Issues | Where-Object { $_.title -like 'S-1:*' }
+        $firstBody = $first.body
+        $script:fake.Writes.Clear()
+        (Invoke-Filing -Arguments @{ Create = $true; Only = @('S-2') }).Code | Should -Be 0
+        $second = $script:fake.Issues | Where-Object { $_.title -like 'S-2:*' }
+        $second.body | Should -Match '\*\*Related:\*\* #40 depends on this one'
+        @($script:fake.Writes) | Should -Be @('create')
+        @($script:fake.Issues).Count | Should -Be 2
+        ($script:fake.Issues | Where-Object { $_.title -like 'S-1:*' }).body | Should -Be $firstBody
+    }
+
+    It 'keeps unsafe text of an excluded finding out of the backlink' {
+        $text = (Get-Content -Raw (Join-Path $script:fixtures 'review-small.md')) -replace '### S-1 - Thing breaks', ('### ghp_' + ('a' * 30) + ' - Thing breaks') -replace '\*\*Depends on:\*\* S-2 ', ('**Depends on:** S-2 ')
+        $text = $text -replace '(?s)\*\*Why it matters:\*\* decision 7', "**Why it matters:** decision 7 token = hunter2hunter"
+        $dir = Join-Path $TestDrive 'reviews'
+        New-Item -ItemType Directory $dir -Force | Out-Null
+        Set-Content (Join-Path $dir 'review-unsafe.md') $text
+        $run = Invoke-Filing -Fixture 'review-unsafe.md' -Arguments @{ Create = $true; Only = @('S-2') }
+        $run.Code | Should -Be 0
+        $body = ($script:fake.Issues | Where-Object { $_.title -like 'S-2:*' }).body
+        $body | Should -Not -Match 'ghp_'
+        $body | Should -Not -Match 'hunter2'
+    }
+
     It 'files nothing when any finding is refused' {
         $run = Invoke-Filing -Fixture 'review-m2a-codex.md' -Arguments @{ Create = $true }
         $run.Code | Should -Be 1
