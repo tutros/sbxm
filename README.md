@@ -94,7 +94,7 @@ development.
 | `claude` (default) | Claude Code | `~/.claude/CLAUDE.md` | Supports `harness.claude.home_files` and `harness.claude.managed_settings`. |
 | `codex` | Codex | `~/.codex/AGENTS.md` | |
 | `gemini` | Gemini CLI | `~/.gemini/GEMINI.md` | `sbx`'s skills store doesn't serve Gemini: sbxm warns unless `skills.store = "off"`. |
-| `antigravity` | Antigravity (`agy`) | `~/.gemini/AGENTS.md` | Uses the Antigravity kit from Docker Hub, pinned to a fixed tag. Sign-in is per sandbox: run `sbx run --name sbxm-<project>-antigravity` once and sign in (decision 124). `sbx`'s skills store isn't known to serve it: sbxm warns unless `skills.store = "off"`. |
+| `antigravity` | Antigravity (`agy`) | `~/.gemini/AGENTS.md` | Uses the Antigravity kit from Docker Hub, pinned to a fixed tag. With a `google` secret stored (`sbx secret set -g google`), `agy` uses it as a Gemini API key and needs no sign-in (decision 137). `sbx`'s skills store isn't known to serve it: sbxm warns unless `skills.store = "off"`. |
 | `pi` | Pi | `~/.pi/agent/AGENTS.md` | Uses the Pi kit from Docker Hub, pinned to a fixed tag. See below. `sbx`'s skills store doesn't serve Pi either: sbxm warns unless `skills.store = "off"`. |
 
 Settings a harness can't use are never dropped silently: `sbxm new`/`open` print a `warning:` line for each, e.g.
