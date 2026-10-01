@@ -29,14 +29,15 @@ for each acceptance criterion. You push and open the PR from the host.
 
 ## One-time setup
 
-1. Copy the profile into your sbxm profiles folder (`profiles_dir` in `config.toml`):
+1. Copy the profile into your sbxm profiles folder (`profiles_dir` in `config.toml`); rerun this after the profile
+   changes:
 
    ```
-   Copy-Item -Recurse profiles\sbxm-dev (Join-Path $HOME '.config\sbxm\profiles\')
+   just deploy-profiles
    ```
 
-   Expected: `<profiles_dir>\sbxm-dev\profile.toml` exists. It installs Rust 1.93.0 and a C toolchain, allows
-   crates.io, and needs the `anthropic` secret (`sbx secret ls` shows it). The Codex reviewer also needs the
+   Expected: `<profiles_dir>\sbxm-dev\profile.toml` exists. It installs Rust 1.93.0, a C toolchain, PowerShell 7.6.6,
+   Pester 5.5.0 and `just` 1.58.0, allows crates.io, Microsoft's package host and the PowerShell Gallery, and needs the `anthropic` secret (`sbx secret ls` shows it). The Codex reviewer also needs the
    `openai` secret; `review` checks for it before running anything.
 
 2. Check `gh` is logged in: `gh auth status`.
@@ -53,7 +54,7 @@ for each acceptance criterion. You push and open the PR from the host.
    Expected: `cargo fmt --check`, `cargo clippy` and `cargo test` lines, `review round 1`, then
    `#1: <k> must-fix finding(s)`; with k > 0 a `fix round` and `review round 2`; last line `#1: review done; …`.
    A failing host check stops it with the log path (`.sbxm-issue\gates.log`). The reviewer sandbox is removed at the end.
-5. Read `result.md`, `review.md` and the commits. To take over interactively: `sbxm open sbxm-issue-<n>`.
+5. Read `result.md`, `review.md` and the commits. To take over interactively: `sbxm open sbxm-issue-<n> --harness claude`.
 6. Push and open the PR (its body is `Fixes #<n>`, `result.md` and `review.md`): `./scripts/issue-workers.ps1 finish -Issue 1`
 7. After merging: `./scripts/issue-workers.ps1 remove -Issue 1` (asks you to confirm the paths it deletes).
 

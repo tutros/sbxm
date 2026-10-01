@@ -43,7 +43,7 @@ pub enum Command {
         #[arg(long)]
         rebuild: bool,
         /// Which of the project's sandboxes to open.
-        #[arg(long, value_enum, default_value_t)]
+        #[arg(long, value_enum)]
         harness: Harness,
     },
     /// Stop a project's sandbox.
@@ -51,7 +51,7 @@ pub enum Command {
         /// Project name.
         project: String,
         /// Which of the project's sandboxes to stop.
-        #[arg(long, value_enum, default_value_t)]
+        #[arg(long, value_enum)]
         harness: Harness,
     },
     /// Remove a project's sandbox and state; the workspace is kept unless --purge.
@@ -65,8 +65,13 @@ pub enum Command {
         #[arg(long, requires = "purge")]
         yes: bool,
         /// Which of the project's sandboxes to remove (--purge removes all).
-        #[arg(long, value_enum, default_value_t, conflicts_with = "purge")]
-        harness: Harness,
+        #[arg(
+            long,
+            value_enum,
+            conflicts_with = "purge",
+            required_unless_present = "purge"
+        )]
+        harness: Option<Harness>,
     },
     /// Check sbx, the config and the base dir; exits non-zero if any check fails.
     Doctor,
@@ -97,6 +102,8 @@ pub enum ConfigCommand {
         #[arg(long, value_enum, default_value_t)]
         harness: Harness,
     },
+    /// Print the folder profiles are read from (for scripts), or fail like any command would.
+    ProfilesDir,
 }
 
 /// `sbxm run <config>` launches a comparison; `sbxm run init` writes a starter

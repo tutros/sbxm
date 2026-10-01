@@ -2,6 +2,7 @@
 # Recipes run sbxm through `cargo run`, so they always use the current code.
 # Run `just install` for a plain `sbxm` command on your PATH.
 
+set shell := ["pwsh", "-NoLogo", "-NoProfile", "-Command"]
 set windows-shell := ["pwsh.exe", "-NoLogo", "-NoProfile", "-Command"]
 
 sbxm := "cargo run --quiet --"
@@ -92,6 +93,10 @@ real-test base_dir='E:\sbxm-it':
 # Compare the pinned Pi and Antigravity kit tags in src/harness.rs with the newest dated tag on Docker Hub (M2a P8). Changes nothing; re-pinning is a manual step.
 kit-tags:
     foreach ($kit in 'pi-kit', 'antigravity-kit') { $pinned = (Select-String -Path src/harness.rs -Pattern "docker.io/sbx/$kit`:([0-9a-z-]+)").Matches[0].Groups[1].Value; $tags = (Invoke-RestMethod "https://hub.docker.com/v2/repositories/sbx/$kit/tags?page_size=25&ordering=last_updated").results.name | Where-Object { $_ -match '^[0-9]{8}-' }; $newest = $tags | Select-Object -First 1; $note = if ($pinned -eq $newest) { 'up to date' } else { 'NEWER TAG AVAILABLE: re-pin by hand, run the real-sbx checks, log a decision' }; Write-Host "$kit pinned $pinned, newest $newest ($note)" }
+
+# Copy profiles/* into the profiles_dir sbxm reads, asking `sbxm config profiles-dir` (see scripts/deploy-profiles.ps1).
+deploy-profiles:
+    ./scripts/deploy-profiles.ps1 -ProfilesDirCommand { cargo run --quiet -- config profiles-dir }
 
 # Install `sbxm` on your PATH from this checkout.
 install:

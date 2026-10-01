@@ -29,8 +29,8 @@ fn commands_without_config_point_to_config_init() {
     for args in [
         &["list"][..],
         &["list", "--json"][..],
-        &["stop", "demo"][..],
-        &["open", "demo", "--rebuild"][..],
+        &["stop", "demo", "--harness", "claude"][..],
+        &["open", "demo", "--rebuild", "--harness", "claude"][..],
     ] {
         let output = sbxm()
             .env("SBXM_CONFIG_DIR", tmp.path())
@@ -107,4 +107,41 @@ fn purge_with_harness_is_rejected_and_deletes_nothing() {
         "{stderr}"
     );
     assert!(base.join("demo").is_dir());
+}
+
+#[test]
+fn commands_on_an_existing_sandbox_require_harness() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    for args in [
+        &["rm", "demo"][..],
+        &["stop", "demo"][..],
+        &["open", "demo"][..],
+    ] {
+        let output = sbxm()
+            .env("SBXM_CONFIG_DIR", tmp.path())
+            .args(args)
+            .assert()
+            .failure()
+            .get_output()
+            .clone();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("required arguments were not provided") && stderr.contains("--harness"),
+            "{args:?}: {stderr}"
+        );
+    }
+}
+
+#[test]
+fn rm_purge_does_not_require_harness() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let output = sbxm()
+        .env("SBXM_CONFIG_DIR", tmp.path())
+        .args(["rm", "demo", "--purge", "--yes"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(!stderr.contains("required arguments"), "{stderr}");
 }

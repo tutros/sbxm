@@ -1,4 +1,5 @@
 pub mod config_init;
+pub mod config_profiles_dir;
 pub mod config_show;
 pub mod doctor;
 pub mod list;
@@ -40,8 +41,9 @@ pub(crate) fn invalid_kit_check(
     checked
 }
 
-/// The `--harness` argument selecting `harness` in a hint, empty for the
-/// default, so Claude-only users see the commands they already know.
+/// The `--harness` argument selecting `harness` for a `sbxm new` hint, empty
+/// for the default: `new` keeps its default per decision 135, so a hint
+/// suggesting it stays valid without the flag.
 fn harness_flag(harness: Harness) -> String {
     if harness == Harness::default() {
         String::new()
@@ -50,13 +52,28 @@ fn harness_flag(harness: Harness) -> String {
     }
 }
 
-/// `harness` followed by a space for messages, empty for the default.
+/// `harness` followed by a space, empty for the default, for the "no sandbox
+/// at all" messages that pair with `harness_flag`'s `sbxm new` hint above.
 fn harness_label(harness: Harness) -> String {
     if harness == Harness::default() {
         String::new()
     } else {
         format!("{} ", harness.as_str())
     }
+}
+
+/// The `--harness` argument selecting `harness` for a `sbxm open` hint,
+/// always explicit: decision 135 makes `--harness` required on `open`, so a
+/// hint that omits it for the default (claude) would be unusable as shown.
+fn open_harness_flag(harness: Harness) -> String {
+    format!(" --harness {}", harness.as_str())
+}
+
+/// `harness` followed by a space, always explicit: decision 135 requires
+/// `stop`/`rm` to always name the harness they were asked for, so a "no
+/// sandbox for X, but Y has one" message can't hide X while naming Y.
+fn requested_harness_label(harness: Harness) -> String {
+    format!("{} ", harness.as_str())
 }
 
 /// Warns about every setting in `profile` that `harness` can't apply in

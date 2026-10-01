@@ -60,7 +60,7 @@ fn main() -> anyhow::Result<()> {
             &commands::rm::Options {
                 purge,
                 yes,
-                harness,
+                harness: harness.unwrap_or_default(),
             },
             &SbxBackend,
             &Terminal,
@@ -118,6 +118,15 @@ fn main() -> anyhow::Result<()> {
         Command::Config {
             command: ConfigCommand::Init,
         } => commands::config_init::run(),
+        Command::Config {
+            command: ConfigCommand::ProfilesDir,
+        } => {
+            print!(
+                "{}",
+                commands::config_profiles_dir::render(&config::config_dir()?)?
+            );
+            Ok(())
+        }
         Command::Config {
             command:
                 ConfigCommand::Show {

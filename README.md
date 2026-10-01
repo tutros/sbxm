@@ -48,7 +48,7 @@ that).
 4. Create a project and its Claude Code sandbox, then attach to it:
    ```
    sbxm new demo
-   sbxm open demo
+   sbxm open demo --harness claude
    ```
    The workspace is `<base_dir>\demo`, mounted read-write into the sandbox.
 
@@ -57,25 +57,59 @@ that).
 | Command | What it does |
 |---|---|
 | `sbxm config init` | Writes a starter `config.toml` and `default` profile. Refuses to overwrite either. |
-| `sbxm new <project> [--harness h] [--profile p] [--seed dir]` | Creates `<base_dir>/<project>` if missing (or reuses it), builds the kits from the profile and the project's `sandbox.toml`, checks them with `sbx kit validate`, and creates the sandbox. Doesn't attach. Refuses a harness that already has a sandbox for the project, before writing anything; open that one with `sbxm open <project> [--harness h]` (or `--rebuild` it). `--seed` copies a folder into a *new* project. |
-| `sbxm open <project> [--harness h] [--rebuild]` | Attaches to the sandbox, starting it if it's stopped and creating it if it's missing. Refuses if the config changed since the sandbox was built; `--rebuild` recreates it. |
+| `sbxm new <project> [--harness h] [--profile p] [--seed dir]` | Creates `<base_dir>/<project>` if missing (or reuses it), builds the kits from the profile and the project's `sandbox.toml`, checks them with `sbx kit validate`, and creates the sandbox. Doesn't attach. Refuses a harness that already has a sandbox for the project, before writing anything; open that one with `sbxm open <project> --harness h` (or `--rebuild` it). `--seed` copies a folder into a *new* project. |
+| `sbxm open <project> --harness h [--rebuild]` | Attaches to the sandbox, starting it if it's stopped and creating it if it's missing. Refuses if the config changed since the sandbox was built; `--rebuild` recreates it. |
 | `sbxm list [--json]` | Lists sbxm's sandboxes with project, harness, status and whether their config is `current` or `changed`. Flags orphans (a sandbox sbxm has no record of, or a record without a sandbox) and says how to fix each. |
-| `sbxm stop <project> [--harness h]` | Stops the sandbox. |
-| `sbxm rm <project> [--harness h]` | Removes the sandbox and sbxm's record of it. The workspace is kept. |
+| `sbxm stop <project> --harness h` | Stops the sandbox. |
+| `sbxm rm <project> --harness h` | Removes the sandbox and sbxm's record of it. The workspace is kept. |
 | `sbxm rm <project> --purge [--yes]` | Removes **every** sandbox of the project, then deletes the workspace and its metadata, after you confirm the exact paths. Without a terminal it needs `--yes`. Can't be combined with `--harness`. |
 | `sbxm run init [path]` | Writes a starter run-config for a comparison (default `./run.toml`): two contestants (Claude and Codex) live, an Antigravity one commented out, and commented examples for checks, a rubric and a judge. The file is valid as written. Refuses to overwrite. |
 | `sbxm run <config>` | Runs a comparison: checks the run-config and that every needed secret is stored in `sbx` (each contestant's provider, the judge's, and the profiles' `secrets.services`), builds and validates the kits, then gives each (contestant, repeat) pair its own throwaway sandbox. A contestant can set its own `profile`; otherwise `[run].profile` (or your `default_profile`) applies, and the judge uses the run's. Contestants of a repeat run in parallel; repeats run one after another. Each sandbox is removed afterwards, even after an error; the workspaces stay under `<base_dir>/runs/<run-id>/<contestant>/<repeat>/`. Prints the run ID and one line per pair (completed, timed out or failed). With `task.seed`, each contestant gets its own copy of the seed as a fresh git repo with one baseline commit (the seed's history and remotes are dropped); without it, an empty plain folder. Each pair's diff (everything the contestant changed or added, even if it committed) is captured before its sandbox is removed. Each pair's results are saved the moment it finishes under `<base_dir>\.sbxm\runs\<run-id>\<contestant>\<repeat>\` (`answer.md`, `diff.patch`, `transcript.jsonl`, `result.json`), next to `run.json` (the run's identity: config hashes, profile, `sbx` version, times) and a copy of the run-config; `run.json` gets `completed_at` only once everything is saved. Any `[[eval.checks]]` run inside each contestant's sandbox after its agent finishes (and after its diff is taken), as `sh -c <command>` with a time limit enforced inside the sandbox; exit code 0 passes. The verdicts are saved in `evals.json` next to the pair's other files and summarised on the pair's line (`; checks 2/3 passed`). With `[eval.judge]` and a rubric, an LLM judge then scores the contestants: after all pairs are done, once per repeat, in its own throwaway sandbox, it sees each contestant's answer and diff under an anonymous label (A, B, ...) and scores every rubric criterion (`pass_fail` or a `scale` of levels). A judge from the same provider as a contestant is allowed, with a warning. Verdicts are saved in each pair's `evals.json` and per repeat in `judge/<repeat>/judge.json` (the label mapping); a judge that fails is warned about and doesn't fail the run. The contestants are then ranked: each criterion is 0 to 1, a contestant's score is the weighted mean over the criteria the judge scored (criteria it skipped are listed, never counted as 0), repeats are averaged, equal scores share a rank, and executable checks are shown alongside without changing the score. The ranking is printed before the last line, `Results: <folder>`. Cosine evaluation is planned but not implemented yet, so `[eval.cosine]` is currently refused. |
 | `sbxm run show <run-id> [--diff]` | Prints a saved run from its files: when it started and completed, the profile and `sbx` version, and for each contestant and repeat the status, the answer, a summary of the diff (files changed, lines added and removed) each executable check's verdict and the judge's scores, with the anonymous label each contestant was judged under. `--diff` also prints every full patch. With a judge it also prints the ranking, recomputed from the saved files (edit `run-config.toml` in the run folder to try other weights). A run that is still going or was interrupted shows what has been saved so far. Only reads files; the id must look like `2026-09-30-a1b2c3`. |
 | `sbxm config show [project] [--profile p] [--harness h] [--kits]` | Prints the merged config exactly as it's hashed, the hash, and with `--kits` the generated kits. Creates nothing. |
+| `sbxm config profiles-dir` | Prints the folder profiles are read from (`profiles_dir`, else `<config dir>/profiles`), for scripts such as `just deploy-profiles`. Loads only `config.toml`, so it fails like any command on an invalid or missing one. |
 | `sbxm doctor` | Checks `sbx` (on `PATH`, new enough, daemon answering), the config, every profile, every project with each of its sandboxes (secrets stored, kits valid), and the base dir (exists, writable, not a temp folder, at least 10 GiB free). Exits non-zero if anything fails. |
 
-`--harness` defaults to `claude` everywhere. `sbxm <command> --help` shows every option.
+`--harness` defaults to `claude` for `new` and `config show`; `open`, `stop` and `rm` (without `--purge`) require it, so they never act on the wrong sandbox by default (issue #33). `sbxm <command> --help` shows every option.
 
 ### The `justfile`
 
-`just` lists the recipes: `just new demo codex`, `just open demo codex`, `just rebuild demo`, `just show demo pi`,
-`just demo` (one project with all four harnesses), `just purge demo`, plus `just check` and `just real-test` for
-development.
+`just` lists the recipes. Recipes run sbxm through `cargo run`, so they always use the current code, and the
+`justfile` uses PowerShell 7 (`pwsh`) as its shell on every platform.
+
+**Setting up**
+
+| Recipe | What it does |
+|---|---|
+| `just deploy-profiles` | Copies the repo's `profiles/*` into the `profiles_dir` sbxm reads, asking `sbxm config profiles-dir` (so an invalid or missing `config.toml` stops it before anything is written). Each repo profile replaces its copy there; profiles that exist only in `profiles_dir` are left alone. It prints `new`, `updated` or `unchanged` per profile. Run it after `git pull` changes a profile; sandboxes built from the old one show config drift until you rebuild them. |
+| `just init` | Writes a starter config and `default` profile (refuses to overwrite). |
+| `just doctor` | Checks `sbx`, the config, every profile and project, and the base dir. |
+| `just install` | Installs `sbxm` on your PATH from this checkout. |
+
+**Using sbxm** (harness defaults to `claude`, as in the recipes' arguments)
+
+| Recipe | What it does |
+|---|---|
+| `just new <project> [harness] [profile]` | Creates a project and its sandbox, e.g. `just new demo codex`. |
+| `just seed <project> <dir> [harness]` | Creates a project from a seed folder. |
+| `just open <project> [harness]` | Attaches to the sandbox, creating it if needed. |
+| `just rebuild <project> [harness]` | Recreates the sandbox from the current config (session history is lost; the workspace is kept). |
+| `just stop <project> [harness]` | Stops the sandbox. |
+| `just rm <project> [harness]` | Removes the sandbox and state; the workspace is kept. |
+| `just purge <project>` | Removes every sandbox of the project and deletes its workspace (asks first). |
+| `just list` | Lists sandboxes with status, config drift and orphans. |
+| `just show [project] [harness]` | Prints the merged config, its hash and the kits, without creating anything. |
+| `just demo [project]` | Creates one project with a sandbox for every harness, then lists them. |
+
+**Developing sbxm**
+
+| Recipe | What it does |
+|---|---|
+| `just build` | Builds the debug binary. |
+| `just test` | Runs the Rust tests (no Docker needed). |
+| `just script-test` | Runs the Pester tests for the scripts in `scripts/` (needs Pester 5). |
+| `just check` | Everything that must pass before a commit: `cargo fmt --check`, clippy, `cargo test` and `just script-test`. |
+| `just real-test [base_dir]` | Runs the tests against the real `sbx` (needs `sbx login` and a base dir not on `C:`). |
 
 ## Projects, sandboxes and where things live
 
@@ -200,7 +234,7 @@ settings, the *contents* of referenced files, resources and sbxm's version. A se
 
 - `sbxm list` shows `changed` when the current config no longer matches, with the command to fix it.
 - `sbxm open` refuses a changed sandbox instead of attaching to something built from an old config.
-- `sbxm open <project> --rebuild` recreates it. The workspace is kept, but the agent's **session history in that
+- `sbxm open <project> --harness h --rebuild` recreates it. The workspace is kept, but the agent's **session history in that
   sandbox is lost**. The old sandbox is removed only after the new kits validate.
 - `sbxm config show <project> --harness <h>` prints exactly what's hashed, so you can see what changed.
 
@@ -214,22 +248,73 @@ settings, the *contents* of referenced files, resources and sbxm's version. A se
   tells you the command to run.
 - Deleting files needs `rm --purge` plus a confirmation showing the exact paths; links and junctions are refused.
 
+## Checking on a sandbox
+
+**Which sandboxes exist and are they running?**
+
+| Command | Shows |
+|---|---|
+| `sbxm list` | sbxm's sandboxes with status, config drift and orphans (`--json` for scripts). |
+| `sbx ls` | Every sandbox `sbx` knows about, with agent, `running`/`stopped` and workspace. A sandbox that has gone from this list is finished and removed. |
+| `./scripts/issue-workers.ps1 status` | Issue workers: agent running or finished, commits, `result.md` and `review.md`. |
+
+Sandbox names are `sbxm-<project>-<harness>`, so the scripted ones follow from their project names: a worker is
+`sbxm-sbxm-issue-<n>-claude`, a PR reviewer `sbxm-sbxm-review-pr-<n>-codex`.
+
+**What is it doing right now?**
+
+- `sbx exec <sandbox> bash -c 'ps aux'` runs a command inside it (this starts a stopped sandbox). Attach to the agent
+  with `sbx run --name <sandbox>`.
+- `sbx policy log <sandbox>` lists the hosts the sandbox reached and the ones the proxy blocked. A host under
+  *Blocked requests* needs adding to `network.allow` (see *Troubleshooting*).
+- Inside the sandbox, `/var/log/sbx-kit-startup.log` has the kit's startup commands. The profile's `setup.install`
+  steps run when the sandbox is created and print as `✓`/`✗` lines; the `sbxm-dev` profile's take about two and a half
+  minutes (mostly `just`, which is compiled).
+- `sbxm config show <project> --harness <h> --kits` prints exactly what was applied, and `sbxm config profiles-dir`
+  prints the folder profiles are read from.
+
+**A scripted run (worker or `review -Pr`): which file changes when**
+
+A worker's files are in `.sbxm-issue\` in its clone; a PR review's are in `<base_dir>\sbxm-pr-<n>-review\`. Follow one
+live with `Get-Content <file> -Tail 20 -Wait`.
+
+| File | Written while | Meaning |
+|---|---|---|
+| `gates.log` | the host checks run (first) | `cargo fmt`, clippy and `cargo test` on the host. A failure here stops the run before any sandbox starts. |
+| `review-1.log` | the reviewer runs | The reviewer's live log. It stays old until the reviewer's sandbox has started. |
+| `review.md`, `review-1.md` | the end | The review itself. Until then they are the **previous** run's files, so check their times. |
+| `agent.log` | a worker runs | The worker's own output; it ends with `agent exit code: <n>`. |
+| `transcripts\` | the end | The reviewer's session transcripts, copied out before its sandbox is removed. |
+
+A review normally takes 6 to 12 minutes after its sandbox has started. The command's own output says which stage it is
+in (`cargo fmt`, `cargo test`, `review round 1`).
+
+**Cleaning up.** Each sandbox that builds the project keeps its own `target\`, which is 3 to 4 GB. `sbxm rm <project>
+--purge` removes every sandbox of a project and its workspace (asks first); `issue-workers.ps1 remove -Issue <n>` does it
+for a worker. Finished review folders are small and can stay or go. Check `sbx ls` for stopped leftovers.
+
 ## Troubleshooting
 
 - **Start with `sbxm doctor`.** Each failure says what's wrong and how to fix it.
 - **`sbx create` fails with `failed to run sandbox container`:** check the workspace isn't on a drive `sbx` can't
   mount (on the development machine, anything on `C:`), or under `%TEMP%`/`AppData`.
-- **A host is blocked:** add it to `network.allow`, then `sbxm open <project> --rebuild`.
+- **A host is blocked:** add it to `network.allow`, then `sbxm open <project> --harness h --rebuild`.
 - **`secret '…' (secrets.services) is not stored in sbx`:** `sbx secret set <service>`, or `sbx setup` to import it
   from your environment.
 - **Pi answers `401`:** approve the credential binding (see *Harnesses*).
 - **`sandbox … exists but sbxm has no state for it`:** it wasn't created by sbxm here; remove it with `sbx rm` (this
   deletes its session history) and run `sbxm open` again.
+- **A profile change isn't taking effect:** sbxm reads the copy in `profiles_dir`, not the one in the repo. Run
+  `just deploy-profiles` (it refuses to write if `config.toml` is invalid), then rebuild the sandbox.
+- **`git` fails with `Permission denied` on Windows (`.git/config`, `.git/objects/…`):** antivirus or the file indexer
+  briefly holds a file git just created. It passes by itself, so run the command again.
+- **`sbx exec`/`sbx run` print `context deadline exceeded` after the sandbox was created:** the sandbox exists; only
+  the attach step timed out in a non-interactive shell. Check `sbx ls`.
 
 ## Development
 
-`just check` runs formatting, lints and the tests (no Docker needed); `just real-test` runs the tests against the
-real `sbx`. Design decisions are numbered in `decisions.md`, the milestone plan is `milestone-1.md`, and
+`just check` runs formatting, lints, the Rust tests and the script (Pester) tests, with no Docker needed;
+`just real-test` runs the tests against the real `sbx`. See [The `justfile`](#the-justfile) for every recipe. Design decisions are numbered in `decisions.md`, the milestone plan is `milestone-1.md`, and
 `AGENTS.md` describes the code layout and workflow for coding agents.
 
 ### Working on issues with sbxm sandboxes
@@ -253,8 +338,10 @@ Every change to sbxm goes through a PR, including ones not made by workers, and 
 the PR. There's no fix round; the author fixes the findings and runs it again. PRs from forks are refused, because
 the host checks run the PR's code on your machine.
 
-One-time setup: copy `profiles/sbxm-dev` into your `profiles_dir`. It installs Rust and a C toolchain, allows
-crates.io, and needs the `anthropic` secret; the Codex reviewer also needs the `openai` one (`sbx secret ls`). Also
+One-time setup: run `just deploy-profiles` to copy `profiles/sbxm-dev` into your `profiles_dir` (run it again after
+the profile changes). It installs Rust, a C toolchain, PowerShell 7,
+Pester 5 and `just` (so `just script-test` runs in the sandbox), allows crates.io, Microsoft's package host and the
+PowerShell Gallery, and needs the `anthropic` secret; the Codex reviewer also needs the `openai` one (`sbx secret ls`). Also
 check that `gh auth status` shows you logged in.
 
 ```powershell
@@ -272,7 +359,7 @@ worker, the output goes to `.sbxm-issue/` in its clone (`agent.log`, `gates.log`
 `review.md`, `fix.log`); for `review -Pr <n>`, to `<base_dir>\sbxm-pr-<n>-review\` (`gates.log`, `review-1.log`,
 `review.md`). Both keep the reviewer's full session transcripts in `transcripts\`, copied out before its sandbox is
 removed.
-To take over one interactively, run `sbxm open sbxm-issue-<n>`. `-BaseDir` (default `E:\sbxm-projects`) must match
+To take over one interactively, run `sbxm open sbxm-issue-<n> --harness claude`. `-BaseDir` (default `E:\sbxm-projects`) must match
 `base_dir` in `config.toml`. [`sandbox-issues.md`](sandbox-issues.md) has the steps with the expected output.
 
 ### Filing review findings as issues

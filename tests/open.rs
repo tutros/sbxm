@@ -190,7 +190,7 @@ fn changed_config_is_refused_without_rebuild() {
     assert!(
         message.contains(
             "the config of sbxm-demo-claude (profile 'default') changed since it was created; \
-             run `sbxm open demo --rebuild` to recreate it (its session history is lost; \
+             run `sbxm open demo --harness claude --rebuild` to recreate it (its session history is lost; \
              the workspace is kept)"
         ),
         "{message}"
@@ -216,7 +216,7 @@ fn state_without_a_hash_is_refused_without_rebuild() {
     assert!(
         message.contains(
             "sbxm-demo-claude was created before sbxm recorded config hashes; \
-             run `sbxm open demo --rebuild` to recreate it"
+             run `sbxm open demo --harness claude --rebuild` to recreate it"
         ),
         "{message}"
     );
