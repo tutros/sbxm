@@ -25,6 +25,7 @@ Each SDLC phase has a project skill in `.claude/skills/`; follow it for that pha
 ## Working rules
 
 - **Show progress as `[current] of [total]` (user rule, 2026-10-01).** Whenever you mention a step that is complete or in progress, give its position and the total: "slice 4 of 13", "test case 3 of 7", "step 2 of 5". This covers milestone slices, test cases within a slice, review rounds, manual steps for the user, and any other sub-step whose total is known. If the total isn't known yet, say so rather than leaving it out.
+- **Say when work can run in parallel, up to 3 sessions in total (user rule, 2026-10-01).** Whenever upcoming work has parts that don't depend on each other (independent slices, a background review next to the next slice, a research spike, docs next to code), say so and name each part as its own session, counting the current one: at most 3 at once. Say which parts must wait and why (shared files, one part's output feeding the other). Don't start extra sessions without the user's go-ahead.
 
 ## Commands
 

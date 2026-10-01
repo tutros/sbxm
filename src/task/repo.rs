@@ -197,6 +197,110 @@ pub fn push(repo_git: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
+/// The default size cap for a bundle collected from a sandbox: 500 MB.
+pub const BUNDLE_CAP: u64 = 500 * 1024 * 1024;
+
+/// Brings the agent's commits on `branch` into `repo_git` from the bundle the sandbox wrote at
+/// `bundle` (a path inside the agent's workspace, so nothing about it is trusted).
+///
+/// The bundle must be a plain file of at most `cap` bytes. It is copied to a host-owned
+/// folder, checked with `git bundle verify` (including that `repo_git` has everything it builds
+/// on), and only `refs/heads/<branch>` is fetched: fast-forward only, hooks switched off, objects
+/// fsck-checked, no submodules, no other refs. Nothing runs `git` inside the workspace.
+pub fn fetch_bundle(repo_git: &Path, bundle: &Path, branch: &str, cap: u64) -> Result<()> {
+    check_ref("branch", branch)?;
+    let meta = std::fs::symlink_metadata(bundle).with_context(|| {
+        format!(
+            "cannot read the bundle {}; did the agent's sandbox write it?",
+            bundle.display()
+        )
+    })?;
+    if !meta.file_type().is_file() {
+        bail!(
+            "the bundle {} is not a plain file; refusing to read it",
+            bundle.display()
+        );
+    }
+    if meta.len() > cap {
+        bail!(
+            "the bundle is too large ({} bytes, the limit is {cap}); ask the agent for smaller changes",
+            meta.len()
+        );
+    }
+
+    let task_dir = repo_git.parent().unwrap_or(Path::new("."));
+    let work = task_dir.join("bundle");
+    std::fs::create_dir_all(&work).with_context(|| format!("cannot create {}", work.display()))?;
+    let copy = work.join("branch.bundle");
+    std::fs::copy(bundle, &copy)
+        .with_context(|| format!("cannot copy the bundle to {}", copy.display()))?;
+    if std::fs::metadata(&copy)?.len() > cap {
+        let _ = std::fs::remove_file(&copy);
+        bail!("the bundle grew past the {cap}-byte limit while it was being copied");
+    }
+    let copy_text = text(&copy)?;
+
+    git::run(
+        repo_git,
+        Some(repo_git),
+        None,
+        &["bundle", "verify", copy_text],
+    )
+    .context("the bundle failed verification (damaged, or built on commits the task repo lacks)")?;
+    let heads = git::run(
+        repo_git,
+        Some(repo_git),
+        None,
+        &["bundle", "list-heads", copy_text],
+    )?;
+    let wanted = format!("refs/heads/{branch}");
+    if !heads
+        .lines()
+        .any(|line| line.split_whitespace().nth(1) == Some(wanted.as_str()))
+    {
+        bail!("the bundle has no branch {branch}; the agent must commit on {branch}");
+    }
+
+    let no_hooks = task_dir.join("no-hooks");
+    std::fs::create_dir_all(&no_hooks)
+        .with_context(|| format!("cannot create {}", no_hooks.display()))?;
+    let refspec = format!("{wanted}:{wanted}");
+    let out = git::output(
+        repo_git,
+        Some(repo_git),
+        None,
+        &[
+            "-c",
+            &format!("core.hooksPath={}", text(&no_hooks)?),
+            // The hardened runner denies every protocol; a local file is the one this needs
+            // (the verified copy above), so `ext::` and the network transports stay denied.
+            "-c",
+            "protocol.file.allow=always",
+            "-c",
+            "transfer.fsckObjects=true",
+            "-c",
+            "fetch.fsckObjects=true",
+            "-c",
+            "gc.auto=0",
+            "fetch",
+            "--no-tags",
+            "--no-recurse-submodules",
+            copy_text,
+            &refspec,
+        ],
+    )?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        if stderr.contains("non-fast-forward") || stderr.contains("rejected") {
+            bail!(
+                "the agent rewrote the history of {branch}; it must add commits on top of the ones already collected"
+            );
+        }
+        bail!("`git fetch` from the bundle failed: {}", stderr.trim());
+    }
+    Ok(())
+}
+
 /// How many commits `branch` has that `base` doesn't.
 pub fn commits_ahead(repo_git: &Path, base: &str, branch: &str) -> Result<u32> {
     check_ref("base", base)?;

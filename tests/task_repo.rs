@@ -1,6 +1,8 @@
 //! M2b slice 5: the host-owned repo (spec §6): bare clone, task branch, workspace clone,
 //! PR head fetch, push, commits ahead. A local bare repo plays GitHub.
 
+mod common;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -351,4 +353,340 @@ fn pushing_a_missing_branch_is_an_error_naming_it() {
     repo::clone_bare(&source(&f), &f.repo_git).unwrap();
     let message = format!("{:#}", repo::push(&f.repo_git, "issue-9").unwrap_err());
     assert!(message.contains("issue-9"), "{message}");
+}
+
+// ---- The bundle path: the one place agent-made data enters repo.git (spec §6) ----
+
+const CAP: u64 = 50 * 1024 * 1024;
+
+/// A prepared task: repo.git with `issue-4` at `main`, and the agent's workspace clone.
+fn prepared(f: &Fixture) {
+    repo::clone_bare(&source(f), &f.repo_git).unwrap();
+    repo::create_branch(&f.repo_git, "issue-4", "main").unwrap();
+    repo::clone_workspace(&f.repo_git, &f.workspace, "issue-4", &identity()).unwrap();
+}
+
+/// What the agent does in its workspace: commits on `issue-4`, then the sandbox bundles them.
+fn agent_commits(f: &Fixture, files: &[&str]) {
+    for file in files {
+        fs::write(f.workspace.join(file), "x\n").unwrap();
+        git(&f.workspace, &["add", "-A"]);
+        git(&f.workspace, &["commit", "-q", "-m", file]);
+    }
+}
+
+fn make_bundle(f: &Fixture, refs: &[&str]) -> PathBuf {
+    let dir = f.workspace.join(".sbxm-task");
+    fs::create_dir_all(&dir).unwrap();
+    let bundle = dir.join("branch.bundle");
+    let mut args = vec!["bundle", "create", bundle.to_str().unwrap()];
+    args.extend_from_slice(refs);
+    args.push("^origin/main");
+    git(&f.workspace, &args);
+    bundle
+}
+
+fn tip(repo_git: &Path, branch: &str) -> String {
+    git(repo_git, &["rev-parse", &format!("refs/heads/{branch}")])
+}
+
+#[test]
+fn a_good_bundle_advances_the_task_branch() {
+    let f = fixture();
+    prepared(&f);
+    agent_commits(&f, &["a.txt", "b.txt"]);
+    let bundle = make_bundle(&f, &["issue-4"]);
+
+    repo::fetch_bundle(&f.repo_git, &bundle, "issue-4", CAP).unwrap();
+
+    assert_eq!(
+        tip(&f.repo_git, "issue-4"),
+        git(&f.workspace, &["rev-parse", "HEAD"])
+    );
+    assert_eq!(
+        repo::commits_ahead(&f.repo_git, "main", "issue-4").unwrap(),
+        2
+    );
+}
+
+#[test]
+fn a_second_bundle_on_top_of_the_first_is_accepted() {
+    let f = fixture();
+    prepared(&f);
+    agent_commits(&f, &["a.txt"]);
+    repo::fetch_bundle(&f.repo_git, &make_bundle(&f, &["issue-4"]), "issue-4", CAP).unwrap();
+
+    agent_commits(&f, &["fix.txt"]);
+    repo::fetch_bundle(&f.repo_git, &make_bundle(&f, &["issue-4"]), "issue-4", CAP).unwrap();
+
+    assert_eq!(
+        repo::commits_ahead(&f.repo_git, "main", "issue-4").unwrap(),
+        2
+    );
+}
+
+#[test]
+fn garbage_that_is_not_a_bundle_is_refused() {
+    let f = fixture();
+    prepared(&f);
+    let before = tip(&f.repo_git, "issue-4");
+    let bundle = f.workspace.join("branch.bundle");
+    fs::write(&bundle, "this is not a bundle").unwrap();
+
+    let message = format!(
+        "{:#}",
+        repo::fetch_bundle(&f.repo_git, &bundle, "issue-4", CAP).unwrap_err()
+    );
+
+    assert!(message.contains("bundle"), "{message}");
+    assert_eq!(tip(&f.repo_git, "issue-4"), before);
+}
+
+#[test]
+fn a_bundle_built_on_commits_repo_git_lacks_is_refused() {
+    let f = fixture();
+    prepared(&f);
+    // A history that never came from repo.git: the bundle needs a base it can't find.
+    let alien = f.root.join("alien");
+    fs::create_dir_all(&alien).unwrap();
+    git(&alien, &["init", "-q", "-b", "main"]);
+    fs::write(alien.join("x"), "1").unwrap();
+    git(&alien, &["add", "-A"]);
+    git(&alien, &["commit", "-q", "-m", "one"]);
+    fs::write(alien.join("y"), "2").unwrap();
+    git(&alien, &["add", "-A"]);
+    git(&alien, &["commit", "-q", "-m", "two"]);
+    let bundle = alien.join("alien.bundle");
+    git(
+        &alien,
+        &[
+            "bundle",
+            "create",
+            bundle.to_str().unwrap(),
+            "main",
+            "^main~1",
+        ],
+    );
+
+    let message = format!(
+        "{:#}",
+        repo::fetch_bundle(&f.repo_git, &bundle, "issue-4", CAP).unwrap_err()
+    );
+
+    assert!(message.contains("bundle"), "{message}");
+}
+
+#[test]
+fn a_bundle_without_the_task_branch_is_refused_naming_it() {
+    let f = fixture();
+    prepared(&f);
+    git(&f.workspace, &["checkout", "-q", "-b", "other"]);
+    agent_commits(&f, &["a.txt"]);
+    let bundle = make_bundle(&f, &["other"]);
+
+    let message = format!(
+        "{:#}",
+        repo::fetch_bundle(&f.repo_git, &bundle, "issue-4", CAP).unwrap_err()
+    );
+
+    assert!(message.contains("issue-4"), "{message}");
+}
+
+#[test]
+fn other_branches_in_a_bundle_are_not_imported() {
+    let f = fixture();
+    prepared(&f);
+    agent_commits(&f, &["a.txt"]);
+    git(&f.workspace, &["branch", "evil"]);
+    git(&f.workspace, &["tag", "v-evil"]);
+    let bundle = make_bundle(&f, &["issue-4", "evil", "v-evil"]);
+
+    repo::fetch_bundle(&f.repo_git, &bundle, "issue-4", CAP).unwrap();
+
+    let refs = git(&f.repo_git, &["for-each-ref", "--format=%(refname)"]);
+    assert!(!refs.contains("evil"), "{refs}");
+    assert!(refs.contains("refs/heads/issue-4"), "{refs}");
+}
+
+#[test]
+fn a_bundle_over_the_size_cap_is_refused_and_nothing_changes() {
+    let f = fixture();
+    prepared(&f);
+    agent_commits(&f, &["a.txt"]);
+    let bundle = make_bundle(&f, &["issue-4"]);
+    let before = tip(&f.repo_git, "issue-4");
+
+    let message = format!(
+        "{:#}",
+        repo::fetch_bundle(&f.repo_git, &bundle, "issue-4", 10).unwrap_err()
+    );
+
+    assert!(
+        message.contains("too large") && message.contains("10"),
+        "{message}"
+    );
+    assert_eq!(tip(&f.repo_git, "issue-4"), before);
+}
+
+#[test]
+fn a_bundle_path_that_is_not_a_plain_file_is_refused() {
+    let f = fixture();
+    prepared(&f);
+    let target = f.root.join("somewhere");
+    fs::create_dir_all(&target).unwrap();
+    let link = f.workspace.join("branch.bundle");
+    common::dir_link(&link, &target);
+
+    let message = format!(
+        "{:#}",
+        repo::fetch_bundle(&f.repo_git, &link, "issue-4", CAP).unwrap_err()
+    );
+
+    assert!(message.contains("not a plain file"), "{message}");
+}
+
+#[cfg(unix)]
+#[test]
+fn a_bundle_that_is_a_symlink_to_a_host_file_is_refused() {
+    let f = fixture();
+    prepared(&f);
+    let secret = f.root.join("host-secret.txt");
+    fs::write(&secret, "top secret").unwrap();
+    let link = f.workspace.join("branch.bundle");
+    common::file_link(&link, &secret);
+
+    let message = format!(
+        "{:#}",
+        repo::fetch_bundle(&f.repo_git, &link, "issue-4", CAP).unwrap_err()
+    );
+
+    assert!(message.contains("not a plain file"), "{message}");
+}
+
+#[test]
+fn rewritten_history_is_refused_and_the_branch_keeps_its_commits() {
+    let f = fixture();
+    prepared(&f);
+    agent_commits(&f, &["a.txt"]);
+    repo::fetch_bundle(&f.repo_git, &make_bundle(&f, &["issue-4"]), "issue-4", CAP).unwrap();
+    let kept = tip(&f.repo_git, "issue-4");
+
+    // The agent throws its commit away and writes a different one on the base.
+    git(&f.workspace, &["reset", "-q", "--hard", "origin/main"]);
+    agent_commits(&f, &["different.txt"]);
+    let bundle = make_bundle(&f, &["issue-4"]);
+
+    let message = format!(
+        "{:#}",
+        repo::fetch_bundle(&f.repo_git, &bundle, "issue-4", CAP).unwrap_err()
+    );
+
+    assert!(message.contains("history"), "{message}");
+    assert_eq!(tip(&f.repo_git, "issue-4"), kept);
+}
+
+/// Where a planted command would leave proof that it ran.
+fn sentinel(f: &Fixture, name: &str) -> PathBuf {
+    f.root.join(name)
+}
+
+#[test]
+fn a_hostile_workspace_config_is_never_executed_by_collecting_the_bundle() {
+    let f = fixture();
+    prepared(&f);
+    agent_commits(&f, &["a.txt"]);
+    let bundle = make_bundle(&f, &["issue-4"]);
+    // The agent plants commands in its own .git/config and hooks (the #41 attack).
+    let ran = sentinel(&f, "ran-config");
+    let command = format!("echo ran > '{}'", ran.to_str().unwrap().replace('\\', "/"));
+    let config = f.workspace.join(".git").join("config");
+    let mut text = fs::read_to_string(&config).unwrap();
+    text.push_str(&format!(
+        "[core]\n\tfsmonitor = {command}\n\thooksPath = {hooks}\n[diff]\n\texternal = {command}\n\
+         [filter \"x\"]\n\tclean = {command}\n\tsmudge = {command}\n",
+        hooks = f
+            .workspace
+            .join(".git")
+            .join("evil-hooks")
+            .display()
+            .to_string()
+            .replace('\\', "/"),
+    ));
+    fs::write(&config, text).unwrap();
+    let hooks = f.workspace.join(".git").join("evil-hooks");
+    fs::create_dir_all(&hooks).unwrap();
+    for hook in [
+        "pre-commit",
+        "post-checkout",
+        "reference-transaction",
+        "post-merge",
+    ] {
+        fs::write(hooks.join(hook), format!("#!/bin/sh\n{command}\n")).unwrap();
+    }
+
+    repo::fetch_bundle(&f.repo_git, &bundle, "issue-4", CAP).unwrap();
+
+    assert!(
+        !ran.exists(),
+        "a command planted in the agent's .git ran on the host"
+    );
+}
+
+#[test]
+fn hooks_in_repo_git_do_not_run_on_the_fetch_path() {
+    let f = fixture();
+    prepared(&f);
+    agent_commits(&f, &["a.txt"]);
+    let bundle = make_bundle(&f, &["issue-4"]);
+    let ran = sentinel(&f, "ran-hook");
+    let command = format!("echo ran > '{}'", ran.to_str().unwrap().replace('\\', "/"));
+    let hooks = f.repo_git.join("hooks");
+    fs::create_dir_all(&hooks).unwrap();
+    for hook in [
+        "reference-transaction",
+        "post-update",
+        "post-merge",
+        "pre-auto-gc",
+    ] {
+        fs::write(hooks.join(hook), format!("#!/bin/sh\n{command}\n")).unwrap();
+    }
+
+    repo::fetch_bundle(&f.repo_git, &bundle, "issue-4", CAP).unwrap();
+
+    assert!(!ran.exists(), "a hook ran during the fetch");
+}
+
+#[test]
+fn hostile_committed_content_runs_nothing_when_fetched() {
+    let f = fixture();
+    prepared(&f);
+    let ran = sentinel(&f, "ran-content");
+    let command = format!("echo ran > '{}'", ran.to_str().unwrap().replace('\\', "/"));
+    // Committed files can name a filter and a submodule URL; neither may execute anything.
+    fs::write(
+        f.workspace.join(".gitattributes"),
+        "* filter=evil diff=evil\n",
+    )
+    .unwrap();
+    fs::write(
+        f.workspace.join(".gitmodules"),
+        format!("[submodule \"s\"]\n\tpath = s\n\turl = ext::sh -c \"{command}\"\n"),
+    )
+    .unwrap();
+    fs::create_dir_all(f.workspace.join("hooks")).unwrap();
+    fs::write(
+        f.workspace.join("hooks").join("post-merge"),
+        format!("#!/bin/sh\n{command}\n"),
+    )
+    .unwrap();
+    git(&f.workspace, &["add", "-A"]);
+    git(&f.workspace, &["commit", "-q", "-m", "hostile content"]);
+    let bundle = make_bundle(&f, &["issue-4"]);
+
+    repo::fetch_bundle(&f.repo_git, &bundle, "issue-4", CAP).unwrap();
+
+    assert!(
+        !ran.exists(),
+        "committed content made the host run a command"
+    );
 }
