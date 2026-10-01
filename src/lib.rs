@@ -5,6 +5,7 @@ pub mod config;
 pub mod confirm;
 pub mod eval;
 pub(crate) mod git;
+pub mod github;
 pub mod harness;
 pub mod headless;
 pub mod kit;
