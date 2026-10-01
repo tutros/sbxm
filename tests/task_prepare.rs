@@ -7,98 +7,14 @@ mod common;
 use std::fs;
 use std::path::PathBuf;
 
-use common::{Env, git, git_origin};
+use common::git;
+use common::task_fixture::{
+    Fixture, backend, ctx, fixture, fixture_with, issue_text, open_issue, source,
+};
 use sbxm::backend::FakeBackend;
 use sbxm::github::fake::FakeGitHub;
-use sbxm::github::{Issue, IssueText};
-use sbxm::task::config::TaskConfig;
-use sbxm::task::pipeline::{self, Ctx};
-use sbxm::task::record::{self, ProcessProbe, Stage, Status};
-use sbxm::task::repo::Identity;
-
-struct Probe;
-
-impl ProcessProbe for Probe {
-    fn start_time(&self, _pid: u32) -> Option<u64> {
-        Some(0)
-    }
-}
-
-struct Fixture {
-    env: Env,
-    origin: PathBuf,
-    config: TaskConfig,
-    identity: Identity,
-}
-
-fn fixture() -> Fixture {
-    fixture_with(
-        "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = [\"cargo test\", \"cargo fmt --check\"]\n",
-    )
-}
-
-fn fixture_with(task_toml: &str) -> Fixture {
-    let env = Env::new();
-    let origin = git_origin(env.tmp.path());
-    let repo_root = env.tmp.path().join("target-repo");
-    fs::create_dir_all(&repo_root).unwrap();
-    fs::write(repo_root.join("sbxm-task.toml"), task_toml).unwrap();
-    let config = TaskConfig::load(&repo_root).unwrap();
-    Fixture {
-        env,
-        origin,
-        config,
-        identity: Identity {
-            name: "Dev".into(),
-            email: "dev@example.com".into(),
-        },
-    }
-}
-
-fn issue_text(number: u32) -> IssueText {
-    IssueText {
-        number,
-        title: format!("Fix {number}"),
-        state: "OPEN".into(),
-        text: format!("title:\tFix {number}\nstate:\tOPEN\n--\n**Acceptance criteria:** do it\n"),
-    }
-}
-
-fn open_issue(number: u32, labels: &[&str], body: &str) -> Issue {
-    Issue {
-        number,
-        title: format!("Fix {number}"),
-        labels: labels.iter().map(|l| (*l).to_owned()).collect(),
-        body: body.to_owned(),
-    }
-}
-
-fn ctx<'a>(
-    f: &'a Fixture,
-    source: &'a str,
-    backend: &'a FakeBackend,
-    github: &'a FakeGitHub,
-) -> Ctx<'a> {
-    Ctx {
-        config_dir: Box::leak(Box::new(f.env.config_dir())),
-        repo: "o/r",
-        clone_source: source,
-        base_branch: "main",
-        config: &f.config,
-        backend,
-        github,
-        identity: &f.identity,
-        probe: &Probe,
-    }
-}
-
-fn source(f: &Fixture) -> String {
-    f.origin.to_str().unwrap().to_owned()
-}
-
-fn backend() -> FakeBackend {
-    FakeBackend::with_secrets(&["anthropic"])
-}
+use sbxm::task::pipeline;
+use sbxm::task::record::{self, Stage, Status};
 
 fn base_has_nothing_new(f: &Fixture) -> bool {
     // The shared containers may stay (empty); no task folder may.

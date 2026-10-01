@@ -6,15 +6,21 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+use std::time::Instant;
+
 use super::config::TaskConfig;
 use super::prompts::{self, Role};
-use super::record::{self, Agent, Kind, NewTask, Process, ProcessProbe, Record};
-use super::repo::{self, Identity};
+use super::record::{
+    self, Agent, Kind, NewTask, Process, ProcessProbe, Record, RunInfo, Stage, Status,
+};
+use super::repo::{self, AgentFile, BUNDLE_CAP, Identity};
 use super::select::{self, Selection};
-use crate::backend::{CreateSpec, SandboxBackend};
+use crate::backend::{CreateSpec, ExecSpec, SandboxBackend, Stdin};
 use crate::config::{GlobalConfig, Profile};
 use crate::github::{GitHubBackend, IssueText};
+use crate::headless::{self, HeadlessOpts, RunStatus};
 use crate::run::kits::{self, HarnessKits, Overrides};
+use crate::run::orchestrate::in_sandbox_path;
 use crate::run::results::now;
 
 /// Folder inside the workspace for sbxm's files (the issue, the prompt, `result.md`, the bundle).
@@ -257,4 +263,193 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
             Err(e)
         }
     }
+}
+
+/// What the worker is told on its command line; the real prompt is a file (decision 131), since
+/// a rendered prompt carries the whole issue and can outgrow a command line.
+const AGENT_PROMPT: &str =
+    "Read the file .sbxm-task/prompt.md in the current directory and follow it exactly.";
+
+/// The biggest `result.md` copied to the host.
+const RESULT_CAP: u64 = 1024 * 1024;
+
+/// How the worker's run went and what was collected from it.
+#[derive(Debug)]
+pub struct Worked {
+    pub status: RunStatus,
+    /// Also saved in the record.
+    pub notes: Vec<String>,
+    /// Commits the worker's branch has over the base, after collecting its bundle.
+    pub commits: u32,
+}
+
+fn run_label(status: &RunStatus) -> String {
+    match status {
+        RunStatus::Completed => "completed".to_owned(),
+        RunStatus::TimedOut => "timed-out".to_owned(),
+        RunStatus::Failed(why) => format!("failed: {why}"),
+    }
+}
+
+/// Spec §5.1 steps 3 and 4: runs the worker, then collects what it left, whatever its status
+/// (a timed-out or failed run keeps its partial commits). The stage is written before the agent
+/// starts; a write failure stops the command. `Err` means the run couldn't be attempted.
+pub fn run_worker(ctx: &Ctx, prepared: &mut Prepared) -> Result<Worked> {
+    let worker = &ctx.config.worker;
+    let sandbox = prepared
+        .record
+        .worker
+        .as_ref()
+        .context("the task has no worker")?
+        .sandbox
+        .clone();
+    prepared
+        .record
+        .advance(Stage::Working, now(), Process::current(ctx.probe))?;
+    record::write(&prepared.meta, &prepared.record)?;
+
+    let started = Instant::now();
+    let opts = HeadlessOpts {
+        model: worker.model.clone(),
+        high_effort: false,
+        budget_usd: None,
+        is_git_repo: true,
+    };
+    let result = match headless::run(
+        ctx.backend,
+        &sandbox,
+        &in_sandbox_path(&prepared.workspace),
+        worker.harness,
+        AGENT_PROMPT,
+        &opts,
+        worker.time_limit,
+    ) {
+        Ok(result) => result,
+        Err(e) => {
+            prepared.record.finish(Status::Failed)?;
+            record::write(&prepared.meta, &prepared.record)?;
+            return Err(e.context(format!("cannot run the worker in {sandbox}")));
+        }
+    };
+
+    let transcripts = prepared.meta.join("transcripts");
+    fs::create_dir_all(&transcripts)?;
+    fs::write(transcripts.join("worker.jsonl"), &result.transcript)?;
+    if let Some(agent) = prepared.record.worker.as_mut() {
+        agent.run = Some(RunInfo {
+            status: run_label(&result.status),
+            usage: serde_json::json!({
+                "input_tokens": result.usage.input_tokens,
+                "output_tokens": result.usage.output_tokens,
+                "cost_usd": result.usage.cost_usd,
+            }),
+            duration_s: started.elapsed().as_secs(),
+        });
+    }
+    let mut status = result.status;
+    prepared.record.finish(match &status {
+        RunStatus::Completed => Status::Completed,
+        RunStatus::TimedOut => Status::TimedOut,
+        RunStatus::Failed(_) => Status::Failed,
+    })?;
+    record::write(&prepared.meta, &prepared.record)?;
+
+    let mut notes = Vec::new();
+    let commits = collect(ctx, prepared, &sandbox, &mut status, &mut notes)?;
+    prepared.record.notes.extend(notes.iter().cloned());
+    record::write(&prepared.meta, &prepared.record)?;
+    Ok(Worked {
+        status,
+        notes,
+        commits,
+    })
+}
+
+/// Brings the worker's commits, `result.md` and a note about unsaved work to the host. A failure
+/// to collect marks the worker failed (with a note); it is not an `Err`.
+fn collect(
+    ctx: &Ctx,
+    prepared: &mut Prepared,
+    sandbox: &str,
+    status: &mut RunStatus,
+    notes: &mut Vec<String>,
+) -> Result<u32> {
+    let (branch, base) = (prepared.record.branch.clone(), prepared.record.base.clone());
+    let ws = in_sandbox_path(&prepared.workspace)
+        .to_string_lossy()
+        .into_owned();
+    let in_sandbox = |argv: &[&str]| ExecSpec {
+        workdir: None,
+        argv: argv.iter().map(|a| (*a).to_owned()).collect(),
+        stdin: Stdin::Closed,
+    };
+    let mut failed = |why: String, status: &mut RunStatus, record: &mut Record| {
+        notes.push(format!("could not collect the worker's commits: {why}"));
+        *status = RunStatus::Failed(why);
+        record.status = Status::Failed;
+    };
+
+    // The fixed bundle command runs in the sandbox; nothing runs git in the agent's clone here.
+    let origin = format!("^origin/{base}");
+    let mut commits = 0;
+    match ctx.backend.exec(
+        sandbox,
+        &in_sandbox(&[
+            "git",
+            "-C",
+            &ws,
+            "bundle",
+            "create",
+            ".sbxm-task/branch.bundle",
+            &branch,
+            &origin,
+        ]),
+    ) {
+        Ok(out) if out.exit_code == Some(0) => {
+            let repo_git = prepared.meta.join("repo.git");
+            match repo::fetch_bundle(&repo_git, &prepared.workspace, &branch, BUNDLE_CAP)
+                .and_then(|()| repo::commits_ahead(&repo_git, &base, &branch))
+            {
+                Ok(n) => commits = n,
+                Err(e) => failed(format!("{e:#}"), status, &mut prepared.record),
+            }
+        }
+        Ok(out) if out.stderr.contains("empty bundle") => {
+            notes.push("the worker made no commits".to_owned());
+        }
+        Ok(out) => failed(
+            format!(
+                "`git bundle create` failed in the sandbox: {}",
+                out.stderr.trim()
+            ),
+            status,
+            &mut prepared.record,
+        ),
+        Err(e) => failed(format!("{e:#}"), status, &mut prepared.record),
+    }
+
+    // Work the agent left uncommitted is not collected: say so (the agent may have ended early).
+    if let Ok(out) = ctx.backend.exec(
+        sandbox,
+        &in_sandbox(&["git", "-C", &ws, "status", "--porcelain"]),
+    ) {
+        let changed = out.stdout.lines().filter(|l| !l.trim().is_empty()).count();
+        if out.exit_code == Some(0) && changed > 0 {
+            notes.push(format!(
+                "{changed} uncommitted change(s) in the worker's clone were not collected \
+                 (the agent may have ended early)"
+            ));
+        }
+    }
+
+    match repo::read_agent_file(&prepared.workspace, "result.md", RESULT_CAP) {
+        Ok(AgentFile::Text(text)) => fs::write(prepared.meta.join("result.md"), text)?,
+        Ok(AgentFile::Missing) => notes.push("the worker wrote no result.md".to_owned()),
+        Ok(AgentFile::TooLarge(_)) => notes.push(
+            "result.md is larger than 1 MiB and was not copied; read it in the worker's clone"
+                .to_owned(),
+        ),
+        Err(e) => notes.push(format!("result.md was refused: {e:#}")),
+    }
+    Ok(commits)
 }

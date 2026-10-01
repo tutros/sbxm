@@ -219,6 +219,10 @@ pub struct Record {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr: Option<String>,
     pub related: Vec<u32>,
+    /// Things worth telling the user about how the task went (no commits, uncommitted changes,
+    /// a missing `result.md`); never a secret.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
     /// Free-form; later stages attach here and M2b leaves it alone (decision 139).
     pub hooks: Value,
     pub sbxm_version: String,
@@ -260,6 +264,7 @@ impl Record {
             gates: Vec::new(),
             pr: None,
             related: Vec::new(),
+            notes: Vec::new(),
             hooks: Value::Object(serde_json::Map::new()),
             sbxm_version: env!("CARGO_PKG_VERSION").to_owned(),
             config_hash: task.config_hash.to_owned(),

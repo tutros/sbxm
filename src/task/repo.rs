@@ -209,6 +209,80 @@ const BUNDLE_FILE: &str = ".sbxm-task/branch.bundle";
 /// The default size cap for a bundle collected from a sandbox: 500 MB.
 pub const BUNDLE_CAP: u64 = 500 * 1024 * 1024;
 
+/// Opens `<workspace>/.sbxm-task/<name>` for reading, trusting nothing about it: the folder must
+/// resolve to a real folder inside the workspace (not a link out of it) and the file must be a
+/// plain file, checked on the open handle. `Ok(None)` when the folder or file doesn't exist.
+fn open_agent_file(workspace: &Path, name: &str) -> Result<Option<(std::fs::File, u64)>> {
+    use std::io::ErrorKind::NotFound;
+
+    let folder = workspace.join(BUNDLE_DIR);
+    let real_workspace = std::fs::canonicalize(workspace)
+        .with_context(|| format!("cannot read the workspace {}", workspace.display()))?;
+    let real_folder = match std::fs::canonicalize(&folder) {
+        Ok(path) => path,
+        Err(e) if e.kind() == NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("cannot read {}", folder.display())),
+    };
+    if real_folder != real_workspace.join(BUNDLE_DIR) {
+        bail!(
+            "the folder {} doesn't resolve to a folder inside the workspace; refusing to read it",
+            folder.display()
+        );
+    }
+    let path = real_folder.join(name);
+    let meta = match std::fs::symlink_metadata(&path) {
+        Ok(meta) => meta,
+        Err(e) if e.kind() == NotFound => return Ok(None),
+        Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
+    };
+    let not_plain = || {
+        anyhow::anyhow!(
+            "{} is not a plain file; refusing to read it",
+            path.display()
+        )
+    };
+    if !meta.file_type().is_file() {
+        return Err(not_plain());
+    }
+    let file =
+        std::fs::File::open(&path).with_context(|| format!("cannot read {}", path.display()))?;
+    let opened = file.metadata()?;
+    if !opened.is_file() {
+        return Err(not_plain());
+    }
+    Ok(Some((file, opened.len())))
+}
+
+/// What reading a file the agent wrote found.
+#[derive(Debug, PartialEq, Eq)]
+pub enum AgentFile {
+    Missing,
+    /// Bigger than the cap; not read.
+    TooLarge(u64),
+    Text(String),
+}
+
+/// Reads `<workspace>/.sbxm-task/<name>` as text (lossily), at most `cap` bytes; never follows
+/// a link out of the workspace.
+pub fn read_agent_file(workspace: &Path, name: &str, cap: u64) -> Result<AgentFile> {
+    use std::io::Read;
+
+    let Some((file, len)) = open_agent_file(workspace, name)? else {
+        return Ok(AgentFile::Missing);
+    };
+    if len > cap {
+        return Ok(AgentFile::TooLarge(len));
+    }
+    let mut bytes = Vec::new();
+    file.take(cap.saturating_add(1)).read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > cap {
+        return Ok(AgentFile::TooLarge(bytes.len() as u64));
+    }
+    Ok(AgentFile::Text(
+        String::from_utf8_lossy(&bytes).into_owned(),
+    ))
+}
+
 /// Brings the agent's commits on `branch` into `repo_git` from the bundle the sandbox wrote at
 /// `<workspace>/.sbxm-task/branch.bundle` (inside the agent's workspace, so nothing about it is
 /// trusted).
@@ -224,38 +298,12 @@ pub fn fetch_bundle(repo_git: &Path, workspace: &Path, branch: &str, cap: u64) -
     use std::io::Read;
 
     check_ref("branch", branch)?;
-    let missing =
-        || format!("cannot find {BUNDLE_FILE} in the workspace; did the agent's sandbox write it?");
-    let folder = workspace.join(BUNDLE_DIR);
-    let real_workspace = std::fs::canonicalize(workspace)
-        .with_context(|| format!("cannot read the workspace {}", workspace.display()))?;
-    let real_folder = std::fs::canonicalize(&folder).with_context(missing)?;
-    if real_folder != real_workspace.join(BUNDLE_DIR) {
+    let Some((mut source, len)) = open_agent_file(workspace, "branch.bundle")? else {
+        bail!("cannot find {BUNDLE_FILE} in the workspace; did the agent's sandbox write it?");
+    };
+    if len > cap {
         bail!(
-            "the bundle folder {} doesn't resolve to a folder inside the workspace; refusing to read it",
-            folder.display()
-        );
-    }
-    let bundle = real_folder.join("branch.bundle");
-    let meta = std::fs::symlink_metadata(&bundle).with_context(missing)?;
-    if !meta.file_type().is_file() {
-        bail!(
-            "the bundle {} is not a plain file; refusing to read it",
-            bundle.display()
-        );
-    }
-    let mut source = std::fs::File::open(&bundle).with_context(missing)?;
-    let opened = source.metadata()?;
-    if !opened.is_file() {
-        bail!(
-            "the bundle {} is not a plain file; refusing to read it",
-            bundle.display()
-        );
-    }
-    if opened.len() > cap {
-        bail!(
-            "the bundle is too large ({} bytes, the limit is {cap}); ask the agent for smaller changes",
-            opened.len()
+            "the bundle is too large ({len} bytes, the limit is {cap}); ask the agent for smaller changes"
         );
     }
 

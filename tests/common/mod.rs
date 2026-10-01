@@ -1,6 +1,8 @@
 //! Shared test helpers. Each test crate uses only some of them.
 #![allow(dead_code)]
 
+pub mod task_fixture;
+
 use std::path::{Path, PathBuf};
 
 use sbxm::backend::FakeBackend;
