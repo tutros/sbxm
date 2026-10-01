@@ -122,7 +122,8 @@ Missing Related is omitted.
 Before creating anything, list existing issues once: `gh issue list --repo <repo> --state all --limit 1000 --json
 number,title,body` and scan the bodies for each finding's marker. A finding whose marker exists is **skipped** and its
 number is reused for links and the write-back. Re-running after a failure or after hand edits never duplicates. If
-the list has exactly the limit's worth of issues, stop with an error (the scan could be incomplete).
+the list has exactly the limit's worth of issues, stop with an error (the scan could be incomplete). If the list
+can't be read (a non-zero exit code or a thrown error), exit 1 with a clear message and make no create or edit call.
 
 ## Creating (with `-Create`)
 
@@ -135,6 +136,11 @@ the list has exactly the limit's worth of issues, stop with an error (the scan c
 4. After every issue exists, rewrite `Depends on` and `Related` ids to `#n` (an edit pass with `gh issue edit` where
    the number wasn't known at creation, for cycles or forward references). Write the link on **both** issues, as the
    skill requires: a `Depends on` on one implies a `Related` back-reference on the other.
+   Existing issues of this review (found by the marker) are patched too, narrowly: once every current number is
+   known, only finding-id tokens inside the `Depends on` and `Related` fields of the listed body are rewritten to
+   `#n`, so hand edits elsewhere survive. An issue that needs no change gets no `gh issue edit` call. This also
+   finishes the links of an interrupted earlier run and of split `-Only` batches. A failed edit is reported and the
+   exit code is non-zero; a rerun retries it.
 5. Print a table: id, label, number, URL, `created` or `skipped (exists)`.
 
 ## Write-back
@@ -144,12 +150,17 @@ Replace the review file's `Issues:` line with `Issues: M2A-1 #33, M2A-2 #34, ...
 
 ## Scrubbing (the repo is public)
 
+Scrubbing is best-effort: path and secret detection is heuristic, and the dry run is the safety net (read it before
+`-Create`). A further heuristic gap is a should-fix issue, not a blocker.
+
 - **Refuse** (finding is invalid, nothing is filed) any text matching a secret pattern: GitHub tokens
   (`ghp_`, `gho_`, `ghs_`, `github_pat_`), `sk-` followed by 20 or more characters, AWS `AKIA` keys, `Bearer ` followed
-  by a long token, private-key headers, and `password =`/`token =` assignments with a value. Print the finding id
+  by a long token, private-key headers, and `password =`/`token =`/`secret =` assignments with any non-empty value,
+  quoted or not and of any length (an empty value, `==` and prose such as "the token is missing" are allowed). Print the finding id
   and the line number, never the value.
 - **Replace** personal paths by default: `C:\Users\<name>\...` and `/home/<name>/...` become `~\...` / `~/...`;
-  warn for each. `-KeepPaths` turns this off. Project paths such as `E:\sbxm-projects\...` are left alone.
+  warn for each. A profile folder with spaces is replaced whole, however many words it has, when a separator, quote
+  or backtick ends it (`/Users/<name>/...` too). `-KeepPaths` turns this off. Project paths such as `E:\sbxm-projects\...` are left alone.
 - **Warn** on e-mail addresses (don't change them).
 
 ## Tasks, methods and acceptance criteria
