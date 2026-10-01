@@ -6,6 +6,9 @@ pub mod list;
 pub mod new;
 pub mod open;
 pub mod rm;
+pub mod run;
+pub mod run_init;
+pub mod run_show;
 pub mod stop;
 
 use std::io::Write;
@@ -19,7 +22,7 @@ use crate::harness::Harness;
 /// What to check for an invalid generated kit: the profile's `profile.toml`,
 /// plus the project's `sandbox.toml` too when `metadata_dir` has one
 /// (decisions from #4/#6), used identically by `new` and `doctor`.
-fn invalid_kit_check(
+pub(crate) fn invalid_kit_check(
     profiles_dir: &Path,
     profile_name: &str,
     metadata_dir: Option<&Path>,

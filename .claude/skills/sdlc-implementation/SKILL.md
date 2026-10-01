@@ -134,13 +134,32 @@ Review findings are GitHub issues with acceptance criteria (code review skill, s
 5. **No GitHub access** (e.g. inside a sandbox): work from the issue text the user or review file provides, keep
    `Fixes #<n>` in the commit, and report the per-criterion evidence in chat so it can be posted later.
 
+## 8. The milestone flow (how M1 was built; M2 follows it)
+
+A milestone is built as one batch, reviewed once at the end. It is the lighter form of rule 5 applied to a whole milestone:
+
+1. **One branch per milestone** (M2a: `m2a-implementation`), pushed for backup. Slices are commits on it in plan
+   order, not one branch or PR per slice.
+2. **Each slice** runs the loop below (red → green → checks → commit, real-`sbx` test if it touches `sbx`) and ends with a
+   short report: what now works, the commits, deferred items. No per-slice review and no per-slice PR.
+3. **Rule 5's stop conditions apply throughout.** Also stop for a slice-level review when the user asks, or when a slice
+   is risky enough (security guards, destructive operations) that waiting for the end isn't safe.
+4. **At the end of the milestone,** one full review of `main..<milestone branch>` with the `sdlc-code-review` skill
+   (full checklist plus the cross-cutting sweep), written to `reviews/<date>-milestone-<n>.md`. Its findings become
+   GitHub issues (`must-fix`, `should-fix`, `question`).
+5. **Fixes go through rule 7,** one issue at a time, TDD, `Fixes #<n>`, each through a branch and PR that the independent
+   reviewer checks before the user merges (never push to `main`).
+6. **The milestone lands** as a PR from the milestone branch after the end-of-milestone review's must-fix issues are
+   fixed or the user accepts them.
+
 ## Loop summary
 
 ```
 pick slice (1 sentence) → list test cases →
   for each case: red (see it fail) → green (minimal code) → refactor → checks pass → commit
-→ slice done: run the #[ignore] real-sbx test if the slice touches sbx
-→ review the slice's commits (sdlc-code-review skill) → fix must-fix findings (TDD) → report
+→ slice done: run the #[ignore] real-sbx test if the slice touches sbx → report (no per-slice review, rule 8)
+… next slice …
+→ milestone done: one full review (sdlc-code-review, end-of-milestone row) → issues → fix each (rule 7) → PR
 ```
 
 When a slice is done, report to the user: what now works, the commits made, and anything deferred.

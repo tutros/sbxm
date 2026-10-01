@@ -1,7 +1,7 @@
 use clap::Parser;
 
 use sbxm::backend::SbxBackend;
-use sbxm::cli::{Cli, Command, ConfigCommand};
+use sbxm::cli::{Cli, Command, ConfigCommand, RunArgs, RunCommand};
 use sbxm::commands;
 use sbxm::config;
 use sbxm::confirm::Terminal;
@@ -77,6 +77,44 @@ fn main() -> anyhow::Result<()> {
             }
             Ok(())
         }
+        Command::Run(RunArgs {
+            command: Some(RunCommand::Init { path }),
+            ..
+        }) => {
+            let written = commands::run_init::run(path.as_deref())?;
+            println!("Wrote {}", written.display());
+            println!(
+                "Edit the task and contestants, then run: sbxm run {}",
+                written.display()
+            );
+            Ok(())
+        }
+        Command::Run(RunArgs {
+            command: None,
+            config: Some(config_path),
+        }) => {
+            commands::run::run(
+                &config::config_dir()?,
+                &config_path,
+                &SbxBackend,
+                &mut std::io::stdout(),
+                &mut std::io::stderr(),
+            )?;
+            Ok(())
+        }
+        Command::Run(RunArgs {
+            command: Some(RunCommand::Show { run_id, diff }),
+            ..
+        }) => {
+            let text = commands::run_show::render(
+                &config::config_dir()?,
+                &run_id,
+                &commands::run_show::Options { full_diff: diff },
+            )?;
+            print!("{text}");
+            Ok(())
+        }
+        Command::Run(_) => unreachable!("clap requires a config or a subcommand"),
         Command::Config {
             command: ConfigCommand::Init,
         } => commands::config_init::run(),

@@ -75,6 +75,8 @@ pub enum Command {
     },
     /// Check sbx, the config and the base dir; exits non-zero if any check fails.
     Doctor,
+    /// Run comparisons between coding agents.
+    Run(RunArgs),
     /// Manage sbxm configuration.
     Config {
         #[command(subcommand)]
@@ -102,4 +104,33 @@ pub enum ConfigCommand {
     },
     /// Print the folder profiles are read from (for scripts), or fail like any command would.
     ProfilesDir,
+}
+
+/// `sbxm run <config>` launches a comparison; `sbxm run init` writes a starter
+/// config. (A config file named `init` is written `./init`.)
+#[derive(Debug, clap::Args)]
+#[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+pub struct RunArgs {
+    #[command(subcommand)]
+    pub command: Option<RunCommand>,
+    /// The run-config file (create one with `sbxm run init`).
+    #[arg(required = true)]
+    pub config: Option<PathBuf>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum RunCommand {
+    /// Write a starter run-config (default: ./run.toml); refuses to overwrite.
+    Init {
+        /// Where to write it.
+        path: Option<PathBuf>,
+    },
+    /// Print a saved run: status, answer and diff summary per contestant.
+    Show {
+        /// The run id `sbxm run` printed, e.g. 2026-09-30-a1b2c3.
+        run_id: String,
+        /// Also print every full patch.
+        #[arg(long)]
+        diff: bool,
+    },
 }

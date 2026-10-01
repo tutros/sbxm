@@ -1,5 +1,6 @@
 use std::ffi::OsString;
-use std::process::Command;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
 
@@ -7,7 +8,7 @@ use serde::Deserialize;
 
 use std::path::Path;
 
-use super::{CreateSpec, KitValidation, SandboxBackend, SandboxInfo};
+use super::{CreateSpec, ExecOutput, ExecSpec, KitValidation, SandboxBackend, SandboxInfo, Stdin};
 
 /// Shells out to the `sbx` CLI on PATH.
 #[derive(Debug, Default)]
@@ -75,6 +76,53 @@ impl SandboxBackend for SbxBackend {
         parse_version(&String::from_utf8_lossy(&output.stdout))
     }
 
+    fn exec(&self, sandbox: &str, spec: &ExecSpec) -> Result<ExecOutput> {
+        let mut child = Command::new("sbx")
+            .args(exec_args(sandbox, spec))
+            .stdin(match spec.stdin {
+                Stdin::Closed => Stdio::null(),
+                Stdin::Piped(_) => Stdio::piped(),
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context(SBX_MISSING)?;
+        // Written from a thread so a large input can't deadlock against the
+        // output pipes; dropping the handle closes stdin.
+        let writer = match (&spec.stdin, child.stdin.take()) {
+            (Stdin::Piped(text), Some(mut pipe)) => {
+                let text = text.clone();
+                Some(std::thread::spawn(move || pipe.write_all(text.as_bytes())))
+            }
+            _ => None,
+        };
+        let output = child.wait_with_output()?;
+        if let Some(writer) = writer {
+            // A broken pipe only means the command didn't read its stdin.
+            let _ = writer.join();
+        }
+        Ok(ExecOutput {
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            exit_code: output.status.code(),
+        })
+    }
+
+    fn skills(&self) -> Result<serde_json::Value> {
+        let output = Command::new("sbx")
+            .args(skills_args())
+            .output()
+            .context(SBX_MISSING)?;
+        if !output.status.success() {
+            bail!(
+                "`sbx skills ls --json` failed ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        serde_json::from_slice(&output.stdout).context("unexpected `sbx skills ls --json` output")
+    }
+
     fn validate_kit(&self, dir: &Path) -> Result<KitValidation> {
         // Exits non-zero for an invalid kit but still prints the JSON result.
         let output = Command::new("sbx")
@@ -119,6 +167,20 @@ where
         bail!("`sbx {verb}` failed for sandbox {sandbox} ({status})");
     }
     Ok(())
+}
+
+fn exec_args(sandbox: &str, spec: &ExecSpec) -> Vec<OsString> {
+    let mut args: Vec<OsString> = vec!["exec".into()];
+    if let Some(dir) = &spec.workdir {
+        args.extend(["-w".into(), dir.into()]);
+    }
+    args.push(sandbox.into());
+    args.extend(spec.argv.iter().map(OsString::from));
+    args
+}
+
+fn skills_args() -> [&'static str; 3] {
+    ["skills", "ls", "--json"]
 }
 
 fn stop_args(name: &str) -> [&str; 2] {
@@ -217,6 +279,31 @@ mod tests {
     use std::path::PathBuf;
 
     use super::*;
+
+    fn exec_spec(workdir: Option<&str>) -> ExecSpec {
+        ExecSpec {
+            workdir: workdir.map(PathBuf::from),
+            argv: vec!["echo".into(), "hi".into()],
+            stdin: Stdin::Closed,
+        }
+    }
+
+    #[test]
+    fn exec_args_match_sbx_cli() {
+        assert_eq!(
+            exec_args("sb", &exec_spec(None)),
+            ["exec", "sb", "echo", "hi"].map(OsString::from)
+        );
+        assert_eq!(
+            exec_args("sb", &exec_spec(Some("/work"))),
+            ["exec", "-w", "/work", "sb", "echo", "hi"].map(OsString::from)
+        );
+    }
+
+    #[test]
+    fn skills_args_match_sbx_cli() {
+        assert_eq!(skills_args(), ["skills", "ls", "--json"]);
+    }
 
     #[test]
     fn create_args_match_sbx_cli() {

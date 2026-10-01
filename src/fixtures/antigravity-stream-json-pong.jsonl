@@ -1,0 +1,4 @@
+{"event":"init","conversation_id":"080c280c-af01-432d-83df-737760b95514","init":{"cwd":"/e/sbxm-it/agy","tools":["ask_custom_permission","ask_permission","ask_question"],"permission_mode":"always-proceed"}}
+{"event":"step_update","step_update":{"conversation_id":"080c280c-af01-432d-83df-737760b95514","step_index":0,"state":"DONE","step_type":"user_input"}}
+{"event":"step_update","step_update":{"conversation_id":"080c280c-af01-432d-83df-737760b95514","step_index":1,"state":"DONE","step_type":"agent_response","text_delta":"PONG\n","duration_seconds":3.7175407,"usage":{"input_tokens":13093,"output_tokens":30,"thinking_tokens":28,"cache_read_tokens":0,"total_tokens":13123}}}
+{"event":"result","result":{"conversation_id":"080c280c-af01-432d-83df-737760b95514","status":"SUCCESS","response":"PONG\n","duration_seconds":3.7648399,"num_turns":1,"usage":{"input_tokens":13093,"output_tokens":30,"thinking_tokens":28,"cache_read_tokens":0,"total_tokens":13123}}}

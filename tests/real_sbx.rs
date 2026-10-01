@@ -595,3 +595,959 @@ fn pi_mandatory_instructions_against_real_sbx() {
     let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
     assert!(!String::from_utf8_lossy(&ls.stdout).contains(&sandbox));
 }
+
+#[test]
+#[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
+fn exec_and_skills_against_real_sbx() {
+    use sbxm::backend::{CreateSpec, ExecSpec, SkillsStore, Stdin};
+
+    let base_dir = real_base_dir();
+    let name = format!("sbxm-it-{}-exec", std::process::id());
+    let workspace = base_dir.join(&name);
+    let _cleanup = Cleanup {
+        sandbox: name.clone(),
+        dirs: vec![workspace.clone()],
+        shared_dirs: vec![],
+    };
+    std::fs::create_dir_all(&workspace).unwrap();
+    SbxBackend
+        .create(&CreateSpec {
+            name: name.clone(),
+            agent: "claude".into(),
+            workspace,
+            cpus: 2,
+            memory: "2g".into(),
+            skills: SkillsStore::Off,
+            kits: vec![],
+        })
+        .unwrap();
+
+    let run = |workdir: Option<&str>, argv: &[&str], stdin: Stdin| {
+        SbxBackend
+            .exec(
+                &name,
+                &ExecSpec {
+                    workdir: workdir.map(PathBuf::from),
+                    argv: argv.iter().map(|a| a.to_string()).collect(),
+                    stdin,
+                },
+            )
+            .unwrap()
+    };
+
+    let out = run(None, &["echo", "hi"], Stdin::Closed);
+    assert_eq!((out.stdout.trim(), out.exit_code), ("hi", Some(0)));
+
+    // The working directory is passed through.
+    let out = run(Some("/tmp"), &["pwd"], Stdin::Closed);
+    assert_eq!(out.stdout.trim(), "/tmp");
+
+    // stdout and stderr stay separate, and a non-zero exit is data, not an error.
+    let out = run(
+        None,
+        &["sh", "-c", "echo out; echo err >&2; exit 3"],
+        Stdin::Closed,
+    );
+    assert_eq!(
+        (out.stdout.trim(), out.stderr.trim(), out.exit_code),
+        ("out", "err", Some(3))
+    );
+
+    // Closed stdin and empty piped stdin both give EOF at once; piped text arrives.
+    let out = run(None, &["cat"], Stdin::Closed);
+    assert_eq!((out.stdout.as_str(), out.exit_code), ("", Some(0)));
+    let out = run(None, &["cat"], Stdin::Piped(String::new()));
+    assert_eq!((out.stdout.as_str(), out.exit_code), ("", Some(0)));
+    let out = run(None, &["cat"], Stdin::Piped("piped input".into()));
+    assert_eq!(
+        (out.stdout.as_str(), out.exit_code),
+        ("piped input", Some(0))
+    );
+
+    assert!(SbxBackend.skills().unwrap().is_object());
+}
+
+#[test]
+#[ignore = "needs a logged-in sbx, the anthropic secret and SBXM_REAL_BASE_DIR"]
+fn claude_headless_against_real_sbx() {
+    use std::time::Duration;
+
+    use sbxm::backend::{CreateSpec, ExecSpec, SkillsStore, Stdin};
+    use sbxm::harness::Harness;
+    use sbxm::headless::{self, HeadlessOpts, RunStatus};
+
+    let base_dir = real_base_dir();
+    let name = format!("sbxm-it-{}-headless", std::process::id());
+    let workspace = base_dir.join(&name);
+    let _cleanup = Cleanup {
+        sandbox: name.clone(),
+        dirs: vec![workspace.clone()],
+        shared_dirs: vec![],
+    };
+    std::fs::create_dir_all(&workspace).unwrap();
+    SbxBackend
+        .create(&CreateSpec {
+            name: name.clone(),
+            agent: "claude".into(),
+            workspace: workspace.clone(),
+            cpus: 2,
+            memory: "2g".into(),
+            skills: SkillsStore::Off,
+            kits: vec![],
+        })
+        .unwrap();
+    // The workspace is mounted at its host path in forward-slash form, drive
+    // letter first and lowercase: E:\sbxm-it\x is /e/sbxm-it/x.
+    let path = workspace.to_string_lossy().replace(char::from(92), "/");
+    let in_sandbox = PathBuf::from(format!("/{}{}", path[..1].to_lowercase(), &path[2..]));
+    let opts = HeadlessOpts {
+        model: "claude-haiku-4-5-20251001".into(),
+        budget_usd: None,
+        is_git_repo: false,
+    };
+
+    let result = headless::run(
+        &SbxBackend,
+        &name,
+        &in_sandbox,
+        Harness::Claude,
+        "Reply with exactly: PONG",
+        &opts,
+        Duration::from_secs(120),
+    )
+    .unwrap();
+    assert_eq!(result.status, RunStatus::Completed, "{result:?}");
+    assert!(result.answer.contains("PONG"), "{result:?}");
+    assert!(result.usage.output_tokens > 0 && result.usage.cost_usd.is_some());
+
+    // A run that can't finish in 3 s is killed inside the sandbox: TimedOut,
+    // and no `claude` process is left behind (decision 114).
+    let result = headless::run(
+        &SbxBackend,
+        &name,
+        &in_sandbox,
+        Harness::Claude,
+        "Run `sleep 60` in the shell, then reply DONE.",
+        &opts,
+        Duration::from_secs(3),
+    )
+    .unwrap();
+    assert_eq!(result.status, RunStatus::TimedOut, "{result:?}");
+    let left = SbxBackend
+        .exec(
+            &name,
+            &ExecSpec {
+                workdir: None,
+                argv: vec!["pgrep".into(), "-x".into(), "claude".into()],
+                stdin: Stdin::Closed,
+            },
+        )
+        .unwrap();
+    assert_eq!(left.exit_code, Some(1), "claude still running: {left:?}");
+}
+
+#[test]
+#[ignore = "needs a logged-in sbx, the openai secret and SBXM_REAL_BASE_DIR"]
+fn codex_headless_against_real_sbx() {
+    use std::time::Duration;
+
+    use sbxm::backend::{CreateSpec, ExecSpec, SkillsStore, Stdin};
+    use sbxm::harness::Harness;
+    use sbxm::headless::{self, HeadlessOpts, RunStatus};
+
+    let base_dir = real_base_dir();
+    let name = format!("sbxm-it-{}-codex-headless", std::process::id());
+    let workspace = base_dir.join(&name);
+    let _cleanup = Cleanup {
+        sandbox: name.clone(),
+        dirs: vec![workspace.clone()],
+        shared_dirs: vec![],
+    };
+    std::fs::create_dir_all(&workspace).unwrap();
+    SbxBackend
+        .create(&CreateSpec {
+            name: name.clone(),
+            agent: "codex".into(),
+            workspace: workspace.clone(),
+            cpus: 2,
+            memory: "2g".into(),
+            skills: SkillsStore::Off,
+            kits: vec![],
+        })
+        .unwrap();
+    // E:\sbxm-it\x is mounted as /e/sbxm-it/x.
+    let path = workspace.to_string_lossy().replace(char::from(92), "/");
+    let in_sandbox = PathBuf::from(format!("/{}{}", path[..1].to_lowercase(), &path[2..]));
+    // An unseeded workspace isn't a git repo (decision 113).
+    let opts = HeadlessOpts {
+        model: "gpt-5.6-luna".into(),
+        budget_usd: None,
+        is_git_repo: false,
+    };
+
+    let result = headless::run(
+        &SbxBackend,
+        &name,
+        &in_sandbox,
+        Harness::Codex,
+        "Reply with exactly: PONG",
+        &opts,
+        Duration::from_secs(180),
+    )
+    .unwrap();
+    assert_eq!(result.status, RunStatus::Completed, "{result:?}");
+    assert!(result.answer.contains("PONG"), "{result:?}");
+    assert!(result.usage.output_tokens > 0 && result.usage.cost_usd.is_none());
+
+    // Killed inside the sandbox after 3 s: TimedOut, and no `codex` process left.
+    let result = headless::run(
+        &SbxBackend,
+        &name,
+        &in_sandbox,
+        Harness::Codex,
+        "Run `sleep 60` in the shell, then reply DONE.",
+        &opts,
+        Duration::from_secs(3),
+    )
+    .unwrap();
+    assert_eq!(result.status, RunStatus::TimedOut, "{result:?}");
+    let left = SbxBackend
+        .exec(
+            &name,
+            &ExecSpec {
+                workdir: None,
+                argv: vec!["pgrep".into(), "-x".into(), "codex".into()],
+                stdin: Stdin::Closed,
+            },
+        )
+        .unwrap();
+    assert_eq!(left.exit_code, Some(1), "codex still running: {left:?}");
+}
+
+#[test]
+#[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
+fn antigravity_sandbox_against_real_sbx() {
+    use std::time::Duration;
+
+    use sbxm::headless::{self, HeadlessOpts, RunStatus};
+
+    let base_dir = real_base_dir();
+    let project = format!("sbxm-it-{}-agy", std::process::id());
+    let sandbox = format!("sbxm-{project}-antigravity");
+    let _cleanup = Cleanup {
+        sandbox: sandbox.clone(),
+        dirs: vec![
+            base_dir.join(&project),
+            base_dir.join(".sbxm").join(&project),
+        ],
+        shared_dirs: vec![base_dir.join(".sbxm")],
+    };
+    let config_dir = TempDir::new().unwrap();
+    let base = toml::Value::String(base_dir.to_str().unwrap().to_owned());
+    std::fs::write(
+        config_dir.path().join("config.toml"),
+        format!("base_dir = {base}\n\n[resources]\ncpus = 2\nmemory = \"2g\"\n"),
+    )
+    .unwrap();
+    let profile_dir = config_dir.path().join("profiles").join("default");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    std::fs::write(
+        profile_dir.join("profile.toml"),
+        "[instructions]\nmandatory = \"mandatory.md\"\n\n[skills]\nstore = \"off\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        profile_dir.join("mandatory.md"),
+        "REAL TEST CANARY: the word is QUINCE-7\n",
+    )
+    .unwrap();
+    let agy = sbxm::harness::Harness::Antigravity;
+    let options = new::Options {
+        harness: agy,
+        ..Default::default()
+    };
+
+    // The sandbox is created from the pinned kit, with the harness mixin.
+    new::run(
+        config_dir.path(),
+        &project,
+        &options,
+        &SbxBackend,
+        &mut std::io::stderr(),
+    )
+    .unwrap();
+
+    let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
+    let ls: serde_json::Value = serde_json::from_slice(&ls.stdout).unwrap();
+    let entry = ls["sandboxes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["name"] == sandbox.as_str())
+        .expect("sandbox listed");
+    assert_eq!(entry["agent"], "antigravity");
+
+    // Mandatory instructions land where `agy -p` loads them (P5).
+    let agents_md = Command::new("sbx")
+        .args(["exec", &sandbox, "cat", "/home/agent/.gemini/AGENTS.md"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&agents_md.stdout).trim(),
+        "REAL TEST CANARY: the word is QUINCE-7"
+    );
+
+    // Nobody signed in to this fresh sandbox, so `agy -p` fails at auth. The
+    // primitive reports that as `Failed`, not an error and not a timeout.
+    let workspace = base_dir.join(&project);
+    let path = workspace.to_string_lossy().replace(char::from(92), "/");
+    let in_sandbox = PathBuf::from(format!("/{}{}", path[..1].to_lowercase(), &path[2..]));
+    let result = headless::run(
+        &SbxBackend,
+        &sandbox,
+        &in_sandbox,
+        agy,
+        "Reply with exactly: PONG",
+        &HeadlessOpts {
+            model: "gemini-3.8-flash-low".into(),
+            budget_usd: None,
+            is_git_repo: false,
+        },
+        Duration::from_secs(60),
+    )
+    .unwrap();
+    assert!(matches!(result.status, RunStatus::Failed(_)), "{result:?}");
+
+    stop::run(config_dir.path(), &project, agy, &SbxBackend).unwrap();
+    let rm_agy = rm::Options {
+        harness: agy,
+        ..Default::default()
+    };
+    rm::run(config_dir.path(), &project, &rm_agy, &SbxBackend, &Terminal).unwrap();
+    let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
+    assert!(!String::from_utf8_lossy(&ls.stdout).contains(&sandbox));
+}
+
+#[test]
+#[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
+fn run_against_real_sbx() {
+    use sbxm::commands::run;
+    use sbxm::headless::RunStatus;
+
+    // A base dir of its own, so the whole run vanishes with it.
+    let base = real_base_dir().join(format!("sbxm-it-{}-run", std::process::id()));
+    let _cleanup = Cleanup {
+        sandbox: String::new(),
+        dirs: vec![base.clone()],
+        shared_dirs: vec![],
+    };
+    std::fs::create_dir_all(&base).unwrap();
+    let config_dir = TempDir::new().unwrap();
+    let base_toml = toml::Value::String(base.to_str().unwrap().to_owned());
+    std::fs::write(
+        config_dir.path().join("config.toml"),
+        format!("base_dir = {base_toml}\n\n[resources]\ncpus = 2\nmemory = \"2g\"\n"),
+    )
+    .unwrap();
+    let profile_dir = config_dir.path().join("profiles").join("default");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    std::fs::write(
+        profile_dir.join("profile.toml"),
+        "description = \"real run test\"\n\n[skills]\nstore = \"off\"\n",
+    )
+    .unwrap();
+    let run_config = config_dir.path().join("run.toml");
+    std::fs::write(
+        &run_config,
+        "[task]\nprompt = \"Reply with exactly: PONG\"\n\n[run]\ntimeout = \"3m\"\n\n\
+         [[contestants]]\nharness = \"claude\"\nmodel = \"claude-haiku-4-5-20251001\"\n\n\
+         [[contestants]]\nharness = \"codex\"\nmodel = \"gpt-5.6-luna\"\n",
+    )
+    .unwrap();
+
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let summary = run::run(
+        config_dir.path(),
+        &run_config,
+        &SbxBackend,
+        &mut out,
+        &mut warn,
+    )
+    .unwrap();
+    println!(
+        "{}{}",
+        String::from_utf8_lossy(&out),
+        String::from_utf8_lossy(&warn)
+    );
+
+    // Both contestants ran in their own sandbox and answered.
+    assert_eq!(summary.outcomes.len(), 2);
+    for outcome in &summary.outcomes {
+        let result = outcome.result.as_ref().unwrap();
+        assert_eq!(result.status, RunStatus::Completed, "{result:?}");
+        assert!(result.answer.contains("PONG"), "{result:?}");
+        assert!(outcome.remove_error.is_none(), "{outcome:?}");
+        // The workspace stays after the sandbox is gone.
+        assert!(outcome.workspace.is_dir());
+    }
+    // The results are on disk: run.json is complete, each pair has its files.
+    let meta = base.join(".sbxm").join("runs").join(&summary.run_id);
+    let record: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(meta.join("run.json")).unwrap()).unwrap();
+    assert_eq!(record["run_id"], summary.run_id.as_str());
+    assert!(record["completed_at"].is_string(), "{record}");
+    assert!(record["sbx_version"].is_string(), "{record}");
+    assert_eq!(record["harnesses"].as_array().unwrap().len(), 2);
+    for i in 0..2 {
+        let dir = meta.join(i.to_string()).join("0");
+        let result: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(dir.join("result.json")).unwrap())
+                .unwrap();
+        assert_eq!(result["status"], "completed", "{result}");
+        assert!(
+            std::fs::read_to_string(dir.join("answer.md"))
+                .unwrap()
+                .contains("PONG")
+        );
+        assert!(
+            !std::fs::read_to_string(dir.join("transcript.jsonl"))
+                .unwrap()
+                .is_empty()
+        );
+        assert!(dir.join("diff.patch").is_file());
+    }
+    assert!(meta.join("run-config.toml").is_file());
+    // No run sandbox is left behind.
+    let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
+    let ls = String::from_utf8_lossy(&ls.stdout).into_owned();
+    assert!(
+        !ls.contains(&format!("sbxm-run-{}", summary.run_id)),
+        "{ls}"
+    );
+}
+
+#[test]
+#[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
+fn run_diffs_against_real_sbx() {
+    use sbxm::commands::run;
+    use sbxm::headless::RunStatus;
+
+    let base = real_base_dir().join(format!("sbxm-it-{}-diff", std::process::id()));
+    let _cleanup = Cleanup {
+        sandbox: String::new(),
+        dirs: vec![base.clone()],
+        shared_dirs: vec![],
+    };
+    std::fs::create_dir_all(&base).unwrap();
+    let config_dir = TempDir::new().unwrap();
+    let base_toml = toml::Value::String(base.to_str().unwrap().to_owned());
+    std::fs::write(
+        config_dir.path().join("config.toml"),
+        format!("base_dir = {base_toml}\n\n[resources]\ncpus = 2\nmemory = \"2g\"\n"),
+    )
+    .unwrap();
+    let profile_dir = config_dir.path().join("profiles").join("default");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    std::fs::write(
+        profile_dir.join("profile.toml"),
+        "description = \"real diff test\"\n\n[skills]\nstore = \"off\"\n",
+    )
+    .unwrap();
+    // A seed with history and a remote, to check it arrives as one clean commit.
+    let seed = config_dir.path().join("seed");
+    std::fs::create_dir_all(&seed).unwrap();
+    std::fs::write(seed.join("a.txt"), "alpha\n").unwrap();
+    let seed_git = |args: &[&str]| {
+        let ok = Command::new("git")
+            .current_dir(&seed)
+            .args(["-c", "user.name=t", "-c", "user.email=t@t"])
+            .args(args)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?}");
+    };
+    seed_git(&["init", "-q"]);
+    seed_git(&["add", "-A"]);
+    seed_git(&["commit", "-q", "-m", "old history"]);
+    seed_git(&["remote", "add", "origin", "https://example.com/private.git"]);
+
+    let contestants = "[[contestants]]\nharness = \"claude\"\nmodel = \"claude-haiku-4-5-20251001\"\n\n\
+                       [[contestants]]\nharness = \"codex\"\nmodel = \"gpt-5.6-luna\"\n";
+    let go = |name: &str, task: &str| {
+        let run_config = config_dir.path().join(name);
+        std::fs::write(
+            &run_config,
+            format!("{task}\n[run]\ntimeout = \"4m\"\n\n{contestants}"),
+        )
+        .unwrap();
+        let (mut out, mut warn) = (Vec::new(), Vec::new());
+        let summary = run::run(
+            config_dir.path(),
+            &run_config,
+            &SbxBackend,
+            &mut out,
+            &mut warn,
+        )
+        .unwrap();
+        println!(
+            "{}{}",
+            String::from_utf8_lossy(&out),
+            String::from_utf8_lossy(&warn)
+        );
+        summary
+    };
+
+    // Seeded: each agent edits the seed's file and adds one.
+    let toml_seed = toml::Value::String(seed.to_str().unwrap().to_owned());
+    let seeded = go(
+        "seeded.toml",
+        &format!(
+            "[task]\nprompt = \"Append the line 'edited by agent' to a.txt, and create hello.txt containing the word hi. Do not use git.\"\nseed = {toml_seed}\n"
+        ),
+    );
+    for outcome in &seeded.outcomes {
+        let result = outcome.result.as_ref().unwrap();
+        assert_eq!(result.status, RunStatus::Completed, "{result:?}");
+        let patch = &outcome.diff.as_ref().unwrap().as_ref().unwrap().patch;
+        assert!(
+            patch.contains("diff --git a/a.txt b/a.txt") && patch.contains("+edited by agent"),
+            "{patch}"
+        );
+        assert!(
+            patch.contains("diff --git a/hello.txt b/hello.txt"),
+            "{patch}"
+        );
+        assert!(!patch.contains(".git/"), "{patch}");
+        // One commit, no remote, in the workspace the agent had.
+        let git_out = |args: &[&str]| {
+            let out = Command::new("git")
+                .current_dir(&outcome.workspace)
+                .args(args)
+                .output()
+                .unwrap();
+            String::from_utf8_lossy(&out.stdout).trim().to_owned()
+        };
+        assert_eq!(git_out(&["remote"]), "");
+    }
+
+    // Unseeded: a plain folder, every new file in the diff, no `.git/` paths.
+    let unseeded = go(
+        "unseeded.toml",
+        "[task]\nprompt = \"Create a file hello.txt containing the word hi. Do not use git.\"\n",
+    );
+    for outcome in &unseeded.outcomes {
+        assert_eq!(
+            outcome.result.as_ref().unwrap().status,
+            RunStatus::Completed,
+            "{outcome:?}"
+        );
+        let patch = &outcome.diff.as_ref().unwrap().as_ref().unwrap().patch;
+        assert!(
+            patch.contains("diff --git a/hello.txt b/hello.txt") && patch.contains("+hi"),
+            "{patch}"
+        );
+        assert!(!outcome.workspace.join(".git").exists());
+    }
+    let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
+    let ls = String::from_utf8_lossy(&ls.stdout).into_owned();
+    assert!(!ls.contains("sbxm-run-"), "{ls}");
+}
+
+#[test]
+#[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
+fn run_checks_against_real_sbx() {
+    use sbxm::commands::run;
+    use sbxm::headless::RunStatus;
+
+    let base = real_base_dir().join(format!("sbxm-it-{}-checks", std::process::id()));
+    let _cleanup = Cleanup {
+        sandbox: String::new(),
+        dirs: vec![base.clone()],
+        shared_dirs: vec![],
+    };
+    std::fs::create_dir_all(&base).unwrap();
+    let config_dir = TempDir::new().unwrap();
+    let base_toml = toml::Value::String(base.to_str().unwrap().to_owned());
+    std::fs::write(
+        config_dir.path().join("config.toml"),
+        format!("base_dir = {base_toml}\n\n[resources]\ncpus = 2\nmemory = \"2g\"\n"),
+    )
+    .unwrap();
+    let profile_dir = config_dir.path().join("profiles").join("default");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    std::fs::write(
+        profile_dir.join("profile.toml"),
+        "description = \"real checks test\"\n\n[skills]\nstore = \"off\"\n",
+    )
+    .unwrap();
+    let seed = config_dir.path().join("seed");
+    std::fs::create_dir_all(&seed).unwrap();
+    std::fs::write(seed.join("a.txt"), "alpha\n").unwrap();
+    let seed_toml = toml::Value::String(seed.to_str().unwrap().to_owned());
+    let run_config = config_dir.path().join("run.toml");
+    std::fs::write(
+        &run_config,
+        format!(
+            "[task]\nprompt = \"Create a file hello.txt containing the word hi. Do not use git.\"\nseed = {seed_toml}\n\n\
+             [run]\ntimeout = \"4m\"\n\n\
+             [[contestants]]\nharness = \"claude\"\nmodel = \"claude-haiku-4-5-20251001\"\n\n\
+             [[contestants]]\nharness = \"codex\"\nmodel = \"gpt-5.6-luna\"\n\n\
+             [[eval.checks]]\nid = \"has-hello\"\ncommand = \"test -f hello.txt && grep -q hi hello.txt\"\n\n\
+             [[eval.checks]]\nid = \"seed-intact\"\ncommand = \"test -f a.txt\"\n\n\
+             [[eval.checks]]\nid = \"deliberate-fail\"\ncommand = \"echo nope >&2; test -f does-not-exist.txt\"\n\n\
+             [[eval.checks]]\nid = \"slow\"\ncommand = \"sleep 120\"\ntimeout = \"3s\"\n"
+        ),
+    )
+    .unwrap();
+
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let summary = run::run(
+        config_dir.path(),
+        &run_config,
+        &SbxBackend,
+        &mut out,
+        &mut warn,
+    )
+    .unwrap();
+    println!(
+        "{}{}",
+        String::from_utf8_lossy(&out),
+        String::from_utf8_lossy(&warn)
+    );
+
+    let meta = base.join(".sbxm").join("runs").join(&summary.run_id);
+    for outcome in &summary.outcomes {
+        let result = outcome.result.as_ref().unwrap();
+        assert_eq!(result.status, RunStatus::Completed, "{result:?}");
+        // The checks ran in the sandbox and were judged by exit code.
+        let verdicts: Vec<(&str, bool, bool)> = outcome
+            .checks
+            .iter()
+            .map(|c| (c.id.as_str(), c.passed, c.timed_out))
+            .collect();
+        assert_eq!(
+            verdicts,
+            [
+                ("has-hello", true, false),
+                ("seed-intact", true, false),
+                ("deliberate-fail", false, false),
+                ("slow", false, true)
+            ],
+            "{:?}",
+            outcome.checks
+        );
+        assert!(outcome.checks[2].output_tail.contains("nope"));
+        // Saved next to the pair's other results, and the run finished normally.
+        let evals: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(
+                meta.join(outcome.contestant.to_string())
+                    .join("0")
+                    .join("evals.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(evals["checks"].as_array().unwrap().len(), 4);
+        // The checks' side effects stay out of the diff.
+        let patch = &outcome.diff.as_ref().unwrap().as_ref().unwrap().patch;
+        assert!(patch.contains("hello.txt"), "{patch}");
+    }
+    let record: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(meta.join("run.json")).unwrap()).unwrap();
+    assert!(record["completed_at"].is_string());
+    let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
+    let ls = String::from_utf8_lossy(&ls.stdout).into_owned();
+    assert!(!ls.contains("sbxm-run-"), "{ls}");
+}
+
+#[test]
+#[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
+fn run_judge_against_real_sbx() {
+    use sbxm::commands::{run, run_show};
+    use sbxm::headless::RunStatus;
+
+    let base = real_base_dir().join(format!("sbxm-it-{}-judge", std::process::id()));
+    let _cleanup = Cleanup {
+        sandbox: String::new(),
+        dirs: vec![base.clone()],
+        shared_dirs: vec![],
+    };
+    std::fs::create_dir_all(&base).unwrap();
+    let config_dir = TempDir::new().unwrap();
+    let base_toml = toml::Value::String(base.to_str().unwrap().to_owned());
+    std::fs::write(
+        config_dir.path().join("config.toml"),
+        format!("base_dir = {base_toml}\n\n[resources]\ncpus = 2\nmemory = \"2g\"\n"),
+    )
+    .unwrap();
+    let profile_dir = config_dir.path().join("profiles").join("default");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    std::fs::write(
+        profile_dir.join("profile.toml"),
+        "description = \"real judge test\"\n\n[skills]\nstore = \"off\"\n",
+    )
+    .unwrap();
+    let run_config = config_dir.path().join("run.toml");
+    std::fs::write(
+        &run_config,
+        "[task]\nprompt = \"In one sentence, explain what a mutex is. Reply with just that sentence.\"\n\n\
+         [run]\ntimeout = \"4m\"\n\n\
+         [[contestants]]\nharness = \"claude\"\nmodel = \"claude-haiku-4-5-20251001\"\n\n\
+         [[contestants]]\nharness = \"codex\"\nmodel = \"gpt-5.6-luna\"\n\n\
+         [[eval.rubric]]\nid = \"correct\"\nkind = \"pass_fail\"\nweight = 1.0\nnotes = \"Says a mutex gives one thread at a time exclusive access\"\n\n\
+         [[eval.rubric]]\nid = \"clarity\"\nkind = \"scale\"\nlevels = [\"poor\", \"fair\", \"good\"]\nweight = 0.5\n\n\
+         [eval.judge]\nharness = \"claude\"\nmodel = \"claude-haiku-4-5-20251001\"\n",
+    )
+    .unwrap();
+
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let summary = run::run(
+        config_dir.path(),
+        &run_config,
+        &SbxBackend,
+        &mut out,
+        &mut warn,
+    )
+    .unwrap();
+    let (out, warn) = (
+        String::from_utf8_lossy(&out).into_owned(),
+        String::from_utf8_lossy(&warn).into_owned(),
+    );
+    println!("{out}{warn}");
+
+    for outcome in &summary.outcomes {
+        assert_eq!(
+            outcome.result.as_ref().unwrap().status,
+            RunStatus::Completed,
+            "{outcome:?}"
+        );
+    }
+    // The judge ran in its own sandbox, once, and scored both contestants.
+    assert!(
+        out.contains("Judge claude/claude-haiku-4-5-20251001: repeat 1/1 scored 2 contestants"),
+        "{out}"
+    );
+    let meta = base.join(".sbxm").join("runs").join(&summary.run_id);
+    let read = |path: std::path::PathBuf| -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    };
+    let record = read(meta.join("judge").join("0").join("judge.json"));
+    assert_eq!(record["status"], "ok", "{record}");
+    let mut labels: Vec<String> = record["labels"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .cloned()
+        .collect();
+    labels.sort();
+    assert_eq!(labels, ["A", "B"]);
+    assert!(
+        !std::fs::read_to_string(meta.join("judge").join("0").join("reply.txt"))
+            .unwrap()
+            .is_empty()
+    );
+    for contestant in 0..2 {
+        let evals = read(
+            meta.join(contestant.to_string())
+                .join("0")
+                .join("evals.json"),
+        );
+        let judge = &evals["judge"];
+        assert_eq!(judge["status"], "ok", "{judge}");
+        assert_eq!(judge["unscored"], serde_json::json!([]), "{judge}");
+        assert!(
+            judge["criteria"]["correct"]["value"].is_boolean(),
+            "{judge}"
+        );
+        let clarity = judge["criteria"]["clarity"]["value"].as_str().unwrap();
+        assert!(["poor", "fair", "good"].contains(&clarity), "{judge}");
+        let score = judge["criteria"]["clarity"]["score"].as_f64().unwrap();
+        assert!((0.0..=1.0).contains(&score));
+    }
+    // `run show` reveals which contestant was which candidate.
+    let shown = run_show::render(
+        config_dir.path(),
+        &summary.run_id,
+        &run_show::Options { full_diff: false },
+    )
+    .unwrap();
+    assert!(
+        shown.contains("Judge (candidate A):") && shown.contains("Judge (candidate B):"),
+        "{shown}"
+    );
+    // The claude judge shares a provider with a claude contestant: warned, not refused.
+    assert!(
+        warn.contains("the judge (claude) uses the same provider (anthropic)"),
+        "{warn}"
+    );
+    let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
+    let ls = String::from_utf8_lossy(&ls.stdout).into_owned();
+    assert!(!ls.contains("sbxm-run-"), "{ls}");
+}
+
+#[test]
+#[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
+fn run_profiles_against_real_sbx() {
+    use sbxm::commands::run;
+    use sbxm::headless::RunStatus;
+
+    let base = real_base_dir().join(format!("sbxm-it-{}-profiles", std::process::id()));
+    let _cleanup = Cleanup {
+        sandbox: String::new(),
+        dirs: vec![base.clone()],
+        shared_dirs: vec![],
+    };
+    std::fs::create_dir_all(&base).unwrap();
+    let config_dir = TempDir::new().unwrap();
+    let base_toml = toml::Value::String(base.to_str().unwrap().to_owned());
+    std::fs::write(
+        config_dir.path().join("config.toml"),
+        format!("base_dir = {base_toml}\n\n[resources]\ncpus = 2\nmemory = \"2g\"\n"),
+    )
+    .unwrap();
+    // Two profiles that differ in a visible setting: an environment variable.
+    for (name, who) in [
+        ("default", "from-the-default-profile"),
+        ("strict", "from-the-strict-profile"),
+    ] {
+        let dir = config_dir.path().join("profiles").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("profile.toml"),
+            format!("description = \"real profiles test\"\n\n[env]\nWHO = \"{who}\"\n\n[skills]\nstore = \"off\"\n"),
+        )
+        .unwrap();
+    }
+    let run_config = config_dir.path().join("run.toml");
+    std::fs::write(
+        &run_config,
+        "[task]\nprompt = \"Run `printenv WHO` in the shell and reply with exactly its output and nothing else.\"\n\n\
+         [run]\ntimeout = \"4m\"\n\n\
+         [[contestants]]\nharness = \"claude\"\nmodel = \"claude-haiku-4-5-20251001\"\n\n\
+         [[contestants]]\nharness = \"claude\"\nmodel = \"claude-haiku-4-5-20251001\"\nprofile = \"strict\"\n",
+    )
+    .unwrap();
+
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let summary = run::run(
+        config_dir.path(),
+        &run_config,
+        &SbxBackend,
+        &mut out,
+        &mut warn,
+    )
+    .unwrap();
+    println!(
+        "{}{}",
+        String::from_utf8_lossy(&out),
+        String::from_utf8_lossy(&warn)
+    );
+
+    // Each contestant's sandbox got its own profile's environment.
+    let answers: Vec<String> = summary
+        .outcomes
+        .iter()
+        .map(|o| {
+            let result = o.result.as_ref().unwrap();
+            assert_eq!(result.status, RunStatus::Completed, "{result:?}");
+            result.answer.clone()
+        })
+        .collect();
+    assert!(
+        answers[0].contains("from-the-default-profile"),
+        "{answers:?}"
+    );
+    assert!(
+        answers[1].contains("from-the-strict-profile"),
+        "{answers:?}"
+    );
+    // And the run recorded which profile each pair used.
+    let meta = base.join(".sbxm").join("runs").join(&summary.run_id);
+    let read = |path: std::path::PathBuf| -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+    };
+    let record = read(meta.join("run.json"));
+    assert_eq!(record["contestants"][0]["profile"], "default");
+    assert_eq!(record["contestants"][1]["profile"], "strict");
+    assert_eq!(record["harnesses"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        read(meta.join("1").join("0").join("result.json"))["profile"],
+        "strict"
+    );
+    let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
+    assert!(!String::from_utf8_lossy(&ls.stdout).contains("sbxm-run-"));
+}
+
+#[test]
+#[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
+fn run_kits_validate_against_real_sbx() {
+    use sbxm::run::config::RunConfig;
+    use sbxm::run::kits;
+
+    let base_dir = real_base_dir();
+    let run_dir = base_dir.join(format!("sbxm-it-{}-runkits", std::process::id()));
+    let _cleanup = Cleanup {
+        sandbox: String::new(),
+        dirs: vec![run_dir.clone()],
+        shared_dirs: vec![],
+    };
+    let config_dir = TempDir::new().unwrap();
+    let base = toml::Value::String(base_dir.to_str().unwrap().to_owned());
+    std::fs::write(
+        config_dir.path().join("config.toml"),
+        format!("base_dir = {base}\n\n[resources]\ncpus = 2\nmemory = \"2g\"\n"),
+    )
+    .unwrap();
+    let profile_dir = config_dir.path().join("profiles").join("default");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    std::fs::write(
+        profile_dir.join("profile.toml"),
+        "[network]\nallow = [\"example.org\"]\n\n[env]\nREAL_TEST = \"run-kit\"\n\n[instructions]\nmandatory = \"mandatory.md\"\n",
+    )
+    .unwrap();
+    std::fs::write(profile_dir.join("mandatory.md"), "Real test canary.\n").unwrap();
+    // Contestants: Claude and Codex; the judge is Antigravity, a harness no contestant uses.
+    let run_config = config_dir.path().join("run.toml");
+    std::fs::write(
+        &run_config,
+        "[task]\nprompt = \"p\"\n\n[run]\ncpus = 1\nmemory = \"1g\"\n\n\
+         [[contestants]]\nharness = \"claude\"\nmodel = \"m\"\n\n\
+         [[contestants]]\nharness = \"codex\"\nmodel = \"m\"\n\n\
+         [[eval.rubric]]\nid = \"a\"\nkind = \"pass_fail\"\nweight = 1.0\n\n\
+         [eval.judge]\nharness = \"antigravity\"\nmodel = \"m\"\n",
+    )
+    .unwrap();
+    let run_config = RunConfig::load(&run_config).unwrap();
+
+    let before = Command::new("sbx")
+        .args(["ls", "--json"])
+        .output()
+        .unwrap()
+        .stdout;
+    let run = kits::build(
+        config_dir.path(),
+        &run_config,
+        &run_dir.join("kits"),
+        &SbxBackend,
+    )
+    .unwrap();
+
+    // `sbx kit validate` accepted a common and a harness mixin for each of the three harnesses.
+    assert_eq!(run.harnesses.len(), 3);
+    for kit in &run.harnesses {
+        assert_eq!(kit.dirs.len(), 2);
+        assert!(kit.dirs.iter().all(|d| d.join("spec.yaml").is_file()));
+    }
+    assert_eq!(
+        (run.resources.cpus, run.resources.memory.as_str()),
+        (1, "1g")
+    );
+    // Validation only: no sandbox was created.
+    let after = Command::new("sbx")
+        .args(["ls", "--json"])
+        .output()
+        .unwrap()
+        .stdout;
+    assert_eq!(before, after);
+}

@@ -399,7 +399,25 @@ pub fn config_hash(
     resources: &Resources,
     harness: Harness,
 ) -> String {
-    let input = HashInput::new(profile_name, profile, resources, harness);
+    config_hash_with_kit(
+        profile_name,
+        profile,
+        resources,
+        harness,
+        harness.agent_kit(),
+    )
+}
+
+/// [`config_hash`] with the pinned agent-kit ref given, so a test can show
+/// that re-pinning changes the hash (decisions 55, 104).
+fn config_hash_with_kit(
+    profile_name: &str,
+    profile: &Profile,
+    resources: &Resources,
+    harness: Harness,
+    agent_kit: Option<&str>,
+) -> String {
+    let input = HashInput::new(profile_name, profile, resources, harness, agent_kit);
     sha256_hex(&serde_json::to_vec(&input).expect("config serializes"))
 }
 
@@ -411,7 +429,13 @@ pub fn hash_input_toml(
     resources: &Resources,
     harness: Harness,
 ) -> Result<String> {
-    let input = HashInput::new(profile_name, profile, resources, harness);
+    let input = HashInput::new(
+        profile_name,
+        profile,
+        resources,
+        harness,
+        harness.agent_kit(),
+    );
     toml::to_string(&input).context("cannot render the config as TOML")
 }
 
@@ -422,6 +446,9 @@ struct HashInput<'a> {
     profile_name: &'a str,
     profile: Cow<'a, Profile>,
     resources: &'a Resources,
+    /// The pinned kit a Pi or Antigravity sandbox is created from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    agent_kit: Option<&'a str>,
 }
 
 impl<'a> HashInput<'a> {
@@ -430,6 +457,7 @@ impl<'a> HashInput<'a> {
         profile: &'a Profile,
         resources: &'a Resources,
         harness: Harness,
+        agent_kit: Option<&'a str>,
     ) -> Self {
         // Settings that don't reach the harness mustn't show as drift there.
         let profile = harness.applied(profile);
@@ -439,6 +467,7 @@ impl<'a> HashInput<'a> {
             profile_name,
             profile,
             resources,
+            agent_kit,
         }
     }
 }
@@ -628,4 +657,50 @@ fn validate_profile_name(name: &str) -> Result<()> {
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod agent_kit_tests {
+    use super::*;
+
+    #[test]
+    fn a_different_agent_kit_ref_changes_the_hash() {
+        let profile = Profile::default();
+        let resources = Resources {
+            cpus: 4,
+            memory: "8g".into(),
+        };
+        let hash = |kit| config_hash_with_kit("default", &profile, &resources, Harness::Pi, kit);
+
+        assert_ne!(hash(Some("kit:1")), hash(Some("kit:2")));
+        assert_ne!(hash(Some("kit:1")), hash(None));
+        assert_eq!(hash(Some("kit:1")), hash(Some("kit:1")));
+    }
+
+    #[test]
+    fn pi_and_antigravity_hashes_cover_their_pinned_kit_ref() {
+        let profile = Profile::default();
+        let resources = Resources {
+            cpus: 4,
+            memory: "8g".into(),
+        };
+        for harness in [Harness::Pi, Harness::Antigravity] {
+            let toml = hash_input_toml("default", &profile, &resources, harness).unwrap();
+            let kit = harness.agent_kit().unwrap();
+            assert!(toml.contains(&format!("agent_kit = \"{kit}\"")), "{toml}");
+        }
+    }
+
+    #[test]
+    fn built_in_agents_have_no_kit_ref_in_their_hash_input() {
+        let profile = Profile::default();
+        let resources = Resources {
+            cpus: 4,
+            memory: "8g".into(),
+        };
+        for harness in [Harness::Claude, Harness::Codex, Harness::Gemini] {
+            let toml = hash_input_toml("default", &profile, &resources, harness).unwrap();
+            assert!(!toml.contains("agent_kit"), "{toml}");
+        }
+    }
 }

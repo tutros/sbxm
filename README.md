@@ -2,7 +2,7 @@
 
 `sbxm` creates and manages per-project Docker Sandboxes (`sbx`) from one
 shared, versioned config. Each project gets a folder on your machine, and each coding agent (Claude Code, Codex,
-Gemini CLI or Pi) gets its own sandbox for it, built with your network allowlist, environment, secrets, instructions
+Gemini CLI, Pi or Antigravity) gets its own sandbox for it, built with your network allowlist, environment, secrets, instructions
 and setup steps.
 
 sbxm enforces nothing itself: `sbx` does the isolation, the deny-by-default egress proxy and secret injection. sbxm
@@ -63,6 +63,9 @@ that).
 | `sbxm stop <project> --harness h` | Stops the sandbox. |
 | `sbxm rm <project> --harness h` | Removes the sandbox and sbxm's record of it. The workspace is kept. |
 | `sbxm rm <project> --purge [--yes]` | Removes **every** sandbox of the project, then deletes the workspace and its metadata, after you confirm the exact paths. Without a terminal it needs `--yes`. Can't be combined with `--harness`. |
+| `sbxm run init [path]` | Writes a starter run-config for a comparison (default `./run.toml`): two contestants (Claude and Codex) live, an Antigravity one commented out, and commented examples for checks, a rubric and a judge. The file is valid as written. Refuses to overwrite. |
+| `sbxm run <config>` | Runs a comparison: checks the run-config and that every needed secret is stored in `sbx` (each contestant's provider, the judge's, and the profiles' `secrets.services`), builds and validates the kits, then gives each (contestant, repeat) pair its own throwaway sandbox. A contestant can set its own `profile`; otherwise `[run].profile` (or your `default_profile`) applies, and the judge uses the run's. Contestants of a repeat run in parallel; repeats run one after another. Each sandbox is removed afterwards, even after an error; the workspaces stay under `<base_dir>/runs/<run-id>/<contestant>/<repeat>/`. Prints the run ID and one line per pair (completed, timed out or failed). With `task.seed`, each contestant gets its own copy of the seed as a fresh git repo with one baseline commit (the seed's history and remotes are dropped); without it, an empty plain folder. Each pair's diff (everything the contestant changed or added, even if it committed) is captured before its sandbox is removed. Each pair's results are saved the moment it finishes under `<base_dir>\.sbxm\runs\<run-id>\<contestant>\<repeat>\` (`answer.md`, `diff.patch`, `transcript.jsonl`, `result.json`), next to `run.json` (the run's identity: config hashes, profile, `sbx` version, times) and a copy of the run-config; `run.json` gets `completed_at` only once everything is saved. Any `[[eval.checks]]` run inside each contestant's sandbox after its agent finishes (and after its diff is taken), as `sh -c <command>` with a time limit enforced inside the sandbox; exit code 0 passes. The verdicts are saved in `evals.json` next to the pair's other files and summarised on the pair's line (`; checks 2/3 passed`). With `[eval.judge]` and a rubric, an LLM judge then scores the contestants: after all pairs are done, once per repeat, in its own throwaway sandbox, it sees each contestant's answer and diff under an anonymous label (A, B, ...) and scores every rubric criterion (`pass_fail` or a `scale` of levels). A judge from the same provider as a contestant is allowed, with a warning. Verdicts are saved in each pair's `evals.json` and per repeat in `judge/<repeat>/judge.json` (the label mapping); a judge that fails is warned about and doesn't fail the run. The contestants are then ranked: each criterion is 0 to 1, a contestant's score is the weighted mean over the criteria the judge scored (criteria it skipped are listed, never counted as 0), repeats are averaged, equal scores share a rank, and executable checks are shown alongside without changing the score. The ranking is printed before the last line, `Results: <folder>`. Cosine evaluation is planned but not implemented yet, so `[eval.cosine]` is currently refused. |
+| `sbxm run show <run-id> [--diff]` | Prints a saved run from its files: when it started and completed, the profile and `sbx` version, and for each contestant and repeat the status, the answer, a summary of the diff (files changed, lines added and removed) each executable check's verdict and the judge's scores, with the anonymous label each contestant was judged under. `--diff` also prints every full patch. With a judge it also prints the ranking, recomputed from the saved files (edit `run-config.toml` in the run folder to try other weights). A run that is still going or was interrupted shows what has been saved so far. Only reads files; the id must look like `2026-09-30-a1b2c3`. |
 | `sbxm config show [project] [--profile p] [--harness h] [--kits]` | Prints the merged config exactly as it's hashed, the hash, and with `--kits` the generated kits. Creates nothing. |
 | `sbxm config profiles-dir` | Prints the folder profiles are read from (`profiles_dir`, else `<config dir>/profiles`), for scripts such as `just deploy-profiles`. Loads only `config.toml`, so it fails like any command on an invalid or missing one. |
 | `sbxm doctor` | Checks `sbx` (on `PATH`, new enough, daemon answering), the config, every profile, every project with each of its sandboxes (secrets stored, kits valid), and the base dir (exists, writable, not a temp folder, at least 10 GiB free). Exits non-zero if anything fails. |
@@ -125,6 +128,7 @@ that).
 | `claude` (default) | Claude Code | `~/.claude/CLAUDE.md` | Supports `harness.claude.home_files` and `harness.claude.managed_settings`. |
 | `codex` | Codex | `~/.codex/AGENTS.md` | |
 | `gemini` | Gemini CLI | `~/.gemini/GEMINI.md` | `sbx`'s skills store doesn't serve Gemini: sbxm warns unless `skills.store = "off"`. |
+| `antigravity` | Antigravity (`agy`) | `~/.gemini/AGENTS.md` | Uses the Antigravity kit from Docker Hub, pinned to a fixed tag. With a `google` secret stored (`sbx secret set -g google`), `agy` uses it as a Gemini API key and needs no sign-in (decision 137). `sbx`'s skills store isn't known to serve it: sbxm warns unless `skills.store = "off"`. |
 | `pi` | Pi | `~/.pi/agent/AGENTS.md` | Uses the Pi kit from Docker Hub, pinned to a fixed tag. See below. `sbx`'s skills store doesn't serve Pi either: sbxm warns unless `skills.store = "off"`. |
 
 Settings a harness can't use are never dropped silently: `sbxm new`/`open` print a `warning:` line for each, e.g.
@@ -357,6 +361,24 @@ worker, the output goes to `.sbxm-issue/` in its clone (`agent.log`, `gates.log`
 removed.
 To take over one interactively, run `sbxm open sbxm-issue-<n> --harness claude`. `-BaseDir` (default `E:\sbxm-projects`) must match
 `base_dir` in `config.toml`. [`sandbox-issues.md`](sandbox-issues.md) has the steps with the expected output.
+
+### Filing review findings as issues
+
+Reviews run in sandboxes without GitHub access, so their findings sit in `reviews/<date>-<scope>.md` marked
+`Issues: pending`. `scripts/file-review-issues.ps1` (PowerShell 7, run from a host where `gh` works) files one issue
+per finding. It is a dry run unless you pass `-Create`, so read the dry run first: it prints every issue body, and
+path and secret scrubbing is heuristic (personal paths become `~`; a secret-looking line refuses the finding).
+
+```powershell
+./scripts/file-review-issues.ps1 reviews/2026-09-30-milestone-2a.md                     # dry run
+./scripts/file-review-issues.ps1 reviews/2026-09-30-milestone-2a.md -Create             # file the issues
+./scripts/file-review-issues.ps1 reviews/2026-09-30-milestone-2a.md -Create -Only M2A-1 # just these finding ids
+```
+
+`-StandardCriteria` files a finding that has no acceptance criteria with only the standard ones, `-KeepPaths` keeps
+personal paths as they are, and `-Repo <owner/name>` overrides the repo taken from `origin`. A rerun never
+duplicates issues (a hidden marker in each body); it also fills in the `#n` links of issues filed earlier. Afterwards
+the review's `Issues:` line is rewritten to `Issues: <id> #<n>, ...`. Decision 134 has the details.
 
 ## License
 
