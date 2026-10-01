@@ -285,6 +285,10 @@ impl Validator<'_> {
     }
 
     fn eval(&self, raw: RawEval) -> Result<EvalConfig> {
+        if raw.cosine.is_some() {
+            return Err(self.err("[eval.cosine] isn't implemented yet; remove it"));
+        }
+
         let mut seen = HashSet::new();
         let mut checks = Vec::new();
         for (i, c) in raw.checks.into_iter().enumerate() {

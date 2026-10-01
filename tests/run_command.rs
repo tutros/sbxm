@@ -262,6 +262,29 @@ fn a_missing_secret_stops_everything_before_anything_is_written() {
 }
 
 #[test]
+fn cosine_is_refused_before_any_write_or_backend_call() {
+    let env = Env::new();
+    let backend = pong();
+
+    let ran = go(
+        &env,
+        &format!("{TASK}{TWO_CLAUDES}[eval.cosine]\n"),
+        &backend,
+    );
+
+    assert!(
+        ran.result
+            .unwrap_err()
+            .to_string()
+            .contains("[eval.cosine] isn't implemented yet")
+    );
+    nothing_written(&env);
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert!(backend.creates().is_empty() && backend.execs().is_empty());
+    assert_eq!(ran.out, "");
+}
+
+#[test]
 fn an_invalid_kit_creates_no_sandbox() {
     let env = Env::new();
     let backend = FakeBackend::with_invalid_kit("bad").and_secrets(&["anthropic"]);

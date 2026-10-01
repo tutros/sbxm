@@ -70,8 +70,7 @@ fn the_full_schema_parses() {
          [[eval.checks]]\nid = \"tests-pass\"\ncommand = \"cargo test\"\ntimeout = \"2m\"\n\n\
          [[eval.rubric]]\nid = \"correctness\"\nkind = \"pass_fail\"\nweight = 1.0\n\n\
          [[eval.rubric]]\nid = \"quality\"\nkind = \"scale\"\nlevels = [\"poor\", \"good\"]\nweight = 0.5\nnotes = \"idiomatic\"\n\n\
-         [eval.judge]\nharness = \"claude\"\nmodel = \"claude-opus-5-5\"\n\n\
-         [eval.cosine]\n"
+         [eval.judge]\nharness = \"claude\"\nmodel = \"claude-opus-5-5\"\n"
     ));
 
     assert_eq!(config.run.timeout, Duration::from_secs(90));
@@ -87,7 +86,6 @@ fn the_full_schema_parses() {
     assert_eq!(config.eval.rubric[1].kind, CriterionKind::Scale);
     assert_eq!(config.eval.rubric[1].levels, ["poor", "good"]);
     assert_eq!(config.eval.judge.as_ref().unwrap().harness, Harness::Claude);
-    assert!(config.eval.cosine.is_some());
 }
 
 #[test]
@@ -150,7 +148,6 @@ fn unknown_keys_are_errors_at_every_level_and_name_the_file() {
             "judge",
             valid("[eval.judge]\nharness = \"claude\"\nmodel = \"m\"\nbogus = 1\n"),
         ),
-        ("cosine", valid("[eval.cosine]\nbogus = 1\n")),
     ] {
         let err = load_err(&body);
         assert!(
@@ -158,6 +155,22 @@ fn unknown_keys_are_errors_at_every_level_and_name_the_file() {
             "{label}: {err}"
         );
     }
+}
+
+#[test]
+fn cosine_is_rejected_until_implemented() {
+    let env = Env::new();
+    let path = write(&env, &valid("[eval.cosine]\n"));
+
+    let err = format!("{:#}", RunConfig::load(&path).unwrap_err());
+
+    assert_eq!(
+        err,
+        format!(
+            "run-config {}: [eval.cosine] isn't implemented yet; remove it",
+            path.display()
+        )
+    );
 }
 
 #[test]
