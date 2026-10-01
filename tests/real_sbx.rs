@@ -701,7 +701,8 @@ fn claude_headless_against_real_sbx() {
     let path = workspace.to_string_lossy().replace(char::from(92), "/");
     let in_sandbox = PathBuf::from(format!("/{}{}", path[..1].to_lowercase(), &path[2..]));
     let opts = HeadlessOpts {
-        model: "claude-haiku-4-5-20251001".into(),
+        model: Some("claude-haiku-4-5-20251001".into()),
+        high_effort: false,
         budget_usd: None,
         is_git_repo: false,
     };
@@ -780,7 +781,8 @@ fn codex_headless_against_real_sbx() {
     let in_sandbox = PathBuf::from(format!("/{}{}", path[..1].to_lowercase(), &path[2..]));
     // An unseeded workspace isn't a git repo (decision 113).
     let opts = HeadlessOpts {
-        model: "gpt-5.6-luna".into(),
+        model: Some("gpt-5.6-luna".into()),
+        high_effort: false,
         budget_usd: None,
         is_git_repo: false,
     };
@@ -909,7 +911,8 @@ fn antigravity_sandbox_against_real_sbx() {
         agy,
         "Reply with exactly: PONG",
         &HeadlessOpts {
-            model: "gemini-3.8-flash-low".into(),
+            model: Some("gemini-3.8-flash-low".into()),
+            high_effort: false,
             budget_usd: None,
             is_git_repo: false,
         },

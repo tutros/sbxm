@@ -271,7 +271,8 @@ pub fn judge_repeat(
             })
             .map_err(|e| format!("cannot create the judge sandbox {sandbox}: {e:#}"))?;
         let opts = HeadlessOpts {
-            model: judge.model.clone(),
+            model: Some(judge.model.clone()),
+            high_effort: false,
             budget_usd: None,
             is_git_repo: false,
         };

@@ -86,21 +86,41 @@ impl Harness {
     /// The headless command `headless::run` executes in the sandbox (S5).
     pub fn headless_argv(self, prompt: &str, opts: &HeadlessOpts) -> Result<Vec<String>> {
         self.require_headless()?;
+        let model_flag = |flag: &str| -> Vec<String> {
+            opts.model
+                .iter()
+                .flat_map(|m| [flag.to_owned(), m.clone()])
+                .collect()
+        };
         let mut argv: Vec<String> = match self {
-            Harness::Codex => ["codex", "exec", "-m", &opts.model, "--json"]
-                .map(str::to_owned)
-                .into(),
-            Harness::Antigravity => ["agy", "-p", prompt, "--model", &opts.model]
-                .into_iter()
-                .chain(["--output-format", "stream-json"])
-                .chain(["--dangerously-skip-permissions"])
-                .map(str::to_owned)
-                .collect(),
-            _ => ["claude", "-p", prompt, "--model", &opts.model]
-                .into_iter()
-                .chain(["--output-format", "stream-json", "--verbose"])
-                .map(str::to_owned)
-                .collect(),
+            Harness::Codex => {
+                let mut argv: Vec<String> = ["codex", "exec"].map(str::to_owned).into();
+                argv.extend(model_flag("-m"));
+                if opts.high_effort {
+                    argv.extend(["-c", "model_reasoning_effort=high"].map(str::to_owned));
+                }
+                argv.push("--json".to_owned());
+                argv
+            }
+            Harness::Antigravity => {
+                let mut argv: Vec<String> = ["agy", "-p", prompt].map(str::to_owned).into();
+                argv.extend(model_flag("--model"));
+                argv.extend(
+                    [
+                        "--output-format",
+                        "stream-json",
+                        "--dangerously-skip-permissions",
+                    ]
+                    .map(str::to_owned),
+                );
+                argv
+            }
+            _ => {
+                let mut argv: Vec<String> = ["claude", "-p", prompt].map(str::to_owned).into();
+                argv.extend(model_flag("--model"));
+                argv.extend(["--output-format", "stream-json", "--verbose"].map(str::to_owned));
+                argv
+            }
         };
         argv.extend(
             self.git_repo_workaround(opts.is_git_repo)

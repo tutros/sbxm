@@ -247,7 +247,8 @@ impl Pair<'_> {
         }
 
         let opts = HeadlessOpts {
-            model: self.contestant.model.clone(),
+            model: Some(self.contestant.model.clone()),
+            high_effort: false,
             budget_usd: self.run_config.run.budget_usd,
             is_git_repo: seed.is_some(),
         };

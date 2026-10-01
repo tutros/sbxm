@@ -20,7 +20,8 @@ const TERM_MARKER: &str = "timeout: sending signal TERM to command 'agy'\n";
 
 fn opts() -> HeadlessOpts {
     HeadlessOpts {
-        model: "gemini-3.8-flash-low".into(),
+        model: Some("gemini-3.8-flash-low".into()),
+        high_effort: false,
         budget_usd: Some(1.0),
         is_git_repo: false,
     }
@@ -176,4 +177,16 @@ fn the_unauthenticated_error_is_reported_as_failed() {
         result.status,
         RunStatus::Failed("authentication failed or timed out".into())
     );
+}
+
+#[test]
+fn argv_omits_the_model_flag_when_absent() {
+    let no_model = HeadlessOpts {
+        model: None,
+        ..opts()
+    };
+    let argv = Harness::Antigravity
+        .headless_argv("do it", &no_model)
+        .unwrap();
+    assert!(!argv.contains(&"--model".to_owned()));
 }
