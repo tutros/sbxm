@@ -149,6 +149,52 @@ pub fn clone_workspace(
     Ok(())
 }
 
+/// Checks out `branch` of `repo_git` into the new folder `dest`: only committed files, no hooks
+/// and no line-ending conversion, made by the hardened runner (no user config, so no filters or
+/// helpers run). This is where host gates and a reviewer's clone come from: no file the agent
+/// merely left lying around reaches it. `dest` must not exist.
+pub fn clean_checkout(repo_git: &Path, branch: &str, dest: &Path) -> Result<()> {
+    check_ref("branch", branch)?;
+    if dest.exists() {
+        bail!(
+            "{} already exists; remove it or let the previous run finish",
+            dest.display()
+        );
+    }
+    if !has_branch(repo_git, branch)? {
+        bail!("branch {branch} isn't in the task repo; collect the worker's commits first");
+    }
+    let parent = dest.parent().unwrap_or(Path::new("."));
+    std::fs::create_dir_all(parent)
+        .with_context(|| format!("cannot create {}", parent.display()))?;
+    let made = git::run(
+        parent,
+        None,
+        None,
+        &[
+            // The hardened runner denies every protocol; a local path is the one this needs.
+            "-c",
+            "protocol.file.allow=always",
+            "clone",
+            "--no-hardlinks",
+            "--template=",
+            "-c",
+            "core.autocrlf=false",
+            "--branch",
+            branch,
+            "--",
+            text(repo_git)?,
+            text(dest)?,
+        ],
+    );
+    if let Err(e) = made {
+        let _ = std::fs::remove_dir_all(dest);
+        return Err(e)
+            .with_context(|| format!("cannot check out {branch} into {}", dest.display()));
+    }
+    Ok(())
+}
+
 /// Fetches the head of PR `number` from GitHub into the local branch `pr-<n>`; returns its name.
 pub fn fetch_pr_head(repo_git: &Path, number: u32) -> Result<String> {
     let branch = format!("pr-{number}");
