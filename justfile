@@ -77,7 +77,7 @@ test:
 
 # Pester tests for scripts/issue-workers.ps1 (needs Pester 5: `Install-Module Pester -MinimumVersion 5 -Scope CurrentUser`).
 script-test:
-    Import-Module Pester -MinimumVersion 5; Invoke-Pester scripts/tests -Output Minimal -CI
+    Import-Module Pester -MinimumVersion 5.0.0; Invoke-Pester scripts/tests -Output Minimal -CI
 
 # Everything that must pass before a commit.
 check:
