@@ -177,6 +177,10 @@ fn host_command(
             .into_iter()
             .filter(|(name, _)| !is_git_variable(name)),
     );
+    // cmd.exe looks in the current directory before `PATH`; the checkout holds agent files, so a
+    // committed `cargo.cmd` would otherwise stand in for the real tool.
+    #[cfg(windows)]
+    cmd.env("NoDefaultCurrentDirectoryInExePath", "1");
     cmd
 }
 
@@ -352,6 +356,28 @@ impl HostRunner for FakeHostRunner {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cmd.exe searches the current directory before `PATH` unless told not to, so a committed
+    /// `hello.cmd` would run when a gate says just `hello` (or `cargo`, with a `cargo.cmd`).
+    /// The environment given here lacks the variable, whatever this machine has set.
+    #[cfg(windows)]
+    #[test]
+    fn a_program_in_the_checkout_does_not_take_the_place_of_a_tool_on_the_path() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("hello.cmd"), "@echo HIJACKED\r\n").unwrap();
+        let environment = std::env::vars_os()
+            .filter(|(name, _)| !name.eq_ignore_ascii_case("NoDefaultCurrentDirectoryInExePath"));
+
+        let out = host_command(dir.path(), "hello", environment)
+            .output()
+            .unwrap();
+
+        assert!(
+            !String::from_utf8_lossy(&out.stdout).contains("HIJACKED"),
+            "{out:?}"
+        );
+        assert!(!out.status.success(), "{out:?}");
+    }
 
     #[test]
     fn host_commands_never_inherit_git_variables() {

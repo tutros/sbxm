@@ -268,9 +268,25 @@ impl Validator<'_> {
                 ));
             }
         };
+        let host = raw.host.unwrap_or_default();
+        for (key, commands) in [("gates.sandbox", &sandbox), ("gates.host", &host)] {
+            for (i, command) in commands.iter().enumerate() {
+                if command.trim().is_empty() {
+                    return Err(
+                        self.err(format!("{key}[{i}] is empty; write a command or remove it"))
+                    );
+                }
+                // `sh -c` would run every line, `cmd /C` only the first: refuse instead.
+                if command.contains(['\n', '\r']) {
+                    return Err(self.err(format!(
+                        "{key}[{i}] contains a line break; put one command in each list entry"
+                    )));
+                }
+            }
+        }
         Ok(Gates {
             sandbox,
-            host: raw.host.unwrap_or_default(),
+            host,
             timeout: self.duration("gates.timeout", raw.timeout, DEFAULT_GATE_TIMEOUT)?,
         })
     }

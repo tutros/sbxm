@@ -116,6 +116,40 @@ worker = "prompts/worker.md"
 }
 
 #[test]
+fn a_gate_command_with_a_line_break_is_refused_naming_the_key() {
+    // `sh -c` would run both lines but `cmd /C` stops at the first: never a silent drop.
+    for (key, toml) in [
+        (
+            "gates.sandbox",
+            "[gates]\nsandbox = [\"cargo fmt --check\", \"cargo test\\ncargo build\"]\n",
+        ),
+        (
+            "gates.host",
+            "[gates]\nsandbox = []\nhost = [\"cargo build\\r\\ncargo doc\"]\n",
+        ),
+    ] {
+        let message = load_err(&format!("{MINIMAL}{toml}"), false);
+        assert!(
+            message.contains(key) && message.contains("line break"),
+            "{message}"
+        );
+        assert!(message.contains(FILE_NAME), "{message}");
+    }
+}
+
+#[test]
+fn an_empty_gate_command_is_refused_too() {
+    let message = load_err(
+        &format!("{MINIMAL}[gates]\nsandbox = [\"cargo test\", \"  \"]\n"),
+        false,
+    );
+    assert!(
+        message.contains("gates.sandbox") && message.contains("empty"),
+        "{message}"
+    );
+}
+
+#[test]
 fn a_missing_file_points_at_task_init() {
     let dir = TempDir::new().unwrap();
     let message = format!("{:#}", TaskConfig::load(dir.path()).unwrap_err());
