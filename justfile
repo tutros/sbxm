@@ -74,7 +74,7 @@ build:
 test:
     cargo test
 
-# Pester tests for scripts/issue-workers.ps1 (needs Pester 5: `Install-Module Pester -MinimumVersion 5 -Scope CurrentUser`).
+# Pester tests for scripts/issue-workers.ps1 and scripts/file-review-issues.ps1 (needs Pester 5: `Install-Module Pester -MinimumVersion 5 -Scope CurrentUser`).
 script-test:
     Import-Module Pester -MinimumVersion 5.0.0; Invoke-Pester scripts/tests -Output Minimal -CI
 

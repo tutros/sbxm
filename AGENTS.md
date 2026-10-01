@@ -31,7 +31,7 @@ cargo test --test cli help_prints_usage      # a single test
 $env:SBXM_REAL_BASE_DIR='E:\sbxm-it'; cargo test --test real_sbx -- --ignored   # real sbx; needs `sbx login`, dir not on C: (decision 56)
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-just script-test                             # Pester 5 tests for scripts/issue-workers.ps1 (decision 91)
+just script-test                             # Pester 5 tests for scripts/issue-workers.ps1 and scripts/file-review-issues.ps1 (decisions 91, 134)
 ```
 
 The `justfile` wraps these (`just check`, `just real-test`) plus representative sbxm commands (`just` lists them).
