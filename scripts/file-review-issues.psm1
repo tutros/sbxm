@@ -173,11 +173,14 @@ function Resolve-HeadSha([string]$Sha) {
     "$full".Trim()
 }
 
-# `src/a.rs:10-20` becomes a permalink at the reviewed commit. Plain words are left alone.
+# `src/a.rs:10-20` or `justfile:76` becomes a permalink at the reviewed commit. Plain words are left alone.
 function ConvertTo-WhereLinks {
     param([string]$Text, [string]$Repo, [string]$Sha)
     $known = 'rs|toml|md|ps1|psm1|json|ya?ml|lock|txt|sh|py|js|ts'
-    $pattern = '(?<![\w/.:-])(`?)((?:[\w.-]+/)*[\w.-]+\.\w+)(?::(\d+)(?:-(\d+))?)?(`?)'
+    # Extensionless names count only when they are a well-known file name and carry a line suffix, so words such
+    # as "step:3" or "ratio 3:1" stay text.
+    $bare = '(?:justfile|Dockerfile|Containerfile|Makefile|Rakefile|Gemfile|Procfile|Brewfile|Vagrantfile|Jenkinsfile|LICENSE)(?=:\d)'
+    $pattern = '(?<![\w/.:-])(`?)((?:[\w.-]+/)*(?:[\w.-]+\.\w+|' + $bare + '))(?::(\d+)(?:-(\d+))?)?(`?)'
     if (-not $Sha) {
         if ($Text -match $pattern) { Write-Warning 'no commit sha found in the Scope line; Where links stay plain text' }
         return $Text

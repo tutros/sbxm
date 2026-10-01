@@ -24,6 +24,16 @@ Describe 'ConvertTo-WhereLinks' {
         ConvertTo-WhereLinks 'used by e.g. the parser' 'o/r' $script:sha | Should -Be 'used by e.g. the parser'
     }
 
+    It 'links an extensionless file name that has a line suffix' {
+        ConvertTo-WhereLinks '`justfile:76` and `Dockerfile:1-3` and deploy/Makefile:4' 'o/r' $script:sha |
+            Should -Be "[``justfile:76``](https://github.com/o/r/blob/$script:sha/justfile#L76) and [``Dockerfile:1-3``](https://github.com/o/r/blob/$script:sha/Dockerfile#L1-L3) and [deploy/Makefile:4](https://github.com/o/r/blob/$script:sha/deploy/Makefile#L4)"
+    }
+
+    It 'leaves plain words with a colon and a number alone' {
+        $text = 'at step:3 the ratio 3:1 of profile:2 and e.g. a justfile without a line'
+        ConvertTo-WhereLinks $text 'o/r' $script:sha | Should -Be $text
+    }
+
     It 'warns and keeps the text when there is no sha' {
         $out = ConvertTo-WhereLinks '`src/git.rs:50-72`' 'o/r' $null 3>&1
         ($out | Where-Object { $_ -is [System.Management.Automation.WarningRecord] }).Message | Should -BeLike '*no commit sha*'
