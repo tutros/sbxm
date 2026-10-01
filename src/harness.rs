@@ -48,8 +48,8 @@ impl Harness {
     }
 
     /// The `sbx` service secret this harness's provider calls need (decision
-    /// 98). Antigravity's is unverified: `agy` signs in with OAuth inside the
-    /// sandbox and ignored the `google` placeholder (decision 124).
+    /// 98). Antigravity uses it as a Gemini API key (the kit sets
+    /// `modelProvider: gemini`; decision 137).
     pub fn provider_secret(self) -> &'static str {
         match self {
             Harness::Claude | Harness::Pi => "anthropic",

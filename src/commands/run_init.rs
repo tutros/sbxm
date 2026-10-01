@@ -43,8 +43,7 @@ harness = "codex"
 model = "gpt-5.6-sol"
 
 # A third contestant: remove the leading "# " from these three lines. Antigravity
-# needs a stored `google` secret and a sign-in inside its sandbox (`agy models`
-# lists its models).
+# needs a stored `google` secret (`agy models` lists its models).
 # [[contestants]]
 # harness = "antigravity"
 # model = "gemini-3.1-pro-high"
