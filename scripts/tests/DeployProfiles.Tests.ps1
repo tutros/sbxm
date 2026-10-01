@@ -1,70 +1,83 @@
 BeforeAll {
     $script:deploy = Join-Path $PSScriptRoot '..\deploy-profiles.ps1'
+    $script:repo = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
+
+    # A stand-in for `sbxm config profiles-dir` that prints $path. What sbxm accepts as config is covered by
+    # tests/config_profiles_dir.rs; these tests cover what the script does with the answer.
+    function New-Stub([string]$path) { [scriptblock]::Create("'" + $path.Replace("'", "''") + "'") }
 }
 
 Describe 'deploy-profiles.ps1' {
     BeforeEach {
         $root = Join-Path $TestDrive ([guid]::NewGuid())
         $script:source = Join-Path $root 'repo-profiles'
-        $script:config = Join-Path $root 'config'
-        New-Item -ItemType Directory (Join-Path $script:source 'dev'), (Join-Path $script:source 'other'), $script:config | Out-Null
+        $script:target = Join-Path $root 'sbxm-profiles'
+        New-Item -ItemType Directory (Join-Path $script:source 'dev'), (Join-Path $script:source 'other') | Out-Null
         Set-Content (Join-Path $script:source 'dev\profile.toml') 'description = "dev"'
         Set-Content (Join-Path $script:source 'other\profile.toml') 'description = "other"'
+        $script:stub = New-Stub $script:target
     }
 
-    It 'copies every profile into the config dir profiles folder when config.toml has no profiles_dir' {
-        & $script:deploy -Source $script:source -ConfigDir $script:config 6>$null
+    It 'copies every profile into the folder sbxm reports' {
+        & $script:deploy -Source $script:source -ProfilesDirCommand $script:stub 6>$null
 
-        Get-Content (Join-Path $script:config 'profiles\dev\profile.toml') | Should -Be 'description = "dev"'
-        Get-Content (Join-Path $script:config 'profiles\other\profile.toml') | Should -Be 'description = "other"'
-    }
-
-    It 'uses the profiles_dir that config.toml names' {
-        $custom = Join-Path $TestDrive ([guid]::NewGuid())
-        Set-Content (Join-Path $script:config 'config.toml') "base_dir = 'E:\x'`nprofiles_dir = '$custom'"
-
-        & $script:deploy -Source $script:source -ConfigDir $script:config 6>$null
-
-        Test-Path (Join-Path $custom 'dev\profile.toml') | Should -BeTrue
-        Test-Path (Join-Path $script:config 'profiles') | Should -BeFalse
+        Get-Content (Join-Path $script:target 'dev\profile.toml') | Should -Be 'description = "dev"'
+        Get-Content (Join-Path $script:target 'other\profile.toml') | Should -Be 'description = "other"'
     }
 
     It 'replaces a changed profile, drops files the repo no longer has and leaves other profiles alone' {
-        $target = Join-Path $script:config 'profiles'
-        New-Item -ItemType Directory (Join-Path $target 'dev'), (Join-Path $target 'mine') | Out-Null
-        Set-Content (Join-Path $target 'dev\profile.toml') 'description = "old"'
-        Set-Content (Join-Path $target 'dev\stale.txt') 'left over'
-        Set-Content (Join-Path $target 'mine\profile.toml') 'description = "mine"'
+        New-Item -ItemType Directory (Join-Path $script:target 'dev'), (Join-Path $script:target 'mine') | Out-Null
+        Set-Content (Join-Path $script:target 'dev\profile.toml') 'description = "old"'
+        Set-Content (Join-Path $script:target 'dev\stale.txt') 'left over'
+        Set-Content (Join-Path $script:target 'mine\profile.toml') 'description = "mine"'
 
-        & $script:deploy -Source $script:source -ConfigDir $script:config 6>$null
+        & $script:deploy -Source $script:source -ProfilesDirCommand $script:stub 6>$null
 
-        Get-Content (Join-Path $target 'dev\profile.toml') | Should -Be 'description = "dev"'
-        Test-Path (Join-Path $target 'dev\stale.txt') | Should -BeFalse
-        Get-Content (Join-Path $target 'mine\profile.toml') | Should -Be 'description = "mine"'
+        Get-Content (Join-Path $script:target 'dev\profile.toml') | Should -Be 'description = "dev"'
+        Test-Path (Join-Path $script:target 'dev\stale.txt') | Should -BeFalse
+        Get-Content (Join-Path $script:target 'mine\profile.toml') | Should -Be 'description = "mine"'
     }
 
     It 'copies nested files, such as instruction files' {
         New-Item -ItemType Directory (Join-Path $script:source 'dev\files') | Out-Null
         Set-Content (Join-Path $script:source 'dev\files\notes.md') 'hello'
 
-        & $script:deploy -Source $script:source -ConfigDir $script:config 6>$null
+        & $script:deploy -Source $script:source -ProfilesDirCommand $script:stub 6>$null
 
-        Get-Content (Join-Path $script:config 'profiles\dev\files\notes.md') | Should -Be 'hello'
+        Get-Content (Join-Path $script:target 'dev\files\notes.md') | Should -Be 'hello'
     }
 
     It 'says which profiles are new, updated or unchanged' {
-        $target = Join-Path $script:config 'profiles'
-        New-Item -ItemType Directory (Join-Path $target 'other') | Out-Null
-        Set-Content (Join-Path $target 'other\profile.toml') 'description = "other"'
+        New-Item -ItemType Directory (Join-Path $script:target 'other') | Out-Null
+        Set-Content (Join-Path $script:target 'other\profile.toml') 'description = "other"'
 
-        $out = & $script:deploy -Source $script:source -ConfigDir $script:config 6>&1 | Out-String
-        $again = & $script:deploy -Source $script:source -ConfigDir $script:config 6>&1 | Out-String
+        $out = & $script:deploy -Source $script:source -ProfilesDirCommand $script:stub 6>&1 | Out-String
+        $again = & $script:deploy -Source $script:source -ProfilesDirCommand $script:stub 6>&1 | Out-String
 
         $out | Should -Match 'dev: new'
         $out | Should -Match 'other: unchanged'
         $again | Should -Match 'dev: unchanged'
-        Set-Content (Join-Path $target 'dev\profile.toml') 'description = "changed"'
-        (& $script:deploy -Source $script:source -ConfigDir $script:config 6>&1 | Out-String) | Should -Match 'dev: updated'
+        Set-Content (Join-Path $script:target 'dev\profile.toml') 'description = "changed"'
+        (& $script:deploy -Source $script:source -ProfilesDirCommand $script:stub 6>&1 | Out-String) | Should -Match 'dev: updated'
+    }
+
+    It 'ignores folders without a profile.toml' {
+        New-Item -ItemType Directory (Join-Path $script:source 'not-a-profile') | Out-Null
+
+        & $script:deploy -Source $script:source -ProfilesDirCommand $script:stub 6>$null
+
+        Test-Path (Join-Path $script:target 'not-a-profile') | Should -BeFalse
+    }
+
+    It 'keeps the old profile intact and leaves no staging folder when the copy fails' {
+        New-Item -ItemType Directory (Join-Path $script:target 'dev') | Out-Null
+        Set-Content (Join-Path $script:target 'dev\profile.toml') 'description = "old"'
+        $failing = { param($from, $to) throw 'injected copy failure' }
+
+        { & $script:deploy -Source $script:source -ProfilesDirCommand $script:stub -Copier $failing 6>$null } | Should -Throw '*injected copy failure*'
+
+        Get-Content (Join-Path $script:target 'dev\profile.toml') | Should -Be 'description = "old"'
+        @(Get-ChildItem $script:target -Force).Name | Should -Be @('dev')
     }
 
     Context 'hidden files' {
@@ -75,7 +88,6 @@ Describe 'deploy-profiles.ps1' {
                 Set-Content $path $text
                 if ($IsWindows) { [IO.File]::SetAttributes($path, 'Hidden') }
             }
-            $script:target = Join-Path $script:config 'profiles'
             New-Item -ItemType Directory (Join-Path $script:target 'dev') | Out-Null
             Copy-Item (Join-Path $script:source 'dev\profile.toml') (Join-Path $script:target 'dev\profile.toml')
         }
@@ -84,7 +96,7 @@ Describe 'deploy-profiles.ps1' {
             Set-HiddenFile (Join-Path $script:source 'dev\files\.rules') 'new'
             Set-HiddenFile (Join-Path $script:target 'dev\files\.rules') 'old'
 
-            $out = & $script:deploy -Source $script:source -ConfigDir $script:config 6>&1 | Out-String
+            $out = & $script:deploy -Source $script:source -ProfilesDirCommand $script:stub 6>&1 | Out-String
 
             $out | Should -Match 'dev: updated'
             Get-Content (Join-Path $script:target 'dev\files\.rules') -Force | Should -Be 'new'
@@ -93,7 +105,7 @@ Describe 'deploy-profiles.ps1' {
         It 'removes a hidden file the repo no longer has and says updated' {
             Set-HiddenFile (Join-Path $script:target 'dev\.stale') 'left over'
 
-            $out = & $script:deploy -Source $script:source -ConfigDir $script:config 6>&1 | Out-String
+            $out = & $script:deploy -Source $script:source -ProfilesDirCommand $script:stub 6>&1 | Out-String
 
             $out | Should -Match 'dev: updated'
             Test-Path (Join-Path $script:target 'dev\.stale') | Should -BeFalse
@@ -103,100 +115,72 @@ Describe 'deploy-profiles.ps1' {
             Set-HiddenFile (Join-Path $script:source 'dev\.rules') 'same'
             Set-HiddenFile (Join-Path $script:target 'dev\.rules') 'same'
 
-            (& $script:deploy -Source $script:source -ConfigDir $script:config 6>&1 | Out-String) | Should -Match 'dev: unchanged'
+            (& $script:deploy -Source $script:source -ProfilesDirCommand $script:stub 6>&1 | Out-String) | Should -Match 'dev: unchanged'
         }
     }
 
-    It 'ignores folders without a profile.toml' {
-        New-Item -ItemType Directory (Join-Path $script:source 'not-a-profile') | Out-Null
+    Context 'asking sbxm for the folder' {
+        It 'stops with sbxm message and writes nothing when sbxm refuses the config' {
+            $refusing = [scriptblock]::Create(@'
+pwsh -NoProfile -Command "[Console]::Error.WriteLine('unknown field profiles_dri'); exit 1"
+'@)
 
-        & $script:deploy -Source $script:source -ConfigDir $script:config 6>$null
+            { & $script:deploy -Source $script:source -ProfilesDirCommand $refusing 6>$null } | Should -Throw '*unknown field profiles_dri*'
 
-        Test-Path (Join-Path $script:config 'profiles\not-a-profile') | Should -BeFalse
-    }
+            Test-Path $script:target | Should -BeFalse
+        }
 
-    It 'decodes TOML escapes in a double-quoted profiles_dir, as sbxm does' {
-        $custom = Join-Path $TestDrive ([guid]::NewGuid())
-        $escaped = ($custom -replace '\\', '\\') -replace 't', '\u0074'
-        Set-Content (Join-Path $script:config 'config.toml') "base_dir = 'E:\x'`nprofiles_dir = `"$escaped`""
+        It 'stops when sbxm prints no folder' {
+            { & $script:deploy -Source $script:source -ProfilesDirCommand { '' } 6>$null } | Should -Throw '*no folder*'
 
-        & $script:deploy -Source $script:source -ConfigDir $script:config 6>$null
+            Test-Path $script:target | Should -BeFalse
+        }
 
-        Test-Path (Join-Path $custom 'dev\profile.toml') | Should -BeTrue
-    }
+        It 'says how to run it when sbxm cannot be started' {
+            $missing = { this-command-does-not-exist-sbxm }
 
-    It 'refuses a config.toml key sbxm would refuse, before writing anything' {
-        Set-Content (Join-Path $script:config 'config.toml') "base_dir = 'E:\x'`nprofiles_dri = 'E:\elsewhere'"
+            { & $script:deploy -Source $script:source -ProfilesDirCommand $missing 6>$null } | Should -Throw '*-ProfilesDirCommand*'
+        }
 
-        { & $script:deploy -Source $script:source -ConfigDir $script:config 6>$null } | Should -Throw '*profiles_dri*'
+        It 'ignores progress lines that are not the folder, such as cargo output on stderr' {
+            $noisy = [scriptblock]::Create(@"
+pwsh -NoProfile -Command "[Console]::Error.WriteLine('   Compiling sbxm'); Write-Output '$($script:target.Replace("'", "''"))'"
+"@)
 
-        Test-Path (Join-Path $script:config 'profiles') | Should -BeFalse
-    }
+            & $script:deploy -Source $script:source -ProfilesDirCommand $noisy 6>$null
 
-    It 'reads a quoted profiles_dir key, basic or literal, like sbxm' -ForEach @(
-        @{ Name = 'basic'; Key = '"profiles_dir"' }
-        @{ Name = 'literal'; Key = "'profiles_dir'" }
-        @{ Name = 'escaped basic'; Key = '"profiles\u005fdir"' }
-    ) {
-        $custom = Join-Path $TestDrive ([guid]::NewGuid())
-        Set-Content (Join-Path $script:config 'config.toml') "base_dir = 'E:\x'`n$Key = '$custom'"
+            Test-Path (Join-Path $script:target 'dev\profile.toml') | Should -BeTrue
+        }
 
-        & $script:deploy -Source $script:source -ConfigDir $script:config 6>$null
+        It 'hands -ConfigDir to sbxm as SBXM_CONFIG_DIR for the call only' {
+            $before = $env:SBXM_CONFIG_DIR
+            $echo = { $env:SBXM_CONFIG_DIR }
+            $configDir = Join-Path $TestDrive ([guid]::NewGuid())
 
-        Test-Path (Join-Path $custom 'dev\profile.toml') | Should -BeTrue
-        Test-Path (Join-Path $script:config 'profiles') | Should -BeFalse
-    }
+            & $script:deploy -Source $script:source -ConfigDir $configDir -ProfilesDirCommand $echo 6>$null
 
-    It 'refuses a quoted or dotted key sbxm would refuse, before writing anything' -ForEach @(
-        @{ Line = "`"profiles_dri`" = 'E:\elsewhere'" }
-        @{ Line = "'profiles_dri' = 'E:\elsewhere'" }
-        @{ Line = "profiles.dir = 'E:\elsewhere'" }
-    ) {
-        Set-Content (Join-Path $script:config 'config.toml') "base_dir = 'E:\x'`n$Line"
+            Test-Path (Join-Path $configDir 'dev\profile.toml') | Should -BeTrue
+            $env:SBXM_CONFIG_DIR | Should -Be $before
+        }
 
-        { & $script:deploy -Source $script:source -ConfigDir $script:config 6>$null } | Should -Throw '*sbxm would refuse*'
+        It 'asks the real sbxm, so its config rules apply' -Skip:(-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+            $config = Join-Path $TestDrive ([guid]::NewGuid())
+            New-Item -ItemType Directory $config | Out-Null
+            $custom = Join-Path $TestDrive ([guid]::NewGuid())
+            Set-Content (Join-Path $config 'config.toml') "`"base_dir`" = 'base'`n`"profiles_dir`" = '$custom'`n[resources]`ncpus = 4`nmemory = '8g'"
+            $real = [scriptblock]::Create("cargo run --quiet --manifest-path '$($script:repo)/Cargo.toml' -- config profiles-dir")
 
-        Test-Path (Join-Path $script:config 'profiles') | Should -BeFalse
-    }
+            & $script:deploy -Source $script:source -ConfigDir $config -ProfilesDirCommand $real 6>$null
+            Test-Path (Join-Path $custom 'dev\profile.toml') | Should -BeTrue
 
-    It 'accepts a quoted or dotted form of the other known keys' {
-        Set-Content (Join-Path $script:config 'config.toml') "`"base_dir`" = 'E:\x'`nresources.cpus = 4`nresources.memory = '8g'"
-
-        & $script:deploy -Source $script:source -ConfigDir $script:config 6>$null
-
-        Test-Path (Join-Path $script:config 'profiles\dev\profile.toml') | Should -BeTrue
-    }
-
-    It 'refuses a profiles_dir it cannot read as a quoted string' {
-        Set-Content (Join-Path $script:config 'config.toml') "base_dir = 'E:\x'`nprofiles_dir = 5"
-
-        { & $script:deploy -Source $script:source -ConfigDir $script:config 6>$null } | Should -Throw '*profiles_dir*'
-
-        Test-Path (Join-Path $script:config 'profiles') | Should -BeFalse
-    }
-
-    It 'keeps the other keys and the resources table working' {
-        Set-Content (Join-Path $script:config 'config.toml') "base_dir = 'E:\x'`ndefault_profile = 'dev'`nmin_sbx_version = '0.43.0'`n[resources]`ncpus = 4`nmemory = '8g'"
-
-        & $script:deploy -Source $script:source -ConfigDir $script:config 6>$null
-
-        Test-Path (Join-Path $script:config 'profiles\dev\profile.toml') | Should -BeTrue
-    }
-
-    It 'keeps the old profile intact and leaves no staging folder when the copy fails' {
-        $target = Join-Path $script:config 'profiles'
-        New-Item -ItemType Directory (Join-Path $target 'dev') | Out-Null
-        Set-Content (Join-Path $target 'dev\profile.toml') 'description = "old"'
-        $failing = { param($from, $to) throw 'injected copy failure' }
-
-        { & $script:deploy -Source $script:source -ConfigDir $script:config -Copier $failing 6>$null } | Should -Throw '*injected copy failure*'
-
-        Get-Content (Join-Path $target 'dev\profile.toml') | Should -Be 'description = "old"'
-        @(Get-ChildItem $target -Force).Name | Should -Be @('dev')
+            Set-Content (Join-Path $config 'config.toml') "base_dir = 'base'`nprofiles_dri = 'x'"
+            $other = Join-Path $TestDrive ([guid]::NewGuid())
+            { & $script:deploy -Source $script:source -ConfigDir $config -ProfilesDirCommand $real 6>$null } | Should -Throw '*profiles_dri*'
+        }
     }
 
     It 'fails when the source folder is missing, before touching anything' {
-        { & $script:deploy -Source (Join-Path $TestDrive 'nope') -ConfigDir $script:config 6>$null } | Should -Throw '*not found*'
-        Test-Path (Join-Path $script:config 'profiles') | Should -BeFalse
+        { & $script:deploy -Source (Join-Path $TestDrive 'nope') -ProfilesDirCommand $script:stub 6>$null } | Should -Throw '*not found*'
+        Test-Path $script:target | Should -BeFalse
     }
 }

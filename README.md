@@ -64,6 +64,7 @@ that).
 | `sbxm rm <project> --harness h` | Removes the sandbox and sbxm's record of it. The workspace is kept. |
 | `sbxm rm <project> --purge [--yes]` | Removes **every** sandbox of the project, then deletes the workspace and its metadata, after you confirm the exact paths. Without a terminal it needs `--yes`. Can't be combined with `--harness`. |
 | `sbxm config show [project] [--profile p] [--harness h] [--kits]` | Prints the merged config exactly as it's hashed, the hash, and with `--kits` the generated kits. Creates nothing. |
+| `sbxm config profiles-dir` | Prints the folder profiles are read from (`profiles_dir`, else `<config dir>/profiles`), for scripts such as `just deploy-profiles`. Loads only `config.toml`, so it fails like any command on an invalid or missing one. |
 | `sbxm doctor` | Checks `sbx` (on `PATH`, new enough, daemon answering), the config, every profile, every project with each of its sandboxes (secrets stored, kits valid), and the base dir (exists, writable, not a temp folder, at least 10 GiB free). Exits non-zero if anything fails. |
 
 `--harness` defaults to `claude` for `new` and `config show`; `open`, `stop` and `rm` (without `--purge`) require it, so they never act on the wrong sandbox by default (issue #33). `sbxm <command> --help` shows every option.
@@ -77,7 +78,7 @@ that).
 
 | Recipe | What it does |
 |---|---|
-| `just deploy-profiles` | Copies the repo's `profiles/*` into the `profiles_dir` sbxm reads (from `config.toml`, else `<config dir>\profiles`). Each repo profile replaces its copy there; profiles that exist only in `profiles_dir` are left alone. It prints `new`, `updated` or `unchanged` per profile. Run it after `git pull` changes a profile; sandboxes built from the old one show config drift until you rebuild them. |
+| `just deploy-profiles` | Copies the repo's `profiles/*` into the `profiles_dir` sbxm reads, asking `sbxm config profiles-dir` (so an invalid or missing `config.toml` stops it before anything is written). Each repo profile replaces its copy there; profiles that exist only in `profiles_dir` are left alone. It prints `new`, `updated` or `unchanged` per profile. Run it after `git pull` changes a profile; sandboxes built from the old one show config drift until you rebuild them. |
 | `just init` | Writes a starter config and `default` profile (refuses to overwrite). |
 | `just doctor` | Checks `sbx`, the config, every profile and project, and the base dir. |
 | `just install` | Installs `sbxm` on your PATH from this checkout. |
