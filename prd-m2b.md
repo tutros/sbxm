@@ -16,7 +16,7 @@ stage to a task.
 
 - **The maintainer** (a developer on Windows with Docker Sandboxes) who hands issues to agents, reads their results,
   and merges.
-- **Later (M3, not this milestone):** another project that consumes sbxm through its CLI [119][120 of the M3 draft].
+- **Later (M3, not this milestone):** another project that consumes sbxm through its CLI.
   M2b avoids Rust- and sbxm-specific assumptions where it is cheap.
 
 ## Goals
