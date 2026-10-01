@@ -58,6 +58,26 @@ fn the_starter_is_valid_as_written_in_a_rust_repo() {
 }
 
 #[test]
+fn the_starter_warns_that_host_gates_run_agent_code_on_this_machine() {
+    let tmp = TempDir::new().unwrap();
+    task_init(tmp.path(), &[]).success();
+
+    let text = fs::read_to_string(tmp.path().join(FILE_NAME)).unwrap();
+
+    // The warning sits right above `host = []` (spec §7), where someone about to fill it in reads it.
+    let host_line = text
+        .lines()
+        .position(|l| l.contains("# host = []"))
+        .unwrap();
+    let above: Vec<&str> = text.lines().take(host_line).collect();
+    let nearby = above[above.len().saturating_sub(4)..].join("\n");
+    assert!(
+        nearby.contains("agent-written code on this machine"),
+        "{nearby}"
+    );
+}
+
+#[test]
 fn refuses_to_overwrite_and_leaves_the_file_alone() {
     let tmp = TempDir::new().unwrap();
     let file = tmp.path().join(FILE_NAME);

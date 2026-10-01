@@ -37,6 +37,8 @@ profile = "sbxm-dev"
 [gates]
 # sandbox = ["cargo fmt --check", "cargo clippy --all-targets -- -D warnings", "cargo test"]
 # Optional second tier, run on this machine after the sandbox tier passes. Off while empty.
+# WARNING: host gates run agent-written code on this machine, outside any sandbox. List
+# only commands you would run on a stranger's pull request.
 # host = []
 timeout = "20m"                # per command
 

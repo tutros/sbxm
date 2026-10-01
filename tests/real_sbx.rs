@@ -1709,6 +1709,92 @@ fn task_start_against_real_sbx() {
     );
 }
 
+/// Sandbox gates in a real sandbox: each command runs as `sh -c` in the workspace under the
+/// in-sandbox timeout, a failure stops the tier, and a command that outlives its limit is killed
+/// there (nothing left running).
+#[test]
+#[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
+fn task_sandbox_gates_against_real_sbx() {
+    use std::time::Duration;
+
+    use sbxm::backend::{CreateSpec, ExecSpec, SkillsStore, Stdin};
+    use sbxm::run::orchestrate::in_sandbox_path;
+    use sbxm::task::gates::run_sandbox_tier;
+
+    let base_dir = real_base_dir();
+    let name = format!("sbxm-it-{}-gates", std::process::id());
+    let workspace = base_dir.join(&name);
+    let _cleanup = Cleanup {
+        sandbox: name.clone(),
+        dirs: vec![workspace.clone()],
+        shared_dirs: vec![],
+    };
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("marker.txt"), "here\n").unwrap();
+    SbxBackend
+        .create(&CreateSpec {
+            name: name.clone(),
+            agent: "claude".into(),
+            workspace: workspace.clone(),
+            cpus: 2,
+            memory: "2g".into(),
+            skills: SkillsStore::Off,
+            kits: vec![],
+        })
+        .unwrap();
+    let dir = in_sandbox_path(&workspace);
+    let cmds = |list: &[&str]| list.iter().map(|s| (*s).to_owned()).collect::<Vec<_>>();
+
+    // Runs in the workspace; a failing command (exit 3) stops the tier.
+    let outcomes = run_sandbox_tier(
+        &SbxBackend,
+        &name,
+        &dir,
+        "after-worker",
+        &cmds(&["test -f marker.txt && echo found", "exit 3", "echo never"]),
+        Duration::from_secs(60),
+    );
+    assert_eq!(outcomes.len(), 2, "{outcomes:?}");
+    assert!(
+        outcomes[0].result.passed && outcomes[0].output_tail.contains("found"),
+        "{outcomes:?}"
+    );
+    assert_eq!(
+        (outcomes[1].result.exit, outcomes[1].result.passed),
+        (Some(3), false)
+    );
+
+    // A command that outlives its limit is killed inside the sandbox.
+    let outcomes = run_sandbox_tier(
+        &SbxBackend,
+        &name,
+        &dir,
+        "after-worker",
+        &cmds(&["sleep 60"]),
+        Duration::from_secs(3),
+    );
+    assert!(
+        outcomes[0].timed_out && !outcomes[0].result.passed,
+        "{outcomes:?}"
+    );
+    let left = SbxBackend
+        .exec(
+            &name,
+            &ExecSpec {
+                workdir: None,
+                // The sandbox has its own keep-alive `sleep`, so look for the gate's command line.
+                argv: vec!["pgrep".into(), "-f".into(), "sleep 60".into()],
+                stdin: Stdin::Closed,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        left.exit_code,
+        Some(1),
+        "the gate's sleep is still running: {left:?}"
+    );
+}
+
 /// Spike S10 as a test (decision 161): a bundle an agent makes in its sandbox is verified and
 /// fetched into the host-owned repo, with the sandbox's own `git` and no host git in the workspace.
 #[test]
