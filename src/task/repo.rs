@@ -130,6 +130,10 @@ pub fn clone_workspace(
             "clone",
             "--no-hardlinks",
             "--template=",
+            // The user's `core.autocrlf` (true on Windows) would write CRLF files that the
+            // sandbox's Linux git then sees as modified; no conversion, in either direction.
+            "-c",
+            "core.autocrlf=false",
             "-c",
             &name,
             "-c",

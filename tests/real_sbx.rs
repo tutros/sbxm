@@ -1555,6 +1555,160 @@ fn run_kits_validate_against_real_sbx() {
     assert_eq!(before, after);
 }
 
+/// `sbxm task start` with a real sandbox and a real (small) Claude worker, against a local
+/// bare repo standing in for GitHub and a scripted GitHub: the worker's commit is collected
+/// into the host-owned repo. Spends a few cents of Anthropic credit.
+#[test]
+#[ignore = "needs a logged-in sbx, the anthropic secret and SBXM_REAL_BASE_DIR; spends API credit"]
+fn task_start_against_real_sbx() {
+    use sbxm::commands::task_start::{self, Options};
+    use sbxm::github::fake::FakeGitHub;
+    use sbxm::github::{Issue, IssueText};
+    use sbxm::task::record::{self, Stage, Status, SystemProbe};
+    use sbxm::task::repo::{self, Identity};
+
+    let base_dir = real_base_dir().join(format!("sbxm-it-{}-task", std::process::id()));
+    let _cleanup = Cleanup {
+        sandbox: "sbxm-task-issue-41-claude".into(),
+        dirs: vec![base_dir.clone()],
+        shared_dirs: vec![],
+    };
+    std::fs::create_dir_all(&base_dir).unwrap();
+    let tmp = TempDir::new().unwrap();
+    let git = |dir: &std::path::Path, args: &[&str]| -> String {
+        let out = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    };
+
+    // The config: base dir on E:, an empty profile.
+    let config_dir = tmp.path().join("config");
+    std::fs::create_dir_all(config_dir.join("profiles").join("default")).unwrap();
+    let base = toml::Value::String(base_dir.to_str().unwrap().to_owned());
+    let profiles = toml::Value::String(config_dir.join("profiles").to_str().unwrap().to_owned());
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "base_dir = {base}\nprofiles_dir = {profiles}\ndefault_profile = \"default\"\n\n\
+             [resources]\ncpus = 2\nmemory = \"2g\"\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        config_dir
+            .join("profiles")
+            .join("default")
+            .join("profile.toml"),
+        "description = \"real task test\"\n",
+    )
+    .unwrap();
+
+    // GitHub's stand-in, and the target repo's config with a tiny worker prompt.
+    let origin = tmp.path().join("origin.git");
+    let seed = tmp.path().join("seed");
+    std::fs::create_dir_all(&origin).unwrap();
+    std::fs::create_dir_all(&seed).unwrap();
+    git(&origin, &["init", "--bare", "-b", "main"]);
+    git(&seed, &["init", "-b", "main"]);
+    std::fs::write(seed.join("README.md"), "hello\n").unwrap();
+    git(&seed, &["add", "-A"]);
+    git(&seed, &["commit", "-m", "first"]);
+    git(&seed, &["push", origin.to_str().unwrap(), "main"]);
+    let target = tmp.path().join("target");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(
+        target.join("sbxm-task.toml"),
+        "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = []\n\n[prompts]\nworker = \"worker.md\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        target.join("worker.md"),
+        "This is issue #{{number}}, branch {{branch}}. Do exactly this and nothing else:\n\
+         1. Create a file hello.txt containing the word hi.\n\
+         2. Run: git add hello.txt && git commit -m \"Add hello.txt. Fixes #{{number}}\"\n\
+         3. Write .sbxm-task/result.md saying: hello.txt added.\n\
+         4. Stop.\n",
+    )
+    .unwrap();
+    let github = FakeGitHub::default()
+        .with_default_branch("main")
+        .with_open_issues(vec![Issue {
+            number: 41,
+            title: "Add hello.txt".into(),
+            labels: vec![],
+            body: String::new(),
+        }])
+        .with_issue_text(IssueText {
+            number: 41,
+            title: "Add hello.txt".into(),
+            state: "OPEN".into(),
+            text: "title:\tAdd hello.txt\nstate:\tOPEN\n--\nAdd a hello.txt file.\n".into(),
+        });
+
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let result = task_start::run(
+        &config_dir,
+        &Options {
+            repo_root: target,
+            issues: vec![41],
+            workers: None,
+            worker_harness: None,
+            worker_model: Some("claude-haiku-4-5-20251001".into()),
+            time_limit: Some("5m".into()),
+            profile: None,
+            base: None,
+            repo: Some("o/r".into()),
+            clone_source: Some(origin.to_str().unwrap().to_owned()),
+            identity: Some(Identity {
+                name: "Dev".into(),
+                email: "dev@example.com".into(),
+            }),
+        },
+        &SbxBackend,
+        &github,
+        &SystemProbe,
+        &mut out,
+        &mut warn,
+    );
+    let (out, warn) = (
+        String::from_utf8_lossy(&out),
+        String::from_utf8_lossy(&warn),
+    );
+    println!("{out}\n{warn}");
+    result.unwrap();
+
+    let meta = record::task_dir(&base_dir, "issue-41");
+    let task = record::read(&meta.join("task.json")).unwrap();
+    assert_eq!(
+        (task.stage, task.status),
+        (Stage::Working, Status::Completed),
+        "{task:?}"
+    );
+    let repo_git = meta.join("repo.git");
+    assert!(repo::commits_ahead(&repo_git, "main", "issue-41").unwrap() >= 1);
+    assert!(git(&repo_git, &["show", "issue-41:hello.txt"]).contains("hi"));
+    assert!(meta.join("result.md").is_file(), "{task:?}");
+    assert!(meta.join("transcripts").join("worker.jsonl").is_file());
+    // The clone's files match what the sandbox's git expects: no line-ending noise.
+    assert!(
+        !task.notes.iter().any(|n| n.contains("uncommitted")),
+        "{:?}",
+        task.notes
+    );
+}
+
 /// Spike S10 as a test (decision 161): a bundle an agent makes in its sandbox is verified and
 /// fetched into the host-owned repo, with the sandbox's own `git` and no host git in the workspace.
 #[test]

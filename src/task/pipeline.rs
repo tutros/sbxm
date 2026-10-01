@@ -484,11 +484,24 @@ fn collect(
         sandbox,
         &in_sandbox(&["git", "-C", &ws, "status", "--porcelain"]),
     ) {
-        let changed = out.stdout.lines().filter(|l| !l.trim().is_empty()).count();
-        if out.exit_code == Some(0) && changed > 0 {
+        let changed: Vec<&str> = out
+            .stdout
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .collect();
+        if out.exit_code == Some(0) && !changed.is_empty() {
+            let shown = changed
+                .iter()
+                .take(5)
+                .copied()
+                .collect::<Vec<_>>()
+                .join(", ");
+            let more = if changed.len() > 5 { ", ..." } else { "" };
             notes.push(format!(
-                "{changed} uncommitted change(s) in the worker's clone were not collected \
-                 (the agent may have ended early)"
+                "{} uncommitted change(s) in the worker's clone were not collected \
+                 ({shown}{more}); the agent may have ended early",
+                changed.len()
             ));
         }
     }

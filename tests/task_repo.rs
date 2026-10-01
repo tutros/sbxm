@@ -164,6 +164,23 @@ fn the_workspace_clone_is_on_the_task_branch_with_the_hosts_identity() {
 }
 
 #[test]
+fn the_workspace_clone_never_converts_line_endings() {
+    // The user's own git config may say `core.autocrlf = true` (the Windows default). A
+    // checkout with CRLF files looks "modified" to the Linux git in the sandbox, so `git add -A`
+    // would commit whole-file line-ending changes: the clone pins the setting off.
+    let f = fixture();
+    repo::clone_bare(&source(&f), &f.repo_git).unwrap();
+    repo::create_branch(&f.repo_git, "issue-4", "main").unwrap();
+
+    repo::clone_workspace(&f.repo_git, &f.workspace, "issue-4", &identity()).unwrap();
+
+    assert_eq!(
+        git(&f.workspace, &["config", "--local", "core.autocrlf"]),
+        "false"
+    );
+}
+
+#[test]
 fn the_workspace_shares_no_objects_with_the_repo() {
     let f = fixture();
     repo::clone_bare(&source(&f), &f.repo_git).unwrap();
