@@ -156,6 +156,61 @@ pub(crate) fn run(
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// The `GIT_*` variables that keep working for [`user_output`]: where the user's own
+/// config and credentials come from. Every other one (`GIT_DIR`, `GIT_CONFIG_COUNT`, ...)
+/// could point git elsewhere or make it run code, so it is dropped.
+const USER_GIT_VARIABLES: [&str; 8] = [
+    "GIT_ASKPASS",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "GIT_SSL_CAINFO",
+    "GIT_CONFIG_GLOBAL",
+    "GIT_CONFIG_SYSTEM",
+    "GIT_CONFIG_NOSYSTEM",
+    "GIT_EXEC_PATH",
+];
+
+/// `git <args>` for the repo sbxm owns (`repo.git`) and for talking to GitHub, never for a
+/// repository an agent controls: the user's git config and credentials apply, because
+/// cloning, fetching and pushing need them (spec §6). `extra_env` is added last.
+pub(crate) fn user_output(
+    cwd: &Path,
+    args: &[&str],
+    extra_env: &[(&str, &OsStr)],
+) -> Result<Output> {
+    retry(TRIES, FIRST_DELAY, || {
+        let mut cmd = Command::new("git");
+        cmd.current_dir(cwd).args(args);
+        cmd.env_clear();
+        cmd.envs(std::env::vars_os().filter(|(name, _)| {
+            !is_git_variable(name)
+                || USER_GIT_VARIABLES
+                    .iter()
+                    .any(|allowed| name.to_string_lossy().eq_ignore_ascii_case(allowed))
+        }));
+        cmd.env("GIT_TERMINAL_PROMPT", "0");
+        for (name, value) in extra_env {
+            cmd.env(name, value);
+        }
+        cmd.output()
+            .context("cannot run `git`; is Git installed and on PATH?")
+    })
+}
+
+/// Like [`user_output`], but a non-zero exit is an error carrying git's message.
+pub(crate) fn user_run(cwd: &Path, args: &[&str]) -> Result<String> {
+    let out = user_output(cwd, args, &[])?;
+    if !out.status.success() {
+        bail!(
+            "`git {}` failed ({}): {}",
+            args.join(" "),
+            out.status,
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// Stages everything in `work_tree` (respecting its ignore files) and commits
 /// it as the single baseline; returns the commit id.
 pub(crate) fn baseline_commit(cwd: &Path, git_dir: &Path, work_tree: &Path) -> Result<String> {
