@@ -11,6 +11,43 @@ use sbxm::run::diff;
 use sbxm::seed;
 use tempfile::TempDir;
 
+const HOSTILE_GIT_CHILD: &str = "SBXM_HOSTILE_GIT_CHILD";
+
+/// Runs this test again in an isolated process with environment-based Git
+/// config that installs a clean filter. Returns true in that child process;
+/// the parent waits for it and proves the filter did not create its marker.
+fn in_hostile_git_child(test_name: &str) -> bool {
+    if std::env::var_os(HOSTILE_GIT_CHILD).as_deref() == Some(test_name.as_ref()) {
+        return true;
+    }
+
+    let temp = TempDir::new().unwrap();
+    let marker = temp.path().join("PWNED");
+    let filter = format!(
+        "echo pwned > \"{}\"",
+        marker.to_string_lossy().replace(char::from(92), "/")
+    );
+    let output = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", test_name, "--nocapture"])
+        .env(HOSTILE_GIT_CHILD, test_name)
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", "filter.probe.clean")
+        .env("GIT_CONFIG_VALUE_0", filter)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "child test failed:\n{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !marker.exists(),
+        "inherited Git config ran a command on the host"
+    );
+    false
+}
+
 /// Plain `git` for setting up and inspecting fixtures (the code under test
 /// uses its own hardened invocation).
 fn git(dir: &Path, args: &[&str]) -> String {
@@ -93,6 +130,21 @@ fn seeding_copies_the_files_into_a_repo_with_one_baseline_commit() {
     assert_eq!(git(&ws, &["rev-parse", "HEAD"]), id);
     // The working tree starts clean.
     assert_eq!(git(&ws, &["status", "--porcelain"]), "");
+}
+
+#[test]
+fn inherited_git_config_never_runs_during_baseline_commit() {
+    if !in_hostile_git_child("inherited_git_config_never_runs_during_baseline_commit") {
+        return;
+    }
+
+    let f = Fixture::new();
+    let seed = f.seed();
+    write(&seed.join(".gitattributes"), "* filter=probe\n");
+
+    let id = seed::seed_contestant(&seed, &f.workspace(), &f.git_dir()).unwrap();
+
+    assert_eq!(id.len(), 40);
 }
 
 #[test]
@@ -229,6 +281,23 @@ fn a_seeded_diff_shows_modified_new_and_deleted_files() {
         patch.contains("diff --git a/sub/b.txt b/sub/b.txt") && patch.contains("deleted file mode"),
         "{patch}"
     );
+}
+
+#[test]
+fn inherited_git_config_never_runs_during_seeded_diff() {
+    if !in_hostile_git_child("inherited_git_config_never_runs_during_seeded_diff") {
+        return;
+    }
+
+    let f = Fixture::new();
+    let id = f.seeded();
+    let ws = f.workspace();
+    write(&ws.join(".gitattributes"), "* filter=probe\n");
+    write(&ws.join("new.txt"), "new\n");
+
+    let patch = diff::seeded(&f.git_dir(), &ws, &id).unwrap().patch;
+
+    assert!(patch.contains("diff --git a/new.txt b/new.txt"), "{patch}");
 }
 
 #[test]
@@ -375,6 +444,22 @@ fn an_unseeded_diff_lists_every_new_file_with_clean_paths() {
         !patch.contains("workspace/") && !patch.contains("snap"),
         "{patch}"
     );
+}
+
+#[test]
+fn inherited_git_config_never_runs_during_unseeded_diff() {
+    if !in_hostile_git_child("inherited_git_config_never_runs_during_unseeded_diff") {
+        return;
+    }
+
+    let f = Fixture::new();
+    let ws = unseeded_workspace(&f);
+    write(&ws.join(".gitattributes"), "* filter=probe\n");
+    write(&ws.join("new.txt"), "new\n");
+
+    let patch = diff::unseeded(&ws).unwrap().patch;
+
+    assert!(patch.contains("diff --git a/new.txt b/new.txt"), "{patch}");
 }
 
 #[test]
