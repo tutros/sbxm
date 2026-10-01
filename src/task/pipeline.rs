@@ -504,11 +504,25 @@ pub fn run_gates(
     if tiers.host && sandbox_ok && !gates.host.is_empty() {
         let id = prepared.record.id.clone();
         let checkout = prepared.workspace.with_file_name(format!("{id}-gates"));
-        match repo::clean_checkout(
-            &prepared.meta.join("repo.git"),
-            &prepared.record.branch,
-            &checkout,
-        ) {
+        // A folder left by a killed run (or one a build still held) must not fail this run.
+        let cleared = if checkout.exists() {
+            remove_with_retries(&checkout).map_err(|e| {
+                anyhow::anyhow!(
+                    "could not clear {}, left by an earlier run: {e}; close whatever uses it and \
+                     delete it by hand",
+                    checkout.display()
+                )
+            })
+        } else {
+            Ok(())
+        };
+        match cleared.and_then(|()| {
+            repo::clean_checkout(
+                &prepared.meta.join("repo.git"),
+                &prepared.record.branch,
+                &checkout,
+            )
+        }) {
             Ok(()) => {
                 outcomes.extend(gates::run_host_tier(
                     env.host,

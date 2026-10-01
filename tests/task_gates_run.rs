@@ -240,6 +240,39 @@ fn host_gates_run_in_a_clean_checkout_of_the_committed_branch_which_is_removed_a
 }
 
 #[test]
+fn a_leftover_checkout_from_an_earlier_run_is_cleared_not_reported_as_a_gate_failure() {
+    let f = config("\"cargo test\"", "\"cargo build\"");
+    let backend = playing(&f);
+    let mut prepared = worked(&f, &backend);
+    // What a killed sbxm (or a build that still held the folder) leaves behind.
+    let checkout = f.env.base_dir().join("tasks").join("issue-41-gates");
+    fs::create_dir_all(checkout.join("target")).unwrap();
+    fs::write(checkout.join("stale.txt"), "from an earlier run\n").unwrap();
+    let saw_stale = Arc::new(Mutex::new(None));
+    let saw_stale_in_hook = Arc::clone(&saw_stale);
+    let host = FakeHostRunner::default().with_hook(move |cwd, _| {
+        *saw_stale_in_hook.lock().unwrap() = Some(cwd.join("stale.txt").exists());
+    });
+
+    let gated = run_gates(
+        &f,
+        &backend,
+        &host,
+        &mut prepared,
+        "after-worker",
+        Tiers::ALL,
+    );
+
+    assert!(gated.passed, "{:?}", gated.failed);
+    assert_eq!(
+        *saw_stale.lock().unwrap(),
+        Some(false),
+        "the host gate ran in a clean checkout"
+    );
+    assert!(!checkout.exists());
+}
+
+#[test]
 fn a_failing_host_gate_is_gates_failed_and_the_checkout_is_still_removed() {
     let f = config("\"cargo test\"", "\"cargo build\"");
     let backend = playing(&f);
