@@ -119,8 +119,10 @@ pub fn check_can_gate(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
     }
 }
 
-/// What running gates needs from the outside world (less than a whole [`Ctx`]: no GitHub).
-pub struct GateEnv<'a> {
+/// What running gates and reviews need from the outside world (less than a whole [`Ctx`]: no
+/// GitHub, no clone source).
+pub struct TaskEnv<'a> {
+    pub config_dir: &'a Path,
     pub config: &'a TaskConfig,
     pub backend: &'a dyn SandboxBackend,
     pub probe: &'a dyn ProcessProbe,
@@ -128,8 +130,9 @@ pub struct GateEnv<'a> {
 }
 
 impl Ctx<'_> {
-    pub fn gate_env(&self) -> GateEnv<'_> {
-        GateEnv {
+    pub fn env(&self) -> TaskEnv<'_> {
+        TaskEnv {
+            config_dir: self.config_dir,
             config: self.config,
             backend: self.backend,
             probe: self.probe,
@@ -414,7 +417,7 @@ fn start_one(ctx: &Ctx, number: u32) -> TaskReport {
         // A failed worker is not gated; a timed-out one is (its partial commits count).
         if !matches!(worked.status, RunStatus::Failed(_)) {
             gates = Some(run_gates(
-                &ctx.gate_env(),
+                &ctx.env(),
                 &mut prepared,
                 "after-worker",
                 Tiers::ALL,
@@ -489,7 +492,7 @@ fn gates_log_entry(phase: &str, outcomes: &[GateOutcome]) -> String {
 /// of the task branch from `repo.git`, which is removed afterwards. The stage is written before
 /// anything runs; results go to the record and `gates.log`; the first failure stops a tier.
 pub fn run_gates(
-    env: &GateEnv,
+    env: &TaskEnv,
     prepared: &mut Prepared,
     phase: &str,
     tiers: Tiers,
@@ -716,7 +719,7 @@ pub fn run_worker(ctx: &Ctx, prepared: &mut Prepared) -> Result<Worked> {
     record::write(&prepared.meta, &prepared.record)?;
 
     let mut notes = Vec::new();
-    let commits = collect(ctx, prepared, &sandbox, &mut status, &mut notes)?;
+    let commits = collect(ctx.backend, prepared, &sandbox, &mut status, &mut notes)?;
     prepared.record.notes.extend(notes.iter().cloned());
     record::write(&prepared.meta, &prepared.record)?;
     Ok(Worked {
@@ -729,7 +732,7 @@ pub fn run_worker(ctx: &Ctx, prepared: &mut Prepared) -> Result<Worked> {
 /// Brings the worker's commits, `result.md` and a note about unsaved work to the host. A failure
 /// to collect marks the worker failed (with a note); it is not an `Err`.
 fn collect(
-    ctx: &Ctx,
+    backend: &dyn SandboxBackend,
     prepared: &mut Prepared,
     sandbox: &str,
     status: &mut RunStatus,
@@ -753,7 +756,7 @@ fn collect(
     // The fixed bundle command runs in the sandbox; nothing runs git in the agent's clone here.
     let origin = format!("^origin/{base}");
     let mut commits = 0;
-    match ctx.backend.exec(
+    match backend.exec(
         sandbox,
         &in_sandbox(&[
             "git",
@@ -790,7 +793,7 @@ fn collect(
     }
 
     // Work the agent left uncommitted is not collected: say so (the agent may have ended early).
-    if let Ok(out) = ctx.backend.exec(
+    if let Ok(out) = backend.exec(
         sandbox,
         &in_sandbox(&["git", "-C", &ws, "status", "--porcelain"]),
     ) {
@@ -894,20 +897,19 @@ pub struct ReviewReport {
 /// no fix round was used yet: one fix round by the worker, its commits collected, gates again and
 /// one more review. The task ends `ready` (findings left are reported, not an error), or stops
 /// where gates failed or a step failed.
-pub fn review_issue(ctx: &Ctx, prepared: &mut Prepared) -> Result<ReviewReport> {
-    check_can_review(&prepared.record, ctx.probe)?;
+pub fn review_issue(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewReport> {
+    check_can_review(&prepared.record, env.probe)?;
     let mut report = ReviewReport {
-        warnings: check_reviewer(ctx, prepared)?,
+        warnings: check_reviewer(env, prepared)?,
         ..ReviewReport::default()
     };
-    let env = ctx.gate_env();
 
     let gates_current = matches!(
         (prepared.record.stage, prepared.record.status),
         (Stage::Gating, Status::Passed) | (Stage::Reviewing, Status::Failed)
     );
     if !gates_current {
-        let gated = run_gates(&env, prepared, "before-review", Tiers::ALL)?;
+        let gated = run_gates(env, prepared, "before-review", Tiers::ALL)?;
         if let Some(failed) = gated.failed {
             report.gates_failed = Some(failed);
             return Ok(report);
@@ -916,16 +918,16 @@ pub fn review_issue(ctx: &Ctx, prepared: &mut Prepared) -> Result<ReviewReport> 
 
     let mut round = if prepared.record.fix_round { 2 } else { 1 };
     loop {
-        let reviewed = run_reviewer(ctx, prepared, round)?;
+        let reviewed = run_reviewer(env, prepared, round)?;
         report.must_fix_left = reviewed.must_fix;
         let must_fix = reviewed.must_fix;
         report.rounds.push(reviewed);
         if must_fix == 0 || prepared.record.fix_round {
             break;
         }
-        run_fix_round(ctx, prepared)?;
+        run_fix_round(env, prepared)?;
         report.fix_ran = true;
-        let gated = run_gates(&env, prepared, "after-fix", Tiers::ALL)?;
+        let gated = run_gates(env, prepared, "after-fix", Tiers::ALL)?;
         if let Some(failed) = gated.failed {
             report.gates_failed = Some(failed);
             return Ok(report);
@@ -935,7 +937,7 @@ pub fn review_issue(ctx: &Ctx, prepared: &mut Prepared) -> Result<ReviewReport> 
 
     prepared
         .record
-        .advance(Stage::Ready, now(), Process::current(ctx.probe))?;
+        .advance(Stage::Ready, now(), Process::current(env.probe))?;
     record::write(&prepared.meta, &prepared.record)?;
     Ok(report)
 }
@@ -943,8 +945,8 @@ pub fn review_issue(ctx: &Ctx, prepared: &mut Prepared) -> Result<ReviewReport> 
 /// The one fix round (spec §5.2): the worker, in its own sandbox, gets the review and a fix
 /// prompt; its new commits are collected like the first time. A failed run, or commits that can't
 /// be collected, stop the review (the task is `fixing/failed`).
-fn run_fix_round(ctx: &Ctx, prepared: &mut Prepared) -> Result<()> {
-    let worker = &ctx.config.worker;
+fn run_fix_round(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
+    let worker = &env.config.worker;
     let sandbox = prepared
         .record
         .worker
@@ -954,13 +956,13 @@ fn run_fix_round(ctx: &Ctx, prepared: &mut Prepared) -> Result<()> {
         .clone();
     prepared
         .record
-        .advance(Stage::Fixing, now(), Process::current(ctx.probe))?;
+        .advance(Stage::Fixing, now(), Process::current(env.probe))?;
     prepared.record.fix_round = true;
     record::write(&prepared.meta, &prepared.record)?;
 
     let review = fs::read_to_string(prepared.meta.join("review.md"))
         .context("the review to fix is missing; run the review again")?;
-    let template = prompts::template(Role::Fix, &ctx.config.prompts)?;
+    let template = prompts::template(Role::Fix, &env.config.prompts)?;
     let prompt = prompts::render(
         &template.name,
         &template.text,
@@ -970,8 +972,8 @@ fn run_fix_round(ctx: &Ctx, prepared: &mut Prepared) -> Result<()> {
             ("branch", &prepared.record.branch),
             ("base", &prepared.record.base),
             ("repo", &prepared.record.repo),
-            ("gates_sandbox", &bullets(&ctx.config.gates.sandbox)),
-            ("gates_host", &bullets(&ctx.config.gates.host)),
+            ("gates_sandbox", &bullets(&env.config.gates.sandbox)),
+            ("gates_host", &bullets(&env.config.gates.host)),
             ("review_path", ".sbxm-task/review.md"),
             ("previous_review_path", ".sbxm-task/previous-review.md"),
         ],
@@ -983,7 +985,7 @@ fn run_fix_round(ctx: &Ctx, prepared: &mut Prepared) -> Result<()> {
     fs::write(prepared.meta.join("fix-prompt.md"), &prompt)?;
 
     let result = match headless::run(
-        ctx.backend,
+        env.backend,
         &sandbox,
         &in_sandbox_path(&prepared.workspace),
         worker.harness,
@@ -1018,7 +1020,7 @@ fn run_fix_round(ctx: &Ctx, prepared: &mut Prepared) -> Result<()> {
     }
 
     let mut notes = Vec::new();
-    collect(ctx, prepared, &sandbox, &mut status, &mut notes)?;
+    collect(env.backend, prepared, &sandbox, &mut status, &mut notes)?;
     prepared
         .record
         .notes
@@ -1039,18 +1041,18 @@ pub struct Reviewed {
 
 /// Checks before a review creates anything (spec §5.2): the reviewer's provider secret and the
 /// profile's secrets are stored, and the profile loads. Returns the warnings to print.
-pub fn check_reviewer(ctx: &Ctx, _task: &Prepared) -> Result<Vec<String>> {
-    let global = GlobalConfig::load(ctx.config_dir)?;
-    let reviewer = &ctx.config.reviewer;
-    let profile = Profile::load(global.profiles_dir(), &ctx.config.sandbox.profile)?;
+pub fn check_reviewer(env: &TaskEnv, _task: &Prepared) -> Result<Vec<String>> {
+    let global = GlobalConfig::load(env.config_dir)?;
+    let reviewer = &env.config.reviewer;
+    let profile = Profile::load(global.profiles_dir(), &env.config.sandbox.profile)?;
     check_secrets(
-        ctx.backend,
+        env.backend,
         reviewer.harness,
         "the reviewer",
-        &ctx.config.sandbox.profile,
+        &env.config.sandbox.profile,
         &profile,
     )?;
-    let mut warnings = ctx.config.warnings.clone();
+    let mut warnings = env.config.warnings.clone();
     warnings.extend(
         reviewer
             .harness
@@ -1064,9 +1066,9 @@ pub fn check_reviewer(ctx: &Ctx, _task: &Prepared) -> Result<Vec<String>> {
 /// nothing of the worker's), writes `review.md`, and sbxm saves it as `review-<round>.md` (and
 /// `review.md`) under the reviewer's name. The sandbox and the clone are removed afterwards,
 /// also when the round fails; a failed round leaves the task `reviewing/failed` and nothing used.
-pub fn run_reviewer(ctx: &Ctx, prepared: &mut Prepared, round: u32) -> Result<Reviewed> {
+pub fn run_reviewer(env: &TaskEnv, prepared: &mut Prepared, round: u32) -> Result<Reviewed> {
     let id = prepared.record.id.clone();
-    let reviewer = &ctx.config.reviewer;
+    let reviewer = &env.config.reviewer;
     let clone = prepared.workspace.with_file_name(format!("{id}-review"));
     let sandbox = format!("sbxm-task-{id}-review-{}", reviewer.harness.as_str());
 
@@ -1078,13 +1080,13 @@ pub fn run_reviewer(ctx: &Ctx, prepared: &mut Prepared, round: u32) -> Result<Re
 
     prepared
         .record
-        .begin_review(now(), Process::current(ctx.probe))?;
+        .begin_review(now(), Process::current(env.probe))?;
     record::write(&prepared.meta, &prepared.record)?;
 
-    let result = review_round(ctx, prepared, round, &clone, &sandbox, previous.as_deref());
+    let result = review_round(env, prepared, round, &clone, &sandbox, previous.as_deref());
 
     // Always: the reviewer's sandbox and clone are gone, whatever happened.
-    let _ = ctx.backend.remove(&sandbox);
+    let _ = env.backend.remove(&sandbox);
     if let Err(e) = remove_with_retries(&clone) {
         prepared
             .record
@@ -1110,33 +1112,33 @@ pub fn run_reviewer(ctx: &Ctx, prepared: &mut Prepared, round: u32) -> Result<Re
 }
 
 fn review_round(
-    ctx: &Ctx,
+    env: &TaskEnv,
     prepared: &mut Prepared,
     round: u32,
     clone: &Path,
     sandbox: &str,
     previous: Option<&str>,
 ) -> Result<Reviewed> {
-    let reviewer = &ctx.config.reviewer;
+    let reviewer = &env.config.reviewer;
     let repo_git = prepared.meta.join("repo.git");
     let branch = prepared.record.branch.clone();
 
     // A clone left by a killed run (and its sandbox) goes first.
     if clone.exists() {
-        let _ = ctx.backend.remove(sandbox);
+        let _ = env.backend.remove(sandbox);
         remove_with_retries(clone)
             .with_context(|| format!("cannot clear {}, left by an earlier run", clone.display()))?;
     }
     let kit_set = kits::build_for(
-        ctx.config_dir,
-        &ctx.config.sandbox.profile,
+        env.config_dir,
+        &env.config.sandbox.profile,
         &[reviewer.harness],
         &Overrides {
-            cpus: ctx.config.sandbox.cpus,
-            memory: ctx.config.sandbox.memory.clone(),
+            cpus: env.config.sandbox.cpus,
+            memory: env.config.sandbox.memory.clone(),
         },
         &prepared.meta.join("kits-review"),
-        ctx.backend,
+        env.backend,
     )?;
     let harness_kits = kit_set
         .get(reviewer.harness)
@@ -1154,7 +1156,7 @@ fn review_round(
     if let Some(text) = previous {
         fs::write(agent_dir.join("previous-review.md"), text)?;
     }
-    let template = prompts::template(Role::Reviewer, &ctx.config.prompts)?;
+    let template = prompts::template(Role::Reviewer, &env.config.prompts)?;
     let prompt = prompts::render(
         &template.name,
         &template.text,
@@ -1164,8 +1166,8 @@ fn review_round(
             ("branch", &branch),
             ("base", &prepared.record.base),
             ("repo", &prepared.record.repo),
-            ("gates_sandbox", &bullets(&ctx.config.gates.sandbox)),
-            ("gates_host", &bullets(&ctx.config.gates.host)),
+            ("gates_sandbox", &bullets(&env.config.gates.sandbox)),
+            ("gates_host", &bullets(&env.config.gates.host)),
             ("review_path", ".sbxm-task/review.md"),
             ("previous_review_path", ".sbxm-task/previous-review.md"),
         ],
@@ -1176,7 +1178,7 @@ fn review_round(
         &prompt,
     )?;
 
-    ctx.backend
+    env.backend
         .create(&CreateSpec {
             name: sandbox.to_owned(),
             agent: reviewer.harness.agent_arg().into(),
@@ -1198,7 +1200,7 @@ fn review_round(
 
     let started = Instant::now();
     let result = headless::run(
-        ctx.backend,
+        env.backend,
         sandbox,
         &in_sandbox_path(clone),
         reviewer.harness,

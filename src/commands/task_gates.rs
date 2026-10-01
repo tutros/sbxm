@@ -12,7 +12,7 @@ use crate::config::GlobalConfig;
 use crate::run::orchestrate::in_sandbox_path;
 use crate::task::config::TaskConfig;
 use crate::task::gates::HostRunner;
-use crate::task::pipeline::{self, GateEnv, Prepared, Tiers};
+use crate::task::pipeline::{self, Prepared, TaskEnv, Tiers};
 use crate::task::record::ProcessProbe;
 
 pub struct Options {
@@ -62,7 +62,8 @@ pub fn run(
 
     let mut prepared = Prepared::open(&base_dir, &id)?;
     pipeline::check_can_gate(&prepared.record, probe)?;
-    let env = GateEnv {
+    let env = TaskEnv {
+        config_dir,
         config: &config,
         backend,
         probe,

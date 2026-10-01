@@ -65,7 +65,7 @@ fn review(
 ) -> anyhow::Result<ReviewReport> {
     let github = FakeGitHub::default();
     let source = source(f);
-    pipeline::review_issue(&ctx(f, &source, backend, &github), prepared)
+    pipeline::review_issue(&ctx(f, &source, backend, &github).env(), prepared)
 }
 
 fn count(backend: &FakeBackend, needle: &str) -> usize {
@@ -118,7 +118,7 @@ fn gates_that_already_passed_are_not_run_again_before_the_review() {
     let source = source(&f);
     let context = ctx(&f, &source, &backend, &github);
     pipeline::run_gates(
-        &context.gate_env(),
+        &context.env(),
         &mut prepared,
         "after-worker",
         pipeline::Tiers::ALL,

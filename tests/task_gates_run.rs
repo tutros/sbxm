@@ -70,7 +70,7 @@ fn run_gates(
     let github = FakeGitHub::default();
     let source = source(f);
     let ctx = ctx_with_host(f, &source, backend, &github, host);
-    pipeline::run_gates(&ctx.gate_env(), prepared, phase, tiers).unwrap()
+    pipeline::run_gates(&ctx.env(), prepared, phase, tiers).unwrap()
 }
 
 #[test]

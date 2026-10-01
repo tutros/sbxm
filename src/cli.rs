@@ -185,6 +185,28 @@ pub enum TaskCommand {
         #[arg(long)]
         repo: Option<String>,
     },
+    /// Review a task: gates, an independent reviewer in its own sandbox, at most one fix round by
+    /// the worker, gates and a second review; ends ready. Blocks until it is done.
+    Review {
+        /// The issue's task.
+        #[arg(long, value_name = "N")]
+        issue: u32,
+        /// The reviewer's harness (default: sbxm-task.toml, else one different from the worker's).
+        #[arg(long, value_enum)]
+        reviewer_harness: Option<Harness>,
+        /// The reviewer's model (default: the harness's own).
+        #[arg(long)]
+        reviewer_model: Option<String>,
+        /// The reviewer's time limit, e.g. 45m.
+        #[arg(long)]
+        reviewer_time_limit: Option<String>,
+        /// The worker's time limit for the fix round, e.g. 2h.
+        #[arg(long)]
+        time_limit: Option<String>,
+        /// The sandbox profile (default: sbxm-task.toml).
+        #[arg(long)]
+        profile: Option<String>,
+    },
     /// Run a task's gates now (the checks that decide whether its work may go on), or with
     /// --dry-run say what would run and where.
     Gates {

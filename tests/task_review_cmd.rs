@@ -1,0 +1,304 @@
+//! M2b slice 8, step 5: `sbxm task review --issue N` as a command (spec §4, §5.2).
+
+mod common;
+
+use common::task_fixture::{
+    CLAUDE_DONE, CODEX_DONE, Fixture, Play, Probe, fixture_with, ok, play_reviews, play_tasks,
+    worked_task,
+};
+use sbxm::backend::{ExecOutput, FakeBackend};
+use sbxm::commands::task_review::{Options, run};
+use sbxm::harness::Harness;
+use sbxm::task::gates::FakeHostRunner;
+use sbxm::task::record;
+
+fn config(reviewer: &str) -> Fixture {
+    fixture_with(&format!(
+        "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = [\"cargo test\"]\n\n\
+         [reviewer]\nharness = \"{reviewer}\"\n"
+    ))
+}
+
+const CLEAN: &str = "Must-fix findings: 0\n\nNothing found.\n";
+const ONE: &str = "Must-fix findings: 1\n\n1. must-fix: a.txt:1 wrong.\n";
+
+fn backend(f: &Fixture, reviews: &[&str]) -> FakeBackend {
+    let worker = play_tasks(
+        &f.env.base_dir(),
+        "main",
+        Play {
+            commits: vec!["a.txt".into()],
+            result_md: Some(b"done\n".to_vec()),
+            bundle_bytes: None,
+        },
+    );
+    let reviewer = play_reviews(
+        &f.env.base_dir(),
+        "issue-41",
+        reviews.iter().map(|s| (*s).to_owned()).collect(),
+    );
+    FakeBackend::with_secrets(&["anthropic", "openai"])
+        .with_exec_output_matching("claude", ok(CLAUDE_DONE))
+        .with_exec_output_matching("codex", ok(CODEX_DONE))
+        .with_exec_hook(move |sandbox, spec| {
+            worker(sandbox, spec);
+            reviewer(sandbox, spec);
+        })
+}
+
+fn options(f: &Fixture) -> Options {
+    Options {
+        repo_root: f.env.tmp.path().join("target-repo"),
+        issue: 41,
+        reviewer_harness: None,
+        reviewer_model: None,
+        reviewer_time_limit: None,
+        time_limit: None,
+        profile: None,
+    }
+}
+
+struct Out {
+    result: anyhow::Result<()>,
+    out: String,
+    warn: String,
+}
+
+fn go(f: &Fixture, opts: &Options, backend: &FakeBackend) -> Out {
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let result = run(
+        &f.env.config_dir(),
+        opts,
+        backend,
+        &Probe,
+        &FakeHostRunner::default(),
+        &mut out,
+        &mut warn,
+    );
+    Out {
+        result,
+        out: String::from_utf8(out).unwrap(),
+        warn: String::from_utf8(warn).unwrap(),
+    }
+}
+
+fn meta(f: &Fixture) -> std::path::PathBuf {
+    record::task_dir(&f.env.base_dir(), "issue-41")
+}
+
+#[test]
+fn a_clean_review_prints_the_round_and_where_the_review_is() {
+    let f = config("codex");
+    let backend = backend(&f, &[CLEAN]);
+    worked_task(&f, &backend);
+
+    let out = go(&f, &options(&f), &backend);
+
+    out.result.unwrap();
+    assert!(
+        out.out
+            .contains("issue-41: review round 1: 0 must-fix finding(s)"),
+        "{}",
+        out.out
+    );
+    assert!(out.out.contains("issue-41: ready"), "{}", out.out);
+    assert!(
+        out.out
+            .contains(&meta(&f).join("review.md").display().to_string()),
+        "{}",
+        out.out
+    );
+    assert!(
+        out.out.contains("sbxm task finish --issue 41"),
+        "{}",
+        out.out
+    );
+}
+
+#[test]
+fn must_fix_findings_show_the_fix_round_and_the_second_review() {
+    let f = config("codex");
+    let backend = backend(&f, &[ONE, CLEAN]);
+    worked_task(&f, &backend);
+
+    let out = go(&f, &options(&f), &backend);
+
+    out.result.unwrap();
+    let text = &out.out;
+    assert!(text.contains("review round 1: 1 must-fix"), "{text}");
+    assert!(text.contains("fix round ran"), "{text}");
+    assert!(text.contains("review round 2: 0 must-fix"), "{text}");
+    assert!(text.contains("issue-41: ready"), "{text}");
+}
+
+#[test]
+fn findings_left_after_the_fix_round_are_reported_and_the_command_still_succeeds() {
+    let f = config("codex");
+    let backend = backend(&f, &[ONE, ONE]);
+    worked_task(&f, &backend);
+
+    let out = go(&f, &options(&f), &backend);
+
+    out.result.unwrap();
+    assert!(
+        out.out.contains("1 must-fix finding(s) left"),
+        "{}",
+        out.out
+    );
+    assert!(
+        out.out.contains("sbxm task file-findings --issue 41"),
+        "{}",
+        out.out
+    );
+}
+
+#[test]
+fn failing_gates_fail_the_command_and_no_reviewer_runs() {
+    let f = config("codex");
+    let good = backend(&f, &[CLEAN]);
+    worked_task(&f, &good);
+    let red = FakeBackend::with_secrets(&["anthropic", "openai"]).with_exec_output_matching(
+        "cargo test",
+        ExecOutput {
+            stdout: String::new(),
+            stderr: "red\n".into(),
+            exit_code: Some(101),
+        },
+    );
+
+    let out = go(&f, &options(&f), &red);
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(
+        message.contains("gates failed") && message.contains("cargo test"),
+        "{message}"
+    );
+    assert!(
+        out.out.contains("gates failed") && out.out.contains("gates.log"),
+        "{}",
+        out.out
+    );
+    assert!(red.creates().is_empty());
+}
+
+#[test]
+fn a_reviewer_that_fails_fails_the_command() {
+    let f = config("codex");
+    let good = backend(&f, &[CLEAN]);
+    worked_task(&f, &good);
+    let broken =
+        FakeBackend::with_secrets(&["anthropic", "openai"]).with_failing_exec_matching("codex");
+
+    let out = go(&f, &options(&f), &broken);
+
+    assert!(out.result.is_err());
+}
+
+#[test]
+fn the_reviewer_flags_override_the_file_and_are_checked_before_anything_is_created() {
+    let f = config("codex");
+    let good = backend(&f, &[CLEAN]);
+    worked_task(&f, &good);
+    let mut opts = options(&f);
+    opts.reviewer_harness = Some(Harness::Antigravity);
+    let before = good.creates().len();
+
+    let out = go(&f, &opts, &good);
+
+    // Antigravity needs the `google` secret, which is not stored.
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("google"), "{message}");
+    assert_eq!(good.creates().len(), before, "nothing was created");
+}
+
+#[test]
+fn a_harness_that_cannot_run_headless_is_refused_before_anything_happens() {
+    let f = config("codex");
+    let good = backend(&f, &[CLEAN]);
+    worked_task(&f, &good);
+    let mut opts = options(&f);
+    opts.reviewer_harness = Some(Harness::Pi);
+    let before = good.execs().len();
+
+    let message = format!("{:#}", go(&f, &opts, &good).result.unwrap_err());
+
+    assert!(
+        message.contains("pi") && message.contains("claude, codex or antigravity"),
+        "{message}"
+    );
+    assert_eq!(good.execs().len(), before);
+}
+
+#[test]
+fn a_bad_time_limit_is_refused_before_anything_happens() {
+    let f = config("codex");
+    let good = backend(&f, &[CLEAN]);
+    worked_task(&f, &good);
+    let mut opts = options(&f);
+    opts.reviewer_time_limit = Some("soon".into());
+    let before = good.execs().len();
+
+    let message = format!("{:#}", go(&f, &opts, &good).result.unwrap_err());
+
+    assert!(
+        message.contains("soon") && message.contains("duration"),
+        "{message}"
+    );
+    assert_eq!(good.execs().len(), before);
+}
+
+#[test]
+fn a_reviewer_like_the_worker_warns_on_the_warning_writer() {
+    let f = config("claude");
+    let good = FakeBackend::with_secrets(&["anthropic"])
+        .with_exec_output_matching("claude", ok(CLAUDE_DONE))
+        .with_exec_hook({
+            let worker = play_tasks(
+                &f.env.base_dir(),
+                "main",
+                Play {
+                    commits: vec!["a.txt".into()],
+                    result_md: Some(b"done\n".to_vec()),
+                    bundle_bytes: None,
+                },
+            );
+            move |sandbox, spec| worker(sandbox, spec)
+        });
+    worked_task(&f, &good);
+
+    // The claude reviewer writes no review.md in this fake, so the review itself fails; the
+    // warning must already have been printed.
+    let out = go(&f, &options(&f), &good);
+
+    assert!(out.warn.contains("same harness"), "{}", out.warn);
+}
+
+#[test]
+fn a_task_that_does_not_exist_is_refused_with_how_to_list_them() {
+    let f = config("codex");
+    let message = format!(
+        "{:#}",
+        go(&f, &options(&f), &backend(&f, &[CLEAN]))
+            .result
+            .unwrap_err()
+    );
+    assert!(
+        message.contains("no task issue-41") && message.contains("sbxm task status"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_missing_config_file_says_how_to_make_one() {
+    let f = config("codex");
+    let mut opts = options(&f);
+    opts.repo_root = f.env.tmp.path().join("nowhere");
+    let message = format!(
+        "{:#}",
+        go(&f, &opts, &backend(&f, &[CLEAN])).result.unwrap_err()
+    );
+    assert!(
+        message.contains("sbxm-task.toml") && message.contains("sbxm task init"),
+        "{message}"
+    );
+}

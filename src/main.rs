@@ -243,6 +243,33 @@ fn main() -> anyhow::Result<()> {
                 &mut std::io::stderr(),
             )
         }
+        Command::Task {
+            command:
+                TaskCommand::Review {
+                    issue,
+                    reviewer_harness,
+                    reviewer_model,
+                    reviewer_time_limit,
+                    time_limit,
+                    profile,
+                },
+        } => commands::task_review::run(
+            &config::config_dir()?,
+            &commands::task_review::Options {
+                repo_root: std::env::current_dir()?,
+                issue,
+                reviewer_harness,
+                reviewer_model,
+                reviewer_time_limit,
+                time_limit,
+                profile,
+            },
+            &SbxBackend,
+            &task::record::SystemProbe,
+            &task::gates::ShellHostRunner,
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+        ),
         Command::Run(_) => unreachable!("clap requires a config or a subcommand"),
         Command::Config {
             command: ConfigCommand::Init,

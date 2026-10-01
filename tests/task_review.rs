@@ -65,8 +65,7 @@ fn gated(f: &Fixture, backend: &FakeBackend) -> Prepared {
     let github = FakeGitHub::default();
     let source = common::task_fixture::source(f);
     let ctx = ctx(f, &source, backend, &github);
-    let gated =
-        pipeline::run_gates(&ctx.gate_env(), &mut prepared, "after-worker", Tiers::ALL).unwrap();
+    let gated = pipeline::run_gates(&ctx.env(), &mut prepared, "after-worker", Tiers::ALL).unwrap();
     assert!(gated.passed);
     prepared
 }
@@ -79,7 +78,7 @@ fn round(
 ) -> anyhow::Result<pipeline::Reviewed> {
     let github = FakeGitHub::default();
     let source = common::task_fixture::source(f);
-    pipeline::run_reviewer(&ctx(f, &source, backend, &github), prepared, round)
+    pipeline::run_reviewer(&ctx(f, &source, backend, &github).env(), prepared, round)
 }
 
 const CLEAN: &str = "Must-fix findings: 0\n\nChecked the diff against the issue; nothing found.\n";
@@ -404,7 +403,8 @@ fn the_reviewers_secret_is_checked_before_anything_is_created() {
 
     let message = format!(
         "{:#}",
-        pipeline::check_reviewer(&ctx(&f, &source, &backend, &github), &prepared).unwrap_err()
+        pipeline::check_reviewer(&ctx(&f, &source, &backend, &github).env(), &prepared)
+            .unwrap_err()
     );
 
     assert!(
@@ -426,7 +426,7 @@ fn the_check_returns_the_same_harness_warning_for_a_reviewer_like_the_worker() {
     let source = common::task_fixture::source(&f);
 
     let warnings =
-        pipeline::check_reviewer(&ctx(&f, &source, &backend, &github), &prepared).unwrap();
+        pipeline::check_reviewer(&ctx(&f, &source, &backend, &github).env(), &prepared).unwrap();
 
     assert!(
         warnings.iter().any(|w| w.contains("same harness")),
