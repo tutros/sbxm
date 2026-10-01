@@ -56,10 +56,8 @@ fn each_pick_gets_its_own_task_sandbox_and_collected_commits() {
         assert_eq!(worked.status, RunStatus::Completed, "#{}", report.number);
         assert_eq!(worked.commits, 1, "#{}", report.number);
         let task = record::read(&meta(&f, report.number).join("task.json")).unwrap();
-        assert_eq!(
-            (task.stage, task.status),
-            (Stage::Working, Status::Completed)
-        );
+        // The worker finished and its gates (the fixture's defaults, in the fake sandbox) passed.
+        assert_eq!((task.stage, task.status), (Stage::Gating, Status::Passed));
         assert_eq!(
             task.worker.unwrap().sandbox,
             format!("sbxm-task-issue-{}-claude", report.number)

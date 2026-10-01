@@ -154,6 +154,61 @@ fn a_failed_task_is_reported_and_the_command_fails() {
 }
 
 #[test]
+fn passing_gates_are_reported_after_the_worker_line() {
+    let f = fixture();
+    let (backend, github) = (playing(&f), github());
+
+    let out = run(&f, &options(&f), &backend, &github);
+
+    out.result.unwrap();
+    assert!(
+        out.out.contains("gates: passed (2 sandbox, 0 host)"),
+        "{}",
+        out.out
+    );
+    assert!(
+        out.out.contains("sbxm task review --issue 41"),
+        "{}",
+        out.out
+    );
+}
+
+#[test]
+fn failing_gates_fail_the_command_and_say_where_to_look() {
+    let f = fixture();
+    let backend = playing(&f).with_exec_output_matching(
+        "cargo test",
+        sbxm::backend::ExecOutput {
+            stdout: String::new(),
+            stderr: "1 test failed\n".into(),
+            exit_code: Some(101),
+        },
+    );
+
+    let out = run(&f, &options(&f), &backend, &github());
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("1 of 1"), "{message}");
+    assert!(
+        out.out
+            .contains("gates: failed: `cargo test` (sandbox, exit 101)"),
+        "{}",
+        out.out
+    );
+    assert!(out.out.contains("gates.log"), "{}", out.out);
+    assert!(
+        out.out.contains("sbxm task gates --issue 41"),
+        "{}",
+        out.out
+    );
+    assert!(
+        !out.out.contains("sbxm task review --issue 41"),
+        "{}",
+        out.out
+    );
+}
+
+#[test]
 fn notes_from_the_worker_are_printed() {
     let f = fixture();
     let backend = playing(&f).with_exec_output_matching("status", ok(" M a.rs\n"));

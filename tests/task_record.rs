@@ -170,6 +170,63 @@ fn failed_gates_stop_the_task() {
 }
 
 #[test]
+fn gating_can_begin_after_the_worker_and_again_after_a_pass_or_a_failure() {
+    let mut record = new_record();
+    record
+        .advance(Stage::Working, T0, Process::new(1, T0))
+        .unwrap();
+    record.finish(Status::Completed).unwrap();
+    record.begin_gating(T0 + 1, Process::new(1, T0)).unwrap();
+    assert_eq!(
+        (record.stage, record.status),
+        (Stage::Gating, Status::Running)
+    );
+    record.finish(Status::GatesFailed).unwrap();
+
+    // The user fixed something by hand and runs the gates again.
+    record.begin_gating(T0 + 2, Process::new(1, T0)).unwrap();
+    assert_eq!(
+        (record.stage, record.status),
+        (Stage::Gating, Status::Running)
+    );
+    record.finish(Status::Passed).unwrap();
+    record.begin_gating(T0 + 3, Process::new(1, T0)).unwrap();
+    assert_eq!(
+        record
+            .stages
+            .iter()
+            .filter(|s| s.stage == Stage::Gating)
+            .count(),
+        3
+    );
+}
+
+#[test]
+fn gating_cannot_begin_while_gates_are_running_or_from_the_wrong_stage() {
+    let mut record = new_record();
+    record
+        .advance(Stage::Working, T0, Process::new(1, T0))
+        .unwrap();
+    // Still running the worker.
+    assert!(record.begin_gating(T0, Process::new(1, T0)).is_err());
+    record.finish(Status::Completed).unwrap();
+    record.begin_gating(T0, Process::new(1, T0)).unwrap();
+    // Gates are running now.
+    let message = format!(
+        "{:#}",
+        record.begin_gating(T0, Process::new(1, T0)).unwrap_err()
+    );
+    assert!(message.contains("running"), "{message}");
+
+    let mut reviewing = new_record();
+    reviewing
+        .advance(Stage::Reviewing, T0, Process::new(1, T0))
+        .unwrap();
+    reviewing.finish(Status::Completed).unwrap();
+    assert!(reviewing.begin_gating(T0, Process::new(1, T0)).is_err());
+}
+
+#[test]
 fn a_status_that_does_not_belong_to_the_stage_is_refused() {
     let mut record = new_record();
     record

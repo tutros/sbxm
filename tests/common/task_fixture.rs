@@ -9,6 +9,7 @@ use sbxm::backend::{ExecOutput, ExecSpec, FakeBackend};
 use sbxm::github::fake::FakeGitHub;
 use sbxm::github::{Issue, IssueText};
 use sbxm::task::config::TaskConfig;
+use sbxm::task::gates::{FakeHostRunner, HostRunner};
 use sbxm::task::pipeline::Ctx;
 use sbxm::task::record::ProcessProbe;
 use sbxm::task::repo::Identity;
@@ -79,7 +80,20 @@ pub fn ctx<'a>(
     backend: &'a FakeBackend,
     github: &'a FakeGitHub,
 ) -> Ctx<'a> {
+    // Host gates off in most tests; a runner that records everything and runs nothing.
+    let host: &'static FakeHostRunner = Box::leak(Box::default());
+    ctx_with_host(f, source, backend, github, host)
+}
+
+pub fn ctx_with_host<'a>(
+    f: &'a Fixture,
+    source: &'a str,
+    backend: &'a FakeBackend,
+    github: &'a FakeGitHub,
+    host: &'a dyn HostRunner,
+) -> Ctx<'a> {
     Ctx {
+        host,
         config_dir: Box::leak(Box::new(f.env.config_dir())),
         repo: "o/r",
         clone_source: source,

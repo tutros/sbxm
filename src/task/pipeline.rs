@@ -9,9 +9,10 @@ use anyhow::{Context, Result, bail};
 use std::time::Instant;
 
 use super::config::TaskConfig;
+use super::gates::{self, GateOutcome, HostRunner};
 use super::prompts::{self, Role};
 use super::record::{
-    self, Agent, Kind, NewTask, Process, ProcessProbe, Record, RunInfo, Stage, Status,
+    self, Agent, GateResult, Kind, NewTask, Process, ProcessProbe, Record, RunInfo, Stage, Status,
 };
 use super::repo::{self, AgentFile, BUNDLE_CAP, Identity};
 use super::select::{self, Selection};
@@ -40,6 +41,8 @@ pub struct Ctx<'a> {
     /// The committer identity the agent's commits carry.
     pub identity: &'a Identity,
     pub probe: &'a dyn ProcessProbe,
+    /// Runs host-tier gates (never the agent's own commands anywhere else).
+    pub host: &'a dyn HostRunner,
 }
 
 /// A task that is ready for its worker.
@@ -274,6 +277,8 @@ pub struct TaskReport {
     /// `Err` is a refusal or a failure before or while running; the task's own folders are
     /// already cleaned up when it happened before the record existed.
     pub result: Result<Worked>,
+    /// The gates after the worker; `None` when the worker failed or never ran.
+    pub gates: Option<Result<Gated>>,
 }
 
 /// Starts a task for each of `numbers` at the same time (`--workers`, decision 144): each gets
@@ -295,6 +300,7 @@ pub fn start(ctx: &Ctx, numbers: &[u32]) -> Vec<TaskReport> {
                     result: Err(anyhow::anyhow!(
                         "the task for issue #{number} stopped unexpectedly"
                     )),
+                    gates: None,
                 })
             })
             .collect()
@@ -303,17 +309,189 @@ pub fn start(ctx: &Ctx, numbers: &[u32]) -> Vec<TaskReport> {
 
 fn start_one(ctx: &Ctx, number: u32) -> TaskReport {
     let mut warnings = Vec::new();
+    let mut gates = None;
     let result = (|| {
         let issue = ctx.github.issue(ctx.repo, number)?;
         let mut prepared = prepare(ctx, &issue)?;
         warnings.clone_from(&prepared.warnings);
-        run_worker(ctx, &mut prepared)
+        let worked = run_worker(ctx, &mut prepared)?;
+        // A failed worker is not gated; a timed-out one is (its partial commits count).
+        if !matches!(worked.status, RunStatus::Failed(_)) {
+            gates = Some(run_gates(ctx, &mut prepared, "after-worker", Tiers::ALL));
+        }
+        Ok(worked)
     })();
     TaskReport {
         number,
         warnings,
         result,
+        gates,
     }
+}
+
+/// Which gate tiers to run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Tiers {
+    pub sandbox: bool,
+    pub host: bool,
+}
+
+impl Tiers {
+    pub const ALL: Self = Self {
+        sandbox: true,
+        host: true,
+    };
+    pub const SANDBOX: Self = Self {
+        sandbox: true,
+        host: false,
+    };
+    pub const HOST: Self = Self {
+        sandbox: false,
+        host: true,
+    };
+}
+
+/// How the gates went.
+#[derive(Debug)]
+pub struct Gated {
+    pub passed: bool,
+    /// The first gate that failed, if any.
+    pub failed: Option<GateResult>,
+    pub outcomes: Vec<GateOutcome>,
+}
+
+fn gates_log_entry(phase: &str, outcomes: &[GateOutcome]) -> String {
+    if outcomes.is_empty() {
+        return format!("== {phase}: no gates configured\n\n");
+    }
+    let mut log = String::new();
+    for outcome in outcomes {
+        let result = &outcome.result;
+        let exit = result
+            .exit
+            .map_or_else(|| "no exit code".to_owned(), |code| format!("exit {code}"));
+        log.push_str(&format!(
+            "== {phase} {}: {}\n{}: {exit}{}\n{}\n\n",
+            result.tier,
+            result.command,
+            if result.passed { "passed" } else { "failed" },
+            if outcome.timed_out { ", timed out" } else { "" },
+            outcome.output_tail.trim_end(),
+        ));
+    }
+    log
+}
+
+/// Spec §5.1 step 5 and §7: runs the gates of the chosen `tiers`. The sandbox tier runs in the
+/// worker's sandbox on its workspace; the host tier (only when listed, and only after the
+/// sandbox tier passed, unless it was asked for alone) runs on this machine in a clean checkout
+/// of the task branch from `repo.git`, which is removed afterwards. The stage is written before
+/// anything runs; results go to the record and `gates.log`; the first failure stops a tier.
+pub fn run_gates(ctx: &Ctx, prepared: &mut Prepared, phase: &str, tiers: Tiers) -> Result<Gated> {
+    let gates = &ctx.config.gates;
+    let sandbox = prepared
+        .record
+        .worker
+        .as_ref()
+        .context("the task has no worker")?
+        .sandbox
+        .clone();
+    prepared
+        .record
+        .begin_gating(now(), Process::current(ctx.probe))?;
+    record::write(&prepared.meta, &prepared.record)?;
+
+    let mut outcomes = Vec::new();
+    let mut sandbox_ok = true;
+    if tiers.sandbox {
+        let ran = gates::run_sandbox_tier(
+            ctx.backend,
+            &sandbox,
+            &in_sandbox_path(&prepared.workspace),
+            phase,
+            &gates.sandbox,
+            gates.timeout,
+        );
+        sandbox_ok = ran.iter().all(|o| o.result.passed);
+        outcomes.extend(ran);
+    }
+    if tiers.host && sandbox_ok && !gates.host.is_empty() {
+        let id = prepared.record.id.clone();
+        let checkout = prepared.workspace.with_file_name(format!("{id}-gates"));
+        match repo::clean_checkout(
+            &prepared.meta.join("repo.git"),
+            &prepared.record.branch,
+            &checkout,
+        ) {
+            Ok(()) => {
+                outcomes.extend(gates::run_host_tier(
+                    ctx.host,
+                    &checkout,
+                    phase,
+                    &gates.host,
+                    gates.timeout,
+                ));
+                if let Err(e) = remove_with_retries(&checkout) {
+                    prepared
+                        .record
+                        .notes
+                        .push(format!("could not remove {}: {e}", checkout.display()));
+                }
+            }
+            Err(e) => outcomes.push(GateOutcome {
+                result: GateResult {
+                    phase: phase.to_owned(),
+                    tier: "host".to_owned(),
+                    command: "(clean checkout)".to_owned(),
+                    exit: None,
+                    passed: false,
+                },
+                output_tail: format!("{e:#}"),
+                timed_out: false,
+            }),
+        }
+    }
+
+    let failed = outcomes
+        .iter()
+        .find(|o| !o.result.passed)
+        .map(|o| o.result.clone());
+    let log_path = prepared.meta.join("gates.log");
+    let mut log = fs::read_to_string(&log_path).unwrap_or_default();
+    log.push_str(&gates_log_entry(phase, &outcomes));
+    fs::write(&log_path, log)?;
+    prepared
+        .record
+        .gates
+        .extend(outcomes.iter().map(|o| o.result.clone()));
+    prepared.record.finish(if failed.is_some() {
+        Status::GatesFailed
+    } else {
+        Status::Passed
+    })?;
+    record::write(&prepared.meta, &prepared.record)?;
+    Ok(Gated {
+        passed: failed.is_none(),
+        failed,
+        outcomes,
+    })
+}
+
+/// Removes a folder a build may still hold files in for a moment (antivirus, indexers).
+fn remove_with_retries(dir: &Path) -> std::io::Result<()> {
+    let mut last = Ok(());
+    for attempt in 0..5 {
+        match fs::remove_dir_all(dir) {
+            Ok(()) => return Ok(()),
+            Err(e) if !dir.exists() => {
+                let _ = e;
+                return Ok(());
+            }
+            Err(e) => last = Err(e),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100 << attempt));
+    }
+    last
 }
 
 /// What the worker is told on its command line; the real prompt is a file (decision 131), since

@@ -7,14 +7,16 @@ use std::path::PathBuf;
 use anyhow::{Result, anyhow, bail};
 
 use crate::backend::SandboxBackend;
+use crate::config::GlobalConfig;
 use crate::git;
 use crate::github::GitHubBackend;
 use crate::harness::Harness;
 use crate::headless::RunStatus;
 use crate::run::config::{headless_harness, parse_duration};
 use crate::task::config::TaskConfig;
+use crate::task::gates::ShellHostRunner;
 use crate::task::pipeline::{self, Ctx};
-use crate::task::record::ProcessProbe;
+use crate::task::record::{self, ProcessProbe};
 use crate::task::repo::{self, Identity};
 
 pub struct Options {
@@ -159,6 +161,7 @@ pub fn run(
         github,
         identity: &identity,
         probe,
+        host: &ShellHostRunner,
     };
     let selection = if opts.issues.is_empty() {
         pipeline::select_issues(&ctx, None, opts.workers.unwrap_or(1))?
@@ -179,6 +182,7 @@ pub fn run(
         .collect();
     writeln!(out, "Starting {} ...", names.join(", "))?;
     let reports = pipeline::start(&ctx, &selection.picks);
+    let base_dir = GlobalConfig::load(config_dir)?.base_dir;
 
     let mut failed = 0;
     for report in &reports {
@@ -201,9 +205,59 @@ pub fn run(
                 for note in &worked.notes {
                     writeln!(out, "  note: {note}")?;
                 }
+                // `gates_ok`: the gates passed (or none were configured); a failed worker has none.
+                let mut gates_ok = !bad;
+                match &report.gates {
+                    Some(Ok(gated)) if gated.passed => {
+                        let count = |tier: &str| {
+                            gated
+                                .outcomes
+                                .iter()
+                                .filter(|o| o.result.tier == tier)
+                                .count()
+                        };
+                        if gated.outcomes.is_empty() {
+                            writeln!(out, "  gates: none configured")?;
+                        } else {
+                            writeln!(
+                                out,
+                                "  gates: passed ({} sandbox, {} host)",
+                                count("sandbox"),
+                                count("host")
+                            )?;
+                        }
+                    }
+                    Some(Ok(gated)) => {
+                        gates_ok = false;
+                        if let Some(first) = &gated.failed {
+                            let exit = first
+                                .exit
+                                .map_or_else(|| "no exit code".to_owned(), |c| format!("exit {c}"));
+                            writeln!(
+                                out,
+                                "  gates: failed: `{}` ({}, {exit}); output in {}",
+                                first.command,
+                                first.tier,
+                                record::task_dir(&base_dir, &id).join("gates.log").display()
+                            )?;
+                        }
+                    }
+                    Some(Err(e)) => {
+                        gates_ok = false;
+                        writeln!(out, "  gates: could not run: {e:#}")?;
+                    }
+                    None => {}
+                }
                 if bad {
                     failed += 1;
                     writeln!(out, "  see: sbxm task status --issue {}", report.number)?;
+                } else if !gates_ok {
+                    failed += 1;
+                    writeln!(
+                        out,
+                        "  next: fix it in the worker's clone, then run: sbxm task gates --issue {}",
+                        report.number
+                    )?;
                 } else {
                     writeln!(out, "  next: sbxm task review --issue {}", report.number)?;
                 }

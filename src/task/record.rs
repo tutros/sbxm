@@ -300,6 +300,27 @@ impl Record {
         Ok(())
     }
 
+    /// Starts the gates: after the worker or the fix round, or again after earlier gates passed or
+    /// failed (the user changed something and wants them re-run). Refused while gates are running.
+    pub fn begin_gating(&mut self, now: u64, process: Process) -> Result<()> {
+        if self.stage != Stage::Gating {
+            return self.advance(Stage::Gating, now, process);
+        }
+        if self.status == Status::Running {
+            bail!(
+                "task {} is already running its gates; wait for them, or see `sbxm task status`",
+                self.id
+            );
+        }
+        self.status = Status::Running;
+        self.stages.push(Stamp {
+            stage: Stage::Gating,
+            at: format_timestamp(now),
+        });
+        self.process = Some(process);
+        Ok(())
+    }
+
     /// Ends the current stage with `status`, which must belong to the stage.
     pub fn finish(&mut self, status: Status) -> Result<()> {
         if !self.stage.statuses().contains(&status) {
