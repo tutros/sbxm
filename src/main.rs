@@ -81,6 +81,15 @@ fn main() -> anyhow::Result<()> {
             command: ConfigCommand::Init,
         } => commands::config_init::run(),
         Command::Config {
+            command: ConfigCommand::ProfilesDir,
+        } => {
+            print!(
+                "{}",
+                commands::config_profiles_dir::render(&config::config_dir()?)?
+            );
+            Ok(())
+        }
+        Command::Config {
             command:
                 ConfigCommand::Show {
                     project,

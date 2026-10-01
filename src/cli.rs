@@ -100,4 +100,6 @@ pub enum ConfigCommand {
         #[arg(long, value_enum, default_value_t)]
         harness: Harness,
     },
+    /// Print the folder profiles are read from (for scripts), or fail like any command would.
+    ProfilesDir,
 }

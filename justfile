@@ -2,6 +2,7 @@
 # Recipes run sbxm through `cargo run`, so they always use the current code.
 # Run `just install` for a plain `sbxm` command on your PATH.
 
+set shell := ["pwsh", "-NoLogo", "-NoProfile", "-Command"]
 set windows-shell := ["pwsh.exe", "-NoLogo", "-NoProfile", "-Command"]
 
 sbxm := "cargo run --quiet --"
@@ -76,7 +77,7 @@ test:
 
 # Pester tests for scripts/issue-workers.ps1 (needs Pester 5: `Install-Module Pester -MinimumVersion 5 -Scope CurrentUser`).
 script-test:
-    Import-Module Pester -MinimumVersion 5; Invoke-Pester scripts/tests -Output Minimal -CI
+    Import-Module Pester -MinimumVersion 5.0.0; Invoke-Pester scripts/tests -Output Minimal -CI
 
 # Everything that must pass before a commit.
 check:
@@ -88,6 +89,10 @@ check:
 # Run the tests against the real sbx (needs `sbx login` and a base dir not on C:).
 real-test base_dir='E:\sbxm-it':
     $env:SBXM_REAL_BASE_DIR = '{{base_dir}}'; cargo test --test real_sbx -- --ignored
+
+# Copy profiles/* into the profiles_dir sbxm reads, asking `sbxm config profiles-dir` (see scripts/deploy-profiles.ps1).
+deploy-profiles:
+    ./scripts/deploy-profiles.ps1 -ProfilesDirCommand { cargo run --quiet -- config profiles-dir }
 
 # Install `sbxm` on your PATH from this checkout.
 install:
