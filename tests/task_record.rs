@@ -272,6 +272,55 @@ fn only_running_gates_can_be_given_up() {
 }
 
 #[test]
+fn a_review_can_begin_after_the_gates_and_again_after_a_failed_review() {
+    let mut record = new_record();
+    record
+        .advance(Stage::Working, T0, Process::new(1, T0))
+        .unwrap();
+    record.finish(Status::Completed).unwrap();
+    record.begin_gating(T0, Process::new(1, T0)).unwrap();
+    record.finish(Status::Passed).unwrap();
+
+    record.begin_review(T0 + 1, Process::new(1, T0)).unwrap();
+    assert_eq!(
+        (record.stage, record.status),
+        (Stage::Reviewing, Status::Running)
+    );
+    record.finish(Status::Failed).unwrap();
+
+    // The reviewer failed: the same round is tried again.
+    record.begin_review(T0 + 2, Process::new(1, T0)).unwrap();
+    assert_eq!(
+        (record.stage, record.status),
+        (Stage::Reviewing, Status::Running)
+    );
+    assert_eq!(
+        record
+            .stages
+            .iter()
+            .filter(|s| s.stage == Stage::Reviewing)
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn a_review_cannot_begin_while_running_or_once_it_is_complete() {
+    let mut record = new_record();
+    record
+        .advance(Stage::Reviewing, T0, Process::new(1, T0))
+        .unwrap();
+    let message = format!(
+        "{:#}",
+        record.begin_review(T0, Process::new(1, T0)).unwrap_err()
+    );
+    assert!(message.contains("running"), "{message}");
+
+    record.finish(Status::Completed).unwrap();
+    assert!(record.begin_review(T0, Process::new(1, T0)).is_err());
+}
+
+#[test]
 fn a_status_that_does_not_belong_to_the_stage_is_refused() {
     let mut record = new_record();
     record

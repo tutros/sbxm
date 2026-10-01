@@ -831,6 +831,205 @@ fn collect(
 /// The biggest `review.md` read from the reviewer's clone.
 const REVIEW_CAP: u64 = 1024 * 1024;
 
+/// What the worker is told for the fix round; the prompt itself is a file.
+const FIX_PROMPT: &str =
+    "Read the file .sbxm-task/fix-prompt.md in the current directory and follow it exactly.";
+
+/// Whether a review may start now (`task review`). The reason for a refusal says what to do.
+pub fn check_can_review(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
+    let id = &task.id;
+    let number = task.number;
+    match (task.stage, task.status) {
+        (Stage::Working | Stage::Fixing, Status::Completed | Status::TimedOut)
+        | (Stage::Gating, Status::Passed | Status::GatesFailed)
+        | (Stage::Reviewing, Status::Failed) => Ok(()),
+        (Stage::Working | Stage::Fixing, Status::Running) => {
+            if task.is_interrupted(probe) {
+                bail!(
+                    "task {id} was interrupted while its {} stage was running; see `sbxm task status --issue {number}`",
+                    task.stage.name()
+                )
+            }
+            bail!(
+                "the worker is still running for task {id} (worker still running); wait for `sbxm task start` to finish"
+            )
+        }
+        (Stage::Working | Stage::Fixing, _) => bail!(
+            "the worker failed for task {id}, so there is nothing to review; see `sbxm task status --issue {number}`"
+        ),
+        // Gates whose process is gone are given up and run again by the review itself.
+        (Stage::Gating, Status::Running) if task.is_interrupted(probe) => Ok(()),
+        (Stage::Gating, _) => bail!(
+            "gates are running for task {id}, or were interrupted; see `sbxm task status --issue {number}`"
+        ),
+        (Stage::Reviewing, _) => bail!(
+            "task {id} is already being reviewed or has been (stage reviewing); see `sbxm task status --issue {number}`"
+        ),
+        (Stage::Prepared, _) => {
+            bail!("no worker has run for task {id}; run `sbxm task start` first")
+        }
+        (stage @ (Stage::Ready | Stage::Finished), _) => bail!(
+            "task {id} is already {}; the review is review.md in its folder",
+            stage.name()
+        ),
+    }
+}
+
+/// How a whole review went.
+#[derive(Debug, Default)]
+pub struct ReviewReport {
+    /// One entry per reviewer round that finished (one or two).
+    pub rounds: Vec<Reviewed>,
+    /// Whether the single fix round ran.
+    pub fix_ran: bool,
+    /// Set when gates failed before a review or after the fix round: the review stops there.
+    pub gates_failed: Option<GateResult>,
+    /// Must-fix findings in the last review (reported, not an error).
+    pub must_fix_left: u32,
+    pub warnings: Vec<String>,
+}
+
+/// Spec §5.2, issue tasks: checks first (nothing is created if a secret is missing), gates when
+/// they haven't passed since the last change, a reviewer, and if it found must-fix problems and
+/// no fix round was used yet: one fix round by the worker, its commits collected, gates again and
+/// one more review. The task ends `ready` (findings left are reported, not an error), or stops
+/// where gates failed or a step failed.
+pub fn review_issue(ctx: &Ctx, prepared: &mut Prepared) -> Result<ReviewReport> {
+    check_can_review(&prepared.record, ctx.probe)?;
+    let mut report = ReviewReport {
+        warnings: check_reviewer(ctx, prepared)?,
+        ..ReviewReport::default()
+    };
+    let env = ctx.gate_env();
+
+    let gates_current = matches!(
+        (prepared.record.stage, prepared.record.status),
+        (Stage::Gating, Status::Passed) | (Stage::Reviewing, Status::Failed)
+    );
+    if !gates_current {
+        let gated = run_gates(&env, prepared, "before-review", Tiers::ALL)?;
+        if let Some(failed) = gated.failed {
+            report.gates_failed = Some(failed);
+            return Ok(report);
+        }
+    }
+
+    let mut round = if prepared.record.fix_round { 2 } else { 1 };
+    loop {
+        let reviewed = run_reviewer(ctx, prepared, round)?;
+        report.must_fix_left = reviewed.must_fix;
+        let must_fix = reviewed.must_fix;
+        report.rounds.push(reviewed);
+        if must_fix == 0 || prepared.record.fix_round {
+            break;
+        }
+        run_fix_round(ctx, prepared)?;
+        report.fix_ran = true;
+        let gated = run_gates(&env, prepared, "after-fix", Tiers::ALL)?;
+        if let Some(failed) = gated.failed {
+            report.gates_failed = Some(failed);
+            return Ok(report);
+        }
+        round = 2;
+    }
+
+    prepared
+        .record
+        .advance(Stage::Ready, now(), Process::current(ctx.probe))?;
+    record::write(&prepared.meta, &prepared.record)?;
+    Ok(report)
+}
+
+/// The one fix round (spec §5.2): the worker, in its own sandbox, gets the review and a fix
+/// prompt; its new commits are collected like the first time. A failed run, or commits that can't
+/// be collected, stop the review (the task is `fixing/failed`).
+fn run_fix_round(ctx: &Ctx, prepared: &mut Prepared) -> Result<()> {
+    let worker = &ctx.config.worker;
+    let sandbox = prepared
+        .record
+        .worker
+        .as_ref()
+        .context("the task has no worker")?
+        .sandbox
+        .clone();
+    prepared
+        .record
+        .advance(Stage::Fixing, now(), Process::current(ctx.probe))?;
+    prepared.record.fix_round = true;
+    record::write(&prepared.meta, &prepared.record)?;
+
+    let review = fs::read_to_string(prepared.meta.join("review.md"))
+        .context("the review to fix is missing; run the review again")?;
+    let template = prompts::template(Role::Fix, &ctx.config.prompts)?;
+    let prompt = prompts::render(
+        &template.name,
+        &template.text,
+        &[
+            ("issue", ""),
+            ("number", &prepared.record.number.to_string()),
+            ("branch", &prepared.record.branch),
+            ("base", &prepared.record.base),
+            ("repo", &prepared.record.repo),
+            ("gates_sandbox", &bullets(&ctx.config.gates.sandbox)),
+            ("gates_host", &bullets(&ctx.config.gates.host)),
+            ("review_path", ".sbxm-task/review.md"),
+            ("previous_review_path", ".sbxm-task/previous-review.md"),
+        ],
+    )?;
+    let agent_dir = prepared.workspace.join(AGENT_DIR);
+    fs::create_dir_all(&agent_dir)?;
+    fs::write(agent_dir.join("review.md"), &review)?;
+    fs::write(agent_dir.join("fix-prompt.md"), &prompt)?;
+    fs::write(prepared.meta.join("fix-prompt.md"), &prompt)?;
+
+    let result = match headless::run(
+        ctx.backend,
+        &sandbox,
+        &in_sandbox_path(&prepared.workspace),
+        worker.harness,
+        FIX_PROMPT,
+        &HeadlessOpts {
+            model: worker.model.clone(),
+            high_effort: false,
+            budget_usd: None,
+            is_git_repo: true,
+        },
+        worker.time_limit,
+    ) {
+        Ok(result) => result,
+        Err(e) => {
+            prepared.record.finish(Status::Failed)?;
+            record::write(&prepared.meta, &prepared.record)?;
+            return Err(e.context(format!("cannot run the fix round in {sandbox}")));
+        }
+    };
+    let transcripts = prepared.meta.join("transcripts");
+    fs::create_dir_all(&transcripts)?;
+    fs::write(transcripts.join("fix.jsonl"), &result.transcript)?;
+    let mut status = result.status;
+    prepared.record.finish(match &status {
+        RunStatus::Completed => Status::Completed,
+        RunStatus::TimedOut => Status::TimedOut,
+        RunStatus::Failed(_) => Status::Failed,
+    })?;
+    record::write(&prepared.meta, &prepared.record)?;
+    if let RunStatus::Failed(why) = &status {
+        bail!("the fix round failed ({why}); the worker's clone keeps whatever it did");
+    }
+
+    let mut notes = Vec::new();
+    collect(ctx, prepared, &sandbox, &mut status, &mut notes)?;
+    prepared
+        .record
+        .notes
+        .extend(notes.iter().map(|n| format!("fix round: {n}")));
+    record::write(&prepared.meta, &prepared.record)?;
+    if let RunStatus::Failed(why) = status {
+        bail!("the fix round's commits could not be collected ({why})");
+    }
+    Ok(())
+}
+
 /// What a reviewer round found.
 #[derive(Debug)]
 pub struct Reviewed {
@@ -879,7 +1078,7 @@ pub fn run_reviewer(ctx: &Ctx, prepared: &mut Prepared, round: u32) -> Result<Re
 
     prepared
         .record
-        .advance(Stage::Reviewing, now(), Process::current(ctx.probe))?;
+        .begin_review(now(), Process::current(ctx.probe))?;
     record::write(&prepared.meta, &prepared.record)?;
 
     let result = review_round(ctx, prepared, round, &clone, &sandbox, previous.as_deref());

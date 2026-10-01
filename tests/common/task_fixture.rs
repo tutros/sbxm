@@ -39,6 +39,25 @@ pub fn play_reviewer(
     }
 }
 
+/// Like [`play_reviewer`], but the n-th reviewer run writes `reviews[n]` (the last repeats).
+pub fn play_reviews(
+    base_dir: &Path,
+    task: &str,
+    reviews: Vec<String>,
+) -> impl Fn(&str, &ExecSpec) + Send + Sync + use<> {
+    let clone = base_dir.join("tasks").join(format!("{task}-review"));
+    let runs = std::sync::atomic::AtomicUsize::new(0);
+    move |_sandbox: &str, spec: &ExecSpec| {
+        if spec.argv.iter().any(|a| a == "codex") {
+            let n = runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let text = &reviews[n.min(reviews.len() - 1)];
+            let dir = clone.join(".sbxm-task");
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("review.md"), text).unwrap();
+        }
+    }
+}
+
 pub struct Probe;
 
 impl ProcessProbe for Probe {
@@ -208,8 +227,12 @@ pub fn play(
     let (base, branch) = (base.to_owned(), branch.to_owned());
     move |_sandbox: &str, spec: &ExecSpec| {
         if is_headless(spec) {
+            // Each headless run (the worker's, then a fix round's) writes different content, so
+            // each makes a real commit.
+            static RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let run = RUNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             for file in &what.commits {
-                fs::write(workspace.join(file), "x\n").unwrap();
+                fs::write(workspace.join(file), format!("x{run}\n")).unwrap();
                 git(&workspace, &["add", "-A"]);
                 git(&workspace, &["commit", "-q", "-m", file]);
             }

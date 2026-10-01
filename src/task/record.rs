@@ -321,6 +321,33 @@ impl Record {
         Ok(())
     }
 
+    /// Starts a review round: after the gates, or again after a review that failed. Refused while
+    /// one is running and once it is complete.
+    pub fn begin_review(&mut self, now: u64, process: Process) -> Result<()> {
+        if self.stage != Stage::Reviewing {
+            return self.advance(Stage::Reviewing, now, process);
+        }
+        match self.status {
+            Status::Failed => {
+                self.status = Status::Running;
+                self.stages.push(Stamp {
+                    stage: Stage::Reviewing,
+                    at: format_timestamp(now),
+                });
+                self.process = Some(process);
+                Ok(())
+            }
+            Status::Running => bail!(
+                "task {} is already running its review; wait for it, or see `sbxm task status`",
+                self.id
+            ),
+            _ => bail!(
+                "the review of task {} is complete; read review.md in its folder",
+                self.id
+            ),
+        }
+    }
+
     /// Gates that were running but whose `sbxm` process is gone (a crash, Ctrl-C) never finished:
     /// count them as failed so the gates can run again. Returns whether that happened.
     pub fn abandon_interrupted_gates(&mut self, probe: &dyn ProcessProbe) -> bool {
