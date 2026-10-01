@@ -115,6 +115,65 @@ worker = "prompts/worker.md"
     assert_eq!(config.prompts.reviewer, None);
 }
 
+fn same_harness_warnings(config: &TaskConfig) -> usize {
+    config
+        .warnings
+        .iter()
+        .filter(|w| w.contains("same harness"))
+        .count()
+}
+
+#[test]
+fn changing_the_worker_harness_re_defaults_a_reviewer_nobody_chose() {
+    let dir = repo(MINIMAL, true);
+    let mut config = TaskConfig::load(dir.path()).unwrap();
+    assert_eq!(
+        (config.worker.harness, config.reviewer.harness),
+        (Harness::Claude, Harness::Codex)
+    );
+
+    config.set_worker_harness(Harness::Codex);
+
+    // Codex can't review itself by default: the next harness in the order that differs.
+    assert_eq!(
+        (config.worker.harness, config.reviewer.harness),
+        (Harness::Codex, Harness::Claude)
+    );
+    assert_eq!(same_harness_warnings(&config), 0);
+}
+
+#[test]
+fn a_reviewer_set_in_the_file_stays_when_the_worker_changes_and_warns_if_they_match() {
+    let dir = repo(&format!("{MINIMAL}[reviewer]\nharness = \"codex\"\n"), true);
+    let mut config = TaskConfig::load(dir.path()).unwrap();
+    assert_eq!(same_harness_warnings(&config), 0);
+
+    config.set_worker_harness(Harness::Codex);
+
+    assert_eq!(config.reviewer.harness, Harness::Codex);
+    assert_eq!(same_harness_warnings(&config), 1);
+    // Setting the worker again to the same value doesn't repeat the warning.
+    config.set_worker_harness(Harness::Codex);
+    assert_eq!(same_harness_warnings(&config), 1);
+}
+
+#[test]
+fn choosing_a_reviewer_harness_warns_once_when_it_equals_the_worker_and_clears_when_it_differs() {
+    let dir = repo(MINIMAL, true);
+    let mut config = TaskConfig::load(dir.path()).unwrap();
+
+    config.set_reviewer_harness(Harness::Claude);
+    assert_eq!(same_harness_warnings(&config), 1);
+    config.set_reviewer_harness(Harness::Claude);
+    assert_eq!(same_harness_warnings(&config), 1);
+
+    config.set_reviewer_harness(Harness::Antigravity);
+    assert_eq!(same_harness_warnings(&config), 0);
+    // A chosen reviewer is kept when the worker changes later.
+    config.set_worker_harness(Harness::Codex);
+    assert_eq!(config.reviewer.harness, Harness::Antigravity);
+}
+
 #[test]
 fn a_gate_command_with_a_line_break_is_refused_naming_the_key() {
     // `sh -c` would run both lines but `cmd /C` stops at the first: never a silent drop.

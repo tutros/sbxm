@@ -104,8 +104,9 @@ pub fn run(
     // Everything that can be wrong with the inputs, before anything is created.
     let mut config = TaskConfig::load(&opts.repo_root)?;
     if let Some(harness) = opts.worker_harness {
-        config.worker.harness = headless_harness("--worker-harness", harness.as_str(), "tasks")
+        let harness = headless_harness("--worker-harness", harness.as_str(), "tasks")
             .map_err(|e| anyhow!(e))?;
+        config.set_worker_harness(harness);
     }
     if let Some(model) = &opts.worker_model {
         config.worker.model = Some(model.clone());

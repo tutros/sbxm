@@ -26,10 +26,30 @@ const RUST_GATES: [&str; 3] = [
 /// The reviewer default is the first of these that differs from the worker's [148].
 const REVIEWER_ORDER: [Harness; 3] = [Harness::Codex, Harness::Claude, Harness::Antigravity];
 
+/// The first of [`REVIEWER_ORDER`] that differs from the worker's harness [148].
+fn default_reviewer(worker: Harness) -> Harness {
+    REVIEWER_ORDER
+        .into_iter()
+        .find(|h| *h != worker)
+        .expect("the order has several harnesses")
+}
+
+const SAME_HARNESS: &str = "worker and reviewer use the same harness";
+
+fn same_harness_warning(harness: Harness) -> String {
+    format!(
+        "{SAME_HARNESS} ({}); the review is less independent, set [reviewer] harness to another \
+         to avoid it",
+        harness.as_str()
+    )
+}
+
 #[derive(Debug, Clone)]
 pub struct TaskConfig {
     pub worker: Role,
     pub reviewer: Role,
+    /// Whether the reviewer's harness was chosen (in the file or by a flag) rather than defaulted.
+    reviewer_chosen: bool,
     pub sandbox: Sandbox,
     pub gates: Gates,
     pub prompts: Prompts,
@@ -117,6 +137,32 @@ struct RawPrompts {
 }
 
 impl TaskConfig {
+    /// A flag changed the worker's harness: a reviewer nobody chose is chosen again to differ from
+    /// it, and the same-harness warning follows.
+    pub fn set_worker_harness(&mut self, harness: Harness) {
+        self.worker.harness = harness;
+        if !self.reviewer_chosen {
+            self.reviewer.harness = default_reviewer(harness);
+        }
+        self.refresh_warning();
+    }
+
+    /// A flag chose the reviewer's harness (it is kept from now on).
+    pub fn set_reviewer_harness(&mut self, harness: Harness) {
+        self.reviewer.harness = harness;
+        self.reviewer_chosen = true;
+        self.refresh_warning();
+    }
+
+    /// Exactly one same-harness warning while the two roles match, none otherwise.
+    fn refresh_warning(&mut self) {
+        self.warnings.retain(|w| !w.starts_with(SAME_HARNESS));
+        if self.worker.harness == self.reviewer.harness {
+            self.warnings
+                .push(same_harness_warning(self.worker.harness));
+        }
+    }
+
     /// Reads and validates `<repo_root>/sbxm-task.toml`.
     pub fn load(repo_root: &Path) -> Result<Self> {
         let path = repo_root.join(FILE_NAME);
@@ -161,23 +207,16 @@ impl Validator<'_> {
 
         let worker_harness = self.harness("worker.harness", raw.worker.harness.as_deref())?;
         let worker_harness = worker_harness.unwrap_or(Harness::Claude);
-        let reviewer_harness =
-            match self.harness("reviewer.harness", raw.reviewer.harness.as_deref())? {
-                Some(h) => {
-                    if h == worker_harness {
-                        warnings.push(format!(
-                            "worker and reviewer use the same harness ({}); the review is less \
-                         independent, set [reviewer] harness to another to avoid it",
-                            h.as_str()
-                        ));
-                    }
-                    h
+        let chosen_reviewer = self.harness("reviewer.harness", raw.reviewer.harness.as_deref())?;
+        let reviewer_harness = match chosen_reviewer {
+            Some(h) => {
+                if h == worker_harness {
+                    warnings.push(same_harness_warning(h));
                 }
-                None => REVIEWER_ORDER
-                    .into_iter()
-                    .find(|h| *h != worker_harness)
-                    .expect("the order has several harnesses"),
-            };
+                h
+            }
+            None => default_reviewer(worker_harness),
+        };
         let worker = self.role("worker", worker_harness, raw.worker, DEFAULT_WORKER_LIMIT)?;
         let reviewer = self.role(
             "reviewer",
@@ -196,6 +235,7 @@ impl Validator<'_> {
         Ok(TaskConfig {
             worker,
             reviewer,
+            reviewer_chosen: chosen_reviewer.is_some(),
             sandbox,
             gates,
             prompts,
