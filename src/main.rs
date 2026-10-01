@@ -176,6 +176,28 @@ fn main() -> anyhow::Result<()> {
             &mut std::io::stdout(),
             &mut std::io::stderr(),
         ),
+        Command::Task {
+            command:
+                TaskCommand::FileFindings {
+                    file,
+                    only,
+                    standard_criteria,
+                    keep_paths,
+                    repo,
+                },
+        } => commands::task_file_findings::run(
+            &commands::task_file_findings::Options {
+                source: commands::task_file_findings::Source::File(file),
+                repo_root: std::env::current_dir()?,
+                repo,
+                standard_criteria,
+                keep_paths,
+                only,
+            },
+            &sbxm::github::gh::GhBackend::default(),
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+        ),
         Command::Run(_) => unreachable!("clap requires a config or a subcommand"),
         Command::Config {
             command: ConfigCommand::Init,

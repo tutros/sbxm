@@ -10,6 +10,7 @@ pub mod run;
 pub mod run_init;
 pub mod run_show;
 pub mod stop;
+pub mod task_file_findings;
 pub mod task_init;
 pub mod task_start;
 pub mod task_status;

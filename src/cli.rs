@@ -188,4 +188,23 @@ pub enum TaskCommand {
         #[arg(long)]
         json: bool,
     },
+    /// File the findings of a review as GitHub issues, one per finding. A dry run: nothing is
+    /// filed or changed.
+    FileFindings {
+        /// A review file, e.g. sdlc/reviews/2026-10-01-milestone-2b.md.
+        #[arg(long, value_name = "F", required = true)]
+        file: PathBuf,
+        /// File only these finding ids (repeatable, or comma-separated).
+        #[arg(long = "only", value_name = "ID", value_delimiter = ',')]
+        only: Vec<String>,
+        /// File findings that have no acceptance criteria with only the standard ones.
+        #[arg(long)]
+        standard_criteria: bool,
+        /// Keep personal paths instead of replacing them with ~.
+        #[arg(long)]
+        keep_paths: bool,
+        /// The GitHub repo, owner/name (default: this checkout's origin).
+        #[arg(long)]
+        repo: Option<String>,
+    },
 }
