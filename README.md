@@ -294,6 +294,7 @@ check that `gh auth status` shows you logged in.
 ./scripts/issue-workers.ps1 start -Workers 2           # or choose them: -Issue 1,2
 ./scripts/issue-workers.ps1 status                     # agent running/finished, commits, result.md, review
 ./scripts/issue-workers.ps1 review -Issue 1            # host checks, independent review, one fix round
+./scripts/issue-workers.ps1 review -Issue 1 -GatesOnly # just fmt, clippy and tests on the clone, no reviewer
 ./scripts/issue-workers.ps1 review -Pr 12              # review any open PR and comment the result on it
 ./scripts/issue-workers.ps1 finish -Issue 1            # push issue-1 and open a PR with "Fixes #1" and the review
 ./scripts/issue-workers.ps1 remove -Issue 1            # after merging: sandbox and clone (asks first)

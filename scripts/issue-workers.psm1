@@ -367,6 +367,18 @@ function Invoke-Review([int]$n) {
     Write-Host "#${n}: review done; read $issueDir\review.md, then run finish"
 }
 
+# Only the host gates (fmt, clippy, tests), on the worker's clone: the cheap deterministic check after any change to
+# the branch, with no reviewer, sandbox or secret involved.
+function Invoke-GatesOnly([int]$n) {
+    $workspace = Get-Workspace $n
+    if (-not (Test-Path $workspace)) { throw "#${n}: no worker at $workspace" }
+    if (Test-AgentRunning $n) { throw "#${n}: the agent is still running; wait until status says finished" }
+    $log = Join-Path (Get-IssueDir $n) 'gates.log'
+    Remove-Item $log -ErrorAction SilentlyContinue
+    Invoke-Gates "#$n" $workspace $log
+    Write-Host "#${n}: gates passed (log: $log)"
+}
+
 # Reviews a PR's branch and posts the review as a PR comment (decision 87). No fix round: the author fixes and
 # runs it again.
 function Invoke-PrReview([int]$pr) {
