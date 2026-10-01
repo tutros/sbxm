@@ -1,0 +1,468 @@
+//! M2b slice 6, step 2: `task start`'s checks before acting and its prepare phase (spec §5.1
+//! steps 1 and 2): every refusal happens before a write, and a failure while preparing leaves
+//! nothing behind.
+
+mod common;
+
+use std::fs;
+use std::path::PathBuf;
+
+use common::{Env, git, git_origin};
+use sbxm::backend::FakeBackend;
+use sbxm::github::fake::FakeGitHub;
+use sbxm::github::{Issue, IssueText};
+use sbxm::task::config::TaskConfig;
+use sbxm::task::pipeline::{self, Ctx};
+use sbxm::task::record::{self, ProcessProbe, Stage, Status};
+use sbxm::task::repo::Identity;
+
+struct Probe;
+
+impl ProcessProbe for Probe {
+    fn start_time(&self, _pid: u32) -> Option<u64> {
+        Some(0)
+    }
+}
+
+struct Fixture {
+    env: Env,
+    origin: PathBuf,
+    config: TaskConfig,
+    identity: Identity,
+}
+
+fn fixture() -> Fixture {
+    fixture_with(
+        "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = [\"cargo test\", \"cargo fmt --check\"]\n",
+    )
+}
+
+fn fixture_with(task_toml: &str) -> Fixture {
+    let env = Env::new();
+    let origin = git_origin(env.tmp.path());
+    let repo_root = env.tmp.path().join("target-repo");
+    fs::create_dir_all(&repo_root).unwrap();
+    fs::write(repo_root.join("sbxm-task.toml"), task_toml).unwrap();
+    let config = TaskConfig::load(&repo_root).unwrap();
+    Fixture {
+        env,
+        origin,
+        config,
+        identity: Identity {
+            name: "Dev".into(),
+            email: "dev@example.com".into(),
+        },
+    }
+}
+
+fn issue_text(number: u32) -> IssueText {
+    IssueText {
+        number,
+        title: format!("Fix {number}"),
+        state: "OPEN".into(),
+        text: format!("title:\tFix {number}\nstate:\tOPEN\n--\n**Acceptance criteria:** do it\n"),
+    }
+}
+
+fn open_issue(number: u32, labels: &[&str], body: &str) -> Issue {
+    Issue {
+        number,
+        title: format!("Fix {number}"),
+        labels: labels.iter().map(|l| (*l).to_owned()).collect(),
+        body: body.to_owned(),
+    }
+}
+
+fn ctx<'a>(
+    f: &'a Fixture,
+    source: &'a str,
+    backend: &'a FakeBackend,
+    github: &'a FakeGitHub,
+) -> Ctx<'a> {
+    Ctx {
+        config_dir: Box::leak(Box::new(f.env.config_dir())),
+        repo: "o/r",
+        clone_source: source,
+        base_branch: "main",
+        config: &f.config,
+        backend,
+        github,
+        identity: &f.identity,
+        probe: &Probe,
+    }
+}
+
+fn source(f: &Fixture) -> String {
+    f.origin.to_str().unwrap().to_owned()
+}
+
+fn backend() -> FakeBackend {
+    FakeBackend::with_secrets(&["anthropic"])
+}
+
+fn base_has_nothing_new(f: &Fixture) -> bool {
+    // The shared containers may stay (empty); no task folder may.
+    let empty_or_absent =
+        |dir: PathBuf| fs::read_dir(dir).map_or(true, |mut entries| entries.next().is_none());
+    empty_or_absent(f.env.base_dir().join("tasks"))
+        && empty_or_absent(f.env.base_dir().join(".sbxm").join("tasks"))
+}
+
+#[test]
+fn a_prepared_task_has_its_folders_repo_clone_files_sandbox_and_record() {
+    let f = fixture();
+    let (backend, github) = (backend(), FakeGitHub::default());
+    let source = source(&f);
+
+    let prepared =
+        pipeline::prepare(&ctx(&f, &source, &backend, &github), &issue_text(41)).unwrap();
+
+    let meta = f
+        .env
+        .base_dir()
+        .join(".sbxm")
+        .join("tasks")
+        .join("issue-41");
+    let workspace = f.env.base_dir().join("tasks").join("issue-41");
+    assert_eq!(
+        (prepared.meta.as_path(), prepared.workspace.as_path()),
+        (meta.as_path(), workspace.as_path())
+    );
+    assert!(meta.join("repo.git").is_dir());
+    assert_eq!(git(&workspace, &["branch", "--show-current"]), "issue-41");
+    assert_eq!(
+        git(&workspace, &["config", "user.email"]),
+        "dev@example.com"
+    );
+
+    // The issue text goes in both places; the agent reads the copy in its workspace.
+    assert_eq!(
+        fs::read_to_string(meta.join("issue.md")).unwrap(),
+        issue_text(41).text
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.join(".sbxm-task").join("issue.md")).unwrap(),
+        issue_text(41).text
+    );
+    let prompt = fs::read_to_string(workspace.join(".sbxm-task").join("prompt.md")).unwrap();
+    assert!(
+        prompt.contains("#41") && prompt.contains("issue-41") && prompt.contains("- `cargo test`"),
+        "{prompt}"
+    );
+    assert_eq!(
+        fs::read_to_string(meta.join("worker-prompt.md")).unwrap(),
+        prompt
+    );
+
+    // The agent's `git add -A` must not pick up sbxm's own files.
+    let exclude = fs::read_to_string(workspace.join(".git").join("info").join("exclude")).unwrap();
+    assert!(exclude.lines().any(|l| l == ".sbxm-task/"), "{exclude}");
+
+    let record = record::read(&meta.join("task.json")).unwrap();
+    assert_eq!(
+        (record.stage, record.status),
+        (Stage::Prepared, Status::Running)
+    );
+    assert_eq!(
+        (record.id.as_str(), record.number, record.base.as_str()),
+        ("issue-41", 41, "main")
+    );
+    assert_eq!(record.branch, "issue-41");
+    assert_eq!(record.title, "Fix 41");
+    let worker = record.worker.unwrap();
+    assert_eq!(worker.sandbox, "sbxm-task-issue-41-claude");
+    assert_eq!(worker.harness, "claude");
+    assert!(
+        worker.workspace.ends_with("tasks/issue-41"),
+        "{}",
+        worker.workspace
+    );
+    assert!(!record.config_hash.is_empty());
+
+    let log = backend.log();
+    assert!(
+        log.iter().any(|l| l == "create sbxm-task-issue-41-claude"),
+        "{log:?}"
+    );
+}
+
+#[test]
+fn the_sandbox_is_created_over_the_workspace_with_the_profiles_kits() {
+    let f = fixture();
+    let (backend, github) = (backend(), FakeGitHub::default());
+    let source = source(&f);
+
+    let prepared =
+        pipeline::prepare(&ctx(&f, &source, &backend, &github), &issue_text(41)).unwrap();
+
+    let specs = backend.creates();
+    assert_eq!(specs.len(), 1);
+    assert_eq!(specs[0].workspace, prepared.workspace);
+    assert_eq!(specs[0].agent, "claude");
+    assert_eq!((specs[0].cpus, specs[0].memory.as_str()), (4, "8g"));
+    assert_eq!(specs[0].kits.len(), 2);
+    assert!(
+        specs[0]
+            .kits
+            .iter()
+            .all(|k| k.starts_with(prepared.meta.join("kits")))
+    );
+}
+
+#[test]
+fn the_configs_resources_override_the_global_ones() {
+    let f = fixture_with(
+        "[sandbox]\nprofile = \"default\"\ncpus = 2\nmemory = \"3g\"\n[gates]\nsandbox = []\n",
+    );
+    let (backend, github) = (backend(), FakeGitHub::default());
+    let source = source(&f);
+
+    pipeline::prepare(&ctx(&f, &source, &backend, &github), &issue_text(41)).unwrap();
+
+    let spec = &backend.creates()[0];
+    assert_eq!((spec.cpus, spec.memory.as_str()), (2, "3g"));
+}
+
+#[test]
+fn a_missing_provider_secret_is_refused_before_anything_is_written() {
+    let f = fixture();
+    let (backend, github) = (FakeBackend::with_secrets(&[]), FakeGitHub::default());
+    let source = source(&f);
+
+    let message = format!(
+        "{:#}",
+        pipeline::prepare(&ctx(&f, &source, &backend, &github), &issue_text(41)).unwrap_err()
+    );
+
+    assert!(
+        message.contains("anthropic") && message.contains("sbx secret set"),
+        "{message}"
+    );
+    assert!(base_has_nothing_new(&f));
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+}
+
+#[test]
+fn a_profile_service_secret_that_is_missing_is_refused_too() {
+    let f = fixture();
+    f.env
+        .write_profile("default", "[secrets]\nservices = [\"github\"]\n");
+    let (backend, github) = (backend(), FakeGitHub::default());
+    let source = source(&f);
+
+    let message = format!(
+        "{:#}",
+        pipeline::prepare(&ctx(&f, &source, &backend, &github), &issue_text(41)).unwrap_err()
+    );
+
+    assert!(message.contains("github"), "{message}");
+    assert!(base_has_nothing_new(&f));
+}
+
+#[test]
+fn an_unknown_profile_is_refused_before_anything_is_written() {
+    let f = fixture_with("[sandbox]\nprofile = \"nope\"\n[gates]\nsandbox = []\n");
+    let (backend, github) = (backend(), FakeGitHub::default());
+    let source = source(&f);
+
+    let message = format!(
+        "{:#}",
+        pipeline::prepare(&ctx(&f, &source, &backend, &github), &issue_text(41)).unwrap_err()
+    );
+
+    assert!(message.contains("nope"), "{message}");
+    assert!(base_has_nothing_new(&f));
+}
+
+#[test]
+fn a_closed_issue_is_refused_before_anything_is_written() {
+    let f = fixture();
+    let (backend, github) = (backend(), FakeGitHub::default());
+    let source = source(&f);
+    let mut issue = issue_text(41);
+    issue.state = "CLOSED".into();
+
+    let message = format!(
+        "{:#}",
+        pipeline::prepare(&ctx(&f, &source, &backend, &github), &issue).unwrap_err()
+    );
+
+    assert!(
+        message.contains("#41") && message.contains("not open"),
+        "{message}"
+    );
+    assert!(base_has_nothing_new(&f));
+}
+
+#[test]
+fn an_existing_task_is_refused_with_its_stage_and_nothing_changes() {
+    let f = fixture();
+    let (backend, github) = (backend(), FakeGitHub::default());
+    let source = source(&f);
+    pipeline::prepare(&ctx(&f, &source, &backend, &github), &issue_text(41)).unwrap();
+    let before = fs::read_to_string(
+        f.env
+            .base_dir()
+            .join(".sbxm")
+            .join("tasks")
+            .join("issue-41")
+            .join("task.json"),
+    )
+    .unwrap();
+    let calls = backend.log().len();
+
+    let message = format!(
+        "{:#}",
+        pipeline::prepare(&ctx(&f, &source, &backend, &github), &issue_text(41)).unwrap_err()
+    );
+
+    assert!(
+        message.contains("task issue-41 exists (stage prepared)"),
+        "{message}"
+    );
+    assert!(
+        message.contains("task status") && message.contains("--restart"),
+        "{message}"
+    );
+    assert_eq!(
+        backend.log().len(),
+        calls,
+        "no backend call for a refused task"
+    );
+    let after = fs::read_to_string(
+        f.env
+            .base_dir()
+            .join(".sbxm")
+            .join("tasks")
+            .join("issue-41")
+            .join("task.json"),
+    )
+    .unwrap();
+    assert_eq!(before, after);
+}
+
+#[test]
+fn an_invalid_kit_leaves_no_folders_behind() {
+    let f = fixture();
+    let (backend, github) = (
+        FakeBackend::with_invalid_kit("bad mixin"),
+        FakeGitHub::default(),
+    );
+    let backend = backend.and_secrets(&["anthropic"]);
+    let source = source(&f);
+
+    let message = format!(
+        "{:#}",
+        pipeline::prepare(&ctx(&f, &source, &backend, &github), &issue_text(41)).unwrap_err()
+    );
+
+    assert!(message.contains("bad mixin"), "{message}");
+    assert!(base_has_nothing_new(&f));
+}
+
+#[test]
+fn a_clone_that_fails_leaves_no_folders_behind() {
+    let f = fixture();
+    let (backend, github) = (backend(), FakeGitHub::default());
+    let missing = f.env.tmp.path().join("no-such-origin.git");
+
+    let message = format!(
+        "{:#}",
+        pipeline::prepare(
+            &ctx(&f, missing.to_str().unwrap(), &backend, &github),
+            &issue_text(41)
+        )
+        .unwrap_err()
+    );
+
+    assert!(message.contains("no-such-origin"), "{message}");
+    assert!(base_has_nothing_new(&f));
+    assert!(backend.creates().is_empty());
+}
+
+#[test]
+fn a_failed_sandbox_create_removes_the_folders() {
+    let f = fixture();
+    let github = FakeGitHub::default();
+    let backend = FakeBackend::failing_create().and_secrets(&["anthropic"]);
+    let source = source(&f);
+
+    let message = format!(
+        "{:#}",
+        pipeline::prepare(&ctx(&f, &source, &backend, &github), &issue_text(41)).unwrap_err()
+    );
+
+    assert!(message.contains("sbxm-task-issue-41-claude"), "{message}");
+    assert!(base_has_nothing_new(&f));
+}
+
+// ---- Selection: which issues get a task (spec §5.1 step 1, decision 154) ----
+
+#[test]
+fn selection_picks_by_the_rules_and_counts_existing_tasks_as_in_progress() {
+    let f = fixture();
+    let (backend, github) = (backend(), FakeGitHub::default());
+    let source = source(&f);
+    pipeline::prepare(&ctx(&f, &source, &backend, &github), &issue_text(1)).unwrap();
+    let github = FakeGitHub::default().with_open_issues(vec![
+        open_issue(1, &["should-fix"], ""),
+        open_issue(2, &["must-fix"], ""),
+        open_issue(3, &["question"], ""),
+        open_issue(4, &["should-fix"], "**Depends on:** #2"),
+    ]);
+
+    let selection = pipeline::select_issues(&ctx(&f, &source, &backend, &github), None, 2).unwrap();
+
+    assert_eq!(selection.picks, [2]);
+    let reasons: Vec<String> = selection
+        .skips
+        .iter()
+        .map(|(n, r)| format!("#{n}: {r}"))
+        .collect();
+    assert!(
+        reasons.contains(&"#1: already has a task".to_owned()),
+        "{reasons:?}"
+    );
+    assert!(
+        reasons.contains(&"#3: a question, needs your answer first".to_owned()),
+        "{reasons:?}"
+    );
+    assert!(
+        reasons.contains(&"#4: blocked by open #2".to_owned()),
+        "{reasons:?}"
+    );
+}
+
+#[test]
+fn nothing_to_start_is_an_error_listing_why() {
+    let f = fixture();
+    let (backend, source) = (backend(), source(&f));
+    let github = FakeGitHub::default().with_open_issues(vec![open_issue(3, &["question"], "")]);
+
+    let message = format!(
+        "{:#}",
+        pipeline::select_issues(&ctx(&f, &source, &backend, &github), None, 1).unwrap_err()
+    );
+
+    assert!(
+        message.contains("nothing to start") && message.contains("#3: a question"),
+        "{message}"
+    );
+}
+
+#[test]
+fn an_explicit_issue_that_is_not_open_is_named_in_the_error() {
+    let f = fixture();
+    let (backend, source) = (backend(), source(&f));
+    let github = FakeGitHub::default().with_open_issues(vec![open_issue(1, &[], "")]);
+
+    let message = format!(
+        "{:#}",
+        pipeline::select_issues(&ctx(&f, &source, &backend, &github), Some(&[9]), 1).unwrap_err()
+    );
+
+    assert!(
+        message.contains("#9") && message.contains("isn't an open issue"),
+        "{message}"
+    );
+}
