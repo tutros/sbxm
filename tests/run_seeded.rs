@@ -107,12 +107,26 @@ fn execute(s: &Setup, backend: &FakeBackend) -> Vec<PairOutcome> {
     orchestrate::execute(backend, &s.config, &s.kits, &s.roots)
 }
 
+/// Plays the agent running git, so like sbxm's own git calls it waits out the
+/// brief Windows "Permission denied" while antivirus or the indexer holds a new
+/// file (issue #39).
 fn git(dir: &Path, args: &[&str]) -> String {
-    let out = Command::new("git")
-        .current_dir(dir)
-        .args(args)
-        .output()
-        .unwrap();
+    let mut tries = 0;
+    let out = loop {
+        let out = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .output()
+            .unwrap();
+        tries += 1;
+        if out.status.success()
+            || tries == 5
+            || !String::from_utf8_lossy(&out.stderr).contains("Permission denied")
+        {
+            break out;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50 << tries));
+    };
     assert!(
         out.status.success(),
         "{}",
