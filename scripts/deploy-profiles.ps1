@@ -43,6 +43,21 @@ function ConvertFrom-TomlBasicString([string]$text) {
         })
 }
 
+# The first segment of a TOML key (bare, "basic" or 'literal', possibly dotted: `a.b`, `"a".b`), or $null when
+# the text before the `=` isn't a key. Returns the key's name and whether it is a dotted key.
+function Get-TomlTopKey([string]$text) {
+    $segment = '(?:[A-Za-z0-9_-]+|"(?:[^"\\]|\\.)*"|''[^'']*'')'
+    if ($text -notmatch "^\s*($segment(?:\s*\.\s*$segment)*)\s*$") { return $null }
+    $keyText = $Matches[1]
+    $first = [regex]::Match($keyText, "^$segment").Value
+    $name = switch ($first[0]) {
+        '"' { ConvertFrom-TomlBasicString $first.Substring(1, $first.Length - 2) }
+        "'" { $first.Substring(1, $first.Length - 2) }
+        default { $first }
+    }
+    [pscustomobject]@{ Name = $name; Dotted = ($keyText.Length -gt $first.Length) }
+}
+
 function Get-ProfilesDir([string]$configDir) {
     $default = Join-Path $configDir 'profiles'
     $configFile = Join-Path $configDir 'config.toml'
@@ -52,9 +67,13 @@ function Get-ProfilesDir([string]$configDir) {
     $inTable = $false
     foreach ($line in Get-Content -LiteralPath $configFile) {
         if ($line -match '^\s*\[') { $inTable = $true; continue }
-        if ($inTable -or $line -notmatch '^\s*([A-Za-z0-9_-]+)\s*=(.*)$') { continue }
-        $key = $Matches[1]; $value = $Matches[2].Trim()
-        if ($key -notin $knownKeys) { throw "config.toml has a key sbxm would refuse: '$key' (fix $configFile first; nothing was changed)" }
+        $eq = $line.IndexOf('=')
+        if ($inTable -or $eq -lt 1) { continue }
+        $parsed = Get-TomlTopKey $line.Substring(0, $eq)
+        if (-not $parsed) { continue }
+        $key = $parsed.Name; $value = $line.Substring($eq + 1).Trim()
+        # A dotted `profiles_dir.x` would make it a table, which sbxm refuses too.
+        if ($key -notin $knownKeys -or ($parsed.Dotted -and $key -ne 'resources')) { throw "config.toml has a key sbxm would refuse: '$key' (fix $configFile first; nothing was changed)" }
         if ($key -ne 'profiles_dir') { continue }
         if ($value -match "^'([^']*)'(\s*#.*)?$") { $dir = $Matches[1] }
         elseif ($value -match '^"((?:[^"\\]|\\.)*)"(\s*#.*)?$') { $dir = ConvertFrom-TomlBasicString $Matches[1] }
@@ -67,7 +86,8 @@ function Get-ProfilesDir([string]$configDir) {
 function Get-FolderState([string]$dir) {
     if (-not (Test-Path -LiteralPath $dir)) { return $null }
     $root = (Resolve-Path -LiteralPath $dir).Path
-    (Get-ChildItem -LiteralPath $root -Recurse -File | Sort-Object FullName | ForEach-Object {
+    # -Force, or hidden files (dot files on Linux, the Hidden attribute on Windows) would be left out.
+    (Get-ChildItem -LiteralPath $root -Recurse -File -Force | Sort-Object FullName | ForEach-Object {
         '{0}={1}' -f $_.FullName.Substring($root.Length), (Get-FileHash -LiteralPath $_.FullName).Hash
     }) -join "`n"
 }

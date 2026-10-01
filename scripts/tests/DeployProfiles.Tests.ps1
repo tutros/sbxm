@@ -67,6 +67,46 @@ Describe 'deploy-profiles.ps1' {
         (& $script:deploy -Source $script:source -ConfigDir $script:config 6>&1 | Out-String) | Should -Match 'dev: updated'
     }
 
+    Context 'hidden files' {
+        BeforeEach {
+            # A dot file is hidden to PowerShell on Linux; on Windows it needs the Hidden attribute too.
+            function Set-HiddenFile([string]$path, [string]$text) {
+                New-Item -ItemType Directory -Force (Split-Path $path) | Out-Null
+                Set-Content $path $text
+                if ($IsWindows) { [IO.File]::SetAttributes($path, 'Hidden') }
+            }
+            $script:target = Join-Path $script:config 'profiles'
+            New-Item -ItemType Directory (Join-Path $script:target 'dev') | Out-Null
+            Copy-Item (Join-Path $script:source 'dev\profile.toml') (Join-Path $script:target 'dev\profile.toml')
+        }
+
+        It 'deploys a changed hidden nested file and says updated' {
+            Set-HiddenFile (Join-Path $script:source 'dev\files\.rules') 'new'
+            Set-HiddenFile (Join-Path $script:target 'dev\files\.rules') 'old'
+
+            $out = & $script:deploy -Source $script:source -ConfigDir $script:config 6>&1 | Out-String
+
+            $out | Should -Match 'dev: updated'
+            Get-Content (Join-Path $script:target 'dev\files\.rules') -Force | Should -Be 'new'
+        }
+
+        It 'removes a hidden file the repo no longer has and says updated' {
+            Set-HiddenFile (Join-Path $script:target 'dev\.stale') 'left over'
+
+            $out = & $script:deploy -Source $script:source -ConfigDir $script:config 6>&1 | Out-String
+
+            $out | Should -Match 'dev: updated'
+            Test-Path (Join-Path $script:target 'dev\.stale') | Should -BeFalse
+        }
+
+        It 'says unchanged when the hidden files match too' {
+            Set-HiddenFile (Join-Path $script:source 'dev\.rules') 'same'
+            Set-HiddenFile (Join-Path $script:target 'dev\.rules') 'same'
+
+            (& $script:deploy -Source $script:source -ConfigDir $script:config 6>&1 | Out-String) | Should -Match 'dev: unchanged'
+        }
+    }
+
     It 'ignores folders without a profile.toml' {
         New-Item -ItemType Directory (Join-Path $script:source 'not-a-profile') | Out-Null
 
@@ -91,6 +131,40 @@ Describe 'deploy-profiles.ps1' {
         { & $script:deploy -Source $script:source -ConfigDir $script:config 6>$null } | Should -Throw '*profiles_dri*'
 
         Test-Path (Join-Path $script:config 'profiles') | Should -BeFalse
+    }
+
+    It 'reads a quoted profiles_dir key, basic or literal, like sbxm' -ForEach @(
+        @{ Name = 'basic'; Key = '"profiles_dir"' }
+        @{ Name = 'literal'; Key = "'profiles_dir'" }
+        @{ Name = 'escaped basic'; Key = '"profiles\u005fdir"' }
+    ) {
+        $custom = Join-Path $TestDrive ([guid]::NewGuid())
+        Set-Content (Join-Path $script:config 'config.toml') "base_dir = 'E:\x'`n$Key = '$custom'"
+
+        & $script:deploy -Source $script:source -ConfigDir $script:config 6>$null
+
+        Test-Path (Join-Path $custom 'dev\profile.toml') | Should -BeTrue
+        Test-Path (Join-Path $script:config 'profiles') | Should -BeFalse
+    }
+
+    It 'refuses a quoted or dotted key sbxm would refuse, before writing anything' -ForEach @(
+        @{ Line = "`"profiles_dri`" = 'E:\elsewhere'" }
+        @{ Line = "'profiles_dri' = 'E:\elsewhere'" }
+        @{ Line = "profiles.dir = 'E:\elsewhere'" }
+    ) {
+        Set-Content (Join-Path $script:config 'config.toml') "base_dir = 'E:\x'`n$Line"
+
+        { & $script:deploy -Source $script:source -ConfigDir $script:config 6>$null } | Should -Throw '*sbxm would refuse*'
+
+        Test-Path (Join-Path $script:config 'profiles') | Should -BeFalse
+    }
+
+    It 'accepts a quoted or dotted form of the other known keys' {
+        Set-Content (Join-Path $script:config 'config.toml') "`"base_dir`" = 'E:\x'`nresources.cpus = 4`nresources.memory = '8g'"
+
+        & $script:deploy -Source $script:source -ConfigDir $script:config 6>$null
+
+        Test-Path (Join-Path $script:config 'profiles\dev\profile.toml') | Should -BeTrue
     }
 
     It 'refuses a profiles_dir it cannot read as a quoted string' {
