@@ -19,6 +19,7 @@ use crate::task::findings::{
     self, Finding, Render, acceptance_criteria, filing_order, find_secrets, issue_body,
     issues_line, marker, protect_finding, protect_text, secret_kind, update_link_fields,
 };
+use crate::task::record::{self, Kind};
 
 /// How many issues one listing reads. A repo with this many or more can't be checked for
 /// markers, so the command refuses instead of risking a duplicate.
@@ -27,6 +28,12 @@ const ISSUE_LIST_LIMIT: u32 = 1000;
 pub enum Source {
     /// Any review file, e.g. `sdlc/reviews/<date>-<scope>.md`.
     File(PathBuf),
+    /// The `review.md` of a task, in its folder under `<base_dir>/.sbxm/tasks/`.
+    Task {
+        base_dir: PathBuf,
+        kind: Kind,
+        number: u32,
+    },
 }
 
 pub struct Options {
@@ -102,22 +109,54 @@ fn file(
     out: &mut dyn Write,
     warnings: &mut Vec<String>,
 ) -> Result<()> {
-    let Source::File(path) = &opts.source;
-    if !path.is_file() {
-        bail!(
-            "review file {} not found; give the path of a file in sdlc/reviews/",
-            path.display()
-        );
-    }
+    let (path, task_repo, task_id) = match &opts.source {
+        Source::File(path) => {
+            if !path.is_file() {
+                bail!(
+                    "review file {} not found; give the path of a file in sdlc/reviews/",
+                    path.display()
+                );
+            }
+            (path.clone(), None, None)
+        }
+        Source::Task {
+            base_dir,
+            kind,
+            number,
+        } => {
+            let (id, flag) = match kind {
+                Kind::Issue => (format!("issue-{number}"), "--issue"),
+                Kind::Pr => (format!("pr-{number}"), "--pr"),
+            };
+            let dir = record::task_dir(base_dir, &id);
+            if !dir.join("task.json").is_file() {
+                bail!("no task {id}; run `sbxm task status` to list the tasks");
+            }
+            let review = dir.join("review.md");
+            if !review.is_file() {
+                bail!(
+                    "task {id} has no review.md yet; run `sbxm task review {flag} {number}` first"
+                );
+            }
+            let record = record::read(&dir.join("task.json"))?;
+            (review, Some(record.repo), Some(id))
+        }
+    };
+    let path = &path;
     let text = fs::read_to_string(path).with_context(|| {
         format!(
             "cannot read {}; check the file and its permissions",
             path.display()
         )
     })?;
-    let name = path
-        .file_name()
-        .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+    // A task's review is always `review.md`, so its name carries the task: markers of two tasks
+    // must not collide in one repo.
+    let name = match &task_id {
+        Some(id) => format!("{id}-review.md"),
+        None => path
+            .file_name()
+            .map_or_else(String::new, |n| n.to_string_lossy().into_owned()),
+    };
     let parsed = findings::parse(&text);
 
     // An id goes into titles, bodies, markers and the Issues line, so it can't be a way to carry
@@ -202,12 +241,13 @@ fn file(
     }
 
     // The repo, who is logged in, and the labels the selected findings need.
-    let repo = match &opts.repo {
-        Some(repo) => {
+    let repo = match (&opts.repo, task_repo) {
+        (Some(repo), _) => {
             check_repo(repo)?;
             repo.clone()
         }
-        None => {
+        (None, Some(repo)) => repo,
+        (None, None) => {
             let url =
                 git::user_run(&opts.repo_root, &["remote", "get-url", "origin"]).map_err(|e| {
                     anyhow!(
@@ -348,7 +388,10 @@ fn file(
     if let Some(scope) = scope_fallback {
         view.scope = Some(scope);
     }
-    let review_ref = format!("sdlc/reviews/{posted_name}");
+    let review_ref = match &task_id {
+        Some(id) => format!("sbxm task {id}: review.md"),
+        None => format!("sdlc/reviews/{posted_name}"),
+    };
     let mut render = |finding: &Finding, ids: &BTreeMap<String, u32>| -> Result<String> {
         let context = Render {
             repo: &repo,
