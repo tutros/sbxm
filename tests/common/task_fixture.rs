@@ -106,6 +106,16 @@ pub fn ctx_with_host<'a>(
     }
 }
 
+/// Prepares issue 41 and runs its worker (against `backend`), leaving it at `working/completed`.
+pub fn worked_task(f: &Fixture, backend: &FakeBackend) -> sbxm::task::pipeline::Prepared {
+    let github = FakeGitHub::default();
+    let source = source(f);
+    let ctx = ctx(f, &source, backend, &github);
+    let mut prepared = sbxm::task::pipeline::prepare(&ctx, &issue_text(41)).unwrap();
+    sbxm::task::pipeline::run_worker(&ctx, &mut prepared).unwrap();
+    prepared
+}
+
 pub fn source(f: &Fixture) -> String {
     f.origin.to_str().unwrap().to_owned()
 }

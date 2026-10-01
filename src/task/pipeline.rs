@@ -53,9 +53,85 @@ pub struct Prepared {
     pub meta: PathBuf,
     /// `<base>/tasks/<id>/`: the worker's clone, mounted in its sandbox.
     pub workspace: PathBuf,
-    pub kits: HarnessKits,
+    /// The worker's kits; `None` for a task reopened from its record.
+    pub kits: Option<HarnessKits>,
     /// One line each, to print before the run.
     pub warnings: Vec<String>,
+}
+
+impl Prepared {
+    /// A task that already exists, read back from its record (`<base>/.sbxm/tasks/<id>/`).
+    /// `id` must look like `issue-<n>` or `pr-<n>` before any path is built from it.
+    pub fn open(base_dir: &Path, id: &str) -> Result<Self> {
+        if !record::is_valid_id(id) {
+            bail!("{id:?} isn't a task id; task ids look like issue-41 or pr-7");
+        }
+        let meta = record::task_dir(base_dir, id);
+        let path = meta.join("task.json");
+        if !path.is_file() {
+            bail!("no task {id}; run `sbxm task status` to list the tasks");
+        }
+        Ok(Self {
+            record: record::read(&path)?,
+            meta,
+            workspace: base_dir.join("tasks").join(id),
+            kits: None,
+            warnings: Vec::new(),
+        })
+    }
+}
+
+/// Whether gates may run on this task now (`task gates`): after the worker or the fix round has
+/// finished, or again after earlier gates ended. The reason for a refusal says what to do.
+pub fn check_can_gate(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
+    let id = &task.id;
+    let number = task.number;
+    match (task.stage, task.status) {
+        (Stage::Working | Stage::Fixing, Status::Completed | Status::TimedOut)
+        | (Stage::Gating, Status::Passed | Status::GatesFailed) => Ok(()),
+        (Stage::Working | Stage::Fixing, Status::Running) => {
+            if task.is_interrupted(probe) {
+                bail!(
+                    "task {id} was interrupted while its {} stage was running; see `sbxm task status --issue {number}`",
+                    task.stage.name()
+                )
+            }
+            bail!(
+                "the worker is still running for task {id} (worker still running); wait for `sbxm task start` to finish"
+            )
+        }
+        (Stage::Working | Stage::Fixing, _) => {
+            bail!(
+                "the worker failed for task {id}, so there is nothing to gate; see `sbxm task status --issue {number}`"
+            )
+        }
+        (Stage::Gating, _) => bail!(
+            "gates are running for task {id}, or were interrupted; see `sbxm task status --issue {number}`"
+        ),
+        (stage, _) => bail!(
+            "task {id} is at stage {}; gates run after the worker or after the fix round",
+            stage.name()
+        ),
+    }
+}
+
+/// What running gates needs from the outside world (less than a whole [`Ctx`]: no GitHub).
+pub struct GateEnv<'a> {
+    pub config: &'a TaskConfig,
+    pub backend: &'a dyn SandboxBackend,
+    pub probe: &'a dyn ProcessProbe,
+    pub host: &'a dyn HostRunner,
+}
+
+impl Ctx<'_> {
+    pub fn gate_env(&self) -> GateEnv<'_> {
+        GateEnv {
+            config: self.config,
+            backend: self.backend,
+            probe: self.probe,
+            host: self.host,
+        }
+    }
 }
 
 /// Chooses the issues to start (spec §8). With nothing to pick, the error says why for each.
@@ -255,7 +331,7 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
             record,
             meta,
             workspace,
-            kits,
+            kits: Some(kits),
             warnings,
         }),
         Err(e) => {
@@ -317,7 +393,12 @@ fn start_one(ctx: &Ctx, number: u32) -> TaskReport {
         let worked = run_worker(ctx, &mut prepared)?;
         // A failed worker is not gated; a timed-out one is (its partial commits count).
         if !matches!(worked.status, RunStatus::Failed(_)) {
-            gates = Some(run_gates(ctx, &mut prepared, "after-worker", Tiers::ALL));
+            gates = Some(run_gates(
+                &ctx.gate_env(),
+                &mut prepared,
+                "after-worker",
+                Tiers::ALL,
+            ));
         }
         Ok(worked)
     })();
@@ -387,8 +468,13 @@ fn gates_log_entry(phase: &str, outcomes: &[GateOutcome]) -> String {
 /// sandbox tier passed, unless it was asked for alone) runs on this machine in a clean checkout
 /// of the task branch from `repo.git`, which is removed afterwards. The stage is written before
 /// anything runs; results go to the record and `gates.log`; the first failure stops a tier.
-pub fn run_gates(ctx: &Ctx, prepared: &mut Prepared, phase: &str, tiers: Tiers) -> Result<Gated> {
-    let gates = &ctx.config.gates;
+pub fn run_gates(
+    env: &GateEnv,
+    prepared: &mut Prepared,
+    phase: &str,
+    tiers: Tiers,
+) -> Result<Gated> {
+    let gates = &env.config.gates;
     let sandbox = prepared
         .record
         .worker
@@ -398,14 +484,14 @@ pub fn run_gates(ctx: &Ctx, prepared: &mut Prepared, phase: &str, tiers: Tiers) 
         .clone();
     prepared
         .record
-        .begin_gating(now(), Process::current(ctx.probe))?;
+        .begin_gating(now(), Process::current(env.probe))?;
     record::write(&prepared.meta, &prepared.record)?;
 
     let mut outcomes = Vec::new();
     let mut sandbox_ok = true;
     if tiers.sandbox {
         let ran = gates::run_sandbox_tier(
-            ctx.backend,
+            env.backend,
             &sandbox,
             &in_sandbox_path(&prepared.workspace),
             phase,
@@ -425,7 +511,7 @@ pub fn run_gates(ctx: &Ctx, prepared: &mut Prepared, phase: &str, tiers: Tiers) 
         ) {
             Ok(()) => {
                 outcomes.extend(gates::run_host_tier(
-                    ctx.host,
+                    env.host,
                     &checkout,
                     phase,
                     &gates.host,

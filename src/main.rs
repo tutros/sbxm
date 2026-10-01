@@ -1,7 +1,7 @@
 use clap::Parser;
 
 use sbxm::backend::SbxBackend;
-use sbxm::cli::{Cli, Command, ConfigCommand, RunArgs, RunCommand, TaskCommand};
+use sbxm::cli::{Cli, Command, ConfigCommand, GateTier, RunArgs, RunCommand, TaskCommand};
 use sbxm::commands;
 use sbxm::config;
 use sbxm::confirm::Terminal;
@@ -175,6 +175,30 @@ fn main() -> anyhow::Result<()> {
             &task::record::SystemProbe,
             &mut std::io::stdout(),
             &mut std::io::stderr(),
+        ),
+        Command::Task {
+            command:
+                TaskCommand::Gates {
+                    issue,
+                    tier,
+                    dry_run,
+                },
+        } => commands::task_gates::run(
+            &config::config_dir()?,
+            &commands::task_gates::Options {
+                repo_root: std::env::current_dir()?,
+                issue,
+                tiers: match tier {
+                    GateTier::Sandbox => task::pipeline::Tiers::SANDBOX,
+                    GateTier::Host => task::pipeline::Tiers::HOST,
+                    GateTier::All => task::pipeline::Tiers::ALL,
+                },
+                dry_run,
+            },
+            &SbxBackend,
+            &task::record::SystemProbe,
+            &task::gates::ShellHostRunner,
+            &mut std::io::stdout(),
         ),
         Command::Run(_) => unreachable!("clap requires a config or a subcommand"),
         Command::Config {

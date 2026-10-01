@@ -140,6 +140,15 @@ pub enum RunCommand {
     },
 }
 
+/// `--tier` of `task gates`.
+#[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
+pub enum GateTier {
+    Sandbox,
+    Host,
+    #[default]
+    All,
+}
+
 #[derive(Debug, Subcommand)]
 pub enum TaskCommand {
     /// Write a starter sbxm-task.toml (default: in the working directory); refuses to overwrite.
@@ -175,6 +184,19 @@ pub enum TaskCommand {
         /// The GitHub repo, owner/name (default: this checkout's origin).
         #[arg(long)]
         repo: Option<String>,
+    },
+    /// Run a task's gates now (the checks that decide whether its work may go on), or with
+    /// --dry-run say what would run and where.
+    Gates {
+        /// The issue's task.
+        #[arg(long, value_name = "N")]
+        issue: u32,
+        /// Which gates: the sandbox tier, the host tier (on this machine), or both.
+        #[arg(long, value_enum, default_value_t)]
+        tier: GateTier,
+        /// Print the commands, where they run and which tiers are off; run nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Show the tasks: stage, status, and whether one was interrupted.
     Status {
