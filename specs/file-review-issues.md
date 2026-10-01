@@ -111,7 +111,8 @@ Rules:
 Exactly the skill's template, in this order: **Where**, **What happens**, **Why it matters**, **Fix** (a question
 has **Options and recommendation** instead), **Depends on**, **Related**, **Acceptance criteria**, **Review**
 (`reviews/<file name>`, finding id, and the reviewed commit range). A hidden marker
-`<!-- review-finding: <review file name>#<id> -->` is the last line. Missing Depends on becomes `none known`.
+`<!-- review-finding: <review file name>#<id> -->` is the last line. The **Review** field is text, not a link:
+the review file may not be committed or pushed yet, so a link could point nowhere (decided 2026-09-30). Missing Depends on becomes `none known`.
 Missing Related is omitted.
 
 ## Idempotency
