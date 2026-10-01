@@ -131,7 +131,12 @@ function Find-Secrets {
 function Protect-Text {
     param([Parameter(Mandatory, Position = 0)][AllowEmptyString()][string]$Text, [Parameter(Mandatory)][string]$Id, [switch]$KeepPaths)
     if (-not $KeepPaths) {
-        $replacements = @{ '(?i)\b[A-Z]:\\Users\\[^\\\s`''"]+' = '~'; '/home/[^/\s`''"]+' = '~' }
+        # The profile folder may hold spaces ("Jane Doe"): up to three words count as the name when a separator or a
+        # quote/backtick follows; otherwise only the first word does, so prose after a bare path is left alone.
+        $replacements = @{
+            '(?i)\b[A-Z]:\\Users\\(?:[^\\\s`''"]+(?: [^\\\s`''"]+){0,2}(?=[\\`''"])|[^\\\s`''"]+)' = '~'
+            '/home/(?:[^/\s`''"]+(?: [^/\s`''"]+){0,2}(?=[/`''"])|[^/\s`''"]+)' = '~'
+        }
         foreach ($pattern in $replacements.Keys) {
             $hits = [regex]::Matches($Text, $pattern).Count
             if ($hits) {

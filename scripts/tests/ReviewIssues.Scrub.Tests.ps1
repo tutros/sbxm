@@ -70,6 +70,25 @@ Describe 'Protect-Text' {
         Protect-Text 'in /home/james/src/a.rs' -Id 'S-1' 3>$null | Should -Be 'in ~/src/a.rs'
     }
 
+    It 'removes a whole Windows profile name that contains a space' {
+        Protect-Text 'see C:\Users\Jane Doe\project\x.rs' -Id 'S-1' 3>$null | Should -Be 'see ~\project\x.rs'
+    }
+
+    It 'removes a whole Linux profile name that contains a space' {
+        Protect-Text 'in /home/Jane Doe/project/x.rs' -Id 'S-1' 3>$null | Should -Be 'in ~/project/x.rs'
+    }
+
+    It 'stops a spaced profile name at a quote, a backtick or a newline' {
+        Protect-Text 'a "C:\Users\Jane Doe" b' -Id 'S-1' 3>$null | Should -Be 'a "~" b'
+        Protect-Text "x /home/Jane Doe``y/z" -Id 'S-1' 3>$null | Should -Be "x ~``y/z"
+        Protect-Text "C:\Users\james`nsee D:\x\y" -Id 'S-1' 3>$null | Should -Be "~`nsee D:\x\y"
+    }
+
+    It 'does not swallow ordinary prose after a path with no separator' {
+        Protect-Text 'C:\Users\james is the folder' -Id 'S-1' 3>$null | Should -Be '~ is the folder'
+        Protect-Text 'under /home/james and then /etc/x' -Id 'S-1' 3>$null | Should -Be 'under ~ and then /etc/x'
+    }
+
     It 'keeps personal paths with -KeepPaths' {
         Protect-Text 'see C:\Users\james\x' -Id 'S-1' -KeepPaths | Should -Be 'see C:\Users\james\x'
     }
