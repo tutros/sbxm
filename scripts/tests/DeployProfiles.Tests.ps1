@@ -87,6 +87,50 @@ Describe 'deploy-profiles.ps1' {
         ($names -ccontains 'rules.md') | Should -BeFalse
     }
 
+    It 'deploys from and to folders whose names contain wildcard characters' {
+        $odd = Join-Path $TestDrive 'sbxm [repo] x'
+        $oddSource = Join-Path $odd 'profiles'
+        $oddTarget = Join-Path $odd 'deployed [profiles]'
+        New-Item -ItemType Directory (Join-Path $oddSource 'dev\files') | Out-Null
+        Set-Content -LiteralPath (Join-Path $oddSource 'dev\profile.toml') 'description = "dev"'
+        Set-Content -LiteralPath (Join-Path $oddSource 'dev\files\notes.md') 'hello'
+
+        $first = & $script:deploy -Source $oddSource -ProfilesDirCommand (New-Stub $oddTarget) 6>&1 | Out-String
+        $second = & $script:deploy -Source $oddSource -ProfilesDirCommand (New-Stub $oddTarget) 6>&1 | Out-String
+
+        $first | Should -Match 'dev: new'
+        Get-Content -LiteralPath (Join-Path $oddTarget 'dev\files\notes.md') | Should -Be 'hello'
+        $second | Should -Match 'dev: unchanged'
+    }
+
+    It 'deploys an empty folder the repo has, since a profile can point at one' {
+        New-Item -ItemType Directory (Join-Path $script:source 'dev\home') | Out-Null
+        New-Item -ItemType Directory (Join-Path $script:target 'dev') | Out-Null
+        Copy-Item (Join-Path $script:source 'dev\profile.toml') (Join-Path $script:target 'dev\profile.toml')
+
+        $out = & $script:deploy -Source $script:source -ProfilesDirCommand $script:stub 6>&1 | Out-String
+
+        $out | Should -Match 'dev: updated'
+        Test-Path -LiteralPath (Join-Path $script:target 'dev\home') -PathType Container | Should -BeTrue
+    }
+
+    It 'removes an empty folder the repo no longer has' {
+        New-Item -ItemType Directory (Join-Path $script:target 'dev\gone') | Out-Null
+        Copy-Item (Join-Path $script:source 'dev\profile.toml') (Join-Path $script:target 'dev\profile.toml')
+
+        $out = & $script:deploy -Source $script:source -ProfilesDirCommand $script:stub 6>&1 | Out-String
+
+        $out | Should -Match 'dev: updated'
+        Test-Path -LiteralPath (Join-Path $script:target 'dev\gone') | Should -BeFalse
+    }
+
+    It 'says unchanged when the empty folders match too' {
+        New-Item -ItemType Directory (Join-Path $script:source 'dev\home'), (Join-Path $script:target 'dev\home') | Out-Null
+        Copy-Item (Join-Path $script:source 'dev\profile.toml') (Join-Path $script:target 'dev\profile.toml')
+
+        (& $script:deploy -Source $script:source -ProfilesDirCommand $script:stub 6>&1 | Out-String) | Should -Match 'dev: unchanged'
+    }
+
     It 'ignores folders without a profile.toml' {
         New-Item -ItemType Directory (Join-Path $script:source 'not-a-profile') | Out-Null
 

@@ -57,18 +57,23 @@ function Get-ProfilesDir([scriptblock]$command, [string]$configDir) {
     $dir
 }
 
-# Hash every file by relative path, so "unchanged" means the whole folder matches. Compare the result with
-# -ceq: a file renamed only in case is a change (-eq ignores case).
+# Every file (relative path and content hash) and every folder, empty ones included, so "unchanged" means the
+# whole tree matches: a profile can point at an empty folder (`home_files`), and sbxm refuses it when it's
+# missing. Compare the result with -ceq: a file renamed only in case is a change (-eq ignores case), so the
+# entries are sorted ordinally too.
 function Get-FolderState([string]$dir) {
     if (-not (Test-Path -LiteralPath $dir)) { return $null }
     $root = (Resolve-Path -LiteralPath $dir).Path
     # -Force, or hidden files (dot files on Linux, the Hidden attribute on Windows) would be left out.
-    (Get-ChildItem -LiteralPath $root -Recurse -File -Force | Sort-Object FullName | ForEach-Object {
-        '{0}={1}' -f $_.FullName.Substring($root.Length), (Get-FileHash -LiteralPath $_.FullName).Hash
-    }) -join "`n"
+    $entries = [string[]]@(Get-ChildItem -LiteralPath $root -Recurse -Force | ForEach-Object {
+            $relative = $_.FullName.Substring($root.Length)
+            if ($_.PSIsContainer) { "D $relative" } else { 'F {0}={1}' -f $relative, (Get-FileHash -LiteralPath $_.FullName).Hash }
+        })
+    [Array]::Sort($entries, [StringComparer]::Ordinal)
+    $entries -join "`n"
 }
 
-$profiles = @(Get-ChildItem -LiteralPath $Source -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'profile.toml') })
+$profiles = @(Get-ChildItem -LiteralPath $Source -Directory | Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'profile.toml') -PathType Leaf })
 if (-not $profiles) { throw "no profiles (folders with a profile.toml) in $Source" }
 
 $target = Get-ProfilesDir $ProfilesDirCommand $ConfigDir
