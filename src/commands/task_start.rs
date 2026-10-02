@@ -8,12 +8,14 @@ use anyhow::{Result, anyhow, bail};
 
 use crate::backend::SandboxBackend;
 use crate::config::GlobalConfig;
+use crate::confirm::Confirm;
 use crate::git;
 use crate::github::GitHubBackend;
 use crate::harness::Harness;
 use crate::headless::RunStatus;
 use crate::run::config::{headless_harness, parse_duration};
 use crate::task::config::TaskConfig;
+use crate::task::finish;
 use crate::task::gates::ShellHostRunner;
 use crate::task::pipeline::{self, Ctx};
 use crate::task::record::{self, ProcessProbe};
@@ -79,6 +81,52 @@ pub(crate) fn check_repo(repo: &str) -> Result<()> {
     }
 }
 
+/// Discards the existing task of each issue (`--restart`). Every one is checked before the first
+/// is deleted: the issue must still be open (else the restart would only destroy the work) and
+/// the task must not be running.
+#[allow(clippy::too_many_arguments)]
+fn discard_existing(
+    config_dir: &std::path::Path,
+    repo: &str,
+    issues: &[u32],
+    restart: &Restart,
+    backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    out: &mut dyn Write,
+) -> Result<()> {
+    let base_dir = GlobalConfig::load(config_dir)?.base_dir;
+    let mut ids: Vec<(u32, String)> = Vec::new();
+    for &number in issues {
+        let id = format!("issue-{number}");
+        if finish::exists(&base_dir, &id) && !ids.iter().any(|(_, known)| *known == id) {
+            ids.push((number, id));
+        }
+    }
+    for (number, id) in &ids {
+        let issue = github.issue(repo, *number)?;
+        if issue.state != "OPEN" {
+            bail!(
+                "issue #{number} is {}, not open; --restart would only delete task {id}; remove it with `sbxm task rm --issue {number}` if you want it gone",
+                issue.state.to_lowercase()
+            );
+        }
+        finish::plan_removal(&base_dir, id, probe)?;
+    }
+    for (_, id) in &ids {
+        finish::discard(
+            &base_dir,
+            id,
+            restart.yes,
+            backend,
+            probe,
+            restart.confirm,
+            out,
+        )?;
+    }
+    Ok(())
+}
+
 fn plural(n: u32, word: &str) -> String {
     format!("{n} {word}{}", if n == 1 { "" } else { "s" })
 }
@@ -94,6 +142,32 @@ pub fn run(
     out: &mut dyn Write,
     warn: &mut dyn Write,
 ) -> Result<()> {
+    run_with(config_dir, opts, None, backend, github, probe, out, warn)
+}
+
+/// `--restart`: discard the task of each `--issue` that has one before starting it.
+pub struct Restart<'a> {
+    pub confirm: &'a dyn Confirm,
+    /// `--yes`: don't ask.
+    pub yes: bool,
+}
+
+/// [`run`], optionally discarding existing tasks first (spec §4, decision 153): all of them are
+/// checked before any is deleted, and nothing is deleted if an input is wrong.
+#[allow(clippy::too_many_arguments)]
+pub fn run_with(
+    config_dir: &std::path::Path,
+    opts: &Options,
+    restart: Option<&Restart>,
+    backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<()> {
+    if restart.is_some() && opts.issues.is_empty() {
+        bail!("--restart needs the issues to restart: --issue <n> (repeatable)");
+    }
     if opts.issues.is_empty() && opts.workers.is_none() {
         bail!("say which issues to start: --issue <n> (repeatable) or --workers <n>");
     }
@@ -150,6 +224,19 @@ pub fn run(
         .unwrap_or_else(|| format!("https://github.com/{repo_name}.git"));
     for warning in &config.warnings {
         writeln!(warn, "warning: {warning}")?;
+    }
+
+    if let Some(restart) = restart {
+        discard_existing(
+            config_dir,
+            &repo_name,
+            &opts.issues,
+            restart,
+            backend,
+            github,
+            probe,
+            out,
+        )?;
     }
 
     let ctx = Ctx {

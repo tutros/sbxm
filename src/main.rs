@@ -154,8 +154,10 @@ fn main() -> anyhow::Result<()> {
                     profile,
                     base,
                     repo,
+                    restart,
+                    yes,
                 },
-        } => commands::task_start::run(
+        } => commands::task_start::run_with(
             &config::config_dir()?,
             &commands::task_start::Options {
                 repo_root: std::env::current_dir()?,
@@ -170,6 +172,10 @@ fn main() -> anyhow::Result<()> {
                 clone_source: None,
                 identity: None,
             },
+            restart.then_some(&commands::task_start::Restart {
+                confirm: &Terminal,
+                yes,
+            }),
             &SbxBackend,
             &sbxm::github::gh::GhBackend::default(),
             &task::record::SystemProbe,
@@ -270,6 +276,76 @@ fn main() -> anyhow::Result<()> {
             &mut std::io::stdout(),
             &mut std::io::stderr(),
         ),
+        Command::Task {
+            command:
+                TaskCommand::Run {
+                    issue,
+                    worker_harness,
+                    worker_model,
+                    reviewer_harness,
+                    reviewer_model,
+                    time_limit,
+                    reviewer_time_limit,
+                    profile,
+                    base,
+                    repo,
+                    restart,
+                    yes,
+                },
+        } => commands::task_run::run(
+            &config::config_dir()?,
+            &commands::task_run::Options {
+                repo_root: std::env::current_dir()?,
+                issue,
+                worker_harness,
+                worker_model,
+                reviewer_harness,
+                reviewer_model,
+                time_limit,
+                reviewer_time_limit,
+                profile,
+                base,
+                repo,
+                clone_source: None,
+                identity: None,
+            },
+            restart.then_some(&commands::task_start::Restart {
+                confirm: &Terminal,
+                yes,
+            }),
+            &SbxBackend,
+            &sbxm::github::gh::GhBackend::default(),
+            &task::record::SystemProbe,
+            &task::gates::ShellHostRunner,
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+        ),
+        Command::Task {
+            command: TaskCommand::Finish { issue },
+        } => commands::task_finish::run(
+            &config::config_dir()?,
+            &commands::task_finish::Options { issue },
+            &sbxm::github::gh::GhBackend::default(),
+            &task::record::SystemProbe,
+            &mut std::io::stdout(),
+        ),
+        Command::Task {
+            command: TaskCommand::Rm { issue, pr, yes },
+        } => {
+            let (kind, number) = match (issue, pr) {
+                (Some(n), _) => (task::record::Kind::Issue, n),
+                (None, Some(n)) => (task::record::Kind::Pr, n),
+                (None, None) => unreachable!("clap requires --issue or --pr"),
+            };
+            commands::task_rm::run(
+                &config::config_dir()?,
+                &commands::task_rm::Options { kind, number, yes },
+                &SbxBackend,
+                &task::record::SystemProbe,
+                &Terminal,
+                &mut std::io::stdout(),
+            )
+        }
         Command::Run(_) => unreachable!("clap requires a config or a subcommand"),
         Command::Config {
             command: ConfigCommand::Init,

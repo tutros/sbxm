@@ -184,6 +184,13 @@ pub enum TaskCommand {
         /// The GitHub repo, owner/name (default: this checkout's origin).
         #[arg(long)]
         repo: Option<String>,
+        /// Delete the existing task of each --issue first (asks, showing exactly what), then
+        /// start it again.
+        #[arg(long, requires = "issues", conflicts_with = "workers")]
+        restart: bool,
+        /// With --restart: don't ask before deleting.
+        #[arg(long, requires = "restart")]
+        yes: bool,
     },
     /// Review a task: gates, an independent reviewer in its own sandbox, at most one fix round by
     /// the worker, gates and a second review; ends ready. Blocks until it is done.
@@ -231,6 +238,67 @@ pub enum TaskCommand {
         /// Print the task records as JSON.
         #[arg(long)]
         json: bool,
+    },
+    /// Start a task for one issue, then review it: the worker, the gates, an independent reviewer
+    /// and at most one fix round. Stops at ready; `finish` publishes. Blocks until it is done.
+    Run {
+        /// The issue to carry through.
+        #[arg(long, value_name = "N")]
+        issue: u32,
+        /// The worker's harness (default: sbxm-task.toml, else claude).
+        #[arg(long, value_enum)]
+        worker_harness: Option<Harness>,
+        /// The worker's model (default: the harness's own).
+        #[arg(long)]
+        worker_model: Option<String>,
+        /// The reviewer's harness (default: sbxm-task.toml, else one different from the worker's).
+        #[arg(long, value_enum)]
+        reviewer_harness: Option<Harness>,
+        /// The reviewer's model (default: the harness's own).
+        #[arg(long)]
+        reviewer_model: Option<String>,
+        /// The worker's time limit, e.g. 90s, 45m, 2h (also for the fix round).
+        #[arg(long)]
+        time_limit: Option<String>,
+        /// The reviewer's time limit, e.g. 45m.
+        #[arg(long)]
+        reviewer_time_limit: Option<String>,
+        /// The sandbox profile (default: sbxm-task.toml).
+        #[arg(long)]
+        profile: Option<String>,
+        /// The branch to start from (default: the repo's default branch).
+        #[arg(long)]
+        base: Option<String>,
+        /// The GitHub repo, owner/name (default: this checkout's origin).
+        #[arg(long)]
+        repo: Option<String>,
+        /// Delete the issue's existing task first (asks, showing exactly what), then start again.
+        #[arg(long)]
+        restart: bool,
+        /// With --restart: don't ask before deleting.
+        #[arg(long, requires = "restart")]
+        yes: bool,
+    },
+    /// Push a ready task's branch and open its PR (`Fixes #N`, with the result and the review in
+    /// the body). Refuses unless the task is ready and has no PR yet.
+    Finish {
+        /// The issue's task.
+        #[arg(long, value_name = "N")]
+        issue: u32,
+    },
+    /// Delete a task: its sandboxes, its clones and its task folder. Shows exactly what, and asks
+    /// first (without a terminal it needs --yes).
+    #[command(group(clap::ArgGroup::new("which").required(true).args(["issue", "pr"])))]
+    Rm {
+        /// The issue's task.
+        #[arg(long, value_name = "N")]
+        issue: Option<u32>,
+        /// The PR's task.
+        #[arg(long, value_name = "N")]
+        pr: Option<u32>,
+        /// Don't ask; delete.
+        #[arg(long)]
+        yes: bool,
     },
     /// File the findings of a review as GitHub issues, one per finding. A dry run unless
     /// --create: it shows every issue and changes nothing.
