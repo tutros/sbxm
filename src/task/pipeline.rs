@@ -482,18 +482,8 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
         fs::write(meta.join("issue.md"), &issue.text)?;
         fs::write(meta.join("worker-prompt.md"), &prompt)?;
 
-        ctx.backend
-            .create(&CreateSpec {
-                name: sandbox.clone(),
-                agent: worker.harness.agent_arg().into(),
-                workspace: workspace.clone(),
-                cpus: kit_set.resources.cpus,
-                memory: kit_set.resources.memory.clone(),
-                skills: harness_kits.skills_store,
-                kits: harness_kits.dirs.clone(),
-            })
-            .with_context(|| format!("cannot create sandbox {sandbox}"))?;
-
+        // The record goes first: sandbox setup takes minutes, and `status` (and a restart after a
+        // kill) must see the task during it.
         let mut task = Record::new(
             &NewTask {
                 kind: Kind::Issue,
@@ -515,6 +505,18 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
             run: None,
         });
         record::write(&meta, &task)?;
+
+        ctx.backend
+            .create(&CreateSpec {
+                name: sandbox.clone(),
+                agent: worker.harness.agent_arg().into(),
+                workspace: workspace.clone(),
+                cpus: kit_set.resources.cpus,
+                memory: kit_set.resources.memory.clone(),
+                skills: harness_kits.skills_store,
+                kits: harness_kits.dirs.clone(),
+            })
+            .with_context(|| format!("cannot create sandbox {sandbox}"))?;
         Ok((task, harness_kits))
     })();
 

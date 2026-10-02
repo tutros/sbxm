@@ -12,7 +12,24 @@ on the change:
 If the file {{previous_review_path}} exists, this is a re-review: the author had one round to fix the findings it
 lists. Check that each earlier finding is fixed, and review the new commits too.
 
-Write {{review_path}}. Its first line is exactly "Must-fix findings: <count>". Then list each finding with its rank
-(must-fix, should-fix or nit), file:line, evidence (a command and its trimmed output, or the quoted code) and the fix
-you suggest. Only this change's problems count; put problems it didn't cause under "Outside this change". If there are
-no findings, say what you checked.
+Write {{review_path}}. Its first line is exactly "Must-fix findings: <count>". Then, so the findings can be filed as
+GitHub issues later, use this shape:
+
+Scope: `<base sha>..<head sha>`
+Issues: pending
+
+## Must fix  (then "## Should fix" and "## Questions"; leave out a heading with no findings)
+
+### <ID> - <what happens, in plain words>   (<ID> unique in the file: M-1, S-1, Q-1)
+
+**Where:** `path/file.rs:10`
+**What happens:** the behavior, with evidence (a command and its trimmed output, or the quoted code)
+**Why it matters:** the decision or convention it breaks
+**Fix:** the smallest change that resolves it
+**Depends on:** another finding or "none known"
+**Acceptance criteria:**
+- [ ] an observable result that proves the fix
+- [ ] a test covering it fails before the fix and passes after
+
+Nits go in a "## Nits" section, one "- Nit:" line each. Only this change's problems count; put problems it didn't
+cause under "## Outside this change". If there are no findings, say what you checked under "## Summary".

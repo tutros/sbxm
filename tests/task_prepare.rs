@@ -382,3 +382,25 @@ fn an_explicit_issue_that_is_not_open_is_named_in_the_error() {
         "{message}"
     );
 }
+
+#[test]
+fn the_record_exists_before_the_slow_sandbox_setup_starts() {
+    let f = fixture();
+    let meta = f
+        .env
+        .base_dir()
+        .join(".sbxm")
+        .join("tasks")
+        .join("issue-41");
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(None));
+    let seen_in_hook = seen.clone();
+    let backend = backend().with_create_hook(move |_| {
+        *seen_in_hook.lock().unwrap() = Some(record::read(&meta.join("task.json")).is_ok());
+    });
+    let github = FakeGitHub::default();
+    let source = source(&f);
+
+    pipeline::prepare(&ctx(&f, &source, &backend, &github), &issue_text(41)).unwrap();
+
+    assert_eq!(*seen.lock().unwrap(), Some(true));
+}

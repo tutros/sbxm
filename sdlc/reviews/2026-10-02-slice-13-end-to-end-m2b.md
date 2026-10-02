@@ -38,32 +38,32 @@ askpass) on network git, a timeout, and a clear error naming `gh auth setup-git`
 
 ### Should-fix
 
-**S-1 (not run) - the one fix round.** No review found a must-fix finding on an issue task, so
+**S-1 (not run; nothing to fix) - the one fix round.** No review found a must-fix finding on an issue task, so
 fix prompt, second gates and second review were not exercised for real.
 
-**S-2 - `task start` leaves no record during sandbox setup.** For the first ~3 minutes `status` says "No tasks yet"
+**S-2 (fixed) - `task start` leaves no record during sandbox setup.** For the first ~3 minutes `status` says "No tasks yet"
 while a sandbox is already running; `task.json` appears only when the worker starts. A task killed before that
 leaves folders with no record: `start` then says "stage no readable record" and `--restart` is the way out (works).
 
-**S-3 - `file-findings --issue/--pr` can't read a task's `review.md`.** The reviewer writes `Reviewer:`, `Must-fix
+**S-3 (fixed) - `file-findings --issue/--pr` can't read a task's `review.md`.** The reviewer writes `Reviewer:`, `Must-fix
 findings: <n>` and free-form findings; `file-findings` demands the skill format with one `Issues:` line and refuses
 ("issue-7-review.md has no 'Issues:' line(s)"). The README says `--issue`/`--pr` take the task's `review.md`. Either
 the reviewer prompt asks for the skill format, or `file-findings` accepts the task format, or the README is changed.
 The parallel-review records under `sdlc/reviews/` hit the same refusal.
 
-**S-4 - `start` for an issue whose branch already exists on origin fails with a raw git error:**
+**S-4 (fixed) - `start` for an issue whose branch already exists on origin fails with a raw git error:**
 `git branch -- issue-1 refs/heads/main failed: a branch named 'issue-1' already exists` (after `finish` had pushed it).
 Should say that the branch exists on origin and what to do.
 
-**S-5 - `task init` prints `sbxm task gates --dry-run`**, which needs `--issue N`; checklist item 1 has the same wording.
+**S-5 (fixed) - `task init` prints `sbxm task gates --dry-run`**, which needs `--issue N`; checklist item 1 has the same wording.
 
-**S-6 - `start --workers N` prints skip reasons only for issues passed over before the cap.** Checklist item 2 says
+**S-6 (fixed, checklist reworded) - `start --workers N` prints skip reasons only for issues passed over before the cap.** Checklist item 2 says
 "every skip reason"; spec rule 6 stops at the cap, so either is fine, but one of them should change.
 
-**S-7 - `task rm` prints `error: sandbox '...' not found` for sandboxes that are already gone** (reviewer
+**S-7 (fixed) - `task rm` prints `error: sandbox '...' not found` for sandboxes that are already gone** (reviewer
 sandboxes are removed after each round), and then `removed sandbox ...`. Cosmetic but alarming.
 
-**S-8 - README says `--issue` "starts exactly the issues named"**, but a named issue that is blocked by an open issue is
+**S-8 (fixed) - README says `--issue` "starts exactly the issues named"**, but a named issue that is blocked by an open issue is
 still refused ("blocked by open #2"), as the spec says.
 
 ### Observations

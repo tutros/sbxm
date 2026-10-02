@@ -315,3 +315,20 @@ fn an_override_that_cannot_be_read_is_an_error_naming_it() {
     );
     assert!(message.contains("missing.md"), "{message}");
 }
+
+#[test]
+fn both_reviewer_prompts_ask_for_the_shape_file_findings_reads() {
+    for role in [Role::Reviewer, Role::ReviewerPr] {
+        let text = prompts::template(role, &Prompts::default()).unwrap().text;
+
+        for needle in [
+            "\"Must-fix findings: <count>\"",
+            "Scope: `<base sha>..<head sha>`",
+            "Issues: pending",
+            "## Must fix",
+            "**Acceptance criteria:**",
+        ] {
+            assert!(text.contains(needle), "{role:?} prompt lacks {needle}");
+        }
+    }
+}
