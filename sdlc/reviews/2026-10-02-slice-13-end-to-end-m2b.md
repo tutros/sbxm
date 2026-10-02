@@ -22,13 +22,13 @@ Real agent runs: Claude, Codex and Antigravity as workers and as reviewers.
 
 ### Must-fix
 
-**M-1 - Sandbox gates run with a PATH that has no `~/.cargo/bin`.** `task start` on the first worker ended
+**M-1 (fixed) - Sandbox gates run with a PATH that has no `~/.cargo/bin`.** `task start` on the first worker ended
 `gates-failed` with `cargo fmt --check: exit 127, sh: 1: cargo: not found`, while the worker had run `cargo test`
 itself. Rust is installed by the `sbxm-dev` profile into `~/.cargo`; `sbx exec ... sh -c` doesn't source it. So the
 default gates for a Rust repo, as `task init` writes them, fail out of the box. Worked around in the scratch repo by
 prefixing `. "$HOME/.cargo/env" &&`. Seen in `src/task/gates.rs` (`sh -c`); `src/run/checks.rs` uses the same pattern.
 
-**M-2 - A credential prompt hangs `task start` forever.** Host network git (`git clone --bare https://...`) used the
+**M-2 (fixed) - A credential prompt hangs `task start` forever.** Host network git (`git clone --bare https://...`) used the
 user's git config; with the Git Credential Manager unable to prompt, a clone sat on VS Code's askpass for 10+ minutes
 with no output, and `sbxm` stayed hung after the git processes were killed. The orphaned askpass helper then held the
 task folder open, so `task rm` and `--restart` failed ("used by another process") until it was killed. It happened with

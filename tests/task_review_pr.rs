@@ -163,7 +163,7 @@ fn the_sandbox_gates_run_inside_the_reviewers_sandbox_before_the_reviewer_does()
     let execs = backend.execs();
     let gate = execs
         .iter()
-        .position(|(_, s)| s.argv.iter().any(|a| a == "cargo test"))
+        .position(|(_, s)| s.argv.iter().any(|a| a.ends_with("cargo test")))
         .unwrap();
     let reviewer = execs
         .iter()

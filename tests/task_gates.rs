@@ -7,6 +7,10 @@ use std::time::Duration;
 use sbxm::backend::{ExecOutput, FakeBackend};
 use sbxm::task::gates::run_sandbox_tier;
 
+/// What every sandbox gate command starts with: `sbx exec` reads no login profile, so the
+/// toolchains the profile installs under `~/.cargo` are put on the PATH here (slice 13, M-1).
+const CARGO_ENV: &str = "[ -f \"$HOME/.cargo/env\" ] && . \"$HOME/.cargo/env\"; ";
+
 const SANDBOX: &str = "sbxm-task-issue-41-claude";
 
 fn cmds(list: &[&str]) -> Vec<String> {
@@ -42,13 +46,13 @@ fn every_command_runs_as_sh_c_under_the_timeout_in_the_workspace() {
         assert_eq!(
             spec.argv,
             [
-                "timeout",
-                "-v",
-                "--kill-after=10",
-                "1200",
-                "sh",
-                "-c",
-                command
+                "timeout".to_owned(),
+                "-v".to_owned(),
+                "--kill-after=10".to_owned(),
+                "1200".to_owned(),
+                "sh".to_owned(),
+                "-c".to_owned(),
+                format!("{CARGO_ENV}{command}")
             ]
         );
         assert_eq!(

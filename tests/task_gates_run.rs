@@ -173,7 +173,7 @@ fn the_gating_stage_is_on_disk_before_any_gate_runs() {
     let backend = backend()
         .with_exec_output_matching("claude", ok(CLAUDE_DONE))
         .with_exec_hook(move |sandbox, spec| {
-            if spec.argv.iter().any(|a| a == "cargo test") {
+            if spec.argv.iter().any(|a| a.ends_with("cargo test")) {
                 let record = record::read(&record_path).unwrap();
                 *seen_in_hook.lock().unwrap() = Some((record.stage, record.status));
             }

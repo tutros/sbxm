@@ -20,6 +20,10 @@ use crate::run::config::Check;
 /// How much of a command's output is kept in `gates.log`.
 const OUTPUT_TAIL_BYTES: usize = 8 * 1024;
 
+/// Put in front of every sandbox gate command: `sbx exec` reads no login profile, so a toolchain
+/// the profile installs under `~/.cargo` (Rust, `just`) isn't on the PATH without it.
+const CARGO_ENV: &str = "[ -f \"$HOME/.cargo/env\" ] && . \"$HOME/.cargo/env\"; ";
+
 /// How one gate command went.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GateOutcome {
@@ -44,7 +48,7 @@ pub fn run_sandbox_tier(
     for (i, command) in commands.iter().enumerate() {
         let check = Check {
             id: format!("gate-{i}"),
-            command: command.clone(),
+            command: format!("{CARGO_ENV}{command}"),
             timeout: Some(timeout),
         };
         let verdict = run_checks(backend, sandbox, workdir, &[check], timeout).remove(0);
