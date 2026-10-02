@@ -159,8 +159,8 @@ Every finding becomes a GitHub issue (decision 79), so the work to fix it has a 
 If either fails (e.g. inside a sandbox with no `gh` login, no `github` secret or no `github.com` egress), don't file
 anything and don't try to set up a remote or log in: that's the user's call. Write the findings to the review file,
 mark it `Issues: pending (no GitHub access from <where>)`, tell the user, and file them later from where access
-works. From a host with access, `scripts/file-review-issues.ps1` does the filing from the review file
-(decision 134; format below).
+works. From a host with access, `sbxm task file-findings --file <review>` does the filing from the review file
+(decisions 134 and 165; format below).
 
 **Template.** Every issue has exactly these parts:
 
@@ -205,17 +205,17 @@ the other) so either one leads to the other.
 - Write bodies to temp files with the file-write tool and pass `--body-file` (Windows paths contain backslashes, which
   the Bash tool mangles). Delete the temp files afterwards.
 
-### Review file format (what `scripts/file-review-issues.ps1` parses)
+### Review file format (what `sbxm task file-findings` parses)
 
-A review file in `sdlc/reviews/` uses this shape, so its findings can be filed without rewriting them. The script also
-accepts the small variations real reviewers produce (see `scripts/tests/fixtures/review-m2a-codex.md`), but a review
+A review file in `sdlc/reviews/` uses this shape, so its findings can be filed without rewriting them. The command also
+accepts the small variations real reviewers produce (see `tests/fixtures/review-findings/review-m2a-codex.md`), but a review
 should follow this.
 
 ```
 # <title>
 
 Scope: `<base sha>..<head sha>` (<n> commits)        the reviewed commits; permalinks use the head sha
-Issues: pending (<why>)                              the script rewrites this line to "Issues: <id> #<n>, ..."
+Issues: pending (<why>)                              the command rewrites this line to "Issues: <id> #<n>, ..."
 
 ## Must fix                   then "## Should fix" and "## Questions"; each heading is the label of its findings
 
@@ -236,9 +236,13 @@ Issues: pending (<why>)                              the script rewrites this li
 
 Text under other `##` headings (Summary, Verification and checklist notes, nits) is not filed. **Acceptance criteria
 are required for must-fix and should-fix findings**: a reviewer that leaves them out makes the finding impossible to
-file as written (the script refuses it, or files it with only the standard criteria when told to).
+file as written (the command refuses it, or files it with only the standard criteria when told to).
 
 ## Independent reviews
+
+For a pull request of this repo, `sbxm task review --pr <n>` runs this whole procedure itself: the gates, a reviewer
+from another harness in its own sandbox, and the review posted as a comment on the PR (see the README). The manual
+route below is for a branch with no PR, or when you want to choose the prompt.
 
 When the user asks for a fresh-eyes review, run it as a read-only subagent: give it the scope, this skill, and the
 output format above. It doesn't edit files or commit; the main session checks its evidence before reporting any of
@@ -262,5 +266,5 @@ when it needs to build and run the tests. Nothing here needs GitHub access.
    must-fix and should-fix finding. Don't edit code."
 4. Copy the review file out of the clone into the real repo's `sdlc/reviews/`, check its evidence yourself (the main
    session verifies every must-fix claim by reproducing it), then file the issues from the host:
-   `./scripts/file-review-issues.ps1 -Review sdlc/reviews/<file>` (dry run), then again with `-Create`.
+   `sbxm task file-findings --file sdlc/reviews/<file>` (dry run), then again with `--create`.
 5. Remove the sandbox and the clone: `sbxm rm <project>-review --harness codex`, then delete the clone folder.

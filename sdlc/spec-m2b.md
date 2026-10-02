@@ -292,7 +292,7 @@ timeouts are enforced inside the sandbox.
 | `deploy-profiles.ps1` | stays a script | profile deployment, not task work | `scripts/tests/DeployProfiles.Tests.ps1` |
 | (new) | `init`, `gates`, `run` | [157][158] | `task_init.rs`, `task_gates_cmd.rs`, `task_run.rs`; slice 13 item 1 |
 
-Both scripts carry a DEPRECATED line in their help; deleting them is a separate decision after slice 13 passes.
+Both scripts were deleted on 2026-10-02 (decision 165) after slice 13 passed and PR #57 merged; `git log -- scripts/` has them. `deploy-profiles.ps1` stays.
 
 ## Details to verify first (before the slice that relies on them)
 

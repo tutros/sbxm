@@ -1,7 +1,7 @@
 //! `sbxm task file-findings (--issue N | --pr N | --file F) [--create]` (spec §4, §11, decisions
 //! 134, 149): files the findings of a review as GitHub issues. A dry run unless `--create`.
 //! Everything that can be wrong is checked before the first write: ids, the `Issues:` line,
-//! secrets, labels, the issue list. Ported from `scripts/file-review-issues.ps1`.
+//! secrets, labels, the issue list. Ported from the PowerShell script removed in decision 165.
 
 use std::collections::BTreeMap;
 use std::fs;
