@@ -118,7 +118,7 @@ pub fn run(
 
 /// `sbx rm` fails for a sandbox that's already gone, which is the outcome
 /// `rm` wants, so a failure only counts if `sbx ls` still lists the sandbox.
-fn remove_sandbox(backend: &dyn SandboxBackend, sandbox: &str) -> Result<()> {
+pub(crate) fn remove_sandbox(backend: &dyn SandboxBackend, sandbox: &str) -> Result<()> {
     let Err(err) = backend.remove(sandbox) else {
         return Ok(());
     };
