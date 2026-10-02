@@ -1,5 +1,5 @@
 //! Issue selection (spec §8, decision 154): which open issues get a task, and why the
-//! others don't. Pure; the rules are those of `Select-Issues` in `scripts/issue-workers.psm1`.
+//! others don't. Pure; the rules are those of `Select-Issues` in the PowerShell script removed in decision 165.
 
 use std::collections::HashMap;
 use std::fmt;

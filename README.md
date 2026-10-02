@@ -67,11 +67,11 @@ that).
 | `sbxm run <config>` | Runs a comparison: checks the run-config and that every needed secret is stored in `sbx` (each contestant's provider, the judge's, and the profiles' `secrets.services`), builds and validates the kits, then gives each (contestant, repeat) pair its own throwaway sandbox. A contestant can set its own `profile`; otherwise `[run].profile` (or your `default_profile`) applies, and the judge uses the run's. Contestants of a repeat run in parallel; repeats run one after another. Each sandbox is removed afterwards, even after an error; the workspaces stay under `<base_dir>/runs/<run-id>/<contestant>/<repeat>/`. Prints the run ID and one line per pair (completed, timed out or failed). With `task.seed`, each contestant gets its own copy of the seed as a fresh git repo with one baseline commit (the seed's history and remotes are dropped); without it, an empty plain folder. Each pair's diff (everything the contestant changed or added, even if it committed) is captured before its sandbox is removed. Each pair's results are saved the moment it finishes under `<base_dir>\.sbxm\runs\<run-id>\<contestant>\<repeat>\` (`answer.md`, `diff.patch`, `transcript.jsonl`, `result.json`), next to `run.json` (the run's identity: config hashes, profile, `sbx` version, times) and a copy of the run-config; `run.json` gets `completed_at` only once everything is saved. Any `[[eval.checks]]` run inside each contestant's sandbox after its agent finishes (and after its diff is taken), as `sh -c <command>` with a time limit enforced inside the sandbox; exit code 0 passes. The verdicts are saved in `evals.json` next to the pair's other files and summarised on the pair's line (`; checks 2/3 passed`). With `[eval.judge]` and a rubric, an LLM judge then scores the contestants: after all pairs are done, once per repeat, in its own throwaway sandbox, it sees each contestant's answer and diff under an anonymous label (A, B, ...) and scores every rubric criterion (`pass_fail` or a `scale` of levels). A judge from the same provider as a contestant is allowed, with a warning. Verdicts are saved in each pair's `evals.json` and per repeat in `judge/<repeat>/judge.json` (the label mapping); a judge that fails is warned about and doesn't fail the run. The contestants are then ranked: each criterion is 0 to 1, a contestant's score is the weighted mean over the criteria the judge scored (criteria it skipped are listed, never counted as 0), repeats are averaged, equal scores share a rank, and executable checks are shown alongside without changing the score. The ranking is printed before the last line, `Results: <folder>`. Cosine evaluation is planned but not implemented yet, so `[eval.cosine]` is currently refused. |
 | `sbxm run show <run-id> [--diff]` | Prints a saved run from its files: when it started and completed, the profile and `sbx` version, and for each contestant and repeat the status, the answer, a summary of the diff (files changed, lines added and removed) each executable check's verdict and the judge's scores, with the anonymous label each contestant was judged under. `--diff` also prints every full patch. With a judge it also prints the ranking, recomputed from the saved files (edit `run-config.toml` in the run folder to try other weights). A run that is still going or was interrupted shows what has been saved so far. Only reads files; the id must look like `2026-09-30-a1b2c3`. |
 | `sbxm task init [path]` | Writes a starter `sbxm-task.toml` (the worker, reviewer, sandbox profile and gates for `sbxm task`) in the repo's root. Valid as written for a Rust repo. Refuses to overwrite. |
-| `sbxm task start (--issue N... \| --workers N) [flags]` | Hands GitHub issues to worker agents (the port of `scripts/issue-workers.ps1`). For each chosen issue it makes a task: its own sandbox (`sbxm-task-issue-<n>-<harness>`), a clone of the repo on branch `issue-<n>`, and a headless worker that follows the issue and commits. `--workers N` picks up to N open issues (`must-fix` before `should-fix`; it skips questions, issues whose `**Depends on:**` issues are still open, issues that already have a task and issues `**Related:**` to one that does); `--issue N` starts exactly the issues named (one that is blocked by an open issue is still refused). The tasks run in parallel and one failing doesn't stop the others. The worker has no GitHub access: the issue text is copied into its clone. When it stops, its commits are collected into a bare repo that only sbxm and your git touch (`<base_dir>\.sbxm\tasks\<id>\repo.git`) through a verified `git bundle`: the bundle must be a plain file under 500 MB, only the task branch is fetched, and no git command ever runs inside the agent's folder. Also saved there: `issue.md`, `result.md` (what the worker wrote), the transcript and `task.json`. Flags override `sbxm-task.toml`: `--worker-harness`, `--worker-model`, `--time-limit`, `--profile`, `--base`, `--repo`. `--restart` (with `--issue`) first deletes an existing task of that issue, showing what and asking like `task rm` (`--yes` skips the question), after checking that the issue is still open, the task isn't running and every other input is valid. After the worker (unless it failed) the task's gates run (see `task gates`); then `task review` and `task finish` (or `task run` for start and review in one go). Exits non-zero if any task or its gates failed. |
+| `sbxm task start (--issue N... \| --workers N) [flags]` | Hands GitHub issues to worker agents. For each chosen issue it makes a task: its own sandbox (`sbxm-task-issue-<n>-<harness>`), a clone of the repo on branch `issue-<n>`, and a headless worker that follows the issue and commits. `--workers N` picks up to N open issues (`must-fix` before `should-fix`; it skips questions, issues whose `**Depends on:**` issues are still open, issues that already have a task and issues `**Related:**` to one that does); `--issue N` starts exactly the issues named (one that is blocked by an open issue is still refused). The tasks run in parallel and one failing doesn't stop the others. The worker has no GitHub access: the issue text is copied into its clone. When it stops, its commits are collected into a bare repo that only sbxm and your git touch (`<base_dir>\.sbxm\tasks\<id>\repo.git`) through a verified `git bundle`: the bundle must be a plain file under 500 MB, only the task branch is fetched, and no git command ever runs inside the agent's folder. Also saved there: `issue.md`, `result.md` (what the worker wrote), the transcript and `task.json`. Flags override `sbxm-task.toml`: `--worker-harness`, `--worker-model`, `--time-limit`, `--profile`, `--base`, `--repo`. `--restart` (with `--issue`) first deletes an existing task of that issue, showing what and asking like `task rm` (`--yes` skips the question), after checking that the issue is still open, the task isn't running and every other input is valid. After the worker (unless it failed) the task's gates run (see `task gates`); then `task review` and `task finish` (or `task run` for start and review in one go). Exits non-zero if any task or its gates failed. |
 | `sbxm task review (--issue N \| --pr N) [--repo owner/name] [--base b] [--reviewer-harness h] [--reviewer-model m] [--reviewer-time-limit 45m] [--time-limit 2h] [--profile p]` | Has a task's change reviewed by an independent agent, then lets the worker fix what it found, once. Checks first, before anything is created: the task is ready for review, and the reviewer's provider secret (and the profile's) are stored. The gates run first unless they passed since the last change (a failure stops here, exit 1). The reviewer runs in its own sandbox over its own clone of the task branch (made from the host-owned repo, so it sees exactly the collected commits and can't touch the worker's folder), told to follow the repo's `sdlc-code-review` skill, to change nothing and to write `.sbxm-task/review.md` whose first line is `Must-fix findings: <count>`; Codex runs with high reasoning effort. The review is saved under the reviewer's name (`Reviewer: codex (model)`) as `review-<round>.md` and `review.md`; a review without that first line is kept for reading but not used. If it counts must-fix findings, the worker gets one fix round in its own sandbox (the review and a fix prompt are put in its folder; its new commits are collected like the first time), the gates run again (a failure stops here, exit 1), and a second review (`review-2.md`) follows with the first one as context. The reviewer's sandbox and clone are removed after each round, also after an error. The task ends `ready`; must-fix findings left after the second review are reported, not an error. A reviewer like the worker's harness warns (less independent). For an issue's task nothing is pushed or posted. **`--pr N` instead reviews an open pull request from a branch of this repo** (a fork's PR is refused, as is a closed or merged one, before anything is created): the PR's head is fetched into the host-owned repo (with git's object check on), the PR's description and the issues it closes are the reviewer's context, and the gates run on a clean checkout: the sandbox tier inside the reviewer's own sandbox (a PR has no worker), the host tier as usual. The reviewer runs once, with no fix round, and a valid review is posted as a comment on the PR (`@mentions` are neutralised and a very long review is cut with a note; the whole text is `review.md` in the task folder). Nothing is posted if the gates fail or the review is invalid; if only the posting fails, the review stays saved and the error gives the `gh pr comment` command to post it by hand. A PR task that exists is retried only when its review failed; to review a PR again after it changed, remove its task first with `sbxm task rm --pr N`. `--repo` and `--base` apply to PRs (defaults: this checkout's origin, the repo's default branch). |
 | `sbxm task gates --issue N [--tier sandbox\|host\|all] [--dry-run]` | Runs a task's gates, the checks `sbxm` itself runs (an agent's prompt can't skip them) to decide whether its work may go on. They are listed in `sbxm-task.toml` under `[gates]`. The **sandbox tier** (`sandbox = [...]`, default for a Rust repo: `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`) runs each command as `sh -c` in the worker's own sandbox, on its folder, under a time limit enforced inside the sandbox (`timeout = "20m"` per command); the first failure stops the tier. The optional **host tier** (`host = [...]`, off while empty) runs on this machine, in a clean checkout of the task branch from the host-owned repo (only committed files, no hooks), only after the sandbox tier passed, and the checkout is removed afterwards. **Host gates run agent-written code on your machine, outside any sandbox**: list only commands you would run on a stranger's pull request. Results go to the task's `task.json` and `gates.log`; a failure marks the task `gates-failed`. `task start` runs them after the worker; this command runs them again on demand, for example after you fixed something by hand in the worker's clone: first it collects what is *committed* there into the task's repo, so the host tier, `task review` and `task finish` use the same commits as the sandbox tier (commit your fix; uncommitted changes are seen by the sandbox tier but are never collected). `--dry-run` prints each tier's commands, where they run and whether the tier is off, and changes nothing. A run of one tier is partial: `task review` skips its own gate run only if the passing runs together covered every configured tier on the task branch's current commit, and `--tier host` is refused unless the sandbox tier passed on that commit. Refused while the worker is running or after the task has moved past its gates. |
 | `sbxm task status [--issue N \| --pr N] [--json]` | One line per task: stage, status (`interrupted` when its `sbxm` process is gone), `ahead:` the commits on the task branch past its base in the task's own repo (`-` before the repo exists), and whether `result.md` and `review.md` exist. `--json` prints the records, plus `interrupted` and `commits_ahead` (`null` when unknown). |
-| `sbxm task file-findings (--issue N \| --pr N \| --file F) [--create] [--only ID,...] [--standard-criteria] [--keep-paths] [--repo owner/name]` | Files the findings of a review as GitHub issues, one per finding (the port of `scripts/file-review-issues.ps1`). `--file` takes any review file (e.g. `sdlc/reviews/<date>-<scope>.md`); `--issue`/`--pr` take the `review.md` of that task (the built-in reviewer prompts ask for the skill's review format, with an `Issues:` line; a custom `[prompts] reviewer` must do the same). **A dry run unless `--create`**: it prints every issue it would create and the `Issues:` line it would write, and changes nothing. Before any write it checks the finding ids, that the review has exactly one `Issues:` line, your `gh` login, the repo and its labels (`must-fix`, `should-fix`, `question` must exist; none are created), and every finding: a secret-looking line (token, key, password assignment) refuses the whole run, naming the finding and line but never the value, and personal paths (`C:\Users\<name>`, `/home/<name>`) become `~` (`--keep-paths` keeps them). A must-fix or should-fix finding with no acceptance criteria is refused unless `--standard-criteria`. Issues are created in dependency order with permalinks at the reviewed commit and `Depends on`/`Related` links to the other issues; a hidden marker in each body means a rerun never files a finding twice (it skips it and reuses its number), and the links of issues that already exist are patched in those two fields only. Afterwards the review's `Issues:` line is rewritten (`Issues: S-1 #41, S-2 pending`). Exits non-zero if some issue could not be filed; rerun to file the rest. |
+| `sbxm task file-findings (--issue N \| --pr N \| --file F) [--create] [--only ID,...] [--standard-criteria] [--keep-paths] [--repo owner/name]` | Files the findings of a review as GitHub issues, one per finding. `--file` takes any review file (e.g. `sdlc/reviews/<date>-<scope>.md`); `--issue`/`--pr` take the `review.md` of that task (the built-in reviewer prompts ask for the skill's review format, with an `Issues:` line; a custom `[prompts] reviewer` must do the same). **A dry run unless `--create`**: it prints every issue it would create and the `Issues:` line it would write, and changes nothing. Before any write it checks the finding ids, that the review has exactly one `Issues:` line, your `gh` login, the repo and its labels (`must-fix`, `should-fix`, `question` must exist; none are created), and every finding: a secret-looking line (token, key, password assignment) refuses the whole run, naming the finding and line but never the value, and personal paths (`C:\Users\<name>`, `/home/<name>`) become `~` (`--keep-paths` keeps them). A must-fix or should-fix finding with no acceptance criteria is refused unless `--standard-criteria`. Issues are created in dependency order with permalinks at the reviewed commit and `Depends on`/`Related` links to the other issues; a hidden marker in each body means a rerun never files a finding twice (it skips it and reuses its number), and the links of issues that already exist are patched in those two fields only. Afterwards the review's `Issues:` line is rewritten (`Issues: S-1 #41, S-2 pending`). Exits non-zero if some issue could not be filed; rerun to file the rest. |
 | `sbxm task finish --issue N` | Publishes a ready task: pushes branch `issue-<n>` from the task's host-owned `repo.git` (never forced) and opens the PR from it to the task's base, titled like the issue, with `Fixes #<n>`, then `result.md` and `review.md` each under a heading (a file over 25,000 characters is cut, and the body and the output say so). Every check comes before the push: the task must be `ready` and have no PR yet, the repo, branch and base names must be usable, the branch must have commits beyond the base, and `result.md`/`review.md` must not contain a secret-looking line (refused, naming the line, never the value). The task then becomes `finished` and `task.json` keeps the PR's URL. If the push worked but opening the PR failed, the task stays `ready` with a note and the error says so: run `finish` again, which pushes the same commits (nothing to do) and retries only the PR. If someone opened the PR by hand in between, GitHub's refusal is shown and nothing is recorded. **It refuses to push a branch that adds, edits or deletes anything under `.github/workflows/` or `.github/actions/`** (letter case ignored): GitHub would run those files with the repository's secrets the moment the branch is pushed, before anyone has read what the agent wrote, so read them in the task's `repo.git` and push the branch yourself if the change is meant. |
 | `sbxm task rm (--issue N \| --pr N) [--yes]` | Deletes a task: its sandboxes (the worker's and the reviewer's, by the names saved in `task.json`), its clones (`<base_dir>\tasks\<id>`, `<id>-review`, `<id>-gates`) and its folder `<base_dir>\.sbxm\tasks\<id>\`. It first prints the exact sandboxes and paths and asks `[y/N]`; without a terminal it refuses unless you pass `--yes`. It refuses while the task is running (an interrupted one can go), and builds paths only from an id that looks like `issue-41` or `pr-7`. It never follows a link or junction: a task folder that is one, or that resolves anywhere but its own place under the base folder, stays (a link *inside* a clone is removed, not followed). Removal carries on after a failure and says what went and what stayed; the task folder is deleted last and only if everything else went, so a second `rm` still knows the sandbox names. Exits non-zero if anything stayed. |
 | `sbxm task run --issue N [flags]` | `task start` and then `task review` for one issue, with the flags of both (`--worker-harness`, `--worker-model`, `--reviewer-harness`, `--reviewer-model`, `--time-limit`, `--reviewer-time-limit`, `--profile`, `--base`, `--repo`, `--restart`, `--yes`). The reviewer's flags are checked before the worker starts. It stops at `ready` and prints the `task finish` command: publishing stays a separate step. Exit 1 for any failure, including failing gates; a task that ends `ready` with must-fix findings left is reported, not an error. |
@@ -116,7 +116,7 @@ that).
 |---|---|
 | `just build` | Builds the debug binary. |
 | `just test` | Runs the Rust tests (no Docker needed). |
-| `just script-test` | Runs the Pester tests for the scripts in `scripts/` (needs Pester 5). |
+| `just script-test` | Runs the Pester tests for `scripts/deploy-profiles.ps1` (needs Pester 5). |
 | `just check` | Everything that must pass before a commit: `cargo fmt --check`, clippy, `cargo test` and `just script-test`. |
 | `just real-test [base_dir]` | Runs the tests against the real `sbx` (needs `sbx login` and a base dir not on `C:`). |
 
@@ -265,10 +265,10 @@ settings, the *contents* of referenced files, resources and sbxm's version. A se
 |---|---|
 | `sbxm list` | sbxm's sandboxes with status, config drift and orphans (`--json` for scripts). |
 | `sbx ls` | Every sandbox `sbx` knows about, with agent, `running`/`stopped` and workspace. A sandbox that has gone from this list is finished and removed. |
-| `./scripts/issue-workers.ps1 status` | Issue workers: agent running or finished, commits, `result.md` and `review.md`. |
+| `sbxm task status` | Tasks: stage and status (`interrupted` if `sbxm` died), commits ahead of base, `result.md` and `review.md`. |
 
-Sandbox names are `sbxm-<project>-<harness>`, so the scripted ones follow from their project names: a worker is
-`sbxm-sbxm-issue-<n>-claude`, a PR reviewer `sbxm-sbxm-review-pr-<n>-codex`.
+Sandbox names are `sbxm-<project>-<harness>`. A task's are `sbxm-task-issue-<n>-<harness>` for its worker and
+`sbxm-task-<id>-review-<harness>` for a reviewer (`<id>` is `issue-<n>` or `pr-<n>`).
 
 **What is it doing right now?**
 
@@ -282,25 +282,25 @@ Sandbox names are `sbxm-<project>-<harness>`, so the scripted ones follow from t
 - `sbxm config show <project> --harness <h> --kits` prints exactly what was applied, and `sbxm config profiles-dir`
   prints the folder profiles are read from.
 
-**A scripted run (worker or `review -Pr`): which file changes when**
+**A task: which file changes when**
 
-A worker's files are in `.sbxm-issue\` in its clone; a PR review's are in `<base_dir>\sbxm-pr-<n>-review\`. Follow one
-live with `Get-Content <file> -Tail 20 -Wait`.
+A task's files are in `<base_dir>\.sbxm\tasks\<id>\` (`<id>` is `issue-<n>` or `pr-<n>`). `sbxm task status` shows
+the stage; follow a file live with `Get-Content <file> -Tail 20 -Wait`.
 
 | File | Written while | Meaning |
 |---|---|---|
-| `gates.log` | the host checks run (first) | `cargo fmt`, clippy and `cargo test` on the host. A failure here stops the run before any sandbox starts. |
-| `review-1.log` | the reviewer runs | The reviewer's live log. It stays old until the reviewer's sandbox has started. |
-| `review.md`, `review-1.md` | the end | The review itself. Until then they are the **previous** run's files, so check their times. |
-| `agent.log` | a worker runs | The worker's own output; it ends with `agent exit code: <n>`. |
-| `transcripts\` | the end | The reviewer's session transcripts, copied out before its sandbox is removed. |
+| `task.json` | every stage change | The record: stage, status, gate results, sandbox names, notes. It exists from the start of `task start`, before the sandbox is ready. |
+| `gates.log` | the gates run | Each gate command with its exit code and the end of its output. A failure here marks the task `gates-failed` and stops it. |
+| `transcripts\` | each agent run ends | The worker's, fix round's and reviewer's session transcripts, copied out before a sandbox is removed. |
+| `result.md` | the worker ends | What the worker wrote about its change (copied from its clone). |
+| `review-<round>.md`, `review.md` | a review ends | The reviewer's findings; `review.md` is the latest, starting with `Must-fix findings: <n>`. |
 
 A review normally takes 6 to 12 minutes after its sandbox has started. The command's own output says which stage it is
-in (`cargo fmt`, `cargo test`, `review round 1`).
+in (gates, `review round 1`).
 
 **Cleaning up.** Each sandbox that builds the project keeps its own `target\`, which is 3 to 4 GB. `sbxm rm <project>
---purge` removes every sandbox of a project and its workspace (asks first); `issue-workers.ps1 remove -Issue <n>` does it
-for a worker. Finished review folders are small and can stay or go. Check `sbx ls` for stopped leftovers.
+--purge` removes every sandbox of a project and its workspace (asks first); `sbxm task rm --issue <n>` does it
+for a task. Check `sbx ls` for stopped leftovers.
 
 ## Troubleshooting
 
@@ -326,68 +326,75 @@ for a worker. Finished review folders are small and can stay or go. Check `sbx l
 `just real-test` runs the tests against the real `sbx`. See [The `justfile`](#the-justfile) for every recipe. Design decisions are numbered in `sdlc/decisions.md`, the milestone plan is `sdlc/milestone-1.md`, and
 `AGENTS.md` describes the code layout and workflow for coding agents.
 
-### Working on issues with sbxm sandboxes
+### Working on issues with `sbxm task`
 
-`scripts/issue-workers.ps1` (PowerShell 7) hands open GitHub issues to Claude Code agents running in parallel, one
-sbxm sandbox per issue. The host picks the issues, so no two workers get the same one. It skips questions, issues
-whose **Depends on** issues are still open, and issues **Related** to one that already has a worker. Each worker is a
-clone at `<base_dir>\sbxm-issue-<n>` on branch `issue-<n>`, and the agent follows the `sdlc-implementation` skill from
-the clone's `.claude/skills/`. The sandbox has no GitHub access: the agent commits locally and writes
-`.sbxm-issue/result.md` with evidence for each acceptance criterion, and you push from the host.
+`sbxm task` hands GitHub issues to worker agents, one sbxm sandbox per issue, checks and reviews their work, and
+opens the PR. The host picks the issues, so no two workers get the same one: it skips questions, issues whose
+**Depends on** issues are still open, and issues **Related** to one that already has a task. The sandbox has no
+GitHub access; the agent commits locally and writes `.sbxm-task/result.md`, and `sbxm` collects the commits through
+a verified `git bundle` into its own repo (`<base_dir>\.sbxm\tasks\<id>\repo.git`). Only `sbxm` pushes. The table in
+[Commands](#commands) lists every `task` command and flag.
 
-A worker never reviews its own change. `review` first runs `cargo fmt --check`, clippy and `cargo test` on the host,
-then a fresh reviewer in its own sandbox (`sbxm-review-<n>`, on its own clone, so it can't change the branch)
-writes `review.md`. The reviewer is Codex with `gpt-5.6-sol` at high reasoning effort, so it doesn't share the Claude
-workers' blind spots; `-ReviewHarness claude` and `-ReviewModel <model>` change that. If the review has must-fix
-findings, the worker gets one round to fix them and the review runs once more. Whatever is still open goes into the
-PR description; nothing is filed as an issue.
+A worker never reviews its own change. `task review` first runs the **gates** (`cargo fmt --check`, clippy and
+`cargo test` in the worker's sandbox by default, plus any host commands you list), then a fresh reviewer in its own
+sandbox, on its own clone so it can't change the branch, writes `review.md`. The reviewer's harness differs from the
+worker's by default (Codex when the worker is Claude), so it doesn't share the worker's blind spots. If the review
+has must-fix findings, the worker gets one round to fix them, the gates run again and the review runs once more.
+Whatever is still open goes into the PR description; nothing is filed as an issue unless you run
+`task file-findings`.
 
 Every change to sbxm goes through a PR, including ones not made by workers, and gets the same review:
-`review -Pr <n>` clones the PR's branch, runs the host checks and the reviewer, and posts the review as a comment on
-the PR. There's no fix round; the author fixes the findings and runs it again. PRs from forks are refused, because
-the host checks run the PR's code on your machine.
+`task review --pr <n>` fetches the PR's head, runs the gates in the reviewer's sandbox, and posts the review as a
+comment on the PR. There's no fix round; the author fixes the findings and runs it again. PRs from forks are
+refused, because the code would run on your machine.
 
-One-time setup: run `just deploy-profiles` to copy `profiles/sbxm-dev` into your `profiles_dir` (run it again after
-the profile changes). It installs Rust, a C toolchain, PowerShell 7,
-Pester 5 and `just` (so `just script-test` runs in the sandbox), allows crates.io, Microsoft's package host and the
-PowerShell Gallery, and needs the `anthropic` secret; the Codex reviewer also needs the `openai` one (`sbx secret ls`). Also
-check that `gh auth status` shows you logged in.
+One-time setup:
+- `just deploy-profiles` copies `profiles/sbxm-dev` into your `profiles_dir` (again after the profile changes). It
+  installs Rust, a C toolchain, PowerShell 7, Pester 5 and `just`, allows crates.io, Microsoft's package host and the
+  PowerShell Gallery, and needs the `anthropic` secret; a Codex reviewer also needs `openai` (`sbx secret ls`).
+- `sbxm task init` writes `sbxm-task.toml` in the repo's root: the worker, reviewer, profile, gates and time limits.
+- `gh auth status` must show you logged in, and git must be able to clone and push without a prompt: run
+  `gh auth setup-git` once. `sbxm` never lets a credential prompt hang; it fails and names that command.
 
 ```powershell
-./scripts/issue-workers.ps1 start -Workers 2 -DryRun   # which issues would be picked
-./scripts/issue-workers.ps1 start -Workers 2           # or choose them: -Issue 1,2
-./scripts/issue-workers.ps1 status                     # agent running/finished, commits, result.md, review
-./scripts/issue-workers.ps1 review -Issue 1            # host checks, independent review, one fix round
-./scripts/issue-workers.ps1 review -Pr 12              # review any open PR and comment the result on it
-./scripts/issue-workers.ps1 finish -Issue 1            # push issue-1 and open a PR with "Fixes #1" and the review
-./scripts/issue-workers.ps1 remove -Issue 1            # after merging: sandbox and clone (asks first)
+sbxm task start --workers 2     # pick up to 2 issues, one sandbox each, wait for the workers
+sbxm task status                # stage, status, commits ahead of base, result and review present
+sbxm task review --issue 1      # gates, independent review, one fix round
+sbxm task finish --issue 1      # push issue-1 and open a PR with "Fixes #1", the result and the review
+sbxm task rm --issue 1          # after merging: the sandboxes, clones and record (asks first)
+sbxm task review --pr 12        # review any open PR of this repo and comment the result on it
+sbxm task run --issue 1         # start and review in one go, stopping before finish
 ```
 
-Agents run for up to `-TimeLimit` (default `2h`), reviewers for up to `-ReviewTimeLimit` (default `45m`). For a
-worker, the output goes to `.sbxm-issue/` in its clone (`agent.log`, `gates.log`, `review-<round>.log` and `.md`,
-`review.md`, `fix.log`); for `review -Pr <n>`, to `<base_dir>\sbxm-pr-<n>-review\` (`gates.log`, `review-1.log`,
-`review.md`). Both keep the reviewer's full session transcripts in `transcripts\`, copied out before its sandbox is
-removed.
-To take over one interactively, run `sbxm open sbxm-issue-<n> --harness claude`. `-BaseDir` (default `E:\sbxm-projects`) must match
-`base_dir` in `config.toml`. [`sandbox-issues.md`](sandbox-issues.md) has the steps with the expected output.
+Workers run for up to 2 hours and reviewers for 45 minutes by default (`--time-limit`, `--reviewer-time-limit` or
+`sbxm-task.toml`). Each task keeps `task.json` (its stage, status, gate results and the sandbox names), `gates.log`,
+`issue.md`, `result.md`, `review.md` and the transcripts under `<base_dir>\.sbxm\tasks\<id>\`; the clones are
+`<base_dir>\tasks\<id>`, `<id>-review` and `<id>-gates`. A task killed halfway shows as `interrupted` in
+`task status`; `task start --restart --issue <n>` (after the same confirmation as `task rm`) starts it again.
+
+Sandbox setup takes about 3 minutes per task (apt, rustup, `cargo install just`), and each sandbox's disk lives on
+the drive Docker keeps its state on (about 7 GB while it exists): `sbxm doctor` checks the base dir's free space,
+not that drive's.
 
 ### Filing review findings as issues
 
 Reviews run in sandboxes without GitHub access, so their findings sit in `sdlc/reviews/<date>-<scope>.md` marked
-`Issues: pending`. `scripts/file-review-issues.ps1` (PowerShell 7, run from a host where `gh` works) files one issue
-per finding. It is a dry run unless you pass `-Create`, so read the dry run first: it prints every issue body, and
-path and secret scrubbing is heuristic (personal paths become `~`; a secret-looking line refuses the finding).
+`Issues: pending`. `sbxm task file-findings` files one issue per finding, from a host where `gh` works. It is a dry
+run unless you pass `--create`, so read the dry run first: it prints every issue body, and path and secret scrubbing
+is heuristic (personal paths become `~`; a secret-looking line refuses the finding).
 
 ```powershell
-./scripts/file-review-issues.ps1 sdlc/reviews/2026-09-30-milestone-2a.md                     # dry run
-./scripts/file-review-issues.ps1 sdlc/reviews/2026-09-30-milestone-2a.md -Create             # file the issues
-./scripts/file-review-issues.ps1 sdlc/reviews/2026-09-30-milestone-2a.md -Create -Only M2A-1 # just these finding ids
+sbxm task file-findings --file sdlc/reviews/2026-09-30-milestone-2a.md                      # dry run
+sbxm task file-findings --file sdlc/reviews/2026-09-30-milestone-2a.md --create             # file the issues
+sbxm task file-findings --file sdlc/reviews/2026-09-30-milestone-2a.md --create --only M2A-1 # just these ids
+sbxm task file-findings --pr 12 --create                                                    # a task's own review.md
 ```
 
-`-StandardCriteria` files a finding that has no acceptance criteria with only the standard ones, `-KeepPaths` keeps
-personal paths as they are, and `-Repo <owner/name>` overrides the repo taken from `origin`. A rerun never
-duplicates issues (a hidden marker in each body); it also fills in the `#n` links of issues filed earlier. Afterwards
-the review's `Issues:` line is rewritten to `Issues: <id> #<n>, ...`. Decision 134 has the details.
+`--standard-criteria` files a finding that has no acceptance criteria with only the standard ones, `--keep-paths`
+keeps personal paths as they are, and `--repo <owner/name>` overrides the repo taken from `origin`. A rerun never
+duplicates issues (a hidden marker in each body); it also fills in the `#n` links of issues filed earlier.
+Afterwards the review's `Issues:` line is rewritten to `Issues: <id> #<n>, ...`. Decision 134 has the details; the
+review format is described in the `sdlc-code-review` skill.
 
 ## License
 

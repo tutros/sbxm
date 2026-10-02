@@ -25,3 +25,29 @@ fn the_prd_is_not_a_draft_and_the_experiment_has_a_report_and_a_decision() {
     assert!(read("sdlc/m2b-experiment-report.md").contains("Options for the user"));
     assert!(read("sdlc/decisions.md").contains("164. **M2b PRD/spec experiment assessed"));
 }
+
+#[test]
+fn the_spec_does_not_send_readers_to_the_deleted_pester_tests() {
+    let spec = read("sdlc/spec-m2b.md");
+    let details = spec
+        .split("## Details to verify first")
+        .nth(1)
+        .expect("the spec has a details section");
+
+    assert!(
+        !details.contains("scripts/tests/"),
+        "the live checklist names deleted files"
+    );
+    assert!(details.contains("tests/fixtures/review-findings"));
+}
+
+#[test]
+fn decision_165_says_it_allows_factual_skill_updates_but_not_the_methodology() {
+    let decisions = read("sdlc/decisions.md");
+    let at = decisions.find("165. **").expect("decision 165 exists");
+
+    let text = &decisions[at..];
+
+    assert!(text.contains("factual command and path updates"));
+    assert!(text.contains("methodology stays frozen"));
+}

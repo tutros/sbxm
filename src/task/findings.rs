@@ -1,6 +1,6 @@
 //! The findings of a review file (spec §11, decisions 134, 149): parse `sdlc/reviews/*.md` or a
 //! task's `review.md`, and later render, check and file them. Ported from
-//! `scripts/file-review-issues.psm1`; its Pester cases are the golden tests.
+//! the PowerShell script removed in decision 165; its cases are the golden tests in `tests/task_findings_*.rs`.
 
 use std::collections::BTreeMap;
 use std::sync::LazyLock;

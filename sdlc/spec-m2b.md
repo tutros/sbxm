@@ -292,7 +292,7 @@ timeouts are enforced inside the sandbox.
 | `deploy-profiles.ps1` | stays a script | profile deployment, not task work | `scripts/tests/DeployProfiles.Tests.ps1` |
 | (new) | `init`, `gates`, `run` | [157][158] | `task_init.rs`, `task_gates_cmd.rs`, `task_run.rs`; slice 13 item 1 |
 
-Both scripts carry a DEPRECATED line in their help; deleting them is a separate decision after slice 13 passes.
+Both scripts were deleted on 2026-10-02 (decision 165) after slice 13 passed and PR #57 merged; `git log -- scripts/` has them. `deploy-profiles.ps1` stays.
 
 ## Details to verify first (before the slice that relies on them)
 
@@ -303,6 +303,7 @@ verify and fetch on the host with hooks off: works (spike S10).
 Still to check inside the slice that needs it:
 1. `gh pr view --json` field set and `gh issue list --json labels,body` output: capture fixtures and note the `gh`
    version (slice 2).
-2. The Pester tests in `scripts/tests/` for selection and `file-review-issues` are the source of golden cases
-   (slices 3 and 11).
+2. Done: the golden cases of selection and `file-findings` were ported to `tests/task_select.rs` and
+   `tests/task_findings_*.rs`, with their fixtures in `tests/fixtures/review-findings/` (slices 3 and 11); the
+   PowerShell tests they came from were deleted with the scripts (decision 165).
 3. Bundle behavior when the agent rewrites history or deletes the base ref (slice 5 tests it).

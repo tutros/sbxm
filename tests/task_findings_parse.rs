@@ -1,5 +1,5 @@
 //! M2b slice 11, step 1: parsing a review file into findings (spec §11, decision 134). The cases
-//! are ported from `scripts/tests/ReviewIssues.Parse.Tests.ps1`, on the same fixtures.
+//! are ported from the removed Pester tests, on the same fixtures.
 
 use sbxm::task::findings::{self, Review};
 
