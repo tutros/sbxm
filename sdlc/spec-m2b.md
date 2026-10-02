@@ -268,17 +268,19 @@ timeouts are enforced inside the sandbox.
 
 ## 13. Parity table (S1)
 
-| Script | `sbxm task` | Note |
-|---|---|---|
-| `start` | `start` | + harness, base, `--restart` |
-| `status` | `status` | + `interrupted`, `--json` |
-| `review -Issue` | `review --issue` | gates tiers; one fix round |
-| `review -Pr` | `review --pr` | posts the comment |
-| `finish` | `finish` | base-aware PR |
-| `remove` | `rm` | confirms |
-| `file-review-issues.ps1` | `file-findings` | dry run default |
-| `deploy-profiles.ps1` | stays a script | profile deployment, not task work |
-| (new) | `init`, `gates`, `run` | [157][158] |
+| Script | `sbxm task` | Note | Tests / manual check |
+|---|---|---|---|
+| `start` | `start` | + harness, base, `--restart` | `task_select.rs`, `task_start_cmd.rs`, `task_start_restart.rs`, `task_work.rs`; slice 13 item 2 |
+| `status` | `status` | + `interrupted`, `--json` | `task_status.rs`, `task_record.rs`; slice 13 item 3 |
+| `review -Issue` | `review --issue` | gates tiers; one fix round | `task_review_flow.rs`, `task_review_cmd.rs`, `task_gates_*.rs`; slice 13 items 4-5 |
+| `review -Pr` | `review --pr` | posts the comment | `task_review_pr.rs`, `task_pr_prepare.rs`; slice 13 item 6 |
+| `finish` | `finish` | base-aware PR | `task_finish_cmd.rs`, `task_finish.rs`; slice 13 item 7 |
+| `remove` | `rm` | confirms | `task_rm.rs`, `task_rm_cmd.rs`; slice 13 item 8 |
+| `file-review-issues.ps1` | `file-findings` | dry run default | `task_findings_*.rs`; slice 13 item 7 |
+| `deploy-profiles.ps1` | stays a script | profile deployment, not task work | `scripts/tests/DeployProfiles.Tests.ps1` |
+| (new) | `init`, `gates`, `run` | [157][158] | `task_init.rs`, `task_gates_cmd.rs`, `task_run.rs`; slice 13 item 1 |
+
+Both scripts carry a DEPRECATED line in their help; deleting them is a separate decision after slice 13 passes.
 
 ## Details to verify first (before the slice that relies on them)
 

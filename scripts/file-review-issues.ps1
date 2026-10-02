@@ -1,5 +1,6 @@
 <#
 .SYNOPSIS
+DEPRECATED: use `sbxm task file-findings` (sdlc/spec-m2b.md section 13). Kept until the end-to-end check passes.
 Files the findings of a code review file from sdlc/reviews/ as GitHub issues (decision 134).
 
 .DESCRIPTION

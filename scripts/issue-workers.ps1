@@ -1,5 +1,6 @@
 <#
 .SYNOPSIS
+DEPRECATED: use `sbxm task` (parity table: sdlc/spec-m2b.md section 13). Frozen to bug fixes (decision 88).
 Hands open GitHub issues to parallel Claude Code agents, one sbxm sandbox per issue (decisions 80-82).
 
 .DESCRIPTION
