@@ -271,6 +271,15 @@ fn main() -> anyhow::Result<()> {
             &mut std::io::stderr(),
         ),
         Command::Task {
+            command: TaskCommand::Finish { issue },
+        } => commands::task_finish::run(
+            &config::config_dir()?,
+            &commands::task_finish::Options { issue },
+            &sbxm::github::gh::GhBackend::default(),
+            &task::record::SystemProbe,
+            &mut std::io::stdout(),
+        ),
+        Command::Task {
             command: TaskCommand::Rm { issue, pr, yes },
         } => {
             let (kind, number) = match (issue, pr) {

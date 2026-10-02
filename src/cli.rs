@@ -232,6 +232,13 @@ pub enum TaskCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Push a ready task's branch and open its PR (`Fixes #N`, with the result and the review in
+    /// the body). Refuses unless the task is ready and has no PR yet.
+    Finish {
+        /// The issue's task.
+        #[arg(long, value_name = "N")]
+        issue: u32,
+    },
     /// Delete a task: its sandboxes, its clones and its task folder. Shows exactly what, and asks
     /// first (without a terminal it needs --yes).
     #[command(group(clap::ArgGroup::new("which").required(true).args(["issue", "pr"])))]
