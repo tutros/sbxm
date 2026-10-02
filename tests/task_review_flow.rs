@@ -438,3 +438,31 @@ fn a_worker_that_links_its_agent_folder_out_makes_the_fix_round_refuse_and_write
     assert!(!outside.join("fix-prompt.md").exists());
     assert_eq!(count(&backend, "fix-prompt.md"), 0, "no fix run");
 }
+
+#[test]
+fn the_record_names_the_reviewers_sandbox_before_it_is_created() {
+    let f = config();
+    let meta = meta(&f);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let in_hook = seen.clone();
+    let backend = backend(&f, &[CLEAN]).with_create_hook(move |spec| {
+        if spec.name.contains("-review-") {
+            let named = record::read(&meta.join("task.json"))
+                .ok()
+                .and_then(|r| r.reviewer)
+                .map(|a| a.sandbox);
+            in_hook.lock().unwrap().push((spec.name.clone(), named));
+        }
+    });
+    let mut prepared = worked_task(&f, &backend);
+
+    review(&f, &backend, &mut prepared).unwrap();
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!(
+        seen[0].1.as_deref(),
+        Some(seen[0].0.as_str()),
+        "a kill during the multi-minute create must leave a record `task rm` can use"
+    );
+}

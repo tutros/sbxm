@@ -440,3 +440,35 @@ fn a_very_long_review_is_cut_to_what_github_accepts_and_the_comment_says_so() {
         &text[text.len() - 300..]
     );
 }
+
+#[test]
+fn a_pr_record_names_the_reviewers_sandbox_before_it_is_created() {
+    let f = config("");
+    let github = github();
+    let meta = meta(&f);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let in_hook = seen.clone();
+    let backend = backend(&f, &[CLEAN]).with_create_hook(move |spec| {
+        if spec.name.contains("-review-") {
+            let named = record::read(&meta.join("task.json"))
+                .ok()
+                .and_then(|r| r.reviewer)
+                .map(|a| a.sandbox);
+            in_hook.lock().unwrap().push((spec.name.clone(), named));
+        }
+    });
+    let mut prepared = prepared(&f, &backend, &github);
+
+    review_it(
+        &f,
+        &backend,
+        &github,
+        &FakeHostRunner::default(),
+        &mut prepared,
+    )
+    .unwrap();
+
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!(seen[0].1.as_deref(), Some(seen[0].0.as_str()));
+}

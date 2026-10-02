@@ -1616,6 +1616,16 @@ fn open_review_workspace(
         &prompt,
     )?;
 
+    // The record goes first: the create takes minutes, and a kill during it must leave the name
+    // that `task rm` needs to find the sandbox.
+    prepared.record.reviewer = Some(Agent {
+        harness: reviewer.harness.as_str().to_owned(),
+        model: reviewer.model.clone(),
+        sandbox: sandbox.to_owned(),
+        workspace: slashes(clone),
+        run: None,
+    });
+    record::write(&prepared.meta, &prepared.record)?;
     env.backend
         .create(&CreateSpec {
             name: sandbox.to_owned(),
@@ -1627,14 +1637,6 @@ fn open_review_workspace(
             kits: harness_kits.dirs.clone(),
         })
         .with_context(|| format!("cannot create sandbox {sandbox}"))?;
-    prepared.record.reviewer = Some(Agent {
-        harness: reviewer.harness.as_str().to_owned(),
-        model: reviewer.model.clone(),
-        sandbox: sandbox.to_owned(),
-        workspace: slashes(clone),
-        run: None,
-    });
-    record::write(&prepared.meta, &prepared.record)?;
     Ok(())
 }
 
