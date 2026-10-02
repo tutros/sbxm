@@ -700,56 +700,69 @@ pub fn run_gates(
         outcomes.extend(ran);
     }
     if tiers.host && sandbox_ok && !gates.host.is_empty() {
-        let id = prepared.record.id.clone();
-        let checkout = prepared.workspace.with_file_name(format!("{id}-gates"));
-        // A folder left by a killed run (or one a build still held) must not fail this run.
-        let cleared = if checkout.exists() {
-            remove_with_retries(&checkout).map_err(|e| {
-                anyhow::anyhow!(
-                    "could not clear {}, left by an earlier run: {e}; close whatever uses it and \
-                     delete it by hand",
-                    checkout.display()
-                )
-            })
-        } else {
-            Ok(())
-        };
-        match cleared.and_then(|()| {
-            repo::clean_checkout(
-                &prepared.meta.join("repo.git"),
-                &prepared.record.branch,
-                &checkout,
-            )
-        }) {
-            Ok(()) => {
-                outcomes.extend(gates::run_host_tier(
-                    env.host,
-                    &checkout,
-                    phase,
-                    &gates.host,
-                    gates.timeout,
-                ));
-                if let Err(e) = remove_with_retries(&checkout) {
-                    prepared
-                        .record
-                        .notes
-                        .push(format!("could not remove {}: {e}", checkout.display()));
-                }
-            }
-            Err(e) => outcomes.push(GateOutcome {
-                result: GateResult {
-                    phase: phase.to_owned(),
-                    tier: "host".to_owned(),
-                    command: "(clean checkout)".to_owned(),
-                    exit: None,
-                    passed: false,
-                },
-                output_tail: format!("{e:#}"),
-                timed_out: false,
-            }),
-        }
+        outcomes.extend(host_gate_outcomes(env, prepared, phase));
     }
 
+    finish_gating(prepared, phase, outcomes)
+}
+
+/// The host tier (spec §7): a clean checkout of the task branch from `repo.git` in `<id>-gates`
+/// (a folder left by a killed run goes first), the host commands run there, and the checkout is
+/// removed. A checkout that can't be made is one failed gate, not an error.
+fn host_gate_outcomes(env: &TaskEnv, prepared: &mut Prepared, phase: &str) -> Vec<GateOutcome> {
+    let gates = &env.config.gates;
+    let id = prepared.record.id.clone();
+    let checkout = prepared.workspace.with_file_name(format!("{id}-gates"));
+    let cleared = if checkout.exists() {
+        remove_with_retries(&checkout).map_err(|e| {
+            anyhow::anyhow!(
+                "could not clear {}, left by an earlier run: {e}; close whatever uses it and \
+                 delete it by hand",
+                checkout.display()
+            )
+        })
+    } else {
+        Ok(())
+    };
+    match cleared.and_then(|()| {
+        repo::clean_checkout(
+            &prepared.meta.join("repo.git"),
+            &prepared.record.branch,
+            &checkout,
+        )
+    }) {
+        Ok(()) => {
+            let outcomes =
+                gates::run_host_tier(env.host, &checkout, phase, &gates.host, gates.timeout);
+            if let Err(e) = remove_with_retries(&checkout) {
+                prepared
+                    .record
+                    .notes
+                    .push(format!("could not remove {}: {e}", checkout.display()));
+            }
+            outcomes
+        }
+        Err(e) => vec![GateOutcome {
+            result: GateResult {
+                phase: phase.to_owned(),
+                tier: "host".to_owned(),
+                command: "(clean checkout)".to_owned(),
+                exit: None,
+                passed: false,
+            },
+            output_tail: format!("{e:#}"),
+            timed_out: false,
+        }],
+    }
+}
+
+/// Records how the gates went: `gates.log`, the record's results, and the stage's status
+/// (`passed` or `gates-failed`), written to disk.
+fn finish_gating(
+    prepared: &mut Prepared,
+    phase: &str,
+    outcomes: Vec<GateOutcome>,
+) -> Result<Gated> {
     let failed = outcomes
         .iter()
         .find(|o| !o.result.passed)
@@ -780,7 +793,6 @@ pub fn run_gates(
         outcomes,
     })
 }
-
 /// Removes a folder a build may still hold files in for a moment (antivirus, indexers).
 fn remove_with_retries(dir: &Path) -> std::io::Result<()> {
     let mut last = Ok(());
