@@ -14,7 +14,7 @@ use super::prompts::{self, Role};
 use super::record::{
     self, Agent, GateResult, Kind, NewTask, Process, ProcessProbe, Record, RunInfo, Stage, Status,
 };
-use super::repo::{self, AgentFile, BUNDLE_CAP, Identity};
+use super::repo::{self, AgentFile, BUNDLE_CAP, Existing, Identity};
 use super::review;
 use super::select::{self, Selection};
 use crate::backend::{CreateSpec, ExecSpec, SandboxBackend, Stdin};
@@ -475,10 +475,14 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
         let info = workspace.join(".git").join("info");
         fs::create_dir_all(&info)?;
         fs::write(info.join("exclude"), format!("# sbxm\n{AGENT_DIR}/\n"))?;
-        let agent_dir = workspace.join(AGENT_DIR);
-        fs::create_dir_all(&agent_dir)?;
-        fs::write(agent_dir.join("issue.md"), &issue.text)?;
-        fs::write(agent_dir.join("prompt.md"), &prompt)?;
+        repo::write_agent_files(
+            &workspace,
+            &[
+                ("issue.md", issue.text.as_bytes()),
+                ("prompt.md", prompt.as_bytes()),
+            ],
+            Existing::Replace,
+        )?;
         fs::write(meta.join("issue.md"), &issue.text)?;
         fs::write(meta.join("worker-prompt.md"), &prompt)?;
 
@@ -1334,10 +1338,14 @@ fn run_fix_round(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
             ("previous_review_path", ".sbxm-task/previous-review.md"),
         ],
     )?;
-    let agent_dir = prepared.workspace.join(AGENT_DIR);
-    fs::create_dir_all(&agent_dir)?;
-    fs::write(agent_dir.join("review.md"), &review)?;
-    fs::write(agent_dir.join("fix-prompt.md"), &prompt)?;
+    repo::write_agent_files(
+        &prepared.workspace,
+        &[
+            ("review.md", review.as_bytes()),
+            ("fix-prompt.md", prompt.as_bytes()),
+        ],
+        Existing::Refuse,
+    )?;
     fs::write(prepared.meta.join("fix-prompt.md"), &prompt)?;
 
     let result = match headless::run(
@@ -1521,13 +1529,7 @@ fn open_review_workspace(
     let info = clone.join(".git").join("info");
     fs::create_dir_all(&info)?;
     fs::write(info.join("exclude"), format!("# sbxm\n{AGENT_DIR}/\n"))?;
-    let agent_dir = clone.join(AGENT_DIR);
-    fs::create_dir_all(&agent_dir)?;
     let issue = fs::read_to_string(prepared.meta.join("issue.md")).unwrap_or_default();
-    fs::write(agent_dir.join("issue.md"), &issue)?;
-    if let Some(text) = previous {
-        fs::write(agent_dir.join("previous-review.md"), text)?;
-    }
     let role = if prepared.record.kind == Kind::Pr {
         Role::ReviewerPr
     } else {
@@ -1549,7 +1551,15 @@ fn open_review_workspace(
             ("previous_review_path", ".sbxm-task/previous-review.md"),
         ],
     )?;
-    fs::write(agent_dir.join("prompt.md"), &prompt)?;
+    // The checkout is the worker's committed tree, so `.sbxm-task` may be a link it planted.
+    let mut agent_files: Vec<(&str, &[u8])> = vec![
+        ("issue.md", issue.as_bytes()),
+        ("prompt.md", prompt.as_bytes()),
+    ];
+    if let Some(text) = previous {
+        agent_files.push(("previous-review.md", text.as_bytes()));
+    }
+    repo::write_agent_files(clone, &agent_files, Existing::Replace)?;
     fs::write(
         prepared.meta.join(format!("reviewer-prompt-{round}.md")),
         &prompt,

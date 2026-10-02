@@ -413,3 +413,28 @@ fn a_task_that_cannot_be_reviewed_now_is_refused_with_why() {
         "{message}"
     );
 }
+
+#[test]
+fn a_worker_that_links_its_agent_folder_out_makes_the_fix_round_refuse_and_writes_nothing_there() {
+    let f = config();
+    let backend = backend(&f, &[ONE, CLEAN]);
+    let mut prepared = worked_task(&f, &backend);
+    // After the worker is done it replaces `.sbxm-task` with a link to somewhere else on the host.
+    let outside = f.env.tmp.path().join("outside");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("review.md"), "precious").unwrap();
+    let agent_dir = f
+        .env
+        .base_dir()
+        .join("tasks")
+        .join("issue-41")
+        .join(".sbxm-task");
+    fs::remove_dir_all(&agent_dir).unwrap();
+    common::dir_link(&agent_dir, &outside);
+
+    let _ = review(&f, &backend, &mut prepared);
+
+    assert_eq!(fs::read(outside.join("review.md")).unwrap(), b"precious");
+    assert!(!outside.join("fix-prompt.md").exists());
+    assert_eq!(count(&backend, "fix-prompt.md"), 0, "no fix run");
+}

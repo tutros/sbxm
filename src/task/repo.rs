@@ -315,6 +315,91 @@ fn open_agent_file(workspace: &Path, name: &str) -> Result<Option<(std::fs::File
     Ok(Some((file, opened.len())))
 }
 
+/// What `write_agent_files` does when `.sbxm-task` is not a plain folder inside the workspace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Existing {
+    /// Refuse: the agent's own clone, where a link can only be the agent's doing.
+    Refuse,
+    /// Remove it and make a real folder: a fresh checkout, where the branch's content (what the
+    /// worker committed) decides what is there.
+    Replace,
+}
+
+/// Removes whatever is at `path` without following it: a link goes, a folder goes with its content.
+fn remove_entry(path: &Path) -> Result<()> {
+    let kind = std::fs::symlink_metadata(path)?.file_type();
+    if kind.is_symlink() {
+        // A Windows junction or directory symlink is removed as a directory, a file link as a file.
+        std::fs::remove_file(path).or_else(|_| std::fs::remove_dir(path))?;
+    } else if kind.is_dir() {
+        std::fs::remove_dir_all(path)?;
+    } else {
+        std::fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+/// Writes sbxm's own files into `<workspace>/.sbxm-task`, trusting nothing about what is already
+/// there: the folder must be a real folder inside the workspace and no file is written through a
+/// link (a file that exists is removed and created again, so a hard link isn't written through
+/// either). Without this, a worker that replaces `.sbxm-task` or one of its files with a link makes
+/// the host overwrite whatever the link points at (PR 57 review, M-1).
+pub fn write_agent_files(
+    workspace: &Path,
+    files: &[(&str, &[u8])],
+    existing: Existing,
+) -> Result<()> {
+    use std::io::Write;
+
+    let folder = workspace.join(BUNDLE_DIR);
+    let real_workspace = std::fs::canonicalize(workspace)
+        .with_context(|| format!("cannot read the workspace {}", workspace.display()))?;
+    let expected = real_workspace.join(BUNDLE_DIR);
+    let is_real_folder = |folder: &Path| -> bool {
+        std::fs::symlink_metadata(folder).is_ok_and(|m| m.file_type().is_dir())
+            && std::fs::canonicalize(folder).is_ok_and(|real| real == expected)
+    };
+    if std::fs::symlink_metadata(&folder).is_ok() && !is_real_folder(&folder) {
+        match existing {
+            Existing::Refuse => bail!(
+                "{} is a link or not a folder inside the workspace; refusing to write into it",
+                folder.display()
+            ),
+            Existing::Replace => remove_entry(&folder)
+                .with_context(|| format!("cannot replace {}", folder.display()))?,
+        }
+    }
+    std::fs::create_dir_all(&folder)
+        .with_context(|| format!("cannot create {}", folder.display()))?;
+    if !is_real_folder(&folder) {
+        bail!(
+            "{} doesn't resolve to a folder inside the workspace; refusing to write into it",
+            folder.display()
+        );
+    }
+    for (name, bytes) in files {
+        let path = folder.join(name);
+        if std::fs::symlink_metadata(&path).is_ok() {
+            let plain = std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file());
+            if !plain && existing == Existing::Refuse {
+                bail!(
+                    "{} is a link or not a file; refusing to write it",
+                    path.display()
+                );
+            }
+            remove_entry(&path).with_context(|| format!("cannot replace {}", path.display()))?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .with_context(|| format!("cannot write {}", path.display()))?;
+        file.write_all(bytes)
+            .with_context(|| format!("cannot write {}", path.display()))?;
+    }
+    Ok(())
+}
+
 /// What reading a file the agent wrote found.
 #[derive(Debug, PartialEq, Eq)]
 pub enum AgentFile {
