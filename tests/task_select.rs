@@ -1,5 +1,5 @@
 //! M2b slice 3: issue selection (spec §8). Golden cases ported from
-//! `scripts/tests/SelectIssues.Tests.ps1`, plus both-direction `Related`, the explicit
+//! the removed `SelectIssues` Pester tests, plus both-direction `Related`, the explicit
 //! list and the `--workers` cap.
 
 use sbxm::github::Issue;

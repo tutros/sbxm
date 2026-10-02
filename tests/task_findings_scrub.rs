@@ -1,5 +1,5 @@
 //! M2b slice 11, step 2: refusing secrets and replacing personal paths in a review's text
-//! (decision 134). Ported from `scripts/tests/ReviewIssues.Scrub.Tests.ps1`. Secret-shaped
+//! (decision 134). Ported from the removed Pester tests. Secret-shaped
 //! values are built here, so the repo holds no literal that looks like one.
 
 use sbxm::task::findings::{self, find_secrets, protect_finding, protect_text, secret_kind};
