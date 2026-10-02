@@ -125,6 +125,17 @@ fn run_issue(
     let base_dir = GlobalConfig::load(config_dir)?.base_dir;
     let id = format!("issue-{number}");
     let mut prepared = Prepared::open(&base_dir, &id)?;
+    // The worker is whoever the task recorded: a flag of `task start`/`run` may have chosen it, and
+    // the file read now can say something else. The fix round runs that harness in that sandbox,
+    // and the default reviewer must differ from it (decision 148).
+    let mut config = config.clone();
+    if let Some(worker) = &prepared.record.worker {
+        if let Ok(harness) = <Harness as clap::ValueEnum>::from_str(&worker.harness, true) {
+            config.set_worker_harness(harness);
+        }
+        config.worker.model.clone_from(&worker.model);
+    }
+    let config = &config;
     let env = TaskEnv {
         config_dir,
         config,

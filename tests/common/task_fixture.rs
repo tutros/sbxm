@@ -47,8 +47,10 @@ pub fn play_reviews(
 ) -> impl Fn(&str, &ExecSpec) + Send + Sync + use<> {
     let clone = base_dir.join("tasks").join(format!("{task}-review"));
     let runs = std::sync::atomic::AtomicUsize::new(0);
-    move |_sandbox: &str, spec: &ExecSpec| {
-        if spec.argv.iter().any(|a| a == "codex") {
+    move |sandbox: &str, spec: &ExecSpec| {
+        // Any harness can be the reviewer; it is the sandbox that says it is one.
+        let headless = spec.argv.iter().any(|a| a == "codex" || a == "claude");
+        if sandbox.contains("-review-") && headless {
             let n = runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let text = &reviews[n.min(reviews.len() - 1)];
             let dir = clone.join(".sbxm-task");
@@ -214,7 +216,7 @@ pub struct Play {
 }
 
 pub fn is_headless(spec: &ExecSpec) -> bool {
-    spec.argv.iter().any(|a| a == "claude")
+    spec.argv.iter().any(|a| a == "claude" || a == "codex")
 }
 
 pub fn is_bundle(spec: &ExecSpec) -> bool {
@@ -254,7 +256,11 @@ pub fn play(
 ) -> impl Fn(&str, &ExecSpec) + Send + Sync + use<> {
     let workspace = workspace.to_path_buf();
     let (base, branch) = (base.to_owned(), branch.to_owned());
-    move |_sandbox: &str, spec: &ExecSpec| {
+    move |sandbox: &str, spec: &ExecSpec| {
+        // A reviewer's sandbox is not the worker's, whatever harness it runs.
+        if sandbox.contains("-review-") {
+            return;
+        }
         if is_headless(spec) {
             // Each headless run (the worker's, then a fix round's) writes different content, so
             // each makes a real commit.

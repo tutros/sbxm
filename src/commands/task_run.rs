@@ -12,7 +12,9 @@ use crate::backend::SandboxBackend;
 use crate::github::GitHubBackend;
 use crate::harness::Harness;
 use crate::run::config::{headless_harness, parse_duration};
+use crate::task::config::TaskConfig;
 use crate::task::gates::HostRunner;
+use crate::task::pipeline;
 use crate::task::record::ProcessProbe;
 use crate::task::repo::Identity;
 
@@ -92,6 +94,27 @@ pub fn run(
     }
     if let Some(limit) = &opts.reviewer_time_limit {
         parse_duration("--reviewer-time-limit", limit).map_err(|e| anyhow!(e))?;
+    }
+
+    // The reviewer's secret and profile are checked now too: a missing one must not be found only
+    // after the worker has spent its time (spec §5.2). The effective config is the one both
+    // phases will build from their flags.
+    {
+        let mut config = TaskConfig::load(&opts.repo_root)?;
+        if let Some(harness) = opts.worker_harness {
+            let harness = headless_harness("--worker-harness", harness.as_str(), "tasks")
+                .map_err(|e| anyhow!(e))?;
+            config.set_worker_harness(harness);
+        }
+        if let Some(harness) = opts.reviewer_harness {
+            let harness = headless_harness("--reviewer-harness", harness.as_str(), "tasks")
+                .map_err(|e| anyhow!(e))?;
+            config.set_reviewer_harness(harness);
+        }
+        if let Some(profile) = &opts.profile {
+            config.sandbox.profile = profile.clone();
+        }
+        pipeline::check_reviewer_inputs(config_dir, backend, &config)?;
     }
 
     let start = task_start::Options {

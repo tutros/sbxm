@@ -532,3 +532,56 @@ fn the_pr_review_uses_the_default_branch_as_the_base() {
         "trunk"
     );
 }
+
+#[test]
+fn the_recorded_worker_decides_the_fix_adapter_and_the_default_reviewer() {
+    // The task was started with a Codex worker (a flag; or the file said so then) ...
+    let f = fixture_with(
+        "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = [\"cargo test\"]\n\n\
+         [worker]\nharness = \"codex\"\n",
+    );
+    let backend = backend(&f, &[ONE, CLEAN]);
+    worked_task(&f, &backend);
+    assert_eq!(
+        record::read(&meta(&f).join("task.json"))
+            .unwrap()
+            .worker
+            .unwrap()
+            .harness,
+        "codex"
+    );
+    // ... and the file read at review time says nothing about it (so claude is its worker).
+    std::fs::write(
+        f.env.tmp.path().join("target-repo").join("sbxm-task.toml"),
+        "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = [\"cargo test\"]\n",
+    )
+    .unwrap();
+
+    let out = go(&f, &options(&f), &backend);
+
+    out.result.unwrap();
+    let reviewers: Vec<_> = backend
+        .creates()
+        .into_iter()
+        .filter(|c| c.name.contains("-review-"))
+        .collect();
+    assert!(!reviewers.is_empty());
+    assert!(
+        reviewers.iter().all(|c| c.agent != "codex"),
+        "the reviewer must differ from the Codex worker: {reviewers:?}"
+    );
+    let fix = backend
+        .execs()
+        .into_iter()
+        .find(|(_, spec)| spec.argv.iter().any(|a| a.contains("fix-prompt.md")))
+        .expect("a fix run");
+    assert_eq!(
+        fix.0, "sbxm-task-issue-41-codex",
+        "the recorded worker's sandbox"
+    );
+    assert!(
+        fix.1.argv.iter().any(|a| a == "codex"),
+        "the fix run must use the Codex adapter: {:?}",
+        fix.1.argv
+    );
+}

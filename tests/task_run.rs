@@ -279,3 +279,24 @@ fn restart_discards_the_old_task_then_runs() {
     );
     assert_eq!(stage(&f), (Stage::Ready, Status::Ok));
 }
+
+#[test]
+fn a_missing_reviewer_secret_is_refused_before_the_worker_creates_anything() {
+    let f = config(); // the reviewer is codex, which needs the openai secret
+    let b = FakeBackend::with_secrets(&["anthropic"]);
+
+    let out = go(&f, &options(&f), None, &b, &github());
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("openai"), "{message}");
+    assert!(b.creates().is_empty(), "no sandbox may be created");
+    assert!(
+        !f.env
+            .base_dir()
+            .join(".sbxm")
+            .join("tasks")
+            .join("issue-41")
+            .exists(),
+        "no task folder may be left"
+    );
+}

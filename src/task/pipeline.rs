@@ -1406,17 +1406,27 @@ pub struct Reviewed {
 /// Checks before a review creates anything (spec §5.2): the reviewer's provider secret and the
 /// profile's secrets are stored, and the profile loads. Returns the warnings to print.
 pub fn check_reviewer(env: &TaskEnv, _task: &Prepared) -> Result<Vec<String>> {
-    let global = GlobalConfig::load(env.config_dir)?;
-    let reviewer = &env.config.reviewer;
-    let profile = Profile::load(global.profiles_dir(), &env.config.sandbox.profile)?;
+    check_reviewer_inputs(env.config_dir, env.backend, env.config)
+}
+
+/// The checks of [`check_reviewer`] without a task, so `task run` can make them before its worker
+/// has created anything.
+pub fn check_reviewer_inputs(
+    config_dir: &Path,
+    backend: &dyn SandboxBackend,
+    config: &TaskConfig,
+) -> Result<Vec<String>> {
+    let global = GlobalConfig::load(config_dir)?;
+    let reviewer = &config.reviewer;
+    let profile = Profile::load(global.profiles_dir(), &config.sandbox.profile)?;
     check_secrets(
-        env.backend,
+        backend,
         reviewer.harness,
         "the reviewer",
-        &env.config.sandbox.profile,
+        &config.sandbox.profile,
         &profile,
     )?;
-    let mut warnings = env.config.warnings.clone();
+    let mut warnings = config.warnings.clone();
     warnings.extend(
         reviewer
             .harness
