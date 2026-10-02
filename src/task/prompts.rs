@@ -25,6 +25,8 @@ const KNOWN: [&str; 9] = [
 pub enum Role {
     Worker,
     Reviewer,
+    /// The reviewer of a pull request (no issue of its own, no fix round).
+    ReviewerPr,
     /// The one fix round after a review.
     Fix,
 }
@@ -38,6 +40,7 @@ pub struct Template {
 
 const WORKER: &str = include_str!("../../prompts/worker.md");
 const REVIEWER: &str = include_str!("../../prompts/reviewer.md");
+const REVIEWER_PR: &str = include_str!("../../prompts/reviewer-pr.md");
 const FIX: &str = include_str!("../../prompts/fix.md");
 
 /// The template for `role`: the repo's override when configured, else the embedded one.
@@ -45,6 +48,8 @@ pub fn template(role: Role, prompts: &Prompts) -> Result<Template> {
     let (embedded_name, embedded, custom) = match role {
         Role::Worker => ("worker.md", WORKER, prompts.worker.as_deref()),
         Role::Reviewer => ("reviewer.md", REVIEWER, prompts.reviewer.as_deref()),
+        // One `[prompts] reviewer` override covers issue and pull request reviews alike.
+        Role::ReviewerPr => ("reviewer-pr.md", REVIEWER_PR, prompts.reviewer.as_deref()),
         Role::Fix => ("fix.md", FIX, prompts.fix.as_deref()),
     };
     match custom {

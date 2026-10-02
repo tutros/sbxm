@@ -214,6 +214,50 @@ fn the_embedded_fix_prompt_renders_and_asks_for_a_review_section_in_result_md() 
 }
 
 #[test]
+fn the_pr_reviewer_prompt_talks_about_the_pull_request_and_has_no_fix_round() {
+    let template = prompts::template(Role::ReviewerPr, &Prompts::default()).unwrap();
+
+    let text = prompts::render(&template.name, &template.text, &review_values()).unwrap();
+
+    assert!(
+        text.contains("pull request #41") && text.contains("o/r"),
+        "{text}"
+    );
+    assert!(
+        text.contains(".sbxm-task/issue.md") && text.contains("origin/main...HEAD"),
+        "{text}"
+    );
+    assert!(
+        text.contains("don't edit tracked files, commit, push or file issues"),
+        "{text}"
+    );
+    assert!(
+        text.contains("Must-fix findings: <count>") && text.contains(".sbxm-task/review.md"),
+        "{text}"
+    );
+    assert!(text.contains("- `cargo test`"), "{text}");
+    assert!(
+        !text.contains("re-review") && !text.contains("{{"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_reviewer_override_in_the_config_covers_pull_requests_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("r.md");
+    fs::write(&path, "Custom {{number}}").unwrap();
+    let config = Prompts {
+        reviewer: Some(path),
+        ..Prompts::default()
+    };
+    assert_eq!(
+        prompts::template(Role::ReviewerPr, &config).unwrap().text,
+        "Custom {{number}}"
+    );
+}
+
+#[test]
 fn reviewer_and_fix_overrides_are_read_from_their_own_keys() {
     let dir = tempfile::tempdir().unwrap();
     let reviewer = dir.path().join("r.md");

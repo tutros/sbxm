@@ -19,7 +19,7 @@ use super::review;
 use super::select::{self, Selection};
 use crate::backend::{CreateSpec, ExecSpec, SandboxBackend, Stdin};
 use crate::config::{GlobalConfig, Profile};
-use crate::github::{GitHubBackend, IssueText};
+use crate::github::{GitHubBackend, IssueText, PrInfo, PrState};
 use crate::harness::Harness;
 use crate::headless::{self, HeadlessOpts, RunStatus};
 use crate::run::kits::{self, HarnessKits, Overrides};
@@ -137,6 +137,138 @@ impl Ctx<'_> {
             backend: self.backend,
             probe: self.probe,
             host: self.host,
+        }
+    }
+}
+
+/// Spec §5.2 "PR": a task for reviewing an open pull request from a branch of this same repo.
+/// Everything that can be refused is refused first (a fork, a closed or merged PR, an existing
+/// task, a missing reviewer secret, a bad profile); then the task folder, `repo.git` with the
+/// PR's head as the local branch `pr-<n>`, the review context (the PR and the issues it closes)
+/// and the first record. No worker, no clone, no sandbox yet; a failure removes the folder again.
+pub fn prepare_pr(ctx: &Ctx, pr: &PrInfo) -> Result<Prepared> {
+    let global = GlobalConfig::load(ctx.config_dir)?;
+    let number = pr.number;
+    let id = format!("pr-{number}");
+    let meta = record::task_dir(&global.base_dir, &id);
+    let workspace = global.base_dir.join("tasks").join(&id);
+
+    match pr.state {
+        PrState::Open => {}
+        PrState::Closed => bail!("PR #{number} is closed; only open PRs are reviewed"),
+        PrState::Merged => bail!("PR #{number} is merged; only open PRs are reviewed"),
+    }
+    if pr.is_cross_repository {
+        bail!(
+            "PR #{number} comes from a fork; only PRs from branches of {} are reviewed, because a \
+             fork's code is not something to fetch and run here (decision 87)",
+            ctx.repo
+        );
+    }
+    if meta.exists() {
+        let stage = record::read(&meta.join("task.json"))
+            .map(|r| r.stage.name().to_owned())
+            .unwrap_or_else(|_| "no readable record".to_owned());
+        bail!(
+            "task {id} exists (stage {stage}); use `sbxm task status`, or `sbxm task rm --pr {number}` to remove it first"
+        );
+    }
+    let reviewer = &ctx.config.reviewer;
+    let profile = Profile::load(global.profiles_dir(), &ctx.config.sandbox.profile)?;
+    check_secrets(
+        ctx.backend,
+        reviewer.harness,
+        "the reviewer",
+        &ctx.config.sandbox.profile,
+        &profile,
+    )?;
+    let mut warnings = ctx.config.warnings.clone();
+    warnings.extend(
+        reviewer
+            .harness
+            .unsupported(&profile, "the reviewer's sandbox"),
+    );
+
+    let parent = meta.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(parent).with_context(|| format!("cannot create {}", parent.display()))?;
+    fs::create_dir(&meta).with_context(|| format!("cannot reserve {}", meta.display()))?;
+    let built = (|| -> Result<Record> {
+        // The reviewer's kits must validate before anything else is made.
+        let kit_set = kits::build_for(
+            ctx.config_dir,
+            &ctx.config.sandbox.profile,
+            &[reviewer.harness],
+            &Overrides {
+                cpus: ctx.config.sandbox.cpus,
+                memory: ctx.config.sandbox.memory.clone(),
+            },
+            &meta.join("kits-review"),
+            ctx.backend,
+        )?;
+        let config_hash = kit_set
+            .get(reviewer.harness)
+            .map(|k| k.config_hash.clone())
+            .context("no kits were built for the reviewer's harness")?;
+
+        let repo_git = meta.join("repo.git");
+        repo::clone_bare(ctx.clone_source, &repo_git)?;
+        let branch = repo::fetch_pr_head(&repo_git, number)?;
+
+        // The review context: the PR itself, then each issue it closes.
+        let mut context = format!(
+            "Pull request #{number}: {}\nBranch: {}\n\n{}\n",
+            pr.title, pr.head_ref, pr.body
+        );
+        for issue_number in &pr.closing_issues {
+            let issue = ctx.github.issue(ctx.repo, *issue_number).with_context(|| {
+                format!("cannot read issue #{issue_number}, which the pull request closes")
+            })?;
+            context.push_str(&format!(
+                "\n---\n\nIssue #{issue_number} (closed by this pull request):\n\n{}\n",
+                issue.text
+            ));
+        }
+        fs::write(meta.join("issue.md"), &context)?;
+
+        let mut task = Record::new(
+            &NewTask {
+                kind: Kind::Pr,
+                number,
+                repo: ctx.repo,
+                title: &pr.title,
+                base: ctx.base_branch,
+                branch: &branch,
+                config_hash: &config_hash,
+            },
+            now(),
+            Process::current(ctx.probe),
+        );
+        // An issue task for something this PR closes is related work (spec §5.2).
+        task.related = pr
+            .closing_issues
+            .iter()
+            .copied()
+            .filter(|n| {
+                record::task_dir(&global.base_dir, &format!("issue-{n}"))
+                    .join("task.json")
+                    .is_file()
+            })
+            .collect();
+        record::write(&meta, &task)?;
+        Ok(task)
+    })();
+
+    match built {
+        Ok(record) => Ok(Prepared {
+            record,
+            meta,
+            workspace,
+            kits: None,
+            warnings,
+        }),
+        Err(e) => {
+            let _ = fs::remove_dir_all(&meta);
+            Err(e)
         }
     }
 }

@@ -157,6 +157,35 @@ pub fn worked_task(f: &Fixture, backend: &FakeBackend) -> sbxm::task::pipeline::
     prepared
 }
 
+/// What GitHub keeps for a pull request: a commit on top of `main`, at `refs/pull/<n>/head` of the
+/// stand-in origin. Returns the commit's id.
+pub fn add_pr_head(f: &Fixture, number: u32) -> String {
+    let scratch = f.env.tmp.path().join(format!("pr-scratch-{number}"));
+    git(
+        f.env.tmp.path(),
+        &[
+            "clone",
+            "-q",
+            f.origin.to_str().unwrap(),
+            scratch.to_str().unwrap(),
+        ],
+    );
+    fs::write(scratch.join("pr.txt"), format!("change from PR {number}\n")).unwrap();
+    git(&scratch, &["add", "-A"]);
+    git(&scratch, &["commit", "-q", "-m", "the PR's change"]);
+    let sha = git(&scratch, &["rev-parse", "HEAD"]);
+    git(
+        &scratch,
+        &[
+            "push",
+            "-q",
+            f.origin.to_str().unwrap(),
+            &format!("HEAD:refs/pull/{number}/head"),
+        ],
+    );
+    sha
+}
+
 pub fn source(f: &Fixture) -> String {
     f.origin.to_str().unwrap().to_owned()
 }
