@@ -509,7 +509,7 @@ fn read_instructions(
 /// profile is self-contained (decisions 62, 63). No component on the way
 /// (a folder or the file itself) may be a symlink or junction, since
 /// following one could read or write outside the profile folder.
-fn resolve_inside(
+pub(crate) fn resolve_inside(
     key: &str,
     relative: &Path,
     dir: &Path,

@@ -18,7 +18,8 @@ const TERM_MARKER: &str = "timeout: sending signal TERM to command 'codex'\n";
 
 fn opts(is_git_repo: bool) -> HeadlessOpts {
     HeadlessOpts {
-        model: "gpt-5.6-luna".into(),
+        model: Some("gpt-5.6-luna".into()),
+        high_effort: false,
         budget_usd: None,
         is_git_repo,
     }
@@ -206,4 +207,44 @@ fn a_failed_exit_keeps_the_parsed_message_not_stderr_noise() {
         message.contains("'no-such-model' model is not supported"),
         "{message}"
     );
+}
+
+#[test]
+fn argv_omits_the_model_flag_when_absent() {
+    let no_model = HeadlessOpts {
+        model: None,
+        ..opts(true)
+    };
+    let argv = Harness::Codex.headless_argv("do it", &no_model).unwrap();
+    insta::assert_debug_snapshot!(argv, @r#"
+    [
+        "codex",
+        "exec",
+        "--json",
+        "do it",
+    ]
+    "#);
+}
+
+#[test]
+fn high_effort_sets_reasoning_effort() {
+    let high = HeadlessOpts {
+        high_effort: true,
+        ..opts(true)
+    };
+    let argv = Harness::Codex.headless_argv("do it", &high).unwrap();
+    insta::assert_debug_snapshot!(argv, @r#"
+    [
+        "codex",
+        "exec",
+        "-m",
+        "gpt-5.6-luna",
+        "-c",
+        "model_reasoning_effort=high",
+        "--json",
+        "do it",
+    ]
+    "#);
+    let normal = Harness::Codex.headless_argv("do it", &opts(true)).unwrap();
+    assert!(!normal.iter().any(|a| a.contains("reasoning")));
 }

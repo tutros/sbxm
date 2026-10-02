@@ -77,6 +77,11 @@ pub enum Command {
     Doctor,
     /// Run comparisons between coding agents.
     Run(RunArgs),
+    /// Carry GitHub issues and PRs through worker, gates, review and hand-off.
+    Task {
+        #[command(subcommand)]
+        command: TaskCommand,
+    },
     /// Manage sbxm configuration.
     Config {
         #[command(subcommand)]
@@ -132,5 +137,211 @@ pub enum RunCommand {
         /// Also print every full patch.
         #[arg(long)]
         diff: bool,
+    },
+}
+
+/// `--tier` of `task gates`.
+#[derive(Debug, Clone, Copy, Default, clap::ValueEnum)]
+pub enum GateTier {
+    Sandbox,
+    Host,
+    #[default]
+    All,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TaskCommand {
+    /// Write a starter sbxm-task.toml (default: in the working directory); refuses to overwrite.
+    Init {
+        /// The repo's root folder.
+        path: Option<PathBuf>,
+    },
+    /// Start a task for each chosen GitHub issue: a worker agent in its own sandbox, then its
+    /// commits are collected. Blocks until the workers finish.
+    Start {
+        /// Start this issue (repeatable).
+        #[arg(long = "issue", value_name = "N", conflicts_with = "workers")]
+        issues: Vec<u32>,
+        /// Start up to N issues, chosen by label (must-fix first), skipping questions, blocked
+        /// and related ones.
+        #[arg(long, value_name = "N", conflicts_with = "issues")]
+        workers: Option<usize>,
+        /// The worker's harness (default: sbxm-task.toml, else claude).
+        #[arg(long, value_enum)]
+        worker_harness: Option<Harness>,
+        /// The worker's model (default: the harness's own).
+        #[arg(long)]
+        worker_model: Option<String>,
+        /// The worker's time limit, e.g. 90s, 45m, 2h.
+        #[arg(long)]
+        time_limit: Option<String>,
+        /// The sandbox profile (default: sbxm-task.toml).
+        #[arg(long)]
+        profile: Option<String>,
+        /// The branch to start from (default: the repo's default branch).
+        #[arg(long)]
+        base: Option<String>,
+        /// The GitHub repo, owner/name (default: this checkout's origin).
+        #[arg(long)]
+        repo: Option<String>,
+        /// Delete the existing task of each --issue first (asks, showing exactly what), then
+        /// start it again.
+        #[arg(long, requires = "issues", conflicts_with = "workers")]
+        restart: bool,
+        /// With --restart: don't ask before deleting.
+        #[arg(long, requires = "restart")]
+        yes: bool,
+    },
+    /// Review a task: gates, an independent reviewer in its own sandbox, at most one fix round by
+    /// the worker, gates and a second review; ends ready. Blocks until it is done.
+    Review {
+        /// Review this issue's task.
+        #[arg(
+            long,
+            value_name = "N",
+            required_unless_present = "pr",
+            conflicts_with = "pr"
+        )]
+        issue: Option<u32>,
+        /// Review this open pull request (from a branch of this repo) and post the review on it:
+        /// gates on a clean checkout, one reviewer, no fix round.
+        #[arg(long, value_name = "N")]
+        pr: Option<u32>,
+        /// The GitHub repo, owner/name (pull requests; default: this checkout's origin).
+        #[arg(long)]
+        repo: Option<String>,
+        /// The branch a pull request is diffed against (default: the repo's default branch).
+        #[arg(long)]
+        base: Option<String>,
+        /// The reviewer's harness (default: sbxm-task.toml, else one different from the worker's).
+        #[arg(long, value_enum)]
+        reviewer_harness: Option<Harness>,
+        /// The reviewer's model (default: the harness's own).
+        #[arg(long)]
+        reviewer_model: Option<String>,
+        /// The reviewer's time limit, e.g. 45m.
+        #[arg(long)]
+        reviewer_time_limit: Option<String>,
+        /// The worker's time limit for the fix round, e.g. 2h.
+        #[arg(long)]
+        time_limit: Option<String>,
+        /// The sandbox profile (default: sbxm-task.toml).
+        #[arg(long)]
+        profile: Option<String>,
+    },
+    /// Run a task's gates now (the checks that decide whether its work may go on), or with
+    /// --dry-run say what would run and where.
+    Gates {
+        /// The issue's task.
+        #[arg(long, value_name = "N")]
+        issue: u32,
+        /// Which gates: the sandbox tier, the host tier (on this machine), or both.
+        #[arg(long, value_enum, default_value_t)]
+        tier: GateTier,
+        /// Print the commands, where they run and which tiers are off; run nothing.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Show the tasks: stage, status, commits ahead of the base, and whether one was interrupted.
+    Status {
+        /// Only the task for this issue.
+        #[arg(long, conflicts_with = "pr")]
+        issue: Option<u32>,
+        /// Only the task for this PR.
+        #[arg(long)]
+        pr: Option<u32>,
+        /// Print the task records as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Start a task for one issue, then review it: the worker, the gates, an independent reviewer
+    /// and at most one fix round. Stops at ready; `finish` publishes. Blocks until it is done.
+    Run {
+        /// The issue to carry through.
+        #[arg(long, value_name = "N")]
+        issue: u32,
+        /// The worker's harness (default: sbxm-task.toml, else claude).
+        #[arg(long, value_enum)]
+        worker_harness: Option<Harness>,
+        /// The worker's model (default: the harness's own).
+        #[arg(long)]
+        worker_model: Option<String>,
+        /// The reviewer's harness (default: sbxm-task.toml, else one different from the worker's).
+        #[arg(long, value_enum)]
+        reviewer_harness: Option<Harness>,
+        /// The reviewer's model (default: the harness's own).
+        #[arg(long)]
+        reviewer_model: Option<String>,
+        /// The worker's time limit, e.g. 90s, 45m, 2h (also for the fix round).
+        #[arg(long)]
+        time_limit: Option<String>,
+        /// The reviewer's time limit, e.g. 45m.
+        #[arg(long)]
+        reviewer_time_limit: Option<String>,
+        /// The sandbox profile (default: sbxm-task.toml).
+        #[arg(long)]
+        profile: Option<String>,
+        /// The branch to start from (default: the repo's default branch).
+        #[arg(long)]
+        base: Option<String>,
+        /// The GitHub repo, owner/name (default: this checkout's origin).
+        #[arg(long)]
+        repo: Option<String>,
+        /// Delete the issue's existing task first (asks, showing exactly what), then start again.
+        #[arg(long)]
+        restart: bool,
+        /// With --restart: don't ask before deleting.
+        #[arg(long, requires = "restart")]
+        yes: bool,
+    },
+    /// Push a ready task's branch and open its PR (`Fixes #N`, with the result and the review in
+    /// the body). Refuses unless the task is ready and has no PR yet.
+    Finish {
+        /// The issue's task.
+        #[arg(long, value_name = "N")]
+        issue: u32,
+    },
+    /// Delete a task: its sandboxes, its clones and its task folder. Shows exactly what, and asks
+    /// first (without a terminal it needs --yes).
+    #[command(group(clap::ArgGroup::new("which").required(true).args(["issue", "pr"])))]
+    Rm {
+        /// The issue's task.
+        #[arg(long, value_name = "N")]
+        issue: Option<u32>,
+        /// The PR's task.
+        #[arg(long, value_name = "N")]
+        pr: Option<u32>,
+        /// Don't ask; delete.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// File the findings of a review as GitHub issues, one per finding. A dry run unless
+    /// --create: it shows every issue and changes nothing.
+    #[command(group(clap::ArgGroup::new("source").required(true).args(["issue", "pr", "file"])))]
+    FileFindings {
+        /// The review of this issue's task (review.md in its task folder).
+        #[arg(long, value_name = "N")]
+        issue: Option<u32>,
+        /// The review of this PR's task (review.md in its task folder).
+        #[arg(long, value_name = "N")]
+        pr: Option<u32>,
+        /// Any review file, e.g. sdlc/reviews/2026-10-01-milestone-2b.md.
+        #[arg(long, value_name = "F")]
+        file: Option<PathBuf>,
+        /// Publish the issues, then record their numbers on the review's Issues line.
+        #[arg(long)]
+        create: bool,
+        /// File only these finding ids (repeatable, or comma-separated).
+        #[arg(long = "only", value_name = "ID", value_delimiter = ',')]
+        only: Vec<String>,
+        /// File findings that have no acceptance criteria with only the standard ones.
+        #[arg(long)]
+        standard_criteria: bool,
+        /// Keep personal paths instead of replacing them with ~.
+        #[arg(long)]
+        keep_paths: bool,
+        /// The GitHub repo, owner/name (default: this checkout's origin).
+        #[arg(long)]
+        repo: Option<String>,
     },
 }

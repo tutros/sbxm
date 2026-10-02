@@ -10,6 +10,15 @@ pub mod run;
 pub mod run_init;
 pub mod run_show;
 pub mod stop;
+pub mod task_file_findings;
+pub mod task_finish;
+pub mod task_gates;
+pub mod task_init;
+pub mod task_review;
+pub mod task_rm;
+pub mod task_run;
+pub mod task_start;
+pub mod task_status;
 
 use std::io::Write;
 use std::path::Path;

@@ -39,7 +39,22 @@ impl SandboxBackend for SbxBackend {
     }
 
     fn remove(&self, name: &str) -> Result<()> {
-        run_sbx(remove_args(name), name)
+        // sbx's own "sandbox not found" is held back: callers check `list` and treat a sandbox
+        // that is already gone as removed, so printing it would be alarming noise.
+        let output = Command::new("sbx")
+            .args(remove_args(name))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::inherit())
+            .output()
+            .context(SBX_MISSING)?;
+        if !output.status.success() {
+            bail!(
+                "`sbx rm` failed for sandbox {name} ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(())
     }
 
     fn attach(&self, name: &str) -> Result<()> {

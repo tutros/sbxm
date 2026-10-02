@@ -1,6 +1,6 @@
 # PRD: milestone 2b, `sbxm task`
 
-Status: draft for the PRD/spec experiment [140]. Written 2026-10-01 after interview rounds 1-6 (decisions 139-156).
+Status: built (M2b slices 0-13 done; PR #57) and judged in `sdlc/m2b-experiment-report.md` [140][164]; the user's decision on the skills is pending. Written 2026-10-01 after interview rounds 1-6 (decisions 139-156).
 The spec (`sdlc/spec-m2b.md`) holds the exact behavior; this file says what and why. Decisions are cited by number.
 
 ## Problem

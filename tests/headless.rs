@@ -16,7 +16,8 @@ const KILL_MARKER: &str = "timeout: sending signal TERM to command 'claude'\ntim
 
 fn opts() -> HeadlessOpts {
     HeadlessOpts {
-        model: "claude-haiku-4-5-20251001".into(),
+        model: Some("claude-haiku-4-5-20251001".into()),
+        high_effort: false,
         budget_usd: None,
         is_git_repo: false,
     }
@@ -220,4 +221,27 @@ fn a_harness_without_an_adapter_is_refused_before_any_exec() {
         "gemini has no headless adapter; use claude, codex or antigravity"
     );
     assert!(fake.execs().is_empty());
+}
+
+#[test]
+fn claude_omits_the_model_flag_when_absent() {
+    let no_model = HeadlessOpts {
+        model: None,
+        ..opts()
+    };
+    let argv = Harness::Claude.headless_argv("do it", &no_model).unwrap();
+    assert!(!argv.contains(&"--model".to_owned()));
+    assert_eq!(argv[..3], ["claude", "-p", "do it"]);
+}
+
+#[test]
+fn high_effort_changes_nothing_for_claude() {
+    let high = HeadlessOpts {
+        high_effort: true,
+        ..opts()
+    };
+    assert_eq!(
+        Harness::Claude.headless_argv("do it", &high).unwrap(),
+        Harness::Claude.headless_argv("do it", &opts()).unwrap()
+    );
 }

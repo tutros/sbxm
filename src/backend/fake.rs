@@ -87,11 +87,23 @@ pub struct FakeBackend {
     exec_outputs_matching: Vec<(String, ExecOutput)>,
     fail_exec_matching: Vec<String>,
     exec_hook: Option<ExecHook>,
+    create_hook: Option<CreateHook>,
 }
 
 /// Runs inside every `exec` (after the gate), so a test can play the agent
 /// by changing files on the host while the "sandbox" is busy.
 type HookFn = dyn Fn(&str, &ExecSpec) + Send + Sync;
+
+type CreateHookFn = dyn Fn(&CreateSpec) + Send + Sync;
+
+#[derive(Clone)]
+struct CreateHook(Arc<CreateHookFn>);
+
+impl std::fmt::Debug for CreateHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("CreateHook")
+    }
+}
 
 #[derive(Clone)]
 struct ExecHook(Arc<HookFn>);
@@ -237,6 +249,15 @@ impl FakeBackend {
         self
     }
 
+    /// Calls `hook(spec)` at the start of every `create`, e.g. to look at what exists on the
+    /// host while the sandbox is being made.
+    pub fn with_create_hook(self, hook: impl Fn(&CreateSpec) + Send + Sync + 'static) -> Self {
+        Self {
+            create_hook: Some(CreateHook(Arc::new(hook))),
+            ..self
+        }
+    }
+
     /// Calls `hook(sandbox, spec)` inside every successful `exec`, before it
     /// returns, e.g. to write files into the workspace like an agent would.
     pub fn with_exec_hook(self, hook: impl Fn(&str, &ExecSpec) + Send + Sync + 'static) -> Self {
@@ -300,6 +321,9 @@ impl FakeBackend {
 
 impl SandboxBackend for FakeBackend {
     fn create(&self, spec: &CreateSpec) -> Result<()> {
+        if let Some(hook) = &self.create_hook {
+            (hook.0)(spec);
+        }
         self.creates.lock().unwrap().push(spec.clone());
         self.record("create", &spec.name);
         if self.fail_create || self.fail_create_for.contains(&spec.name) {

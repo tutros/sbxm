@@ -1,0 +1,21 @@
+title:	M2 plan: tests for run-id validation and run-root collision rollback (P2)
+state:	OPEN
+author:	tutros
+labels:	should-fix
+comments:	0
+assignees:	
+projects:	
+milestone:	
+number:	31
+--
+**Where:** `milestone-2.md` P2, slices 8 and 9 (branch `plan/milestone-2`, PR #29)
+
+**What happens:** P2 states strict `run show` id validation and atomic reservation of both run roots, but slices 8 and 9 list no tests for them.
+
+**Why it matters:** path-safety rules should each have a test (slices are test-first, so this is should-fix, not must-fix).
+
+**Fix:** slice 8: pre-existing metadata-root and workspace-root collisions leave existing contents untouched and roll back any newly reserved counterpart. Slice 9: malformed ids and `../`/separator inputs read and create nothing.
+
+**Acceptance criteria:**
+- [ ] The slice 8 and 9 test-focus cells name these cases
+- [ ] Docs only, no user-visible change

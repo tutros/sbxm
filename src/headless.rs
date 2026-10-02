@@ -37,7 +37,9 @@ fn reported_failure(status: &RunStatus) -> bool {
 /// What [`run`] passes to the harness's command.
 #[derive(Debug, Clone, PartialEq)]
 pub struct HeadlessOpts {
-    pub model: String,
+    pub model: Option<String>,
+    /// Ask for the harness's highest reasoning effort (reviewers); only Codex has a flag.
+    pub high_effort: bool,
     /// Best-effort cost cap; only harnesses with a budget flag apply it.
     pub budget_usd: Option<f64>,
     /// Whether the workspace is a git repository (seeded runs); unseeded

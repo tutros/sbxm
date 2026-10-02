@@ -138,8 +138,11 @@ checkout (a GitHub URL is required; anything else is an error). `--base` default
 | `task rm (--issue N \| --pr N) [--yes]` | Removes sandboxes, clones and the task folder; asks first, showing the exact paths | task running |
 | `task run --issue N` | `start` then `review`; stops before `finish` [158] | those of both |
 
-Flags shared by `start`, `review`, `run`: `--worker-harness`, `--worker-model`, `--reviewer-harness`,
-`--reviewer-model`, `--time-limit`, `--reviewer-time-limit`, `--profile`, `--base`, `--repo`.
+Flags are per phase (amended 2026-10-02 after the PR 57 review, Q-1: a flag a command would accept and not use is
+worse than a missing one, and the worker of a task under review comes from its record, not from a flag):
+`start`: `--worker-harness`, `--worker-model`, `--time-limit` (the worker's), `--profile`, `--base`, `--repo`.
+`review`: `--reviewer-harness`, `--reviewer-model`, `--reviewer-time-limit`, `--time-limit` (the worker's, for the fix
+round), `--profile`, `--base`, `--repo`. `run`: every flag of both. The README table is the user-facing copy.
 `start --restart` discards an existing task of that id after the same confirmation as `rm` [153].
 `start` on an existing task that is not finished refuses: `task issue-41 exists (stage working); use task status, or --restart` [153].
 
@@ -207,6 +210,15 @@ Output: human text by default; `status --json` prints the records. Exit codes: 0
   it); then, if `host` is non-empty, a clean checkout of `issue-N` from `repo.git` into `tasks/<id>-gates/` and
   the host commands there through `HostRunner`. The first failing command stops the phase.
 - Results go to `task.json` (`gates[]`) and `gates.log`; a failure is `gates-failed` [152].
+- A host command that outlives its timeout is killed together with what it started: its process tree on Windows,
+  its process group on Unix (the shell leads a group of its own). What the command wrote before the timeout stays in
+  `gates.log` even if a process that escaped the group still holds the pipe.
+- **A run of one tier is partial.** `task.json` also records which tiers the latest passing run covered and the
+  commit of `issue-N` in `repo.git` they ran against (`gate_run`). Review skips its own gate run only when the
+  record covers the sandbox tier and, if `host` is non-empty, the host tier, on the branch's current commit; otherwise
+  it runs all tiers first. `--tier host` is refused unless the sandbox tier passed on that same commit (so host
+  gates never run agent code the sandbox tier hasn't cleared). Before on-demand gates run, the commits in the worker's
+  clone are collected into `repo.git`, so every tier and later stage see one revision.
 - `HostRunner` is a trait (`run(cwd, command, timeout) -> Output`); tests use a fake. Host gates inherit the user's
   environment but not `GIT_*` variables.
 - Documented risk: host gates run agent-written code on the host (decision 84); they are off unless listed, and only
@@ -268,17 +280,19 @@ timeouts are enforced inside the sandbox.
 
 ## 13. Parity table (S1)
 
-| Script | `sbxm task` | Note |
-|---|---|---|
-| `start` | `start` | + harness, base, `--restart` |
-| `status` | `status` | + `interrupted`, `--json` |
-| `review -Issue` | `review --issue` | gates tiers; one fix round |
-| `review -Pr` | `review --pr` | posts the comment |
-| `finish` | `finish` | base-aware PR |
-| `remove` | `rm` | confirms |
-| `file-review-issues.ps1` | `file-findings` | dry run default |
-| `deploy-profiles.ps1` | stays a script | profile deployment, not task work |
-| (new) | `init`, `gates`, `run` | [157][158] |
+| Script | `sbxm task` | Note | Tests / manual check |
+|---|---|---|---|
+| `start` | `start` | + harness, base, `--restart` | `task_select.rs`, `task_start_cmd.rs`, `task_start_restart.rs`, `task_work.rs`; slice 13 item 2 |
+| `status` | `status` | + `interrupted`, `--json` | `task_status.rs`, `task_record.rs`; slice 13 item 3 |
+| `review -Issue` | `review --issue` | gates tiers; one fix round | `task_review_flow.rs`, `task_review_cmd.rs`, `task_gates_*.rs`; slice 13 items 4-5 |
+| `review -Pr` | `review --pr` | posts the comment | `task_review_pr.rs`, `task_pr_prepare.rs`; slice 13 item 6 |
+| `finish` | `finish` | base-aware PR | `task_finish_cmd.rs`, `task_finish.rs`; slice 13 item 7 |
+| `remove` | `rm` | confirms | `task_rm.rs`, `task_rm_cmd.rs`; slice 13 item 8 |
+| `file-review-issues.ps1` | `file-findings` | dry run default | `task_findings_*.rs`; slice 13 item 7 |
+| `deploy-profiles.ps1` | stays a script | profile deployment, not task work | `scripts/tests/DeployProfiles.Tests.ps1` |
+| (new) | `init`, `gates`, `run` | [157][158] | `task_init.rs`, `task_gates_cmd.rs`, `task_run.rs`; slice 13 item 1 |
+
+Both scripts carry a DEPRECATED line in their help; deleting them is a separate decision after slice 13 passes.
 
 ## Details to verify first (before the slice that relies on them)
 

@@ -1,6 +1,8 @@
 //! Shared test helpers. Each test crate uses only some of them.
 #![allow(dead_code)]
 
+pub mod task_fixture;
+
 use std::path::{Path, PathBuf};
 
 use sbxm::backend::FakeBackend;
@@ -94,6 +96,64 @@ impl Env {
         std::fs::write(seed.join("sub").join("b.txt"), "b").unwrap();
         seed
     }
+}
+
+/// Plain `git` for building fixtures; returns trimmed stdout.
+pub fn git(dir: &Path, args: &[&str]) -> String {
+    // Windows can briefly refuse git a file an indexer or antivirus holds (issue #39), which
+    // shows up as "Permission denied" or "failed to write object"; the production runner
+    // retries that, so the fixture does too.
+    let mut out = None;
+    for attempt in 0..5 {
+        let run = std::process::Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_AUTHOR_NAME", "t")
+            .env("GIT_AUTHOR_EMAIL", "t@t")
+            .env("GIT_COMMITTER_NAME", "t")
+            .env("GIT_COMMITTER_EMAIL", "t@t")
+            .output()
+            .unwrap();
+        let failed = !run.status.success();
+        if failed {
+            // Fixture git commands are deterministic, so a failure is environmental (a file lock
+            // under load); say what it was, so the cause can be found, and try again.
+            eprintln!(
+                "fixture git {args:?} failed on attempt {}: {}",
+                attempt + 1,
+                String::from_utf8_lossy(&run.stderr).trim()
+            );
+        }
+        out = Some(run);
+        if !failed {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100 << attempt));
+    }
+    let out = out.unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+/// A local bare repo standing in for GitHub, with `main` holding one commit (a README).
+pub fn git_origin(root: &Path) -> PathBuf {
+    let origin = root.join("origin.git");
+    let seed = root.join("origin-seed");
+    std::fs::create_dir_all(&origin).unwrap();
+    std::fs::create_dir_all(&seed).unwrap();
+    git(&origin, &["init", "--bare", "-b", "main"]);
+    git(&seed, &["init", "-b", "main"]);
+    std::fs::write(seed.join("README.md"), "hello\n").unwrap();
+    git(&seed, &["add", "-A"]);
+    git(&seed, &["commit", "-m", "first"]);
+    git(&seed, &["push", origin.to_str().unwrap(), "main"]);
+    origin
 }
 
 /// A directory link that needs no admin rights: a junction on Windows.
