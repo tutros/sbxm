@@ -29,7 +29,7 @@ fn writes_the_file_in_the_working_directory_by_default() {
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains(FILE_NAME), "{stdout}");
     assert!(
-        stdout.contains("task gates --dry-run"),
+        stdout.contains("task gates --issue N --dry-run"),
         "next step is named: {stdout}"
     );
 }

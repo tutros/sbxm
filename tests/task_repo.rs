@@ -815,3 +815,22 @@ fn hostile_committed_content_runs_nothing_when_fetched() {
         "committed content made the host run a command"
     );
 }
+
+#[test]
+fn a_task_branch_that_already_exists_on_origin_is_refused_in_plain_words() {
+    let f = fixture();
+    repo::clone_bare(&source(&f), &f.repo_git).unwrap();
+    repo::create_branch(&f.repo_git, "issue-4", "main").unwrap();
+
+    let message = format!(
+        "{:#}",
+        repo::create_branch(&f.repo_git, "issue-4", "main").unwrap_err()
+    );
+
+    assert!(
+        message.contains("issue-4 already exists in the repo"),
+        "{message}"
+    );
+    assert!(message.contains("delete it"), "{message}");
+    assert!(!message.contains("failed"), "{message}");
+}

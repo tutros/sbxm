@@ -120,7 +120,7 @@ fn main() -> anyhow::Result<()> {
         } => {
             let written = commands::task_init::run(path.as_deref())?;
             println!("Wrote {}", written.display());
-            println!("Check the profile and gates, then run: sbxm task gates --dry-run");
+            println!("Check the profile and gates, then run: sbxm task gates --issue N --dry-run");
             Ok(())
         }
         Command::Task {

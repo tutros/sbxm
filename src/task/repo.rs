@@ -105,6 +105,13 @@ pub fn create_branch(repo_git: &Path, branch: &str, base: &str) -> Result<()> {
     if !found.status.success() {
         bail!("base branch {base} not found in the repo; check --base");
     }
+    if has_branch(repo_git, branch)? {
+        bail!(
+            "branch {branch} already exists in the repo (a clone has every branch of origin, so it \
+             was probably pushed by an earlier `sbxm task finish`); delete it on GitHub, or merge \
+             it, before starting this task again"
+        );
+    }
     git::run(
         repo_git,
         Some(repo_git),

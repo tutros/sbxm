@@ -235,8 +235,8 @@ decision, departs from the spec, or grows past its row.
 
 On a scratch GitHub repo with a few issues (one with `Depends on`, one labelled `question`), `sbxm-task.toml`
 committed, and a profile deployed:
-1. `sbxm task init` in a fresh checkout; the starter file is valid; `task gates --dry-run` lists the commands.
-2. `sbxm task start --workers 2`: the picks and every skip reason are printed; two sandboxes appear; `status` from
+1. `sbxm task init` in a fresh checkout; the starter file is valid; `task gates --issue N --dry-run` lists the commands.
+2. `sbxm task start --workers 2`: the picks and the skip reasons of issues passed over before the cap are printed; two sandboxes appear; `status` from
    another terminal shows `working`; each task folder has the layout in spec §3 when done.
 3. Kill one `sbxm` mid-run: `status` shows `interrupted`; `start` without `--restart` refuses; `--restart` works.
 4. A deliberate gate failure (a failing test in the worker's change) marks `gates-failed` and stops.

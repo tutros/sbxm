@@ -10,7 +10,7 @@ use crate::task::config::FILE_NAME;
 /// profile must exist in your profiles dir (spec §2).
 const STARTER: &str = r##"# How `sbxm task` works on this repo: a worker agent takes a GitHub issue, gates check
 # its change, an independent reviewer reads it, and one fix round follows.
-# See what would run with: sbxm task gates --dry-run
+# See what would run with: sbxm task gates --issue N --dry-run
 
 [worker]
 harness = "claude"             # claude | codex | antigravity
