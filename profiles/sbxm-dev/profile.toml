@@ -13,6 +13,7 @@ allow = [
   "packages.microsoft.com",       # PowerShell .deb
   "www.powershellgallery.com",    # Install-Module Pester (index)
   "cdn.powershellgallery.com",    # Install-Module Pester (package download)
+  "cdn.pyke.io",                  # ort-sys fetches ONNX Runtime at build time (fastembed; sha256-pinned in the crate)
 ]
 deny = []
 
