@@ -119,7 +119,8 @@ fn meta(f: &Fixture) -> std::path::PathBuf {
 fn restart_asks_discards_the_old_task_and_starts_a_new_one() {
     let f = fixture();
     started(&f);
-    let first = std::fs::read_to_string(meta(&f).join("task.json")).unwrap();
+    // Records can't tell the runs apart (same second, same fake process), so mark the old folder.
+    std::fs::write(meta(&f).join("old-run.marker"), "old").unwrap();
     let confirm = FakeConfirm::new(true, true);
     let b = playing(&f);
 
@@ -149,8 +150,14 @@ fn restart_asks_discards_the_old_task_and_starts_a_new_one() {
     );
     assert!(out.contains("issue-41: worker completed"), "{out}");
     assert_eq!(b.creates().len(), 1);
-    let again = std::fs::read_to_string(meta(&f).join("task.json")).unwrap();
-    assert_ne!(first, again, "a fresh record");
+    assert!(
+        !meta(&f).join("old-run.marker").exists(),
+        "the old folder was reused"
+    );
+    assert!(
+        record::read(&meta(&f).join("task.json")).is_ok(),
+        "a fresh record"
+    );
 }
 
 #[test]
@@ -491,7 +498,7 @@ fn several_restarts_are_confirmed_once_for_all_and_declining_deletes_none() {
 fn several_restarts_accepted_once_delete_and_start_them_all() {
     let f = fixture();
     started_both(&f);
-    let first_41 = std::fs::read_to_string(meta_of(&f, 41).join("task.json")).unwrap();
+    std::fs::write(meta_of(&f, 41).join("old-run.marker"), "old").unwrap();
     let b = playing(&f);
     let confirm = FakeConfirm::new(true, true);
     let gh = github_of(&[(41, &["should-fix"], ""), (42, &["should-fix"], "")]);
@@ -514,8 +521,9 @@ fn several_restarts_accepted_once_delete_and_start_them_all() {
         out.contains("issue-41: worker completed") && out.contains("issue-42: worker completed"),
         "{out}"
     );
-    assert_ne!(
-        first_41,
-        std::fs::read_to_string(meta_of(&f, 41).join("task.json")).unwrap()
+    assert!(
+        !meta_of(&f, 41).join("old-run.marker").exists(),
+        "the old folder was reused"
     );
+    assert!(record::read(&meta_of(&f, 41).join("task.json")).is_ok());
 }
