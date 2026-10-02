@@ -198,6 +198,18 @@ pub struct GateResult {
     pub passed: bool,
 }
 
+/// What the latest *passed* gate run covered: which tiers passed, on which commit of the task
+/// branch in `repo.git`. Review skips its own gate run only when this covers every configured tier
+/// on the branch's current commit, and a host-only run needs the sandbox tier to have passed on the
+/// same commit (decision 160, PR 57 review round 2).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GateRun {
+    pub sandbox: bool,
+    pub host: bool,
+    /// The branch tip the gates ran against; `None` when it couldn't be read (never matches).
+    pub commit: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Record {
     pub schema: u32,
@@ -216,6 +228,9 @@ pub struct Record {
     pub reviewer: Option<Agent>,
     pub fix_round: bool,
     pub gates: Vec<GateResult>,
+    /// The latest gate run that passed, and what it covered; cleared when gates start again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gate_run: Option<GateRun>,
     /// The PR's URL once `finish` opened it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr: Option<String>,
@@ -263,6 +278,7 @@ impl Record {
             reviewer: None,
             fix_round: false,
             gates: Vec::new(),
+            gate_run: None,
             pr: None,
             related: Vec::new(),
             notes: Vec::new(),
@@ -291,6 +307,9 @@ impl Record {
                 self.stage.name()
             );
         }
+        if stage == Stage::Gating {
+            self.gate_run = None;
+        }
         self.stage = stage;
         self.status = stage.statuses()[0];
         self.stages.push(Stamp {
@@ -314,6 +333,7 @@ impl Record {
             );
         }
         self.status = Status::Running;
+        self.gate_run = None;
         self.stages.push(Stamp {
             stage: Stage::Gating,
             at: format_timestamp(now),

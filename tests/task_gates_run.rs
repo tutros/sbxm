@@ -332,7 +332,7 @@ fn a_failing_host_gate_is_gates_failed_and_the_checkout_is_still_removed() {
 }
 
 #[test]
-fn a_tier_can_be_chosen_and_a_failed_task_can_be_gated_again() {
+fn a_failed_task_can_be_gated_again_but_the_host_tier_not_alone() {
     let f = config("\"cargo test\"", "\"cargo build\"");
     let backend = playing(&f).with_exec_output_matching(
         "cargo test",
@@ -354,23 +354,34 @@ fn a_tier_can_be_chosen_and_a_failed_task_can_be_gated_again() {
     );
     assert_eq!(saved(&f).status, Status::GatesFailed);
 
-    // Only the host tier this time (as `task gates --tier host` would): it does not need the
-    // sandbox tier to pass first, because the user asked for it alone.
-    let gated = run_gates(&f, &backend, &host, &mut prepared, "on-demand", Tiers::HOST);
+    // The host tier alone is refused while the sandbox tier has not passed (decision 160): the
+    // failed task stays as it was and nothing ran on the host.
+    let github = FakeGitHub::default();
+    let source = source(&f);
+    let ctx = ctx_with_host(&f, &source, &backend, &github, &host);
+    let err = pipeline::run_gates(&ctx.env(), &mut prepared, "on-demand", Tiers::HOST).unwrap_err();
 
-    assert!(gated.passed);
-    let record = saved(&f);
-    assert_eq!(
-        (record.stage, record.status),
-        (Stage::Gating, Status::Passed)
+    assert!(format!("{err:#}").contains("sandbox tier"), "{err:#}");
+    assert_eq!(saved(&f).status, Status::GatesFailed);
+    assert_eq!(saved(&f).gates.len(), 1);
+    assert!(host.calls().is_empty());
+
+    // The sandbox tier can be run again alone (and fails again here, so the history grows).
+    let gated = run_gates(
+        &f,
+        &backend,
+        &host,
+        &mut prepared,
+        "on-demand",
+        Tiers::SANDBOX,
     );
+    assert!(!gated.passed);
     assert_eq!(
-        record.gates.len(),
+        saved(&f).gates.len(),
         2,
         "the earlier failure stays in the history"
     );
-    assert_eq!(record.gates[1].phase, "on-demand");
-    assert_eq!(host.calls().len(), 1);
+    assert_eq!(saved(&f).gates[1].phase, "on-demand");
 }
 
 #[test]

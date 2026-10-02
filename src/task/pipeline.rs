@@ -12,7 +12,8 @@ use super::config::TaskConfig;
 use super::gates::{self, GateOutcome, HostRunner};
 use super::prompts::{self, Role};
 use super::record::{
-    self, Agent, GateResult, Kind, NewTask, Process, ProcessProbe, Record, RunInfo, Stage, Status,
+    self, Agent, GateResult, GateRun, Kind, NewTask, Process, ProcessProbe, Record, RunInfo, Stage,
+    Status,
 };
 use super::repo::{self, AgentFile, BUNDLE_CAP, Existing, Identity};
 use super::review;
@@ -686,6 +687,20 @@ pub fn run_gates(
             .notes
             .push("earlier gates were interrupted before they finished".to_owned());
     }
+    // What the last passed run covered, and the commit the gates are about to see: a host-only run
+    // builds on a sandbox pass of this same commit, and a partial run adds to what was covered.
+    let tip = repo::branch_tip(&prepared.meta.join("repo.git"), &prepared.record.branch).ok();
+    let covered = prepared
+        .record
+        .gate_run
+        .clone()
+        .filter(|run| tip.is_some() && run.commit == tip);
+    if tiers.host && !tiers.sandbox && !covered.as_ref().is_some_and(|run| run.sandbox) {
+        bail!(
+            "the host tier runs only after the sandbox tier passed on the task's current commit; run `sbxm task gates --issue {} --tier sandbox` (or all tiers) first",
+            prepared.record.number
+        );
+    }
     prepared
         .record
         .begin_gating(now(), Process::current(env.probe))?;
@@ -709,7 +724,12 @@ pub fn run_gates(
         outcomes.extend(host_gate_outcomes(env, prepared, phase));
     }
 
-    finish_gating(prepared, phase, outcomes)
+    let run = GateRun {
+        sandbox: tiers.sandbox || covered.as_ref().is_some_and(|r| r.sandbox),
+        host: tiers.host || covered.as_ref().is_some_and(|r| r.host),
+        commit: tip,
+    };
+    finish_gating(prepared, phase, outcomes, Some(run))
 }
 
 /// The host tier (spec §7): a clean checkout of the task branch from `repo.git` in `<id>-gates`
@@ -768,6 +788,7 @@ fn finish_gating(
     prepared: &mut Prepared,
     phase: &str,
     outcomes: Vec<GateOutcome>,
+    run: Option<GateRun>,
 ) -> Result<Gated> {
     let failed = outcomes
         .iter()
@@ -787,6 +808,7 @@ fn finish_gating(
         .record
         .gates
         .extend(outcomes.iter().map(|o| o.result.clone()));
+    prepared.record.gate_run = run.filter(|_| failed.is_none());
     prepared.record.finish(if failed.is_some() {
         Status::GatesFailed
     } else {
@@ -814,6 +836,18 @@ fn remove_with_retries(dir: &Path) -> std::io::Result<()> {
         std::thread::sleep(std::time::Duration::from_millis(100 << attempt));
     }
     last
+}
+
+/// Whether the last passed gate run covered the sandbox tier and, when one is configured, the host
+/// tier, on the task branch's current commit.
+fn gates_cover_everything(env: &TaskEnv, prepared: &Prepared) -> bool {
+    let tip = repo::branch_tip(&prepared.meta.join("repo.git"), &prepared.record.branch).ok();
+    prepared.record.gate_run.as_ref().is_some_and(|run| {
+        tip.is_some()
+            && run.commit == tip
+            && run.sandbox
+            && (run.host || env.config.gates.host.is_empty())
+    })
 }
 
 /// What the worker is told on its command line; the real prompt is a file (decision 131), since
@@ -1132,10 +1166,13 @@ pub fn review_issue(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewRepo
         ..ReviewReport::default()
     };
 
-    let gates_current = matches!(
-        (prepared.record.stage, prepared.record.status),
-        (Stage::Gating, Status::Passed) | (Stage::Reviewing, Status::Failed)
-    );
+    let gates_current = match (prepared.record.stage, prepared.record.status) {
+        // Passed gates count only if they covered every configured tier on the branch as it is now.
+        (Stage::Gating, Status::Passed) => gates_cover_everything(env, prepared),
+        // A review that failed already had its gates pass; they ran for the same commits.
+        (Stage::Reviewing, Status::Failed) => true,
+        _ => false,
+    };
     if !gates_current {
         let gated = run_gates(env, prepared, "before-review", Tiers::ALL)?;
         if let Some(failed) = gated.failed {
@@ -1252,7 +1289,7 @@ pub fn review_pr(
         if outcomes.iter().all(|o| o.result.passed) && !gates.host.is_empty() {
             outcomes.extend(host_gate_outcomes(env, prepared, "pr"));
         }
-        Ok(Some(finish_gating(prepared, "pr", outcomes)?))
+        Ok(Some(finish_gating(prepared, "pr", outcomes, None)?))
     })();
     let cleanup = |prepared: &mut Prepared| {
         let _ = env.backend.remove(&sandbox);

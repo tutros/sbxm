@@ -238,8 +238,19 @@ fn only_the_chosen_tier_runs() {
             .filter(|(_, spec)| spec.argv.iter().any(|a| a == "sh"))
             .count()
     };
-    let before = gate_runs(&backend);
     let host = FakeHostRunner::default();
+    // The host tier builds on a sandbox pass of the same commit, so that comes first.
+    go(
+        &f,
+        &options(&f, Tiers::SANDBOX, false),
+        &backend,
+        &Probe,
+        &host,
+    )
+    .result
+    .unwrap();
+    assert!(host.calls().is_empty());
+    let before = gate_runs(&backend);
 
     go(
         &f,

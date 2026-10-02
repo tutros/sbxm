@@ -207,6 +207,12 @@ Output: human text by default; `status --json` prints the records. Exit codes: 0
   it); then, if `host` is non-empty, a clean checkout of `issue-N` from `repo.git` into `tasks/<id>-gates/` and
   the host commands there through `HostRunner`. The first failing command stops the phase.
 - Results go to `task.json` (`gates[]`) and `gates.log`; a failure is `gates-failed` [152].
+- **A run of one tier is partial.** `task.json` also records which tiers the latest passing run covered and the
+  commit of `issue-N` in `repo.git` they ran against (`gate_run`). Review skips its own gate run only when the
+  record covers the sandbox tier and, if `host` is non-empty, the host tier, on the branch's current commit; otherwise
+  it runs all tiers first. `--tier host` is refused unless the sandbox tier passed on that same commit (so host
+  gates never run agent code the sandbox tier hasn't cleared). Before on-demand gates run, the commits in the worker's
+  clone are collected into `repo.git`, so every tier and later stage see one revision.
 - `HostRunner` is a trait (`run(cwd, command, timeout) -> Output`); tests use a fake. Host gates inherit the user's
   environment but not `GIT_*` variables.
 - Documented risk: host gates run agent-written code on the host (decision 84); they are off unless listed, and only

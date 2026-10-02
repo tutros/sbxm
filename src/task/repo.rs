@@ -247,6 +247,22 @@ fn has_branch(repo_git: &Path, branch: &str) -> Result<bool> {
     Ok(out.status.success())
 }
 
+/// The commit `branch` points at in `repo_git`.
+pub fn branch_tip(repo_git: &Path, branch: &str) -> Result<String> {
+    check_ref("branch", branch)?;
+    let out = git::run(
+        repo_git,
+        Some(repo_git),
+        None,
+        &[
+            "rev-parse",
+            "--verify",
+            &format!("refs/heads/{branch}^{{commit}}"),
+        ],
+    )?;
+    Ok(out.trim().to_owned())
+}
+
 /// Pushes `branch` (and only it) from `repo_git` to GitHub, never forcing.
 pub fn push(repo_git: &Path, branch: &str) -> Result<()> {
     check_ref("branch", branch)?;

@@ -6,12 +6,13 @@ mod common;
 use std::fs;
 
 use common::task_fixture::{
-    CLAUDE_DONE, CODEX_DONE, Fixture, Play, ctx, fixture_with, ok, play_reviews, play_tasks,
-    source, worked_task,
+    CLAUDE_DONE, CODEX_DONE, Fixture, Play, ctx, ctx_with_host, fixture_with, ok, play_reviews,
+    play_tasks, source, worked_task,
 };
 use sbxm::backend::{ExecOutput, FakeBackend};
 use sbxm::github::fake::FakeGitHub;
-use sbxm::task::pipeline::{self, Prepared, ReviewReport};
+use sbxm::task::gates::FakeHostRunner;
+use sbxm::task::pipeline::{self, Prepared, ReviewReport, Tiers};
 use sbxm::task::record::{self, Stage, Status};
 use sbxm::task::repo;
 
@@ -465,4 +466,118 @@ fn the_record_names_the_reviewers_sandbox_before_it_is_created() {
         Some(seen[0].0.as_str()),
         "a kill during the multi-minute create must leave a record `task rm` can use"
     );
+}
+
+// ---- partial gate runs (PR 57 review round 2, M-1) ----
+
+fn both_tiers() -> Fixture {
+    fixture_with(
+        "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = [\"cargo test\"]\n\
+         host = [\"cargo build\"]\n\n[reviewer]\nharness = \"codex\"\n",
+    )
+}
+
+fn gates(
+    f: &Fixture,
+    backend: &FakeBackend,
+    host: &FakeHostRunner,
+    prepared: &mut Prepared,
+    tiers: Tiers,
+) -> anyhow::Result<pipeline::Gated> {
+    let github = FakeGitHub::default();
+    let source = source(f);
+    pipeline::run_gates(
+        &ctx_with_host(f, &source, backend, &github, host).env(),
+        prepared,
+        "on-demand",
+        tiers,
+    )
+}
+
+fn review_with_host(
+    f: &Fixture,
+    backend: &FakeBackend,
+    host: &FakeHostRunner,
+    prepared: &mut Prepared,
+) -> anyhow::Result<ReviewReport> {
+    let github = FakeGitHub::default();
+    let source = source(f);
+    pipeline::review_issue(
+        &ctx_with_host(f, &source, backend, &github, host).env(),
+        prepared,
+    )
+}
+
+#[test]
+fn a_sandbox_only_gate_run_does_not_authorize_review_without_the_host_tier() {
+    let f = both_tiers();
+    let backend = backend(&f, &[CLEAN]);
+    let host = FakeHostRunner::default();
+    let mut prepared = worked_task(&f, &backend);
+    gates(&f, &backend, &host, &mut prepared, Tiers::SANDBOX).unwrap();
+    assert!(host.calls().is_empty());
+
+    review_with_host(&f, &backend, &host, &mut prepared).unwrap();
+
+    assert_eq!(
+        host.calls().len(),
+        1,
+        "review must run the configured host gate"
+    );
+}
+
+#[test]
+fn a_host_only_run_without_a_sandbox_pass_is_refused_and_runs_nothing() {
+    let f = both_tiers();
+    let backend = backend(&f, &[CLEAN]);
+    let host = FakeHostRunner::default();
+    let mut prepared = worked_task(&f, &backend);
+
+    let err = gates(&f, &backend, &host, &mut prepared, Tiers::HOST).unwrap_err();
+
+    assert!(format!("{err:#}").contains("sandbox"), "{err:#}");
+    assert!(host.calls().is_empty(), "no agent code on the host");
+}
+
+#[test]
+fn sandbox_then_host_on_the_same_commit_together_authorize_review() {
+    let f = both_tiers();
+    let backend = backend(&f, &[CLEAN]);
+    let host = FakeHostRunner::default();
+    let mut prepared = worked_task(&f, &backend);
+    gates(&f, &backend, &host, &mut prepared, Tiers::SANDBOX).unwrap();
+    gates(&f, &backend, &host, &mut prepared, Tiers::HOST).unwrap();
+    assert_eq!(host.calls().len(), 1);
+    let sandbox_runs = count(&backend, "cargo test");
+
+    review_with_host(&f, &backend, &host, &mut prepared).unwrap();
+
+    assert_eq!(
+        host.calls().len(),
+        1,
+        "both tiers already passed on this commit"
+    );
+    assert_eq!(count(&backend, "cargo test"), sandbox_runs);
+}
+
+#[test]
+fn a_new_commit_after_the_gates_means_review_runs_them_again() {
+    let f = both_tiers();
+    let backend = backend(&f, &[CLEAN]);
+    let host = FakeHostRunner::default();
+    let mut prepared = worked_task(&f, &backend);
+    gates(&f, &backend, &host, &mut prepared, Tiers::ALL).unwrap();
+    // The task branch moves on after the gates passed.
+    let repo_git = meta(&f).join("repo.git");
+    let tree = common::git(&repo_git, &["rev-parse", "issue-41^{tree}"]);
+    let parent = common::git(&repo_git, &["rev-parse", "issue-41"]);
+    let moved = common::git(
+        &repo_git,
+        &["commit-tree", &tree, "-p", &parent, "-m", "moved"],
+    );
+    common::git(&repo_git, &["update-ref", "refs/heads/issue-41", &moved]);
+
+    review_with_host(&f, &backend, &host, &mut prepared).unwrap();
+
+    assert_eq!(host.calls().len(), 2, "gates passed on an older commit");
 }
