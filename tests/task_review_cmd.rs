@@ -7,7 +7,8 @@ use common::task_fixture::{
     worked_task,
 };
 use sbxm::backend::{ExecOutput, FakeBackend};
-use sbxm::commands::task_review::{Options, run};
+use sbxm::commands::task_review::{Options, Target, run};
+use sbxm::github::fake::FakeGitHub;
 use sbxm::harness::Harness;
 use sbxm::task::gates::FakeHostRunner;
 use sbxm::task::record;
@@ -49,7 +50,10 @@ fn backend(f: &Fixture, reviews: &[&str]) -> FakeBackend {
 fn options(f: &Fixture) -> Options {
     Options {
         repo_root: f.env.tmp.path().join("target-repo"),
-        issue: 41,
+        target: Target::Issue(41),
+        repo: Some("o/r".into()),
+        base: None,
+        clone_source: None,
         reviewer_harness: None,
         reviewer_model: None,
         reviewer_time_limit: None,
@@ -70,6 +74,7 @@ fn go(f: &Fixture, opts: &Options, backend: &FakeBackend) -> Out {
         &f.env.config_dir(),
         opts,
         backend,
+        &FakeGitHub::default(),
         &Probe,
         &FakeHostRunner::default(),
         &mut out,
@@ -300,5 +305,230 @@ fn a_missing_config_file_says_how_to_make_one() {
     assert!(
         message.contains("sbxm-task.toml") && message.contains("sbxm task init"),
         "{message}"
+    );
+}
+
+// ---- `task review --pr N` ----
+
+use common::task_fixture::{add_pr_head, issue_text, source};
+use sbxm::github::fake::GhCall;
+use sbxm::github::{PrInfo, PrState};
+
+fn pr_info() -> PrInfo {
+    PrInfo {
+        number: 7,
+        head_ref: "feature-x".into(),
+        is_cross_repository: false,
+        state: PrState::Open,
+        title: "Add the x feature".into(),
+        body: "Adds x.\n\nFixes #4".into(),
+        closing_issues: vec![4],
+    }
+}
+
+fn pr_github() -> FakeGitHub {
+    FakeGitHub::default()
+        .with_default_branch("main")
+        .with_pr(pr_info())
+        .with_issue_text(issue_text(4))
+}
+
+fn pr_options(f: &Fixture) -> Options {
+    let mut opts = options(f);
+    opts.target = Target::Pr(7);
+    opts.clone_source = Some(source(f));
+    opts
+}
+
+fn pr_backend(f: &Fixture, reviews: &[&str]) -> FakeBackend {
+    FakeBackend::with_secrets(&["anthropic", "openai"])
+        .with_exec_output_matching("codex", ok(CODEX_DONE))
+        .with_exec_hook(play_reviews(
+            &f.env.base_dir(),
+            "pr-7",
+            reviews.iter().map(|s| (*s).to_owned()).collect(),
+        ))
+}
+
+fn go_pr(f: &Fixture, opts: &Options, backend: &FakeBackend, github: &FakeGitHub) -> Out {
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let result = run(
+        &f.env.config_dir(),
+        opts,
+        backend,
+        github,
+        &Probe,
+        &FakeHostRunner::default(),
+        &mut out,
+        &mut warn,
+    );
+    Out {
+        result,
+        out: String::from_utf8(out).unwrap(),
+        warn: String::from_utf8(warn).unwrap(),
+    }
+}
+
+fn pr_meta(f: &Fixture) -> std::path::PathBuf {
+    record::task_dir(&f.env.base_dir(), "pr-7")
+}
+
+#[test]
+fn a_pr_review_prints_the_result_and_that_it_was_posted() {
+    let f = config("codex");
+    add_pr_head(&f, 7);
+    let github = pr_github();
+
+    let out = go_pr(&f, &pr_options(&f), &pr_backend(&f, &[ONE]), &github);
+
+    out.result.unwrap();
+    assert!(
+        out.out.contains("pr-7: review: 1 must-fix finding(s)"),
+        "{}",
+        out.out
+    );
+    assert!(out.out.contains("posted on PR #7"), "{}", out.out);
+    assert!(
+        !out.out.contains("finish"),
+        "a PR has nothing to finish: {}",
+        out.out
+    );
+    assert!(
+        github
+            .calls()
+            .iter()
+            .any(|c| matches!(c, GhCall::PrComment(r, 7, _) if r == "o/r"))
+    );
+}
+
+#[test]
+fn a_pr_from_a_fork_is_refused_before_anything_is_created() {
+    let f = config("codex");
+    add_pr_head(&f, 7);
+    let mut fork = pr_info();
+    fork.is_cross_repository = true;
+    let github = FakeGitHub::default()
+        .with_default_branch("main")
+        .with_pr(fork);
+    let backend = pr_backend(&f, &[CLEAN]);
+
+    let out = go_pr(&f, &pr_options(&f), &backend, &github);
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("fork"), "{message}");
+    assert!(backend.creates().is_empty() && backend.execs().is_empty());
+    assert!(!pr_meta(&f).exists());
+}
+
+#[test]
+fn a_closed_pr_is_refused() {
+    let f = config("codex");
+    let mut closed = pr_info();
+    closed.state = PrState::Closed;
+    let github = FakeGitHub::default()
+        .with_default_branch("main")
+        .with_pr(closed);
+
+    let out = go_pr(&f, &pr_options(&f), &pr_backend(&f, &[CLEAN]), &github);
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(
+        message.contains("closed") && message.contains("only open"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_pr_github_cannot_show_is_an_error() {
+    let f = config("codex");
+    let github = FakeGitHub::default().with_default_branch("main");
+
+    let out = go_pr(&f, &pr_options(&f), &pr_backend(&f, &[CLEAN]), &github);
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("pr 7"), "{message}");
+}
+
+#[test]
+fn failing_gates_fail_the_pr_review_and_post_nothing() {
+    let f = config("codex");
+    add_pr_head(&f, 7);
+    let github = pr_github();
+    let red = FakeBackend::with_secrets(&["anthropic", "openai"]).with_exec_output_matching(
+        "cargo test",
+        ExecOutput {
+            stdout: String::new(),
+            stderr: "red\n".into(),
+            exit_code: Some(101),
+        },
+    );
+
+    let out = go_pr(&f, &pr_options(&f), &red, &github);
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(
+        message.contains("gates failed") && message.contains("cargo test"),
+        "{message}"
+    );
+    assert!(
+        out.out.contains("gates failed") && out.out.contains("gates.log"),
+        "{}",
+        out.out
+    );
+    assert!(
+        !github
+            .calls()
+            .iter()
+            .any(|c| matches!(c, GhCall::PrComment(..)))
+    );
+}
+
+#[test]
+fn a_review_that_failed_can_be_run_again_without_starting_over() {
+    let f = config("codex");
+    add_pr_head(&f, 7);
+    let github = pr_github();
+    // First attempt: the reviewer writes no usable review.
+    let bad = pr_backend(&f, &["Looks fine.\n"]);
+    assert!(go_pr(&f, &pr_options(&f), &bad, &github).result.is_err());
+
+    let out = go_pr(&f, &pr_options(&f), &pr_backend(&f, &[CLEAN]), &github);
+
+    out.result.unwrap();
+    assert!(out.out.contains("posted on PR #7"), "{}", out.out);
+}
+
+#[test]
+fn a_pr_that_was_already_reviewed_is_refused_and_says_how_to_start_over() {
+    let f = config("codex");
+    add_pr_head(&f, 7);
+    let github = pr_github();
+    go_pr(&f, &pr_options(&f), &pr_backend(&f, &[CLEAN]), &github)
+        .result
+        .unwrap();
+
+    let out = go_pr(&f, &pr_options(&f), &pr_backend(&f, &[CLEAN]), &github);
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(
+        message.contains("already") && message.contains("task rm --pr 7"),
+        "{message}"
+    );
+}
+
+#[test]
+fn the_pr_review_uses_the_default_branch_as_the_base() {
+    let f = config("codex");
+    add_pr_head(&f, 7);
+    let github = pr_github().with_default_branch("trunk");
+
+    let out = go_pr(&f, &pr_options(&f), &pr_backend(&f, &[CLEAN]), &github);
+
+    // A PR's own head is fetched by number, so the missing `trunk` branch doesn't matter; the base
+    // only names what the reviewer diffs against.
+    out.result.unwrap();
+    assert_eq!(
+        record::read(&pr_meta(&f).join("task.json")).unwrap().base,
+        "trunk"
     );
 }

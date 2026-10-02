@@ -128,6 +128,25 @@ fn discard_existing(
     )
 }
 
+/// `--repo owner/name`, or the GitHub repo of the checkout's `origin`.
+pub(crate) fn resolve_repo(repo: Option<&str>, repo_root: &std::path::Path) -> Result<String> {
+    match repo {
+        Some(repo) => {
+            check_repo(repo)?;
+            Ok(repo.to_owned())
+        }
+        None => {
+            let url = git::user_run(repo_root, &["remote", "get-url", "origin"]).map_err(|e| {
+                anyhow!(
+                    "cannot read the origin of {}: {e:#}; pass --repo owner/name",
+                    repo_root.display()
+                )
+            })?;
+            github_repo(url.trim())
+        }
+    }
+}
+
 fn plural(n: u32, word: &str) -> String {
     format!("{n} {word}{}", if n == 1 { "" } else { "s" })
 }
@@ -192,22 +211,7 @@ pub fn run_with(
     if let Some(profile) = &opts.profile {
         config.sandbox.profile = profile.clone();
     }
-    let repo_name = match &opts.repo {
-        Some(repo) => {
-            check_repo(repo)?;
-            repo.clone()
-        }
-        None => {
-            let url =
-                git::user_run(&opts.repo_root, &["remote", "get-url", "origin"]).map_err(|e| {
-                    anyhow!(
-                        "cannot read the origin of {}: {e:#}; pass --repo owner/name",
-                        opts.repo_root.display()
-                    )
-                })?;
-            github_repo(url.trim())?
-        }
-    };
+    let repo_name = resolve_repo(opts.repo.as_deref(), &opts.repo_root)?;
     let identity = match &opts.identity {
         Some(identity) => identity.clone(),
         None => Identity::read_from(None)?,

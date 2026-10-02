@@ -195,9 +195,24 @@ pub enum TaskCommand {
     /// Review a task: gates, an independent reviewer in its own sandbox, at most one fix round by
     /// the worker, gates and a second review; ends ready. Blocks until it is done.
     Review {
-        /// The issue's task.
+        /// Review this issue's task.
+        #[arg(
+            long,
+            value_name = "N",
+            required_unless_present = "pr",
+            conflicts_with = "pr"
+        )]
+        issue: Option<u32>,
+        /// Review this open pull request (from a branch of this repo) and post the review on it:
+        /// gates on a clean checkout, one reviewer, no fix round.
         #[arg(long, value_name = "N")]
-        issue: u32,
+        pr: Option<u32>,
+        /// The GitHub repo, owner/name (pull requests; default: this checkout's origin).
+        #[arg(long)]
+        repo: Option<String>,
+        /// The branch a pull request is diffed against (default: the repo's default branch).
+        #[arg(long)]
+        base: Option<String>,
         /// The reviewer's harness (default: sbxm-task.toml, else one different from the worker's).
         #[arg(long, value_enum)]
         reviewer_harness: Option<Harness>,

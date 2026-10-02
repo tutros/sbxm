@@ -253,6 +253,9 @@ fn main() -> anyhow::Result<()> {
             command:
                 TaskCommand::Review {
                     issue,
+                    pr,
+                    repo,
+                    base,
                     reviewer_harness,
                     reviewer_model,
                     reviewer_time_limit,
@@ -263,7 +266,14 @@ fn main() -> anyhow::Result<()> {
             &config::config_dir()?,
             &commands::task_review::Options {
                 repo_root: std::env::current_dir()?,
-                issue,
+                target: match (issue, pr) {
+                    (Some(n), _) => commands::task_review::Target::Issue(n),
+                    (None, Some(n)) => commands::task_review::Target::Pr(n),
+                    (None, None) => unreachable!("clap requires --issue or --pr"),
+                },
+                repo,
+                base,
+                clone_source: None,
                 reviewer_harness,
                 reviewer_model,
                 reviewer_time_limit,
@@ -271,6 +281,7 @@ fn main() -> anyhow::Result<()> {
                 profile,
             },
             &SbxBackend,
+            &sbxm::github::gh::GhBackend::default(),
             &task::record::SystemProbe,
             &task::gates::ShellHostRunner,
             &mut std::io::stdout(),

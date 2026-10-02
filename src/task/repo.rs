@@ -75,7 +75,12 @@ pub fn clone_bare(source: &str, dest: &Path) -> Result<()> {
     let parent = dest.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent)
         .with_context(|| format!("cannot create {}", parent.display()))?;
-    git::user_run(parent, &["clone", "--bare", "--", source, text(dest)?]).with_context(|| {
+    let cloned = git::user_run(parent, &["clone", "--bare", "--", source, text(dest)?]);
+    if cloned.is_err() {
+        // A failed clone can leave a half-made folder (slowly, on Windows); nothing of it is wanted.
+        let _ = std::fs::remove_dir_all(dest);
+    }
+    cloned.with_context(|| {
         format!("cannot clone {source}; check the repo name and `gh auth status`")
     })?;
     Ok(())
