@@ -116,14 +116,21 @@ pub fn git(dir: &Path, args: &[&str]) -> String {
             .env("GIT_COMMITTER_EMAIL", "t@t")
             .output()
             .unwrap();
-        let stderr = String::from_utf8_lossy(&run.stderr);
-        let locked =
-            stderr.contains("Permission denied") || stderr.contains("failed to write object");
+        let failed = !run.status.success();
+        if failed {
+            // Fixture git commands are deterministic, so a failure is environmental (a file lock
+            // under load); say what it was, so the cause can be found, and try again.
+            eprintln!(
+                "fixture git {args:?} failed on attempt {}: {}",
+                attempt + 1,
+                String::from_utf8_lossy(&run.stderr).trim()
+            );
+        }
         out = Some(run);
-        if !locked {
+        if !failed {
             break;
         }
-        std::thread::sleep(std::time::Duration::from_millis(50 << attempt));
+        std::thread::sleep(std::time::Duration::from_millis(100 << attempt));
     }
     let out = out.unwrap();
     assert!(

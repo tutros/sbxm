@@ -84,18 +84,14 @@ pub(crate) fn check_repo(repo: &str) -> Result<()> {
 /// Discards the existing task of each issue (`--restart`). Every one is checked before the first
 /// is deleted: the issue must still be open (else the restart would only destroy the work) and
 /// the task must not be running.
-#[allow(clippy::too_many_arguments)]
 fn discard_existing(
-    config_dir: &std::path::Path,
-    repo: &str,
+    ctx: &Ctx,
     issues: &[u32],
     restart: &Restart,
-    backend: &dyn SandboxBackend,
-    github: &dyn GitHubBackend,
-    probe: &dyn ProcessProbe,
     out: &mut dyn Write,
 ) -> Result<()> {
-    let base_dir = GlobalConfig::load(config_dir)?.base_dir;
+    let (repo, github, backend, probe) = (ctx.repo, ctx.github, ctx.backend, ctx.probe);
+    let base_dir = GlobalConfig::load(ctx.config_dir)?.base_dir;
     let mut ids: Vec<(u32, String)> = Vec::new();
     for &number in issues {
         let id = format!("issue-{number}");
@@ -113,18 +109,23 @@ fn discard_existing(
         }
         finish::plan_removal(&base_dir, id, probe)?;
     }
-    for (_, id) in &ids {
-        finish::discard(
-            &base_dir,
-            id,
-            restart.yes,
-            backend,
-            probe,
-            restart.confirm,
-            out,
-        )?;
+    // Each issue must be able to start again (not a question, not blocked, ...) before the first
+    // task is deleted, and the user is asked once for all of them.
+    let restarting: Vec<u32> = ids.iter().map(|(number, _)| *number).collect();
+    pipeline::check_restartable(ctx, &restarting)?;
+    let id_list: Vec<String> = ids.into_iter().map(|(_, id)| id).collect();
+    if id_list.is_empty() {
+        return Ok(());
     }
-    Ok(())
+    finish::discard_many(
+        &base_dir,
+        &id_list,
+        restart.yes,
+        backend,
+        probe,
+        restart.confirm,
+        out,
+    )
 }
 
 fn plural(n: u32, word: &str) -> String {
@@ -226,19 +227,6 @@ pub fn run_with(
         writeln!(warn, "warning: {warning}")?;
     }
 
-    if let Some(restart) = restart {
-        discard_existing(
-            config_dir,
-            &repo_name,
-            &opts.issues,
-            restart,
-            backend,
-            github,
-            probe,
-            out,
-        )?;
-    }
-
     let ctx = Ctx {
         config_dir,
         repo: &repo_name,
@@ -251,6 +239,9 @@ pub fn run_with(
         probe,
         host: &ShellHostRunner,
     };
+    if let Some(restart) = restart {
+        discard_existing(&ctx, &opts.issues, restart, out)?;
+    }
     let selection = if opts.issues.is_empty() {
         pipeline::select_issues(&ctx, None, opts.workers.unwrap_or(1))?
     } else {

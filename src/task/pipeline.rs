@@ -273,6 +273,43 @@ pub fn prepare_pr(ctx: &Ctx, pr: &PrInfo) -> Result<Prepared> {
     }
 }
 
+/// `--restart` deletes a task and then starts the issue again, so before the first deletion every
+/// issue in `restarting` (those that have a task) must be able to start: open, not a question, not
+/// blocked, not related to another task. Otherwise the restart would leave the user with nothing.
+/// The tasks being restarted don't count as "already has a task" here.
+pub fn check_restartable(ctx: &Ctx, restarting: &[u32]) -> Result<()> {
+    if restarting.is_empty() {
+        return Ok(());
+    }
+    let base = GlobalConfig::load(ctx.config_dir)?.base_dir;
+    let open = ctx.github.issues_open(ctx.repo)?;
+    let taken: Vec<u32> = record::load_all(&base)?
+        .into_iter()
+        .filter(|r| r.kind == Kind::Issue && !restarting.contains(&r.number))
+        .map(|r| r.number)
+        .collect();
+    let selection = select::select(&open, &taken, Some(restarting), restarting.len());
+    let mut problems: Vec<String> = selection
+        .not_open
+        .iter()
+        .map(|n| format!("#{n} isn't an open issue"))
+        .collect();
+    problems.extend(
+        selection
+            .skips
+            .iter()
+            .map(|(n, why)| format!("#{n}: {why}")),
+    );
+    if !problems.is_empty() {
+        bail!(
+            "--restart would delete a task it then could not start again ({}); fix that, or remove \
+             the task with `sbxm task rm --issue <n>`",
+            problems.join("; ")
+        );
+    }
+    Ok(())
+}
+
 /// Chooses the issues to start (spec §8). With nothing to pick, the error says why for each.
 pub fn select_issues(ctx: &Ctx, explicit: Option<&[u32]>, workers: usize) -> Result<Selection> {
     let base = GlobalConfig::load(ctx.config_dir)?.base_dir;

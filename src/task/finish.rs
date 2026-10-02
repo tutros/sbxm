@@ -236,32 +236,67 @@ pub fn discard(
     confirm: &dyn Confirm,
     out: &mut dyn Write,
 ) -> Result<()> {
-    let plan = plan_removal(base_dir, id, probe)?;
-    let listing = plan.listing();
+    discard_many(
+        base_dir,
+        &[id.to_owned()],
+        yes,
+        backend,
+        probe,
+        confirm,
+        out,
+    )
+}
+
+/// [`discard`] for several tasks at once (`start --restart --issue 1 --issue 2`): every task is
+/// planned first, all of them are listed and confirmed with ONE question, and only then is the
+/// first deleted, so a "no" (or a task that can't be planned) deletes nothing at all.
+pub fn discard_many(
+    base_dir: &Path,
+    ids: &[String],
+    yes: bool,
+    backend: &dyn SandboxBackend,
+    probe: &dyn ProcessProbe,
+    confirm: &dyn Confirm,
+    out: &mut dyn Write,
+) -> Result<()> {
+    let plans = ids
+        .iter()
+        .map(|id| plan_removal(base_dir, id, probe))
+        .collect::<Result<Vec<_>>>()?;
+    let listing = plans
+        .iter()
+        .map(RemovalPlan::listing)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let names = ids.join(", ");
+    let what = if ids.len() == 1 {
+        format!("task {names}")
+    } else {
+        format!("{} tasks ({names})", ids.len())
+    };
     if !yes {
         if !confirm.is_interactive() {
-            bail!(
-                "refusing to remove task {id} without a terminal; pass --yes to delete:\n{listing}"
-            );
+            bail!("refusing to remove {what} without a terminal; pass --yes to delete:\n{listing}");
         }
         if !confirm.confirm(&format!(
-            "Permanently delete task {id}: these sandboxes and folders?\n{listing}\n"
+            "Permanently delete {what}: these sandboxes and folders?\n{listing}\n"
         ))? {
-            bail!("removing task {id} cancelled; nothing was deleted");
+            bail!("removing {what} cancelled; nothing was deleted");
         }
     }
-    let report = remove(&plan, backend);
-    for line in &report.removed {
-        writeln!(out, "removed {line}")?;
+    let mut stayed = 0;
+    for plan in &plans {
+        let report = remove(plan, backend);
+        for line in &report.removed {
+            writeln!(out, "removed {line}")?;
+        }
+        for line in &report.stayed {
+            writeln!(out, "could not remove {line}")?;
+        }
+        stayed += report.stayed.len();
     }
-    for line in &report.stayed {
-        writeln!(out, "could not remove {line}")?;
-    }
-    if !report.is_clean() {
-        bail!(
-            "{} thing(s) of task {id} stayed; fix that, then run `sbxm task rm` again",
-            report.stayed.len()
-        );
+    if stayed > 0 {
+        bail!("{stayed} thing(s) of {what} stayed; fix that, then run `sbxm task rm` again");
     }
     Ok(())
 }

@@ -327,3 +327,195 @@ fn without_restart_an_existing_task_still_refuses() {
     );
     assert!(meta(&f).join("task.json").exists());
 }
+
+// ---- Slice 10 review, must-fix 1: a restart must not delete what it cannot start again ----
+
+fn github_of(issues: &[(u32, &[&str], &str)]) -> FakeGitHub {
+    let mut gh = FakeGitHub::default().with_default_branch("main");
+    let mut open = Vec::new();
+    for (number, labels, body) in issues {
+        gh = gh.with_issue_text(issue_text(*number));
+        open.push(open_issue(*number, labels, body));
+    }
+    gh.with_open_issues(open)
+}
+
+fn options_for(f: &Fixture, issues: &[u32]) -> Options {
+    let mut opts = options(f);
+    opts.issues = issues.to_vec();
+    opts
+}
+
+fn meta_of(f: &Fixture, number: u32) -> std::path::PathBuf {
+    record::task_dir(&f.env.base_dir(), &format!("issue-{number}"))
+}
+
+/// Tasks for issues 41 and 42 that have both worked once.
+fn started_both(f: &Fixture) {
+    let gh = github_of(&[(41, &["should-fix"], ""), (42, &["should-fix"], "")]);
+    let (result, _) = go(f, &options_for(f, &[41, 42]), None, &playing(f), &gh);
+    result.unwrap();
+}
+
+#[test]
+fn restarting_an_issue_that_is_now_a_question_deletes_nothing() {
+    let f = fixture();
+    started(&f);
+    let b = playing(&f);
+    let confirm = FakeConfirm::new(true, true);
+    let gh = github_of(&[(41, &["question"], "")]);
+
+    let (result, _) = go(
+        &f,
+        &options(&f),
+        Some(&Restart {
+            confirm: &confirm,
+            yes: true,
+        }),
+        &b,
+        &gh,
+    );
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains("#41") && message.contains("question"),
+        "{message}"
+    );
+    assert!(
+        message.contains("--restart") || message.contains("restart"),
+        "{message}"
+    );
+    assert!(
+        meta(&f).join("task.json").exists(),
+        "the task must still be there"
+    );
+    assert!(b.removes().is_empty() && b.creates().is_empty());
+    assert!(
+        confirm.prompts.borrow().is_empty(),
+        "nothing is asked for what cannot happen"
+    );
+}
+
+#[test]
+fn restarting_an_issue_that_is_now_blocked_deletes_nothing() {
+    let f = fixture();
+    started(&f);
+    let b = playing(&f);
+    let gh = github_of(&[
+        (41, &["should-fix"], "**Depends on:** #5"),
+        (5, &["should-fix"], ""),
+    ]);
+
+    let (result, _) = go(
+        &f,
+        &options(&f),
+        Some(&Restart {
+            confirm: &FakeConfirm::new(true, true),
+            yes: true,
+        }),
+        &b,
+        &gh,
+    );
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains("#41") && message.contains("blocked by open #5"),
+        "{message}"
+    );
+    assert!(meta(&f).join("task.json").exists());
+    assert!(b.removes().is_empty());
+}
+
+#[test]
+fn if_one_of_several_cannot_restart_none_of_them_is_deleted() {
+    let f = fixture();
+    started_both(&f);
+    let b = playing(&f);
+    // #41 is fine; #42 has become a question.
+    let gh = github_of(&[(41, &["should-fix"], ""), (42, &["question"], "")]);
+
+    let (result, _) = go(
+        &f,
+        &options_for(&f, &[41, 42]),
+        Some(&Restart {
+            confirm: &FakeConfirm::new(true, true),
+            yes: true,
+        }),
+        &b,
+        &gh,
+    );
+
+    assert!(result.is_err());
+    assert!(meta_of(&f, 41).join("task.json").exists());
+    assert!(meta_of(&f, 42).join("task.json").exists());
+    assert!(b.removes().is_empty() && b.creates().is_empty());
+}
+
+#[test]
+fn several_restarts_are_confirmed_once_for_all_and_declining_deletes_none() {
+    let f = fixture();
+    started_both(&f);
+    let b = playing(&f);
+    let confirm = FakeConfirm::new(true, false);
+    let gh = github_of(&[(41, &["should-fix"], ""), (42, &["should-fix"], "")]);
+
+    let (result, _) = go(
+        &f,
+        &options_for(&f, &[41, 42]),
+        Some(&Restart {
+            confirm: &confirm,
+            yes: false,
+        }),
+        &b,
+        &gh,
+    );
+
+    assert!(format!("{:#}", result.unwrap_err()).contains("cancelled"));
+    let prompts = confirm.prompts.borrow();
+    assert_eq!(
+        prompts.len(),
+        1,
+        "one question for all of them: {prompts:?}"
+    );
+    assert!(
+        prompts[0].contains("issue-41") && prompts[0].contains("issue-42"),
+        "{}",
+        prompts[0]
+    );
+    assert!(meta_of(&f, 41).join("task.json").exists());
+    assert!(meta_of(&f, 42).join("task.json").exists());
+    assert!(b.removes().is_empty());
+}
+
+#[test]
+fn several_restarts_accepted_once_delete_and_start_them_all() {
+    let f = fixture();
+    started_both(&f);
+    let first_41 = std::fs::read_to_string(meta_of(&f, 41).join("task.json")).unwrap();
+    let b = playing(&f);
+    let confirm = FakeConfirm::new(true, true);
+    let gh = github_of(&[(41, &["should-fix"], ""), (42, &["should-fix"], "")]);
+
+    let (result, out) = go(
+        &f,
+        &options_for(&f, &[41, 42]),
+        Some(&Restart {
+            confirm: &confirm,
+            yes: false,
+        }),
+        &b,
+        &gh,
+    );
+
+    result.unwrap();
+    assert_eq!(confirm.prompts.borrow().len(), 1);
+    assert_eq!(b.creates().len(), 2);
+    assert!(
+        out.contains("issue-41: worker completed") && out.contains("issue-42: worker completed"),
+        "{out}"
+    );
+    assert_ne!(
+        first_41,
+        std::fs::read_to_string(meta_of(&f, 41).join("task.json")).unwrap()
+    );
+}
