@@ -242,7 +242,7 @@ pub enum TaskCommand {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Show the tasks: stage, status, and whether one was interrupted.
+    /// Show the tasks: stage, status, commits ahead of the base, and whether one was interrupted.
     Status {
         /// Only the task for this issue.
         #[arg(long, conflicts_with = "pr")]

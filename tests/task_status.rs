@@ -189,3 +189,102 @@ fn json_with_no_tasks_is_an_empty_array() {
     let text = task_status::render(base.path(), None, true, &Probe(None)).unwrap();
     assert_eq!(text.trim(), "[]");
 }
+
+/// Plain `git` for building a fixture repo (not the code under test).
+fn git(dir: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {out:?}");
+}
+
+/// `<base>/.sbxm/tasks/<id>/repo.git` with `main` and branch `b`, `ahead` commits past it.
+fn repo_with_commits_ahead(base: &Path, id: &str, ahead: u32) {
+    let work = base.join(format!("{id}-work"));
+    fs::create_dir_all(&work).unwrap();
+    git(&work, &["init", "-q", "-b", "main"]);
+    fs::write(work.join("base.txt"), "base").unwrap();
+    git(&work, &["add", "-A"]);
+    git(&work, &["commit", "-q", "-m", "base"]);
+    git(&work, &["checkout", "-q", "-b", "b"]);
+    for n in 0..ahead {
+        fs::write(work.join(format!("f{n}.txt")), "x").unwrap();
+        git(&work, &["add", "-A"]);
+        git(&work, &["commit", "-q", "-m", &format!("c{n}")]);
+    }
+    let repo_git = record::task_dir(base, id).join("repo.git");
+    fs::create_dir_all(repo_git.parent().unwrap()).unwrap();
+    git(
+        base,
+        &[
+            "clone",
+            "-q",
+            "--bare",
+            work.to_str().unwrap(),
+            repo_git.to_str().unwrap(),
+        ],
+    );
+}
+
+#[test]
+fn the_line_shows_the_commits_ahead_of_base() {
+    let base = tempfile::tempdir().unwrap();
+    save(base.path(), &working(41, Some(Status::Completed)));
+    repo_with_commits_ahead(base.path(), "issue-41", 2);
+
+    let text = task_status::render(base.path(), None, false, &Probe(Some(T0))).unwrap();
+
+    assert!(text.contains("ahead: 2"), "{text}");
+}
+
+#[test]
+fn a_task_without_a_repo_yet_shows_no_count_instead_of_failing() {
+    let base = tempfile::tempdir().unwrap();
+    save(base.path(), &working(41, None));
+
+    let text = task_status::render(base.path(), None, false, &Probe(Some(T0))).unwrap();
+
+    assert!(text.contains("ahead: -"), "{text}");
+}
+
+#[test]
+fn a_branch_with_no_new_commits_shows_zero() {
+    let base = tempfile::tempdir().unwrap();
+    save(base.path(), &working(41, Some(Status::Completed)));
+    repo_with_commits_ahead(base.path(), "issue-41", 0);
+
+    let text = task_status::render(base.path(), None, false, &Probe(Some(T0))).unwrap();
+
+    assert!(text.contains("ahead: 0"), "{text}");
+}
+
+#[test]
+fn json_carries_the_commit_count_or_null() {
+    let base = tempfile::tempdir().unwrap();
+    save(base.path(), &working(41, Some(Status::Completed)));
+    repo_with_commits_ahead(base.path(), "issue-41", 2);
+    save(base.path(), &working(42, None));
+
+    let text = task_status::render(base.path(), None, true, &Probe(Some(T0))).unwrap();
+    let values: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let find = |id: &str| {
+        values
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|v| v["id"] == id)
+            .unwrap()
+            .clone()
+    };
+
+    assert_eq!(find("issue-41")["commits_ahead"], 2);
+    assert!(find("issue-42")["commits_ahead"].is_null());
+}
