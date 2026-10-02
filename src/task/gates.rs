@@ -167,8 +167,11 @@ fn host_command(
     };
     #[cfg(not(windows))]
     let mut cmd = {
+        use std::os::unix::process::CommandExt;
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(command);
+        // Its own process group, so a timeout can stop the shell and everything it started.
+        cmd.process_group(0);
         cmd
     };
     cmd.current_dir(cwd)
@@ -194,24 +197,44 @@ fn is_git_variable(name: &OsStr) -> bool {
         .is_some_and(|prefix| prefix.eq_ignore_ascii_case("GIT_"))
 }
 
-/// Collects a pipe on its own thread, keeping about the last `OUTPUT_TAIL_BYTES * 2` bytes.
-fn drain(mut pipe: impl Read + Send + 'static) -> std::sync::mpsc::Receiver<String> {
-    let (send, receive) = std::sync::mpsc::channel();
+/// A pipe collected on its own thread, keeping about the last `OUTPUT_TAIL_BYTES * 2` bytes.
+/// What has arrived stays readable even if something that outlived the command keeps the pipe
+/// open, so a timeout doesn't lose the output that explains it.
+struct Drained {
+    kept: Arc<Mutex<Vec<u8>>>,
+    eof: std::sync::mpsc::Receiver<()>,
+}
+
+impl Drained {
+    /// Waits up to `wait` for the pipe to close, then returns what was read so far.
+    fn collect(self, wait: Duration) -> String {
+        let _ = self.eof.recv_timeout(wait);
+        let kept = self.kept.lock().map(|k| k.clone()).unwrap_or_default();
+        String::from_utf8_lossy(&kept).into_owned()
+    }
+}
+
+fn drain(mut pipe: impl Read + Send + 'static) -> Drained {
+    let kept = Arc::new(Mutex::new(Vec::new()));
+    let (send, eof) = std::sync::mpsc::channel();
+    let shared = Arc::clone(&kept);
     std::thread::spawn(move || {
-        let mut kept: Vec<u8> = Vec::new();
         let mut chunk = [0u8; 8192];
         while let Ok(n) = pipe.read(&mut chunk) {
             if n == 0 {
                 break;
             }
-            kept.extend_from_slice(&chunk[..n]);
-            if kept.len() > OUTPUT_TAIL_BYTES * 4 {
-                kept.drain(..kept.len() - OUTPUT_TAIL_BYTES * 2);
+            if let Ok(mut kept) = shared.lock() {
+                kept.extend_from_slice(&chunk[..n]);
+                if kept.len() > OUTPUT_TAIL_BYTES * 4 {
+                    let excess = kept.len() - OUTPUT_TAIL_BYTES * 2;
+                    kept.drain(..excess);
+                }
             }
         }
-        let _ = send.send(String::from_utf8_lossy(&kept).into_owned());
+        let _ = send.send(());
     });
-    receive
+    Drained { kept, eof }
 }
 
 fn kill_tree(child: &mut std::process::Child) {
@@ -219,6 +242,16 @@ fn kill_tree(child: &mut std::process::Child) {
     {
         let _ = Command::new("taskkill")
             .args(["/PID", &child.id().to_string(), "/T", "/F"])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+    #[cfg(unix)]
+    {
+        // The shell leads its own group (see `host_command`): `-pid` is the whole group.
+        // The external `kill`: the shell builtin of `dash` rejects `--` before a negative id.
+        let _ = Command::new("kill")
+            .args(["-KILL", "--", &format!("-{}", child.id())])
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status();
@@ -246,8 +279,8 @@ impl HostRunner for ShellHostRunner {
             }
             std::thread::sleep(Duration::from_millis(50));
         };
-        let collect = |pipe: Option<std::sync::mpsc::Receiver<String>>| {
-            pipe.and_then(|rx| rx.recv_timeout(Duration::from_secs(3)).ok())
+        let collect = |pipe: Option<Drained>| {
+            pipe.map(|drained| drained.collect(Duration::from_secs(3)))
                 .unwrap_or_default()
         };
         Ok(HostOutput {
@@ -381,6 +414,67 @@ mod tests {
             "{out:?}"
         );
         assert!(!out.status.success(), "{out:?}");
+    }
+
+    /// Whether process `pid` is alive; kills it if so, so a failing test leaves nothing behind.
+    #[cfg(unix)]
+    fn alive_then_killed(pid: &str) -> bool {
+        let alive = Command::new("kill")
+            .args(["-0", pid])
+            .stderr(Stdio::null())
+            .status()
+            .is_ok_and(|s| s.success());
+        if alive {
+            let _ = Command::new("kill").args(["-KILL", pid]).status();
+        }
+        alive
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_timed_out_command_takes_its_children_with_it() {
+        let dir = tempfile::tempdir().unwrap();
+
+        let out = ShellHostRunner
+            .run(
+                dir.path(),
+                "sleep 30 & echo $! > child.pid; echo before; wait",
+                Duration::from_millis(700),
+            )
+            .unwrap();
+
+        assert!(out.timed_out);
+        let pid = std::fs::read_to_string(dir.path().join("child.pid")).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(
+            !alive_then_killed(pid.trim()),
+            "the child outlived the timeout; agent code kept running on the host"
+        );
+        assert!(out.stdout.contains("before"), "{out:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_before_a_timeout_is_kept_when_a_descendant_escapes_and_holds_the_pipe() {
+        let dir = tempfile::tempdir().unwrap();
+
+        // `setsid` puts the sleeper in a session of its own, out of reach of a group kill, and it
+        // still holds this command's stdout.
+        let out = ShellHostRunner
+            .run(
+                dir.path(),
+                "echo before; setsid sleep 30 & echo $! > child.pid; wait",
+                Duration::from_millis(700),
+            )
+            .unwrap();
+
+        let pid = std::fs::read_to_string(dir.path().join("child.pid")).unwrap();
+        alive_then_killed(pid.trim());
+        assert!(out.timed_out);
+        assert!(
+            out.stdout.contains("before"),
+            "output seen before the timeout must not be lost: {out:?}"
+        );
     }
 
     #[test]
