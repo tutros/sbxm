@@ -1243,6 +1243,7 @@ pub fn run_reviewer(env: &TaskEnv, prepared: &mut Prepared, round: u32) -> Resul
     }
 }
 
+/// One review round: its workspace, then the reviewer.
 fn review_round(
     env: &TaskEnv,
     prepared: &mut Prepared,
@@ -1251,6 +1252,21 @@ fn review_round(
     sandbox: &str,
     previous: Option<&str>,
 ) -> Result<Reviewed> {
+    open_review_workspace(env, prepared, round, clone, sandbox, previous)?;
+    run_review_agent(env, prepared, round, clone, sandbox)
+}
+
+/// Makes the reviewer's workspace: a clean clone of the task branch (a pull request's head for
+/// a PR task) with the context and the prompt in `.sbxm-task/`, and the reviewer's own sandbox
+/// over it. Nothing has run in the sandbox yet.
+fn open_review_workspace(
+    env: &TaskEnv,
+    prepared: &mut Prepared,
+    round: u32,
+    clone: &Path,
+    sandbox: &str,
+    previous: Option<&str>,
+) -> Result<()> {
     let reviewer = &env.config.reviewer;
     let repo_git = prepared.meta.join("repo.git");
     let branch = prepared.record.branch.clone();
@@ -1288,7 +1304,12 @@ fn review_round(
     if let Some(text) = previous {
         fs::write(agent_dir.join("previous-review.md"), text)?;
     }
-    let template = prompts::template(Role::Reviewer, &env.config.prompts)?;
+    let role = if prepared.record.kind == Kind::Pr {
+        Role::ReviewerPr
+    } else {
+        Role::Reviewer
+    };
+    let template = prompts::template(role, &env.config.prompts)?;
     let prompt = prompts::render(
         &template.name,
         &template.text,
@@ -1329,7 +1350,19 @@ fn review_round(
         run: None,
     });
     record::write(&prepared.meta, &prepared.record)?;
+    Ok(())
+}
 
+/// Runs the reviewer in its (already open) sandbox, saves its transcript, and reads and saves what
+/// it wrote: `review-<round>.md` (and `review.md` when its first line has the count).
+fn run_review_agent(
+    env: &TaskEnv,
+    prepared: &mut Prepared,
+    round: u32,
+    clone: &Path,
+    sandbox: &str,
+) -> Result<Reviewed> {
+    let reviewer = &env.config.reviewer;
     let started = Instant::now();
     let result = headless::run(
         env.backend,
