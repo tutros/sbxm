@@ -100,6 +100,17 @@ fn check_sandbox_name(id: &str, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whether any folder of task `id` exists (a task, or what a failed start left behind).
+pub fn exists(base_dir: &Path, id: &str) -> bool {
+    record::is_valid_id(id)
+        && task_folders(id).iter().any(|rel| {
+            rel.iter()
+                .fold(base_dir.to_path_buf(), |p, s| p.join(s))
+                .symlink_metadata()
+                .is_ok()
+        })
+}
+
 /// Checks that `id` can be discarded and lists what that removes. The id is validated before any
 /// path is built from it; a task whose process is alive is refused.
 pub fn plan_removal(base_dir: &Path, id: &str, probe: &dyn ProcessProbe) -> Result<RemovalPlan> {

@@ -184,6 +184,13 @@ pub enum TaskCommand {
         /// The GitHub repo, owner/name (default: this checkout's origin).
         #[arg(long)]
         repo: Option<String>,
+        /// Delete the existing task of each --issue first (asks, showing exactly what), then
+        /// start it again.
+        #[arg(long, requires = "issues", conflicts_with = "workers")]
+        restart: bool,
+        /// With --restart: don't ask before deleting.
+        #[arg(long, requires = "restart")]
+        yes: bool,
     },
     /// Review a task: gates, an independent reviewer in its own sandbox, at most one fix round by
     /// the worker, gates and a second review; ends ready. Blocks until it is done.

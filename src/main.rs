@@ -154,8 +154,10 @@ fn main() -> anyhow::Result<()> {
                     profile,
                     base,
                     repo,
+                    restart,
+                    yes,
                 },
-        } => commands::task_start::run(
+        } => commands::task_start::run_with(
             &config::config_dir()?,
             &commands::task_start::Options {
                 repo_root: std::env::current_dir()?,
@@ -170,6 +172,10 @@ fn main() -> anyhow::Result<()> {
                 clone_source: None,
                 identity: None,
             },
+            restart.then_some(&commands::task_start::Restart {
+                confirm: &Terminal,
+                yes,
+            }),
             &SbxBackend,
             &sbxm::github::gh::GhBackend::default(),
             &task::record::SystemProbe,
