@@ -81,7 +81,7 @@ pub fn clone_bare(source: &str, dest: &Path) -> Result<()> {
         let _ = std::fs::remove_dir_all(dest);
     }
     cloned.with_context(|| {
-        format!("cannot clone {source}; check the repo name and `gh auth status`")
+        format!("cannot clone {source}; check the repo name, `gh auth status` and that git can log in without a prompt (`gh auth setup-git`)")
     })?;
     Ok(())
 }
