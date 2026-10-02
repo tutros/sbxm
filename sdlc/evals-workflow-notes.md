@@ -18,6 +18,11 @@ could define. Each entry says what happened, the workaround used, and the candid
 | G8 | **Sandbox disk lives on C:, `doctor` doesn't check it.** A review sandbox takes about 7 GB there while it exists; the machine ran out twice. | PR 57 runs | Freed space by hand | `sbxm doctor` reads the drive of Docker's sandbox state and warns under about 10 GB |
 | G9 | **Integration tests that need the host or the network can't run in a task sandbox** (a real model, real `sbx`). They are `#[ignore]`d and nobody runs them in a loop. | cosine design | Ignored tests with an env var, run by hand | `just real-test` already exists for `sbx`; add `just model-test` and list both in the PR template |
 | G10 | **Unix-only code can't be tested from the Windows host.** The process-group kill and the symlink tests ran only through a WSL clone. | PR 57 M-2 | `git fetch` into a WSL clone, `cargo test` there | A `just test-linux` recipe doing that fetch-and-test |
+| G11 | **Custom secrets can't be expressed in a profile or checked.** `sbx secret set-custom` is host-side only, `preflight` and `doctor` don't know about it, and `sbxm rm --purge` leaves sandbox-scoped custom secrets behind. | spike S9 (PR #65) | Created and removed by hand with `sbx` | A `[secrets.custom]` table naming env var and host (never a value), checked by preflight and `doctor`, and removed with the sandbox |
+| G12 | **A throwaway sandbox with one extra egress host needs a hand-written `sandbox.toml`** before `sbxm new`. | spike S9 | Wrote the file by hand | `sbxm new --allow-host <h>` or a `just scratch` recipe |
+| G13 | **Removing a custom secret is error-prone:** it needs `--placeholder` and the right `--sandbox`, a positional argument is read as a service name, and `--all` deletes everything. Proving real secrets were untouched was a habit, not a command. | spike S9 | Snapshot of `sbx secret ls --json` before and after | A script that snapshots, runs a command, diffs and refuses on any change to non-throwaway secrets |
+| G14 | **No `sbxm exec`.** Every probe went through `sbx exec`, which adds "started successfully" lines to stdout. | spike S9 | Filtered the noise | `sbxm exec <project> --harness h -- <cmd>` with clean output |
+| G15 | **Two same-env-name custom secrets (global and scoped) make `sbx create` fail** with `400 invalid custom secrets`. | spike S9 | Removed one | Preflight should refuse a clash before any sandbox is created |
 
 ## Friction in the working environment (not sbxm's code)
 
@@ -36,7 +41,8 @@ could define. Each entry says what happened, the workaround used, and the candid
    sequence: a `just slice <issue>` recipe.
 2. **Review a PR:** G5's `just review-pr <n>`.
 3. **Spikes:** a throwaway project plus an extra egress host plus a cleanup that proves the real secrets are
-   untouched (S9 is the first such spike; its notes are in `sdlc/spikes/S9.md` once merged).
+   untouched (S9 was the first such spike, PR #65): a `scripts/spike-sandbox.ps1` that takes the baseline,
+   creates the project, runs a probe, searches the sandbox for the secret, cleans up and diffs.
 4. **After a review:** copy `review.md` into `sdlc/reviews/` with prefixed ids, file the should-fix findings,
    write the resolution line. Done by hand three times so far (PR 57 rounds 1-3, PR 62); `task file-findings`
    covers only the filing.
