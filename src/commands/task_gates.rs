@@ -69,6 +69,7 @@ pub fn run(
         probe,
         host,
     };
+    pipeline::recollect_commits(&env, &prepared)?;
     let gated = pipeline::run_gates(&env, &mut prepared, "on-demand", opts.tiers)?;
     let log = prepared.meta.join("gates.log");
     if gated.passed {

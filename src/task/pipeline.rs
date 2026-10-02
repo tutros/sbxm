@@ -916,6 +916,80 @@ pub fn run_worker(ctx: &Ctx, prepared: &mut Prepared) -> Result<Worked> {
     })
 }
 
+/// What the bundle step found in the worker's clone.
+enum Bundled {
+    /// The branch's commits ahead of the base now in `repo.git`.
+    Commits(u32),
+    /// Nothing ahead of the base.
+    Nothing,
+}
+
+/// The fixed bundle command runs in the sandbox; the bundle is verified and fetched into
+/// `repo.git` on the host. Nothing runs git in the agent's clone here (decision 159).
+fn bundle_and_fetch(
+    backend: &dyn SandboxBackend,
+    prepared: &Prepared,
+    sandbox: &str,
+) -> Result<Bundled> {
+    let (branch, base) = (prepared.record.branch.clone(), prepared.record.base.clone());
+    let ws = in_sandbox_path(&prepared.workspace)
+        .to_string_lossy()
+        .into_owned();
+    let origin = format!("^origin/{base}");
+    let out = backend.exec(
+        sandbox,
+        &ExecSpec {
+            workdir: None,
+            argv: [
+                "git",
+                "-C",
+                &ws,
+                "bundle",
+                "create",
+                ".sbxm-task/branch.bundle",
+                &branch,
+                &origin,
+            ]
+            .map(str::to_owned)
+            .into(),
+            stdin: Stdin::Closed,
+        },
+    )?;
+    if out.exit_code == Some(0) {
+        let repo_git = prepared.meta.join("repo.git");
+        repo::fetch_bundle(&repo_git, &prepared.workspace, &branch, BUNDLE_CAP)?;
+        Ok(Bundled::Commits(repo::commits_ahead(
+            &repo_git, &base, &branch,
+        )?))
+    } else if out.stderr.contains("empty bundle") {
+        Ok(Bundled::Nothing)
+    } else {
+        bail!(
+            "`git bundle create` failed in the sandbox: {}",
+            out.stderr.trim()
+        )
+    }
+}
+
+/// Before gates run on demand: whatever is committed in the worker's clone now (a fix made by
+/// hand after a failed gate, say) is collected into `repo.git`, because the host tier, the
+/// reviewer's checkout and `finish` all read `repo.git`, never the clone. Without it a task could
+/// pass its gates on one revision and be reviewed and published on an older one.
+pub fn recollect_commits(env: &TaskEnv, prepared: &Prepared) -> Result<()> {
+    let sandbox = prepared
+        .record
+        .worker
+        .as_ref()
+        .context("the task has no worker")?
+        .sandbox
+        .clone();
+    bundle_and_fetch(env.backend, prepared, &sandbox).context(concat!(
+        "cannot collect the commits in the worker's clone before the gates; ",
+        "the gates would not be testing what review and finish will use"
+    ))?;
+    Ok(())
+}
+
 /// Brings the worker's commits, `result.md` and a note about unsaved work to the host. A failure
 /// to collect marks the worker failed (with a note); it is not an `Err`.
 fn collect(
@@ -925,7 +999,6 @@ fn collect(
     status: &mut RunStatus,
     notes: &mut Vec<String>,
 ) -> Result<u32> {
-    let (branch, base) = (prepared.record.branch.clone(), prepared.record.base.clone());
     let ws = in_sandbox_path(&prepared.workspace)
         .to_string_lossy()
         .into_owned();
@@ -934,49 +1007,17 @@ fn collect(
         argv: argv.iter().map(|a| (*a).to_owned()).collect(),
         stdin: Stdin::Closed,
     };
-    let mut failed = |why: String, status: &mut RunStatus, record: &mut Record| {
-        notes.push(format!("could not collect the worker's commits: {why}"));
-        *status = RunStatus::Failed(why);
-        record.status = Status::Failed;
-    };
 
-    // The fixed bundle command runs in the sandbox; nothing runs git in the agent's clone here.
-    let origin = format!("^origin/{base}");
     let mut commits = 0;
-    match backend.exec(
-        sandbox,
-        &in_sandbox(&[
-            "git",
-            "-C",
-            &ws,
-            "bundle",
-            "create",
-            ".sbxm-task/branch.bundle",
-            &branch,
-            &origin,
-        ]),
-    ) {
-        Ok(out) if out.exit_code == Some(0) => {
-            let repo_git = prepared.meta.join("repo.git");
-            match repo::fetch_bundle(&repo_git, &prepared.workspace, &branch, BUNDLE_CAP)
-                .and_then(|()| repo::commits_ahead(&repo_git, &base, &branch))
-            {
-                Ok(n) => commits = n,
-                Err(e) => failed(format!("{e:#}"), status, &mut prepared.record),
-            }
+    match bundle_and_fetch(backend, prepared, sandbox) {
+        Ok(Bundled::Commits(n)) => commits = n,
+        Ok(Bundled::Nothing) => notes.push("the worker made no commits".to_owned()),
+        Err(e) => {
+            let why = format!("{e:#}");
+            notes.push(format!("could not collect the worker's commits: {why}"));
+            *status = RunStatus::Failed(why);
+            prepared.record.status = Status::Failed;
         }
-        Ok(out) if out.stderr.contains("empty bundle") => {
-            notes.push("the worker made no commits".to_owned());
-        }
-        Ok(out) => failed(
-            format!(
-                "`git bundle create` failed in the sandbox: {}",
-                out.stderr.trim()
-            ),
-            status,
-            &mut prepared.record,
-        ),
-        Err(e) => failed(format!("{e:#}"), status, &mut prepared.record),
     }
 
     // Work the agent left uncommitted is not collected: say so (the agent may have ended early).

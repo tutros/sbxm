@@ -338,7 +338,7 @@ pub fn run_with(
                     failed += 1;
                     writeln!(
                         out,
-                        "  next: fix it in the worker's clone, then run: sbxm task gates --issue {}",
+                        "  next: fix it in the worker's clone and commit, then run: sbxm task gates --issue {}",
                         report.number
                     )?;
                 } else {

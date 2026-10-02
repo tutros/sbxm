@@ -231,7 +231,14 @@ fn only_the_chosen_tier_runs() {
     let f = config("\"cargo test\"", "\"cargo build\"");
     let backend = playing(&f);
     worked_task(&f, &backend);
-    let before = backend.execs().len();
+    // The bundle step runs for every tier (the host tier reads repo.git); gates are the `sh` runs.
+    let gate_runs = |b: &FakeBackend| {
+        b.execs()
+            .iter()
+            .filter(|(_, spec)| spec.argv.iter().any(|a| a == "sh"))
+            .count()
+    };
+    let before = gate_runs(&backend);
     let host = FakeHostRunner::default();
 
     go(
@@ -245,9 +252,9 @@ fn only_the_chosen_tier_runs() {
     .unwrap();
 
     assert_eq!(
-        backend.execs().len(),
+        gate_runs(&backend),
         before,
-        "no sandbox command for --tier host"
+        "no sandbox gate command for --tier host"
     );
     assert_eq!(host.calls().len(), 1);
 }
@@ -474,5 +481,37 @@ fn a_missing_config_file_says_how_to_make_one() {
     assert!(
         message.contains("sbxm-task.toml") && message.contains("sbxm task init"),
         "{message}"
+    );
+}
+
+// ---- a manual fix after a failed gate ----
+
+#[test]
+fn a_commit_made_by_hand_in_the_workers_clone_reaches_repo_git_before_the_gates_pass() {
+    let f = config("\"cargo test\"", "");
+    let backend = playing(&f);
+    worked_task(&f, &backend);
+    let workspace = f.env.base_dir().join("tasks").join("issue-41");
+    let repo_git = record::task_dir(&f.env.base_dir(), "issue-41").join("repo.git");
+    // The user fixes what the gate found, in the worker's clone.
+    std::fs::write(workspace.join("fixed-by-hand.txt"), "fix\n").unwrap();
+    common::git(&workspace, &["add", "-A"]);
+    common::git(&workspace, &["commit", "-q", "-m", "fix by hand"]);
+    let fixed = common::git(&workspace, &["rev-parse", "HEAD"]);
+    assert_ne!(common::git(&repo_git, &["rev-parse", "issue-41"]), fixed);
+
+    let out = go(
+        &f,
+        &options(&f, Tiers::ALL, false),
+        &backend,
+        &Probe,
+        &FakeHostRunner::default(),
+    );
+
+    out.result.unwrap();
+    assert_eq!(
+        common::git(&repo_git, &["rev-parse", "issue-41"]),
+        fixed,
+        "review, the host gates and finish read repo.git, so it must have the fix"
     );
 }
