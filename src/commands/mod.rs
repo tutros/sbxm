@@ -14,6 +14,7 @@ pub mod task_file_findings;
 pub mod task_gates;
 pub mod task_init;
 pub mod task_review;
+pub mod task_rm;
 pub mod task_start;
 pub mod task_status;
 

@@ -6,12 +6,14 @@
 //! resolve to its expected place under the base dir.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
 use super::record::{self, ProcessProbe, Record, Status};
 use crate::backend::SandboxBackend;
+use crate::confirm::Confirm;
 
 /// Everything `task rm` would delete, worked out before anything is.
 #[derive(Debug)]
@@ -206,4 +208,45 @@ pub fn remove(plan: &RemovalPlan, backend: &dyn SandboxBackend) -> RemovalReport
         }
     }
     report
+}
+
+/// Shows what removing `id` would delete, asks (unless `yes`), removes it and says what went and
+/// what stayed. Nothing is touched before the answer. Fails if anything stayed.
+pub fn discard(
+    base_dir: &Path,
+    id: &str,
+    yes: bool,
+    backend: &dyn SandboxBackend,
+    probe: &dyn ProcessProbe,
+    confirm: &dyn Confirm,
+    out: &mut dyn Write,
+) -> Result<()> {
+    let plan = plan_removal(base_dir, id, probe)?;
+    let listing = plan.listing();
+    if !yes {
+        if !confirm.is_interactive() {
+            bail!(
+                "refusing to remove task {id} without a terminal; pass --yes to delete:\n{listing}"
+            );
+        }
+        if !confirm.confirm(&format!(
+            "Permanently delete task {id}: these sandboxes and folders?\n{listing}\n"
+        ))? {
+            bail!("removing task {id} cancelled; nothing was deleted");
+        }
+    }
+    let report = remove(&plan, backend);
+    for line in &report.removed {
+        writeln!(out, "removed {line}")?;
+    }
+    for line in &report.stayed {
+        writeln!(out, "could not remove {line}")?;
+    }
+    if !report.is_clean() {
+        bail!(
+            "{} thing(s) of task {id} stayed; fix that, then run `sbxm task rm` again",
+            report.stayed.len()
+        );
+    }
+    Ok(())
 }

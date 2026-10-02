@@ -232,6 +232,20 @@ pub enum TaskCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Delete a task: its sandboxes, its clones and its task folder. Shows exactly what, and asks
+    /// first (without a terminal it needs --yes).
+    #[command(group(clap::ArgGroup::new("which").required(true).args(["issue", "pr"])))]
+    Rm {
+        /// The issue's task.
+        #[arg(long, value_name = "N")]
+        issue: Option<u32>,
+        /// The PR's task.
+        #[arg(long, value_name = "N")]
+        pr: Option<u32>,
+        /// Don't ask; delete.
+        #[arg(long)]
+        yes: bool,
+    },
     /// File the findings of a review as GitHub issues, one per finding. A dry run unless
     /// --create: it shows every issue and changes nothing.
     #[command(group(clap::ArgGroup::new("source").required(true).args(["issue", "pr", "file"])))]

@@ -270,6 +270,23 @@ fn main() -> anyhow::Result<()> {
             &mut std::io::stdout(),
             &mut std::io::stderr(),
         ),
+        Command::Task {
+            command: TaskCommand::Rm { issue, pr, yes },
+        } => {
+            let (kind, number) = match (issue, pr) {
+                (Some(n), _) => (task::record::Kind::Issue, n),
+                (None, Some(n)) => (task::record::Kind::Pr, n),
+                (None, None) => unreachable!("clap requires --issue or --pr"),
+            };
+            commands::task_rm::run(
+                &config::config_dir()?,
+                &commands::task_rm::Options { kind, number, yes },
+                &SbxBackend,
+                &task::record::SystemProbe,
+                &Terminal,
+                &mut std::io::stdout(),
+            )
+        }
         Command::Run(_) => unreachable!("clap requires a config or a subcommand"),
         Command::Config {
             command: ConfigCommand::Init,
