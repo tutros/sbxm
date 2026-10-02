@@ -261,7 +261,9 @@ pub fn play(
             static RUNS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
             let run = RUNS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             for file in &what.commits {
-                fs::write(workspace.join(file), format!("x{run}\n")).unwrap();
+                let path = workspace.join(file);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(path, format!("x{run}\n")).unwrap();
                 git(&workspace, &["add", "-A"]);
                 git(&workspace, &["commit", "-q", "-m", file]);
             }

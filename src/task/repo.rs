@@ -436,6 +436,30 @@ pub fn fetch_bundle(repo_git: &Path, workspace: &Path, branch: &str, cap: u64) -
     Ok(())
 }
 
+/// The paths `branch` changes relative to where it left `base` (added, changed or deleted; a rename
+/// counts as both its old and its new path), as git prints them.
+pub fn changed_paths(repo_git: &Path, base: &str, branch: &str) -> Result<Vec<String>> {
+    check_ref("base", base)?;
+    check_ref("branch", branch)?;
+    let out = git::run(
+        repo_git,
+        Some(repo_git),
+        None,
+        &[
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            &format!("refs/heads/{base}...refs/heads/{branch}"),
+        ],
+    )?;
+    Ok(out
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
 /// How many commits `branch` has that `base` doesn't.
 pub fn commits_ahead(repo_git: &Path, base: &str, branch: &str) -> Result<u32> {
     check_ref("base", base)?;

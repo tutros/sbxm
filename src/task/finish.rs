@@ -385,6 +385,34 @@ fn read_capped(path: &Path) -> Result<Option<String>> {
     Ok(Some(String::from_utf8_lossy(&bytes).into_owned()))
 }
 
+/// Whether `path` is part of the repository's CI: GitHub runs what is in `.github/workflows/` and
+/// `.github/actions/`, with the repository's secrets, as soon as a branch is pushed. Compared
+/// without regard to letter case, so `.GitHub/Workflows/` can't slip past.
+fn is_ci_path(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.starts_with(".github/workflows/") || lower.starts_with(".github/actions/")
+}
+
+/// The agent's commits are untrusted (decision 127): a same-repo branch that adds or edits a
+/// workflow would run it, with secrets, on the push, before anyone has read it. So `finish`
+/// refuses, naming the files, and the user can review and push the branch by hand if it is meant.
+fn refuse_workflow_changes(id: &str, changed: &[String]) -> Result<()> {
+    let ci: Vec<&str> = changed
+        .iter()
+        .map(String::as_str)
+        .filter(|p| is_ci_path(p))
+        .collect();
+    if ci.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "task {id} changes {}, which GitHub would run with this repository's secrets as soon as \
+         the branch is pushed; read those files in the task's repo.git, and push the branch \
+         yourself if the change is meant",
+        ci.join(", ")
+    );
+}
+
 fn refuse_secrets(name: &str, text: &str) -> Result<()> {
     for (n, line) in text.lines().enumerate() {
         if let Some(kind) = super::findings::secret_kind(line) {
@@ -429,6 +457,10 @@ pub fn finish(
             task.base
         );
     }
+    refuse_workflow_changes(
+        id,
+        &repo::changed_paths(&repo_git, &task.base, &task.branch)?,
+    )?;
     let result = read_capped(&prepared.meta.join("result.md"))?;
     let review = read_capped(&prepared.meta.join("review.md"))?;
     for (name, text) in [("result.md", &result), ("review.md", &review)] {

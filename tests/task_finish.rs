@@ -18,6 +18,11 @@ const REVIEW: &str = "Reviewer: codex (default)\nMust-fix findings: 0\n\nNothing
 
 /// Issue 41 worked, its gates and review done by hand: `ready`, with a result and a review.
 fn ready(f: &Fixture) -> Prepared {
+    ready_with(f, &["a.txt"])
+}
+
+/// [`ready`], where the worker commits `files` (paths inside the repo).
+fn ready_with(f: &Fixture, files: &[&str]) -> Prepared {
     let b = backend()
         .with_exec_output_matching("claude", ok(CLAUDE_DONE))
         .with_exec_hook(play(
@@ -25,7 +30,7 @@ fn ready(f: &Fixture) -> Prepared {
             "main",
             "issue-41",
             Play {
-                commits: vec!["a.txt".into()],
+                commits: files.iter().map(|s| (*s).to_owned()).collect(),
                 result_md: Some(b"done\n".to_vec()),
                 bundle_bytes: None,
             },
@@ -259,4 +264,72 @@ fn a_record_that_names_a_hostile_branch_is_refused() {
         "{err:#}"
     );
     assert!(github.calls().is_empty());
+}
+
+// ---- Slice 10 review, must-fix 2: the agent's commits must not start CI before anyone looks ----
+
+#[test]
+fn a_branch_that_changes_a_workflow_is_refused_before_anything_is_pushed() {
+    for path in [
+        ".github/workflows/ci.yml",
+        ".github/actions/setup/action.yml",
+        // GitHub reads these paths as written; sbxm must not be fooled by letter case.
+        ".GitHub/Workflows/ci.yml",
+    ] {
+        let f = fixture();
+        ready_with(&f, &["a.txt", path]);
+        let before =
+            fs::read_to_string(record::task_dir(&f.env.base_dir(), "issue-41").join("task.json"))
+                .unwrap();
+        let github = FakeGitHub::default();
+
+        let message = format!("{:#}", run(&f, &github).unwrap_err());
+
+        assert!(message.contains(path), "{path}: {message}");
+        assert!(
+            message.contains("secrets") || message.contains("run"),
+            "{message}"
+        );
+        assert!(
+            !origin_has(&f, "issue-41"),
+            "{path}: the branch must not have been pushed"
+        );
+        assert!(github.calls().is_empty(), "{path}: no PR may be opened");
+        let after =
+            fs::read_to_string(record::task_dir(&f.env.base_dir(), "issue-41").join("task.json"))
+                .unwrap();
+        assert_eq!(before, after, "{path}: the task stays ready and unchanged");
+    }
+}
+
+#[test]
+fn only_the_workflow_files_are_named_in_the_refusal() {
+    let f = fixture();
+    ready_with(&f, &["src/a.rs", ".github/workflows/ci.yml", "README.md"]);
+
+    let message = format!("{:#}", run(&f, &FakeGitHub::default()).unwrap_err());
+
+    assert!(message.contains(".github/workflows/ci.yml"), "{message}");
+    assert!(
+        !message.contains("src/a.rs") && !message.contains("README.md"),
+        "{message}"
+    );
+}
+
+#[test]
+fn other_files_under_dot_github_and_look_alike_paths_are_fine() {
+    let f = fixture();
+    ready_with(
+        &f,
+        &[
+            ".github/ISSUE_TEMPLATE/bug.md",
+            ".github/workflows-notes.md",
+            "docs/.github/workflows/example.yml",
+        ],
+    );
+    let github = FakeGitHub::default();
+
+    run(&f, &github).unwrap();
+
+    assert!(origin_has(&f, "issue-41"));
 }
