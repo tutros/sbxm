@@ -38,6 +38,7 @@ pub struct FakeGitHub {
     fail_edit_at: Option<usize>,
     fail_issues_all: bool,
     failure: Option<String>,
+    comment_failure: Option<String>,
     calls: Mutex<Vec<GhCall>>,
 }
 
@@ -96,6 +97,12 @@ impl FakeGitHub {
 
     pub fn with_next_issue_number(self, number: u32) -> Self {
         *self.next_issue.lock().unwrap() = number;
+        self
+    }
+
+    /// Only `pr_comment` fails (and is still recorded).
+    pub fn failing_comments(mut self, message: &str) -> Self {
+        self.comment_failure = Some(message.to_owned());
         self
     }
 
@@ -161,7 +168,11 @@ impl GitHubBackend for FakeGitHub {
     }
 
     fn pr_comment(&self, repo: &str, number: u32, body: &str) -> Result<()> {
-        self.record(GhCall::PrComment(repo.to_owned(), number, body.to_owned()))
+        self.record(GhCall::PrComment(repo.to_owned(), number, body.to_owned()))?;
+        match &self.comment_failure {
+            Some(message) => Err(anyhow!("{message}")),
+            None => Ok(()),
+        }
     }
 
     fn issue_create(&self, repo: &str, request: &IssueRequest) -> Result<u32> {

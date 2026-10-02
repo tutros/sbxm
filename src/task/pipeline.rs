@@ -1123,6 +1123,179 @@ pub fn review_issue(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewRepo
     Ok(report)
 }
 
+/// How the review of a pull request went.
+#[derive(Debug, Default)]
+pub struct PrReview {
+    /// `None` when the gates failed first.
+    pub reviewed: Option<Reviewed>,
+    pub gates_failed: Option<GateResult>,
+    /// Whether the review was posted as a comment on the PR.
+    pub posted: bool,
+    pub warnings: Vec<String>,
+}
+
+/// Whether a pull request's review may start (or be tried again) now.
+pub fn check_can_review_pr(task: &Record) -> Result<()> {
+    let (id, number) = (&task.id, task.number);
+    match (task.stage, task.status) {
+        (Stage::Prepared, Status::Running)
+        | (Stage::Gating, Status::Passed | Status::GatesFailed)
+        | (Stage::Reviewing, Status::Failed) => Ok(()),
+        (stage @ (Stage::Ready | Stage::Finished), _) => bail!(
+            "task {id} is already {}; its review is review.md in the task folder; to review the PR \
+             again after it changed, run `sbxm task rm --pr {number}` first",
+            stage.name()
+        ),
+        (stage, status) => bail!(
+            "task {id} is at stage {} ({}); see `sbxm task status --pr {number}`",
+            stage.name(),
+            status.name()
+        ),
+    }
+}
+
+/// Spec §5.2 "PR": the gates run on a clean checkout of the PR's head (the sandbox tier inside the
+/// reviewer's own sandbox, since a PR has no worker; the host tier as usual), then the reviewer
+/// runs once (no fix round), and a valid review is posted as a PR comment. The reviewer's sandbox
+/// and clone are removed on every path. A failed gate stops before the reviewer; an invalid review
+/// is never posted; a failed post keeps the saved review and says how to post it by hand.
+pub fn review_pr(
+    env: &TaskEnv,
+    github: &dyn GitHubBackend,
+    prepared: &mut Prepared,
+) -> Result<PrReview> {
+    check_can_review_pr(&prepared.record)?;
+    let mut report = PrReview {
+        warnings: check_reviewer(env, prepared)?,
+        ..PrReview::default()
+    };
+    let id = prepared.record.id.clone();
+    let reviewer = &env.config.reviewer;
+    let gates = &env.config.gates;
+    let clone = prepared.workspace.with_file_name(format!("{id}-review"));
+    let sandbox = format!("sbxm-task-{id}-review-{}", reviewer.harness.as_str());
+    let _ = fs::remove_file(prepared.meta.join("review.md"));
+
+    // Gating: in the reviewer's sandbox, over a clean clone of the PR's head.
+    if prepared.record.stage != Stage::Reviewing {
+        prepared
+            .record
+            .begin_gating(now(), Process::current(env.probe))?;
+        record::write(&prepared.meta, &prepared.record)?;
+    }
+    let gated_or_ready = (|| -> Result<Option<Gated>> {
+        if prepared.record.stage == Stage::Reviewing {
+            // A review that failed is tried again; its gates passed before.
+            prepared
+                .record
+                .begin_review(now(), Process::current(env.probe))?;
+            record::write(&prepared.meta, &prepared.record)?;
+            open_review_workspace(env, prepared, 1, &clone, &sandbox, None)?;
+            return Ok(None);
+        }
+        open_review_workspace(env, prepared, 1, &clone, &sandbox, None)?;
+        let mut outcomes = gates::run_sandbox_tier(
+            env.backend,
+            &sandbox,
+            &in_sandbox_path(&clone),
+            "pr",
+            &gates.sandbox,
+            gates.timeout,
+        );
+        if outcomes.iter().all(|o| o.result.passed) && !gates.host.is_empty() {
+            outcomes.extend(host_gate_outcomes(env, prepared, "pr"));
+        }
+        Ok(Some(finish_gating(prepared, "pr", outcomes)?))
+    })();
+    let cleanup = |prepared: &mut Prepared| {
+        let _ = env.backend.remove(&sandbox);
+        if let Err(e) = remove_with_retries(&clone) {
+            prepared
+                .record
+                .notes
+                .push(format!("could not remove {}: {e}", clone.display()));
+        }
+    };
+    match gated_or_ready {
+        Err(e) => {
+            cleanup(prepared);
+            prepared
+                .record
+                .notes
+                .push(format!("could not start the review: {e:#}"));
+            // Whichever stage was running did not finish.
+            let failed = if prepared.record.stage == Stage::Gating {
+                Status::GatesFailed
+            } else {
+                Status::Failed
+            };
+            prepared.record.finish(failed)?;
+            record::write(&prepared.meta, &prepared.record)?;
+            return Err(e);
+        }
+        Ok(Some(gated)) if !gated.passed => {
+            cleanup(prepared);
+            record::write(&prepared.meta, &prepared.record)?;
+            report.gates_failed = gated.failed;
+            return Ok(report);
+        }
+        Ok(Some(_)) => {
+            prepared
+                .record
+                .begin_review(now(), Process::current(env.probe))?;
+            record::write(&prepared.meta, &prepared.record)?;
+        }
+        Ok(None) => {}
+    }
+
+    // The reviewer, once.
+    let ran = run_review_agent(env, prepared, 1, &clone, &sandbox);
+    cleanup(prepared);
+    let reviewed = match ran {
+        Ok(reviewed) => reviewed,
+        Err(e) => {
+            prepared.record.notes.push(format!("review: {e:#}"));
+            prepared.record.finish(Status::Failed)?;
+            record::write(&prepared.meta, &prepared.record)?;
+            return Err(e);
+        }
+    };
+    prepared.record.finish(Status::Completed)?;
+    prepared
+        .record
+        .advance(Stage::Ready, now(), Process::current(env.probe))?;
+    record::write(&prepared.meta, &prepared.record)?;
+    report.reviewed = Some(reviewed);
+
+    let review_path = prepared.meta.join("review.md");
+    let text = fs::read_to_string(&review_path)?;
+    let (repo, number) = (prepared.record.repo.clone(), prepared.record.number);
+    match github.pr_comment(&repo, number, &review::pr_comment(number, &text)) {
+        Ok(()) => {
+            report.posted = true;
+            prepared
+                .record
+                .notes
+                .push(format!("the review was posted on PR #{number}"));
+            record::write(&prepared.meta, &prepared.record)?;
+            Ok(report)
+        }
+        Err(e) => {
+            prepared
+                .record
+                .notes
+                .push(format!("the review was not posted: {e:#}"));
+            record::write(&prepared.meta, &prepared.record)?;
+            Err(e.context(format!(
+                "the review is saved in {} but could not be posted on PR #{number}; post it \
+                 yourself with `gh pr comment {number} --body-file {}`",
+                review_path.display(),
+                review_path.display()
+            )))
+        }
+    }
+}
+
 /// The one fix round (spec §5.2): the worker, in its own sandbox, gets the review and a fix
 /// prompt; its new commits are collected like the first time. A failed run, or commits that can't
 /// be collected, stop the review (the task is `fixing/failed`).

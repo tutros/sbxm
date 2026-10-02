@@ -56,8 +56,9 @@ impl Stage {
     /// The stages that may follow this one.
     fn next(self) -> &'static [Stage] {
         match self {
-            // A PR task has no worker: it goes straight to review.
-            Self::Prepared => &[Self::Working, Self::Reviewing],
+            // A PR task has no worker: it goes to its gates (run in the reviewer's sandbox) or
+            // straight to review.
+            Self::Prepared => &[Self::Working, Self::Gating, Self::Reviewing],
             Self::Working | Self::Fixing => &[Self::Gating],
             Self::Gating => &[Self::Reviewing],
             Self::Reviewing => &[Self::Fixing, Self::Ready],
