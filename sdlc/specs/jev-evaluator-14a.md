@@ -1,4 +1,13 @@
-<!-- Draft of the GitHub issue for M2a slice 14a (Jev), kept here so it is not lost. NOT FILED. Written 2026-10-02 and edited 2026-10-03 only to renumber the proposed decision from 167 to 168, because decision 167 became cosine's evals.json key. Before filing: confirm the design with the user, run spike S12 with the real token (see sdlc/jev.md) and fold its results in. -->
+<!-- Draft of the GitHub issue for M2a slice 14a (Jev), kept here so it is not lost. NOT FILED. Written 2026-10-02 and edited 2026-10-03 only to renumber the proposed decision from 167 to 168, because decision 167 became cosine's evals.json key. Spike S12 ran on 2026-10-03 with a real token (sdlc/spikes/S12.md); its corrections are the block directly below and override the text further down where they differ. Before filing: confirm the design with the user (sdlc/jev.md section 5) and fold the corrections into the body. -->
+
+> **Corrections from spike S12 (real token, 2026-10-03; they override the text below):**
+> 1. **`model` is required in every request** (omitting it is a 422). Send `jev-latest` (answered as `jev-1.13.0`) or a pinned name such as `jev-1.13.0`; record the **response's** `model` in `evals.json` and `run.json`.
+> 2. **Error shapes:** 401 and 400 carry `detail.error_type` (plus `message`, except `max_tokens_exceeded`); 422 carries a list whose `input` **echoes the whole request**. Never write a raw error body to a result, log or warning; keep `error_type`, or `loc` and `msg`.
+> 3. **Oversize is a 400 `max_tokens_exceeded`** (not a 422), with no token count. 130,000 characters of prose (31,958 input tokens in all) passed; 160,000 did not.
+> 4. **Token estimate:** about 4.0 characters per token for prose and 3.0 to 3.6 for a code diff, plus a fixed overhead of about 295 tokens per request and about 50 to 70 per extra question. The 1-per-3 estimate and the 28k cap stay safe.
+> 5. **Answers are not deterministic:** a Noul was identical in five calls, a Score varied slightly (1.80 to 1.86 of 2, `confidence` 0.70 to 0.79). Record `confidence`; whether to average several calls is the user's decision.
+> 6. **Choice** (for slice 14b and a router): `criteria` is an object id -> description; the answer is `{choice, confidence, probabilities}`.
+> 7. Not tested: 429 and 529 retries (the retry rules below are still from the docs), redirects, concurrent calls, `state` as an array.
 
 **Slice:** M2a slice 14a (deferred by decisions 99 and 138; the plan's slice 14 is split here: 14a is this issue, 14b is "Jev-specific raw questions" in a later issue). See `sdlc/milestone-2.md` row 14, `sdlc/spikes/S9.md` (merged; read it first), decisions 9, 18, 19, 20, 36, 112, 120, 138 and 168 (below, proposed).
 
@@ -9,7 +18,7 @@
 1. **The token** must not be readable on the host or in a sandbox (decision 36). Spike S9 verified that `sbx secret set-custom` does this: the proxy swaps a placeholder for the real value in request **headers** to one named host, and nowhere else.
 2. **The 32k-token limit** on `state` plus the longest question: Jev never receives a transcript (decision 20), and a big diff is split.
 
-## Jev's API (from https://docs.typesafe.ai/api.md, 2026-10-02; verify against a real token, which we do not have yet)
+## Jev's API (from https://docs.typesafe.ai/api.md, 2026-10-02; checked against a real token in spike S12 on 2026-10-03, see the corrections at the top)
 
 ```
 POST https://api.typesafe.ai/v1/systemone
