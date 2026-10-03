@@ -25,8 +25,10 @@ use super::config::RunConfig;
 use super::id::date_from_days;
 use super::kits::RunKits;
 use super::orchestrate::PairOutcome;
+use crate::eval::cosine::CosineEntry;
 use crate::eval::judge::JudgeRun;
 use crate::headless::RunStatus;
+use std::collections::BTreeMap;
 
 /// Seconds since the epoch.
 pub fn now() -> u64 {
@@ -242,6 +244,21 @@ pub fn write_judge(meta: &Path, run_config: &RunConfig, run: &JudgeRun) -> Resul
         let pair = pair_dir(meta, contestant, run.repeat);
         fs::create_dir_all(&pair).with_context(|| format!("cannot create {}", pair.display()))?;
         merge_evals(&pair, "judge", entry)?;
+    }
+    Ok(())
+}
+
+/// Merges one repeat's cosine similarities into each contestant's
+/// `evals.json` (key `cosine`), one per entry in `entries` (issue #63).
+pub fn write_cosine(
+    meta: &Path,
+    repeat: u32,
+    entries: &BTreeMap<usize, CosineEntry>,
+) -> Result<()> {
+    for (&contestant, entry) in entries {
+        let dir = pair_dir(meta, contestant, repeat);
+        fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+        merge_evals(&dir, "cosine", entry.to_json())?;
     }
     Ok(())
 }
