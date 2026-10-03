@@ -9,6 +9,7 @@ use anyhow::{Result, bail};
 
 use crate::backend::SandboxBackend;
 use crate::config::GlobalConfig;
+use crate::eval::cosine::{self, CosineEntry, Embedder, FailingEmbedder, FastEmbedder};
 use crate::eval::{judge, score};
 use crate::headless::RunStatus;
 use crate::run::config::RunConfig;
@@ -29,6 +30,32 @@ pub fn run(
     backend: &dyn SandboxBackend,
     out: &mut dyn Write,
     warn: &mut dyn Write,
+) -> Result<Summary> {
+    run_with(config_dir, config_path, backend, out, warn, None)
+}
+
+/// Like [`run`], but runs `[eval.cosine]` (if configured) against `embedder`
+/// instead of loading `FastEmbedder` from `model_dir`: a seam for testing the
+/// runtime embedding-failure path (an already-loaded model whose `embed`
+/// call fails) without a real model file (issue #63 review finding M-1).
+pub fn run_with_embedder(
+    config_dir: &Path,
+    config_path: &Path,
+    backend: &dyn SandboxBackend,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+    embedder: &dyn Embedder,
+) -> Result<Summary> {
+    run_with(config_dir, config_path, backend, out, warn, Some(embedder))
+}
+
+fn run_with(
+    config_dir: &Path,
+    config_path: &Path,
+    backend: &dyn SandboxBackend,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+    embedder_override: Option<&dyn Embedder>,
 ) -> Result<Summary> {
     let run_config = RunConfig::load(config_path)?;
     let checked = preflight::check(config_dir, &run_config, backend)?;
@@ -180,6 +207,56 @@ pub fn run(
         }
     }
 
+    // Cosine compares same-repeat-index answers, like the judge, but needs no
+    // sandbox: a model-load failure is one warning, recorded on every
+    // participant, never fatal (decision 166, issue #63). An already-loaded
+    // model whose `embed` call fails at runtime gets the same treatment: one
+    // warning for the whole run, not duplicated with the load-failure
+    // warning above (review finding M-1).
+    let mut cosine_saved = true;
+    if let Some(cosine_cfg) = &run_config.eval.cosine {
+        let (embedder, report_runtime_errors): (Box<dyn Embedder>, bool) = match embedder_override {
+            Some(e) => (Box::new(e), true),
+            None => {
+                let model_dir = cosine_cfg.resolve_model_dir(config_dir);
+                let loaded = FastEmbedder::from_dir(&model_dir);
+                let model_loaded = loaded.is_ok();
+                if let Err(e) = &loaded {
+                    writeln!(warn, "warning: {e:#}")?;
+                }
+                let embedder = loaded
+                    .map(|e| Box::new(e) as Box<dyn Embedder>)
+                    .unwrap_or_else(|e| Box::new(FailingEmbedder(format!("{e:#}"))));
+                (embedder, model_loaded)
+            }
+        };
+        let repeats = run_config.run.repeat;
+        // One warning for the whole run: the first runtime error. Every repeat
+        // still keeps its own message in its pairs' evals.json (PR 69 review M-2).
+        let mut first_runtime_error: Option<String> = None;
+        for repeat in 0..repeats {
+            let pairs: Vec<&PairOutcome> = outcomes.iter().filter(|o| o.repeat == repeat).collect();
+            let entries = cosine::cosine_repeat(embedder.as_ref(), &pairs);
+            if report_runtime_errors && first_runtime_error.is_none() {
+                first_runtime_error = entries.values().find_map(|entry| match entry {
+                    CosineEntry::Error(message) => Some(message.clone()),
+                    _ => None,
+                });
+            }
+            if let Err(e) = results::write_cosine(&roots.meta, repeat, &entries) {
+                cosine_saved = false;
+                writeln!(
+                    warn,
+                    "warning: cannot save the cosine results for repeat {}/{repeats}: {e:#}",
+                    repeat + 1
+                )?;
+            }
+        }
+        if let Some(message) = &first_runtime_error {
+            writeln!(warn, "warning: {message}")?;
+        }
+    }
+
     // The ranking is computed from what was just saved, exactly as `run show`
     // will later, so the two can't disagree (decisions 19, 120).
     match score::load(&roots.meta) {
@@ -194,9 +271,20 @@ pub fn run(
         Ok(None) => {}
         Err(e) => writeln!(warn, "warning: cannot rank the run: {e:#}")?,
     }
+    if run_config.eval.cosine.is_some() {
+        write!(
+            out,
+            "{}",
+            cosine::render(
+                &roots.meta,
+                run_config.contestants.len(),
+                run_config.run.repeat
+            )
+        )?;
+    }
 
-    // Complete only if every pair's results (and the judge's) are on disk.
-    if outcomes.iter().all(|o| o.save_error.is_none()) && judge_saved {
+    // Complete only if every pair's results (and the judge's and cosine's) are on disk.
+    if outcomes.iter().all(|o| o.save_error.is_none()) && judge_saved && cosine_saved {
         if let Err(e) = results::mark_completed(&roots.meta, results::now()) {
             writeln!(warn, "warning: cannot mark the run completed: {e:#}")?;
         }

@@ -5,11 +5,13 @@
 
 mod common;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use common::Env;
 use sbxm::backend::{ExecOutput, ExecSpec, FakeBackend};
 use sbxm::commands::run;
+use sbxm::eval::cosine::CosineEntry;
 use sbxm::run::results;
 use serde_json::{Value, json};
 
@@ -424,6 +426,46 @@ fn a_run_that_is_refused_up_front_writes_no_run_json() {
     for entry in std::fs::read_dir(&runs).unwrap() {
         assert!(!entry.unwrap().path().join("run.json").exists());
     }
+}
+
+// ---- cosine results --------------------------------------------------------
+
+#[test]
+fn merge_evals_keeps_checks_and_judge_when_cosine_is_added() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let pair = dir.path();
+    results::merge_evals(pair, "checks", json!([{"id": "a", "passed": true}])).unwrap();
+    results::merge_evals(pair, "judge", json!({"label": "A", "status": "ok"})).unwrap();
+    results::merge_evals(
+        pair,
+        "cosine",
+        json!({"model": "all-MiniLM-L6-v2", "peers": {}}),
+    )
+    .unwrap();
+
+    let evals = read_json(&pair.join("evals.json"));
+
+    assert_eq!(evals["checks"][0]["id"], "a");
+    assert_eq!(evals["judge"]["label"], "A");
+    assert_eq!(evals["cosine"]["model"], "all-MiniLM-L6-v2");
+}
+
+#[test]
+fn write_cosine_merges_each_contestants_entry_into_its_own_evals_json() {
+    let env = Env::new();
+    let meta = env.tmp.path().join("meta");
+    let mut peers = BTreeMap::new();
+    peers.insert(1usize, 0.42_f32);
+    let mut entries = BTreeMap::new();
+    entries.insert(0usize, CosineEntry::Peers(peers));
+    entries.insert(1usize, CosineEntry::Skipped);
+
+    results::write_cosine(&meta, 0, &entries).unwrap();
+
+    let a = read_json(&meta.join("0").join("0").join("evals.json"));
+    assert_eq!(a["cosine"]["peers"]["1"].as_f64().unwrap() as f32, 0.42);
+    let b = read_json(&meta.join("1").join("0").join("evals.json"));
+    assert_eq!(b["cosine"]["skipped"], "no text answer");
 }
 
 // ---- timestamps ------------------------------------------------------------

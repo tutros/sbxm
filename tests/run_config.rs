@@ -148,6 +148,7 @@ fn unknown_keys_are_errors_at_every_level_and_name_the_file() {
             "judge",
             valid("[eval.judge]\nharness = \"claude\"\nmodel = \"m\"\nbogus = 1\n"),
         ),
+        ("cosine", valid("[eval.cosine]\nbogus = 1\n")),
     ] {
         let err = load_err(&body);
         assert!(
@@ -158,19 +159,33 @@ fn unknown_keys_are_errors_at_every_level_and_name_the_file() {
 }
 
 #[test]
-fn cosine_is_rejected_until_implemented() {
-    let env = Env::new();
-    let path = write(&env, &valid("[eval.cosine]\n"));
+fn cosine_with_no_model_dir_uses_the_default() {
+    let config = load_ok(&valid("[eval.cosine]\n"));
 
-    let err = format!("{:#}", RunConfig::load(&path).unwrap_err());
+    assert_eq!(config.eval.cosine.as_ref().unwrap().model_dir, None);
+}
+
+#[test]
+fn cosine_with_an_explicit_model_dir_resolves_it_against_the_config_file() {
+    let env = Env::new();
+    let path = write(
+        &env,
+        &valid("[eval.cosine]\nmodel_dir = \"./models/mini\"\n"),
+    );
+
+    let config = RunConfig::load(&path).unwrap();
 
     assert_eq!(
-        err,
-        format!(
-            "run-config {}: [eval.cosine] isn't implemented yet; remove it",
-            path.display()
-        )
+        config.eval.cosine.unwrap().model_dir,
+        Some(env.tmp.path().join("models").join("mini"))
     );
+}
+
+#[test]
+fn without_eval_cosine_there_is_none() {
+    let config = load_ok(&valid(""));
+
+    assert!(config.eval.cosine.is_none());
 }
 
 #[test]
@@ -536,6 +551,73 @@ fn a_seed_containing_the_base_dir_is_refused() {
     let err = preflight_of(&env, &body, &backend).unwrap_err().to_string();
 
     assert!(err.contains("contains the base dir"), "{err}");
+}
+
+const COSINE_MODEL_FILES: [&str; 5] = [
+    "model.onnx",
+    "tokenizer.json",
+    "config.json",
+    "special_tokens_map.json",
+    "tokenizer_config.json",
+];
+
+#[test]
+fn a_cosine_model_missing_a_file_is_refused_naming_it() {
+    let env = Env::new();
+    let backend = FakeBackend::with_secrets(&["anthropic", "openai"]);
+    let dir = env.tmp.path().join("models");
+    std::fs::create_dir_all(&dir).unwrap();
+    for name in COSINE_MODEL_FILES.iter().skip(1) {
+        std::fs::write(dir.join(name), "{}").unwrap();
+    }
+    let body = format!(
+        "{TASK}{CLAUDE}{CODEX}[eval.cosine]\nmodel_dir = {}\n",
+        toml::Value::String(dir.to_str().unwrap().to_owned())
+    );
+
+    let err = preflight_of(&env, &body, &backend).unwrap_err().to_string();
+
+    assert!(err.contains("model.onnx"), "{err}");
+    assert!(err.contains(dir.to_str().unwrap()), "{err}");
+    assert!(
+        err.contains("https://huggingface.co/Qdrant/all-MiniLM-L6-v2-onnx/resolve/main/"),
+        "{err}"
+    );
+    assert_nothing_created(&env, &backend);
+}
+
+#[test]
+fn a_cosine_model_with_every_file_present_passes() {
+    let env = Env::new();
+    let backend = FakeBackend::with_secrets(&["anthropic", "openai"]);
+    let dir = env.tmp.path().join("models");
+    std::fs::create_dir_all(&dir).unwrap();
+    for name in COSINE_MODEL_FILES {
+        std::fs::write(dir.join(name), "{}").unwrap();
+    }
+    let body = format!(
+        "{TASK}{CLAUDE}{CODEX}[eval.cosine]\nmodel_dir = {}\n",
+        toml::Value::String(dir.to_str().unwrap().to_owned())
+    );
+
+    let result = preflight_of(&env, &body, &backend).unwrap();
+
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    assert_nothing_created(&env, &backend);
+}
+
+#[test]
+fn a_cosine_model_with_no_model_dir_is_checked_under_the_config_dir() {
+    let env = Env::new();
+    let backend = FakeBackend::with_secrets(&["anthropic", "openai"]);
+
+    let err = preflight_of(&env, &valid("[eval.cosine]\n"), &backend)
+        .unwrap_err()
+        .to_string();
+
+    let default_dir = env.config_dir().join("models").join("all-minilm-l6-v2");
+    assert!(err.contains(default_dir.to_str().unwrap()), "{err}");
+    assert_nothing_created(&env, &backend);
 }
 
 #[test]

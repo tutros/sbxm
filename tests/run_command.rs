@@ -262,21 +262,33 @@ fn a_missing_secret_stops_everything_before_anything_is_written() {
 }
 
 #[test]
-fn cosine_is_refused_before_any_write_or_backend_call() {
+fn cosine_with_an_incomplete_model_dir_is_refused_before_any_write_or_backend_call() {
     let env = Env::new();
     let backend = pong();
-
-    let ran = go(
-        &env,
-        &format!("{TASK}{TWO_CLAUDES}[eval.cosine]\n"),
-        &backend,
+    let model_dir = env.tmp.path().join("models");
+    std::fs::create_dir_all(&model_dir).unwrap();
+    // Every file but model.onnx, the first one checked.
+    for name in [
+        "tokenizer.json",
+        "config.json",
+        "special_tokens_map.json",
+        "tokenizer_config.json",
+    ] {
+        std::fs::write(model_dir.join(name), "{}").unwrap();
+    }
+    let body = format!(
+        "{TASK}{TWO_CLAUDES}[eval.cosine]\nmodel_dir = {}\n",
+        toml::Value::String(model_dir.to_str().unwrap().to_owned())
     );
 
+    let ran = go(&env, &body, &backend);
+
+    let err = ran.result.unwrap_err().to_string();
+    assert!(err.contains("model.onnx"), "{err}");
+    assert!(err.contains(model_dir.to_str().unwrap()), "{err}");
     assert!(
-        ran.result
-            .unwrap_err()
-            .to_string()
-            .contains("[eval.cosine] isn't implemented yet")
+        err.contains("https://huggingface.co/Qdrant/all-MiniLM-L6-v2-onnx/resolve/main/"),
+        "{err}"
     );
     nothing_written(&env);
     assert!(backend.log().is_empty(), "{:?}", backend.log());

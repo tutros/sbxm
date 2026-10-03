@@ -7,9 +7,10 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-use super::config::RunConfig;
+use super::config::{Cosine, RunConfig};
 use crate::backend::SandboxBackend;
 use crate::config::{GlobalConfig, Profile};
+use crate::eval::cosine;
 use crate::harness::Harness;
 use crate::seed;
 
@@ -27,6 +28,9 @@ pub fn check(
     let global = GlobalConfig::load(config_dir)?;
     if let Some(seed_dir) = &run_config.task.seed {
         check_seed(seed_dir, &global.base_dir, config_dir)?;
+    }
+    if let Some(c) = &run_config.eval.cosine {
+        check_cosine_model(c, config_dir)?;
     }
 
     // The run's profile applies to every contestant and the judge unless a
@@ -165,4 +169,22 @@ fn check_seed(seed_dir: &Path, base_dir: &Path, config_dir: &Path) -> Result<()>
         );
     }
     seed::reject_links(seed_dir)
+}
+
+/// The five model files `cosine` needs (decision 166), checked in order so
+/// the first missing one is named with where it was looked for and where to
+/// get it; loading the model happens later, once a sandbox call is safe.
+fn check_cosine_model(wanted: &Cosine, config_dir: &Path) -> Result<()> {
+    let dir = wanted.resolve_model_dir(config_dir);
+    for name in cosine::MODEL_FILES {
+        if !dir.join(name).is_file() {
+            bail!(
+                "eval.cosine model file {name} is missing from {}; download it from \
+                 {}{name}",
+                dir.display(),
+                cosine::MODEL_URL_PREFIX
+            );
+        }
+    }
+    Ok(())
 }
