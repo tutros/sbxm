@@ -17,7 +17,7 @@ use crate::git;
 use crate::github::{GitHubBackend, IssueRequest};
 use crate::task::findings::{
     self, Finding, Render, acceptance_criteria, filing_order, find_secrets, issue_body,
-    issues_line, marker, protect_finding, protect_text, secret_kind, update_link_fields,
+    issues_line, marker, pr_of, protect_finding, protect_text, secret_kind, update_link_fields,
 };
 use crate::task::record::{self, Kind};
 
@@ -44,6 +44,9 @@ pub struct Options {
     pub repo: Option<String>,
     /// Publish the issues. Without it nothing is created or edited.
     pub create: bool,
+    /// The PR this review covers, when the source is `--pr N` (decision 169): named in each
+    /// issue's body and used, with the title, to catch a duplicate that lacks the marker.
+    pub pr: Option<u32>,
     /// File findings with no acceptance criteria with only the standard ones.
     pub standard_criteria: bool,
     /// Keep personal paths instead of replacing them with `~`.
@@ -356,7 +359,14 @@ fn file(
     let mut numbers: BTreeMap<String, u32> = BTreeMap::new();
     for finding in &parsed.findings {
         let wanted = marker(&posted_name, &finding.id);
-        if let Some(issue) = listed.iter().find(|i| i.body.contains(&wanted)) {
+        let title = format!("{}: {}", finding.id, finding.title);
+        let duplicate = listed.iter().find(|i| {
+            i.body.contains(&wanted)
+                || opts
+                    .pr
+                    .is_some_and(|pr| i.title == title && pr_of(&i.body) == Some(pr))
+        });
+        if let Some(issue) = duplicate {
             numbers.insert(finding.id.clone(), issue.number);
         }
     }
@@ -400,6 +410,7 @@ fn file(
             head_sha: head_sha.as_deref(),
             ids,
             standard_criteria: opts.standard_criteria,
+            pr: opts.pr,
         };
         issue_body(&view, finding, &context, warnings).map_err(|e| anyhow!(e))
     };

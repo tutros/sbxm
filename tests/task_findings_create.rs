@@ -65,6 +65,7 @@ impl Setup {
             repo_root: self.dir.path().to_path_buf(),
             repo: Some("o/r".into()),
             create,
+            pr: None,
             standard_criteria: false,
             keep_paths: false,
             only: Vec::new(),
@@ -231,6 +232,70 @@ fn a_run_resumes_after_an_interruption_with_only_the_missing_findings() {
     unique.sort();
     unique.dedup();
     assert_eq!(unique.len(), 4);
+}
+
+#[test]
+fn a_duplicate_by_title_and_pr_is_skipped_without_creating_a_new_issue() {
+    let setup = Setup::new();
+    let gh = github().with_issues(vec![Issue {
+        number: 77,
+        title: "S-1: Thing breaks".into(),
+        labels: vec![],
+        body: "PR: #7\nold body, no marker\n".into(),
+    }]);
+    let path = setup.write("review-small.md", small().as_bytes());
+    let run = setup.file(&path, &gh, true, |o| o.pr = Some(7));
+
+    assert!(run.result.is_ok(), "{}", run.error());
+    assert_eq!(
+        issues(&gh)
+            .iter()
+            .filter(|i| i.title.starts_with("S-1"))
+            .count(),
+        1,
+        "{:?}",
+        issues(&gh)
+    );
+    assert!(run.out.contains("S-1      must-fix    #77"), "{}", run.out);
+    assert_eq!(
+        writes(&gh)
+            .iter()
+            .filter(|w| w.as_str() == "create")
+            .count(),
+        2,
+        "{:?}",
+        writes(&gh)
+    );
+
+    // A rerun with the same options files nothing new for S-1.
+    let before = issues(&gh).len();
+    let second = setup.file(&path, &gh, true, |o| o.pr = Some(7));
+    assert!(second.result.is_ok(), "{}", second.error());
+    assert_eq!(issues(&gh).len(), before);
+}
+
+#[test]
+fn a_title_match_with_a_different_pr_is_not_a_duplicate() {
+    let setup = Setup::new();
+    let gh = github().with_issues(vec![Issue {
+        number: 77,
+        title: "S-1: Thing breaks".into(),
+        labels: vec![],
+        body: "PR: #9\nold body, no marker\n".into(),
+    }]);
+    let path = setup.write("review-small.md", small().as_bytes());
+    let run = setup.file(&path, &gh, true, |o| o.pr = Some(7));
+
+    assert!(run.result.is_ok(), "{}", run.error());
+    assert_eq!(
+        issues(&gh)
+            .iter()
+            .filter(|i| i.title.starts_with("S-1"))
+            .count(),
+        2,
+        "a new S-1 issue is created alongside the old one: {:?}",
+        issues(&gh)
+    );
 }
 
 #[test]

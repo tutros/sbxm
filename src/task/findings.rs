@@ -552,11 +552,22 @@ pub struct Render<'a> {
     /// Issue numbers known so far, by finding id.
     pub ids: &'a BTreeMap<String, u32>,
     pub standard_criteria: bool,
+    /// The PR this review covers; written as the body's first line, `PR: #n` (decision 169).
+    /// `None` when the review isn't tied to a PR.
+    pub pr: Option<u32>,
 }
 
 /// The hidden marker that says which finding of which review an issue is.
 pub fn marker(review_name: &str, id: &str) -> String {
     format!("<!-- review-finding: {review_name}#{id} -->")
+}
+
+/// The PR a finding issue's body names, read from its first line only (decision 169): `None` for
+/// a line anywhere else, or no such line at all.
+pub fn pr_of(body: &str) -> Option<u32> {
+    static PR: LazyLock<Regex> = LazyLock::new(|| re(r"^PR: #(\d+)$"));
+    let first = *lines_of(body).first()?;
+    PR.captures(first)?[1].parse().ok()
 }
 
 /// The issue text for one finding: the skill's template in order, the marker on the last line.
@@ -587,7 +598,11 @@ pub fn issue_body(
     );
     let field = |name: &str| finding.field(name).unwrap_or("");
 
-    let mut parts = vec![
+    let mut parts = Vec::new();
+    if let Some(pr) = render.pr {
+        parts.push(format!("PR: #{pr}"));
+    }
+    parts.extend([
         format_field(
             "Where",
             &where_links(field("where"), render.repo, render.head_sha, warnings),
@@ -603,7 +618,7 @@ pub fn issue_body(
             field("fix"),
         ),
         format_field("Depends on", &link_ids(depends, render.ids)),
-    ];
+    ]);
     if !related.is_empty() {
         parts.push(format_field(
             "Related",

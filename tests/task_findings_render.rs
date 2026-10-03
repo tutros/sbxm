@@ -7,7 +7,7 @@ use std::collections::BTreeMap;
 
 use sbxm::task::findings::{
     self, Render, Review, acceptance_criteria, filing_order, issue_body, issues_line, link_ids,
-    update_link_fields, where_links,
+    pr_of, update_link_fields, where_links,
 };
 
 const SMALL: &str = include_str!("fixtures/review-findings/review-small.md");
@@ -29,6 +29,7 @@ fn render_with<'a>(map: &'a BTreeMap<String, u32>, standard: bool) -> Render<'a>
         head_sha: Some(SHA),
         ids: map,
         standard_criteria: standard,
+        pr: None,
     }
 }
 
@@ -255,6 +256,40 @@ fn the_issues_line_has_numbers_would_file_markers_and_pending() {
         issues_line(&review.findings, &numbers, &would, "#?"),
         "Issues: S-1 #41, S-2 #?, S-Q1 pending"
     );
+}
+
+#[test]
+fn a_pr_is_named_on_the_bodys_first_line() {
+    let review = findings::parse(SMALL);
+    let map = BTreeMap::new();
+    let render = Render {
+        pr: Some(57),
+        ..render_with(&map, false)
+    };
+    let out = issue_body(&review, &review.findings[0], &render, &mut Vec::new()).unwrap();
+    assert_eq!(out.lines().next(), Some("PR: #57"));
+}
+
+#[test]
+fn with_no_pr_the_body_has_no_pr_line() {
+    let review = findings::parse(SMALL);
+    let out = body(&review, 0, &BTreeMap::new());
+    assert!(!out.lines().any(|l| l == "PR: #57"));
+    assert!(out.lines().next().unwrap().starts_with("**Where:**"));
+}
+
+#[test]
+fn pr_of_reads_the_first_line_only() {
+    assert_eq!(pr_of("PR: #57\nmore text\n"), Some(57));
+    assert_eq!(pr_of("PR: #57"), Some(57));
+}
+
+#[test]
+fn pr_of_ignores_the_line_anywhere_but_the_first() {
+    assert_eq!(pr_of("something else\nPR: #57\n"), None);
+    assert_eq!(pr_of("PR: #57 extra\n"), None);
+    assert_eq!(pr_of(""), None);
+    assert_eq!(pr_of("no pr here"), None);
 }
 
 #[test]
