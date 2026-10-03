@@ -9,6 +9,7 @@ use anyhow::{Result, bail};
 
 use crate::backend::SandboxBackend;
 use crate::config::GlobalConfig;
+use crate::eval::cosine::{self, Embedder, FailingEmbedder, FastEmbedder};
 use crate::eval::{judge, score};
 use crate::headless::RunStatus;
 use crate::run::config::RunConfig;
@@ -180,6 +181,35 @@ pub fn run(
         }
     }
 
+    // Cosine compares same-repeat-index answers, like the judge, but needs no
+    // sandbox: a model-load failure is one warning, recorded on every
+    // participant, never fatal (decision 166, issue #63).
+    let mut cosine_saved = true;
+    if let Some(cosine_cfg) = &run_config.eval.cosine {
+        let model_dir = cosine_cfg.resolve_model_dir(config_dir);
+        let loaded = FastEmbedder::from_dir(&model_dir);
+        if let Err(e) = &loaded {
+            writeln!(warn, "warning: {e:#}")?;
+        }
+        let embedder: Box<dyn Embedder> = match loaded {
+            Ok(e) => Box::new(e),
+            Err(e) => Box::new(FailingEmbedder(format!("{e:#}"))),
+        };
+        let repeats = run_config.run.repeat;
+        for repeat in 0..repeats {
+            let pairs: Vec<&PairOutcome> = outcomes.iter().filter(|o| o.repeat == repeat).collect();
+            let entries = cosine::cosine_repeat(embedder.as_ref(), &pairs);
+            if let Err(e) = results::write_cosine(&roots.meta, repeat, &entries) {
+                cosine_saved = false;
+                writeln!(
+                    warn,
+                    "warning: cannot save the cosine results for repeat {}/{repeats}: {e:#}",
+                    repeat + 1
+                )?;
+            }
+        }
+    }
+
     // The ranking is computed from what was just saved, exactly as `run show`
     // will later, so the two can't disagree (decisions 19, 120).
     match score::load(&roots.meta) {
@@ -194,9 +224,20 @@ pub fn run(
         Ok(None) => {}
         Err(e) => writeln!(warn, "warning: cannot rank the run: {e:#}")?,
     }
+    if run_config.eval.cosine.is_some() {
+        write!(
+            out,
+            "{}",
+            cosine::render(
+                &roots.meta,
+                run_config.contestants.len(),
+                run_config.run.repeat
+            )
+        )?;
+    }
 
-    // Complete only if every pair's results (and the judge's) are on disk.
-    if outcomes.iter().all(|o| o.save_error.is_none()) && judge_saved {
+    // Complete only if every pair's results (and the judge's and cosine's) are on disk.
+    if outcomes.iter().all(|o| o.save_error.is_none()) && judge_saved && cosine_saved {
         if let Err(e) = results::mark_completed(&roots.meta, results::now()) {
             writeln!(warn, "warning: cannot mark the run completed: {e:#}")?;
         }

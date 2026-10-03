@@ -10,7 +10,7 @@ use anyhow::{Context, Result, bail};
 use serde_json::Value;
 
 use crate::config::GlobalConfig;
-use crate::eval::score;
+use crate::eval::{cosine, score};
 use crate::run::id;
 
 #[derive(Debug, Default)]
@@ -73,6 +73,11 @@ pub fn render(config_dir: &Path, run_id: &str, options: &Options) -> Result<Stri
             .collect();
         writeln!(out)?;
         write!(out, "{}", score::render(&ranking, &labels))?;
+    }
+    let similarity = cosine::render(&meta, contestants.len(), repeat);
+    if !similarity.is_empty() {
+        writeln!(out)?;
+        write!(out, "{similarity}")?;
     }
 
     for (n, contestant) in contestants.iter().enumerate() {
