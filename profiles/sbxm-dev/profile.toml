@@ -3,7 +3,7 @@ description = "Working on sbxm itself: Rust toolchain matching the host, crates.
 # Egress is deny-by-default: list the hosts sandboxes may reach.
 [network]
 allow = [
-  "archive.ubuntu.com",   # apt: build-essential (cargo needs a C linker)
+  "archive.ubuntu.com",   # apt: build-essential, pkg-config, libssl-dev (cargo needs a C linker; openssl-sys needs the rest)
   "security.ubuntu.com",
   "sh.rustup.rs",         # rustup installer
   "static.rust-lang.org", # toolchain downloads
@@ -26,9 +26,9 @@ services = ["anthropic"]
 # The Claude kit runs its own `apt-get update` at startup, so wait for its lock. The image's
 # download.docker.com source isn't allowed and makes `update` fail; Ubuntu's own sources still refresh.
 [[setup.install]]
-command = "apt-get -o DPkg::Lock::Timeout=300 update || true; apt-get -o DPkg::Lock::Timeout=300 install -y build-essential"
+command = "apt-get -o DPkg::Lock::Timeout=300 update || true; apt-get -o DPkg::Lock::Timeout=300 install -y build-essential pkg-config libssl-dev"
 user = "0"
-description = "install a C toolchain for cargo"
+description = "install a C toolchain, pkg-config and OpenSSL headers for cargo (openssl-sys needs them)"
 
 # Pinned to the host's version so fmt and clippy agree with `just check` there.
 [[setup.install]]
