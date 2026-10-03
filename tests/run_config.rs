@@ -553,6 +553,73 @@ fn a_seed_containing_the_base_dir_is_refused() {
     assert!(err.contains("contains the base dir"), "{err}");
 }
 
+const COSINE_MODEL_FILES: [&str; 5] = [
+    "model.onnx",
+    "tokenizer.json",
+    "config.json",
+    "special_tokens_map.json",
+    "tokenizer_config.json",
+];
+
+#[test]
+fn a_cosine_model_missing_a_file_is_refused_naming_it() {
+    let env = Env::new();
+    let backend = FakeBackend::with_secrets(&["anthropic", "openai"]);
+    let dir = env.tmp.path().join("models");
+    std::fs::create_dir_all(&dir).unwrap();
+    for name in COSINE_MODEL_FILES.iter().skip(1) {
+        std::fs::write(dir.join(name), "{}").unwrap();
+    }
+    let body = format!(
+        "{TASK}{CLAUDE}{CODEX}[eval.cosine]\nmodel_dir = {}\n",
+        toml::Value::String(dir.to_str().unwrap().to_owned())
+    );
+
+    let err = preflight_of(&env, &body, &backend).unwrap_err().to_string();
+
+    assert!(err.contains("model.onnx"), "{err}");
+    assert!(err.contains(dir.to_str().unwrap()), "{err}");
+    assert!(
+        err.contains("https://huggingface.co/Qdrant/all-MiniLM-L6-v2-onnx/resolve/main/"),
+        "{err}"
+    );
+    assert_nothing_created(&env, &backend);
+}
+
+#[test]
+fn a_cosine_model_with_every_file_present_passes() {
+    let env = Env::new();
+    let backend = FakeBackend::with_secrets(&["anthropic", "openai"]);
+    let dir = env.tmp.path().join("models");
+    std::fs::create_dir_all(&dir).unwrap();
+    for name in COSINE_MODEL_FILES {
+        std::fs::write(dir.join(name), "{}").unwrap();
+    }
+    let body = format!(
+        "{TASK}{CLAUDE}{CODEX}[eval.cosine]\nmodel_dir = {}\n",
+        toml::Value::String(dir.to_str().unwrap().to_owned())
+    );
+
+    let result = preflight_of(&env, &body, &backend).unwrap();
+
+    assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+    assert_nothing_created(&env, &backend);
+}
+
+#[test]
+fn a_cosine_model_with_no_model_dir_is_checked_under_the_config_dir() {
+    let env = Env::new();
+    let backend = FakeBackend::with_secrets(&["anthropic", "openai"]);
+
+    let err = preflight_of(&env, &valid("[eval.cosine]\n"), &backend)
+        .unwrap_err()
+        .to_string();
+
+    let default_dir = env.config_dir().join("models").join("all-minilm-l6-v2");
+    assert!(err.contains(default_dir.to_str().unwrap()), "{err}");
+    assert_nothing_created(&env, &backend);
+}
+
 #[test]
 fn budget_with_a_harness_that_has_no_budget_flag_warns_loudly() {
     let env = Env::new();
