@@ -558,3 +558,26 @@ fn a_dry_run_names_the_label_an_adopted_duplicate_would_get() {
     );
     no_writes(&gh);
 }
+
+#[test]
+fn a_dry_run_names_the_pr_line_a_reused_marker_issue_would_get() {
+    let setup = Setup::new();
+    let gh = github().with_issues(vec![Issue {
+        number: 99,
+        open: true,
+        title: "S-1: old".into(),
+        // Already labeled, so only the PR line is new: isolates the message this test checks.
+        labels: vec!["must-fix".into()],
+        body: "x\n<!-- review-finding: review-small.md#S-1 -->\n".into(),
+    }]);
+    let run = setup.run("review-small.md", small(), &gh, |o| o.pr = Some(7));
+
+    assert!(run.result.is_ok(), "{}", run.error());
+    assert!(
+        run.out
+            .contains("S-1 skipped (exists #99), would set its body's first line to PR: #7"),
+        "{}",
+        run.out
+    );
+    no_writes(&gh);
+}

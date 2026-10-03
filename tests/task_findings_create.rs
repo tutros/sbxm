@@ -10,6 +10,7 @@ use anyhow::Result;
 use sbxm::commands::task_file_findings::{self, Options, Source};
 use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::github::{GitHubBackend, Issue};
+use sbxm::task::findings::pr_of;
 use tempfile::TempDir;
 
 fn small() -> String {
@@ -225,6 +226,29 @@ fn a_marker_matched_issue_gains_its_sections_label_once() {
     let second = setup.file(&path, &gh, true, |o| o.pr = Some(7));
     assert!(second.result.is_ok(), "{}", second.error());
     assert_eq!(writes(&gh).len(), before, "{:?}", writes(&gh));
+}
+
+#[test]
+fn a_reused_marker_issue_gets_its_pr_first_line_once() {
+    let setup = Setup::new();
+    let gh = github().with_issues(vec![marked(99, "S-1")]);
+    let path = setup.write("review-small.md", small().as_bytes());
+    let first = setup.file(&path, &gh, true, |o| o.pr = Some(7));
+    assert!(first.result.is_ok(), "{}", first.error());
+    let body = body_of(&gh, "S-1");
+    assert!(body.starts_with("PR: #7\n"), "{body}");
+    assert!(body.contains("x\n"), "{body}");
+    assert!(
+        body.contains("<!-- review-finding: review-small.md#S-1 -->"),
+        "{body}"
+    );
+    assert_eq!(pr_of(&body), Some(7));
+
+    let before = writes(&gh).len();
+    let second = setup.file(&path, &gh, true, |o| o.pr = Some(7));
+    assert!(second.result.is_ok(), "{}", second.error());
+    assert_eq!(writes(&gh).len(), before, "{:?}", writes(&gh));
+    assert_eq!(body_of(&gh, "S-1"), body);
 }
 
 #[test]

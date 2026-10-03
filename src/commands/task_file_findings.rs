@@ -17,7 +17,8 @@ use crate::git;
 use crate::github::{GitHubBackend, IssueRequest};
 use crate::task::findings::{
     self, Finding, Render, acceptance_criteria, filing_order, find_secrets, issue_body,
-    issues_line, marker, pr_of, protect_finding, protect_text, secret_kind, update_link_fields,
+    issues_line, marker, pr_of, protect_finding, protect_text, secret_kind, set_pr_line,
+    update_link_fields,
 };
 use crate::task::record::{self, Kind};
 
@@ -359,6 +360,7 @@ fn file(
     }
     let mut numbers: BTreeMap<String, u32> = BTreeMap::new();
     let mut relabel: BTreeMap<String, LabelChange> = BTreeMap::new();
+    let mut pr_patch: BTreeMap<String, u32> = BTreeMap::new();
     for finding in &parsed.findings {
         let wanted = marker(&posted_name, &finding.id);
         let title = format!("{}: {}", finding.id, finding.title);
@@ -379,6 +381,14 @@ fn file(
                 && let Some(change) = label_change(&issue.labels, &done.label)
             {
                 relabel.insert(finding.id.clone(), change);
+            }
+            // A marker match may also predate the PR-line rule (decision 169); a title+PR
+            // duplicate already carries the matching line by construction of the match itself.
+            if issue.open
+                && let Some(pr) = opts.pr
+                && set_pr_line(&issue.body, pr) != issue.body
+            {
+                pr_patch.insert(finding.id.clone(), pr);
             }
         }
     }
@@ -437,6 +447,9 @@ fn file(
                         write!(out, " (removing {})", change.remove.join(", "))?;
                     }
                 }
+                if let Some(pr) = pr_patch.get(&finding.id) {
+                    write!(out, ", would set its body's first line to PR: #{pr}")?;
+                }
                 writeln!(out)?;
                 continue;
             }
@@ -463,11 +476,12 @@ fn file(
         return Ok(());
     }
 
-    // The bodies of issues that exist already, as listed, for patching their links at the end.
-    let existing: BTreeMap<u32, String> = listed
+    // The bodies of issues that exist already, as listed, for patching their links (and, for an
+    // open one, a stale or missing PR line) at the end.
+    let existing: BTreeMap<u32, (String, bool)> = listed
         .iter()
         .filter(|i| numbers.values().any(|n| *n == i.number))
-        .map(|i| (i.number, i.body.clone()))
+        .map(|i| (i.number, (i.body.clone(), i.open)))
         .collect();
 
     let mut created: Vec<(Finding, u32, String)> = Vec::new();
@@ -500,10 +514,13 @@ fn file(
             failure = Some(format!("#{number} links: {e:#}"));
         }
     }
-    // Issues that existed before this run get only their link fields patched, from the body as
-    // listed.
-    for (number, body) in &existing {
-        let patched = update_link_fields(body, &numbers);
+    // Issues that existed before this run get their link fields patched, from the body as listed,
+    // and, if open, a current `PR: #n` first line (decision 169).
+    for (number, (body, open)) in &existing {
+        let mut patched = update_link_fields(body, &numbers);
+        if *open && let Some(pr) = opts.pr {
+            patched = set_pr_line(&patched, pr);
+        }
         if patched != *body
             && let Err(e) = github.issue_edit(&repo, *number, &patched)
         {
