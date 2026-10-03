@@ -151,7 +151,7 @@ fn two_answers_become_each_others_only_peer() {
 }
 
 #[test]
-fn a_missing_or_empty_answer_is_skipped_without_calling_the_embedder() {
+fn a_missing_or_empty_answer_is_skipped_and_only_the_present_one_is_embedded() {
     let embedder = FakeEmbedder::new(&[("a", vec![1.0, 0.0])]);
     let missing = err_pair(0, 0);
     let empty = ok_pair(1, 0, "   ");
@@ -161,19 +161,43 @@ fn a_missing_or_empty_answer_is_skipped_without_calling_the_embedder() {
 
     assert_eq!(entries[&0], CosineEntry::Skipped);
     assert_eq!(entries[&1], CosineEntry::Skipped);
-    // Only one real answer remains, so no embedding call was needed at all.
+    // One real answer remains: it has no peers, but it still goes through the
+    // embedder, so a model that cannot embed is recorded (review M-1, PR 69).
     assert_eq!(entries[&2], CosineEntry::Peers(Default::default()));
-    assert!(embedder.calls().is_empty(), "{:?}", embedder.calls());
+    assert_eq!(embedder.calls(), vec![vec!["a".to_owned()]]);
 }
 
 #[test]
 fn a_single_answer_gets_no_peers() {
-    let embedder = FakeEmbedder::new(&[]);
+    let embedder = FakeEmbedder::new(&[("alone", vec![1.0, 0.0])]);
     let only = ok_pair(0, 0, "alone");
 
     let entries = cosine::cosine_repeat(&embedder, &[&only]);
 
     assert_eq!(entries[&0], CosineEntry::Peers(Default::default()));
+    assert_eq!(embedder.calls(), vec![vec!["alone".to_owned()]]);
+}
+
+#[test]
+fn a_single_answer_with_a_failing_embedder_records_the_error() {
+    let embedder = FakeEmbedder::failing("boom");
+    let only = ok_pair(0, 0, "alone");
+    let nothing = err_pair(1, 0);
+
+    let entries = cosine::cosine_repeat(&embedder, &[&only, &nothing]);
+
+    assert_eq!(entries[&0], CosineEntry::Error("boom".into()));
+    assert_eq!(entries[&1], CosineEntry::Skipped);
+}
+
+#[test]
+fn no_answers_at_all_never_call_the_embedder() {
+    let embedder = FakeEmbedder::failing("boom");
+    let nothing = err_pair(0, 0);
+
+    let entries = cosine::cosine_repeat(&embedder, &[&nothing]);
+
+    assert_eq!(entries[&0], CosineEntry::Skipped);
     assert!(embedder.calls().is_empty());
 }
 

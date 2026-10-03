@@ -2,7 +2,6 @@
 //! validate the kits, then run the pairs (sdlc/milestone-2.md, "Command behavior").
 //! Everything that can be refused is refused before the first write.
 
-use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::Path;
 
@@ -232,16 +231,17 @@ fn run_with(
             }
         };
         let repeats = run_config.run.repeat;
-        let mut runtime_errors: BTreeSet<String> = BTreeSet::new();
+        // One warning for the whole run: the first runtime error. Every repeat
+        // still keeps its own message in its pairs' evals.json (PR 69 review M-2).
+        let mut first_runtime_error: Option<String> = None;
         for repeat in 0..repeats {
             let pairs: Vec<&PairOutcome> = outcomes.iter().filter(|o| o.repeat == repeat).collect();
             let entries = cosine::cosine_repeat(embedder.as_ref(), &pairs);
-            if report_runtime_errors {
-                for entry in entries.values() {
-                    if let CosineEntry::Error(message) = entry {
-                        runtime_errors.insert(message.clone());
-                    }
-                }
+            if report_runtime_errors && first_runtime_error.is_none() {
+                first_runtime_error = entries.values().find_map(|entry| match entry {
+                    CosineEntry::Error(message) => Some(message.clone()),
+                    _ => None,
+                });
             }
             if let Err(e) = results::write_cosine(&roots.meta, repeat, &entries) {
                 cosine_saved = false;
@@ -252,7 +252,7 @@ fn run_with(
                 )?;
             }
         }
-        for message in &runtime_errors {
+        if let Some(message) = &first_runtime_error {
             writeln!(warn, "warning: {message}")?;
         }
     }

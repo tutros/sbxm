@@ -140,8 +140,9 @@ impl CosineEntry {
 /// Compares every pair of `pairs` that has a non-empty text answer, all from
 /// the same repeat index (the caller filters `pairs` to one; answers of
 /// different indices must never meet). Never fails: a missing or empty
-/// answer is `Skipped`, one remaining answer gets no peers, and an embedder
-/// error is recorded for every would-be participant instead of propagating.
+/// answer is `Skipped`, one remaining answer gets no peers (but is still
+/// embedded, so a broken model shows), and an embedder error is recorded for
+/// every would-be participant instead of propagating.
 pub fn cosine_repeat(
     embedder: &dyn Embedder,
     pairs: &[&PairOutcome],
@@ -157,10 +158,10 @@ pub fn cosine_repeat(
             }
         }
     }
-    if participants.len() < 2 {
-        for (contestant, _) in &participants {
-            result.insert(*contestant, CosineEntry::Peers(BTreeMap::new()));
-        }
+    // A lone answer has no peers, but it still goes through the embedder: a
+    // model that cannot embed is then recorded as an error instead of looking
+    // like a clean run (PR 69 review M-1).
+    if participants.is_empty() {
         return result;
     }
 

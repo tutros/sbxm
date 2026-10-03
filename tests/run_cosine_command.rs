@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use common::Env;
 use sbxm::backend::{ExecOutput, FakeBackend};
 use sbxm::commands::{run, run_show};
-use sbxm::eval::cosine::{CosineEntry, FailingEmbedder};
+use sbxm::eval::cosine::{CosineEntry, Embedder, FailingEmbedder};
 use sbxm::eval::score;
 use sbxm::run::results;
 use serde_json::Value;
@@ -261,6 +261,72 @@ fn an_already_loaded_embedder_that_fails_at_runtime_is_one_warning_and_leaves_th
     }
     let ranking_without_cosine = score::load(&meta).unwrap().unwrap();
     assert_eq!(ranking_with_cosine, ranking_without_cosine);
+}
+
+/// Fails every call with a different message ("boom 1", "boom 2", ...), as a
+/// model that breaks differently on each repeat would.
+struct ChangingFailure(std::cell::Cell<u32>);
+
+impl Embedder for ChangingFailure {
+    fn embed(&self, _texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
+        let n = self.0.get() + 1;
+        self.0.set(n);
+        Err(anyhow::anyhow!("boom {n}"))
+    }
+}
+
+#[test]
+fn different_runtime_embedding_errors_print_one_warning_and_each_repeat_keeps_its_own_error() {
+    let env = Env::new();
+    let model_dir = garbage_model_dir(&env);
+    let path = env.tmp.path().join("cosine.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "{TASK}{TWO_CLAUDES}[eval.cosine]\nmodel_dir = {}\n[run]\nrepeat = 2\n",
+            toml::Value::String(model_dir.to_str().unwrap().to_owned())
+        ),
+    )
+    .unwrap();
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let embedder = ChangingFailure(std::cell::Cell::new(0));
+    let summary = run::run_with_embedder(
+        &env.config_dir(),
+        &path,
+        &pong(),
+        &mut out,
+        &mut warn,
+        &embedder,
+    )
+    .unwrap();
+    let warn = String::from_utf8(warn).unwrap();
+
+    // Exactly one warning about the embedding failure, even though the two
+    // repeats failed with different messages (the first one is the one shown).
+    assert_eq!(
+        warn.lines().filter(|l| l.contains("boom")).count(),
+        1,
+        "{warn}"
+    );
+
+    // Every repeat still keeps its own actual error in evals.json.
+    let meta = env
+        .base_dir()
+        .join(".sbxm")
+        .join("runs")
+        .join(&summary.run_id);
+    for (repeat, expected) in [(0, "boom 1"), (1, "boom 2")] {
+        for contestant in 0..2 {
+            let entry = read_json(
+                &meta
+                    .join(contestant.to_string())
+                    .join(repeat.to_string())
+                    .join("evals.json"),
+            )["cosine"]
+                .clone();
+            assert_eq!(entry["error"], expected, "{entry}");
+        }
+    }
 }
 
 #[test]
