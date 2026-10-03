@@ -85,15 +85,9 @@ sbxm task run --issue 63               # start and review in one go; stops befor
   of a large dependency tree (fastembed, ONNX Runtime) can fill it: `/tmp/target` reached 17 GB. Keep over 10 GB free
   before starting a sandbox, run one sandbox at a time unless over 25 GB is free, and delete `/tmp/target` in a
   sandbox you keep. Deleting files inside a sandbox does not return space to the host; removing the sandbox does.
-  **To put the sandbox disks on a bigger drive, use a junction** (tested once on Windows with `sbx` 0.46.0: a sandbox
-  created through it put its data on the other drive, kept it across a daemon restart, and left the system drive's free
-  space unchanged). With no sandboxes left: `sbx daemon stop`; check that no `sbx`, `sandboxd` or `containerd` process
-  is running (any `sbx` command, even `sbx ls`, restarts the daemon, so run nothing else meanwhile); copy
-  `%LOCALAPPDATA%\DockerSandboxes\sandboxes\state` to the new drive with `robocopy /MIR` and check the file count and
-  size match; rename the original to `state.bak`; create the junction at the old path
-  (`New-Item -ItemType Junction -Path <old state path> -Target <new state path>`); then `sbx ls` and create a throwaway
-  sandbox to check. Junction the `state` folder, not its parent: renaming `sandboxes` itself was denied by an open
-  handle we could not identify (the child renamed fine). Keep `state.bak` until you are satisfied, then delete it.
+  A junction from `sbx`'s `state` folder to a bigger drive was tried (2026-10-03, `sbx` 0.46.0) and does not work for the
+  `claude` agent: sandbox creation fails with `policybind: resolve policy source`. A plain `shell` sandbox worked, so a
+  quick test with it is not enough. See gap G19 in `sdlc/evals-workflow-notes.md`.
 - **Gates that fit the disk.** `CARGO_PROFILE_DEV_DEBUG=0` in the `[gates]` commands of `sbxm-task.toml` drops debug
   info and should shrink the builds (its effect on this repo's builds was not measured). A full disk shows up as exit 101 with no failing test, so have the gate command print `^error`
   and `No space` lines as well as `FAILED` and `panicked`.

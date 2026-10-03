@@ -380,7 +380,7 @@ Workers run for up to 2 hours and reviewers for 45 minutes by default (`--time-l
 
 Sandbox setup takes about 3 minutes per task (apt, rustup, `cargo install just`). `base_dir` only moves the
 workspace: each sandbox's own disk lives in the folder `sbx` keeps its state in, on the system drive, and `sbx` has no
-setting to move it (a junction from its `state` folder to a bigger drive works; see [`docs/workflow.md`](docs/workflow.md)).
+setting to move it (a junction to a bigger drive was tried and failed for the `claude` agent; see [`docs/workflow.md`](docs/workflow.md)).
 Budget about 7 GB for a fresh sandbox and much more once a large build runs in it: the disk image
 is up to 20 GB for `/` plus a 10 GB Docker volume, and the debug builds of the gates (`check`, `clippy`, `test`
 share one target folder) reached 17 GB for a crate that pulls in `fastembed`. A full disk shows up as a gate that
