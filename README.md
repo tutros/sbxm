@@ -9,6 +9,9 @@ sbxm enforces nothing itself: `sbx` does the isolation, the deny-by-default egre
 turns your config into `sbx` kits, passes them to `sbx create`, and remembers what each sandbox was built from, so it
 can tell you when the config has changed since.
 
+For how the commands fit together (sandboxes, comparisons, working on GitHub issues), with use cases, see
+[`docs/workflow.md`](docs/workflow.md). This file is the reference.
+
 ## Requirements
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) with `sbx` **0.43.0 or newer**, logged in
@@ -350,8 +353,11 @@ refused, because the code would run on your machine.
 
 One-time setup:
 - `just deploy-profiles` copies `profiles/sbxm-dev` into your `profiles_dir` (again after the profile changes). It
-  installs Rust, a C toolchain, PowerShell 7, Pester 5 and `just`, allows crates.io, Microsoft's package host and the
-  PowerShell Gallery, and needs the `anthropic` secret; a Codex reviewer also needs `openai` (`sbx secret ls`).
+  installs Rust, a C toolchain with `pkg-config` and the OpenSSL headers (`openssl-sys` needs them), PowerShell 7,
+  Pester 5 and `just`, allows crates.io, `cdn.pyke.io` (the ONNX Runtime download of the `fastembed` build),
+  Microsoft's package host and the PowerShell Gallery, and needs the `anthropic` secret; a Codex reviewer also needs
+  `openai` (`sbx secret ls`). A worker should not install software itself: what a build needs belongs in the
+  profile's `setup.install`, or a clean sandbox (such as a PR review's) fails where the worker's passed.
 - `sbxm task init` writes `sbxm-task.toml` in the repo's root: the worker, reviewer, profile, gates and time limits.
 - `gh auth status` must show you logged in, and git must be able to clone and push without a prompt: run
   `gh auth setup-git` once. `sbxm` never lets a credential prompt hang; it fails and names that command.
@@ -372,9 +378,19 @@ Workers run for up to 2 hours and reviewers for 45 minutes by default (`--time-l
 `<base_dir>\tasks\<id>`, `<id>-review` and `<id>-gates`. A task killed halfway shows as `interrupted` in
 `task status`; `task start --restart --issue <n>` (after the same confirmation as `task rm`) starts it again.
 
-Sandbox setup takes about 3 minutes per task (apt, rustup, `cargo install just`), and each sandbox's disk lives on
-the drive Docker keeps its state on (about 7 GB while it exists): `sbxm doctor` checks the base dir's free space,
-not that drive's.
+Sandbox setup takes about 3 minutes per task (apt, rustup, `cargo install just`). `base_dir` only moves the
+workspace: each sandbox's own disk lives in the folder `sbx` keeps its state in, on the system drive, and `sbx` has no
+setting to move it. Budget about 7 GB for a fresh sandbox and much more once a large build runs in it: the disk image
+is up to 20 GB for `/` plus a 10 GB Docker volume, and the debug builds of the gates (`check`, `clippy`, `test`
+share one target folder) reached 17 GB for a crate that pulls in `fastembed`. A full disk shows up as a gate that
+fails with exit 101 and no failing test, so keep over 10 GB free before starting a sandbox and run one at a time
+unless 25 GB or more is free. `CARGO_PROFILE_DEV_DEBUG=0` in the `[gates]` commands drops debug info and should
+shrink the builds (its effect on this repo's builds was not measured).
+Deleting files inside a sandbox does not return space to the host; removing the sandbox (`task rm`) does.
+`sbxm doctor` checks the base dir's free space, not the drive `sbx` uses.
+
+[`docs/workflow.md`](docs/workflow.md) shows how the commands fit together, with the use cases and these practical
+notes in one place.
 
 ### Filing review findings as issues
 

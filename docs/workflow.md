@@ -40,7 +40,8 @@ sbxm run show <run-id> [--diff]      # read a saved run
 Each contestant (harness, model, optional profile) gets a fresh copy of an optional seed folder. The answer, the diff
 and the transcript are saved under `<base_dir>/.sbxm/runs/<run-id>/`. Evaluation is optional and combinable:
 executable checks (`[[eval.checks]]`, exit 0 passes), an LLM judge with a rubric that sees blind labels (A, B, ...), and
-a ranking computed in code. Cosine similarity is being added (issue #63).
+cosine similarity between text answers (`[eval.cosine]`, which loads the model from local files named by `model_dir`;
+decision 166). A ranking is computed in code from the judge's scores.
 
 ## Use case 3: GitHub issues to pull requests (`sbxm task`)
 
