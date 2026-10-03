@@ -299,3 +299,32 @@ fn render_never_opens_a_model_file() {
     // saved run folder and the shape of the run.
     let _: fn(&std::path::Path, usize, u32) -> String = cosine::render;
 }
+
+// ---- the real model (decision 166): needs model files on disk, no network ----
+
+/// `cargo test --test eval_cosine -- --ignored`, with `SBXM_TEST_MODEL_DIR`
+/// pointing at a folder holding the five files named in
+/// `cosine::MODEL_FILES` (fetched by hand from `cosine::MODEL_URL_PREFIX`).
+#[test]
+#[ignore]
+fn the_real_model_embeds_sentences_deterministically() {
+    let dir = std::env::var("SBXM_TEST_MODEL_DIR")
+        .expect("set SBXM_TEST_MODEL_DIR to a folder holding the cosine model files");
+    let embedder = cosine::FastEmbedder::from_dir(std::path::Path::new(&dir)).unwrap();
+
+    let texts = vec![
+        "the cat sat on the mat".to_owned(),
+        "a cat is sitting on a mat".to_owned(),
+        "quarterly revenue grew twelve percent".to_owned(),
+    ];
+    let vectors = embedder.embed(&texts).unwrap();
+
+    assert_eq!(vectors[0].len(), 384);
+    let similar = cosine::similarity(&vectors[0], &vectors[1]).unwrap();
+    assert!(similar > 0.9, "{similar}");
+    let unrelated = cosine::similarity(&vectors[0], &vectors[2]).unwrap();
+    assert!(unrelated < 0.1, "{unrelated}");
+
+    let again = embedder.embed(&texts[..1]).unwrap();
+    assert_eq!(again[0], vectors[0]);
+}
