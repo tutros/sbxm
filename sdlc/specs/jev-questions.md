@@ -82,8 +82,8 @@ What follows (to be decided and planned):
   harness is an authoritative price source, and prices change as new and cheaper models arrive, so this is a versioned
   file in config that each run records the version of. That is not an external service, only a maintained table.
 - **Subscription logins make dollars notional.** Most harness accounts here are OAuth subscriptions, so no dollars are
-  actually charged per run; a dollar figure is list-price equivalent (Claude Code's own `total_cost_usd` is a list-price
-  figure; whether it is also reported under a subscription was not checked). Whether the routing cost is list-price dollars,
+  actually charged per run; a dollar figure is list-price equivalent (Claude Code's own `total_cost_usd` is presumably
+  computed from list prices; neither that nor whether it is reported under a subscription login was checked). Whether the routing cost is list-price dollars,
   quota used, or tokens alone is the user's call.
 - **Wall time** is measured by sbxm itself (it needs no harness figure).
 - Jev's own calls are cheap and report `usage` ($0.042 per 1M input tokens), so the classifier's cost can be included.
