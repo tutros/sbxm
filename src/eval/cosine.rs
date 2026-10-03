@@ -4,6 +4,7 @@
 //! the model files are on disk.
 
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -178,4 +179,96 @@ pub fn cosine_repeat(
         }
     }
     result
+}
+
+/// One similarity line per repeat that has cosine data, after the ranking
+/// (issue #63): the pairs' values, two decimals, in blind-label order when
+/// the judge scored that repeat (the mapping comes from its saved
+/// `judge/<repeat>/judge.json`), else by contestant index. Only reads saved
+/// files; never loads a model.
+pub fn render(meta: &Path, contestants: usize, repeats: u32) -> String {
+    let mut out = String::new();
+    for repeat in 0..repeats {
+        let pairs = load_repeat(meta, contestants, repeat);
+        if pairs.is_empty() {
+            continue;
+        }
+        let labels = judge_labels(meta, repeat);
+        let mut parts: Vec<(String, f32)> = pairs
+            .into_iter()
+            .map(|(a, b, sim)| {
+                let name = match &labels {
+                    Some(l) => {
+                        let mut letters = [
+                            l.get(&a).copied().unwrap_or('?'),
+                            l.get(&b).copied().unwrap_or('?'),
+                        ];
+                        letters.sort_unstable();
+                        format!("{}-{}", letters[0], letters[1])
+                    }
+                    None => format!("{a}-{b}"),
+                };
+                (name, sim)
+            })
+            .collect();
+        parts.sort_by(|x, y| x.0.cmp(&y.0));
+        let text: Vec<String> = parts.iter().map(|(n, s)| format!("{n} {s:.2}")).collect();
+        let _ = writeln!(
+            out,
+            "Similarity repeat {}/{repeats}: {}",
+            repeat + 1,
+            text.join(", ")
+        );
+    }
+    out
+}
+
+/// Each unique (lower, higher) contestant pair of `repeat` with its
+/// similarity, read from every contestant's own `evals.json["cosine"]["peers"]`.
+fn load_repeat(meta: &Path, contestants: usize, repeat: u32) -> Vec<(usize, usize, f32)> {
+    let mut out = Vec::new();
+    for c in 0..contestants {
+        let path = meta
+            .join(c.to_string())
+            .join(repeat.to_string())
+            .join("evals.json");
+        let Ok(text) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        let Some(peers) = value["cosine"]["peers"].as_object() else {
+            continue;
+        };
+        for (other, sim) in peers {
+            let Ok(other) = other.parse::<usize>() else {
+                continue;
+            };
+            let Some(sim) = sim.as_f64() else { continue };
+            if other > c {
+                out.push((c, other, sim as f32));
+            }
+        }
+    }
+    out
+}
+
+/// The judge's blind-label mapping for `repeat`, if it scored one, from
+/// `judge/<repeat>/judge.json` (written by [`crate::run::results::write_judge`]).
+fn judge_labels(meta: &Path, repeat: u32) -> Option<BTreeMap<usize, char>> {
+    let path = meta
+        .join("judge")
+        .join(repeat.to_string())
+        .join("judge.json");
+    let text = std::fs::read_to_string(path).ok()?;
+    let value: Value = serde_json::from_str(&text).ok()?;
+    let labels = value["labels"].as_object()?;
+    let mut map = BTreeMap::new();
+    for (label, contestant) in labels {
+        let contestant = contestant.as_u64()? as usize;
+        let label = label.chars().next()?;
+        map.insert(contestant, label);
+    }
+    Some(map)
 }

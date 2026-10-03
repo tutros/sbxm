@@ -3,11 +3,14 @@
 //! repeat index - against a fake `Embedder` (no model, no network).
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use sbxm::eval::cosine::{self, CosineEntry, Embedder};
 use sbxm::headless::{HeadlessResult, RunStatus, Usage};
 use sbxm::run::orchestrate::PairOutcome;
+use sbxm::run::results;
+use serde_json::json;
 
 /// Returns a fixed vector per text (looked up by exact match) and records
 /// every call, so a test can assert whether (and with what) it was invoked.
@@ -239,4 +242,60 @@ fn the_json_shapes_match_the_spec() {
         CosineEntry::Error("oops".into()).to_json(),
         serde_json::json!({"error": "oops"})
     );
+}
+
+// ---- display: reads saved files, never a model --------------------------------
+
+fn peers(pairs: &[(usize, f32)]) -> BTreeMap<usize, f32> {
+    pairs.iter().copied().collect()
+}
+
+#[test]
+fn render_shows_each_pairs_similarity_by_contestant_index_with_two_decimals() {
+    let meta = tempfile::TempDir::new().unwrap();
+    let mut entries = BTreeMap::new();
+    entries.insert(0, CosineEntry::Peers(peers(&[(1, 0.9305)])));
+    entries.insert(1, CosineEntry::Peers(peers(&[(0, 0.9305)])));
+    results::write_cosine(meta.path(), 0, &entries).unwrap();
+
+    let text = cosine::render(meta.path(), 2, 1);
+
+    assert_eq!(text, "Similarity repeat 1/1: 0-1 0.93\n");
+}
+
+#[test]
+fn render_skips_a_repeat_with_no_cosine_data() {
+    let meta = tempfile::TempDir::new().unwrap();
+
+    let text = cosine::render(meta.path(), 2, 1);
+
+    assert_eq!(text, "");
+}
+
+#[test]
+fn render_uses_blind_labels_when_the_judge_scored_that_repeat() {
+    let meta = tempfile::TempDir::new().unwrap();
+    let mut entries = BTreeMap::new();
+    entries.insert(0, CosineEntry::Peers(peers(&[(1, 0.5)])));
+    entries.insert(1, CosineEntry::Peers(peers(&[(0, 0.5)])));
+    results::write_cosine(meta.path(), 0, &entries).unwrap();
+    // Contestant 0 is judged under label B, contestant 1 under A.
+    let judge_dir = meta.path().join("judge").join("0");
+    std::fs::create_dir_all(&judge_dir).unwrap();
+    std::fs::write(
+        judge_dir.join("judge.json"),
+        json!({"labels": {"B": 0, "A": 1}}).to_string(),
+    )
+    .unwrap();
+
+    let text = cosine::render(meta.path(), 2, 1);
+
+    assert_eq!(text, "Similarity repeat 1/1: A-B 0.50\n");
+}
+
+#[test]
+fn render_never_opens_a_model_file() {
+    // The signature alone proves it: no Embedder, no model_dir, just the
+    // saved run folder and the shape of the run.
+    let _: fn(&std::path::Path, usize, u32) -> String = cosine::render;
 }
