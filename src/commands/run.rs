@@ -2,6 +2,7 @@
 //! validate the kits, then run the pairs (sdlc/milestone-2.md, "Command behavior").
 //! Everything that can be refused is refused before the first write.
 
+use std::collections::BTreeSet;
 use std::io::Write;
 use std::path::Path;
 
@@ -9,7 +10,7 @@ use anyhow::{Result, bail};
 
 use crate::backend::SandboxBackend;
 use crate::config::GlobalConfig;
-use crate::eval::cosine::{self, Embedder, FailingEmbedder, FastEmbedder};
+use crate::eval::cosine::{self, CosineEntry, Embedder, FailingEmbedder, FastEmbedder};
 use crate::eval::{judge, score};
 use crate::headless::RunStatus;
 use crate::run::config::RunConfig;
@@ -30,6 +31,32 @@ pub fn run(
     backend: &dyn SandboxBackend,
     out: &mut dyn Write,
     warn: &mut dyn Write,
+) -> Result<Summary> {
+    run_with(config_dir, config_path, backend, out, warn, None)
+}
+
+/// Like [`run`], but runs `[eval.cosine]` (if configured) against `embedder`
+/// instead of loading `FastEmbedder` from `model_dir`: a seam for testing the
+/// runtime embedding-failure path (an already-loaded model whose `embed`
+/// call fails) without a real model file (issue #63 review finding M-1).
+pub fn run_with_embedder(
+    config_dir: &Path,
+    config_path: &Path,
+    backend: &dyn SandboxBackend,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+    embedder: &dyn Embedder,
+) -> Result<Summary> {
+    run_with(config_dir, config_path, backend, out, warn, Some(embedder))
+}
+
+fn run_with(
+    config_dir: &Path,
+    config_path: &Path,
+    backend: &dyn SandboxBackend,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+    embedder_override: Option<&dyn Embedder>,
 ) -> Result<Summary> {
     let run_config = RunConfig::load(config_path)?;
     let checked = preflight::check(config_dir, &run_config, backend)?;
@@ -183,22 +210,39 @@ pub fn run(
 
     // Cosine compares same-repeat-index answers, like the judge, but needs no
     // sandbox: a model-load failure is one warning, recorded on every
-    // participant, never fatal (decision 166, issue #63).
+    // participant, never fatal (decision 166, issue #63). An already-loaded
+    // model whose `embed` call fails at runtime gets the same treatment: one
+    // warning for the whole run, not duplicated with the load-failure
+    // warning above (review finding M-1).
     let mut cosine_saved = true;
     if let Some(cosine_cfg) = &run_config.eval.cosine {
-        let model_dir = cosine_cfg.resolve_model_dir(config_dir);
-        let loaded = FastEmbedder::from_dir(&model_dir);
-        if let Err(e) = &loaded {
-            writeln!(warn, "warning: {e:#}")?;
-        }
-        let embedder: Box<dyn Embedder> = match loaded {
-            Ok(e) => Box::new(e),
-            Err(e) => Box::new(FailingEmbedder(format!("{e:#}"))),
+        let (embedder, report_runtime_errors): (Box<dyn Embedder>, bool) = match embedder_override {
+            Some(e) => (Box::new(e), true),
+            None => {
+                let model_dir = cosine_cfg.resolve_model_dir(config_dir);
+                let loaded = FastEmbedder::from_dir(&model_dir);
+                let model_loaded = loaded.is_ok();
+                if let Err(e) = &loaded {
+                    writeln!(warn, "warning: {e:#}")?;
+                }
+                let embedder = loaded
+                    .map(|e| Box::new(e) as Box<dyn Embedder>)
+                    .unwrap_or_else(|e| Box::new(FailingEmbedder(format!("{e:#}"))));
+                (embedder, model_loaded)
+            }
         };
         let repeats = run_config.run.repeat;
+        let mut runtime_errors: BTreeSet<String> = BTreeSet::new();
         for repeat in 0..repeats {
             let pairs: Vec<&PairOutcome> = outcomes.iter().filter(|o| o.repeat == repeat).collect();
             let entries = cosine::cosine_repeat(embedder.as_ref(), &pairs);
+            if report_runtime_errors {
+                for entry in entries.values() {
+                    if let CosineEntry::Error(message) = entry {
+                        runtime_errors.insert(message.clone());
+                    }
+                }
+            }
             if let Err(e) = results::write_cosine(&roots.meta, repeat, &entries) {
                 cosine_saved = false;
                 writeln!(
@@ -207,6 +251,9 @@ pub fn run(
                     repeat + 1
                 )?;
             }
+        }
+        for message in &runtime_errors {
+            writeln!(warn, "warning: {message}")?;
         }
     }
 

@@ -45,6 +45,15 @@ impl Embedder for FailingEmbedder {
     }
 }
 
+/// Lets a borrowed `Embedder` stand in wherever a `Box<dyn Embedder>` is
+/// expected (`commands::run::run_with_embedder`'s test seam, issue #63 review
+/// M-1): an already-loaded fake can be passed by reference instead of boxed.
+impl Embedder for &dyn Embedder {
+    fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        (**self).embed(texts)
+    }
+}
+
 /// `fastembed`'s `all-MiniLM-L6-v2`, loaded from local files (decision 166):
 /// `fastembed`'s own downloader fails on a machine whose HTTPS is
 /// intercepted. `embed` takes `&mut self` upstream, so the session sits

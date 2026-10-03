@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 use common::Env;
 use sbxm::backend::{ExecOutput, FakeBackend};
 use sbxm::commands::{run, run_show};
-use sbxm::eval::cosine::CosineEntry;
+use sbxm::eval::cosine::{CosineEntry, FailingEmbedder};
+use sbxm::eval::score;
 use sbxm::run::results;
 use serde_json::Value;
 
@@ -163,6 +164,103 @@ fn a_cosine_model_failure_leaves_the_judges_ranking_unaffected() {
     );
     assert!(out.contains("1. contestants["), "{out}");
     let _ = summary;
+}
+
+fn judge_backend() -> FakeBackend {
+    pong().with_exec_output_matching(
+        "judge-prompt.md",
+        ExecOutput {
+            stdout: {
+                let result = serde_json::json!({
+                    "type": "result", "subtype": "success", "is_error": false,
+                    "result": serde_json::json!({
+                        "A": {"correctness": {"value": true, "reason": "ok"}},
+                        "B": {"correctness": {"value": false, "reason": "no"}},
+                    }).to_string(),
+                    "usage": {"input_tokens": 1, "output_tokens": 1}
+                });
+                format!("{result}\n")
+            },
+            stderr: String::new(),
+            exit_code: Some(0),
+        },
+    )
+}
+
+#[test]
+fn an_already_loaded_embedder_that_fails_at_runtime_is_one_warning_and_leaves_the_ranking_unchanged()
+ {
+    let env = Env::new();
+    let model_dir = garbage_model_dir(&env);
+    let backend = judge_backend();
+
+    // The embedder is already "loaded" (no model dir is ever read, so this
+    // is never the model-load-failure path) and fails every `embed` call.
+    let path = env.tmp.path().join("cosine.toml");
+    std::fs::write(
+        &path,
+        format!(
+            "{TASK}{TWO_CLAUDES}{RUBRIC_AND_JUDGE}[eval.cosine]\nmodel_dir = {}\n[run]\nrepeat = 2\n",
+            toml::Value::String(model_dir.to_str().unwrap().to_owned())
+        ),
+    )
+    .unwrap();
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let embedder = FailingEmbedder("boom".into());
+    let summary = run::run_with_embedder(
+        &env.config_dir(),
+        &path,
+        &backend,
+        &mut out,
+        &mut warn,
+        &embedder,
+    )
+    .unwrap();
+    let warn = String::from_utf8(warn).unwrap();
+
+    // Exactly one warning line mentions the embedding failure, not one per
+    // repeat (the judge/contestant same-provider warning is unrelated).
+    assert_eq!(
+        warn.lines().filter(|l| l.contains("boom")).count(),
+        1,
+        "{warn}"
+    );
+
+    let meta = env
+        .base_dir()
+        .join(".sbxm")
+        .join("runs")
+        .join(&summary.run_id);
+    for repeat in 0..2 {
+        for contestant in 0..2 {
+            let entry = read_json(
+                &meta
+                    .join(contestant.to_string())
+                    .join(repeat.to_string())
+                    .join("evals.json"),
+            )["cosine"]
+                .clone();
+            assert!(entry["error"].is_string(), "{entry}");
+        }
+    }
+    let record = read_json(&meta.join("run.json"));
+    assert!(record["completed_at"].is_string());
+
+    // The ranking is computed only from the judge's and checks' saved data
+    // (eval/score.rs never reads "cosine"); prove it by stripping the
+    // "cosine" key the run just wrote from every pair's evals.json and
+    // recomputing - the ranking must come out identical.
+    let ranking_with_cosine = score::load(&meta).unwrap().unwrap();
+    for repeat in 0..2 {
+        for contestant in 0..2 {
+            let dir = meta.join(contestant.to_string()).join(repeat.to_string());
+            let mut evals = read_json(&dir.join("evals.json"));
+            evals.as_object_mut().unwrap().remove("cosine");
+            std::fs::write(dir.join("evals.json"), evals.to_string()).unwrap();
+        }
+    }
+    let ranking_without_cosine = score::load(&meta).unwrap().unwrap();
+    assert_eq!(ranking_with_cosine, ranking_without_cosine);
 }
 
 #[test]
