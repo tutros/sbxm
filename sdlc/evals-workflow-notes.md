@@ -79,7 +79,7 @@ text is still in git history (commit `bf3cb2b`); rewriting `main` was not done.
 
 ## Next session (agenda, in this order)
 
-1. **Interview: continuing work on an open PR (G16, G17, G25).** Questions to settle, each with a recommendation:
+1. **Interview: continuing work on an open PR (G16, G17, G25) — DONE 2026-10-03, decision 169 (all findings are issues; an issue tied to a PR continues its branch). Labels, format and duplicates settled; implementation issues filed.** Original questions:
    shape (`task fix --pr`, a fix round in `task review --pr`, or `task start --pr`); who pushes to an existing PR
    branch and behind which flag; whether a re-review replaces or extends the old task; recreate or always use a
    fresh sandbox for a fix round. Output: a numbered decision in `sdlc/decisions.md`, issues with acceptance
