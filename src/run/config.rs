@@ -88,9 +88,23 @@ pub struct Judge {
     pub model: String,
 }
 
-/// `[eval.cosine]` takes no options.
-#[derive(Debug, Clone)]
-pub struct Cosine;
+/// `[eval.cosine]` (decision 166): `model_dir` is resolved against the
+/// run-config's folder, like `task.seed`; `None` means "use the default",
+/// which only [`crate::run::preflight`] and the runner can resolve (they
+/// know the sbxm config dir, which this module never touches).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cosine {
+    pub model_dir: Option<PathBuf>,
+}
+
+impl Cosine {
+    /// `model_dir`, or `<config_dir>/models/all-minilm-l6-v2` (decision 166).
+    pub fn resolve_model_dir(&self, config_dir: &Path) -> PathBuf {
+        self.model_dir
+            .clone()
+            .unwrap_or_else(|| config_dir.join("models").join("all-minilm-l6-v2"))
+    }
+}
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -169,7 +183,9 @@ struct RawJudge {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawCosine {}
+struct RawCosine {
+    model_dir: Option<PathBuf>,
+}
 
 impl RunConfig {
     /// Reads and validates `path`. Nothing else is touched: the seed, the
@@ -285,10 +301,6 @@ impl Validator<'_> {
     }
 
     fn eval(&self, raw: RawEval) -> Result<EvalConfig> {
-        if raw.cosine.is_some() {
-            return Err(self.err("[eval.cosine] isn't implemented yet; remove it"));
-        }
-
         let mut seen = HashSet::new();
         let mut checks = Vec::new();
         for (i, c) in raw.checks.into_iter().enumerate() {
@@ -367,11 +379,18 @@ impl Validator<'_> {
             }
             None => None,
         };
+        let cosine = raw.cosine.map(|c| Cosine {
+            model_dir: c.model_dir.map(|dir| {
+                self.path
+                    .parent()
+                    .map_or_else(|| dir.clone(), |base| base.join(&dir))
+            }),
+        });
         Ok(EvalConfig {
             checks,
             rubric,
             judge,
-            cosine: raw.cosine.map(|_| Cosine),
+            cosine,
         })
     }
 

@@ -148,6 +148,7 @@ fn unknown_keys_are_errors_at_every_level_and_name_the_file() {
             "judge",
             valid("[eval.judge]\nharness = \"claude\"\nmodel = \"m\"\nbogus = 1\n"),
         ),
+        ("cosine", valid("[eval.cosine]\nbogus = 1\n")),
     ] {
         let err = load_err(&body);
         assert!(
@@ -158,19 +159,33 @@ fn unknown_keys_are_errors_at_every_level_and_name_the_file() {
 }
 
 #[test]
-fn cosine_is_rejected_until_implemented() {
-    let env = Env::new();
-    let path = write(&env, &valid("[eval.cosine]\n"));
+fn cosine_with_no_model_dir_uses_the_default() {
+    let config = load_ok(&valid("[eval.cosine]\n"));
 
-    let err = format!("{:#}", RunConfig::load(&path).unwrap_err());
+    assert_eq!(config.eval.cosine.as_ref().unwrap().model_dir, None);
+}
+
+#[test]
+fn cosine_with_an_explicit_model_dir_resolves_it_against_the_config_file() {
+    let env = Env::new();
+    let path = write(
+        &env,
+        &valid("[eval.cosine]\nmodel_dir = \"./models/mini\"\n"),
+    );
+
+    let config = RunConfig::load(&path).unwrap();
 
     assert_eq!(
-        err,
-        format!(
-            "run-config {}: [eval.cosine] isn't implemented yet; remove it",
-            path.display()
-        )
+        config.eval.cosine.unwrap().model_dir,
+        Some(env.tmp.path().join("models").join("mini"))
     );
+}
+
+#[test]
+fn without_eval_cosine_there_is_none() {
+    let config = load_ok(&valid(""));
+
+    assert!(config.eval.cosine.is_none());
 }
 
 #[test]
