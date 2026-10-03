@@ -94,6 +94,49 @@ fn issue_edit_sends_the_body_on_stdin() {
     assert_eq!(calls[0].1.as_deref(), Some("new body\n"));
 }
 
+#[test]
+fn issue_labels_adds_and_removes_by_name() {
+    let (gh, script) = backend("");
+
+    gh.issue_labels("o/r", 12, &["must-fix".into()], &["should-fix".into()])
+        .unwrap();
+
+    assert_eq!(
+        script.calls.lock().unwrap()[0].0,
+        [
+            "issue",
+            "edit",
+            "12",
+            "--repo",
+            "o/r",
+            "--add-label",
+            "must-fix",
+            "--remove-label",
+            "should-fix"
+        ]
+    );
+}
+
+#[test]
+fn the_fake_applies_label_changes() {
+    let fake = FakeGitHub::default().with_issues(vec![Issue {
+        number: 7,
+        open: true,
+        title: "old".into(),
+        labels: vec!["bug".into(), "should-fix".into()],
+        body: "b".into(),
+    }]);
+
+    fake.issue_labels("o/r", 7, &["must-fix".into()], &["should-fix".into()])
+        .unwrap();
+
+    assert_eq!(
+        fake.issues_all("o/r", 10).unwrap()[0].labels,
+        ["bug", "must-fix"]
+    );
+    assert!(fake.issue_labels("o/r", 3, &[], &[]).is_err());
+}
+
 fn request(title: &str, body: &str) -> IssueRequest {
     IssueRequest {
         title: title.to_owned(),

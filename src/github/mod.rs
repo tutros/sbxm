@@ -76,4 +76,12 @@ pub trait GitHubBackend: Send + Sync {
     fn issues_all(&self, repo: &str, limit: u32) -> Result<Vec<Issue>>;
     /// Replaces an issue's body.
     fn issue_edit(&self, repo: &str, number: u32, body: &str) -> Result<()>;
+    /// Adds and removes labels on an issue, leaving its other labels alone.
+    fn issue_labels(
+        &self,
+        repo: &str,
+        number: u32,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()>;
 }

@@ -358,6 +358,7 @@ fn file(
         );
     }
     let mut numbers: BTreeMap<String, u32> = BTreeMap::new();
+    let mut relabel: BTreeMap<String, LabelChange> = BTreeMap::new();
     for finding in &parsed.findings {
         let wanted = marker(&posted_name, &finding.id);
         let title = format!("{}: {}", finding.id, finding.title);
@@ -370,6 +371,14 @@ fn file(
         });
         if let Some(issue) = duplicate {
             numbers.insert(finding.id.clone(), issue.number);
+            // An issue adopted by title and PR wasn't filed by this command, so it may lack the
+            // section's label or carry another severity's (decision 169).
+            if !issue.body.contains(&wanted)
+                && let Some(done) = prepared.iter().find(|p| p.id == finding.id)
+                && let Some(change) = label_change(&issue.labels, &done.label)
+            {
+                relabel.insert(finding.id.clone(), change);
+            }
         }
     }
     let to_create: Vec<&Finding> = prepared
@@ -420,7 +429,14 @@ fn file(
     if !opts.create {
         for finding in &prepared {
             if let Some(number) = numbers.get(&finding.id) {
-                writeln!(out, "{} skipped (exists #{number})", finding.id)?;
+                write!(out, "{} skipped (exists #{number})", finding.id)?;
+                if let Some(change) = relabel.get(&finding.id) {
+                    write!(out, ", would label it {}", change.add.join(", "))?;
+                    if !change.remove.is_empty() {
+                        write!(out, " (removing {})", change.remove.join(", "))?;
+                    }
+                }
+                writeln!(out)?;
                 continue;
             }
             writeln!(
@@ -494,6 +510,16 @@ fn file(
         }
     }
 
+    // Adopted duplicates get the section's label in place of another severity's.
+    let mut relabeled: Vec<&str> = Vec::new();
+    for (id, change) in &relabel {
+        let number = numbers[id];
+        match github.issue_labels(&repo, number, &change.add, &change.remove) {
+            Ok(()) => relabeled.push(id),
+            Err(e) => failure = Some(format!("#{number} labels: {e:#}")),
+        }
+    }
+
     set_issues_line(
         path,
         &issues_line(&parsed.findings, &numbers, &[], "#?"),
@@ -503,6 +529,8 @@ fn file(
     for finding in &prepared {
         let status = if created.iter().any(|(f, ..)| f.id == finding.id) {
             "created"
+        } else if relabeled.contains(&finding.id.as_str()) {
+            &format!("skipped (exists, labeled {})", finding.label)
         } else if numbers.contains_key(&finding.id) {
             "skipped (exists)"
         } else {
@@ -531,6 +559,28 @@ fn file(
         bail!("stopped early: {failure}; rerun to file the rest (existing issues are skipped)");
     }
     Ok(())
+}
+
+/// The labels an existing issue gains and loses so that `label` is its only review severity.
+struct LabelChange {
+    add: Vec<String>,
+    remove: Vec<String>,
+}
+
+const SEVERITY_LABELS: [&str; 3] = ["must-fix", "should-fix", "question"];
+
+fn label_change(labels: &[String], label: &str) -> Option<LabelChange> {
+    let add: Vec<String> = if labels.iter().any(|l| l == label) {
+        Vec::new()
+    } else {
+        vec![label.to_owned()]
+    };
+    let remove: Vec<String> = labels
+        .iter()
+        .filter(|l| *l != label && SEVERITY_LABELS.contains(&l.as_str()))
+        .cloned()
+        .collect();
+    (!add.is_empty() || !remove.is_empty()).then_some(LabelChange { add, remove })
 }
 
 /// Replaces the first `Issues:` line and nothing else: the file's line endings and byte order

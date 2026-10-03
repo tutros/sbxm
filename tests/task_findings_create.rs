@@ -99,6 +99,7 @@ fn writes(github: &FakeGitHub) -> Vec<String> {
         .filter_map(|call| match call {
             GhCall::IssueCreate(..) => Some("create".to_owned()),
             GhCall::IssueEdit(_, number, _) => Some(format!("edit {number}")),
+            GhCall::IssueLabels(_, number, ..) => Some(format!("label {number}")),
             _ => None,
         })
         .collect()
@@ -274,6 +275,61 @@ fn a_duplicate_by_title_and_pr_is_skipped_without_creating_a_new_issue() {
     let second = setup.file(&path, &gh, true, |o| o.pr = Some(7));
     assert!(second.result.is_ok(), "{}", second.error());
     assert_eq!(issues(&gh).len(), before);
+}
+
+#[test]
+fn an_adopted_duplicate_gets_its_sections_label() {
+    let setup = Setup::new();
+    let gh = github().with_issues(vec![Issue {
+        number: 77,
+        open: true,
+        title: "S-1: Thing breaks".into(),
+        labels: vec![],
+        body: "PR: #7\nold body, no marker\n".into(),
+    }]);
+    let path = setup.write("review-small.md", small().as_bytes());
+    let run = setup.file(&path, &gh, true, |o| o.pr = Some(7));
+
+    assert!(run.result.is_ok(), "{}", run.error());
+    assert_eq!(issues(&gh)[0].labels, ["must-fix"]);
+    assert!(
+        run.out.contains("#77") && run.out.contains("skipped (exists, labeled must-fix)"),
+        "{}",
+        run.out
+    );
+
+    // A rerun finds the label in place and changes nothing.
+    let before = writes(&gh).len();
+    let second = setup.file(&path, &gh, true, |o| o.pr = Some(7));
+    assert!(second.result.is_ok(), "{}", second.error());
+    assert_eq!(writes(&gh).len(), before, "{:?}", writes(&gh));
+}
+
+#[test]
+fn an_adopted_duplicates_other_severity_label_is_replaced_and_other_labels_stay() {
+    let setup = Setup::new();
+    let gh = github().with_issues(vec![Issue {
+        number: 77,
+        open: true,
+        title: "S-1: Thing breaks".into(),
+        labels: vec!["bug".into(), "should-fix".into()],
+        body: "PR: #7\nold body, no marker\n".into(),
+    }]);
+    let path = setup.write("review-small.md", small().as_bytes());
+    let run = setup.file(&path, &gh, true, |o| o.pr = Some(7));
+
+    assert!(run.result.is_ok(), "{}", run.error());
+    assert_eq!(issues(&gh)[0].labels, ["bug", "must-fix"]);
+    assert!(
+        gh.calls().contains(&GhCall::IssueLabels(
+            "o/r".into(),
+            77,
+            vec!["must-fix".into()],
+            vec!["should-fix".into()]
+        )),
+        "{:?}",
+        gh.calls()
+    );
 }
 
 #[test]
