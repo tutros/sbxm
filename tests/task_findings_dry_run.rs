@@ -460,6 +460,7 @@ fn a_short_sha_is_resolved_by_git_or_the_links_stay_text() {
 fn marked(number: u32, id: &str) -> Issue {
     Issue {
         number,
+        open: true,
         title: format!("{id}: old"),
         labels: vec![],
         body: format!("x\n<!-- review-finding: review-small.md#{id} -->\n"),
@@ -504,6 +505,7 @@ fn an_issue_list_as_long_as_the_limit_stops_the_run() {
     let issues = (1..=1000)
         .map(|n| Issue {
             number: n,
+            open: true,
             title: format!("t{n}"),
             labels: vec![],
             body: String::new(),

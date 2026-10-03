@@ -194,6 +194,7 @@ fn a_second_run_creates_nothing_and_reuses_the_numbers() {
 fn marked(number: u32, id: &str) -> Issue {
     Issue {
         number,
+        open: true,
         title: format!("{id}: old"),
         labels: vec![],
         body: format!("x\n<!-- review-finding: review-small.md#{id} -->\n"),
@@ -239,6 +240,7 @@ fn a_duplicate_by_title_and_pr_is_skipped_without_creating_a_new_issue() {
     let setup = Setup::new();
     let gh = github().with_issues(vec![Issue {
         number: 77,
+        open: true,
         title: "S-1: Thing breaks".into(),
         labels: vec![],
         body: "PR: #7\nold body, no marker\n".into(),
@@ -275,10 +277,35 @@ fn a_duplicate_by_title_and_pr_is_skipped_without_creating_a_new_issue() {
 }
 
 #[test]
+fn a_closed_issue_with_the_same_title_and_pr_is_not_a_duplicate() {
+    let setup = Setup::new();
+    let gh = github().with_issues(vec![Issue {
+        number: 77,
+        open: false,
+        title: "S-1: Thing breaks".into(),
+        labels: vec!["must-fix".into()],
+        body: "PR: #7\nold body, no marker\n".into(),
+    }]);
+    let path = setup.write("review-small.md", small().as_bytes());
+    let run = setup.file(&path, &gh, true, |o| o.pr = Some(7));
+
+    assert!(run.result.is_ok(), "{}", run.error());
+    let s1: Vec<Issue> = issues(&gh)
+        .into_iter()
+        .filter(|i| i.title.starts_with("S-1"))
+        .collect();
+    assert_eq!(s1.len(), 2, "a new S-1 issue next to the closed one");
+    assert!(s1[1].open);
+    assert_eq!(s1[1].labels, ["must-fix"]);
+    assert!(!run.out.contains("#77"), "{}", run.out);
+}
+
+#[test]
 fn a_title_match_with_a_different_pr_is_not_a_duplicate() {
     let setup = Setup::new();
     let gh = github().with_issues(vec![Issue {
         number: 77,
+        open: true,
         title: "S-1: Thing breaks".into(),
         labels: vec![],
         body: "PR: #9\nold body, no marker\n".into(),

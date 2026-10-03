@@ -52,7 +52,7 @@ fn issues_all_lists_every_state_up_to_the_limit() {
             "--limit",
             "1000",
             "--json",
-            "number,title,labels,body"
+            "number,title,labels,body,state"
         ]
     );
     assert_eq!(
@@ -60,6 +60,24 @@ fn issues_all_lists_every_state_up_to_the_limit() {
         [38, 36, 31]
     );
     assert!(issues[2].body.contains("**Acceptance criteria:**"));
+    assert!(issues.iter().all(|i| i.open));
+}
+
+#[test]
+fn a_closed_issue_in_the_list_is_not_open() {
+    let (gh, _) = backend(
+        r#"[{"number":5,"state":"CLOSED","title":"t","labels":[],"body":""},{"number":6,"state":"OPEN","title":"u","labels":[],"body":""}]"#,
+    );
+
+    let issues = gh.issues_all("o/r", 1000).unwrap();
+
+    assert_eq!(
+        issues
+            .iter()
+            .map(|i| (i.number, i.open))
+            .collect::<Vec<_>>(),
+        [(5, false), (6, true)]
+    );
 }
 
 #[test]
@@ -90,6 +108,7 @@ fn the_fake_lists_scripted_and_created_issues_and_applies_edits() {
         .with_next_issue_number(40)
         .with_issues(vec![Issue {
             number: 7,
+            open: true,
             title: "old".into(),
             labels: vec![],
             body: "b".into(),

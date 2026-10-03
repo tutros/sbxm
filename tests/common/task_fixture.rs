@@ -111,6 +111,7 @@ pub fn issue_text(number: u32) -> IssueText {
 pub fn open_issue(number: u32, labels: &[&str], body: &str) -> Issue {
     Issue {
         number,
+        open: true,
         title: format!("Fix {number}"),
         labels: labels.iter().map(|l| (*l).to_owned()).collect(),
         body: body.to_owned(),

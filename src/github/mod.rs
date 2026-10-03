@@ -6,10 +6,12 @@ pub mod gh;
 
 use anyhow::Result;
 
-/// An open issue as `gh issue list` reports it.
+/// An issue as `gh issue list` reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Issue {
     pub number: u32,
+    /// `false` for a closed issue; only `issues_all` lists those.
+    pub open: bool,
     pub title: String,
     pub labels: Vec<String>,
     pub body: String,

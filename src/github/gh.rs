@@ -85,12 +85,13 @@ impl GhBackend {
             "--limit",
             &limit.to_string(),
             "--json",
-            "number,title,labels,body",
+            "number,title,labels,body,state",
         ]))?;
         Ok(raw
             .into_iter()
             .map(|i| Issue {
                 number: i.number,
+                open: i.state.eq_ignore_ascii_case("open"),
                 title: i.title,
                 labels: i.labels.into_iter().map(|l| l.name).collect(),
                 body: i.body,
@@ -107,6 +108,7 @@ struct Named {
 #[derive(Deserialize)]
 struct RawIssue {
     number: u32,
+    state: String,
     title: String,
     #[serde(default)]
     labels: Vec<Named>,

@@ -190,6 +190,7 @@ impl GitHubBackend for FakeGitHub {
         *next += 1;
         self.all_issues.lock().unwrap().push(Issue {
             number,
+            open: true,
             title: request.title.clone(),
             labels: request.labels.clone(),
             body: request.body.clone(),

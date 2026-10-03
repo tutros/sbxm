@@ -75,7 +75,7 @@ fn open_issues_are_parsed_with_label_names() {
             "--limit",
             "200",
             "--json",
-            "number,title,labels,body"
+            "number,title,labels,body,state"
         ]
     );
     assert_eq!(

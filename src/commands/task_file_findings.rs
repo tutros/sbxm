@@ -346,7 +346,8 @@ fn file(
         );
     }
 
-    // What exists already: a finding whose marker is in an issue body keeps that number.
+    // What exists already: a finding whose marker is in an issue body, in any state, keeps that
+    // number; so does one with an open issue of the same title and PR (decision 169).
     let listed = github.issues_all(&repo, ISSUE_LIST_LIMIT).map_err(|e| {
         anyhow!("can't read the issue list of {repo}: {e:#}; without it a rerun could duplicate issues, so nothing was filed")
     })?;
@@ -362,9 +363,10 @@ fn file(
         let title = format!("{}: {}", finding.id, finding.title);
         let duplicate = listed.iter().find(|i| {
             i.body.contains(&wanted)
-                || opts
-                    .pr
-                    .is_some_and(|pr| i.title == title && pr_of(&i.body) == Some(pr))
+                || (i.open
+                    && opts
+                        .pr
+                        .is_some_and(|pr| i.title == title && pr_of(&i.body) == Some(pr)))
         });
         if let Some(issue) = duplicate {
             numbers.insert(finding.id.clone(), issue.number);
