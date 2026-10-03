@@ -43,7 +43,7 @@ no personal paths or secrets on purpose.
 - **Know the binary.** Do not run a long job with an executable whose build you cannot name. Build a clean commit with
   `cargo build --release --locked`, record the commit, compiler and SHA-256 next to it, and start every log with them.
 - **Disk.** Keep over 10 GB free before starting a sandbox; one sandbox at a time unless over 25 GB is free; never delete on
-  the system drive without asking. Where sandbox disks live and how to move them: `docs/workflow.md`, "Practical notes".
+  the system drive without asking. Where sandbox disks live (they cannot be moved yet; a junction failed for the `claude` agent): `docs/workflow.md`, "Practical notes".
 - Deploy profiles only from an up-to-date `main` (`just deploy-profiles` replaces whole profiles).
 - A gate that exits 101 with no failing test is probably a full disk, not a code failure.
 - Review findings are GitHub issues; fix them test first. Workers must not install software themselves: put what a build
