@@ -289,6 +289,20 @@ fn pr_of_ignores_the_line_anywhere_but_the_first() {
     assert_eq!(pr_of("something else\nPR: #57\n"), None);
     assert_eq!(pr_of("PR: #57 extra\n"), None);
     assert_eq!(pr_of(""), None);
+}
+
+#[test]
+fn set_pr_line_replaces_a_stale_first_line_instead_of_adding_another() {
+    assert_eq!(
+        findings::set_pr_line("PR: #9\nold body\n", 7),
+        "PR: #7\nold body\n"
+    );
+    assert_eq!(findings::set_pr_line("PR: #9", 7), "PR: #7");
+    assert_eq!(findings::set_pr_line("PR: #7\nbody\n", 7), "PR: #7\nbody\n");
+    assert_eq!(
+        findings::set_pr_line("body\n<!-- marker -->\n", 7),
+        "PR: #7\nbody\n<!-- marker -->\n"
+    );
     assert_eq!(pr_of("no pr here"), None);
 }
 
