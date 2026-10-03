@@ -213,6 +213,32 @@ fn the_number_of_a_finding_filed_earlier_is_used_in_links() {
 }
 
 #[test]
+fn an_exact_marker_wins_over_a_newer_title_and_pr_match() {
+    let setup = Setup::new();
+    // Newest first, as `issues_all` returns them: the title-only issue precedes the marker's.
+    let gh = github().with_issues(vec![
+        Issue {
+            number: 120,
+            open: true,
+            title: "S-1: Thing breaks".into(),
+            labels: vec!["should-fix".into()],
+            body: "PR: #7\nfiled by hand, no marker\n".into(),
+        },
+        marked(99, "S-1"),
+    ]);
+    let path = setup.write("review-small.md", small().as_bytes());
+    let run = setup.file(&path, &gh, true, |o| o.pr = Some(7));
+    assert!(run.result.is_ok(), "{}", run.error());
+
+    let all = issues(&gh);
+    let by_hand = all.iter().find(|i| i.number == 120).unwrap();
+    assert_eq!(by_hand.labels, ["should-fix"], "the title-only issue is left alone");
+    assert_eq!(by_hand.body, "PR: #7\nfiled by hand, no marker\n");
+    let marker_issue = all.iter().find(|i| i.number == 99).unwrap();
+    assert_eq!(marker_issue.labels, ["must-fix"]);
+}
+
+#[test]
 fn a_marker_matched_issue_gains_its_sections_label_once() {
     let setup = Setup::new();
     let gh = github().with_issues(vec![marked(99, "S-1")]);

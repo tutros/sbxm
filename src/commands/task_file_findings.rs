@@ -364,13 +364,19 @@ fn file(
     for finding in &parsed.findings {
         let wanted = marker(&posted_name, &finding.id);
         let title = format!("{}: {}", finding.id, finding.title);
-        let duplicate = listed.iter().find(|i| {
-            i.body.contains(&wanted)
-                || (i.open
-                    && opts
-                        .pr
-                        .is_some_and(|pr| i.title == title && pr_of(&i.body) == Some(pr)))
-        });
+        // The exact marker is the finding's identity, in any state, so it is looked for first; the
+        // open title-and-PR match is only the fallback for an issue filed without a marker.
+        let duplicate = listed
+            .iter()
+            .find(|i| i.body.contains(&wanted))
+            .or_else(|| {
+                listed.iter().find(|i| {
+                    i.open
+                        && opts
+                            .pr
+                            .is_some_and(|pr| i.title == title && pr_of(&i.body) == Some(pr))
+                })
+            });
         if let Some(issue) = duplicate {
             numbers.insert(finding.id.clone(), issue.number);
             // A matched open issue may lack the section's label or carry another severity's: one
