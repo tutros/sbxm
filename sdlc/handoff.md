@@ -54,8 +54,8 @@ no personal paths or secrets on purpose.
 What a cloud session has: the repo cloned from GitHub (so only what is pushed), the instruction files, and nothing else.
 It has no local drives, no Docker Sandboxes (`sbx`), no stored `sbx` secrets and no assistant memory. So it can do
 repo-only work (docs, specs, code and tests that do not need `sbx`, pull requests) but it **cannot run `sbxm` against
-sandboxes**; that stays local, or on `sbx` cloud sandboxes if the maintainer subscribes to Docker's Agentic Platform
-(untested; a spike, S13, would check kits, egress rules, secrets, getting files in and out, and the cloud sandbox's
+sandboxes**; that stays local. The maintainer decided (2026-10-03) not to subscribe to Docker's Agentic Platform for now, so `sbx`
+cloud sandboxes and spike S13 are shelved. If that changes, S13 would check kits, egress rules, secrets, getting files in and out, and the cloud sandbox's
 expiry against the 2-hour worker limit). Start one from the terminal with `claude --cloud "<task>"` on a
 pushed branch, or from the Desktop app's "Continue in" menu. Details:
 https://code.claude.com/docs/en/claude-code-on-the-web
