@@ -67,6 +67,14 @@ sbxm task run --issue 63               # start and review in one go; stops befor
   - `task review --pr` has no fix round: the author fixes the findings and reviews again after `task rm --pr N`.
   - `task gates` is refused once a task is `ready`.
 
+## Knowing when a task is done
+
+`task start`, `task review` and `task run` block until they finish and print the outcome on their last lines, so run
+them in the foreground, or as a background command your tool notifies you about. To check from another terminal, run
+`sbxm task status`: `ready`, `gates-failed`, `finished` or `interrupted` means it is no longer running, and `working`,
+`gating`, `reviewing` or `fixing` means it is. A live view (`sbxm status --watch`) and a built-in `run.log` are planned
+(decisions 170 and 171).
+
 ## How a change to sbxm itself goes
 
 1. Plan with the `sdlc-planning` skill: numbered decisions in `sdlc/decisions.md`, spikes for unknowns.
