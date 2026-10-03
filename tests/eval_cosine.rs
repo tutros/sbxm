@@ -273,6 +273,66 @@ fn render_skips_a_repeat_with_no_cosine_data() {
 }
 
 #[test]
+fn render_shows_an_unavailable_line_when_every_entry_is_an_error() {
+    let meta = tempfile::TempDir::new().unwrap();
+    let mut entries = BTreeMap::new();
+    entries.insert(0, CosineEntry::Error("boom".into()));
+    entries.insert(1, CosineEntry::Error("boom".into()));
+    results::write_cosine(meta.path(), 0, &entries).unwrap();
+
+    let text = cosine::render(meta.path(), 2, 1);
+
+    assert_eq!(text, "Similarity repeat 1/1: no comparable answers\n");
+}
+
+#[test]
+fn render_shows_an_unavailable_line_when_every_entry_is_skipped() {
+    let meta = tempfile::TempDir::new().unwrap();
+    let mut entries = BTreeMap::new();
+    entries.insert(0, CosineEntry::Skipped);
+    entries.insert(1, CosineEntry::Skipped);
+    results::write_cosine(meta.path(), 0, &entries).unwrap();
+
+    let text = cosine::render(meta.path(), 2, 1);
+
+    assert_eq!(text, "Similarity repeat 1/1: no comparable answers\n");
+}
+
+#[test]
+fn render_shows_an_unavailable_line_for_a_lone_participant_with_no_peers() {
+    let meta = tempfile::TempDir::new().unwrap();
+    let mut entries = BTreeMap::new();
+    entries.insert(0, CosineEntry::Peers(Default::default()));
+    results::write_cosine(meta.path(), 0, &entries).unwrap();
+
+    let text = cosine::render(meta.path(), 2, 1);
+
+    assert_eq!(text, "Similarity repeat 1/1: no comparable answers\n");
+}
+
+#[test]
+fn render_mixes_a_numeric_repeat_with_an_unavailable_one_and_skips_an_unconfigured_one() {
+    let meta = tempfile::TempDir::new().unwrap();
+    let mut numeric = BTreeMap::new();
+    numeric.insert(0, CosineEntry::Peers(peers(&[(1, 0.5)])));
+    numeric.insert(1, CosineEntry::Peers(peers(&[(0, 0.5)])));
+    results::write_cosine(meta.path(), 0, &numeric).unwrap();
+    let mut errored = BTreeMap::new();
+    errored.insert(0, CosineEntry::Error("boom".into()));
+    errored.insert(1, CosineEntry::Error("boom".into()));
+    results::write_cosine(meta.path(), 1, &errored).unwrap();
+    // Repeat 2 has no cosine entry at all (e.g. cosine wasn't configured for
+    // this saved run): it must stay absent, not "no comparable answers".
+
+    let text = cosine::render(meta.path(), 2, 3);
+
+    assert_eq!(
+        text,
+        "Similarity repeat 1/3: 0-1 0.50\nSimilarity repeat 2/3: no comparable answers\n"
+    );
+}
+
+#[test]
 fn render_uses_blind_labels_when_the_judge_scored_that_repeat() {
     let meta = tempfile::TempDir::new().unwrap();
     let mut entries = BTreeMap::new();

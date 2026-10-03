@@ -193,13 +193,24 @@ pub fn cosine_repeat(
 /// One similarity line per repeat that has cosine data, after the ranking
 /// (issue #63): the pairs' values, two decimals, in blind-label order when
 /// the judge scored that repeat (the mapping comes from its saved
-/// `judge/<repeat>/judge.json`), else by contestant index. Only reads saved
+/// `judge/<repeat>/judge.json`), else by contestant index. A repeat whose
+/// saved files hold a `cosine` entry but no numeric pair (every participant
+/// errored, was skipped, or only one answered) still gets a line, saying so;
+/// a repeat with no `cosine` entry at all (cosine wasn't configured, or
+/// nothing has been saved yet) is left out, same as before. Only reads saved
 /// files; never loads a model.
 pub fn render(meta: &Path, contestants: usize, repeats: u32) -> String {
     let mut out = String::new();
     for repeat in 0..repeats {
-        let pairs = load_repeat(meta, contestants, repeat);
+        let Some(pairs) = load_repeat(meta, contestants, repeat) else {
+            continue;
+        };
         if pairs.is_empty() {
+            let _ = writeln!(
+                out,
+                "Similarity repeat {}/{repeats}: no comparable answers",
+                repeat + 1
+            );
             continue;
         }
         let labels = judge_labels(meta, repeat);
@@ -234,8 +245,12 @@ pub fn render(meta: &Path, contestants: usize, repeats: u32) -> String {
 
 /// Each unique (lower, higher) contestant pair of `repeat` with its
 /// similarity, read from every contestant's own `evals.json["cosine"]["peers"]`.
-fn load_repeat(meta: &Path, contestants: usize, repeat: u32) -> Vec<(usize, usize, f32)> {
+/// `None` means no contestant's saved file has a `cosine` entry for this
+/// repeat at all; `Some(vec![])` means at least one does, but none of them
+/// has a numeric peer (an error, a skip, or a lone participant).
+fn load_repeat(meta: &Path, contestants: usize, repeat: u32) -> Option<Vec<(usize, usize, f32)>> {
     let mut out = Vec::new();
+    let mut any_cosine = false;
     for c in 0..contestants {
         let path = meta
             .join(c.to_string())
@@ -247,7 +262,11 @@ fn load_repeat(meta: &Path, contestants: usize, repeat: u32) -> Vec<(usize, usiz
         let Ok(value) = serde_json::from_str::<Value>(&text) else {
             continue;
         };
-        let Some(peers) = value["cosine"]["peers"].as_object() else {
+        let Some(cosine_value) = value.get("cosine") else {
+            continue;
+        };
+        any_cosine = true;
+        let Some(peers) = cosine_value["peers"].as_object() else {
             continue;
         };
         for (other, sim) in peers {
@@ -260,7 +279,7 @@ fn load_repeat(meta: &Path, contestants: usize, repeat: u32) -> Vec<(usize, usiz
             }
         }
     }
-    out
+    any_cosine.then_some(out)
 }
 
 /// The judge's blind-label mapping for `repeat`, if it scored one, from
