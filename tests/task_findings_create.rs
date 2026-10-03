@@ -232,7 +232,11 @@ fn an_exact_marker_wins_over_a_newer_title_and_pr_match() {
 
     let all = issues(&gh);
     let by_hand = all.iter().find(|i| i.number == 120).unwrap();
-    assert_eq!(by_hand.labels, ["should-fix"], "the title-only issue is left alone");
+    assert_eq!(
+        by_hand.labels,
+        ["should-fix"],
+        "the title-only issue is left alone"
+    );
     assert_eq!(by_hand.body, "PR: #7\nfiled by hand, no marker\n");
     let marker_issue = all.iter().find(|i| i.number == 99).unwrap();
     assert_eq!(marker_issue.labels, ["must-fix"]);
