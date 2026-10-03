@@ -371,9 +371,10 @@ fn file(
         });
         if let Some(issue) = duplicate {
             numbers.insert(finding.id.clone(), issue.number);
-            // An issue adopted by title and PR wasn't filed by this command, so it may lack the
-            // section's label or carry another severity's (decision 169).
-            if !issue.body.contains(&wanted)
+            // A matched open issue may lack the section's label or carry another severity's: one
+            // adopted by title and PR wasn't filed by this command, and a marker match may predate
+            // the label rule (decision 169).
+            if issue.open
                 && let Some(done) = prepared.iter().find(|p| p.id == finding.id)
                 && let Some(change) = label_change(&issue.labels, &done.label)
             {

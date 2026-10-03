@@ -212,6 +212,22 @@ fn the_number_of_a_finding_filed_earlier_is_used_in_links() {
 }
 
 #[test]
+fn a_marker_matched_issue_gains_its_sections_label_once() {
+    let setup = Setup::new();
+    let gh = github().with_issues(vec![marked(99, "S-1")]);
+    let path = setup.write("review-small.md", small().as_bytes());
+    let first = setup.file(&path, &gh, true, |o| o.pr = Some(7));
+    assert!(first.result.is_ok(), "{}", first.error());
+    let issue = issues(&gh).into_iter().find(|i| i.number == 99).unwrap();
+    assert_eq!(issue.labels, ["must-fix"]);
+
+    let before = writes(&gh).len();
+    let second = setup.file(&path, &gh, true, |o| o.pr = Some(7));
+    assert!(second.result.is_ok(), "{}", second.error());
+    assert_eq!(writes(&gh).len(), before, "{:?}", writes(&gh));
+}
+
+#[test]
 fn a_run_resumes_after_an_interruption_with_only_the_missing_findings() {
     let setup = Setup::new();
     let gh = github().failing_issue_create_at(3);
