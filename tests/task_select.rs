@@ -8,6 +8,7 @@ use sbxm::task::select::{Reason, Selection, select};
 fn issue(number: u32, labels: &[&str], body: &str) -> Issue {
     Issue {
         number,
+        open: true,
         title: format!("issue {number}"),
         labels: labels.iter().map(|l| (*l).to_owned()).collect(),
         body: body.to_owned(),

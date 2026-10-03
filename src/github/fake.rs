@@ -19,6 +19,8 @@ pub enum GhCall {
     Labels(String),
     IssuesAll(String, u32),
     IssueEdit(String, u32, String),
+    /// Repo, number, labels added, labels removed.
+    IssueLabels(String, u32, Vec<String>, Vec<String>),
 }
 
 #[derive(Default)]
@@ -190,6 +192,7 @@ impl GitHubBackend for FakeGitHub {
         *next += 1;
         self.all_issues.lock().unwrap().push(Issue {
             number,
+            open: true,
             title: request.title.clone(),
             labels: request.labels.clone(),
             body: request.body.clone(),
@@ -235,5 +238,32 @@ impl GitHubBackend for FakeGitHub {
             }
             None => Err(anyhow!("FakeGitHub: issue {number} does not exist")),
         }
+    }
+
+    fn issue_labels(
+        &self,
+        repo: &str,
+        number: u32,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()> {
+        self.record(GhCall::IssueLabels(
+            repo.to_owned(),
+            number,
+            add.to_vec(),
+            remove.to_vec(),
+        ))?;
+        let mut all = self.all_issues.lock().unwrap();
+        let issue = all
+            .iter_mut()
+            .find(|i| i.number == number)
+            .ok_or_else(|| anyhow!("FakeGitHub: issue {number} does not exist"))?;
+        issue.labels.retain(|l| !remove.contains(l));
+        for label in add {
+            if !issue.labels.contains(label) {
+                issue.labels.push(label.clone());
+            }
+        }
+        Ok(())
     }
 }

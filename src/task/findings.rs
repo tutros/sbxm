@@ -552,11 +552,43 @@ pub struct Render<'a> {
     /// Issue numbers known so far, by finding id.
     pub ids: &'a BTreeMap<String, u32>,
     pub standard_criteria: bool,
+    /// The PR this review covers; written as the body's first line, `PR: #n` (decision 169).
+    /// `None` when the review isn't tied to a PR.
+    pub pr: Option<u32>,
 }
 
 /// The hidden marker that says which finding of which review an issue is.
 pub fn marker(review_name: &str, id: &str) -> String {
     format!("<!-- review-finding: {review_name}#{id} -->")
+}
+
+/// The PR a finding issue's body names, read from its first line only (decision 169): `None` for
+/// a line anywhere else, or no such line at all.
+pub fn pr_of(body: &str) -> Option<u32> {
+    static PR: LazyLock<Regex> = LazyLock::new(|| re(r"^PR: #(\d+)$"));
+    let first = *lines_of(body).first()?;
+    PR.captures(first)?[1].parse().ok()
+}
+
+/// A reused issue's body with its first line made exactly `PR: #n` (decision 169): a stale `PR:
+/// #m` first line is replaced, otherwise the line is inserted before whatever the body already
+/// had. The rest of the body, marker included, is untouched. A no-op when the first line already
+/// matches.
+pub fn set_pr_line(body: &str, pr: u32) -> String {
+    let wanted = format!("PR: #{pr}");
+    let first = *lines_of(body).first().unwrap_or(&"");
+    if first == wanted {
+        return body.to_owned();
+    }
+    static PR_LINE: LazyLock<Regex> = LazyLock::new(|| re(r"^PR: #\d+$"));
+    if PR_LINE.is_match(first) {
+        match body.find('\n') {
+            Some(idx) => format!("{wanted}{}", &body[idx..]),
+            None => wanted,
+        }
+    } else {
+        format!("{wanted}\n{body}")
+    }
 }
 
 /// The issue text for one finding: the skill's template in order, the marker on the last line.
@@ -587,7 +619,11 @@ pub fn issue_body(
     );
     let field = |name: &str| finding.field(name).unwrap_or("");
 
-    let mut parts = vec![
+    let mut parts = Vec::new();
+    if let Some(pr) = render.pr {
+        parts.push(format!("PR: #{pr}"));
+    }
+    parts.extend([
         format_field(
             "Where",
             &where_links(field("where"), render.repo, render.head_sha, warnings),
@@ -603,7 +639,7 @@ pub fn issue_body(
             field("fix"),
         ),
         format_field("Depends on", &link_ids(depends, render.ids)),
-    ];
+    ]);
     if !related.is_empty() {
         parts.push(format_field(
             "Related",
