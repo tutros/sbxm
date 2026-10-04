@@ -6,10 +6,12 @@ pub mod gh;
 
 use anyhow::Result;
 
-/// An open issue as `gh issue list` reports it.
+/// An issue as `gh issue list` reports it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Issue {
     pub number: u32,
+    /// `false` for a closed issue; only `issues_all` lists those.
+    pub open: bool,
     pub title: String,
     pub labels: Vec<String>,
     pub body: String,
@@ -74,4 +76,12 @@ pub trait GitHubBackend: Send + Sync {
     fn issues_all(&self, repo: &str, limit: u32) -> Result<Vec<Issue>>;
     /// Replaces an issue's body.
     fn issue_edit(&self, repo: &str, number: u32, body: &str) -> Result<()>;
+    /// Adds and removes labels on an issue, leaving its other labels alone.
+    fn issue_labels(
+        &self,
+        repo: &str,
+        number: u32,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()>;
 }

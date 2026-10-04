@@ -71,6 +71,7 @@ fn run(
         repo_root: base.to_path_buf(),
         repo: repo.map(str::to_owned),
         create,
+        pr: (kind == Kind::Pr).then_some(number),
         standard_criteria: false,
         keep_paths: false,
         only: Vec::new(),
@@ -125,6 +126,7 @@ fn a_pr_task_reads_its_own_folder() {
         "{out}"
     );
     assert!(out.contains("review-finding: pr-7-review.md#S-1"), "{out}");
+    assert!(out.contains("PR: #7"), "{out}");
 }
 
 #[test]

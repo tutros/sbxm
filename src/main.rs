@@ -240,6 +240,7 @@ fn main() -> anyhow::Result<()> {
                     repo_root: std::env::current_dir()?,
                     repo,
                     create,
+                    pr,
                     standard_criteria,
                     keep_paths,
                     only,

@@ -62,6 +62,7 @@ impl Setup {
             repo_root: self.dir.path().to_path_buf(),
             repo: Some("o/r".into()),
             create: false,
+            pr: None,
             standard_criteria: false,
             keep_paths: false,
             only: Vec::new(),
@@ -102,7 +103,10 @@ fn dry(name: &str, text: impl AsRef<str>) -> Out {
 fn no_writes(github: &FakeGitHub) {
     for call in github.calls() {
         assert!(
-            !matches!(call, GhCall::IssueCreate(..) | GhCall::IssueEdit(..)),
+            !matches!(
+                call,
+                GhCall::IssueCreate(..) | GhCall::IssueEdit(..) | GhCall::IssueLabels(..)
+            ),
             "{call:?}"
         );
     }
@@ -459,6 +463,7 @@ fn a_short_sha_is_resolved_by_git_or_the_links_stay_text() {
 fn marked(number: u32, id: &str) -> Issue {
     Issue {
         number,
+        open: true,
         title: format!("{id}: old"),
         labels: vec![],
         body: format!("x\n<!-- review-finding: review-small.md#{id} -->\n"),
@@ -503,6 +508,7 @@ fn an_issue_list_as_long_as_the_limit_stops_the_run() {
     let issues = (1..=1000)
         .map(|n| Issue {
             number: n,
+            open: true,
             title: format!("t{n}"),
             labels: vec![],
             body: String::new(),
@@ -529,4 +535,49 @@ fn the_fake_is_asked_for_the_login_labels_and_issues_in_that_order() {
             GhCall::IssuesAll("o/r".into(), 1000)
         ]
     );
+}
+
+#[test]
+fn a_dry_run_names_the_label_an_adopted_duplicate_would_get() {
+    let setup = Setup::new();
+    let gh = github().with_issues(vec![Issue {
+        number: 77,
+        open: true,
+        title: "S-1: Thing breaks".into(),
+        labels: vec!["should-fix".into()],
+        body: "PR: #7\nold body, no marker\n".into(),
+    }]);
+    let run = setup.run("review-small.md", small(), &gh, |o| o.pr = Some(7));
+
+    assert!(run.result.is_ok(), "{}", run.error());
+    assert!(
+        run.out
+            .contains("S-1 skipped (exists #77), would label it must-fix (removing should-fix)"),
+        "{}",
+        run.out
+    );
+    no_writes(&gh);
+}
+
+#[test]
+fn a_dry_run_names_the_pr_line_a_reused_marker_issue_would_get() {
+    let setup = Setup::new();
+    let gh = github().with_issues(vec![Issue {
+        number: 99,
+        open: true,
+        title: "S-1: old".into(),
+        // Already labeled, so only the PR line is new: isolates the message this test checks.
+        labels: vec!["must-fix".into()],
+        body: "x\n<!-- review-finding: review-small.md#S-1 -->\n".into(),
+    }]);
+    let run = setup.run("review-small.md", small(), &gh, |o| o.pr = Some(7));
+
+    assert!(run.result.is_ok(), "{}", run.error());
+    assert!(
+        run.out
+            .contains("S-1 skipped (exists #99), would set its body's first line to PR: #7"),
+        "{}",
+        run.out
+    );
+    no_writes(&gh);
 }

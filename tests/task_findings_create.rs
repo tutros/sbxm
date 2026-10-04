@@ -10,6 +10,7 @@ use anyhow::Result;
 use sbxm::commands::task_file_findings::{self, Options, Source};
 use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::github::{GitHubBackend, Issue};
+use sbxm::task::findings::pr_of;
 use tempfile::TempDir;
 
 fn small() -> String {
@@ -65,6 +66,7 @@ impl Setup {
             repo_root: self.dir.path().to_path_buf(),
             repo: Some("o/r".into()),
             create,
+            pr: None,
             standard_criteria: false,
             keep_paths: false,
             only: Vec::new(),
@@ -98,6 +100,7 @@ fn writes(github: &FakeGitHub) -> Vec<String> {
         .filter_map(|call| match call {
             GhCall::IssueCreate(..) => Some("create".to_owned()),
             GhCall::IssueEdit(_, number, _) => Some(format!("edit {number}")),
+            GhCall::IssueLabels(_, number, ..) => Some(format!("label {number}")),
             _ => None,
         })
         .collect()
@@ -193,6 +196,7 @@ fn a_second_run_creates_nothing_and_reuses_the_numbers() {
 fn marked(number: u32, id: &str) -> Issue {
     Issue {
         number,
+        open: true,
         title: format!("{id}: old"),
         labels: vec![],
         body: format!("x\n<!-- review-finding: review-small.md#{id} -->\n"),
@@ -206,6 +210,75 @@ fn the_number_of_a_finding_filed_earlier_is_used_in_links() {
     setup.create("review-small.md", &small(), &gh);
     assert!(body_of(&gh, "S-1").contains("Depends on:** #99 (the message must match)"));
     assert_eq!(issues(&gh).len(), 3, "the old one, S-1 and S-Q1");
+}
+
+#[test]
+fn an_exact_marker_wins_over_a_newer_title_and_pr_match() {
+    let setup = Setup::new();
+    // Newest first, as `issues_all` returns them: the title-only issue precedes the marker's.
+    let gh = github().with_issues(vec![
+        Issue {
+            number: 120,
+            open: true,
+            title: "S-1: Thing breaks".into(),
+            labels: vec!["should-fix".into()],
+            body: "PR: #7\nfiled by hand, no marker\n".into(),
+        },
+        marked(99, "S-1"),
+    ]);
+    let path = setup.write("review-small.md", small().as_bytes());
+    let run = setup.file(&path, &gh, true, |o| o.pr = Some(7));
+    assert!(run.result.is_ok(), "{}", run.error());
+
+    let all = issues(&gh);
+    let by_hand = all.iter().find(|i| i.number == 120).unwrap();
+    assert_eq!(
+        by_hand.labels,
+        ["should-fix"],
+        "the title-only issue is left alone"
+    );
+    assert_eq!(by_hand.body, "PR: #7\nfiled by hand, no marker\n");
+    let marker_issue = all.iter().find(|i| i.number == 99).unwrap();
+    assert_eq!(marker_issue.labels, ["must-fix"]);
+}
+
+#[test]
+fn a_marker_matched_issue_gains_its_sections_label_once() {
+    let setup = Setup::new();
+    let gh = github().with_issues(vec![marked(99, "S-1")]);
+    let path = setup.write("review-small.md", small().as_bytes());
+    let first = setup.file(&path, &gh, true, |o| o.pr = Some(7));
+    assert!(first.result.is_ok(), "{}", first.error());
+    let issue = issues(&gh).into_iter().find(|i| i.number == 99).unwrap();
+    assert_eq!(issue.labels, ["must-fix"]);
+
+    let before = writes(&gh).len();
+    let second = setup.file(&path, &gh, true, |o| o.pr = Some(7));
+    assert!(second.result.is_ok(), "{}", second.error());
+    assert_eq!(writes(&gh).len(), before, "{:?}", writes(&gh));
+}
+
+#[test]
+fn a_reused_marker_issue_gets_its_pr_first_line_once() {
+    let setup = Setup::new();
+    let gh = github().with_issues(vec![marked(99, "S-1")]);
+    let path = setup.write("review-small.md", small().as_bytes());
+    let first = setup.file(&path, &gh, true, |o| o.pr = Some(7));
+    assert!(first.result.is_ok(), "{}", first.error());
+    let body = body_of(&gh, "S-1");
+    assert!(body.starts_with("PR: #7\n"), "{body}");
+    assert!(body.contains("x\n"), "{body}");
+    assert!(
+        body.contains("<!-- review-finding: review-small.md#S-1 -->"),
+        "{body}"
+    );
+    assert_eq!(pr_of(&body), Some(7));
+
+    let before = writes(&gh).len();
+    let second = setup.file(&path, &gh, true, |o| o.pr = Some(7));
+    assert!(second.result.is_ok(), "{}", second.error());
+    assert_eq!(writes(&gh).len(), before, "{:?}", writes(&gh));
+    assert_eq!(body_of(&gh, "S-1"), body);
 }
 
 #[test]
@@ -231,6 +304,151 @@ fn a_run_resumes_after_an_interruption_with_only_the_missing_findings() {
     unique.sort();
     unique.dedup();
     assert_eq!(unique.len(), 4);
+}
+
+#[test]
+fn a_duplicate_by_title_and_pr_is_skipped_without_creating_a_new_issue() {
+    let setup = Setup::new();
+    let gh = github().with_issues(vec![Issue {
+        number: 77,
+        open: true,
+        title: "S-1: Thing breaks".into(),
+        labels: vec![],
+        body: "PR: #7\nold body, no marker\n".into(),
+    }]);
+    let path = setup.write("review-small.md", small().as_bytes());
+    let run = setup.file(&path, &gh, true, |o| o.pr = Some(7));
+
+    assert!(run.result.is_ok(), "{}", run.error());
+    assert_eq!(
+        issues(&gh)
+            .iter()
+            .filter(|i| i.title.starts_with("S-1"))
+            .count(),
+        1,
+        "{:?}",
+        issues(&gh)
+    );
+    assert!(run.out.contains("S-1      must-fix    #77"), "{}", run.out);
+    assert_eq!(
+        writes(&gh)
+            .iter()
+            .filter(|w| w.as_str() == "create")
+            .count(),
+        2,
+        "{:?}",
+        writes(&gh)
+    );
+
+    // A rerun with the same options files nothing new for S-1.
+    let before = issues(&gh).len();
+    let second = setup.file(&path, &gh, true, |o| o.pr = Some(7));
+    assert!(second.result.is_ok(), "{}", second.error());
+    assert_eq!(issues(&gh).len(), before);
+}
+
+#[test]
+fn an_adopted_duplicate_gets_its_sections_label() {
+    let setup = Setup::new();
+    let gh = github().with_issues(vec![Issue {
+        number: 77,
+        open: true,
+        title: "S-1: Thing breaks".into(),
+        labels: vec![],
+        body: "PR: #7\nold body, no marker\n".into(),
+    }]);
+    let path = setup.write("review-small.md", small().as_bytes());
+    let run = setup.file(&path, &gh, true, |o| o.pr = Some(7));
+
+    assert!(run.result.is_ok(), "{}", run.error());
+    assert_eq!(issues(&gh)[0].labels, ["must-fix"]);
+    assert!(
+        run.out.contains("#77") && run.out.contains("skipped (exists, labeled must-fix)"),
+        "{}",
+        run.out
+    );
+
+    // A rerun finds the label in place and changes nothing.
+    let before = writes(&gh).len();
+    let second = setup.file(&path, &gh, true, |o| o.pr = Some(7));
+    assert!(second.result.is_ok(), "{}", second.error());
+    assert_eq!(writes(&gh).len(), before, "{:?}", writes(&gh));
+}
+
+#[test]
+fn an_adopted_duplicates_other_severity_label_is_replaced_and_other_labels_stay() {
+    let setup = Setup::new();
+    let gh = github().with_issues(vec![Issue {
+        number: 77,
+        open: true,
+        title: "S-1: Thing breaks".into(),
+        labels: vec!["bug".into(), "should-fix".into()],
+        body: "PR: #7\nold body, no marker\n".into(),
+    }]);
+    let path = setup.write("review-small.md", small().as_bytes());
+    let run = setup.file(&path, &gh, true, |o| o.pr = Some(7));
+
+    assert!(run.result.is_ok(), "{}", run.error());
+    assert_eq!(issues(&gh)[0].labels, ["bug", "must-fix"]);
+    assert!(
+        gh.calls().contains(&GhCall::IssueLabels(
+            "o/r".into(),
+            77,
+            vec!["must-fix".into()],
+            vec!["should-fix".into()]
+        )),
+        "{:?}",
+        gh.calls()
+    );
+}
+
+#[test]
+fn a_closed_issue_with_the_same_title_and_pr_is_not_a_duplicate() {
+    let setup = Setup::new();
+    let gh = github().with_issues(vec![Issue {
+        number: 77,
+        open: false,
+        title: "S-1: Thing breaks".into(),
+        labels: vec!["must-fix".into()],
+        body: "PR: #7\nold body, no marker\n".into(),
+    }]);
+    let path = setup.write("review-small.md", small().as_bytes());
+    let run = setup.file(&path, &gh, true, |o| o.pr = Some(7));
+
+    assert!(run.result.is_ok(), "{}", run.error());
+    let s1: Vec<Issue> = issues(&gh)
+        .into_iter()
+        .filter(|i| i.title.starts_with("S-1"))
+        .collect();
+    assert_eq!(s1.len(), 2, "a new S-1 issue next to the closed one");
+    assert!(s1[1].open);
+    assert_eq!(s1[1].labels, ["must-fix"]);
+    assert!(!run.out.contains("#77"), "{}", run.out);
+}
+
+#[test]
+fn a_title_match_with_a_different_pr_is_not_a_duplicate() {
+    let setup = Setup::new();
+    let gh = github().with_issues(vec![Issue {
+        number: 77,
+        open: true,
+        title: "S-1: Thing breaks".into(),
+        labels: vec![],
+        body: "PR: #9\nold body, no marker\n".into(),
+    }]);
+    let path = setup.write("review-small.md", small().as_bytes());
+    let run = setup.file(&path, &gh, true, |o| o.pr = Some(7));
+
+    assert!(run.result.is_ok(), "{}", run.error());
+    assert_eq!(
+        issues(&gh)
+            .iter()
+            .filter(|i| i.title.starts_with("S-1"))
+            .count(),
+        2,
+        "a new S-1 issue is created alongside the old one: {:?}",
+        issues(&gh)
+    );
 }
 
 #[test]

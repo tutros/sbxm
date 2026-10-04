@@ -1653,6 +1653,7 @@ fn real_task_world(
         .with_default_branch("main")
         .with_open_issues(vec![Issue {
             number: 41,
+            open: true,
             title: "Add hello.txt".into(),
             labels: vec![],
             body: String::new(),

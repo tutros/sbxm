@@ -17,7 +17,8 @@ use crate::git;
 use crate::github::{GitHubBackend, IssueRequest};
 use crate::task::findings::{
     self, Finding, Render, acceptance_criteria, filing_order, find_secrets, issue_body,
-    issues_line, marker, protect_finding, protect_text, secret_kind, update_link_fields,
+    issues_line, marker, pr_of, protect_finding, protect_text, secret_kind, set_pr_line,
+    update_link_fields,
 };
 use crate::task::record::{self, Kind};
 
@@ -44,6 +45,9 @@ pub struct Options {
     pub repo: Option<String>,
     /// Publish the issues. Without it nothing is created or edited.
     pub create: bool,
+    /// The PR this review covers, when the source is `--pr N` (decision 169): named in each
+    /// issue's body and used, with the title, to catch a duplicate that lacks the marker.
+    pub pr: Option<u32>,
     /// File findings with no acceptance criteria with only the standard ones.
     pub standard_criteria: bool,
     /// Keep personal paths instead of replacing them with `~`.
@@ -343,7 +347,8 @@ fn file(
         );
     }
 
-    // What exists already: a finding whose marker is in an issue body keeps that number.
+    // What exists already: a finding whose marker is in an issue body, in any state, keeps that
+    // number; so does one with an open issue of the same title and PR (decision 169).
     let listed = github.issues_all(&repo, ISSUE_LIST_LIMIT).map_err(|e| {
         anyhow!("can't read the issue list of {repo}: {e:#}; without it a rerun could duplicate issues, so nothing was filed")
     })?;
@@ -354,10 +359,43 @@ fn file(
         );
     }
     let mut numbers: BTreeMap<String, u32> = BTreeMap::new();
+    let mut relabel: BTreeMap<String, LabelChange> = BTreeMap::new();
+    let mut pr_patch: BTreeMap<String, u32> = BTreeMap::new();
     for finding in &parsed.findings {
         let wanted = marker(&posted_name, &finding.id);
-        if let Some(issue) = listed.iter().find(|i| i.body.contains(&wanted)) {
+        let title = format!("{}: {}", finding.id, finding.title);
+        // The exact marker is the finding's identity, in any state, so it is looked for first; the
+        // open title-and-PR match is only the fallback for an issue filed without a marker.
+        let duplicate = listed
+            .iter()
+            .find(|i| i.body.contains(&wanted))
+            .or_else(|| {
+                listed.iter().find(|i| {
+                    i.open
+                        && opts
+                            .pr
+                            .is_some_and(|pr| i.title == title && pr_of(&i.body) == Some(pr))
+                })
+            });
+        if let Some(issue) = duplicate {
             numbers.insert(finding.id.clone(), issue.number);
+            // A matched open issue may lack the section's label or carry another severity's: one
+            // adopted by title and PR wasn't filed by this command, and a marker match may predate
+            // the label rule (decision 169).
+            if issue.open
+                && let Some(done) = prepared.iter().find(|p| p.id == finding.id)
+                && let Some(change) = label_change(&issue.labels, &done.label)
+            {
+                relabel.insert(finding.id.clone(), change);
+            }
+            // A marker match may also predate the PR-line rule (decision 169); a title+PR
+            // duplicate already carries the matching line by construction of the match itself.
+            if issue.open
+                && let Some(pr) = opts.pr
+                && set_pr_line(&issue.body, pr) != issue.body
+            {
+                pr_patch.insert(finding.id.clone(), pr);
+            }
         }
     }
     let to_create: Vec<&Finding> = prepared
@@ -400,6 +438,7 @@ fn file(
             head_sha: head_sha.as_deref(),
             ids,
             standard_criteria: opts.standard_criteria,
+            pr: opts.pr,
         };
         issue_body(&view, finding, &context, warnings).map_err(|e| anyhow!(e))
     };
@@ -407,7 +446,17 @@ fn file(
     if !opts.create {
         for finding in &prepared {
             if let Some(number) = numbers.get(&finding.id) {
-                writeln!(out, "{} skipped (exists #{number})", finding.id)?;
+                write!(out, "{} skipped (exists #{number})", finding.id)?;
+                if let Some(change) = relabel.get(&finding.id) {
+                    write!(out, ", would label it {}", change.add.join(", "))?;
+                    if !change.remove.is_empty() {
+                        write!(out, " (removing {})", change.remove.join(", "))?;
+                    }
+                }
+                if let Some(pr) = pr_patch.get(&finding.id) {
+                    write!(out, ", would set its body's first line to PR: #{pr}")?;
+                }
+                writeln!(out)?;
                 continue;
             }
             writeln!(
@@ -433,11 +482,12 @@ fn file(
         return Ok(());
     }
 
-    // The bodies of issues that exist already, as listed, for patching their links at the end.
-    let existing: BTreeMap<u32, String> = listed
+    // The bodies of issues that exist already, as listed, for patching their links (and, for an
+    // open one, a stale or missing PR line) at the end.
+    let existing: BTreeMap<u32, (String, bool)> = listed
         .iter()
         .filter(|i| numbers.values().any(|n| *n == i.number))
-        .map(|i| (i.number, i.body.clone()))
+        .map(|i| (i.number, (i.body.clone(), i.open)))
         .collect();
 
     let mut created: Vec<(Finding, u32, String)> = Vec::new();
@@ -470,14 +520,27 @@ fn file(
             failure = Some(format!("#{number} links: {e:#}"));
         }
     }
-    // Issues that existed before this run get only their link fields patched, from the body as
-    // listed.
-    for (number, body) in &existing {
-        let patched = update_link_fields(body, &numbers);
+    // Issues that existed before this run get their link fields patched, from the body as listed,
+    // and, if open, a current `PR: #n` first line (decision 169).
+    for (number, (body, open)) in &existing {
+        let mut patched = update_link_fields(body, &numbers);
+        if *open && let Some(pr) = opts.pr {
+            patched = set_pr_line(&patched, pr);
+        }
         if patched != *body
             && let Err(e) = github.issue_edit(&repo, *number, &patched)
         {
             failure = Some(format!("#{number} links: {e:#}"));
+        }
+    }
+
+    // Adopted duplicates get the section's label in place of another severity's.
+    let mut relabeled: Vec<&str> = Vec::new();
+    for (id, change) in &relabel {
+        let number = numbers[id];
+        match github.issue_labels(&repo, number, &change.add, &change.remove) {
+            Ok(()) => relabeled.push(id),
+            Err(e) => failure = Some(format!("#{number} labels: {e:#}")),
         }
     }
 
@@ -490,6 +553,8 @@ fn file(
     for finding in &prepared {
         let status = if created.iter().any(|(f, ..)| f.id == finding.id) {
             "created"
+        } else if relabeled.contains(&finding.id.as_str()) {
+            &format!("skipped (exists, labeled {})", finding.label)
         } else if numbers.contains_key(&finding.id) {
             "skipped (exists)"
         } else {
@@ -518,6 +583,28 @@ fn file(
         bail!("stopped early: {failure}; rerun to file the rest (existing issues are skipped)");
     }
     Ok(())
+}
+
+/// The labels an existing issue gains and loses so that `label` is its only review severity.
+struct LabelChange {
+    add: Vec<String>,
+    remove: Vec<String>,
+}
+
+const SEVERITY_LABELS: [&str; 3] = ["must-fix", "should-fix", "question"];
+
+fn label_change(labels: &[String], label: &str) -> Option<LabelChange> {
+    let add: Vec<String> = if labels.iter().any(|l| l == label) {
+        Vec::new()
+    } else {
+        vec![label.to_owned()]
+    };
+    let remove: Vec<String> = labels
+        .iter()
+        .filter(|l| *l != label && SEVERITY_LABELS.contains(&l.as_str()))
+        .cloned()
+        .collect();
+    (!add.is_empty() || !remove.is_empty()).then_some(LabelChange { add, remove })
 }
 
 /// Replaces the first `Issues:` line and nothing else: the file's line endings and byte order

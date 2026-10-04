@@ -85,12 +85,13 @@ impl GhBackend {
             "--limit",
             &limit.to_string(),
             "--json",
-            "number,title,labels,body",
+            "number,title,labels,body,state",
         ]))?;
         Ok(raw
             .into_iter()
             .map(|i| Issue {
                 number: i.number,
+                open: i.state.eq_ignore_ascii_case("open"),
                 title: i.title,
                 labels: i.labels.into_iter().map(|l| l.name).collect(),
                 body: i.body,
@@ -107,6 +108,7 @@ struct Named {
 #[derive(Deserialize)]
 struct RawIssue {
     number: u32,
+    state: String,
     title: String,
     #[serde(default)]
     labels: Vec<Named>,
@@ -178,6 +180,25 @@ impl GitHubBackend for GhBackend {
         )?;
         Ok(())
     }
+
+    fn issue_labels(
+        &self,
+        repo: &str,
+        number: u32,
+        add: &[String],
+        remove: &[String],
+    ) -> Result<()> {
+        let mut args = strings(&["issue", "edit", &number.to_string(), "--repo", repo]);
+        for label in add {
+            args.extend(strings(&["--add-label", label]));
+        }
+        for label in remove {
+            args.extend(strings(&["--remove-label", label]));
+        }
+        self.run(&args, None)?;
+        Ok(())
+    }
+
     fn issue(&self, repo: &str, number: u32) -> Result<IssueText> {
         let text = self.run(
             &strings(&["issue", "view", &number.to_string(), "--repo", repo]),

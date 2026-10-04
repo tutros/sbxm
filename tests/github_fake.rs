@@ -6,6 +6,7 @@ use sbxm::github::{GitHubBackend, Issue, IssueRequest, IssueText, PrInfo, PrRequ
 fn issue(number: u32) -> Issue {
     Issue {
         number,
+        open: true,
         title: format!("issue {number}"),
         labels: vec!["bug".into()],
         body: String::new(),
