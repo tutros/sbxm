@@ -84,6 +84,7 @@ text is still in git history (commit `bf3cb2b`); rewriting `main` was not done.
    branch and behind which flag; whether a re-review replaces or extends the old task; recreate or always use a
    fresh sandbox for a fix round. Output: a numbered decision in `sdlc/decisions.md`, issues with acceptance
    criteria, then the work goes through the workflow as a milestone batch.
+1b. **Interview: how a finding is identified across review rounds (found 2026-10-03 on PR #86, 4 review rounds, 7 must-fix findings).** A marker is the review file name plus the ID (`review.md#M-1`); a PR's file is always `review.md` and IDs restart each round, so the marker cannot tell two rounds' M-1 apart, and title-plus-PR adoption (decision 169) adds a second route that conflicts with it (issues #97, #98, #99, #100). Questions: what makes two findings the same (title, location, a hash of the finding text, the head commit), whether a re-review should update an issue or file a new one, and whether `--only` may touch other findings' issues. Output: a decision that replaces the matching rules in decision 169, then fix #97 and #98 or remove them.
 2. **Interview: templates and a strict mode (G20, G19).** Every dependency baked into a template, and sandboxes
    blocked from updating themselves (no apt, rustup or crates hosts, a pre-warmed cargo cache, `--offline`, a changed
    `Cargo.lock` fails loudly). Finish spike S11 first (PR 67; it needs 20 GB free on C:). Open questions: what
