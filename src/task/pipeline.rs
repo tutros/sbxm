@@ -19,7 +19,7 @@ use super::record::{
 };
 use super::repo::{self, AgentFile, BUNDLE_CAP, Existing, Identity};
 use super::review;
-use super::select::{self, Selection};
+use super::select::{self, Reason, Selection};
 use crate::backend::{CreateSpec, ExecSpec, SandboxBackend, Stdin};
 use crate::config::{GlobalConfig, Profile};
 use crate::github::{GitHubBackend, Issue, IssueText, PrInfo, PrState};
@@ -320,11 +320,20 @@ pub fn check_restartable(ctx: &Ctx, restarting: &[u32]) -> Result<()> {
 }
 
 /// The state of every PR an open `must-fix` issue names on its first line (`PR: #n`), so selection
-/// can put those of an open PR first (decision 169).
-fn must_fix_pr_states(ctx: &Ctx, open: &[Issue]) -> Result<HashMap<u32, PrState>> {
+/// can put those of an open PR first (decision 169). An issue that selection skips anyway as one
+/// with a task, a question or a blocked one is not looked up: its PR can't change that, and a
+/// stale reference there must not stop the other issues.
+fn must_fix_pr_states(ctx: &Ctx, open: &[Issue], taken: &[u32]) -> Result<HashMap<u32, PrState>> {
+    let first = select::select(open, taken, None, usize::MAX, &HashMap::new());
+    let skipped_first = |number: u32| {
+        first.skips.iter().any(|(n, why)| {
+            *n == number && matches!(why, Reason::HasTask | Reason::Question | Reason::Blocked(_))
+        })
+    };
     let mut wanted: Vec<u32> = open
         .iter()
         .filter(|i| i.labels.iter().any(|l| l == "must-fix"))
+        .filter(|i| !skipped_first(i.number))
         .filter_map(|i| pr_of(&i.body))
         .collect();
     wanted.sort_unstable();
@@ -351,7 +360,7 @@ pub fn select_issues(ctx: &Ctx, explicit: Option<&[u32]>, workers: usize) -> Res
         .map(|r| r.number)
         .collect();
     let prs = if explicit.is_none() {
-        must_fix_pr_states(ctx, &open)?
+        must_fix_pr_states(ctx, &open, &taken)?
     } else {
         HashMap::new()
     };

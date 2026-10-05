@@ -13,7 +13,7 @@ use common::task_fixture::{
 use sbxm::backend::FakeBackend;
 use sbxm::commands::task_start::{self, Options, github_repo};
 use sbxm::github::fake::FakeGitHub;
-use sbxm::github::{PrInfo, PrState};
+use sbxm::github::{Issue, PrInfo, PrState};
 use sbxm::harness::Harness;
 use sbxm::task::repo::Identity;
 
@@ -462,4 +462,60 @@ fn an_explicit_issue_starts_whatever_its_pr() {
     out.result.unwrap();
     let created: Vec<String> = backend.creates().into_iter().map(|c| c.name).collect();
     assert_eq!(created, ["sbxm-task-issue-41-claude"]);
+}
+
+/// #41 is a must-fix issue whose `PR: #999` no longer exists; #2 is an unrelated eligible issue.
+fn github_with_a_stale_pr_finding(body: &str, labels: &[&str], extra: Vec<Issue>) -> FakeGitHub {
+    let mut open = vec![
+        open_issue(41, labels, body),
+        open_issue(2, &["must-fix"], ""),
+    ];
+    open.extend(extra);
+    FakeGitHub::default()
+        .with_default_branch("main")
+        .with_issue_text(issue_text(41))
+        .with_issue_text(issue_text(2))
+        .with_open_issues(open)
+}
+
+fn workers_start_only_issue_2(f: &Fixture, github: &FakeGitHub) {
+    let mut opts = options(f);
+    opts.issues = Vec::new();
+    opts.workers = Some(2);
+    let backend = playing(f);
+
+    let out = run(f, &opts, &backend, github);
+
+    out.result.unwrap();
+    let created: Vec<String> = backend.creates().into_iter().map(|c| c.name).collect();
+    assert_eq!(created, ["sbxm-task-issue-2-claude"], "{}", out.out);
+}
+
+#[test]
+fn a_stale_pr_on_a_question_is_still_skipped_as_a_question() {
+    let f = fixture();
+    let github =
+        github_with_a_stale_pr_finding("PR: #999\nfinding", &["must-fix", "question"], vec![]);
+    workers_start_only_issue_2(&f, &github);
+}
+
+#[test]
+fn a_stale_pr_on_a_blocked_issue_is_still_skipped_as_blocked() {
+    let f = fixture();
+    let github = github_with_a_stale_pr_finding(
+        "PR: #999\n**Depends on:** #3",
+        &["must-fix"],
+        vec![open_issue(3, &["question"], "")],
+    );
+    workers_start_only_issue_2(&f, &github);
+}
+
+#[test]
+fn a_stale_pr_on_an_issue_that_already_has_a_task_is_still_skipped_as_having_one() {
+    let f = fixture();
+    // #41 gets its task first, from a run that never reads its PR (an explicit issue).
+    let first = run(&f, &options(&f), &playing(&f), &github());
+    first.result.unwrap();
+    let github = github_with_a_stale_pr_finding("PR: #999\nfinding", &["must-fix"], vec![]);
+    workers_start_only_issue_2(&f, &github);
 }
