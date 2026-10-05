@@ -577,3 +577,52 @@ fn an_unreadable_pr_skips_its_issue_with_a_reason_and_starts_nothing_for_it() {
     assert_eq!(created, ["sbxm-task-issue-2-claude"]);
     assert!(!record::task_dir(&f.env.base_dir(), "issue-41").exists());
 }
+
+#[test]
+fn when_every_candidate_is_skipped_an_unreadable_pr_is_still_warned_about() {
+    let f = fixture();
+    let github = FakeGitHub::default()
+        .with_default_branch("main")
+        .with_issue_text(issue_text(41))
+        .with_open_issues(vec![open_issue(41, &["must-fix"], "PR: #999\nfinding")]);
+    let mut opts = options(&f);
+    opts.issues = Vec::new();
+    opts.workers = Some(1);
+    let backend = playing(&f);
+
+    let out = run(&f, &opts, &backend, &github);
+
+    let err = format!("{:#}", out.result.unwrap_err());
+    assert!(err.contains("nothing to start"), "{err}");
+    assert!(err.contains("its PR #999 couldn't be read"), "{err}");
+    // The warning carries the lookup's own reason ("pr 999 is not scripted").
+    assert!(
+        out.warn.contains("#41") && out.warn.contains("999") && out.warn.contains("not scripted"),
+        "{}",
+        out.warn
+    );
+    assert!(backend.creates().is_empty());
+    assert!(!record::task_dir(&f.env.base_dir(), "issue-41").exists());
+}
+
+#[test]
+fn an_issue_selection_already_skips_never_costs_a_pr_lookup_or_a_warning() {
+    for (labels, body, extra) in [
+        (&["must-fix", "question"][..], "PR: #999\nfinding", vec![]),
+        (
+            &["must-fix"][..],
+            "PR: #999\n**Depends on:** #3",
+            vec![open_issue(3, &["question"], "")],
+        ),
+    ] {
+        let f = fixture();
+        let github = github_with_a_stale_pr_finding(body, labels, extra);
+        workers_start_only_issue_2(&f, &github);
+        let looked_up: Vec<_> = github
+            .calls()
+            .into_iter()
+            .filter(|c| matches!(c, sbxm::github::fake::GhCall::Pr(..)))
+            .collect();
+        assert!(looked_up.is_empty(), "{looked_up:?}");
+    }
+}

@@ -10,7 +10,6 @@ use anyhow::{Context, Result, bail};
 use std::time::Instant;
 
 use super::config::TaskConfig;
-use super::findings::pr_of;
 use super::gates::{self, GateOutcome, HostRunner};
 use super::prompts::{self, Role};
 use super::record::{
@@ -324,12 +323,12 @@ pub fn check_restartable(ctx: &Ctx, restarting: &[u32]) -> Result<()> {
 /// network error) is not an error here: it is left out of the map, `select` skips the issues that
 /// name it, and the warning says why, so one stale reference never stops the other issues and
 /// nothing starts whose PR isn't known to be open.
-fn must_fix_pr_states(ctx: &Ctx, open: &[Issue]) -> (HashMap<u32, PrState>, Vec<String>) {
-    let mut named: Vec<(u32, u32)> = open
-        .iter()
-        .filter(|i| i.labels.iter().any(|l| l == "must-fix"))
-        .filter_map(|i| pr_of(&i.body).map(|pr| (pr, i.number)))
-        .collect();
+fn must_fix_pr_states(
+    ctx: &Ctx,
+    open: &[Issue],
+    taken: &[u32],
+) -> (HashMap<u32, PrState>, Vec<String>) {
+    let mut named = select::needs_pr_state(open, taken);
     named.sort_unstable();
     let mut states = HashMap::new();
     let mut warnings = Vec::new();
@@ -353,8 +352,14 @@ fn must_fix_pr_states(ctx: &Ctx, open: &[Issue]) -> (HashMap<u32, PrState>, Vec<
     }
     (states, warnings)
 }
-/// Chooses the issues to start (spec §8). With nothing to pick, the error says why for each.
+/// Chooses the issues to start (spec §8) and refuses when there is nothing to pick.
 pub fn select_issues(ctx: &Ctx, explicit: Option<&[u32]>, workers: usize) -> Result<Selection> {
+    require_picks(choose_issues(ctx, explicit, workers)?)
+}
+
+/// Applies the selection rules and returns the result whether or not anything was picked, so a
+/// caller can show the warnings and skips before it refuses (see `require_picks`).
+pub fn choose_issues(ctx: &Ctx, explicit: Option<&[u32]>, workers: usize) -> Result<Selection> {
     let base = GlobalConfig::load(ctx.config_dir)?.base_dir;
     let open = ctx.github.issues_open(ctx.repo)?;
     let taken: Vec<u32> = record::load_all(&base)?
@@ -363,12 +368,17 @@ pub fn select_issues(ctx: &Ctx, explicit: Option<&[u32]>, workers: usize) -> Res
         .map(|r| r.number)
         .collect();
     let (prs, warnings) = if explicit.is_none() {
-        must_fix_pr_states(ctx, &open)
+        must_fix_pr_states(ctx, &open, &taken)
     } else {
         (HashMap::new(), Vec::new())
     };
     let mut selection = select::select(&open, &taken, explicit, workers, &prs);
     selection.warnings = warnings;
+    Ok(selection)
+}
+
+/// With nothing to pick, the error says why for each candidate.
+pub fn require_picks(selection: Selection) -> Result<Selection> {
     if selection.picks.is_empty() {
         let mut lines: Vec<String> = selection
             .not_open

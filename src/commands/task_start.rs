@@ -247,9 +247,9 @@ pub fn run_with(
         discard_existing(&ctx, &opts.issues, restart, out)?;
     }
     let selection = if opts.issues.is_empty() {
-        pipeline::select_issues(&ctx, None, opts.workers.unwrap_or(1))?
+        pipeline::choose_issues(&ctx, None, opts.workers.unwrap_or(1))?
     } else {
-        pipeline::select_issues(&ctx, Some(&opts.issues), opts.issues.len())?
+        pipeline::choose_issues(&ctx, Some(&opts.issues), opts.issues.len())?
     };
     for warning in &selection.warnings {
         writeln!(warn, "warning: {warning}")?;
@@ -260,6 +260,7 @@ pub fn run_with(
     for (number, why) in &selection.skips {
         writeln!(out, "#{number}: skipped, {why}")?;
     }
+    let selection = pipeline::require_picks(selection)?;
 
     let names: Vec<String> = selection
         .picks

@@ -99,6 +99,34 @@ fn must_fix_pr(issue: &Issue, prs: &HashMap<u32, PrState>) -> Option<(u32, Optio
     Some((pr, prs.get(&pr).copied()))
 }
 
+/// The rules that come before any PR is looked at, in the order the spec gives them: already has
+/// a task, a question, blocked by an open issue. `select` applies them first, and
+/// `needs_pr_state` uses the same function to leave every issue they skip out of the PR lookups,
+/// so the order lives in one place.
+fn early_skip(issue: &Issue, taken: &[u32], open_numbers: &[u32]) -> Option<Reason> {
+    if taken.contains(&issue.number) {
+        return Some(Reason::HasTask);
+    }
+    if issue.labels.iter().any(|l| l == "question") {
+        return Some(Reason::Question);
+    }
+    let mut blockers = field_numbers(&issue.body, "Depends on");
+    blockers.sort_unstable();
+    blockers.dedup();
+    blockers.retain(|b| open_numbers.contains(b));
+    (!blockers.is_empty()).then_some(Reason::Blocked(blockers))
+}
+
+/// The `(pr, issue)` pairs whose PR state an automatic selection needs: `must-fix` issues naming
+/// a PR that no earlier rule skips. Nothing else is worth a lookup (or a warning about one).
+pub fn needs_pr_state(open: &[Issue], in_progress: &[u32]) -> Vec<(u32, u32)> {
+    let open_numbers: Vec<u32> = open.iter().map(|i| i.number).collect();
+    open.iter()
+        .filter(|i| early_skip(i, in_progress, &open_numbers).is_none())
+        .filter_map(|i| must_fix_pr(i, &HashMap::new()).map(|(pr, _)| (pr, i.number)))
+        .collect()
+}
+
 /// Picks up to `workers` issues (all of `explicit` when given): `must-fix` issues of an open PR
 /// first, then by label rank, then by number. `prs` holds the known state of the PRs that
 /// `must-fix` issues name; without an explicit list, one whose PR is closed or merged is skipped,
@@ -140,10 +168,6 @@ pub fn select(
             break;
         }
         let number = candidate.number;
-        let mut blockers = field_numbers(&candidate.body, "Depends on");
-        blockers.sort_unstable();
-        blockers.dedup();
-        blockers.retain(|b| open_numbers.contains(b));
         let own = related_of.get(&number).map_or(&[][..], Vec::as_slice);
         let clashes: Vec<u32> = taken
             .iter()
@@ -151,12 +175,8 @@ pub fn select(
             .filter(|t| own.contains(t) || related_of.get(t).is_some_and(|r| r.contains(&number)))
             .collect();
 
-        if taken.contains(&number) {
-            selection.skips.push((number, Reason::HasTask));
-        } else if candidate.labels.iter().any(|l| l == "question") {
-            selection.skips.push((number, Reason::Question));
-        } else if !blockers.is_empty() {
-            selection.skips.push((number, Reason::Blocked(blockers)));
+        if let Some(reason) = early_skip(candidate, &taken, &open_numbers) {
+            selection.skips.push((number, reason));
         } else if let Some((pr, Some(state @ (PrState::Closed | PrState::Merged)))) =
             must_fix_pr(candidate, prs).filter(|_| explicit.is_none())
         {
