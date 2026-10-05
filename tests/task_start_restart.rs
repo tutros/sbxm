@@ -12,8 +12,8 @@ use common::task_fixture::{
 use sbxm::backend::FakeBackend;
 use sbxm::commands::task_start::{self, Options, Restart};
 use sbxm::confirm::Confirm;
-use sbxm::github::IssueText;
 use sbxm::github::fake::FakeGitHub;
+use sbxm::github::{IssueText, PrInfo, PrState};
 use sbxm::task::record::{self, Status};
 use sbxm::task::repo::Identity;
 
@@ -526,4 +526,122 @@ fn several_restarts_accepted_once_delete_and_start_them_all() {
         "the old folder was reused"
     );
     assert!(record::read(&meta_of(&f, 41).join("task.json")).is_ok());
+}
+
+// ---- Issue #83 review M-2: a PR that can't be continued is refused before anything is deleted ----
+
+/// Issue `number`, now a finding of PR 7 (`PR: #7` on its body's first line).
+fn finding_of_pr_7(number: u32) -> IssueText {
+    IssueText {
+        text: format!(
+            "title:\tFix {number}\nstate:\tOPEN\n--\nPR: #7\n\n**Acceptance criteria:** do it\n"
+        ),
+        ..issue_text(number)
+    }
+}
+
+fn pr_7(state: PrState, fork: bool) -> PrInfo {
+    PrInfo {
+        number: 7,
+        head_ref: "feature-x".into(),
+        is_cross_repository: fork,
+        state,
+        title: "Add x".into(),
+        body: String::new(),
+        closing_issues: vec![],
+    }
+}
+
+fn untouched(f: &Fixture, number: u32) {
+    let meta = meta_of(f, number);
+    assert!(meta.join("task.json").exists(), "#{number}: record deleted");
+    assert!(
+        meta.join("repo.git").is_dir(),
+        "#{number}: repo.git deleted"
+    );
+    assert!(
+        f.env
+            .base_dir()
+            .join("tasks")
+            .join(format!("issue-{number}"))
+            .is_dir(),
+        "#{number}: workspace deleted"
+    );
+}
+
+#[test]
+fn restarting_an_issue_of_a_closed_merged_or_fork_pr_deletes_nothing() {
+    for (state, fork, word) in [
+        (PrState::Closed, false, "closed"),
+        (PrState::Merged, false, "merged"),
+        (PrState::Open, true, "fork"),
+    ] {
+        let f = fixture();
+        started(&f);
+        let b = playing(&f);
+        let gh = FakeGitHub::default()
+            .with_default_branch("main")
+            .with_issue_text(finding_of_pr_7(41))
+            .with_open_issues(vec![open_issue(41, &["should-fix"], "")])
+            .with_pr(pr_7(state, fork));
+
+        let (result, _) = go(
+            &f,
+            &options(&f),
+            Some(&Restart {
+                confirm: &FakeConfirm::new(true, true),
+                yes: true,
+            }),
+            &b,
+            &gh,
+        );
+
+        let message = format!("{:#}", result.unwrap_err());
+        assert!(
+            message.contains("PR #7") && message.contains(word),
+            "{word}: {message}"
+        );
+        untouched(&f, 41);
+        assert!(
+            b.removes().is_empty() && b.creates().is_empty(),
+            "{word}: the sandbox was touched"
+        );
+    }
+}
+
+#[test]
+fn one_restart_with_an_uncontinuable_pr_keeps_every_task() {
+    let f = fixture();
+    started_both(&f);
+    let b = playing(&f);
+    // #41 is fine; #42 is now a finding of a merged PR.
+    let gh = FakeGitHub::default()
+        .with_default_branch("main")
+        .with_issue_text(issue_text(41))
+        .with_issue_text(finding_of_pr_7(42))
+        .with_open_issues(vec![
+            open_issue(41, &["should-fix"], ""),
+            open_issue(42, &["should-fix"], ""),
+        ])
+        .with_pr(pr_7(PrState::Merged, false));
+
+    let (result, _) = go(
+        &f,
+        &options_for(&f, &[41, 42]),
+        Some(&Restart {
+            confirm: &FakeConfirm::new(true, true),
+            yes: true,
+        }),
+        &b,
+        &gh,
+    );
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains("#42") && message.contains("merged"),
+        "{message}"
+    );
+    untouched(&f, 41);
+    untouched(&f, 42);
+    assert!(b.removes().is_empty() && b.creates().is_empty());
 }

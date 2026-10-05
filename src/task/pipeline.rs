@@ -436,6 +436,16 @@ fn pr_to_continue(ctx: &Ctx, number: u32, pr: u32) -> Result<String> {
     Ok(info.head_ref)
 }
 
+/// The PR whose branch an issue's task continues, as (PR number, its branch), or `None` when the
+/// issue names no PR; an error when it names one that can't be continued. `prepare` and
+/// `task start --restart` both use it, so a restart never deletes a task it couldn't start again.
+pub fn continued_pr(ctx: &Ctx, issue: &IssueText) -> Result<Option<(u32, String)>> {
+    match issue_pr(issue) {
+        Some(pr) => Ok(Some((pr, pr_to_continue(ctx, issue.number, pr)?))),
+        None => Ok(None),
+    }
+}
+
 /// Spec §5.1 steps 1 and 2: checks, then the task's folders, `repo.git`, the worker's clone,
 /// `issue.md` and the prompt, the sandbox and the first record.
 pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
@@ -460,11 +470,7 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
             "task {id} exists (stage {stage}); use `sbxm task status`, or --restart to start it again"
         );
     }
-    // An issue of an open PR continues that PR's branch: (PR number, its branch).
-    let continues = match issue_pr(issue) {
-        Some(pr) => Some((pr, pr_to_continue(ctx, issue.number, pr)?)),
-        None => None,
-    };
+    let continues = continued_pr(ctx, issue)?;
     let worker = &ctx.config.worker;
     let profile = Profile::load(global.profiles_dir(), &ctx.config.sandbox.profile)?;
     check_secrets(
