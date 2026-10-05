@@ -260,7 +260,8 @@ trait GitHubBackend: Send + Sync {
 ## 10. Prompts [156]
 
 `prompts/worker.md`, `reviewer.md`, `fix.md` are ported from the script's text (`New-Prompt`, `New-ReviewPrompt`,
-`New-FixPrompt`), with `{{name}}` placeholders: `issue`, `number`, `branch`, `base`, `repo`, `gates_sandbox`,
+`New-FixPrompt`), with `{{name}}` placeholders: `issue`, `number`, `branch`, `base`, `repo`, `pr_context` (one sentence naming the PR whose branch
+the task continues, decision 169; empty otherwise), `gates_sandbox`,
 `gates_host`, `review_path`, `previous_review_path`. An unknown placeholder, or a placeholder with no value, is an
 error naming the template. The rendered prompt is written to the task folder so a run can be audited.
 

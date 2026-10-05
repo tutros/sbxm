@@ -210,6 +210,20 @@ pub fn clean_checkout(repo_git: &Path, branch: &str, dest: &Path) -> Result<()> 
 /// Fetches the head of PR `number` from GitHub into the local branch `pr-<n>`; returns its name.
 pub fn fetch_pr_head(repo_git: &Path, number: u32) -> Result<String> {
     let branch = format!("pr-{number}");
+    fetch_pr_into(repo_git, number, &branch)?;
+    Ok(branch)
+}
+
+/// Fetches the head of PR `number` from GitHub into the local branch `branch` (the PR's own
+/// branch name, for a task that continues the PR), replacing what the clone had there; returns
+/// the commit it is at.
+pub fn fetch_pr_branch(repo_git: &Path, number: u32, branch: &str) -> Result<String> {
+    check_ref("branch", branch)?;
+    fetch_pr_into(repo_git, number, branch)?;
+    branch_tip(repo_git, branch)
+}
+
+fn fetch_pr_into(repo_git: &Path, number: u32, branch: &str) -> Result<()> {
     let refspec = format!("+refs/pull/{number}/head:refs/heads/{branch}");
     git::user_run(
         repo_git,
@@ -229,7 +243,7 @@ pub fn fetch_pr_head(repo_git: &Path, number: u32) -> Result<String> {
         ],
     )
     .with_context(|| format!("cannot fetch the head of PR #{number}; is it a PR of this repo?"))?;
-    Ok(branch)
+    Ok(())
 }
 
 fn has_branch(repo_git: &Path, branch: &str) -> Result<bool> {

@@ -62,7 +62,7 @@ pub fn render(
         };
         writeln!(
             out,
-            "{:<width$}  {:<9}  {:<12}  ahead: {:<3}  result: {:<3}  review: {:<3}  {}",
+            "{:<width$}  {:<9}  {:<12}  ahead: {:<3}  result: {:<3}  review: {:<3}  {}{}",
             record.id,
             record.stage.name(),
             status,
@@ -70,6 +70,10 @@ pub fn render(
             yes_no(dir.join("result.md").is_file()),
             yes_no(dir.join("review.md").is_file()),
             record.title,
+            record
+                .continues
+                .as_ref()
+                .map_or_else(String::new, |c| format!("  [PR #{} ({})]", c.pr, c.branch)),
         )?;
     }
     Ok(out)

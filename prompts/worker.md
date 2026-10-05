@@ -1,5 +1,5 @@
 You are working on GitHub issue #{{number}} of this repository ({{repo}}). You have no GitHub access: the issue is in
-.sbxm-task/issue.md. You are on branch {{branch}}, which started from {{base}}.
+.sbxm-task/issue.md. You are on branch {{branch}}, which started from {{base}}.{{pr_context}}
 
 If the repository has an sdlc-implementation skill (.claude/skills/), follow it. Otherwise work test first, in the
 smallest steps you can, and commit after every green step. After each step run these checks and fix what they report:
