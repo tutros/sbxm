@@ -13,6 +13,7 @@ use common::task_fixture::{
 use sbxm::backend::FakeBackend;
 use sbxm::commands::task_start::{self, Options, github_repo};
 use sbxm::github::fake::FakeGitHub;
+use sbxm::github::{PrInfo, PrState};
 use sbxm::harness::Harness;
 use sbxm::task::repo::Identity;
 
@@ -389,4 +390,76 @@ fn warnings_go_to_the_warning_writer() {
     out.result.unwrap();
     // The default config has a different reviewer harness and no unsupported settings.
     assert!(out.warn.is_empty(), "{}", out.warn);
+}
+
+fn pr_in_state(number: u32, state: PrState) -> PrInfo {
+    PrInfo {
+        number,
+        head_ref: format!("issue-{number}"),
+        is_cross_repository: false,
+        state,
+        title: format!("PR {number}"),
+        body: String::new(),
+        closing_issues: Vec::new(),
+    }
+}
+
+fn github_with_pr_finding(state: PrState) -> FakeGitHub {
+    FakeGitHub::default()
+        .with_default_branch("main")
+        .with_issue_text(issue_text(41))
+        .with_issue_text(issue_text(2))
+        .with_pr(pr_in_state(40, state))
+        .with_open_issues(vec![
+            open_issue(41, &["must-fix"], "PR: #40\nfinding"),
+            open_issue(2, &["must-fix"], ""),
+        ])
+}
+
+#[test]
+fn workers_picks_a_must_fix_issue_of_an_open_pr_first() {
+    let f = fixture();
+    let mut opts = options(&f);
+    opts.issues = Vec::new();
+    opts.workers = Some(1);
+    let (backend, github) = (playing(&f), github_with_pr_finding(PrState::Open));
+
+    let out = run(&f, &opts, &backend, &github);
+
+    out.result.unwrap();
+    let created: Vec<String> = backend.creates().into_iter().map(|c| c.name).collect();
+    assert_eq!(created, ["sbxm-task-issue-41-claude"]);
+}
+
+#[test]
+fn workers_skips_a_must_fix_issue_of_a_merged_pr_and_says_why() {
+    let f = fixture();
+    let mut opts = options(&f);
+    opts.issues = Vec::new();
+    opts.workers = Some(2);
+    let (backend, github) = (playing(&f), github_with_pr_finding(PrState::Merged));
+
+    let out = run(&f, &opts, &backend, &github);
+
+    out.result.unwrap();
+    assert!(
+        out.out.contains("#41: skipped, its PR #40 is merged"),
+        "{}",
+        out.out
+    );
+    let created: Vec<String> = backend.creates().into_iter().map(|c| c.name).collect();
+    assert_eq!(created, ["sbxm-task-issue-2-claude"]);
+}
+
+#[test]
+fn an_explicit_issue_starts_whatever_its_pr() {
+    let f = fixture();
+    let opts = options(&f);
+    let (backend, github) = (playing(&f), github_with_pr_finding(PrState::Merged));
+
+    let out = run(&f, &opts, &backend, &github);
+
+    out.result.unwrap();
+    let created: Vec<String> = backend.creates().into_iter().map(|c| c.name).collect();
+    assert_eq!(created, ["sbxm-task-issue-41-claude"]);
 }

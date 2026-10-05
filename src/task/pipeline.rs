@@ -10,6 +10,7 @@ use anyhow::{Context, Result, bail};
 use std::time::Instant;
 
 use super::config::TaskConfig;
+use super::findings::pr_of;
 use super::gates::{self, GateOutcome, HostRunner};
 use super::prompts::{self, Role};
 use super::record::{
@@ -21,7 +22,7 @@ use super::review;
 use super::select::{self, Selection};
 use crate::backend::{CreateSpec, ExecSpec, SandboxBackend, Stdin};
 use crate::config::{GlobalConfig, Profile};
-use crate::github::{GitHubBackend, IssueText, PrInfo, PrState};
+use crate::github::{GitHubBackend, Issue, IssueText, PrInfo, PrState};
 use crate::harness::Harness;
 use crate::headless::{self, HeadlessOpts, RunStatus};
 use crate::run::kits::{self, HarnessKits, Overrides};
@@ -318,6 +319,28 @@ pub fn check_restartable(ctx: &Ctx, restarting: &[u32]) -> Result<()> {
     Ok(())
 }
 
+/// The state of every PR an open `must-fix` issue names on its first line (`PR: #n`), so selection
+/// can put those of an open PR first (decision 169).
+fn must_fix_pr_states(ctx: &Ctx, open: &[Issue]) -> Result<HashMap<u32, PrState>> {
+    let mut wanted: Vec<u32> = open
+        .iter()
+        .filter(|i| i.labels.iter().any(|l| l == "must-fix"))
+        .filter_map(|i| pr_of(&i.body))
+        .collect();
+    wanted.sort_unstable();
+    wanted.dedup();
+    wanted
+        .into_iter()
+        .map(|n| {
+            let pr = ctx
+                .github
+                .pr(ctx.repo, n)
+                .with_context(|| format!("reading PR #{n}, named by a must-fix issue"))?;
+            Ok((n, pr.state))
+        })
+        .collect()
+}
+
 /// Chooses the issues to start (spec §8). With nothing to pick, the error says why for each.
 pub fn select_issues(ctx: &Ctx, explicit: Option<&[u32]>, workers: usize) -> Result<Selection> {
     let base = GlobalConfig::load(ctx.config_dir)?.base_dir;
@@ -327,7 +350,12 @@ pub fn select_issues(ctx: &Ctx, explicit: Option<&[u32]>, workers: usize) -> Res
         .filter(|r| r.kind == Kind::Issue)
         .map(|r| r.number)
         .collect();
-    let selection = select::select(&open, &taken, explicit, workers, &HashMap::new());
+    let prs = if explicit.is_none() {
+        must_fix_pr_states(ctx, &open)?
+    } else {
+        HashMap::new()
+    };
+    let selection = select::select(&open, &taken, explicit, workers, &prs);
     if selection.picks.is_empty() {
         let mut lines: Vec<String> = selection
             .not_open
