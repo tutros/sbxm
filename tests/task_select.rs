@@ -303,3 +303,20 @@ fn an_explicit_list_still_names_any_issue_whatever_its_pr() {
     assert_eq!(selection.picks, [1, 3]);
     assert!(selection.skips.is_empty());
 }
+
+#[test]
+fn a_must_fix_issue_whose_pr_state_is_unknown_is_skipped_but_an_explicit_one_is_not() {
+    let open = [issue(1, &["must-fix"], "PR: #40"), plain(2)];
+
+    let automatic = pick_with_prs(&open, None, 2, &[]);
+    assert_eq!(automatic.picks, [2]);
+    assert_eq!(automatic.skips, [(1, Reason::PrUnreadable(40))]);
+    assert_eq!(
+        Reason::PrUnreadable(40).to_string(),
+        "its PR #40 couldn't be read"
+    );
+
+    let explicit = pick_with_prs(&open, Some(&[1]), 1, &[]);
+    assert_eq!(explicit.picks, [1]);
+    assert!(explicit.skips.is_empty());
+}

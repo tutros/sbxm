@@ -15,6 +15,7 @@ use sbxm::commands::task_start::{self, Options, github_repo};
 use sbxm::github::fake::FakeGitHub;
 use sbxm::github::{Issue, PrInfo, PrState};
 use sbxm::harness::Harness;
+use sbxm::task::record;
 use sbxm::task::repo::Identity;
 
 fn options(f: &Fixture) -> Options {
@@ -548,7 +549,7 @@ fn a_stale_pr_on_an_issue_related_to_an_existing_task_is_still_skipped_as_relate
 }
 
 #[test]
-fn an_unreadable_pr_is_a_warning_and_its_issue_ranks_as_an_ordinary_one() {
+fn an_unreadable_pr_skips_its_issue_with_a_reason_and_starts_nothing_for_it() {
     let f = fixture();
     let github = github_with_a_stale_pr_finding("PR: #999\nfinding", &["must-fix"], vec![]);
     let mut opts = options(&f);
@@ -558,17 +559,21 @@ fn an_unreadable_pr_is_a_warning_and_its_issue_ranks_as_an_ordinary_one() {
 
     let out = run(&f, &opts, &backend, &github);
 
+    out.result.unwrap();
     assert!(
-        out.warn.contains("#41") && out.warn.contains("PR #999") && out.warn.contains("ordinary"),
+        out.out
+            .contains("#41: skipped, its PR #999 couldn't be read"),
+        "{}",
+        out.out
+    );
+    // The warning carries the lookup's own reason.
+    assert!(
+        out.warn.contains("#41") && out.warn.contains("PR #999") && out.warn.contains("skipped"),
         "{}",
         out.warn
     );
-    // Nothing is stopped: both must-fix issues start, by number as ordinary ones.
-    out.result.unwrap();
-    let mut created: Vec<String> = backend.creates().into_iter().map(|c| c.name).collect();
-    created.sort();
-    assert_eq!(
-        created,
-        ["sbxm-task-issue-2-claude", "sbxm-task-issue-41-claude"]
-    );
+    // Only the unrelated issue starts; no task folder or sandbox exists for #41.
+    let created: Vec<String> = backend.creates().into_iter().map(|c| c.name).collect();
+    assert_eq!(created, ["sbxm-task-issue-2-claude"]);
+    assert!(!record::task_dir(&f.env.base_dir(), "issue-41").exists());
 }

@@ -321,8 +321,9 @@ pub fn check_restartable(ctx: &Ctx, restarting: &[u32]) -> Result<()> {
 
 /// The state of every PR an open `must-fix` issue names on its first line (`PR: #n`), so selection
 /// can put those of an open PR first (decision 169). A PR that can't be read (deleted, a typo, a
-/// network error) is not an error here: its issues rank as ordinary ones and the warning says why,
-/// so one stale reference never stops the other issues.
+/// network error) is not an error here: it is left out of the map, `select` skips the issues that
+/// name it, and the warning says why, so one stale reference never stops the other issues and
+/// nothing starts whose PR isn't known to be open.
 fn must_fix_pr_states(ctx: &Ctx, open: &[Issue]) -> (HashMap<u32, PrState>, Vec<String>) {
     let mut named: Vec<(u32, u32)> = open
         .iter()
@@ -336,7 +337,7 @@ fn must_fix_pr_states(ctx: &Ctx, open: &[Issue]) -> (HashMap<u32, PrState>, Vec<
     for (pr, issue) in named {
         if unreadable.contains(&pr) {
             warnings.push(format!(
-                "#{issue}: PR #{pr} couldn't be read (see above); ranked as an ordinary issue"
+                "#{issue}: PR #{pr} couldn't be read (see above); skipped"
             ));
         } else if let std::collections::hash_map::Entry::Vacant(slot) = states.entry(pr) {
             match ctx.github.pr(ctx.repo, pr) {
@@ -345,9 +346,7 @@ fn must_fix_pr_states(ctx: &Ctx, open: &[Issue]) -> (HashMap<u32, PrState>, Vec<
                 }
                 Err(e) => {
                     unreadable.push(pr);
-                    warnings.push(format!(
-                        "#{issue}: couldn't read PR #{pr} ({e:#}); ranked as an ordinary issue"
-                    ));
+                    warnings.push(format!("#{issue}: couldn't read PR #{pr} ({e:#}); skipped"));
                 }
             }
         }

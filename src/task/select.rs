@@ -18,6 +18,9 @@ pub enum Reason {
     RelatedToTask(Vec<u32>),
     /// A `must-fix` issue whose PR (`PR: #n`) is closed or merged (decision 169).
     PrNotOpen(u32, PrState),
+    /// A `must-fix` issue whose PR's state isn't known (the lookup failed), so it can't be shown
+    /// to belong to an open PR; only an explicit list starts it.
+    PrUnreadable(u32),
 }
 
 fn numbers(list: &[u32]) -> String {
@@ -44,6 +47,7 @@ impl fmt::Display for Reason {
                 };
                 write!(f, "its PR #{pr} is {state}")
             }
+            Self::PrUnreadable(pr) => write!(f, "its PR #{pr} couldn't be read"),
         }
     }
 }
@@ -97,7 +101,8 @@ fn must_fix_pr(issue: &Issue, prs: &HashMap<u32, PrState>) -> Option<(u32, Optio
 
 /// Picks up to `workers` issues (all of `explicit` when given): `must-fix` issues of an open PR
 /// first, then by label rank, then by number. `prs` holds the known state of the PRs that
-/// `must-fix` issues name; without an explicit list, one whose PR is closed or merged is skipped.
+/// `must-fix` issues name; without an explicit list, one whose PR is closed or merged is skipped,
+/// and so is one whose PR is missing from `prs` (it couldn't be read, so it isn't known to be open).
 /// An explicit list names any issue, whatever its PR.
 pub fn select(
     open: &[Issue],
@@ -156,6 +161,9 @@ pub fn select(
             must_fix_pr(candidate, prs).filter(|_| explicit.is_none())
         {
             selection.skips.push((number, Reason::PrNotOpen(pr, state)));
+        } else if let Some((pr, None)) = must_fix_pr(candidate, prs).filter(|_| explicit.is_none())
+        {
+            selection.skips.push((number, Reason::PrUnreadable(pr)));
         } else if !clashes.is_empty() {
             selection
                 .skips

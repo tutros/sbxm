@@ -231,14 +231,14 @@ Output: human text by default; `status --json` prints the records. Exit codes: 0
 -> Selection`, pure. `Issue { number, title, labels, body }`. Dependencies: `**Depends on:** #a, #b`; relations:
 `**Related:** #c` (the regexes of the script: a line starting with the bold field name; every `#<digits>` on it).
 `prs` is the state of each PR a `must-fix` issue names on its first line (`PR: #n`, decision 169); without an
-explicit list, `task start` reads them with `GitHubBackend::pr` before selecting. Rules, in order, per candidate
+explicit list, `task start` reads them with `GitHubBackend::pr` before selecting; one that can't be read is left out of `prs` and warned about. Rules, in order, per candidate
 sorted by (a `must-fix` issue of an open PR first, label rank, number); label rank: `must-fix` 0, `should-fix` 1,
 others 9:
 1. not in the explicit list (when given) → not a candidate (explicit numbers that aren't open issues warn);
 2. already has a task → skip `already has a task`;
 3. label `question` → skip `a question, needs your answer first`;
 4. any `Depends on` issue still open → skip `blocked by open #…`;
-5. no explicit list, and a `must-fix` issue whose PR is closed or merged → skip `its PR #n is merged` (or `closed`);
+5. no explicit list, and a `must-fix` issue whose PR is closed or merged → skip `its PR #n is merged` (or `closed`); one whose PR is not in `prs` (the lookup failed, so it is not known to be open) → skip `its PR #n couldn't be read`;
    an explicit list names any issue, whatever its PR;
 6. related (either direction) to an in-progress or already picked issue → skip `related to #…, which has a task`;
 7. otherwise pick, until `workers` picks (not applied to an explicit list).
