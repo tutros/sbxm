@@ -108,6 +108,7 @@ fn values() -> Vec<(&'static str, &'static str)> {
         ("repo", "o/r"),
         ("branch", "issue-41"),
         ("base", "main"),
+        ("scope_base", "origin/main"),
         ("pr_context", ""),
         ("gates_sandbox", "- `cargo test`"),
     ]
@@ -149,6 +150,7 @@ fn review_values() -> Vec<(&'static str, &'static str)> {
         ("repo", "o/r"),
         ("branch", "issue-41"),
         ("base", "main"),
+        ("scope_base", "origin/main"),
         ("gates_sandbox", "- `cargo test`"),
         ("review_path", ".sbxm-task/review.md"),
         ("previous_review_path", ".sbxm-task/previous-review.md"),

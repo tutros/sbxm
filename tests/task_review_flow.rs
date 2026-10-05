@@ -581,3 +581,51 @@ fn a_new_commit_after_the_gates_means_review_runs_them_again() {
 
     assert_eq!(host.calls().len(), 2, "gates passed on an older commit");
 }
+
+fn head_of_main(f: &Fixture) -> String {
+    let out = std::process::Command::new("git")
+        .args(["rev-parse", "refs/heads/main"])
+        .current_dir(meta(f).join("repo.git"))
+        .output()
+        .unwrap();
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
+}
+
+#[test]
+fn an_ordinary_tasks_reviewer_is_scoped_from_its_base_branch() {
+    let f = config();
+    let backend = backend(&f, &[CLEAN]);
+    let mut prepared = worked_task(&f, &backend);
+
+    review(&f, &backend, &mut prepared).unwrap();
+
+    let prompt = fs::read_to_string(meta(&f).join("reviewer-prompt-1.md")).unwrap();
+    assert!(
+        prompt.contains("git log origin/main..HEAD")
+            && prompt.contains("git diff origin/main...HEAD"),
+        "{prompt}"
+    );
+}
+
+#[test]
+fn a_continued_tasks_reviewer_is_scoped_from_the_pr_head_it_started_at() {
+    let f = config();
+    let backend = backend(&f, &[CLEAN]);
+    let mut prepared = worked_task(&f, &backend);
+    let head = head_of_main(&f);
+    prepared.record.continues = Some(record::PrBranch {
+        pr: 7,
+        branch: "issue-41".into(),
+        base: head.clone(),
+    });
+
+    review(&f, &backend, &mut prepared).unwrap();
+
+    let prompt = fs::read_to_string(meta(&f).join("reviewer-prompt-1.md")).unwrap();
+    assert!(
+        prompt.contains(&format!("git log {head}..HEAD"))
+            && prompt.contains(&format!("git diff {head}...HEAD")),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("origin/main"), "{prompt}");
+}

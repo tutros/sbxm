@@ -288,6 +288,15 @@ impl Record {
         }
     }
 
+    /// Where the reviewer's scope starts, as a git revision: the commit a continued PR's branch
+    /// started from, else the base branch's remote ref.
+    pub fn scope_base(&self) -> String {
+        match &self.continues {
+            Some(c) => c.base.clone(),
+            None => format!("origin/{}", self.base),
+        }
+    }
+
     /// A task that has just been created: stage `prepared`, running.
     pub fn new(task: &NewTask, now: u64, process: Process) -> Self {
         Self {

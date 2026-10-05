@@ -1711,6 +1711,7 @@ fn open_review_workspace(
             ("number", &prepared.record.number.to_string()),
             ("branch", &branch),
             ("base", &prepared.record.base),
+            ("scope_base", &prepared.record.scope_base()),
             ("repo", &prepared.record.repo),
             ("gates_sandbox", &bullets(&env.config.gates.sandbox)),
             ("gates_host", &bullets(&env.config.gates.host)),
