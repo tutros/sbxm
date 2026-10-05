@@ -55,6 +55,8 @@ pub struct Selection {
     pub skips: Vec<(u32, Reason)>,
     /// Explicitly named numbers that are not open issues (the caller warns).
     pub not_open: Vec<u32>,
+    /// Warnings from before selection (the caller prints them), e.g. a PR that couldn't be read.
+    pub warnings: Vec<String>,
 }
 
 /// The `#<digits>` numbers on the first line of `body` that starts with `**<field>:**`.

@@ -519,3 +519,56 @@ fn a_stale_pr_on_an_issue_that_already_has_a_task_is_still_skipped_as_having_one
     let github = github_with_a_stale_pr_finding("PR: #999\nfinding", &["must-fix"], vec![]);
     workers_start_only_issue_2(&f, &github);
 }
+
+#[test]
+fn a_stale_pr_on_an_issue_related_to_an_existing_task_is_still_skipped_as_related() {
+    let f = fixture();
+    let first = run(&f, &options(&f), &playing(&f), &github());
+    first.result.unwrap(); // #41 has its task
+    let github = FakeGitHub::default()
+        .with_default_branch("main")
+        .with_issue_text(issue_text(41))
+        .with_issue_text(issue_text(2))
+        .with_open_issues(vec![
+            open_issue(41, &["must-fix"], ""),
+            open_issue(42, &["must-fix"], "PR: #999\n**Related:** #41"),
+            open_issue(2, &["must-fix"], ""),
+        ]);
+    let mut opts = options(&f);
+    opts.issues = Vec::new();
+    opts.workers = Some(3);
+    let backend = playing(&f);
+
+    let out = run(&f, &opts, &backend, &github);
+
+    out.result.unwrap();
+    assert!(out.out.contains("#42: skipped"), "{}", out.out);
+    let created: Vec<String> = backend.creates().into_iter().map(|c| c.name).collect();
+    assert_eq!(created, ["sbxm-task-issue-2-claude"]);
+}
+
+#[test]
+fn an_unreadable_pr_is_a_warning_and_its_issue_ranks_as_an_ordinary_one() {
+    let f = fixture();
+    let github = github_with_a_stale_pr_finding("PR: #999\nfinding", &["must-fix"], vec![]);
+    let mut opts = options(&f);
+    opts.issues = Vec::new();
+    opts.workers = Some(2);
+    let backend = playing(&f);
+
+    let out = run(&f, &opts, &backend, &github);
+
+    assert!(
+        out.warn.contains("#41") && out.warn.contains("PR #999") && out.warn.contains("ordinary"),
+        "{}",
+        out.warn
+    );
+    // Nothing is stopped: both must-fix issues start, by number as ordinary ones.
+    out.result.unwrap();
+    let mut created: Vec<String> = backend.creates().into_iter().map(|c| c.name).collect();
+    created.sort();
+    assert_eq!(
+        created,
+        ["sbxm-task-issue-2-claude", "sbxm-task-issue-41-claude"]
+    );
+}

@@ -251,6 +251,9 @@ pub fn run_with(
     } else {
         pipeline::select_issues(&ctx, Some(&opts.issues), opts.issues.len())?
     };
+    for warning in &selection.warnings {
+        writeln!(warn, "warning: {warning}")?;
+    }
     for number in &selection.not_open {
         writeln!(warn, "warning: #{number} isn't an open issue; skipped")?;
     }
