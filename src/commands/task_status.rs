@@ -7,7 +7,6 @@ use anyhow::{Result, bail};
 use serde_json::Value;
 
 use crate::task::record::{self, Kind, ProcessProbe, Record};
-use crate::task::repo;
 
 fn id_of(kind: Kind, number: u32) -> String {
     match kind {
@@ -27,7 +26,7 @@ fn commits_ahead(base: &Path, record: &Record) -> Option<u32> {
     if !repo_git.is_dir() {
         return None;
     }
-    repo::commits_ahead(&repo_git, &record.base, &record.branch).ok()
+    record.commits_ahead(&repo_git).ok()
 }
 
 /// `which`: show just that task (an error when it doesn't exist).

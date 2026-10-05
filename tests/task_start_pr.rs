@@ -9,7 +9,12 @@ use std::fs;
 use std::path::PathBuf;
 
 use common::git;
-use common::task_fixture::{Fixture, add_pr_head, backend, ctx, fixture, issue_text, source};
+use common::task_fixture::{
+    CLAUDE_DONE, Fixture, Probe, add_pr_head, backend, ctx, fixture, is_bundle, is_headless,
+    issue_text, ok, source,
+};
+use sbxm::backend::{ExecOutput, FakeBackend};
+use sbxm::commands::task_status;
 use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::github::{IssueText, PrInfo, PrState};
 use sbxm::task::pipeline;
@@ -192,4 +197,94 @@ fn a_record_without_continues_still_loads() {
 
     let read = record::read(&dir.join("task.json")).unwrap();
     assert_eq!(read.continues, None);
+}
+
+// ---- Review M-1: a continued task counts only the worker's commits, not the PR's ----
+
+/// A backend whose worker commits `commits` files in issue 41's clone, and whose bundle command
+/// runs the real `git bundle create` with the arguments the pipeline sent, answering as git does
+/// (`Refusing to create empty bundle` when nothing is past the excluded commit).
+fn bundling(f: &Fixture, commits: usize) -> FakeBackend {
+    let ws = f.env.base_dir().join("tasks").join("issue-41");
+    backend()
+        .with_exec_output_matching("claude", ok(CLAUDE_DONE))
+        .with_exec_responder(move |_, spec| {
+            if is_headless(spec) {
+                for n in 0..commits {
+                    let file = format!("worker-{n}.txt");
+                    fs::write(ws.join(&file), "x").unwrap();
+                    git(&ws, &["add", "-A"]);
+                    git(&ws, &["commit", "-q", "-m", &file]);
+                }
+                None
+            } else if is_bundle(spec) {
+                fs::create_dir_all(ws.join(".sbxm-task")).unwrap();
+                // argv: git -C <ws> bundle create <file> <refs...>
+                let out = std::process::Command::new("git")
+                    .arg("-C")
+                    .arg(&ws)
+                    .args(&spec.argv[3..])
+                    .output()
+                    .unwrap();
+                Some(ExecOutput {
+                    stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+                    exit_code: out.status.code(),
+                })
+            } else {
+                None
+            }
+        })
+}
+
+fn ahead_shown(f: &Fixture) -> String {
+    let text = task_status::render(&f.env.base_dir(), None, false, &Probe).unwrap();
+    text.split("ahead:")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or_default()
+        .to_owned()
+}
+
+#[test]
+fn a_continued_task_whose_worker_adds_nothing_counts_zero_commits() {
+    let f = fixture();
+    add_pr_head(&f, 7);
+    let backend = bundling(&f, 0);
+    let github = FakeGitHub::default().with_pr(pr(7, PrState::Open, false));
+    let source = source(&f);
+    let ctx = ctx(&f, &source, &backend, &github);
+
+    let mut prepared = pipeline::prepare(&ctx, &finding(7)).unwrap();
+    let worked = pipeline::run_worker(&ctx, &mut prepared).unwrap();
+
+    assert_eq!(worked.commits, 0, "the PR's own commit isn't the worker's");
+    assert!(
+        worked.notes.iter().any(|n| n.contains("no commits")),
+        "{:?}",
+        worked.notes
+    );
+    assert_eq!(ahead_shown(&f), "0");
+}
+
+#[test]
+fn a_continued_task_whose_worker_adds_one_commit_counts_one() {
+    let f = fixture();
+    add_pr_head(&f, 7);
+    let backend = bundling(&f, 1);
+    let github = FakeGitHub::default().with_pr(pr(7, PrState::Open, false));
+    let source = source(&f);
+    let ctx = ctx(&f, &source, &backend, &github);
+
+    let mut prepared = pipeline::prepare(&ctx, &finding(7)).unwrap();
+    let worked = pipeline::run_worker(&ctx, &mut prepared).unwrap();
+
+    assert_eq!(worked.commits, 1);
+    assert_eq!(ahead_shown(&f), "1");
+    // The PR's commit and the worker's are both in repo.git's copy of the branch.
+    let repo_git = prepared.meta.join("repo.git");
+    assert_eq!(
+        git(&repo_git, &["rev-list", "--count", "main..feature-x"]),
+        "2"
+    );
 }

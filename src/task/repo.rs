@@ -587,6 +587,33 @@ pub fn changed_paths(repo_git: &Path, base: &str, branch: &str) -> Result<Vec<St
         .collect())
 }
 
+/// A full commit id (SHA-1 or SHA-256 hex), the only form [`commits_since`] accepts.
+pub fn is_commit_id(id: &str) -> bool {
+    matches!(id.len(), 40 | 64) && id.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// How many commits `branch` has past `commit` (a full commit id, e.g. where a continued PR's
+/// branch was when the task started).
+pub fn commits_since(repo_git: &Path, commit: &str, branch: &str) -> Result<u32> {
+    if !is_commit_id(commit) {
+        bail!("{commit:?} isn't a full commit id; the task record may be damaged");
+    }
+    check_ref("branch", branch)?;
+    let out = git::run(
+        repo_git,
+        Some(repo_git),
+        None,
+        &[
+            "rev-list",
+            "--count",
+            &format!("{commit}..refs/heads/{branch}"),
+        ],
+    )?;
+    out.trim()
+        .parse()
+        .with_context(|| format!("unexpected `git rev-list --count` output: {out}"))
+}
+
 /// How many commits `branch` has that `base` doesn't.
 pub fn commits_ahead(repo_git: &Path, base: &str, branch: &str) -> Result<u32> {
     check_ref("base", base)?;

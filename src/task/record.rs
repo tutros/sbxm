@@ -270,6 +270,24 @@ pub struct NewTask<'a> {
 }
 
 impl Record {
+    /// The task's own commits in `repo_git`: past the PR head it started from when it continues
+    /// a PR (decision 169), else past its base branch.
+    pub fn commits_ahead(&self, repo_git: &Path) -> Result<u32> {
+        match &self.continues {
+            Some(c) => super::repo::commits_since(repo_git, &c.base, &self.branch),
+            None => super::repo::commits_ahead(repo_git, &self.base, &self.branch),
+        }
+    }
+
+    /// What `git bundle create` excludes in the worker's clone: the commit a continued PR's
+    /// branch started from, else the base branch's remote ref.
+    pub fn bundle_exclusion(&self) -> String {
+        match &self.continues {
+            Some(c) => format!("^{}", c.base),
+            None => format!("^origin/{}", self.base),
+        }
+    }
+
     /// A task that has just been created: stage `prepared`, running.
     pub fn new(task: &NewTask, now: u64, process: Process) -> Self {
         Self {

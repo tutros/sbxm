@@ -87,6 +87,7 @@ pub struct FakeBackend {
     exec_outputs_matching: Vec<(String, ExecOutput)>,
     fail_exec_matching: Vec<String>,
     exec_hook: Option<ExecHook>,
+    exec_responder: Option<ExecResponder>,
     create_hook: Option<CreateHook>,
 }
 
@@ -111,6 +112,18 @@ struct ExecHook(Arc<HookFn>);
 impl std::fmt::Debug for ExecHook {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("ExecHook")
+    }
+}
+
+/// Answers an `exec` itself (after the hook), or passes with `None` to the scripted outputs.
+type ResponderFn = dyn Fn(&str, &ExecSpec) -> Option<ExecOutput> + Send + Sync;
+
+#[derive(Clone)]
+struct ExecResponder(Arc<ResponderFn>);
+
+impl std::fmt::Debug for ExecResponder {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ExecResponder")
     }
 }
 
@@ -267,6 +280,18 @@ impl FakeBackend {
         }
     }
 
+    /// Lets a test compute an `exec`'s output from the command (e.g. run the real `git` it names);
+    /// `None` falls through to the scripted outputs.
+    pub fn with_exec_responder(
+        self,
+        responder: impl Fn(&str, &ExecSpec) -> Option<ExecOutput> + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            exec_responder: Some(ExecResponder(Arc::new(responder))),
+            ..self
+        }
+    }
+
     /// Like [`FakeBackend::with_exec_gate`], but only holds `exec` in sandboxes
     /// whose name ends with `suffix` (e.g. `-1-0`); the others run freely.
     pub fn with_exec_gate_for(self, suffix: &str) -> (Self, ExecGate) {
@@ -405,6 +430,13 @@ impl SandboxBackend for FakeBackend {
         }
         if let Some(hook) = &self.exec_hook {
             (hook.0)(sandbox, spec);
+        }
+        if let Some(output) = self
+            .exec_responder
+            .as_ref()
+            .and_then(|r| (r.0)(sandbox, spec))
+        {
+            return Ok(output);
         }
         if let Some((_, output)) = self.exec_outputs_matching.iter().find(|(n, _)| mentions(n)) {
             return Ok(output.clone());

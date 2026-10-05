@@ -1040,11 +1040,11 @@ fn bundle_and_fetch(
     prepared: &Prepared,
     sandbox: &str,
 ) -> Result<Bundled> {
-    let (branch, base) = (prepared.record.branch.clone(), prepared.record.base.clone());
+    let branch = prepared.record.branch.clone();
     let ws = in_sandbox_path(&prepared.workspace)
         .to_string_lossy()
         .into_owned();
-    let origin = format!("^origin/{base}");
+    let origin = prepared.record.bundle_exclusion();
     let out = backend.exec(
         sandbox,
         &ExecSpec {
@@ -1067,9 +1067,7 @@ fn bundle_and_fetch(
     if out.exit_code == Some(0) {
         let repo_git = prepared.meta.join("repo.git");
         repo::fetch_bundle(&repo_git, &prepared.workspace, &branch, BUNDLE_CAP)?;
-        Ok(Bundled::Commits(repo::commits_ahead(
-            &repo_git, &base, &branch,
-        )?))
+        Ok(Bundled::Commits(prepared.record.commits_ahead(&repo_git)?))
     } else if out.stderr.contains("empty bundle") {
         Ok(Bundled::Nothing)
     } else {
