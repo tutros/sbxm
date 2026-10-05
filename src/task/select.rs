@@ -1,10 +1,12 @@
 //! Issue selection (spec §8, decision 154): which open issues get a task, and why the
-//! others don't. Pure; the rules are those of `Select-Issues` in the PowerShell script removed in decision 165.
+//! others don't. Pure; the rules are those of `Select-Issues` in the PowerShell script removed in decision 165,
+//! plus decision 169's: a `must-fix` issue of an open PR comes first.
 
 use std::collections::HashMap;
 use std::fmt;
 
-use crate::github::Issue;
+use crate::github::{Issue, PrState};
+use crate::task::findings::pr_of;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Reason {
@@ -14,6 +16,8 @@ pub enum Reason {
     Blocked(Vec<u32>),
     /// The issues with a task (or picked in this run) it is related to.
     RelatedToTask(Vec<u32>),
+    /// A `must-fix` issue whose PR (`PR: #n`) is closed or merged (decision 169).
+    PrNotOpen(u32, PrState),
 }
 
 fn numbers(list: &[u32]) -> String {
@@ -31,6 +35,14 @@ impl fmt::Display for Reason {
             Self::Blocked(open) => write!(f, "blocked by open {}", numbers(open)),
             Self::RelatedToTask(tasks) => {
                 write!(f, "related to {}, which has a task", numbers(tasks))
+            }
+            Self::PrNotOpen(pr, state) => {
+                let state = match state {
+                    PrState::Open => "open",
+                    PrState::Closed => "closed",
+                    PrState::Merged => "merged",
+                };
+                write!(f, "its PR #{pr} is {state}")
             }
         }
     }
@@ -72,12 +84,25 @@ fn rank(labels: &[String]) -> u8 {
         .unwrap_or(9)
 }
 
-/// Picks up to `workers` issues (all of `explicit` when given), by label rank then number.
+/// The PR a `must-fix` issue names on its first line (`PR: #n`), with that PR's state when known.
+fn must_fix_pr(issue: &Issue, prs: &HashMap<u32, PrState>) -> Option<(u32, Option<PrState>)> {
+    if !issue.labels.iter().any(|l| l == "must-fix") {
+        return None;
+    }
+    let pr = pr_of(&issue.body)?;
+    Some((pr, prs.get(&pr).copied()))
+}
+
+/// Picks up to `workers` issues (all of `explicit` when given): `must-fix` issues of an open PR
+/// first, then by label rank, then by number. `prs` holds the known state of the PRs that
+/// `must-fix` issues name; without an explicit list, one whose PR is closed or merged is skipped.
+/// An explicit list names any issue, whatever its PR.
 pub fn select(
     open: &[Issue],
     in_progress: &[u32],
     explicit: Option<&[u32]>,
     workers: usize,
+    prs: &HashMap<u32, PrState>,
 ) -> Selection {
     let open_numbers: Vec<u32> = open.iter().map(|i| i.number).collect();
     // "Related" is often written on one of the two issues only, so look both ways.
@@ -99,7 +124,8 @@ pub fn select(
         .iter()
         .filter(|i| explicit.is_none_or(|wanted| wanted.contains(&i.number)))
         .collect();
-    candidates.sort_by_key(|i| (rank(&i.labels), i.number));
+    let of_open_pr = |i: &Issue| matches!(must_fix_pr(i, prs), Some((_, Some(PrState::Open))));
+    candidates.sort_by_key(|i| (!of_open_pr(i), rank(&i.labels), i.number));
 
     let mut taken: Vec<u32> = in_progress.to_vec();
     for candidate in candidates {
@@ -124,6 +150,10 @@ pub fn select(
             selection.skips.push((number, Reason::Question));
         } else if !blockers.is_empty() {
             selection.skips.push((number, Reason::Blocked(blockers)));
+        } else if let Some((pr, Some(state @ (PrState::Closed | PrState::Merged)))) =
+            must_fix_pr(candidate, prs).filter(|_| explicit.is_none())
+        {
+            selection.skips.push((number, Reason::PrNotOpen(pr, state)));
         } else if !clashes.is_empty() {
             selection
                 .skips

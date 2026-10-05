@@ -1,6 +1,7 @@
 //! `sbxm task` orchestration, one function per phase (spec §5, §1). Every refusal happens before
 //! the first write or backend call; once folders are reserved, a failure removes them again.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -289,7 +290,13 @@ pub fn check_restartable(ctx: &Ctx, restarting: &[u32]) -> Result<()> {
         .filter(|r| r.kind == Kind::Issue && !restarting.contains(&r.number))
         .map(|r| r.number)
         .collect();
-    let selection = select::select(&open, &taken, Some(restarting), restarting.len());
+    let selection = select::select(
+        &open,
+        &taken,
+        Some(restarting),
+        restarting.len(),
+        &HashMap::new(),
+    );
     let mut problems: Vec<String> = selection
         .not_open
         .iter()
@@ -320,7 +327,7 @@ pub fn select_issues(ctx: &Ctx, explicit: Option<&[u32]>, workers: usize) -> Res
         .filter(|r| r.kind == Kind::Issue)
         .map(|r| r.number)
         .collect();
-    let selection = select::select(&open, &taken, explicit, workers);
+    let selection = select::select(&open, &taken, explicit, workers, &HashMap::new());
     if selection.picks.is_empty() {
         let mut lines: Vec<String> = selection
             .not_open
