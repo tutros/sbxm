@@ -1,6 +1,8 @@
 # Task state machine: states, operations, gaps (draft, 2026-10-05)
 
-**Status: draft for an interview, not a decision.** It rebuilds a table the user remembers making on 2026-10-03 and that
+**Status (updated 2026-10-05): the interview is done and its six answers are decision 173 (section 4 below);
+sections 1-3 still describe today's code. The target design (one transition table with rounds and a pluggable
+source, section 5) is still to be written.** It rebuilds a table the user remembers making on 2026-10-03 and that
 was never saved to a file. It is derived from the code (`src/task/record.rs` `Stage::next`/`statuses`/`done`,
 `check_can_gate`, `check_can_review`, `check_can_review_pr`, `check_can_finish`, `finish::plan_removal`), so it
 describes what sbxm does today. Decision 169(f) ("a task's own `ready` state is not re-entered") is the choice this
@@ -74,13 +76,20 @@ The only exits from several states are "delete the task and start over" (about 1
 Pattern: every stage that can fail or be interrupted has no retry except S11 (review) and S8 (gates). Round count is
 fixed at one (decision 116), so "one more round" is a design question, not only a missing command.
 
-## 4. Candidate decisions (for the interview, none taken)
+## 4. Interview questions and the user's answers (2026-10-05; recorded as decision 173)
 
-1. **Rounds:** keep one fix round; allow N (`[worker] fix_rounds`, default 1); or an explicit `task review --again`.
-2. **Ready with must-fix left:** may `finish` publish it? (Today yes, with the findings in the PR body.)
-3. **Retry operations** for T3, T5, T6, T9: one `task resume` that continues from the recorded stage, or per-stage flags.
-4. **Failed gates (T2):** is a fix round for gate failures wanted, or is that the worker's job inside its own run?
-5. **Reviewer scope** after more than one round: review all commits, or only the new ones (like `scope_base` for continued PR tasks).
-6. **Where the table lives:** make `Stage::next`/`done` the single source and generate the table from it, so it can't drift.
+1. **Rounds:** configurable `[worker] fix_rounds`, default 3, with a no-progress stop.
+2. **Ready with must-fix left:** `finish` opens a draft PR listing the findings.
+3. **Retry operations** (T3, T5, T6, T9): one `task resume` from the recorded stage.
+4. **Failed gates (T2):** a gate failure feeds a fix round, counted against `fix_rounds`.
+5. **Reviewer scope:** rounds 2+ review only new commits; one full review before `ready`.
+6. **Where the table lives:** the code is the single source (a state machine); docs are generated from it.
+   Also from the interview: the task source is pluggable (issue, PR, spec, later a local repo).
+
+## 5. Target design (to write)
+
+Open for the spec: the transition table (events, guards, actions), where the round counter and the source live in
+`task.json`, the no-progress rule, whether `resume` can extend the round budget (`--rounds N`, proposed), how a spec or
+local-repo source fits the git trust boundary (decision 159), and the migration steps (spike first, after PRs 102/103).
 
 Related: `sdlc/evals-workflow-notes.md` G16, G17, G24, G25; decisions 116, 154, 159, 169.
