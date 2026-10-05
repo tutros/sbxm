@@ -89,7 +89,7 @@ fixed at one (decision 116), so "one more round" is a design question, not only 
 ## 5. Target design (to write)
 
 Open for the spec: the transition table (events, guards, actions), where the round counter and the source live in
-`task.json`, the no-progress rule, whether `resume` can extend the round budget (`--rounds N`, proposed), how a spec or
+`task.json`, the no-progress rule, `resume --rounds N` extends the round budget (confirmed), how a spec or
 local-repo source fits the git trust boundary (decision 159), and the migration steps (spike first, after PRs 102/103).
 
 Related: `sdlc/evals-workflow-notes.md` G16, G17, G24, G25; decisions 116, 154, 159, 169.
