@@ -111,6 +111,18 @@ fn discard_existing(
         // An issue of a PR that is closed, merged or a fork's would fail to start again.
         pipeline::continued_pr(ctx, &issue)?;
     }
+    // A requested issue with no task yet is started after the deletions, so its PR is checked
+    // now too. One that can't be read or isn't open is left to the selection, which skips it.
+    for &number in issues {
+        if ids.iter().any(|(known, _)| *known == number) {
+            continue;
+        }
+        if let Ok(issue) = github.issue(repo, number)
+            && issue.state == "OPEN"
+        {
+            pipeline::continued_pr(ctx, &issue)?;
+        }
+    }
     // Each issue must be able to start again (not a question, not blocked, ...) before the first
     // task is deleted, and the user is asked once for all of them.
     let restarting: Vec<u32> = ids.iter().map(|(number, _)| *number).collect();

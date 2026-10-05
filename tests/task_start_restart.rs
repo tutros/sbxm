@@ -645,3 +645,39 @@ fn one_restart_with_an_uncontinuable_pr_keeps_every_task() {
     untouched(&f, 42);
     assert!(b.removes().is_empty() && b.creates().is_empty());
 }
+
+#[test]
+fn a_new_issue_of_an_uncontinuable_pr_keeps_the_task_that_would_be_restarted() {
+    let f = fixture();
+    started(&f); // #41 has a task; #42 has none and is a finding of a merged PR
+    let b = playing(&f);
+    let gh = FakeGitHub::default()
+        .with_default_branch("main")
+        .with_issue_text(issue_text(41))
+        .with_issue_text(finding_of_pr_7(42))
+        .with_open_issues(vec![
+            open_issue(41, &["should-fix"], ""),
+            open_issue(42, &["should-fix"], ""),
+        ])
+        .with_pr(pr_7(PrState::Merged, false));
+
+    let (result, _) = go(
+        &f,
+        &options_for(&f, &[41, 42]),
+        Some(&Restart {
+            confirm: &FakeConfirm::new(true, true),
+            yes: true,
+        }),
+        &b,
+        &gh,
+    );
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains("#42") && message.contains("merged"),
+        "{message}"
+    );
+    untouched(&f, 41);
+    assert!(!meta_of(&f, 42).exists(), "a task for #42 was created");
+    assert!(b.removes().is_empty() && b.creates().is_empty());
+}
