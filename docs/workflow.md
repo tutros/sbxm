@@ -50,7 +50,8 @@ sbxm task init                         # writes sbxm-task.toml: worker, reviewer
 sbxm task start --issue 63             # worker in its own sandbox; commits collected; gates run
 sbxm task status                       # stage, status, commits ahead, result/review present
 sbxm task review --issue 63            # gates, independent review, one fix round, gates, second review
-sbxm task finish --issue 63            # push the branch and open the PR ("Fixes #63")
+sbxm task finish --issue 63            # push the branch and open the PR ("Fixes #63"); for an issue of
+                                       # an open PR: push to that PR's branch and comment on the PR
 sbxm task review --pr 69               # independent review of any PR of this repo, posted as a comment
 sbxm task file-findings --pr 69        # dry run; add --create to file the findings as issues
 sbxm task rm --issue 63                # after the merge: sandboxes, clones and record (asks first)
@@ -65,6 +66,13 @@ sbxm task run --issue 63               # start and review in one go; stops befor
 - **Limits to know:**
   - A `ready` task cannot be reviewed again with `task review --issue`; the only redo is `task start --restart`.
   - `task review --pr` has no fix round: the author fixes the findings and reviews again after `task rm --pr N`.
+- **Continuing an open PR (decision 169):** a finding filed with `task file-findings --pr N` names its PR (`PR: #N`),
+  so its task starts from the PR's branch head. `task finish` for that task pushes to the PR's branch (no new flag),
+  opens no new PR and comments on the PR with the commits added and `Fixes #<issue>`. The push is a fast-forward
+  only, never a force: it is refused, with the reason, if the PR's branch moved on GitHub since the task started (or
+  was deleted); start the task again with `task start --restart --issue <n>`. If only the comment failed, the task
+  stays `ready` and `finish` again retries just the comment. The task is then `finished`; the re-review is
+  `task review --pr N` as before (after `task rm --pr N` if the PR was reviewed already).
   - `task gates` is refused once a task is `ready`.
 
 ## How a change to sbxm itself goes

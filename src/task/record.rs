@@ -279,6 +279,15 @@ impl Record {
         }
     }
 
+    /// The paths the task's own commits change: past the PR head it started from when it
+    /// continues a PR, else past where it left its base branch.
+    pub fn changed_paths(&self, repo_git: &Path) -> Result<Vec<String>> {
+        match &self.continues {
+            Some(c) => super::repo::changed_paths_since(repo_git, &c.base, &self.branch),
+            None => super::repo::changed_paths(repo_git, &self.base, &self.branch),
+        }
+    }
+
     /// What `git bundle create` excludes in the worker's clone: the commit a continued PR's
     /// branch started from, else the base branch's remote ref.
     pub fn bundle_exclusion(&self) -> String {

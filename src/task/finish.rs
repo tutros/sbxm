@@ -1,5 +1,6 @@
 //! Ending a task (spec §4, decisions 153, 158): discarding one (`task rm`, `task start
-//! --restart`) and, further down, handing a ready one to GitHub (`task finish`).
+//! --restart`) and, further down, handing a ready one to GitHub (`task finish`): a new PR, or
+//! more commits on the open PR the task continues (decision 169 (e)).
 //!
 //! Removal only ever touches a task's own folders, whose paths are built from a validated id and
 //! checked again on disk before anything is deleted: never a link, never a folder that doesn't
@@ -14,6 +15,7 @@ use anyhow::{Context, Result, bail};
 use super::pipeline::Prepared;
 use super::record::{self, Process, ProcessProbe, Record, Status};
 use super::repo;
+use super::review::{COMMENT_CAP, defang_mentions};
 use crate::backend::SandboxBackend;
 use crate::confirm::Confirm;
 use crate::github::{GitHubBackend, PrRequest};
@@ -345,8 +347,12 @@ const PUSHED_NOTE: &str =
 #[derive(Debug)]
 pub struct Finished {
     pub url: String,
+    /// The branch that was pushed.
+    pub branch: String,
     /// Things cut from the PR body.
     pub cuts: Vec<String>,
+    /// The PR the task pushed to, when it continues one (decision 169): no PR was opened.
+    pub continued: Option<u32>,
 }
 
 /// Whether the task may be finished now. The reason for a refusal says what to do.
@@ -450,17 +456,17 @@ pub fn finish(
     if !repo_git.is_dir() {
         bail!("task {id} has no repo.git, so there is nothing to push; see `sbxm task status`");
     }
-    if repo::commits_ahead(&repo_git, &task.base, &task.branch)? == 0 {
+    if task.commits_ahead(&repo_git)? == 0 {
+        let from = task.continues.as_ref().map_or(&task.base, |c| &c.base);
         bail!(
-            "task {id} has no commits on {} beyond {}, so there is nothing to open a PR for",
+            "task {id} has no commits on {} beyond {from}, so there is nothing to publish",
             task.branch,
-            task.base
         );
     }
-    refuse_workflow_changes(
-        id,
-        &repo::changed_paths(&repo_git, &task.base, &task.branch)?,
-    )?;
+    refuse_workflow_changes(id, &task.changed_paths(&repo_git)?)?;
+    if let Some(continued) = &task.continues {
+        return finish_continued(prepared, &repo_git, continued, github, probe);
+    }
     let result = read_capped(&prepared.meta.join("result.md"))?;
     let review = read_capped(&prepared.meta.join("review.md"))?;
     for (name, text) in [("result.md", &result), ("review.md", &review)] {
@@ -498,5 +504,141 @@ pub fn finish(
     record::write(&prepared.meta, &prepared.record).with_context(|| {
         format!("the PR is open at {url} but task.json couldn't be updated; note the URL")
     })?;
-    Ok(Finished { url, cuts })
+    Ok(Finished {
+        url,
+        branch: task.branch,
+        cuts,
+        continued: None,
+    })
+}
+
+/// The note `finish` leaves on a continued task whose commits are pushed but whose PR comment
+/// isn't posted yet.
+const PUSHED_UNCOMMENTED_NOTE: &str = "the commits are pushed to the PR's branch but the PR isn't commented on; run `sbxm task finish` again";
+
+/// The longest commit subject the comment on a continued PR shows in full.
+const SUBJECT_CAP: usize = 500;
+
+/// The comment on a continued PR: the commits the task added, and `Fixes #n` for its issue. It
+/// stays below what GitHub accepts: a subject over [`SUBJECT_CAP`] characters is cut, commits
+/// that don't fit are counted instead of listed, and a note says so. Mentions are neutralised
+/// as in the review's comment, so an agent's commit subject notifies no one.
+pub fn pr_comment(number: u32, branch: &str, commits: &[String]) -> String {
+    let mut body = defang_mentions(&format!(
+        "`sbxm task finish` pushed {} commit(s) to {branch} for issue #{number}:\n\n",
+        commits.len()
+    ));
+    let (mut cut, mut listed) = (0, 0);
+    for line in commits {
+        let (id, subject) = line.split_once(' ').unwrap_or((line, ""));
+        let subject = match subject.char_indices().nth(SUBJECT_CAP) {
+            Some((at, _)) => {
+                cut += 1;
+                format!("{}…", &subject[..at])
+            }
+            None => subject.to_owned(),
+        };
+        let item = defang_mentions(&format!("- `{id}` {subject}\n"));
+        if body.len() + item.len() > COMMENT_CAP {
+            break;
+        }
+        body.push_str(&item);
+        listed += 1;
+    }
+    if listed < commits.len() {
+        body.push_str(&format!(
+            "- … and {} more commit(s), not listed here; see the PR's commits\n",
+            commits.len() - listed
+        ));
+    }
+    if cut > 0 {
+        body.push_str(&format!(
+            "\n(sbxm cut {cut} commit subject(s) at {SUBJECT_CAP} characters.)\n"
+        ));
+    }
+    body.push_str(&format!("\nFixes #{number}\n"));
+    body
+}
+
+/// [`finish`] for a task that continues an open PR (decision 169 (e)): pushes to the PR's branch,
+/// as a fast-forward from the head the task started at and never a force, then comments on the
+/// PR; no PR is opened. The remote branch must still be where the task started, checked again
+/// atomically by the push itself ([`repo::push_from`]); a remote already at the task's tip means
+/// a rerun after a failed comment, which only retries the comment.
+fn finish_continued(
+    mut prepared: Prepared,
+    repo_git: &Path,
+    continued: &record::PrBranch,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+) -> Result<Finished> {
+    let task = prepared.record.clone();
+    let (id, pr, branch) = (&task.id, continued.pr, &task.branch);
+    let tip = repo::branch_tip(repo_git, branch)?;
+    let commits = repo::commit_lines(repo_git, &continued.base, branch)?;
+    let body = pr_comment(task.number, branch, &commits);
+    refuse_secrets("the PR comment", &body)?;
+    let pushed = match repo::remote_branch_head(repo_git, branch)? {
+        None => bail!(
+            "PR #{pr}'s branch {branch} isn't on the remote any more (deleted, or the PR merged?); \
+             sbxm never forces a push, so check PR #{pr}, then push the task's commits from its \
+             repo.git yourself or start the task again with `sbxm task start --restart --issue {}`",
+            task.number
+        ),
+        Some(head) if head == tip => true,
+        Some(head) if head == continued.base => false,
+        Some(head) => bail!(
+            "PR #{pr}'s branch {branch} moved on the remote (it is at {head}, the task started at \
+             {}); sbxm never forces a push, so start the task again from the new head with \
+             `sbxm task start --restart --issue {}`",
+            continued.base,
+            task.number
+        ),
+    };
+
+    if !pushed {
+        repo::push_from(repo_git, branch, &continued.base).with_context(|| {
+            format!(
+                "PR #{pr}'s branch {branch} wasn't updated; sbxm never forces a push, so check \
+                 PR #{pr} and, if someone else pushed, start the task again from the new head \
+                 with `sbxm task start --restart --issue {}`",
+                task.number
+            )
+        })?;
+    }
+    if let Err(e) = github.pr_comment(&task.repo, pr, &body) {
+        if !prepared
+            .record
+            .notes
+            .iter()
+            .any(|n| n == PUSHED_UNCOMMENTED_NOTE)
+        {
+            prepared
+                .record
+                .notes
+                .push(PUSHED_UNCOMMENTED_NOTE.to_owned());
+            let _ = record::write(&prepared.meta, &prepared.record);
+        }
+        return Err(e).context(format!(
+            "pushed {branch} but could not comment on PR #{pr}; run `sbxm task finish --issue {}` again, which only retries the comment",
+            task.number
+        ));
+    }
+    let url = format!("https://github.com/{}/pull/{pr}", task.repo);
+    prepared
+        .record
+        .notes
+        .retain(|n| n != PUSHED_UNCOMMENTED_NOTE);
+    prepared
+        .record
+        .advance(record::Stage::Finished, now(), Process::current(probe))?;
+    prepared.record.pr = Some(url.clone());
+    record::write(&prepared.meta, &prepared.record)
+        .with_context(|| format!("{id} is pushed to PR #{pr} but task.json couldn't be updated"))?;
+    Ok(Finished {
+        url,
+        branch: task.branch.clone(),
+        cuts: Vec::new(),
+        continued: Some(pr),
+    })
 }

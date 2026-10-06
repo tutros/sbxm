@@ -14,12 +14,12 @@ pub fn must_fix_count(review: &str) -> Option<u32> {
 }
 
 /// GitHub accepts at most 65,536 characters in a comment; the review is cut well below that.
-const COMMENT_CAP: usize = 60_000;
+pub(crate) const COMMENT_CAP: usize = 60_000;
 
 /// An `@name` at the start of a word would notify that user or team; a zero-width space after the
 /// `@` keeps the text readable and the notification away. An `@` inside a word (an e-mail
 /// address) is left alone.
-fn defang_mentions(text: &str) -> String {
+pub(crate) fn defang_mentions(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut previous: Option<char> = None;
     let mut chars = text.chars().peekable();

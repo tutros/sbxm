@@ -294,6 +294,102 @@ pub fn push(repo_git: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
+/// Moves `branch` on GitHub (`origin`) from `from` (a full commit id) to its tip in `repo_git`,
+/// as a fast-forward and only if the remote branch is still at `from` when the push lands: the
+/// tip must descend from `from`, and the push carries `from` as the expected old value
+/// (`--force-with-lease`), so a branch that moved meanwhile, even to an ancestor of the tip, is
+/// left alone and the push is refused.
+pub fn push_from(repo_git: &Path, branch: &str, from: &str) -> Result<()> {
+    check_ref("branch", branch)?;
+    if !is_commit_id(from) {
+        bail!("{from:?} isn't a full commit id; the task record may be damaged");
+    }
+    let out = git::output(
+        repo_git,
+        Some(repo_git),
+        None,
+        &[
+            "merge-base",
+            "--is-ancestor",
+            from,
+            &format!("refs/heads/{branch}"),
+        ],
+    )?;
+    if !out.status.success() {
+        bail!(
+            "{branch} in the task repo doesn't descend from {from}, so pushing it wouldn't be a fast-forward"
+        );
+    }
+    let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+    let lease = format!("--force-with-lease=refs/heads/{branch}:{from}");
+    let out = git::user_output(
+        repo_git,
+        &[
+            "--git-dir",
+            text(repo_git)?,
+            "push",
+            &lease,
+            "origin",
+            &refspec,
+        ],
+        &[],
+    )?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if stderr.contains("stale info") {
+        bail!(
+            "{branch} moved on the remote after sbxm checked it (it is no longer at {from}); nothing was pushed"
+        );
+    }
+    bail!(
+        "cannot push {branch}; check `gh auth status` and your access to the repo: `git push` failed ({}): {}",
+        out.status,
+        stderr.trim()
+    )
+}
+
+/// The commit `branch` is at on GitHub (`origin`), or `None` when the remote has no such branch.
+pub fn remote_branch_head(repo_git: &Path, branch: &str) -> Result<Option<String>> {
+    check_ref("branch", branch)?;
+    let wanted = format!("refs/heads/{branch}");
+    let out = git::user_run(
+        repo_git,
+        &["--git-dir", text(repo_git)?, "ls-remote", "origin", &wanted],
+    )
+    .with_context(|| {
+        format!(
+            "cannot read {branch} on the remote; check `gh auth status` and your access to the repo"
+        )
+    })?;
+    Ok(out.lines().find_map(|line| {
+        let (id, name) = line.split_once('\t')?;
+        (name == wanted).then(|| id.to_owned())
+    }))
+}
+
+/// The commits `branch` has past `commit` (a full commit id), oldest first, each as
+/// `<short id> <subject>`.
+pub fn commit_lines(repo_git: &Path, commit: &str, branch: &str) -> Result<Vec<String>> {
+    if !is_commit_id(commit) {
+        bail!("{commit:?} isn't a full commit id; the task record may be damaged");
+    }
+    check_ref("branch", branch)?;
+    let out = git::run(
+        repo_git,
+        Some(repo_git),
+        None,
+        &[
+            "log",
+            "--reverse",
+            "--format=%h %s",
+            &format!("{commit}..refs/heads/{branch}"),
+        ],
+    )?;
+    Ok(out.lines().map(str::to_owned).collect())
+}
+
 /// Where the sandbox writes the bundle (spec §6), relative to the workspace.
 const BUNDLE_DIR: &str = ".sbxm-task";
 const BUNDLE_FILE: &str = ".sbxm-task/branch.bundle";
@@ -567,6 +663,19 @@ pub fn fetch_bundle(repo_git: &Path, workspace: &Path, branch: &str, cap: u64) -
 /// counts as both its old and its new path), as git prints them.
 pub fn changed_paths(repo_git: &Path, base: &str, branch: &str) -> Result<Vec<String>> {
     check_ref("base", base)?;
+    diff_names(repo_git, &format!("refs/heads/{base}"), branch)
+}
+
+/// [`changed_paths`] from `commit` (a full commit id, e.g. where a continued PR's branch was when
+/// the task started).
+pub fn changed_paths_since(repo_git: &Path, commit: &str, branch: &str) -> Result<Vec<String>> {
+    if !is_commit_id(commit) {
+        bail!("{commit:?} isn't a full commit id; the task record may be damaged");
+    }
+    diff_names(repo_git, commit, branch)
+}
+
+fn diff_names(repo_git: &Path, from: &str, branch: &str) -> Result<Vec<String>> {
     check_ref("branch", branch)?;
     let out = git::run(
         repo_git,
@@ -577,7 +686,7 @@ pub fn changed_paths(repo_git: &Path, base: &str, branch: &str) -> Result<Vec<St
             "--name-only",
             "-z",
             "--no-renames",
-            &format!("refs/heads/{base}...refs/heads/{branch}"),
+            &format!("{from}...refs/heads/{branch}"),
         ],
     )?;
     Ok(out
