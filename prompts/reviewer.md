@@ -3,7 +3,7 @@ The issue is in .sbxm-task/issue.md; you have no GitHub access. Someone else wro
 don't edit tracked files, commit, push or file issues. You may build and run tests.
 
 If the repository has a sdlc-code-review skill (.claude/skills/sdlc-code-review/SKILL.md), follow it. Scope: the
-branch's commits (git log origin/{{base}}..HEAD, and git diff origin/{{base}}...HEAD). Check the change against the
+branch's commits (git log {{scope_base}}..HEAD, and git diff {{scope_base}}...HEAD). Check the change against the
 acceptance criteria of the issue, the repository's recorded decisions and its conventions. These checks already passed
 on the change:
 

@@ -288,3 +288,22 @@ fn json_carries_the_commit_count_or_null() {
     assert_eq!(find("issue-41")["commits_ahead"], 2);
     assert!(find("issue-42")["commits_ahead"].is_null());
 }
+
+#[test]
+fn a_task_continuing_a_pr_shows_the_pr_and_its_branch() {
+    let base = tempfile::tempdir().unwrap();
+    let mut record = working(41, None);
+    record.continues = Some(record::PrBranch {
+        pr: 7,
+        branch: "feature-x".into(),
+        base: "abc123".into(),
+    });
+    save(base.path(), &record);
+    save(base.path(), &working(42, None));
+
+    let text = task_status::render(base.path(), None, false, &Probe(Some(T0))).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+
+    assert!(lines[0].contains("PR #7 (feature-x)"), "{text}");
+    assert!(!lines[1].contains("PR #"), "{text}");
+}

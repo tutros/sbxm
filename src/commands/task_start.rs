@@ -82,8 +82,8 @@ pub(crate) fn check_repo(repo: &str) -> Result<()> {
 }
 
 /// Discards the existing task of each issue (`--restart`). Every one is checked before the first
-/// is deleted: the issue must still be open (else the restart would only destroy the work) and
-/// the task must not be running.
+/// is deleted: the issue must still be open (else the restart would only destroy the work), the
+/// PR it names (if any) must still be continuable, and the task must not be running.
 fn discard_existing(
     ctx: &Ctx,
     issues: &[u32],
@@ -108,6 +108,20 @@ fn discard_existing(
             );
         }
         finish::plan_removal(&base_dir, id, probe)?;
+        // An issue of a PR that is closed, merged or a fork's would fail to start again.
+        pipeline::continued_pr(ctx, &issue)?;
+    }
+    // A requested issue with no task yet is started after the deletions, so its PR is checked
+    // now too. One that can't be read or isn't open is left to the selection, which skips it.
+    for &number in issues {
+        if ids.iter().any(|(known, _)| *known == number) {
+            continue;
+        }
+        if let Ok(issue) = github.issue(repo, number)
+            && issue.state == "OPEN"
+        {
+            pipeline::continued_pr(ctx, &issue)?;
+        }
     }
     // Each issue must be able to start again (not a question, not blocked, ...) before the first
     // task is deleted, and the user is asked once for all of them.

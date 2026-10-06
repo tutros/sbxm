@@ -210,6 +210,17 @@ pub struct GateRun {
     pub commit: Option<String>,
 }
 
+/// The open PR an issue's task continues (decision 169): the issue names it (`PR: #n`), and the
+/// task started from its branch head instead of the base branch.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrBranch {
+    pub pr: u32,
+    /// The PR's branch, which is also the task's branch.
+    pub branch: String,
+    /// The commit the PR's branch was at when the task started.
+    pub base: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Record {
     pub schema: u32,
@@ -234,6 +245,9 @@ pub struct Record {
     /// The PR's URL once `finish` opened it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr: Option<String>,
+    /// Set when the task continues an open PR's branch; absent in older records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continues: Option<PrBranch>,
     pub related: Vec<u32>,
     /// Things worth telling the user about how the task went (no commits, uncommitted changes,
     /// a missing `result.md`); never a secret.
@@ -256,6 +270,33 @@ pub struct NewTask<'a> {
 }
 
 impl Record {
+    /// The task's own commits in `repo_git`: past the PR head it started from when it continues
+    /// a PR (decision 169), else past its base branch.
+    pub fn commits_ahead(&self, repo_git: &Path) -> Result<u32> {
+        match &self.continues {
+            Some(c) => super::repo::commits_since(repo_git, &c.base, &self.branch),
+            None => super::repo::commits_ahead(repo_git, &self.base, &self.branch),
+        }
+    }
+
+    /// What `git bundle create` excludes in the worker's clone: the commit a continued PR's
+    /// branch started from, else the base branch's remote ref.
+    pub fn bundle_exclusion(&self) -> String {
+        match &self.continues {
+            Some(c) => format!("^{}", c.base),
+            None => format!("^origin/{}", self.base),
+        }
+    }
+
+    /// Where the reviewer's scope starts, as a git revision: the commit a continued PR's branch
+    /// started from, else the base branch's remote ref.
+    pub fn scope_base(&self) -> String {
+        match &self.continues {
+            Some(c) => c.base.clone(),
+            None => format!("origin/{}", self.base),
+        }
+    }
+
     /// A task that has just been created: stage `prepared`, running.
     pub fn new(task: &NewTask, now: u64, process: Process) -> Self {
         Self {
@@ -280,6 +321,7 @@ impl Record {
             gates: Vec::new(),
             gate_run: None,
             pr: None,
+            continues: None,
             related: Vec::new(),
             notes: Vec::new(),
             hooks: Value::Object(serde_json::Map::new()),

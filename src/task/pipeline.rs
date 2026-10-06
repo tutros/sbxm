@@ -13,8 +13,8 @@ use super::config::TaskConfig;
 use super::gates::{self, GateOutcome, HostRunner};
 use super::prompts::{self, Role};
 use super::record::{
-    self, Agent, GateResult, GateRun, Kind, NewTask, Process, ProcessProbe, Record, RunInfo, Stage,
-    Status,
+    self, Agent, GateResult, GateRun, Kind, NewTask, PrBranch, Process, ProcessProbe, Record,
+    RunInfo, Stage, Status,
 };
 use super::repo::{self, AgentFile, BUNDLE_CAP, Existing, Identity};
 use super::review;
@@ -444,6 +444,66 @@ fn slashes(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+/// The PR an issue belongs to: `PR: #n` on the first line of its body (decision 169), the body
+/// being what follows the `--` line of `gh issue view`'s output.
+pub fn issue_pr(issue: &IssueText) -> Option<u32> {
+    let body = issue
+        .text
+        .split_once("\n--\n")
+        .map_or(issue.text.as_str(), |(_, body)| body);
+    super::findings::pr_of(body)
+}
+
+/// The branch of the open PR that issue `number` belongs to (decision 169 (d)), read before any
+/// write. A closed or merged PR, or one from a fork, is refused: there is no branch to continue.
+fn pr_to_continue(ctx: &Ctx, number: u32, pr: u32) -> Result<String> {
+    let info = ctx.github.pr(ctx.repo, pr).with_context(|| {
+        format!(
+            "issue #{number} belongs to PR #{pr} (`PR: #{pr}` in its body), which cannot be read"
+        )
+    })?;
+    let fix = format!(
+        "remove the `PR: #{pr}` line from issue #{number} to start it from the base branch instead"
+    );
+    match info.state {
+        PrState::Open => {}
+        PrState::Closed => {
+            bail!(
+                "issue #{number} belongs to PR #{pr}, which is closed, so it has no branch to continue; {fix}"
+            )
+        }
+        PrState::Merged => {
+            bail!(
+                "issue #{number} belongs to PR #{pr}, which is merged, so it has no branch to continue; {fix}"
+            )
+        }
+    }
+    if info.is_cross_repository {
+        bail!(
+            "issue #{number} belongs to PR #{pr}, which comes from a fork; only branches of {} are \
+             continued, because a fork's code is not something to fetch and run here (decision 87); {fix}",
+            ctx.repo
+        );
+    }
+    if !repo::valid_ref_name(&info.head_ref) {
+        bail!(
+            "issue #{number} belongs to PR #{pr}, whose branch {:?} isn't a usable branch name; {fix}",
+            info.head_ref
+        );
+    }
+    Ok(info.head_ref)
+}
+
+/// The PR whose branch an issue's task continues, as (PR number, its branch), or `None` when the
+/// issue names no PR; an error when it names one that can't be continued. `prepare` and
+/// `task start --restart` both use it, so a restart never deletes a task it couldn't start again.
+pub fn continued_pr(ctx: &Ctx, issue: &IssueText) -> Result<Option<(u32, String)>> {
+    match issue_pr(issue) {
+        Some(pr) => Ok(Some((pr, pr_to_continue(ctx, issue.number, pr)?))),
+        None => Ok(None),
+    }
+}
+
 /// Spec §5.1 steps 1 and 2: checks, then the task's folders, `repo.git`, the worker's clone,
 /// `issue.md` and the prompt, the sandbox and the first record.
 pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
@@ -468,6 +528,7 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
             "task {id} exists (stage {stage}); use `sbxm task status`, or --restart to start it again"
         );
     }
+    let continues = continued_pr(ctx, issue)?;
     let worker = &ctx.config.worker;
     let profile = Profile::load(global.profiles_dir(), &ctx.config.sandbox.profile)?;
     check_secrets(
@@ -480,7 +541,15 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
     let mut warnings = ctx.config.warnings.clone();
     warnings.extend(worker.harness.unsupported(&profile, "the worker's sandbox"));
     let template = prompts::template(Role::Worker, &ctx.config.prompts)?;
-    let branch = id.clone();
+    let branch = continues
+        .as_ref()
+        .map_or_else(|| id.clone(), |(_, branch)| branch.clone());
+    let pr_context = continues.as_ref().map_or_else(String::new, |(pr, branch)| {
+        format!(
+            " This issue belongs to pull request #{pr}, and {branch} is that pull request's \
+             branch: it already has commits, so build on them instead of starting over."
+        )
+    });
     let prompt = prompts::render(
         &template.name,
         &template.text,
@@ -490,6 +559,7 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
             ("branch", &branch),
             ("base", ctx.base_branch),
             ("repo", ctx.repo),
+            ("pr_context", &pr_context),
             ("gates_sandbox", &bullets(&ctx.config.gates.sandbox)),
             ("gates_host", &bullets(&ctx.config.gates.host)),
         ],
@@ -527,7 +597,17 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
 
         let repo_git = meta.join("repo.git");
         repo::clone_bare(ctx.clone_source, &repo_git)?;
-        repo::create_branch(&repo_git, &branch, ctx.base_branch)?;
+        let continued = match &continues {
+            Some((pr, pr_branch)) => Some(PrBranch {
+                pr: *pr,
+                branch: pr_branch.clone(),
+                base: repo::fetch_pr_branch(&repo_git, *pr, pr_branch)?,
+            }),
+            None => {
+                repo::create_branch(&repo_git, &branch, ctx.base_branch)?;
+                None
+            }
+        };
         repo::clone_workspace(&repo_git, &workspace, &branch, ctx.identity)?;
 
         // The agent's `git add -A` must not pick up sbxm's own files.
@@ -560,6 +640,7 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
             now(),
             Process::current(ctx.probe),
         );
+        task.continues = continued;
         task.worker = Some(Agent {
             harness: worker.harness.as_str().to_owned(),
             model: worker.model.clone(),
@@ -1023,11 +1104,11 @@ fn bundle_and_fetch(
     prepared: &Prepared,
     sandbox: &str,
 ) -> Result<Bundled> {
-    let (branch, base) = (prepared.record.branch.clone(), prepared.record.base.clone());
+    let branch = prepared.record.branch.clone();
     let ws = in_sandbox_path(&prepared.workspace)
         .to_string_lossy()
         .into_owned();
-    let origin = format!("^origin/{base}");
+    let origin = prepared.record.bundle_exclusion();
     let out = backend.exec(
         sandbox,
         &ExecSpec {
@@ -1050,9 +1131,7 @@ fn bundle_and_fetch(
     if out.exit_code == Some(0) {
         let repo_git = prepared.meta.join("repo.git");
         repo::fetch_bundle(&repo_git, &prepared.workspace, &branch, BUNDLE_CAP)?;
-        Ok(Bundled::Commits(repo::commits_ahead(
-            &repo_git, &base, &branch,
-        )?))
+        Ok(Bundled::Commits(prepared.record.commits_ahead(&repo_git)?))
     } else if out.stderr.contains("empty bundle") {
         Ok(Bundled::Nothing)
     } else {
@@ -1690,6 +1769,7 @@ fn open_review_workspace(
             ("number", &prepared.record.number.to_string()),
             ("branch", &branch),
             ("base", &prepared.record.base),
+            ("scope_base", &prepared.record.scope_base()),
             ("repo", &prepared.record.repo),
             ("gates_sandbox", &bullets(&env.config.gates.sandbox)),
             ("gates_host", &bullets(&env.config.gates.host)),

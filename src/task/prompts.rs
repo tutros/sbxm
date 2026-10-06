@@ -9,12 +9,14 @@ use anyhow::{Context, Result, bail};
 use super::config::Prompts;
 
 /// The names a template may use; anything else is an error, so a typo is caught before a run.
-const KNOWN: [&str; 9] = [
+const KNOWN: [&str; 11] = [
     "issue",
     "number",
     "branch",
     "base",
+    "scope_base",
     "repo",
+    "pr_context",
     "gates_sandbox",
     "gates_host",
     "review_path",

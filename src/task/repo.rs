@@ -210,6 +210,20 @@ pub fn clean_checkout(repo_git: &Path, branch: &str, dest: &Path) -> Result<()> 
 /// Fetches the head of PR `number` from GitHub into the local branch `pr-<n>`; returns its name.
 pub fn fetch_pr_head(repo_git: &Path, number: u32) -> Result<String> {
     let branch = format!("pr-{number}");
+    fetch_pr_into(repo_git, number, &branch)?;
+    Ok(branch)
+}
+
+/// Fetches the head of PR `number` from GitHub into the local branch `branch` (the PR's own
+/// branch name, for a task that continues the PR), replacing what the clone had there; returns
+/// the commit it is at.
+pub fn fetch_pr_branch(repo_git: &Path, number: u32, branch: &str) -> Result<String> {
+    check_ref("branch", branch)?;
+    fetch_pr_into(repo_git, number, branch)?;
+    branch_tip(repo_git, branch)
+}
+
+fn fetch_pr_into(repo_git: &Path, number: u32, branch: &str) -> Result<()> {
     let refspec = format!("+refs/pull/{number}/head:refs/heads/{branch}");
     git::user_run(
         repo_git,
@@ -229,7 +243,7 @@ pub fn fetch_pr_head(repo_git: &Path, number: u32) -> Result<String> {
         ],
     )
     .with_context(|| format!("cannot fetch the head of PR #{number}; is it a PR of this repo?"))?;
-    Ok(branch)
+    Ok(())
 }
 
 fn has_branch(repo_git: &Path, branch: &str) -> Result<bool> {
@@ -571,6 +585,33 @@ pub fn changed_paths(repo_git: &Path, base: &str, branch: &str) -> Result<Vec<St
         .filter(|path| !path.is_empty())
         .map(str::to_owned)
         .collect())
+}
+
+/// A full commit id (SHA-1 or SHA-256 hex), the only form [`commits_since`] accepts.
+pub fn is_commit_id(id: &str) -> bool {
+    matches!(id.len(), 40 | 64) && id.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// How many commits `branch` has past `commit` (a full commit id, e.g. where a continued PR's
+/// branch was when the task started).
+pub fn commits_since(repo_git: &Path, commit: &str, branch: &str) -> Result<u32> {
+    if !is_commit_id(commit) {
+        bail!("{commit:?} isn't a full commit id; the task record may be damaged");
+    }
+    check_ref("branch", branch)?;
+    let out = git::run(
+        repo_git,
+        Some(repo_git),
+        None,
+        &[
+            "rev-list",
+            "--count",
+            &format!("{commit}..refs/heads/{branch}"),
+        ],
+    )?;
+    out.trim()
+        .parse()
+        .with_context(|| format!("unexpected `git rev-list --count` output: {out}"))
 }
 
 /// How many commits `branch` has that `base` doesn't.
