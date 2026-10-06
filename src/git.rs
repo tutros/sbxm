@@ -28,7 +28,7 @@ const FIRST_DELAY: Duration = Duration::from_millis(50);
 /// access to a file, or `tries` is used up; then returns the last result.
 ///
 /// On Windows another process (antivirus, the file indexer) can briefly hold a
-/// file git just created, and git exits 128 with "Permission denied" when it
+/// file git just created, and git fails with "Permission denied" (exit 128, or 1 from `git fetch`) when it
 /// replaces that file. It goes away on its own, so waiting and trying again is
 /// right; a seeded contestant would otherwise fail with "cannot seed workspace"
 /// (issue #39). Every call sbxm makes is safe to repeat after that failure,
@@ -50,9 +50,10 @@ fn retry(
     attempt()
 }
 
+/// Git failed because it was refused access to a file. The exit code varies: 128 when git dies
+/// itself, 1 when `git fetch` reports that `index-pack` could not move a pack into place.
 fn permission_denied(out: &Output) -> bool {
-    out.status.code() == Some(128)
-        && String::from_utf8_lossy(&out.stderr).contains("Permission denied")
+    !out.status.success() && String::from_utf8_lossy(&out.stderr).contains("Permission denied")
 }
 
 /// `git <args>` with a hardened environment. `git_dir` and `work_tree` are
@@ -340,6 +341,28 @@ mod tests {
             calls.set(calls.get() + 1);
             Ok(if calls.get() < 3 {
                 failed(128, DENIED)
+            } else {
+                failed(0, "")
+            })
+        })
+        .unwrap();
+
+        assert!(out.status.success());
+        assert_eq!(calls.get(), 3);
+    }
+
+    /// `git fetch` reports a pack it could not move into place with exit code 1, not 128 (seen
+    /// in `task start` tests under load, issue #104).
+    const PACK_DENIED: &str = "error: unable to write file repo.git/objects/pack/pack-1.pack: Permission denied\nfatal: unable to rename temporary '*.pack' file to 'repo.git/objects/pack/pack-1.pack'\nerror: index-pack died";
+
+    #[test]
+    fn a_permission_denied_failure_is_retried_whatever_gits_exit_code() {
+        let calls = Cell::new(0);
+
+        let out = retry(3, Duration::ZERO, || {
+            calls.set(calls.get() + 1);
+            Ok(if calls.get() < 3 {
+                failed(1, PACK_DENIED)
             } else {
                 failed(0, "")
             })
