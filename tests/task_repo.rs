@@ -9,6 +9,13 @@ use std::process::Command;
 
 use sbxm::task::repo::{self, Identity};
 
+/// Whether a fixture git run should be tried again: it failed, and said `Permission denied`. A run
+/// that worked is never repeated whatever it printed: git can report a file it could not write and
+/// still finish the commit, and the second `git commit -q` then fails with nothing to say (#104).
+fn retry_denied(success: bool, stderr: &str) -> bool {
+    !success && stderr.contains("Permission denied")
+}
+
 /// Plain `git` for building fixtures (not the code under test).
 fn git(dir: &Path, args: &[&str]) -> String {
     // Windows can briefly refuse git a file an indexer or antivirus holds (issue #39); the
@@ -26,7 +33,7 @@ fn git(dir: &Path, args: &[&str]) -> String {
             .env("GIT_COMMITTER_EMAIL", "t@t")
             .output()
             .unwrap();
-        let denied = String::from_utf8_lossy(&run.stderr).contains("Permission denied");
+        let denied = retry_denied(run.status.success(), &String::from_utf8_lossy(&run.stderr));
         out = Some(run);
         if !denied {
             break;
@@ -833,4 +840,14 @@ fn a_task_branch_that_already_exists_on_origin_is_refused_in_plain_words() {
     );
     assert!(message.contains("delete it"), "{message}");
     assert!(!message.contains("failed"), "{message}");
+}
+
+#[test]
+fn the_fixture_retries_only_a_git_that_failed_with_permission_denied() {
+    let said = "error: unable to write file .git/objects/ab/cdef: Permission denied";
+    // git can say this and still finish the commit; running that commit again finds nothing to
+    // commit and fails with no message (issue 104).
+    assert!(!retry_denied(true, said));
+    assert!(retry_denied(false, said));
+    assert!(!retry_denied(false, "fatal: not a git repository"));
 }
