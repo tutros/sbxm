@@ -235,6 +235,23 @@ fn a_harness_that_cannot_run_headless_is_refused_before_anything_happens() {
 }
 
 #[test]
+fn an_empty_or_blank_reviewer_model_flag_is_refused_before_anything_happens() {
+    for bad in ["", "  "] {
+        let f = config("codex");
+        let good = backend(&f, &[CLEAN]);
+        worked_task(&f, &good);
+        let mut opts = options(&f);
+        opts.reviewer_model = Some(bad.into());
+        let before = good.execs().len();
+
+        let message = format!("{:#}", go(&f, &opts, &good).result.unwrap_err());
+
+        assert!(message.contains("--reviewer-model"), "{bad:?}: {message}");
+        assert_eq!(good.execs().len(), before, "{bad:?}");
+    }
+}
+
+#[test]
 fn a_bad_time_limit_is_refused_before_anything_happens() {
     let f = config("codex");
     let good = backend(&f, &[CLEAN]);

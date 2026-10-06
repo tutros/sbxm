@@ -13,7 +13,7 @@ use crate::backend::SandboxBackend;
 use crate::config::GlobalConfig;
 use crate::github::GitHubBackend;
 use crate::harness::Harness;
-use crate::run::config::{headless_harness, parse_duration};
+use crate::run::config::{check_model_flag, headless_harness, parse_duration};
 use crate::task::config::TaskConfig;
 use crate::task::finish;
 use crate::task::gates::HostRunner;
@@ -84,6 +84,7 @@ pub fn run(
         config.set_reviewer_harness(harness);
     }
     if let Some(model) = &opts.reviewer_model {
+        check_model_flag("--reviewer-model", model).map_err(|e| anyhow!(e))?;
         config.reviewer.model = Some(model.clone());
     }
     if let Some(limit) = &opts.reviewer_time_limit {
