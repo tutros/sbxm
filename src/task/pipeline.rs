@@ -1370,10 +1370,18 @@ pub struct PrReview {
 /// Whether a pull request's review may start (or be tried again) now.
 pub fn check_can_review_pr(task: &Record) -> Result<()> {
     let (id, number) = (&task.id, task.number);
+    let state = machine::State {
+        stage: task.stage,
+        status: task.status,
+        // This check never sees a probe (no command retries an interrupted PR gating run yet;
+        // see `sdlc/spikes/state-table.md` dead end T3/T9 for PR tasks).
+        interrupted: false,
+        kind: task.kind,
+    };
+    if machine::verdict(&state, machine::Event::Review) {
+        return Ok(());
+    }
     match (task.stage, task.status) {
-        (Stage::Prepared, Status::Running)
-        | (Stage::Gating, Status::Passed | Status::GatesFailed)
-        | (Stage::Reviewing, Status::Failed) => Ok(()),
         (stage @ (Stage::Ready | Stage::Finished), _) => bail!(
             "task {id} is already {}; its review is review.md in the task folder; to review the PR \
              again after it changed, run `sbxm task rm --pr {number}` first",
