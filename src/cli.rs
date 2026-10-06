@@ -242,6 +242,9 @@ pub enum TaskCommand {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Print the task state machine's transition table (states, events, next state), generated
+    /// from the code (decision 174's "code is the documentation"; spec section 5.2).
+    States,
     /// Show the tasks: stage, status, commits ahead of the base, and whether one was interrupted.
     Status {
         /// Only the task for this issue.

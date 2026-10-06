@@ -19,6 +19,7 @@ pub mod task_review;
 pub mod task_rm;
 pub mod task_run;
 pub mod task_start;
+pub mod task_states;
 pub mod task_status;
 
 use std::io::Write;

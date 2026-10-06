@@ -218,6 +218,12 @@ fn main() -> anyhow::Result<()> {
             Ok(())
         }
         Command::Task {
+            command: TaskCommand::States,
+        } => {
+            print!("{}", commands::task_states::render());
+            Ok(())
+        }
+        Command::Task {
             command: TaskCommand::Status { issue, pr, json },
         } => {
             let which = match (issue, pr) {
