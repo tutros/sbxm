@@ -1244,14 +1244,21 @@ const REVIEW_CAP: u64 = 1024 * 1024;
 const FIX_PROMPT: &str =
     "Read the file .sbxm-task/fix-prompt.md in the current directory and follow it exactly.";
 
-/// Whether a review may start now (`task review`). The reason for a refusal says what to do.
+/// Whether a review may start now (`task review`). Decided through `machine::TABLE`; the reason
+/// for a refusal says what to do.
 pub fn check_can_review(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
     let id = &task.id;
     let number = task.number;
+    let state = machine::State {
+        stage: task.stage,
+        status: task.status,
+        interrupted: task.is_interrupted(probe),
+        kind: task.kind,
+    };
+    if machine::verdict(&state, machine::Event::Review) {
+        return Ok(());
+    }
     match (task.stage, task.status) {
-        (Stage::Working | Stage::Fixing, Status::Completed | Status::TimedOut)
-        | (Stage::Gating, Status::Passed | Status::GatesFailed)
-        | (Stage::Reviewing, Status::Failed) => Ok(()),
         (Stage::Working | Stage::Fixing, Status::Running) => {
             if task.is_interrupted(probe) {
                 bail!(
@@ -1266,8 +1273,6 @@ pub fn check_can_review(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
         (Stage::Working | Stage::Fixing, _) => bail!(
             "the worker failed for task {id}, so there is nothing to review; see `sbxm task status --issue {number}`"
         ),
-        // Gates whose process is gone are given up and run again by the review itself.
-        (Stage::Gating, Status::Running) if task.is_interrupted(probe) => Ok(()),
         (Stage::Gating, _) => bail!(
             "gates are running for task {id}, or were interrupted; see `sbxm task status --issue {number}`"
         ),
