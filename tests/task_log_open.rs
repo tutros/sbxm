@@ -15,7 +15,7 @@ fn the_opened_log_starts_with_this_processs_header_and_then_the_lines() {
     let dir = record::task_dir(&f.env.base_dir(), "issue-41");
     fs::create_dir_all(&dir).unwrap();
 
-    let log = task_log::open(&f.env.config_dir(), vec!["issue-41".to_owned()], false).unwrap();
+    let log = task_log::open(&f.env.config_dir(), vec!["issue-41".to_owned()], None).unwrap();
     log.lock().unwrap().line("hello");
 
     let text = fs::read_to_string(dir.join("run.log")).unwrap();
@@ -48,7 +48,7 @@ fn a_log_that_cannot_be_opened_is_an_error_and_the_inert_log_writes_nothing() {
         task_log::open(
             &nowhere.path().join("no-config"),
             vec!["issue-1".to_owned()],
-            false
+            None
         )
         .is_err()
     );

@@ -22,12 +22,12 @@ fn stage(name: &'static str) -> Box<dyn Fn(&Path) -> String + Send> {
     Box::new(move |_| name.to_owned())
 }
 
-fn log(base: &Path, ids: &[&str], pid: Option<u32>) -> RunLog {
+fn log(base: &Path, ids: &[&str], identity: Option<Process>) -> RunLog {
     RunLog::new(
         base,
         "# header".to_owned(),
         ids.iter().map(|s| (*s).to_owned()).collect(),
-        pid,
+        identity,
         clock(),
         stage("working"),
     )
@@ -43,7 +43,7 @@ fn read(base: &Path, id: &str) -> String {
     fs::read_to_string(record::task_dir(base, id).join("run.log")).unwrap()
 }
 
-fn record_of_pid(number: u32, pid: u32) -> Record {
+fn record_of_process(number: u32, process: Process) -> Record {
     Record::new(
         &NewTask {
             kind: Kind::Issue,
@@ -55,7 +55,7 @@ fn record_of_pid(number: u32, pid: u32) -> Record {
             config_hash: "h",
         },
         T0,
-        Process::new(pid, T0),
+        process,
     )
 }
 
@@ -150,11 +150,19 @@ fn secret_looking_values_never_reach_the_log() {
 #[test]
 fn a_task_made_by_this_process_gets_the_log_without_being_named() {
     let base = tempfile::tempdir().unwrap();
-    let mut log = log(base.path(), &[], Some(777));
+    let mut log = log(base.path(), &[], Some(Process::new(777, T0)));
     log.line("Starting issue-7 ...");
 
-    record::write(&task_dir(base.path(), "issue-7"), &record_of_pid(7, 777)).unwrap();
-    record::write(&task_dir(base.path(), "issue-8"), &record_of_pid(8, 999)).unwrap();
+    record::write(
+        &task_dir(base.path(), "issue-7"),
+        &record_of_process(7, Process::new(777, T0)),
+    )
+    .unwrap();
+    record::write(
+        &task_dir(base.path(), "issue-8"),
+        &record_of_process(8, Process::new(999, T0)),
+    )
+    .unwrap();
     log.line("issue-7: worker done");
 
     let text = read(base.path(), "issue-7");
@@ -165,6 +173,29 @@ fn a_task_made_by_this_process_gets_the_log_without_being_named() {
         !record::task_dir(base.path(), "issue-8")
             .join("run.log")
             .exists()
+    );
+}
+
+/// Decision 163, issue 129 M-3: a pid alone isn't the process; its start time must match too, or
+/// a reused pid would make a stale task look like this process's and receive its whole output.
+#[test]
+fn a_record_with_the_current_pid_but_a_different_start_time_is_not_treated_as_this_process() {
+    let base = tempfile::tempdir().unwrap();
+    let mut log = log(base.path(), &[], Some(Process::new(777, T0)));
+    log.line("Starting issue-9 ...");
+
+    record::write(
+        &task_dir(base.path(), "issue-9"),
+        &record_of_process(9, Process::new(777, T0 + 1000)),
+    )
+    .unwrap();
+    log.line("issue-9: worker done");
+
+    assert!(
+        !record::task_dir(base.path(), "issue-9")
+            .join("run.log")
+            .exists(),
+        "a stale record with a reused pid must not receive this process's output"
     );
 }
 

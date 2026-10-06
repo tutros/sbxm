@@ -20,17 +20,19 @@ fn task_id(kind: task::record::Kind, number: u32) -> String {
 }
 
 /// The screen and warning writers of a `sbxm task` command, each copying its lines to the
-/// `run.log` of the tasks `ids` (and, with `discover`, of the tasks this process starts).
+/// `run.log` of the tasks `ids` (and, with `discover`, of every task this process's own identity
+/// — pid and start time — turns up in, since `task start` picks its issues itself).
 fn task_writers(
     ids: Vec<String>,
-    discover: bool,
+    discover: Option<&dyn task::record::ProcessProbe>,
 ) -> anyhow::Result<(Tee<std::io::Stdout>, Tee<std::io::Stderr>)> {
     // A log that cannot be opened (no config yet, say) never stops the command, which reports that itself.
-    let log = if ids.is_empty() && !discover {
+    let log = if ids.is_empty() && discover.is_none() {
         commands::task_log::none()
     } else {
+        let identity = discover.map(task::record::Process::current);
         config::config_dir()
-            .and_then(|dir| commands::task_log::open(&dir, ids, discover))
+            .and_then(|dir| commands::task_log::open(&dir, ids, identity))
             .unwrap_or_else(|_| commands::task_log::none())
     };
     Ok((
@@ -193,7 +195,7 @@ fn main() -> anyhow::Result<()> {
             let ids = rendered
                 .as_ref()
                 .map_or_else(|_| Vec::new(), |(_, ids)| ids.clone());
-            let (mut out, warn) = task_writers(ids, false)?;
+            let (mut out, warn) = task_writers(ids, None)?;
             let result = rendered.and_then(|(text, _)| write!(out, "{text}").map_err(Into::into));
             finish_task(result, out, warn)
         }
@@ -213,7 +215,7 @@ fn main() -> anyhow::Result<()> {
                 },
         } => {
             let ids = issues.iter().map(|n| format!("issue-{n}")).collect();
-            let (mut out, mut warn) = task_writers(ids, true)?;
+            let (mut out, mut warn) = task_writers(ids, Some(&task::record::SystemProbe))?;
             let result = commands::task_start::run_with(
                 &config::config_dir()?,
                 &commands::task_start::Options {
@@ -249,7 +251,7 @@ fn main() -> anyhow::Result<()> {
                     dry_run,
                 },
         } => {
-            let (mut out, warn) = task_writers(vec![format!("issue-{issue}")], false)?;
+            let (mut out, warn) = task_writers(vec![format!("issue-{issue}")], None)?;
             let result = commands::task_gates::run(
                 &config::config_dir()?,
                 &commands::task_gates::Options {
@@ -301,7 +303,7 @@ fn main() -> anyhow::Result<()> {
                 Source::Task { kind, number, .. } => vec![task_id(*kind, *number)],
                 Source::File(_) => Vec::new(),
             };
-            let (mut out, mut warn) = task_writers(ids, false)?;
+            let (mut out, mut warn) = task_writers(ids, None)?;
             let result = commands::task_file_findings::run(
                 &commands::task_file_findings::Options {
                     source,
@@ -338,7 +340,7 @@ fn main() -> anyhow::Result<()> {
                 (None, Some(n)) => format!("pr-{n}"),
                 (None, None) => unreachable!("clap requires --issue or --pr"),
             };
-            let (mut out, mut warn) = task_writers(vec![id], false)?;
+            let (mut out, mut warn) = task_writers(vec![id], None)?;
             let result = commands::task_review::run(
                 &config::config_dir()?,
                 &commands::task_review::Options {
@@ -383,7 +385,7 @@ fn main() -> anyhow::Result<()> {
                     yes,
                 },
         } => {
-            let (mut out, mut warn) = task_writers(vec![format!("issue-{issue}")], false)?;
+            let (mut out, mut warn) = task_writers(vec![format!("issue-{issue}")], None)?;
             let result = commands::task_run::run(
                 &config::config_dir()?,
                 &commands::task_run::Options {
@@ -417,7 +419,7 @@ fn main() -> anyhow::Result<()> {
         Command::Task {
             command: TaskCommand::Finish { issue },
         } => {
-            let (mut out, warn) = task_writers(vec![format!("issue-{issue}")], false)?;
+            let (mut out, warn) = task_writers(vec![format!("issue-{issue}")], None)?;
             let result = commands::task_finish::run(
                 &config::config_dir()?,
                 &commands::task_finish::Options { issue },
@@ -435,7 +437,7 @@ fn main() -> anyhow::Result<()> {
                 (None, Some(n)) => (task::record::Kind::Pr, n),
                 (None, None) => unreachable!("clap requires --issue or --pr"),
             };
-            let (mut out, warn) = task_writers(vec![task_id(kind, number)], false)?;
+            let (mut out, warn) = task_writers(vec![task_id(kind, number)], None)?;
             let result = commands::task_rm::run(
                 &config::config_dir()?,
                 &commands::task_rm::Options { kind, number, yes },

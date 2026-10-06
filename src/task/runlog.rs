@@ -61,7 +61,9 @@ pub struct RunLog {
     /// The tasks the command names (`issue-5`), whether or not their folders exist yet.
     named: Vec<String>,
     /// Also log to every task this process records in its `task.json` (`task start` picks them).
-    pid: Option<u32>,
+    /// Both the pid and the start time must match (decision 163): a pid alone can be reused by an
+    /// unrelated later process, which would otherwise make a stale task look like this one's.
+    identity: Option<record::Process>,
     clock: Box<dyn Fn() -> u64 + Send>,
     stage_of: Box<dyn Fn(&Path) -> String + Send>,
     /// Tasks found to be this process's.
@@ -79,7 +81,7 @@ impl RunLog {
         base: &Path,
         header: String,
         named: Vec<String>,
-        pid: Option<u32>,
+        identity: Option<record::Process>,
         clock: Box<dyn Fn() -> u64 + Send>,
         stage_of: Box<dyn Fn(&Path) -> String + Send>,
     ) -> Self {
@@ -87,7 +89,7 @@ impl RunLog {
             base: base.to_owned(),
             header,
             named,
-            pid,
+            identity,
             clock,
             stage_of,
             found: BTreeSet::new(),
@@ -115,7 +117,9 @@ impl RunLog {
     }
 
     fn find_own_tasks(&mut self) {
-        let Some(pid) = self.pid else { return };
+        let Some(identity) = &self.identity else {
+            return;
+        };
         let Ok(entries) = fs::read_dir(record::tasks_root(&self.base)) else {
             return;
         };
@@ -126,7 +130,7 @@ impl RunLog {
             }
             // A folder without a readable record is still being made: look again next line.
             if let Ok(rec) = record::read(&entry.path().join("task.json")) {
-                if rec.process.is_some_and(|p| p.pid == pid) {
+                if rec.process.as_ref() == Some(identity) {
                     self.found.insert(id);
                 } else {
                     self.foreign.insert(id);

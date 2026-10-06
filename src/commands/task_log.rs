@@ -10,11 +10,17 @@ use sha2::{Digest, Sha256};
 
 use crate::config::GlobalConfig;
 use crate::run::results::now;
+use crate::task::record::Process;
 use crate::task::runlog::{self, RunLog};
 
-/// A log for a command working on the tasks `ids` (`issue-5`, `pr-7`). With `discover`, it also
-/// logs into every task this process records (`task start` picks its issues itself).
-pub fn open(config_dir: &Path, ids: Vec<String>, discover: bool) -> Result<Arc<Mutex<RunLog>>> {
+/// A log for a command working on the tasks `ids` (`issue-5`, `pr-7`). With `identity`, it also
+/// logs into every task whose record carries that exact process (pid and start time; decision
+/// 163): `task start` picks its own issues itself, so it discovers its tasks instead of naming them.
+pub fn open(
+    config_dir: &Path,
+    ids: Vec<String>,
+    identity: Option<Process>,
+) -> Result<Arc<Mutex<RunLog>>> {
     let base = GlobalConfig::load(config_dir)?.base_dir;
     let exe = std::env::current_exe().context("cannot find this executable")?;
     let bytes = std::fs::read(&exe).with_context(|| format!("cannot read {}", exe.display()))?;
@@ -29,7 +35,7 @@ pub fn open(config_dir: &Path, ids: Vec<String>, discover: bool) -> Result<Arc<M
         &base,
         header,
         ids,
-        discover.then_some(pid),
+        identity,
         Box::new(now),
         Box::new(runlog::recorded_stage),
     ))))
