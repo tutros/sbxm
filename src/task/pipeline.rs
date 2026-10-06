@@ -11,6 +11,7 @@ use std::time::Instant;
 
 use super::config::TaskConfig;
 use super::gates::{self, GateOutcome, HostRunner};
+use super::machine;
 use super::prompts::{self, Role};
 use super::record::{
     self, Agent, GateResult, GateRun, Kind, NewTask, PrBranch, Process, ProcessProbe, Record,
@@ -86,13 +87,21 @@ impl Prepared {
 }
 
 /// Whether gates may run on this task now (`task gates`): after the worker or the fix round has
-/// finished, or again after earlier gates ended. The reason for a refusal says what to do.
+/// finished, or again after earlier gates ended. Decided through `machine::TABLE`; the reason for
+/// a refusal says what to do.
 pub fn check_can_gate(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
     let id = &task.id;
     let number = task.number;
+    let state = machine::State {
+        stage: task.stage,
+        status: task.status,
+        interrupted: task.is_interrupted(probe),
+        kind: task.kind,
+    };
+    if machine::verdict(&state, machine::Event::Gates) {
+        return Ok(());
+    }
     match (task.stage, task.status) {
-        (Stage::Working | Stage::Fixing, Status::Completed | Status::TimedOut)
-        | (Stage::Gating, Status::Passed | Status::GatesFailed) => Ok(()),
         (Stage::Working | Stage::Fixing, Status::Running) => {
             if task.is_interrupted(probe) {
                 bail!(
@@ -109,8 +118,6 @@ pub fn check_can_gate(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
                 "the worker failed for task {id}, so there is nothing to gate; see `sbxm task status --issue {number}`"
             )
         }
-        // Gates whose sbxm process is gone never finished: `run_gates` gives them up and re-runs.
-        (Stage::Gating, Status::Running) if task.is_interrupted(probe) => Ok(()),
         (Stage::Gating, _) => bail!(
             "gates are running for task {id}, or were interrupted; see `sbxm task status --issue {number}`"
         ),
