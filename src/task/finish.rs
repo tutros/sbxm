@@ -531,8 +531,9 @@ pub fn pr_comment(number: u32, branch: &str, commits: &[String]) -> String {
 
 /// [`finish`] for a task that continues an open PR (decision 169 (e)): pushes to the PR's branch,
 /// as a fast-forward from the head the task started at and never a force, then comments on the
-/// PR; no PR is opened. The remote branch must still be where the task started (or already at the
-/// task's tip, when a rerun only retries the comment).
+/// PR; no PR is opened. The remote branch must still be where the task started, checked again
+/// atomically by the push itself ([`repo::push_from`]); a remote already at the task's tip means
+/// a rerun after a failed comment, which only retries the comment.
 fn finish_continued(
     mut prepared: Prepared,
     repo_git: &Path,
@@ -546,14 +547,15 @@ fn finish_continued(
     let commits = repo::commit_lines(repo_git, &continued.base, branch)?;
     let body = pr_comment(task.number, branch, &commits);
     refuse_secrets("the PR comment", &body)?;
-    match repo::remote_branch_head(repo_git, branch)? {
+    let pushed = match repo::remote_branch_head(repo_git, branch)? {
         None => bail!(
             "PR #{pr}'s branch {branch} isn't on the remote any more (deleted, or the PR merged?); \
              sbxm never forces a push, so check PR #{pr}, then push the task's commits from its \
              repo.git yourself or start the task again with `sbxm task start --restart --issue {}`",
             task.number
         ),
-        Some(head) if head == continued.base || head == tip => {}
+        Some(head) if head == tip => true,
+        Some(head) if head == continued.base => false,
         Some(head) => bail!(
             "PR #{pr}'s branch {branch} moved on the remote (it is at {head}, the task started at \
              {}); sbxm never forces a push, so start the task again from the new head with \
@@ -561,9 +563,18 @@ fn finish_continued(
             continued.base,
             task.number
         ),
-    }
+    };
 
-    repo::push(repo_git, branch)?;
+    if !pushed {
+        repo::push_from(repo_git, branch, &continued.base).with_context(|| {
+            format!(
+                "PR #{pr}'s branch {branch} wasn't updated; sbxm never forces a push, so check \
+                 PR #{pr} and, if someone else pushed, start the task again from the new head \
+                 with `sbxm task start --restart --issue {}`",
+                task.number
+            )
+        })?;
+    }
     if let Err(e) = github.pr_comment(&task.repo, pr, &body) {
         if !prepared
             .record

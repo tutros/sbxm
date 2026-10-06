@@ -229,7 +229,12 @@ fn a_comment_that_fails_after_the_push_leaves_the_task_ready_and_a_rerun_only_co
     assert!(record.pr.is_none());
     assert_eq!(record.notes.len(), 1, "{:?}", record.notes);
 
-    // The remote is now at the task's own tip, which a rerun accepts.
+    // The remote is now at the task's own tip, which a rerun accepts without pushing again: a
+    // push would now fail.
+    git(
+        &prepared.meta.join("repo.git"),
+        &["config", "remote.origin.receivepack", "false"],
+    );
     let up = FakeGitHub::default();
     run(&f, &up).unwrap();
 
@@ -301,4 +306,39 @@ fn the_command_says_it_pushed_to_the_pr_and_how_to_review_it_again() {
     );
     assert!(out.contains("sbxm task review --pr 7"), "{out}");
     assert!(!out.contains("opened"), "{out}");
+}
+
+#[test]
+fn a_pr_branch_moved_between_the_check_and_the_push_is_refused_and_left_alone() {
+    let f = fixture();
+    let (prepared, head) = ready_with(&f, &["b.txt", "c.txt"]);
+    let repo_git = prepared.meta.join("repo.git");
+    let middle = git(&repo_git, &["rev-parse", "refs/heads/feature-x~1"]);
+    assert_ne!(middle, head);
+    git(
+        &repo_git,
+        &["push", "-q", "origin", &format!("{middle}:refs/heads/side")],
+    );
+    // `ls-remote` reads the remote through upload-pack; once it has answered (with the task's
+    // start commit), the remote branch moves on to a commit between that start and the task's
+    // tip, which a plain push would fast-forward over.
+    git(
+        &repo_git,
+        &[
+            "config",
+            "remote.origin.uploadpack",
+            &format!(
+                "race() {{ git upload-pack \"$@\"; s=$?; git --git-dir='{}' update-ref refs/heads/feature-x {middle}; return $s; }}; race",
+                f.origin.to_str().unwrap().replace(char::from(92), "/")
+            ),
+        ],
+    );
+    let github = FakeGitHub::default();
+
+    let err = run(&f, &github).unwrap_err();
+
+    assert!(format!("{err:#}").contains("moved"), "{err:#}");
+    assert_eq!(origin_head(&f), middle);
+    assert!(github.calls().is_empty(), "{:?}", github.calls());
+    assert_eq!(reread(&f).stage, Stage::Ready);
 }

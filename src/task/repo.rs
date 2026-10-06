@@ -294,6 +294,62 @@ pub fn push(repo_git: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
+/// Moves `branch` on GitHub (`origin`) from `from` (a full commit id) to its tip in `repo_git`,
+/// as a fast-forward and only if the remote branch is still at `from` when the push lands: the
+/// tip must descend from `from`, and the push carries `from` as the expected old value
+/// (`--force-with-lease`), so a branch that moved meanwhile, even to an ancestor of the tip, is
+/// left alone and the push is refused.
+pub fn push_from(repo_git: &Path, branch: &str, from: &str) -> Result<()> {
+    check_ref("branch", branch)?;
+    if !is_commit_id(from) {
+        bail!("{from:?} isn't a full commit id; the task record may be damaged");
+    }
+    let out = git::output(
+        repo_git,
+        Some(repo_git),
+        None,
+        &[
+            "merge-base",
+            "--is-ancestor",
+            from,
+            &format!("refs/heads/{branch}"),
+        ],
+    )?;
+    if !out.status.success() {
+        bail!(
+            "{branch} in the task repo doesn't descend from {from}, so pushing it wouldn't be a fast-forward"
+        );
+    }
+    let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+    let lease = format!("--force-with-lease=refs/heads/{branch}:{from}");
+    let out = git::user_output(
+        repo_git,
+        &[
+            "--git-dir",
+            text(repo_git)?,
+            "push",
+            &lease,
+            "origin",
+            &refspec,
+        ],
+        &[],
+    )?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if stderr.contains("stale info") {
+        bail!(
+            "{branch} moved on the remote after sbxm checked it (it is no longer at {from}); nothing was pushed"
+        );
+    }
+    bail!(
+        "cannot push {branch}; check `gh auth status` and your access to the repo: `git push` failed ({}): {}",
+        out.status,
+        stderr.trim()
+    )
+}
+
 /// The commit `branch` is at on GitHub (`origin`), or `None` when the remote has no such branch.
 pub fn remote_branch_head(repo_git: &Path, branch: &str) -> Result<Option<String>> {
     check_ref("branch", branch)?;
