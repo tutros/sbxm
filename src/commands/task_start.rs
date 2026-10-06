@@ -13,7 +13,7 @@ use crate::git;
 use crate::github::GitHubBackend;
 use crate::harness::Harness;
 use crate::headless::RunStatus;
-use crate::run::config::{headless_harness, parse_duration};
+use crate::run::config::{check_model_flag, headless_harness, parse_duration};
 use crate::task::config::TaskConfig;
 use crate::task::finish;
 use crate::task::gates::ShellHostRunner;
@@ -217,6 +217,7 @@ pub fn run_with(
         config.set_worker_harness(harness);
     }
     if let Some(model) = &opts.worker_model {
+        check_model_flag("--worker-model", model).map_err(|e| anyhow!(e))?;
         config.worker.model = Some(model.clone());
     }
     if let Some(limit) = &opts.time_limit {

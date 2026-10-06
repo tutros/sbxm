@@ -204,6 +204,38 @@ fn a_bad_reviewer_flag_is_refused_before_the_worker_starts() {
 }
 
 #[test]
+fn an_empty_or_blank_reviewer_model_flag_is_refused_before_the_worker_starts() {
+    for bad in ["", "  "] {
+        let f = config();
+        let b = backend(&f, &[CLEAN]);
+        let mut opts = options(&f);
+        opts.reviewer_model = Some(bad.into());
+
+        let out = go(&f, &opts, None, &b, &github());
+
+        let message = format!("{:#}", out.result.unwrap_err());
+        assert!(message.contains("--reviewer-model"), "{bad:?}: {message}");
+        assert!(b.creates().is_empty(), "{bad:?}");
+    }
+}
+
+#[test]
+fn an_empty_or_blank_worker_model_flag_is_refused_before_anything_happens() {
+    for bad in ["", "  "] {
+        let f = config();
+        let b = backend(&f, &[CLEAN]);
+        let mut opts = options(&f);
+        opts.worker_model = Some(bad.into());
+
+        let out = go(&f, &opts, None, &b, &github());
+
+        let message = format!("{:#}", out.result.unwrap_err());
+        assert!(message.contains("--worker-model"), "{bad:?}: {message}");
+        assert!(b.creates().is_empty(), "{bad:?}");
+    }
+}
+
+#[test]
 fn the_configs_warnings_are_said_once() {
     // Worker and reviewer both claude: both start and review would warn about it.
     let f = fixture_with(
