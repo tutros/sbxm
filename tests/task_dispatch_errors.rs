@@ -138,6 +138,35 @@ fn a_command_whose_current_dir_vanishes_after_start_still_logs_its_error() {
     assert!(log.contains("Error: "), "{log}");
 }
 
+/// Issue 129, M-3: a targeted command whose task-log *construction* fails (not just a later
+/// append) must not look like the explicit no-target case, which stays silent on purpose. It
+/// warns once on the real stderr, naming the cause, instead of quietly falling back to the inert
+/// logger.
+#[test]
+fn a_task_log_that_cannot_be_constructed_warns_once_on_real_stderr() {
+    let env = Env::new();
+    // Breaks `task_log::open`'s own `GlobalConfig::load` deterministically, while the command's
+    // own identical load fails the same way, so the ordinary error is unaffected.
+    fs::write(env.config_dir().join("config.toml"), "bogus_key = true\n").unwrap();
+
+    let output = Command::cargo_bin("sbxm")
+        .unwrap()
+        .env("SBXM_CONFIG_DIR", env.config_dir())
+        .args(["task", "status", "--issue", "41"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let warnings: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.starts_with("warning:"))
+        .collect();
+    assert_eq!(warnings.len(), 1, "{stderr}");
+    assert!(warnings[0].contains("cannot open the task log"), "{stderr}");
+    assert!(stderr.contains("Error: "), "{stderr}");
+}
+
 #[test]
 fn a_cancelled_rm_without_a_terminal_appends_its_header_and_refusal_to_the_existing_log() {
     let env = Env::new();

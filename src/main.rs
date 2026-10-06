@@ -26,19 +26,59 @@ fn task_writers(
     ids: Vec<String>,
     discover: Option<&dyn task::record::ProcessProbe>,
 ) -> anyhow::Result<(Tee<std::io::Stdout>, Tee<std::io::Stderr>)> {
-    // A log that cannot be opened (no config yet, say) never stops the command, which reports that itself.
+    // The explicit no-target case (`task init`, `file-findings --file`) stays inert on purpose:
+    // there is nothing to log into, and that is not a failure.
     let log = if ids.is_empty() && discover.is_none() {
         commands::task_log::none()
     } else {
         let identity = discover.map(task::record::Process::current);
         config::config_dir()
-            .and_then(|dir| commands::task_log::open(&dir, ids, identity))
-            .unwrap_or_else(|_| commands::task_log::none())
+            .and_then(|dir| commands::task_log::open(&dir, ids.clone(), identity))
+            .unwrap_or_else(|err| {
+                warn_log_open_failed(&ids, &err);
+                commands::task_log::none()
+            })
     };
     Ok((
         Tee::new(std::io::stdout(), Arc::clone(&log)),
         Tee::new(std::io::stderr(), log),
     ))
+}
+
+/// A targeted log construction failed (unlike the explicit no-target case above, which never
+/// calls this): reports it once on the real stderr, naming the ids and, when the base dir could
+/// still be resolved, each one's `run.log` path, so the command's own later, likely identical,
+/// config failure doesn't leave this one looking like silently-dropped logging (issue 129 M-3,
+/// decision 11).
+fn warn_log_open_failed(ids: &[String], err: &anyhow::Error) {
+    let paths = config::config_dir()
+        .and_then(|dir| config::GlobalConfig::load(&dir))
+        .ok()
+        .map(|global| {
+            ids.iter()
+                .map(|id| {
+                    task::record::task_dir(&global.base_dir, id)
+                        .join("run.log")
+                        .display()
+                        .to_string()
+                })
+                .collect::<Vec<_>>()
+        })
+        .filter(|paths| !paths.is_empty());
+    match paths {
+        Some(paths) => eprintln!(
+            "warning: cannot open the task log at {}: {err:#}",
+            paths.join(", ")
+        ),
+        None => {
+            let target = if ids.is_empty() {
+                "the discovered tasks".to_owned()
+            } else {
+                ids.join(", ")
+            };
+            eprintln!("warning: cannot open the task log for {target}: {err:#}");
+        }
+    }
 }
 
 /// Ends a `sbxm task` command's invocation. On success this changes nothing; on failure it writes
