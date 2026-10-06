@@ -131,20 +131,11 @@ fn the_table_and_the_guards_agree_except_for_the_listed_differences() {
     );
 }
 
-/// Where the table (spec sections 2 and 5.2) and `Record::advance` differ; every one is about
-/// `advance` not knowing the kind of task (see `sdlc/spikes/state-table.md`, findings F1-F2).
-const EXPECTED: &[&str] = &[
-    // F1: `advance` lets an issue task skip its worker.
-    "Issue Prepared/Running Advance(Gating): table refuses, guard allows",
-    "Issue Prepared/Running Advance(Reviewing): table refuses, guard allows",
-    "Issue Prepared/Running+interrupted Advance(Gating): table refuses, guard allows",
-    "Issue Prepared/Running+interrupted Advance(Reviewing): table refuses, guard allows",
-    // F2: `advance` lets a PR task have a worker, a fix round or a finish.
-    "Pr Prepared/Running Advance(Working): table refuses, guard allows",
-    "Pr Prepared/Running+interrupted Advance(Working): table refuses, guard allows",
-    "Pr Reviewing/Completed Advance(Fixing): table refuses, guard allows",
-    "Pr Ready/Ok Advance(Finished): table refuses, guard allows",
-];
+/// The table and `Record::advance` (and, below, every other guard) now agree everywhere: `advance`
+/// respects the task kind, so findings F1 and F2 of `sdlc/spikes/state-table.md` are closed. An
+/// empty list here means exactly that; a future difference fails the build instead of silently
+/// reappearing.
+const EXPECTED: &[&str] = &[];
 
 /// The rows are checked top to bottom and the first match wins (spec section 5.2); that is only
 /// meaningful if at most one row ever matches a given (state, event) pair to begin with, so there

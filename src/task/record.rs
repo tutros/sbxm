@@ -53,17 +53,22 @@ impl Stage {
         }
     }
 
-    /// The stages that may follow this one.
-    pub(crate) fn next(self) -> &'static [Stage] {
-        match self {
+    /// The stages that may follow this one, for a task of `kind`: an issue task must pass through
+    /// its worker, and a PR task (no worker, no fix round, never finished: spec section 5.2) never
+    /// reaches `working`, `fixing` or `finished`.
+    pub(crate) fn next(self, kind: Kind) -> &'static [Stage] {
+        match (self, kind) {
+            (Self::Prepared, Kind::Issue) => &[Self::Working],
             // A PR task has no worker: it goes to its gates (run in the reviewer's sandbox) or
-            // straight to review.
-            Self::Prepared => &[Self::Working, Self::Gating, Self::Reviewing],
-            Self::Working | Self::Fixing => &[Self::Gating],
-            Self::Gating => &[Self::Reviewing],
-            Self::Reviewing => &[Self::Fixing, Self::Ready],
-            Self::Ready => &[Self::Finished],
-            Self::Finished => &[],
+            // straight to review when none are configured (decision 175, finding F3).
+            (Self::Prepared, Kind::Pr) => &[Self::Gating, Self::Reviewing],
+            (Self::Working | Self::Fixing, Kind::Issue) => &[Self::Gating],
+            (Self::Working | Self::Fixing, Kind::Pr) => &[],
+            (Self::Gating, _) => &[Self::Reviewing],
+            (Self::Reviewing, Kind::Issue) => &[Self::Fixing, Self::Ready],
+            (Self::Reviewing, Kind::Pr) => &[Self::Ready],
+            (Self::Ready, Kind::Issue) => &[Self::Finished],
+            (Self::Ready, Kind::Pr) | (Self::Finished, _) => &[],
         }
     }
 
@@ -342,7 +347,7 @@ impl Record {
     /// Enters the next stage (running, or `ok` for the last two). Refused, with nothing
     /// changed, unless the current stage is finished and the move is a legal one.
     pub fn advance(&mut self, stage: Stage, now: u64, process: Process) -> Result<()> {
-        if !self.stage.next().contains(&stage) {
+        if !self.stage.next(self.kind).contains(&stage) {
             bail!(
                 "task {} cannot go from {} to {}; see `sbxm task status`",
                 self.id,

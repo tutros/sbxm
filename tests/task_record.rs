@@ -33,6 +33,22 @@ fn new_record() -> Record {
     )
 }
 
+fn new_pr_record() -> Record {
+    Record::new(
+        &NewTask {
+            kind: Kind::Pr,
+            number: 7,
+            repo: "o/r",
+            title: "t",
+            base: "main",
+            branch: "pr-7",
+            config_hash: "abc123",
+        },
+        T0,
+        Process::new(1234, T0),
+    )
+}
+
 #[test]
 fn a_new_record_is_prepared_and_running() {
     let record = new_record();
@@ -94,11 +110,58 @@ fn the_whole_pipeline_is_a_legal_walk_with_every_stage_stamped() {
 
 #[test]
 fn a_pr_task_goes_straight_from_prepared_to_reviewing() {
-    let mut record = new_record();
+    let mut record = new_pr_record();
     record
         .advance(Stage::Reviewing, T0 + 1, Process::new(1, T0))
         .unwrap();
     assert_eq!(record.stage, Stage::Reviewing);
+}
+
+#[test]
+fn an_issue_task_cannot_skip_its_worker() {
+    let mut record = new_record();
+    let message = format!(
+        "{:#}",
+        record
+            .advance(Stage::Gating, T0, Process::new(1, T0))
+            .unwrap_err()
+    );
+    assert!(
+        message.contains("prepared") && message.contains("gating"),
+        "{message}"
+    );
+    assert!(
+        record
+            .advance(Stage::Reviewing, T0, Process::new(1, T0))
+            .is_err()
+    );
+}
+
+#[test]
+fn a_pr_task_cannot_get_a_worker_a_fix_round_or_a_finish() {
+    let mut record = new_pr_record();
+    assert!(
+        record
+            .advance(Stage::Working, T0, Process::new(1, T0))
+            .is_err()
+    );
+    record
+        .advance(Stage::Reviewing, T0, Process::new(1, T0))
+        .unwrap();
+    record.finish(Status::Completed).unwrap();
+    assert!(
+        record
+            .advance(Stage::Fixing, T0, Process::new(1, T0))
+            .is_err()
+    );
+    record
+        .advance(Stage::Ready, T0, Process::new(1, T0))
+        .unwrap();
+    assert!(
+        record
+            .advance(Stage::Finished, T0, Process::new(1, T0))
+            .is_err()
+    );
 }
 
 #[test]
@@ -220,6 +283,14 @@ fn gating_cannot_begin_while_gates_are_running_or_from_the_wrong_stage() {
 
     let mut reviewing = new_record();
     reviewing
+        .advance(Stage::Working, T0, Process::new(1, T0))
+        .unwrap();
+    reviewing.finish(Status::Completed).unwrap();
+    reviewing
+        .advance(Stage::Gating, T0, Process::new(1, T0))
+        .unwrap();
+    reviewing.finish(Status::Passed).unwrap();
+    reviewing
         .advance(Stage::Reviewing, T0, Process::new(1, T0))
         .unwrap();
     reviewing.finish(Status::Completed).unwrap();
@@ -307,6 +378,14 @@ fn a_review_can_begin_after_the_gates_and_again_after_a_failed_review() {
 #[test]
 fn a_review_cannot_begin_while_running_or_once_it_is_complete() {
     let mut record = new_record();
+    record
+        .advance(Stage::Working, T0, Process::new(1, T0))
+        .unwrap();
+    record.finish(Status::Completed).unwrap();
+    record
+        .advance(Stage::Gating, T0, Process::new(1, T0))
+        .unwrap();
+    record.finish(Status::Passed).unwrap();
     record
         .advance(Stage::Reviewing, T0, Process::new(1, T0))
         .unwrap();
