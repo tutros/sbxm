@@ -1,3 +1,6 @@
+use std::io::Write as _;
+use std::sync::Arc;
+
 use clap::Parser;
 
 use sbxm::backend::SbxBackend;
@@ -7,7 +10,6 @@ use sbxm::config;
 use sbxm::confirm::Terminal;
 use sbxm::task;
 use sbxm::task::runlog::Tee;
-use std::sync::Arc;
 
 /// The task id (`issue-5`, `pr-7`) a command works on.
 fn task_id(kind: task::record::Kind, number: u32) -> String {
@@ -35,6 +37,26 @@ fn task_writers(
         Tee::new(std::io::stdout(), Arc::clone(&log)),
         Tee::new(std::io::stderr(), log),
     ))
+}
+
+/// Ends a `sbxm task` command's invocation. On success this changes nothing; on failure it writes
+/// through `warn` the exact text `main`'s own `anyhow::Result<()>` return would otherwise print to
+/// the real, un-teed stderr (`Error: {err:?}`), so the task's `run.log` gets the header (written as
+/// a side effect of this being the first line, if nothing else was) and the error exactly once,
+/// then exits with the status that printing would have produced. `out` and `warn` are dropped
+/// (flushing any partial line) before the process exits, since `std::process::exit` skips `Drop`.
+fn finish_task(
+    result: anyhow::Result<()>,
+    out: Tee<std::io::Stdout>,
+    mut warn: Tee<std::io::Stderr>,
+) -> ! {
+    let failed = result.is_err();
+    if let Err(err) = result {
+        let _ = writeln!(warn, "Error: {err:?}");
+    }
+    drop(out);
+    drop(warn);
+    std::process::exit(if failed { 1 } else { 0 });
 }
 
 fn main() -> anyhow::Result<()> {
@@ -190,7 +212,7 @@ fn main() -> anyhow::Result<()> {
         } => {
             let ids = issues.iter().map(|n| format!("issue-{n}")).collect();
             let (mut out, mut warn) = task_writers(ids, true)?;
-            commands::task_start::run_with(
+            let result = commands::task_start::run_with(
                 &config::config_dir()?,
                 &commands::task_start::Options {
                     repo_root: std::env::current_dir()?,
@@ -214,7 +236,8 @@ fn main() -> anyhow::Result<()> {
                 &task::record::SystemProbe,
                 &mut out,
                 &mut warn,
-            )
+            );
+            finish_task(result, out, warn)
         }
         Command::Task {
             command:
@@ -224,8 +247,8 @@ fn main() -> anyhow::Result<()> {
                     dry_run,
                 },
         } => {
-            let (mut out, _warn) = task_writers(vec![format!("issue-{issue}")], false)?;
-            commands::task_gates::run(
+            let (mut out, warn) = task_writers(vec![format!("issue-{issue}")], false)?;
+            let result = commands::task_gates::run(
                 &config::config_dir()?,
                 &commands::task_gates::Options {
                     repo_root: std::env::current_dir()?,
@@ -241,7 +264,8 @@ fn main() -> anyhow::Result<()> {
                 &task::record::SystemProbe,
                 &task::gates::ShellHostRunner,
                 &mut out,
-            )
+            );
+            finish_task(result, out, warn)
         }
         Command::Task {
             command:
@@ -276,7 +300,7 @@ fn main() -> anyhow::Result<()> {
                 Source::File(_) => Vec::new(),
             };
             let (mut out, mut warn) = task_writers(ids, false)?;
-            commands::task_file_findings::run(
+            let result = commands::task_file_findings::run(
                 &commands::task_file_findings::Options {
                     source,
                     repo_root: std::env::current_dir()?,
@@ -290,7 +314,8 @@ fn main() -> anyhow::Result<()> {
                 &sbxm::github::gh::GhBackend::default(),
                 &mut out,
                 &mut warn,
-            )
+            );
+            finish_task(result, out, warn)
         }
         Command::Task {
             command:
@@ -312,7 +337,7 @@ fn main() -> anyhow::Result<()> {
                 (None, None) => unreachable!("clap requires --issue or --pr"),
             };
             let (mut out, mut warn) = task_writers(vec![id], false)?;
-            commands::task_review::run(
+            let result = commands::task_review::run(
                 &config::config_dir()?,
                 &commands::task_review::Options {
                     repo_root: std::env::current_dir()?,
@@ -336,7 +361,8 @@ fn main() -> anyhow::Result<()> {
                 &task::gates::ShellHostRunner,
                 &mut out,
                 &mut warn,
-            )
+            );
+            finish_task(result, out, warn)
         }
         Command::Task {
             command:
@@ -356,7 +382,7 @@ fn main() -> anyhow::Result<()> {
                 },
         } => {
             let (mut out, mut warn) = task_writers(vec![format!("issue-{issue}")], false)?;
-            commands::task_run::run(
+            let result = commands::task_run::run(
                 &config::config_dir()?,
                 &commands::task_run::Options {
                     repo_root: std::env::current_dir()?,
@@ -383,19 +409,21 @@ fn main() -> anyhow::Result<()> {
                 &task::gates::ShellHostRunner,
                 &mut out,
                 &mut warn,
-            )
+            );
+            finish_task(result, out, warn)
         }
         Command::Task {
             command: TaskCommand::Finish { issue },
         } => {
-            let (mut out, _warn) = task_writers(vec![format!("issue-{issue}")], false)?;
-            commands::task_finish::run(
+            let (mut out, warn) = task_writers(vec![format!("issue-{issue}")], false)?;
+            let result = commands::task_finish::run(
                 &config::config_dir()?,
                 &commands::task_finish::Options { issue },
                 &sbxm::github::gh::GhBackend::default(),
                 &task::record::SystemProbe,
                 &mut out,
-            )
+            );
+            finish_task(result, out, warn)
         }
         Command::Task {
             command: TaskCommand::Rm { issue, pr, yes },
@@ -405,15 +433,16 @@ fn main() -> anyhow::Result<()> {
                 (None, Some(n)) => (task::record::Kind::Pr, n),
                 (None, None) => unreachable!("clap requires --issue or --pr"),
             };
-            let (mut out, _warn) = task_writers(vec![task_id(kind, number)], false)?;
-            commands::task_rm::run(
+            let (mut out, warn) = task_writers(vec![task_id(kind, number)], false)?;
+            let result = commands::task_rm::run(
                 &config::config_dir()?,
                 &commands::task_rm::Options { kind, number, yes },
                 &SbxBackend,
                 &task::record::SystemProbe,
                 &Terminal,
                 &mut out,
-            )
+            );
+            finish_task(result, out, warn)
         }
         Command::Run(_) => unreachable!("clap requires a config or a subcommand"),
         Command::Config {
