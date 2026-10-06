@@ -68,11 +68,15 @@ fn run(f: &Fixture, opts: &Options, backend: &FakeBackend, github: &FakeGitHub) 
         &mut out,
         &mut warn,
     );
-    Out {
-        result,
-        out: String::from_utf8(out).unwrap(),
-        warn: String::from_utf8(warn).unwrap(),
+    let (out, warn) = (
+        String::from_utf8(out).unwrap(),
+        String::from_utf8(warn).unwrap(),
+    );
+    if let Err(e) = &result {
+        // The error alone ("1 of 1 task(s) failed; see above") hides why; show what was above.
+        eprintln!("task start failed: {e:#}\n--- out ---\n{out}\n--- warn ---\n{warn}");
     }
+    Out { result, out, warn }
 }
 
 fn github() -> FakeGitHub {
