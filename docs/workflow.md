@@ -49,7 +49,7 @@ decision 166). A ranking is computed in code from the judge's scores.
 sbxm task init                         # writes sbxm-task.toml: worker, reviewer, profile, gates
 sbxm task start --issue 63             # worker in its own sandbox; commits collected; gates run
 sbxm task status                       # stage, status, commits ahead, result/review present
-sbxm task review --issue 63            # gates, independent review, one fix round, gates, second review
+sbxm task review --issue 63            # gates, independent review, fix rounds up to [worker] fix_rounds
 sbxm task finish --issue 63            # push the branch and open the PR ("Fixes #63"); for an issue of
                                        # an open PR: push to that PR's branch and comment on the PR
 sbxm task review --pr 69               # independent review of any PR of this repo, posted as a comment
@@ -65,7 +65,12 @@ sbxm task run --issue 63               # start and review in one go; stops befor
 - **Independence:** a worker never reviews its own change; the reviewer's harness differs from the worker's by default.
 - **Limits to know:**
   - A `ready` task cannot be reviewed again with `task review --issue`; the only redo is `task start --restart`.
-  - `task review --pr` has no fix round: the author fixes the findings and reviews again after `task rm --pr N`.
+  - `task review --pr` has no fix round (a PR task's `fix_rounds` is always 0): the author fixes the findings and
+    reviews again after `task rm --pr N`.
+  - `[worker] fix_rounds` (default 3) bounds the review-fix-review loop; a gate failure spends a round too. Rounds
+    after the first review only the commits made since the last one, and one more review of everything confirms a
+    clean one before the task is `ready`. If the budget runs out with findings still open, the task is still
+    `ready`, with `stopped` set to `rounds-exhausted` in `task.json`.
 - **Continuing an open PR (decision 169):** a finding filed with `task file-findings --pr N` names its PR (`PR: #N`),
   so its task starts from the PR's branch head. `task finish` for that task pushes to the PR's branch (no new flag),
   opens no new PR and comments on the PR with the commits added and `Fixes #<issue>`. The push is a fast-forward

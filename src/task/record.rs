@@ -12,6 +12,14 @@ use crate::run::results::format_timestamp;
 
 pub const SCHEMA: u32 = 1;
 
+/// `[worker] fix_rounds` in `sbxm-task.toml` when the key is absent, and what an older record
+/// (written before this field existed) reads as (issue 117, decision 173(a)).
+pub const DEFAULT_FIX_ROUNDS: u32 = 3;
+
+fn default_fix_rounds() -> u32 {
+    DEFAULT_FIX_ROUNDS
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Kind {
@@ -55,7 +63,9 @@ impl Stage {
 
     /// The stages that may follow this one, for a task of `kind`: an issue task must pass through
     /// its worker, and a PR task (no worker, no fix round, never finished: spec section 5.2) never
-    /// reaches `working`, `fixing` or `finished`.
+    /// reaches `working`, `fixing` or `finished`. A failed gate feeds a fix round too, for an
+    /// issue task with rounds left (issue 117, decision 173(d)); a PR task's gates have no such
+    /// move since its `fix_rounds` is always 0.
     pub(crate) fn next(self, kind: Kind) -> &'static [Stage] {
         match (self, kind) {
             (Self::Prepared, Kind::Issue) => &[Self::Working],
@@ -64,7 +74,8 @@ impl Stage {
             (Self::Prepared, Kind::Pr) => &[Self::Gating, Self::Reviewing],
             (Self::Working | Self::Fixing, Kind::Issue) => &[Self::Gating],
             (Self::Working | Self::Fixing, Kind::Pr) => &[],
-            (Self::Gating, _) => &[Self::Reviewing],
+            (Self::Gating, Kind::Issue) => &[Self::Reviewing, Self::Fixing],
+            (Self::Gating, Kind::Pr) => &[Self::Reviewing],
             (Self::Reviewing, Kind::Issue) => &[Self::Fixing, Self::Ready],
             (Self::Reviewing, Kind::Pr) => &[Self::Ready],
             (Self::Ready, Kind::Issue) => &[Self::Finished],
@@ -84,16 +95,36 @@ impl Stage {
         }
     }
 
-    /// The statuses from which the task may move on.
-    pub(crate) fn done(self) -> &'static [Status] {
+    /// The statuses from which the task may move on to `to`: leaving `Gating` needs `Passed` for
+    /// `Reviewing` but `GatesFailed` for `Fixing` (issue 117), so the two moves don't share a
+    /// status set the way every other stage's moves do.
+    pub(crate) fn done_for(self, to: Stage) -> &'static [Status] {
         use Status::*;
+        match (self, to) {
+            (Self::Gating, Self::Fixing) => &[GatesFailed],
+            (Self::Gating, _) => &[Passed],
+            (Self::Prepared, _) => &[Running],
+            (Self::Working | Self::Fixing, _) => &[Completed, TimedOut],
+            (Self::Reviewing, _) => &[Completed],
+            (Self::Ready, _) => &[Ok],
+            (Self::Finished, _) => &[],
+        }
+    }
+}
+
+/// Why a task ended `ready` with something left unresolved (spec §5.1, decision 174(c)): recorded
+/// once and read by `task finish` and `task resume`, never re-derived from `review.md`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Stopped {
+    /// The round budget (`fix_rounds`) was used up with must-fix findings still open.
+    RoundsExhausted,
+}
+
+impl Stopped {
+    pub fn name(self) -> &'static str {
         match self {
-            Self::Prepared => &[Running],
-            Self::Working | Self::Fixing => &[Completed, TimedOut],
-            Self::Gating => &[Passed],
-            Self::Reviewing => &[Completed],
-            Self::Ready => &[Ok],
-            Self::Finished => &[],
+            Self::RoundsExhausted => "rounds-exhausted",
         }
     }
 }
@@ -242,7 +273,22 @@ pub struct Record {
     pub process: Option<Process>,
     pub worker: Option<Agent>,
     pub reviewer: Option<Agent>,
-    pub fix_round: bool,
+    /// Fix rounds used so far (issue 117, decision 173(a)); an older record without this field
+    /// reads as 0.
+    #[serde(default)]
+    pub round: u32,
+    /// The budget: `[worker] fix_rounds` as it was when the task started (a later config change
+    /// affects new tasks only); 0 for a PR task, which has no worker. An older record without
+    /// this field reads as the default.
+    #[serde(default = "default_fix_rounds")]
+    pub fix_rounds: u32,
+    /// Set when the task ends `ready` with something left unresolved (spec §5.1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopped: Option<Stopped>,
+    /// The branch commit the last review covered; `None` means the next review is full (spec
+    /// §5.1, §5.2: a narrow review exists only once this is set).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_reviewed_commit: Option<String>,
     pub gates: Vec<GateResult>,
     /// The latest gate run that passed, and what it covered; cleared when gates start again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -331,7 +377,10 @@ impl Record {
             process: Some(process),
             worker: None,
             reviewer: None,
-            fix_round: false,
+            round: 0,
+            fix_rounds: DEFAULT_FIX_ROUNDS,
+            stopped: None,
+            last_reviewed_commit: None,
             gates: Vec::new(),
             gate_run: None,
             pr: None,
@@ -355,7 +404,7 @@ impl Record {
                 stage.name()
             );
         }
-        if !self.stage.done().contains(&self.status) {
+        if !self.stage.done_for(stage).contains(&self.status) {
             bail!(
                 "task {} is {} in stage {}, so it cannot move on; see `sbxm task status`",
                 self.id,
@@ -398,31 +447,26 @@ impl Record {
         Ok(())
     }
 
-    /// Starts a review round: after the gates, or again after a review that failed. Refused while
-    /// one is running and once it is complete.
+    /// Starts a review round: after the gates, after a review that failed, or again after a
+    /// review that completed (a retry, or the confirmatory full review that follows a clean
+    /// narrow one, spec §5.2, issue 117). Refused only while one is already running.
     pub fn begin_review(&mut self, now: u64, process: Process) -> Result<()> {
         if self.stage != Stage::Reviewing {
             return self.advance(Stage::Reviewing, now, process);
         }
-        match self.status {
-            Status::Failed => {
-                self.status = Status::Running;
-                self.stages.push(Stamp {
-                    stage: Stage::Reviewing,
-                    at: format_timestamp(now),
-                });
-                self.process = Some(process);
-                Ok(())
-            }
-            Status::Running => bail!(
+        if self.status == Status::Running {
+            bail!(
                 "task {} is already running its review; wait for it, or see `sbxm task status`",
                 self.id
-            ),
-            _ => bail!(
-                "the review of task {} is complete; read review.md in its folder",
-                self.id
-            ),
+            );
         }
+        self.status = Status::Running;
+        self.stages.push(Stamp {
+            stage: Stage::Reviewing,
+            at: format_timestamp(now),
+        });
+        self.process = Some(process);
+        Ok(())
     }
 
     /// Gates that were running but whose `sbxm` process is gone (a crash, Ctrl-C) never finished:

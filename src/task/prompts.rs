@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use super::config::Prompts;
 
 /// The names a template may use; anything else is an error, so a typo is caught before a run.
-const KNOWN: [&str; 11] = [
+const KNOWN: [&str; 12] = [
     "issue",
     "number",
     "branch",
@@ -21,6 +21,7 @@ const KNOWN: [&str; 11] = [
     "gates_host",
     "review_path",
     "previous_review_path",
+    "gate_output_path",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,8 +30,10 @@ pub enum Role {
     Reviewer,
     /// The reviewer of a pull request (no issue of its own, no fix round).
     ReviewerPr,
-    /// The one fix round after a review.
+    /// The fix round after a review found must-fix findings.
     Fix,
+    /// The fix round after a gate failure, which has no review to point at (issue 117).
+    FixGate,
 }
 
 /// A template and the name errors are reported under (the embedded name, or the override's path).
@@ -44,6 +47,7 @@ const WORKER: &str = include_str!("../../prompts/worker.md");
 const REVIEWER: &str = include_str!("../../prompts/reviewer.md");
 const REVIEWER_PR: &str = include_str!("../../prompts/reviewer-pr.md");
 const FIX: &str = include_str!("../../prompts/fix.md");
+const FIX_GATE: &str = include_str!("../../prompts/fix-gate.md");
 
 /// The template for `role`: the repo's override when configured, else the embedded one.
 pub fn template(role: Role, prompts: &Prompts) -> Result<Template> {
@@ -53,6 +57,8 @@ pub fn template(role: Role, prompts: &Prompts) -> Result<Template> {
         // One `[prompts] reviewer` override covers issue and pull request reviews alike.
         Role::ReviewerPr => ("reviewer-pr.md", REVIEWER_PR, prompts.reviewer.as_deref()),
         Role::Fix => ("fix.md", FIX, prompts.fix.as_deref()),
+        // One `[prompts] fix` override covers both kinds of fix round.
+        Role::FixGate => ("fix-gate.md", FIX_GATE, prompts.fix.as_deref()),
     };
     match custom {
         Some(path) => read_override(path),

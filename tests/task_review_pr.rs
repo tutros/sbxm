@@ -113,7 +113,7 @@ fn a_pr_review_runs_gates_then_the_reviewer_posts_the_review_and_ends_ready() {
     assert!(report.gates_failed.is_none() && report.posted);
     let record = saved(&f);
     assert_eq!((record.stage, record.status), (Stage::Ready, Status::Ok));
-    assert!(!record.fix_round && record.worker.is_none());
+    assert!(record.fix_rounds == 0 && record.round == 0 && record.worker.is_none());
     assert_eq!(
         record.reviewer.as_ref().unwrap().sandbox,
         "sbxm-task-pr-7-review-codex"

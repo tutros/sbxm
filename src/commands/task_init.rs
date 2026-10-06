@@ -9,13 +9,15 @@ use crate::task::config::FILE_NAME;
 /// differs from the worker). Models are ones verified on real `sbx`; the
 /// profile must exist in your profiles dir (spec §2).
 const STARTER: &str = r##"# How `sbxm task` works on this repo: a worker agent takes a GitHub issue, gates check
-# its change, an independent reviewer reads it, and one fix round follows.
+# its change, an independent reviewer reads it, and a fix round follows for as long as the
+# round budget below allows (a gate failure spends a round too).
 # See what would run with: sbxm task gates --issue N --dry-run
 
 [worker]
 harness = "claude"             # claude | codex | antigravity
 # model = "claude-opus-5-5"    # the harness's default when absent
 time_limit = "2h"
+# fix_rounds = 3                # the round budget; 0 stops at the first must-fix finding or gate failure
 
 # The reviewer defaults to a harness different from the worker's.
 [reviewer]

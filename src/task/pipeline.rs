@@ -252,6 +252,8 @@ pub fn prepare_pr(ctx: &Ctx, pr: &PrInfo) -> Result<Prepared> {
             now(),
             Process::current(ctx.probe),
         );
+        // A PR task has no worker, so it never fixes anything (decision 173(d)).
+        task.fix_rounds = 0;
         // An issue task for something this PR closes is related work (spec §5.2).
         task.related = pr
             .closing_issues
@@ -648,6 +650,7 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
             Process::current(ctx.probe),
         );
         task.continues = continued;
+        task.fix_rounds = ctx.config.fix_rounds;
         task.worker = Some(Agent {
             harness: worker.harness.as_str().to_owned(),
             model: worker.model.clone(),
@@ -1298,22 +1301,56 @@ pub fn check_can_review(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
 /// How a whole review went.
 #[derive(Debug, Default)]
 pub struct ReviewReport {
-    /// One entry per reviewer round that finished (one or two).
+    /// One entry per reviewer round that finished.
     pub rounds: Vec<Reviewed>,
-    /// Whether the single fix round ran.
+    /// Whether at least one fix round ran.
     pub fix_ran: bool,
-    /// Set when gates failed before a review or after the fix round: the review stops there.
+    /// Set when the round budget ran out with a gate still failing: the review stops there.
     pub gates_failed: Option<GateResult>,
-    /// Must-fix findings in the last review (reported, not an error).
+    /// Must-fix findings in the last review (reported, not an error; `0` unless the round budget
+    /// ran out too, see `Record::stopped`).
     pub must_fix_left: u32,
     pub warnings: Vec<String>,
 }
 
-/// Spec §5.2, issue tasks: checks first (nothing is created if a secret is missing), gates when
-/// they haven't passed since the last change, a reviewer, and if it found must-fix problems and
-/// no fix round was used yet: one fix round by the worker, its commits collected, gates again and
-/// one more review. The task ends `ready` (findings left are reported, not an error), or stops
-/// where gates failed or a step failed.
+/// Runs the gates, feeding a fix round for the gate's own output on a failure and retrying, until
+/// they pass or the round budget (`Record::fix_rounds`) is used (issue 117, decision 173(d)).
+/// `Ok(None)` once they pass; `Ok(Some(failed))` when the budget ran out with `failed` still
+/// failing (the review stops there, as it always did for a single round).
+fn pass_gates(
+    env: &TaskEnv,
+    prepared: &mut Prepared,
+    report: &mut ReviewReport,
+    phase: &str,
+) -> Result<Option<GateResult>> {
+    loop {
+        let gated = run_gates(env, prepared, phase, Tiers::ALL)?;
+        let Some(failed) = gated.failed else {
+            return Ok(None);
+        };
+        if prepared.record.round >= prepared.record.fix_rounds {
+            return Ok(Some(failed));
+        }
+        let outcome = gated
+            .outcomes
+            .iter()
+            .find(|o| !o.result.passed)
+            .context("a failed gate run has no failing outcome")?;
+        run_fix_round(env, prepared, Some(outcome))?;
+        prepared.record.round += 1;
+        report.fix_ran = true;
+    }
+}
+
+/// Spec §5.2, issue tasks (issue 117, decisions 173(a)(d)(e), 174): checks first (nothing is
+/// created if a secret is missing), gates when they haven't passed since the last change, then a
+/// reviewer. A review with must-fix findings gets a fix round by the worker, as long as the round
+/// budget (`[worker] fix_rounds`) isn't used: its commits are collected, the gates run again (also
+/// feeding a fix round on their own failure), and the review runs again, scoped to only the
+/// commits since the last one. Once a narrow review finds nothing, one more, full review runs
+/// before the task is `ready`, so nothing a narrow scope missed stands in the way. The task never
+/// ends `ready` with must-fix findings while rounds are left; when the budget runs out first, it
+/// ends `ready` with `Record::stopped` set to `rounds-exhausted`.
 pub fn review_issue(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewReport> {
     check_can_review(&prepared.record, env.probe)?;
     let mut report = ReviewReport {
@@ -1328,31 +1365,41 @@ pub fn review_issue(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewRepo
         (Stage::Reviewing, Status::Failed) => true,
         _ => false,
     };
-    if !gates_current {
-        let gated = run_gates(env, prepared, "before-review", Tiers::ALL)?;
-        if let Some(failed) = gated.failed {
-            report.gates_failed = Some(failed);
-            return Ok(report);
-        }
+    if !gates_current && let Some(failed) = pass_gates(env, prepared, &mut report, "before-review")?
+    {
+        report.gates_failed = Some(failed);
+        return Ok(report);
     }
 
-    let mut round = if prepared.record.fix_round { 2 } else { 1 };
+    let mut round = prepared.record.round + 1;
     loop {
         let reviewed = run_reviewer(env, prepared, round)?;
         report.must_fix_left = reviewed.must_fix;
-        let must_fix = reviewed.must_fix;
+        let (must_fix, full) = (reviewed.must_fix, reviewed.full);
         report.rounds.push(reviewed);
-        if must_fix == 0 || prepared.record.fix_round {
+
+        if must_fix == 0 {
+            if full {
+                break;
+            }
+            // A clean narrow review proves nothing about what it didn't see: one more, full
+            // review runs before the task is ready (spec §5.2).
+            round += 1;
+            continue;
+        }
+        if prepared.record.round >= prepared.record.fix_rounds {
+            prepared.record.stopped = Some(record::Stopped::RoundsExhausted);
             break;
         }
-        run_fix_round(env, prepared)?;
+
+        run_fix_round(env, prepared, None)?;
+        prepared.record.round += 1;
         report.fix_ran = true;
-        let gated = run_gates(env, prepared, "after-fix", Tiers::ALL)?;
-        if let Some(failed) = gated.failed {
+        if let Some(failed) = pass_gates(env, prepared, &mut report, "after-fix")? {
             report.gates_failed = Some(failed);
             return Ok(report);
         }
-        round = 2;
+        round += 1;
     }
 
     prepared
@@ -1495,11 +1542,12 @@ pub fn review_pr(
         Ok(None) => {}
     }
 
-    // The reviewer, once.
+    // The reviewer, once: a PR task is always a single full review (it has no worker to fix
+    // anything and so never narrows a later one).
     let ran = run_review_agent(env, prepared, 1, &clone, &sandbox);
     cleanup(prepared);
-    let reviewed = match ran {
-        Ok(reviewed) => reviewed,
+    let must_fix = match ran {
+        Ok(must_fix) => must_fix,
         Err(e) => {
             prepared.record.notes.push(format!("review: {e:#}"));
             prepared.record.finish(Status::Failed)?;
@@ -1512,7 +1560,11 @@ pub fn review_pr(
         .record
         .advance(Stage::Ready, now(), Process::current(env.probe))?;
     record::write(&prepared.meta, &prepared.record)?;
-    report.reviewed = Some(reviewed);
+    report.reviewed = Some(Reviewed {
+        round: 1,
+        must_fix,
+        full: true,
+    });
 
     let review_path = prepared.meta.join("review.md");
     let text = fs::read_to_string(&review_path)?;
@@ -1543,10 +1595,32 @@ pub fn review_pr(
     }
 }
 
-/// The one fix round (spec §5.2): the worker, in its own sandbox, gets the review and a fix
-/// prompt; its new commits are collected like the first time. A failed run, or commits that can't
-/// be collected, stop the review (the task is `fixing/failed`).
-fn run_fix_round(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
+/// The text written as `.sbxm-task/gate-failure.md`: the failing command, its tier and exit
+/// status, and the end of its output, so the fix prompt can point at it (issue 117, decision
+/// 173(d)).
+fn gate_failure_text(outcome: &GateOutcome) -> String {
+    let result = &outcome.result;
+    let exit = result
+        .exit
+        .map_or_else(|| "no exit code".to_owned(), |code| format!("exit {code}"));
+    format!(
+        "Gate failed: `{}` ({}, {exit}{})\n\n{}\n",
+        result.command,
+        result.tier,
+        if outcome.timed_out { ", timed out" } else { "" },
+        outcome.output_tail.trim_end(),
+    )
+}
+
+/// A fix round (spec §5.2, issue 117): the worker, in its own sandbox, gets either the review or
+/// a failed gate's own output and a fix prompt; its new commits are collected like the first
+/// time. A failed run, or commits that can't be collected, stop the review (the task is
+/// `fixing/failed`). Counts against `Record::fix_rounds`; the caller increments `round`.
+fn run_fix_round(
+    env: &TaskEnv,
+    prepared: &mut Prepared,
+    gate_failure: Option<&GateOutcome>,
+) -> Result<()> {
     let worker = &env.config.worker;
     let sandbox = prepared
         .record
@@ -1558,12 +1632,18 @@ fn run_fix_round(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
     prepared
         .record
         .advance(Stage::Fixing, now(), Process::current(env.probe))?;
-    prepared.record.fix_round = true;
     record::write(&prepared.meta, &prepared.record)?;
 
-    let review = fs::read_to_string(prepared.meta.join("review.md"))
-        .context("the review to fix is missing; run the review again")?;
-    let template = prompts::template(Role::Fix, &env.config.prompts)?;
+    let (role, extra_name, extra_text) = match gate_failure {
+        None => (
+            Role::Fix,
+            "review.md",
+            fs::read_to_string(prepared.meta.join("review.md"))
+                .context("the review to fix is missing; run the review again")?,
+        ),
+        Some(outcome) => (Role::FixGate, "gate-failure.md", gate_failure_text(outcome)),
+    };
+    let template = prompts::template(role, &env.config.prompts)?;
     let prompt = prompts::render(
         &template.name,
         &template.text,
@@ -1577,12 +1657,13 @@ fn run_fix_round(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
             ("gates_host", &bullets(&env.config.gates.host)),
             ("review_path", ".sbxm-task/review.md"),
             ("previous_review_path", ".sbxm-task/previous-review.md"),
+            ("gate_output_path", ".sbxm-task/gate-failure.md"),
         ],
     )?;
     repo::write_agent_files(
         &prepared.workspace,
         &[
-            ("review.md", review.as_bytes()),
+            (extra_name, extra_text.as_bytes()),
             ("fix-prompt.md", prompt.as_bytes()),
         ],
         Existing::Refuse,
@@ -1642,6 +1723,9 @@ fn run_fix_round(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
 pub struct Reviewed {
     pub round: u32,
     pub must_fix: u32,
+    /// Whether this round covered every commit since the task's base (`true`), or only those
+    /// since the last review (`false`, spec §5.2, issue 117).
+    pub full: bool,
 }
 
 /// Checks before a review creates anything (spec §5.2): the reviewer's provider secret and the
@@ -1681,11 +1765,17 @@ pub fn check_reviewer_inputs(
 /// nothing of the worker's), writes `review.md`, and sbxm saves it as `review-<round>.md` (and
 /// `review.md`) under the reviewer's name. The sandbox and the clone are removed afterwards,
 /// also when the round fails; a failed round leaves the task `reviewing/failed` and nothing used.
+/// Scoped to every commit since the base when `Record::last_reviewed_commit` is unset (`full`),
+/// else only to the commits since that review (issue 117, spec §5.2); a review that still finds
+/// must-fix findings narrows the next one to this one's commit, and a clean one clears it so the
+/// next review (the confirmatory full one, if this was narrow) starts fresh.
 pub fn run_reviewer(env: &TaskEnv, prepared: &mut Prepared, round: u32) -> Result<Reviewed> {
     let id = prepared.record.id.clone();
     let reviewer = &env.config.reviewer;
     let clone = prepared.workspace.with_file_name(format!("{id}-review"));
     let sandbox = format!("sbxm-task-{id}-review-{}", reviewer.harness.as_str());
+    let full = prepared.record.last_reviewed_commit.is_none();
+    let tip = repo::branch_tip(&prepared.meta.join("repo.git"), &prepared.record.branch).ok();
 
     // Round 2 reads round 1's review; a stale `review.md` must never stand in for this round's.
     let previous = (round > 1)
@@ -1709,10 +1799,15 @@ pub fn run_reviewer(env: &TaskEnv, prepared: &mut Prepared, round: u32) -> Resul
             .push(format!("could not remove {}: {e}", clone.display()));
     }
     match result {
-        Ok(reviewed) => {
+        Ok(must_fix) => {
+            prepared.record.last_reviewed_commit = if must_fix == 0 { None } else { tip };
             prepared.record.finish(Status::Completed)?;
             record::write(&prepared.meta, &prepared.record)?;
-            Ok(reviewed)
+            Ok(Reviewed {
+                round,
+                must_fix,
+                full,
+            })
         }
         Err(e) => {
             prepared
@@ -1726,7 +1821,7 @@ pub fn run_reviewer(env: &TaskEnv, prepared: &mut Prepared, round: u32) -> Resul
     }
 }
 
-/// One review round: its workspace, then the reviewer.
+/// One review round: its workspace, then the reviewer. Returns the must-fix count.
 fn review_round(
     env: &TaskEnv,
     prepared: &mut Prepared,
@@ -1734,7 +1829,7 @@ fn review_round(
     clone: &Path,
     sandbox: &str,
     previous: Option<&str>,
-) -> Result<Reviewed> {
+) -> Result<u32> {
     open_review_workspace(env, prepared, round, clone, sandbox, previous)?;
     run_review_agent(env, prepared, round, clone, sandbox)
 }
@@ -1786,6 +1881,14 @@ fn open_review_workspace(
     } else {
         Role::Reviewer
     };
+    // Narrow to the commits since the last review when one is recorded, else the task's whole
+    // scope (spec §5.2, issue 117): a PR task and the first review of an issue task never set
+    // `last_reviewed_commit`, so both fall back to the full scope unchanged.
+    let scope_base = prepared
+        .record
+        .last_reviewed_commit
+        .clone()
+        .unwrap_or_else(|| prepared.record.scope_base());
     let template = prompts::template(role, &env.config.prompts)?;
     let prompt = prompts::render(
         &template.name,
@@ -1795,7 +1898,7 @@ fn open_review_workspace(
             ("number", &prepared.record.number.to_string()),
             ("branch", &branch),
             ("base", &prepared.record.base),
-            ("scope_base", &prepared.record.scope_base()),
+            ("scope_base", &scope_base),
             ("repo", &prepared.record.repo),
             ("gates_sandbox", &bullets(&env.config.gates.sandbox)),
             ("gates_host", &bullets(&env.config.gates.host)),
@@ -1842,14 +1945,15 @@ fn open_review_workspace(
 }
 
 /// Runs the reviewer in its (already open) sandbox, saves its transcript, and reads and saves what
-/// it wrote: `review-<round>.md` (and `review.md` when its first line has the count).
+/// it wrote: `review-<round>.md` (and `review.md` when its first line has the count). Returns the
+/// must-fix count.
 fn run_review_agent(
     env: &TaskEnv,
     prepared: &mut Prepared,
     round: u32,
     clone: &Path,
     sandbox: &str,
-) -> Result<Reviewed> {
+) -> Result<u32> {
     let reviewer = &env.config.reviewer;
     let started = Instant::now();
     let result = headless::run(
@@ -1911,5 +2015,5 @@ fn run_review_agent(
         );
     };
     fs::write(prepared.meta.join("review.md"), &saved)?;
-    Ok(Reviewed { round, must_fix })
+    Ok(must_fix)
 }

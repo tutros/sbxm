@@ -35,6 +35,7 @@ fn a_minimal_file_gets_the_code_defaults() {
     assert_eq!(config.worker.harness, Harness::Claude);
     assert_eq!(config.worker.model, None);
     assert_eq!(config.worker.time_limit, Duration::from_secs(2 * 3600));
+    assert_eq!(config.fix_rounds, 3);
     assert_eq!(config.reviewer.harness, Harness::Codex);
     assert_eq!(config.reviewer.model, None);
     assert_eq!(config.reviewer.time_limit, Duration::from_secs(45 * 60));
@@ -66,6 +67,7 @@ fn every_key_is_read() {
 harness = "codex"
 model = "gpt-5.6-sol"
 time_limit = "90m"
+fix_rounds = 5
 
 [reviewer]
 harness = "antigravity"
@@ -95,6 +97,7 @@ worker = "prompts/worker.md"
     assert_eq!(config.worker.harness, Harness::Codex);
     assert_eq!(config.worker.model.as_deref(), Some("gpt-5.6-sol"));
     assert_eq!(config.worker.time_limit, Duration::from_secs(5400));
+    assert_eq!(config.fix_rounds, 5);
     assert_eq!(config.reviewer.harness, Harness::Antigravity);
     assert_eq!(
         config.reviewer.model.as_deref(),
@@ -225,6 +228,21 @@ fn unknown_keys_and_tables_are_errors_naming_the_file_and_key() {
         table.contains(FILE_NAME) && table.contains("extras"),
         "{table}"
     );
+}
+
+#[test]
+fn fix_rounds_belongs_to_the_worker_only() {
+    let message = load_err(&format!("{MINIMAL}[reviewer]\nfix_rounds = 1\n"), true);
+    assert!(
+        message.contains(FILE_NAME) && message.contains("fix_rounds"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_zero_fix_rounds_budget_is_allowed() {
+    let dir = repo(&format!("{MINIMAL}[worker]\nfix_rounds = 0\n"), true);
+    assert_eq!(TaskConfig::load(dir.path()).unwrap().fix_rounds, 0);
 }
 
 #[test]

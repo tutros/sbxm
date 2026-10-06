@@ -176,28 +176,48 @@ fn run_issue(
     for round in &report.rounds {
         writeln!(
             out,
-            "{id}: review round {}: {} must-fix finding(s)",
-            round.round, round.must_fix
+            "{id}: review round {}: {} must-fix finding(s){}",
+            round.round,
+            round.must_fix,
+            if round.full { "" } else { " (narrow)" }
         )?;
-        if round.round == 1 && report.fix_ran {
-            writeln!(out, "{id}: fix round ran; the gates after it passed")?;
-        }
+    }
+    if report.fix_ran {
+        writeln!(
+            out,
+            "{id}: the fix round ran {} time(s); the gates after each passed",
+            prepared.record.round
+        )?;
     }
     let review = meta.join("review.md");
-    if report.must_fix_left == 0 {
-        writeln!(out, "{id}: ready; the review is {}", review.display())?;
-        writeln!(out, "  next: sbxm task finish --issue {number}")?;
-    } else {
-        writeln!(
-            out,
-            "{id}: ready, with {} must-fix finding(s) left; read {}",
-            report.must_fix_left,
-            review.display()
-        )?;
-        writeln!(
-            out,
-            "  next: fix them by hand, or file them: sbxm task file-findings --issue {number}"
-        )?;
+    match (report.must_fix_left, prepared.record.stopped) {
+        (0, _) => {
+            writeln!(out, "{id}: ready; the review is {}", review.display())?;
+            writeln!(out, "  next: sbxm task finish --issue {number}")?;
+        }
+        (n, Some(stopped)) => {
+            writeln!(
+                out,
+                "{id}: ready, with {n} must-fix finding(s) left (stopped: {}); read {}",
+                stopped.name(),
+                review.display()
+            )?;
+            writeln!(
+                out,
+                "  next: fix them by hand, or file them: sbxm task file-findings --issue {number}"
+            )?;
+        }
+        (n, None) => {
+            writeln!(
+                out,
+                "{id}: ready, with {n} must-fix finding(s) left; read {}",
+                review.display()
+            )?;
+            writeln!(
+                out,
+                "  next: fix them by hand, or file them: sbxm task file-findings --issue {number}"
+            )?;
+        }
     }
     Ok(())
 }
