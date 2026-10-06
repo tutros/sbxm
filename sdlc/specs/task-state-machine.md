@@ -109,7 +109,8 @@ Events: `worker` (done/timed-out/failed), `gates` (passed/failed), `review(n, re
 
 | From | Event | To | Action |
 |---|---|---|---|
-| prepared | start | working (issue, spec) or gating (pr) | run worker / gates |
+| prepared | start | working (issue, spec) or gating or reviewing (pr) | run worker / gates / reviewer |
+| prepared | preparation failed | prepared `failed` | `resume` retries preparation (decision 175) |
 | working | worker done or timed-out | gating | run gates |
 | working | worker failed | working (retry only by `resume`) | keep clone and commits |
 | gating | gates passed | reviewing, scope `narrow` if `round` > 0 else `full` | run reviewer |
