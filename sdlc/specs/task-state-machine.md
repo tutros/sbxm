@@ -94,12 +94,19 @@ A task's state is `(stage, status)` as today, plus four recorded facts that toda
 
 | Field | Meaning |
 |---|---|
-| `source` | `issue <n>`, `pr <n>` or `spec <path>`; decides the id (`issue-<n>`, `pr-<n>`, `spec-<name>`), the input text copied into the task folder and the sink |
+| `source` | `issue <n>`, `pr <n>` or `spec <path>`; decides the id (`issue-<n>`, `pr-<n>`, `spec-<name>-<hash>`: the sanitized file name plus the first 6 hex digits of the SHA-256 of the canonical path, so two files with the same name never collide), the input text copied into the task folder (`source.md` is the durable input for `resume`) and the sink |
 | `round` | fix rounds used so far |
 | `fix_rounds` | the budget: `[worker] fix_rounds` (default 3), raised by `resume --rounds N` |
-| `stopped` | absent, or why the task ended `ready` with must-fix left: `repeat-finding` or `rounds-exhausted` |
+| `stopped` | absent, or why the task ended `ready` with something unresolved: `repeat-finding`, `repeat-gate-failure` or `rounds-exhausted` |
+| `last_gate_failure` | the command and exit code of the last failed gate, kept to detect a repeat (5.3) |
+| `review` | the accepted result of the last review, recorded once when the review is parsed: SHA-256 of `review.md`, scope, must-fix count, the findings (id and `Where:` file), risk. Everything after that (`finish`, the no-progress check, the draft decision) reads this record, never `review.md` again, so a missing or edited file cannot change a decision |
 
-A review also records its `scope`: `narrow` (commits since the last review) or `full` (all commits).
+A review's `scope` is `narrow` (commits since the last review) or `full` (all commits). The saved `review.md` starts
+with a `Reviewer:` line, so the parser reads the reviewer's own text before the header is added, and the result is
+stored in `review` above (the format round-trip is tested through the exact write and read path).
+
+Source capabilities, not special cases: each source answers `has_worker`, `runs_gates`, `review_destination` and
+`finish_sink` (5.4), and the table's predicates use these, so a new source adds one answer set and no new rows.
 
 ### 5.2 The transition table (the code's single source; this table is generated from it)
 
@@ -109,37 +116,49 @@ Events: `worker` (done/timed-out/failed), `gates` (passed/failed), `review(n, re
 
 | From | Event | To | Action |
 |---|---|---|---|
-| prepared | start | working (issue, spec) or gating or reviewing (pr) | run worker / gates / reviewer |
+| prepared | start, source has a worker | working | run worker |
+| prepared | start, no worker (pr), gates configured | gating | run gates, then the reviewer |
+| prepared | start, no worker (pr), no gates configured | reviewing | run reviewer |
 | prepared | preparation failed | prepared `failed` | `resume` retries preparation (decision 175) |
 | working | worker done or timed-out | gating | run gates |
 | working | worker failed | working (retry only by `resume`) | keep clone and commits |
 | gating | gates passed | reviewing, scope `narrow` if `round` > 0 else `full` | run reviewer |
-| gating | gates failed, `round` < `fix_rounds`, source has a worker | fixing, `round` + 1 | fix prompt gets the gate output |
-| gating | gates failed otherwise | gating `gates-failed` | stays; `task gates` re-runs |
+| gating | gates failed, same command as `last_gate_failure` | ready, `stopped` = `repeat-gate-failure` | recorded as unresolved |
+| gating | gates failed, `round` < `fix_rounds`, source has a worker | fixing, `round` + 1 | `last_gate_failure` set; fix prompt gets the gate output |
+| gating | gates failed, rounds used, source has a worker | ready, `stopped` = `rounds-exhausted` | the gate failure is recorded as unresolved; `finish` opens a draft, `resume --rounds N` can continue |
+| gating | gates failed, source has no worker (pr) | gating `gates-failed` | stays; `task gates` re-runs |
 | reviewing `narrow` | review(0) | reviewing, scope `full` | the final full review |
 | reviewing `full` | review(0) | ready | |
 | reviewing | review(n > 0, repeat) | ready, `stopped` = `repeat-finding` | |
 | reviewing | review(n > 0), `round` >= `fix_rounds` | ready, `stopped` = `rounds-exhausted` | |
 | reviewing | review(n > 0), rounds left | fixing, `round` + 1 | fix prompt gets `review.md` |
 | reviewing | reviewer failed | reviewing `failed` | `task review` or `resume` retries |
-| fixing | fix done or timed-out | gating | run gates |
+| fixing | fix done or timed-out, commits collected and verified | gating | run gates |
+| fixing | fix done or timed-out, collection failed | fixing `failed` | clone intact; `resume` retries the collection |
 | fixing | fix failed | fixing `failed` | `resume` retries |
 | any `running` | interrupted | same stage, `running` flagged interrupted | `resume` continues it |
-| ready with `stopped` | resume(+N) | fixing, `fix_rounds` + N, `round` + 1 | fix prompt gets `review.md` |
+| ready with `stopped` | resume(+N), N >= 1 | fixing, `fix_rounds` + N, `round` + 1, `stopped` cleared | fix prompt gets the recorded review (or the gate output for a gate stop) |
 | ready | finish | finished | sink, see 5.4 |
 | finished | any | refused | new work is a new task (decision 169) |
 | any not live | rm | removed | |
 
 `resume` is refused while the recorded process is alive (pid and start time, as `interrupted` is decided today).
-A PR source has no worker and no fix rounds: its `fix_rounds` is 0, so a failed gate or a finding ends the task.
+`--rounds N` is additive ("N more rounds", N >= 1; 0 is refused) and is valid from any `ready` with `stopped`,
+including `repeat-finding` and `repeat-gate-failure` before the budget is used; a successful resume clears `stopped`
+and a later stop sets it again. A PR source has no worker and no fix rounds: its `fix_rounds` is 0, so a failed gate or
+a finding ends the task.
 
 ### 5.3 The no-progress rule
 
 After a review with n > 0, the task stops (`ready`, `stopped` = `repeat-finding`) if any finding carries
-`Repeat of: <id>` and shares a file path (from `Where:`, line numbers ignored) with that earlier finding. The review
-prompt for rounds 2 and up includes the previous review so the reviewer can say so; the file check is the guard,
-so a wrong "repeat" claim alone cannot stop a task. A gate failure that repeats the same failing command output
-counts the same way (to settle in the spec's tests).
+`Repeat of: <id>` where `<id>` exists in the immediately preceding review's recorded findings and the two share a file
+path (from `Where:`, line numbers ignored). The review prompt for rounds 2 and up includes the previous review so
+the reviewer can say so. The id and file checks are the guard: a claim naming an id that is not in the preceding
+review, or a different file, counts as a new finding and adds a warning, so a wrong claim alone cannot stop a task.
+
+A gate failure is a repeat when the same command fails again after a fix round (`last_gate_failure`: command and
+exit code, not the output text); the task stops with `stopped` = `repeat-gate-failure`, a separate reason because
+no reviewer finding is involved. A different failing command is progress.
 
 ### 5.4 Sources and sinks
 
@@ -151,6 +170,22 @@ counts the same way (to settle in the spec's tests).
 
 The git trust boundary (decision 159) is unchanged: the host only fetches a verified bundle into `repo.git`, and
 never runs git inside the agent's clone, whatever the source.
+
+### 5.4a Actions that leave the machine are idempotent
+
+`resume` must not repeat an action that already happened outside the task folder. Each such action is recorded in
+`task.json` as intent before it runs and as result after, and `resume` reconciles with the outside world before
+retrying:
+
+| Action | Reconcile on resume |
+|---|---|
+| push the branch | compare the remote branch head with the local one; push only if they differ |
+| open the PR (draft or normal) | look up an open PR for the head branch; reuse it instead of opening a second |
+| post the review comment | find the comment carrying a marker line with the review's SHA-256; skip if present |
+| record `finished` | written after the PR exists; a crash before it finds the PR and records it |
+| collect commits after a worker or fix | verify the bundle against the clone; collect only if the commits are not in `repo.git` |
+
+`resume` continues the incomplete action; it does not rerun the whole stage.
 
 ### 5.5 Migration (decision 173(f))
 
