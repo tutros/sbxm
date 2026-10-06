@@ -147,6 +147,7 @@ kept here as the design for issues #117-121 to build toward.
 | prepared running (pr) | advance | reviewing | run the reviewer |
 | working completed/timed-out (issue) | advance | gating | run the gates |
 | gating passed | advance | reviewing | run the reviewer |
+| gating gates-failed (issue) | advance | fixing | run the fix round for the gate's own output |
 | reviewing completed (issue) | advance | fixing | run the fix round |
 | reviewing completed | advance | ready | record the task as ready |
 | fixing completed/timed-out (issue) | advance | gating | run the gates |
