@@ -1,63 +1,56 @@
 ---
 name: sbxm-context
-description: Project context for sbxm - what it is, the two goals, where each kind of fact lives, how to run and test it, how `sbxm task` and `sbxm run` are used day to day, the current build plan, and the working rules. Use at the start of any session on this repo, before planning, implementing or reviewing, or when you need to know where something is documented.
+description: Project context for sbxm - the goals, the current state and build plan, where each kind of fact lives, how `sbxm task` and `sbxm run` are used day to day, and the working rules not written elsewhere. Use at the start of any session on this repo, before planning, implementing or reviewing, or when you need to know where something is documented.
 ---
 
 # sbxm project context
 
-A map, not a copy: `AGENTS.md` (read through `CLAUDE.md`) holds the code layout and constraints, and the files below hold the rest. Read the ones your task touches; don't rely on this file for facts that change.
+This file is the one place for the project's goals and current state; `AGENTS.md` links here for them. The code layout, commands, constraints and the always-on working rules stay in `AGENTS.md` (loaded every session), so they are linked below, not copied. Read the files your task touches; verify anything time-bound with `gh` before trusting it.
 
-## What it is
+## Goals (user-confirmed 2026-10-05)
 
-A Rust CLI over Docker Sandboxes (`sbx`). Goals (user-confirmed 2026-10-05):
 1. **Software factory:** launch sandboxes with a profile (kits) to produce or change code from a PRD/spec, a GitHub issue or a review. The task source is pluggable. Command: `sbxm task`.
 2. **Comparisons:** run 2-4 contestants (harness x model x profile) on the same task and evaluate them. Command: `sbxm run`.
-Plus the lifecycle commands from milestone 1 (`new`, `open`, `list`, `stop`, `rm`, `config`, `doctor`). sbxm enforces nothing itself: `sbx` does egress, secrets and isolation.
+
+Plus the lifecycle commands (`new`, `open`, `list`, `stop`, `rm`, `config`, `doctor`). What sbxm is and the constraints it follows: `AGENTS.md`, "What `sbxm` is" and "Architectural constraints".
+
+## State (as of 2026-10-06)
+
+- Merged: milestones 1, 2a (`sbxm run`) and 2b (`sbxm task`); decision 169 (continue work on an open PR: #102, #103, #122); `run.log` for task commands (#127, decision 170 part 1); the state machine's table and its guards (#115, PR #133).
+- The state machine is designed (decisions 173-177, `sdlc/specs/task-state-machine.md` section 5, `sdlc/spikes/state-table.md`, the table in `src/task/machine.rs`). Remaining, in waves with a checkpoint: #117 (`fix_rounds` loop) with #116 (`task states`), then **pause and check a real multi-round run**, then #119 + #121 (`Repeat of:` marker, no-progress stop, `task start --spec`, `[finish] sink`), then #118 + #120 (`task resume`, `--rounds N`, draft PR), then #123 (PR risk assessment, decision 176). #107/#108 were held until #115 was done, so they are next.
+- Separate tracks: dashboard #88-#92, #114, #111, #106, #126, #130, #135.
+- Log of gaps found while using `task`, run logs and the agenda: `sdlc/evals-workflow-notes.md`.
 
 ## Where facts live
 
 | Need | Read |
 |---|---|
-| Code layout, constraints, commands | `AGENTS.md` |
-| Any design question | `sdlc/decisions.md` (numbered; add new ones, never depart silently; next free number is in the latest handoff or at the file's end) |
+| Code layout, commands, constraints, working rules | `AGENTS.md` |
+| Any design question | `sdlc/decisions.md` (numbered; add new ones, never depart silently; the next free number is after the last entry) |
 | `sbxm task` behavior | `sdlc/spec-m2b.md`, `sdlc/prd-m2b.md` |
-| Task state machine (decisions 173-177) | `sdlc/specs/task-state-machine.md` section 5, `sdlc/spikes/state-table.md`, `src/task/machine.rs` |
-| Gaps found while using `task`, run logs, next-session agenda | `sdlc/evals-workflow-notes.md` |
-| How the commands fit together, practical notes | `docs/workflow.md`, `README.md` (user-facing; keep in step with behavior) |
-| Past code reviews | `sdlc/reviews/` |
-| Spikes | `sdlc/spikes/` |
-| Open work | `gh issue list`, `gh pr list` (the repo is `tutros/sbxm`; review findings are issues) |
+| Task state machine | `sdlc/specs/task-state-machine.md`, `sdlc/spikes/state-table.md`, `src/task/machine.rs` |
+| How the commands fit together | `docs/workflow.md`; `README.md` is user-facing, keep it in step with behavior |
+| Past reviews, spikes | `sdlc/reviews/`, `sdlc/spikes/` |
+| Open work | `gh issue list`, `gh pr list` (repo `tutros/sbxm`; review findings are issues) |
 
-## Build plan in flight (verify with `gh` before trusting)
+Phase skills: `sdlc-planning`, `sdlc-implementation` (TDD, commit per green step), `sdlc-code-review`.
 
-State machine issues #115-#121 are built in waves with a checkpoint: wave 1 #115; wave 2 #117 (fix_rounds loop) with #116 (`task states`); **pause and check a real multi-round run**; wave 3 #119 + #121; wave 4 #118 + #120; then #123 (PR risk assessment, decision 176); #107/#108 wait for #115. Separate tracks: dashboard #88-#92, #114, #111, #106, #126, #130.
+## Practical notes
 
-## Running and testing
-
-```
-cargo build
-cargo test                                   # no Docker needed, but slow and flaky under load on Windows
-cargo fmt --check
-cargo clippy --all-targets -- -D warnings
-```
-- The gates inside a sandbox (Linux) are the reliable ones; a Windows `Permission denied` from `git` or file locks is usually transient, so retry after a few seconds.
-- Base dir must not be on `C:` (decision 56). Never touch the real config in tests.
-- Long jobs: run them in the background so you are told when they end.
-- Bash tool quirk: it collapses `\\`; a hook blocks such commands. Use PowerShell or the Write/Edit tools for backslashes (details in `AGENTS.md`).
+- Build, test and lint commands, and the Bash `\\` quirk: `AGENTS.md`, "Commands" and its notes. The suite is slow and flaky under load on Windows; the gates inside a sandbox (Linux) are the reliable ones. A Windows `Permission denied` from `git` or a file lock is usually transient: retry after a few seconds.
+- Run long jobs in the background so you are told when they end.
 
 ## Using sbxm on itself (the e2e setup)
 
-- Use a release binary built from the commit being worked on, copied to a named file (`sbxm-<sha>.exe`) with its SHA-256 recorded, and run it with its own `SBXM_CONFIG_DIR` and base dir off `C:`.
-- `task run --issue N` = start + gates + review + at most one fix round, then stops at `ready`. `task finish` (the user decides) pushes with the user's login. `--reviewer-harness`/`--reviewer-model` override the reviewer; the config is read once at start, so changing `sbxm-task.toml` mid-run has no effect (use `--restart` to start over).
+- Use a release binary built from the commit being worked on, copied to a named file (`sbxm-<sha>.exe`) with its SHA-256 recorded, run with its own `SBXM_CONFIG_DIR` and a base dir off `C:` (decision 56).
+- `task run --issue N` = start + gates + review + at most one fix round, then stops at `ready`. `task finish` (the user decides) pushes with the user's login. `--reviewer-harness`/`--reviewer-model` override the reviewer; the config is read once at start, so changing `sbxm-task.toml` mid-run has no effect (use `--restart` to start over). An issue with a `PR: #n` line for a merged PR is refused (decision 169).
 - `task rm` shows what it deletes; clean up finished tasks, worktrees and build dirs only with the user's OK.
 - antigravity (`agy`): model ids come from `agy models`; set `model` explicitly (the default is believed to be Gemini 3.1 Pro but is unverified). Needs the `google` secret.
+- Typical timing of one task with a fix round (28 min): about two thirds agent work, one third sandbox setup; the `setup.install` steps (mostly `cargo install just`, ~95 s) are about 2m40s per sandbox, and the reviewer's sandbox is set up again each round.
 
-## Working rules (from the user)
+## Working rules the user gave beyond `AGENTS.md`
 
-- Every change, docs and plans included, goes to a branch and a PR after an initial code review; an independent reviewer runs on the PR; **the user merges; never push to `main`**.
-- Follow the phase skills: `sdlc-planning`, `sdlc-implementation` (TDD, commit per green step), `sdlc-code-review`.
-- Show progress as `[current] of [total]` whenever the total is known.
-- Say when work can run in parallel (max 3 sessions including this one); don't start extra sessions unasked.
+The always-on rules (every change through a branch and a PR, never push to `main`, `[current] of [total]` progress, up to 3 parallel sessions) are in `AGENTS.md`, "Workflow" and "Working rules". Also:
 - Keep messages short; one decision at a time with a recommendation; say unprompted when things get complex or a request looks over- or underspecified.
 - Don't pre-harden: log a gap with its trigger and fix it when hit.
 - Severity: the user may downgrade edge-case must-fix findings to should-fix and log them as issues instead of running more review rounds.
