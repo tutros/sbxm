@@ -443,6 +443,18 @@ pub(crate) fn headless_harness(
     }
 }
 
+/// A `--worker-model`/`--reviewer-model` flag, checked against the same rule the file's own
+/// `model` key uses (decision 48), so a flag can't bypass it. The error is the problem text.
+pub(crate) fn check_model_flag(at: &str, model: &str) -> std::result::Result<(), String> {
+    if model.trim().is_empty() {
+        Err(format!(
+            "{at} is empty; name a model or omit the flag for the harness's default"
+        ))
+    } else {
+        Ok(())
+    }
+}
+
 /// `<n>s`, `<n>m` or `<n>h`, above zero. The error is the problem text.
 pub(crate) fn parse_duration(at: &str, text: &str) -> std::result::Result<Duration, String> {
     let parsed = text

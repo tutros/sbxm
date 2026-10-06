@@ -1,11 +1,14 @@
-//! State-machine spike (decisions 173 and 174, spec section 5): the transition table in
-//! `task::machine` against what the existing guards say, for every (state, event) pair.
-//! Every difference is listed below with its reason, so a new one (or a fixed one) fails the test.
+//! The state machine migration (decisions 173-175, spec section 5, spike
+//! `sdlc/spikes/state-table.md`): the transition table in `task::machine` against what the
+//! commands that now decide through it (`check_can_gate`, `check_can_review`,
+//! `check_can_review_pr`, `check_can_finish`, `plan_removal`, `Record::advance`) say, for every
+//! (state, event) pair. Any difference would mean the table and a command have drifted apart; the
+//! list below is pinned empty, so a new difference fails the test instead of going unnoticed.
 
 use std::collections::BTreeSet;
 
 use sbxm::task::finish::{check_can_finish, plan_removal};
-use sbxm::task::machine::{Event, STAGES, State, dead_ends, states, verdict};
+use sbxm::task::machine::{Event, STAGES, State, dead_ends, matching, states, verdict};
 use sbxm::task::pipeline::{check_can_gate, check_can_review, check_can_review_pr};
 use sbxm::task::record::{self, Kind, NewTask, Process, ProcessProbe, Record};
 
@@ -38,7 +41,9 @@ fn record_in(state: &State) -> Record {
     record
 }
 
-/// What the existing code says: `true` when the operation is allowed.
+/// What the commands say: `true` when the operation is allowed. Each of these now decides through
+/// `machine::verdict` itself, so this doubles as a regression check that they stay in step with
+/// the table as both change.
 fn guard(state: &State, event: Event) -> bool {
     let record = record_in(state);
     let probe = Probe(if state.interrupted { None } else { Some(T0) });
@@ -131,23 +136,31 @@ fn the_table_and_the_guards_agree_except_for_the_listed_differences() {
     );
 }
 
-/// Where the table (spec sections 2 and 5.2) and `Record::advance` differ; every one is about
-/// `advance` not knowing the kind of task (see `sdlc/spikes/state-table.md`, findings F1-F3).
-const EXPECTED: &[&str] = &[
-    // F1: `advance` lets an issue task skip its worker.
-    "Issue Prepared/Running Advance(Gating): table refuses, guard allows",
-    "Issue Prepared/Running Advance(Reviewing): table refuses, guard allows",
-    "Issue Prepared/Running+interrupted Advance(Gating): table refuses, guard allows",
-    "Issue Prepared/Running+interrupted Advance(Reviewing): table refuses, guard allows",
-    // F2: `advance` lets a PR task have a worker, a fix round or a finish.
-    "Pr Prepared/Running Advance(Working): table refuses, guard allows",
-    "Pr Prepared/Running+interrupted Advance(Working): table refuses, guard allows",
-    "Pr Reviewing/Completed Advance(Fixing): table refuses, guard allows",
-    "Pr Ready/Ok Advance(Finished): table refuses, guard allows",
-    // F3: the spec's section 5.2 omits prepared -> reviewing for a PR task, which the code does.
-    "Pr Prepared/Running Advance(Reviewing): table refuses, guard allows",
-    "Pr Prepared/Running+interrupted Advance(Reviewing): table refuses, guard allows",
-];
+/// The table and `Record::advance` (and, below, every other guard) now agree everywhere: `advance`
+/// respects the task kind, so findings F1 and F2 of `sdlc/spikes/state-table.md` are closed. An
+/// empty list here means exactly that; a future difference fails the build instead of silently
+/// reappearing.
+const EXPECTED: &[&str] = &[];
+
+/// The rows are checked top to bottom and the first match wins (spec section 5.2); that is only
+/// meaningful if at most one row ever matches a given (state, event) pair to begin with, so there
+/// is no hidden ambiguity for a row's destination and action to resolve.
+#[test]
+fn every_state_event_pair_matches_at_most_one_row() {
+    for kind in [Kind::Issue, Kind::Pr] {
+        for state in states(kind) {
+            for event in events() {
+                let rows = matching(&state, event);
+                assert!(
+                    rows.len() <= 1,
+                    "{} matches {} rows",
+                    key(&state, event),
+                    rows.len()
+                );
+            }
+        }
+    }
+}
 
 fn names(kind: Kind) -> Vec<String> {
     dead_ends(kind)

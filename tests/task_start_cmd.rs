@@ -341,6 +341,27 @@ fn a_bad_time_limit_flag_is_refused_before_anything_happens() {
 }
 
 #[test]
+fn an_empty_or_blank_worker_model_flag_is_refused_before_anything_happens() {
+    for bad in ["", "  "] {
+        let f = fixture();
+        let mut opts = options(&f);
+        opts.worker_model = Some(bad.into());
+        let backend = playing(&f);
+        let github = github();
+
+        let message = format!(
+            "{:#}",
+            run(&f, &opts, &backend, &github).result.unwrap_err()
+        );
+
+        assert!(message.contains("--worker-model"), "{bad:?}: {message}");
+        assert!(backend.creates().is_empty(), "{bad:?}");
+        assert_eq!(backend.secret_service_calls(), 0, "{bad:?}");
+        assert!(github.calls().is_empty(), "{bad:?}");
+    }
+}
+
+#[test]
 fn a_missing_config_file_says_how_to_make_one() {
     let f = fixture();
     let mut opts = options(&f);

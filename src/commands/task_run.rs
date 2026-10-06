@@ -11,7 +11,7 @@ use super::task_start::{self, Restart};
 use crate::backend::SandboxBackend;
 use crate::github::GitHubBackend;
 use crate::harness::Harness;
-use crate::run::config::{headless_harness, parse_duration};
+use crate::run::config::{check_model_flag, headless_harness, parse_duration};
 use crate::task::config::TaskConfig;
 use crate::task::gates::HostRunner;
 use crate::task::pipeline;
@@ -91,6 +91,12 @@ pub fn run(
     if let Some(harness) = opts.reviewer_harness {
         headless_harness("--reviewer-harness", harness.as_str(), "tasks")
             .map_err(|e| anyhow!(e))?;
+    }
+    if let Some(model) = &opts.reviewer_model {
+        check_model_flag("--reviewer-model", model).map_err(|e| anyhow!(e))?;
+    }
+    if let Some(model) = &opts.worker_model {
+        check_model_flag("--worker-model", model).map_err(|e| anyhow!(e))?;
     }
     if let Some(limit) = &opts.reviewer_time_limit {
         parse_duration("--reviewer-time-limit", limit).map_err(|e| anyhow!(e))?;
