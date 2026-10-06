@@ -1,5 +1,6 @@
 //! Ending a task (spec §4, decisions 153, 158): discarding one (`task rm`, `task start
-//! --restart`) and, further down, handing a ready one to GitHub (`task finish`).
+//! --restart`) and, further down, handing a ready one to GitHub (`task finish`): a new PR, or
+//! more commits on the open PR the task continues (decision 169 (e)).
 //!
 //! Removal only ever touches a task's own folders, whose paths are built from a validated id and
 //! checked again on disk before anything is deleted: never a link, never a folder that doesn't

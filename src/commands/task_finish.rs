@@ -1,5 +1,6 @@
 //! `sbxm task finish --issue N` (spec §4): pushes the task's branch from its `repo.git` and opens
-//! the PR. The work is in `task::finish`.
+//! the PR, or, for a task that continues an open PR, pushes to that PR's branch and comments on it
+//! (decision 169 (e)). The work is in `task::finish`.
 
 use std::io::Write;
 use std::path::Path;
@@ -40,7 +41,8 @@ pub fn run(
         )?;
         writeln!(
             out,
-            "  next: review it again with: sbxm task review --pr {pr}; clean up after the merge with: sbxm task rm --issue {}",
+            "  next: review PR #{pr} again with: sbxm task review --pr {pr} (if it was reviewed before, \
+             first sbxm task rm --pr {pr}); after the merge, clean up with: sbxm task rm --issue {}",
             opts.issue
         )?;
         return Ok(());
