@@ -294,6 +294,46 @@ pub fn push(repo_git: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
+/// The commit `branch` is at on GitHub (`origin`), or `None` when the remote has no such branch.
+pub fn remote_branch_head(repo_git: &Path, branch: &str) -> Result<Option<String>> {
+    check_ref("branch", branch)?;
+    let wanted = format!("refs/heads/{branch}");
+    let out = git::user_run(
+        repo_git,
+        &["--git-dir", text(repo_git)?, "ls-remote", "origin", &wanted],
+    )
+    .with_context(|| {
+        format!(
+            "cannot read {branch} on the remote; check `gh auth status` and your access to the repo"
+        )
+    })?;
+    Ok(out.lines().find_map(|line| {
+        let (id, name) = line.split_once('\t')?;
+        (name == wanted).then(|| id.to_owned())
+    }))
+}
+
+/// The commits `branch` has past `commit` (a full commit id), oldest first, each as
+/// `<short id> <subject>`.
+pub fn commit_lines(repo_git: &Path, commit: &str, branch: &str) -> Result<Vec<String>> {
+    if !is_commit_id(commit) {
+        bail!("{commit:?} isn't a full commit id; the task record may be damaged");
+    }
+    check_ref("branch", branch)?;
+    let out = git::run(
+        repo_git,
+        Some(repo_git),
+        None,
+        &[
+            "log",
+            "--reverse",
+            "--format=%h %s",
+            &format!("{commit}..refs/heads/{branch}"),
+        ],
+    )?;
+    Ok(out.lines().map(str::to_owned).collect())
+}
+
 /// Where the sandbox writes the bundle (spec §6), relative to the workspace.
 const BUNDLE_DIR: &str = ".sbxm-task";
 const BUNDLE_FILE: &str = ".sbxm-task/branch.bundle";
@@ -567,6 +607,19 @@ pub fn fetch_bundle(repo_git: &Path, workspace: &Path, branch: &str, cap: u64) -
 /// counts as both its old and its new path), as git prints them.
 pub fn changed_paths(repo_git: &Path, base: &str, branch: &str) -> Result<Vec<String>> {
     check_ref("base", base)?;
+    diff_names(repo_git, &format!("refs/heads/{base}"), branch)
+}
+
+/// [`changed_paths`] from `commit` (a full commit id, e.g. where a continued PR's branch was when
+/// the task started).
+pub fn changed_paths_since(repo_git: &Path, commit: &str, branch: &str) -> Result<Vec<String>> {
+    if !is_commit_id(commit) {
+        bail!("{commit:?} isn't a full commit id; the task record may be damaged");
+    }
+    diff_names(repo_git, commit, branch)
+}
+
+fn diff_names(repo_git: &Path, from: &str, branch: &str) -> Result<Vec<String>> {
     check_ref("branch", branch)?;
     let out = git::run(
         repo_git,
@@ -577,7 +630,7 @@ pub fn changed_paths(repo_git: &Path, base: &str, branch: &str) -> Result<Vec<St
             "--name-only",
             "-z",
             "--no-renames",
-            &format!("refs/heads/{base}...refs/heads/{branch}"),
+            &format!("{from}...refs/heads/{branch}"),
         ],
     )?;
     Ok(out

@@ -31,6 +31,20 @@ pub fn run(
     for cut in &done.cuts {
         writeln!(out, "  note: {cut}")?;
     }
+    if let Some(pr) = done.continued {
+        let branch = &done.branch;
+        writeln!(
+            out,
+            "{id}: pushed {branch} to PR #{pr} and commented on it, {}",
+            done.url
+        )?;
+        writeln!(
+            out,
+            "  next: review it again with: sbxm task review --pr {pr}; clean up after the merge with: sbxm task rm --issue {}",
+            opts.issue
+        )?;
+        return Ok(());
+    }
     writeln!(out, "{id}: pushed {id} and opened {}", done.url)?;
     writeln!(
         out,
