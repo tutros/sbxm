@@ -342,3 +342,66 @@ fn a_pr_branch_moved_between_the_check_and_the_push_is_refused_and_left_alone() 
     assert!(github.calls().is_empty(), "{:?}", github.calls());
     assert_eq!(reread(&f).stage, Stage::Ready);
 }
+
+/// Gives the tip commit of `feature-x` in the task's repo the message `message`.
+fn reword_tip(prepared: &Prepared, message: &str) -> String {
+    let repo_git = prepared.meta.join("repo.git");
+    let tip = git(
+        &repo_git,
+        &[
+            "commit-tree",
+            "refs/heads/feature-x^{tree}",
+            "-p",
+            "refs/heads/feature-x~1",
+            "-m",
+            message,
+        ],
+    );
+    git(&repo_git, &["update-ref", "refs/heads/feature-x", &tip]);
+    tip
+}
+
+fn posted_comment(github: &FakeGitHub) -> String {
+    let calls = github.calls();
+    let [GhCall::PrComment(_, 7, body)] = calls.as_slice() else {
+        panic!("{calls:?}")
+    };
+    body.clone()
+}
+
+#[test]
+fn a_commit_subject_longer_than_github_accepts_is_cut_and_the_task_finishes() {
+    let f = fixture();
+    let (prepared, _) = ready(&f);
+    let tip = reword_tip(&prepared, &"y".repeat(70_000));
+    let github = FakeGitHub::default();
+
+    run(&f, &github).unwrap();
+
+    let body = posted_comment(&github);
+    assert!(body.chars().count() < 65_536, "{}", body.chars().count());
+    assert!(body.contains(&tip[..7]), "{}", &body[..300]);
+    assert!(body.contains("Fixes #41"), "{}", &body[body.len() - 300..]);
+    assert!(body.contains("cut"), "{}", &body[body.len() - 300..]);
+    assert_eq!(origin_head(&f), tip);
+    assert_eq!(reread(&f).stage, Stage::Finished);
+}
+
+#[test]
+fn a_comment_with_too_many_commits_lists_what_fits_and_says_how_many_more() {
+    let commits: Vec<String> = (0..2_000)
+        .map(|i| format!("{i:07x} {}", "z".repeat(200)))
+        .collect();
+
+    let body = sbxm::task::finish::pr_comment(41, "feature-x", &commits);
+
+    assert!(body.chars().count() < 65_536, "{}", body.chars().count());
+    assert!(body.contains("`0000000`"), "{}", &body[..300]);
+    assert!(
+        body.contains("more commit"),
+        "{}",
+        &body[body.len() - 300..]
+    );
+    assert!(body.contains("2000 commit(s)"), "{}", &body[..300]);
+    assert!(body.contains("Fixes #41"), "{}", &body[body.len() - 300..]);
+}

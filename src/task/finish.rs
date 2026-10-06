@@ -515,15 +515,44 @@ pub fn finish(
 /// isn't posted yet.
 const PUSHED_UNCOMMENTED_NOTE: &str = "the commits are pushed to the PR's branch but the PR isn't commented on; run `sbxm task finish` again";
 
-/// The comment on a continued PR: the commits the task added, and `Fixes #n` for its issue.
+/// The longest commit subject the comment on a continued PR shows in full.
+const SUBJECT_CAP: usize = 500;
+
+/// The comment on a continued PR: the commits the task added, and `Fixes #n` for its issue. It
+/// stays below what GitHub accepts: a subject over [`SUBJECT_CAP`] characters is cut, commits
+/// that don't fit are counted instead of listed, and a note says so.
 pub fn pr_comment(number: u32, branch: &str, commits: &[String]) -> String {
     let mut body = format!(
         "`sbxm task finish` pushed {} commit(s) to {branch} for issue #{number}:\n\n",
         commits.len()
     );
+    let (mut cut, mut listed) = (0, 0);
     for line in commits {
         let (id, subject) = line.split_once(' ').unwrap_or((line, ""));
-        body.push_str(&format!("- `{id}` {subject}\n"));
+        let subject = match subject.char_indices().nth(SUBJECT_CAP) {
+            Some((at, _)) => {
+                cut += 1;
+                format!("{}…", &subject[..at])
+            }
+            None => subject.to_owned(),
+        };
+        let item = format!("- `{id}` {subject}\n");
+        if body.len() + item.len() > crate::task::review::COMMENT_CAP {
+            break;
+        }
+        body.push_str(&item);
+        listed += 1;
+    }
+    if listed < commits.len() {
+        body.push_str(&format!(
+            "- … and {} more commit(s), not listed here; see the PR's commits\n",
+            commits.len() - listed
+        ));
+    }
+    if cut > 0 {
+        body.push_str(&format!(
+            "\n(sbxm cut {cut} commit subject(s) at {SUBJECT_CAP} characters.)\n"
+        ));
     }
     body.push_str(&format!("\nFixes #{number}\n"));
     body
