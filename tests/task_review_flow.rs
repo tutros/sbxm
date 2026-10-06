@@ -1,5 +1,7 @@
-//! M2b slice 8, step 4: the whole review of an issue task (spec §5.2): gates first, a reviewer,
-//! at most one fix round by the worker, gates again, one more review, then `ready`.
+//! M2b slice 8, step 4, and issue 117 (fix_rounds and the multi-round loop): the whole review of
+//! an issue task (spec §5.2): gates first, a reviewer, then as many fix rounds as the budget
+//! allows, gates again after each, and a review scoped to the commits since the last one, until
+//! one finds nothing after a full scope (or the budget runs out), then `ready`.
 
 mod common;
 
@@ -16,11 +18,17 @@ use sbxm::task::pipeline::{self, Prepared, ReviewReport, Tiers};
 use sbxm::task::record::{self, Stage, Status};
 use sbxm::task::repo;
 
+/// `fix_rounds` set to 1: the tests that only care about a single fix round stay as simple as
+/// before this issue's change.
 fn config() -> Fixture {
-    fixture_with(
-        "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = [\"cargo test\"]\n\n\
-         [reviewer]\nharness = \"codex\"\n",
-    )
+    config_with_fix_rounds(1)
+}
+
+fn config_with_fix_rounds(fix_rounds: u32) -> Fixture {
+    fixture_with(&format!(
+        "[sandbox]\nprofile = \"default\"\n\n[worker]\nfix_rounds = {fix_rounds}\n\n\
+         [gates]\nsandbox = [\"cargo test\"]\n\n[reviewer]\nharness = \"codex\"\n",
+    ))
 }
 
 const CLEAN: &str = "Must-fix findings: 0\n\nNothing found.\n";
@@ -97,7 +105,8 @@ fn a_clean_review_runs_the_gates_first_and_ends_ready_without_a_fix_round() {
     assert!(!report.fix_ran && report.gates_failed.is_none());
     let record = saved(&f);
     assert_eq!((record.stage, record.status), (Stage::Ready, Status::Ok));
-    assert!(!record.fix_round);
+    assert_eq!(record.round, 0);
+    assert!(record.stopped.is_none());
     // The gates ran (before the review), the reviewer ran once, no fix prompt was used.
     assert_eq!(count(&backend, "cargo test"), 1);
     assert_eq!(count(&backend, "codex"), 1);
@@ -133,9 +142,11 @@ fn gates_that_already_passed_are_not_run_again_before_the_review() {
 }
 
 #[test]
-fn must_fix_findings_get_one_fix_round_then_gates_and_a_second_review() {
+fn must_fix_findings_get_a_fix_round_then_a_narrow_review_then_one_full_review_before_ready() {
     let f = config();
-    let backend = backend(&f, &[ONE, CLEAN]);
+    // Round 1 (full) finds one; the fix round runs; round 2 (narrow, scoped to the commits since
+    // round 1) finds nothing, so round 3 (full again) runs to confirm before the task is ready.
+    let backend = backend(&f, &[ONE, CLEAN, CLEAN]);
     let mut prepared = worked_task(&f, &backend);
 
     let report = review(&f, &backend, &mut prepared).unwrap();
@@ -144,18 +155,20 @@ fn must_fix_findings_get_one_fix_round_then_gates_and_a_second_review() {
         report
             .rounds
             .iter()
-            .map(|r| (r.round, r.must_fix))
+            .map(|r| (r.round, r.must_fix, r.full))
             .collect::<Vec<_>>(),
-        [(1, 1), (2, 0)]
+        [(1, 1, true), (2, 0, false), (3, 0, true)]
     );
     assert!(report.fix_ran);
     assert_eq!(report.must_fix_left, 0);
     let record = saved(&f);
     assert_eq!((record.stage, record.status), (Stage::Ready, Status::Ok));
-    assert!(record.fix_round);
-    // Gates before round 1 and again after the fix; two reviews; one fix run in the worker's sandbox.
+    assert_eq!(record.round, 1);
+    assert!(record.stopped.is_none());
+    // Gates before round 1 and again after the fix (not between rounds 2 and 3); three reviews;
+    // one fix run in the worker's sandbox.
     assert_eq!(count(&backend, "cargo test"), 2);
-    assert_eq!(count(&backend, "codex"), 2);
+    assert_eq!(count(&backend, "codex"), 3);
     let fix_execs: Vec<_> = backend
         .execs()
         .into_iter()
@@ -193,7 +206,7 @@ fn must_fix_findings_get_one_fix_round_then_gates_and_a_second_review() {
         2
     );
     assert!(fs::read_to_string(meta(&f).join("transcripts").join("fix.jsonl")).is_ok());
-    // Both reviews are kept; review.md is the latest.
+    // Every round is kept; review.md is the latest.
     assert!(
         fs::read_to_string(meta(&f).join("review-1.md"))
             .unwrap()
@@ -204,9 +217,14 @@ fn must_fix_findings_get_one_fix_round_then_gates_and_a_second_review() {
             .unwrap()
             .contains("Nothing found.")
     );
+    assert!(
+        fs::read_to_string(meta(&f).join("review-3.md"))
+            .unwrap()
+            .contains("Nothing found.")
+    );
     assert_eq!(
         fs::read_to_string(meta(&f).join("review.md")).unwrap(),
-        fs::read_to_string(meta(&f).join("review-2.md")).unwrap()
+        fs::read_to_string(meta(&f).join("review-3.md")).unwrap()
     );
     // The reviewer's sandbox is gone after each round.
     let removed = backend.removes();
@@ -215,8 +233,60 @@ fn must_fix_findings_get_one_fix_round_then_gates_and_a_second_review() {
             .iter()
             .filter(|n| n.as_str() == "sbxm-task-issue-41-review-codex")
             .count(),
-        2
+        3
     );
+}
+
+#[test]
+fn a_narrow_review_is_scoped_to_the_commits_since_the_last_one() {
+    let f = config();
+    let backend = backend(&f, &[ONE, CLEAN, CLEAN]);
+    let mut prepared = worked_task(&f, &backend);
+
+    review(&f, &backend, &mut prepared).unwrap();
+
+    let full = fs::read_to_string(meta(&f).join("reviewer-prompt-1.md")).unwrap();
+    assert!(
+        full.contains("git log origin/main..HEAD") && full.contains("git diff origin/main...HEAD"),
+        "{full}"
+    );
+    let narrow = fs::read_to_string(meta(&f).join("reviewer-prompt-2.md")).unwrap();
+    assert!(
+        !narrow.contains("origin/main"),
+        "round 2 must not be scoped from the base branch: {narrow}"
+    );
+    let confirmatory = fs::read_to_string(meta(&f).join("reviewer-prompt-3.md")).unwrap();
+    assert!(
+        confirmatory.contains("git log origin/main..HEAD"),
+        "the confirmatory round is full again: {confirmatory}"
+    );
+}
+
+#[test]
+fn as_many_fix_rounds_as_the_budget_allows_run_before_the_task_stops() {
+    let f = config_with_fix_rounds(3);
+    // Every round after the first is narrow and still finds the same thing, so no confirmatory
+    // full round is reached before the budget runs out.
+    let backend = backend(&f, &[ONE, ONE, ONE, ONE]);
+    let mut prepared = worked_task(&f, &backend);
+
+    let report = review(&f, &backend, &mut prepared).unwrap();
+
+    assert_eq!(
+        report.rounds.iter().map(|r| r.must_fix).collect::<Vec<_>>(),
+        [1, 1, 1, 1]
+    );
+    assert_eq!(report.must_fix_left, 1);
+    let record = saved(&f);
+    assert_eq!((record.stage, record.status), (Stage::Ready, Status::Ok));
+    assert_eq!(record.round, 3, "every round in the budget ran");
+    assert_eq!(record.stopped, Some(record::Stopped::RoundsExhausted));
+    let fix_execs: Vec<_> = backend
+        .execs()
+        .into_iter()
+        .filter(|(_, spec)| spec.argv.iter().any(|a| a.contains("fix-prompt.md")))
+        .collect();
+    assert_eq!(fix_execs.len(), 3);
 }
 
 #[test]
@@ -237,11 +307,14 @@ fn the_fix_round_happens_at_most_once_and_findings_left_are_reported_not_an_erro
         (Stage::Ready, Status::Ok),
         "the round is used"
     );
+    assert_eq!(record.round, 1);
+    assert_eq!(record.stopped, Some(record::Stopped::RoundsExhausted));
 }
 
 #[test]
 fn failing_gates_before_the_review_stop_it_before_any_reviewer_exists() {
-    let f = config();
+    // No fix rounds to spend: the first gate failure stops the task at once.
+    let f = config_with_fix_rounds(0);
     let backend = backend(&f, &[CLEAN]);
     let mut prepared = worked_task(&f, &backend);
     let failing = FakeBackend::with_secrets(&["anthropic", "openai"]).with_exec_output_matching(
@@ -263,6 +336,68 @@ fn failing_gates_before_the_review_stop_it_before_any_reviewer_exists() {
     assert_eq!(
         (record.stage, record.status),
         (Stage::Gating, Status::GatesFailed)
+    );
+}
+
+#[test]
+fn a_gate_failure_before_any_review_feeds_a_fix_round_with_the_gates_own_output() {
+    let f = config();
+    // Execs that no scripted rule matches are answered from this queue, in order: the worker's
+    // bundle and status, the gates before the review (fail), the fix round's bundle and status,
+    // then the gates after the fix round (pass).
+    let pass = || ok("");
+    let red = ExecOutput {
+        stdout: String::new(),
+        stderr: "undefined reference to `oops`\n".into(),
+        exit_code: Some(101),
+    };
+    let backend =
+        backend(&f, &[CLEAN]).with_exec_outputs(vec![pass(), pass(), red, pass(), pass(), pass()]);
+    let mut prepared = worked_task(&f, &backend);
+
+    let report = review(&f, &backend, &mut prepared).unwrap();
+
+    assert!(report.fix_ran);
+    assert!(report.gates_failed.is_none(), "the retry passed");
+    assert_eq!(
+        report.rounds.iter().map(|r| r.must_fix).collect::<Vec<_>>(),
+        [0]
+    );
+    let record = saved(&f);
+    assert_eq!((record.stage, record.status), (Stage::Ready, Status::Ok));
+    assert_eq!(record.round, 1, "the gate failure spent the only round");
+    assert!(record.stopped.is_none());
+
+    // The fix round used the gate's own prompt (no review.md existed yet) and named its output.
+    let fix_execs: Vec<_> = backend
+        .execs()
+        .into_iter()
+        .filter(|(_, spec)| spec.argv.iter().any(|a| a.contains("fix-prompt.md")))
+        .collect();
+    assert_eq!(fix_execs.len(), 1);
+    let fix_prompt = fs::read_to_string(meta(&f).join("fix-prompt.md")).unwrap();
+    assert!(
+        fix_prompt.contains("gate-failure.md") && fix_prompt.contains("#41"),
+        "{fix_prompt}"
+    );
+    assert!(
+        !fix_prompt.to_lowercase().contains("reviewer checked"),
+        "a gate-triggered fix round isn't told a reviewer ran: {fix_prompt}"
+    );
+    let workspace = f
+        .env
+        .base_dir()
+        .join("tasks")
+        .join("issue-41")
+        .join(".sbxm-task");
+    let gate_output = fs::read_to_string(workspace.join("gate-failure.md")).unwrap();
+    assert!(
+        gate_output.contains("cargo test") && gate_output.contains("oops"),
+        "{gate_output}"
+    );
+    assert!(
+        !workspace.join("review.md").exists(),
+        "no review exists yet"
     );
 }
 
@@ -299,7 +434,7 @@ fn failing_gates_after_the_fix_round_stop_before_the_second_review() {
         (record.stage, record.status),
         (Stage::Gating, Status::GatesFailed)
     );
-    assert!(record.fix_round);
+    assert_eq!(record.round, 1);
 }
 
 #[test]

@@ -11,6 +11,7 @@ use serde::Deserialize;
 use crate::config::resolve_inside;
 use crate::harness::Harness;
 use crate::run::config::{headless_harness, parse_duration};
+use crate::task::record::DEFAULT_FIX_ROUNDS;
 
 pub const FILE_NAME: &str = "sbxm-task.toml";
 
@@ -48,6 +49,9 @@ fn same_harness_warning(harness: Harness) -> String {
 pub struct TaskConfig {
     pub worker: Role,
     pub reviewer: Role,
+    /// `[worker] fix_rounds` (decision 173(a)): the worker's round budget for `task review`; 0
+    /// means the first review that finds anything stops the task at once.
+    pub fix_rounds: u32,
     /// Whether the reviewer's harness was chosen (in the file or by a flag) rather than defaulted.
     reviewer_chosen: bool,
     pub sandbox: Sandbox,
@@ -94,7 +98,7 @@ pub struct Prompts {
 #[serde(deny_unknown_fields)]
 struct RawConfig {
     #[serde(default)]
-    worker: RawRole,
+    worker: RawWorkerRole,
     #[serde(default)]
     reviewer: RawRole,
     sandbox: Option<RawSandbox>,
@@ -110,6 +114,17 @@ struct RawRole {
     harness: Option<String>,
     model: Option<String>,
     time_limit: Option<String>,
+}
+
+/// `[worker]`: like `RawRole`, plus `fix_rounds`, which only the worker has (a reviewer never
+/// fixes its own findings, decision 148).
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawWorkerRole {
+    harness: Option<String>,
+    model: Option<String>,
+    time_limit: Option<String>,
+    fix_rounds: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -217,11 +232,19 @@ impl Validator<'_> {
             }
             None => default_reviewer(worker_harness),
         };
-        let worker = self.role("worker", worker_harness, raw.worker, DEFAULT_WORKER_LIMIT)?;
+        let fix_rounds = raw.worker.fix_rounds.unwrap_or(DEFAULT_FIX_ROUNDS);
+        let worker = self.role(
+            "worker",
+            worker_harness,
+            raw.worker.model,
+            raw.worker.time_limit,
+            DEFAULT_WORKER_LIMIT,
+        )?;
         let reviewer = self.role(
             "reviewer",
             reviewer_harness,
-            raw.reviewer,
+            raw.reviewer.model,
+            raw.reviewer.time_limit,
             DEFAULT_REVIEWER_LIMIT,
         )?;
 
@@ -235,6 +258,7 @@ impl Validator<'_> {
         Ok(TaskConfig {
             worker,
             reviewer,
+            fix_rounds,
             reviewer_chosen: chosen_reviewer.is_some(),
             sandbox,
             gates,
@@ -253,10 +277,11 @@ impl Validator<'_> {
         &self,
         table: &str,
         harness: Harness,
-        raw: RawRole,
+        model: Option<String>,
+        time_limit: Option<String>,
         default_limit: Duration,
     ) -> Result<Role> {
-        if raw.model.as_deref().is_some_and(|m| m.trim().is_empty()) {
+        if model.as_deref().is_some_and(|m| m.trim().is_empty()) {
             return Err(self.err(format!(
                 "{table}.model is empty; name a model or remove the key for {}'s default",
                 harness.as_str()
@@ -264,12 +289,8 @@ impl Validator<'_> {
         }
         Ok(Role {
             harness,
-            model: raw.model,
-            time_limit: self.duration(
-                &format!("{table}.time_limit"),
-                raw.time_limit,
-                default_limit,
-            )?,
+            model,
+            time_limit: self.duration(&format!("{table}.time_limit"), time_limit, default_limit)?,
         })
     }
 

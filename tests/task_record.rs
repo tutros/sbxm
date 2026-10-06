@@ -62,7 +62,9 @@ fn a_new_record_is_prepared_and_running() {
     assert_eq!(record.stages[0].stage, Stage::Prepared);
     assert_eq!(record.stages[0].at, "2026-09-21T14:13:20Z");
     assert_eq!(record.process.as_ref().unwrap().pid, 1234);
-    assert!(!record.fix_round);
+    assert_eq!(record.round, 0);
+    assert_eq!(record.fix_rounds, record::DEFAULT_FIX_ROUNDS);
+    assert!(record.stopped.is_none());
     assert!(record.gates.is_empty() && record.related.is_empty());
 }
 
@@ -388,7 +390,7 @@ fn a_review_can_begin_after_the_gates_and_again_after_a_failed_review() {
 }
 
 #[test]
-fn a_review_cannot_begin_while_running_or_once_it_is_complete() {
+fn a_review_cannot_begin_while_running_but_can_begin_again_once_complete() {
     let mut record = new_record();
     record
         .advance(Stage::Working, T0, Process::new(1, T0))
@@ -408,7 +410,13 @@ fn a_review_cannot_begin_while_running_or_once_it_is_complete() {
     assert!(message.contains("running"), "{message}");
 
     record.finish(Status::Completed).unwrap();
-    assert!(record.begin_review(T0, Process::new(1, T0)).is_err());
+    // The confirmatory full review that follows a clean narrow one (issue 117, spec §5.2) begins
+    // again in the same stage, without going through gates or a fix round.
+    record.begin_review(T0 + 1, Process::new(1, T0)).unwrap();
+    assert_eq!(
+        (record.stage, record.status),
+        (Stage::Reviewing, Status::Running)
+    );
 }
 
 #[test]
@@ -439,6 +447,41 @@ fn write_then_read_round_trips_and_leaves_no_temp_file() {
         .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
         .collect();
     assert_eq!(names, ["task.json"]);
+}
+
+#[test]
+fn an_older_record_without_round_fix_rounds_or_stopped_reads_with_their_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("task.json");
+    let mut value = serde_json::to_value(new_record()).unwrap();
+    let object = value.as_object_mut().unwrap();
+    object.remove("round");
+    object.remove("fix_rounds");
+    object.remove("stopped");
+    object.remove("last_reviewed_commit");
+    fs::write(&path, value.to_string()).unwrap();
+
+    let record = record::read(&path).unwrap();
+
+    assert_eq!(record.round, 0);
+    assert_eq!(record.fix_rounds, record::DEFAULT_FIX_ROUNDS);
+    assert!(record.stopped.is_none());
+    assert!(record.last_reviewed_commit.is_none());
+}
+
+#[test]
+fn round_fix_rounds_and_stopped_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let task = dir.path().join("tasks").join("issue-41");
+    let mut record = new_record();
+    record.round = 2;
+    record.fix_rounds = 5;
+    record.stopped = Some(record::Stopped::RoundsExhausted);
+    record.last_reviewed_commit = Some("deadbeef".into());
+
+    record::write(&task, &record).unwrap();
+
+    assert_eq!(record::read(&task.join("task.json")).unwrap(), record);
 }
 
 #[test]

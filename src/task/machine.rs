@@ -141,6 +141,18 @@ pub const TABLE: &[Row] = &[
         to: Some(Stage::Reviewing),
         action: "run the reviewer",
     },
+    // A gate failure feeds a fix round when the round budget allows it (issue 117, decision
+    // 173(d)); `Record::advance` enforces the budget itself through `done_for`, so this row only
+    // says the move exists for an issue task.
+    Row {
+        stages: &[Stage::Gating],
+        statuses: &[Status::GatesFailed],
+        live: Live::Any,
+        kinds: ISSUE,
+        event: Event::Advance(Stage::Fixing),
+        to: Some(Stage::Fixing),
+        action: "run the fix round for the gate's own output",
+    },
     Row {
         stages: &[Stage::Reviewing],
         statuses: &[Status::Completed],
