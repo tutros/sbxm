@@ -1,6 +1,9 @@
-//! State-machine spike (decisions 173 and 174, spec section 5): the transition table in
-//! `task::machine` against what the existing guards say, for every (state, event) pair.
-//! Every difference is listed below with its reason, so a new one (or a fixed one) fails the test.
+//! The state machine migration (decisions 173-175, spec section 5, spike
+//! `sdlc/spikes/state-table.md`): the transition table in `task::machine` against what the
+//! commands that now decide through it (`check_can_gate`, `check_can_review`,
+//! `check_can_review_pr`, `check_can_finish`, `plan_removal`, `Record::advance`) say, for every
+//! (state, event) pair. Any difference would mean the table and a command have drifted apart; the
+//! list below is pinned empty, so a new difference fails the test instead of going unnoticed.
 
 use std::collections::BTreeSet;
 
@@ -38,7 +41,9 @@ fn record_in(state: &State) -> Record {
     record
 }
 
-/// What the existing code says: `true` when the operation is allowed.
+/// What the commands say: `true` when the operation is allowed. Each of these now decides through
+/// `machine::verdict` itself, so this doubles as a regression check that they stay in step with
+/// the table as both change.
 fn guard(state: &State, event: Event) -> bool {
     let record = record_in(state);
     let probe = Probe(if state.interrupted { None } else { Some(T0) });

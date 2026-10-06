@@ -1,7 +1,9 @@
-//! The task state machine as data (spike for decisions 173 and 174; spec
-//! `sdlc/specs/task-state-machine.md` sections 2 and 5.2). Nothing here is used by the commands
-//! yet: `tests/task_machine.rs` compares this table with the existing guards, and
-//! `sdlc/spikes/state-table.md` records what differs.
+//! The task state machine as data (decisions 173, 174, 175; spec `sdlc/specs/task-state-machine.md`
+//! sections 2 and 5.2). `check_can_gate`, `check_can_review`, `check_can_review_pr`,
+//! `check_can_finish` and `finish::plan_removal` all decide through `verdict`/`row_for`, and
+//! `Record::advance` enforces the same moves directly (spike `sdlc/spikes/state-table.md`,
+//! migration step 2). `tests/task_machine.rs` walks every (state, event) pair and checks that the
+//! table and those commands still agree.
 
 use super::record::{Kind, Stage, Status};
 
