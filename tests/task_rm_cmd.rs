@@ -196,3 +196,18 @@ fn an_unknown_task_says_so_and_a_failed_removal_fails_the_command() {
     );
     assert!(fs::metadata(meta(&f).join("task.json")).is_ok());
 }
+
+#[test]
+fn the_run_log_goes_with_the_task() {
+    let f = fixture();
+    let b = worked(&f);
+    let log = meta(&f).join("run.log");
+    std::fs::write(&log, "# header\n").unwrap();
+    assert!(log.exists());
+
+    let (result, _) = rm(&f, 41, true, &b, &FakeConfirm::new(true, true));
+
+    result.unwrap();
+    assert!(!log.exists());
+    assert!(!meta(&f).exists());
+}

@@ -214,3 +214,39 @@ fn the_tee_passes_every_byte_on_unchanged_and_logs_whole_lines() {
         "{text}"
     );
 }
+
+#[test]
+fn the_header_names_the_command_the_exe_its_hash_the_commit_and_the_pid() {
+    let text = sbxm::task::runlog::header(
+        T0,
+        &["sbxm".to_owned(), "task".to_owned(), "start".to_owned()],
+        Path::new("/bin/sbxm"),
+        "abc123",
+        Some("415da41"),
+        4242,
+    );
+    assert_eq!(
+        text,
+        "# 2026-09-21T14:13:20Z sbxm task start | exe /bin/sbxm | sha256 abc123 | commit 415da41 | pid 4242"
+    );
+    let unknown = sbxm::task::runlog::header(T0, &[], Path::new("x"), "h", None, 1);
+    assert!(unknown.contains("| commit unknown |"), "{unknown}");
+}
+
+#[test]
+fn a_secret_on_the_command_line_is_masked_in_the_header() {
+    let text = sbxm::task::runlog::header(
+        T0,
+        &[
+            "sbxm".to_owned(),
+            "--token".to_owned(),
+            "ghp_0123456789abcdefABCDEF01".to_owned(),
+        ],
+        Path::new("x"),
+        "h",
+        None,
+        1,
+    );
+    assert!(!text.contains("ghp_0123456789abcdefABCDEF01"), "{text}");
+    assert!(text.contains("--token [redacted]"), "{text}");
+}

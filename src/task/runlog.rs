@@ -38,7 +38,7 @@ pub fn header(
     commit: Option<&str>,
     pid: u32,
 ) -> String {
-    format!(
+    redact(&format!(
         "# {} {} | exe {} | sha256 {} | commit {} | pid {}",
         format_timestamp(secs),
         args.join(" "),
@@ -46,7 +46,7 @@ pub fn header(
         sha256,
         commit.unwrap_or("unknown"),
         pid
-    )
+    ))
 }
 
 /// The stage in the task's own record, for the stamp on a line.
