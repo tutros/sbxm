@@ -298,7 +298,7 @@ fn gating_cannot_begin_while_gates_are_running_or_from_the_wrong_stage() {
 }
 
 #[test]
-fn gates_whose_process_is_gone_are_given_up_as_failed_so_they_can_run_again() {
+fn gates_whose_process_is_gone_restart_in_place_without_being_marked_failed() {
     let mut record = new_record();
     record
         .advance(Stage::Working, T0, Process::new(1234, T0))
@@ -307,26 +307,38 @@ fn gates_whose_process_is_gone_are_given_up_as_failed_so_they_can_run_again() {
     record.begin_gating(T0, Process::new(1234, T0)).unwrap();
 
     // The process is still there: nothing changes.
-    assert!(!record.abandon_interrupted_gates(&Probe(Some(T0))));
+    assert!(!record.abandon_interrupted_gates(
+        T0 + 1,
+        Process::new(5678, T0 + 1),
+        &Probe(Some(T0))
+    ));
     assert_eq!(
         (record.stage, record.status),
         (Stage::Gating, Status::Running)
     );
 
-    // The process is gone (a crash, Ctrl-C): the gates did not finish, so they count as failed.
-    assert!(record.abandon_interrupted_gates(&Probe(None)));
+    // The process is gone (a crash, Ctrl-C): the gates did not finish, but they stay `running`,
+    // never `gates-failed` (a fix round is never spent on an abandoned run), and are re-runnable
+    // right away, owned by the new process.
+    assert!(record.abandon_interrupted_gates(T0 + 1, Process::new(5678, T0 + 1), &Probe(None)));
     assert_eq!(
         (record.stage, record.status),
-        (Stage::Gating, Status::GatesFailed)
+        (Stage::Gating, Status::Running)
     );
-    record.begin_gating(T0 + 1, Process::new(1234, T0)).unwrap();
+    assert!(!record.is_interrupted(&Probe(Some(T0 + 1))));
+    // Genuinely running now (owned by the new process), so running it again is still refused.
+    assert!(
+        record
+            .begin_gating(T0 + 2, Process::new(5678, T0 + 1))
+            .is_err()
+    );
 }
 
 #[test]
 fn only_running_gates_can_be_given_up() {
     let mut record = new_record();
     // Not in the gating stage at all, even though its process is gone.
-    assert!(!record.abandon_interrupted_gates(&Probe(None)));
+    assert!(!record.abandon_interrupted_gates(T0, Process::new(1, T0), &Probe(None)));
     assert_eq!(
         (record.stage, record.status),
         (Stage::Prepared, Status::Running)
@@ -338,7 +350,7 @@ fn only_running_gates_can_be_given_up() {
     record.finish(Status::Completed).unwrap();
     record.begin_gating(T0, Process::new(1234, T0)).unwrap();
     record.finish(Status::Passed).unwrap();
-    assert!(!record.abandon_interrupted_gates(&Probe(None)));
+    assert!(!record.abandon_interrupted_gates(T0, Process::new(1, T0), &Probe(None)));
     assert_eq!(record.status, Status::Passed);
 }
 

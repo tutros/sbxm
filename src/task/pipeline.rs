@@ -827,7 +827,11 @@ pub fn run_gates(
         .context("the task has no worker")?
         .sandbox
         .clone();
-    if prepared.record.abandon_interrupted_gates(env.probe) {
+    let restarted =
+        prepared
+            .record
+            .abandon_interrupted_gates(now(), Process::current(env.probe), env.probe);
+    if restarted {
         prepared
             .record
             .notes
@@ -847,9 +851,11 @@ pub fn run_gates(
             prepared.record.number
         );
     }
-    prepared
-        .record
-        .begin_gating(now(), Process::current(env.probe))?;
+    if !restarted {
+        prepared
+            .record
+            .begin_gating(now(), Process::current(env.probe))?;
+    }
     record::write(&prepared.meta, &prepared.record)?;
 
     let mut outcomes = Vec::new();
