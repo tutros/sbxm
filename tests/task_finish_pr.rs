@@ -405,3 +405,26 @@ fn a_comment_with_too_many_commits_lists_what_fits_and_says_how_many_more() {
     assert!(body.contains("2000 commit(s)"), "{}", &body[..300]);
     assert!(body.contains("Fixes #41"), "{}", &body[body.len() - 300..]);
 }
+
+#[test]
+fn mentions_in_commit_subjects_do_not_ping_anyone() {
+    let f = fixture();
+    let (prepared, _) = ready(&f);
+    reword_tip(
+        &prepared,
+        "Ask @someone and @team/leads; mail a@b.com; (@x) too",
+    );
+    let github = FakeGitHub::default();
+
+    run(&f, &github).unwrap();
+
+    let body = posted_comment(&github);
+    assert!(
+        !body.contains("@someone") && !body.contains("@team") && !body.contains("(@x)"),
+        "{body}"
+    );
+    assert!(
+        body.contains("someone") && body.contains("a@b.com"),
+        "{body}"
+    );
+}

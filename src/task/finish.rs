@@ -15,6 +15,7 @@ use anyhow::{Context, Result, bail};
 use super::pipeline::Prepared;
 use super::record::{self, Process, ProcessProbe, Record, Status};
 use super::repo;
+use super::review::{COMMENT_CAP, defang_mentions};
 use crate::backend::SandboxBackend;
 use crate::confirm::Confirm;
 use crate::github::{GitHubBackend, PrRequest};
@@ -520,12 +521,13 @@ const SUBJECT_CAP: usize = 500;
 
 /// The comment on a continued PR: the commits the task added, and `Fixes #n` for its issue. It
 /// stays below what GitHub accepts: a subject over [`SUBJECT_CAP`] characters is cut, commits
-/// that don't fit are counted instead of listed, and a note says so.
+/// that don't fit are counted instead of listed, and a note says so. Mentions are neutralised
+/// as in the review's comment, so an agent's commit subject notifies no one.
 pub fn pr_comment(number: u32, branch: &str, commits: &[String]) -> String {
-    let mut body = format!(
+    let mut body = defang_mentions(&format!(
         "`sbxm task finish` pushed {} commit(s) to {branch} for issue #{number}:\n\n",
         commits.len()
-    );
+    ));
     let (mut cut, mut listed) = (0, 0);
     for line in commits {
         let (id, subject) = line.split_once(' ').unwrap_or((line, ""));
@@ -536,8 +538,8 @@ pub fn pr_comment(number: u32, branch: &str, commits: &[String]) -> String {
             }
             None => subject.to_owned(),
         };
-        let item = format!("- `{id}` {subject}\n");
-        if body.len() + item.len() > crate::task::review::COMMENT_CAP {
+        let item = defang_mentions(&format!("- `{id}` {subject}\n"));
+        if body.len() + item.len() > COMMENT_CAP {
             break;
         }
         body.push_str(&item);
