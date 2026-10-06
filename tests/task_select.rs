@@ -2,7 +2,9 @@
 //! the removed `SelectIssues` Pester tests, plus both-direction `Related`, the explicit
 //! list and the `--workers` cap.
 
-use sbxm::github::Issue;
+use std::collections::HashMap;
+
+use sbxm::github::{Issue, PrState};
 use sbxm::task::select::{Reason, Selection, select};
 
 fn issue(number: u32, labels: &[&str], body: &str) -> Issue {
@@ -25,7 +27,16 @@ fn pick(
     explicit: Option<&[u32]>,
     workers: usize,
 ) -> Selection {
-    select(open, in_progress, explicit, workers)
+    select(open, in_progress, explicit, workers, &HashMap::new())
+}
+
+fn pick_with_prs(
+    open: &[Issue],
+    explicit: Option<&[u32]>,
+    workers: usize,
+    prs: &[(u32, PrState)],
+) -> Selection {
+    select(open, &[], explicit, workers, &prs.iter().copied().collect())
 }
 
 #[test]
@@ -171,4 +182,141 @@ fn nothing_open_selects_nothing() {
     assert!(
         selection.picks.is_empty() && selection.skips.is_empty() && selection.not_open.is_empty()
     );
+}
+
+// Decision 169 (c): must-fix issues of an open PR come first.
+
+#[test]
+fn a_must_fix_issue_of_an_open_pr_comes_before_every_other_issue() {
+    let open = [
+        issue(1, &["must-fix"], ""),
+        plain(2),
+        issue(5, &["must-fix"], "PR: #40\nbody"),
+    ];
+    let selection = pick_with_prs(&open, None, 3, &[(40, PrState::Open)]);
+    assert_eq!(selection.picks, [5, 1, 2]);
+}
+
+#[test]
+fn ties_among_open_pr_must_fix_issues_keep_the_number_order() {
+    let open = [
+        issue(7, &["must-fix"], "PR: #41"),
+        issue(3, &["must-fix"], "PR: #40"),
+        issue(1, &["must-fix"], ""),
+    ];
+    let prs = [(40, PrState::Open), (41, PrState::Open)];
+    assert_eq!(pick_with_prs(&open, None, 3, &prs).picks, [3, 7, 1]);
+}
+
+#[test]
+fn the_worker_cap_takes_the_open_pr_must_fix_issues_first() {
+    let open = [
+        issue(1, &["must-fix"], ""),
+        issue(9, &["must-fix"], "PR: #40"),
+    ];
+    let selection = pick_with_prs(&open, None, 1, &[(40, PrState::Open)]);
+    assert_eq!(selection.picks, [9]);
+}
+
+#[test]
+fn a_should_fix_issue_of_an_open_pr_keeps_its_usual_rank() {
+    let open = [
+        issue(1, &["must-fix"], ""),
+        issue(2, &["should-fix"], "PR: #40"),
+    ];
+    let selection = pick_with_prs(&open, None, 2, &[(40, PrState::Open)]);
+    assert_eq!(selection.picks, [1, 2]);
+}
+
+#[test]
+fn a_pr_line_that_is_not_the_first_line_does_not_count() {
+    let open = [
+        issue(1, &["must-fix"], ""),
+        issue(2, &["must-fix"], "intro\nPR: #40"),
+    ];
+    let selection = pick_with_prs(&open, None, 2, &[(40, PrState::Open)]);
+    assert_eq!(selection.picks, [1, 2]);
+}
+
+#[test]
+fn a_must_fix_issue_of_a_merged_or_closed_pr_is_skipped_with_its_reason() {
+    let open = [
+        issue(1, &["must-fix"], "PR: #40"),
+        issue(2, &["must-fix"], "PR: #41"),
+        plain(3),
+    ];
+    let prs = [(40, PrState::Merged), (41, PrState::Closed)];
+    let selection = pick_with_prs(&open, None, 3, &prs);
+    assert_eq!(selection.picks, [3]);
+    assert_eq!(
+        selection.skips,
+        [
+            (1, Reason::PrNotOpen(40, PrState::Merged)),
+            (2, Reason::PrNotOpen(41, PrState::Closed)),
+        ]
+    );
+    assert_eq!(
+        Reason::PrNotOpen(40, PrState::Merged).to_string(),
+        "its PR #40 is merged"
+    );
+    assert_eq!(
+        Reason::PrNotOpen(41, PrState::Closed).to_string(),
+        "its PR #41 is closed"
+    );
+}
+
+#[test]
+fn the_other_rules_still_apply_to_an_open_pr_must_fix_issue() {
+    let open = [
+        plain(1),
+        issue(2, &["must-fix", "question"], "PR: #40"),
+        issue(3, &["must-fix"], "PR: #40\n**Depends on:** #1"),
+        issue(4, &["must-fix"], "PR: #40"),
+    ];
+    let selection = select(
+        &open,
+        &[4],
+        None,
+        9,
+        &[(40, PrState::Open)].into_iter().collect(),
+    );
+    assert_eq!(selection.picks, [1]);
+    assert_eq!(
+        selection.skips,
+        [
+            (2, Reason::Question),
+            (3, Reason::Blocked(vec![1])),
+            (4, Reason::HasTask),
+        ]
+    );
+}
+
+#[test]
+fn an_explicit_list_still_names_any_issue_whatever_its_pr() {
+    let open = [
+        issue(1, &["must-fix"], "PR: #40"),
+        issue(2, &["must-fix"], "PR: #41"),
+        plain(3),
+    ];
+    let prs = [(40, PrState::Merged), (41, PrState::Open)];
+    let selection = pick_with_prs(&open, Some(&[3, 1]), 1, &prs);
+    assert_eq!(selection.picks, [1, 3]);
+    assert!(selection.skips.is_empty());
+}
+
+#[test]
+fn a_must_fix_issue_whose_pr_state_is_unknown_is_skipped_but_an_explicit_one_is_not() {
+    let open = [issue(1, &["must-fix"], "PR: #40"), plain(2)];
+
+    let automatic = pick_with_prs(&open, None, 2, &[]);
+    assert_eq!(automatic.picks, [2]);
+    assert_eq!(automatic.skips, [(1, Reason::PrUnreadable(40))]);
+    assert_eq!(
+        Reason::PrUnreadable(40).to_string(),
+        "its PR #40 couldn't be read"
+    );
+
+    let explicit = pick_with_prs(&open, Some(&[1]), 1, &[]);
+    assert_eq!(explicit.picks, [1]);
+    assert!(explicit.skips.is_empty());
 }

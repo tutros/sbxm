@@ -13,7 +13,9 @@ use common::task_fixture::{
 use sbxm::backend::FakeBackend;
 use sbxm::commands::task_start::{self, Options, github_repo};
 use sbxm::github::fake::FakeGitHub;
+use sbxm::github::{Issue, PrInfo, PrState};
 use sbxm::harness::Harness;
+use sbxm::task::record;
 use sbxm::task::repo::Identity;
 
 fn options(f: &Fixture) -> Options {
@@ -389,4 +391,238 @@ fn warnings_go_to_the_warning_writer() {
     out.result.unwrap();
     // The default config has a different reviewer harness and no unsupported settings.
     assert!(out.warn.is_empty(), "{}", out.warn);
+}
+
+fn pr_in_state(number: u32, state: PrState) -> PrInfo {
+    PrInfo {
+        number,
+        head_ref: format!("issue-{number}"),
+        is_cross_repository: false,
+        state,
+        title: format!("PR {number}"),
+        body: String::new(),
+        closing_issues: Vec::new(),
+    }
+}
+
+fn github_with_pr_finding(state: PrState) -> FakeGitHub {
+    FakeGitHub::default()
+        .with_default_branch("main")
+        .with_issue_text(issue_text(41))
+        .with_issue_text(issue_text(2))
+        .with_pr(pr_in_state(40, state))
+        .with_open_issues(vec![
+            open_issue(41, &["must-fix"], "PR: #40\nfinding"),
+            open_issue(2, &["must-fix"], ""),
+        ])
+}
+
+#[test]
+fn workers_picks_a_must_fix_issue_of_an_open_pr_first() {
+    let f = fixture();
+    let mut opts = options(&f);
+    opts.issues = Vec::new();
+    opts.workers = Some(1);
+    let (backend, github) = (playing(&f), github_with_pr_finding(PrState::Open));
+
+    let out = run(&f, &opts, &backend, &github);
+
+    out.result.unwrap();
+    let created: Vec<String> = backend.creates().into_iter().map(|c| c.name).collect();
+    assert_eq!(created, ["sbxm-task-issue-41-claude"]);
+}
+
+#[test]
+fn workers_skips_a_must_fix_issue_of_a_merged_pr_and_says_why() {
+    let f = fixture();
+    let mut opts = options(&f);
+    opts.issues = Vec::new();
+    opts.workers = Some(2);
+    let (backend, github) = (playing(&f), github_with_pr_finding(PrState::Merged));
+
+    let out = run(&f, &opts, &backend, &github);
+
+    out.result.unwrap();
+    assert!(
+        out.out.contains("#41: skipped, its PR #40 is merged"),
+        "{}",
+        out.out
+    );
+    let created: Vec<String> = backend.creates().into_iter().map(|c| c.name).collect();
+    assert_eq!(created, ["sbxm-task-issue-2-claude"]);
+}
+
+#[test]
+fn an_explicit_issue_starts_whatever_its_pr() {
+    let f = fixture();
+    let opts = options(&f);
+    let (backend, github) = (playing(&f), github_with_pr_finding(PrState::Merged));
+
+    let out = run(&f, &opts, &backend, &github);
+
+    out.result.unwrap();
+    let created: Vec<String> = backend.creates().into_iter().map(|c| c.name).collect();
+    assert_eq!(created, ["sbxm-task-issue-41-claude"]);
+}
+
+/// #41 is a must-fix issue whose `PR: #999` no longer exists; #2 is an unrelated eligible issue.
+fn github_with_a_stale_pr_finding(body: &str, labels: &[&str], extra: Vec<Issue>) -> FakeGitHub {
+    let mut open = vec![
+        open_issue(41, labels, body),
+        open_issue(2, &["must-fix"], ""),
+    ];
+    open.extend(extra);
+    FakeGitHub::default()
+        .with_default_branch("main")
+        .with_issue_text(issue_text(41))
+        .with_issue_text(issue_text(2))
+        .with_open_issues(open)
+}
+
+fn workers_start_only_issue_2(f: &Fixture, github: &FakeGitHub) {
+    let mut opts = options(f);
+    opts.issues = Vec::new();
+    opts.workers = Some(2);
+    let backend = playing(f);
+
+    let out = run(f, &opts, &backend, github);
+
+    out.result.unwrap();
+    let created: Vec<String> = backend.creates().into_iter().map(|c| c.name).collect();
+    assert_eq!(created, ["sbxm-task-issue-2-claude"], "{}", out.out);
+}
+
+#[test]
+fn a_stale_pr_on_a_question_is_still_skipped_as_a_question() {
+    let f = fixture();
+    let github =
+        github_with_a_stale_pr_finding("PR: #999\nfinding", &["must-fix", "question"], vec![]);
+    workers_start_only_issue_2(&f, &github);
+}
+
+#[test]
+fn a_stale_pr_on_a_blocked_issue_is_still_skipped_as_blocked() {
+    let f = fixture();
+    let github = github_with_a_stale_pr_finding(
+        "PR: #999\n**Depends on:** #3",
+        &["must-fix"],
+        vec![open_issue(3, &["question"], "")],
+    );
+    workers_start_only_issue_2(&f, &github);
+}
+
+#[test]
+fn a_stale_pr_on_an_issue_that_already_has_a_task_is_still_skipped_as_having_one() {
+    let f = fixture();
+    // #41 gets its task first, from a run that never reads its PR (an explicit issue).
+    let first = run(&f, &options(&f), &playing(&f), &github());
+    first.result.unwrap();
+    let github = github_with_a_stale_pr_finding("PR: #999\nfinding", &["must-fix"], vec![]);
+    workers_start_only_issue_2(&f, &github);
+}
+
+#[test]
+fn a_stale_pr_on_an_issue_related_to_an_existing_task_is_still_skipped_as_related() {
+    let f = fixture();
+    let first = run(&f, &options(&f), &playing(&f), &github());
+    first.result.unwrap(); // #41 has its task
+    let github = FakeGitHub::default()
+        .with_default_branch("main")
+        .with_issue_text(issue_text(41))
+        .with_issue_text(issue_text(2))
+        .with_open_issues(vec![
+            open_issue(41, &["must-fix"], ""),
+            open_issue(42, &["must-fix"], "PR: #999\n**Related:** #41"),
+            open_issue(2, &["must-fix"], ""),
+        ]);
+    let mut opts = options(&f);
+    opts.issues = Vec::new();
+    opts.workers = Some(3);
+    let backend = playing(&f);
+
+    let out = run(&f, &opts, &backend, &github);
+
+    out.result.unwrap();
+    assert!(out.out.contains("#42: skipped"), "{}", out.out);
+    let created: Vec<String> = backend.creates().into_iter().map(|c| c.name).collect();
+    assert_eq!(created, ["sbxm-task-issue-2-claude"]);
+}
+
+#[test]
+fn an_unreadable_pr_skips_its_issue_with_a_reason_and_starts_nothing_for_it() {
+    let f = fixture();
+    let github = github_with_a_stale_pr_finding("PR: #999\nfinding", &["must-fix"], vec![]);
+    let mut opts = options(&f);
+    opts.issues = Vec::new();
+    opts.workers = Some(2);
+    let backend = playing(&f);
+
+    let out = run(&f, &opts, &backend, &github);
+
+    out.result.unwrap();
+    assert!(
+        out.out
+            .contains("#41: skipped, its PR #999 couldn't be read"),
+        "{}",
+        out.out
+    );
+    // The warning carries the lookup's own reason.
+    assert!(
+        out.warn.contains("#41") && out.warn.contains("PR #999") && out.warn.contains("skipped"),
+        "{}",
+        out.warn
+    );
+    // Only the unrelated issue starts; no task folder or sandbox exists for #41.
+    let created: Vec<String> = backend.creates().into_iter().map(|c| c.name).collect();
+    assert_eq!(created, ["sbxm-task-issue-2-claude"]);
+    assert!(!record::task_dir(&f.env.base_dir(), "issue-41").exists());
+}
+
+#[test]
+fn when_every_candidate_is_skipped_an_unreadable_pr_is_still_warned_about() {
+    let f = fixture();
+    let github = FakeGitHub::default()
+        .with_default_branch("main")
+        .with_issue_text(issue_text(41))
+        .with_open_issues(vec![open_issue(41, &["must-fix"], "PR: #999\nfinding")]);
+    let mut opts = options(&f);
+    opts.issues = Vec::new();
+    opts.workers = Some(1);
+    let backend = playing(&f);
+
+    let out = run(&f, &opts, &backend, &github);
+
+    let err = format!("{:#}", out.result.unwrap_err());
+    assert!(err.contains("nothing to start"), "{err}");
+    assert!(err.contains("its PR #999 couldn't be read"), "{err}");
+    // The warning carries the lookup's own reason ("pr 999 is not scripted").
+    assert!(
+        out.warn.contains("#41") && out.warn.contains("999") && out.warn.contains("not scripted"),
+        "{}",
+        out.warn
+    );
+    assert!(backend.creates().is_empty());
+    assert!(!record::task_dir(&f.env.base_dir(), "issue-41").exists());
+}
+
+#[test]
+fn an_issue_selection_already_skips_never_costs_a_pr_lookup_or_a_warning() {
+    for (labels, body, extra) in [
+        (&["must-fix", "question"][..], "PR: #999\nfinding", vec![]),
+        (
+            &["must-fix"][..],
+            "PR: #999\n**Depends on:** #3",
+            vec![open_issue(3, &["question"], "")],
+        ),
+    ] {
+        let f = fixture();
+        let github = github_with_a_stale_pr_finding(body, labels, extra);
+        workers_start_only_issue_2(&f, &github);
+        let looked_up: Vec<_> = github
+            .calls()
+            .into_iter()
+            .filter(|c| matches!(c, sbxm::github::fake::GhCall::Pr(..)))
+            .collect();
+        assert!(looked_up.is_empty(), "{looked_up:?}");
+    }
 }
