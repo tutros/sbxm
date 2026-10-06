@@ -5,6 +5,7 @@
 mod common;
 
 use std::fs;
+use std::process::Command as StdCommand;
 
 use assert_cmd::Command;
 use common::Env;
@@ -103,6 +104,38 @@ fn a_second_invocation_that_fails_still_gets_its_own_header() {
         2,
         "{log}"
     );
+}
+
+/// Issue 129, M-2: fallible setup evaluated after the writers are created (here,
+/// `std::env::current_dir()` for `--repo-root`) must still reach `run.log`, not bypass the tee by
+/// returning straight out of `main` via `?`. The current directory is removed after the child
+/// process has already started (so its `chdir` into it succeeded), giving the child's own later
+/// `std::env::current_dir()` call nothing to resolve.
+#[test]
+fn a_command_whose_current_dir_vanishes_after_start_still_logs_its_error() {
+    let env = Env::new();
+    save_task(&env, 42);
+    let repo_root = env.tmp.path().join("vanishing");
+    fs::create_dir_all(&repo_root).unwrap();
+
+    let child = StdCommand::new(assert_cmd::cargo::cargo_bin("sbxm"))
+        .env("SBXM_CONFIG_DIR", env.config_dir())
+        .current_dir(&repo_root)
+        .args(["task", "gates", "--issue", "42"])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    fs::remove_dir(&repo_root).unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(stderr.starts_with("Error: "), "{stderr}");
+
+    let log = run_log(&env, "issue-42");
+    assert!(log.starts_with("# "), "{log}");
+    assert!(log.contains("Error: "), "{log}");
 }
 
 #[test]

@@ -185,19 +185,46 @@ fn main() -> anyhow::Result<()> {
                 (None, Some(n)) => Some((task::record::Kind::Pr, n)),
                 (None, None) => None,
             };
-            let global = config::GlobalConfig::load(&config::config_dir()?)?;
-            let rendered = commands::task_status::render(
-                &global.base_dir,
-                which,
-                json,
-                &task::record::SystemProbe,
-            );
-            let ids = rendered
-                .as_ref()
-                .map_or_else(|_| Vec::new(), |(_, ids)| ids.clone());
-            let (mut out, warn) = task_writers(ids, None)?;
-            let result = rendered.and_then(|(text, _)| write!(out, "{text}").map_err(Into::into));
-            finish_task(result, out, warn)
+            match which {
+                // The target is known from the CLI alone, so the writer is opened before the
+                // fallible config load and render, and any failure of either still reaches it
+                // (issue 129 M-2).
+                Some((kind, number)) => {
+                    let (mut out, warn) = task_writers(vec![task_id(kind, number)], None)?;
+                    let result = (|| -> anyhow::Result<()> {
+                        let global = config::GlobalConfig::load(&config::config_dir()?)?;
+                        let (text, _ids) = commands::task_status::render(
+                            &global.base_dir,
+                            which,
+                            json,
+                            &task::record::SystemProbe,
+                        )?;
+                        write!(out, "{text}")?;
+                        Ok(())
+                    })();
+                    finish_task(result, out, warn)
+                }
+                // Unfiltered: there is no target yet until render says which tasks it displayed,
+                // so there is nothing to log a load/render failure into either way.
+                None => {
+                    let rendered =
+                        config::GlobalConfig::load(&config::config_dir()?).and_then(|global| {
+                            commands::task_status::render(
+                                &global.base_dir,
+                                None,
+                                json,
+                                &task::record::SystemProbe,
+                            )
+                        });
+                    let ids = rendered
+                        .as_ref()
+                        .map_or_else(|_| Vec::new(), |(_, ids)| ids.clone());
+                    let (mut out, warn) = task_writers(ids, None)?;
+                    let result =
+                        rendered.and_then(|(text, _)| write!(out, "{text}").map_err(Into::into));
+                    finish_task(result, out, warn)
+                }
+            }
         }
         Command::Task {
             command:
@@ -216,31 +243,33 @@ fn main() -> anyhow::Result<()> {
         } => {
             let ids = issues.iter().map(|n| format!("issue-{n}")).collect();
             let (mut out, mut warn) = task_writers(ids, Some(&task::record::SystemProbe))?;
-            let result = commands::task_start::run_with(
-                &config::config_dir()?,
-                &commands::task_start::Options {
-                    repo_root: std::env::current_dir()?,
-                    issues,
-                    workers,
-                    worker_harness,
-                    worker_model,
-                    time_limit,
-                    profile,
-                    base,
-                    repo,
-                    clone_source: None,
-                    identity: None,
-                },
-                restart.then_some(&commands::task_start::Restart {
-                    confirm: &Terminal,
-                    yes,
-                }),
-                &SbxBackend,
-                &sbxm::github::gh::GhBackend::default(),
-                &task::record::SystemProbe,
-                &mut out,
-                &mut warn,
-            );
+            let result = (|| -> anyhow::Result<()> {
+                commands::task_start::run_with(
+                    &config::config_dir()?,
+                    &commands::task_start::Options {
+                        repo_root: std::env::current_dir()?,
+                        issues,
+                        workers,
+                        worker_harness,
+                        worker_model,
+                        time_limit,
+                        profile,
+                        base,
+                        repo,
+                        clone_source: None,
+                        identity: None,
+                    },
+                    restart.then_some(&commands::task_start::Restart {
+                        confirm: &Terminal,
+                        yes,
+                    }),
+                    &SbxBackend,
+                    &sbxm::github::gh::GhBackend::default(),
+                    &task::record::SystemProbe,
+                    &mut out,
+                    &mut warn,
+                )
+            })();
             finish_task(result, out, warn)
         }
         Command::Task {
@@ -252,23 +281,25 @@ fn main() -> anyhow::Result<()> {
                 },
         } => {
             let (mut out, warn) = task_writers(vec![format!("issue-{issue}")], None)?;
-            let result = commands::task_gates::run(
-                &config::config_dir()?,
-                &commands::task_gates::Options {
-                    repo_root: std::env::current_dir()?,
-                    issue,
-                    tiers: match tier {
-                        GateTier::Sandbox => task::pipeline::Tiers::SANDBOX,
-                        GateTier::Host => task::pipeline::Tiers::HOST,
-                        GateTier::All => task::pipeline::Tiers::ALL,
+            let result = (|| -> anyhow::Result<()> {
+                commands::task_gates::run(
+                    &config::config_dir()?,
+                    &commands::task_gates::Options {
+                        repo_root: std::env::current_dir()?,
+                        issue,
+                        tiers: match tier {
+                            GateTier::Sandbox => task::pipeline::Tiers::SANDBOX,
+                            GateTier::Host => task::pipeline::Tiers::HOST,
+                            GateTier::All => task::pipeline::Tiers::ALL,
+                        },
+                        dry_run,
                     },
-                    dry_run,
-                },
-                &SbxBackend,
-                &task::record::SystemProbe,
-                &task::gates::ShellHostRunner,
-                &mut out,
-            );
+                    &SbxBackend,
+                    &task::record::SystemProbe,
+                    &task::gates::ShellHostRunner,
+                    &mut out,
+                )
+            })();
             finish_task(result, out, warn)
         }
         Command::Task {
@@ -285,40 +316,48 @@ fn main() -> anyhow::Result<()> {
                 },
         } => {
             use commands::task_file_findings::Source;
-            let source = match (issue, pr, file) {
-                (Some(number), ..) => Source::Task {
-                    base_dir: config::GlobalConfig::load(&config::config_dir()?)?.base_dir,
-                    kind: task::record::Kind::Issue,
-                    number,
-                },
-                (None, Some(number), _) => Source::Task {
-                    base_dir: config::GlobalConfig::load(&config::config_dir()?)?.base_dir,
-                    kind: task::record::Kind::Pr,
-                    number,
-                },
-                (None, None, Some(file)) => Source::File(file),
+            // The target (if any) is known from the CLI alone, so the writer can be opened
+            // before the fallible config load that resolves `base_dir` (issue 129 M-2).
+            let ids = match (issue, pr, &file) {
+                (Some(number), ..) => vec![task_id(task::record::Kind::Issue, number)],
+                (None, Some(number), _) => vec![task_id(task::record::Kind::Pr, number)],
+                (None, None, Some(_)) => Vec::new(),
                 (None, None, None) => unreachable!("clap requires one of --issue, --pr, --file"),
             };
-            let ids = match &source {
-                Source::Task { kind, number, .. } => vec![task_id(*kind, *number)],
-                Source::File(_) => Vec::new(),
-            };
             let (mut out, mut warn) = task_writers(ids, None)?;
-            let result = commands::task_file_findings::run(
-                &commands::task_file_findings::Options {
-                    source,
-                    repo_root: std::env::current_dir()?,
-                    repo,
-                    create,
-                    pr,
-                    standard_criteria,
-                    keep_paths,
-                    only,
-                },
-                &sbxm::github::gh::GhBackend::default(),
-                &mut out,
-                &mut warn,
-            );
+            let result = (|| -> anyhow::Result<()> {
+                let source = match (issue, pr, file) {
+                    (Some(number), ..) => Source::Task {
+                        base_dir: config::GlobalConfig::load(&config::config_dir()?)?.base_dir,
+                        kind: task::record::Kind::Issue,
+                        number,
+                    },
+                    (None, Some(number), _) => Source::Task {
+                        base_dir: config::GlobalConfig::load(&config::config_dir()?)?.base_dir,
+                        kind: task::record::Kind::Pr,
+                        number,
+                    },
+                    (None, None, Some(file)) => Source::File(file),
+                    (None, None, None) => {
+                        unreachable!("clap requires one of --issue, --pr, --file")
+                    }
+                };
+                commands::task_file_findings::run(
+                    &commands::task_file_findings::Options {
+                        source,
+                        repo_root: std::env::current_dir()?,
+                        repo,
+                        create,
+                        pr,
+                        standard_criteria,
+                        keep_paths,
+                        only,
+                    },
+                    &sbxm::github::gh::GhBackend::default(),
+                    &mut out,
+                    &mut warn,
+                )
+            })();
             finish_task(result, out, warn)
         }
         Command::Task {
@@ -341,31 +380,33 @@ fn main() -> anyhow::Result<()> {
                 (None, None) => unreachable!("clap requires --issue or --pr"),
             };
             let (mut out, mut warn) = task_writers(vec![id], None)?;
-            let result = commands::task_review::run(
-                &config::config_dir()?,
-                &commands::task_review::Options {
-                    repo_root: std::env::current_dir()?,
-                    target: match (issue, pr) {
-                        (Some(n), _) => commands::task_review::Target::Issue(n),
-                        (None, Some(n)) => commands::task_review::Target::Pr(n),
-                        (None, None) => unreachable!("clap requires --issue or --pr"),
+            let result = (|| -> anyhow::Result<()> {
+                commands::task_review::run(
+                    &config::config_dir()?,
+                    &commands::task_review::Options {
+                        repo_root: std::env::current_dir()?,
+                        target: match (issue, pr) {
+                            (Some(n), _) => commands::task_review::Target::Issue(n),
+                            (None, Some(n)) => commands::task_review::Target::Pr(n),
+                            (None, None) => unreachable!("clap requires --issue or --pr"),
+                        },
+                        repo,
+                        base,
+                        clone_source: None,
+                        reviewer_harness,
+                        reviewer_model,
+                        reviewer_time_limit,
+                        time_limit,
+                        profile,
                     },
-                    repo,
-                    base,
-                    clone_source: None,
-                    reviewer_harness,
-                    reviewer_model,
-                    reviewer_time_limit,
-                    time_limit,
-                    profile,
-                },
-                &SbxBackend,
-                &sbxm::github::gh::GhBackend::default(),
-                &task::record::SystemProbe,
-                &task::gates::ShellHostRunner,
-                &mut out,
-                &mut warn,
-            );
+                    &SbxBackend,
+                    &sbxm::github::gh::GhBackend::default(),
+                    &task::record::SystemProbe,
+                    &task::gates::ShellHostRunner,
+                    &mut out,
+                    &mut warn,
+                )
+            })();
             finish_task(result, out, warn)
         }
         Command::Task {
@@ -386,47 +427,51 @@ fn main() -> anyhow::Result<()> {
                 },
         } => {
             let (mut out, mut warn) = task_writers(vec![format!("issue-{issue}")], None)?;
-            let result = commands::task_run::run(
-                &config::config_dir()?,
-                &commands::task_run::Options {
-                    repo_root: std::env::current_dir()?,
-                    issue,
-                    worker_harness,
-                    worker_model,
-                    reviewer_harness,
-                    reviewer_model,
-                    time_limit,
-                    reviewer_time_limit,
-                    profile,
-                    base,
-                    repo,
-                    clone_source: None,
-                    identity: None,
-                },
-                restart.then_some(&commands::task_start::Restart {
-                    confirm: &Terminal,
-                    yes,
-                }),
-                &SbxBackend,
-                &sbxm::github::gh::GhBackend::default(),
-                &task::record::SystemProbe,
-                &task::gates::ShellHostRunner,
-                &mut out,
-                &mut warn,
-            );
+            let result = (|| -> anyhow::Result<()> {
+                commands::task_run::run(
+                    &config::config_dir()?,
+                    &commands::task_run::Options {
+                        repo_root: std::env::current_dir()?,
+                        issue,
+                        worker_harness,
+                        worker_model,
+                        reviewer_harness,
+                        reviewer_model,
+                        time_limit,
+                        reviewer_time_limit,
+                        profile,
+                        base,
+                        repo,
+                        clone_source: None,
+                        identity: None,
+                    },
+                    restart.then_some(&commands::task_start::Restart {
+                        confirm: &Terminal,
+                        yes,
+                    }),
+                    &SbxBackend,
+                    &sbxm::github::gh::GhBackend::default(),
+                    &task::record::SystemProbe,
+                    &task::gates::ShellHostRunner,
+                    &mut out,
+                    &mut warn,
+                )
+            })();
             finish_task(result, out, warn)
         }
         Command::Task {
             command: TaskCommand::Finish { issue },
         } => {
             let (mut out, warn) = task_writers(vec![format!("issue-{issue}")], None)?;
-            let result = commands::task_finish::run(
-                &config::config_dir()?,
-                &commands::task_finish::Options { issue },
-                &sbxm::github::gh::GhBackend::default(),
-                &task::record::SystemProbe,
-                &mut out,
-            );
+            let result = (|| -> anyhow::Result<()> {
+                commands::task_finish::run(
+                    &config::config_dir()?,
+                    &commands::task_finish::Options { issue },
+                    &sbxm::github::gh::GhBackend::default(),
+                    &task::record::SystemProbe,
+                    &mut out,
+                )
+            })();
             finish_task(result, out, warn)
         }
         Command::Task {
@@ -438,14 +483,16 @@ fn main() -> anyhow::Result<()> {
                 (None, None) => unreachable!("clap requires --issue or --pr"),
             };
             let (mut out, warn) = task_writers(vec![task_id(kind, number)], None)?;
-            let result = commands::task_rm::run(
-                &config::config_dir()?,
-                &commands::task_rm::Options { kind, number, yes },
-                &SbxBackend,
-                &task::record::SystemProbe,
-                &Terminal,
-                &mut out,
-            );
+            let result = (|| -> anyhow::Result<()> {
+                commands::task_rm::run(
+                    &config::config_dir()?,
+                    &commands::task_rm::Options { kind, number, yes },
+                    &SbxBackend,
+                    &task::record::SystemProbe,
+                    &Terminal,
+                    &mut out,
+                )
+            })();
             finish_task(result, out, warn)
         }
         Command::Run(_) => unreachable!("clap requires a config or a subcommand"),
