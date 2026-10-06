@@ -29,13 +29,15 @@ fn commits_ahead(base: &Path, record: &Record) -> Option<u32> {
     record.commits_ahead(&repo_git).ok()
 }
 
-/// `which`: show just that task (an error when it doesn't exist).
+/// `which`: show just that task (an error when it doesn't exist). The second part of the result
+/// is the ids of the tasks the text names, in the order shown: the caller logs the output to each
+/// (`main`'s `task_writers`), so a task with nothing to show (no tasks yet) gets no log entry.
 pub fn render(
     base: &Path,
     which: Option<(Kind, u32)>,
     json: bool,
     probe: &dyn ProcessProbe,
-) -> Result<String> {
+) -> Result<(String, Vec<String>)> {
     let mut records = record::load_all(base)?;
     if let Some((kind, number)) = which {
         let id = id_of(kind, number);
@@ -44,11 +46,15 @@ pub fn render(
             bail!("no task {id}; run `sbxm task status` to list the tasks");
         }
     }
+    let ids: Vec<String> = records.iter().map(|r| r.id.clone()).collect();
     if json {
-        return render_json(base, &records, probe);
+        return Ok((render_json(base, &records, probe)?, ids));
     }
     if records.is_empty() {
-        return Ok("No tasks yet; start one with `sbxm task start --issue <n>`.\n".to_owned());
+        return Ok((
+            "No tasks yet; start one with `sbxm task start --issue <n>`.\n".to_owned(),
+            ids,
+        ));
     }
     let width = records.iter().map(|r| r.id.len()).max().unwrap_or(0);
     let mut out = String::new();
@@ -75,7 +81,7 @@ pub fn render(
                 .map_or_else(String::new, |c| format!("  [PR #{} ({})]", c.pr, c.branch)),
         )?;
     }
-    Ok(out)
+    Ok((out, ids))
 }
 
 fn render_json(base: &Path, records: &[Record], probe: &dyn ProcessProbe) -> Result<String> {

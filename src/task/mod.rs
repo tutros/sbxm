@@ -11,4 +11,5 @@ pub mod prompts;
 pub mod record;
 pub mod repo;
 pub mod review;
+pub mod runlog;
 pub mod select;

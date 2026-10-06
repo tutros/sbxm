@@ -1,9 +1,13 @@
 //! M2b slice 4: `sbxm task status` (spec §4): one line per task with stage, status,
 //! `interrupted` and which of `result.md`/`review.md` exist; `--json` prints the records.
+//! Issue 129, M-1: its displayed output also reaches each displayed task's `run.log`.
+
+mod common;
 
 use std::fs;
 use std::path::Path;
 
+use common::Env;
 use sbxm::commands::task_status;
 use sbxm::task::record::{self, Kind, NewTask, Process, ProcessProbe, Record, Stage, Status};
 
@@ -51,7 +55,7 @@ fn working(number: u32, done: Option<Status>) -> Record {
 #[test]
 fn no_tasks_says_how_to_start_one() {
     let base = tempfile::tempdir().unwrap();
-    let text = task_status::render(base.path(), None, false, &Probe(Some(T0))).unwrap();
+    let (text, _ids) = task_status::render(base.path(), None, false, &Probe(Some(T0))).unwrap();
     assert!(text.contains("No tasks"), "{text}");
 }
 
@@ -61,7 +65,7 @@ fn one_line_per_task_with_stage_status_and_title() {
     save(base.path(), &working(41, None));
     save(base.path(), &working(7, Some(Status::Completed)));
 
-    let text = task_status::render(base.path(), None, false, &Probe(Some(T0))).unwrap();
+    let (text, ids) = task_status::render(base.path(), None, false, &Probe(Some(T0))).unwrap();
     let lines: Vec<&str> = text.lines().collect();
 
     assert_eq!(lines.len(), 2, "{text}");
@@ -75,6 +79,7 @@ fn one_line_per_task_with_stage_status_and_title() {
         lines[1].starts_with("issue-41") && lines[1].contains("running"),
         "{text}"
     );
+    assert_eq!(ids, vec!["issue-7".to_owned(), "issue-41".to_owned()]);
 }
 
 #[test]
@@ -82,7 +87,7 @@ fn a_running_task_whose_process_is_gone_shows_interrupted() {
     let base = tempfile::tempdir().unwrap();
     save(base.path(), &working(41, None));
 
-    let text = task_status::render(base.path(), None, false, &Probe(None)).unwrap();
+    let (text, _ids) = task_status::render(base.path(), None, false, &Probe(None)).unwrap();
 
     assert!(text.contains("interrupted"), "{text}");
     assert!(!text.contains("running"), "{text}");
@@ -104,7 +109,7 @@ fn result_and_review_files_are_reported_when_present() {
     )
     .unwrap();
 
-    let text = task_status::render(base.path(), None, false, &Probe(Some(T0))).unwrap();
+    let (text, _ids) = task_status::render(base.path(), None, false, &Probe(Some(T0))).unwrap();
     let lines: Vec<&str> = text.lines().collect();
 
     assert!(
@@ -127,9 +132,10 @@ fn a_selector_shows_only_that_task() {
         .unwrap();
     save(base.path(), &pr);
 
-    let text =
+    let (text, ids) =
         task_status::render(base.path(), Some((Kind::Pr, 2)), false, &Probe(Some(T0))).unwrap();
 
+    assert_eq!(ids, vec!["pr-2".to_owned()]);
     assert_eq!(text.lines().count(), 1, "{text}");
     assert!(
         text.starts_with("pr-2 ") && text.contains("reviewing"),
@@ -157,7 +163,7 @@ fn json_prints_the_records_with_an_interrupted_flag() {
     save(base.path(), &working(41, None));
     save(base.path(), &working(7, Some(Status::Completed)));
 
-    let text = task_status::render(base.path(), None, true, &Probe(None)).unwrap();
+    let (text, _ids) = task_status::render(base.path(), None, true, &Probe(None)).unwrap();
     let value: serde_json::Value = serde_json::from_str(&text).unwrap();
 
     let tasks = value.as_array().unwrap();
@@ -186,7 +192,7 @@ fn the_cli_refuses_both_selectors_at_once() {
 #[test]
 fn json_with_no_tasks_is_an_empty_array() {
     let base = tempfile::tempdir().unwrap();
-    let text = task_status::render(base.path(), None, true, &Probe(None)).unwrap();
+    let (text, _ids) = task_status::render(base.path(), None, true, &Probe(None)).unwrap();
     assert_eq!(text.trim(), "[]");
 }
 
@@ -240,7 +246,7 @@ fn the_line_shows_the_commits_ahead_of_base() {
     save(base.path(), &working(41, Some(Status::Completed)));
     repo_with_commits_ahead(base.path(), "issue-41", 2);
 
-    let text = task_status::render(base.path(), None, false, &Probe(Some(T0))).unwrap();
+    let (text, _ids) = task_status::render(base.path(), None, false, &Probe(Some(T0))).unwrap();
 
     assert!(text.contains("ahead: 2"), "{text}");
 }
@@ -250,7 +256,7 @@ fn a_task_without_a_repo_yet_shows_no_count_instead_of_failing() {
     let base = tempfile::tempdir().unwrap();
     save(base.path(), &working(41, None));
 
-    let text = task_status::render(base.path(), None, false, &Probe(Some(T0))).unwrap();
+    let (text, _ids) = task_status::render(base.path(), None, false, &Probe(Some(T0))).unwrap();
 
     assert!(text.contains("ahead: -"), "{text}");
 }
@@ -261,7 +267,7 @@ fn a_branch_with_no_new_commits_shows_zero() {
     save(base.path(), &working(41, Some(Status::Completed)));
     repo_with_commits_ahead(base.path(), "issue-41", 0);
 
-    let text = task_status::render(base.path(), None, false, &Probe(Some(T0))).unwrap();
+    let (text, _ids) = task_status::render(base.path(), None, false, &Probe(Some(T0))).unwrap();
 
     assert!(text.contains("ahead: 0"), "{text}");
 }
@@ -273,7 +279,7 @@ fn json_carries_the_commit_count_or_null() {
     repo_with_commits_ahead(base.path(), "issue-41", 2);
     save(base.path(), &working(42, None));
 
-    let text = task_status::render(base.path(), None, true, &Probe(Some(T0))).unwrap();
+    let (text, _ids) = task_status::render(base.path(), None, true, &Probe(Some(T0))).unwrap();
     let values: serde_json::Value = serde_json::from_str(&text).unwrap();
     let find = |id: &str| {
         values
@@ -301,9 +307,78 @@ fn a_task_continuing_a_pr_shows_the_pr_and_its_branch() {
     save(base.path(), &record);
     save(base.path(), &working(42, None));
 
-    let text = task_status::render(base.path(), None, false, &Probe(Some(T0))).unwrap();
+    let (text, _ids) = task_status::render(base.path(), None, false, &Probe(Some(T0))).unwrap();
     let lines: Vec<&str> = text.lines().collect();
 
     assert!(lines[0].contains("PR #7 (feature-x)"), "{text}");
     assert!(!lines[1].contains("PR #"), "{text}");
+}
+
+#[test]
+fn the_cli_appends_a_selected_issues_output_to_its_run_log() {
+    let env = Env::new();
+    save(&env.base_dir(), &working(41, None));
+
+    let output = assert_cmd::Command::cargo_bin("sbxm")
+        .unwrap()
+        .env("SBXM_CONFIG_DIR", env.config_dir())
+        .args(["task", "status", "--issue", "41"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(stdout.starts_with("issue-41"), "{stdout}");
+
+    let log =
+        fs::read_to_string(record::task_dir(&env.base_dir(), "issue-41").join("run.log")).unwrap();
+    assert!(log.starts_with("# "), "{log}");
+    assert!(log.contains(stdout.trim_end()), "{log}");
+}
+
+#[test]
+fn the_cli_appends_a_selected_prs_output_to_its_run_log() {
+    let env = Env::new();
+    let mut pr = task(Kind::Pr, 2, "a pr");
+    pr.advance(Stage::Reviewing, T0, Process::new(1, T0))
+        .unwrap();
+    save(&env.base_dir(), &pr);
+
+    let output = assert_cmd::Command::cargo_bin("sbxm")
+        .unwrap()
+        .env("SBXM_CONFIG_DIR", env.config_dir())
+        .args(["task", "status", "--pr", "2"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let log =
+        fs::read_to_string(record::task_dir(&env.base_dir(), "pr-2").join("run.log")).unwrap();
+    assert!(log.starts_with("# "), "{log}");
+    assert!(log.contains("reviewing"), "{log}");
+}
+
+#[test]
+fn the_cli_appends_unfiltered_output_to_every_displayed_tasks_run_log() {
+    let env = Env::new();
+    save(&env.base_dir(), &working(41, None));
+    save(&env.base_dir(), &working(7, Some(Status::Completed)));
+
+    let output = assert_cmd::Command::cargo_bin("sbxm")
+        .unwrap()
+        .env("SBXM_CONFIG_DIR", env.config_dir())
+        .args(["task", "status"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+    for id in ["issue-7", "issue-41"] {
+        let log =
+            fs::read_to_string(record::task_dir(&env.base_dir(), id).join("run.log")).unwrap();
+        assert!(log.starts_with("# "), "{id}: {log}");
+        for line in stdout.lines() {
+            assert!(log.contains(line), "{id}: missing {line:?} in {log}");
+        }
+    }
 }

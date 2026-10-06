@@ -41,6 +41,17 @@ fn a_missing_file_is_refused_in_one_line() {
     );
 }
 
+/// Issue 129, M-4: `--file` has no task to log into, so there is nothing to warn about even
+/// though the command itself fails.
+#[test]
+fn a_no_target_command_emits_no_logging_warning() {
+    let dir = TempDir::new().unwrap();
+    let stderr =
+        String::from_utf8(sbxm(dir.path(), &["--file", "nope.md", "--repo", "o/r"]).stderr)
+            .unwrap();
+    assert!(!stderr.contains("warning:"), "{stderr}");
+}
+
 #[test]
 fn the_help_says_it_is_a_dry_run_unless_create() {
     let dir = TempDir::new().unwrap();

@@ -238,7 +238,7 @@ fn bundling(f: &Fixture, commits: usize) -> FakeBackend {
 }
 
 fn ahead_shown(f: &Fixture) -> String {
-    let text = task_status::render(&f.env.base_dir(), None, false, &Probe).unwrap();
+    let (text, _ids) = task_status::render(&f.env.base_dir(), None, false, &Probe).unwrap();
     text.split("ahead:")
         .nth(1)
         .and_then(|rest| rest.split_whitespace().next())
