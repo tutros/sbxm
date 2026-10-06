@@ -74,6 +74,11 @@ pub struct RunLog {
     history: Vec<(u64, String)>,
     /// How much of `history` each task's log already has.
     caught_up: BTreeMap<String, usize>,
+    /// Told once, not once per line, when a log can't be appended to (an actual I/O failure, not
+    /// a folder that merely doesn't exist yet): the exact text to show the user.
+    warn: Box<dyn FnMut(&str) + Send>,
+    /// Ids already warned about, so a failure that keeps happening says so only once.
+    warned: BTreeSet<String>,
 }
 
 impl RunLog {
@@ -84,6 +89,7 @@ impl RunLog {
         identity: Option<record::Process>,
         clock: Box<dyn Fn() -> u64 + Send>,
         stage_of: Box<dyn Fn(&Path) -> String + Send>,
+        warn: Box<dyn FnMut(&str) + Send>,
     ) -> Self {
         Self {
             base: base.to_owned(),
@@ -96,11 +102,14 @@ impl RunLog {
             foreign: BTreeSet::new(),
             history: Vec::new(),
             caught_up: BTreeMap::new(),
+            warn,
+            warned: BTreeSet::new(),
         }
     }
 
     /// Adds one line to the log of every task this command is working on. A log that can't be
     /// written is skipped: the screen already has the line, and the command must not fail for it.
+    /// (`write_to`'s own error is still reported, once per id, through `warn`.)
     pub fn line(&mut self, text: &str) {
         let secs = (self.clock)();
         self.history.push((secs, redact(text)));
@@ -112,7 +121,12 @@ impl RunLog {
             .cloned()
             .collect();
         for id in ids {
-            let _ = self.write_to(&id);
+            if let Err(err) = self.write_to(&id)
+                && self.warned.insert(id.clone())
+            {
+                let path = record::task_dir(&self.base, &id).join("run.log");
+                (self.warn)(&format!("warning: cannot write {}: {err}", path.display()));
+            }
         }
     }
 

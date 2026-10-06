@@ -38,6 +38,7 @@ pub fn open(
         identity,
         Box::new(now),
         Box::new(runlog::recorded_stage),
+        Box::new(|msg| eprintln!("{msg}")),
     ))))
 }
 
@@ -51,5 +52,6 @@ pub fn none() -> Arc<Mutex<RunLog>> {
         None,
         Box::new(now),
         Box::new(runlog::recorded_stage),
+        Box::new(|_| {}),
     )))
 }

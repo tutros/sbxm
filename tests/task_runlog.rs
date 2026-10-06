@@ -30,6 +30,7 @@ fn log(base: &Path, ids: &[&str], identity: Option<Process>) -> RunLog {
         identity,
         clock(),
         stage("working"),
+        Box::new(|_| {}),
     )
 }
 
@@ -280,4 +281,58 @@ fn a_secret_on_the_command_line_is_masked_in_the_header() {
     );
     assert!(!text.contains("ghp_0123456789abcdefABCDEF01"), "{text}");
     assert!(text.contains("--token [redacted]"), "{text}");
+}
+
+/// Issue 129, M-4: a log that can't be appended to (a deterministic failure, not just "the task
+/// folder doesn't exist yet") still lets the command run, but warns once, not once per line, so
+/// the missing provenance isn't silent.
+#[test]
+fn an_append_failure_warns_once_naming_the_path_and_cause_not_once_per_line() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = task_dir(base.path(), "issue-5");
+    // `run.log` is a directory, so opening it for append fails deterministically.
+    fs::create_dir_all(dir.join("run.log")).unwrap();
+    let warnings = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&warnings);
+    let mut log = RunLog::new(
+        base.path(),
+        "# header".to_owned(),
+        vec!["issue-5".to_owned()],
+        None,
+        clock(),
+        stage("working"),
+        Box::new(move |msg: &str| sink.lock().unwrap().push(msg.to_owned())),
+    );
+
+    log.line("one");
+    log.line("two");
+
+    let warned = warnings.lock().unwrap();
+    assert_eq!(warned.len(), 1, "{warned:?}");
+    assert!(
+        warned[0].contains(&dir.join("run.log").display().to_string()),
+        "{warned:?}"
+    );
+}
+
+/// A command with no task to log into (`task init`, `file-findings --file`) must stay silent:
+/// there is no failure, just nothing to write to.
+#[test]
+fn no_target_and_no_identity_never_warns() {
+    let base = tempfile::tempdir().unwrap();
+    let warnings = Arc::new(Mutex::new(Vec::new()));
+    let sink = Arc::clone(&warnings);
+    let mut log = RunLog::new(
+        base.path(),
+        "# header".to_owned(),
+        Vec::new(),
+        None,
+        clock(),
+        stage("working"),
+        Box::new(move |msg: &str| sink.lock().unwrap().push(msg.to_owned())),
+    );
+
+    log.line("nothing to log");
+
+    assert!(warnings.lock().unwrap().is_empty());
 }
