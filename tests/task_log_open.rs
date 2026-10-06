@@ -40,3 +40,20 @@ fn the_opened_log_starts_with_this_processs_header_and_then_the_lines() {
     assert!(sha.bytes().all(|b| b.is_ascii_hexdigit()), "{text}");
     assert!(lines[1].ends_with("[-] hello"), "{text}");
 }
+
+#[test]
+fn a_log_that_cannot_be_opened_is_an_error_and_the_inert_log_writes_nothing() {
+    let nowhere = tempfile::tempdir().unwrap();
+    assert!(
+        task_log::open(
+            &nowhere.path().join("no-config"),
+            vec!["issue-1".to_owned()],
+            false
+        )
+        .is_err()
+    );
+
+    let before = fs::read_dir(".").unwrap().count();
+    task_log::none().lock().unwrap().line("hello");
+    assert_eq!(fs::read_dir(".").unwrap().count(), before);
+}

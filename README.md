@@ -293,6 +293,7 @@ the stage; follow a file live with `Get-Content <file> -Tail 20 -Wait`.
 | File | Written while | Meaning |
 |---|---|---|
 | `task.json` | every stage change | The record: stage, status, gate results, sandbox names, notes. It exists from the start of `task start`, before the sandbox is ready. |
+| `run.log` | every `sbxm task` command that names or starts the task | A copy of what the command printed (screen output and warnings), each line stamped with the time and the task's stage (`-` before it has one), under a header per invocation: the command line, the `sbxm` executable and its SHA-256, the commit if the build knows it, and the process id. It does not hold the output of the `sbx` child process (image pull and sandbox setup lines), which goes only to the terminal. Values that look like API keys or tokens (`sk-…`, `ghp_…`, `github_pat_…`, `AIza…`) are masked in it. `task rm` deletes it with the task. |
 | `gates.log` | the gates run | Each gate command with its exit code and the end of its output. A failure here marks the task `gates-failed` and stops it. |
 | `transcripts\` | each agent run ends | The worker's, fix round's and reviewer's session transcripts, copied out before a sandbox is removed. |
 | `result.md` | the worker ends | What the worker wrote about its change (copied from its clone). |

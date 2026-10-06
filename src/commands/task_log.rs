@@ -34,3 +34,16 @@ pub fn open(config_dir: &Path, ids: Vec<String>, discover: bool) -> Result<Arc<M
         Box::new(runlog::recorded_stage),
     ))))
 }
+
+/// A log that writes nowhere: for a command with no task folder to log into, and for a command
+/// whose log could not be opened (a missing config, say), which then reports that itself.
+pub fn none() -> Arc<Mutex<RunLog>> {
+    Arc::new(Mutex::new(RunLog::new(
+        Path::new("."),
+        String::new(),
+        Vec::new(),
+        None,
+        Box::new(now),
+        Box::new(runlog::recorded_stage),
+    )))
+}
