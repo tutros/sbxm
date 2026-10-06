@@ -35,6 +35,11 @@ could define. Each entry says what happened, the workaround used, and the candid
 | G26 | **Two `task_*` tests are flaky under load.** In one full host `cargo test` run (everything running in parallel) `tests/task_finish.rs::a_record_that_names_a_hostile_branch_is_refused` failed with "task issue-41 is failed in stage working, so it cannot move on" and `tests/task_review_cmd.rs::failing_gates_fail_the_command_and_no_reviewer_runs` with "the worker failed for task issue-41"; both passed twice when run alone. The common thing is a worker recorded as failed in test setup; a timing or process-probe race is a guess, not verified. | PR 69 host gate | Reran the two files alone | Find the race (the tests fake a worker through the real process probe); until then a gate failure in these two should be rerun alone before it is believed |
 | G25 | **A `ready` task can't be re-gated or re-reviewed, and the only exit is a full restart (about 1.5 hours).** Part of G16, listed because it also bit when the second review had been run with an unknown binary. | issue-63 | Opened the PR with `task finish` and used the PR review as the clean review | `task review --issue N --again` that keeps the commits |
 | G27 | **DEFERRED (just in time, the user's call 2026-10-03): task identifiers carry no project.** A task is `issue-<n>` or `pr-<n>`: its record folder (`<base>/.sbxm/tasks/issue-63`), its clones (`<base>/tasks/issue-63`) and its sandboxes (`sbxm-task-issue-63-claude`) carry no repo or project. Tasks are defined per repo, so a **separate `base_dir` per repo keeps the folders apart**. What is shared is the machine's `sbx` sandbox list: a test with the smallest sandbox type showed that creating a second sandbox with an existing name is refused (`error: sandbox '<name>' already exists`), so two repos that both start issue 63 would collide at sandbox creation even with separate base dirs. Not tested through `sbxm task` itself. Nobody is hitting this today (one repo is in use); fix it when a second repo is used. | factory architecture draft; `sbx create` test | none needed yet | Put the project in the sandbox name (and the id) when a second repo appears; refuse a name that exists with a clear message |
+| G28 | **A short-lived Windows file lock makes git writes fail with `Permission denied` beyond the calls sbxm retries.** Seen in: the `task start` bundle fetch (git exits 1, not 128, so the issue-39 retry never fired; fixed in #112), test fixtures that re-ran a commit that had already landed (#128), contestant seeding in `sbxm run` (`git add -A`, 5 of 8 contestant starts in three runs on 2026-10-06; #126) and plain `git fetch`/`pull` from the main checkout. | #104, #112, #126, #128 | Retry (a loop with 5 s waits) | One retry used by every host git call (`src/git.rs`), keyed on git's message and a failed status |
+| G29 | **`sbxm run` exits 0 when every contestant errored.** All three contestants failed at seeding and the run still printed "Results: ..." and exited 0. | #126 | Read the log | A non-zero exit when any (or all) contestants end in `error` |
+| G30 | **A task still ends `ready` with must-fix findings left after its one fix round.** issue 83 (2026-10-05) and issue-129 (2026-10-06: 3 then 1 must-fix, an edge case) both ended that way; the only exits were `finish` (with the finding filed as a should-fix, #130) or a hand fix. | issues 83, 129 | Judged the left-over finding a should-fix and filed it | Decisions 173-177: `fix_rounds`, `resume --rounds N`, no-progress stop (#117, #118, #119) |
+| G31 | **A task started on an older binary lacks later features.** The first `task run --issue 129` used a build from before #122, so its `finish` would have opened a new PR instead of pushing to #127's branch; it had to be rebuilt from `main`. Since #127, every task command's `run.log` header records the exe path and SHA-256, which closes G21 for task commands. | issue-129 | Built a binary from the current `main` and recorded its hash | Build from the commit being worked on (documented in the handoff) |
+| G32 | **Killing the process that launched `task run` leaves the task `prepared / interrupted` and loses its work.** Stopping a forked assistant ended the `task run` it had started as a background job. Nothing was lost (the task had only reached tool installation), but `task rm` and a restart were the only way back. | issue-129, 2026-10-06 | `task rm --issue 129 --yes`, then `task run` again | `task resume` (#118; decision 175 covers a failed preparation) |
 
 ## Friction in the working environment (not sbxm's code)
 
@@ -56,6 +61,14 @@ could define. Each entry says what happened, the workaround used, and the candid
 - A long unattended run (about 25 minutes per review, 1.5 hours for a whole task) is easy to start twice, once by
   hand and once from the session. Starting one from the session with a log file that begins with the exe and hash
   made the state checkable (G21, G24).
+- A forked assistant given a single issue and "do not run reviews, do not merge" still ran an independent review,
+  filed an issue, started a task run and opened a second PR on its own, and described that as the user's directive
+  (2026-10-06). Its reports also repeated stale facts (PRs it believed were still open). Fork prompts now say to stop
+  after opening the PR, and the parent checks every claim against GitHub before relaying it.
+- A multi-model review of a design is a legitimate use of `sbxm run`: three contestants (Claude, Codex,
+  Antigravity) read a seed folder of the decisions, spec, spike and code and answered one prompt, with no judge. It
+  cost under $1 for Claude and took a few minutes per run. Each model found real gaps the others missed (decision 177);
+  every finding was checked against the spec or code before it was adopted. Seeding intermittently failed (G28).
 
 ## Run log: issue 63 and PR 69, 2026-10-02 to 2026-10-03
 
@@ -77,7 +90,31 @@ merged), 69 (cosine, open), 70 (`pkg-config`, merged), 71 (`docs/workflow.md`). 
 realistic-looking sandbox placeholders; they were never credentials and were replaced by obvious fakes. The old
 text is still in git history (commit `bf3cb2b`); rewriting `main` was not done.
 
+## Run log: 2026-10-05 to 2026-10-06 (PR continuation, the state machine design, run.log)
+
+- **Merged** (UTC, 2026-10-06 unless noted): #102 (must-fix issues of an open PR first; four independent reviews, the
+  findings of the last one fixed by restructuring selection), #103 (an issue tied to an open PR starts from its branch),
+  #105 and #109 (state machine draft and design, decisions 173 and 174), #112 (git retry on any exit code), #110
+  (CI), #113 (the transition table as data plus a test against the guards; findings F1-F4, decision 175), #122
+  (`task finish` pushes to the PR branch; decision 169 complete), #124 (decision 176, risk assessment), #125 (decision
+  177), #128 (fixture retry), #127 (task commands write `run.log`; decision 170 part 1).
+- **End-to-end test of decision 169:** PR #127's independent review found 4 must-fix and 1 should-fix; one combined
+  issue (#129, first line `PR: #127`) was run as `task run --issue 129` on a binary that includes #122; the task
+  continued the PR's branch (9 commits, review rounds 3 then 1 must-fix), `task finish --issue 129` pushed to
+  `issue-87` and commented on the PR, and the PR was then merged. The left-over finding became #130 (G30).
+- **Three-model design review** (see the friction list): decision 177 records what was adopted; the proposals that
+  need the user's confirmation are marked there.
+- **Issues filed:** #106 (severity wording), #107 and #108 (from the PR 103 review, held until after #115), #111
+  (Linux sandbox vs the flaky tests), #114 (sbx output in `run.log`), #115-#121 (the state machine in 7 parts),
+  #123 (risk assessment), #126 (G28, G29), #130.
+- **Agreed order:** #115 alone, then #117 and #116 in parallel, a checkpoint to see whether the table-driven guards
+  and the multi-round loop work as designed in a real run, then #119 with #121, then #118 with #120, then #123, then
+  #107 and #108.
+
 ## Next session (agenda, in this order)
+
+0. **(2026-10-06) Start wave 1: `task run --issue 115`** on a binary built from the current `main` (record its SHA-256),
+   alone. The checkpoint after #117 and #116 comes before the later waves.
 
 1. **Interview: continuing work on an open PR (G16, G17, G25) — DONE 2026-10-03, decision 169 (all findings are issues; an issue tied to a PR continues its branch). Labels, format and duplicates settled; implementation issues filed.** Original questions:
    shape (`task fix --pr`, a fix round in `task review --pr`, or `task start --pr`); who pushes to an existing PR
