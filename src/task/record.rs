@@ -54,7 +54,7 @@ impl Stage {
     }
 
     /// The stages that may follow this one.
-    fn next(self) -> &'static [Stage] {
+    pub(crate) fn next(self) -> &'static [Stage] {
         match self {
             // A PR task has no worker: it goes to its gates (run in the reviewer's sandbox) or
             // straight to review.
@@ -68,7 +68,7 @@ impl Stage {
     }
 
     /// The statuses this stage can be in (first: where it starts).
-    fn statuses(self) -> &'static [Status] {
+    pub(crate) fn statuses(self) -> &'static [Status] {
         use Status::*;
         match self {
             Self::Prepared => &[Running, Failed],
@@ -80,7 +80,7 @@ impl Stage {
     }
 
     /// The statuses from which the task may move on.
-    fn done(self) -> &'static [Status] {
+    pub(crate) fn done(self) -> &'static [Status] {
         use Status::*;
         match self {
             Self::Prepared => &[Running],

@@ -5,6 +5,7 @@ pub mod config;
 pub mod findings;
 pub mod finish;
 pub mod gates;
+pub mod machine;
 pub mod pipeline;
 pub mod prompts;
 pub mod record;
