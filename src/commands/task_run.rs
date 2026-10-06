@@ -95,6 +95,9 @@ pub fn run(
     if let Some(model) = &opts.reviewer_model {
         check_model_flag("--reviewer-model", model).map_err(|e| anyhow!(e))?;
     }
+    if let Some(model) = &opts.worker_model {
+        check_model_flag("--worker-model", model).map_err(|e| anyhow!(e))?;
+    }
     if let Some(limit) = &opts.reviewer_time_limit {
         parse_duration("--reviewer-time-limit", limit).map_err(|e| anyhow!(e))?;
     }

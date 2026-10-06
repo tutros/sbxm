@@ -89,6 +89,8 @@ pub struct FakeBackend {
     exec_hook: Option<ExecHook>,
     exec_responder: Option<ExecResponder>,
     create_hook: Option<CreateHook>,
+    /// How many times `secret_services` was called; a read, so it's not in `log`.
+    secret_service_calls: Mutex<usize>,
 }
 
 /// Runs inside every `exec` (after the gate), so a test can play the agent
@@ -339,6 +341,11 @@ impl FakeBackend {
         self.log.lock().unwrap().clone()
     }
 
+    /// How many times `secret_services` was called so far.
+    pub fn secret_service_calls(&self) -> usize {
+        *self.secret_service_calls.lock().unwrap()
+    }
+
     fn record(&self, call: &str, name: &str) {
         self.log.lock().unwrap().push(format!("{call} {name}"));
     }
@@ -395,6 +402,7 @@ impl SandboxBackend for FakeBackend {
     }
 
     fn secret_services(&self) -> Result<Vec<String>> {
+        *self.secret_service_calls.lock().unwrap() += 1;
         Ok(self.secrets.clone())
     }
 

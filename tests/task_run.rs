@@ -216,6 +216,7 @@ fn an_empty_or_blank_reviewer_model_flag_is_refused_before_the_worker_starts() {
         let message = format!("{:#}", out.result.unwrap_err());
         assert!(message.contains("--reviewer-model"), "{bad:?}: {message}");
         assert!(b.creates().is_empty(), "{bad:?}");
+        assert_eq!(b.secret_service_calls(), 0, "{bad:?}");
     }
 }
 
@@ -232,6 +233,7 @@ fn an_empty_or_blank_worker_model_flag_is_refused_before_anything_happens() {
         let message = format!("{:#}", out.result.unwrap_err());
         assert!(message.contains("--worker-model"), "{bad:?}: {message}");
         assert!(b.creates().is_empty(), "{bad:?}");
+        assert_eq!(b.secret_service_calls(), 0, "{bad:?}");
     }
 }
 

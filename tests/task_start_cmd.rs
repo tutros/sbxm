@@ -356,6 +356,7 @@ fn an_empty_or_blank_worker_model_flag_is_refused_before_anything_happens() {
 
         assert!(message.contains("--worker-model"), "{bad:?}: {message}");
         assert!(backend.creates().is_empty(), "{bad:?}");
+        assert_eq!(backend.secret_service_calls(), 0, "{bad:?}");
         assert!(github.calls().is_empty(), "{bad:?}");
     }
 }
