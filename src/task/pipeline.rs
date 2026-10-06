@@ -1,6 +1,7 @@
 //! `sbxm task` orchestration, one function per phase (spec §5, §1). Every refusal happens before
 //! the first write or backend call; once folders are reserved, a failure removes them again.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -20,7 +21,7 @@ use super::review;
 use super::select::{self, Selection};
 use crate::backend::{CreateSpec, ExecSpec, SandboxBackend, Stdin};
 use crate::config::{GlobalConfig, Profile};
-use crate::github::{GitHubBackend, IssueText, PrInfo, PrState};
+use crate::github::{GitHubBackend, Issue, IssueText, PrInfo, PrState};
 use crate::harness::Harness;
 use crate::headless::{self, HeadlessOpts, RunStatus};
 use crate::run::kits::{self, HarnessKits, Overrides};
@@ -289,7 +290,13 @@ pub fn check_restartable(ctx: &Ctx, restarting: &[u32]) -> Result<()> {
         .filter(|r| r.kind == Kind::Issue && !restarting.contains(&r.number))
         .map(|r| r.number)
         .collect();
-    let selection = select::select(&open, &taken, Some(restarting), restarting.len());
+    let selection = select::select(
+        &open,
+        &taken,
+        Some(restarting),
+        restarting.len(),
+        &HashMap::new(),
+    );
     let mut problems: Vec<String> = selection
         .not_open
         .iter()
@@ -311,8 +318,48 @@ pub fn check_restartable(ctx: &Ctx, restarting: &[u32]) -> Result<()> {
     Ok(())
 }
 
-/// Chooses the issues to start (spec §8). With nothing to pick, the error says why for each.
+/// The state of every PR an open `must-fix` issue names on its first line (`PR: #n`), so selection
+/// can put those of an open PR first (decision 169). A PR that can't be read (deleted, a typo, a
+/// network error) is not an error here: it is left out of the map, `select` skips the issues that
+/// name it, and the warning says why, so one stale reference never stops the other issues and
+/// nothing starts whose PR isn't known to be open.
+fn must_fix_pr_states(
+    ctx: &Ctx,
+    open: &[Issue],
+    taken: &[u32],
+) -> (HashMap<u32, PrState>, Vec<String>) {
+    let mut named = select::needs_pr_state(open, taken);
+    named.sort_unstable();
+    let mut states = HashMap::new();
+    let mut warnings = Vec::new();
+    let mut unreadable: Vec<u32> = Vec::new();
+    for (pr, issue) in named {
+        if unreadable.contains(&pr) {
+            warnings.push(format!(
+                "#{issue}: PR #{pr} couldn't be read (see above); skipped"
+            ));
+        } else if let std::collections::hash_map::Entry::Vacant(slot) = states.entry(pr) {
+            match ctx.github.pr(ctx.repo, pr) {
+                Ok(info) => {
+                    slot.insert(info.state);
+                }
+                Err(e) => {
+                    unreadable.push(pr);
+                    warnings.push(format!("#{issue}: couldn't read PR #{pr} ({e:#}); skipped"));
+                }
+            }
+        }
+    }
+    (states, warnings)
+}
+/// Chooses the issues to start (spec §8) and refuses when there is nothing to pick.
 pub fn select_issues(ctx: &Ctx, explicit: Option<&[u32]>, workers: usize) -> Result<Selection> {
+    require_picks(choose_issues(ctx, explicit, workers)?)
+}
+
+/// Applies the selection rules and returns the result whether or not anything was picked, so a
+/// caller can show the warnings and skips before it refuses (see `require_picks`).
+pub fn choose_issues(ctx: &Ctx, explicit: Option<&[u32]>, workers: usize) -> Result<Selection> {
     let base = GlobalConfig::load(ctx.config_dir)?.base_dir;
     let open = ctx.github.issues_open(ctx.repo)?;
     let taken: Vec<u32> = record::load_all(&base)?
@@ -320,7 +367,18 @@ pub fn select_issues(ctx: &Ctx, explicit: Option<&[u32]>, workers: usize) -> Res
         .filter(|r| r.kind == Kind::Issue)
         .map(|r| r.number)
         .collect();
-    let selection = select::select(&open, &taken, explicit, workers);
+    let (prs, warnings) = if explicit.is_none() {
+        must_fix_pr_states(ctx, &open, &taken)
+    } else {
+        (HashMap::new(), Vec::new())
+    };
+    let mut selection = select::select(&open, &taken, explicit, workers, &prs);
+    selection.warnings = warnings;
+    Ok(selection)
+}
+
+/// With nothing to pick, the error says why for each candidate.
+pub fn require_picks(selection: Selection) -> Result<Selection> {
     if selection.picks.is_empty() {
         let mut lines: Vec<String> = selection
             .not_open
