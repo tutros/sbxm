@@ -1,7 +1,9 @@
-//! The task state machine as data (spike for decisions 173 and 174; spec
-//! `sdlc/specs/task-state-machine.md` sections 2 and 5.2). Nothing here is used by the commands
-//! yet: `tests/task_machine.rs` compares this table with the existing guards, and
-//! `sdlc/spikes/state-table.md` records what differs.
+//! The task state machine as data (decisions 173, 174, 175; spec `sdlc/specs/task-state-machine.md`
+//! sections 2 and 5.2). `check_can_gate`, `check_can_review`, `check_can_review_pr`,
+//! `check_can_finish` and `finish::plan_removal` all decide through `verdict`/`row_for`, and
+//! `Record::advance` enforces the same moves directly (spike `sdlc/spikes/state-table.md`,
+//! migration step 2). `tests/task_machine.rs` walks every (state, event) pair and checks that the
+//! table and those commands still agree.
 
 use super::record::{Kind, Stage, Status};
 
@@ -46,6 +48,11 @@ pub struct Row {
     pub live: Live,
     pub kinds: &'static [Kind],
     pub event: Event,
+    /// Where the move leaves the task; `None` for a row that does not change the stage by itself
+    /// (`rm`, which removes the task instead).
+    pub to: Option<Stage>,
+    /// What taking this row does, in words (descriptive only; no driver reads this yet).
+    pub action: &'static str,
 }
 
 impl Row {
@@ -83,7 +90,9 @@ const NOT_RUNNING: &[Status] = &[
     Status::Ok,
 ];
 
-/// Spec section 5.2 (today's rows) and section 2 (the operations per state).
+/// Spec section 5.2 (today's rows) and section 2 (the operations per state). Checked top to
+/// bottom; the first row that matches wins ([`row_for`]), though a well-formed table never has
+/// two rows match the same (state, event) pair to begin with (`tests/task_machine.rs` checks it).
 pub const TABLE: &[Row] = &[
     // The pipeline's moves (`Record::advance`).
     Row {
@@ -92,6 +101,8 @@ pub const TABLE: &[Row] = &[
         live: Live::Any,
         kinds: ISSUE,
         event: Event::Advance(Stage::Working),
+        to: Some(Stage::Working),
+        action: "run the worker",
     },
     Row {
         stages: &[Stage::Prepared],
@@ -99,6 +110,18 @@ pub const TABLE: &[Row] = &[
         live: Live::Any,
         kinds: PR,
         event: Event::Advance(Stage::Gating),
+        to: Some(Stage::Gating),
+        action: "run the gates",
+    },
+    // F3 (decision 175): a PR task with no gates configured goes straight to review.
+    Row {
+        stages: &[Stage::Prepared],
+        statuses: &[Status::Running],
+        live: Live::Any,
+        kinds: PR,
+        event: Event::Advance(Stage::Reviewing),
+        to: Some(Stage::Reviewing),
+        action: "run the reviewer",
     },
     Row {
         stages: &[Stage::Working],
@@ -106,6 +129,8 @@ pub const TABLE: &[Row] = &[
         live: Live::Any,
         kinds: ISSUE,
         event: Event::Advance(Stage::Gating),
+        to: Some(Stage::Gating),
+        action: "run the gates",
     },
     Row {
         stages: &[Stage::Gating],
@@ -113,6 +138,8 @@ pub const TABLE: &[Row] = &[
         live: Live::Any,
         kinds: BOTH,
         event: Event::Advance(Stage::Reviewing),
+        to: Some(Stage::Reviewing),
+        action: "run the reviewer",
     },
     Row {
         stages: &[Stage::Reviewing],
@@ -120,6 +147,8 @@ pub const TABLE: &[Row] = &[
         live: Live::Any,
         kinds: ISSUE,
         event: Event::Advance(Stage::Fixing),
+        to: Some(Stage::Fixing),
+        action: "run the fix round",
     },
     Row {
         stages: &[Stage::Reviewing],
@@ -127,6 +156,8 @@ pub const TABLE: &[Row] = &[
         live: Live::Any,
         kinds: BOTH,
         event: Event::Advance(Stage::Ready),
+        to: Some(Stage::Ready),
+        action: "record the task as ready",
     },
     Row {
         stages: &[Stage::Fixing],
@@ -134,6 +165,8 @@ pub const TABLE: &[Row] = &[
         live: Live::Any,
         kinds: ISSUE,
         event: Event::Advance(Stage::Gating),
+        to: Some(Stage::Gating),
+        action: "run the gates",
     },
     Row {
         stages: &[Stage::Ready],
@@ -141,6 +174,8 @@ pub const TABLE: &[Row] = &[
         live: Live::Any,
         kinds: ISSUE,
         event: Event::Advance(Stage::Finished),
+        to: Some(Stage::Finished),
+        action: "push the branch and open the PR",
     },
     // `task gates` (issue tasks only).
     Row {
@@ -149,6 +184,8 @@ pub const TABLE: &[Row] = &[
         live: Live::Any,
         kinds: ISSUE,
         event: Event::Gates,
+        to: Some(Stage::Gating),
+        action: "run the gates",
     },
     Row {
         stages: &[Stage::Gating],
@@ -156,6 +193,8 @@ pub const TABLE: &[Row] = &[
         live: Live::Any,
         kinds: ISSUE,
         event: Event::Gates,
+        to: Some(Stage::Gating),
+        action: "re-run the gates",
     },
     Row {
         stages: &[Stage::Gating],
@@ -163,6 +202,8 @@ pub const TABLE: &[Row] = &[
         live: Live::Interrupted,
         kinds: ISSUE,
         event: Event::Gates,
+        to: Some(Stage::Gating),
+        action: "re-run the abandoned gates",
     },
     // `task review`, issue tasks: after the worker or fix round, after gates, or retrying a failed review.
     Row {
@@ -171,6 +212,8 @@ pub const TABLE: &[Row] = &[
         live: Live::Any,
         kinds: ISSUE,
         event: Event::Review,
+        to: Some(Stage::Reviewing),
+        action: "run the gates, then the reviewer",
     },
     Row {
         stages: &[Stage::Gating],
@@ -178,6 +221,8 @@ pub const TABLE: &[Row] = &[
         live: Live::Any,
         kinds: ISSUE,
         event: Event::Review,
+        to: Some(Stage::Reviewing),
+        action: "run the reviewer",
     },
     Row {
         stages: &[Stage::Gating],
@@ -185,6 +230,8 @@ pub const TABLE: &[Row] = &[
         live: Live::Interrupted,
         kinds: ISSUE,
         event: Event::Review,
+        to: Some(Stage::Reviewing),
+        action: "re-run the abandoned gates, then the reviewer",
     },
     Row {
         stages: &[Stage::Reviewing],
@@ -192,6 +239,8 @@ pub const TABLE: &[Row] = &[
         live: Live::Any,
         kinds: ISSUE,
         event: Event::Review,
+        to: Some(Stage::Reviewing),
+        action: "retry the reviewer",
     },
     // `task review --pr`: a PR task has no worker; it starts prepared, or after gates, or retries a failed review.
     Row {
@@ -200,6 +249,8 @@ pub const TABLE: &[Row] = &[
         live: Live::Any,
         kinds: PR,
         event: Event::Review,
+        to: Some(Stage::Gating),
+        action: "run the gates, then the reviewer",
     },
     Row {
         stages: &[Stage::Gating],
@@ -207,6 +258,8 @@ pub const TABLE: &[Row] = &[
         live: Live::Any,
         kinds: PR,
         event: Event::Review,
+        to: Some(Stage::Reviewing),
+        action: "run the reviewer",
     },
     Row {
         stages: &[Stage::Reviewing],
@@ -214,6 +267,8 @@ pub const TABLE: &[Row] = &[
         live: Live::Any,
         kinds: PR,
         event: Event::Review,
+        to: Some(Stage::Reviewing),
+        action: "retry the reviewer",
     },
     // `task finish`.
     Row {
@@ -222,6 +277,8 @@ pub const TABLE: &[Row] = &[
         live: Live::Any,
         kinds: ISSUE,
         event: Event::Finish,
+        to: Some(Stage::Finished),
+        action: "push the branch and open the PR",
     },
     // `task rm`: anything that is not running, or running with its process gone.
     Row {
@@ -230,6 +287,8 @@ pub const TABLE: &[Row] = &[
         live: Live::Any,
         kinds: BOTH,
         event: Event::Rm,
+        to: None,
+        action: "remove the task's folders and sandboxes",
     },
     Row {
         stages: &STAGES,
@@ -237,12 +296,27 @@ pub const TABLE: &[Row] = &[
         live: Live::Interrupted,
         kinds: BOTH,
         event: Event::Rm,
+        to: None,
+        action: "remove the task's folders and sandboxes",
     },
 ];
 
+/// The first row that allows `event` in `state` (rows are checked top to bottom).
+pub fn row_for(state: &State, event: Event) -> Option<&'static Row> {
+    TABLE.iter().find(|row| row.allows(state, event))
+}
+
+/// Every row that allows `event` in `state`; at most one in a well-formed table.
+pub fn matching(state: &State, event: Event) -> Vec<&'static Row> {
+    TABLE
+        .iter()
+        .filter(|row| row.allows(state, event))
+        .collect()
+}
+
 /// Whether the table allows `event` in `state`.
 pub fn verdict(state: &State, event: Event) -> bool {
-    TABLE.iter().any(|row| row.allows(state, event))
+    row_for(state, event).is_some()
 }
 
 /// Every state a task of `kind` can be recorded in: each stage with each of its statuses, and a

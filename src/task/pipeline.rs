@@ -11,6 +11,7 @@ use std::time::Instant;
 
 use super::config::TaskConfig;
 use super::gates::{self, GateOutcome, HostRunner};
+use super::machine;
 use super::prompts::{self, Role};
 use super::record::{
     self, Agent, GateResult, GateRun, Kind, NewTask, PrBranch, Process, ProcessProbe, Record,
@@ -86,13 +87,21 @@ impl Prepared {
 }
 
 /// Whether gates may run on this task now (`task gates`): after the worker or the fix round has
-/// finished, or again after earlier gates ended. The reason for a refusal says what to do.
+/// finished, or again after earlier gates ended. Decided through `machine::TABLE`; the reason for
+/// a refusal says what to do.
 pub fn check_can_gate(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
     let id = &task.id;
     let number = task.number;
+    let state = machine::State {
+        stage: task.stage,
+        status: task.status,
+        interrupted: task.is_interrupted(probe),
+        kind: task.kind,
+    };
+    if machine::verdict(&state, machine::Event::Gates) {
+        return Ok(());
+    }
     match (task.stage, task.status) {
-        (Stage::Working | Stage::Fixing, Status::Completed | Status::TimedOut)
-        | (Stage::Gating, Status::Passed | Status::GatesFailed) => Ok(()),
         (Stage::Working | Stage::Fixing, Status::Running) => {
             if task.is_interrupted(probe) {
                 bail!(
@@ -109,8 +118,6 @@ pub fn check_can_gate(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
                 "the worker failed for task {id}, so there is nothing to gate; see `sbxm task status --issue {number}`"
             )
         }
-        // Gates whose sbxm process is gone never finished: `run_gates` gives them up and re-runs.
-        (Stage::Gating, Status::Running) if task.is_interrupted(probe) => Ok(()),
         (Stage::Gating, _) => bail!(
             "gates are running for task {id}, or were interrupted; see `sbxm task status --issue {number}`"
         ),
@@ -820,7 +827,11 @@ pub fn run_gates(
         .context("the task has no worker")?
         .sandbox
         .clone();
-    if prepared.record.abandon_interrupted_gates(env.probe) {
+    let restarted =
+        prepared
+            .record
+            .abandon_interrupted_gates(now(), Process::current(env.probe), env.probe);
+    if restarted {
         prepared
             .record
             .notes
@@ -840,9 +851,11 @@ pub fn run_gates(
             prepared.record.number
         );
     }
-    prepared
-        .record
-        .begin_gating(now(), Process::current(env.probe))?;
+    if !restarted {
+        prepared
+            .record
+            .begin_gating(now(), Process::current(env.probe))?;
+    }
     record::write(&prepared.meta, &prepared.record)?;
 
     let mut outcomes = Vec::new();
@@ -1237,14 +1250,21 @@ const REVIEW_CAP: u64 = 1024 * 1024;
 const FIX_PROMPT: &str =
     "Read the file .sbxm-task/fix-prompt.md in the current directory and follow it exactly.";
 
-/// Whether a review may start now (`task review`). The reason for a refusal says what to do.
+/// Whether a review may start now (`task review`). Decided through `machine::TABLE`; the reason
+/// for a refusal says what to do.
 pub fn check_can_review(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
     let id = &task.id;
     let number = task.number;
+    let state = machine::State {
+        stage: task.stage,
+        status: task.status,
+        interrupted: task.is_interrupted(probe),
+        kind: task.kind,
+    };
+    if machine::verdict(&state, machine::Event::Review) {
+        return Ok(());
+    }
     match (task.stage, task.status) {
-        (Stage::Working | Stage::Fixing, Status::Completed | Status::TimedOut)
-        | (Stage::Gating, Status::Passed | Status::GatesFailed)
-        | (Stage::Reviewing, Status::Failed) => Ok(()),
         (Stage::Working | Stage::Fixing, Status::Running) => {
             if task.is_interrupted(probe) {
                 bail!(
@@ -1259,8 +1279,6 @@ pub fn check_can_review(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
         (Stage::Working | Stage::Fixing, _) => bail!(
             "the worker failed for task {id}, so there is nothing to review; see `sbxm task status --issue {number}`"
         ),
-        // Gates whose process is gone are given up and run again by the review itself.
-        (Stage::Gating, Status::Running) if task.is_interrupted(probe) => Ok(()),
         (Stage::Gating, _) => bail!(
             "gates are running for task {id}, or were interrupted; see `sbxm task status --issue {number}`"
         ),
@@ -1358,10 +1376,18 @@ pub struct PrReview {
 /// Whether a pull request's review may start (or be tried again) now.
 pub fn check_can_review_pr(task: &Record) -> Result<()> {
     let (id, number) = (&task.id, task.number);
+    let state = machine::State {
+        stage: task.stage,
+        status: task.status,
+        // This check never sees a probe (no command retries an interrupted PR gating run yet;
+        // see `sdlc/spikes/state-table.md` dead end T3/T9 for PR tasks).
+        interrupted: false,
+        kind: task.kind,
+    };
+    if machine::verdict(&state, machine::Event::Review) {
+        return Ok(());
+    }
     match (task.stage, task.status) {
-        (Stage::Prepared, Status::Running)
-        | (Stage::Gating, Status::Passed | Status::GatesFailed)
-        | (Stage::Reviewing, Status::Failed) => Ok(()),
         (stage @ (Stage::Ready | Stage::Finished), _) => bail!(
             "task {id} is already {}; its review is review.md in the task folder; to review the PR \
              again after it changed, run `sbxm task rm --pr {number}` first",
