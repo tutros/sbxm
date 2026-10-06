@@ -184,16 +184,18 @@ fn main() -> anyhow::Result<()> {
                 (None, None) => None,
             };
             let global = config::GlobalConfig::load(&config::config_dir()?)?;
-            print!(
-                "{}",
-                commands::task_status::render(
-                    &global.base_dir,
-                    which,
-                    json,
-                    &task::record::SystemProbe,
-                )?
+            let rendered = commands::task_status::render(
+                &global.base_dir,
+                which,
+                json,
+                &task::record::SystemProbe,
             );
-            Ok(())
+            let ids = rendered
+                .as_ref()
+                .map_or_else(|_| Vec::new(), |(_, ids)| ids.clone());
+            let (mut out, warn) = task_writers(ids, false)?;
+            let result = rendered.and_then(|(text, _)| write!(out, "{text}").map_err(Into::into));
+            finish_task(result, out, warn)
         }
         Command::Task {
             command:
