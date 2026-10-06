@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
+use super::machine;
 use super::pipeline::Prepared;
 use super::record::{self, Process, ProcessProbe, Record, Status};
 use super::repo;
@@ -355,17 +356,29 @@ pub struct Finished {
     pub continued: Option<u32>,
 }
 
-/// Whether the task may be finished now. The reason for a refusal says what to do.
+/// Whether the task may be finished now. Decided through `machine::TABLE` once the `pr` field (not
+/// part of a table state; see `sdlc/spikes/state-table.md`) is checked. The reason for a refusal
+/// says what to do.
 pub fn check_can_finish(task: &Record) -> Result<()> {
     let (id, number) = (&task.id, task.number);
     if let Some(url) = &task.pr {
         bail!("task {id} already has a PR, {url}; there is nothing left to finish");
     }
+    let state = machine::State {
+        stage: task.stage,
+        status: task.status,
+        // No command retries an interrupted task towards `finish` yet, so this check never sees
+        // one; `finish` itself only ever runs on `ready`, never on a `running` status.
+        interrupted: false,
+        kind: task.kind,
+    };
+    if machine::verdict(&state, machine::Event::Finish) {
+        return Ok(());
+    }
     if task.kind != record::Kind::Issue {
         bail!("task {id} is a PR review; only an issue's task can be finished");
     }
     match (task.stage, task.status) {
-        (record::Stage::Ready, Status::Ok) => Ok(()),
         (record::Stage::Finished, _) => {
             bail!("task {id} is already finished; its PR is recorded in task.json")
         }
