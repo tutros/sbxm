@@ -74,6 +74,9 @@ pub struct RunLog {
     history: Vec<(u64, String)>,
     /// How much of `history` each task's log already has.
     caught_up: BTreeMap<String, usize>,
+    /// Ids already given this invocation's header, so a `run.log` left over from an earlier
+    /// invocation still gets a fresh header on its first write, not just a file that didn't exist.
+    headered: BTreeSet<String>,
     /// Told once, not once per line, when a log can't be appended to (an actual I/O failure, not
     /// a folder that merely doesn't exist yet): the exact text to show the user.
     warn: Box<dyn FnMut(&str) + Send>,
@@ -102,6 +105,7 @@ impl RunLog {
             foreign: BTreeSet::new(),
             history: Vec::new(),
             caught_up: BTreeMap::new(),
+            headered: BTreeSet::new(),
             warn,
             warned: BTreeSet::new(),
         }
@@ -154,7 +158,10 @@ impl RunLog {
     }
 
     /// Appends the newest line to the task's log. A log made now starts with the header and the
-    /// lines printed before it could be made; a folder that was removed is left removed.
+    /// lines printed before it could be made; a folder that was removed is left removed. A
+    /// `run.log` left over from an earlier invocation still gets this invocation's own header, on
+    /// its first write here, so each invocation's errors stay traceable to their own header
+    /// (issue 129 M-1) instead of trailing silently after a previous one's.
     fn write_to(&mut self, id: &str) -> std::io::Result<()> {
         let dir = record::task_dir(&self.base, id);
         if !dir.is_dir() {
@@ -162,6 +169,7 @@ impl RunLog {
         }
         let path = dir.join("run.log");
         let newest = self.history.len() - 1;
+        let first_write_this_invocation = self.headered.insert(id.to_owned());
         let mut text = String::new();
         if !path.exists() {
             text.push_str(&self.header);
@@ -173,6 +181,9 @@ impl RunLog {
                     format_timestamp(*secs)
                 ));
             }
+        } else if first_write_this_invocation {
+            text.push_str(&self.header);
+            text.push('\n');
         }
         let (secs, line) = &self.history[newest];
         text.push_str(&format!(
