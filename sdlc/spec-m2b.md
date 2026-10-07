@@ -94,7 +94,7 @@ Sandbox names: `sbxm-task-<id>-<harness>` (worker), `sbxm-task-<id>-review-<harn
   "worker": {"harness": "claude", "model": null, "sandbox": "sbxm-task-issue-41-claude",
              "workspace": "E:/.../tasks/issue-41", "run": {"status": "completed", "usage": {}, "duration_s": 0}},
   "reviewer": null,
-  "fix_round": false,
+  "round": 0, "fix_rounds": 3,
   "gates": [{"phase": "after-worker", "tier": "sandbox", "command": "cargo test", "exit": 0, "passed": true}],
   "related": [], "hooks": {}, "sbxm_version": "0.x", "config_hash": "..."
 }

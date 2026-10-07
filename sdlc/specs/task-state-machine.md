@@ -8,6 +8,14 @@ was never saved to a file. It is derived from the code (`src/task/record.rs` `St
 describes what sbxm does today. Decision 169(f) ("a task's own `ready` state is not re-entered") is the choice this
 draft questions.
 
+**Issue 117 (part 3 of 7) built the `round`/`fix_rounds`/`stopped` fields, the multi-round
+review-fix-review loop (`pipeline::review_issue`), the narrow-then-one-full reviewer scoping
+(`Record::last_reviewed_commit`), and the gate-failure-feeds-a-fix-round move (`Stage::Gating`
+`GatesFailed` to `Fixing`, `Record::done_for`) described in section 5.2 — everything in that section
+except the no-progress/`repeat-finding` and `repeat-gate-failure` stops (173(a)(d)(e), 174(a); left
+for the no-progress issue), `resume`, draft PRs, and the `spec` source, which are still open per
+section 5.5.**
+
 ## 1. States of an issue task (`stage` / `status`)
 
 Legal moves (`Stage::next`): prepared -> working -> gating -> reviewing -> (fixing -> gating -> reviewing) -> ready -> finished.
@@ -139,6 +147,7 @@ kept here as the design for issues #117-121 to build toward.
 | prepared running (pr) | advance | reviewing | run the reviewer |
 | working completed/timed-out (issue) | advance | gating | run the gates |
 | gating passed | advance | reviewing | run the reviewer |
+| gating gates-failed (issue) | advance | fixing | run the fix round for the gate's own output |
 | reviewing completed (issue) | advance | fixing | run the fix round |
 | reviewing completed | advance | ready | record the task as ready |
 | fixing completed/timed-out (issue) | advance | gating | run the gates |

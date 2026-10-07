@@ -20,6 +20,14 @@ fn config(reviewer: &str) -> Fixture {
     ))
 }
 
+/// No fix rounds to spend: a gate failure stops the task at once instead of feeding one.
+fn config_no_fix_rounds(reviewer: &str) -> Fixture {
+    fixture_with(&format!(
+        "[sandbox]\nprofile = \"default\"\n\n[worker]\nfix_rounds = 0\n\n\
+         [gates]\nsandbox = [\"cargo test\"]\n\n[reviewer]\nharness = \"{reviewer}\"\n"
+    ))
+}
+
 const CLEAN: &str = "Must-fix findings: 0\n\nNothing found.\n";
 const ONE: &str = "Must-fix findings: 1\n\n1. must-fix: a.txt:1 wrong.\n";
 
@@ -159,7 +167,7 @@ fn findings_left_after_the_fix_round_are_reported_and_the_command_still_succeeds
 
 #[test]
 fn failing_gates_fail_the_command_and_no_reviewer_runs() {
-    let f = config("codex");
+    let f = config_no_fix_rounds("codex");
     let good = backend(&f, &[CLEAN]);
     worked_task(&f, &good);
     let red = FakeBackend::with_secrets(&["anthropic", "openai"]).with_exec_output_matching(
