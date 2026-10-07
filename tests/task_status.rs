@@ -176,6 +176,67 @@ fn json_prints_the_records_with_an_interrupted_flag() {
     assert_eq!(tasks[1]["stage"], "working");
 }
 
+fn spec_task() -> Record {
+    Record::new(
+        &NewTask {
+            kind: Kind::Spec,
+            number: 0,
+            repo: "o/r",
+            title: "idea.md",
+            base: "main",
+            branch: "spec-idea-abc123",
+            config_hash: "h",
+            id: Some("spec-idea-abc123"),
+        },
+        T0,
+        Process::new(1, T0),
+    )
+}
+
+#[test]
+fn a_persisted_spec_task_shows_in_the_plain_listing() {
+    let base = tempfile::tempdir().unwrap();
+    save(base.path(), &spec_task());
+
+    let (text, ids) = task_status::render(base.path(), None, false, &Probe(Some(T0))).unwrap();
+
+    assert_eq!(ids, vec!["spec-idea-abc123".to_owned()]);
+    assert!(text.starts_with("spec-idea-abc123 "), "{text}");
+    assert!(
+        text.contains("prepared") && text.contains("idea.md"),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_persisted_spec_task_shows_in_the_json_listing() {
+    let base = tempfile::tempdir().unwrap();
+    save(base.path(), &spec_task());
+
+    let (text, _ids) = task_status::render(base.path(), None, true, &Probe(Some(T0))).unwrap();
+    let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+
+    let tasks = value.as_array().unwrap();
+    assert_eq!(tasks.len(), 1);
+    assert_eq!(tasks[0]["id"], "spec-idea-abc123");
+    assert_eq!(tasks[0]["kind"], "spec");
+    assert_eq!(tasks[0]["interrupted"], false);
+}
+
+#[test]
+fn filtering_status_by_spec_is_refused_and_says_what_to_do() {
+    let base = tempfile::tempdir().unwrap();
+    save(base.path(), &spec_task());
+
+    let error = task_status::render(base.path(), Some((Kind::Spec, 0)), false, &Probe(Some(T0)))
+        .unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("run it without a filter"),
+        "{error:#}"
+    );
+}
+
 #[test]
 fn the_cli_refuses_both_selectors_at_once() {
     let config = tempfile::tempdir().unwrap();

@@ -176,6 +176,32 @@ fn a_running_task_is_refused_and_nothing_is_asked_or_deleted() {
 }
 
 #[test]
+fn a_spec_task_is_refused_and_no_backend_call_or_question_happens() {
+    let f = fixture();
+    let b = backend();
+    let confirm = FakeConfirm::new(true, true);
+    let mut out = Vec::new();
+
+    let result = run(
+        &f.env.config_dir(),
+        &Options {
+            kind: Kind::Spec,
+            number: 0,
+            yes: true,
+        },
+        &b,
+        &Probe,
+        &confirm,
+        &mut out,
+    );
+
+    assert!(format!("{:#}", result.unwrap_err()).contains("doesn't take a spec task yet"));
+    assert!(confirm.prompts.borrow().is_empty());
+    assert!(b.log().is_empty(), "{:?}", b.log());
+    assert!(out.is_empty());
+}
+
+#[test]
 fn an_unknown_task_says_so_and_a_failed_removal_fails_the_command() {
     let f = fixture();
     let (result, _) = rm(&f, 41, true, &backend(), &FakeConfirm::new(true, true));

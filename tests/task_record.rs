@@ -4,7 +4,8 @@
 use std::fs;
 
 use sbxm::task::record::{
-    self, Kind, NewTask, Process, ProcessProbe, Record, SCHEMA, Stage, Status, is_valid_id, spec_id,
+    self, Kind, NewTask, Process, ProcessProbe, Record, SCHEMA, Stage, Status, is_valid_id,
+    spec_id, spec_id_for_canonical,
 };
 
 struct Probe(Option<u64>);
@@ -744,6 +745,56 @@ fn spec_id_differs_for_files_with_the_same_name_in_different_folders() {
 
     assert_ne!(id_a, id_b);
     assert!(id_a.starts_with("spec-idea-") && id_b.starts_with("spec-idea-"));
+}
+
+#[test]
+fn the_pure_spec_id_gives_the_known_hash_without_touching_the_filesystem() {
+    // The path does not exist: the function only sanitizes the name and hashes the given path.
+    let path = std::path::Path::new("/no/such/dir/idea.md");
+
+    let (id, title) = spec_id_for_canonical(path).unwrap();
+
+    // First 6 hex digits of the SHA-256 of "/no/such/dir/idea.md".
+    assert_eq!(id, "spec-idea-9e40e1");
+    assert_eq!(title, "idea.md");
+    assert_eq!(
+        spec_id_for_canonical(path).unwrap().0,
+        id,
+        "same input, same id"
+    );
+}
+
+#[cfg(any(unix, windows))]
+fn path_with_odd_unit(unit: u16) -> std::path::PathBuf {
+    // A directory name that is not valid text, differing from its twin in one unit only.
+    #[cfg(unix)]
+    let odd: std::ffi::OsString = {
+        use std::os::unix::ffi::OsStringExt;
+        std::ffi::OsString::from_vec(vec![b'd', unit as u8])
+    };
+    #[cfg(windows)]
+    let odd: std::ffi::OsString = {
+        use std::os::windows::ffi::OsStringExt;
+        std::ffi::OsString::from_wide(&[u16::from(b'd'), unit])
+    };
+    std::path::Path::new("/specs").join(odd).join("idea.md")
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn spec_ids_differ_for_paths_that_differ_only_in_non_text_units() {
+    // Unix: bytes 0xfe and 0xff; Windows: unpaired surrogates 0xd800 and 0xd801. A lossy text
+    // conversion maps both pairs to the same replacement character.
+    #[cfg(unix)]
+    let (first, second) = (0xfe, 0xff);
+    #[cfg(windows)]
+    let (first, second) = (0xd800, 0xd801);
+
+    let (a, _) = spec_id_for_canonical(&path_with_odd_unit(first)).unwrap();
+    let (b, _) = spec_id_for_canonical(&path_with_odd_unit(second)).unwrap();
+
+    assert_ne!(a, b);
+    assert!(is_valid_id(&a) && is_valid_id(&b), "{a} {b}");
 }
 
 #[test]

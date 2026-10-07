@@ -176,6 +176,21 @@ fn a_task_that_does_not_exist_is_refused_before_any_github_call() {
 }
 
 #[test]
+fn a_spec_task_is_refused_before_any_github_call() {
+    let base = TempDir::new().unwrap();
+    let gh = github();
+
+    let (result, out) = run(base.path(), Kind::Spec, 0, None, true, &gh);
+
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "sbxm task file-findings doesn't take a spec task yet"
+    );
+    assert!(gh.calls().is_empty(), "{:?}", gh.calls());
+    assert!(out.is_empty(), "{out}");
+}
+
+#[test]
 fn a_task_without_a_review_says_how_to_get_one() {
     let base = TempDir::new().unwrap();
     task(base.path(), Kind::Issue, 12, "o/r", None);

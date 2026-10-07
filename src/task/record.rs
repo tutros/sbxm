@@ -593,6 +593,13 @@ fn sanitize_spec_name(stem: &str) -> String {
 pub fn spec_id(path: &Path) -> Result<(String, String)> {
     let canonical =
         fs::canonicalize(path).with_context(|| format!("cannot read {}", path.display()))?;
+    spec_id_for_canonical(&canonical)
+}
+
+/// The pure part of [`spec_id`]: no filesystem access, so the same canonical path always gives the
+/// same id whether or not it exists. The hash covers the path's raw encoded bytes, not a lossy text
+/// conversion, so two paths that differ only in bytes that aren't valid text never share an id.
+pub fn spec_id_for_canonical(canonical: &Path) -> Result<(String, String)> {
     let file_name = canonical
         .file_name()
         .and_then(|n| n.to_str())
@@ -606,10 +613,10 @@ pub fn spec_id(path: &Path) -> Result<(String, String)> {
     crate::project::validate_name(&name).map_err(|e| {
         anyhow::anyhow!(
             "{}: its name sanitizes to {name:?}, which isn't a usable task id ({e:#})",
-            path.display()
+            canonical.display()
         )
     })?;
-    let digest = Sha256::digest(canonical.to_string_lossy().as_bytes());
+    let digest = Sha256::digest(canonical.as_os_str().as_encoded_bytes());
     let id = format!(
         "spec-{name}-{:02x}{:02x}{:02x}",
         digest[0], digest[1], digest[2]
