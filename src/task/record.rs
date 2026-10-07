@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
 use crate::run::results::format_timestamp;
 
@@ -25,6 +26,10 @@ fn default_fix_rounds() -> u32 {
 pub enum Kind {
     Issue,
     Pr,
+    /// A task whose source is a file instead of a GitHub issue (decision 174(d), issue 142): the
+    /// id is given explicitly (`spec-<name>-<hash>`, see [`spec_id`]), never derived from
+    /// `number`, which is unused (always 0).
+    Spec,
 }
 
 impl Kind {
@@ -32,6 +37,7 @@ impl Kind {
         match self {
             Self::Issue => "issue",
             Self::Pr => "pr",
+            Self::Spec => "spec",
         }
     }
 }
@@ -61,25 +67,27 @@ impl Stage {
         }
     }
 
-    /// The stages that may follow this one, for a task of `kind`: an issue task must pass through
-    /// its worker, and a PR task (no worker, no fix round, never finished: spec section 5.2) never
-    /// reaches `working`, `fixing` or `finished`. A failed gate feeds a fix round too, for an
-    /// issue task with rounds left (issue 117, decision 173(d)); a PR task's gates have no such
-    /// move since its `fix_rounds` is always 0.
+    /// The stages that may follow this one, for a task of `kind`: an issue or a spec task must
+    /// pass through its worker, and a PR task (no worker, no fix round, never finished: spec
+    /// section 5.2) never reaches `working`, `fixing` or `finished`. A failed gate feeds a fix
+    /// round too, for a task with a worker and rounds left (issue 117, decision 173(d)); a PR
+    /// task's gates have no such move since its `fix_rounds` is always 0. A spec task reaches
+    /// `ready` like an issue task, but not `finished`: `finish` is refused until a sink lands
+    /// (decision 174(e), issue 142), so there is no row from `ready` to `finished` for it yet.
     pub(crate) fn next(self, kind: Kind) -> &'static [Stage] {
         match (self, kind) {
-            (Self::Prepared, Kind::Issue) => &[Self::Working],
+            (Self::Prepared, Kind::Issue | Kind::Spec) => &[Self::Working],
             // A PR task has no worker: it goes to its gates (run in the reviewer's sandbox) or
             // straight to review when none are configured (decision 175, finding F3).
             (Self::Prepared, Kind::Pr) => &[Self::Gating, Self::Reviewing],
-            (Self::Working | Self::Fixing, Kind::Issue) => &[Self::Gating],
+            (Self::Working | Self::Fixing, Kind::Issue | Kind::Spec) => &[Self::Gating],
             (Self::Working | Self::Fixing, Kind::Pr) => &[],
-            (Self::Gating, Kind::Issue) => &[Self::Reviewing, Self::Fixing],
+            (Self::Gating, Kind::Issue | Kind::Spec) => &[Self::Reviewing, Self::Fixing],
             (Self::Gating, Kind::Pr) => &[Self::Reviewing],
-            (Self::Reviewing, Kind::Issue) => &[Self::Fixing, Self::Ready],
+            (Self::Reviewing, Kind::Issue | Kind::Spec) => &[Self::Fixing, Self::Ready],
             (Self::Reviewing, Kind::Pr) => &[Self::Ready],
             (Self::Ready, Kind::Issue) => &[Self::Finished],
-            (Self::Ready, Kind::Pr) | (Self::Finished, _) => &[],
+            (Self::Ready, Kind::Spec | Kind::Pr) | (Self::Finished, _) => &[],
         }
     }
 
@@ -323,6 +331,9 @@ pub struct NewTask<'a> {
     pub base: &'a str,
     pub branch: &'a str,
     pub config_hash: &'a str,
+    /// The task id, for a kind (`Kind::Spec`) whose id isn't `<prefix>-<number>`; `None` for
+    /// `Kind::Issue`/`Kind::Pr`, which derive it from `number`.
+    pub id: Option<&'a str>,
 }
 
 impl Record {
@@ -366,7 +377,10 @@ impl Record {
     pub fn new(task: &NewTask, now: u64, process: Process) -> Self {
         Self {
             schema: SCHEMA,
-            id: format!("{}-{}", task.kind.prefix(), task.number),
+            id: task
+                .id
+                .map(str::to_owned)
+                .unwrap_or_else(|| format!("{}-{}", task.kind.prefix(), task.number)),
             kind: task.kind,
             number: task.number,
             repo: task.repo.to_owned(),
@@ -524,12 +538,114 @@ impl Record {
     }
 }
 
-/// `issue-<n>` or `pr-<n>`, with a plain positive number: the only ids that may become a path.
+/// `issue-<n>` or `pr-<n>`, with a plain positive number, or a `spec-<name>-<hash>` id built by
+/// [`spec_id`]: the only ids that may become a path.
 pub fn is_valid_id(id: &str) -> bool {
-    let Some(digits) = id.strip_prefix("issue-").or_else(|| id.strip_prefix("pr-")) else {
+    if let Some(digits) = id.strip_prefix("issue-").or_else(|| id.strip_prefix("pr-")) {
+        return !digits.starts_with('0')
+            && !digits.is_empty()
+            && digits.bytes().all(|b| b.is_ascii_digit());
+    }
+    is_valid_spec_id(id)
+}
+
+/// `spec-<name>-<hash>`: `name` passes [`crate::project::validate_name`] and `hash` is exactly 6
+/// lowercase hex digits. Checked structurally, not by re-deriving it from a file (there is none
+/// to read here), so it rejects anything [`spec_id`] could not have built, including a `name`
+/// that smuggles a path separator.
+fn is_valid_spec_id(id: &str) -> bool {
+    let Some(rest) = id.strip_prefix("spec-") else {
         return false;
     };
-    !digits.starts_with('0') && !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+    let Some((name, hash)) = rest.rsplit_once('-') else {
+        return false;
+    };
+    hash.len() == 6
+        && hash
+            .bytes()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+        && crate::project::validate_name(name).is_ok()
+}
+
+/// The sanitized file name for a spec task's id: lowercased, every run of characters that are not
+/// `[a-z0-9]` collapsed to one `-`, and leading/trailing `-` trimmed (so `"My Spec v2.md"`'s stem
+/// `"My Spec v2"` becomes `"my-spec-v2"`).
+fn sanitize_spec_name(stem: &str) -> String {
+    let mut out = String::with_capacity(stem.len());
+    for c in stem.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.push(c.to_ascii_lowercase());
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out.trim_start_matches('-').to_owned()
+}
+
+/// `spec-<name>-<hash>` for `task start --spec <file>` (decision 174(d), issue 142, spec section
+/// 5.1 "source"): `name` is the sanitized file name (its extension dropped, then validated like a
+/// project name) and `hash` is the first 6 hex digits of the SHA-256 of the file's canonical path,
+/// so two files named alike never collide. Returns the id and the file's name (for the record's
+/// title); the file must exist, so the path is canonicalized before anything else reads it.
+pub fn spec_id(path: &Path) -> Result<(String, String)> {
+    let canonical =
+        fs::canonicalize(path).with_context(|| format!("cannot read {}", path.display()))?;
+    spec_id_for_canonical(&canonical)
+}
+
+/// The bytes a canonical path is hashed as. The id they produce names a task folder and branch, so
+/// this is an on-disk format and must not change with the Rust version (`OsStr::as_encoded_bytes`
+/// may): the path's raw bytes on Unix, its UTF-16 code units as little-endian bytes on Windows.
+/// Neither goes through a lossy text conversion, so two paths that differ only in units that
+/// aren't valid text never share an id.
+fn path_hash_bytes(path: &Path) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        path.as_os_str().as_bytes().to_vec()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        path.as_os_str()
+            .encode_wide()
+            .flat_map(u16::to_le_bytes)
+            .collect()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        path.to_string_lossy().into_owned().into_bytes()
+    }
+}
+
+/// The pure part of [`spec_id`]: no filesystem access, so the same canonical path always gives the
+/// same id whether or not it exists. The hash covers [`path_hash_bytes`].
+pub fn spec_id_for_canonical(canonical: &Path) -> Result<(String, String)> {
+    let file_name = canonical
+        .file_name()
+        .and_then(|n| n.to_str())
+        .with_context(|| format!("{} has no file name", canonical.display()))?
+        .to_owned();
+    let stem = Path::new(&file_name)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&file_name);
+    let name = sanitize_spec_name(stem);
+    crate::project::validate_name(&name).map_err(|e| {
+        anyhow::anyhow!(
+            "{}: its name sanitizes to {name:?}, which isn't a usable task id ({e:#})",
+            canonical.display()
+        )
+    })?;
+    let digest = Sha256::digest(path_hash_bytes(canonical));
+    let id = format!(
+        "spec-{name}-{:02x}{:02x}{:02x}",
+        digest[0], digest[1], digest[2]
+    );
+    Ok((id, file_name))
 }
 
 pub fn tasks_root(base: &Path) -> PathBuf {
@@ -589,6 +705,8 @@ pub fn load_all(base: &Path) -> Result<Vec<Record>> {
             records.push(read(&path)?);
         }
     }
-    records.sort_by_key(|r| (r.kind.prefix(), r.number));
+    records.sort_by(|a, b| {
+        (a.kind.prefix(), a.number, &a.id).cmp(&(b.kind.prefix(), b.number, &b.id))
+    });
     Ok(records)
 }

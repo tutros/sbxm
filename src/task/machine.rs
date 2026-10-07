@@ -77,7 +77,11 @@ pub const STAGES: [Stage; 7] = [
 
 const ISSUE: &[Kind] = &[Kind::Issue];
 const PR: &[Kind] = &[Kind::Pr];
-const BOTH: &[Kind] = &[Kind::Issue, Kind::Pr];
+/// Issue and spec tasks both have a worker and go through gates, review and fix rounds the same
+/// way (issue 142, decision 174(d)): a spec source adds this one answer set, no new rows.
+const HAS_WORKER: &[Kind] = &[Kind::Issue, Kind::Spec];
+/// Every kind: the rows that don't care which source a task has.
+const ANY: &[Kind] = &[Kind::Issue, Kind::Pr, Kind::Spec];
 
 const WORKER_DONE: &[Status] = &[Status::Completed, Status::TimedOut];
 const GATES_ENDED: &[Status] = &[Status::Passed, Status::GatesFailed];
@@ -99,7 +103,7 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Prepared],
         statuses: &[Status::Running],
         live: Live::Any,
-        kinds: ISSUE,
+        kinds: HAS_WORKER,
         event: Event::Advance(Stage::Working),
         to: Some(Stage::Working),
         action: "run the worker",
@@ -127,7 +131,7 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Working],
         statuses: WORKER_DONE,
         live: Live::Any,
-        kinds: ISSUE,
+        kinds: HAS_WORKER,
         event: Event::Advance(Stage::Gating),
         to: Some(Stage::Gating),
         action: "run the gates",
@@ -136,7 +140,7 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Gating],
         statuses: &[Status::Passed],
         live: Live::Any,
-        kinds: BOTH,
+        kinds: ANY,
         event: Event::Advance(Stage::Reviewing),
         to: Some(Stage::Reviewing),
         action: "run the reviewer",
@@ -148,7 +152,7 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Gating],
         statuses: &[Status::GatesFailed],
         live: Live::Any,
-        kinds: ISSUE,
+        kinds: HAS_WORKER,
         event: Event::Advance(Stage::Fixing),
         to: Some(Stage::Fixing),
         action: "run the fix round for the gate's own output",
@@ -157,7 +161,7 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Reviewing],
         statuses: &[Status::Completed],
         live: Live::Any,
-        kinds: ISSUE,
+        kinds: HAS_WORKER,
         event: Event::Advance(Stage::Fixing),
         to: Some(Stage::Fixing),
         action: "run the fix round",
@@ -166,7 +170,7 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Reviewing],
         statuses: &[Status::Completed],
         live: Live::Any,
-        kinds: BOTH,
+        kinds: ANY,
         event: Event::Advance(Stage::Ready),
         to: Some(Stage::Ready),
         action: "record the task as ready",
@@ -175,7 +179,7 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Fixing],
         statuses: WORKER_DONE,
         live: Live::Any,
-        kinds: ISSUE,
+        kinds: HAS_WORKER,
         event: Event::Advance(Stage::Gating),
         to: Some(Stage::Gating),
         action: "run the gates",
@@ -189,12 +193,12 @@ pub const TABLE: &[Row] = &[
         to: Some(Stage::Finished),
         action: "push the branch and open the PR",
     },
-    // `task gates` (issue tasks only).
+    // `task gates` (a task with a worker: issue and spec).
     Row {
         stages: &[Stage::Working, Stage::Fixing],
         statuses: WORKER_DONE,
         live: Live::Any,
-        kinds: ISSUE,
+        kinds: HAS_WORKER,
         event: Event::Gates,
         to: Some(Stage::Gating),
         action: "run the gates",
@@ -203,7 +207,7 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Gating],
         statuses: GATES_ENDED,
         live: Live::Any,
-        kinds: ISSUE,
+        kinds: HAS_WORKER,
         event: Event::Gates,
         to: Some(Stage::Gating),
         action: "re-run the gates",
@@ -212,17 +216,18 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Gating],
         statuses: &[Status::Running],
         live: Live::Interrupted,
-        kinds: ISSUE,
+        kinds: HAS_WORKER,
         event: Event::Gates,
         to: Some(Stage::Gating),
         action: "re-run the abandoned gates",
     },
-    // `task review`, issue tasks: after the worker or fix round, after gates, or retrying a failed review.
+    // `task review`, a task with a worker: after the worker or fix round, after gates, or
+    // retrying a failed review.
     Row {
         stages: &[Stage::Working, Stage::Fixing],
         statuses: WORKER_DONE,
         live: Live::Any,
-        kinds: ISSUE,
+        kinds: HAS_WORKER,
         event: Event::Review,
         to: Some(Stage::Reviewing),
         action: "run the gates, then the reviewer",
@@ -231,7 +236,7 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Gating],
         statuses: GATES_ENDED,
         live: Live::Any,
-        kinds: ISSUE,
+        kinds: HAS_WORKER,
         event: Event::Review,
         to: Some(Stage::Reviewing),
         action: "run the reviewer",
@@ -240,7 +245,7 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Gating],
         statuses: &[Status::Running],
         live: Live::Interrupted,
-        kinds: ISSUE,
+        kinds: HAS_WORKER,
         event: Event::Review,
         to: Some(Stage::Reviewing),
         action: "re-run the abandoned gates, then the reviewer",
@@ -249,7 +254,7 @@ pub const TABLE: &[Row] = &[
         stages: &[Stage::Reviewing],
         statuses: &[Status::Failed],
         live: Live::Any,
-        kinds: ISSUE,
+        kinds: HAS_WORKER,
         event: Event::Review,
         to: Some(Stage::Reviewing),
         action: "retry the reviewer",
@@ -297,7 +302,7 @@ pub const TABLE: &[Row] = &[
         stages: &STAGES,
         statuses: NOT_RUNNING,
         live: Live::Any,
-        kinds: BOTH,
+        kinds: ANY,
         event: Event::Rm,
         to: None,
         action: "remove the task's folders and sandboxes",
@@ -306,7 +311,7 @@ pub const TABLE: &[Row] = &[
         stages: &STAGES,
         statuses: &[Status::Running],
         live: Live::Interrupted,
-        kinds: BOTH,
+        kinds: ANY,
         event: Event::Rm,
         to: None,
         action: "remove the task's folders and sandboxes",
@@ -359,7 +364,9 @@ pub fn states(kind: Kind) -> Vec<State> {
 
 /// The states of a `kind` task that are not the end of its life (`finished`; a PR task's `ready`),
 /// not in flight (a `running` task whose process is alive) and from which no command moves it on:
-/// only `rm` is allowed. Each is a gap in the operations.
+/// only `rm` is allowed. Each is a gap in the operations. A spec task's `ready` is one of these
+/// too (not excluded like a PR task's): `finish` is refused for it until a sink lands (decision
+/// 174(e), issue 142), so it is a dead end by design, not yet a missing operation.
 pub fn dead_ends(kind: Kind) -> Vec<State> {
     states(kind)
         .into_iter()

@@ -23,6 +23,7 @@ fn save_task(env: &Env, number: u32) {
             base: "main",
             branch: "b",
             config_hash: "h",
+            id: None,
         },
         T0,
         Process::new(777_777, T0),

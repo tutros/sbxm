@@ -4,7 +4,7 @@
 use std::io::Write;
 use std::path::Path;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 
 use crate::backend::SandboxBackend;
 use crate::config::GlobalConfig;
@@ -31,6 +31,8 @@ pub fn run(
     let id = match opts.kind {
         Kind::Issue => format!("issue-{}", opts.number),
         Kind::Pr => format!("pr-{}", opts.number),
+        // Issue 142 is start-only for spec tasks; remove its folders under the base dir by hand.
+        Kind::Spec => bail!("sbxm task rm doesn't take a spec task yet"),
     };
     finish::discard(&base_dir, &id, opts.yes, backend, probe, confirm, out)
 }

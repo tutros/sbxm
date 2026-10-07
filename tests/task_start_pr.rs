@@ -187,6 +187,7 @@ fn a_record_without_continues_still_loads() {
             base: "main",
             branch: "issue-5",
             config_hash: "h",
+            id: None,
         },
         0,
         Process::new(1, 0),

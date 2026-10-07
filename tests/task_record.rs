@@ -5,6 +5,7 @@ use std::fs;
 
 use sbxm::task::record::{
     self, Kind, NewTask, Process, ProcessProbe, Record, SCHEMA, Stage, Status, is_valid_id,
+    spec_id, spec_id_for_canonical,
 };
 
 struct Probe(Option<u64>);
@@ -27,6 +28,24 @@ fn new_record() -> Record {
             base: "main",
             branch: "issue-41",
             config_hash: "abc123",
+            id: None,
+        },
+        T0,
+        Process::new(1234, T0),
+    )
+}
+
+fn new_spec_record() -> Record {
+    Record::new(
+        &NewTask {
+            kind: Kind::Spec,
+            number: 0,
+            repo: "o/r",
+            title: "idea.md",
+            base: "main",
+            branch: "spec-idea-abc123",
+            config_hash: "abc123",
+            id: Some("spec-idea-abc123"),
         },
         T0,
         Process::new(1234, T0),
@@ -43,6 +62,7 @@ fn new_pr_record() -> Record {
             base: "main",
             branch: "pr-7",
             config_hash: "abc123",
+            id: None,
         },
         T0,
         Process::new(1234, T0),
@@ -79,6 +99,7 @@ fn a_pr_record_gets_a_pr_id() {
             base: "main",
             branch: "feature",
             config_hash: "h",
+            id: None,
         },
         T0,
         Process::new(1, T0),
@@ -108,6 +129,45 @@ fn the_whole_pipeline_is_a_legal_walk_with_every_stage_stamped() {
     record.advance(Stage::Finished, T0 + 11, process()).unwrap();
     assert_eq!((record.stage, record.status), (Stage::Finished, Status::Ok));
     assert_eq!(record.stages.len(), 9);
+}
+
+#[test]
+fn a_spec_task_takes_the_explicit_id_instead_of_prefix_number() {
+    let record = new_spec_record();
+    assert_eq!(record.id, "spec-idea-abc123");
+    assert_eq!(record.number, 0);
+}
+
+#[test]
+fn a_spec_task_walks_the_same_stages_as_an_issue_task_but_never_finishes() {
+    let mut record = new_spec_record();
+    let process = || Process::new(1234, T0);
+    for (stage, done) in [
+        (Stage::Working, Status::Completed),
+        (Stage::Gating, Status::Passed),
+        (Stage::Reviewing, Status::Completed),
+        (Stage::Fixing, Status::Completed),
+        (Stage::Gating, Status::Passed),
+        (Stage::Reviewing, Status::Completed),
+    ] {
+        record.advance(stage, T0 + 1, process()).unwrap();
+        record.finish(done).unwrap();
+    }
+    record.advance(Stage::Ready, T0 + 10, process()).unwrap();
+    assert_eq!(record.status, Status::Ok);
+
+    // `finish` is refused until a sink lands (decision 174(e), issue 142): there is no row from
+    // `ready` to `finished` for a spec task yet.
+    let message = format!(
+        "{:#}",
+        record
+            .advance(Stage::Finished, T0 + 11, process())
+            .unwrap_err()
+    );
+    assert!(
+        message.contains("ready") && message.contains("finished"),
+        "{message}"
+    );
 }
 
 #[test]
@@ -629,4 +689,149 @@ fn only_issue_and_pr_ids_with_plain_numbers_are_valid() {
     ] {
         assert!(!is_valid_id(bad), "{bad:?}");
     }
+}
+
+#[test]
+fn spec_ids_look_like_spec_name_hash_and_are_valid() {
+    for good in [
+        "spec-idea-a1b2c3",
+        "spec-my-cool-spec-000000",
+        "spec-x-abcdef",
+    ] {
+        assert!(is_valid_id(good), "{good}");
+    }
+    for bad in [
+        "spec-",
+        "spec-abcdef",
+        "spec-x-",
+        "spec-x-ABCDEF",
+        "spec-x-abcde",
+        "spec-x-abcdefg",
+        "spec-x-abcdeg",
+        "spec-default-a1b2c3",
+        "spec--a1b2c3",
+        "spec-../x-a1b2c3",
+        "spec-x-a1b2c3/..",
+    ] {
+        assert!(!is_valid_id(bad), "{bad:?}");
+    }
+}
+
+#[test]
+fn spec_id_sanitizes_the_file_name_and_hashes_the_canonical_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("My Spec v2.md");
+    fs::write(&path, "hello").unwrap();
+
+    let (id, title) = spec_id(&path).unwrap();
+
+    assert!(id.starts_with("spec-my-spec-v2-"), "{id}");
+    assert_eq!(id.len(), "spec-my-spec-v2-".len() + 6);
+    assert!(is_valid_id(&id), "{id}");
+    assert_eq!(title, "My Spec v2.md");
+}
+
+#[test]
+fn spec_id_differs_for_files_with_the_same_name_in_different_folders() {
+    let dir = tempfile::tempdir().unwrap();
+    let (a, b) = (dir.path().join("a"), dir.path().join("b"));
+    fs::create_dir_all(&a).unwrap();
+    fs::create_dir_all(&b).unwrap();
+    fs::write(a.join("idea.md"), "x").unwrap();
+    fs::write(b.join("idea.md"), "x").unwrap();
+
+    let (id_a, _) = spec_id(&a.join("idea.md")).unwrap();
+    let (id_b, _) = spec_id(&b.join("idea.md")).unwrap();
+
+    assert_ne!(id_a, id_b);
+    assert!(id_a.starts_with("spec-idea-") && id_b.starts_with("spec-idea-"));
+}
+
+// The hashed bytes are a stable on-disk format (the id names the task folder and branch): raw path
+// bytes on Unix, UTF-16 code units as little-endian bytes on Windows.
+#[cfg(unix)]
+const TEXT_PATH_ID: &str = "spec-idea-9e40e1"; // SHA-256 of the UTF-8 bytes of the path
+#[cfg(windows)]
+const TEXT_PATH_ID: &str = "spec-idea-e3eb4e"; // SHA-256 of the path's UTF-16LE bytes
+
+#[cfg(any(unix, windows))]
+#[test]
+fn the_pure_spec_id_gives_the_known_hash_without_touching_the_filesystem() {
+    // The path does not exist: the function only sanitizes the name and hashes the given path.
+    let path = std::path::Path::new("/no/such/dir/idea.md");
+
+    let (id, title) = spec_id_for_canonical(path).unwrap();
+
+    // First 6 hex digits of the SHA-256 of the stable encoding of "/no/such/dir/idea.md".
+    assert_eq!(id, TEXT_PATH_ID);
+    assert_eq!(title, "idea.md");
+    assert_eq!(
+        spec_id_for_canonical(path).unwrap().0,
+        id,
+        "same input, same id"
+    );
+}
+
+#[cfg(any(unix, windows))]
+fn path_with_odd_unit(unit: u16) -> std::path::PathBuf {
+    // A directory name that is not valid text, differing from its twin in one unit only.
+    #[cfg(unix)]
+    let odd: std::ffi::OsString = {
+        use std::os::unix::ffi::OsStringExt;
+        std::ffi::OsString::from_vec(vec![b'd', unit as u8])
+    };
+    #[cfg(windows)]
+    let odd: std::ffi::OsString = {
+        use std::os::windows::ffi::OsStringExt;
+        std::ffi::OsString::from_wide(&[u16::from(b'd'), unit])
+    };
+    std::path::Path::new("/specs").join(odd).join("idea.md")
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn spec_ids_differ_for_paths_that_differ_only_in_non_text_units() {
+    // Unix: bytes 0xfe and 0xff; Windows: unpaired surrogates 0xd800 and 0xd801. A lossy text
+    // conversion maps both pairs to the same replacement character.
+    #[cfg(unix)]
+    let (first, second) = (0xfe, 0xff);
+    #[cfg(windows)]
+    let (first, second) = (0xd800, 0xd801);
+
+    let (a, _) = spec_id_for_canonical(&path_with_odd_unit(first)).unwrap();
+    let (b, _) = spec_id_for_canonical(&path_with_odd_unit(second)).unwrap();
+
+    assert_ne!(a, b);
+    assert!(is_valid_id(&a) && is_valid_id(&b), "{a} {b}");
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn a_non_text_path_has_a_known_id_in_the_stable_encoding() {
+    // Unix: `/specs/d<0xfe>/idea.md`; Windows: `/specs\d<0xd800>\idea.md` (the joins use `\`).
+    #[cfg(unix)]
+    let (unit, expected) = (0xfe, "spec-idea-e0ab55");
+    #[cfg(windows)]
+    let (unit, expected) = (0xd800, "spec-idea-58bbc6");
+
+    let (id, _) = spec_id_for_canonical(&path_with_odd_unit(unit)).unwrap();
+
+    assert_eq!(id, expected);
+}
+
+#[test]
+fn spec_id_refuses_a_file_that_does_not_exist() {
+    let dir = tempfile::tempdir().unwrap();
+    let message = format!("{:#}", spec_id(&dir.path().join("missing.md")).unwrap_err());
+    assert!(message.contains("missing.md"), "{message}");
+}
+
+#[test]
+fn spec_id_refuses_a_name_that_sanitizes_to_nothing_usable() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("---.md");
+    fs::write(&path, "x").unwrap();
+
+    let message = format!("{:#}", spec_id(&path).unwrap_err());
+    assert!(message.contains("---.md"), "{message}");
 }

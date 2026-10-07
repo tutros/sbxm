@@ -54,6 +54,7 @@ fn record_of_process(number: u32, process: Process) -> Record {
             base: "main",
             branch: "b",
             config_hash: "h",
+            id: None,
         },
         T0,
         process,

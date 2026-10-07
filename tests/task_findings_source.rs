@@ -32,6 +32,7 @@ fn task(
     let id = match kind {
         Kind::Issue => format!("issue-{number}"),
         Kind::Pr => format!("pr-{number}"),
+        Kind::Spec => unreachable!("this fixture is only used with Issue and Pr"),
     };
     let record = Record::new(
         &NewTask {
@@ -42,6 +43,7 @@ fn task(
             base: "main",
             branch: "b",
             config_hash: "h",
+            id: None,
         },
         1_790_000_000,
         Process::new(1, 1_790_000_000),
@@ -171,6 +173,21 @@ fn a_task_that_does_not_exist_is_refused_before_any_github_call() {
         "no task issue-12; run `sbxm task status` to list the tasks"
     );
     assert!(gh.calls().is_empty());
+}
+
+#[test]
+fn a_spec_task_is_refused_before_any_github_call() {
+    let base = TempDir::new().unwrap();
+    let gh = github();
+
+    let (result, out) = run(base.path(), Kind::Spec, 0, None, true, &gh);
+
+    assert_eq!(
+        result.unwrap_err().to_string(),
+        "sbxm task file-findings doesn't take a spec task yet"
+    );
+    assert!(gh.calls().is_empty(), "{:?}", gh.calls());
+    assert!(out.is_empty(), "{out}");
 }
 
 #[test]

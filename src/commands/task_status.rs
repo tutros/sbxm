@@ -8,10 +8,15 @@ use serde_json::Value;
 
 use crate::task::record::{self, Kind, ProcessProbe, Record};
 
-fn id_of(kind: Kind, number: u32) -> String {
+/// `--issue`/`--pr` only; a spec task has no number to filter by (issue 142 is start-only for
+/// now; its task shows up in the unfiltered listing).
+fn id_of(kind: Kind, number: u32) -> Result<String> {
     match kind {
-        Kind::Issue => format!("issue-{number}"),
-        Kind::Pr => format!("pr-{number}"),
+        Kind::Issue => Ok(format!("issue-{number}")),
+        Kind::Pr => Ok(format!("pr-{number}")),
+        Kind::Spec => bail!(
+            "sbxm task status doesn't filter by --spec yet; run it without a filter to see spec tasks"
+        ),
     }
 }
 
@@ -40,7 +45,7 @@ pub fn render(
 ) -> Result<(String, Vec<String>)> {
     let mut records = record::load_all(base)?;
     if let Some((kind, number)) = which {
-        let id = id_of(kind, number);
+        let id = id_of(kind, number)?;
         records.retain(|r| r.id == id);
         if records.is_empty() {
             bail!("no task {id}; run `sbxm task status` to list the tasks");

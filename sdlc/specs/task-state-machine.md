@@ -142,23 +142,23 @@ kept here as the design for issues #117-121 to build toward.
 
 | From | Event | To | Action |
 |---|---|---|---|
-| prepared running (issue) | advance | working | run the worker |
+| prepared running (issue/spec) | advance | working | run the worker |
 | prepared running (pr) | advance | gating | run the gates |
 | prepared running (pr) | advance | reviewing | run the reviewer |
-| working completed/timed-out (issue) | advance | gating | run the gates |
+| working completed/timed-out (issue/spec) | advance | gating | run the gates |
 | gating passed | advance | reviewing | run the reviewer |
-| gating gates-failed (issue) | advance | fixing | run the fix round for the gate's own output |
-| reviewing completed (issue) | advance | fixing | run the fix round |
+| gating gates-failed (issue/spec) | advance | fixing | run the fix round for the gate's own output |
+| reviewing completed (issue/spec) | advance | fixing | run the fix round |
 | reviewing completed | advance | ready | record the task as ready |
-| fixing completed/timed-out (issue) | advance | gating | run the gates |
+| fixing completed/timed-out (issue/spec) | advance | gating | run the gates |
 | ready ok (issue) | advance | finished | push the branch and open the PR |
-| working/fixing completed/timed-out (issue) | task gates | gating | run the gates |
-| gating passed/gates-failed (issue) | task gates | gating | re-run the gates |
-| gating running (issue), interrupted | task gates | gating | re-run the abandoned gates |
-| working/fixing completed/timed-out (issue) | task review | reviewing | run the gates, then the reviewer |
-| gating passed/gates-failed (issue) | task review | reviewing | run the reviewer |
-| gating running (issue), interrupted | task review | reviewing | re-run the abandoned gates, then the reviewer |
-| reviewing failed (issue) | task review | reviewing | retry the reviewer |
+| working/fixing completed/timed-out (issue/spec) | task gates | gating | run the gates |
+| gating passed/gates-failed (issue/spec) | task gates | gating | re-run the gates |
+| gating running (issue/spec), interrupted | task gates | gating | re-run the abandoned gates |
+| working/fixing completed/timed-out (issue/spec) | task review | reviewing | run the gates, then the reviewer |
+| gating passed/gates-failed (issue/spec) | task review | reviewing | run the reviewer |
+| gating running (issue/spec), interrupted | task review | reviewing | re-run the abandoned gates, then the reviewer |
+| reviewing failed (issue/spec) | task review | reviewing | retry the reviewer |
 | prepared running (pr) | task review | gating | run the gates, then the reviewer |
 | gating passed/gates-failed (pr) | task review | reviewing | run the reviewer |
 | reviewing failed (pr) | task review | reviewing | retry the reviewer |
