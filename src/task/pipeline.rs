@@ -694,6 +694,162 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
     }
 }
 
+/// Spec §5.1 steps 1 and 2, for a spec source (decision 174(d), issue 142): same as [`prepare`],
+/// but the source is a file read from disk instead of a GitHub issue. The id and the record's
+/// title come from [`record::spec_id`]; the file's text is copied in as `source.md` (in the
+/// task's own folder and the worker's workspace) and the worker prompt points at that instead of
+/// `issue.md`. There is no PR to continue, so `continues` is always `None`; no GitHub call is
+/// made anywhere in this function.
+pub fn prepare_spec(ctx: &Ctx, source_path: &Path) -> Result<Prepared> {
+    let global = GlobalConfig::load(ctx.config_dir)?;
+    let (id, title) = record::spec_id(source_path)?;
+    let meta = record::task_dir(&global.base_dir, &id);
+    let workspace = global.base_dir.join("tasks").join(&id);
+
+    // Check before acting: nothing is written until every one of these passes.
+    let text = fs::read_to_string(source_path)
+        .with_context(|| format!("cannot read {}", source_path.display()))?;
+    if meta.exists() || workspace.exists() {
+        let stage = record::read(&meta.join("task.json"))
+            .map(|r| r.stage.name().to_owned())
+            .unwrap_or_else(|_| "no readable record".to_owned());
+        bail!(
+            "task {id} exists (stage {stage}); use `sbxm task status`, or remove its folders \
+             under the base dir to start it again"
+        );
+    }
+    let worker = &ctx.config.worker;
+    let profile = Profile::load(global.profiles_dir(), &ctx.config.sandbox.profile)?;
+    check_secrets(
+        ctx.backend,
+        worker.harness,
+        "the worker",
+        &ctx.config.sandbox.profile,
+        &profile,
+    )?;
+    let mut warnings = ctx.config.warnings.clone();
+    warnings.extend(worker.harness.unsupported(&profile, "the worker's sandbox"));
+    let template = prompts::template(Role::WorkerSpec, &ctx.config.prompts)?;
+    let prompt = prompts::render(
+        &template.name,
+        &template.text,
+        &[
+            ("branch", &id),
+            ("base", ctx.base_branch),
+            ("repo", ctx.repo),
+            ("gates_sandbox", &bullets(&ctx.config.gates.sandbox)),
+            ("gates_host", &bullets(&ctx.config.gates.host)),
+        ],
+    )?;
+
+    // Reserve both folders; `create_dir` fails if either appeared meanwhile.
+    for dir in [&meta, &workspace] {
+        let parent = dir.parent().unwrap_or(Path::new("."));
+        fs::create_dir_all(parent)
+            .with_context(|| format!("cannot create {}", parent.display()))?;
+    }
+    fs::create_dir(&meta).with_context(|| format!("cannot reserve {}", meta.display()))?;
+    if let Err(e) = fs::create_dir(&workspace) {
+        let _ = fs::remove_dir_all(&meta);
+        return Err(e).with_context(|| format!("cannot reserve {}", workspace.display()));
+    }
+
+    let sandbox = format!("sbxm-task-{id}-{}", worker.harness.as_str());
+    let built = (|| -> Result<(Record, HarnessKits)> {
+        let kit_set = kits::build_for(
+            ctx.config_dir,
+            &ctx.config.sandbox.profile,
+            &[worker.harness],
+            &Overrides {
+                cpus: ctx.config.sandbox.cpus,
+                memory: ctx.config.sandbox.memory.clone(),
+            },
+            &meta.join("kits"),
+            ctx.backend,
+        )?;
+        let harness_kits = kit_set
+            .get(worker.harness)
+            .cloned()
+            .context("no kits were built for the worker's harness")?;
+
+        let repo_git = meta.join("repo.git");
+        repo::clone_bare(ctx.clone_source, &repo_git)?;
+        repo::create_branch(&repo_git, &id, ctx.base_branch)?;
+        repo::clone_workspace(&repo_git, &workspace, &id, ctx.identity)?;
+
+        // The agent's `git add -A` must not pick up sbxm's own files.
+        let info = workspace.join(".git").join("info");
+        fs::create_dir_all(&info)?;
+        fs::write(info.join("exclude"), format!("# sbxm\n{AGENT_DIR}/\n"))?;
+        repo::write_agent_files(
+            &workspace,
+            &[
+                ("source.md", text.as_bytes()),
+                ("prompt.md", prompt.as_bytes()),
+            ],
+            Existing::Replace,
+        )?;
+        fs::write(meta.join("source.md"), &text)?;
+        fs::write(meta.join("worker-prompt.md"), &prompt)?;
+
+        // The record goes first: sandbox setup takes minutes, and `status` (and a restart after a
+        // kill) must see the task during it.
+        let mut task = Record::new(
+            &NewTask {
+                kind: Kind::Spec,
+                number: 0,
+                repo: ctx.repo,
+                title: &title,
+                base: ctx.base_branch,
+                branch: &id,
+                config_hash: &harness_kits.config_hash,
+                id: Some(&id),
+            },
+            now(),
+            Process::current(ctx.probe),
+        );
+        task.fix_rounds = ctx.config.fix_rounds;
+        task.worker = Some(Agent {
+            harness: worker.harness.as_str().to_owned(),
+            model: worker.model.clone(),
+            sandbox: sandbox.clone(),
+            workspace: slashes(&workspace),
+            run: None,
+        });
+        record::write(&meta, &task)?;
+
+        ctx.backend
+            .create(&CreateSpec {
+                name: sandbox.clone(),
+                agent: worker.harness.agent_arg().into(),
+                workspace: workspace.clone(),
+                cpus: kit_set.resources.cpus,
+                memory: kit_set.resources.memory.clone(),
+                skills: harness_kits.skills_store,
+                kits: harness_kits.dirs.clone(),
+            })
+            .with_context(|| format!("cannot create sandbox {sandbox}"))?;
+        Ok((task, harness_kits))
+    })();
+
+    match built {
+        Ok((record, kits)) => Ok(Prepared {
+            record,
+            meta,
+            workspace,
+            kits: Some(kits),
+            warnings,
+        }),
+        Err(e) => {
+            // Back to nothing: the sandbox (if it got created) and both folders.
+            let _ = ctx.backend.remove(&sandbox);
+            let _ = fs::remove_dir_all(&workspace);
+            let _ = fs::remove_dir_all(&meta);
+            Err(e)
+        }
+    }
+}
+
 /// What happened to one pick of `start`.
 #[derive(Debug)]
 pub struct TaskReport {
