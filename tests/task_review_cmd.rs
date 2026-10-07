@@ -76,13 +76,13 @@ struct Out {
     warn: String,
 }
 
-fn go(f: &Fixture, opts: &Options, backend: &FakeBackend) -> Out {
+fn go_with_github(f: &Fixture, opts: &Options, backend: &FakeBackend, github: &FakeGitHub) -> Out {
     let (mut out, mut warn) = (Vec::new(), Vec::new());
     let result = run(
         &f.env.config_dir(),
         opts,
         backend,
-        &FakeGitHub::default(),
+        github,
         &Probe,
         &FakeHostRunner::default(),
         &mut out,
@@ -93,6 +93,10 @@ fn go(f: &Fixture, opts: &Options, backend: &FakeBackend) -> Out {
         out: String::from_utf8(out).unwrap(),
         warn: String::from_utf8(warn).unwrap(),
     }
+}
+
+fn go(f: &Fixture, opts: &Options, backend: &FakeBackend) -> Out {
+    go_with_github(f, opts, backend, &FakeGitHub::default())
 }
 
 fn meta(f: &Fixture) -> std::path::PathBuf {
@@ -250,12 +254,23 @@ fn an_empty_or_blank_reviewer_model_flag_is_refused_before_anything_happens() {
         worked_task(&f, &good);
         let mut opts = options(&f);
         opts.reviewer_model = Some(bad.into());
-        let before = good.execs().len();
+        let before_execs = good.execs().len();
+        let before_creates = good.creates().len();
+        let before_secrets = good.secret_service_calls();
+        let github = FakeGitHub::default();
 
-        let message = format!("{:#}", go(&f, &opts, &good).result.unwrap_err());
+        let message = format!(
+            "{:#}",
+            go_with_github(&f, &opts, &good, &github)
+                .result
+                .unwrap_err()
+        );
 
         assert!(message.contains("--reviewer-model"), "{bad:?}: {message}");
-        assert_eq!(good.execs().len(), before, "{bad:?}");
+        assert_eq!(good.execs().len(), before_execs, "{bad:?}");
+        assert_eq!(good.creates().len(), before_creates, "{bad:?}");
+        assert_eq!(good.secret_service_calls(), before_secrets, "{bad:?}");
+        assert!(github.calls().is_empty(), "{bad:?}");
     }
 }
 

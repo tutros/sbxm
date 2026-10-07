@@ -210,13 +210,15 @@ fn an_empty_or_blank_reviewer_model_flag_is_refused_before_the_worker_starts() {
         let b = backend(&f, &[CLEAN]);
         let mut opts = options(&f);
         opts.reviewer_model = Some(bad.into());
+        let gh = github();
 
-        let out = go(&f, &opts, None, &b, &github());
+        let out = go(&f, &opts, None, &b, &gh);
 
         let message = format!("{:#}", out.result.unwrap_err());
         assert!(message.contains("--reviewer-model"), "{bad:?}: {message}");
         assert!(b.creates().is_empty(), "{bad:?}");
         assert_eq!(b.secret_service_calls(), 0, "{bad:?}");
+        assert!(gh.calls().is_empty(), "{bad:?}");
     }
 }
 
@@ -227,13 +229,79 @@ fn an_empty_or_blank_worker_model_flag_is_refused_before_anything_happens() {
         let b = backend(&f, &[CLEAN]);
         let mut opts = options(&f);
         opts.worker_model = Some(bad.into());
+        let gh = github();
 
-        let out = go(&f, &opts, None, &b, &github());
+        let out = go(&f, &opts, None, &b, &gh);
 
         let message = format!("{:#}", out.result.unwrap_err());
         assert!(message.contains("--worker-model"), "{bad:?}: {message}");
         assert!(b.creates().is_empty(), "{bad:?}");
         assert_eq!(b.secret_service_calls(), 0, "{bad:?}");
+        assert!(gh.calls().is_empty(), "{bad:?}");
+    }
+}
+
+#[test]
+fn an_empty_or_blank_reviewer_model_flag_with_restart_leaves_the_existing_task_in_place() {
+    for bad in ["", "  "] {
+        let f = config();
+        let first = go(&f, &options(&f), None, &backend(&f, &[CLEAN]), &github());
+        first.result.unwrap();
+        let b = backend(&f, &[CLEAN]);
+        let gh = github();
+        let mut opts = options(&f);
+        opts.reviewer_model = Some(bad.into());
+
+        let out = go(
+            &f,
+            &opts,
+            Some(&Restart {
+                confirm: &Yes,
+                yes: false,
+            }),
+            &b,
+            &gh,
+        );
+
+        let message = format!("{:#}", out.result.unwrap_err());
+        assert!(message.contains("--reviewer-model"), "{bad:?}: {message}");
+        assert!(b.creates().is_empty(), "{bad:?}");
+        assert!(b.removes().is_empty(), "{bad:?}");
+        assert_eq!(b.secret_service_calls(), 0, "{bad:?}");
+        assert!(gh.calls().is_empty(), "{bad:?}");
+        assert_eq!(stage(&f), (Stage::Ready, Status::Ok), "{bad:?}");
+    }
+}
+
+#[test]
+fn an_empty_or_blank_worker_model_flag_with_restart_leaves_the_existing_task_in_place() {
+    for bad in ["", "  "] {
+        let f = config();
+        let first = go(&f, &options(&f), None, &backend(&f, &[CLEAN]), &github());
+        first.result.unwrap();
+        let b = backend(&f, &[CLEAN]);
+        let gh = github();
+        let mut opts = options(&f);
+        opts.worker_model = Some(bad.into());
+
+        let out = go(
+            &f,
+            &opts,
+            Some(&Restart {
+                confirm: &Yes,
+                yes: false,
+            }),
+            &b,
+            &gh,
+        );
+
+        let message = format!("{:#}", out.result.unwrap_err());
+        assert!(message.contains("--worker-model"), "{bad:?}: {message}");
+        assert!(b.creates().is_empty(), "{bad:?}");
+        assert!(b.removes().is_empty(), "{bad:?}");
+        assert_eq!(b.secret_service_calls(), 0, "{bad:?}");
+        assert!(gh.calls().is_empty(), "{bad:?}");
+        assert_eq!(stage(&f), (Stage::Ready, Status::Ok), "{bad:?}");
     }
 }
 
