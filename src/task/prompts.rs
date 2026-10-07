@@ -34,6 +34,17 @@ pub enum Role {
     Fix,
     /// The fix round after a gate failure, which has no review to point at (issue 117).
     FixGate,
+    /// The worker of a spec task (issue 142, decision 174(d)): the source is a file
+    /// (`.sbxm-task/source.md`) instead of a GitHub issue, so the wording differs from
+    /// [`Role::Worker`] even though the flow is the same.
+    WorkerSpec,
+    /// The reviewer of a spec task: no pull request to comment on, so `review.md` is the only
+    /// output.
+    ReviewerSpec,
+    /// The fix round of a spec task after a review found must-fix findings.
+    FixSpec,
+    /// The fix round of a spec task after a gate failure.
+    FixGateSpec,
 }
 
 /// A template and the name errors are reported under (the embedded name, or the override's path).
@@ -48,6 +59,10 @@ const REVIEWER: &str = include_str!("../../prompts/reviewer.md");
 const REVIEWER_PR: &str = include_str!("../../prompts/reviewer-pr.md");
 const FIX: &str = include_str!("../../prompts/fix.md");
 const FIX_GATE: &str = include_str!("../../prompts/fix-gate.md");
+const WORKER_SPEC: &str = include_str!("../../prompts/worker-spec.md");
+const REVIEWER_SPEC: &str = include_str!("../../prompts/reviewer-spec.md");
+const FIX_SPEC: &str = include_str!("../../prompts/fix-spec.md");
+const FIX_GATE_SPEC: &str = include_str!("../../prompts/fix-gate-spec.md");
 
 /// The template for `role`: the repo's override when configured, else the embedded one.
 pub fn template(role: Role, prompts: &Prompts) -> Result<Template> {
@@ -59,6 +74,16 @@ pub fn template(role: Role, prompts: &Prompts) -> Result<Template> {
         Role::Fix => ("fix.md", FIX, prompts.fix.as_deref()),
         // One `[prompts] fix` override covers both kinds of fix round.
         Role::FixGate => ("fix-gate.md", FIX_GATE, prompts.fix.as_deref()),
+        // A spec task reuses the same `[prompts]` override keys as an issue task's (issue 142):
+        // one override point per role, whichever source a task started from.
+        Role::WorkerSpec => ("worker-spec.md", WORKER_SPEC, prompts.worker.as_deref()),
+        Role::ReviewerSpec => (
+            "reviewer-spec.md",
+            REVIEWER_SPEC,
+            prompts.reviewer.as_deref(),
+        ),
+        Role::FixSpec => ("fix-spec.md", FIX_SPEC, prompts.fix.as_deref()),
+        Role::FixGateSpec => ("fix-gate-spec.md", FIX_GATE_SPEC, prompts.fix.as_deref()),
     };
     match custom {
         Some(path) => read_override(path),

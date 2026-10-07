@@ -262,6 +262,129 @@ fn the_pr_reviewer_prompt_talks_about_the_pull_request_and_has_no_fix_round() {
     );
 }
 
+fn spec_values() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("repo", "o/r"),
+        ("branch", "spec-idea-abc123"),
+        ("base", "main"),
+        ("scope_base", "origin/main"),
+        ("gates_sandbox", "- `cargo test`"),
+        ("review_path", ".sbxm-task/review.md"),
+        ("previous_review_path", ".sbxm-task/previous-review.md"),
+        ("gate_output_path", ".sbxm-task/gate-failure.md"),
+    ]
+}
+
+#[test]
+fn the_embedded_worker_spec_prompt_points_at_source_md_not_an_issue() {
+    let template = prompts::template(Role::WorkerSpec, &Prompts::default()).unwrap();
+
+    let text = prompts::render(&template.name, &template.text, &spec_values()).unwrap();
+
+    assert!(
+        text.contains(".sbxm-task/source.md") && text.contains("spec-idea-abc123"),
+        "{text}"
+    );
+    assert!(
+        text.contains("main") && text.contains("- `cargo test`"),
+        "{text}"
+    );
+    assert!(text.contains(".sbxm-task/result.md"), "{text}");
+    assert!(!text.contains("GitHub issue"), "{text}");
+    assert!(!text.contains("Fixes #"), "{text}");
+    assert!(!text.contains("{{"), "{text}");
+}
+
+#[test]
+fn the_embedded_reviewer_spec_prompt_has_no_pull_request_or_filing_language() {
+    let template = prompts::template(Role::ReviewerSpec, &Prompts::default()).unwrap();
+
+    let text = prompts::render(&template.name, &template.text, &spec_values()).unwrap();
+
+    assert!(
+        text.contains("spec-idea-abc123") && text.contains("o/r"),
+        "{text}"
+    );
+    assert!(text.contains(".sbxm-task/source.md"), "{text}");
+    assert!(text.contains("Must-fix findings: <count>"), "{text}");
+    assert!(
+        text.contains("no pull request") && text.contains("review.md is the only output"),
+        "{text}"
+    );
+    assert!(!text.contains("filed as"), "{text}");
+    assert!(!text.contains("{{"), "{text}");
+}
+
+#[test]
+fn the_embedded_fix_spec_prompt_renders() {
+    let template = prompts::template(Role::FixSpec, &Prompts::default()).unwrap();
+    let text = prompts::render(&template.name, &template.text, &spec_values()).unwrap();
+    assert!(text.contains(".sbxm-task/review.md"), "{text}");
+    assert!(text.contains("- `cargo test`"), "{text}");
+    assert!(!text.contains("issue #"), "{text}");
+    assert!(!text.contains("{{"), "{text}");
+}
+
+#[test]
+fn the_reviewer_spec_prompt_asks_for_a_repeat_of_marker_on_each_finding() {
+    let template = prompts::template(Role::ReviewerSpec, &Prompts::default()).unwrap();
+    let text = prompts::render(&template.name, &template.text, &spec_values()).unwrap();
+    assert!(text.contains("Repeat of: <id>"), "{text}");
+    assert!(text.contains("Repeat of: new"), "{text}");
+    assert!(text.contains("**Repeat of:**"), "{text}");
+}
+
+#[test]
+fn the_fix_spec_prompt_says_there_is_no_pull_request_and_review_md_is_the_record() {
+    let template = prompts::template(Role::FixSpec, &Prompts::default()).unwrap();
+    let text = prompts::render(&template.name, &template.text, &spec_values()).unwrap();
+    assert!(text.contains("no pull request"), "{text}");
+    assert!(
+        text.contains("review.md is the only review record"),
+        "{text}"
+    );
+}
+
+#[test]
+fn the_embedded_fix_gate_spec_prompt_renders() {
+    let template = prompts::template(Role::FixGateSpec, &Prompts::default()).unwrap();
+    let text = prompts::render(&template.name, &template.text, &spec_values()).unwrap();
+    assert!(text.contains(".sbxm-task/gate-failure.md"), "{text}");
+    assert!(!text.contains("issue #"), "{text}");
+    assert!(!text.contains("{{"), "{text}");
+}
+
+#[test]
+fn a_spec_role_reuses_the_same_override_keys_as_its_issue_counterpart() {
+    let dir = tempfile::tempdir().unwrap();
+    let (worker, reviewer, fix) = (
+        dir.path().join("w.md"),
+        dir.path().join("r.md"),
+        dir.path().join("f.md"),
+    );
+    fs::write(&worker, "W").unwrap();
+    fs::write(&reviewer, "R").unwrap();
+    fs::write(&fix, "F").unwrap();
+    let config = Prompts {
+        worker: Some(worker),
+        reviewer: Some(reviewer),
+        fix: Some(fix),
+    };
+    assert_eq!(
+        prompts::template(Role::WorkerSpec, &config).unwrap().text,
+        "W"
+    );
+    assert_eq!(
+        prompts::template(Role::ReviewerSpec, &config).unwrap().text,
+        "R"
+    );
+    assert_eq!(prompts::template(Role::FixSpec, &config).unwrap().text, "F");
+    assert_eq!(
+        prompts::template(Role::FixGateSpec, &config).unwrap().text,
+        "F"
+    );
+}
+
 #[test]
 fn a_reviewer_override_in_the_config_covers_pull_requests_too() {
     let dir = tempfile::tempdir().unwrap();
