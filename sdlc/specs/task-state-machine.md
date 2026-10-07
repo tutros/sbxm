@@ -13,13 +13,22 @@ review-fix-review loop (`pipeline::review_issue`), the narrow-then-one-full revi
 (`Record::last_reviewed_commit`), and the gate-failure-feeds-a-fix-round move (`Stage::Gating`
 `GatesFailed` to `Fixing`, `Record::done_for`) described in section 5.2 — everything in that section
 except the no-progress/`repeat-finding` and `repeat-gate-failure` stops (173(a)(d)(e), 174(a); left
-for the no-progress issue), `resume`, draft PRs, and the `spec` source, which are still open per
-section 5.5.**
+for the no-progress issue), `resume` and draft PRs, which are still open per section 5.5.**
+
+**Issue 142 (part 7a of 7) built the `spec` source: `Kind::Spec`, `record::spec_id`,
+`task start --spec <file>` (`pipeline::prepare_spec`) and `task review --spec <file>`, running the
+same `pipeline::review_issue` loop as an issue task's (`machine::TABLE`'s `HAS_WORKER` rows cover
+`Kind::Issue` and `Kind::Spec` alike, so no new rows were added). `review.md` is its only output
+(`Role::ReviewerSpec`/`FixSpec`/`FixGateSpec`, no GitHub call anywhere); `task finish` is refused
+for it (`check_can_finish`) until the sink (`[finish] sink` = `local`/`push`, decision 174(e))
+lands, in the two issues that follow it.**
 
 ## 1. States of an issue task (`stage` / `status`)
 
 Legal moves (`Stage::next`): prepared -> working -> gating -> reviewing -> (fixing -> gating -> reviewing) -> ready -> finished.
 A PR task (`pr-N`) has no worker: prepared -> gating -> reviewing -> ready.
+A spec task (`spec-<name>-<hash>`, issue 142) walks the same moves as an issue task up to and including `ready`, but
+never `finished`: `check_can_finish` refuses it until a sink lands (decision 174(e)).
 
 | # | State (stage / status) | How it is reached |
 |---|---|---|
@@ -166,7 +175,9 @@ kept here as the design for issues #117-121 to build toward.
 | any completed/timed-out/failed/passed/gates-failed/ok | task rm | removed | remove the task's folders and sandboxes |
 | any running, interrupted | task rm | removed | remove the task's folders and sandboxes |
 
-#### Target (decisions 173, 174; not yet built — issues #117-121)
+#### Target (decisions 173, 174; not yet built — issues #117-121; the `prepared`-to-`ready` rows
+for a spec source are built by issue 142 through the existing issue-task mechanics below, not this
+table yet — see the note after it)
 
 Events: `worker` (done/timed-out/failed), `gates` (passed/failed), `review(n, repeat)` (n must-fix findings;
 `repeat` = a finding the reviewer marked `Repeat of: <id>` whose file matches the earlier finding's), `fix`
@@ -210,6 +221,12 @@ spike's agreement test already walks them).
 Rows are checked top to bottom and the first match wins. A validation test walks every reachable (state, event)
 pair and asserts that it matches exactly one row, so an accidental overlap fails the build.
 
+**Issue 142 status:** a spec task's `prepared` through `ready` rows are built, but through the section 5.2 "Today
+(generated)" mechanics (the `HAS_WORKER` kind list covers `Kind::Issue` and `Kind::Spec` alike), not this target
+table's `resume`/`round`/`repeat` machinery, which is still unbuilt for every source. The `ready, issue or spec
+source | finish | finished | sink, see 5.4` row above is **not** built for a spec source: `check_can_finish` refuses
+it unconditionally until the sink (`local`/`push`) lands, in the two issues that follow 142.
+
 `resume` is refused while the recorded process is alive (pid and start time, as `interrupted` is decided today).
 `--rounds N` is additive ("N more rounds", N >= 1; 0 is refused) and is valid from any `ready` with `stopped`,
 including `repeat-finding` and `repeat-gate-failure` before the budget is used; a successful resume clears `stopped`
@@ -242,16 +259,16 @@ no reviewer finding is involved. A different failing command is progress.
 |---|---|---|---|
 | issue | `issue.md` | PR comment (once a PR exists) | branch pushed, PR opened (draft if `stopped` or must-fix left) |
 | pr | `issue.md` of the linked issues + the PR | PR comment | none (review only) |
-| spec | `source.md` | `review.md` only | `[finish] sink`: `local` (default: the branch stays in `repo.git`; `finish` prints how to fetch it) or `push` (pushed to `origin`, no PR) |
+| spec | `source.md` (built, issue 142) | `review.md` only (built, issue 142) | `[finish] sink`: `local` (default: the branch stays in `repo.git`; `finish` prints how to fetch it) or `push` (pushed to `origin`, no PR) — **not built**; `finish` refuses every spec task until this lands, in the two issues that follow 142 |
 
 For an issue task tied to an open PR (decision 169), `finish` pushes to the PR's own branch and cannot make it a draft:
 it posts the remaining findings as a PR comment and leaves the PR's draft status alone.
 
-Safety of the spec sinks (proposed, to confirm): `finish` with the `push` sink refuses a spec task that has `stopped`
-or open findings unless `--push-unresolved` is given, because a spec task has no PR and no draft to mark it
-unfinished; `push` never force-pushes, and a branch-name collision is refused. `task rm` refuses a spec task whose
-result exists only in `repo.git` (the `local` sink, not yet fetched), because `repo.git` lives in the task folder, and
-needs `--force` to delete it.
+Safety of the spec sinks (proposed, to confirm, not yet built): `finish` with the `push` sink refuses a spec task
+that has `stopped` or open findings unless `--push-unresolved` is given, because a spec task has no PR and no draft
+to mark it unfinished; `push` never force-pushes, and a branch-name collision is refused. `task rm` refuses a spec
+task whose result exists only in `repo.git` (the `local` sink, not yet fetched), because `repo.git` lives in the task
+folder, and needs `--force` to delete it.
 
 The git trust boundary (decision 159) is unchanged: the host only fetches a verified bundle into `repo.git`, and
 never runs git inside the agent's clone, whatever the source.
@@ -280,6 +297,8 @@ retrying:
 3. **Done (issue #116):** `sbxm task states` and the section 5.2 "Today (generated)" table are generated from
    the code; `tests/task_states.rs` compares them with this file and fails when they differ.
 4. Then add `resume`, `fix_rounds`, `Repeat of:` and the `spec` source as new rows (the 5.2 "Target" table above),
-   each with tests that fail first.
+   each with tests that fail first. **Issue 142 (part 7a) did the `spec` source's `prepared`-to-`ready` stages
+   ahead of this step, through the existing mechanics (section 2); `finish`'s sink row is left for the two issues
+   that follow it.**
 
 Related: `sdlc/evals-workflow-notes.md` G16, G17, G24, G25; decisions 116, 154, 159, 169.
