@@ -14,6 +14,12 @@ lists. Check that each earlier finding is fixed, and review the new commits too.
 `Repeat of: <id>`, naming the earlier finding's id (its `M-`/`S-`/`Q-` number, e.g. `M-1`) if it's the same problem
 as before, in the same file (line numbers may differ); otherwise write `Repeat of: new`.
 
+A finding is about what this change introduces or changes.
+A must-fix finding names the line of the diff that causes it. A gap the change inherited, a design that a spec or plan
+describes elsewhere and this change doesn't claim to deliver, or something that might break in a future version of a
+tool is not a finding for this change: put it under "## Outside this change" (or ask it as a question).
+It doesn't count towards the must-fix total.
+
 Write {{review_path}}. Its first line is exactly "Must-fix findings: <count>". There is no pull request to
 comment on and no issue to file findings against: review.md is the only output, so use this shape so a human can
 act on it directly:
