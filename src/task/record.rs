@@ -596,9 +596,33 @@ pub fn spec_id(path: &Path) -> Result<(String, String)> {
     spec_id_for_canonical(&canonical)
 }
 
+/// The bytes a canonical path is hashed as. The id they produce names a task folder and branch, so
+/// this is an on-disk format and must not change with the Rust version (`OsStr::as_encoded_bytes`
+/// may): the path's raw bytes on Unix, its UTF-16 code units as little-endian bytes on Windows.
+/// Neither goes through a lossy text conversion, so two paths that differ only in units that
+/// aren't valid text never share an id.
+fn path_hash_bytes(path: &Path) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        path.as_os_str().as_bytes().to_vec()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        path.as_os_str()
+            .encode_wide()
+            .flat_map(u16::to_le_bytes)
+            .collect()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        path.to_string_lossy().into_owned().into_bytes()
+    }
+}
+
 /// The pure part of [`spec_id`]: no filesystem access, so the same canonical path always gives the
-/// same id whether or not it exists. The hash covers the path's raw encoded bytes, not a lossy text
-/// conversion, so two paths that differ only in bytes that aren't valid text never share an id.
+/// same id whether or not it exists. The hash covers [`path_hash_bytes`].
 pub fn spec_id_for_canonical(canonical: &Path) -> Result<(String, String)> {
     let file_name = canonical
         .file_name()
@@ -616,7 +640,7 @@ pub fn spec_id_for_canonical(canonical: &Path) -> Result<(String, String)> {
             canonical.display()
         )
     })?;
-    let digest = Sha256::digest(canonical.as_os_str().as_encoded_bytes());
+    let digest = Sha256::digest(path_hash_bytes(canonical));
     let id = format!(
         "spec-{name}-{:02x}{:02x}{:02x}",
         digest[0], digest[1], digest[2]

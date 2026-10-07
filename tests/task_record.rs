@@ -747,6 +747,14 @@ fn spec_id_differs_for_files_with_the_same_name_in_different_folders() {
     assert!(id_a.starts_with("spec-idea-") && id_b.starts_with("spec-idea-"));
 }
 
+// The hashed bytes are a stable on-disk format (the id names the task folder and branch): raw path
+// bytes on Unix, UTF-16 code units as little-endian bytes on Windows.
+#[cfg(unix)]
+const TEXT_PATH_ID: &str = "spec-idea-9e40e1"; // SHA-256 of the UTF-8 bytes of the path
+#[cfg(windows)]
+const TEXT_PATH_ID: &str = "spec-idea-e3eb4e"; // SHA-256 of the path's UTF-16LE bytes
+
+#[cfg(any(unix, windows))]
 #[test]
 fn the_pure_spec_id_gives_the_known_hash_without_touching_the_filesystem() {
     // The path does not exist: the function only sanitizes the name and hashes the given path.
@@ -754,8 +762,8 @@ fn the_pure_spec_id_gives_the_known_hash_without_touching_the_filesystem() {
 
     let (id, title) = spec_id_for_canonical(path).unwrap();
 
-    // First 6 hex digits of the SHA-256 of "/no/such/dir/idea.md".
-    assert_eq!(id, "spec-idea-9e40e1");
+    // First 6 hex digits of the SHA-256 of the stable encoding of "/no/such/dir/idea.md".
+    assert_eq!(id, TEXT_PATH_ID);
     assert_eq!(title, "idea.md");
     assert_eq!(
         spec_id_for_canonical(path).unwrap().0,
@@ -795,6 +803,20 @@ fn spec_ids_differ_for_paths_that_differ_only_in_non_text_units() {
 
     assert_ne!(a, b);
     assert!(is_valid_id(&a) && is_valid_id(&b), "{a} {b}");
+}
+
+#[cfg(any(unix, windows))]
+#[test]
+fn a_non_text_path_has_a_known_id_in_the_stable_encoding() {
+    // Unix: `/specs/d<0xfe>/idea.md`; Windows: `/specs\d<0xd800>\idea.md` (the joins use `\`).
+    #[cfg(unix)]
+    let (unit, expected) = (0xfe, "spec-idea-e0ab55");
+    #[cfg(windows)]
+    let (unit, expected) = (0xd800, "spec-idea-58bbc6");
+
+    let (id, _) = spec_id_for_canonical(&path_with_odd_unit(unit)).unwrap();
+
+    assert_eq!(id, expected);
 }
 
 #[test]
