@@ -315,6 +315,21 @@ fn a_task_continuing_a_pr_shows_the_pr_and_its_branch() {
 }
 
 #[test]
+fn a_stopped_task_shows_the_reason() {
+    let base = tempfile::tempdir().unwrap();
+    let mut record = working(41, Some(Status::Completed));
+    record.stopped = Some(record::Stopped::RepeatFinding);
+    save(base.path(), &record);
+    save(base.path(), &working(42, None));
+
+    let (text, _ids) = task_status::render(base.path(), None, false, &Probe(Some(T0))).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+
+    assert!(lines[0].contains("stopped: repeat-finding"), "{text}");
+    assert!(!lines[1].contains("stopped:"), "{text}");
+}
+
+#[test]
 fn the_cli_appends_a_selected_issues_output_to_its_run_log() {
     let env = Env::new();
     save(&env.base_dir(), &working(41, None));
