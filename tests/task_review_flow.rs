@@ -34,6 +34,37 @@ fn config_with_fix_rounds(fix_rounds: u32) -> Fixture {
 const CLEAN: &str = "Must-fix findings: 0\n\nNothing found.\n";
 const ONE: &str = "Must-fix findings: 1\n\n1. must-fix: a.txt:1 does the wrong thing.\n";
 
+/// A structured finding (unlike `ONE`, which `review::must_fix_count` reads but
+/// `review::repeats_a_must_fix_finding` can't parse), so round 2's `Repeat of:` line has an
+/// earlier finding to validate against (issue 119).
+const FINDING1: &str = "Must-fix findings: 1\n\n\
+    ## Must fix\n\n\
+    ### M-1 - a.txt does the wrong thing\n\n\
+    **Where:** `a.txt:1`\n\
+    **What happens:** it returns the wrong value\n\
+    **Why it matters:** decision 1\n\
+    **Fix:** return the right value\n";
+
+/// Claims to repeat `FINDING1`'s `M-1`, in the same file at a different line: a valid repeat.
+const REPEAT_SAME_FILE: &str = "Must-fix findings: 1\n\n\
+    ## Must fix\n\n\
+    ### M-1 - a.txt still does the wrong thing\n\n\
+    **Where:** `a.txt:5`\n\
+    **What happens:** it still returns the wrong value\n\
+    **Why it matters:** decision 1\n\
+    **Fix:** return the right value\n\
+    **Repeat of:** M-1\n";
+
+/// Claims to repeat `FINDING1`'s `M-1`, but in a different file: not a valid repeat.
+const REPEAT_WRONG_FILE: &str = "Must-fix findings: 1\n\n\
+    ## Must fix\n\n\
+    ### M-1 - b.txt does something else wrong\n\n\
+    **Where:** `b.txt:5`\n\
+    **What happens:** it does something else wrong\n\
+    **Why it matters:** decision 1\n\
+    **Fix:** fix it\n\
+    **Repeat of:** M-1\n";
+
 /// The worker (and a fix round) commit a file each time; the n-th review is `reviews[n]`.
 fn backend(f: &Fixture, reviews: &[&str]) -> FakeBackend {
     let worker = play_tasks(
@@ -307,6 +338,45 @@ fn the_fix_round_happens_at_most_once_and_findings_left_are_reported_not_an_erro
         (Stage::Ready, Status::Ok),
         "the round is used"
     );
+    assert_eq!(record.round, 1);
+    assert_eq!(record.stopped, Some(record::Stopped::RoundsExhausted));
+}
+
+#[test]
+fn a_validated_repeat_stops_the_task_before_the_round_budget_is_used() {
+    let f = config_with_fix_rounds(3);
+    let backend = backend(&f, &[FINDING1, REPEAT_SAME_FILE]);
+    let mut prepared = worked_task(&f, &backend);
+
+    let report = review(&f, &backend, &mut prepared).unwrap();
+
+    assert_eq!(
+        report.rounds.iter().map(|r| r.must_fix).collect::<Vec<_>>(),
+        [1, 1]
+    );
+    assert_eq!(report.must_fix_left, 1);
+    let record = saved(&f);
+    assert_eq!((record.stage, record.status), (Stage::Ready, Status::Ok));
+    assert_eq!(
+        record.round, 1,
+        "only the fix round before the repeat was found ran, though 3 were budgeted"
+    );
+    assert_eq!(record.stopped, Some(record::Stopped::RepeatFinding));
+}
+
+#[test]
+fn a_repeat_claim_naming_a_different_file_does_not_stop_the_task() {
+    let f = config_with_fix_rounds(1);
+    let backend = backend(&f, &[FINDING1, REPEAT_WRONG_FILE]);
+    let mut prepared = worked_task(&f, &backend);
+
+    let report = review(&f, &backend, &mut prepared).unwrap();
+
+    assert_eq!(report.must_fix_left, 1);
+    let record = saved(&f);
+    assert_eq!((record.stage, record.status), (Stage::Ready, Status::Ok));
+    // The wrong claim is treated as a new finding: the round budget (1) is what stops it, not
+    // the no-progress rule.
     assert_eq!(record.round, 1);
     assert_eq!(record.stopped, Some(record::Stopped::RoundsExhausted));
 }

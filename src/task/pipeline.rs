@@ -1375,7 +1375,7 @@ pub fn review_issue(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewRepo
     loop {
         let reviewed = run_reviewer(env, prepared, round)?;
         report.must_fix_left = reviewed.must_fix;
-        let (must_fix, full) = (reviewed.must_fix, reviewed.full);
+        let (must_fix, full, repeat) = (reviewed.must_fix, reviewed.full, reviewed.repeat);
         report.rounds.push(reviewed);
 
         if must_fix == 0 {
@@ -1386,6 +1386,12 @@ pub fn review_issue(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewRepo
             // review runs before the task is ready (spec §5.2).
             round += 1;
             continue;
+        }
+        // The no-progress rule (spec §5.3, issue 119): a validated repeat stops the task even
+        // with rounds left in the budget, before the rounds-exhausted check below.
+        if repeat {
+            prepared.record.stopped = Some(record::Stopped::RepeatFinding);
+            break;
         }
         if prepared.record.round >= prepared.record.fix_rounds {
             prepared.record.stopped = Some(record::Stopped::RoundsExhausted);
@@ -1543,11 +1549,11 @@ pub fn review_pr(
     }
 
     // The reviewer, once: a PR task is always a single full review (it has no worker to fix
-    // anything and so never narrows a later one).
-    let ran = run_review_agent(env, prepared, 1, &clone, &sandbox);
+    // anything and so never narrows a later one, and so never repeats one either).
+    let ran = run_review_agent(env, prepared, 1, &clone, &sandbox, None);
     cleanup(prepared);
     let must_fix = match ran {
-        Ok(must_fix) => must_fix,
+        Ok((must_fix, _repeat)) => must_fix,
         Err(e) => {
             prepared.record.notes.push(format!("review: {e:#}"));
             prepared.record.finish(Status::Failed)?;
@@ -1564,6 +1570,7 @@ pub fn review_pr(
         round: 1,
         must_fix,
         full: true,
+        repeat: false,
     });
 
     let review_path = prepared.meta.join("review.md");
@@ -1726,6 +1733,10 @@ pub struct Reviewed {
     /// Whether this round covered every commit since the task's base (`true`), or only those
     /// since the last review (`false`, spec §5.2, issue 117).
     pub full: bool,
+    /// Whether a must-fix finding validly claimed `Repeat of:` one of the previous round's
+    /// must-fix findings (spec §5.3, issue 119): always `false` for round 1, which has no
+    /// previous round to repeat.
+    pub repeat: bool,
 }
 
 /// Checks before a review creates anything (spec §5.2): the reviewer's provider secret and the
@@ -1799,7 +1810,7 @@ pub fn run_reviewer(env: &TaskEnv, prepared: &mut Prepared, round: u32) -> Resul
             .push(format!("could not remove {}: {e}", clone.display()));
     }
     match result {
-        Ok(must_fix) => {
+        Ok((must_fix, repeat)) => {
             prepared.record.last_reviewed_commit = if must_fix == 0 { None } else { tip };
             prepared.record.finish(Status::Completed)?;
             record::write(&prepared.meta, &prepared.record)?;
@@ -1807,6 +1818,7 @@ pub fn run_reviewer(env: &TaskEnv, prepared: &mut Prepared, round: u32) -> Resul
                 round,
                 must_fix,
                 full,
+                repeat,
             })
         }
         Err(e) => {
@@ -1821,7 +1833,8 @@ pub fn run_reviewer(env: &TaskEnv, prepared: &mut Prepared, round: u32) -> Resul
     }
 }
 
-/// One review round: its workspace, then the reviewer. Returns the must-fix count.
+/// One review round: its workspace, then the reviewer. Returns the must-fix count and whether a
+/// must-fix finding validly repeats one of `previous`'s (spec §5.3, issue 119).
 fn review_round(
     env: &TaskEnv,
     prepared: &mut Prepared,
@@ -1829,9 +1842,9 @@ fn review_round(
     clone: &Path,
     sandbox: &str,
     previous: Option<&str>,
-) -> Result<u32> {
+) -> Result<(u32, bool)> {
     open_review_workspace(env, prepared, round, clone, sandbox, previous)?;
-    run_review_agent(env, prepared, round, clone, sandbox)
+    run_review_agent(env, prepared, round, clone, sandbox, previous)
 }
 
 /// Makes the reviewer's workspace: a clean clone of the task branch (a pull request's head for
@@ -1946,14 +1959,16 @@ fn open_review_workspace(
 
 /// Runs the reviewer in its (already open) sandbox, saves its transcript, and reads and saves what
 /// it wrote: `review-<round>.md` (and `review.md` when its first line has the count). Returns the
-/// must-fix count.
+/// must-fix count and whether a must-fix finding validly claims `Repeat of:` one of `previous`'s
+/// must-fix findings (spec §5.3, issue 119; always `false` when `previous` is `None`).
 fn run_review_agent(
     env: &TaskEnv,
     prepared: &mut Prepared,
     round: u32,
     clone: &Path,
     sandbox: &str,
-) -> Result<u32> {
+    previous: Option<&str>,
+) -> Result<(u32, bool)> {
     let reviewer = &env.config.reviewer;
     let started = Instant::now();
     let result = headless::run(
@@ -2015,5 +2030,6 @@ fn run_review_agent(
         );
     };
     fs::write(prepared.meta.join("review.md"), &saved)?;
-    Ok(must_fix)
+    let repeat = previous.is_some_and(|p| review::repeats_a_must_fix_finding(&text, p));
+    Ok((must_fix, repeat))
 }
