@@ -1,6 +1,8 @@
 //! Reading a reviewer's `review.md` (spec §5.2): its first line says how many must-fix findings
 //! there are, and a review without that line isn't used.
 
+use super::findings;
+
 /// The count on the first line, which must be exactly `Must-fix findings: <count>` (trailing
 /// spaces and a Windows line ending are fine); `None` for anything else.
 pub fn must_fix_count(review: &str) -> Option<u32> {
@@ -58,4 +60,41 @@ pub fn with_header(harness: &str, model: Option<&str>, review: &str) -> String {
         "Reviewer: {harness} ({})\n\n{review}",
         model.unwrap_or("default model")
     )
+}
+
+/// A `Where:` value with any trailing `:<line>` or `:<line>-<line>` stripped, so two findings in
+/// the same file match regardless of which lines they point at (spec §5.3, issue 119).
+fn where_path(raw: &str) -> &str {
+    let s = raw.trim().trim_matches('`');
+    match s.rsplit_once(':') {
+        Some((path, suffix))
+            if !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit() || b == b'-') =>
+        {
+            path
+        }
+        _ => s,
+    }
+}
+
+/// The no-progress rule's matching (spec §5.3, decisions 174(b), 177(e)): whether `current`'s
+/// review has a must-fix finding that validly claims `Repeat of: <id>` against `previous`'s
+/// must-fix findings — the id must name one of them, and the two must share a `Where:` file path
+/// (line numbers ignored). A missing `Repeat of:` line, an id `previous` has no must-fix finding
+/// for, or a different file all count as new, so a wrong claim alone can never stop the task; the
+/// same is true of a repeat claimed on a should-fix finding or a question, which never stop it.
+pub fn repeats_a_must_fix_finding(current: &str, previous: &str) -> bool {
+    let previous = findings::parse(previous);
+    findings::parse(current).findings.iter().any(|finding| {
+        finding.label == "must-fix"
+            && finding.field("repeat of").is_some_and(|claimed_id| {
+                previous.findings.iter().any(|earlier| {
+                    earlier.label == "must-fix"
+                        && earlier.id == claimed_id
+                        && match (finding.field("where"), earlier.field("where")) {
+                            (Some(a), Some(b)) => where_path(a) == where_path(b),
+                            _ => false,
+                        }
+                })
+            })
+    })
 }
