@@ -375,3 +375,138 @@ pub fn run_with(
     }
     Ok(())
 }
+
+/// `task start --spec <FILE>` (decision 174(d), issue 142): one task, not a selection of issues.
+pub struct SpecOptions {
+    /// The target repo's root, where `sbxm-task.toml` is.
+    pub repo_root: PathBuf,
+    pub spec: PathBuf,
+    pub worker_harness: Option<Harness>,
+    pub worker_model: Option<String>,
+    pub time_limit: Option<String>,
+    pub profile: Option<String>,
+    /// Default: the repo's default branch on GitHub.
+    pub base: Option<String>,
+    /// `owner/name`. Default: the `origin` of the checkout at `repo_root`.
+    pub repo: Option<String>,
+    /// For tests: what `repo.git` is cloned from instead of `https://github.com/<repo>.git`.
+    pub clone_source: Option<String>,
+    /// For tests: the committer identity instead of the user's global git config.
+    pub identity: Option<Identity>,
+}
+
+/// Starts a spec task: prepares it, runs the worker, then the gates (as `run` does for an issue
+/// task), and prints what happened. No GitHub call is made anywhere in this path.
+#[allow(clippy::too_many_arguments)]
+pub fn run_spec(
+    config_dir: &std::path::Path,
+    opts: &SpecOptions,
+    backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<()> {
+    let mut config = TaskConfig::load(&opts.repo_root)?;
+    if let Some(harness) = opts.worker_harness {
+        let harness = headless_harness("--worker-harness", harness.as_str(), "tasks")
+            .map_err(|e| anyhow!(e))?;
+        config.set_worker_harness(harness);
+    }
+    if let Some(model) = &opts.worker_model {
+        check_model_flag("--worker-model", model).map_err(|e| anyhow!(e))?;
+        config.worker.model = Some(model.clone());
+    }
+    if let Some(limit) = &opts.time_limit {
+        config.worker.time_limit = parse_duration("--time-limit", limit).map_err(|e| anyhow!(e))?;
+    }
+    if let Some(profile) = &opts.profile {
+        config.sandbox.profile = profile.clone();
+    }
+    let repo_name = resolve_repo(opts.repo.as_deref(), &opts.repo_root)?;
+    let identity = match &opts.identity {
+        Some(identity) => identity.clone(),
+        None => Identity::read_from(None)?,
+    };
+    let base_branch = match &opts.base {
+        Some(base) => base.clone(),
+        None => github.default_branch(&repo_name)?,
+    };
+    if !repo::valid_ref_name(&base_branch) {
+        bail!("base {base_branch:?} isn't a usable branch name; pass --base <branch>");
+    }
+    let clone_source = opts
+        .clone_source
+        .clone()
+        .unwrap_or_else(|| format!("https://github.com/{repo_name}.git"));
+    for warning in &config.warnings {
+        writeln!(warn, "warning: {warning}")?;
+    }
+
+    let ctx = Ctx {
+        config_dir,
+        repo: &repo_name,
+        clone_source: &clone_source,
+        base_branch: &base_branch,
+        config: &config,
+        backend,
+        github,
+        identity: &identity,
+        probe,
+        host: &ShellHostRunner,
+    };
+    writeln!(out, "Starting a task from {} ...", opts.spec.display())?;
+    let mut prepared = pipeline::prepare_spec(&ctx, &opts.spec)?;
+    for warning in &prepared.warnings {
+        writeln!(warn, "warning: {warning}")?;
+    }
+    let id = prepared.record.id.clone();
+
+    let worked = pipeline::run_worker(&ctx, &mut prepared)?;
+    let (label, bad) = match &worked.status {
+        RunStatus::Completed => ("completed".to_owned(), false),
+        RunStatus::TimedOut => ("timed out".to_owned(), false),
+        RunStatus::Failed(why) => (format!("failed: {why}"), true),
+    };
+    writeln!(out, "{id}: worker {label}, {} commit(s)", worked.commits)?;
+    for note in &worked.notes {
+        writeln!(out, "  note: {note}")?;
+    }
+    if bad {
+        bail!(
+            "{id}: the worker failed; see `sbxm task status` (issue 142 is start-only: review it by hand in the task's folder)"
+        );
+    }
+
+    let gated = pipeline::run_gates(
+        &ctx.env(),
+        &mut prepared,
+        "after-worker",
+        pipeline::Tiers::ALL,
+    )?;
+    if gated.passed {
+        if gated.outcomes.is_empty() {
+            writeln!(out, "  gates: none configured")?;
+        } else {
+            writeln!(out, "  gates: passed")?;
+        }
+        writeln!(
+            out,
+            "  next: sbxm task review --spec {}",
+            opts.spec.display()
+        )?;
+        Ok(())
+    } else {
+        let first = gated.failed.expect("failed gates name the first failure");
+        let exit = first
+            .exit
+            .map_or_else(|| "no exit code".to_owned(), |c| format!("exit {c}"));
+        bail!(
+            "{id}: gates failed: `{}` ({}, {exit}); fix it in the worker's clone and commit, \
+             then run: sbxm task review --spec {}",
+            first.command,
+            first.tier,
+            opts.spec.display()
+        )
+    }
+}

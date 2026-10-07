@@ -10,7 +10,7 @@ use common::git;
 use common::task_fixture::{
     CLAUDE_DONE, Fixture, Play, Probe, add_pr_head, backend, ctx, fixture, ok, play, source,
 };
-use sbxm::commands::task_finish::{Options, run as finish_cmd};
+use sbxm::commands::task_finish::{Options, Target, run as finish_cmd};
 use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::github::{IssueText, PrInfo, PrState};
 use sbxm::task::finish::finish;
@@ -290,7 +290,9 @@ fn the_command_says_it_pushed_to_the_pr_and_how_to_review_it_again() {
 
     finish_cmd(
         &f.env.config_dir(),
-        &Options { issue: 41 },
+        &Options {
+            target: Target::Issue(41),
+        },
         &FakeGitHub::default(),
         &Probe,
         &mut out,

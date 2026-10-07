@@ -160,12 +160,34 @@ pub enum TaskCommand {
     /// commits are collected. Blocks until the workers finish.
     Start {
         /// Start this issue (repeatable).
-        #[arg(long = "issue", value_name = "N", conflicts_with = "workers")]
+        #[arg(
+            long = "issue",
+            value_name = "N",
+            conflicts_with = "workers",
+            conflicts_with = "spec"
+        )]
         issues: Vec<u32>,
         /// Start up to N issues, chosen by label (must-fix first), skipping questions, blocked
         /// and related ones.
-        #[arg(long, value_name = "N", conflicts_with = "issues")]
+        #[arg(
+            long,
+            value_name = "N",
+            conflicts_with = "issues",
+            conflicts_with = "spec"
+        )]
         workers: Option<usize>,
+        /// Start a task from this file instead of a GitHub issue (decision 174(d), issue 142):
+        /// the file is copied into the task as source.md, and the worker is told to follow it.
+        /// The task id is derived from the file (`spec-<name>-<hash>`); `task finish` is refused
+        /// for it until a sink lands.
+        #[arg(
+            long,
+            value_name = "FILE",
+            conflicts_with = "issues",
+            conflicts_with = "workers",
+            conflicts_with = "restart"
+        )]
+        spec: Option<PathBuf>,
         /// The worker's harness (default: sbxm-task.toml, else claude).
         #[arg(long, value_enum)]
         worker_harness: Option<Harness>,
@@ -194,19 +216,19 @@ pub enum TaskCommand {
     },
     /// Review a task: gates, an independent reviewer in its own sandbox, at most one fix round by
     /// the worker, gates and a second review; ends ready. Blocks until it is done.
+    #[command(group(clap::ArgGroup::new("review_target").required(true).args(["issue", "pr", "spec"])))]
     Review {
         /// Review this issue's task.
-        #[arg(
-            long,
-            value_name = "N",
-            required_unless_present = "pr",
-            conflicts_with = "pr"
-        )]
+        #[arg(long, value_name = "N")]
         issue: Option<u32>,
         /// Review this open pull request (from a branch of this repo) and post the review on it:
         /// gates on a clean checkout, one reviewer, no fix round.
         #[arg(long, value_name = "N")]
         pr: Option<u32>,
+        /// Review this spec task's file (decision 174(d), issue 142): same gates, review and fix
+        /// rounds as an issue task's; review.md is the only output (no PR to comment on).
+        #[arg(long, value_name = "FILE")]
+        spec: Option<PathBuf>,
         /// The GitHub repo, owner/name (pull requests; default: this checkout's origin).
         #[arg(long)]
         repo: Option<String>,
@@ -299,10 +321,15 @@ pub enum TaskCommand {
     },
     /// Push a ready task's branch and open its PR (`Fixes #N`, with the result and the review in
     /// the body). Refuses unless the task is ready and has no PR yet.
+    #[command(group(clap::ArgGroup::new("finish_target").required(true).args(["issue", "spec"])))]
     Finish {
         /// The issue's task.
         #[arg(long, value_name = "N")]
-        issue: u32,
+        issue: Option<u32>,
+        /// The spec task's file (decision 174(d), issue 142): always refused for now, with a
+        /// clear message, since the sink isn't built yet.
+        #[arg(long, value_name = "FILE")]
+        spec: Option<PathBuf>,
     },
     /// Delete a task: its sandboxes, its clones and its task folder. Shows exactly what, and asks
     /// first (without a terminal it needs --yes).
