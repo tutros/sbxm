@@ -34,6 +34,47 @@ fn config_with_fix_rounds(fix_rounds: u32) -> Fixture {
 const CLEAN: &str = "Must-fix findings: 0\n\nNothing found.\n";
 const ONE: &str = "Must-fix findings: 1\n\n1. must-fix: a.txt:1 does the wrong thing.\n";
 
+/// A structured finding (unlike `ONE`, which `review::must_fix_count` reads but
+/// `review::repeats_a_must_fix_finding` can't parse), so round 2's `Repeat of:` line has an
+/// earlier finding to validate against (issue 119).
+const FINDING1: &str = "Must-fix findings: 1\n\n\
+    ## Must fix\n\n\
+    ### M-1 - a.txt does the wrong thing\n\n\
+    **Where:** `a.txt:1`\n\
+    **What happens:** it returns the wrong value\n\
+    **Why it matters:** decision 1\n\
+    **Fix:** return the right value\n";
+
+/// Claims to repeat `FINDING1`'s `M-1`, in the same file at a different line: a valid repeat.
+const REPEAT_SAME_FILE: &str = "Must-fix findings: 1\n\n\
+    ## Must fix\n\n\
+    ### M-1 - a.txt still does the wrong thing\n\n\
+    **Where:** `a.txt:5`\n\
+    **What happens:** it still returns the wrong value\n\
+    **Why it matters:** decision 1\n\
+    **Fix:** return the right value\n\
+    **Repeat of:** M-1\n";
+
+/// Claims to repeat `FINDING1`'s `M-1`, but in a different file: not a valid repeat.
+const REPEAT_WRONG_FILE: &str = "Must-fix findings: 1\n\n\
+    ## Must fix\n\n\
+    ### M-1 - b.txt does something else wrong\n\n\
+    **Where:** `b.txt:5`\n\
+    **What happens:** it does something else wrong\n\
+    **Why it matters:** decision 1\n\
+    **Fix:** fix it\n\
+    **Repeat of:** M-1\n";
+
+/// Claims to repeat an id `FINDING1`'s round never had: not a valid repeat.
+const REPEAT_UNKNOWN_ID: &str = "Must-fix findings: 1\n\n\
+    ## Must fix\n\n\
+    ### M-1 - a.txt still does the wrong thing\n\n\
+    **Where:** `a.txt:5`\n\
+    **What happens:** it still returns the wrong value\n\
+    **Why it matters:** decision 1\n\
+    **Fix:** return the right value\n\
+    **Repeat of:** M-9\n";
+
 /// The worker (and a fix round) commit a file each time; the n-th review is `reviews[n]`.
 fn backend(f: &Fixture, reviews: &[&str]) -> FakeBackend {
     let worker = play_tasks(
@@ -309,6 +350,134 @@ fn the_fix_round_happens_at_most_once_and_findings_left_are_reported_not_an_erro
     );
     assert_eq!(record.round, 1);
     assert_eq!(record.stopped, Some(record::Stopped::RoundsExhausted));
+}
+
+#[test]
+fn a_validated_repeat_stops_the_task_before_the_round_budget_is_used() {
+    let f = config_with_fix_rounds(3);
+    let backend = backend(&f, &[FINDING1, REPEAT_SAME_FILE]);
+    let mut prepared = worked_task(&f, &backend);
+
+    let report = review(&f, &backend, &mut prepared).unwrap();
+
+    assert_eq!(
+        report.rounds.iter().map(|r| r.must_fix).collect::<Vec<_>>(),
+        [1, 1]
+    );
+    assert_eq!(report.must_fix_left, 1);
+    let record = saved(&f);
+    assert_eq!((record.stage, record.status), (Stage::Ready, Status::Ok));
+    assert_eq!(
+        record.round, 1,
+        "only the fix round before the repeat was found ran, though 3 were budgeted"
+    );
+    assert_eq!(record.stopped, Some(record::Stopped::RepeatFinding));
+}
+
+#[test]
+fn a_repeat_claim_naming_a_different_file_does_not_stop_the_task() {
+    let f = config_with_fix_rounds(1);
+    let backend = backend(&f, &[FINDING1, REPEAT_WRONG_FILE]);
+    let mut prepared = worked_task(&f, &backend);
+
+    let report = review(&f, &backend, &mut prepared).unwrap();
+
+    assert_eq!(report.must_fix_left, 1);
+    let record = saved(&f);
+    assert_eq!((record.stage, record.status), (Stage::Ready, Status::Ok));
+    // The wrong claim is treated as a new finding: the round budget (1) is what stops it, not
+    // the no-progress rule.
+    assert_eq!(record.round, 1);
+    assert_eq!(record.stopped, Some(record::Stopped::RoundsExhausted));
+    // A wrong claim isn't silently dropped (decision 177(e)): it's why no-progress didn't fire.
+    assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+    assert!(report.warnings[0].contains("M-1"), "{:?}", report.warnings);
+}
+
+#[test]
+fn a_repeat_claim_naming_an_unknown_id_does_not_stop_the_task_and_warns() {
+    let f = config_with_fix_rounds(1);
+    let backend = backend(&f, &[FINDING1, REPEAT_UNKNOWN_ID]);
+    let mut prepared = worked_task(&f, &backend);
+
+    let report = review(&f, &backend, &mut prepared).unwrap();
+
+    assert_eq!(report.must_fix_left, 1);
+    let record = saved(&f);
+    assert_eq!(record.stopped, Some(record::Stopped::RoundsExhausted));
+    assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+    assert!(report.warnings[0].contains("M-9"), "{:?}", report.warnings);
+}
+
+#[test]
+fn an_intervening_clean_narrow_review_does_not_hide_an_older_must_fix_finding() {
+    // Round 1 (full) finds M-1 in a.txt; a fix round runs. Round 2 (narrow, scoped to that fix's
+    // commits) finds nothing, so round 3 (full, confirmatory) runs next and finds the bug still
+    // there, correctly naming it `Repeat of: M-1`. Matching only against the review right before
+    // round 3 (round 2, which has no findings at all) would miss this: the no-progress rule must
+    // match against every earlier round (decision 177(o)), and round 3's reviewer context must
+    // include round 1's still-open finding, not only round 2's (empty) review.
+    let f = config_with_fix_rounds(3);
+    let worker = play_tasks(
+        &f.env.base_dir(),
+        "main",
+        Play {
+            commits: vec!["a.txt".into()],
+            result_md: Some(b"done\n".to_vec()),
+            bundle_bytes: None,
+        },
+    );
+    let reviewer = play_reviews(
+        &f.env.base_dir(),
+        "issue-41",
+        vec![
+            FINDING1.to_owned(),
+            CLEAN.to_owned(),
+            REPEAT_SAME_FILE.to_owned(),
+        ],
+    );
+    let review_clone = f.env.base_dir().join("tasks").join("issue-41-review");
+    let seen_previous = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let seen = seen_previous.clone();
+    let backend = FakeBackend::with_secrets(&["anthropic", "openai"])
+        .with_exec_output_matching("claude", ok(CLAUDE_DONE))
+        .with_exec_output_matching("codex", ok(CODEX_DONE))
+        .with_exec_hook(move |sandbox, spec| {
+            worker(sandbox, spec);
+            if sandbox.contains("-review-")
+                && spec.argv.iter().any(|a| a == "codex")
+                && let Ok(text) =
+                    fs::read_to_string(review_clone.join(".sbxm-task").join("previous-review.md"))
+            {
+                seen.lock().unwrap().push(text);
+            }
+            reviewer(sandbox, spec);
+        });
+    let mut prepared = worked_task(&f, &backend);
+
+    let report = review(&f, &backend, &mut prepared).unwrap();
+
+    assert_eq!(
+        report.rounds.iter().map(|r| r.must_fix).collect::<Vec<_>>(),
+        [1, 0, 1]
+    );
+    let record = saved(&f);
+    assert_eq!((record.stage, record.status), (Stage::Ready, Status::Ok));
+    assert_eq!(
+        record.round, 1,
+        "only the fix round after round 1 ran; round 3's repeat stopped the task before a second"
+    );
+    assert_eq!(record.stopped, Some(record::Stopped::RepeatFinding));
+    assert_eq!(count(&backend, "codex"), 3, "no fourth review");
+
+    let seen_previous = seen_previous.lock().unwrap();
+    assert_eq!(seen_previous.len(), 2, "{seen_previous:?}");
+    assert!(
+        seen_previous[1].contains("a.txt does the wrong thing"),
+        "round 3's context must include round 1's still-open finding, not only round 2's \
+         (empty) review: {:?}",
+        seen_previous[1]
+    );
 }
 
 #[test]

@@ -119,12 +119,17 @@ impl Stage {
 pub enum Stopped {
     /// The round budget (`fix_rounds`) was used up with must-fix findings still open.
     RoundsExhausted,
+    /// A review validly claimed `Repeat of: <id>` against an earlier must-fix finding: the same
+    /// problem, in the same file, came back after a fix round (spec §5.3, decisions 174(b), 177(e),
+    /// issue 119).
+    RepeatFinding,
 }
 
 impl Stopped {
     pub fn name(self) -> &'static str {
         match self {
             Self::RoundsExhausted => "rounds-exhausted",
+            Self::RepeatFinding => "repeat-finding",
         }
     }
 }

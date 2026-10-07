@@ -67,7 +67,7 @@ pub fn render(
         };
         writeln!(
             out,
-            "{:<width$}  {:<9}  {:<12}  ahead: {:<3}  result: {:<3}  review: {:<3}  {}{}",
+            "{:<width$}  {:<9}  {:<12}  ahead: {:<3}  result: {:<3}  review: {:<3}  {}{}{}",
             record.id,
             record.stage.name(),
             status,
@@ -79,6 +79,9 @@ pub fn render(
                 .continues
                 .as_ref()
                 .map_or_else(String::new, |c| format!("  [PR #{} ({})]", c.pr, c.branch)),
+            record
+                .stopped
+                .map_or_else(String::new, |s| format!("  stopped: {}", s.name())),
         )?;
     }
     Ok((out, ids))

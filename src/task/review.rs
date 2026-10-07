@@ -1,6 +1,8 @@
 //! Reading a reviewer's `review.md` (spec §5.2): its first line says how many must-fix findings
 //! there are, and a review without that line isn't used.
 
+use super::findings;
+
 /// The count on the first line, which must be exactly `Must-fix findings: <count>` (trailing
 /// spaces and a Windows line ending are fine); `None` for anything else.
 pub fn must_fix_count(review: &str) -> Option<u32> {
@@ -58,4 +60,127 @@ pub fn with_header(harness: &str, model: Option<&str>, review: &str) -> String {
         "Reviewer: {harness} ({})\n\n{review}",
         model.unwrap_or("default model")
     )
+}
+
+/// The individual file paths named by a `Where:` value (spec §5.3, issue 119): each
+/// backtick-delimited reference, with any trailing `:<line>` or `:<line>-<line>` stripped so two
+/// findings in the same file match regardless of which lines they point at. A `Where:` may name
+/// more than one file (`` `a.rs:10`, `b.rs:20` ``); any one of them shared with another finding
+/// is enough to match.
+fn where_paths(raw: &str) -> Vec<&str> {
+    let raw = raw.trim();
+    if raw.contains('`') {
+        raw.split('`')
+            .skip(1)
+            .step_by(2)
+            .map(strip_line_suffix)
+            .filter(|p| !p.is_empty())
+            .collect()
+    } else if raw.is_empty() {
+        Vec::new()
+    } else {
+        vec![strip_line_suffix(raw)]
+    }
+}
+
+fn strip_line_suffix(raw: &str) -> &str {
+    let s = raw.trim();
+    match s.rsplit_once(':') {
+        Some((path, suffix))
+            if !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_digit() || b == b'-') =>
+        {
+            path
+        }
+        _ => s,
+    }
+}
+
+fn shares_a_path(a: &str, b: &str) -> bool {
+    let a = where_paths(a);
+    where_paths(b).into_iter().any(|p| a.contains(&p))
+}
+
+/// How a must-fix finding's `Repeat of:` claim matched the must-fix findings of every review
+/// round before it (spec §5.3, decisions 174(b), 177(e), 177(o)).
+enum Claim {
+    /// No `Repeat of:` line, or the literal `Repeat of: new`: an ordinary new finding.
+    None,
+    /// Names an id with no must-fix finding in any earlier round sharing a file: wrong, but
+    /// still counts as new rather than stopping the task.
+    Invalid(String),
+    /// Validly names an earlier round's must-fix finding that shares a file.
+    Valid,
+}
+
+fn classify(finding: &findings::Finding, earlier: &[findings::Review]) -> Claim {
+    let Some(claimed_id) = finding.field("repeat of") else {
+        return Claim::None;
+    };
+    if claimed_id == "new" {
+        return Claim::None;
+    }
+    let valid = earlier.iter().any(|review| {
+        review.findings.iter().any(|earlier_finding| {
+            earlier_finding.label == "must-fix"
+                && earlier_finding.id == claimed_id
+                && match (finding.field("where"), earlier_finding.field("where")) {
+                    (Some(a), Some(b)) => shares_a_path(a, b),
+                    _ => false,
+                }
+        })
+    });
+    if valid {
+        Claim::Valid
+    } else {
+        Claim::Invalid(claimed_id.to_owned())
+    }
+}
+
+/// Every must-fix finding of `current`, classified against the must-fix findings of
+/// `earlier_reviews` (every review round before this one, spec §5.3, decisions 174(b), 177(o)): a
+/// narrow round between two full ones must not hide a finding that keeps coming back, so all
+/// earlier rounds count, not only the one immediately before.
+fn classify_current(current: &str, earlier_reviews: &[&str]) -> Vec<(String, Claim)> {
+    let earlier: Vec<findings::Review> =
+        earlier_reviews.iter().map(|r| findings::parse(r)).collect();
+    findings::parse(current)
+        .findings
+        .into_iter()
+        .filter(|f| f.label == "must-fix")
+        .map(|f| {
+            let claim = classify(&f, &earlier);
+            (f.id, claim)
+        })
+        .collect()
+}
+
+/// The no-progress rule's matching (spec §5.3, decisions 174(b), 177(o)): whether `current`'s
+/// review has a must-fix finding that validly claims `Repeat of: <id>` against any of
+/// `earlier_reviews`' must-fix findings (one entry per review round before this one, oldest
+/// first) — the id must name one of them, and the two must share a `Where:` file path (line
+/// numbers ignored). A missing `Repeat of:` line, an id no earlier round has a must-fix finding
+/// for, or a different file all count as new, so a wrong claim alone can never stop the task; the
+/// same is true of a repeat claimed on a should-fix finding or a question, which never stop it.
+pub fn repeats_a_must_fix_finding(current: &str, earlier_reviews: &[&str]) -> bool {
+    classify_current(current, earlier_reviews)
+        .iter()
+        .any(|(_, claim)| matches!(claim, Claim::Valid))
+}
+
+/// One warning per must-fix finding of `current` whose `Repeat of:` claim is invalid (decision
+/// 177(e)): it names an id no earlier round has a must-fix finding for, or one in a different
+/// file. `Repeat of: new` and a missing marker are ordinary new findings and never warned about,
+/// so a malformed reviewer claim isn't silently dropped when it's also why the no-progress rule
+/// didn't stop the task.
+pub fn invalid_repeat_claims(current: &str, earlier_reviews: &[&str]) -> Vec<String> {
+    classify_current(current, earlier_reviews)
+        .into_iter()
+        .filter_map(|(id, claim)| match claim {
+            Claim::Invalid(claimed_id) => Some(format!(
+                "{id} claims \"Repeat of: {claimed_id}\", but no earlier must-fix finding \
+                 {claimed_id} shares its file; counted as new"
+            )),
+            _ => None,
+        })
+        .collect()
 }
