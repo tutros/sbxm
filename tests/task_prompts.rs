@@ -193,6 +193,22 @@ fn the_reviewer_prompt_covers_a_re_review_through_the_previous_review_file() {
 }
 
 #[test]
+fn the_reviewer_prompt_asks_for_a_repeat_of_marker_on_each_finding() {
+    let template = prompts::template(Role::Reviewer, &Prompts::default()).unwrap();
+    let text = prompts::render(&template.name, &template.text, &review_values()).unwrap();
+    assert!(text.contains("Repeat of:"), "{text}");
+    assert!(text.contains("**Repeat of:**"), "{text}");
+    assert!(text.to_lowercase().contains("new"), "{text}");
+}
+
+#[test]
+fn the_pr_reviewer_prompt_has_no_repeat_of_marker() {
+    let template = prompts::template(Role::ReviewerPr, &Prompts::default()).unwrap();
+    let text = prompts::render(&template.name, &template.text, &review_values()).unwrap();
+    assert!(!text.contains("Repeat of:"), "{text}");
+}
+
+#[test]
 fn the_embedded_fix_prompt_renders_and_asks_for_a_review_section_in_result_md() {
     let template = prompts::template(Role::Fix, &Prompts::default()).unwrap();
 
