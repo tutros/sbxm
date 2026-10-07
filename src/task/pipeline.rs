@@ -1801,14 +1801,23 @@ fn run_fix_round(
         .advance(Stage::Fixing, now(), Process::current(env.probe))?;
     record::write(&prepared.meta, &prepared.record)?;
 
+    let is_spec = prepared.record.kind == Kind::Spec;
     let (role, extra_name, extra_text) = match gate_failure {
         None => (
-            Role::Fix,
+            if is_spec { Role::FixSpec } else { Role::Fix },
             "review.md",
             fs::read_to_string(prepared.meta.join("review.md"))
                 .context("the review to fix is missing; run the review again")?,
         ),
-        Some(outcome) => (Role::FixGate, "gate-failure.md", gate_failure_text(outcome)),
+        Some(outcome) => (
+            if is_spec {
+                Role::FixGateSpec
+            } else {
+                Role::FixGate
+            },
+            "gate-failure.md",
+            gate_failure_text(outcome),
+        ),
     };
     let template = prompts::template(role, &env.config.prompts)?;
     let prompt = prompts::render(
@@ -2074,12 +2083,12 @@ fn open_review_workspace(
     let info = clone.join(".git").join("info");
     fs::create_dir_all(&info)?;
     fs::write(info.join("exclude"), format!("# sbxm\n{AGENT_DIR}/\n"))?;
-    let issue = fs::read_to_string(prepared.meta.join("issue.md")).unwrap_or_default();
-    let role = if prepared.record.kind == Kind::Pr {
-        Role::ReviewerPr
-    } else {
-        Role::Reviewer
+    let (source_file, role) = match prepared.record.kind {
+        Kind::Pr => ("issue.md", Role::ReviewerPr),
+        Kind::Spec => ("source.md", Role::ReviewerSpec),
+        Kind::Issue => ("issue.md", Role::Reviewer),
     };
+    let issue = fs::read_to_string(prepared.meta.join(source_file)).unwrap_or_default();
     // Narrow to the commits since the last review when one is recorded, else the task's whole
     // scope (spec §5.2, issue 117): a PR task and the first review of an issue task never set
     // `last_reviewed_commit`, so both fall back to the full scope unchanged.
@@ -2107,7 +2116,7 @@ fn open_review_workspace(
     )?;
     // The checkout is the worker's committed tree, so `.sbxm-task` may be a link it planted.
     let mut agent_files: Vec<(&str, &[u8])> = vec![
-        ("issue.md", issue.as_bytes()),
+        (source_file, issue.as_bytes()),
         ("prompt.md", prompt.as_bytes()),
     ];
     let combined_earlier_reviews = combined_earlier_reviews(earlier);

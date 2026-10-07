@@ -10,9 +10,9 @@ use common::task_fixture::{
     CLAUDE_DONE, Fixture, Play, Probe, backend, fixture, ok, play, worked_task,
 };
 use sbxm::github::fake::{FakeGitHub, GhCall};
-use sbxm::task::finish::{SECTION_CAP, finish, pr_body};
+use sbxm::task::finish::{SECTION_CAP, check_can_finish, finish, pr_body};
 use sbxm::task::pipeline::Prepared;
-use sbxm::task::record::{self, Process, Stage, Status};
+use sbxm::task::record::{self, Kind, NewTask, Process, Record, Stage, Status};
 
 const REVIEW: &str = "Reviewer: codex (default)\nMust-fix findings: 0\n\nNothing found.\n";
 
@@ -314,6 +314,46 @@ fn only_the_workflow_files_are_named_in_the_refusal() {
         !message.contains("src/a.rs") && !message.contains("README.md"),
         "{message}"
     );
+}
+
+/// Issue 142, decision 174(e): `finish` is refused for a spec task, whatever its stage, with a
+/// message naming why (no sink yet) rather than the generic "not ready" one.
+#[test]
+fn finish_is_refused_for_a_spec_task_with_a_clear_message() {
+    let mut record = Record::new(
+        &NewTask {
+            kind: Kind::Spec,
+            number: 0,
+            repo: "o/r",
+            title: "idea.md",
+            base: "main",
+            branch: "spec-idea-abc123",
+            config_hash: "h",
+            id: Some("spec-idea-abc123"),
+        },
+        0,
+        Process::new(1, 0),
+    );
+
+    let message = format!("{:#}", check_can_finish(&record).unwrap_err());
+    assert!(
+        message.contains("spec-idea-abc123") && message.contains("sink"),
+        "{message}"
+    );
+    assert!(!message.contains("not ready"), "{message}");
+
+    // Still refused once it reaches `ready`.
+    for (stage, done) in [
+        (Stage::Working, Status::Completed),
+        (Stage::Gating, Status::Passed),
+        (Stage::Reviewing, Status::Completed),
+    ] {
+        record.advance(stage, 0, Process::new(1, 0)).unwrap();
+        record.finish(done).unwrap();
+    }
+    record.advance(Stage::Ready, 0, Process::new(1, 0)).unwrap();
+    let message = format!("{:#}", check_can_finish(&record).unwrap_err());
+    assert!(message.contains("sink"), "{message}");
 }
 
 #[test]
