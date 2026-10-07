@@ -485,6 +485,21 @@ fn round_fix_rounds_and_stopped_round_trip() {
 }
 
 #[test]
+fn a_repeat_finding_stop_round_trips_and_names_itself_repeat_finding() {
+    let dir = tempfile::tempdir().unwrap();
+    let task = dir.path().join("tasks").join("issue-41");
+    let mut record = new_record();
+    record.stopped = Some(record::Stopped::RepeatFinding);
+
+    record::write(&task, &record).unwrap();
+
+    assert_eq!(record::read(&task.join("task.json")).unwrap(), record);
+    assert_eq!(record::Stopped::RepeatFinding.name(), "repeat-finding");
+    let value = serde_json::to_value(&record).unwrap();
+    assert_eq!(value["stopped"], "repeat-finding");
+}
+
+#[test]
 fn a_failed_write_is_an_error_naming_the_path() {
     let dir = tempfile::tempdir().unwrap();
     let blocker = dir.path().join("issue-41");
