@@ -11,11 +11,13 @@ use sbxm::confirm::Terminal;
 use sbxm::task;
 use sbxm::task::runlog::Tee;
 
-/// The task id (`issue-5`, `pr-7`) a command works on.
+/// The task id (`issue-5`, `pr-7`) a command works on. `--spec` tasks (issue 142) don't reach
+/// this: `status`/`rm`/`file-findings` don't take a spec task yet.
 fn task_id(kind: task::record::Kind, number: u32) -> String {
     match kind {
         task::record::Kind::Issue => format!("issue-{number}"),
         task::record::Kind::Pr => format!("pr-{number}"),
+        task::record::Kind::Spec => unreachable!("the CLI never passes --spec here"),
     }
 }
 

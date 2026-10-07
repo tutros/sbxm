@@ -32,6 +32,9 @@ fn kind_suffix(kinds: &[Kind]) -> &'static str {
     match kinds {
         [Kind::Issue] => " (issue)",
         [Kind::Pr] => " (pr)",
+        // A task with a worker: issue and spec alike (issue 142); every other row applies to
+        // every kind, so it gets no suffix.
+        [Kind::Issue, Kind::Spec] => " (issue/spec)",
         _ => "",
     }
 }

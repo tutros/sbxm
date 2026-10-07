@@ -131,6 +131,9 @@ fn file(
             let (id, flag) = match kind {
                 Kind::Issue => (format!("issue-{number}"), "--issue"),
                 Kind::Pr => (format!("pr-{number}"), "--pr"),
+                // Issue 142 is start-only for spec tasks; a spec task has no PR to file
+                // findings against yet (its review has nothing to comment on).
+                Kind::Spec => bail!("sbxm task file-findings doesn't take a spec task yet"),
             };
             let dir = record::task_dir(base_dir, &id);
             if !dir.join("task.json").is_file() {

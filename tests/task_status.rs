@@ -31,6 +31,7 @@ fn task(kind: Kind, number: u32, title: &str) -> Record {
             base: "main",
             branch: "b",
             config_hash: "h",
+            id: None,
         },
         T0,
         Process::new(1, T0),

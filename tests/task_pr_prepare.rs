@@ -118,6 +118,7 @@ fn a_closing_issue_that_has_a_task_is_linked() {
             base: "main",
             branch: "issue-4",
             config_hash: "h",
+            id: None,
         },
         0,
         Process::new(1, 0),

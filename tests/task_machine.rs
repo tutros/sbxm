@@ -23,6 +23,9 @@ impl ProcessProbe for Probe {
 }
 
 fn record_in(state: &State) -> Record {
+    // A spec id isn't `<prefix>-<number>` (record::spec_id's format), so the default naming
+    // would build an id `plan_removal` refuses as invalid before it even reads the state.
+    let id = (state.kind == Kind::Spec).then_some("spec-t-abc123");
     let mut record = Record::new(
         &NewTask {
             kind: state.kind,
@@ -32,6 +35,7 @@ fn record_in(state: &State) -> Record {
             base: "main",
             branch: "b",
             config_hash: "h",
+            id,
         },
         T0,
         Process::new(1234, T0),
@@ -50,7 +54,7 @@ fn guard(state: &State, event: Event) -> bool {
     match event {
         Event::Gates => check_can_gate(&record, &probe).is_ok(),
         Event::Review => match state.kind {
-            Kind::Issue => check_can_review(&record, &probe).is_ok(),
+            Kind::Issue | Kind::Spec => check_can_review(&record, &probe).is_ok(),
             Kind::Pr => check_can_review_pr(&record).is_ok(),
         },
         Event::Finish => check_can_finish(&record).is_ok(),
@@ -95,7 +99,7 @@ fn is_asked(state: &State, event: Event) -> bool {
 /// The differences between the table and the guards, as `<key>: table says X, guard says Y`.
 fn differences() -> BTreeSet<String> {
     let mut found = BTreeSet::new();
-    for kind in [Kind::Issue, Kind::Pr] {
+    for kind in [Kind::Issue, Kind::Pr, Kind::Spec] {
         for state in states(kind) {
             for event in events() {
                 if !is_asked(&state, event) {
@@ -147,7 +151,7 @@ const EXPECTED: &[&str] = &[];
 /// is no hidden ambiguity for a row's destination and action to resolve.
 #[test]
 fn every_state_event_pair_matches_at_most_one_row() {
-    for kind in [Kind::Issue, Kind::Pr] {
+    for kind in [Kind::Issue, Kind::Pr, Kind::Spec] {
         for state in states(kind) {
             for event in events() {
                 let rows = matching(&state, event);
@@ -201,6 +205,23 @@ fn the_dead_ends_are_the_gaps_the_spec_lists() {
             "Gating/Running+interrupted",
             "Reviewing/Running+interrupted",
             "Reviewing/Completed",
+        ]
+    );
+    // A spec task runs the same stages as an issue task (issue 142), but `ready` is also a dead
+    // end for it: `finish` is refused until a sink lands (decision 174(e)), so there is no row
+    // off `ready` for it yet.
+    assert_eq!(
+        names(Kind::Spec),
+        [
+            "Prepared/Running+interrupted",
+            "Prepared/Failed",
+            "Working/Running+interrupted",
+            "Working/Failed",
+            "Reviewing/Running+interrupted",
+            "Reviewing/Completed",
+            "Fixing/Running+interrupted",
+            "Fixing/Failed",
+            "Ready/Ok",
         ]
     );
 }
