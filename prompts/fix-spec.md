@@ -6,6 +6,9 @@ checks after each step:
 
 {{gates_sandbox}}
 
+There is no pull request to comment on: review.md is the only review record, and result.md is where you report what
+you fixed.
+
 Don't rewrite existing commits, push or change remotes. If you think a finding is wrong, don't change the code for it;
 say why.
 

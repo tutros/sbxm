@@ -326,6 +326,26 @@ fn the_embedded_fix_spec_prompt_renders() {
 }
 
 #[test]
+fn the_reviewer_spec_prompt_asks_for_a_repeat_of_marker_on_each_finding() {
+    let template = prompts::template(Role::ReviewerSpec, &Prompts::default()).unwrap();
+    let text = prompts::render(&template.name, &template.text, &spec_values()).unwrap();
+    assert!(text.contains("Repeat of: <id>"), "{text}");
+    assert!(text.contains("Repeat of: new"), "{text}");
+    assert!(text.contains("**Repeat of:**"), "{text}");
+}
+
+#[test]
+fn the_fix_spec_prompt_says_there_is_no_pull_request_and_review_md_is_the_record() {
+    let template = prompts::template(Role::FixSpec, &Prompts::default()).unwrap();
+    let text = prompts::render(&template.name, &template.text, &spec_values()).unwrap();
+    assert!(text.contains("no pull request"), "{text}");
+    assert!(
+        text.contains("review.md is the only review record"),
+        "{text}"
+    );
+}
+
+#[test]
 fn the_embedded_fix_gate_spec_prompt_renders() {
     let template = prompts::template(Role::FixGateSpec, &Prompts::default()).unwrap();
     let text = prompts::render(&template.name, &template.text, &spec_values()).unwrap();

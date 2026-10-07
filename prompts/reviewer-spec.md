@@ -10,7 +10,9 @@ change:
 {{gates_sandbox}}
 
 If the file {{previous_review_path}} exists, this is a re-review: the author had one round to fix the findings it
-lists. Check that each earlier finding is fixed, and review the new commits too.
+lists. Check that each earlier finding is fixed, and review the new commits too. Mark each finding below
+`Repeat of: <id>`, naming the earlier finding's id (its `M-`/`S-`/`Q-` number, e.g. `M-1`) if it's the same problem
+as before, in the same file (line numbers may differ); otherwise write `Repeat of: new`.
 
 Write {{review_path}}. Its first line is exactly "Must-fix findings: <count>". There is no pull request to
 comment on and no issue to file findings against: review.md is the only output, so use this shape so a human can
@@ -27,6 +29,7 @@ Scope: `<base sha>..<head sha>`
 **Why it matters:** the decision or convention it breaks
 **Fix:** the smallest change that resolves it
 **Depends on:** another finding or "none known"
+**Repeat of:** the earlier review's finding id this repeats, or "new" (leave out when this is the first review)
 **Acceptance criteria:**
 - [ ] an observable result that proves the fix
 - [ ] a test covering it fails before the fix and passes after
