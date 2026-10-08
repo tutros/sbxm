@@ -658,6 +658,9 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
             model: worker.model.clone(),
             sandbox: sandbox.clone(),
             workspace: slashes(&workspace),
+            profile: Some(ctx.config.sandbox.profile.clone()),
+            cpus: ctx.config.sandbox.cpus,
+            memory: ctx.config.sandbox.memory.clone(),
             run: None,
         });
         record::write(&meta, &task)?;
@@ -829,6 +832,9 @@ pub fn prepare_spec(ctx: &Ctx, source_path: &Path) -> Result<Prepared> {
             model: worker.model.clone(),
             sandbox: sandbox.clone(),
             workspace: slashes(&workspace),
+            profile: Some(ctx.config.sandbox.profile.clone()),
+            cpus: ctx.config.sandbox.cpus,
+            memory: ctx.config.sandbox.memory.clone(),
             run: None,
         });
         record::write(&meta, &task)?;
@@ -1166,37 +1172,85 @@ fn remove_with_retries(dir: &Path) -> std::io::Result<()> {
     last
 }
 
-/// Makes the worker's sandbox again from the task's profile when it is gone (`task resume`, issue
-/// 118; a sandbox can vanish between stages, workflow note G17), over the same clone: the kits are
-/// built again under the task's `kits/`. With `replace`, a sandbox that still exists is removed
-/// first (a preparation that was cut off may have left one half made). Returns whether it was
-/// made.
+/// The flag that names a task again on the command line, for a one-line recovery hint: a spec
+/// task has no path recorded, so it gets a placeholder (as `task resume`'s own flag does).
+fn task_flag(record: &Record) -> String {
+    match record.kind {
+        Kind::Pr => format!("--pr {}", record.number),
+        Kind::Spec => "--spec <file>".to_owned(),
+        Kind::Issue => format!("--issue {}", record.number),
+    }
+}
+
+/// The recorded worker, and the profile its sandbox was built with: `None` only in a record
+/// written before issue 118's resume fix (M-2, PR 163 review), which never saved one. Refused with
+/// a one-line recovery instead of guessing a profile the task never ran under.
+fn worker_profile<'a>(record: &'a Record, worker: &'a Agent) -> Result<&'a str> {
+    worker.profile.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "task {}'s record has no saved sandbox profile (it predates issue 118's resume fix); \
+             remove it and start it again: `sbxm task rm {}`",
+            record.id,
+            task_flag(record)
+        )
+    })
+}
+
+/// Checks before `task resume` restores the worker's input, rebuilds its sandbox, or runs the
+/// worker or a fix round again (M-3, PR 163 review): the recorded worker's harness and the
+/// profile its sandbox was built with — never the current `sbxm-task.toml`, which `--profile` or
+/// an edit could have changed since the task started — must have their secrets stored in `sbx`,
+/// the same way `prepare` checks the worker up front. Shares `check_secrets` with `prepare` so the
+/// two can't drift.
+pub fn check_worker(env: &TaskEnv, prepared: &Prepared) -> Result<()> {
+    let worker = prepared
+        .record
+        .worker
+        .as_ref()
+        .context("the task has no worker")?;
+    let profile_name = worker_profile(&prepared.record, worker)?;
+    let global = GlobalConfig::load(env.config_dir)?;
+    let profile = Profile::load(global.profiles_dir(), profile_name)?;
+    check_secrets(
+        env.backend,
+        env.config.worker.harness,
+        "the worker",
+        profile_name,
+        &profile,
+    )
+}
+
+/// Makes the worker's sandbox again from the profile its record saved when it is gone (`task
+/// resume`, issue 118; a sandbox can vanish between stages, workflow note G17), over the same
+/// clone: the kits are built again under the task's `kits/`. With `replace`, a sandbox that still
+/// exists is removed first (a preparation that was cut off may have left one half made), but only
+/// once the recorded profile is confirmed, so a refusal never removes anything. Returns whether it
+/// was made.
 pub(super) fn ensure_worker_sandbox(
     env: &TaskEnv,
     prepared: &Prepared,
     replace: bool,
 ) -> Result<bool> {
-    let sandbox = prepared
+    let worker = prepared
         .record
         .worker
         .as_ref()
-        .context("the task has no worker")?
-        .sandbox
-        .clone();
+        .context("the task has no worker")?;
+    let sandbox = worker.sandbox.clone();
+    if !replace && env.backend.list()?.iter().any(|s| s.name == sandbox) {
+        return Ok(false);
+    }
+    let profile_name = worker_profile(&prepared.record, worker)?.to_owned();
+    let (cpus, memory) = (worker.cpus, worker.memory.clone());
     if replace {
         let _ = env.backend.remove(&sandbox);
-    } else if env.backend.list()?.iter().any(|s| s.name == sandbox) {
-        return Ok(false);
     }
     let harness = env.config.worker.harness;
     let kit_set = kits::build_for(
         env.config_dir,
-        &env.config.sandbox.profile,
+        &profile_name,
         &[harness],
-        &Overrides {
-            cpus: env.config.sandbox.cpus,
-            memory: env.config.sandbox.memory.clone(),
-        },
+        &Overrides { cpus, memory },
         &prepared.meta.join("kits"),
         env.backend,
     )?;
@@ -2444,6 +2498,11 @@ fn open_review_workspace(
         model: reviewer.model.clone(),
         sandbox: sandbox.to_owned(),
         workspace: slashes(clone),
+        // The reviewer's sandbox is rebuilt from the current config every round and is never
+        // resumed, so it has no reconstruction settings to save (issue 118, PR 163 review M-2).
+        profile: None,
+        cpus: None,
+        memory: None,
         run: None,
     });
     record::write(&prepared.meta, &prepared.record)?;

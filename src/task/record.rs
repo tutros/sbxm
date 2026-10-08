@@ -236,6 +236,18 @@ pub struct Agent {
     pub model: Option<String>,
     pub sandbox: String,
     pub workspace: String,
+    /// The profile and resource overrides this sandbox was built with (issue 118, PR 163 review
+    /// M-2): `task resume` rebuilds the worker's sandbox from these, never from `sbxm-task.toml`
+    /// as it reads now, so a `--profile` flag at `task start` or a later edit of the file never
+    /// silently changes what gets recreated. Always `None` on the reviewer's `Agent`, whose
+    /// sandbox is rebuilt from the current config every round and is never resumed; `None` on the
+    /// worker's `Agent` only in a record written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpus: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<String>,
     pub run: Option<RunInfo>,
 }
 

@@ -10,6 +10,7 @@ use common::task_fixture::{
 };
 use sbxm::backend::{ExecOutput, FakeBackend, SandboxInfo};
 use sbxm::github::fake::FakeGitHub;
+use sbxm::task::config::TaskConfig;
 use sbxm::task::gates::FakeHostRunner;
 use sbxm::task::pipeline::{self, Prepared, TaskEnv};
 use sbxm::task::record::{self, Kind, ProcessProbe, ReviewResult, Stage, Status, Stopped};
@@ -277,6 +278,89 @@ fn the_worker_s_sandbox_is_kept_when_it_still_exists() {
             .iter()
             .any(|c| c.name == "sbxm-task-issue-41-claude")
     );
+}
+
+/// M-2 (PR 163 review): `task start --profile alternate` records the profile and resource
+/// overrides that built the worker's sandbox; `task resume` rebuilds it from those, not from
+/// whatever `sbxm-task.toml` says now.
+#[test]
+fn the_worker_s_sandbox_is_remade_from_the_profile_recorded_at_start_not_the_current_file() {
+    let f = fixture_with(
+        "[sandbox]\nprofile = \"alternate\"\ncpus = 7\nmemory = \"7g\"\n\n\
+         [gates]\nsandbox = [\"cargo test\"]\n\n[reviewer]\nharness = \"codex\"\n",
+    );
+    f.env
+        .write_profile("alternate", "description = \"alternate\"\n");
+    let first = backend(&f, &[CLEAN]);
+    let github = FakeGitHub::default();
+    let source = source(&f);
+    let mut prepared =
+        pipeline::prepare(&ctx(&f, &source, &first, &github), &issue_text(41)).unwrap();
+    let worker = prepared.record.worker.clone().unwrap();
+    assert_eq!(worker.profile, Some("alternate".to_owned()));
+    assert_eq!(worker.cpus, Some(7));
+    assert_eq!(worker.memory, Some("7g".to_owned()));
+
+    // Left as a crash would leave it: the worker never ran, and its sandbox is gone.
+    prepared.record.stage = Stage::Working;
+    prepared.record.status = Status::Failed;
+    record::write(&prepared.meta, &prepared.record).unwrap();
+
+    // `sbxm-task.toml` was edited after the task started: a different profile, cpus and memory.
+    let repo_root = f.env.tmp.path().join("target-repo-edited");
+    std::fs::create_dir_all(&repo_root).unwrap();
+    std::fs::write(
+        repo_root.join("sbxm-task.toml"),
+        "[sandbox]\nprofile = \"default\"\ncpus = 99\nmemory = \"99g\"\n\n\
+         [gates]\nsandbox = [\"cargo test\"]\n\n[reviewer]\nharness = \"codex\"\n",
+    )
+    .unwrap();
+    let current_config = TaskConfig::load(&repo_root).unwrap();
+    let backend = backend(&f, &[CLEAN]);
+    let host: &'static FakeHostRunner = Box::leak(Box::default());
+    let env = TaskEnv {
+        config_dir: Box::leak(Box::new(f.env.config_dir())),
+        config: &current_config,
+        backend: &backend,
+        probe: &Gone,
+        host,
+    };
+
+    resume::resume(&env, &mut prepared, None).unwrap();
+
+    let create = backend
+        .creates()
+        .into_iter()
+        .find(|c| c.name == "sbxm-task-issue-41-claude")
+        .expect("the worker's sandbox was made again");
+    assert_eq!(
+        create.cpus, 7,
+        "the recorded cpus, not the edited file's 99"
+    );
+    assert_eq!(
+        create.memory, "7g",
+        "the recorded memory, not the edited file's 99g"
+    );
+}
+
+/// M-2 (PR 163 review): a record written before issue 118's resume fix saved no profile. Resume
+/// refuses to guess the current file's instead of silently rebuilding under the wrong one.
+#[test]
+fn an_older_record_without_a_saved_profile_refuses_instead_of_guessing() {
+    let f = config();
+    let mut prepared = task_left_in(&f, Stage::Working, Status::Failed);
+    let worker = prepared.record.worker.as_mut().unwrap();
+    worker.profile = None;
+    worker.cpus = None;
+    worker.memory = None;
+    record::write(&prepared.meta, &prepared.record).unwrap();
+    let backend = backend(&f, &[CLEAN]);
+
+    let err = resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("sbxm task rm --issue 41"), "{message}");
+    assert!(backend.creates().is_empty(), "nothing was created");
 }
 
 #[test]
