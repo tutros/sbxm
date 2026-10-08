@@ -8,7 +8,7 @@ use common::task_fixture::{
     CLAUDE_DONE, CODEX_DONE, Fixture, Play, ctx, fixture_with, issue_text, ok, play_reviews,
     play_tasks, source, worked_task,
 };
-use sbxm::backend::{FakeBackend, SandboxInfo};
+use sbxm::backend::{ExecOutput, FakeBackend, SandboxInfo};
 use sbxm::github::fake::FakeGitHub;
 use sbxm::task::gates::FakeHostRunner;
 use sbxm::task::pipeline::{self, Prepared, TaskEnv};
@@ -492,6 +492,104 @@ fn a_record_without_the_result_runs_the_reviewer_again() {
     assert_eq!(count(&backend, "fix-prompt.md"), 0);
     assert_eq!(count(&backend, "codex"), 1);
     assert_eq!(saved(&f).stage, Stage::Ready);
+}
+
+// ---- The fix round (T5, T9) ----
+
+/// Issue 41 whose first fix round failed: the review found one must-fix finding, and the
+/// worker's fix run errored (`fixing/failed`, the round not counted).
+fn failed_fix_for_a_review(f: &Fixture) -> Prepared {
+    let first = backend(f, &[ONE]);
+    let mut prepared = worked_task(f, &first);
+    let failing = backend(f, &[ONE]).with_failing_exec_matching("fix-prompt.md");
+    pipeline::review_issue(&env(f, &failing, &Gone), &mut prepared).unwrap_err();
+    let record = saved(f);
+    assert_eq!(
+        (record.stage, record.status),
+        (Stage::Fixing, Status::Failed)
+    );
+    prepared
+}
+
+#[test]
+fn a_failed_fix_round_runs_again_from_its_review_and_the_task_goes_on_to_ready() {
+    let f = config();
+    let mut prepared = failed_fix_for_a_review(&f);
+    let backend = backend(&f, &[CLEAN]);
+
+    let resumed = resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap();
+
+    assert_eq!(
+        count(&backend, "fix-prompt.md"),
+        1,
+        "the fix round ran again"
+    );
+    let workspace = f.env.base_dir().join("tasks").join("issue-41");
+    assert_eq!(
+        std::fs::read_to_string(workspace.join(".sbxm-task").join("review.md")).unwrap(),
+        std::fs::read_to_string(meta(&f).join("review-1.md")).unwrap(),
+        "the worker sees the review it is fixing"
+    );
+    let report = resumed.review.unwrap();
+    assert!(report.fix_ran);
+    // After the fix: a narrow review, then the confirming full one.
+    let rounds: Vec<(u32, bool)> = report.rounds.iter().map(|r| (r.round, r.full)).collect();
+    assert_eq!(rounds, [(2, false), (3, true)]);
+    let record = saved(&f);
+    assert_eq!((record.stage, record.status), (Stage::Ready, Status::Ok));
+    assert_eq!(record.round, 1, "the round is counted once");
+}
+
+#[test]
+fn an_interrupted_fix_round_runs_again() {
+    let f = config();
+    let mut prepared = failed_fix_for_a_review(&f);
+    prepared.record.status = Status::Running;
+    record::write(&prepared.meta, &prepared.record).unwrap();
+    let backend = backend(&f, &[CLEAN]);
+
+    resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap();
+
+    assert_eq!(count(&backend, "fix-prompt.md"), 1);
+    assert_eq!(saved(&f).stage, Stage::Ready);
+}
+
+#[test]
+fn a_failed_fix_round_for_a_gate_runs_again_with_the_gate_s_output() {
+    let f = config();
+    let first = backend(&f, &[CLEAN]);
+    let mut prepared = worked_task(&f, &first);
+    let failing = backend(&f, &[CLEAN])
+        .with_exec_output_matching(
+            "cargo test",
+            ExecOutput {
+                stdout: "test a ... FAILED\n".into(),
+                stderr: String::new(),
+                exit_code: Some(1),
+            },
+        )
+        .with_failing_exec_matching("fix-prompt.md");
+    pipeline::review_issue(&env(&f, &failing, &Gone), &mut prepared).unwrap_err();
+    assert_eq!(saved(&f).stage, Stage::Fixing);
+    let backend = backend(&f, &[CLEAN]);
+
+    resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap();
+
+    let input = f
+        .env
+        .base_dir()
+        .join("tasks")
+        .join("issue-41")
+        .join(".sbxm-task")
+        .join("gate-failure.md");
+    let text = std::fs::read_to_string(input).unwrap();
+    assert!(
+        text.contains("cargo test") && text.contains("FAILED"),
+        "{text}"
+    );
+    assert_eq!(count(&backend, "fix-prompt.md"), 1);
+    let record = saved(&f);
+    assert_eq!((record.stage, record.round), (Stage::Ready, 1));
 }
 
 // ---- Refusals ----

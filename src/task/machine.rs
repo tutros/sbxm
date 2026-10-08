@@ -406,6 +406,25 @@ pub const TABLE: &[Row] = &[
         to: Some(Stage::Reviewing),
         action: "run the reviewer again",
     },
+    // T5: a fix round that failed or was cut off runs again with the same input.
+    Row {
+        stages: &[Stage::Fixing],
+        statuses: &[Status::Running],
+        live: Live::Interrupted,
+        kinds: HAS_WORKER,
+        event: Event::Resume,
+        to: Some(Stage::Fixing),
+        action: "run the fix round again in its clone, then the gates and the review",
+    },
+    Row {
+        stages: &[Stage::Fixing],
+        statuses: &[Status::Failed],
+        live: Live::Any,
+        kinds: HAS_WORKER,
+        event: Event::Resume,
+        to: Some(Stage::Fixing),
+        action: "run the fix round again in its clone, then the gates and the review",
+    },
     // T4: a review that completed, but whose process was gone before it acted on it.
     Row {
         stages: &[Stage::Reviewing],

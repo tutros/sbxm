@@ -157,6 +157,13 @@ pub fn resume(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Re
                 prepared.record.round += 1;
             }
         }
+        // T5, T9: the fix round runs again in the same clone with the input it was given, then
+        // the gates and the review rounds go on.
+        (Stage::Fixing, Status::Running | Status::Failed) => {
+            pipeline::rerun_fix_round(env, prepared)?;
+            resumed.review = Some(pipeline::continue_after_fix(env, prepared)?);
+            return Ok(resumed);
+        }
         // T3: its process is gone, so the review it was running never finished: the same as one
         // that failed, which `review_issue` runs again (its gates passed for these commits).
         (Stage::Reviewing, Status::Running) => {

@@ -203,16 +203,15 @@ fn names(kind: Kind) -> Vec<String> {
         .collect()
 }
 
-/// The gaps T3-T6 and T9 of the spec fall out of the table: these are the states a task can be
-/// left in (not finished, not in flight) from which no command moves it on, only `rm`.
-/// `Prepared/Failed` is one the spec does not list (finding F4). `task resume` (issue 118) closes
-/// them one by one; each row goes from this list as its `resume` row is built.
+/// The gaps T3-T6 and T9 of the spec fall out of the table: the states a task can be left in (not
+/// finished, not in flight) from which no command moves it on, only `rm`. `Prepared/Failed` is one
+/// the spec did not list (finding F4). `task resume` (issue 118) closed them row by row for a task
+/// with a worker, so an issue or spec task has none left. A PR task's stay: it has no worker or
+/// fix rounds, and `resume` is refused for it (spec section 5.2); the way on is `rm`, then
+/// `review --pr` again (decision 169(f)).
 #[test]
 fn the_dead_ends_are_the_gaps_the_spec_lists() {
-    assert_eq!(
-        names(Kind::Issue),
-        ["Fixing/Running+interrupted", "Fixing/Failed",]
-    );
+    assert!(names(Kind::Issue).is_empty(), "{:?}", names(Kind::Issue));
     assert_eq!(
         names(Kind::Pr),
         [
@@ -224,8 +223,5 @@ fn the_dead_ends_are_the_gaps_the_spec_lists() {
     );
     // A spec task runs the same stages as an issue task (issue 142), and since issue 143 its
     // `ready` moves on through `finish` and the `[finish] sink`, so it has the same dead ends.
-    assert_eq!(
-        names(Kind::Spec),
-        ["Fixing/Running+interrupted", "Fixing/Failed",]
-    );
+    assert!(names(Kind::Spec).is_empty(), "{:?}", names(Kind::Spec));
 }
