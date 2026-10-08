@@ -86,6 +86,22 @@ fn a_prepared_spec_task_has_its_folders_repo_clone_source_md_sandbox_and_record(
     assert!(github.calls().is_empty(), "{:?}", github.calls());
 }
 
+/// M-2 (PR 163 review round 2): mirrors `tests/task_prepare.rs`'s test of the same name for the
+/// issue path.
+#[test]
+fn the_record_saves_the_resolved_resources_not_the_unset_override() {
+    let f = fixture();
+    let (backend, github) = (backend(), FakeGitHub::default());
+    let source = source(&f);
+    let spec = spec_file(&f, "idea.md", "Build a thing.\n");
+
+    let prepared = pipeline::prepare_spec(&ctx(&f, &source, &backend, &github), &spec).unwrap();
+
+    let worker = prepared.record.worker.unwrap();
+    assert_eq!(worker.cpus, Some(4));
+    assert_eq!(worker.memory, Some("8g".to_owned()));
+}
+
 #[test]
 fn starting_the_same_spec_file_twice_is_refused_and_changes_nothing() {
     let f = fixture();

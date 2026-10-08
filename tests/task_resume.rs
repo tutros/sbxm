@@ -16,6 +16,7 @@ use sbxm::task::gates::FakeHostRunner;
 use sbxm::task::pipeline::{self, Prepared, TaskEnv};
 use sbxm::task::record::{self, Kind, ProcessProbe, ReviewResult, Stage, Status, Stopped};
 use sbxm::task::{repo, resume};
+use std::fs;
 use std::sync::{Arc, Mutex};
 
 fn config() -> Fixture {
@@ -362,6 +363,94 @@ fn an_older_record_without_a_saved_profile_refuses_instead_of_guessing() {
     let message = format!("{err:#}");
     assert!(message.contains("sbxm task rm --issue 41"), "{message}");
     assert!(backend.creates().is_empty(), "nothing was created");
+}
+
+/// M-2 round 2 (PR 163 review): a record written before resume's round-2 fix saved a profile but
+/// only the optional `cpus`/`memory` overrides, which are `None` for a task that inherited the
+/// global defaults. Resume refuses instead of substituting today's defaults for resources the
+/// task never ran under.
+#[test]
+fn an_older_record_without_saved_resources_refuses_instead_of_guessing() {
+    let f = config();
+    let mut prepared = task_left_in(&f, Stage::Working, Status::Failed);
+    let worker = prepared.record.worker.as_mut().unwrap();
+    worker.cpus = None;
+    worker.memory = None;
+    record::write(&prepared.meta, &prepared.record).unwrap();
+    let backend = backend(&f, &[CLEAN]);
+
+    let err = resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("sbxm task rm --issue 41"), "{message}");
+    assert!(backend.creates().is_empty(), "nothing was created");
+}
+
+/// M-2 round 2 (PR 163 review): a task without resource overrides records the values it resolved
+/// against the global defaults at `task start`. Resume rebuilds the gone sandbox from those
+/// recorded values, never from whatever the globals say now.
+#[test]
+fn the_worker_s_sandbox_is_remade_with_the_resources_resolved_at_start_not_todays_globals() {
+    let f = config();
+    let mut prepared = task_left_in(&f, Stage::Working, Status::Failed);
+    let worker = prepared.record.worker.clone().unwrap();
+    assert_eq!(worker.cpus, Some(4));
+    assert_eq!(worker.memory, Some("8g".to_owned()));
+
+    // The global defaults change after the task started.
+    let config_path = f.env.config_dir().join("config.toml");
+    let text = fs::read_to_string(&config_path).unwrap();
+    fs::write(
+        &config_path,
+        text.replace("cpus = 4\nmemory = \"8g\"", "cpus = 99\nmemory = \"99g\""),
+    )
+    .unwrap();
+
+    let backend = backend(&f, &[CLEAN]);
+    let resumed = resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap();
+
+    assert!(resumed.sandbox_remade);
+    let create = backend
+        .creates()
+        .into_iter()
+        .find(|c| c.name == "sbxm-task-issue-41-claude")
+        .expect("the worker's sandbox was made again");
+    assert_eq!(
+        create.cpus, 4,
+        "the value resolved at start, not today's global 99"
+    );
+    assert_eq!(
+        create.memory, "8g",
+        "the value resolved at start, not today's global 99g"
+    );
+}
+
+/// M-2 round 2 (PR 163 review): the profile the task recorded is edited after the sandbox is
+/// gone. Resume refuses to rebuild under contents the task never ran with, before touching the
+/// backend or writing anything, instead of silently changing egress, instructions or setup.
+#[test]
+fn editing_the_recorded_profile_refuses_resume_before_any_backend_call_or_write() {
+    let f = config();
+    let mut prepared = task_left_in(&f, Stage::Working, Status::Failed);
+    let before = fs::read(meta(&f).join("task.json")).unwrap();
+
+    f.env.write_profile(
+        "default",
+        "description = \"test default\"\n[env]\nFOO = \"bar\"\n",
+    );
+
+    let backend = backend(&f, &[CLEAN]);
+    let err = resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("sandbox config changed"), "{message}");
+    assert!(
+        message.contains("sbxm task start --restart --issue 41"),
+        "{message}"
+    );
+    assert!(backend.log().is_empty(), "no backend call changed anything");
+    let after = fs::read(meta(&f).join("task.json")).unwrap();
+    assert_eq!(before, after, "task.json stays byte-for-byte unchanged");
 }
 
 #[test]

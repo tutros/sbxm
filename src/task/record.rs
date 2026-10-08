@@ -236,14 +236,21 @@ pub struct Agent {
     pub model: Option<String>,
     pub sandbox: String,
     pub workspace: String,
-    /// The profile and resource overrides this sandbox was built with (issue 118, PR 163 review
-    /// M-2): `task resume` rebuilds the worker's sandbox from these, never from `sbxm-task.toml`
-    /// as it reads now, so a `--profile` flag at `task start` or a later edit of the file never
-    /// silently changes what gets recreated. Always `None` on the reviewer's `Agent`, whose
-    /// sandbox is rebuilt from the current config every round and is never resumed; `None` on the
-    /// worker's `Agent` only in a record written before this field existed.
+    /// The profile this sandbox was built with (issue 118, PR 163 review M-2): `task resume`
+    /// rebuilds the worker's sandbox from this, never from `sbxm-task.toml` as it reads now, so a
+    /// `--profile` flag at `task start` or a later edit of the file never silently changes what
+    /// gets recreated. Always `None` on the reviewer's `Agent`, whose sandbox is rebuilt from the
+    /// current config every round and is never resumed; `None` on the worker's `Agent` only in a
+    /// record written before this field existed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
+    /// The resolved CPU and memory the first `CreateSpec` actually used (M-2, PR 163 review round
+    /// 2), not the optional overrides `sbxm-task.toml` may have left unset: a task that inherited
+    /// the global defaults at `task start` keeps running under those, even after the globals
+    /// change. Together with the profile above, `task resume` hashes these again before rebuilding
+    /// the sandbox and refuses if the result no longer matches `config_hash`. `None` on the
+    /// reviewer's `Agent`, and on the worker's `Agent` only in a record written before issue 118's
+    /// resume fix.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpus: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

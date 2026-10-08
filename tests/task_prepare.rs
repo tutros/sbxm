@@ -125,6 +125,23 @@ fn the_sandbox_is_created_over_the_workspace_with_the_profiles_kits() {
     );
 }
 
+/// M-2 (PR 163 review round 2): a task without `cpus`/`memory` overrides inherits the global
+/// defaults; what gets recorded is the resolved value the sandbox was actually created with, not
+/// the unset override, so `task resume` can rebuild from it later even if the globals change.
+#[test]
+fn the_record_saves_the_resolved_resources_not_the_unset_override() {
+    let f = fixture();
+    let (backend, github) = (backend(), FakeGitHub::default());
+    let source = source(&f);
+
+    let prepared =
+        pipeline::prepare(&ctx(&f, &source, &backend, &github), &issue_text(41)).unwrap();
+
+    let worker = prepared.record.worker.unwrap();
+    assert_eq!(worker.cpus, Some(4));
+    assert_eq!(worker.memory, Some("8g".to_owned()));
+}
+
 #[test]
 fn the_configs_resources_override_the_global_ones() {
     let f = fixture_with(

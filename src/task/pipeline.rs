@@ -21,7 +21,7 @@ use super::repo::{self, AgentFile, BUNDLE_CAP, Existing, Identity};
 use super::review;
 use super::select::{self, Selection};
 use crate::backend::{CreateSpec, ExecSpec, SandboxBackend, Stdin};
-use crate::config::{GlobalConfig, Profile};
+use crate::config::{self, GlobalConfig, Profile, Resources};
 use crate::github::{GitHubBackend, Issue, IssueText, PrInfo, PrState};
 use crate::harness::Harness;
 use crate::headless::{self, HeadlessOpts, RunStatus};
@@ -659,8 +659,8 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
             sandbox: sandbox.clone(),
             workspace: slashes(&workspace),
             profile: Some(ctx.config.sandbox.profile.clone()),
-            cpus: ctx.config.sandbox.cpus,
-            memory: ctx.config.sandbox.memory.clone(),
+            cpus: Some(kit_set.resources.cpus),
+            memory: Some(kit_set.resources.memory.clone()),
             run: None,
         });
         record::write(&meta, &task)?;
@@ -833,8 +833,8 @@ pub fn prepare_spec(ctx: &Ctx, source_path: &Path) -> Result<Prepared> {
             sandbox: sandbox.clone(),
             workspace: slashes(&workspace),
             profile: Some(ctx.config.sandbox.profile.clone()),
-            cpus: ctx.config.sandbox.cpus,
-            memory: ctx.config.sandbox.memory.clone(),
+            cpus: Some(kit_set.resources.cpus),
+            memory: Some(kit_set.resources.memory.clone()),
             run: None,
         });
         record::write(&meta, &task)?;
@@ -1196,6 +1196,60 @@ fn worker_profile<'a>(record: &'a Record, worker: &'a Agent) -> Result<&'a str> 
     })
 }
 
+/// The recorded worker's resolved CPU and memory: `None` only in a record written before issue
+/// 118's resume fix round 2 (M-2, PR 163 review), which saved the optional overrides instead of
+/// what the sandbox was actually created with. Refused the same way as a missing profile, instead
+/// of substituting today's global defaults for a task that never ran under them.
+fn worker_resources(record: &Record, worker: &Agent) -> Result<Resources> {
+    match (worker.cpus, worker.memory.clone()) {
+        (Some(cpus), Some(memory)) => Ok(Resources { cpus, memory }),
+        _ => Err(anyhow::anyhow!(
+            "task {}'s record has no saved sandbox resources (it predates issue 118's resume \
+             fix); remove it and start it again: `sbxm task rm {}`",
+            record.id,
+            task_flag(record)
+        )),
+    }
+}
+
+/// What to run instead, once [`check_config_drift`] refuses: an issue task's worker is recreated
+/// afresh by `--restart`; a spec task has no such flag, so it is removed and started again from
+/// the same file.
+fn restart_hint(record: &Record) -> String {
+    match record.kind {
+        Kind::Issue => format!("sbxm task start --restart --issue {}", record.number),
+        _ => format!("sbxm task rm {}", task_flag(record)),
+    }
+}
+
+/// Refuses before `ensure_worker_sandbox` removes, rebuilds or records anything (M-2, PR 163
+/// review round 2): hashes the recorded profile's contents as they are on disk right now, together
+/// with the recorded resources and the worker's harness, the same way [`config::config_hash`]
+/// hashed them when the task started, and bails if the result no longer matches
+/// `Record::config_hash`. An edit to the profile (egress, instructions, setup, secrets, skills) or
+/// to the global defaults a task without explicit overrides resolved against must never silently
+/// run resumed work in a differently provisioned or differently restricted sandbox.
+fn check_config_drift(
+    env: &TaskEnv,
+    record: &Record,
+    profile_name: &str,
+    resources: &Resources,
+) -> Result<()> {
+    let global = GlobalConfig::load(env.config_dir)?;
+    let profile = Profile::load(global.profiles_dir(), profile_name)?;
+    let harness = env.config.worker.harness;
+    let hash = config::config_hash(profile_name, &profile, resources, harness);
+    if hash != record.config_hash {
+        bail!(
+            "task {}'s sandbox config changed since it started; restart it with `{}`, or restore \
+             the profile {profile_name:?} to what it was",
+            record.id,
+            restart_hint(record)
+        );
+    }
+    Ok(())
+}
+
 /// Checks before `task resume` restores the worker's input, rebuilds its sandbox, or runs the
 /// worker or a fix round again (M-3, PR 163 review): the recorded worker's harness and the
 /// profile its sandbox was built with — never the current `sbxm-task.toml`, which `--profile` or
@@ -1220,12 +1274,12 @@ pub fn check_worker(env: &TaskEnv, prepared: &Prepared) -> Result<()> {
     )
 }
 
-/// Makes the worker's sandbox again from the profile its record saved when it is gone (`task
-/// resume`, issue 118; a sandbox can vanish between stages, workflow note G17), over the same
-/// clone: the kits are built again under the task's `kits/`. With `replace`, a sandbox that still
-/// exists is removed first (a preparation that was cut off may have left one half made), but only
-/// once the recorded profile is confirmed, so a refusal never removes anything. Returns whether it
-/// was made.
+/// Makes the worker's sandbox again from the profile and resources its record saved when it is
+/// gone (`task resume`, issue 118; a sandbox can vanish between stages, workflow note G17), over
+/// the same clone: the kits are built again under the task's `kits/`. With `replace`, a sandbox
+/// that still exists is removed first (a preparation that was cut off may have left one half
+/// made), but only once the recorded profile and resources are confirmed and [`check_config_drift`]
+/// passes, so a refusal never removes, rebuilds or records anything. Returns whether it was made.
 pub(super) fn ensure_worker_sandbox(
     env: &TaskEnv,
     prepared: &Prepared,
@@ -1241,7 +1295,8 @@ pub(super) fn ensure_worker_sandbox(
         return Ok(false);
     }
     let profile_name = worker_profile(&prepared.record, worker)?.to_owned();
-    let (cpus, memory) = (worker.cpus, worker.memory.clone());
+    let resources = worker_resources(&prepared.record, worker)?;
+    check_config_drift(env, &prepared.record, &profile_name, &resources)?;
     if replace {
         let _ = env.backend.remove(&sandbox);
     }
@@ -1250,7 +1305,10 @@ pub(super) fn ensure_worker_sandbox(
         env.config_dir,
         &profile_name,
         &[harness],
-        &Overrides { cpus, memory },
+        &Overrides {
+            cpus: Some(resources.cpus),
+            memory: Some(resources.memory.clone()),
+        },
         &prepared.meta.join("kits"),
         env.backend,
     )?;
