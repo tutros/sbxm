@@ -321,6 +321,25 @@ pub const TABLE: &[Row] = &[
     },
     // `task resume` (decisions 173(c), 175; issue 118), a task with a worker: a failed or
     // interrupted stage runs again in the task's own clone, and the task goes on to `ready`.
+    // F4 (decision 175): a preparation that failed or was cut off keeps its folders and clone.
+    Row {
+        stages: &[Stage::Prepared],
+        statuses: &[Status::Running],
+        live: Live::Interrupted,
+        kinds: HAS_WORKER,
+        event: Event::Resume,
+        to: Some(Stage::Working),
+        action: "make the worker's sandbox again, then run the worker and review",
+    },
+    Row {
+        stages: &[Stage::Prepared],
+        statuses: &[Status::Failed],
+        live: Live::Any,
+        kinds: HAS_WORKER,
+        event: Event::Resume,
+        to: Some(Stage::Working),
+        action: "make the worker's sandbox again, then run the worker and review",
+    },
     Row {
         stages: &[Stage::Working],
         statuses: &[Status::Running],

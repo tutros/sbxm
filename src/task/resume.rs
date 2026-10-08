@@ -107,15 +107,33 @@ pub fn resume(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Re
         review: None,
     };
     match prepared.record.stage {
-        Stage::Working => {
-            resumed.sandbox_remade = pipeline::ensure_worker_sandbox(env, prepared, false)?;
-            if resumed.sandbox_remade {
+        Stage::Prepared | Stage::Working => {
+            if prepared.record.stage == Stage::Prepared {
+                // A cut-off `sbx create` may have left a half-made sandbox: it is made afresh. A
+                // failure leaves the task `prepared/failed` with its folders, for another resume.
+                if let Err(e) = pipeline::ensure_worker_sandbox(env, prepared, true) {
+                    prepared.record.status = Status::Failed;
+                    prepared
+                        .record
+                        .notes
+                        .push(format!("resume: the preparation failed again: {e:#}"));
+                    record::write(&prepared.meta, &prepared.record)?;
+                    return Err(e);
+                }
+                resumed.sandbox_remade = true;
+                prepared.record.rerun(now(), Process::current(env.probe))?;
                 prepared
                     .record
-                    .notes
-                    .push("resume: the worker's sandbox was gone and was made again".to_owned());
+                    .advance(Stage::Working, now(), Process::current(env.probe))?;
+            } else {
+                resumed.sandbox_remade = pipeline::ensure_worker_sandbox(env, prepared, false)?;
+                if resumed.sandbox_remade {
+                    prepared.record.notes.push(
+                        "resume: the worker's sandbox was gone and was made again".to_owned(),
+                    );
+                }
+                prepared.record.rerun(now(), Process::current(env.probe))?;
             }
-            prepared.record.rerun(now(), Process::current(env.probe))?;
             record::write(&prepared.meta, &prepared.record)?;
             let worked = pipeline::work(env, prepared)?;
             let failed = matches!(worked.status, RunStatus::Failed(_));

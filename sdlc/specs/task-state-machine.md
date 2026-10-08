@@ -184,6 +184,8 @@ kept here as the design for issues #117-121 to build toward.
 | reviewing failed (pr) | task review | reviewing | retry the reviewer |
 | ready ok (issue) | task finish | finished | push the branch and open the PR |
 | ready ok (spec) | task finish | finished | deliver the branch through the [finish] sink |
+| prepared running (issue/spec), interrupted | task resume | working | make the worker's sandbox again, then run the worker and review |
+| prepared failed (issue/spec) | task resume | working | make the worker's sandbox again, then run the worker and review |
 | working running (issue/spec), interrupted | task resume | working | run the worker again in its clone, then review |
 | working failed (issue/spec) | task resume | working | run the worker again in its clone, then review |
 | any completed/timed-out/failed/passed/gates-failed/ok | task rm | removed | remove the task's folders and sandboxes |

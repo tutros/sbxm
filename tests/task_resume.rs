@@ -5,11 +5,13 @@
 mod common;
 
 use common::task_fixture::{
-    CLAUDE_DONE, CODEX_DONE, Fixture, Play, fixture_with, ok, play_reviews, play_tasks, worked_task,
+    CLAUDE_DONE, CODEX_DONE, Fixture, Play, ctx, fixture_with, issue_text, ok, play_reviews,
+    play_tasks, source, worked_task,
 };
 use sbxm::backend::{FakeBackend, SandboxInfo};
+use sbxm::github::fake::FakeGitHub;
 use sbxm::task::gates::FakeHostRunner;
-use sbxm::task::pipeline::{Prepared, TaskEnv};
+use sbxm::task::pipeline::{self, Prepared, TaskEnv};
 use sbxm::task::record::{self, Kind, ProcessProbe, Stage, Status};
 use sbxm::task::{repo, resume};
 
@@ -105,6 +107,76 @@ fn count(backend: &FakeBackend, needle: &str) -> usize {
 
 fn commits(f: &Fixture) -> u32 {
     repo::commits_ahead(&meta(f).join("repo.git"), "main", "issue-41").unwrap()
+}
+
+/// Issue 41 prepared (folders, clone, record, sandbox) but its worker never started, left in
+/// `status` as a killed or failed preparation would leave it.
+fn prepared_left_in(f: &Fixture, status: Status) -> Prepared {
+    let first = backend(f, &[CLEAN]);
+    let github = FakeGitHub::default();
+    let source = source(f);
+    let mut prepared =
+        pipeline::prepare(&ctx(f, &source, &first, &github), &issue_text(41)).unwrap();
+    prepared.record.status = status;
+    record::write(&prepared.meta, &prepared.record).unwrap();
+    prepared
+}
+
+// ---- The preparation (T9, F4; decision 175) ----
+
+#[test]
+fn an_interrupted_preparation_makes_the_sandbox_again_then_runs_the_worker() {
+    let f = config();
+    let mut prepared = prepared_left_in(&f, Status::Running);
+    let backend = backend(&f, &[CLEAN]);
+
+    let resumed = resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap();
+
+    // A cut-off `sbx create` may have left a half-made sandbox: it goes first.
+    assert_eq!(backend.removes()[0], "sbxm-task-issue-41-claude");
+    assert!(resumed.sandbox_remade);
+    assert!(
+        backend
+            .creates()
+            .iter()
+            .any(|c| c.name == "sbxm-task-issue-41-claude")
+    );
+    assert_eq!(resumed.worked.unwrap().commits, 1);
+    let record = saved(&f);
+    assert_eq!((record.stage, record.status), (Stage::Ready, Status::Ok));
+}
+
+#[test]
+fn a_failed_preparation_is_retried_the_same_way() {
+    let f = config();
+    let mut prepared = prepared_left_in(&f, Status::Failed);
+    let backend = backend(&f, &[CLEAN]);
+
+    resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap();
+
+    assert_eq!(count(&backend, "claude"), 1);
+    assert_eq!(saved(&f).stage, Stage::Ready);
+}
+
+#[test]
+fn a_preparation_whose_sandbox_cannot_be_made_stays_prepared_and_keeps_its_folders() {
+    let f = config();
+    let mut prepared = prepared_left_in(&f, Status::Running);
+    let backend = backend(&f, &[CLEAN]).with_failing_create_for("sbxm-task-issue-41-claude");
+
+    let message = format!(
+        "{:#}",
+        resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap_err()
+    );
+
+    assert!(message.contains("sbxm-task-issue-41-claude"), "{message}");
+    let record = saved(&f);
+    assert_eq!(
+        (record.stage, record.status),
+        (Stage::Prepared, Status::Failed)
+    );
+    assert!(meta(&f).join("repo.git").is_dir());
+    assert!(f.env.base_dir().join("tasks").join("issue-41").is_dir());
 }
 
 // ---- The worker (T6, T9) ----

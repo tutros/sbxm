@@ -212,8 +212,6 @@ fn the_dead_ends_are_the_gaps_the_spec_lists() {
     assert_eq!(
         names(Kind::Issue),
         [
-            "Prepared/Running+interrupted",
-            "Prepared/Failed",
             "Reviewing/Running+interrupted",
             "Reviewing/Completed",
             "Fixing/Running+interrupted",
@@ -234,8 +232,6 @@ fn the_dead_ends_are_the_gaps_the_spec_lists() {
     assert_eq!(
         names(Kind::Spec),
         [
-            "Prepared/Running+interrupted",
-            "Prepared/Failed",
             "Reviewing/Running+interrupted",
             "Reviewing/Completed",
             "Fixing/Running+interrupted",
