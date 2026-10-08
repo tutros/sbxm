@@ -193,3 +193,40 @@ fn a_cancelled_rm_without_a_terminal_appends_its_header_and_refusal_to_the_exist
         "declining must not delete the task"
     );
 }
+
+/// Issue 149, review of #156, M-2: a `--spec` path that cannot be turned into a task id has no
+/// task to log into, so the refusal must not create a log at the task root or a task folder.
+#[test]
+fn an_unresolvable_spec_path_writes_no_log_for_review_or_finish() {
+    for command in ["review", "finish"] {
+        let env = Env::new();
+        let tasks = record::tasks_root(&env.base_dir());
+        fs::create_dir_all(&tasks).unwrap();
+        let missing = env.tmp.path().join("missing.md");
+        let repo_root = env.tmp.path().join("repo");
+        fs::create_dir_all(&repo_root).unwrap();
+        fs::write(
+            repo_root.join("sbxm-task.toml"),
+            "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = [\"cargo test\"]\n",
+        )
+        .unwrap();
+
+        let output = Command::cargo_bin("sbxm")
+            .unwrap()
+            .env("SBXM_CONFIG_DIR", env.config_dir())
+            .current_dir(&repo_root)
+            .args(["task", command, "--spec"])
+            .arg(&missing)
+            .output()
+            .unwrap();
+
+        assert!(!output.status.success(), "{command}");
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(stderr.contains("missing.md"), "{command}: {stderr}");
+        let entries: Vec<_> = fs::read_dir(&tasks)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert!(entries.is_empty(), "{command}: {entries:?}");
+    }
+}

@@ -474,14 +474,15 @@ fn main() -> anyhow::Result<()> {
                 (None, None, Some(path)) => commands::task_review::Target::Spec(path),
                 (None, None, None) => unreachable!("clap requires --issue, --pr or --spec"),
             };
-            let id = match &target {
-                commands::task_review::Target::Issue(n) => format!("issue-{n}"),
-                commands::task_review::Target::Pr(n) => format!("pr-{n}"),
+            // A spec path that gives no id has no task to log into; the command reports why.
+            let ids = match &target {
+                commands::task_review::Target::Issue(n) => vec![format!("issue-{n}")],
+                commands::task_review::Target::Pr(n) => vec![format!("pr-{n}")],
                 commands::task_review::Target::Spec(path) => task::record::spec_id(path)
-                    .map(|(id, _)| id)
+                    .map(|(id, _)| vec![id])
                     .unwrap_or_default(),
             };
-            let (mut out, mut warn) = task_writers(vec![id], None)?;
+            let (mut out, mut warn) = task_writers(ids, None)?;
             let result = (|| -> anyhow::Result<()> {
                 commands::task_review::run(
                     &config::config_dir()?,
@@ -565,13 +566,13 @@ fn main() -> anyhow::Result<()> {
                 (None, Some(path)) => commands::task_finish::Target::Spec(path),
                 (None, None) => unreachable!("clap requires --issue or --spec"),
             };
-            let id = match &target {
-                commands::task_finish::Target::Issue(n) => format!("issue-{n}"),
+            let ids = match &target {
+                commands::task_finish::Target::Issue(n) => vec![format!("issue-{n}")],
                 commands::task_finish::Target::Spec(path) => task::record::spec_id(path)
-                    .map(|(id, _)| id)
+                    .map(|(id, _)| vec![id])
                     .unwrap_or_default(),
             };
-            let (mut out, warn) = task_writers(vec![id], None)?;
+            let (mut out, warn) = task_writers(ids, None)?;
             let result = (|| -> anyhow::Result<()> {
                 commands::task_finish::run(
                     &config::config_dir()?,
