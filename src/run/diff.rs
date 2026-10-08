@@ -4,6 +4,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
@@ -60,11 +61,15 @@ pub fn unseeded(workspace: &Path) -> Result<Diff> {
     result
 }
 
+/// A scratch folder name no other call in this process gets: two pairs diffed at the same
+/// moment would otherwise share one, and the first to finish deletes it under the other.
 fn scratch_dir() -> PathBuf {
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_nanos());
-    std::env::temp_dir().join(format!("sbxm-diff-{}-{nanos}", std::process::id()))
+    std::env::temp_dir().join(format!("sbxm-diff-{}-{nanos}-{n}", std::process::id()))
 }
 
 /// The name the snapshot folder has inside `scratch`; stripped from the
@@ -158,4 +163,25 @@ fn strip_snapshot_prefix(patch: &str) -> String {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashSet;
+
+    #[test]
+    fn scratch_dirs_made_at_the_same_time_never_share_a_name() {
+        let names: Vec<PathBuf> = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| scope.spawn(|| (0..2_000).map(|_| scratch_dir()).collect::<Vec<_>>()))
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|handle| handle.join().unwrap())
+                .collect()
+        });
+        let unique: HashSet<_> = names.iter().collect();
+        assert_eq!(unique.len(), names.len());
+    }
 }
