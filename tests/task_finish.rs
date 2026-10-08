@@ -564,3 +564,18 @@ fn a_long_list_of_must_fix_findings_is_cut_and_counted() {
     assert!(!section.contains("- M-200: "), "{section}");
     assert!(section.trim_end().ends_with("more"), "{section}");
 }
+
+#[test]
+fn one_overlong_must_fix_finding_is_cut_to_the_cap() {
+    let review = format!(
+        "Must-fix findings: 1\n\n## Must fix\n\n### M-1: {}\n\n**Where:** `{}`\n\n",
+        "t".repeat(6_000),
+        "w".repeat(6_000)
+    );
+
+    let section = unresolved_section(&["why".to_owned()], Some(&review));
+
+    assert!(section.chars().count() <= 5_000, "{}", section.len());
+    assert!(section.contains("- M-1: ttt"), "{section}");
+    assert!(section.contains("(cut)"), "{section}");
+}

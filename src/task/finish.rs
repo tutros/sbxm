@@ -422,6 +422,12 @@ pub fn unresolved_reasons(task: &Record, review: Option<&str>) -> Vec<String> {
 /// follows in full (up to [`SECTION_CAP`]).
 const UNRESOLVED_CAP: usize = 5_000;
 
+/// Ends a finding cut to fit [`UNRESOLVED_CAP`].
+const CUT_MARK: &str = "… (cut)\n";
+
+/// Room kept under [`UNRESOLVED_CAP`] for the `and N more` line after a cut first finding.
+const MORE_ROOM: usize = 40;
+
 /// The section at the top of a draft PR's body: why it is a draft, then each must-fix finding
 /// of `review` with its `Where:`.
 pub fn unresolved_section(reasons: &[String], review: Option<&str>) -> String {
@@ -451,7 +457,16 @@ fn unresolved_text(intro: &str, reasons: &[String], review: Option<&str>) -> Str
             Some(place) => format!("- {}: {} ({place})\n", finding.id, finding.title),
             None => format!("- {}: {}\n", finding.id, finding.title),
         };
-        if listed > 0 && text.chars().count() + line.chars().count() > UNRESOLVED_CAP {
+        if text.chars().count() + line.chars().count() > UNRESOLVED_CAP {
+            if listed == 0 {
+                // A first finding too long on its own is cut, leaving room for the `and N more`
+                // line, so the section never passes the cap.
+                let room = UNRESOLVED_CAP
+                    .saturating_sub(text.chars().count() + CUT_MARK.chars().count() + MORE_ROOM);
+                text.extend(line.chars().take(room));
+                text.push_str(CUT_MARK);
+                listed = 1;
+            }
             break;
         }
         text.push_str(&line);
