@@ -586,6 +586,56 @@ fn a_record_without_the_result_runs_the_reviewer_again() {
     assert_eq!(saved(&f).stage, Stage::Ready);
 }
 
+#[test]
+fn a_record_without_the_result_reviews_again_under_a_new_round_and_keeps_every_earlier_one() {
+    // An older record: one fix round, then a clean narrow review (round 2) and the confirming
+    // full one (round 3) completed, its result never recorded.
+    let f = config();
+    let mut prepared = reviewed_task(&f, ONE, None);
+    std::fs::write(meta(&f).join("review-2.md"), "second\n").unwrap();
+    std::fs::write(meta(&f).join("review-3.md"), "third\n").unwrap();
+    prepared.record.round = 1;
+    record::write(&prepared.meta, &prepared.record).unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (context, log) = (
+        workspace(&f)
+            .with_file_name("issue-41-review")
+            .join(".sbxm-task")
+            .join("previous-review.md"),
+        Arc::clone(&seen),
+    );
+    let backend = backend(&f, &[CLEAN]).with_exec_responder(move |sandbox, spec| {
+        if sandbox.contains("-review-") && spec.argv.iter().any(|a| a == "codex") {
+            log.lock()
+                .unwrap()
+                .push(std::fs::read_to_string(&context).unwrap_or_default());
+        }
+        None
+    });
+
+    let resumed = resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap();
+
+    let rounds: Vec<u32> = resumed
+        .review
+        .unwrap()
+        .rounds
+        .iter()
+        .map(|r| r.round)
+        .collect();
+    assert_eq!(rounds, [4]);
+    let read = |n: u32| std::fs::read_to_string(meta(&f).join(format!("review-{n}.md"))).unwrap();
+    assert_eq!(
+        (read(1), read(2), read(3)),
+        (ONE.to_owned(), "second\n".to_owned(), "third\n".to_owned())
+    );
+    assert!(read(4).ends_with(CLEAN), "{}", read(4));
+    let seen = seen.lock().unwrap();
+    assert_eq!(seen.len(), 1);
+    for earlier in [ONE, "second\n", "third\n"] {
+        assert!(seen[0].contains(earlier), "{}", seen[0]);
+    }
+}
+
 // ---- The fix round (T5, T9) ----
 
 /// Issue 41 whose first fix round failed: the review found one must-fix finding, and the

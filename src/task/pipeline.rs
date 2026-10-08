@@ -1644,8 +1644,31 @@ pub fn review_issue(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewRepo
         return Ok(report);
     }
 
-    let round = prepared.record.round + 1;
+    let round = next_review_round(prepared);
     review_rounds(env, prepared, report, round, None, false)
+}
+
+/// The number for a review round that is about to start: after the last recorded review and
+/// every saved `review-<n>.md`, and never below the fix rounds counted. Review rounds outnumber fix
+/// rounds (a clean narrow review is followed by a full one), and a record older than
+/// `Record::review` (issue 118) only has the files to go by: a number taken from the fix-round
+/// counter alone would overwrite an earlier round's saved review.
+fn next_review_round(prepared: &Prepared) -> u32 {
+    let saved = fs::read_dir(&prepared.meta)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.ok()?.file_name();
+            name.to_str()?
+                .strip_prefix("review-")?
+                .strip_suffix(".md")?
+                .parse::<u32>()
+                .ok()
+        })
+        .max()
+        .unwrap_or(0);
+    let recorded = prepared.record.review.as_ref().map_or(0, |last| last.round);
+    prepared.record.round.max(recorded).max(saved) + 1
 }
 
 /// The review rounds of [`review_issue`], from review round `round` on: each review, and while
@@ -1741,11 +1764,7 @@ fn after_fix(env: &TaskEnv, prepared: &mut Prepared, ignore_repeat: bool) -> Res
         report.gates_failed = Some(failed);
         return Ok(report);
     }
-    let round = prepared
-        .record
-        .review
-        .as_ref()
-        .map_or(prepared.record.round + 1, |last| last.round + 1);
+    let round = next_review_round(prepared);
     review_rounds(env, prepared, report, round, None, ignore_repeat)
 }
 
