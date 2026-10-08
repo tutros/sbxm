@@ -17,7 +17,19 @@ use sbxm::task::finish::finish;
 use sbxm::task::pipeline::{self, Prepared};
 use sbxm::task::record::{self, Process, Stage, Status};
 
-const REVIEW: &str = "Reviewer: codex (default)\nMust-fix findings: 0\n\nNothing found.\n";
+const REVIEW: &str = "Reviewer: codex (default)\n\nMust-fix findings: 0\n\nNothing found.\n";
+
+const REVIEW_WITH_MUST_FIX: &str = "Reviewer: codex (default)\n\nMust-fix findings: 2\n\n\
+## Must fix\n\n\
+### M-1: The lock is never released\n\n\
+**Where:** `src/lock.rs:10`\n\
+**What happens:** x\n\n\
+### M-2: The count is off by one\n\n\
+**Where:** `src/count.rs:3`\n\
+**What happens:** x\n\n\
+## Should fix\n\n\
+### S-1: A name is unclear\n\n\
+**Where:** `src/name.rs:1`\n";
 
 fn pr7() -> PrInfo {
     PrInfo {
@@ -145,6 +157,8 @@ fn a_continued_task_is_pushed_to_the_pr_branch_with_a_comment_and_no_new_pr() {
     assert!(body.contains(&tip[..7]), "{body}");
     assert!(body.contains("b.txt"), "{body}");
     assert!(!body.contains(&head[..7]), "{body}");
+    assert!(!body.contains("Unresolved"), "{body}");
+    assert!(done.unresolved.is_empty());
     assert_eq!(done.url, "https://github.com/o/r/pull/7");
     assert_eq!(done.continued, Some(7));
     let record = reread(&f);
@@ -397,7 +411,7 @@ fn a_comment_with_too_many_commits_lists_what_fits_and_says_how_many_more() {
         .map(|i| format!("{i:07x} {}", "z".repeat(200)))
         .collect();
 
-    let body = sbxm::task::finish::pr_comment(41, "feature-x", &commits);
+    let body = sbxm::task::finish::pr_comment(41, "feature-x", &commits, None);
 
     assert!(body.chars().count() < 65_536, "{}", body.chars().count());
     assert!(body.contains("`0000000`"), "{}", &body[..300]);
@@ -430,5 +444,80 @@ fn mentions_in_commit_subjects_do_not_ping_anyone() {
     assert!(
         body.contains("someone") && body.contains("a@b.com"),
         "{body}"
+    );
+}
+
+/// Decision 177(r): a continued PR can't be made a draft, so what is left goes in its comment.
+#[test]
+fn a_continued_task_with_must_fix_left_lists_the_findings_in_its_comment() {
+    let f = fixture();
+    let (prepared, _) = ready(&f);
+    fs::write(prepared.meta.join("review.md"), REVIEW_WITH_MUST_FIX).unwrap();
+    let github = FakeGitHub::default();
+
+    let done = run(&f, &github).unwrap();
+
+    // Only a comment: no PR is opened and the PR's draft status is left alone.
+    let body = posted_comment(&github);
+    assert!(body.contains("## Unresolved"), "{body}");
+    assert!(body.contains("2 must-fix finding(s) left"), "{body}");
+    assert!(
+        body.contains("- M-1: The lock is never released (`src/lock.rs:10`)"),
+        "{body}"
+    );
+    assert!(
+        body.contains("- M-2: The count is off by one (`src/count.rs:3`)"),
+        "{body}"
+    );
+    assert!(!body.contains("S-1"), "{body}");
+    assert!(body.contains("b.txt"), "{body}");
+    assert!(body.contains("Fixes #41"), "{body}");
+    assert!(!done.draft);
+    assert_eq!(done.unresolved.len(), 1, "{:?}", done.unresolved);
+    assert_eq!(reread(&f).stage, Stage::Finished);
+}
+
+#[test]
+fn a_stopped_continued_task_names_the_reason_in_its_comment() {
+    let f = fixture();
+    let (mut prepared, _) = ready(&f);
+    prepared.record.stopped = Some(record::Stopped::RoundsExhausted);
+    record::write(&prepared.meta, &prepared.record).unwrap();
+    let github = FakeGitHub::default();
+
+    let done = run(&f, &github).unwrap();
+
+    let body = posted_comment(&github);
+    assert!(body.contains("## Unresolved"), "{body}");
+    assert!(body.contains("rounds-exhausted"), "{body}");
+    assert!(!body.contains("draft because"), "{body}");
+    assert_eq!(done.unresolved.len(), 1, "{:?}", done.unresolved);
+}
+
+#[test]
+fn the_command_prints_what_a_continued_task_left_unresolved() {
+    let f = fixture();
+    let (prepared, _) = ready(&f);
+    fs::write(prepared.meta.join("review.md"), REVIEW_WITH_MUST_FIX).unwrap();
+    let mut out = Vec::new();
+
+    finish_cmd(
+        &f.env.config_dir(),
+        &Options {
+            target: Target::Issue(41),
+            repo_root: f.env.tmp.path().join("target-repo"),
+            push_unresolved: false,
+        },
+        &FakeGitHub::default(),
+        &Probe,
+        &mut out,
+    )
+    .unwrap();
+
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("commented on it"), "{out}");
+    assert!(
+        out.contains("  unresolved: the last review has 2 must-fix finding(s) left"),
+        "{out}"
     );
 }

@@ -425,7 +425,12 @@ const UNRESOLVED_CAP: usize = 5_000;
 /// The section at the top of a draft PR's body: why it is a draft, then each must-fix finding
 /// of `review` with its `Where:`.
 pub fn unresolved_section(reasons: &[String], review: Option<&str>) -> String {
-    let mut text = "## Unresolved\n\nThis PR is a draft because:\n\n".to_owned();
+    unresolved_text("This PR is a draft because:", reasons, review)
+}
+
+/// [`unresolved_section`] under `intro`: a continued PR isn't made a draft (decision 177(r)).
+fn unresolved_text(intro: &str, reasons: &[String], review: Option<&str>) -> String {
+    let mut text = format!("## Unresolved\n\n{intro}\n\n");
     for reason in reasons {
         text.push_str(&format!("- {reason}\n"));
     }
@@ -781,15 +786,23 @@ const PUSHED_UNCOMMENTED_NOTE: &str = "the commits are pushed to the PR's branch
 /// The longest commit subject the comment on a continued PR shows in full.
 const SUBJECT_CAP: usize = 500;
 
-/// The comment on a continued PR: the commits the task added, and `Fixes #n` for its issue. It
+/// The comment on a continued PR: what the task left `unresolved` (decision 177(r), a section
+/// like a draft's), the commits the task added, and `Fixes #n` for its issue. It
 /// stays below what GitHub accepts: a subject over [`SUBJECT_CAP`] characters is cut, commits
 /// that don't fit are counted instead of listed, and a note says so. Mentions are neutralised
 /// as in the review's comment, so an agent's commit subject notifies no one.
-pub fn pr_comment(number: u32, branch: &str, commits: &[String]) -> String {
-    let mut body = defang_mentions(&format!(
+pub fn pr_comment(
+    number: u32,
+    branch: &str,
+    commits: &[String],
+    unresolved: Option<&str>,
+) -> String {
+    let mut body =
+        unresolved.map_or_else(String::new, |text| defang_mentions(&format!("{text}\n")));
+    body.push_str(&defang_mentions(&format!(
         "`sbxm task finish` pushed {} commit(s) to {branch} for issue #{number}:\n\n",
         commits.len()
-    ));
+    )));
     let (mut cut, mut listed) = (0, 0);
     for line in commits {
         let (id, subject) = line.split_once(' ').unwrap_or((line, ""));
@@ -838,7 +851,16 @@ fn finish_continued(
     let (id, pr, branch) = (&task.id, continued.pr, &task.branch);
     let tip = repo::branch_tip(repo_git, branch)?;
     let commits = repo::commit_lines(repo_git, &continued.base, branch)?;
-    let body = pr_comment(task.number, branch, &commits);
+    let review = read_capped(&prepared.meta.join("review.md"))?;
+    let unresolved = unresolved_reasons(&task, review.as_deref());
+    let section = (!unresolved.is_empty()).then(|| {
+        unresolved_text(
+            "sbxm doesn't make a PR it continues a draft, but this task left:",
+            &unresolved,
+            review.as_deref(),
+        )
+    });
+    let body = pr_comment(task.number, branch, &commits, section.as_deref());
     refuse_secrets("the PR comment", &body)?;
     let pushed = match repo::remote_branch_head(repo_git, branch)? {
         None => bail!(
@@ -903,6 +925,6 @@ fn finish_continued(
         cuts: Vec::new(),
         continued: Some(pr),
         draft: false,
-        unresolved: Vec::new(),
+        unresolved,
     })
 }

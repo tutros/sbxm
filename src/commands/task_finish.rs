@@ -59,6 +59,9 @@ pub fn run(
             "{id}: pushed {branch} to PR #{pr} and commented on it, {}",
             done.url
         )?;
+        for reason in &done.unresolved {
+            writeln!(out, "  unresolved: {reason}")?;
+        }
         writeln!(
             out,
             "  next: review PR #{pr} again with: sbxm task review --pr {pr} (if it was reviewed before, \
