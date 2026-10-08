@@ -319,8 +319,10 @@ pub enum TaskCommand {
         #[arg(long, requires = "restart")]
         yes: bool,
     },
-    /// Push a ready task's branch and open its PR (`Fixes #N`, with the result and the review in
-    /// the body). Refuses unless the task is ready and has no PR yet.
+    /// Publish a ready task: an issue's task pushes its branch and opens its PR (`Fixes #N`, with
+    /// the result and the review in the body); a spec task goes to its `[finish] sink` (the
+    /// branch kept in the task's repo.git, or pushed to origin with no PR). Refuses unless the
+    /// task is ready and not finished yet.
     #[command(group(clap::ArgGroup::new("finish_target").required(true).args(["issue", "spec"])))]
     Finish {
         /// The issue's task.

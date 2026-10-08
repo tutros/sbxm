@@ -19,14 +19,14 @@ for the no-progress issue), `resume` and draft PRs, which are still open per sec
 `task start --spec <file>` (`pipeline::prepare_spec`) and `task review --spec <file>`, running the
 same `pipeline::review_issue` loop as an issue task's (`machine::TABLE`'s `HAS_WORKER` rows cover
 `Kind::Issue` and `Kind::Spec` alike, so no new rows were added). `review.md` is its only output
-(`Role::ReviewerSpec`/`FixSpec`/`FixGateSpec`, no GitHub call anywhere); `task finish` is refused
-for it (`check_can_finish`) until the sink (`[finish] sink` = `local`/`push`, decision 174(e))
-lands, in the two issues that follow it.**
+(`Role::ReviewerSpec`/`FixSpec`/`FixGateSpec`, no GitHub call anywhere); `task finish` for it
+goes through the `[finish] sink` (`local`/`push`, decision 174(e)), built by the two issues that
+follow it.**
 
 **Issue 143 (part 7b of 7) built the `local` sink: `[finish] sink` in `sbxm-task.toml` (`local`, the
 default, or `push`), `finish::finish_local` (a ready spec task with commits beyond its base becomes
 `finished`; its branch stays in `repo.git`, nothing is pushed, and `finish` prints the `git fetch`
-command), `push` refused as not available yet (issue 144), and `task rm --spec` with its protection
+command), and `task rm --spec` with its protection
 (`finish::check_spec_result_fetched`, below in 5.4).**
 
 **Issue 144 (part 7c of 7) built the `push` sink: `finish::finish_push` pushes the branch to `origin` as a
