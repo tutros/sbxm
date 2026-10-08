@@ -510,6 +510,43 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Task {
             command:
+                TaskCommand::Resume {
+                    issue,
+                    spec,
+                    rounds,
+                },
+        } => {
+            let target = match (issue, spec) {
+                (Some(n), _) => commands::task_resume::Target::Issue(n),
+                (None, Some(path)) => commands::task_resume::Target::Spec(path),
+                (None, None) => unreachable!("clap requires --issue or --spec"),
+            };
+            let ids = match &target {
+                commands::task_resume::Target::Issue(n) => vec![format!("issue-{n}")],
+                commands::task_resume::Target::Spec(path) => task::record::spec_id(path)
+                    .map(|(id, _)| vec![id])
+                    .unwrap_or_default(),
+            };
+            let (mut out, mut warn) = task_writers(ids, None)?;
+            let result = (|| -> anyhow::Result<()> {
+                commands::task_resume::run(
+                    &config::config_dir()?,
+                    &commands::task_resume::Options {
+                        repo_root: std::env::current_dir()?,
+                        target,
+                        rounds,
+                    },
+                    &SbxBackend,
+                    &task::record::SystemProbe,
+                    &task::gates::ShellHostRunner,
+                    &mut out,
+                    &mut warn,
+                )
+            })();
+            finish_task(result, out, warn)
+        }
+        Command::Task {
+            command:
                 TaskCommand::Run {
                     issue,
                     worker_harness,

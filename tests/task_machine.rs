@@ -10,7 +10,8 @@ use std::collections::BTreeSet;
 use sbxm::task::finish::{check_can_finish, plan_removal};
 use sbxm::task::machine::{Event, STAGES, State, dead_ends, matching, states, verdict};
 use sbxm::task::pipeline::{check_can_gate, check_can_review, check_can_review_pr};
-use sbxm::task::record::{self, Kind, NewTask, Process, ProcessProbe, Record};
+use sbxm::task::record::{self, Kind, NewTask, Process, ProcessProbe, Record, Stage, Stopped};
+use sbxm::task::resume::check_can_resume;
 
 const T0: u64 = 1_790_000_000;
 
@@ -63,6 +64,22 @@ fn guard(state: &State, event: Event) -> bool {
             record::write(&record::task_dir(base.path(), &record.id), &record).unwrap();
             plan_removal(base.path(), &record.id, &probe).is_ok()
         }
+        // The table doesn't model the recorded process of a task that isn't `running`: a state
+        // it calls not in flight has no live process. `ready` is resumable only once the task
+        // stopped (`stopped`, not in the table either), so it is asked with a stopped task and
+        // `--rounds 1`.
+        Event::Resume => {
+            let alive = state.status == record::Status::Running && !state.interrupted;
+            let probe = Probe(alive.then_some(T0));
+            let mut record = record;
+            let rounds = if state.stage == Stage::Ready {
+                record.stopped = Some(Stopped::RoundsExhausted);
+                Some(1)
+            } else {
+                None
+            };
+            check_can_resume(&record, &probe, rounds).is_ok()
+        }
         Event::Advance(to) => {
             let mut record = record;
             record.advance(to, T0 + 1, Process::new(1234, T0)).is_ok()
@@ -71,7 +88,13 @@ fn guard(state: &State, event: Event) -> bool {
 }
 
 fn events() -> Vec<Event> {
-    let mut all = vec![Event::Gates, Event::Review, Event::Finish, Event::Rm];
+    let mut all = vec![
+        Event::Gates,
+        Event::Review,
+        Event::Finish,
+        Event::Rm,
+        Event::Resume,
+    ];
     all.extend(STAGES.iter().map(|&stage| Event::Advance(stage)));
     all
 }
@@ -180,24 +203,15 @@ fn names(kind: Kind) -> Vec<String> {
         .collect()
 }
 
-/// The gaps T3-T6 and T9 of the spec fall out of the table: these are the states a task can be
-/// left in (not finished, not in flight) from which no command moves it on, only `rm`.
-/// `Prepared/Failed` is one the spec does not list (finding F4).
+/// The gaps T3-T6 and T9 of the spec fall out of the table: the states a task can be left in (not
+/// finished, not in flight) from which no command moves it on, only `rm`. `Prepared/Failed` is one
+/// the spec did not list (finding F4). `task resume` (issue 118) closed them row by row for a task
+/// with a worker, so an issue or spec task has none left. A PR task's stay: it has no worker or
+/// fix rounds, and `resume` is refused for it (spec section 5.2); the way on is `rm`, then
+/// `review --pr` again (decision 169(f)).
 #[test]
 fn the_dead_ends_are_the_gaps_the_spec_lists() {
-    assert_eq!(
-        names(Kind::Issue),
-        [
-            "Prepared/Running+interrupted",
-            "Prepared/Failed",
-            "Working/Running+interrupted",
-            "Working/Failed",
-            "Reviewing/Running+interrupted",
-            "Reviewing/Completed",
-            "Fixing/Running+interrupted",
-            "Fixing/Failed",
-        ]
-    );
+    assert!(names(Kind::Issue).is_empty(), "{:?}", names(Kind::Issue));
     assert_eq!(
         names(Kind::Pr),
         [
@@ -209,17 +223,5 @@ fn the_dead_ends_are_the_gaps_the_spec_lists() {
     );
     // A spec task runs the same stages as an issue task (issue 142), and since issue 143 its
     // `ready` moves on through `finish` and the `[finish] sink`, so it has the same dead ends.
-    assert_eq!(
-        names(Kind::Spec),
-        [
-            "Prepared/Running+interrupted",
-            "Prepared/Failed",
-            "Working/Running+interrupted",
-            "Working/Failed",
-            "Reviewing/Running+interrupted",
-            "Reviewing/Completed",
-            "Fixing/Running+interrupted",
-            "Fixing/Failed",
-        ]
-    );
+    assert!(names(Kind::Spec).is_empty(), "{:?}", names(Kind::Spec));
 }

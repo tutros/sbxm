@@ -86,7 +86,8 @@ impl Stage {
             (Self::Gating, Kind::Pr) => &[Self::Reviewing],
             (Self::Reviewing, Kind::Issue | Kind::Spec) => &[Self::Fixing, Self::Ready],
             (Self::Reviewing, Kind::Pr) => &[Self::Ready],
-            (Self::Ready, Kind::Issue | Kind::Spec) => &[Self::Finished],
+            // `task resume` reopens a task that stopped `ready` for another fix round (issue 118).
+            (Self::Ready, Kind::Issue | Kind::Spec) => &[Self::Finished, Self::Fixing],
             (Self::Ready, Kind::Pr) | (Self::Finished, _) => &[],
         }
     }
@@ -235,6 +236,25 @@ pub struct Agent {
     pub model: Option<String>,
     pub sandbox: String,
     pub workspace: String,
+    /// The profile this sandbox was built with (issue 118, PR 163 review M-2): `task resume`
+    /// rebuilds the worker's sandbox from this, never from `sbxm-task.toml` as it reads now, so a
+    /// `--profile` flag at `task start` or a later edit of the file never silently changes what
+    /// gets recreated. Always `None` on the reviewer's `Agent`, whose sandbox is rebuilt from the
+    /// current config every round and is never resumed; `None` on the worker's `Agent` only in a
+    /// record written before this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
+    /// The resolved CPU and memory the first `CreateSpec` actually used (M-2, PR 163 review round
+    /// 2), not the optional overrides `sbxm-task.toml` may have left unset: a task that inherited
+    /// the global defaults at `task start` keeps running under those, even after the globals
+    /// change. Together with the profile above, `task resume` hashes these again before rebuilding
+    /// the sandbox and refuses if the result no longer matches `config_hash`. `None` on the
+    /// reviewer's `Agent`, and on the worker's `Agent` only in a record written before issue 118's
+    /// resume fix.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpus: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory: Option<String>,
     pub run: Option<RunInfo>,
 }
 
@@ -270,6 +290,20 @@ pub struct PrBranch {
     pub base: String,
 }
 
+/// The accepted result of the last review of a task with a worker, recorded when its `review.md`
+/// is parsed (part of spec §5.1's `review`; issue 118): `task resume` continues a task left at
+/// `reviewing/completed` from this, never from `review.md` again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewResult {
+    /// The review round (its saved file is `review-<round>.md`).
+    pub round: u32,
+    pub must_fix: u32,
+    /// Whether it covered every commit since the base (`false`: only those since the last review).
+    pub full: bool,
+    /// Whether a must-fix finding validly repeated an earlier one (spec §5.3).
+    pub repeat: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Record {
     pub schema: u32,
@@ -302,6 +336,9 @@ pub struct Record {
     /// §5.1, §5.2: a narrow review exists only once this is set).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_reviewed_commit: Option<String>,
+    /// The last review's result (issue 118); absent in older records and until a review completes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<ReviewResult>,
     pub gates: Vec<GateResult>,
     /// The latest gate run that passed, and what it covered; cleared when gates start again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -400,6 +437,7 @@ impl Record {
             fix_rounds: DEFAULT_FIX_ROUNDS,
             stopped: None,
             last_reviewed_commit: None,
+            review: None,
             gates: Vec::new(),
             gate_run: None,
             pr: None,
@@ -521,6 +559,38 @@ impl Record {
             );
         }
         self.status = status;
+        Ok(())
+    }
+
+    /// Whether the `sbxm` process the record names is still the one running (its pid with the
+    /// same start time, as [`Record::is_interrupted`] decides), whatever the status: a task
+    /// between two stages is not `running`, but the process driving it is alive.
+    pub fn process_alive(&self, probe: &dyn ProcessProbe) -> bool {
+        self.process.as_ref().is_some_and(|process| {
+            probe
+                .start_time(process.pid)
+                .is_some_and(|started| format_timestamp(started) == process.started_at)
+        })
+    }
+
+    /// Runs the current stage again (`task resume`, issue 118): a stage that failed, or was left
+    /// `running` by a process that is gone, starts over (running, owned by `process`). Refused
+    /// for any other status, with nothing changed.
+    pub fn rerun(&mut self, now: u64, process: Process) -> Result<()> {
+        if !matches!(self.status, Status::Failed | Status::Running) {
+            bail!(
+                "task {} is {} in stage {}, so that stage has nothing to run again; see `sbxm task status`",
+                self.id,
+                self.status.name(),
+                self.stage.name()
+            );
+        }
+        self.status = self.stage.statuses()[0];
+        self.stages.push(Stamp {
+            stage: self.stage,
+            at: format_timestamp(now),
+        });
+        self.process = Some(process);
         Ok(())
     }
 

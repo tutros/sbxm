@@ -18,6 +18,9 @@ pub enum Event {
     Finish,
     /// `task rm` and `task start --restart`.
     Rm,
+    /// `task resume` (decisions 173(c), 175; issue 118): continue a task from its recorded stage,
+    /// keeping its clone and commits.
+    Resume,
     /// The pipeline moving the task to a stage (`Record::advance`).
     Advance(Stage),
 }
@@ -203,6 +206,17 @@ pub const TABLE: &[Row] = &[
         to: Some(Stage::Finished),
         action: "deliver the branch through the [finish] sink",
     },
+    // `task resume` on a task that stopped `ready` (issue 118); `resume` checks `stopped`
+    // and the budget, which this table does not model.
+    Row {
+        stages: &[Stage::Ready],
+        statuses: &[Status::Ok],
+        live: Live::Any,
+        kinds: HAS_WORKER,
+        event: Event::Advance(Stage::Fixing),
+        to: Some(Stage::Fixing),
+        action: "run a fix round from the recorded review",
+    },
     // `task gates` (a task with a worker: issue and spec).
     Row {
         stages: &[Stage::Working, Stage::Fixing],
@@ -316,6 +330,133 @@ pub const TABLE: &[Row] = &[
         to: Some(Stage::Finished),
         action: "deliver the branch through the [finish] sink",
     },
+    // `task resume` (decisions 173(c), 175; issue 118), a task with a worker: a failed or
+    // interrupted stage runs again in the task's own clone, and the task goes on to `ready`.
+    // F4 (decision 175): a preparation that failed or was cut off keeps its folders and clone.
+    Row {
+        stages: &[Stage::Prepared],
+        statuses: &[Status::Running],
+        live: Live::Interrupted,
+        kinds: HAS_WORKER,
+        event: Event::Resume,
+        to: Some(Stage::Working),
+        action: "make the worker's sandbox again, then run the worker and review",
+    },
+    Row {
+        stages: &[Stage::Prepared],
+        statuses: &[Status::Failed],
+        live: Live::Any,
+        kinds: HAS_WORKER,
+        event: Event::Resume,
+        to: Some(Stage::Working),
+        action: "make the worker's sandbox again, then run the worker and review",
+    },
+    Row {
+        stages: &[Stage::Working],
+        statuses: &[Status::Running],
+        live: Live::Interrupted,
+        kinds: HAS_WORKER,
+        event: Event::Resume,
+        to: Some(Stage::Working),
+        action: "run the worker again in its clone, then review",
+    },
+    Row {
+        stages: &[Stage::Working],
+        statuses: &[Status::Failed],
+        live: Live::Any,
+        kinds: HAS_WORKER,
+        event: Event::Resume,
+        to: Some(Stage::Working),
+        action: "run the worker again in its clone, then review",
+    },
+    // A worker or fix round that ended, or gates that ended or were cut off: on to the review,
+    // as `task review` would.
+    Row {
+        stages: &[Stage::Working, Stage::Fixing],
+        statuses: WORKER_DONE,
+        live: Live::Any,
+        kinds: HAS_WORKER,
+        event: Event::Resume,
+        to: Some(Stage::Reviewing),
+        action: "run the gates, then the reviewer",
+    },
+    Row {
+        stages: &[Stage::Gating],
+        statuses: GATES_ENDED,
+        live: Live::Any,
+        kinds: HAS_WORKER,
+        event: Event::Resume,
+        to: Some(Stage::Reviewing),
+        action: "run the reviewer (after the gates again, when they failed)",
+    },
+    Row {
+        stages: &[Stage::Gating],
+        statuses: &[Status::Running],
+        live: Live::Interrupted,
+        kinds: HAS_WORKER,
+        event: Event::Resume,
+        to: Some(Stage::Reviewing),
+        action: "re-run the abandoned gates, then the reviewer",
+    },
+    // T3: a review that failed or was cut off runs again; its gates passed for the same commits.
+    Row {
+        stages: &[Stage::Reviewing],
+        statuses: &[Status::Running],
+        live: Live::Interrupted,
+        kinds: HAS_WORKER,
+        event: Event::Resume,
+        to: Some(Stage::Reviewing),
+        action: "run the reviewer again",
+    },
+    Row {
+        stages: &[Stage::Reviewing],
+        statuses: &[Status::Failed],
+        live: Live::Any,
+        kinds: HAS_WORKER,
+        event: Event::Resume,
+        to: Some(Stage::Reviewing),
+        action: "run the reviewer again",
+    },
+    // T5: a fix round that failed or was cut off runs again with the same input.
+    Row {
+        stages: &[Stage::Fixing],
+        statuses: &[Status::Running],
+        live: Live::Interrupted,
+        kinds: HAS_WORKER,
+        event: Event::Resume,
+        to: Some(Stage::Fixing),
+        action: "run the fix round again in its clone, then the gates and the review",
+    },
+    Row {
+        stages: &[Stage::Fixing],
+        statuses: &[Status::Failed],
+        live: Live::Any,
+        kinds: HAS_WORKER,
+        event: Event::Resume,
+        to: Some(Stage::Fixing),
+        action: "run the fix round again in its clone, then the gates and the review",
+    },
+    // T4: a review that completed, but whose process was gone before it acted on it.
+    Row {
+        stages: &[Stage::Reviewing],
+        statuses: &[Status::Completed],
+        live: Live::Any,
+        kinds: HAS_WORKER,
+        event: Event::Resume,
+        to: Some(Stage::Fixing),
+        action: "replay the recorded review: a fix round for its findings, else ready",
+    },
+    // A task that stopped `ready` with findings left (`stopped`): another fix round, after
+    // `--rounds N` added to the budget when it was used (decisions 173(c), 177(b)(q)).
+    Row {
+        stages: &[Stage::Ready],
+        statuses: &[Status::Ok],
+        live: Live::Any,
+        kinds: HAS_WORKER,
+        event: Event::Resume,
+        to: Some(Stage::Fixing),
+        action: "when stopped: a fix round from the recorded review (--rounds N adds N rounds)",
+    },
     // `task rm`: anything that is not running, or running with its process gone.
     Row {
         stages: &STAGES,
@@ -390,7 +531,7 @@ pub fn dead_ends(kind: Kind) -> Vec<State> {
         .filter(|s| s.stage != Stage::Finished && !(kind == Kind::Pr && s.stage == Stage::Ready))
         .filter(|s| s.status != Status::Running || s.interrupted)
         .filter(|s| {
-            [Event::Gates, Event::Review, Event::Finish]
+            [Event::Gates, Event::Review, Event::Finish, Event::Resume]
                 .iter()
                 .all(|&e| !verdict(s, e))
         })

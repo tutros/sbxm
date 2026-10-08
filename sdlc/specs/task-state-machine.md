@@ -33,6 +33,12 @@ command), and `task rm --spec` with its protection
 new branch (`repo::push_new`, an empty `--force-with-lease`), opens no PR, and keeps the safety rules of
 5.4.**
 
+**Issue 118 (part 4 of 7) built `task resume` and `--rounds N`** (decisions 173(c), 175, 177(b)(n)(q)):
+`machine::TABLE`'s `task resume` rows (5.2 "Today"), `resume::check_can_resume` and `resume::resume`, and
+`commands::task_resume`. It closes T3, T4, T5, T6, T9 and F4 for issue and spec tasks (the dead-end list in
+`tests/task_machine.rs` is empty for both; a PR task's stay, see 5.2), and records part of 5.1's `review` (round,
+must-fix count, scope, repeat). Where it differs from the target table is listed after it in 5.2.
+
 ## 1. States of an issue task (`stage` / `status`)
 
 Legal moves (`Stage::next`): prepared -> working -> gating -> reviewing -> (fixing -> gating -> reviewing) -> ready -> finished.
@@ -84,6 +90,12 @@ goes through the `[finish] sink` instead of a PR (decision 174(e), issue 143).
 | S15 ready | no | no ("already ready") | ok | ok |
 | S16 finished | no | no | no (already has a PR) | ok |
 
+`task resume` (issue 118), for an issue or spec task whose recorded process is gone: S1, S2 (make the sandbox again,
+then the worker), S3, S5 (the worker again), S4, S13 (collect again, then review), S6-S8 (as `task review`), S9, S11
+(the reviewer again), S10 (replay the recorded review), S12, S14 (the fix round again) and S15 when `stopped` (a fix
+round; `--rounds N` once the budget is used). Refused for S16, for S15 without `stopped`, for a PR task and while the
+recorded process is alive, whatever the status.
+
 ## 3. Gaps (operations that are missing)
 
 The only exits from several states are "delete the task and start over" (about 1.5 hours and a new sandbox).
@@ -99,6 +111,9 @@ The only exits from several states are "delete the task and start over" (about 1
 | T7 | S16 finished, review of the PR finds more | `task review --pr N` (new task), `file-findings`, then `start` per finding (decision 169) | Covered by decision 169; a PR with k findings costs k tasks and k sandboxes |
 | T8 | any task whose PR changed after the review | `rm` then review again | Re-review without deleting (decision 169(f) chose `rm` + `review --pr`) |
 | T9 | S1 / S3 / S6 / S9 / S12 interrupted | `rm` only | Resume at the interrupted stage |
+
+**Closed by issue 118:** T3, T4, T5, T6 and T9 for issue and spec tasks (`task resume`; T1's "a further fix round" is
+`task resume --rounds N`). A PR task keeps its gaps by design (5.2: `resume` is refused for it).
 
 Pattern: every stage that can fail or be interrupted has no retry except S11 (review) and S8 (gates). Round count is
 fixed at one (decision 116), so "one more round" is a design question, not only a missing command.
@@ -126,7 +141,7 @@ A task's state is `(stage, status)` as today, plus four recorded facts that toda
 | `fix_rounds` | the budget: `[worker] fix_rounds` (default 3), raised by `resume --rounds N` |
 | `stopped` | absent, or why the task ended `ready` with something unresolved: `repeat-finding`, `repeat-gate-failure` or `rounds-exhausted` |
 | `last_gate_failure` | the command and exit code of the last failed gate, kept to detect a repeat (5.3) |
-| `review` | the accepted result of the last review, recorded once when the review is parsed: SHA-256 of `review.md`, scope, must-fix count, the findings (id and `Where:` file), risk. Everything after that (`finish`, the no-progress check, the draft decision) reads this record, never `review.md` again, so a missing or edited file cannot change a decision |
+| `review` | the accepted result of the last review, recorded once when the review is parsed: SHA-256 of `review.md`, scope, must-fix count, the findings (id and `Where:` file), risk. Everything after that (`finish`, the no-progress check, the draft decision) reads this record, never `review.md` again, so a missing or edited file cannot change a decision. **Built in part (issue 118): round, must-fix count, scope (`full`) and repeat, which `resume` replays** |
 
 Two more recorded facts: `last_reviewed_commit` (the commit the last review covered; a review is `narrow` only when
 one exists, so the first review after a gate-only round is `full`), and `open_findings` (the must-fix findings still
@@ -172,6 +187,7 @@ kept here as the design for issues #117-121 to build toward.
 | fixing completed/timed-out (issue/spec) | advance | gating | run the gates |
 | ready ok (issue) | advance | finished | push the branch and open the PR |
 | ready ok (spec) | advance | finished | deliver the branch through the [finish] sink |
+| ready ok (issue/spec) | advance | fixing | run a fix round from the recorded review |
 | working/fixing completed/timed-out (issue/spec) | task gates | gating | run the gates |
 | gating passed/gates-failed (issue/spec) | task gates | gating | re-run the gates |
 | gating running (issue/spec), interrupted | task gates | gating | re-run the abandoned gates |
@@ -184,6 +200,19 @@ kept here as the design for issues #117-121 to build toward.
 | reviewing failed (pr) | task review | reviewing | retry the reviewer |
 | ready ok (issue) | task finish | finished | push the branch and open the PR |
 | ready ok (spec) | task finish | finished | deliver the branch through the [finish] sink |
+| prepared running (issue/spec), interrupted | task resume | working | make the worker's sandbox again, then run the worker and review |
+| prepared failed (issue/spec) | task resume | working | make the worker's sandbox again, then run the worker and review |
+| working running (issue/spec), interrupted | task resume | working | run the worker again in its clone, then review |
+| working failed (issue/spec) | task resume | working | run the worker again in its clone, then review |
+| working/fixing completed/timed-out (issue/spec) | task resume | reviewing | run the gates, then the reviewer |
+| gating passed/gates-failed (issue/spec) | task resume | reviewing | run the reviewer (after the gates again, when they failed) |
+| gating running (issue/spec), interrupted | task resume | reviewing | re-run the abandoned gates, then the reviewer |
+| reviewing running (issue/spec), interrupted | task resume | reviewing | run the reviewer again |
+| reviewing failed (issue/spec) | task resume | reviewing | run the reviewer again |
+| fixing running (issue/spec), interrupted | task resume | fixing | run the fix round again in its clone, then the gates and the review |
+| fixing failed (issue/spec) | task resume | fixing | run the fix round again in its clone, then the gates and the review |
+| reviewing completed (issue/spec) | task resume | fixing | replay the recorded review: a fix round for its findings, else ready |
+| ready ok (issue/spec) | task resume | fixing | when stopped: a fix round from the recorded review (--rounds N adds N rounds) |
 | any completed/timed-out/failed/passed/gates-failed/ok | task rm | removed | remove the task's folders and sandboxes |
 | any running, interrupted | task rm | removed | remove the task's folders and sandboxes |
 
@@ -232,6 +261,30 @@ spike's agreement test already walks them).
 
 Rows are checked top to bottom and the first match wins. A validation test walks every reachable (state, event)
 pair and asserts that it matches exactly one row, so an accidental overlap fails the build.
+
+**Issue 118 status:** the `resume` rows are built (the `task resume` rows of "Today (generated)"), for issue and spec
+tasks, with these differences from the target rows above:
+- `resume` carries the task on to `ready` like `task review` (gates, review, fix rounds), not only through the stage
+  it retries; a worker that fails again stops it there.
+- It refuses while the recorded process is alive whatever the status, not only for a `running` state: a task between
+  two stages is not `running`, but its process is still driving it.
+- A preparation's own failure still removes the task's folders (`pipeline::prepare`, unchanged), so `prepared
+  failed` is reached only when `resume` cannot make the sandbox again; an interrupted preparation (`prepared
+  running`, its process gone) is the common case (workflow note G32).
+- A fix round is counted once its run is over (`review_issue` adds it then, unchanged), so `resume` counts a fix
+  round that failed or was cut off when it runs again, and one that ended but was never reviewed, once.
+- `--rounds N` reopens a `ready` task stopped by a review (`rounds-exhausted` or `repeat-finding`) with a fix round
+  from its `review.md`; `repeat-gate-failure` and the gate-failure `rounds-exhausted` stop of 177(a) are not built
+  (a gate failure with the budget used still leaves the task `gating gates-failed`, which `resume` re-runs like
+  `task review`, with no extra round).
+- The first review after a `ready` task is reopened ignores repeats (any `Repeat of:` claim, not only of findings
+  open at the resume); after a retried stage it does not.
+- The replay of a completed review reads the recorded result (5.1 `review`: round, must-fix count, scope, repeat;
+  not yet the SHA-256, findings or risk); a record without it runs the reviewer again.
+- 5.4a's reconciliation is built only for collecting commits (collected again, a fetch of what `repo.git` has
+  changes nothing); the lock file of 5.1 is not built.
+- A PR task is refused, as above; its dead ends (`prepared failed`, interrupted `gating` and `reviewing`, `reviewing
+  completed`) stay `rm` then `review --pr` (decision 169(f)).
 
 **Issue 142 status:** a spec task's `prepared` through `ready` rows are built, but through the section 5.2 "Today
 (generated)" mechanics (the `HAS_WORKER` kind list covers `Kind::Issue` and `Kind::Spec` alike), not this target
@@ -314,7 +367,8 @@ retrying:
 3. **Done (issue #116):** `sbxm task states` and the section 5.2 "Today (generated)" table are generated from
    the code; `tests/task_states.rs` compares them with this file and fails when they differ.
 4. Then add `resume`, `fix_rounds`, `Repeat of:` and the `spec` source as new rows (the 5.2 "Target" table above),
-   each with tests that fail first. **Issue 142 (part 7a) did the `spec` source's `prepared`-to-`ready` stages
+   each with tests that fail first. **Issue 118 added the `resume` rows (and `ready` to `fixing` for a reopened
+   task).** **Issue 142 (part 7a) did the `spec` source's `prepared`-to-`ready` stages
    ahead of this step, through the existing mechanics (section 2); `finish`'s sink row is left for the two issues
    that follow it; issues 143 and 144 added it for the `local` and `push` sinks.**
 

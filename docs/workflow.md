@@ -59,12 +59,15 @@ sbxm task run --issue 63               # start and review in one go; stops befor
 ```
 
 - **Stages:** `prepared`, `working`, `gating`, `reviewing`, `fixing`, `ready`, `finished`. A failed gate shows as
-  `gates-failed`; a killed run shows as `interrupted` in `task status`.
+  `gates-failed`; a killed run shows as `interrupted` in `task status`, and `task resume --issue N` continues a
+  failed or interrupted task from its stage, keeping its clone and commits.
 - **Trust boundary:** the worker has no GitHub access and the host never runs git inside an agent's folder. Commits are
   collected through a verified `git bundle` into a host-owned repo, and only `sbxm` pushes.
 - **Independence:** a worker never reviews its own change; the reviewer's harness differs from the worker's by default.
 - **Limits to know:**
-  - A `ready` task cannot be reviewed again with `task review --issue`; the only redo is `task start --restart`.
+  - A `ready` task cannot be reviewed again with `task review --issue`; one that stopped (`stopped` in `task.json`)
+    gets more fix rounds with `task resume --issue N --rounds N`, and otherwise the only redo is
+    `task start --restart`.
   - `task review --pr` has no fix round (a PR task's `fix_rounds` is always 0): the author fixes the findings and
     reviews again after `task rm --pr N`.
   - `[worker] fix_rounds` (default 3) bounds the review-fix-review loop; a gate failure spends a round too. Rounds

@@ -21,7 +21,7 @@ use super::repo::{self, AgentFile, BUNDLE_CAP, Existing, Identity};
 use super::review;
 use super::select::{self, Selection};
 use crate::backend::{CreateSpec, ExecSpec, SandboxBackend, Stdin};
-use crate::config::{GlobalConfig, Profile};
+use crate::config::{self, GlobalConfig, Profile, Resources};
 use crate::github::{GitHubBackend, Issue, IssueText, PrInfo, PrState};
 use crate::harness::Harness;
 use crate::headless::{self, HeadlessOpts, RunStatus};
@@ -658,6 +658,9 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
             model: worker.model.clone(),
             sandbox: sandbox.clone(),
             workspace: slashes(&workspace),
+            profile: Some(ctx.config.sandbox.profile.clone()),
+            cpus: Some(kit_set.resources.cpus),
+            memory: Some(kit_set.resources.memory.clone()),
             run: None,
         });
         record::write(&meta, &task)?;
@@ -829,6 +832,9 @@ pub fn prepare_spec(ctx: &Ctx, source_path: &Path) -> Result<Prepared> {
             model: worker.model.clone(),
             sandbox: sandbox.clone(),
             workspace: slashes(&workspace),
+            profile: Some(ctx.config.sandbox.profile.clone()),
+            cpus: Some(kit_set.resources.cpus),
+            memory: Some(kit_set.resources.memory.clone()),
             run: None,
         });
         record::write(&meta, &task)?;
@@ -1166,6 +1172,164 @@ fn remove_with_retries(dir: &Path) -> std::io::Result<()> {
     last
 }
 
+/// The flag that names a task again on the command line, for a one-line recovery hint: a spec
+/// task has no path recorded, so it gets a placeholder (as `task resume`'s own flag does).
+fn task_flag(record: &Record) -> String {
+    match record.kind {
+        Kind::Pr => format!("--pr {}", record.number),
+        Kind::Spec => "--spec <file>".to_owned(),
+        Kind::Issue => format!("--issue {}", record.number),
+    }
+}
+
+/// The recorded worker, and the profile its sandbox was built with: `None` only in a record
+/// written before issue 118's resume fix (M-2, PR 163 review), which never saved one. Refused with
+/// a one-line recovery instead of guessing a profile the task never ran under.
+fn worker_profile<'a>(record: &'a Record, worker: &'a Agent) -> Result<&'a str> {
+    worker.profile.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "task {}'s record has no saved sandbox profile (it predates issue 118's resume fix); \
+             remove it and start it again: `sbxm task rm {}`",
+            record.id,
+            task_flag(record)
+        )
+    })
+}
+
+/// The recorded worker's resolved CPU and memory: `None` only in a record written before issue
+/// 118's resume fix round 2 (M-2, PR 163 review), which saved the optional overrides instead of
+/// what the sandbox was actually created with. Refused the same way as a missing profile, instead
+/// of substituting today's global defaults for a task that never ran under them.
+fn worker_resources(record: &Record, worker: &Agent) -> Result<Resources> {
+    match (worker.cpus, worker.memory.clone()) {
+        (Some(cpus), Some(memory)) => Ok(Resources { cpus, memory }),
+        _ => Err(anyhow::anyhow!(
+            "task {}'s record has no saved sandbox resources (it predates issue 118's resume \
+             fix); remove it and start it again: `sbxm task rm {}`",
+            record.id,
+            task_flag(record)
+        )),
+    }
+}
+
+/// What to run instead, once [`check_config_drift`] refuses: an issue task's worker is recreated
+/// afresh by `--restart`; a spec task has no such flag, so it is removed and started again from
+/// the same file.
+fn restart_hint(record: &Record) -> String {
+    match record.kind {
+        Kind::Issue => format!("sbxm task start --restart --issue {}", record.number),
+        _ => format!("sbxm task rm {}", task_flag(record)),
+    }
+}
+
+/// Refuses before `ensure_worker_sandbox` removes, rebuilds or records anything (M-2, PR 163
+/// review round 2): hashes the recorded profile's contents as they are on disk right now, together
+/// with the recorded resources and the worker's harness, the same way [`config::config_hash`]
+/// hashed them when the task started, and bails if the result no longer matches
+/// `Record::config_hash`. An edit to the profile (egress, instructions, setup, secrets, skills) or
+/// to the global defaults a task without explicit overrides resolved against must never silently
+/// run resumed work in a differently provisioned or differently restricted sandbox.
+fn check_config_drift(
+    env: &TaskEnv,
+    record: &Record,
+    profile_name: &str,
+    resources: &Resources,
+) -> Result<()> {
+    let global = GlobalConfig::load(env.config_dir)?;
+    let profile = Profile::load(global.profiles_dir(), profile_name)?;
+    let harness = env.config.worker.harness;
+    let hash = config::config_hash(profile_name, &profile, resources, harness);
+    if hash != record.config_hash {
+        bail!(
+            "task {}'s sandbox config changed since it started; restart it with `{}`, or restore \
+             the profile {profile_name:?} to what it was",
+            record.id,
+            restart_hint(record)
+        );
+    }
+    Ok(())
+}
+
+/// Checks before `task resume` restores the worker's input, rebuilds its sandbox, or runs the
+/// worker or a fix round again (M-3, PR 163 review): the recorded worker's harness and the
+/// profile its sandbox was built with — never the current `sbxm-task.toml`, which `--profile` or
+/// an edit could have changed since the task started — must have their secrets stored in `sbx`,
+/// the same way `prepare` checks the worker up front. Shares `check_secrets` with `prepare` so the
+/// two can't drift.
+pub fn check_worker(env: &TaskEnv, prepared: &Prepared) -> Result<()> {
+    let worker = prepared
+        .record
+        .worker
+        .as_ref()
+        .context("the task has no worker")?;
+    let profile_name = worker_profile(&prepared.record, worker)?;
+    let global = GlobalConfig::load(env.config_dir)?;
+    let profile = Profile::load(global.profiles_dir(), profile_name)?;
+    check_secrets(
+        env.backend,
+        env.config.worker.harness,
+        "the worker",
+        profile_name,
+        &profile,
+    )
+}
+
+/// Makes the worker's sandbox again from the profile and resources its record saved when it is
+/// gone (`task resume`, issue 118; a sandbox can vanish between stages, workflow note G17), over
+/// the same clone: the kits are built again under the task's `kits/`. With `replace`, a sandbox
+/// that still exists is removed first (a preparation that was cut off may have left one half
+/// made), but only once the recorded profile and resources are confirmed and [`check_config_drift`]
+/// passes, so a refusal never removes, rebuilds or records anything. Returns whether it was made.
+pub(super) fn ensure_worker_sandbox(
+    env: &TaskEnv,
+    prepared: &Prepared,
+    replace: bool,
+) -> Result<bool> {
+    let worker = prepared
+        .record
+        .worker
+        .as_ref()
+        .context("the task has no worker")?;
+    let sandbox = worker.sandbox.clone();
+    if !replace && env.backend.list()?.iter().any(|s| s.name == sandbox) {
+        return Ok(false);
+    }
+    let profile_name = worker_profile(&prepared.record, worker)?.to_owned();
+    let resources = worker_resources(&prepared.record, worker)?;
+    check_config_drift(env, &prepared.record, &profile_name, &resources)?;
+    if replace {
+        let _ = env.backend.remove(&sandbox);
+    }
+    let harness = env.config.worker.harness;
+    let kit_set = kits::build_for(
+        env.config_dir,
+        &profile_name,
+        &[harness],
+        &Overrides {
+            cpus: Some(resources.cpus),
+            memory: Some(resources.memory.clone()),
+        },
+        &prepared.meta.join("kits"),
+        env.backend,
+    )?;
+    let harness_kits = kit_set
+        .get(harness)
+        .cloned()
+        .context("no kits were built for the worker's harness")?;
+    env.backend
+        .create(&CreateSpec {
+            name: sandbox.clone(),
+            agent: harness.agent_arg().into(),
+            workspace: prepared.workspace.clone(),
+            cpus: kit_set.resources.cpus,
+            memory: kit_set.resources.memory.clone(),
+            skills: harness_kits.skills_store,
+            kits: harness_kits.dirs.clone(),
+        })
+        .with_context(|| format!("cannot create sandbox {sandbox}"))?;
+    Ok(true)
+}
+
 /// Whether the last passed gate run covered the sandbox tier and, when one is configured, the host
 /// tier, on the task branch's current commit.
 fn gates_cover_everything(env: &TaskEnv, prepared: &Prepared) -> bool {
@@ -1208,7 +1372,44 @@ fn run_label(status: &RunStatus) -> String {
 /// (a timed-out or failed run keeps its partial commits). The stage is written before the agent
 /// starts; a write failure stops the command. `Err` means the run couldn't be attempted.
 pub fn run_worker(ctx: &Ctx, prepared: &mut Prepared) -> Result<Worked> {
-    let worker = &ctx.config.worker;
+    prepared
+        .record
+        .worker
+        .as_ref()
+        .context("the task has no worker")?;
+    prepared
+        .record
+        .advance(Stage::Working, now(), Process::current(ctx.probe))?;
+    record::write(&prepared.meta, &prepared.record)?;
+    work(&ctx.env(), prepared)
+}
+
+/// Writes the task's input (`prompt.md`, and `issue.md` or a spec task's `source.md`) into the
+/// worker's clone again from the copies in the task's folder, for a worker that runs again (`task
+/// resume`, issue 118): the last run could change or delete the clone's copies. Refuses a control
+/// folder or file the agent replaced with a link.
+pub(super) fn restore_worker_input(prepared: &Prepared) -> Result<()> {
+    let source = match prepared.record.kind {
+        Kind::Spec => "source.md",
+        _ => "issue.md",
+    };
+    let read = |name: &str| {
+        fs::read(prepared.meta.join(name))
+            .with_context(|| format!("the task's {name} is missing from its folder"))
+    };
+    let (prompt, text) = (read("worker-prompt.md")?, read(source)?);
+    repo::write_agent_files(
+        &prepared.workspace,
+        &[(source, &text), ("prompt.md", &prompt)],
+        Existing::Refuse,
+    )
+}
+
+/// The worker's run itself, in a task already at `working/running` (written): the headless agent,
+/// its transcript and status, then what it left collected. Shared by [`run_worker`] and `task
+/// resume`, which runs it again in the same clone (issue 118).
+pub(super) fn work(env: &TaskEnv, prepared: &mut Prepared) -> Result<Worked> {
+    let worker = &env.config.worker;
     let sandbox = prepared
         .record
         .worker
@@ -1216,10 +1417,6 @@ pub fn run_worker(ctx: &Ctx, prepared: &mut Prepared) -> Result<Worked> {
         .context("the task has no worker")?
         .sandbox
         .clone();
-    prepared
-        .record
-        .advance(Stage::Working, now(), Process::current(ctx.probe))?;
-    record::write(&prepared.meta, &prepared.record)?;
 
     let started = Instant::now();
     let opts = HeadlessOpts {
@@ -1229,7 +1426,7 @@ pub fn run_worker(ctx: &Ctx, prepared: &mut Prepared) -> Result<Worked> {
         is_git_repo: true,
     };
     let result = match headless::run(
-        ctx.backend,
+        env.backend,
         &sandbox,
         &in_sandbox_path(&prepared.workspace),
         worker.harness,
@@ -1268,7 +1465,7 @@ pub fn run_worker(ctx: &Ctx, prepared: &mut Prepared) -> Result<Worked> {
     record::write(&prepared.meta, &prepared.record)?;
 
     let mut notes = Vec::new();
-    let commits = collect(ctx.backend, prepared, &sandbox, &mut status, &mut notes)?;
+    let commits = collect(env.backend, prepared, &sandbox, &mut status, &mut notes)?;
     prepared.record.notes.extend(notes.iter().cloned());
     record::write(&prepared.meta, &prepared.record)?;
     Ok(Worked {
@@ -1435,6 +1632,11 @@ pub fn check_can_review(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
         record::Kind::Spec => "sbxm task status".to_owned(),
         _ => format!("sbxm task status --issue {}", task.number),
     };
+    // What continues a failed or interrupted stage (issue 118).
+    let resume = match task.kind {
+        record::Kind::Spec => "sbxm task resume --spec <file>".to_owned(),
+        _ => format!("sbxm task resume --issue {}", task.number),
+    };
     let state = machine::State {
         stage: task.stage,
         status: task.status,
@@ -1448,7 +1650,8 @@ pub fn check_can_review(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
         (Stage::Working | Stage::Fixing, Status::Running) => {
             if task.is_interrupted(probe) {
                 bail!(
-                    "task {id} was interrupted while its {} stage was running; see `{status_hint}`",
+                    "task {id} was interrupted while its {} stage was running; continue it with \
+                     `{resume}`, or see `{status_hint}`",
                     task.stage.name()
                 )
             }
@@ -1457,13 +1660,15 @@ pub fn check_can_review(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
             )
         }
         (Stage::Working | Stage::Fixing, _) => bail!(
-            "the worker failed for task {id}, so there is nothing to review; see `{status_hint}`"
+            "the worker failed for task {id}, so there is nothing to review; run it again with \
+             `{resume}`, or see `{status_hint}`"
         ),
         (Stage::Gating, _) => {
             bail!("gates are running for task {id}, or were interrupted; see `{status_hint}`")
         }
         (Stage::Reviewing, _) => bail!(
-            "task {id} is already being reviewed or has been (stage reviewing); see `{status_hint}`"
+            "task {id} is already being reviewed or has been (stage reviewing); if the sbxm \
+             process that ran it is gone, continue it with `{resume}`, or see `{status_hint}`"
         ),
         (Stage::Prepared, _) if task.kind == record::Kind::Spec => bail!(
             "no worker has run for task {id}; see `{status_hint}`, and remove its folders under the base dir to start it again"
@@ -1537,6 +1742,9 @@ pub fn review_issue(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewRepo
         warnings: check_reviewer(env, prepared)?,
         ..ReviewReport::default()
     };
+    // Refused before the gates run when no review round number is left (worked out again after
+    // them, as their fix rounds count).
+    next_review_round(prepared)?;
 
     let gates_current = match (prepared.record.stage, prepared.record.status) {
         // Passed gates count only if they covered every configured tier on the branch as it is now.
@@ -1551,13 +1759,77 @@ pub fn review_issue(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewRepo
         return Ok(report);
     }
 
-    let mut round = prepared.record.round + 1;
+    let round = next_review_round(prepared)?;
+    review_rounds(env, prepared, report, round, None, false)
+}
+
+/// The number for a review round that is about to start: after the last recorded review and
+/// every saved `review-<n>.md`, and never below the fix rounds counted. Review rounds outnumber fix
+/// rounds (a clean narrow review is followed by a full one), and a record older than
+/// `Record::review` (issue 118) only has the files to go by: a number taken from the fix-round
+/// counter alone would overwrite an earlier round's saved review.
+fn next_review_round(prepared: &Prepared) -> Result<u32> {
+    let saved = fs::read_dir(&prepared.meta)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.ok()?.file_name();
+            name.to_str()?
+                .strip_prefix("review-")?
+                .strip_suffix(".md")?
+                .parse::<u32>()
+                .ok()
+        })
+        .max()
+        .unwrap_or(0);
+    let recorded = prepared.record.review.as_ref().map_or(0, |last| last.round);
+    review_round_after(prepared, prepared.record.round.max(recorded).max(saved))
+}
+
+/// The review round after `round`, or an error once the numbers run out: a wrapped number would
+/// reuse, and overwrite, a saved `review-<n>.md` (decision 177(o)).
+fn review_round_after(prepared: &Prepared, round: u32) -> Result<u32> {
+    round.checked_add(1).with_context(|| {
+        format!(
+            "task {} has no review round number left after {round}; move the review-<n>.md files out of {} or remove the task with `sbxm task rm`",
+            prepared.record.id,
+            prepared.meta.display()
+        )
+    })
+}
+
+/// The review rounds of [`review_issue`], from review round `round` on: each review, and while
+/// must-fix findings are left and the budget allows, a fix round and the gates before the next;
+/// then `ready`. `first` is a review that already completed (`task resume` replaying the recorded
+/// [`record::ReviewResult`], issue 118): it stands in for the first round instead of running the
+/// reviewer again (it was reported when it ran, so it is not one of `report.rounds`), and the
+/// rounds go on from its number. With `ignore_repeat`, the first review that runs does not stop
+/// the task on a repeat: the first review after `task resume` reopened a stopped task (spec
+/// §5.3), so it is not stopped again at once.
+pub(super) fn review_rounds(
+    env: &TaskEnv,
+    prepared: &mut Prepared,
+    mut report: ReviewReport,
+    mut round: u32,
+    mut first: Option<record::ReviewResult>,
+    mut ignore_repeat: bool,
+) -> Result<ReviewReport> {
     loop {
-        let reviewed = run_reviewer(env, prepared, round)?;
-        report.must_fix_left = reviewed.must_fix;
-        let (must_fix, full, repeat) = (reviewed.must_fix, reviewed.full, reviewed.repeat);
-        report.warnings.extend(reviewed.warnings.clone());
-        report.rounds.push(reviewed);
+        let (must_fix, full, repeat) = match first.take() {
+            Some(replayed) => {
+                round = replayed.round;
+                (replayed.must_fix, replayed.full, replayed.repeat)
+            }
+            None => {
+                let reviewed = run_reviewer(env, prepared, round)?;
+                let repeat = reviewed.repeat && !std::mem::take(&mut ignore_repeat);
+                let outcome = (reviewed.must_fix, reviewed.full, repeat);
+                report.warnings.extend(reviewed.warnings.clone());
+                report.rounds.push(reviewed);
+                outcome
+            }
+        };
+        report.must_fix_left = must_fix;
 
         if must_fix == 0 {
             if full {
@@ -1565,7 +1837,7 @@ pub fn review_issue(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewRepo
             }
             // A clean narrow review proves nothing about what it didn't see: one more, full
             // review runs before the task is ready (spec §5.2).
-            round += 1;
+            round = review_round_after(prepared, round)?;
             continue;
         }
         // The no-progress rule (spec §5.3, issue 119): a validated repeat stops the task even
@@ -1586,7 +1858,7 @@ pub fn review_issue(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewRepo
             report.gates_failed = Some(failed);
             return Ok(report);
         }
-        round += 1;
+        round = review_round_after(prepared, round)?;
     }
 
     prepared
@@ -1594,6 +1866,38 @@ pub fn review_issue(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewRepo
         .advance(Stage::Ready, now(), Process::current(env.probe))?;
     record::write(&prepared.meta, &prepared.record)?;
     Ok(report)
+}
+
+/// After a fix round that `task resume` ran again (issue 118): the round is counted (a failed
+/// round never was), the gates run (feeding further fix rounds while the budget allows), then
+/// the review rounds go on from the one after the last recorded review, to `ready`.
+pub(super) fn continue_after_fix(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewReport> {
+    after_fix(env, prepared, false)
+}
+
+/// A task that stopped `ready` with must-fix findings, reopened by `task resume` (issue 118,
+/// decisions 173(c), 177(b)(q)): a fix round from the recorded review (its `input`, read and
+/// placed before anything changed), then as after any fix round, except that the first review
+/// after it doesn't stop the task on a repeat.
+pub(super) fn fix_from_ready(
+    env: &TaskEnv,
+    prepared: &mut Prepared,
+    input: &FixInput,
+) -> Result<ReviewReport> {
+    start_fix_round(env, prepared, input)?;
+    after_fix(env, prepared, true)
+}
+
+fn after_fix(env: &TaskEnv, prepared: &mut Prepared, ignore_repeat: bool) -> Result<ReviewReport> {
+    let mut report = ReviewReport::default();
+    prepared.record.round += 1;
+    report.fix_ran = true;
+    if let Some(failed) = pass_gates(env, prepared, &mut report, "after-fix")? {
+        report.gates_failed = Some(failed);
+        return Ok(report);
+    }
+    let round = next_review_round(prepared)?;
+    review_rounds(env, prepared, report, round, None, ignore_repeat)
 }
 
 /// How the review of a pull request went.
@@ -1810,19 +2114,44 @@ fn run_fix_round(
     prepared: &mut Prepared,
     gate_failure: Option<&GateOutcome>,
 ) -> Result<()> {
-    let worker = &env.config.worker;
-    let sandbox = prepared
+    let input = fix_input(env, prepared, gate_failure)?;
+    start_fix_round(env, prepared, &input)
+}
+
+/// What a fix round is given: the review or a gate's output, as the file the prompt names, and
+/// the rendered prompt. Read and rendered before the round changes anything, so a missing review
+/// stops it first (issue 118).
+pub(super) struct FixInput {
+    extra_name: &'static str,
+    extra_text: String,
+    prompt: String,
+}
+
+impl FixInput {
+    /// Writes the input and the prompt into the worker's clone, refusing a link the agent left.
+    pub(super) fn place(&self, workspace: &Path) -> Result<()> {
+        repo::write_agent_files(
+            workspace,
+            &[
+                (self.extra_name, self.extra_text.as_bytes()),
+                ("fix-prompt.md", self.prompt.as_bytes()),
+            ],
+            Existing::Refuse,
+        )
+    }
+}
+
+/// A fix round's [`FixInput`]: the review in the task's folder, or `gate_failure`'s output.
+pub(super) fn fix_input(
+    env: &TaskEnv,
+    prepared: &Prepared,
+    gate_failure: Option<&GateOutcome>,
+) -> Result<FixInput> {
+    prepared
         .record
         .worker
         .as_ref()
-        .context("the task has no worker")?
-        .sandbox
-        .clone();
-    prepared
-        .record
-        .advance(Stage::Fixing, now(), Process::current(env.probe))?;
-    record::write(&prepared.meta, &prepared.record)?;
-
+        .context("the task has no worker")?;
     let is_spec = prepared.record.kind == Kind::Spec;
     let (role, extra_name, extra_text) = match gate_failure {
         None => (
@@ -1858,6 +2187,58 @@ fn run_fix_round(
             ("gate_output_path", ".sbxm-task/gate-failure.md"),
         ],
     )?;
+    Ok(FixInput {
+        extra_name,
+        extra_text,
+        prompt,
+    })
+}
+
+/// Starts a fix round with its input: the task goes to `fixing/running`, the input is kept in the
+/// task's folder and written into the clone, and the worker runs.
+pub(super) fn start_fix_round(
+    env: &TaskEnv,
+    prepared: &mut Prepared,
+    input: &FixInput,
+) -> Result<()> {
+    prepared
+        .record
+        .advance(Stage::Fixing, now(), Process::current(env.probe))?;
+    record::write(&prepared.meta, &prepared.record)?;
+
+    // The round's input is kept in the task's folder too: a gate's output as `gate-failure.md`
+    // (a review's is `review.md` already), so `task resume` can run the round again with it.
+    let gate_copy = prepared.meta.join("gate-failure.md");
+    if input.extra_name == "gate-failure.md" {
+        fs::write(&gate_copy, &input.extra_text)?;
+    } else {
+        let _ = fs::remove_file(&gate_copy);
+    }
+    input.place(&prepared.workspace)?;
+    fs::write(prepared.meta.join("fix-prompt.md"), &input.prompt)?;
+    fix(env, prepared)
+}
+
+/// A fix round that failed, or whose process was gone while it ran, runs again (`task resume`,
+/// issue 118) in the same clone, which keeps what the last run did: the prompt and the input it
+/// was given (the review, or the gate's output) are written into the clone again from the task's
+/// folder, and the worker runs. Like [`run_fix_round`], the caller counts the round.
+pub(super) fn rerun_fix_round(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
+    let prompt = fs::read_to_string(prepared.meta.join("fix-prompt.md"))
+        .context("the failed fix round's prompt (fix-prompt.md) is missing from the task folder")?;
+    let gate_copy = prepared.meta.join("gate-failure.md");
+    let (extra_name, extra_text) = if gate_copy.is_file() {
+        ("gate-failure.md", fs::read_to_string(&gate_copy)?)
+    } else {
+        (
+            "review.md",
+            fs::read_to_string(prepared.meta.join("review.md"))
+                .context("the review to fix is missing; run the review again")?,
+        )
+    };
+    // The clone is agent-controlled, so it is validated and the input placed in it before the
+    // record says the retry is running (as `restore_worker_input` and the stopped-ready fix path
+    // already do): a link the failed worker left must be refused with nothing recorded yet.
     repo::write_agent_files(
         &prepared.workspace,
         &[
@@ -1866,8 +2247,22 @@ fn run_fix_round(
         ],
         Existing::Refuse,
     )?;
-    fs::write(prepared.meta.join("fix-prompt.md"), &prompt)?;
+    prepared.record.rerun(now(), Process::current(env.probe))?;
+    record::write(&prepared.meta, &prepared.record)?;
+    fix(env, prepared)
+}
 
+/// The fix round's run itself, in a task at `fixing/running` whose prompt is in the clone: the
+/// worker, its transcript and status, then its commits collected.
+fn fix(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
+    let worker = &env.config.worker;
+    let sandbox = prepared
+        .record
+        .worker
+        .as_ref()
+        .context("the task has no worker")?
+        .sandbox
+        .clone();
     let result = match headless::run(
         env.backend,
         &sandbox,
@@ -2009,6 +2404,12 @@ pub fn run_reviewer(env: &TaskEnv, prepared: &mut Prepared, round: u32) -> Resul
     match result {
         Ok((must_fix, repeat, warnings)) => {
             prepared.record.last_reviewed_commit = if must_fix == 0 { None } else { tip };
+            prepared.record.review = Some(record::ReviewResult {
+                round,
+                must_fix,
+                full,
+                repeat,
+            });
             prepared.record.finish(Status::Completed)?;
             record::write(&prepared.meta, &prepared.record)?;
             Ok(Reviewed {
@@ -2158,6 +2559,11 @@ fn open_review_workspace(
         model: reviewer.model.clone(),
         sandbox: sandbox.to_owned(),
         workspace: slashes(clone),
+        // The reviewer's sandbox is rebuilt from the current config every round and is never
+        // resumed, so it has no reconstruction settings to save (issue 118, PR 163 review M-2).
+        profile: None,
+        cpus: None,
+        memory: None,
         run: None,
     });
     record::write(&prepared.meta, &prepared.record)?;
