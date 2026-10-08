@@ -272,7 +272,7 @@ no reviewer finding is involved. A different failing command is progress.
 For an issue task tied to an open PR (decision 169), `finish` pushes to the PR's own branch and cannot make it a draft:
 it posts the remaining findings as a PR comment and leaves the PR's draft status alone.
 
-Safety of the spec sinks (confirmed by the user, 2026-10-07): `finish` with the `push` sink refuses a spec task
+Safety of the spec sinks (confirmed by the user, 2026-10-07; the fetched rule is decision 178): `finish` with the `push` sink refuses a spec task
 that has `stopped` or open findings unless `--push-unresolved` is given, because a spec task has no PR and no draft
 to mark it unfinished; `push` never force-pushes, and a branch-name collision is refused (not built yet: issue 144).
 `task rm` refuses a spec task whose result exists only in `repo.git` (the `local` sink, not yet fetched), because
