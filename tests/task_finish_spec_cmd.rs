@@ -26,6 +26,7 @@ fn finish(f: &Fixture, spec: &Path, github: &FakeGitHub) -> (anyhow::Result<()>,
         &Options {
             target: Target::Spec(spec.to_path_buf()),
             repo_root: repo_root(f),
+            push_unresolved: false,
         },
         github,
         &Probe,
@@ -113,28 +114,6 @@ fn finishing_twice_is_refused_the_second_time_and_changes_nothing() {
     let message = format!("{:#}", result.unwrap_err());
     assert!(message.contains("already finished"), "{message}");
     assert_eq!(fs::read(&task_json).unwrap(), before);
-}
-
-#[test]
-fn the_push_sink_is_accepted_by_the_config_but_finish_says_it_is_not_available_yet() {
-    let f = fixture();
-    let (spec, id) = ready_spec_task(&f);
-    let toml = repo_root(&f).join("sbxm-task.toml");
-    let text = fs::read_to_string(&toml).unwrap();
-    fs::write(&toml, format!("{text}\n[finish]\nsink = \"push\"\n")).unwrap();
-    let github = FakeGitHub::default();
-
-    let (result, _) = finish(&f, &spec, &github);
-
-    let message = format!("{:#}", result.unwrap_err());
-    assert!(
-        message.contains("push") && message.contains("not available yet"),
-        "{message}"
-    );
-    let record = reread(&f, &id);
-    assert_eq!((record.stage, record.status), (Stage::Ready, Status::Ok));
-    assert!(github.calls().is_empty());
-    assert!(!origin_branches(&f).contains(&id));
 }
 
 #[test]

@@ -41,6 +41,7 @@ fn kept_spec_task(f: &Fixture) -> (PathBuf, String) {
         &task_finish::Options {
             target: task_finish::Target::Spec(spec.clone()),
             repo_root: target_repo(f),
+            push_unresolved: false,
         },
         &FakeGitHub::default(),
         &Probe,

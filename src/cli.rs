@@ -328,9 +328,14 @@ pub enum TaskCommand {
         issue: Option<u32>,
         /// The spec task's file (decision 174(d)): finished through `[finish] sink` in
         /// sbxm-task.toml; `local` (the default) keeps the branch in the task's repo.git and
-        /// prints how to fetch it (issue 143).
+        /// prints how to fetch it (issue 143); `push` pushes it to origin, opening no PR (issue
+        /// 144).
         #[arg(long, value_name = "FILE")]
         spec: Option<PathBuf>,
+        /// With `sink = "push"`: push a spec task even though it stopped or has must-fix
+        /// findings left (it has no PR or draft to mark it unfinished).
+        #[arg(long, requires = "spec")]
+        push_unresolved: bool,
     },
     /// Delete a task: its sandboxes, its clones and its task folder. Shows exactly what, and asks
     /// first (without a terminal it needs --yes).

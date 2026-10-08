@@ -595,7 +595,66 @@ pub struct Kept {
 /// host-owned `repo.git` and the task becomes `finished`. Nothing is pushed and nothing leaves
 /// the machine; the caller says how to fetch the branch.
 pub fn finish_local(base_dir: &Path, id: &str, probe: &dyn ProcessProbe) -> Result<Kept> {
-    let mut prepared = Prepared::open(base_dir, id)?;
+    let (mut prepared, kept) = open_spec_result(base_dir, id, "keep")?;
+    record_finished(&mut prepared, probe)?;
+    Ok(kept)
+}
+
+/// The `push` sink for a spec task (decision 174(e), issue 144): the branch goes to `origin` as a
+/// new branch and no PR is opened. Every check comes first: a stopped task or one with must-fix
+/// findings left is refused unless `push_unresolved` (a spec task has no PR or draft to mark it
+/// unfinished), and so is a branch that changes the repository's CI. A branch already on
+/// `origin` at another commit is refused and never forced; one already at the task's tip (an
+/// earlier push whose record was lost) is only recorded (spec section 5.4a).
+pub fn finish_push(
+    base_dir: &Path,
+    id: &str,
+    push_unresolved: bool,
+    probe: &dyn ProcessProbe,
+) -> Result<Kept> {
+    let (mut prepared, kept) = open_spec_result(base_dir, id, "push")?;
+    let (branch, repo_git) = (&kept.branch, &kept.repo_git);
+    if !push_unresolved {
+        let unresolved = |what: String| {
+            anyhow::anyhow!(
+                "task {id} {what}; read review.md in its folder, or pass --push-unresolved to push \
+                 it anyway"
+            )
+        };
+        if let Some(stopped) = prepared.record.stopped {
+            return Err(unresolved(format!("stopped ({})", stopped.name())));
+        }
+        if let Some(review) = read_capped(&prepared.meta.join("review.md"))? {
+            match super::review::saved_must_fix_count(&review) {
+                Some(0) => {}
+                Some(n) => return Err(unresolved(format!("has {n} must-fix finding(s) left"))),
+                None => {
+                    return Err(unresolved(
+                        "has a review.md without a must-fix count".into(),
+                    ));
+                }
+            }
+        }
+    }
+    refuse_workflow_changes(id, &prepared.record.changed_paths(repo_git)?)?;
+    let tip = repo::branch_tip(repo_git, branch)?;
+    match repo::remote_branch_head(repo_git, branch)? {
+        Some(head) if head == tip => {}
+        Some(head) => bail!(
+            "branch {branch} already exists on origin (at {head}), so task {id} would overwrite \
+             someone's branch; nothing was pushed; rename or delete that branch on origin, or set \
+             [finish] sink = \"local\" and fetch the result yourself"
+        ),
+        None => repo::push_new(repo_git, branch)?,
+    }
+    record_finished(&mut prepared, probe)?;
+    Ok(kept)
+}
+
+/// A ready spec task with a branch worth delivering, for either sink: `what` names the action in
+/// the refusals.
+fn open_spec_result(base_dir: &Path, id: &str, what: &str) -> Result<(Prepared, Kept)> {
+    let prepared = Prepared::open(base_dir, id)?;
     if prepared.record.kind != record::Kind::Spec {
         bail!("task {id} isn't a spec task; only a spec task has a [finish] sink");
     }
@@ -608,19 +667,22 @@ pub fn finish_local(base_dir: &Path, id: &str, probe: &dyn ProcessProbe) -> Resu
     }
     let repo_git = prepared.meta.join("repo.git");
     if !repo_git.is_dir() {
-        bail!("task {id} has no repo.git, so there is no result to keep; see `sbxm task status`");
+        bail!("task {id} has no repo.git, so there is no result to {what}; see `sbxm task status`");
     }
     if prepared.record.commits_ahead(&repo_git)? == 0 {
         bail!(
-            "task {id} has no commits on {branch} beyond {}, so there is nothing to keep",
+            "task {id} has no commits on {branch} beyond {}, so there is nothing to {what}",
             prepared.record.base
         );
     }
+    Ok((prepared, Kept { branch, repo_git }))
+}
+
+fn record_finished(prepared: &mut Prepared, probe: &dyn ProcessProbe) -> Result<()> {
     prepared
         .record
         .advance(record::Stage::Finished, now(), Process::current(probe))?;
-    record::write(&prepared.meta, &prepared.record)?;
-    Ok(Kept { branch, repo_git })
+    record::write(&prepared.meta, &prepared.record)
 }
 
 /// The note `finish` leaves on a continued task whose commits are pushed but whose PR comment

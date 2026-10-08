@@ -294,6 +294,42 @@ pub fn push(repo_git: &Path, branch: &str) -> Result<()> {
     Ok(())
 }
 
+/// Pushes `branch` from `repo_git` to `origin` only as a new branch: the lease's empty expected
+/// value (`--force-with-lease=refs/heads/<branch>:`) makes the push fail if the branch exists on
+/// the remote when it lands, so it never moves or overwrites anyone's branch.
+pub fn push_new(repo_git: &Path, branch: &str) -> Result<()> {
+    check_ref("branch", branch)?;
+    if !has_branch(repo_git, branch)? {
+        bail!("branch {branch} isn't in the task repo; nothing to push");
+    }
+    let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+    let lease = format!("--force-with-lease=refs/heads/{branch}:");
+    let out = git::user_output(
+        repo_git,
+        &[
+            "--git-dir",
+            text(repo_git)?,
+            "push",
+            &lease,
+            "origin",
+            &refspec,
+        ],
+        &[],
+    )?;
+    if out.status.success() {
+        return Ok(());
+    }
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if stderr.contains("stale info") {
+        bail!("{branch} appeared on the remote after sbxm checked it; nothing was pushed");
+    }
+    bail!(
+        "cannot push {branch}; check `gh auth status` and your access to the repo: `git push` failed ({}): {}",
+        out.status,
+        stderr.trim()
+    )
+}
+
 /// Moves `branch` on GitHub (`origin`) from `from` (a full commit id) to its tip in `repo_git`,
 /// as a fast-forward and only if the remote branch is still at `from` when the push lands: the
 /// tip must descend from `from`, and the push carries `from` as the expected old value
