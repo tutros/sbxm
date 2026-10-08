@@ -7,7 +7,7 @@ use std::fs;
 use common::task_fixture::{
     CLAUDE_DONE, Fixture, Play, Probe, backend, fixture, ok, play, worked_task,
 };
-use sbxm::commands::task_finish::{Options, run};
+use sbxm::commands::task_finish::{Options, Target, run};
 use sbxm::github::fake::FakeGitHub;
 use sbxm::task::record::{self, Process, Stage, Status};
 
@@ -40,7 +40,9 @@ fn go(f: &Fixture, issue: u32, github: &FakeGitHub) -> (anyhow::Result<()>, Stri
     let mut out = Vec::new();
     let result = run(
         &f.env.config_dir(),
-        &Options { issue },
+        &Options {
+            target: Target::Issue(issue),
+        },
         github,
         &Probe,
         &mut out,

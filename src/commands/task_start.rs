@@ -142,6 +142,42 @@ fn discard_existing(
     )
 }
 
+/// The branch the checkout's `origin/HEAD` points at, for a spec task's default base (no GitHub
+/// call). `git clone` sets it; a checkout made some other way may not have it.
+fn local_default_branch(repo_root: &std::path::Path) -> Result<String> {
+    let head = git::user_run(
+        repo_root,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .map_err(|_| {
+        anyhow!(
+            "cannot tell the default branch from {} without GitHub; pass --base <branch>",
+            repo_root.display()
+        )
+    })?;
+    let head = head.trim();
+    Ok(head.strip_prefix("origin/").unwrap_or(head).to_owned())
+}
+
+/// `--spec <path>` as the retry hints print it: the path is one argument, quoted when it has a
+/// space or a character a shell would read (double quotes work in PowerShell and POSIX shells;
+/// single quotes, with `'` doubled, when the path itself has a `"`, `$` or backtick).
+pub(crate) fn spec_flag(path: &std::path::Path) -> String {
+    let text = path.display().to_string();
+    let plain = !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_alphanumeric() || "/\\:._-+=@%,~".contains(c));
+    let arg = if plain {
+        text
+    } else if text.contains(['"', '$', '`']) {
+        format!("'{}'", text.replace('\'', "''"))
+    } else {
+        format!("\"{text}\"")
+    };
+    format!("--spec {arg}")
+}
+
 /// `--repo owner/name`, or the GitHub repo of the checkout's `origin`.
 pub(crate) fn resolve_repo(repo: Option<&str>, repo_root: &std::path::Path) -> Result<String> {
     match repo {
@@ -374,4 +410,147 @@ pub fn run_with(
         bail!("{failed} of {} task(s) failed; see above", reports.len());
     }
     Ok(())
+}
+
+/// `task start --spec <FILE>` (decision 174(d), issue 142): one task, not a selection of issues.
+pub struct SpecOptions {
+    /// The target repo's root, where `sbxm-task.toml` is.
+    pub repo_root: PathBuf,
+    pub spec: PathBuf,
+    pub worker_harness: Option<Harness>,
+    pub worker_model: Option<String>,
+    pub time_limit: Option<String>,
+    pub profile: Option<String>,
+    /// Default: the repo's default branch on GitHub.
+    pub base: Option<String>,
+    /// `owner/name`. Default: the `origin` of the checkout at `repo_root`.
+    pub repo: Option<String>,
+    /// For tests: what `repo.git` is cloned from instead of `https://github.com/<repo>.git`.
+    pub clone_source: Option<String>,
+    /// For tests: the committer identity instead of the user's global git config.
+    pub identity: Option<Identity>,
+}
+
+/// Starts a spec task: prepares it, runs the worker, then the gates (as `run` does for an issue
+/// task), and prints what happened. No GitHub call is made anywhere in this path.
+#[allow(clippy::too_many_arguments)]
+pub fn run_spec(
+    config_dir: &std::path::Path,
+    opts: &SpecOptions,
+    backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<()> {
+    let mut config = TaskConfig::load(&opts.repo_root)?;
+    if let Some(harness) = opts.worker_harness {
+        let harness = headless_harness("--worker-harness", harness.as_str(), "tasks")
+            .map_err(|e| anyhow!(e))?;
+        config.set_worker_harness(harness);
+    }
+    if let Some(model) = &opts.worker_model {
+        check_model_flag("--worker-model", model).map_err(|e| anyhow!(e))?;
+        config.worker.model = Some(model.clone());
+    }
+    if let Some(limit) = &opts.time_limit {
+        config.worker.time_limit = parse_duration("--time-limit", limit).map_err(|e| anyhow!(e))?;
+    }
+    if let Some(profile) = &opts.profile {
+        config.sandbox.profile = profile.clone();
+    }
+    let repo_name = resolve_repo(opts.repo.as_deref(), &opts.repo_root)?;
+    let identity = match &opts.identity {
+        Some(identity) => identity.clone(),
+        None => Identity::read_from(None)?,
+    };
+    // A spec task makes no GitHub call, so an omitted base is read from the checkout (`origin/HEAD`,
+    // which `git clone` sets), not asked of GitHub.
+    let base_branch = match &opts.base {
+        Some(base) => base.clone(),
+        None => {
+            // The checkout's `origin/HEAD` is the default of the checkout's own origin only.
+            let origin = resolve_repo(None, &opts.repo_root);
+            if opts.repo.is_some() && !origin.is_ok_and(|o| o.eq_ignore_ascii_case(&repo_name)) {
+                bail!(
+                    "cannot tell the default branch of {repo_name} without GitHub (it isn't this \
+                     checkout's origin); pass --base <branch>"
+                );
+            }
+            local_default_branch(&opts.repo_root)?
+        }
+    };
+    if !repo::valid_ref_name(&base_branch) {
+        bail!("base {base_branch:?} isn't a usable branch name; pass --base <branch>");
+    }
+    let clone_source = opts
+        .clone_source
+        .clone()
+        .unwrap_or_else(|| format!("https://github.com/{repo_name}.git"));
+    for warning in &config.warnings {
+        writeln!(warn, "warning: {warning}")?;
+    }
+
+    let ctx = Ctx {
+        config_dir,
+        repo: &repo_name,
+        clone_source: &clone_source,
+        base_branch: &base_branch,
+        config: &config,
+        backend,
+        github,
+        identity: &identity,
+        probe,
+        host: &ShellHostRunner,
+    };
+    writeln!(out, "Starting a task from {} ...", opts.spec.display())?;
+    let mut prepared = pipeline::prepare_spec(&ctx, &opts.spec)?;
+    for warning in &prepared.warnings {
+        writeln!(warn, "warning: {warning}")?;
+    }
+    let id = prepared.record.id.clone();
+
+    let worked = pipeline::run_worker(&ctx, &mut prepared)?;
+    let (label, bad) = match &worked.status {
+        RunStatus::Completed => ("completed".to_owned(), false),
+        RunStatus::TimedOut => ("timed out".to_owned(), false),
+        RunStatus::Failed(why) => (format!("failed: {why}"), true),
+    };
+    writeln!(out, "{id}: worker {label}, {} commit(s)", worked.commits)?;
+    for note in &worked.notes {
+        writeln!(out, "  note: {note}")?;
+    }
+    if bad {
+        bail!(
+            "{id}: the worker failed; see `sbxm task status` and the task's folder for what it left"
+        );
+    }
+
+    let gated = pipeline::run_gates(
+        &ctx.env(),
+        &mut prepared,
+        "after-worker",
+        pipeline::Tiers::ALL,
+    )?;
+    if gated.passed {
+        if gated.outcomes.is_empty() {
+            writeln!(out, "  gates: none configured")?;
+        } else {
+            writeln!(out, "  gates: passed")?;
+        }
+        writeln!(out, "  next: sbxm task review {}", spec_flag(&opts.spec))?;
+        Ok(())
+    } else {
+        let first = gated.failed.expect("failed gates name the first failure");
+        let exit = first
+            .exit
+            .map_or_else(|| "no exit code".to_owned(), |c| format!("exit {c}"));
+        bail!(
+            "{id}: gates failed: `{}` ({}, {exit}); fix it in the worker's clone and commit, \
+             then run: sbxm task review {}",
+            first.command,
+            first.tier,
+            spec_flag(&opts.spec)
+        )
+    }
 }

@@ -1,0 +1,279 @@
+//! Issue 142 (decision 174(d)): `sbxm task start --spec <FILE>` as a command: it prepares the
+//! task, runs the worker, then the gates, and prints what happened; no GitHub call is made.
+
+mod common;
+
+use std::fs;
+use std::path::PathBuf;
+
+use common::task_fixture::{CLAUDE_DONE, Fixture, Play, Probe, backend, fixture, ok, play, source};
+use sbxm::backend::FakeBackend;
+use sbxm::commands::task_start::{self, SpecOptions};
+use sbxm::github::fake::FakeGitHub;
+use sbxm::task::record;
+use sbxm::task::repo::Identity;
+
+fn spec_file(f: &Fixture, text: &str) -> PathBuf {
+    let path = f.env.tmp.path().join("idea.md");
+    fs::write(&path, text).unwrap();
+    path
+}
+
+fn options(f: &Fixture, spec: PathBuf) -> SpecOptions {
+    SpecOptions {
+        repo_root: f.env.tmp.path().join("target-repo"),
+        spec,
+        worker_harness: None,
+        worker_model: None,
+        time_limit: None,
+        profile: None,
+        base: Some("main".into()),
+        repo: Some("o/r".into()),
+        clone_source: Some(source(f)),
+        identity: Some(Identity {
+            name: "Dev".into(),
+            email: "dev@example.com".into(),
+        }),
+    }
+}
+
+struct Out {
+    result: anyhow::Result<()>,
+    out: String,
+    warn: String,
+}
+
+fn run(f: &Fixture, opts: &SpecOptions, backend: &FakeBackend, github: &FakeGitHub) -> Out {
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let result = task_start::run_spec(
+        &f.env.config_dir(),
+        opts,
+        backend,
+        github,
+        &Probe,
+        &mut out,
+        &mut warn,
+    );
+    let (out, warn) = (
+        String::from_utf8(out).unwrap(),
+        String::from_utf8(warn).unwrap(),
+    );
+    if let Err(e) = &result {
+        eprintln!("task start --spec failed: {e:#}\n--- out ---\n{out}\n--- warn ---\n{warn}");
+    }
+    Out { result, out, warn }
+}
+
+fn playing(f: &Fixture, id: &str) -> FakeBackend {
+    backend()
+        .with_exec_output_matching("claude", ok(CLAUDE_DONE))
+        .with_exec_hook(play(
+            &f.env.base_dir().join("tasks").join(id),
+            "main",
+            id,
+            Play {
+                commits: vec!["a.txt".into()],
+                result_md: Some(b"done\n".to_vec()),
+                bundle_bytes: None,
+            },
+        ))
+}
+
+#[test]
+fn a_started_spec_task_prints_what_happened_and_the_next_step() {
+    let f = fixture();
+    let spec = spec_file(&f, "Build a thing.\n");
+    let (id, _) = record::spec_id(&spec).unwrap();
+    let backend = playing(&f, &id);
+    let github = FakeGitHub::default();
+
+    let out = run(&f, &options(&f, spec), &backend, &github);
+
+    out.result.unwrap();
+    assert!(out.out.contains(&id), "{}", out.out);
+    assert!(
+        out.out.contains("completed") && out.out.contains("1 commit"),
+        "{}",
+        out.out
+    );
+    assert!(out.out.contains("gates: passed"), "{}", out.out);
+    assert!(out.out.contains("sbxm task review --spec"), "{}", out.out);
+    // No GitHub call anywhere in the flow (no --base override would need default_branch either).
+    assert!(github.calls().is_empty(), "{:?}", github.calls());
+    assert!(out.warn.is_empty(), "{}", out.warn);
+}
+
+#[test]
+fn a_failed_worker_is_reported_and_the_command_fails() {
+    let f = fixture();
+    let spec = spec_file(&f, "Build a thing.\n");
+    let (id, _) = record::spec_id(&spec).unwrap();
+    let sandbox = format!("sbxm-task-{id}-claude");
+    let backend = playing(&f, &id).with_failing_create_for(&sandbox);
+    let github = FakeGitHub::default();
+
+    let out = run(&f, &options(&f, spec), &backend, &github);
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains(&sandbox), "{message}");
+}
+
+#[test]
+fn a_missing_spec_file_is_refused_before_anything_is_written() {
+    let f = fixture();
+    let missing = f.env.tmp.path().join("missing.md");
+    let backend = backend();
+    let github = FakeGitHub::default();
+
+    let out = run(&f, &options(&f, missing), &backend, &github);
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("missing.md"), "{message}");
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+}
+
+fn checkout_with_origin_head(f: &Fixture, branch: &str) {
+    let root = f.env.tmp.path().join("target-repo");
+    common::git(&root, &["init", "-q"]);
+    common::git(
+        &root,
+        &["remote", "add", "origin", "https://github.com/o/r.git"],
+    );
+    let target = format!("refs/remotes/origin/{branch}");
+    common::git(
+        &root,
+        &["symbolic-ref", "refs/remotes/origin/HEAD", &target],
+    );
+}
+
+#[test]
+fn without_base_the_default_branch_comes_from_the_checkout_and_no_github_call_is_made() {
+    let f = fixture();
+    checkout_with_origin_head(&f, "main");
+    let spec = spec_file(&f, "Build a thing.\n");
+    let (id, _) = record::spec_id(&spec).unwrap();
+    let backend = playing(&f, &id);
+    let github = FakeGitHub::default();
+    let mut opts = options(&f, spec);
+    opts.base = None;
+
+    let out = run(&f, &opts, &backend, &github);
+
+    out.result.unwrap();
+    assert!(github.calls().is_empty(), "{:?}", github.calls());
+}
+
+#[test]
+fn without_base_and_without_a_local_default_branch_it_asks_for_base_and_calls_no_github() {
+    let f = fixture();
+    let spec = spec_file(&f, "Build a thing.\n");
+    let backend = backend();
+    let github = FakeGitHub::default();
+    let mut opts = options(&f, spec);
+    opts.base = None;
+
+    let out = run(&f, &opts, &backend, &github);
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("--base"), "{message}");
+    assert!(github.calls().is_empty(), "{:?}", github.calls());
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+}
+
+#[test]
+fn without_base_a_repo_that_is_not_the_checkouts_origin_asks_for_base_and_writes_nothing() {
+    let f = fixture();
+    checkout_with_origin_head(&f, "develop");
+    let spec = spec_file(&f, "Build a thing.\n");
+    let backend = backend();
+    let github = FakeGitHub::default();
+    let mut opts = options(&f, spec);
+    opts.base = None;
+    opts.repo = Some("other/project".into());
+
+    let out = run(&f, &opts, &backend, &github);
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(
+        message.contains("--base") && message.contains("other/project"),
+        "{message}"
+    );
+    assert!(github.calls().is_empty(), "{:?}", github.calls());
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert!(
+        !f.env.base_dir().join("tasks").exists(),
+        "a refused start must not create the tasks folder"
+    );
+}
+
+#[test]
+fn without_base_a_repo_equal_to_the_checkouts_origin_uses_its_default_branch() {
+    let f = fixture();
+    checkout_with_origin_head(&f, "main");
+    let spec = spec_file(&f, "Build a thing.\n");
+    let (id, _) = record::spec_id(&spec).unwrap();
+    let backend = playing(&f, &id);
+    let github = FakeGitHub::default();
+    let mut opts = options(&f, spec);
+    opts.base = None;
+    opts.repo = Some("O/R".into());
+
+    let out = run(&f, &opts, &backend, &github);
+
+    out.result.unwrap();
+    assert!(github.calls().is_empty(), "{:?}", github.calls());
+}
+
+/// A spec file in a folder whose name has a space, as in `E:\My Specs\idea.md`.
+fn spaced_spec_file(f: &Fixture) -> PathBuf {
+    let dir = f.env.tmp.path().join("My Specs");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("idea.md");
+    fs::write(&path, "Build a thing.\n").unwrap();
+    path
+}
+
+#[test]
+fn the_next_step_hint_quotes_a_spec_path_with_spaces() {
+    let f = fixture();
+    let spec = spaced_spec_file(&f);
+    let (id, _) = record::spec_id(&spec).unwrap();
+    let backend = playing(&f, &id);
+
+    let out = run(
+        &f,
+        &options(&f, spec.clone()),
+        &backend,
+        &FakeGitHub::default(),
+    );
+
+    out.result.unwrap();
+    let want = format!("sbxm task review --spec \"{}\"", spec.display());
+    assert!(out.out.contains(&want), "{}", out.out);
+}
+
+#[test]
+fn the_gate_failure_hint_quotes_a_spec_path_with_spaces() {
+    let f = fixture();
+    let spec = spaced_spec_file(&f);
+    let (id, _) = record::spec_id(&spec).unwrap();
+    let backend = playing(&f, &id).with_exec_output_matching(
+        "cargo test",
+        sbxm::backend::ExecOutput {
+            stdout: String::new(),
+            stderr: "assertion failed".into(),
+            exit_code: Some(1),
+        },
+    );
+
+    let out = run(
+        &f,
+        &options(&f, spec.clone()),
+        &backend,
+        &FakeGitHub::default(),
+    );
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    let want = format!("sbxm task review --spec \"{}\"", spec.display());
+    assert!(message.contains(&want), "{message}");
+}

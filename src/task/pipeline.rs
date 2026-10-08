@@ -1429,7 +1429,11 @@ const FIX_PROMPT: &str =
 /// for a refusal says what to do.
 pub fn check_can_review(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
     let id = &task.id;
-    let number = task.number;
+    // A spec task has no issue number: its status is read without a filter.
+    let status_hint = match task.kind {
+        record::Kind::Spec => "sbxm task status".to_owned(),
+        _ => format!("sbxm task status --issue {}", task.number),
+    };
     let state = machine::State {
         stage: task.stage,
         status: task.status,
@@ -1443,7 +1447,7 @@ pub fn check_can_review(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
         (Stage::Working | Stage::Fixing, Status::Running) => {
             if task.is_interrupted(probe) {
                 bail!(
-                    "task {id} was interrupted while its {} stage was running; see `sbxm task status --issue {number}`",
+                    "task {id} was interrupted while its {} stage was running; see `{status_hint}`",
                     task.stage.name()
                 )
             }
@@ -1452,13 +1456,16 @@ pub fn check_can_review(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
             )
         }
         (Stage::Working | Stage::Fixing, _) => bail!(
-            "the worker failed for task {id}, so there is nothing to review; see `sbxm task status --issue {number}`"
+            "the worker failed for task {id}, so there is nothing to review; see `{status_hint}`"
         ),
-        (Stage::Gating, _) => bail!(
-            "gates are running for task {id}, or were interrupted; see `sbxm task status --issue {number}`"
-        ),
+        (Stage::Gating, _) => {
+            bail!("gates are running for task {id}, or were interrupted; see `{status_hint}`")
+        }
         (Stage::Reviewing, _) => bail!(
-            "task {id} is already being reviewed or has been (stage reviewing); see `sbxm task status --issue {number}`"
+            "task {id} is already being reviewed or has been (stage reviewing); see `{status_hint}`"
+        ),
+        (Stage::Prepared, _) if task.kind == record::Kind::Spec => bail!(
+            "no worker has run for task {id}; see `{status_hint}`, and remove its folders under the base dir to start it again"
         ),
         (Stage::Prepared, _) => {
             bail!("no worker has run for task {id}; run `sbxm task start` first")

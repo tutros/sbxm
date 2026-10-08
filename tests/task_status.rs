@@ -83,6 +83,24 @@ fn one_line_per_task_with_stage_status_and_title() {
     assert_eq!(ids, vec!["issue-7".to_owned(), "issue-41".to_owned()]);
 }
 
+/// Issue 142: a spec task has no `--spec` filter yet, but it shows up in the unfiltered listing
+/// like any other task (`render` doesn't branch on `Kind` at all).
+#[test]
+fn a_spec_task_appears_in_the_unfiltered_listing() {
+    let base = tempfile::tempdir().unwrap();
+    let mut record = task(Kind::Spec, 0, "idea.md");
+    record.id = "spec-idea-abc123".to_owned();
+    save(base.path(), &record);
+
+    let (text, ids) = task_status::render(base.path(), None, false, &Probe(Some(T0))).unwrap();
+
+    assert!(
+        text.contains("spec-idea-abc123") && text.contains("idea.md"),
+        "{text}"
+    );
+    assert_eq!(ids, vec!["spec-idea-abc123".to_owned()]);
+}
+
 #[test]
 fn a_running_task_whose_process_is_gone_shows_interrupted() {
     let base = tempfile::tempdir().unwrap();

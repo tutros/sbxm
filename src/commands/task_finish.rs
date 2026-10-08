@@ -3,17 +3,26 @@
 //! (decision 169 (e)). The work is in `task::finish`.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
 use crate::config::GlobalConfig;
 use crate::github::GitHubBackend;
 use crate::task::finish;
-use crate::task::record::ProcessProbe;
+use crate::task::record::{self, ProcessProbe};
+
+/// What `finish` is asked for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    Issue(u32),
+    /// A spec task's file (decision 174(d), issue 142): always refused (no sink yet), but the
+    /// command still needs to find the task to say so clearly.
+    Spec(PathBuf),
+}
 
 pub struct Options {
-    pub issue: u32,
+    pub target: Target,
 }
 
 pub fn run(
@@ -23,11 +32,13 @@ pub fn run(
     probe: &dyn ProcessProbe,
     out: &mut dyn Write,
 ) -> Result<()> {
-    if opts.issue == 0 {
-        bail!("issue numbers start at 1; pass --issue <n>");
-    }
+    let (id, number) = match &opts.target {
+        Target::Issue(0) => bail!("issue numbers start at 1; pass --issue <n>"),
+        Target::Issue(n) => (format!("issue-{n}"), *n),
+        // `finish` always refuses a spec task (no sink yet), so `number` is never read.
+        Target::Spec(path) => (record::spec_id(path)?.0, 0),
+    };
     let base_dir = GlobalConfig::load(config_dir)?.base_dir;
-    let id = format!("issue-{}", opts.issue);
     let done = finish::finish(&base_dir, &id, github, probe)?;
     for cut in &done.cuts {
         writeln!(out, "  note: {cut}")?;
@@ -43,7 +54,7 @@ pub fn run(
             out,
             "  next: review PR #{pr} again with: sbxm task review --pr {pr} (if it was reviewed before, \
              first sbxm task rm --pr {pr}); after the merge, clean up with: sbxm task rm --issue {}",
-            opts.issue
+            number
         )?;
         return Ok(());
     }
@@ -51,7 +62,7 @@ pub fn run(
     writeln!(
         out,
         "  next: after it is merged, clean up with: sbxm task rm --issue {}",
-        opts.issue
+        number
     )?;
     Ok(())
 }

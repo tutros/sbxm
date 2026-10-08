@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, anyhow, bail};
 
-use super::task_start::resolve_repo;
+use super::task_start::{resolve_repo, spec_flag};
 use crate::backend::SandboxBackend;
 use crate::config::GlobalConfig;
 use crate::github::GitHubBackend;
@@ -22,10 +22,12 @@ use crate::task::record::{self, GateResult, ProcessProbe};
 use crate::task::repo::{self, Identity};
 
 /// What is reviewed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
     Issue(u32),
     Pr(u32),
+    /// A spec task's file (decision 174(d), issue 142).
+    Spec(PathBuf),
 }
 
 pub struct Options {
@@ -70,10 +72,7 @@ pub fn run(
     out: &mut dyn Write,
     warn: &mut dyn Write,
 ) -> Result<()> {
-    let number = match opts.target {
-        Target::Issue(n) | Target::Pr(n) => n,
-    };
-    if number == 0 {
+    if let Target::Issue(0) | Target::Pr(0) = opts.target {
         bail!("issue and PR numbers start at 1");
     }
     // Every input is checked before anything is created.
@@ -101,13 +100,14 @@ pub fn run(
     for warning in &config.warnings {
         writeln!(warn, "warning: {warning}")?;
     }
-    match opts.target {
+    match &opts.target {
         Target::Issue(n) => run_issue(
-            config_dir, opts, &config, n, backend, probe, host, out, warn,
+            config_dir, opts, &config, *n, backend, probe, host, out, warn,
         ),
         Target::Pr(n) => run_pr(
-            config_dir, opts, &config, n, backend, github, probe, host, out, warn,
+            config_dir, opts, &config, *n, backend, github, probe, host, out, warn,
         ),
+        Target::Spec(path) => run_spec(config_dir, &config, path, backend, probe, host, out, warn),
     }
 }
 
@@ -219,6 +219,115 @@ fn run_issue(
             )?;
         }
     }
+    Ok(())
+}
+
+/// `task review --spec <FILE>` (decision 174(d), issue 142): the same gates/review/fix-round loop
+/// as `run_issue`'s (`pipeline::review_issue`, which makes no GitHub call), but `finish` is
+/// refused for the result, so the "ready" hint says where the review is instead of naming it.
+#[allow(clippy::too_many_arguments)]
+fn run_spec(
+    config_dir: &std::path::Path,
+    config: &TaskConfig,
+    path: &std::path::Path,
+    backend: &dyn SandboxBackend,
+    probe: &dyn ProcessProbe,
+    host: &dyn HostRunner,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<()> {
+    let base_dir = GlobalConfig::load(config_dir)?.base_dir;
+    let (id, _) = record::spec_id(path)?;
+    let mut prepared = Prepared::open(&base_dir, &id)?;
+    // As `run_issue`: the worker is whoever the task recorded.
+    let mut config = config.clone();
+    if let Some(worker) = &prepared.record.worker {
+        if let Ok(harness) = <Harness as clap::ValueEnum>::from_str(&worker.harness, true) {
+            config.set_worker_harness(harness);
+        }
+        config.worker.model.clone_from(&worker.model);
+    }
+    let config = &config;
+    let env = TaskEnv {
+        config_dir,
+        config,
+        backend,
+        probe,
+        host,
+    };
+    let report = pipeline::review_issue(&env, &mut prepared)?;
+    for warning in report
+        .warnings
+        .iter()
+        .filter(|w| !config.warnings.contains(w))
+    {
+        writeln!(warn, "warning: {warning}")?;
+    }
+
+    let meta = record::task_dir(&base_dir, &id);
+    if let Some(failed) = &report.gates_failed {
+        writeln!(
+            out,
+            "{}",
+            gates_failed_line(&id, failed, &meta.join("gates.log"))
+        )?;
+        for round in &report.rounds {
+            writeln!(
+                out,
+                "{id}: review round {}: {} must-fix finding(s)",
+                round.round, round.must_fix
+            )?;
+        }
+        bail!(
+            "gates failed for {id}: `{}`; fix it in the worker's clone and commit, then run \
+             `sbxm task review {}` again",
+            failed.command,
+            spec_flag(path)
+        );
+    }
+
+    for round in &report.rounds {
+        writeln!(
+            out,
+            "{id}: review round {}: {} must-fix finding(s){}",
+            round.round,
+            round.must_fix,
+            if round.full { "" } else { " (narrow)" }
+        )?;
+    }
+    if report.fix_ran {
+        writeln!(
+            out,
+            "{id}: the fix round ran {} time(s); the gates after each passed",
+            prepared.record.round
+        )?;
+    }
+    let review = meta.join("review.md");
+    match (report.must_fix_left, prepared.record.stopped) {
+        (0, _) => {
+            writeln!(out, "{id}: ready; the review is {}", review.display())?;
+        }
+        (n, Some(stopped)) => {
+            writeln!(
+                out,
+                "{id}: ready, with {n} must-fix finding(s) left (stopped: {}); read {}",
+                stopped.name(),
+                review.display()
+            )?;
+        }
+        (n, None) => {
+            writeln!(
+                out,
+                "{id}: ready, with {n} must-fix finding(s) left; read {}",
+                review.display()
+            )?;
+        }
+    }
+    writeln!(
+        out,
+        "  note: `sbxm task finish` is refused for a spec task until its sink is built; fix \
+         findings by hand in the task's clone"
+    )?;
     Ok(())
 }
 

@@ -277,6 +277,50 @@ fn main() -> anyhow::Result<()> {
         Command::Task {
             command:
                 TaskCommand::Start {
+                    issues: _,
+                    workers: _,
+                    worker_harness,
+                    worker_model,
+                    time_limit,
+                    profile,
+                    base,
+                    repo,
+                    restart: _,
+                    yes: _,
+                    spec: Some(spec),
+                },
+        } => {
+            let ids = task::record::spec_id(&spec)
+                .map(|(id, _)| vec![id])
+                .unwrap_or_default();
+            let (mut out, mut warn) = task_writers(ids, Some(&task::record::SystemProbe))?;
+            let result = (|| -> anyhow::Result<()> {
+                commands::task_start::run_spec(
+                    &config::config_dir()?,
+                    &commands::task_start::SpecOptions {
+                        repo_root: std::env::current_dir()?,
+                        spec,
+                        worker_harness,
+                        worker_model,
+                        time_limit,
+                        profile,
+                        base,
+                        repo,
+                        clone_source: None,
+                        identity: None,
+                    },
+                    &SbxBackend,
+                    &sbxm::github::gh::GhBackend::default(),
+                    &task::record::SystemProbe,
+                    &mut out,
+                    &mut warn,
+                )
+            })();
+            finish_task(result, out, warn)
+        }
+        Command::Task {
+            command:
+                TaskCommand::Start {
                     issues,
                     workers,
                     worker_harness,
@@ -287,6 +331,7 @@ fn main() -> anyhow::Result<()> {
                     repo,
                     restart,
                     yes,
+                    spec: None,
                 },
         } => {
             let ids = issues.iter().map(|n| format!("issue-{n}")).collect();
@@ -413,6 +458,7 @@ fn main() -> anyhow::Result<()> {
                 TaskCommand::Review {
                     issue,
                     pr,
+                    spec,
                     repo,
                     base,
                     reviewer_harness,
@@ -422,22 +468,27 @@ fn main() -> anyhow::Result<()> {
                     profile,
                 },
         } => {
-            let id = match (issue, pr) {
-                (Some(n), _) => format!("issue-{n}"),
-                (None, Some(n)) => format!("pr-{n}"),
-                (None, None) => unreachable!("clap requires --issue or --pr"),
+            let target = match (issue, pr, spec) {
+                (Some(n), _, _) => commands::task_review::Target::Issue(n),
+                (None, Some(n), _) => commands::task_review::Target::Pr(n),
+                (None, None, Some(path)) => commands::task_review::Target::Spec(path),
+                (None, None, None) => unreachable!("clap requires --issue, --pr or --spec"),
             };
-            let (mut out, mut warn) = task_writers(vec![id], None)?;
+            // A spec path that gives no id has no task to log into; the command reports why.
+            let ids = match &target {
+                commands::task_review::Target::Issue(n) => vec![format!("issue-{n}")],
+                commands::task_review::Target::Pr(n) => vec![format!("pr-{n}")],
+                commands::task_review::Target::Spec(path) => task::record::spec_id(path)
+                    .map(|(id, _)| vec![id])
+                    .unwrap_or_default(),
+            };
+            let (mut out, mut warn) = task_writers(ids, None)?;
             let result = (|| -> anyhow::Result<()> {
                 commands::task_review::run(
                     &config::config_dir()?,
                     &commands::task_review::Options {
                         repo_root: std::env::current_dir()?,
-                        target: match (issue, pr) {
-                            (Some(n), _) => commands::task_review::Target::Issue(n),
-                            (None, Some(n)) => commands::task_review::Target::Pr(n),
-                            (None, None) => unreachable!("clap requires --issue or --pr"),
-                        },
+                        target,
                         repo,
                         base,
                         clone_source: None,
@@ -508,13 +559,24 @@ fn main() -> anyhow::Result<()> {
             finish_task(result, out, warn)
         }
         Command::Task {
-            command: TaskCommand::Finish { issue },
+            command: TaskCommand::Finish { issue, spec },
         } => {
-            let (mut out, warn) = task_writers(vec![format!("issue-{issue}")], None)?;
+            let target = match (issue, spec) {
+                (Some(n), _) => commands::task_finish::Target::Issue(n),
+                (None, Some(path)) => commands::task_finish::Target::Spec(path),
+                (None, None) => unreachable!("clap requires --issue or --spec"),
+            };
+            let ids = match &target {
+                commands::task_finish::Target::Issue(n) => vec![format!("issue-{n}")],
+                commands::task_finish::Target::Spec(path) => task::record::spec_id(path)
+                    .map(|(id, _)| vec![id])
+                    .unwrap_or_default(),
+            };
+            let (mut out, warn) = task_writers(ids, None)?;
             let result = (|| -> anyhow::Result<()> {
                 commands::task_finish::run(
                     &config::config_dir()?,
-                    &commands::task_finish::Options { issue },
+                    &commands::task_finish::Options { target },
                     &sbxm::github::gh::GhBackend::default(),
                     &task::record::SystemProbe,
                     &mut out,
