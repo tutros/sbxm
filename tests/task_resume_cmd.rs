@@ -4,7 +4,8 @@ mod common;
 
 use assert_cmd::Command;
 use common::task_fixture::{
-    CLAUDE_DONE, CODEX_DONE, Fixture, Play, fixture_with, ok, play_reviews, play_tasks, worked_task,
+    CLAUDE_DONE, CODEX_DONE, Fixture, Play, fixture_with, ok, play_reviews, play_tasks,
+    ready_spec_task, worked_task,
 };
 use sbxm::backend::FakeBackend;
 use sbxm::commands::task_resume::{Options, Target, run};
@@ -235,4 +236,44 @@ fn the_cli_needs_a_target() {
         .args(["task", "resume"])
         .assert()
         .failure();
+}
+
+#[test]
+fn a_spec_task_is_resumed_by_its_file() {
+    let f = fixture_with(
+        "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = [\"cargo test\"]\n\n\
+         [reviewer]\nharness = \"codex\"\n",
+    );
+    let (spec, id) = ready_spec_task(&f);
+    // Its review failed (left as a killed or failed reviewer would leave it).
+    let meta = record::task_dir(&f.env.base_dir(), &id);
+    let mut task = record::read(&meta.join("task.json")).unwrap();
+    (task.stage, task.status) = (Stage::Reviewing, Status::Failed);
+    record::write(&meta, &task).unwrap();
+    let reviewer = play_reviews(&f.env.base_dir(), &id, vec![CLEAN.to_owned()]);
+    let backend = FakeBackend::with_secrets(&["anthropic", "openai"])
+        .with_exec_output_matching("codex", ok(CODEX_DONE))
+        .with_exec_hook(reviewer);
+    let opts = Options {
+        target: Target::Spec(spec),
+        ..options(&f, None)
+    };
+
+    let out = go(&f, &opts, &backend, &Gone);
+
+    out.result.unwrap();
+    assert!(
+        out.out
+            .contains(&format!("{id}: resuming from reviewing (failed)")),
+        "{}",
+        out.out
+    );
+    assert!(out.out.contains(&format!("{id}: ready")), "{}", out.out);
+    assert!(
+        out.out.contains("next: sbxm task finish --spec"),
+        "{}",
+        out.out
+    );
+    let task = record::read(&meta.join("task.json")).unwrap();
+    assert_eq!((task.stage, task.status), (Stage::Ready, Status::Ok));
 }
