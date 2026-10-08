@@ -108,7 +108,7 @@ Rank each finding:
 
 ### What counts as must-fix
 
-A finding is **must fix** only if it has evidence *and* at least one of these holds:
+A finding is **must fix** only if it has evidence, **the change under review causes it** (a gap the change inherited, a design described elsewhere that the change doesn't claim to deliver, or a worry about a future version of a tool goes under "Outside this change" or becomes a question), *and* at least one of these holds:
 
 1. **Wrong behavior now:** the code or plan produces a wrong result, a silent drop (decision 11), a security or
    data-loss risk, or contradicts a decision the user confirmed.

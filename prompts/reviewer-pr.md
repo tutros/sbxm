@@ -9,6 +9,12 @@ already passed on the change:
 
 {{gates_sandbox}}
 
+A finding is about what this change introduces or changes.
+A must-fix finding names the line of the diff that causes it. A gap the change inherited, a design that a spec or plan
+describes elsewhere and this change doesn't claim to deliver, or something that might break in a future version of a
+tool is not a finding for this change: put it under "## Outside this change" (or ask it as a question).
+It doesn't count towards the must-fix total.
+
 Write {{review_path}}. Its first line is exactly "Must-fix findings: <count>". Then, so the findings can be filed as
 GitHub issues later, use this shape:
 

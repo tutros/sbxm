@@ -219,3 +219,11 @@ fn issues_lines_are_counted() {
         Some("Issues: pending (no access)")
     );
 }
+
+#[test]
+fn a_finding_under_outside_this_change_is_not_a_finding() {
+    // Issue 152: what the change did not cause is reported, never filed and never counted.
+    let r = one(&review("O-1 - an older gap", "Outside this change"));
+    assert!(r.findings.is_empty(), "{:?}", r.findings);
+    assert_eq!(r.not_filed_sections, 1);
+}

@@ -475,3 +475,35 @@ fn both_reviewer_prompts_ask_for_the_shape_file_findings_reads() {
         }
     }
 }
+
+#[test]
+fn every_reviewer_prompt_limits_findings_to_what_the_change_causes() {
+    // Issue 152: a reviewer judges the change. A must-fix names the diff line that causes it;
+    // inherited gaps, designs described elsewhere and future-version worries go under "Outside
+    // this change", never into the must-fix count.
+    let prompts_and_values = [
+        (Role::Reviewer, review_values()),
+        (Role::ReviewerPr, review_values()),
+        (Role::ReviewerSpec, spec_values()),
+    ];
+    for (role, values) in prompts_and_values {
+        let template = prompts::template(role, &Prompts::default()).unwrap();
+        let text = prompts::render(&template.name, &template.text, &values).unwrap();
+        assert!(
+            text.contains("names the line of the diff that causes it"),
+            "{}: {text}",
+            template.name
+        );
+        assert!(text.contains("inherited"), "{}: {text}", template.name);
+        assert!(
+            text.contains("\"## Outside this change\""),
+            "{}: {text}",
+            template.name
+        );
+        assert!(
+            text.contains("doesn't count towards the must-fix total"),
+            "{}: {text}",
+            template.name
+        );
+    }
+}
