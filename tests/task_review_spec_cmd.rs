@@ -178,3 +178,33 @@ fn failed_gates_say_how_to_fix_and_retry_with_spec() {
         "{message}"
     );
 }
+
+#[test]
+fn the_gate_failure_hint_quotes_a_spec_path_with_spaces() {
+    let f = config();
+    let dir = f.env.tmp.path().join("My Specs");
+    fs::create_dir_all(&dir).unwrap();
+    let spec = dir.join("idea.md");
+    fs::write(&spec, "Build a thing.\n").unwrap();
+    let (id, _) = record::spec_id(&spec).unwrap();
+    let backend = backend_for(&f, &id, &[CLEAN]).with_exec_output_matching(
+        "cargo test",
+        ExecOutput {
+            stdout: String::new(),
+            stderr: "assertion failed".into(),
+            exit_code: Some(1),
+        },
+    );
+    worked_spec_task(&f, &spec, &backend);
+
+    let out = go(
+        &f,
+        &options(&f, spec.clone()),
+        &backend,
+        &FakeGitHub::default(),
+    );
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    let want = format!("sbxm task review --spec \"{}\"", spec.display());
+    assert!(message.contains(&want), "{message}");
+}

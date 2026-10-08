@@ -158,6 +158,26 @@ fn local_default_branch(repo_root: &std::path::Path) -> Result<String> {
     let head = head.trim();
     Ok(head.strip_prefix("origin/").unwrap_or(head).to_owned())
 }
+
+/// `--spec <path>` as the retry hints print it: the path is one argument, quoted when it has a
+/// space or a character a shell would read (double quotes work in PowerShell and POSIX shells;
+/// single quotes, with `'` doubled, when the path itself has a `"`, `$` or backtick).
+pub(crate) fn spec_flag(path: &std::path::Path) -> String {
+    let text = path.display().to_string();
+    let plain = !text.is_empty()
+        && text
+            .chars()
+            .all(|c| c.is_alphanumeric() || "/\\:._-+=@%,~".contains(c));
+    let arg = if plain {
+        text
+    } else if text.contains(['"', '$', '`']) {
+        format!("'{}'", text.replace('\'', "''"))
+    } else {
+        format!("\"{text}\"")
+    };
+    format!("--spec {arg}")
+}
+
 /// `--repo owner/name`, or the GitHub repo of the checkout's `origin`.
 pub(crate) fn resolve_repo(repo: Option<&str>, repo_root: &std::path::Path) -> Result<String> {
     match repo {
@@ -518,11 +538,7 @@ pub fn run_spec(
         } else {
             writeln!(out, "  gates: passed")?;
         }
-        writeln!(
-            out,
-            "  next: sbxm task review --spec {}",
-            opts.spec.display()
-        )?;
+        writeln!(out, "  next: sbxm task review {}", spec_flag(&opts.spec))?;
         Ok(())
     } else {
         let first = gated.failed.expect("failed gates name the first failure");
@@ -531,10 +547,10 @@ pub fn run_spec(
             .map_or_else(|| "no exit code".to_owned(), |c| format!("exit {c}"));
         bail!(
             "{id}: gates failed: `{}` ({}, {exit}); fix it in the worker's clone and commit, \
-             then run: sbxm task review --spec {}",
+             then run: sbxm task review {}",
             first.command,
             first.tier,
-            opts.spec.display()
+            spec_flag(&opts.spec)
         )
     }
 }

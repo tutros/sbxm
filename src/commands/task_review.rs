@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, anyhow, bail};
 
-use super::task_start::resolve_repo;
+use super::task_start::{resolve_repo, spec_flag};
 use crate::backend::SandboxBackend;
 use crate::config::GlobalConfig;
 use crate::github::GitHubBackend;
@@ -280,9 +280,9 @@ fn run_spec(
         }
         bail!(
             "gates failed for {id}: `{}`; fix it in the worker's clone and commit, then run \
-             `sbxm task review --spec {}` again",
+             `sbxm task review {}` again",
             failed.command,
-            path.display()
+            spec_flag(path)
         );
     }
 

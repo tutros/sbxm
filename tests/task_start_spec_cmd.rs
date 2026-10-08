@@ -223,3 +223,57 @@ fn without_base_a_repo_equal_to_the_checkouts_origin_uses_its_default_branch() {
     out.result.unwrap();
     assert!(github.calls().is_empty(), "{:?}", github.calls());
 }
+
+/// A spec file in a folder whose name has a space, as in `E:\My Specs\idea.md`.
+fn spaced_spec_file(f: &Fixture) -> PathBuf {
+    let dir = f.env.tmp.path().join("My Specs");
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("idea.md");
+    fs::write(&path, "Build a thing.\n").unwrap();
+    path
+}
+
+#[test]
+fn the_next_step_hint_quotes_a_spec_path_with_spaces() {
+    let f = fixture();
+    let spec = spaced_spec_file(&f);
+    let (id, _) = record::spec_id(&spec).unwrap();
+    let backend = playing(&f, &id);
+
+    let out = run(
+        &f,
+        &options(&f, spec.clone()),
+        &backend,
+        &FakeGitHub::default(),
+    );
+
+    out.result.unwrap();
+    let want = format!("sbxm task review --spec \"{}\"", spec.display());
+    assert!(out.out.contains(&want), "{}", out.out);
+}
+
+#[test]
+fn the_gate_failure_hint_quotes_a_spec_path_with_spaces() {
+    let f = fixture();
+    let spec = spaced_spec_file(&f);
+    let (id, _) = record::spec_id(&spec).unwrap();
+    let backend = playing(&f, &id).with_exec_output_matching(
+        "cargo test",
+        sbxm::backend::ExecOutput {
+            stdout: String::new(),
+            stderr: "assertion failed".into(),
+            exit_code: Some(1),
+        },
+    );
+
+    let out = run(
+        &f,
+        &options(&f, spec.clone()),
+        &backend,
+        &FakeGitHub::default(),
+    );
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    let want = format!("sbxm task review --spec \"{}\"", spec.display());
+    assert!(message.contains(&want), "{message}");
+}
