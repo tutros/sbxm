@@ -153,6 +153,14 @@ pub fn resume(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Re
         review: None,
     };
     let probe = env.probe;
+    // A worker that runs again gets the task's own input back first, before any sandbox is
+    // touched: the last run could change it, or leave a link where it goes.
+    if matches!(
+        (prepared.record.stage, prepared.record.status),
+        (Stage::Prepared, _) | (Stage::Working, Status::Running | Status::Failed)
+    ) {
+        pipeline::restore_worker_input(prepared)?;
+    }
     // The worker's sandbox runs the worker, the sandbox gates and every fix round; it can vanish
     // between stages (workflow note G17), so it is made again first when it is gone. A
     // preparation makes it afresh below instead.

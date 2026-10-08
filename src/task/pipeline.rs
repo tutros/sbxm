@@ -1272,6 +1272,27 @@ pub fn run_worker(ctx: &Ctx, prepared: &mut Prepared) -> Result<Worked> {
     work(&ctx.env(), prepared)
 }
 
+/// Writes the task's input (`prompt.md`, and `issue.md` or a spec task's `source.md`) into the
+/// worker's clone again from the copies in the task's folder, for a worker that runs again (`task
+/// resume`, issue 118): the last run could change or delete the clone's copies. Refuses a control
+/// folder or file the agent replaced with a link.
+pub(super) fn restore_worker_input(prepared: &Prepared) -> Result<()> {
+    let source = match prepared.record.kind {
+        Kind::Spec => "source.md",
+        _ => "issue.md",
+    };
+    let read = |name: &str| {
+        fs::read(prepared.meta.join(name))
+            .with_context(|| format!("the task's {name} is missing from its folder"))
+    };
+    let (prompt, text) = (read("worker-prompt.md")?, read(source)?);
+    repo::write_agent_files(
+        &prepared.workspace,
+        &[(source, &text), ("prompt.md", &prompt)],
+        Existing::Refuse,
+    )
+}
+
 /// The worker's run itself, in a task already at `working/running` (written): the headless agent,
 /// its transcript and status, then what it left collected. Shared by [`run_worker`] and `task
 /// resume`, which runs it again in the same clone (issue 118).

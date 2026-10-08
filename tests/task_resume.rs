@@ -14,6 +14,7 @@ use sbxm::task::gates::FakeHostRunner;
 use sbxm::task::pipeline::{self, Prepared, TaskEnv};
 use sbxm::task::record::{self, Kind, ProcessProbe, ReviewResult, Stage, Status, Stopped};
 use sbxm::task::{repo, resume};
+use std::sync::{Arc, Mutex};
 
 fn config() -> Fixture {
     config_with_fix_rounds(1)
@@ -294,6 +295,74 @@ fn a_worker_that_fails_again_stays_failed_and_is_not_reviewed() {
         (Stage::Working, Status::Failed)
     );
     assert_eq!(count(&backend, "codex"), 0, "no reviewer");
+}
+
+/// The worker's workspace, where its `.sbxm-task` control folder is.
+fn workspace(f: &Fixture) -> std::path::PathBuf {
+    f.env.base_dir().join("tasks").join("issue-41")
+}
+
+/// What `.sbxm-task/prompt.md` and `issue.md` held in the worker's clone each time the worker
+/// started.
+fn seen_by_worker(backend: FakeBackend, f: &Fixture) -> (FakeBackend, Arc<Mutex<Vec<String>>>) {
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (dir, log) = (workspace(f).join(".sbxm-task"), Arc::clone(&seen));
+    let backend = backend.with_exec_responder(move |sandbox, spec| {
+        let worker = sandbox == "sbxm-task-issue-41-claude";
+        if worker && spec.argv.iter().any(|a| a.contains(".sbxm-task/prompt.md")) {
+            let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap_or_default();
+            log.lock()
+                .unwrap()
+                .push(format!("{}|{}", read("prompt.md"), read("issue.md")));
+        }
+        None
+    });
+    (backend, seen)
+}
+
+#[test]
+fn a_resumed_worker_gets_the_task_s_own_prompt_and_issue_back() {
+    let f = config();
+    let mut prepared = task_left_in(&f, Stage::Working, Status::Failed);
+    // The first worker could write anything in its control folder before it failed.
+    let control = workspace(&f).join(".sbxm-task");
+    std::fs::remove_file(control.join("prompt.md")).unwrap();
+    std::fs::write(control.join("issue.md"), "Do something else entirely.\n").unwrap();
+    let (backend, seen) = seen_by_worker(backend(&f, &[CLEAN]), &f);
+
+    resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap();
+
+    let prompt = std::fs::read_to_string(meta(&f).join("worker-prompt.md")).unwrap();
+    let issue = std::fs::read_to_string(meta(&f).join("issue.md")).unwrap();
+    assert_eq!(*seen.lock().unwrap(), [format!("{prompt}|{issue}")]);
+}
+
+#[test]
+fn a_worker_whose_control_folder_is_a_link_is_refused_before_any_sandbox() {
+    let f = config();
+    let mut prepared = task_left_in(&f, Stage::Working, Status::Failed);
+    let control = workspace(&f).join(".sbxm-task");
+    std::fs::remove_dir_all(&control).unwrap();
+    let outside = f.env.tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    common::dir_link(&control, &outside);
+    let before = std::fs::read(meta(&f).join("task.json")).unwrap();
+    let backend = backend(&f, &[CLEAN]);
+
+    let message = format!(
+        "{:#}",
+        resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap_err()
+    );
+
+    assert!(message.contains("refusing"), "{message}");
+    assert!(backend.execs().is_empty());
+    assert!(backend.creates().is_empty());
+    assert!(backend.removes().is_empty());
+    assert_eq!(std::fs::read(meta(&f).join("task.json")).unwrap(), before);
+    assert!(
+        std::fs::read_dir(&outside).unwrap().next().is_none(),
+        "nothing written through it"
+    );
 }
 
 // ---- The review and the gates (T3, T9) ----
