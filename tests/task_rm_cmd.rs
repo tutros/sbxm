@@ -10,9 +10,9 @@ use common::task_fixture::{
     CLAUDE_DONE, Fixture, Play, Probe, backend, fixture, ok, play, worked_task,
 };
 use sbxm::backend::FakeBackend;
-use sbxm::commands::task_rm::{Options, run};
+use sbxm::commands::task_rm::{Options, Target, run};
 use sbxm::confirm::Confirm;
-use sbxm::task::record::{self, Kind, Status};
+use sbxm::task::record::{self, Status};
 
 /// Answers from a script and records the prompts.
 struct FakeConfirm {
@@ -70,9 +70,10 @@ fn rm(
     let result = run(
         &f.env.config_dir(),
         &Options {
-            kind: Kind::Issue,
-            number,
+            target: Target::Issue(number),
             yes,
+            force: false,
+            repo_root: f.env.tmp.path().join("target-repo"),
         },
         backend,
         &Probe,
@@ -173,32 +174,6 @@ fn a_running_task_is_refused_and_nothing_is_asked_or_deleted() {
     assert!(confirm.prompts.borrow().is_empty());
     assert!(prepared.meta.join("task.json").exists());
     assert!(b.removes().is_empty());
-}
-
-#[test]
-fn a_spec_task_is_refused_and_no_backend_call_or_question_happens() {
-    let f = fixture();
-    let b = backend();
-    let confirm = FakeConfirm::new(true, true);
-    let mut out = Vec::new();
-
-    let result = run(
-        &f.env.config_dir(),
-        &Options {
-            kind: Kind::Spec,
-            number: 0,
-            yes: true,
-        },
-        &b,
-        &Probe,
-        &confirm,
-        &mut out,
-    );
-
-    assert!(format!("{:#}", result.unwrap_err()).contains("doesn't take a spec task yet"));
-    assert!(confirm.prompts.borrow().is_empty());
-    assert!(b.log().is_empty(), "{:?}", b.log());
-    assert!(out.is_empty());
 }
 
 #[test]

@@ -8,60 +8,15 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use common::task_fixture::{
-    CLAUDE_DONE, CODEX_DONE, Fixture, Play, Probe, backend, ctx, fixture, ok, play, play_reviews,
-    source,
+    Fixture, Probe, backend, ctx, fixture, ready_spec_task, source, spec_file,
 };
-use sbxm::backend::FakeBackend;
 use sbxm::commands::task_finish::{Options, Target, run};
 use sbxm::github::fake::FakeGitHub;
 use sbxm::task::pipeline;
 use sbxm::task::record::{self, Record, Stage, Status};
 
-const CLEAN: &str = "Must-fix findings: 0\n\nNothing found.\n";
-
-fn spec_file(f: &Fixture, text: &str) -> PathBuf {
-    let path = f.env.tmp.path().join("idea.md");
-    fs::write(&path, text).unwrap();
-    path
-}
-
 fn repo_root(f: &Fixture) -> PathBuf {
     f.env.tmp.path().join("target-repo")
-}
-
-/// Starts a spec task, runs its worker (one commit) and a clean review: it ends `ready`.
-fn ready_spec_task(f: &Fixture) -> (PathBuf, String) {
-    let spec = spec_file(f, "Build a thing.\n");
-    let (id, _) = record::spec_id(&spec).unwrap();
-    let worker = play(
-        &f.env.base_dir().join("tasks").join(&id),
-        "main",
-        &id,
-        Play {
-            commits: vec!["a.txt".into()],
-            result_md: Some(b"done\n".to_vec()),
-            bundle_bytes: None,
-        },
-    );
-    let reviewer = play_reviews(&f.env.base_dir(), &id, vec![CLEAN.to_owned()]);
-    let backend = FakeBackend::with_secrets(&["anthropic", "openai"])
-        .with_exec_output_matching("claude", ok(CLAUDE_DONE))
-        .with_exec_output_matching("codex", ok(CODEX_DONE))
-        .with_exec_hook(move |sandbox, exec| {
-            worker(sandbox, exec);
-            reviewer(sandbox, exec);
-        });
-    let github = FakeGitHub::default();
-    let source = source(f);
-    let context = ctx(f, &source, &backend, &github);
-    let mut prepared = pipeline::prepare_spec(&context, &spec).unwrap();
-    pipeline::run_worker(&context, &mut prepared).unwrap();
-    pipeline::review_issue(&context.env(), &mut prepared).unwrap();
-    assert_eq!(
-        (prepared.record.stage, prepared.record.status),
-        (Stage::Ready, Status::Ok)
-    );
-    (spec, id)
 }
 
 fn finish(f: &Fixture, spec: &Path, github: &FakeGitHub) -> (anyhow::Result<()>, String) {

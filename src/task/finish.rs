@@ -234,6 +234,43 @@ pub fn remove(plan: &RemovalPlan, backend: &dyn SandboxBackend) -> RemovalReport
     report
 }
 
+/// A spec task's result under the `local` sink lives only in its `repo.git`, which removal deletes
+/// (decision 174(e), spec section 5.4). Refused while its branch has commits beyond the base that
+/// `checkout` (the user's git checkout) doesn't have, so a result is never lost by accident; the
+/// caller skips this for `--force`. Only reads: `repo.git` is host-owned (decision 159) and
+/// `checkout` is the user's own.
+pub fn check_spec_result_fetched(base_dir: &Path, id: &str, checkout: &Path) -> Result<()> {
+    let force = "or pass --force to delete it anyway";
+    let meta = record::task_dir(base_dir, id);
+    let repo_git = meta.join("repo.git");
+    if !repo_git.is_dir() {
+        return Ok(());
+    }
+    let task = record::read(&meta.join("task.json"))
+        .with_context(|| format!("cannot tell whether task {id}'s result was fetched; {force}"))?;
+    if !repo::valid_ref_name(&task.branch) {
+        bail!(
+            "task {id} records branch {:?}, which isn't a usable branch name; {force}",
+            task.branch
+        );
+    }
+    if task.commits_ahead(&repo_git)? == 0 {
+        return Ok(());
+    }
+    let tip = repo::branch_tip(&repo_git, &task.branch)?;
+    let object = format!("{tip}^{{commit}}");
+    if crate::git::user_run(checkout, &["cat-file", "-e", &object]).is_ok() {
+        return Ok(());
+    }
+    let branch = &task.branch;
+    bail!(
+        "task {id}'s result, branch {branch}, exists only in {}, which `task rm` deletes; fetch it \
+         first with: git fetch {} {branch}:{branch} (in your checkout), {force}",
+        repo_git.display(),
+        crate::commands::task_start::path_arg(&repo_git)
+    )
+}
+
 /// Shows what removing `id` would delete, asks (unless `yes`), removes it and says what went and
 /// what stayed. Nothing is touched before the answer. Fails if anything stayed.
 pub fn discard(
