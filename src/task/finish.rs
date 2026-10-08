@@ -381,8 +381,17 @@ pub fn check_can_finish(task: &Record) -> Result<()> {
     if machine::verdict(&state, machine::Event::Finish) {
         return Ok(());
     }
-    if task.kind != record::Kind::Issue {
-        bail!("task {id} is a PR review; only an issue's task can be finished");
+    match task.kind {
+        record::Kind::Pr => bail!("task {id} is a PR review; only an issue's task can be finished"),
+        // Issue 142 is start-only for spec tasks: the sink that `finish` would use (`local` or
+        // `push`, decision 174(e)) isn't built yet, so there is nothing `finish` can do even once
+        // the task is ready.
+        record::Kind::Spec => bail!(
+            "task {id} is a spec task; `finish` is refused until its sink (`[finish] sink` = \
+             `local` or `push`) is built, in the issues that follow issue 142; the task's review \
+             is review.md in its folder"
+        ),
+        record::Kind::Issue => {}
     }
     match (task.stage, task.status) {
         (record::Stage::Finished, _) => {
