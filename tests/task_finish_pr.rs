@@ -521,3 +521,49 @@ fn the_command_prints_what_a_continued_task_left_unresolved() {
         "{out}"
     );
 }
+
+#[test]
+fn a_continued_task_stopped_by_a_narrow_review_lists_every_finding_still_open() {
+    // Review M-1 (issue 120, decision 177(f, p, r)): the comment lists what the record says is
+    // open, round 1's M-2 included, not only the narrow review.md's M-1.
+    let f = fixture();
+    let (mut prepared, _) = ready(&f);
+    prepared.record.stopped = Some(record::Stopped::RepeatFinding);
+    prepared.record.review = Some(record::ReviewResult {
+        round: 2,
+        must_fix: 1,
+        full: false,
+        repeat: true,
+    });
+    prepared.record.open_findings = Some(vec![
+        record::OpenFinding {
+            round: 1,
+            id: "M-2".into(),
+            title: "Second problem".into(),
+            place: None,
+        },
+        record::OpenFinding {
+            round: 2,
+            id: "M-1".into(),
+            title: "First problem remains".into(),
+            place: None,
+        },
+    ]);
+    record::write(&prepared.meta, &prepared.record).unwrap();
+    fs::write(
+        prepared.meta.join("review.md"),
+        "Reviewer: codex (default)\n\nMust-fix findings: 1\n\n## Must fix\n\n\
+         ### M-1: First problem remains\n\n**Repeat of:** M-1\n",
+    )
+    .unwrap();
+    let github = FakeGitHub::default();
+
+    run(&f, &github).unwrap();
+
+    let body = posted_comment(&github);
+    assert!(body.contains("- M-2 (review 1): Second problem"), "{body}");
+    assert!(
+        body.contains("- M-1 (review 2): First problem remains"),
+        "{body}"
+    );
+}

@@ -14,9 +14,9 @@ use anyhow::{Context, Result, bail};
 
 use super::machine;
 use super::pipeline::Prepared;
-use super::record::{self, Process, ProcessProbe, Record};
+use super::record::{self, OpenFinding, Process, ProcessProbe, Record};
 use super::repo;
-use super::review::{COMMENT_CAP, defang_mentions};
+use super::review::{self, COMMENT_CAP, defang_mentions};
 use crate::backend::SandboxBackend;
 use crate::confirm::Confirm;
 use crate::github::{GitHubBackend, PrRequest};
@@ -425,34 +425,44 @@ const UNRESOLVED_CAP: usize = 5_000;
 /// Ends a finding cut to fit [`UNRESOLVED_CAP`].
 const CUT_MARK: &str = "… (cut)\n";
 
+/// The must-fix findings task `task` left open: those recorded in `task.json` when its reviews
+/// were accepted (decision 177(f, p)), so an edited `review.md` changes nothing; for a record from
+/// before they were kept, those of the saved `review`.
+pub fn open_findings(task: &Record, review: Option<&str>) -> Vec<OpenFinding> {
+    match &task.open_findings {
+        Some(open) => open.clone(),
+        None => review
+            .map(|r| review::must_fix_findings(r, 0))
+            .unwrap_or_default(),
+    }
+}
+
 /// The section at the top of a draft PR's body: why it is a draft, then each must-fix finding
-/// of `review` with its `Where:`.
-pub fn unresolved_section(reasons: &[String], review: Option<&str>) -> String {
-    unresolved_text("This PR is a draft because:", reasons, review)
+/// left open ([`open_findings`]) with its `Where:`.
+pub fn unresolved_section(reasons: &[String], open: &[OpenFinding]) -> String {
+    unresolved_text("This PR is a draft because:", reasons, open)
 }
 
 /// [`unresolved_section`] under `intro`: a continued PR isn't made a draft (decision 177(r)).
-fn unresolved_text(intro: &str, reasons: &[String], review: Option<&str>) -> String {
+fn unresolved_text(intro: &str, reasons: &[String], must_fix: &[OpenFinding]) -> String {
     let mut text = format!("## Unresolved\n\n{intro}\n\n");
     for reason in reasons {
         text.push_str(&format!("- {reason}\n"));
     }
-    let must_fix: Vec<_> = review
-        .map(super::findings::parse)
-        .unwrap_or_default()
-        .findings
-        .into_iter()
-        .filter(|f| f.label == "must-fix")
-        .collect();
     if must_fix.is_empty() {
         return text;
     }
     text.push_str("\nMust-fix findings left (the review below has the details):\n\n");
     let mut listed = 0;
     for (i, finding) in must_fix.iter().enumerate() {
-        let line = match finding.field("where") {
-            Some(place) => format!("- {}: {} ({place})\n", finding.id, finding.title),
-            None => format!("- {}: {}\n", finding.id, finding.title),
+        // Ids restart with each review, so a recorded finding names the round that found it.
+        let id = match finding.round {
+            0 => finding.id.clone(),
+            round => format!("{} (review {round})", finding.id),
+        };
+        let line = match &finding.place {
+            Some(place) => format!("- {id}: {} ({place})\n", finding.title),
+            None => format!("- {id}: {}\n", finding.title),
         };
         // A finding is listed only if the `and N more` line for the ones after it still fits,
         // so the section never passes the cap whichever finding is the first left out.
@@ -652,7 +662,8 @@ pub fn finish(
     }
     let unresolved = unresolved_reasons(&task, review.as_deref());
     let draft = !unresolved.is_empty();
-    let section = draft.then(|| unresolved_section(&unresolved, review.as_deref()));
+    let section =
+        draft.then(|| unresolved_section(&unresolved, &open_findings(&task, review.as_deref())));
     let (body, cuts) = pr_body(
         task.number,
         section.as_deref(),
@@ -878,7 +889,7 @@ fn finish_continued(
         unresolved_text(
             "sbxm doesn't make a PR it continues a draft, but this task left:",
             &unresolved,
-            review.as_deref(),
+            &open_findings(&task, review.as_deref()),
         )
     });
     let body = pr_comment(task.number, branch, &commits, section.as_deref());

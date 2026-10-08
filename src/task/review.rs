@@ -2,6 +2,7 @@
 //! there are, and a review without that line isn't used.
 
 use super::findings;
+use super::record::OpenFinding;
 
 /// The count on the first line, which must be exactly `Must-fix findings: <count>` (trailing
 /// spaces and a Windows line ending are fine); `None` for anything else.
@@ -193,4 +194,57 @@ pub fn invalid_repeat_claims(current: &str, earlier_reviews: &[&str]) -> Vec<Str
             _ => None,
         })
         .collect()
+}
+
+/// The must-fix findings of `review` (a reviewer's text, or a saved `review.md`), as found by
+/// review round `round`.
+pub fn must_fix_findings(review: &str, round: u32) -> Vec<OpenFinding> {
+    findings::parse(review)
+        .findings
+        .into_iter()
+        .filter(|f| f.label == "must-fix")
+        .map(|f| OpenFinding {
+            round,
+            place: f.field("where").map(str::to_owned),
+            id: f.id,
+            title: f.title,
+        })
+        .collect()
+}
+
+/// The must-fix findings open once review round `round` (`current`, the reviewer's text) is
+/// accepted (decision 177(p)): a `full` review saw every commit, so its findings are all that is
+/// open; a narrow one saw only the latest, so the `earlier` open findings stay, except one it
+/// names in a `Repeat of:` claim on the same file, which its own finding replaces.
+pub fn open_after(
+    earlier: Option<&[OpenFinding]>,
+    current: &str,
+    round: u32,
+    full: bool,
+) -> Vec<OpenFinding> {
+    let found: Vec<findings::Finding> = findings::parse(current)
+        .findings
+        .into_iter()
+        .filter(|f| f.label == "must-fix")
+        .collect();
+    let mut open: Vec<OpenFinding> = if full {
+        Vec::new()
+    } else {
+        earlier
+            .unwrap_or_default()
+            .iter()
+            .filter(|old| {
+                !found.iter().any(|f| {
+                    f.field("repeat of") == Some(old.id.as_str())
+                        && match (f.field("where"), old.place.as_deref()) {
+                            (Some(a), Some(b)) => shares_a_path(a, b),
+                            _ => false,
+                        }
+                })
+            })
+            .cloned()
+            .collect()
+    };
+    open.extend(must_fix_findings(current, round));
+    open
 }

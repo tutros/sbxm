@@ -13,6 +13,7 @@ use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::task::finish::{SECTION_CAP, check_can_finish, finish, pr_body, unresolved_section};
 use sbxm::task::pipeline::Prepared;
 use sbxm::task::record::{self, Kind, NewTask, Process, Record, Stage, Status};
+use sbxm::task::review::must_fix_findings;
 
 /// As `review::with_header` saves it: the reviewer's line, a blank line, then the review.
 const REVIEW: &str = "Reviewer: codex (default)\n\nMust-fix findings: 0\n\nNothing found.\n";
@@ -557,7 +558,7 @@ fn a_long_list_of_must_fix_findings_is_cut_and_counted() {
         ));
     }
 
-    let section = unresolved_section(&["why".to_owned()], Some(&review));
+    let section = unresolved_section(&["why".to_owned()], &must_fix_findings(&review, 0));
 
     assert!(section.chars().count() < 6_000, "{}", section.len());
     assert!(section.contains("- M-1: "), "{section}");
@@ -573,7 +574,7 @@ fn one_overlong_must_fix_finding_is_cut_to_the_cap() {
         "w".repeat(6_000)
     );
 
-    let section = unresolved_section(&["why".to_owned()], Some(&review));
+    let section = unresolved_section(&["why".to_owned()], &must_fix_findings(&review, 0));
 
     assert!(section.chars().count() <= 5_000, "{}", section.len());
     assert!(section.contains("- M-1: ttt"), "{section}");
@@ -590,7 +591,7 @@ fn every_multi_finding_unresolved_section_obeys_the_five_thousand_character_cap(
             "t".repeat(len)
         );
 
-        let section = unresolved_section(&["why".to_owned()], Some(&review));
+        let section = unresolved_section(&["why".to_owned()], &must_fix_findings(&review, 0));
 
         let chars = section.chars().count();
         assert!(chars <= 5_000, "title length {len} produced {chars} chars");
@@ -599,5 +600,94 @@ fn every_multi_finding_unresolved_section_obeys_the_five_thousand_character_cap(
             section.contains("- M-2: ") || section.contains("- and 1 more"),
             "title length {len} lost M-2 without counting it"
         );
+    }
+}
+
+/// Round 2's narrow review, which repeats only M-1 of round 1's M-1 and M-2.
+const NARROW_REVIEW: &str = "Reviewer: codex (default)\n\nMust-fix findings: 1\n\n## Must fix\n\n\
+    ### M-1: First problem remains\n\n**Where:** `src/a.rs:5`\n\n**Repeat of:** M-1\n";
+
+/// [`ready`], stopped by a narrow review that repeated M-1, with round 1's M-2 still open.
+fn stopped_after_a_narrow_review(f: &Fixture) -> Prepared {
+    let mut prepared = ready(f);
+    prepared.record.stopped = Some(record::Stopped::RepeatFinding);
+    prepared.record.review = Some(record::ReviewResult {
+        round: 2,
+        must_fix: 1,
+        full: false,
+        repeat: true,
+    });
+    prepared.record.open_findings = Some(vec![
+        record::OpenFinding {
+            round: 1,
+            id: "M-2".into(),
+            title: "Second problem".into(),
+            place: Some("`src/b.rs:9`".into()),
+        },
+        record::OpenFinding {
+            round: 2,
+            id: "M-1".into(),
+            title: "First problem remains".into(),
+            place: Some("`src/a.rs:5`".into()),
+        },
+    ]);
+    record::write(&prepared.meta, &prepared.record).unwrap();
+    fs::write(prepared.meta.join("review.md"), NARROW_REVIEW).unwrap();
+    prepared
+}
+
+#[test]
+fn a_stopped_narrow_review_lists_every_finding_still_open_from_the_full_review() {
+    let f = fixture();
+    stopped_after_a_narrow_review(&f);
+    let github = FakeGitHub::default();
+
+    run(&f, &github).unwrap();
+
+    let request = only_pr_request(&github);
+    assert!(request.draft);
+    let section = request.body.split("## Result").next().unwrap();
+    assert!(
+        section.contains("- M-1 (review 2): First problem remains (`src/a.rs:5`)"),
+        "{section}"
+    );
+    assert!(
+        section.contains("- M-2 (review 1): Second problem (`src/b.rs:9`)"),
+        "{section}"
+    );
+}
+
+#[test]
+fn an_edited_or_deleted_review_md_cannot_change_the_recorded_open_findings() {
+    for edit in [
+        Some(
+            "Reviewer: codex (default)\n\nMust-fix findings: 1\n\n## Must fix\n\n### M-7: Invented\n",
+        ),
+        Some("Reviewer: codex (default)\n\nMust-fix findings: 0\n\nNothing found.\n"),
+        None,
+    ] {
+        let f = fixture();
+        let prepared = stopped_after_a_narrow_review(&f);
+        match edit {
+            Some(text) => fs::write(prepared.meta.join("review.md"), text).unwrap(),
+            None => fs::remove_file(prepared.meta.join("review.md")).unwrap(),
+        }
+        let github = FakeGitHub::default();
+
+        run(&f, &github).unwrap();
+
+        let request = only_pr_request(&github);
+        assert!(request.draft, "{edit:?}");
+        let section = request.body.split("## Result").next().unwrap();
+        assert!(
+            section.contains("M-2 (review 1): Second problem"),
+            "{section}"
+        );
+        assert!(
+            section.contains("M-1 (review 2): First problem remains"),
+            "{section}"
+        );
+        assert!(!section.contains("M-7"), "{section}");
+        assert!(!section.contains("review.md has no"), "{section}");
     }
 }
