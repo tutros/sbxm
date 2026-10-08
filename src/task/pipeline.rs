@@ -2178,8 +2178,9 @@ pub(super) fn rerun_fix_round(env: &TaskEnv, prepared: &mut Prepared) -> Result<
                 .context("the review to fix is missing; run the review again")?,
         )
     };
-    prepared.record.rerun(now(), Process::current(env.probe))?;
-    record::write(&prepared.meta, &prepared.record)?;
+    // The clone is agent-controlled, so it is validated and the input placed in it before the
+    // record says the retry is running (as `restore_worker_input` and the stopped-ready fix path
+    // already do): a link the failed worker left must be refused with nothing recorded yet.
     repo::write_agent_files(
         &prepared.workspace,
         &[
@@ -2188,6 +2189,8 @@ pub(super) fn rerun_fix_round(env: &TaskEnv, prepared: &mut Prepared) -> Result<
         ],
         Existing::Refuse,
     )?;
+    prepared.record.rerun(now(), Process::current(env.probe))?;
+    record::write(&prepared.meta, &prepared.record)?;
     fix(env, prepared)
 }
 

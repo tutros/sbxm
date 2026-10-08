@@ -4,6 +4,7 @@
 
 mod common;
 
+use common::dir_link;
 use common::task_fixture::{
     CLAUDE_DONE, CODEX_DONE, Fixture, Play, ctx, fixture_with, issue_text, ok, play_reviews,
     play_tasks, source, worked_task,
@@ -843,6 +844,52 @@ fn failed_fix_for_a_review(f: &Fixture) -> Prepared {
         (Stage::Fixing, Status::Failed)
     );
     prepared
+}
+
+/// M-4 (PR 163 review): retrying a failed fix round must validate the agent's clone before
+/// recording the retry as running, the same way the worker's own retry (`restore_worker_input`)
+/// does, not after.
+#[test]
+fn retrying_a_failed_fix_round_with_a_linked_agent_folder_is_refused_before_any_record_write() {
+    let f = config();
+    let mut prepared = failed_fix_for_a_review(&f);
+    let before = saved(&f);
+    let dir = workspace(&f).join(".sbxm-task");
+    std::fs::remove_dir_all(&dir).unwrap();
+    let outside = f.env.tmp.path().join("outside-folder");
+    std::fs::create_dir(&outside).unwrap();
+    dir_link(&dir, &outside);
+    let backend = backend(&f, &[CLEAN]);
+
+    let err = resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap_err();
+
+    assert!(format!("{err:#}").contains(".sbxm-task"), "{err:#}");
+    assert_eq!(saved(&f), before, "task.json is unchanged");
+    assert!(
+        !outside.join("fix-prompt.md").exists(),
+        "nothing was written through the link"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn retrying_a_failed_fix_round_with_a_linked_input_file_is_refused_before_any_record_write() {
+    use common::file_link;
+
+    let f = config();
+    let mut prepared = failed_fix_for_a_review(&f);
+    let before = saved(&f);
+    let dir = workspace(&f).join(".sbxm-task");
+    let target = f.env.tmp.path().join("precious-fix-prompt.txt");
+    std::fs::write(&target, "precious").unwrap();
+    std::fs::remove_file(dir.join("fix-prompt.md")).unwrap();
+    file_link(&dir.join("fix-prompt.md"), &target);
+    let backend = backend(&f, &[CLEAN]);
+
+    resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap_err();
+
+    assert_eq!(saved(&f), before, "task.json is unchanged");
+    assert_eq!(std::fs::read_to_string(&target).unwrap(), "precious");
 }
 
 #[test]
