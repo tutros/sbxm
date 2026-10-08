@@ -145,6 +145,36 @@ fn run_issue(
         host,
     };
     let report = pipeline::review_issue(&env, &mut prepared)?;
+    let meta = record::task_dir(&base_dir, &id);
+    if let Some(failed) = print_review(out, warn, config, &id, &meta, &report, &prepared.record)? {
+        bail!(
+            "gates failed for {id}: `{}`; fix it, then run `sbxm task gates --issue {number}` and review again",
+            failed.command
+        );
+    }
+    match report.must_fix_left {
+        0 => writeln!(out, "  next: sbxm task finish --issue {number}")?,
+        _ => writeln!(
+            out,
+            "  next: fix them by hand, or file them: sbxm task file-findings --issue {number}"
+        )?,
+    }
+    Ok(())
+}
+
+/// Prints how the review of a task with a worker went (`task review`, `task resume`): warnings
+/// not already printed, each review round, the fix rounds, and where the task ended. When the
+/// gates stopped it, prints that instead of the ready line and returns the failed gate, so the
+/// caller can say what to do; the caller adds its own `next:` line otherwise.
+pub(super) fn print_review<'a>(
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+    config: &TaskConfig,
+    id: &str,
+    meta: &std::path::Path,
+    report: &'a pipeline::ReviewReport,
+    record: &record::Record,
+) -> Result<Option<&'a GateResult>> {
     for warning in report
         .warnings
         .iter()
@@ -152,13 +182,11 @@ fn run_issue(
     {
         writeln!(warn, "warning: {warning}")?;
     }
-
-    let meta = record::task_dir(&base_dir, &id);
     if let Some(failed) = &report.gates_failed {
         writeln!(
             out,
             "{}",
-            gates_failed_line(&id, failed, &meta.join("gates.log"))
+            gates_failed_line(id, failed, &meta.join("gates.log"))
         )?;
         for round in &report.rounds {
             writeln!(
@@ -167,10 +195,7 @@ fn run_issue(
                 round.round, round.must_fix
             )?;
         }
-        bail!(
-            "gates failed for {id}: `{}`; fix it, then run `sbxm task gates --issue {number}` and review again",
-            failed.command
-        );
+        return Ok(Some(failed));
     }
 
     for round in &report.rounds {
@@ -186,40 +211,25 @@ fn run_issue(
         writeln!(
             out,
             "{id}: the fix round ran {} time(s); the gates after each passed",
-            prepared.record.round
+            record.round
         )?;
     }
     let review = meta.join("review.md");
-    match (report.must_fix_left, prepared.record.stopped) {
-        (0, _) => {
-            writeln!(out, "{id}: ready; the review is {}", review.display())?;
-            writeln!(out, "  next: sbxm task finish --issue {number}")?;
-        }
-        (n, Some(stopped)) => {
-            writeln!(
-                out,
-                "{id}: ready, with {n} must-fix finding(s) left (stopped: {}); read {}",
-                stopped.name(),
-                review.display()
-            )?;
-            writeln!(
-                out,
-                "  next: fix them by hand, or file them: sbxm task file-findings --issue {number}"
-            )?;
-        }
-        (n, None) => {
-            writeln!(
-                out,
-                "{id}: ready, with {n} must-fix finding(s) left; read {}",
-                review.display()
-            )?;
-            writeln!(
-                out,
-                "  next: fix them by hand, or file them: sbxm task file-findings --issue {number}"
-            )?;
-        }
+    match (report.must_fix_left, record.stopped) {
+        (0, _) => writeln!(out, "{id}: ready; the review is {}", review.display())?,
+        (n, Some(stopped)) => writeln!(
+            out,
+            "{id}: ready, with {n} must-fix finding(s) left (stopped: {}); read {}",
+            stopped.name(),
+            review.display()
+        )?,
+        (n, None) => writeln!(
+            out,
+            "{id}: ready, with {n} must-fix finding(s) left; read {}",
+            review.display()
+        )?,
     }
-    Ok(())
+    Ok(None)
 }
 
 /// `task review --spec <FILE>` (decision 174(d), issue 142): the same gates/review/fix-round loop
@@ -256,72 +266,14 @@ fn run_spec(
         host,
     };
     let report = pipeline::review_issue(&env, &mut prepared)?;
-    for warning in report
-        .warnings
-        .iter()
-        .filter(|w| !config.warnings.contains(w))
-    {
-        writeln!(warn, "warning: {warning}")?;
-    }
-
     let meta = record::task_dir(&base_dir, &id);
-    if let Some(failed) = &report.gates_failed {
-        writeln!(
-            out,
-            "{}",
-            gates_failed_line(&id, failed, &meta.join("gates.log"))
-        )?;
-        for round in &report.rounds {
-            writeln!(
-                out,
-                "{id}: review round {}: {} must-fix finding(s)",
-                round.round, round.must_fix
-            )?;
-        }
+    if let Some(failed) = print_review(out, warn, config, &id, &meta, &report, &prepared.record)? {
         bail!(
             "gates failed for {id}: `{}`; fix it in the worker's clone and commit, then run \
              `sbxm task review {}` again",
             failed.command,
             spec_flag(path)
         );
-    }
-
-    for round in &report.rounds {
-        writeln!(
-            out,
-            "{id}: review round {}: {} must-fix finding(s){}",
-            round.round,
-            round.must_fix,
-            if round.full { "" } else { " (narrow)" }
-        )?;
-    }
-    if report.fix_ran {
-        writeln!(
-            out,
-            "{id}: the fix round ran {} time(s); the gates after each passed",
-            prepared.record.round
-        )?;
-    }
-    let review = meta.join("review.md");
-    match (report.must_fix_left, prepared.record.stopped) {
-        (0, _) => {
-            writeln!(out, "{id}: ready; the review is {}", review.display())?;
-        }
-        (n, Some(stopped)) => {
-            writeln!(
-                out,
-                "{id}: ready, with {n} must-fix finding(s) left (stopped: {}); read {}",
-                stopped.name(),
-                review.display()
-            )?;
-        }
-        (n, None) => {
-            writeln!(
-                out,
-                "{id}: ready, with {n} must-fix finding(s) left; read {}",
-                review.display()
-            )?;
-        }
     }
     writeln!(out, "  next: sbxm task finish {}", spec_flag(path))?;
     Ok(())

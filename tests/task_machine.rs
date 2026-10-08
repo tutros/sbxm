@@ -10,7 +10,8 @@ use std::collections::BTreeSet;
 use sbxm::task::finish::{check_can_finish, plan_removal};
 use sbxm::task::machine::{Event, STAGES, State, dead_ends, matching, states, verdict};
 use sbxm::task::pipeline::{check_can_gate, check_can_review, check_can_review_pr};
-use sbxm::task::record::{self, Kind, NewTask, Process, ProcessProbe, Record};
+use sbxm::task::record::{self, Kind, NewTask, Process, ProcessProbe, Record, Stage, Stopped};
+use sbxm::task::resume::check_can_resume;
 
 const T0: u64 = 1_790_000_000;
 
@@ -63,6 +64,22 @@ fn guard(state: &State, event: Event) -> bool {
             record::write(&record::task_dir(base.path(), &record.id), &record).unwrap();
             plan_removal(base.path(), &record.id, &probe).is_ok()
         }
+        // The table doesn't model the recorded process of a task that isn't `running`: a state
+        // it calls not in flight has no live process. `ready` is resumable only once the task
+        // stopped (`stopped`, not in the table either), so it is asked with a stopped task and
+        // `--rounds 1`.
+        Event::Resume => {
+            let alive = state.status == record::Status::Running && !state.interrupted;
+            let probe = Probe(alive.then_some(T0));
+            let mut record = record;
+            let rounds = if state.stage == Stage::Ready {
+                record.stopped = Some(Stopped::RoundsExhausted);
+                Some(1)
+            } else {
+                None
+            };
+            check_can_resume(&record, &probe, rounds).is_ok()
+        }
         Event::Advance(to) => {
             let mut record = record;
             record.advance(to, T0 + 1, Process::new(1234, T0)).is_ok()
@@ -71,7 +88,13 @@ fn guard(state: &State, event: Event) -> bool {
 }
 
 fn events() -> Vec<Event> {
-    let mut all = vec![Event::Gates, Event::Review, Event::Finish, Event::Rm];
+    let mut all = vec![
+        Event::Gates,
+        Event::Review,
+        Event::Finish,
+        Event::Rm,
+        Event::Resume,
+    ];
     all.extend(STAGES.iter().map(|&stage| Event::Advance(stage)));
     all
 }
@@ -182,7 +205,8 @@ fn names(kind: Kind) -> Vec<String> {
 
 /// The gaps T3-T6 and T9 of the spec fall out of the table: these are the states a task can be
 /// left in (not finished, not in flight) from which no command moves it on, only `rm`.
-/// `Prepared/Failed` is one the spec does not list (finding F4).
+/// `Prepared/Failed` is one the spec does not list (finding F4). `task resume` (issue 118) closes
+/// them one by one; each row goes from this list as its `resume` row is built.
 #[test]
 fn the_dead_ends_are_the_gaps_the_spec_lists() {
     assert_eq!(
@@ -190,8 +214,6 @@ fn the_dead_ends_are_the_gaps_the_spec_lists() {
         [
             "Prepared/Running+interrupted",
             "Prepared/Failed",
-            "Working/Running+interrupted",
-            "Working/Failed",
             "Reviewing/Running+interrupted",
             "Reviewing/Completed",
             "Fixing/Running+interrupted",
@@ -214,8 +236,6 @@ fn the_dead_ends_are_the_gaps_the_spec_lists() {
         [
             "Prepared/Running+interrupted",
             "Prepared/Failed",
-            "Working/Running+interrupted",
-            "Working/Failed",
             "Reviewing/Running+interrupted",
             "Reviewing/Completed",
             "Fixing/Running+interrupted",

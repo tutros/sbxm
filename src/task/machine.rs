@@ -18,6 +18,9 @@ pub enum Event {
     Finish,
     /// `task rm` and `task start --restart`.
     Rm,
+    /// `task resume` (decisions 173(c), 175; issue 118): continue a task from its recorded stage,
+    /// keeping its clone and commits.
+    Resume,
     /// The pipeline moving the task to a stage (`Record::advance`).
     Advance(Stage),
 }
@@ -316,6 +319,26 @@ pub const TABLE: &[Row] = &[
         to: Some(Stage::Finished),
         action: "deliver the branch through the [finish] sink",
     },
+    // `task resume` (decisions 173(c), 175; issue 118), a task with a worker: a failed or
+    // interrupted stage runs again in the task's own clone, and the task goes on to `ready`.
+    Row {
+        stages: &[Stage::Working],
+        statuses: &[Status::Running],
+        live: Live::Interrupted,
+        kinds: HAS_WORKER,
+        event: Event::Resume,
+        to: Some(Stage::Working),
+        action: "run the worker again in its clone, then review",
+    },
+    Row {
+        stages: &[Stage::Working],
+        statuses: &[Status::Failed],
+        live: Live::Any,
+        kinds: HAS_WORKER,
+        event: Event::Resume,
+        to: Some(Stage::Working),
+        action: "run the worker again in its clone, then review",
+    },
     // `task rm`: anything that is not running, or running with its process gone.
     Row {
         stages: &STAGES,
@@ -390,7 +413,7 @@ pub fn dead_ends(kind: Kind) -> Vec<State> {
         .filter(|s| s.stage != Stage::Finished && !(kind == Kind::Pr && s.stage == Stage::Ready))
         .filter(|s| s.status != Status::Running || s.interrupted)
         .filter(|s| {
-            [Event::Gates, Event::Review, Event::Finish]
+            [Event::Gates, Event::Review, Event::Finish, Event::Resume]
                 .iter()
                 .all(|&e| !verdict(s, e))
         })

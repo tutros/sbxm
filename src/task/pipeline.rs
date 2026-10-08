@@ -1166,6 +1166,58 @@ fn remove_with_retries(dir: &Path) -> std::io::Result<()> {
     last
 }
 
+/// Makes the worker's sandbox again from the task's profile when it is gone (`task resume`, issue
+/// 118; a sandbox can vanish between stages, workflow note G17), over the same clone: the kits are
+/// built again under the task's `kits/`. With `replace`, a sandbox that still exists is removed
+/// first (a preparation that was cut off may have left one half made). Returns whether it was
+/// made.
+pub(super) fn ensure_worker_sandbox(
+    env: &TaskEnv,
+    prepared: &Prepared,
+    replace: bool,
+) -> Result<bool> {
+    let sandbox = prepared
+        .record
+        .worker
+        .as_ref()
+        .context("the task has no worker")?
+        .sandbox
+        .clone();
+    if replace {
+        let _ = env.backend.remove(&sandbox);
+    } else if env.backend.list()?.iter().any(|s| s.name == sandbox) {
+        return Ok(false);
+    }
+    let harness = env.config.worker.harness;
+    let kit_set = kits::build_for(
+        env.config_dir,
+        &env.config.sandbox.profile,
+        &[harness],
+        &Overrides {
+            cpus: env.config.sandbox.cpus,
+            memory: env.config.sandbox.memory.clone(),
+        },
+        &prepared.meta.join("kits"),
+        env.backend,
+    )?;
+    let harness_kits = kit_set
+        .get(harness)
+        .cloned()
+        .context("no kits were built for the worker's harness")?;
+    env.backend
+        .create(&CreateSpec {
+            name: sandbox.clone(),
+            agent: harness.agent_arg().into(),
+            workspace: prepared.workspace.clone(),
+            cpus: kit_set.resources.cpus,
+            memory: kit_set.resources.memory.clone(),
+            skills: harness_kits.skills_store,
+            kits: harness_kits.dirs.clone(),
+        })
+        .with_context(|| format!("cannot create sandbox {sandbox}"))?;
+    Ok(true)
+}
+
 /// Whether the last passed gate run covered the sandbox tier and, when one is configured, the host
 /// tier, on the task branch's current commit.
 fn gates_cover_everything(env: &TaskEnv, prepared: &Prepared) -> bool {
@@ -1208,7 +1260,23 @@ fn run_label(status: &RunStatus) -> String {
 /// (a timed-out or failed run keeps its partial commits). The stage is written before the agent
 /// starts; a write failure stops the command. `Err` means the run couldn't be attempted.
 pub fn run_worker(ctx: &Ctx, prepared: &mut Prepared) -> Result<Worked> {
-    let worker = &ctx.config.worker;
+    prepared
+        .record
+        .worker
+        .as_ref()
+        .context("the task has no worker")?;
+    prepared
+        .record
+        .advance(Stage::Working, now(), Process::current(ctx.probe))?;
+    record::write(&prepared.meta, &prepared.record)?;
+    work(&ctx.env(), prepared)
+}
+
+/// The worker's run itself, in a task already at `working/running` (written): the headless agent,
+/// its transcript and status, then what it left collected. Shared by [`run_worker`] and `task
+/// resume`, which runs it again in the same clone (issue 118).
+pub(super) fn work(env: &TaskEnv, prepared: &mut Prepared) -> Result<Worked> {
+    let worker = &env.config.worker;
     let sandbox = prepared
         .record
         .worker
@@ -1216,10 +1284,6 @@ pub fn run_worker(ctx: &Ctx, prepared: &mut Prepared) -> Result<Worked> {
         .context("the task has no worker")?
         .sandbox
         .clone();
-    prepared
-        .record
-        .advance(Stage::Working, now(), Process::current(ctx.probe))?;
-    record::write(&prepared.meta, &prepared.record)?;
 
     let started = Instant::now();
     let opts = HeadlessOpts {
@@ -1229,7 +1293,7 @@ pub fn run_worker(ctx: &Ctx, prepared: &mut Prepared) -> Result<Worked> {
         is_git_repo: true,
     };
     let result = match headless::run(
-        ctx.backend,
+        env.backend,
         &sandbox,
         &in_sandbox_path(&prepared.workspace),
         worker.harness,
@@ -1268,7 +1332,7 @@ pub fn run_worker(ctx: &Ctx, prepared: &mut Prepared) -> Result<Worked> {
     record::write(&prepared.meta, &prepared.record)?;
 
     let mut notes = Vec::new();
-    let commits = collect(ctx.backend, prepared, &sandbox, &mut status, &mut notes)?;
+    let commits = collect(env.backend, prepared, &sandbox, &mut status, &mut notes)?;
     prepared.record.notes.extend(notes.iter().cloned());
     record::write(&prepared.meta, &prepared.record)?;
     Ok(Worked {

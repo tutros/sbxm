@@ -524,6 +524,38 @@ impl Record {
         Ok(())
     }
 
+    /// Whether the `sbxm` process the record names is still the one running (its pid with the
+    /// same start time, as [`Record::is_interrupted`] decides), whatever the status: a task
+    /// between two stages is not `running`, but the process driving it is alive.
+    pub fn process_alive(&self, probe: &dyn ProcessProbe) -> bool {
+        self.process.as_ref().is_some_and(|process| {
+            probe
+                .start_time(process.pid)
+                .is_some_and(|started| format_timestamp(started) == process.started_at)
+        })
+    }
+
+    /// Runs the current stage again (`task resume`, issue 118): a stage that failed, or was left
+    /// `running` by a process that is gone, starts over (running, owned by `process`). Refused
+    /// for any other status, with nothing changed.
+    pub fn rerun(&mut self, now: u64, process: Process) -> Result<()> {
+        if !matches!(self.status, Status::Failed | Status::Running) {
+            bail!(
+                "task {} is {} in stage {}, so that stage has nothing to run again; see `sbxm task status`",
+                self.id,
+                self.status.name(),
+                self.stage.name()
+            );
+        }
+        self.status = self.stage.statuses()[0];
+        self.stages.push(Stamp {
+            stage: self.stage,
+            at: format_timestamp(now),
+        });
+        self.process = Some(process);
+        Ok(())
+    }
+
     /// `running` whose process is gone (no pid, or the pid now belongs to another process).
     pub fn is_interrupted(&self, probe: &dyn ProcessProbe) -> bool {
         if self.status != Status::Running {

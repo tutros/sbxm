@@ -251,6 +251,22 @@ pub enum TaskCommand {
         #[arg(long)]
         profile: Option<String>,
     },
+    /// Continue a task from its recorded stage, keeping its clone and commits: a failed or
+    /// interrupted preparation, worker, review or fix round runs again, and the task goes on to
+    /// ready like `task review`. Refused while the sbxm process that recorded it is still running.
+    #[command(group(clap::ArgGroup::new("resume_target").required(true).args(["issue", "spec"])))]
+    Resume {
+        /// Resume this issue's task.
+        #[arg(long, value_name = "N")]
+        issue: Option<u32>,
+        /// Resume this spec task's file.
+        #[arg(long, value_name = "FILE")]
+        spec: Option<PathBuf>,
+        /// For a task that stopped ready (its fix rounds used, or a finding repeated): add N
+        /// fix rounds to its budget and start a fix round from its review.md.
+        #[arg(long, value_name = "N")]
+        rounds: Option<u32>,
+    },
     /// Run a task's gates now (the checks that decide whether its work may go on), or with
     /// --dry-run say what would run and where.
     Gates {
