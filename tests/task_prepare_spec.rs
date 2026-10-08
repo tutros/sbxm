@@ -127,6 +127,26 @@ fn a_missing_spec_file_is_refused_before_anything_is_written() {
     assert!(backend.log().is_empty(), "{:?}", backend.log());
 }
 
+#[cfg(unix)]
+#[test]
+fn a_spec_file_that_is_a_link_is_refused_before_anything_is_written() {
+    let f = fixture();
+    let (backend, github) = (backend(), FakeGitHub::default());
+    let source = source(&f);
+    let real = spec_file(&f, "real.md", "Build a thing.\n");
+    let link = f.env.tmp.path().join("idea.md");
+    common::file_link(&link, &real);
+
+    let message = format!(
+        "{:#}",
+        pipeline::prepare_spec(&ctx(&f, &source, &backend, &github), &link).unwrap_err()
+    );
+
+    assert!(message.contains("is a link"), "{message}");
+    assert!(base_has_nothing_new(&f));
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+}
+
 #[test]
 fn a_missing_provider_secret_is_refused_before_anything_is_written() {
     let f = fixture();
