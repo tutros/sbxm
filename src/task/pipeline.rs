@@ -1749,10 +1749,15 @@ pub(super) fn continue_after_fix(env: &TaskEnv, prepared: &mut Prepared) -> Resu
 }
 
 /// A task that stopped `ready` with must-fix findings, reopened by `task resume` (issue 118,
-/// decisions 173(c), 177(b)(q)): a fix round from the recorded review, then as after any fix
-/// round, except that the first review after it doesn't stop the task on a repeat.
-pub(super) fn fix_from_ready(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewReport> {
-    run_fix_round(env, prepared, None)?;
+/// decisions 173(c), 177(b)(q)): a fix round from the recorded review (its `input`, read and
+/// placed before anything changed), then as after any fix round, except that the first review
+/// after it doesn't stop the task on a repeat.
+pub(super) fn fix_from_ready(
+    env: &TaskEnv,
+    prepared: &mut Prepared,
+    input: &FixInput,
+) -> Result<ReviewReport> {
+    start_fix_round(env, prepared, input)?;
     after_fix(env, prepared, true)
 }
 
@@ -1982,43 +1987,61 @@ fn run_fix_round(
     prepared: &mut Prepared,
     gate_failure: Option<&GateOutcome>,
 ) -> Result<()> {
+    let input = fix_input(env, prepared, gate_failure)?;
+    start_fix_round(env, prepared, &input)
+}
+
+/// What a fix round is given: the review or a gate's output, as the file the prompt names, and
+/// the rendered prompt. Read and rendered before the round changes anything, so a missing review
+/// stops it first (issue 118).
+pub(super) struct FixInput {
+    extra_name: &'static str,
+    extra_text: String,
+    prompt: String,
+}
+
+impl FixInput {
+    /// Writes the input and the prompt into the worker's clone, refusing a link the agent left.
+    pub(super) fn place(&self, workspace: &Path) -> Result<()> {
+        repo::write_agent_files(
+            workspace,
+            &[
+                (self.extra_name, self.extra_text.as_bytes()),
+                ("fix-prompt.md", self.prompt.as_bytes()),
+            ],
+            Existing::Refuse,
+        )
+    }
+}
+
+/// A fix round's [`FixInput`]: the review in the task's folder, or `gate_failure`'s output.
+pub(super) fn fix_input(
+    env: &TaskEnv,
+    prepared: &Prepared,
+    gate_failure: Option<&GateOutcome>,
+) -> Result<FixInput> {
     prepared
         .record
         .worker
         .as_ref()
         .context("the task has no worker")?;
-    prepared
-        .record
-        .advance(Stage::Fixing, now(), Process::current(env.probe))?;
-    record::write(&prepared.meta, &prepared.record)?;
-
     let is_spec = prepared.record.kind == Kind::Spec;
-    // The round's input is kept in the task's folder too: a gate's output as `gate-failure.md`
-    // (a review's is `review.md` already), so `task resume` can run the round again with it.
-    let gate_copy = prepared.meta.join("gate-failure.md");
     let (role, extra_name, extra_text) = match gate_failure {
-        None => {
-            let _ = fs::remove_file(&gate_copy);
-            (
-                if is_spec { Role::FixSpec } else { Role::Fix },
-                "review.md",
-                fs::read_to_string(prepared.meta.join("review.md"))
-                    .context("the review to fix is missing; run the review again")?,
-            )
-        }
-        Some(outcome) => {
-            let text = gate_failure_text(outcome);
-            fs::write(&gate_copy, &text)?;
-            (
-                if is_spec {
-                    Role::FixGateSpec
-                } else {
-                    Role::FixGate
-                },
-                "gate-failure.md",
-                text,
-            )
-        }
+        None => (
+            if is_spec { Role::FixSpec } else { Role::Fix },
+            "review.md",
+            fs::read_to_string(prepared.meta.join("review.md"))
+                .context("the review to fix is missing; run the review again")?,
+        ),
+        Some(outcome) => (
+            if is_spec {
+                Role::FixGateSpec
+            } else {
+                Role::FixGate
+            },
+            "gate-failure.md",
+            gate_failure_text(outcome),
+        ),
     };
     let template = prompts::template(role, &env.config.prompts)?;
     let prompt = prompts::render(
@@ -2037,15 +2060,35 @@ fn run_fix_round(
             ("gate_output_path", ".sbxm-task/gate-failure.md"),
         ],
     )?;
-    repo::write_agent_files(
-        &prepared.workspace,
-        &[
-            (extra_name, extra_text.as_bytes()),
-            ("fix-prompt.md", prompt.as_bytes()),
-        ],
-        Existing::Refuse,
-    )?;
-    fs::write(prepared.meta.join("fix-prompt.md"), &prompt)?;
+    Ok(FixInput {
+        extra_name,
+        extra_text,
+        prompt,
+    })
+}
+
+/// Starts a fix round with its input: the task goes to `fixing/running`, the input is kept in the
+/// task's folder and written into the clone, and the worker runs.
+pub(super) fn start_fix_round(
+    env: &TaskEnv,
+    prepared: &mut Prepared,
+    input: &FixInput,
+) -> Result<()> {
+    prepared
+        .record
+        .advance(Stage::Fixing, now(), Process::current(env.probe))?;
+    record::write(&prepared.meta, &prepared.record)?;
+
+    // The round's input is kept in the task's folder too: a gate's output as `gate-failure.md`
+    // (a review's is `review.md` already), so `task resume` can run the round again with it.
+    let gate_copy = prepared.meta.join("gate-failure.md");
+    if input.extra_name == "gate-failure.md" {
+        fs::write(&gate_copy, &input.extra_text)?;
+    } else {
+        let _ = fs::remove_file(&gate_copy);
+    }
+    input.place(&prepared.workspace)?;
+    fs::write(prepared.meta.join("fix-prompt.md"), &input.prompt)?;
     fix(env, prepared)
 }
 

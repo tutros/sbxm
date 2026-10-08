@@ -780,6 +780,38 @@ fn rounds_n_raises_the_budget_and_starts_a_fix_round_from_the_review() {
 }
 
 #[test]
+fn a_stopped_task_without_its_review_is_refused_before_anything_changes() {
+    let f = config();
+    let mut prepared = stopped_task(&f, &[ONE, ONE]);
+    let review = meta(&f).join("review.md");
+    let text = std::fs::read_to_string(&review).unwrap();
+    std::fs::remove_file(&review).unwrap();
+    let before = std::fs::read(meta(&f).join("task.json")).unwrap();
+    let backend = backend(&f, &[CLEAN]);
+
+    let message = format!(
+        "{:#}",
+        resume::resume(&env(&f, &backend, &Gone), &mut prepared, Some(2)).unwrap_err()
+    );
+
+    assert!(message.contains("review"), "{message}");
+    assert!(backend.execs().is_empty());
+    assert!(backend.creates().is_empty());
+    assert!(backend.removes().is_empty());
+    assert_eq!(std::fs::read(meta(&f).join("task.json")).unwrap(), before);
+
+    // Once the review is back, the same command adds the rounds and runs one fix round.
+    std::fs::write(&review, text).unwrap();
+    let mut prepared = Prepared::open(&f.env.base_dir(), "issue-41").unwrap();
+    resume::resume(&env(&f, &backend, &Gone), &mut prepared, Some(2)).unwrap();
+
+    assert_eq!(count(&backend, "fix-prompt.md"), 1);
+    let record = saved(&f);
+    assert_eq!((record.round, record.fix_rounds), (2, 3));
+    assert_eq!((record.stage, record.stopped), (Stage::Ready, None));
+}
+
+#[test]
 fn plain_resume_of_a_task_that_used_all_its_rounds_is_refused_and_names_rounds() {
     let f = config();
     let mut prepared = stopped_task(&f, &[ONE, ONE]);

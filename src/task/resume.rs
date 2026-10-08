@@ -4,7 +4,7 @@
 //! `sbxm` process is alive, and for a PR task (no worker; `ready` ends it). Decided through
 //! `machine::TABLE`'s `Resume` rows; the refusal text for each state lives here.
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 
 use super::machine::{self, Event};
 use super::pipeline::{self, Prepared, ReviewReport, TaskEnv, Worked};
@@ -161,6 +161,15 @@ pub fn resume(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Re
     ) {
         pipeline::restore_worker_input(prepared)?;
     }
+    // A stopped `ready` task's fix round works from its recorded review: it is read, and with the
+    // prompt written into the clone, before the sandbox, the budget or the stage change.
+    let fix_input = if prepared.record.stage == Stage::Ready {
+        let input = pipeline::fix_input(env, prepared, None)?;
+        input.place(&prepared.workspace)?;
+        Some(input)
+    } else {
+        None
+    };
     // The worker's sandbox runs the worker, the sandbox gates and every fix round; it can vanish
     // between stages (workflow note G17), so it is made again first when it is gone. A
     // preparation makes it afresh below instead.
@@ -222,7 +231,8 @@ pub fn resume(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Re
                 "resume: stopped {was}; another fix round, {} of {} used so far",
                 prepared.record.round, prepared.record.fix_rounds
             ));
-            resumed.review = Some(pipeline::fix_from_ready(env, prepared)?);
+            let input = fix_input.context("the fix round's input was not read")?;
+            resumed.review = Some(pipeline::fix_from_ready(env, prepared, &input)?);
             return Ok(resumed);
         }
         // T5, T9: the fix round runs again in the same clone with the input it was given, then
