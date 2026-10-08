@@ -207,9 +207,8 @@ fn the_dead_ends_are_the_gaps_the_spec_lists() {
             "Reviewing/Completed",
         ]
     );
-    // A spec task runs the same stages as an issue task (issue 142), but `ready` is also a dead
-    // end for it: `finish` is refused until a sink lands (decision 174(e)), so there is no row
-    // off `ready` for it yet.
+    // A spec task runs the same stages as an issue task (issue 142), and since issue 143 its
+    // `ready` moves on through `finish` and the `[finish] sink`, so it has the same dead ends.
     assert_eq!(
         names(Kind::Spec),
         [
@@ -221,7 +220,6 @@ fn the_dead_ends_are_the_gaps_the_spec_lists() {
             "Reviewing/Completed",
             "Fixing/Running+interrupted",
             "Fixing/Failed",
-            "Ready/Ok",
         ]
     );
 }

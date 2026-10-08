@@ -576,7 +576,10 @@ fn main() -> anyhow::Result<()> {
             let result = (|| -> anyhow::Result<()> {
                 commands::task_finish::run(
                     &config::config_dir()?,
-                    &commands::task_finish::Options { target },
+                    &commands::task_finish::Options {
+                        target,
+                        repo_root: std::env::current_dir()?,
+                    },
                     &sbxm::github::gh::GhBackend::default(),
                     &task::record::SystemProbe,
                     &mut out,

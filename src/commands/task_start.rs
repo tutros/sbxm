@@ -159,23 +159,27 @@ fn local_default_branch(repo_root: &std::path::Path) -> Result<String> {
     Ok(head.strip_prefix("origin/").unwrap_or(head).to_owned())
 }
 
-/// `--spec <path>` as the retry hints print it: the path is one argument, quoted when it has a
-/// space or a character a shell would read (double quotes work in PowerShell and POSIX shells;
-/// single quotes, with `'` doubled, when the path itself has a `"`, `$` or backtick).
+/// `--spec <path>` as the retry hints print it (see [`path_arg`]).
 pub(crate) fn spec_flag(path: &std::path::Path) -> String {
+    format!("--spec {}", path_arg(path))
+}
+
+/// A path as one argument of a printed command, quoted when it has a space or a character a shell
+/// would read (double quotes work in PowerShell and POSIX shells; single quotes, with `'`
+/// doubled, when the path itself has a `"`, `$` or backtick).
+pub(crate) fn path_arg(path: &std::path::Path) -> String {
     let text = path.display().to_string();
     let plain = !text.is_empty()
         && text
             .chars()
             .all(|c| c.is_alphanumeric() || "/\\:._-+=@%,~".contains(c));
-    let arg = if plain {
+    if plain {
         text
     } else if text.contains(['"', '$', '`']) {
         format!("'{}'", text.replace('\'', "''"))
     } else {
         format!("\"{text}\"")
-    };
-    format!("--spec {arg}")
+    }
 }
 
 /// `--repo owner/name`, or the GitHub repo of the checkout's `origin`.

@@ -42,6 +42,7 @@ fn go(f: &Fixture, issue: u32, github: &FakeGitHub) -> (anyhow::Result<()>, Stri
         &f.env.config_dir(),
         &Options {
             target: Target::Issue(issue),
+            repo_root: f.env.tmp.path().join("target-repo"),
         },
         github,
         &Probe,

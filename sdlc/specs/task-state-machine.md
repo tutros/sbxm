@@ -161,6 +161,7 @@ kept here as the design for issues #117-121 to build toward.
 | reviewing completed | advance | ready | record the task as ready |
 | fixing completed/timed-out (issue/spec) | advance | gating | run the gates |
 | ready ok (issue) | advance | finished | push the branch and open the PR |
+| ready ok (spec) | advance | finished | deliver the branch through the [finish] sink |
 | working/fixing completed/timed-out (issue/spec) | task gates | gating | run the gates |
 | gating passed/gates-failed (issue/spec) | task gates | gating | re-run the gates |
 | gating running (issue/spec), interrupted | task gates | gating | re-run the abandoned gates |
@@ -172,6 +173,7 @@ kept here as the design for issues #117-121 to build toward.
 | gating passed/gates-failed (pr) | task review | reviewing | run the reviewer |
 | reviewing failed (pr) | task review | reviewing | retry the reviewer |
 | ready ok (issue) | task finish | finished | push the branch and open the PR |
+| ready ok (spec) | task finish | finished | deliver the branch through the [finish] sink |
 | any completed/timed-out/failed/passed/gates-failed/ok | task rm | removed | remove the task's folders and sandboxes |
 | any running, interrupted | task rm | removed | remove the task's folders and sandboxes |
 
