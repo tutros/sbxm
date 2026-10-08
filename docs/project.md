@@ -9,11 +9,11 @@ This file is the one place for the project's goals and current state; `AGENTS.md
 
 Plus the lifecycle commands (`new`, `open`, `list`, `stop`, `rm`, `config`, `doctor`). What sbxm is and the constraints it follows: `AGENTS.md`, "What `sbxm` is" and "Architectural constraints".
 
-## State (as of 2026-10-06)
+## State (as of 2026-10-07)
 
-- Merged: milestones 1, 2a (`sbxm run`) and 2b (`sbxm task`); decision 169 (continue work on an open PR: #102, #103, #122); `run.log` for task commands (#127, decision 170 part 1); the state machine's table and its guards (#115, PR #133).
-- The state machine is designed (decisions 173-177, `sdlc/specs/task-state-machine.md` section 5, `sdlc/spikes/state-table.md`, the table in `src/task/machine.rs`). Remaining, in waves with a checkpoint: #117 (`fix_rounds` loop) with #116 (`task states`), then **pause and check a real multi-round run**, then #119 + #121 (`Repeat of:` marker, no-progress stop, `task start --spec`, `[finish] sink`), then #118 + #120 (`task resume`, `--rounds N`, draft PR), then #123 (PR risk assessment, decision 176). #107/#108 were held until #115 was done, so they are next.
-- Separate tracks: dashboard #88-#92, #114, #111, #106, #126, #130, #135.
+- Merged: milestones 1, 2a (`sbxm run`) and 2b (`sbxm task`); decision 169 (continue work on an open PR: #102, #103, #122); `run.log` for task commands (#127, decision 170 part 1); the state machine's table and its guards (#115, PR #133), `task states` (#116, PR #136), the `fix_rounds` loop (#117, PR #137), the `Repeat of:` marker and the no-progress stop (#119, PR #145; its run was the multi-round checkpoint); the spec task source (#121, split into #146-#149: PRs #150, #151, #155, #156), so `task start --spec` and `task review --spec` work and `task finish` is refused for a spec task until a sink lands; reviewers judge the change only, with an "Outside this change" section (#152 part 1, PR #154).
+- Not yet seen in a real run: a gate failure feeding a fix round, and `stopped = rounds-exhausted`.
+- The state machine is designed (decisions 173-177, `sdlc/specs/task-state-machine.md` section 5, `sdlc/spikes/state-table.md`, the table in `src/task/machine.rs`). Remaining, in order: #143 (`[finish] sink = local`, in progress) then #144 (`sink = push`), #118 + #120 (`task resume`, `--rounds N`, draft PR), #123 (PR risk assessment, decision 176), then #107/#108, #138, #140, #130, #126, #114, #111, #106, #104, #96-#100, #58-#60 and the dashboard #88-#92. #152 stays open for part 2 (a separate improvement-review mode). #153 (source capabilities instead of kind lists) is deferred until a 4th task source, or a change needed in more than one place.
 - Log of gaps found while using `task`, run logs and the agenda: `sdlc/evals-workflow-notes.md`.
 
 ## Where facts live
@@ -38,7 +38,7 @@ Phase skills: `sdlc-planning`, `sdlc-implementation` (TDD, commit per green step
 ## Using sbxm on itself (the e2e setup)
 
 - Use a release binary built from the commit being worked on, copied to a named file (`sbxm-<sha>.exe`) with its SHA-256 recorded, run with its own `SBXM_CONFIG_DIR` and a base dir off `C:` (decision 56).
-- `task run --issue N` = start + gates + review + at most one fix round, then stops at `ready`. `task finish` (the user decides) pushes with the user's login. `--reviewer-harness`/`--reviewer-model` override the reviewer; the config is read once at start, so changing `sbxm-task.toml` mid-run has no effect (use `--restart` to start over). An issue with a `PR: #n` line for a merged PR is refused (decision 169).
+- `task run --issue N` = start + gates + review + up to `[worker] fix_rounds` fix rounds (default 3), then stops at `ready`. `task finish` (the user decides) pushes with the user's login. `--reviewer-harness`/`--reviewer-model` override the reviewer; the config is read once at start, so changing `sbxm-task.toml` mid-run has no effect (use `--restart` to start over). An issue with a `PR: #n` line for a merged PR is refused (decision 169).
 - `task rm` shows what it deletes; clean up finished tasks, worktrees and build dirs only with the user's OK.
 - antigravity (`agy`): model ids come from `agy models`; set `model` explicitly (the default is believed to be Gemini 3.1 Pro but is unverified). Needs the `google` secret.
 - Typical timing of one task with a fix round (28 min): about two thirds agent work, one third sandbox setup; the `setup.install` steps (mostly `cargo install just`, ~95 s) are about 2m40s per sandbox, and the reviewer's sandbox is set up again each round.
