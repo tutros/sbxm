@@ -7,7 +7,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use sbxm::harness::Harness;
-use sbxm::task::config::{FILE_NAME, TaskConfig};
+use sbxm::task::config::{FILE_NAME, Sink, TaskConfig};
 use tempfile::TempDir;
 
 const MINIMAL: &str = "[sandbox]\nprofile = \"sbxm-dev\"\n";
@@ -392,4 +392,31 @@ fn a_prompt_path_may_not_pass_through_a_link() {
         common::dir_link(&root.join("linked"), &real);
     });
     assert!(message.contains("symlink or junction"), "{message}");
+}
+
+/// Issue 143 (decision 174(e)): `[finish] sink` says where a spec task's result lands.
+#[test]
+fn the_finish_sink_defaults_to_local_and_accepts_push() {
+    let dir = repo(MINIMAL, true);
+    assert_eq!(TaskConfig::load(dir.path()).unwrap().sink, Sink::Local);
+
+    for (value, sink) in [("local", Sink::Local), ("push", Sink::Push)] {
+        let dir = repo(&format!("{MINIMAL}\n[finish]\nsink = \"{value}\"\n"), true);
+        assert_eq!(TaskConfig::load(dir.path()).unwrap().sink, sink, "{value}");
+    }
+}
+
+#[test]
+fn an_unknown_sink_or_finish_key_is_an_error_naming_the_file() {
+    for toml in [
+        format!("{MINIMAL}\n[finish]\nsink = \"github\"\n"),
+        format!("{MINIMAL}\n[finish]\ndestination = \"local\"\n"),
+    ] {
+        let message = load_err(&toml, true);
+        assert!(message.contains(FILE_NAME), "{message}");
+        assert!(
+            message.contains("github") || message.contains("destination"),
+            "{message}"
+        );
+    }
 }

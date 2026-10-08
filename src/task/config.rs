@@ -57,6 +57,8 @@ pub struct TaskConfig {
     pub sandbox: Sandbox,
     pub gates: Gates,
     pub prompts: Prompts,
+    /// `[finish] sink` (decision 174(e)): where a spec task's result lands at `task finish`.
+    pub sink: Sink,
     /// Things to say once and carry on (the same harness for both roles).
     pub warnings: Vec<String>,
 }
@@ -86,6 +88,17 @@ pub struct Gates {
     pub timeout: Duration,
 }
 
+/// Where `task finish` puts a spec task's branch (decision 174(e)); an issue task always opens a PR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Sink {
+    /// The branch stays in the task's host-owned `repo.git`; `finish` prints how to fetch it.
+    #[default]
+    Local,
+    /// The branch is pushed to `origin`, and no PR is opened.
+    Push,
+}
+
 /// Override files, as absolute paths inside the repo, checked to exist.
 #[derive(Debug, Clone, Default)]
 pub struct Prompts {
@@ -106,6 +119,15 @@ struct RawConfig {
     gates: RawGates,
     #[serde(default)]
     prompts: RawPrompts,
+    #[serde(default)]
+    finish: RawFinish,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawFinish {
+    #[serde(default)]
+    sink: Sink,
 }
 
 #[derive(Deserialize, Default)]
@@ -263,6 +285,7 @@ impl Validator<'_> {
             sandbox,
             gates,
             prompts,
+            sink: raw.finish.sink,
             warnings,
         })
     }
