@@ -142,6 +142,22 @@ fn discard_existing(
     )
 }
 
+/// The branch the checkout's `origin/HEAD` points at, for a spec task's default base (no GitHub
+/// call). `git clone` sets it; a checkout made some other way may not have it.
+fn local_default_branch(repo_root: &std::path::Path) -> Result<String> {
+    let head = git::user_run(
+        repo_root,
+        &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    )
+    .map_err(|_| {
+        anyhow!(
+            "cannot tell the default branch from {} without GitHub; pass --base <branch>",
+            repo_root.display()
+        )
+    })?;
+    let head = head.trim();
+    Ok(head.strip_prefix("origin/").unwrap_or(head).to_owned())
+}
 /// `--repo owner/name`, or the GitHub repo of the checkout's `origin`.
 pub(crate) fn resolve_repo(repo: Option<&str>, repo_root: &std::path::Path) -> Result<String> {
     match repo {
@@ -428,9 +444,11 @@ pub fn run_spec(
         Some(identity) => identity.clone(),
         None => Identity::read_from(None)?,
     };
+    // A spec task makes no GitHub call, so an omitted base is read from the checkout (`origin/HEAD`,
+    // which `git clone` sets), not asked of GitHub.
     let base_branch = match &opts.base {
         Some(base) => base.clone(),
-        None => github.default_branch(&repo_name)?,
+        None => local_default_branch(&opts.repo_root)?,
     };
     if !repo::valid_ref_name(&base_branch) {
         bail!("base {base_branch:?} isn't a usable branch name; pass --base <branch>");
@@ -474,7 +492,7 @@ pub fn run_spec(
     }
     if bad {
         bail!(
-            "{id}: the worker failed; see `sbxm task status` (issue 142 is start-only: review it by hand in the task's folder)"
+            "{id}: the worker failed; see `sbxm task status` and the task's folder for what it left"
         );
     }
 

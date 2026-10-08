@@ -131,3 +131,51 @@ fn a_missing_spec_file_is_refused_before_anything_is_written() {
     assert!(message.contains("missing.md"), "{message}");
     assert!(backend.log().is_empty(), "{:?}", backend.log());
 }
+
+fn checkout_with_origin_head(f: &Fixture, branch: &str) {
+    let root = f.env.tmp.path().join("target-repo");
+    common::git(&root, &["init", "-q"]);
+    common::git(
+        &root,
+        &["remote", "add", "origin", "https://github.com/o/r.git"],
+    );
+    let target = format!("refs/remotes/origin/{branch}");
+    common::git(
+        &root,
+        &["symbolic-ref", "refs/remotes/origin/HEAD", &target],
+    );
+}
+
+#[test]
+fn without_base_the_default_branch_comes_from_the_checkout_and_no_github_call_is_made() {
+    let f = fixture();
+    checkout_with_origin_head(&f, "main");
+    let spec = spec_file(&f, "Build a thing.\n");
+    let (id, _) = record::spec_id(&spec).unwrap();
+    let backend = playing(&f, &id);
+    let github = FakeGitHub::default();
+    let mut opts = options(&f, spec);
+    opts.base = None;
+
+    let out = run(&f, &opts, &backend, &github);
+
+    out.result.unwrap();
+    assert!(github.calls().is_empty(), "{:?}", github.calls());
+}
+
+#[test]
+fn without_base_and_without_a_local_default_branch_it_asks_for_base_and_calls_no_github() {
+    let f = fixture();
+    let spec = spec_file(&f, "Build a thing.\n");
+    let backend = backend();
+    let github = FakeGitHub::default();
+    let mut opts = options(&f, spec);
+    opts.base = None;
+
+    let out = run(&f, &opts, &backend, &github);
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("--base"), "{message}");
+    assert!(github.calls().is_empty(), "{:?}", github.calls());
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+}
