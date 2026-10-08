@@ -277,3 +277,56 @@ fn a_spec_task_is_resumed_by_its_file() {
     let task = record::read(&meta.join("task.json")).unwrap();
     assert_eq!((task.stage, task.status), (Stage::Ready, Status::Ok));
 }
+
+/// Issue 41 reviewed through `[ONE, ONE]` with its one fix round: stopped `rounds-exhausted`.
+fn stopped(f: &Fixture) {
+    let first = backend(f, &[ONE, ONE]);
+    let mut prepared = worked_task(f, &first);
+    let env = sbxm::task::pipeline::TaskEnv {
+        config_dir: &f.env.config_dir(),
+        config: &f.config,
+        backend: &first,
+        probe: &Gone,
+        host: &FakeHostRunner::default(),
+    };
+    sbxm::task::pipeline::review_issue(&env, &mut prepared).unwrap();
+}
+
+#[test]
+fn rounds_that_would_overflow_the_budget_are_refused_before_anything_changes() {
+    let f = config();
+    stopped(&f);
+    let path = record::task_dir(&f.env.base_dir(), "issue-41").join("task.json");
+    let before = std::fs::read(&path).unwrap();
+    let backend = backend(&f, &[CLEAN]);
+
+    let out = go(&f, &options(&f, Some(u32::MAX)), &backend, &Gone);
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("--rounds 4294967295"), "{message}");
+    assert!(message.contains("too many"), "{message}");
+    assert!(!message.contains('\n'), "one line: {message}");
+    assert_eq!(std::fs::read(&path).unwrap(), before, "task.json unchanged");
+    assert!(backend.execs().is_empty());
+    assert!(backend.creates().is_empty());
+}
+
+#[test]
+fn the_largest_rounds_that_fit_are_added_exactly() {
+    let f = config();
+    stopped(&f);
+    let backend = backend(&f, &[CLEAN]);
+
+    let out = go(&f, &options(&f, Some(u32::MAX - 1)), &backend, &Gone);
+
+    out.result.unwrap();
+    assert!(
+        out.out
+            .contains("issue-41: 4294967294 more fix round(s), 4294967295 in all"),
+        "{}",
+        out.out
+    );
+    let saved =
+        record::read(&record::task_dir(&f.env.base_dir(), "issue-41").join("task.json")).unwrap();
+    assert_eq!(saved.fix_rounds, u32::MAX);
+}

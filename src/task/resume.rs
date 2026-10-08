@@ -72,6 +72,16 @@ pub fn check_can_resume(
             task.status.name()
         );
     }
+    if let Some(n) = rounds
+        && task.fix_rounds.checked_add(n).is_none()
+    {
+        bail!(
+            "--rounds {n} is too many: task {id} has {} fix rounds, and the total can be at most \
+             {}",
+            task.fix_rounds,
+            u32::MAX
+        );
+    }
     let state = machine::State {
         stage: task.stage,
         status: task.status,
