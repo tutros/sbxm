@@ -56,7 +56,7 @@ timeout = "20m"               # per command
 # fix = "prompts/fix.md"
 
 [finish]                      # optional; spec tasks only [174(e)], an issue task always opens a PR
-# sink = "local"              # "local" (default: branch stays in repo.git) or "push" (issue 144)
+# sink = "local"              # "local" (default: branch stays in repo.git) or "push" (to origin, no PR)
 ```
 
 Rules:
