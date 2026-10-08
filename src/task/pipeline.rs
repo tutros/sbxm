@@ -1615,13 +1615,38 @@ pub fn review_issue(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewRepo
         return Ok(report);
     }
 
-    let mut round = prepared.record.round + 1;
+    let round = prepared.record.round + 1;
+    review_rounds(env, prepared, report, round, None)
+}
+
+/// The review rounds of [`review_issue`], from review round `round` on: each review, and while
+/// must-fix findings are left and the budget allows, a fix round and the gates before the next;
+/// then `ready`. `first` is a review that already completed (`task resume` replaying the recorded
+/// [`record::ReviewResult`], issue 118): it stands in for the first round instead of running the
+/// reviewer again (it was reported when it ran, so it is not one of `report.rounds`), and the
+/// rounds go on from its number.
+pub(super) fn review_rounds(
+    env: &TaskEnv,
+    prepared: &mut Prepared,
+    mut report: ReviewReport,
+    mut round: u32,
+    mut first: Option<record::ReviewResult>,
+) -> Result<ReviewReport> {
     loop {
-        let reviewed = run_reviewer(env, prepared, round)?;
-        report.must_fix_left = reviewed.must_fix;
-        let (must_fix, full, repeat) = (reviewed.must_fix, reviewed.full, reviewed.repeat);
-        report.warnings.extend(reviewed.warnings.clone());
-        report.rounds.push(reviewed);
+        let (must_fix, full, repeat) = match first.take() {
+            Some(replayed) => {
+                round = replayed.round;
+                (replayed.must_fix, replayed.full, replayed.repeat)
+            }
+            None => {
+                let reviewed = run_reviewer(env, prepared, round)?;
+                let outcome = (reviewed.must_fix, reviewed.full, reviewed.repeat);
+                report.warnings.extend(reviewed.warnings.clone());
+                report.rounds.push(reviewed);
+                outcome
+            }
+        };
+        report.must_fix_left = must_fix;
 
         if must_fix == 0 {
             if full {
@@ -2073,6 +2098,12 @@ pub fn run_reviewer(env: &TaskEnv, prepared: &mut Prepared, round: u32) -> Resul
     match result {
         Ok((must_fix, repeat, warnings)) => {
             prepared.record.last_reviewed_commit = if must_fix == 0 { None } else { tip };
+            prepared.record.review = Some(record::ReviewResult {
+                round,
+                must_fix,
+                full,
+                repeat,
+            });
             prepared.record.finish(Status::Completed)?;
             record::write(&prepared.meta, &prepared.record)?;
             Ok(Reviewed {

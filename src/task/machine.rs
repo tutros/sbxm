@@ -406,6 +406,16 @@ pub const TABLE: &[Row] = &[
         to: Some(Stage::Reviewing),
         action: "run the reviewer again",
     },
+    // T4: a review that completed, but whose process was gone before it acted on it.
+    Row {
+        stages: &[Stage::Reviewing],
+        statuses: &[Status::Completed],
+        live: Live::Any,
+        kinds: HAS_WORKER,
+        event: Event::Resume,
+        to: Some(Stage::Fixing),
+        action: "replay the recorded review: a fix round for its findings, else ready",
+    },
     // `task rm`: anything that is not running, or running with its process gone.
     Row {
         stages: &STAGES,

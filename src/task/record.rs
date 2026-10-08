@@ -270,6 +270,20 @@ pub struct PrBranch {
     pub base: String,
 }
 
+/// The accepted result of the last review of a task with a worker, recorded when its `review.md`
+/// is parsed (part of spec §5.1's `review`; issue 118): `task resume` continues a task left at
+/// `reviewing/completed` from this, never from `review.md` again.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReviewResult {
+    /// The review round (its saved file is `review-<round>.md`).
+    pub round: u32,
+    pub must_fix: u32,
+    /// Whether it covered every commit since the base (`false`: only those since the last review).
+    pub full: bool,
+    /// Whether a must-fix finding validly repeated an earlier one (spec §5.3).
+    pub repeat: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Record {
     pub schema: u32,
@@ -302,6 +316,9 @@ pub struct Record {
     /// §5.1, §5.2: a narrow review exists only once this is set).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_reviewed_commit: Option<String>,
+    /// The last review's result (issue 118); absent in older records and until a review completes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review: Option<ReviewResult>,
     pub gates: Vec<GateResult>,
     /// The latest gate run that passed, and what it covered; cleared when gates start again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -400,6 +417,7 @@ impl Record {
             fix_rounds: DEFAULT_FIX_ROUNDS,
             stopped: None,
             last_reviewed_commit: None,
+            review: None,
             gates: Vec::new(),
             gate_run: None,
             pr: None,

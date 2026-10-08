@@ -107,6 +107,18 @@ pub fn resume(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Re
         review: None,
     };
     let probe = env.probe;
+    // The worker's sandbox runs the worker, the sandbox gates and every fix round; it can vanish
+    // between stages (workflow note G17), so it is made again first when it is gone. A
+    // preparation makes it afresh below instead.
+    if prepared.record.stage != Stage::Prepared {
+        resumed.sandbox_remade = pipeline::ensure_worker_sandbox(env, prepared, false)?;
+        if resumed.sandbox_remade {
+            prepared
+                .record
+                .notes
+                .push("resume: the worker's sandbox was gone and was made again".to_owned());
+        }
+    }
     // Whether the worker runs again (its stage is set up below, running).
     let mut run_worker = false;
     match (prepared.record.stage, prepared.record.status) {
@@ -132,7 +144,6 @@ pub fn resume(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Re
         }
         // T6, T9: the worker runs again in its own clone, which keeps what the last run did.
         (Stage::Working, Status::Running | Status::Failed) => {
-            resumed.sandbox_remade = pipeline::ensure_worker_sandbox(env, prepared, false)?;
             prepared.record.rerun(now(), Process::current(probe))?;
             run_worker = true;
         }
@@ -141,7 +152,6 @@ pub fn resume(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Re
         // fetch of what `repo.git` already has changes nothing). A fix round is counted once its
         // run is over (`review_issue` adds it then), so this one was never counted.
         (Stage::Working | Stage::Fixing, Status::Completed | Status::TimedOut) => {
-            resumed.sandbox_remade = pipeline::ensure_worker_sandbox(env, prepared, false)?;
             pipeline::recollect_commits(env, prepared)?;
             if prepared.record.stage == Stage::Fixing {
                 prepared.record.round += 1;
@@ -156,6 +166,30 @@ pub fn resume(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Re
                 .notes
                 .push("resume: the review was interrupted; it runs again".to_owned());
         }
+        // T4: the review completed, but its process was gone before it acted on the result: the
+        // recorded result is replayed (decision 177(n)), so the reviewer doesn't run again. An
+        // older record without one runs the reviewer again, as after a failed review.
+        (Stage::Reviewing, Status::Completed) => match prepared.record.review.clone() {
+            Some(result) => {
+                let report = pipeline::ReviewReport::default();
+                let round = result.round;
+                resumed.review = Some(pipeline::review_rounds(
+                    env,
+                    prepared,
+                    report,
+                    round,
+                    Some(result),
+                )?);
+                return Ok(resumed);
+            }
+            None => {
+                prepared.record.status = Status::Failed;
+                prepared.record.notes.push(
+                    "resume: the completed review's result was not recorded; it runs again"
+                        .to_owned(),
+                );
+            }
+        },
         // Gates (ended or cut off) and a failed review: what `review_issue` already continues.
         (Stage::Gating, _) | (Stage::Reviewing, Status::Failed) => {}
         (stage, status) => bail!(
@@ -164,12 +198,6 @@ pub fn resume(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Re
             stage.name(),
             status.name()
         ),
-    }
-    if resumed.sandbox_remade && resumed.from.0 != Stage::Prepared {
-        prepared
-            .record
-            .notes
-            .push("resume: the worker's sandbox was gone and was made again".to_owned());
     }
     if run_worker {
         record::write(&prepared.meta, &prepared.record)?;

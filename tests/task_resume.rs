@@ -12,7 +12,7 @@ use sbxm::backend::{FakeBackend, SandboxInfo};
 use sbxm::github::fake::FakeGitHub;
 use sbxm::task::gates::FakeHostRunner;
 use sbxm::task::pipeline::{self, Prepared, TaskEnv};
-use sbxm::task::record::{self, Kind, ProcessProbe, Stage, Status};
+use sbxm::task::record::{self, Kind, ProcessProbe, ReviewResult, Stage, Status};
 use sbxm::task::{repo, resume};
 
 fn config() -> Fixture {
@@ -23,6 +23,7 @@ fn config() -> Fixture {
 }
 
 const CLEAN: &str = "Must-fix findings: 0\n\nNothing found.\n";
+const ONE: &str = "Must-fix findings: 1\n\n1. must-fix: a.txt:1 does the wrong thing.\n";
 
 /// The process a record names is gone (the `sbxm` that wrote it was killed).
 struct Gone;
@@ -367,6 +368,130 @@ fn a_fix_round_that_ended_but_was_never_counted_is_counted() {
     let record = saved(&f);
     assert_eq!(record.round, 1);
     assert_eq!(record.stage, Stage::Ready);
+}
+
+#[test]
+fn a_failed_review_whose_worker_sandbox_is_gone_gets_it_back_for_the_gates_and_fix_rounds() {
+    let f = config();
+    let mut prepared = task_left_in(&f, Stage::Gating, Status::GatesFailed);
+    let backend = backend(&f, &[CLEAN]);
+
+    let resumed = resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap();
+
+    assert!(resumed.sandbox_remade);
+    assert!(
+        backend
+            .creates()
+            .iter()
+            .any(|c| c.name == "sbxm-task-issue-41-claude")
+    );
+    assert_eq!(saved(&f).stage, Stage::Ready);
+}
+
+// ---- A review that completed, its result never acted on (T4) ----
+
+/// Issue 41 left at `reviewing/completed` (its process gone before it moved on), with `review`
+/// saved as `review.md` and its result recorded as `result`.
+fn reviewed_task(f: &Fixture, review: &str, result: Option<ReviewResult>) -> Prepared {
+    let mut prepared = task_left_in(f, Stage::Reviewing, Status::Completed);
+    std::fs::write(meta(f).join("review.md"), review).unwrap();
+    std::fs::write(meta(f).join("review-1.md"), review).unwrap();
+    // A review with findings narrows the next one to the commits after the one it saw.
+    if result.as_ref().is_some_and(|r| r.must_fix > 0) {
+        prepared.record.last_reviewed_commit =
+            Some(repo::branch_tip(&meta(f).join("repo.git"), "issue-41").unwrap());
+    }
+    prepared.record.review = result;
+    record::write(&prepared.meta, &prepared.record).unwrap();
+    prepared
+}
+
+#[test]
+fn a_review_records_its_result_when_it_completes() {
+    let f = config();
+    let backend = backend(&f, &[CLEAN]);
+    let mut prepared = worked_task(&f, &backend);
+
+    resume_free_review(&f, &backend, &mut prepared);
+
+    assert_eq!(
+        saved(&f).review,
+        Some(ReviewResult {
+            round: 1,
+            must_fix: 0,
+            full: true,
+            repeat: false,
+        })
+    );
+}
+
+fn resume_free_review(f: &Fixture, backend: &FakeBackend, prepared: &mut Prepared) {
+    pipeline::review_issue(&env(f, backend, &Gone), prepared).unwrap();
+}
+
+#[test]
+fn a_clean_full_review_is_replayed_to_ready_without_running_the_reviewer() {
+    let f = config();
+    let result = ReviewResult {
+        round: 1,
+        must_fix: 0,
+        full: true,
+        repeat: false,
+    };
+    let mut prepared = reviewed_task(&f, CLEAN, Some(result));
+    let backend = backend(&f, &[CLEAN]);
+
+    let resumed = resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap();
+
+    assert_eq!(count(&backend, "codex"), 0);
+    assert_eq!(count(&backend, "cargo test"), 0);
+    assert!(resumed.review.unwrap().rounds.is_empty(), "nothing new ran");
+    let record = saved(&f);
+    assert_eq!((record.stage, record.status), (Stage::Ready, Status::Ok));
+}
+
+#[test]
+fn a_review_with_findings_is_replayed_into_the_fix_round_it_would_have_started() {
+    let f = config();
+    let result = ReviewResult {
+        round: 1,
+        must_fix: 1,
+        full: true,
+        repeat: false,
+    };
+    let mut prepared = reviewed_task(&f, ONE, Some(result));
+    let backend = backend(&f, &[CLEAN]);
+
+    let resumed = resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap();
+
+    assert_eq!(count(&backend, "fix-prompt.md"), 1, "one fix round");
+    // After the fix: the gates, a narrow review, then the confirming full one.
+    assert_eq!(count(&backend, "codex"), 2);
+    let rounds: Vec<u32> = resumed
+        .review
+        .unwrap()
+        .rounds
+        .iter()
+        .map(|r| r.round)
+        .collect();
+    assert_eq!(rounds, [2, 3], "the replayed review was round 1");
+    let record = saved(&f);
+    assert_eq!((record.stage, record.status), (Stage::Ready, Status::Ok));
+    assert_eq!(record.round, 1);
+}
+
+#[test]
+fn a_record_without_the_result_runs_the_reviewer_again() {
+    // A record written before the result was recorded: `review.md` is not read back instead.
+    let f = config();
+    let mut prepared = reviewed_task(&f, ONE, None);
+    let backend = backend(&f, &[CLEAN]);
+
+    resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap();
+
+    assert_eq!(count(&backend, "fix-prompt.md"), 0);
+    assert_eq!(count(&backend, "codex"), 1);
+    assert_eq!(saved(&f).stage, Stage::Ready);
 }
 
 // ---- Refusals ----

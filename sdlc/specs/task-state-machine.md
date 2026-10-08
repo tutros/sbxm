@@ -193,6 +193,7 @@ kept here as the design for issues #117-121 to build toward.
 | gating running (issue/spec), interrupted | task resume | reviewing | re-run the abandoned gates, then the reviewer |
 | reviewing running (issue/spec), interrupted | task resume | reviewing | run the reviewer again |
 | reviewing failed (issue/spec) | task resume | reviewing | run the reviewer again |
+| reviewing completed (issue/spec) | task resume | fixing | replay the recorded review: a fix round for its findings, else ready |
 | any completed/timed-out/failed/passed/gates-failed/ok | task rm | removed | remove the task's folders and sandboxes |
 | any running, interrupted | task rm | removed | remove the task's folders and sandboxes |
 

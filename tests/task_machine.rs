@@ -211,11 +211,7 @@ fn names(kind: Kind) -> Vec<String> {
 fn the_dead_ends_are_the_gaps_the_spec_lists() {
     assert_eq!(
         names(Kind::Issue),
-        [
-            "Reviewing/Completed",
-            "Fixing/Running+interrupted",
-            "Fixing/Failed",
-        ]
+        ["Fixing/Running+interrupted", "Fixing/Failed",]
     );
     assert_eq!(
         names(Kind::Pr),
@@ -230,10 +226,6 @@ fn the_dead_ends_are_the_gaps_the_spec_lists() {
     // `ready` moves on through `finish` and the `[finish] sink`, so it has the same dead ends.
     assert_eq!(
         names(Kind::Spec),
-        [
-            "Reviewing/Completed",
-            "Fixing/Running+interrupted",
-            "Fixing/Failed",
-        ]
+        ["Fixing/Running+interrupted", "Fixing/Failed",]
     );
 }
