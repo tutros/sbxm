@@ -67,7 +67,14 @@ pub fn run(
         )?;
         return Ok(());
     }
-    writeln!(out, "{id}: pushed {id} and opened {}", done.url)?;
+    if done.draft {
+        writeln!(out, "{id}: pushed {id} and opened draft PR {}", done.url)?;
+        for reason in &done.unresolved {
+            writeln!(out, "  unresolved: {reason}")?;
+        }
+    } else {
+        writeln!(out, "{id}: pushed {id} and opened {}", done.url)?;
+    }
     writeln!(
         out,
         "  next: after it is merged, clean up with: sbxm task rm --issue {}",

@@ -351,10 +351,19 @@ pub fn discard_many(
 /// 65,536 for the whole body).
 pub const SECTION_CAP: usize = 25_000;
 
-/// The PR body: `Fixes #N`, then each file under a heading. A file longer than the cap is cut and
-/// the body says so. Returns the body and one line per cut for the command to print.
-pub fn pr_body(number: u32, result: Option<&str>, review: Option<&str>) -> (String, Vec<String>) {
+/// The PR body: `Fixes #N`, then the [`unresolved_section`] of a draft, then each file under a
+/// heading. A file longer than the cap is cut and the body says so. Returns the body and one line
+/// per cut for the command to print.
+pub fn pr_body(
+    number: u32,
+    unresolved: Option<&str>,
+    result: Option<&str>,
+    review: Option<&str>,
+) -> (String, Vec<String>) {
     let mut body = format!("Fixes #{number}\n");
+    if let Some(section) = unresolved {
+        body.push_str(&format!("\n{}\n", section.trim_end()));
+    }
     let mut cuts = Vec::new();
     for (file, heading, text) in [
         ("result.md", "Result", result),
@@ -383,6 +392,72 @@ pub fn pr_body(number: u32, result: Option<&str>, review: Option<&str>) -> (Stri
     (body, cuts)
 }
 
+/// Why task `task`'s PR must be a draft (decision 173(b)), one line per reason; empty when it is
+/// clean. The must-fix count is the review result recorded in `task.json` (decision 177(f)), or,
+/// for a record from before it was kept, the count in the saved `review`. A count that can't be
+/// read is a reason too: a task with must-fix findings left never gets a normal PR.
+pub fn unresolved_reasons(task: &Record, review: Option<&str>) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if let Some(stopped) = task.stopped {
+        let why = match stopped {
+            record::Stopped::RoundsExhausted => "it used all its fix rounds",
+            record::Stopped::RepeatFinding => "a must-fix finding came back after a fix round",
+        };
+        reasons.push(format!("the task stopped ({}): {why}", stopped.name()));
+    }
+    let must_fix = match &task.review {
+        Some(recorded) => Some(recorded.must_fix),
+        None => review.and_then(super::review::saved_must_fix_count),
+    };
+    match (must_fix, review) {
+        (Some(0), _) => {}
+        (Some(n), _) => reasons.push(format!("the last review has {n} must-fix finding(s) left")),
+        (None, Some(_)) => reasons.push("review.md has no must-fix count".to_owned()),
+        (None, None) => reasons.push("no review result is recorded".to_owned()),
+    }
+    reasons
+}
+
+/// The longest list of findings the draft's section carries, in characters; the review itself
+/// follows in full (up to [`SECTION_CAP`]).
+const UNRESOLVED_CAP: usize = 5_000;
+
+/// The section at the top of a draft PR's body: why it is a draft, then each must-fix finding
+/// of `review` with its `Where:`.
+pub fn unresolved_section(reasons: &[String], review: Option<&str>) -> String {
+    let mut text = "## Unresolved\n\nThis PR is a draft because:\n\n".to_owned();
+    for reason in reasons {
+        text.push_str(&format!("- {reason}\n"));
+    }
+    let must_fix: Vec<_> = review
+        .map(super::findings::parse)
+        .unwrap_or_default()
+        .findings
+        .into_iter()
+        .filter(|f| f.label == "must-fix")
+        .collect();
+    if must_fix.is_empty() {
+        return text;
+    }
+    text.push_str("\nMust-fix findings left (the review below has the details):\n\n");
+    let mut listed = 0;
+    for finding in &must_fix {
+        let line = match finding.field("where") {
+            Some(place) => format!("- {}: {} ({place})\n", finding.id, finding.title),
+            None => format!("- {}: {}\n", finding.id, finding.title),
+        };
+        if listed > 0 && text.chars().count() + line.chars().count() > UNRESOLVED_CAP {
+            break;
+        }
+        text.push_str(&line);
+        listed += 1;
+    }
+    if listed < must_fix.len() {
+        text.push_str(&format!("- and {} more\n", must_fix.len() - listed));
+    }
+    text
+}
+
 /// The note `finish` leaves on a task whose branch is pushed but whose PR isn't open yet.
 const PUSHED_NOTE: &str =
     "the branch is pushed but its PR isn't open; run `sbxm task finish` again";
@@ -397,6 +472,9 @@ pub struct Finished {
     pub cuts: Vec<String>,
     /// The PR the task pushed to, when it continues one (decision 169): no PR was opened.
     pub continued: Option<u32>,
+    /// Whether the PR was opened as a draft, and why ([`unresolved_reasons`]).
+    pub draft: bool,
+    pub unresolved: Vec<String>,
 }
 
 /// Whether the task may be finished now. Decided through `machine::TABLE` once the `pr` field (not
@@ -546,7 +624,15 @@ pub fn finish(
             refuse_secrets(name, text)?;
         }
     }
-    let (body, cuts) = pr_body(task.number, result.as_deref(), review.as_deref());
+    let unresolved = unresolved_reasons(&task, review.as_deref());
+    let draft = !unresolved.is_empty();
+    let section = draft.then(|| unresolved_section(&unresolved, review.as_deref()));
+    let (body, cuts) = pr_body(
+        task.number,
+        section.as_deref(),
+        result.as_deref(),
+        review.as_deref(),
+    );
 
     repo::push(&repo_git, &task.branch)?;
     let request = PrRequest {
@@ -554,7 +640,7 @@ pub fn finish(
         base: task.base.clone(),
         title: task.title.clone(),
         body,
-        draft: false,
+        draft,
     };
     let url = match github.pr_create(&task.repo, &request) {
         Ok(url) => url,
@@ -582,6 +668,8 @@ pub fn finish(
         branch: task.branch,
         cuts,
         continued: None,
+        draft,
+        unresolved,
     })
 }
 
@@ -814,5 +902,7 @@ fn finish_continued(
         branch: task.branch.clone(),
         cuts: Vec::new(),
         continued: Some(pr),
+        draft: false,
+        unresolved: Vec::new(),
     })
 }

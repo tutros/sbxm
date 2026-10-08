@@ -10,11 +10,12 @@ use common::task_fixture::{
     CLAUDE_DONE, Fixture, Play, Probe, backend, fixture, ok, play, worked_task,
 };
 use sbxm::github::fake::{FakeGitHub, GhCall};
-use sbxm::task::finish::{SECTION_CAP, check_can_finish, finish, pr_body};
+use sbxm::task::finish::{SECTION_CAP, check_can_finish, finish, pr_body, unresolved_section};
 use sbxm::task::pipeline::Prepared;
 use sbxm::task::record::{self, Kind, NewTask, Process, Record, Stage, Status};
 
-const REVIEW: &str = "Reviewer: codex (default)\nMust-fix findings: 0\n\nNothing found.\n";
+/// As `review::with_header` saves it: the reviewer's line, a blank line, then the review.
+const REVIEW: &str = "Reviewer: codex (default)\n\nMust-fix findings: 0\n\nNothing found.\n";
 
 /// Issue 41 worked, its gates and review done by hand: `ready`, with a result and a review.
 fn ready(f: &Fixture) -> Prepared {
@@ -107,9 +108,159 @@ fn a_ready_task_is_pushed_and_its_pr_is_opened_with_the_result_and_review() {
         "{}",
         request.body
     );
+    // A clean task gets a normal PR, as before issue 120.
+    assert!(!request.draft);
+    assert!(!done.draft);
+    assert!(!request.body.contains("## Unresolved"), "{}", request.body);
     let record = reread(&f);
     assert_eq!((record.stage, record.status), (Stage::Finished, Status::Ok));
     assert_eq!(record.pr.as_deref(), Some(done.url.as_str()));
+}
+
+const REVIEW_WITH_MUST_FIX: &str = "Reviewer: codex (default)\n\nMust-fix findings: 2\n\n\
+## Must fix\n\n\
+### M-1: The lock is never released\n\n\
+**Where:** `src/lock.rs:10`\n\
+**What happens:** x\n\
+**Why it matters:** y\n\
+**Fix:** z\n\n\
+### M-2: The count is off by one\n\n\
+**Where:** `src/count.rs:3`\n\
+**What happens:** x\n\
+**Why it matters:** y\n\
+**Fix:** z\n\n\
+## Should fix\n\n\
+### S-1: A name is unclear\n\n\
+**Where:** `src/name.rs:1`\n\
+**What happens:** x\n\
+**Why it matters:** y\n\
+**Fix:** z\n";
+
+/// The PR request `finish` made, after checking it made exactly one.
+fn only_pr_request(github: &FakeGitHub) -> sbxm::github::PrRequest {
+    let calls = github.calls();
+    let [GhCall::PrCreate(_, request)] = calls.as_slice() else {
+        panic!("{calls:?}")
+    };
+    request.clone()
+}
+
+#[test]
+fn a_ready_task_with_must_fix_left_opens_a_draft_that_lists_the_findings() {
+    let f = fixture();
+    let prepared = ready(&f);
+    fs::write(prepared.meta.join("review.md"), REVIEW_WITH_MUST_FIX).unwrap();
+    let github = FakeGitHub::default();
+
+    let done = run(&f, &github).unwrap();
+
+    let request = only_pr_request(&github);
+    assert!(request.draft);
+    assert!(done.draft);
+    let body = &request.body;
+    assert!(body.starts_with("Fixes #41\n"), "{body}");
+    let unresolved = body.find("## Unresolved").expect(body);
+    assert!(unresolved < body.find("## Result").unwrap(), "{body}");
+    assert!(body.contains("2 must-fix finding(s) left"), "{body}");
+    assert!(
+        body.contains("- M-1: The lock is never released (`src/lock.rs:10`)"),
+        "{body}"
+    );
+    assert!(
+        body.contains("- M-2: The count is off by one (`src/count.rs:3`)"),
+        "{body}"
+    );
+    // Only must-fix findings are the reason for the draft; the rest is in the review below.
+    let section = &body[unresolved..body.find("## Result").unwrap()];
+    assert!(!section.contains("S-1"), "{section}");
+    let record = reread(&f);
+    assert_eq!(record.stage, Stage::Finished);
+    assert_eq!(record.pr.as_deref(), Some(done.url.as_str()));
+}
+
+#[test]
+fn a_stopped_task_opens_a_draft_that_names_the_reason() {
+    let f = fixture();
+    let mut prepared = ready(&f);
+    fs::write(prepared.meta.join("review.md"), REVIEW_WITH_MUST_FIX).unwrap();
+    prepared.record.stopped = Some(record::Stopped::RepeatFinding);
+    record::write(&prepared.meta, &prepared.record).unwrap();
+    let github = FakeGitHub::default();
+
+    run(&f, &github).unwrap();
+
+    let request = only_pr_request(&github);
+    assert!(request.draft);
+    assert!(request.body.contains("repeat-finding"), "{}", request.body);
+    assert!(request.body.contains("- M-1: The lock"), "{}", request.body);
+}
+
+#[test]
+fn a_stopped_task_with_no_must_fix_left_is_still_a_draft() {
+    let f = fixture();
+    let mut prepared = ready(&f);
+    prepared.record.stopped = Some(record::Stopped::RoundsExhausted);
+    record::write(&prepared.meta, &prepared.record).unwrap();
+    let github = FakeGitHub::default();
+
+    run(&f, &github).unwrap();
+
+    let request = only_pr_request(&github);
+    assert!(request.draft);
+    assert!(
+        request.body.contains("rounds-exhausted"),
+        "{}",
+        request.body
+    );
+    assert!(request.body.contains("## Unresolved"), "{}", request.body);
+}
+
+#[test]
+fn the_recorded_review_decides_the_draft_not_an_edited_review_md() {
+    // Decision 177(f): `finish` reads the review result recorded in task.json, so a review.md
+    // edited to say 0 can't turn a task with must-fix left into a normal PR.
+    let f = fixture();
+    let mut prepared = ready(&f);
+    prepared.record.review = Some(record::ReviewResult {
+        round: 1,
+        must_fix: 1,
+        full: true,
+        repeat: false,
+    });
+    record::write(&prepared.meta, &prepared.record).unwrap();
+    let github = FakeGitHub::default();
+
+    run(&f, &github).unwrap();
+
+    let request = only_pr_request(&github);
+    assert!(request.draft);
+    assert!(
+        request.body.contains("1 must-fix finding(s) left"),
+        "{}",
+        request.body
+    );
+}
+
+#[test]
+fn a_review_md_without_a_must_fix_count_and_no_recorded_review_is_a_draft() {
+    let f = fixture();
+    let prepared = ready(&f);
+    fs::write(
+        prepared.meta.join("review.md"),
+        "Reviewer: codex (default)\n\nLooks fine.\n",
+    )
+    .unwrap();
+    let github = FakeGitHub::default();
+
+    run(&f, &github).unwrap();
+
+    let request = only_pr_request(&github);
+    assert!(request.draft);
+    assert!(
+        request.body.contains("no must-fix count"),
+        "{}",
+        request.body
+    );
 }
 
 #[test]
@@ -238,7 +389,7 @@ fn a_secret_in_review_or_result_stops_the_publish_without_echoing_it() {
 fn a_huge_file_is_cut_to_the_cap_and_the_body_says_so() {
     let big = "x".repeat(SECTION_CAP * 2);
 
-    let (body, cuts) = pr_body(7, Some(&big), None);
+    let (body, cuts) = pr_body(7, None, Some(&big), None);
 
     assert!(body.chars().count() < 65_536, "{}", body.len());
     assert!(
@@ -394,4 +545,22 @@ fn other_files_under_dot_github_and_look_alike_paths_are_fine() {
     run(&f, &github).unwrap();
 
     assert!(origin_has(&f, "issue-41"));
+}
+
+#[test]
+fn a_long_list_of_must_fix_findings_is_cut_and_counted() {
+    let mut review = "Must-fix findings: 200\n\n## Must fix\n\n".to_owned();
+    for n in 1..=200 {
+        review.push_str(&format!(
+            "### M-{n}: {}\n\n**Where:** `src/a.rs:{n}`\n\n",
+            "t".repeat(100)
+        ));
+    }
+
+    let section = unresolved_section(&["why".to_owned()], Some(&review));
+
+    assert!(section.chars().count() < 6_000, "{}", section.len());
+    assert!(section.contains("- M-1: "), "{section}");
+    assert!(!section.contains("- M-200: "), "{section}");
+    assert!(section.trim_end().ends_with("more"), "{section}");
 }
