@@ -212,6 +212,24 @@ pub fn must_fix_findings(review: &str, round: u32) -> Vec<OpenFinding> {
         .collect()
 }
 
+/// The must-fix findings open after the saved reviews `saved` (`(round, review-<round>.md)`,
+/// oldest first), for a record written before `open_findings` existed (decision 177(p)): each
+/// accepted round (one with a must-fix count) is replayed through [`open_after`]; it was `full`
+/// when it was the first or the accepted round before it had no must-fix finding, the same rule
+/// that clears `last_reviewed_commit`. No accepted round leaves nothing open.
+pub fn open_from_saved(saved: &[(u32, &str)]) -> Vec<OpenFinding> {
+    let mut open: Option<Vec<OpenFinding>> = None;
+    let mut full = true;
+    for (round, text) in saved {
+        let Some(must_fix) = saved_must_fix_count(text) else {
+            continue;
+        };
+        open = Some(open_after(open.as_deref(), text, *round, full));
+        full = must_fix == 0;
+    }
+    open.unwrap_or_default()
+}
+
 /// The must-fix findings open once review round `round` (`current`, the reviewer's text) is
 /// accepted (decision 177(p)): a `full` review saw every commit, so its findings are all that is
 /// open; a narrow one saw only the latest, so the `earlier` open findings stay, except one it

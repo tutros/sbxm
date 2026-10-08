@@ -9,7 +9,7 @@
 //! gets a warning.
 
 use sbxm::task::review::{
-    invalid_repeat_claims, must_fix_count, repeats_a_must_fix_finding, with_header,
+    invalid_repeat_claims, must_fix_count, open_from_saved, repeats_a_must_fix_finding, with_header,
 };
 
 const PREVIOUS: &str = "Must-fix findings: 1\n\n\
@@ -214,5 +214,54 @@ fn a_reviewer_with_no_chosen_model_says_default_model() {
     assert!(
         text.starts_with("Reviewer: claude (default model)\n\n"),
         "{text}"
+    );
+}
+
+// ---- Rebuilding the open findings of a record from before `open_findings` (review round 3, M-2) ----
+
+fn ids(saved: &[(u32, &str)]) -> Vec<(u32, String)> {
+    open_from_saved(saved)
+        .into_iter()
+        .map(|o| (o.round, o.id))
+        .collect()
+}
+
+#[test]
+fn no_accepted_review_leaves_nothing_open() {
+    assert!(ids(&[]).is_empty());
+    // A saved review without a must-fix count was never accepted.
+    let unread = with_header("codex", None, "I could not finish.\n");
+    assert!(ids(&[(1, &unread)]).is_empty());
+}
+
+#[test]
+fn a_narrow_review_keeps_the_full_reviews_findings_it_does_not_repeat() {
+    let first = with_header("codex", None, &current("b.txt:1", None, "must fix"));
+    let second = with_header("codex", None, &current("a.txt:5", Some("M-1"), "must fix"));
+    let first_two = with_header("codex", None, PREVIOUS);
+
+    // Round 1 (full) found M-1 in b.txt; round 2 (narrow) found an M-1 in a.txt that repeats
+    // nothing in its file, so both stay open.
+    assert_eq!(
+        ids(&[(1, &first), (2, &second)]),
+        [(1, "M-1".to_owned()), (2, "M-1".to_owned())]
+    );
+    // Round 1 found M-1 in a.txt; round 2 repeats it, so its own M-1 replaces it.
+    assert_eq!(
+        ids(&[(1, &first_two), (2, &second)]),
+        [(2, "M-1".to_owned())]
+    );
+}
+
+#[test]
+fn a_review_after_a_clean_one_is_full_and_replaces_what_was_open() {
+    let found = with_header("codex", None, PREVIOUS);
+    let clean = with_header("codex", None, CLEAN);
+    let again = with_header("codex", None, &current("b.txt:1", None, "must fix"));
+
+    // Round 1 found M-1, round 2 (narrow) was clean, so round 3 was full: only its findings.
+    assert_eq!(
+        ids(&[(1, &found), (2, &clean), (3, &again)]),
+        [(3, "M-1".to_owned())]
     );
 }

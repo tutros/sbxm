@@ -2661,6 +2661,21 @@ fn run_review_agent(
     let repeat = review::repeats_a_must_fix_finding(&text, &earlier_refs);
     let warnings = review::invalid_repeat_claims(&text, &earlier_refs);
     let full = prepared.record.last_reviewed_commit.is_none();
-    let open = review::open_after(prepared.record.open_findings.as_deref(), &text, round, full);
+    let earlier_open = match &prepared.record.open_findings {
+        Some(open) => open.clone(),
+        // A record from before the list: rebuilt from the saved reviews, never taken as empty.
+        None => {
+            let saved: Vec<(u32, String)> = (1..round)
+                .filter_map(|r| {
+                    fs::read_to_string(prepared.meta.join(format!("review-{r}.md")))
+                        .ok()
+                        .map(|text| (r, text))
+                })
+                .collect();
+            let refs: Vec<(u32, &str)> = saved.iter().map(|(r, t)| (*r, t.as_str())).collect();
+            review::open_from_saved(&refs)
+        }
+    };
+    let open = review::open_after(Some(&earlier_open), &text, round, full);
     Ok((must_fix, repeat, warnings, open))
 }
