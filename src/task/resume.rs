@@ -8,7 +8,7 @@ use anyhow::{Result, bail};
 
 use super::machine::{self, Event};
 use super::pipeline::{self, Prepared, ReviewReport, TaskEnv, Worked};
-use super::record::{self, Kind, Process, ProcessProbe, Record, Stage, Status};
+use super::record::{self, Kind, Process, ProcessProbe, Record, Stage, Status, Stopped};
 use crate::headless::RunStatus;
 use crate::run::results::now;
 
@@ -79,7 +79,11 @@ pub fn check_can_resume(
         kind: task.kind,
     };
     if machine::verdict(&state, Event::Resume) {
-        return Ok(());
+        return if task.stage == Stage::Ready {
+            check_stopped(task, rounds)
+        } else {
+            Ok(())
+        };
     }
     match task.stage {
         Stage::Finished => bail!(
@@ -93,6 +97,38 @@ pub fn check_can_resume(
             status_hint(task)
         ),
     }
+}
+
+/// The flag that names a task on the command line again: a spec task's file isn't recorded, so
+/// it is named by its placeholder.
+fn target_flag(task: &Record) -> String {
+    match task.kind {
+        Kind::Spec => "--spec <file>".to_owned(),
+        _ => format!("--issue {}", task.number),
+    }
+}
+
+/// A `ready` task is resumed only when it stopped with something unresolved (spec section 5.2):
+/// `--rounds N` adds rounds from any stop, and without it a repeat stop needs rounds left in the
+/// budget (decision 177(q)).
+fn check_stopped(task: &Record, rounds: Option<u32>) -> Result<()> {
+    let (id, flag) = (&task.id, target_flag(task));
+    let Some(stopped) = task.stopped else {
+        bail!(
+            "task {id} is ready and did not stop on anything unresolved, so there is nothing to \
+             resume; publish it with `sbxm task finish {flag}`"
+        );
+    };
+    let used_up = task.round >= task.fix_rounds;
+    if rounds.is_none() && (stopped == Stopped::RoundsExhausted || used_up) {
+        bail!(
+            "task {id} stopped ready ({}) with all {} of its fix rounds used; give it more with \
+             `sbxm task resume {flag} --rounds N`",
+            stopped.name(),
+            task.fix_rounds
+        );
+    }
+    Ok(())
 }
 
 /// Continues the task from its recorded stage (issue 118). Checks first: nothing runs or is
@@ -157,6 +193,20 @@ pub fn resume(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Re
                 prepared.record.round += 1;
             }
         }
+        // Stopped `ready`: the budget grows by `--rounds`, `stopped` is cleared (a later stop sets
+        // it again), and a fix round runs from the recorded review.
+        (Stage::Ready, _) => {
+            if let Some(n) = rounds {
+                prepared.record.fix_rounds += n;
+            }
+            let was = prepared.record.stopped.take().map_or("", Stopped::name);
+            prepared.record.notes.push(format!(
+                "resume: stopped {was}; another fix round, {} of {} used so far",
+                prepared.record.round, prepared.record.fix_rounds
+            ));
+            resumed.review = Some(pipeline::fix_from_ready(env, prepared)?);
+            return Ok(resumed);
+        }
         // T5, T9: the fix round runs again in the same clone with the input it was given, then
         // the gates and the review rounds go on.
         (Stage::Fixing, Status::Running | Status::Failed) => {
@@ -186,6 +236,7 @@ pub fn resume(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Re
                     report,
                     round,
                     Some(result),
+                    false,
                 )?);
                 return Ok(resumed);
             }

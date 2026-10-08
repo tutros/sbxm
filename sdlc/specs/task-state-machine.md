@@ -172,6 +172,7 @@ kept here as the design for issues #117-121 to build toward.
 | fixing completed/timed-out (issue/spec) | advance | gating | run the gates |
 | ready ok (issue) | advance | finished | push the branch and open the PR |
 | ready ok (spec) | advance | finished | deliver the branch through the [finish] sink |
+| ready ok (issue/spec) | advance | fixing | run a fix round from the recorded review |
 | working/fixing completed/timed-out (issue/spec) | task gates | gating | run the gates |
 | gating passed/gates-failed (issue/spec) | task gates | gating | re-run the gates |
 | gating running (issue/spec), interrupted | task gates | gating | re-run the abandoned gates |
@@ -196,6 +197,7 @@ kept here as the design for issues #117-121 to build toward.
 | fixing running (issue/spec), interrupted | task resume | fixing | run the fix round again in its clone, then the gates and the review |
 | fixing failed (issue/spec) | task resume | fixing | run the fix round again in its clone, then the gates and the review |
 | reviewing completed (issue/spec) | task resume | fixing | replay the recorded review: a fix round for its findings, else ready |
+| ready ok (issue/spec) | task resume | fixing | when stopped: a fix round from the recorded review (--rounds N adds N rounds) |
 | any completed/timed-out/failed/passed/gates-failed/ok | task rm | removed | remove the task's folders and sandboxes |
 | any running, interrupted | task rm | removed | remove the task's folders and sandboxes |
 

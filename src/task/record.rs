@@ -86,7 +86,8 @@ impl Stage {
             (Self::Gating, Kind::Pr) => &[Self::Reviewing],
             (Self::Reviewing, Kind::Issue | Kind::Spec) => &[Self::Fixing, Self::Ready],
             (Self::Reviewing, Kind::Pr) => &[Self::Ready],
-            (Self::Ready, Kind::Issue | Kind::Spec) => &[Self::Finished],
+            // `task resume` reopens a task that stopped `ready` for another fix round (issue 118).
+            (Self::Ready, Kind::Issue | Kind::Spec) => &[Self::Finished, Self::Fixing],
             (Self::Ready, Kind::Pr) | (Self::Finished, _) => &[],
         }
     }

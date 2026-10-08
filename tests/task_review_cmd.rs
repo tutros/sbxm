@@ -167,6 +167,13 @@ fn findings_left_after_the_fix_round_are_reported_and_the_command_still_succeeds
         "{}",
         out.out
     );
+    // The budget ran out: another round is one command away (issue 118).
+    assert!(
+        out.out
+            .contains("or give it more fix rounds: sbxm task resume --issue 41 --rounds 1"),
+        "{}",
+        out.out
+    );
 }
 
 #[test]

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
-use super::task_review::print_review;
+use super::task_review::{print_review, resume_hint};
 use super::task_start::spec_flag;
 use crate::backend::SandboxBackend;
 use crate::config::GlobalConfig;
@@ -90,6 +90,14 @@ pub fn run(
         prepared.record.stage.name(),
         prepared.record.status.name()
     )?;
+    if let Some(n) = opts.rounds {
+        writeln!(
+            out,
+            "{id}: {n} more fix round(s), {} in all (stopped: {})",
+            prepared.record.fix_rounds + n,
+            prepared.record.stopped.map_or("", record::Stopped::name)
+        )?;
+    }
     let resumed = resume::resume(&env, &mut prepared, opts.rounds)?;
     let flag = opts.target.flag();
 
@@ -130,6 +138,9 @@ pub fn run(
             out,
             "  next: fix them by hand, or file them: sbxm task file-findings --issue {n}"
         )?,
+    }
+    if let Some(hint) = resume_hint(&prepared.record, &flag) {
+        writeln!(out, "{hint}")?;
     }
     Ok(())
 }

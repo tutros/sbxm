@@ -159,7 +159,23 @@ fn run_issue(
             "  next: fix them by hand, or file them: sbxm task file-findings --issue {number}"
         )?,
     }
+    if let Some(hint) = resume_hint(&prepared.record, &format!("--issue {number}")) {
+        writeln!(out, "{hint}")?;
+    }
     Ok(())
+}
+
+/// The line after `next:` for a task that stopped `ready` (issue 118): `task resume` gives it
+/// another fix round, with `--rounds` once its budget is used. `None` for a task that didn't stop.
+pub(super) fn resume_hint(record: &record::Record, flag: &str) -> Option<String> {
+    let stopped = record.stopped?;
+    Some(
+        if stopped == record::Stopped::RoundsExhausted || record.round >= record.fix_rounds {
+            format!("  or give it more fix rounds: sbxm task resume {flag} --rounds 1")
+        } else {
+            format!("  or fix them in another round: sbxm task resume {flag}")
+        },
+    )
 }
 
 /// Prints how the review of a task with a worker went (`task review`, `task resume`): warnings
@@ -276,6 +292,9 @@ fn run_spec(
         );
     }
     writeln!(out, "  next: sbxm task finish {}", spec_flag(path))?;
+    if let Some(hint) = resume_hint(&prepared.record, &spec_flag(path)) {
+        writeln!(out, "{hint}")?;
+    }
     Ok(())
 }
 

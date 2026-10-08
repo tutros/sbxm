@@ -206,6 +206,17 @@ pub const TABLE: &[Row] = &[
         to: Some(Stage::Finished),
         action: "deliver the branch through the [finish] sink",
     },
+    // `task resume` on a task that stopped `ready` (issue 118); `resume` checks `stopped`
+    // and the budget, which this table does not model.
+    Row {
+        stages: &[Stage::Ready],
+        statuses: &[Status::Ok],
+        live: Live::Any,
+        kinds: HAS_WORKER,
+        event: Event::Advance(Stage::Fixing),
+        to: Some(Stage::Fixing),
+        action: "run a fix round from the recorded review",
+    },
     // `task gates` (a task with a worker: issue and spec).
     Row {
         stages: &[Stage::Working, Stage::Fixing],
@@ -434,6 +445,17 @@ pub const TABLE: &[Row] = &[
         event: Event::Resume,
         to: Some(Stage::Fixing),
         action: "replay the recorded review: a fix round for its findings, else ready",
+    },
+    // A task that stopped `ready` with findings left (`stopped`): another fix round, after
+    // `--rounds N` added to the budget when it was used (decisions 173(c), 177(b)(q)).
+    Row {
+        stages: &[Stage::Ready],
+        statuses: &[Status::Ok],
+        live: Live::Any,
+        kinds: HAS_WORKER,
+        event: Event::Resume,
+        to: Some(Stage::Fixing),
+        action: "when stopped: a fix round from the recorded review (--rounds N adds N rounds)",
     },
     // `task rm`: anything that is not running, or running with its process gone.
     Row {

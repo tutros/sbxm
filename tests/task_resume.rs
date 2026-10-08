@@ -12,18 +12,41 @@ use sbxm::backend::{ExecOutput, FakeBackend, SandboxInfo};
 use sbxm::github::fake::FakeGitHub;
 use sbxm::task::gates::FakeHostRunner;
 use sbxm::task::pipeline::{self, Prepared, TaskEnv};
-use sbxm::task::record::{self, Kind, ProcessProbe, ReviewResult, Stage, Status};
+use sbxm::task::record::{self, Kind, ProcessProbe, ReviewResult, Stage, Status, Stopped};
 use sbxm::task::{repo, resume};
 
 fn config() -> Fixture {
-    fixture_with(
-        "[sandbox]\nprofile = \"default\"\n\n[worker]\nfix_rounds = 1\n\n\
+    config_with_fix_rounds(1)
+}
+
+fn config_with_fix_rounds(fix_rounds: u32) -> Fixture {
+    fixture_with(&format!(
+        "[sandbox]\nprofile = \"default\"\n\n[worker]\nfix_rounds = {fix_rounds}\n\n\
          [gates]\nsandbox = [\"cargo test\"]\n\n[reviewer]\nharness = \"codex\"\n",
-    )
+    ))
 }
 
 const CLEAN: &str = "Must-fix findings: 0\n\nNothing found.\n";
 const ONE: &str = "Must-fix findings: 1\n\n1. must-fix: a.txt:1 does the wrong thing.\n";
+
+/// A structured must-fix finding, so a later round can claim to repeat it (spec §5.3).
+const FINDING1: &str = "Must-fix findings: 1\n\n\
+    ## Must fix\n\n\
+    ### M-1 - a.txt does the wrong thing\n\n\
+    **Where:** `a.txt:1`\n\
+    **What happens:** it returns the wrong value\n\
+    **Why it matters:** decision 1\n\
+    **Fix:** return the right value\n";
+
+/// Validly repeats `FINDING1`'s `M-1` (same file).
+const REPEAT: &str = "Must-fix findings: 1\n\n\
+    ## Must fix\n\n\
+    ### M-1 - a.txt still does the wrong thing\n\n\
+    **Where:** `a.txt:5`\n\
+    **What happens:** it still returns the wrong value\n\
+    **Why it matters:** decision 1\n\
+    **Fix:** return the right value\n\
+    **Repeat of:** M-1\n";
 
 /// The process a record names is gone (the `sbxm` that wrote it was killed).
 struct Gone;
@@ -590,6 +613,142 @@ fn a_failed_fix_round_for_a_gate_runs_again_with_the_gate_s_output() {
     assert_eq!(count(&backend, "fix-prompt.md"), 1);
     let record = saved(&f);
     assert_eq!((record.stage, record.round), (Stage::Ready, 1));
+}
+
+// ---- A task that stopped ready (`--rounds N`, decisions 173(c), 177(b)(q)) ----
+
+/// Issue 41 reviewed through `reviews` with the config's budget, ending `ready` with `stopped`.
+fn stopped_task(f: &Fixture, reviews: &[&str]) -> Prepared {
+    let first = backend(f, reviews);
+    let mut prepared = worked_task(f, &first);
+    pipeline::review_issue(&env(f, &first, &Gone), &mut prepared).unwrap();
+    let record = saved(f);
+    assert_eq!(record.stage, Stage::Ready);
+    assert!(record.stopped.is_some());
+    prepared
+}
+
+#[test]
+fn rounds_n_raises_the_budget_and_starts_a_fix_round_from_the_review() {
+    let f = config();
+    // Round 1 finds one, the one fix round runs, round 2 still finds one: rounds-exhausted.
+    let mut prepared = stopped_task(&f, &[ONE, ONE]);
+    assert_eq!(prepared.record.stopped, Some(Stopped::RoundsExhausted));
+    let review = std::fs::read_to_string(meta(&f).join("review.md")).unwrap();
+    let backend = backend(&f, &[CLEAN]);
+
+    let resumed = resume::resume(&env(&f, &backend, &Gone), &mut prepared, Some(2)).unwrap();
+
+    assert_eq!(count(&backend, "fix-prompt.md"), 1);
+    let workspace = f.env.base_dir().join("tasks").join("issue-41");
+    assert_eq!(
+        std::fs::read_to_string(workspace.join(".sbxm-task").join("review.md")).unwrap(),
+        review,
+        "the fix round works from the review the task stopped on"
+    );
+    let rounds: Vec<(u32, bool)> = resumed
+        .review
+        .unwrap()
+        .rounds
+        .iter()
+        .map(|r| (r.round, r.full))
+        .collect();
+    assert_eq!(rounds, [(3, false), (4, true)]);
+    let record = saved(&f);
+    assert_eq!((record.stage, record.status), (Stage::Ready, Status::Ok));
+    assert_eq!((record.round, record.fix_rounds), (2, 3));
+    assert_eq!(record.stopped, None, "a successful resume clears it");
+}
+
+#[test]
+fn plain_resume_of_a_task_that_used_all_its_rounds_is_refused_and_names_rounds() {
+    let f = config();
+    let mut prepared = stopped_task(&f, &[ONE, ONE]);
+    let backend = backend(&f, &[CLEAN]);
+
+    let message = format!(
+        "{:#}",
+        resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap_err()
+    );
+
+    assert!(message.contains("--rounds"), "{message}");
+    assert!(message.contains("rounds-exhausted"), "{message}");
+    assert!(backend.execs().is_empty());
+}
+
+#[test]
+fn rounds_zero_is_refused() {
+    let f = config();
+    let mut prepared = stopped_task(&f, &[ONE, ONE]);
+    let backend = backend(&f, &[CLEAN]);
+
+    let message = format!(
+        "{:#}",
+        resume::resume(&env(&f, &backend, &Gone), &mut prepared, Some(0)).unwrap_err()
+    );
+
+    assert!(message.contains("1 or more"), "{message}");
+    assert_eq!(saved(&f).fix_rounds, 1);
+}
+
+#[test]
+fn rounds_on_a_task_that_did_not_stop_ready_is_refused() {
+    let f = config();
+    let mut prepared = task_left_in(&f, Stage::Working, Status::Failed);
+    let backend = backend(&f, &[CLEAN]);
+
+    let message = format!(
+        "{:#}",
+        resume::resume(&env(&f, &backend, &Gone), &mut prepared, Some(1)).unwrap_err()
+    );
+
+    assert!(message.contains("without --rounds"), "{message}");
+    assert!(backend.execs().is_empty());
+}
+
+#[test]
+fn a_ready_task_that_did_not_stop_is_refused_and_names_finish() {
+    let f = config();
+    let first = backend(&f, &[CLEAN]);
+    let mut prepared = worked_task(&f, &first);
+    pipeline::review_issue(&env(&f, &first, &Gone), &mut prepared).unwrap();
+    let backend = backend(&f, &[CLEAN]);
+
+    for rounds in [None, Some(1)] {
+        let message = format!(
+            "{:#}",
+            resume::resume(&env(&f, &backend, &Gone), &mut prepared, rounds).unwrap_err()
+        );
+        assert!(message.contains("task finish --issue 41"), "{message}");
+    }
+    assert!(backend.execs().is_empty());
+}
+
+#[test]
+fn a_repeat_stop_with_rounds_left_resumes_without_rounds_and_its_first_review_ignores_repeats() {
+    let f = config_with_fix_rounds(3);
+    // Round 1 finds M-1, the fix round runs, round 2 repeats it: stopped with 2 rounds left.
+    let mut prepared = stopped_task(&f, &[FINDING1, REPEAT]);
+    assert_eq!(prepared.record.stopped, Some(Stopped::RepeatFinding));
+    assert_eq!(prepared.record.round, 1);
+    // After the resumed fix round, round 3 repeats M-1 again: ignored once, so another fix round
+    // runs instead of an immediate stop; then round 4 (narrow) and 5 (full) are clean.
+    let backend = backend(&f, &[REPEAT, CLEAN, CLEAN]);
+
+    let resumed = resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap();
+
+    assert_eq!(count(&backend, "fix-prompt.md"), 2);
+    let rounds: Vec<u32> = resumed
+        .review
+        .unwrap()
+        .rounds
+        .iter()
+        .map(|r| r.round)
+        .collect();
+    assert_eq!(rounds, [3, 4, 5]);
+    let record = saved(&f);
+    assert_eq!((record.stage, record.stopped), (Stage::Ready, None));
+    assert_eq!((record.round, record.fix_rounds), (3, 3));
 }
 
 // ---- Refusals ----

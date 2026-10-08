@@ -1616,7 +1616,7 @@ pub fn review_issue(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewRepo
     }
 
     let round = prepared.record.round + 1;
-    review_rounds(env, prepared, report, round, None)
+    review_rounds(env, prepared, report, round, None, false)
 }
 
 /// The review rounds of [`review_issue`], from review round `round` on: each review, and while
@@ -1624,13 +1624,16 @@ pub fn review_issue(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewRepo
 /// then `ready`. `first` is a review that already completed (`task resume` replaying the recorded
 /// [`record::ReviewResult`], issue 118): it stands in for the first round instead of running the
 /// reviewer again (it was reported when it ran, so it is not one of `report.rounds`), and the
-/// rounds go on from its number.
+/// rounds go on from its number. With `ignore_repeat`, the first review that runs does not stop
+/// the task on a repeat: the first review after `task resume` reopened a stopped task (spec
+/// §5.3), so it is not stopped again at once.
 pub(super) fn review_rounds(
     env: &TaskEnv,
     prepared: &mut Prepared,
     mut report: ReviewReport,
     mut round: u32,
     mut first: Option<record::ReviewResult>,
+    mut ignore_repeat: bool,
 ) -> Result<ReviewReport> {
     loop {
         let (must_fix, full, repeat) = match first.take() {
@@ -1640,7 +1643,8 @@ pub(super) fn review_rounds(
             }
             None => {
                 let reviewed = run_reviewer(env, prepared, round)?;
-                let outcome = (reviewed.must_fix, reviewed.full, reviewed.repeat);
+                let repeat = reviewed.repeat && !std::mem::take(&mut ignore_repeat);
+                let outcome = (reviewed.must_fix, reviewed.full, repeat);
                 report.warnings.extend(reviewed.warnings.clone());
                 report.rounds.push(reviewed);
                 outcome
@@ -1689,6 +1693,18 @@ pub(super) fn review_rounds(
 /// round never was), the gates run (feeding further fix rounds while the budget allows), then
 /// the review rounds go on from the one after the last recorded review, to `ready`.
 pub(super) fn continue_after_fix(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewReport> {
+    after_fix(env, prepared, false)
+}
+
+/// A task that stopped `ready` with must-fix findings, reopened by `task resume` (issue 118,
+/// decisions 173(c), 177(b)(q)): a fix round from the recorded review, then as after any fix
+/// round, except that the first review after it doesn't stop the task on a repeat.
+pub(super) fn fix_from_ready(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewReport> {
+    run_fix_round(env, prepared, None)?;
+    after_fix(env, prepared, true)
+}
+
+fn after_fix(env: &TaskEnv, prepared: &mut Prepared, ignore_repeat: bool) -> Result<ReviewReport> {
     let mut report = ReviewReport::default();
     prepared.record.round += 1;
     report.fix_ran = true;
@@ -1701,7 +1717,7 @@ pub(super) fn continue_after_fix(env: &TaskEnv, prepared: &mut Prepared) -> Resu
         .review
         .as_ref()
         .map_or(prepared.record.round + 1, |last| last.round + 1);
-    review_rounds(env, prepared, report, round, None)
+    review_rounds(env, prepared, report, round, None, ignore_repeat)
 }
 
 /// How the review of a pull request went.

@@ -19,6 +19,7 @@ fn config() -> Fixture {
 }
 
 const CLEAN: &str = "Must-fix findings: 0\n\nNothing found.\n";
+const ONE: &str = "Must-fix findings: 1\n\n1. must-fix: a.txt:1 wrong.\n";
 
 struct Gone;
 
@@ -126,6 +127,49 @@ fn a_failed_worker_is_resumed_and_the_output_says_from_where_and_how_it_ended() 
     assert!(out.out.contains("issue-41: ready"), "{}", out.out);
     assert!(
         out.out.contains("next: sbxm task finish --issue 41"),
+        "{}",
+        out.out
+    );
+}
+
+#[test]
+fn rounds_says_how_many_rounds_the_task_now_has_and_a_new_stop_names_rounds_again() {
+    let f = config();
+    // One round: round 1 finds one, the fix round runs, round 2 still finds one: stopped.
+    let first = backend(&f, &[ONE, ONE]);
+    let mut prepared = worked_task(&f, &first);
+    let env = sbxm::task::pipeline::TaskEnv {
+        config_dir: &f.env.config_dir(),
+        config: &f.config,
+        backend: &first,
+        probe: &Gone,
+        host: &FakeHostRunner::default(),
+    };
+    sbxm::task::pipeline::review_issue(&env, &mut prepared).unwrap();
+    let backend = backend(&f, &[ONE]);
+
+    let out = go(&f, &options(&f, Some(1)), &backend, &Gone);
+
+    out.result.unwrap();
+    assert!(
+        out.out.contains("issue-41: resuming from ready (ok)"),
+        "{}",
+        out.out
+    );
+    assert!(
+        out.out
+            .contains("issue-41: 1 more fix round(s), 2 in all (stopped: rounds-exhausted)"),
+        "{}",
+        out.out
+    );
+    assert!(
+        out.out.contains("(stopped: rounds-exhausted)"),
+        "{}",
+        out.out
+    );
+    assert!(
+        out.out
+            .contains("or give it more fix rounds: sbxm task resume --issue 41 --rounds 1"),
         "{}",
         out.out
     );
