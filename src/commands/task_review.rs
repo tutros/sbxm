@@ -323,11 +323,7 @@ fn run_spec(
             )?;
         }
     }
-    writeln!(
-        out,
-        "  note: `sbxm task finish` is refused for a spec task until its sink is built; fix \
-         findings by hand in the task's clone"
-    )?;
+    writeln!(out, "  next: sbxm task finish {}", spec_flag(path))?;
     Ok(())
 }
 

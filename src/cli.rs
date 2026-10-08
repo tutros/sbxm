@@ -178,8 +178,8 @@ pub enum TaskCommand {
         workers: Option<usize>,
         /// Start a task from this file instead of a GitHub issue (decision 174(d), issue 142):
         /// the file is copied into the task as source.md, and the worker is told to follow it.
-        /// The task id is derived from the file (`spec-<name>-<hash>`); `task finish` is refused
-        /// for it until a sink lands.
+        /// The task id is derived from the file (`spec-<name>-<hash>`); `task finish --spec`
+        /// delivers it through `[finish] sink` in sbxm-task.toml (issue 143).
         #[arg(
             long,
             value_name = "FILE",

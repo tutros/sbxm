@@ -728,8 +728,9 @@ pub fn prepare_spec(ctx: &Ctx, source_path: &Path) -> Result<Prepared> {
             .map(|r| r.stage.name().to_owned())
             .unwrap_or_else(|_| "no readable record".to_owned());
         bail!(
-            "task {id} exists (stage {stage}); use `sbxm task status`, or remove its folders \
-             under the base dir to start it again"
+            "task {id} exists (stage {stage}); use `sbxm task status`, or remove it with \
+             `sbxm task rm {}` to start it again",
+            crate::commands::task_start::spec_flag(source_path)
         );
     }
     let worker = &ctx.config.worker;

@@ -166,3 +166,33 @@ fn finish_names_the_missing_task_when_no_task_was_started() {
     let message = format!("{:#}", result.unwrap_err());
     assert!(message.contains("no task"), "{message}");
 }
+
+#[test]
+fn a_ready_spec_task_without_commits_is_refused_and_stays_ready() {
+    let f = fixture();
+    let spec = spec_file(&f, "Build a thing.\n");
+    let b = backend();
+    let github = FakeGitHub::default();
+    let source = source(&f);
+    let mut prepared = pipeline::prepare_spec(&ctx(&f, &source, &b, &github), &spec).unwrap();
+    // Walked to `ready` by hand: the worker committed nothing.
+    let r = &mut prepared.record;
+    let p = || record::Process::new(1, 0);
+    for (stage, done) in [
+        (Stage::Working, Status::Completed),
+        (Stage::Gating, Status::Passed),
+        (Stage::Reviewing, Status::Completed),
+    ] {
+        r.advance(stage, 0, p()).unwrap();
+        r.finish(done).unwrap();
+    }
+    r.advance(Stage::Ready, 0, p()).unwrap();
+    record::write(&prepared.meta, &prepared.record).unwrap();
+
+    let (result, _) = finish(&f, &spec, &FakeGitHub::default());
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(message.contains("nothing to keep"), "{message}");
+    let record = reread(&f, &prepared.record.id);
+    assert_eq!((record.stage, record.status), (Stage::Ready, Status::Ok));
+}

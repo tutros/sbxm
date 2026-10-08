@@ -105,6 +105,7 @@ fn starting_the_same_spec_file_twice_is_refused_and_changes_nothing() {
         message.contains(&id) && message.contains("stage prepared"),
         "{message}"
     );
+    assert!(message.contains("sbxm task rm --spec"), "{message}");
     assert_eq!(backend.log().len(), calls);
     // The first task's own folders still exist; a refused restart deleted nothing.
     assert!(!base_has_nothing_new(&f));

@@ -1,6 +1,6 @@
 //! Issue 142 (decision 174(d)): `sbxm task review --spec <FILE>` as a command: the same
-//! gates/review/fix-round loop as `--issue`'s, but the "ready" output notes that `finish` is
-//! refused instead of naming a next `finish` step.
+//! gates/review/fix-round loop as `--issue`'s; the "ready" output names `task finish --spec` as the
+//! next step (issue 143: the `local` sink).
 
 mod common;
 
@@ -110,7 +110,7 @@ fn go(f: &Fixture, opts: &Options, backend: &FakeBackend, github: &FakeGitHub) -
 }
 
 #[test]
-fn a_clean_review_ends_ready_and_notes_that_finish_is_refused() {
+fn a_clean_review_ends_ready_and_names_finish_spec_as_the_next_step() {
     let f = config();
     let spec = spec_file(&f, "Build a thing.\n");
     let (id, _) = record::spec_id(&spec).unwrap();
@@ -122,14 +122,13 @@ fn a_clean_review_ends_ready_and_notes_that_finish_is_refused() {
 
     out.result.unwrap();
     assert!(out.out.contains(&format!("{id}: ready")), "{}", out.out);
+    assert!(out.out.contains("review.md"), "{}", out.out);
     assert!(
-        out.out.contains("review.md") && out.out.contains("finish") && out.out.contains("refused"),
+        out.out.contains("next: sbxm task finish --spec"),
         "{}",
         out.out
     );
-    // No "next: sbxm task finish" hint, unlike the issue path: finish doesn't work for a spec
-    // task, only the note that explains why.
-    assert!(!out.out.contains("next: sbxm task finish"), "{}", out.out);
+    assert!(!out.out.contains("refused"), "{}", out.out);
     assert!(github.calls().is_empty(), "{:?}", github.calls());
     assert!(out.warn.is_empty(), "{}", out.warn);
 }
