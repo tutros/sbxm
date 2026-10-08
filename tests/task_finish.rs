@@ -691,3 +691,30 @@ fn an_edited_or_deleted_review_md_cannot_change_the_recorded_open_findings() {
         assert!(!section.contains("review.md has no"), "{section}");
     }
 }
+
+#[test]
+fn a_secret_in_a_recorded_open_finding_stops_the_publish_without_echoing_it() {
+    // Review round 3, M-1: the draft's section comes from task.json, not from a checked file, so
+    // a deleted or benign review.md must not let a recorded secret-looking title through.
+    for review in [None, Some(REVIEW)] {
+        let f = fixture();
+        let mut prepared = stopped_after_a_narrow_review(&f);
+        prepared.record.open_findings.as_mut().unwrap()[0].title =
+            "key ghp_abcdefghijklmnopqrstuvwxyz0123456789".into();
+        record::write(&prepared.meta, &prepared.record).unwrap();
+        match review {
+            Some(text) => fs::write(prepared.meta.join("review.md"), text).unwrap(),
+            None => fs::remove_file(prepared.meta.join("review.md")).unwrap(),
+        }
+        let github = FakeGitHub::default();
+
+        let err = run(&f, &github).unwrap_err();
+
+        let message = format!("{err:#}");
+        assert!(message.contains("looks like a secret"), "{message}");
+        assert!(message.contains("open findings"), "{message}");
+        assert!(!message.contains("ghp_abc"), "{message}");
+        assert!(github.calls().is_empty(), "{review:?}");
+        assert!(!origin_has(&f, "issue-41"), "{review:?}");
+    }
+}

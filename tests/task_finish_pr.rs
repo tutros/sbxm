@@ -567,3 +567,27 @@ fn a_continued_task_stopped_by_a_narrow_review_lists_every_finding_still_open() 
         "{body}"
     );
 }
+
+#[test]
+fn a_secret_in_a_recorded_open_finding_stops_a_continued_task_without_echoing_it() {
+    let f = fixture();
+    let (mut prepared, head) = ready(&f);
+    prepared.record.stopped = Some(record::Stopped::RepeatFinding);
+    prepared.record.open_findings = Some(vec![record::OpenFinding {
+        round: 1,
+        id: "M-2".into(),
+        title: "key ghp_abcdefghijklmnopqrstuvwxyz0123456789".into(),
+        place: None,
+    }]);
+    record::write(&prepared.meta, &prepared.record).unwrap();
+    fs::remove_file(prepared.meta.join("review.md")).unwrap();
+    let github = FakeGitHub::default();
+
+    let err = run(&f, &github).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("looks like a secret"), "{message}");
+    assert!(!message.contains("ghp_abc"), "{message}");
+    assert!(github.calls().is_empty());
+    assert_eq!(origin_head(&f), head, "nothing was pushed");
+}

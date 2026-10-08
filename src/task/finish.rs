@@ -664,6 +664,10 @@ pub fn finish(
     let draft = !unresolved.is_empty();
     let section =
         draft.then(|| unresolved_section(&unresolved, &open_findings(&task, review.as_deref())));
+    if let Some(section) = &section {
+        // Its findings come from task.json, which no file check above covered.
+        refuse_secrets("the draft's list of open findings", section)?;
+    }
     let (body, cuts) = pr_body(
         task.number,
         section.as_deref(),
