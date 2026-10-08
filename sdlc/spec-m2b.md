@@ -54,6 +54,9 @@ timeout = "20m"               # per command
 # worker = "prompts/worker.md"
 # reviewer = "prompts/reviewer.md"
 # fix = "prompts/fix.md"
+
+[finish]                      # optional; spec tasks only [174(e)], an issue task always opens a PR
+# sink = "local"              # "local" (default: branch stays in repo.git) or "push" (issue 144)
 ```
 
 Rules:
