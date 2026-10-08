@@ -448,7 +448,17 @@ pub fn run_spec(
     // which `git clone` sets), not asked of GitHub.
     let base_branch = match &opts.base {
         Some(base) => base.clone(),
-        None => local_default_branch(&opts.repo_root)?,
+        None => {
+            // The checkout's `origin/HEAD` is the default of the checkout's own origin only.
+            let origin = resolve_repo(None, &opts.repo_root);
+            if opts.repo.is_some() && !origin.is_ok_and(|o| o.eq_ignore_ascii_case(&repo_name)) {
+                bail!(
+                    "cannot tell the default branch of {repo_name} without GitHub (it isn't this \
+                     checkout's origin); pass --base <branch>"
+                );
+            }
+            local_default_branch(&opts.repo_root)?
+        }
     };
     if !repo::valid_ref_name(&base_branch) {
         bail!("base {base_branch:?} isn't a usable branch name; pass --base <branch>");

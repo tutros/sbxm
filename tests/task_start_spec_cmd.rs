@@ -179,3 +179,47 @@ fn without_base_and_without_a_local_default_branch_it_asks_for_base_and_calls_no
     assert!(github.calls().is_empty(), "{:?}", github.calls());
     assert!(backend.log().is_empty(), "{:?}", backend.log());
 }
+
+#[test]
+fn without_base_a_repo_that_is_not_the_checkouts_origin_asks_for_base_and_writes_nothing() {
+    let f = fixture();
+    checkout_with_origin_head(&f, "develop");
+    let spec = spec_file(&f, "Build a thing.\n");
+    let backend = backend();
+    let github = FakeGitHub::default();
+    let mut opts = options(&f, spec);
+    opts.base = None;
+    opts.repo = Some("other/project".into());
+
+    let out = run(&f, &opts, &backend, &github);
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(
+        message.contains("--base") && message.contains("other/project"),
+        "{message}"
+    );
+    assert!(github.calls().is_empty(), "{:?}", github.calls());
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert!(
+        !f.env.base_dir().join("tasks").exists(),
+        "a refused start must not create the tasks folder"
+    );
+}
+
+#[test]
+fn without_base_a_repo_equal_to_the_checkouts_origin_uses_its_default_branch() {
+    let f = fixture();
+    checkout_with_origin_head(&f, "main");
+    let spec = spec_file(&f, "Build a thing.\n");
+    let (id, _) = record::spec_id(&spec).unwrap();
+    let backend = playing(&f, &id);
+    let github = FakeGitHub::default();
+    let mut opts = options(&f, spec);
+    opts.base = None;
+    opts.repo = Some("O/R".into());
+
+    let out = run(&f, &opts, &backend, &github);
+
+    out.result.unwrap();
+    assert!(github.calls().is_empty(), "{:?}", github.calls());
+}
