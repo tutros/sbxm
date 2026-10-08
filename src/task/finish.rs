@@ -425,9 +425,6 @@ const UNRESOLVED_CAP: usize = 5_000;
 /// Ends a finding cut to fit [`UNRESOLVED_CAP`].
 const CUT_MARK: &str = "… (cut)\n";
 
-/// Room kept under [`UNRESOLVED_CAP`] for the `and N more` line after a cut first finding.
-const MORE_ROOM: usize = 40;
-
 /// The section at the top of a draft PR's body: why it is a draft, then each must-fix finding
 /// of `review` with its `Where:`.
 pub fn unresolved_section(reasons: &[String], review: Option<&str>) -> String {
@@ -452,17 +449,19 @@ fn unresolved_text(intro: &str, reasons: &[String], review: Option<&str>) -> Str
     }
     text.push_str("\nMust-fix findings left (the review below has the details):\n\n");
     let mut listed = 0;
-    for finding in &must_fix {
+    for (i, finding) in must_fix.iter().enumerate() {
         let line = match finding.field("where") {
             Some(place) => format!("- {}: {} ({place})\n", finding.id, finding.title),
             None => format!("- {}: {}\n", finding.id, finding.title),
         };
-        if text.chars().count() + line.chars().count() > UNRESOLVED_CAP {
+        // A finding is listed only if the `and N more` line for the ones after it still fits,
+        // so the section never passes the cap whichever finding is the first left out.
+        let after = more_line(must_fix.len() - i - 1).chars().count();
+        if text.chars().count() + line.chars().count() + after > UNRESOLVED_CAP {
             if listed == 0 {
-                // A first finding too long on its own is cut, leaving room for the `and N more`
-                // line, so the section never passes the cap.
+                // A first finding too long on its own is cut instead of left out.
                 let room = UNRESOLVED_CAP
-                    .saturating_sub(text.chars().count() + CUT_MARK.chars().count() + MORE_ROOM);
+                    .saturating_sub(text.chars().count() + CUT_MARK.chars().count() + after);
                 text.extend(line.chars().take(room));
                 text.push_str(CUT_MARK);
                 listed = 1;
@@ -472,10 +471,17 @@ fn unresolved_text(intro: &str, reasons: &[String], review: Option<&str>) -> Str
         text.push_str(&line);
         listed += 1;
     }
-    if listed < must_fix.len() {
-        text.push_str(&format!("- and {} more\n", must_fix.len() - listed));
-    }
+    text.push_str(&more_line(must_fix.len() - listed));
     text
+}
+
+/// The line counting `left` findings not listed; empty when there are none.
+fn more_line(left: usize) -> String {
+    if left == 0 {
+        String::new()
+    } else {
+        format!("- and {left} more\n")
+    }
 }
 
 /// The note `finish` leaves on a task whose branch is pushed but whose PR isn't open yet.

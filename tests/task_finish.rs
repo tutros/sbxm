@@ -579,3 +579,25 @@ fn one_overlong_must_fix_finding_is_cut_to_the_cap() {
     assert!(section.contains("- M-1: ttt"), "{section}");
     assert!(section.contains("(cut)"), "{section}");
 }
+
+#[test]
+fn every_multi_finding_unresolved_section_obeys_the_five_thousand_character_cap() {
+    // Review S-1, round 2: a first finding that fits, then one that doesn't, must leave room for
+    // the `and N more` line, whatever the first one's length.
+    for len in 4_700..5_000 {
+        let review = format!(
+            "Must-fix findings: 2\n\n## Must fix\n\n### M-1: {}\n\n### M-2: second\n\n",
+            "t".repeat(len)
+        );
+
+        let section = unresolved_section(&["why".to_owned()], Some(&review));
+
+        let chars = section.chars().count();
+        assert!(chars <= 5_000, "title length {len} produced {chars} chars");
+        assert!(section.contains("- M-1: "), "{len}");
+        assert!(
+            section.contains("- M-2: ") || section.contains("- and 1 more"),
+            "title length {len} lost M-2 without counting it"
+        );
+    }
+}
