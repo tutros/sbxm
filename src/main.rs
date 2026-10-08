@@ -576,7 +576,10 @@ fn main() -> anyhow::Result<()> {
             let result = (|| -> anyhow::Result<()> {
                 commands::task_finish::run(
                     &config::config_dir()?,
-                    &commands::task_finish::Options { target },
+                    &commands::task_finish::Options {
+                        target,
+                        repo_root: std::env::current_dir()?,
+                    },
                     &sbxm::github::gh::GhBackend::default(),
                     &task::record::SystemProbe,
                     &mut out,
@@ -585,18 +588,38 @@ fn main() -> anyhow::Result<()> {
             finish_task(result, out, warn)
         }
         Command::Task {
-            command: TaskCommand::Rm { issue, pr, yes },
+            command:
+                TaskCommand::Rm {
+                    issue,
+                    pr,
+                    spec,
+                    yes,
+                    force,
+                },
         } => {
-            let (kind, number) = match (issue, pr) {
-                (Some(n), _) => (task::record::Kind::Issue, n),
-                (None, Some(n)) => (task::record::Kind::Pr, n),
-                (None, None) => unreachable!("clap requires --issue or --pr"),
+            let target = match (issue, pr, spec) {
+                (Some(n), _, _) => commands::task_rm::Target::Issue(n),
+                (None, Some(n), _) => commands::task_rm::Target::Pr(n),
+                (None, None, Some(path)) => commands::task_rm::Target::Spec(path),
+                (None, None, None) => unreachable!("clap requires --issue, --pr or --spec"),
             };
-            let (mut out, warn) = task_writers(vec![task_id(kind, number)], None)?;
+            let ids = match &target {
+                commands::task_rm::Target::Issue(n) => vec![format!("issue-{n}")],
+                commands::task_rm::Target::Pr(n) => vec![format!("pr-{n}")],
+                commands::task_rm::Target::Spec(path) => task::record::spec_id(path)
+                    .map(|(id, _)| vec![id])
+                    .unwrap_or_default(),
+            };
+            let (mut out, warn) = task_writers(ids, None)?;
             let result = (|| -> anyhow::Result<()> {
                 commands::task_rm::run(
                     &config::config_dir()?,
-                    &commands::task_rm::Options { kind, number, yes },
+                    &commands::task_rm::Options {
+                        target,
+                        yes,
+                        force,
+                        repo_root: std::env::current_dir()?,
+                    },
                     &SbxBackend,
                     &task::record::SystemProbe,
                     &Terminal,

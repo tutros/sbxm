@@ -77,6 +77,7 @@ pub const STAGES: [Stage; 7] = [
 
 const ISSUE: &[Kind] = &[Kind::Issue];
 const PR: &[Kind] = &[Kind::Pr];
+const SPEC: &[Kind] = &[Kind::Spec];
 /// Issue and spec tasks both have a worker and go through gates, review and fix rounds the same
 /// way (issue 142, decision 174(d)): a spec source adds this one answer set, no new rows.
 const HAS_WORKER: &[Kind] = &[Kind::Issue, Kind::Spec];
@@ -193,6 +194,15 @@ pub const TABLE: &[Row] = &[
         to: Some(Stage::Finished),
         action: "push the branch and open the PR",
     },
+    Row {
+        stages: &[Stage::Ready],
+        statuses: &[Status::Ok],
+        live: Live::Any,
+        kinds: SPEC,
+        event: Event::Advance(Stage::Finished),
+        to: Some(Stage::Finished),
+        action: "deliver the branch through the [finish] sink",
+    },
     // `task gates` (a task with a worker: issue and spec).
     Row {
         stages: &[Stage::Working, Stage::Fixing],
@@ -297,6 +307,15 @@ pub const TABLE: &[Row] = &[
         to: Some(Stage::Finished),
         action: "push the branch and open the PR",
     },
+    Row {
+        stages: &[Stage::Ready],
+        statuses: &[Status::Ok],
+        live: Live::Any,
+        kinds: SPEC,
+        event: Event::Finish,
+        to: Some(Stage::Finished),
+        action: "deliver the branch through the [finish] sink",
+    },
     // `task rm`: anything that is not running, or running with its process gone.
     Row {
         stages: &STAGES,
@@ -364,9 +383,7 @@ pub fn states(kind: Kind) -> Vec<State> {
 
 /// The states of a `kind` task that are not the end of its life (`finished`; a PR task's `ready`),
 /// not in flight (a `running` task whose process is alive) and from which no command moves it on:
-/// only `rm` is allowed. Each is a gap in the operations. A spec task's `ready` is one of these
-/// too (not excluded like a PR task's): `finish` is refused for it until a sink lands (decision
-/// 174(e), issue 142), so it is a dead end by design, not yet a missing operation.
+/// only `rm` is allowed. Each is a gap in the operations.
 pub fn dead_ends(kind: Kind) -> Vec<State> {
     states(kind)
         .into_iter()

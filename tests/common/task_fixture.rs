@@ -299,3 +299,50 @@ pub fn play(
         }
     }
 }
+
+/// A clean review's text.
+pub const CLEAN_REVIEW: &str = "Must-fix findings: 0\n\nNothing found.\n";
+
+/// Writes `text` to `idea.md` in the fixture's temp dir: a spec task's source file.
+pub fn spec_file(f: &Fixture, text: &str) -> PathBuf {
+    let path = f.env.tmp.path().join("idea.md");
+    fs::write(&path, text).unwrap();
+    path
+}
+
+/// Starts a spec task from `idea.md`, runs its worker (one commit) and a clean review: it ends
+/// `ready`. Returns the spec file and the task id.
+pub fn ready_spec_task(f: &Fixture) -> (PathBuf, String) {
+    use sbxm::task::{pipeline, record};
+    let spec = spec_file(f, "Build a thing.\n");
+    let (id, _) = record::spec_id(&spec).unwrap();
+    let worker = play(
+        &f.env.base_dir().join("tasks").join(&id),
+        "main",
+        &id,
+        Play {
+            commits: vec!["a.txt".into()],
+            result_md: Some(b"done\n".to_vec()),
+            bundle_bytes: None,
+        },
+    );
+    let reviewer = play_reviews(&f.env.base_dir(), &id, vec![CLEAN_REVIEW.to_owned()]);
+    let backend = FakeBackend::with_secrets(&["anthropic", "openai"])
+        .with_exec_output_matching("claude", ok(CLAUDE_DONE))
+        .with_exec_output_matching("codex", ok(CODEX_DONE))
+        .with_exec_hook(move |sandbox, exec| {
+            worker(sandbox, exec);
+            reviewer(sandbox, exec);
+        });
+    let github = FakeGitHub::default();
+    let source = source(f);
+    let context = ctx(f, &source, &backend, &github);
+    let mut prepared = pipeline::prepare_spec(&context, &spec).unwrap();
+    pipeline::run_worker(&context, &mut prepared).unwrap();
+    pipeline::review_issue(&context.env(), &mut prepared).unwrap();
+    assert_eq!(
+        (prepared.record.stage, prepared.record.status),
+        (record::Stage::Ready, record::Status::Ok)
+    );
+    (spec, id)
+}

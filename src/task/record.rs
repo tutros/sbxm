@@ -72,8 +72,8 @@ impl Stage {
     /// section 5.2) never reaches `working`, `fixing` or `finished`. A failed gate feeds a fix
     /// round too, for a task with a worker and rounds left (issue 117, decision 173(d)); a PR
     /// task's gates have no such move since its `fix_rounds` is always 0. A spec task reaches
-    /// `ready` like an issue task, but not `finished`: `finish` is refused until a sink lands
-    /// (decision 174(e), issue 142), so there is no row from `ready` to `finished` for it yet.
+    /// `ready` and `finished` like an issue task; its `finish` goes through the `[finish] sink`
+    /// instead of a PR (decision 174(e), issue 143).
     pub(crate) fn next(self, kind: Kind) -> &'static [Stage] {
         match (self, kind) {
             (Self::Prepared, Kind::Issue | Kind::Spec) => &[Self::Working],
@@ -86,8 +86,8 @@ impl Stage {
             (Self::Gating, Kind::Pr) => &[Self::Reviewing],
             (Self::Reviewing, Kind::Issue | Kind::Spec) => &[Self::Fixing, Self::Ready],
             (Self::Reviewing, Kind::Pr) => &[Self::Ready],
-            (Self::Ready, Kind::Issue) => &[Self::Finished],
-            (Self::Ready, Kind::Spec | Kind::Pr) | (Self::Finished, _) => &[],
+            (Self::Ready, Kind::Issue | Kind::Spec) => &[Self::Finished],
+            (Self::Ready, Kind::Pr) | (Self::Finished, _) => &[],
         }
     }
 

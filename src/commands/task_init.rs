@@ -44,6 +44,11 @@ profile = "sbxm-dev"
 # host = []
 timeout = "20m"                # per command
 
+# Where `task finish --spec` puts a spec task's branch (an issue task always opens a PR):
+# "local" keeps it in the task's repo.git and prints how to fetch it; "push" isn't built yet.
+# [finish]
+# sink = "local"
+
 # Replace a built-in prompt with a file inside this repo:
 # [prompts]
 # worker = "prompts/worker.md"

@@ -139,7 +139,7 @@ fn a_spec_task_takes_the_explicit_id_instead_of_prefix_number() {
 }
 
 #[test]
-fn a_spec_task_walks_the_same_stages_as_an_issue_task_but_never_finishes() {
+fn a_spec_task_walks_the_same_stages_as_an_issue_task_and_finishes_through_its_sink() {
     let mut record = new_spec_record();
     let process = || Process::new(1234, T0);
     for (stage, done) in [
@@ -156,18 +156,9 @@ fn a_spec_task_walks_the_same_stages_as_an_issue_task_but_never_finishes() {
     record.advance(Stage::Ready, T0 + 10, process()).unwrap();
     assert_eq!(record.status, Status::Ok);
 
-    // `finish` is refused until a sink lands (decision 174(e), issue 142): there is no row from
-    // `ready` to `finished` for a spec task yet.
-    let message = format!(
-        "{:#}",
-        record
-            .advance(Stage::Finished, T0 + 11, process())
-            .unwrap_err()
-    );
-    assert!(
-        message.contains("ready") && message.contains("finished"),
-        "{message}"
-    );
+    // `finish` delivers it through the `[finish] sink` (decision 174(e), issue 143).
+    record.advance(Stage::Finished, T0 + 11, process()).unwrap();
+    assert_eq!((record.stage, record.status), (Stage::Finished, Status::Ok));
 }
 
 #[test]

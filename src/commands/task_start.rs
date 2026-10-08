@@ -159,23 +159,29 @@ fn local_default_branch(repo_root: &std::path::Path) -> Result<String> {
     Ok(head.strip_prefix("origin/").unwrap_or(head).to_owned())
 }
 
-/// `--spec <path>` as the retry hints print it: the path is one argument, quoted when it has a
-/// space or a character a shell would read (double quotes work in PowerShell and POSIX shells;
-/// single quotes, with `'` doubled, when the path itself has a `"`, `$` or backtick).
+/// `--spec <path>` as the retry hints print it (see [`path_arg`]).
 pub(crate) fn spec_flag(path: &std::path::Path) -> String {
+    format!("--spec {}", path_arg(path))
+}
+
+/// A path as one argument of a printed command, quoted when it has a space or a character a shell
+/// would read (double quotes work in PowerShell and POSIX shells; single quotes when the path
+/// itself has a `"`, `$` or backtick, with a `'` inside doubled for PowerShell on Windows and
+/// written `'\''` for a POSIX shell elsewhere, which can't double it).
+pub(crate) fn path_arg(path: &std::path::Path) -> String {
     let text = path.display().to_string();
     let plain = !text.is_empty()
         && text
             .chars()
             .all(|c| c.is_alphanumeric() || "/\\:._-+=@%,~".contains(c));
-    let arg = if plain {
+    if plain {
         text
     } else if text.contains(['"', '$', '`']) {
-        format!("'{}'", text.replace('\'', "''"))
+        let quote = if cfg!(windows) { "''" } else { r"'\''" };
+        format!("'{}'", text.replace('\'', quote))
     } else {
         format!("\"{text}\"")
-    };
-    format!("--spec {arg}")
+    }
 }
 
 /// `--repo owner/name`, or the GitHub repo of the checkout's `origin`.
@@ -552,5 +558,51 @@ pub fn run_spec(
             first.tier,
             spec_flag(&opts.spec)
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::path_arg;
+    use std::path::Path;
+
+    /// What the platform's shell makes of `arg` as one argument: PowerShell on Windows (the
+    /// primary platform), `sh` elsewhere.
+    fn through_shell(arg: &str) -> String {
+        let dir = tempfile::TempDir::new().unwrap();
+        let out = if cfg!(windows) {
+            let script = dir.path().join("echo.ps1");
+            // A command argument, as `git fetch <arg>` gets it.
+            let show = "function Show { [Console]::Out.Write($args[0]) }";
+            std::fs::write(&script, format!("{show}\nShow {arg}\n")).unwrap();
+            std::process::Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-File"])
+                .arg(&script)
+                .output()
+                .unwrap()
+        } else {
+            std::process::Command::new("sh")
+                .args(["-c", &format!("printf %s {arg}")])
+                .output()
+                .unwrap()
+        };
+        assert!(out.status.success(), "{out:?}");
+        String::from_utf8(out.stdout).unwrap()
+    }
+
+    /// Review of PR 157, M-1: a printed command must give the shell back the exact path.
+    #[test]
+    fn a_printed_path_reaches_the_shell_unchanged() {
+        for path in [
+            "/tmp/plain/repo.git",
+            "/tmp/a b/repo.git",
+            "/tmp/it's/repo.git",
+            "/tmp/a'$b/repo.git",
+            "/tmp/a\"b'c/repo.git",
+            "/tmp/a`b'c/repo.git",
+        ] {
+            let arg = path_arg(Path::new(path));
+            assert_eq!(through_shell(&arg), path, "{arg}");
+        }
     }
 }

@@ -316,10 +316,11 @@ fn only_the_workflow_files_are_named_in_the_refusal() {
     );
 }
 
-/// Issue 142, decision 174(e): `finish` is refused for a spec task, whatever its stage, with a
-/// message naming why (no sink yet) rather than the generic "not ready" one.
+/// Issue 143, decision 174(e): a spec task can be finished once `ready` (through its sink, not a
+/// PR); before that the refusal names the spec form of the review command. The issue 142 version
+/// of this test refused it at every stage, since no sink existed yet.
 #[test]
-fn finish_is_refused_for_a_spec_task_with_a_clear_message() {
+fn a_spec_task_is_refused_until_ready_and_may_be_finished_once_ready() {
     let mut record = Record::new(
         &NewTask {
             kind: Kind::Spec,
@@ -337,12 +338,12 @@ fn finish_is_refused_for_a_spec_task_with_a_clear_message() {
 
     let message = format!("{:#}", check_can_finish(&record).unwrap_err());
     assert!(
-        message.contains("spec-idea-abc123") && message.contains("sink"),
+        message.contains("spec-idea-abc123") && message.contains("not ready"),
         "{message}"
     );
-    assert!(!message.contains("not ready"), "{message}");
+    assert!(message.contains("task review --spec"), "{message}");
+    assert!(!message.contains("--issue"), "{message}");
 
-    // Still refused once it reaches `ready`.
     for (stage, done) in [
         (Stage::Working, Status::Completed),
         (Stage::Gating, Status::Passed),
@@ -352,8 +353,29 @@ fn finish_is_refused_for_a_spec_task_with_a_clear_message() {
         record.finish(done).unwrap();
     }
     record.advance(Stage::Ready, 0, Process::new(1, 0)).unwrap();
-    let message = format!("{:#}", check_can_finish(&record).unwrap_err());
-    assert!(message.contains("sink"), "{message}");
+    check_can_finish(&record).unwrap();
+}
+
+/// The issue path never publishes a spec task as a PR, even a ready one.
+#[test]
+fn the_pr_path_refuses_a_spec_task() {
+    let f = fixture();
+    let spec = f.env.tmp.path().join("idea.md");
+    fs::write(&spec, "Build a thing.\n").unwrap();
+    let b = backend();
+    let github = FakeGitHub::default();
+    let source = common::task_fixture::source(&f);
+    let prepared = sbxm::task::pipeline::prepare_spec(
+        &common::task_fixture::ctx(&f, &source, &b, &github),
+        &spec,
+    )
+    .unwrap();
+
+    let result = finish(&f.env.base_dir(), &prepared.record.id, &github, &Probe);
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(message.contains("never a PR"), "{message}");
+    assert!(github.calls().is_empty());
 }
 
 #[test]

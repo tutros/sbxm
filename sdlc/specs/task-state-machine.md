@@ -23,12 +23,18 @@ same `pipeline::review_issue` loop as an issue task's (`machine::TABLE`'s `HAS_W
 for it (`check_can_finish`) until the sink (`[finish] sink` = `local`/`push`, decision 174(e))
 lands, in the two issues that follow it.**
 
+**Issue 143 (part 7b of 7) built the `local` sink: `[finish] sink` in `sbxm-task.toml` (`local`, the
+default, or `push`), `finish::finish_local` (a ready spec task with commits beyond its base becomes
+`finished`; its branch stays in `repo.git`, nothing is pushed, and `finish` prints the `git fetch`
+command), `push` refused as not available yet (issue 144), and `task rm --spec` with its protection
+(`finish::check_spec_result_fetched`, below in 5.4).**
+
 ## 1. States of an issue task (`stage` / `status`)
 
 Legal moves (`Stage::next`): prepared -> working -> gating -> reviewing -> (fixing -> gating -> reviewing) -> ready -> finished.
 A PR task (`pr-N`) has no worker: prepared -> gating -> reviewing -> ready.
-A spec task (`spec-<name>-<hash>`, issue 142) walks the same moves as an issue task up to and including `ready`, but
-never `finished`: `check_can_finish` refuses it until a sink lands (decision 174(e)).
+A spec task (`spec-<name>-<hash>`, issue 142) walks the same moves as an issue task, `finished` included; its `finish`
+goes through the `[finish] sink` instead of a PR (decision 174(e), issue 143).
 
 | # | State (stage / status) | How it is reached |
 |---|---|---|
@@ -161,6 +167,7 @@ kept here as the design for issues #117-121 to build toward.
 | reviewing completed | advance | ready | record the task as ready |
 | fixing completed/timed-out (issue/spec) | advance | gating | run the gates |
 | ready ok (issue) | advance | finished | push the branch and open the PR |
+| ready ok (spec) | advance | finished | deliver the branch through the [finish] sink |
 | working/fixing completed/timed-out (issue/spec) | task gates | gating | run the gates |
 | gating passed/gates-failed (issue/spec) | task gates | gating | re-run the gates |
 | gating running (issue/spec), interrupted | task gates | gating | re-run the abandoned gates |
@@ -172,6 +179,7 @@ kept here as the design for issues #117-121 to build toward.
 | gating passed/gates-failed (pr) | task review | reviewing | run the reviewer |
 | reviewing failed (pr) | task review | reviewing | retry the reviewer |
 | ready ok (issue) | task finish | finished | push the branch and open the PR |
+| ready ok (spec) | task finish | finished | deliver the branch through the [finish] sink |
 | any completed/timed-out/failed/passed/gates-failed/ok | task rm | removed | remove the task's folders and sandboxes |
 | any running, interrupted | task rm | removed | remove the task's folders and sandboxes |
 
@@ -224,8 +232,8 @@ pair and asserts that it matches exactly one row, so an accidental overlap fails
 **Issue 142 status:** a spec task's `prepared` through `ready` rows are built, but through the section 5.2 "Today
 (generated)" mechanics (the `HAS_WORKER` kind list covers `Kind::Issue` and `Kind::Spec` alike), not this target
 table's `resume`/`round`/`repeat` machinery, which is still unbuilt for every source. The `ready, issue or spec
-source | finish | finished | sink, see 5.4` row above is **not** built for a spec source: `check_can_finish` refuses
-it unconditionally until the sink (`local`/`push`) lands, in the two issues that follow 142.
+source | finish | finished | sink, see 5.4` row above is built for a spec source by issue 143 (the `local` sink; `push`
+is refused until issue 144), as its own `(spec)` row in the "Today (generated)" table.
 
 `resume` is refused while the recorded process is alive (pid and start time, as `interrupted` is decided today).
 `--rounds N` is additive ("N more rounds", N >= 1; 0 is refused) and is valid from any `ready` with `stopped`,
@@ -259,16 +267,20 @@ no reviewer finding is involved. A different failing command is progress.
 |---|---|---|---|
 | issue | `issue.md` | PR comment (once a PR exists) | branch pushed, PR opened (draft if `stopped` or must-fix left) |
 | pr | `issue.md` of the linked issues + the PR | PR comment | none (review only) |
-| spec | `source.md` (built, issue 142) | `review.md` only (built, issue 142) | `[finish] sink`: `local` (default: the branch stays in `repo.git`; `finish` prints how to fetch it) or `push` (pushed to `origin`, no PR) — **not built**; `finish` refuses every spec task until this lands, in the two issues that follow 142 |
+| spec | `source.md` (built, issue 142) | `review.md` only (built, issue 142) | `[finish] sink`: `local` (default: the branch stays in `repo.git`; `finish` prints how to fetch it; built, issue 143) or `push` (pushed to `origin`, no PR) — **`push` not built**; `finish` refuses it as not available yet until issue 144 |
 
 For an issue task tied to an open PR (decision 169), `finish` pushes to the PR's own branch and cannot make it a draft:
 it posts the remaining findings as a PR comment and leaves the PR's draft status alone.
 
-Safety of the spec sinks (proposed, to confirm, not yet built): `finish` with the `push` sink refuses a spec task
+Safety of the spec sinks (confirmed by the user, 2026-10-07; the fetched rule is decision 178): `finish` with the `push` sink refuses a spec task
 that has `stopped` or open findings unless `--push-unresolved` is given, because a spec task has no PR and no draft
-to mark it unfinished; `push` never force-pushes, and a branch-name collision is refused. `task rm` refuses a spec
-task whose result exists only in `repo.git` (the `local` sink, not yet fetched), because `repo.git` lives in the task
-folder, and needs `--force` to delete it.
+to mark it unfinished; `push` never force-pushes, and a branch-name collision is refused (not built yet: issue 144).
+`task rm` refuses a spec task whose result exists only in `repo.git` (the `local` sink, not yet fetched), because
+`repo.git` lives in the task folder, and needs `--force` to delete it (built, issue 143). "Not yet fetched" means:
+the task's branch has commits beyond its base, and its tip commit isn't in the git checkout `task rm` runs from
+(`git cat-file -e <tip>^{commit}` there, a read in the user's own checkout; nothing runs in the agent's clone). This
+holds at any stage, not only `finished`, and the refusal comes before the confirmation question. A result fetched
+into a different clone still needs `--force`.
 
 The git trust boundary (decision 159) is unchanged: the host only fetches a verified bundle into `repo.git`, and
 never runs git inside the agent's clone, whatever the source.
@@ -299,6 +311,6 @@ retrying:
 4. Then add `resume`, `fix_rounds`, `Repeat of:` and the `spec` source as new rows (the 5.2 "Target" table above),
    each with tests that fail first. **Issue 142 (part 7a) did the `spec` source's `prepared`-to-`ready` stages
    ahead of this step, through the existing mechanics (section 2); `finish`'s sink row is left for the two issues
-   that follow it.**
+   that follow it; issue 143 added it for the `local` sink (`push` is issue 144).**
 
 Related: `sdlc/evals-workflow-notes.md` G16, G17, G24, G25; decisions 116, 154, 159, 169.

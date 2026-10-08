@@ -178,8 +178,8 @@ pub enum TaskCommand {
         workers: Option<usize>,
         /// Start a task from this file instead of a GitHub issue (decision 174(d), issue 142):
         /// the file is copied into the task as source.md, and the worker is told to follow it.
-        /// The task id is derived from the file (`spec-<name>-<hash>`); `task finish` is refused
-        /// for it until a sink lands.
+        /// The task id is derived from the file (`spec-<name>-<hash>`); `task finish --spec`
+        /// delivers it through `[finish] sink` in sbxm-task.toml (issue 143).
         #[arg(
             long,
             value_name = "FILE",
@@ -326,14 +326,15 @@ pub enum TaskCommand {
         /// The issue's task.
         #[arg(long, value_name = "N")]
         issue: Option<u32>,
-        /// The spec task's file (decision 174(d), issue 142): always refused for now, with a
-        /// clear message, since the sink isn't built yet.
+        /// The spec task's file (decision 174(d)): finished through `[finish] sink` in
+        /// sbxm-task.toml; `local` (the default) keeps the branch in the task's repo.git and
+        /// prints how to fetch it (issue 143).
         #[arg(long, value_name = "FILE")]
         spec: Option<PathBuf>,
     },
     /// Delete a task: its sandboxes, its clones and its task folder. Shows exactly what, and asks
     /// first (without a terminal it needs --yes).
-    #[command(group(clap::ArgGroup::new("which").required(true).args(["issue", "pr"])))]
+    #[command(group(clap::ArgGroup::new("which").required(true).args(["issue", "pr", "spec"])))]
     Rm {
         /// The issue's task.
         #[arg(long, value_name = "N")]
@@ -341,9 +342,16 @@ pub enum TaskCommand {
         /// The PR's task.
         #[arg(long, value_name = "N")]
         pr: Option<u32>,
+        /// The spec task's file (decision 174(d)). Refused while its result exists only in the
+        /// task's repo.git (not yet fetched into this checkout) unless --force (issue 143).
+        #[arg(long, value_name = "FILE")]
+        spec: Option<PathBuf>,
         /// Don't ask; delete.
         #[arg(long)]
         yes: bool,
+        /// Delete a spec task's result even though it was never fetched out of its repo.git.
+        #[arg(long)]
+        force: bool,
     },
     /// File the findings of a review as GitHub issues, one per finding. A dry run unless
     /// --create: it shows every issue and changes nothing.

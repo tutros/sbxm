@@ -73,8 +73,10 @@ sbxm task run --issue 63               # start and review in one go; stops befor
     `ready`, with `stopped` set to `rounds-exhausted` in `task.json`.
   - `task start --spec FILE` makes a task from a file instead of a GitHub issue (id `spec-<name>-<hash>`,
     `source.md` in place of `issue.md`); `task review --spec FILE` continues it through the same gates/review/fix
-    loop. `review.md` is its only output (no PR, no GitHub call anywhere). `task finish` is refused for it until a
-    sink (`local`/`push`) is built, in the issues that follow issue 142.
+    loop. `review.md` is its review (no PR, no GitHub call anywhere). `task finish --spec FILE` delivers it through
+    `[finish] sink` in `sbxm-task.toml`: `local` (the default) keeps the branch in the task's `repo.git` and prints
+    the `git fetch` command (`push` is issue 144). `task rm --spec FILE` refuses to delete a result you haven't
+    fetched into the checkout yet, unless `--force`.
 - **Continuing an open PR (decision 169):** a finding filed with `task file-findings --pr N` names its PR (`PR: #N`),
   so its task starts from the PR's branch head. `task finish` for that task pushes to the PR's branch (no new flag),
   opens no new PR and comments on the PR with the commits added and `Fixes #<issue>`. The push is a fast-forward

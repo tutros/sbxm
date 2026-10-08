@@ -234,6 +234,43 @@ pub fn remove(plan: &RemovalPlan, backend: &dyn SandboxBackend) -> RemovalReport
     report
 }
 
+/// A spec task's result under the `local` sink lives only in its `repo.git`, which removal deletes
+/// (decision 174(e), spec section 5.4). Refused while its branch has commits beyond the base that
+/// `checkout` (the user's git checkout) doesn't have, so a result is never lost by accident; the
+/// caller skips this for `--force`. Only reads: `repo.git` is host-owned (decision 159) and
+/// `checkout` is the user's own.
+pub fn check_spec_result_fetched(base_dir: &Path, id: &str, checkout: &Path) -> Result<()> {
+    let force = "or pass --force to delete it anyway";
+    let meta = record::task_dir(base_dir, id);
+    let repo_git = meta.join("repo.git");
+    if !repo_git.is_dir() {
+        return Ok(());
+    }
+    let task = record::read(&meta.join("task.json"))
+        .with_context(|| format!("cannot tell whether task {id}'s result was fetched; {force}"))?;
+    if !repo::valid_ref_name(&task.branch) {
+        bail!(
+            "task {id} records branch {:?}, which isn't a usable branch name; {force}",
+            task.branch
+        );
+    }
+    if task.commits_ahead(&repo_git)? == 0 {
+        return Ok(());
+    }
+    let tip = repo::branch_tip(&repo_git, &task.branch)?;
+    let object = format!("{tip}^{{commit}}");
+    if crate::git::user_run(checkout, &["cat-file", "-e", &object]).is_ok() {
+        return Ok(());
+    }
+    let branch = &task.branch;
+    bail!(
+        "task {id}'s result, branch {branch}, exists only in {}, which `task rm` deletes; fetch it \
+         first with: git fetch {} {branch}:{branch} (in your checkout), {force}",
+        repo_git.display(),
+        crate::commands::task_start::path_arg(&repo_git)
+    )
+}
+
 /// Shows what removing `id` would delete, asks (unless `yes`), removes it and says what went and
 /// what stayed. Nothing is touched before the answer. Fails if anything stayed.
 pub fn discard(
@@ -383,24 +420,28 @@ pub fn check_can_finish(task: &Record) -> Result<()> {
     }
     match task.kind {
         record::Kind::Pr => bail!("task {id} is a PR review; only an issue's task can be finished"),
-        // Issue 142 is start-only for spec tasks: the sink that `finish` would use (`local` or
-        // `push`, decision 174(e)) isn't built yet, so there is nothing `finish` can do even once
-        // the task is ready.
-        record::Kind::Spec => bail!(
-            "task {id} is a spec task; `finish` is refused until its sink (`[finish] sink` = \
-             `local` or `push`) is built, in the issues that follow issue 142; the task's review \
-             is review.md in its folder"
-        ),
-        record::Kind::Issue => {}
+        record::Kind::Issue | record::Kind::Spec => {}
     }
+    let spec = task.kind == record::Kind::Spec;
     match (task.stage, task.status) {
+        (record::Stage::Finished, _) if spec => {
+            bail!(
+                "task {id} is already finished; its branch {} is in its repo.git",
+                task.branch
+            )
+        }
         (record::Stage::Finished, _) => {
             bail!("task {id} is already finished; its PR is recorded in task.json")
         }
         (stage, status) => bail!(
-            "task {id} is at stage {} ({}), not ready; run `sbxm task review --issue {number}` first",
+            "task {id} is at stage {} ({}), not ready; run `sbxm task review {}` first",
             stage.name(),
-            status.name()
+            status.name(),
+            if spec {
+                "--spec <FILE>".to_owned()
+            } else {
+                format!("--issue {number}")
+            }
         ),
     }
 }
@@ -470,6 +511,9 @@ pub fn finish(
     probe: &dyn ProcessProbe,
 ) -> Result<Finished> {
     let mut prepared = Prepared::open(base_dir, id)?;
+    if prepared.record.kind == record::Kind::Spec {
+        bail!("task {id} is a spec task; it finishes through its [finish] sink, never a PR");
+    }
     check_can_finish(&prepared.record)?;
     let task = prepared.record.clone();
     crate::commands::task_start::check_repo(&task.repo)?;
@@ -538,6 +582,45 @@ pub fn finish(
         cuts,
         continued: None,
     })
+}
+
+/// Where the `local` sink left a spec task's result.
+#[derive(Debug)]
+pub struct Kept {
+    pub branch: String,
+    pub repo_git: PathBuf,
+}
+
+/// The `local` sink for a spec task (decision 174(e), issue 143): the branch stays in the task's
+/// host-owned `repo.git` and the task becomes `finished`. Nothing is pushed and nothing leaves
+/// the machine; the caller says how to fetch the branch.
+pub fn finish_local(base_dir: &Path, id: &str, probe: &dyn ProcessProbe) -> Result<Kept> {
+    let mut prepared = Prepared::open(base_dir, id)?;
+    if prepared.record.kind != record::Kind::Spec {
+        bail!("task {id} isn't a spec task; only a spec task has a [finish] sink");
+    }
+    check_can_finish(&prepared.record)?;
+    let branch = prepared.record.branch.clone();
+    if !repo::valid_ref_name(&branch) {
+        bail!(
+            "task {id} records branch {branch:?}, which isn't a usable branch name; see task.json"
+        );
+    }
+    let repo_git = prepared.meta.join("repo.git");
+    if !repo_git.is_dir() {
+        bail!("task {id} has no repo.git, so there is no result to keep; see `sbxm task status`");
+    }
+    if prepared.record.commits_ahead(&repo_git)? == 0 {
+        bail!(
+            "task {id} has no commits on {branch} beyond {}, so there is nothing to keep",
+            prepared.record.base
+        );
+    }
+    prepared
+        .record
+        .advance(record::Stage::Finished, now(), Process::current(probe))?;
+    record::write(&prepared.meta, &prepared.record)?;
+    Ok(Kept { branch, repo_git })
 }
 
 /// The note `finish` leaves on a continued task whose commits are pushed but whose PR comment
