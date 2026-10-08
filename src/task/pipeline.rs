@@ -702,16 +702,19 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
 /// made anywhere in this function.
 pub fn prepare_spec(ctx: &Ctx, source_path: &Path) -> Result<Prepared> {
     let global = GlobalConfig::load(ctx.config_dir)?;
-    // A plain file copy only: a link could point anywhere the user can read.
-    let linked = fs::symlink_metadata(source_path)
+    // A plain file copy only: a link could point anywhere the user can read, and a device or a
+    // pipe could block the read or never end.
+    let kind = fs::symlink_metadata(source_path)
         .with_context(|| format!("cannot read {}", source_path.display()))?
-        .file_type()
-        .is_symlink();
-    if linked {
+        .file_type();
+    if kind.is_symlink() {
         bail!(
             "{} is a link; give sbxm the file itself, not a link to it",
             source_path.display()
         );
+    }
+    if !kind.is_file() {
+        bail!("{} is not a regular file", source_path.display());
     }
     let (id, title) = record::spec_id(source_path)?;
     let meta = record::task_dir(&global.base_dir, &id);

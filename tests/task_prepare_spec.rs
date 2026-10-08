@@ -127,6 +127,24 @@ fn a_missing_spec_file_is_refused_before_anything_is_written() {
     assert!(backend.log().is_empty(), "{:?}", backend.log());
 }
 
+#[test]
+fn a_spec_source_that_is_not_a_regular_file_is_refused_before_anything_is_written() {
+    let f = fixture();
+    let (backend, github) = (backend(), FakeGitHub::default());
+    let source = source(&f);
+    let dir = f.env.tmp.path().join("idea.md");
+    fs::create_dir_all(&dir).unwrap();
+
+    let message = format!(
+        "{:#}",
+        pipeline::prepare_spec(&ctx(&f, &source, &backend, &github), &dir).unwrap_err()
+    );
+
+    assert!(message.contains("is not a regular file"), "{message}");
+    assert!(base_has_nothing_new(&f));
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+}
+
 #[cfg(unix)]
 #[test]
 fn a_spec_file_that_is_a_link_is_refused_before_anything_is_written() {
