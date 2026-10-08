@@ -334,7 +334,7 @@ pub enum TaskCommand {
         spec: Option<PathBuf>,
         /// With `sink = "push"`: push a spec task even though it stopped or has must-fix
         /// findings left (it has no PR or draft to mark it unfinished).
-        #[arg(long, requires = "spec")]
+        #[arg(long, conflicts_with = "issue")]
         push_unresolved: bool,
     },
     /// Delete a task: its sandboxes, its clones and its task folder. Shows exactly what, and asks

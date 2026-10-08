@@ -228,3 +228,23 @@ fn a_branch_that_changes_a_workflow_is_refused_before_the_push() {
     assert!(message.contains(".github/workflows/ci.yml"), "{message}");
     assert_eq!(origin_head(&f, &id), None);
 }
+
+/// `--push-unresolved` only means something for a spec task's `push` sink: clap refuses it with
+/// `--issue` before anything runs.
+#[test]
+fn push_unresolved_needs_spec() {
+    let env = common::Env::new();
+    let output = assert_cmd::Command::cargo_bin("sbxm")
+        .unwrap()
+        .env("SBXM_CONFIG_DIR", env.config_dir())
+        .args(["task", "finish", "--issue", "1", "--push-unresolved"])
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("cannot be used with '--push-unresolved'"),
+        "{stderr}"
+    );
+}
