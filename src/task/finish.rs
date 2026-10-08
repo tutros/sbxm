@@ -554,6 +554,7 @@ pub fn finish(
         base: task.base.clone(),
         title: task.title.clone(),
         body,
+        draft: false,
     };
     let url = match github.pr_create(&task.repo, &request) {
         Ok(url) => url,

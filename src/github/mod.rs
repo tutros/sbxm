@@ -51,6 +51,9 @@ pub struct PrRequest {
     pub base: String,
     pub title: String,
     pub body: String,
+    /// Open it as a draft (`gh pr create --draft`), for a task with something left unresolved
+    /// (decision 173(b)).
+    pub draft: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

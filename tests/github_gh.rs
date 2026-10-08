@@ -223,6 +223,7 @@ fn a_pr_is_created_from_the_head_branch_and_returns_the_url() {
                 base: "main".into(),
                 title: "Fix it".into(),
                 body: "Fixes #4".into(),
+                draft: false,
             },
         )
         .unwrap();
@@ -247,6 +248,42 @@ fn a_pr_is_created_from_the_head_branch_and_returns_the_url() {
     );
     let stdin = script.calls.lock().unwrap()[0].1.clone();
     assert_eq!(stdin.as_deref(), Some("Fixes #4"));
+}
+
+#[test]
+fn a_draft_pr_is_created_with_the_draft_flag() {
+    let (gh, script) = backend(Scripted::answering("https://github.com/o/r/pull/9\n"));
+
+    gh.pr_create(
+        "o/r",
+        &PrRequest {
+            head: "issue-4".into(),
+            base: "main".into(),
+            title: "Fix it".into(),
+            body: "Fixes #4".into(),
+            draft: true,
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        args(script, 0),
+        [
+            "pr",
+            "create",
+            "--repo",
+            "o/r",
+            "--head",
+            "issue-4",
+            "--base",
+            "main",
+            "--title",
+            "Fix it",
+            "--draft",
+            "--body-file",
+            "-"
+        ]
+    );
 }
 
 #[test]
