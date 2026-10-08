@@ -106,47 +106,79 @@ pub fn resume(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Re
         worked: None,
         review: None,
     };
-    match prepared.record.stage {
-        Stage::Prepared | Stage::Working => {
-            if prepared.record.stage == Stage::Prepared {
-                // A cut-off `sbx create` may have left a half-made sandbox: it is made afresh. A
-                // failure leaves the task `prepared/failed` with its folders, for another resume.
-                if let Err(e) = pipeline::ensure_worker_sandbox(env, prepared, true) {
-                    prepared.record.status = Status::Failed;
-                    prepared
-                        .record
-                        .notes
-                        .push(format!("resume: the preparation failed again: {e:#}"));
-                    record::write(&prepared.meta, &prepared.record)?;
-                    return Err(e);
-                }
-                resumed.sandbox_remade = true;
-                prepared.record.rerun(now(), Process::current(env.probe))?;
+    let probe = env.probe;
+    // Whether the worker runs again (its stage is set up below, running).
+    let mut run_worker = false;
+    match (prepared.record.stage, prepared.record.status) {
+        // F4, decision 175: a cut-off `sbx create` may have left a half-made sandbox, so it is
+        // made afresh. A failure leaves the task `prepared/failed` with its folders, for another
+        // resume.
+        (Stage::Prepared, _) => {
+            if let Err(e) = pipeline::ensure_worker_sandbox(env, prepared, true) {
+                prepared.record.status = Status::Failed;
                 prepared
                     .record
-                    .advance(Stage::Working, now(), Process::current(env.probe))?;
-            } else {
-                resumed.sandbox_remade = pipeline::ensure_worker_sandbox(env, prepared, false)?;
-                if resumed.sandbox_remade {
-                    prepared.record.notes.push(
-                        "resume: the worker's sandbox was gone and was made again".to_owned(),
-                    );
-                }
-                prepared.record.rerun(now(), Process::current(env.probe))?;
+                    .notes
+                    .push(format!("resume: the preparation failed again: {e:#}"));
+                record::write(&prepared.meta, &prepared.record)?;
+                return Err(e);
             }
-            record::write(&prepared.meta, &prepared.record)?;
-            let worked = pipeline::work(env, prepared)?;
-            let failed = matches!(worked.status, RunStatus::Failed(_));
-            resumed.worked = Some(worked);
-            if failed {
-                return Ok(resumed);
+            resumed.sandbox_remade = true;
+            prepared.record.rerun(now(), Process::current(probe))?;
+            prepared
+                .record
+                .advance(Stage::Working, now(), Process::current(probe))?;
+            run_worker = true;
+        }
+        // T6, T9: the worker runs again in its own clone, which keeps what the last run did.
+        (Stage::Working, Status::Running | Status::Failed) => {
+            resumed.sandbox_remade = pipeline::ensure_worker_sandbox(env, prepared, false)?;
+            prepared.record.rerun(now(), Process::current(probe))?;
+            run_worker = true;
+        }
+        // A worker or fix round that ended, but whose process was gone before the review: it may
+        // have been cut off while its commits were collected, so they are collected again (a
+        // fetch of what `repo.git` already has changes nothing). A fix round is counted once its
+        // run is over (`review_issue` adds it then), so this one was never counted.
+        (Stage::Working | Stage::Fixing, Status::Completed | Status::TimedOut) => {
+            resumed.sandbox_remade = pipeline::ensure_worker_sandbox(env, prepared, false)?;
+            pipeline::recollect_commits(env, prepared)?;
+            if prepared.record.stage == Stage::Fixing {
+                prepared.record.round += 1;
             }
         }
-        stage => bail!(
-            "task {} is at stage {}, which `task resume` cannot continue yet",
+        // T3: its process is gone, so the review it was running never finished: the same as one
+        // that failed, which `review_issue` runs again (its gates passed for these commits).
+        (Stage::Reviewing, Status::Running) => {
+            prepared.record.status = Status::Failed;
+            prepared
+                .record
+                .notes
+                .push("resume: the review was interrupted; it runs again".to_owned());
+        }
+        // Gates (ended or cut off) and a failed review: what `review_issue` already continues.
+        (Stage::Gating, _) | (Stage::Reviewing, Status::Failed) => {}
+        (stage, status) => bail!(
+            "task {} is {} ({}), which `task resume` cannot continue yet",
             prepared.record.id,
-            stage.name()
+            stage.name(),
+            status.name()
         ),
+    }
+    if resumed.sandbox_remade && resumed.from.0 != Stage::Prepared {
+        prepared
+            .record
+            .notes
+            .push("resume: the worker's sandbox was gone and was made again".to_owned());
+    }
+    if run_worker {
+        record::write(&prepared.meta, &prepared.record)?;
+        let worked = pipeline::work(env, prepared)?;
+        let failed = matches!(worked.status, RunStatus::Failed(_));
+        resumed.worked = Some(worked);
+        if failed {
+            return Ok(resumed);
+        }
     }
     resumed.review = Some(pipeline::review_issue(env, prepared)?);
     Ok(resumed)

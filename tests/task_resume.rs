@@ -272,6 +272,103 @@ fn a_worker_that_fails_again_stays_failed_and_is_not_reviewed() {
     assert_eq!(count(&backend, "codex"), 0, "no reviewer");
 }
 
+// ---- The review and the gates (T3, T9) ----
+
+#[test]
+fn an_interrupted_review_runs_the_reviewer_again_without_the_gates() {
+    let f = config();
+    let mut prepared = task_left_in(&f, Stage::Reviewing, Status::Running);
+    let backend = backend(&f, &[CLEAN]);
+
+    let resumed = resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap();
+
+    assert!(resumed.worked.is_none());
+    assert_eq!(count(&backend, "claude"), 0, "no worker");
+    assert_eq!(
+        count(&backend, "cargo test"),
+        0,
+        "the gates passed before the review"
+    );
+    assert_eq!(count(&backend, "codex"), 1);
+    let record = saved(&f);
+    assert_eq!((record.stage, record.status), (Stage::Ready, Status::Ok));
+}
+
+#[test]
+fn a_failed_review_runs_the_reviewer_again() {
+    let f = config();
+    let mut prepared = task_left_in(&f, Stage::Reviewing, Status::Failed);
+    let backend = backend(&f, &[CLEAN]);
+
+    resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap();
+
+    assert_eq!(count(&backend, "codex"), 1);
+    assert_eq!(saved(&f).stage, Stage::Ready);
+}
+
+#[test]
+fn interrupted_gates_run_again_then_the_review() {
+    let f = config();
+    let mut prepared = task_left_in(&f, Stage::Gating, Status::Running);
+    let backend = backend(&f, &[CLEAN]);
+
+    resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap();
+
+    assert_eq!(count(&backend, "cargo test"), 1);
+    assert_eq!(count(&backend, "codex"), 1);
+    let record = saved(&f);
+    assert_eq!((record.stage, record.status), (Stage::Ready, Status::Ok));
+    assert!(
+        !record.gates.iter().any(|g| !g.passed),
+        "an abandoned gate run is never recorded as failed"
+    );
+}
+
+#[test]
+fn a_worker_that_completed_but_was_never_reviewed_goes_on_to_the_review() {
+    let f = config();
+    let mut prepared = task_left_in(&f, Stage::Working, Status::Completed);
+    let backend = backend(&f, &[CLEAN]);
+
+    resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap();
+
+    assert_eq!(count(&backend, "claude"), 0);
+    assert_eq!(count(&backend, "cargo test"), 1);
+    assert_eq!(count(&backend, "codex"), 1);
+    assert_eq!(saved(&f).stage, Stage::Ready);
+}
+
+#[test]
+fn commits_a_cut_off_collection_missed_are_collected_before_the_review() {
+    let f = config();
+    let mut prepared = task_left_in(&f, Stage::Working, Status::Completed);
+    // The worker committed once more, and its process was killed before the bundle was fetched.
+    let workspace = f.env.base_dir().join("tasks").join("issue-41");
+    std::fs::write(workspace.join("b.txt"), "late\n").unwrap();
+    common::git(&workspace, &["add", "-A"]);
+    common::git(&workspace, &["commit", "-q", "-m", "late"]);
+    let before = commits(&f);
+    let backend = backend(&f, &[CLEAN]);
+
+    resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap();
+
+    assert_eq!(commits(&f), before + 1);
+}
+
+#[test]
+fn a_fix_round_that_ended_but_was_never_counted_is_counted() {
+    let f = config();
+    let mut prepared = task_left_in(&f, Stage::Fixing, Status::Completed);
+    assert_eq!(prepared.record.round, 0);
+    let backend = backend(&f, &[CLEAN]);
+
+    resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap();
+
+    let record = saved(&f);
+    assert_eq!(record.round, 1);
+    assert_eq!(record.stage, Stage::Ready);
+}
+
 // ---- Refusals ----
 
 #[test]

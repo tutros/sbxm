@@ -188,6 +188,11 @@ kept here as the design for issues #117-121 to build toward.
 | prepared failed (issue/spec) | task resume | working | make the worker's sandbox again, then run the worker and review |
 | working running (issue/spec), interrupted | task resume | working | run the worker again in its clone, then review |
 | working failed (issue/spec) | task resume | working | run the worker again in its clone, then review |
+| working/fixing completed/timed-out (issue/spec) | task resume | reviewing | run the gates, then the reviewer |
+| gating passed/gates-failed (issue/spec) | task resume | reviewing | run the reviewer (after the gates again, when they failed) |
+| gating running (issue/spec), interrupted | task resume | reviewing | re-run the abandoned gates, then the reviewer |
+| reviewing running (issue/spec), interrupted | task resume | reviewing | run the reviewer again |
+| reviewing failed (issue/spec) | task resume | reviewing | run the reviewer again |
 | any completed/timed-out/failed/passed/gates-failed/ok | task rm | removed | remove the task's folders and sandboxes |
 | any running, interrupted | task rm | removed | remove the task's folders and sandboxes |
 
