@@ -381,6 +381,72 @@ fn a_worker_that_fails_again_stays_failed_and_is_not_reviewed() {
     assert_eq!(count(&backend, "codex"), 0, "no reviewer");
 }
 
+/// M-3 (PR 163 review): the reviewer's secret alone isn't enough to resume a path that runs the
+/// worker again; its own provider secret must be checked first, before any backend call.
+#[test]
+fn resume_refuses_to_run_the_worker_again_without_its_provider_secret() {
+    let f = config();
+    let mut prepared = task_left_in(&f, Stage::Working, Status::Failed);
+    let before = saved(&f);
+    let prompt_path = workspace(&f).join(".sbxm-task").join("prompt.md");
+    let before_prompt = std::fs::read_to_string(&prompt_path).unwrap();
+    let backend = FakeBackend::with_secrets(&["openai"]);
+
+    let err = resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("anthropic"), "{message}");
+    assert!(backend.creates().is_empty(), "no sandbox was created");
+    assert!(backend.execs().is_empty(), "nothing was run");
+    assert!(backend.removes().is_empty(), "nothing was removed");
+    assert_eq!(saved(&f), before, "task.json is unchanged");
+    assert_eq!(
+        std::fs::read_to_string(&prompt_path).unwrap(),
+        before_prompt,
+        "the clone's control files are unchanged"
+    );
+}
+
+/// M-3: a fix round that runs the worker again is checked the same way.
+#[test]
+fn resume_refuses_to_run_a_fix_round_again_without_the_worker_s_provider_secret() {
+    let f = config();
+    let mut prepared = failed_fix_for_a_review(&f);
+    let before = saved(&f);
+    let backend = FakeBackend::with_secrets(&["openai"]);
+
+    let err = resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap_err();
+
+    assert!(format!("{err:#}").contains("anthropic"));
+    assert!(backend.creates().is_empty(), "no sandbox was created");
+    assert!(backend.execs().is_empty(), "nothing was run");
+    assert_eq!(saved(&f), before, "task.json is unchanged");
+}
+
+/// M-3: replaying a clean completed review never touches the worker, so its secret isn't needed.
+#[test]
+fn resuming_a_replayed_clean_review_does_not_need_the_worker_s_provider_secret() {
+    let f = config();
+    let result = ReviewResult {
+        round: 1,
+        must_fix: 0,
+        full: true,
+        repeat: false,
+    };
+    let mut prepared = reviewed_task(&f, CLEAN, Some(result));
+    let backend = FakeBackend::with_secrets(&["openai"]);
+
+    resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap();
+
+    assert_eq!(
+        count(&backend, "codex"),
+        0,
+        "the reviewer did not run again"
+    );
+    let record = saved(&f);
+    assert_eq!((record.stage, record.status), (Stage::Ready, Status::Ok));
+}
+
 /// The worker's workspace, where its `.sbxm-task` control folder is.
 fn workspace(f: &Fixture) -> std::path::PathBuf {
     f.env.base_dir().join("tasks").join("issue-41")

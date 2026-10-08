@@ -141,11 +141,30 @@ fn check_stopped(task: &Record, rounds: Option<u32>) -> Result<()> {
     Ok(())
 }
 
+/// Whether resuming the task at this stage and status restores the worker's input, rebuilds its
+/// sandbox to run it, or runs the worker or a fix round again (M-3, PR 163 review): the stages
+/// where [`pipeline::check_worker`] must run first, the same way [`pipeline::check_reviewer`]
+/// already does for every resume. A path that only collects commits already made, runs the gates,
+/// or replays a recorded review never touches the worker and needs no such check.
+fn resume_runs_worker(task: &Record) -> bool {
+    matches!(
+        (task.stage, task.status),
+        (Stage::Prepared, _)
+            | (Stage::Working, Status::Running | Status::Failed)
+            | (Stage::Fixing, Status::Running | Status::Failed)
+            | (Stage::Ready, _)
+    )
+}
+
 /// Continues the task from its recorded stage (issue 118). Checks first: nothing runs or is
-/// written when [`check_can_resume`] or the reviewer's checks refuse.
+/// written when [`check_can_resume`], the reviewer's checks, or (when the worker will run) the
+/// worker's checks refuse.
 pub fn resume(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Result<Resumed> {
     check_can_resume(&prepared.record, env.probe, rounds)?;
     pipeline::check_reviewer(env, prepared)?;
+    if resume_runs_worker(&prepared.record) {
+        pipeline::check_worker(env, prepared)?;
+    }
     let mut resumed = Resumed {
         from: (prepared.record.stage, prepared.record.status),
         sandbox_remade: false,
