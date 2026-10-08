@@ -636,6 +636,48 @@ fn a_record_without_the_result_reviews_again_under_a_new_round_and_keeps_every_e
     }
 }
 
+#[test]
+fn a_saved_review_at_the_last_round_number_is_refused_and_every_review_is_kept() {
+    let f = config();
+    let mut prepared = reviewed_task(&f, ONE, None);
+    let last = meta(&f).join(format!("review-{}.md", u32::MAX));
+    std::fs::write(meta(&f).join("review-0.md"), "zero\n").unwrap();
+    std::fs::write(&last, "last\n").unwrap();
+    let backend = backend(&f, &[CLEAN]);
+
+    let err = resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("review round"), "{message}");
+    assert!(!message.contains('\n'), "{message}");
+    assert_eq!(count(&backend, "codex"), 0, "no reviewer ran");
+    assert_eq!(
+        std::fs::read_to_string(meta(&f).join("review-0.md")).unwrap(),
+        "zero\n"
+    );
+    assert_eq!(std::fs::read_to_string(&last).unwrap(), "last\n");
+}
+
+#[test]
+fn a_clean_narrow_review_at_the_last_round_number_is_refused_instead_of_wrapping() {
+    let f = config();
+    let result = ReviewResult {
+        round: u32::MAX,
+        must_fix: 0,
+        full: false,
+        repeat: false,
+    };
+    let mut prepared = reviewed_task(&f, CLEAN, Some(result));
+    let backend = backend(&f, &[CLEAN]);
+
+    let err = resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("review round"), "{message}");
+    assert_eq!(count(&backend, "codex"), 0, "no reviewer ran");
+    assert!(!meta(&f).join("review-0.md").exists());
+}
+
 // ---- The fix round (T5, T9) ----
 
 /// Issue 41 whose first fix round failed: the review found one must-fix finding, and the

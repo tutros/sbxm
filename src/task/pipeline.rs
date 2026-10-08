@@ -1630,6 +1630,9 @@ pub fn review_issue(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewRepo
         warnings: check_reviewer(env, prepared)?,
         ..ReviewReport::default()
     };
+    // Refused before the gates run when no review round number is left (worked out again after
+    // them, as their fix rounds count).
+    next_review_round(prepared)?;
 
     let gates_current = match (prepared.record.stage, prepared.record.status) {
         // Passed gates count only if they covered every configured tier on the branch as it is now.
@@ -1644,7 +1647,7 @@ pub fn review_issue(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewRepo
         return Ok(report);
     }
 
-    let round = next_review_round(prepared);
+    let round = next_review_round(prepared)?;
     review_rounds(env, prepared, report, round, None, false)
 }
 
@@ -1653,7 +1656,7 @@ pub fn review_issue(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewRepo
 /// rounds (a clean narrow review is followed by a full one), and a record older than
 /// `Record::review` (issue 118) only has the files to go by: a number taken from the fix-round
 /// counter alone would overwrite an earlier round's saved review.
-fn next_review_round(prepared: &Prepared) -> u32 {
+fn next_review_round(prepared: &Prepared) -> Result<u32> {
     let saved = fs::read_dir(&prepared.meta)
         .into_iter()
         .flatten()
@@ -1668,7 +1671,19 @@ fn next_review_round(prepared: &Prepared) -> u32 {
         .max()
         .unwrap_or(0);
     let recorded = prepared.record.review.as_ref().map_or(0, |last| last.round);
-    prepared.record.round.max(recorded).max(saved) + 1
+    review_round_after(prepared, prepared.record.round.max(recorded).max(saved))
+}
+
+/// The review round after `round`, or an error once the numbers run out: a wrapped number would
+/// reuse, and overwrite, a saved `review-<n>.md` (decision 177(o)).
+fn review_round_after(prepared: &Prepared, round: u32) -> Result<u32> {
+    round.checked_add(1).with_context(|| {
+        format!(
+            "task {} has no review round number left after {round}; move the review-<n>.md files out of {} or remove the task with `sbxm task rm`",
+            prepared.record.id,
+            prepared.meta.display()
+        )
+    })
 }
 
 /// The review rounds of [`review_issue`], from review round `round` on: each review, and while
@@ -1710,7 +1725,7 @@ pub(super) fn review_rounds(
             }
             // A clean narrow review proves nothing about what it didn't see: one more, full
             // review runs before the task is ready (spec §5.2).
-            round += 1;
+            round = review_round_after(prepared, round)?;
             continue;
         }
         // The no-progress rule (spec §5.3, issue 119): a validated repeat stops the task even
@@ -1731,7 +1746,7 @@ pub(super) fn review_rounds(
             report.gates_failed = Some(failed);
             return Ok(report);
         }
-        round += 1;
+        round = review_round_after(prepared, round)?;
     }
 
     prepared
@@ -1769,7 +1784,7 @@ fn after_fix(env: &TaskEnv, prepared: &mut Prepared, ignore_repeat: bool) -> Res
         report.gates_failed = Some(failed);
         return Ok(report);
     }
-    let round = next_review_round(prepared);
+    let round = next_review_round(prepared)?;
     review_rounds(env, prepared, report, round, None, ignore_repeat)
 }
 
