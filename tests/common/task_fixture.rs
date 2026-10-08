@@ -313,6 +313,11 @@ pub fn spec_file(f: &Fixture, text: &str) -> PathBuf {
 /// Starts a spec task from `idea.md`, runs its worker (one commit) and a clean review: it ends
 /// `ready`. Returns the spec file and the task id.
 pub fn ready_spec_task(f: &Fixture) -> (PathBuf, String) {
+    ready_spec_task_with(f, &["a.txt"])
+}
+
+/// [`ready_spec_task`], where the worker commits `files` (paths inside the repo).
+pub fn ready_spec_task_with(f: &Fixture, files: &[&str]) -> (PathBuf, String) {
     use sbxm::task::{pipeline, record};
     let spec = spec_file(f, "Build a thing.\n");
     let (id, _) = record::spec_id(&spec).unwrap();
@@ -321,7 +326,7 @@ pub fn ready_spec_task(f: &Fixture) -> (PathBuf, String) {
         "main",
         &id,
         Play {
-            commits: vec!["a.txt".into()],
+            commits: files.iter().map(|s| (*s).to_owned()).collect(),
             result_md: Some(b"done\n".to_vec()),
             bundle_bytes: None,
         },

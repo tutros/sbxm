@@ -293,6 +293,7 @@ fn the_command_says_it_pushed_to_the_pr_and_how_to_review_it_again() {
         &Options {
             target: Target::Issue(41),
             repo_root: f.env.tmp.path().join("target-repo"),
+            push_unresolved: false,
         },
         &FakeGitHub::default(),
         &Probe,

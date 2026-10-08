@@ -559,7 +559,12 @@ fn main() -> anyhow::Result<()> {
             finish_task(result, out, warn)
         }
         Command::Task {
-            command: TaskCommand::Finish { issue, spec },
+            command:
+                TaskCommand::Finish {
+                    issue,
+                    spec,
+                    push_unresolved,
+                },
         } => {
             let target = match (issue, spec) {
                 (Some(n), _) => commands::task_finish::Target::Issue(n),
@@ -579,6 +584,7 @@ fn main() -> anyhow::Result<()> {
                     &commands::task_finish::Options {
                         target,
                         repo_root: std::env::current_dir()?,
+                        push_unresolved,
                     },
                     &sbxm::github::gh::GhBackend::default(),
                     &task::record::SystemProbe,

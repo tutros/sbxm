@@ -7,10 +7,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Result, bail};
 
-use crate::commands::task_start::path_arg;
+use crate::commands::task_start::{path_arg, spec_flag};
 use crate::config::GlobalConfig;
 use crate::github::GitHubBackend;
-use crate::task::config::{self as task_config, Sink, TaskConfig};
+use crate::task::config::{Sink, TaskConfig};
 use crate::task::finish;
 use crate::task::record::{self, ProcessProbe};
 
@@ -27,6 +27,8 @@ pub struct Options {
     pub target: Target,
     /// The checkout whose `sbxm-task.toml` names a spec task's `[finish] sink`.
     pub repo_root: PathBuf,
+    /// Push a spec task that has `stopped` set or must-fix findings left (issue 144).
+    pub push_unresolved: bool,
 }
 
 pub fn run(
@@ -42,7 +44,7 @@ pub fn run(
         Target::Spec(path) => {
             let id = record::spec_id(path)?.0;
             let base_dir = GlobalConfig::load(config_dir)?.base_dir;
-            return finish_spec(&base_dir, &id, &opts.repo_root, probe, out);
+            return finish_spec(&base_dir, &id, path, opts, probe, out);
         }
     };
     let base_dir = GlobalConfig::load(config_dir)?.base_dir;
@@ -75,21 +77,26 @@ pub fn run(
 }
 
 /// A spec task goes to the `[finish] sink` named in the checkout's `sbxm-task.toml` (decision
-/// 174(e)): `local` keeps the branch in the task's `repo.git` and says how to fetch it.
+/// 174(e)): `local` keeps the branch in the task's `repo.git` and says how to fetch it; `push`
+/// pushes it to `origin` as a new branch, opening no PR.
 fn finish_spec(
     base_dir: &Path,
     id: &str,
-    repo_root: &Path,
+    spec: &Path,
+    opts: &Options,
     probe: &dyn ProcessProbe,
     out: &mut dyn Write,
 ) -> Result<()> {
-    match TaskConfig::load(repo_root)?.sink {
-        Sink::Push => bail!(
-            "task {id}: [finish] sink = \"push\" is not available yet (issue 144); set sink = \
-             \"local\" in {} to keep the branch in the task's repo.git",
-            repo_root.join(task_config::FILE_NAME).display()
-        ),
-        Sink::Local => {}
+    if TaskConfig::load(&opts.repo_root)?.sink == Sink::Push {
+        let pushed = finish::finish_push(base_dir, id, opts.push_unresolved, probe)?;
+        let branch = &pushed.branch;
+        writeln!(out, "{id}: pushed {branch} to origin; no PR was opened")?;
+        writeln!(
+            out,
+            "  next: fetch it with: git fetch origin {branch}; then clean up with: sbxm task rm {}",
+            spec_flag(spec)
+        )?;
+        return Ok(());
     }
     let kept = finish::finish_local(base_dir, id, probe)?;
     let branch = &kept.branch;

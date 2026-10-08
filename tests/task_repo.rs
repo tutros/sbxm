@@ -446,6 +446,34 @@ fn push_sends_only_the_task_branch_to_origin() {
     );
 }
 
+/// Issue 144: `push_new` only ever creates a branch. Even a branch on origin that the push would
+/// merely fast-forward is left alone (a plain push would move it), so a spec task's push can't
+/// take over a branch that appeared after sbxm checked.
+#[test]
+fn push_new_creates_a_branch_and_never_moves_an_existing_one() {
+    let f = fixture();
+    repo::clone_bare(&source(&f), &f.repo_git).unwrap();
+    repo::create_branch(&f.repo_git, "spec-a", "main").unwrap();
+    repo::create_branch(&f.repo_git, "spec-b", "main").unwrap();
+    commit_on(&f, "spec-a", "a.txt");
+
+    repo::push_new(&f.repo_git, "spec-a").unwrap();
+    assert_eq!(
+        git(&f.origin, &["rev-parse", "spec-a"]),
+        git(&f.repo_git, &["rev-parse", "spec-a"])
+    );
+
+    // spec-b exists on origin at main; the task's spec-b is one commit ahead of it.
+    git(&f.repo_git, &["push", "-q", "origin", "spec-b"]);
+    let before = git(&f.origin, &["rev-parse", "spec-b"]);
+    commit_on(&f, "spec-b", "b.txt");
+
+    let message = format!("{:#}", repo::push_new(&f.repo_git, "spec-b").unwrap_err());
+
+    assert!(message.contains("spec-b"), "{message}");
+    assert_eq!(git(&f.origin, &["rev-parse", "spec-b"]), before);
+}
+
 #[test]
 fn pushing_a_missing_branch_is_an_error_naming_it() {
     let f = fixture();

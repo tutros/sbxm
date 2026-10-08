@@ -62,6 +62,16 @@ pub fn with_header(harness: &str, model: Option<&str>, review: &str) -> String {
     )
 }
 
+/// [`must_fix_count`] of a saved `review.md`, read past the [`with_header`] line (a file without
+/// it is read as it is).
+pub fn saved_must_fix_count(saved: &str) -> Option<u32> {
+    let review = saved
+        .strip_prefix("Reviewer: ")
+        .and_then(|rest| rest.split_once("\n\n"))
+        .map_or(saved, |(_, review)| review);
+    must_fix_count(review)
+}
+
 /// The individual file paths named by a `Where:` value (spec §5.3, issue 119): each
 /// backtick-delimited reference, with any trailing `:<line>` or `:<line>-<line>` stripped so two
 /// findings in the same file match regardless of which lines they point at. A `Where:` may name

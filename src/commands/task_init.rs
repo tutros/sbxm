@@ -45,7 +45,8 @@ profile = "sbxm-dev"
 timeout = "20m"                # per command
 
 # Where `task finish --spec` puts a spec task's branch (an issue task always opens a PR):
-# "local" keeps it in the task's repo.git and prints how to fetch it; "push" isn't built yet.
+# "local" keeps it in the task's repo.git and prints how to fetch it; "push" pushes it to
+# origin as a new branch and opens no PR.
 # [finish]
 # sink = "local"
 
