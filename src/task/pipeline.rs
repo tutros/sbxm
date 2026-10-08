@@ -1499,6 +1499,11 @@ pub fn check_can_review(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
         record::Kind::Spec => "sbxm task status".to_owned(),
         _ => format!("sbxm task status --issue {}", task.number),
     };
+    // What continues a failed or interrupted stage (issue 118).
+    let resume = match task.kind {
+        record::Kind::Spec => "sbxm task resume --spec <file>".to_owned(),
+        _ => format!("sbxm task resume --issue {}", task.number),
+    };
     let state = machine::State {
         stage: task.stage,
         status: task.status,
@@ -1512,7 +1517,8 @@ pub fn check_can_review(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
         (Stage::Working | Stage::Fixing, Status::Running) => {
             if task.is_interrupted(probe) {
                 bail!(
-                    "task {id} was interrupted while its {} stage was running; see `{status_hint}`",
+                    "task {id} was interrupted while its {} stage was running; continue it with \
+                     `{resume}`, or see `{status_hint}`",
                     task.stage.name()
                 )
             }
@@ -1521,13 +1527,15 @@ pub fn check_can_review(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
             )
         }
         (Stage::Working | Stage::Fixing, _) => bail!(
-            "the worker failed for task {id}, so there is nothing to review; see `{status_hint}`"
+            "the worker failed for task {id}, so there is nothing to review; run it again with \
+             `{resume}`, or see `{status_hint}`"
         ),
         (Stage::Gating, _) => {
             bail!("gates are running for task {id}, or were interrupted; see `{status_hint}`")
         }
         (Stage::Reviewing, _) => bail!(
-            "task {id} is already being reviewed or has been (stage reviewing); see `{status_hint}`"
+            "task {id} is already being reviewed or has been (stage reviewing); if the sbxm \
+             process that ran it is gone, continue it with `{resume}`, or see `{status_hint}`"
         ),
         (Stage::Prepared, _) if task.kind == record::Kind::Spec => bail!(
             "no worker has run for task {id}; see `{status_hint}`, and remove its folders under the base dir to start it again"

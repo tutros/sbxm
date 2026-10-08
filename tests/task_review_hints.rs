@@ -106,3 +106,45 @@ fn an_issue_task_refusal_still_names_its_issue() {
     let message = refusal(&at(Kind::Issue, Stage::Working, Status::Failed), true);
     assert!(message.contains("sbxm task status --issue 7"), "{message}");
 }
+
+/// Issue 118: a review refused because a stage failed or was cut off names `task resume`, which
+/// continues it, instead of leaving only `task status` (and `rm`) to the user.
+#[test]
+fn a_failed_or_interrupted_stage_names_task_resume() {
+    let cases = [
+        ("worker failed", Stage::Working, Status::Failed, true),
+        ("worker interrupted", Stage::Working, Status::Running, false),
+        ("fix round failed", Stage::Fixing, Status::Failed, true),
+        (
+            "review interrupted",
+            Stage::Reviewing,
+            Status::Running,
+            false,
+        ),
+        (
+            "review completed",
+            Stage::Reviewing,
+            Status::Completed,
+            false,
+        ),
+    ];
+    // `check_can_review` reads only the stage, the status, the kind and the process.
+    let left_in = |kind, stage, status| {
+        let mut record = task(kind);
+        (record.stage, record.status) = (stage, status);
+        record
+    };
+    for (name, stage, status, alive) in cases {
+        let message = refusal(&left_in(Kind::Issue, stage, status), alive);
+        assert!(
+            message.contains("sbxm task resume --issue 7"),
+            "{name}: {message}"
+        );
+        let message = refusal(&left_in(Kind::Spec, stage, status), alive);
+        assert!(
+            message.contains("sbxm task resume --spec <file>"),
+            "{name}: {message}"
+        );
+        assert!(!message.contains("--issue"), "{name}: {message}");
+    }
+}
