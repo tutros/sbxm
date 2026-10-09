@@ -594,12 +594,12 @@ fn a_pr_that_was_already_reviewed_is_refused_and_says_how_to_start_over() {
 fn the_pr_review_uses_the_default_branch_as_the_base() {
     let f = config("codex");
     add_pr_head(&f, 7);
+    // The base must exist: the risk floor diffs the PR against it (issue 123).
+    common::git(&f.origin, &["branch", "trunk", "main"]);
     let github = pr_github().with_default_branch("trunk");
 
     let out = go_pr(&f, &pr_options(&f), &pr_backend(&f, &[CLEAN]), &github);
 
-    // A PR's own head is fetched by number, so the missing `trunk` branch doesn't matter; the base
-    // only names what the reviewer diffs against.
     out.result.unwrap();
     assert_eq!(
         record::read(&pr_meta(&f).join("task.json")).unwrap().base,
