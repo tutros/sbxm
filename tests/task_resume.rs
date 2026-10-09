@@ -15,7 +15,7 @@ use sbxm::task::config::TaskConfig;
 use sbxm::task::gates::FakeHostRunner;
 use sbxm::task::pipeline::{self, Prepared, TaskEnv};
 use sbxm::task::record::{self, Kind, ProcessProbe, ReviewResult, Stage, Status, Stopped};
-use sbxm::task::{repo, resume};
+use sbxm::task::{finish, repo, resume};
 use std::fs;
 use std::sync::{Arc, Mutex};
 
@@ -31,7 +31,8 @@ fn config_with_fix_rounds(fix_rounds: u32) -> Fixture {
 }
 
 const CLEAN: &str = "Must-fix findings: 0\n\nNothing found.\n";
-const ONE: &str = "Must-fix findings: 1\n\n1. must-fix: a.txt:1 does the wrong thing.\n";
+const ONE: &str =
+    "Must-fix findings: 1\n\n## Must fix\n\n### M-1 - a.txt:1 does the wrong thing.\n";
 
 /// A structured must-fix finding, so a later round can claim to repeat it (spec §5.3).
 const FINDING1: &str = "Must-fix findings: 1\n\n\
@@ -51,6 +52,20 @@ const REPEAT: &str = "Must-fix findings: 1\n\n\
     **Why it matters:** decision 1\n\
     **Fix:** return the right value\n\
     **Repeat of:** M-1\n";
+
+/// Two structured must-fix findings in different files: `REPEAT` repeats only `M-1`.
+const FINDINGS_TWO: &str = "Must-fix findings: 2\n\n\
+    ## Must fix\n\n\
+    ### M-1 - a.txt does the wrong thing\n\n\
+    **Where:** `a.txt:1`\n\
+    **What happens:** it returns the wrong value\n\
+    **Why it matters:** decision 1\n\
+    **Fix:** return the right value\n\n\
+    ### M-2 - b.txt is wrong too\n\n\
+    **Where:** `b.txt:3`\n\
+    **What happens:** it is wrong\n\
+    **Why it matters:** decision 2\n\
+    **Fix:** make it right\n";
 
 /// The process a record names is gone (the `sbxm` that wrote it was killed).
 struct Gone;
@@ -1228,6 +1243,38 @@ fn a_repeat_stop_with_rounds_left_resumes_without_rounds_and_its_first_review_ig
     let record = saved(&f);
     assert_eq!((record.stage, record.stopped), (Stage::Ready, None));
     assert_eq!((record.round, record.fix_rounds), (3, 3));
+}
+
+#[test]
+fn an_older_record_without_open_findings_keeps_what_its_saved_reviews_left_open() {
+    // Review round 3, M-2: a record written before `open_findings` existed has none, but its
+    // saved reviews do. Round 1 (full) found M-1 and M-2, round 2 (narrow) repeated M-1; the
+    // resumed round 3 (narrow) repeats M-1 again, so M-2 is still open and must stay listed.
+    let f = config();
+    let mut prepared = stopped_task(&f, &[FINDINGS_TWO, REPEAT]);
+    prepared.record.open_findings = None;
+    record::write(&prepared.meta, &prepared.record).unwrap();
+    let backend = backend(&f, &[REPEAT]);
+
+    resume::resume(&env(&f, &backend, &Gone), &mut prepared, Some(1)).unwrap();
+
+    let record = saved(&f);
+    assert!(record.stopped.is_some(), "round 3 still has M-1");
+    let open: Vec<(u32, String)> = record
+        .open_findings
+        .clone()
+        .expect("the open findings are recorded")
+        .into_iter()
+        .map(|o| (o.round, o.id))
+        .collect();
+    assert_eq!(open, [(1, "M-2".to_owned()), (3, "M-1".to_owned())]);
+    let section =
+        finish::unresolved_section(&[], &finish::open_findings(&record, &prepared.meta, None));
+    assert!(
+        section.contains("M-2 (review 1): b.txt is wrong too"),
+        "{section}"
+    );
+    assert!(section.contains("M-1 (review 3)"), "{section}");
 }
 
 // ---- Refusals ----

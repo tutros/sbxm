@@ -14,8 +14,8 @@ use super::gates::{self, GateOutcome, HostRunner};
 use super::machine;
 use super::prompts::{self, Role};
 use super::record::{
-    self, Agent, GateResult, GateRun, Kind, NewTask, PrBranch, Process, ProcessProbe, Record,
-    RunInfo, Stage, Status,
+    self, Agent, GateResult, GateRun, Kind, NewTask, OpenFinding, PrBranch, Process, ProcessProbe,
+    Record, RunInfo, Stage, Status,
 };
 use super::repo::{self, AgentFile, BUNDLE_CAP, Existing, Identity};
 use super::review;
@@ -1769,18 +1769,9 @@ pub fn review_issue(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewRepo
 /// `Record::review` (issue 118) only has the files to go by: a number taken from the fix-round
 /// counter alone would overwrite an earlier round's saved review.
 fn next_review_round(prepared: &Prepared) -> Result<u32> {
-    let saved = fs::read_dir(&prepared.meta)
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.ok()?.file_name();
-            name.to_str()?
-                .strip_prefix("review-")?
-                .strip_suffix(".md")?
-                .parse::<u32>()
-                .ok()
-        })
-        .max()
+    let saved = review::saved_rounds(&prepared.meta)
+        .last()
+        .copied()
         .unwrap_or(0);
     let recorded = prepared.record.review.as_ref().map_or(0, |last| last.round);
     review_round_after(prepared, prepared.record.round.max(recorded).max(saved))
@@ -2038,7 +2029,7 @@ pub fn review_pr(
     let ran = run_review_agent(env, prepared, 1, &clone, &sandbox, &[]);
     cleanup(prepared);
     let must_fix = match ran {
-        Ok((must_fix, _repeat, _warnings)) => must_fix,
+        Ok((must_fix, _repeat, _warnings, _open)) => must_fix,
         Err(e) => {
             prepared.record.notes.push(format!("review: {e:#}"));
             prepared.record.finish(Status::Failed)?;
@@ -2402,8 +2393,9 @@ pub fn run_reviewer(env: &TaskEnv, prepared: &mut Prepared, round: u32) -> Resul
             .push(format!("could not remove {}: {e}", clone.display()));
     }
     match result {
-        Ok((must_fix, repeat, warnings)) => {
+        Ok((must_fix, repeat, warnings, open)) => {
             prepared.record.last_reviewed_commit = if must_fix == 0 { None } else { tip };
+            prepared.record.open_findings = Some(open);
             prepared.record.review = Some(record::ReviewResult {
                 round,
                 must_fix,
@@ -2433,8 +2425,9 @@ pub fn run_reviewer(env: &TaskEnv, prepared: &mut Prepared, round: u32) -> Resul
 }
 
 /// One review round: its workspace, then the reviewer. Returns the must-fix count, whether a
-/// must-fix finding validly repeats one of `earlier`'s (spec §5.3, decisions 174(b), 177(o)), and
-/// warnings for any invalid `Repeat of:` claim (decision 177(e)).
+/// must-fix finding validly repeats one of `earlier`'s (spec §5.3, decisions 174(b), 177(o)),
+/// warnings for any invalid `Repeat of:` claim (decision 177(e)), and the must-fix findings open
+/// once it is accepted ([`review::open_after`], decision 177(p)).
 fn review_round(
     env: &TaskEnv,
     prepared: &mut Prepared,
@@ -2442,7 +2435,7 @@ fn review_round(
     clone: &Path,
     sandbox: &str,
     earlier: &[String],
-) -> Result<(u32, bool, Vec<String>)> {
+) -> Result<(u32, bool, Vec<String>, Vec<OpenFinding>)> {
     open_review_workspace(env, prepared, round, clone, sandbox, earlier)?;
     run_review_agent(env, prepared, round, clone, sandbox, earlier)
 }
@@ -2593,7 +2586,7 @@ fn run_review_agent(
     clone: &Path,
     sandbox: &str,
     earlier: &[String],
-) -> Result<(u32, bool, Vec<String>)> {
+) -> Result<(u32, bool, Vec<String>, Vec<OpenFinding>)> {
     let reviewer = &env.config.reviewer;
     let started = Instant::now();
     let result = headless::run(
@@ -2654,9 +2647,24 @@ fn run_review_agent(
              used; read it in review-{round}.md"
         );
     };
+    if !review::count_matches(must_fix, &text) {
+        let listed = review::must_fix_findings(&text, round).len();
+        bail!(
+            "the reviewer's review.md says {must_fix} must-fix finding(s) but lists {listed} as \
+             '### <id> - <title>' under '## Must fix', so it isn't used; read it in \
+             review-{round}.md"
+        );
+    }
     fs::write(prepared.meta.join("review.md"), &saved)?;
     let earlier_refs: Vec<&str> = earlier.iter().map(String::as_str).collect();
     let repeat = review::repeats_a_must_fix_finding(&text, &earlier_refs);
     let warnings = review::invalid_repeat_claims(&text, &earlier_refs);
-    Ok((must_fix, repeat, warnings))
+    let full = prepared.record.last_reviewed_commit.is_none();
+    let earlier_open = match &prepared.record.open_findings {
+        Some(open) => open.clone(),
+        // A record from before the list: rebuilt from the saved reviews, never taken as empty.
+        None => review::open_from_task_dir(&prepared.meta, round.saturating_sub(1)),
+    };
+    let open = review::open_after(Some(&earlier_open), &text, round, full);
+    Ok((must_fix, repeat, warnings, open))
 }

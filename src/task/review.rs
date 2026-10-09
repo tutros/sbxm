@@ -1,7 +1,11 @@
 //! Reading a reviewer's `review.md` (spec §5.2): its first line says how many must-fix findings
 //! there are, and a review without that line isn't used.
 
+use std::fs;
+use std::path::Path;
+
 use super::findings;
+use super::record::OpenFinding;
 
 /// The count on the first line, which must be exactly `Must-fix findings: <count>` (trailing
 /// spaces and a Windows line ending are fine); `None` for anything else.
@@ -193,4 +197,131 @@ pub fn invalid_repeat_claims(current: &str, earlier_reviews: &[&str]) -> Vec<Str
             _ => None,
         })
         .collect()
+}
+
+/// The must-fix findings of `review` (a reviewer's text, or a saved `review.md`), as found by
+/// review round `round`.
+pub fn must_fix_findings(review: &str, round: u32) -> Vec<OpenFinding> {
+    findings::parse(review)
+        .findings
+        .into_iter()
+        .filter(|f| f.label == "must-fix")
+        .map(|f| OpenFinding {
+            round,
+            place: f.field("where").map(str::to_owned),
+            id: f.id,
+            title: f.title,
+        })
+        .collect()
+}
+
+/// The must-fix findings open after the saved reviews `saved` (`(round, review-<round>.md)`,
+/// oldest first), for a record written before `open_findings` existed (decision 177(p)): each
+/// accepted round (one with a must-fix count) is replayed through [`open_after`]; it was `full`
+/// when it was the first or the accepted round before it had no must-fix finding, the same rule
+/// that clears `last_reviewed_commit`. No accepted round leaves nothing open.
+pub fn open_from_saved(saved: &[(u32, &str)]) -> Vec<OpenFinding> {
+    let mut open: Option<Vec<OpenFinding>> = None;
+    let mut full = true;
+    for (round, text) in saved {
+        let Some(must_fix) = saved_must_fix_count(text) else {
+            continue;
+        };
+        if !count_matches(must_fix, text) {
+            continue;
+        }
+        open = Some(open_after(open.as_deref(), text, *round, full));
+        full = must_fix == 0;
+    }
+    open.unwrap_or_default()
+}
+
+/// Whether a review's must-fix `count` is the number of must-fix findings its text lists; a
+/// review where they differ isn't used, live or replayed.
+pub fn count_matches(count: u32, review: &str) -> bool {
+    usize::try_from(count).ok() == Some(must_fix_findings(review, 0).len())
+}
+
+/// The rounds of the `review-<round>.md` files a task saved in its folder `meta`, in order. They
+/// need not start at 1: gate failures can use rounds before the first review.
+pub fn saved_rounds(meta: &Path) -> Vec<u32> {
+    let mut rounds: Vec<u32> = fs::read_dir(meta)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.ok()?.file_name();
+            name.to_str()?
+                .strip_prefix("review-")?
+                .strip_suffix(".md")?
+                .parse::<u32>()
+                .ok()
+        })
+        .collect();
+    rounds.sort_unstable();
+    rounds
+}
+
+/// [`open_from_saved`] over the `review-<round>.md` files a task saved in its folder `meta`, up
+/// to round `last`.
+pub fn open_from_task_dir(meta: &Path, last: u32) -> Vec<OpenFinding> {
+    let saved: Vec<(u32, String)> = saved_rounds(meta)
+        .into_iter()
+        .take_while(|&r| r <= last)
+        .filter_map(|r| {
+            fs::read_to_string(meta.join(format!("review-{r}.md")))
+                .ok()
+                .map(|text| (r, text))
+        })
+        .collect();
+    let refs: Vec<(u32, &str)> = saved.iter().map(|(r, t)| (*r, t.as_str())).collect();
+    open_from_saved(&refs)
+}
+
+/// The must-fix findings open once review round `round` (`current`, the reviewer's text) is
+/// accepted (decision 177(p)): a `full` review saw every commit, so its findings are all that is
+/// open; a narrow one saw only the latest, so the `earlier` open findings stay, except one it
+/// names in a `Repeat of:` claim on the same file, which its own finding replaces. Ids restart
+/// every round, so a claim matching more than one open finding can't say which it means: all of
+/// them stay.
+pub fn open_after(
+    earlier: Option<&[OpenFinding]>,
+    current: &str,
+    round: u32,
+    full: bool,
+) -> Vec<OpenFinding> {
+    let found: Vec<findings::Finding> = findings::parse(current)
+        .findings
+        .into_iter()
+        .filter(|f| f.label == "must-fix")
+        .collect();
+    let mut open: Vec<OpenFinding> = if full {
+        Vec::new()
+    } else {
+        let earlier = earlier.unwrap_or_default();
+        let claims = |f: &findings::Finding, old: &OpenFinding| {
+            f.field("repeat of") == Some(old.id.as_str())
+                && match (f.field("where"), old.place.as_deref()) {
+                    (Some(a), Some(b)) => shares_a_path(a, b),
+                    _ => false,
+                }
+        };
+        let replaced: Vec<usize> = found
+            .iter()
+            .filter_map(|f| {
+                let mut matches = (0..earlier.len()).filter(|&i| claims(f, &earlier[i]));
+                match (matches.next(), matches.next()) {
+                    (Some(only), None) => Some(only),
+                    _ => None,
+                }
+            })
+            .collect();
+        earlier
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !replaced.contains(i))
+            .map(|(_, old)| old.clone())
+            .collect()
+    };
+    open.extend(must_fix_findings(current, round));
+    open
 }

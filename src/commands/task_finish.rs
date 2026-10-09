@@ -59,6 +59,9 @@ pub fn run(
             "{id}: pushed {branch} to PR #{pr} and commented on it, {}",
             done.url
         )?;
+        for reason in &done.unresolved {
+            writeln!(out, "  unresolved: {reason}")?;
+        }
         writeln!(
             out,
             "  next: review PR #{pr} again with: sbxm task review --pr {pr} (if it was reviewed before, \
@@ -67,7 +70,14 @@ pub fn run(
         )?;
         return Ok(());
     }
-    writeln!(out, "{id}: pushed {id} and opened {}", done.url)?;
+    if done.draft {
+        writeln!(out, "{id}: pushed {id} and opened draft PR {}", done.url)?;
+        for reason in &done.unresolved {
+            writeln!(out, "  unresolved: {reason}")?;
+        }
+    } else {
+        writeln!(out, "{id}: pushed {id} and opened {}", done.url)?;
+    }
     writeln!(
         out,
         "  next: after it is merged, clean up with: sbxm task rm --issue {}",

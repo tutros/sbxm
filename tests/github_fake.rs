@@ -77,6 +77,7 @@ fn writes_are_recorded_and_answered_with_plausible_values() {
         base: "main".into(),
         title: "t".into(),
         body: "Fixes #4".into(),
+        draft: false,
     };
     let issue_request = IssueRequest {
         title: "F1".into(),
@@ -107,4 +108,24 @@ fn a_failing_fake_fails_every_call_but_still_records_it() {
     let message = format!("{:#}", fake.whoami().unwrap_err());
     assert!(message.contains("gh is down"), "{message}");
     assert_eq!(fake.calls(), [GhCall::Whoami]);
+}
+
+#[test]
+fn a_draft_pr_request_is_recorded_as_a_draft() {
+    let fake = FakeGitHub::default();
+    let request = PrRequest {
+        head: "issue-4".into(),
+        base: "main".into(),
+        title: "t".into(),
+        body: "Fixes #4".into(),
+        draft: true,
+    };
+
+    fake.pr_create("o/r", &request).unwrap();
+
+    let calls = fake.calls();
+    let [GhCall::PrCreate(_, recorded)] = calls.as_slice() else {
+        panic!("{calls:?}")
+    };
+    assert!(recorded.draft);
 }

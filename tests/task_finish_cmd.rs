@@ -68,6 +68,28 @@ fn it_prints_the_pr_url_and_the_next_step() {
 }
 
 #[test]
+fn a_draft_pr_is_called_a_draft_with_what_is_left() {
+    let f = fixture();
+    ready(&f);
+    let meta = f
+        .env
+        .base_dir()
+        .join(".sbxm")
+        .join("tasks")
+        .join("issue-41");
+    fs::write(meta.join("review.md"), "Must-fix findings: 1\n").unwrap();
+
+    let (result, out) = go(&f, 41, &FakeGitHub::default());
+
+    result.unwrap();
+    assert!(
+        out.contains("issue-41: pushed issue-41 and opened draft PR https://github.com/o/r/pull/"),
+        "{out}"
+    );
+    assert!(out.contains("1 must-fix finding(s) left"), "{out}");
+}
+
+#[test]
 fn issue_zero_and_an_unknown_task_are_refused_with_a_fix() {
     let f = fixture();
 

@@ -338,7 +338,7 @@ fn a_clone_left_by_a_killed_run_is_cleared_first() {
 #[test]
 fn round_two_gets_the_previous_review_and_keeps_both_files() {
     let f = config();
-    let first = "Must-fix findings: 1\n\n1. must-fix: a.txt:1 wrong.\n";
+    let first = "Must-fix findings: 1\n\n## Must fix\n\n### M-1 - a.txt:1 wrong.\n";
     let backend = backend_with(&f, Some(first));
     let mut prepared = gated(&f, &backend);
     round(&f, &backend, &mut prepared, 1).unwrap();
@@ -368,14 +368,11 @@ fn round_two_gets_the_previous_review_and_keeps_both_files() {
         .unwrap()
         .clone()
         .expect("previous-review.md was there");
-    assert!(
-        previous.contains("1. must-fix: a.txt:1 wrong."),
-        "{previous}"
-    );
+    assert!(previous.contains("### M-1 - a.txt:1 wrong."), "{previous}");
     assert!(
         fs::read_to_string(meta(&f).join("review-1.md"))
             .unwrap()
-            .contains("must-fix: a.txt:1")
+            .contains("M-1 - a.txt:1")
     );
     assert!(
         fs::read_to_string(meta(&f).join("review-2.md"))

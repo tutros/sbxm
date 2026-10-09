@@ -73,7 +73,9 @@ sbxm task run --issue 63               # start and review in one go; stops befor
   - `[worker] fix_rounds` (default 3) bounds the review-fix-review loop; a gate failure spends a round too. Rounds
     after the first review only the commits made since the last one, and one more review of everything confirms a
     clean one before the task is `ready`. If the budget runs out with findings still open, the task is still
-    `ready`, with `stopped` set to `rounds-exhausted` in `task.json`.
+    `ready`, with `stopped` set to `rounds-exhausted` in `task.json`, and `task finish` opens its PR as a draft whose
+    body lists the reason and the must-fix findings left (issue 120); a clean task gets a normal PR. A task that
+    continues an open PR puts the same list in its comment on that PR instead (it can't make the PR a draft).
   - `task start --spec FILE` makes a task from a file instead of a GitHub issue (id `spec-<name>-<hash>`,
     `source.md` in place of `issue.md`); `task review --spec FILE` continues it through the same gates/review/fix
     loop. `review.md` is its review (no PR, no GitHub call anywhere). `task finish --spec FILE` delivers it through

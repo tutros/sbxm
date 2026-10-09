@@ -20,7 +20,7 @@ use sbxm::task::record::{self, Stage, Status};
 use sbxm::task::review;
 
 const CLEAN: &str = "Must-fix findings: 0\n\nNothing found.\n";
-const ONE: &str = "Must-fix findings: 1\n\n1. must-fix: pr.txt:1 is wrong.\n";
+const ONE: &str = "Must-fix findings: 1\n\n## Must fix\n\n### M-1 - pr.txt:1 is wrong.\n";
 
 fn config(host_gates: &str) -> Fixture {
     fixture_with(&format!(

@@ -304,6 +304,20 @@ pub struct ReviewResult {
     pub repeat: bool,
 }
 
+/// A must-fix finding still open, as the review that found it (or, for a repeat, last found it)
+/// described it (decision 177(f, p)): recorded when the review is parsed, so `finish` never reads
+/// a `review.md` that may have been edited since.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OpenFinding {
+    /// The review round that found it.
+    pub round: u32,
+    pub id: String,
+    pub title: String,
+    /// Its `Where:`, as written.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub place: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Record {
     pub schema: u32,
@@ -339,6 +353,11 @@ pub struct Record {
     /// The last review's result (issue 118); absent in older records and until a review completes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub review: Option<ReviewResult>,
+    /// Every must-fix finding still open across the review rounds (decision 177(p)): a full
+    /// review replaces the set, a narrow one adds its findings and keeps the older ones it didn't
+    /// see. Absent in older records and until a review completes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open_findings: Option<Vec<OpenFinding>>,
     pub gates: Vec<GateResult>,
     /// The latest gate run that passed, and what it covered; cleared when gates start again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -438,6 +457,7 @@ impl Record {
             stopped: None,
             last_reviewed_commit: None,
             review: None,
+            open_findings: None,
             gates: Vec::new(),
             gate_run: None,
             pr: None,

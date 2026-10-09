@@ -32,7 +32,8 @@ fn config_with_fix_rounds(fix_rounds: u32) -> Fixture {
 }
 
 const CLEAN: &str = "Must-fix findings: 0\n\nNothing found.\n";
-const ONE: &str = "Must-fix findings: 1\n\n1. must-fix: a.txt:1 does the wrong thing.\n";
+const ONE: &str =
+    "Must-fix findings: 1\n\n## Must fix\n\n### M-1 - a.txt:1 does the wrong thing.\n";
 
 /// A structured finding (unlike `ONE`, which `review::must_fix_count` reads but
 /// `review::repeats_a_must_fix_finding` can't parse), so round 2's `Repeat of:` line has an
@@ -74,6 +75,20 @@ const REPEAT_UNKNOWN_ID: &str = "Must-fix findings: 1\n\n\
     **Why it matters:** decision 1\n\
     **Fix:** return the right value\n\
     **Repeat of:** M-9\n";
+
+/// Two structured must-fix findings in different files: `REPEAT_SAME_FILE` repeats only `M-1`.
+const FINDINGS_TWO: &str = "Must-fix findings: 2\n\n\
+    ## Must fix\n\n\
+    ### M-1 - a.txt does the wrong thing\n\n\
+    **Where:** `a.txt:1`\n\
+    **What happens:** it returns the wrong value\n\
+    **Why it matters:** decision 1\n\
+    **Fix:** return the right value\n\n\
+    ### M-2 - b.txt is wrong too\n\n\
+    **Where:** `b.txt:3`\n\
+    **What happens:** it is wrong\n\
+    **Why it matters:** decision 2\n\
+    **Fix:** make it right\n";
 
 /// The worker (and a fix round) commit a file each time; the n-th review is `reviews[n]`.
 fn backend(f: &Fixture, reviews: &[&str]) -> FakeBackend {
@@ -251,7 +266,7 @@ fn must_fix_findings_get_a_fix_round_then_a_narrow_review_then_one_full_review_b
     assert!(
         fs::read_to_string(meta(&f).join("review-1.md"))
             .unwrap()
-            .contains("must-fix")
+            .contains("### M-1 - a.txt:1")
     );
     assert!(
         fs::read_to_string(meta(&f).join("review-2.md"))
@@ -932,4 +947,79 @@ fn a_continued_tasks_reviewer_is_scoped_from_the_pr_head_it_started_at() {
         "{prompt}"
     );
     assert!(!prompt.contains("origin/main"), "{prompt}");
+}
+
+#[test]
+fn a_narrow_review_that_repeats_one_finding_keeps_the_full_reviews_other_findings_open() {
+    // Review M-1 (issue 120, decision 177(f, p)): round 1 (full) finds M-1 and M-2, round 2
+    // (narrow) repeats only M-1 and stops the task. M-2 was never seen fixed, so it stays open in
+    // the record, next to round 2's M-1, and `finish` lists both from there.
+    let f = config_with_fix_rounds(3);
+    let backend = backend(&f, &[FINDINGS_TWO, REPEAT_SAME_FILE]);
+    let mut prepared = worked_task(&f, &backend);
+
+    review(&f, &backend, &mut prepared).unwrap();
+
+    let record = saved(&f);
+    assert_eq!(record.stopped, Some(record::Stopped::RepeatFinding));
+    let open = record
+        .open_findings
+        .expect("the open findings are recorded");
+    let listed: Vec<_> = open
+        .iter()
+        .map(|o| (o.round, o.id.as_str(), o.title.as_str(), o.place.as_deref()))
+        .collect();
+    assert_eq!(
+        listed,
+        [
+            (1, "M-2", "b.txt is wrong too", Some("`b.txt:3`")),
+            (
+                2,
+                "M-1",
+                "a.txt still does the wrong thing",
+                Some("`a.txt:5`")
+            ),
+        ]
+    );
+}
+
+#[test]
+fn a_full_review_replaces_the_open_findings() {
+    // A full review sees every commit, so what it finds is all that is open: round 1's M-2 is
+    // gone once round 3 (the confirmatory full review after a clean narrow one) doesn't name it.
+    let f = config_with_fix_rounds(3);
+    let backend = backend(&f, &[FINDINGS_TWO, CLEAN, FINDING1, CLEAN, CLEAN]);
+    let mut prepared = worked_task(&f, &backend);
+
+    review(&f, &backend, &mut prepared).unwrap();
+
+    let record = saved(&f);
+    assert_eq!(record.stopped, None);
+    assert_eq!(record.open_findings, Some(Vec::new()));
+}
+
+#[test]
+fn a_review_whose_count_differs_from_its_must_fix_findings_is_not_used() {
+    // Review round 6, M-2: a count with no `### M-…` findings under `## Must fix` would leave a
+    // stopped task with nothing to list in its draft PR, so the review is refused like one with no
+    // count line.
+    let f = config();
+    let backend = backend(&f, &["Must-fix findings: 2\n\nTwo things are wrong.\n"]);
+    let mut prepared = worked_task(&f, &backend);
+
+    let err = review(&f, &backend, &mut prepared).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("says 2 must-fix finding(s) but lists 0"),
+        "{message}"
+    );
+    let record = saved(&f);
+    assert_eq!(
+        (record.stage, record.status),
+        (Stage::Reviewing, Status::Failed)
+    );
+    assert_eq!(record.open_findings, None);
+    assert!(!meta(&f).join("review.md").exists());
+    assert!(meta(&f).join("review-1.md").exists());
 }

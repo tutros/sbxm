@@ -14,9 +14,9 @@ use anyhow::{Context, Result, bail};
 
 use super::machine;
 use super::pipeline::Prepared;
-use super::record::{self, Process, ProcessProbe, Record};
+use super::record::{self, OpenFinding, Process, ProcessProbe, Record};
 use super::repo;
-use super::review::{COMMENT_CAP, defang_mentions};
+use super::review::{self, COMMENT_CAP, defang_mentions};
 use crate::backend::SandboxBackend;
 use crate::confirm::Confirm;
 use crate::github::{GitHubBackend, PrRequest};
@@ -351,10 +351,19 @@ pub fn discard_many(
 /// 65,536 for the whole body).
 pub const SECTION_CAP: usize = 25_000;
 
-/// The PR body: `Fixes #N`, then each file under a heading. A file longer than the cap is cut and
-/// the body says so. Returns the body and one line per cut for the command to print.
-pub fn pr_body(number: u32, result: Option<&str>, review: Option<&str>) -> (String, Vec<String>) {
+/// The PR body: `Fixes #N`, then the [`unresolved_section`] of a draft, then each file under a
+/// heading. A file longer than the cap is cut and the body says so. Returns the body and one line
+/// per cut for the command to print.
+pub fn pr_body(
+    number: u32,
+    unresolved: Option<&str>,
+    result: Option<&str>,
+    review: Option<&str>,
+) -> (String, Vec<String>) {
     let mut body = format!("Fixes #{number}\n");
+    if let Some(section) = unresolved {
+        body.push_str(&format!("\n{}\n", section.trim_end()));
+    }
     let mut cuts = Vec::new();
     for (file, heading, text) in [
         ("result.md", "Result", result),
@@ -383,6 +392,133 @@ pub fn pr_body(number: u32, result: Option<&str>, review: Option<&str>) -> (Stri
     (body, cuts)
 }
 
+/// Why task `task`'s PR must be a draft (decision 173(b)), one line per reason; empty when it is
+/// clean. The must-fix count is the review result recorded in `task.json` (decision 177(f)), or,
+/// for a record from before it was kept, the count in the saved `review`. A count that can't be
+/// read is a reason too: a task with must-fix findings left never gets a normal PR.
+pub fn unresolved_reasons(task: &Record, review: Option<&str>) -> Vec<String> {
+    let mut reasons = Vec::new();
+    if let Some(stopped) = task.stopped {
+        let why = match stopped {
+            record::Stopped::RoundsExhausted => "it used all its fix rounds",
+            record::Stopped::RepeatFinding => "a must-fix finding came back after a fix round",
+        };
+        reasons.push(format!("the task stopped ({}): {why}", stopped.name()));
+    }
+    let must_fix = match &task.review {
+        Some(recorded) => Some(recorded.must_fix),
+        None => review.and_then(super::review::saved_must_fix_count),
+    };
+    match (must_fix, review) {
+        (Some(0), _) => {}
+        (Some(n), _) => reasons.push(format!("the last review has {n} must-fix finding(s) left")),
+        (None, Some(_)) => reasons.push("review.md has no must-fix count".to_owned()),
+        (None, None) => reasons.push("no review result is recorded".to_owned()),
+    }
+    reasons
+}
+
+/// The longest list of findings the draft's section carries, in characters; the review itself
+/// follows in full (up to [`SECTION_CAP`]).
+const UNRESOLVED_CAP: usize = 5_000;
+
+/// Ends a finding cut to fit [`UNRESOLVED_CAP`].
+const CUT_MARK: &str = "… (cut)\n";
+
+/// The must-fix findings task `task` left open: those recorded in `task.json` when its reviews
+/// were accepted (decision 177(f, p)), so an edited `review.md` changes nothing. A record from
+/// before they were kept rebuilds them from the `review-<round>.md` files saved in its folder
+/// `meta`, like the next review would; with none of those, they are the saved `review`'s.
+pub fn open_findings(task: &Record, meta: &Path, review: Option<&str>) -> Vec<OpenFinding> {
+    if let Some(open) = &task.open_findings {
+        return open.clone();
+    }
+    let rebuilt = review::open_from_task_dir(meta, u32::MAX);
+    if !rebuilt.is_empty() {
+        return rebuilt;
+    }
+    review
+        .map(|r| review::must_fix_findings(r, 0))
+        .unwrap_or_default()
+}
+
+/// Refuses a secret-looking open finding before any of it is cut to fit a PR's text, naming the
+/// finding by its place in the list, never the value.
+fn refuse_secret_findings(open: &[OpenFinding]) -> Result<()> {
+    for (n, finding) in open.iter().enumerate() {
+        let place = finding.place.as_deref().unwrap_or_default();
+        for text in [finding.id.as_str(), finding.title.as_str(), place] {
+            if let Some(kind) = text.lines().find_map(super::findings::secret_kind) {
+                bail!(
+                    "the draft's list of open findings: finding {} of {} looks like a secret \
+                     ({kind}); remove it from the task folder's task.json or saved reviews, then \
+                     run `sbxm task finish` again",
+                    n + 1,
+                    open.len()
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The section at the top of a draft PR's body: why it is a draft, then each must-fix finding
+/// left open ([`open_findings`]) with its `Where:`.
+pub fn unresolved_section(reasons: &[String], open: &[OpenFinding]) -> String {
+    unresolved_text("This PR is a draft because:", reasons, open)
+}
+
+/// [`unresolved_section`] under `intro`: a continued PR isn't made a draft (decision 177(r)).
+fn unresolved_text(intro: &str, reasons: &[String], must_fix: &[OpenFinding]) -> String {
+    let mut text = format!("## Unresolved\n\n{intro}\n\n");
+    for reason in reasons {
+        text.push_str(&format!("- {reason}\n"));
+    }
+    if must_fix.is_empty() {
+        return text;
+    }
+    text.push_str("\nMust-fix findings left (the review below has the details):\n\n");
+    let mut listed = 0;
+    for (i, finding) in must_fix.iter().enumerate() {
+        // Ids restart with each review, so a recorded finding names the round that found it.
+        let id = match finding.round {
+            0 => finding.id.clone(),
+            round => format!("{} (review {round})", finding.id),
+        };
+        let line = match &finding.place {
+            Some(place) => format!("- {id}: {} ({place})\n", finding.title),
+            None => format!("- {id}: {}\n", finding.title),
+        };
+        // A finding is listed only if the `and N more` line for the ones after it still fits,
+        // so the section never passes the cap whichever finding is the first left out.
+        let after = more_line(must_fix.len() - i - 1).chars().count();
+        if text.chars().count() + line.chars().count() + after > UNRESOLVED_CAP {
+            if listed == 0 {
+                // A first finding too long on its own is cut instead of left out.
+                let room = UNRESOLVED_CAP
+                    .saturating_sub(text.chars().count() + CUT_MARK.chars().count() + after);
+                text.extend(line.chars().take(room));
+                text.push_str(CUT_MARK);
+                listed = 1;
+            }
+            break;
+        }
+        text.push_str(&line);
+        listed += 1;
+    }
+    text.push_str(&more_line(must_fix.len() - listed));
+    text
+}
+
+/// The line counting `left` findings not listed; empty when there are none.
+fn more_line(left: usize) -> String {
+    if left == 0 {
+        String::new()
+    } else {
+        format!("- and {left} more\n")
+    }
+}
+
 /// The note `finish` leaves on a task whose branch is pushed but whose PR isn't open yet.
 const PUSHED_NOTE: &str =
     "the branch is pushed but its PR isn't open; run `sbxm task finish` again";
@@ -397,6 +533,9 @@ pub struct Finished {
     pub cuts: Vec<String>,
     /// The PR the task pushed to, when it continues one (decision 169): no PR was opened.
     pub continued: Option<u32>,
+    /// Whether the PR was opened as a draft, and why ([`unresolved_reasons`]).
+    pub draft: bool,
+    pub unresolved: Vec<String>,
 }
 
 /// Whether the task may be finished now. Decided through `machine::TABLE` once the `pr` field (not
@@ -546,7 +685,25 @@ pub fn finish(
             refuse_secrets(name, text)?;
         }
     }
-    let (body, cuts) = pr_body(task.number, result.as_deref(), review.as_deref());
+    let unresolved = unresolved_reasons(&task, review.as_deref());
+    let draft = !unresolved.is_empty();
+    let open = if draft {
+        open_findings(&task, &prepared.meta, review.as_deref())
+    } else {
+        Vec::new()
+    };
+    refuse_secret_findings(&open)?;
+    let section = draft.then(|| unresolved_section(&unresolved, &open));
+    if let Some(section) = &section {
+        // Its findings come from task.json, which no file check above covered.
+        refuse_secrets("the draft's list of open findings", section)?;
+    }
+    let (body, cuts) = pr_body(
+        task.number,
+        section.as_deref(),
+        result.as_deref(),
+        review.as_deref(),
+    );
 
     repo::push(&repo_git, &task.branch)?;
     let request = PrRequest {
@@ -554,6 +711,7 @@ pub fn finish(
         base: task.base.clone(),
         title: task.title.clone(),
         body,
+        draft,
     };
     let url = match github.pr_create(&task.repo, &request) {
         Ok(url) => url,
@@ -581,6 +739,8 @@ pub fn finish(
         branch: task.branch,
         cuts,
         continued: None,
+        draft,
+        unresolved,
     })
 }
 
@@ -692,15 +852,23 @@ const PUSHED_UNCOMMENTED_NOTE: &str = "the commits are pushed to the PR's branch
 /// The longest commit subject the comment on a continued PR shows in full.
 const SUBJECT_CAP: usize = 500;
 
-/// The comment on a continued PR: the commits the task added, and `Fixes #n` for its issue. It
+/// The comment on a continued PR: what the task left `unresolved` (decision 177(r), a section
+/// like a draft's), the commits the task added, and `Fixes #n` for its issue. It
 /// stays below what GitHub accepts: a subject over [`SUBJECT_CAP`] characters is cut, commits
 /// that don't fit are counted instead of listed, and a note says so. Mentions are neutralised
 /// as in the review's comment, so an agent's commit subject notifies no one.
-pub fn pr_comment(number: u32, branch: &str, commits: &[String]) -> String {
-    let mut body = defang_mentions(&format!(
+pub fn pr_comment(
+    number: u32,
+    branch: &str,
+    commits: &[String],
+    unresolved: Option<&str>,
+) -> String {
+    let mut body =
+        unresolved.map_or_else(String::new, |text| defang_mentions(&format!("{text}\n")));
+    body.push_str(&defang_mentions(&format!(
         "`sbxm task finish` pushed {} commit(s) to {branch} for issue #{number}:\n\n",
         commits.len()
-    ));
+    )));
     let (mut cut, mut listed) = (0, 0);
     for line in commits {
         let (id, subject) = line.split_once(' ').unwrap_or((line, ""));
@@ -749,7 +917,22 @@ fn finish_continued(
     let (id, pr, branch) = (&task.id, continued.pr, &task.branch);
     let tip = repo::branch_tip(repo_git, branch)?;
     let commits = repo::commit_lines(repo_git, &continued.base, branch)?;
-    let body = pr_comment(task.number, branch, &commits);
+    let review = read_capped(&prepared.meta.join("review.md"))?;
+    let unresolved = unresolved_reasons(&task, review.as_deref());
+    let open = if unresolved.is_empty() {
+        Vec::new()
+    } else {
+        open_findings(&task, &prepared.meta, review.as_deref())
+    };
+    refuse_secret_findings(&open)?;
+    let section = (!unresolved.is_empty()).then(|| {
+        unresolved_text(
+            "sbxm doesn't make a PR it continues a draft, but this task left:",
+            &unresolved,
+            &open,
+        )
+    });
+    let body = pr_comment(task.number, branch, &commits, section.as_deref());
     refuse_secrets("the PR comment", &body)?;
     let pushed = match repo::remote_branch_head(repo_git, branch)? {
         None => bail!(
@@ -813,5 +996,7 @@ fn finish_continued(
         branch: task.branch.clone(),
         cuts: Vec::new(),
         continued: Some(pr),
+        draft: false,
+        unresolved,
     })
 }

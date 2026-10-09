@@ -257,23 +257,23 @@ impl GitHubBackend for GhBackend {
     }
 
     fn pr_create(&self, repo: &str, request: &PrRequest) -> Result<String> {
-        let out = self.run(
-            &strings(&[
-                "pr",
-                "create",
-                "--repo",
-                repo,
-                "--head",
-                &request.head,
-                "--base",
-                &request.base,
-                "--title",
-                &request.title,
-                "--body-file",
-                "-",
-            ]),
-            Some(&request.body),
-        )?;
+        let mut args = strings(&[
+            "pr",
+            "create",
+            "--repo",
+            repo,
+            "--head",
+            &request.head,
+            "--base",
+            &request.base,
+            "--title",
+            &request.title,
+        ]);
+        if request.draft {
+            args.push("--draft".into());
+        }
+        args.extend(strings(&["--body-file", "-"]));
+        let out = self.run(&args, Some(&request.body))?;
         Ok(out.trim().to_owned())
     }
 
