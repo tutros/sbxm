@@ -472,3 +472,27 @@ fn a_pr_record_names_the_reviewers_sandbox_before_it_is_created() {
     assert_eq!(seen.len(), 1, "{seen:?}");
     assert_eq!(seen[0].1.as_deref(), Some(seen[0].0.as_str()));
 }
+
+/// Issue 123, decision 176(b): a review-only PR task gets a risk assessment too, recorded the
+/// same way as an issue task's.
+#[test]
+fn a_pr_reviews_risk_level_and_reasons_are_recorded() {
+    let f = config("");
+    let review_text = "Must-fix findings: 0\n\nRisk: medium\n\n## Risk\n\n\
+        - a behavior change in one area\n\nNothing else found.\n";
+    let (backend, github) = (backend(&f, &[review_text]), github());
+    let mut prepared = prepared(&f, &backend, &github);
+
+    review_it(
+        &f,
+        &backend,
+        &github,
+        &FakeHostRunner::default(),
+        &mut prepared,
+    )
+    .unwrap();
+
+    let result = saved(&f).review.unwrap();
+    assert_eq!(result.risk, sbxm::task::risk::Level::Medium);
+    assert_eq!(result.risk_reasons, ["a behavior change in one area"]);
+}

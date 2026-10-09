@@ -132,6 +132,33 @@ fn a_clean_review_prints_the_round_and_where_the_review_is() {
     );
 }
 
+/// Issue 123, decision 176(e): a review with no readable `Risk:` line warns, but never fails the
+/// task, and the warning stays separate from a `Repeat of:` warning's count.
+#[test]
+fn a_review_with_no_risk_line_warns_but_still_succeeds() {
+    let f = config("codex");
+    let backend = backend(&f, &[CLEAN]);
+    worked_task(&f, &backend);
+
+    let out = go(&f, &options(&f), &backend);
+
+    out.result.unwrap();
+    assert!(out.warn.contains("risk is \"unknown\""), "{}", out.warn);
+}
+
+#[test]
+fn a_review_with_a_readable_risk_line_does_not_warn() {
+    let f = config("codex");
+    let review_text = "Must-fix findings: 0\n\nRisk: low\n\nNothing found.\n";
+    let backend = backend(&f, &[review_text]);
+    worked_task(&f, &backend);
+
+    let out = go(&f, &options(&f), &backend);
+
+    out.result.unwrap();
+    assert!(!out.warn.contains("risk is"), "{}", out.warn);
+}
+
 #[test]
 fn must_fix_findings_show_the_fix_round_and_the_second_review() {
     let f = config("codex");

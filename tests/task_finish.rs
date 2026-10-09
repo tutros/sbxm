@@ -227,6 +227,7 @@ fn the_recorded_review_decides_the_draft_not_an_edited_review_md() {
         must_fix: 1,
         full: true,
         repeat: false,
+        ..Default::default()
     });
     record::write(&prepared.meta, &prepared.record).unwrap();
     let github = FakeGitHub::default();
@@ -616,6 +617,7 @@ fn stopped_after_a_narrow_review(f: &Fixture) -> Prepared {
         must_fix: 1,
         full: false,
         repeat: true,
+        ..Default::default()
     });
     prepared.record.open_findings = Some(vec![
         record::OpenFinding {

@@ -19,6 +19,7 @@ use super::record::{
 };
 use super::repo::{self, AgentFile, BUNDLE_CAP, Existing, Identity};
 use super::review;
+use super::risk;
 use super::select::{self, Selection};
 use crate::backend::{CreateSpec, ExecSpec, SandboxBackend, Stdin};
 use crate::config::{self, GlobalConfig, Profile, Resources};
@@ -2064,8 +2065,8 @@ pub fn review_pr(
     // anything and so never narrows a later one, and so never repeats one either).
     let ran = run_review_agent(env, prepared, 1, &clone, &sandbox, &[]);
     cleanup(prepared);
-    let must_fix = match ran {
-        Ok((must_fix, _repeat, _warnings, _open)) => must_fix,
+    let outcome = match ran {
+        Ok(outcome) => outcome,
         Err(e) => {
             prepared.record.notes.push(format!("review: {e:#}"));
             prepared.record.finish(Status::Failed)?;
@@ -2073,6 +2074,16 @@ pub fn review_pr(
             return Err(e);
         }
     };
+    let must_fix = outcome.must_fix;
+    prepared.record.open_findings = Some(outcome.open);
+    prepared.record.review = Some(record::ReviewResult {
+        round: 1,
+        must_fix,
+        full: true,
+        repeat: false,
+        risk: outcome.risk,
+        risk_reasons: outcome.risk_reasons,
+    });
     prepared.record.finish(Status::Completed)?;
     prepared
         .record
@@ -2083,7 +2094,8 @@ pub fn review_pr(
         must_fix,
         full: true,
         repeat: false,
-        warnings: Vec::new(),
+        warnings: outcome.warnings,
+        risk: outcome.risk,
     });
 
     let review_path = prepared.meta.join("review.md");
@@ -2353,6 +2365,9 @@ pub struct Reviewed {
     /// One warning per must-fix finding whose `Repeat of:` claim was invalid (decision 177(e)):
     /// an id no earlier round has a must-fix finding for, or one in a different file.
     pub warnings: Vec<String>,
+    /// The risk level (decision 176): the reviewer's own `Risk:` line, raised to the path-rule
+    /// floor but never lowered; `Level::Unknown` for a review with no readable `Risk:` line.
+    pub risk: risk::Level,
 }
 
 /// Checks before a review creates anything (spec §5.2): the reviewer's provider secret and the
@@ -2433,14 +2448,17 @@ pub fn run_reviewer(env: &TaskEnv, prepared: &mut Prepared, round: u32) -> Resul
             .push(format!("could not remove {}: {e}", clone.display()));
     }
     match result {
-        Ok((must_fix, repeat, warnings, open)) => {
+        Ok(outcome) => {
+            let must_fix = outcome.must_fix;
             prepared.record.last_reviewed_commit = if must_fix == 0 { None } else { tip };
-            prepared.record.open_findings = Some(open);
+            prepared.record.open_findings = Some(outcome.open);
             prepared.record.review = Some(record::ReviewResult {
                 round,
                 must_fix,
                 full,
-                repeat,
+                repeat: outcome.repeat,
+                risk: outcome.risk,
+                risk_reasons: outcome.risk_reasons,
             });
             prepared.record.finish(Status::Completed)?;
             record::write(&prepared.meta, &prepared.record)?;
@@ -2448,8 +2466,9 @@ pub fn run_reviewer(env: &TaskEnv, prepared: &mut Prepared, round: u32) -> Resul
                 round,
                 must_fix,
                 full,
-                repeat,
-                warnings,
+                repeat: outcome.repeat,
+                warnings: outcome.warnings,
+                risk: outcome.risk,
             })
         }
         Err(e) => {
@@ -2464,10 +2483,24 @@ pub fn run_reviewer(env: &TaskEnv, prepared: &mut Prepared, round: u32) -> Resul
     }
 }
 
-/// One review round: its workspace, then the reviewer. Returns the must-fix count, whether a
-/// must-fix finding validly repeats one of `earlier`'s (spec §5.3, decisions 174(b), 177(o)),
-/// warnings for any invalid `Repeat of:` claim (decision 177(e)), and the must-fix findings open
-/// once it is accepted ([`review::open_after`], decision 177(p)).
+/// What a reviewer round's own `review.md` decided, before any of it is recorded (decision 176).
+struct ReviewOutcome {
+    must_fix: u32,
+    /// Whether a must-fix finding validly repeats one of `earlier`'s (spec §5.3, decisions
+    /// 174(b), 177(o)).
+    repeat: bool,
+    /// One warning per invalid `Repeat of:` claim (decision 177(e)).
+    warnings: Vec<String>,
+    /// The must-fix findings open once this round is accepted ([`review::open_after`], decision
+    /// 177(p)).
+    open: Vec<OpenFinding>,
+    /// The risk level (decision 176): the reviewer's own, raised to the path-rule floor but
+    /// never lowered.
+    risk: risk::Level,
+    risk_reasons: Vec<String>,
+}
+
+/// One review round: its workspace, then the reviewer.
 fn review_round(
     env: &TaskEnv,
     prepared: &mut Prepared,
@@ -2475,7 +2508,7 @@ fn review_round(
     clone: &Path,
     sandbox: &str,
     earlier: &[String],
-) -> Result<(u32, bool, Vec<String>, Vec<OpenFinding>)> {
+) -> Result<ReviewOutcome> {
     open_review_workspace(env, prepared, round, clone, sandbox, earlier)?;
     run_review_agent(env, prepared, round, clone, sandbox, earlier)
 }
@@ -2615,10 +2648,11 @@ fn open_review_workspace(
 }
 
 /// Runs the reviewer in its (already open) sandbox, saves its transcript, and reads and saves what
-/// it wrote: `review-<round>.md` (and `review.md` when its first line has the count). Returns the
-/// must-fix count, whether a must-fix finding validly claims `Repeat of:` one of `earlier`'s
-/// must-fix findings (spec §5.3, decisions 174(b), 177(o); always `false` when `earlier` is
-/// empty), and warnings for any invalid claim (decision 177(e)).
+/// it wrote: `review-<round>.md` (and `review.md` when its first line has the count). The
+/// must-fix claims, repeats and findings are [`ReviewOutcome`]'s, as is the risk level (decision
+/// 176): the reviewer's own `Risk:` line (`Level::Unknown`, with a warning, when it is missing or
+/// unparseable), raised to the path-rule floor computed from the task's own changed paths, but
+/// never lowered.
 fn run_review_agent(
     env: &TaskEnv,
     prepared: &mut Prepared,
@@ -2626,7 +2660,7 @@ fn run_review_agent(
     clone: &Path,
     sandbox: &str,
     earlier: &[String],
-) -> Result<(u32, bool, Vec<String>, Vec<OpenFinding>)> {
+) -> Result<ReviewOutcome> {
     let reviewer = &env.config.reviewer;
     let started = Instant::now();
     let result = headless::run(
@@ -2706,5 +2740,32 @@ fn run_review_agent(
         None => review::open_from_task_dir(&prepared.meta, round.saturating_sub(1)),
     };
     let open = review::open_after(Some(&earlier_open), &text, round, full);
-    Ok((must_fix, repeat, warnings, open))
+
+    let changed_paths = prepared
+        .record
+        .changed_paths(&prepared.meta.join("repo.git"))
+        .unwrap_or_default();
+    let (floor_level, floor_reasons) = risk::floor(&changed_paths, &env.config.risk);
+    let (risk_level, risk_reasons) = match review::risk_level(&text) {
+        Some(level) => {
+            let mut reasons = review::risk_reasons(&text);
+            let combined = level.max(floor_level);
+            if combined > level {
+                reasons.extend(floor_reasons);
+            }
+            (combined, reasons)
+        }
+        // Recorded as `Level::Unknown`, never silently `low` (decision 176(e)); `print_review`
+        // and `run_pr` warn about it on their own, separately from a `Repeat of:` warning, so
+        // this never changes `warnings`'s count for a review that has neither.
+        None => (risk::Level::Unknown, review::risk_reasons(&text)),
+    };
+    Ok(ReviewOutcome {
+        must_fix,
+        repeat,
+        warnings,
+        open,
+        risk: risk_level,
+        risk_reasons,
+    })
 }

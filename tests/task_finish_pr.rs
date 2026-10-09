@@ -534,6 +534,7 @@ fn a_continued_task_stopped_by_a_narrow_review_lists_every_finding_still_open() 
         must_fix: 1,
         full: false,
         repeat: true,
+        ..Default::default()
     });
     prepared.record.open_findings = Some(vec![
         record::OpenFinding {
