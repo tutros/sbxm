@@ -448,6 +448,19 @@ fn a_huge_file_is_cut_to_the_cap_and_the_body_says_so() {
     assert_eq!(cuts.len(), 1);
 }
 
+/// Review finding M-4 (issue 123): the risk section had no cap, so an overlong risk reason
+/// could by itself push the PR body past GitHub's 65,536-character limit.
+#[test]
+fn a_huge_risk_section_is_cut_to_what_github_accepts() {
+    let long_risk = format!("## Risk: \u{1f534} high\n\n- {}\n", "x".repeat(70_000));
+
+    let (body, cuts) = pr_body(7, &long_risk, None, None, None);
+
+    assert!(body.chars().count() < 65_536, "{}", body.chars().count());
+    assert!(body.contains("cut"), "{body}");
+    assert_eq!(cuts.len(), 1, "{cuts:?}");
+}
+
 #[test]
 fn a_record_that_names_a_hostile_branch_is_refused() {
     let f = fixture();

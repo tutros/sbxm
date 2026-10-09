@@ -375,11 +375,12 @@ pub fn pr_body(
     result: Option<&str>,
     review: Option<&str>,
 ) -> (String, Vec<String>) {
+    let (risk, risk_cut) = risk::cap_section(risk);
     let mut body = format!("{}\nFixes #{number}\n", risk.trim_end());
     if let Some(section) = unresolved {
         body.push_str(&format!("\n{}\n", section.trim_end()));
     }
-    let mut cuts = Vec::new();
+    let mut cuts: Vec<String> = risk_cut.into_iter().collect();
     for (file, heading, text) in [
         ("result.md", "Result", result),
         ("review.md", "Review", review),

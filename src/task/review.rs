@@ -6,7 +6,7 @@ use std::path::Path;
 
 use super::findings;
 use super::record::OpenFinding;
-use super::risk::Level;
+use super::risk::{self, Level};
 
 /// The count on the first line, which must be exactly `Must-fix findings: <count>` (trailing
 /// spaces and a Windows line ending are fine); `None` for anything else.
@@ -51,7 +51,7 @@ pub fn pr_comment(number: u32, risk_section: &str, review: &str) -> String {
         Some((at, _)) => (&defanged[..at], true),
         None => (defanged.as_str(), false),
     };
-    let risk_section = defang_mentions(risk_section.trim_end());
+    let (risk_section, _) = risk::cap_section(&defang_mentions(risk_section.trim_end()));
     let header = if risk_section.is_empty() {
         String::new()
     } else {

@@ -478,6 +478,18 @@ fn a_very_long_review_is_cut_to_what_github_accepts_and_the_comment_says_so() {
     );
 }
 
+/// Review finding M-4 (issue 123): the risk section had no cap of its own, so an overlong risk
+/// reason could by itself push the whole comment past GitHub's 65,536-character limit even
+/// though the review text's own cap left room.
+#[test]
+fn a_very_long_risk_section_is_cut_to_what_github_accepts_and_the_comment_says_so() {
+    let long_risk = format!("## Risk: \u{1f534} high\n\n- {}\n", "x".repeat(100_000));
+    let text = review::pr_comment(7, &long_risk, "Must-fix findings: 0\n\nAll good.\n");
+    assert!(text.chars().count() < 65_536, "{}", text.chars().count());
+    assert!(text.contains("cut"), "{text}");
+    assert!(text.contains("All good."), "{text}");
+}
+
 #[test]
 fn a_pr_record_names_the_reviewers_sandbox_before_it_is_created() {
     let f = config("");

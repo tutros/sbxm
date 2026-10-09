@@ -157,3 +157,29 @@ pub fn render_section(level: Level, reasons: &[String]) -> String {
     }
     text
 }
+
+/// [`render_section`]'s output is capped well below GitHub's limit (issue 123, review finding
+/// M-4): without a cap of its own, a reviewer's overlong risk reason could by itself push a PR
+/// body or review comment past what GitHub accepts, even though every other section there has
+/// its own cap.
+pub const RISK_CAP: usize = 3_000;
+
+/// `text` (typically [`render_section`]'s output), cut to [`RISK_CAP`] characters with a note if
+/// it had to be. Returns the (possibly cut) text and, when it was cut, one line describing it
+/// for the caller to report.
+pub fn cap_section(text: &str) -> (String, Option<String>) {
+    let text = text.trim_end();
+    let total = text.chars().count();
+    if total <= RISK_CAP {
+        return (text.to_owned(), None);
+    }
+    let head: String = text.chars().take(RISK_CAP).collect();
+    let capped = format!(
+        "{}\n\n(cut: the risk section has {total} characters; the first {RISK_CAP} are shown, \
+         the rest is in the task folder)\n",
+        head.trim_end()
+    );
+    let note =
+        format!("the risk section is {total} characters; only the first {RISK_CAP} are shown");
+    (capped, Some(note))
+}
