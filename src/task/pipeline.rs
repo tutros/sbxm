@@ -1774,18 +1774,32 @@ fn next_review_round(prepared: &Prepared) -> Result<u32> {
         .copied()
         .unwrap_or(0);
     let recorded = prepared.record.review.as_ref().map_or(0, |last| last.round);
-    review_round_after(prepared, prepared.record.round.max(recorded).max(saved))
+    let from_record = prepared.record.round.max(recorded);
+    // Only a saved file strictly above both record fields is freed by moving it out; when a
+    // record field is the maximum, no file holds it (issue 162).
+    review_round_after(prepared, from_record.max(saved), saved > from_record)
 }
 
 /// The review round after `round`, or an error once the numbers run out: a wrapped number would
-/// reuse, and overwrite, a saved `review-<n>.md` (decision 177(o)).
-fn review_round_after(prepared: &Prepared, round: u32) -> Result<u32> {
+/// reuse, and overwrite, a saved `review-<n>.md` (decision 177(o)). `moving_helps` must be set
+/// only when a saved `review-<n>.md` file is the sole reason `round` is exhausted: moving it out
+/// of the task's folder is then a recovery that works on the next attempt. `record.round` or
+/// `record.review.round` reaching `u32::MAX` is never freed by moving any file, so the hint must
+/// not claim it is (issue 162).
+fn review_round_after(prepared: &Prepared, round: u32, moving_helps: bool) -> Result<u32> {
     round.checked_add(1).with_context(|| {
-        format!(
-            "task {} has no review round number left after {round}; move the review-<n>.md files out of {} or remove the task with `sbxm task rm`",
-            prepared.record.id,
-            prepared.meta.display()
-        )
+        if moving_helps {
+            format!(
+                "task {} has no review round number left after {round}; move the review-<n>.md files out of {} or remove the task with `sbxm task rm`",
+                prepared.record.id,
+                prepared.meta.display()
+            )
+        } else {
+            format!(
+                "task {} has no review round number left after {round}; remove the task with `sbxm task rm`",
+                prepared.record.id
+            )
+        }
     })
 }
 
@@ -1800,7 +1814,8 @@ pub(super) fn check_replay(prepared: &Prepared, result: &record::ReviewResult) -
         !result.repeat && prepared.record.round < prepared.record.fix_rounds
     };
     if another_review {
-        review_round_after(prepared, result.round)?;
+        // `result.round` came from the record, not freshly read from `review-<n>.md` files.
+        review_round_after(prepared, result.round, false)?;
     }
     Ok(())
 }
@@ -1843,8 +1858,9 @@ pub(super) fn review_rounds(
                 break;
             }
             // A clean narrow review proves nothing about what it didn't see: one more, full
-            // review runs before the task is ready (spec §5.2).
-            round = review_round_after(prepared, round)?;
+            // review runs before the task is ready (spec §5.2). `round` is already in memory,
+            // not freshly read from files, so moving one would not free it.
+            round = review_round_after(prepared, round, false)?;
             continue;
         }
         // The no-progress rule (spec §5.3, issue 119): a validated repeat stops the task even
@@ -1859,8 +1875,9 @@ pub(super) fn review_rounds(
         }
 
         // The review after the fix needs a number: refused before the fix round and the gates
-        // change anything (issue 161).
-        let next = review_round_after(prepared, round)?;
+        // change anything (issue 161). `round` is already in memory, not freshly read from
+        // files, so moving one would not free it.
+        let next = review_round_after(prepared, round, false)?;
         run_fix_round(env, prepared, None)?;
         prepared.record.round += 1;
         report.fix_ran = true;
