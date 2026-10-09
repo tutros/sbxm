@@ -12,6 +12,7 @@ use crate::config::resolve_inside;
 use crate::harness::Harness;
 use crate::run::config::{headless_harness, parse_duration};
 use crate::task::record::DEFAULT_FIX_ROUNDS;
+use crate::task::risk::{self, Level, PathRule};
 
 pub const FILE_NAME: &str = "sbxm-task.toml";
 
@@ -59,6 +60,9 @@ pub struct TaskConfig {
     pub prompts: Prompts,
     /// `[finish] sink` (decision 174(e)): where a spec task's result lands at `task finish`.
     pub sink: Sink,
+    /// The path-rule floor (decision 176(d)): the built-in defaults, plus `[risk]`'s own rules
+    /// (or, with `[risk] replace = true`, only those).
+    pub risk: Vec<PathRule>,
     /// Things to say once and carry on (the same harness for both roles).
     pub warnings: Vec<String>,
 }
@@ -121,6 +125,7 @@ struct RawConfig {
     prompts: RawPrompts,
     #[serde(default)]
     finish: RawFinish,
+    risk: Option<RawRisk>,
 }
 
 #[derive(Deserialize, Default)]
@@ -171,6 +176,19 @@ struct RawPrompts {
     worker: Option<PathBuf>,
     reviewer: Option<PathBuf>,
     fix: Option<PathBuf>,
+}
+
+/// `[risk]` (decision 176(d)): path-rule entries that raise the floor at least to `medium` or
+/// `high`; `replace` drops the built-in defaults instead of adding to them.
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawRisk {
+    #[serde(default)]
+    replace: bool,
+    #[serde(default)]
+    medium: Vec<String>,
+    #[serde(default)]
+    high: Vec<String>,
 }
 
 impl TaskConfig {
@@ -277,6 +295,7 @@ impl Validator<'_> {
             reviewer: self.prompt("reviewer", raw.prompts.reviewer)?,
             fix: self.prompt("fix", raw.prompts.fix)?,
         };
+        let risk = self.risk(raw.risk)?;
         Ok(TaskConfig {
             worker,
             reviewer,
@@ -286,8 +305,38 @@ impl Validator<'_> {
             gates,
             prompts,
             sink: raw.finish.sink,
+            risk,
             warnings,
         })
+    }
+
+    /// The path-rule floor: the built-in defaults plus `[risk]`'s own patterns at `medium` and
+    /// `high`, or, with `replace = true`, only those. An empty pattern is refused, naming the key.
+    fn risk(&self, raw: Option<RawRisk>) -> Result<Vec<PathRule>> {
+        let raw = raw.unwrap_or_default();
+        let mut rules = if raw.replace {
+            Vec::new()
+        } else {
+            risk::built_in_rules()
+        };
+        for (key, level, patterns) in [
+            ("risk.medium", Level::Medium, &raw.medium),
+            ("risk.high", Level::High, &raw.high),
+        ] {
+            for (i, pattern) in patterns.iter().enumerate() {
+                if pattern.trim().is_empty() {
+                    return Err(self.err(format!(
+                        "{key}[{i}] is empty; write a path pattern or remove it"
+                    )));
+                }
+                rules.push(PathRule {
+                    level,
+                    pattern: pattern.to_lowercase(),
+                    category: format!("named in [risk] of {}", FILE_NAME),
+                });
+            }
+        }
+        Ok(rules)
     }
 
     fn harness(&self, at: &str, name: Option<&str>) -> Result<Option<Harness>> {
