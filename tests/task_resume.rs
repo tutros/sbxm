@@ -999,6 +999,45 @@ fn a_review_with_findings_at_the_last_round_number_is_refused_before_any_fix_rou
     assert!(!meta(&f).join("review-0.md").exists());
 }
 
+/// Issue 171: `next_review_round` combines `record.round` with the recorded review's round and
+/// every saved `review-<n>.md`; the existing last-round-number tests exhaust it through the
+/// recorded review or a saved file, never through `record.round` alone.
+#[test]
+fn the_fix_round_counter_at_the_last_round_number_is_refused_without_a_move_files_hint() {
+    let f = config();
+    let mut prepared = task_left_in(&f, Stage::Working, Status::Completed);
+    prepared.record.round = u32::MAX;
+    prepared.record.review = Some(ReviewResult {
+        round: 1,
+        must_fix: 0,
+        full: true,
+        repeat: false,
+    });
+    record::write(&prepared.meta, &prepared.record).unwrap();
+    std::fs::write(meta(&f).join("review-1.md"), CLEAN).unwrap();
+    std::fs::write(meta(&f).join("review-2.md"), "second\n").unwrap();
+    let task_json = std::fs::read(meta(&f).join("task.json")).unwrap();
+    let backend = backend(&f, &[CLEAN]);
+
+    let err = pipeline::review_issue(&env(&f, &backend, &Gone), &mut prepared).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("review round"), "{message}");
+    assert!(!message.contains('\n'), "{message}");
+    // Record.round alone is the maximum here; a lower recorded review round and lower saved
+    // files cannot free it by being moved out.
+    assert!(!message.contains("move the review"), "{message}");
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert!(
+        backend.execs().is_empty(),
+        "no backend call before the refusal"
+    );
+    assert_eq!(
+        std::fs::read(meta(&f).join("task.json")).unwrap(),
+        task_json
+    );
+}
+
 // ---- The fix round (T5, T9) ----
 
 /// Issue 41 whose first fix round failed: the review found one must-fix finding, and the
