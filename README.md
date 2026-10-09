@@ -299,7 +299,7 @@ the stage; follow a file live with `Get-Content <file> -Tail 20 -Wait`.
 | `gates.log` | the gates run | Each gate command with its exit code and the end of its output. A failure here marks the task `gates-failed` and stops it. |
 | `transcripts\` | each agent run ends | The worker's, fix round's and reviewer's session transcripts, copied out before a sandbox is removed. |
 | `result.md` | the worker ends | What the worker wrote about its change (copied from its clone). |
-| `review-<round>.md`, `review.md` | a review ends | The reviewer's findings; `review.md` is the latest, starting with `Must-fix findings: <n>` then `Risk: low\|medium\|high`. |
+| `review-<round>.md`, `review.md` | a review ends | The reviewer's findings; `review.md` is the latest. Each saved file starts with a `Reviewer: <harness> (<model>)` line sbxm adds, then the reviewer's own text, which starts with `Must-fix findings: <n>` then `Risk: low\|medium\|high`. |
 
 A review normally takes 6 to 12 minutes after its sandbox has started. The command's own output says which stage it is
 in (gates, `review round 1`).
