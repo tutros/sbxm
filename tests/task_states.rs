@@ -56,12 +56,12 @@ fn the_cli_command_prints_the_same_table() {
     assert_eq!(stdout, task_states::render());
 }
 
-/// The spec names this test as where the table is checked (section 5.2). The generated table is
-/// copied verbatim into the "Today (generated)" block; this test fails the moment the code's
-/// `TABLE` and that block disagree, so the file cannot go stale.
-#[test]
-fn the_generated_table_matches_the_spec() {
-    let spec = fs::read_to_string(Path::new("sdlc/specs/task-state-machine.md")).unwrap();
+/// Pulls the "Today (generated)" table out of the spec's text. Line endings are normalised first
+/// so a CRLF checkout (the project's primary platform is Windows) still finds the blank line that
+/// ends the table; without it the table text runs to the end of the file and the `find("\n\n")`
+/// below panics even when the table itself is correct.
+fn generated_table_block(spec_source: &str) -> String {
+    let spec = spec_source.replace("\r\n", "\n");
     let start = spec
         .find("#### Today (generated)")
         .expect("spec is missing the 'Today (generated)' block");
@@ -73,10 +73,79 @@ fn the_generated_table_matches_the_spec() {
     let table_end = table_text
         .find("\n\n")
         .expect("spec's generated table has no blank line after it");
-    let spec_table = &table_text[..table_end];
+    table_text[..table_end].to_string()
+}
+
+/// The spec names this test as where the table is checked (section 5.2). The generated table is
+/// copied verbatim into the "Today (generated)" block; this test fails the moment the code's
+/// `TABLE` and that block disagree, so the file cannot go stale.
+#[test]
+fn the_generated_table_matches_the_spec() {
+    let spec = fs::read_to_string(Path::new("sdlc/specs/task-state-machine.md")).unwrap();
+    let spec_table = generated_table_block(&spec);
 
     let generated = task_states::render();
     let generated_trimmed = generated.trim_end_matches('\n');
 
     assert_eq!(spec_table, generated_trimmed);
+}
+
+/// Reproduces issue 138: on a Windows checkout the spec file has CRLF line endings. `git
+/// checkout-index` with `core.autocrlf=true` performs that same conversion, so this test exercises
+/// genuinely CRLF file content rather than a synthetic one.
+#[test]
+fn the_generated_table_matches_the_spec_on_a_crlf_checkout() {
+    let tmp = tempfile::tempdir().unwrap();
+    let status = std::process::Command::new("git")
+        .args([
+            "-c",
+            "core.autocrlf=true",
+            "checkout-index",
+            &format!("--prefix={}/", tmp.path().display()),
+            "--",
+            "sdlc/specs/task-state-machine.md",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success(), "git checkout-index failed");
+
+    let crlf_spec =
+        fs::read_to_string(tmp.path().join("sdlc/specs/task-state-machine.md")).unwrap();
+    assert!(
+        crlf_spec.contains("\r\n"),
+        "checkout-index did not produce CRLF line endings"
+    );
+
+    let spec_table = generated_table_block(&crlf_spec);
+
+    let generated = task_states::render();
+    let generated_trimmed = generated.trim_end_matches('\n');
+
+    assert_eq!(spec_table, generated_trimmed);
+}
+
+/// The CRLF fix must not blind the comparison: a spec whose table is missing a row still has to
+/// fail it.
+#[test]
+#[should_panic]
+fn the_generated_table_matches_the_spec_still_fails_when_a_row_is_missing() {
+    let generated = task_states::render();
+    let generated_trimmed = generated.trim_end_matches('\n');
+    let lines: Vec<&str> = generated_trimmed.lines().collect();
+    let table_missing_a_row = lines[..lines.len() - 1].join("\n");
+    let spec_source = format!("#### Today (generated)\n\n{table_missing_a_row}\n\n");
+
+    assert_eq!(generated_table_block(&spec_source), generated_trimmed);
+}
+
+/// Same as above, for a row whose content has drifted rather than being dropped entirely.
+#[test]
+#[should_panic]
+fn the_generated_table_matches_the_spec_still_fails_when_a_row_is_different() {
+    let generated = task_states::render();
+    let generated_trimmed = generated.trim_end_matches('\n');
+    let table_with_a_changed_row = generated_trimmed.replacen("interrupted", "changed", 1);
+    let spec_source = format!("#### Today (generated)\n\n{table_with_a_changed_row}\n\n");
+
+    assert_eq!(generated_table_block(&spec_source), generated_trimmed);
 }
