@@ -6,6 +6,7 @@ use std::path::Path;
 
 use super::findings;
 use super::record::OpenFinding;
+use super::risk::Level;
 
 /// The count on the first line, which must be exactly `Must-fix findings: <count>` (trailing
 /// spaces and a Windows line ending are fine); `None` for anything else.
@@ -66,14 +67,64 @@ pub fn with_header(harness: &str, model: Option<&str>, review: &str) -> String {
     )
 }
 
+/// Past the [`with_header`] line (a file without it is read as it is).
+fn past_header(saved: &str) -> &str {
+    saved
+        .strip_prefix("Reviewer: ")
+        .and_then(|rest| rest.split_once("\n\n"))
+        .map_or(saved, |(_, review)| review)
+}
+
 /// [`must_fix_count`] of a saved `review.md`, read past the [`with_header`] line (a file without
 /// it is read as it is).
 pub fn saved_must_fix_count(saved: &str) -> Option<u32> {
-    let review = saved
-        .strip_prefix("Reviewer: ")
-        .and_then(|rest| rest.split_once("\n\n"))
-        .map_or(saved, |(_, review)| review);
-    must_fix_count(review)
+    must_fix_count(past_header(saved))
+}
+
+/// The risk level of a line reading exactly `Risk: low`, `Risk: medium` or `Risk: high` (trailing
+/// spaces and a Windows line ending are fine; decision 176(e)): the first such line in the file,
+/// or `None` for a review with no readable one.
+pub fn risk_level(review: &str) -> Option<Level> {
+    let review = review.strip_prefix('\u{feff}').unwrap_or(review);
+    review.lines().find_map(|line| {
+        let word = line.trim_end().strip_prefix("Risk: ")?;
+        Level::from_word(word)
+    })
+}
+
+/// [`risk_level`] of a saved `review.md`, read past the [`with_header`] line.
+pub fn saved_risk_level(saved: &str) -> Option<Level> {
+    risk_level(past_header(saved))
+}
+
+/// The reasons under a `## Risk` heading (decision 176(e)): one per `- ` or `* ` bullet, in file
+/// order, until the next `##` heading or the end of the file. Empty when there is no such
+/// heading.
+pub fn risk_reasons(review: &str) -> Vec<String> {
+    let mut reasons = Vec::new();
+    let mut in_section = false;
+    for line in findings::lines_of(review) {
+        let trimmed = line.trim();
+        if let Some(name) = trimmed.strip_prefix("## ") {
+            in_section = name.trim().eq_ignore_ascii_case("risk");
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        if let Some(reason) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+        {
+            reasons.push(reason.trim().to_owned());
+        }
+    }
+    reasons
+}
+
+/// [`risk_reasons`] of a saved `review.md`, read past the [`with_header`] line.
+pub fn saved_risk_reasons(saved: &str) -> Vec<String> {
+    risk_reasons(past_header(saved))
 }
 
 /// The individual file paths named by a `Where:` value (spec §5.3, issue 119): each
