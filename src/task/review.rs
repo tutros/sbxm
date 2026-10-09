@@ -43,14 +43,15 @@ pub(crate) fn defang_mentions(text: &str) -> String {
 
 /// The comment posted on a pull request: `risk_section` (decision 176(b), rendered by
 /// [`super::risk::render_section`]) first, then a line naming the review, then the reviewer's
-/// text with mentions neutralised, cut (with a note) if it is longer than GitHub accepts.
+/// text; both the risk section and the review text have mentions neutralised, and the review
+/// text is cut (with a note) if it is longer than GitHub accepts.
 pub fn pr_comment(number: u32, risk_section: &str, review: &str) -> String {
     let defanged = defang_mentions(review);
     let (body, cut) = match defanged.char_indices().nth(COMMENT_CAP) {
         Some((at, _)) => (&defanged[..at], true),
         None => (defanged.as_str(), false),
     };
-    let risk_section = risk_section.trim_end();
+    let risk_section = defang_mentions(risk_section.trim_end());
     let header = if risk_section.is_empty() {
         String::new()
     } else {

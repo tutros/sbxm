@@ -450,6 +450,22 @@ fn mentions_in_the_review_do_not_ping_anyone() {
     );
 }
 
+/// Review finding M-3 (issue 123): `pr_comment` neutralised mentions in the review text but
+/// prepended the risk section unchanged, so a mention in a risk reason still pinged.
+#[test]
+fn mentions_in_the_risk_section_do_not_ping_anyone() {
+    let text = review::pr_comment(
+        7,
+        "## Risk: \u{1f534} high\n\n- ask @someone and @team/leads about this\n",
+        "Must-fix findings: 0\n\nAll good.\n",
+    );
+    assert!(
+        !text.contains("@someone") && !text.contains("@team"),
+        "{text}"
+    );
+    assert!(text.contains("someone"), "{text}");
+}
+
 #[test]
 fn a_very_long_review_is_cut_to_what_github_accepts_and_the_comment_says_so() {
     let long = "x".repeat(100_000);
