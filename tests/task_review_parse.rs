@@ -265,3 +265,21 @@ fn a_review_after_a_clean_one_is_full_and_replaces_what_was_open() {
         [(3, "M-1".to_owned())]
     );
 }
+
+#[test]
+fn a_repeat_matching_two_open_findings_with_the_same_id_and_file_keeps_both() {
+    // Review round 6, M-1: ids restart every round, so rounds 1 and 2 can both have an open M-1 in
+    // a.txt. Round 3's `Repeat of: M-1` can't say which one it means, so neither is dropped.
+    let first = with_header("codex", None, PREVIOUS);
+    let second = with_header("codex", None, &current("a.txt:9", Some("new"), "must fix"));
+    let third = with_header("codex", None, &current("a.txt:5", Some("M-1"), "must fix"));
+
+    assert_eq!(
+        ids(&[(1, &first), (2, &second), (3, &third)]),
+        [
+            (1, "M-1".to_owned()),
+            (2, "M-1".to_owned()),
+            (3, "M-1".to_owned())
+        ]
+    );
+}

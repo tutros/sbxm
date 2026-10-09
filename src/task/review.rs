@@ -233,7 +233,9 @@ pub fn open_from_saved(saved: &[(u32, &str)]) -> Vec<OpenFinding> {
 /// The must-fix findings open once review round `round` (`current`, the reviewer's text) is
 /// accepted (decision 177(p)): a `full` review saw every commit, so its findings are all that is
 /// open; a narrow one saw only the latest, so the `earlier` open findings stay, except one it
-/// names in a `Repeat of:` claim on the same file, which its own finding replaces.
+/// names in a `Repeat of:` claim on the same file, which its own finding replaces. Ids restart
+/// every round, so a claim matching more than one open finding can't say which it means: all of
+/// them stay.
 pub fn open_after(
     earlier: Option<&[OpenFinding]>,
     current: &str,
@@ -248,19 +250,29 @@ pub fn open_after(
     let mut open: Vec<OpenFinding> = if full {
         Vec::new()
     } else {
-        earlier
-            .unwrap_or_default()
+        let earlier = earlier.unwrap_or_default();
+        let claims = |f: &findings::Finding, old: &OpenFinding| {
+            f.field("repeat of") == Some(old.id.as_str())
+                && match (f.field("where"), old.place.as_deref()) {
+                    (Some(a), Some(b)) => shares_a_path(a, b),
+                    _ => false,
+                }
+        };
+        let replaced: Vec<usize> = found
             .iter()
-            .filter(|old| {
-                !found.iter().any(|f| {
-                    f.field("repeat of") == Some(old.id.as_str())
-                        && match (f.field("where"), old.place.as_deref()) {
-                            (Some(a), Some(b)) => shares_a_path(a, b),
-                            _ => false,
-                        }
-                })
+            .filter_map(|f| {
+                let mut matches = (0..earlier.len()).filter(|&i| claims(f, &earlier[i]));
+                match (matches.next(), matches.next()) {
+                    (Some(only), None) => Some(only),
+                    _ => None,
+                }
             })
-            .cloned()
+            .collect();
+        earlier
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !replaced.contains(i))
+            .map(|(_, old)| old.clone())
             .collect()
     };
     open.extend(must_fix_findings(current, round));
