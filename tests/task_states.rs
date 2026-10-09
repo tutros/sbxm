@@ -90,12 +90,32 @@ fn the_generated_table_matches_the_spec() {
     assert_eq!(spec_table, generated_trimmed);
 }
 
-/// Reproduces issue 138: on a Windows checkout the spec file has CRLF line endings, so the real
-/// spec text (converted here rather than relying on a checked-out file) must still compare equal.
+/// Reproduces issue 138: on a Windows checkout the spec file has CRLF line endings. `git
+/// checkout-index` with `core.autocrlf=true` performs that same conversion, so this test exercises
+/// genuinely CRLF file content rather than a synthetic one.
 #[test]
 fn the_generated_table_matches_the_spec_on_a_crlf_checkout() {
-    let spec = fs::read_to_string(Path::new("sdlc/specs/task-state-machine.md")).unwrap();
-    let crlf_spec = spec.replace('\n', "\r\n");
+    let tmp = tempfile::tempdir().unwrap();
+    let status = std::process::Command::new("git")
+        .args([
+            "-c",
+            "core.autocrlf=true",
+            "checkout-index",
+            &format!("--prefix={}/", tmp.path().display()),
+            "--",
+            "sdlc/specs/task-state-machine.md",
+        ])
+        .status()
+        .unwrap();
+    assert!(status.success(), "git checkout-index failed");
+
+    let crlf_spec =
+        fs::read_to_string(tmp.path().join("sdlc/specs/task-state-machine.md")).unwrap();
+    assert!(
+        crlf_spec.contains("\r\n"),
+        "checkout-index did not produce CRLF line endings"
+    );
+
     let spec_table = generated_table_block(&crlf_spec);
 
     let generated = task_states::render();
