@@ -72,13 +72,18 @@ pub fn render(
         };
         writeln!(
             out,
-            "{:<width$}  {:<9}  {:<12}  ahead: {:<3}  result: {:<3}  review: {:<3}  {}{}{}",
+            "{:<width$}  {:<9}  {:<12}  ahead: {:<3}  result: {:<3}  review: {:<3}  risk: {:<7}  {}{}{}",
             record.id,
             record.stage.name(),
             status,
             commits_ahead(base, record).map_or_else(|| "-".to_owned(), |n| n.to_string()),
             yes_no(dir.join("result.md").is_file()),
             yes_no(dir.join("review.md").is_file()),
+            record
+                .review
+                .as_ref()
+                .map_or_else(Default::default, |r| r.risk)
+                .word(),
             record.title,
             record
                 .continues
