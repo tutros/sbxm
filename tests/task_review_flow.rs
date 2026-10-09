@@ -1140,6 +1140,20 @@ fn the_path_rule_floor_raises_a_lower_level_the_reviewer_gave_and_says_why() {
 }
 
 #[test]
+fn a_changed_path_lookup_that_fails_stops_the_review_before_the_reviewer_runs() {
+    let f = config();
+    let backend = backend(&f, &[CLEAN]);
+    let mut prepared = worked_task(&f, &backend);
+    prepared.record.base = "no-such-branch".into();
+
+    let err = review(&f, &backend, &mut prepared).unwrap_err();
+
+    assert!(format!("{err:#}").contains("changed paths"), "{err:#}");
+    assert_eq!(count(&backend, "codex"), 0);
+    assert!(!meta(&f).join("review.md").exists());
+}
+
+#[test]
 fn the_floor_never_lowers_a_level_already_at_or_above_it() {
     let f = config();
     let review_text = "Must-fix findings: 0\n\nRisk: high\n\n## Risk\n\n\

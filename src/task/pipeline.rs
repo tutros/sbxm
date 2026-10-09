@@ -2665,6 +2665,11 @@ fn run_review_agent(
     earlier: &[String],
 ) -> Result<ReviewOutcome> {
     let reviewer = &env.config.reviewer;
+    // Before the reviewer runs: a git error here must stop the review, never drop the floor.
+    let changed_paths = prepared
+        .record
+        .changed_paths(&prepared.meta.join("repo.git"))
+        .context("cannot list the task's changed paths for the risk floor")?;
     let started = Instant::now();
     let result = headless::run(
         env.backend,
@@ -2744,10 +2749,6 @@ fn run_review_agent(
     };
     let open = review::open_after(Some(&earlier_open), &text, round, full);
 
-    let changed_paths = prepared
-        .record
-        .changed_paths(&prepared.meta.join("repo.git"))
-        .unwrap_or_default();
     let (floor_level, floor_reasons) = risk::floor(&changed_paths, &env.config.risk);
     let (risk_level, risk_reasons) = match review::risk_level(&text) {
         Some(level) => {
