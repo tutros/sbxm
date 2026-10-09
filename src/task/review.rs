@@ -227,16 +227,46 @@ pub fn open_from_saved(saved: &[(u32, &str)]) -> Vec<OpenFinding> {
         let Some(must_fix) = saved_must_fix_count(text) else {
             continue;
         };
+        if !count_matches(must_fix, text) {
+            continue;
+        }
         open = Some(open_after(open.as_deref(), text, *round, full));
         full = must_fix == 0;
     }
     open.unwrap_or_default()
 }
 
-/// [`open_from_saved`] over the `review-<round>.md` files a task saved in its folder `meta`,
-/// rounds 1 to `last` (one that is missing is skipped).
+/// Whether a review's must-fix `count` is the number of must-fix findings its text lists; a
+/// review where they differ isn't used, live or replayed.
+pub fn count_matches(count: u32, review: &str) -> bool {
+    usize::try_from(count).ok() == Some(must_fix_findings(review, 0).len())
+}
+
+/// The rounds of the `review-<round>.md` files a task saved in its folder `meta`, in order. They
+/// need not start at 1: gate failures can use rounds before the first review.
+pub fn saved_rounds(meta: &Path) -> Vec<u32> {
+    let mut rounds: Vec<u32> = fs::read_dir(meta)
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| {
+            let name = entry.ok()?.file_name();
+            name.to_str()?
+                .strip_prefix("review-")?
+                .strip_suffix(".md")?
+                .parse::<u32>()
+                .ok()
+        })
+        .collect();
+    rounds.sort_unstable();
+    rounds
+}
+
+/// [`open_from_saved`] over the `review-<round>.md` files a task saved in its folder `meta`, up
+/// to round `last`.
 pub fn open_from_task_dir(meta: &Path, last: u32) -> Vec<OpenFinding> {
-    let saved: Vec<(u32, String)> = (1..=last)
+    let saved: Vec<(u32, String)> = saved_rounds(meta)
+        .into_iter()
+        .take_while(|&r| r <= last)
         .filter_map(|r| {
             fs::read_to_string(meta.join(format!("review-{r}.md")))
                 .ok()

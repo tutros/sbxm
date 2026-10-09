@@ -433,11 +433,7 @@ pub fn open_findings(task: &Record, meta: &Path, review: Option<&str>) -> Vec<Op
     if let Some(open) = &task.open_findings {
         return open.clone();
     }
-    let last = (1..)
-        .take_while(|r| meta.join(format!("review-{r}.md")).is_file())
-        .last()
-        .unwrap_or(0);
-    let rebuilt = review::open_from_task_dir(meta, last);
+    let rebuilt = review::open_from_task_dir(meta, u32::MAX);
     if !rebuilt.is_empty() {
         return rebuilt;
     }

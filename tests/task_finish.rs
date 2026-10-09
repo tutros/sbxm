@@ -776,3 +776,29 @@ fn an_older_record_without_open_findings_lists_them_from_its_saved_reviews() {
         "{section}"
     );
 }
+
+#[test]
+fn an_older_record_rebuilds_its_findings_when_review_rounds_do_not_start_at_one() {
+    // PR #165 review round 2, M-1: gate failures can use fix rounds before the first review, so
+    // the saved reviews may start at review-4.md; none of them may be missed.
+    let f = fixture();
+    let mut prepared = stopped_after_a_narrow_review(&f);
+    prepared.record.open_findings = None;
+    record::write(&prepared.meta, &prepared.record).unwrap();
+    fs::write(prepared.meta.join("review-4.md"), FULL_REVIEW).unwrap();
+    fs::write(prepared.meta.join("review-5.md"), NARROW_REVIEW).unwrap();
+    let github = FakeGitHub::default();
+
+    run(&f, &github).unwrap();
+
+    let request = only_pr_request(&github);
+    let section = request.body.split("## Result").next().unwrap();
+    assert!(
+        section.contains("- M-2 (review 4): Second problem (`src/b.rs:9`)"),
+        "{section}"
+    );
+    assert!(
+        section.contains("- M-1 (review 5): First problem remains (`src/a.rs:5`)"),
+        "{section}"
+    );
+}

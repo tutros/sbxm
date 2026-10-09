@@ -1769,18 +1769,9 @@ pub fn review_issue(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewRepo
 /// `Record::review` (issue 118) only has the files to go by: a number taken from the fix-round
 /// counter alone would overwrite an earlier round's saved review.
 fn next_review_round(prepared: &Prepared) -> Result<u32> {
-    let saved = fs::read_dir(&prepared.meta)
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| {
-            let name = entry.ok()?.file_name();
-            name.to_str()?
-                .strip_prefix("review-")?
-                .strip_suffix(".md")?
-                .parse::<u32>()
-                .ok()
-        })
-        .max()
+    let saved = review::saved_rounds(&prepared.meta)
+        .last()
+        .copied()
         .unwrap_or(0);
     let recorded = prepared.record.review.as_ref().map_or(0, |last| last.round);
     review_round_after(prepared, prepared.record.round.max(recorded).max(saved))
@@ -2656,8 +2647,8 @@ fn run_review_agent(
              used; read it in review-{round}.md"
         );
     };
-    let listed = review::must_fix_findings(&text, round).len();
-    if usize::try_from(must_fix).ok() != Some(listed) {
+    if !review::count_matches(must_fix, &text) {
+        let listed = review::must_fix_findings(&text, round).len();
         bail!(
             "the reviewer's review.md says {must_fix} must-fix finding(s) but lists {listed} as \
              '### <id> - <title>' under '## Must fix', so it isn't used; read it in \

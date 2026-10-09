@@ -283,3 +283,21 @@ fn a_repeat_matching_two_open_findings_with_the_same_id_and_file_keeps_both() {
         ]
     );
 }
+
+#[test]
+fn a_saved_review_with_a_mismatched_count_is_not_replayed_as_accepted() {
+    // PR #165 review round 2, M-2: a review refused because its count differs from its must-fix
+    // findings is still saved as review-<round>.md; replaying the saved rounds must skip it too.
+    let accepted = with_header("codex", None, PREVIOUS);
+    let refused = with_header(
+        "codex",
+        None,
+        "Must-fix findings: 0\n\n## Must fix\n\n### M-9 - listed but not counted\n\n\
+         **Where:** `c.txt:1`\n",
+    );
+
+    assert_eq!(
+        ids(&[(1, &accepted), (2, &refused)]),
+        [(1, "M-1".to_owned())]
+    );
+}
