@@ -52,6 +52,25 @@ fn a_crlf_risk_line_still_parses() {
     );
 }
 
+/// Issue 123, M-1 of the issue-123 review: a `Risk:`-looking line quoted elsewhere in the body
+/// (here, inside prose further down) must not be mistaken for the required header, which sits
+/// right after the `Must-fix findings:` line.
+#[test]
+fn a_risk_line_quoted_later_in_the_body_is_not_the_header() {
+    let review = "Must-fix findings: 0\n\n## Summary\n\nquoted output:\nRisk: high\n";
+    assert_eq!(risk_level(review), None);
+}
+
+/// The blank separator line is optional: a reviewer who writes the risk line directly after the
+/// must-fix line, with nothing between, still parses.
+#[test]
+fn a_risk_line_with_no_blank_separator_still_parses() {
+    assert_eq!(
+        risk_level("Must-fix findings: 0\nRisk: medium\n"),
+        Some(Level::Medium)
+    );
+}
+
 #[test]
 fn risk_reasons_are_read_from_their_own_section() {
     let review = "Must-fix findings: 0\n\nRisk: medium\n\n## Risk\n\n\

@@ -91,15 +91,21 @@ pub fn saved_must_fix_count(saved: &str) -> Option<u32> {
     must_fix_count(past_header(saved))
 }
 
-/// The risk level of a line reading exactly `Risk: low`, `Risk: medium` or `Risk: high` (trailing
-/// spaces and a Windows line ending are fine; decision 176(e)): the first such line in the file,
-/// or `None` for a review with no readable one.
+/// The risk level of the line reading exactly `Risk: low`, `Risk: medium` or `Risk: high`
+/// (trailing spaces and a Windows line ending are fine; decision 176(e)), required right after
+/// the [`must_fix_count`] line, with at most one blank line between the two: `None` for a review
+/// where that position doesn't hold such a line, even if one appears later (e.g. quoted in a
+/// finding's body or the `## Risk` section's own prose).
 pub fn risk_level(review: &str) -> Option<Level> {
     let review = review.strip_prefix('\u{feff}').unwrap_or(review);
-    review.lines().find_map(|line| {
-        let word = line.trim_end().strip_prefix("Risk: ")?;
-        Level::from_word(word)
-    })
+    let mut lines = review.lines();
+    lines.next()?; // the `Must-fix findings:` line, checked by `must_fix_count`
+    let mut candidate = lines.next()?;
+    if candidate.trim().is_empty() {
+        candidate = lines.next()?;
+    }
+    let word = candidate.trim_end().strip_prefix("Risk: ")?;
+    Level::from_word(word)
 }
 
 /// [`risk_level`] of a saved `review.md`, read past the [`with_header`] line.
