@@ -933,6 +933,54 @@ fn a_clean_narrow_review_at_the_last_round_number_is_refused_instead_of_wrapping
     assert!(!meta(&f).join("review-0.md").exists());
 }
 
+/// Issue 161: a replayed review with findings and budget left would get a fix round and the
+/// gates before the next review's number was worked out, so it is refused before any of them.
+#[test]
+fn a_review_with_findings_at_the_last_round_number_is_refused_before_any_fix_round() {
+    let f = config();
+    let result = ReviewResult {
+        round: u32::MAX,
+        must_fix: 1,
+        full: false,
+        repeat: false,
+    };
+    let mut prepared = reviewed_task(&f, ONE, Some(result));
+    prepared.record.fix_rounds = prepared.record.round + 3;
+    record::write(&prepared.meta, &prepared.record).unwrap();
+    let last = meta(&f).join(format!("review-{}.md", u32::MAX));
+    std::fs::write(&last, ONE).unwrap();
+    let task_json = std::fs::read(meta(&f).join("task.json")).unwrap();
+    let reviews: Vec<_> = ["review.md", "review-1.md"]
+        .iter()
+        .map(|name| std::fs::read(meta(&f).join(name)).unwrap())
+        .collect();
+    let backend = backend(&f, &[CLEAN]);
+
+    let err = resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("review round"), "{message}");
+    assert!(!message.contains('\n'), "{message}");
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert!(
+        backend.execs().is_empty(),
+        "no fix round, gate or reviewer ran"
+    );
+    assert_eq!(
+        std::fs::read(meta(&f).join("task.json")).unwrap(),
+        task_json
+    );
+    for (name, before) in ["review.md", "review-1.md"].iter().zip(&reviews) {
+        assert_eq!(
+            &std::fs::read(meta(&f).join(name)).unwrap(),
+            before,
+            "{name}"
+        );
+    }
+    assert_eq!(std::fs::read_to_string(&last).unwrap(), ONE);
+    assert!(!meta(&f).join("review-0.md").exists());
+}
+
 // ---- The fix round (T5, T9) ----
 
 /// Issue 41 whose first fix round failed: the review found one must-fix finding, and the

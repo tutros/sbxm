@@ -1789,6 +1789,22 @@ fn review_round_after(prepared: &Prepared, round: u32) -> Result<u32> {
     })
 }
 
+/// Refuses a recorded review result that [`review_rounds`] would follow with another review
+/// round (a clean narrow review, or findings with fix-round budget left and no repeat) when no
+/// review round number is left after it, so `task resume` refuses before it touches a sandbox,
+/// runs a fix round or writes anything (issue 161).
+pub(super) fn check_replay(prepared: &Prepared, result: &record::ReviewResult) -> Result<()> {
+    let another_review = if result.must_fix == 0 {
+        !result.full
+    } else {
+        !result.repeat && prepared.record.round < prepared.record.fix_rounds
+    };
+    if another_review {
+        review_round_after(prepared, result.round)?;
+    }
+    Ok(())
+}
+
 /// The review rounds of [`review_issue`], from review round `round` on: each review, and while
 /// must-fix findings are left and the budget allows, a fix round and the gates before the next;
 /// then `ready`. `first` is a review that already completed (`task resume` replaying the recorded
@@ -1842,6 +1858,9 @@ pub(super) fn review_rounds(
             break;
         }
 
+        // The review after the fix needs a number: refused before the fix round and the gates
+        // change anything (issue 161).
+        let next = review_round_after(prepared, round)?;
         run_fix_round(env, prepared, None)?;
         prepared.record.round += 1;
         report.fix_ran = true;
@@ -1849,7 +1868,7 @@ pub(super) fn review_rounds(
             report.gates_failed = Some(failed);
             return Ok(report);
         }
-        round = review_round_after(prepared, round)?;
+        round = next;
     }
 
     prepared
