@@ -2412,7 +2412,7 @@ pub fn run_reviewer(env: &TaskEnv, prepared: &mut Prepared, round: u32) -> Resul
     // `round == u32::MAX`, trying every number first would be about 4.3 billion file reads.
     let earlier: Vec<String> = review::saved_rounds(&prepared.meta)
         .into_iter()
-        .filter(|&r| r < round)
+        .filter(|&r| r > 0 && r < round)
         .filter_map(|r| fs::read_to_string(prepared.meta.join(format!("review-{r}.md"))).ok())
         .collect();
     let _ = fs::remove_file(prepared.meta.join("review.md"));

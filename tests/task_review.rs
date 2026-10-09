@@ -222,6 +222,11 @@ fn the_reviewers_context_includes_every_saved_review_even_with_gaps_in_the_round
         }
     });
     let mut prepared = gated(&f, &backend);
+    fs::write(
+        meta(&f).join("review-0.md"),
+        "zero review must be ignored\n",
+    )
+    .unwrap();
     fs::write(meta(&f).join("review-2.md"), "second review\n").unwrap();
     fs::write(meta(&f).join("review-5.md"), "fifth review\n").unwrap();
 
@@ -236,6 +241,10 @@ fn the_reviewers_context_includes_every_saved_review_even_with_gaps_in_the_round
     let at_2 = previous.find("second review").expect("review-2.md's text");
     let at_5 = previous.find("fifth review").expect("review-5.md's text");
     assert!(at_2 < at_5, "oldest first: {previous}");
+    assert!(
+        !previous.contains("zero review must be ignored"),
+        "review-0.md must never be treated as an earlier review: {previous}"
+    );
 }
 
 #[test]
