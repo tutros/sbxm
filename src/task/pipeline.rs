@@ -2075,6 +2075,7 @@ pub fn review_pr(
         }
     };
     let must_fix = outcome.must_fix;
+    let (risk, risk_reasons) = (outcome.risk, outcome.risk_reasons.clone());
     prepared.record.open_findings = Some(outcome.open);
     prepared.record.review = Some(record::ReviewResult {
         round: 1,
@@ -2095,13 +2096,15 @@ pub fn review_pr(
         full: true,
         repeat: false,
         warnings: outcome.warnings,
-        risk: outcome.risk,
+        risk,
     });
 
     let review_path = prepared.meta.join("review.md");
     let text = fs::read_to_string(&review_path)?;
     let (repo, number) = (prepared.record.repo.clone(), prepared.record.number);
-    match github.pr_comment(&repo, number, &review::pr_comment(number, &text)) {
+    let risk_section = risk::render_section(risk, &risk_reasons);
+    let comment = review::pr_comment(number, &risk_section, &text);
+    match github.pr_comment(&repo, number, &comment) {
         Ok(()) => {
             report.posted = true;
             prepared
