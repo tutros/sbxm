@@ -189,6 +189,65 @@ fn the_reviewer_gets_its_own_sandbox_over_a_clone_of_the_task_branch() {
 }
 
 #[test]
+fn the_reviewers_context_includes_every_saved_review_even_with_gaps_in_the_round_numbers() {
+    // Issue 169, part 1: `earlier` is built from `review::saved_rounds`, not from trying every
+    // round number below `round`, so saved reviews that don't start at 1 and have gaps (gate
+    // failures can use round numbers before the first review) are still all seen, oldest first.
+    let f = config();
+    let seen = Arc::new(Mutex::new(None));
+    let seen_in_hook = Arc::clone(&seen);
+    let clone = clone_dir(&f);
+    let inner = backend_with(&f, Some(CLEAN));
+    let observer = move |spec: &sbxm::backend::ExecSpec| {
+        if spec.argv.iter().any(|a| a == "codex") {
+            *seen_in_hook.lock().unwrap() =
+                Some(fs::read_to_string(clone.join(".sbxm-task").join("previous-review.md")).ok());
+        }
+    };
+    let backend = inner.with_exec_hook({
+        let worker = play_tasks(
+            &f.env.base_dir(),
+            "main",
+            Play {
+                commits: vec!["a.txt".into()],
+                result_md: Some(b"done\n".to_vec()),
+                bundle_bytes: None,
+            },
+        );
+        let reviewer = play_reviewer(&f.env.base_dir(), "issue-41", Some(CLEAN.to_owned()));
+        move |sandbox, spec| {
+            worker(sandbox, spec);
+            observer(spec);
+            reviewer(sandbox, spec);
+        }
+    });
+    let mut prepared = gated(&f, &backend);
+    fs::write(
+        meta(&f).join("review-0.md"),
+        "zero review must be ignored\n",
+    )
+    .unwrap();
+    fs::write(meta(&f).join("review-2.md"), "second review\n").unwrap();
+    fs::write(meta(&f).join("review-5.md"), "fifth review\n").unwrap();
+
+    round(&f, &backend, &mut prepared, 7).unwrap();
+
+    let previous = seen
+        .lock()
+        .unwrap()
+        .clone()
+        .flatten()
+        .expect("round 7 has earlier reviews to see");
+    let at_2 = previous.find("second review").expect("review-2.md's text");
+    let at_5 = previous.find("fifth review").expect("review-5.md's text");
+    assert!(at_2 < at_5, "oldest first: {previous}");
+    assert!(
+        !previous.contains("zero review must be ignored"),
+        "review-0.md must never be treated as an earlier review: {previous}"
+    );
+}
+
+#[test]
 fn the_reviewer_is_run_under_the_timeout_with_high_effort_on_a_prompt_file() {
     let f = config();
     let backend = backend_with(&f, Some(CLEAN));

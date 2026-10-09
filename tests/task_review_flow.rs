@@ -346,6 +346,35 @@ fn as_many_fix_rounds_as_the_budget_allows_run_before_the_task_stops() {
 }
 
 #[test]
+fn a_freshly_run_review_with_findings_at_the_last_round_number_is_refused_before_any_fix_round() {
+    // Issue 169, part 2: unlike `task_resume`'s
+    // `a_review_with_findings_at_the_last_round_number_is_refused_before_any_fix_round`, which
+    // enters through a recorded, already-completed review and returns from `check_replay`
+    // without ever reaching `review_rounds`'s own guard, this drives a review that actually runs
+    // at round `u32::MAX`, so the guard right before `run_fix_round` is the one that fires. Part
+    // 1 is what makes this fast: before it, building `earlier` at this round would try about 4.3
+    // billion file reads first.
+    let f = config_with_fix_rounds(u32::MAX);
+    let backend = backend(&f, &[FINDING1]);
+    let mut prepared = worked_task(&f, &backend);
+    prepared.record.round = u32::MAX - 1;
+
+    let err = review(&f, &backend, &mut prepared).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("review round"), "{message}");
+    assert!(!message.contains('\n'), "{message}");
+    assert!(!message.contains("move the review"), "{message}");
+    assert_eq!(count(&backend, "codex"), 1, "the review itself ran");
+    assert_eq!(
+        count(&backend, "cargo test"),
+        1,
+        "only the before-review gates ran"
+    );
+    assert_eq!(count(&backend, "fix-prompt.md"), 0, "no fix round ran");
+}
+
+#[test]
 fn the_fix_round_happens_at_most_once_and_findings_left_are_reported_not_an_error() {
     let f = config();
     let backend = backend(&f, &[ONE, ONE]);

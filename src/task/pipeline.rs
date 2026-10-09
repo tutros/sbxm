@@ -2407,8 +2407,12 @@ pub fn run_reviewer(env: &TaskEnv, prepared: &mut Prepared, round: u32) -> Resul
     // Every earlier round's saved review, oldest first: the no-progress rule matches a claimed
     // repeat against any of them, not only the one right before (spec §5.3, decisions 174(b),
     // 177(o)), so a narrow round that misses an older finding can't hide it. A stale `review.md`
-    // must never stand in for this round's.
-    let earlier: Vec<String> = (1..round)
+    // must never stand in for this round's. Walking the saved rounds (issue 169), rather than
+    // every number below `round`, keeps the cost proportional to the files present: at
+    // `round == u32::MAX`, trying every number first would be about 4.3 billion file reads.
+    let earlier: Vec<String> = review::saved_rounds(&prepared.meta)
+        .into_iter()
+        .filter(|&r| r > 0 && r < round)
         .filter_map(|r| fs::read_to_string(prepared.meta.join(format!("review-{r}.md"))).ok())
         .collect();
     let _ = fs::remove_file(prepared.meta.join("review.md"));
