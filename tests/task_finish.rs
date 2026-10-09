@@ -98,7 +98,14 @@ fn a_ready_task_is_pushed_and_its_pr_is_opened_with_the_result_and_review() {
         ("issue-41", "main")
     );
     assert_eq!(request.title, "Fix 41");
-    assert!(request.body.starts_with("Fixes #41\n"), "{}", request.body);
+    // Issue 123: the PR description starts with the risk section (a record with no recorded
+    // review, as `ready` leaves it, reads as "unknown").
+    assert!(
+        request.body.starts_with("## Risk: \u{26aa} unknown\n"),
+        "{}",
+        request.body
+    );
+    assert!(request.body.contains("Fixes #41\n"), "{}", request.body);
     assert!(
         request.body.contains("## Result\n\ndone\n"),
         "{}",
@@ -116,6 +123,36 @@ fn a_ready_task_is_pushed_and_its_pr_is_opened_with_the_result_and_review() {
     let record = reread(&f);
     assert_eq!((record.stage, record.status), (Stage::Finished, Status::Ok));
     assert_eq!(record.pr.as_deref(), Some(done.url.as_str()));
+}
+
+/// Issue 123, decision 176: a recorded risk level and reasons are shown at the top of a normal
+/// PR's description, above `Fixes #N`.
+#[test]
+fn a_recorded_risk_level_opens_the_pr_description() {
+    let f = fixture();
+    let prepared = ready(&f);
+    let mut record = reread(&f);
+    record.review = Some(record::ReviewResult {
+        round: 1,
+        must_fix: 0,
+        full: true,
+        repeat: false,
+        risk: sbxm::task::risk::Level::High,
+        risk_reasons: vec!["touches the git trust boundary".to_owned()],
+    });
+    record::write(&prepared.meta, &record).unwrap();
+    let github = FakeGitHub::default();
+
+    run(&f, &github).unwrap();
+
+    let request = only_pr_request(&github);
+    let body = &request.body;
+    assert!(body.starts_with("## Risk: \u{1f534} high\n"), "{body}");
+    let risk_end = body.find("Fixes #41\n").expect(body);
+    assert!(
+        body[..risk_end].contains("touches the git trust boundary"),
+        "{body}"
+    );
 }
 
 const REVIEW_WITH_MUST_FIX: &str = "Reviewer: codex (default)\n\nMust-fix findings: 2\n\n\
@@ -159,7 +196,16 @@ fn a_ready_task_with_must_fix_left_opens_a_draft_that_lists_the_findings() {
     assert!(request.draft);
     assert!(done.draft);
     let body = &request.body;
-    assert!(body.starts_with("Fixes #41\n"), "{body}");
+    // Issue 123, decision 176: the risk section at the very top names the same must-fix reason
+    // as `## Unresolved` below it, so it's visible without reading past the result and review.
+    assert!(body.starts_with("## Risk: \u{26aa} unknown\n"), "{body}");
+    let risk_end = body.find("Fixes #41\n").expect(body);
+    let risk_section = &body[..risk_end];
+    assert!(
+        risk_section.contains("2 must-fix finding(s) left"),
+        "{risk_section}"
+    );
+    assert!(body.contains("Fixes #41\n"), "{body}");
     let unresolved = body.find("## Unresolved").expect(body);
     assert!(unresolved < body.find("## Result").unwrap(), "{body}");
     assert!(body.contains("2 must-fix finding(s) left"), "{body}");
@@ -391,7 +437,7 @@ fn a_secret_in_review_or_result_stops_the_publish_without_echoing_it() {
 fn a_huge_file_is_cut_to_the_cap_and_the_body_says_so() {
     let big = "x".repeat(SECTION_CAP * 2);
 
-    let (body, cuts) = pr_body(7, None, Some(&big), None);
+    let (body, cuts) = pr_body(7, "## Risk: \u{26aa} unknown\n", None, Some(&big), None);
 
     assert!(body.chars().count() < 65_536, "{}", body.len());
     assert!(
