@@ -194,7 +194,8 @@ Output: human text by default; `status --json` prints the records. Exit codes: 0
   one exists [158].
 - The reviewer is told it cannot change files, commit, push or file issues, and to follow the code-review skill from
   the clone (`.claude/skills/sdlc-code-review/SKILL.md` when present).
-- **Risk assessment [176]:** the reviewer's second line is `Risk: low|medium|high`, parsed like `Must-fix findings:`;
+- **Risk assessment [176]:** the line right after the reviewer's first (one blank line between the two is fine,
+  but nothing else) is `Risk: low|medium|high`, parsed at that fixed position, never scanned for further down;
   a `## Risk` section lists one bullet per reason. Missing or unparseable: `Level::Unknown`, never silently `low`,
   warned about separately from a `Repeat of:` warning. sbxm raises the level (never lowers it) to the highest
   matching path rule's floor over the task's own changed paths: the built-in defaults (CI/workflow files, dependency
