@@ -32,7 +32,8 @@ fn config_with_fix_rounds(fix_rounds: u32) -> Fixture {
 }
 
 const CLEAN: &str = "Must-fix findings: 0\n\nNothing found.\n";
-const ONE: &str = "Must-fix findings: 1\n\n1. must-fix: a.txt:1 does the wrong thing.\n";
+const ONE: &str =
+    "Must-fix findings: 1\n\n## Must fix\n\n### M-1 - a.txt:1 does the wrong thing.\n";
 
 /// A structured finding (unlike `ONE`, which `review::must_fix_count` reads but
 /// `review::repeats_a_must_fix_finding` can't parse), so round 2's `Repeat of:` line has an
@@ -265,7 +266,7 @@ fn must_fix_findings_get_a_fix_round_then_a_narrow_review_then_one_full_review_b
     assert!(
         fs::read_to_string(meta(&f).join("review-1.md"))
             .unwrap()
-            .contains("must-fix")
+            .contains("### M-1 - a.txt:1")
     );
     assert!(
         fs::read_to_string(meta(&f).join("review-2.md"))
@@ -995,4 +996,30 @@ fn a_full_review_replaces_the_open_findings() {
     let record = saved(&f);
     assert_eq!(record.stopped, None);
     assert_eq!(record.open_findings, Some(Vec::new()));
+}
+
+#[test]
+fn a_review_whose_count_differs_from_its_must_fix_findings_is_not_used() {
+    // Review round 6, M-2: a count with no `### M-…` findings under `## Must fix` would leave a
+    // stopped task with nothing to list in its draft PR, so the review is refused like one with no
+    // count line.
+    let f = config();
+    let backend = backend(&f, &["Must-fix findings: 2\n\nTwo things are wrong.\n"]);
+    let mut prepared = worked_task(&f, &backend);
+
+    let err = review(&f, &backend, &mut prepared).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("says 2 must-fix finding(s) but lists 0"),
+        "{message}"
+    );
+    let record = saved(&f);
+    assert_eq!(
+        (record.stage, record.status),
+        (Stage::Reviewing, Status::Failed)
+    );
+    assert_eq!(record.open_findings, None);
+    assert!(!meta(&f).join("review.md").exists());
+    assert!(meta(&f).join("review-1.md").exists());
 }

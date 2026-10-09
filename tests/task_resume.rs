@@ -31,7 +31,8 @@ fn config_with_fix_rounds(fix_rounds: u32) -> Fixture {
 }
 
 const CLEAN: &str = "Must-fix findings: 0\n\nNothing found.\n";
-const ONE: &str = "Must-fix findings: 1\n\n1. must-fix: a.txt:1 does the wrong thing.\n";
+const ONE: &str =
+    "Must-fix findings: 1\n\n## Must fix\n\n### M-1 - a.txt:1 does the wrong thing.\n";
 
 /// A structured must-fix finding, so a later round can claim to repeat it (spec §5.3).
 const FINDING1: &str = "Must-fix findings: 1\n\n\

@@ -2656,6 +2656,14 @@ fn run_review_agent(
              used; read it in review-{round}.md"
         );
     };
+    let listed = review::must_fix_findings(&text, round).len();
+    if usize::try_from(must_fix).ok() != Some(listed) {
+        bail!(
+            "the reviewer's review.md says {must_fix} must-fix finding(s) but lists {listed} as \
+             '### <id> - <title>' under '## Must fix', so it isn't used; read it in \
+             review-{round}.md"
+        );
+    }
     fs::write(prepared.meta.join("review.md"), &saved)?;
     let earlier_refs: Vec<&str> = earlier.iter().map(String::as_str).collect();
     let repeat = review::repeats_a_must_fix_finding(&text, &earlier_refs);

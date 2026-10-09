@@ -26,7 +26,7 @@ fn config() -> Fixture {
 }
 
 const CLEAN: &str = "Must-fix findings: 0\n\nNothing found.\n";
-const ONE: &str = "Must-fix findings: 1\n\n1. must-fix: a.txt:1 wrong.\n";
+const ONE: &str = "Must-fix findings: 1\n\n## Must fix\n\n### M-1 - a.txt:1 wrong.\n";
 
 fn spec_file(f: &Fixture, text: &str) -> PathBuf {
     let path = f.env.tmp.path().join("idea.md");
