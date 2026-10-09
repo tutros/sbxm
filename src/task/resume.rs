@@ -157,13 +157,18 @@ fn resume_runs_worker(task: &Record) -> bool {
 }
 
 /// Continues the task from its recorded stage (issue 118). Checks first: nothing runs or is
-/// written when [`check_can_resume`], the reviewer's checks, or (when the worker will run) the
-/// worker's checks refuse.
+/// written when [`check_can_resume`], the reviewer's checks, (when the worker will run) the
+/// worker's checks, or (when a recorded review is replayed) [`pipeline::check_replay`] refuse.
 pub fn resume(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Result<Resumed> {
     check_can_resume(&prepared.record, env.probe, rounds)?;
     pipeline::check_reviewer(env, prepared)?;
     if resume_runs_worker(&prepared.record) {
         pipeline::check_worker(env, prepared)?;
+    }
+    if (prepared.record.stage, prepared.record.status) == (Stage::Reviewing, Status::Completed)
+        && let Some(result) = &prepared.record.review
+    {
+        pipeline::check_replay(prepared, result)?;
     }
     let mut resumed = Resumed {
         from: (prepared.record.stage, prepared.record.status),
