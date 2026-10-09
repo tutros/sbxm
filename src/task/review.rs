@@ -114,15 +114,35 @@ pub fn saved_risk_level(saved: &str) -> Option<Level> {
     risk_level(past_header(saved))
 }
 
-/// The reasons under a `## Risk` heading (decision 176(e)): one per `- ` or `* ` bullet, in file
-/// order, until the next `##` heading or the end of the file. Empty when there is no such
-/// heading.
+/// The reasons under the first `## Risk` heading (decision 176(e)): one per `- ` or `* ` bullet,
+/// in file order, until the next `##` heading or the end of the file. Empty when there is no such
+/// heading. A heading inside a fenced (```` ``` ````, `~~~`) or indented code block is quoted text,
+/// never the section.
 pub fn risk_reasons(review: &str) -> Vec<String> {
     let mut reasons = Vec::new();
     let mut in_section = false;
+    let mut fence: Option<&str> = None;
     for line in findings::lines_of(review) {
         let trimmed = line.trim();
-        if let Some(name) = trimmed.strip_prefix("## ") {
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        let is_code_indent = indent >= 4 || line.starts_with('\t');
+        if !is_code_indent
+            && let Some(marker) = ["```", "~~~"].into_iter().find(|m| trimmed.starts_with(m))
+        {
+            fence = match fence {
+                Some(open) if open == marker => None,
+                Some(open) => Some(open),
+                None => Some(marker),
+            };
+            continue;
+        }
+        if fence.is_some() {
+            continue;
+        }
+        if !is_code_indent && let Some(name) = trimmed.strip_prefix("## ") {
+            if in_section {
+                break;
+            }
             in_section = name.trim().eq_ignore_ascii_case("risk");
             continue;
         }

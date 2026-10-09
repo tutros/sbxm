@@ -82,6 +82,23 @@ fn risk_reasons_are_read_from_their_own_section() {
 }
 
 #[test]
+fn a_quoted_risk_section_in_code_gives_no_reasons() {
+    let fenced = "Must-fix findings: 0\n\nRisk: low\n\n## Summary\n\n```markdown\n## Risk\n\n\
+        - not an assessment\n```\n";
+    assert_eq!(risk_reasons(fenced), Vec::<String>::new());
+    let indented = "Must-fix findings: 0\n\nRisk: low\n\n## Summary\n\n    ## Risk\n    \
+        - not an assessment\n";
+    assert_eq!(risk_reasons(indented), Vec::<String>::new());
+}
+
+#[test]
+fn only_the_first_real_risk_section_counts() {
+    let review = "Must-fix findings: 0\n\nRisk: low\n\n## Risk\n\n- contained\n\n## Summary\n\n\
+        ~~~\n## Risk\n- quoted\n~~~\n\n## Risk\n\n- a second section\n";
+    assert_eq!(risk_reasons(review), ["contained"]);
+}
+
+#[test]
 fn a_review_with_no_risk_section_has_no_reasons() {
     assert_eq!(
         risk_reasons("Must-fix findings: 0\n\nNothing found.\n"),
