@@ -1775,8 +1775,8 @@ fn next_review_round(prepared: &Prepared) -> Result<u32> {
         .unwrap_or(0);
     let recorded = prepared.record.review.as_ref().map_or(0, |last| last.round);
     let from_record = prepared.record.round.max(recorded);
-    // Only a saved file strictly above both record fields is freed by moving it out; when a
-    // record field is the maximum, no file holds it (issue 162).
+    // Moving files out cannot lower the maximum the record itself holds: only a saved file
+    // strictly above both record fields is freed by moving it out (issue 162).
     review_round_after(prepared, from_record.max(saved), saved > from_record)
 }
 
