@@ -2374,8 +2374,12 @@ pub struct Reviewed {
 }
 
 /// Checks before a review creates anything (spec §5.2): the reviewer's provider secret and the
-/// profile's secrets are stored, and the profile loads. Returns the warnings to print.
-pub fn check_reviewer(env: &TaskEnv, _task: &Prepared) -> Result<Vec<String>> {
+/// profile's secrets are stored, the profile loads, and the task's changed paths can be listed
+/// (the risk floor needs them; decision 176). Returns the warnings to print.
+pub fn check_reviewer(env: &TaskEnv, task: &Prepared) -> Result<Vec<String>> {
+    task.record
+        .changed_paths(&task.meta.join("repo.git"))
+        .context("cannot list the task's changed paths for the risk floor")?;
     check_reviewer_inputs(env.config_dir, env.backend, env.config)
 }
 
@@ -2665,7 +2669,8 @@ fn run_review_agent(
     earlier: &[String],
 ) -> Result<ReviewOutcome> {
     let reviewer = &env.config.reviewer;
-    // Before the reviewer runs: a git error here must stop the review, never drop the floor.
+    // Listed again here, as a fix round may have added commits since `check_reviewer` did; a git
+    // error must stop the review, never drop the floor.
     let changed_paths = prepared
         .record
         .changed_paths(&prepared.meta.join("repo.git"))

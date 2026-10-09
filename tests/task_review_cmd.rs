@@ -608,6 +608,20 @@ fn the_pr_review_uses_the_default_branch_as_the_base() {
 }
 
 #[test]
+fn a_pr_review_whose_base_is_missing_is_refused_before_any_sandbox_or_gate() {
+    let f = config("codex");
+    add_pr_head(&f, 7);
+    let github = pr_github().with_default_branch("trunk");
+    let backend = pr_backend(&f, &[CLEAN]);
+
+    let out = go_pr(&f, &pr_options(&f), &backend, &github);
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("changed paths"), "{message}");
+    assert!(backend.creates().is_empty() && backend.execs().is_empty());
+}
+
+#[test]
 fn the_recorded_worker_decides_the_fix_adapter_and_the_default_reviewer() {
     // The task was started with a Codex worker (a flag; or the file said so then) ...
     let f = fixture_with(

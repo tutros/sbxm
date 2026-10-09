@@ -1145,11 +1145,21 @@ fn a_changed_path_lookup_that_fails_stops_the_review_before_the_reviewer_runs() 
     let backend = backend(&f, &[CLEAN]);
     let mut prepared = worked_task(&f, &backend);
     prepared.record.base = "no-such-branch".into();
+    let record_before = std::fs::read(meta(&f).join("task.json")).unwrap();
+    let (creates, execs) = (backend.creates().len(), backend.execs().len());
 
     let err = review(&f, &backend, &mut prepared).unwrap_err();
 
     assert!(format!("{err:#}").contains("changed paths"), "{err:#}");
-    assert_eq!(count(&backend, "codex"), 0);
+    // Refused before any write, sandbox or gate (decision 176, PR #178 review round 2).
+    assert_eq!(
+        std::fs::read(meta(&f).join("task.json")).unwrap(),
+        record_before
+    );
+    assert_eq!(
+        (backend.creates().len(), backend.execs().len()),
+        (creates, execs)
+    );
     assert!(!meta(&f).join("review.md").exists());
 }
 
