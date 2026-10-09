@@ -891,6 +891,9 @@ fn a_record_without_the_result_reviews_again_under_a_new_round_and_keeps_every_e
     }
 }
 
+/// Issue 162: the number here is exhausted only by `review-<u32::MAX>.md`, the highest saved
+/// file; `record.round` and the recorded review (none here) are both far below it. Moving that
+/// file out, as the hint says, must actually let the next attempt succeed.
 #[test]
 fn a_saved_review_at_the_last_round_number_is_refused_and_every_review_is_kept() {
     let f = config();
@@ -905,12 +908,21 @@ fn a_saved_review_at_the_last_round_number_is_refused_and_every_review_is_kept()
     let message = format!("{err:#}");
     assert!(message.contains("review round"), "{message}");
     assert!(!message.contains('\n'), "{message}");
+    assert!(message.contains("move the review-"), "{message}");
     assert_eq!(count(&backend, "codex"), 0, "no reviewer ran");
     assert_eq!(
         std::fs::read_to_string(meta(&f).join("review-0.md")).unwrap(),
         "zero\n"
     );
     assert_eq!(std::fs::read_to_string(&last).unwrap(), "last\n");
+
+    // The hint's own recovery: move the file out, then retry from the untouched record on disk.
+    std::fs::rename(&last, last.with_file_name("moved-aside.md")).unwrap();
+    let mut prepared = Prepared::open(&f.env.base_dir(), "issue-41").unwrap();
+    let resumed = resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap();
+
+    assert_eq!(count(&backend, "codex"), 1, "the reviewer ran");
+    assert!(resumed.review.is_some());
 }
 
 #[test]
@@ -929,6 +941,9 @@ fn a_clean_narrow_review_at_the_last_round_number_is_refused_instead_of_wrapping
 
     let message = format!("{err:#}");
     assert!(message.contains("review round"), "{message}");
+    // Issue 162: this round is exhausted by the recorded review, not by a saved file; moving
+    // files would not free it.
+    assert!(!message.contains("move the review"), "{message}");
     assert_eq!(count(&backend, "codex"), 0, "no reviewer ran");
     assert!(!meta(&f).join("review-0.md").exists());
 }
@@ -961,6 +976,9 @@ fn a_review_with_findings_at_the_last_round_number_is_refused_before_any_fix_rou
     let message = format!("{err:#}");
     assert!(message.contains("review round"), "{message}");
     assert!(!message.contains('\n'), "{message}");
+    // Issue 162: this round is exhausted by the recorded review, not by a saved file; moving
+    // files would not free it.
+    assert!(!message.contains("move the review"), "{message}");
     assert!(backend.log().is_empty(), "{:?}", backend.log());
     assert!(
         backend.execs().is_empty(),
