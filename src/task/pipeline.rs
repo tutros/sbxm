@@ -2672,17 +2672,7 @@ fn run_review_agent(
     let earlier_open = match &prepared.record.open_findings {
         Some(open) => open.clone(),
         // A record from before the list: rebuilt from the saved reviews, never taken as empty.
-        None => {
-            let saved: Vec<(u32, String)> = (1..round)
-                .filter_map(|r| {
-                    fs::read_to_string(prepared.meta.join(format!("review-{r}.md")))
-                        .ok()
-                        .map(|text| (r, text))
-                })
-                .collect();
-            let refs: Vec<(u32, &str)> = saved.iter().map(|(r, t)| (*r, t.as_str())).collect();
-            review::open_from_saved(&refs)
-        }
+        None => review::open_from_task_dir(&prepared.meta, round.saturating_sub(1)),
     };
     let open = review::open_after(Some(&earlier_open), &text, round, full);
     Ok((must_fix, repeat, warnings, open))

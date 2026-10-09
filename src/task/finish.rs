@@ -426,15 +426,44 @@ const UNRESOLVED_CAP: usize = 5_000;
 const CUT_MARK: &str = "… (cut)\n";
 
 /// The must-fix findings task `task` left open: those recorded in `task.json` when its reviews
-/// were accepted (decision 177(f, p)), so an edited `review.md` changes nothing; for a record from
-/// before they were kept, those of the saved `review`.
-pub fn open_findings(task: &Record, review: Option<&str>) -> Vec<OpenFinding> {
-    match &task.open_findings {
-        Some(open) => open.clone(),
-        None => review
-            .map(|r| review::must_fix_findings(r, 0))
-            .unwrap_or_default(),
+/// were accepted (decision 177(f, p)), so an edited `review.md` changes nothing. A record from
+/// before they were kept rebuilds them from the `review-<round>.md` files saved in its folder
+/// `meta`, like the next review would; with none of those, they are the saved `review`'s.
+pub fn open_findings(task: &Record, meta: &Path, review: Option<&str>) -> Vec<OpenFinding> {
+    if let Some(open) = &task.open_findings {
+        return open.clone();
     }
+    let last = (1..)
+        .take_while(|r| meta.join(format!("review-{r}.md")).is_file())
+        .last()
+        .unwrap_or(0);
+    let rebuilt = review::open_from_task_dir(meta, last);
+    if !rebuilt.is_empty() {
+        return rebuilt;
+    }
+    review
+        .map(|r| review::must_fix_findings(r, 0))
+        .unwrap_or_default()
+}
+
+/// Refuses a secret-looking open finding before any of it is cut to fit a PR's text, naming the
+/// finding by its place in the list, never the value.
+fn refuse_secret_findings(open: &[OpenFinding]) -> Result<()> {
+    for (n, finding) in open.iter().enumerate() {
+        let place = finding.place.as_deref().unwrap_or_default();
+        for text in [finding.id.as_str(), finding.title.as_str(), place] {
+            if let Some(kind) = text.lines().find_map(super::findings::secret_kind) {
+                bail!(
+                    "the draft's list of open findings: finding {} of {} looks like a secret \
+                     ({kind}); remove it from the task folder's task.json or saved reviews, then \
+                     run `sbxm task finish` again",
+                    n + 1,
+                    open.len()
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// The section at the top of a draft PR's body: why it is a draft, then each must-fix finding
@@ -662,8 +691,13 @@ pub fn finish(
     }
     let unresolved = unresolved_reasons(&task, review.as_deref());
     let draft = !unresolved.is_empty();
-    let section =
-        draft.then(|| unresolved_section(&unresolved, &open_findings(&task, review.as_deref())));
+    let open = if draft {
+        open_findings(&task, &prepared.meta, review.as_deref())
+    } else {
+        Vec::new()
+    };
+    refuse_secret_findings(&open)?;
+    let section = draft.then(|| unresolved_section(&unresolved, &open));
     if let Some(section) = &section {
         // Its findings come from task.json, which no file check above covered.
         refuse_secrets("the draft's list of open findings", section)?;
@@ -889,11 +923,17 @@ fn finish_continued(
     let commits = repo::commit_lines(repo_git, &continued.base, branch)?;
     let review = read_capped(&prepared.meta.join("review.md"))?;
     let unresolved = unresolved_reasons(&task, review.as_deref());
+    let open = if unresolved.is_empty() {
+        Vec::new()
+    } else {
+        open_findings(&task, &prepared.meta, review.as_deref())
+    };
+    refuse_secret_findings(&open)?;
     let section = (!unresolved.is_empty()).then(|| {
         unresolved_text(
             "sbxm doesn't make a PR it continues a draft, but this task left:",
             &unresolved,
-            &open_findings(&task, review.as_deref()),
+            &open,
         )
     });
     let body = pr_comment(task.number, branch, &commits, section.as_deref());

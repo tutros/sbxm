@@ -718,3 +718,61 @@ fn a_secret_in_a_recorded_open_finding_stops_the_publish_without_echoing_it() {
         assert!(!origin_has(&f, "issue-41"), "{review:?}");
     }
 }
+
+#[test]
+fn a_secret_past_the_cut_of_a_long_recorded_finding_still_stops_the_publish() {
+    // PR #165 review, M-1: a finding longer than the section's cap is cut, so the check must read
+    // the recorded finding itself, not only the cut section.
+    let f = fixture();
+    let mut prepared = stopped_after_a_narrow_review(&f);
+    prepared.record.open_findings.as_mut().unwrap()[0].title = format!(
+        "{} ghp_abcdefghijklmnopqrstuvwxyz0123456789",
+        "x".repeat(4_843)
+    );
+    record::write(&prepared.meta, &prepared.record).unwrap();
+    let github = FakeGitHub::default();
+
+    let err = run(&f, &github).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("looks like a secret"), "{message}");
+    assert!(!message.contains("ghp_abc"), "{message}");
+    assert!(github.calls().is_empty());
+    assert!(!origin_has(&f, "issue-41"));
+}
+
+/// Round 1's full review: M-1 and M-2.
+const FULL_REVIEW: &str = "Reviewer: codex (default)\n\nMust-fix findings: 2\n\n## Must fix\n\n\
+    ### M-1: First problem\n\n**Where:** `src/a.rs:1`\n\n\
+    ### M-2: Second problem\n\n**Where:** `src/b.rs:9`\n";
+
+#[test]
+fn an_older_record_without_open_findings_lists_them_from_its_saved_reviews() {
+    // PR #165 review, M-2: a record from before `open_findings` rebuilds the list from its saved
+    // review rounds, so a narrow last review.md doesn't hide round 1's M-2.
+    let f = fixture();
+    let mut prepared = stopped_after_a_narrow_review(&f);
+    prepared.record.open_findings = None;
+    record::write(&prepared.meta, &prepared.record).unwrap();
+    fs::write(prepared.meta.join("review-1.md"), FULL_REVIEW).unwrap();
+    fs::write(prepared.meta.join("review-2.md"), NARROW_REVIEW).unwrap();
+    let github = FakeGitHub::default();
+
+    run(&f, &github).unwrap();
+
+    let request = only_pr_request(&github);
+    assert!(request.draft);
+    let section = request.body.split("## Result").next().unwrap();
+    assert!(
+        section.contains("- M-2 (review 1): Second problem (`src/b.rs:9`)"),
+        "{section}"
+    );
+    assert!(
+        section.contains("- M-1 (review 2): First problem remains (`src/a.rs:5`)"),
+        "{section}"
+    );
+    assert!(
+        !section.contains("First problem (`src/a.rs:1`)"),
+        "{section}"
+    );
+}

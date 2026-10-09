@@ -1,6 +1,9 @@
 //! Reading a reviewer's `review.md` (spec §5.2): its first line says how many must-fix findings
 //! there are, and a review without that line isn't used.
 
+use std::fs;
+use std::path::Path;
+
 use super::findings;
 use super::record::OpenFinding;
 
@@ -228,6 +231,20 @@ pub fn open_from_saved(saved: &[(u32, &str)]) -> Vec<OpenFinding> {
         full = must_fix == 0;
     }
     open.unwrap_or_default()
+}
+
+/// [`open_from_saved`] over the `review-<round>.md` files a task saved in its folder `meta`,
+/// rounds 1 to `last` (one that is missing is skipped).
+pub fn open_from_task_dir(meta: &Path, last: u32) -> Vec<OpenFinding> {
+    let saved: Vec<(u32, String)> = (1..=last)
+        .filter_map(|r| {
+            fs::read_to_string(meta.join(format!("review-{r}.md")))
+                .ok()
+                .map(|text| (r, text))
+        })
+        .collect();
+    let refs: Vec<(u32, &str)> = saved.iter().map(|(r, t)| (*r, t.as_str())).collect();
+    open_from_saved(&refs)
 }
 
 /// The must-fix findings open once review round `round` (`current`, the reviewer's text) is

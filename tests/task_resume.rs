@@ -1268,7 +1268,8 @@ fn an_older_record_without_open_findings_keeps_what_its_saved_reviews_left_open(
         .map(|o| (o.round, o.id))
         .collect();
     assert_eq!(open, [(1, "M-2".to_owned()), (3, "M-1".to_owned())]);
-    let section = finish::unresolved_section(&[], &finish::open_findings(&record, None));
+    let section =
+        finish::unresolved_section(&[], &finish::open_findings(&record, &prepared.meta, None));
     assert!(
         section.contains("M-2 (review 1): b.txt is wrong too"),
         "{section}"
