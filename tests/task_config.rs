@@ -463,6 +463,24 @@ fn risk_entries_add_to_the_built_in_rules_by_default() {
     assert_eq!(medium, Level::Medium);
 }
 
+/// Review finding M-2 (issue 123): a path matching both a configured medium and a configured
+/// high pattern must floor to high, and show a reason that says so, not a reason left over from
+/// the medium match.
+#[test]
+fn overlapping_medium_and_high_risk_patterns_keep_the_high_reason() {
+    use sbxm::task::risk::{Level, floor};
+
+    let dir = repo(
+        &format!("{MINIMAL}\n[risk]\nmedium = [\"src/\"]\nhigh = [\"src/git.rs\"]\n"),
+        true,
+    );
+    let config = TaskConfig::load(dir.path()).unwrap();
+    let (level, reasons) = floor(&["src/git.rs".to_owned()], &config.risk);
+    assert_eq!(level, Level::High);
+    assert_eq!(reasons.len(), 1, "{reasons:?}");
+    assert!(reasons[0].contains("at least high"), "{reasons:?}");
+}
+
 #[test]
 fn risk_replace_drops_the_built_in_rules() {
     use sbxm::task::risk::{Level, floor};

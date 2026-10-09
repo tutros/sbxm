@@ -105,13 +105,16 @@ pub fn built_in_rules() -> Vec<PathRule> {
     rules
 }
 
-/// The highest level any of `rules` floors `paths` to, and one reason per matching rule
-/// (deduplicated by category: several files matching the same category get one reason naming
-/// the first). `Level::Unknown` (no rule matched anything) carries no reasons.
+/// The highest level any of `rules` floors `paths` to, and one reason per matching category
+/// (several files, or several rules, matching the same category still give one reason: the
+/// highest level that category reached and a path that matched it, so the reason never
+/// understates what the level ended up being). `Level::Unknown` (no rule matched anything)
+/// carries no reasons.
 pub fn floor(paths: &[String], rules: &[PathRule]) -> (Level, Vec<String>) {
     let mut level = Level::Unknown;
-    let mut reasons = Vec::new();
-    let mut seen_categories = Vec::new();
+    // One (category, level, reason) entry per category, in first-seen order; a later match in
+    // the same category only replaces the reason when its level is higher than what's recorded.
+    let mut by_category: Vec<(String, Level, String)> = Vec::new();
     for path in paths {
         let lower = path.to_lowercase();
         for rule in rules {
@@ -119,16 +122,24 @@ pub fn floor(paths: &[String], rules: &[PathRule]) -> (Level, Vec<String>) {
                 continue;
             }
             level = level.max(rule.level);
-            if !seen_categories.contains(&rule.category) {
-                seen_categories.push(rule.category.clone());
-                reasons.push(format!(
-                    "`{path}` is {} (at least {})",
-                    rule.category,
-                    rule.level.word()
-                ));
+            let reason = format!(
+                "`{path}` is {} (at least {})",
+                rule.category,
+                rule.level.word()
+            );
+            match by_category.iter_mut().find(|(c, ..)| c == &rule.category) {
+                Some(entry) if entry.1 < rule.level => {
+                    *entry = (rule.category.clone(), rule.level, reason)
+                }
+                Some(_) => {}
+                None => by_category.push((rule.category.clone(), rule.level, reason)),
             }
         }
     }
+    let reasons = by_category
+        .into_iter()
+        .map(|(_, _, reason)| reason)
+        .collect();
     (level, reasons)
 }
 
