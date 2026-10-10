@@ -277,3 +277,36 @@ fn the_gate_failure_hint_quotes_a_spec_path_with_spaces() {
     let want = format!("sbxm task review --spec \"{}\"", spec.display());
     assert!(message.contains(&want), "{message}");
 }
+
+/// Issue 140, decision 180: a post-worker gate failure names the review as the next step (it
+/// reruns the gates and gives a failure to a fix round), not a hand fix in the worker's clone.
+#[test]
+fn a_gate_failure_names_the_review_as_the_next_step() {
+    let f = fixture();
+    let spec = spec_file(&f, "Build a thing.\n");
+    let (id, _) = record::spec_id(&spec).unwrap();
+    let backend = playing(&f, &id).with_exec_output_matching(
+        "cargo test",
+        sbxm::backend::ExecOutput {
+            stdout: String::new(),
+            stderr: "assertion failed".into(),
+            exit_code: Some(1),
+        },
+    );
+
+    let out = run(
+        &f,
+        &options(&f, spec.clone()),
+        &backend,
+        &FakeGitHub::default(),
+    );
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(
+        message.contains("gates failed: `cargo test` (sandbox, exit 1)"),
+        "{message}"
+    );
+    let want = format!("next: sbxm task review --spec {}", spec.display());
+    assert!(message.contains(&want), "{message}");
+    assert!(!message.contains("worker's clone"), "{message}");
+}

@@ -202,16 +202,14 @@ fn failing_gates_fail_the_command_and_say_where_to_look() {
         out.out
     );
     assert!(out.out.contains("gates.log"), "{}", out.out);
+    // Issue 140, decision 180: the review reruns the gates and feeds a failure to a fix round.
     assert!(
-        out.out.contains("sbxm task gates --issue 41"),
+        out.out.contains("next: sbxm task review --issue 41"),
         "{}",
         out.out
     );
-    assert!(
-        !out.out.contains("sbxm task review --issue 41"),
-        "{}",
-        out.out
-    );
+    assert!(!out.out.contains("worker's clone"), "{}", out.out);
+    assert!(!out.out.contains("sbxm task gates"), "{}", out.out);
 }
 
 #[test]

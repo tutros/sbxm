@@ -397,11 +397,8 @@ pub fn run_with(
                     writeln!(out, "  see: sbxm task status --issue {}", report.number)?;
                 } else if !gates_ok {
                     failed += 1;
-                    writeln!(
-                        out,
-                        "  next: fix it in the worker's clone and commit, then run: sbxm task gates --issue {}",
-                        report.number
-                    )?;
+                    // The review reruns the gates and gives a failure to a fix round (decision 180).
+                    writeln!(out, "  next: sbxm task review --issue {}", report.number)?;
                 } else {
                     writeln!(out, "  next: sbxm task review --issue {}", report.number)?;
                 }
@@ -552,8 +549,8 @@ pub fn run_spec(
             .exit
             .map_or_else(|| "no exit code".to_owned(), |c| format!("exit {c}"));
         bail!(
-            "{id}: gates failed: `{}` ({}, {exit}); fix it in the worker's clone and commit, \
-             then run: sbxm task review {}",
+            "{id}: gates failed: `{}` ({}, {exit}); next: sbxm task review {} (it reruns the \
+             gates and gives a failure to a fix round)",
             first.command,
             first.tier,
             spec_flag(&opts.spec)
