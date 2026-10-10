@@ -217,6 +217,13 @@ impl std::fmt::Display for GatesFailed {
 
 impl std::error::Error for GatesFailed {}
 
+/// Whether a task failed only because its gates ran and failed, the one failure [`GatesFailed`]
+/// stands for. `gates` is the gate run after the worker, if there was one: whether it passed, or
+/// `None` when it could not run at all, which is not a gate failure and stops `task run`.
+fn only_gates_failed(worker_failed: bool, gates: Option<Option<bool>>) -> bool {
+    !worker_failed && gates == Some(Some(false))
+}
+
 fn plural(n: u32, word: &str) -> String {
     format!("{n} {word}{}", if n == 1 { "" } else { "s" })
 }
@@ -365,6 +372,10 @@ pub fn run_with(
                 }
                 // `gates_ok`: the gates passed (or none were configured); a failed worker has none.
                 let mut gates_ok = !bad;
+                let gates = report.gates.as_ref();
+                if only_gates_failed(bad, gates.map(|g| g.as_ref().map(|g| g.passed).ok())) {
+                    gates_failed += 1;
+                }
                 match &report.gates {
                     Some(Ok(gated)) if gated.passed => {
                         let count = |tier: &str| {
@@ -387,9 +398,6 @@ pub fn run_with(
                     }
                     Some(Ok(gated)) => {
                         gates_ok = false;
-                        if !bad {
-                            gates_failed += 1;
-                        }
                         if let Some(first) = &gated.failed {
                             let exit = first
                                 .exit
@@ -581,8 +589,19 @@ pub fn run_spec(
 
 #[cfg(test)]
 mod tests {
-    use super::path_arg;
+    use super::{only_gates_failed, path_arg};
     use std::path::Path;
+
+    /// Review of PR 184, M-1 (decision 180): `task run` goes on to the review only after gates
+    /// that ran and failed, never after gates that could not run or a failed worker.
+    #[test]
+    fn only_gates_that_ran_and_failed_after_a_working_worker_count_as_a_gate_failure() {
+        assert!(only_gates_failed(false, Some(Some(false))));
+        assert!(!only_gates_failed(false, Some(None)), "could not run");
+        assert!(!only_gates_failed(false, Some(Some(true))), "passed");
+        assert!(!only_gates_failed(false, None), "no gate run");
+        assert!(!only_gates_failed(true, Some(Some(false))), "worker failed");
+    }
 
     /// What the platform's shell makes of `arg` as one argument: PowerShell on Windows (the
     /// primary platform), `sh` elsewhere.
