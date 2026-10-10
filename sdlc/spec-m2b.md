@@ -151,7 +151,7 @@ checkout (a GitHub URL is required; anything else is an error). `--base` default
 | `task file-findings (--issue N \| --pr N \| --file F) [--create]` | Files a review's findings as issues [134][149]; a dry run unless `--create` | file malformed; secret in a finding |
 | `task finish --issue N` | Pushes `issue-N` from `repo.git`, opens the PR (base = task base) with `Fixes #N`, `result.md` and `review.md` in the body; for a task that continues PR m, pushes to PR m's branch (fast-forward only) and comments on PR m instead of opening a PR (decision 169) | not `ready`; PR exists; a continued PR's branch moved or is gone |
 | `task rm (--issue N \| --pr N) [--yes]` | Removes sandboxes, clones and the task folder; asks first, showing the exact paths | task running |
-| `task run --issue N` | `start` then `review`; stops before `finish` [158] | those of both |
+| `task run --issue N` | `start` then `review`, also after gates that fail right after the worker (5.1 step 5); stops before `finish` [158] | those of both |
 
 Flags are per phase (amended 2026-10-02 after the PR 57 review, Q-1: a flag a command would accept and not use is
 worse than a missing one, and the worker of a task under review comes from its record, not from a flag):
@@ -183,8 +183,11 @@ Output: human text by default; `status --json` prints the records. Exit codes: 0
    `origin/<base>`, or for a task that continues a PR to the commit its branch started at, decision 169) into the
    workspace; the host verifies and fetches it into `repo.git` [159]; `result.md` and the transcript are copied to the
    task folder. Uncommitted changes in the clone are reported as a note (the agent may have ended early, #16).
-5. **Gate:** stage `gating`; run the tiers (section 7). On failure: status `gates-failed`, stop (the sandbox stays for
-   inspection until `rm`).
+5. **Gate:** stage `gating`; run the tiers (section 7). On failure: status `gates-failed`, stop with a failing exit
+   (the sandbox stays for inspection until `rm`); the next step printed is still `task review --issue N` (or
+   `--spec FILE`), which reruns the gates and gives a failure to a fix round (5.2, `gate-failure.md`). `start` itself
+   runs no fix round. `task run` goes on to the review after this failure, and stops only on any other failure
+   (decision 180).
 6. Print the next step (`task review --issue N`). `start` itself never reviews.
 
 ### 5.2 `task review --issue N` and `--pr N`
