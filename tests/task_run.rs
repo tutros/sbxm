@@ -50,6 +50,14 @@ fn backend(f: &Fixture, reviews: &[&str]) -> FakeBackend {
         })
 }
 
+fn count(backend: &FakeBackend, needle: &str) -> usize {
+    backend
+        .execs()
+        .iter()
+        .filter(|(_, spec)| spec.argv.iter().any(|a| a.contains(needle)))
+        .count()
+}
+
 fn github() -> FakeGitHub {
     FakeGitHub::default()
         .with_default_branch("main")
@@ -222,14 +230,27 @@ fn failing_gates_after_the_worker_go_on_to_the_review_and_its_fix_round() {
 #[test]
 fn a_failed_worker_stops_before_any_reviewer_and_fails_the_command() {
     let f = config();
-    let b = backend(&f, &[CLEAN]).with_failing_create_for("sbxm-task-issue-41-claude");
+    let b = FakeBackend::with_secrets(&["anthropic", "openai"])
+        .with_exec_output_matching(
+            "claude",
+            sbxm::backend::ExecOutput {
+                stdout: String::new(),
+                stderr: "boom".into(),
+                exit_code: Some(1),
+            },
+        )
+        .with_exec_output_matching("codex", ok(CODEX_DONE));
 
     let out = go(&f, &options(&f), None, &b, &github());
 
-    assert!(out.result.is_err());
-    assert!(out.out.contains("issue-41: failed"), "{}", out.out);
+    // The error is the start step's own: the review, which would refuse this task too, is not asked.
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("1 of 1 task(s) failed"), "{message}");
+    assert_eq!(count(&b, "claude"), 1, "the worker ran");
+    assert!(out.out.contains("issue-41: worker failed"), "{}", out.out);
     assert!(!out.out.contains("review round"), "{}", out.out);
     assert_eq!(b.creates().len(), 1, "no reviewer sandbox");
+    assert_eq!(count(&b, "codex"), 0, "no reviewer");
 }
 
 #[test]
