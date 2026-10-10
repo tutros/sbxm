@@ -10,10 +10,13 @@ use common::task_fixture::{
     CLAUDE_DONE, Fixture, Play, Probe, backend, fixture, ok, play, worked_task,
 };
 use sbxm::github::fake::{FakeGitHub, GhCall};
-use sbxm::task::finish::{SECTION_CAP, check_can_finish, finish, pr_body, unresolved_section};
+use sbxm::task::finish::{
+    SECTION_CAP, check_can_finish, finish, pr_body, risk_section, unresolved_section,
+};
 use sbxm::task::pipeline::Prepared;
 use sbxm::task::record::{self, Kind, NewTask, Process, Record, Stage, Status};
 use sbxm::task::review::must_fix_findings;
+use sbxm::task::risk::Level;
 
 /// As `review::with_header` saves it: the reviewer's line, a blank line, then the review.
 const REVIEW: &str = "Reviewer: codex (default)\n\nMust-fix findings: 0\n\nNothing found.\n";
@@ -459,6 +462,31 @@ fn a_huge_risk_section_is_cut_to_what_github_accepts() {
     assert!(body.chars().count() < 65_536, "{}", body.chars().count());
     assert!(body.contains("cut"), "{body}");
     assert_eq!(cuts.len(), 1, "{cuts:?}");
+}
+
+/// PR #178 review round 3, M-1: the draft's own reason came after the reviewer's, so a long
+/// reviewer reason pushed it past the cap and out of the risk section.
+#[test]
+fn a_drafts_reason_survives_the_cap_of_a_long_risk_section() {
+    let f = fixture();
+    let mut task = ready(&f).record;
+    task.review = Some(record::ReviewResult {
+        round: 1,
+        must_fix: 2,
+        full: true,
+        repeat: false,
+        risk: Level::High,
+        risk_reasons: vec!["x".repeat(4_000)],
+    });
+    let section = risk_section(&task, &["2 must-fix finding(s) left".to_owned()]);
+
+    let (body, _) = pr_body(41, &section, None, None, None);
+
+    let risk_end = body.find("Fixes #41\n").expect(&body);
+    assert!(
+        body[..risk_end].contains("2 must-fix finding(s) left"),
+        "{body}"
+    );
 }
 
 #[test]

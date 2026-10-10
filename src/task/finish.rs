@@ -351,13 +351,14 @@ pub fn discard_many(
 /// The risk section at the very top of a PR description (decision 176(b, e)): the level the
 /// review recorded (`Level::Unknown` for a record from before this existed) and its reasons, plus
 /// a draft's own reasons (decision 176's "shows its must-fix reason in the same section"), so a
-/// draft from a must-fix finding left shows why there, not only under `## Unresolved`.
+/// draft from a must-fix finding left shows why there, not only under `## Unresolved`. The draft's
+/// reasons come first, so cutting a long reviewer reason to `risk::RISK_CAP` never drops them.
 pub fn risk_section(task: &Record, unresolved: &[String]) -> String {
-    let (level, mut reasons) = match &task.review {
-        Some(result) => (result.risk, result.risk_reasons.clone()),
-        None => (risk::Level::default(), Vec::new()),
+    let (level, reviewer_reasons) = match &task.review {
+        Some(result) => (result.risk, result.risk_reasons.as_slice()),
+        None => (risk::Level::default(), [].as_slice()),
     };
-    reasons.extend(unresolved.iter().cloned());
+    let reasons: Vec<String> = unresolved.iter().chain(reviewer_reasons).cloned().collect();
     risk::render_section(level, &reasons)
 }
 
