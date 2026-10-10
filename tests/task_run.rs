@@ -159,35 +159,77 @@ fn findings_left_after_the_fix_round_are_reported_and_it_still_succeeds() {
     assert_eq!(stage(&f), (Stage::Ready, Status::Ok));
 }
 
+/// Issue 140, decision 180(b): a post-worker gate failure doesn't stop `run`; the review reruns
+/// the gates and gives the failure to a fix round.
 #[test]
-fn failing_gates_after_the_worker_stop_before_any_reviewer_and_fail_the_command() {
+fn failing_gates_after_the_worker_go_on_to_the_review_and_its_fix_round() {
     let f = config();
-    let red = FakeBackend::with_secrets(&["anthropic", "openai"])
-        .with_exec_output_matching("claude", ok(CLAUDE_DONE))
-        .with_exec_hook(play_tasks(
-            &f.env.base_dir(),
-            "main",
-            Play {
-                commits: vec!["a.txt".into()],
-                result_md: Some(b"done\n".to_vec()),
-                bundle_bytes: None,
-            },
-        ))
-        .with_exec_output_matching(
-            "cargo test",
+    // `cargo test` fails until a fix round has run, then passes.
+    let fixed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let b = backend(&f, &[CLEAN]).with_exec_responder(move |_, spec| {
+        let mentions = |needle: &str| spec.argv.iter().any(|a| a.contains(needle));
+        if mentions("fix-prompt.md") {
+            fixed.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        (mentions("cargo test") && !fixed.load(std::sync::atomic::Ordering::SeqCst)).then(|| {
             ExecOutput {
                 stdout: String::new(),
-                stderr: "red\n".into(),
+                stderr: "undefined reference to `oops`\n".into(),
                 exit_code: Some(101),
-            },
-        );
+            }
+        })
+    });
 
-    let out = go(&f, &options(&f), None, &red, &github());
+    let out = go(&f, &options(&f), None, &b, &github());
+
+    out.result.unwrap();
+    let text = &out.out;
+    // The start step's own report stays, without its `next:` line.
+    let failed = text
+        .find("gates: failed: `cargo test` (sandbox, exit 101)")
+        .expect(text);
+    assert!(text.contains("gates.log"), "{text}");
+    assert!(!text.contains("next: sbxm task review"), "{text}");
+    // The gate failure spent round 1 on a fix round; the reviewer ran in round 2.
+    let review = text.find("issue-41: review round 2").expect(text);
+    assert!(failed < review, "{text}");
+    assert!(text.contains("the fix round ran 1 time(s)"), "{text}");
+    assert!(text.contains("next: sbxm task finish --issue 41"), "{text}");
+    assert_eq!(stage(&f), (Stage::Ready, Status::Ok));
+    // The gates ran after the worker, again in the review, and once more after the fix round.
+    let gate_runs = b
+        .execs()
+        .iter()
+        .filter(|(_, spec)| spec.argv.iter().any(|a| a.contains("cargo test")))
+        .count();
+    assert_eq!(gate_runs, 3, "{text}");
+    // The fix round got the gate's own output.
+    let meta = record::task_dir(&f.env.base_dir(), "issue-41");
+    let fix_prompt = std::fs::read_to_string(meta.join("fix-prompt.md")).unwrap();
+    assert!(fix_prompt.contains("gate-failure.md"), "{fix_prompt}");
+    let gate_output = std::fs::read_to_string(
+        f.env
+            .base_dir()
+            .join("tasks")
+            .join("issue-41")
+            .join(".sbxm-task")
+            .join("gate-failure.md"),
+    )
+    .unwrap();
+    assert!(gate_output.contains("oops"), "{gate_output}");
+}
+
+#[test]
+fn a_failed_worker_stops_before_any_reviewer_and_fails_the_command() {
+    let f = config();
+    let b = backend(&f, &[CLEAN]).with_failing_create_for("sbxm-task-issue-41-claude");
+
+    let out = go(&f, &options(&f), None, &b, &github());
 
     assert!(out.result.is_err());
-    assert!(out.out.contains("gates: failed"), "{}", out.out);
+    assert!(out.out.contains("issue-41: failed"), "{}", out.out);
     assert!(!out.out.contains("review round"), "{}", out.out);
-    assert_eq!(red.creates().len(), 1, "no reviewer sandbox");
+    assert_eq!(b.creates().len(), 1, "no reviewer sandbox");
 }
 
 #[test]

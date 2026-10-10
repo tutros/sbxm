@@ -1,5 +1,6 @@
 //! `sbxm task run --issue N` (spec §4, decision 158): `start` then `review` for one issue, and
-//! then it stops; `finish` publishes, so it stays a deliberate command of its own.
+//! then it stops; `finish` publishes, so it stays a deliberate command of its own. Gates that
+//! fail after the worker don't stop it: the review reruns them (decision 180).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -153,7 +154,13 @@ pub fn run(
         &mut warn,
     );
     out.write_all(without_next(&started).as_bytes())?;
-    result?;
+    // Gates that failed after the worker go on to the review, which reruns them and gives a
+    // failure to a fix round (decision 180); every other failure stops here.
+    if let Err(e) = result
+        && !e.is::<task_start::GatesFailed>()
+    {
+        return Err(e);
+    }
 
     task_review::run(
         config_dir,

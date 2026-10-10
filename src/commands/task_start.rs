@@ -203,6 +203,20 @@ pub(crate) fn resolve_repo(repo: Option<&str>, repo_root: &std::path::Path) -> R
     }
 }
 
+/// The error [`run_with`] returns when every failed task got through its worker and only its gates
+/// failed: `task run` goes on to the review then, which reruns them and gives a failure to a fix
+/// round (decision 180).
+#[derive(Debug)]
+pub struct GatesFailed(String);
+
+impl std::fmt::Display for GatesFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for GatesFailed {}
+
 fn plural(n: u32, word: &str) -> String {
     format!("{n} {word}{}", if n == 1 { "" } else { "s" })
 }
@@ -328,7 +342,7 @@ pub fn run_with(
     let reports = pipeline::start(&ctx, &selection.picks);
     let base_dir = GlobalConfig::load(config_dir)?.base_dir;
 
-    let mut failed = 0;
+    let (mut failed, mut gates_failed) = (0, 0);
     for report in &reports {
         let id = format!("issue-{}", report.number);
         for warning in &report.warnings {
@@ -373,6 +387,9 @@ pub fn run_with(
                     }
                     Some(Ok(gated)) => {
                         gates_ok = false;
+                        if !bad {
+                            gates_failed += 1;
+                        }
                         if let Some(first) = &gated.failed {
                             let exit = first
                                 .exit
@@ -410,7 +427,11 @@ pub fn run_with(
         }
     }
     if failed > 0 {
-        bail!("{failed} of {} task(s) failed; see above", reports.len());
+        let message = format!("{failed} of {} task(s) failed; see above", reports.len());
+        if failed == gates_failed {
+            return Err(GatesFailed(message).into());
+        }
+        bail!(message);
     }
     Ok(())
 }
