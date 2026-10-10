@@ -31,6 +31,12 @@ pub struct GateOutcome {
     /// The end of the command's output, for `gates.log`.
     pub output_tail: String,
     pub timed_out: bool,
+    /// The command never ran at all (the sandbox `exec` call failed, the host command couldn't be
+    /// started, or the clean checkout it needed couldn't be made): never inferred from `passed`,
+    /// `exit` or the output text, so a timeout and an exit the shell did report (including exit
+    /// 127, command not found) are never marked this way (issue 186). In memory only: `task.json`
+    /// still records this the same as any other failed gate.
+    pub could_not_run: bool,
 }
 
 /// Runs `commands` in `sandbox` under `workdir`, as `sh -c` inside the in-sandbox timeout (the
@@ -52,6 +58,7 @@ pub fn run_sandbox_tier(
             timeout: Some(timeout),
         };
         let verdict = run_checks(backend, sandbox, workdir, &[check], timeout).remove(0);
+        let could_not_run = verdict.error.is_some();
         let output_tail = match &verdict.error {
             Some(error) => format!("could not run the command: {error}"),
             None => verdict.output_tail.clone(),
@@ -67,6 +74,7 @@ pub fn run_sandbox_tier(
             },
             output_tail,
             timed_out: verdict.timed_out,
+            could_not_run,
         });
         if !passed {
             break;
@@ -103,20 +111,23 @@ pub fn run_host_tier(
 ) -> Vec<GateOutcome> {
     let mut outcomes = Vec::new();
     for command in commands {
-        let (exit, passed, timed_out, output_tail) = match runner.run(cwd, command, timeout) {
-            Ok(out) => (
-                out.exit_code,
-                out.exit_code == Some(0) && !out.timed_out,
-                out.timed_out,
-                tail(&format!("{}{}", out.stdout, out.stderr), OUTPUT_TAIL_BYTES),
-            ),
-            Err(e) => (
-                None,
-                false,
-                false,
-                format!("could not run the command: {e:#}"),
-            ),
-        };
+        let (exit, passed, timed_out, output_tail, could_not_run) =
+            match runner.run(cwd, command, timeout) {
+                Ok(out) => (
+                    out.exit_code,
+                    out.exit_code == Some(0) && !out.timed_out,
+                    out.timed_out,
+                    tail(&format!("{}{}", out.stdout, out.stderr), OUTPUT_TAIL_BYTES),
+                    false,
+                ),
+                Err(e) => (
+                    None,
+                    false,
+                    false,
+                    format!("could not run the command: {e:#}"),
+                    true,
+                ),
+            };
         outcomes.push(GateOutcome {
             result: GateResult {
                 phase: phase.to_owned(),
@@ -127,6 +138,7 @@ pub fn run_host_tier(
             },
             output_tail,
             timed_out,
+            could_not_run,
         });
         if !passed {
             break;
