@@ -218,10 +218,11 @@ Output: human text by default; `status --json` prints the records. Exit codes: 0
 
 - The agent's clone is never a cwd or `--git-dir` of a host git command. All host git runs against `repo.git`,
   `<base>/.sbxm/...` temp folders, or the clean checkouts that come from it.
-- Bundle step: `git -C <ws> bundle create <ws>/.sbxm-task/branch.bundle issue-N ^origin/<base>` runs **in the
-  sandbox** (an `exec` with a fixed argv). For a task that continues a PR (decision 169) the branch is the PR's and
-  the exclusion is `^<continues.base>`, the commit that branch was at when the task started. The host then runs `git bundle verify` and
-  `git fetch <bundle> refs/heads/issue-N:refs/heads/issue-N` inside `repo.git`, with hooks disabled
+- Bundle step: `git -C <ws> bundle create <ws>/.sbxm-task/branch.bundle <task-branch> ^origin/<base>` runs **in the
+  sandbox** (an `exec` with a fixed argv). `<task-branch>` is `task.json`'s `branch`: `issue-N` for a normal task;
+  for a task that continues a PR (decision 169) it is `continues.branch`, the PR's own branch, and the exclusion is
+  `^<continues.base>`, the commit that branch was at when the task started. The host then runs `git bundle verify`
+  and `git fetch <bundle> refs/heads/<task-branch>:refs/heads/<task-branch>` inside `repo.git`, with hooks disabled
   (`-c core.hooksPath=<empty dir>`), no recursive submodules, and a size cap (config constant, default 500 MB).
 - Network operations on `repo.git` (clone from GitHub, fetch a PR head, push) use the user's git configuration and
   credentials, because `repo.git` is host-owned. A new runner in `git.rs` does this; the hardened runner stays for
