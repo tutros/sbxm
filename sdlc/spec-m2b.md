@@ -190,8 +190,8 @@ Output: human text by default; `status --json` prints the records. Exit codes: 0
 ### 5.2 `task review --issue N` and `--pr N`
 
 - **Issue:** requires a worker that has finished (not running, not interrupted). Gates run first (5.1 step 5) if
-  they haven't passed since the last change. Then the reviewer: a clone of `repo.git` at `issue-N` into
-  `tasks/<id>-review/`, its own sandbox, prompt with the issue text, `time_limit`, `review.md` written by the
+  they haven't passed since the last change. Then the reviewer: a clone of `repo.git` at the task branch
+  (`task.json`'s `branch`: `issue-N`, or PR m's branch for a continued task, decision 169) into `tasks/<id>-review/`, its own sandbox, prompt with the issue text, `time_limit`, `review.md` written by the
   reviewer; `Reviewer: <harness> (<model>)` and `Must-fix findings: <n>` lines parsed from it. If `n > 0` and no fix
   round was used: one fix round (the worker's sandbox, fix prompt with `review.md`), collect (5.1 step 4), gates, and
   one more review (`review-2.md`). Final stage `ready`. Reviewer sandbox and clone are removed afterwards, also on
@@ -238,14 +238,14 @@ Output: human text by default; `status --json` prints the records. Exit codes: 0
   `[gates] timeout`; sandbox gates reuse the in-sandbox timeout wrapper (`timeout -v --kill-after=...` and the
   `-v` marker for timeouts, decision 123).
 - Order: sandbox tier in the worker's sandbox on its workspace (after the agent exits, so a stuck agent can't race
-  it); then, if `host` is non-empty, a clean checkout of `issue-N` from `repo.git` into `tasks/<id>-gates/` and
+  it); then, if `host` is non-empty, a clean checkout of the task branch from `repo.git` into `tasks/<id>-gates/` and
   the host commands there through `HostRunner`. The first failing command stops the phase.
 - Results go to `task.json` (`gates[]`) and `gates.log`; a failure is `gates-failed` [152].
 - A host command that outlives its timeout is killed together with what it started: its process tree on Windows,
   its process group on Unix (the shell leads a group of its own). What the command wrote before the timeout stays in
   `gates.log` even if a process that escaped the group still holds the pipe.
 - **A run of one tier is partial.** `task.json` also records which tiers the latest passing run covered and the
-  commit of `issue-N` in `repo.git` they ran against (`gate_run`). Review skips its own gate run only when the
+  commit of the task branch in `repo.git` they ran against (`gate_run`). Review skips its own gate run only when the
   record covers the sandbox tier and, if `host` is non-empty, the host tier, on the branch's current commit; otherwise
   it runs all tiers first. `--tier host` is refused unless the sandbox tier passed on that same commit (so host
   gates never run agent code the sandbox tier hasn't cleared). Before on-demand gates run, the commits in the worker's
