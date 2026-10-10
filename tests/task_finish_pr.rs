@@ -364,6 +364,10 @@ fn a_pr_branch_moved_between_the_check_and_the_push_is_refused_and_left_alone() 
 /// Gives the tip commit of `feature-x` in the task's repo the message `message`.
 fn reword_tip(prepared: &Prepared, message: &str) -> String {
     let repo_git = prepared.meta.join("repo.git");
+    // The message goes to git in a file, not as an argument: Windows refuses to start a process
+    // whose command line is longer than 32,767 characters (issue #185).
+    let message_file = tempfile::NamedTempFile::new().unwrap();
+    fs::write(message_file.path(), message).unwrap();
     let tip = git(
         &repo_git,
         &[
@@ -371,8 +375,8 @@ fn reword_tip(prepared: &Prepared, message: &str) -> String {
             "refs/heads/feature-x^{tree}",
             "-p",
             "refs/heads/feature-x~1",
-            "-m",
-            message,
+            "-F",
+            message_file.path().to_str().unwrap(),
         ],
     );
     git(&repo_git, &["update-ref", "refs/heads/feature-x", &tip]);
