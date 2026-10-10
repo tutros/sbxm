@@ -70,7 +70,8 @@ sbxm task run --issue 63               # start and review in one go; stops befor
     `task start --restart`.
   - `task review --pr` has no fix round (a PR task's `fix_rounds` is always 0): the author fixes the findings and
     reviews again after `task rm --pr N`.
-  - `[worker] fix_rounds` (default 3) bounds the review-fix-review loop; a gate failure spends a round too. Rounds
+  - `[worker] fix_rounds` (default 3) bounds the review-fix-review loop; a gate that ran and failed spends a round too
+    (one that could not run at all stops the task without spending any). Rounds
     after the first review only the commits made since the last one, and one more review of everything confirms a
     clean one before the task is `ready`. If the budget runs out with findings still open, the task is still
     `ready`, with `stopped` set to `rounds-exhausted` in `task.json`, and `task finish` opens its PR as a draft whose
