@@ -9,7 +9,7 @@ This file is the one place for the project's goals and current state; `AGENTS.md
 
 Plus the lifecycle commands (`new`, `open`, `list`, `stop`, `rm`, `config`, `doctor`). What sbxm is and the constraints it follows: `AGENTS.md`, "What `sbxm` is" and "Architectural constraints".
 
-## State (as of 2026-10-09)
+## State (as of 2026-10-10)
 
 - Merged: milestones 1, 2a (`sbxm run`) and 2b (`sbxm task`); decision 169 (continue work on an open PR: #102, #103, #122); `run.log` for task commands (#127, decision 170 part 1); the state machine's table and its guards (#115, PR #133), `task states` (#116, PR #136), the `fix_rounds` loop (#117, PR #137), the `Repeat of:` marker and the no-progress stop (#119, PR #145; its run was the multi-round checkpoint); the spec task source (#121, split into #146-#149: PRs #150, #151, #155, #156), so `task start --spec` and `task review --spec` work; the `local` sink (#143, PR #157, decision 178): `task finish --spec` keeps the branch in the task's `repo.git` and `task rm --spec` protects an unfetched result; the `push` sink (#144, PR #160) pushes it to `origin` as a new branch, no PR; reviewers judge the change only, with an "Outside this change" section (#152 part 1, PR #154).
 - Both seen in a real run (issue 120, 2026-10-08): a gate failure feeding a fix round, and `stopped = rounds-exhausted` followed by `task resume --rounds 1`.
