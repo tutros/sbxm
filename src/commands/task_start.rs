@@ -219,7 +219,9 @@ impl std::error::Error for GatesFailed {}
 
 /// Whether a task failed only because its gates ran and failed, the one failure [`GatesFailed`]
 /// stands for. `gates` is the gate run after the worker, if there was one: whether it passed, or
-/// `None` when it could not run at all, which is not a gate failure and stops `task run`.
+/// `None` when the gate run itself returned an error, which is not a gate failure and stops
+/// `task run`. A gate command that could not be executed is a failed gate here, like one that ran
+/// and failed (`gates.rs` records both the same way; issue 186).
 fn only_gates_failed(worker_failed: bool, gates: Option<Option<bool>>) -> bool {
     !worker_failed && gates == Some(Some(false))
 }
