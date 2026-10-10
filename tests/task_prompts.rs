@@ -459,6 +459,22 @@ fn an_override_that_cannot_be_read_is_an_error_naming_it() {
     assert!(message.contains("missing.md"), "{message}");
 }
 
+/// Issue 123 (decision 176(e)): every reviewer role is asked for a risk assessment in the same
+/// shape `review.rs` parses (`Risk: low|medium|high`, then a `## Risk` section of bullets).
+#[test]
+fn every_reviewer_prompt_asks_for_a_risk_assessment() {
+    for role in [Role::Reviewer, Role::ReviewerPr, Role::ReviewerSpec] {
+        let text = prompts::template(role, &Prompts::default()).unwrap().text;
+
+        for needle in [
+            "\"Risk: low\", \"Risk: medium\" or \"Risk: high\"",
+            "## Risk",
+        ] {
+            assert!(text.contains(needle), "{role:?} prompt lacks {needle}");
+        }
+    }
+}
+
 #[test]
 fn both_reviewer_prompts_ask_for_the_shape_file_findings_reads() {
     for role in [Role::Reviewer, Role::ReviewerPr] {

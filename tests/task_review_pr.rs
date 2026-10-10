@@ -410,15 +410,36 @@ fn a_task_that_is_already_reviewed_is_refused() {
 fn the_comment_names_the_pr_and_keeps_the_review() {
     let text = review::pr_comment(
         7,
+        "",
         "Reviewer: codex (m)\n\nMust-fix findings: 0\n\nAll good.\n",
     );
     assert!(text.starts_with("sbxm review of PR #7"), "{text}");
     assert!(text.contains("All good."), "{text}");
 }
 
+/// Issue 123, decision 176(b): the risk section comes first, ahead of the review itself.
+#[test]
+fn the_risk_section_opens_the_comment() {
+    let text = review::pr_comment(
+        7,
+        "## Risk: \u{1f7e1} medium\n\n- a behavior change in one area\n",
+        "Reviewer: codex (m)\n\nMust-fix findings: 0\n\nAll good.\n",
+    );
+    assert!(text.starts_with("## Risk: \u{1f7e1} medium\n"), "{text}");
+    let risk_end = text.find("sbxm review of PR #7").expect(&text);
+    assert!(
+        text[..risk_end].contains("a behavior change in one area"),
+        "{text}"
+    );
+}
+
 #[test]
 fn mentions_in_the_review_do_not_ping_anyone() {
-    let text = review::pr_comment(7, "Ask @someone and @team/leads; mail a@b.com; (@x) too.\n");
+    let text = review::pr_comment(
+        7,
+        "",
+        "Ask @someone and @team/leads; mail a@b.com; (@x) too.\n",
+    );
     assert!(
         !text.contains("@someone") && !text.contains("@team") && !text.contains("(@x)"),
         "{text}"
@@ -429,16 +450,44 @@ fn mentions_in_the_review_do_not_ping_anyone() {
     );
 }
 
+/// Review finding M-3 (issue 123): `pr_comment` neutralised mentions in the review text but
+/// prepended the risk section unchanged, so a mention in a risk reason still pinged.
+#[test]
+fn mentions_in_the_risk_section_do_not_ping_anyone() {
+    let text = review::pr_comment(
+        7,
+        "## Risk: \u{1f534} high\n\n- ask @someone and @team/leads about this\n",
+        "Must-fix findings: 0\n\nAll good.\n",
+    );
+    assert!(
+        !text.contains("@someone") && !text.contains("@team"),
+        "{text}"
+    );
+    assert!(text.contains("someone"), "{text}");
+}
+
 #[test]
 fn a_very_long_review_is_cut_to_what_github_accepts_and_the_comment_says_so() {
     let long = "x".repeat(100_000);
-    let text = review::pr_comment(7, &long);
+    let text = review::pr_comment(7, "", &long);
     assert!(text.chars().count() < 65_536, "{}", text.chars().count());
     assert!(
         text.contains("cut") && text.contains("review.md"),
         "{}",
         &text[text.len() - 300..]
     );
+}
+
+/// Review finding M-4 (issue 123): the risk section had no cap of its own, so an overlong risk
+/// reason could by itself push the whole comment past GitHub's 65,536-character limit even
+/// though the review text's own cap left room.
+#[test]
+fn a_very_long_risk_section_is_cut_to_what_github_accepts_and_the_comment_says_so() {
+    let long_risk = format!("## Risk: \u{1f534} high\n\n- {}\n", "x".repeat(100_000));
+    let text = review::pr_comment(7, &long_risk, "Must-fix findings: 0\n\nAll good.\n");
+    assert!(text.chars().count() < 65_536, "{}", text.chars().count());
+    assert!(text.contains("cut"), "{text}");
+    assert!(text.contains("All good."), "{text}");
 }
 
 #[test]
@@ -471,4 +520,65 @@ fn a_pr_record_names_the_reviewers_sandbox_before_it_is_created() {
     let seen = seen.lock().unwrap();
     assert_eq!(seen.len(), 1, "{seen:?}");
     assert_eq!(seen[0].1.as_deref(), Some(seen[0].0.as_str()));
+}
+
+/// Issue 123, decision 176(b): a review-only PR task gets a risk assessment too, recorded the
+/// same way as an issue task's.
+#[test]
+fn a_pr_reviews_risk_level_and_reasons_are_recorded() {
+    let f = config("");
+    let review_text = "Must-fix findings: 0\n\nRisk: medium\n\n## Risk\n\n\
+        - a behavior change in one area\n\nNothing else found.\n";
+    let (backend, github) = (backend(&f, &[review_text]), github());
+    let mut prepared = prepared(&f, &backend, &github);
+
+    review_it(
+        &f,
+        &backend,
+        &github,
+        &FakeHostRunner::default(),
+        &mut prepared,
+    )
+    .unwrap();
+
+    let result = saved(&f).review.unwrap();
+    assert_eq!(result.risk, sbxm::task::risk::Level::Medium);
+    assert_eq!(result.risk_reasons, ["a behavior change in one area"]);
+}
+
+/// Issue 123, decision 176(b): the posted comment opens with the risk section too.
+#[test]
+fn the_posted_comment_opens_with_the_risk_section() {
+    let f = config("");
+    let review_text = "Must-fix findings: 0\n\nRisk: medium\n\n## Risk\n\n\
+        - a behavior change in one area\n\nNothing else found.\n";
+    let (backend, github) = (backend(&f, &[review_text]), github());
+    let mut prepared = prepared(&f, &backend, &github);
+
+    review_it(
+        &f,
+        &backend,
+        &github,
+        &FakeHostRunner::default(),
+        &mut prepared,
+    )
+    .unwrap();
+
+    let calls = github.calls();
+    let comment = calls
+        .iter()
+        .find_map(|c| match c {
+            GhCall::PrComment(_, _, body) => Some(body.clone()),
+            _ => None,
+        })
+        .expect("a comment was posted");
+    assert!(
+        comment.starts_with("## Risk: \u{1f7e1} medium\n"),
+        "{comment}"
+    );
+    let risk_end = comment.find("sbxm review of PR #7").expect(&comment);
+    assert!(
+        comment[..risk_end].contains("a behavior change in one area"),
+        "{comment}"
+    );
 }

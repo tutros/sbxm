@@ -141,6 +141,30 @@ fn result_and_review_files_are_reported_when_present() {
     );
 }
 
+/// Issue 123, decision 176: a task's recorded risk level shows in the plain listing
+/// (`unknown` for one with no recorded review, as the field's default reads).
+#[test]
+fn the_recorded_risk_level_is_shown() {
+    let base = tempfile::tempdir().unwrap();
+    save(base.path(), &working(1, Some(Status::Completed)));
+    let mut with_review = working(2, Some(Status::Completed));
+    with_review.review = Some(record::ReviewResult {
+        round: 1,
+        must_fix: 0,
+        full: true,
+        repeat: false,
+        risk: sbxm::task::risk::Level::High,
+        risk_reasons: vec!["touches the git trust boundary".to_owned()],
+    });
+    save(base.path(), &with_review);
+
+    let (text, _ids) = task_status::render(base.path(), None, false, &Probe(Some(T0))).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+
+    assert!(lines[0].contains("risk: unknown"), "{text}");
+    assert!(lines[1].contains("risk: high"), "{text}");
+}
+
 #[test]
 fn a_selector_shows_only_that_task() {
     let base = tempfile::tempdir().unwrap();

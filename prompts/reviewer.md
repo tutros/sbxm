@@ -20,11 +20,19 @@ describes elsewhere and this change doesn't claim to deliver, or something that 
 tool is not a finding for this change: put it under "## Outside this change" (or ask it as a question).
 It doesn't count towards the must-fix total.
 
-Write {{review_path}}. Its first line is exactly "Must-fix findings: <count>". Then, so the findings can be filed as
-GitHub issues later, use this shape:
+Write {{review_path}}. Its first line is exactly "Must-fix findings: <count>", and the line right after it (one
+blank line between the two is fine, but nothing else) is exactly "Risk: low", "Risk: medium" or "Risk: high": low is
+docs, tests or a contained change with tests; medium is a behavior change in one area, or a failed/unresolved
+finding; high is security-sensitive or cross-cutting code (a trust boundary, secrets, egress, the state format), a
+change with no test, or must-fix findings left. Then, so the findings can be filed as GitHub issues later, use this
+shape:
 
 Scope: `<base sha>..<head sha>`
 Issues: pending
+
+## Risk
+
+- one bullet per reason for the level above
 
 ## Must fix  (then "## Should fix" and "## Questions"; leave out a heading with no findings)
 

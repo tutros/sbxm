@@ -6,6 +6,7 @@ use std::path::Path;
 
 use super::findings;
 use super::record::OpenFinding;
+use super::risk::{self, Level};
 
 /// The count on the first line, which must be exactly `Must-fix findings: <count>` (trailing
 /// spaces and a Windows line ending are fine); `None` for anything else.
@@ -40,15 +41,26 @@ pub(crate) fn defang_mentions(text: &str) -> String {
     out
 }
 
-/// The comment posted on a pull request: a line naming the review, then the reviewer's text with
-/// mentions neutralised, cut (with a note) if it is longer than GitHub accepts.
-pub fn pr_comment(number: u32, review: &str) -> String {
+/// The comment posted on a pull request: `risk_section` (decision 176(b), rendered by
+/// [`super::risk::render_section`]) first, then a line naming the review, then the reviewer's
+/// text; both the risk section and the review text have mentions neutralised, and the review
+/// text is cut (with a note) if it is longer than GitHub accepts.
+pub fn pr_comment(number: u32, risk_section: &str, review: &str) -> String {
     let defanged = defang_mentions(review);
     let (body, cut) = match defanged.char_indices().nth(COMMENT_CAP) {
         Some((at, _)) => (&defanged[..at], true),
         None => (defanged.as_str(), false),
     };
-    let mut text = format!("sbxm review of PR #{number}\n\n{}\n", body.trim_end());
+    let (risk_section, _) = risk::cap_section(&defang_mentions(risk_section.trim_end()));
+    let header = if risk_section.is_empty() {
+        String::new()
+    } else {
+        format!("{risk_section}\n")
+    };
+    let mut text = format!(
+        "{header}sbxm review of PR #{number}\n\n{}\n",
+        body.trim_end()
+    );
     if cut {
         text.push_str(&format!(
             "\n(sbxm cut this review at {COMMENT_CAP} characters; the whole text is review.md in \
@@ -66,14 +78,102 @@ pub fn with_header(harness: &str, model: Option<&str>, review: &str) -> String {
     )
 }
 
+/// Past the [`with_header`] line (a file without it is read as it is).
+fn past_header(saved: &str) -> &str {
+    saved
+        .strip_prefix("Reviewer: ")
+        .and_then(|rest| rest.split_once("\n\n"))
+        .map_or(saved, |(_, review)| review)
+}
+
 /// [`must_fix_count`] of a saved `review.md`, read past the [`with_header`] line (a file without
 /// it is read as it is).
 pub fn saved_must_fix_count(saved: &str) -> Option<u32> {
-    let review = saved
-        .strip_prefix("Reviewer: ")
-        .and_then(|rest| rest.split_once("\n\n"))
-        .map_or(saved, |(_, review)| review);
-    must_fix_count(review)
+    must_fix_count(past_header(saved))
+}
+
+/// The risk level of the line reading exactly `Risk: low`, `Risk: medium` or `Risk: high`
+/// (trailing spaces and a Windows line ending are fine; decision 176(e)), required right after
+/// the [`must_fix_count`] line, with at most one blank line between the two: `None` for a review
+/// where that position doesn't hold such a line, even if one appears later (e.g. quoted in a
+/// finding's body or the `## Risk` section's own prose).
+pub fn risk_level(review: &str) -> Option<Level> {
+    let review = review.strip_prefix('\u{feff}').unwrap_or(review);
+    let mut lines = review.lines();
+    lines.next()?; // the `Must-fix findings:` line, checked by `must_fix_count`
+    let mut candidate = lines.next()?;
+    if candidate.trim().is_empty() {
+        candidate = lines.next()?;
+    }
+    let word = candidate.trim_end().strip_prefix("Risk: ")?;
+    Level::from_word(word)
+}
+
+/// [`risk_level`] of a saved `review.md`, read past the [`with_header`] line.
+pub fn saved_risk_level(saved: &str) -> Option<Level> {
+    risk_level(past_header(saved))
+}
+
+/// The reasons under the first `## Risk` heading (decision 176(e)): one per `- ` or `* ` bullet,
+/// in file order, until the next `##` heading or the end of the file. Empty when there is no such
+/// heading. A heading inside a fenced (```` ``` ````, `~~~`) or indented code block is quoted text,
+/// never the section.
+pub fn risk_reasons(review: &str) -> Vec<String> {
+    let mut reasons = Vec::new();
+    let mut in_section = false;
+    // The open fence's character and length: only a line of at least as many of the same
+    // character, and nothing else, closes it (CommonMark).
+    let mut fence: Option<(char, usize)> = None;
+    for line in findings::lines_of(review) {
+        let trimmed = line.trim();
+        let indent = line.len() - line.trim_start_matches(' ').len();
+        let is_code_indent = indent >= 4 || line.starts_with('\t');
+        if !is_code_indent && let Some((ch, len)) = fence_run(trimmed) {
+            match fence {
+                None => fence = Some((ch, len)),
+                Some((open, open_len))
+                    if ch == open && len >= open_len && trimmed[len..].trim().is_empty() =>
+                {
+                    fence = None
+                }
+                Some(_) => {}
+            }
+            continue;
+        }
+        if fence.is_some() {
+            continue;
+        }
+        if !is_code_indent && let Some(name) = trimmed.strip_prefix("## ") {
+            if in_section {
+                break;
+            }
+            in_section = name.trim().eq_ignore_ascii_case("risk");
+            continue;
+        }
+        if !in_section {
+            continue;
+        }
+        if let Some(reason) = trimmed
+            .strip_prefix("- ")
+            .or_else(|| trimmed.strip_prefix("* "))
+        {
+            reasons.push(reason.trim().to_owned());
+        }
+    }
+    reasons
+}
+
+/// The fence character and run length when `trimmed` starts a code fence (three or more
+/// backticks or tildes).
+fn fence_run(trimmed: &str) -> Option<(char, usize)> {
+    let ch = trimmed.chars().next().filter(|c| *c == '`' || *c == '~')?;
+    let len = trimmed.chars().take_while(|c| *c == ch).count();
+    (len >= 3).then_some((ch, len))
+}
+
+/// [`risk_reasons`] of a saved `review.md`, read past the [`with_header`] line.
+pub fn saved_risk_reasons(saved: &str) -> Vec<String> {
+    risk_reasons(past_header(saved))
 }
 
 /// The individual file paths named by a `Where:` value (spec §5.3, issue 119): each

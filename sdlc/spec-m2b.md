@@ -57,6 +57,11 @@ timeout = "20m"               # per command
 
 [finish]                      # optional; spec tasks only [174(e)], an issue task always opens a PR
 # sink = "local"              # "local" (default: branch stays in repo.git) or "push" (to origin, no PR)
+
+[risk]                        # optional; adds to the risk assessment's built-in path-rule floor [176(d)]
+# replace = false             # true: use only this table's patterns, not the built-in defaults
+# medium = ["pattern", ...]   # case-insensitive substring match against a changed path
+# high = ["src/git.rs", ...]  # this repo's own especially sensitive paths typically go here
 ```
 
 Rules:
@@ -98,6 +103,8 @@ Sandbox names: `sbxm-task-<id>-<harness>` (worker), `sbxm-task-<id>-review-<harn
              "workspace": "E:/.../tasks/issue-41", "run": {"status": "completed", "usage": {}, "duration_s": 0}},
   "reviewer": null,
   "round": 0, "fix_rounds": 3,
+  "review": {"round": 1, "must_fix": 0, "full": true, "repeat": false,
+             "risk": "medium", "risk_reasons": ["a behavior change in one area"]},
   "gates": [{"phase": "after-worker", "tier": "sandbox", "command": "cargo test", "exit": 0, "passed": true}],
   "related": [], "hooks": {}, "sbxm_version": "0.x", "config_hash": "..."
 }
@@ -187,6 +194,17 @@ Output: human text by default; `status --json` prints the records. Exit codes: 0
   one exists [158].
 - The reviewer is told it cannot change files, commit, push or file issues, and to follow the code-review skill from
   the clone (`.claude/skills/sdlc-code-review/SKILL.md` when present).
+- **Risk assessment [176]:** the line right after the reviewer's first (one blank line between the two is fine,
+  but nothing else) is `Risk: low|medium|high`, parsed at that fixed position, never scanned for further down;
+  a `## Risk` section lists one bullet per reason. Missing or unparseable: `Level::Unknown`, never silently `low`,
+  warned about separately from a `Repeat of:` warning. sbxm raises the level (never lowers it) to the highest
+  matching path rule's floor over the task's own changed paths: the built-in defaults (CI/workflow files, dependency
+  manifests/lockfiles, secret-named files, all `medium`) plus `[risk]` in `sbxm-task.toml`. The combined level and
+  reasons are recorded in `task.json`'s `review.risk`/`review.risk_reasons` when the review is parsed (same point as
+  `must_fix`), for both an issue/spec task's rounds and a PR task's single round. Shown at the top of the PR
+  description `task finish` opens and, for a PR task, the posted review comment (colored marker: 🟢 low, 🟡 medium,
+  🔴 high, ⚪ unknown — GitHub Markdown can't color text); a draft's own reasons (section 5.1's `## Unresolved`) are
+  folded into this same section too. Information only: it changes nothing else sbxm does.
 
 ## 6. Git trust boundary [159]
 

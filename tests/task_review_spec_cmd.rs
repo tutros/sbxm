@@ -25,7 +25,10 @@ fn config() -> Fixture {
     )
 }
 
-const CLEAN: &str = "Must-fix findings: 0\n\nNothing found.\n";
+// `Risk: low` keeps `a_clean_review_ends_ready_and_names_finish_spec_as_the_next_step`'s
+// "no warnings" assertion about a well-formed review true (issue 123): a missing `Risk:` line
+// warns on its own, which that test isn't about.
+const CLEAN: &str = "Must-fix findings: 0\n\nRisk: low\n\nNothing found.\n";
 const ONE: &str = "Must-fix findings: 1\n\n## Must fix\n\n### M-1 - a.txt:1 wrong.\n";
 
 fn spec_file(f: &Fixture, text: &str) -> PathBuf {

@@ -50,6 +50,14 @@ timeout = "20m"                # per command
 # [finish]
 # sink = "local"
 
+# The risk level on each PR is raised to at least medium for CI files, dependency manifests and
+# lockfiles, and secret-named files. Patterns are case-insensitive substrings of a changed path;
+# they add to those defaults, or replace them with `replace = true`.
+# [risk]
+# replace = false
+# medium = ["migrations/"]
+# high = ["src/auth/"]
+
 # Replace a built-in prompt with a file inside this repo:
 # [prompts]
 # worker = "prompts/worker.md"

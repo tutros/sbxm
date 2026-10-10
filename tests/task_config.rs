@@ -56,6 +56,7 @@ fn a_minimal_file_gets_the_code_defaults() {
     );
     assert_eq!(config.gates.timeout, Duration::from_secs(20 * 60));
     assert_eq!(config.prompts.worker, None);
+    assert_eq!(config.risk.len(), sbxm::task::risk::built_in_rules().len());
     assert!(config.warnings.is_empty());
 }
 
@@ -86,6 +87,10 @@ timeout = "5m"
 
 [prompts]
 worker = "prompts/worker.md"
+
+[risk]
+medium = ["custom-pattern"]
+high = ["src/git.rs"]
 "#,
         false,
     );
@@ -116,6 +121,15 @@ worker = "prompts/worker.md"
         Some(dir.path().join("prompts").join("worker.md"))
     );
     assert_eq!(config.prompts.reviewer, None);
+    use sbxm::task::risk::{Level, floor};
+    assert_eq!(
+        floor(&["custom-pattern".to_owned()], &config.risk).0,
+        Level::Medium
+    );
+    assert_eq!(
+        floor(&["src/git.rs".to_owned()], &config.risk).0,
+        Level::High
+    );
 }
 
 fn same_harness_warnings(config: &TaskConfig) -> usize {
@@ -419,4 +433,97 @@ fn an_unknown_sink_or_finish_key_is_an_error_naming_the_file() {
             "{message}"
         );
     }
+}
+
+/// Issue 123 (decision 176(d)): `[risk]` adds to, or replaces, the built-in path-rule floor.
+#[test]
+fn risk_defaults_to_the_built_in_rules_only() {
+    use sbxm::task::risk::{self, Level, floor};
+
+    let dir = repo(MINIMAL, true);
+    let config = TaskConfig::load(dir.path()).unwrap();
+    assert_eq!(config.risk.len(), risk::built_in_rules().len());
+    let (level, _) = floor(&["Cargo.lock".to_owned()], &config.risk);
+    assert_eq!(level, Level::Medium);
+}
+
+#[test]
+fn risk_entries_add_to_the_built_in_rules_by_default() {
+    use sbxm::task::risk::{Level, floor};
+
+    let dir = repo(
+        &format!("{MINIMAL}\n[risk]\nhigh = [\"src/git.rs\"]\n"),
+        true,
+    );
+    let config = TaskConfig::load(dir.path()).unwrap();
+    let (high, _) = floor(&["src/git.rs".to_owned()], &config.risk);
+    assert_eq!(high, Level::High);
+    // The built-in rules are still there too.
+    let (medium, _) = floor(&["Cargo.lock".to_owned()], &config.risk);
+    assert_eq!(medium, Level::Medium);
+}
+
+/// Review finding M-2 (issue 123): a path matching both a configured medium and a configured
+/// high pattern must floor to high, and show a reason that says so, not a reason left over from
+/// the medium match.
+#[test]
+fn overlapping_medium_and_high_risk_patterns_keep_the_high_reason() {
+    use sbxm::task::risk::{Level, floor};
+
+    let dir = repo(
+        &format!("{MINIMAL}\n[risk]\nmedium = [\"src/\"]\nhigh = [\"src/git.rs\"]\n"),
+        true,
+    );
+    let config = TaskConfig::load(dir.path()).unwrap();
+    let (level, reasons) = floor(&["src/git.rs".to_owned()], &config.risk);
+    assert_eq!(level, Level::High);
+    assert_eq!(reasons.len(), 1, "{reasons:?}");
+    assert!(reasons[0].contains("at least high"), "{reasons:?}");
+}
+
+#[test]
+fn risk_replace_drops_the_built_in_rules() {
+    use sbxm::task::risk::{Level, floor};
+
+    let dir = repo(
+        &format!("{MINIMAL}\n[risk]\nreplace = true\nmedium = [\"only-this\"]\n"),
+        true,
+    );
+    let config = TaskConfig::load(dir.path()).unwrap();
+    let (not_floored, _) = floor(&["Cargo.lock".to_owned()], &config.risk);
+    assert_eq!(not_floored, Level::Unknown, "the built-in rule is gone");
+    let (floored, _) = floor(&["only-this.txt".to_owned()], &config.risk);
+    assert_eq!(floored, Level::Medium);
+}
+
+#[test]
+fn risk_patterns_are_matched_case_insensitively() {
+    use sbxm::task::risk::{Level, floor};
+
+    let dir = repo(
+        &format!("{MINIMAL}\n[risk]\nreplace = true\nhigh = [\"SRC/GIT.RS\"]\n"),
+        true,
+    );
+    let config = TaskConfig::load(dir.path()).unwrap();
+    let (level, _) = floor(&["src/git.rs".to_owned()], &config.risk);
+    assert_eq!(level, Level::High);
+}
+
+#[test]
+fn an_empty_risk_pattern_is_refused_naming_the_key() {
+    let message = load_err(&format!("{MINIMAL}\n[risk]\nhigh = [\"  \"]\n"), true);
+    assert!(
+        message.contains("risk.high") && message.contains("empty"),
+        "{message}"
+    );
+    assert!(message.contains(FILE_NAME), "{message}");
+}
+
+#[test]
+fn an_unknown_risk_key_is_an_error_naming_the_file() {
+    let message = load_err(&format!("{MINIMAL}\n[risk]\nlow = [\"x\"]\n"), true);
+    assert!(
+        message.contains(FILE_NAME) && message.contains("low"),
+        "{message}"
+    );
 }

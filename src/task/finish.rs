@@ -17,6 +17,7 @@ use super::pipeline::Prepared;
 use super::record::{self, OpenFinding, Process, ProcessProbe, Record};
 use super::repo;
 use super::review::{self, COMMENT_CAP, defang_mentions};
+use super::risk;
 use crate::backend::SandboxBackend;
 use crate::confirm::Confirm;
 use crate::github::{GitHubBackend, PrRequest};
@@ -347,24 +348,40 @@ pub fn discard_many(
     Ok(())
 }
 
+/// The risk section at the very top of a PR description (decision 176(b, e)): the level the
+/// review recorded (`Level::Unknown` for a record from before this existed) and its reasons, plus
+/// a draft's own reasons (decision 176's "shows its must-fix reason in the same section"), so a
+/// draft from a must-fix finding left shows why there, not only under `## Unresolved`. The draft's
+/// reasons come first, so cutting a long reviewer reason to `risk::RISK_CAP` never drops them.
+pub fn risk_section(task: &Record, unresolved: &[String]) -> String {
+    let (level, reviewer_reasons) = match &task.review {
+        Some(result) => (result.risk, result.risk_reasons.as_slice()),
+        None => (risk::Level::default(), [].as_slice()),
+    };
+    let reasons: Vec<String> = unresolved.iter().chain(reviewer_reasons).cloned().collect();
+    risk::render_section(level, &reasons)
+}
+
 /// The longest piece of `result.md` or `review.md` put in a PR body, in characters (GitHub allows
 /// 65,536 for the whole body).
 pub const SECTION_CAP: usize = 25_000;
 
-/// The PR body: `Fixes #N`, then the [`unresolved_section`] of a draft, then each file under a
-/// heading. A file longer than the cap is cut and the body says so. Returns the body and one line
-/// per cut for the command to print.
+/// The PR body: the [`risk_section`] first, then `Fixes #N`, the [`unresolved_section`] of a
+/// draft, and each file under a heading. A file longer than the cap is cut and the body says so.
+/// Returns the body and one line per cut for the command to print.
 pub fn pr_body(
     number: u32,
+    risk: &str,
     unresolved: Option<&str>,
     result: Option<&str>,
     review: Option<&str>,
 ) -> (String, Vec<String>) {
-    let mut body = format!("Fixes #{number}\n");
+    let (risk, risk_cut) = risk::cap_section(risk);
+    let mut body = format!("{}\nFixes #{number}\n", risk.trim_end());
     if let Some(section) = unresolved {
         body.push_str(&format!("\n{}\n", section.trim_end()));
     }
-    let mut cuts = Vec::new();
+    let mut cuts: Vec<String> = risk_cut.into_iter().collect();
     for (file, heading, text) in [
         ("result.md", "Result", result),
         ("review.md", "Review", review),
@@ -698,8 +715,11 @@ pub fn finish(
         // Its findings come from task.json, which no file check above covered.
         refuse_secrets("the draft's list of open findings", section)?;
     }
+    let risk_text = risk_section(&task, &unresolved);
+    refuse_secrets("the risk section", &risk_text)?;
     let (body, cuts) = pr_body(
         task.number,
+        &risk_text,
         section.as_deref(),
         result.as_deref(),
         review.as_deref(),

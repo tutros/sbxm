@@ -293,7 +293,7 @@ pub struct PrBranch {
 /// The accepted result of the last review of a task with a worker, recorded when its `review.md`
 /// is parsed (part of spec §5.1's `review`; issue 118): `task resume` continues a task left at
 /// `reviewing/completed` from this, never from `review.md` again.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewResult {
     /// The review round (its saved file is `review-<round>.md`).
     pub round: u32,
@@ -302,6 +302,15 @@ pub struct ReviewResult {
     pub full: bool,
     /// Whether a must-fix finding validly repeated an earlier one (spec §5.3).
     pub repeat: bool,
+    /// The risk level (decision 176(a, e)): the reviewer's own `Risk:` line, raised to the
+    /// path-rule floor but never lowered. `Level::Unknown` (its default) for a record from before
+    /// this field existed, and for a review whose `Risk:` line was missing or unparseable.
+    #[serde(default)]
+    pub risk: super::risk::Level,
+    /// The reasons shown with `risk` (decision 176(e)): the reviewer's own `## Risk` bullets, plus
+    /// the path rule's reason when it raised the level above what the reviewer wrote.
+    #[serde(default)]
+    pub risk_reasons: Vec<String>,
 }
 
 /// A must-fix finding still open, as the review that found it (or, for a repeat, last found it)

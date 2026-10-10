@@ -10,10 +10,13 @@ use common::task_fixture::{
     CLAUDE_DONE, Fixture, Play, Probe, backend, fixture, ok, play, worked_task,
 };
 use sbxm::github::fake::{FakeGitHub, GhCall};
-use sbxm::task::finish::{SECTION_CAP, check_can_finish, finish, pr_body, unresolved_section};
+use sbxm::task::finish::{
+    SECTION_CAP, check_can_finish, finish, pr_body, risk_section, unresolved_section,
+};
 use sbxm::task::pipeline::Prepared;
 use sbxm::task::record::{self, Kind, NewTask, Process, Record, Stage, Status};
 use sbxm::task::review::must_fix_findings;
+use sbxm::task::risk::Level;
 
 /// As `review::with_header` saves it: the reviewer's line, a blank line, then the review.
 const REVIEW: &str = "Reviewer: codex (default)\n\nMust-fix findings: 0\n\nNothing found.\n";
@@ -98,7 +101,14 @@ fn a_ready_task_is_pushed_and_its_pr_is_opened_with_the_result_and_review() {
         ("issue-41", "main")
     );
     assert_eq!(request.title, "Fix 41");
-    assert!(request.body.starts_with("Fixes #41\n"), "{}", request.body);
+    // Issue 123: the PR description starts with the risk section (a record with no recorded
+    // review, as `ready` leaves it, reads as "unknown").
+    assert!(
+        request.body.starts_with("## Risk: \u{26aa} unknown\n"),
+        "{}",
+        request.body
+    );
+    assert!(request.body.contains("Fixes #41\n"), "{}", request.body);
     assert!(
         request.body.contains("## Result\n\ndone\n"),
         "{}",
@@ -116,6 +126,36 @@ fn a_ready_task_is_pushed_and_its_pr_is_opened_with_the_result_and_review() {
     let record = reread(&f);
     assert_eq!((record.stage, record.status), (Stage::Finished, Status::Ok));
     assert_eq!(record.pr.as_deref(), Some(done.url.as_str()));
+}
+
+/// Issue 123, decision 176: a recorded risk level and reasons are shown at the top of a normal
+/// PR's description, above `Fixes #N`.
+#[test]
+fn a_recorded_risk_level_opens_the_pr_description() {
+    let f = fixture();
+    let prepared = ready(&f);
+    let mut record = reread(&f);
+    record.review = Some(record::ReviewResult {
+        round: 1,
+        must_fix: 0,
+        full: true,
+        repeat: false,
+        risk: sbxm::task::risk::Level::High,
+        risk_reasons: vec!["touches the git trust boundary".to_owned()],
+    });
+    record::write(&prepared.meta, &record).unwrap();
+    let github = FakeGitHub::default();
+
+    run(&f, &github).unwrap();
+
+    let request = only_pr_request(&github);
+    let body = &request.body;
+    assert!(body.starts_with("## Risk: \u{1f534} high\n"), "{body}");
+    let risk_end = body.find("Fixes #41\n").expect(body);
+    assert!(
+        body[..risk_end].contains("touches the git trust boundary"),
+        "{body}"
+    );
 }
 
 const REVIEW_WITH_MUST_FIX: &str = "Reviewer: codex (default)\n\nMust-fix findings: 2\n\n\
@@ -159,7 +199,16 @@ fn a_ready_task_with_must_fix_left_opens_a_draft_that_lists_the_findings() {
     assert!(request.draft);
     assert!(done.draft);
     let body = &request.body;
-    assert!(body.starts_with("Fixes #41\n"), "{body}");
+    // Issue 123, decision 176: the risk section at the very top names the same must-fix reason
+    // as `## Unresolved` below it, so it's visible without reading past the result and review.
+    assert!(body.starts_with("## Risk: \u{26aa} unknown\n"), "{body}");
+    let risk_end = body.find("Fixes #41\n").expect(body);
+    let risk_section = &body[..risk_end];
+    assert!(
+        risk_section.contains("2 must-fix finding(s) left"),
+        "{risk_section}"
+    );
+    assert!(body.contains("Fixes #41\n"), "{body}");
     let unresolved = body.find("## Unresolved").expect(body);
     assert!(unresolved < body.find("## Result").unwrap(), "{body}");
     assert!(body.contains("2 must-fix finding(s) left"), "{body}");
@@ -227,6 +276,7 @@ fn the_recorded_review_decides_the_draft_not_an_edited_review_md() {
         must_fix: 1,
         full: true,
         repeat: false,
+        ..Default::default()
     });
     record::write(&prepared.meta, &prepared.record).unwrap();
     let github = FakeGitHub::default();
@@ -390,7 +440,7 @@ fn a_secret_in_review_or_result_stops_the_publish_without_echoing_it() {
 fn a_huge_file_is_cut_to_the_cap_and_the_body_says_so() {
     let big = "x".repeat(SECTION_CAP * 2);
 
-    let (body, cuts) = pr_body(7, None, Some(&big), None);
+    let (body, cuts) = pr_body(7, "## Risk: \u{26aa} unknown\n", None, Some(&big), None);
 
     assert!(body.chars().count() < 65_536, "{}", body.len());
     assert!(
@@ -399,6 +449,44 @@ fn a_huge_file_is_cut_to_the_cap_and_the_body_says_so() {
     );
     assert!(body.contains("(no review.md)"), "{body}");
     assert_eq!(cuts.len(), 1);
+}
+
+/// Review finding M-4 (issue 123): the risk section had no cap, so an overlong risk reason
+/// could by itself push the PR body past GitHub's 65,536-character limit.
+#[test]
+fn a_huge_risk_section_is_cut_to_what_github_accepts() {
+    let long_risk = format!("## Risk: \u{1f534} high\n\n- {}\n", "x".repeat(70_000));
+
+    let (body, cuts) = pr_body(7, &long_risk, None, None, None);
+
+    assert!(body.chars().count() < 65_536, "{}", body.chars().count());
+    assert!(body.contains("cut"), "{body}");
+    assert_eq!(cuts.len(), 1, "{cuts:?}");
+}
+
+/// PR #178 review round 3, M-1: the draft's own reason came after the reviewer's, so a long
+/// reviewer reason pushed it past the cap and out of the risk section.
+#[test]
+fn a_drafts_reason_survives_the_cap_of_a_long_risk_section() {
+    let f = fixture();
+    let mut task = ready(&f).record;
+    task.review = Some(record::ReviewResult {
+        round: 1,
+        must_fix: 2,
+        full: true,
+        repeat: false,
+        risk: Level::High,
+        risk_reasons: vec!["x".repeat(4_000)],
+    });
+    let section = risk_section(&task, &["2 must-fix finding(s) left".to_owned()]);
+
+    let (body, _) = pr_body(41, &section, None, None, None);
+
+    let risk_end = body.find("Fixes #41\n").expect(&body);
+    assert!(
+        body[..risk_end].contains("2 must-fix finding(s) left"),
+        "{body}"
+    );
 }
 
 #[test]
@@ -616,6 +704,7 @@ fn stopped_after_a_narrow_review(f: &Fixture) -> Prepared {
         must_fix: 1,
         full: false,
         repeat: true,
+        ..Default::default()
     });
     prepared.record.open_findings = Some(vec![
         record::OpenFinding {

@@ -132,6 +132,33 @@ fn a_clean_review_prints_the_round_and_where_the_review_is() {
     );
 }
 
+/// Issue 123, decision 176(e): a review with no readable `Risk:` line warns, but never fails the
+/// task, and the warning stays separate from a `Repeat of:` warning's count.
+#[test]
+fn a_review_with_no_risk_line_warns_but_still_succeeds() {
+    let f = config("codex");
+    let backend = backend(&f, &[CLEAN]);
+    worked_task(&f, &backend);
+
+    let out = go(&f, &options(&f), &backend);
+
+    out.result.unwrap();
+    assert!(out.warn.contains("risk is \"unknown\""), "{}", out.warn);
+}
+
+#[test]
+fn a_review_with_a_readable_risk_line_does_not_warn() {
+    let f = config("codex");
+    let review_text = "Must-fix findings: 0\n\nRisk: low\n\nNothing found.\n";
+    let backend = backend(&f, &[review_text]);
+    worked_task(&f, &backend);
+
+    let out = go(&f, &options(&f), &backend);
+
+    out.result.unwrap();
+    assert!(!out.warn.contains("risk is"), "{}", out.warn);
+}
+
 #[test]
 fn must_fix_findings_show_the_fix_round_and_the_second_review() {
     let f = config("codex");
@@ -567,17 +594,31 @@ fn a_pr_that_was_already_reviewed_is_refused_and_says_how_to_start_over() {
 fn the_pr_review_uses_the_default_branch_as_the_base() {
     let f = config("codex");
     add_pr_head(&f, 7);
+    // The base must exist: the risk floor diffs the PR against it (issue 123).
+    common::git(&f.origin, &["branch", "trunk", "main"]);
     let github = pr_github().with_default_branch("trunk");
 
     let out = go_pr(&f, &pr_options(&f), &pr_backend(&f, &[CLEAN]), &github);
 
-    // A PR's own head is fetched by number, so the missing `trunk` branch doesn't matter; the base
-    // only names what the reviewer diffs against.
     out.result.unwrap();
     assert_eq!(
         record::read(&pr_meta(&f).join("task.json")).unwrap().base,
         "trunk"
     );
+}
+
+#[test]
+fn a_pr_review_whose_base_is_missing_is_refused_before_any_sandbox_or_gate() {
+    let f = config("codex");
+    add_pr_head(&f, 7);
+    let github = pr_github().with_default_branch("trunk");
+    let backend = pr_backend(&f, &[CLEAN]);
+
+    let out = go_pr(&f, &pr_options(&f), &backend, &github);
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("changed paths"), "{message}");
+    assert!(backend.creates().is_empty() && backend.execs().is_empty());
 }
 
 #[test]

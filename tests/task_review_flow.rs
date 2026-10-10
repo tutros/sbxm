@@ -17,6 +17,7 @@ use sbxm::task::gates::FakeHostRunner;
 use sbxm::task::pipeline::{self, Prepared, ReviewReport, Tiers};
 use sbxm::task::record::{self, Stage, Status};
 use sbxm::task::repo;
+use sbxm::task::risk::Level;
 
 /// `fix_rounds` set to 1: the tests that only care about a single fix round stay as simple as
 /// before this issue's change.
@@ -139,6 +140,32 @@ fn count(backend: &FakeBackend, needle: &str) -> usize {
         .iter()
         .filter(|(_, spec)| spec.argv.iter().any(|a| a.contains(needle)))
         .count()
+}
+
+/// Like [`backend`], but the worker commits `file` instead of `a.txt` (issue 123): lets a test
+/// make the task's own changed paths match a path rule.
+fn backend_committing(f: &Fixture, reviews: &[&str], file: &str) -> FakeBackend {
+    let worker = play_tasks(
+        &f.env.base_dir(),
+        "main",
+        Play {
+            commits: vec![file.to_owned()],
+            result_md: Some(b"done\n".to_vec()),
+            bundle_bytes: None,
+        },
+    );
+    let reviewer = play_reviews(
+        &f.env.base_dir(),
+        "issue-41",
+        reviews.iter().map(|s| (*s).to_owned()).collect(),
+    );
+    FakeBackend::with_secrets(&["anthropic", "openai"])
+        .with_exec_output_matching("claude", ok(CLAUDE_DONE))
+        .with_exec_output_matching("codex", ok(CODEX_DONE))
+        .with_exec_hook(move |sandbox, spec| {
+            worker(sandbox, spec);
+            reviewer(sandbox, spec);
+        })
 }
 
 #[test]
@@ -1051,4 +1078,102 @@ fn a_review_whose_count_differs_from_its_must_fix_findings_is_not_used() {
     assert_eq!(record.open_findings, None);
     assert!(!meta(&f).join("review.md").exists());
     assert!(meta(&f).join("review-1.md").exists());
+}
+
+// ---- Risk assessment (issue 123, decision 176) ----
+
+#[test]
+fn the_reviewers_own_risk_level_and_reasons_are_recorded() {
+    let f = config();
+    let review_text = "Must-fix findings: 0\n\nRisk: medium\n\n## Risk\n\n\
+        - a behavior change in one area\n\nNothing else found.\n";
+    let backend = backend(&f, &[review_text]);
+    let mut prepared = worked_task(&f, &backend);
+
+    review(&f, &backend, &mut prepared).unwrap();
+
+    let result = saved(&f).review.unwrap();
+    assert_eq!(result.risk, Level::Medium);
+    assert_eq!(result.risk_reasons, ["a behavior change in one area"]);
+}
+
+#[test]
+fn a_review_with_no_risk_line_is_recorded_as_unknown() {
+    let f = config();
+    let backend = backend(&f, &[CLEAN]);
+    let mut prepared = worked_task(&f, &backend);
+
+    review(&f, &backend, &mut prepared).unwrap();
+
+    let result = saved(&f).review.unwrap();
+    assert_eq!(result.risk, Level::Unknown);
+}
+
+#[test]
+fn the_path_rule_floor_raises_a_lower_level_the_reviewer_gave_and_says_why() {
+    let f = config();
+    let review_text = "Must-fix findings: 0\n\nRisk: low\n\n## Risk\n\n\
+        - a contained change\n\nNothing else found.\n";
+    let backend = backend_committing(&f, &[review_text], "Cargo.lock");
+    let mut prepared = worked_task(&f, &backend);
+
+    review(&f, &backend, &mut prepared).unwrap();
+
+    let result = saved(&f).review.unwrap();
+    assert_eq!(result.risk, Level::Medium);
+    assert!(
+        result
+            .risk_reasons
+            .iter()
+            .any(|r| r.contains("a contained change")),
+        "{:?}",
+        result.risk_reasons
+    );
+    assert!(
+        result
+            .risk_reasons
+            .iter()
+            .any(|r| r.contains("Cargo.lock") && r.contains("dependency manifest")),
+        "{:?}",
+        result.risk_reasons
+    );
+}
+
+#[test]
+fn a_changed_path_lookup_that_fails_stops_the_review_before_the_reviewer_runs() {
+    let f = config();
+    let backend = backend(&f, &[CLEAN]);
+    let mut prepared = worked_task(&f, &backend);
+    prepared.record.base = "no-such-branch".into();
+    let record_before = std::fs::read(meta(&f).join("task.json")).unwrap();
+    let (creates, execs) = (backend.creates().len(), backend.execs().len());
+
+    let err = review(&f, &backend, &mut prepared).unwrap_err();
+
+    assert!(format!("{err:#}").contains("changed paths"), "{err:#}");
+    // Refused before any write, sandbox or gate (decision 176, PR #178 review round 2).
+    assert_eq!(
+        std::fs::read(meta(&f).join("task.json")).unwrap(),
+        record_before
+    );
+    assert_eq!(
+        (backend.creates().len(), backend.execs().len()),
+        (creates, execs)
+    );
+    assert!(!meta(&f).join("review.md").exists());
+}
+
+#[test]
+fn the_floor_never_lowers_a_level_already_at_or_above_it() {
+    let f = config();
+    let review_text = "Must-fix findings: 0\n\nRisk: high\n\n## Risk\n\n\
+        - touches the config loader\n\nNothing else found.\n";
+    let backend = backend_committing(&f, &[review_text], "Cargo.lock");
+    let mut prepared = worked_task(&f, &backend);
+
+    review(&f, &backend, &mut prepared).unwrap();
+
+    let result = saved(&f).review.unwrap();
+    assert_eq!(result.risk, Level::High);
+    assert_eq!(result.risk_reasons, ["touches the config loader"]);
 }

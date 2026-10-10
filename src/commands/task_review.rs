@@ -20,6 +20,7 @@ use crate::task::gates::HostRunner;
 use crate::task::pipeline::{self, Ctx, Prepared, TaskEnv};
 use crate::task::record::{self, GateResult, ProcessProbe};
 use crate::task::repo::{self, Identity};
+use crate::task::risk;
 
 /// What is reviewed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,6 +166,19 @@ fn run_issue(
     Ok(())
 }
 
+/// A warning when a review round's risk (decision 176(e)) couldn't be read: never silently
+/// `low`, and never folded into `report.warnings`, so it doesn't change the count of `Repeat of:`
+/// warnings a round without a readable `Risk:` line would otherwise still have none of.
+fn print_risk_warning(warn: &mut dyn Write, risk: risk::Level) -> Result<()> {
+    if risk == risk::Level::Unknown {
+        writeln!(
+            warn,
+            "warning: the reviewer's review.md has no readable 'Risk: low|medium|high' line; its risk is \"unknown\""
+        )?;
+    }
+    Ok(())
+}
+
 /// The line after `next:` for a task that stopped `ready` (issue 118): `task resume` gives it
 /// another fix round, with `--rounds` once its budget is used. `None` for a task that didn't stop.
 pub(super) fn resume_hint(record: &record::Record, flag: &str) -> Option<String> {
@@ -210,6 +224,7 @@ pub(super) fn print_review<'a>(
                 "{id}: review round {}: {} must-fix finding(s)",
                 round.round, round.must_fix
             )?;
+            print_risk_warning(warn, round.risk)?;
         }
         return Ok(Some(failed));
     }
@@ -222,6 +237,7 @@ pub(super) fn print_review<'a>(
             round.must_fix,
             if round.full { "" } else { " (narrow)" }
         )?;
+        print_risk_warning(warn, round.risk)?;
     }
     if report.fix_ran {
         writeln!(
@@ -381,6 +397,7 @@ fn run_pr(
             "{id}: review: {} must-fix finding(s)",
             reviewed.must_fix
         )?;
+        print_risk_warning(warn, reviewed.risk)?;
     }
     if report.posted {
         writeln!(
