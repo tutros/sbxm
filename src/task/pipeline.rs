@@ -561,6 +561,16 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
              branch: it already has commits, so build on them instead of starting over."
         )
     });
+    // Where the branch starts (issue 107): the base for a new branch, else the PR's own branch.
+    let branch_context = continues.as_ref().map_or_else(
+        || format!("which started from {}.", ctx.base_branch),
+        |(pr, _)| {
+            format!(
+                "the branch of pull request #{pr}: this issue belongs to that pull request, and \
+                 the branch already has commits, so build on them instead of starting over."
+            )
+        },
+    );
     let prompt = prompts::render(
         &template.name,
         &template.text,
@@ -571,6 +581,7 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
             ("base", ctx.base_branch),
             ("repo", ctx.repo),
             ("pr_context", &pr_context),
+            ("branch_context", &branch_context),
             ("gates_sandbox", &bullets(&ctx.config.gates.sandbox)),
             ("gates_host", &bullets(&ctx.config.gates.host)),
         ],

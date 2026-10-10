@@ -117,6 +117,25 @@ fn the_worker_prompt_names_the_pr_and_says_the_branch_has_commits() {
 }
 
 #[test]
+fn the_worker_prompt_of_a_continued_pr_does_not_say_the_branch_started_from_the_base() {
+    let f = fixture();
+    add_pr_head(&f, 7);
+    let backend = backend();
+    let github = FakeGitHub::default().with_pr(pr(7, PrState::Open, false));
+    let source = source(&f);
+
+    let prepared = pipeline::prepare(&ctx(&f, &source, &backend, &github), &finding(7)).unwrap();
+
+    let prompt =
+        fs::read_to_string(prepared.workspace.join(".sbxm-task").join("prompt.md")).unwrap();
+    assert!(
+        prompt.contains("You are on branch feature-x, the branch of pull request #7"),
+        "{prompt}"
+    );
+    assert!(!prompt.contains("started from"), "{prompt}");
+}
+
+#[test]
 fn an_issue_without_a_pr_line_starts_from_the_base_as_before() {
     let f = fixture();
     let backend = backend();
@@ -132,6 +151,28 @@ fn an_issue_without_a_pr_line_starts_from_the_base_as_before() {
     let prompt =
         fs::read_to_string(prepared.workspace.join(".sbxm-task").join("prompt.md")).unwrap();
     assert!(!prompt.contains("pull request #"), "{prompt}");
+    assert!(
+        prompt.contains("You are on branch issue-41, which started from main."),
+        "{prompt}"
+    );
+}
+
+#[test]
+fn a_custom_worker_template_using_base_still_renders() {
+    let mut f = fixture();
+    let template = f.env.tmp.path().join("my-worker.md");
+    fs::write(&template, "branch {{branch}} from {{base}}{{pr_context}}\n").unwrap();
+    f.config.prompts.worker = Some(template);
+    let backend = backend();
+    let github = FakeGitHub::default();
+    let source = source(&f);
+
+    let prepared =
+        pipeline::prepare(&ctx(&f, &source, &backend, &github), &issue_text(41)).unwrap();
+
+    let prompt =
+        fs::read_to_string(prepared.workspace.join(".sbxm-task").join("prompt.md")).unwrap();
+    assert_eq!(prompt, "branch issue-41 from main\n");
 }
 
 #[test]

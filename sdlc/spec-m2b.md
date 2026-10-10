@@ -110,6 +110,11 @@ Sandbox names: `sbxm-task-<id>-<harness>` (worker), `sbxm-task-<id>-review-<harn
 }
 ```
 
+`branch` is `issue-N` on a new branch from `base`. A task for an issue whose body starts with `PR: #m` continues PR
+m's own branch instead (decision 169): `branch` is that PR's branch, and the record also has
+`"continues": {"pr": m, "branch": "<the PR's branch>", "base": "<the commit the PR's branch was at when the task
+started>"}`. Absent (or `null`) for every other task.
+
 Stages and statuses:
 
 | `stage` | Entered when | `status` values while/after |
@@ -140,11 +145,11 @@ checkout (a GitHub URL is required; anything else is an error). `--base` default
 |---|---|---|
 | `task init [PATH]` | Writes a starter `sbxm-task.toml` (valid as written for a Rust repo), refuses to overwrite | exists: `not overwriting it` |
 | `task start (--issue N... \| --workers N)` | Section 5.1 | issue not open; blocked; question; clash; task exists |
-| `task status [--issue N \| --pr N] [--json]` | One line per task: stage, status, commits ahead of base, `result.md`/`review.md` present, `interrupted` | no such task |
+| `task status [--issue N \| --pr N] [--json]` | One line per task: stage, status, commits ahead of base (for a task that continues a PR, past the commit its branch started at, decision 169), `result.md`/`review.md` present, `interrupted` | no such task |
 | `task review (--issue N \| --pr N)` | Section 5.2 | gates fail; secret missing; fork PR |
 | `task gates --issue N [--tier sandbox\|host\|all] [--dry-run]` | Runs the tiers on the task's current state; `--dry-run` prints the commands and where they would run, changes nothing | worker still running |
 | `task file-findings (--issue N \| --pr N \| --file F) [--create]` | Files a review's findings as issues [134][149]; a dry run unless `--create` | file malformed; secret in a finding |
-| `task finish --issue N` | Pushes `issue-N` from `repo.git`, opens the PR (base = task base) with `Fixes #N`, `result.md` and `review.md` in the body | not `ready`; PR exists |
+| `task finish --issue N` | Pushes `issue-N` from `repo.git`, opens the PR (base = task base) with `Fixes #N`, `result.md` and `review.md` in the body; for a task that continues PR m, pushes to PR m's branch (fast-forward only) and comments on PR m instead of opening a PR (decision 169) | not `ready`; PR exists; a continued PR's branch moved or is gone |
 | `task rm (--issue N \| --pr N) [--yes]` | Removes sandboxes, clones and the task folder; asks first, showing the exact paths | task running |
 | `task run --issue N` | `start` then `review`; stops before `finish` [158] | those of both |
 
@@ -166,13 +171,16 @@ Output: human text by default; `status --json` prints the records. Exit codes: 0
 1. **Check before acting:** load config; resolve repo/base; secrets stored for the harnesses; profile exists and its
    kits validate (`kits::build`); `gh` works; the issue is open and passes selection [154]; no task with this id.
 2. **Prepare:** reserve the task folders; `repo.git` = bare clone of GitHub (user's git config allowed, section 6);
-   clone the workspace from `repo.git` at `--base`, switch to `issue-N`; set a repo-level `user.name`/`user.email`
+   clone the workspace from `repo.git` at `--base`, switch to `issue-N`, or, for an issue whose body starts with
+   `PR: #m` (PR m open and not a fork, checked in step 1), fetch PR m's head into `repo.git` as PR m's own branch and
+   clone the workspace on that branch, recording `continues` (decision 169, section 3); set a repo-level `user.name`/`user.email`
    from the host's global git config (the sandbox doesn't see it); write `issue.md` (`gh issue view`) and the worker
    prompt; create the sandbox (`backend.create`); stage `prepared`.
 3. **Work:** stage `working`; `headless::run` with the worker prompt, `time_limit` enforced in the sandbox [114].
    The prompt tells the agent the sandbox gate commands, to commit after each green step, to end the last commit with
    `Fixes #N`, not to push, and to write `.sbxm-task/result.md`. The agent has no GitHub access [141].
-4. **Collect:** a fixed command in the sandbox writes `git bundle create` of `issue-N` (relative to base) into the
+4. **Collect:** a fixed command in the sandbox writes `git bundle create` of the task's branch (relative to
+   `origin/<base>`, or for a task that continues a PR to the commit its branch started at, decision 169) into the
    workspace; the host verifies and fetches it into `repo.git` [159]; `result.md` and the transcript are copied to the
    task folder. Uncommitted changes in the clone are reported as a note (the agent may have ended early, #16).
 5. **Gate:** stage `gating`; run the tiers (section 7). On failure: status `gates-failed`, stop (the sandbox stays for
@@ -182,8 +190,8 @@ Output: human text by default; `status --json` prints the records. Exit codes: 0
 ### 5.2 `task review --issue N` and `--pr N`
 
 - **Issue:** requires a worker that has finished (not running, not interrupted). Gates run first (5.1 step 5) if
-  they haven't passed since the last change. Then the reviewer: a clone of `repo.git` at `issue-N` into
-  `tasks/<id>-review/`, its own sandbox, prompt with the issue text, `time_limit`, `review.md` written by the
+  they haven't passed since the last change. Then the reviewer: a clone of `repo.git` at the task branch
+  (`task.json`'s `branch`: `issue-N`, or PR m's branch for a continued task, decision 169) into `tasks/<id>-review/`, its own sandbox, prompt with the issue text, `time_limit`, `review.md` written by the
   reviewer; `Reviewer: <harness> (<model>)` and `Must-fix findings: <n>` lines parsed from it. If `n > 0` and no fix
   round was used: one fix round (the worker's sandbox, fix prompt with `review.md`), collect (5.1 step 4), gates, and
   one more review (`review-2.md`). Final stage `ready`. Reviewer sandbox and clone are removed afterwards, also on
@@ -210,9 +218,11 @@ Output: human text by default; `status --json` prints the records. Exit codes: 0
 
 - The agent's clone is never a cwd or `--git-dir` of a host git command. All host git runs against `repo.git`,
   `<base>/.sbxm/...` temp folders, or the clean checkouts that come from it.
-- Bundle step: `git -C <ws> bundle create <ws>/.sbxm-task/branch.bundle issue-N ^origin/<base>` runs **in the
-  sandbox** (an `exec` with a fixed argv). The host then runs `git bundle verify` and
-  `git fetch <bundle> refs/heads/issue-N:refs/heads/issue-N` inside `repo.git`, with hooks disabled
+- Bundle step: `git -C <ws> bundle create <ws>/.sbxm-task/branch.bundle <task-branch> ^origin/<base>` runs **in the
+  sandbox** (an `exec` with a fixed argv). `<task-branch>` is `task.json`'s `branch`: `issue-N` for a normal task;
+  for a task that continues a PR (decision 169) it is `continues.branch`, the PR's own branch, and the exclusion is
+  `^<continues.base>`, the commit that branch was at when the task started. The host then runs `git bundle verify`
+  and `git fetch <bundle> refs/heads/<task-branch>:refs/heads/<task-branch>` inside `repo.git`, with hooks disabled
   (`-c core.hooksPath=<empty dir>`), no recursive submodules, and a size cap (config constant, default 500 MB).
 - Network operations on `repo.git` (clone from GitHub, fetch a PR head, push) use the user's git configuration and
   credentials, because `repo.git` is host-owned. A new runner in `git.rs` does this; the hardened runner stays for
@@ -228,14 +238,14 @@ Output: human text by default; `status --json` prints the records. Exit codes: 0
   `[gates] timeout`; sandbox gates reuse the in-sandbox timeout wrapper (`timeout -v --kill-after=...` and the
   `-v` marker for timeouts, decision 123).
 - Order: sandbox tier in the worker's sandbox on its workspace (after the agent exits, so a stuck agent can't race
-  it); then, if `host` is non-empty, a clean checkout of `issue-N` from `repo.git` into `tasks/<id>-gates/` and
+  it); then, if `host` is non-empty, a clean checkout of the task branch from `repo.git` into `tasks/<id>-gates/` and
   the host commands there through `HostRunner`. The first failing command stops the phase.
 - Results go to `task.json` (`gates[]`) and `gates.log`; a failure is `gates-failed` [152].
 - A host command that outlives its timeout is killed together with what it started: its process tree on Windows,
   its process group on Unix (the shell leads a group of its own). What the command wrote before the timeout stays in
   `gates.log` even if a process that escaped the group still holds the pipe.
 - **A run of one tier is partial.** `task.json` also records which tiers the latest passing run covered and the
-  commit of `issue-N` in `repo.git` they ran against (`gate_run`). Review skips its own gate run only when the
+  commit of the task branch in `repo.git` they ran against (`gate_run`). Review skips its own gate run only when the
   record covers the sandbox tier and, if `host` is non-empty, the host tier, on the branch's current commit; otherwise
   it runs all tiers first. `--tier host` is refused unless the sandbox tier passed on that same commit (so host
   gates never run agent code the sandbox tier hasn't cleared). Before on-demand gates run, the commits in the worker's
@@ -287,7 +297,10 @@ trait GitHubBackend: Send + Sync {
 
 `prompts/worker.md`, `reviewer.md`, `fix.md` are ported from the script's text (`New-Prompt`, `New-ReviewPrompt`,
 `New-FixPrompt`), with `{{name}}` placeholders: `issue`, `number`, `branch`, `base`, `scope_base` (where the reviewer's scope starts: `origin/<base>`, or for a task that continues a PR the commit that PR's branch was at when the task started, so the reviewer sees only this task's commits), `repo`, `pr_context` (one sentence naming the PR whose branch
-the task continues, decision 169; empty otherwise), `gates_sandbox`,
+the task continues, decision 169; empty otherwise), `branch_context` (where the branch starts, completing "You are on
+branch {{branch}}, ...": "which started from <base>." for a new branch, or, for a task that continues a PR, that it is
+the PR's own branch with commits already on it, decision 169 and issue 107; the embedded worker prompt uses it instead
+of `base` and `pr_context`, which stay available to a repo's override), `gates_sandbox`,
 `gates_host`, `review_path`, `previous_review_path`. An unknown placeholder, or a placeholder with no value, is an
 error naming the template. The rendered prompt is written to the task folder so a run can be audited.
 

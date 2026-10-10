@@ -87,6 +87,7 @@ fn every_documented_name_is_known() {
         "base",
         "repo",
         "pr_context",
+        "branch_context",
         "gates_sandbox",
         "gates_host",
         "review_path",
@@ -110,6 +111,7 @@ fn values() -> Vec<(&'static str, &'static str)> {
         ("base", "main"),
         ("scope_base", "origin/main"),
         ("pr_context", ""),
+        ("branch_context", "which started from main."),
         ("gates_sandbox", "- `cargo test`"),
     ]
 }

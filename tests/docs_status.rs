@@ -51,3 +51,29 @@ fn decision_165_says_it_allows_factual_skill_updates_but_not_the_methodology() {
     assert!(text.contains("factual command and path updates"));
     assert!(text.contains("methodology stays frozen"));
 }
+
+/// Review M-1 (issue #108): section 6's bundle commands name the task's own branch, so a
+/// continued PR's bundle is created and fetched under that PR's branch, not `issue-N`.
+#[test]
+fn the_spec_bundle_commands_use_the_tasks_branch() {
+    let spec = read("sdlc/spec-m2b.md");
+    let section = spec
+        .split("## 6. Git trust boundary")
+        .nth(1)
+        .and_then(|s| s.split("\n## ").next())
+        .expect("the spec has section 6");
+
+    assert!(
+        section.contains("bundle create <ws>/.sbxm-task/branch.bundle <task-branch> ^"),
+        "bundle create does not name the task's branch"
+    );
+    assert!(
+        section.contains("refs/heads/<task-branch>:refs/heads/<task-branch>"),
+        "the fetch does not name the task's branch"
+    );
+    assert!(
+        !section.contains("refs/heads/issue-N"),
+        "a hard-coded issue-N ref is left"
+    );
+    assert!(section.contains("`continues.branch`"));
+}
