@@ -183,17 +183,24 @@ Output: human text by default; `status --json` prints the records. Exit codes: 0
    `origin/<base>`, or for a task that continues a PR to the commit its branch started at, decision 169) into the
    workspace; the host verifies and fetches it into `repo.git` [159]; `result.md` and the transcript are copied to the
    task folder. Uncommitted changes in the clone are reported as a note (the agent may have ended early, #16).
-5. **Gate:** stage `gating`; run the tiers (section 7). On failure: status `gates-failed`, stop with a failing exit
-   (the sandbox stays for inspection until `rm`); the next step printed is still `task review --issue N` (or
-   `--spec FILE`), which reruns the gates and gives a failure to a fix round (5.2, `gate-failure.md`). `start` itself
-   runs no fix round. `task run` goes on to the review after this failure, and stops only on any other failure
-   (decision 180).
+5. **Gate:** stage `gating`; run the tiers (section 7). On failure: status `gates-failed` either way (`task.json`
+   never distinguishes), stop with a failing exit (the sandbox stays for inspection until `rm`). When the failed gate
+   *ran* (a non-zero exit, or a timeout), the next step printed is still `task review --issue N` (or `--spec FILE`),
+   which reruns the gates and gives a failure to a fix round (5.2, `gate-failure.md`); `start` itself runs no fix
+   round; `task run` goes on to the review after this failure, and stops only on any other failure (decision 180).
+   When the failed gate **could not run at all** (the sandbox `exec` call errored, the host command couldn't be
+   started, or its clean checkout couldn't be made) — never inferred from `passed`, `exit` or the output text, only
+   ever set at the point each of those three happens — the line says so and why instead, names no next step, and
+   `task run` stops after this phase: a fix round would have nothing to react to, since nothing ran (issue 186).
 6. Print the next step (`task review --issue N`). `start` itself never reviews.
 
 ### 5.2 `task review --issue N` and `--pr N`
 
 - **Issue:** requires a worker that has finished (not running, not interrupted). Gates run first (5.1 step 5) if
-  they haven't passed since the last change. Then the reviewer: a clone of `repo.git` at the task branch
+  they haven't passed since the last change; a gate that ran and failed feeds a fix round and retries (counted
+  against the same budget), but a gate that could not run at all never does, whatever budget is left — the review
+  stops there at once, with a failing exit and a message saying so and why, naming `gates.log` (issue 186). Then the
+  reviewer: a clone of `repo.git` at the task branch
   (`task.json`'s `branch`: `issue-N`, or PR m's branch for a continued task, decision 169) into `tasks/<id>-review/`, its own sandbox, prompt with the issue text, `time_limit`, `review.md` written by the
   reviewer; `Reviewer: <harness> (<model>)` and `Must-fix findings: <n>` lines parsed from it. If `n > 0` and no fix
   round was used: one fix round (the worker's sandbox, fix prompt with `review.md`), collect (5.1 step 4), gates, and
@@ -243,7 +250,12 @@ Output: human text by default; `status --json` prints the records. Exit codes: 0
 - Order: sandbox tier in the worker's sandbox on its workspace (after the agent exits, so a stuck agent can't race
   it); then, if `host` is non-empty, a clean checkout of the task branch from `repo.git` into `tasks/<id>-gates/` and
   the host commands there through `HostRunner`. The first failing command stops the phase.
-- Results go to `task.json` (`gates[]`) and `gates.log`; a failure is `gates-failed` [152].
+- Results go to `task.json` (`gates[]`) and `gates.log`; a failure is `gates-failed` [152]. In memory only (never in
+  `task.json`), each outcome also carries whether the command could not run at all — the sandbox `exec` call errored,
+  the host command couldn't be started, or the clean checkout it needed couldn't be made — as opposed to one the
+  shell ran and that failed (a non-zero exit, including 127, or a timeout). The review's gate loop (5.2) uses this to
+  never spend a fix round on a gate that could not run (issue 186); `task gates` itself still just reports it as a
+  failure.
 - A host command that outlives its timeout is killed together with what it started: its process tree on Windows,
   its process group on Unix (the shell leads a group of its own). What the command wrote before the timeout stays in
   `gates.log` even if a process that escaped the group still holds the pipe.
