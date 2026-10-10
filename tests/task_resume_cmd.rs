@@ -330,3 +330,45 @@ fn the_largest_rounds_that_fit_are_added_exactly() {
         record::read(&record::task_dir(&f.env.base_dir(), "issue-41").join("task.json")).unwrap();
     assert_eq!(saved.fix_rounds, u32::MAX);
 }
+
+/// Issue 186: when the gates `task resume --rounds N` reruns after its fix round cannot run at
+/// all, the command fails saying so, with the reason and `gates.log`, and spends no further round.
+#[test]
+fn gates_that_cannot_run_fail_the_resume_with_the_reason_and_no_further_round() {
+    let f = config();
+    // One round: round 1 finds one, the fix round runs, round 2 still finds one: stopped.
+    let first = backend(&f, &[ONE, ONE]);
+    let mut prepared = worked_task(&f, &first);
+    let env = sbxm::task::pipeline::TaskEnv {
+        config_dir: &f.env.config_dir(),
+        config: &f.config,
+        backend: &first,
+        probe: &Gone,
+        host: &FakeHostRunner::default(),
+    };
+    sbxm::task::pipeline::review_issue(&env, &mut prepared).unwrap();
+    let red = backend(&f, &[CLEAN]).with_failing_exec_matching("cargo test");
+
+    let out = go(&f, &options(&f, Some(2)), &red, &Gone);
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(
+        message.contains("gates for issue-41 could not run: `cargo test`"),
+        "{message}"
+    );
+    assert!(message.contains("could not run the command"), "{message}");
+    assert!(message.contains("gates.log"), "{message}");
+    assert!(!message.contains("sbxm task resume"), "{message}");
+    assert!(
+        out.out.contains("issue-41: gates could not run"),
+        "{}",
+        out.out
+    );
+    assert!(!out.out.contains("review round"), "{}", out.out);
+    let meta = record::task_dir(&f.env.base_dir(), "issue-41");
+    let record = record::read(&meta.join("task.json")).unwrap();
+    assert_eq!(
+        record.round, 2,
+        "only the fix round from the stopped review ran, of the 2 more allowed"
+    );
+}

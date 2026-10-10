@@ -210,3 +210,32 @@ fn the_gate_failure_hint_quotes_a_spec_path_with_spaces() {
     let want = format!("sbxm task review --spec \"{}\"", spec.display());
     assert!(message.contains(&want), "{message}");
 }
+
+/// Issue 186: a gate that could not run at all gets no fix round, and the error says so with the
+/// reason and `gates.log` instead of the "fix it and review again" hint.
+#[test]
+fn a_gate_that_cannot_run_ends_the_spec_review_without_a_fix_round() {
+    let f = config();
+    let spec = spec_file(&f, "Build a thing.\n");
+    let (id, _) = record::spec_id(&spec).unwrap();
+    let good = backend_for(&f, &id, &[CLEAN]);
+    worked_spec_task(&f, &spec, &good);
+    let red = FakeBackend::with_secrets(&["anthropic", "openai"])
+        .with_failing_exec_matching("cargo test");
+
+    let out = go(&f, &options(&f, spec), &red, &FakeGitHub::default());
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(
+        message.contains(&format!("gates for {id} could not run: `cargo test`")),
+        "{message}"
+    );
+    assert!(message.contains("could not run the command"), "{message}");
+    assert!(message.contains("gates.log"), "{message}");
+    assert!(!message.contains("sbxm task review --spec"), "{message}");
+    assert!(out.out.contains("gates could not run"), "{}", out.out);
+    assert!(red.creates().is_empty(), "no reviewer sandbox");
+    let meta = record::task_dir(&f.env.base_dir(), &id);
+    let record = record::read(&meta.join("task.json")).unwrap();
+    assert_eq!(record.round, 0, "no fix round ran");
+}
