@@ -81,6 +81,35 @@ fn risk_reasons_are_read_from_their_own_section() {
     );
 }
 
+/// PR #178 review round 3, M-2: common manifests and lockfiles beyond Cargo, npm, Go, Ruby, PHP
+/// and Maven had no floor.
+#[test]
+fn common_dependency_files_of_other_ecosystems_get_the_medium_floor() {
+    for path in [
+        "pyproject.toml",
+        "uv.lock",
+        "build.gradle",
+        "app/build.gradle.kts",
+        "Package.swift",
+        "Package.resolved",
+        "src/App/App.csproj",
+        "packages.lock.json",
+        "pubspec.yaml",
+        "mix.lock",
+        "bun.lockb",
+        "flake.lock",
+    ] {
+        let (level, reasons) = floor(&[path.to_owned()], &built_in_rules());
+        assert_eq!(level, Level::Medium, "{path}");
+        assert!(
+            reasons
+                .iter()
+                .any(|r| r.contains("dependency manifest or lockfile")),
+            "{path}: {reasons:?}"
+        );
+    }
+}
+
 #[test]
 fn a_quoted_risk_section_in_code_gives_no_reasons() {
     let fenced = "Must-fix findings: 0\n\nRisk: low\n\n## Summary\n\n```markdown\n## Risk\n\n\
