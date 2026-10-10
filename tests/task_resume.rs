@@ -1234,6 +1234,34 @@ fn rounds_n_raises_the_budget_and_starts_a_fix_round_from_the_review() {
     assert_eq!(record.stopped, None, "a successful resume clears it");
 }
 
+/// Issue 186: the mandatory fix round `task resume --rounds N` starts from the stopped review
+/// still runs (it isn't skipped), but if the gates it then reruns cannot run at all, no further
+/// fix round is spent on it, however much budget `--rounds` just added.
+#[test]
+fn rounds_n_stops_at_once_when_the_gate_it_reruns_cannot_run() {
+    let f = config();
+    let mut prepared = stopped_task(&f, &[ONE, ONE]);
+    assert_eq!(prepared.record.stopped, Some(Stopped::RoundsExhausted));
+    let before_round = prepared.record.round;
+    let backend = backend(&f, &[CLEAN]).with_failing_exec_matching("cargo test");
+
+    let resumed = resume::resume(&env(&f, &backend, &Gone), &mut prepared, Some(2)).unwrap();
+
+    let report = resumed.review.expect("the review ran");
+    assert!(report.gates_could_not_run.is_some(), "{report:?}");
+    assert!(report.rounds.is_empty(), "no reviewer ran: {report:?}");
+    let record = saved(&f);
+    assert_eq!(
+        (record.stage, record.status),
+        (Stage::Gating, Status::GatesFailed)
+    );
+    assert_eq!(
+        record.round,
+        before_round + 1,
+        "only the mandatory fix round from the stopped review ran"
+    );
+}
+
 #[test]
 fn a_stopped_task_without_its_review_is_refused_before_anything_changes() {
     let f = config();

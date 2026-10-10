@@ -126,11 +126,18 @@ pub fn run(
     };
     let meta = record::task_dir(&base_dir, &id);
     if let Some(failed) = print_review(out, warn, &config, &id, &meta, report, &prepared.record)? {
-        bail!(
-            "gates failed for {id}: `{}`; fix it in the worker's clone and commit, then run \
-             `sbxm task resume {flag}` again",
-            failed.command
-        );
+        match &report.gates_could_not_run {
+            Some(reason) => bail!(
+                "gates for {id} could not run: `{}`; {reason}; see {}",
+                failed.command,
+                meta.join("gates.log").display()
+            ),
+            None => bail!(
+                "gates failed for {id}: `{}`; fix it in the worker's clone and commit, then run \
+                 `sbxm task resume {flag}` again",
+                failed.command
+            ),
+        }
     }
     match (report.must_fix_left, &opts.target) {
         (0, _) | (_, Target::Spec(_)) => writeln!(out, "  next: sbxm task finish {flag}")?,

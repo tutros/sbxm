@@ -232,6 +232,31 @@ fn failing_gates_fail_the_command_and_no_reviewer_runs() {
     assert!(red.creates().is_empty());
 }
 
+/// Issue 186: a gate that could not run at all never gets a fix round, even with the budget
+/// (here, the default 3) still open — unlike a gate that ran and failed (the test above).
+#[test]
+fn a_gate_that_cannot_run_ends_the_review_without_a_fix_round() {
+    let f = config("codex");
+    let good = backend(&f, &[CLEAN]);
+    worked_task(&f, &good);
+    let red = FakeBackend::with_secrets(&["anthropic", "openai"])
+        .with_failing_exec_matching("cargo test");
+
+    let out = go(&f, &options(&f), &red);
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("could not run"), "{message}");
+    assert!(message.contains("gates.log"), "{message}");
+    assert!(
+        out.out.contains("gates could not run") && out.out.contains("gates.log"),
+        "{}",
+        out.out
+    );
+    assert!(red.creates().is_empty(), "no reviewer sandbox");
+    let record = record::read(&meta(&f).join("task.json")).unwrap();
+    assert_eq!(record.round, 0, "no fix round ran");
+}
+
 #[test]
 fn a_reviewer_that_fails_fails_the_command() {
     let f = config("codex");
