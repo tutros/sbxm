@@ -121,19 +121,23 @@ pub fn saved_risk_level(saved: &str) -> Option<Level> {
 pub fn risk_reasons(review: &str) -> Vec<String> {
     let mut reasons = Vec::new();
     let mut in_section = false;
-    let mut fence: Option<&str> = None;
+    // The open fence's character and length: only a line of at least as many of the same
+    // character, and nothing else, closes it (CommonMark).
+    let mut fence: Option<(char, usize)> = None;
     for line in findings::lines_of(review) {
         let trimmed = line.trim();
         let indent = line.len() - line.trim_start_matches(' ').len();
         let is_code_indent = indent >= 4 || line.starts_with('\t');
-        if !is_code_indent
-            && let Some(marker) = ["```", "~~~"].into_iter().find(|m| trimmed.starts_with(m))
-        {
-            fence = match fence {
-                Some(open) if open == marker => None,
-                Some(open) => Some(open),
-                None => Some(marker),
-            };
+        if !is_code_indent && let Some((ch, len)) = fence_run(trimmed) {
+            match fence {
+                None => fence = Some((ch, len)),
+                Some((open, open_len))
+                    if ch == open && len >= open_len && trimmed[len..].trim().is_empty() =>
+                {
+                    fence = None
+                }
+                Some(_) => {}
+            }
             continue;
         }
         if fence.is_some() {
@@ -157,6 +161,14 @@ pub fn risk_reasons(review: &str) -> Vec<String> {
         }
     }
     reasons
+}
+
+/// The fence character and run length when `trimmed` starts a code fence (three or more
+/// backticks or tildes).
+fn fence_run(trimmed: &str) -> Option<(char, usize)> {
+    let ch = trimmed.chars().next().filter(|c| *c == '`' || *c == '~')?;
+    let len = trimmed.chars().take_while(|c| *c == ch).count();
+    (len >= 3).then_some((ch, len))
 }
 
 /// [`risk_reasons`] of a saved `review.md`, read past the [`with_header`] line.

@@ -120,6 +120,19 @@ fn a_quoted_risk_section_in_code_gives_no_reasons() {
     assert_eq!(risk_reasons(indented), Vec::<String>::new());
 }
 
+/// PR #178 review round 3, M-3: a shorter fence inside a longer one closed it early.
+#[test]
+fn a_shorter_fence_inside_a_longer_one_does_not_close_it() {
+    let review = "Must-fix findings: 0\n\nRisk: low\n\n## Summary\n\n````markdown\n```\n\
+        ## Risk\n- quoted, not an assessment\n```\n````\n\n## Risk\n\n- the real reason\n";
+    assert_eq!(risk_reasons(review), ["the real reason"]);
+    let tildes = "Risk: low\n\n~~~~\n~~~\n## Risk\n- quoted\n~~~\n~~~~~\n\n## Risk\n- real\n";
+    assert_eq!(risk_reasons(tildes), ["real"]);
+    // A line with an info string never closes a fence.
+    let info = "Risk: low\n\n```\n```rust\n## Risk\n- quoted\n```\n\n## Risk\n- real\n";
+    assert_eq!(risk_reasons(info), ["real"]);
+}
+
 #[test]
 fn only_the_first_real_risk_section_counts() {
     let review = "Must-fix findings: 0\n\nRisk: low\n\n## Risk\n\n- contained\n\n## Summary\n\n\
