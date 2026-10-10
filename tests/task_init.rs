@@ -77,6 +77,37 @@ fn the_starter_warns_that_host_gates_run_agent_code_on_this_machine() {
     );
 }
 
+/// PR #178 review round 3, S-1: `[risk]` (decisions 176(d), 179) was only in the README.
+#[test]
+fn the_starter_shows_the_risk_settings_and_they_load_once_uncommented() {
+    let tmp = TempDir::new().unwrap();
+    fs::write(tmp.path().join("Cargo.toml"), "[package]\n").unwrap();
+    task_init(tmp.path(), &[]).success();
+    let text = fs::read_to_string(tmp.path().join(FILE_NAME)).unwrap();
+
+    for key in ["# [risk]", "# replace = ", "# medium = ", "# high = "] {
+        assert!(text.contains(key), "{key}: {text}");
+    }
+    assert!(text.contains("case-insensitive"), "{text}");
+    let uncommented: String = text
+        .lines()
+        .map(|l| match l.strip_prefix("# ") {
+            Some(rest)
+                if rest.starts_with("[risk]")
+                    || ["replace =", "medium =", "high ="]
+                        .iter()
+                        .any(|k| rest.starts_with(k)) =>
+            {
+                rest
+            }
+            _ => l,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(tmp.path().join(FILE_NAME), uncommented).unwrap();
+    TaskConfig::load(tmp.path()).unwrap();
+}
+
 #[test]
 fn refuses_to_overwrite_and_leaves_the_file_alone() {
     let tmp = TempDir::new().unwrap();
