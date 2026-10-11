@@ -131,14 +131,9 @@ fn it_starts_then_reviews_and_stops_before_finish() {
     let s = spec(&f);
     let id = id_of(&s);
     let b = backend_for(&f, &id, &[CLEAN_REVIEW]);
+    let github = FakeGitHub::default();
 
-    let out = go(
-        &f,
-        &options(&f, s.clone()),
-        None,
-        &b,
-        &FakeGitHub::default(),
-    );
+    let out = go(&f, &options(&f, s.clone()), None, &b, &github);
 
     out.result.unwrap();
     let text = &out.out;
@@ -154,7 +149,7 @@ fn it_starts_then_reviews_and_stops_before_finish() {
     );
     assert_eq!(stage(&f, &id), (Stage::Ready, Status::Ok));
     // No GitHub call anywhere in this path.
-    assert!(FakeGitHub::default().calls().is_empty());
+    assert!(github.calls().is_empty(), "{:?}", github.calls());
 }
 
 /// Issue 140, decision 180(b): a post-worker gate failure doesn't stop `run --spec`; the review
