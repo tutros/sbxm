@@ -128,6 +128,9 @@ Everything else is **should fix** (or a nit), however true it is. These are neve
   holds even when a confirmed decision words the message: criterion 1's "contradicts a decision" is about what the
   tool does, not how fully it explains it. It is must-fix only when nothing is shown at all (a silent drop,
   decision 11) or the message sends the user to a wrong action.
+- A finding that needs something outside the command to change while it waits at a prompt (a file edited, a
+  secret removed, a sandbox stopped during a confirmation). It is should-fix, unless the spec or a decision
+  promises protection for that case (issue #206; decision 184 states it for `--restart`).
 - Speculative edge cases with no failing input, or hardening beyond the stated requirements.
 - Anything that is a preference between two workable designs: that is a **question**, not a finding.
 

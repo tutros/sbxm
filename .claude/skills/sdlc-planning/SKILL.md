@@ -31,6 +31,7 @@ Also:
 - If the user uses a term you don't know (a product, acronym, tool), **ask**. Don't guess. If they point to docs or a plugin, read them and summarize what matters for the design.
 - If an answer creates new questions, ask them in the next round before moving on.
 - "Don't know yet" is a valid answer: turn it into a spike (step 4).
+- An issue or task spec that an agent will build unattended (`sbxm task`) leaves no question open: answer each "to decide when building" point with the user and write the answer into the issue or spec before the task starts (issue #206). The worker can't ask.
 
 ## Step 3: Log decisions right away
 
