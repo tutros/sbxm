@@ -208,7 +208,13 @@ fn a_pair_that_never_ran_has_a_result_json_but_no_output_files() {
 
     let ran = go(&env, &format!("{TASK}{TWO_CLAUDES}"), &backend);
 
-    let id = ran.summary.unwrap().run_id;
+    // The run fails because no pair could be run (decision 181); its results are saved all the same.
+    let errored = ran.summary.unwrap_err();
+    let id = errored
+        .downcast::<run::PairsErrored>()
+        .unwrap()
+        .summary
+        .run_id;
     let dir = meta(&env, &id).join("0/0");
     let result = read_json(&dir.join("result.json"));
     assert_eq!(result["status"], "error");

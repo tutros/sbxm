@@ -22,8 +22,38 @@ pub struct Summary {
     pub outcomes: Vec<PairOutcome>,
 }
 
+impl Summary {
+    /// Pairs sbxm could not run at all (`PairOutcome::result` is `Err`: seeding, sandbox
+    /// creation or the exec itself failed), as opposed to one that ran and timed out or that the
+    /// harness reported failing, which is a result, not an error (issue #126c).
+    pub fn errored_pairs(&self) -> usize {
+        self.outcomes.iter().filter(|o| o.result.is_err()).count()
+    }
+}
+
+/// The error of a run that finished, printed and saved everything, but had pairs sbxm could not
+/// run (decision 181). It carries the run's summary, which is otherwise complete.
+#[derive(Debug)]
+pub struct PairsErrored {
+    pub summary: Summary,
+}
+
+impl std::fmt::Display for PairsErrored {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} of {} contestant runs ended in error",
+            self.summary.errored_pairs(),
+            self.summary.outcomes.len()
+        )
+    }
+}
+
+impl std::error::Error for PairsErrored {}
+
 /// Runs the comparison in `config_path`, printing the run ID and one line per
-/// pair to `out` and warnings to `warn`.
+/// pair to `out` and warnings to `warn`. Fails with [`PairsErrored`], after all of that, when a
+/// pair could not be run.
 pub fn run(
     config_dir: &Path,
     config_path: &Path,
@@ -295,10 +325,16 @@ fn run_with(
         )?;
     }
     writeln!(out, "Results: {}", roots.meta.display())?;
-    Ok(Summary {
+    let summary = Summary {
         run_id: roots.id,
         outcomes,
-    })
+    };
+    // Last, after everything is printed and saved: the run fails if a pair could not be run, so
+    // the process exits non-zero the way every failing command does (decision 181).
+    if summary.errored_pairs() > 0 {
+        return Err(PairsErrored { summary }.into());
+    }
+    Ok(summary)
 }
 
 /// ` repeat 2/3` when the run repeats, empty otherwise.

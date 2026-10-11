@@ -211,7 +211,12 @@ fn go(checks_toml: &str, backend: &FakeBackend) -> Ran {
     )
     .unwrap();
     let (mut out, mut warn) = (Vec::new(), Vec::new());
-    let summary = run::run(&env.config_dir(), &path, backend, &mut out, &mut warn).unwrap();
+    // A run with a pair that could not be run fails (decision 181), but its summary is complete:
+    // these tests are about the checks, so they take it either way.
+    let summary = match run::run(&env.config_dir(), &path, backend, &mut out, &mut warn) {
+        Ok(summary) => summary,
+        Err(e) => e.downcast::<run::PairsErrored>().unwrap().summary,
+    };
     Ran {
         env,
         summary,

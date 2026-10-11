@@ -201,7 +201,6 @@ fn a_backend_error_is_reported_per_pair_and_cleaned_up() {
 
     let ran = go(&env, &format!("{TASK}{TWO_CLAUDES}"), &backend);
 
-    ran.result.unwrap();
     assert!(
         ran.out
             .contains("contestants[0] claude/one: error: cannot create sandbox"),
@@ -210,6 +209,70 @@ fn a_backend_error_is_reported_per_pair_and_cleaned_up() {
     );
     // The half-made sandboxes are removed anyway.
     assert_eq!(backend.removes().len(), 2);
+    // Every pair errored, so the run itself fails (decision 181).
+    let err = ran.result.unwrap_err();
+    assert_eq!(err.to_string(), "2 of 2 contestant runs ended in error");
+    let errored = err.downcast::<run::PairsErrored>().unwrap();
+    assert_eq!(errored.summary.outcomes.len(), 2);
+}
+
+#[test]
+fn one_errored_pair_is_counted_against_the_total_the_other_pair_still_completing() {
+    let env = Env::new();
+    // Contestant "two"'s headless command has `--model two` in its argv, so only its exec fails.
+    let backend = pong().with_failing_exec_matching("two");
+
+    let ran = go(&env, &format!("{TASK}{TWO_CLAUDES}"), &backend);
+
+    assert!(
+        ran.out.contains("contestants[0] claude/one: completed"),
+        "{}",
+        ran.out
+    );
+    assert!(
+        ran.out.contains("contestants[1] claude/two: error:"),
+        "{}",
+        ran.out
+    );
+    // Everything still got saved and printed (decision 16): the run isn't aborted by the error.
+    let last = ran.out.lines().last().unwrap();
+    assert!(last.starts_with("Results: "), "{}", ran.out);
+    // Only then does the run fail, which is what gives the process its exit status (decision 181).
+    let err = ran.result.unwrap_err();
+    assert_eq!(err.to_string(), "1 of 2 contestant runs ended in error");
+    let errored = err.downcast::<run::PairsErrored>().unwrap();
+    assert_eq!(errored.summary.errored_pairs(), 1);
+    assert_eq!(errored.summary.outcomes.len(), 2);
+}
+
+#[test]
+fn a_timed_out_or_harness_failed_pair_alone_reports_no_errors() {
+    let env = Env::new();
+
+    let timed_out = go(
+        &env,
+        &format!("{TASK}{TWO_CLAUDES}"),
+        &scripted(
+            CLAUDE_PONG,
+            "timeout: sending signal TERM to command 'claude'\n",
+            124,
+        ),
+    );
+    assert_eq!(timed_out.result.unwrap().errored_pairs(), 0);
+    assert!(
+        !timed_out.warn.contains("ended in error"),
+        "{}",
+        timed_out.warn
+    );
+
+    let env = Env::new();
+    let failed = go(
+        &env,
+        &format!("{TASK}{TWO_CLAUDES}"),
+        &scripted("", "boom\n", 1),
+    );
+    assert_eq!(failed.result.unwrap().errored_pairs(), 0);
+    assert!(!failed.warn.contains("ended in error"), "{}", failed.warn);
 }
 
 #[test]

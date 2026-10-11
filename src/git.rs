@@ -21,7 +21,9 @@ const BASELINE_DATE: &str = "2000-01-01T00:00:00+0000";
 
 /// How often a git call that Windows refused with "Permission denied" is tried,
 /// and how long to wait before the second try (it doubles after each failure).
-const TRIES: u32 = 5;
+/// 8 tries wait about 6.4 s in total before the last one (issue #126: 5 tries,
+/// 750 ms total, ran out under load from a concurrent `cargo test`).
+const TRIES: u32 = 8;
 const FIRST_DELAY: Duration = Duration::from_millis(50);
 
 /// Runs `attempt` until it succeeds, fails for any reason but git being refused
@@ -147,14 +149,26 @@ pub(crate) fn run(
 ) -> Result<String> {
     let out = output(cwd, git_dir, work_tree, args)?;
     if !out.status.success() {
-        bail!(
-            "`git {}` failed ({}): {}",
-            args.join(" "),
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        bail!(failure_message(args, &out));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// `git <args>` failed with `out`. A still-permission-denied failure can only be the last of
+/// [`TRIES`] tries ([`retry`]'s invariant), so the message names that count; any other failure
+/// reads as it always has, since it was never retried.
+fn failure_message(args: &[&str], out: &Output) -> String {
+    let tries = if permission_denied(out) {
+        format!(" (tried {TRIES} times)")
+    } else {
+        String::new()
+    };
+    format!(
+        "`git {}` failed ({}){tries}: {}",
+        args.join(" "),
+        out.status,
+        String::from_utf8_lossy(&out.stderr).trim()
+    )
 }
 
 /// The `GIT_*` variables that keep working for [`user_output`]: where the user's own
@@ -351,6 +365,26 @@ mod tests {
         assert_eq!(calls.get(), 3);
     }
 
+    /// The real `TRIES` budget (issue #126: `TRIES = 5` gave up after 750 ms under load on
+    /// Windows); a tiny delay keeps the test fast while using the real try count.
+    #[test]
+    fn the_real_try_budget_survives_seven_failures_in_a_row() {
+        let calls = Cell::new(0);
+
+        let out = retry(TRIES, Duration::ZERO, || {
+            calls.set(calls.get() + 1);
+            Ok(if calls.get() < 8 {
+                failed(128, DENIED)
+            } else {
+                failed(0, "")
+            })
+        })
+        .unwrap();
+
+        assert!(out.status.success());
+        assert_eq!(calls.get(), 8);
+    }
+
     /// `git fetch` reports a pack it could not move into place with exit code 1, not 128 (seen
     /// in `task start` tests under load, issue #104).
     const PACK_DENIED: &str = "error: unable to write file repo.git/objects/pack/pack-1.pack: Permission denied\nfatal: unable to rename temporary '*.pack' file to 'repo.git/objects/pack/pack-1.pack'\nerror: index-pack died";
@@ -386,6 +420,28 @@ mod tests {
         assert!(!out.status.success());
         assert!(String::from_utf8_lossy(&out.stderr).contains("Permission denied"));
         assert_eq!(calls.get(), 4);
+    }
+
+    /// `git::run`'s message names the real try budget for a permission-denied failure that
+    /// exhausted it (the invariant [`retry`] establishes: a failing, still-permission-denied
+    /// `Output` can only be the last of `TRIES` tries, since any earlier one that was still
+    /// permission-denied would have kept retrying), so the next report can tell "ran out" apart
+    /// from "never retried" (issue #126).
+    #[test]
+    fn a_permission_denied_failure_names_how_many_tries_were_made() {
+        let message = failure_message(&["add", "-A"], &failed(128, DENIED));
+
+        assert!(
+            message.contains(&format!("tried {TRIES} times")),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_failure_for_another_reason_does_not_mention_tries() {
+        let message = failure_message(&["status"], &failed(128, "fatal: not a git repository"));
+
+        assert!(!message.contains("tried"), "{message}");
     }
 
     #[test]
