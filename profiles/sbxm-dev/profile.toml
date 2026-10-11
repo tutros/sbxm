@@ -34,5 +34,5 @@ command = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- 
 user = "agent"
 description = "install Rust 1.93.0 with rustfmt and clippy"
 
-# Not installed: PowerShell, Pester and `just` (decision 182). The task gates only run cargo, and the three
+# Not installed: PowerShell, Pester and `just` (decision 183). The task gates only run cargo, and the three
 # cost about 100 s on every sandbox. A change to `scripts/` is tested on the host with `just script-test`.
