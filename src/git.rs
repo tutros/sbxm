@@ -21,7 +21,9 @@ const BASELINE_DATE: &str = "2000-01-01T00:00:00+0000";
 
 /// How often a git call that Windows refused with "Permission denied" is tried,
 /// and how long to wait before the second try (it doubles after each failure).
-const TRIES: u32 = 5;
+/// 8 tries wait about 6.4 s in total before the last one (issue #126: 5 tries,
+/// 750 ms total, ran out under load from a concurrent `cargo test`).
+const TRIES: u32 = 8;
 const FIRST_DELAY: Duration = Duration::from_millis(50);
 
 /// Runs `attempt` until it succeeds, fails for any reason but git being refused
@@ -349,6 +351,26 @@ mod tests {
 
         assert!(out.status.success());
         assert_eq!(calls.get(), 3);
+    }
+
+    /// The real `TRIES` budget (issue #126: `TRIES = 5` gave up after 750 ms under load on
+    /// Windows); a tiny delay keeps the test fast while using the real try count.
+    #[test]
+    fn the_real_try_budget_survives_seven_failures_in_a_row() {
+        let calls = Cell::new(0);
+
+        let out = retry(TRIES, Duration::ZERO, || {
+            calls.set(calls.get() + 1);
+            Ok(if calls.get() < 8 {
+                failed(128, DENIED)
+            } else {
+                failed(0, "")
+            })
+        })
+        .unwrap();
+
+        assert!(out.status.success());
+        assert_eq!(calls.get(), 8);
     }
 
     /// `git fetch` reports a pack it could not move into place with exit code 1, not 128 (seen
