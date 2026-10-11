@@ -201,7 +201,7 @@ fn a_backend_error_is_reported_per_pair_and_cleaned_up() {
 
     let ran = go(&env, &format!("{TASK}{TWO_CLAUDES}"), &backend);
 
-    ran.result.unwrap();
+    let summary = ran.result.unwrap();
     assert!(
         ran.out
             .contains("contestants[0] claude/one: error: cannot create sandbox"),
@@ -210,6 +210,62 @@ fn a_backend_error_is_reported_per_pair_and_cleaned_up() {
     );
     // The half-made sandboxes are removed anyway.
     assert_eq!(backend.removes().len(), 2);
+    // Every pair errored (issue #126c).
+    assert_eq!(summary.errored_pairs(), 2);
+    assert_eq!(summary.outcomes.len(), 2);
+}
+
+#[test]
+fn one_errored_pair_is_counted_against_the_total_the_other_pair_still_completing() {
+    let env = Env::new();
+    // Contestant "two"'s headless command has `--model two` in its argv, so only its exec fails.
+    let backend = pong().with_failing_exec_matching("two");
+
+    let ran = go(&env, &format!("{TASK}{TWO_CLAUDES}"), &backend);
+
+    let summary = ran.result.unwrap();
+    assert!(
+        ran.out.contains("contestants[0] claude/one: completed"),
+        "{}",
+        ran.out
+    );
+    assert!(
+        ran.out.contains("contestants[1] claude/two: error:"),
+        "{}",
+        ran.out
+    );
+    assert_eq!(summary.errored_pairs(), 1);
+    assert_eq!(summary.outcomes.len(), 2);
+    // Everything still got saved and printed (decision 16): the run isn't aborted by the error.
+    assert!(ran.out.contains("Results: "), "{}", ran.out);
+}
+
+#[test]
+fn a_timed_out_or_harness_failed_pair_alone_reports_no_errors() {
+    let env = Env::new();
+
+    let timed_out = go(
+        &env,
+        &format!("{TASK}{TWO_CLAUDES}"),
+        &scripted(
+            CLAUDE_PONG,
+            "timeout: sending signal TERM to command 'claude'\n",
+            124,
+        ),
+    )
+    .result
+    .unwrap();
+    assert_eq!(timed_out.errored_pairs(), 0);
+
+    let env = Env::new();
+    let failed = go(
+        &env,
+        &format!("{TASK}{TWO_CLAUDES}"),
+        &scripted("", "boom\n", 1),
+    )
+    .result
+    .unwrap();
+    assert_eq!(failed.errored_pairs(), 0);
 }
 
 #[test]

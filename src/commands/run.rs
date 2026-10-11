@@ -22,6 +22,15 @@ pub struct Summary {
     pub outcomes: Vec<PairOutcome>,
 }
 
+impl Summary {
+    /// Pairs sbxm could not run at all (`PairOutcome::result` is `Err`: seeding, sandbox
+    /// creation or the exec itself failed), as opposed to one that ran and timed out or that the
+    /// harness reported failing, which is a result, not an error (issue #126c).
+    pub fn errored_pairs(&self) -> usize {
+        self.outcomes.iter().filter(|o| o.result.is_err()).count()
+    }
+}
+
 /// Runs the comparison in `config_path`, printing the run ID and one line per
 /// pair to `out` and warnings to `warn`.
 pub fn run(
