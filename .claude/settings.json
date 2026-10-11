@@ -1,4 +1,24 @@
 {
+  "permissions": {
+    "allow": [
+      "Bash(gh issue view *)",
+      "Bash(gh issue list *)",
+      "Bash(gh pr view *)",
+      "Bash(gh pr list *)",
+      "Bash(gh pr diff *)",
+      "Bash(gh pr checks *)",
+      "Bash(sbx ls *)",
+      "Bash(sbx template ls *)",
+      "PowerShell(gh issue view *)",
+      "PowerShell(gh issue list *)",
+      "PowerShell(gh pr view *)",
+      "PowerShell(gh pr list *)",
+      "PowerShell(gh pr diff *)",
+      "PowerShell(gh pr checks *)",
+      "PowerShell(sbx ls *)",
+      "PowerShell(sbx template ls *)"
+    ]
+  },
   "hooks": {
     "PreToolUse": [
       {
