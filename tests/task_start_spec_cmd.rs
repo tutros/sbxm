@@ -310,3 +310,26 @@ fn a_gate_failure_names_the_review_as_the_next_step() {
     assert!(message.contains(&want), "{message}");
     assert!(!message.contains("worker's clone"), "{message}");
 }
+
+/// Issue 186: a gate that could not run at all is never named with a next step, unlike one that
+/// ran and failed (the test above).
+#[test]
+fn a_gate_that_cannot_run_does_not_name_the_review_as_the_next_step() {
+    let f = fixture();
+    let spec = spec_file(&f, "Build a thing.\n");
+    let (id, _) = record::spec_id(&spec).unwrap();
+    let backend = playing(&f, &id).with_failing_exec_matching("cargo test");
+
+    let out = run(
+        &f,
+        &options(&f, spec.clone()),
+        &backend,
+        &FakeGitHub::default(),
+    );
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("gates could not run"), "{message}");
+    assert!(message.contains("cargo test"), "{message}");
+    let not_wanted = format!("next: sbxm task review --spec {}", spec.display());
+    assert!(!message.contains(&not_wanted), "{message}");
+}

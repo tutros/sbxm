@@ -59,6 +59,10 @@ fn the_first_failing_host_command_stops_the_tier() {
     assert_eq!(outcomes[1].result.exit, Some(2));
     assert!(!outcomes[1].result.passed);
     assert!(outcomes[1].output_tail.contains("boom"));
+    assert!(
+        !outcomes[1].could_not_run,
+        "an exit the shell reported is a command that ran and failed (issue 186)"
+    );
     assert_eq!(runner.calls().len(), 2, "cargo doc must not run");
 }
 
@@ -73,6 +77,10 @@ fn a_host_command_that_times_out_or_cannot_start_is_a_failure() {
         Duration::from_secs(1),
     );
     assert!(outcomes[0].timed_out && !outcomes[0].result.passed);
+    assert!(
+        !outcomes[0].could_not_run,
+        "a timeout is the shell reporting back, not a command that never ran (issue 186)"
+    );
 
     let runner = FakeHostRunner::default().with_start_error("nope", "no such shell");
     let outcomes = run_host_tier(
@@ -88,6 +96,10 @@ fn a_host_command_that_times_out_or_cannot_start_is_a_failure() {
         outcomes[0].output_tail.contains("no such shell"),
         "{}",
         outcomes[0].output_tail
+    );
+    assert!(
+        outcomes[0].could_not_run,
+        "issue 186: the host couldn't even start the command"
     );
 }
 

@@ -218,12 +218,19 @@ impl std::fmt::Display for GatesFailed {
 impl std::error::Error for GatesFailed {}
 
 /// Whether a task failed only because its gates ran and failed, the one failure [`GatesFailed`]
-/// stands for. `gates` is the gate run after the worker, if there was one: whether it passed, or
-/// `None` when the gate run itself returned an error, which is not a gate failure and stops
-/// `task run`. A gate command that could not be executed is a failed gate here, like one that ran
-/// and failed (`gates.rs` records both the same way; issue 186).
-fn only_gates_failed(worker_failed: bool, gates: Option<Option<bool>>) -> bool {
-    !worker_failed && gates == Some(Some(false))
+/// stands for. `gates` is the gate run after the worker, if there was one: `Some(Ok(gated))` when
+/// the run itself completed (whether or not every gate passed), `Some(Err(_))` when the gate run
+/// itself returned an error, which is not a gate failure and stops `task run`, or `None` when
+/// there was no gate run (the worker failed first). A gate that could not run at all (issue 186)
+/// does not count either: the review would have nothing to react to, so the plain error is
+/// returned instead and `task run` stops after the start phase.
+fn only_gates_failed(worker_failed: bool, gates: Option<&Result<pipeline::Gated>>) -> bool {
+    !worker_failed
+        && matches!(
+            gates,
+            Some(Ok(gated)) if !gated.passed
+                && !gated.failed_outcome().is_some_and(|o| o.could_not_run)
+        )
 }
 
 fn plural(n: u32, word: &str) -> String {
@@ -374,8 +381,10 @@ pub fn run_with(
                 }
                 // `gates_ok`: the gates passed (or none were configured); a failed worker has none.
                 let mut gates_ok = !bad;
-                let gates = report.gates.as_ref();
-                if only_gates_failed(bad, gates.map(|g| g.as_ref().map(|g| g.passed).ok())) {
+                // Set when the failed gate could not run at all (issue 186): the review would have
+                // nothing to react to, so `task run` must not go on to it.
+                let mut gate_could_not_run = false;
+                if only_gates_failed(bad, report.gates.as_ref()) {
                     gates_failed += 1;
                 }
                 match &report.gates {
@@ -401,16 +410,33 @@ pub fn run_with(
                     Some(Ok(gated)) => {
                         gates_ok = false;
                         if let Some(first) = &gated.failed {
-                            let exit = first
-                                .exit
-                                .map_or_else(|| "no exit code".to_owned(), |c| format!("exit {c}"));
-                            writeln!(
-                                out,
-                                "  gates: failed: `{}` ({}, {exit}); output in {}",
-                                first.command,
-                                first.tier,
-                                record::task_dir(&base_dir, &id).join("gates.log").display()
-                            )?;
+                            let log = record::task_dir(&base_dir, &id).join("gates.log");
+                            match gated.failed_outcome().filter(|o| o.could_not_run) {
+                                Some(outcome) => {
+                                    gate_could_not_run = true;
+                                    writeln!(
+                                        out,
+                                        "  gates: could not run: `{}` ({}); {}; see {}",
+                                        first.command,
+                                        first.tier,
+                                        outcome.output_tail,
+                                        log.display()
+                                    )?;
+                                }
+                                None => {
+                                    let exit = first.exit.map_or_else(
+                                        || "no exit code".to_owned(),
+                                        |c| format!("exit {c}"),
+                                    );
+                                    writeln!(
+                                        out,
+                                        "  gates: failed: `{}` ({}, {exit}); output in {}",
+                                        first.command,
+                                        first.tier,
+                                        log.display()
+                                    )?;
+                                }
+                            }
                         }
                     }
                     Some(Err(e)) => {
@@ -424,8 +450,12 @@ pub fn run_with(
                     writeln!(out, "  see: sbxm task status --issue {}", report.number)?;
                 } else if !gates_ok {
                     failed += 1;
-                    // The review reruns the gates and gives a failure to a fix round (decision 180).
-                    writeln!(out, "  next: sbxm task review --issue {}", report.number)?;
+                    // The review reruns the gates and gives a failure to a fix round (decision
+                    // 180) — but only for a gate that ran and failed; one that could not run at
+                    // all would give the review nothing to react to (issue 186).
+                    if !gate_could_not_run {
+                        writeln!(out, "  next: sbxm task review --issue {}", report.number)?;
+                    }
                 } else {
                     writeln!(out, "  next: sbxm task review --issue {}", report.number)?;
                 }
@@ -575,34 +605,94 @@ pub fn run_spec(
         writeln!(out, "  next: sbxm task review {}", spec_flag(&opts.spec))?;
         Ok(())
     } else {
-        let first = gated.failed.expect("failed gates name the first failure");
-        let exit = first
-            .exit
-            .map_or_else(|| "no exit code".to_owned(), |c| format!("exit {c}"));
-        bail!(
-            "{id}: gates failed: `{}` ({}, {exit}); next: sbxm task review {} (it reruns the \
-             gates and gives a failure to a fix round)",
-            first.command,
-            first.tier,
-            spec_flag(&opts.spec)
-        )
+        let first = gated
+            .failed
+            .clone()
+            .expect("failed gates name the first failure");
+        // A gate that could not run at all gives the review nothing to react to, so it is not
+        // named as the next step (issue 186).
+        match gated.failed_outcome().filter(|o| o.could_not_run) {
+            Some(outcome) => bail!(
+                "{id}: gates could not run: `{}` ({}); {}",
+                first.command,
+                first.tier,
+                outcome.output_tail
+            ),
+            None => {
+                let exit = first
+                    .exit
+                    .map_or_else(|| "no exit code".to_owned(), |c| format!("exit {c}"));
+                bail!(
+                    "{id}: gates failed: `{}` ({}, {exit}); next: sbxm task review {} (it reruns \
+                     the gates and gives a failure to a fix round)",
+                    first.command,
+                    first.tier,
+                    spec_flag(&opts.spec)
+                )
+            }
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{only_gates_failed, path_arg};
+    use crate::task::gates::GateOutcome;
+    use crate::task::pipeline::Gated;
+    use crate::task::record::GateResult;
     use std::path::Path;
 
+    fn gate_result(passed: bool) -> GateResult {
+        GateResult {
+            phase: "after-worker".into(),
+            tier: "sandbox".into(),
+            command: "cargo test".into(),
+            exit: if passed { Some(0) } else { Some(1) },
+            passed,
+        }
+    }
+
+    /// A one-gate [`Gated`]: `passed`, and (when it failed) whether it could not run at all.
+    fn fake_gated(passed: bool, could_not_run: bool) -> Gated {
+        let result = gate_result(passed);
+        Gated {
+            passed,
+            failed: (!passed).then(|| result.clone()),
+            outcomes: vec![GateOutcome {
+                result,
+                output_tail: "could not run the command: no such file\n".into(),
+                timed_out: false,
+                could_not_run,
+            }],
+        }
+    }
+
     /// Review of PR 184, M-1 (decision 180): `task run` goes on to the review only after gates
-    /// that ran and failed, never after gates that could not run or a failed worker.
+    /// that ran and failed, never after gates that could not run or a failed worker. Issue 186:
+    /// a gate command that could not be executed at all does not count either, even though
+    /// `Gated::passed` is `false` for it the same as a gate that ran and failed.
     #[test]
     fn only_gates_that_ran_and_failed_after_a_working_worker_count_as_a_gate_failure() {
-        assert!(only_gates_failed(false, Some(Some(false))));
-        assert!(!only_gates_failed(false, Some(None)), "could not run");
-        assert!(!only_gates_failed(false, Some(Some(true))), "passed");
+        let ran_and_failed = Ok(fake_gated(false, false));
+        let could_not_run = Ok(fake_gated(false, true));
+        let passed = Ok(fake_gated(true, false));
+        let run_errored = Err(anyhow::anyhow!("no worker"));
+
+        assert!(only_gates_failed(false, Some(&ran_and_failed)));
+        assert!(
+            !only_gates_failed(false, Some(&could_not_run)),
+            "could not run"
+        );
+        assert!(!only_gates_failed(false, Some(&passed)), "passed");
+        assert!(
+            !only_gates_failed(false, Some(&run_errored)),
+            "the gate run itself errored"
+        );
         assert!(!only_gates_failed(false, None), "no gate run");
-        assert!(!only_gates_failed(true, Some(Some(false))), "worker failed");
+        assert!(
+            !only_gates_failed(true, Some(&ran_and_failed)),
+            "worker failed"
+        );
     }
 
     /// What the platform's shell makes of `arg` as one argument: PowerShell on Windows (the

@@ -227,6 +227,67 @@ fn failing_gates_after_the_worker_go_on_to_the_review_and_its_fix_round() {
     assert!(gate_output.contains("oops"), "{gate_output}");
 }
 
+/// Issue 186: unlike a gate that ran and failed, one that could not run at all gives the review
+/// nothing to react to, so `task run` stops after the start phase instead of going on to it.
+#[test]
+fn a_sandbox_gate_that_cannot_run_stops_before_any_reviewer() {
+    let f = config();
+    let b = backend(&f, &[CLEAN]).with_failing_exec_matching("cargo test");
+
+    let out = go(&f, &options(&f), None, &b, &github());
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("1 of 1"), "{message}");
+    // The start step's own report says the worker ran and the gate could not run.
+    assert!(
+        out.out.contains("issue-41: worker completed"),
+        "{}",
+        out.out
+    );
+    assert!(out.out.contains("gates: could not run"), "{}", out.out);
+    assert!(!out.out.contains("next: sbxm task review"), "{}", out.out);
+    assert_eq!(stage(&f), (Stage::Gating, Status::GatesFailed));
+    assert_eq!(count(&b, "codex"), 0, "no reviewer ran");
+    assert_eq!(b.creates().len(), 1, "no reviewer sandbox");
+}
+
+/// Issue 186, the host tier: a gate command the host couldn't even start behaves the same as one
+/// the sandbox couldn't run. `task start`'s own gate run always uses the real shell (it has no
+/// `HostRunner` parameter to fake), so `nope` there is "command not found" (exit 127: the shell
+/// did run) and goes on to the review as today (decision 180); the fake `HostRunner` only reaches
+/// the review's own gate run, through `task run`'s `host` parameter, which is where issue 186's
+/// distinction is visible: it stops the review without a fix round.
+#[test]
+fn a_host_gate_that_cannot_start_stops_before_any_reviewer() {
+    let f = fixture_with(
+        "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = [\"cargo test\"]\nhost = [\"nope\"]\n\n\
+         [reviewer]\nharness = \"codex\"\n",
+    );
+    let b = backend(&f, &[CLEAN]);
+    let host = FakeHostRunner::default().with_start_error("nope", "no such shell");
+
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let result = run(
+        &f.env.config_dir(),
+        &options(&f),
+        None,
+        &b,
+        &github(),
+        &Probe,
+        &host,
+        &mut out,
+        &mut warn,
+    );
+    let out = String::from_utf8(out).unwrap();
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(message.contains("could not run"), "{message}");
+    assert!(message.contains("no such shell"), "{message}");
+    assert!(out.contains("gates could not run"), "{out}");
+    assert!(!out.contains("next: sbxm task review"), "{out}");
+    assert_eq!(count(&b, "codex"), 0, "no reviewer ran");
+}
+
 #[test]
 fn a_failed_worker_stops_before_any_reviewer_and_fails_the_command() {
     let f = config();

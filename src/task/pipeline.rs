@@ -980,6 +980,14 @@ pub struct Gated {
     pub outcomes: Vec<GateOutcome>,
 }
 
+impl Gated {
+    /// The outcome behind `failed`, if any (issue 186): carries `could_not_run` and the reason
+    /// text, which never reach `task.json`.
+    pub fn failed_outcome(&self) -> Option<&GateOutcome> {
+        self.outcomes.iter().find(|o| !o.result.passed)
+    }
+}
+
 fn gates_log_entry(phase: &str, outcomes: &[GateOutcome]) -> String {
     if outcomes.is_empty() {
         return format!("== {phase}: no gates configured\n\n");
@@ -1124,6 +1132,7 @@ fn host_gate_outcomes(env: &TaskEnv, prepared: &mut Prepared, phase: &str) -> Ve
             },
             output_tail: format!("{e:#}"),
             timed_out: false,
+            could_not_run: true,
         }],
     }
 }
@@ -1702,8 +1711,14 @@ pub struct ReviewReport {
     pub rounds: Vec<Reviewed>,
     /// Whether at least one fix round ran.
     pub fix_ran: bool,
-    /// Set when the round budget ran out with a gate still failing: the review stops there.
+    /// Set when the round budget ran out with a gate still failing, or a gate could not run at
+    /// all: the review stops there.
     pub gates_failed: Option<GateResult>,
+    /// Set instead of retrying when the gate named in `gates_failed` could not run at all (issue
+    /// 186: the shell could not even start it, so a fix round has nothing to react to), holding
+    /// the reason (`GateOutcome::output_tail`). `None` when `gates_failed` ran and failed, or
+    /// wasn't set.
+    pub gates_could_not_run: Option<String>,
     /// Must-fix findings in the last review (reported, not an error; `0` unless the round budget
     /// ran out too, see `Record::stopped`).
     pub must_fix_left: u32,
@@ -1711,28 +1726,31 @@ pub struct ReviewReport {
 }
 
 /// Runs the gates, feeding a fix round for the gate's own output on a failure and retrying, until
-/// they pass or the round budget (`Record::fix_rounds`) is used (issue 117, decision 173(d)).
-/// `Ok(None)` once they pass; `Ok(Some(failed))` when the budget ran out with `failed` still
-/// failing (the review stops there, as it always did for a single round).
+/// they pass, the round budget (`Record::fix_rounds`) is used (issue 117, decision 173(d)), or the
+/// failed gate could not run at all (issue 186): that is never worth a fix round, since nothing
+/// ran for the worker to react to, so the loop stops there whatever budget is left. Sets
+/// `report.gates_failed` (and, for the could-not-run case, `report.gates_could_not_run`) when it
+/// stops on a failure. Returns whether it stopped on a failure (`true`) or every gate passed
+/// (`false`).
 fn pass_gates(
     env: &TaskEnv,
     prepared: &mut Prepared,
     report: &mut ReviewReport,
     phase: &str,
-) -> Result<Option<GateResult>> {
+) -> Result<bool> {
     loop {
         let gated = run_gates(env, prepared, phase, Tiers::ALL)?;
-        let Some(failed) = gated.failed else {
-            return Ok(None);
+        let Some(failed) = gated.failed.clone() else {
+            return Ok(false);
         };
-        if prepared.record.round >= prepared.record.fix_rounds {
-            return Ok(Some(failed));
-        }
         let outcome = gated
-            .outcomes
-            .iter()
-            .find(|o| !o.result.passed)
+            .failed_outcome()
             .context("a failed gate run has no failing outcome")?;
+        if outcome.could_not_run || prepared.record.round >= prepared.record.fix_rounds {
+            report.gates_could_not_run = outcome.could_not_run.then(|| outcome.output_tail.clone());
+            report.gates_failed = Some(failed);
+            return Ok(true);
+        }
         run_fix_round(env, prepared, Some(outcome))?;
         prepared.record.round += 1;
         report.fix_ran = true;
@@ -1765,9 +1783,7 @@ pub fn review_issue(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewRepo
         (Stage::Reviewing, Status::Failed) => true,
         _ => false,
     };
-    if !gates_current && let Some(failed) = pass_gates(env, prepared, &mut report, "before-review")?
-    {
-        report.gates_failed = Some(failed);
+    if !gates_current && pass_gates(env, prepared, &mut report, "before-review")? {
         return Ok(report);
     }
 
@@ -1893,8 +1909,7 @@ pub(super) fn review_rounds(
         run_fix_round(env, prepared, None)?;
         prepared.record.round += 1;
         report.fix_ran = true;
-        if let Some(failed) = pass_gates(env, prepared, &mut report, "after-fix")? {
-            report.gates_failed = Some(failed);
+        if pass_gates(env, prepared, &mut report, "after-fix")? {
             return Ok(report);
         }
         round = next;
@@ -1931,8 +1946,7 @@ fn after_fix(env: &TaskEnv, prepared: &mut Prepared, ignore_repeat: bool) -> Res
     let mut report = ReviewReport::default();
     prepared.record.round += 1;
     report.fix_ran = true;
-    if let Some(failed) = pass_gates(env, prepared, &mut report, "after-fix")? {
-        report.gates_failed = Some(failed);
+    if pass_gates(env, prepared, &mut report, "after-fix")? {
         return Ok(report);
     }
     let round = next_review_round(prepared)?;

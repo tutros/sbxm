@@ -49,12 +49,30 @@ pub struct Options {
     pub profile: Option<String>,
 }
 
+/// The line for a gate that ran and failed (an exit the shell reported, or a timeout).
 fn gates_failed_line(id: &str, failed: &GateResult, log: &std::path::Path) -> String {
     let exit = failed
         .exit
         .map_or_else(|| "no exit code".to_owned(), |code| format!("exit {code}"));
     format!(
         "{id}: gates failed: `{}` ({}, {exit}, {}); output in {}",
+        failed.command,
+        failed.tier,
+        failed.phase,
+        log.display()
+    )
+}
+
+/// The line for a gate that could not run at all (issue 186): says so, not "failed", and gives the
+/// reason instead of an exit code, so it reads differently from one that ran and failed.
+fn gates_could_not_run_line(
+    id: &str,
+    failed: &GateResult,
+    reason: &str,
+    log: &std::path::Path,
+) -> String {
+    format!(
+        "{id}: gates could not run: `{}` ({}, {}); {reason}; see {}",
         failed.command,
         failed.tier,
         failed.phase,
@@ -148,10 +166,17 @@ fn run_issue(
     let report = pipeline::review_issue(&env, &mut prepared)?;
     let meta = record::task_dir(&base_dir, &id);
     if let Some(failed) = print_review(out, warn, config, &id, &meta, &report, &prepared.record)? {
-        bail!(
-            "gates failed for {id}: `{}`; fix it, then run `sbxm task gates --issue {number}` and review again",
-            failed.command
-        );
+        match &report.gates_could_not_run {
+            Some(reason) => bail!(
+                "gates for {id} could not run: `{}`; {reason}; see {}",
+                failed.command,
+                meta.join("gates.log").display()
+            ),
+            None => bail!(
+                "gates failed for {id}: `{}`; fix it, then run `sbxm task gates --issue {number}` and review again",
+                failed.command
+            ),
+        }
     }
     match report.must_fix_left {
         0 => writeln!(out, "  next: sbxm task finish --issue {number}")?,
@@ -213,11 +238,12 @@ pub(super) fn print_review<'a>(
         writeln!(warn, "warning: {warning}")?;
     }
     if let Some(failed) = &report.gates_failed {
-        writeln!(
-            out,
-            "{}",
-            gates_failed_line(id, failed, &meta.join("gates.log"))
-        )?;
+        let log = meta.join("gates.log");
+        let line = match &report.gates_could_not_run {
+            Some(reason) => gates_could_not_run_line(id, failed, reason, &log),
+            None => gates_failed_line(id, failed, &log),
+        };
+        writeln!(out, "{line}")?;
         for round in &report.rounds {
             writeln!(
                 out,
@@ -300,12 +326,19 @@ fn run_spec(
     let report = pipeline::review_issue(&env, &mut prepared)?;
     let meta = record::task_dir(&base_dir, &id);
     if let Some(failed) = print_review(out, warn, config, &id, &meta, &report, &prepared.record)? {
-        bail!(
-            "gates failed for {id}: `{}`; fix it in the worker's clone and commit, then run \
-             `sbxm task review {}` again",
-            failed.command,
-            spec_flag(path)
-        );
+        match &report.gates_could_not_run {
+            Some(reason) => bail!(
+                "gates for {id} could not run: `{}`; {reason}; see {}",
+                failed.command,
+                meta.join("gates.log").display()
+            ),
+            None => bail!(
+                "gates failed for {id}: `{}`; fix it in the worker's clone and commit, then run \
+                 `sbxm task review {}` again",
+                failed.command,
+                spec_flag(path)
+            ),
+        }
     }
     writeln!(out, "  next: sbxm task finish {}", spec_flag(path))?;
     if let Some(hint) = resume_hint(&prepared.record, &spec_flag(path)) {

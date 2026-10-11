@@ -331,6 +331,35 @@ fn a_failing_host_gate_is_gates_failed_and_the_checkout_is_still_removed() {
     assert!(gates_log(&f).contains("link error"));
 }
 
+/// Issue 186: a host clean checkout that cannot be made (here, the task's branch was never
+/// collected into `repo.git`) is a gate outcome marked `could_not_run`, not an ordinary failure —
+/// `task.json` still records it the same as any other failed gate.
+#[test]
+fn a_host_checkout_that_cannot_be_made_is_marked_could_not_run() {
+    let f = config("\"cargo test\"", "\"cargo build\"");
+    let backend = playing(&f);
+    let mut prepared = worked(&f, &backend);
+    // Never pushed to `repo.git`, so `clean_checkout` cannot find the branch.
+    prepared.record.branch = "issue-999".to_owned();
+    let host = FakeHostRunner::default();
+
+    let gated = run_gates(
+        &f,
+        &backend,
+        &host,
+        &mut prepared,
+        "after-worker",
+        Tiers::ALL,
+    );
+
+    assert!(!gated.passed);
+    let outcome = gated.failed_outcome().expect("a failed outcome");
+    assert_eq!(outcome.result.command, "(clean checkout)");
+    assert!(outcome.could_not_run, "{outcome:?}");
+    assert!(host.calls().is_empty(), "the host command itself never ran");
+    assert_eq!(saved(&f).status, Status::GatesFailed);
+}
+
 #[test]
 fn a_failed_task_can_be_gated_again_but_the_host_tier_not_alone() {
     let f = config("\"cargo test\"", "\"cargo build\"");

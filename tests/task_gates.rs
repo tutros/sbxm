@@ -115,6 +115,10 @@ fn the_first_failure_stops_the_tier() {
         "{}",
         outcomes[1].output_tail
     );
+    assert!(
+        !outcomes[1].could_not_run,
+        "an exit the shell reported is a command that ran and failed (issue 186)"
+    );
     assert_eq!(backend.execs().len(), 2);
 }
 
@@ -137,6 +141,10 @@ fn a_command_that_hits_the_timeout_is_a_failure_marked_as_timed_out() {
 
     assert!(outcomes[0].timed_out);
     assert!(!outcomes[0].result.passed);
+    assert!(
+        !outcomes[0].could_not_run,
+        "a timeout is the shell reporting back, not a command that never ran (issue 186)"
+    );
 }
 
 #[test]
@@ -163,6 +171,10 @@ fn a_command_that_cannot_be_run_is_a_failure_with_the_reason() {
         outcomes[0].output_tail.contains("fake exec failure"),
         "{}",
         outcomes[0].output_tail
+    );
+    assert!(
+        outcomes[0].could_not_run,
+        "issue 186: the backend couldn't even start the command"
     );
 }
 
