@@ -363,10 +363,10 @@ refused, because the code would run on your machine.
 
 One-time setup:
 - `just deploy-profiles` copies `profiles/sbxm-dev` into your `profiles_dir` (again after the profile changes). It
-  installs Rust, a C toolchain with `pkg-config` and the OpenSSL headers (`openssl-sys` needs them), PowerShell 7,
-  Pester 5 and `just`, allows crates.io, `cdn.pyke.io` (the ONNX Runtime download of the `fastembed` build),
-  Microsoft's package host and the PowerShell Gallery, and needs the `anthropic` secret; a Codex reviewer also needs
-  `openai` (`sbx secret ls`). A worker should not install software itself: what a build needs belongs in the
+  installs Rust and a C toolchain with `pkg-config` and the OpenSSL headers (`openssl-sys` needs them), allows
+  crates.io and `cdn.pyke.io` (the ONNX Runtime download of the `fastembed` build), and needs the `anthropic` secret;
+  a Codex reviewer also needs `openai` (`sbx secret ls`). It leaves out PowerShell, Pester and `just` to keep sandbox
+  setup short, so `just script-test` runs on the host only. A worker should not install software itself: what a build needs belongs in the
   profile's `setup.install`, or a clean sandbox (such as a PR review's) fails where the worker's passed.
 - `sbxm task init` writes `sbxm-task.toml` in the repo's root: the worker, reviewer, profile, gates and time limits.
 - `[risk]` in `sbxm-task.toml` adds to the risk assessment's built-in path-rule floor (decision 176(d)): `medium =
@@ -398,7 +398,7 @@ are `<base_dir>\tasks\<id>`, `<id>-review` and `<id>-gates`. A task killed halfw
 retries a stage that failed), and `task start --restart --issue <n>` (after the same confirmation as `task rm`)
 starts it over instead.
 
-Sandbox setup takes about 3 minutes per task (apt, rustup, `cargo install just`). `base_dir` only moves the
+Sandbox setup takes about 1 minute per sandbox (apt, rustup). `base_dir` only moves the
 workspace: each sandbox's own disk lives in the folder `sbx` keeps its state in, on the system drive, and `sbx` has no
 setting to move it (a junction to a bigger drive was tried and failed for the `claude` agent; see [`docs/workflow.md`](docs/workflow.md)).
 Budget about 7 GB for a fresh sandbox and much more once a large build runs in it: the disk image

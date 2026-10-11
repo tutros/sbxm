@@ -41,7 +41,7 @@ Phase skills: `sdlc-planning`, `sdlc-implementation` (TDD, commit per green step
 - `task run --issue N` = start + gates + review + up to `[worker] fix_rounds` fix rounds (default 3), then stops at `ready`. `task finish` (the user decides) pushes with the user's login. `--reviewer-harness`/`--reviewer-model` override the reviewer; the config is read once at start, so changing `sbxm-task.toml` mid-run has no effect (use `--restart` to start over). An issue with a `PR: #n` line for a merged PR is refused (decision 169).
 - `task rm` shows what it deletes; clean up finished tasks, worktrees and build dirs only with the user's OK.
 - antigravity (`agy`): model ids come from `agy models`; set `model` explicitly (the default is believed to be Gemini 3.1 Pro but is unverified). Needs the `google` secret.
-- Typical timing of one task with a fix round (28 min): about two thirds agent work, one third sandbox setup; the `setup.install` steps (mostly `cargo install just`, ~95 s) are about 2m40s per sandbox, and the reviewer's sandbox is set up again each round.
+- Typical timing of one task with a fix round (28 min): about two thirds agent work, one third sandbox setup; the `setup.install` steps were about 2m40s per sandbox (mostly `cargo install just`, ~95 s) until decision 182 dropped `just`, PowerShell and Pester from the profile, which leaves about 1 minute (apt, rustup; not yet measured on a run); the reviewer's sandbox is set up again each round.
 
 ## Working rules the user gave beyond `AGENTS.md`
 
