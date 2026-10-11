@@ -1,6 +1,6 @@
 # Spike S13: do the flaky tests vanish in a Linux sandbox? (issue #111)
 
-Run 2026-10-11 on commit `5b8a9a85d3280600fb0182f32e1e2c0de2d8ffca` (branch `spec-spike-111-7da7e4`, head of
+Run 2026-10-11 (the sandbox's UTC date; 2026-10-10 on the host) on commit `5b8a9a85d3280600fb0182f32e1e2c0de2d8ffca` (branch `spec-spike-111-7da7e4`, head of
 `main` at the time), in a Linux sandbox: Ubuntu 26.04.1 LTS, 4 CPUs, 7.8Gi RAM, `/tmp` on the `overlay` mount
 with 7.3G free at the start (20G total, 61% used) and 12G free at the end (36% used, after cleanup).
 Question (from issue #111, following up on issue #104): issue #104 lists three tests that each failed once
@@ -12,6 +12,10 @@ Linux allows). Do the three flakes reproduce in a Linux sandbox, where that spec
 none of the three tracked flakes, or any other test, failed.** This is consistent with "the Windows file
 lock is the main cause", but 25 clean runs is a small sample against a flake that showed once across
 however many runs preceded issue #104 — see "What this does and doesn't show" below.
+
+This is the second pass. A first pass of the same 25 runs in the same sandbox (commit `ddcbf4a`) was also
+25/25 clean, but it took only a before and an after disk reading, so it was run again with one reading per
+run. The table and the numbers below are the second pass only; the first pass's logs were not kept.
 
 ## Setup used
 
@@ -173,7 +177,7 @@ done
 touch /tmp/spike-111/load-stop
 wait "$LOAD_PID"
 
-# Final disk check, and cleanup of the load target
-df -h /tmp | tail -1
+# Cleanup of the load target, then the final disk check (the "at the end" value above)
 rm -rf /tmp/target2
+df -h /tmp | tail -1
 ```
