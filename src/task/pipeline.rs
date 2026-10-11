@@ -2457,6 +2457,30 @@ pub fn check_reviewer_inputs(
     Ok(warnings)
 }
 
+/// The worker-secret part of [`prepare_spec_resolved`]/[`prepare`]'s checks, without a task, so a
+/// caller can check the worker's secret before a destructive action (`task run --spec --restart`'s
+/// discard, issue #194 review finding M-2) rather than only inside the preparation that runs after
+/// it. Mirrors [`check_reviewer_inputs`] for the worker.
+pub fn check_worker_inputs(
+    config_dir: &Path,
+    backend: &dyn SandboxBackend,
+    config: &TaskConfig,
+) -> Result<Vec<String>> {
+    let global = GlobalConfig::load(config_dir)?;
+    let worker = &config.worker;
+    let profile = Profile::load(global.profiles_dir(), &config.sandbox.profile)?;
+    check_secrets(
+        backend,
+        worker.harness,
+        "the worker",
+        &config.sandbox.profile,
+        &profile,
+    )?;
+    let mut warnings = config.warnings.clone();
+    warnings.extend(worker.harness.unsupported(&profile, "the worker's sandbox"));
+    Ok(warnings)
+}
+
 /// One reviewer round (spec §5.2): the reviewer runs in its own sandbox on its own clone of the
 /// task branch (made from `repo.git`, so it sees exactly the collected commits and can change
 /// nothing of the worker's), writes `review.md`, and sbxm saves it as `review-<round>.md` (and

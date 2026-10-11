@@ -309,6 +309,10 @@ pub fn run_spec(
     // the file could change or vanish while the discard's confirmation prompt is pending (issue
     // #194 review finding M-1, repeat).
     let resolved = task_start::resolve_spec_start(&start)?;
+    // The worker's secret, checked the same way the reviewer's already is above, before anything
+    // is discarded: a missing one must not be found only after the old task is gone (issue #194
+    // review finding M-2).
+    pipeline::check_worker_inputs(config_dir, backend, &resolved.config)?;
     // The composed review below must open the same task this resolved snapshot started, not
     // re-derive the id from `opts.spec` by reading the file again: the file could have changed or
     // vanished while the discard's confirmation prompt was pending (issue #194 review finding M-1,

@@ -508,6 +508,55 @@ fn restart_reaches_ready_even_if_the_spec_is_removed_during_confirmation() {
     assert_eq!(stage(&f, &id), (Stage::Ready, Status::Ok));
 }
 
+/// Issue #194 review finding M-2: `--restart` must not discard the old task before the new
+/// start's worker secret is checked, the same as the reviewer's already is.
+#[test]
+fn restart_validates_the_worker_secret_before_discarding_the_old_task() {
+    let f = config();
+    let s = spec(&f);
+    let id = id_of(&s);
+    let failing = FakeBackend::with_secrets(&["anthropic", "openai"]).with_exec_output_matching(
+        "claude",
+        ExecOutput {
+            stdout: String::new(),
+            stderr: "boom".into(),
+            exit_code: Some(1),
+        },
+    );
+    let first = go(
+        &f,
+        &options(&f, s.clone()),
+        None,
+        &failing,
+        &FakeGitHub::default(),
+    );
+    assert!(first.result.is_err());
+    // Only the reviewer's secret ("openai", codex) is stored; the worker's ("anthropic", claude)
+    // is missing.
+    let b = FakeBackend::with_secrets(&["openai"]);
+
+    let out = go(
+        &f,
+        &options(&f, s.clone()),
+        Some(&Restart {
+            confirm: &Yes,
+            yes: false,
+        }),
+        &b,
+        &FakeGitHub::default(),
+    );
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("anthropic"), "{message}");
+    assert!(b.creates().is_empty(), "nothing started");
+    assert!(
+        record::task_dir(&f.env.base_dir(), &id)
+            .join("repo.git")
+            .is_dir(),
+        "the old task was deleted before the worker's secret was validated"
+    );
+}
+
 /// `start --spec` and `review --spec` would both warn about the same-harness reviewer; `run
 /// --spec` says it once (the `Once` writer, as for `--issue`).
 #[test]
