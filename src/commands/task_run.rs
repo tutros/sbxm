@@ -288,18 +288,6 @@ pub fn run_spec(
         pipeline::check_reviewer_inputs(config_dir, backend, &config)?;
     }
 
-    if let Some(restart) = restart {
-        discard_existing_spec(
-            config_dir,
-            &opts.repo_root,
-            &opts.spec,
-            restart,
-            backend,
-            probe,
-            out,
-        )?;
-    }
-
     let start = task_start::SpecOptions {
         repo_root: opts.repo_root.clone(),
         spec: opts.spec.clone(),
@@ -312,6 +300,24 @@ pub fn run_spec(
         clone_source: opts.clone_source.clone(),
         identity: opts.identity.clone(),
     };
+    // The same preflight `task_start::run_spec` itself runs, so a bad --time-limit, repo,
+    // identity, base or spec file is caught here too: `--restart`'s discard below must not cost
+    // the old task its result over an input that was always going to be rejected (issue #194
+    // review finding M-1).
+    task_start::resolve_spec_start(&start)?;
+
+    if let Some(restart) = restart {
+        discard_existing_spec(
+            config_dir,
+            &opts.repo_root,
+            &opts.spec,
+            restart,
+            backend,
+            probe,
+            out,
+        )?;
+    }
+
     let mut warn = Once {
         inner: warn,
         seen: Vec::new(),

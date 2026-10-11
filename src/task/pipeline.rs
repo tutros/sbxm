@@ -709,14 +709,11 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
     }
 }
 
-/// Spec §5.1 steps 1 and 2, for a spec source (decision 174(d), issue 142): same as [`prepare`],
-/// but the source is a file read from disk instead of a GitHub issue. The id and the record's
-/// title come from [`record::spec_id`]; the file's text is copied in as `source.md` (in the
-/// task's own folder and the worker's workspace) and the worker prompt points at that instead of
-/// `issue.md`. There is no PR to continue, so `continues` is always `None`; no GitHub call is
-/// made anywhere in this function.
-pub fn prepare_spec(ctx: &Ctx, source_path: &Path) -> Result<Prepared> {
-    let global = GlobalConfig::load(ctx.config_dir)?;
+/// Checks that `source_path` is a plain, readable UTF-8 file and returns its text: the part of
+/// [`prepare_spec`]'s checks that don't depend on whether the task already exists, so a caller
+/// can validate the file before a destructive action (`--restart`'s discard, issue #194 review
+/// finding M-1) without risking the "task exists" bail that a restart is meant to get past.
+pub fn validate_spec_file(source_path: &Path) -> Result<String> {
     // A plain file copy only: a link could point anywhere the user can read, and a device or a
     // pipe could block the read or never end.
     let kind = fs::symlink_metadata(source_path)
@@ -731,13 +728,24 @@ pub fn prepare_spec(ctx: &Ctx, source_path: &Path) -> Result<Prepared> {
     if !kind.is_file() {
         bail!("{} is not a regular file", source_path.display());
     }
+    fs::read_to_string(source_path)
+        .with_context(|| format!("cannot read {}", source_path.display()))
+}
+
+/// Spec §5.1 steps 1 and 2, for a spec source (decision 174(d), issue 142): same as [`prepare`],
+/// but the source is a file read from disk instead of a GitHub issue. The id and the record's
+/// title come from [`record::spec_id`]; the file's text is copied in as `source.md` (in the
+/// task's own folder and the worker's workspace) and the worker prompt points at that instead of
+/// `issue.md`. There is no PR to continue, so `continues` is always `None`; no GitHub call is
+/// made anywhere in this function.
+pub fn prepare_spec(ctx: &Ctx, source_path: &Path) -> Result<Prepared> {
+    let global = GlobalConfig::load(ctx.config_dir)?;
+    let text = validate_spec_file(source_path)?;
     let (id, title) = record::spec_id(source_path)?;
     let meta = record::task_dir(&global.base_dir, &id);
     let workspace = global.base_dir.join("tasks").join(&id);
 
     // Check before acting: nothing is written until every one of these passes.
-    let text = fs::read_to_string(source_path)
-        .with_context(|| format!("cannot read {}", source_path.display()))?;
     if meta.exists() || workspace.exists() {
         let stage = record::read(&meta.join("task.json"))
             .map(|r| r.stage.name().to_owned())

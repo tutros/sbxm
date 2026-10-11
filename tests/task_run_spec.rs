@@ -339,6 +339,55 @@ fn restart_refuses_to_discard_an_unfetched_finished_result() {
     );
 }
 
+/// Issue #194 review finding M-1: `--restart` must not discard the old task before the new
+/// start's own inputs are validated, the same as it already doesn't for `--issue`.
+#[test]
+fn restart_validates_the_new_start_before_discarding_the_old_task() {
+    let f = config();
+    let s = spec(&f);
+    let id = id_of(&s);
+    let failing = FakeBackend::with_secrets(&["anthropic", "openai"]).with_exec_output_matching(
+        "claude",
+        ExecOutput {
+            stdout: String::new(),
+            stderr: "boom".into(),
+            exit_code: Some(1),
+        },
+    );
+    let first = go(
+        &f,
+        &options(&f, s.clone()),
+        None,
+        &failing,
+        &FakeGitHub::default(),
+    );
+    assert!(first.result.is_err());
+    let b = backend_for(&f, &id, &[CLEAN_REVIEW]);
+    let mut opts = options(&f, s.clone());
+    opts.time_limit = Some("soon".into());
+
+    let out = go(
+        &f,
+        &opts,
+        Some(&Restart {
+            confirm: &Yes,
+            yes: false,
+        }),
+        &b,
+        &FakeGitHub::default(),
+    );
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("--time-limit"), "{message}");
+    assert!(b.creates().is_empty(), "nothing started");
+    assert!(
+        record::task_dir(&f.env.base_dir(), &id)
+            .join("repo.git")
+            .is_dir(),
+        "the old task was deleted before the new start's inputs were validated"
+    );
+}
+
 /// `start --spec` and `review --spec` would both warn about the same-harness reviewer; `run
 /// --spec` says it once (the `Once` writer, as for `--issue`).
 #[test]

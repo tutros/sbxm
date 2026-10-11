@@ -495,18 +495,20 @@ pub struct SpecOptions {
     pub identity: Option<Identity>,
 }
 
-/// Starts a spec task: prepares it, runs the worker, then the gates (as `run` does for an issue
-/// task), and prints what happened. No GitHub call is made anywhere in this path.
-#[allow(clippy::too_many_arguments)]
-pub fn run_spec(
-    config_dir: &std::path::Path,
-    opts: &SpecOptions,
-    backend: &dyn SandboxBackend,
-    github: &dyn GitHubBackend,
-    probe: &dyn ProcessProbe,
-    out: &mut dyn Write,
-    warn: &mut dyn Write,
-) -> Result<()> {
+/// Every input [`run_spec`] resolves before it does anything with the backend or writes
+/// anything: the worker config, the repo, the committer identity, the base branch and the spec
+/// file itself. Shared with `task_run::run_spec` (issue #194 review finding M-1) so a `--restart`
+/// discard there happens only after all of this has been checked, the same as `run_with`
+/// validates every start input before its own `discard_existing` call.
+pub(crate) struct SpecStart {
+    pub config: TaskConfig,
+    pub repo_name: String,
+    pub identity: Identity,
+    pub base_branch: String,
+    pub clone_source: String,
+}
+
+pub(crate) fn resolve_spec_start(opts: &SpecOptions) -> Result<SpecStart> {
     let mut config = TaskConfig::load(&opts.repo_root)?;
     if let Some(harness) = opts.worker_harness {
         let harness = headless_harness("--worker-harness", harness.as_str(), "tasks")
@@ -547,10 +549,39 @@ pub fn run_spec(
     if !repo::valid_ref_name(&base_branch) {
         bail!("base {base_branch:?} isn't a usable branch name; pass --base <branch>");
     }
+    pipeline::validate_spec_file(&opts.spec)?;
     let clone_source = opts
         .clone_source
         .clone()
         .unwrap_or_else(|| format!("https://github.com/{repo_name}.git"));
+    Ok(SpecStart {
+        config,
+        repo_name,
+        identity,
+        base_branch,
+        clone_source,
+    })
+}
+
+/// Starts a spec task: prepares it, runs the worker, then the gates (as `run` does for an issue
+/// task), and prints what happened. No GitHub call is made anywhere in this path.
+#[allow(clippy::too_many_arguments)]
+pub fn run_spec(
+    config_dir: &std::path::Path,
+    opts: &SpecOptions,
+    backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<()> {
+    let SpecStart {
+        config,
+        repo_name,
+        identity,
+        base_branch,
+        clone_source,
+    } = resolve_spec_start(opts)?;
     for warning in &config.warnings {
         writeln!(warn, "warning: {warning}")?;
     }
