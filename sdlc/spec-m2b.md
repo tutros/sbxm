@@ -151,7 +151,7 @@ checkout (a GitHub URL is required; anything else is an error). `--base` default
 | `task file-findings (--issue N \| --pr N \| --file F) [--create]` | Files a review's findings as issues [134][149]; a dry run unless `--create` | file malformed; secret in a finding |
 | `task finish --issue N` | Pushes `issue-N` from `repo.git`, opens the PR (base = task base) with `Fixes #N`, `result.md` and `review.md` in the body; for a task that continues PR m, pushes to PR m's branch (fast-forward only) and comments on PR m instead of opening a PR (decision 169) | not `ready`; PR exists; a continued PR's branch moved or is gone |
 | `task rm (--issue N \| --pr N) [--yes]` | Removes sandboxes, clones and the task folder; asks first, showing the exact paths | task running |
-| `task run (--issue N \| --spec FILE)` | `start` then `review`, also after gates that fail right after the worker (5.1 step 5); stops before `finish` [158]. `--spec FILE` runs `start --spec` then `review --spec` instead, with no GitHub call anywhere [194] | those of both |
+| `task run (--issue N \| --spec FILE)` | `start` then `review`, also after gates that fail right after the worker (5.1 step 5); stops before `finish` [158]. `--spec FILE` runs `start --spec` then `review --spec` instead, with no GitHub call anywhere (issue 194) | those of both |
 
 Flags are per phase (amended 2026-10-02 after the PR 57 review, Q-1: a flag a command would accept and not use is
 worse than a missing one, and the worker of a task under review comes from its record, not from a flag):
@@ -162,7 +162,11 @@ round), `--profile`, `--base`, `--repo`. `run`: every flag of both. The README t
 `start` on an existing task that is not finished refuses: `task issue-41 exists (stage working); use task status, or --restart` [153].
 `run --spec --restart` discards an existing spec task the same way, except a result that lives only in the task's
 `repo.git`, not yet fetched into the checkout, is protected the same way `rm --spec` protects it [178], since `run`
-has no `--force` of its own: fetch it first, or `rm --spec FILE --force` before restarting [194].
+has no `--force` of its own: fetch it first, or `rm --spec FILE --force` before restarting [182].
+`--restart` is two steps, for `start` and `run`, an issue and a spec alike [184]: every refusal that needs no write
+comes before the confirmation prompt and leaves the old task untouched; after a confirmed discard, a start that fails
+leaves no task. A change made while the command waits at its prompt, and the validation of the new task's kits, fall
+in the second step.
 
 Output: human text by default; `status --json` prints the records. Exit codes: 0 success; 1 any failure
 (including `gates-failed` and a `ready` task with must-fix findings left, which is reported, not an error).
