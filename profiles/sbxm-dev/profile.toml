@@ -29,8 +29,10 @@ user = "0"
 description = "install a C toolchain, pkg-config and OpenSSL headers for cargo (openssl-sys needs them)"
 
 # Pinned to the host's version so fmt and clippy agree with `just check` there.
+# The installer is downloaded to a file and then run, not piped into `sh`: with a pipe, a failed
+# download leaves `sh` reading nothing and exiting 0, and the sandbox is created without Rust (issue 209).
 [[setup.install]]
-command = "curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain 1.93.0 --component rustfmt,clippy"
+command = "curl --proto '=https' --tlsv1.2 -sSf -o /tmp/rustup-init.sh https://sh.rustup.rs && sh /tmp/rustup-init.sh -y --profile minimal --default-toolchain 1.93.0 --component rustfmt,clippy && rm /tmp/rustup-init.sh"
 user = "agent"
 description = "install Rust 1.93.0 with rustfmt and clippy"
 
