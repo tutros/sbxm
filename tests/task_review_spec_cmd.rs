@@ -84,6 +84,7 @@ fn options(f: &Fixture, spec: PathBuf) -> Options {
         reviewer_time_limit: None,
         time_limit: None,
         profile: None,
+        resolved_spec_id: None,
     }
 }
 

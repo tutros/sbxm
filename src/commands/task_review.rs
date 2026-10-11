@@ -47,6 +47,13 @@ pub struct Options {
     /// The worker's time limit for the fix round (issue tasks).
     pub time_limit: Option<String>,
     pub profile: Option<String>,
+    /// Set only by `task run --spec`'s composed review (issue #194 review finding M-1, repeat of
+    /// the repeat): the id its own preflight already resolved from the spec file, before a
+    /// `--restart` discard could change or remove it. `run_spec` opens the task by this id instead
+    /// of re-deriving it from `Target::Spec`'s path, which would re-read a file that may no longer
+    /// match (or exist). Every other caller leaves this `None`, so the id is derived from the path
+    /// as usual.
+    pub resolved_spec_id: Option<String>,
 }
 
 /// The line for a gate that ran and failed (an exit the shell reported, or a timeout).
@@ -126,7 +133,17 @@ pub fn run(
         Target::Pr(n) => run_pr(
             config_dir, opts, &config, *n, backend, github, probe, host, out, warn,
         ),
-        Target::Spec(path) => run_spec(config_dir, &config, path, backend, probe, host, out, warn),
+        Target::Spec(path) => run_spec(
+            config_dir,
+            &config,
+            path,
+            opts.resolved_spec_id.as_deref(),
+            backend,
+            probe,
+            host,
+            out,
+            warn,
+        ),
     }
 }
 
@@ -293,11 +310,15 @@ pub(super) fn print_review<'a>(
 /// `task review --spec <FILE>` (decision 174(d), issue 142): the same gates/review/fix-round loop
 /// as `run_issue`'s (`pipeline::review_issue`, which makes no GitHub call), but `finish` is
 /// refused for the result, so the "ready" hint says where the review is instead of naming it.
+/// `id_hint`, when given, is a snapshot already resolved from `path` (`task run --spec`'s composed
+/// review); it is used as-is instead of re-deriving the id from `path`, which would re-read a file
+/// that may have changed or vanished since (issue #194 review finding M-1, repeat of the repeat).
 #[allow(clippy::too_many_arguments)]
 fn run_spec(
     config_dir: &std::path::Path,
     config: &TaskConfig,
     path: &std::path::Path,
+    id_hint: Option<&str>,
     backend: &dyn SandboxBackend,
     probe: &dyn ProcessProbe,
     host: &dyn HostRunner,
@@ -305,7 +326,10 @@ fn run_spec(
     warn: &mut dyn Write,
 ) -> Result<()> {
     let base_dir = GlobalConfig::load(config_dir)?.base_dir;
-    let (id, _) = record::spec_id(path)?;
+    let id = match id_hint {
+        Some(id) => id.to_owned(),
+        None => record::spec_id(path)?.0,
+    };
     let mut prepared = Prepared::open(&base_dir, &id)?;
     // As `run_issue`: the worker is whoever the task recorded.
     let mut config = config.clone();

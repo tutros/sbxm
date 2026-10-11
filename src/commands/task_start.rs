@@ -495,18 +495,27 @@ pub struct SpecOptions {
     pub identity: Option<Identity>,
 }
 
-/// Starts a spec task: prepares it, runs the worker, then the gates (as `run` does for an issue
-/// task), and prints what happened. No GitHub call is made anywhere in this path.
-#[allow(clippy::too_many_arguments)]
-pub fn run_spec(
-    config_dir: &std::path::Path,
-    opts: &SpecOptions,
-    backend: &dyn SandboxBackend,
-    github: &dyn GitHubBackend,
-    probe: &dyn ProcessProbe,
-    out: &mut dyn Write,
-    warn: &mut dyn Write,
-) -> Result<()> {
+/// Every input [`run_spec`] resolves before it does anything with the backend or writes
+/// anything: the worker config, the repo, the committer identity, the base branch and the spec
+/// file itself. Shared with `task_run::run_spec` (issue #194 review finding M-1) so a `--restart`
+/// discard there happens only after all of this has been checked, the same as `run_with`
+/// validates every start input before its own `discard_existing` call. `source_text`, `id` and
+/// `title` are this snapshot's read of the spec file: a caller that discards an existing task
+/// between resolving and starting resolves again after the discard and hands that snapshot to
+/// [`run_spec_from`], since the file may have changed or vanished while a confirmation prompt
+/// was pending (decision 184).
+pub(crate) struct SpecStart {
+    pub config: TaskConfig,
+    pub repo_name: String,
+    pub identity: Identity,
+    pub base_branch: String,
+    pub clone_source: String,
+    pub source_text: String,
+    pub id: String,
+    pub title: String,
+}
+
+pub(crate) fn resolve_spec_start(opts: &SpecOptions) -> Result<SpecStart> {
     let mut config = TaskConfig::load(&opts.repo_root)?;
     if let Some(harness) = opts.worker_harness {
         let harness = headless_harness("--worker-harness", harness.as_str(), "tasks")
@@ -547,10 +556,66 @@ pub fn run_spec(
     if !repo::valid_ref_name(&base_branch) {
         bail!("base {base_branch:?} isn't a usable branch name; pass --base <branch>");
     }
+    let source_text = pipeline::validate_spec_file(&opts.spec)?;
+    let (id, title) = record::spec_id(&opts.spec)?;
+    // Rendered here only as a check; the start renders it again from the same inputs.
+    pipeline::spec_worker_prompt(&config, &id, &base_branch, &repo_name)?;
     let clone_source = opts
         .clone_source
         .clone()
         .unwrap_or_else(|| format!("https://github.com/{repo_name}.git"));
+    Ok(SpecStart {
+        config,
+        repo_name,
+        identity,
+        base_branch,
+        clone_source,
+        source_text,
+        id,
+        title,
+    })
+}
+
+/// Starts a spec task: prepares it, runs the worker, then the gates (as `run` does for an issue
+/// task), and prints what happened. No GitHub call is made anywhere in this path.
+#[allow(clippy::too_many_arguments)]
+pub fn run_spec(
+    config_dir: &std::path::Path,
+    opts: &SpecOptions,
+    backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<()> {
+    let start = resolve_spec_start(opts)?;
+    run_spec_from(config_dir, opts, start, backend, github, probe, out, warn)
+}
+
+/// [`run_spec`], taking an already-resolved [`SpecStart`] instead of resolving one itself: a
+/// caller that discards an existing task (`--restart`) first passes the snapshot it resolved
+/// after the discard, so the task it starts and the id it reviews are the same one.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_spec_from(
+    config_dir: &std::path::Path,
+    opts: &SpecOptions,
+    start: SpecStart,
+    backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<()> {
+    let SpecStart {
+        config,
+        repo_name,
+        identity,
+        base_branch,
+        clone_source,
+        source_text,
+        id: spec_id,
+        title,
+    } = start;
     for warning in &config.warnings {
         writeln!(warn, "warning: {warning}")?;
     }
@@ -568,7 +633,8 @@ pub fn run_spec(
         host: &ShellHostRunner,
     };
     writeln!(out, "Starting a task from {} ...", opts.spec.display())?;
-    let mut prepared = pipeline::prepare_spec(&ctx, &opts.spec)?;
+    let mut prepared =
+        pipeline::prepare_spec_resolved(&ctx, &opts.spec, &source_text, &spec_id, &title)?;
     for warning in &prepared.warnings {
         writeln!(warn, "warning: {warning}")?;
     }
@@ -612,23 +678,46 @@ pub fn run_spec(
         // A gate that could not run at all gives the review nothing to react to, so it is not
         // named as the next step (issue 186).
         match gated.failed_outcome().filter(|o| o.could_not_run) {
-            Some(outcome) => bail!(
-                "{id}: gates could not run: `{}` ({}); {}",
-                first.command,
-                first.tier,
-                outcome.output_tail
-            ),
+            Some(outcome) => {
+                writeln!(
+                    out,
+                    "  gates: could not run: `{}` ({}); {}",
+                    first.command, first.tier, outcome.output_tail
+                )?;
+                bail!(
+                    "{id}: gates could not run: `{}` ({}); {}",
+                    first.command,
+                    first.tier,
+                    outcome.output_tail
+                )
+            }
             None => {
                 let exit = first
                     .exit
                     .map_or_else(|| "no exit code".to_owned(), |c| format!("exit {c}"));
-                bail!(
+                writeln!(
+                    out,
+                    "  gates: failed: `{}` ({}, {exit})",
+                    first.command, first.tier
+                )?;
+                writeln!(
+                    out,
+                    "  next: sbxm task review {} (it reruns the gates and gives a failure to a \
+                     fix round)",
+                    spec_flag(&opts.spec)
+                )?;
+                // A gate that ran and failed goes on to the review, which reruns it and gives a
+                // failure to a fix round (decision 180): `task run --spec` catches this typed
+                // error to tell it apart from any other failure, the same way it does for
+                // `--issue` (`GatesFailed`, defined above for the issue path).
+                Err(GatesFailed(format!(
                     "{id}: gates failed: `{}` ({}, {exit}); next: sbxm task review {} (it reruns \
                      the gates and gives a failure to a fix round)",
                     first.command,
                     first.tier,
                     spec_flag(&opts.spec)
-                )
+                ))
+                .into())
             }
         }
     }

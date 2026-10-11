@@ -709,14 +709,11 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
     }
 }
 
-/// Spec §5.1 steps 1 and 2, for a spec source (decision 174(d), issue 142): same as [`prepare`],
-/// but the source is a file read from disk instead of a GitHub issue. The id and the record's
-/// title come from [`record::spec_id`]; the file's text is copied in as `source.md` (in the
-/// task's own folder and the worker's workspace) and the worker prompt points at that instead of
-/// `issue.md`. There is no PR to continue, so `continues` is always `None`; no GitHub call is
-/// made anywhere in this function.
-pub fn prepare_spec(ctx: &Ctx, source_path: &Path) -> Result<Prepared> {
-    let global = GlobalConfig::load(ctx.config_dir)?;
+/// Checks that `source_path` is a plain, readable UTF-8 file and returns its text: the part of
+/// [`prepare_spec`]'s checks that don't depend on whether the task already exists, so a caller
+/// can validate the file before a destructive action (`--restart`'s discard, issue #194 review
+/// finding M-1) without risking the "task exists" bail that a restart is meant to get past.
+pub fn validate_spec_file(source_path: &Path) -> Result<String> {
     // A plain file copy only: a link could point anywhere the user can read, and a device or a
     // pipe could block the read or never end.
     let kind = fs::symlink_metadata(source_path)
@@ -731,13 +728,62 @@ pub fn prepare_spec(ctx: &Ctx, source_path: &Path) -> Result<Prepared> {
     if !kind.is_file() {
         bail!("{} is not a regular file", source_path.display());
     }
+    fs::read_to_string(source_path)
+        .with_context(|| format!("cannot read {}", source_path.display()))
+}
+
+/// Spec §5.1 steps 1 and 2, for a spec source (decision 174(d), issue 142): same as [`prepare`],
+/// but the source is a file read from disk instead of a GitHub issue. The id and the record's
+/// title come from [`record::spec_id`]; the file's text is copied in as `source.md` (in the
+/// task's own folder and the worker's workspace) and the worker prompt points at that instead of
+/// `issue.md`. There is no PR to continue, so `continues` is always `None`; no GitHub call is
+/// made anywhere in this function.
+pub fn prepare_spec(ctx: &Ctx, source_path: &Path) -> Result<Prepared> {
+    let text = validate_spec_file(source_path)?;
     let (id, title) = record::spec_id(source_path)?;
-    let meta = record::task_dir(&global.base_dir, &id);
-    let workspace = global.base_dir.join("tasks").join(&id);
+    prepare_spec_resolved(ctx, source_path, &text, &id, &title)
+}
+
+/// The spec worker's prompt, rendered. It needs only the config and the resolved names, so
+/// `--restart` also calls it before its discard: a custom prompt that cannot be rendered for a
+/// spec task is refused while the old task is still there (decision 184).
+pub fn spec_worker_prompt(
+    config: &TaskConfig,
+    id: &str,
+    base_branch: &str,
+    repo: &str,
+) -> Result<String> {
+    let template = prompts::template(Role::WorkerSpec, &config.prompts)?;
+    prompts::render(
+        &template.name,
+        &template.text,
+        &[
+            ("branch", id),
+            ("base", base_branch),
+            ("repo", repo),
+            ("gates_sandbox", &bullets(&config.gates.sandbox)),
+            ("gates_host", &bullets(&config.gates.host)),
+        ],
+    )
+}
+
+/// [`prepare_spec`], taking the spec file's already-read text and already-derived id/title
+/// instead of reading or deriving them itself: a caller that validated the spec before a
+/// destructive action elsewhere (`--restart`'s discard, issue #194 review finding M-1, repeat)
+/// passes that same snapshot here, so the file is never read again after the file could have
+/// changed or vanished.
+pub fn prepare_spec_resolved(
+    ctx: &Ctx,
+    source_path: &Path,
+    text: &str,
+    id: &str,
+    title: &str,
+) -> Result<Prepared> {
+    let global = GlobalConfig::load(ctx.config_dir)?;
+    let meta = record::task_dir(&global.base_dir, id);
+    let workspace = global.base_dir.join("tasks").join(id);
 
     // Check before acting: nothing is written until every one of these passes.
-    let text = fs::read_to_string(source_path)
-        .with_context(|| format!("cannot read {}", source_path.display()))?;
     if meta.exists() || workspace.exists() {
         let stage = record::read(&meta.join("task.json"))
             .map(|r| r.stage.name().to_owned())
@@ -759,18 +805,7 @@ pub fn prepare_spec(ctx: &Ctx, source_path: &Path) -> Result<Prepared> {
     )?;
     let mut warnings = ctx.config.warnings.clone();
     warnings.extend(worker.harness.unsupported(&profile, "the worker's sandbox"));
-    let template = prompts::template(Role::WorkerSpec, &ctx.config.prompts)?;
-    let prompt = prompts::render(
-        &template.name,
-        &template.text,
-        &[
-            ("branch", &id),
-            ("base", ctx.base_branch),
-            ("repo", ctx.repo),
-            ("gates_sandbox", &bullets(&ctx.config.gates.sandbox)),
-            ("gates_host", &bullets(&ctx.config.gates.host)),
-        ],
-    )?;
+    let prompt = spec_worker_prompt(ctx.config, id, ctx.base_branch, ctx.repo)?;
 
     // Reserve both folders; `create_dir` fails if either appeared meanwhile.
     for dir in [&meta, &workspace] {
@@ -804,8 +839,8 @@ pub fn prepare_spec(ctx: &Ctx, source_path: &Path) -> Result<Prepared> {
 
         let repo_git = meta.join("repo.git");
         repo::clone_bare(ctx.clone_source, &repo_git)?;
-        repo::create_branch(&repo_git, &id, ctx.base_branch)?;
-        repo::clone_workspace(&repo_git, &workspace, &id, ctx.identity)?;
+        repo::create_branch(&repo_git, id, ctx.base_branch)?;
+        repo::clone_workspace(&repo_git, &workspace, id, ctx.identity)?;
 
         // The agent's `git add -A` must not pick up sbxm's own files.
         let info = workspace.join(".git").join("info");
@@ -819,7 +854,7 @@ pub fn prepare_spec(ctx: &Ctx, source_path: &Path) -> Result<Prepared> {
             ],
             Existing::Replace,
         )?;
-        fs::write(meta.join("source.md"), &text)?;
+        fs::write(meta.join("source.md"), text)?;
         fs::write(meta.join("worker-prompt.md"), &prompt)?;
 
         // The record goes first: sandbox setup takes minutes, and `status` (and a restart after a
@@ -829,11 +864,11 @@ pub fn prepare_spec(ctx: &Ctx, source_path: &Path) -> Result<Prepared> {
                 kind: Kind::Spec,
                 number: 0,
                 repo: ctx.repo,
-                title: &title,
+                title,
                 base: ctx.base_branch,
-                branch: &id,
+                branch: id,
                 config_hash: &harness_kits.config_hash,
-                id: Some(&id),
+                id: Some(id),
             },
             now(),
             Process::current(ctx.probe),
@@ -2431,6 +2466,30 @@ pub fn check_reviewer_inputs(
             .harness
             .unsupported(&profile, "the reviewer's sandbox"),
     );
+    Ok(warnings)
+}
+
+/// The worker-secret part of [`prepare_spec_resolved`]/[`prepare`]'s checks, without a task, so a
+/// caller can check the worker's secret before a destructive action (`task run --spec --restart`'s
+/// discard, issue #194 review finding M-2) rather than only inside the preparation that runs after
+/// it. Mirrors [`check_reviewer_inputs`] for the worker.
+pub fn check_worker_inputs(
+    config_dir: &Path,
+    backend: &dyn SandboxBackend,
+    config: &TaskConfig,
+) -> Result<Vec<String>> {
+    let global = GlobalConfig::load(config_dir)?;
+    let worker = &config.worker;
+    let profile = Profile::load(global.profiles_dir(), &config.sandbox.profile)?;
+    check_secrets(
+        backend,
+        worker.harness,
+        "the worker",
+        &config.sandbox.profile,
+        &profile,
+    )?;
+    let mut warnings = config.warnings.clone();
+    warnings.extend(worker.harness.unsupported(&profile, "the worker's sandbox"));
     Ok(warnings)
 }
 

@@ -497,6 +497,7 @@ fn main() -> anyhow::Result<()> {
                         reviewer_time_limit,
                         time_limit,
                         profile,
+                        resolved_spec_id: None,
                     },
                     &SbxBackend,
                     &sbxm::github::gh::GhBackend::default(),
@@ -549,6 +550,7 @@ fn main() -> anyhow::Result<()> {
             command:
                 TaskCommand::Run {
                     issue,
+                    spec,
                     worker_harness,
                     worker_model,
                     reviewer_harness,
@@ -562,36 +564,74 @@ fn main() -> anyhow::Result<()> {
                     yes,
                 },
         } => {
-            let (mut out, mut warn) = task_writers(vec![format!("issue-{issue}")], None)?;
+            let ids = match (&issue, &spec) {
+                (Some(n), _) => vec![format!("issue-{n}")],
+                (None, Some(path)) => task::record::spec_id(path)
+                    .map(|(id, _)| vec![id])
+                    .unwrap_or_default(),
+                (None, None) => unreachable!("clap requires --issue or --spec"),
+            };
+            let (mut out, mut warn) = task_writers(ids, None)?;
             let result = (|| -> anyhow::Result<()> {
-                commands::task_run::run(
-                    &config::config_dir()?,
-                    &commands::task_run::Options {
-                        repo_root: std::env::current_dir()?,
-                        issue,
-                        worker_harness,
-                        worker_model,
-                        reviewer_harness,
-                        reviewer_model,
-                        time_limit,
-                        reviewer_time_limit,
-                        profile,
-                        base,
-                        repo,
-                        clone_source: None,
-                        identity: None,
-                    },
-                    restart.then_some(&commands::task_start::Restart {
-                        confirm: &Terminal,
-                        yes,
-                    }),
-                    &SbxBackend,
-                    &sbxm::github::gh::GhBackend::default(),
-                    &task::record::SystemProbe,
-                    &task::gates::ShellHostRunner,
-                    &mut out,
-                    &mut warn,
-                )
+                match (issue, spec) {
+                    (Some(issue), None) => commands::task_run::run(
+                        &config::config_dir()?,
+                        &commands::task_run::Options {
+                            repo_root: std::env::current_dir()?,
+                            issue,
+                            worker_harness,
+                            worker_model,
+                            reviewer_harness,
+                            reviewer_model,
+                            time_limit,
+                            reviewer_time_limit,
+                            profile,
+                            base,
+                            repo,
+                            clone_source: None,
+                            identity: None,
+                        },
+                        restart.then_some(&commands::task_start::Restart {
+                            confirm: &Terminal,
+                            yes,
+                        }),
+                        &SbxBackend,
+                        &sbxm::github::gh::GhBackend::default(),
+                        &task::record::SystemProbe,
+                        &task::gates::ShellHostRunner,
+                        &mut out,
+                        &mut warn,
+                    ),
+                    (None, Some(spec)) => commands::task_run::run_spec(
+                        &config::config_dir()?,
+                        &commands::task_run::SpecOptions {
+                            repo_root: std::env::current_dir()?,
+                            spec,
+                            worker_harness,
+                            worker_model,
+                            reviewer_harness,
+                            reviewer_model,
+                            time_limit,
+                            reviewer_time_limit,
+                            profile,
+                            base,
+                            repo,
+                            clone_source: None,
+                            identity: None,
+                        },
+                        restart.then_some(&commands::task_start::Restart {
+                            confirm: &Terminal,
+                            yes,
+                        }),
+                        &SbxBackend,
+                        &sbxm::github::gh::GhBackend::default(),
+                        &task::record::SystemProbe,
+                        &task::gates::ShellHostRunner,
+                        &mut out,
+                        &mut warn,
+                    ),
+                    _ => unreachable!("clap requires exactly one of --issue or --spec"),
+                }
             })();
             finish_task(result, out, warn)
         }
