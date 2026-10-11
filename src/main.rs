@@ -190,13 +190,21 @@ fn main() -> anyhow::Result<()> {
             command: None,
             config: Some(config_path),
         }) => {
-            commands::run::run(
+            let summary = commands::run::run(
                 &config::config_dir()?,
                 &config_path,
                 &SbxBackend,
                 &mut std::io::stdout(),
                 &mut std::io::stderr(),
             )?;
+            let errored = summary.errored_pairs();
+            if errored > 0 {
+                eprintln!(
+                    "error: {errored} of {} contestant runs ended in error",
+                    summary.outcomes.len()
+                );
+                std::process::exit(1);
+            }
             Ok(())
         }
         Command::Run(RunArgs {
