@@ -295,12 +295,19 @@ pub enum TaskCommand {
         #[arg(long)]
         json: bool,
     },
-    /// Start a task for one issue, then review it: the worker, the gates, an independent reviewer
-    /// and at most one fix round. Stops at ready; `finish` publishes. Blocks until it is done.
+    /// Start a task for one issue or a spec file, then review it: the worker, the gates, an
+    /// independent reviewer and at most one fix round. Stops at ready; `finish` publishes. Blocks
+    /// until it is done.
+    #[command(group(clap::ArgGroup::new("run_target").required(true).args(["issue", "spec"])))]
     Run {
         /// The issue to carry through.
         #[arg(long, value_name = "N")]
-        issue: u32,
+        issue: Option<u32>,
+        /// Carry through this spec task's file instead (decision 174(d), issue 194): the same
+        /// start, gates, review and fix rounds as an issue task's, with no GitHub call anywhere;
+        /// `task finish --spec` publishes it.
+        #[arg(long, value_name = "FILE")]
+        spec: Option<PathBuf>,
         /// The worker's harness (default: sbxm-task.toml, else claude).
         #[arg(long, value_enum)]
         worker_harness: Option<Harness>,
@@ -322,13 +329,14 @@ pub enum TaskCommand {
         /// The sandbox profile (default: sbxm-task.toml).
         #[arg(long)]
         profile: Option<String>,
-        /// The branch to start from (default: the repo's default branch).
+        /// The branch to start from (default: the repo's default branch; a spec task reads it
+        /// from the checkout instead, with no GitHub call).
         #[arg(long)]
         base: Option<String>,
         /// The GitHub repo, owner/name (default: this checkout's origin).
         #[arg(long)]
         repo: Option<String>,
-        /// Delete the issue's existing task first (asks, showing exactly what), then start again.
+        /// Delete the existing task first (asks, showing exactly what), then start again.
         #[arg(long)]
         restart: bool,
         /// With --restart: don't ask before deleting.

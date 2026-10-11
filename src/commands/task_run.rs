@@ -1,6 +1,6 @@
-//! `sbxm task run --issue N` (spec §4, decision 158): `start` then `review` for one issue, and
-//! then it stops; `finish` publishes, so it stays a deliberate command of its own. Gates that
-//! fail after the worker don't stop it: the review reruns them (decision 180).
+//! `sbxm task run (--issue N | --spec FILE)` (spec §4, decision 158): `start` then `review` for
+//! one task, and then it stops; `finish` publishes, so it stays a deliberate command of its own.
+//! Gates that fail after the worker don't stop it: the review reruns them (decision 180).
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -10,13 +10,15 @@ use anyhow::{Result, anyhow};
 use super::task_review;
 use super::task_start::{self, Restart};
 use crate::backend::SandboxBackend;
+use crate::config::GlobalConfig;
 use crate::github::GitHubBackend;
 use crate::harness::Harness;
 use crate::run::config::{check_model_flag, headless_harness, parse_duration};
 use crate::task::config::TaskConfig;
+use crate::task::finish;
 use crate::task::gates::HostRunner;
 use crate::task::pipeline;
-use crate::task::record::ProcessProbe;
+use crate::task::record::{self, ProcessProbe};
 use crate::task::repo::Identity;
 
 /// The flags `start` and `review` share, and each one's own.
@@ -167,6 +169,178 @@ pub fn run(
         &task_review::Options {
             repo_root: opts.repo_root.clone(),
             target: task_review::Target::Issue(opts.issue),
+            repo: opts.repo.clone(),
+            base: opts.base.clone(),
+            clone_source: opts.clone_source.clone(),
+            reviewer_harness: opts.reviewer_harness,
+            reviewer_model: opts.reviewer_model.clone(),
+            reviewer_time_limit: opts.reviewer_time_limit.clone(),
+            time_limit: opts.time_limit.clone(),
+            profile: opts.profile.clone(),
+        },
+        backend,
+        github,
+        probe,
+        host,
+        out,
+        &mut warn,
+    )
+}
+
+/// `task run --spec <FILE>` (decision 174(d), issue 194): `start --spec` then `review --spec` for
+/// one spec task, stopping at `ready`. No GitHub call is made anywhere in this path.
+pub struct SpecOptions {
+    /// The target repo's root, where `sbxm-task.toml` is.
+    pub repo_root: PathBuf,
+    pub spec: PathBuf,
+    pub worker_harness: Option<Harness>,
+    pub worker_model: Option<String>,
+    pub reviewer_harness: Option<Harness>,
+    pub reviewer_model: Option<String>,
+    /// The worker's time limit, also for the fix round.
+    pub time_limit: Option<String>,
+    pub reviewer_time_limit: Option<String>,
+    pub profile: Option<String>,
+    pub base: Option<String>,
+    pub repo: Option<String>,
+    /// For tests: what `repo.git` is cloned from.
+    pub clone_source: Option<String>,
+    /// For tests: the committer identity.
+    pub identity: Option<Identity>,
+}
+
+/// Deletes the spec task of `spec`, if one exists, the same way `--restart --issue` does:
+/// everything is checked and shown before anything is deleted. A finished result that lives only
+/// in the task's `repo.git` (not yet fetched into `repo_root`, decision 178) is protected the same
+/// way `task rm --spec` protects it, since `--restart` has no `--force` of its own; fetch the
+/// result first, or run `sbxm task rm --spec FILE --force` before restarting.
+fn discard_existing_spec(
+    config_dir: &Path,
+    repo_root: &Path,
+    spec: &Path,
+    restart: &Restart,
+    backend: &dyn SandboxBackend,
+    probe: &dyn ProcessProbe,
+    out: &mut dyn Write,
+) -> Result<()> {
+    let base_dir = GlobalConfig::load(config_dir)?.base_dir;
+    let (id, _) = record::spec_id(spec)?;
+    if !finish::exists(&base_dir, &id) {
+        return Ok(());
+    }
+    finish::check_spec_result_fetched(&base_dir, &id, repo_root)?;
+    finish::discard(
+        &base_dir,
+        &id,
+        restart.yes,
+        backend,
+        probe,
+        restart.confirm,
+        out,
+    )
+}
+
+/// [`run_spec`], optionally discarding an existing spec task first (`--restart`, as for `--issue`).
+#[allow(clippy::too_many_arguments)]
+pub fn run_spec(
+    config_dir: &Path,
+    opts: &SpecOptions,
+    restart: Option<&Restart>,
+    backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    host: &dyn HostRunner,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<()> {
+    // The review's flags are checked now, not after the worker has spent its time.
+    if let Some(harness) = opts.reviewer_harness {
+        headless_harness("--reviewer-harness", harness.as_str(), "tasks")
+            .map_err(|e| anyhow!(e))?;
+    }
+    if let Some(model) = &opts.reviewer_model {
+        check_model_flag("--reviewer-model", model).map_err(|e| anyhow!(e))?;
+    }
+    if let Some(model) = &opts.worker_model {
+        check_model_flag("--worker-model", model).map_err(|e| anyhow!(e))?;
+    }
+    if let Some(limit) = &opts.reviewer_time_limit {
+        parse_duration("--reviewer-time-limit", limit).map_err(|e| anyhow!(e))?;
+    }
+
+    // As for `--issue`: the reviewer's secret and profile are checked now too, before the worker
+    // has spent its time (spec §5.2).
+    {
+        let mut config = TaskConfig::load(&opts.repo_root)?;
+        if let Some(harness) = opts.worker_harness {
+            let harness = headless_harness("--worker-harness", harness.as_str(), "tasks")
+                .map_err(|e| anyhow!(e))?;
+            config.set_worker_harness(harness);
+        }
+        if let Some(harness) = opts.reviewer_harness {
+            let harness = headless_harness("--reviewer-harness", harness.as_str(), "tasks")
+                .map_err(|e| anyhow!(e))?;
+            config.set_reviewer_harness(harness);
+        }
+        if let Some(profile) = &opts.profile {
+            config.sandbox.profile = profile.clone();
+        }
+        pipeline::check_reviewer_inputs(config_dir, backend, &config)?;
+    }
+
+    if let Some(restart) = restart {
+        discard_existing_spec(
+            config_dir,
+            &opts.repo_root,
+            &opts.spec,
+            restart,
+            backend,
+            probe,
+            out,
+        )?;
+    }
+
+    let start = task_start::SpecOptions {
+        repo_root: opts.repo_root.clone(),
+        spec: opts.spec.clone(),
+        worker_harness: opts.worker_harness,
+        worker_model: opts.worker_model.clone(),
+        time_limit: opts.time_limit.clone(),
+        profile: opts.profile.clone(),
+        base: opts.base.clone(),
+        repo: opts.repo.clone(),
+        clone_source: opts.clone_source.clone(),
+        identity: opts.identity.clone(),
+    };
+    let mut warn = Once {
+        inner: warn,
+        seen: Vec::new(),
+        line: Vec::new(),
+    };
+    let mut started = Vec::new();
+    let result = task_start::run_spec(
+        config_dir,
+        &start,
+        backend,
+        github,
+        probe,
+        &mut started,
+        &mut warn,
+    );
+    out.write_all(without_next(&started).as_bytes())?;
+    // Gates that failed after the worker go on to the review, which reruns them and gives a
+    // failure to a fix round (decision 180); every other failure stops here.
+    if let Err(e) = result
+        && !e.is::<task_start::GatesFailed>()
+    {
+        return Err(e);
+    }
+
+    task_review::run(
+        config_dir,
+        &task_review::Options {
+            repo_root: opts.repo_root.clone(),
+            target: task_review::Target::Spec(opts.spec.clone()),
             repo: opts.repo.clone(),
             base: opts.base.clone(),
             clone_source: opts.clone_source.clone(),

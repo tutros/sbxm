@@ -612,23 +612,46 @@ pub fn run_spec(
         // A gate that could not run at all gives the review nothing to react to, so it is not
         // named as the next step (issue 186).
         match gated.failed_outcome().filter(|o| o.could_not_run) {
-            Some(outcome) => bail!(
-                "{id}: gates could not run: `{}` ({}); {}",
-                first.command,
-                first.tier,
-                outcome.output_tail
-            ),
+            Some(outcome) => {
+                writeln!(
+                    out,
+                    "  gates: could not run: `{}` ({}); {}",
+                    first.command, first.tier, outcome.output_tail
+                )?;
+                bail!(
+                    "{id}: gates could not run: `{}` ({}); {}",
+                    first.command,
+                    first.tier,
+                    outcome.output_tail
+                )
+            }
             None => {
                 let exit = first
                     .exit
                     .map_or_else(|| "no exit code".to_owned(), |c| format!("exit {c}"));
-                bail!(
+                writeln!(
+                    out,
+                    "  gates: failed: `{}` ({}, {exit})",
+                    first.command, first.tier
+                )?;
+                writeln!(
+                    out,
+                    "  next: sbxm task review {} (it reruns the gates and gives a failure to a \
+                     fix round)",
+                    spec_flag(&opts.spec)
+                )?;
+                // A gate that ran and failed goes on to the review, which reruns it and gives a
+                // failure to a fix round (decision 180): `task run --spec` catches this typed
+                // error to tell it apart from any other failure, the same way it does for
+                // `--issue` (`GatesFailed`, defined above for the issue path).
+                Err(GatesFailed(format!(
                     "{id}: gates failed: `{}` ({}, {exit}); next: sbxm task review {} (it reruns \
                      the gates and gives a failure to a fix round)",
                     first.command,
                     first.tier,
                     spec_flag(&opts.spec)
-                )
+                ))
+                .into())
             }
         }
     }
