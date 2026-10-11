@@ -558,6 +558,8 @@ pub(crate) fn resolve_spec_start(opts: &SpecOptions) -> Result<SpecStart> {
     }
     let source_text = pipeline::validate_spec_file(&opts.spec)?;
     let (id, title) = record::spec_id(&opts.spec)?;
+    // Rendered here only as a check; the start renders it again from the same inputs.
+    pipeline::spec_worker_prompt(&config, &id, &base_branch, &repo_name)?;
     let clone_source = opts
         .clone_source
         .clone()

@@ -579,6 +579,121 @@ fn restart_validates_the_worker_secret_before_discarding_the_old_task() {
     );
 }
 
+/// PR 208 review round 3, M-1: a custom worker prompt that cannot be rendered for a spec task is
+/// known from the config alone, so it is refused before the prompt and the old task stays
+/// (decision 184).
+#[test]
+fn restart_validates_the_worker_prompt_before_discarding_the_old_task() {
+    let f = config();
+    let s = spec(&f);
+    let id = id_of(&s);
+    let failing = FakeBackend::with_secrets(&["anthropic", "openai"]).with_exec_output_matching(
+        "claude",
+        ExecOutput {
+            stdout: String::new(),
+            stderr: "boom".into(),
+            exit_code: Some(1),
+        },
+    );
+    let first = go(
+        &f,
+        &options(&f, s.clone()),
+        None,
+        &failing,
+        &FakeGitHub::default(),
+    );
+    assert!(first.result.is_err());
+    let repo_root = f.env.tmp.path().join("target-repo");
+    fs::write(repo_root.join("worker.md"), "Work on {{issue}}.\n").unwrap();
+    fs::write(
+        repo_root.join("sbxm-task.toml"),
+        "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = [\"cargo test\"]\n\n\
+         [reviewer]\nharness = \"codex\"\n\n[prompts]\nworker = \"worker.md\"\n",
+    )
+    .unwrap();
+    let b = backend_for(&f, &id, &[CLEAN_REVIEW]);
+
+    let out = go(
+        &f,
+        &options(&f, s.clone()),
+        Some(&Restart {
+            confirm: &Yes,
+            yes: false,
+        }),
+        &b,
+        &FakeGitHub::default(),
+    );
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("has no value here"), "{message}");
+    assert!(b.creates().is_empty(), "nothing started");
+    assert!(
+        record::task_dir(&f.env.base_dir(), &id)
+            .join("repo.git")
+            .is_dir(),
+        "the old task was deleted before the worker prompt was validated"
+    );
+}
+
+/// A `Confirm` that edits the spec file, validly, before saying yes.
+struct EditThenYes<'a> {
+    spec: &'a Path,
+}
+
+impl Confirm for EditThenYes<'_> {
+    fn is_interactive(&self) -> bool {
+        true
+    }
+
+    fn confirm(&self, _prompt: &str) -> anyhow::Result<bool> {
+        fs::write(self.spec, "Build a different thing.\n").unwrap();
+        Ok(true)
+    }
+}
+
+/// PR 208 review round 3, S-2: the spec is read again after the discard, so a valid edit at the
+/// same path made while the prompt was pending is what the new task starts from.
+#[test]
+fn restart_uses_a_valid_spec_change_made_during_confirmation() {
+    let f = config();
+    let s = spec(&f);
+    let id = id_of(&s);
+    let failing = FakeBackend::with_secrets(&["anthropic", "openai"]).with_exec_output_matching(
+        "claude",
+        ExecOutput {
+            stdout: String::new(),
+            stderr: "boom".into(),
+            exit_code: Some(1),
+        },
+    );
+    let first = go(
+        &f,
+        &options(&f, s.clone()),
+        None,
+        &failing,
+        &FakeGitHub::default(),
+    );
+    assert!(first.result.is_err());
+    let b = backend_for(&f, &id, &[CLEAN_REVIEW]);
+
+    let out = go(
+        &f,
+        &options(&f, s.clone()),
+        Some(&Restart {
+            confirm: &EditThenYes { spec: &s },
+            yes: false,
+        }),
+        &b,
+        &FakeGitHub::default(),
+    );
+
+    out.result.unwrap();
+    assert_eq!(stage(&f, &id), (Stage::Ready, Status::Ok));
+    let source =
+        fs::read_to_string(record::task_dir(&f.env.base_dir(), &id).join("source.md")).unwrap();
+    assert_eq!(source, "Build a different thing.\n");
+}
+
 /// `start --spec` and `review --spec` would both warn about the same-harness reviewer; `run
 /// --spec` says it once (the `Once` writer, as for `--issue`).
 #[test]

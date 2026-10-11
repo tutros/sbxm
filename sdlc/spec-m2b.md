@@ -163,7 +163,7 @@ round), `--profile`, `--base`, `--repo`. `run`: every flag of both. The README t
 `run --spec --restart` discards an existing spec task the same way, except a result that lives only in the task's
 `repo.git`, not yet fetched into the checkout, is protected the same way `rm --spec` protects it [178], since `run`
 has no `--force` of its own: fetch it first, or `rm --spec FILE --force` before restarting [182].
-`--restart` is two steps, for `start` and `run`, an issue and a spec alike [184]: every refusal that needs no write
+`--restart` is two steps, for `start --issue` and for `run` with `--issue` or `--spec` (`start --spec` has none) [184]: every refusal that needs no write
 comes before the confirmation prompt and leaves the old task untouched; after a confirmed discard, a start that fails
 leaves no task. A change made while the command waits at its prompt, and the validation of the new task's kits, fall
 in the second step.

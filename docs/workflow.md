@@ -80,8 +80,9 @@ sbxm task run --spec idea.md           # the same for a spec task; no GitHub cal
     continues an open PR puts the same list in its comment on that PR instead (it can't make the PR a draft).
   - `task start --spec FILE` makes a task from a file instead of a GitHub issue (id `spec-<name>-<hash>`,
     `source.md` in place of `issue.md`); `task review --spec FILE` continues it through the same gates/review/fix
-    loop, and `task run --spec FILE` does both in one go, stopping before `finish` (with `--restart`, a spec file
-    that changes or disappears while it asks to confirm fails the start after the old task is gone; decision 184).
+    loop, and `task run --spec FILE` does both in one go, stopping before `finish` (with `--restart`, the spec is
+    read again after you confirm: a valid edit at the same path is used, and a file that disappeared, became
+    unusable or now names another task fails the start after the old task is gone; decision 184).
     `review.md` is its review (no PR, no GitHub call anywhere). `task finish --spec FILE` delivers it through
     `[finish] sink` in `sbxm-task.toml`: `local` (the default) keeps the branch in the task's `repo.git` and prints
     the `git fetch` command; `push` pushes it to `origin` as a new branch, no PR (refused while the task stopped or has

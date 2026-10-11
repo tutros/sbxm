@@ -744,6 +744,29 @@ pub fn prepare_spec(ctx: &Ctx, source_path: &Path) -> Result<Prepared> {
     prepare_spec_resolved(ctx, source_path, &text, &id, &title)
 }
 
+/// The spec worker's prompt, rendered. It needs only the config and the resolved names, so
+/// `--restart` also calls it before its discard: a custom prompt that cannot be rendered for a
+/// spec task is refused while the old task is still there (decision 184).
+pub fn spec_worker_prompt(
+    config: &TaskConfig,
+    id: &str,
+    base_branch: &str,
+    repo: &str,
+) -> Result<String> {
+    let template = prompts::template(Role::WorkerSpec, &config.prompts)?;
+    prompts::render(
+        &template.name,
+        &template.text,
+        &[
+            ("branch", id),
+            ("base", base_branch),
+            ("repo", repo),
+            ("gates_sandbox", &bullets(&config.gates.sandbox)),
+            ("gates_host", &bullets(&config.gates.host)),
+        ],
+    )
+}
+
 /// [`prepare_spec`], taking the spec file's already-read text and already-derived id/title
 /// instead of reading or deriving them itself: a caller that validated the spec before a
 /// destructive action elsewhere (`--restart`'s discard, issue #194 review finding M-1, repeat)
@@ -782,18 +805,7 @@ pub fn prepare_spec_resolved(
     )?;
     let mut warnings = ctx.config.warnings.clone();
     warnings.extend(worker.harness.unsupported(&profile, "the worker's sandbox"));
-    let template = prompts::template(Role::WorkerSpec, &ctx.config.prompts)?;
-    let prompt = prompts::render(
-        &template.name,
-        &template.text,
-        &[
-            ("branch", id),
-            ("base", ctx.base_branch),
-            ("repo", ctx.repo),
-            ("gates_sandbox", &bullets(&ctx.config.gates.sandbox)),
-            ("gates_host", &bullets(&ctx.config.gates.host)),
-        ],
-    )?;
+    let prompt = spec_worker_prompt(ctx.config, id, ctx.base_branch, ctx.repo)?;
 
     // Reserve both folders; `create_dir` fails if either appeared meanwhile.
     for dir in [&meta, &workspace] {
