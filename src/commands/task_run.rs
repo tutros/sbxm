@@ -303,8 +303,11 @@ pub fn run_spec(
     // The same preflight `task_start::run_spec` itself runs, so a bad --time-limit, repo,
     // identity, base or spec file is caught here too: `--restart`'s discard below must not cost
     // the old task its result over an input that was always going to be rejected (issue #194
-    // review finding M-1).
-    task_start::resolve_spec_start(&start)?;
+    // review finding M-1). The resolved snapshot, including the spec file's text, is kept and
+    // handed to `run_spec_from` below instead of being resolved or read again after the discard:
+    // the file could change or vanish while the discard's confirmation prompt is pending (issue
+    // #194 review finding M-1, repeat).
+    let resolved = task_start::resolve_spec_start(&start)?;
 
     if let Some(restart) = restart {
         discard_existing_spec(
@@ -324,9 +327,10 @@ pub fn run_spec(
         line: Vec::new(),
     };
     let mut started = Vec::new();
-    let result = task_start::run_spec(
+    let result = task_start::run_spec_from(
         config_dir,
         &start,
+        resolved,
         backend,
         github,
         probe,

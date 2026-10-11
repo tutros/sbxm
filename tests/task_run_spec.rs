@@ -3,6 +3,7 @@
 
 mod common;
 
+use std::fs;
 use std::path::{Path, PathBuf};
 
 use common::task_fixture::{
@@ -380,6 +381,72 @@ fn restart_validates_the_new_start_before_discarding_the_old_task() {
             .join("repo.git")
             .is_dir(),
         "the old task was deleted before the new start's inputs were validated"
+    );
+}
+
+/// A `Confirm` that changes the spec file before saying yes, so a re-read at that point would
+/// either fail (`validate_spec_file` rejects non-UTF-8) or start the wrong task.
+struct CorruptThenYes<'a> {
+    spec: &'a Path,
+}
+
+impl Confirm for CorruptThenYes<'_> {
+    fn is_interactive(&self) -> bool {
+        true
+    }
+
+    fn confirm(&self, _prompt: &str) -> anyhow::Result<bool> {
+        fs::write(self.spec, [0xff, 0xfe, 0xfd]).unwrap();
+        Ok(true)
+    }
+}
+
+/// Issue #194 review finding M-1 (repeat): the old task must not be discarded and then have its
+/// replacement resolved or read again, since the spec file can change (or vanish) while the
+/// discard's confirmation prompt is pending. The new task must come from the same snapshot that
+/// was validated before the discard.
+#[test]
+fn restart_starts_from_the_validated_spec_even_if_it_changes_during_confirmation() {
+    let f = config();
+    let s = spec(&f);
+    let id = id_of(&s);
+    let failing = FakeBackend::with_secrets(&["anthropic", "openai"]).with_exec_output_matching(
+        "claude",
+        ExecOutput {
+            stdout: String::new(),
+            stderr: "boom".into(),
+            exit_code: Some(1),
+        },
+    );
+    let first = go(
+        &f,
+        &options(&f, s.clone()),
+        None,
+        &failing,
+        &FakeGitHub::default(),
+    );
+    assert!(first.result.is_err());
+    let b = backend_for(&f, &id, &[CLEAN_REVIEW]);
+
+    let out = go(
+        &f,
+        &options(&f, s.clone()),
+        Some(&Restart {
+            confirm: &CorruptThenYes { spec: &s },
+            yes: false,
+        }),
+        &b,
+        &FakeGitHub::default(),
+    );
+
+    out.result.unwrap();
+    assert_eq!(stage(&f, &id), (Stage::Ready, Status::Ok));
+    let source =
+        fs::read_to_string(record::task_dir(&f.env.base_dir(), &id).join("source.md")).unwrap();
+    assert_eq!(
+        source, "Build a thing.\n",
+        "the replacement must use the text validated before the discard, not the file's content \
+         after it changed"
     );
 }
 

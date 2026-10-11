@@ -499,13 +499,20 @@ pub struct SpecOptions {
 /// anything: the worker config, the repo, the committer identity, the base branch and the spec
 /// file itself. Shared with `task_run::run_spec` (issue #194 review finding M-1) so a `--restart`
 /// discard there happens only after all of this has been checked, the same as `run_with`
-/// validates every start input before its own `discard_existing` call.
+/// validates every start input before its own `discard_existing` call. `source_text`, `id` and
+/// `title` are this snapshot's read of the spec file: a caller that discards an existing task
+/// between resolving and starting must hand this same snapshot to [`run_spec_from`] rather than
+/// resolving or reading the file again, since the file may have changed or vanished while a
+/// confirmation prompt was pending (issue #194 review finding M-1, repeat).
 pub(crate) struct SpecStart {
     pub config: TaskConfig,
     pub repo_name: String,
     pub identity: Identity,
     pub base_branch: String,
     pub clone_source: String,
+    pub source_text: String,
+    pub id: String,
+    pub title: String,
 }
 
 pub(crate) fn resolve_spec_start(opts: &SpecOptions) -> Result<SpecStart> {
@@ -549,7 +556,8 @@ pub(crate) fn resolve_spec_start(opts: &SpecOptions) -> Result<SpecStart> {
     if !repo::valid_ref_name(&base_branch) {
         bail!("base {base_branch:?} isn't a usable branch name; pass --base <branch>");
     }
-    pipeline::validate_spec_file(&opts.spec)?;
+    let source_text = pipeline::validate_spec_file(&opts.spec)?;
+    let (id, title) = record::spec_id(&opts.spec)?;
     let clone_source = opts
         .clone_source
         .clone()
@@ -560,6 +568,9 @@ pub(crate) fn resolve_spec_start(opts: &SpecOptions) -> Result<SpecStart> {
         identity,
         base_branch,
         clone_source,
+        source_text,
+        id,
+        title,
     })
 }
 
@@ -575,13 +586,35 @@ pub fn run_spec(
     out: &mut dyn Write,
     warn: &mut dyn Write,
 ) -> Result<()> {
+    let start = resolve_spec_start(opts)?;
+    run_spec_from(config_dir, opts, start, backend, github, probe, out, warn)
+}
+
+/// [`run_spec`], taking an already-resolved [`SpecStart`] instead of resolving one itself: a
+/// caller that must discard an existing task (`--restart`) between resolving and starting passes
+/// the same snapshot it validated before the discard, rather than having this function read the
+/// spec file again after that deletion (issue #194 review finding M-1, repeat).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_spec_from(
+    config_dir: &std::path::Path,
+    opts: &SpecOptions,
+    start: SpecStart,
+    backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<()> {
     let SpecStart {
         config,
         repo_name,
         identity,
         base_branch,
         clone_source,
-    } = resolve_spec_start(opts)?;
+        source_text,
+        id: spec_id,
+        title,
+    } = start;
     for warning in &config.warnings {
         writeln!(warn, "warning: {warning}")?;
     }
@@ -599,7 +632,8 @@ pub fn run_spec(
         host: &ShellHostRunner,
     };
     writeln!(out, "Starting a task from {} ...", opts.spec.display())?;
-    let mut prepared = pipeline::prepare_spec(&ctx, &opts.spec)?;
+    let mut prepared =
+        pipeline::prepare_spec_resolved(&ctx, &opts.spec, &source_text, &spec_id, &title)?;
     for warning in &prepared.warnings {
         writeln!(warn, "warning: {warning}")?;
     }

@@ -739,11 +739,26 @@ pub fn validate_spec_file(source_path: &Path) -> Result<String> {
 /// `issue.md`. There is no PR to continue, so `continues` is always `None`; no GitHub call is
 /// made anywhere in this function.
 pub fn prepare_spec(ctx: &Ctx, source_path: &Path) -> Result<Prepared> {
-    let global = GlobalConfig::load(ctx.config_dir)?;
     let text = validate_spec_file(source_path)?;
     let (id, title) = record::spec_id(source_path)?;
-    let meta = record::task_dir(&global.base_dir, &id);
-    let workspace = global.base_dir.join("tasks").join(&id);
+    prepare_spec_resolved(ctx, source_path, &text, &id, &title)
+}
+
+/// [`prepare_spec`], taking the spec file's already-read text and already-derived id/title
+/// instead of reading or deriving them itself: a caller that validated the spec before a
+/// destructive action elsewhere (`--restart`'s discard, issue #194 review finding M-1, repeat)
+/// passes that same snapshot here, so the file is never read again after the file could have
+/// changed or vanished.
+pub fn prepare_spec_resolved(
+    ctx: &Ctx,
+    source_path: &Path,
+    text: &str,
+    id: &str,
+    title: &str,
+) -> Result<Prepared> {
+    let global = GlobalConfig::load(ctx.config_dir)?;
+    let meta = record::task_dir(&global.base_dir, id);
+    let workspace = global.base_dir.join("tasks").join(id);
 
     // Check before acting: nothing is written until every one of these passes.
     if meta.exists() || workspace.exists() {
@@ -772,7 +787,7 @@ pub fn prepare_spec(ctx: &Ctx, source_path: &Path) -> Result<Prepared> {
         &template.name,
         &template.text,
         &[
-            ("branch", &id),
+            ("branch", id),
             ("base", ctx.base_branch),
             ("repo", ctx.repo),
             ("gates_sandbox", &bullets(&ctx.config.gates.sandbox)),
@@ -812,8 +827,8 @@ pub fn prepare_spec(ctx: &Ctx, source_path: &Path) -> Result<Prepared> {
 
         let repo_git = meta.join("repo.git");
         repo::clone_bare(ctx.clone_source, &repo_git)?;
-        repo::create_branch(&repo_git, &id, ctx.base_branch)?;
-        repo::clone_workspace(&repo_git, &workspace, &id, ctx.identity)?;
+        repo::create_branch(&repo_git, id, ctx.base_branch)?;
+        repo::clone_workspace(&repo_git, &workspace, id, ctx.identity)?;
 
         // The agent's `git add -A` must not pick up sbxm's own files.
         let info = workspace.join(".git").join("info");
@@ -827,7 +842,7 @@ pub fn prepare_spec(ctx: &Ctx, source_path: &Path) -> Result<Prepared> {
             ],
             Existing::Replace,
         )?;
-        fs::write(meta.join("source.md"), &text)?;
+        fs::write(meta.join("source.md"), text)?;
         fs::write(meta.join("worker-prompt.md"), &prompt)?;
 
         // The record goes first: sandbox setup takes minutes, and `status` (and a restart after a
@@ -837,11 +852,11 @@ pub fn prepare_spec(ctx: &Ctx, source_path: &Path) -> Result<Prepared> {
                 kind: Kind::Spec,
                 number: 0,
                 repo: ctx.repo,
-                title: &title,
+                title,
                 base: ctx.base_branch,
-                branch: &id,
+                branch: id,
                 config_hash: &harness_kits.config_hash,
-                id: Some(&id),
+                id: Some(id),
             },
             now(),
             Process::current(ctx.probe),
