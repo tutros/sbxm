@@ -124,5 +124,11 @@ sbxm task run --spec idea.md           # the same for a spec task; no GitHub cal
 - **Workers should not install software.** If a worker installs a package itself, its gates pass where a clean
   sandbox fails (`pkg-config` for `openssl-sys` was the case). Put what the build needs in the profile's
   `setup.install`. Pre-built templates that make this strict are planned as their own milestone.
+- **Tests after a hand fix.** A hand fix on a task's branch was not gated in a sandbox, so run the checks on the
+  host: `cargo fmt --check`, clippy, and the tests the change touches (`cargo test --test <file>`, plus the unit
+  tests of a changed module). The full `cargo test` takes about 12 minutes on Windows; run it when the change is
+  Windows-specific (paths, file locks, process handling), when it makes a command fail where it used to succeed (then
+  grep every test that calls the command first), or when no sandbox gate will run on the result. The PR review's
+  sandbox gates run the full suite on Linux in either case.
 - **Reading logs on Windows.** Files written by `sbxm` are UTF-8 without a BOM. Windows PowerShell 5.1 reads them as
   ANSI (`✓` shows as `âœ“`); use `Get-Content -Encoding utf8` or PowerShell 7.
