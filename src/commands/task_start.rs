@@ -501,9 +501,9 @@ pub struct SpecOptions {
 /// discard there happens only after all of this has been checked, the same as `run_with`
 /// validates every start input before its own `discard_existing` call. `source_text`, `id` and
 /// `title` are this snapshot's read of the spec file: a caller that discards an existing task
-/// between resolving and starting must hand this same snapshot to [`run_spec_from`] rather than
-/// resolving or reading the file again, since the file may have changed or vanished while a
-/// confirmation prompt was pending (issue #194 review finding M-1, repeat).
+/// between resolving and starting resolves again after the discard and hands that snapshot to
+/// [`run_spec_from`], since the file may have changed or vanished while a confirmation prompt
+/// was pending (decision 184).
 pub(crate) struct SpecStart {
     pub config: TaskConfig,
     pub repo_name: String,
@@ -591,9 +591,8 @@ pub fn run_spec(
 }
 
 /// [`run_spec`], taking an already-resolved [`SpecStart`] instead of resolving one itself: a
-/// caller that must discard an existing task (`--restart`) between resolving and starting passes
-/// the same snapshot it validated before the discard, rather than having this function read the
-/// spec file again after that deletion (issue #194 review finding M-1, repeat).
+/// caller that discards an existing task (`--restart`) first passes the snapshot it resolved
+/// after the discard, so the task it starts and the id it reviews are the same one.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_spec_from(
     config_dir: &std::path::Path,

@@ -282,6 +282,25 @@ fn restart_discards_the_old_task_then_runs() {
         out.out
     );
     assert_eq!(stage(&f, &id), (Stage::Ready, Status::Ok));
+    // The printed `task finish --spec FILE` works on the restarted task.
+    assert!(
+        out.out
+            .contains(&format!("next: sbxm task finish --spec {}", s.display())),
+        "{}",
+        out.out
+    );
+    task_finish::run(
+        &f.env.config_dir(),
+        &task_finish::Options {
+            target: task_finish::Target::Spec(s.clone()),
+            repo_root: f.env.tmp.path().join("target-repo"),
+            push_unresolved: false,
+        },
+        &FakeGitHub::default(),
+        &Probe,
+        &mut Vec::new(),
+    )
+    .unwrap();
 }
 
 /// Decision 178: a finished spec task's result lives only in its `repo.git` until fetched, so
@@ -384,8 +403,8 @@ fn restart_validates_the_new_start_before_discarding_the_old_task() {
     );
 }
 
-/// A `Confirm` that changes the spec file before saying yes, so a re-read at that point would
-/// either fail (`validate_spec_file` rejects non-UTF-8) or start the wrong task.
+/// A `Confirm` that makes the spec file unusable before saying yes (`validate_spec_file` rejects
+/// non-UTF-8).
 struct CorruptThenYes<'a> {
     spec: &'a Path,
 }
@@ -401,12 +420,11 @@ impl Confirm for CorruptThenYes<'_> {
     }
 }
 
-/// Issue #194 review finding M-1 (repeat): the old task must not be discarded and then have its
-/// replacement resolved or read again, since the spec file can change (or vanish) while the
-/// discard's confirmation prompt is pending. The new task must come from the same snapshot that
-/// was validated before the discard.
+/// Decision 184 (PR 208 review round 2, M-1): the spec is read again after a confirmed discard, so
+/// a file that became unusable while the prompt was pending fails the start there and leaves no
+/// task, instead of starting from text the file no longer has.
 #[test]
-fn restart_starts_from_the_validated_spec_even_if_it_changes_during_confirmation() {
+fn restart_fails_after_the_discard_if_the_spec_becomes_unusable_during_confirmation() {
     let f = config();
     let s = spec(&f);
     let id = id_of(&s);
@@ -439,19 +457,17 @@ fn restart_starts_from_the_validated_spec_even_if_it_changes_during_confirmation
         &FakeGitHub::default(),
     );
 
-    out.result.unwrap();
-    assert_eq!(stage(&f, &id), (Stage::Ready, Status::Ok));
-    let source =
-        fs::read_to_string(record::task_dir(&f.env.base_dir(), &id).join("source.md")).unwrap();
-    assert_eq!(
-        source, "Build a thing.\n",
-        "the replacement must use the text validated before the discard, not the file's content \
-         after it changed"
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("the old task was discarded"), "{message}");
+    assert!(b.creates().is_empty(), "nothing started");
+    assert!(
+        !record::task_dir(&f.env.base_dir(), &id).exists(),
+        "no replacement task"
     );
 }
 
-/// A `Confirm` that removes the spec file before saying yes, so the composed review that follows
-/// must not re-read or re-derive the id from the path: the file is gone by the time it would.
+/// A `Confirm` that removes the spec file before saying yes: `task finish|resume|rm --spec FILE`
+/// could not address a task started under that path's id afterwards.
 struct RemoveThenYes<'a> {
     spec: &'a Path,
 }
@@ -467,11 +483,12 @@ impl Confirm for RemoveThenYes<'_> {
     }
 }
 
-/// Issue #194 review finding M-1 (second repeat): the composed review that runs after the worker
-/// must open the task by the id resolved before the discard, not re-derive it from the spec path
-/// (which `record::spec_id` would canonicalize, and fail, if the file no longer exists).
+/// Decision 184 (PR 208 review round 2, M-1): a spec removed while the prompt was pending fails
+/// the start after the discard. A task started under the old id would end `ready` with a
+/// `task finish --spec FILE` hint that cannot work, since every spec command derives the id from
+/// the path again.
 #[test]
-fn restart_reaches_ready_even_if_the_spec_is_removed_during_confirmation() {
+fn restart_fails_after_the_discard_if_the_spec_is_removed_during_confirmation() {
     let f = config();
     let s = spec(&f);
     let id = id_of(&s);
@@ -504,8 +521,13 @@ fn restart_reaches_ready_even_if_the_spec_is_removed_during_confirmation() {
         &FakeGitHub::default(),
     );
 
-    out.result.unwrap();
-    assert_eq!(stage(&f, &id), (Stage::Ready, Status::Ok));
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("the old task was discarded"), "{message}");
+    assert!(b.creates().is_empty(), "nothing started");
+    assert!(
+        !record::task_dir(&f.env.base_dir(), &id).exists(),
+        "no replacement task"
+    );
 }
 
 /// Issue #194 review finding M-2: `--restart` must not discard the old task before the new

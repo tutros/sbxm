@@ -56,6 +56,7 @@ sbxm task review --pr 69               # independent review of any PR of this re
 sbxm task file-findings --pr 69        # dry run; add --create to file the findings as issues
 sbxm task rm --issue 63                # after the merge: sandboxes, clones and record (asks first)
 sbxm task run --issue 63               # start and review in one go; stops before finish
+sbxm task run --spec idea.md           # the same for a spec task; no GitHub call anywhere
 ```
 
 - **Stages:** `prepared`, `working`, `gating`, `reviewing`, `fixing`, `ready`, `finished`. A failed gate shows as
@@ -79,7 +80,9 @@ sbxm task run --issue 63               # start and review in one go; stops befor
     continues an open PR puts the same list in its comment on that PR instead (it can't make the PR a draft).
   - `task start --spec FILE` makes a task from a file instead of a GitHub issue (id `spec-<name>-<hash>`,
     `source.md` in place of `issue.md`); `task review --spec FILE` continues it through the same gates/review/fix
-    loop. `review.md` is its review (no PR, no GitHub call anywhere). `task finish --spec FILE` delivers it through
+    loop, and `task run --spec FILE` does both in one go, stopping before `finish` (with `--restart`, a spec file
+    that changes or disappears while it asks to confirm fails the start after the old task is gone; decision 184).
+    `review.md` is its review (no PR, no GitHub call anywhere). `task finish --spec FILE` delivers it through
     `[finish] sink` in `sbxm-task.toml`: `local` (the default) keeps the branch in the task's `repo.git` and prints
     the `git fetch` command; `push` pushes it to `origin` as a new branch, no PR (refused while the task stopped or has
     must-fix findings left, unless `--push-unresolved`). `task rm --spec FILE` refuses to delete a result you haven't

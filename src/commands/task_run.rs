@@ -5,7 +5,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 
 use super::task_review;
 use super::task_start::{self, Restart};
@@ -304,20 +304,12 @@ pub fn run_spec(
     // The same preflight `task_start::run_spec` itself runs, so a bad --time-limit, repo,
     // identity, base or spec file is caught here too: `--restart`'s discard below must not cost
     // the old task its result over an input that was always going to be rejected (issue #194
-    // review finding M-1). The resolved snapshot, including the spec file's text, is kept and
-    // handed to `run_spec_from` below instead of being resolved or read again after the discard:
-    // the file could change or vanish while the discard's confirmation prompt is pending (issue
-    // #194 review finding M-1, repeat).
-    let resolved = task_start::resolve_spec_start(&start)?;
+    // review finding M-1).
+    let mut resolved = task_start::resolve_spec_start(&start)?;
     // The worker's secret, checked the same way the reviewer's already is above, before anything
     // is discarded: a missing one must not be found only after the old task is gone (issue #194
     // review finding M-2).
     pipeline::check_worker_inputs(config_dir, backend, &resolved.config)?;
-    // The composed review below must open the same task this resolved snapshot started, not
-    // re-derive the id from `opts.spec` by reading the file again: the file could have changed or
-    // vanished while the discard's confirmation prompt was pending (issue #194 review finding M-1,
-    // repeat of the repeat).
-    let spec_id = resolved.id.clone();
 
     if let Some(restart) = restart {
         discard_existing_spec(
@@ -329,7 +321,25 @@ pub fn run_spec(
             probe,
             out,
         )?;
+        // The resolution above was the preflight only. The spec file could have changed or
+        // vanished while the confirmation prompt was pending, so it is resolved again and the
+        // start fails here if it no longer names the same task (decision 184): a task started
+        // under the old id would be one `task finish|resume|rm --spec FILE` cannot address.
+        let discarded = resolved.id;
+        resolved = task_start::resolve_spec_start(&start)
+            .context("the old task was discarded, but the new one could not be started")?;
+        if resolved.id != discarded {
+            bail!(
+                "the old task was discarded, but the new one could not be started: {} now names \
+                 another task ({}, was {discarded})",
+                opts.spec.display(),
+                resolved.id
+            );
+        }
     }
+    // The composed review below opens the task this snapshot starts, not one whose id is derived
+    // from `opts.spec` again.
+    let spec_id = resolved.id.clone();
 
     let mut warn = Once {
         inner: warn,

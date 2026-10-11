@@ -296,8 +296,8 @@ pub enum TaskCommand {
         json: bool,
     },
     /// Start a task for one issue or a spec file, then review it: the worker, the gates, an
-    /// independent reviewer and at most one fix round. Stops at ready; `finish` publishes. Blocks
-    /// until it is done.
+    /// independent reviewer and as many fix rounds as `[worker] fix_rounds` allows (default 3).
+    /// Stops at ready; `finish` publishes. Blocks until it is done.
     #[command(group(clap::ArgGroup::new("run_target").required(true).args(["issue", "spec"])))]
     Run {
         /// The issue to carry through.

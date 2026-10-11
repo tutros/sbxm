@@ -52,6 +52,21 @@ fn a_run_with_both_targets_is_refused_by_clap() {
     assert!(stderr.contains("Usage: sbxm task run"), "{stderr}");
 }
 
+/// PR 208 review round 2, S-1: the help names the fix-round budget, not "one fix round".
+#[test]
+fn the_help_names_the_fix_round_budget() {
+    let output = Command::cargo_bin("sbxm")
+        .unwrap()
+        .args(["task", "run", "--help"])
+        .output()
+        .unwrap();
+    let help = String::from_utf8_lossy(&output.stdout).into_owned();
+
+    assert!(output.status.success());
+    assert!(!help.contains("at most one fix round"), "{help}");
+    assert!(help.contains("fix_rounds"), "{help}");
+}
+
 /// `--spec` alone satisfies the target group and gets past `main`'s dispatch to the command's own
 /// first check. The checkout has no `sbxm-task.toml`, so the command stops there, before any
 /// backend call: the test needs no `sbx`.
