@@ -177,6 +177,7 @@ pub fn run(
             reviewer_time_limit: opts.reviewer_time_limit.clone(),
             time_limit: opts.time_limit.clone(),
             profile: opts.profile.clone(),
+            resolved_spec_id: None,
         },
         backend,
         github,
@@ -308,6 +309,11 @@ pub fn run_spec(
     // the file could change or vanish while the discard's confirmation prompt is pending (issue
     // #194 review finding M-1, repeat).
     let resolved = task_start::resolve_spec_start(&start)?;
+    // The composed review below must open the same task this resolved snapshot started, not
+    // re-derive the id from `opts.spec` by reading the file again: the file could have changed or
+    // vanished while the discard's confirmation prompt was pending (issue #194 review finding M-1,
+    // repeat of the repeat).
+    let spec_id = resolved.id.clone();
 
     if let Some(restart) = restart {
         discard_existing_spec(
@@ -359,6 +365,7 @@ pub fn run_spec(
             reviewer_time_limit: opts.reviewer_time_limit.clone(),
             time_limit: opts.time_limit.clone(),
             profile: opts.profile.clone(),
+            resolved_spec_id: Some(spec_id),
         },
         backend,
         github,

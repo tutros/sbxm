@@ -450,6 +450,64 @@ fn restart_starts_from_the_validated_spec_even_if_it_changes_during_confirmation
     );
 }
 
+/// A `Confirm` that removes the spec file before saying yes, so the composed review that follows
+/// must not re-read or re-derive the id from the path: the file is gone by the time it would.
+struct RemoveThenYes<'a> {
+    spec: &'a Path,
+}
+
+impl Confirm for RemoveThenYes<'_> {
+    fn is_interactive(&self) -> bool {
+        true
+    }
+
+    fn confirm(&self, _prompt: &str) -> anyhow::Result<bool> {
+        fs::remove_file(self.spec).unwrap();
+        Ok(true)
+    }
+}
+
+/// Issue #194 review finding M-1 (second repeat): the composed review that runs after the worker
+/// must open the task by the id resolved before the discard, not re-derive it from the spec path
+/// (which `record::spec_id` would canonicalize, and fail, if the file no longer exists).
+#[test]
+fn restart_reaches_ready_even_if_the_spec_is_removed_during_confirmation() {
+    let f = config();
+    let s = spec(&f);
+    let id = id_of(&s);
+    let failing = FakeBackend::with_secrets(&["anthropic", "openai"]).with_exec_output_matching(
+        "claude",
+        ExecOutput {
+            stdout: String::new(),
+            stderr: "boom".into(),
+            exit_code: Some(1),
+        },
+    );
+    let first = go(
+        &f,
+        &options(&f, s.clone()),
+        None,
+        &failing,
+        &FakeGitHub::default(),
+    );
+    assert!(first.result.is_err());
+    let b = backend_for(&f, &id, &[CLEAN_REVIEW]);
+
+    let out = go(
+        &f,
+        &options(&f, s.clone()),
+        Some(&Restart {
+            confirm: &RemoveThenYes { spec: &s },
+            yes: false,
+        }),
+        &b,
+        &FakeGitHub::default(),
+    );
+
+    out.result.unwrap();
+    assert_eq!(stage(&f, &id), (Stage::Ready, Status::Ok));
+}
+
 /// `start --spec` and `review --spec` would both warn about the same-harness reviewer; `run
 /// --spec` says it once (the `Once` writer, as for `--issue`).
 #[test]
