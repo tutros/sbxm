@@ -201,7 +201,6 @@ fn a_backend_error_is_reported_per_pair_and_cleaned_up() {
 
     let ran = go(&env, &format!("{TASK}{TWO_CLAUDES}"), &backend);
 
-    let summary = ran.result.unwrap();
     assert!(
         ran.out
             .contains("contestants[0] claude/one: error: cannot create sandbox"),
@@ -210,15 +209,11 @@ fn a_backend_error_is_reported_per_pair_and_cleaned_up() {
     );
     // The half-made sandboxes are removed anyway.
     assert_eq!(backend.removes().len(), 2);
-    // Every pair errored (issue #126c).
-    assert_eq!(summary.errored_pairs(), 2);
-    assert_eq!(summary.outcomes.len(), 2);
-    assert!(
-        ran.warn
-            .ends_with("error: 2 of 2 contestant runs ended in error\n"),
-        "{}",
-        ran.warn
-    );
+    // Every pair errored, so the run itself fails (decision 181).
+    let err = ran.result.unwrap_err();
+    assert_eq!(err.to_string(), "2 of 2 contestant runs ended in error");
+    let errored = err.downcast::<run::PairsErrored>().unwrap();
+    assert_eq!(errored.summary.outcomes.len(), 2);
 }
 
 #[test]
@@ -229,7 +224,6 @@ fn one_errored_pair_is_counted_against_the_total_the_other_pair_still_completing
 
     let ran = go(&env, &format!("{TASK}{TWO_CLAUDES}"), &backend);
 
-    let summary = ran.result.unwrap();
     assert!(
         ran.out.contains("contestants[0] claude/one: completed"),
         "{}",
@@ -240,17 +234,15 @@ fn one_errored_pair_is_counted_against_the_total_the_other_pair_still_completing
         "{}",
         ran.out
     );
-    assert_eq!(summary.errored_pairs(), 1);
-    assert_eq!(summary.outcomes.len(), 2);
     // Everything still got saved and printed (decision 16): the run isn't aborted by the error.
-    assert!(ran.out.contains("Results: "), "{}", ran.out);
-    // The count is the last thing the run says, on the warning stream (decision 181).
-    assert!(
-        ran.warn
-            .ends_with("error: 1 of 2 contestant runs ended in error\n"),
-        "{}",
-        ran.warn
-    );
+    let last = ran.out.lines().last().unwrap();
+    assert!(last.starts_with("Results: "), "{}", ran.out);
+    // Only then does the run fail, which is what gives the process its exit status (decision 181).
+    let err = ran.result.unwrap_err();
+    assert_eq!(err.to_string(), "1 of 2 contestant runs ended in error");
+    let errored = err.downcast::<run::PairsErrored>().unwrap();
+    assert_eq!(errored.summary.errored_pairs(), 1);
+    assert_eq!(errored.summary.outcomes.len(), 2);
 }
 
 #[test]

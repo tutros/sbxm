@@ -31,8 +31,29 @@ impl Summary {
     }
 }
 
+/// The error of a run that finished, printed and saved everything, but had pairs sbxm could not
+/// run (decision 181). It carries the run's summary, which is otherwise complete.
+#[derive(Debug)]
+pub struct PairsErrored {
+    pub summary: Summary,
+}
+
+impl std::fmt::Display for PairsErrored {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} of {} contestant runs ended in error",
+            self.summary.errored_pairs(),
+            self.summary.outcomes.len()
+        )
+    }
+}
+
+impl std::error::Error for PairsErrored {}
+
 /// Runs the comparison in `config_path`, printing the run ID and one line per
-/// pair to `out` and warnings to `warn`.
+/// pair to `out` and warnings to `warn`. Fails with [`PairsErrored`], after all of that, when a
+/// pair could not be run.
 pub fn run(
     config_dir: &Path,
     config_path: &Path,
@@ -308,14 +329,10 @@ fn run_with(
         run_id: roots.id,
         outcomes,
     };
-    // Said last, after everything is printed and saved; `main` exits 1 on it (decision 181).
-    let errored = summary.errored_pairs();
-    if errored > 0 {
-        writeln!(
-            warn,
-            "error: {errored} of {} contestant runs ended in error",
-            summary.outcomes.len()
-        )?;
+    // Last, after everything is printed and saved: the run fails if a pair could not be run, so
+    // the process exits non-zero the way every failing command does (decision 181).
+    if summary.errored_pairs() > 0 {
+        return Err(PairsErrored { summary }.into());
     }
     Ok(summary)
 }

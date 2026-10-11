@@ -190,17 +190,13 @@ fn main() -> anyhow::Result<()> {
             command: None,
             config: Some(config_path),
         }) => {
-            let summary = commands::run::run(
+            commands::run::run(
                 &config::config_dir()?,
                 &config_path,
                 &SbxBackend,
                 &mut std::io::stdout(),
                 &mut std::io::stderr(),
             )?;
-            // The run has already said how many pairs errored (decision 181).
-            if summary.errored_pairs() > 0 {
-                std::process::exit(1);
-            }
             Ok(())
         }
         Command::Run(RunArgs {
