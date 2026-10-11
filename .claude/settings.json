@@ -2,9 +2,6 @@
   "permissions": {
     "allow": [
       "Bash(git status *)",
-      "Bash(git log *)",
-      "Bash(git diff *)",
-      "Bash(git show *)",
       "Bash(git worktree list *)",
       "Bash(gh issue view *)",
       "Bash(gh issue list *)",
@@ -15,9 +12,6 @@
       "Bash(sbx ls *)",
       "Bash(sbx template ls *)",
       "PowerShell(git status *)",
-      "PowerShell(git log *)",
-      "PowerShell(git diff *)",
-      "PowerShell(git show *)",
       "PowerShell(git worktree list *)",
       "PowerShell(gh issue view *)",
       "PowerShell(gh issue list *)",

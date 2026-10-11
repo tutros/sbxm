@@ -104,9 +104,12 @@ sbxm task run --issue 63               # start and review in one go; stops befor
 Work in a sandbox needs no approval of single commands; work an agent session does on the host asks for each one.
 So keep the host side thin: fix review findings with `task resume --rounds N` instead of by hand, and run docs and
 state changes as spec tasks. What has to stay on the host is what calls `sbx` or publishes: the `sbxm task`
-commands themselves, pushes, PRs, issues and profile deploys. The repo's `.claude/settings.json` allows the commands
-that only read (`git status|log|diff|show`, `gh issue|pr view|list`, `sbx ls`) without a prompt; anything that
-publishes, deletes or starts a sandbox still asks.
+commands themselves, pushes, PRs, issues and profile deploys. The repo's `.claude/settings.json` allows these
+commands without a prompt, for the Bash and the PowerShell tool: `git status`, `git worktree list`, `gh issue view`,
+`gh issue list`, `gh pr view`, `gh pr list`, `gh pr diff`, `gh pr checks`, `sbx ls` and `sbx template ls`. `git log`,
+`git diff` and `git show` are left out on purpose: their `--output=<file>` option writes a file, and a rule cannot
+exclude an option (Claude Code already runs the read-only forms of `git` in Bash without asking). Anything that
+publishes, deletes, writes or starts a sandbox still asks.
 
 ## Practical notes
 
