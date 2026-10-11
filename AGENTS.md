@@ -10,7 +10,7 @@ Milestone 1 complete (slices 0–21, end-to-end check passed 2026-09-27). Milest
 - `sdlc/milestone-2.md`: milestone 2's implementation plan (M2a comparisons, done; M2b issue-worker migration, slices 0–13).
 - `sdlc/prd-m2b.md` and `sdlc/spec-m2b.md`: M2b's requirements (what and why, success criteria S1–S9) and exact behavior (modules, `sbxm-task.toml`, `task.json`, commands, pipelines, gates, git trust boundary).
 - `sdlc/decisions.md`: numbered design decisions and open research spikes. **Read it before designing anything**, and add new decisions there instead of silently departing from it.
-- `docs/workflow.md`: how the commands fit together, with the use cases and practical notes (disk, binaries, gates). `sdlc/evals-workflow-notes.md`: the log of gaps found while using `sbxm task` (G1 onwards, the issue 63 run log and the next-session agenda); `sdlc/spikes/`: spike write-ups (S9 done, S11 templates unfinished).
+- `docs/workflow.md`: how the commands fit together, with the use cases and practical notes (disk, binaries, gates). `sdlc/evals-workflow-notes.md`: the log of gaps found while using `sbxm task` (G1 onwards, the issue 63 run log and the next-session agenda); `sdlc/spikes/`: spike write-ups (S9 done, S11 templates unfinished, S13 done: the flaky tests of #104 don't show in a Linux sandbox).
 - `sdlc/reviews/`: code review records (`<date>-<scope>.md`), in the format the code-review skill defines; `sdlc/specs/`: task specs for work done in a separate session (`sdlc/specs/file-review-issues.md` was built as a PowerShell script, then ported to `sbxm task file-findings`; decisions 134 and 165); `sdlc/batches/`: unattended batch specs and their logs.
 
 ## Workflow
