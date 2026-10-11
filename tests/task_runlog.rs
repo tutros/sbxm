@@ -316,6 +316,31 @@ fn an_append_failure_warns_once_naming_the_path_and_cause_not_once_per_line() {
     );
 }
 
+/// Issue 130: a failed first append must not mark the task as already headered. If a later
+/// append then succeeds against a `run.log` left over from an earlier invocation, it must still
+/// start with this invocation's own header, not trail silently after the older one's.
+#[test]
+fn a_recovered_append_still_gets_this_invocations_header() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = task_dir(base.path(), "issue-5");
+    // `run.log` is a directory, so the first append fails deterministically.
+    fs::create_dir_all(dir.join("run.log")).unwrap();
+    let mut log = log(base.path(), &["issue-5"], None);
+
+    log.line("one");
+
+    fs::remove_dir_all(dir.join("run.log")).unwrap();
+    fs::write(dir.join("run.log"), "# older invocation\n").unwrap();
+
+    log.line("two");
+
+    let text = read(base.path(), "issue-5");
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], "# older invocation");
+    assert_eq!(lines[1], "# header", "{text}");
+    assert!(lines[2].ends_with("[working] two"), "{text}");
+}
+
 /// A command with no task to log into (`task init`, `file-findings --file`) must stay silent:
 /// there is no failure, just nothing to write to.
 #[test]

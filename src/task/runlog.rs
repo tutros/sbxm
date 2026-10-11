@@ -161,7 +161,9 @@ impl RunLog {
     /// lines printed before it could be made; a folder that was removed is left removed. A
     /// `run.log` left over from an earlier invocation still gets this invocation's own header, on
     /// its first write here, so each invocation's errors stay traceable to their own header
-    /// (issue 129 M-1) instead of trailing silently after a previous one's.
+    /// (issue 129 M-1) instead of trailing silently after a previous one's. `headered` is only
+    /// marked once the write actually succeeds (issue 130): a failed first append must not make a
+    /// later, successful one skip the header.
     fn write_to(&mut self, id: &str) -> std::io::Result<()> {
         let dir = record::task_dir(&self.base, id);
         if !dir.is_dir() {
@@ -169,7 +171,7 @@ impl RunLog {
         }
         let path = dir.join("run.log");
         let newest = self.history.len() - 1;
-        let first_write_this_invocation = self.headered.insert(id.to_owned());
+        let first_write_this_invocation = !self.headered.contains(id);
         let mut text = String::new();
         if !path.exists() {
             text.push_str(&self.header);
@@ -193,6 +195,7 @@ impl RunLog {
         ));
         let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
         file.write_all(text.as_bytes())?;
+        self.headered.insert(id.to_owned());
         self.caught_up.insert(id.to_owned(), self.history.len());
         Ok(())
     }
