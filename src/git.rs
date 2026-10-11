@@ -149,14 +149,26 @@ pub(crate) fn run(
 ) -> Result<String> {
     let out = output(cwd, git_dir, work_tree, args)?;
     if !out.status.success() {
-        bail!(
-            "`git {}` failed ({}): {}",
-            args.join(" "),
-            out.status,
-            String::from_utf8_lossy(&out.stderr).trim()
-        );
+        bail!(failure_message(args, &out));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// `git <args>` failed with `out`. A still-permission-denied failure can only be the last of
+/// [`TRIES`] tries ([`retry`]'s invariant), so the message names that count; any other failure
+/// reads as it always has, since it was never retried.
+fn failure_message(args: &[&str], out: &Output) -> String {
+    let tries = if permission_denied(out) {
+        format!(" (tried {TRIES} times)")
+    } else {
+        String::new()
+    };
+    format!(
+        "`git {}` failed ({}){tries}: {}",
+        args.join(" "),
+        out.status,
+        String::from_utf8_lossy(&out.stderr).trim()
+    )
 }
 
 /// The `GIT_*` variables that keep working for [`user_output`]: where the user's own
@@ -408,6 +420,28 @@ mod tests {
         assert!(!out.status.success());
         assert!(String::from_utf8_lossy(&out.stderr).contains("Permission denied"));
         assert_eq!(calls.get(), 4);
+    }
+
+    /// `git::run`'s message names the real try budget for a permission-denied failure that
+    /// exhausted it (the invariant [`retry`] establishes: a failing, still-permission-denied
+    /// `Output` can only be the last of `TRIES` tries, since any earlier one that was still
+    /// permission-denied would have kept retrying), so the next report can tell "ran out" apart
+    /// from "never retried" (issue #126).
+    #[test]
+    fn a_permission_denied_failure_names_how_many_tries_were_made() {
+        let message = failure_message(&["add", "-A"], &failed(128, DENIED));
+
+        assert!(
+            message.contains(&format!("tried {TRIES} times")),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn a_failure_for_another_reason_does_not_mention_tries() {
+        let message = failure_message(&["status"], &failed(128, "fatal: not a git repository"));
+
+        assert!(!message.contains("tried"), "{message}");
     }
 
     #[test]
