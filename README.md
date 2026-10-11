@@ -398,7 +398,7 @@ are `<base_dir>\tasks\<id>`, `<id>-review` and `<id>-gates`. A task killed halfw
 retries a stage that failed), and `task start --restart --issue <n>` (after the same confirmation as `task rm`)
 starts it over instead.
 
-Sandbox setup takes about 1 minute per sandbox (apt, rustup). `base_dir` only moves the
+Sandbox setup should take about 1 minute per sandbox (apt, rustup; an estimate, not yet measured). `base_dir` only moves the
 workspace: each sandbox's own disk lives in the folder `sbx` keeps its state in, on the system drive, and `sbx` has no
 setting to move it (a junction to a bigger drive was tried and failed for the `claude` agent; see [`docs/workflow.md`](docs/workflow.md)).
 Budget about 7 GB for a fresh sandbox and much more once a large build runs in it: the disk image
