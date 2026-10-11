@@ -1,8 +1,6 @@
 {
   "permissions": {
     "allow": [
-      "Bash(git status *)",
-      "Bash(git worktree list *)",
       "Bash(gh issue view *)",
       "Bash(gh issue list *)",
       "Bash(gh pr view *)",
@@ -11,8 +9,6 @@
       "Bash(gh pr checks *)",
       "Bash(sbx ls *)",
       "Bash(sbx template ls *)",
-      "PowerShell(git status *)",
-      "PowerShell(git worktree list *)",
       "PowerShell(gh issue view *)",
       "PowerShell(gh issue list *)",
       "PowerShell(gh pr view *)",
