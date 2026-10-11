@@ -197,12 +197,8 @@ fn main() -> anyhow::Result<()> {
                 &mut std::io::stdout(),
                 &mut std::io::stderr(),
             )?;
-            let errored = summary.errored_pairs();
-            if errored > 0 {
-                eprintln!(
-                    "error: {errored} of {} contestant runs ended in error",
-                    summary.outcomes.len()
-                );
+            // The run has already said how many pairs errored (decision 181).
+            if summary.errored_pairs() > 0 {
                 std::process::exit(1);
             }
             Ok(())

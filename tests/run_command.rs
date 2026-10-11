@@ -213,6 +213,12 @@ fn a_backend_error_is_reported_per_pair_and_cleaned_up() {
     // Every pair errored (issue #126c).
     assert_eq!(summary.errored_pairs(), 2);
     assert_eq!(summary.outcomes.len(), 2);
+    assert!(
+        ran.warn
+            .ends_with("error: 2 of 2 contestant runs ended in error\n"),
+        "{}",
+        ran.warn
+    );
 }
 
 #[test]
@@ -238,6 +244,13 @@ fn one_errored_pair_is_counted_against_the_total_the_other_pair_still_completing
     assert_eq!(summary.outcomes.len(), 2);
     // Everything still got saved and printed (decision 16): the run isn't aborted by the error.
     assert!(ran.out.contains("Results: "), "{}", ran.out);
+    // The count is the last thing the run says, on the warning stream (decision 181).
+    assert!(
+        ran.warn
+            .ends_with("error: 1 of 2 contestant runs ended in error\n"),
+        "{}",
+        ran.warn
+    );
 }
 
 #[test]
@@ -252,20 +265,22 @@ fn a_timed_out_or_harness_failed_pair_alone_reports_no_errors() {
             "timeout: sending signal TERM to command 'claude'\n",
             124,
         ),
-    )
-    .result
-    .unwrap();
-    assert_eq!(timed_out.errored_pairs(), 0);
+    );
+    assert_eq!(timed_out.result.unwrap().errored_pairs(), 0);
+    assert!(
+        !timed_out.warn.contains("ended in error"),
+        "{}",
+        timed_out.warn
+    );
 
     let env = Env::new();
     let failed = go(
         &env,
         &format!("{TASK}{TWO_CLAUDES}"),
         &scripted("", "boom\n", 1),
-    )
-    .result
-    .unwrap();
-    assert_eq!(failed.errored_pairs(), 0);
+    );
+    assert_eq!(failed.result.unwrap().errored_pairs(), 0);
+    assert!(!failed.warn.contains("ended in error"), "{}", failed.warn);
 }
 
 #[test]

@@ -304,10 +304,20 @@ fn run_with(
         )?;
     }
     writeln!(out, "Results: {}", roots.meta.display())?;
-    Ok(Summary {
+    let summary = Summary {
         run_id: roots.id,
         outcomes,
-    })
+    };
+    // Said last, after everything is printed and saved; `main` exits 1 on it (decision 181).
+    let errored = summary.errored_pairs();
+    if errored > 0 {
+        writeln!(
+            warn,
+            "error: {errored} of {} contestant runs ended in error",
+            summary.outcomes.len()
+        )?;
+    }
+    Ok(summary)
 }
 
 /// ` repeat 2/3` when the run repeats, empty otherwise.
