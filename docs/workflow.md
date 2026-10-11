@@ -101,6 +101,13 @@ sbxm task run --issue 63               # start and review in one go; stops befor
 4. The user merges. Never push to `main`; every change, docs included, goes through a PR.
 5. `task rm` the finished task, which also gives back the disk its sandbox used.
 
+Work in a sandbox needs no approval of single commands; work an agent session does on the host asks for each one.
+So keep the host side thin: fix review findings with `task resume --rounds N` instead of by hand, and run docs and
+state changes as spec tasks. What has to stay on the host is what calls `sbx` or publishes: the `sbxm task`
+commands themselves, pushes, PRs, issues and profile deploys. The repo's `.claude/settings.json` allows the commands
+that only read (`git status|log|diff|show`, `gh issue|pr view|list`, `sbx ls`) without a prompt; anything that
+publishes, deletes or starts a sandbox still asks.
+
 ## Practical notes
 
 - **Which config and which binary.** `task` commands only see the tasks of the config dir they were started with
