@@ -123,6 +123,11 @@ Everything else is **should fix** (or a nit), however true it is. These are neve
 - Wording, stale numbers or ranges, formatting, naming preferences, and "the plan could say more here".
 - A detail an implementer would settle naturally inside the slice (an exact field list, an internal helper, an
   error message), unless the gap forces a wrong or costly-to-reverse design.
+- A message that loses detail, when the tool still did the right thing and the user can still see that something
+  was skipped or failed (issue #106: a lookup's cause, 404 or network error, missing from a skip message). This
+  holds even when a confirmed decision words the message: criterion 1's "contradicts a decision" is about what the
+  tool does, not how fully it explains it. It is must-fix only when nothing is shown at all (a silent drop,
+  decision 11) or the message sends the user to a wrong action.
 - Speculative edge cases with no failing input, or hardening beyond the stated requirements.
 - Anything that is a preference between two workable designs: that is a **question**, not a finding.
 
