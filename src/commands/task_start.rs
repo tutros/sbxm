@@ -1,6 +1,7 @@
 //! `sbxm task start (--issue N... | --workers N)` (spec §4, §5.1): resolves the repo, the base
 //! and the config (flags override the file), chooses the issues, and starts a task for each.
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -81,15 +82,18 @@ pub(crate) fn check_repo(repo: &str) -> Result<()> {
     }
 }
 
-/// Discards the existing task of each issue (`--restart`). Every one is checked before the first
-/// is deleted: the issue must still be open (else the restart would only destroy the work), the
-/// PR it names (if any) must still be continuable, and the task must not be running.
+/// Discards the existing task of each issue (`--restart`), moving each aside instead of deleting
+/// it (decision 185): the caller decides, once it knows which of them started again, whether to
+/// settle or restore each one. Every one is checked before the first is set aside: no leftover
+/// from an earlier, unsettled `--restart` ([`finish::check_no_leftover`]), the issue must still be
+/// open (else the restart would only destroy the work), the PR it names (if any) must still be
+/// continuable, and the task must not be running.
 fn discard_existing(
     ctx: &Ctx,
     issues: &[u32],
     restart: &Restart,
     out: &mut dyn Write,
-) -> Result<()> {
+) -> Result<Vec<finish::SetAside>> {
     let (repo, github, backend, probe) = (ctx.repo, ctx.github, ctx.backend, ctx.probe);
     let base_dir = GlobalConfig::load(ctx.config_dir)?.base_dir;
     let mut ids: Vec<(u32, String)> = Vec::new();
@@ -98,6 +102,9 @@ fn discard_existing(
         if finish::exists(&base_dir, &id) && !ids.iter().any(|(_, known)| *known == id) {
             ids.push((number, id));
         }
+    }
+    for (_, id) in &ids {
+        finish::check_no_leftover(&base_dir, id)?;
     }
     for (number, id) in &ids {
         let issue = github.issue(repo, *number)?;
@@ -129,9 +136,9 @@ fn discard_existing(
     pipeline::check_restartable(ctx, &restarting)?;
     let id_list: Vec<String> = ids.into_iter().map(|(_, id)| id).collect();
     if id_list.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
-    finish::discard_many(
+    finish::set_aside_many(
         &base_dir,
         &id_list,
         restart.yes,
@@ -330,42 +337,82 @@ pub fn run_with(
         probe,
         host: &ShellHostRunner,
     };
+    let mut aside_by_id: HashMap<String, finish::SetAside> = HashMap::new();
     if let Some(restart) = restart {
-        discard_existing(&ctx, &opts.issues, restart, out)?;
+        for aside in discard_existing(&ctx, &opts.issues, restart, out)? {
+            aside_by_id.insert(aside.id().to_owned(), aside);
+        }
     }
-    let selection = if opts.issues.is_empty() {
-        pipeline::choose_issues(&ctx, None, opts.workers.unwrap_or(1))?
-    } else {
-        pipeline::choose_issues(&ctx, Some(&opts.issues), opts.issues.len())?
-    };
-    for warning in &selection.warnings {
-        writeln!(warn, "warning: {warning}")?;
-    }
-    for number in &selection.not_open {
-        writeln!(warn, "warning: #{number} isn't an open issue; skipped")?;
-    }
-    for (number, why) in &selection.skips {
-        writeln!(out, "#{number}: skipped, {why}")?;
-    }
-    let selection = pipeline::require_picks(selection)?;
-
-    let names: Vec<String> = selection
-        .picks
-        .iter()
-        .map(|n| format!("issue-{n}"))
-        .collect();
-    writeln!(out, "Starting {} ...", names.join(", "))?;
-    let reports = pipeline::start(&ctx, &selection.picks);
     let base_dir = GlobalConfig::load(config_dir)?.base_dir;
 
-    let (mut failed, mut gates_failed) = (0, 0);
-    for report in &reports {
-        let id = format!("issue-{}", report.number);
-        for warning in &report.warnings {
+    let run_outcome: Result<Vec<pipeline::TaskReport>> = (|| {
+        let selection = if opts.issues.is_empty() {
+            pipeline::choose_issues(&ctx, None, opts.workers.unwrap_or(1))?
+        } else {
+            pipeline::choose_issues(&ctx, Some(&opts.issues), opts.issues.len())?
+        };
+        for warning in &selection.warnings {
             writeln!(warn, "warning: {warning}")?;
         }
-        match &report.result {
+        for number in &selection.not_open {
+            writeln!(warn, "warning: #{number} isn't an open issue; skipped")?;
+        }
+        for (number, why) in &selection.skips {
+            writeln!(out, "#{number}: skipped, {why}")?;
+        }
+        let selection = pipeline::require_picks(selection)?;
+
+        let names: Vec<String> = selection
+            .picks
+            .iter()
+            .map(|n| format!("issue-{n}"))
+            .collect();
+        writeln!(out, "Starting {} ...", names.join(", "))?;
+        Ok(pipeline::start(&ctx, &selection.picks))
+    })();
+
+    // Every restarted task is settled or restored now that it is known whether the task that
+    // was to replace it finished preparing, regardless of where the run stopped (decision 185
+    // point 3): a selection failure never even reaches `pipeline::start`, so none of them got a
+    // report at all; here that is treated the same as one that did and failed.
+    let reports = match run_outcome {
+        Ok(reports) => reports,
+        Err(e) => {
+            for (id, aside) in aside_by_id {
+                let msg = finish::restore_after_failed_start(&aside, anyhow!("{e:#}"));
+                writeln!(out, "{id}: {msg:#}")?;
+            }
+            return Err(e);
+        }
+    };
+    let total = reports.len();
+
+    let (mut failed, mut gates_failed, mut restored) = (0, 0, 0);
+    for report in reports {
+        let pipeline::TaskReport {
+            number,
+            warnings,
+            result,
+            gates,
+        } = report;
+        let id = format!("issue-{number}");
+        for warning in &warnings {
+            writeln!(warn, "warning: {warning}")?;
+        }
+        let aside = aside_by_id.remove(&id);
+        match result {
             Ok(worked) => {
+                // The task's preparation completed (it has a report at all), so a restarted
+                // task's old copy is gone for good now, whether or not the worker then failed.
+                if let Some(aside) = aside
+                    && let Err(e) = aside.settle()
+                {
+                    writeln!(
+                        warn,
+                        "warning: {id}'s old copy at {} could not be deleted: {e:#}",
+                        aside.folder().display()
+                    )?;
+                }
                 let (label, bad) = match &worked.status {
                     RunStatus::Completed => ("completed".to_owned(), false),
                     RunStatus::TimedOut => ("timed out".to_owned(), false),
@@ -384,10 +431,10 @@ pub fn run_with(
                 // Set when the failed gate could not run at all (issue 186): the review would have
                 // nothing to react to, so `task run` must not go on to it.
                 let mut gate_could_not_run = false;
-                if only_gates_failed(bad, report.gates.as_ref()) {
+                if only_gates_failed(bad, gates.as_ref()) {
                     gates_failed += 1;
                 }
-                match &report.gates {
+                match &gates {
                     Some(Ok(gated)) if gated.passed => {
                         let count = |tier: &str| {
                             gated
@@ -447,31 +494,54 @@ pub fn run_with(
                 }
                 if bad {
                     failed += 1;
-                    writeln!(out, "  see: sbxm task status --issue {}", report.number)?;
+                    writeln!(out, "  see: sbxm task status --issue {number}")?;
                 } else if !gates_ok {
                     failed += 1;
                     // The review reruns the gates and gives a failure to a fix round (decision
                     // 180) — but only for a gate that ran and failed; one that could not run at
                     // all would give the review nothing to react to (issue 186).
                     if !gate_could_not_run {
-                        writeln!(out, "  next: sbxm task review --issue {}", report.number)?;
+                        writeln!(out, "  next: sbxm task review --issue {number}")?;
                     }
                 } else {
-                    writeln!(out, "  next: sbxm task review --issue {}", report.number)?;
+                    writeln!(out, "  next: sbxm task review --issue {number}")?;
                 }
             }
             Err(e) => {
                 failed += 1;
-                writeln!(out, "{id}: failed: {e:#}")?;
+                match aside {
+                    // The task's preparation never completed, so its old copy goes back.
+                    Some(aside) => {
+                        restored += 1;
+                        let msg = finish::restore_after_failed_start(&aside, e);
+                        writeln!(out, "{id}: {msg:#}")?;
+                    }
+                    None => writeln!(out, "{id}: failed: {e:#}")?,
+                }
             }
         }
     }
+    // A restarted issue the selection didn't even pick this time around never got a report, so
+    // the loop above never saw it; it is exactly as unprepared as one that did and failed.
+    for (id, aside) in aside_by_id {
+        restored += 1;
+        let msg = finish::restore_after_failed_start(
+            &aside,
+            anyhow!("issue was not picked to start again"),
+        );
+        writeln!(out, "{id}: {msg:#}")?;
+    }
     if failed > 0 {
-        let message = format!("{failed} of {} task(s) failed; see above", reports.len());
-        if failed == gates_failed {
+        let message = format!("{failed} of {total} task(s) failed; see above");
+        if failed == gates_failed && restored == 0 {
             return Err(GatesFailed(message).into());
         }
         bail!(message);
+    }
+    if restored > 0 {
+        bail!(
+            "{restored} restarted task(s) could not be started again and were put back; see above"
+        );
     }
     Ok(())
 }

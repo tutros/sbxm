@@ -420,9 +420,10 @@ impl Confirm for CorruptThenYes<'_> {
     }
 }
 
-/// Decision 184 (PR 208 review round 2, M-1): the spec is read again after a confirmed discard, so
-/// a file that became unusable while the prompt was pending fails the start there and leaves no
-/// task, instead of starting from text the file no longer has.
+/// Decision 185 (issue #207, supersedes decision 184's "nothing after a confirmed discard"): the
+/// spec is read again after a confirmed discard, so a file that became unusable while the prompt
+/// was pending fails the start there; the old task, set aside rather than deleted, is put back
+/// instead of being lost.
 #[test]
 fn restart_fails_after_the_discard_if_the_spec_becomes_unusable_during_confirmation() {
     let f = config();
@@ -459,10 +460,17 @@ fn restart_fails_after_the_discard_if_the_spec_becomes_unusable_during_confirmat
 
     let message = format!("{:#}", out.result.unwrap_err());
     assert!(message.contains("the old task was discarded"), "{message}");
+    assert!(message.contains("put back"), "{message}");
     assert!(b.creates().is_empty(), "nothing started");
     assert!(
-        !record::task_dir(&f.env.base_dir(), &id).exists(),
-        "no replacement task"
+        record::task_dir(&f.env.base_dir(), &id)
+            .join("repo.git")
+            .is_dir(),
+        "the old task was put back"
+    );
+    assert!(
+        !sbxm::task::finish::has_leftover(&f.env.base_dir(), &id),
+        "nothing left set aside"
     );
 }
 
@@ -483,10 +491,12 @@ impl Confirm for RemoveThenYes<'_> {
     }
 }
 
-/// Decision 184 (PR 208 review round 2, M-1): a spec removed while the prompt was pending fails
-/// the start after the discard. A task started under the old id would end `ready` with a
-/// `task finish --spec FILE` hint that cannot work, since every spec command derives the id from
-/// the path again.
+/// Decision 185 (issue #207, supersedes decision 184's "nothing after a confirmed discard"): a
+/// spec removed while the prompt was pending fails the start after the discard, and the old task,
+/// set aside rather than deleted, is put back instead of being lost. (Before decision 185, a task
+/// started under the old id would have ended `ready` with a `task finish --spec FILE` hint that
+/// cannot work, since every spec command derives the id from the path again; now there is no such
+/// task at all.)
 #[test]
 fn restart_fails_after_the_discard_if_the_spec_is_removed_during_confirmation() {
     let f = config();
@@ -523,10 +533,17 @@ fn restart_fails_after_the_discard_if_the_spec_is_removed_during_confirmation() 
 
     let message = format!("{:#}", out.result.unwrap_err());
     assert!(message.contains("the old task was discarded"), "{message}");
+    assert!(message.contains("put back"), "{message}");
     assert!(b.creates().is_empty(), "nothing started");
     assert!(
-        !record::task_dir(&f.env.base_dir(), &id).exists(),
-        "no replacement task"
+        record::task_dir(&f.env.base_dir(), &id)
+            .join("repo.git")
+            .is_dir(),
+        "the old task was put back"
+    );
+    assert!(
+        !sbxm::task::finish::has_leftover(&f.env.base_dir(), &id),
+        "nothing left set aside"
     );
 }
 

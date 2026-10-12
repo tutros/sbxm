@@ -235,6 +235,243 @@ pub fn remove(plan: &RemovalPlan, backend: &dyn SandboxBackend) -> RemovalReport
     report
 }
 
+/// Where a set-aside task's folders live while a `--restart` discard is undoable (decision 185):
+/// same drive as the base dir, so moving a task here and back is a rename; outside `tasks/` and
+/// `.sbxm/tasks/`, so `task status` and `task rm` never list or touch it.
+fn replaced_root(base_dir: &Path, id: &str) -> PathBuf {
+    base_dir.join(".sbxm").join("tasks-replaced").join(id)
+}
+
+/// Whether a leftover set-aside copy of `id` exists: an earlier `--restart` discarded it but was
+/// never settled one way or the other, most likely because it, or the process running it, was
+/// interrupted (decision 185 point 4).
+pub fn has_leftover(base_dir: &Path, id: &str) -> bool {
+    replaced_root(base_dir, id).symlink_metadata().is_ok()
+}
+
+/// Refuses a `--restart` of `id` while [`has_leftover`] holds, before anything else about it is
+/// checked: the folder and the two ways out (moving it back by hand, or deleting it) are named.
+/// There is no command of its own for the leftover (decision 185 point 4).
+pub fn check_no_leftover(base_dir: &Path, id: &str) -> Result<()> {
+    let dir = replaced_root(base_dir, id);
+    if dir.symlink_metadata().is_ok() {
+        bail!(
+            "an earlier `--restart` of task {id} left its old copy at {}, never settled; move it \
+             back into place yourself, or delete it, then run `--restart` again",
+            dir.display()
+        );
+    }
+    Ok(())
+}
+
+/// A task's folders, set aside instead of deleted so a `--restart` discard can be undone
+/// (decision 185). [`set_aside_many`] builds one of these per task: its sandboxes are already
+/// gone (removed the same way [`remove`] removes them; that part is not undone), but each folder
+/// [`plan_removal`] found is moved to [`replaced_root`] rather than deleted. [`SetAside::restore`]
+/// moves every one of them back; [`SetAside::settle`] deletes them for good, once the task that
+/// replaced this one no longer needs them to fall back to.
+#[derive(Debug)]
+pub struct SetAside {
+    id: String,
+    base_dir: PathBuf,
+    /// Paths relative to the base dir that were actually moved, so `restore`/`settle` touch
+    /// exactly what `set_aside_many` moved and nothing it left alone.
+    moved: Vec<PathBuf>,
+}
+
+impl SetAside {
+    pub fn id(&self) -> &str {
+        &self.id
+    }
+
+    /// Where this task's old copy currently sits.
+    pub fn folder(&self) -> PathBuf {
+        replaced_root(&self.base_dir, &self.id)
+    }
+
+    fn pair(&self, rel: &Path) -> (PathBuf, PathBuf) {
+        (self.base_dir.join(rel), self.folder().join(rel))
+    }
+
+    /// Moves every folder back to where it was, so the old task is exactly as it was before
+    /// [`set_aside_many`] moved it aside (its sandboxes are not restored; decision 185 point 2).
+    /// If one folder can't move back, whatever was already moved back in this call is moved aside
+    /// again, so the old task stays entirely in one place or the other, never split between them.
+    pub fn restore(&self) -> Result<()> {
+        let mut done: Vec<&PathBuf> = Vec::new();
+        for rel in &self.moved {
+            let (original, replaced) = self.pair(rel);
+            if let Some(parent) = original.parent()
+                && let Err(e) = fs::create_dir_all(parent)
+            {
+                self.undo_restore(&done);
+                return Err(e).with_context(|| format!("cannot create {}", parent.display()));
+            }
+            if let Err(e) = fs::rename(&replaced, &original) {
+                self.undo_restore(&done);
+                return Err(e).with_context(|| {
+                    format!(
+                        "cannot move {} back to {}",
+                        replaced.display(),
+                        original.display()
+                    )
+                });
+            }
+            done.push(rel);
+        }
+        let _ = fs::remove_dir_all(self.folder());
+        Ok(())
+    }
+
+    fn undo_restore(&self, done: &[&PathBuf]) {
+        for rel in done.iter().rev() {
+            let (original, replaced) = self.pair(rel);
+            let _ = fs::rename(&original, &replaced);
+        }
+    }
+
+    /// Deletes the set-aside copy for good: the task that replaced it no longer needs it.
+    pub fn settle(&self) -> Result<()> {
+        let dir = self.folder();
+        fs::remove_dir_all(&dir).with_context(|| format!("cannot delete {}", dir.display()))
+    }
+}
+
+/// What a `--restart` discard tells the caller once it is known that the task which was to
+/// replace `aside` did not finish preparing: `start_failed` is why. If putting the old task back
+/// succeeds, the returned error is `start_failed` plus a note that it's back; if putting it back
+/// also fails, the error names both failures and the folder it is still at, so nothing more is
+/// deleted (decision 185 point 4).
+pub fn restore_after_failed_start(aside: &SetAside, start_failed: anyhow::Error) -> anyhow::Error {
+    match aside.restore() {
+        Ok(()) => start_failed.context(format!("the old task {} was put back", aside.id())),
+        Err(restore_failed) => anyhow::anyhow!(
+            "the start failed ({start_failed:#}), and putting the old task {} back failed too \
+             ({restore_failed:#}); it is still set aside at {}",
+            aside.id(),
+            aside.folder().display()
+        ),
+    }
+}
+
+/// [`discard_many`], but moves each task's folders to [`replaced_root`] instead of deleting them
+/// (decision 185): the confirmation and the sandbox removal are the same. A caller gets back one
+/// [`SetAside`] per task and decides, once it knows whether the task that replaced it finished
+/// preparing, whether to [`SetAside::restore`] or [`SetAside::settle`] it; nothing here decides
+/// that. A sandbox that can't be removed is reported but doesn't stop the rest (as [`remove`]
+/// does): the sandboxes are gone either way, only the folders are undoable.
+pub fn set_aside_many(
+    base_dir: &Path,
+    ids: &[String],
+    yes: bool,
+    backend: &dyn SandboxBackend,
+    probe: &dyn ProcessProbe,
+    confirm: &dyn Confirm,
+    out: &mut dyn Write,
+) -> Result<Vec<SetAside>> {
+    let plans = ids
+        .iter()
+        .map(|id| plan_removal(base_dir, id, probe))
+        .collect::<Result<Vec<_>>>()?;
+    let listing = plans
+        .iter()
+        .map(RemovalPlan::listing)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let names = ids.join(", ");
+    let what = if ids.len() == 1 {
+        format!("task {names}")
+    } else {
+        format!("{} tasks ({names})", ids.len())
+    };
+    if !yes {
+        if !confirm.is_interactive() {
+            bail!(
+                "refusing to restart {what} without a terminal; pass --yes to restart it:\n{listing}"
+            );
+        }
+        if !confirm.confirm(&format!(
+            "Restart {what}: discard these sandboxes and start over?\n{listing}\n"
+        ))? {
+            bail!("restarting {what} cancelled; nothing was deleted");
+        }
+    }
+    let mut result: Vec<SetAside> = Vec::new();
+    for plan in &plans {
+        for sandbox in &plan.sandboxes {
+            match crate::commands::rm::remove_sandbox(backend, sandbox) {
+                Ok(()) => writeln!(out, "removed sandbox {sandbox}")?,
+                Err(e) => writeln!(out, "could not remove sandbox {sandbox}: {e:#}")?,
+            }
+        }
+        match set_aside_one(base_dir, plan) {
+            Ok(aside) => result.push(aside),
+            Err(e) => {
+                for aside in &result {
+                    let _ = aside.restore();
+                }
+                return Err(e);
+            }
+        }
+    }
+    Ok(result)
+}
+
+/// [`set_aside_many`] for one task.
+pub fn set_aside(
+    base_dir: &Path,
+    id: &str,
+    yes: bool,
+    backend: &dyn SandboxBackend,
+    probe: &dyn ProcessProbe,
+    confirm: &dyn Confirm,
+    out: &mut dyn Write,
+) -> Result<SetAside> {
+    let ids = [id.to_owned()];
+    let mut all = set_aside_many(base_dir, &ids, yes, backend, probe, confirm, out)?;
+    Ok(all.remove(0))
+}
+
+/// Moves every folder `plan` lists into [`replaced_root`], rolling back if one of them fails
+/// partway so the old task stays entirely where it started instead of being split.
+fn set_aside_one(base_dir: &Path, plan: &RemovalPlan) -> Result<SetAside> {
+    let mut moved: Vec<PathBuf> = Vec::new();
+    for folder in &plan.folders {
+        check_own_folder(base_dir, folder)?;
+        let rel = folder
+            .strip_prefix(base_dir)
+            .with_context(|| format!("{} isn't under {}", folder.display(), base_dir.display()))?
+            .to_path_buf();
+        let replaced = replaced_root(base_dir, &plan.id).join(&rel);
+        if let Some(parent) = replaced.parent()
+            && let Err(e) = fs::create_dir_all(parent)
+        {
+            undo_set_aside(base_dir, &plan.id, &moved);
+            return Err(e).with_context(|| format!("cannot create {}", parent.display()));
+        }
+        if let Err(e) = fs::rename(folder, &replaced) {
+            undo_set_aside(base_dir, &plan.id, &moved);
+            return Err(e).with_context(|| {
+                format!("cannot move {} to {}", folder.display(), replaced.display())
+            });
+        }
+        moved.push(rel);
+    }
+    Ok(SetAside {
+        id: plan.id.clone(),
+        base_dir: base_dir.to_path_buf(),
+        moved,
+    })
+}
+
+fn undo_set_aside(base_dir: &Path, id: &str, moved: &[PathBuf]) {
+    for rel in moved.iter().rev() {
+        let original = base_dir.join(rel);
+        let replaced = replaced_root(base_dir, id).join(rel);
+        let _ = fs::rename(&replaced, &original);
+    }
+}
+
 /// A spec task's result under the `local` sink lives only in its `repo.git`, which removal deletes
 /// (decision 174(e), spec section 5.4). Refused while its branch has commits beyond the base that
 /// `checkout` (the user's git checkout) doesn't have, so a result is never lost by accident; the
