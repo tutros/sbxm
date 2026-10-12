@@ -214,6 +214,58 @@ fn without_a_terminal_restart_needs_yes_and_yes_is_enough() {
     assert!(confirm.prompts.borrow().is_empty());
 }
 
+/// A `Confirm` that removes the worker's secret from the backend right when the user says yes,
+/// modeling it vanishing while the confirmation prompt is pending (decision 185, issue #207).
+struct SecretVanishesThenYes<'a> {
+    backend: &'a FakeBackend,
+}
+
+impl Confirm for SecretVanishesThenYes<'_> {
+    fn is_interactive(&self) -> bool {
+        true
+    }
+
+    fn confirm(&self, _prompt: &str) -> anyhow::Result<bool> {
+        self.backend.set_secrets(&[]);
+        Ok(true)
+    }
+}
+
+/// Decision 185 (issue #207): a start that fails after the confirmed discard and before the new
+/// task's preparation is complete leaves the old task exactly as it was, instead of losing it.
+#[test]
+fn restart_puts_the_old_task_back_if_the_worker_secret_vanishes_during_confirmation() {
+    let f = fixture();
+    started(&f);
+    let b = playing(&f);
+    let confirm = SecretVanishesThenYes { backend: &b };
+
+    let (result, out) = go(
+        &f,
+        &options(&f),
+        Some(&Restart {
+            confirm: &confirm,
+            yes: false,
+        }),
+        &b,
+        &github(),
+    );
+
+    assert!(result.is_err(), "{out}");
+    assert!(out.contains("anthropic"), "{out}");
+    assert!(out.contains("put back"), "{out}");
+    assert!(b.creates().is_empty(), "nothing started");
+    assert!(
+        record::read(&meta(&f).join("task.json")).is_ok(),
+        "the old task is back"
+    );
+    assert!(meta(&f).join("repo.git").is_dir(), "the old task is back");
+    assert!(
+        !sbxm::task::finish::has_leftover(&f.env.base_dir(), "issue-41"),
+        "nothing left set aside"
+    );
+}
+
 #[test]
 fn a_running_task_is_not_restarted() {
     let f = fixture();

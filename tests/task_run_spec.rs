@@ -547,6 +547,80 @@ fn restart_fails_after_the_discard_if_the_spec_is_removed_during_confirmation() 
     );
 }
 
+/// A `Confirm` that removes the worker's secret from the backend right when the user says yes,
+/// modeling it vanishing while the confirmation prompt is pending (issue #207's original finding,
+/// issue 194's review M-1): the reviewer's and worker's secrets are both still stored for the
+/// before-the-prompt checks, but only the reviewer's is left by the time `prepare_spec_resolved`
+/// checks the worker's secret again, after the discard.
+struct SecretVanishesThenYes<'a> {
+    backend: &'a FakeBackend,
+}
+
+impl Confirm for SecretVanishesThenYes<'_> {
+    fn is_interactive(&self) -> bool {
+        true
+    }
+
+    fn confirm(&self, _prompt: &str) -> anyhow::Result<bool> {
+        self.backend.set_secrets(&["openai"]);
+        Ok(true)
+    }
+}
+
+/// Decision 185 (issue #207): the worker's secret disappearing while `task run --spec --restart`
+/// waits for confirmation must not cost the old task its result. Before the fix, `prepare_spec_resolved`'s
+/// second secret check (after the discard) failed on the missing secret and the old task was
+/// already gone; now it is put back.
+#[test]
+fn restart_fails_after_the_discard_if_the_worker_secret_vanishes_during_confirmation() {
+    let f = config();
+    let s = spec(&f);
+    let id = id_of(&s);
+    let failing = FakeBackend::with_secrets(&["anthropic", "openai"]).with_exec_output_matching(
+        "claude",
+        ExecOutput {
+            stdout: String::new(),
+            stderr: "boom".into(),
+            exit_code: Some(1),
+        },
+    );
+    let first = go(
+        &f,
+        &options(&f, s.clone()),
+        None,
+        &failing,
+        &FakeGitHub::default(),
+    );
+    assert!(first.result.is_err());
+    let b = FakeBackend::with_secrets(&["anthropic", "openai"]);
+
+    let out = go(
+        &f,
+        &options(&f, s.clone()),
+        Some(&Restart {
+            confirm: &SecretVanishesThenYes { backend: &b },
+            yes: false,
+        }),
+        &b,
+        &FakeGitHub::default(),
+    );
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("anthropic"), "{message}");
+    assert!(message.contains("put back"), "{message}");
+    assert!(b.creates().is_empty(), "nothing started");
+    assert!(
+        record::task_dir(&f.env.base_dir(), &id)
+            .join("repo.git")
+            .is_dir(),
+        "the old task was put back"
+    );
+    assert!(
+        !sbxm::task::finish::has_leftover(&f.env.base_dir(), &id),
+        "nothing left set aside"
+    );
+}
+
 /// Issue #194 review finding M-2: `--restart` must not discard the old task before the new
 /// start's worker secret is checked, the same as the reviewer's already is.
 #[test]
