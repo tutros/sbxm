@@ -137,6 +137,7 @@ fn a_recorded_risk_level_opens_the_pr_description() {
     let mut record = reread(&f);
     record.review = Some(record::ReviewResult {
         round: 1,
+        commit: None,
         must_fix: 0,
         full: true,
         repeat: false,
@@ -273,6 +274,7 @@ fn the_recorded_review_decides_the_draft_not_an_edited_review_md() {
     let mut prepared = ready(&f);
     prepared.record.review = Some(record::ReviewResult {
         round: 1,
+        commit: None,
         must_fix: 1,
         full: true,
         repeat: false,
@@ -472,6 +474,7 @@ fn a_drafts_reason_survives_the_cap_of_a_long_risk_section() {
     let mut task = ready(&f).record;
     task.review = Some(record::ReviewResult {
         round: 1,
+        commit: None,
         must_fix: 2,
         full: true,
         repeat: false,
@@ -701,6 +704,7 @@ fn stopped_after_a_narrow_review(f: &Fixture) -> Prepared {
     prepared.record.stopped = Some(record::Stopped::RepeatFinding);
     prepared.record.review = Some(record::ReviewResult {
         round: 2,
+        commit: None,
         must_fix: 1,
         full: false,
         repeat: true,

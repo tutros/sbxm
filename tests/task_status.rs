@@ -170,6 +170,7 @@ fn the_recorded_risk_level_is_shown() {
     let mut with_review = working(2, Some(Status::Completed));
     with_review.review = Some(record::ReviewResult {
         round: 1,
+        commit: None,
         must_fix: 0,
         full: true,
         repeat: false,
