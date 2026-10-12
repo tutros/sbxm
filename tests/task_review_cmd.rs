@@ -418,6 +418,7 @@ fn pr_info() -> PrInfo {
     PrInfo {
         number: 7,
         head_ref: "feature-x".into(),
+        head_oid: "0000000000000000000000000000000000000000".into(),
         is_cross_repository: false,
         state: PrState::Open,
         title: "Add the x feature".into(),

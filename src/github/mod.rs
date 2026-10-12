@@ -38,6 +38,8 @@ pub enum PrState {
 pub struct PrInfo {
     pub number: u32,
     pub head_ref: String,
+    /// The commit the PR's head branch is at (`headRefOid`).
+    pub head_oid: String,
     pub is_cross_repository: bool,
     pub state: PrState,
     pub title: String,

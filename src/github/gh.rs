@@ -125,6 +125,7 @@ struct Number {
 #[serde(rename_all = "camelCase")]
 struct RawPr {
     head_ref_name: String,
+    head_ref_oid: String,
     is_cross_repository: bool,
     state: String,
     title: String,
@@ -229,7 +230,7 @@ impl GitHubBackend for GhBackend {
             "--repo",
             repo,
             "--json",
-            "headRefName,isCrossRepository,state,title,body,closingIssuesReferences",
+            "headRefName,headRefOid,isCrossRepository,state,title,body,closingIssuesReferences",
         ]))?;
         let state = match raw.state.as_str() {
             "OPEN" => PrState::Open,
@@ -244,6 +245,7 @@ impl GitHubBackend for GhBackend {
         Ok(PrInfo {
             number,
             head_ref: raw.head_ref_name,
+            head_oid: raw.head_ref_oid,
             is_cross_repository: raw.is_cross_repository,
             state,
             title: raw.title,
