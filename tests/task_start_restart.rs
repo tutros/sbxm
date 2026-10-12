@@ -266,6 +266,63 @@ fn restart_puts_the_old_task_back_if_the_worker_secret_vanishes_during_confirmat
     );
 }
 
+/// A `Confirm` that removes `config.toml` right when the user says yes, modeling it vanishing (or
+/// changing) while the confirmation prompt is pending (decision 185, issue #207 review M-1).
+struct ConfigVanishesThenYes {
+    config_toml: std::path::PathBuf,
+}
+
+impl Confirm for ConfigVanishesThenYes {
+    fn is_interactive(&self) -> bool {
+        true
+    }
+
+    fn confirm(&self, _prompt: &str) -> anyhow::Result<bool> {
+        std::fs::remove_file(&self.config_toml).unwrap();
+        Ok(true)
+    }
+}
+
+/// Issue #207 review M-1: the same guarantee as the worker-secret case above, but for the global
+/// config read again after the confirmed discard instead of before it. Before the fix, `run_with`
+/// reloaded `GlobalConfig` for its own use right after `discard_existing` had already set the old
+/// task aside; a failure there returned straight out of `run_with`, bypassing the restore path
+/// that every other post-discard failure goes through, and left the old task stranded under
+/// `tasks-replaced/`.
+#[test]
+fn restart_puts_the_old_task_back_if_global_config_vanishes_during_confirmation() {
+    let f = fixture();
+    started(&f);
+    let b = playing(&f);
+    let confirm = ConfigVanishesThenYes {
+        config_toml: f.env.config_dir().join("config.toml"),
+    };
+
+    let (result, out) = go(
+        &f,
+        &options(&f),
+        Some(&Restart {
+            confirm: &confirm,
+            yes: false,
+        }),
+        &b,
+        &github(),
+    );
+
+    assert!(result.is_err(), "{out}");
+    assert!(out.contains("put back"), "{out}");
+    assert!(b.creates().is_empty(), "nothing started");
+    assert!(
+        record::read(&meta(&f).join("task.json")).is_ok(),
+        "the old task is back"
+    );
+    assert!(meta(&f).join("repo.git").is_dir(), "the old task is back");
+    assert!(
+        !sbxm::task::finish::has_leftover(&f.env.base_dir(), "issue-41"),
+        "nothing left set aside"
+    );
+}
+
 /// Decision 185 point 3: the old task's set-aside copy is gone for good once the new task's
 /// preparation completes, even when the worker that runs next fails.
 #[test]

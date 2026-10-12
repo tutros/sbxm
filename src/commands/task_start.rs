@@ -87,26 +87,29 @@ pub(crate) fn check_repo(repo: &str) -> Result<()> {
 /// settle or restore each one. Every one is checked before the first is set aside: no leftover
 /// from an earlier, unsettled `--restart` ([`finish::check_no_leftover`]), the issue must still be
 /// open (else the restart would only destroy the work), the PR it names (if any) must still be
-/// continuable, and the task must not be running.
+/// continuable, and the task must not be running. `base_dir` is resolved by the caller, once,
+/// before anything is set aside, and reused after: reloading it again afterward could fail
+/// (config.toml changing or vanishing while confirmation was pending) outside the guarded restore
+/// path that only covers what happens from here on (issue #207 review M-1).
 fn discard_existing(
     ctx: &Ctx,
+    base_dir: &std::path::Path,
     issues: &[u32],
     restart: &Restart,
     out: &mut dyn Write,
 ) -> Result<Vec<finish::SetAside>> {
     let (repo, github, backend, probe) = (ctx.repo, ctx.github, ctx.backend, ctx.probe);
-    let base_dir = GlobalConfig::load(ctx.config_dir)?.base_dir;
     // Checked for every requested issue, not only those with a task right now: an earlier
     // `--restart` that was interrupted after setting the old task aside but before settling it
     // may have left no live task folder at all, which must not look like a clean slate to start
     // a brand new task over (decision 185 point 4).
     for &number in issues {
-        finish::check_no_leftover(&base_dir, &format!("issue-{number}"))?;
+        finish::check_no_leftover(base_dir, &format!("issue-{number}"))?;
     }
     let mut ids: Vec<(u32, String)> = Vec::new();
     for &number in issues {
         let id = format!("issue-{number}");
-        if finish::exists(&base_dir, &id) && !ids.iter().any(|(_, known)| *known == id) {
+        if finish::exists(base_dir, &id) && !ids.iter().any(|(_, known)| *known == id) {
             ids.push((number, id));
         }
     }
@@ -118,7 +121,7 @@ fn discard_existing(
                 issue.state.to_lowercase()
             );
         }
-        finish::plan_removal(&base_dir, id, probe)?;
+        finish::plan_removal(base_dir, id, probe)?;
         // An issue of a PR that is closed, merged or a fork's would fail to start again.
         pipeline::continued_pr(ctx, &issue)?;
     }
@@ -143,7 +146,7 @@ fn discard_existing(
         return Ok(Vec::new());
     }
     finish::set_aside_many(
-        &base_dir,
+        base_dir,
         &id_list,
         restart.yes,
         backend,
@@ -341,13 +344,16 @@ pub fn run_with(
         probe,
         host: &ShellHostRunner,
     };
+    // Resolved once, before any task is set aside, and reused for the rest of this function: a
+    // second load after the discard could itself fail (issue #207 review M-1) outside the path
+    // below that restores a set-aside task on any later failure.
+    let base_dir = GlobalConfig::load(config_dir)?.base_dir;
     let mut aside_by_id: HashMap<String, finish::SetAside> = HashMap::new();
     if let Some(restart) = restart {
-        for aside in discard_existing(&ctx, &opts.issues, restart, out)? {
+        for aside in discard_existing(&ctx, &base_dir, &opts.issues, restart, out)? {
             aside_by_id.insert(aside.id().to_owned(), aside);
         }
     }
-    let base_dir = GlobalConfig::load(config_dir)?.base_dir;
 
     // Settled the moment each issue's preparation succeeds (decision 185(b)), before its worker
     // runs: called from that issue's own thread inside `pipeline::start_with`, so a later failure
