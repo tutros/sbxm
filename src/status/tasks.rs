@@ -92,15 +92,56 @@ fn format_duration(secs: u64) -> String {
     }
 }
 
-/// `text`, or cut to `max` characters with a trailing `…` if it's longer; empty if `max` is 0.
+/// A terminal column width: 2 for the common East Asian wide ranges (where a character takes two
+/// monospace cells), 1 for everything else. Not a full Unicode East Asian Width table, but enough
+/// to keep CJK text from overrunning a terminal's column count (decided: no new dependency, same
+/// as the rest of this module's ANSI handling).
+fn char_width(c: char) -> usize {
+    let cp = u32::from(c);
+    let wide = matches!(cp,
+        0x1100..=0x115F
+        | 0x2E80..=0x303E
+        | 0x3041..=0x33FF
+        | 0x3400..=0x4DBF
+        | 0x4E00..=0x9FFF
+        | 0xA000..=0xA4CF
+        | 0xAC00..=0xD7A3
+        | 0xF900..=0xFAFF
+        | 0xFE30..=0xFE4F
+        | 0xFF00..=0xFF60
+        | 0xFFE0..=0xFFE6
+        | 0x20000..=0x3FFFD
+    );
+    if wide { 2 } else { 1 }
+}
+
+/// `text`'s width in terminal columns (not its byte length or its count of Unicode scalar
+/// values, either of which undercounts a wide character like `界`).
+fn display_width(text: &str) -> usize {
+    text.chars().map(char_width).sum()
+}
+
+/// `text`, or cut to at most `max` terminal columns with a trailing `…` (always 1 column) if it's
+/// wider; empty if `max` is 0. Measures columns, not characters, so a cut never leaves the result
+/// wider than `max` even when `text` has wide (e.g. CJK) characters in it.
 fn truncate(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
+    if display_width(text) <= max {
         return text.to_owned();
     }
     if max == 0 {
         return String::new();
     }
-    let mut cut: String = text.chars().take(max - 1).collect();
+    let budget = max - 1;
+    let mut cut = String::new();
+    let mut used = 0;
+    for c in text.chars() {
+        let w = char_width(c);
+        if used + w > budget {
+            break;
+        }
+        cut.push(c);
+        used += w;
+    }
     cut.push('…');
     cut
 }
@@ -125,23 +166,53 @@ fn fixed_cells(row: &TaskRow, now: u64) -> [String; 7] {
     ]
 }
 
+/// The fixed cells padded to `widths`, each followed by `sep` spaces (2 is the normal, readable
+/// gap; a terminal that's too narrow for even that falls back to 1, then 0, before giving up on
+/// separating columns at all).
+fn build_fixed(cells: &[String; 7], widths: &[usize; 7], sep: usize) -> String {
+    let gap = " ".repeat(sep);
+    let mut line = String::new();
+    for (cell, width) in cells.iter().zip(widths) {
+        line.push_str(&format!("{cell:width$}"));
+        line.push_str(&gap);
+    }
+    line
+}
+
 /// One line: the fixed cells padded to `widths`, then `log`, cut to fit `total_width` when given
-/// (a terminal); shown in full when not (a pipe or a file, decided point 1).
+/// (a terminal); shown in full when not (a pipe or a file, decided point 1). On a terminal too
+/// narrow for the fixed cells at the normal 2-space gap, the gap is compacted (1 space, then none)
+/// before the log loses any more than its own `…`; `log_is_real` marks a log worth that guarantee
+/// (a task's actual last line, not the header's "LOG" label or the dash for no log yet).
 fn push_row(
     out: &mut String,
     cells: &[String; 7],
     log: &str,
+    log_is_real: bool,
     widths: &[usize; 7],
     total_width: Option<usize>,
 ) {
-    let mut line = String::new();
-    for (cell, width) in cells.iter().zip(widths) {
-        line.push_str(&format!("{cell:width$}  "));
-    }
-    match total_width {
-        Some(total) => line.push_str(&truncate(log, total.saturating_sub(line.len()))),
-        None => line.push_str(log),
-    }
+    let line = match total_width {
+        None => build_fixed(cells, widths, 2) + log,
+        Some(total) => {
+            let mut fixed = build_fixed(cells, widths, 2);
+            let mut available = total.saturating_sub(display_width(&fixed));
+            for sep in [1, 0] {
+                if available > 0 {
+                    break;
+                }
+                fixed = build_fixed(cells, widths, sep);
+                available = total.saturating_sub(display_width(&fixed));
+            }
+            if available > 0 {
+                fixed + &truncate(log, available)
+            } else if log_is_real {
+                fixed + "…"
+            } else {
+                fixed
+            }
+        }
+    };
     out.push_str(&line);
     out.push('\n');
 }
@@ -154,17 +225,25 @@ pub fn render(rows: &[TaskRow], now: u64, width: Option<usize>) -> String {
         return "No tasks yet; start one with `sbxm task start --issue <n>`.\n".to_owned();
     }
     let data: Vec<[String; 7]> = rows.iter().map(|row| fixed_cells(row, now)).collect();
-    let mut widths = HEADER.map(str::len);
+    let mut widths = HEADER.map(display_width);
     for row in &data {
         for (width, cell) in widths.iter_mut().zip(row) {
-            *width = (*width).max(cell.len());
+            *width = (*width).max(display_width(cell));
         }
     }
     let mut out = String::new();
-    push_row(&mut out, &HEADER.map(str::to_owned), "LOG", &widths, width);
+    push_row(
+        &mut out,
+        &HEADER.map(str::to_owned),
+        "LOG",
+        false,
+        &widths,
+        width,
+    );
     for (cells, row) in data.iter().zip(rows) {
+        let log_is_real = row.log_line.as_deref().is_some_and(|line| !line.is_empty());
         let log = row.log_line.as_deref().unwrap_or(DASH);
-        push_row(&mut out, cells, log, &widths, width);
+        push_row(&mut out, cells, log, log_is_real, &widths, width);
     }
     out
 }

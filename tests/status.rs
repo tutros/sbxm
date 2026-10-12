@@ -177,6 +177,53 @@ fn a_narrow_width_still_produces_one_line_per_row() {
     assert_eq!(text.lines().count(), 2, "{text}");
 }
 
+#[test]
+fn a_full_row_at_terminal_width_still_shows_an_ellipsis_instead_of_losing_the_log() {
+    let r = TaskRow {
+        id: "issue-7".to_owned(),
+        stage: "reviewing",
+        status: "running".to_owned(),
+        stage_entered_at: Some(60),
+        commits_ahead: Some(2),
+        must_fix: Some(1),
+        pr: Some("https://github.com/tutros/sbxm/pull/999".to_owned()),
+        log_line: Some("still working".to_owned()),
+    };
+    let text = tasks::render(&[r], 120, Some(80));
+    let line = text.lines().nth(1).unwrap();
+
+    assert!(
+        line.chars().count() <= 80,
+        "{line:?} is {} columns wide",
+        line.chars().count()
+    );
+    assert!(line.ends_with('…'), "the log must not vanish: {line:?}");
+}
+
+#[test]
+fn a_terminal_width_measures_display_columns_not_unicode_scalar_values() {
+    let mut r = row("issue-1", "working", "running");
+    r.log_line = Some("界".repeat(60));
+    let text = tasks::render(&[r], 0, Some(80));
+    let line = text.lines().nth(1).unwrap();
+
+    assert!(line.ends_with('…'), "{line:?}");
+    let visual_width: usize = line
+        .chars()
+        .map(|c| {
+            if ('\u{4E00}'..='\u{9FFF}').contains(&c) {
+                2
+            } else {
+                1
+            }
+        })
+        .sum();
+    assert!(
+        visual_width <= 80,
+        "{line:?} occupies {visual_width} terminal columns, wider than the requested 80"
+    );
+}
+
 // ---- gathering rows from task.json/run.log ---------------------------------
 
 #[test]
