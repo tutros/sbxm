@@ -158,15 +158,24 @@ worse than a missing one, and the worker of a task under review comes from its r
 `start`: `--worker-harness`, `--worker-model`, `--time-limit` (the worker's), `--profile`, `--base`, `--repo`.
 `review`: `--reviewer-harness`, `--reviewer-model`, `--reviewer-time-limit`, `--time-limit` (the worker's, for the fix
 round), `--profile`, `--base`, `--repo`. `run`: every flag of both. The README table is the user-facing copy.
-`start --restart` discards an existing task of that id after the same confirmation as `rm` [153].
+`start --restart` discards an existing task of that id after the same confirmation as `rm` [153], undoably [185]: its
+folders are set aside under `.sbxm/tasks-replaced/<id>/`, not deleted, until the new task's preparation is complete.
 `start` on an existing task that is not finished refuses: `task issue-41 exists (stage working); use task status, or --restart` [153].
-`run --spec --restart` discards an existing spec task the same way, except a result that lives only in the task's
-`repo.git`, not yet fetched into the checkout, is protected the same way `rm --spec` protects it [178], since `run`
-has no `--force` of its own: fetch it first, or `rm --spec FILE --force` before restarting [182].
+`run --spec --restart` discards an existing spec task the same undoable way, except a result that lives only in the
+task's `repo.git`, not yet fetched into the checkout, is protected the same way `rm --spec` protects it [178], since
+`run` has no `--force` of its own: fetch it first, or `rm --spec FILE --force` before restarting [182].
 `--restart` is two steps, for `start --issue` and for `run` with `--issue` or `--spec` (`start --spec` has none) [184]: every refusal that needs no write
-comes before the confirmation prompt and leaves the old task untouched; after a confirmed discard, a start that fails
-leaves no task. A change made while the command waits at its prompt, and the validation of the new task's kits, fall
-in the second step.
+comes before the confirmation prompt and leaves the old task untouched, including a leftover check: a leftover
+`tasks-replaced/<id>/` from an earlier, unsettled `--restart` refuses before the prompt too, naming the folder and
+how to resolve it [185]. The second step, after a confirmed discard, is undoable [185]: the old task is set aside
+(its sandboxes removed, as before; its folders moved) rather than deleted, and settled (deleted for good) once the
+new task's preparation — its folder, kits and sandbox, `task.json` written — is complete, even if the worker or its
+gates then fail; a start that fails before that point restores the old task instead of losing it, and the error
+names why the start failed and, if putting the old task back itself fails, that failure and the folder too. A
+change made while the command waits at its prompt, and the validation of the new task's kits, are exactly the
+checks that can still make this second step fail. `start --restart --issue 1 --issue 2` settles each task on its
+own: one whose preparation completes is settled even if another's fails or was never reached (not picked to start
+again); the command exits non-zero if any was restored, and its output says per task which happened.
 
 Output: human text by default; `status --json` prints the records. Exit codes: 0 success; 1 any failure
 (including `gates-failed` and a `ready` task with must-fix findings left, which is reported, not an error).
