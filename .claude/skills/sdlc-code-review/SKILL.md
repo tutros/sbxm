@@ -131,6 +131,11 @@ Everything else is **should fix** (or a nit), however true it is. These are neve
 - A finding that needs something outside the command to change while it waits at a prompt (a file edited, a
   secret removed, a sandbox stopped during a confirmation). It is should-fix, unless the spec or a decision
   promises protection for that case (issue #206; decision 184 states it for `--restart`).
+- A finding that needs a write to the screen (stdout, stderr, a warning writer) to fail before anything goes wrong.
+  It is should-fix, unless the spec or a decision promises protection for that case (issue #207: four of its
+  eight review rounds found one more place where a failed screen write stranded a set-aside task; decision 185(e)
+  now makes a `--restart` command's output unable to stop it). When such findings repeat on one change, name the
+  kind once and propose a structure that removes it, not the next place.
 - Speculative edge cases with no failing input, or hardening beyond the stated requirements.
 - Anything that is a preference between two workable designs: that is a **question**, not a finding.
 
