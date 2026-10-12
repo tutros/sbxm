@@ -6,6 +6,7 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::Result;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::run::results::parse_timestamp;
 use crate::task::record::{self, ProcessProbe};
@@ -92,38 +93,17 @@ fn format_duration(secs: u64) -> String {
     }
 }
 
-/// A terminal column width: 2 for the common East Asian wide ranges (where a character takes two
-/// monospace cells), 1 for everything else. Not a full Unicode East Asian Width table, but enough
-/// to keep CJK text from overrunning a terminal's column count (decided: no new dependency, same
-/// as the rest of this module's ANSI handling).
-fn char_width(c: char) -> usize {
-    let cp = u32::from(c);
-    let wide = matches!(cp,
-        0x1100..=0x115F
-        | 0x2E80..=0x303E
-        | 0x3041..=0x33FF
-        | 0x3400..=0x4DBF
-        | 0x4E00..=0x9FFF
-        | 0xA000..=0xA4CF
-        | 0xAC00..=0xD7A3
-        | 0xF900..=0xFAFF
-        | 0xFE30..=0xFE4F
-        | 0xFF00..=0xFF60
-        | 0xFFE0..=0xFFE6
-        | 0x20000..=0x3FFFD
-    );
-    if wide { 2 } else { 1 }
-}
-
 /// `text`'s width in terminal columns (not its byte length or its count of Unicode scalar
-/// values, either of which undercounts a wide character like `界`).
+/// values, either of which undercounts a wide character like `界` or `😀`), from the Unicode
+/// width tables `unicode-width` carries, emoji presentation sequences included. Every column
+/// measurement in this module goes through it, padding and cutting alike.
 fn display_width(text: &str) -> usize {
-    text.chars().map(char_width).sum()
+    UnicodeWidthStr::width(text)
 }
 
 /// `text`, or cut to at most `max` terminal columns with a trailing `…` (always 1 column) if it's
-/// wider; empty if `max` is 0. Measures columns, not characters, so a cut never leaves the result
-/// wider than `max` even when `text` has wide (e.g. CJK) characters in it.
+/// wider; empty if `max` is 0. The cut is checked with [`display_width`] itself, so a character
+/// whose width depends on what follows it (a variation selector) can't push it past `max`.
 fn truncate(text: &str, max: usize) -> String {
     if display_width(text) <= max {
         return text.to_owned();
@@ -135,15 +115,25 @@ fn truncate(text: &str, max: usize) -> String {
     let mut cut = String::new();
     let mut used = 0;
     for c in text.chars() {
-        let w = char_width(c);
+        let w = UnicodeWidthChar::width(c).unwrap_or(0);
         if used + w > budget {
             break;
         }
         cut.push(c);
         used += w;
     }
+    while display_width(&cut) > budget {
+        cut.pop();
+    }
     cut.push('…');
     cut
+}
+
+/// `cell` followed by spaces up to `width` terminal columns (`format!`'s own padding counts
+/// characters, which leaves a wide character's column short).
+fn pad(cell: &str, width: usize) -> String {
+    let fill = width.saturating_sub(display_width(cell));
+    format!("{cell}{}", " ".repeat(fill))
 }
 
 const HEADER: [&str; 7] = ["ID", "STAGE", "STATUS", "TIME", "AHEAD", "FINDINGS", "PR"];
@@ -173,7 +163,7 @@ fn build_fixed(cells: &[String; 7], widths: &[usize; 7], sep: usize) -> String {
     let gap = " ".repeat(sep);
     let mut line = String::new();
     for (cell, width) in cells.iter().zip(widths) {
-        line.push_str(&format!("{cell:width$}"));
+        line.push_str(&pad(cell, *width));
         line.push_str(&gap);
     }
     line

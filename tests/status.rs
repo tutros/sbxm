@@ -200,27 +200,70 @@ fn a_full_row_at_terminal_width_still_shows_an_ellipsis_instead_of_losing_the_lo
     assert!(line.ends_with('…'), "the log must not vanish: {line:?}");
 }
 
-#[test]
-fn a_terminal_width_measures_display_columns_not_unicode_scalar_values() {
+/// Terminal columns of `line`, counted by hand for the characters these tests use (so the
+/// expectation doesn't come from the width table under test): CJK ideographs and emoji take 2
+/// cells, `❤` followed by the emoji variation selector too (alone it's 1), anything else 1.
+fn cells(line: &str) -> usize {
+    line.replace("\u{2764}\u{FE0F}", "😀")
+        .chars()
+        .map(|c| match c {
+            '\u{4E00}'..='\u{9FFF}' | '\u{1F300}'..='\u{1FAFF}' => 2,
+            _ => 1,
+        })
+        .sum()
+}
+
+/// One log made of `log` repeated until it's wider than the terminal, cut at width 80: the
+/// line fits in 80 cells and still ends with the `…`.
+fn assert_wide_log_fits(log: &str) {
     let mut r = row("issue-1", "working", "running");
-    r.log_line = Some("界".repeat(60));
+    r.log_line = Some(log.repeat(60));
     let text = tasks::render(&[r], 0, Some(80));
     let line = text.lines().nth(1).unwrap();
 
     assert!(line.ends_with('…'), "{line:?}");
-    let visual_width: usize = line
-        .chars()
-        .map(|c| {
-            if ('\u{4E00}'..='\u{9FFF}').contains(&c) {
-                2
-            } else {
-                1
-            }
-        })
-        .sum();
     assert!(
-        visual_width <= 80,
-        "{line:?} occupies {visual_width} terminal columns, wider than the requested 80"
+        cells(line) <= 80,
+        "{line:?} occupies {} terminal columns, wider than the requested 80",
+        cells(line)
+    );
+}
+
+#[test]
+fn a_terminal_width_measures_display_columns_not_unicode_scalar_values() {
+    assert_wide_log_fits("界");
+}
+
+#[test]
+fn an_emoji_log_respects_the_terminal_display_width() {
+    assert_wide_log_fits("😀");
+}
+
+#[test]
+fn an_emoji_with_a_variation_selector_respects_the_terminal_display_width() {
+    assert_wide_log_fits("\u{2764}\u{FE0F}");
+}
+
+#[test]
+fn a_wide_character_in_a_fixed_column_keeps_the_log_column_aligned() {
+    let mut wide = row("issue-1", "working", "running");
+    wide.pr = Some("界界".to_owned());
+    wide.log_line = Some("one".to_owned());
+    let mut plain = row("issue-2", "working", "running");
+    plain.pr = Some("x".to_owned());
+    plain.log_line = Some("two".to_owned());
+    let text = tasks::render(&[wide, plain], 0, None);
+    let starts: Vec<usize> = text
+        .lines()
+        .map(|line| {
+            let (before, _) = line.rsplit_once("  ").unwrap();
+            cells(before) + 2
+        })
+        .collect();
+
+    assert!(
+        starts.windows(2).all(|w| w[0] == w[1]),
+        "the LOG column starts at different columns {starts:?}:\n{text}"
     );
 }
 
