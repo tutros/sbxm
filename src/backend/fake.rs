@@ -68,7 +68,7 @@ pub struct FakeBackend {
     invalid_kit: Option<String>,
     fail_create: bool,
     sandboxes: Vec<SandboxInfo>,
-    secrets: Vec<String>,
+    secrets: Mutex<Vec<String>>,
     /// `0.43.0` when `None`.
     version: Option<String>,
     no_sbx: bool,
@@ -157,7 +157,7 @@ impl FakeBackend {
     /// A backend whose `secret_services` returns these names.
     pub fn with_secrets(names: &[&str]) -> Self {
         Self {
-            secrets: names.iter().map(|n| n.to_string()).collect(),
+            secrets: Mutex::new(names.iter().map(|n| n.to_string()).collect()),
             ..Self::default()
         }
     }
@@ -165,9 +165,17 @@ impl FakeBackend {
     /// Makes `secret_services` return these names, on top of another constructor.
     pub fn and_secrets(self, names: &[&str]) -> Self {
         Self {
-            secrets: names.iter().map(|n| n.to_string()).collect(),
+            secrets: Mutex::new(names.iter().map(|n| n.to_string()).collect()),
             ..self
         }
+    }
+
+    /// Changes what `secret_services` returns from now on, e.g. to model a secret removed while
+    /// a `--restart` confirmation is pending (issue #207): a test's `Confirm::confirm` can call
+    /// this to change the answer the *next* `secret_services` call gives, after the ones a
+    /// restart's before-the-prompt checks already made.
+    pub fn set_secrets(&self, names: &[&str]) {
+        *self.secrets.lock().unwrap() = names.iter().map(|n| n.to_string()).collect();
     }
 
     /// A backend whose `list` returns these sandboxes.
@@ -403,7 +411,7 @@ impl SandboxBackend for FakeBackend {
 
     fn secret_services(&self) -> Result<Vec<String>> {
         *self.secret_service_calls.lock().unwrap() += 1;
-        Ok(self.secrets.clone())
+        Ok(self.secrets.lock().unwrap().clone())
     }
 
     fn validate_kit(&self, dir: &Path) -> Result<KitValidation> {
