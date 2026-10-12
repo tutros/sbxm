@@ -1,0 +1,12 @@
+# Generates src/status/width_table.rs (decision 185). Not part of sbxm's build: its own
+# workspace, so sbxm never depends on unicode-width (decision 171(a)).
+[package]
+name = "gen-display-width"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+unicode-width = "=0.2.2"
+
+[workspace]

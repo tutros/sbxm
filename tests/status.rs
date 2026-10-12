@@ -208,6 +208,7 @@ fn cells(line: &str) -> usize {
         .chars()
         .map(|c| match c {
             '\u{4E00}'..='\u{9FFF}' | '\u{1F300}'..='\u{1FAFF}' => 2,
+            '\u{0300}'..='\u{036F}' => 0,
             _ => 1,
         })
         .sum()
@@ -242,6 +243,21 @@ fn an_emoji_log_respects_the_terminal_display_width() {
 #[test]
 fn an_emoji_with_a_variation_selector_respects_the_terminal_display_width() {
     assert_wide_log_fits("\u{2764}\u{FE0F}");
+}
+
+#[test]
+fn a_combining_mark_takes_no_terminal_column() {
+    let mut r = row("issue-1", "working", "running");
+    r.log_line = Some("e\u{301}".repeat(30));
+    let uncut = tasks::render(&[r.clone()], 0, None);
+    let line = uncut.lines().nth(1).unwrap();
+
+    let text = tasks::render(&[r], 0, Some(cells(line)));
+
+    assert_eq!(
+        text, uncut,
+        "a line exactly as wide as the terminal was cut"
+    );
 }
 
 #[test]
