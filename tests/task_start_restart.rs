@@ -266,6 +266,51 @@ fn restart_puts_the_old_task_back_if_the_worker_secret_vanishes_during_confirmat
     );
 }
 
+/// Decision 185 point 4: a `--restart` of a task with a leftover copy under `tasks-replaced/` is
+/// refused before the prompt, naming the folder and the two ways out; nothing is deleted or
+/// created.
+#[test]
+fn a_restart_refuses_before_the_prompt_while_a_leftover_copy_exists() {
+    let f = fixture();
+    started(&f);
+    let b = playing(&f);
+    // An earlier `--restart` that was interrupted after discarding but before settling.
+    sbxm::task::finish::set_aside(
+        &f.env.base_dir(),
+        "issue-41",
+        true,
+        &b,
+        &Probe,
+        &FakeConfirm::new(true, true),
+        &mut Vec::new(),
+    )
+    .unwrap();
+    let (removes_before, creates_before) = (b.removes().len(), b.creates().len());
+    let confirm = FakeConfirm::new(true, true);
+
+    let (result, _) = go(
+        &f,
+        &options(&f),
+        Some(&Restart {
+            confirm: &confirm,
+            yes: false,
+        }),
+        &b,
+        &github(),
+    );
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(message.contains("tasks-replaced"), "{message}");
+    assert!(message.contains("move it back"), "{message}");
+    assert!(message.contains("delete it"), "{message}");
+    assert!(
+        confirm.prompts.borrow().is_empty(),
+        "nothing is asked while a leftover exists"
+    );
+    assert_eq!(b.removes().len(), removes_before, "nothing more removed");
+    assert_eq!(b.creates().len(), creates_before, "nothing created");
+}
+
 #[test]
 fn a_running_task_is_not_restarted() {
     let f = fixture();

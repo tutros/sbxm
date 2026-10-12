@@ -557,6 +557,43 @@ fn restart_puts_the_old_task_back_if_the_worker_secret_vanishes_during_confirmat
     );
 }
 
+/// Decision 185 point 4: `task run --restart --issue` refuses before the prompt while a leftover
+/// copy of the task exists under `tasks-replaced/`, naming the folder and the two ways out.
+#[test]
+fn a_restart_refuses_before_the_prompt_while_a_leftover_copy_exists() {
+    let f = config();
+    let first = go(&f, &options(&f), None, &backend(&f, &[CLEAN]), &github());
+    first.result.unwrap();
+    let b = backend(&f, &[CLEAN]);
+    // An earlier `--restart` that was interrupted after discarding but before settling.
+    sbxm::task::finish::set_aside(
+        &f.env.base_dir(),
+        "issue-41",
+        true,
+        &b,
+        &Probe,
+        &Yes,
+        &mut Vec::new(),
+    )
+    .unwrap();
+
+    let out = go(
+        &f,
+        &options(&f),
+        Some(&Restart {
+            confirm: &Yes,
+            yes: false,
+        }),
+        &b,
+        &github(),
+    );
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("tasks-replaced"), "{message}");
+    assert!(message.contains("move it back"), "{message}");
+    assert!(message.contains("delete it"), "{message}");
+}
+
 #[test]
 fn a_missing_reviewer_secret_is_refused_before_the_worker_creates_anything() {
     let f = config(); // the reviewer is codex, which needs the openai secret

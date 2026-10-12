@@ -96,15 +96,19 @@ fn discard_existing(
 ) -> Result<Vec<finish::SetAside>> {
     let (repo, github, backend, probe) = (ctx.repo, ctx.github, ctx.backend, ctx.probe);
     let base_dir = GlobalConfig::load(ctx.config_dir)?.base_dir;
+    // Checked for every requested issue, not only those with a task right now: an earlier
+    // `--restart` that was interrupted after setting the old task aside but before settling it
+    // may have left no live task folder at all, which must not look like a clean slate to start
+    // a brand new task over (decision 185 point 4).
+    for &number in issues {
+        finish::check_no_leftover(&base_dir, &format!("issue-{number}"))?;
+    }
     let mut ids: Vec<(u32, String)> = Vec::new();
     for &number in issues {
         let id = format!("issue-{number}");
         if finish::exists(&base_dir, &id) && !ids.iter().any(|(_, known)| *known == id) {
             ids.push((number, id));
         }
-    }
-    for (_, id) in &ids {
-        finish::check_no_leftover(&base_dir, id)?;
     }
     for (number, id) in &ids {
         let issue = github.issue(repo, *number)?;

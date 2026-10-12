@@ -354,6 +354,55 @@ fn restart_refuses_to_discard_an_unfetched_finished_result() {
     );
 }
 
+/// Decision 185 point 4: `task run --spec --restart` refuses before the prompt while a leftover
+/// copy of the task exists under `tasks-replaced/`, naming the folder and the two ways out;
+/// nothing is deleted or created.
+#[test]
+fn restart_refuses_before_the_prompt_while_a_leftover_copy_exists() {
+    let f = config();
+    let s = spec(&f);
+    let id = id_of(&s);
+    let first = go(
+        &f,
+        &options(&f, s.clone()),
+        None,
+        &backend_for(&f, &id, &[CLEAN_REVIEW]),
+        &FakeGitHub::default(),
+    );
+    first.result.unwrap();
+    let b = backend_for(&f, &id, &[CLEAN_REVIEW]);
+    // An earlier `--restart` that was interrupted after discarding but before settling.
+    sbxm::task::finish::set_aside(
+        &f.env.base_dir(),
+        &id,
+        true,
+        &b,
+        &Probe,
+        &Yes,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    let (removes_before, creates_before) = (b.removes().len(), b.creates().len());
+
+    let out = go(
+        &f,
+        &options(&f, s.clone()),
+        Some(&Restart {
+            confirm: &Yes,
+            yes: false,
+        }),
+        &b,
+        &FakeGitHub::default(),
+    );
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("tasks-replaced"), "{message}");
+    assert!(message.contains("move it back"), "{message}");
+    assert!(message.contains("delete it"), "{message}");
+    assert_eq!(b.removes().len(), removes_before, "nothing more removed");
+    assert_eq!(b.creates().len(), creates_before, "nothing created");
+}
+
 /// Issue #194 review finding M-1: `--restart` must not discard the old task before the new
 /// start's own inputs are validated, the same as it already doesn't for `--issue`.
 #[test]
