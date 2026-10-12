@@ -83,6 +83,7 @@ that).
 | `sbxm config show [project] [--profile p] [--harness h] [--kits]` | Prints the merged config exactly as it's hashed, the hash, and with `--kits` the generated kits. Creates nothing. |
 | `sbxm config profiles-dir` | Prints the folder profiles are read from (`profiles_dir`, else `<config dir>/profiles`), for scripts such as `just deploy-profiles`. Loads only `config.toml`, so it fails like any command on an invalid or missing one. |
 | `sbxm doctor` | Checks `sbx` (on `PATH`, new enough, daemon answering), the config, every profile, every project with each of its sandboxes (secrets stored, kits valid), and the base dir (exists, writable, not a temp folder, at least 10 GiB free). Exits non-zero if anything fails. |
+| `sbxm status [--watch] [--interval secs]` | The Tasks dashboard (decision 171): one row per task — id, stage, status (`interrupted` when its `sbxm` process is gone, decided the same way `task status` decides it), time in the current stage (the last stage stamp in `task.json`; `45s`, `12m`, `1h05m`, `3d02h`), commits ahead of base, must-fix findings left (from the last review `task.json` recorded), the PR link in full, and the last `run.log` line that isn't a header, without its timestamp. A missing value shows `-`. On a terminal the last column (the log line) is cut to the terminal's width with `…`; a pipe or a file never cuts it. `--watch` redraws every `--interval` seconds (whole seconds, minimum 1; an error without `--watch`; default 2) until Ctrl+C, clearing the screen each time; on a pipe or a file it always prints once and exits, `--watch` or not. Reads only `task.json` and `run.log`; never calls `sbx` (a missing sandbox is the Sandboxes section, a separate issue). Rows are in the same order `sbxm task status` lists them. |
 
 `--harness` defaults to `claude` for `new` and `config show`; `open`, `stop` and `rm` (without `--purge`) require it, so they never act on the wrong sandbox by default (issue #33). `sbxm <command> --help` shows every option.
 
@@ -271,6 +272,7 @@ settings, the *contents* of referenced files, resources and sbxm's version. A se
 | `sbxm list` | sbxm's sandboxes with status, config drift and orphans (`--json` for scripts). |
 | `sbx ls` | Every sandbox `sbx` knows about, with agent, `running`/`stopped` and workspace. A sandbox that has gone from this list is finished and removed. |
 | `sbxm task status` | Tasks: stage and status (`interrupted` if `sbxm` died), commits ahead of base, `result.md` and `review.md`, and the recorded risk level (`unknown` with none recorded). |
+| `sbxm status [--watch]` | A live dashboard over every task: the same stage/status/ahead as `task status`, plus time in the current stage, must-fix findings left, the PR link and the last `run.log` line. `--watch` redraws every 2 seconds on a terminal; a pipe or a file always gets one printout. |
 
 Sandbox names are `sbxm-<project>-<harness>`. A task's are `sbxm-task-issue-<n>-<harness>` for its worker and
 `sbxm-task-<id>-review-<harness>` for a reviewer (`<id>` is `issue-<n>` or `pr-<n>`).

@@ -49,6 +49,9 @@ decision 166). A ranking is computed in code from the judge's scores.
 sbxm task init                         # writes sbxm-task.toml: worker, reviewer, profile, gates
 sbxm task start --issue 63             # worker in its own sandbox; commits collected; gates run
 sbxm task status                       # stage, status, commits ahead, result/review present
+sbxm status --watch                    # a live dashboard over every task (decision 171, part 4 of 6):
+                                       # stage, status, time in stage, commits ahead, must-fix findings
+                                       # left, PR link, last run.log line; redraws every 2s on a terminal
 sbxm task review --issue 63            # gates, independent review, fix rounds up to [worker] fix_rounds
 sbxm task finish --issue 63            # push the branch and open the PR ("Fixes #63"); for an issue of
                                        # an open PR: push to that PR's branch and comment on the PR
