@@ -488,3 +488,28 @@ fn timestamps_are_utc_rfc3339() {
         "2026-09-30T01:01:01Z"
     );
 }
+
+#[test]
+fn parse_timestamp_is_the_inverse_of_format_timestamp() {
+    for secs in [0, 1_790_000_000, 20_726 * 86_400 + 3_661, 1] {
+        assert_eq!(
+            results::parse_timestamp(&results::format_timestamp(secs)),
+            Some(secs),
+            "secs={secs}"
+        );
+    }
+}
+
+#[test]
+fn parse_timestamp_rejects_the_wrong_shape() {
+    for bad in [
+        "",
+        "2026-09-21 14:13:20Z",
+        "2026-09-21T14:13:20",
+        "2026-09-21T14:13:20Zoo",
+        "not-a-timestamp",
+        "2026-09-21T14:13Z",
+    ] {
+        assert_eq!(results::parse_timestamp(bad), None, "{bad:?}");
+    }
+}
