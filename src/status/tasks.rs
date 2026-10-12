@@ -6,11 +6,10 @@ use std::fs;
 use std::path::Path;
 
 use anyhow::Result;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::run::results::parse_timestamp;
 use crate::task::record::{self, ProcessProbe};
-
-use super::width_table::{EMOJI_PRESENTATION, WIDTHS};
 
 /// A missing value (no commits yet, no review yet, no PR, no `run.log`).
 const DASH: &str = "-";
@@ -94,39 +93,12 @@ fn format_duration(secs: u64) -> String {
     }
 }
 
-/// Whether `c` falls in one of `ranges`' `(first, last, ..)` runs, which are in order.
-fn in_runs<T>(ranges: &[T], c: char, bounds: impl Fn(&T) -> (u32, u32)) -> Option<&T> {
-    let u = u32::from(c);
-    let i = ranges.partition_point(|r| bounds(r).1 < u);
-    ranges.get(i).filter(|r| bounds(r).0 <= u)
-}
-
-/// `c`'s width in terminal columns on its own, from the generated table (decision 185).
-fn char_width(c: char) -> usize {
-    in_runs(WIDTHS, c, |r| (r.0, r.1)).map_or(1, |r| usize::from(r.2))
-}
-
 /// `text`'s width in terminal columns (not its byte length or its count of Unicode scalar
-/// values, either of which undercounts a wide character like `界` or `😀`), from the table
-/// `scripts/gen-display-width` generates out of `unicode-width`'s (decision 185): every
-/// character's own width, and U+FE0F widening an emoji to 2 columns. Other sequences (a ZWJ
-/// emoji, a text-presentation selector) count as the sum of their characters, never less than
-/// `unicode-width` measures them, so a row can't overflow. Every column measurement in
-/// this module goes through it, padding and cutting alike.
+/// values, either of which undercounts a wide character like `界` or `😀`), from the Unicode
+/// width tables `unicode-width` carries, emoji presentation sequences included. Every column
+/// measurement in this module goes through it, padding and cutting alike.
 fn display_width(text: &str) -> usize {
-    let mut total = 0;
-    let mut previous = None;
-    for c in text.chars() {
-        if c == '\u{FE0F}'
-            && let Some(p) = previous
-            && in_runs(EMOJI_PRESENTATION, p, |r| *r).is_some()
-        {
-            total += 2_usize.saturating_sub(char_width(p));
-        }
-        total += char_width(c);
-        previous = Some(c);
-    }
-    total
+    UnicodeWidthStr::width(text)
 }
 
 /// `text`, or cut to at most `max` terminal columns with a trailing `…` (always 1 column) if it's
@@ -143,7 +115,7 @@ fn truncate(text: &str, max: usize) -> String {
     let mut cut = String::new();
     let mut used = 0;
     for c in text.chars() {
-        let w = char_width(c);
+        let w = UnicodeWidthChar::width(c).unwrap_or(0);
         if used + w > budget {
             break;
         }
