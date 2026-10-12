@@ -307,7 +307,18 @@ impl SetAside {
                 self.undo_restore(&done);
                 return Err(e).with_context(|| format!("cannot create {}", parent.display()));
             }
-            if let Err(e) = fs::rename(&replaced, &original) {
+            // Checked here, not left to `rename`: what a rename does to something in the way
+            // depends on the platform (Windows replaces a plain file, Linux an empty folder), and
+            // nothing more may be deleted.
+            let moved_back = if original.symlink_metadata().is_ok() {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "something is already there",
+                ))
+            } else {
+                fs::rename(&replaced, &original)
+            };
+            if let Err(e) = moved_back {
                 self.undo_restore(&done);
                 return Err(e).with_context(|| {
                     format!(
@@ -404,16 +415,12 @@ pub fn set_aside_many(
                 Err(e) => format!("could not remove sandbox {sandbox}: {e:#}"),
             };
             if let Err(e) = writeln!(out, "{line}") {
-                undo_set_asides(&result);
-                return Err(e.into());
+                return Err(undo_set_asides(&result, e.into()));
             }
         }
         match set_aside_one(base_dir, plan) {
             Ok(aside) => result.push(aside),
-            Err(e) => {
-                undo_set_asides(&result);
-                return Err(e);
-            }
+            Err(e) => return Err(undo_set_asides(&result, e)),
         }
     }
     Ok(result)
@@ -423,10 +430,26 @@ pub fn set_aside_many(
 /// something else in the same call fails partway through the batch (another task's set-aside, or
 /// the status output in between): the one path that un-does an accumulated [`SetAside`] list, so
 /// a later fallible step added to the loop rolls back the same way instead of needing its own copy.
-fn undo_set_asides(result: &[SetAside]) {
-    for aside in result {
-        let _ = aside.restore();
+/// Returns the error for the caller: `failed` (why the batch stopped) as it is when every task
+/// went back, or else `failed` plus, for each task that could not be put back, why and the folder
+/// it is still set aside at (decision 185 point 4). Every restore is tried either way.
+fn undo_set_asides(result: &[SetAside], failed: anyhow::Error) -> anyhow::Error {
+    let stranded: Vec<String> = result
+        .iter()
+        .filter_map(|aside| {
+            let restore_failed = aside.restore().err()?;
+            Some(format!(
+                "putting the old task {} back failed too ({restore_failed:#}); it is still set \
+                 aside at {}",
+                aside.id(),
+                aside.folder().display()
+            ))
+        })
+        .collect();
+    if stranded.is_empty() {
+        return failed;
     }
+    anyhow::anyhow!("{failed:#}, and {}", stranded.join(", and "))
 }
 
 /// [`set_aside_many`] for one task.

@@ -304,3 +304,113 @@ fn multi_set_aside_restores_the_first_task_if_output_fails_on_the_second() {
             .exists()
     );
 }
+
+/// A `Write` for a two-task `set_aside_many`: when the second line starts (the first task is set
+/// aside by then), it puts a plain file where the first task's folder has to go back, so that
+/// task's restore fails. The second line itself fails too when `fail` is set.
+struct BlocksTheFirstRestore {
+    seen: String,
+    in_the_way: std::path::PathBuf,
+    fail: bool,
+}
+
+impl std::io::Write for BlocksTheFirstRestore {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.seen.contains('\n') {
+            fs::write(&self.in_the_way, b"in the way")?;
+            if self.fail {
+                return Err(std::io::Error::other("sandbox status output failed"));
+            }
+        }
+        self.seen.push_str(&String::from_utf8_lossy(buf));
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn assert_names_the_stranded_first_task(message: &str, base_dir: &std::path::Path) {
+    assert!(
+        message.contains("putting the old task issue-41 back failed too"),
+        "{message}"
+    );
+    let folder = base_dir
+        .join(".sbxm")
+        .join("tasks-replaced")
+        .join("issue-41");
+    assert!(message.contains(&folder.display().to_string()), "{message}");
+    assert!(
+        finish::has_leftover(base_dir, "issue-41"),
+        "the old task is still set aside"
+    );
+    assert!(
+        folder
+            .join(".sbxm")
+            .join("tasks")
+            .join("issue-41")
+            .join("task.json")
+            .exists()
+    );
+}
+
+/// Issue #207 review round 7, M-1: the batch rollback dropped a failed restore, so the caller saw
+/// only the output failure and was never told the first task was still set aside, or where
+/// (decision 185 point 4 wants both failures and the folder named).
+#[test]
+fn output_failure_reports_when_rolling_back_the_first_task_also_fails() {
+    let f = fixture();
+    let backend = FakeBackend::with_secrets(&["anthropic", "openai"]);
+    resumable_task_for(&f, &backend, 41);
+    resumable_task_for(&f, &backend, 42);
+    let base_dir = f.env.base_dir();
+    let ids = vec!["issue-41".to_owned(), "issue-42".to_owned()];
+    let mut out = BlocksTheFirstRestore {
+        seen: String::new(),
+        in_the_way: record::task_dir(&base_dir, "issue-41"),
+        fail: true,
+    };
+
+    let err = finish::set_aside_many(&base_dir, &ids, true, &backend, &Probe, &Never, &mut out)
+        .unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("sandbox status output failed"),
+        "{message}"
+    );
+    assert_names_the_stranded_first_task(&message, &base_dir);
+}
+
+/// The same when what fails is the second task's own set-aside (here its `tasks-replaced/` folder
+/// can't be made: a plain file sits there).
+#[test]
+fn a_failed_set_aside_reports_when_rolling_back_the_first_task_also_fails() {
+    let f = fixture();
+    let backend = FakeBackend::with_secrets(&["anthropic", "openai"]);
+    resumable_task_for(&f, &backend, 41);
+    resumable_task_for(&f, &backend, 42);
+    let base_dir = f.env.base_dir();
+    let replaced = base_dir.join(".sbxm").join("tasks-replaced");
+    fs::create_dir_all(&replaced).unwrap();
+    fs::write(replaced.join("issue-42"), b"not a folder").unwrap();
+    let ids = vec!["issue-41".to_owned(), "issue-42".to_owned()];
+    let mut out = BlocksTheFirstRestore {
+        seen: String::new(),
+        in_the_way: record::task_dir(&base_dir, "issue-41"),
+        fail: false,
+    };
+
+    let err = finish::set_aside_many(&base_dir, &ids, true, &backend, &Probe, &Never, &mut out)
+        .unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("issue-42"), "{message}");
+    assert_names_the_stranded_first_task(&message, &base_dir);
+    assert!(
+        record::task_dir(&base_dir, "issue-42")
+            .join("task.json")
+            .exists()
+    );
+}
