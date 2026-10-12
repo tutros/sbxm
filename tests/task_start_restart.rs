@@ -625,6 +625,121 @@ fn several_restarts_accepted_once_delete_and_start_them_all() {
     assert!(record::read(&meta_of(&f, 41).join("task.json")).is_ok());
 }
 
+// ---- Decision 185 (issue #207): several restarts, each settled on its own ----
+
+/// Decision 185 point 5: `task start --restart --issue 41 --issue 42` where #42's preparation
+/// fails settles #41 (its old copy is gone) and restores #42 (its old copy is back), the command
+/// exits with an error, and the output says per task which of the two happened.
+#[test]
+fn restart_batch_settles_the_one_that_starts_and_restores_the_one_whose_preparation_fails() {
+    let f = fixture();
+    started_both(&f);
+    let b = playing(&f).with_failing_create_for("sbxm-task-issue-42-claude");
+    let confirm = FakeConfirm::new(true, true);
+    let gh = github_of(&[(41, &["should-fix"], ""), (42, &["should-fix"], "")]);
+
+    let (result, out) = go(
+        &f,
+        &options_for(&f, &[41, 42]),
+        Some(&Restart {
+            confirm: &confirm,
+            yes: false,
+        }),
+        &b,
+        &gh,
+    );
+
+    assert!(result.is_err(), "{out}");
+    assert!(
+        record::read(&meta_of(&f, 41).join("task.json")).is_ok(),
+        "issue 41's new task is in place"
+    );
+    assert!(
+        !sbxm::task::finish::has_leftover(&f.env.base_dir(), "issue-41"),
+        "nothing left set aside for issue 41"
+    );
+    assert!(
+        meta_of(&f, 42).join("repo.git").is_dir(),
+        "issue 42's old task is back"
+    );
+    assert!(
+        !sbxm::task::finish::has_leftover(&f.env.base_dir(), "issue-42"),
+        "nothing left set aside for issue 42"
+    );
+    assert!(
+        out.contains("issue-42") && out.contains("put back"),
+        "{out}"
+    );
+}
+
+/// A `Confirm` that drops an issue from the open list right when the user says yes, so
+/// `pipeline::choose_issues`' later call (after `check_restartable` already approved it) never
+/// picks it again: its `--restart` never even reaches `pipeline::start`.
+struct DropIssueThenYes<'a> {
+    github: &'a FakeGitHub,
+    keep: Vec<u32>,
+}
+
+impl Confirm for DropIssueThenYes<'_> {
+    fn is_interactive(&self) -> bool {
+        true
+    }
+
+    fn confirm(&self, _prompt: &str) -> anyhow::Result<bool> {
+        let kept: Vec<_> = self
+            .keep
+            .iter()
+            .map(|&n| open_issue(n, &["should-fix"], ""))
+            .collect();
+        self.github.set_open_issues(kept);
+        Ok(true)
+    }
+}
+
+/// Decision 185 point 5: a restarted issue that the selection doesn't pick again this time
+/// around never reaches `pipeline::start`, so it never gets a report; it is restored exactly as
+/// one whose own preparation failed is.
+#[test]
+fn restart_batch_restores_a_task_the_command_never_got_to_starting_again() {
+    let f = fixture();
+    started_both(&f);
+    let b = playing(&f);
+    let gh = github_of(&[(41, &["should-fix"], ""), (42, &["should-fix"], "")]);
+    let confirm = DropIssueThenYes {
+        github: &gh,
+        keep: vec![41],
+    };
+
+    let (result, out) = go(
+        &f,
+        &options_for(&f, &[41, 42]),
+        Some(&Restart {
+            confirm: &confirm,
+            yes: false,
+        }),
+        &b,
+        &gh,
+    );
+
+    assert!(result.is_err(), "{out}");
+    assert!(
+        record::read(&meta_of(&f, 41).join("task.json")).is_ok(),
+        "issue 41's new task is in place"
+    );
+    assert!(!sbxm::task::finish::has_leftover(
+        &f.env.base_dir(),
+        "issue-41"
+    ));
+    assert!(
+        meta_of(&f, 42).join("repo.git").is_dir(),
+        "issue 42's old task is back"
+    );
+    assert!(!sbxm::task::finish::has_leftover(
+        &f.env.base_dir(),
+        "issue-42"
+    ));
+}
+
 // ---- Issue #83 review M-2: a PR that can't be continued is refused before anything is deleted ----
 
 /// Issue `number`, now a finding of PR 7 (`PR: #7` on its body's first line).
