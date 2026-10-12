@@ -265,6 +265,10 @@ pub enum TaskCommand {
         /// The sandbox profile (default: sbxm-task.toml).
         #[arg(long)]
         profile: Option<String>,
+        /// Review the pull request even though its head is the commit a local issue task's
+        /// in-task review covered (posted by `task finish` as the PR's review).
+        #[arg(long, conflicts_with_all = ["issue", "spec"])]
+        force: bool,
     },
     /// Continue a task from its recorded stage, keeping its clone and commits: a failed or
     /// interrupted preparation, worker, review or fix round runs again, and the task goes on to

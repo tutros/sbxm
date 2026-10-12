@@ -902,6 +902,28 @@ pub fn pr_number(url: &str) -> Option<u32> {
     number.parse().ok()
 }
 
+/// The local issue task that opened PR `number` of `repo` with `task finish`, and the commit its
+/// in-task review covered (issue 198), read only from the task folders on this machine. A task
+/// that continued the PR doesn't count: its review covered only its own commits, not the PR. A
+/// folder whose `task.json` can't be read is skipped: at worst the PR is reviewed again.
+pub fn reviewed_pr_task(base_dir: &Path, repo: &str, number: u32) -> Option<(String, String)> {
+    let url = format!("https://github.com/{repo}/pull/{number}");
+    let entries = fs::read_dir(record::tasks_root(base_dir)).ok()?;
+    let mut found: Vec<(String, String)> = entries
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("issue-"))
+        .filter_map(|e| record::read(&e.path().join("task.json")).ok())
+        .filter(|t| t.kind == record::Kind::Issue && t.continues.is_none())
+        .filter(|t| {
+            t.pr.as_deref()
+                .is_some_and(|pr| pr.trim().eq_ignore_ascii_case(&url))
+        })
+        .filter_map(|t| Some((t.id, t.review?.commit?)))
+        .collect();
+    found.sort();
+    found.into_iter().next()
+}
+
 /// The commit task `task`'s recorded review covered, when that is `tip`, the head the PR will
 /// have (issue 198): only then does the in-task review count as the PR's review.
 fn reviewed_head(task: &Record, tip: &str) -> Option<String> {

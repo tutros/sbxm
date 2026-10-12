@@ -145,3 +145,18 @@ fn rm_purge_does_not_require_harness() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(!stderr.contains("required arguments"), "{stderr}");
 }
+
+/// Issue 198: `task review --force` only overrides the already-reviewed check of a PR.
+#[test]
+fn task_review_force_needs_pr() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let output = sbxm()
+        .env("SBXM_CONFIG_DIR", tmp.path())
+        .args(["task", "review", "--issue", "4", "--force"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("cannot be used with '--force'"), "{stderr}");
+}
