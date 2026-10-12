@@ -22,7 +22,7 @@ use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 use super::config::RunConfig;
-use super::id::date_from_days;
+use super::id::{date_from_days, days_from_civil};
 use super::kits::RunKits;
 use super::orchestrate::PairOutcome;
 use crate::eval::cosine::CosineEntry;
@@ -41,6 +41,32 @@ pub fn now() -> u64 {
 pub fn format_timestamp(secs: u64) -> String {
     let (h, m, s) = (secs % 86_400 / 3_600, secs % 3_600 / 60, secs % 60);
     format!("{}T{h:02}:{m:02}:{s:02}Z", date_from_days(secs / 86_400))
+}
+
+/// Inverse of [`format_timestamp`]; `None` if `s` isn't exactly that shape (used to read a
+/// stamp `sbxm` itself wrote, e.g. a task's `Stamp::at`, never free-form input).
+pub fn parse_timestamp(s: &str) -> Option<u64> {
+    let (date, time) = s.split_once('T')?;
+    let time = time.strip_suffix('Z')?;
+    let mut date_parts = date.split('-');
+    let year: i64 = date_parts.next()?.parse().ok()?;
+    let month: i64 = date_parts.next()?.parse().ok()?;
+    let day: i64 = date_parts.next()?.parse().ok()?;
+    if date_parts.next().is_some() {
+        return None;
+    }
+    let mut time_parts = time.split(':');
+    let hour: u64 = time_parts.next()?.parse().ok()?;
+    let minute: u64 = time_parts.next()?.parse().ok()?;
+    let second: u64 = time_parts.next()?.parse().ok()?;
+    if time_parts.next().is_some() {
+        return None;
+    }
+    let days = days_from_civil(year, month, day);
+    let secs = days
+        .checked_mul(86_400)?
+        .checked_add((hour * 3_600 + minute * 60 + second) as i64)?;
+    u64::try_from(secs).ok()
 }
 
 /// What `run.json` records about the run itself.

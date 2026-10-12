@@ -746,5 +746,18 @@ fn main() -> anyhow::Result<()> {
             print!("{output}");
             Ok(())
         }
+        Command::Status { watch, interval } => {
+            let global = config::GlobalConfig::load(&config::config_dir()?)?;
+            let env = commands::status::Env::real();
+            let watch = watch.then(|| std::time::Duration::from_secs(interval.unwrap_or(2)));
+            commands::status::run(
+                &global.base_dir,
+                &SbxBackend,
+                &task::record::SystemProbe,
+                &env,
+                watch,
+                &mut std::io::stdout(),
+            )
+        }
     }
 }

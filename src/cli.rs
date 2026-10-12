@@ -87,6 +87,21 @@ pub enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Show the Tasks dashboard: stage, status, time in stage, commits ahead, must-fix findings
+    /// left, PR link and the last run.log line. Reads only; never calls `sbx`.
+    Status {
+        /// Redraw every --interval seconds until Ctrl+C; on a terminal only (a pipe or a file
+        /// always prints once and exits).
+        #[arg(long)]
+        watch: bool,
+        /// Seconds between redraws (whole seconds, minimum 1; needs --watch; default 2).
+        #[arg(
+            long,
+            requires = "watch",
+            value_parser = clap::value_parser!(u64).range(1..)
+        )]
+        interval: Option<u64>,
+    },
 }
 
 #[derive(Debug, Subcommand)]

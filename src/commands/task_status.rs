@@ -24,16 +24,6 @@ fn yes_no(present: bool) -> &'static str {
     if present { "yes" } else { "no" }
 }
 
-/// The task branch's commits ahead of its base in the task's own `repo.git`; `None` while the
-/// repo or the branch doesn't exist yet (or can't be read).
-fn commits_ahead(base: &Path, record: &Record) -> Option<u32> {
-    let repo_git = record::task_dir(base, &record.id).join("repo.git");
-    if !repo_git.is_dir() {
-        return None;
-    }
-    record.commits_ahead(&repo_git).ok()
-}
-
 /// `which`: show just that task (an error when it doesn't exist). The second part of the result
 /// is the ids of the tasks the text names, in the order shown: the caller logs the output to each
 /// (`main`'s `task_writers`), so a task with nothing to show (no tasks yet) gets no log entry.
@@ -76,7 +66,7 @@ pub fn render(
             record.id,
             record.stage.name(),
             status,
-            commits_ahead(base, record).map_or_else(|| "-".to_owned(), |n| n.to_string()),
+            super::commits_ahead(base, record).map_or_else(|| "-".to_owned(), |n| n.to_string()),
             yes_no(dir.join("result.md").is_file()),
             yes_no(dir.join("review.md").is_file()),
             record
@@ -103,7 +93,8 @@ fn render_json(base: &Path, records: &[Record], probe: &dyn ProcessProbe) -> Res
         .map(|record| {
             let mut value = serde_json::to_value(record)?;
             value["interrupted"] = Value::Bool(record.is_interrupted(probe));
-            value["commits_ahead"] = commits_ahead(base, record).map_or(Value::Null, Value::from);
+            value["commits_ahead"] =
+                super::commits_ahead(base, record).map_or(Value::Null, Value::from);
             Ok(value)
         })
         .collect::<Result<_>>()?;
