@@ -434,18 +434,7 @@ pub fn set_aside_many(
 /// went back, or else `failed` plus, for each task that could not be put back, why and the folder
 /// it is still set aside at (decision 185 point 4). Every restore is tried either way.
 fn undo_set_asides(result: &[SetAside], failed: anyhow::Error) -> anyhow::Error {
-    let stranded: Vec<String> = result
-        .iter()
-        .filter_map(|aside| {
-            let restore_failed = aside.restore().err()?;
-            Some(format!(
-                "putting the old task {} back failed too ({restore_failed:#}); it is still set \
-                 aside at {}",
-                aside.id(),
-                aside.folder().display()
-            ))
-        })
-        .collect();
+    let stranded: Vec<String> = result.iter().filter_map(stranded).collect();
     if stranded.is_empty() {
         return failed;
     }
@@ -470,40 +459,116 @@ pub fn set_aside(
 /// Moves every folder `plan` lists into [`replaced_root`], rolling back if one of them fails
 /// partway so the old task stays entirely where it started instead of being split.
 fn set_aside_one(base_dir: &Path, plan: &RemovalPlan) -> Result<SetAside> {
-    let mut moved: Vec<PathBuf> = Vec::new();
+    // Every folder is checked before any is moved: one that is refused leaves the task untouched.
+    let mut rels: Vec<PathBuf> = Vec::new();
     for folder in &plan.folders {
         check_own_folder(base_dir, folder)?;
         let rel = folder
             .strip_prefix(base_dir)
-            .with_context(|| format!("{} isn't under {}", folder.display(), base_dir.display()))?
-            .to_path_buf();
-        let replaced = replaced_root(base_dir, &plan.id).join(&rel);
-        if let Some(parent) = replaced.parent()
-            && let Err(e) = fs::create_dir_all(parent)
-        {
-            undo_set_aside(base_dir, &plan.id, &moved);
-            return Err(e).with_context(|| format!("cannot create {}", parent.display()));
-        }
-        if let Err(e) = fs::rename(folder, &replaced) {
-            undo_set_aside(base_dir, &plan.id, &moved);
-            return Err(e).with_context(|| {
-                format!("cannot move {} to {}", folder.display(), replaced.display())
-            });
-        }
-        moved.push(rel);
+            .with_context(|| format!("{} isn't under {}", folder.display(), base_dir.display()))?;
+        rels.push(rel.to_path_buf());
     }
-    Ok(SetAside {
+    let mut aside = SetAside {
         id: plan.id.clone(),
         base_dir: base_dir.to_path_buf(),
-        moved,
-    })
+        moved: Vec::new(),
+    };
+    for rel in rels {
+        let (original, replaced) = aside.pair(&rel);
+        let moved = match replaced.parent() {
+            Some(parent) => fs::create_dir_all(parent)
+                .with_context(|| format!("cannot create {}", parent.display())),
+            None => Ok(()),
+        }
+        .and_then(|()| {
+            fs::rename(&original, &replaced).with_context(|| {
+                format!(
+                    "cannot move {} to {}",
+                    original.display(),
+                    replaced.display()
+                )
+            })
+        });
+        if let Err(e) = moved {
+            return Err(match stranded(&aside) {
+                Some(note) => anyhow::anyhow!("{e:#}, and {note}"),
+                None => e,
+            });
+        }
+        aside.moved.push(rel);
+    }
+    Ok(aside)
 }
 
-fn undo_set_aside(base_dir: &Path, id: &str, moved: &[PathBuf]) {
-    for rel in moved.iter().rev() {
-        let original = base_dir.join(rel);
-        let replaced = replaced_root(base_dir, id).join(rel);
-        let _ = fs::rename(&replaced, &original);
+/// Puts `aside` back; `None` when that worked, or else why it didn't and the folder the old task
+/// is still set aside at (decision 185 point 4), for the caller's error to carry.
+fn stranded(aside: &SetAside) -> Option<String> {
+    let restore_failed = aside.restore().err()?;
+    Some(format!(
+        "putting the old task {} back failed too ({restore_failed:#}); it is still set aside at {}",
+        aside.id(),
+        aside.folder().display()
+    ))
+}
+
+/// Screen output of a `--restart` command (decision 185): writing to it never fails, so no step
+/// between setting an old task aside and settling or restoring it can be cut short by output.
+/// The first write error is kept, later output is dropped, and [`after_output`] reports the
+/// error once the command is done.
+pub struct Unfailing<'a> {
+    inner: &'a mut dyn Write,
+    failed: Option<std::io::Error>,
+}
+
+impl<'a> Unfailing<'a> {
+    pub fn new(inner: &'a mut dyn Write) -> Self {
+        Self {
+            inner,
+            failed: None,
+        }
+    }
+
+    pub fn into_error(self) -> Option<std::io::Error> {
+        self.failed
+    }
+}
+
+impl Write for Unfailing<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.failed.is_none()
+            && let Err(e) = self.inner.write_all(buf)
+        {
+            self.failed = Some(e);
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        if self.failed.is_none()
+            && let Err(e) = self.inner.flush()
+        {
+            self.failed = Some(e);
+        }
+        Ok(())
+    }
+}
+
+/// The result of a command that wrote through [`Unfailing`]: its own result, with the first
+/// output error (`failed`, from each writer's [`Unfailing::into_error`]) added to an error or
+/// turned into one.
+pub fn after_output<const N: usize>(
+    result: Result<()>,
+    failed: [Option<std::io::Error>; N],
+) -> Result<()> {
+    let failed = failed.into_iter().flatten().next();
+    match (result, failed) {
+        (Ok(()), None) => Ok(()),
+        (Ok(()), Some(io)) => Err(anyhow::Error::new(io)
+            .context("the command ran to its end, but its output could not be written")),
+        (Err(e), None) => Err(e),
+        (Err(e), Some(io)) => Err(e.context(format!(
+            "the command's output could not be written either ({io})"
+        ))),
     }
 }
 

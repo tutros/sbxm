@@ -1043,3 +1043,78 @@ fn an_empty_or_blank_reviewer_model_flag_is_refused_before_the_worker_starts() {
         assert!(gh.calls().is_empty(), "{bad:?}");
     }
 }
+
+/// A `Write` that takes its first line and fails from then on.
+#[derive(Default)]
+struct FailsAfterFirstLine(String);
+
+impl std::io::Write for FailsAfterFirstLine {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.0.contains('\n') {
+            return Err(std::io::Error::other("screen output failed"));
+        }
+        self.0.push_str(&String::from_utf8_lossy(buf));
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// PR 219 review, M-2: screen output cannot interrupt a restart. The new task's preparation fails
+/// (its sandbox can't be made) and the screen stops taking output after the discard's first line:
+/// the old task is still put back.
+#[test]
+fn restart_puts_the_old_task_back_even_when_the_screen_stops_taking_output() {
+    let f = config();
+    let s = spec(&f);
+    let id = id_of(&s);
+    let failing = FakeBackend::with_secrets(&["anthropic", "openai"]).with_exec_output_matching(
+        "claude",
+        ExecOutput {
+            stdout: String::new(),
+            stderr: "boom".into(),
+            exit_code: Some(1),
+        },
+    );
+    let first = go(
+        &f,
+        &options(&f, s.clone()),
+        None,
+        &failing,
+        &FakeGitHub::default(),
+    );
+    assert!(first.result.is_err());
+
+    let no_sandbox = FakeBackend::with_secrets(&["anthropic", "openai"])
+        .with_failing_create_for(&format!("sbxm-task-{id}-claude"));
+    let mut out = FailsAfterFirstLine::default();
+    let result = run_spec(
+        &f.env.config_dir(),
+        &options(&f, s.clone()),
+        Some(&Restart {
+            confirm: &Yes,
+            yes: false,
+        }),
+        &no_sandbox,
+        &FakeGitHub::default(),
+        &Probe,
+        &FakeHostRunner::default(),
+        &mut out,
+        &mut Vec::new(),
+    );
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(message.contains("put back"), "{message}");
+    assert!(
+        record::task_dir(&f.env.base_dir(), &id)
+            .join("repo.git")
+            .is_dir(),
+        "the old task is back: {message}"
+    );
+    assert!(
+        !sbxm::task::finish::has_leftover(&f.env.base_dir(), &id),
+        "{message}"
+    );
+}

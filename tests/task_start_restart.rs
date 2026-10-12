@@ -1076,3 +1076,59 @@ fn a_new_issue_of_an_uncontinuable_pr_keeps_the_task_that_would_be_restarted() {
     assert!(!meta_of(&f, 42).exists(), "a task for #42 was created");
     assert!(b.removes().is_empty() && b.creates().is_empty());
 }
+
+/// A `Write` that takes `self.1` lines and fails from then on.
+struct FailsAfterLines(String, usize);
+
+impl std::io::Write for FailsAfterLines {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.0.matches('\n').count() >= self.1 {
+            return Err(std::io::Error::other("screen output failed"));
+        }
+        self.0.push_str(&String::from_utf8_lossy(buf));
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// PR 219 review, M-2: screen output cannot interrupt a restart. Both old tasks are set aside,
+/// then the screen stops taking output: the restart still runs to its end, nothing stays set
+/// aside, and the command reports the output failure once it is done.
+#[test]
+fn a_batch_restart_runs_to_its_end_when_the_screen_stops_taking_output() {
+    let f = fixture();
+    started_both(&f);
+    let confirm = FakeConfirm::new(true, true);
+    let gh = github_of(&[(41, &["should-fix"], ""), (42, &["should-fix"], "")]);
+    let mut out = FailsAfterLines(String::new(), 2);
+
+    let result = task_start::run_with(
+        &f.env.config_dir(),
+        &options_for(&f, &[41, 42]),
+        Some(&Restart {
+            confirm: &confirm,
+            yes: false,
+        }),
+        &playing(&f),
+        &gh,
+        &Probe,
+        &mut out,
+        &mut Vec::new(),
+    );
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(message.contains("screen output failed"), "{message}");
+    for number in [41, 42] {
+        assert!(
+            record::read(&meta_of(&f, number).join("task.json")).is_ok(),
+            "issue {number}'s task is in place: {message}"
+        );
+        assert!(
+            !sbxm::task::finish::has_leftover(&f.env.base_dir(), &format!("issue-{number}")),
+            "nothing left set aside for issue {number}: {message}"
+        );
+    }
+}

@@ -90,6 +90,31 @@ pub fn run(
     out: &mut dyn Write,
     warn: &mut dyn Write,
 ) -> Result<()> {
+    if restart.is_none() {
+        return run_issue(
+            config_dir, opts, None, backend, github, probe, host, out, warn,
+        );
+    }
+    // As in `task_start::run_with`: a restart's screen output can't stop it on the way.
+    let (mut out, mut warn) = (finish::Unfailing::new(out), finish::Unfailing::new(warn));
+    let result = run_issue(
+        config_dir, opts, restart, backend, github, probe, host, &mut out, &mut warn,
+    );
+    finish::after_output(result, [out.into_error(), warn.into_error()])
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_issue(
+    config_dir: &Path,
+    opts: &Options,
+    restart: Option<&Restart>,
+    backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    host: &dyn HostRunner,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<()> {
     // The review's flags are checked now, not after the worker has spent its time.
     if let Some(harness) = opts.reviewer_harness {
         headless_harness("--reviewer-harness", harness.as_str(), "tasks")
@@ -248,6 +273,31 @@ fn discard_existing_spec(
 /// [`run_spec`], optionally discarding an existing spec task first (`--restart`, as for `--issue`).
 #[allow(clippy::too_many_arguments)]
 pub fn run_spec(
+    config_dir: &Path,
+    opts: &SpecOptions,
+    restart: Option<&Restart>,
+    backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    host: &dyn HostRunner,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<()> {
+    if restart.is_none() {
+        return run_spec_task(
+            config_dir, opts, None, backend, github, probe, host, out, warn,
+        );
+    }
+    // As in `task_start::run_with`: a restart's screen output can't stop it on the way.
+    let (mut out, mut warn) = (finish::Unfailing::new(out), finish::Unfailing::new(warn));
+    let result = run_spec_task(
+        config_dir, opts, restart, backend, github, probe, host, &mut out, &mut warn,
+    );
+    finish::after_output(result, [out.into_error(), warn.into_error()])
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_spec_task(
     config_dir: &Path,
     opts: &SpecOptions,
     restart: Option<&Restart>,

@@ -285,6 +285,29 @@ pub fn run_with(
     out: &mut dyn Write,
     warn: &mut dyn Write,
 ) -> Result<()> {
+    if restart.is_none() {
+        return start(config_dir, opts, None, backend, github, probe, out, warn);
+    }
+    // A restart sets old tasks aside and must get to settling or restoring each one: its screen
+    // output can't stop it on the way (decision 185).
+    let (mut out, mut warn) = (finish::Unfailing::new(out), finish::Unfailing::new(warn));
+    let result = start(
+        config_dir, opts, restart, backend, github, probe, &mut out, &mut warn,
+    );
+    finish::after_output(result, [out.into_error(), warn.into_error()])
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start(
+    config_dir: &std::path::Path,
+    opts: &Options,
+    restart: Option<&Restart>,
+    backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<()> {
     if restart.is_some() && opts.issues.is_empty() {
         bail!("--restart needs the issues to restart: --issue <n> (repeatable)");
     }

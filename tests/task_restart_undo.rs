@@ -414,3 +414,35 @@ fn a_failed_set_aside_reports_when_rolling_back_the_first_task_also_fails() {
             .exists()
     );
 }
+
+/// PR 219 review, M-1: a later folder that fails the safety check (a link where a task folder
+/// should be) used to stop the set-aside after an earlier folder had already moved. Every folder
+/// is checked before any is moved, so the old task stays whole where it was.
+#[test]
+fn a_later_linked_folder_fails_the_set_aside_with_every_folder_still_in_place() {
+    let f = fixture();
+    let backend = FakeBackend::with_secrets(&["anthropic", "openai"]);
+    resumable_task(&f, &backend);
+    let base_dir = f.env.base_dir();
+    let elsewhere = f.env.tmp.path().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    common::dir_link(&base_dir.join("tasks").join("issue-41-review"), &elsewhere);
+
+    let result = finish::set_aside(
+        &base_dir,
+        "issue-41",
+        true,
+        &backend,
+        &Probe,
+        &Never,
+        &mut Vec::new(),
+    );
+
+    assert!(result.is_err(), "a linked task folder must be refused");
+    assert!(
+        base_dir.join("tasks").join("issue-41").is_dir(),
+        "the workspace must not have moved"
+    );
+    assert!(meta(&f).join("task.json").exists());
+    assert!(!finish::has_leftover(&base_dir, "issue-41"));
+}
