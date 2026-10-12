@@ -506,6 +506,48 @@ fn restart_discards_the_old_task_then_runs() {
     assert_eq!(stage(&f), (Stage::Ready, Status::Ok));
 }
 
+/// Decision 185(b), issue #207 review M-1: `task run --restart --issue` settles the old task's
+/// set-aside copy the moment the new task's preparation completes — before its worker runs — not
+/// only once the whole `start` phase (worker, then its gates) has also finished. A gate holds the
+/// worker's one `exec` call, so the assertions run while the command is still blocked there.
+#[test]
+fn restart_settles_the_old_task_before_its_worker_runs() {
+    let f = config();
+    let first = go(&f, &options(&f), None, &backend(&f, &[CLEAN]), &github());
+    first.result.unwrap();
+    let (gated, gate) = backend(&f, &[CLEAN]).with_exec_gate();
+
+    std::thread::scope(|scope| {
+        let handle = scope.spawn(|| {
+            go(
+                &f,
+                &options(&f),
+                Some(&Restart {
+                    confirm: &Yes,
+                    yes: false,
+                }),
+                &gated,
+                &github(),
+            )
+        });
+
+        gate.wait_for_blocked(1);
+        assert!(
+            record::read(&record::task_dir(&f.env.base_dir(), "issue-41").join("task.json"))
+                .is_ok(),
+            "the new task's preparation has completed"
+        );
+        assert!(
+            !sbxm::task::finish::has_leftover(&f.env.base_dir(), "issue-41"),
+            "settled before the worker ran, not left set aside"
+        );
+        gate.open();
+
+        let out = handle.join().unwrap();
+        out.result.unwrap_or_else(|e| panic!("{e:#}: {}", out.out));
+    });
+}
+
 /// A `Confirm` that removes the worker's secret from the backend right when the user says yes,
 /// modeling it vanishing while the confirmation prompt is pending (decision 185, issue #207).
 struct SecretVanishesThenYes<'a> {

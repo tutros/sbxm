@@ -315,7 +315,6 @@ pub fn run_spec(
     // review finding M-2).
     pipeline::check_worker_inputs(config_dir, backend, &resolved.config)?;
 
-    let base_dir = GlobalConfig::load(config_dir)?.base_dir;
     let mut aside: Option<finish::SetAside> = None;
     if let Some(restart) = restart {
         aside = discard_existing_spec(
@@ -364,6 +363,22 @@ pub fn run_spec(
         seen: Vec::new(),
         line: Vec::new(),
     };
+    // Settled the moment the new task's preparation succeeds (decision 185(b)), before its worker
+    // runs: `aside_cell` still holds it only if preparation itself fails, which is the only case
+    // `run_spec_from` can return without ever calling `on_prepared`.
+    let aside_cell = std::cell::RefCell::new(aside);
+    let settle_warning = std::cell::RefCell::new(None);
+    let on_prepared = |_id: &str| {
+        let Some(aside) = aside_cell.borrow_mut().take() else {
+            return;
+        };
+        if let Err(e) = aside.settle() {
+            *settle_warning.borrow_mut() = Some(format!(
+                "the old task's set-aside copy at {} could not be deleted: {e:#}",
+                aside.folder().display()
+            ));
+        }
+    };
     let mut started = Vec::new();
     let result = task_start::run_spec_from(
         config_dir,
@@ -374,31 +389,22 @@ pub fn run_spec(
         probe,
         &mut started,
         &mut warn,
+        &on_prepared,
     );
     out.write_all(without_next(&started).as_bytes())?;
 
-    // The old task, if any was set aside, is settled or restored now, regardless of what the
-    // run itself did next: its copy is gone for good once the new task's preparation is
-    // complete (decision 185 point 3), even when the worker or its gates then fail.
-    if let Some(aside) = aside {
-        let prepared = record::task_dir(&base_dir, &spec_id)
-            .join("task.json")
-            .is_file();
-        if prepared {
-            if let Err(e) = aside.settle() {
-                writeln!(
-                    warn,
-                    "warning: the old task's set-aside copy at {} could not be deleted: {e:#}",
-                    aside.folder().display()
-                )?;
-            }
-        } else {
-            let start_failed = match &result {
-                Err(e) => anyhow!("{e:#}"),
-                Ok(()) => unreachable!("the start cannot succeed without preparing its task"),
-            };
-            return Err(finish::restore_after_failed_start(&aside, start_failed));
-        }
+    if let Some(warning) = settle_warning.into_inner() {
+        writeln!(warn, "warning: {warning}")?;
+    }
+    // Still holding its `SetAside` means preparation itself failed (the only way `run_spec_from`
+    // can return without `on_prepared` ever running), so the old task goes back; a later worker
+    // or gate failure never reaches here, since `on_prepared` already settled it for good.
+    if let Some(aside) = aside_cell.into_inner() {
+        let start_failed = match &result {
+            Err(e) => anyhow!("{e:#}"),
+            Ok(()) => unreachable!("preparation failed, so run_spec_from cannot have succeeded"),
+        };
+        return Err(finish::restore_after_failed_start(&aside, start_failed));
     }
 
     // Gates that failed after the worker go on to the review, which reruns them and gives a

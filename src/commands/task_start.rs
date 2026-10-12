@@ -349,6 +349,27 @@ pub fn run_with(
     }
     let base_dir = GlobalConfig::load(config_dir)?.base_dir;
 
+    // Settled the moment each issue's preparation succeeds (decision 185(b)), before its worker
+    // runs: called from that issue's own thread inside `pipeline::start_with`, so a later failure
+    // of the worker or its gates never finds anything left of the old task to put back. Shared
+    // across threads behind a `Mutex`, since only the thread whose issue just finished preparing
+    // removes that one entry; `settle_warnings` carries what a failed deletion says, printed once
+    // every thread has finished.
+    let asides = std::sync::Mutex::new(aside_by_id);
+    let settle_warnings: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let on_prepared = |number: u32| {
+        let id = format!("issue-{number}");
+        let Some(aside) = asides.lock().unwrap().remove(&id) else {
+            return;
+        };
+        if let Err(e) = aside.settle() {
+            settle_warnings.lock().unwrap().push(format!(
+                "{id}'s old copy at {} could not be deleted: {e:#}",
+                aside.folder().display()
+            ));
+        }
+    };
+
     let run_outcome: Result<Vec<pipeline::TaskReport>> = (|| {
         let selection = if opts.issues.is_empty() {
             pipeline::choose_issues(&ctx, None, opts.workers.unwrap_or(1))?
@@ -372,13 +393,18 @@ pub fn run_with(
             .map(|n| format!("issue-{n}"))
             .collect();
         writeln!(out, "Starting {} ...", names.join(", "))?;
-        Ok(pipeline::start(&ctx, &selection.picks))
+        Ok(pipeline::start_with(&ctx, &selection.picks, &on_prepared))
     })();
 
-    // Every restarted task is settled or restored now that it is known whether the task that
-    // was to replace it finished preparing, regardless of where the run stopped (decision 185
-    // point 3): a selection failure never even reaches `pipeline::start`, so none of them got a
-    // report at all; here that is treated the same as one that did and failed.
+    for warning in settle_warnings.into_inner().unwrap() {
+        writeln!(warn, "warning: {warning}")?;
+    }
+    let mut aside_by_id = asides.into_inner().unwrap();
+
+    // Every restarted task that never got settled above (its preparation failed, or the run never
+    // reached it) is put back now, regardless of where the run stopped (decision 185 point 3): a
+    // selection failure never even reaches `pipeline::start_with`, so none of them got a report at
+    // all; here that is treated the same as one that did and failed.
     let reports = match run_outcome {
         Ok(reports) => reports,
         Err(e) => {
@@ -403,20 +429,12 @@ pub fn run_with(
         for warning in &warnings {
             writeln!(warn, "warning: {warning}")?;
         }
+        // A task whose preparation completed was already settled by `on_prepared`, whether or
+        // not its worker then failed, so this only ever finds something for a task whose
+        // preparation itself failed.
         let aside = aside_by_id.remove(&id);
         match result {
             Ok(worked) => {
-                // The task's preparation completed (it has a report at all), so a restarted
-                // task's old copy is gone for good now, whether or not the worker then failed.
-                if let Some(aside) = aside
-                    && let Err(e) = aside.settle()
-                {
-                    writeln!(
-                        warn,
-                        "warning: {id}'s old copy at {} could not be deleted: {e:#}",
-                        aside.folder().display()
-                    )?;
-                }
                 let (label, bad) = match &worked.status {
                     RunStatus::Completed => ("completed".to_owned(), false),
                     RunStatus::TimedOut => ("timed out".to_owned(), false),
@@ -663,12 +681,25 @@ pub fn run_spec(
     warn: &mut dyn Write,
 ) -> Result<()> {
     let start = resolve_spec_start(opts)?;
-    run_spec_from(config_dir, opts, start, backend, github, probe, out, warn)
+    run_spec_from(
+        config_dir,
+        opts,
+        start,
+        backend,
+        github,
+        probe,
+        out,
+        warn,
+        &|_| {},
+    )
 }
 
 /// [`run_spec`], taking an already-resolved [`SpecStart`] instead of resolving one itself: a
 /// caller that discards an existing task (`--restart`) first passes the snapshot it resolved
-/// after the discard, so the task it starts and the id it reviews are the same one.
+/// after the discard, so the task it starts and the id it reviews are the same one. `on_prepared`
+/// is called with the task's id the moment its preparation succeeds, before its worker runs, so a
+/// caller settling that task's set-aside old copy (decision 185(b)) does it right then, not after
+/// the worker or its gates, which a later failure of either must not undo.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_spec_from(
     config_dir: &std::path::Path,
@@ -679,6 +710,7 @@ pub(crate) fn run_spec_from(
     probe: &dyn ProcessProbe,
     out: &mut dyn Write,
     warn: &mut dyn Write,
+    on_prepared: &dyn Fn(&str),
 ) -> Result<()> {
     let SpecStart {
         config,
@@ -713,6 +745,7 @@ pub(crate) fn run_spec_from(
         writeln!(warn, "warning: {warning}")?;
     }
     let id = prepared.record.id.clone();
+    on_prepared(&id);
 
     let worked = pipeline::run_worker(&ctx, &mut prepared)?;
     let (label, bad) = match &worked.status {

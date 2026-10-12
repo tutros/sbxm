@@ -237,6 +237,66 @@ impl Confirm for Yes {
     }
 }
 
+/// Decision 185(b), issue #207 review M-1: `task run --restart --spec` settles the old task's
+/// set-aside copy the moment the new task's preparation completes — before its worker runs — not
+/// only once the whole `start` phase (worker, then its gates) has also finished. A gate holds the
+/// worker's one `exec` call, so the assertions run while the command is still blocked there.
+#[test]
+fn restart_settles_the_old_task_before_its_worker_runs() {
+    let f = config();
+    let s = spec(&f);
+    let id = id_of(&s);
+    // The first run's worker fails before committing anything, so its `repo.git` has no commits
+    // beyond the base: nothing for decision 178's protection to refuse (see
+    // `restart_discards_the_old_task_then_runs`), and `--restart` can discard it right away.
+    let failing = FakeBackend::with_secrets(&["anthropic", "openai"]).with_exec_output_matching(
+        "claude",
+        ExecOutput {
+            stdout: String::new(),
+            stderr: "boom".into(),
+            exit_code: Some(1),
+        },
+    );
+    let first = go(
+        &f,
+        &options(&f, s.clone()),
+        None,
+        &failing,
+        &FakeGitHub::default(),
+    );
+    assert!(first.result.is_err());
+    let (gated, gate) = backend_for(&f, &id, &[CLEAN_REVIEW]).with_exec_gate();
+
+    std::thread::scope(|scope| {
+        let handle = scope.spawn(|| {
+            go(
+                &f,
+                &options(&f, s.clone()),
+                Some(&Restart {
+                    confirm: &Yes,
+                    yes: false,
+                }),
+                &gated,
+                &FakeGitHub::default(),
+            )
+        });
+
+        gate.wait_for_blocked(1);
+        assert!(
+            record::read(&record::task_dir(&f.env.base_dir(), &id).join("task.json")).is_ok(),
+            "the new task's preparation has completed"
+        );
+        assert!(
+            !sbxm::task::finish::has_leftover(&f.env.base_dir(), &id),
+            "settled before the worker ran, not left set aside"
+        );
+        gate.open();
+
+        let out = handle.join().unwrap();
+        out.result.unwrap_or_else(|e| panic!("{e:#}: {}", out.out));
+    });
+}
+
 /// The first run's worker fails before committing anything, so its `repo.git` has no commits
 /// beyond the base: nothing for decision 178's protection to refuse (see the next test for the
 /// case where it does), and `--restart` can discard it and run again right away.

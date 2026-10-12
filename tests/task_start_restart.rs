@@ -307,6 +307,91 @@ fn restart_settles_the_old_task_even_when_the_new_worker_then_fails() {
     );
 }
 
+/// Issue #207 review M-1: when the worker's `exec` call itself fails (not the agent reporting
+/// failure, but `run_worker` returning `Err`), the task's preparation still completed, so the old
+/// copy must already be settled, the same as a worker that runs and then fails. Before the fix,
+/// this `Err` was read as "preparation never completed" and the already-populated new task was
+/// mistaken for the old one to restore, which then failed because the new task's folders were
+/// already there.
+#[test]
+fn restart_settles_the_old_task_and_does_not_try_to_restore_it_when_the_worker_cannot_run_at_all() {
+    let f = fixture();
+    started(&f);
+    let confirm = FakeConfirm::new(true, true);
+    let cannot_exec = backend().with_failing_exec_matching("claude");
+
+    let (result, out) = go(
+        &f,
+        &options(&f),
+        Some(&Restart {
+            confirm: &confirm,
+            yes: false,
+        }),
+        &cannot_exec,
+        &github(),
+    );
+
+    assert!(result.is_err(), "{out}");
+    assert!(
+        record::read(&meta(&f).join("task.json")).is_ok(),
+        "the new task exists: its preparation completed"
+    );
+    assert!(
+        !sbxm::task::finish::has_leftover(&f.env.base_dir(), "issue-41"),
+        "settled, not left set aside, because preparation completed"
+    );
+    assert!(
+        out.contains("issue-41: failed:"),
+        "the worker error is reported plainly: {out}"
+    );
+    assert!(
+        !out.contains("put back"),
+        "preparation completed, so nothing was restored: {out}"
+    );
+}
+
+/// Decision 185(b), issue #207 review M-1: the old task's set-aside copy is gone for good the
+/// moment the new task's preparation completes (its folder, kits and sandbox exist and
+/// `task.json` is written) — before its worker runs at all, not only once the worker (and
+/// possibly its gates) have also finished. A gate holds the worker's one `exec` call, so the
+/// assertions run while the command is still blocked there.
+#[test]
+fn restart_settles_the_old_task_before_its_worker_runs() {
+    let f = fixture();
+    started(&f);
+    let (gated, gate) = playing(&f).with_exec_gate();
+
+    std::thread::scope(|scope| {
+        let handle = scope.spawn(|| {
+            let confirm = FakeConfirm::new(true, true);
+            go(
+                &f,
+                &options(&f),
+                Some(&Restart {
+                    confirm: &confirm,
+                    yes: false,
+                }),
+                &gated,
+                &github(),
+            )
+        });
+
+        gate.wait_for_blocked(1);
+        assert!(
+            record::read(&meta(&f).join("task.json")).is_ok(),
+            "the new task's preparation has completed"
+        );
+        assert!(
+            !sbxm::task::finish::has_leftover(&f.env.base_dir(), "issue-41"),
+            "settled before the worker ran, not left set aside"
+        );
+        gate.open();
+
+        let (result, out) = handle.join().unwrap();
+        result.unwrap_or_else(|e| panic!("{e:#}: {out}"));
+    });
+}
+
 /// Decision 185 point 4: a `--restart` of a task with a leftover copy under `tasks-replaced/` is
 /// refused before the prompt, naming the folder and the two ways out; nothing is deleted or
 /// created.
