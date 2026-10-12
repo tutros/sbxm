@@ -1,6 +1,7 @@
 //! `sbxm task start (--issue N... | --workers N)` (spec §4, §5.1): resolves the repo, the base
 //! and the config (flags override the file), chooses the issues, and starts a task for each.
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -81,21 +82,34 @@ pub(crate) fn check_repo(repo: &str) -> Result<()> {
     }
 }
 
-/// Discards the existing task of each issue (`--restart`). Every one is checked before the first
-/// is deleted: the issue must still be open (else the restart would only destroy the work), the
-/// PR it names (if any) must still be continuable, and the task must not be running.
+/// Discards the existing task of each issue (`--restart`), moving each aside instead of deleting
+/// it (decision 185): the caller decides, once it knows which of them started again, whether to
+/// settle or restore each one. Every one is checked before the first is set aside: no leftover
+/// from an earlier, unsettled `--restart` ([`finish::check_no_leftover`]), the issue must still be
+/// open (else the restart would only destroy the work), the PR it names (if any) must still be
+/// continuable, and the task must not be running. `base_dir` is resolved by the caller, once,
+/// before anything is set aside, and reused after: reloading it again afterward could fail
+/// (config.toml changing or vanishing while confirmation was pending) outside the guarded restore
+/// path that only covers what happens from here on (issue #207 review M-1).
 fn discard_existing(
     ctx: &Ctx,
+    base_dir: &std::path::Path,
     issues: &[u32],
     restart: &Restart,
     out: &mut dyn Write,
-) -> Result<()> {
+) -> Result<Vec<finish::SetAside>> {
     let (repo, github, backend, probe) = (ctx.repo, ctx.github, ctx.backend, ctx.probe);
-    let base_dir = GlobalConfig::load(ctx.config_dir)?.base_dir;
+    // Checked for every requested issue, not only those with a task right now: an earlier
+    // `--restart` that was interrupted after setting the old task aside but before settling it
+    // may have left no live task folder at all, which must not look like a clean slate to start
+    // a brand new task over (decision 185 point 4).
+    for &number in issues {
+        finish::check_no_leftover(base_dir, &format!("issue-{number}"))?;
+    }
     let mut ids: Vec<(u32, String)> = Vec::new();
     for &number in issues {
         let id = format!("issue-{number}");
-        if finish::exists(&base_dir, &id) && !ids.iter().any(|(_, known)| *known == id) {
+        if finish::exists(base_dir, &id) && !ids.iter().any(|(_, known)| *known == id) {
             ids.push((number, id));
         }
     }
@@ -107,7 +121,7 @@ fn discard_existing(
                 issue.state.to_lowercase()
             );
         }
-        finish::plan_removal(&base_dir, id, probe)?;
+        finish::plan_removal(base_dir, id, probe)?;
         // An issue of a PR that is closed, merged or a fork's would fail to start again.
         pipeline::continued_pr(ctx, &issue)?;
     }
@@ -129,10 +143,10 @@ fn discard_existing(
     pipeline::check_restartable(ctx, &restarting)?;
     let id_list: Vec<String> = ids.into_iter().map(|(_, id)| id).collect();
     if id_list.is_empty() {
-        return Ok(());
+        return Ok(Vec::new());
     }
-    finish::discard_many(
-        &base_dir,
+    finish::set_aside_many(
+        base_dir,
         &id_list,
         restart.yes,
         backend,
@@ -271,6 +285,29 @@ pub fn run_with(
     out: &mut dyn Write,
     warn: &mut dyn Write,
 ) -> Result<()> {
+    if restart.is_none() {
+        return start(config_dir, opts, None, backend, github, probe, out, warn);
+    }
+    // A restart sets old tasks aside and must get to settling or restoring each one: its screen
+    // output can't stop it on the way (decision 185).
+    let (mut out, mut warn) = (finish::Unfailing::new(out), finish::Unfailing::new(warn));
+    let result = start(
+        config_dir, opts, restart, backend, github, probe, &mut out, &mut warn,
+    );
+    finish::after_output(result, [out.into_error(), warn.into_error()])
+}
+
+#[allow(clippy::too_many_arguments)]
+fn start(
+    config_dir: &std::path::Path,
+    opts: &Options,
+    restart: Option<&Restart>,
+    backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<()> {
     if restart.is_some() && opts.issues.is_empty() {
         bail!("--restart needs the issues to restart: --issue <n> (repeatable)");
     }
@@ -330,41 +367,102 @@ pub fn run_with(
         probe,
         host: &ShellHostRunner,
     };
-    if let Some(restart) = restart {
-        discard_existing(&ctx, &opts.issues, restart, out)?;
-    }
-    let selection = if opts.issues.is_empty() {
-        pipeline::choose_issues(&ctx, None, opts.workers.unwrap_or(1))?
-    } else {
-        pipeline::choose_issues(&ctx, Some(&opts.issues), opts.issues.len())?
-    };
-    for warning in &selection.warnings {
-        writeln!(warn, "warning: {warning}")?;
-    }
-    for number in &selection.not_open {
-        writeln!(warn, "warning: #{number} isn't an open issue; skipped")?;
-    }
-    for (number, why) in &selection.skips {
-        writeln!(out, "#{number}: skipped, {why}")?;
-    }
-    let selection = pipeline::require_picks(selection)?;
-
-    let names: Vec<String> = selection
-        .picks
-        .iter()
-        .map(|n| format!("issue-{n}"))
-        .collect();
-    writeln!(out, "Starting {} ...", names.join(", "))?;
-    let reports = pipeline::start(&ctx, &selection.picks);
+    // Resolved once, before any task is set aside, and reused for the rest of this function: a
+    // second load after the discard could itself fail (issue #207 review M-1) outside the path
+    // below that restores a set-aside task on any later failure.
     let base_dir = GlobalConfig::load(config_dir)?.base_dir;
+    let mut aside_by_id: HashMap<String, finish::SetAside> = HashMap::new();
+    if let Some(restart) = restart {
+        for aside in discard_existing(&ctx, &base_dir, &opts.issues, restart, out)? {
+            aside_by_id.insert(aside.id().to_owned(), aside);
+        }
+    }
 
-    let (mut failed, mut gates_failed) = (0, 0);
-    for report in &reports {
-        let id = format!("issue-{}", report.number);
-        for warning in &report.warnings {
+    // Settled the moment each issue's preparation succeeds (decision 185(b)), before its worker
+    // runs: called from that issue's own thread inside `pipeline::start_with`, so a later failure
+    // of the worker or its gates never finds anything left of the old task to put back. Shared
+    // across threads behind a `Mutex`, since only the thread whose issue just finished preparing
+    // removes that one entry; `settle_warnings` carries what a failed deletion says, printed once
+    // every thread has finished.
+    let asides = std::sync::Mutex::new(aside_by_id);
+    let settle_warnings: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+    let on_prepared = |number: u32| {
+        let id = format!("issue-{number}");
+        let Some(aside) = asides.lock().unwrap().remove(&id) else {
+            return;
+        };
+        if let Err(e) = aside.settle() {
+            settle_warnings.lock().unwrap().push(format!(
+                "{id}'s old copy at {} could not be deleted: {e:#}",
+                aside.folder().display()
+            ));
+        }
+    };
+
+    let run_outcome: Result<Vec<pipeline::TaskReport>> = (|| {
+        let selection = if opts.issues.is_empty() {
+            pipeline::choose_issues(&ctx, None, opts.workers.unwrap_or(1))?
+        } else {
+            pipeline::choose_issues(&ctx, Some(&opts.issues), opts.issues.len())?
+        };
+        for warning in &selection.warnings {
             writeln!(warn, "warning: {warning}")?;
         }
-        match &report.result {
+        for number in &selection.not_open {
+            writeln!(warn, "warning: #{number} isn't an open issue; skipped")?;
+        }
+        for (number, why) in &selection.skips {
+            writeln!(out, "#{number}: skipped, {why}")?;
+        }
+        let selection = pipeline::require_picks(selection)?;
+
+        let names: Vec<String> = selection
+            .picks
+            .iter()
+            .map(|n| format!("issue-{n}"))
+            .collect();
+        writeln!(out, "Starting {} ...", names.join(", "))?;
+        Ok(pipeline::start_with(&ctx, &selection.picks, &on_prepared))
+    })();
+
+    for warning in settle_warnings.into_inner().unwrap() {
+        writeln!(warn, "warning: {warning}")?;
+    }
+    let mut aside_by_id = asides.into_inner().unwrap();
+
+    // Every restarted task that never got settled above (its preparation failed, or the run never
+    // reached it) is put back now, regardless of where the run stopped (decision 185 point 3): a
+    // selection failure never even reaches `pipeline::start_with`, so none of them got a report at
+    // all; here that is treated the same as one that did and failed.
+    let reports = match run_outcome {
+        Ok(reports) => reports,
+        Err(e) => {
+            for (id, aside) in aside_by_id {
+                let msg = finish::restore_after_failed_start(&aside, anyhow!("{e:#}"));
+                writeln!(out, "{id}: {msg:#}")?;
+            }
+            return Err(e);
+        }
+    };
+    let total = reports.len();
+
+    let (mut failed, mut gates_failed, mut restored) = (0, 0, 0);
+    for report in reports {
+        let pipeline::TaskReport {
+            number,
+            warnings,
+            result,
+            gates,
+        } = report;
+        let id = format!("issue-{number}");
+        for warning in &warnings {
+            writeln!(warn, "warning: {warning}")?;
+        }
+        // A task whose preparation completed was already settled by `on_prepared`, whether or
+        // not its worker then failed, so this only ever finds something for a task whose
+        // preparation itself failed.
+        let aside = aside_by_id.remove(&id);
+        match result {
             Ok(worked) => {
                 let (label, bad) = match &worked.status {
                     RunStatus::Completed => ("completed".to_owned(), false),
@@ -384,10 +482,10 @@ pub fn run_with(
                 // Set when the failed gate could not run at all (issue 186): the review would have
                 // nothing to react to, so `task run` must not go on to it.
                 let mut gate_could_not_run = false;
-                if only_gates_failed(bad, report.gates.as_ref()) {
+                if only_gates_failed(bad, gates.as_ref()) {
                     gates_failed += 1;
                 }
-                match &report.gates {
+                match &gates {
                     Some(Ok(gated)) if gated.passed => {
                         let count = |tier: &str| {
                             gated
@@ -447,31 +545,54 @@ pub fn run_with(
                 }
                 if bad {
                     failed += 1;
-                    writeln!(out, "  see: sbxm task status --issue {}", report.number)?;
+                    writeln!(out, "  see: sbxm task status --issue {number}")?;
                 } else if !gates_ok {
                     failed += 1;
                     // The review reruns the gates and gives a failure to a fix round (decision
                     // 180) — but only for a gate that ran and failed; one that could not run at
                     // all would give the review nothing to react to (issue 186).
                     if !gate_could_not_run {
-                        writeln!(out, "  next: sbxm task review --issue {}", report.number)?;
+                        writeln!(out, "  next: sbxm task review --issue {number}")?;
                     }
                 } else {
-                    writeln!(out, "  next: sbxm task review --issue {}", report.number)?;
+                    writeln!(out, "  next: sbxm task review --issue {number}")?;
                 }
             }
             Err(e) => {
                 failed += 1;
-                writeln!(out, "{id}: failed: {e:#}")?;
+                match aside {
+                    // The task's preparation never completed, so its old copy goes back.
+                    Some(aside) => {
+                        restored += 1;
+                        let msg = finish::restore_after_failed_start(&aside, e);
+                        writeln!(out, "{id}: {msg:#}")?;
+                    }
+                    None => writeln!(out, "{id}: failed: {e:#}")?,
+                }
             }
         }
     }
+    // A restarted issue the selection didn't even pick this time around never got a report, so
+    // the loop above never saw it; it is exactly as unprepared as one that did and failed.
+    for (id, aside) in aside_by_id {
+        restored += 1;
+        let msg = finish::restore_after_failed_start(
+            &aside,
+            anyhow!("issue was not picked to start again"),
+        );
+        writeln!(out, "{id}: {msg:#}")?;
+    }
     if failed > 0 {
-        let message = format!("{failed} of {} task(s) failed; see above", reports.len());
-        if failed == gates_failed {
+        let message = format!("{failed} of {total} task(s) failed; see above");
+        if failed == gates_failed && restored == 0 {
             return Err(GatesFailed(message).into());
         }
         bail!(message);
+    }
+    if restored > 0 {
+        bail!(
+            "{restored} restarted task(s) could not be started again and were put back; see above"
+        );
     }
     Ok(())
 }
@@ -589,12 +710,25 @@ pub fn run_spec(
     warn: &mut dyn Write,
 ) -> Result<()> {
     let start = resolve_spec_start(opts)?;
-    run_spec_from(config_dir, opts, start, backend, github, probe, out, warn)
+    run_spec_from(
+        config_dir,
+        opts,
+        start,
+        backend,
+        github,
+        probe,
+        out,
+        warn,
+        &|_| {},
+    )
 }
 
 /// [`run_spec`], taking an already-resolved [`SpecStart`] instead of resolving one itself: a
 /// caller that discards an existing task (`--restart`) first passes the snapshot it resolved
-/// after the discard, so the task it starts and the id it reviews are the same one.
+/// after the discard, so the task it starts and the id it reviews are the same one. `on_prepared`
+/// is called with the task's id the moment its preparation succeeds, before its worker runs, so a
+/// caller settling that task's set-aside old copy (decision 185(b)) does it right then, not after
+/// the worker or its gates, which a later failure of either must not undo.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn run_spec_from(
     config_dir: &std::path::Path,
@@ -605,6 +739,7 @@ pub(crate) fn run_spec_from(
     probe: &dyn ProcessProbe,
     out: &mut dyn Write,
     warn: &mut dyn Write,
+    on_prepared: &dyn Fn(&str),
 ) -> Result<()> {
     let SpecStart {
         config,
@@ -635,10 +770,11 @@ pub(crate) fn run_spec_from(
     writeln!(out, "Starting a task from {} ...", opts.spec.display())?;
     let mut prepared =
         pipeline::prepare_spec_resolved(&ctx, &opts.spec, &source_text, &spec_id, &title)?;
+    let id = prepared.record.id.clone();
+    on_prepared(&id);
     for warning in &prepared.warnings {
         writeln!(warn, "warning: {warning}")?;
     }
-    let id = prepared.record.id.clone();
 
     let worked = pipeline::run_worker(&ctx, &mut prepared)?;
     let (label, bad) = match &worked.status {

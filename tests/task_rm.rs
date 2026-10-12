@@ -78,6 +78,40 @@ fn leftover_review_and_gate_checkouts_are_listed_too() {
     assert!(listing.contains("issue-41-gates"), "{listing}");
 }
 
+/// Decision 185 (issue #207): `task rm` never lists or touches a leftover set-aside copy of the
+/// same id under `tasks-replaced/` (the folders it plans to remove are only ever under `tasks/`
+/// and `.sbxm/tasks/`).
+#[test]
+fn a_leftover_set_aside_copy_is_not_listed_or_touched() {
+    let f = fixture();
+    let (b, prepared) = worked(&f);
+    let leftover = f
+        .env
+        .base_dir()
+        .join(".sbxm")
+        .join("tasks-replaced")
+        .join("issue-41");
+    fs::create_dir_all(&leftover).unwrap();
+    fs::write(leftover.join("marker.txt"), b"old copy").unwrap();
+
+    let plan = plan_removal(&f.env.base_dir(), "issue-41", &Probe).unwrap();
+    assert!(
+        !plan.listing().contains("tasks-replaced"),
+        "{}",
+        plan.listing()
+    );
+
+    let report = remove(&plan, &b);
+
+    assert!(report.is_clean(), "{report:?}");
+    assert_eq!(
+        fs::read(leftover.join("marker.txt")).unwrap(),
+        b"old copy",
+        "the leftover was not touched"
+    );
+    let _ = prepared;
+}
+
 #[test]
 fn an_id_that_is_not_a_task_id_is_refused_before_any_path_is_built() {
     let f = fixture();

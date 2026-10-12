@@ -506,6 +506,136 @@ fn restart_discards_the_old_task_then_runs() {
     assert_eq!(stage(&f), (Stage::Ready, Status::Ok));
 }
 
+/// Decision 185(b), issue #207 review M-1: `task run --restart --issue` settles the old task's
+/// set-aside copy the moment the new task's preparation completes — before its worker runs — not
+/// only once the whole `start` phase (worker, then its gates) has also finished. A gate holds the
+/// worker's one `exec` call, so the assertions run while the command is still blocked there.
+#[test]
+fn restart_settles_the_old_task_before_its_worker_runs() {
+    let f = config();
+    let first = go(&f, &options(&f), None, &backend(&f, &[CLEAN]), &github());
+    first.result.unwrap();
+    let (gated, gate) = backend(&f, &[CLEAN]).with_exec_gate();
+
+    std::thread::scope(|scope| {
+        let handle = scope.spawn(|| {
+            go(
+                &f,
+                &options(&f),
+                Some(&Restart {
+                    confirm: &Yes,
+                    yes: false,
+                }),
+                &gated,
+                &github(),
+            )
+        });
+
+        gate.wait_for_blocked(1);
+        assert!(
+            record::read(&record::task_dir(&f.env.base_dir(), "issue-41").join("task.json"))
+                .is_ok(),
+            "the new task's preparation has completed"
+        );
+        assert!(
+            !sbxm::task::finish::has_leftover(&f.env.base_dir(), "issue-41"),
+            "settled before the worker ran, not left set aside"
+        );
+        gate.open();
+
+        let out = handle.join().unwrap();
+        out.result.unwrap_or_else(|e| panic!("{e:#}: {}", out.out));
+    });
+}
+
+/// A `Confirm` that removes the worker's secret from the backend right when the user says yes,
+/// modeling it vanishing while the confirmation prompt is pending (decision 185, issue #207).
+struct SecretVanishesThenYes<'a> {
+    backend: &'a FakeBackend,
+}
+
+impl Confirm for SecretVanishesThenYes<'_> {
+    fn is_interactive(&self) -> bool {
+        true
+    }
+
+    fn confirm(&self, _prompt: &str) -> anyhow::Result<bool> {
+        self.backend.set_secrets(&["openai"]);
+        Ok(true)
+    }
+}
+
+/// Decision 185 (issue #207): `task run --restart --issue` puts the old task back, instead of
+/// losing it, when the worker's secret vanishes while the confirmation prompt is pending.
+#[test]
+fn restart_puts_the_old_task_back_if_the_worker_secret_vanishes_during_confirmation() {
+    let f = config();
+    let first = go(&f, &options(&f), None, &backend(&f, &[CLEAN]), &github());
+    first.result.unwrap();
+    let b = backend(&f, &[CLEAN]);
+    let confirm = SecretVanishesThenYes { backend: &b };
+
+    let out = go(
+        &f,
+        &options(&f),
+        Some(&Restart {
+            confirm: &confirm,
+            yes: false,
+        }),
+        &b,
+        &github(),
+    );
+
+    assert!(out.result.is_err(), "{}", out.out);
+    assert!(out.out.contains("anthropic"), "{}", out.out);
+    assert!(out.out.contains("put back"), "{}", out.out);
+    assert!(
+        record::read(&record::task_dir(&f.env.base_dir(), "issue-41").join("task.json")).is_ok(),
+        "the old task is back"
+    );
+    assert!(
+        !sbxm::task::finish::has_leftover(&f.env.base_dir(), "issue-41"),
+        "nothing left set aside"
+    );
+}
+
+/// Decision 185 point 4: `task run --restart --issue` refuses before the prompt while a leftover
+/// copy of the task exists under `tasks-replaced/`, naming the folder and the two ways out.
+#[test]
+fn a_restart_refuses_before_the_prompt_while_a_leftover_copy_exists() {
+    let f = config();
+    let first = go(&f, &options(&f), None, &backend(&f, &[CLEAN]), &github());
+    first.result.unwrap();
+    let b = backend(&f, &[CLEAN]);
+    // An earlier `--restart` that was interrupted after discarding but before settling.
+    sbxm::task::finish::set_aside(
+        &f.env.base_dir(),
+        "issue-41",
+        true,
+        &b,
+        &Probe,
+        &Yes,
+        &mut Vec::new(),
+    )
+    .unwrap();
+
+    let out = go(
+        &f,
+        &options(&f),
+        Some(&Restart {
+            confirm: &Yes,
+            yes: false,
+        }),
+        &b,
+        &github(),
+    );
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("tasks-replaced"), "{message}");
+    assert!(message.contains("move it back"), "{message}");
+    assert!(message.contains("delete it"), "{message}");
+}
+
 #[test]
 fn a_missing_reviewer_secret_is_refused_before_the_worker_creates_anything() {
     let f = config(); // the reviewer is codex, which needs the openai secret

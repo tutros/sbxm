@@ -931,14 +931,20 @@ pub struct TaskReport {
     pub gates: Option<Result<Gated>>,
 }
 
-/// Starts a task for each of `numbers` at the same time (`--workers`, decision 144): each gets
-/// its own folders and sandbox on its own thread, and one failing does not stop the others.
-/// Reports come back in the order of `numbers`.
-pub fn start(ctx: &Ctx, numbers: &[u32]) -> Vec<TaskReport> {
+/// [`start`], taking `on_prepared` as well: called with each issue's number the moment its
+/// preparation succeeds (folder, kits and sandbox made, `task.json` written), before its worker
+/// runs. `--restart` (decision 185(b)) uses this to settle that issue's set-aside old task right
+/// then, instead of waiting for the worker or its gates, so a later failure of either never finds
+/// anything left to put back. Called from each issue's own thread, so it must be `Sync`.
+pub fn start_with(
+    ctx: &Ctx,
+    numbers: &[u32],
+    on_prepared: &(dyn Fn(u32) + Sync),
+) -> Vec<TaskReport> {
     std::thread::scope(|scope| {
         let handles: Vec<_> = numbers
             .iter()
-            .map(|&number| scope.spawn(move || start_one(ctx, number)))
+            .map(|&number| scope.spawn(move || start_one(ctx, number, on_prepared)))
             .collect();
         handles
             .into_iter()
@@ -957,13 +963,21 @@ pub fn start(ctx: &Ctx, numbers: &[u32]) -> Vec<TaskReport> {
     })
 }
 
-fn start_one(ctx: &Ctx, number: u32) -> TaskReport {
+/// Starts a task for each of `numbers` at the same time (`--workers`, decision 144): each gets
+/// its own folders and sandbox on its own thread, and one failing does not stop the others.
+/// Reports come back in the order of `numbers`.
+pub fn start(ctx: &Ctx, numbers: &[u32]) -> Vec<TaskReport> {
+    start_with(ctx, numbers, &|_| {})
+}
+
+fn start_one(ctx: &Ctx, number: u32, on_prepared: &(dyn Fn(u32) + Sync)) -> TaskReport {
     let mut warnings = Vec::new();
     let mut gates = None;
     let result = (|| {
         let issue = ctx.github.issue(ctx.repo, number)?;
         let mut prepared = prepare(ctx, &issue)?;
         warnings.clone_from(&prepared.warnings);
+        on_prepared(number);
         let worked = run_worker(ctx, &mut prepared)?;
         // A failed worker is not gated; a timed-out one is (its partial commits count).
         if !matches!(worked.status, RunStatus::Failed(_)) {

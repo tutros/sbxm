@@ -5,7 +5,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, anyhow};
 
 use super::task_review;
 use super::task_start::{self, Restart};
@@ -80,6 +80,31 @@ impl Write for Once<'_> {
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
+    config_dir: &Path,
+    opts: &Options,
+    restart: Option<&Restart>,
+    backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    host: &dyn HostRunner,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<()> {
+    if restart.is_none() {
+        return run_issue(
+            config_dir, opts, None, backend, github, probe, host, out, warn,
+        );
+    }
+    // As in `task_start::run_with`: a restart's screen output can't stop it on the way.
+    let (mut out, mut warn) = (finish::Unfailing::new(out), finish::Unfailing::new(warn));
+    let result = run_issue(
+        config_dir, opts, restart, backend, github, probe, host, &mut out, &mut warn,
+    );
+    finish::after_output(result, [out.into_error(), warn.into_error()])
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_issue(
     config_dir: &Path,
     opts: &Options,
     restart: Option<&Restart>,
@@ -210,11 +235,13 @@ pub struct SpecOptions {
     pub identity: Option<Identity>,
 }
 
-/// Deletes the spec task of `spec`, if one exists, the same way `--restart --issue` does:
-/// everything is checked and shown before anything is deleted. A finished result that lives only
-/// in the task's `repo.git` (not yet fetched into `repo_root`, decision 178) is protected the same
-/// way `task rm --spec` protects it, since `--restart` has no `--force` of its own; fetch the
-/// result first, or run `sbxm task rm --spec FILE --force` before restarting.
+/// Sets the spec task of `spec` aside, if one exists, instead of deleting it (decision 185): the
+/// caller decides, once it knows whether the new one's preparation completed, whether to put it
+/// back or delete it for good. Everything is checked and shown before it is moved: no leftover
+/// from an earlier, unsettled `--restart` ([`finish::check_no_leftover`]), and a finished result
+/// that lives only in the task's `repo.git` (not yet fetched into `repo_root`, decision 178) is
+/// protected the same way `task rm --spec` protects it, since `--restart` has no `--force` of its
+/// own; fetch the result first, or run `sbxm task rm --spec FILE --force` before restarting.
 fn discard_existing_spec(
     config_dir: &Path,
     repo_root: &Path,
@@ -223,14 +250,15 @@ fn discard_existing_spec(
     backend: &dyn SandboxBackend,
     probe: &dyn ProcessProbe,
     out: &mut dyn Write,
-) -> Result<()> {
+) -> Result<Option<finish::SetAside>> {
     let base_dir = GlobalConfig::load(config_dir)?.base_dir;
     let (id, _) = record::spec_id(spec)?;
+    finish::check_no_leftover(&base_dir, &id)?;
     if !finish::exists(&base_dir, &id) {
-        return Ok(());
+        return Ok(None);
     }
     finish::check_spec_result_fetched(&base_dir, &id, repo_root)?;
-    finish::discard(
+    let aside = finish::set_aside(
         &base_dir,
         &id,
         restart.yes,
@@ -238,12 +266,38 @@ fn discard_existing_spec(
         probe,
         restart.confirm,
         out,
-    )
+    )?;
+    Ok(Some(aside))
 }
 
 /// [`run_spec`], optionally discarding an existing spec task first (`--restart`, as for `--issue`).
 #[allow(clippy::too_many_arguments)]
 pub fn run_spec(
+    config_dir: &Path,
+    opts: &SpecOptions,
+    restart: Option<&Restart>,
+    backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    host: &dyn HostRunner,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<()> {
+    if restart.is_none() {
+        return run_spec_task(
+            config_dir, opts, None, backend, github, probe, host, out, warn,
+        );
+    }
+    // As in `task_start::run_with`: a restart's screen output can't stop it on the way.
+    let (mut out, mut warn) = (finish::Unfailing::new(out), finish::Unfailing::new(warn));
+    let result = run_spec_task(
+        config_dir, opts, restart, backend, github, probe, host, &mut out, &mut warn,
+    );
+    finish::after_output(result, [out.into_error(), warn.into_error()])
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_spec_task(
     config_dir: &Path,
     opts: &SpecOptions,
     restart: Option<&Restart>,
@@ -311,8 +365,9 @@ pub fn run_spec(
     // review finding M-2).
     pipeline::check_worker_inputs(config_dir, backend, &resolved.config)?;
 
+    let mut aside: Option<finish::SetAside> = None;
     if let Some(restart) = restart {
-        discard_existing_spec(
+        aside = discard_existing_spec(
             config_dir,
             &opts.repo_root,
             &opts.spec,
@@ -321,20 +376,32 @@ pub fn run_spec(
             probe,
             out,
         )?;
-        // The resolution above was the preflight only. The spec file could have changed or
-        // vanished while the confirmation prompt was pending, so it is resolved again and the
-        // start fails here if it no longer names the same task (decision 184): a task started
-        // under the old id would be one `task finish|resume|rm --spec FILE` cannot address.
-        let discarded = resolved.id;
-        resolved = task_start::resolve_spec_start(&start)
-            .context("the old task was discarded, but the new one could not be started")?;
-        if resolved.id != discarded {
-            bail!(
-                "the old task was discarded, but the new one could not be started: {} now names \
-                 another task ({}, was {discarded})",
-                opts.spec.display(),
-                resolved.id
-            );
+        if let Some(aside) = &aside {
+            // The resolution above was the preflight only. The spec file could have changed or
+            // vanished while the confirmation prompt was pending, so it is resolved again and the
+            // start fails here if it no longer names the same task (decision 184): a task started
+            // under the old id would be one `task finish|resume|rm --spec FILE` cannot address.
+            // Either way the old task, set aside rather than deleted (decision 185), is put back:
+            // its preparation never got far enough to need it gone for good.
+            let discarded = resolved.id.clone();
+            let refreshed = task_start::resolve_spec_start(&start)
+                .context("the old task was discarded, but the new one could not be started")
+                .and_then(|fresh| {
+                    if fresh.id == discarded {
+                        Ok(fresh)
+                    } else {
+                        Err(anyhow!(
+                            "the old task was discarded, but the new one could not be started: \
+                             {} now names another task ({}, was {discarded})",
+                            opts.spec.display(),
+                            fresh.id
+                        ))
+                    }
+                });
+            match refreshed {
+                Ok(fresh) => resolved = fresh,
+                Err(e) => return Err(finish::restore_after_failed_start(aside, e)),
+            }
         }
     }
     // The composed review below opens the task this snapshot starts, not one whose id is derived
@@ -346,6 +413,22 @@ pub fn run_spec(
         seen: Vec::new(),
         line: Vec::new(),
     };
+    // Settled the moment the new task's preparation succeeds (decision 185(b)), before its worker
+    // runs: `aside_cell` still holds it only if preparation itself fails, which is the only case
+    // `run_spec_from` can return without ever calling `on_prepared`.
+    let aside_cell = std::cell::RefCell::new(aside);
+    let settle_warning = std::cell::RefCell::new(None);
+    let on_prepared = |_id: &str| {
+        let Some(aside) = aside_cell.borrow_mut().take() else {
+            return;
+        };
+        if let Err(e) = aside.settle() {
+            *settle_warning.borrow_mut() = Some(format!(
+                "the old task's set-aside copy at {} could not be deleted: {e:#}",
+                aside.folder().display()
+            ));
+        }
+    };
     let mut started = Vec::new();
     let result = task_start::run_spec_from(
         config_dir,
@@ -356,8 +439,24 @@ pub fn run_spec(
         probe,
         &mut started,
         &mut warn,
+        &on_prepared,
     );
     out.write_all(without_next(&started).as_bytes())?;
+
+    if let Some(warning) = settle_warning.into_inner() {
+        writeln!(warn, "warning: {warning}")?;
+    }
+    // Still holding its `SetAside` means preparation itself failed (the only way `run_spec_from`
+    // can return without `on_prepared` ever running), so the old task goes back; a later worker
+    // or gate failure never reaches here, since `on_prepared` already settled it for good.
+    if let Some(aside) = aside_cell.into_inner() {
+        let start_failed = match &result {
+            Err(e) => anyhow!("{e:#}"),
+            Ok(()) => unreachable!("preparation failed, so run_spec_from cannot have succeeded"),
+        };
+        return Err(finish::restore_after_failed_start(&aside, start_failed));
+    }
+
     // Gates that failed after the worker go on to the review, which reruns them and gives a
     // failure to a fix round (decision 180); every other failure stops here.
     if let Err(e) = result

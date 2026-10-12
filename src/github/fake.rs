@@ -27,7 +27,7 @@ pub enum GhCall {
 pub struct FakeGitHub {
     user: String,
     default_branch: String,
-    open_issues: Vec<Issue>,
+    open_issues: Mutex<Vec<Issue>>,
     issue_texts: Vec<IssueText>,
     prs: Vec<PrInfo>,
     labels: Vec<String>,
@@ -55,9 +55,19 @@ impl FakeGitHub {
         self
     }
 
-    pub fn with_open_issues(mut self, issues: Vec<Issue>) -> Self {
-        self.open_issues = issues;
-        self
+    pub fn with_open_issues(self, issues: Vec<Issue>) -> Self {
+        Self {
+            open_issues: Mutex::new(issues),
+            ..self
+        }
+    }
+
+    /// Changes what `issues_open` returns from now on, e.g. to model an issue closing or becoming
+    /// blocked while a `--restart` confirmation is pending (issue #207): a test's
+    /// `Confirm::confirm` can call this to change the answer `pipeline::choose_issues`' later call
+    /// gives, after `check_restartable`'s own call already ran.
+    pub fn set_open_issues(&self, issues: Vec<Issue>) {
+        *self.open_issues.lock().unwrap() = issues;
     }
 
     pub fn with_issue_text(mut self, text: IssueText) -> Self {
@@ -140,7 +150,7 @@ impl GitHubBackend for FakeGitHub {
 
     fn issues_open(&self, repo: &str) -> Result<Vec<Issue>> {
         self.record(GhCall::IssuesOpen(repo.to_owned()))?;
-        Ok(self.open_issues.clone())
+        Ok(self.open_issues.lock().unwrap().clone())
     }
 
     fn issue(&self, repo: &str, number: u32) -> Result<IssueText> {

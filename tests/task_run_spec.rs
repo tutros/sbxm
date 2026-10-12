@@ -237,6 +237,157 @@ impl Confirm for Yes {
     }
 }
 
+/// Decision 185(b), issue #207 review M-1: `task run --restart --spec` settles the old task's
+/// set-aside copy the moment the new task's preparation completes — before its worker runs — not
+/// only once the whole `start` phase (worker, then its gates) has also finished. A gate holds the
+/// worker's one `exec` call, so the assertions run while the command is still blocked there.
+#[test]
+fn restart_settles_the_old_task_before_its_worker_runs() {
+    let f = config();
+    let s = spec(&f);
+    let id = id_of(&s);
+    // The first run's worker fails before committing anything, so its `repo.git` has no commits
+    // beyond the base: nothing for decision 178's protection to refuse (see
+    // `restart_discards_the_old_task_then_runs`), and `--restart` can discard it right away.
+    let failing = FakeBackend::with_secrets(&["anthropic", "openai"]).with_exec_output_matching(
+        "claude",
+        ExecOutput {
+            stdout: String::new(),
+            stderr: "boom".into(),
+            exit_code: Some(1),
+        },
+    );
+    let first = go(
+        &f,
+        &options(&f, s.clone()),
+        None,
+        &failing,
+        &FakeGitHub::default(),
+    );
+    assert!(first.result.is_err());
+    let (gated, gate) = backend_for(&f, &id, &[CLEAN_REVIEW]).with_exec_gate();
+
+    std::thread::scope(|scope| {
+        let handle = scope.spawn(|| {
+            go(
+                &f,
+                &options(&f, s.clone()),
+                Some(&Restart {
+                    confirm: &Yes,
+                    yes: false,
+                }),
+                &gated,
+                &FakeGitHub::default(),
+            )
+        });
+
+        gate.wait_for_blocked(1);
+        assert!(
+            record::read(&record::task_dir(&f.env.base_dir(), &id).join("task.json")).is_ok(),
+            "the new task's preparation has completed"
+        );
+        assert!(
+            !sbxm::task::finish::has_leftover(&f.env.base_dir(), &id),
+            "settled before the worker ran, not left set aside"
+        );
+        gate.open();
+
+        let out = handle.join().unwrap();
+        out.result.unwrap_or_else(|e| panic!("{e:#}: {}", out.out));
+    });
+}
+
+/// A `Write` that always fails, modeling a warning writer whose output can't be delivered (e.g. a
+/// closed pipe).
+struct FailingWrite;
+
+impl std::io::Write for FailingWrite {
+    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("warning output failed"))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Issue #207 review round 2, M-1: `run_spec_from` wrote the newly prepared task's own warnings
+/// with `?` *before* calling `on_prepared`, so a warning writer that fails stops the function
+/// there and the old task's set-aside copy is never settled, even though preparation (folder,
+/// kits, sandbox, `task.json`) already completed — exactly the boundary decision 185(b) requires.
+/// Reproduced with a worker harness (codex) that can't apply the profile's
+/// `harness.claude.managed_settings` (so `prepared.warnings`, only known once preparation
+/// succeeds, is non-empty) and a `warn` writer that always errors. The reviewer is left at its
+/// default (picked to differ from the worker automatically), so no same-harness warning — which
+/// `config.warnings` would already carry *before* preparation — masks the one this test is about.
+#[test]
+fn restart_settles_after_preparation_even_if_printing_a_warning_fails() {
+    let f =
+        fixture_with("[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = [\"cargo test\"]\n");
+    f.env.write_profile(
+        "default",
+        "[harness.claude]\nmanaged_settings = \"claude/managed.json\"\n",
+    );
+    let managed = f.env.profiles_dir().join("default").join("claude");
+    fs::create_dir_all(&managed).unwrap();
+    fs::write(managed.join("managed.json"), "{}").unwrap();
+
+    let s = spec(&f);
+    let id = id_of(&s);
+    let mut opts = options(&f, s.clone());
+    opts.worker_harness = Some(sbxm::harness::Harness::Codex);
+
+    let failing = FakeBackend::with_secrets(&["anthropic", "openai"]).with_exec_output_matching(
+        "codex",
+        ExecOutput {
+            stdout: String::new(),
+            stderr: "boom".into(),
+            exit_code: Some(1),
+        },
+    );
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let first = run_spec(
+        &f.env.config_dir(),
+        &opts,
+        None,
+        &failing,
+        &FakeGitHub::default(),
+        &Probe,
+        &FakeHostRunner::default(),
+        &mut out,
+        &mut warn,
+    );
+    assert!(first.is_err());
+
+    let gated = FakeBackend::with_secrets(&["anthropic", "openai"]);
+    let mut out = Vec::new();
+    let result = run_spec(
+        &f.env.config_dir(),
+        &opts,
+        Some(&Restart {
+            confirm: &Yes,
+            yes: false,
+        }),
+        &gated,
+        &FakeGitHub::default(),
+        &Probe,
+        &FakeHostRunner::default(),
+        &mut out,
+        &mut FailingWrite,
+    );
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(message.contains("warning output failed"), "{message}");
+    assert!(
+        record::read(&record::task_dir(&f.env.base_dir(), &id).join("task.json")).is_ok(),
+        "the new task's preparation has completed"
+    );
+    assert!(
+        !sbxm::task::finish::has_leftover(&f.env.base_dir(), &id),
+        "settled once prepared, even though printing its warning failed"
+    );
+}
+
 /// The first run's worker fails before committing anything, so its `repo.git` has no commits
 /// beyond the base: nothing for decision 178's protection to refuse (see the next test for the
 /// case where it does), and `--restart` can discard it and run again right away.
@@ -354,6 +505,55 @@ fn restart_refuses_to_discard_an_unfetched_finished_result() {
     );
 }
 
+/// Decision 185 point 4: `task run --spec --restart` refuses before the prompt while a leftover
+/// copy of the task exists under `tasks-replaced/`, naming the folder and the two ways out;
+/// nothing is deleted or created.
+#[test]
+fn restart_refuses_before_the_prompt_while_a_leftover_copy_exists() {
+    let f = config();
+    let s = spec(&f);
+    let id = id_of(&s);
+    let first = go(
+        &f,
+        &options(&f, s.clone()),
+        None,
+        &backend_for(&f, &id, &[CLEAN_REVIEW]),
+        &FakeGitHub::default(),
+    );
+    first.result.unwrap();
+    let b = backend_for(&f, &id, &[CLEAN_REVIEW]);
+    // An earlier `--restart` that was interrupted after discarding but before settling.
+    sbxm::task::finish::set_aside(
+        &f.env.base_dir(),
+        &id,
+        true,
+        &b,
+        &Probe,
+        &Yes,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    let (removes_before, creates_before) = (b.removes().len(), b.creates().len());
+
+    let out = go(
+        &f,
+        &options(&f, s.clone()),
+        Some(&Restart {
+            confirm: &Yes,
+            yes: false,
+        }),
+        &b,
+        &FakeGitHub::default(),
+    );
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("tasks-replaced"), "{message}");
+    assert!(message.contains("move it back"), "{message}");
+    assert!(message.contains("delete it"), "{message}");
+    assert_eq!(b.removes().len(), removes_before, "nothing more removed");
+    assert_eq!(b.creates().len(), creates_before, "nothing created");
+}
+
 /// Issue #194 review finding M-1: `--restart` must not discard the old task before the new
 /// start's own inputs are validated, the same as it already doesn't for `--issue`.
 #[test]
@@ -420,9 +620,10 @@ impl Confirm for CorruptThenYes<'_> {
     }
 }
 
-/// Decision 184 (PR 208 review round 2, M-1): the spec is read again after a confirmed discard, so
-/// a file that became unusable while the prompt was pending fails the start there and leaves no
-/// task, instead of starting from text the file no longer has.
+/// Decision 185 (issue #207, supersedes decision 184's "nothing after a confirmed discard"): the
+/// spec is read again after a confirmed discard, so a file that became unusable while the prompt
+/// was pending fails the start there; the old task, set aside rather than deleted, is put back
+/// instead of being lost.
 #[test]
 fn restart_fails_after_the_discard_if_the_spec_becomes_unusable_during_confirmation() {
     let f = config();
@@ -459,10 +660,17 @@ fn restart_fails_after_the_discard_if_the_spec_becomes_unusable_during_confirmat
 
     let message = format!("{:#}", out.result.unwrap_err());
     assert!(message.contains("the old task was discarded"), "{message}");
+    assert!(message.contains("put back"), "{message}");
     assert!(b.creates().is_empty(), "nothing started");
     assert!(
-        !record::task_dir(&f.env.base_dir(), &id).exists(),
-        "no replacement task"
+        record::task_dir(&f.env.base_dir(), &id)
+            .join("repo.git")
+            .is_dir(),
+        "the old task was put back"
+    );
+    assert!(
+        !sbxm::task::finish::has_leftover(&f.env.base_dir(), &id),
+        "nothing left set aside"
     );
 }
 
@@ -483,10 +691,12 @@ impl Confirm for RemoveThenYes<'_> {
     }
 }
 
-/// Decision 184 (PR 208 review round 2, M-1): a spec removed while the prompt was pending fails
-/// the start after the discard. A task started under the old id would end `ready` with a
-/// `task finish --spec FILE` hint that cannot work, since every spec command derives the id from
-/// the path again.
+/// Decision 185 (issue #207, supersedes decision 184's "nothing after a confirmed discard"): a
+/// spec removed while the prompt was pending fails the start after the discard, and the old task,
+/// set aside rather than deleted, is put back instead of being lost. (Before decision 185, a task
+/// started under the old id would have ended `ready` with a `task finish --spec FILE` hint that
+/// cannot work, since every spec command derives the id from the path again; now there is no such
+/// task at all.)
 #[test]
 fn restart_fails_after_the_discard_if_the_spec_is_removed_during_confirmation() {
     let f = config();
@@ -523,10 +733,91 @@ fn restart_fails_after_the_discard_if_the_spec_is_removed_during_confirmation() 
 
     let message = format!("{:#}", out.result.unwrap_err());
     assert!(message.contains("the old task was discarded"), "{message}");
+    assert!(message.contains("put back"), "{message}");
     assert!(b.creates().is_empty(), "nothing started");
     assert!(
-        !record::task_dir(&f.env.base_dir(), &id).exists(),
-        "no replacement task"
+        record::task_dir(&f.env.base_dir(), &id)
+            .join("repo.git")
+            .is_dir(),
+        "the old task was put back"
+    );
+    assert!(
+        !sbxm::task::finish::has_leftover(&f.env.base_dir(), &id),
+        "nothing left set aside"
+    );
+}
+
+/// A `Confirm` that removes the worker's secret from the backend right when the user says yes,
+/// modeling it vanishing while the confirmation prompt is pending (issue #207's original finding,
+/// issue 194's review M-1): the reviewer's and worker's secrets are both still stored for the
+/// before-the-prompt checks, but only the reviewer's is left by the time `prepare_spec_resolved`
+/// checks the worker's secret again, after the discard.
+struct SecretVanishesThenYes<'a> {
+    backend: &'a FakeBackend,
+}
+
+impl Confirm for SecretVanishesThenYes<'_> {
+    fn is_interactive(&self) -> bool {
+        true
+    }
+
+    fn confirm(&self, _prompt: &str) -> anyhow::Result<bool> {
+        self.backend.set_secrets(&["openai"]);
+        Ok(true)
+    }
+}
+
+/// Decision 185 (issue #207): the worker's secret disappearing while `task run --spec --restart`
+/// waits for confirmation must not cost the old task its result. Before the fix, `prepare_spec_resolved`'s
+/// second secret check (after the discard) failed on the missing secret and the old task was
+/// already gone; now it is put back.
+#[test]
+fn restart_fails_after_the_discard_if_the_worker_secret_vanishes_during_confirmation() {
+    let f = config();
+    let s = spec(&f);
+    let id = id_of(&s);
+    let failing = FakeBackend::with_secrets(&["anthropic", "openai"]).with_exec_output_matching(
+        "claude",
+        ExecOutput {
+            stdout: String::new(),
+            stderr: "boom".into(),
+            exit_code: Some(1),
+        },
+    );
+    let first = go(
+        &f,
+        &options(&f, s.clone()),
+        None,
+        &failing,
+        &FakeGitHub::default(),
+    );
+    assert!(first.result.is_err());
+    let b = FakeBackend::with_secrets(&["anthropic", "openai"]);
+
+    let out = go(
+        &f,
+        &options(&f, s.clone()),
+        Some(&Restart {
+            confirm: &SecretVanishesThenYes { backend: &b },
+            yes: false,
+        }),
+        &b,
+        &FakeGitHub::default(),
+    );
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("anthropic"), "{message}");
+    assert!(message.contains("put back"), "{message}");
+    assert!(b.creates().is_empty(), "nothing started");
+    assert!(
+        record::task_dir(&f.env.base_dir(), &id)
+            .join("repo.git")
+            .is_dir(),
+        "the old task was put back"
+    );
+    assert!(
+        !sbxm::task::finish::has_leftover(&f.env.base_dir(), &id),
+        "nothing left set aside"
     );
 }
 
@@ -751,4 +1042,79 @@ fn an_empty_or_blank_reviewer_model_flag_is_refused_before_the_worker_starts() {
         assert_eq!(b.secret_service_calls(), 0, "{bad:?}");
         assert!(gh.calls().is_empty(), "{bad:?}");
     }
+}
+
+/// A `Write` that takes its first line and fails from then on.
+#[derive(Default)]
+struct FailsAfterFirstLine(String);
+
+impl std::io::Write for FailsAfterFirstLine {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.0.contains('\n') {
+            return Err(std::io::Error::other("screen output failed"));
+        }
+        self.0.push_str(&String::from_utf8_lossy(buf));
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// PR 219 review, M-2: screen output cannot interrupt a restart. The new task's preparation fails
+/// (its sandbox can't be made) and the screen stops taking output after the discard's first line:
+/// the old task is still put back.
+#[test]
+fn restart_puts_the_old_task_back_even_when_the_screen_stops_taking_output() {
+    let f = config();
+    let s = spec(&f);
+    let id = id_of(&s);
+    let failing = FakeBackend::with_secrets(&["anthropic", "openai"]).with_exec_output_matching(
+        "claude",
+        ExecOutput {
+            stdout: String::new(),
+            stderr: "boom".into(),
+            exit_code: Some(1),
+        },
+    );
+    let first = go(
+        &f,
+        &options(&f, s.clone()),
+        None,
+        &failing,
+        &FakeGitHub::default(),
+    );
+    assert!(first.result.is_err());
+
+    let no_sandbox = FakeBackend::with_secrets(&["anthropic", "openai"])
+        .with_failing_create_for(&format!("sbxm-task-{id}-claude"));
+    let mut out = FailsAfterFirstLine::default();
+    let result = run_spec(
+        &f.env.config_dir(),
+        &options(&f, s.clone()),
+        Some(&Restart {
+            confirm: &Yes,
+            yes: false,
+        }),
+        &no_sandbox,
+        &FakeGitHub::default(),
+        &Probe,
+        &FakeHostRunner::default(),
+        &mut out,
+        &mut Vec::new(),
+    );
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(message.contains("put back"), "{message}");
+    assert!(
+        record::task_dir(&f.env.base_dir(), &id)
+            .join("repo.git")
+            .is_dir(),
+        "the old task is back: {message}"
+    );
+    assert!(
+        !sbxm::task::finish::has_leftover(&f.env.base_dir(), &id),
+        "{message}"
+    );
 }
