@@ -257,7 +257,7 @@ pub fn check_no_leftover(base_dir: &Path, id: &str) -> Result<()> {
     if dir.symlink_metadata().is_ok() {
         bail!(
             "an earlier `--restart` of task {id} left its old copy at {}, never settled; move it \
-             back into place yourself, or delete it, then run `--restart` again",
+             back into place yourself, or delete it, before restarting {id} again",
             dir.display()
         );
     }
