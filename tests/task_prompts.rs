@@ -525,3 +525,33 @@ fn every_reviewer_prompt_limits_findings_to_what_the_change_causes() {
         );
     }
 }
+
+/// Issue 206: both worker prompts ask for a self-review before the worker reports done.
+#[test]
+fn the_worker_prompts_ask_for_a_self_review_with_its_own_section_in_result_md() {
+    for (role, values) in [(Role::Worker, values()), (Role::WorkerSpec, spec_values())] {
+        let template = prompts::template(role, &Prompts::default()).unwrap();
+        let text = prompts::render(&template.name, &template.text, &values).unwrap();
+        assert!(text.contains("review your own change"), "{text}");
+        assert!(text.contains("sdlc-code-review"), "{text}");
+        assert!(text.contains("check before acting"), "{text}");
+        assert!(text.contains("destructive action"), "{text}");
+        assert!(text.contains("\"Self-review\" section"), "{text}");
+        assert!(!text.contains("{{"), "{text}");
+    }
+}
+
+/// Issue 206: a review's fix round fixes the kind of problem, and a repeat finding is not
+/// patched one more time.
+#[test]
+fn the_fix_prompts_ask_for_the_kind_of_problem_and_stop_patching_a_repeat() {
+    for (role, values) in [(Role::Fix, review_values()), (Role::FixSpec, spec_values())] {
+        let template = prompts::template(role, &Prompts::default()).unwrap();
+        let text = prompts::render(&template.name, &template.text, &values).unwrap();
+        assert!(text.contains("kind of problem"), "{text}");
+        assert!(text.contains("every other place"), "{text}");
+        assert!(text.contains("\"Repeat of:\""), "{text}");
+        assert!(text.contains("Change the structure"), "{text}");
+        assert!(!text.contains("{{"), "{text}");
+    }
+}
