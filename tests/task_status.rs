@@ -53,6 +53,26 @@ fn working(number: u32, done: Option<Status>) -> Record {
     record
 }
 
+/// Decision 185 (issue #207): a leftover set-aside copy under `tasks-replaced/` is not a task
+/// `status` scans for (`record::load_all` only reads `.sbxm/tasks/`).
+#[test]
+fn a_leftover_set_aside_copy_is_not_listed() {
+    let base = tempfile::tempdir().unwrap();
+    save(base.path(), &working(41, None));
+    let leftover = base
+        .path()
+        .join(".sbxm")
+        .join("tasks-replaced")
+        .join("issue-99");
+    fs::create_dir_all(&leftover).unwrap();
+    record::write(&leftover, &working(99, None)).unwrap();
+
+    let (text, ids) = task_status::render(base.path(), None, false, &Probe(Some(T0))).unwrap();
+
+    assert!(!text.contains("issue-99"), "{text}");
+    assert_eq!(ids, vec!["issue-41".to_owned()]);
+}
+
 #[test]
 fn no_tasks_says_how_to_start_one() {
     let base = tempfile::tempdir().unwrap();
