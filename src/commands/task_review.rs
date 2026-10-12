@@ -374,6 +374,13 @@ fn run_spec(
     Ok(())
 }
 
+fn check_base(base: &str) -> Result<()> {
+    if !repo::valid_ref_name(base) {
+        bail!("base {base:?} isn't a usable branch name; pass --base <branch>");
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_pr(
     config_dir: &std::path::Path,
@@ -390,6 +397,10 @@ fn run_pr(
     let base_dir = GlobalConfig::load(config_dir)?.base_dir;
     let id = format!("pr-{number}");
     let repo_name = resolve_repo(opts.repo.as_deref(), &opts.repo_root)?;
+    // Checked before the refusal below, which prints it in a command.
+    if let Some(base) = &opts.base {
+        check_base(base)?;
+    }
     // Issue 198: a head the local issue task's in-task review covered has its review already.
     // Only the task folders on this machine decide; nothing on GitHub but the head is read.
     let mut pr_info = None;
@@ -401,7 +412,8 @@ fn run_pr(
             bail!(
                 "PR #{number} is already reviewed at `{commit}`: its head is the commit task \
                  {task}'s in-task review covered, which `sbxm task finish` posted as the PR's \
-                 review; to review it again anyway, run `sbxm task review --pr {number} --force`"
+                 review; to review it again anyway, run `{}`",
+                finish::review_pr_command(number, &repo_name, opts.base.as_deref(), true)
             );
         }
         pr_info = Some(pr);
@@ -410,9 +422,7 @@ fn run_pr(
         Some(base) => base.clone(),
         None => github.default_branch(&repo_name)?,
     };
-    if !repo::valid_ref_name(&base_branch) {
-        bail!("base {base_branch:?} isn't a usable branch name; pass --base <branch>");
-    }
+    check_base(&base_branch)?;
     let clone_source = opts
         .clone_source
         .clone()

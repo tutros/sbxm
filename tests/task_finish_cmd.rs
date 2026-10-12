@@ -116,6 +116,8 @@ fn a_posted_in_task_review_is_reported_with_its_commit() {
         commit: Some(tip.clone()),
         ..Default::default()
     });
+    // Not the checkout's origin: the printed command must name the recorded repo and base.
+    task.repo = "owner/target".into();
     record::write(&meta, &task).unwrap();
 
     let (result, out) = go(&f, 41, &FakeGitHub::default());
@@ -127,5 +129,8 @@ fn a_posted_in_task_review_is_reported_with_its_commit() {
         )),
         "{out}"
     );
-    assert!(out.contains("sbxm task review --pr 9"), "{out}");
+    assert!(
+        out.contains("sbxm task review --pr 9 --repo owner/target --base main"),
+        "{out}"
+    );
 }

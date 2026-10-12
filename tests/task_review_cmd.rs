@@ -774,11 +774,34 @@ fn a_pr_head_the_local_issue_task_reviewed_is_refused_before_anything_with_a_for
         message.contains(&format!("already reviewed at `{REVIEWED}`")),
         "{message}"
     );
-    assert!(message.contains("--force"), "{message}");
+    assert!(
+        message.contains("`sbxm task review --pr 7 --repo o/r --force`"),
+        "{message}"
+    );
     assert!(message.contains("issue-4"), "{message}");
     assert!(backend.creates().is_empty() && backend.execs().is_empty());
     assert!(!pr_meta(&f).exists());
     assert!(!posted(&github));
+}
+
+/// Review M-1: the `--force` command keeps the `--base` the refused command was given.
+#[test]
+fn the_force_hint_of_an_already_reviewed_head_keeps_the_given_base() {
+    let f = config("codex");
+    add_pr_head(&f, 7);
+    finished_issue_task(&f, "https://github.com/o/r/pull/7", REVIEWED, false);
+    let github = pr_github_at(REVIEWED);
+    let backend = pr_backend(&f, &[CLEAN]);
+    let mut opts = pr_options(&f);
+    opts.base = Some("release".into());
+
+    let out = go_pr(&f, &opts, &backend, &github);
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(
+        message.contains("`sbxm task review --pr 7 --repo o/r --base release --force`"),
+        "{message}"
+    );
 }
 
 #[test]

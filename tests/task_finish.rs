@@ -1021,7 +1021,15 @@ fn a_review_that_cannot_be_posted_leaves_the_pr_recorded_and_says_how_to_go_on()
     assert!(message.contains(&url), "{message}");
     assert!(message.contains("HTTP 502"), "{message}");
     assert!(message.contains("review.md"), "{message}");
-    assert!(message.contains("--force"), "{message}");
+    assert!(
+        message.contains(&format!(
+            "sbxm task review --pr {} --repo {} --base {} --force",
+            url.rsplit('/').next().unwrap(),
+            record.repo,
+            record.base
+        )),
+        "{message}"
+    );
     assert!(
         record.notes.iter().any(|n| n.contains("not posted")),
         "{:?}",

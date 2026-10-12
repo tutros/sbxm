@@ -323,7 +323,7 @@ fn the_command_says_it_pushed_to_the_pr_and_how_to_review_it_again() {
         ),
         "{out}"
     );
-    assert!(out.contains("sbxm task review --pr 7"), "{out}");
+    assert!(out.contains("sbxm task review --pr 7 --repo o/r "), "{out}");
     assert!(!out.contains("opened"), "{out}");
 }
 

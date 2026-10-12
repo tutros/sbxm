@@ -893,6 +893,23 @@ pub struct Finished {
     /// The commit whose in-task review was posted on the new PR as its review (issue 198);
     /// `None` when no recorded review covered the PR's head.
     pub review_posted: Option<String>,
+    /// The `sbxm task review --pr` command for the PR's next commit ([`review_pr_command`]).
+    pub review_again: String,
+}
+
+/// The `sbxm task review --pr` command a hint prints (issue 198, review M-1). It names `repo`,
+/// and `base` when one is known, so it reviews the same PR against the same base wherever it is
+/// run, not the PR of that number in the checkout's `origin` diffed against its default branch.
+/// Both are checked names (`owner/name`, a branch name), so neither needs quoting.
+pub fn review_pr_command(
+    pr: impl std::fmt::Display,
+    repo: &str,
+    base: Option<&str>,
+    force: bool,
+) -> String {
+    let base = base.map_or_else(String::new, |b| format!(" --base {b}"));
+    let force = if force { " --force" } else { "" };
+    format!("sbxm task review --pr {pr} --repo {repo}{base}{force}")
 }
 
 /// The number at the end of a PR's URL (`https://github.com/o/r/pull/7`), as `gh pr create`
@@ -1142,7 +1159,9 @@ pub fn finish(
         }
         None => None,
     };
+    let pr = pr_number(&url).map_or_else(|| "<N>".to_owned(), |n| n.to_string());
     Ok(Finished {
+        review_again: review_pr_command(pr, &task.repo, Some(&task.base), false),
         url,
         branch: task.branch,
         cuts,
@@ -1182,12 +1201,14 @@ fn post_in_task_review(
         "the in-task review was not posted on PR #{pr}: {e:#}"
     ));
     let _ = record::write(&prepared.meta, &prepared.record);
+    let task = &prepared.record;
     Err(e.context(format!(
         "the PR is open at {url}, but the in-task review couldn't be posted on it; post it \
          yourself with `gh pr comment {pr} --repo {} --body-file {}`, or review the PR again with \
-         `sbxm task review --pr {pr} --force`",
-        prepared.record.repo,
-        prepared.meta.join("review.md").display()
+         `{}`",
+        task.repo,
+        prepared.meta.join("review.md").display(),
+        review_pr_command(&pr, &task.repo, Some(&task.base), true)
     )))
 }
 
@@ -1439,6 +1460,9 @@ fn finish_continued(
     record::write(&prepared.meta, &prepared.record)
         .with_context(|| format!("{id} is pushed to PR #{pr} but task.json couldn't be updated"))?;
     Ok(Finished {
+        // The task's base is the one it was started with, not necessarily the PR's: the review
+        // diffs against the repo's default branch, as before, unless `--base` is added.
+        review_again: review_pr_command(pr, &task.repo, None, false),
         url,
         branch: task.branch.clone(),
         cuts: Vec::new(),
