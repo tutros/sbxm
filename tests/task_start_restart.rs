@@ -266,6 +266,47 @@ fn restart_puts_the_old_task_back_if_the_worker_secret_vanishes_during_confirmat
     );
 }
 
+/// Decision 185 point 3: the old task's set-aside copy is gone for good once the new task's
+/// preparation completes, even when the worker that runs next fails.
+#[test]
+fn restart_settles_the_old_task_even_when_the_new_worker_then_fails() {
+    let f = fixture();
+    started(&f);
+    let confirm = FakeConfirm::new(true, true);
+    let failing_worker = backend().with_exec_output_matching(
+        "claude",
+        sbxm::backend::ExecOutput {
+            stdout: String::new(),
+            stderr: "boom".into(),
+            exit_code: Some(1),
+        },
+    );
+
+    let (result, out) = go(
+        &f,
+        &options(&f),
+        Some(&Restart {
+            confirm: &confirm,
+            yes: false,
+        }),
+        &failing_worker,
+        &github(),
+    );
+
+    assert!(
+        result.is_err(),
+        "the new worker's failure still fails the command: {out}"
+    );
+    assert!(
+        record::read(&meta(&f).join("task.json")).is_ok(),
+        "the new task exists: its preparation completed"
+    );
+    assert!(
+        !sbxm::task::finish::has_leftover(&f.env.base_dir(), "issue-41"),
+        "settled, not left set aside, because preparation completed"
+    );
+}
+
 /// Decision 185 point 4: a `--restart` of a task with a leftover copy under `tasks-replaced/` is
 /// refused before the prompt, naming the folder and the two ways out; nothing is deleted or
 /// created.
