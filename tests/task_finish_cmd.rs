@@ -101,3 +101,31 @@ fn issue_zero_and_an_unknown_task_are_refused_with_a_fix() {
         format!("{:#}", unknown.unwrap_err()).contains("no task issue-41; run `sbxm task status`")
     );
 }
+
+/// Issue 198: a task whose recorded review covered the PR's head says the review is posted as
+/// the PR's own, and that a later commit gets `task review --pr`.
+#[test]
+fn a_posted_in_task_review_is_reported_with_its_commit() {
+    let f = fixture();
+    ready(&f);
+    let meta = record::task_dir(&f.env.base_dir(), "issue-41");
+    let mut task = record::read(&meta.join("task.json")).unwrap();
+    let tip = common::git(&meta.join("repo.git"), &["rev-parse", "issue-41"]);
+    task.review = Some(record::ReviewResult {
+        round: 1,
+        commit: Some(tip.clone()),
+        ..Default::default()
+    });
+    record::write(&meta, &task).unwrap();
+
+    let (result, out) = go(&f, 41, &FakeGitHub::default());
+
+    result.unwrap();
+    assert!(
+        out.contains(&format!(
+            "the in-task review of {tip} is posted on PR #9 as its review"
+        )),
+        "{out}"
+    );
+    assert!(out.contains("sbxm task review --pr 9"), "{out}");
+}

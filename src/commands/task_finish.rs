@@ -78,6 +78,13 @@ pub fn run(
     } else {
         writeln!(out, "{id}: pushed {id} and opened {}", done.url)?;
     }
+    if let (Some(commit), Some(pr)) = (&done.review_posted, finish::pr_number(&done.url)) {
+        writeln!(
+            out,
+            "  the in-task review of {commit} is posted on PR #{pr} as its review; a later commit \
+             on the PR gets: sbxm task review --pr {pr}"
+        )?;
+    }
     writeln!(
         out,
         "  next: after it is merged, clean up with: sbxm task rm --issue {}",

@@ -46,6 +46,25 @@ pub(crate) fn defang_mentions(text: &str) -> String {
 /// text; both the risk section and the review text have mentions neutralised, and the review
 /// text is cut (with a note) if it is longer than GitHub accepts.
 pub fn pr_comment(number: u32, risk_section: &str, review: &str) -> String {
+    titled_comment(
+        &format!("sbxm review of PR #{number}"),
+        risk_section,
+        review,
+    )
+}
+
+/// The comment `task finish` posts on the PR it opened (issue 198): an issue task's in-task
+/// review, under a line naming the issue and the commit it covered, which is the PR's head, so
+/// the review counts as that head's. Laid out and cut like [`pr_comment`].
+pub fn in_task_pr_comment(issue: u32, commit: &str, risk_section: &str, review: &str) -> String {
+    let title = format!(
+        "sbxm in-task review of issue #{issue}'s task, at commit {commit} (this PR's head when \
+         `sbxm task finish` opened it); it counts as the review of that commit"
+    );
+    titled_comment(&title, risk_section, review)
+}
+
+fn titled_comment(title: &str, risk_section: &str, review: &str) -> String {
     let defanged = defang_mentions(review);
     let (body, cut) = match defanged.char_indices().nth(COMMENT_CAP) {
         Some((at, _)) => (&defanged[..at], true),
@@ -57,10 +76,7 @@ pub fn pr_comment(number: u32, risk_section: &str, review: &str) -> String {
     } else {
         format!("{risk_section}\n")
     };
-    let mut text = format!(
-        "{header}sbxm review of PR #{number}\n\n{}\n",
-        body.trim_end()
-    );
+    let mut text = format!("{header}{title}\n\n{}\n", body.trim_end());
     if cut {
         text.push_str(&format!(
             "\n(sbxm cut this review at {COMMENT_CAP} characters; the whole text is review.md in \
