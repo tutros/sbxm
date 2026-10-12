@@ -62,6 +62,19 @@ pub fn date_from_days(days: u64) -> String {
     format!("{year:04}-{month:02}-{day:02}")
 }
 
+/// Inverse of [`date_from_days`] (same algorithm, Howard Hinnant's `days_from_civil`): the day
+/// count since 1970-01-01 for a civil `(year, month, day)`, which may be negative for a date
+/// before the epoch. Used to parse a stamp sbxm itself wrote, so it doesn't validate `month`/`day`
+/// ranges beyond what the arithmetic needs.
+pub(crate) fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = year - i64::from(month <= 2);
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let year_of_era = y - era * 400;
+    let day_of_year = (153 * (if month > 2 { month - 3 } else { month + 9 }) + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
 /// Whether `id` has exactly the generated format, so it can be used in a
 /// path without checking for separators or traversal.
 pub fn is_valid(id: &str) -> bool {

@@ -9,6 +9,7 @@ pub mod rm;
 pub mod run;
 pub mod run_init;
 pub mod run_show;
+pub mod status;
 pub mod stop;
 pub mod task_file_findings;
 pub mod task_finish;
@@ -30,6 +31,7 @@ use anyhow::Result;
 
 use crate::config::Profile;
 use crate::harness::Harness;
+use crate::task::record::Record;
 
 /// What to check for an invalid generated kit: the profile's `profile.toml`,
 /// plus the project's `sandbox.toml` too when `metadata_dir` has one
@@ -51,6 +53,16 @@ pub(crate) fn invalid_kit_check(
         }
     }
     checked
+}
+
+/// The task branch's commits ahead of its base in the task's own `repo.git`; `None` while the
+/// repo or the branch doesn't exist yet (or can't be read). Shared by `task_status` and `status`.
+pub(crate) fn commits_ahead(base: &Path, record: &Record) -> Option<u32> {
+    let repo_git = crate::task::record::task_dir(base, &record.id).join("repo.git");
+    if !repo_git.is_dir() {
+        return None;
+    }
+    record.commits_ahead(&repo_git).ok()
 }
 
 /// The `--harness` argument selecting `harness` for a `sbxm new` hint, empty
