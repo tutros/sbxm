@@ -7,10 +7,11 @@ mod common;
 
 use std::fs;
 
-use common::task_fixture::{Fixture, Probe, fixture, worked_task};
+use common::task_fixture::{Fixture, Probe, ctx, fixture, issue_text, source};
 use sbxm::backend::FakeBackend;
 use sbxm::confirm::Confirm;
-use sbxm::task::pipeline::{Prepared, TaskEnv};
+use sbxm::github::fake::FakeGitHub;
+use sbxm::task::pipeline::{self, Prepared, TaskEnv};
 use sbxm::task::record::{self, ProcessProbe, Stage, Status};
 use sbxm::task::{finish, resume};
 
@@ -47,14 +48,23 @@ fn saved(f: &Fixture) -> record::Record {
     record::read(&meta(f).join("task.json")).unwrap()
 }
 
-/// Issue 41, prepared and worked once, left `Working`/`Failed` as a crash would leave it: a
+/// `number`, prepared and worked once, left `Working`/`Failed` as a crash would leave it: a
 /// resumable state ([`resume::resume`] reruns the worker for it).
-fn resumable_task(f: &Fixture, backend: &FakeBackend) -> Prepared {
-    let mut prepared = worked_task(f, backend);
+fn resumable_task_for(f: &Fixture, backend: &FakeBackend, number: u32) -> Prepared {
+    let github = FakeGitHub::default();
+    let source = source(f);
+    let ctx = ctx(f, &source, backend, &github);
+    let mut prepared = pipeline::prepare(&ctx, &issue_text(number)).unwrap();
+    pipeline::run_worker(&ctx, &mut prepared).unwrap();
     prepared.record.stage = Stage::Working;
     prepared.record.status = Status::Failed;
     record::write(&prepared.meta, &prepared.record).unwrap();
     prepared
+}
+
+/// Issue 41, prepared and worked once, left `Working`/`Failed` as a crash would leave it.
+fn resumable_task(f: &Fixture, backend: &FakeBackend) -> Prepared {
+    resumable_task_for(f, backend, 41)
 }
 
 fn host() -> &'static sbxm::task::gates::FakeHostRunner {
@@ -224,4 +234,73 @@ fn check_no_leftover_refuses_and_names_the_folder_and_the_two_ways_out() {
     );
     assert!(message.contains("move it back"), "{message}");
     assert!(message.contains("delete it"), "{message}");
+}
+
+/// A `Write` that accepts everything up to (and including) the first `\n` it sees, then fails:
+/// models a sandbox-status writer (stdout, a pipe) that works for one line and then can't be
+/// written to anymore (a closed pipe, a full disk) — exactly the review's "accepts the first
+/// sandbox-status line and fails on the second" reproduction.
+#[derive(Default)]
+struct FailsAfterFirstLine(String);
+
+impl std::io::Write for FailsAfterFirstLine {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if self.0.contains('\n') {
+            return Err(std::io::Error::other("sandbox status output failed"));
+        }
+        self.0.push_str(&String::from_utf8_lossy(buf));
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Issue #207 review round 4, M-1: `set_aside_many`'s sandbox-status `writeln!` used `?` instead
+/// of going through the same rollback `set_aside_one`'s failure does, so a write failure between
+/// the first and second task left the first task's `SetAside` dropped without ever being restored
+/// — stranded under `tasks-replaced/` with no way for the caller to know or recover it. Two tasks,
+/// a writer that accepts the first task's sandbox-status line and fails on the second: the first
+/// task must come back, and the error must say the write is why.
+#[test]
+fn multi_set_aside_restores_the_first_task_if_output_fails_on_the_second() {
+    let f = fixture();
+    let backend = FakeBackend::with_secrets(&["anthropic", "openai"]);
+    resumable_task_for(&f, &backend, 41);
+    resumable_task_for(&f, &backend, 42);
+    let base_dir = f.env.base_dir();
+    let ids = vec!["issue-41".to_owned(), "issue-42".to_owned()];
+    let mut out = FailsAfterFirstLine::default();
+
+    let err = finish::set_aside_many(&base_dir, &ids, true, &backend, &Probe, &Never, &mut out)
+        .unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains("sandbox status output failed"),
+        "{err:#}"
+    );
+    assert!(
+        !finish::has_leftover(&base_dir, "issue-41"),
+        "the first old task must be put back"
+    );
+    assert!(
+        record::task_dir(&base_dir, "issue-41")
+            .join("task.json")
+            .exists()
+    );
+    assert!(
+        record::task_dir(&base_dir, "issue-41")
+            .join("repo.git")
+            .is_dir()
+    );
+    assert!(
+        !finish::has_leftover(&base_dir, "issue-42"),
+        "the second task's folders were never moved, so nothing is set aside for it either"
+    );
+    assert!(
+        record::task_dir(&base_dir, "issue-42")
+            .join("task.json")
+            .exists()
+    );
 }

@@ -399,22 +399,34 @@ pub fn set_aside_many(
     let mut result: Vec<SetAside> = Vec::new();
     for plan in &plans {
         for sandbox in &plan.sandboxes {
-            match crate::commands::rm::remove_sandbox(backend, sandbox) {
-                Ok(()) => writeln!(out, "removed sandbox {sandbox}")?,
-                Err(e) => writeln!(out, "could not remove sandbox {sandbox}: {e:#}")?,
+            let line = match crate::commands::rm::remove_sandbox(backend, sandbox) {
+                Ok(()) => format!("removed sandbox {sandbox}"),
+                Err(e) => format!("could not remove sandbox {sandbox}: {e:#}"),
+            };
+            if let Err(e) = writeln!(out, "{line}") {
+                undo_set_asides(&result);
+                return Err(e.into());
             }
         }
         match set_aside_one(base_dir, plan) {
             Ok(aside) => result.push(aside),
             Err(e) => {
-                for aside in &result {
-                    let _ = aside.restore();
-                }
+                undo_set_asides(&result);
                 return Err(e);
             }
         }
     }
     Ok(result)
+}
+
+/// Restores every task already set aside in this [`set_aside_many`] call, best-effort, when
+/// something else in the same call fails partway through the batch (another task's set-aside, or
+/// the status output in between): the one path that un-does an accumulated [`SetAside`] list, so
+/// a later fallible step added to the loop rolls back the same way instead of needing its own copy.
+fn undo_set_asides(result: &[SetAside]) {
+    for aside in result {
+        let _ = aside.restore();
+    }
 }
 
 /// [`set_aside_many`] for one task.
