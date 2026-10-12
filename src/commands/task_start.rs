@@ -741,11 +741,11 @@ pub(crate) fn run_spec_from(
     writeln!(out, "Starting a task from {} ...", opts.spec.display())?;
     let mut prepared =
         pipeline::prepare_spec_resolved(&ctx, &opts.spec, &source_text, &spec_id, &title)?;
+    let id = prepared.record.id.clone();
+    on_prepared(&id);
     for warning in &prepared.warnings {
         writeln!(warn, "warning: {warning}")?;
     }
-    let id = prepared.record.id.clone();
-    on_prepared(&id);
 
     let worked = pipeline::run_worker(&ctx, &mut prepared)?;
     let (label, bad) = match &worked.status {

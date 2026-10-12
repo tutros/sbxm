@@ -297,6 +297,97 @@ fn restart_settles_the_old_task_before_its_worker_runs() {
     });
 }
 
+/// A `Write` that always fails, modeling a warning writer whose output can't be delivered (e.g. a
+/// closed pipe).
+struct FailingWrite;
+
+impl std::io::Write for FailingWrite {
+    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("warning output failed"))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Issue #207 review round 2, M-1: `run_spec_from` wrote the newly prepared task's own warnings
+/// with `?` *before* calling `on_prepared`, so a warning writer that fails stops the function
+/// there and the old task's set-aside copy is never settled, even though preparation (folder,
+/// kits, sandbox, `task.json`) already completed — exactly the boundary decision 185(b) requires.
+/// Reproduced with a worker harness (codex) that can't apply the profile's
+/// `harness.claude.managed_settings` (so `prepared.warnings`, only known once preparation
+/// succeeds, is non-empty) and a `warn` writer that always errors. The reviewer is left at its
+/// default (picked to differ from the worker automatically), so no same-harness warning — which
+/// `config.warnings` would already carry *before* preparation — masks the one this test is about.
+#[test]
+fn restart_settles_after_preparation_even_if_printing_a_warning_fails() {
+    let f =
+        fixture_with("[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = [\"cargo test\"]\n");
+    f.env.write_profile(
+        "default",
+        "[harness.claude]\nmanaged_settings = \"claude/managed.json\"\n",
+    );
+    let managed = f.env.profiles_dir().join("default").join("claude");
+    fs::create_dir_all(&managed).unwrap();
+    fs::write(managed.join("managed.json"), "{}").unwrap();
+
+    let s = spec(&f);
+    let id = id_of(&s);
+    let mut opts = options(&f, s.clone());
+    opts.worker_harness = Some(sbxm::harness::Harness::Codex);
+
+    let failing = FakeBackend::with_secrets(&["anthropic", "openai"]).with_exec_output_matching(
+        "codex",
+        ExecOutput {
+            stdout: String::new(),
+            stderr: "boom".into(),
+            exit_code: Some(1),
+        },
+    );
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let first = run_spec(
+        &f.env.config_dir(),
+        &opts,
+        None,
+        &failing,
+        &FakeGitHub::default(),
+        &Probe,
+        &FakeHostRunner::default(),
+        &mut out,
+        &mut warn,
+    );
+    assert!(first.is_err());
+
+    let gated = FakeBackend::with_secrets(&["anthropic", "openai"]);
+    let mut out = Vec::new();
+    let result = run_spec(
+        &f.env.config_dir(),
+        &opts,
+        Some(&Restart {
+            confirm: &Yes,
+            yes: false,
+        }),
+        &gated,
+        &FakeGitHub::default(),
+        &Probe,
+        &FakeHostRunner::default(),
+        &mut out,
+        &mut FailingWrite,
+    );
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(message.contains("warning output failed"), "{message}");
+    assert!(
+        record::read(&record::task_dir(&f.env.base_dir(), &id).join("task.json")).is_ok(),
+        "the new task's preparation has completed"
+    );
+    assert!(
+        !sbxm::task::finish::has_leftover(&f.env.base_dir(), &id),
+        "settled once prepared, even though printing its warning failed"
+    );
+}
+
 /// The first run's worker fails before committing anything, so its `repo.git` has no commits
 /// beyond the base: nothing for decision 178's protection to refuse (see the next test for the
 /// case where it does), and `--restart` can discard it and run again right away.
