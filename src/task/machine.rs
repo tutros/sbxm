@@ -217,6 +217,17 @@ pub const TABLE: &[Row] = &[
         to: Some(Stage::Fixing),
         action: "run a fix round from the recorded review",
     },
+    // `task review --pr` on a `ready` PR task (issue 195, gap G34): the refusal for an unchanged
+    // head lives in `review_pr` itself, which needs a GitHub call this table does not model.
+    Row {
+        stages: &[Stage::Ready],
+        statuses: &[Status::Ok],
+        live: Live::Any,
+        kinds: PR,
+        event: Event::Advance(Stage::Gating),
+        to: Some(Stage::Gating),
+        action: "fetch the PR's new head, then run the gates",
+    },
     // `task gates` (a task with a worker: issue and spec).
     Row {
         stages: &[Stage::Working, Stage::Fixing],
@@ -310,6 +321,18 @@ pub const TABLE: &[Row] = &[
         event: Event::Review,
         to: Some(Stage::Reviewing),
         action: "retry the reviewer",
+    },
+    // A `ready` PR task is reviewed again (issue 195, gap G34): refused while the PR's head is
+    // still the commit the last review covered, unless `--force` (`task review --pr`'s own
+    // check, which this table does not model since it needs a GitHub call).
+    Row {
+        stages: &[Stage::Ready],
+        statuses: &[Status::Ok],
+        live: Live::Any,
+        kinds: PR,
+        event: Event::Review,
+        to: Some(Stage::Gating),
+        action: "fetch the PR's new head, keep the review as review-<n>.md, run the gates, then the reviewer",
     },
     // `task finish`.
     Row {
@@ -522,9 +545,11 @@ pub fn states(kind: Kind) -> Vec<State> {
     all
 }
 
-/// The states of a `kind` task that are not the end of its life (`finished`; a PR task's `ready`),
-/// not in flight (a `running` task whose process is alive) and from which no command moves it on:
-/// only `rm` is allowed. Each is a gap in the operations.
+/// The states of a `kind` task that are not where it settles once there is nowhere further to go
+/// on its own (`finished`; a PR task's `ready`, which `task review --pr` can still move on from,
+/// issue 195, but nothing drives it there by itself), not in flight (a `running` task whose
+/// process is alive) and from which no command moves it on: only `rm` is allowed. Each is a gap in
+/// the operations.
 pub fn dead_ends(kind: Kind) -> Vec<State> {
     states(kind)
         .into_iter()

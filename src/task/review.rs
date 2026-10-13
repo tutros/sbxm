@@ -53,6 +53,24 @@ pub fn pr_comment(number: u32, risk_section: &str, review: &str) -> String {
     )
 }
 
+/// The `sbxm task review --pr` command a hint prints: with `force: false`, after `task finish`
+/// opens a PR (issue 198, review M-1); with `force: true`, to review an unchanged head again
+/// anyway, both when an issue task's in-task review already covered it (issue 198) and when the
+/// PR task's own last review did (issue 195). It names `repo`, and `base` when one is known, so
+/// it reviews the same PR against the same base wherever it is run, not the PR of that number in
+/// the checkout's `origin` diffed against its default branch. Both are checked names
+/// (`owner/name`, a branch name), so neither needs quoting.
+pub fn review_pr_command(
+    pr: impl std::fmt::Display,
+    repo: &str,
+    base: Option<&str>,
+    force: bool,
+) -> String {
+    let base = base.map_or_else(String::new, |b| format!(" --base {b}"));
+    let force = if force { " --force" } else { "" };
+    format!("sbxm task review --pr {pr} --repo {repo}{base}{force}")
+}
+
 /// The comment `task finish` posts on the PR it opened (issue 198): an issue task's in-task
 /// review, under a line naming the issue and the commit it covered, which is the PR's head, so
 /// the review counts as that head's. Laid out and cut like [`pr_comment`].

@@ -42,7 +42,8 @@ must-fix count, scope, repeat). Where it differs from the target table is listed
 ## 1. States of an issue task (`stage` / `status`)
 
 Legal moves (`Stage::next`): prepared -> working -> gating -> reviewing -> (fixing -> gating -> reviewing) -> ready -> finished.
-A PR task (`pr-N`) has no worker: prepared -> gating -> reviewing -> ready.
+A PR task (`pr-N`) has no worker: prepared -> gating -> reviewing -> ready, and back to gating from
+ready once the PR's head changes (issue 195, gap G34).
 A spec task (`spec-<name>-<hash>`, issue 142) walks the same moves as an issue task, `finished` included; its `finish`
 goes through the `[finish] sink` instead of a PR (decision 174(e), issue 143).
 
@@ -188,6 +189,7 @@ kept here as the design for issues #117-121 to build toward.
 | ready ok (issue) | advance | finished | push the branch and open the PR |
 | ready ok (spec) | advance | finished | deliver the branch through the [finish] sink |
 | ready ok (issue/spec) | advance | fixing | run a fix round from the recorded review |
+| ready ok (pr) | advance | gating | fetch the PR's new head, then run the gates |
 | working/fixing completed/timed-out (issue/spec) | task gates | gating | run the gates |
 | gating passed/gates-failed (issue/spec) | task gates | gating | re-run the gates |
 | gating running (issue/spec), interrupted | task gates | gating | re-run the abandoned gates |
@@ -198,6 +200,7 @@ kept here as the design for issues #117-121 to build toward.
 | prepared running (pr) | task review | gating | run the gates, then the reviewer |
 | gating passed/gates-failed (pr) | task review | reviewing | run the reviewer |
 | reviewing failed (pr) | task review | reviewing | retry the reviewer |
+| ready ok (pr) | task review | gating | fetch the PR's new head, keep the review as review-<n>.md, run the gates, then the reviewer |
 | ready ok (issue) | task finish | finished | push the branch and open the PR |
 | ready ok (spec) | task finish | finished | deliver the branch through the [finish] sink |
 | prepared running (issue/spec), interrupted | task resume | working | make the worker's sandbox again, then run the worker and review |
@@ -291,6 +294,15 @@ tasks, with these differences from the target rows above:
 table's `resume`/`round`/`repeat` machinery, which is still unbuilt for every source. The `ready, issue or spec
 source | finish | finished | sink, see 5.4` row above is built for a spec source by issues 143 (the `local` sink) and 144 (the `push`
 sink), as its own `(spec)` row in the "Today (generated)" table.
+
+**Issue 195 status (gap G34):** the `ready, pr source | finish | refused` row above still holds — a PR task never
+reaches `finished`, and `finish` is still refused for it. But `ready` is no longer the dead end the rest of this
+section's prose describes: `task review --pr` on a `ready` PR task fetches the PR's new head and reviews it again
+(the "Today (generated)" table's own `ready ok (pr) | task review | gating | ...` row), instead of being refused
+outright with only `rm` left. The refusal for an unchanged head (named commit, `--force` to review it anyway) is a
+business rule inside `review_pr` itself, not a row here, since it needs a GitHub call this table does not model; a
+refused attempt or a failed fetch leaves `review.md` and `task.json` untouched. `resume` stays refused for a PR
+task either way: it has no worker, so there is nothing for `resume` to continue.
 
 `resume` is refused while the recorded process is alive (pid and start time, as `interrupted` is decided today).
 `--rounds N` is additive ("N more rounds", N >= 1; 0 is refused) and is valid from any `ready` with `stopped`,

@@ -893,23 +893,9 @@ pub struct Finished {
     /// The commit whose in-task review was posted on the new PR as its review (issue 198);
     /// `None` when no recorded review covered the PR's head.
     pub review_posted: Option<String>,
-    /// The `sbxm task review --pr` command for the PR's next commit ([`review_pr_command`]).
+    /// The `sbxm task review --pr` command for the PR's next commit
+    /// ([`review::review_pr_command`]).
     pub review_again: String,
-}
-
-/// The `sbxm task review --pr` command a hint prints (issue 198, review M-1). It names `repo`,
-/// and `base` when one is known, so it reviews the same PR against the same base wherever it is
-/// run, not the PR of that number in the checkout's `origin` diffed against its default branch.
-/// Both are checked names (`owner/name`, a branch name), so neither needs quoting.
-pub fn review_pr_command(
-    pr: impl std::fmt::Display,
-    repo: &str,
-    base: Option<&str>,
-    force: bool,
-) -> String {
-    let base = base.map_or_else(String::new, |b| format!(" --base {b}"));
-    let force = if force { " --force" } else { "" };
-    format!("sbxm task review --pr {pr} --repo {repo}{base}{force}")
 }
 
 /// The number at the end of a PR's URL (`https://github.com/o/r/pull/7`), as `gh pr create`
@@ -1164,7 +1150,7 @@ pub fn finish(
     };
     let pr = pr_number(&url).map_or_else(|| "<N>".to_owned(), |n| n.to_string());
     Ok(Finished {
-        review_again: review_pr_command(pr, &task.repo, Some(&task.base), false),
+        review_again: review::review_pr_command(pr, &task.repo, Some(&task.base), false),
         url,
         branch: task.branch,
         cuts,
@@ -1200,7 +1186,7 @@ fn post_in_task_review(
         }
         None => Err((None, anyhow::anyhow!("{url} doesn't end in a PR number"))),
     };
-    let review_pr = |pr: &str| review_pr_command(pr, &task.repo, Some(&task.base), false);
+    let review_pr = |pr: &str| review::review_pr_command(pr, &task.repo, Some(&task.base), false);
     let (pr, e) = match posted {
         Ok(pr) => {
             let hint = review_pr(&pr.to_string());
@@ -1478,7 +1464,7 @@ fn finish_continued(
     Ok(Finished {
         // The task's base is the one it was started with, not necessarily the PR's: the review
         // diffs against the repo's default branch, as before, unless `--base` is added.
-        review_again: review_pr_command(pr, &task.repo, None, false),
+        review_again: review::review_pr_command(pr, &task.repo, None, false),
         url,
         branch: task.branch.clone(),
         cuts: Vec::new(),

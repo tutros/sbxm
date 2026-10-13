@@ -64,8 +64,8 @@ pub fn run(
         }
         writeln!(
             out,
-            "  next: review PR #{pr} again with: {} (if it was reviewed before, first sbxm task rm \
-             --pr {pr}); after the merge, clean up with: sbxm task rm --issue {}",
+            "  next: review PR #{pr} again with: {}; after the merge, clean up with: sbxm task rm \
+             --issue {}",
             done.review_again, number
         )?;
         return Ok(());

@@ -485,7 +485,8 @@ fn a_pr_review_prints_the_result_and_that_it_was_posted() {
 
     out.result.unwrap();
     assert!(
-        out.out.contains("pr-7: review: 1 must-fix finding(s)"),
+        out.out
+            .contains("pr-7: review round 1: 1 must-fix finding(s)"),
         "{}",
         out.out
     );
@@ -600,21 +601,36 @@ fn a_review_that_failed_can_be_run_again_without_starting_over() {
     assert!(out.out.contains("posted on PR #7"), "{}", out.out);
 }
 
+/// Issue 195, gap G34: an unchanged head is refused with the commit and the `--force` command,
+/// and forcing it reviews the PR again (same head) instead of needing `task rm --pr` first.
 #[test]
-fn a_pr_that_was_already_reviewed_is_refused_and_says_how_to_start_over() {
+fn a_pr_with_an_unchanged_head_is_refused_unless_forced() {
     let f = config("codex");
     add_pr_head(&f, 7);
     let github = pr_github();
-    go_pr(&f, &pr_options(&f), &pr_backend(&f, &[CLEAN]), &github)
+    let backend = pr_backend(&f, &[CLEAN, ONE]);
+    go_pr(&f, &pr_options(&f), &backend, &github)
         .result
         .unwrap();
 
-    let out = go_pr(&f, &pr_options(&f), &pr_backend(&f, &[CLEAN]), &github);
+    let out = go_pr(&f, &pr_options(&f), &backend, &github);
 
     let message = format!("{:#}", out.result.unwrap_err());
     assert!(
-        message.contains("already") && message.contains("task rm --pr 7"),
+        message.contains("already reviewed") && message.contains("--force"),
         "{message}"
+    );
+
+    let mut forced = pr_options(&f);
+    forced.force = true;
+    let out = go_pr(&f, &forced, &backend, &github);
+
+    out.result.unwrap();
+    assert!(
+        out.out
+            .contains("pr-7: review round 2: 1 must-fix finding(s)"),
+        "{}",
+        out.out
     );
 }
 
@@ -890,4 +906,22 @@ fn a_task_recording_another_repos_pr_or_continuing_the_pr_does_not_count() {
             .unwrap_or_else(|e| panic!("{url} {continues}: {e:#}"));
         assert!(posted(&github), "{url} {continues}");
     }
+}
+
+/// Issue 195, review finding S-1: `--force`'s help names both refusals it overrides, the one for
+/// a head an issue task's in-task review covered and the one for the PR task's own last round.
+#[test]
+fn the_force_help_names_both_reasons_a_head_counts_as_reviewed() {
+    use assert_cmd::Command;
+    let output = Command::cargo_bin("sbxm")
+        .unwrap()
+        .args(["task", "review", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let help = String::from_utf8(output.stdout).unwrap();
+    let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(help.contains("in-task review"), "{help}");
+    assert!(help.contains("PR task's own last review"), "{help}");
 }

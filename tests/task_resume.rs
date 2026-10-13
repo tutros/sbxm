@@ -1468,21 +1468,34 @@ fn a_failed_task_whose_process_is_still_alive_is_refused() {
     assert!(backend.execs().is_empty());
 }
 
+/// Issue 195: a PR task that `task review --pr` can move on (a `ready` one, decision 190, or a
+/// failed reviewer to retry) is pointed straight at it; one the state table still lists as a dead
+/// end is pointed at `task rm --pr`, then `task review --pr`, since a direct review is refused there.
 #[test]
-fn a_pr_task_is_refused() {
-    let f = config();
-    let mut prepared = task_left_in(&f, Stage::Reviewing, Status::Failed);
-    prepared.record.kind = Kind::Pr;
-    let backend = backend(&f, &[CLEAN]);
+fn a_pr_task_is_refused_with_the_recovery_its_state_allows() {
+    let cases = [
+        (Stage::Ready, Status::Ok, false),
+        (Stage::Reviewing, Status::Failed, false),
+        (Stage::Prepared, Status::Failed, true),
+        (Stage::Reviewing, Status::Completed, true),
+    ];
+    for (stage, status, needs_rm) in cases {
+        let f = config();
+        let mut prepared = task_left_in(&f, stage, status);
+        prepared.record.kind = Kind::Pr;
+        let backend = backend(&f, &[CLEAN]);
 
-    let message = format!(
-        "{:#}",
-        resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap_err()
-    );
+        let message = format!(
+            "{:#}",
+            resume::resume(&env(&f, &backend, &Gone), &mut prepared, None).unwrap_err()
+        );
 
-    assert!(message.contains("PR task"), "{message}");
-    assert!(message.contains("task review --pr"), "{message}");
-    assert!(backend.execs().is_empty());
+        let case = format!("{stage:?}/{status:?}: {message}");
+        assert!(message.contains("PR task"), "{case}");
+        assert!(message.contains("task review --pr"), "{case}");
+        assert_eq!(message.contains("task rm --pr"), needs_rm, "{case}");
+        assert!(backend.execs().is_empty(), "{case}");
+    }
 }
 
 #[test]

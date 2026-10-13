@@ -75,7 +75,8 @@ sbxm task run --spec idea.md           # the same for a spec task; no GitHub cal
     gets more fix rounds with `task resume --issue N --rounds N`, and otherwise the only redo is
     `task start --restart`.
   - `task review --pr` has no fix round (a PR task's `fix_rounds` is always 0): the author fixes the findings and
-    reviews again after `task rm --pr N`.
+    runs `task review --pr N` again, which reviews the new head in place, keeping the earlier rounds (decision 190;
+    an unchanged head is refused unless `--force`).
   - **The in-task review counts as the PR's review (decision 187):** `task finish --issue N` posts the review
     recorded in `task.json` on the PR it opens (risk section first, the same one the description opens with, then a
     line naming the reviewed commit), a draft's failing review included, when that review covered the PR's head.
@@ -107,7 +108,7 @@ sbxm task run --spec idea.md           # the same for a spec task; no GitHub cal
   only, never a force: it is refused, with the reason, if the PR's branch moved on GitHub since the task started (or
   was deleted); start the task again with `task start --restart --issue <n>`. If only the comment failed, the task
   stays `ready` and `finish` again retries just the comment. The task is then `finished`; the re-review is
-  `task review --pr N` as before (after `task rm --pr N` if the PR was reviewed already).
+  `task review --pr N` as before (reviewed again in place if the PR was reviewed already).
   - `task gates` is refused once a task is `ready`.
 
 ## How a change to sbxm itself goes
