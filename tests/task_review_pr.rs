@@ -431,6 +431,11 @@ fn an_unchanged_pr_head_is_refused_unless_forced() {
 
     assert_eq!(report.reviewed.unwrap().round, 2, "forced anyway");
     assert_eq!(saved(&f).review.unwrap().must_fix, 1);
+    assert_eq!(
+        saved(&f).gates.len(),
+        2,
+        "a forced review runs the gates again too, same as a changed head"
+    );
 }
 
 /// Issue 195, decision 190(d): a failed fetch of the PR's new head leaves the task exactly as
