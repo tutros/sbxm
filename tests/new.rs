@@ -394,3 +394,43 @@ fn invalid_kit_without_a_sandbox_toml_names_only_the_profile() {
     assert!(!message.contains(&sandbox_toml), "{message}");
     assert!(!message.contains("network entries"), "{message}");
 }
+
+// Issue 210: a low sandbox drive refuses before anything is written or created.
+
+#[test]
+fn a_low_sandbox_drive_refuses_before_anything_is_created() {
+    let env = Env::new();
+    let backend = FakeBackend::default();
+    let options = new::Options {
+        disk: common::low_disk(&env),
+        ..Default::default()
+    };
+
+    let err = format!(
+        "{:#}",
+        env.run_with("demo", &options, &backend).unwrap_err()
+    );
+
+    assert!(err.starts_with(common::LOW_DISK), "{err}");
+    assert!(err.contains("pass --ignore-disk"), "{err}");
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert!(!env.base_dir().join("demo").exists());
+    assert!(!env.base_dir().join(".sbxm").exists());
+}
+
+#[test]
+fn ignore_disk_creates_the_sandbox_anyway() {
+    let env = Env::new();
+    let backend = FakeBackend::default();
+    let options = new::Options {
+        disk: sbxm::disk::Guard {
+            ignore: true,
+            ..common::low_disk(&env)
+        },
+        ..Default::default()
+    };
+
+    env.run_with("demo", &options, &backend).unwrap();
+
+    assert_eq!(backend.creates().len(), 1);
+}

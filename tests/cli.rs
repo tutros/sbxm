@@ -160,3 +160,21 @@ fn task_review_force_needs_pr() {
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(stderr.contains("cannot be used with '--force'"), "{stderr}");
 }
+
+/// Issue 210: every command that creates a sandbox takes `--ignore-disk`.
+#[test]
+fn sandbox_creating_commands_take_ignore_disk() {
+    for args in [
+        &["new", "--help"][..],
+        &["open", "--help"],
+        &["run", "--help"],
+        &["task", "start", "--help"],
+        &["task", "review", "--help"],
+        &["task", "run", "--help"],
+        &["task", "resume", "--help"],
+    ] {
+        let output = sbxm().args(args).assert().success().get_output().clone();
+        let stdout = String::from_utf8(output.stdout).unwrap();
+        assert!(stdout.contains("--ignore-disk"), "{args:?}:\n{stdout}");
+    }
+}

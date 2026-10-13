@@ -357,6 +357,7 @@ fn a_real_run_can_be_shown_right_after_it_finishes() {
     let summary = run::run(
         &env.config_dir(),
         &config,
+        &Default::default(),
         &backend,
         &mut Vec::new(),
         &mut Vec::new(),

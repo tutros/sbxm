@@ -3,7 +3,7 @@
 
 mod common;
 
-use common::Env;
+use common::{Env, toml_path};
 use sbxm::backend::FakeBackend;
 use sbxm::commands::{doctor, new};
 
@@ -16,6 +16,7 @@ fn host() -> doctor::Host {
         free_space: |_| Ok(20 * GIB),
         writable: |_| Ok(()),
         temp_dirs: Vec::new(),
+        sandbox_state_dir: None,
     }
 }
 
@@ -503,6 +504,197 @@ fn unknown_harness_in_state_fails() {
             "FAIL project demo (opencode, profile 'default'): sbxm doesn't know this harness; \
              use an sbxm version that does, or remove its entry from {}",
             metadata.join("state.json").display()
+        )),
+        "{}",
+        report.render()
+    );
+}
+
+// Issue 210 (decision 194): the drive of sbx's sandbox state.
+
+/// An env whose `sandbox_state_dir` is an existing folder.
+fn env_with_state() -> (Env, std::path::PathBuf) {
+    let env = Env::new();
+    let state = env.tmp.path().join("state");
+    std::fs::create_dir(&state).unwrap();
+    env.set_config(&format!("sandbox_state_dir = {}", toml_path(&state)));
+    (env, state)
+}
+
+#[test]
+fn the_sandbox_drive_free_space_is_reported() {
+    let (env, state) = env_with_state();
+
+    let report = report(&env, &FakeBackend::default());
+
+    assert!(!report.failed(), "{}", report.render());
+    assert!(
+        report.render().contains(&format!(
+            "ok   20.0 GiB free on {} (sbx's sandbox state)\n",
+            sbxm::disk::describe(&state)
+        )),
+        "{}",
+        report.render()
+    );
+}
+
+#[test]
+fn a_low_sandbox_drive_warns_without_failing() {
+    let (env, state) = env_with_state();
+    // Only the state folder is low; the base dir has room.
+    let host = doctor::Host {
+        free_space: |path| {
+            Ok(if path.ends_with("state") {
+                3 * GIB
+            } else {
+                20 * GIB
+            })
+        },
+        ..host()
+    };
+
+    let report = report_with(&env, &host);
+
+    assert!(!report.failed(), "{}", report.render());
+    assert!(
+        report.render().contains(&format!(
+            "warn only 3.0 GiB free on {} (sbx's sandbox state); free up space to \
+             at least 10.0 GiB (a full drive makes sbx answer \"try: sbx login\"), or change \
+             min_free_disk in {}\n",
+            sbxm::disk::describe(&state),
+            env.config_dir().join("config.toml").display()
+        )),
+        "{}",
+        report.render()
+    );
+}
+
+#[test]
+fn the_threshold_comes_from_min_free_disk() {
+    let (env, _) = env_with_state();
+    env.set_config("min_free_disk = \"30g\"");
+
+    let text = report(&env, &FakeBackend::default()).render();
+
+    assert!(text.contains("warn only 20.0 GiB free on "), "{text}");
+    assert!(text.contains("at least 30.0 GiB"), "{text}");
+}
+
+#[test]
+fn a_zero_threshold_says_the_check_is_off() {
+    let (env, _) = env_with_state();
+    env.set_config("min_free_disk = \"0\"");
+
+    let text = report(&env, &FakeBackend::default()).render();
+
+    assert!(
+        text.contains(&format!(
+            "ok   sandbox drive not checked: min_free_disk is \"0\" in {}\n",
+            env.config_dir().join("config.toml").display()
+        )),
+        "{text}"
+    );
+}
+
+#[test]
+fn without_a_known_state_folder_doctor_says_so_and_names_the_key() {
+    let env = Env::new();
+
+    let report = report(&env, &FakeBackend::default());
+
+    assert!(!report.failed(), "{}", report.render());
+    assert!(
+        report.render().contains(&format!(
+            "skip sandbox drive not checked: sbxm knows where sbx keeps its sandboxes only on \
+             Windows; set sandbox_state_dir in {} to check it\n",
+            env.config_dir().join("config.toml").display()
+        )),
+        "{}",
+        report.render()
+    );
+}
+
+#[test]
+fn the_platform_default_folder_is_checked() {
+    let env = Env::new();
+    let state = env.tmp.path().join("DockerSandboxes");
+    std::fs::create_dir(&state).unwrap();
+    let host = doctor::Host {
+        sandbox_state_dir: Some(state.clone()),
+        ..host()
+    };
+
+    let text = report_with(&env, &host).render();
+
+    assert!(
+        text.contains(&format!(
+            "ok   20.0 GiB free on {} (sbx's sandbox state)\n",
+            sbxm::disk::describe(&state)
+        )),
+        "{text}"
+    );
+}
+
+#[test]
+fn sandbox_state_dir_overrides_the_platform_default() {
+    let (env, state) = env_with_state();
+    let host = doctor::Host {
+        sandbox_state_dir: Some(env.tmp.path().join("elsewhere")),
+        ..host()
+    };
+
+    let text = report_with(&env, &host).render();
+
+    assert!(
+        text.contains(&format!("on {} ", sbxm::disk::describe(&state))),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_missing_state_folder_warns() {
+    let env = Env::new();
+    let missing = env.tmp.path().join("missing");
+    env.set_config(&format!("sandbox_state_dir = {}", toml_path(&missing)));
+
+    let report = report(&env, &FakeBackend::default());
+
+    assert!(!report.failed(), "{}", report.render());
+    assert!(
+        report.render().contains(&format!(
+            "warn sbx's sandbox state folder {} does not exist, so its drive isn't checked; \
+             check sandbox_state_dir in {}, or that sbx has run on this machine\n",
+            missing.display(),
+            env.config_dir().join("config.toml").display()
+        )),
+        "{}",
+        report.render()
+    );
+}
+
+#[test]
+fn an_unreadable_sandbox_drive_warns() {
+    let (env, state) = env_with_state();
+    let host = doctor::Host {
+        free_space: |path| {
+            if path.ends_with("state") {
+                Err(std::io::Error::other("no statvfs"))
+            } else {
+                Ok(20 * GIB)
+            }
+        },
+        ..host()
+    };
+
+    let report = report_with(&env, &host);
+
+    assert!(!report.failed(), "{}", report.render());
+    assert!(
+        report.render().contains(&format!(
+            "warn free space of {} (sbx's sandbox state): no statvfs; check \
+             sandbox_state_dir in {}\n",
+            sbxm::disk::describe(&state),
+            env.config_dir().join("config.toml").display()
         )),
         "{}",
         report.render()

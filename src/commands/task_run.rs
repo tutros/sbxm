@@ -11,6 +11,7 @@ use super::task_review;
 use super::task_start::{self, Restart};
 use crate::backend::SandboxBackend;
 use crate::config::GlobalConfig;
+use crate::disk;
 use crate::github::GitHubBackend;
 use crate::harness::Harness;
 use crate::run::config::{check_model_flag, headless_harness, parse_duration};
@@ -40,6 +41,25 @@ pub struct Options {
     pub clone_source: Option<String>,
     /// For tests: the committer identity.
     pub identity: Option<Identity>,
+    /// The free-space check of the sandbox drive before a sandbox is created (decision 194).
+    pub disk: disk::Guard,
+}
+
+/// The drive can fill up while the worker runs, so it is checked again before the reviewer's
+/// sandbox (decision 194). A refusal names `task review`, which goes on from here: `task run`
+/// would not pick the task up again. Returns the guard to hand the review, which has nothing left
+/// to check: its own refusal would name no way to continue.
+fn review_has_room(config_dir: &Path, guard: &disk::Guard, flag: &str) -> Result<disk::Guard> {
+    disk::require(&GlobalConfig::load(config_dir)?, config_dir, guard).with_context(|| {
+        format!(
+            "the worker is done but its review was not started; continue with `sbxm task review \
+             {flag}`"
+        )
+    })?;
+    Ok(disk::Guard {
+        ignore: true,
+        ..guard.clone()
+    })
 }
 
 /// Drops the `next:` hint of a step that isn't the last one.
@@ -148,6 +168,7 @@ fn run_issue(
         if let Some(profile) = &opts.profile {
             config.sandbox.profile = profile.clone();
         }
+        disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?;
         pipeline::check_reviewer_inputs(config_dir, backend, &config)?;
     }
 
@@ -163,6 +184,7 @@ fn run_issue(
         repo: opts.repo.clone(),
         clone_source: opts.clone_source.clone(),
         identity: opts.identity.clone(),
+        disk: opts.disk.clone(),
     };
     let mut warn = Once {
         inner: warn,
@@ -189,6 +211,7 @@ fn run_issue(
         return Err(e);
     }
 
+    let disk = review_has_room(config_dir, &opts.disk, &format!("--issue {}", opts.issue))?;
     task_review::run(
         config_dir,
         &task_review::Options {
@@ -204,6 +227,7 @@ fn run_issue(
             profile: opts.profile.clone(),
             resolved_spec_id: None,
             force: false,
+            disk,
         },
         backend,
         github,
@@ -234,6 +258,8 @@ pub struct SpecOptions {
     pub clone_source: Option<String>,
     /// For tests: the committer identity.
     pub identity: Option<Identity>,
+    /// The free-space check of the sandbox drive before a sandbox is created (decision 194).
+    pub disk: disk::Guard,
 }
 
 /// Sets the spec task of `spec` aside, if one exists, instead of deleting it (decision 185): the
@@ -341,6 +367,7 @@ fn run_spec_task(
         if let Some(profile) = &opts.profile {
             config.sandbox.profile = profile.clone();
         }
+        disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?;
         pipeline::check_reviewer_inputs(config_dir, backend, &config)?;
     }
 
@@ -355,6 +382,7 @@ fn run_spec_task(
         repo: opts.repo.clone(),
         clone_source: opts.clone_source.clone(),
         identity: opts.identity.clone(),
+        disk: opts.disk.clone(),
     };
     // The same preflight `task_start::run_spec` itself runs, so a bad --time-limit, repo,
     // identity, base or spec file is caught here too: `--restart`'s discard below must not cost
@@ -466,6 +494,7 @@ fn run_spec_task(
         return Err(e);
     }
 
+    let disk = review_has_room(config_dir, &opts.disk, &task_start::spec_flag(&opts.spec))?;
     task_review::run(
         config_dir,
         &task_review::Options {
@@ -481,6 +510,7 @@ fn run_spec_task(
             profile: opts.profile.clone(),
             resolved_spec_id: Some(spec_id),
             force: false,
+            disk,
         },
         backend,
         github,

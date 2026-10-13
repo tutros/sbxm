@@ -8,7 +8,9 @@ this file shows how the commands fit together and when to use which. `sbxm` has 
 1. `sbxm config init` writes `config.toml` and a `default` profile (refuses to overwrite).
 2. Set `base_dir` in `config.toml` to a folder that is **not on `C:`**: on the Windows host this was built on, `sbx` fails
    to mount a workspace on `C:` (decision 56).
-3. `sbxm doctor`: every line should start with `ok`.
+3. `sbxm doctor`: every line should start with `ok`. A `skip` line says what to set for a check to run (on macOS and
+   Linux, `sandbox_state_dir` for the sandbox drive), and a `warn` line is a problem that doesn't fail `doctor` yet
+   (the sandbox drive under `min_free_disk`).
 4. Store the provider secrets in `sbx` (`sbx secret ls`): `anthropic` for Claude, `openai` for Codex (also the default
    reviewer for a Claude worker), `google` for Antigravity. For `sbxm task`, run `gh auth setup-git` once.
 5. `just deploy-profiles` copies the repo's `profiles/*` into the folder `sbxm config profiles-dir` reports. It replaces
@@ -154,6 +156,12 @@ same tasks and only reads).
   of a large dependency tree (fastembed, ONNX Runtime) can fill it: `/tmp/target` reached 17 GB. Keep over 10 GB free
   before starting a sandbox, run one sandbox at a time unless over 25 GB is free, and delete `/tmp/target` in a
   sandbox you keep. Deleting files inside a sandbox does not return space to the host; removing the sandbox does.
+  sbxm checks this for you: `doctor` reports that drive's free space, and `new`, `open` (when it creates or rebuilds),
+  `run`, `task start`, `task review`, `task run` and `task resume` refuse before writing anything when it is under
+  `min_free_disk` in `config.toml` (default `"10g"`; `"0"` switches the check off), naming the drive and its free
+  space; `--ignore-disk` lets one command through. The folder is `%LOCALAPPDATA%\DockerSandboxes` on Windows, or
+  `sandbox_state_dir` in `config.toml` on any platform; on macOS and Linux without that key nothing is checked (a full
+  drive makes `sbx` answer `try: sbx login`, which looks like a login problem).
   A junction from `sbx`'s `state` folder to a bigger drive was tried (2026-10-03, `sbx` 0.46.0) and does not work for the
   `claude` agent: sandbox creation fails with `policybind: resolve policy source`. A plain `shell` sandbox worked, so a
   quick test with it is not enough. See gap G19 in `sdlc/evals-workflow-notes.md`.

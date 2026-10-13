@@ -34,6 +34,7 @@ fn options(f: &Fixture, spec: PathBuf) -> SpecOptions {
             name: "Dev".into(),
             email: "dev@example.com".into(),
         }),
+        disk: Default::default(),
     }
 }
 
@@ -332,4 +333,21 @@ fn a_gate_that_cannot_run_does_not_name_the_review_as_the_next_step() {
     assert!(message.contains("cargo test"), "{message}");
     let not_wanted = format!("next: sbxm task review --spec {}", spec.display());
     assert!(!message.contains(&not_wanted), "{message}");
+}
+
+#[test]
+fn a_low_sandbox_drive_refuses_before_anything_is_written() {
+    let f = fixture();
+    let spec = spec_file(&f, "Build a thing.\n");
+    let (id, _) = record::spec_id(&spec).unwrap();
+    let backend = playing(&f, &id);
+    let mut opts = options(&f, spec);
+    opts.disk = common::low_disk(&f.env);
+
+    let out = run(&f, &opts, &backend, &FakeGitHub::default());
+
+    let err = format!("{:#}", out.result.unwrap_err());
+    assert!(err.starts_with(common::LOW_DISK), "{err}");
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert!(!record::task_dir(&f.env.base_dir(), &id).exists());
 }

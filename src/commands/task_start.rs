@@ -10,6 +10,7 @@ use anyhow::{Result, anyhow, bail};
 use crate::backend::SandboxBackend;
 use crate::config::GlobalConfig;
 use crate::confirm::Confirm;
+use crate::disk;
 use crate::git;
 use crate::github::GitHubBackend;
 use crate::harness::Harness;
@@ -41,6 +42,8 @@ pub struct Options {
     pub clone_source: Option<String>,
     /// For tests: the committer identity instead of the user's global git config.
     pub identity: Option<Identity>,
+    /// The free-space check of the sandbox drive before a sandbox is created (decision 194).
+    pub disk: disk::Guard,
 }
 
 fn name_ok(segment: &str) -> bool {
@@ -335,6 +338,7 @@ fn start(
     if let Some(profile) = &opts.profile {
         config.sandbox.profile = profile.clone();
     }
+    disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?;
     let repo_name = resolve_repo(opts.repo.as_deref(), &opts.repo_root)?;
     let identity = match &opts.identity {
         Some(identity) => identity.clone(),
@@ -614,6 +618,8 @@ pub struct SpecOptions {
     pub clone_source: Option<String>,
     /// For tests: the committer identity instead of the user's global git config.
     pub identity: Option<Identity>,
+    /// The free-space check of the sandbox drive before a sandbox is created (decision 194).
+    pub disk: disk::Guard,
 }
 
 /// Every input [`run_spec`] resolves before it does anything with the backend or writes
@@ -710,6 +716,7 @@ pub fn run_spec(
     warn: &mut dyn Write,
 ) -> Result<()> {
     let start = resolve_spec_start(opts)?;
+    disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?;
     run_spec_from(
         config_dir,
         opts,

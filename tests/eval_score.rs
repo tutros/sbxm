@@ -469,6 +469,7 @@ fn judged_run() -> (Env, run::Summary, String) {
     let summary = run::run(
         &env.config_dir(),
         &path,
+        &Default::default(),
         &backend,
         &mut out,
         &mut Vec::new(),
@@ -532,6 +533,7 @@ fn a_run_with_no_judge_prints_no_ranking() {
     let summary = run::run(
         &env.config_dir(),
         &path,
+        &Default::default(),
         &backend,
         &mut out,
         &mut Vec::new(),

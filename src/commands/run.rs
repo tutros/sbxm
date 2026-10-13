@@ -9,6 +9,7 @@ use anyhow::{Result, bail};
 
 use crate::backend::SandboxBackend;
 use crate::config::GlobalConfig;
+use crate::disk;
 use crate::eval::cosine::{self, CosineEntry, Embedder, FailingEmbedder, FastEmbedder};
 use crate::eval::{judge, score};
 use crate::headless::RunStatus;
@@ -57,11 +58,12 @@ impl std::error::Error for PairsErrored {}
 pub fn run(
     config_dir: &Path,
     config_path: &Path,
+    disk: &disk::Guard,
     backend: &dyn SandboxBackend,
     out: &mut dyn Write,
     warn: &mut dyn Write,
 ) -> Result<Summary> {
-    run_with(config_dir, config_path, backend, out, warn, None)
+    run_with(config_dir, config_path, disk, backend, out, warn, None)
 }
 
 /// Like [`run`], but runs `[eval.cosine]` (if configured) against `embedder`
@@ -71,28 +73,40 @@ pub fn run(
 pub fn run_with_embedder(
     config_dir: &Path,
     config_path: &Path,
+    disk: &disk::Guard,
     backend: &dyn SandboxBackend,
     out: &mut dyn Write,
     warn: &mut dyn Write,
     embedder: &dyn Embedder,
 ) -> Result<Summary> {
-    run_with(config_dir, config_path, backend, out, warn, Some(embedder))
+    run_with(
+        config_dir,
+        config_path,
+        disk,
+        backend,
+        out,
+        warn,
+        Some(embedder),
+    )
 }
 
 fn run_with(
     config_dir: &Path,
     config_path: &Path,
+    disk: &disk::Guard,
     backend: &dyn SandboxBackend,
     out: &mut dyn Write,
     warn: &mut dyn Write,
     embedder_override: Option<&dyn Embedder>,
 ) -> Result<Summary> {
     let run_config = RunConfig::load(config_path)?;
+    let global = GlobalConfig::load(config_dir)?;
+    // Before preflight's calls to `sbx`, like every other refusal (decision 194).
+    disk::require(&global, config_dir, disk)?;
     let checked = preflight::check(config_dir, &run_config, backend)?;
     for warning in &checked.warnings {
         writeln!(warn, "warning: {warning}")?;
     }
-    let global = GlobalConfig::load(config_dir)?;
     if !global.base_dir.is_dir() {
         bail!(
             "base dir {} does not exist; create it or change base_dir in {}",

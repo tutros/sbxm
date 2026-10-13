@@ -34,6 +34,7 @@ fn options(f: &Fixture) -> Options {
             name: "Dev".into(),
             email: "dev@example.com".into(),
         }),
+        disk: Default::default(),
     }
 }
 
@@ -649,4 +650,40 @@ fn an_issue_selection_already_skips_never_costs_a_pr_lookup_or_a_warning() {
             .collect();
         assert!(looked_up.is_empty(), "{looked_up:?}");
     }
+}
+
+// Issue 210: a low sandbox drive refuses before anything is created or asked of GitHub.
+
+#[test]
+fn a_low_sandbox_drive_refuses_before_anything_is_created() {
+    let f = fixture();
+    let (backend, github) = (playing(&f), github());
+    let mut opts = options(&f);
+    opts.base = None;
+    opts.disk = common::low_disk(&f.env);
+
+    let out = run(&f, &opts, &backend, &github);
+
+    let err = format!("{:#}", out.result.unwrap_err());
+    assert!(err.starts_with(common::LOW_DISK), "{err}");
+    assert!(err.contains("pass --ignore-disk"), "{err}");
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert!(github.calls().is_empty(), "{:?}", github.calls());
+    assert!(!record::task_dir(&f.env.base_dir(), "issue-41").exists());
+}
+
+#[test]
+fn ignore_disk_starts_the_task_anyway() {
+    let f = fixture();
+    let (backend, github) = (playing(&f), github());
+    let mut opts = options(&f);
+    opts.disk = sbxm::disk::Guard {
+        ignore: true,
+        ..common::low_disk(&f.env)
+    };
+
+    let out = run(&f, &opts, &backend, &github);
+
+    out.result.unwrap();
+    assert_eq!(backend.creates().len(), 1);
 }

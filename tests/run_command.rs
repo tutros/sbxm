@@ -34,7 +34,14 @@ fn go(env: &Env, body: &str, backend: &FakeBackend) -> Ran {
     let path = env.tmp.path().join("run.toml");
     std::fs::write(&path, body).unwrap();
     let (mut out, mut warn) = (Vec::new(), Vec::new());
-    let result = run::run(&env.config_dir(), &path, backend, &mut out, &mut warn);
+    let result = run::run(
+        &env.config_dir(),
+        &path,
+        &Default::default(),
+        backend,
+        &mut out,
+        &mut warn,
+    );
     Ran {
         result,
         out: String::from_utf8(out).unwrap(),
@@ -508,4 +515,69 @@ fn run_init_still_works_next_to_run_config() {
     cli(tmp.path(), &["run", "init"]).success();
 
     assert!(PathBuf::from(tmp.path()).join("run.toml").is_file());
+}
+
+// Issue 210: a low sandbox drive refuses before the run is reserved or any sandbox exists.
+
+#[test]
+fn a_low_sandbox_drive_refuses_before_anything_is_written() {
+    let env = Env::new();
+    let backend = pong();
+    let path = env.tmp.path().join("run.toml");
+    std::fs::write(&path, format!("{TASK}{TWO_CLAUDES}")).unwrap();
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+
+    let result = run::run(
+        &env.config_dir(),
+        &path,
+        &common::low_disk(&env),
+        &backend,
+        &mut out,
+        &mut warn,
+    );
+
+    let err = format!("{:#}", result.unwrap_err());
+    assert!(err.starts_with(common::LOW_DISK), "{err}");
+    assert!(err.contains("pass --ignore-disk"), "{err}");
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert_eq!(backend.secret_service_calls(), 0);
+    nothing_written(&env);
+}
+
+#[test]
+fn ignore_disk_runs_anyway() {
+    let env = Env::new();
+    let backend = pong();
+    let path = env.tmp.path().join("run.toml");
+    std::fs::write(&path, format!("{TASK}{TWO_CLAUDES}")).unwrap();
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let disk = sbxm::disk::Guard {
+        ignore: true,
+        ..common::low_disk(&env)
+    };
+
+    run::run(
+        &env.config_dir(),
+        &path,
+        &disk,
+        &backend,
+        &mut out,
+        &mut warn,
+    )
+    .unwrap();
+}
+
+#[test]
+fn run_takes_ignore_disk() {
+    let env = Env::new();
+    let assert = Command::cargo_bin("sbxm")
+        .unwrap()
+        .env("SBXM_CONFIG_DIR", env.config_dir())
+        .args(["run", "--ignore-disk", "missing.toml"])
+        .assert()
+        .failure();
+    // Past argument parsing: the run-config itself is what's missing.
+    let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
+    assert!(stderr.contains("missing.toml"), "{stderr}");
+    assert!(!stderr.contains("unexpected argument"), "{stderr}");
 }

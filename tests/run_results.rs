@@ -39,7 +39,14 @@ fn go(env: &Env, body: &str, backend: &FakeBackend) -> Ran {
     let path = env.tmp.path().join("run.toml");
     std::fs::write(&path, body).unwrap();
     let (mut out, mut warn) = (Vec::new(), Vec::new());
-    let summary = run::run(&env.config_dir(), &path, backend, &mut out, &mut warn);
+    let summary = run::run(
+        &env.config_dir(),
+        &path,
+        &Default::default(),
+        backend,
+        &mut out,
+        &mut warn,
+    );
     Ran {
         summary,
         out: String::from_utf8(out).unwrap(),
@@ -281,6 +288,7 @@ fn completed_at_is_only_set_after_every_pair_finished() {
             run::run(
                 &env.config_dir(),
                 &path,
+                &Default::default(),
                 &backend,
                 &mut Vec::new(),
                 &mut Vec::new(),
@@ -322,6 +330,7 @@ fn one_pair_stuck_mid_run_leaves_the_others_results_already_on_disk() {
             run::run(
                 &env.config_dir(),
                 &path,
+                &Default::default(),
                 &backend,
                 &mut Vec::new(),
                 &mut Vec::new(),

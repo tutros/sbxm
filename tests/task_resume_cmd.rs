@@ -67,6 +67,7 @@ fn options(f: &Fixture, rounds: Option<u32>) -> Options {
         repo_root: f.env.tmp.path().join("target-repo"),
         target: Target::Issue(41),
         rounds,
+        disk: Default::default(),
     }
 }
 
@@ -371,4 +372,38 @@ fn gates_that_cannot_run_fail_the_resume_with_the_reason_and_no_further_round() 
         record.round, 2,
         "only the fix round from the stopped review ran, of the 2 more allowed"
     );
+}
+
+// Issue 210: a low sandbox drive refuses before the resume changes anything.
+
+#[test]
+fn a_low_sandbox_drive_refuses_before_resuming() {
+    let f = config();
+    leave_in(&f, Stage::Working, Status::Failed);
+    let task_json = record::task_dir(&f.env.base_dir(), "issue-41").join("task.json");
+    let before = std::fs::read(&task_json).unwrap();
+    let backend = backend(&f, &[CLEAN]);
+    let mut opts = options(&f, None);
+    opts.disk = common::low_disk(&f.env);
+
+    let out = go(&f, &opts, &backend, &Gone);
+
+    let err = format!("{:#}", out.result.unwrap_err());
+    assert!(err.starts_with(common::LOW_DISK), "{err}");
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert_eq!(std::fs::read(&task_json).unwrap(), before);
+    assert!(!out.out.contains("resuming"), "{}", out.out);
+}
+
+#[test]
+fn a_refused_resume_is_refused_for_its_own_reason_first() {
+    let f = config();
+    leave_in(&f, Stage::Working, Status::Failed);
+    let mut opts = options(&f, None);
+    opts.disk = common::low_disk(&f.env);
+
+    let out = go(&f, &opts, &backend(&f, &[CLEAN]), &Alive);
+
+    let err = format!("{:#}", out.result.unwrap_err());
+    assert!(!err.starts_with(common::LOW_DISK), "{err}");
 }

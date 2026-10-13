@@ -86,6 +86,7 @@ fn options(f: &Fixture, spec: PathBuf) -> SpecOptions {
             name: "Dev".into(),
             email: "dev@example.com".into(),
         }),
+        disk: Default::default(),
     }
 }
 
@@ -1117,4 +1118,88 @@ fn restart_puts_the_old_task_back_even_when_the_screen_stops_taking_output() {
         !sbxm::task::finish::has_leftover(&f.env.base_dir(), &id),
         "{message}"
     );
+}
+
+// Issue 210: a low sandbox drive refuses before anything is created.
+
+#[test]
+fn a_low_sandbox_drive_refuses_before_anything_is_created() {
+    let f = config();
+    let s = spec(&f);
+    let id = id_of(&s);
+    let b = backend_for(&f, &id, &[CLEAN_REVIEW]);
+    let mut opts = options(&f, s);
+    opts.disk = common::low_disk(&f.env);
+
+    let out = go(&f, &opts, None, &b, &FakeGitHub::default());
+
+    let err = format!("{:#}", out.result.unwrap_err());
+    assert!(err.starts_with(common::LOW_DISK), "{err}");
+    assert!(b.log().is_empty(), "{:?}", b.log());
+    assert_eq!(b.secret_service_calls(), 0);
+    assert!(!record::task_dir(&f.env.base_dir(), &id).exists());
+}
+
+/// Issue 210: a drive that fills during the worker stops before the reviewer's sandbox, naming
+/// `task review --spec`.
+#[test]
+fn a_drive_that_fills_during_the_worker_stops_before_the_review_naming_task_review() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static READS: AtomicUsize = AtomicUsize::new(0);
+    let f = config();
+    let s = spec(&f);
+    let id = id_of(&s);
+    let b = backend_for(&f, &id, &[CLEAN_REVIEW]);
+    let mut opts = options(&f, s.clone());
+    // Room for `task run`'s own check (the start reuses it); none left for the review.
+    opts.disk = sbxm::disk::Guard {
+        free_space: |_| {
+            let gib = 1024 * 1024 * 1024;
+            Ok(if READS.fetch_add(1, Ordering::SeqCst) < 1 {
+                20 * gib
+            } else {
+                gib
+            })
+        },
+        ..common::low_disk(&f.env)
+    };
+
+    let out = go(&f, &opts, None, &b, &FakeGitHub::default());
+
+    let err = format!("{:#}", out.result.unwrap_err());
+    assert!(
+        err.starts_with(&format!(
+            "the worker is done but its review was not started; continue with `sbxm task review \
+             --spec {}`: only 1.0 GiB free on ",
+            s.display()
+        )),
+        "{err}"
+    );
+    assert_eq!(b.creates().len(), 1, "{:?}", b.log());
+}
+
+#[test]
+fn the_review_after_the_worker_reads_the_drive_once_so_its_refusal_names_task_review() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static READS: AtomicUsize = AtomicUsize::new(0);
+    let f = config();
+    let s = spec(&f);
+    let id = id_of(&s);
+    let b = backend_for(&f, &id, &[CLEAN_REVIEW]);
+    let mut opts = options(&f, s);
+    opts.disk = sbxm::disk::Guard {
+        free_space: |_| {
+            READS.fetch_add(1, Ordering::SeqCst);
+            Ok(20 * 1024 * 1024 * 1024)
+        },
+        ..common::low_disk(&f.env)
+    };
+
+    let out = go(&f, &opts, None, &b, &FakeGitHub::default());
+
+    out.result.unwrap();
+    // `task run`'s own check and the one before the review: the review itself doesn't read the
+    // drive again with a refusal that names no way to continue.
+    assert_eq!(READS.load(Ordering::SeqCst), 2);
+    assert_eq!(b.creates().len(), 2, "{:?}", b.log());
 }

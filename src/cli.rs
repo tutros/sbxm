@@ -27,6 +27,10 @@ pub enum Command {
         /// Agent harness to run in the sandbox.
         #[arg(long, value_enum, default_value_t)]
         harness: Harness,
+        /// Create the sandbox even when the drive of sbx's sandbox state has less than
+        /// min_free_disk free.
+        #[arg(long)]
+        ignore_disk: bool,
     },
     /// List sbxm sandboxes and flag orphans.
     List {
@@ -45,6 +49,10 @@ pub enum Command {
         /// Which of the project's sandboxes to open.
         #[arg(long, value_enum)]
         harness: Harness,
+        /// Create or rebuild the sandbox even when the drive of sbx's sandbox state has less
+        /// than min_free_disk free.
+        #[arg(long)]
+        ignore_disk: bool,
     },
     /// Stop a project's sandbox.
     Stop {
@@ -136,6 +144,9 @@ pub struct RunArgs {
     /// The run-config file (create one with `sbxm run init`).
     #[arg(required = true)]
     pub config: Option<PathBuf>,
+    /// Run even when the drive of sbx's sandbox state has less than min_free_disk free.
+    #[arg(long)]
+    pub ignore_disk: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -228,6 +239,10 @@ pub enum TaskCommand {
         /// With --restart: don't ask before deleting.
         #[arg(long, requires = "restart")]
         yes: bool,
+        /// Create the sandbox even when the drive of sbx's sandbox state has less than
+        /// min_free_disk free.
+        #[arg(long)]
+        ignore_disk: bool,
     },
     /// Review a task: gates, an independent reviewer in its own sandbox, at most one fix round by
     /// the worker, gates and a second review; ends ready. Blocks until it is done.
@@ -270,6 +285,10 @@ pub enum TaskCommand {
         /// the commit the PR task's own last review covered.
         #[arg(long, conflicts_with_all = ["issue", "spec"])]
         force: bool,
+        /// Create the sandbox even when the drive of sbx's sandbox state has less than
+        /// min_free_disk free.
+        #[arg(long)]
+        ignore_disk: bool,
     },
     /// Continue a task from its recorded stage, keeping its clone and commits: a failed or
     /// interrupted preparation, worker, review or fix round runs again, and the task goes on to
@@ -286,6 +305,10 @@ pub enum TaskCommand {
         /// fix rounds to its budget and start a fix round from its review.md.
         #[arg(long, value_name = "N")]
         rounds: Option<u32>,
+        /// Create the sandbox even when the drive of sbx's sandbox state has less than
+        /// min_free_disk free.
+        #[arg(long)]
+        ignore_disk: bool,
     },
     /// Run a task's gates now (the checks that decide whether its work may go on), or with
     /// --dry-run say what would run and where.
@@ -362,6 +385,10 @@ pub enum TaskCommand {
         /// With --restart: don't ask before deleting.
         #[arg(long, requires = "restart")]
         yes: bool,
+        /// Create the sandbox even when the drive of sbx's sandbox state has less than
+        /// min_free_disk free.
+        #[arg(long)]
+        ignore_disk: bool,
     },
     /// Publish a ready task: an issue's task pushes its branch and opens its PR (`Fixes #N`, with
     /// the result and the review in the body); a spec task goes to its `[finish] sink` (the

@@ -213,7 +213,14 @@ fn go(checks_toml: &str, backend: &FakeBackend) -> Ran {
     let (mut out, mut warn) = (Vec::new(), Vec::new());
     // A run with a pair that could not be run fails (decision 181), but its summary is complete:
     // these tests are about the checks, so they take it either way.
-    let summary = match run::run(&env.config_dir(), &path, backend, &mut out, &mut warn) {
+    let summary = match run::run(
+        &env.config_dir(),
+        &path,
+        &Default::default(),
+        backend,
+        &mut out,
+        &mut warn,
+    ) {
         Ok(summary) => summary,
         Err(e) => e.downcast::<run::PairsErrored>().unwrap().summary,
     };
@@ -315,6 +322,7 @@ fn a_check_sees_the_agents_files_but_its_side_effects_stay_out_of_the_diff() {
     let summary = run::run(
         &env.config_dir(),
         &path,
+        &Default::default(),
         &backend,
         &mut Vec::new(),
         &mut Vec::new(),

@@ -6,6 +6,7 @@ use anyhow::{Result, bail};
 use super::{new, open_harness_flag, rm};
 use crate::backend::SandboxBackend;
 use crate::config::{self, GlobalConfig, Profile};
+use crate::disk;
 use crate::harness::Harness;
 use crate::{project, state};
 
@@ -15,6 +16,8 @@ pub struct Options {
     pub rebuild: bool,
     /// Which of the project's sandboxes to open.
     pub harness: Harness,
+    /// The free-space check of the sandbox drive, when `open` creates or rebuilds (decision 194).
+    pub disk: disk::Guard,
 }
 
 /// Attaches to the project's sandbox, creating it first (via `new`) if it
@@ -34,6 +37,10 @@ pub fn run(
     let mut state = state::load(&metadata_dir)?.unwrap_or_default();
     let entry = state.sandboxes.remove(harness.as_str());
     let exists = backend.list()?.iter().any(|s| s.name == sandbox);
+    // Checked here too, not only by `new`, so a refused rebuild doesn't first warn about it.
+    if options.rebuild || !exists {
+        disk::require(&config, config_dir, &options.disk)?;
+    }
 
     match (entry, exists) {
         (Some(entry), true) if options.rebuild => {
@@ -47,6 +54,7 @@ pub fn run(
                 profile: entry.profile,
                 replace: true,
                 harness,
+                disk: options.disk.clone(),
                 ..new::Options::default()
             };
             new::run(config_dir, name, &options, backend, warn)?;
@@ -71,6 +79,7 @@ pub fn run(
                 recreate: entry.is_some(),
                 profile: entry.and_then(|e| e.profile),
                 harness,
+                disk: options.disk.clone(),
                 ..new::Options::default()
             };
             new::run(config_dir, name, &options, backend, warn)?

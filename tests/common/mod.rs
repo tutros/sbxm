@@ -45,6 +45,13 @@ impl Env {
         std::fs::write(dir.join("profile.toml"), contents).unwrap();
     }
 
+    /// Writes top-level `lines` into the test config, before its `[resources]` table.
+    pub fn set_config(&self, lines: &str) {
+        let path = self.config_dir().join("config.toml");
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, format!("{lines}\n{text}")).unwrap();
+    }
+
     pub fn config_dir(&self) -> PathBuf {
         self.tmp.path().join("config")
     }
@@ -99,6 +106,26 @@ impl Env {
 }
 
 /// Plain `git` for building fixtures; returns trimmed stdout.
+/// A [`sbxm::disk::Guard`] that finds 1 GiB free on the drive of an existing sandbox state
+/// folder in `env`, under the default threshold of 10 GiB (issue 210).
+pub fn low_disk(env: &Env) -> sbxm::disk::Guard {
+    let state = env.tmp.path().join("sbx-state");
+    std::fs::create_dir_all(&state).unwrap();
+    sbxm::disk::Guard {
+        free_space: |_| Ok(1024 * 1024 * 1024),
+        default_state_dir: Some(state),
+        ignore: false,
+    }
+}
+
+/// The start of the refusal [`low_disk`] leads to.
+pub const LOW_DISK: &str = "only 1.0 GiB free on ";
+
+/// `path` as a TOML string.
+pub fn toml_path(path: &Path) -> String {
+    toml::Value::String(path.to_str().unwrap().to_owned()).to_string()
+}
+
 pub fn git(dir: &Path, args: &[&str]) -> String {
     // Windows can briefly refuse git a file an indexer or antivirus holds (issue #39), which
     // shows up as "Permission denied" or "failed to write object"; the production runner

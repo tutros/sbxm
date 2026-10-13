@@ -36,6 +36,17 @@ pub struct GlobalConfig {
     #[serde(default = "default_min_sbx_version")]
     pub min_sbx_version: String,
     pub resources: Resources,
+    /// `min_free_disk` as written; parsed into [`GlobalConfig::min_free_disk`] by
+    /// [`GlobalConfig::load`] (decision 194).
+    #[serde(default, rename = "min_free_disk")]
+    min_free_disk_text: Option<String>,
+    /// Bytes that must stay free on the drive of `sbx`'s sandbox state before a command creates
+    /// a sandbox; `0` switches the check off. 10 GiB when unset.
+    #[serde(skip)]
+    pub min_free_disk: u64,
+    /// Where `sbx` keeps its sandboxes, overriding the platform default (decision 194).
+    #[serde(default)]
+    pub sandbox_state_dir: Option<PathBuf>,
     /// Written by `config init` before decision 76 but never read; refused
     /// by [`GlobalConfig::load`] rather than silently ignored.
     #[serde(default)]
@@ -77,6 +88,16 @@ impl GlobalConfig {
                 path.display()
             );
         }
+        config.min_free_disk = match &config.min_free_disk_text {
+            None => crate::disk::DEFAULT_MIN_FREE,
+            Some(text) => crate::disk::parse_size(text).map_err(|_| {
+                anyhow::anyhow!(
+                    "min_free_disk {text:?} in {} isn't a size; use a number with a unit, like \
+                     \"10g\" (k, m, g or t), or \"0\" to switch the check off",
+                    path.display()
+                )
+            })?,
+        };
         config
             .profiles_dir
             .get_or_insert_with(|| config_dir.join("profiles"));
