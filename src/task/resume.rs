@@ -1,7 +1,7 @@
 //! `sbxm task resume` (issue 118; decisions 173(c), 175; spec `sdlc/specs/task-state-machine.md`
 //! section 5.2): continues an issue or spec task from its recorded stage, keeping its clone and
 //! commits, and carries it on to `ready` the way `task review` would. Refused while the recorded
-//! `sbxm` process is alive, and for a PR task (no worker; `ready` ends it). Decided through
+//! `sbxm` process is alive, and for a PR task (no worker; `task review --pr` moves it on). Decided through
 //! `machine::TABLE`'s `Resume` rows; the refusal text for each state lives here.
 
 use anyhow::{Context, Result, bail};
@@ -42,11 +42,24 @@ pub fn check_can_resume(
     rounds: Option<u32>,
 ) -> Result<()> {
     let id = &task.id;
+    let state = machine::State {
+        stage: task.stage,
+        status: task.status,
+        interrupted: task.is_interrupted(probe),
+        kind: task.kind,
+    };
     if task.kind == Kind::Pr {
+        // `task review --pr` moves a `ready` PR task on (decision 190) and retries a failed one;
+        // from a dead end of the state table it is refused, so the task goes first.
+        let n = task.number;
+        let review = if machine::dead_ends(Kind::Pr).contains(&state) {
+            format!("`sbxm task rm --pr {n}`, then `sbxm task review --pr {n}`")
+        } else {
+            format!("`sbxm task review --pr {n}`")
+        };
         bail!(
             "task {id} is a PR task, which has no worker or fix rounds to resume; to review the PR \
-             again, run `sbxm task review --pr {n}`",
-            n = task.number
+             again, run {review}"
         );
     }
     if task.process_alive(probe)
@@ -82,12 +95,6 @@ pub fn check_can_resume(
             u32::MAX
         );
     }
-    let state = machine::State {
-        stage: task.stage,
-        status: task.status,
-        interrupted: task.is_interrupted(probe),
-        kind: task.kind,
-    };
     if machine::verdict(&state, Event::Resume) {
         return if task.stage == Stage::Ready {
             check_stopped(task, rounds)
