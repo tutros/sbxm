@@ -232,7 +232,8 @@ Output: human text by default; `status --json` prints the records. Exit codes: 0
 - **A PR head already reviewed (decision 187):** before any write, `--pr N` looks through the task folders on this
   machine for an issue task (not one that continued a PR) whose `pr` is PR N of this repo; when its `review.commit`
   is the PR's `headRefOid`, the command is refused with `already reviewed at <commit>` and a hint naming `--force`.
-  `--force` skips this check only. `task finish --issue N` posts that review on the PR it opens: the risk section of
+  `--force` skips this check only. A task whose review `task finish` didn't post doesn't count: one with no
+  `review.md` in its folder, or with the note a failed post leaves. `task finish --issue N` posts that review on the PR it opens: the risk section of
   the PR description first, then a line naming the issue and the commit, then `review.md`, laid out and cut like a
   `--pr` review comment. Nothing read from GitHub but the head decides (anyone can post a comment that looks like a
   review); with no task folder recording the PR, the review runs as before. Spec tasks open no PR, so this never

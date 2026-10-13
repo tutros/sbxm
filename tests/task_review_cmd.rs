@@ -738,7 +738,9 @@ fn finished_issue_task(f: &Fixture, pr: &str, commit: &str, continues: bool) {
             base: "2222222222222222222222222222222222222222".into(),
         });
     }
-    record::write(&record::task_dir(&f.env.base_dir(), "issue-4"), &task).unwrap();
+    let meta = record::task_dir(&f.env.base_dir(), "issue-4");
+    record::write(&meta, &task).unwrap();
+    std::fs::write(meta.join("review.md"), CLEAN).unwrap();
 }
 
 /// [`pr_github`] with PR 7's head at `head`, and a body that looks like a posted review.
@@ -845,6 +847,32 @@ fn with_no_local_task_recording_the_pr_it_is_reviewed_whatever_github_says() {
 
     out.result.unwrap();
     assert!(posted(&github));
+}
+
+/// PR review M-1: `task finish` posts nothing when the task has no `review.md`, and says so in
+/// a note when the post fails. Neither task counts as the PR's review.
+#[test]
+fn a_task_whose_review_was_never_posted_does_not_count() {
+    for unposted in ["no review.md", "a failed post"] {
+        let f = config("codex");
+        add_pr_head(&f, 7);
+        finished_issue_task(&f, "https://github.com/o/r/pull/7", REVIEWED, false);
+        let meta = record::task_dir(&f.env.base_dir(), "issue-4");
+        if unposted == "no review.md" {
+            std::fs::remove_file(meta.join("review.md")).unwrap();
+        } else {
+            let mut task = record::read(&meta.join("task.json")).unwrap();
+            task.notes
+                .push("the in-task review was not posted on PR #7: HTTP 502".into());
+            record::write(&meta, &task).unwrap();
+        }
+        let github = pr_github_at(REVIEWED);
+
+        let out = go_pr(&f, &pr_options(&f), &pr_backend(&f, &[CLEAN]), &github);
+
+        out.result.unwrap_or_else(|e| panic!("{unposted}: {e:#}"));
+        assert!(posted(&github), "{unposted}");
+    }
 }
 
 #[test]

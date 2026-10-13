@@ -1020,7 +1020,10 @@ fn a_review_that_cannot_be_posted_leaves_the_pr_recorded_and_says_how_to_go_on()
     assert_eq!(record.stage, Stage::Finished);
     assert!(message.contains(&url), "{message}");
     assert!(message.contains("HTTP 502"), "{message}");
-    assert!(message.contains("review.md"), "{message}");
+    // PR review M-2: the only way on is a review that posts a whole comment; the saved review.md
+    // alone has neither the risk section nor the commit.
+    assert!(!message.contains("gh pr comment"), "{message}");
+    assert!(!message.contains("review.md"), "{message}");
     assert!(
         message.contains(&format!(
             "sbxm task review --pr {} --repo {} --base {} --force",
@@ -1034,5 +1037,11 @@ fn a_review_that_cannot_be_posted_leaves_the_pr_recorded_and_says_how_to_go_on()
         record.notes.iter().any(|n| n.contains("not posted")),
         "{:?}",
         record.notes
+    );
+    // And the task doesn't count as the PR's review: nothing was posted.
+    let number = url.rsplit('/').next().unwrap().parse().unwrap();
+    assert_eq!(
+        sbxm::task::finish::reviewed_pr_task(&f.env.base_dir(), &record.repo, number),
+        None
     );
 }
