@@ -54,6 +54,9 @@ pub struct Options {
     /// match (or exist). Every other caller leaves this `None`, so the id is derived from the path
     /// as usual.
     pub resolved_spec_id: Option<String>,
+    /// Review a pull request whose head a local issue task's in-task review already covered
+    /// (issue 198); without it, that is refused.
+    pub force: bool,
 }
 
 /// The line for a gate that ran and failed (an exit the shell reported, or a timeout).
@@ -371,6 +374,13 @@ fn run_spec(
     Ok(())
 }
 
+fn check_base(base: &str) -> Result<()> {
+    if !repo::valid_ref_name(base) {
+        bail!("base {base:?} isn't a usable branch name; pass --base <branch>");
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_pr(
     config_dir: &std::path::Path,
@@ -387,13 +397,32 @@ fn run_pr(
     let base_dir = GlobalConfig::load(config_dir)?.base_dir;
     let id = format!("pr-{number}");
     let repo_name = resolve_repo(opts.repo.as_deref(), &opts.repo_root)?;
+    // Checked before the refusal below, which prints it in a command.
+    if let Some(base) = &opts.base {
+        check_base(base)?;
+    }
+    // Issue 198: a head the local issue task's in-task review covered has its review already.
+    // Only the task folders on this machine decide; nothing on GitHub but the head is read.
+    let mut pr_info = None;
+    if !opts.force
+        && let Some((task, commit)) = finish::reviewed_pr_task(&base_dir, &repo_name, number)
+    {
+        let pr = github.pr(&repo_name, number)?;
+        if pr.head_oid == commit {
+            bail!(
+                "PR #{number} is already reviewed at `{commit}`: its head is the commit task \
+                 {task}'s in-task review covered, which `sbxm task finish` posted as the PR's \
+                 review; to review it again anyway, run `{}`",
+                finish::review_pr_command(number, &repo_name, opts.base.as_deref(), true)
+            );
+        }
+        pr_info = Some(pr);
+    }
     let base_branch = match &opts.base {
         Some(base) => base.clone(),
         None => github.default_branch(&repo_name)?,
     };
-    if !repo::valid_ref_name(&base_branch) {
-        bail!("base {base_branch:?} isn't a usable branch name; pass --base <branch>");
-    }
+    check_base(&base_branch)?;
     let clone_source = opts
         .clone_source
         .clone()
@@ -423,7 +452,10 @@ fn run_pr(
         pipeline::check_can_review_pr(&prepared.record)?;
         prepared
     } else {
-        let pr = github.pr(&repo_name, number)?;
+        let pr = match pr_info {
+            Some(pr) => pr,
+            None => github.pr(&repo_name, number)?,
+        };
         let prepared = pipeline::prepare_pr(&ctx, &pr)?;
         for warning in prepared
             .warnings

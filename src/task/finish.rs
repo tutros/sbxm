@@ -890,6 +890,67 @@ pub struct Finished {
     /// Whether the PR was opened as a draft, and why ([`unresolved_reasons`]).
     pub draft: bool,
     pub unresolved: Vec<String>,
+    /// The commit whose in-task review was posted on the new PR as its review (issue 198);
+    /// `None` when no recorded review covered the PR's head.
+    pub review_posted: Option<String>,
+    /// The `sbxm task review --pr` command for the PR's next commit ([`review_pr_command`]).
+    pub review_again: String,
+}
+
+/// The `sbxm task review --pr` command a hint prints (issue 198, review M-1). It names `repo`,
+/// and `base` when one is known, so it reviews the same PR against the same base wherever it is
+/// run, not the PR of that number in the checkout's `origin` diffed against its default branch.
+/// Both are checked names (`owner/name`, a branch name), so neither needs quoting.
+pub fn review_pr_command(
+    pr: impl std::fmt::Display,
+    repo: &str,
+    base: Option<&str>,
+    force: bool,
+) -> String {
+    let base = base.map_or_else(String::new, |b| format!(" --base {b}"));
+    let force = if force { " --force" } else { "" };
+    format!("sbxm task review --pr {pr} --repo {repo}{base}{force}")
+}
+
+/// The number at the end of a PR's URL (`https://github.com/o/r/pull/7`), as `gh pr create`
+/// prints it and `task.json` records it.
+pub fn pr_number(url: &str) -> Option<u32> {
+    let (_, number) = url.trim().trim_end_matches('/').rsplit_once("/pull/")?;
+    number.parse().ok()
+}
+
+/// The local issue task that opened PR `number` of `repo` with `task finish`, and the commit its
+/// in-task review covered (issue 198), read only from the task folders on this machine. A task
+/// that continued the PR doesn't count: its review covered only its own commits, not the PR.
+/// Only `review.posted` counts, which `task finish` records once GitHub accepted the comment (PR
+/// 226's review): a task that had no `review.md` to post, whose post failed, or that was
+/// interrupted before the post has none, so its PR is reviewed as usual. A folder whose
+/// `task.json` can't be read is skipped: at worst the PR is reviewed again.
+pub fn reviewed_pr_task(base_dir: &Path, repo: &str, number: u32) -> Option<(String, String)> {
+    let url = format!("https://github.com/{repo}/pull/{number}");
+    let entries = fs::read_dir(record::tasks_root(base_dir)).ok()?;
+    let mut found: Vec<(String, String)> = entries
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with("issue-"))
+        .filter_map(|e| record::read(&e.path().join("task.json")).ok())
+        .filter(|t| t.kind == record::Kind::Issue && t.continues.is_none())
+        .filter(|t| {
+            t.pr.as_deref()
+                .is_some_and(|pr| pr.trim().eq_ignore_ascii_case(&url))
+        })
+        .filter_map(|t| Some((t.id, t.review?.posted?)))
+        .collect();
+    found.sort();
+    found.into_iter().next()
+}
+
+/// The commit task `task`'s recorded review covered, when that is `tip`, the head the PR will
+/// have (issue 198): only then does the in-task review count as the PR's review.
+fn reviewed_head(task: &Record, tip: &str) -> Option<String> {
+    task.review
+        .as_ref()
+        .and_then(|r| r.commit.clone())
+        .filter(|commit| commit == tip)
 }
 
 /// Whether the task may be finished now. Decided through `machine::TABLE` once the `pr` field (not
@@ -1061,6 +1122,9 @@ pub fn finish(
         result.as_deref(),
         review.as_deref(),
     );
+    // Issue 198: the in-task review becomes the PR's review when it covered the head pushed now.
+    let tip = repo::branch_tip(&repo_git, &task.branch)?;
+    let posting = reviewed_head(&task, &tip).zip(review.clone());
 
     repo::push(&repo_git, &task.branch)?;
     let request = PrRequest {
@@ -1091,14 +1155,77 @@ pub fn finish(
     record::write(&prepared.meta, &prepared.record).with_context(|| {
         format!("the PR is open at {url} but task.json couldn't be updated; note the URL")
     })?;
+    let review_posted = match posting {
+        Some((commit, text)) => {
+            post_in_task_review(&mut prepared, &url, &commit, &risk_text, &text, github)?;
+            Some(commit)
+        }
+        None => None,
+    };
+    let pr = pr_number(&url).map_or_else(|| "<N>".to_owned(), |n| n.to_string());
     Ok(Finished {
+        review_again: review_pr_command(pr, &task.repo, Some(&task.base), false),
         url,
         branch: task.branch,
         cuts,
         continued: None,
         draft,
         unresolved,
+        review_posted,
     })
+}
+
+/// Posts the in-task review of `commit` on the PR at `url` (issue 198), with `risk_text`, the
+/// section the PR description opens with, first, and then records the post as `review.posted`,
+/// the only thing that makes `task review --pr` treat the head as reviewed (PR 226's review). The
+/// PR is already open and recorded, so a post that fails, or one that can't be recorded, leaves
+/// an error naming the review to run instead. It names no command that posts `review.md`: that
+/// file has neither the risk section nor the commit.
+fn post_in_task_review(
+    prepared: &mut Prepared,
+    url: &str,
+    commit: &str,
+    risk_text: &str,
+    review: &str,
+    github: &dyn GitHubBackend,
+) -> Result<()> {
+    let task = &prepared.record;
+    let posted = match pr_number(url) {
+        Some(pr) => {
+            let body = super::review::in_task_pr_comment(task.number, commit, risk_text, review);
+            github
+                .pr_comment(&task.repo, pr, &body)
+                .map(|_| pr)
+                .map_err(|e| (Some(pr), e))
+        }
+        None => Err((None, anyhow::anyhow!("{url} doesn't end in a PR number"))),
+    };
+    let review_pr = |pr: &str| review_pr_command(pr, &task.repo, Some(&task.base), false);
+    let (pr, e) = match posted {
+        Ok(pr) => {
+            let hint = review_pr(&pr.to_string());
+            if let Some(review) = &mut prepared.record.review {
+                review.posted = Some(commit.to_owned());
+            }
+            return record::write(&prepared.meta, &prepared.record).with_context(|| {
+                format!(
+                    "the in-task review is posted on {url}, but task.json couldn't be updated \
+                     to say so; `{hint}` will review the PR again"
+                )
+            });
+        }
+        Err(failed) => failed,
+    };
+    let pr = pr.map_or_else(|| "<N>".to_owned(), |n| n.to_string());
+    let hint = review_pr(&pr);
+    prepared.record.notes.push(format!(
+        "the in-task review was not posted on PR #{pr}: {e:#}"
+    ));
+    let _ = record::write(&prepared.meta, &prepared.record);
+    Err(e.context(format!(
+        "the PR is open at {url}, but the in-task review couldn't be posted on it; review the PR \
+         with `{hint}`"
+    )))
 }
 
 /// Where the `local` sink left a spec task's result.
@@ -1349,11 +1476,15 @@ fn finish_continued(
     record::write(&prepared.meta, &prepared.record)
         .with_context(|| format!("{id} is pushed to PR #{pr} but task.json couldn't be updated"))?;
     Ok(Finished {
+        // The task's base is the one it was started with, not necessarily the PR's: the review
+        // diffs against the repo's default branch, as before, unless `--base` is added.
+        review_again: review_pr_command(pr, &task.repo, None, false),
         url,
         branch: task.branch.clone(),
         cuts: Vec::new(),
         continued: Some(pr),
         draft: false,
         unresolved,
+        review_posted: None,
     })
 }

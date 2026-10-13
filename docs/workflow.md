@@ -53,9 +53,11 @@ sbxm status --watch                    # a live dashboard over every task (decis
                                        # stage, status, time in stage, commits ahead, must-fix findings
                                        # left, PR link, last run.log line; redraws every 2s on a terminal
 sbxm task review --issue 63            # gates, independent review, fix rounds up to [worker] fix_rounds
-sbxm task finish --issue 63            # push the branch and open the PR ("Fixes #63"); for an issue of
-                                       # an open PR: push to that PR's branch and comment on the PR
+sbxm task finish --issue 63            # push the branch and open the PR ("Fixes #63"), and post the
+                                       # in-task review on it as its review; for an issue of an open
+                                       # PR: push to that PR's branch and comment on the PR
 sbxm task review --pr 69               # independent review of any PR of this repo, posted as a comment
+                                       # (refused for a head the in-task review covered; --force)
 sbxm task file-findings --pr 69        # dry run; add --create to file the findings as issues
 sbxm task rm --issue 63                # after the merge: sandboxes, clones and record (asks first)
 sbxm task run --issue 63               # start and review in one go; stops before finish
@@ -74,6 +76,14 @@ sbxm task run --spec idea.md           # the same for a spec task; no GitHub cal
     `task start --restart`.
   - `task review --pr` has no fix round (a PR task's `fix_rounds` is always 0): the author fixes the findings and
     reviews again after `task rm --pr N`.
+  - **The in-task review counts as the PR's review (decision 187):** `task finish --issue N` posts the review
+    recorded in `task.json` on the PR it opens (risk section first, the same one the description opens with, then a
+    line naming the reviewed commit), a draft's failing review included, when that review covered the PR's head.
+    `task review --pr N` then refuses that head before anything is written (`already reviewed at <commit>`;
+    `--force` reviews it anyway); a later commit on the PR (a hand fix, a rebase) is reviewed as usual. Only the
+    issue task's own `task.json` on this machine decides, never a comment on GitHub; with no task folder recording
+    the PR, the review runs as before. A task that continued an open PR and spec tasks (which open no PR) are
+    unchanged.
   - `[worker] fix_rounds` (default 3) bounds the review-fix-review loop; a gate that ran and failed spends a round too
     (one that could not run at all stops the task without spending any). Rounds
     after the first review only the commits made since the last one, and one more review of everything confirms a
@@ -104,7 +114,9 @@ sbxm task run --spec idea.md           # the same for a spec task; no GitHub cal
 
 1. Plan with the `sdlc-planning` skill: numbered decisions in `sdlc/decisions.md`, spikes for unknowns.
 2. File the work as issues; run `task start` and `task review`, then `task finish`.
-3. Run `task review --pr N` on the PR: this is the independent review. Fix what it finds, with a test first.
+3. The independent review: for a PR `task finish` opened, the in-task review it posted is that review (decision
+   187); run `task review --pr N` after any later commit on the PR, and on a PR made some other way. Fix what it
+   finds, with a test first.
 4. The user merges. Never push to `main`; every change, docs included, goes through a PR.
 5. `task rm` the finished task, which also gives back the disk its sandbox used.
 

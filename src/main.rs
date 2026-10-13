@@ -466,6 +466,7 @@ fn main() -> anyhow::Result<()> {
                     reviewer_time_limit,
                     time_limit,
                     profile,
+                    force,
                 },
         } => {
             let target = match (issue, pr, spec) {
@@ -498,6 +499,7 @@ fn main() -> anyhow::Result<()> {
                         time_limit,
                         profile,
                         resolved_spec_id: None,
+                        force,
                     },
                     &SbxBackend,
                     &sbxm::github::gh::GhBackend::default(),

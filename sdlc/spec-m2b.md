@@ -103,8 +103,8 @@ Sandbox names: `sbxm-task-<id>-<harness>` (worker), `sbxm-task-<id>-review-<harn
              "workspace": "E:/.../tasks/issue-41", "run": {"status": "completed", "usage": {}, "duration_s": 0}},
   "reviewer": null,
   "round": 0, "fix_rounds": 3,
-  "review": {"round": 1, "must_fix": 0, "full": true, "repeat": false,
-             "risk": "medium", "risk_reasons": ["a behavior change in one area"]},
+  "review": {"round": 1, "commit": "<the branch commit it covered>", "must_fix": 0, "full": true,
+             "repeat": false, "risk": "medium", "risk_reasons": ["a behavior change in one area"]},
   "gates": [{"phase": "after-worker", "tier": "sandbox", "command": "cargo test", "exit": 0, "passed": true}],
   "related": [], "hooks": {}, "sbxm_version": "0.x", "config_hash": "..."
 }
@@ -134,6 +134,11 @@ Rules:
 - `hooks` is a free-form object, untouched by M2b; later stages (plan, release, learn) attach there [139].
 - `schema` is checked on read; a newer schema is refused with a hint to upgrade sbxm.
 - The record never contains secret values; usage and transcripts follow the run-results rules (decision 128).
+- `review.commit` (decision 187) is the branch commit the last review of an issue or spec task covered, kept even when
+  that review is clean (`last_reviewed_commit` is then cleared, since it only narrows the next review). Absent in
+  older records and for a PR task's review. `review.posted` (same decision; optional, not in the example above) is
+  the commit whose review `task finish` posted on the PR it opened, written only after the comment was accepted; it
+  alone makes `task review --pr` refuse that head.
 
 ## 4. Commands [143][157][158]
 
@@ -146,10 +151,10 @@ checkout (a GitHub URL is required; anything else is an error). `--base` default
 | `task init [PATH]` | Writes a starter `sbxm-task.toml` (valid as written for a Rust repo), refuses to overwrite | exists: `not overwriting it` |
 | `task start (--issue N... \| --workers N)` | Section 5.1 | issue not open; blocked; question; clash; task exists |
 | `task status [--issue N \| --pr N] [--json]` | One line per task: stage, status, commits ahead of base (for a task that continues a PR, past the commit its branch started at, decision 169), `result.md`/`review.md` present, `interrupted` | no such task |
-| `task review (--issue N \| --pr N)` | Section 5.2 | gates fail; secret missing; fork PR |
+| `task review (--issue N \| --pr N [--force])` | Section 5.2 | gates fail; secret missing; fork PR; a PR head the in-task review covered, unless `--force` (decision 187) |
 | `task gates --issue N [--tier sandbox\|host\|all] [--dry-run]` | Runs the tiers on the task's current state; `--dry-run` prints the commands and where they would run, changes nothing | worker still running |
 | `task file-findings (--issue N \| --pr N \| --file F) [--create]` | Files a review's findings as issues [134][149]; a dry run unless `--create` | file malformed; secret in a finding |
-| `task finish --issue N` | Pushes `issue-N` from `repo.git`, opens the PR (base = task base) with `Fixes #N`, `result.md` and `review.md` in the body; for a task that continues PR m, pushes to PR m's branch (fast-forward only) and comments on PR m instead of opening a PR (decision 169) | not `ready`; PR exists; a continued PR's branch moved or is gone |
+| `task finish --issue N` | Pushes `issue-N` from `repo.git`, opens the PR (base = task base) with `Fixes #N`, `result.md` and `review.md` in the body; for a task that continues PR m, pushes to PR m's branch (fast-forward only) and comments on PR m instead of opening a PR (decision 169). When `review.commit` is the head it opens the PR at, posts the in-task review on the new PR as its review (decision 187), a draft's included |  not `ready`; PR exists; a continued PR's branch moved or is gone |
 | `task rm (--issue N \| --pr N) [--yes]` | Removes sandboxes, clones and the task folder; asks first, showing the exact paths | task running |
 | `task run (--issue N \| --spec FILE)` | `start` then `review`, also after gates that fail right after the worker (5.1 step 5); stops before `finish` [158]. `--spec FILE` runs `start --spec` then `review --spec` instead, with no GitHub call anywhere (issue 194) | those of both |
 
@@ -226,6 +231,17 @@ Output: human text by default; `status --json` prints the records. Exit codes: 0
   PR head; the linked issues' text is the review context; gates run (clean checkout, section 7); the reviewer runs
   once; the review is posted as a PR comment; no fix round. Task id `pr-<n>`; `related` links an `issue-<n>` task if
   one exists [158].
+- **A PR head already reviewed (decision 187):** before any write, `--pr N` looks through the task folders on this
+  machine for an issue task (not one that continued a PR) whose `pr` is PR N of this repo; when its `review.posted`
+  is the PR's `headRefOid`, the command is refused with `already reviewed at <commit>` and a hint naming `--force`.
+  `--force` skips this check only. `review.posted` alone is the proof: `task finish` writes it only after GitHub
+  accepted the comment, so a task that posted nothing, whose post failed or that was interrupted before the post
+  has none and doesn't count, whatever its `review.commit` says. `task finish --issue N` posts the review, when
+  `review.commit` is the branch tip it pushes, on the PR it opens: the risk section of
+  the PR description first, then a line naming the issue and the commit, then `review.md`, laid out and cut like a
+  `--pr` review comment. Nothing read from GitHub but the head decides (anyone can post a comment that looks like a
+  review); with no task folder recording the PR, the review runs as before. Spec tasks open no PR, so this never
+  applies to them.
 - The reviewer is told it cannot change files, commit, push or file issues, and to follow the code-review skill from
   the clone (`.claude/skills/sdlc-code-review/SKILL.md` when present).
 - **Risk assessment [176]:** the line right after the reviewer's first (one blank line between the two is fine,

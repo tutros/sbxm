@@ -297,6 +297,17 @@ pub struct PrBranch {
 pub struct ReviewResult {
     /// The review round (its saved file is `review-<round>.md`).
     pub round: u32,
+    /// The branch commit this review covered (issue 198): `task finish` posts the review as the
+    /// PR's own when the PR's head is this commit, and `task review --pr` refuses to review that
+    /// head again. Kept even when the review is clean, unlike `last_reviewed_commit`, which only
+    /// narrows the next review. Absent in older records and for a PR task's review.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub commit: Option<String>,
+    /// The commit whose review `task finish` posted on the PR it opened (issue 198), written
+    /// only after GitHub accepted the comment. `task review --pr` refuses a head on this proof
+    /// alone, so a post that failed or never ran leaves the PR to be reviewed as usual.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub posted: Option<String>,
     pub must_fix: u32,
     /// Whether it covered every commit since the base (`false`: only those since the last review).
     pub full: bool,

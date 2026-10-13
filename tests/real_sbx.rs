@@ -1797,6 +1797,7 @@ fn task_review_against_real_sbx() {
             time_limit: Some("5m".into()),
             profile: None,
             resolved_spec_id: None,
+            force: false,
         },
         &SbxBackend,
         &world.github,

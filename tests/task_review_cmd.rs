@@ -68,6 +68,7 @@ fn options(f: &Fixture) -> Options {
         time_limit: None,
         profile: None,
         resolved_spec_id: None,
+        force: false,
     }
 }
 
@@ -418,6 +419,7 @@ fn pr_info() -> PrInfo {
     PrInfo {
         number: 7,
         head_ref: "feature-x".into(),
+        head_oid: "0000000000000000000000000000000000000000".into(),
         is_cross_repository: false,
         state: PrState::Open,
         title: "Add the x feature".into(),
@@ -698,4 +700,194 @@ fn the_recorded_worker_decides_the_fix_adapter_and_the_default_reviewer() {
         "the fix run must use the Codex adapter: {:?}",
         fix.1.argv
     );
+}
+
+// ---- Issue 198: a PR head the in-task review covered isn't reviewed again ----
+
+const REVIEWED: &str = "1111111111111111111111111111111111111111";
+
+/// A finished task for issue 4 that recorded `pr` as its PR and `commit` as what its review
+/// covered and posted, as `task finish` leaves it; `continues` makes it a task that continued
+/// that PR.
+fn finished_issue_task(f: &Fixture, pr: &str, commit: &str, continues: bool) {
+    use record::{NewTask, Process, Record, Stage, Status};
+    let mut task = Record::new(
+        &NewTask {
+            kind: record::Kind::Issue,
+            number: 4,
+            repo: "o/r",
+            title: "Fix 4",
+            base: "main",
+            branch: "issue-4",
+            config_hash: "h",
+            id: None,
+        },
+        0,
+        Process::new(1, 0),
+    );
+    (task.stage, task.status) = (Stage::Finished, Status::Ok);
+    task.pr = Some(pr.to_owned());
+    task.review = Some(record::ReviewResult {
+        round: 1,
+        commit: Some(commit.to_owned()),
+        posted: Some(commit.to_owned()),
+        ..Default::default()
+    });
+    if continues {
+        task.continues = Some(record::PrBranch {
+            pr: 7,
+            branch: "feature-x".into(),
+            base: "2222222222222222222222222222222222222222".into(),
+        });
+    }
+    let meta = record::task_dir(&f.env.base_dir(), "issue-4");
+    record::write(&meta, &task).unwrap();
+    std::fs::write(meta.join("review.md"), CLEAN).unwrap();
+}
+
+/// [`pr_github`] with PR 7's head at `head`, and a body that looks like a posted review.
+fn pr_github_at(head: &str) -> FakeGitHub {
+    let mut pr = pr_info();
+    pr.head_oid = head.to_owned();
+    pr.body = format!("sbxm in-task review of issue #4's task, at commit {head}\n");
+    FakeGitHub::default()
+        .with_default_branch("main")
+        .with_pr(pr)
+        .with_issue_text(issue_text(4))
+}
+
+fn posted(github: &FakeGitHub) -> bool {
+    github
+        .calls()
+        .iter()
+        .any(|c| matches!(c, GhCall::PrComment(_, 7, _)))
+}
+
+#[test]
+fn a_pr_head_the_local_issue_task_reviewed_is_refused_before_anything_with_a_force_hint() {
+    let f = config("codex");
+    add_pr_head(&f, 7);
+    finished_issue_task(&f, "https://github.com/o/r/pull/7", REVIEWED, false);
+    let github = pr_github_at(REVIEWED);
+    let backend = pr_backend(&f, &[CLEAN]);
+
+    let out = go_pr(&f, &pr_options(&f), &backend, &github);
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(
+        message.contains(&format!("already reviewed at `{REVIEWED}`")),
+        "{message}"
+    );
+    assert!(
+        message.contains("`sbxm task review --pr 7 --repo o/r --force`"),
+        "{message}"
+    );
+    assert!(message.contains("issue-4"), "{message}");
+    assert!(backend.creates().is_empty() && backend.execs().is_empty());
+    assert!(!pr_meta(&f).exists());
+    assert!(!posted(&github));
+}
+
+/// Review M-1: the `--force` command keeps the `--base` the refused command was given.
+#[test]
+fn the_force_hint_of_an_already_reviewed_head_keeps_the_given_base() {
+    let f = config("codex");
+    add_pr_head(&f, 7);
+    finished_issue_task(&f, "https://github.com/o/r/pull/7", REVIEWED, false);
+    let github = pr_github_at(REVIEWED);
+    let backend = pr_backend(&f, &[CLEAN]);
+    let mut opts = pr_options(&f);
+    opts.base = Some("release".into());
+
+    let out = go_pr(&f, &opts, &backend, &github);
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(
+        message.contains("`sbxm task review --pr 7 --repo o/r --base release --force`"),
+        "{message}"
+    );
+}
+
+#[test]
+fn force_reviews_a_pr_head_the_local_issue_task_reviewed() {
+    let f = config("codex");
+    add_pr_head(&f, 7);
+    finished_issue_task(&f, "https://github.com/o/r/pull/7", REVIEWED, false);
+    let github = pr_github_at(REVIEWED);
+    let mut opts = pr_options(&f);
+    opts.force = true;
+
+    let out = go_pr(&f, &opts, &pr_backend(&f, &[CLEAN]), &github);
+
+    out.result.unwrap();
+    assert!(out.out.contains("posted on PR #7"), "{}", out.out);
+    assert!(posted(&github));
+}
+
+#[test]
+fn a_new_commit_on_the_pr_is_reviewed_without_force() {
+    let f = config("codex");
+    add_pr_head(&f, 7);
+    finished_issue_task(&f, "https://github.com/o/r/pull/7", REVIEWED, false);
+    let github = pr_github_at("3333333333333333333333333333333333333333");
+
+    let out = go_pr(&f, &pr_options(&f), &pr_backend(&f, &[CLEAN]), &github);
+
+    out.result.unwrap();
+    assert!(posted(&github));
+}
+
+/// Only a local task folder decides: a PR body or comment that looks like a posted review, with
+/// no task recording the PR, changes nothing (sbxm reads no comments to decide).
+#[test]
+fn with_no_local_task_recording_the_pr_it_is_reviewed_whatever_github_says() {
+    let f = config("codex");
+    add_pr_head(&f, 7);
+    let github = pr_github_at(REVIEWED);
+
+    let out = go_pr(&f, &pr_options(&f), &pr_backend(&f, &[CLEAN]), &github);
+
+    out.result.unwrap();
+    assert!(posted(&github));
+}
+
+/// PR review, rounds 1 and 2: only the record of a posted review counts. This is the task
+/// `task finish` leaves when it had no `review.md` to post, when the post failed, and when it was
+/// interrupted between recording the PR and posting: the PR, the reviewed commit and `review.md`
+/// are all there, the proof of a post is not.
+#[test]
+fn a_task_with_no_record_of_a_posted_review_does_not_count() {
+    let f = config("codex");
+    add_pr_head(&f, 7);
+    finished_issue_task(&f, "https://github.com/o/r/pull/7", REVIEWED, false);
+    let meta = record::task_dir(&f.env.base_dir(), "issue-4");
+    let mut task = record::read(&meta.join("task.json")).unwrap();
+    task.review.as_mut().unwrap().posted = None;
+    record::write(&meta, &task).unwrap();
+    let github = pr_github_at(REVIEWED);
+
+    let out = go_pr(&f, &pr_options(&f), &pr_backend(&f, &[CLEAN]), &github);
+
+    out.result.unwrap();
+    assert!(posted(&github));
+}
+
+#[test]
+fn a_task_recording_another_repos_pr_or_continuing_the_pr_does_not_count() {
+    for (url, continues) in [
+        ("https://github.com/o/other/pull/7", false),
+        ("https://github.com/o/r/pull/8", false),
+        ("https://github.com/o/r/pull/7", true),
+    ] {
+        let f = config("codex");
+        add_pr_head(&f, 7);
+        finished_issue_task(&f, url, REVIEWED, continues);
+        let github = pr_github_at(REVIEWED);
+
+        let out = go_pr(&f, &pr_options(&f), &pr_backend(&f, &[CLEAN]), &github);
+
+        out.result
+            .unwrap_or_else(|e| panic!("{url} {continues}: {e:#}"));
+        assert!(posted(&github), "{url} {continues}");
+    }
 }

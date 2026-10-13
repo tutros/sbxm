@@ -313,6 +313,8 @@ fn must_fix_comes_from_the_last_recorded_review() {
     record.finish(Status::Completed).unwrap();
     record.review = Some(record::ReviewResult {
         round: 1,
+        commit: None,
+        posted: None,
         must_fix: 3,
         full: true,
         repeat: false,

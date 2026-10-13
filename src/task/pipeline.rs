@@ -2153,6 +2153,8 @@ pub fn review_pr(
     prepared.record.open_findings = Some(outcome.open);
     prepared.record.review = Some(record::ReviewResult {
         round: 1,
+        commit: None,
+        posted: None,
         must_fix,
         full: true,
         repeat: false,
@@ -2555,10 +2557,12 @@ pub fn run_reviewer(env: &TaskEnv, prepared: &mut Prepared, round: u32) -> Resul
     match result {
         Ok(outcome) => {
             let must_fix = outcome.must_fix;
-            prepared.record.last_reviewed_commit = if must_fix == 0 { None } else { tip };
+            prepared.record.last_reviewed_commit = if must_fix == 0 { None } else { tip.clone() };
             prepared.record.open_findings = Some(outcome.open);
             prepared.record.review = Some(record::ReviewResult {
                 round,
+                commit: tip,
+                posted: None,
                 must_fix,
                 full,
                 repeat: outcome.repeat,

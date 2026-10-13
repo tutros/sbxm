@@ -35,6 +35,7 @@ fn pr7() -> PrInfo {
     PrInfo {
         number: 7,
         head_ref: "feature-x".into(),
+        head_oid: "0000000000000000000000000000000000000000".into(),
         is_cross_repository: false,
         state: PrState::Open,
         title: "Add the x feature".into(),
@@ -322,7 +323,7 @@ fn the_command_says_it_pushed_to_the_pr_and_how_to_review_it_again() {
         ),
         "{out}"
     );
-    assert!(out.contains("sbxm task review --pr 7"), "{out}");
+    assert!(out.contains("sbxm task review --pr 7 --repo o/r "), "{out}");
     assert!(!out.contains("opened"), "{out}");
 }
 
@@ -535,6 +536,8 @@ fn a_continued_task_stopped_by_a_narrow_review_lists_every_finding_still_open() 
     prepared.record.stopped = Some(record::Stopped::RepeatFinding);
     prepared.record.review = Some(record::ReviewResult {
         round: 2,
+        commit: None,
+        posted: None,
         must_fix: 1,
         full: false,
         repeat: true,

@@ -131,11 +131,13 @@ fn a_pr_with_closing_issues_is_parsed() {
             "--repo",
             "tutros/sbxm",
             "--json",
-            "headRefName,isCrossRepository,state,title,body,closingIssuesReferences"
+            "headRefName,headRefOid,isCrossRepository,state,title,body,closingIssuesReferences"
         ]
     );
     assert_eq!(pr.number, 34);
     assert_eq!(pr.head_ref, "fix-33-mandatory-harness");
+    // Issue 198: the head commit, which `task review --pr` compares with a local task's review.
+    assert_eq!(pr.head_oid, "5c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d");
     assert!(!pr.is_cross_repository);
     assert_eq!(pr.state, PrState::Merged);
     assert_eq!(pr.title, "Require --harness on open, stop and rm");
@@ -158,7 +160,7 @@ fn another_merged_pr_parses_too() {
 #[test]
 fn an_unknown_pr_state_is_an_error() {
     let (gh, _) = backend(Scripted::answering(
-        r#"{"headRefName":"b","isCrossRepository":false,"state":"WEIRD","title":"t","body":"","closingIssuesReferences":[]}"#,
+        r#"{"headRefName":"b","headRefOid":"abc","isCrossRepository":false,"state":"WEIRD","title":"t","body":"","closingIssuesReferences":[]}"#,
     ));
     let message = format!("{:#}", gh.pr("o/r", 2).unwrap_err());
     assert!(message.contains("WEIRD"), "{message}");

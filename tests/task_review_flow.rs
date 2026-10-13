@@ -1177,3 +1177,37 @@ fn the_floor_never_lowers_a_level_already_at_or_above_it() {
     assert_eq!(result.risk, Level::High);
     assert_eq!(result.risk_reasons, ["touches the config loader"]);
 }
+
+/// Issue 198: the review result in `task.json` names the branch commit it covered, a clean one
+/// included (`last_reviewed_commit` is cleared then, since it only narrows the next review), so
+/// `task finish` and `task review --pr` can tell whether a PR's head is what was reviewed.
+#[test]
+fn the_review_result_records_the_commit_it_covered() {
+    let f = config();
+    let backend = backend(&f, &[ONE, CLEAN, CLEAN]);
+    let mut prepared = worked_task(&f, &backend);
+
+    review(&f, &backend, &mut prepared).unwrap();
+
+    let record = saved(&f);
+    let tip = repo::branch_tip(&meta(&f).join("repo.git"), "issue-41").unwrap();
+    assert!(record.last_reviewed_commit.is_none());
+    let result = record.review.expect("a review result");
+    assert_eq!(result.round, 3);
+    assert_eq!(result.commit.as_deref(), Some(tip.as_str()));
+}
+
+#[test]
+fn a_review_with_findings_left_records_the_commit_it_covered_too() {
+    let f = config_with_fix_rounds(0);
+    let backend = backend(&f, &[ONE]);
+    let mut prepared = worked_task(&f, &backend);
+
+    review(&f, &backend, &mut prepared).unwrap();
+
+    let record = saved(&f);
+    let tip = repo::branch_tip(&meta(&f).join("repo.git"), "issue-41").unwrap();
+    let result = record.review.expect("a review result");
+    assert_eq!(result.must_fix, 1);
+    assert_eq!(result.commit.as_deref(), Some(tip.as_str()));
+}

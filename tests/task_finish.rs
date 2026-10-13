@@ -137,6 +137,8 @@ fn a_recorded_risk_level_opens_the_pr_description() {
     let mut record = reread(&f);
     record.review = Some(record::ReviewResult {
         round: 1,
+        commit: None,
+        posted: None,
         must_fix: 0,
         full: true,
         repeat: false,
@@ -273,6 +275,8 @@ fn the_recorded_review_decides_the_draft_not_an_edited_review_md() {
     let mut prepared = ready(&f);
     prepared.record.review = Some(record::ReviewResult {
         round: 1,
+        commit: None,
+        posted: None,
         must_fix: 1,
         full: true,
         repeat: false,
@@ -472,6 +476,8 @@ fn a_drafts_reason_survives_the_cap_of_a_long_risk_section() {
     let mut task = ready(&f).record;
     task.review = Some(record::ReviewResult {
         round: 1,
+        commit: None,
+        posted: None,
         must_fix: 2,
         full: true,
         repeat: false,
@@ -701,6 +707,8 @@ fn stopped_after_a_narrow_review(f: &Fixture) -> Prepared {
     prepared.record.stopped = Some(record::Stopped::RepeatFinding);
     prepared.record.review = Some(record::ReviewResult {
         round: 2,
+        commit: None,
+        posted: None,
         must_fix: 1,
         full: false,
         repeat: true,
@@ -889,5 +897,164 @@ fn an_older_record_rebuilds_its_findings_when_review_rounds_do_not_start_at_one(
     assert!(
         section.contains("- M-1 (review 5): First problem remains (`src/a.rs:5`)"),
         "{section}"
+    );
+}
+
+// ---- Issue 198: the in-task review counts as the PR's review ----
+
+/// The tip of the task's branch in its `repo.git`.
+fn tip(prepared: &Prepared) -> String {
+    git(&prepared.meta.join("repo.git"), &["rev-parse", "issue-41"])
+}
+
+/// Records a review of `commit` with `must_fix` findings and a high risk, as the in-task review
+/// would have, and saves `review` as review.md.
+fn reviewed_at(prepared: &mut Prepared, commit: &str, must_fix: u32, review: &str) {
+    prepared.record.review = Some(record::ReviewResult {
+        round: 1,
+        commit: Some(commit.to_owned()),
+        posted: None,
+        must_fix,
+        full: true,
+        repeat: false,
+        risk: Level::High,
+        risk_reasons: vec!["touches the git trust boundary".to_owned()],
+    });
+    record::write(&prepared.meta, &prepared.record).unwrap();
+    fs::write(prepared.meta.join("review.md"), review).unwrap();
+}
+
+/// The one PR `finish` opened and the one comment it posted, after checking it made exactly
+/// those two calls, in that order.
+fn pr_and_comment(github: &FakeGitHub) -> (sbxm::github::PrRequest, u32, String) {
+    let calls = github.calls();
+    let [
+        GhCall::PrCreate(_, request),
+        GhCall::PrComment(repo, pr, body),
+    ] = calls.as_slice()
+    else {
+        panic!("{calls:?}")
+    };
+    assert_eq!(repo, "o/r");
+    (request.clone(), *pr, body.clone())
+}
+
+/// The risk section at the top of `text`: everything before `until`.
+fn risk_part<'a>(text: &'a str, until: &str) -> &'a str {
+    &text[..text.find(until).expect(text)]
+}
+
+#[test]
+fn a_ready_task_posts_its_in_task_review_on_the_new_pr_naming_the_reviewed_commit() {
+    let f = fixture();
+    let mut prepared = ready(&f);
+    let commit = tip(&prepared);
+    reviewed_at(&mut prepared, &commit, 0, REVIEW);
+    let github = FakeGitHub::default();
+
+    let done = run(&f, &github).unwrap();
+
+    let (request, pr, body) = pr_and_comment(&github);
+    assert!(!request.draft);
+    assert_eq!(done.url, format!("https://github.com/o/r/pull/{pr}"));
+    // The risk section first, the same one the PR description opens with (decision 4 of the
+    // issue: both come from task.json, so they always agree).
+    assert!(body.starts_with("## Risk: \u{1f534} high\n"), "{body}");
+    assert_eq!(
+        risk_part(&body, "sbxm"),
+        risk_part(&request.body, "Fixes #41")
+    );
+    assert!(body.contains(&commit), "{body}");
+    assert!(body.contains("Nothing found."), "{body}");
+    assert_eq!(done.review_posted.as_deref(), Some(commit.as_str()));
+    let record = reread(&f);
+    assert_eq!(record.stage, Stage::Finished);
+    assert_eq!(record.pr.as_deref(), Some(done.url.as_str()));
+    // PR review round 2, M-1: the proof `task review --pr` goes by, written after the post.
+    assert_eq!(record.review.unwrap().posted, Some(commit.clone()));
+    assert_eq!(
+        sbxm::task::finish::reviewed_pr_task(&f.env.base_dir(), "o/r", pr),
+        Some(("issue-41".to_owned(), commit))
+    );
+}
+
+#[test]
+fn a_draft_pr_gets_the_failing_in_task_review_posted_the_same_way() {
+    let f = fixture();
+    let mut prepared = ready(&f);
+    let commit = tip(&prepared);
+    reviewed_at(&mut prepared, &commit, 2, REVIEW_WITH_MUST_FIX);
+    let github = FakeGitHub::default();
+
+    let done = run(&f, &github).unwrap();
+
+    let (request, _, body) = pr_and_comment(&github);
+    assert!(request.draft && done.draft);
+    assert!(body.starts_with("## Risk: \u{1f534} high\n"), "{body}");
+    // The draft's must-fix reason is in both risk sections alike.
+    assert_eq!(
+        risk_part(&body, "sbxm"),
+        risk_part(&request.body, "Fixes #41")
+    );
+    assert!(body.contains("2 must-fix finding(s) left"), "{body}");
+    assert!(body.contains(&commit), "{body}");
+    assert!(body.contains("The lock is never released"), "{body}");
+    assert_eq!(done.review_posted.as_deref(), Some(commit.as_str()));
+}
+
+#[test]
+fn a_review_of_another_commit_is_not_posted_as_the_prs_review() {
+    let f = fixture();
+    let mut prepared = ready(&f);
+    let base = git(&prepared.meta.join("repo.git"), &["rev-parse", "main"]);
+    reviewed_at(&mut prepared, &base, 0, REVIEW);
+    let github = FakeGitHub::default();
+
+    let done = run(&f, &github).unwrap();
+
+    only_pr_request(&github);
+    assert!(done.review_posted.is_none());
+}
+
+#[test]
+fn a_review_that_cannot_be_posted_leaves_the_pr_recorded_and_says_how_to_go_on() {
+    let f = fixture();
+    let mut prepared = ready(&f);
+    let commit = tip(&prepared);
+    reviewed_at(&mut prepared, &commit, 0, REVIEW);
+    let github = FakeGitHub::default().failing_comments("HTTP 502");
+
+    let message = format!("{:#}", run(&f, &github).unwrap_err());
+
+    let record = reread(&f);
+    let url = record.pr.clone().expect("the PR is recorded");
+    assert_eq!(record.stage, Stage::Finished);
+    assert!(message.contains(&url), "{message}");
+    assert!(message.contains("HTTP 502"), "{message}");
+    // PR review M-2: the only way on is a review that posts a whole comment; the saved review.md
+    // alone has neither the risk section nor the commit.
+    assert!(!message.contains("gh pr comment"), "{message}");
+    assert!(!message.contains("review.md"), "{message}");
+    // No `--force`: with no post recorded, the PR is reviewed as usual.
+    assert!(
+        message.contains(&format!(
+            "`sbxm task review --pr {} --repo {} --base {}`",
+            url.rsplit('/').next().unwrap(),
+            record.repo,
+            record.base
+        )),
+        "{message}"
+    );
+    assert!(
+        record.notes.iter().any(|n| n.contains("not posted")),
+        "{:?}",
+        record.notes
+    );
+    // And the task doesn't count as the PR's review: nothing was posted.
+    assert_eq!(record.review.as_ref().unwrap().posted, None);
+    let number = url.rsplit('/').next().unwrap().parse().unwrap();
+    assert_eq!(
+        sbxm::task::finish::reviewed_pr_task(&f.env.base_dir(), &record.repo, number),
+        None
     );
 }
