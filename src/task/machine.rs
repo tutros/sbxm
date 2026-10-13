@@ -545,9 +545,11 @@ pub fn states(kind: Kind) -> Vec<State> {
     all
 }
 
-/// The states of a `kind` task that are not the end of its life (`finished`; a PR task's `ready`),
-/// not in flight (a `running` task whose process is alive) and from which no command moves it on:
-/// only `rm` is allowed. Each is a gap in the operations.
+/// The states of a `kind` task that are not where it settles once there is nowhere further to go
+/// on its own (`finished`; a PR task's `ready`, which `task review --pr` can still move on from,
+/// issue 195, but nothing drives it there by itself), not in flight (a `running` task whose
+/// process is alive) and from which no command moves it on: only `rm` is allowed. Each is a gap in
+/// the operations.
 pub fn dead_ends(kind: Kind) -> Vec<State> {
     states(kind)
         .into_iter()
