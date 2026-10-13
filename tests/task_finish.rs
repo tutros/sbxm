@@ -138,6 +138,7 @@ fn a_recorded_risk_level_opens_the_pr_description() {
     record.review = Some(record::ReviewResult {
         round: 1,
         commit: None,
+        posted: None,
         must_fix: 0,
         full: true,
         repeat: false,
@@ -275,6 +276,7 @@ fn the_recorded_review_decides_the_draft_not_an_edited_review_md() {
     prepared.record.review = Some(record::ReviewResult {
         round: 1,
         commit: None,
+        posted: None,
         must_fix: 1,
         full: true,
         repeat: false,
@@ -475,6 +477,7 @@ fn a_drafts_reason_survives_the_cap_of_a_long_risk_section() {
     task.review = Some(record::ReviewResult {
         round: 1,
         commit: None,
+        posted: None,
         must_fix: 2,
         full: true,
         repeat: false,
@@ -705,6 +708,7 @@ fn stopped_after_a_narrow_review(f: &Fixture) -> Prepared {
     prepared.record.review = Some(record::ReviewResult {
         round: 2,
         commit: None,
+        posted: None,
         must_fix: 1,
         full: false,
         repeat: true,
@@ -909,6 +913,7 @@ fn reviewed_at(prepared: &mut Prepared, commit: &str, must_fix: u32, review: &st
     prepared.record.review = Some(record::ReviewResult {
         round: 1,
         commit: Some(commit.to_owned()),
+        posted: None,
         must_fix,
         full: true,
         repeat: false,
@@ -965,6 +970,12 @@ fn a_ready_task_posts_its_in_task_review_on_the_new_pr_naming_the_reviewed_commi
     let record = reread(&f);
     assert_eq!(record.stage, Stage::Finished);
     assert_eq!(record.pr.as_deref(), Some(done.url.as_str()));
+    // PR review round 2, M-1: the proof `task review --pr` goes by, written after the post.
+    assert_eq!(record.review.unwrap().posted, Some(commit.clone()));
+    assert_eq!(
+        sbxm::task::finish::reviewed_pr_task(&f.env.base_dir(), "o/r", pr),
+        Some(("issue-41".to_owned(), commit))
+    );
 }
 
 #[test]
@@ -1024,9 +1035,10 @@ fn a_review_that_cannot_be_posted_leaves_the_pr_recorded_and_says_how_to_go_on()
     // alone has neither the risk section nor the commit.
     assert!(!message.contains("gh pr comment"), "{message}");
     assert!(!message.contains("review.md"), "{message}");
+    // No `--force`: with no post recorded, the PR is reviewed as usual.
     assert!(
         message.contains(&format!(
-            "sbxm task review --pr {} --repo {} --base {} --force",
+            "`sbxm task review --pr {} --repo {} --base {}`",
             url.rsplit('/').next().unwrap(),
             record.repo,
             record.base
@@ -1039,6 +1051,7 @@ fn a_review_that_cannot_be_posted_leaves_the_pr_recorded_and_says_how_to_go_on()
         record.notes
     );
     // And the task doesn't count as the PR's review: nothing was posted.
+    assert_eq!(record.review.as_ref().unwrap().posted, None);
     let number = url.rsplit('/').next().unwrap().parse().unwrap();
     assert_eq!(
         sbxm::task::finish::reviewed_pr_task(&f.env.base_dir(), &record.repo, number),

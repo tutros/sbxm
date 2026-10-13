@@ -303,6 +303,11 @@ pub struct ReviewResult {
     /// narrows the next review. Absent in older records and for a PR task's review.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
+    /// The commit whose review `task finish` posted on the PR it opened (issue 198), written
+    /// only after GitHub accepted the comment. `task review --pr` refuses a head on this proof
+    /// alone, so a post that failed or never ran leaves the PR to be reviewed as usual.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub posted: Option<String>,
     pub must_fix: u32,
     /// Whether it covered every commit since the base (`false`: only those since the last review).
     pub full: bool,

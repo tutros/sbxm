@@ -922,26 +922,23 @@ pub fn pr_number(url: &str) -> Option<u32> {
 /// The local issue task that opened PR `number` of `repo` with `task finish`, and the commit its
 /// in-task review covered (issue 198), read only from the task folders on this machine. A task
 /// that continued the PR doesn't count: its review covered only its own commits, not the PR.
-/// Neither does one whose review `task finish` didn't post (PR review M-1): it has no `review.md`
-/// to post, or a note that the post failed. A folder whose `task.json` can't be read is skipped:
-/// at worst the PR is reviewed again.
+/// Only `review.posted` counts, which `task finish` records once GitHub accepted the comment (PR
+/// 226's review): a task that had no `review.md` to post, whose post failed, or that was
+/// interrupted before the post has none, so its PR is reviewed as usual. A folder whose
+/// `task.json` can't be read is skipped: at worst the PR is reviewed again.
 pub fn reviewed_pr_task(base_dir: &Path, repo: &str, number: u32) -> Option<(String, String)> {
     let url = format!("https://github.com/{repo}/pull/{number}");
     let entries = fs::read_dir(record::tasks_root(base_dir)).ok()?;
     let mut found: Vec<(String, String)> = entries
         .flatten()
         .filter(|e| e.file_name().to_string_lossy().starts_with("issue-"))
-        .filter(|e| {
-            fs::symlink_metadata(e.path().join("review.md")).is_ok_and(|m| m.file_type().is_file())
-        })
         .filter_map(|e| record::read(&e.path().join("task.json")).ok())
         .filter(|t| t.kind == record::Kind::Issue && t.continues.is_none())
-        .filter(|t| !t.notes.iter().any(|n| n.starts_with(NOT_POSTED_NOTE)))
         .filter(|t| {
             t.pr.as_deref()
                 .is_some_and(|pr| pr.trim().eq_ignore_ascii_case(&url))
         })
-        .filter_map(|t| Some((t.id, t.review?.commit?)))
+        .filter_map(|t| Some((t.id, t.review?.posted?)))
         .collect();
     found.sort();
     found.into_iter().next()
@@ -1178,14 +1175,12 @@ pub fn finish(
     })
 }
 
-/// How the note of a failed post starts; [`reviewed_pr_task`] reads it.
-const NOT_POSTED_NOTE: &str = "the in-task review was not posted on PR #";
-
 /// Posts the in-task review of `commit` on the PR at `url` (issue 198), with `risk_text`, the
-/// section the PR description opens with, first. The PR is already open and recorded, so a post
-/// that fails leaves a note, by which the task stops counting as the PR's review, and an error
-/// naming the review to run instead. It names no command that posts `review.md`: that file has
-/// neither the risk section nor the commit (PR review M-2).
+/// section the PR description opens with, first, and then records the post as `review.posted`,
+/// the only thing that makes `task review --pr` treat the head as reviewed (PR 226's review). The
+/// PR is already open and recorded, so a post that fails, or one that can't be recorded, leaves
+/// an error naming the review to run instead. It names no command that posts `review.md`: that
+/// file has neither the risk section nor the commit.
 fn post_in_task_review(
     prepared: &mut Prepared,
     url: &str,
@@ -1200,24 +1195,36 @@ fn post_in_task_review(
             let body = super::review::in_task_pr_comment(task.number, commit, risk_text, review);
             github
                 .pr_comment(&task.repo, pr, &body)
+                .map(|_| pr)
                 .map_err(|e| (Some(pr), e))
         }
         None => Err((None, anyhow::anyhow!("{url} doesn't end in a PR number"))),
     };
-    let Err((pr, e)) = posted else {
-        return Ok(());
+    let review_pr = |pr: &str| review_pr_command(pr, &task.repo, Some(&task.base), false);
+    let (pr, e) = match posted {
+        Ok(pr) => {
+            let hint = review_pr(&pr.to_string());
+            if let Some(review) = &mut prepared.record.review {
+                review.posted = Some(commit.to_owned());
+            }
+            return record::write(&prepared.meta, &prepared.record).with_context(|| {
+                format!(
+                    "the in-task review is posted on {url}, but task.json couldn't be updated \
+                     to say so; `{hint}` will review the PR again"
+                )
+            });
+        }
+        Err(failed) => failed,
     };
     let pr = pr.map_or_else(|| "<N>".to_owned(), |n| n.to_string());
-    prepared
-        .record
-        .notes
-        .push(format!("{NOT_POSTED_NOTE}{pr}: {e:#}"));
+    let hint = review_pr(&pr);
+    prepared.record.notes.push(format!(
+        "the in-task review was not posted on PR #{pr}: {e:#}"
+    ));
     let _ = record::write(&prepared.meta, &prepared.record);
-    let task = &prepared.record;
     Err(e.context(format!(
         "the PR is open at {url}, but the in-task review couldn't be posted on it; review the PR \
-         with `{}`",
-        review_pr_command(&pr, &task.repo, Some(&task.base), true)
+         with `{hint}`"
     )))
 }
 

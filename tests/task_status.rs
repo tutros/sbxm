@@ -171,6 +171,7 @@ fn the_recorded_risk_level_is_shown() {
     with_review.review = Some(record::ReviewResult {
         round: 1,
         commit: None,
+        posted: None,
         must_fix: 0,
         full: true,
         repeat: false,

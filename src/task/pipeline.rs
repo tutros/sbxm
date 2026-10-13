@@ -2154,6 +2154,7 @@ pub fn review_pr(
     prepared.record.review = Some(record::ReviewResult {
         round: 1,
         commit: None,
+        posted: None,
         must_fix,
         full: true,
         repeat: false,
@@ -2561,6 +2562,7 @@ pub fn run_reviewer(env: &TaskEnv, prepared: &mut Prepared, round: u32) -> Resul
             prepared.record.review = Some(record::ReviewResult {
                 round,
                 commit: tip,
+                posted: None,
                 must_fix,
                 full,
                 repeat: outcome.repeat,

@@ -136,7 +136,9 @@ Rules:
 - The record never contains secret values; usage and transcripts follow the run-results rules (decision 128).
 - `review.commit` (decision 187) is the branch commit the last review of an issue or spec task covered, kept even when
   that review is clean (`last_reviewed_commit` is then cleared, since it only narrows the next review). Absent in
-  older records and for a PR task's review.
+  older records and for a PR task's review. `review.posted` (same decision; optional, not in the example above) is
+  the commit whose review `task finish` posted on the PR it opened, written only after the comment was accepted; it
+  alone makes `task review --pr` refuse that head.
 
 ## 4. Commands [143][157][158]
 
@@ -232,8 +234,9 @@ Output: human text by default; `status --json` prints the records. Exit codes: 0
 - **A PR head already reviewed (decision 187):** before any write, `--pr N` looks through the task folders on this
   machine for an issue task (not one that continued a PR) whose `pr` is PR N of this repo; when its `review.commit`
   is the PR's `headRefOid`, the command is refused with `already reviewed at <commit>` and a hint naming `--force`.
-  `--force` skips this check only. A task whose review `task finish` didn't post doesn't count: one with no
-  `review.md` in its folder, or with the note a failed post leaves. `task finish --issue N` posts that review on the PR it opens: the risk section of
+  `--force` skips this check only. The commit compared is `review.posted`, which `task finish` writes only after
+  GitHub accepted the comment: a task that posted nothing, whose post failed or that was interrupted before the
+  post has none and doesn't count. `task finish --issue N` posts that review on the PR it opens: the risk section of
   the PR description first, then a line naming the issue and the commit, then `review.md`, laid out and cut like a
   `--pr` review comment. Nothing read from GitHub but the head decides (anyone can post a comment that looks like a
   review); with no task folder recording the PR, the review runs as before. Spec tasks open no PR, so this never

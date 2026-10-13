@@ -535,6 +535,7 @@ fn resuming_a_replayed_clean_review_does_not_need_the_worker_s_provider_secret()
     let result = ReviewResult {
         round: 1,
         commit: None,
+        posted: None,
         must_fix: 0,
         full: true,
         repeat: false,
@@ -769,6 +770,7 @@ fn a_review_records_its_result_when_it_completes() {
         Some(ReviewResult {
             round: 1,
             commit: Some(tip),
+            posted: None,
             must_fix: 0,
             full: true,
             repeat: false,
@@ -787,6 +789,7 @@ fn a_clean_full_review_is_replayed_to_ready_without_running_the_reviewer() {
     let result = ReviewResult {
         round: 1,
         commit: None,
+        posted: None,
         must_fix: 0,
         full: true,
         repeat: false,
@@ -810,6 +813,7 @@ fn a_review_with_findings_is_replayed_into_the_fix_round_it_would_have_started()
     let result = ReviewResult {
         round: 1,
         commit: None,
+        posted: None,
         must_fix: 1,
         full: true,
         repeat: false,
@@ -940,6 +944,7 @@ fn a_clean_narrow_review_at_the_last_round_number_is_refused_instead_of_wrapping
     let result = ReviewResult {
         round: u32::MAX,
         commit: None,
+        posted: None,
         must_fix: 0,
         full: false,
         repeat: false,
@@ -967,6 +972,7 @@ fn a_review_with_findings_at_the_last_round_number_is_refused_before_any_fix_rou
     let result = ReviewResult {
         round: u32::MAX,
         commit: None,
+        posted: None,
         must_fix: 1,
         full: false,
         repeat: false,
@@ -1023,6 +1029,7 @@ fn the_fix_round_counter_at_the_last_round_number_is_refused_without_a_move_file
     prepared.record.review = Some(ReviewResult {
         round: 1,
         commit: None,
+        posted: None,
         must_fix: 0,
         full: true,
         repeat: false,

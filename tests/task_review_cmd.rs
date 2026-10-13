@@ -707,7 +707,8 @@ fn the_recorded_worker_decides_the_fix_adapter_and_the_default_reviewer() {
 const REVIEWED: &str = "1111111111111111111111111111111111111111";
 
 /// A finished task for issue 4 that recorded `pr` as its PR and `commit` as what its review
-/// covered, as `task finish` leaves it; `continues` makes it a task that continued that PR.
+/// covered and posted, as `task finish` leaves it; `continues` makes it a task that continued
+/// that PR.
 fn finished_issue_task(f: &Fixture, pr: &str, commit: &str, continues: bool) {
     use record::{NewTask, Process, Record, Stage, Status};
     let mut task = Record::new(
@@ -729,6 +730,7 @@ fn finished_issue_task(f: &Fixture, pr: &str, commit: &str, continues: bool) {
     task.review = Some(record::ReviewResult {
         round: 1,
         commit: Some(commit.to_owned()),
+        posted: Some(commit.to_owned()),
         ..Default::default()
     });
     if continues {
@@ -849,30 +851,25 @@ fn with_no_local_task_recording_the_pr_it_is_reviewed_whatever_github_says() {
     assert!(posted(&github));
 }
 
-/// PR review M-1: `task finish` posts nothing when the task has no `review.md`, and says so in
-/// a note when the post fails. Neither task counts as the PR's review.
+/// PR review, rounds 1 and 2: only the record of a posted review counts. This is the task
+/// `task finish` leaves when it had no `review.md` to post, when the post failed, and when it was
+/// interrupted between recording the PR and posting: the PR, the reviewed commit and `review.md`
+/// are all there, the proof of a post is not.
 #[test]
-fn a_task_whose_review_was_never_posted_does_not_count() {
-    for unposted in ["no review.md", "a failed post"] {
-        let f = config("codex");
-        add_pr_head(&f, 7);
-        finished_issue_task(&f, "https://github.com/o/r/pull/7", REVIEWED, false);
-        let meta = record::task_dir(&f.env.base_dir(), "issue-4");
-        if unposted == "no review.md" {
-            std::fs::remove_file(meta.join("review.md")).unwrap();
-        } else {
-            let mut task = record::read(&meta.join("task.json")).unwrap();
-            task.notes
-                .push("the in-task review was not posted on PR #7: HTTP 502".into());
-            record::write(&meta, &task).unwrap();
-        }
-        let github = pr_github_at(REVIEWED);
+fn a_task_with_no_record_of_a_posted_review_does_not_count() {
+    let f = config("codex");
+    add_pr_head(&f, 7);
+    finished_issue_task(&f, "https://github.com/o/r/pull/7", REVIEWED, false);
+    let meta = record::task_dir(&f.env.base_dir(), "issue-4");
+    let mut task = record::read(&meta.join("task.json")).unwrap();
+    task.review.as_mut().unwrap().posted = None;
+    record::write(&meta, &task).unwrap();
+    let github = pr_github_at(REVIEWED);
 
-        let out = go_pr(&f, &pr_options(&f), &pr_backend(&f, &[CLEAN]), &github);
+    let out = go_pr(&f, &pr_options(&f), &pr_backend(&f, &[CLEAN]), &github);
 
-        out.result.unwrap_or_else(|e| panic!("{unposted}: {e:#}"));
-        assert!(posted(&github), "{unposted}");
-    }
+    out.result.unwrap();
+    assert!(posted(&github));
 }
 
 #[test]

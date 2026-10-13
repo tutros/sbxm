@@ -537,6 +537,7 @@ fn a_continued_task_stopped_by_a_narrow_review_lists_every_finding_still_open() 
     prepared.record.review = Some(record::ReviewResult {
         round: 2,
         commit: None,
+        posted: None,
         must_fix: 1,
         full: false,
         repeat: true,
