@@ -45,7 +45,7 @@ pub fn check_can_resume(
     if task.kind == Kind::Pr {
         bail!(
             "task {id} is a PR task, which has no worker or fix rounds to resume; to review the PR \
-             again, run `sbxm task rm --pr {n}`, then `sbxm task review --pr {n}`",
+             again, run `sbxm task review --pr {n}`",
             n = task.number
         );
     }

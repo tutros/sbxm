@@ -1482,6 +1482,8 @@ fn a_pr_task_is_refused() {
 
     assert!(message.contains("PR task"), "{message}");
     assert!(message.contains("task review --pr"), "{message}");
+    // Issue 195: a PR task is reviewed again in place, never removed first.
+    assert!(!message.contains("task rm"), "{message}");
     assert!(backend.execs().is_empty());
 }
 
