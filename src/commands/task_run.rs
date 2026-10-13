@@ -47,13 +47,18 @@ pub struct Options {
 
 /// The drive can fill up while the worker runs, so it is checked again before the reviewer's
 /// sandbox (decision 194). A refusal names `task review`, which goes on from here: `task run`
-/// would not pick the task up again.
-fn review_has_room(config_dir: &Path, guard: &disk::Guard, flag: &str) -> Result<()> {
+/// would not pick the task up again. Returns the guard to hand the review, which has nothing left
+/// to check: its own refusal would name no way to continue.
+fn review_has_room(config_dir: &Path, guard: &disk::Guard, flag: &str) -> Result<disk::Guard> {
     disk::require(&GlobalConfig::load(config_dir)?, config_dir, guard).with_context(|| {
         format!(
             "the worker is done but its review was not started; continue with `sbxm task review \
              {flag}`"
         )
+    })?;
+    Ok(disk::Guard {
+        ignore: true,
+        ..guard.clone()
     })
 }
 
@@ -206,7 +211,7 @@ fn run_issue(
         return Err(e);
     }
 
-    review_has_room(config_dir, &opts.disk, &format!("--issue {}", opts.issue))?;
+    let disk = review_has_room(config_dir, &opts.disk, &format!("--issue {}", opts.issue))?;
     task_review::run(
         config_dir,
         &task_review::Options {
@@ -222,7 +227,7 @@ fn run_issue(
             profile: opts.profile.clone(),
             resolved_spec_id: None,
             force: false,
-            disk: opts.disk.clone(),
+            disk,
         },
         backend,
         github,
@@ -489,7 +494,7 @@ fn run_spec_task(
         return Err(e);
     }
 
-    review_has_room(config_dir, &opts.disk, &task_start::spec_flag(&opts.spec))?;
+    let disk = review_has_room(config_dir, &opts.disk, &task_start::spec_flag(&opts.spec))?;
     task_review::run(
         config_dir,
         &task_review::Options {
@@ -505,7 +510,7 @@ fn run_spec_task(
             profile: opts.profile.clone(),
             resolved_spec_id: Some(spec_id),
             force: false,
-            disk: opts.disk.clone(),
+            disk,
         },
         backend,
         github,

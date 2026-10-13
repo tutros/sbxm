@@ -1177,3 +1177,29 @@ fn a_drive_that_fills_during_the_worker_stops_before_the_review_naming_task_revi
     );
     assert_eq!(b.creates().len(), 1, "{:?}", b.log());
 }
+
+#[test]
+fn the_review_after_the_worker_reads_the_drive_once_so_its_refusal_names_task_review() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static READS: AtomicUsize = AtomicUsize::new(0);
+    let f = config();
+    let s = spec(&f);
+    let id = id_of(&s);
+    let b = backend_for(&f, &id, &[CLEAN_REVIEW]);
+    let mut opts = options(&f, s);
+    opts.disk = sbxm::disk::Guard {
+        free_space: |_| {
+            READS.fetch_add(1, Ordering::SeqCst);
+            Ok(20 * 1024 * 1024 * 1024)
+        },
+        ..common::low_disk(&f.env)
+    };
+
+    let out = go(&f, &opts, None, &b, &FakeGitHub::default());
+
+    out.result.unwrap();
+    // `task run`'s own check and the one before the review: the review itself doesn't read the
+    // drive again with a refusal that names no way to continue.
+    assert_eq!(READS.load(Ordering::SeqCst), 2);
+    assert_eq!(b.creates().len(), 2, "{:?}", b.log());
+}
