@@ -2058,9 +2058,10 @@ pub fn check_can_review_pr(task: &Record) -> Result<()> {
 /// posted; a failed post keeps the saved review and says how to post it by hand.
 ///
 /// A task left `ready` by an earlier round is reviewed again (issue 195, gap G34): refused while
-/// the PR's head is still the commit that round's review covered, unless `force`. That refusal
-/// and the fetch of the PR's new head both happen before anything is written, so a refused
-/// attempt or a failed fetch leaves `review.md` and `task.json` as they were. Once it proceeds,
+/// the PR's head is still the commit that round's review covered, unless `force`. That refusal,
+/// the reviewer's checks and the fetch of the PR's new head all happen before anything is
+/// written, so a refused attempt or a failed fetch leaves `issue.md`, `review.md` and `task.json`
+/// as they were (only the fetched ref in `repo.git` moves). Once it proceeds,
 /// the earlier round's `review-<n>.md` stays in the task folder (as for an issue task, issue 169)
 /// and the reviewer gets every one of them as context; the gates run again, since the commits are
 /// new.
@@ -2074,12 +2075,17 @@ pub fn review_pr(
     let id = prepared.record.id.clone();
     let number = prepared.record.number;
     let repo_git = prepared.meta.join("repo.git");
+    let mut report = PrReview {
+        warnings: check_reviewer_inputs(env.config_dir, env.backend, env.config)?,
+        ..PrReview::default()
+    };
+    let mut context = None;
     if prepared.record.stage == Stage::Ready {
         // The PR may have been closed, or its description and issues changed, since the last
-        // round: checked and rebuilt like a new task's, but written only after the refusals.
+        // round: checked and rebuilt like a new task's, but written only after every refusal.
         let pr = github.pr(&prepared.record.repo, number)?;
         check_pr_reviewable(&pr, &prepared.record.repo)?;
-        let context = pr_context(github, &prepared.record.repo, &pr)?;
+        context = Some(pr_context(github, &prepared.record.repo, &pr)?);
         repo::fetch_pr_head(&repo_git, number)
             .with_context(|| format!("cannot fetch PR #{number}'s head to review it again"))?;
         let head = repo::branch_tip(&repo_git, &prepared.record.branch)?;
@@ -2099,17 +2105,16 @@ pub fn review_pr(
                 )
             );
         }
+    }
+    check_changed_paths(prepared)?;
+    let round = next_review_round(prepared)?;
+    if let Some(context) = context {
         fs::write(prepared.meta.join("issue.md"), context)?;
     }
-    let mut report = PrReview {
-        warnings: check_reviewer(env, prepared)?,
-        ..PrReview::default()
-    };
     let reviewer = &env.config.reviewer;
     let gates = &env.config.gates;
     let clone = prepared.workspace.with_file_name(format!("{id}-review"));
     let sandbox = format!("sbxm-task-{id}-review-{}", reviewer.harness.as_str());
-    let round = next_review_round(prepared)?;
     let earlier: Vec<String> = review::saved_rounds(&prepared.meta)
         .into_iter()
         .filter(|&r| r > 0 && r < round)
@@ -2508,10 +2513,17 @@ pub struct Reviewed {
 /// profile's secrets are stored, the profile loads, and the task's changed paths can be listed
 /// (the risk floor needs them; decision 176). Returns the warnings to print.
 pub fn check_reviewer(env: &TaskEnv, task: &Prepared) -> Result<Vec<String>> {
+    check_changed_paths(task)?;
+    check_reviewer_inputs(env.config_dir, env.backend, env.config)
+}
+
+/// The changed-paths part of [`check_reviewer`], for a caller that must make it after fetching
+/// new commits but its other checks before ([`review_pr`] on a `ready` task).
+fn check_changed_paths(task: &Prepared) -> Result<()> {
     task.record
         .changed_paths(&task.meta.join("repo.git"))
         .context("cannot list the task's changed paths for the risk floor")?;
-    check_reviewer_inputs(env.config_dir, env.backend, env.config)
+    Ok(())
 }
 
 /// The checks of [`check_reviewer`] without a task, so `task run` can make them before its worker

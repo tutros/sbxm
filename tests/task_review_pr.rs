@@ -651,6 +651,62 @@ fn a_pr_closed_or_merged_after_the_first_round_is_refused_before_anything_runs()
     }
 }
 
+/// Issue 195, round 3 review finding M-1: a second round refused by the reviewer's own checks (here
+/// a missing secret) leaves the task folder as round 1 left it, the PR's changed description
+/// included, and runs nothing.
+#[test]
+fn a_second_round_refused_by_the_reviewers_checks_keeps_the_old_context() {
+    let f = config("");
+    let (backend, github) = (backend(&f, &[CLEAN]), github());
+    let mut prepared = prepared(&f, &backend, &github);
+    review_it(
+        &f,
+        &backend,
+        &github,
+        &FakeHostRunner::default(),
+        &mut prepared,
+    )
+    .unwrap();
+    add_pr_head(&f, 7);
+    let before = saved(&f);
+    let issue_before = fs::read_to_string(meta(&f).join("issue.md")).unwrap();
+    let review_before = fs::read_to_string(meta(&f).join("review.md")).unwrap();
+    let now = FakeGitHub::default()
+        .with_pr(PrInfo {
+            body: "A changed description that must not be written on a refusal".into(),
+            ..pr()
+        })
+        .with_issue_text(issue_text(4));
+    let no_secret = FakeBackend::with_secrets(&["anthropic"]);
+
+    let message = format!(
+        "{:#}",
+        review_it(
+            &f,
+            &no_secret,
+            &now,
+            &FakeHostRunner::default(),
+            &mut prepared
+        )
+        .unwrap_err()
+    );
+
+    assert!(message.contains("openai"), "{message}");
+    assert_eq!(
+        fs::read_to_string(meta(&f).join("issue.md")).unwrap(),
+        issue_before,
+        "issue.md is unchanged"
+    );
+    assert_eq!(saved(&f), before, "task.json is unchanged");
+    assert_eq!(
+        fs::read_to_string(meta(&f).join("review.md")).unwrap(),
+        review_before,
+        "review.md is unchanged"
+    );
+    assert!(no_secret.creates().is_empty(), "no sandbox");
+    assert!(no_secret.execs().is_empty(), "no gate ran");
+}
+
 /// Issue 195, review finding M-2: round 2's reviewer gets the PR's current description and the
 /// issues it closes now, not the ones saved at round 1.
 #[test]
