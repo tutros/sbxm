@@ -179,8 +179,9 @@ works. From a host with access, `sbxm task file-findings --file <review>` does t
 
 ```
 Title:  <id>: <what happens, in plain words>          e.g. "M1: seed with a link is refused only after kits are written"
-Labels: must-fix | should-fix | question
+Labels: must-fix | should-fix | question, plus size:S | size:M | size:L (see "Size" below)
 
+**Size:** S | M | L, with the reason in a few words (e.g. "M: one command, tests and README")
 **Where:** permalinks at the reviewed commit: https://github.com/<repo>/blob/<full sha>/<file>#L<a>-L<b>
 **What happens:** the behavior, with evidence (the command or test, and its output trimmed to the lines that prove it)
 **Why it matters:** the decision or convention it breaks (e.g. "decision 47", "`<problem>; <fix>` convention")
@@ -202,6 +203,24 @@ author: a command and its expected output, a test name, a message's exact text, 
 exist. No criterion like "works better" or "is cleaner". The first criteria are specific to the finding; the
 standard ones (test, checks, docs, real `sbx`) follow and are dropped only when they can't apply, with a reason. The
 issue is done when every box is ticked with its evidence, as described in the implementation skill.
+
+**Size.** Every issue gets an approximate size when it is written, whoever writes it: a reviewer's finding, or an
+issue filed by hand for a gap or a feature. It orders the work, shows which issue to split before anyone starts, and
+gives a running task something to be judged against. Judge it from what the issue shows, not from hours:
+
+| Size | Looks like | Example |
+|---|---|---|
+| **S** | One module, no new state or file format, no open points | #106 (one bullet in this skill) |
+| **M** | One command or feature, with tests and docs across a few files | #88 (`task logs`) |
+| **L** | The state machine, `task.json` or the git trust boundary changes, or three or more open points; consider splitting it | #195 (review a changed PR in place), #121 (split into six) |
+
+A question gets a size as well: the size of the work its recommended answer leads to.
+
+The first size is a guess, and a reviewer's is rougher still, since it sees the diff and not the backlog. It is
+confirmed or changed when the issue's open points are answered, just before work starts (the "No open questions go
+to a worker" rule in `AGENTS.md`): that is the first moment the scope is fixed. Write the confirmed size and what
+changed it into the issue, and correct the label. Until issue #233 is built, `sbxm task file-findings` leaves a
+finding's `**Size:**` line out of the issue it files and sets no size label, so add both by hand after filing.
 
 **Dependencies.** Look for them across the whole set of findings, not one issue at a time: two issues editing the
 same function, one message that must match another, or a fix that only makes sense after a decision. A question
@@ -238,6 +257,7 @@ Issues: pending (<why>)                              the command rewrites this l
 **What happens:** <behavior, with the evidence: the command or test and its trimmed output>
 **Why it matters:** <the decision or convention it breaks, and the must-fix criterion it meets>
 **Fix:** <the smallest change that resolves it>      questions: **Recommendation:** with the options
+**Size:** <S, M or L, with the reason in a few words>                 see "Size" above; questions too
 **Depends on:** <ID or #n, with why>, or "none known"
 **Related:** <ID or #n, with the order that avoids rework>            optional
 **Acceptance criteria:**
