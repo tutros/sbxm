@@ -433,6 +433,49 @@ fn an_unchanged_pr_head_is_refused_unless_forced() {
     assert_eq!(saved(&f).review.unwrap().must_fix, 1);
 }
 
+/// Issue 195, decision 190(d): a failed fetch of the PR's new head leaves the task exactly as
+/// the first round's review left it.
+#[test]
+fn a_failed_fetch_of_the_new_head_leaves_the_task_unchanged() {
+    let f = config("");
+    let (backend, github) = (backend(&f, &[CLEAN]), github());
+    let mut prepared = prepared(&f, &backend, &github);
+    review_it(
+        &f,
+        &backend,
+        &github,
+        &FakeHostRunner::default(),
+        &mut prepared,
+    )
+    .unwrap();
+    let before = saved(&f);
+    let review_before = fs::read_to_string(meta(&f).join("review.md")).unwrap();
+    // The PR's head is gone from the stand-in origin: the fetch `review_pr` must do before
+    // anything else now fails.
+    common::git(&f.origin, &["update-ref", "-d", "refs/pull/7/head"]);
+
+    let message = format!(
+        "{:#}",
+        review_it_forced(
+            &f,
+            &backend,
+            &github,
+            &FakeHostRunner::default(),
+            &mut prepared,
+            true,
+        )
+        .unwrap_err()
+    );
+
+    assert!(message.contains("cannot fetch"), "{message}");
+    assert_eq!(saved(&f), before, "task.json is unchanged");
+    assert_eq!(
+        fs::read_to_string(meta(&f).join("review.md")).unwrap(),
+        review_before,
+        "review.md is unchanged"
+    );
+}
+
 /// Issue 195, gap G34: a changed head is reviewed again without `--force`, in place, keeping the
 /// earlier round's saved review and the gates running again for the new commits.
 #[test]
