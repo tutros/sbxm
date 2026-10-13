@@ -544,6 +544,10 @@ fn the_second_rounds_reviewer_gets_the_earlier_rounds_findings_as_context() {
         .expect("round 2 saw the earlier review as previous-review.md");
     assert!(context.contains("Nothing found."), "{context}");
     assert!(context.contains("Review round 1"), "{context}");
+    // The prompt itself points the reviewer at that file and the status it must write.
+    let prompt = fs::read_to_string(meta(&f).join("reviewer-prompt-2.md")).unwrap();
+    assert!(prompt.contains(".sbxm-task/previous-review.md"), "{prompt}");
+    assert!(prompt.contains("Status of earlier findings"), "{prompt}");
 }
 
 // ---- The comment text ----

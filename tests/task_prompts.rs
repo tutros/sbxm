@@ -258,10 +258,18 @@ fn the_pr_reviewer_prompt_talks_about_the_pull_request_and_has_no_fix_round() {
         "{text}"
     );
     assert!(text.contains("- `cargo test`"), "{text}");
+    // Issue 195: unlike the issue/spec reviewer, a PR review never feeds a fix round or repeats a
+    // finding, so there is no `**Repeat of:**` field to fill in; it still re-reviews in place
+    // when the PR changed, naming the earlier round's file and the status it must report.
     assert!(
-        !text.contains("re-review") && !text.contains("{{"),
+        !text.contains("Repeat of:") && !text.contains("{{"),
         "{text}"
     );
+    assert!(
+        text.contains("re-review") && text.contains(".sbxm-task/previous-review.md"),
+        "{text}"
+    );
+    assert!(text.contains("Status of earlier findings"), "{text}");
 }
 
 fn spec_values() -> Vec<(&'static str, &'static str)> {
