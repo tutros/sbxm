@@ -60,6 +60,7 @@ fn options(f: &Fixture) -> Options {
             name: "Dev".into(),
             email: "dev@example.com".into(),
         }),
+        disk: Default::default(),
     }
 }
 

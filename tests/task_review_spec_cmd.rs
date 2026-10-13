@@ -86,6 +86,7 @@ fn options(f: &Fixture, spec: PathBuf) -> Options {
         profile: None,
         resolved_spec_id: None,
         force: false,
+        disk: Default::default(),
     }
 }
 

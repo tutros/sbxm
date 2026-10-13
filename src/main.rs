@@ -297,6 +297,7 @@ fn main() -> anyhow::Result<()> {
                     restart: _,
                     yes: _,
                     spec: Some(spec),
+                    ignore_disk,
                 },
         } => {
             let ids = task::record::spec_id(&spec)
@@ -317,6 +318,7 @@ fn main() -> anyhow::Result<()> {
                         repo,
                         clone_source: None,
                         identity: None,
+                        disk: sbxm::disk::Guard::real(ignore_disk),
                     },
                     &SbxBackend,
                     &sbxm::github::gh::GhBackend::default(),
@@ -341,6 +343,7 @@ fn main() -> anyhow::Result<()> {
                     restart,
                     yes,
                     spec: None,
+                    ignore_disk,
                 },
         } => {
             let ids = issues.iter().map(|n| format!("issue-{n}")).collect();
@@ -360,6 +363,7 @@ fn main() -> anyhow::Result<()> {
                         repo,
                         clone_source: None,
                         identity: None,
+                        disk: sbxm::disk::Guard::real(ignore_disk),
                     },
                     restart.then_some(&commands::task_start::Restart {
                         confirm: &Terminal,
@@ -476,6 +480,7 @@ fn main() -> anyhow::Result<()> {
                     time_limit,
                     profile,
                     force,
+                    ignore_disk,
                 },
         } => {
             let target = match (issue, pr, spec) {
@@ -509,6 +514,7 @@ fn main() -> anyhow::Result<()> {
                         profile,
                         resolved_spec_id: None,
                         force,
+                        disk: sbxm::disk::Guard::real(ignore_disk),
                     },
                     &SbxBackend,
                     &sbxm::github::gh::GhBackend::default(),
@@ -526,6 +532,7 @@ fn main() -> anyhow::Result<()> {
                     issue,
                     spec,
                     rounds,
+                    ignore_disk,
                 },
         } => {
             let target = match (issue, spec) {
@@ -547,6 +554,7 @@ fn main() -> anyhow::Result<()> {
                         repo_root: std::env::current_dir()?,
                         target,
                         rounds,
+                        disk: sbxm::disk::Guard::real(ignore_disk),
                     },
                     &SbxBackend,
                     &task::record::SystemProbe,
@@ -573,6 +581,7 @@ fn main() -> anyhow::Result<()> {
                     repo,
                     restart,
                     yes,
+                    ignore_disk,
                 },
         } => {
             let ids = match (&issue, &spec) {
@@ -601,6 +610,7 @@ fn main() -> anyhow::Result<()> {
                             repo,
                             clone_source: None,
                             identity: None,
+                            disk: sbxm::disk::Guard::real(ignore_disk),
                         },
                         restart.then_some(&commands::task_start::Restart {
                             confirm: &Terminal,
@@ -629,6 +639,7 @@ fn main() -> anyhow::Result<()> {
                             repo,
                             clone_source: None,
                             identity: None,
+                            disk: sbxm::disk::Guard::real(ignore_disk),
                         },
                         restart.then_some(&commands::task_start::Restart {
                             confirm: &Terminal,

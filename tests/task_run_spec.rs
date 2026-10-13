@@ -86,6 +86,7 @@ fn options(f: &Fixture, spec: PathBuf) -> SpecOptions {
             name: "Dev".into(),
             email: "dev@example.com".into(),
         }),
+        disk: Default::default(),
     }
 }
 
@@ -1117,4 +1118,24 @@ fn restart_puts_the_old_task_back_even_when_the_screen_stops_taking_output() {
         !sbxm::task::finish::has_leftover(&f.env.base_dir(), &id),
         "{message}"
     );
+}
+
+// Issue 210: a low sandbox drive refuses before anything is created.
+
+#[test]
+fn a_low_sandbox_drive_refuses_before_anything_is_created() {
+    let f = config();
+    let s = spec(&f);
+    let id = id_of(&s);
+    let b = backend_for(&f, &id, &[CLEAN_REVIEW]);
+    let mut opts = options(&f, s);
+    opts.disk = common::low_disk(&f.env);
+
+    let out = go(&f, &opts, None, &b, &FakeGitHub::default());
+
+    let err = format!("{:#}", out.result.unwrap_err());
+    assert!(err.starts_with(common::LOW_DISK), "{err}");
+    assert!(b.log().is_empty(), "{:?}", b.log());
+    assert_eq!(b.secret_service_calls(), 0);
+    assert!(!record::task_dir(&f.env.base_dir(), &id).exists());
 }

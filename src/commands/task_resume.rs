@@ -12,6 +12,7 @@ use super::task_review::{print_review, resume_hint};
 use super::task_start::spec_flag;
 use crate::backend::SandboxBackend;
 use crate::config::GlobalConfig;
+use crate::disk;
 use crate::harness::Harness;
 use crate::headless::RunStatus;
 use crate::task::config::TaskConfig;
@@ -34,6 +35,8 @@ pub struct Options {
     pub target: Target,
     /// `--rounds N`: N more fix rounds for a task that stopped `ready`.
     pub rounds: Option<u32>,
+    /// The free-space check of the sandbox drive before a sandbox is created (decision 194).
+    pub disk: disk::Guard,
 }
 
 impl Target {
@@ -59,7 +62,8 @@ pub fn run(
         bail!("issue numbers start at 1");
     }
     let mut config = TaskConfig::load(&opts.repo_root)?;
-    let base_dir = GlobalConfig::load(config_dir)?.base_dir;
+    let global = GlobalConfig::load(config_dir)?;
+    let base_dir = global.base_dir.clone();
     let id = match &opts.target {
         Target::Issue(n) => format!("issue-{n}"),
         Target::Spec(path) => record::spec_id(path)?.0,
@@ -84,6 +88,7 @@ pub fn run(
         host,
     };
     resume::check_can_resume(&prepared.record, probe, opts.rounds)?;
+    disk::require(&global, config_dir, &opts.disk)?;
     writeln!(
         out,
         "{id}: resuming from {} ({})",

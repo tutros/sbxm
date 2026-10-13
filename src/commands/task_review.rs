@@ -11,6 +11,7 @@ use anyhow::{Result, anyhow, bail};
 use super::task_start::{resolve_repo, spec_flag};
 use crate::backend::SandboxBackend;
 use crate::config::GlobalConfig;
+use crate::disk;
 use crate::github::GitHubBackend;
 use crate::harness::Harness;
 use crate::run::config::{check_model_flag, headless_harness, parse_duration};
@@ -58,6 +59,8 @@ pub struct Options {
     /// Review a pull request whose head a local issue task's in-task review already covered
     /// (issue 198); without it, that is refused.
     pub force: bool,
+    /// The free-space check of the sandbox drive before a sandbox is created (decision 194).
+    pub disk: disk::Guard,
 }
 
 /// The line for a gate that ran and failed (an exit the shell reported, or a timeout).
@@ -130,6 +133,7 @@ pub fn run(
     for warning in &config.warnings {
         writeln!(warn, "warning: {warning}")?;
     }
+    disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?;
     match &opts.target {
         Target::Issue(n) => run_issue(
             config_dir, opts, &config, *n, backend, probe, host, out, warn,

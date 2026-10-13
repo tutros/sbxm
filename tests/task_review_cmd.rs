@@ -69,6 +69,7 @@ fn options(f: &Fixture) -> Options {
         profile: None,
         resolved_spec_id: None,
         force: false,
+        disk: Default::default(),
     }
 }
 
@@ -924,4 +925,23 @@ fn the_force_help_names_both_reasons_a_head_counts_as_reviewed() {
     let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(help.contains("in-task review"), "{help}");
     assert!(help.contains("PR task's own last review"), "{help}");
+}
+
+// Issue 210: a low sandbox drive refuses before the reviewer's sandbox, leaving the task as it was.
+
+#[test]
+fn a_low_sandbox_drive_refuses_before_the_review() {
+    let f = config("codex");
+    worked_task(&f, &backend(&f, &[CLEAN]));
+    let before = std::fs::read(meta(&f).join("task.json")).unwrap();
+    let backend = backend(&f, &[CLEAN]);
+    let mut opts = options(&f);
+    opts.disk = common::low_disk(&f.env);
+
+    let out = go(&f, &opts, &backend);
+
+    let err = format!("{:#}", out.result.unwrap_err());
+    assert!(err.starts_with(common::LOW_DISK), "{err}");
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert_eq!(std::fs::read(meta(&f).join("task.json")).unwrap(), before);
 }

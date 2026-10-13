@@ -11,6 +11,7 @@ use super::task_review;
 use super::task_start::{self, Restart};
 use crate::backend::SandboxBackend;
 use crate::config::GlobalConfig;
+use crate::disk;
 use crate::github::GitHubBackend;
 use crate::harness::Harness;
 use crate::run::config::{check_model_flag, headless_harness, parse_duration};
@@ -40,6 +41,8 @@ pub struct Options {
     pub clone_source: Option<String>,
     /// For tests: the committer identity.
     pub identity: Option<Identity>,
+    /// The free-space check of the sandbox drive before a sandbox is created (decision 194).
+    pub disk: disk::Guard,
 }
 
 /// Drops the `next:` hint of a step that isn't the last one.
@@ -148,6 +151,7 @@ fn run_issue(
         if let Some(profile) = &opts.profile {
             config.sandbox.profile = profile.clone();
         }
+        disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?;
         pipeline::check_reviewer_inputs(config_dir, backend, &config)?;
     }
 
@@ -163,6 +167,7 @@ fn run_issue(
         repo: opts.repo.clone(),
         clone_source: opts.clone_source.clone(),
         identity: opts.identity.clone(),
+        disk: opts.disk.clone(),
     };
     let mut warn = Once {
         inner: warn,
@@ -204,6 +209,7 @@ fn run_issue(
             profile: opts.profile.clone(),
             resolved_spec_id: None,
             force: false,
+            disk: opts.disk.clone(),
         },
         backend,
         github,
@@ -234,6 +240,8 @@ pub struct SpecOptions {
     pub clone_source: Option<String>,
     /// For tests: the committer identity.
     pub identity: Option<Identity>,
+    /// The free-space check of the sandbox drive before a sandbox is created (decision 194).
+    pub disk: disk::Guard,
 }
 
 /// Sets the spec task of `spec` aside, if one exists, instead of deleting it (decision 185): the
@@ -341,6 +349,7 @@ fn run_spec_task(
         if let Some(profile) = &opts.profile {
             config.sandbox.profile = profile.clone();
         }
+        disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?;
         pipeline::check_reviewer_inputs(config_dir, backend, &config)?;
     }
 
@@ -355,6 +364,7 @@ fn run_spec_task(
         repo: opts.repo.clone(),
         clone_source: opts.clone_source.clone(),
         identity: opts.identity.clone(),
+        disk: opts.disk.clone(),
     };
     // The same preflight `task_start::run_spec` itself runs, so a bad --time-limit, repo,
     // identity, base or spec file is caught here too: `--restart`'s discard below must not cost
@@ -481,6 +491,7 @@ fn run_spec_task(
             profile: opts.profile.clone(),
             resolved_spec_id: Some(spec_id),
             force: false,
+            disk: opts.disk.clone(),
         },
         backend,
         github,

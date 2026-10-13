@@ -83,6 +83,7 @@ fn options(f: &Fixture) -> Options {
             name: "Dev".into(),
             email: "dev@example.com".into(),
         }),
+        disk: Default::default(),
     }
 }
 
@@ -655,4 +656,23 @@ fn a_missing_reviewer_secret_is_refused_before_the_worker_creates_anything() {
             .exists(),
         "no task folder may be left"
     );
+}
+
+// Issue 210: a low sandbox drive refuses before the worker, the reviewer or GitHub.
+
+#[test]
+fn a_low_sandbox_drive_refuses_before_anything_is_created() {
+    let f = config();
+    let (b, gh) = (backend(&f, &[CLEAN]), github());
+    let mut opts = options(&f);
+    opts.disk = common::low_disk(&f.env);
+
+    let out = go(&f, &opts, None, &b, &gh);
+
+    let err = format!("{:#}", out.result.unwrap_err());
+    assert!(err.starts_with(common::LOW_DISK), "{err}");
+    assert!(b.log().is_empty(), "{:?}", b.log());
+    assert_eq!(b.secret_service_calls(), 0);
+    assert!(gh.calls().is_empty(), "{:?}", gh.calls());
+    assert!(!record::task_dir(&f.env.base_dir(), "issue-41").exists());
 }
