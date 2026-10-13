@@ -601,6 +601,33 @@ fn the_fix_prompts_hand_back_a_finding_that_needs_a_change_that_is_not_theirs() 
     }
 }
 
+/// PR 227's review, M-1: a fix round for a failed gate is the same headless worker, so it has the
+/// same limits (a failing gate is no licence to cross them) and the same turn-end rule.
+#[test]
+fn the_gate_fix_prompts_have_the_same_limits_as_the_review_fix_prompts() {
+    let mut issue_values = values();
+    issue_values.push(("gate_output_path", ".sbxm-task/gate-failure.md"));
+    for (role, values) in [
+        (Role::FixGate, issue_values),
+        (Role::FixGateSpec, spec_values()),
+    ] {
+        let template = prompts::template(role, &Prompts::default()).unwrap();
+        let text = prompts::render(&template.name, &template.text, &values).unwrap();
+        for needle in [
+            "a recorded decision",
+            "a dependency, or code whose main purpose is to avoid one",
+            "don't make it and don't build around it",
+            "much larger than the failure",
+            "\"Needs a decision\"",
+            "\"Choices made\"",
+            "never end your turn while waiting on a background command",
+        ] {
+            assert!(text.contains(needle), "{}: lacks {needle}", template.name);
+        }
+        assert!(!text.contains("{{"), "{text}");
+    }
+}
+
 /// Issue 220, part 1: a reviewer doesn't send the author around a rule. A finding whose only fix
 /// is the user's call is a question, an unasked change of that kind is a must-fix, an undeclared
 /// choice a should-fix.
