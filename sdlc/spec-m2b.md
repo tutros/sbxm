@@ -245,7 +245,9 @@ Output: human text by default; `status --json` prints the records. Exit codes: 0
   applies to them.
 - **A `ready` PR task is reviewed again (decision 190, gap G34):** `--pr N` on a task already at `ready` fetches the
   PR's new head into `repo.git` and reviews it again instead of refusing outright (`task rm --pr N` is no longer
-  needed first). An unchanged head (the PR's current head equals `review.commit`) is refused the same way as the
+  needed first). The PR is read again first and checked like a new task's: one closed, merged or from a fork since
+  is refused before the fetch, and its current description and closing issues replace `issue.md` (written only after
+  the refusals). An unchanged head (the PR's current head equals `review.commit`) is refused the same way as the
   decision 187 case above, naming the commit and `--force`; the fetch and this refusal both happen before anything
   is written, so a refused attempt or a failed fetch leaves `review.md` and `task.json` untouched. Once it proceeds:
   the gates run again (the commits are new), the earlier round's `review-<n>.md` stays in the task folder (never
