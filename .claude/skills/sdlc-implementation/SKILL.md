@@ -152,6 +152,27 @@ A milestone is built as one batch, reviewed once at the end. It is the lighter f
 6. **The milestone lands** as a PR from the milestone branch after the end-of-milestone review's must-fix issues are
    fixed or the user accepts them.
 
+## 9. Review your own change, and fix the kind of problem
+
+Added after the issue 206 experiment (`sdlc/issue-206-experiment-report.md`). The `sbxm task` worker and fix prompts
+carry the same text.
+
+**Before reporting a change done,** review it the way the reviewer will:
+- Read the whole diff against its base, and check it against "What counts as must-fix" in the `sdlc-code-review` skill
+  and against the "check before acting" rule below.
+- For every destructive action in the diff (a delete, an overwrite, a removed sandbox), list each input that is read
+  after it. An input that can still make the command fail there is a finding.
+- Fix what you find, test first, like any other step. The report says what was checked, each destructive action with
+  the inputs read after it, and what changed because of the self-review (or "nothing").
+
+**When fixing a review finding,** fix the kind of problem, not only the place the reviewer named:
+- Name the kind of problem in one sentence, search the change for every other place it occurs, and fix them together,
+  or say why a place is left.
+- A finding that repeats an earlier one means the last fix patched one instance. Don't patch the next one: change the
+  structure so the kind can't occur, or say that it is outside the task and why.
+- After two rounds with the same kind, stop and settle the structure with the user. A prompt didn't solve that in the
+  experiment.
+
 ## Loop summary
 
 ```
