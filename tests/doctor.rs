@@ -530,8 +530,8 @@ fn the_sandbox_drive_free_space_is_reported() {
     assert!(!report.failed(), "{}", report.render());
     assert!(
         report.render().contains(&format!(
-            "ok   20.0 GiB free on the drive of {} (sbx's sandbox state)\n",
-            state.display()
+            "ok   20.0 GiB free on {} (sbx's sandbox state)\n",
+            sbxm::disk::describe(&state)
         )),
         "{}",
         report.render()
@@ -558,10 +558,10 @@ fn a_low_sandbox_drive_warns_without_failing() {
     assert!(!report.failed(), "{}", report.render());
     assert!(
         report.render().contains(&format!(
-            "warn only 3.0 GiB free on the drive of {} (sbx's sandbox state); free up space to \
+            "warn only 3.0 GiB free on {} (sbx's sandbox state); free up space to \
              at least 10.0 GiB (a full drive makes sbx answer \"try: sbx login\"), or change \
              min_free_disk in {}\n",
-            state.display(),
+            sbxm::disk::describe(&state),
             env.config_dir().join("config.toml").display()
         )),
         "{}",
@@ -576,10 +576,7 @@ fn the_threshold_comes_from_min_free_disk() {
 
     let text = report(&env, &FakeBackend::default()).render();
 
-    assert!(
-        text.contains("warn only 20.0 GiB free on the drive of "),
-        "{text}"
-    );
+    assert!(text.contains("warn only 20.0 GiB free on "), "{text}");
     assert!(text.contains("at least 30.0 GiB"), "{text}");
 }
 
@@ -631,8 +628,8 @@ fn the_platform_default_folder_is_checked() {
 
     assert!(
         text.contains(&format!(
-            "ok   20.0 GiB free on the drive of {} (sbx's sandbox state)\n",
-            state.display()
+            "ok   20.0 GiB free on {} (sbx's sandbox state)\n",
+            sbxm::disk::describe(&state)
         )),
         "{text}"
     );
@@ -649,7 +646,7 @@ fn sandbox_state_dir_overrides_the_platform_default() {
     let text = report_with(&env, &host).render();
 
     assert!(
-        text.contains(&format!("on the drive of {} ", state.display())),
+        text.contains(&format!("on {} ", sbxm::disk::describe(&state))),
         "{text}"
     );
 }
@@ -694,9 +691,9 @@ fn an_unreadable_sandbox_drive_warns() {
     assert!(!report.failed(), "{}", report.render());
     assert!(
         report.render().contains(&format!(
-            "warn free space of the drive of {} (sbx's sandbox state): no statvfs; check \
+            "warn free space of {} (sbx's sandbox state): no statvfs; check \
              sandbox_state_dir in {}\n",
-            state.display(),
+            sbxm::disk::describe(&state),
             env.config_dir().join("config.toml").display()
         )),
         "{}",

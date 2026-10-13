@@ -100,10 +100,10 @@ fn under_the_threshold_refuses_naming_the_drive_the_free_space_and_the_flag() {
     assert_eq!(
         format!("{err:#}"),
         format!(
-            "only 2.5 GiB free on the drive of {} (sbx's sandbox state), under min_free_disk \
+            "only 2.5 GiB free on {} (sbx's sandbox state), under min_free_disk \
              10.0 GiB; free up space, or pass --ignore-disk to go ahead anyway (min_free_disk \
              in {} sets the threshold, \"0\" switches the check off)",
-            state.display(),
+            sbxm::disk::describe(&state),
             env.config_dir().join("config.toml").display()
         )
     );
@@ -195,4 +195,24 @@ fn a_missing_state_folder_goes_ahead() {
 fn an_unreadable_free_space_goes_ahead() {
     let (env, _) = env_with_state();
     require(&env, &guard(|_| Err(std::io::Error::other("no")))).unwrap();
+}
+
+// The other tests take the wording from `describe`, so its two forms are pinned here, each on
+// the platform whose paths can produce it.
+#[cfg(windows)]
+#[test]
+fn a_path_with_a_drive_is_described_by_its_drive_letter() {
+    assert_eq!(
+        disk::describe(Path::new(r"E:\sbx\state")),
+        r"drive E: (E:\sbx\state)"
+    );
+}
+
+#[cfg(not(windows))]
+#[test]
+fn a_path_without_a_drive_is_described_by_its_folder() {
+    assert_eq!(
+        disk::describe(Path::new("/var/sbx/state")),
+        "the drive of /var/sbx/state"
+    );
 }

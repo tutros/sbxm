@@ -119,7 +119,7 @@ pub fn low_disk(env: &Env) -> sbxm::disk::Guard {
 }
 
 /// The start of the refusal [`low_disk`] leads to.
-pub const LOW_DISK: &str = "only 1.0 GiB free on the drive of ";
+pub const LOW_DISK: &str = "only 1.0 GiB free on ";
 
 /// `path` as a TOML string.
 pub fn toml_path(path: &Path) -> String {

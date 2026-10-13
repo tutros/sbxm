@@ -1170,7 +1170,7 @@ fn a_drive_that_fills_during_the_worker_stops_before_the_review_naming_task_revi
     assert!(
         err.starts_with(&format!(
             "the worker is done but its review was not started; continue with `sbxm task review \
-             --spec {}`: only 1.0 GiB free on the drive of ",
+             --spec {}`: only 1.0 GiB free on ",
             s.display()
         )),
         "{err}"
