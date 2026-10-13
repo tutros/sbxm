@@ -196,10 +196,12 @@ fn main() -> anyhow::Result<()> {
         Command::Run(RunArgs {
             command: None,
             config: Some(config_path),
+            ignore_disk,
         }) => {
             commands::run::run(
                 &config::config_dir()?,
                 &config_path,
+                &sbxm::disk::Guard::real(ignore_disk),
                 &SbxBackend,
                 &mut std::io::stdout(),
                 &mut std::io::stderr(),

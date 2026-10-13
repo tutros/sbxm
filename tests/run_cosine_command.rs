@@ -62,7 +62,15 @@ fn go(body: &str, backend: &FakeBackend) -> Ran {
     let path = env.tmp.path().join("run.toml");
     std::fs::write(&path, body).unwrap();
     let (mut out, mut warn) = (Vec::new(), Vec::new());
-    let summary = run::run(&env.config_dir(), &path, backend, &mut out, &mut warn).unwrap();
+    let summary = run::run(
+        &env.config_dir(),
+        &path,
+        &Default::default(),
+        backend,
+        &mut out,
+        &mut warn,
+    )
+    .unwrap();
     Ran {
         env,
         summary,
@@ -150,7 +158,15 @@ fn a_cosine_model_failure_leaves_the_judges_ranking_unaffected() {
     let path = env.tmp.path().join("run.toml");
     std::fs::write(&path, &body).unwrap();
     let (mut out, mut warn) = (Vec::new(), Vec::new());
-    let summary = run::run(&env.config_dir(), &path, &backend, &mut out, &mut warn).unwrap();
+    let summary = run::run(
+        &env.config_dir(),
+        &path,
+        &Default::default(),
+        &backend,
+        &mut out,
+        &mut warn,
+    )
+    .unwrap();
     let out = String::from_utf8(out).unwrap();
     let warn_text = String::from_utf8(warn).unwrap();
 
@@ -210,6 +226,7 @@ fn an_already_loaded_embedder_that_fails_at_runtime_is_one_warning_and_leaves_th
     let summary = run::run_with_embedder(
         &env.config_dir(),
         &path,
+        &Default::default(),
         &backend,
         &mut out,
         &mut warn,
@@ -293,6 +310,7 @@ fn different_runtime_embedding_errors_print_one_warning_and_each_repeat_keeps_it
     let summary = run::run_with_embedder(
         &env.config_dir(),
         &path,
+        &Default::default(),
         &pong(),
         &mut out,
         &mut warn,

@@ -972,6 +972,7 @@ fn run_against_real_sbx() {
     let summary = run::run(
         config_dir.path(),
         &run_config,
+        &Default::default(),
         &SbxBackend,
         &mut out,
         &mut warn,
@@ -1088,6 +1089,7 @@ fn run_diffs_against_real_sbx() {
         let summary = run::run(
             config_dir.path(),
             &run_config,
+            &Default::default(),
             &SbxBackend,
             &mut out,
             &mut warn,
@@ -1208,6 +1210,7 @@ fn run_checks_against_real_sbx() {
     let summary = run::run(
         config_dir.path(),
         &run_config,
+        &Default::default(),
         &SbxBackend,
         &mut out,
         &mut warn,
@@ -1308,6 +1311,7 @@ fn run_judge_against_real_sbx() {
     let summary = run::run(
         config_dir.path(),
         &run_config,
+        &Default::default(),
         &SbxBackend,
         &mut out,
         &mut warn,
@@ -1436,6 +1440,7 @@ fn run_profiles_against_real_sbx() {
     let summary = run::run(
         config_dir.path(),
         &run_config,
+        &Default::default(),
         &SbxBackend,
         &mut out,
         &mut warn,

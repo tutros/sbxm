@@ -144,6 +144,9 @@ pub struct RunArgs {
     /// The run-config file (create one with `sbxm run init`).
     #[arg(required = true)]
     pub config: Option<PathBuf>,
+    /// Run even when the drive of sbx's sandbox state has less than min_free_disk free.
+    #[arg(long)]
+    pub ignore_disk: bool,
 }
 
 #[derive(Debug, Subcommand)]

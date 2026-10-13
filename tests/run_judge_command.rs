@@ -74,7 +74,15 @@ fn go(run_table: &str, judge: &str, backend: &FakeBackend) -> Ran {
     )
     .unwrap();
     let (mut out, mut warn) = (Vec::new(), Vec::new());
-    let summary = run::run(&env.config_dir(), &path, backend, &mut out, &mut warn).unwrap();
+    let summary = run::run(
+        &env.config_dir(),
+        &path,
+        &Default::default(),
+        backend,
+        &mut out,
+        &mut warn,
+    )
+    .unwrap();
     Ran {
         env,
         summary,

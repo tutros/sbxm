@@ -251,6 +251,7 @@ fn go(contestants: &str) -> (Env, run::Summary, String) {
     let summary = run::run(
         &env.config_dir(),
         &path,
+        &Default::default(),
         &backend,
         &mut out,
         &mut Vec::new(),
@@ -339,6 +340,7 @@ fn a_contestants_profile_secrets_are_required_before_anything_is_written() {
     let err = run::run(
         &env.config_dir(),
         &path,
+        &Default::default(),
         &backend,
         &mut Vec::new(),
         &mut Vec::new(),
