@@ -131,16 +131,18 @@ log`, `git diff` and `git show` can write a file with `--output=<file>`, `git st
 a rule cannot exclude an option (Claude Code already runs the read-only forms of `git` in Bash without asking).
 Anything that publishes, deletes, writes or starts a sandbox still asks.
 
-The `sbxm` commands that only report (`status`, `task status`, `task states`, `task logs`, `list`, `config show`,
-`config profiles-dir`, `run show`) are not in that file (decision 192): a recorded build's file name changes with every build and each call
-sets `SBXM_CONFIG_DIR` first, so a rule would need a wildcard in the middle of the command. Allow them on your own
+The `sbxm` commands that only report (`status`, `task states`, `task logs`, `list`, `config show`,
+`config profiles-dir`, `run show`) are not in that file (decision 192): a recorded build's file name changes with
+every build and each call sets `SBXM_CONFIG_DIR` first, so a rule would need a wildcard in the middle of the command. Allow them on your own
 machine instead: a small wrapper script at a fixed path that sets the config dir and calls the current recorded
 build, rewritten by whatever makes that build, and one allow rule per report command for that path in
 `.claude/settings.local.json`, which is not checked in because it names a path of one machine. Claude Code refuses
 to let an agent session edit its own permission settings, so you add the rules yourself. Whoever can edit the
-wrapper decides what the allowed command does: keep it outside any folder an agent's sandbox mounts. `doctor` is
-left out on purpose and keeps asking: its writability check creates and removes a file in the base dir, and its kit
-check writes and removes kits in the temp dir.
+wrapper decides what the allowed command does: keep it outside any folder an agent's sandbox mounts. Two commands
+that look like reports are left out on purpose and keep asking, because they write: `doctor` (its writability
+check creates and removes a file in the base dir, and its kit check writes and removes kits in the temp dir) and
+`task status` (it appends its output to the `run.log` of each task it shows, decision 170; `sbxm status` shows the
+same tasks and only reads).
 
 ## Practical notes
 
