@@ -232,11 +232,12 @@ Output: human text by default; `status --json` prints the records. Exit codes: 0
   once; the review is posted as a PR comment; no fix round. Task id `pr-<n>`; `related` links an `issue-<n>` task if
   one exists [158].
 - **A PR head already reviewed (decision 187):** before any write, `--pr N` looks through the task folders on this
-  machine for an issue task (not one that continued a PR) whose `pr` is PR N of this repo; when its `review.commit`
+  machine for an issue task (not one that continued a PR) whose `pr` is PR N of this repo; when its `review.posted`
   is the PR's `headRefOid`, the command is refused with `already reviewed at <commit>` and a hint naming `--force`.
-  `--force` skips this check only. The commit compared is `review.posted`, which `task finish` writes only after
-  GitHub accepted the comment: a task that posted nothing, whose post failed or that was interrupted before the
-  post has none and doesn't count. `task finish --issue N` posts that review on the PR it opens: the risk section of
+  `--force` skips this check only. `review.posted` alone is the proof: `task finish` writes it only after GitHub
+  accepted the comment, so a task that posted nothing, whose post failed or that was interrupted before the post
+  has none and doesn't count, whatever its `review.commit` says. `task finish --issue N` posts the review, when
+  `review.commit` is the branch tip it pushes, on the PR it opens: the risk section of
   the PR description first, then a line naming the issue and the commit, then `review.md`, laid out and cut like a
   `--pr` review comment. Nothing read from GitHub but the head decides (anyone can post a comment that looks like a
   review); with no task folder recording the PR, the review runs as before. Spec tasks open no PR, so this never
