@@ -598,6 +598,103 @@ fn the_second_rounds_reviewer_gets_the_earlier_rounds_findings_as_context() {
     assert!(prompt.contains("Status of earlier findings"), "{prompt}");
 }
 
+/// Issue 195, review finding M-2: a PR closed or merged after the first round is refused like a
+/// new PR task would be, before any sandbox, gate or write.
+#[test]
+fn a_pr_closed_or_merged_after_the_first_round_is_refused_before_anything_runs() {
+    for (state, word) in [(PrState::Closed, "closed"), (PrState::Merged, "merged")] {
+        let f = config("");
+        let (backend, github) = (backend(&f, &[CLEAN, ONE]), github());
+        let mut prepared = prepared(&f, &backend, &github);
+        review_it(
+            &f,
+            &backend,
+            &github,
+            &FakeHostRunner::default(),
+            &mut prepared,
+        )
+        .unwrap();
+        add_pr_head(&f, 7);
+        let before = saved(&f);
+        let review_before = fs::read_to_string(meta(&f).join("review.md")).unwrap();
+        let creates = backend.creates().len();
+        let now = FakeGitHub::default()
+            .with_pr(PrInfo { state, ..pr() })
+            .with_issue_text(issue_text(4));
+
+        let message = format!(
+            "{:#}",
+            review_it(
+                &f,
+                &backend,
+                &now,
+                &FakeHostRunner::default(),
+                &mut prepared
+            )
+            .unwrap_err()
+        );
+
+        assert!(message.contains(word), "{message}");
+        assert_eq!(backend.creates().len(), creates, "no sandbox for {word}");
+        assert_eq!(saved(&f), before, "task.json is unchanged ({word})");
+        assert_eq!(
+            fs::read_to_string(meta(&f).join("review.md")).unwrap(),
+            review_before,
+            "review.md is unchanged ({word})"
+        );
+        assert!(
+            !now.calls()
+                .iter()
+                .any(|c| matches!(c, GhCall::PrComment(..))),
+            "nothing posted ({word})"
+        );
+    }
+}
+
+/// Issue 195, review finding M-2: round 2's reviewer gets the PR's current description and the
+/// issues it closes now, not the ones saved at round 1.
+#[test]
+fn a_second_round_gets_the_prs_current_description_and_issues() {
+    let f = config("");
+    let (backend, github) = (backend(&f, &[CLEAN, ONE]), github());
+    let mut prepared = prepared(&f, &backend, &github);
+    review_it(
+        &f,
+        &backend,
+        &github,
+        &FakeHostRunner::default(),
+        &mut prepared,
+    )
+    .unwrap();
+    add_pr_head(&f, 7);
+    let mut issue_5 = issue_text(5);
+    issue_5.text = "Issue five's own text\n".into();
+    let now = FakeGitHub::default()
+        .with_pr(PrInfo {
+            title: "Add the x and y features".into(),
+            body: "Adds x and now y.\n\nFixes #4, fixes #5".into(),
+            closing_issues: vec![4, 5],
+            ..pr()
+        })
+        .with_issue_text(issue_text(4))
+        .with_issue_text(issue_5);
+
+    review_it(
+        &f,
+        &backend,
+        &now,
+        &FakeHostRunner::default(),
+        &mut prepared,
+    )
+    .unwrap();
+
+    let context = fs::read_to_string(meta(&f).join("issue.md")).unwrap();
+    assert!(context.contains("Add the x and y features"), "{context}");
+    assert!(context.contains("Adds x and now y."), "{context}");
+    assert!(context.contains("Issue five's own text"), "{context}");
+    assert_eq!(saved(&f).review.unwrap().round, 2);
+}
+
 // ---- The comment text ----
 
 #[test]

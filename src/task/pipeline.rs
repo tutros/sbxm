@@ -163,18 +163,7 @@ pub fn prepare_pr(ctx: &Ctx, pr: &PrInfo) -> Result<Prepared> {
     let meta = record::task_dir(&global.base_dir, &id);
     let workspace = global.base_dir.join("tasks").join(&id);
 
-    match pr.state {
-        PrState::Open => {}
-        PrState::Closed => bail!("PR #{number} is closed; only open PRs are reviewed"),
-        PrState::Merged => bail!("PR #{number} is merged; only open PRs are reviewed"),
-    }
-    if pr.is_cross_repository {
-        bail!(
-            "PR #{number} comes from a fork; only PRs from branches of {} are reviewed, because a \
-             fork's code is not something to fetch and run here (decision 87)",
-            ctx.repo
-        );
-    }
+    check_pr_reviewable(pr, ctx.repo)?;
     if meta.exists() {
         let stage = record::read(&meta.join("task.json"))
             .map(|r| r.stage.name().to_owned())
@@ -224,21 +213,7 @@ pub fn prepare_pr(ctx: &Ctx, pr: &PrInfo) -> Result<Prepared> {
         repo::clone_bare(ctx.clone_source, &repo_git)?;
         let branch = repo::fetch_pr_head(&repo_git, number)?;
 
-        // The review context: the PR itself, then each issue it closes.
-        let mut context = format!(
-            "Pull request #{number}: {}\nBranch: {}\n\n{}\n",
-            pr.title, pr.head_ref, pr.body
-        );
-        for issue_number in &pr.closing_issues {
-            let issue = ctx.github.issue(ctx.repo, *issue_number).with_context(|| {
-                format!("cannot read issue #{issue_number}, which the pull request closes")
-            })?;
-            context.push_str(&format!(
-                "\n---\n\nIssue #{issue_number} (closed by this pull request):\n\n{}\n",
-                issue.text
-            ));
-        }
-        fs::write(meta.join("issue.md"), &context)?;
+        fs::write(meta.join("issue.md"), pr_context(ctx.github, ctx.repo, pr)?)?;
 
         let mut task = Record::new(
             &NewTask {
@@ -284,6 +259,42 @@ pub fn prepare_pr(ctx: &Ctx, pr: &PrInfo) -> Result<Prepared> {
             Err(e)
         }
     }
+}
+
+/// Only an open PR from a branch of `repo` itself is reviewed, both when its task is made and
+/// each time a `ready` task reviews it again (issue 195).
+fn check_pr_reviewable(pr: &PrInfo, repo: &str) -> Result<()> {
+    let number = pr.number;
+    match pr.state {
+        PrState::Open => {}
+        PrState::Closed => bail!("PR #{number} is closed; only open PRs are reviewed"),
+        PrState::Merged => bail!("PR #{number} is merged; only open PRs are reviewed"),
+    }
+    if pr.is_cross_repository {
+        bail!(
+            "PR #{number} comes from a fork; only PRs from branches of {repo} are reviewed, \
+             because a fork's code is not something to fetch and run here (decision 87)"
+        );
+    }
+    Ok(())
+}
+
+/// The review context `issue.md` holds: the PR itself, then each issue it closes.
+fn pr_context(github: &dyn GitHubBackend, repo: &str, pr: &PrInfo) -> Result<String> {
+    let mut context = format!(
+        "Pull request #{}: {}\nBranch: {}\n\n{}\n",
+        pr.number, pr.title, pr.head_ref, pr.body
+    );
+    for issue_number in &pr.closing_issues {
+        let issue = github.issue(repo, *issue_number).with_context(|| {
+            format!("cannot read issue #{issue_number}, which the pull request closes")
+        })?;
+        context.push_str(&format!(
+            "\n---\n\nIssue #{issue_number} (closed by this pull request):\n\n{}\n",
+            issue.text
+        ));
+    }
+    Ok(context)
 }
 
 /// `--restart` deletes a task and then starts the issue again, so before the first deletion every
@@ -2064,6 +2075,11 @@ pub fn review_pr(
     let number = prepared.record.number;
     let repo_git = prepared.meta.join("repo.git");
     if prepared.record.stage == Stage::Ready {
+        // The PR may have been closed, or its description and issues changed, since the last
+        // round: checked and rebuilt like a new task's, but written only after the refusals.
+        let pr = github.pr(&prepared.record.repo, number)?;
+        check_pr_reviewable(&pr, &prepared.record.repo)?;
+        let context = pr_context(github, &prepared.record.repo, &pr)?;
         repo::fetch_pr_head(&repo_git, number)
             .with_context(|| format!("cannot fetch PR #{number}'s head to review it again"))?;
         let head = repo::branch_tip(&repo_git, &prepared.record.branch)?;
@@ -2083,6 +2099,7 @@ pub fn review_pr(
                 )
             );
         }
+        fs::write(prepared.meta.join("issue.md"), context)?;
     }
     let mut report = PrReview {
         warnings: check_reviewer(env, prepared)?,
