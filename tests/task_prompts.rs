@@ -525,3 +525,131 @@ fn every_reviewer_prompt_limits_findings_to_what_the_change_causes() {
         );
     }
 }
+
+/// Issue 206: both worker prompts ask for a self-review before the worker reports done.
+#[test]
+fn the_worker_prompts_ask_for_a_self_review_with_its_own_section_in_result_md() {
+    for (role, values) in [(Role::Worker, values()), (Role::WorkerSpec, spec_values())] {
+        let template = prompts::template(role, &Prompts::default()).unwrap();
+        let text = prompts::render(&template.name, &template.text, &values).unwrap();
+        assert!(text.contains("review your own change"), "{text}");
+        assert!(text.contains("sdlc-code-review"), "{text}");
+        assert!(text.contains("check before acting"), "{text}");
+        assert!(text.contains("destructive action"), "{text}");
+        assert!(text.contains("\"Self-review\" section"), "{text}");
+        assert!(!text.contains("{{"), "{text}");
+    }
+}
+
+/// Issue 206: a review's fix round fixes the kind of problem, and a repeat finding is not
+/// patched one more time.
+#[test]
+fn the_fix_prompts_ask_for_the_kind_of_problem_and_stop_patching_a_repeat() {
+    for (role, values) in [(Role::Fix, review_values()), (Role::FixSpec, spec_values())] {
+        let template = prompts::template(role, &Prompts::default()).unwrap();
+        let text = prompts::render(&template.name, &template.text, &values).unwrap();
+        assert!(text.contains("kind of problem"), "{text}");
+        assert!(text.contains("every other place"), "{text}");
+        assert!(text.contains("\"Repeat of:\""), "{text}");
+        assert!(text.contains("Change the structure"), "{text}");
+        assert!(!text.contains("{{"), "{text}");
+    }
+}
+
+/// Issue 220, part 1: a worker knows which choices are its own, which it declares and which it
+/// hands back, and result.md has a section for each of the last two.
+#[test]
+fn the_worker_prompts_set_the_limits_and_name_the_two_result_sections() {
+    for (role, values) in [(Role::Worker, values()), (Role::WorkerSpec, spec_values())] {
+        let template = prompts::template(role, &Prompts::default()).unwrap();
+        let text = prompts::render(&template.name, &template.text, &values).unwrap();
+        for needle in [
+            "Not yours",
+            "a recorded decision",
+            "a dependency, or code whose main purpose is to avoid one",
+            "upkeep outside the feature",
+            "don't make it and don't build around it",
+            "\"Choices made\"",
+            "\"Needs a decision\"",
+        ] {
+            assert!(text.contains(needle), "{}: lacks {needle}", template.name);
+        }
+        assert!(!text.contains("{{"), "{text}");
+    }
+}
+
+/// Issue 220, part 1: a fix round has the same limits (a finding is no licence to cross them),
+/// and, being a headless run like the worker's, must not end while a check runs in the background
+/// (issue 90's fix round did, and committed nothing).
+#[test]
+fn the_fix_prompts_hand_back_a_finding_that_needs_a_change_that_is_not_theirs() {
+    for (role, values) in [(Role::Fix, review_values()), (Role::FixSpec, spec_values())] {
+        let template = prompts::template(role, &Prompts::default()).unwrap();
+        let text = prompts::render(&template.name, &template.text, &values).unwrap();
+        for needle in [
+            "a recorded decision",
+            "a dependency, or code whose main purpose is to avoid one",
+            "don't make it and don't build around it",
+            "much larger than its finding",
+            "\"Needs a decision\"",
+            "\"Choices made\"",
+            "never end your turn while waiting on a background command",
+        ] {
+            assert!(text.contains(needle), "{}: lacks {needle}", template.name);
+        }
+        assert!(!text.contains("{{"), "{text}");
+    }
+}
+
+/// PR 227's review, M-1: a fix round for a failed gate is the same headless worker, so it has the
+/// same limits (a failing gate is no licence to cross them) and the same turn-end rule.
+#[test]
+fn the_gate_fix_prompts_have_the_same_limits_as_the_review_fix_prompts() {
+    let mut issue_values = values();
+    issue_values.push(("gate_output_path", ".sbxm-task/gate-failure.md"));
+    for (role, values) in [
+        (Role::FixGate, issue_values),
+        (Role::FixGateSpec, spec_values()),
+    ] {
+        let template = prompts::template(role, &Prompts::default()).unwrap();
+        let text = prompts::render(&template.name, &template.text, &values).unwrap();
+        for needle in [
+            "a recorded decision",
+            "a dependency, or code whose main purpose is to avoid one",
+            "don't make it and don't build around it",
+            "much larger than the failure",
+            "\"Needs a decision\"",
+            "\"Choices made\"",
+            "never end your turn while waiting on a background command",
+        ] {
+            assert!(text.contains(needle), "{}: lacks {needle}", template.name);
+        }
+        assert!(!text.contains("{{"), "{text}");
+    }
+}
+
+/// Issue 220, part 1: a reviewer doesn't send the author around a rule. A finding whose only fix
+/// is the user's call is a question, an unasked change of that kind is a must-fix, an undeclared
+/// choice a should-fix.
+#[test]
+fn every_reviewer_prompt_knows_what_is_the_users_call() {
+    let prompts_and_values = [
+        (Role::Reviewer, review_values()),
+        (Role::ReviewerPr, review_values()),
+        (Role::ReviewerSpec, spec_values()),
+    ];
+    for (role, values) in prompts_and_values {
+        let template = prompts::template(role, &Prompts::default()).unwrap();
+        let text = prompts::render(&template.name, &template.text, &values).unwrap();
+        for needle in [
+            "a recorded decision",
+            "a dependency, or code whose main purpose is to avoid one",
+            "\"Needs a decision:\"",
+            "is a must-fix finding",
+            "\"Choices made\"",
+            "is a should-fix finding",
+        ] {
+            assert!(text.contains(needle), "{}: lacks {needle}", template.name);
+        }
+    }
+}

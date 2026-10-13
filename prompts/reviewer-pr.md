@@ -15,6 +15,16 @@ describes elsewhere and this change doesn't claim to deliver, or something that 
 tool is not a finding for this change: put it under "## Outside this change" (or ask it as a question).
 It doesn't count towards the must-fix total.
 
+Some changes are the user's to decide, not the author's: adding, removing or reinterpreting a recorded decision, or
+working around a rule one sets; adding a dependency, or code whose main purpose is to avoid one; adding something that
+needs upkeep outside the feature (generated code, a script, a second crate, a new file format or config key); adding
+user-visible behavior that wasn't asked for; or a change far larger than its task. Such a change, made without the
+task asking for it, is a must-fix finding: the fix is to take it out and hand the question back to the user. When a
+finding of yours could only be fixed by such a change, don't write it as must-fix: put it under "## Questions" with a
+title that starts "Needs a decision:", and give the options. A choice between ways of meeting the task that someone
+could reasonably have made differently, and that the author's result doesn't list under "Choices made" (when you can
+see the result: a pull request's description carries it), is a should-fix finding.
+
 Write {{review_path}}. Its first line is exactly "Must-fix findings: <count>", and the line right after it (one
 blank line between the two is fine, but nothing else) is exactly "Risk: low", "Risk: medium" or "Risk: high": low is
 docs, tests or a contained change with tests; medium is a behavior change in one area, or a failed/unresolved
