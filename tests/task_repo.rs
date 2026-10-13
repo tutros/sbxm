@@ -870,6 +870,112 @@ fn a_task_branch_that_already_exists_on_origin_is_refused_in_plain_words() {
     assert!(!message.contains("failed"), "{message}");
 }
 
+/// Issue 202 (`task rm --merged`): `fetch_base` refreshes `refs/remotes/origin/<base>` in
+/// `repo_git`, even though the bare clone's own `refs/heads/<base>` is stale (it was set once, at
+/// clone time, and nothing else in sbxm ever updates it).
+#[test]
+fn fetch_base_updates_the_remote_tracking_ref_past_the_stale_clone() {
+    let f = fixture();
+    repo::clone_bare(&source(&f), &f.repo_git).unwrap();
+    // The base branch moves on origin after the clone.
+    let scratch = f.root.join("scratch");
+    git(
+        &f.root,
+        &[
+            "clone",
+            "-q",
+            f.origin.to_str().unwrap(),
+            scratch.to_str().unwrap(),
+        ],
+    );
+    fs::write(scratch.join("new.txt"), "x\n").unwrap();
+    git(&scratch, &["add", "-A"]);
+    git(&scratch, &["commit", "-q", "-m", "moved on"]);
+    git(&scratch, &["push", "-q", "origin", "main"]);
+    let moved_on = git(&scratch, &["rev-parse", "main"]);
+
+    repo::fetch_base(&f.repo_git, "main").unwrap();
+
+    assert_eq!(
+        git(&f.repo_git, &["rev-parse", "refs/remotes/origin/main"]),
+        moved_on
+    );
+    assert_ne!(
+        git(&f.repo_git, &["rev-parse", "refs/heads/main"]),
+        moved_on,
+        "the clone's own refs/heads/main is untouched"
+    );
+}
+
+#[test]
+fn fetch_base_off_a_missing_base_is_an_error_naming_it() {
+    let f = fixture();
+    repo::clone_bare(&source(&f), &f.repo_git).unwrap();
+
+    let message = format!("{:#}", repo::fetch_base(&f.repo_git, "nope").unwrap_err());
+
+    assert!(message.contains("nope"), "{message}");
+}
+
+#[test]
+fn is_ancestor_of_remote_base_is_true_only_once_merged() {
+    let f = fixture();
+    repo::clone_bare(&source(&f), &f.repo_git).unwrap();
+    repo::create_branch(&f.repo_git, "issue-4", "main").unwrap();
+    repo::clone_workspace(&f.repo_git, &f.workspace, "issue-4", &identity()).unwrap();
+    fs::write(f.workspace.join("change.txt"), "x\n").unwrap();
+    git(&f.workspace, &["add", "-A"]);
+    git(&f.workspace, &["commit", "-q", "-m", "change"]);
+    git(&f.workspace, &["push", "-q", "origin", "issue-4"]);
+    let branch_tip = git(&f.workspace, &["rev-parse", "issue-4"]);
+    repo::fetch_base(&f.repo_git, "main").unwrap();
+
+    assert!(
+        !repo::is_ancestor_of_remote_base(&f.repo_git, &branch_tip, "main").unwrap(),
+        "issue-4 is not yet merged into main"
+    );
+
+    // Merge issue-4 into main on origin (a fast-forward, so the exact commit lands on main).
+    let scratch = f.root.join("scratch2");
+    git(
+        &f.root,
+        &[
+            "clone",
+            "-q",
+            f.origin.to_str().unwrap(),
+            scratch.to_str().unwrap(),
+        ],
+    );
+    git(
+        &scratch,
+        &[
+            "fetch",
+            "-q",
+            f.repo_git.to_str().unwrap(),
+            "refs/heads/issue-4:refs/heads/issue-4",
+        ],
+    );
+    git(&scratch, &["merge", "--ff-only", "-q", "issue-4"]);
+    git(&scratch, &["push", "-q", "origin", "main"]);
+    repo::fetch_base(&f.repo_git, "main").unwrap();
+
+    assert!(repo::is_ancestor_of_remote_base(&f.repo_git, &branch_tip, "main").unwrap());
+}
+
+#[test]
+fn is_ancestor_of_remote_base_refuses_a_commit_id_that_is_not_full() {
+    let f = fixture();
+    repo::clone_bare(&source(&f), &f.repo_git).unwrap();
+    repo::fetch_base(&f.repo_git, "main").unwrap();
+
+    let message = format!(
+        "{:#}",
+        repo::is_ancestor_of_remote_base(&f.repo_git, "abc123", "main").unwrap_err()
+    );
+
+    assert!(message.contains("full commit id"), "{message}");
+}
+
 #[test]
 fn the_fixture_retries_only_a_git_that_failed_with_permission_denied() {
     let said = "error: unable to write file .git/objects/ab/cdef: Permission denied";

@@ -759,6 +759,49 @@ pub fn commits_since(repo_git: &Path, commit: &str, branch: &str) -> Result<u32>
         .with_context(|| format!("unexpected `git rev-list --count` output: {out}"))
 }
 
+/// Refreshes `repo_git`'s view of `base` as a remote-tracking ref (`task rm --merged`, decision
+/// 195, issue 202): `refs/heads/<base>` there was set once, at clone time, and nothing else in
+/// sbxm moves it, so a merge check fetches `refs/remotes/origin/<base>` instead of trusting it.
+pub fn fetch_base(repo_git: &Path, base: &str) -> Result<()> {
+    check_ref("base", base)?;
+    let refspec = format!("+refs/heads/{base}:refs/remotes/origin/{base}");
+    git::user_run(
+        repo_git,
+        &[
+            "--git-dir",
+            text(repo_git)?,
+            "fetch",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "origin",
+            &refspec,
+        ],
+    )
+    .with_context(|| format!("cannot fetch {base} from origin"))?;
+    Ok(())
+}
+
+/// Whether `commit` (a full commit id) is reachable from `refs/remotes/origin/<base>` in
+/// `repo_git`, as it stood after the last [`fetch_base`].
+pub fn is_ancestor_of_remote_base(repo_git: &Path, commit: &str, base: &str) -> Result<bool> {
+    if !is_commit_id(commit) {
+        bail!("{commit:?} isn't a full commit id; the task record may be damaged");
+    }
+    check_ref("base", base)?;
+    let out = git::output(
+        repo_git,
+        Some(repo_git),
+        None,
+        &[
+            "merge-base",
+            "--is-ancestor",
+            commit,
+            &format!("refs/remotes/origin/{base}"),
+        ],
+    )?;
+    Ok(out.status.success())
+}
+
 /// How many commits `branch` has that `base` doesn't.
 pub fn commits_ahead(repo_git: &Path, base: &str, branch: &str) -> Result<u32> {
     check_ref("base", base)?;
