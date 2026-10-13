@@ -907,3 +907,21 @@ fn a_task_recording_another_repos_pr_or_continuing_the_pr_does_not_count() {
         assert!(posted(&github), "{url} {continues}");
     }
 }
+
+/// Issue 195, review finding S-1: `--force`'s help names both refusals it overrides, the one for
+/// a head an issue task's in-task review covered and the one for the PR task's own last round.
+#[test]
+fn the_force_help_names_both_reasons_a_head_counts_as_reviewed() {
+    use assert_cmd::Command;
+    let output = Command::cargo_bin("sbxm")
+        .unwrap()
+        .args(["task", "review", "--help"])
+        .assert()
+        .success()
+        .get_output()
+        .clone();
+    let help = String::from_utf8(output.stdout).unwrap();
+    let help = help.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(help.contains("in-task review"), "{help}");
+    assert!(help.contains("PR task's own last review"), "{help}");
+}

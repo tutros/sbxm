@@ -265,8 +265,9 @@ pub enum TaskCommand {
         /// The sandbox profile (default: sbxm-task.toml).
         #[arg(long)]
         profile: Option<String>,
-        /// Review the pull request even though its head is the commit a local issue task's
-        /// in-task review covered (posted by `task finish` as the PR's review).
+        /// Review the pull request even though its head is already reviewed: the commit a local
+        /// issue task's in-task review covered (posted by `task finish` as the PR's review), or
+        /// the commit the PR task's own last review covered.
         #[arg(long, conflicts_with_all = ["issue", "spec"])]
         force: bool,
     },
