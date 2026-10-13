@@ -83,10 +83,15 @@ that).
 | `sbxm task run (--issue N \| --spec FILE) [flags]` | `task start` and then `task review` for one task, with the flags of both (`--worker-harness`, `--worker-model`, `--reviewer-harness`, `--reviewer-model`, `--time-limit`, `--reviewer-time-limit`, `--profile`, `--base`, `--repo`, `--restart`, `--yes`). The reviewer's flags are checked before the worker starts. It stops at `ready` and prints the `task finish` command: publishing stays a separate step. Gates that ran and failed right after the worker don't stop it: it goes on to the review, which runs them again and gives a failure to a fix round (decision 180). A gate command that could not be executed at all — the sandbox or the host couldn't even start it, or its clean checkout couldn't be made — stops it after the start phase instead: the review would have nothing to react to, so it isn't named as the next step (issue 186). A failed worker stops it before the review, and so does a gate run that could not record its results. Exit 1 for any failure, including gates still failing once the review's round budget is used; a task that ends `ready` with must-fix findings left is reported, not an error. **`--spec FILE` instead carries through a spec task** (decision 174(d), issue 194): `task start --spec` then `task review --spec`, with no GitHub call anywhere in the path; it ends with the `task finish --spec` line, same as the three commands typed by hand. `--restart` discards an existing spec task the same undoable way `--issue` does (decision 185), except a finished (or merely worked) result that lives only in the task's `repo.git`, not yet fetched into your checkout, is protected the same way `task rm --spec` protects it (decision 178): fetch it first, or run `task rm --spec FILE --force` before restarting, since `--restart` has no `--force` of its own. |
 | `sbxm config show [project] [--profile p] [--harness h] [--kits]` | Prints the merged config exactly as it's hashed, the hash, and with `--kits` the generated kits. Creates nothing. |
 | `sbxm config profiles-dir` | Prints the folder profiles are read from (`profiles_dir`, else `<config dir>/profiles`), for scripts such as `just deploy-profiles`. Loads only `config.toml`, so it fails like any command on an invalid or missing one. |
-| `sbxm doctor` | Checks `sbx` (on `PATH`, new enough, daemon answering), the config, every profile, every project with each of its sandboxes (secrets stored, kits valid), and the base dir (exists, writable, not a temp folder, at least 10 GiB free). Exits non-zero if anything fails. |
+| `sbxm doctor` | Checks `sbx` (on `PATH`, new enough, daemon answering), the config, every profile, every project with each of its sandboxes (secrets stored, kits valid), the base dir (exists, writable, not a temp folder, at least 10 GiB free), and the free space of the drive `sbx` keeps its sandboxes on (see *The sandbox drive*). Each line starts with `ok`, `skip` (a check that couldn't run, with how to make it run), `warn` (a problem that doesn't fail `doctor`) or `FAIL`. Exits non-zero if anything fails. |
 | `sbxm status [--watch] [--interval secs]` | The Tasks dashboard (decision 171): one row per task — id, stage, status (`interrupted` when its `sbxm` process is gone, decided the same way `task status` decides it), time in the current stage (the last stage stamp in `task.json`; `45s`, `12m`, `1h05m`, `3d02h`), commits ahead of base, must-fix findings left (from the last review `task.json` recorded), the PR link in full, and the last `run.log` line that isn't a header, without its timestamp. A missing value shows `-`. On a terminal the last column (the log line) is cut to the terminal's width, counted in display columns (a wide character such as `界` or `😀` takes two), with `…`; on a terminal too narrow for the other columns their spacing shrinks first (to one space, then none), and a nonempty log line always keeps at least its `…`. A pipe or a file never cuts it. `--watch` redraws every `--interval` seconds (whole seconds, minimum 1; an error without `--watch`; default 2) until Ctrl+C, clearing the screen each time; on a pipe or a file it always prints once and exits, `--watch` or not. Reads only `task.json` and `run.log`; never calls `sbx` (a missing sandbox is the Sandboxes section, a separate issue). Rows are in the same order `sbxm task status` lists them. |
 
 `--harness` defaults to `claude` for `new` and `config show`; `open`, `stop` and `rm` (without `--purge`) require it, so they never act on the wrong sandbox by default (issue #33). `sbxm <command> --help` shows every option.
+
+Every command that can create a sandbox (`new`, `open` when it creates or rebuilds one, `run`, and `task start`,
+`task review`, `task run` and `task resume`) first checks the free space of the drive `sbx` keeps its sandboxes on and
+refuses, before writing anything, when it is under `min_free_disk`, naming the drive, the free space and the flag
+that overrides it: `--ignore-disk` lets that one command through. See *The sandbox drive*.
 
 ### The `justfile`
 
@@ -170,6 +175,8 @@ base_dir = 'E:\sbxm-projects'                          # where projects live
 profiles_dir = 'C:\Users\you\.config\sbxm\profiles'    # default: <config dir>/profiles; keep it in git
 default_profile = "default"                            # used when --profile isn't given
 min_sbx_version = "0.43.0"                             # checked by `sbxm doctor`
+min_free_disk = "10g"                                  # default; "0" switches the sandbox-drive check off
+# sandbox_state_dir = 'C:\Users\you\AppData\Local\DockerSandboxes'  # where sbx keeps its sandboxes
 
 [resources]            # per sandbox; sbx would otherwise take all CPUs and 16 GiB
 cpus = 4
@@ -177,6 +184,23 @@ memory = "8g"
 ```
 
 There's no `default_harness` setting: use `--harness`.
+
+#### The sandbox drive
+
+Each sandbox's disk lives in the folder `sbx` keeps its state in, not in `base_dir`, and it never shrinks: deleting
+files inside a sandbox frees nothing on the host until the sandbox is removed. A full drive makes `sbx` answer
+`try: sbx login`, which looks like a login problem. So `sbxm doctor` reports that drive's free space, and the commands
+that create a sandbox refuse when it is low:
+
+- **Threshold:** `min_free_disk`, a size with a unit (`k`, `m`, `g` or `t`, powers of 1024: `"10g"` is 10 GiB),
+  10 GiB when unset. `"0"` switches the check off, in `doctor` and in every command. `--ignore-disk` skips it for one
+  command.
+- **Which folder:** `sandbox_state_dir` if set, on any platform. Otherwise, on Windows, `%LOCALAPPDATA%\DockerSandboxes`
+  (the only location verified; `sbx` 0.46.0 can't move it and doesn't report it). On macOS and Linux sbxm doesn't
+  guess: without the key the check is skipped, and `doctor` says so in a `skip` line naming the key.
+- **When it can't be checked:** if the folder doesn't exist or its free space can't be read, `doctor` warns and the
+  other commands go ahead.
+- `doctor` only warns about a low drive (a `warn` line, not a failure): the commands refuse on it themselves.
 
 ### Profiles: `<profiles_dir>/<name>/profile.toml`
 
@@ -314,6 +338,8 @@ for a task. Check `sbx ls` for stopped leftovers.
 ## Troubleshooting
 
 - **Start with `sbxm doctor`.** Each failure says what's wrong and how to fix it.
+- **`sbx` says `try: sbx login` although you are logged in:** the drive `sbx` keeps its sandboxes on may be full.
+  `sbxm doctor` shows its free space; remove sandboxes you no longer need (`sbxm rm`, `sbxm task rm`).
 - **`sbx create` fails with `failed to run sandbox container`:** check the workspace isn't on a drive `sbx` can't
   mount (on the development machine, anything on `C:`), or under `%TEMP%`/`AppData`.
 - **A host is blocked:** add it to `network.allow`, then `sbxm open <project> --harness h --rebuild`.
@@ -418,7 +444,8 @@ fails with exit 101 and no failing test, so keep over 10 GB free before starting
 unless 25 GB or more is free. `CARGO_PROFILE_DEV_DEBUG=0` in the `[gates]` commands drops debug info and should
 shrink the builds (its effect on this repo's builds was not measured).
 Deleting files inside a sandbox does not return space to the host; removing the sandbox (`task rm`) does.
-`sbxm doctor` checks the base dir's free space, not the drive `sbx` uses.
+`sbxm doctor` checks the free space of both the base dir and the drive `sbx` keeps its sandboxes on, and the commands
+that create a sandbox refuse under `min_free_disk` (see *The sandbox drive*).
 
 [`docs/workflow.md`](docs/workflow.md) shows how the commands fit together, with the use cases and these practical
 notes in one place.
