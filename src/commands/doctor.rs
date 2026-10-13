@@ -8,6 +8,7 @@ use clap::ValueEnum;
 use super::new;
 use crate::backend::SandboxBackend;
 use crate::config::{self, GlobalConfig, Profile};
+use crate::disk::{self, gib};
 use crate::harness::Harness;
 use crate::{kit, project, state};
 
@@ -23,6 +24,9 @@ pub struct Host {
     pub writable: fn(&Path) -> std::io::Result<()>,
     /// Directories `sbx` can't mount workspaces under (S1).
     pub temp_dirs: Vec<PathBuf>,
+    /// Where `sbx` keeps its sandboxes on this platform, when known
+    /// ([`disk::platform_state_dir`]); `sandbox_state_dir` overrides it.
+    pub sandbox_state_dir: Option<PathBuf>,
 }
 
 impl Host {
@@ -41,35 +45,64 @@ impl Host {
                 std::fs::remove_file(&probe)
             },
             temp_dirs,
+            sandbox_state_dir: disk::platform_state_dir(),
         }
     }
+}
+
+/// How a check came out. Only `Fail` fails `doctor`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Outcome {
+    Ok,
+    Skip,
+    Warn,
+    Fail,
 }
 
 /// Every check `doctor` ran, in order.
 #[derive(Debug, Default)]
 pub struct Report {
-    checks: Vec<(bool, String)>,
+    checks: Vec<(Outcome, String)>,
 }
 
 impl Report {
     pub fn failed(&self) -> bool {
-        self.checks.iter().any(|(ok, _)| !ok)
+        self.checks
+            .iter()
+            .any(|(outcome, _)| *outcome == Outcome::Fail)
     }
 
-    /// One line per check: `ok   <what>` or `FAIL <problem>; <fix>`.
+    /// One line per check: `ok   <what>`, `skip <what>; <how to check it>`,
+    /// `warn <problem>; <fix>` or `FAIL <problem>; <fix>`.
     pub fn render(&self) -> String {
         self.checks
             .iter()
-            .map(|(ok, text)| format!("{} {text}\n", if *ok { "ok  " } else { "FAIL" }))
+            .map(|(outcome, text)| {
+                let label = match outcome {
+                    Outcome::Ok => "ok  ",
+                    Outcome::Skip => "skip",
+                    Outcome::Warn => "warn",
+                    Outcome::Fail => "FAIL",
+                };
+                format!("{label} {text}\n")
+            })
             .collect()
     }
 
     fn pass(&mut self, text: String) {
-        self.checks.push((true, text));
+        self.checks.push((Outcome::Ok, text));
+    }
+
+    fn skip(&mut self, text: String) {
+        self.checks.push((Outcome::Skip, text));
+    }
+
+    fn warn(&mut self, text: String) {
+        self.checks.push((Outcome::Warn, text));
     }
 
     fn fail(&mut self, text: String) {
-        self.checks.push((false, text));
+        self.checks.push((Outcome::Fail, text));
     }
 }
 
@@ -107,6 +140,7 @@ pub fn run(config_dir: &Path, backend: &dyn SandboxBackend, host: &Host) -> Repo
     }
 
     check_base_dir(&mut report, &config.base_dir, &config_path, host);
+    check_state_drive(&mut report, &config, &config_path, host);
     check_configs(&mut report, &config, &config_path, backend);
     report
 }
@@ -315,8 +349,51 @@ fn check_base_dir(report: &mut Report, base: &Path, config_path: &Path, host: &H
     }
 }
 
-fn gib(bytes: u64) -> String {
-    format!("{:.1} GiB", bytes as f64 / GIB as f64)
+/// The drive of `sbx`'s sandbox state only warns: the commands that create a
+/// sandbox refuse on it themselves (decision 194).
+fn check_state_drive(report: &mut Report, config: &GlobalConfig, config_path: &Path, host: &Host) {
+    if config.min_free_disk == 0 {
+        report.pass(format!(
+            "sandbox drive not checked: min_free_disk is \"0\" in {}",
+            config_path.display()
+        ));
+        return;
+    }
+    let Some(dir) = disk::state_dir(config, host.sandbox_state_dir.as_deref()) else {
+        report.skip(format!(
+            "sandbox drive not checked: sbxm knows where sbx keeps its sandboxes only on \
+             Windows; set sandbox_state_dir in {} to check it",
+            config_path.display()
+        ));
+        return;
+    };
+    if !dir.is_dir() {
+        report.warn(format!(
+            "sbx's sandbox state folder {} does not exist, so its drive isn't checked; check \
+             sandbox_state_dir in {}, or that sbx has run on this machine",
+            dir.display(),
+            config_path.display()
+        ));
+        return;
+    }
+    let drive = disk::describe(&dir);
+    match (host.free_space)(&dir) {
+        Ok(bytes) if bytes < config.min_free_disk => report.warn(format!(
+            "only {} free on {drive} (sbx's sandbox state); free up space to at least {} \
+             (a full drive makes sbx answer \"try: sbx login\"), or change min_free_disk in {}",
+            gib(bytes),
+            gib(config.min_free_disk),
+            config_path.display()
+        )),
+        Ok(bytes) => report.pass(format!(
+            "{} free on {drive} (sbx's sandbox state)",
+            gib(bytes)
+        )),
+        Err(err) => report.warn(format!(
+            "free space of {drive} (sbx's sandbox state): {err}; check sandbox_state_dir in {}",
+            config_path.display()
+        )),
+    }
 }
 
 /// Compares dotted versions numerically (`0.9.0` < `0.43.0`); a part's
