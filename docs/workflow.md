@@ -64,6 +64,7 @@ sbxm task file-findings --pr 69        # dry run; add --create to file the findi
 sbxm task rm --issue 63                # after the merge: sandboxes, clones and record (asks first)
 sbxm task run --issue 63               # start and review in one go; stops before finish
 sbxm task run --spec idea.md           # the same for a spec task; no GitHub call anywhere
+sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one after another
 ```
 
 - **Stages:** `prepared`, `working`, `gating`, `reviewing`, `fixing`, `ready`, `finished`. A failed gate shows as
@@ -104,6 +105,17 @@ sbxm task run --spec idea.md           # the same for a spec task; no GitHub cal
     the `git fetch` command; `push` pushes it to `origin` as a new branch, no PR (refused while the task stopped or has
     must-fix findings left, unless `--push-unresolved`). `task rm --spec FILE` refuses to delete a result you haven't
     fetched into the checkout yet, unless `--force`.
+  - **A list of tasks, one command (decision 193, issue 201):** `--issue`/`--spec` are repeatable and may be
+    combined (`--issue 210 --issue 202 --spec sdlc/specs/x.md`), run in the order written; the other flags apply to
+    every task of the list, and there is no list file. The tasks are independent: a later one never gets an earlier
+    one's work. A task that stops short of `ready` (must-fix findings left, a failed worker, a gate that could not
+    run) is recorded and the list goes on to the next one; the list itself stops only for a problem that would hit
+    every task (`sbx` not reachable, a missing secret, too little free disk — checked again before each task, not
+    only the first, since a task's own sandbox can fill the drive the next one needs). It prints a summary line per
+    task at the end (stage, must-fix findings left, the next command). Exit 0 only when every task of the list
+    ended `ready`; 1 when at least one failed or was never started because the list stopped. `--restart` is
+    refused with more than one task in the list: there is nothing left to show the user when several tasks' old
+    copies would be discarded at once.
 - **Continuing an open PR (decision 169):** a finding filed with `task file-findings --pr N` names its PR (`PR: #N`),
   so its task starts from the PR's branch head. `task finish` for that task pushes to the PR's branch (no new flag),
   opens no new PR and comments on the PR with the commits added and `Fixes #<issue>`. The push is a fast-forward
@@ -159,7 +171,9 @@ same tasks and only reads).
   sbxm checks this for you: `doctor` reports that drive's free space, and `new`, `open` (when it creates or rebuilds),
   `run`, `task start`, `task review`, `task run` and `task resume` refuse before writing anything when it is under
   `min_free_disk` in `config.toml` (default `"10g"`; `"0"` switches the check off), naming the drive and its free
-  space; `--ignore-disk` lets one command through. The folder is `%LOCALAPPDATA%\DockerSandboxes` on Windows, or
+  space; `--ignore-disk` lets one command through. A `task run` list (decision 193) checks again before every task,
+  not only the first, since a task's own sandbox can fill the drive the next one needs; a failure there stops the
+  rest of the list. The folder is `%LOCALAPPDATA%\DockerSandboxes` on Windows, or
   `sandbox_state_dir` in `config.toml` on any platform; on macOS and Linux without that key nothing is checked (a full
   drive makes `sbx` answer `try: sbx login`, which looks like a login problem).
   A junction from `sbx`'s `state` folder to a bigger drive was tried (2026-10-03, `sbx` 0.46.0) and does not work for the

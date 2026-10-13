@@ -157,7 +157,7 @@ checkout (a GitHub URL is required; anything else is an error). `--base` default
 | `task file-findings (--issue N \| --pr N \| --file F) [--create]` | Files a review's findings as issues [134][149]; a dry run unless `--create` | file malformed; secret in a finding |
 | `task finish --issue N` | Pushes `issue-N` from `repo.git`, opens the PR (base = task base) with `Fixes #N`, `result.md` and `review.md` in the body; for a task that continues PR m, pushes to PR m's branch (fast-forward only) and comments on PR m instead of opening a PR (decision 169). When `review.commit` is the head it opens the PR at, posts the in-task review on the new PR as its review (decision 187), a draft's included |  not `ready`; PR exists; a continued PR's branch moved or is gone |
 | `task rm (--issue N \| --pr N) [--yes]` | Removes sandboxes, clones and the task folder; asks first, showing the exact paths | task running |
-| `task run (--issue N \| --spec FILE)` | `start` then `review`, also after gates that fail right after the worker (5.1 step 5); stops before `finish` [158]. `--spec FILE` runs `start --spec` then `review --spec` instead, with no GitHub call anywhere (issue 194) | those of both |
+| `task run (--issue N \| --spec FILE)...` | `start` then `review`, also after gates that fail right after the worker (5.1 step 5); stops before `finish` [158]. `--spec FILE` runs `start --spec` then `review --spec` instead, with no GitHub call anywhere (issue 194). `--issue`/`--spec` are repeatable and may be combined into a list, run one after another in the order written (decision 193, issue 201; section 5.3) | those of both |
 
 Flags are per phase (amended 2026-10-02 after the PR 57 review, Q-1: a flag a command would accept and not use is
 worse than a missing one, and the worker of a task under review comes from its record, not from a flag):
@@ -271,6 +271,33 @@ Output: human text by default; `status --json` prints the records. Exit codes: 0
   description `task finish` opens and, for a PR task, the posted review comment (colored marker: 🟢 low, 🟡 medium,
   🔴 high, ⚪ unknown — GitHub Markdown can't color text); a draft's own reasons (section 5.1's `## Unresolved`) are
   folded into this same section too. Information only: it changes nothing else sbxm does.
+
+### 5.3 `task run` over a list [193]
+
+`task run` accepts `--issue`/`--spec` more than once, in any mix, and treats them as a list run one after
+another, in the order the flags were written on the command line (clap's derive API carries no field for the
+relative order of two different repeated flags, so it's read back from the parsed command's raw `ArgMatches`,
+`cli::run_target_order`). A single target (one `--issue` or one `--spec`, however the flag combo resolves to
+exactly one) runs through 5.1 and 5.2 unchanged, `--restart` included.
+
+With more than one target:
+
+1. **Check before acting:** `--restart` is refused outright — there is nothing left to show the user when several
+   tasks' old copies would be discarded at once. An empty list (not reachable through the CLI, whose `--issue`/
+   `--spec` group is required) is refused the same way.
+2. Each target runs 5.1 then 5.2 exactly as a single `task run` would (restart never passed down), one at a time —
+   no `--parallel` option. The disk check (`disk::require`) runs again right before each target's turn, not only
+   the first: a task's own sandbox can fill the drive the next one needs. A failure there stops the list for good;
+   the targets already run keep their results, and every target from the failing one onward is reported as not
+   started.
+3. Any other way a target's run ends — `ready` or not — is recorded and the list goes on to the next target. The
+   targets are independent: a later one is never given an earlier one's work, and nothing about a target's own run
+   changes because of its position in the list.
+4. At the end, a summary line per target: its task id, its stage, its must-fix findings left, and the next command
+   (read back from the task's own record, the same way `task status` would, not from the run's own text) — or,
+   for a target whose own run never reserved a task folder, the refusal that stopped it.
+5. Exit code: 0 only if every target reached `ready` (a `ready` target with must-fix findings left still counts,
+   as for a single task); 1 if any target failed, or was never started because the list itself stopped.
 
 ## 6. Git trust boundary [159]
 
