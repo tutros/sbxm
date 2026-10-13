@@ -214,6 +214,8 @@ gives a running task something to be judged against. Judge it from what the issu
 | **M** | One command or feature, with tests and docs across a few files | #88 (`task logs`) |
 | **L** | The state machine, `task.json` or the git trust boundary changes, or three or more open points; consider splitting it | #195 (review a changed PR in place), #121 (split into six) |
 
+A question gets a size as well: the size of the work its recommended answer leads to.
+
 The first size is a guess, and a reviewer's is rougher still, since it sees the diff and not the backlog. It is
 confirmed or changed when the issue's open points are answered, just before work starts (the "No open questions go
 to a worker" rule in `AGENTS.md`): that is the first moment the scope is fixed. Write the confirmed size and what
@@ -255,7 +257,7 @@ Issues: pending (<why>)                              the command rewrites this l
 **What happens:** <behavior, with the evidence: the command or test and its trimmed output>
 **Why it matters:** <the decision or convention it breaks, and the must-fix criterion it meets>
 **Fix:** <the smallest change that resolves it>      questions: **Recommendation:** with the options
-**Size:** <S, M or L, with the reason in a few words>                 see "Size" above; not for questions
+**Size:** <S, M or L, with the reason in a few words>                 see "Size" above; questions too
 **Depends on:** <ID or #n, with why>, or "none known"
 **Related:** <ID or #n, with the order that avoids rework>            optional
 **Acceptance criteria:**
