@@ -292,11 +292,11 @@ never was before), the command refuses before writing anything, naming that comm
 is the same `--force` flag `task review --pr` already has for decision [187]'s refusal, not a second flag. (b)
 **G38, the reviewer's half only:** from the second round on, the reviewer gets every earlier round's saved
 `review-<n>.md` as context (`previous-review.md`, the same mechanism issue 169 built for a re-reviewed issue task),
-and `review.md` opens with a "Status of earlier findings" section the reviewer writes from them: each earlier
-must-fix finding marked fixed (naming the commit), still open, or deferred to a GitHub issue, judged from the
-current commits rather than the pull request's own claims. Recording the status of a hand fix made outside a review
-round, and editing earlier PR comments, are not part of this: G38 stays open in `sdlc/evals-workflow-notes.md` for
-that half. (c) **One new state machine row:** `ready` with status `ok`, PR tasks only, plus the `task review` event
+and `review.md` opens with a "Status of earlier findings" section the reviewer writes from them: every earlier
+finding (must-fix, should-fix or question) marked fixed (naming the commit), still open, or deferred to a GitHub
+issue, judged from the current commits rather than the pull request's own claims. Recording the status of a hand
+fix made outside a review round, and editing earlier PR comments, are not part of this: G38 stays open in
+`sdlc/evals-workflow-notes.md` for that half. (c) **One new state machine row:** `ready` with status `ok`, PR tasks only, plus the `task review` event
 (and the `Record::advance` move it drives) goes to `gating`: fetch the PR's new head, keep the last review's
 `review-<n>.md`, run the gates (they run again, since the commits are new), then the reviewer, numbering the round
 after every saved `review-<n>.md` the same way `next_review_round` already does for an issue task. A forced review

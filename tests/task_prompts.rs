@@ -270,6 +270,12 @@ fn the_pr_reviewer_prompt_talks_about_the_pull_request_and_has_no_fix_round() {
         "{text}"
     );
     assert!(text.contains("Status of earlier findings"), "{text}");
+    // Review finding M-1: the status covers every earlier finding, not only the must-fix ones.
+    assert!(text.contains("every finding"), "{text}");
+    for id in ["`M-<n>`", "`S-<n>`", "`Q-<n>`"] {
+        assert!(text.contains(id), "{id} missing: {text}");
+    }
+    assert!(!text.contains("must-fix finding (its"), "{text}");
 }
 
 fn spec_values() -> Vec<(&'static str, &'static str)> {

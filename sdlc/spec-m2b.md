@@ -251,10 +251,10 @@ Output: human text by default; `status --json` prints the records. Exit codes: 0
   the gates run again (the commits are new), the earlier round's `review-<n>.md` stays in the task folder (never
   overwritten, as for an issue task), the reviewer gets every earlier round as context the same way [169] gives a
   re-reviewed issue task's reviewer `previous-review.md`, and `review.md` opens with a "## Status of earlier
-  findings" section the reviewer writes from them (fixed in `<commit>` / still open / deferred to `#n`) — the
-  reviewer's half of gap G38; a hand fix's status and editing earlier PR comments are not built. A PR task still has
-  no fix round and no `Repeat of:` field: the no-progress rule (`sdlc/specs/task-state-machine.md` section 5.3)
-  stays issue/spec-only.
+  findings" section the reviewer writes from them, one line for every earlier finding of any kind (fixed in
+  `<commit>` / still open / deferred to `#n`) — the reviewer's half of gap G38; a hand fix's status and editing
+  earlier PR comments are not built. A PR task still has no fix round and no `Repeat of:` field: the no-progress
+  rule (`sdlc/specs/task-state-machine.md` section 5.3) stays issue/spec-only.
 - The reviewer is told it cannot change files, commit, push or file issues, and to follow the code-review skill from
   the clone (`.claude/skills/sdlc-code-review/SKILL.md` when present).
 - **Risk assessment [176]:** the line right after the reviewer's first (one blank line between the two is fine,

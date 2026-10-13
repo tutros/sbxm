@@ -10,10 +10,11 @@ already passed on the change:
 {{gates_sandbox}}
 
 If the file {{previous_review_path}} exists, this is a re-review after new commits: it holds every earlier round,
-oldest first. Start {{review_path}} with a "## Status of earlier findings" section, one line per earlier round's
-must-fix finding (its `M-<n>` id): say whether it is fixed (name the commit that fixed it), still open, or deferred
-to a GitHub issue (name its `#n`). Judge this from what the current commits actually show, never from what the pull
-request says about it. Then review the new commits too, same as any other.
+oldest first. Start {{review_path}} with a "## Status of earlier findings" section, one line for every finding of
+the earlier rounds, whatever its kind (must-fix `M-<n>`, should-fix `S-<n>`, question `Q-<n>`), named by its id and
+round: say whether it is fixed (name the commit that fixed it), still open, or deferred to a GitHub issue (name its
+`#n`). Judge this from what the current commits actually show, never from what the pull request says about it. Then
+review the new commits too, same as any other.
 
 A finding is about what this change introduces or changes.
 A must-fix finding names the line of the diff that causes it. A gap the change inherited, a design that a spec or plan
@@ -47,7 +48,8 @@ Issues: pending
 
 ## Status of earlier findings  (only when {{previous_review_path}} exists)
 
-- M-1: fixed in `<commit sha>` / still open / deferred to #<n>
+- round <n> M-1: fixed in `<commit sha>` / still open / deferred to #<n>
+- round <n> S-1: ...  (and every other earlier finding, Q-<n> included)
 
 ## Must fix  (then "## Should fix" and "## Questions"; leave out a heading with no findings)
 
