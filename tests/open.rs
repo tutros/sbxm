@@ -377,6 +377,7 @@ fn open_codex(env: &Env, rebuild: bool, backend: &FakeBackend) -> anyhow::Result
     let options = open::Options {
         rebuild,
         harness: Harness::Codex,
+        ..Default::default()
     };
     open::run(
         &env.config_dir(),
@@ -467,4 +468,63 @@ fn rebuild_codex_leaves_claude_alone() {
         log[log.len() - 2..],
         ["create sbxm-demo-codex", "attach sbxm-demo-codex"]
     );
+}
+
+// Issue 210: `open` refuses on a low sandbox drive only when it would create a sandbox.
+
+fn open_low(env: &Env, backend: &FakeBackend, rebuild: bool) -> (anyhow::Result<()>, String) {
+    let mut warn = Vec::new();
+    let result = open::run(
+        &env.config_dir(),
+        "demo",
+        &open::Options {
+            rebuild,
+            disk: common::low_disk(env),
+            ..Default::default()
+        },
+        backend,
+        &mut warn,
+    );
+    (result, String::from_utf8(warn).unwrap())
+}
+
+#[test]
+fn a_low_sandbox_drive_refuses_to_create_a_sandbox() {
+    let env = Env::new();
+    let backend = FakeBackend::default();
+
+    let (result, _) = open_low(&env, &backend, false);
+
+    let err = format!("{:#}", result.unwrap_err());
+    assert!(err.starts_with(common::LOW_DISK), "{err}");
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert!(!env.base_dir().join("demo").exists());
+}
+
+#[test]
+fn a_low_sandbox_drive_refuses_a_rebuild_and_keeps_the_sandbox() {
+    let env = Env::new();
+    env.run("demo", &FakeBackend::default()).unwrap();
+    let before = state_entry(&env);
+    let backend = FakeBackend::with_sandboxes(vec![sandbox("running")]);
+
+    let (result, warn) = open_low(&env, &backend, true);
+
+    let err = format!("{:#}", result.unwrap_err());
+    assert!(err.starts_with(common::LOW_DISK), "{err}");
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert_eq!(state_entry(&env), before);
+    assert!(!warn.contains("rebuilding"), "{warn}");
+}
+
+#[test]
+fn a_low_sandbox_drive_still_attaches_an_existing_sandbox() {
+    let env = Env::new();
+    env.run("demo", &FakeBackend::default()).unwrap();
+    let backend = FakeBackend::with_sandboxes(vec![sandbox("running")]);
+
+    let (result, _) = open_low(&env, &backend, false);
+
+    result.unwrap();
+    assert_eq!(backend.log(), ["attach sbxm-demo-claude"]);
 }

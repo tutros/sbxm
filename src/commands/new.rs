@@ -8,6 +8,7 @@ use anyhow::{Context, Result, bail};
 use super::open_harness_flag;
 use crate::backend::{CreateSpec, SandboxBackend};
 use crate::config::{self, GlobalConfig, Profile};
+use crate::disk;
 use crate::harness::Harness;
 use crate::kit;
 use crate::project;
@@ -27,6 +28,8 @@ pub struct Options {
     /// gone from `sbx` (`open` recreating it), so the entry doesn't block.
     pub recreate: bool,
     pub harness: Harness,
+    /// The free-space check of the sandbox drive (decision 194).
+    pub disk: disk::Guard,
 }
 
 pub fn run(
@@ -93,6 +96,7 @@ pub fn run(
         }
         seed::reject_links(seed_dir)?;
     }
+    disk::require(&config, config_dir, &options.disk)?;
     check_secrets(&profile.secrets.services, backend)?;
     // Named after the hash, so a changed config never overwrites the kit an
     // existing sandbox was built from (decision 55).

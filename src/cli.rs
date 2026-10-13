@@ -27,6 +27,10 @@ pub enum Command {
         /// Agent harness to run in the sandbox.
         #[arg(long, value_enum, default_value_t)]
         harness: Harness,
+        /// Create the sandbox even when the drive of sbx's sandbox state has less than
+        /// min_free_disk free.
+        #[arg(long)]
+        ignore_disk: bool,
     },
     /// List sbxm sandboxes and flag orphans.
     List {
@@ -45,6 +49,10 @@ pub enum Command {
         /// Which of the project's sandboxes to open.
         #[arg(long, value_enum)]
         harness: Harness,
+        /// Create or rebuild the sandbox even when the drive of sbx's sandbox state has less
+        /// than min_free_disk free.
+        #[arg(long)]
+        ignore_disk: bool,
     },
     /// Stop a project's sandbox.
     Stop {

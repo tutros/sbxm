@@ -110,6 +110,7 @@ fn main() -> anyhow::Result<()> {
             seed,
             profile,
             harness,
+            ignore_disk,
         } => commands::new::run(
             &config::config_dir()?,
             &project,
@@ -117,6 +118,7 @@ fn main() -> anyhow::Result<()> {
                 seed,
                 profile,
                 harness,
+                disk: sbxm::disk::Guard::real(ignore_disk),
                 ..Default::default()
             },
             &SbxBackend,
@@ -136,10 +138,15 @@ fn main() -> anyhow::Result<()> {
             project,
             rebuild,
             harness,
+            ignore_disk,
         } => commands::open::run(
             &config::config_dir()?,
             &project,
-            &commands::open::Options { rebuild, harness },
+            &commands::open::Options {
+                rebuild,
+                harness,
+                disk: sbxm::disk::Guard::real(ignore_disk),
+            },
             &SbxBackend,
             &mut std::io::stderr(),
         ),
