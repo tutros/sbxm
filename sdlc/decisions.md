@@ -282,6 +282,30 @@ Recorded early at the user's request; planning proper starts later and may refin
 
 189. **`sbxm task logs (--issue N | --pr N | --spec FILE) [--follow]` (2026-10-12, decided with the user before issue #88 started, recorded on the issue itself; part 2 of 6 of decisions [170] and [171]):** reads a task's `run.log` ([170]'s part 1, built in #87) instead of the user opening the file by hand. (a) `--spec F` reads a spec task's log the same way (the issue was written before spec tasks existed). (b) `--follow` only stops on Ctrl+C: it keeps polling for new lines even after the command that is writing the log ends, and a missing log is not waited for, `--follow` or not (see (d)). (c) **Read-only:** `task logs` never writes to `run.log`, with or without `--follow` — no header line and no copy of its own output — so unlike every other `sbxm task` command it does not go through `task_log`'s `RunLog`/`Tee` at all; `main` calls `commands::task_logs::run` directly, writing straight to the real stdout. (d) **No log yet:** says so, naming the task's folder, and exits 1; an unknown task (no `task.json` in its folder) is refused with the `sbxm task status` hint, the same wording `task rm`/`task file-findings` already use for that case. Implementation: `src/commands/task_logs.rs`; `--follow` polls the open file handle every 500ms (`commands::task_logs::Env`, the same injectable-`sleep`-plus-test-iteration-cap shape as `commands::status::Env`'s `--watch` loop, decision [171]) rather than a filesystem watcher, since `run.log` has no rotation to react to.
 
+190. **`task review --pr N` reviews a `ready` PR task again in place instead of refusing (2026-10-12, decided with
+the user before issue #195 started, recorded on the issue itself; gap G34):** a second review round used to need two
+hand steps (copy `review.md` aside, `task rm --pr N`) every time a PR's author pushed a fix, and forgetting the
+copy lost the earlier round's review — the PR comment on GitHub was the only other copy. Now: (a) **An unchanged
+head is refused unless `--force`.** When the PR's current head (from `gh pr view`, fetched into `repo.git`) is
+still the commit the task's last review covered (`review.commit`, now also set for a PR task's own review, which it
+never was before), the command refuses before writing anything, naming that commit and the `--force` command; this
+is the same `--force` flag `task review --pr` already has for decision [187]'s refusal, not a second flag. (b)
+**G38, the reviewer's half only:** from the second round on, the reviewer gets every earlier round's saved
+`review-<n>.md` as context (`previous-review.md`, the same mechanism issue 169 built for a re-reviewed issue task),
+and `review.md` opens with a "Status of earlier findings" section the reviewer writes from them: each earlier
+must-fix finding marked fixed (naming the commit), still open, or deferred to a GitHub issue, judged from the
+current commits rather than the pull request's own claims. Recording the status of a hand fix made outside a review
+round, and editing earlier PR comments, are not part of this: G38 stays open in `sdlc/evals-workflow-notes.md` for
+that half. (c) **One new state machine row:** `ready` with status `ok`, PR tasks only, plus the `task review` event
+(and the `Record::advance` move it drives) goes to `gating`: fetch the PR's new head, keep the last review's
+`review-<n>.md`, run the gates (they run again, since the commits are new), then the reviewer, numbering the round
+after every saved `review-<n>.md` the same way `next_review_round` already does for an issue task. A forced review
+of an unchanged head takes the same row; there is no second path that skips the gates. (d) **Nothing is written
+before the refusals and the fetch:** a refused attempt, or one whose fetch of the PR's head fails, leaves the task
+`ready` with its `review.md` and `task.json` as they were. A PR task still has no fix round and never repeats a
+finding (no `Repeat of:` field in its prompt): the no-progress rule stays issue/spec-only, since only they have a fix
+round of their own to make no progress in.
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.
