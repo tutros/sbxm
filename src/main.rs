@@ -713,6 +713,30 @@ fn main() -> anyhow::Result<()> {
             })();
             finish_task(result, out, warn)
         }
+        Command::Task {
+            command:
+                TaskCommand::Logs {
+                    issue,
+                    pr,
+                    spec,
+                    follow,
+                },
+        } => {
+            let target = match (issue, pr, spec) {
+                (Some(n), _, _) => commands::task_logs::Target::Issue(n),
+                (None, Some(n), _) => commands::task_logs::Target::Pr(n),
+                (None, None, Some(path)) => commands::task_logs::Target::Spec(path),
+                (None, None, None) => unreachable!("clap requires --issue, --pr or --spec"),
+            };
+            // Read-only (decided point 3): unlike every other `sbxm task` command, this one
+            // never goes through `task_writers`/`RunLog`, so it never writes to the log it prints.
+            commands::task_logs::run(
+                &config::config_dir()?,
+                &commands::task_logs::Options { target, follow },
+                &commands::task_logs::Env::real(),
+                &mut std::io::stdout(),
+            )
+        }
         Command::Run(_) => unreachable!("clap requires a config or a subcommand"),
         Command::Config {
             command: ConfigCommand::Init,

@@ -403,6 +403,22 @@ pub enum TaskCommand {
         #[arg(long)]
         force: bool,
     },
+    /// Print a task's run.log (decision 170, part 1). Read-only: never writes to the log itself.
+    #[command(group(clap::ArgGroup::new("logs_target").required(true).args(["issue", "pr", "spec"])))]
+    Logs {
+        /// The issue's task.
+        #[arg(long, value_name = "N")]
+        issue: Option<u32>,
+        /// The PR's task.
+        #[arg(long, value_name = "N")]
+        pr: Option<u32>,
+        /// The spec task's file (decision 174(d)).
+        #[arg(long, value_name = "FILE")]
+        spec: Option<PathBuf>,
+        /// Keep printing new lines until Ctrl+C; does not stop by itself.
+        #[arg(long)]
+        follow: bool,
+    },
     /// File the findings of a review as GitHub issues, one per finding. A dry run unless
     /// --create: it shows every issue and changes nothing.
     #[command(group(clap::ArgGroup::new("source").required(true).args(["issue", "pr", "file"])))]
