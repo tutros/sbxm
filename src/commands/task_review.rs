@@ -20,6 +20,7 @@ use crate::task::gates::HostRunner;
 use crate::task::pipeline::{self, Ctx, Prepared, TaskEnv};
 use crate::task::record::{self, GateResult, ProcessProbe};
 use crate::task::repo::{self, Identity};
+use crate::task::review;
 use crate::task::risk;
 
 /// What is reviewed.
@@ -413,7 +414,7 @@ fn run_pr(
                 "PR #{number} is already reviewed at `{commit}`: its head is the commit task \
                  {task}'s in-task review covered, which `sbxm task finish` posted as the PR's \
                  review; to review it again anyway, run `{}`",
-                finish::review_pr_command(number, &repo_name, opts.base.as_deref(), true)
+                review::review_pr_command(number, &repo_name, opts.base.as_deref(), true)
             );
         }
         pr_info = Some(pr);
@@ -468,7 +469,7 @@ fn run_pr(
     };
 
     let meta = record::task_dir(&base_dir, &id);
-    let report = pipeline::review_pr(&ctx.env(), github, &mut prepared)?;
+    let report = pipeline::review_pr(&ctx.env(), github, &mut prepared, opts.force)?;
     if let Some(failed) = &report.gates_failed {
         writeln!(
             out,
@@ -483,8 +484,8 @@ fn run_pr(
     if let Some(reviewed) = &report.reviewed {
         writeln!(
             out,
-            "{id}: review: {} must-fix finding(s)",
-            reviewed.must_fix
+            "{id}: review round {}: {} must-fix finding(s)",
+            reviewed.round, reviewed.must_fix
         )?;
         print_risk_warning(warn, reviewed.risk)?;
     }

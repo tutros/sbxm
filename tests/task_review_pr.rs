@@ -79,9 +79,20 @@ fn review_it(
     host: &FakeHostRunner,
     prepared: &mut Prepared,
 ) -> anyhow::Result<PrReview> {
+    review_it_forced(f, backend, github, host, prepared, false)
+}
+
+fn review_it_forced(
+    f: &Fixture,
+    backend: &FakeBackend,
+    github: &FakeGitHub,
+    host: &FakeHostRunner,
+    prepared: &mut Prepared,
+    force: bool,
+) -> anyhow::Result<PrReview> {
     let source = source(f);
     let context = ctx_with_host(f, &source, backend, github, host);
-    pipeline::review_pr(&context.env(), github, prepared)
+    pipeline::review_pr(&context.env(), github, prepared, force)
 }
 
 fn count(backend: &FakeBackend, needle: &str) -> usize {
@@ -373,10 +384,13 @@ fn a_failed_post_keeps_the_review_and_says_where_it_is() {
     );
 }
 
+/// Issue 195, gap G34: a `ready` PR task refuses a second review while the PR's head hasn't
+/// changed, unless `--force`, and nothing is written for either a refused or a forced attempt
+/// that changes nothing else about the task's recorded state at that point.
 #[test]
-fn a_task_that_is_already_reviewed_is_refused() {
+fn an_unchanged_pr_head_is_refused_unless_forced() {
     let f = config("");
-    let (backend, github) = (backend(&f, &[CLEAN]), github());
+    let (backend, github) = (backend(&f, &[CLEAN, ONE]), github());
     let mut prepared = prepared(&f, &backend, &github);
     review_it(
         &f,
@@ -386,6 +400,7 @@ fn a_task_that_is_already_reviewed_is_refused() {
         &mut prepared,
     )
     .unwrap();
+    let head = saved(&f).review.unwrap().commit.unwrap();
 
     let message = format!(
         "{:#}",
@@ -399,10 +414,136 @@ fn a_task_that_is_already_reviewed_is_refused() {
         .unwrap_err()
     );
 
+    assert!(message.contains(&head), "{message}");
+    assert!(message.contains("--force"), "{message}");
+    assert_eq!(review::saved_rounds(&meta(&f)), vec![1]);
+    assert_eq!(saved(&f).review.unwrap().round, 1, "task.json is unchanged");
+
+    let report = review_it_forced(
+        &f,
+        &backend,
+        &github,
+        &FakeHostRunner::default(),
+        &mut prepared,
+        true,
+    )
+    .unwrap();
+
+    assert_eq!(report.reviewed.unwrap().round, 2, "forced anyway");
+    assert_eq!(saved(&f).review.unwrap().must_fix, 1);
+}
+
+/// Issue 195, gap G34: a changed head is reviewed again without `--force`, in place, keeping the
+/// earlier round's saved review and the gates running again for the new commits.
+#[test]
+fn a_changed_pr_head_is_reviewed_again_keeping_the_earlier_round() {
+    let f = config("");
+    let (backend, github) = (backend(&f, &[CLEAN, ONE]), github());
+    let mut prepared = prepared(&f, &backend, &github);
+    review_it(
+        &f,
+        &backend,
+        &github,
+        &FakeHostRunner::default(),
+        &mut prepared,
+    )
+    .unwrap();
+    let first_head = saved(&f).review.unwrap().commit.unwrap();
+    let new_head = add_pr_head(&f, 7);
+    assert_ne!(first_head, new_head);
+
+    let report = review_it(
+        &f,
+        &backend,
+        &github,
+        &FakeHostRunner::default(),
+        &mut prepared,
+    )
+    .unwrap();
+
+    assert_eq!(report.reviewed.as_ref().map(|r| r.round), Some(2));
+    let record = saved(&f);
+    assert_eq!((record.stage, record.status), (Stage::Ready, Status::Ok));
+    let result = record.review.unwrap();
+    assert_eq!(result.round, 2);
+    assert_eq!(result.commit.as_deref(), Some(new_head.as_str()));
+    assert_eq!(result.must_fix, 1);
     assert!(
-        message.contains("already") && message.contains("ready"),
-        "{message}"
+        review::saved_rounds(&meta(&f)).contains(&1),
+        "round 1's review is kept"
     );
+    assert!(meta(&f).join("review-1.md").is_file());
+    assert!(meta(&f).join("review-2.md").is_file());
+    let latest = fs::read_to_string(meta(&f).join("review.md")).unwrap();
+    assert!(
+        latest.contains("pr.txt:1 is wrong"),
+        "review.md is the latest round: {latest}"
+    );
+    // The gates ran again, for the new head.
+    assert_eq!(record.gates.len(), 2);
+    // A new comment was posted for round 2.
+    let comments = github
+        .calls()
+        .iter()
+        .filter(|c| matches!(c, GhCall::PrComment(..)))
+        .count();
+    assert_eq!(comments, 2);
+}
+
+/// Issue 195: the second round's reviewer is given the earlier round's findings as context, the
+/// same way a re-review of an issue task's worker is (issue 169).
+#[test]
+fn the_second_rounds_reviewer_gets_the_earlier_rounds_findings_as_context() {
+    let f = config("");
+    let github = github();
+    let captured: std::sync::Arc<std::sync::Mutex<Option<String>>> = Default::default();
+    let captured_in_hook = captured.clone();
+    let clone = f.env.base_dir().join("tasks").join("pr-7-review");
+    let reviews = [CLEAN.to_owned(), ONE.to_owned()];
+    let runs = std::sync::atomic::AtomicUsize::new(0);
+    let backend = FakeBackend::with_secrets(&["anthropic", "openai"])
+        .with_exec_output_matching("codex", ok(CODEX_DONE))
+        .with_exec_hook(move |sandbox: &str, spec: &sbxm::backend::ExecSpec| {
+            let headless = spec.argv.iter().any(|a| a == "codex" || a == "claude");
+            if !sandbox.contains("-review-") || !headless {
+                return;
+            }
+            let n = runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if n == 1 {
+                *captured_in_hook.lock().unwrap() =
+                    fs::read_to_string(clone.join(".sbxm-task").join("previous-review.md")).ok();
+            }
+            let dir = clone.join(".sbxm-task");
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join("review.md"), &reviews[n.min(reviews.len() - 1)]).unwrap();
+        });
+    let mut prepared = prepared(&f, &backend, &github);
+    review_it(
+        &f,
+        &backend,
+        &github,
+        &FakeHostRunner::default(),
+        &mut prepared,
+    )
+    .unwrap();
+    add_pr_head(&f, 7);
+
+    review_it(
+        &f,
+        &backend,
+        &github,
+        &FakeHostRunner::default(),
+        &mut prepared,
+    )
+    .unwrap();
+
+    let context = captured
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("round 2 saw the earlier review as previous-review.md");
+    assert!(context.contains("Nothing found."), "{context}");
+    assert!(context.contains("Review round 1"), "{context}");
 }
 
 // ---- The comment text ----

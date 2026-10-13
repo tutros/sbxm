@@ -217,6 +217,17 @@ pub const TABLE: &[Row] = &[
         to: Some(Stage::Fixing),
         action: "run a fix round from the recorded review",
     },
+    // `task review --pr` on a `ready` PR task (issue 195, gap G34): the refusal for an unchanged
+    // head lives in `review_pr` itself, which needs a GitHub call this table does not model.
+    Row {
+        stages: &[Stage::Ready],
+        statuses: &[Status::Ok],
+        live: Live::Any,
+        kinds: PR,
+        event: Event::Advance(Stage::Gating),
+        to: Some(Stage::Gating),
+        action: "fetch the PR's new head, then run the gates",
+    },
     // `task gates` (a task with a worker: issue and spec).
     Row {
         stages: &[Stage::Working, Stage::Fixing],
@@ -310,6 +321,18 @@ pub const TABLE: &[Row] = &[
         event: Event::Review,
         to: Some(Stage::Reviewing),
         action: "retry the reviewer",
+    },
+    // A `ready` PR task is reviewed again (issue 195, gap G34): refused while the PR's head is
+    // still the commit the last review covered, unless `--force` (`task review --pr`'s own
+    // check, which this table does not model since it needs a GitHub call).
+    Row {
+        stages: &[Stage::Ready],
+        statuses: &[Status::Ok],
+        live: Live::Any,
+        kinds: PR,
+        event: Event::Review,
+        to: Some(Stage::Gating),
+        action: "fetch the PR's new head, keep the review as review-<n>.md, run the gates, then the reviewer",
     },
     // `task finish`.
     Row {

@@ -188,6 +188,7 @@ kept here as the design for issues #117-121 to build toward.
 | ready ok (issue) | advance | finished | push the branch and open the PR |
 | ready ok (spec) | advance | finished | deliver the branch through the [finish] sink |
 | ready ok (issue/spec) | advance | fixing | run a fix round from the recorded review |
+| ready ok (pr) | advance | gating | fetch the PR's new head, then run the gates |
 | working/fixing completed/timed-out (issue/spec) | task gates | gating | run the gates |
 | gating passed/gates-failed (issue/spec) | task gates | gating | re-run the gates |
 | gating running (issue/spec), interrupted | task gates | gating | re-run the abandoned gates |
@@ -198,6 +199,7 @@ kept here as the design for issues #117-121 to build toward.
 | prepared running (pr) | task review | gating | run the gates, then the reviewer |
 | gating passed/gates-failed (pr) | task review | reviewing | run the reviewer |
 | reviewing failed (pr) | task review | reviewing | retry the reviewer |
+| ready ok (pr) | task review | gating | fetch the PR's new head, keep the review as review-<n>.md, run the gates, then the reviewer |
 | ready ok (issue) | task finish | finished | push the branch and open the PR |
 | ready ok (spec) | task finish | finished | deliver the branch through the [finish] sink |
 | prepared running (issue/spec), interrupted | task resume | working | make the worker's sandbox again, then run the worker and review |

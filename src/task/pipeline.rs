@@ -2028,9 +2028,8 @@ pub fn check_can_review_pr(task: &Record) -> Result<()> {
         return Ok(());
     }
     match (task.stage, task.status) {
-        (stage @ (Stage::Ready | Stage::Finished), _) => bail!(
-            "task {id} is already {}; its review is review.md in the task folder; to review the PR \
-             again after it changed, run `sbxm task rm --pr {number}` first",
+        (stage @ Stage::Finished, _) => bail!(
+            "task {id} is already {}; its review is review.md in the task folder",
             stage.name()
         ),
         (stage, status) => bail!(
@@ -2043,24 +2042,63 @@ pub fn check_can_review_pr(task: &Record) -> Result<()> {
 
 /// Spec §5.2 "PR": the gates run on a clean checkout of the PR's head (the sandbox tier inside the
 /// reviewer's own sandbox, since a PR has no worker; the host tier as usual), then the reviewer
-/// runs once (no fix round), and a valid review is posted as a PR comment. The reviewer's sandbox
-/// and clone are removed on every path. A failed gate stops before the reviewer; an invalid review
-/// is never posted; a failed post keeps the saved review and says how to post it by hand.
+/// runs, and a valid review is posted as a PR comment. The reviewer's sandbox and clone are
+/// removed on every path. A failed gate stops before the reviewer; an invalid review is never
+/// posted; a failed post keeps the saved review and says how to post it by hand.
+///
+/// A task left `ready` by an earlier round is reviewed again (issue 195, gap G34): refused while
+/// the PR's head is still the commit that round's review covered, unless `force`. That refusal
+/// and the fetch of the PR's new head both happen before anything is written, so a refused
+/// attempt or a failed fetch leaves `review.md` and `task.json` as they were. Once it proceeds,
+/// the earlier round's `review-<n>.md` stays in the task folder (as for an issue task, issue 169)
+/// and the reviewer gets every one of them as context; the gates run again, since the commits are
+/// new.
 pub fn review_pr(
     env: &TaskEnv,
     github: &dyn GitHubBackend,
     prepared: &mut Prepared,
+    force: bool,
 ) -> Result<PrReview> {
     check_can_review_pr(&prepared.record)?;
+    let id = prepared.record.id.clone();
+    let number = prepared.record.number;
+    let repo_git = prepared.meta.join("repo.git");
+    if prepared.record.stage == Stage::Ready {
+        repo::fetch_pr_head(&repo_git, number)
+            .with_context(|| format!("cannot fetch PR #{number}'s head to review it again"))?;
+        let head = repo::branch_tip(&repo_git, &prepared.record.branch)?;
+        let reviewed = prepared
+            .record
+            .review
+            .as_ref()
+            .and_then(|r| r.commit.as_deref());
+        if !force && reviewed == Some(head.as_str()) {
+            bail!(
+                "PR #{number} is already reviewed at `{head}`; to review it again anyway, run `{}`",
+                review::review_pr_command(
+                    number,
+                    &prepared.record.repo,
+                    Some(&prepared.record.base),
+                    true
+                )
+            );
+        }
+    }
     let mut report = PrReview {
         warnings: check_reviewer(env, prepared)?,
         ..PrReview::default()
     };
-    let id = prepared.record.id.clone();
     let reviewer = &env.config.reviewer;
     let gates = &env.config.gates;
     let clone = prepared.workspace.with_file_name(format!("{id}-review"));
     let sandbox = format!("sbxm-task-{id}-review-{}", reviewer.harness.as_str());
+    let round = next_review_round(prepared)?;
+    let earlier: Vec<String> = review::saved_rounds(&prepared.meta)
+        .into_iter()
+        .filter(|&r| r > 0 && r < round)
+        .filter_map(|r| fs::read_to_string(prepared.meta.join(format!("review-{r}.md"))).ok())
+        .collect();
+    let tip = repo::branch_tip(&repo_git, &prepared.record.branch).ok();
     let _ = fs::remove_file(prepared.meta.join("review.md"));
 
     // Gating: in the reviewer's sandbox, over a clean clone of the PR's head.
@@ -2077,10 +2115,10 @@ pub fn review_pr(
                 .record
                 .begin_review(now(), Process::current(env.probe))?;
             record::write(&prepared.meta, &prepared.record)?;
-            open_review_workspace(env, prepared, 1, &clone, &sandbox, &[])?;
+            open_review_workspace(env, prepared, round, &clone, &sandbox, &earlier)?;
             return Ok(None);
         }
-        open_review_workspace(env, prepared, 1, &clone, &sandbox, &[])?;
+        open_review_workspace(env, prepared, round, &clone, &sandbox, &earlier)?;
         let mut outcomes = gates::run_sandbox_tier(
             env.backend,
             &sandbox,
@@ -2135,9 +2173,9 @@ pub fn review_pr(
         Ok(None) => {}
     }
 
-    // The reviewer, once: a PR task is always a single full review (it has no worker to fix
-    // anything and so never narrows a later one, and so never repeats one either).
-    let ran = run_review_agent(env, prepared, 1, &clone, &sandbox, &[]);
+    // The reviewer: a PR task always covers the whole diff (it has no worker to fix anything and
+    // so never narrows a later round, and so never repeats a finding of an earlier one either).
+    let ran = run_review_agent(env, prepared, round, &clone, &sandbox, &earlier);
     cleanup(prepared);
     let outcome = match ran {
         Ok(outcome) => outcome,
@@ -2152,8 +2190,8 @@ pub fn review_pr(
     let (risk, risk_reasons) = (outcome.risk, outcome.risk_reasons.clone());
     prepared.record.open_findings = Some(outcome.open);
     prepared.record.review = Some(record::ReviewResult {
-        round: 1,
-        commit: None,
+        round,
+        commit: tip,
         posted: None,
         must_fix,
         full: true,
@@ -2167,7 +2205,7 @@ pub fn review_pr(
         .advance(Stage::Ready, now(), Process::current(env.probe))?;
     record::write(&prepared.meta, &prepared.record)?;
     report.reviewed = Some(Reviewed {
-        round: 1,
+        round,
         must_fix,
         full: true,
         repeat: false,

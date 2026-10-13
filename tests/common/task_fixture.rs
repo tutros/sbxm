@@ -160,10 +160,17 @@ pub fn worked_task(f: &Fixture, backend: &FakeBackend) -> sbxm::task::pipeline::
     prepared
 }
 
+/// Distinguishes repeated [`add_pr_head`] calls for the same PR number (a changed head, issue
+/// 195): a fresh scratch dir each time, and distinct file content so the commit is never the same
+/// object twice even if two calls land in the same second.
+static PR_SCRATCH_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 /// What GitHub keeps for a pull request: a commit on top of `main`, at `refs/pull/<n>/head` of the
-/// stand-in origin. Returns the commit's id.
+/// stand-in origin. Returns the commit's id. Calling it again for the same `number` replaces the
+/// head with a new commit (a force push: the new scratch clone has no knowledge of the old head).
 pub fn add_pr_head(f: &Fixture, number: u32) -> String {
-    let scratch = f.env.tmp.path().join(format!("pr-scratch-{number}"));
+    let seq = PR_SCRATCH_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let scratch = f.env.tmp.path().join(format!("pr-scratch-{number}-{seq}"));
     git(
         f.env.tmp.path(),
         &[
@@ -173,7 +180,11 @@ pub fn add_pr_head(f: &Fixture, number: u32) -> String {
             scratch.to_str().unwrap(),
         ],
     );
-    fs::write(scratch.join("pr.txt"), format!("change from PR {number}\n")).unwrap();
+    fs::write(
+        scratch.join("pr.txt"),
+        format!("change from PR {number} ({seq})\n"),
+    )
+    .unwrap();
     git(&scratch, &["add", "-A"]);
     git(&scratch, &["commit", "-q", "-m", "the PR's change"]);
     let sha = git(&scratch, &["rev-parse", "HEAD"]);
@@ -182,6 +193,7 @@ pub fn add_pr_head(f: &Fixture, number: u32) -> String {
         &[
             "push",
             "-q",
+            "-f",
             f.origin.to_str().unwrap(),
             &format!("HEAD:refs/pull/{number}/head"),
         ],

@@ -73,7 +73,8 @@ impl Stage {
     /// round too, for a task with a worker and rounds left (issue 117, decision 173(d)); a PR
     /// task's gates have no such move since its `fix_rounds` is always 0. A spec task reaches
     /// `ready` and `finished` like an issue task; its `finish` goes through the `[finish] sink`
-    /// instead of a PR (decision 174(e), issue 143).
+    /// instead of a PR (decision 174(e), issue 143). A PR task's `ready` goes back to `gating`
+    /// for another review round once its head changes (issue 195).
     pub(crate) fn next(self, kind: Kind) -> &'static [Stage] {
         match (self, kind) {
             (Self::Prepared, Kind::Issue | Kind::Spec) => &[Self::Working],
@@ -88,7 +89,8 @@ impl Stage {
             (Self::Reviewing, Kind::Pr) => &[Self::Ready],
             // `task resume` reopens a task that stopped `ready` for another fix round (issue 118).
             (Self::Ready, Kind::Issue | Kind::Spec) => &[Self::Finished, Self::Fixing],
-            (Self::Ready, Kind::Pr) | (Self::Finished, _) => &[],
+            (Self::Ready, Kind::Pr) => &[Self::Gating],
+            (Self::Finished, _) => &[],
         }
     }
 
@@ -300,7 +302,9 @@ pub struct ReviewResult {
     /// The branch commit this review covered (issue 198): `task finish` posts the review as the
     /// PR's own when the PR's head is this commit, and `task review --pr` refuses to review that
     /// head again. Kept even when the review is clean, unlike `last_reviewed_commit`, which only
-    /// narrows the next review. Absent in older records and for a PR task's review.
+    /// narrows the next review. Also set on a PR task's own review (issue 195), which
+    /// `task review --pr` compares the PR's current head against to refuse an unchanged one.
+    /// Absent in older records, and in a PR task's review recorded before issue 195.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub commit: Option<String>,
     /// The commit whose review `task finish` posted on the PR it opened (issue 198), written
