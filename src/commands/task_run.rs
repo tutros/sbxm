@@ -45,6 +45,18 @@ pub struct Options {
     pub disk: disk::Guard,
 }
 
+/// The drive can fill up while the worker runs, so it is checked again before the reviewer's
+/// sandbox (decision 194). A refusal names `task review`, which goes on from here: `task run`
+/// would not pick the task up again.
+fn review_has_room(config_dir: &Path, guard: &disk::Guard, flag: &str) -> Result<()> {
+    disk::require(&GlobalConfig::load(config_dir)?, config_dir, guard).with_context(|| {
+        format!(
+            "the worker is done but its review was not started; continue with `sbxm task review \
+             {flag}`"
+        )
+    })
+}
+
 /// Drops the `next:` hint of a step that isn't the last one.
 fn without_next(text: &[u8]) -> String {
     String::from_utf8_lossy(text)
@@ -194,6 +206,7 @@ fn run_issue(
         return Err(e);
     }
 
+    review_has_room(config_dir, &opts.disk, &format!("--issue {}", opts.issue))?;
     task_review::run(
         config_dir,
         &task_review::Options {
@@ -476,6 +489,7 @@ fn run_spec_task(
         return Err(e);
     }
 
+    review_has_room(config_dir, &opts.disk, &task_start::spec_flag(&opts.spec))?;
     task_review::run(
         config_dir,
         &task_review::Options {

@@ -1139,3 +1139,41 @@ fn a_low_sandbox_drive_refuses_before_anything_is_created() {
     assert_eq!(b.secret_service_calls(), 0);
     assert!(!record::task_dir(&f.env.base_dir(), &id).exists());
 }
+
+/// Issue 210: a drive that fills during the worker stops before the reviewer's sandbox, naming
+/// `task review --spec`.
+#[test]
+fn a_drive_that_fills_during_the_worker_stops_before_the_review_naming_task_review() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static READS: AtomicUsize = AtomicUsize::new(0);
+    let f = config();
+    let s = spec(&f);
+    let id = id_of(&s);
+    let b = backend_for(&f, &id, &[CLEAN_REVIEW]);
+    let mut opts = options(&f, s.clone());
+    // Room for `task run`'s own check (the start reuses it); none left for the review.
+    opts.disk = sbxm::disk::Guard {
+        free_space: |_| {
+            let gib = 1024 * 1024 * 1024;
+            Ok(if READS.fetch_add(1, Ordering::SeqCst) < 1 {
+                20 * gib
+            } else {
+                gib
+            })
+        },
+        ..common::low_disk(&f.env)
+    };
+
+    let out = go(&f, &opts, None, &b, &FakeGitHub::default());
+
+    let err = format!("{:#}", out.result.unwrap_err());
+    assert!(
+        err.starts_with(&format!(
+            "the worker is done but its review was not started; continue with `sbxm task review \
+             --spec {}`: only 1.0 GiB free on the drive of ",
+            s.display()
+        )),
+        "{err}"
+    );
+    assert_eq!(b.creates().len(), 1, "{:?}", b.log());
+}
