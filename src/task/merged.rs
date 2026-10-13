@@ -81,26 +81,16 @@ fn add_merged(
     }
 }
 
-/// An issue task (decision 195 point 1): no PR yet isn't a candidate at all; a merged PR is;
-/// anything else (open, or closed without merging) is left alone silently, like `task rm` leaves
-/// it.
-fn check_issue(
+/// A task whose PR is `number` is merged: a candidate; anything else (open, or closed without
+/// merging) is left alone silently, like `task rm` leaves it.
+fn check_pr_number(
     base_dir: &Path,
     task: &Record,
+    number: u32,
     github: &dyn GitHubBackend,
     probe: &dyn ProcessProbe,
     out: &mut MergedPlan,
 ) -> Result<()> {
-    let Some(url) = &task.pr else {
-        return Ok(());
-    };
-    let Some(number) = finish::pr_number(url) else {
-        out.left_alone.push(LeftAlone {
-            id: task.id.clone(),
-            reason: format!("its recorded PR {url:?} doesn't end in a PR number"),
-        });
-        return Ok(());
-    };
     let info = github.pr(&task.repo, number).with_context(|| {
         format!(
             "task {}: cannot read PR #{number} of {}",
@@ -120,15 +110,36 @@ fn check_issue(
     Ok(())
 }
 
+/// An issue task (decision 195 point 1): no PR yet isn't a candidate at all.
+fn check_issue(
+    base_dir: &Path,
+    task: &Record,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    out: &mut MergedPlan,
+) -> Result<()> {
+    let Some(url) = &task.pr else {
+        return Ok(());
+    };
+    let Some(number) = finish::pr_number(url) else {
+        out.left_alone.push(LeftAlone {
+            id: task.id.clone(),
+            reason: format!("its recorded PR {url:?} doesn't end in a PR number"),
+        });
+        return Ok(());
+    };
+    check_pr_number(base_dir, task, number, github, probe, out)
+}
+
 /// A PR-review task (decision 195 point 1): its own number is the PR's.
 fn check_pr_review(
-    _base_dir: &Path,
-    _task: &Record,
-    _github: &dyn GitHubBackend,
-    _probe: &dyn ProcessProbe,
-    _out: &mut MergedPlan,
+    base_dir: &Path,
+    task: &Record,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    out: &mut MergedPlan,
 ) -> Result<()> {
-    Ok(())
+    check_pr_number(base_dir, task, task.number, github, probe, out)
 }
 
 /// A spec task (decision 195 point 1).
