@@ -207,8 +207,9 @@ fn names(kind: Kind) -> Vec<String> {
 /// finished, not in flight) from which no command moves it on, only `rm`. `Prepared/Failed` is one
 /// the spec did not list (finding F4). `task resume` (issue 118) closed them row by row for a task
 /// with a worker, so an issue or spec task has none left. A PR task's stay: it has no worker or
-/// fix rounds, and `resume` is refused for it (spec section 5.2); the way on is `rm`, then
-/// `review --pr` again (decision 169(f)).
+/// fix rounds, and `resume` is refused for it (spec section 5.2); from these, the way on is `rm`,
+/// then `review --pr` again (decision 169(f)). Its `ready` is not one of them: since issue 195,
+/// `review --pr` reviews a `ready` PR task again in place (decision 190).
 #[test]
 fn the_dead_ends_are_the_gaps_the_spec_lists() {
     assert!(names(Kind::Issue).is_empty(), "{:?}", names(Kind::Issue));
