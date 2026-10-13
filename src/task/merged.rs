@@ -9,6 +9,7 @@ use anyhow::{Context, Result};
 
 use super::finish::{self, RemovalPlan};
 use super::record::{self, Kind, ProcessProbe, Record};
+use super::repo;
 use crate::github::{GitHubBackend, PrState};
 
 /// A task `task rm --merged` would remove, and why.
@@ -142,14 +143,69 @@ fn check_pr_review(
     check_pr_number(base_dir, task, task.number, github, probe, out)
 }
 
-/// A spec task (decision 195 point 1).
+/// A spec task (decision 195 point 1): nothing to check until it is finished (its result in
+/// `repo.git`, decision 178). Merged is "the branch's tip is reachable from the base branch as
+/// `origin/<base>` stands after a fetch"; a squash or rebase merge isn't detected, so a task that
+/// looks not-merged by this test is listed, not dropped silently, naming the plain command to
+/// remove it by hand. A result that counts as merged but was never fetched into `repo_root` is
+/// left alone too (decision 178's protection, reused as-is).
 fn check_spec(
-    _base_dir: &Path,
-    _task: &Record,
-    _repo_root: &Path,
-    _probe: &dyn ProcessProbe,
-    _out: &mut MergedPlan,
+    base_dir: &Path,
+    task: &Record,
+    repo_root: &Path,
+    probe: &dyn ProcessProbe,
+    out: &mut MergedPlan,
 ) -> Result<()> {
+    if task.stage != record::Stage::Finished {
+        return Ok(());
+    }
+    let meta = record::task_dir(base_dir, &task.id);
+    let repo_git = meta.join("repo.git");
+    if !repo_git.is_dir() {
+        return Ok(());
+    }
+    if !repo::valid_ref_name(&task.branch) || !repo::valid_ref_name(&task.base) {
+        out.left_alone.push(LeftAlone {
+            id: task.id.clone(),
+            reason: "records a branch or base name that isn't usable; see task.json".to_owned(),
+        });
+        return Ok(());
+    }
+    if task.commits_ahead(&repo_git)? == 0 {
+        return Ok(());
+    }
+    repo::fetch_base(&repo_git, &task.base).with_context(|| {
+        format!(
+            "task {}: cannot check whether its branch is merged into {}",
+            task.id, task.base
+        )
+    })?;
+    let tip = repo::branch_tip(&repo_git, &task.branch)?;
+    if !repo::is_ancestor_of_remote_base(&repo_git, &tip, &task.base)? {
+        out.left_alone.push(LeftAlone {
+            id: task.id.clone(),
+            reason: format!(
+                "not merged into {} (a squash or rebase merge isn't detected); remove it with \
+                 `sbxm task rm --spec` naming its file if you're sure it's done",
+                task.base
+            ),
+        });
+        return Ok(());
+    }
+    if let Err(e) = finish::check_spec_result_fetched(base_dir, &task.id, repo_root) {
+        out.left_alone.push(LeftAlone {
+            id: task.id.clone(),
+            reason: format!("{e:#}"),
+        });
+        return Ok(());
+    }
+    add_merged(
+        base_dir,
+        &task.id,
+        format!("branch {} is merged into {}", task.branch, task.base),
+        probe,
+        out,
+    );
     Ok(())
 }
 

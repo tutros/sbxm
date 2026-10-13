@@ -6,8 +6,9 @@ use std::fs;
 
 use common::task_fixture::{
     CLAUDE_DONE, Fixture, Play, Probe, add_pr_head, backend, ctx, fixture, issue_text, ok, play,
-    source,
+    ready_spec_task, source,
 };
+use sbxm::commands::task_finish;
 use sbxm::github::fake::FakeGitHub;
 use sbxm::github::{PrInfo, PrState};
 use sbxm::task::finish::finish;
@@ -252,6 +253,154 @@ fn an_issue_task_whose_pr_closed_without_merging_is_left_alone() {
         body: String::new(),
         closing_issues: vec![41],
     });
+
+    let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
+
+    assert!(found.is_empty(), "{found:?}");
+    assert!(found.left_alone.is_empty(), "{found:?}");
+}
+
+/// A spec task finished through the `local` sink (decision 174(e)): its result lives only in its
+/// own `repo.git` until fetched.
+fn kept_spec_task(f: &Fixture) -> (std::path::PathBuf, String) {
+    let (spec, id) = ready_spec_task(f);
+    task_finish::run(
+        &f.env.config_dir(),
+        &task_finish::Options {
+            target: task_finish::Target::Spec(spec.clone()),
+            repo_root: repo_root(f),
+            push_unresolved: false,
+        },
+        &FakeGitHub::default(),
+        &Probe,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    (spec, id)
+}
+
+/// A checkout of `f.origin` with `id`'s branch fetched out of its `repo.git` (decision 178's
+/// protection satisfied).
+fn fetched_checkout(f: &Fixture, id: &str) -> std::path::PathBuf {
+    let checkout = f.env.tmp.path().join("checkout");
+    common::git(
+        f.env.tmp.path(),
+        &[
+            "clone",
+            "-q",
+            f.origin.to_str().unwrap(),
+            checkout.to_str().unwrap(),
+        ],
+    );
+    let repo_git = record::task_dir(&f.env.base_dir(), id).join("repo.git");
+    common::git(
+        &checkout,
+        &[
+            "fetch",
+            "-q",
+            repo_git.to_str().unwrap(),
+            &format!("{id}:{id}"),
+        ],
+    );
+    checkout
+}
+
+/// Fast-forward merges `id`'s branch (from its `repo.git`) into `main` on `f.origin`, as a real
+/// GitHub merge would land it.
+fn merge_into_origin_main(f: &Fixture, id: &str) {
+    let repo_git = record::task_dir(&f.env.base_dir(), id).join("repo.git");
+    let scratch = f.env.tmp.path().join("merge-scratch");
+    common::git(
+        f.env.tmp.path(),
+        &[
+            "clone",
+            "-q",
+            f.origin.to_str().unwrap(),
+            scratch.to_str().unwrap(),
+        ],
+    );
+    common::git(
+        &scratch,
+        &[
+            "fetch",
+            "-q",
+            repo_git.to_str().unwrap(),
+            &format!("{id}:{id}"),
+        ],
+    );
+    common::git(&scratch, &["merge", "--ff-only", "-q", id]);
+    common::git(&scratch, &["push", "-q", "origin", "main"]);
+}
+
+#[test]
+fn a_finished_spec_task_not_yet_merged_is_left_alone_as_not_merged() {
+    let f = fixture();
+    let (_spec, id) = kept_spec_task(&f);
+    let checkout = fetched_checkout(&f, &id);
+    let github = FakeGitHub::default();
+
+    let found = plan(&f.env.base_dir(), &checkout, &github, &Probe).unwrap();
+
+    assert!(found.candidates.is_empty(), "{found:?}");
+    assert_eq!(found.left_alone.len(), 1, "{found:?}");
+    assert_eq!(found.left_alone[0].id, id);
+    assert!(
+        found.left_alone[0].reason.contains("not merged"),
+        "{}",
+        found.left_alone[0].reason
+    );
+    assert!(
+        found.left_alone[0].reason.contains("--spec"),
+        "{}",
+        found.left_alone[0].reason
+    );
+}
+
+#[test]
+fn a_merged_and_fetched_spec_task_is_a_candidate() {
+    let f = fixture();
+    let (_spec, id) = kept_spec_task(&f);
+    let checkout = fetched_checkout(&f, &id);
+    merge_into_origin_main(&f, &id);
+    let github = FakeGitHub::default();
+
+    let found = plan(&f.env.base_dir(), &checkout, &github, &Probe).unwrap();
+
+    assert_eq!(found.candidates.len(), 1, "{found:?}");
+    assert_eq!(found.candidates[0].id, id);
+    assert!(
+        found.candidates[0].reason.contains("merged"),
+        "{}",
+        found.candidates[0].reason
+    );
+    assert!(found.left_alone.is_empty(), "{found:?}");
+}
+
+#[test]
+fn a_merged_but_unfetched_spec_task_is_left_alone_protected() {
+    let f = fixture();
+    let (_spec, id) = kept_spec_task(&f);
+    merge_into_origin_main(&f, &id);
+    let github = FakeGitHub::default();
+
+    // repo_root here is the sbxm-task.toml checkout, which never fetched the branch.
+    let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
+
+    assert!(found.candidates.is_empty(), "{found:?}");
+    assert_eq!(found.left_alone.len(), 1, "{found:?}");
+    assert_eq!(found.left_alone[0].id, id);
+    assert!(
+        found.left_alone[0].reason.contains("git fetch"),
+        "{}",
+        found.left_alone[0].reason
+    );
+}
+
+#[test]
+fn an_unfinished_spec_task_is_not_a_candidate() {
+    let f = fixture();
+    let (_spec, _id) = ready_spec_task(&f);
+    let github = FakeGitHub::default();
 
     let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
 
