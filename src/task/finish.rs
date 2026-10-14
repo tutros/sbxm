@@ -179,7 +179,7 @@ fn sandbox_names(id: &str, task: &Record) -> Result<Vec<String>> {
 }
 
 /// Refuses a folder that is a link, or whose real place isn't `<base>/<rel...>`.
-fn check_own_folder(base_dir: &Path, dir: &Path) -> Result<()> {
+pub(crate) fn check_own_folder(base_dir: &Path, dir: &Path) -> Result<()> {
     if dir.symlink_metadata()?.file_type().is_symlink() {
         bail!(
             "{} is a symlink or junction; remove the link yourself if you want it gone",

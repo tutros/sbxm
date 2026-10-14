@@ -458,3 +458,116 @@ fn removing_never_fails_when_the_disk_cannot_be_read() {
     let printed = String::from_utf8(out).unwrap();
     assert!(!printed.contains("freed"), "{printed}");
 }
+
+/// Moves the task folder `meta` elsewhere and leaves a link in its place; returns where it went.
+fn link_task_folder(f: &Fixture, meta: &Path) -> std::path::PathBuf {
+    let elsewhere = f.env.tmp.path().join("elsewhere-task");
+    fs::rename(meta, &elsewhere).unwrap();
+    dir_link(meta, &elsewhere);
+    elsewhere
+}
+
+/// Issue 202's round-3 M-2: a task folder that is a link is refused before anything is read
+/// through it or any archive is made.
+#[test]
+fn archiving_refuses_a_linked_task_folder_and_writes_nothing() {
+    let f = fixture();
+    finished_task(&f);
+    let elsewhere = link_task_folder(&f, &meta(&f));
+    let before: Vec<_> = fs::read_dir(&elsewhere)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+
+    let err = archive_task(&f.env.base_dir(), "issue-41").unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains(&meta(&f).display().to_string()),
+        "{err:#}"
+    );
+    assert!(!archive_dir(&f.env.base_dir(), "issue-41").exists());
+    let after: Vec<_> = fs::read_dir(&elsewhere)
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(before, after);
+    assert!(
+        meta(&f)
+            .symlink_metadata()
+            .unwrap()
+            .file_type()
+            .is_symlink()
+    );
+}
+
+/// Issue 202's round-3 M-2: a linked `.sbxm/task-archive` is refused before any folder or file is
+/// created through it.
+#[test]
+fn archiving_refuses_a_linked_archive_root() {
+    let f = fixture();
+    finished_task(&f);
+    let root = archive_dir(&f.env.base_dir(), "issue-41")
+        .parent()
+        .unwrap()
+        .to_path_buf();
+    let elsewhere = f.env.tmp.path().join("elsewhere-archive");
+    fs::create_dir_all(&elsewhere).unwrap();
+    dir_link(&root, &elsewhere);
+
+    let err = archive_task(&f.env.base_dir(), "issue-41").unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains(&root.display().to_string()),
+        "{err:#}"
+    );
+    assert!(
+        fs::read_dir(&elsewhere).unwrap().next().is_none(),
+        "something was created through the link"
+    );
+}
+
+/// Issue 202's round-3 M-2: a record inside the task folder that is a link isn't followed: what it
+/// points at is never copied into the archive.
+#[cfg(unix)]
+#[test]
+fn archiving_skips_a_record_that_is_a_link() {
+    let f = fixture();
+    finished_task(&f);
+    let outside = f.env.tmp.path().join("outside.md");
+    fs::write(&outside, "not the task's\n").unwrap();
+    fs::remove_file(meta(&f).join("result.md")).unwrap();
+    std::os::unix::fs::symlink(&outside, meta(&f).join("result.md")).unwrap();
+
+    let archive = archive_task(&f.env.base_dir(), "issue-41").unwrap();
+
+    assert!(archive.join("task.json").is_file());
+    assert!(archive.join("result.md").symlink_metadata().is_err());
+}
+
+/// Issue 202's round-3 M-2: removing refuses a linked task folder before archiving, so the task
+/// stays, nothing is archived, and nothing behind the link changes.
+#[test]
+fn removing_a_task_whose_folder_is_a_link_archives_and_deletes_nothing() {
+    let f = fixture();
+    let url = finished_task(&f);
+    let number = sbxm::task::finish::pr_number(&url).unwrap();
+    let found = found_merged(&f, number);
+    let elsewhere = link_task_folder(&f, &meta(&f));
+    let mut out = Vec::new();
+
+    let err = remove(
+        &f.env.base_dir(),
+        &found,
+        true,
+        &FakeBackend::with_secrets(&["anthropic"]),
+        &Yes::new(),
+        rising_free_space,
+        &mut out,
+    )
+    .unwrap_err();
+
+    assert!(format!("{err:#}").contains("stayed"), "{err:#}");
+    assert!(!archive_dir(&f.env.base_dir(), "issue-41").exists());
+    assert!(elsewhere.join("task.json").is_file());
+    assert!(meta(&f).symlink_metadata().is_ok());
+}

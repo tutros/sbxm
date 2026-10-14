@@ -515,3 +515,34 @@ fn a_ready_but_unfinished_spec_task_whose_branch_is_merged_is_a_candidate() {
     );
     assert!(found.left_alone.is_empty(), "{found:?}");
 }
+
+/// Issue 202's round-3 M-2: a spec task whose folder is a link is left alone, named, before its
+/// `repo.git` is fetched into or read through the link.
+#[test]
+fn a_spec_task_whose_folder_is_a_link_is_left_alone_without_fetching_through_it() {
+    let f = fixture();
+    let (_spec, id) = ready_spec_task(&f);
+    let meta = record::task_dir(&f.env.base_dir(), &id);
+    let elsewhere = f.env.tmp.path().join("elsewhere-task");
+    fs::rename(&meta, &elsewhere).unwrap();
+    common::dir_link(&meta, &elsewhere);
+    let fetch_head = elsewhere.join("repo.git").join("FETCH_HEAD");
+    let before = fs::read(&fetch_head).ok();
+    let github = FakeGitHub::default();
+
+    let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
+
+    assert!(found.candidates.is_empty(), "{found:?}");
+    assert_eq!(found.left_alone.len(), 1, "{found:?}");
+    assert_eq!(found.left_alone[0].id, id);
+    assert!(
+        found.left_alone[0].reason.contains("link"),
+        "{}",
+        found.left_alone[0].reason
+    );
+    assert_eq!(
+        fs::read(&fetch_head).ok(),
+        before,
+        "fetched through the link"
+    );
+}

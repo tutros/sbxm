@@ -264,6 +264,15 @@ pub fn plan(
 ) -> Result<MergedPlan> {
     let mut out = MergedPlan::default();
     for task in record::load_all(base_dir)? {
+        // Nothing below runs through a task folder that is a link, or sits under one: not the
+        // spec check's fetch into its `repo.git`, not the archive (README's removal contract).
+        if let Err(e) = finish::check_own_folder(base_dir, &record::task_dir(base_dir, &task.id)) {
+            out.left_alone.push(LeftAlone {
+                id: task.id.clone(),
+                reason: format!("{e:#}"),
+            });
+            continue;
+        }
         match task.kind {
             Kind::Issue => check_issue(base_dir, &task, github, probe, &mut out)?,
             Kind::Pr => check_pr_review(base_dir, &task, github, probe, &mut out)?,
@@ -299,14 +308,35 @@ fn archive_names(meta: &Path) -> Vec<String> {
     names
 }
 
+/// `dir`, a folder under `base_dir`, checked with [`finish::check_own_folder`] if it exists
+/// (never followed if it is a link, refused if its real place is elsewhere), created if it
+/// doesn't.
+fn own_folder_or_create(base_dir: &Path, dir: &Path) -> Result<()> {
+    match fs::symlink_metadata(dir) {
+        Ok(_) => finish::check_own_folder(base_dir, dir),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            fs::create_dir(dir).with_context(|| format!("cannot create {}", dir.display()))
+        }
+        Err(e) => Err(e).with_context(|| format!("cannot read {}", dir.display())),
+    }
+}
+
 /// Copies `id`'s text records into [`archive_dir`] before its folder is removed (decision 195
-/// point 2). Only files that exist are copied; a name [`archive_names`] lists but that isn't
-/// there is silently skipped, never an error. Refuses, without writing anything, if the archive
-/// path already exists in any form (a directory from an earlier archive of the same id, a plain
-/// file, or a symlink or junction, checked without following it): "nothing deletes an archive"
-/// means nothing overwrites one either. Returns the archive folder.
+/// point 2). Only plain files that exist are copied; a name [`archive_names`] lists but that
+/// isn't there, or is a link, is silently skipped, never an error or followed. Refuses, without
+/// writing anything, if the task folder is a link or isn't really under `base_dir`, if
+/// `.sbxm` or `.sbxm/task-archive` is (both are created one at a time otherwise, never through a
+/// link), or if the archive path already exists in any form (a directory from an earlier archive
+/// of the same id, a plain file, or a symlink or junction, checked without following it):
+/// "nothing deletes an archive" means nothing overwrites one either. Returns the archive folder.
 pub fn archive_task(base_dir: &Path, id: &str) -> Result<PathBuf> {
     let meta = record::task_dir(base_dir, id);
+    if fs::symlink_metadata(&meta).is_ok() {
+        finish::check_own_folder(base_dir, &meta)?;
+    }
+    let sbxm = base_dir.join(".sbxm");
+    own_folder_or_create(base_dir, &sbxm)?;
+    own_folder_or_create(base_dir, &sbxm.join("task-archive"))?;
     let archive = archive_dir(base_dir, id);
     if fs::symlink_metadata(&archive).is_ok() {
         bail!(
@@ -314,10 +344,11 @@ pub fn archive_task(base_dir: &Path, id: &str) -> Result<PathBuf> {
             archive.display()
         );
     }
-    fs::create_dir_all(&archive).with_context(|| format!("cannot create {}", archive.display()))?;
+    fs::create_dir(&archive).with_context(|| format!("cannot create {}", archive.display()))?;
     for name in archive_names(&meta) {
         let src = meta.join(&name);
-        if !src.is_file() {
+        let plain = fs::symlink_metadata(&src).is_ok_and(|m| m.file_type().is_file());
+        if !plain {
             continue;
         }
         let dest = archive.join(&name);
