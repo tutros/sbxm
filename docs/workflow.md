@@ -107,16 +107,20 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
     fetched into the checkout yet, unless `--force`.
   - **A list of tasks, one command (decision 193, issue 201):** `--issue`/`--spec` are repeatable and may be
     combined (`--issue 210 --issue 202 --spec sdlc/specs/x.md`), run in the order written; the other flags apply to
-    every task of the list, and there is no list file. Every target's own identity is checked before the first
-    target's sandbox is created (issue 201 review M-1): an issue that doesn't exist, isn't open, already has a task,
-    or names a PR that can't be continued; a spec file that can't be read or already has a task. A later target's
-    problem is refused up front this way instead of only once an earlier, valid target has already run; skipped,
-    not an error, when the list's shared repo can't even be resolved (no `--repo` and no git origin), in which case
-    each target is checked the old way, on its own turn. The tasks are independent: a later one never gets an
-    earlier one's work. A task that stops short of `ready` (must-fix findings left, a failed worker, a gate that
-    could not run) is recorded and the list goes on to the next one; the list itself stops only for a problem that
-    would hit every task (`sbx` not reachable, a missing secret, too little free disk — checked again before each
-    task, not only the first, since a task's own sandbox can fill the drive the next one needs). It prints a
+    every task of the list, and there is no list file. Every target's own selection problem is checked before the
+    first target's sandbox is created (issue 201 review M-1, repeat of M-1): for an issue, the same rules an
+    explicit `task start --issue A --issue B` already applies — a question, blocked by an open `Depends on` issue,
+    related to another issue in the same batch or an existing task, doesn't exist, isn't open, already has a task,
+    or names a PR that can't be continued; for a spec, a file that can't be read or already has a task. A later
+    target's problem is refused up front this way instead of only once an earlier, valid target has already run;
+    skipped, not an error, when the list's shared repo can't even be resolved (no `--repo` and no git origin), in
+    which case each target is checked the old way, on its own turn. The tasks are independent: a later one never
+    gets an earlier one's work. A task that stops short of `ready` (must-fix findings left, a failed worker, a gate
+    that could not run) is recorded and the list goes on to the next one; the list itself stops only for a problem
+    that would hit every task (`sbx` not reachable — the preflight's own call to it, or `SandboxBackend::exec`
+    itself failing while a worker, fix round or reviewer ran, issue 201 review M-2, repeat of M-2 — a missing
+    secret, or too little free disk — checked again before each task, not only the first, since a task's own
+    sandbox can fill the drive the next one needs). It prints a
     summary line per task at the end (stage, must-fix findings left, the next command). Exit 0 only when every task
     of the list ended `ready`; 1 when at least one failed or was never started because the list stopped. `--restart`
     is refused with more than one task in the list: there is nothing left to show the user when several tasks' old
