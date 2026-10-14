@@ -11,7 +11,7 @@ use common::task_fixture::{
     CLAUDE_DONE, CODEX_DONE, Fixture, Play, Probe, fixture_with, issue_text, ok, open_issue,
     play_tasks, source,
 };
-use sbxm::backend::{ExecSpec, FakeBackend};
+use sbxm::backend::{ExecOutput, ExecSpec, FakeBackend};
 use sbxm::commands::task_run::{ListOptions, Target, run_list};
 use sbxm::commands::task_start::Restart;
 use sbxm::confirm::Confirm;
@@ -87,6 +87,19 @@ fn github() -> FakeGitHub {
             open_issue(42, &["should-fix"], ""),
             open_issue(43, &["should-fix"], ""),
         ])
+}
+
+/// Like [`github`], with `extra` open issues added for a test of one of `select::select`'s own
+/// rules (issue 201 review M-1): the base set (41, 42, 43) stays the same so `github_with` can
+/// stand in for `github` in every list test, just with one more candidate.
+fn github_with(extra: Vec<sbxm::github::Issue>) -> FakeGitHub {
+    let mut open = vec![
+        open_issue(41, &["should-fix"], ""),
+        open_issue(42, &["should-fix"], ""),
+        open_issue(43, &["should-fix"], ""),
+    ];
+    open.extend(extra);
+    github().with_open_issues(open)
 }
 
 fn opts(f: &Fixture) -> ListOptions {
@@ -186,11 +199,22 @@ fn two_issues_run_in_order_and_both_reach_ready() {
 }
 
 /// Decision 193, point 1: a task that stops short of `ready` is recorded, and the list goes on to
-/// the next one instead of stopping.
+/// the next one instead of stopping. The agent's own command exiting non-zero is `Ok` with a
+/// failed status (`SandboxBackend::exec` itself still ran): an ordinary per-task stop, unlike
+/// `sbx` itself failing to run a command (issue 201 review M-2, repeat of M-2; see
+/// `sbx_exec_failing_for_the_worker_stops_the_list` below).
 #[test]
 fn a_failed_task_does_not_stop_the_list() {
     let f = config();
-    let b = backend(&f).with_failing_exec_for("sbxm-task-issue-41-claude");
+    let b = backend(&f).with_exec_responder(|sandbox, spec| {
+        (sandbox == "sbxm-task-issue-41-claude" && spec.argv.iter().any(|a| a == "claude")).then(
+            || ExecOutput {
+                stdout: String::new(),
+                stderr: "boom".into(),
+                exit_code: Some(1),
+            },
+        )
+    });
     let gh = github();
     let targets = [Target::Issue(41), Target::Issue(42)];
 
@@ -202,10 +226,34 @@ fn a_failed_task_does_not_stop_the_list() {
         "{message}"
     );
     let text = &out.out;
-    assert!(text.contains("issue-41: failed:"), "{text}");
+    assert!(text.contains("issue-41: worker failed:"), "{text}");
     assert_eq!(stage(&f, "issue-42"), (Stage::Ready, Status::Ok));
     assert!(
         text.contains("--issue 42: stage ready, must-fix 0; next: sbxm task finish --issue 42"),
+        "{text}"
+    );
+}
+
+/// Decision 193(a), issue 201 review M-2 (repeat of M-2): `SandboxBackend::exec` itself failing —
+/// "`sbx` itself couldn't run" per its own doc comment, never a failing agent command, which comes
+/// back `Ok` with a status — is one of the list's queue-wide stops, not a per-task failure the
+/// list goes on past. The previous fix only wired this up for a missing secret or `sbx` not
+/// answering `secret_services`; an `exec` failure while the worker itself ran still let the list
+/// continue, which this test would have caught.
+#[test]
+fn sbx_exec_failing_for_the_worker_stops_the_list() {
+    let f = config();
+    let b = backend(&f).with_failing_exec_for("sbxm-task-issue-41-claude");
+    let gh = github();
+    let targets = [Target::Issue(41), Target::Issue(42)];
+
+    let out = go(&f, &opts(&f), &targets, None, &b, &gh);
+
+    out.result.unwrap_err();
+    assert!(!record::task_dir(&f.env.base_dir(), "issue-42").exists());
+    let text = &out.out;
+    assert!(
+        text.contains("--issue 42: not started; the list stopped"),
         "{text}"
     );
 }
@@ -309,6 +357,70 @@ fn a_later_invalid_spec_is_refused_before_any_sandbox_is_created() {
         message.contains(&missing.display().to_string()),
         "{message}"
     );
+    assert!(b.log().is_empty(), "{:?}", b.log());
+    assert!(!record::task_dir(&f.env.base_dir(), "issue-41").exists());
+}
+
+/// Issue 201 review M-1 (repeat of M-1): the preflight pass must apply the same rules an explicit
+/// `task start --issue A --issue B` already does (`select::select`), not only `issue_startable`'s
+/// own open/existing-task/continued-PR checks — a later target labeled `question` passed the old
+/// preflight and only its own turn in the loop found it, after an earlier valid target had already
+/// run its worker and reviewer sandboxes.
+#[test]
+fn a_later_question_issue_is_refused_before_any_sandbox_is_created() {
+    let f = config();
+    let (b, gh) = (
+        backend(&f),
+        github_with(vec![open_issue(44, &["question"], "")]),
+    );
+    let targets = [Target::Issue(41), Target::Issue(44)];
+
+    let out = go(&f, &opts(&f), &targets, None, &b, &gh);
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("--issue 44"), "{message}");
+    assert!(message.contains("question"), "{message}");
+    assert!(b.log().is_empty(), "{:?}", b.log());
+    assert!(!record::task_dir(&f.env.base_dir(), "issue-41").exists());
+}
+
+/// Issue 201 review M-1 (repeat of M-1): same kind as above, for a later target blocked by an open
+/// dependency (`**Depends on:**`).
+#[test]
+fn a_later_blocked_issue_is_refused_before_any_sandbox_is_created() {
+    let f = config();
+    let (b, gh) = (
+        backend(&f),
+        github_with(vec![open_issue(44, &["should-fix"], "**Depends on:** #43")]),
+    );
+    let targets = [Target::Issue(41), Target::Issue(44)];
+
+    let out = go(&f, &opts(&f), &targets, None, &b, &gh);
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("--issue 44"), "{message}");
+    assert!(message.contains("blocked"), "{message}");
+    assert!(b.log().is_empty(), "{:?}", b.log());
+    assert!(!record::task_dir(&f.env.base_dir(), "issue-41").exists());
+}
+
+/// Issue 201 review M-1 (repeat of M-1): same kind as above, for a later target related
+/// (`**Related:**`) to an earlier target in the same batch — the batch's own picks, not only
+/// existing tasks on disk, must be in the snapshot `select::select` checks clashes against.
+#[test]
+fn a_target_related_to_an_earlier_target_is_refused_before_any_sandbox_is_created() {
+    let f = config();
+    let (b, gh) = (
+        backend(&f),
+        github_with(vec![open_issue(44, &["should-fix"], "**Related:** #41")]),
+    );
+    let targets = [Target::Issue(41), Target::Issue(44)];
+
+    let out = go(&f, &opts(&f), &targets, None, &b, &gh);
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("--issue 44"), "{message}");
+    assert!(message.contains("related to"), "{message}");
     assert!(b.log().is_empty(), "{:?}", b.log());
     assert!(!record::task_dir(&f.env.base_dir(), "issue-41").exists());
 }

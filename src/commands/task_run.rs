@@ -2,6 +2,7 @@
 //! one task, and then it stops; `finish` publishes, so it stays a deliberate command of its own.
 //! Gates that fail after the worker don't stop it: the review reruns them (decision 180).
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -676,11 +677,17 @@ fn summary_line(
 }
 
 /// Whether `e` is one of decision 193(a)'s three list-wide stops that aren't the free-disk check
-/// (issue 201 review M-2): a missing shared secret or `sbx` itself not answering. Either stops
-/// the whole list instead of being counted as this target's own failure and asked again for
-/// every later one.
+/// (issue 201 review M-2, repeat of M-2): a missing shared secret, `sbx` itself not answering a
+/// preflight call (`check_secrets`), or `SandboxBackend::exec` itself failing while the worker,
+/// fix round or reviewer ran (`headless::run`'s `ExecUnavailable`, which carries the same "`sbx`
+/// couldn't run" meaning `SbxUnavailable` does, just found at a different point). Either stops the
+/// whole list instead of being counted as this target's own failure and asked again for every
+/// later one; a harness-reported failure or an ordinary failing gate is still `Ok` with a status,
+/// not this, so it stays a per-task stop that the list goes on past.
 fn queue_wide_stop(e: &anyhow::Error) -> bool {
-    e.is::<pipeline::MissingSecret>() || e.is::<pipeline::SbxUnavailable>()
+    e.is::<pipeline::MissingSecret>()
+        || e.is::<pipeline::SbxUnavailable>()
+        || e.is::<crate::headless::ExecUnavailable>()
 }
 
 /// Checks every target's own identity before the first one's sandbox is created (decision 193,
@@ -699,14 +706,34 @@ fn preflight_targets(
     let Ok(repo) = task_start::resolve_repo(opts.repo.as_deref(), &opts.repo_root) else {
         return Ok(());
     };
+    // All of this batch's issue numbers are checked together (issue 201 review M-1), not one at a
+    // time, so two targets related to each other are caught the same way an explicit `task start
+    // --issue A --issue B` already catches it.
+    let issue_numbers: Vec<u32> = targets
+        .iter()
+        .filter_map(|target| match target {
+            Target::Issue(n) => Some(*n),
+            Target::Spec(_) => None,
+        })
+        .collect();
+    let issue_problems = if issue_numbers.is_empty() {
+        HashMap::new()
+    } else {
+        pipeline::preflight_issues(config_dir, &repo, github, &issue_numbers)?
+    };
     let mut problems = Vec::new();
     for target in targets {
-        let result = match target {
-            Target::Issue(n) => pipeline::preflight_issue(config_dir, &repo, github, *n),
-            Target::Spec(path) => pipeline::preflight_spec(config_dir, path),
-        };
-        if let Err(e) = result {
-            problems.push(format!("{}: {e:#}", target.flag()));
+        match target {
+            Target::Issue(n) => {
+                if let Some(reason) = issue_problems.get(n) {
+                    problems.push(format!("{}: {reason}", target.flag()));
+                }
+            }
+            Target::Spec(path) => {
+                if let Err(e) = pipeline::preflight_spec(config_dir, path) {
+                    problems.push(format!("{}: {e:#}", target.flag()));
+                }
+            }
         }
     }
     if !problems.is_empty() {

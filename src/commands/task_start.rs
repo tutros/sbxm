@@ -450,7 +450,7 @@ fn start(
     };
     let total = reports.len();
 
-    let (mut failed, mut gates_failed, mut restored) = (0, 0, 0);
+    let (mut failed, mut gates_failed, mut exec_unavailable, mut restored) = (0, 0, 0, 0);
     for report in reports {
         let pipeline::TaskReport {
             number,
@@ -564,6 +564,9 @@ fn start(
             }
             Err(e) => {
                 failed += 1;
+                if e.is::<crate::headless::ExecUnavailable>() {
+                    exec_unavailable += 1;
+                }
                 match aside {
                     // The task's preparation never completed, so its old copy goes back.
                     Some(aside) => {
@@ -590,6 +593,14 @@ fn start(
         let message = format!("{failed} of {total} task(s) failed; see above");
         if failed == gates_failed && restored == 0 {
             return Err(GatesFailed(message).into());
+        }
+        // Decision 193(a), issue 201 review M-2: `SandboxBackend::exec` itself failing (not a
+        // harness-reported failure, which is `Ok` with a status) means `sbx` couldn't run, the
+        // same meaning `check_secrets`'s `SbxUnavailable` already carries; a `task run` list stops
+        // for it instead of counting it as this task's own failure. `restored == 0`, as above: a
+        // task whose preparation never completed (restarted and put back) never got this far.
+        if failed == exec_unavailable && restored == 0 {
+            return Err(crate::headless::ExecUnavailable(message).into());
         }
         bail!(message);
     }

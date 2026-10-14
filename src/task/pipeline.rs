@@ -596,20 +596,49 @@ fn issue_startable(
     continued_pr(repo, github, issue)
 }
 
-/// Validates one `--issue N` target of a `task run` list without creating anything (issue 201
-/// review M-1): the same checks [`prepare`] makes before its first write, so a later target's own
-/// problem is found before an earlier target's sandbox exists. One GitHub call for the issue
-/// itself, plus one more if it names a pull request.
-pub fn preflight_issue(
+/// Validates every `--issue N` target of a `task run` list together, without creating anything
+/// (issue 201 review M-1, repeat of M-1): the same rules `choose_issues` applies to an explicit
+/// list — already has a task, a question, blocked by an open dependency, or related to another
+/// issue in the same batch or an existing task (`select::select`) — plus each still-eligible
+/// issue's own continued-PR eligibility (`issue_startable`), so a later target's selection problem
+/// is found before an earlier target's sandbox exists. One shared snapshot of open issues and
+/// existing tasks for the whole batch, so two targets related to each other are caught the same
+/// way `task start --issue A --issue B` already would be — checking each number on its own, as the
+/// previous `preflight_issue` did, missed exactly this (and the question/blocked rules), because
+/// `issue_startable` alone was never where those rules lived. Returns the problem for each number
+/// that isn't startable; a number missing from the result is startable.
+pub fn preflight_issues(
     config_dir: &Path,
     repo: &str,
     github: &dyn GitHubBackend,
-    number: u32,
-) -> Result<()> {
+    numbers: &[u32],
+) -> Result<HashMap<u32, String>> {
     let base_dir = GlobalConfig::load(config_dir)?.base_dir;
-    let issue = github.issue(repo, number)?;
-    issue_startable(&base_dir, repo, github, &issue)?;
-    Ok(())
+    let open = github.issues_open(repo)?;
+    let taken: Vec<u32> = record::load_all(&base_dir)?
+        .into_iter()
+        .filter(|r| r.kind == Kind::Issue)
+        .map(|r| r.number)
+        .collect();
+    let selection = select::select(&open, &taken, Some(numbers), numbers.len(), &HashMap::new());
+    let mut problems: HashMap<u32, String> = selection
+        .not_open
+        .iter()
+        .map(|n| (*n, "isn't an open issue".to_owned()))
+        .collect();
+    for (n, why) in &selection.skips {
+        problems.entry(*n).or_insert_with(|| why.to_string());
+    }
+    for &n in numbers {
+        if problems.contains_key(&n) {
+            continue;
+        }
+        let issue = github.issue(repo, n)?;
+        if let Err(e) = issue_startable(&base_dir, repo, github, &issue) {
+            problems.insert(n, format!("{e:#}"));
+        }
+    }
+    Ok(problems)
 }
 
 /// Spec §5.1 steps 1 and 2: checks, then the task's folders, `repo.git`, the worker's clone,

@@ -75,6 +75,21 @@ pub struct HeadlessResult {
     pub usage: Usage,
 }
 
+/// `SandboxBackend::exec` returning `Err` means "`sbx` itself couldn't run" (its own doc comment),
+/// not a failing agent command (that comes back as `Ok` with a [`RunStatus::Failed`]). A `task
+/// run` list turns this into one of its queue-wide stops (decision 193(a), issue 201 review M-2)
+/// instead of counting it as this task's own failure.
+#[derive(Debug)]
+pub struct ExecUnavailable(pub String);
+
+impl std::fmt::Display for ExecUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for ExecUnavailable {}
+
 /// Runs `prompt` headlessly in `sandbox` under `workdir`. A timeout or a
 /// failing command is `Ok` with the matching status and whatever output could
 /// be parsed; `Err` means the run couldn't be attempted.
@@ -94,14 +109,16 @@ pub fn run(
         timeout.as_secs().max(1).to_string(),
     ];
     argv.extend(harness.headless_argv(prompt, opts)?);
-    let output = backend.exec(
-        sandbox,
-        &ExecSpec {
-            workdir: Some(workdir.to_path_buf()),
-            argv,
-            stdin: harness.stdin(),
-        },
-    )?;
+    let output = backend
+        .exec(
+            sandbox,
+            &ExecSpec {
+                workdir: Some(workdir.to_path_buf()),
+                argv,
+                stdin: harness.stdin(),
+            },
+        )
+        .map_err(|e| anyhow::Error::new(ExecUnavailable(format!("{e:#}"))))?;
     let mut result = harness.parse_headless_output(&output.stdout)?;
     if hit_timeout(output.exit_code, &output.stderr) {
         result.status = RunStatus::TimedOut;
