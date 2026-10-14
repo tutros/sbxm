@@ -627,3 +627,75 @@ fn a_linked_tasks_root_refuses_the_scan() {
 
     assert!(format!("{err:#}").contains("link"), "{err:#}");
 }
+
+/// PR 241 review M-1: a spec task whose `repo.git` is a link is left alone, named, without
+/// fetching into the repository behind the link (decision 159: `repo.git` is host-owned).
+#[test]
+fn a_linked_repo_git_is_left_alone_without_fetching_through_it() {
+    let f = fixture();
+    let (_spec, id) = ready_spec_task(&f);
+    let checkout = fetched_checkout(&f, &id);
+    merge_into_origin_main(&f, &id);
+    let repo_git = record::task_dir(&f.env.base_dir(), &id).join("repo.git");
+    let elsewhere = f.env.tmp.path().join("elsewhere-repo.git");
+    fs::rename(&repo_git, &elsewhere).unwrap();
+    common::dir_link(&repo_git, &elsewhere);
+    let fetch_head = elsewhere.join("FETCH_HEAD");
+    let before = fs::read(&fetch_head).ok();
+    let github = FakeGitHub::default();
+
+    let found = plan(&f.env.base_dir(), &checkout, &github, &Probe).unwrap();
+
+    assert!(found.candidates.is_empty(), "{found:?}");
+    assert_eq!(found.left_alone.len(), 1, "{found:?}");
+    assert_eq!(found.left_alone[0].id, id);
+    assert!(
+        found.left_alone[0].reason.contains("link"),
+        "{}",
+        found.left_alone[0].reason
+    );
+    assert_eq!(
+        fs::read(&fetch_head).ok(),
+        before,
+        "fetched through the link"
+    );
+}
+
+/// PR 241 review M-2: a `task.json` whose `id` isn't its own folder's name never selects the task
+/// it names: its folder is left alone under the folder's name, and the named task, whose own PR
+/// is open, is not a candidate.
+#[test]
+fn a_record_whose_id_is_not_its_folder_is_left_alone_and_selects_nothing() {
+    let f = fixture();
+    let url = finished(&f);
+    let number = pr_number(&url);
+    let real = record::task_dir(&f.env.base_dir(), "issue-41").join("task.json");
+    let other_url = format!("{}777", url.trim_end_matches(char::is_numeric));
+    let forged = fs::read_to_string(&real).unwrap().replace(&url, &other_url);
+    let stray = record::task_dir(&f.env.base_dir(), "issue-99");
+    fs::create_dir_all(&stray).unwrap();
+    fs::write(stray.join("task.json"), forged).unwrap();
+    let github = FakeGitHub::default()
+        .with_pr(open_pr(number, "0".repeat(40)))
+        .with_pr(PrInfo {
+            number: 777,
+            head_ref: "issue-41".into(),
+            head_oid: "0".repeat(40),
+            is_cross_repository: false,
+            state: PrState::Merged,
+            title: "Fix 41".into(),
+            body: String::new(),
+            closing_issues: vec![41],
+        });
+
+    let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
+
+    assert!(found.candidates.is_empty(), "{found:?}");
+    assert_eq!(found.left_alone.len(), 1, "{found:?}");
+    assert_eq!(found.left_alone[0].id, "issue-99");
+    assert!(
+        found.left_alone[0].reason.contains("issue-41"),
+        "{}",
+        found.left_alone[0].reason
+    );
+}

@@ -205,6 +205,18 @@ fn check_spec(
 ) -> Result<()> {
     let meta = record::task_dir(base_dir, &task.id);
     let repo_git = meta.join("repo.git");
+    // Checked without following it (decision 159: `repo.git` is host-owned): no git command,
+    // and no fetch, ever runs through a `repo.git` that is a link or resolves elsewhere.
+    if fs::symlink_metadata(&repo_git).is_err() {
+        return Ok(());
+    }
+    if let Err(e) = finish::check_own_folder(base_dir, &repo_git) {
+        out.left_alone.push(LeftAlone {
+            id: task.id.clone(),
+            reason: format!("{e:#}"),
+        });
+        return Ok(());
+    }
     if !repo_git.is_dir() {
         return Ok(());
     }
@@ -257,7 +269,7 @@ fn check_spec(
 /// Every task record under `base_dir`, read only from a folder that passed
 /// [`finish::check_own_folder`]: a task folder that is a link, or resolves elsewhere, is listed
 /// in `out` as left alone, under its folder name, before anything behind it is read, and so is a
-/// `task.json` that is itself a link. Refuses the
+/// `task.json` that is itself a link, or one whose `id` isn't its folder's name. Refuses the
 /// whole scan if `.sbxm/tasks` itself is a link or resolves elsewhere.
 fn load_own(base_dir: &Path, out: &mut MergedPlan) -> Result<Vec<Record>> {
     let root = record::tasks_root(base_dir);
@@ -283,7 +295,24 @@ fn load_own(base_dir: &Path, out: &mut MergedPlan) -> Result<Vec<Record>> {
                     path.display()
                 ),
             }),
-            Ok(m) if m.is_file() => records.push(record::read(&path)?),
+            Ok(m) if m.is_file() => {
+                // A record names the task it belongs to only by its own folder: one whose `id`
+                // differs would combine its own merge state with another task's removal paths.
+                let task = record::read(&path)?;
+                let folder = folder_name(&dir);
+                if task.id == folder {
+                    records.push(task);
+                } else {
+                    out.left_alone.push(LeftAlone {
+                        reason: format!(
+                            "{} names task {}, not {folder}; fix or remove it by hand",
+                            path.display(),
+                            task.id
+                        ),
+                        id: folder,
+                    });
+                }
+            }
             _ => {}
         }
     }
@@ -444,34 +473,40 @@ pub fn remove(
     }
     let before = free_space(base_dir).ok();
     let mut stayed = 0;
+    // From the first archive on, a failed screen write never stops the work: stopping between a
+    // task's archive and its removal would leave the live task behind an archive the next run
+    // refuses. The first such error is reported once every candidate is done.
+    let mut out = Lenient { out, error: None };
     for candidate in &merged.candidates {
         match archive_task(base_dir, &candidate.id) {
-            Ok(archive) => writeln!(
-                out,
+            Ok(archive) => out.line(format_args!(
                 "archived task {} to {}",
                 candidate.id,
                 archive.display()
-            )?,
+            )),
             Err(e) => {
-                writeln!(out, "could not archive task {}: {e:#}", candidate.id)?;
+                out.line(format_args!(
+                    "could not archive task {}: {e:#}",
+                    candidate.id
+                ));
                 stayed += 1;
                 continue;
             }
         }
         let report = finish::remove(&candidate.plan, backend);
         for line in &report.removed {
-            writeln!(out, "removed {line}")?;
+            out.line(format_args!("removed {line}"));
         }
         for line in &report.stayed {
-            writeln!(out, "could not remove {line}")?;
+            out.line(format_args!("could not remove {line}"));
         }
         stayed += report.stayed.len();
         if let Some(cleanup) = &candidate.local_cleanup {
             for (i, line) in cleanup_lines(cleanup).iter().enumerate() {
                 if i == 0 {
-                    writeln!(out, "task {}: {line}", candidate.id)?;
+                    out.line(format_args!("task {}: {line}", candidate.id));
                 } else {
-                    writeln!(out, "{line}")?;
+                    out.line(format_args!("{line}"));
                 }
             }
         }
@@ -479,15 +514,31 @@ pub fn remove(
     if let (Some(before), Some(after)) = (before, free_space(base_dir).ok())
         && after > before
     {
-        writeln!(
-            out,
+        out.line(format_args!(
             "freed about {} on {}",
             crate::disk::gib(after - before),
             crate::disk::describe(base_dir)
-        )?;
+        ));
     }
     if stayed > 0 {
         bail!("{stayed} thing(s) stayed; fix that, then run `sbxm task rm --merged` again");
     }
+    if let Some(e) = out.error {
+        return Err(e).context("the removal finished, but its output could not be written");
+    }
     Ok(())
+}
+
+/// A writer whose failures are kept, not returned: the first one is in `error`.
+struct Lenient<'a> {
+    out: &'a mut dyn Write,
+    error: Option<std::io::Error>,
+}
+
+impl Lenient<'_> {
+    fn line(&mut self, args: std::fmt::Arguments) {
+        if let Err(e) = writeln!(self.out, "{args}") {
+            self.error.get_or_insert(e);
+        }
+    }
 }

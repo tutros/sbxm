@@ -571,3 +571,56 @@ fn removing_a_task_whose_folder_is_a_link_archives_and_deletes_nothing() {
     assert!(elsewhere.join("task.json").is_file());
     assert!(meta(&f).symlink_metadata().is_ok());
 }
+
+/// A writer that fails on the archive-status line only (PR 241 review S-1).
+struct FailsOnArchivedLine(Vec<u8>);
+
+impl std::io::Write for FailsOnArchivedLine {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        if String::from_utf8_lossy(buf).contains("archived task") {
+            return Err(std::io::Error::other("the screen went away"));
+        }
+        self.0.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// PR 241 review S-1: a screen write that fails between a task's archive and its removal doesn't
+/// stop the removal (which would leave the live task behind its new archive, refused by the next
+/// run); the output error is reported once the cleanup is done.
+#[test]
+fn a_failed_output_line_does_not_leave_a_new_archive_blocking_retry() {
+    let f = fixture();
+    let url = finished_task(&f);
+    let number = sbxm::task::finish::pr_number(&url).unwrap();
+    let found = found_merged(&f, number);
+    let mut out = FailsOnArchivedLine(Vec::new());
+
+    let err = remove(
+        &f.env.base_dir(),
+        &found,
+        true,
+        &FakeBackend::with_secrets(&["anthropic"]),
+        &Yes::new(),
+        rising_free_space,
+        &mut out,
+    )
+    .unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains("the screen went away"),
+        "{err:#}"
+    );
+    assert!(!meta(&f).exists(), "the task folder was not removed");
+    assert!(
+        archive_dir(&f.env.base_dir(), "issue-41")
+            .join("task.json")
+            .is_file()
+    );
+    let printed = String::from_utf8(out.0).unwrap();
+    assert!(printed.contains("removed"), "{printed}");
+}

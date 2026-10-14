@@ -141,7 +141,7 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
   whose PR is still open or was closed without merging is skipped without a word. Every other task left alone is
   named with the reason, `--yes` or not: a spec task's merge can't be told from "not yet merged" (a squash or rebase
   merge isn't detected), its result was never fetched out of its own `repo.git` (decision 178's protection, which
-  still applies), or its task folder or its `task.json` is a link (never followed, nothing behind it read; a linked `.sbxm/tasks`
+  still applies), or its task folder, its `task.json` or a spec task's `repo.git` is a link, or its `task.json` names another task than its folder (never followed, nothing behind it read; a linked `.sbxm/tasks`
   refuses the whole command). For a spec task with
   the `local` sink, the worktree and the local branch in your own checkout are never deleted either; the dry run and
   the removal summary both name the two `git` commands that do, instead of running them. `--dry-run` only
