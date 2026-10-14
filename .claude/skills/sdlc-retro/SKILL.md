@@ -14,12 +14,14 @@ decide, one at a time, and an adopted one goes through the normal branch and PR.
 
 - When the user asks, at the end of a milestone, or when about ten PRs have merged since the last retro (say so
   then; don't start one unasked).
-- The window starts where the last retro's window ended (the `Window:` line of the newest file in `sdlc/retros/`)
-  and runs to today. Say the window and how many PRs and tasks it covers before gathering anything.
+- The window starts the day after the last retro's window ended (the `Window:` line of the newest file in
+  `sdlc/retros/`) and runs to today, both days included, so no day is counted twice. Say the window and how many
+  PRs and tasks it covers before gathering anything.
 - **The first retro**, with no earlier file: ask the user where its window starts, with a recommendation (the day
   after the last look back on record, such as `sdlc/issue-206-experiment-report.md`, or the last ten merged PRs),
   before gathering anything.
-- Every retro file records its window on a `Window: <start> to <end>` line, so the next one can start from it.
+- Every retro file records its window on a `Window: <start> to <end>` line (dates, both included), so the next
+  one can start the day after.
 
 ## 2. Gather the facts (numbers, with where each came from)
 
@@ -27,19 +29,19 @@ Read only; nothing is written in this step. For every task and PR in the window:
 
 | What | Where |
 |------|-------|
-| Merged PRs, their issues and sizes | `gh pr list --state merged --search "merged:>=<date>"`, the issues' `size:` labels |
+| Merged PRs, their issues and sizes | `gh pr list --state merged --search "merged:<start>..<end>" --limit 500`, the issues' `size:` labels; if the count it returns equals the limit, raise the limit and run it again, so no PR is cut off |
 | Review rounds and must-fix counts per round, `Repeat of:` findings, stop reasons | each task's `run.log` and `review-<n>.md` under `<base>/.sbxm/tasks/` (or `task-archive/`), PR review comments |
 | Wall time per command (each `run.log` header to that command's last line) and per task (first header to `ready`) | `run.log` timestamps |
-| Time each agent ran (worker, each fix round, each reviewer) | `duration_s` of each run in `task.json` |
-| Sandbox setup and gate time | not recorded: write unknown; if a retro needs it, propose it as a sized code issue |
+| Time the latest worker or fix-round run and the latest reviewer run took | `duration_s` of `worker.run` and `reviewer.run` in `task.json`: each keeps only its latest run |
+| Earlier fix-round and review runs, and the agent total per task; sandbox setup and gate time | not recorded: write unknown; if a retro needs them, propose that as a sized code issue |
 | Hand fixes after a task finished, and why | commits on the PR after `review.posted`, the session handoffs in memory |
 | CI failures and their real cause (read the log, don't guess) | `gh run list`, `gh run view --log-failed` |
 | Gaps logged, and gaps fixed | `sdlc/evals-workflow-notes.md` (G-numbers added or closed in the window) |
 | Decisions made, and decisions changed | `sdlc/decisions.md` |
 | Lessons and corrections from the user | the handoff and feedback memories in the window |
 
-Put the numbers in one table per task: issue, size, rounds, must-fix per round, wall time, agent time, hand fixes,
-CI result.
+Put the numbers in one table per task: issue, size, rounds, must-fix per round, wall time, latest agent runs, hand
+fixes, CI result.
 A fact you couldn't find is written as unknown, not estimated.
 
 ## 3. Find the patterns
@@ -77,7 +79,8 @@ A change to the sbxm code itself is a GitHub issue with a size, not an experimen
 
 1. Write `sdlc/retros/<date>-retro.md` (create the folder for the first one): the `Window:` line, the per-task table, the patterns, last retro's experiments and
    their outcome, and the proposals. Keep security-tool details out of it (it goes to GitHub).
-2. Give the user a short summary: the three proposals in one line each, nothing else.
+2. Give the user a short summary: the proposals, one line each (none is fine when no pattern
+   has two instances), nothing else.
 3. Ask about each proposal on its own, with a recommendation (step 1 of N, 2 of N...).
 4. Record each answer in the retro file. An adopted experiment gets a numbered decision in `sdlc/decisions.md`;
    a code change gets an issue.
