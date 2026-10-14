@@ -7,8 +7,12 @@ use std::cell::RefCell;
 use std::fs;
 use std::path::Path;
 
-use common::task_fixture::{CLAUDE_DONE, Fixture, Play, Probe, backend, fixture, ok, play};
+use common::dir_link;
+use common::task_fixture::{
+    CLAUDE_DONE, Fixture, Play, Probe, backend, fixture, ok, play, ready_spec_task,
+};
 use sbxm::backend::FakeBackend;
+use sbxm::commands::task_finish;
 use sbxm::confirm::Confirm;
 use sbxm::github::fake::FakeGitHub;
 use sbxm::github::{PrInfo, PrState};
@@ -161,6 +165,64 @@ fn archiving_a_task_with_no_optional_files_copies_what_it_has() {
     assert!(!archive.join("gates.log").exists());
 }
 
+/// Issue 202's M-2: a second archive of the same task id (a spec task re-run from the same file
+/// gets the same deterministic id) must not touch or mix into the first archive.
+#[test]
+fn archiving_refuses_when_the_archive_directory_already_exists() {
+    let f = fixture();
+    finished_task(&f);
+    let archive = archive_task(&f.env.base_dir(), "issue-41").unwrap();
+    let first_result = fs::read_to_string(archive.join("result.md")).unwrap();
+    // The live task folder changes before the (would-be) second run: a different result.md, and
+    // a gates.log that didn't exist the first time.
+    fs::write(meta(&f).join("result.md"), "a different result\n").unwrap();
+    fs::write(meta(&f).join("gates.log"), "gate output\n").unwrap();
+
+    let err = archive_task(&f.env.base_dir(), "issue-41").unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains(&archive.display().to_string()),
+        "{err:#}"
+    );
+    assert_eq!(
+        fs::read_to_string(archive.join("result.md")).unwrap(),
+        first_result,
+        "the first archive's result.md was overwritten"
+    );
+    assert!(
+        !archive.join("gates.log").exists(),
+        "a file absent from the first run leaked into the archive"
+    );
+}
+
+/// Issue 202's M-2: an archive destination that is a symlink or junction is refused without
+/// following it, so nothing is ever written through it.
+#[test]
+fn archiving_refuses_a_symlinked_archive_destination() {
+    let f = fixture();
+    finished_task(&f);
+    let archive = archive_dir(&f.env.base_dir(), "issue-41");
+    fs::create_dir_all(archive.parent().unwrap()).unwrap();
+    let elsewhere = f.env.tmp.path().join("elsewhere");
+    fs::create_dir_all(&elsewhere).unwrap();
+    dir_link(&archive, &elsewhere);
+
+    let err = archive_task(&f.env.base_dir(), "issue-41").unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains(&archive.display().to_string()),
+        "{err:#}"
+    );
+    assert!(
+        fs::read_dir(&elsewhere).unwrap().next().is_none(),
+        "something was written through the symlink"
+    );
+    assert!(
+        archive.symlink_metadata().unwrap().file_type().is_symlink(),
+        "the symlink was replaced"
+    );
+}
+
 fn found_merged(f: &Fixture, number: u32) -> sbxm::task::merged::MergedPlan {
     let github = FakeGitHub::default().with_pr(PrInfo {
         number,
@@ -276,6 +338,99 @@ fn removing_nothing_merged_prints_a_message_and_asks_nothing() {
     assert!(confirm.prompts().is_empty());
     let printed = String::from_utf8(out).unwrap();
     assert!(printed.contains("no merged tasks"), "{printed}");
+}
+
+/// A spec task finished through the `local` sink (decision 174(e)), then fetched into a fresh
+/// checkout and merged into `main` there, as a real GitHub merge would land it: a candidate for
+/// `task rm --merged`. Mirrors `tests/task_merged.rs`'s identically named helpers.
+fn merged_spec_task(f: &Fixture) -> (String, std::path::PathBuf) {
+    let (spec, id) = ready_spec_task(f);
+    task_finish::run(
+        &f.env.config_dir(),
+        &task_finish::Options {
+            target: task_finish::Target::Spec(spec),
+            repo_root: repo_root(f),
+            push_unresolved: false,
+        },
+        &FakeGitHub::default(),
+        &Probe,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    let repo_git = record::task_dir(&f.env.base_dir(), &id).join("repo.git");
+    let checkout = f.env.tmp.path().join("checkout");
+    common::git(
+        f.env.tmp.path(),
+        &[
+            "clone",
+            "-q",
+            f.origin.to_str().unwrap(),
+            checkout.to_str().unwrap(),
+        ],
+    );
+    common::git(
+        &checkout,
+        &[
+            "fetch",
+            "-q",
+            repo_git.to_str().unwrap(),
+            &format!("{id}:{id}"),
+        ],
+    );
+    let scratch = f.env.tmp.path().join("merge-scratch");
+    common::git(
+        f.env.tmp.path(),
+        &[
+            "clone",
+            "-q",
+            f.origin.to_str().unwrap(),
+            scratch.to_str().unwrap(),
+        ],
+    );
+    common::git(
+        &scratch,
+        &[
+            "fetch",
+            "-q",
+            repo_git.to_str().unwrap(),
+            &format!("{id}:{id}"),
+        ],
+    );
+    common::git(&scratch, &["merge", "--ff-only", "-q", &id]);
+    common::git(&scratch, &["push", "-q", "origin", "main"]);
+    (id, checkout)
+}
+
+/// Issue 202's M-1: the post-removal summary, not only the dry-run listing, names the two git
+/// commands that clean up a merged spec task's worktree and local branch in the user's own
+/// checkout, which `task rm --merged` never touches.
+#[test]
+fn removing_a_merged_spec_task_names_its_worktree_and_branch_cleanup_commands() {
+    let f = fixture();
+    let (id, checkout) = merged_spec_task(&f);
+    let github = FakeGitHub::default();
+    let found = plan(&f.env.base_dir(), &checkout, &github, &Probe).unwrap();
+    assert_eq!(found.candidates.len(), 1, "{found:?}");
+    let confirm = Yes::new();
+    let mut out = Vec::new();
+
+    remove(
+        &f.env.base_dir(),
+        &found,
+        true,
+        &FakeBackend::with_secrets(&["anthropic", "openai"]),
+        &confirm,
+        rising_free_space,
+        &mut out,
+    )
+    .unwrap();
+
+    let printed = String::from_utf8(out).unwrap();
+    assert!(printed.contains("git worktree remove"), "{printed}");
+    assert!(
+        printed.contains(&format!("git branch -D {id}")),
+        "{printed}"
+    );
 }
 
 #[test]
