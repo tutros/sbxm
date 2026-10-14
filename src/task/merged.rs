@@ -3,13 +3,18 @@
 //! is open or closed without merging, nor one whose result isn't safely elsewhere yet (decision
 //! 178's protection).
 
-use std::path::Path;
+use std::fs;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use super::finish::{self, RemovalPlan};
 use super::record::{self, Kind, ProcessProbe, Record};
 use super::repo;
+use super::review;
+use crate::backend::SandboxBackend;
+use crate::confirm::Confirm;
 use crate::github::{GitHubBackend, PrState};
 
 /// A task `task rm --merged` would remove, and why.
@@ -226,4 +231,122 @@ pub fn plan(
         }
     }
     Ok(out)
+}
+
+/// Where a merged task's text records go before removal (decision 195 point 2): under
+/// `.sbxm/task-archive/`, so it is on the same drive as the base dir and outside `tasks/` and
+/// `.sbxm/tasks/`, which `task status` and `task rm` scan.
+pub fn archive_dir(base_dir: &Path, id: &str) -> PathBuf {
+    base_dir.join(".sbxm").join("task-archive").join(id)
+}
+
+/// The names of a task's text records worth archiving (decision 195 point 2): `review.md`, every
+/// `review-<n>.md`, `result.md`, `run.log`, `gates.log` and `task.json`. Never transcripts, clones
+/// or `repo.git`: those stay with whatever else `task rm` deletes.
+fn archive_names(meta: &Path) -> Vec<String> {
+    let mut names = vec![
+        "review.md".to_owned(),
+        "result.md".to_owned(),
+        "run.log".to_owned(),
+        "gates.log".to_owned(),
+        "task.json".to_owned(),
+    ];
+    names.extend(
+        review::saved_rounds(meta)
+            .into_iter()
+            .map(|r| format!("review-{r}.md")),
+    );
+    names
+}
+
+/// Copies `id`'s text records into [`archive_dir`] before its folder is removed (decision 195
+/// point 2). Only files that exist are copied; a name [`archive_names`] lists but that isn't
+/// there is silently skipped, never an error. Returns the archive folder.
+pub fn archive_task(base_dir: &Path, id: &str) -> Result<PathBuf> {
+    let meta = record::task_dir(base_dir, id);
+    let archive = archive_dir(base_dir, id);
+    fs::create_dir_all(&archive).with_context(|| format!("cannot create {}", archive.display()))?;
+    for name in archive_names(&meta) {
+        let src = meta.join(&name);
+        if !src.is_file() {
+            continue;
+        }
+        let dest = archive.join(&name);
+        fs::copy(&src, &dest)
+            .with_context(|| format!("cannot archive {} to {}", src.display(), dest.display()))?;
+    }
+    Ok(archive)
+}
+
+/// Archives, then removes, every candidate in `merged` (decision 195): one confirmation for the
+/// whole batch (`--dry-run` never reaches here; the caller only lists). A task whose archive
+/// fails is left entirely alone (its folders are not deleted), counted as stayed like a folder
+/// `finish::remove` could not delete. Reports the disk freed on the base dir's drive when
+/// `free_space` can read it both before and after (decision 195's "if it can be read").
+pub fn remove(
+    base_dir: &Path,
+    merged: &MergedPlan,
+    yes: bool,
+    backend: &dyn SandboxBackend,
+    confirm: &dyn Confirm,
+    free_space: fn(&Path) -> std::io::Result<u64>,
+    out: &mut dyn Write,
+) -> Result<()> {
+    if merged.candidates.is_empty() {
+        writeln!(out, "no merged tasks to remove")?;
+        return Ok(());
+    }
+    let listing = merged.listing();
+    if !yes {
+        if !confirm.is_interactive() {
+            bail!(
+                "refusing to remove merged tasks without a terminal; pass --yes to delete:\n{listing}"
+            );
+        }
+        if !confirm.confirm(&format!(
+            "Permanently delete {} merged task(s):\n{listing}\n",
+            merged.candidates.len()
+        ))? {
+            bail!("removing merged tasks cancelled; nothing was deleted");
+        }
+    }
+    let before = free_space(base_dir).ok();
+    let mut stayed = 0;
+    for candidate in &merged.candidates {
+        match archive_task(base_dir, &candidate.id) {
+            Ok(archive) => writeln!(
+                out,
+                "archived task {} to {}",
+                candidate.id,
+                archive.display()
+            )?,
+            Err(e) => {
+                writeln!(out, "could not archive task {}: {e:#}", candidate.id)?;
+                stayed += 1;
+                continue;
+            }
+        }
+        let report = finish::remove(&candidate.plan, backend);
+        for line in &report.removed {
+            writeln!(out, "removed {line}")?;
+        }
+        for line in &report.stayed {
+            writeln!(out, "could not remove {line}")?;
+        }
+        stayed += report.stayed.len();
+    }
+    if let (Some(before), Some(after)) = (before, free_space(base_dir).ok())
+        && after > before
+    {
+        writeln!(
+            out,
+            "freed about {} on {}",
+            crate::disk::gib(after - before),
+            crate::disk::describe(base_dir)
+        )?;
+    }
+    if stayed > 0 {
+        bail!("{stayed} thing(s) stayed; fix that, then run `sbxm task rm --merged` again");
+    }
+    Ok(())
 }
