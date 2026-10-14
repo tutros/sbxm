@@ -394,17 +394,19 @@ fn a_merged_spec_candidate_names_its_worktree_and_branch_cleanup_commands() {
         .local_cleanup
         .as_ref()
         .unwrap_or_else(|| panic!("{found:?}"));
-    assert!(cleanup[0].contains("git worktree remove"), "{cleanup:?}");
-    assert!(
-        cleanup[1].contains(&format!("git branch -D {id}")),
-        "{cleanup:?}"
-    );
+    // Each printed command is a whole, runnable line (prose on lines of its own), and the branch
+    // deletion is git's non-forcing one, which refuses a branch with commits HEAD doesn't have.
+    let expected = [
+        "git worktree remove <path>".to_owned(),
+        format!("git branch -d {id}"),
+    ];
+    assert_eq!(cleanup, &expected);
     let listing = found.listing();
-    assert!(listing.contains("git worktree remove"), "{listing}");
-    assert!(
-        listing.contains(&format!("git branch -D {id}")),
-        "{listing}"
-    );
+    let lines: Vec<&str> = listing.lines().map(str::trim).collect();
+    for cmd in &expected {
+        assert!(lines.contains(&cmd.as_str()), "{listing}");
+    }
+    assert!(!listing.contains("branch -D"), "{listing}");
 }
 
 /// An issue task's cleanup never mentions a worktree or local branch: there is nothing of the

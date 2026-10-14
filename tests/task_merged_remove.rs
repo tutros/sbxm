@@ -426,11 +426,13 @@ fn removing_a_merged_spec_task_names_its_worktree_and_branch_cleanup_commands() 
     .unwrap();
 
     let printed = String::from_utf8(out).unwrap();
-    assert!(printed.contains("git worktree remove"), "{printed}");
+    let lines: Vec<&str> = printed.lines().map(str::trim).collect();
+    assert!(lines.contains(&"git worktree remove <path>"), "{printed}");
     assert!(
-        printed.contains(&format!("git branch -D {id}")),
+        lines.contains(&format!("git branch -d {id}").as_str()),
         "{printed}"
     );
+    assert!(!printed.contains("branch -D"), "{printed}");
 }
 
 #[test]

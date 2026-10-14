@@ -32,15 +32,28 @@ pub struct Candidate {
 
 /// The two git commands that clean up a spec task's result in the user's own checkout (decision
 /// 195 point 3), named instead of run: the branch's own worktree, if the user made one to look at
-/// it, and the local branch itself.
+/// it, and the local branch itself. Commands only, each a whole line to run; what they need from
+/// the user is said by [`cleanup_lines`]. The branch is deleted with `-d`, not `-D`: sbxm only
+/// checked its own copy of the branch, so git's own check that the user's local branch has no
+/// commits their checkout lacks stays in place.
 fn local_cleanup_commands(branch: &str) -> [String; 2] {
     [
-        format!(
-            "git worktree remove <path>, naming the worktree you checked {branch} out in (skip \
-             this if you never made one)"
-        ),
-        format!("git branch -D {branch}"),
+        "git worktree remove <path>".to_owned(),
+        format!("git branch -d {branch}"),
     ]
+}
+
+/// The lines naming a spec task's local cleanup, for the listing and the post-removal summary
+/// alike: the explanation on lines of its own, then each command alone on its line.
+fn cleanup_lines(commands: &[String; 2]) -> Vec<String> {
+    let mut lines = vec![
+        "your own checkout isn't touched; clean it up by hand with the commands below (the first \
+         only if you checked the branch out in a worktree of its own, with <path> replaced by \
+         that worktree's folder):"
+            .to_owned(),
+    ];
+    lines.extend(commands.iter().map(|cmd| format!("  {cmd}")));
+    lines
 }
 
 /// A task considered but left alone, and why (decision 195 point 3: listed, not silently dropped,
@@ -71,11 +84,8 @@ impl MergedPlan {
                 lines.push(format!("  {line}"));
             }
             if let Some(cleanup) = &c.local_cleanup {
-                lines.push(
-                    "  your own checkout isn't touched; clean it up by hand with:".to_owned(),
-                );
-                for cmd in cleanup {
-                    lines.push(format!("    {cmd}"));
+                for line in cleanup_lines(cleanup) {
+                    lines.push(format!("  {line}"));
                 }
             }
         }
@@ -374,13 +384,12 @@ pub fn remove(
         }
         stayed += report.stayed.len();
         if let Some(cleanup) = &candidate.local_cleanup {
-            writeln!(
-                out,
-                "task {}: your own checkout isn't touched; clean it up by hand with:",
-                candidate.id
-            )?;
-            for cmd in cleanup {
-                writeln!(out, "  {cmd}")?;
+            for (i, line) in cleanup_lines(cleanup).iter().enumerate() {
+                if i == 0 {
+                    writeln!(out, "task {}: {line}", candidate.id)?;
+                } else {
+                    writeln!(out, "{line}")?;
+                }
             }
         }
     }
