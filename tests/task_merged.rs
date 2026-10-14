@@ -546,3 +546,84 @@ fn a_spec_task_whose_folder_is_a_link_is_left_alone_without_fetching_through_it(
         "fetched through the link"
     );
 }
+
+/// Issue 202's round-4 M-1: a linked task folder is left alone before anything behind the link is
+/// read, so an invalid `task.json` there neither surfaces nor stops the rest of the scan.
+#[test]
+fn a_linked_task_folder_is_left_alone_without_reading_its_record() {
+    let f = fixture();
+    let (_spec, id) = ready_spec_task(&f);
+    let elsewhere = f.env.tmp.path().join("elsewhere-task");
+    fs::create_dir_all(&elsewhere).unwrap();
+    fs::write(
+        elsewhere.join("task.json"),
+        "this came from behind the link",
+    )
+    .unwrap();
+    let linked = record::task_dir(&f.env.base_dir(), "issue-41");
+    common::dir_link(&linked, &elsewhere);
+    let github = FakeGitHub::default();
+
+    let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
+
+    let ids: Vec<&str> = found.left_alone.iter().map(|l| l.id.as_str()).collect();
+    assert!(ids.contains(&"issue-41"), "{found:?}");
+    assert!(
+        ids.contains(&id.as_str()),
+        "the real task wasn't scanned: {found:?}"
+    );
+    let linked_reason = &found
+        .left_alone
+        .iter()
+        .find(|l| l.id == "issue-41")
+        .unwrap()
+        .reason;
+    assert!(linked_reason.contains("link"), "{linked_reason}");
+}
+
+/// Issue 202's round-4 M-1, the same kind one level down: a `task.json` that is itself a link is
+/// left alone, named, and never read.
+#[cfg(unix)]
+#[test]
+fn a_task_record_that_is_a_link_is_left_alone_without_reading_it() {
+    let f = fixture();
+    let elsewhere = f.env.tmp.path().join("elsewhere-task.json");
+    fs::write(&elsewhere, "this came from behind the link").unwrap();
+    let folder = record::task_dir(&f.env.base_dir(), "issue-41");
+    fs::create_dir_all(&folder).unwrap();
+    common::file_link(&folder.join("task.json"), &elsewhere);
+    let github = FakeGitHub::default();
+
+    let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
+
+    assert_eq!(found.left_alone.len(), 1, "{found:?}");
+    assert_eq!(found.left_alone[0].id, "issue-41");
+    assert!(
+        found.left_alone[0].reason.contains("symlink"),
+        "{}",
+        found.left_alone[0].reason
+    );
+}
+
+/// Issue 202's round-4 M-1: if `.sbxm/tasks` itself is a link, the scan refuses before listing
+/// or reading anything behind it.
+#[test]
+fn a_linked_tasks_root_refuses_the_scan() {
+    let f = fixture();
+    let elsewhere = f.env.tmp.path().join("elsewhere-tasks");
+    fs::create_dir_all(elsewhere.join("issue-41")).unwrap();
+    fs::write(
+        elsewhere.join("issue-41").join("task.json"),
+        "this came from behind the link",
+    )
+    .unwrap();
+    let root = record::tasks_root(&f.env.base_dir());
+    fs::create_dir_all(root.parent().unwrap()).unwrap();
+    let _ = fs::remove_dir_all(&root);
+    common::dir_link(&root, &elsewhere);
+    let github = FakeGitHub::default();
+
+    let err = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap_err();
+
+    assert!(format!("{err:#}").contains("link"), "{err:#}");
+}

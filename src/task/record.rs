@@ -808,19 +808,33 @@ pub fn read(path: &Path) -> Result<Record> {
 /// Every task under `<base>/.sbxm/tasks/`, ordered by kind then number; a folder without a
 /// `task.json` (a task that never got written) is skipped.
 pub fn load_all(base: &Path) -> Result<Vec<Record>> {
-    let root = tasks_root(base);
-    let Ok(entries) = fs::read_dir(&root) else {
-        return Ok(Vec::new());
-    };
     let mut records = Vec::new();
-    for entry in entries {
-        let path = entry?.path().join("task.json");
+    for dir in task_folders(base)? {
+        let path = dir.join("task.json");
         if path.is_file() {
             records.push(read(&path)?);
         }
     }
+    sort(&mut records);
+    Ok(records)
+}
+
+/// Every entry under `<base>/.sbxm/tasks/`, unread and unchecked: what [`load_all`] reads, for a
+/// caller that must check each folder before reading anything in it (`task rm --merged`).
+pub fn task_folders(base: &Path) -> Result<Vec<PathBuf>> {
+    let Ok(entries) = fs::read_dir(tasks_root(base)) else {
+        return Ok(Vec::new());
+    };
+    let mut folders = Vec::new();
+    for entry in entries {
+        folders.push(entry?.path());
+    }
+    Ok(folders)
+}
+
+/// [`load_all`]'s order: by kind, then number, then id.
+pub fn sort(records: &mut [Record]) {
     records.sort_by(|a, b| {
         (a.kind.prefix(), a.number, &a.id).cmp(&(b.kind.prefix(), b.number, &b.id))
     });
-    Ok(records)
 }

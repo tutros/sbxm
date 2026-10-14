@@ -254,6 +254,49 @@ fn check_spec(
     Ok(())
 }
 
+/// Every task record under `base_dir`, read only from a folder that passed
+/// [`finish::check_own_folder`]: a task folder that is a link, or resolves elsewhere, is listed
+/// in `out` as left alone, under its folder name, before anything behind it is read, and so is a
+/// `task.json` that is itself a link. Refuses the
+/// whole scan if `.sbxm/tasks` itself is a link or resolves elsewhere.
+fn load_own(base_dir: &Path, out: &mut MergedPlan) -> Result<Vec<Record>> {
+    let root = record::tasks_root(base_dir);
+    if fs::symlink_metadata(&root).is_err() {
+        return Ok(Vec::new());
+    }
+    finish::check_own_folder(base_dir, &root)?;
+    let mut records = Vec::new();
+    for dir in record::task_folders(base_dir)? {
+        if let Err(e) = finish::check_own_folder(base_dir, &dir) {
+            out.left_alone.push(LeftAlone {
+                id: folder_name(&dir),
+                reason: format!("{e:#}"),
+            });
+            continue;
+        }
+        let path = dir.join("task.json");
+        match fs::symlink_metadata(&path) {
+            Ok(m) if m.file_type().is_symlink() => out.left_alone.push(LeftAlone {
+                id: folder_name(&dir),
+                reason: format!(
+                    "{} is a symlink; remove the link yourself if you want it gone",
+                    path.display()
+                ),
+            }),
+            Ok(m) if m.is_file() => records.push(record::read(&path)?),
+            _ => {}
+        }
+    }
+    record::sort(&mut records);
+    Ok(records)
+}
+
+fn folder_name(dir: &Path) -> String {
+    dir.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
 /// Scans every task under `base_dir` and works out which are merged (decision 195). Nothing is
 /// removed; the caller shows [`MergedPlan::listing`], confirms, then calls [`remove`].
 pub fn plan(
@@ -263,9 +306,10 @@ pub fn plan(
     probe: &dyn ProcessProbe,
 ) -> Result<MergedPlan> {
     let mut out = MergedPlan::default();
-    for task in record::load_all(base_dir)? {
+    for task in load_own(base_dir, &mut out)? {
         // Nothing below runs through a task folder that is a link, or sits under one: not the
         // spec check's fetch into its `repo.git`, not the archive (README's removal contract).
+        // `load_own` checked the folder it read; this checks the one the record names.
         if let Err(e) = finish::check_own_folder(base_dir, &record::task_dir(base_dir, &task.id)) {
             out.left_alone.push(LeftAlone {
                 id: task.id.clone(),
