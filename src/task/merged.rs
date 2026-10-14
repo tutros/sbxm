@@ -475,70 +475,58 @@ pub fn remove(
     let mut stayed = 0;
     // From the first archive on, a failed screen write never stops the work: stopping between a
     // task's archive and its removal would leave the live task behind an archive the next run
-    // refuses. The first such error is reported once every candidate is done.
-    let mut out = Lenient { out, error: None };
+    // refuses. `Unfailing` keeps the first such error, and `after_output` reports it with the
+    // removal's own result once every candidate is done (as for `--restart`, decision 185).
+    let mut screen = finish::Unfailing::new(out);
+    let out = &mut screen;
     for candidate in &merged.candidates {
         match archive_task(base_dir, &candidate.id) {
-            Ok(archive) => out.line(format_args!(
+            Ok(archive) => writeln!(
+                out,
                 "archived task {} to {}",
                 candidate.id,
                 archive.display()
-            )),
+            )?,
             Err(e) => {
-                out.line(format_args!(
-                    "could not archive task {}: {e:#}",
-                    candidate.id
-                ));
+                writeln!(out, "could not archive task {}: {e:#}", candidate.id)?;
                 stayed += 1;
                 continue;
             }
         }
         let report = finish::remove(&candidate.plan, backend);
         for line in &report.removed {
-            out.line(format_args!("removed {line}"));
+            writeln!(out, "removed {line}")?;
         }
         for line in &report.stayed {
-            out.line(format_args!("could not remove {line}"));
+            writeln!(out, "could not remove {line}")?;
         }
         stayed += report.stayed.len();
         if let Some(cleanup) = &candidate.local_cleanup {
             for (i, line) in cleanup_lines(cleanup).iter().enumerate() {
                 if i == 0 {
-                    out.line(format_args!("task {}: {line}", candidate.id));
+                    writeln!(out, "task {}: {line}", candidate.id)?;
                 } else {
-                    out.line(format_args!("{line}"));
+                    writeln!(out, "{line}")?;
                 }
             }
         }
     }
-    if let (Some(before), Some(after)) = (before, free_space(base_dir).ok())
-        && after > before
-    {
-        out.line(format_args!(
+    // Reported whenever both readings exist (decision 195), as 0 when free space didn't grow:
+    // other disk use at the same time can shrink it.
+    if let (Some(before), Some(after)) = (before, free_space(base_dir).ok()) {
+        writeln!(
+            out,
             "freed about {} on {}",
-            crate::disk::gib(after - before),
+            crate::disk::gib(after.saturating_sub(before)),
             crate::disk::describe(base_dir)
-        ));
+        )?;
     }
-    if stayed > 0 {
-        bail!("{stayed} thing(s) stayed; fix that, then run `sbxm task rm --merged` again");
-    }
-    if let Some(e) = out.error {
-        return Err(e).context("the removal finished, but its output could not be written");
-    }
-    Ok(())
-}
-
-/// A writer whose failures are kept, not returned: the first one is in `error`.
-struct Lenient<'a> {
-    out: &'a mut dyn Write,
-    error: Option<std::io::Error>,
-}
-
-impl Lenient<'_> {
-    fn line(&mut self, args: std::fmt::Arguments) {
-        if let Err(e) = writeln!(self.out, "{args}") {
-            self.error.get_or_insert(e);
-        }
-    }
+    let result = if stayed > 0 {
+        Err(anyhow::anyhow!(
+            "{stayed} thing(s) stayed; fix that, then run `sbxm task rm --merged` again"
+        ))
+    } else {
+        Ok(())
+    };
+    finish::after_output(result, [screen.into_error()])
 }

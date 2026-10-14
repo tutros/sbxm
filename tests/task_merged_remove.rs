@@ -621,6 +621,63 @@ fn a_failed_output_line_does_not_leave_a_new_archive_blocking_retry() {
             .join("task.json")
             .is_file()
     );
-    let printed = String::from_utf8(out.0).unwrap();
-    assert!(printed.contains("removed"), "{printed}");
+}
+
+fn same_free_space(_: &Path) -> std::io::Result<u64> {
+    Ok(1_000_000_000)
+}
+
+/// PR 241 review round 2, M-1: a drive whose free space reads the same before and after still
+/// gets its report (decision 195: the disk given back is reported whenever it can be read).
+#[test]
+fn removing_reports_the_disk_even_when_free_space_did_not_grow() {
+    let f = fixture();
+    let url = finished_task(&f);
+    let number = sbxm::task::finish::pr_number(&url).unwrap();
+    let found = found_merged(&f, number);
+    let mut out = Vec::new();
+
+    remove(
+        &f.env.base_dir(),
+        &found,
+        true,
+        &FakeBackend::with_secrets(&["anthropic"]),
+        &Yes::new(),
+        same_free_space,
+        &mut out,
+    )
+    .unwrap();
+
+    let printed = String::from_utf8(out).unwrap();
+    assert!(printed.contains("freed about 0.0 GiB"), "{printed}");
+}
+
+/// PR 241 review round 2, S-1: when something stayed and a screen write failed too, the error
+/// names both.
+#[test]
+fn a_failed_removal_and_a_failed_output_line_are_both_reported() {
+    let f = fixture();
+    let url = finished_task(&f);
+    let number = sbxm::task::finish::pr_number(&url).unwrap();
+    let found = found_merged(&f, number);
+    let mut out = FailsOnArchivedLine(Vec::new());
+
+    let err = remove(
+        &f.env.base_dir(),
+        &found,
+        true,
+        &FakeBackend::failing_remove().and_sandboxes(vec![sbxm::backend::SandboxInfo {
+            name: "sbxm-task-issue-41-claude".into(),
+            agent: "claude".into(),
+            status: "running".into(),
+        }]),
+        &Yes::new(),
+        rising_free_space,
+        &mut out,
+    )
+    .unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("stayed"), "{message}");
+    assert!(message.contains("the screen went away"), "{message}");
 }
