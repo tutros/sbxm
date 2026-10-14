@@ -628,18 +628,33 @@ fn next_command(record: &record::Record, flag: &str) -> String {
     }
 }
 
+/// The target's task record, read fresh; `None` when it names no id yet (a spec file that hasn't
+/// resolved to one) or the record can't be read.
+fn read_record(config_dir: &Path, target: &Target) -> Option<record::Record> {
+    let id = target.id()?;
+    let base_dir = GlobalConfig::load(config_dir).ok()?.base_dir;
+    record::read(&record::task_dir(&base_dir, &id).join("task.json")).ok()
+}
+
 /// The summary line for one target once its run has finished (decision 193): its stage, its
 /// must-fix findings left, and the next command, read back from its record so it reflects what
 /// actually happened rather than the error text alone; a target whose preparation never reserved
 /// a task folder (its own input was refused before anything was created) has no record to read,
-/// so the line falls back to that refusal.
-fn summary_line(config_dir: &Path, target: &Target, result: &Result<()>) -> (String, bool) {
+/// so the line falls back to that refusal. `pre_record` is that same read taken *before* this
+/// target's run, so a refusal that never touched an already-existing task (issue 201 review S-1,
+/// e.g. `task issue-N exists`) is told apart from a worker or review failure that did advance the
+/// task: the record is identical either way, but only the latter is this run's own doing.
+fn summary_line(
+    config_dir: &Path,
+    target: &Target,
+    pre_record: Option<&record::Record>,
+    result: &Result<()>,
+) -> (String, bool) {
     let flag = target.flag();
-    let record = target.id().and_then(|id| {
-        let base_dir = GlobalConfig::load(config_dir).ok()?.base_dir;
-        record::read(&record::task_dir(&base_dir, &id).join("task.json")).ok()
-    });
+    let record = read_record(config_dir, target);
+    let unchanged = matches!((&record, pre_record), (Some(r), Some(p)) if r == p);
     let line = match (&record, result) {
+        (Some(_), Err(e)) if unchanged => format!("{flag}: not started: {e:#}"),
         (Some(record), _) => {
             let must_fix = record
                 .review
@@ -658,6 +673,49 @@ fn summary_line(config_dir: &Path, target: &Target, result: &Result<()>) -> (Str
         (None, Ok(())) => format!("{flag}: ready (its record could not be read back)"),
     };
     (line, result.is_ok())
+}
+
+/// Whether `e` is one of decision 193(a)'s three list-wide stops that aren't the free-disk check
+/// (issue 201 review M-2): a missing shared secret or `sbx` itself not answering. Either stops
+/// the whole list instead of being counted as this target's own failure and asked again for
+/// every later one.
+fn queue_wide_stop(e: &anyhow::Error) -> bool {
+    e.is::<pipeline::MissingSecret>() || e.is::<pipeline::SbxUnavailable>()
+}
+
+/// Checks every target's own identity before the first one's sandbox is created (decision 193,
+/// issue 201 review M-1): an issue that doesn't exist, isn't open, already has a task, or names a
+/// PR that can't be continued; a spec file that can't be read or already has a task. Skipped, not
+/// an error, when the list's shared repo can't even be resolved (no `--repo` and no git origin):
+/// each target then discovers that the same way a single `task run` always has, one at a time as
+/// the loop below reaches it — decision 193 point 1 still applies to that shared failure, and the
+/// existing per-target checks already catch it before that target's own sandbox.
+fn preflight_targets(
+    config_dir: &Path,
+    opts: &ListOptions,
+    targets: &[Target],
+    github: &dyn GitHubBackend,
+) -> Result<()> {
+    let Ok(repo) = task_start::resolve_repo(opts.repo.as_deref(), &opts.repo_root) else {
+        return Ok(());
+    };
+    let mut problems = Vec::new();
+    for target in targets {
+        let result = match target {
+            Target::Issue(n) => pipeline::preflight_issue(config_dir, &repo, github, *n),
+            Target::Spec(path) => pipeline::preflight_spec(config_dir, path),
+        };
+        if let Err(e) = result {
+            problems.push(format!("{}: {e:#}", target.flag()));
+        }
+    }
+    if !problems.is_empty() {
+        bail!(
+            "every target is checked before any of them starts:\n{}",
+            problems.join("\n")
+        );
+    }
+    Ok(())
 }
 
 /// `task run` over a list of `--issue`/`--spec` targets (decision 193): each one runs the same
@@ -717,6 +775,8 @@ pub fn run_list(
         };
     }
 
+    preflight_targets(config_dir, opts, targets, github)?;
+
     let mut summaries: Vec<(String, bool)> = Vec::new();
     for (i, target) in targets.iter().enumerate() {
         writeln!(
@@ -742,6 +802,7 @@ pub fn run_list(
             break;
         }
 
+        let pre_record = read_record(config_dir, target);
         let result = match target {
             Target::Issue(n) => run(
                 config_dir,
@@ -766,7 +827,27 @@ pub fn run_list(
                 warn,
             ),
         };
-        summaries.push(summary_line(config_dir, target, &result));
+        // Decision 193(a) (issue 201 review M-2): a missing shared secret or `sbx` itself not
+        // answering stops the whole list, rather than being asked again for every later target.
+        let stop = result.as_ref().err().is_some_and(queue_wide_stop);
+        summaries.push(summary_line(
+            config_dir,
+            target,
+            pre_record.as_ref(),
+            &result,
+        ));
+        if stop {
+            for later in &targets[i + 1..] {
+                summaries.push((
+                    format!(
+                        "{}: not started; the list stopped (see above)",
+                        later.flag()
+                    ),
+                    false,
+                ));
+            }
+            break;
+        }
     }
 
     writeln!(out, "\nsummary:")?;

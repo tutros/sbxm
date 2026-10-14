@@ -81,9 +81,11 @@ fn github() -> FakeGitHub {
         .with_default_branch("main")
         .with_issue_text(issue_text(41))
         .with_issue_text(issue_text(42))
+        .with_issue_text(issue_text(43))
         .with_open_issues(vec![
             open_issue(41, &["should-fix"], ""),
             open_issue(42, &["should-fix"], ""),
+            open_issue(43, &["should-fix"], ""),
         ])
 }
 
@@ -271,5 +273,129 @@ fn a_low_disk_before_a_later_task_stops_the_list_and_keeps_the_earlier_result() 
     assert!(
         text.contains("--issue 42: not started: only 1.0 GiB free on"),
         "{text}"
+    );
+}
+
+/// Issue 201 review M-1: a later target's own problem (here, an issue that doesn't exist) must
+/// surface before an earlier, valid target's sandbox is ever created, not only once the loop
+/// reaches the bad target's own turn.
+#[test]
+fn a_later_invalid_issue_is_refused_before_any_sandbox_is_created() {
+    let f = config();
+    let (b, gh) = (backend(&f), github());
+    let targets = [Target::Issue(41), Target::Issue(999)];
+
+    let out = go(&f, &opts(&f), &targets, None, &b, &gh);
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("--issue 999"), "{message}");
+    assert!(b.log().is_empty(), "{:?}", b.log());
+    assert!(!record::task_dir(&f.env.base_dir(), "issue-41").exists());
+}
+
+/// Issue 201 review M-1: same as above, for a later `--spec` target naming a file that doesn't
+/// exist.
+#[test]
+fn a_later_invalid_spec_is_refused_before_any_sandbox_is_created() {
+    let f = config();
+    let (b, gh) = (backend(&f), github());
+    let missing = f.env.tmp.path().join("missing.md");
+    let targets = [Target::Issue(41), Target::Spec(missing.clone())];
+
+    let out = go(&f, &opts(&f), &targets, None, &b, &gh);
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(
+        message.contains(&missing.display().to_string()),
+        "{message}"
+    );
+    assert!(b.log().is_empty(), "{:?}", b.log());
+    assert!(!record::task_dir(&f.env.base_dir(), "issue-41").exists());
+}
+
+/// Decision 193(a), issue 201 review M-2: a missing shared secret is one of the three problems
+/// that stop the whole list, instead of being queried and refused again for every later target.
+#[test]
+fn a_missing_shared_secret_stops_the_list_once() {
+    let f = config();
+    let b = FakeBackend::default();
+    let gh = github();
+    let targets = [Target::Issue(41), Target::Issue(42)];
+
+    let out = go(&f, &opts(&f), &targets, None, &b, &gh);
+
+    out.result.unwrap_err();
+    let text = &out.out;
+    assert!(text.contains("is not stored in sbx"), "{text}");
+    assert!(
+        text.contains("--issue 42: not started; the list stopped"),
+        "{text}"
+    );
+    assert!(b.log().is_empty(), "{:?}", b.log());
+    assert!(!record::task_dir(&f.env.base_dir(), "issue-41").exists());
+}
+
+/// Decision 193(a), issue 201 review M-2: `sbx` becoming unreachable partway through the list
+/// stops it too, keeping the result of the task that already finished and never starting the
+/// one after the one that discovered it.
+#[test]
+fn sbx_becoming_unreachable_after_an_earlier_task_stops_the_list_and_keeps_its_result() {
+    let f = config();
+    let b = backend(&f);
+    let fail = b.secret_services_failure();
+    // After issue 41's own review has already checked its secret and created its sandbox, so
+    // issue 41 still reaches `ready`; only issue 42's turn finds `sbx` unreachable.
+    let b = b.with_create_hook(move |spec| {
+        if spec.name == "sbxm-task-issue-41-review-codex" {
+            fail.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    let gh = github();
+    let targets = [Target::Issue(41), Target::Issue(42), Target::Issue(43)];
+
+    let out = go(&f, &opts(&f), &targets, None, &b, &gh);
+
+    out.result.unwrap_err();
+    let text = &out.out;
+    assert_eq!(stage(&f, "issue-41"), (Stage::Ready, Status::Ok));
+    assert!(
+        text.contains("--issue 41: stage ready, must-fix 0; next: sbxm task finish --issue 41"),
+        "{text}"
+    );
+    assert!(text.contains("--issue 42: not started:"), "{text}");
+    assert!(
+        text.contains("--issue 43: not started; the list stopped"),
+        "{text}"
+    );
+    assert!(!record::task_dir(&f.env.base_dir(), "issue-43").exists());
+}
+
+/// Issue 201 review S-1: the same issue listed twice in one `task run` can't be caught by the
+/// preflight above (neither copy has a task yet when it runs, before either target starts), so
+/// the second copy still discovers the conflict the old way, once the first has already made the
+/// task: issue selection now skips #41 as already taken, and that refusal must be what the
+/// summary shows for the second copy, not the first copy's `ready` stage borrowed from the
+/// now-existing record.
+#[test]
+fn a_target_repeated_in_the_same_list_reports_the_refusal_not_the_other_copys_stage() {
+    let f = config();
+    let (b, gh) = (backend(&f), github());
+    let targets = [Target::Issue(41), Target::Issue(41)];
+
+    let out = go(&f, &opts(&f), &targets, None, &b, &gh);
+
+    let text = &out.out;
+    assert_eq!(stage(&f, "issue-41"), (Stage::Ready, Status::Ok));
+    assert!(
+        text.contains("--issue 41: stage ready, must-fix 0; next: sbxm task finish --issue 41"),
+        "{text}"
+    );
+    assert!(text.contains("already has a task"), "{text}");
+    let ready_lines = text
+        .matches("stage ready, must-fix 0; next: sbxm task finish --issue 41")
+        .count();
+    assert_eq!(
+        ready_lines, 1,
+        "two lines for the same target, but only one of them reached ready this run: {text}"
     );
 }

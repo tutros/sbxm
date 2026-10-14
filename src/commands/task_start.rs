@@ -126,7 +126,7 @@ fn discard_existing(
         }
         finish::plan_removal(base_dir, id, probe)?;
         // An issue of a PR that is closed, merged or a fork's would fail to start again.
-        pipeline::continued_pr(ctx, &issue)?;
+        pipeline::continued_pr(ctx.repo, ctx.github, &issue)?;
     }
     // A requested issue with no task yet is started after the deletions, so its PR is checked
     // now too. One that can't be read or isn't open is left to the selection, which skips it.
@@ -137,7 +137,7 @@ fn discard_existing(
         if let Ok(issue) = github.issue(repo, number)
             && issue.state == "OPEN"
         {
-            pipeline::continued_pr(ctx, &issue)?;
+            pipeline::continued_pr(ctx.repo, ctx.github, &issue)?;
         }
     }
     // Each issue must be able to start again (not a question, not blocked, ...) before the first

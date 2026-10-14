@@ -284,18 +284,29 @@ With more than one target:
 
 1. **Check before acting:** `--restart` is refused outright — there is nothing left to show the user when several
    tasks' old copies would be discarded at once. An empty list (not reachable through the CLI, whose `--issue`/
-   `--spec` group is required) is refused the same way.
+   `--spec` group is required) is refused the same way. **Every target's own identity is then checked before the
+   first target's sandbox is created** (issue 201 review M-1): an issue that doesn't exist, isn't open, already
+   has a task, or names a PR that can't be continued (`pipeline::preflight_issue`); a spec file that can't be read
+   or already has a task (`pipeline::preflight_spec`). Any target failing this refuses the whole list, naming every
+   failing target, before any of them — including a valid one earlier in the list — has run at all. Skipped, not
+   an error, when the list's shared repo can't be resolved (no `--repo` and no git origin): each target is then
+   checked the old way, on its own turn as below, since there is nothing to preflight against.
 2. Each target runs 5.1 then 5.2 exactly as a single `task run` would (restart never passed down), one at a time —
    no `--parallel` option. The disk check (`disk::require`) runs again right before each target's turn, not only
-   the first: a task's own sandbox can fill the drive the next one needs. A failure there stops the list for good;
-   the targets already run keep their results, and every target from the failing one onward is reported as not
-   started.
+   the first: a task's own sandbox can fill the drive the next one needs. A failure there, a missing shared secret,
+   or `sbx` itself not answering (`pipeline::MissingSecret`/`pipeline::SbxUnavailable`, decision 193(a)) stops the
+   list for good; the targets already run keep their results, and every target from the failing one onward is
+   reported as not started. These three are the only list-wide stops: everything else is this target's own.
 3. Any other way a target's run ends — `ready` or not — is recorded and the list goes on to the next target. The
    targets are independent: a later one is never given an earlier one's work, and nothing about a target's own run
-   changes because of its position in the list.
+   changes because of its position in the list. Two targets naming the same task (an issue or spec listed twice)
+   are not caught by point 1's preflight, since neither has a task yet when it runs: the second one discovers the
+   conflict the usual way, once the first has already made the task.
 4. At the end, a summary line per target: its task id, its stage, its must-fix findings left, and the next command
    (read back from the task's own record, the same way `task status` would, not from the run's own text) — or,
-   for a target whose own run never reserved a task folder, the refusal that stopped it.
+   for a target whose own run never advanced an already-existing record (compared against that same record read
+   before the target's own turn, issue 201 review S-1), the refusal that stopped it instead of that unrelated
+   record's stage.
 5. Exit code: 0 only if every target reached `ready` (a `ready` target with must-fix findings left still counts,
    as for a single task); 1 if any target failed, or was never started because the list itself stopped.
 
