@@ -91,6 +91,9 @@ pub struct FakeBackend {
     create_hook: Option<CreateHook>,
     /// How many times `secret_services` was called; a read, so it's not in `log`.
     secret_service_calls: Mutex<usize>,
+    /// Flipped (via [`FakeBackend::secret_services_failure`]) to make `secret_services` fail from
+    /// then on, modeling `sbx` not answering (issue #201 review M-2).
+    fail_secret_services: Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Runs inside every `exec` (after the gate), so a test can play the agent
@@ -354,6 +357,14 @@ impl FakeBackend {
         *self.secret_service_calls.lock().unwrap()
     }
 
+    /// A handle to flip from a hook or a `Confirm`, so `secret_services` starts failing partway
+    /// through a test instead of from the start, modeling `sbx` becoming unreachable mid-run or
+    /// mid-list (issue #201 review M-2). Store the returned clone and call `.store(true, ..)` on
+    /// it when the test's scripted moment arrives.
+    pub fn secret_services_failure(&self) -> Arc<std::sync::atomic::AtomicBool> {
+        self.fail_secret_services.clone()
+    }
+
     fn record(&self, call: &str, name: &str) {
         self.log.lock().unwrap().push(format!("{call} {name}"));
     }
@@ -411,6 +422,12 @@ impl SandboxBackend for FakeBackend {
 
     fn secret_services(&self) -> Result<Vec<String>> {
         *self.secret_service_calls.lock().unwrap() += 1;
+        if self
+            .fail_secret_services
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            bail!("fake: sbx not reachable");
+        }
         Ok(self.secrets.lock().unwrap().clone())
     }
 
