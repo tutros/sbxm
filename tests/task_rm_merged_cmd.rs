@@ -5,7 +5,9 @@ mod common;
 use std::cell::RefCell;
 use std::fs;
 
-use common::task_fixture::{CLAUDE_DONE, Fixture, Play, Probe, backend, fixture, ok, play};
+use common::task_fixture::{
+    CLAUDE_DONE, Fixture, Play, Probe, backend, fixture, ok, play, ready_spec_task,
+};
 use sbxm::backend::FakeBackend;
 use sbxm::commands::task_rm::{Options, Target, run};
 use sbxm::confirm::Confirm;
@@ -188,4 +190,48 @@ fn declining_the_confirmation_removes_nothing() {
 
     assert!(result.is_err());
     assert!(meta(&f).exists());
+}
+
+/// Issue 202's round-3 M-1: with nothing to remove, a task left alone is still named, with why it
+/// stayed and how to remove it by hand (decision 195 a, c), and nothing is asked or removed.
+#[test]
+fn with_nothing_merged_a_left_alone_spec_task_is_still_named_with_its_reason() {
+    let f = fixture();
+    let (_spec, id) = ready_spec_task(&f);
+    let github = FakeGitHub::default();
+    let confirm = FakeConfirm::new(true, true);
+
+    let (result, out) = rm_merged(&f, false, false, &backend(), &github, &confirm);
+
+    result.unwrap();
+    assert!(
+        out.contains(&format!("left alone, task {id}: not merged")),
+        "{out}"
+    );
+    assert!(out.contains("sbxm task rm --spec"), "{out}");
+    assert!(out.contains("no merged tasks"), "{out}");
+    assert!(confirm.prompts.borrow().is_empty());
+    assert!(record::task_dir(&f.env.base_dir(), &id).exists());
+}
+
+/// Issue 202's round-3 M-1: `--yes` skips the question, not the listing: every task and its
+/// reason is printed once, and only the merged one is removed.
+#[test]
+fn yes_still_lists_each_task_and_its_reason_once() {
+    let f = fixture();
+    let number = finished_task(&f);
+    let (_spec, id) = ready_spec_task(&f);
+    let github = merged_github(number);
+    let confirm = FakeConfirm::new(true, true);
+
+    let (result, out) = rm_merged(&f, false, true, &backend(), &github, &confirm);
+
+    result.unwrap();
+    assert!(confirm.prompts.borrow().is_empty());
+    let merged_line = format!("task issue-41: PR #{number} is merged");
+    assert_eq!(out.matches(&merged_line).count(), 1, "{out}");
+    let left_line = format!("left alone, task {id}: not merged");
+    assert_eq!(out.matches(&left_line).count(), 1, "{out}");
+    assert!(!meta(&f).exists(), "{out}");
+    assert!(record::task_dir(&f.env.base_dir(), &id).exists(), "{out}");
 }

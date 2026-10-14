@@ -328,7 +328,8 @@ pub fn archive_task(base_dir: &Path, id: &str) -> Result<PathBuf> {
 }
 
 /// Archives, then removes, every candidate in `merged` (decision 195): one confirmation for the
-/// whole batch (`--dry-run` never reaches here; the caller only lists). A task whose archive
+/// whole batch (`--dry-run` never reaches here; the caller only lists). [`MergedPlan::listing`]
+/// is shown once on every path, `--yes` and "nothing to remove" included. A task whose archive
 /// fails is left entirely alone (its folders are not deleted), counted as stayed like a folder
 /// `finish::remove` could not delete. Reports the disk freed on the base dir's drive when
 /// `free_space` can read it both before and after (decision 195's "if it can be read").
@@ -341,12 +342,19 @@ pub fn remove(
     free_space: fn(&Path) -> std::io::Result<u64>,
     out: &mut dyn Write,
 ) -> Result<()> {
+    // Every task left alone is named whichever way this goes (decision 195 a, c): in the
+    // confirmation prompt, the refusal without a terminal, or printed here when nothing is asked.
+    let listing = merged.listing();
     if merged.candidates.is_empty() {
+        if !listing.is_empty() {
+            writeln!(out, "{listing}")?;
+        }
         writeln!(out, "no merged tasks to remove")?;
         return Ok(());
     }
-    let listing = merged.listing();
-    if !yes {
+    if yes {
+        writeln!(out, "{listing}")?;
+    } else {
         if !confirm.is_interactive() {
             bail!(
                 "refusing to remove merged tasks without a terminal; pass --yes to delete:\n{listing}"
