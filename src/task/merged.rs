@@ -23,6 +23,24 @@ pub struct Candidate {
     pub id: String,
     pub reason: String,
     pub plan: RemovalPlan,
+    /// A spec task's own worktree and local branch (decision 195 point 3): `task rm --merged`
+    /// never deletes either, since it has no record of where, or whether, the user checked the
+    /// branch out; these are the two commands that do it by hand. `None` for an issue or
+    /// PR-review task.
+    pub local_cleanup: Option<[String; 2]>,
+}
+
+/// The two git commands that clean up a spec task's result in the user's own checkout (decision
+/// 195 point 3), named instead of run: the branch's own worktree, if the user made one to look at
+/// it, and the local branch itself.
+fn local_cleanup_commands(branch: &str) -> [String; 2] {
+    [
+        format!(
+            "git worktree remove <path>, naming the worktree you checked {branch} out in (skip \
+             this if you never made one)"
+        ),
+        format!("git branch -D {branch}"),
+    ]
 }
 
 /// A task considered but left alone, and why (decision 195 point 3: listed, not silently dropped,
@@ -52,6 +70,14 @@ impl MergedPlan {
             for line in c.plan.listing().lines() {
                 lines.push(format!("  {line}"));
             }
+            if let Some(cleanup) = &c.local_cleanup {
+                lines.push(
+                    "  your own checkout isn't touched; clean it up by hand with:".to_owned(),
+                );
+                for cmd in cleanup {
+                    lines.push(format!("    {cmd}"));
+                }
+            }
         }
         for l in &self.left_alone {
             lines.push(format!("left alone, task {}: {}", l.id, l.reason));
@@ -71,6 +97,7 @@ fn add_merged(
     base_dir: &Path,
     id: &str,
     reason: String,
+    local_cleanup: Option<[String; 2]>,
     probe: &dyn ProcessProbe,
     out: &mut MergedPlan,
 ) {
@@ -79,6 +106,7 @@ fn add_merged(
             id: id.to_owned(),
             reason,
             plan,
+            local_cleanup,
         }),
         Err(e) => out.left_alone.push(LeftAlone {
             id: id.to_owned(),
@@ -110,6 +138,7 @@ fn check_pr_number(
         base_dir,
         &task.id,
         format!("PR #{number} is merged"),
+        None,
         probe,
         out,
     );
@@ -148,12 +177,15 @@ fn check_pr_review(
     check_pr_number(base_dir, task, task.number, github, probe, out)
 }
 
-/// A spec task (decision 195 point 1): nothing to check until it is finished (its result in
-/// `repo.git`, decision 178). Merged is "the branch's tip is reachable from the base branch as
-/// `origin/<base>` stands after a fetch"; a squash or rebase merge isn't detected, so a task that
-/// looks not-merged by this test is listed, not dropped silently, naming the plain command to
-/// remove it by hand. A result that counts as merged but was never fetched into `repo_root` is
-/// left alone too (decision 178's protection, reused as-is).
+/// A spec task (decision 195 point 1): merged is "the branch's tip is reachable from the base
+/// branch as `origin/<base>` stands after a fetch", checked for any non-running spec task that
+/// has commits, whether or not `task finish --spec` has run yet; a task still working, gating,
+/// reviewing or fixing is left alone by the removal-state check inside [`add_merged`], the same
+/// one that protects a running issue or PR-review task, so this doesn't duplicate that check. A
+/// squash or rebase merge isn't detected, so a task that looks not-merged by this test is listed,
+/// not dropped silently, naming the plain command to remove it by hand. A result that counts as
+/// merged but was never fetched into `repo_root` is left alone too (decision 178's protection,
+/// reused as-is).
 fn check_spec(
     base_dir: &Path,
     task: &Record,
@@ -161,9 +193,6 @@ fn check_spec(
     probe: &dyn ProcessProbe,
     out: &mut MergedPlan,
 ) -> Result<()> {
-    if task.stage != record::Stage::Finished {
-        return Ok(());
-    }
     let meta = record::task_dir(base_dir, &task.id);
     let repo_git = meta.join("repo.git");
     if !repo_git.is_dir() {
@@ -208,6 +237,7 @@ fn check_spec(
         base_dir,
         &task.id,
         format!("branch {} is merged into {}", task.branch, task.base),
+        Some(local_cleanup_commands(&task.branch)),
         probe,
         out,
     );
@@ -261,10 +291,19 @@ fn archive_names(meta: &Path) -> Vec<String> {
 
 /// Copies `id`'s text records into [`archive_dir`] before its folder is removed (decision 195
 /// point 2). Only files that exist are copied; a name [`archive_names`] lists but that isn't
-/// there is silently skipped, never an error. Returns the archive folder.
+/// there is silently skipped, never an error. Refuses, without writing anything, if the archive
+/// path already exists in any form (a directory from an earlier archive of the same id, a plain
+/// file, or a symlink or junction, checked without following it): "nothing deletes an archive"
+/// means nothing overwrites one either. Returns the archive folder.
 pub fn archive_task(base_dir: &Path, id: &str) -> Result<PathBuf> {
     let meta = record::task_dir(base_dir, id);
     let archive = archive_dir(base_dir, id);
+    if fs::symlink_metadata(&archive).is_ok() {
+        bail!(
+            "{} already exists; move or delete it by hand, then run `sbxm task rm --merged` again",
+            archive.display()
+        );
+    }
     fs::create_dir_all(&archive).with_context(|| format!("cannot create {}", archive.display()))?;
     for name in archive_names(&meta) {
         let src = meta.join(&name);
@@ -334,6 +373,16 @@ pub fn remove(
             writeln!(out, "could not remove {line}")?;
         }
         stayed += report.stayed.len();
+        if let Some(cleanup) = &candidate.local_cleanup {
+            writeln!(
+                out,
+                "task {}: your own checkout isn't touched; clean it up by hand with:",
+                candidate.id
+            )?;
+            for cmd in cleanup {
+                writeln!(out, "  {cmd}")?;
+            }
+        }
     }
     if let (Some(before), Some(after)) = (before, free_space(base_dir).ok())
         && after > before

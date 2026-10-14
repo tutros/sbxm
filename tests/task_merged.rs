@@ -6,7 +6,7 @@ use std::fs;
 
 use common::task_fixture::{
     CLAUDE_DONE, Fixture, Play, Probe, add_pr_head, backend, ctx, fixture, issue_text, ok, play,
-    ready_spec_task, source,
+    ready_spec_task, source, spec_file,
 };
 use sbxm::commands::task_finish;
 use sbxm::github::fake::FakeGitHub;
@@ -376,6 +376,61 @@ fn a_merged_and_fetched_spec_task_is_a_candidate() {
     assert!(found.left_alone.is_empty(), "{found:?}");
 }
 
+/// Issue 202's M-1: `task rm --merged` never deletes a spec task's own worktree or local branch,
+/// so it names the two git commands that do instead, for both the dry-run/confirmation listing
+/// and (checked in `tests/task_merged_remove.rs`) the post-removal summary.
+#[test]
+fn a_merged_spec_candidate_names_its_worktree_and_branch_cleanup_commands() {
+    let f = fixture();
+    let (_spec, id) = kept_spec_task(&f);
+    let checkout = fetched_checkout(&f, &id);
+    merge_into_origin_main(&f, &id);
+    let github = FakeGitHub::default();
+
+    let found = plan(&f.env.base_dir(), &checkout, &github, &Probe).unwrap();
+
+    assert_eq!(found.candidates.len(), 1, "{found:?}");
+    let cleanup = found.candidates[0]
+        .local_cleanup
+        .as_ref()
+        .unwrap_or_else(|| panic!("{found:?}"));
+    assert!(cleanup[0].contains("git worktree remove"), "{cleanup:?}");
+    assert!(
+        cleanup[1].contains(&format!("git branch -D {id}")),
+        "{cleanup:?}"
+    );
+    let listing = found.listing();
+    assert!(listing.contains("git worktree remove"), "{listing}");
+    assert!(
+        listing.contains(&format!("git branch -D {id}")),
+        "{listing}"
+    );
+}
+
+/// An issue task's cleanup never mentions a worktree or local branch: there is nothing of the
+/// kind for `task rm --merged` to leave alone.
+#[test]
+fn an_issue_candidate_has_no_local_cleanup() {
+    let f = fixture();
+    let url = finished(&f);
+    let number = pr_number(&url);
+    let github = FakeGitHub::default().with_pr(PrInfo {
+        number,
+        head_ref: "issue-41".into(),
+        head_oid: "0".repeat(40),
+        is_cross_repository: false,
+        state: PrState::Merged,
+        title: "Fix 41".into(),
+        body: String::new(),
+        closing_issues: vec![41],
+    });
+
+    let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
+
+    assert_eq!(found.candidates.len(), 1, "{found:?}");
+    assert!(found.candidates[0].local_cleanup.is_none(), "{found:?}");
+}
+
 #[test]
 fn a_merged_but_unfetched_spec_task_is_left_alone_protected() {
     let f = fixture();
@@ -397,13 +452,64 @@ fn a_merged_but_unfetched_spec_task_is_left_alone_protected() {
 }
 
 #[test]
-fn an_unfinished_spec_task_is_not_a_candidate() {
+fn a_spec_task_with_no_commits_yet_is_not_a_candidate() {
     let f = fixture();
-    let (_spec, _id) = ready_spec_task(&f);
+    let spec = spec_file(&f, "Build a thing.\n");
+    let backend = sbxm::backend::FakeBackend::with_secrets(&["anthropic", "openai"]);
     let github = FakeGitHub::default();
+    let source = source(&f);
+    pipeline::prepare_spec(&ctx(&f, &source, &backend, &github), &spec).unwrap();
 
     let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
 
     assert!(found.is_empty(), "{found:?}");
+    assert!(found.left_alone.is_empty(), "{found:?}");
+}
+
+/// Issue 202's M-3: a spec task doesn't need `task finish --spec` to have run before its branch's
+/// mergedness is checked; only whether it has commits and isn't still running.
+#[test]
+fn a_ready_but_unfinished_spec_task_not_yet_merged_is_left_alone_as_not_merged() {
+    let f = fixture();
+    let (_spec, id) = ready_spec_task(&f);
+    let github = FakeGitHub::default();
+
+    let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
+
+    assert!(found.candidates.is_empty(), "{found:?}");
+    assert_eq!(found.left_alone.len(), 1, "{found:?}");
+    assert_eq!(found.left_alone[0].id, id);
+    assert!(
+        found.left_alone[0].reason.contains("not merged"),
+        "{}",
+        found.left_alone[0].reason
+    );
+    assert!(
+        found.left_alone[0].reason.contains("--spec"),
+        "{}",
+        found.left_alone[0].reason
+    );
+}
+
+/// Issue 202's M-3: a `Ready` spec task (never `finish --spec`ed) whose branch is already
+/// reachable from `origin/<base>` — because the user fetched and merged it by hand — is a
+/// candidate, not silently kept.
+#[test]
+fn a_ready_but_unfinished_spec_task_whose_branch_is_merged_is_a_candidate() {
+    let f = fixture();
+    let (_spec, id) = ready_spec_task(&f);
+    let checkout = fetched_checkout(&f, &id);
+    merge_into_origin_main(&f, &id);
+    let github = FakeGitHub::default();
+
+    let found = plan(&f.env.base_dir(), &checkout, &github, &Probe).unwrap();
+
+    assert_eq!(found.candidates.len(), 1, "{found:?}");
+    assert_eq!(found.candidates[0].id, id);
+    assert!(
+        found.candidates[0].reason.contains("merged"),
+        "{}",
+        found.candidates[0].reason
+    );
     assert!(found.left_alone.is_empty(), "{found:?}");
 }
