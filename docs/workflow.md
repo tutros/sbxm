@@ -119,7 +119,9 @@ sbxm task run --spec idea.md           # the same for a spec task; no GitHub cal
   base after a fetch) and removes it after one confirmation, instead of a `task rm` typed by hand per task. A task
   left alone is said so and why: its PR is still open or was closed without merging (nothing printed, just skipped),
   a spec task's merge can't be told from "not yet merged" (a squash or rebase merge isn't detected), or its result
-  was never fetched out of its own `repo.git` (decision 178's protection, which still applies). `--dry-run` only
+  was never fetched out of its own `repo.git` (decision 178's protection, which still applies). For a spec task with
+  the `local` sink, the worktree and the local branch in your own checkout are never deleted either; the dry run and
+  the removal summary both name the two `git` commands that do, instead of running them. `--dry-run` only
   lists; it asks and removes nothing. Each task's text records (`review.md`, `result.md`, `run.log`, `gates.log`,
   `task.json`) are archived to `.sbxm/task-archive/<id>/` before its folder goes, and the output names the disk
   given back.
