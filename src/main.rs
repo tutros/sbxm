@@ -698,15 +698,20 @@ fn main() -> anyhow::Result<()> {
                     issue,
                     pr,
                     spec,
+                    merged,
                     yes,
                     force,
+                    dry_run,
                 },
         } => {
-            let target = match (issue, pr, spec) {
-                (Some(n), _, _) => commands::task_rm::Target::Issue(n),
-                (None, Some(n), _) => commands::task_rm::Target::Pr(n),
-                (None, None, Some(path)) => commands::task_rm::Target::Spec(path),
-                (None, None, None) => unreachable!("clap requires --issue, --pr or --spec"),
+            let target = match (issue, pr, spec, merged) {
+                (Some(n), _, _, _) => commands::task_rm::Target::Issue(n),
+                (None, Some(n), _, _) => commands::task_rm::Target::Pr(n),
+                (None, None, Some(path), _) => commands::task_rm::Target::Spec(path),
+                (None, None, None, true) => commands::task_rm::Target::Merged,
+                (None, None, None, false) => {
+                    unreachable!("clap requires --issue, --pr, --spec or --merged")
+                }
             };
             let ids = match &target {
                 commands::task_rm::Target::Issue(n) => vec![format!("issue-{n}")],
@@ -714,6 +719,8 @@ fn main() -> anyhow::Result<()> {
                 commands::task_rm::Target::Spec(path) => task::record::spec_id(path)
                     .map(|(id, _)| vec![id])
                     .unwrap_or_default(),
+                // No single task to log into: it scans every task first (issue 202).
+                commands::task_rm::Target::Merged => Vec::new(),
             };
             let (mut out, warn) = task_writers(ids, None)?;
             let result = (|| -> anyhow::Result<()> {
@@ -724,8 +731,10 @@ fn main() -> anyhow::Result<()> {
                         yes,
                         force,
                         repo_root: std::env::current_dir()?,
+                        dry_run,
                     },
                     &SbxBackend,
+                    &sbxm::github::gh::GhBackend::default(),
                     &task::record::SystemProbe,
                     &Terminal,
                     &mut out,

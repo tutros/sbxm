@@ -412,7 +412,7 @@ pub enum TaskCommand {
     },
     /// Delete a task: its sandboxes, its clones and its task folder. Shows exactly what, and asks
     /// first (without a terminal it needs --yes).
-    #[command(group(clap::ArgGroup::new("which").required(true).args(["issue", "pr", "spec"])))]
+    #[command(group(clap::ArgGroup::new("which").required(true).args(["issue", "pr", "spec", "merged"])))]
     Rm {
         /// The issue's task.
         #[arg(long, value_name = "N")]
@@ -424,12 +424,21 @@ pub enum TaskCommand {
         /// task's repo.git (not yet fetched into this checkout) unless --force (issue 143).
         #[arg(long, value_name = "FILE")]
         spec: Option<PathBuf>,
+        /// Remove every task whose work is merged (decision 195, issue 202): an issue or
+        /// PR-review task whose PR is merged, or a spec task whose branch is reachable from its
+        /// base branch after a fetch. Archives each task's text records first (review.md,
+        /// result.md, run.log, gates.log, task.json) under .sbxm/task-archive/<id>/.
+        #[arg(long)]
+        merged: bool,
         /// Don't ask; delete.
         #[arg(long)]
         yes: bool,
         /// Delete a spec task's result even though it was never fetched out of its repo.git.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "merged")]
         force: bool,
+        /// With --merged: list what would be removed and why, and remove nothing.
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Print a task's run.log (decision 170, part 1). Read-only: never writes to the log itself.
     #[command(group(clap::ArgGroup::new("logs_target").required(true).args(["issue", "pr", "spec"])))]
