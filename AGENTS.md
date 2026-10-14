@@ -22,6 +22,7 @@ Each SDLC phase has a project skill in `.claude/skills/`; follow it for that pha
 - `sdlc-planning`: interview rounds, numbered decisions, spikes, milestone plan.
 - `sdlc-implementation`: vertical slices, TDD (red first), smallest change per step, commit after every green step (`cargo fmt --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test`). A milestone is built as one batch on one branch (rule 8): a short report per slice, one full review at the end.
 - `sdlc-code-review`: review a milestone at its end (the normal review), a worktree before merging, or a slice when asked or risky; findings need evidence, fixes go back through TDD.
+- `sdlc-retro`: look back over the work since the last retro (numbers per task, patterns with at least two instances, last retro's experiments) and propose at most three process changes as experiments for the user to decide; records in `sdlc/retros/`.
 
 ## Working rules
 
