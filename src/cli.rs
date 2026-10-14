@@ -427,7 +427,8 @@ pub enum TaskCommand {
         /// Remove every task whose work is merged (decision 195, issue 202): an issue or
         /// PR-review task whose PR is merged, or a spec task whose branch is reachable from its
         /// base branch after a fetch. Archives each task's text records first (review.md,
-        /// result.md, run.log, gates.log, task.json) under .sbxm/task-archive/<id>/.
+        /// review-<n>.md, result.md, run.log, gates.log, task.json) under
+        /// .sbxm/task-archive/<id>/.
         #[arg(long)]
         merged: bool,
         /// Don't ask; delete.

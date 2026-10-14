@@ -117,13 +117,14 @@ sbxm task run --spec idea.md           # the same for a spec task; no GitHub cal
 - **Cleanup in one command (decision 195, issue 202):** `task rm --merged` finds every task whose work is merged
   (an issue's task or a PR-review task whose PR merged on GitHub, a spec task whose branch is reachable from its
   base after a fetch) and removes it after one confirmation, instead of a `task rm` typed by hand per task. A task
-  left alone is said so and why: its PR is still open or was closed without merging (nothing printed, just skipped),
-  a spec task's merge can't be told from "not yet merged" (a squash or rebase merge isn't detected), or its result
-  was never fetched out of its own `repo.git` (decision 178's protection, which still applies). For a spec task with
+  whose PR is still open or was closed without merging is skipped without a word. Every other task left alone is
+  named with the reason, `--yes` or not: a spec task's merge can't be told from "not yet merged" (a squash or rebase
+  merge isn't detected), its result was never fetched out of its own `repo.git` (decision 178's protection, which
+  still applies), or its task folder is a link (never followed). For a spec task with
   the `local` sink, the worktree and the local branch in your own checkout are never deleted either; the dry run and
   the removal summary both name the two `git` commands that do, instead of running them. `--dry-run` only
-  lists; it asks and removes nothing. Each task's text records (`review.md`, `result.md`, `run.log`, `gates.log`,
-  `task.json`) are archived to `.sbxm/task-archive/<id>/` before its folder goes, and the output names the disk
+  lists; it asks and removes nothing. Each task's text records (`review.md`, every `review-<n>.md`, `result.md`,
+  `run.log`, `gates.log`, `task.json`) are archived to `.sbxm/task-archive/<id>/` before its folder goes, and the output names the disk
   given back.
 
 ## How a change to sbxm itself goes
