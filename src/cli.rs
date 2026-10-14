@@ -340,17 +340,19 @@ pub enum TaskCommand {
     },
     /// Start a task for one issue or a spec file, then review it: the worker, the gates, an
     /// independent reviewer and as many fix rounds as `[worker] fix_rounds` allows (default 3).
-    /// Stops at ready; `finish` publishes. Blocks until it is done.
-    #[command(group(clap::ArgGroup::new("run_target").required(true).args(["issue", "spec"])))]
+    /// Stops at ready; `finish` publishes. Blocks until it is done. Repeat `--issue`/`--spec` to
+    /// run a list of independent tasks in the order written, one after another (decision 193);
+    /// the other flags apply to every task of the list.
+    #[command(group(clap::ArgGroup::new("run_target").required(true).multiple(true).args(["issues", "specs"])))]
     Run {
-        /// The issue to carry through.
-        #[arg(long, value_name = "N")]
-        issue: Option<u32>,
-        /// Carry through this spec task's file instead (decision 174(d), issue 194): the same
-        /// start, gates, review and fix rounds as an issue task's, with no GitHub call anywhere;
-        /// `task finish --spec` publishes it.
-        #[arg(long, value_name = "FILE")]
-        spec: Option<PathBuf>,
+        /// The issue to carry through (repeatable).
+        #[arg(long = "issue", value_name = "N")]
+        issues: Vec<u32>,
+        /// Carry through this spec task's file instead (repeatable, decision 174(d), issue 194):
+        /// the same start, gates, review and fix rounds as an issue task's, with no GitHub call
+        /// anywhere; `task finish --spec` publishes it.
+        #[arg(long = "spec", value_name = "FILE")]
+        specs: Vec<PathBuf>,
         /// The worker's harness (default: sbxm-task.toml, else claude).
         #[arg(long, value_enum)]
         worker_harness: Option<Harness>,
@@ -380,6 +382,7 @@ pub enum TaskCommand {
         #[arg(long)]
         repo: Option<String>,
         /// Delete the existing task first (asks, showing exactly what), then start again.
+        /// Refused with more than one --issue/--spec: restart one task at a time.
         #[arg(long)]
         restart: bool,
         /// With --restart: don't ask before deleting.
@@ -486,4 +489,96 @@ pub enum TaskCommand {
         #[arg(long)]
         repo: Option<String>,
     },
+}
+
+/// One target of `task run`'s list (decision 193): an issue or a spec file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RunTarget {
+    Issue(u32),
+    Spec(PathBuf),
+}
+
+/// `TaskCommand::Run`'s `--issue`/`--spec` values, in the order they were written on the command
+/// line (decision 193, point 6): clap's derive API has no field that carries this by itself, so
+/// it's read back from the raw [`clap::ArgMatches`] of the `task run` subcommand, the ids being
+/// the struct fields' own names (`issues`, `specs`), not their `--issue`/`--spec` flags.
+pub fn run_target_order(matches: &clap::ArgMatches) -> Vec<RunTarget> {
+    let run_matches = matches
+        .subcommand_matches("task")
+        .and_then(|task| task.subcommand_matches("run"))
+        .expect("called only when the parsed command is `task run`");
+    let mut targets: Vec<(usize, RunTarget)> = Vec::new();
+    if let (Some(indices), Some(values)) = (
+        run_matches.indices_of("issues"),
+        run_matches.get_many::<u32>("issues"),
+    ) {
+        targets.extend(
+            indices
+                .zip(values.copied())
+                .map(|(i, n)| (i, RunTarget::Issue(n))),
+        );
+    }
+    if let (Some(indices), Some(values)) = (
+        run_matches.indices_of("specs"),
+        run_matches.get_many::<PathBuf>("specs"),
+    ) {
+        targets.extend(
+            indices
+                .zip(values.cloned())
+                .map(|(i, p)| (i, RunTarget::Spec(p))),
+        );
+    }
+    targets.sort_by_key(|(i, _)| *i);
+    targets.into_iter().map(|(_, target)| target).collect()
+}
+
+#[cfg(test)]
+mod run_target_order_tests {
+    use super::{Cli, RunTarget, run_target_order};
+    use clap::{CommandFactory, FromArgMatches};
+    use std::path::PathBuf;
+
+    fn order(args: &[&str]) -> Vec<RunTarget> {
+        let mut argv = vec!["sbxm", "task", "run"];
+        argv.extend_from_slice(args);
+        let matches = Cli::command().try_get_matches_from(argv).unwrap();
+        // The parsed `Cli` isn't used; this only checks that the matches parse the way `main`
+        // expects before reading the order back from them.
+        Cli::from_arg_matches(&matches).unwrap();
+        run_target_order(&matches)
+    }
+
+    /// Decision 193, point 6: run in the order written, whichever flag each one used.
+    #[test]
+    fn issues_then_a_spec_stay_in_that_order() {
+        let got = order(&["--issue", "210", "--issue", "202", "--spec", "x.md"]);
+        assert_eq!(
+            got,
+            vec![
+                RunTarget::Issue(210),
+                RunTarget::Issue(202),
+                RunTarget::Spec(PathBuf::from("x.md")),
+            ]
+        );
+    }
+
+    /// The written order holds even when the flags interleave across kinds, not just when every
+    /// `--issue` is grouped before every `--spec`.
+    #[test]
+    fn interleaved_flags_keep_their_written_order() {
+        let got = order(&["--spec", "a.md", "--issue", "5", "--spec", "b.md"]);
+        assert_eq!(
+            got,
+            vec![
+                RunTarget::Spec(PathBuf::from("a.md")),
+                RunTarget::Issue(5),
+                RunTarget::Spec(PathBuf::from("b.md")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_single_issue_is_a_one_target_list() {
+        assert_eq!(order(&["--issue", "41"]), vec![RunTarget::Issue(41)]);
+    }
 }

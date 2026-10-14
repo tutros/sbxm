@@ -2,10 +2,11 @@
 //! one task, and then it stops; `finish` publishes, so it stays a deliberate command of its own.
 //! Gates that fail after the worker don't stop it: the review reruns them (decision 180).
 
+use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 
 use super::task_review;
 use super::task_start::{self, Restart};
@@ -519,4 +520,374 @@ fn run_spec_task(
         out,
         &mut warn,
     )
+}
+
+/// One target of a `task run` list (decision 193): an issue or a spec file, each run to its own
+/// `ready` or its own stop, in the order they're written.
+#[derive(Debug, Clone)]
+pub enum Target {
+    Issue(u32),
+    Spec(PathBuf),
+}
+
+impl Target {
+    /// `--issue N` or `--spec FILE`, as a retry hint or the summary line names it.
+    fn flag(&self) -> String {
+        match self {
+            Target::Issue(n) => format!("--issue {n}"),
+            Target::Spec(path) => task_start::spec_flag(path),
+        }
+    }
+
+    /// The task id this target names, when it can be told without a backend call: `issue-<n>`
+    /// always, a spec's own derived id only once its file resolves to one. Used only to read the
+    /// task's record back for the summary line; a spec file that never resolved to an id has no
+    /// record to read either way.
+    fn id(&self) -> Option<String> {
+        match self {
+            Target::Issue(n) => Some(format!("issue-{n}")),
+            Target::Spec(path) => record::spec_id(path).ok().map(|(id, _)| id),
+        }
+    }
+}
+
+/// The flags every task of a `task run` list shares (decision 193): the same as [`Options`] and
+/// [`SpecOptions`] minus the one target each task carries on its own.
+pub struct ListOptions {
+    /// The target repo's root, where `sbxm-task.toml` is.
+    pub repo_root: PathBuf,
+    pub worker_harness: Option<Harness>,
+    pub worker_model: Option<String>,
+    pub reviewer_harness: Option<Harness>,
+    pub reviewer_model: Option<String>,
+    /// The worker's time limit, also for the fix round.
+    pub time_limit: Option<String>,
+    pub reviewer_time_limit: Option<String>,
+    pub profile: Option<String>,
+    pub base: Option<String>,
+    pub repo: Option<String>,
+    /// For tests: what `repo.git` is cloned from.
+    pub clone_source: Option<String>,
+    /// For tests: the committer identity.
+    pub identity: Option<Identity>,
+    /// The free-space check of the sandbox drive, read again before every task of the list, not
+    /// only the first (decision 193 point 2): a task's own sandbox can fill the drive the next
+    /// one needs.
+    pub disk: disk::Guard,
+}
+
+impl ListOptions {
+    fn for_issue(&self, issue: u32) -> Options {
+        Options {
+            repo_root: self.repo_root.clone(),
+            issue,
+            worker_harness: self.worker_harness,
+            worker_model: self.worker_model.clone(),
+            reviewer_harness: self.reviewer_harness,
+            reviewer_model: self.reviewer_model.clone(),
+            time_limit: self.time_limit.clone(),
+            reviewer_time_limit: self.reviewer_time_limit.clone(),
+            profile: self.profile.clone(),
+            base: self.base.clone(),
+            repo: self.repo.clone(),
+            clone_source: self.clone_source.clone(),
+            identity: self.identity.clone(),
+            disk: self.disk.clone(),
+        }
+    }
+
+    fn for_spec(&self, spec: PathBuf) -> SpecOptions {
+        SpecOptions {
+            repo_root: self.repo_root.clone(),
+            spec,
+            worker_harness: self.worker_harness,
+            worker_model: self.worker_model.clone(),
+            reviewer_harness: self.reviewer_harness,
+            reviewer_model: self.reviewer_model.clone(),
+            time_limit: self.time_limit.clone(),
+            reviewer_time_limit: self.reviewer_time_limit.clone(),
+            profile: self.profile.clone(),
+            base: self.base.clone(),
+            repo: self.repo.clone(),
+            clone_source: self.clone_source.clone(),
+            identity: self.identity.clone(),
+            disk: self.disk.clone(),
+        }
+    }
+}
+
+/// The command's next step for a task at `record`'s stage, as the summary line names it: the
+/// same wording `task review` itself prints when a task reaches `ready` (decision 193).
+fn next_command(record: &record::Record, flag: &str) -> String {
+    match record.stage {
+        record::Stage::Ready => match record.review.as_ref().map_or(0, |r| r.must_fix) {
+            0 => format!("sbxm task finish {flag}"),
+            _ => format!("fix them by hand, or file them: sbxm task file-findings {flag}"),
+        },
+        record::Stage::Finished => "already finished".to_owned(),
+        _ => "see `sbxm task status` and the task's folder for what it left".to_owned(),
+    }
+}
+
+/// The target's task record, read fresh; `None` when it names no id yet (a spec file that hasn't
+/// resolved to one) or the record can't be read.
+fn read_record(config_dir: &Path, target: &Target) -> Option<record::Record> {
+    let id = target.id()?;
+    let base_dir = GlobalConfig::load(config_dir).ok()?.base_dir;
+    record::read(&record::task_dir(&base_dir, &id).join("task.json")).ok()
+}
+
+/// The summary line for one target once its run has finished (decision 193): its stage, its
+/// must-fix findings left, and the next command, read back from its record so it reflects what
+/// actually happened rather than the error text alone; a target whose preparation never reserved
+/// a task folder (its own input was refused before anything was created) has no record to read,
+/// so the line falls back to that refusal. `pre_record` is that same read taken *before* this
+/// target's run, so a refusal that never touched an already-existing task (issue 201 review S-1,
+/// e.g. `task issue-N exists`) is told apart from a worker or review failure that did advance the
+/// task: the record is identical either way, but only the latter is this run's own doing.
+fn summary_line(
+    config_dir: &Path,
+    target: &Target,
+    pre_record: Option<&record::Record>,
+    result: &Result<()>,
+) -> (String, bool) {
+    let flag = target.flag();
+    let record = read_record(config_dir, target);
+    let unchanged = matches!((&record, pre_record), (Some(r), Some(p)) if r == p);
+    let line = match (&record, result) {
+        (Some(_), Err(e)) if unchanged => format!("{flag}: not started: {e:#}"),
+        (Some(record), _) => {
+            let must_fix = record
+                .review
+                .as_ref()
+                .map_or_else(|| "-".to_owned(), |r| r.must_fix.to_string());
+            format!(
+                "{flag}: stage {}, must-fix {must_fix}; next: {}",
+                record.stage.name(),
+                next_command(record, &flag)
+            )
+        }
+        (None, Err(e)) => format!("{flag}: not started: {e:#}"),
+        // A task that reached `ready` always has a record; this only guards against the record
+        // becoming unreadable between the run finishing and this line reading it back (self-
+        // review: don't panic on a race this function can't rule out by construction).
+        (None, Ok(())) => format!("{flag}: ready (its record could not be read back)"),
+    };
+    (line, result.is_ok())
+}
+
+/// Whether `e` is one of decision 193(a)'s three list-wide stops that aren't the free-disk check
+/// (issue 201 review M-2, repeat of M-2): a missing shared secret, `sbx` itself not answering a
+/// preflight call (`check_secrets`), or `SandboxBackend::exec` itself failing while the worker,
+/// fix round or reviewer ran (`headless::run`'s `ExecUnavailable`, which carries the same "`sbx`
+/// couldn't run" meaning `SbxUnavailable` does, just found at a different point). Either stops the
+/// whole list instead of being counted as this target's own failure and asked again for every
+/// later one; a harness-reported failure or an ordinary failing gate is still `Ok` with a status,
+/// not this, so it stays a per-task stop that the list goes on past.
+fn queue_wide_stop(e: &anyhow::Error) -> bool {
+    e.is::<pipeline::MissingSecret>()
+        || e.is::<pipeline::SbxUnavailable>()
+        || e.is::<crate::headless::ExecUnavailable>()
+}
+
+/// Checks every target's own identity before the first one's sandbox is created (decision 193,
+/// issue 201 review M-1): an issue that doesn't exist, isn't open, already has a task, or names a
+/// PR that can't be continued; a spec file that can't be read or already has a task. Skipped, not
+/// an error, when the list's shared repo can't even be resolved (no `--repo` and no git origin):
+/// each target then discovers that the same way a single `task run` always has, one at a time as
+/// the loop below reaches it — decision 193 point 1 still applies to that shared failure, and the
+/// existing per-target checks already catch it before that target's own sandbox.
+fn preflight_targets(
+    config_dir: &Path,
+    opts: &ListOptions,
+    targets: &[Target],
+    github: &dyn GitHubBackend,
+) -> Result<()> {
+    let Ok(repo) = task_start::resolve_repo(opts.repo.as_deref(), &opts.repo_root) else {
+        return Ok(());
+    };
+    // All of this batch's issue numbers are checked together (issue 201 review M-1), not one at a
+    // time, so two targets related to each other are caught the same way an explicit `task start
+    // --issue A --issue B` already catches it.
+    let issue_numbers: Vec<u32> = targets
+        .iter()
+        .filter_map(|target| match target {
+            Target::Issue(n) => Some(*n),
+            Target::Spec(_) => None,
+        })
+        .collect();
+    let issue_problems = if issue_numbers.is_empty() {
+        HashMap::new()
+    } else {
+        pipeline::preflight_issues(config_dir, &repo, github, &issue_numbers)?
+    };
+    let mut problems = Vec::new();
+    for target in targets {
+        match target {
+            Target::Issue(n) => {
+                if let Some(reason) = issue_problems.get(n) {
+                    problems.push(format!("{}: {reason}", target.flag()));
+                }
+            }
+            Target::Spec(path) => {
+                if let Err(e) = pipeline::preflight_spec(config_dir, path) {
+                    problems.push(format!("{}: {e:#}", target.flag()));
+                }
+            }
+        }
+    }
+    if !problems.is_empty() {
+        bail!(
+            "every target is checked before any of them starts:\n{}",
+            problems.join("\n")
+        );
+    }
+    Ok(())
+}
+
+/// `task run` over a list of `--issue`/`--spec` targets (decision 193): each one runs the same
+/// `start` then `review` as a single `task run`, to its own `ready` or its own stop, before the
+/// next one starts. The tasks are independent: a later one never gets an earlier one's work, and
+/// a task that stops short of `ready` does not stop the others — only a problem that would hit
+/// every task does (here, too little free disk, checked again before each one). A single-target
+/// list runs through the unchanged single-task path below, so `--restart` still works there;
+/// with more than one target it is refused; there is nothing left to show the user when several
+/// tasks' old copies would be discarded at once.
+#[allow(clippy::too_many_arguments)]
+pub fn run_list(
+    config_dir: &Path,
+    opts: &ListOptions,
+    targets: &[Target],
+    restart: Option<&Restart>,
+    backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    host: &dyn HostRunner,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<()> {
+    if targets.is_empty() {
+        bail!("say which tasks to run: --issue <n> or --spec <file> (repeatable)");
+    }
+    if targets.len() > 1 && restart.is_some() {
+        bail!(
+            "--restart isn't allowed with more than one task; run `sbxm task run --restart` on \
+             one issue or spec at a time"
+        );
+    }
+    if let [one] = targets {
+        return match one {
+            Target::Issue(n) => run(
+                config_dir,
+                &opts.for_issue(*n),
+                restart,
+                backend,
+                github,
+                probe,
+                host,
+                out,
+                warn,
+            ),
+            Target::Spec(path) => run_spec(
+                config_dir,
+                &opts.for_spec(path.clone()),
+                restart,
+                backend,
+                github,
+                probe,
+                host,
+                out,
+                warn,
+            ),
+        };
+    }
+
+    preflight_targets(config_dir, opts, targets, github)?;
+
+    let mut summaries: Vec<(String, bool)> = Vec::new();
+    for (i, target) in targets.iter().enumerate() {
+        writeln!(
+            out,
+            "task {} of {}: {}",
+            i + 1,
+            targets.len(),
+            target.flag()
+        )?;
+        if let Err(e) = disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk) {
+            let reason = format!("{e:#}");
+            writeln!(out, "{}: not started: {reason}", target.flag())?;
+            summaries.push((format!("{}: not started: {reason}", target.flag()), false));
+            for later in &targets[i + 1..] {
+                summaries.push((
+                    format!(
+                        "{}: not started; the list stopped (see above)",
+                        later.flag()
+                    ),
+                    false,
+                ));
+            }
+            break;
+        }
+
+        let pre_record = read_record(config_dir, target);
+        let result = match target {
+            Target::Issue(n) => run(
+                config_dir,
+                &opts.for_issue(*n),
+                None,
+                backend,
+                github,
+                probe,
+                host,
+                out,
+                warn,
+            ),
+            Target::Spec(path) => run_spec(
+                config_dir,
+                &opts.for_spec(path.clone()),
+                None,
+                backend,
+                github,
+                probe,
+                host,
+                out,
+                warn,
+            ),
+        };
+        // Decision 193(a) (issue 201 review M-2): a missing shared secret or `sbx` itself not
+        // answering stops the whole list, rather than being asked again for every later target.
+        let stop = result.as_ref().err().is_some_and(queue_wide_stop);
+        summaries.push(summary_line(
+            config_dir,
+            target,
+            pre_record.as_ref(),
+            &result,
+        ));
+        if stop {
+            for later in &targets[i + 1..] {
+                summaries.push((
+                    format!(
+                        "{}: not started; the list stopped (see above)",
+                        later.flag()
+                    ),
+                    false,
+                ));
+            }
+            break;
+        }
+    }
+
+    writeln!(out, "\nsummary:")?;
+    for (line, _) in &summaries {
+        writeln!(out, "  {line}")?;
+    }
+
+    let not_ready = summaries.iter().filter(|(_, ready)| !ready).count();
+    if not_ready > 0 {
+        bail!(
+            "{not_ready} of {} task(s) did not reach ready; see the summary above",
+            summaries.len()
+        );
+    }
+    Ok(())
 }

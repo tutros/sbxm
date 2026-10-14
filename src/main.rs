@@ -1,10 +1,12 @@
 use std::io::Write as _;
 use std::sync::Arc;
 
-use clap::Parser;
+use clap::{CommandFactory, FromArgMatches};
 
 use sbxm::backend::SbxBackend;
-use sbxm::cli::{Cli, Command, ConfigCommand, GateTier, RunArgs, RunCommand, TaskCommand};
+use sbxm::cli::{
+    Cli, Command, ConfigCommand, GateTier, RunArgs, RunCommand, RunTarget, TaskCommand,
+};
 use sbxm::commands;
 use sbxm::config;
 use sbxm::confirm::Terminal;
@@ -104,7 +106,12 @@ fn finish_task(
 }
 
 fn main() -> anyhow::Result<()> {
-    match Cli::parse().command {
+    // `Cli::parse()` sugars over this, but `task run`'s list needs the raw matches too: clap's
+    // derive API has no field that carries the relative order of two different repeated flags
+    // (`--issue`/`--spec`), so it's read back from them directly (`cli::run_target_order`).
+    let matches = Cli::command().get_matches();
+    let cli = Cli::from_arg_matches(&matches).unwrap_or_else(|e| e.exit());
+    match cli.command {
         Command::New {
             project,
             seed,
@@ -568,8 +575,8 @@ fn main() -> anyhow::Result<()> {
         Command::Task {
             command:
                 TaskCommand::Run {
-                    issue,
-                    spec,
+                    issues: _,
+                    specs: _,
                     worker_harness,
                     worker_model,
                     reviewer_harness,
@@ -584,76 +591,53 @@ fn main() -> anyhow::Result<()> {
                     ignore_disk,
                 },
         } => {
-            let ids = match (&issue, &spec) {
-                (Some(n), _) => vec![format!("issue-{n}")],
-                (None, Some(path)) => task::record::spec_id(path)
-                    .map(|(id, _)| vec![id])
-                    .unwrap_or_default(),
-                (None, None) => unreachable!("clap requires --issue or --spec"),
-            };
+            let targets: Vec<commands::task_run::Target> = sbxm::cli::run_target_order(&matches)
+                .into_iter()
+                .map(|target| match target {
+                    RunTarget::Issue(n) => commands::task_run::Target::Issue(n),
+                    RunTarget::Spec(path) => commands::task_run::Target::Spec(path),
+                })
+                .collect();
+            let ids: Vec<String> = targets
+                .iter()
+                .filter_map(|target| match target {
+                    commands::task_run::Target::Issue(n) => Some(format!("issue-{n}")),
+                    commands::task_run::Target::Spec(path) => {
+                        task::record::spec_id(path).map(|(id, _)| id).ok()
+                    }
+                })
+                .collect();
             let (mut out, mut warn) = task_writers(ids, None)?;
             let result = (|| -> anyhow::Result<()> {
-                match (issue, spec) {
-                    (Some(issue), None) => commands::task_run::run(
-                        &config::config_dir()?,
-                        &commands::task_run::Options {
-                            repo_root: std::env::current_dir()?,
-                            issue,
-                            worker_harness,
-                            worker_model,
-                            reviewer_harness,
-                            reviewer_model,
-                            time_limit,
-                            reviewer_time_limit,
-                            profile,
-                            base,
-                            repo,
-                            clone_source: None,
-                            identity: None,
-                            disk: sbxm::disk::Guard::real(ignore_disk),
-                        },
-                        restart.then_some(&commands::task_start::Restart {
-                            confirm: &Terminal,
-                            yes,
-                        }),
-                        &SbxBackend,
-                        &sbxm::github::gh::GhBackend::default(),
-                        &task::record::SystemProbe,
-                        &task::gates::ShellHostRunner,
-                        &mut out,
-                        &mut warn,
-                    ),
-                    (None, Some(spec)) => commands::task_run::run_spec(
-                        &config::config_dir()?,
-                        &commands::task_run::SpecOptions {
-                            repo_root: std::env::current_dir()?,
-                            spec,
-                            worker_harness,
-                            worker_model,
-                            reviewer_harness,
-                            reviewer_model,
-                            time_limit,
-                            reviewer_time_limit,
-                            profile,
-                            base,
-                            repo,
-                            clone_source: None,
-                            identity: None,
-                            disk: sbxm::disk::Guard::real(ignore_disk),
-                        },
-                        restart.then_some(&commands::task_start::Restart {
-                            confirm: &Terminal,
-                            yes,
-                        }),
-                        &SbxBackend,
-                        &sbxm::github::gh::GhBackend::default(),
-                        &task::record::SystemProbe,
-                        &task::gates::ShellHostRunner,
-                        &mut out,
-                        &mut warn,
-                    ),
-                    _ => unreachable!("clap requires exactly one of --issue or --spec"),
-                }
+                commands::task_run::run_list(
+                    &config::config_dir()?,
+                    &commands::task_run::ListOptions {
+                        repo_root: std::env::current_dir()?,
+                        worker_harness,
+                        worker_model,
+                        reviewer_harness,
+                        reviewer_model,
+                        time_limit,
+                        reviewer_time_limit,
+                        profile,
+                        base,
+                        repo,
+                        clone_source: None,
+                        identity: None,
+                        disk: sbxm::disk::Guard::real(ignore_disk),
+                    },
+                    &targets,
+                    restart.then_some(&commands::task_start::Restart {
+                        confirm: &Terminal,
+                        yes,
+                    }),
+                    &SbxBackend,
+                    &sbxm::github::gh::GhBackend::default(),
+                    &task::record::SystemProbe,
+                    &task::gates::ShellHostRunner,
+                    &mut out,
+                    &mut warn,
+                )
             })();
             finish_task(result, out, warn)
         }

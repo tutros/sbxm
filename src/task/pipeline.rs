@@ -421,6 +421,34 @@ pub fn require_picks(selection: Selection) -> Result<Selection> {
     Ok(selection)
 }
 
+/// Decision 193(a): a secret every task of a `task run` list needs is one of the three problems
+/// that stop the whole list, not this target's own failure (issue 201 review M-2). Carries the
+/// same message [`check_secrets`] always bailed with; only the type is new.
+#[derive(Debug)]
+pub struct MissingSecret(String);
+
+impl std::fmt::Display for MissingSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for MissingSecret {}
+
+/// Decision 193(a): `sbx` itself not answering is the second of the three list-wide stops (issue
+/// 201 review M-2), found here because [`check_secrets`] is the one place every task's own
+/// preflight asks `sbx` something before it creates anything.
+#[derive(Debug)]
+pub struct SbxUnavailable(String);
+
+impl std::fmt::Display for SbxUnavailable {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SbxUnavailable {}
+
 /// The harness's provider secret and the profile's own `secrets.services` must all be stored in
 /// `sbx` before anything is created; the error says which and how to add it.
 fn check_secrets(
@@ -430,7 +458,9 @@ fn check_secrets(
     profile_name: &str,
     profile: &Profile,
 ) -> Result<()> {
-    let stored = backend.secret_services()?;
+    let stored = backend
+        .secret_services()
+        .map_err(|e| SbxUnavailable(format!("{e:#}")))?;
     let mut needed = vec![(
         harness.provider_secret().to_owned(),
         format!("{who}, {}", harness.as_str()),
@@ -442,10 +472,11 @@ fn check_secrets(
         )
     }));
     if let Some((missing, reason)) = needed.iter().find(|(s, _)| !stored.contains(s)) {
-        bail!(
+        return Err(MissingSecret(format!(
             "secret '{missing}' (needed by {reason}) is not stored in sbx; add it with \
              `sbx secret set {missing}` or import it with `sbx setup`"
-        );
+        ))
+        .into());
     }
     Ok(())
 }
@@ -478,8 +509,11 @@ pub fn issue_pr(issue: &IssueText) -> Option<u32> {
 
 /// The branch of the open PR that issue `number` belongs to (decision 169 (d)), read before any
 /// write. A closed or merged PR, or one from a fork, is refused: there is no branch to continue.
-fn pr_to_continue(ctx: &Ctx, number: u32, pr: u32) -> Result<String> {
-    let info = ctx.github.pr(ctx.repo, pr).with_context(|| {
+/// Takes `repo`/`github` rather than a whole [`Ctx`] so a `task run` list's preflight (issue 201
+/// review M-1) can call it before the rest of a [`Ctx`] (config, base branch, identity) is ever
+/// resolved.
+fn pr_to_continue(repo: &str, github: &dyn GitHubBackend, number: u32, pr: u32) -> Result<String> {
+    let info = github.pr(repo, pr).with_context(|| {
         format!(
             "issue #{number} belongs to PR #{pr} (`PR: #{pr}` in its body), which cannot be read"
         )
@@ -504,7 +538,7 @@ fn pr_to_continue(ctx: &Ctx, number: u32, pr: u32) -> Result<String> {
         bail!(
             "issue #{number} belongs to PR #{pr}, which comes from a fork; only branches of {} are \
              continued, because a fork's code is not something to fetch and run here (decision 87); {fix}",
-            ctx.repo
+            repo
         );
     }
     if !repo::valid_ref_name(&info.head_ref) {
@@ -517,13 +551,94 @@ fn pr_to_continue(ctx: &Ctx, number: u32, pr: u32) -> Result<String> {
 }
 
 /// The PR whose branch an issue's task continues, as (PR number, its branch), or `None` when the
-/// issue names no PR; an error when it names one that can't be continued. `prepare` and
-/// `task start --restart` both use it, so a restart never deletes a task it couldn't start again.
-pub fn continued_pr(ctx: &Ctx, issue: &IssueText) -> Result<Option<(u32, String)>> {
+/// issue names no PR; an error when it names one that can't be continued. `prepare`, `task start
+/// --restart` and a `task run` list's preflight (issue 201 review M-1) all use it, so a restart
+/// never deletes a task it couldn't start again and the preflight agrees with `prepare` on what
+/// is startable.
+pub fn continued_pr(
+    repo: &str,
+    github: &dyn GitHubBackend,
+    issue: &IssueText,
+) -> Result<Option<(u32, String)>> {
     match issue_pr(issue) {
-        Some(pr) => Ok(Some((pr, pr_to_continue(ctx, issue.number, pr)?))),
+        Some(pr) => Ok(Some((pr, pr_to_continue(repo, github, issue.number, pr)?))),
         None => Ok(None),
     }
+}
+
+/// The identity checks [`prepare`] makes before any write (issue state, no conflicting task, PR
+/// eligibility), factored out so a `task run` list's preflight (issue 201 review M-1) can make
+/// the same checks for every target before the first one's sandbox is created.
+fn issue_startable(
+    base_dir: &Path,
+    repo: &str,
+    github: &dyn GitHubBackend,
+    issue: &IssueText,
+) -> Result<Option<(u32, String)>> {
+    if issue.state != "OPEN" {
+        bail!(
+            "issue #{} is {}, not open; pick an open issue",
+            issue.number,
+            issue.state.to_lowercase()
+        );
+    }
+    let id = format!("issue-{}", issue.number);
+    let meta = record::task_dir(base_dir, &id);
+    let workspace = base_dir.join("tasks").join(&id);
+    if meta.exists() || workspace.exists() {
+        let stage = record::read(&meta.join("task.json"))
+            .map(|r| r.stage.name().to_owned())
+            .unwrap_or_else(|_| "no readable record".to_owned());
+        bail!(
+            "task {id} exists (stage {stage}); use `sbxm task status`, or --restart to start it again"
+        );
+    }
+    continued_pr(repo, github, issue)
+}
+
+/// Validates every `--issue N` target of a `task run` list together, without creating anything
+/// (issue 201 review M-1, repeat of M-1): the same rules `choose_issues` applies to an explicit
+/// list — already has a task, a question, blocked by an open dependency, or related to another
+/// issue in the same batch or an existing task (`select::select`) — plus each still-eligible
+/// issue's own continued-PR eligibility (`issue_startable`), so a later target's selection problem
+/// is found before an earlier target's sandbox exists. One shared snapshot of open issues and
+/// existing tasks for the whole batch, so two targets related to each other are caught the same
+/// way `task start --issue A --issue B` already would be — checking each number on its own, as the
+/// previous `preflight_issue` did, missed exactly this (and the question/blocked rules), because
+/// `issue_startable` alone was never where those rules lived. Returns the problem for each number
+/// that isn't startable; a number missing from the result is startable.
+pub fn preflight_issues(
+    config_dir: &Path,
+    repo: &str,
+    github: &dyn GitHubBackend,
+    numbers: &[u32],
+) -> Result<HashMap<u32, String>> {
+    let base_dir = GlobalConfig::load(config_dir)?.base_dir;
+    let open = github.issues_open(repo)?;
+    let taken: Vec<u32> = record::load_all(&base_dir)?
+        .into_iter()
+        .filter(|r| r.kind == Kind::Issue)
+        .map(|r| r.number)
+        .collect();
+    let selection = select::select(&open, &taken, Some(numbers), numbers.len(), &HashMap::new());
+    let mut problems: HashMap<u32, String> = selection
+        .not_open
+        .iter()
+        .map(|n| (*n, "isn't an open issue".to_owned()))
+        .collect();
+    for (n, why) in &selection.skips {
+        problems.entry(*n).or_insert_with(|| why.to_string());
+    }
+    for &n in numbers {
+        if problems.contains_key(&n) {
+            continue;
+        }
+        let issue = github.issue(repo, n)?;
+        if let Err(e) = issue_startable(&base_dir, repo, github, &issue) {
+            problems.insert(n, format!("{e:#}"));
+        }
+    }
+    Ok(problems)
 }
 
 /// Spec §5.1 steps 1 and 2: checks, then the task's folders, `repo.git`, the worker's clone,
@@ -535,22 +650,7 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
     let workspace = global.base_dir.join("tasks").join(&id);
 
     // Check before acting: nothing is written until every one of these passes.
-    if issue.state != "OPEN" {
-        bail!(
-            "issue #{} is {}, not open; pick an open issue",
-            issue.number,
-            issue.state.to_lowercase()
-        );
-    }
-    if meta.exists() || workspace.exists() {
-        let stage = record::read(&meta.join("task.json"))
-            .map(|r| r.stage.name().to_owned())
-            .unwrap_or_else(|_| "no readable record".to_owned());
-        bail!(
-            "task {id} exists (stage {stage}); use `sbxm task status`, or --restart to start it again"
-        );
-    }
-    let continues = continued_pr(ctx, issue)?;
+    let continues = issue_startable(&global.base_dir, ctx.repo, ctx.github, issue)?;
     let worker = &ctx.config.worker;
     let profile = Profile::load(global.profiles_dir(), &ctx.config.sandbox.profile)?;
     check_secrets(
@@ -743,6 +843,34 @@ pub fn validate_spec_file(source_path: &Path) -> Result<String> {
         .with_context(|| format!("cannot read {}", source_path.display()))
 }
 
+/// The identity check [`prepare_spec_resolved`] makes before any write (no conflicting task),
+/// factored out so a `task run` list's preflight (issue 201 review M-1) can make the same check
+/// for every target before the first one's sandbox is created.
+fn spec_startable(base_dir: &Path, id: &str, source_path: &Path) -> Result<()> {
+    let meta = record::task_dir(base_dir, id);
+    let workspace = base_dir.join("tasks").join(id);
+    if meta.exists() || workspace.exists() {
+        let stage = record::read(&meta.join("task.json"))
+            .map(|r| r.stage.name().to_owned())
+            .unwrap_or_else(|_| "no readable record".to_owned());
+        bail!(
+            "task {id} exists (stage {stage}); use `sbxm task status`, or remove it with \
+             `sbxm task rm {}` to start it again",
+            crate::commands::task_start::spec_flag(source_path)
+        );
+    }
+    Ok(())
+}
+
+/// Validates one `--spec FILE` target of a `task run` list without creating anything (issue 201
+/// review M-1): the same checks [`prepare_spec`] makes before its first write. No GitHub call.
+pub fn preflight_spec(config_dir: &Path, source_path: &Path) -> Result<()> {
+    validate_spec_file(source_path)?;
+    let (id, _title) = record::spec_id(source_path)?;
+    let base_dir = GlobalConfig::load(config_dir)?.base_dir;
+    spec_startable(&base_dir, &id, source_path)
+}
+
 /// Spec §5.1 steps 1 and 2, for a spec source (decision 174(d), issue 142): same as [`prepare`],
 /// but the source is a file read from disk instead of a GitHub issue. The id and the record's
 /// title come from [`record::spec_id`]; the file's text is copied in as `source.md` (in the
@@ -795,16 +923,7 @@ pub fn prepare_spec_resolved(
     let workspace = global.base_dir.join("tasks").join(id);
 
     // Check before acting: nothing is written until every one of these passes.
-    if meta.exists() || workspace.exists() {
-        let stage = record::read(&meta.join("task.json"))
-            .map(|r| r.stage.name().to_owned())
-            .unwrap_or_else(|_| "no readable record".to_owned());
-        bail!(
-            "task {id} exists (stage {stage}); use `sbxm task status`, or remove it with \
-             `sbxm task rm {}` to start it again",
-            crate::commands::task_start::spec_flag(source_path)
-        );
-    }
+    spec_startable(&global.base_dir, id, source_path)?;
     let worker = &ctx.config.worker;
     let profile = Profile::load(global.profiles_dir(), &ctx.config.sandbox.profile)?;
     check_secrets(
