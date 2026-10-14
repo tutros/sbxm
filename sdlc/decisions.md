@@ -375,6 +375,15 @@ space and the flag. `task run` checks again before the reviewer's sandbox, since
 that refusal names `task review`, which continues the task. (e) **Override:** `--ignore-disk` lets one command
 through. Free space is read through `doctor`'s `Host` and `disk::Guard`, so no test depends on the machine.
 
+196. **A retro phase skill, `sdlc-retro` (2026-10-14, the user's approval of the proposed text; a third narrow
+exception to the skill freeze of [140] and [164], after [188] and [191]):** the earlier looks back (the M2b
+experiment report [164], the issue 206 report [188]) were one-off; the skill makes them periodic, when the user asks,
+at the end of a milestone, or once about ten PRs have merged since the last retro (an agent says so then, it doesn't
+start one unasked). A retro gathers numbers only from records that hold them, proposes at most three process changes
+as experiments, and changes nothing until the user decides each one; records go to `sdlc/retros/`. This adds a skill
+and edits no existing `sdlc-*` skill (only `sbxm-context`'s list of phase skills names it). The freeze otherwise stands: the PRD/spec methodology choice of [164] is still the
+user's, and this decision doesn't answer it.
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.
