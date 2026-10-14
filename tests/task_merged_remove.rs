@@ -681,3 +681,71 @@ fn a_failed_removal_and_a_failed_output_line_are_both_reported() {
     assert!(message.contains("stayed"), "{message}");
     assert!(message.contains("the screen went away"), "{message}");
 }
+
+/// PR 241 review round 3, M-1: a task archived and then not fully removed (a sandbox stayed) can
+/// be removed by the rerun the error asks for: the rerun finds the archive it made the first time,
+/// identical to the task's records, and goes on instead of refusing it.
+#[test]
+fn a_rerun_after_a_failed_removal_reuses_its_own_identical_archive() {
+    let f = fixture();
+    let url = finished_task(&f);
+    let number = sbxm::task::finish::pr_number(&url).unwrap();
+    let stuck = FakeBackend::failing_remove().and_sandboxes(vec![sbxm::backend::SandboxInfo {
+        name: "sbxm-task-issue-41-claude".into(),
+        agent: "claude".into(),
+        status: "running".into(),
+    }]);
+    let first = remove(
+        &f.env.base_dir(),
+        &found_merged(&f, number),
+        true,
+        &stuck,
+        &Yes::new(),
+        rising_free_space,
+        &mut Vec::new(),
+    );
+    assert!(first.is_err(), "the first removal was meant to fail");
+    assert!(
+        meta(&f).exists(),
+        "the task folder went although a sandbox stayed"
+    );
+    let mut out = Vec::new();
+
+    remove(
+        &f.env.base_dir(),
+        &found_merged(&f, number),
+        true,
+        &FakeBackend::with_secrets(&["anthropic"]),
+        &Yes::new(),
+        rising_free_space,
+        &mut out,
+    )
+    .unwrap();
+
+    assert!(
+        !meta(&f).exists(),
+        "the rerun did not remove the task folder"
+    );
+    assert!(
+        archive_dir(&f.env.base_dir(), "issue-41")
+            .join("task.json")
+            .is_file()
+    );
+}
+
+/// The other side of the same rule: an archive that differs from the task's records (a later run
+/// of a task with the same id) is still never overwritten.
+#[test]
+fn archiving_still_refuses_an_archive_that_differs_from_the_task() {
+    let f = fixture();
+    finished_task(&f);
+    let archive = archive_task(&f.env.base_dir(), "issue-41").unwrap();
+    fs::write(meta(&f).join("result.md"), "a different result\n").unwrap();
+
+    let err = archive_task(&f.env.base_dir(), "issue-41").unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains(&archive.display().to_string()),
+        "{err:#}"
+    );
+}

@@ -146,7 +146,7 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
   the `local` sink, the worktree and the local branch in your own checkout are never deleted either; the dry run and
   the removal summary both name the two `git` commands that do, instead of running them. `--dry-run` only
   lists; it asks and removes nothing. Each task's text records (`review.md`, every `review-<n>.md`, `result.md`,
-  `run.log`, `gates.log`, `task.json`) are archived to `.sbxm/task-archive/<id>/` before its folder goes, and the output names the disk
+  `run.log`, `gates.log`, `task.json`) are archived to `.sbxm/task-archive/<id>/` before its folder goes (a rerun after a failed removal reuses an identical archive; one that differs is refused), and the output names the disk
   given back.
 
 ## How a change to sbxm itself goes
