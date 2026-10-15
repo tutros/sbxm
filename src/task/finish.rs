@@ -16,7 +16,7 @@ use super::machine;
 use super::pipeline::Prepared;
 use super::record::{self, OpenFinding, Process, ProcessProbe, Record};
 use super::repo;
-use super::review::{self, COMMENT_CAP, defang_mentions};
+use super::review::{self, COMMENT_CAP, defang, defang_mentions};
 use super::risk;
 use crate::backend::SandboxBackend;
 use crate::confirm::Confirm;
@@ -705,7 +705,9 @@ pub const SECTION_CAP: usize = 25_000;
 
 /// The PR body: the [`risk_section`] first, then `Fixes #N`, the [`unresolved_section`] of a
 /// draft, and each file under a heading. A file longer than the cap is cut and the body says so.
-/// Returns the body and one line per cut for the command to print.
+/// All of it but the `Fixes #N` line is agent text, so mentions and closing references in it are
+/// neutralised ([`review::defang`]); the files in the task folder stay as they are. Returns the
+/// body and one line per cut for the command to print.
 pub fn pr_body(
     number: u32,
     risk: &str,
@@ -713,10 +715,12 @@ pub fn pr_body(
     result: Option<&str>,
     review: Option<&str>,
 ) -> (String, Vec<String>) {
-    let (risk, risk_cut) = risk::cap_section(risk);
+    // Everything but the `Fixes #N` line is agent text, neutralised before any cut so a cut can't
+    // separate a keyword from its zero-width space and leave the reference active.
+    let (risk, risk_cut) = risk::cap_section(&defang(risk));
     let mut body = format!("{}\nFixes #{number}\n", risk.trim_end());
     if let Some(section) = unresolved {
-        body.push_str(&format!("\n{}\n", section.trim_end()));
+        body.push_str(&format!("\n{}\n", defang(section).trim_end()));
     }
     let mut cuts: Vec<String> = risk_cut.into_iter().collect();
     for (file, heading, text) in [
@@ -728,6 +732,7 @@ pub fn pr_body(
             body.push_str(&format!("(no {file})\n"));
             continue;
         };
+        let text = &defang(text);
         let total = text.chars().count();
         if total <= SECTION_CAP {
             body.push_str(text.trim_end());
