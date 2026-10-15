@@ -1935,13 +1935,16 @@ fn task_sandbox_gates_against_real_sbx() {
 }
 
 /// Spike S10 as a test (decision 161): a bundle an agent makes in its sandbox is verified and
-/// fetched into the host-owned repo, with the sandbox's own `git` and no host git in the workspace.
+/// fetched into the host-owned repo, with the sandbox's own `git` and no host git in the
+/// workspace; `rewrite::rebuild` then rebuilds the delivered branch from the agent ref it landed
+/// on (issue 244).
 #[test]
 #[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
 fn task_bundle_round_trip_against_real_sbx() {
     use sbxm::backend::{CreateSpec, ExecSpec, SkillsStore, Stdin};
     use sbxm::run::orchestrate::in_sandbox_path;
     use sbxm::task::repo::{self, BUNDLE_CAP, Identity};
+    use sbxm::task::rewrite;
 
     let base_dir = real_base_dir();
     let name = format!("sbxm-it-{}-bundle", std::process::id());
@@ -2019,6 +2022,7 @@ fn task_bundle_round_trip_against_real_sbx() {
     assert_eq!(out.exit_code, Some(0), "sandbox git failed: {}", out.stderr);
 
     repo::fetch_bundle(&repo_git, &workspace, "issue-4", BUNDLE_CAP).unwrap();
+    rewrite::rebuild(&repo_git, "refs/heads/main", "issue-4").unwrap();
 
     assert_eq!(
         repo::commits_ahead(&repo_git, "main", "issue-4").unwrap(),
