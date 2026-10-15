@@ -748,6 +748,41 @@ fn rewritten_history_is_refused_and_the_branch_keeps_its_commits() {
     assert_eq!(tip(&f.repo_git, "issue-4"), kept);
 }
 
+#[test]
+fn a_task_repo_from_before_the_agent_ref_existed_backfills_it_and_the_fix_round_still_fast_forwards()
+ {
+    let f = fixture();
+    prepared(&f);
+    // The old binary: the agent's first, unrewritten commit landed straight on the delivered
+    // branch, and there was never an agent ref.
+    agent_commits(&f, &["a.txt"]);
+    git(
+        &f.repo_git,
+        &[
+            "fetch",
+            f.workspace.join(".git").to_str().unwrap(),
+            "issue-4:refs/heads/issue-4",
+        ],
+    );
+    assert!(git(&f.repo_git, &["for-each-ref", "refs/sbxm/agent/issue-4"]).is_empty());
+
+    // Resumed for a fix round: a new bundle on top of the same clone.
+    agent_commits(&f, &["b.txt"]);
+    make_bundle(&f, &["issue-4"]);
+    collect(&f, CAP).unwrap();
+
+    let expected = git(&f.workspace, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        git(&f.repo_git, &["rev-parse", "refs/sbxm/agent/issue-4"]),
+        expected
+    );
+    assert_eq!(tip(&f.repo_git, "issue-4"), expected);
+    assert_eq!(
+        repo::commits_ahead(&f.repo_git, "main", "issue-4").unwrap(),
+        2
+    );
+}
+
 /// Where a planted command would leave proof that it ran.
 fn sentinel(f: &Fixture, name: &str) -> PathBuf {
     f.root.join(name)

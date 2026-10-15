@@ -324,6 +324,219 @@ mod tests {
         assert_eq!(git(&dir, &["rev-parse", &format!("{rewritten}^1")]), base);
     }
 
+    #[test]
+    fn non_ascii_message_text_survives_except_for_the_inserted_zero_width_spaces() {
+        let (_tmp, dir) = repo();
+        let empty_tree = git(&dir, &["hash-object", "-t", "tree", "--stdin"]);
+        let base = git(&dir, &["commit-tree", &empty_tree, "-m", "base"]);
+        git(&dir, &["update-ref", "refs/heads/main", &base]);
+        let agent = git(
+            &dir,
+            &[
+                "commit-tree",
+                &empty_tree,
+                "-p",
+                &base,
+                "-m",
+                "héllo @bob 日本語 that also closes #7",
+            ],
+        );
+        git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &agent]);
+        git(&dir, &["update-ref", "refs/heads/issue-4", &base]);
+
+        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
+
+        let rewritten = git(&dir, &["rev-parse", "refs/heads/issue-4"]);
+        let message = git(&dir, &["log", "-1", "--format=%B", &rewritten]);
+        assert_eq!(
+            message,
+            "héllo @\u{200b}bob 日本語 that also closes\u{200b} #7"
+        );
+    }
+
+    #[test]
+    fn a_merge_commit_keeps_both_rebuilt_parents() {
+        let (_tmp, dir) = repo();
+        let empty_tree = git(&dir, &["hash-object", "-t", "tree", "--stdin"]);
+        let base = git(&dir, &["commit-tree", &empty_tree, "-m", "base"]);
+        git(&dir, &["update-ref", "refs/heads/main", &base]);
+        let main_line = git(
+            &dir,
+            &[
+                "commit-tree",
+                &empty_tree,
+                "-p",
+                &base,
+                "-m",
+                "main line work",
+            ],
+        );
+        let side = git(
+            &dir,
+            &[
+                "commit-tree",
+                &empty_tree,
+                "-p",
+                &base,
+                "-m",
+                "side work, closes #5",
+            ],
+        );
+        let merge = git(
+            &dir,
+            &[
+                "commit-tree",
+                &empty_tree,
+                "-p",
+                &main_line,
+                "-p",
+                &side,
+                "-m",
+                "merge side, fixes #9",
+            ],
+        );
+        git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &merge]);
+        git(&dir, &["update-ref", "refs/heads/issue-4", &base]);
+
+        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
+
+        let rewritten = git(&dir, &["rev-parse", "refs/heads/issue-4"]);
+        assert_ne!(rewritten, merge);
+        let p1 = git(&dir, &["rev-parse", &format!("{rewritten}^1")]);
+        let p2 = git(&dir, &["rev-parse", &format!("{rewritten}^2")]);
+        // `main_line`'s message has nothing to defang, so it rebuilds to the same id; `side`'s
+        // does, so it doesn't.
+        assert_eq!(p1, main_line);
+        assert_ne!(p2, side);
+        let merge_message = git(&dir, &["log", "-1", "--format=%B", &rewritten]);
+        assert!(
+            merge_message.contains("fixes\u{200b} #9"),
+            "{merge_message}"
+        );
+        let side_message = git(&dir, &["log", "-1", "--format=%B", &p2]);
+        assert!(side_message.contains("closes\u{200b} #5"), "{side_message}");
+    }
+
+    /// Crafts a commit object by hand (`git hash-object -t commit -w --stdin`), so a fake
+    /// signature can be attached without a real GPG key.
+    fn write_commit_object(dir: &Path, content: &str) -> String {
+        use std::io::Write;
+        let mut child = Command::new("git")
+            .current_dir(dir)
+            .args(["hash-object", "-t", "commit", "-w", "--stdin"])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(content.as_bytes())
+            .unwrap();
+        let out = child.wait_with_output().unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    #[test]
+    fn a_signed_commit_is_rebuilt_unsigned() {
+        let (_tmp, dir) = repo();
+        let empty_tree = git(&dir, &["hash-object", "-t", "tree", "--stdin"]);
+        let base = git(&dir, &["commit-tree", &empty_tree, "-m", "base"]);
+        git(&dir, &["update-ref", "refs/heads/main", &base]);
+        let raw = format!(
+            "tree {empty_tree}\nparent {base}\nauthor t <t@t> 1700000000 +0000\ncommitter t <t@t> 1700000000 +0000\ngpgsig -----BEGIN PGP SIGNATURE-----\n fakefakefakefakefakefake\n fakefake=\n -----END PGP SIGNATURE-----\n\nsigned work\n"
+        );
+        let agent = write_commit_object(&dir, &raw);
+        git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &agent]);
+        git(&dir, &["update-ref", "refs/heads/issue-4", &base]);
+
+        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
+
+        let rewritten = git(&dir, &["rev-parse", "refs/heads/issue-4"]);
+        // The gpgsig header makes the original object differ from any unsigned rebuild of the
+        // same tree, parent, identity and message, so this alone proves it was dropped.
+        assert_ne!(rewritten, agent);
+        let full = git(&dir, &["cat-file", "-p", &rewritten]);
+        assert!(!full.contains("gpgsig"), "{full}");
+        let message = git(&dir, &["log", "-1", "--format=%B", &rewritten]);
+        assert_eq!(message, "signed work");
+    }
+
+    /// A commit whose `tree` names an object the repo doesn't have: `git commit-tree` fails on it,
+    /// the way it would on any commit partway through a longer range (the issue's own example).
+    #[test]
+    fn a_failure_partway_through_the_rebuild_leaves_the_delivered_branch_unchanged() {
+        let (_tmp, dir) = repo();
+        let empty_tree = git(&dir, &["hash-object", "-t", "tree", "--stdin"]);
+        let base = git(&dir, &["commit-tree", &empty_tree, "-m", "base"]);
+        git(&dir, &["update-ref", "refs/heads/main", &base]);
+        git(&dir, &["update-ref", "refs/heads/issue-4", &base]);
+        let c1 = git(
+            &dir,
+            &["commit-tree", &empty_tree, "-p", &base, "-m", "first"],
+        );
+        let bogus_tree = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let c2 = write_commit_object(
+            &dir,
+            &format!(
+                "tree {bogus_tree}\nparent {c1}\nauthor t <t@t> 1700000000 +0000\ncommitter t <t@t> 1700000000 +0000\n\nsecond\n"
+            ),
+        );
+        let c3 = git(
+            &dir,
+            &["commit-tree", &empty_tree, "-p", &c2, "-m", "third"],
+        );
+        git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &c3]);
+
+        let err = format!(
+            "{:#}",
+            rebuild(&dir, "refs/heads/main", "issue-4").unwrap_err()
+        );
+
+        assert!(!err.is_empty());
+        assert_eq!(git(&dir, &["rev-parse", "refs/heads/issue-4"]), base);
+    }
+
+    /// `task resume` (or any rerun) calls [`rebuild`] again over the same range: the result must
+    /// be the same ids, not a fresh set.
+    #[test]
+    fn rebuilding_the_same_range_twice_gives_the_same_ids() {
+        let (_tmp, dir) = repo();
+        let empty_tree = git(&dir, &["hash-object", "-t", "tree", "--stdin"]);
+        let base = git(&dir, &["commit-tree", &empty_tree, "-m", "base"]);
+        git(&dir, &["update-ref", "refs/heads/main", &base]);
+        git(&dir, &["update-ref", "refs/heads/issue-4", &base]);
+        let agent = git(
+            &dir,
+            &[
+                "commit-tree",
+                &empty_tree,
+                "-p",
+                &base,
+                "-m",
+                "also fixes #4",
+            ],
+        );
+        git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &agent]);
+
+        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
+        let first_tip = git(&dir, &["rev-parse", "refs/heads/issue-4"]);
+        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
+        let second_tip = git(&dir, &["rev-parse", "refs/heads/issue-4"]);
+
+        assert_ne!(first_tip, agent);
+        assert_eq!(first_tip, second_tip);
+    }
+
     /// [`move_branch`]'s compare-and-swap is `rebuild`'s only way to move the delivered branch, so
     /// this is also the backstop for two rebuilds racing on the same task (decision: the record's
     /// own running check, tested elsewhere, is the first line of defence; this is what still holds
