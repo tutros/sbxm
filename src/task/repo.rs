@@ -437,30 +437,6 @@ pub fn agent_ref(branch: &str) -> String {
     format!("refs/sbxm/agent/{branch}")
 }
 
-/// The agent ref's current tip for `branch` in `repo_git`, or `None` when it doesn't exist yet (a
-/// brand-new task with no bundle collected yet, or an old task from before this ref existed).
-/// Reading this *before* [`fetch_bundle`] lets [`super::rewrite::rebuild`] tell its own previous
-/// rebuild's result apart from a delivered branch moved by something else since then (issue 244).
-pub fn agent_tip(repo_git: &Path, branch: &str) -> Result<Option<String>> {
-    check_ref("branch", branch)?;
-    let agent = agent_ref(branch);
-    let out = git::output(
-        repo_git,
-        Some(repo_git),
-        None,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("{agent}^{{commit}}"),
-        ],
-    )?;
-    if !out.status.success() {
-        return Ok(None);
-    }
-    Ok(Some(String::from_utf8_lossy(&out.stdout).trim().to_owned()))
-}
-
 /// Creates the agent ref at the delivered branch's current tip when it is missing (issue 244): a
 /// task made before this ref existed collected the agent's unrewritten commits straight onto the
 /// delivered branch, so that is where its own commits begin; a brand-new task's delivered branch

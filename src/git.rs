@@ -200,10 +200,28 @@ pub(crate) fn run_with_stdin(
     args: &[&str],
     stdin_data: &[u8],
 ) -> Result<String> {
+    let out = output_with_stdin(cwd, git_dir, work_tree, args, stdin_data)?;
+    if !out.status.success() {
+        bail!(failure_message(args, &out));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
+/// Like [`output`], but `stdin_data` is piped to the command instead of giving it none: for a
+/// caller that needs the raw [`Output`] to turn a failure into its own message rather than
+/// git's (`rewrite::move_branch`'s compare-and-swap via `git update-ref --stdin`, issue 244,
+/// expects this to fail sometimes and that is not an error worth git's own wording).
+pub(crate) fn output_with_stdin(
+    cwd: &Path,
+    git_dir: Option<&Path>,
+    work_tree: Option<&Path>,
+    args: &[&str],
+    stdin_data: &[u8],
+) -> Result<Output> {
     use std::io::Write;
     use std::process::Stdio;
 
-    let out = retry(TRIES, FIRST_DELAY, || {
+    retry(TRIES, FIRST_DELAY, || {
         let mut child = command(cwd, git_dir, work_tree, args, std::env::vars_os())
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -219,11 +237,7 @@ pub(crate) fn run_with_stdin(
         child
             .wait_with_output()
             .context("cannot run `git`; is Git installed and on PATH?")
-    })?;
-    if !out.status.success() {
-        bail!(failure_message(args, &out));
-    }
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+    })
 }
 
 /// The `GIT_*` variables that keep working for [`user_output`]: where the user's own

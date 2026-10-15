@@ -13,7 +13,10 @@
 //! or `task resume` never moves the delivered branch to something new. Every new commit is built
 //! before the delivered branch moves, and it moves only if it is still where it was read to be, so
 //! a failure partway through, or something else having moved it meanwhile, leaves it exactly where
-//! it was.
+//! it was. [`rebuilt_marker`] records which agent tip that last successful move rebuilt, moved
+//! atomically with the branch itself, so a fetch that advances the agent ref without a rebuild
+//! ever following it through (the rebuild crashed, or failed for a reason since fixed) is never
+//! mistaken for a rebuild that did.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -41,25 +44,30 @@ struct Original {
     message: Vec<u8>,
 }
 
+/// The ref recording the agent tip whose rebuild is on the delivered branch right now (issue 244
+/// review round 2, M-1). It moves only together with the delivered branch, in the same atomic
+/// `update-ref --stdin` transaction [`move_branch`] runs, so it can never point past a rebuild
+/// that didn't actually land: a fetch that advances the agent ref doesn't move it, only a
+/// *successful* [`rebuild`] does. Reading it tells this call apart from a delivered branch moved
+/// by something other than sbxm's own last rebuild, even when a fetch happened in between without
+/// a rebuild ever following it through (a crash, or a failure since fixed).
+fn rebuilt_marker(branch: &str) -> String {
+    format!("refs/sbxm/rebuilt/{branch}")
+}
+
 /// Rewrites the delivered branch `branch` in `repo_git` from its agent ref (issue 244): every
 /// commit from `start` (exclusive, a revision `repo_git` can resolve -- the task's base branch,
 /// or for a task continuing a PR the PR head it fetched) up to the agent ref's tip (inclusive) is
 /// rebuilt with a defanged message, and the delivered branch is moved to the result in one step.
 ///
-/// `previous_agent_tip` is the agent ref's own tip as it stood just before the fetch that brought
-/// in whatever is now beyond it (`None` when the agent ref didn't exist yet: a task's first
-/// rebuild, or an old task backfilling it from the delivered branch). Since a rebuild is
-/// deterministic, the delivered branch's tip right after the *previous* rebuild is exactly this
-/// rebuild's own result for `previous_agent_tip`; if the branch isn't at that value now, something
-/// other than the last rebuild moved it since, and this call refuses rather than adopting whatever
-/// it currently finds as its new baseline. With `previous_agent_tip` as `None` there is no earlier
-/// rebuild to compare against, so the branch's current value is trusted, as before.
-pub fn rebuild(
-    repo_git: &Path,
-    start: &str,
-    branch: &str,
-    previous_agent_tip: Option<&str>,
-) -> Result<()> {
+/// Since a rebuild is deterministic, the delivered branch's tip right after the *previous*
+/// rebuild is exactly what rebuilding [`rebuilt_marker`]'s own recorded agent tip would produce
+/// again now; if the branch isn't at that value, something other than the last rebuild moved it
+/// since, and this call refuses rather than adopting whatever it currently finds as its new
+/// baseline. A missing marker (no earlier successful rebuild: a task's first one, or an old task
+/// backfilling the agent ref from the delivered branch) trusts the branch's current value, as
+/// before.
+pub fn rebuild(repo_git: &Path, start: &str, branch: &str) -> Result<()> {
     check_ref("branch", branch)?;
     let start_id = resolve(repo_git, start).with_context(|| {
         format!("cannot resolve {start} in the task repo; the task record may be damaged")
@@ -71,6 +79,8 @@ pub fn rebuild(
     let old_tip = resolve(repo_git, &format!("refs/heads/{branch}")).with_context(|| {
         format!("{branch} isn't in the task repo; the task record may be damaged")
     })?;
+    let marker = rebuilt_marker(branch);
+    let last_rebuilt = resolve_optional(repo_git, &marker)?;
 
     let ids = commit_range(repo_git, &start_id, &agent_tip)?;
     let mut rebuilt: HashMap<String, String> = HashMap::new();
@@ -87,12 +97,12 @@ pub fn rebuild(
         rebuilt.insert(id.clone(), new_tip.clone());
     }
 
-    let expected_old_tip = match previous_agent_tip {
+    let expected_old_tip = match last_rebuilt.as_deref() {
         None => old_tip.clone(),
         Some(prev) if prev == start_id => start_id.clone(),
         Some(prev) => rebuilt.get(prev).cloned().with_context(|| {
             format!(
-                "{prev} (the agent ref's tip before this rebuild) isn't an ancestor of {agent}'s \
+                "{prev} (the agent tip of sbxm's last rebuild) isn't an ancestor of {agent}'s \
                  current tip; the task record may be damaged"
             )
         })?,
@@ -104,7 +114,15 @@ pub fn rebuild(
         );
     }
 
-    move_branch(repo_git, branch, &new_tip, &old_tip)
+    move_branch(
+        repo_git,
+        branch,
+        &new_tip,
+        &old_tip,
+        &marker,
+        last_rebuilt.as_deref(),
+        &agent_tip,
+    )
 }
 
 /// `rev` resolved to a full commit id in `repo_git`.
@@ -116,6 +134,25 @@ fn resolve(repo_git: &Path, rev: &str) -> Result<String> {
         &["rev-parse", "--verify", &format!("{rev}^{{commit}}")],
     )?;
     Ok(out.trim().to_owned())
+}
+
+/// Like [`resolve`], but `None` instead of an error when `rev` doesn't exist yet.
+fn resolve_optional(repo_git: &Path, rev: &str) -> Result<Option<String>> {
+    let out = git::output(
+        repo_git,
+        Some(repo_git),
+        None,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{rev}^{{commit}}"),
+        ],
+    )?;
+    if !out.status.success() {
+        return Ok(None);
+    }
+    Ok(Some(String::from_utf8_lossy(&out.stdout).trim().to_owned()))
 }
 
 /// The commits reachable from `tip` but not from `start`, oldest first and with every parent
@@ -343,16 +380,33 @@ fn check_object_exists(repo_git: &Path, id: &str, kind: &str) -> Result<()> {
     Ok(())
 }
 
-/// Moves the delivered branch `branch` to `new_tip`, only if it is still at `old_tip`
-/// (`git update-ref`'s own compare-and-swap): refuses, naming the branch and changing nothing,
-/// if something else moved it since it was read.
-fn move_branch(repo_git: &Path, branch: &str, new_tip: &str, old_tip: &str) -> Result<()> {
+/// Moves the delivered branch `branch` to `new_tip` and [`rebuilt_marker`] to `new_marker`
+/// (this rebuild's agent tip) together, as one atomic `git update-ref --stdin` transaction: both
+/// move, or neither does. Each carries its own compare-and-swap (`old_tip` for the branch,
+/// `old_marker` for the marker, which is created instead when `None`), so a mismatch on either
+/// -- something else having moved the branch, or a concurrent rebuild having moved the marker --
+/// refuses the whole transaction and changes nothing.
+fn move_branch(
+    repo_git: &Path,
+    branch: &str,
+    new_tip: &str,
+    old_tip: &str,
+    marker: &str,
+    old_marker: Option<&str>,
+    new_marker: &str,
+) -> Result<()> {
     let delivered = format!("refs/heads/{branch}");
-    let out = git::output(
+    let mut stdin = format!("update {delivered} {new_tip} {old_tip}\n");
+    match old_marker {
+        Some(old) => stdin.push_str(&format!("update {marker} {new_marker} {old}\n")),
+        None => stdin.push_str(&format!("create {marker} {new_marker}\n")),
+    }
+    let out = git::output_with_stdin(
         repo_git,
         Some(repo_git),
         None,
-        &["update-ref", &delivered, new_tip, old_tip],
+        &["update-ref", "--stdin"],
+        stdin.as_bytes(),
     )?;
     if !out.status.success() {
         bail!(
@@ -437,7 +491,7 @@ mod tests {
         git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &agent]);
         git(&dir, &["update-ref", "refs/heads/issue-4", &base]);
 
-        rebuild(&dir, "refs/heads/main", "issue-4", None).unwrap();
+        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
 
         assert_eq!(git(&dir, &["rev-parse", "refs/heads/issue-4"]), agent);
     }
@@ -462,7 +516,7 @@ mod tests {
         git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &agent]);
         git(&dir, &["update-ref", "refs/heads/issue-4", &base]);
 
-        rebuild(&dir, "refs/heads/main", "issue-4", None).unwrap();
+        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
 
         let rewritten = git(&dir, &["rev-parse", "refs/heads/issue-4"]);
         assert_ne!(rewritten, agent);
@@ -496,7 +550,7 @@ mod tests {
         git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &agent]);
         git(&dir, &["update-ref", "refs/heads/issue-4", &base]);
 
-        rebuild(&dir, "refs/heads/main", "issue-4", None).unwrap();
+        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
 
         let rewritten = git(&dir, &["rev-parse", "refs/heads/issue-4"]);
         let message = git(&dir, &["log", "-1", "--format=%B", &rewritten]);
@@ -525,7 +579,7 @@ mod tests {
         git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &agent]);
         git(&dir, &["update-ref", "refs/heads/issue-4", &base]);
 
-        rebuild(&dir, "refs/heads/main", "issue-4", None).unwrap();
+        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
 
         let rewritten = git(&dir, &["rev-parse", "refs/heads/issue-4"]);
         let full = git_bytes(&dir, &["cat-file", "-p", &rewritten]);
@@ -584,7 +638,7 @@ mod tests {
         git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &merge]);
         git(&dir, &["update-ref", "refs/heads/issue-4", &base]);
 
-        rebuild(&dir, "refs/heads/main", "issue-4", None).unwrap();
+        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
 
         let rewritten = git(&dir, &["rev-parse", "refs/heads/issue-4"]);
         assert_ne!(rewritten, merge);
@@ -641,7 +695,7 @@ mod tests {
         git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &agent]);
         git(&dir, &["update-ref", "refs/heads/issue-4", &base]);
 
-        rebuild(&dir, "refs/heads/main", "issue-4", None).unwrap();
+        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
 
         let rewritten = git(&dir, &["rev-parse", "refs/heads/issue-4"]);
         // The gpgsig header makes the original object differ from any unsigned rebuild of the
@@ -682,7 +736,7 @@ mod tests {
 
         let err = format!(
             "{:#}",
-            rebuild(&dir, "refs/heads/main", "issue-4", None).unwrap_err()
+            rebuild(&dir, "refs/heads/main", "issue-4").unwrap_err()
         );
 
         assert!(!err.is_empty());
@@ -711,9 +765,9 @@ mod tests {
         );
         git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &agent]);
 
-        rebuild(&dir, "refs/heads/main", "issue-4", None).unwrap();
+        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
         let first_tip = git(&dir, &["rev-parse", "refs/heads/issue-4"]);
-        rebuild(&dir, "refs/heads/main", "issue-4", None).unwrap();
+        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
         let second_tip = git(&dir, &["rev-parse", "refs/heads/issue-4"]);
 
         assert_ne!(first_tip, agent);
@@ -724,6 +778,20 @@ mod tests {
     /// this is also the backstop for two rebuilds racing on the same task (decision: the record's
     /// own running check, tested elsewhere, is the first line of defence; this is what still holds
     /// if it is ever bypassed).
+    /// `rev` doesn't resolve to anything in `dir` (a ref was never created, or a transaction that
+    /// should have created or moved it was refused and rolled back).
+    fn ref_missing(dir: &Path, rev: &str) -> bool {
+        let out = Command::new("git")
+            .current_dir(dir)
+            .args(["rev-parse", "--verify", "--quiet", rev])
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        !out.status.success()
+    }
+
     #[test]
     fn move_branch_refuses_when_the_branch_is_not_at_the_expected_old_value() {
         let (_tmp, dir) = repo();
@@ -735,18 +803,30 @@ mod tests {
 
         let message = format!(
             "{:#}",
-            move_branch(&dir, "issue-4", &new, &base).unwrap_err()
+            move_branch(
+                &dir,
+                "issue-4",
+                &new,
+                &base,
+                "refs/sbxm/rebuilt/issue-4",
+                None,
+                &new,
+            )
+            .unwrap_err()
         );
 
         assert!(message.contains("issue-4"), "{message}");
         assert_eq!(git(&dir, &["rev-parse", "refs/heads/issue-4"]), other);
+        // The marker is created only together with the branch move: a refused branch update
+        // must leave it absent too, not created on its own.
+        assert!(ref_missing(&dir, "refs/sbxm/rebuilt/issue-4"));
     }
 
     /// Issue 244's required case, distinct from the CAS test above: a branch moved **since the
-    /// last rebuild**, not merely during this call. Passing the first rebuild's own
-    /// `previous_agent_tip` (`None`, its first ever) let that one through as always; the second
-    /// rebuild must recognise that the branch it now finds isn't what its own previous rebuild
-    /// left, and refuse rather than overwriting it.
+    /// last rebuild**, not merely during this call. The first rebuild has no earlier marker to
+    /// compare against, so it always goes through; the second rebuild must recognise that the
+    /// branch it now finds isn't what its own previous rebuild left there, and refuse rather
+    /// than overwriting it.
     #[test]
     fn a_branch_moved_since_the_last_rebuild_is_refused() {
         let (_tmp, dir) = repo();
@@ -759,7 +839,7 @@ mod tests {
             &["commit-tree", &empty_tree, "-p", &base, "-m", "first"],
         );
         git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &first]);
-        rebuild(&dir, "refs/heads/main", "issue-4", None).unwrap();
+        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
 
         // Something other than sbxm moves the delivered branch before the next rebuild.
         let elsewhere = git(&dir, &["commit-tree", &empty_tree, "-m", "elsewhere"]);
@@ -774,11 +854,80 @@ mod tests {
 
         let err = format!(
             "{:#}",
-            rebuild(&dir, "refs/heads/main", "issue-4", Some(first.as_str())).unwrap_err()
+            rebuild(&dir, "refs/heads/main", "issue-4").unwrap_err()
         );
 
         assert!(err.contains("issue-4"), "{err}");
         assert_eq!(git(&dir, &["rev-parse", "refs/heads/issue-4"]), elsewhere);
         assert_eq!(git(&dir, &["rev-parse", "refs/sbxm/agent/issue-4"]), second);
+    }
+
+    /// Review round 2, M-1: `fetch_bundle` advances the agent ref *before* `rebuild` runs, so a
+    /// rebuild that then fails still leaves the agent ref ahead of whatever was last actually
+    /// rebuilt. The next collection must not mistake that gap for the delivered branch having
+    /// been moved by something else: it should rebuild successfully, over the full range, and
+    /// land on the same ids a clean run over that same range would.
+    #[test]
+    fn a_rebuild_that_never_ran_after_a_fetch_does_not_block_the_next_one() {
+        let (_tmp, dir) = repo();
+        let empty_tree = git(&dir, &["hash-object", "-t", "tree", "--stdin"]);
+        let base = git(&dir, &["commit-tree", &empty_tree, "-m", "base"]);
+        git(&dir, &["update-ref", "refs/heads/main", &base]);
+        git(&dir, &["update-ref", "refs/heads/issue-4", &base]);
+        let first = git(
+            &dir,
+            &["commit-tree", &empty_tree, "-p", &base, "-m", "first"],
+        );
+        git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &first]);
+        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
+
+        // A later bundle fetch advances the agent ref further, but the rebuild that should have
+        // followed it never ran (crashed, or failed for a reason that has since gone away) --
+        // nothing else touched the delivered branch.
+        let second = git(
+            &dir,
+            &["commit-tree", &empty_tree, "-p", &first, "-m", "second"],
+        );
+        git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &second]);
+
+        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
+
+        let rewritten = git(&dir, &["rev-parse", "refs/heads/issue-4"]);
+
+        // A clean run over the same two commits, from scratch, must give the same final id.
+        let (_tmp2, clean_dir) = repo();
+        let clean_base = git(&clean_dir, &["commit-tree", &empty_tree, "-m", "base"]);
+        assert_eq!(clean_base, base);
+        git(&clean_dir, &["update-ref", "refs/heads/main", &clean_base]);
+        git(
+            &clean_dir,
+            &["update-ref", "refs/heads/issue-4", &clean_base],
+        );
+        let clean_first = git(
+            &clean_dir,
+            &["commit-tree", &empty_tree, "-p", &clean_base, "-m", "first"],
+        );
+        let clean_second = git(
+            &clean_dir,
+            &[
+                "commit-tree",
+                &empty_tree,
+                "-p",
+                &clean_first,
+                "-m",
+                "second",
+            ],
+        );
+        assert_eq!(clean_second, second);
+        git(
+            &clean_dir,
+            &["update-ref", "refs/sbxm/agent/issue-4", &clean_second],
+        );
+        rebuild(&clean_dir, "refs/heads/main", "issue-4").unwrap();
+
+        assert_eq!(
+            rewritten,
+            git(&clean_dir, &["rev-parse", "refs/heads/issue-4"])
+        );
     }
 }

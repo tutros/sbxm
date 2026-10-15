@@ -519,18 +519,10 @@ fn tip(repo_git: &Path, branch: &str) -> String {
 }
 
 /// Collects the bundle the sandbox left in the workspace at `.sbxm-task/branch.bundle`, then
-/// rebuilds the delivered branch from it (issue 244), matching what `pipeline.rs` does: the agent
-/// ref's tip is read before the fetch, so `rebuild` can tell its own previous rebuild's result
-/// apart from a delivered branch moved by anything else since then.
+/// rebuilds the delivered branch from it (issue 244), matching what `pipeline.rs` does.
 fn collect(f: &Fixture, cap: u64) -> anyhow::Result<()> {
-    let previous_agent_tip = repo::agent_tip(&f.repo_git, "issue-4")?;
     repo::fetch_bundle(&f.repo_git, &f.workspace, "issue-4", cap)?;
-    rewrite::rebuild(
-        &f.repo_git,
-        "refs/heads/main",
-        "issue-4",
-        previous_agent_tip.as_deref(),
-    )
+    rewrite::rebuild(&f.repo_git, "refs/heads/main", "issue-4")
 }
 
 /// The path the sandbox writes the bundle to, with its folder made.

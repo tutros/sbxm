@@ -136,7 +136,7 @@ fn prepared_with_commit(f: &Fixture) -> (PathBuf, PathBuf) {
         ],
     );
     repo::fetch_bundle(&repo_git, &workspace, "issue-4", repo::BUNDLE_CAP).unwrap();
-    rewrite::rebuild(&repo_git, "refs/heads/main", "issue-4", None).unwrap();
+    rewrite::rebuild(&repo_git, "refs/heads/main", "issue-4").unwrap();
     // Left in the agent's folder, never committed: must not reach the checkout.
     fs::write(workspace.join("untracked.txt"), "only in the workspace\n").unwrap();
     (repo_git, workspace)
