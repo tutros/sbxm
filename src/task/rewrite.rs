@@ -28,19 +28,19 @@ use super::review::defang;
 use crate::git;
 
 /// A commit's full identity, read once from its original (agent-made) object: everything
-/// [`build_commit`] needs to recreate it with a different message. A signature header
-/// (`gpgsig`) is read past, never kept: the rebuilt commit is unsigned. `message` is kept as raw
-/// bytes, not a `String`: an `encoding` header other than UTF-8 means it need not be valid UTF-8
-/// at all (issue 244's encoding edge case), and [`defang_bytes`] preserves it exactly either way.
+/// [`build_commit`] needs to recreate it with a different message. `header_lines` is every
+/// header line verbatim (review round 2, M-3: not only the specific fields `rebuild` happens to
+/// use by name, so a header such as `encoding` survives byte for byte too), except a signature
+/// header (`gpgsig`) and its continuation lines, which are dropped: the rebuilt commit is
+/// unsigned. A `parent` line is kept in `header_lines` at its original position so
+/// [`build_commit`] can substitute the rebuilt id there without disturbing anything else's
+/// order. `message` is kept as raw bytes, not a `String`: an `encoding` header other than UTF-8
+/// means it need not be valid UTF-8 at all (issue 244's encoding edge case), and
+/// [`defang_bytes`] preserves it exactly either way.
 struct Original {
     tree: String,
     parents: Vec<String>,
-    author_name: String,
-    author_email: String,
-    author_date: String,
-    committer_name: String,
-    committer_email: String,
-    committer_date: String,
+    header_lines: Vec<String>,
     message: Vec<u8>,
 }
 
@@ -187,14 +187,18 @@ fn commit_range(repo_git: &Path, start: &str, tip: &str, branch: &str) -> Result
     Ok(out.lines().map(str::to_owned).collect())
 }
 
-/// Reads commit `id`'s tree, parents, author, committer and message straight from the object
-/// (`git cat-file -p`), trusting nothing else about it: a header continuation line (the second and
-/// later lines of a multi-line header such as `gpgsig` or `mergetag`) starts with a space and is
-/// skipped, so a signature is read past rather than copied into the rebuilt commit. Read as raw
-/// bytes (not decoded as UTF-8) so the message -- the one part of a commit object that need not be
-/// UTF-8 at all (an `encoding` header can say otherwise) -- survives untouched; the header is
-/// still treated as text, since every field read from it (the tree and parent ids, the author and
-/// committer lines) is git-controlled and always ASCII.
+/// Reads commit `id`'s tree, parents, every header line and the message straight from the object
+/// (`git cat-file -p`), trusting nothing else about it: a header continuation line (the second
+/// and later lines of a multi-line header such as `gpgsig` or `mergetag`) starts with a space and
+/// belongs to whichever header line started it, so a signature (and only a signature) is read
+/// past rather than copied into the rebuilt commit, continuation lines included. Every other
+/// header line -- `tree`, `parent`, `author`, `committer`, `encoding`, anything else git or a
+/// hook ever writes there -- is kept verbatim in `header_lines` (review round 2, M-3), in its
+/// original order, so [`build_commit`] only ever substitutes a `parent` line's id and otherwise
+/// reproduces the header exactly. Read as raw bytes (not decoded as UTF-8) so the message -- the
+/// one part of a commit object that need not be UTF-8 at all (an `encoding` header can say
+/// otherwise) -- survives untouched; the header is still treated as text, since every field read
+/// from it (the tree and parent ids) is git-controlled and always ASCII.
 fn read_commit(repo_git: &Path, id: &str) -> Result<Original> {
     let raw = git::run_bytes(repo_git, Some(repo_git), None, &["cat-file", "-p", id])
         .with_context(|| format!("cannot read commit {id} in the task repo"))?;
@@ -207,57 +211,33 @@ fn read_commit(repo_git: &Path, id: &str) -> Result<Original> {
 
     let mut tree = None;
     let mut parents = Vec::new();
-    let mut author_line = None;
-    let mut committer_line = None;
+    let mut header_lines = Vec::new();
+    let mut in_signature = false;
     for line in header.split('\n') {
         if line.starts_with(' ') {
+            if !in_signature {
+                header_lines.push(line.to_owned());
+            }
+            continue;
+        }
+        in_signature = line.starts_with("gpgsig ") || line.starts_with("gpgsig-sha256 ");
+        if in_signature {
             continue;
         }
         if let Some(v) = line.strip_prefix("tree ") {
             tree = Some(v.to_owned());
         } else if let Some(v) = line.strip_prefix("parent ") {
             parents.push(v.to_owned());
-        } else if let Some(v) = line.strip_prefix("author ") {
-            author_line = Some(v.to_owned());
-        } else if let Some(v) = line.strip_prefix("committer ") {
-            committer_line = Some(v.to_owned());
         }
+        header_lines.push(line.to_owned());
     }
     let tree = tree.with_context(|| format!("commit {id} has no tree header"))?;
-    let author_line = author_line.with_context(|| format!("commit {id} has no author header"))?;
-    let committer_line =
-        committer_line.with_context(|| format!("commit {id} has no committer header"))?;
-    let (author_name, author_email, author_date) = split_identity(&author_line)
-        .with_context(|| format!("commit {id}'s author header is unexpected: {author_line:?}"))?;
-    let (committer_name, committer_email, committer_date) = split_identity(&committer_line)
-        .with_context(|| {
-            format!("commit {id}'s committer header is unexpected: {committer_line:?}")
-        })?;
     Ok(Original {
         tree,
         parents,
-        author_name,
-        author_email,
-        author_date,
-        committer_name,
-        committer_email,
-        committer_date,
+        header_lines,
         message,
     })
-}
-
-/// Splits a `author`/`committer` header value (`Name <email> timestamp tz`) into its name, email
-/// and `timestamp tz` (the exact form `GIT_AUTHOR_DATE`/`GIT_COMMITTER_DATE` accept).
-fn split_identity(line: &str) -> Result<(String, String, String)> {
-    let open = line.rfind('<').context("no `<` in the identity line")?;
-    let close = line[open..]
-        .find('>')
-        .map(|i| i + open)
-        .context("no `>` in the identity line")?;
-    let name = line[..open].trim_end().to_owned();
-    let email = line[open + 1..close].to_owned();
-    let date = line[close + 1..].trim().to_owned();
-    Ok((name, email, date))
 }
 
 /// Defangs `message` (raw commit-message bytes, not necessarily valid UTF-8 -- issue 244's
@@ -326,9 +306,11 @@ fn push_chars(text: &str, base: usize, decoded: &mut String, spans: &mut Vec<(us
     }
 }
 
-/// Builds a new commit object with `original`'s tree and identity, `parents` (already rebuilt
-/// where they needed to be) and `message`, and writes it (`git hash-object -t commit -w
-/// --stdin`); returns its id. Nothing is written to any ref here.
+/// Builds a new commit object with `original`'s header -- every line verbatim except a `parent`
+/// line, replaced in place with the matching entry of `parents` (already rebuilt where they
+/// needed to be, in the same order `original.parents`/`header_lines` has them) -- and `message`,
+/// and writes it (`git hash-object -t commit -w --stdin`); returns its id. Nothing is written to
+/// any ref here.
 ///
 /// Built and hashed directly, rather than through `git commit-tree -F <file>`: `commit-tree`
 /// quietly reencodes a message that isn't valid UTF-8 (issue 244's encoding edge case) even when
@@ -348,22 +330,20 @@ fn build_commit(
         check_object_exists(repo_git, parent, "commit")?;
     }
 
-    let mut object = format!("tree {}\n", original.tree).into_bytes();
-    for parent in parents {
-        object.extend_from_slice(format!("parent {parent}\n").as_bytes());
+    let mut object = Vec::new();
+    let mut rebuilt_parents = parents.iter();
+    for line in &original.header_lines {
+        if line.starts_with("parent ") {
+            let parent = rebuilt_parents
+                .next()
+                .expect("one rebuilt parent per original `parent` header line");
+            object.extend_from_slice(format!("parent {parent}\n").as_bytes());
+        } else {
+            object.extend_from_slice(line.as_bytes());
+            object.push(b'\n');
+        }
     }
-    object.extend_from_slice(
-        format!(
-            "author {} <{}> {}\ncommitter {} <{}> {}\n\n",
-            original.author_name,
-            original.author_email,
-            original.author_date,
-            original.committer_name,
-            original.committer_email,
-            original.committer_date,
-        )
-        .as_bytes(),
-    );
+    object.push(b'\n');
     object.extend_from_slice(message);
 
     let out = git::run_with_stdin(
@@ -607,6 +587,33 @@ mod tests {
         expected.extend_from_slice("\u{200b}".as_bytes());
         expected.extend_from_slice(b" #12\n");
         assert_eq!(message, expected.as_slice(), "{message:?}");
+    }
+
+    /// Review round 2, M-3: issue 244 requires the delivered branch to equal the agent's own
+    /// commit, id for id, whenever nothing in its message needs a change. A non-signature header
+    /// other than the ones `rebuild` happens to look at by name (`encoding`, say) must survive
+    /// too, or that guarantee breaks for every commit that carries one.
+    #[test]
+    fn an_unchanged_message_with_an_encoding_header_keeps_its_exact_id() {
+        let (_tmp, dir) = repo();
+        let empty_tree = git(&dir, &["hash-object", "-t", "tree", "--stdin"]);
+        let base = git(&dir, &["commit-tree", &empty_tree, "-m", "base"]);
+        git(&dir, &["update-ref", "refs/heads/main", &base]);
+        git(&dir, &["update-ref", "refs/heads/issue-4", &base]);
+        // No closing reference or mention anywhere, so `defang` has nothing to change.
+        let mut raw = Vec::new();
+        raw.extend_from_slice(format!("tree {empty_tree}\nparent {base}\n").as_bytes());
+        raw.extend_from_slice(
+            b"author t <t@t> 1700000000 +0000\ncommitter t <t@t> 1700000000 +0000\n\
+              encoding ISO-8859-1\n\n",
+        );
+        raw.extend_from_slice(b"caf\xe9 plain message\n");
+        let agent = write_commit_object(&dir, &raw);
+        git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &agent]);
+
+        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
+
+        assert_eq!(git(&dir, &["rev-parse", "refs/heads/issue-4"]), agent);
     }
 
     #[test]
