@@ -453,6 +453,18 @@ impl Record {
         }
     }
 
+    /// Where the agent's own commits start, as a revision `repo_git` itself can resolve (issue
+    /// 244, [`super::rewrite::rebuild`]): the commit a continued PR's branch started from, else
+    /// the base branch's own ref there (`repo_git` has no `origin/<base>`; that remote-tracking
+    /// ref only exists in the worker's clone of it, which [`scope_base`](Self::scope_base) names
+    /// instead). Always the same starting point `commits_ahead` and `changed_paths` use.
+    pub fn rewrite_start(&self) -> String {
+        match &self.continues {
+            Some(c) => c.base.clone(),
+            None => format!("refs/heads/{}", self.base),
+        }
+    }
+
     /// A task that has just been created: stage `prepared`, running.
     pub fn new(task: &NewTask, now: u64, process: Process) -> Self {
         Self {

@@ -13,6 +13,7 @@ pub mod record;
 pub mod repo;
 pub mod resume;
 pub mod review;
+pub mod rewrite;
 pub mod risk;
 pub mod runlog;
 pub mod select;

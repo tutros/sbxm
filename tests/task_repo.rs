@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use sbxm::task::repo::{self, Identity};
+use sbxm::task::rewrite;
 
 /// Whether a fixture git run should be tried again: it failed, and said `Permission denied`. A run
 /// that worked is never repeated whatever it printed: git can report a file it could not write and
@@ -517,9 +518,11 @@ fn tip(repo_git: &Path, branch: &str) -> String {
     git(repo_git, &["rev-parse", &format!("refs/heads/{branch}")])
 }
 
-/// Collects the bundle the sandbox left in the workspace at `.sbxm-task/branch.bundle`.
+/// Collects the bundle the sandbox left in the workspace at `.sbxm-task/branch.bundle`, then
+/// rebuilds the delivered branch from it (issue 244), matching what `pipeline.rs` does.
 fn collect(f: &Fixture, cap: u64) -> anyhow::Result<()> {
-    repo::fetch_bundle(&f.repo_git, &f.workspace, "issue-4", cap)
+    repo::fetch_bundle(&f.repo_git, &f.workspace, "issue-4", cap)?;
+    rewrite::rebuild(&f.repo_git, "refs/heads/main", "issue-4")
 }
 
 /// The path the sandbox writes the bundle to, with its folder made.

@@ -19,6 +19,7 @@ use super::record::{
 };
 use super::repo::{self, AgentFile, BUNDLE_CAP, Existing, Identity};
 use super::review;
+use super::rewrite;
 use super::risk;
 use super::select::{self, Selection};
 use crate::backend::{CreateSpec, ExecSpec, SandboxBackend, Stdin};
@@ -1684,7 +1685,10 @@ enum Bundled {
 }
 
 /// The fixed bundle command runs in the sandbox; the bundle is verified and fetched into
-/// `repo.git` on the host. Nothing runs git in the agent's clone here (decision 159).
+/// `repo.git` on the host, onto the agent's own ref, and the delivered branch
+/// (`refs/heads/<branch>`) is then rebuilt from it with every closing reference and mention
+/// defanged (issue 244), so the gates, the review and `finish` always see exactly what would be
+/// pushed. Nothing runs git in the agent's clone here (decision 159).
 fn bundle_and_fetch(
     backend: &dyn SandboxBackend,
     prepared: &Prepared,
@@ -1717,6 +1721,7 @@ fn bundle_and_fetch(
     if out.exit_code == Some(0) {
         let repo_git = prepared.meta.join("repo.git");
         repo::fetch_bundle(&repo_git, &prepared.workspace, &branch, BUNDLE_CAP)?;
+        rewrite::rebuild(&repo_git, &prepared.record.rewrite_start(), &branch)?;
         Ok(Bundled::Commits(prepared.record.commits_ahead(&repo_git)?))
     } else if out.stderr.contains("empty bundle") {
         Ok(Bundled::Nothing)

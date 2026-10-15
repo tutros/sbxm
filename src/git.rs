@@ -171,6 +171,31 @@ fn failure_message(args: &[&str], out: &Output) -> String {
     )
 }
 
+/// Like [`run`], but `identity` (`GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_AUTHOR_DATE`,
+/// `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL`, `GIT_COMMITTER_DATE`) replaces the sbxm baseline
+/// identity [`command`] forces, for this one call: rebuilding an agent's commit (issue 244) must
+/// carry its original author and committer exactly, unlike every other hardened call.
+pub(crate) fn run_with_identity(
+    cwd: &Path,
+    git_dir: Option<&Path>,
+    work_tree: Option<&Path>,
+    args: &[&str],
+    identity: &[(&str, &str)],
+) -> Result<String> {
+    let out = retry(TRIES, FIRST_DELAY, || {
+        let mut cmd = command(cwd, git_dir, work_tree, args, std::env::vars_os());
+        for (key, value) in identity {
+            cmd.env(key, value);
+        }
+        cmd.output()
+            .context("cannot run `git`; is Git installed and on PATH?")
+    })?;
+    if !out.status.success() {
+        bail!(failure_message(args, &out));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
+}
+
 /// The `GIT_*` variables that keep working for [`user_output`]: where the user's own
 /// config and credentials come from. Every other one (`GIT_DIR`, `GIT_CONFIG_COUNT`, ...)
 /// could point git elsewhere or make it run code, so it is dropped.
@@ -582,6 +607,44 @@ mod tests {
 
         assert!(started.elapsed() < Duration::from_secs(10));
         assert!(format!("{err:#}").contains("did not finish"), "{err:#}");
+    }
+
+    #[test]
+    fn run_with_identity_overrides_the_forced_author_and_committer() {
+        let identity = [
+            ("GIT_AUTHOR_NAME", "Agent Alice"),
+            ("GIT_AUTHOR_EMAIL", "alice@example.com"),
+            ("GIT_AUTHOR_DATE", "1700000000 +0000"),
+            ("GIT_COMMITTER_NAME", "Agent Bob"),
+            ("GIT_COMMITTER_EMAIL", "bob@example.com"),
+            ("GIT_COMMITTER_DATE", "1800000000 +0000"),
+        ];
+
+        let author = run_with_identity(
+            Path::new("."),
+            None,
+            None,
+            &["var", "GIT_AUTHOR_IDENT"],
+            &identity,
+        )
+        .unwrap();
+        let committer = run_with_identity(
+            Path::new("."),
+            None,
+            None,
+            &["var", "GIT_COMMITTER_IDENT"],
+            &identity,
+        )
+        .unwrap();
+
+        assert_eq!(
+            author.trim(),
+            "Agent Alice <alice@example.com> 1700000000 +0000"
+        );
+        assert_eq!(
+            committer.trim(),
+            "Agent Bob <bob@example.com> 1800000000 +0000"
+        );
     }
 
     #[test]
