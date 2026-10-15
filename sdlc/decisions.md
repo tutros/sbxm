@@ -425,6 +425,125 @@ The cap bounds sbxm's own copies, not git's: the fetch and the range walk still 
 check, at about one byte of memory per unpacked byte, as the fetch already did for every object before issue 244.
 Limiting the unpacked size of a bundle's objects is deferred to issue 252 (PR 250 review round 3, M-1).
 
+## Round 9: templates milestone planning (2026-10-15, issue 211)
+
+Planning interview for sandboxes created from a prebuilt `sbx` template, one question at a time, from spike S11
+(`sdlc/spikes/S11.md`).
+
+199. **What goes in a template (2026-10-15, the user agreed with the recommendation):** by default a template holds
+the tools only (S11's T0: the profile's install steps run once, in the build sandbox). With `--warm <repo>` it also
+holds that repo's crate registry (`cargo fetch --locked`), the ONNX Runtime cache and the compiled dependencies from
+one real build, with the repo's own build output removed (S11's T2, about 2.6 GB on the sandbox drive). The whole
+build folder is never baked (5.2 GB, mostly rebuilt anyway). Why: only a warm template lets a sandbox run this repo's
+gates with an empty allow list (the strict mode asked for on 2026-10-02), and it saves about 38 s on each sandbox's
+first gate run; tools only keeps the faster start for a profile not tied to one repo. A warm template is tied to the
+repo's `Cargo.lock`; what happens when the lock file changes is decided separately.
+
+200. **Strict mode (2026-10-15, the user agreed with the recommendation):** strict is a profile setting. A sandbox
+of a strict profile (a) runs no install steps: everything comes from the template; (b) gets only the profile's
+runtime allow list (empty for this repo), while the build allow list is used only to build the template; (c) is
+refused when its template is missing, never quietly created with installs instead. Out of scope: the Claude kit's own
+`apt-get update` at startup (blocked by egress, the sandbox starts anyway, S11) and forcing cargo's offline mode (a
+profile can set `CARGO_NET_OFFLINE` in its own env). Why: the user does not want workers installing unsanctioned
+software or profiles' host lists creeping (2026-10-02); a quiet fallback would undo both.
+
+201. **A template is built only on the user's command (2026-10-15, the user agreed with the recommendation):** only
+`sbxm template build` builds one; sbxm never builds or rebuilds a template on its own. A missing or stale template
+gives the refusal of [200] (strict) or today's installs (not strict), and the message names the exact `template
+build` command. The build goes through the free-disk check of [194] like every command that creates a sandbox, and
+there is no rebuild schedule. Why: a build takes minutes, opens the wide build allow list and adds about 2.6 GB on
+the sandbox drive, so it stays a deliberate step.
+
+202. **A profile opts in with a `[template]` table (2026-10-15, the user agreed with the recommendation):** the
+table's presence opts the profile in; it has `strict` (default `false`: use a matching template when one exists,
+else today's installs; `true`: [200]) and `allow`, the runtime allow list of sandboxes created from the template,
+which is **required** (an absent list would silently mean either everything or nothing). `network.allow` keeps its
+meaning; for an opted-in profile it is the build allow list. A profile without the table behaves exactly as today.
+`--warm <repo>` stays a flag of `template build` [199], not a profile key, because a profile does not know the repo.
+
+```toml
+[template]
+strict = true
+allow = []
+```
+
+203. **When a template is stale, and what then (2026-10-15, the user agreed with the recommendation):** three
+signals, each with one response. (a) The profile's build part changed (install steps, build allow list, harness kit):
+the template hash in the tag no longer matches; a strict profile is refused with the `template build` command named,
+a non-strict one gets today's installs and one warning line. (b) A warm template's `Cargo.lock` differs from the
+workspace's `Cargo.lock` when the sandbox is created (compared by the lock file hash in sbxm's template record):
+the same two responses, naming `template build --warm`. (c) The template is older than 14 days (Claude Code is
+frozen at the version it was saved with): `doctor` warns, nothing refuses. Runtime-only profile changes (env, the
+runtime `allow`, instructions) do not make a template stale; they go in the kit as today. The lock file check is
+cargo-only (`Cargo.lock` at the workspace root) until a second package manager is needed. A worker that changes
+`Cargo.lock` mid-task still fails clearly inside the sandbox; that is workflow gap G1 (per-task egress), out of
+scope here.
+
+204. **Harnesses in scope, a Pi spike, and no more Gemini work (2026-10-15, the user's decision):** templates cover
+`claude` and `codex` in this milestone; `codex` gets a real-`sbx` test with `-t` as the first slice (S11 tested only
+`claude`). Spike **S15** checks whether templates work with `pi`, whose `agent_arg` is a kit of its own [73]: the
+user expects to use sbxm with Pi more once the main features are built, so Pi joins the milestone if S15 passes.
+`antigravity` and `gemini` are refused with "templates are not supported for this harness yet". **Gemini is dropped
+from future work** (the user, 2026-10-15; upstream deprecated Gemini CLI and the built-in agent had no working Google
+network permissions here, [103]): no new feature supports it. Whether `--harness gemini` is removed from the code is
+a separate issue, the one [103] left unfiled.
+
+205. **Template disk use and cleanup (2026-10-15, the user agreed with the recommendation):** (a) `template build`
+removes the previous template of the same profile and harness once the new one is saved, unless one of sbxm's
+sandboxes or tasks still records it, in which case it stays and the build says so; (b) `template rm` refuses while
+a template is in use and names the sandboxes and tasks using it (from `state.json` and every `task.json`), because
+`sbx template rm --force` does not refuse (S11, question 8); (c) `doctor` lists each template with its size and age
+and the total, beside the free-space line of [194]; (d) nothing else removes a template: `rm`, `task rm` and `task
+rm --merged` only stop recording it as in use. Why: 1.3 to 2.6 GB per template on the drive that already ran out,
+and a rebuild makes a new tag [203].
+
+206. **Template commands and users (2026-10-15, the user agreed with the recommendation):** new commands `sbxm
+template build <profile> [--harness h] [--warm <repo>]` (`--harness` defaults to `claude`), `sbxm template ls` and
+`sbxm template rm <profile> [--harness h]`. Every command that creates a sandbox follows the profile's opt-in [202]:
+`new`, `open --rebuild`, every `sbxm task` sandbox (worker, reviewer, fix rounds) and `sbxm run`'s contestants and
+judge; no `--no-template` flag until a need shows. sbxm's template records live in
+`<base>/.sbxm/templates/<profile>-<harness>.json` (tag, template hash, lock file hash, `sbx` version, size, date),
+beside the other machine-local state, not in the config dir. The template a sandbox was created from is recorded in
+`state.json` and `task.json` (what [205](b) checks). For a task, the lock file check of [203](b) reads `Cargo.lock`
+from the task's base commit in its `repo.git`, so no host git runs in the agent's clone [159]. Defining sandboxes
+as today stays fully supported (the user asked, 2026-10-15): a profile without `[template]` is unchanged [202], and
+a non-strict profile falls back to today's installs.
+
+207. **What `template build --warm <repo>` runs, for any language (2026-10-15, plan choice P1, the user agreed with
+the revised recommendation after asking how non-Rust repos would work; changes the cargo-only part of [203]):** the
+repo is copied into the build workspace like a seed (no links, no `.git`, no `target`). The repo may declare its
+warm-up in its `sbxm-task.toml`: `[warm] commands = [...]` (run in order with `sh -c` in the workspace, each under
+the in-sandbox timeout like a gate) and `lock_files = [...]` (paths in the repo, hashed into the record). Without
+`[warm]`, a repo with a `Cargo.toml` gets the built-in cargo steps: `cargo fetch --locked`, `cargo clippy
+--all-targets --locked` and `cargo test --no-run --locked` with `CARGO_PROFILE_DEV_DEBUG=0
+CARGO_TARGET_DIR=/tmp/target` (the default gates' environment, so sandboxes reuse the compiled dependencies), then
+`cargo clean -p <pkg>` for each package `cargo metadata --no-deps` names, with `lock_files = ["Cargo.lock"]`; any
+other repo is refused, naming `[warm]`. A failing step saves nothing. The staleness check of [203](b) hashes the
+recorded `lock_files` instead of `Cargo.lock` only. Why: the same pattern as the task gates' cargo defaults, and it
+keeps strict mode open to non-Rust repos. Limit: a template captures the home folder and `/tmp`, not the workspace
+(S11, question 1), so warm-up commands must fill caches outside the repo (`~/.npm`, `~/.cache/uv`); a `node_modules`
+or `.venv` built in the workspace is not saved.
+
+208. **Config drift with templates (2026-10-15, plan choice P2, the user agreed with the recommendation):** a sandbox
+records the template it was created from, or none [206]. `open`'s drift check [55] recomputes the hash of the same
+variant: the baked kit for a sandbox from a template, the install kit otherwise. So a template built or removed later
+is never drift. When a non-strict sandbox was created with installs and a matching template now exists, `open`
+prints one hint naming `open --rebuild`; it does not refuse.
+
+209. **The template hash and tag (2026-10-15, plan choice P3, the user agreed with the recommendation):** the
+template hash covers the profile's `setup.install`, `network.allow` and `network.deny` (the build allow list), the
+harness with its pinned `agent_kit` [104], and whether the template is warm; this is the hash of [203](a). The lock
+file hash and the warm commands [207] are in the record, not the tag: the lock hash is checked at create time
+[203](b); the warm commands are recorded but not checked, since a create cannot see the repo's `[warm]`, so changed
+warm commands need a manual `template build --warm`. Tag: `sbxm-<profile>-<harness>:<first 12 hex of the hash>`
+(profile names are already `[a-z0-9-]`, valid in an image name).
+
+210. **Where a template is built (2026-10-15, plan choice P4, the user agreed with the recommendation):** the build
+sandbox is `sbxm-template-<profile>-<harness>`, its workspace `<base>/.sbxm/templates/build/<profile>-<harness>/`
+(never on `C:`, [56]). Both are removed after the build whether it passes or fails, and a `template build` after an
+interrupted one removes their leftovers first. No agent ever runs in a build sandbox: its home folder goes into the
+image, so agent sessions and transcripts would too (S11, risk 6).
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.
@@ -434,6 +553,7 @@ Limiting the unpacked size of a bundle's objects is deferred to issue 252 (PR 25
 - **S10 (M2b, git bundle from a sandbox):** Done 2026-10-01 (passed), recorded in decision 161.
 - **S8 (GitHub access from a sandbox):** out of M2b [141]; written 2026-09-27, not run; spec `sdlc/spikes/S8.md`. Can issue workers [80–82] push, open PRs and edit issues through `sbx`'s proxy with a repo-scoped token, and do branch protection, no Workflows permission and a narrow allowlist hold? Q1–Q2 need no token; Q3–Q4 need a scratch repo and a stored `github` secret, which the repo owner doesn't plan to set up (a fork's owner may).
 - **S5 (M2):** Headless runs per harness inside `sbx`. Done: Claude, Codex, Antigravity (see "Spike results" below) [93][103]. Gemini CLI is blocked/deprecated upstream and dropped as an M2a harness [103]. Pi deferred. Prompt in, run to completion, extract answer + transcript + token usage (decision 13). Leads: the v3 kit spec has `agent-sessions@1` (`prompt: ["-p", "{{.Prompt}}"]` for claude), but `sbx` 0.43 has no CLI verb for it. Route used: `sbx exec <sandbox> <harness-cli> <headless flags>` (Claude, Codex) or `sbx run --kit <pinned> <agent> <workspace>` + `sbx exec` (Antigravity).
+- **S15 (templates milestone, Pi):** not run yet [204]. Does a template saved from a `pi` sandbox work with `sbx create -t TAG --pull never` plus sbxm's kits, given that Pi's `agent_arg` is a kit reference of its own [73]: does the sandbox start, does Pi answer headless, do the always-loaded `AGENTS.md` and the provider secret still work, and does the kit's allow list apply? Decides whether Pi joins the milestone.
 
 ## Spike results (2026-09-24, sbx v0.43.0, Windows)
 
