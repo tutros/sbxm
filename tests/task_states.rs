@@ -90,27 +90,62 @@ fn the_generated_table_matches_the_spec() {
     assert_eq!(spec_table, generated_trimmed);
 }
 
+/// `git <args>` in `repo`, for [`crlf_checkout`]. The machine's git config and inherited `GIT_*`
+/// variables are switched off (as `src/git.rs` does), so a global `core.autocrlf`, a filter or a
+/// `GIT_DIR` from a hook can't change what the checkout writes (issue 212).
+fn isolated_git(repo: &Path, args: &[&str]) {
+    let output = std::process::Command::new("git")
+        .current_dir(repo)
+        .args(["-c", "core.autocrlf=true", "-c", "core.safecrlf=false"])
+        .args(args)
+        .env_clear()
+        .envs(std::env::vars_os().filter(|(name, _)| {
+            !name
+                .to_string_lossy()
+                .to_ascii_uppercase()
+                .starts_with("GIT_")
+        }))
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .output()
+        .expect("cannot run `git`; is Git installed and on PATH?");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+/// `text` as a CRLF checkout writes it: committed to the index of a fresh repository under `tmp`,
+/// then checked out by `git checkout-index` with `core.autocrlf=true`. The repository is the
+/// test's own, so this works in a copy of the project without `.git` (issue 212).
+fn crlf_checkout(tmp: &Path, text: &str) -> String {
+    let repo = tmp.join("repo");
+    fs::create_dir(&repo).unwrap();
+    isolated_git(&repo, &["init", "--quiet"]);
+    fs::write(repo.join("spec.md"), text.replace("\r\n", "\n")).unwrap();
+    isolated_git(&repo, &["add", "spec.md"]);
+    let out = tmp.join("out");
+    isolated_git(
+        &repo,
+        &[
+            "checkout-index",
+            &format!("--prefix={}/", out.display()),
+            "--",
+            "spec.md",
+        ],
+    );
+    fs::read_to_string(out.join("spec.md")).unwrap()
+}
+
 /// Reproduces issue 138: on a Windows checkout the spec file has CRLF line endings. `git
 /// checkout-index` with `core.autocrlf=true` performs that same conversion, so this test exercises
 /// genuinely CRLF file content rather than a synthetic one.
 #[test]
 fn the_generated_table_matches_the_spec_on_a_crlf_checkout() {
+    let spec = fs::read_to_string(Path::new("sdlc/specs/task-state-machine.md")).unwrap();
     let tmp = tempfile::tempdir().unwrap();
-    let status = std::process::Command::new("git")
-        .args([
-            "-c",
-            "core.autocrlf=true",
-            "checkout-index",
-            &format!("--prefix={}/", tmp.path().display()),
-            "--",
-            "sdlc/specs/task-state-machine.md",
-        ])
-        .status()
-        .unwrap();
-    assert!(status.success(), "git checkout-index failed");
-
-    let crlf_spec =
-        fs::read_to_string(tmp.path().join("sdlc/specs/task-state-machine.md")).unwrap();
+    let crlf_spec = crlf_checkout(tmp.path(), &spec);
     assert!(
         crlf_spec.contains("\r\n"),
         "checkout-index did not produce CRLF line endings"
