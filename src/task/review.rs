@@ -41,6 +41,80 @@ pub(crate) fn defang_mentions(text: &str) -> String {
     out
 }
 
+/// The words GitHub reads as closing an issue or PR when one is referenced right after them.
+const CLOSING_KEYWORDS: [&str; 9] = [
+    "resolves", "resolved", "resolve", "closes", "closed", "close", "fixes", "fixed", "fix",
+];
+
+/// A closing keyword at the start of a word (`Fixes`, `CLOSES:`, any case) followed by a
+/// reference (`#N`, `owner/repo#N` or a URL) would close that issue or PR when the PR merges; a
+/// zero-width space after the keyword keeps the text readable and the issue open. A keyword inside
+/// a word (`prefix #12`) or followed by anything else is left alone.
+pub(crate) fn defang_closing_refs(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out = String::with_capacity(text.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let at_word_start = i == 0 || !chars[i - 1].is_alphanumeric();
+        let keyword = CLOSING_KEYWORDS
+            .iter()
+            .map(|k| k.chars().count())
+            .find(|&len| at_word_start && is_keyword_at(&chars, i, len));
+        match keyword {
+            Some(len) if is_reference_at(&chars, after_separator(&chars, i + len)) => {
+                out.extend(&chars[i..i + len]);
+                out.push('\u{200b}');
+                i += len;
+            }
+            _ => {
+                out.push(chars[i]);
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+/// Whether `chars[at..at + len]` is a whole closing keyword, in any case.
+fn is_keyword_at(chars: &[char], at: usize, len: usize) -> bool {
+    let Some(word) = chars.get(at..at + len) else {
+        return false;
+    };
+    let word: String = word.iter().collect::<String>().to_ascii_lowercase();
+    CLOSING_KEYWORDS.contains(&word.as_str())
+        && chars.get(at + len).is_none_or(|c| !c.is_alphanumeric())
+}
+
+/// Where a reference after a keyword ending at `at` would start: past an optional `:` and spaces.
+fn after_separator(chars: &[char], mut at: usize) -> usize {
+    if chars.get(at) == Some(&':') {
+        at += 1;
+    }
+    while chars.get(at).is_some_and(|c| c.is_whitespace()) {
+        at += 1;
+    }
+    at
+}
+
+/// Whether the word at `at` is an issue reference: `#N`, `owner/repo#N` or a URL.
+fn is_reference_at(chars: &[char], at: usize) -> bool {
+    let word: String = chars[at.min(chars.len())..]
+        .iter()
+        .take_while(|c| !c.is_whitespace())
+        .collect();
+    let numbered = |hash: usize| word[hash + 1..].starts_with(|c: char| c.is_ascii_digit());
+    let lower = word.to_ascii_lowercase();
+    word.match_indices('#').any(|(hash, _)| numbered(hash))
+        || lower.starts_with("http://")
+        || lower.starts_with("https://")
+}
+
+/// Agent text made safe to put in a PR description: no mentions and no closing references
+/// ([`defang_mentions`], [`defang_closing_refs`]).
+pub(crate) fn defang(text: &str) -> String {
+    defang_closing_refs(&defang_mentions(text))
+}
+
 /// The comment posted on a pull request: `risk_section` (decision 176(b), rendered by
 /// [`super::risk::render_section`]) first, then a line naming the review, then the reviewer's
 /// text; both the risk section and the review text have mentions neutralised, and the review
