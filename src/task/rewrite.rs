@@ -51,6 +51,12 @@ struct Original {
 /// *successful* [`rebuild`] does. Reading it tells this call apart from a delivered branch moved
 /// by something other than sbxm's own last rebuild, even when a fetch happened in between without
 /// a rebuild ever following it through (a crash, or a failure since fixed).
+/// The largest commit object (header plus message) [`rebuild`] reads (PR 250 review, M-1): a
+/// highly compressible message can be tiny in the bundle and huge once read, and rebuilding holds
+/// several copies of it, so a bigger commit is refused before it is read. A real commit is never
+/// close to this.
+pub const MAX_COMMIT_BYTES: u64 = 1024 * 1024;
+
 fn rebuilt_marker(branch: &str) -> String {
     format!("refs/sbxm/rebuilt/{branch}")
 }
@@ -218,6 +224,18 @@ fn commit_range(repo_git: &Path, start: &str, tip: &str, branch: &str) -> Result
 /// author name need not be UTF-8 either); only the tree and parent ids, which git always writes
 /// as ASCII hex, are decoded.
 fn read_commit(repo_git: &Path, id: &str) -> Result<Original> {
+    let size = git::run(repo_git, Some(repo_git), None, &["cat-file", "-s", id])
+        .with_context(|| format!("cannot read the size of commit {id} in the task repo"))?;
+    let size: u64 = size
+        .trim()
+        .parse()
+        .with_context(|| format!("git gave no size for commit {id}"))?;
+    if size > MAX_COMMIT_BYTES {
+        bail!(
+            "commit {id} is {size} bytes, over the {MAX_COMMIT_BYTES}-byte limit for one commit; \
+             ask the agent for a shorter commit message"
+        );
+    }
     let raw = git::run_bytes(repo_git, Some(repo_git), None, &["cat-file", "-p", id])
         .with_context(|| format!("cannot read commit {id} in the task repo"))?;
     let sep = raw
@@ -856,6 +874,55 @@ mod tests {
             .position(|w| w == b"\n\n")
             .expect("header/message separator");
         assert_eq!(&full[..sep], header.as_slice());
+    }
+
+    /// PR 250 review, M-1: a highly compressible message can be tiny in the bundle and huge once
+    /// read, and rebuilding holds several copies of it. A commit object over [`MAX_COMMIT_BYTES`]
+    /// is refused before it is read, and the delivered branch stays where it was.
+    #[test]
+    fn a_commit_over_the_size_cap_is_refused_before_it_is_read() {
+        let (_tmp, dir) = repo();
+        let empty_tree = git(&dir, &["hash-object", "-t", "tree", "--stdin"]);
+        let base = git(&dir, &["commit-tree", &empty_tree, "-m", "base"]);
+        git(&dir, &["update-ref", "refs/heads/main", &base]);
+        git(&dir, &["update-ref", "refs/heads/issue-4", &base]);
+        let header = format!(
+            "tree {empty_tree}\nparent {base}\nauthor t <t@t> 1700000000 +0000\ncommitter t <t@t> 1700000000 +0000\n\n"
+        );
+        let mut raw = header.into_bytes();
+        let fill = MAX_COMMIT_BYTES as usize + 1 - raw.len();
+        raw.resize(raw.len() + fill, b'a');
+        let agent = write_commit_object(&dir, &raw);
+        git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &agent]);
+
+        let err = format!(
+            "{:#}",
+            rebuild(&dir, "refs/heads/main", "issue-4").unwrap_err()
+        );
+
+        assert!(err.contains(&agent), "{err}");
+        assert_eq!(git(&dir, &["rev-parse", "refs/heads/issue-4"]), base);
+    }
+
+    #[test]
+    fn a_commit_of_exactly_the_size_cap_is_rebuilt() {
+        let (_tmp, dir) = repo();
+        let empty_tree = git(&dir, &["hash-object", "-t", "tree", "--stdin"]);
+        let base = git(&dir, &["commit-tree", &empty_tree, "-m", "base"]);
+        git(&dir, &["update-ref", "refs/heads/main", &base]);
+        git(&dir, &["update-ref", "refs/heads/issue-4", &base]);
+        let header = format!(
+            "tree {empty_tree}\nparent {base}\nauthor t <t@t> 1700000000 +0000\ncommitter t <t@t> 1700000000 +0000\n\n"
+        );
+        let mut raw = header.into_bytes();
+        let fill = MAX_COMMIT_BYTES as usize - raw.len();
+        raw.resize(raw.len() + fill, b'a');
+        let agent = write_commit_object(&dir, &raw);
+        git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &agent]);
+
+        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
+
+        assert_eq!(git(&dir, &["rev-parse", "refs/heads/issue-4"]), agent);
     }
 
     /// Crafts a commit object by hand (`git hash-object -t commit -w --stdin`), so a fake
