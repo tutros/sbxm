@@ -56,6 +56,47 @@ fn rm_yes_requires_purge() {
     assert!(stderr.contains("--purge"), "{stderr}");
 }
 
+/// Issue 202, decision 195 point 3: `--force` is refused together with `--merged`.
+#[test]
+fn task_rm_force_and_merged_conflict() {
+    let output = sbxm()
+        .args(["task", "rm", "--merged", "--force"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("--force"), "{stderr}");
+    assert!(stderr.contains("--merged"), "{stderr}");
+}
+
+/// `--dry-run` only makes sense with `--merged`.
+#[test]
+fn task_rm_dry_run_requires_merged() {
+    let output = sbxm()
+        .args(["task", "rm", "--issue", "1", "--dry-run"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("--dry-run"), "{stderr}");
+}
+
+/// `--issue` and `--merged` name different, mutually exclusive ways to pick what `task rm`
+/// removes.
+#[test]
+fn task_rm_issue_and_merged_conflict() {
+    let output = sbxm()
+        .args(["task", "rm", "--issue", "1", "--merged"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(stderr.contains("cannot be used with"), "{stderr}");
+}
+
 #[test]
 fn purge_without_terminal_refuses_and_deletes_nothing() {
     let tmp = tempfile::TempDir::new().unwrap();
