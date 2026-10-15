@@ -434,8 +434,16 @@ pub fn archive_task(base_dir: &Path, id: &str) -> Result<PathBuf> {
             continue;
         }
         let dest = archive.join(&name);
+        // A copy that fails leaves the archive half-written, which a rerun refuses (it differs
+        // from the task's records): the error names it, so the user can clear it first.
         fs::copy(&src, &dest)
-            .with_context(|| format!("cannot archive {} to {}", src.display(), dest.display()))?;
+            .with_context(|| format!("cannot archive {} to {}", src.display(), dest.display()))
+            .with_context(|| {
+                format!(
+                    "{} is incomplete; move or delete it, then run `sbxm task rm --merged` again",
+                    archive.display()
+                )
+            })?;
     }
     Ok(archive)
 }

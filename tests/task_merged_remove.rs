@@ -749,3 +749,65 @@ fn archiving_still_refuses_an_archive_that_differs_from_the_task() {
         "{err:#}"
     );
 }
+
+/// Keeps `path` unreadable until dropped: an exclusive share lock on Windows, no permissions on
+/// Unix (`None` when that can't stop a read here, e.g. running as root).
+struct Unreadable {
+    #[cfg(windows)]
+    _file: fs::File,
+    #[cfg(unix)]
+    path: std::path::PathBuf,
+}
+
+impl Unreadable {
+    #[cfg(windows)]
+    fn new(path: &Path) -> Option<Self> {
+        use std::os::windows::fs::OpenOptionsExt;
+        let file = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(path)
+            .unwrap();
+        Some(Self { _file: file })
+    }
+
+    #[cfg(unix)]
+    fn new(path: &Path) -> Option<Self> {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o000)).unwrap();
+        let guard = Self {
+            path: path.to_owned(),
+        };
+        fs::read(path).is_err().then_some(guard)
+    }
+}
+
+#[cfg(unix)]
+impl Drop for Unreadable {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(0o644));
+    }
+}
+
+/// PR 241 review round 4, M-1: a record that can't be copied leaves a half-written archive the
+/// rerun would refuse, so the error names that folder and says to move or delete it first.
+#[test]
+fn a_failed_copy_names_the_incomplete_archive_to_move_aside() {
+    let f = fixture();
+    finished_task(&f);
+    let Some(_lock) = Unreadable::new(&meta(&f).join("task.json")) else {
+        return;
+    };
+
+    let err = archive_task(&f.env.base_dir(), "issue-41").unwrap_err();
+
+    let message = format!("{err:#}");
+    let archive = archive_dir(&f.env.base_dir(), "issue-41");
+    assert!(
+        message.contains(&archive.display().to_string()),
+        "{message}"
+    );
+    assert!(message.contains("incomplete"), "{message}");
+    assert!(message.contains("move or delete"), "{message}");
+}
