@@ -82,7 +82,7 @@ pub fn rebuild(repo_git: &Path, start: &str, branch: &str) -> Result<()> {
     let marker = rebuilt_marker(branch);
     let last_rebuilt = resolve_optional(repo_git, &marker)?;
 
-    let ids = commit_range(repo_git, &start_id, &agent_tip)?;
+    let ids = commit_range(repo_git, &start_id, &agent_tip, branch)?;
     let mut rebuilt: HashMap<String, String> = HashMap::new();
     let mut new_tip = start_id.clone();
     for id in &ids {
@@ -155,9 +155,18 @@ fn resolve_optional(repo_git: &Path, rev: &str) -> Result<Option<String>> {
     Ok(Some(String::from_utf8_lossy(&out.stdout).trim().to_owned()))
 }
 
-/// The commits reachable from `tip` but not from `start`, oldest first and with every parent
-/// before its children (so a mapped parent is always ready when a merge commit needs it).
-fn commit_range(repo_git: &Path, start: &str, tip: &str) -> Result<Vec<String>> {
+/// The commits reachable from `tip` but not from `start` and not already reachable from any
+/// *other* branch or tag in `repo_git` (review round 2, M-2): a commit an agent-made merge brings
+/// in from a branch that already existed -- already on GitHub, or another task's own -- is not
+/// the agent's to rewrite even though it is reachable from `tip`, so it is excluded here and
+/// kept as an out-of-range parent, exactly as it was, by [`rebuild`]'s own fallback for a parent
+/// that `rebuilt` never got an entry for. `branch` (the delivered branch being rebuilt) is
+/// excluded from that exclusion (`--exclude`): its own current tip is this same rebuild's
+/// previous result, which can be identical to one of today's original ids when nothing needed
+/// defanging, and that id is still the agent's own commit to rebuild again, not an outside one
+/// to protect. Oldest first and with every parent before its children (so a mapped parent is
+/// always ready when a merge commit needs it).
+fn commit_range(repo_git: &Path, start: &str, tip: &str, branch: &str) -> Result<Vec<String>> {
     let out = git::run(
         repo_git,
         Some(repo_git),
@@ -166,7 +175,13 @@ fn commit_range(repo_git: &Path, start: &str, tip: &str) -> Result<Vec<String>> 
             "rev-list",
             "--reverse",
             "--topo-order",
-            &format!("{start}..{tip}"),
+            tip,
+            "--exclude",
+            branch,
+            "--not",
+            start,
+            "--branches",
+            "--tags",
         ],
     )?;
     Ok(out.lines().map(str::to_owned).collect())
@@ -655,6 +670,72 @@ mod tests {
         );
         let side_message = git(&dir, &["log", "-1", "--format=%B", &p2]);
         assert!(side_message.contains("closes\u{200b} #5"), "{side_message}");
+    }
+
+    /// Review round 2, M-2: a merge's second parent can already be reachable from a branch that
+    /// has nothing to do with this task (one already on GitHub, or another task's own). That
+    /// commit is not the agent's to rewrite -- only a commit reachable *only* through the agent
+    /// ref is -- so the delivered merge must keep its exact id, closing reference and all.
+    #[test]
+    fn a_merge_parent_already_on_another_branch_keeps_its_exact_id() {
+        let (_tmp, dir) = repo();
+        let empty_tree = git(&dir, &["hash-object", "-t", "tree", "--stdin"]);
+        let base = git(&dir, &["commit-tree", &empty_tree, "-m", "base"]);
+        git(&dir, &["update-ref", "refs/heads/main", &base]);
+        git(&dir, &["update-ref", "refs/heads/issue-4", &base]);
+        let existing = git(
+            &dir,
+            &[
+                "commit-tree",
+                &empty_tree,
+                "-p",
+                &base,
+                "-m",
+                "existing fixes #8",
+            ],
+        );
+        // Already on another host branch before the agent ever touched this task -- not the
+        // agent's commit to rewrite, even though the agent's merge reaches it.
+        git(&dir, &["update-ref", "refs/heads/other-branch", &existing]);
+        let main_line = git(
+            &dir,
+            &[
+                "commit-tree",
+                &empty_tree,
+                "-p",
+                &base,
+                "-m",
+                "main line work",
+            ],
+        );
+        let merge = git(
+            &dir,
+            &[
+                "commit-tree",
+                &empty_tree,
+                "-p",
+                &main_line,
+                "-p",
+                &existing,
+                "-m",
+                "merge side, fixes #9",
+            ],
+        );
+        git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &merge]);
+
+        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
+
+        let rewritten = git(&dir, &["rev-parse", "refs/heads/issue-4"]);
+        assert_ne!(rewritten, merge);
+        let p1 = git(&dir, &["rev-parse", &format!("{rewritten}^1")]);
+        let p2 = git(&dir, &["rev-parse", &format!("{rewritten}^2")]);
+        assert_eq!(p1, main_line);
+        assert_eq!(
+            p2, existing,
+            "the pre-existing commit must keep its exact id"
+        );
+        let existing_message = git(&dir, &["log", "-1", "--format=%B", &p2]);
+        assert_eq!(existing_message, "existing fixes #8");
     }
 
     /// Crafts a commit object by hand (`git hash-object -t commit -w --stdin`), so a fake
