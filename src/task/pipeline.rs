@@ -1720,8 +1720,14 @@ fn bundle_and_fetch(
     )?;
     if out.exit_code == Some(0) {
         let repo_git = prepared.meta.join("repo.git");
+        let previous_agent_tip = repo::agent_tip(&repo_git, &branch)?;
         repo::fetch_bundle(&repo_git, &prepared.workspace, &branch, BUNDLE_CAP)?;
-        rewrite::rebuild(&repo_git, &prepared.record.rewrite_start(), &branch)?;
+        rewrite::rebuild(
+            &repo_git,
+            &prepared.record.rewrite_start(),
+            &branch,
+            previous_agent_tip.as_deref(),
+        )?;
         Ok(Bundled::Commits(prepared.record.commits_ahead(&repo_git)?))
     } else if out.stderr.contains("empty bundle") {
         Ok(Bundled::Nothing)

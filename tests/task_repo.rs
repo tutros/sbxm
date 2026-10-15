@@ -519,10 +519,18 @@ fn tip(repo_git: &Path, branch: &str) -> String {
 }
 
 /// Collects the bundle the sandbox left in the workspace at `.sbxm-task/branch.bundle`, then
-/// rebuilds the delivered branch from it (issue 244), matching what `pipeline.rs` does.
+/// rebuilds the delivered branch from it (issue 244), matching what `pipeline.rs` does: the agent
+/// ref's tip is read before the fetch, so `rebuild` can tell its own previous rebuild's result
+/// apart from a delivered branch moved by anything else since then.
 fn collect(f: &Fixture, cap: u64) -> anyhow::Result<()> {
+    let previous_agent_tip = repo::agent_tip(&f.repo_git, "issue-4")?;
     repo::fetch_bundle(&f.repo_git, &f.workspace, "issue-4", cap)?;
-    rewrite::rebuild(&f.repo_git, "refs/heads/main", "issue-4")
+    rewrite::rebuild(
+        &f.repo_git,
+        "refs/heads/main",
+        "issue-4",
+        previous_agent_tip.as_deref(),
+    )
 }
 
 /// The path the sandbox writes the bundle to, with its folder made.
@@ -567,6 +575,32 @@ fn a_second_bundle_on_top_of_the_first_is_accepted() {
         repo::commits_ahead(&f.repo_git, "main", "issue-4").unwrap(),
         2
     );
+}
+
+#[test]
+fn a_branch_moved_between_two_collections_is_refused() {
+    let f = fixture();
+    prepared(&f);
+    agent_commits(&f, &["a.txt"]);
+    make_bundle(&f, &["issue-4"]);
+    collect(&f, CAP).unwrap();
+
+    // Something other than sbxm moves the delivered branch before the fix round's bundle is
+    // collected.
+    let main_tree = git(&f.repo_git, &["rev-parse", "main^{tree}"]);
+    let elsewhere = git(&f.repo_git, &["commit-tree", &main_tree, "-m", "elsewhere"]);
+    git(
+        &f.repo_git,
+        &["update-ref", "refs/heads/issue-4", &elsewhere],
+    );
+
+    agent_commits(&f, &["fix.txt"]);
+    make_bundle(&f, &["issue-4"]);
+
+    let err = format!("{:#}", collect(&f, CAP).unwrap_err());
+
+    assert!(err.contains("issue-4"), "{err}");
+    assert_eq!(tip(&f.repo_git, "issue-4"), elsewhere);
 }
 
 #[test]

@@ -2022,7 +2022,7 @@ fn task_bundle_round_trip_against_real_sbx() {
     assert_eq!(out.exit_code, Some(0), "sandbox git failed: {}", out.stderr);
 
     repo::fetch_bundle(&repo_git, &workspace, "issue-4", BUNDLE_CAP).unwrap();
-    rewrite::rebuild(&repo_git, "refs/heads/main", "issue-4").unwrap();
+    rewrite::rebuild(&repo_git, "refs/heads/main", "issue-4", None).unwrap();
 
     assert_eq!(
         repo::commits_ahead(&repo_git, "main", "issue-4").unwrap(),

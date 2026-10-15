@@ -43,7 +43,21 @@ struct Original {
 /// commit from `start` (exclusive, a revision `repo_git` can resolve -- the task's base branch,
 /// or for a task continuing a PR the PR head it fetched) up to the agent ref's tip (inclusive) is
 /// rebuilt with a defanged message, and the delivered branch is moved to the result in one step.
-pub fn rebuild(repo_git: &Path, start: &str, branch: &str) -> Result<()> {
+///
+/// `previous_agent_tip` is the agent ref's own tip as it stood just before the fetch that brought
+/// in whatever is now beyond it (`None` when the agent ref didn't exist yet: a task's first
+/// rebuild, or an old task backfilling it from the delivered branch). Since a rebuild is
+/// deterministic, the delivered branch's tip right after the *previous* rebuild is exactly this
+/// rebuild's own result for `previous_agent_tip`; if the branch isn't at that value now, something
+/// other than the last rebuild moved it since, and this call refuses rather than adopting whatever
+/// it currently finds as its new baseline. With `previous_agent_tip` as `None` there is no earlier
+/// rebuild to compare against, so the branch's current value is trusted, as before.
+pub fn rebuild(
+    repo_git: &Path,
+    start: &str,
+    branch: &str,
+    previous_agent_tip: Option<&str>,
+) -> Result<()> {
     check_ref("branch", branch)?;
     let start_id = resolve(repo_git, start).with_context(|| {
         format!("cannot resolve {start} in the task repo; the task record may be damaged")
@@ -62,7 +76,7 @@ pub fn rebuild(repo_git: &Path, start: &str, branch: &str) -> Result<()> {
         .unwrap_or(Path::new("."))
         .join("rewrite-message");
     let mut rebuilt: HashMap<String, String> = HashMap::new();
-    let mut new_tip = start_id;
+    let mut new_tip = start_id.clone();
     for id in &ids {
         let original = read_commit(repo_git, id)?;
         let parents: Vec<String> = original
@@ -73,6 +87,23 @@ pub fn rebuild(repo_git: &Path, start: &str, branch: &str) -> Result<()> {
         let message = defang(&original.message);
         new_tip = build_commit(repo_git, &scratch, &original, &parents, &message)?;
         rebuilt.insert(id.clone(), new_tip.clone());
+    }
+
+    let expected_old_tip = match previous_agent_tip {
+        None => old_tip.clone(),
+        Some(prev) if prev == start_id => start_id.clone(),
+        Some(prev) => rebuilt.get(prev).cloned().with_context(|| {
+            format!(
+                "{prev} (the agent ref's tip before this rebuild) isn't an ancestor of {agent}'s \
+                 current tip; the task record may be damaged"
+            )
+        })?,
+    };
+    if expected_old_tip != old_tip {
+        bail!(
+            "{branch} in the task repo was moved by something other than sbxm's own last rebuild; \
+             nothing was changed"
+        );
     }
 
     move_branch(repo_git, branch, &new_tip, &old_tip)
@@ -285,7 +316,7 @@ mod tests {
         git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &agent]);
         git(&dir, &["update-ref", "refs/heads/issue-4", &base]);
 
-        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
+        rebuild(&dir, "refs/heads/main", "issue-4", None).unwrap();
 
         assert_eq!(git(&dir, &["rev-parse", "refs/heads/issue-4"]), agent);
     }
@@ -310,7 +341,7 @@ mod tests {
         git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &agent]);
         git(&dir, &["update-ref", "refs/heads/issue-4", &base]);
 
-        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
+        rebuild(&dir, "refs/heads/main", "issue-4", None).unwrap();
 
         let rewritten = git(&dir, &["rev-parse", "refs/heads/issue-4"]);
         assert_ne!(rewritten, agent);
@@ -344,7 +375,7 @@ mod tests {
         git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &agent]);
         git(&dir, &["update-ref", "refs/heads/issue-4", &base]);
 
-        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
+        rebuild(&dir, "refs/heads/main", "issue-4", None).unwrap();
 
         let rewritten = git(&dir, &["rev-parse", "refs/heads/issue-4"]);
         let message = git(&dir, &["log", "-1", "--format=%B", &rewritten]);
@@ -398,7 +429,7 @@ mod tests {
         git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &merge]);
         git(&dir, &["update-ref", "refs/heads/issue-4", &base]);
 
-        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
+        rebuild(&dir, "refs/heads/main", "issue-4", None).unwrap();
 
         let rewritten = git(&dir, &["rev-parse", "refs/heads/issue-4"]);
         assert_ne!(rewritten, merge);
@@ -459,7 +490,7 @@ mod tests {
         git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &agent]);
         git(&dir, &["update-ref", "refs/heads/issue-4", &base]);
 
-        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
+        rebuild(&dir, "refs/heads/main", "issue-4", None).unwrap();
 
         let rewritten = git(&dir, &["rev-parse", "refs/heads/issue-4"]);
         // The gpgsig header makes the original object differ from any unsigned rebuild of the
@@ -499,7 +530,7 @@ mod tests {
 
         let err = format!(
             "{:#}",
-            rebuild(&dir, "refs/heads/main", "issue-4").unwrap_err()
+            rebuild(&dir, "refs/heads/main", "issue-4", None).unwrap_err()
         );
 
         assert!(!err.is_empty());
@@ -528,9 +559,9 @@ mod tests {
         );
         git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &agent]);
 
-        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
+        rebuild(&dir, "refs/heads/main", "issue-4", None).unwrap();
         let first_tip = git(&dir, &["rev-parse", "refs/heads/issue-4"]);
-        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
+        rebuild(&dir, "refs/heads/main", "issue-4", None).unwrap();
         let second_tip = git(&dir, &["rev-parse", "refs/heads/issue-4"]);
 
         assert_ne!(first_tip, agent);
@@ -557,5 +588,45 @@ mod tests {
 
         assert!(message.contains("issue-4"), "{message}");
         assert_eq!(git(&dir, &["rev-parse", "refs/heads/issue-4"]), other);
+    }
+
+    /// Issue 244's required case, distinct from the CAS test above: a branch moved **since the
+    /// last rebuild**, not merely during this call. Passing the first rebuild's own
+    /// `previous_agent_tip` (`None`, its first ever) let that one through as always; the second
+    /// rebuild must recognise that the branch it now finds isn't what its own previous rebuild
+    /// left, and refuse rather than overwriting it.
+    #[test]
+    fn a_branch_moved_since_the_last_rebuild_is_refused() {
+        let (_tmp, dir) = repo();
+        let empty_tree = git(&dir, &["hash-object", "-t", "tree", "--stdin"]);
+        let base = git(&dir, &["commit-tree", &empty_tree, "-m", "base"]);
+        git(&dir, &["update-ref", "refs/heads/main", &base]);
+        git(&dir, &["update-ref", "refs/heads/issue-4", &base]);
+        let first = git(
+            &dir,
+            &["commit-tree", &empty_tree, "-p", &base, "-m", "first"],
+        );
+        git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &first]);
+        rebuild(&dir, "refs/heads/main", "issue-4", None).unwrap();
+
+        // Something other than sbxm moves the delivered branch before the next rebuild.
+        let elsewhere = git(&dir, &["commit-tree", &empty_tree, "-m", "elsewhere"]);
+        git(&dir, &["update-ref", "refs/heads/issue-4", &elsewhere]);
+
+        // A fix round's second bundle advances the agent ref further.
+        let second = git(
+            &dir,
+            &["commit-tree", &empty_tree, "-p", &first, "-m", "second"],
+        );
+        git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &second]);
+
+        let err = format!(
+            "{:#}",
+            rebuild(&dir, "refs/heads/main", "issue-4", Some(first.as_str())).unwrap_err()
+        );
+
+        assert!(err.contains("issue-4"), "{err}");
+        assert_eq!(git(&dir, &["rev-parse", "refs/heads/issue-4"]), elsewhere);
+        assert_eq!(git(&dir, &["rev-parse", "refs/sbxm/agent/issue-4"]), second);
     }
 }
