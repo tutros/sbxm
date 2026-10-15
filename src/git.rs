@@ -154,6 +154,22 @@ pub(crate) fn run(
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
+/// Like [`run`], but stdout is returned as raw bytes instead of being decoded (lossily) as UTF-8:
+/// for a caller that must not alter a byte sequence [`run`]'s `from_utf8_lossy` would otherwise
+/// replace (issue 244: a commit message in an encoding other than UTF-8).
+pub(crate) fn run_bytes(
+    cwd: &Path,
+    git_dir: Option<&Path>,
+    work_tree: Option<&Path>,
+    args: &[&str],
+) -> Result<Vec<u8>> {
+    let out = output(cwd, git_dir, work_tree, args)?;
+    if !out.status.success() {
+        bail!(failure_message(args, &out));
+    }
+    Ok(out.stdout)
+}
+
 /// `git <args>` failed with `out`. A still-permission-denied failure can only be the last of
 /// [`TRIES`] tries ([`retry`]'s invariant), so the message names that count; any other failure
 /// reads as it always has, since it was never retried.
@@ -171,23 +187,37 @@ fn failure_message(args: &[&str], out: &Output) -> String {
     )
 }
 
-/// Like [`run`], but `identity` (`GIT_AUTHOR_NAME`, `GIT_AUTHOR_EMAIL`, `GIT_AUTHOR_DATE`,
-/// `GIT_COMMITTER_NAME`, `GIT_COMMITTER_EMAIL`, `GIT_COMMITTER_DATE`) replaces the sbxm baseline
-/// identity [`command`] forces, for this one call: rebuilding an agent's commit (issue 244) must
-/// carry its original author and committer exactly, unlike every other hardened call.
-pub(crate) fn run_with_identity(
+/// Like [`run`], but `stdin_data` is piped to the command instead of giving it none: for
+/// `git hash-object -w --stdin`, which reads the object's content from stdin. Rebuilding a commit
+/// (issue 244) writes it this way, not through `commit-tree`, which quietly reencodes a message
+/// that isn't valid UTF-8 even when it is given verbatim from a file (an `encoding` header other
+/// than UTF-8 means the original bytes need not be UTF-8 at all); `hash-object` stores exactly
+/// the bytes it is given.
+pub(crate) fn run_with_stdin(
     cwd: &Path,
     git_dir: Option<&Path>,
     work_tree: Option<&Path>,
     args: &[&str],
-    identity: &[(&str, &str)],
+    stdin_data: &[u8],
 ) -> Result<String> {
+    use std::io::Write;
+    use std::process::Stdio;
+
     let out = retry(TRIES, FIRST_DELAY, || {
-        let mut cmd = command(cwd, git_dir, work_tree, args, std::env::vars_os());
-        for (key, value) in identity {
-            cmd.env(key, value);
-        }
-        cmd.output()
+        let mut child = command(cwd, git_dir, work_tree, args, std::env::vars_os())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .context("cannot run `git`; is Git installed and on PATH?")?;
+        child
+            .stdin
+            .take()
+            .expect("stdin is piped")
+            .write_all(stdin_data)
+            .context("cannot write to git's stdin")?;
+        child
+            .wait_with_output()
             .context("cannot run `git`; is Git installed and on PATH?")
     })?;
     if !out.status.success() {
@@ -610,41 +640,34 @@ mod tests {
     }
 
     #[test]
-    fn run_with_identity_overrides_the_forced_author_and_committer() {
-        let identity = [
-            ("GIT_AUTHOR_NAME", "Agent Alice"),
-            ("GIT_AUTHOR_EMAIL", "alice@example.com"),
-            ("GIT_AUTHOR_DATE", "1700000000 +0000"),
-            ("GIT_COMMITTER_NAME", "Agent Bob"),
-            ("GIT_COMMITTER_EMAIL", "bob@example.com"),
-            ("GIT_COMMITTER_DATE", "1800000000 +0000"),
-        ];
-
-        let author = run_with_identity(
+    fn run_with_stdin_pipes_the_given_bytes_to_the_command() {
+        let out = run_with_stdin(
             Path::new("."),
             None,
             None,
-            &["var", "GIT_AUTHOR_IDENT"],
-            &identity,
-        )
-        .unwrap();
-        let committer = run_with_identity(
-            Path::new("."),
-            None,
-            None,
-            &["var", "GIT_COMMITTER_IDENT"],
-            &identity,
+            &["hash-object", "-t", "blob", "--stdin"],
+            b"hello\n",
         )
         .unwrap();
 
-        assert_eq!(
-            author.trim(),
-            "Agent Alice <alice@example.com> 1700000000 +0000"
-        );
-        assert_eq!(
-            committer.trim(),
-            "Agent Bob <bob@example.com> 1800000000 +0000"
-        );
+        // `git hash-object` without `-w` just reports the id it would use; a fixed, well-known
+        // blob id proves the exact bytes reached it (a different byte sequence hashes to a
+        // different id).
+        assert_eq!(out.trim(), "ce013625030ba8dba906f756967f9e9ca394464a");
+    }
+
+    #[test]
+    fn run_with_stdin_fails_with_gits_message_on_a_bad_object_type() {
+        let err = run_with_stdin(
+            Path::new("."),
+            None,
+            None,
+            &["hash-object", "-t", "bogus-type", "--stdin"],
+            b"x",
+        )
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("hash-object"), "{err:#}");
     }
 
     #[test]

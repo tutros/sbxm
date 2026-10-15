@@ -26,7 +26,9 @@ use crate::git;
 
 /// A commit's full identity, read once from its original (agent-made) object: everything
 /// [`build_commit`] needs to recreate it with a different message. A signature header
-/// (`gpgsig`) is read past, never kept: the rebuilt commit is unsigned.
+/// (`gpgsig`) is read past, never kept: the rebuilt commit is unsigned. `message` is kept as raw
+/// bytes, not a `String`: an `encoding` header other than UTF-8 means it need not be valid UTF-8
+/// at all (issue 244's encoding edge case), and [`defang_bytes`] preserves it exactly either way.
 struct Original {
     tree: String,
     parents: Vec<String>,
@@ -36,7 +38,7 @@ struct Original {
     committer_name: String,
     committer_email: String,
     committer_date: String,
-    message: String,
+    message: Vec<u8>,
 }
 
 /// Rewrites the delivered branch `branch` in `repo_git` from its agent ref (issue 244): every
@@ -71,10 +73,6 @@ pub fn rebuild(
     })?;
 
     let ids = commit_range(repo_git, &start_id, &agent_tip)?;
-    let scratch = repo_git
-        .parent()
-        .unwrap_or(Path::new("."))
-        .join("rewrite-message");
     let mut rebuilt: HashMap<String, String> = HashMap::new();
     let mut new_tip = start_id.clone();
     for id in &ids {
@@ -84,8 +82,8 @@ pub fn rebuild(
             .iter()
             .map(|p| rebuilt.get(p).cloned().unwrap_or_else(|| p.clone()))
             .collect();
-        let message = defang(&original.message);
-        new_tip = build_commit(repo_git, &scratch, &original, &parents, &message)?;
+        let message = defang_bytes(&original.message);
+        new_tip = build_commit(repo_git, &original, &parents, &message)?;
         rebuilt.insert(id.clone(), new_tip.clone());
     }
 
@@ -140,15 +138,20 @@ fn commit_range(repo_git: &Path, start: &str, tip: &str) -> Result<Vec<String>> 
 /// Reads commit `id`'s tree, parents, author, committer and message straight from the object
 /// (`git cat-file -p`), trusting nothing else about it: a header continuation line (the second and
 /// later lines of a multi-line header such as `gpgsig` or `mergetag`) starts with a space and is
-/// skipped, so a signature is read past rather than copied into the rebuilt commit.
+/// skipped, so a signature is read past rather than copied into the rebuilt commit. Read as raw
+/// bytes (not decoded as UTF-8) so the message -- the one part of a commit object that need not be
+/// UTF-8 at all (an `encoding` header can say otherwise) -- survives untouched; the header is
+/// still treated as text, since every field read from it (the tree and parent ids, the author and
+/// committer lines) is git-controlled and always ASCII.
 fn read_commit(repo_git: &Path, id: &str) -> Result<Original> {
-    let raw = git::run(repo_git, Some(repo_git), None, &["cat-file", "-p", id])
+    let raw = git::run_bytes(repo_git, Some(repo_git), None, &["cat-file", "-p", id])
         .with_context(|| format!("cannot read commit {id} in the task repo"))?;
     let sep = raw
-        .find("\n\n")
+        .windows(2)
+        .position(|w| w == b"\n\n")
         .with_context(|| format!("commit {id} has no header/message separator"))?;
-    let header = &raw[..sep];
-    let message = raw[sep + 2..].to_owned();
+    let header = String::from_utf8_lossy(&raw[..sep]).into_owned();
+    let message = raw[sep + 2..].to_vec();
 
     let mut tree = None;
     let mut parents = Vec::new();
@@ -205,40 +208,139 @@ fn split_identity(line: &str) -> Result<(String, String, String)> {
     Ok((name, email, date))
 }
 
+/// Defangs `message` (raw commit-message bytes, not necessarily valid UTF-8 -- issue 244's
+/// encoding edge case) the way [`defang`] defangs a `&str`, without altering a byte [`defang`]
+/// never touches. [`defang`] only ever *inserts* a zero-width space right after an existing
+/// character; it never changes or drops one. So: decode `message` into a `String` good enough for
+/// [`defang`] to see word boundaries in (each maximal invalid byte run standing in for one
+/// placeholder character, which is never alphanumeric, `@`, `#`, `:` or whitespace -- none of the
+/// characters [`defang`] treats as a trigger), remembering each resulting character's exact byte
+/// range in `message`; run the unchanged function on that `String`; then walk its result against
+/// the original character sequence and reassemble the final bytes from `message` itself for every
+/// character kept, and from the inserted character's own UTF-8 bytes for every one `defang` added.
+fn defang_bytes(message: &[u8]) -> Vec<u8> {
+    let mut decoded = String::new();
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut pos = 0;
+    while pos < message.len() {
+        match std::str::from_utf8(&message[pos..]) {
+            Ok(valid) => {
+                push_chars(valid, pos, &mut decoded, &mut spans);
+                pos = message.len();
+            }
+            Err(e) => {
+                let valid_len = e.valid_up_to();
+                if valid_len > 0 {
+                    let valid = std::str::from_utf8(&message[pos..pos + valid_len])
+                        .expect("valid_up_to names a valid prefix");
+                    push_chars(valid, pos, &mut decoded, &mut spans);
+                }
+                let bad_start = pos + valid_len;
+                let bad_len = e.error_len().unwrap_or(message.len() - bad_start).max(1);
+                decoded.push('\u{fffd}');
+                spans.push((bad_start, bad_start + bad_len));
+                pos = bad_start + bad_len;
+            }
+        }
+    }
+
+    let defanged = defang(&decoded);
+    let original_chars: Vec<char> = decoded.chars().collect();
+    let mut out = Vec::with_capacity(message.len());
+    let mut next = 0;
+    for ch in defanged.chars() {
+        if next < original_chars.len() && ch == original_chars[next] {
+            let (start, end) = spans[next];
+            out.extend_from_slice(&message[start..end]);
+            next += 1;
+        } else {
+            let mut buf = [0u8; 4];
+            out.extend_from_slice(ch.encode_utf8(&mut buf).as_bytes());
+        }
+    }
+    out
+}
+
+/// Pushes every character of `text` (a valid-UTF-8 piece of a larger byte buffer that starts at
+/// `base` in that buffer) onto `decoded`, recording each one's exact byte range in `spans` for
+/// [`defang_bytes`] to reassemble from later.
+fn push_chars(text: &str, base: usize, decoded: &mut String, spans: &mut Vec<(usize, usize)>) {
+    let mut offset = base;
+    for ch in text.chars() {
+        let len = ch.len_utf8();
+        spans.push((offset, offset + len));
+        decoded.push(ch);
+        offset += len;
+    }
+}
+
 /// Builds a new commit object with `original`'s tree and identity, `parents` (already rebuilt
-/// where they needed to be) and `message`; returns its id. Nothing is written to any ref here.
+/// where they needed to be) and `message`, and writes it (`git hash-object -t commit -w
+/// --stdin`); returns its id. Nothing is written to any ref here.
+///
+/// Built and hashed directly, rather than through `git commit-tree -F <file>`: `commit-tree`
+/// quietly reencodes a message that isn't valid UTF-8 (issue 244's encoding edge case) even when
+/// it is given verbatim from a file, where `hash-object` stores exactly the bytes it is given.
+/// `commit-tree` also checks that the tree and every parent exist before it writes anything, so
+/// [`check_object_exists`] does that check here instead, keeping the same guarantee: a commit
+/// whose tree or a parent is missing -- the way a partial, corrupted range would be -- fails
+/// before anything is written for it.
 fn build_commit(
     repo_git: &Path,
-    scratch: &Path,
     original: &Original,
     parents: &[String],
-    message: &str,
+    message: &[u8],
 ) -> Result<String> {
-    std::fs::write(scratch, message.as_bytes())
-        .with_context(|| format!("cannot write {}", scratch.display()))?;
-    let scratch_text = scratch.to_str().with_context(|| {
-        format!(
-            "{} isn't valid UTF-8; use another folder",
-            scratch.display()
-        )
-    })?;
-    let mut args: Vec<&str> = vec!["commit-tree", &original.tree];
+    check_object_exists(repo_git, &original.tree, "tree")?;
     for parent in parents {
-        args.push("-p");
-        args.push(parent);
+        check_object_exists(repo_git, parent, "commit")?;
     }
-    args.push("-F");
-    args.push(scratch_text);
-    let identity = [
-        ("GIT_AUTHOR_NAME", original.author_name.as_str()),
-        ("GIT_AUTHOR_EMAIL", original.author_email.as_str()),
-        ("GIT_AUTHOR_DATE", original.author_date.as_str()),
-        ("GIT_COMMITTER_NAME", original.committer_name.as_str()),
-        ("GIT_COMMITTER_EMAIL", original.committer_email.as_str()),
-        ("GIT_COMMITTER_DATE", original.committer_date.as_str()),
-    ];
-    let out = git::run_with_identity(repo_git, Some(repo_git), None, &args, &identity)?;
+
+    let mut object = format!("tree {}\n", original.tree).into_bytes();
+    for parent in parents {
+        object.extend_from_slice(format!("parent {parent}\n").as_bytes());
+    }
+    object.extend_from_slice(
+        format!(
+            "author {} <{}> {}\ncommitter {} <{}> {}\n\n",
+            original.author_name,
+            original.author_email,
+            original.author_date,
+            original.committer_name,
+            original.committer_email,
+            original.committer_date,
+        )
+        .as_bytes(),
+    );
+    object.extend_from_slice(message);
+
+    let out = git::run_with_stdin(
+        repo_git,
+        Some(repo_git),
+        None,
+        &["hash-object", "-t", "commit", "-w", "--stdin"],
+        &object,
+    )?;
     Ok(out.trim().to_owned())
+}
+
+/// `id` exists in `repo_git` as an object of the given git type (`tree` or `commit`).
+fn check_object_exists(repo_git: &Path, id: &str, kind: &str) -> Result<()> {
+    let out = git::output(
+        repo_git,
+        Some(repo_git),
+        None,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{id}^{{{kind}}}"),
+        ],
+    )?;
+    if !out.status.success() {
+        bail!("{kind} {id} doesn't exist in the task repo; the commit being rebuilt is damaged");
+    }
+    Ok(())
 }
 
 /// Moves the delivered branch `branch` to `new_tip`, only if it is still at `old_tip`
@@ -286,6 +388,25 @@ mod tests {
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8_lossy(&out.stdout).trim().to_owned()
+    }
+
+    /// Like [`git`], but the raw stdout bytes, for a test that must tell a real byte apart from
+    /// one `String::from_utf8_lossy` replaced.
+    fn git_bytes(dir: &Path, args: &[&str]) -> Vec<u8> {
+        let out = Command::new("git")
+            .current_dir(dir)
+            .args(args)
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        out.stdout
     }
 
     fn repo() -> (tempfile::TempDir, std::path::PathBuf) {
@@ -386,6 +507,40 @@ mod tests {
     }
 
     #[test]
+    fn a_non_utf8_message_byte_survives_the_rebuild_unchanged() {
+        let (_tmp, dir) = repo();
+        let empty_tree = git(&dir, &["hash-object", "-t", "tree", "--stdin"]);
+        let base = git(&dir, &["commit-tree", &empty_tree, "-m", "base"]);
+        git(&dir, &["update-ref", "refs/heads/main", &base]);
+        // `encoding ISO-8859-1` and a message byte (0xE9, "é") that isn't valid UTF-8 on its own:
+        // git never requires or converts this, so a worker's commit can carry it as-is.
+        let mut raw = Vec::new();
+        raw.extend_from_slice(format!("tree {empty_tree}\nparent {base}\n").as_bytes());
+        raw.extend_from_slice(
+            b"author t <t@t> 1700000000 +0000\ncommitter t <t@t> 1700000000 +0000\n\
+              encoding ISO-8859-1\n\n",
+        );
+        raw.extend_from_slice(b"caf\xe9 fixes #12\n");
+        let agent = write_commit_object(&dir, &raw);
+        git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &agent]);
+        git(&dir, &["update-ref", "refs/heads/issue-4", &base]);
+
+        rebuild(&dir, "refs/heads/main", "issue-4", None).unwrap();
+
+        let rewritten = git(&dir, &["rev-parse", "refs/heads/issue-4"]);
+        let full = git_bytes(&dir, &["cat-file", "-p", &rewritten]);
+        let sep = full
+            .windows(2)
+            .position(|w| w == b"\n\n")
+            .expect("header/message separator");
+        let message = &full[sep + 2..];
+        let mut expected = b"caf\xe9 fixes".to_vec();
+        expected.extend_from_slice("\u{200b}".as_bytes());
+        expected.extend_from_slice(b" #12\n");
+        assert_eq!(message, expected.as_slice(), "{message:?}");
+    }
+
+    #[test]
     fn a_merge_commit_keeps_both_rebuilt_parents() {
         let (_tmp, dir) = repo();
         let empty_tree = git(&dir, &["hash-object", "-t", "tree", "--stdin"]);
@@ -449,8 +604,9 @@ mod tests {
     }
 
     /// Crafts a commit object by hand (`git hash-object -t commit -w --stdin`), so a fake
-    /// signature can be attached without a real GPG key.
-    fn write_commit_object(dir: &Path, content: &str) -> String {
+    /// signature or a non-UTF-8 message byte can be used without a real GPG key or losing bytes
+    /// to a `&str`'s own UTF-8 requirement.
+    fn write_commit_object(dir: &Path, content: &[u8]) -> String {
         use std::io::Write;
         let mut child = Command::new("git")
             .current_dir(dir)
@@ -462,12 +618,7 @@ mod tests {
             .stderr(Stdio::piped())
             .spawn()
             .unwrap();
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(content.as_bytes())
-            .unwrap();
+        child.stdin.take().unwrap().write_all(content).unwrap();
         let out = child.wait_with_output().unwrap();
         assert!(
             out.status.success(),
@@ -486,7 +637,7 @@ mod tests {
         let raw = format!(
             "tree {empty_tree}\nparent {base}\nauthor t <t@t> 1700000000 +0000\ncommitter t <t@t> 1700000000 +0000\ngpgsig -----BEGIN PGP SIGNATURE-----\n fakefakefakefakefakefake\n fakefake=\n -----END PGP SIGNATURE-----\n\nsigned work\n"
         );
-        let agent = write_commit_object(&dir, &raw);
+        let agent = write_commit_object(&dir, raw.as_bytes());
         git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &agent]);
         git(&dir, &["update-ref", "refs/heads/issue-4", &base]);
 
@@ -518,9 +669,10 @@ mod tests {
         let bogus_tree = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
         let c2 = write_commit_object(
             &dir,
-            &format!(
+            format!(
                 "tree {bogus_tree}\nparent {c1}\nauthor t <t@t> 1700000000 +0000\ncommitter t <t@t> 1700000000 +0000\n\nsecond\n"
-            ),
+            )
+            .as_bytes(),
         );
         let c3 = git(
             &dir,
