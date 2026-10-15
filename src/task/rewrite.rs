@@ -44,6 +44,12 @@ struct Original {
     message: Vec<u8>,
 }
 
+/// The largest commit object (header plus message) [`rebuild`] reads (PR 250 review, M-1;
+/// decision 198): a highly compressible message can be tiny in the bundle and huge once read, and
+/// rebuilding holds several copies of it, so a bigger commit is refused before it is read. A real
+/// commit is never close to this.
+pub const MAX_COMMIT_BYTES: u64 = 1024 * 1024;
+
 /// The ref recording the agent tip whose rebuild is on the delivered branch right now (issue 244
 /// review round 2, M-1). It moves only together with the delivered branch, in the same atomic
 /// `update-ref --stdin` transaction [`move_branch`] runs, so it can never point past a rebuild
@@ -51,12 +57,6 @@ struct Original {
 /// *successful* [`rebuild`] does. Reading it tells this call apart from a delivered branch moved
 /// by something other than sbxm's own last rebuild, even when a fetch happened in between without
 /// a rebuild ever following it through (a crash, or a failure since fixed).
-/// The largest commit object (header plus message) [`rebuild`] reads (PR 250 review, M-1): a
-/// highly compressible message can be tiny in the bundle and huge once read, and rebuilding holds
-/// several copies of it, so a bigger commit is refused before it is read. A real commit is never
-/// close to this.
-pub const MAX_COMMIT_BYTES: u64 = 1024 * 1024;
-
 fn rebuilt_marker(branch: &str) -> String {
     format!("refs/sbxm/rebuilt/{branch}")
 }
