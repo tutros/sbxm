@@ -5,6 +5,6 @@ description: Start-of-session pointer for the sbxm project - read docs/project.m
 
 # sbxm project context
 
-Read `docs/project.md`. It holds the goals, the current state and build plan, where each kind of fact lives, how sbxm is used on itself, and the working rules the user gave beyond `AGENTS.md`. Then follow the phase skill for your task: `sdlc-planning`, `sdlc-implementation` or `sdlc-code-review`.
+Read `docs/project.md`. It holds the goals, the current state and build plan, where each kind of fact lives, how sbxm is used on itself, and the working rules the user gave beyond `AGENTS.md`. Then follow the phase skill for your task: `sdlc-planning`, `sdlc-implementation`, `sdlc-code-review` or `sdlc-retro`.
 
 The project facts live in that file, not here, so that agents without skills can read them too.

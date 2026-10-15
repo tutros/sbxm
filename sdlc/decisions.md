@@ -384,13 +384,22 @@ detected: that task is left alone and listed as "not merged", naming the plain `
 remove it by hand. (b) **An archive before removal:** before removing a task, `task rm --merged` copies its text
 records to `<base>/.sbxm/task-archive/<task-id>/` — `review.md`, every `review-<n>.md`, `result.md`, `run.log`,
 `gates.log` and `task.json`, whichever exist. Never copied: transcripts, clones, `repo.git`. The summary names the
-archive folder; nothing deletes an archive, and a plain `task rm` is unchanged and archives nothing. (c) **What it
+archive folder; nothing deletes or overwrites an archive (PR 241 review: a rerun after a failed removal reuses an archive holding exactly the same records, and one that differs is refused, naming the folder), and a plain `task rm` is unchanged and archives nothing. (c) **What it
 never touches:** `--force` is refused together with `--merged`; a task whose result exists only in its own
 `repo.git` and was never fetched [178] is left alone and listed with the reason, even if it would otherwise count
 as merged. It removes only what sbxm made — sandboxes, clones and task folders; for a spec task with the `local`
 sink it does not delete the worktree or the local branch in the user's own checkout, and the summary prints the two
 `git` commands for each instead of running them. Without a terminal it needs `--yes`, like `task rm` today;
 `--dry-run` lists and removes nothing.
+
+196. **A retro phase skill, `sdlc-retro` (2026-10-14, the user's approval of the proposed text; a third narrow
+exception to the skill freeze of [140] and [164], after [188] and [191]):** the earlier looks back (the M2b
+experiment report [164], the issue 206 report [188]) were one-off; the skill makes them periodic, when the user asks,
+at the end of a milestone, or once about ten PRs have merged since the last retro (an agent says so then, it doesn't
+start one unasked). A retro gathers numbers only from records that hold them, proposes at most three process changes
+as experiments, and changes nothing until the user decides each one; records go to `sdlc/retros/`. This adds a skill
+and edits no existing `sdlc-*` skill (only `sbxm-context`'s list of phase skills names it). The freeze otherwise stands: the PRD/spec methodology choice of [164] is still the
+user's, and this decision doesn't answer it.
 
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
