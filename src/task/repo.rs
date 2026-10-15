@@ -464,9 +464,26 @@ pub fn ensure_agent_ref(repo_git: &Path, branch: &str) -> Result<()> {
         repo_git,
         Some(repo_git),
         None,
-        &["update-ref", &agent, &tip],
+        &[
+            "-c",
+            &no_hooks_config(repo_git)?,
+            "update-ref",
+            &agent,
+            &tip,
+        ],
     )?;
     Ok(())
+}
+
+/// A `-c` value pointing `core.hooksPath` at an empty, host-owned folder next to `repo_git`, so
+/// no hook in `repo_git/hooks` runs while sbxm moves its refs (a `reference-transaction` hook
+/// fires on every ref update; git for Windows runs a hook file whether or not it is executable).
+pub(crate) fn no_hooks_config(repo_git: &Path) -> Result<String> {
+    let task_dir = repo_git.parent().unwrap_or(Path::new("."));
+    let no_hooks = task_dir.join("no-hooks");
+    std::fs::create_dir_all(&no_hooks)
+        .with_context(|| format!("cannot create {}", no_hooks.display()))?;
+    Ok(format!("core.hooksPath={}", text(&no_hooks)?))
 }
 
 /// The default size cap for a bundle collected from a sandbox: 500 MB.
@@ -699,9 +716,6 @@ pub fn fetch_bundle(repo_git: &Path, workspace: &Path, branch: &str, cap: u64) -
 
     ensure_agent_ref(repo_git, branch)?;
     let agent = agent_ref(branch);
-    let no_hooks = task_dir.join("no-hooks");
-    std::fs::create_dir_all(&no_hooks)
-        .with_context(|| format!("cannot create {}", no_hooks.display()))?;
     let refspec = format!("{wanted}:{agent}");
     let out = git::output(
         repo_git,
@@ -709,7 +723,7 @@ pub fn fetch_bundle(repo_git: &Path, workspace: &Path, branch: &str, cap: u64) -
         None,
         &[
             "-c",
-            &format!("core.hooksPath={}", text(&no_hooks)?),
+            &no_hooks_config(repo_git)?,
             // The hardened runner denies every protocol; a local file is the one this needs
             // (the verified copy above), so `ext::` and the network transports stay denied.
             "-c",

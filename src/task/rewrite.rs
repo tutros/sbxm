@@ -23,7 +23,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-use super::repo::{agent_ref, check_ref};
+use super::repo::{agent_ref, check_ref, no_hooks_config};
 use super::review::defang;
 use crate::git;
 
@@ -40,7 +40,7 @@ use crate::git;
 struct Original {
     tree: String,
     parents: Vec<String>,
-    header_lines: Vec<String>,
+    header_lines: Vec<Vec<u8>>,
     message: Vec<u8>,
 }
 
@@ -84,7 +84,6 @@ pub fn rebuild(repo_git: &Path, start: &str, branch: &str) -> Result<()> {
 
     let ids = commit_range(repo_git, &start_id, &agent_tip, branch)?;
     let mut rebuilt: HashMap<String, String> = HashMap::new();
-    let mut new_tip = start_id.clone();
     for id in &ids {
         let original = read_commit(repo_git, id)?;
         let parents: Vec<String> = original
@@ -93,19 +92,26 @@ pub fn rebuild(repo_git: &Path, start: &str, branch: &str) -> Result<()> {
             .map(|p| rebuilt.get(p).cloned().unwrap_or_else(|| p.clone()))
             .collect();
         let message = defang_bytes(&original.message);
-        new_tip = build_commit(repo_git, &original, &parents, &message)?;
-        rebuilt.insert(id.clone(), new_tip.clone());
+        let new_id = build_commit(repo_git, &original, &parents, &message)?;
+        rebuilt.insert(id.clone(), new_id);
     }
+    // A commit outside the rebuilt range (the start itself, or one `commit_range` left out as
+    // already on another branch -- the agent tip too, when the worker only fast-forwarded to an
+    // existing branch, review round 4, M-1) is delivered as it is.
+    let delivered = |id: &str| rebuilt.get(id).cloned().unwrap_or_else(|| id.to_owned());
+    let new_tip = delivered(&agent_tip);
 
     let expected_old_tip = match last_rebuilt.as_deref() {
         None => old_tip.clone(),
-        Some(prev) if prev == start_id => start_id.clone(),
-        Some(prev) => rebuilt.get(prev).cloned().with_context(|| {
-            format!(
-                "{prev} (the agent tip of sbxm's last rebuild) isn't an ancestor of {agent}'s \
-                 current tip; the task record may be damaged"
-            )
-        })?,
+        Some(prev) => {
+            if !rebuilt.contains_key(prev) && !is_ancestor(repo_git, prev, &agent_tip)? {
+                bail!(
+                    "{prev} (the agent tip of sbxm's last rebuild) isn't an ancestor of {agent}'s \
+                     current tip; the task record may be damaged"
+                );
+            }
+            delivered(prev)
+        }
     };
     if expected_old_tip != old_tip {
         bail!(
@@ -134,6 +140,17 @@ fn resolve(repo_git: &Path, rev: &str) -> Result<String> {
         &["rev-parse", "--verify", &format!("{rev}^{{commit}}")],
     )?;
     Ok(out.trim().to_owned())
+}
+
+/// Whether commit `ancestor` is `tip` or one of its ancestors in `repo_git`.
+fn is_ancestor(repo_git: &Path, ancestor: &str, tip: &str) -> Result<bool> {
+    let out = git::output(
+        repo_git,
+        Some(repo_git),
+        None,
+        &["merge-base", "--is-ancestor", ancestor, tip],
+    )?;
+    Ok(out.status.success())
 }
 
 /// Like [`resolve`], but `None` instead of an error when `rev` doesn't exist yet.
@@ -197,8 +214,9 @@ fn commit_range(repo_git: &Path, start: &str, tip: &str, branch: &str) -> Result
 /// original order, so [`build_commit`] only ever substitutes a `parent` line's id and otherwise
 /// reproduces the header exactly. Read as raw bytes (not decoded as UTF-8) so the message -- the
 /// one part of a commit object that need not be UTF-8 at all (an `encoding` header can say
-/// otherwise) -- survives untouched; the header is still treated as text, since every field read
-/// from it (the tree and parent ids) is git-controlled and always ASCII.
+/// otherwise) -- survives untouched, and so does every header line (review round 4, M-2: an
+/// author name need not be UTF-8 either); only the tree and parent ids, which git always writes
+/// as ASCII hex, are decoded.
 fn read_commit(repo_git: &Path, id: &str) -> Result<Original> {
     let raw = git::run_bytes(repo_git, Some(repo_git), None, &["cat-file", "-p", id])
         .with_context(|| format!("cannot read commit {id} in the task repo"))?;
@@ -206,30 +224,29 @@ fn read_commit(repo_git: &Path, id: &str) -> Result<Original> {
         .windows(2)
         .position(|w| w == b"\n\n")
         .with_context(|| format!("commit {id} has no header/message separator"))?;
-    let header = String::from_utf8_lossy(&raw[..sep]).into_owned();
     let message = raw[sep + 2..].to_vec();
 
     let mut tree = None;
     let mut parents = Vec::new();
     let mut header_lines = Vec::new();
     let mut in_signature = false;
-    for line in header.split('\n') {
-        if line.starts_with(' ') {
+    for line in raw[..sep].split(|&b| b == b'\n') {
+        if line.starts_with(b" ") {
             if !in_signature {
-                header_lines.push(line.to_owned());
+                header_lines.push(line.to_vec());
             }
             continue;
         }
-        in_signature = line.starts_with("gpgsig ") || line.starts_with("gpgsig-sha256 ");
+        in_signature = line.starts_with(b"gpgsig ") || line.starts_with(b"gpgsig-sha256 ");
         if in_signature {
             continue;
         }
-        if let Some(v) = line.strip_prefix("tree ") {
-            tree = Some(v.to_owned());
-        } else if let Some(v) = line.strip_prefix("parent ") {
-            parents.push(v.to_owned());
+        if let Some(v) = line.strip_prefix(b"tree ") {
+            tree = Some(object_id(id, v)?);
+        } else if let Some(v) = line.strip_prefix(b"parent ") {
+            parents.push(object_id(id, v)?);
         }
-        header_lines.push(line.to_owned());
+        header_lines.push(line.to_vec());
     }
     let tree = tree.with_context(|| format!("commit {id} has no tree header"))?;
     Ok(Original {
@@ -238,6 +255,15 @@ fn read_commit(repo_git: &Path, id: &str) -> Result<Original> {
         header_lines,
         message,
     })
+}
+
+/// The object id in a `tree` or `parent` header value of commit `id`: git writes it as ASCII
+/// hex, so anything else means the commit is damaged.
+fn object_id(id: &str, value: &[u8]) -> Result<String> {
+    match std::str::from_utf8(value) {
+        Ok(v) if !v.is_empty() && v.bytes().all(|b| b.is_ascii_hexdigit()) => Ok(v.to_owned()),
+        _ => bail!("commit {id} has a malformed tree or parent header"),
+    }
 }
 
 /// Defangs `message` (raw commit-message bytes, not necessarily valid UTF-8 -- issue 244's
@@ -333,13 +359,13 @@ fn build_commit(
     let mut object = Vec::new();
     let mut rebuilt_parents = parents.iter();
     for line in &original.header_lines {
-        if line.starts_with("parent ") {
+        if line.starts_with(b"parent ") {
             let parent = rebuilt_parents
                 .next()
                 .expect("one rebuilt parent per original `parent` header line");
             object.extend_from_slice(format!("parent {parent}\n").as_bytes());
         } else {
-            object.extend_from_slice(line.as_bytes());
+            object.extend_from_slice(line);
             object.push(b'\n');
         }
     }
@@ -400,7 +426,7 @@ fn move_branch(
         repo_git,
         Some(repo_git),
         None,
-        &["update-ref", "--stdin"],
+        &["-c", &no_hooks_config(repo_git)?, "update-ref", "--stdin"],
         stdin.as_bytes(),
     )?;
     if !out.status.success() {
@@ -743,6 +769,93 @@ mod tests {
         );
         let existing_message = git(&dir, &["log", "-1", "--format=%B", &p2]);
         assert_eq!(existing_message, "existing fixes #8");
+    }
+
+    /// Review round 4, M-1: the worker's branch can fast-forward from the task base to a commit
+    /// already reachable from another branch, leaving nothing of the agent's own to rebuild. The
+    /// delivered branch must land on that commit's exact id, not stay at the base, and a later
+    /// rebuild over the same agent tip must not take it for a branch moved by something else.
+    #[test]
+    fn a_fast_forward_to_an_existing_branch_keeps_that_tip() {
+        let (_tmp, dir) = repo();
+        let empty_tree = git(&dir, &["hash-object", "-t", "tree", "--stdin"]);
+        let base = git(&dir, &["commit-tree", &empty_tree, "-m", "base"]);
+        git(&dir, &["update-ref", "refs/heads/main", &base]);
+        git(&dir, &["update-ref", "refs/heads/issue-4", &base]);
+        let existing = git(
+            &dir,
+            &[
+                "commit-tree",
+                &empty_tree,
+                "-p",
+                &base,
+                "-m",
+                "existing fixes #8",
+            ],
+        );
+        git(&dir, &["update-ref", "refs/heads/other-branch", &existing]);
+        git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &existing]);
+
+        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
+        assert_eq!(git(&dir, &["rev-parse", "refs/heads/issue-4"]), existing);
+
+        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
+        assert_eq!(git(&dir, &["rev-parse", "refs/heads/issue-4"]), existing);
+    }
+
+    /// Review round 4, M-2: a header byte that isn't valid UTF-8 (an author name written in
+    /// ISO-8859-1) must survive byte for byte, so a commit whose message needs no change keeps its
+    /// exact id.
+    #[test]
+    fn unchanged_non_utf8_header_bytes_keep_the_commit_id() {
+        let (_tmp, dir) = repo();
+        let empty_tree = git(&dir, &["hash-object", "-t", "tree", "--stdin"]);
+        let base = git(&dir, &["commit-tree", &empty_tree, "-m", "base"]);
+        git(&dir, &["update-ref", "refs/heads/main", &base]);
+        git(&dir, &["update-ref", "refs/heads/issue-4", &base]);
+        let mut raw = Vec::new();
+        raw.extend_from_slice(format!("tree {empty_tree}\nparent {base}\n").as_bytes());
+        raw.extend_from_slice(
+            b"author Ren\xe9 <t@t> 1700000000 +0000\ncommitter t <t@t> 1700000000 +0000\n\n",
+        );
+        raw.extend_from_slice(b"a plain message\n");
+        let agent = write_commit_object(&dir, &raw);
+        git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &agent]);
+
+        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
+
+        assert_eq!(git(&dir, &["rev-parse", "refs/heads/issue-4"]), agent);
+    }
+
+    /// Review round 4, M-2, second case: when the message does need defanging, every header byte
+    /// still stays exact; only the message changes.
+    #[test]
+    fn non_utf8_header_bytes_survive_a_message_rewrite() {
+        let (_tmp, dir) = repo();
+        let empty_tree = git(&dir, &["hash-object", "-t", "tree", "--stdin"]);
+        let base = git(&dir, &["commit-tree", &empty_tree, "-m", "base"]);
+        git(&dir, &["update-ref", "refs/heads/main", &base]);
+        git(&dir, &["update-ref", "refs/heads/issue-4", &base]);
+        let header = format!("tree {empty_tree}\nparent {base}\n").into_bytes();
+        let mut header = header;
+        header.extend_from_slice(
+            b"author Ren\xe9 <t@t> 1700000000 +0000\ncommitter t <t@t> 1700000000 +0000",
+        );
+        let mut raw = header.clone();
+        raw.extend_from_slice(b"\n\nthis fixes #12\n");
+        let agent = write_commit_object(&dir, &raw);
+        git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &agent]);
+
+        rebuild(&dir, "refs/heads/main", "issue-4").unwrap();
+
+        let rewritten = git(&dir, &["rev-parse", "refs/heads/issue-4"]);
+        assert_ne!(rewritten, agent);
+        let full = git_bytes(&dir, &["cat-file", "-p", &rewritten]);
+        let sep = full
+            .windows(2)
+            .position(|w| w == b"\n\n")
+            .expect("header/message separator");
+        assert_eq!(&full[..sep], header.as_slice());
     }
 
     /// Crafts a commit object by hand (`git hash-object -t commit -w --stdin`), so a fake
