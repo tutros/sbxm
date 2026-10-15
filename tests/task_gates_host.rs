@@ -12,6 +12,7 @@ use common::git;
 use common::task_fixture::{Fixture, fixture, source};
 use sbxm::task::gates::{FakeHostRunner, HostRunner, ShellHostRunner, run_host_tier};
 use sbxm::task::repo::{self, Identity};
+use sbxm::task::rewrite;
 
 fn cmds(list: &[&str]) -> Vec<String> {
     list.iter().map(|s| (*s).to_owned()).collect()
@@ -135,6 +136,7 @@ fn prepared_with_commit(f: &Fixture) -> (PathBuf, PathBuf) {
         ],
     );
     repo::fetch_bundle(&repo_git, &workspace, "issue-4", repo::BUNDLE_CAP).unwrap();
+    rewrite::rebuild(&repo_git, "refs/heads/main", "issue-4").unwrap();
     // Left in the agent's folder, never committed: must not reach the checkout.
     fs::write(workspace.join("untracked.txt"), "only in the workspace\n").unwrap();
     (repo_git, workspace)

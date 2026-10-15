@@ -25,7 +25,7 @@ pub fn valid_ref_name(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '/' | '-'))
 }
 
-fn check_ref(what: &str, name: &str) -> Result<()> {
+pub(super) fn check_ref(what: &str, name: &str) -> Result<()> {
     if !valid_ref_name(name) {
         bail!(
             "{what} {name:?} isn't a usable branch name; use letters, digits, `.`, `_`, `-` and `/`"
@@ -430,6 +430,62 @@ pub fn commit_lines(repo_git: &Path, commit: &str, branch: &str) -> Result<Vec<S
 const BUNDLE_DIR: &str = ".sbxm-task";
 const BUNDLE_FILE: &str = ".sbxm-task/branch.bundle";
 
+/// The ref an agent's own, unrewritten commits live on in `repo.git` (issue 244): never the
+/// delivered branch (`refs/heads/<branch>`) itself, so [`super::rewrite::rebuild`] can always
+/// rebuild it from a clean, known starting point.
+pub fn agent_ref(branch: &str) -> String {
+    format!("refs/sbxm/agent/{branch}")
+}
+
+/// Creates the agent ref at the delivered branch's current tip when it is missing (issue 244): a
+/// task made before this ref existed collected the agent's unrewritten commits straight onto the
+/// delivered branch, so that is where its own commits begin; a brand-new task's delivered branch
+/// is still at its base, which is exactly where its agent ref should start too. A no-op once the
+/// agent ref exists.
+pub fn ensure_agent_ref(repo_git: &Path, branch: &str) -> Result<()> {
+    check_ref("branch", branch)?;
+    let agent = agent_ref(branch);
+    let found = git::output(
+        repo_git,
+        Some(repo_git),
+        None,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{agent}^{{commit}}"),
+        ],
+    )?;
+    if found.status.success() {
+        return Ok(());
+    }
+    let tip = branch_tip(repo_git, branch)?;
+    git::run(
+        repo_git,
+        Some(repo_git),
+        None,
+        &[
+            "-c",
+            &no_hooks_config(repo_git)?,
+            "update-ref",
+            &agent,
+            &tip,
+        ],
+    )?;
+    Ok(())
+}
+
+/// A `-c` value pointing `core.hooksPath` at an empty, host-owned folder next to `repo_git`, so
+/// no hook in `repo_git/hooks` runs while sbxm moves its refs (a `reference-transaction` hook
+/// fires on every ref update; git for Windows runs a hook file whether or not it is executable).
+pub(crate) fn no_hooks_config(repo_git: &Path) -> Result<String> {
+    let task_dir = repo_git.parent().unwrap_or(Path::new("."));
+    let no_hooks = task_dir.join("no-hooks");
+    std::fs::create_dir_all(&no_hooks)
+        .with_context(|| format!("cannot create {}", no_hooks.display()))?;
+    Ok(format!("core.hooksPath={}", text(&no_hooks)?))
+}
+
 /// The default size cap for a bundle collected from a sandbox: 500 MB.
 pub const BUNDLE_CAP: u64 = 500 * 1024 * 1024;
 
@@ -601,8 +657,11 @@ pub fn read_agent_file(workspace: &Path, name: &str, cap: u64) -> Result<AgentFi
 /// read from the open file, and at most `cap + 1` bytes are copied, so a file that grows or is
 /// swapped during the copy cannot fill the disk. The copy goes to a host-owned folder, is checked
 /// with `git bundle verify` (including that `repo_git` has everything it builds on), and only
-/// `refs/heads/<branch>` is fetched: fast-forward only, hooks switched off, objects fsck-checked,
-/// no submodules, no other refs. Nothing runs `git` inside the workspace.
+/// `refs/heads/<branch>` is fetched into [`agent_ref`] (issue 244: never the delivered branch
+/// itself, which [`super::rewrite::rebuild`] rebuilds from it): fast-forward only, hooks switched
+/// off, objects fsck-checked, no submodules, no other refs. Nothing runs `git` inside the
+/// workspace. [`ensure_agent_ref`] backfills the agent ref first, for a task whose `repo.git`
+/// still has only the delivered branch (made before this ref existed).
 pub fn fetch_bundle(repo_git: &Path, workspace: &Path, branch: &str, cap: u64) -> Result<()> {
     use std::io::Read;
 
@@ -655,17 +714,16 @@ pub fn fetch_bundle(repo_git: &Path, workspace: &Path, branch: &str, cap: u64) -
         bail!("the bundle has no branch {branch}; the agent must commit on {branch}");
     }
 
-    let no_hooks = task_dir.join("no-hooks");
-    std::fs::create_dir_all(&no_hooks)
-        .with_context(|| format!("cannot create {}", no_hooks.display()))?;
-    let refspec = format!("{wanted}:{wanted}");
+    ensure_agent_ref(repo_git, branch)?;
+    let agent = agent_ref(branch);
+    let refspec = format!("{wanted}:{agent}");
     let out = git::output(
         repo_git,
         Some(repo_git),
         None,
         &[
             "-c",
-            &format!("core.hooksPath={}", text(&no_hooks)?),
+            &no_hooks_config(repo_git)?,
             // The hardened runner denies every protocol; a local file is the one this needs
             // (the verified copy above), so `ext::` and the network transports stay denied.
             "-c",

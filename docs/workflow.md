@@ -73,7 +73,10 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
   `gates-failed`; a killed run shows as `interrupted` in `task status`, and `task resume --issue N` continues a
   failed or interrupted task from its stage, keeping its clone and commits.
 - **Trust boundary:** the worker has no GitHub access and the host never runs git inside an agent's folder. Commits are
-  collected through a verified `git bundle` into a host-owned repo, and only `sbxm` pushes.
+  collected through a verified `git bundle` into a host-owned repo, onto a separate ref for the agent's own,
+  unrewritten commits; before gates, review or finish see them, `sbxm` rewrites every one of those commits onto the
+  delivered branch with any closing reference or mention neutralised, rebuilding them unsigned; a commit over 1 MiB
+  (header plus message) is refused instead (decision 198). Only `sbxm` pushes.
 - **Independence:** a worker never reviews its own change; the reviewer's harness differs from the worker's by default.
 - **Limits to know:**
   - A `ready` task cannot be reviewed again with `task review --issue`; one that stopped (`stopped` in `task.json`)

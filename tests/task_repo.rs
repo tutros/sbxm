@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use sbxm::task::repo::{self, Identity};
+use sbxm::task::rewrite;
 
 /// Whether a fixture git run should be tried again: it failed, and said `Permission denied`. A run
 /// that worked is never repeated whatever it printed: git can report a file it could not write and
@@ -517,9 +518,11 @@ fn tip(repo_git: &Path, branch: &str) -> String {
     git(repo_git, &["rev-parse", &format!("refs/heads/{branch}")])
 }
 
-/// Collects the bundle the sandbox left in the workspace at `.sbxm-task/branch.bundle`.
+/// Collects the bundle the sandbox left in the workspace at `.sbxm-task/branch.bundle`, then
+/// rebuilds the delivered branch from it (issue 244), matching what `pipeline.rs` does.
 fn collect(f: &Fixture, cap: u64) -> anyhow::Result<()> {
-    repo::fetch_bundle(&f.repo_git, &f.workspace, "issue-4", cap)
+    repo::fetch_bundle(&f.repo_git, &f.workspace, "issue-4", cap)?;
+    rewrite::rebuild(&f.repo_git, "refs/heads/main", "issue-4")
 }
 
 /// The path the sandbox writes the bundle to, with its folder made.
@@ -564,6 +567,32 @@ fn a_second_bundle_on_top_of_the_first_is_accepted() {
         repo::commits_ahead(&f.repo_git, "main", "issue-4").unwrap(),
         2
     );
+}
+
+#[test]
+fn a_branch_moved_between_two_collections_is_refused() {
+    let f = fixture();
+    prepared(&f);
+    agent_commits(&f, &["a.txt"]);
+    make_bundle(&f, &["issue-4"]);
+    collect(&f, CAP).unwrap();
+
+    // Something other than sbxm moves the delivered branch before the fix round's bundle is
+    // collected.
+    let main_tree = git(&f.repo_git, &["rev-parse", "main^{tree}"]);
+    let elsewhere = git(&f.repo_git, &["commit-tree", &main_tree, "-m", "elsewhere"]);
+    git(
+        &f.repo_git,
+        &["update-ref", "refs/heads/issue-4", &elsewhere],
+    );
+
+    agent_commits(&f, &["fix.txt"]);
+    make_bundle(&f, &["issue-4"]);
+
+    let err = format!("{:#}", collect(&f, CAP).unwrap_err());
+
+    assert!(err.contains("issue-4"), "{err}");
+    assert_eq!(tip(&f.repo_git, "issue-4"), elsewhere);
 }
 
 #[test]
@@ -743,6 +772,41 @@ fn rewritten_history_is_refused_and_the_branch_keeps_its_commits() {
 
     assert!(message.contains("history"), "{message}");
     assert_eq!(tip(&f.repo_git, "issue-4"), kept);
+}
+
+#[test]
+fn a_task_repo_from_before_the_agent_ref_existed_backfills_it_and_the_fix_round_still_fast_forwards()
+ {
+    let f = fixture();
+    prepared(&f);
+    // The old binary: the agent's first, unrewritten commit landed straight on the delivered
+    // branch, and there was never an agent ref.
+    agent_commits(&f, &["a.txt"]);
+    git(
+        &f.repo_git,
+        &[
+            "fetch",
+            f.workspace.join(".git").to_str().unwrap(),
+            "issue-4:refs/heads/issue-4",
+        ],
+    );
+    assert!(git(&f.repo_git, &["for-each-ref", "refs/sbxm/agent/issue-4"]).is_empty());
+
+    // Resumed for a fix round: a new bundle on top of the same clone.
+    agent_commits(&f, &["b.txt"]);
+    make_bundle(&f, &["issue-4"]);
+    collect(&f, CAP).unwrap();
+
+    let expected = git(&f.workspace, &["rev-parse", "HEAD"]);
+    assert_eq!(
+        git(&f.repo_git, &["rev-parse", "refs/sbxm/agent/issue-4"]),
+        expected
+    );
+    assert_eq!(tip(&f.repo_git, "issue-4"), expected);
+    assert_eq!(
+        repo::commits_ahead(&f.repo_git, "main", "issue-4").unwrap(),
+        2
+    );
 }
 
 /// Where a planted command would leave proof that it ran.

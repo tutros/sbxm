@@ -367,8 +367,11 @@ for a task. Check `sbx ls` for stopped leftovers.
 opens the PR. The host picks the issues, so no two workers get the same one: it skips questions, issues whose
 **Depends on** issues are still open, and issues **Related** to one that already has a task. The sandbox has no
 GitHub access; the agent commits locally and writes `.sbxm-task/result.md`, and `sbxm` collects the commits through
-a verified `git bundle` into its own repo (`<base_dir>\.sbxm\tasks\<id>\repo.git`). Only `sbxm` pushes. The table in
-[Commands](#commands) lists every `task` command and flag.
+a verified `git bundle` into its own repo (`<base_dir>\.sbxm\tasks\<id>\repo.git`), onto a separate ref for the
+agent's own commits; before gates, review or finish see them, `sbxm` rewrites every one of those commits onto the
+delivered branch with any closing reference or mention neutralised, rebuilding them unsigned; a commit over 1 MiB
+(header plus message) is refused instead, so ask the agent for a shorter message. Only `sbxm` pushes.
+The table in [Commands](#commands) lists every `task` command and flag.
 
 A worker never reviews its own change. `task review` first runs the **gates** (`cargo fmt --check`, clippy and
 `cargo test` in the worker's sandbox by default, plus any host commands you list), then a fresh reviewer in its own
