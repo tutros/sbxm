@@ -244,24 +244,70 @@ fn replaced_root(base_dir: &Path, id: &str) -> PathBuf {
 
 /// Whether a leftover set-aside copy of `id` exists: an earlier `--restart` discarded it but was
 /// never settled one way or the other, most likely because it, or the process running it, was
-/// interrupted (decision 185 point 4).
+/// interrupted (decision 185 point 4). A tree of empty folders only is not one: it is what a
+/// restore that put every folder back leaves when it can't delete the tree (issue #224), and
+/// [`check_no_leftover`] deletes it.
 pub fn has_leftover(base_dir: &Path, id: &str) -> bool {
-    replaced_root(base_dir, id).symlink_metadata().is_ok()
+    let dir = replaced_root(base_dir, id);
+    dir.symlink_metadata().is_ok() && !only_empty_folders(&dir)
 }
 
 /// Refuses a `--restart` of `id` while [`has_leftover`] holds, before anything else about it is
 /// checked: the folder and the two ways out (moving it back by hand, or deleting it) are named.
-/// There is no command of its own for the leftover (decision 185 point 4).
+/// There is no command of its own for the leftover (decision 185 point 4). An empty remnant
+/// (issue #224) is deleted instead, folder by folder and never through a link; the refusal for one
+/// that can't be says it is safe to delete.
 pub fn check_no_leftover(base_dir: &Path, id: &str) -> Result<()> {
     let dir = replaced_root(base_dir, id);
-    if dir.symlink_metadata().is_ok() {
+    if dir.symlink_metadata().is_err() {
+        return Ok(());
+    }
+    check_own_folder(base_dir, &dir).with_context(|| {
+        format!(
+            "an earlier `--restart` of task {id} left {} behind",
+            dir.display()
+        )
+    })?;
+    if !only_empty_folders(&dir) {
         bail!(
             "an earlier `--restart` of task {id} left its old copy at {}, never settled; move it \
              back into place yourself, or delete it, before restarting {id} again",
             dir.display()
         );
     }
-    Ok(())
+    remove_empty_folders(&dir).map_err(|e| {
+        anyhow::anyhow!(
+            "{} is an empty folder left from an earlier restore of task {id}, safe to delete, but \
+             it could not be deleted ({e}); delete it yourself, then restart {id} again",
+            dir.display()
+        )
+    })
+}
+
+/// Whether `dir` is a folder, not a link, holding nothing but folders like it at any depth.
+/// Anything that can't be read counts as holding something.
+fn only_empty_folders(dir: &Path) -> bool {
+    let is_dir = dir.symlink_metadata().is_ok_and(|m| m.file_type().is_dir());
+    is_dir
+        && fs::read_dir(dir).is_ok_and(|mut entries| {
+            entries.all(|entry| entry.is_ok_and(|e| only_empty_folders(&e.path())))
+        })
+}
+
+/// Deletes `dir` and the folders in it, deepest first, with `remove_dir` only: it deletes nothing
+/// but an empty folder, so a file or a link anywhere in the tree stops it with an error, and it
+/// never reads through a link, `dir` itself included.
+fn remove_empty_folders(dir: &Path) -> std::io::Result<()> {
+    if !dir.symlink_metadata()?.file_type().is_dir() {
+        return Err(std::io::Error::other("not a folder"));
+    }
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            remove_empty_folders(&entry.path())?;
+        }
+    }
+    fs::remove_dir(dir)
 }
 
 /// A task's folders, set aside instead of deleted so a `--restart` discard can be undone
@@ -297,7 +343,9 @@ impl SetAside {
     /// [`set_aside_many`] moved it aside (its sandboxes are not restored; decision 185 point 2).
     /// If one folder can't move back, whatever was already moved back in this call is moved aside
     /// again, so the old task stays entirely in one place or the other, never split between them.
-    pub fn restore(&self) -> Result<()> {
+    /// Once all are back, the emptied set-aside tree is deleted; if that fails the task is still
+    /// back, and the returned warning names the tree (issue #224).
+    pub fn restore(&self) -> Result<Option<String>> {
         let mut done: Vec<&PathBuf> = Vec::new();
         for rel in &self.moved {
             let (original, replaced) = self.pair(rel);
@@ -330,8 +378,21 @@ impl SetAside {
             }
             done.push(rel);
         }
-        let _ = fs::remove_dir_all(self.folder());
-        Ok(())
+        let dir = self.folder();
+        // Nothing to clean when no folder is there: never created, or something else stands in
+        // its place (a file, a link), which is not this restore's to judge or delete.
+        if !dir.symlink_metadata().is_ok_and(|m| m.file_type().is_dir()) {
+            return Ok(None);
+        }
+        Ok(remove_empty_folders(&dir).err().map(|e| {
+            format!(
+                "the old task {} was put back, but its emptied set-aside folder {} could not be \
+                 deleted ({e}); the next `--restart` of {} deletes it, or delete it yourself",
+                self.id,
+                dir.display(),
+                self.id
+            )
+        }))
     }
 
     fn undo_restore(&self, done: &[&PathBuf]) {
@@ -355,7 +416,8 @@ impl SetAside {
 /// deleted (decision 185 point 4).
 pub fn restore_after_failed_start(aside: &SetAside, start_failed: anyhow::Error) -> anyhow::Error {
     match aside.restore() {
-        Ok(()) => start_failed.context(format!("the old task {} was put back", aside.id())),
+        Ok(None) => start_failed.context(format!("the old task {} was put back", aside.id())),
+        Ok(Some(warning)) => start_failed.context(warning),
         Err(restore_failed) => anyhow::anyhow!(
             "the start failed ({start_failed:#}), and putting the old task {} back failed too \
              ({restore_failed:#}); it is still set aside at {}",
@@ -501,9 +563,13 @@ fn set_aside_one(base_dir: &Path, plan: &RemovalPlan) -> Result<SetAside> {
 }
 
 /// Puts `aside` back; `None` when that worked, or else why it didn't and the folder the old task
-/// is still set aside at (decision 185 point 4), for the caller's error to carry.
+/// is still set aside at (decision 185 point 4), or the folder left behind when only deleting the
+/// emptied set-aside tree failed (issue #224), for the caller's error to carry.
 fn stranded(aside: &SetAside) -> Option<String> {
-    let restore_failed = aside.restore().err()?;
+    let restore_failed = match aside.restore() {
+        Ok(warning) => return warning,
+        Err(e) => e,
+    };
     Some(format!(
         "putting the old task {} back failed too ({restore_failed:#}); it is still set aside at {}",
         aside.id(),
