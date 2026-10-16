@@ -5,7 +5,9 @@ pub mod task_fixture;
 
 use std::path::{Path, PathBuf};
 
-use sbxm::backend::FakeBackend;
+use sbxm::backend::{
+    CreateSpec, ExecOutput, ExecSpec, FakeBackend, KitValidation, SandboxBackend, SandboxInfo,
+};
 use sbxm::commands::new;
 use tempfile::TempDir;
 
@@ -261,5 +263,87 @@ impl Drop for Undeletable {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
         }
+    }
+}
+
+/// A `Write` that fails on every call, modeling a screen that has already stopped taking output
+/// (decision 185(e)) before a `--restart` command's own recovery runs.
+#[derive(Default)]
+pub struct AlwaysFails;
+
+impl std::io::Write for AlwaysFails {
+    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("screen output failed"))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Err(std::io::Error::other("screen output failed"))
+    }
+}
+
+/// Wraps `inner`, delegating every call but `secret_services`, which blocks a restore (puts a
+/// plain file at `blocker`, where a set-aside folder needs to go back) and then reports no stored
+/// secrets. `secret_services` is only called from `check_secrets`, which `pipeline::prepare` calls
+/// after a `--restart` discard has already moved the old task aside, so this is a way to make the
+/// restore itself fail without disturbing the move (issue #223). `skip` passes that many leading
+/// calls straight through to `inner` instead: `task run --restart` checks the reviewer's secret
+/// before any discard moves anything, and that earlier call must not trip the block.
+pub struct SecretCheckBlocksRestore<'a> {
+    pub inner: &'a FakeBackend,
+    pub blocker: PathBuf,
+    pub skip: std::sync::atomic::AtomicU32,
+}
+
+impl SandboxBackend for SecretCheckBlocksRestore<'_> {
+    fn create(&self, spec: &CreateSpec) -> anyhow::Result<()> {
+        self.inner.create(spec)
+    }
+
+    fn list(&self) -> anyhow::Result<Vec<SandboxInfo>> {
+        self.inner.list()
+    }
+
+    fn stop(&self, name: &str) -> anyhow::Result<()> {
+        self.inner.stop(name)
+    }
+
+    fn remove(&self, name: &str) -> anyhow::Result<()> {
+        self.inner.remove(name)
+    }
+
+    fn attach(&self, name: &str) -> anyhow::Result<()> {
+        self.inner.attach(name)
+    }
+
+    fn validate_kit(&self, dir: &Path) -> anyhow::Result<KitValidation> {
+        self.inner.validate_kit(dir)
+    }
+
+    fn secret_services(&self) -> anyhow::Result<Vec<String>> {
+        if self
+            .skip
+            .fetch_update(
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+                |left| (left > 0).then(|| left - 1),
+            )
+            .is_ok()
+        {
+            return self.inner.secret_services();
+        }
+        std::fs::write(&self.blocker, b"in the way").unwrap();
+        Ok(Vec::new())
+    }
+
+    fn version(&self) -> anyhow::Result<String> {
+        self.inner.version()
+    }
+
+    fn exec(&self, sandbox: &str, spec: &ExecSpec) -> anyhow::Result<ExecOutput> {
+        self.inner.exec(sandbox, spec)
+    }
+
+    fn skills(&self) -> anyhow::Result<serde_json::Value> {
+        self.inner.skills()
     }
 }

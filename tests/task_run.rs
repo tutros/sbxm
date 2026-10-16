@@ -600,6 +600,62 @@ fn restart_puts_the_old_task_back_if_the_worker_secret_vanishes_during_confirmat
     );
 }
 
+/// PR 219 review, M-1 (issue #223): the same guarantee `task_start_restart.rs` checks for `task
+/// start --restart --issue` also holds for `task run --restart --issue`: with an issue task set
+/// aside, a preparation failure, a blocked restore and an output writer that has already failed
+/// all at once, the returned error still names all four things (decisions 185(c), 185(e)). The
+/// reviewer's secret is checked, and passes, before any discard moves anything (`skip: 1`); the
+/// worker's own check, after the move, is the one this test makes fail and block the restore.
+#[test]
+fn restart_combined_failure_names_the_preparation_restore_folder_and_output_failures() {
+    let f = config();
+    let first = go(&f, &options(&f), None, &backend(&f, &[CLEAN]), &github());
+    first.result.unwrap();
+    let b = backend(&f, &[CLEAN]);
+    let blocked = common::SecretCheckBlocksRestore {
+        inner: &b,
+        blocker: record::task_dir(&f.env.base_dir(), "issue-41"),
+        skip: std::sync::atomic::AtomicU32::new(1),
+    };
+    let remnant = f
+        .env
+        .base_dir()
+        .join(".sbxm")
+        .join("tasks-replaced")
+        .join("issue-41");
+    let mut out = common::AlwaysFails;
+    let mut warn = common::AlwaysFails;
+
+    let result = run(
+        &f.env.config_dir(),
+        &options(&f),
+        Some(&Restart {
+            confirm: &Yes,
+            yes: false,
+        }),
+        &blocked,
+        &github(),
+        &Probe,
+        &FakeHostRunner::default(),
+        &mut out,
+        &mut warn,
+    );
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(message.contains("is not stored in sbx"), "{message}");
+    assert!(message.contains("putting the old task"), "{message}");
+    assert!(message.contains("back failed too"), "{message}");
+    assert!(
+        message.contains(&remnant.display().to_string()),
+        "{message}"
+    );
+    assert!(message.contains("screen output failed"), "{message}");
+    assert!(
+        sbxm::task::finish::has_leftover(&f.env.base_dir(), "issue-41"),
+        "the old task is still set aside: {message}"
+    );
+}
+
 /// Decision 185 point 4: `task run --restart --issue` refuses before the prompt while a leftover
 /// copy of the task exists under `tasks-replaced/`, naming the folder and the two ways out.
 #[test]

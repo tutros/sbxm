@@ -1282,3 +1282,57 @@ fn a_restore_whose_cleanup_fails_names_the_folder_on_screen() {
     assert!(out.contains(&remnant.display().to_string()), "{out}");
     assert!(record::read(&meta(&f).join("task.json")).is_ok(), "{out}");
 }
+
+/// PR 219 review, M-1 (issue #223): with an issue task set aside, a preparation failure, a blocked
+/// restore and an output writer that has already failed all at once, the returned error must still
+/// name all four things — decision 185(c) requires the first three of a restore's error, and
+/// 185(e) says the screen can't swallow any of it. Before the fix, the combined-error text
+/// `restore_after_failed_start` built only ever reached `out` (which this test makes fail from the
+/// first write); the function's own return value carried only the generic summary.
+#[test]
+fn a_combined_failure_names_the_preparation_restore_folder_and_output_failures() {
+    let f = fixture();
+    started(&f);
+    let b = playing(&f);
+    let blocked = common::SecretCheckBlocksRestore {
+        inner: &b,
+        blocker: meta(&f),
+        skip: std::sync::atomic::AtomicU32::new(0),
+    };
+    let confirm = FakeConfirm::new(true, true);
+    let mut out = FailsAfterLines(String::new(), 0);
+    let remnant = f
+        .env
+        .base_dir()
+        .join(".sbxm")
+        .join("tasks-replaced")
+        .join("issue-41");
+
+    let result = task_start::run_with(
+        &f.env.config_dir(),
+        &options(&f),
+        Some(&Restart {
+            confirm: &confirm,
+            yes: false,
+        }),
+        &blocked,
+        &github(),
+        &Probe,
+        &mut out,
+        &mut Vec::new(),
+    );
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(message.contains("is not stored in sbx"), "{message}");
+    assert!(message.contains("putting the old task"), "{message}");
+    assert!(message.contains("back failed too"), "{message}");
+    assert!(
+        message.contains(&remnant.display().to_string()),
+        "{message}"
+    );
+    assert!(message.contains("screen output failed"), "{message}");
+    assert!(
+        sbxm::task::finish::has_leftover(&f.env.base_dir(), "issue-41"),
+        "the old task is still set aside: {message}"
+    );
+}

@@ -254,6 +254,19 @@ fn plural(n: u32, word: &str) -> String {
     format!("{n} {word}{}", if n == 1 { "" } else { "s" })
 }
 
+/// Appends each issue task's combined recovery error (the preparation failure, the restore
+/// failure and the set-aside folder, from [`finish::restore_after_failed_start`]) to the command's
+/// own summary, so the returned error carries them (decision 185(c)) instead of only the screen
+/// text that prints them, which can be lost if the screen has already stopped taking output
+/// (decision 185(e), issue #223).
+fn with_restore_notes(message: String, notes: &[String]) -> anyhow::Error {
+    if notes.is_empty() {
+        anyhow!(message)
+    } else {
+        anyhow!("{message}; {}", notes.join("; "))
+    }
+}
+
 /// Starts the tasks and prints one line per task to `out` and warnings to `warn`. Fails if any
 /// task failed (after printing everything).
 pub fn run(
@@ -441,16 +454,26 @@ fn start(
     let reports = match run_outcome {
         Ok(reports) => reports,
         Err(e) => {
+            let mut notes = Vec::new();
             for (id, aside) in aside_by_id {
                 let msg = finish::restore_after_failed_start(&aside, anyhow!("{e:#}"));
                 writeln!(out, "{id}: {msg:#}")?;
+                notes.push(format!("{id}: {msg:#}"));
             }
-            return Err(e);
+            return Err(if notes.is_empty() {
+                e
+            } else {
+                anyhow!(notes.join("; "))
+            });
         }
     };
     let total = reports.len();
 
     let (mut failed, mut gates_failed, mut exec_unavailable, mut restored) = (0, 0, 0, 0);
+    // Each issue task's own combined recovery error (preparation failure, restore failure, the
+    // set-aside folder), kept so the final returned error can carry them too (decision 185(c)),
+    // not only the screen text they are also written to, which can be lost (decision 185(e)).
+    let mut restore_notes: Vec<String> = Vec::new();
     for report in reports {
         let pipeline::TaskReport {
             number,
@@ -573,6 +596,7 @@ fn start(
                         restored += 1;
                         let msg = finish::restore_after_failed_start(&aside, e);
                         writeln!(out, "{id}: {msg:#}")?;
+                        restore_notes.push(format!("{id}: {msg:#}"));
                     }
                     None => writeln!(out, "{id}: failed: {e:#}")?,
                 }
@@ -588,6 +612,7 @@ fn start(
             anyhow!("issue was not picked to start again"),
         );
         writeln!(out, "{id}: {msg:#}")?;
+        restore_notes.push(format!("{id}: {msg:#}"));
     }
     if failed > 0 {
         let message = format!("{failed} of {total} task(s) failed; see above");
@@ -602,12 +627,13 @@ fn start(
         if failed == exec_unavailable && restored == 0 {
             return Err(crate::headless::ExecUnavailable(message).into());
         }
-        bail!(message);
+        return Err(with_restore_notes(message, &restore_notes));
     }
     if restored > 0 {
-        bail!(
+        let message = format!(
             "{restored} restarted task(s) could not be started again and were put back; see above"
         );
+        return Err(with_restore_notes(message, &restore_notes));
     }
     Ok(())
 }
