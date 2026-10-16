@@ -11,6 +11,7 @@ use anyhow::{Result, bail};
 use crate::backend::SandboxBackend;
 use crate::config::GlobalConfig;
 use crate::confirm::Confirm;
+use crate::disk;
 use crate::github::GitHubBackend;
 use crate::task::finish;
 use crate::task::merged;
@@ -52,7 +53,8 @@ pub fn run(
     if opts.dry_run && opts.target != Target::Merged {
         bail!("--dry-run only makes sense with --merged");
     }
-    let base_dir = GlobalConfig::load(config_dir)?.base_dir;
+    let config = GlobalConfig::load(config_dir)?;
+    let base_dir = config.base_dir.clone();
     let id = match &opts.target {
         Target::Issue(n) => format!("issue-{n}"),
         Target::Pr(n) => format!("pr-{n}"),
@@ -76,6 +78,7 @@ pub fn run(
                 }
                 return Ok(());
             }
+            let state_dir = disk::state_dir(&config, disk::platform_state_dir().as_deref());
             return merged::remove(
                 &base_dir,
                 &found,
@@ -83,6 +86,7 @@ pub fn run(
                 backend,
                 confirm,
                 |p| fs4::available_space(p),
+                state_dir.as_deref(),
                 out,
             );
         }

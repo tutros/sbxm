@@ -115,6 +115,31 @@ fn unreadable_free_space(_: &Path) -> std::io::Result<u64> {
     Err(std::io::Error::other("no such drive"))
 }
 
+// Issue 258 (decision 220): `remove`'s reports of the base dir and `sbx`'s sandbox state dir are
+// told apart by path, not by call order, so each can be scripted independently. `None` reads as
+// an unreadable drive. Set with `script`, read in order, one entry per call; a path `remove`
+// doesn't read stays unscripted (and panics if it is).
+thread_local! {
+    static SCRIPTED: RefCell<std::collections::HashMap<std::path::PathBuf, Vec<Option<u64>>>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+fn script(dir: &Path, readings: Vec<Option<u64>>) {
+    SCRIPTED.with(|m| m.borrow_mut().insert(dir.to_owned(), readings));
+}
+
+fn scripted_free_space(dir: &Path) -> std::io::Result<u64> {
+    SCRIPTED.with(|m| {
+        let mut scripts = m.borrow_mut();
+        let readings = scripts
+            .get_mut(dir)
+            .unwrap_or_else(|| panic!("{} was not scripted", dir.display()));
+        readings
+            .remove(0)
+            .ok_or_else(|| std::io::Error::other("no such drive"))
+    })
+}
+
 #[test]
 fn archiving_copies_only_the_text_records_that_exist() {
     let f = fixture();
@@ -254,6 +279,7 @@ fn removing_archives_first_then_deletes_the_sandbox_and_folders_and_reports_free
         &FakeBackend::with_secrets(&["anthropic"]),
         &confirm,
         rising_free_space,
+        None,
         &mut out,
     )
     .unwrap();
@@ -285,6 +311,7 @@ fn removing_with_yes_asks_nothing() {
         &FakeBackend::with_secrets(&["anthropic"]),
         &confirm,
         rising_free_space,
+        None,
         &mut out,
     )
     .unwrap();
@@ -308,6 +335,7 @@ fn removing_without_yes_or_a_terminal_is_refused_and_nothing_is_touched() {
         &FakeBackend::with_secrets(&["anthropic"]),
         &NonInteractive,
         rising_free_space,
+        None,
         &mut out,
     )
     .unwrap_err();
@@ -331,6 +359,7 @@ fn removing_nothing_merged_prints_a_message_and_asks_nothing() {
         &FakeBackend::with_secrets(&["anthropic"]),
         &confirm,
         rising_free_space,
+        None,
         &mut out,
     )
     .unwrap();
@@ -421,6 +450,7 @@ fn removing_a_merged_spec_task_names_its_worktree_and_branch_cleanup_commands() 
         &FakeBackend::with_secrets(&["anthropic", "openai"]),
         &confirm,
         rising_free_space,
+        None,
         &mut out,
     )
     .unwrap();
@@ -451,12 +481,151 @@ fn removing_never_fails_when_the_disk_cannot_be_read() {
         &FakeBackend::with_secrets(&["anthropic"]),
         &confirm,
         unreadable_free_space,
+        None,
         &mut out,
     )
     .unwrap();
 
     let printed = String::from_utf8(out).unwrap();
     assert!(!printed.contains("freed"), "{printed}");
+}
+
+const GIB: u64 = 1024 * 1024 * 1024;
+
+/// Issue 258 (decision 220): a task's sandboxes take their space on `sbx`'s sandbox state drive,
+/// not the base dir's, so a removal that frees space there reports it on its own line, separate
+/// from the base dir's.
+#[test]
+fn removing_reports_the_state_dirs_drive_separately_from_the_base_dirs() {
+    let f = fixture();
+    let url = finished_task(&f);
+    let number = sbxm::task::finish::pr_number(&url).unwrap();
+    let found = found_merged(&f, number);
+    let state = f.env.tmp.path().join("sandbox-state");
+    script(&f.env.base_dir(), vec![Some(GIB), Some(2 * GIB)]);
+    script(&state, vec![Some(3 * GIB), Some(5 * GIB)]);
+    let mut out = Vec::new();
+
+    remove(
+        &f.env.base_dir(),
+        &found,
+        true,
+        &FakeBackend::with_secrets(&["anthropic"]),
+        &Yes::new(),
+        scripted_free_space,
+        Some(&state),
+        &mut out,
+    )
+    .unwrap();
+
+    let printed = String::from_utf8(out).unwrap();
+    assert!(
+        printed.contains(&format!(
+            "freed about 1.0 GiB on {}",
+            sbxm::disk::describe(&f.env.base_dir())
+        )),
+        "{printed}"
+    );
+    assert!(
+        printed.contains(&format!(
+            "freed about 2.0 GiB on {}",
+            sbxm::disk::describe(&state)
+        )),
+        "{printed}"
+    );
+}
+
+/// Issue 258, decision 220 point 1: when the base dir and the state dir are on the same drive,
+/// only the base dir's line is printed, so the same free space isn't counted twice.
+#[test]
+fn removing_prints_one_line_when_the_state_dir_shares_the_base_dirs_drive() {
+    let f = fixture();
+    let url = finished_task(&f);
+    let number = sbxm::task::finish::pr_number(&url).unwrap();
+    let found = found_merged(&f, number);
+    script(&f.env.base_dir(), vec![Some(GIB), Some(2 * GIB)]);
+    let mut out = Vec::new();
+    let state = f.env.base_dir();
+
+    remove(
+        &f.env.base_dir(),
+        &found,
+        true,
+        &FakeBackend::with_secrets(&["anthropic"]),
+        &Yes::new(),
+        scripted_free_space,
+        Some(&state),
+        &mut out,
+    )
+    .unwrap();
+
+    let printed = String::from_utf8(out).unwrap();
+    assert_eq!(printed.matches("freed about").count(), 1, "{printed}");
+}
+
+/// Issue 258 (decision 220): an unreadable state dir leaves its line out, as an unreadable base
+/// dir already does, without affecting the base dir's own line.
+#[test]
+fn removing_leaves_out_the_state_dirs_line_when_it_cannot_be_read() {
+    let f = fixture();
+    let url = finished_task(&f);
+    let number = sbxm::task::finish::pr_number(&url).unwrap();
+    let found = found_merged(&f, number);
+    let state = f.env.tmp.path().join("sandbox-state");
+    script(&f.env.base_dir(), vec![Some(GIB), Some(2 * GIB)]);
+    script(&state, vec![None, Some(5 * GIB)]);
+    let mut out = Vec::new();
+
+    remove(
+        &f.env.base_dir(),
+        &found,
+        true,
+        &FakeBackend::with_secrets(&["anthropic"]),
+        &Yes::new(),
+        scripted_free_space,
+        Some(&state),
+        &mut out,
+    )
+    .unwrap();
+
+    let printed = String::from_utf8(out).unwrap();
+    assert!(
+        printed.contains(&format!(
+            "freed about 1.0 GiB on {}",
+            sbxm::disk::describe(&f.env.base_dir())
+        )),
+        "{printed}"
+    );
+    assert!(
+        !printed.contains(&sbxm::disk::describe(&state)),
+        "{printed}"
+    );
+}
+
+/// Issue 258, decision 220: with no known state dir (`None`, as when there is no default on the
+/// platform), only the base dir's line is printed.
+#[test]
+fn removing_prints_only_the_base_dirs_line_without_a_known_state_dir() {
+    let f = fixture();
+    let url = finished_task(&f);
+    let number = sbxm::task::finish::pr_number(&url).unwrap();
+    let found = found_merged(&f, number);
+    let mut out = Vec::new();
+
+    remove(
+        &f.env.base_dir(),
+        &found,
+        true,
+        &FakeBackend::with_secrets(&["anthropic"]),
+        &Yes::new(),
+        rising_free_space,
+        None,
+        &mut out,
+    )
+    .unwrap();
+
+    let printed = String::from_utf8(out).unwrap();
+    assert_eq!(printed.matches("freed about").count(), 1, "{printed}");
 }
 
 /// Moves the task folder `meta` elsewhere and leaves a link in its place; returns where it went.
@@ -562,6 +731,7 @@ fn removing_a_task_whose_folder_is_a_link_archives_and_deletes_nothing() {
         &FakeBackend::with_secrets(&["anthropic"]),
         &Yes::new(),
         rising_free_space,
+        None,
         &mut out,
     )
     .unwrap_err();
@@ -607,6 +777,7 @@ fn a_failed_output_line_does_not_leave_a_new_archive_blocking_retry() {
         &FakeBackend::with_secrets(&["anthropic"]),
         &Yes::new(),
         rising_free_space,
+        None,
         &mut out,
     )
     .unwrap_err();
@@ -644,6 +815,7 @@ fn removing_reports_the_disk_even_when_free_space_did_not_grow() {
         &FakeBackend::with_secrets(&["anthropic"]),
         &Yes::new(),
         same_free_space,
+        None,
         &mut out,
     )
     .unwrap();
@@ -673,6 +845,7 @@ fn a_failed_removal_and_a_failed_output_line_are_both_reported() {
         }]),
         &Yes::new(),
         rising_free_space,
+        None,
         &mut out,
     )
     .unwrap_err();
@@ -702,6 +875,7 @@ fn a_rerun_after_a_failed_removal_reuses_its_own_identical_archive() {
         &stuck,
         &Yes::new(),
         rising_free_space,
+        None,
         &mut Vec::new(),
     );
     assert!(first.is_err(), "the first removal was meant to fail");
@@ -718,6 +892,7 @@ fn a_rerun_after_a_failed_removal_reuses_its_own_identical_archive() {
         &FakeBackend::with_secrets(&["anthropic"]),
         &Yes::new(),
         rising_free_space,
+        None,
         &mut out,
     )
     .unwrap();

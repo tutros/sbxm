@@ -8,6 +8,7 @@ use std::fs;
 use common::task_fixture::{
     CLAUDE_DONE, Fixture, Play, Probe, backend, fixture, ok, play, ready_spec_task,
 };
+use common::toml_path;
 use sbxm::backend::FakeBackend;
 use sbxm::commands::task_rm::{Options, Target, run};
 use sbxm::confirm::Confirm;
@@ -163,6 +164,31 @@ fn yes_removes_the_merged_task_without_asking() {
     assert!(!meta(&f).exists(), "{out}");
     let archive = sbxm::task::merged::archive_dir(&f.env.base_dir(), "issue-41").join("task.json");
     assert!(archive.is_file(), "{out}");
+}
+
+/// Issue 258 (decision 220): the command wires `sandbox_state_dir` through to `merged::remove`,
+/// so a configured drive (here, since the test can't rely on a platform default) gets its own
+/// "freed about" line too, alongside the base dir's.
+#[test]
+fn yes_also_reports_the_configured_sandbox_state_dirs_freed_space() {
+    let f = fixture();
+    let number = finished_task(&f);
+    let github = merged_github(number);
+    let confirm = FakeConfirm::new(true, true);
+    let state_dir = f.env.tmp.path().join("sandbox-state");
+    fs::create_dir(&state_dir).unwrap();
+    f.env
+        .set_config(&format!("sandbox_state_dir = {}", toml_path(&state_dir)));
+
+    let (result, out) = rm_merged(&f, false, true, &backend(), &github, &confirm);
+
+    result.unwrap();
+    assert_eq!(out.matches("freed about").count(), 2, "{out}");
+    assert!(out.contains(&sbxm::disk::describe(&state_dir)), "{out}");
+    assert!(
+        out.contains(&sbxm::disk::describe(&f.env.base_dir())),
+        "{out}"
+    );
 }
 
 #[test]

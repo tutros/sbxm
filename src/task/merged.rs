@@ -488,8 +488,13 @@ fn same_records(base_dir: &Path, meta: &Path, archive: &Path) -> Result<bool> {
 /// whole batch (`--dry-run` never reaches here; the caller only lists). [`MergedPlan::listing`]
 /// is shown once on every path, `--yes` and "nothing to remove" included. A task whose archive
 /// fails is left entirely alone (its folders are not deleted), counted as stayed like a folder
-/// `finish::remove` could not delete. Reports the disk freed on the base dir's drive when
-/// `free_space` can read it both before and after (decision 195's "if it can be read").
+/// `finish::remove` could not delete. Reports the disk freed on the base dir's drive, and
+/// separately on `state_dir`'s (`sbx`'s sandbox state, where a task's sandboxes actually took
+/// their space), whenever `free_space` can read a drive both before and after (decision 195's "if
+/// it can be read"; decision 220). `state_dir` is `None` when it isn't known on this platform;
+/// when it shares a drive with `base_dir`, only the base dir's line is printed, so the same space
+/// isn't counted twice.
+#[allow(clippy::too_many_arguments)]
 pub fn remove(
     base_dir: &Path,
     merged: &MergedPlan,
@@ -497,6 +502,7 @@ pub fn remove(
     backend: &dyn SandboxBackend,
     confirm: &dyn Confirm,
     free_space: fn(&Path) -> std::io::Result<u64>,
+    state_dir: Option<&Path>,
     out: &mut dyn Write,
 ) -> Result<()> {
     // Every task left alone is named whichever way this goes (decision 195 a, c): in the
@@ -525,6 +531,10 @@ pub fn remove(
         }
     }
     let before = free_space(base_dir).ok();
+    // `None` once a same-drive `state_dir` is folded into the base dir's own report (decision
+    // 220), so the block below never reads or prints it a second time.
+    let state_dir = state_dir.filter(|dir| !crate::disk::same_drive(base_dir, dir));
+    let state_before = state_dir.and_then(|dir| free_space(dir).ok());
     let mut stayed = 0;
     // From the first archive on, a failed screen write never stops the work: stopping between a
     // task's archive and its removal would leave the live task behind an archive the next run
@@ -572,6 +582,18 @@ pub fn remove(
             "freed about {} on {}",
             crate::disk::gib(after.saturating_sub(before)),
             crate::disk::describe(base_dir)
+        )?;
+    }
+    // The same rule, separately, for `sbx`'s sandbox state drive (decision 220): a task's
+    // sandboxes take their space there, not on the base dir's drive.
+    if let Some(dir) = state_dir
+        && let (Some(before), Some(after)) = (state_before, free_space(dir).ok())
+    {
+        writeln!(
+            out,
+            "freed about {} on {}",
+            crate::disk::gib(after.saturating_sub(before)),
+            crate::disk::describe(dir)
         )?;
     }
     let result = if stayed > 0 {
