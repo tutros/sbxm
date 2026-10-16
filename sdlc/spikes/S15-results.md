@@ -96,4 +96,5 @@ fair comparison needs repeated runs with the command itself timed (Follow-ups).
 - After cleanup: `sbx ls` empty; no `sbxm-spike-s15` tag; secret names the same. `sbx template ls` also lists
   `docker.io/sbx/pi-image:latest`, the Pi base image `sbx` pulled for the first create (outside the spike's prefix,
   so left in place). C: 30.42 GiB free.
-- `H:\sbxm-spike-s15\` removed after this file was written.
+- `H:\sbxm-spike-s15\` (config, kits, workspaces; no sandbox state) is **not removed yet**: the removal was
+  refused by the assistant's tool as a protected path, so it is left for the user.
