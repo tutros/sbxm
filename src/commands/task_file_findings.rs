@@ -364,45 +364,59 @@ fn file(
     let mut numbers: BTreeMap<String, u32> = BTreeMap::new();
     let mut relabel: BTreeMap<String, LabelChange> = BTreeMap::new();
     let mut pr_patch: BTreeMap<String, u32> = BTreeMap::new();
+    // The exact marker is the finding's identity, in any state, so every finding's marker match
+    // is resolved and its issue number reserved before any title-and-PR fallback runs: that
+    // fallback is only for an issue filed without a marker, and must never take an issue another
+    // finding's marker already claims (issue 97).
     for finding in &parsed.findings {
         let wanted = marker(&posted_name, &finding.id);
+        if let Some(issue) = listed.iter().find(|i| i.body.contains(&wanted)) {
+            numbers.insert(finding.id.clone(), issue.number);
+        }
+    }
+    for finding in &parsed.findings {
+        if numbers.contains_key(&finding.id) {
+            continue;
+        }
         let title = format!("{}: {}", finding.id, finding.title);
-        // The exact marker is the finding's identity, in any state, so it is looked for first; the
-        // open title-and-PR match is only the fallback for an issue filed without a marker.
-        let duplicate = listed
-            .iter()
-            .find(|i| i.body.contains(&wanted))
-            .or_else(|| {
-                listed.iter().find(|i| {
-                    i.open
-                        && opts
-                            .pr
-                            .is_some_and(|pr| i.title == title && pr_of(&i.body) == Some(pr))
-                })
-            });
+        let duplicate = listed.iter().find(|i| {
+            i.open
+                && !numbers.values().any(|&n| n == i.number)
+                && opts
+                    .pr
+                    .is_some_and(|pr| i.title == title && pr_of(&i.body) == Some(pr))
+        });
         if let Some(issue) = duplicate {
             numbers.insert(finding.id.clone(), issue.number);
-            let selected = prepared.iter().find(|p| p.id == finding.id);
-            // A matched open issue may lack the section's label or carry another severity's: one
-            // adopted by title and PR wasn't filed by this command, and a marker match may predate
-            // the label rule (decision 169).
-            if issue.open
-                && let Some(done) = selected
-                && let Some(change) = label_change(&issue.labels, &done.label)
-            {
-                relabel.insert(finding.id.clone(), change);
-            }
-            // The PR-first-line patch, like the label, touches only a selected finding's issue
-            // (issue 98): an unselected `--only` match keeps the listing's body apart from its
-            // link fields. A marker match may predate the PR-line rule (decision 169); a title+PR
-            // duplicate already carries the matching line by construction of the match itself.
-            if issue.open
-                && selected.is_some()
-                && let Some(pr) = opts.pr
-                && set_pr_line(&issue.body, pr) != issue.body
-            {
-                pr_patch.insert(finding.id.clone(), pr);
-            }
+        }
+    }
+    for finding in &parsed.findings {
+        let Some(issue) = numbers
+            .get(&finding.id)
+            .and_then(|number| listed.iter().find(|i| i.number == *number))
+        else {
+            continue;
+        };
+        let selected = prepared.iter().find(|p| p.id == finding.id);
+        // A matched open issue may lack the section's label or carry another severity's: one
+        // adopted by title and PR wasn't filed by this command, and a marker match may predate
+        // the label rule (decision 169).
+        if issue.open
+            && let Some(done) = selected
+            && let Some(change) = label_change(&issue.labels, &done.label)
+        {
+            relabel.insert(finding.id.clone(), change);
+        }
+        // The PR-first-line patch, like the label, touches only a selected finding's issue
+        // (issue 98): an unselected `--only` match keeps the listing's body apart from its
+        // link fields. A marker match may predate the PR-line rule (decision 169); a title+PR
+        // duplicate already carries the matching line by construction of the match itself.
+        if issue.open
+            && selected.is_some()
+            && let Some(pr) = opts.pr
+            && set_pr_line(&issue.body, pr) != issue.body
+        {
+            pr_patch.insert(finding.id.clone(), pr);
         }
     }
     let to_create: Vec<&Finding> = prepared
