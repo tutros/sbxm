@@ -31,7 +31,7 @@ because the account was out of extra usage; the user added credits and both were
 | 4 | Narrow kit | Answered | Starts (about 93.8 s between clock reads, see Conditions; the create output shows only the Pi kit's step, 1.0 s). `jq` present. `archive.ubuntu.com`, `example.com` and `github.com` answered 403, each in `sbx policy log` as "No matching allow rule (default deny)". The Pi kit's own rules allow only `api.anthropic.com`, `platform.claude.com:443` and `registry.npmjs.org` (`sbx policy ls --wide`), so unlike `codex` (decision 217) a Pi sandbox can be held to the profile's list plus the provider. |
 | 5 | Pi works from the template | Answered | First Blocked with question 1's error (twice in all, stop rule). In the rerun, from a new template (`pi-2`) with the narrow kit (no installs, `allow: []`), `pi -p` answered `MEDLAR-15`: the provider sign-in and `AGENTS.md` both work from a template. |
 | 6 | Secrets in the template | Answered | 0 matches for the Anthropic key pattern in the environment, process command lines and filesystem (without `/proc`, `/sys`, `/dev`, `/run` and the workspace). `~/.pi/agent/auth.json`: `anthropic.access` and `anthropic.refresh` of length 26 (placeholders, as S11 found for `claude`), `expires`, `type`. The template carried question 1's Pi session file (`~/.pi/agent/sessions/--tmp--/2026-10-16T19-17-33-*.jsonl`, written before the save), as slice 0 observed for `codex`. |
-| 7 | Disk | Partial | Recorded: C: free at the start, just before and just after the save (0.07 GiB used by the save), after cleanup, and the template's reported size (see Disk). **Not recorded:** C: free before and after each of the three creates (questions 1, 3 and 4), and what the template added on disk beyond the save's own reading. |
+| 7 | Disk | Partial | Recorded: C: free at the start, just before and just after the save (0.07 GiB used by the save), after cleanup, and the template's reported size (see Disk). **Not recorded:** C: free before and after each of the three creates (questions 1, 3 and 4); in the rerun, before and after the `sbxm new`, the `pi-2` save and the template create; and what either template added on disk beyond the first save's own reading. |
 
 ## Evidence
 
@@ -96,7 +96,7 @@ fair comparison needs repeated runs with the command itself timed (Follow-ups).
 |---|---|
 | C: free at the start / before the save / after the save | 30.7 / 30.25 / 30.18 GiB |
 | Template reported size | 734 MB |
-| C: free after cleanup | 30.42 GiB (the Pi base image `docker.io/sbx/pi-image:latest`, pulled by the first create, stays) |
+| C: free after cleanup | 30.42 GiB, read after the first run's cleanup and **before** the rerun; no reading after the rerun's cleanup (the Pi base image `docker.io/sbx/pi-image:latest`, pulled by the first create, stays) |
 
 ## Follow-ups
 
