@@ -166,11 +166,12 @@ fn yes_removes_the_merged_task_without_asking() {
     assert!(archive.is_file(), "{out}");
 }
 
-/// Issue 258 (decision 220): the command wires `sandbox_state_dir` through to `merged::remove`,
-/// so a configured drive (here, since the test can't rely on a platform default) gets its own
-/// "freed about" line too, alongside the base dir's.
+/// Issue 258 (decision 220): the command wires `sandbox_state_dir` through to `merged::remove`.
+/// Here the configured dir sits on the same filesystem as the base dir (the test fixture puts
+/// both under one temp root), so `same_drive` dedupes them and only the base dir's "freed about"
+/// line is printed.
 #[test]
-fn yes_also_reports_the_configured_sandbox_state_dirs_freed_space() {
+fn yes_reports_one_line_when_the_configured_sandbox_state_dir_shares_the_base_dirs_drive() {
     let f = fixture();
     let number = finished_task(&f);
     let github = merged_github(number);
@@ -183,8 +184,7 @@ fn yes_also_reports_the_configured_sandbox_state_dirs_freed_space() {
     let (result, out) = rm_merged(&f, false, true, &backend(), &github, &confirm);
 
     result.unwrap();
-    assert_eq!(out.matches("freed about").count(), 2, "{out}");
-    assert!(out.contains(&sbxm::disk::describe(&state_dir)), "{out}");
+    assert_eq!(out.matches("freed about").count(), 1, "{out}");
     assert!(
         out.contains(&sbxm::disk::describe(&f.env.base_dir())),
         "{out}"

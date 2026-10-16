@@ -70,16 +70,35 @@ pub fn gib(bytes: u64) -> String {
 }
 
 /// Whether two paths are on the same drive, so a free-space report covering both would count the
-/// same space twice (decision 220): the same path always is; otherwise only a shared drive letter
-/// is, since a path without one (every path off Windows) carries no other sign of its drive.
+/// same space twice (decision 220): the same path always is; otherwise, on Unix, two paths that
+/// both exist are compared by the filesystem device they sit on (`stat`'s device id), since two
+/// different folders can share a drive without sharing a prefix; everywhere else (a path that
+/// doesn't exist yet, or Windows, which has no such device id), a shared drive letter is the only
+/// other sign of a shared drive.
 pub fn same_drive(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
+    }
+    if let (Some(da), Some(db)) = (device_id(a), device_id(b)) {
+        return da == db;
     }
     matches!(
         (a.components().next(), b.components().next()),
         (Some(Component::Prefix(p1)), Some(Component::Prefix(p2))) if p1.as_os_str() == p2.as_os_str()
     )
+}
+
+/// The filesystem device a path sits on, or `None` when it can't be read (missing path, or a
+/// platform without the concept, like Windows).
+#[cfg(unix)]
+fn device_id(path: &Path) -> Option<u64> {
+    use std::os::unix::fs::MetadataExt;
+    std::fs::metadata(path).ok().map(|m| m.dev())
+}
+
+#[cfg(not(unix))]
+fn device_id(_path: &Path) -> Option<u64> {
+    None
 }
 
 /// What a sandbox-creating command reads the drive with, passed in so tests don't depend on the

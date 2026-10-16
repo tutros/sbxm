@@ -254,3 +254,14 @@ fn different_folders_are_different_drives_without_a_drive_letter() {
         Path::new("/other/state")
     ));
 }
+
+#[cfg(unix)]
+#[test]
+fn different_existing_folders_on_the_same_filesystem_are_the_same_drive() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let a = tmp.path().join("base");
+    let b = tmp.path().join("state");
+    std::fs::create_dir(&a).unwrap();
+    std::fs::create_dir(&b).unwrap();
+    assert!(disk::same_drive(&a, &b));
+}
