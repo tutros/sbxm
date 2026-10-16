@@ -5,7 +5,7 @@ mod common;
 
 use std::cell::RefCell;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use common::dir_link;
 use common::task_fixture::{
@@ -138,6 +138,22 @@ fn scripted_free_space(dir: &Path) -> std::io::Result<u64> {
             .remove(0)
             .ok_or_else(|| std::io::Error::other("no such drive"))
     })
+}
+
+// A state dir that `disk::same_drive` never puts on the base dir's drive: a folder that doesn't
+// exist under the test's temp dir, which on Windows also needs another drive letter, since every
+// temp folder there shares the base dir's. The free-space reader is scripted, so it is never read.
+fn state_dir_on_another_drive(f: &Fixture) -> PathBuf {
+    if cfg!(windows) {
+        let letter = if f.env.base_dir().starts_with("Q:") {
+            "R:"
+        } else {
+            "Q:"
+        };
+        return PathBuf::from(format!("{letter}{}", std::path::MAIN_SEPARATOR))
+            .join("sandbox-state");
+    }
+    f.env.tmp.path().join("sandbox-state")
 }
 
 #[test]
@@ -501,7 +517,7 @@ fn removing_reports_the_state_dirs_drive_separately_from_the_base_dirs() {
     let url = finished_task(&f);
     let number = sbxm::task::finish::pr_number(&url).unwrap();
     let found = found_merged(&f, number);
-    let state = f.env.tmp.path().join("sandbox-state");
+    let state = state_dir_on_another_drive(&f);
     script(&f.env.base_dir(), vec![Some(GIB), Some(2 * GIB)]);
     script(&state, vec![Some(3 * GIB), Some(5 * GIB)]);
     let mut out = Vec::new();
@@ -571,7 +587,7 @@ fn removing_leaves_out_the_state_dirs_line_when_it_cannot_be_read() {
     let url = finished_task(&f);
     let number = sbxm::task::finish::pr_number(&url).unwrap();
     let found = found_merged(&f, number);
-    let state = f.env.tmp.path().join("sandbox-state");
+    let state = state_dir_on_another_drive(&f);
     script(&f.env.base_dir(), vec![Some(GIB), Some(2 * GIB)]);
     script(&state, vec![None, Some(5 * GIB)]);
     let mut out = Vec::new();
