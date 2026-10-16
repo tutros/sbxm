@@ -692,6 +692,186 @@ fn the_codex_reviews_long_issues_line_becomes_the_short_form() {
     );
 }
 
+// Issue 98 (PR #86 review round 4, M-2): `--only` must not edit an unselected finding's issue
+// outside its link fields. `marked` leaves both issues correctly labeled already, so a relabel
+// isn't in play and the PR-first-line patch is isolated.
+fn marked_labeled(number: u32, id: &str) -> Issue {
+    Issue {
+        labels: vec!["must-fix".into()],
+        ..marked(number, id)
+    }
+}
+
+#[test]
+fn only_does_not_patch_an_unselected_marker_issues_pr_line() {
+    let setup = Setup::new();
+    let gh = github().with_issues(vec![marked_labeled(50, "S-1"), marked_labeled(51, "S-2")]);
+    let path = setup.write("review-small.md", small().as_bytes());
+    let run = setup.file(&path, &gh, true, |o| {
+        o.only = vec!["S-1".into()];
+        o.pr = Some(7);
+    });
+    assert!(run.result.is_ok(), "{}", run.error());
+
+    assert!(
+        body_of(&gh, "S-1").starts_with("PR: #7\n"),
+        "{}",
+        body_of(&gh, "S-1")
+    );
+    assert!(
+        !body_of(&gh, "S-2").contains("PR:"),
+        "{}",
+        body_of(&gh, "S-2")
+    );
+    assert!(
+        !gh.calls().iter().any(|c| matches!(
+            c,
+            GhCall::IssueEdit(_, 51, _) | GhCall::IssueLabels(_, 51, ..)
+        )),
+        "no body or label write on S-2's issue (#51): {:?}",
+        gh.calls()
+    );
+}
+
+#[test]
+fn an_unselected_findings_existing_issue_still_gets_its_link_fields_updated() {
+    let setup = Setup::new();
+    let gh = github().with_issues(vec![Issue {
+        number: 77,
+        open: true,
+        title: "S-2: old".into(),
+        labels: vec!["must-fix".into()],
+        body: "x\n**Related:** S-1 depends on this one\n<!-- review-finding: review-small.md#S-2 -->\n"
+            .into(),
+    }]);
+    let path = setup.write("review-small.md", small().as_bytes());
+    let run = setup.file(&path, &gh, true, |o| o.only = vec!["S-1".into()]);
+    assert!(run.result.is_ok(), "{}", run.error());
+
+    let s1_number = issues(&gh)
+        .into_iter()
+        .find(|i| i.title.starts_with("S-1"))
+        .unwrap()
+        .number;
+    let s2_body = body_of(&gh, "S-2");
+    assert!(
+        s2_body.contains(&format!("**Related:** #{s1_number} depends on this one")),
+        "{s2_body}"
+    );
+    assert!(!s2_body.starts_with("PR:"), "{s2_body}");
+    assert_eq!(
+        issues(&gh)
+            .into_iter()
+            .find(|i| i.number == 77)
+            .unwrap()
+            .labels,
+        ["must-fix"],
+        "no label write on the unselected finding's issue"
+    );
+}
+
+#[test]
+fn a_closed_unselected_issues_link_fields_still_update_but_it_never_gets_a_pr_line() {
+    let setup = Setup::new();
+    let gh = github().with_issues(vec![Issue {
+        number: 77,
+        open: false,
+        title: "S-2: old".into(),
+        labels: vec!["must-fix".into()],
+        body: "x\n**Related:** S-1 depends on this one\n<!-- review-finding: review-small.md#S-2 -->\n"
+            .into(),
+    }]);
+    let path = setup.write("review-small.md", small().as_bytes());
+    let run = setup.file(&path, &gh, true, |o| {
+        o.only = vec!["S-1".into()];
+        o.pr = Some(7);
+    });
+    assert!(run.result.is_ok(), "{}", run.error());
+
+    let s1_number = issues(&gh)
+        .into_iter()
+        .find(|i| i.title.starts_with("S-1"))
+        .unwrap()
+        .number;
+    let s2_body = body_of(&gh, "S-2");
+    assert!(
+        s2_body.contains(&format!("**Related:** #{s1_number} depends on this one")),
+        "{s2_body}"
+    );
+    assert!(!s2_body.starts_with("PR:"), "{s2_body}");
+}
+
+/// Every `#n` the dry run names anywhere in its output, for comparing against the set of issue
+/// numbers `--create` actually writes to (decision for issue 98's "dry run equals create").
+fn numbers_named(text: &str) -> std::collections::BTreeSet<u32> {
+    let mut found = std::collections::BTreeSet::new();
+    for (i, c) in text.char_indices() {
+        // `PR: #N` names the PR the review covers, not an issue create writes to.
+        if c == '#' && !text[..i].ends_with("PR: ") {
+            let digits: String = text[i + 1..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect();
+            if !digits.is_empty() {
+                found.insert(digits.parse().unwrap());
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn the_dry_run_names_exactly_the_existing_issues_create_writes_to() {
+    let state = || {
+        vec![
+            Issue {
+                number: 50,
+                open: true,
+                title: "S-1: old".into(),
+                labels: vec!["should-fix".into()],
+                body: "x\n<!-- review-finding: review-small.md#S-1 -->\n".into(),
+            },
+            Issue {
+                number: 51,
+                open: true,
+                title: "S-2: old".into(),
+                labels: vec!["must-fix".into()],
+                body:
+                    "x\n**Related:** S-1 depends on this one\n<!-- review-finding: review-small.md#S-2 -->\n"
+                        .into(),
+            },
+        ]
+    };
+    let tweak = |o: &mut Options| {
+        o.only = vec!["S-1".into()];
+        o.pr = Some(7);
+    };
+
+    let dry_setup = Setup::new();
+    let dry_gh = github().with_issues(state());
+    let dry_path = dry_setup.write("review-small.md", small().as_bytes());
+    let dry = dry_setup.file(&dry_path, &dry_gh, false, tweak);
+    assert!(dry.result.is_ok(), "{}", dry.error());
+    let named = numbers_named(&dry.out);
+
+    let create_setup = Setup::new();
+    let create_gh = github().with_issues(state());
+    let create_path = create_setup.write("review-small.md", small().as_bytes());
+    let created = create_setup.file(&create_path, &create_gh, true, tweak);
+    assert!(created.result.is_ok(), "{}", created.error());
+    let written: std::collections::BTreeSet<u32> = create_gh
+        .calls()
+        .into_iter()
+        .filter_map(|c| match c {
+            GhCall::IssueEdit(_, n, _) | GhCall::IssueLabels(_, n, ..) => Some(n),
+            _ => None,
+        })
+        .collect();
+
+    assert_eq!(named, written, "dry run:\n{}", dry.out);
+    assert_eq!(written, [50, 51].into_iter().collect(), "{:?}", written);
+}
+
 #[test]
 fn a_dry_run_does_not_touch_the_file() {
     let setup = Setup::new();

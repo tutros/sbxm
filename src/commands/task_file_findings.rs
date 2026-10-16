@@ -382,18 +382,22 @@ fn file(
             });
         if let Some(issue) = duplicate {
             numbers.insert(finding.id.clone(), issue.number);
+            let selected = prepared.iter().find(|p| p.id == finding.id);
             // A matched open issue may lack the section's label or carry another severity's: one
             // adopted by title and PR wasn't filed by this command, and a marker match may predate
             // the label rule (decision 169).
             if issue.open
-                && let Some(done) = prepared.iter().find(|p| p.id == finding.id)
+                && let Some(done) = selected
                 && let Some(change) = label_change(&issue.labels, &done.label)
             {
                 relabel.insert(finding.id.clone(), change);
             }
-            // A marker match may also predate the PR-line rule (decision 169); a title+PR
+            // The PR-first-line patch, like the label, touches only a selected finding's issue
+            // (issue 98): an unselected `--only` match keeps the listing's body apart from its
+            // link fields. A marker match may predate the PR-line rule (decision 169); a title+PR
             // duplicate already carries the matching line by construction of the match itself.
             if issue.open
+                && selected.is_some()
                 && let Some(pr) = opts.pr
                 && set_pr_line(&issue.body, pr) != issue.body
             {
@@ -404,6 +408,20 @@ fn file(
     let to_create: Vec<&Finding> = prepared
         .iter()
         .filter(|f| !numbers.contains_key(&f.id))
+        .collect();
+
+    // The bodies of issues that exist already, as listed, keyed by finding id: for patching
+    // their link fields (every matched finding, decision 169's "option A") and, for a selected
+    // one's entry in `pr_patch`, a stale or missing PR line, at the end; also what the dry run
+    // checks to name an unselected finding's link-only update.
+    let existing: BTreeMap<String, (u32, String)> = numbers
+        .iter()
+        .filter_map(|(id, &number)| {
+            listed
+                .iter()
+                .find(|i| i.number == number)
+                .map(|i| (id.clone(), (number, i.body.clone())))
+        })
         .collect();
 
     // Backlinks (Related: S-1 depends on this one) come from the whole parsed review, not only
@@ -470,6 +488,23 @@ fn file(
             writeln!(out, "{}", render(finding, &numbers)?)?;
             writeln!(out, "---")?;
         }
+        // An unselected finding's matched issue gets no line of its own above (no PR line, no
+        // label change), but create still patches its link fields (decision 169's "option A");
+        // the dry run names that write here so the two name the same set. A finding about to be
+        // created has no number yet, so a placeholder stands in only to tell whether its id,
+        // mentioned in an existing issue's Depends on/Related field, would be rewritten at all.
+        let mut would_know = numbers.clone();
+        for finding in &to_create {
+            would_know.entry(finding.id.clone()).or_insert(0);
+        }
+        for (id, (number, body)) in &existing {
+            if prepared.iter().any(|p| &p.id == id) {
+                continue;
+            }
+            if update_link_fields(body, &would_know) != *body {
+                writeln!(out, "would update links on #{number} ({id})")?;
+            }
+        }
         writeln!(
             out,
             "not filed: {}, {}",
@@ -484,14 +519,6 @@ fn file(
         )?;
         return Ok(());
     }
-
-    // The bodies of issues that exist already, as listed, for patching their links (and, for an
-    // open one, a stale or missing PR line) at the end.
-    let existing: BTreeMap<u32, (String, bool)> = listed
-        .iter()
-        .filter(|i| numbers.values().any(|n| *n == i.number))
-        .map(|i| (i.number, (i.body.clone(), i.open)))
-        .collect();
 
     let mut created: Vec<(Finding, u32, String)> = Vec::new();
     let mut failure: Option<String> = None;
@@ -523,12 +550,13 @@ fn file(
             failure = Some(format!("#{number} links: {e:#}"));
         }
     }
-    // Issues that existed before this run get their link fields patched, from the body as listed,
-    // and, if open, a current `PR: #n` first line (decision 169).
-    for (number, (body, open)) in &existing {
+    // Issues that existed before this run get their link fields patched, from the body as listed;
+    // a selected finding's open issue also gets a current `PR: #n` first line (decision 169), an
+    // unselected one never (issue 98: `pr_patch` was filled only for a selected finding above).
+    for (id, (number, body)) in &existing {
         let mut patched = update_link_fields(body, &numbers);
-        if *open && let Some(pr) = opts.pr {
-            patched = set_pr_line(&patched, pr);
+        if let Some(pr) = pr_patch.get(id) {
+            patched = set_pr_line(&patched, *pr);
         }
         if patched != *body
             && let Err(e) = github.issue_edit(&repo, *number, &patched)
