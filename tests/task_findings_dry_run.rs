@@ -559,6 +559,90 @@ fn a_dry_run_names_the_label_an_adopted_duplicate_would_get() {
     no_writes(&gh);
 }
 
+// Issue 98 (PR #86 review round 4, M-2): an unselected finding's existing issue gets no PR line
+// and no label change in a dry run either; only its link fields, which the dry run now names.
+#[test]
+fn the_dry_run_names_the_link_update_on_an_unselected_findings_issue() {
+    let setup = Setup::new();
+    let gh = github().with_issues(vec![Issue {
+        number: 77,
+        open: true,
+        title: "S-2: old".into(),
+        labels: vec!["must-fix".into()],
+        body: "x\n**Related:** S-1 depends on this one\n<!-- review-finding: review-small.md#S-2 -->\n"
+            .into(),
+    }]);
+    let run = setup.run("review-small.md", small(), &gh, |o| {
+        o.only = vec!["S-1".into()]
+    });
+    assert!(run.result.is_ok(), "{}", run.error());
+    assert!(
+        run.out.contains("would update links on #77 (S-2)"),
+        "{}",
+        run.out
+    );
+    no_writes(&gh);
+}
+
+#[test]
+fn the_dry_run_never_names_a_pr_line_or_label_change_for_an_unselected_findings_issue() {
+    let setup = Setup::new();
+    let gh = github().with_issues(vec![
+        Issue {
+            number: 50,
+            open: true,
+            title: "S-1: old".into(),
+            labels: vec!["must-fix".into()],
+            body: "x\n<!-- review-finding: review-small.md#S-1 -->\n".into(),
+        },
+        Issue {
+            number: 51,
+            open: true,
+            title: "S-2: old".into(),
+            // Mismatched on purpose: a selected finding's issue would be relabeled, so this
+            // proves an unselected one never is.
+            labels: vec!["should-fix".into()],
+            body: "x\n**Related:** S-1 depends on this one\n<!-- review-finding: review-small.md#S-2 -->\n"
+                .into(),
+        },
+    ]);
+    let run = setup.run("review-small.md", small(), &gh, |o| {
+        o.only = vec!["S-1".into()];
+        o.pr = Some(7);
+    });
+    assert!(run.result.is_ok(), "{}", run.error());
+    assert!(
+        run.out
+            .contains("S-1 skipped (exists #50), would set its body's first line to PR: #7"),
+        "{}",
+        run.out
+    );
+    assert!(
+        run.out.contains("would update links on #51 (S-2)"),
+        "{}",
+        run.out
+    );
+    assert!(!run.out.contains("label it"), "{}", run.out);
+    no_writes(&gh);
+}
+
+#[test]
+fn without_only_the_dry_run_never_prints_a_link_update_line() {
+    let setup = Setup::new();
+    let gh = github().with_issues(vec![Issue {
+        number: 77,
+        open: true,
+        title: "S-2: old".into(),
+        labels: vec!["must-fix".into()],
+        body: "x\n**Related:** S-1 depends on this one\n<!-- review-finding: review-small.md#S-2 -->\n"
+            .into(),
+    }]);
+    let run = setup.run("review-small.md", small(), &gh, |_| {});
+    assert!(run.result.is_ok(), "{}", run.error());
+    assert!(!run.out.contains("would update links"), "{}", run.out);
+    assert!(run.out.contains("S-2 skipped (exists #77)"), "{}", run.out);
+}
+
 #[test]
 fn a_dry_run_names_the_pr_line_a_reused_marker_issue_would_get() {
     let setup = Setup::new();
