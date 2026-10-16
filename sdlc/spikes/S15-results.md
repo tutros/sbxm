@@ -2,10 +2,10 @@
 
 Spec: `sdlc/spikes/S15.md`. Filled in by the worker; everything is observed unless marked **inferred**.
 
-**Verdict:** works with limits. `sbx create -t TAG` combines with the Pi kit reference: the template's image is used,
-the kit's environment wins, the narrow kit applies and no real key is in the template; whether Pi *answers* from a
-template is unproven, because the `anthropic` account was out of extra usage for both `pi -p` calls (questions 1 and
-5 Blocked on that, not on templates).
+**Verdict:** works. `sbx create -t TAG` combines with the Pi kit reference: the template's image is used, the kit's
+environment wins, the narrow kit applies, no real key is in the template, and Pi answers from a template sandbox with
+an empty allow list, signed in with the user's Claude subscription (OAuth). Questions 1 and 5 were first Blocked
+because the account was out of extra usage; the user added credits and both were rerun the same day (Rerun below).
 
 ## Conditions
 
@@ -25,11 +25,11 @@ template is unproven, because the `anthropic` account was out of extra usage for
 
 | # | Question | Status | Result |
 |---|---|---|---|
-| 1 | Baseline | Partial | `sbxm new s15-base --profile s15-pi --harness pi` created `sbxm-s15-base-pi` in about 19.6 s (image already pulled by a first failed try; the Pi kit's npm step 0.9 s, the jq step 8.8 s). `pi -p` reached `api.anthropic.com` and got `400 ... You're out of extra usage`: no answer recorded. |
+| 1 | Baseline | Answered | `sbxm new s15-base --profile s15-pi --harness pi` created `sbxm-s15-base-pi` in about 19.6 s (image already pulled by a first failed try; the Pi kit's npm step 0.9 s, the jq step 8.8 s). `pi -p` first got `400 ... You're out of extra usage`; in the rerun it answered `MEDLAR-15`. |
 | 2 | Save | Answered | `sbx template save` (stopped sandbox) took about 5.5 s; `flavor` `pi`, size 734,437,048 bytes. The baseline sandbox was then removed. |
 | 3 | Create from the template with the same kits | Answered | Starts, about 24.9 s. Both markers (`~/s15-marker`, `/tmp/s15-marker`) came back, so the template's image was used, not the Pi kit's; `SBXM_CONFIG_HASH` is the kit's (`b58444cd514f`). Setup steps ran again: the Pi kit's npm proxy step (0.9 s) and the jq step (3.6 s). Pi has no `/var/log/sbx-kit-startup.log`. |
 | 4 | Narrow kit | Answered | Starts (about 93.8 s between clock reads, see Conditions; the create output shows only the Pi kit's step, 1.0 s). `jq` present. `archive.ubuntu.com`, `example.com` and `github.com` answered 403, each in `sbx policy log` as "No matching allow rule (default deny)". The Pi kit's own rules allow only `api.anthropic.com`, `platform.claude.com:443` and `registry.npmjs.org` (`sbx policy ls --wide`), so unlike `codex` (decision 217) a Pi sandbox can be held to the profile's list plus the provider. |
-| 5 | Pi works from the template | Blocked | Same error as question 1, twice in all (stop rule): `400 ... You're out of extra usage`. **Inferred:** the provider secret works from the template, since the request reached Anthropic and was refused for the account's usage, not with a 401. `~/.pi/agent/AGENTS.md` holds the canary (question 6). |
+| 5 | Pi works from the template | Answered | First Blocked with question 1's error (twice in all, stop rule). In the rerun, from a new template (`pi-2`) with the narrow kit (no installs, `allow: []`), `pi -p` answered `MEDLAR-15`: the provider sign-in and `AGENTS.md` both work from a template. |
 | 6 | Secrets in the template | Answered | 0 matches for the Anthropic key pattern in the environment, process command lines and filesystem (without `/proc`, `/sys`, `/dev`, `/run` and the workspace). `~/.pi/agent/auth.json`: `anthropic.access` and `anthropic.refresh` of length 26 (placeholders, as S11 found for `claude`), `expires`, `type`. The template carried question 1's Pi session file (`~/.pi/agent/sessions/--tmp--/2026-10-16T19-17-33-*.jsonl`, written before the save), as slice 0 observed for `codex`. |
 | 7 | Disk | Partial | Recorded: C: free at the start, just before and just after the save (0.07 GiB used by the save), after cleanup, and the template's reported size (see Disk). **Not recorded:** C: free before and after each of the three creates (questions 1, 3 and 4), and what the template added on disk beyond the save's own reading. |
 
@@ -61,6 +61,23 @@ template is unproven, because the `anthropic` account was out of extra usage for
 5. `pi -p` in `sbxm-spike-s15-narrow`: the same `400 ... out of extra usage` (request id differs).
 6. A script printing counts, names and lengths only (S11's method); output as in the table.
 
+### Rerun of questions 1 and 5 (same day, after the user added usage credits)
+
+The user had stored the `anthropic` secret in `sbx` as OAuth (`sbx secret ls`: `anthropic (oauth configured)`), so
+Pi in a sandbox uses the user's Claude subscription, not an API key; the earlier `400` was the subscription's extra
+usage running out.
+
+1. `sbxm rm s15-base --harness pi` (sbxm still held a record of the sandbox removed with `sbx rm`), then `sbxm new
+   s15-base --profile s15-pi --harness pi`: created (Pi kit step 1.0 s, jq step 6.0 s). `pi -p '<question>'`:
+   `MEDLAR-15`. In it: `~/.pi/agent/auth.json` `anthropic.type` is `oauth`, `access` and `refresh` 26 characters
+   each (placeholders); `ANTHROPIC_API_KEY` is set, 13 characters (a placeholder, as slice 0 found for `codex`).
+2. `sbx stop`, `sbx template save sbxm-s15-base-pi sbxm-spike-s15:pi-2`, `sbx rm --force sbxm-s15-base-pi`; `sbx
+   create --name sbxm-spike-s15-narrow -t sbxm-spike-s15:pi-2 --pull never ...` with the narrow `common` kit as in
+   question 4: only the Pi kit's step ran (1.1 s). `pi -p '<question>'`: `MEDLAR-15`. Then `sbx rm --force
+   sbxm-spike-s15-narrow` and `sbx template rm --force sbxm-spike-s15:pi-2`.
+
+Pi calls in all: 4 of the spec's 6.
+
 ## Timings
 
 | What | Runs | Result |
@@ -83,8 +100,6 @@ fair comparison needs repeated runs with the command itself timed (Follow-ups).
 
 ## Follow-ups
 
-- Rerun questions 1 and 5 once the `anthropic` account has usage again: does `pi -p` answer `MEDLAR-15` from a
-  template sandbox?
 - Time `sbx create -t` for Pi with the command itself timed, three runs each, to see whether a template saves time
   for Pi at all (the Pi image is small and its kit step takes about 1 s).
 - `sbxm new` warns that Pi sandboxes don't support `skills.store = "readonly"`; templates don't change that.
