@@ -243,6 +243,31 @@ fn an_exact_marker_wins_over_a_newer_title_and_pr_match() {
 }
 
 #[test]
+fn a_title_match_cannot_reuse_an_issue_reserved_by_another_findings_marker() {
+    let setup = Setup::new();
+    // One issue satisfies both S-1's title-and-PR fallback and S-2's exact marker (issue 97).
+    let gh = github().with_issues(vec![Issue {
+        number: 99,
+        open: true,
+        title: "S-1: Thing breaks".into(),
+        labels: vec![],
+        body: "PR: #7\n<!-- review-finding: review-small.md#S-2 -->\n".into(),
+    }]);
+    let path = setup.write("review-small.md", small().as_bytes());
+    let run = setup.file(&path, &gh, true, |o| o.pr = Some(7));
+    assert!(run.result.is_ok(), "{}", run.error());
+
+    let all = issues(&gh);
+    assert_eq!(
+        all.iter().filter(|i| i.title.starts_with("S-1")).count(),
+        2,
+        "S-1 needs its own newly filed issue: {all:?}"
+    );
+    let adopted = all.iter().find(|i| i.number == 99).unwrap();
+    assert_eq!(adopted.labels, ["must-fix"], "S-2 adopts #99 by its marker");
+}
+
+#[test]
 fn a_marker_matched_issue_gains_its_sections_label_once() {
     let setup = Setup::new();
     let gh = github().with_issues(vec![marked(99, "S-1")]);
