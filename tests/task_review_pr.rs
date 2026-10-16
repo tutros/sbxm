@@ -8,10 +8,11 @@ mod common;
 use std::fs;
 
 use common::task_fixture::{
-    CODEX_DONE, Fixture, add_pr_head, ctx, ctx_with_host, fixture_with, issue_text, ok,
+    CODEX_DONE, Fixture, Probe, add_pr_head, ctx, ctx_with_host, fixture_with, issue_text, ok,
     play_reviews, source,
 };
 use sbxm::backend::{ExecOutput, FakeBackend};
+use sbxm::commands::task_review::{Options, Target, run};
 use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::github::{PrInfo, PrState};
 use sbxm::task::gates::FakeHostRunner;
@@ -101,6 +102,49 @@ fn count(backend: &FakeBackend, needle: &str) -> usize {
         .iter()
         .filter(|(_, spec)| spec.argv.iter().any(|a| a.contains(needle)))
         .count()
+}
+
+fn options(f: &Fixture, number: u32) -> Options {
+    Options {
+        repo_root: f.env.tmp.path().join("target-repo"),
+        target: Target::Pr(number),
+        repo: Some("o/r".into()),
+        base: Some("main".into()),
+        clone_source: Some(source(f)),
+        reviewer_harness: None,
+        reviewer_model: None,
+        reviewer_time_limit: None,
+        time_limit: None,
+        profile: None,
+        resolved_spec_id: None,
+        force: false,
+        disk: Default::default(),
+    }
+}
+
+/// `commands::task_review::run`, not `pipeline::review_pr` directly: the printed round line and
+/// risk warning are the command's own job, done after `review_pr` returns.
+fn run_it(
+    f: &Fixture,
+    backend: &FakeBackend,
+    github: &FakeGitHub,
+) -> (anyhow::Result<()>, String, String) {
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let result = run(
+        &f.env.config_dir(),
+        &options(f, 7),
+        backend,
+        github,
+        &Probe,
+        &FakeHostRunner::default(),
+        &mut out,
+        &mut warn,
+    );
+    (
+        result,
+        String::from_utf8(out).unwrap(),
+        String::from_utf8(warn).unwrap(),
+    )
 }
 
 #[test]
@@ -357,18 +401,22 @@ fn a_failed_post_keeps_the_review_and_says_where_it_is() {
     );
     let mut prepared = prepared(&f, &backend, &github);
 
-    let message = format!(
-        "{:#}",
-        review_it(
-            &f,
-            &backend,
-            &github,
-            &FakeHostRunner::default(),
-            &mut prepared
-        )
-        .unwrap_err()
-    );
+    let report = review_it(
+        &f,
+        &backend,
+        &github,
+        &FakeHostRunner::default(),
+        &mut prepared,
+    )
+    .unwrap();
 
+    assert!(!report.posted);
+    assert_eq!(
+        report.reviewed.as_ref().map(|r| r.risk),
+        Some(sbxm::task::risk::Level::Unknown),
+        "{report:?}"
+    );
+    let message = format!("{:#}", report.post_error.expect("a post error"));
     assert!(
         message.contains("rate limited") && message.contains("review.md"),
         "{message}"
@@ -377,11 +425,60 @@ fn a_failed_post_keeps_the_review_and_says_where_it_is() {
     assert!(meta(&f).join("review.md").is_file(), "the review is saved");
     let record = saved(&f);
     assert_eq!((record.stage, record.status), (Stage::Ready, Status::Ok));
+    assert_eq!(
+        record.review.as_ref().map(|r| r.risk),
+        Some(sbxm::task::risk::Level::Unknown)
+    );
     assert!(
         record.notes.iter().any(|n| n.contains("not posted")),
         "{:?}",
         record.notes
     );
+}
+
+/// Issue 179, M-1: a failed post must not swallow the round line or the unknown-risk warning
+/// (decision 176(e)); the command still exits non-zero with the posting error.
+#[test]
+fn a_failed_post_still_prints_the_round_line_and_the_unknown_risk_warning() {
+    let f = config("");
+    add_pr_head(&f, 7);
+    let (backend, github) = (
+        backend(&f, &[CLEAN]),
+        github().failing_comments("rate limited"),
+    );
+
+    let (result, out, warn) = run_it(&f, &backend, &github);
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(message.contains("rate limited"), "{message}");
+    assert!(
+        out.contains("pr-7: review round 1: 0 must-fix finding(s)"),
+        "{out}"
+    );
+    assert!(warn.contains("risk is \"unknown\""), "{warn}");
+}
+
+/// A failed post with a readable `Risk:` line prints the round line and the posting error, but
+/// no risk warning (decision 176(e): the warning is only for an unreadable risk level).
+#[test]
+fn a_failed_post_with_a_readable_risk_line_prints_no_risk_warning() {
+    let f = config("");
+    add_pr_head(&f, 7);
+    let review = "Must-fix findings: 0\n\nRisk: low\n\nNothing found.\n";
+    let (backend, github) = (
+        backend(&f, &[review]),
+        github().failing_comments("rate limited"),
+    );
+
+    let (result, out, warn) = run_it(&f, &backend, &github);
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(message.contains("rate limited"), "{message}");
+    assert!(
+        out.contains("pr-7: review round 1: 0 must-fix finding(s)"),
+        "{out}"
+    );
+    assert!(!warn.contains("risk is"), "{warn}");
 }
 
 /// Issue 195, gap G34: a `ready` PR task refuses a second review while the PR's head hasn't

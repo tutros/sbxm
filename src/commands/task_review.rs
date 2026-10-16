@@ -485,13 +485,18 @@ fn run_pr(
             failed.command
         );
     }
+    // A failed post (`report.post_error`) is returned below, after the round line and risk
+    // warning print: a write failure here must not take its place (issue 179, M-1).
+    let mut write_err: Option<anyhow::Error> = None;
     if let Some(reviewed) = &report.reviewed {
-        writeln!(
+        match writeln!(
             out,
             "{id}: review round {}: {} must-fix finding(s)",
             reviewed.round, reviewed.must_fix
-        )?;
-        print_risk_warning(warn, reviewed.risk)?;
+        ) {
+            Ok(()) => write_err = print_risk_warning(warn, reviewed.risk).err(),
+            Err(e) => write_err = Some(e.into()),
+        }
     }
     if report.posted {
         writeln!(
@@ -499,6 +504,12 @@ fn run_pr(
             "{id}: the review was posted on PR #{number}; a copy is {}",
             meta.join("review.md").display()
         )?;
+    }
+    if let Some(post_error) = report.post_error {
+        return Err(post_error);
+    }
+    if let Some(e) = write_err {
+        return Err(e);
     }
     Ok(())
 }
