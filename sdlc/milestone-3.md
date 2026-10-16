@@ -90,7 +90,7 @@ The other slices are reviewed at the end of the milestone.
    slice 6 lets a strict `codex` sandbox be created: find a `codex` setup whose rules don't include the built-in
    kit's hosts [217](c), with `codex exec` still answering. Done when written up in `sdlc/decisions.md`; if no such
    setup exists, slice 6 refuses a strict profile with the `codex` harness [218]. **Done 2026-10-16: decision 221**
-   (yes: `--deny-network` per extra kit host; slice 6 adds the deny flags and, if confirmed, the check after creation).
+   (yes: `--deny-network` per extra kit host; slice 6 adds the deny flags and the check after creation, confirmed 2026-10-16).
 1. **Profile `[template]`**: parse, `allow` required, unknown keys refused. Done: `tests/profile.rs` cases.
 2. **Baked kit and template hash**: snapshot of the baked `common` mixin; hash changes with each build-part field and
    not with runtime-only fields; the Claude managed-settings step stays in the baked harness kit and out of the
@@ -108,7 +108,10 @@ The other slices are reviewed at the end of the milestone.
    under the in-sandbox timeout, a failing command saves nothing. Done: `tests/template_build.rs` cases.
 6. **`new` / `open --rebuild` use templates**: resolve, strict refusal, non-strict warning, `state.json` field, P2's
    drift and hint; a project `sandbox.toml` with `[template]` refused, and one adding `setup.install` or build hosts
-   refused (strict) or falling back with a warning (non-strict) [214]. Done: `tests/new.rs`, `tests/open.rs` cases.
+   refused (strict) or falling back with a warning (non-strict) [214]; a strict `codex` sandbox gets one
+   `--deny-network` per extra kit host, and the check after creation removes it and refuses, naming the host, when
+   the kit rule allows one that is neither an OpenAI host, in `[template].allow` nor denied [221]. Done:
+   `tests/new.rs`, `tests/open.rs` cases.
 7. **`template ls` and `template rm`** with the in-use check over `state.json` and every `task.json`. Done: tests.
 8. **`sbxm task` sandboxes**: worker, reviewer, fix rounds, `task resume`'s rebuilt worker; `task.json` field; the lock
    check at the commit each sandbox checks out [216], with tests for a PR whose head changes a lock file (refused
@@ -132,7 +135,8 @@ The other slices are reviewed at the end of the milestone.
    `template build --warm`.
 5. `sbxm task run --issue N` on a real issue: every sandbox records the tag in `task.json`.
 6. `template rm sbxm-dev` while that task exists: refused, naming it. After `task rm`: removed.
-7. `template build sbxm-dev --harness codex`, then a codex sandbox from it.
+7. `template build sbxm-dev --harness codex`, then a strict codex sandbox from it [221]: `codex exec` answers, and a
+   kit host outside `[template].allow` (e.g. `github.com`) answers 403.
 8. `doctor` lists the templates and their total size; `sbx ls`, `sbx template ls` match sbxm's records.
 
 ## Out of scope

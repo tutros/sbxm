@@ -650,10 +650,11 @@ commands still finished (`apt-get update || true` is blocked, not fatal). (c) Th
 docker.io/docker/sandbox-templates:codex-docker --pull never` (created in 5.0 s): the denied hosts answered 403,
 while `api.github.com`, left off the deny list on purpose, answered 200. Not tried: a saved sbxm template with
 sbxm's own kits (the image comes from `-t` and the network rule from the `codex` agent, so neither is expected to
-change the result; slice 8's real test covers it). **Verdict, for slice 6:** a strict `codex` sandbox is created
+change the result; end-to-end check 7 of `sdlc/milestone-3.md` covers it). **Verdict, for slice 6:** a strict `codex` sandbox is created
 with one `--deny-network` per host the `codex` kit allows beyond the OpenAI hosts and the profile's
 `[template].allow`, so [200](b) holds without refusing `codex`. The hosts can't be read before the sandbox exists, so the
-deny list is a table in sbxm (the list in (a)). Proposed for slice 6, for the user to confirm: after creation and
+deny list is a table in sbxm (the list in (a)). **Confirmed by the user 2026-10-16 (PR 265 review Q-1), for slice
+6:** after creation and
 before any agent command, sbxm reads the kit rule's hosts from `sbx policy ls <sandbox> --json` and, if one is
 allowed that is neither an OpenAI host, in `[template].allow` nor denied, removes the sandbox and refuses, naming the
 host, so a later `codex` kit that adds a host can't widen a strict sandbox silently.
