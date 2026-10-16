@@ -130,21 +130,44 @@ fn run_it(
     github: &FakeGitHub,
 ) -> (anyhow::Result<()>, String, String) {
     let (mut out, mut warn) = (Vec::new(), Vec::new());
-    let result = run(
+    let result = run_into(f, backend, github, &mut out, &mut warn);
+    (
+        result,
+        String::from_utf8(out).unwrap(),
+        String::from_utf8(warn).unwrap(),
+    )
+}
+
+fn run_into(
+    f: &Fixture,
+    backend: &FakeBackend,
+    github: &FakeGitHub,
+    out: &mut dyn std::io::Write,
+    warn: &mut dyn std::io::Write,
+) -> anyhow::Result<()> {
+    run(
         &f.env.config_dir(),
         &options(f, 7),
         backend,
         github,
         &Probe,
         &FakeHostRunner::default(),
-        &mut out,
-        &mut warn,
-    );
-    (
-        result,
-        String::from_utf8(out).unwrap(),
-        String::from_utf8(warn).unwrap(),
+        out,
+        warn,
     )
+}
+
+/// A `Write` that always fails, modeling output that can't be delivered (e.g. a closed pipe).
+struct FailingWrite;
+
+impl std::io::Write for FailingWrite {
+    fn write(&mut self, _buf: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::Error::other("output failed"))
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }
 
 #[test]
@@ -479,6 +502,53 @@ fn a_failed_post_with_a_readable_risk_line_prints_no_risk_warning() {
         "{out}"
     );
     assert!(!warn.contains("risk is"), "{warn}");
+}
+
+/// Issue 179 review M-1: when the unknown-risk warning can't be written, the command still
+/// returns the posting error, not the write error.
+#[test]
+fn a_failed_post_with_a_failing_warning_writer_still_returns_the_post_error() {
+    let f = config("");
+    add_pr_head(&f, 7);
+    let (backend, github) = (
+        backend(&f, &[CLEAN]),
+        github().failing_comments("rate limited"),
+    );
+    let mut out = Vec::new();
+
+    let result = run_into(&f, &backend, &github, &mut out, &mut FailingWrite);
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains("rate limited") && !message.contains("output failed"),
+        "{message}"
+    );
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        out.contains("pr-7: review round 1: 0 must-fix finding(s)"),
+        "{out}"
+    );
+}
+
+/// Issue 179 review M-1, the same kind for the other writer: when the round line can't be
+/// written, the command still returns the posting error, not the write error.
+#[test]
+fn a_failed_post_with_a_failing_output_writer_still_returns_the_post_error() {
+    let f = config("");
+    add_pr_head(&f, 7);
+    let (backend, github) = (
+        backend(&f, &[CLEAN]),
+        github().failing_comments("rate limited"),
+    );
+    let mut warn = Vec::new();
+
+    let result = run_into(&f, &backend, &github, &mut FailingWrite, &mut warn);
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains("rate limited") && !message.contains("output failed"),
+        "{message}"
+    );
 }
 
 /// Issue 195, gap G34: a `ready` PR task refuses a second review while the PR's head hasn't
