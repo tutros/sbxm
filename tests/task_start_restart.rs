@@ -1134,3 +1134,151 @@ fn a_batch_restart_runs_to_its_end_when_the_screen_stops_taking_output() {
         );
     }
 }
+
+/// A `Confirm` that, right when the user says yes, removes the worker's secret (so the old task
+/// is put back) and makes the set-aside tree's `.sbxm` folder impossible to empty, so deleting
+/// the tree after the restore fails (issue #224).
+struct SecretVanishesAndCleanupFailsThenYes<'a> {
+    backend: &'a FakeBackend,
+    remnant: std::path::PathBuf,
+    lock: RefCell<Option<common::Undeletable>>,
+}
+
+impl Confirm for SecretVanishesAndCleanupFailsThenYes<'_> {
+    fn is_interactive(&self) -> bool {
+        true
+    }
+
+    fn confirm(&self, _prompt: &str) -> anyhow::Result<bool> {
+        self.backend.set_secrets(&[]);
+        let inner = self.remnant.join(".sbxm");
+        std::fs::create_dir_all(inner.join("tasks")).unwrap();
+        *self.lock.borrow_mut() = common::Undeletable::new(&inner);
+        Ok(true)
+    }
+}
+
+/// Issue #224: the old task is put back but its set-aside tree can't be deleted, and the screen
+/// takes no output at all, so the warning can't be shown: the restore itself is unchanged (the
+/// task is back, nothing counts as a leftover) and the command reports the output failure.
+#[test]
+fn a_restore_whose_cleanup_fails_is_unchanged_when_the_screen_fails() {
+    let f = fixture();
+    started(&f);
+    let b = playing(&f);
+    let remnant = f
+        .env
+        .base_dir()
+        .join(".sbxm")
+        .join("tasks-replaced")
+        .join("issue-41");
+    let confirm = SecretVanishesAndCleanupFailsThenYes {
+        backend: &b,
+        remnant: remnant.clone(),
+        lock: RefCell::new(None),
+    };
+    let mut out = FailsAfterLines(String::new(), 0);
+
+    let result = task_start::run_with(
+        &f.env.config_dir(),
+        &options(&f),
+        Some(&Restart {
+            confirm: &confirm,
+            yes: false,
+        }),
+        &b,
+        &github(),
+        &Probe,
+        &mut out,
+        &mut Vec::new(),
+    );
+
+    if confirm.lock.borrow().is_none() {
+        return;
+    }
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(message.contains("screen output failed"), "{message}");
+    assert!(b.creates().is_empty(), "nothing started");
+    assert!(
+        record::read(&meta(&f).join("task.json")).is_ok(),
+        "the old task is back"
+    );
+    assert!(meta(&f).join("repo.git").is_dir(), "the old task is back");
+    assert!(remnant.is_dir(), "the cleanup failed");
+    assert!(
+        !sbxm::task::finish::has_leftover(&f.env.base_dir(), "issue-41"),
+        "an empty remnant is not an old copy"
+    );
+}
+
+/// Issue #224: an empty remnant of an earlier restore doesn't block the next `--restart`: it is
+/// deleted and the restart goes on.
+#[test]
+fn a_restart_deletes_an_empty_remnant_and_goes_on() {
+    let f = fixture();
+    started(&f);
+    let remnant = f
+        .env
+        .base_dir()
+        .join(".sbxm")
+        .join("tasks-replaced")
+        .join("issue-41");
+    std::fs::create_dir_all(remnant.join(".sbxm").join("tasks")).unwrap();
+    std::fs::create_dir_all(remnant.join("tasks")).unwrap();
+    let b = playing(&f);
+
+    let (result, out) = go(
+        &f,
+        &options(&f),
+        Some(&Restart {
+            confirm: &FakeConfirm::new(false, false),
+            yes: true,
+        }),
+        &b,
+        &github(),
+    );
+
+    result.unwrap();
+    assert!(!b.creates().is_empty(), "the new task started: {out}");
+    assert!(!remnant.exists(), "{out}");
+}
+
+/// Issue #224: with a working screen, the command says the old task is back but its set-aside
+/// tree could not be deleted, naming the tree.
+#[test]
+fn a_restore_whose_cleanup_fails_names_the_folder_on_screen() {
+    let f = fixture();
+    started(&f);
+    let b = playing(&f);
+    let remnant = f
+        .env
+        .base_dir()
+        .join(".sbxm")
+        .join("tasks-replaced")
+        .join("issue-41");
+    let confirm = SecretVanishesAndCleanupFailsThenYes {
+        backend: &b,
+        remnant: remnant.clone(),
+        lock: RefCell::new(None),
+    };
+
+    let (result, out) = go(
+        &f,
+        &options(&f),
+        Some(&Restart {
+            confirm: &confirm,
+            yes: false,
+        }),
+        &b,
+        &github(),
+    );
+
+    if confirm.lock.borrow().is_none() {
+        return;
+    }
+    assert!(result.is_err(), "{out}");
+    assert!(out.contains("was put back"), "{out}");
+    assert!(out.contains("could not be deleted"), "{out}");
+    assert!(out.contains(&remnant.display().to_string()), "{out}");
+    assert!(record::read(&meta(&f).join("task.json")).is_ok(), "{out}");
+}

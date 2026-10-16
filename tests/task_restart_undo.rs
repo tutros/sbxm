@@ -446,3 +446,199 @@ fn a_later_linked_folder_fails_the_set_aside_with_every_folder_still_in_place() 
     assert!(meta(&f).join("task.json").exists());
     assert!(!finish::has_leftover(&base_dir, "issue-41"));
 }
+
+/// Issue #224: every task folder moves back, but the emptied set-aside tree can't be deleted (a
+/// folder in it is held open). The restore still succeeds, and what the command reports names the
+/// cleanup failure and its exact folder instead of an unqualified "put back".
+#[test]
+fn a_restore_whose_cleanup_fails_puts_the_task_back_and_names_the_folder() {
+    let f = fixture();
+    let backend = FakeBackend::with_secrets(&["anthropic", "openai"]);
+    resumable_task(&f, &backend);
+    let base_dir = f.env.base_dir();
+    let aside = finish::set_aside(
+        &base_dir,
+        "issue-41",
+        true,
+        &backend,
+        &Probe,
+        &Never,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    let Some(_lock) = common::Undeletable::new(&aside.folder().join(".sbxm")) else {
+        return;
+    };
+
+    let combined = finish::restore_after_failed_start(
+        &aside,
+        anyhow::anyhow!("the worker's secret is missing"),
+    );
+
+    let message = format!("{combined:#}");
+    assert!(
+        message.contains("the worker's secret is missing"),
+        "{message}"
+    );
+    assert!(message.contains("was put back"), "{message}");
+    assert!(message.contains("could not be deleted"), "{message}");
+    assert!(
+        message.contains(&aside.folder().display().to_string()),
+        "{message}"
+    );
+    assert!(meta(&f).join("task.json").exists(), "the old task is back");
+    assert!(meta(&f).join("repo.git").is_dir(), "the old task is back");
+    assert!(aside.folder().is_dir(), "the remnant is still there");
+    assert!(
+        !finish::has_leftover(&base_dir, "issue-41"),
+        "an empty remnant is not an old copy"
+    );
+}
+
+/// Issue #224: the remnant of the test above is cleaned up by the next leftover check: refused
+/// with an accurate "empty folder, safe to delete" message while it still can't be deleted, which
+/// may have removed part of it (a rerun sees what is left, still only empty folders, the same
+/// way), and deleted once it can be.
+#[test]
+fn the_next_check_deletes_a_cleanup_remnant_or_says_it_is_safe_to_delete() {
+    let f = fixture();
+    let backend = FakeBackend::with_secrets(&["anthropic", "openai"]);
+    resumable_task(&f, &backend);
+    let base_dir = f.env.base_dir();
+    let aside = finish::set_aside(
+        &base_dir,
+        "issue-41",
+        true,
+        &backend,
+        &Probe,
+        &Never,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    let folder = aside.folder();
+    let lock = common::Undeletable::new(&folder.join(".sbxm"));
+    if lock.is_none() {
+        return;
+    }
+    let _ = finish::restore_after_failed_start(&aside, anyhow::anyhow!("start failed"));
+
+    for attempt in 1..=2 {
+        let message = format!(
+            "{:#}",
+            finish::check_no_leftover(&base_dir, "issue-41").unwrap_err()
+        );
+        assert!(
+            message.contains("empty folder") && message.contains("safe to delete"),
+            "attempt {attempt}: {message}"
+        );
+        assert!(
+            !message.contains("old copy"),
+            "attempt {attempt}: {message}"
+        );
+        assert!(
+            message.contains(&folder.display().to_string()),
+            "attempt {attempt}: {message}"
+        );
+        assert!(folder.is_dir(), "attempt {attempt}");
+        assert!(!finish::has_leftover(&base_dir, "issue-41"));
+    }
+
+    drop(lock);
+    finish::check_no_leftover(&base_dir, "issue-41").unwrap();
+    assert!(!folder.exists(), "the remnant is gone");
+    assert!(meta(&f).join("task.json").exists(), "the task is untouched");
+}
+
+/// `tasks-replaced/<id>` under a fresh base dir.
+fn bare_remnant() -> (tempfile::TempDir, std::path::PathBuf, std::path::PathBuf) {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let base_dir = tmp.path().join("base");
+    let root = base_dir
+        .join(".sbxm")
+        .join("tasks-replaced")
+        .join("issue-41");
+    (tmp, base_dir, root)
+}
+
+/// Issue #224: a set-aside tree holding only empty folders, at any depth, is no leftover; the
+/// next check deletes it and goes on.
+#[test]
+fn an_empty_remnant_is_deleted_by_the_next_check() {
+    let (_tmp, base_dir, root) = bare_remnant();
+    fs::create_dir_all(root.join(".sbxm").join("tasks")).unwrap();
+    fs::create_dir_all(root.join("tasks")).unwrap();
+
+    assert!(!finish::has_leftover(&base_dir, "issue-41"));
+    finish::check_no_leftover(&base_dir, "issue-41").unwrap();
+
+    assert!(!root.exists());
+    assert!(base_dir.join(".sbxm").join("tasks-replaced").is_dir());
+}
+
+fn assert_old_copy_refused(base_dir: &std::path::Path) {
+    assert!(finish::has_leftover(base_dir, "issue-41"));
+    let message = format!(
+        "{:#}",
+        finish::check_no_leftover(base_dir, "issue-41").unwrap_err()
+    );
+    assert!(message.contains("left its old copy"), "{message}");
+}
+
+/// Issue #224: a file anywhere in the tree is still an old copy, refused as before; nothing is
+/// deleted.
+#[test]
+fn a_remnant_with_a_file_deep_inside_is_still_an_old_copy() {
+    let (_tmp, base_dir, root) = bare_remnant();
+    let deep = root.join("a").join("b").join("c");
+    fs::create_dir_all(&deep).unwrap();
+    fs::create_dir_all(root.join("empty")).unwrap();
+    fs::write(deep.join("task.json"), b"{}").unwrap();
+
+    assert_old_copy_refused(&base_dir);
+
+    assert_eq!(fs::read(deep.join("task.json")).unwrap(), b"{}");
+    assert!(root.join("empty").is_dir(), "nothing was deleted");
+}
+
+/// Issue #224: so is a link (a junction on Windows) anywhere in the tree, even to an empty folder;
+/// neither the link nor what it points at is touched.
+#[test]
+fn a_remnant_with_a_link_inside_is_still_an_old_copy() {
+    let (tmp, base_dir, root) = bare_remnant();
+    let outside = tmp.path().join("outside");
+    fs::create_dir_all(outside.join("empty")).unwrap();
+    fs::create_dir_all(root.join("a")).unwrap();
+    common::dir_link(&root.join("a").join("link"), &outside);
+
+    assert_old_copy_refused(&base_dir);
+
+    assert!(root.join("a").join("link").symlink_metadata().is_ok());
+    assert!(outside.join("empty").is_dir());
+}
+
+/// Issue #224: when the set-aside root itself, `.sbxm/tasks-replaced` or `.sbxm` is a link, the
+/// check refuses and deletes nothing through it, even if all it reaches is empty folders.
+#[test]
+fn a_linked_remnant_or_parent_is_refused_and_nothing_is_deleted_through_it() {
+    for linked in ["issue-41", "tasks-replaced", ".sbxm"] {
+        let (tmp, base_dir, root) = bare_remnant();
+        let outside = tmp.path().join("outside");
+        let link = match linked {
+            "issue-41" => root.clone(),
+            "tasks-replaced" => root.parent().unwrap().to_path_buf(),
+            _ => base_dir.join(".sbxm"),
+        };
+        // What the link reaches: the same empty tree it stands for.
+        let reached = outside.join(root.strip_prefix(&link).unwrap());
+        fs::create_dir_all(reached.join("tasks")).unwrap();
+        fs::create_dir_all(link.parent().unwrap()).unwrap();
+        common::dir_link(&link, &outside);
+
+        let err = finish::check_no_leftover(&base_dir, "issue-41").unwrap_err();
+
+        let message = format!("{err:#}");
+        assert!(message.contains("issue-41"), "{linked}: {message}");
+        assert!(reached.join("tasks").is_dir(), "{linked}: {message}");
+        assert!(link.symlink_metadata().is_ok(), "{linked}: {message}");
+    }
+}

@@ -209,3 +209,38 @@ pub fn dir_link(link: &Path, target: &Path) {
 pub fn file_link(link: &Path, target: &Path) {
     std::os::unix::fs::symlink(target, link).unwrap();
 }
+
+/// While it lives, nothing directly inside `dir` can be deleted or renamed away, modeling a folder
+/// Windows holds open or locked: on unix `dir` is made read-only. `None` where that doesn't take
+/// (running as root) or on Windows, and the calling test then returns early.
+pub struct Undeletable(PathBuf);
+
+impl Undeletable {
+    #[cfg(unix)]
+    pub fn new(dir: &Path) -> Option<Self> {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let guard = Self(dir.to_owned());
+        let probe = dir.join(".probe");
+        if std::fs::create_dir(&probe).is_ok() {
+            let _ = std::fs::remove_dir(&probe);
+            return None;
+        }
+        Some(guard)
+    }
+
+    #[cfg(not(unix))]
+    pub fn new(_dir: &Path) -> Option<Self> {
+        None
+    }
+}
+
+impl Drop for Undeletable {
+    fn drop(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+        }
+    }
+}
