@@ -8,7 +8,7 @@ Milestone 1 complete (slices 0–21, end-to-end check passed 2026-09-27). Milest
 - `sdlc/idea.md`: original brief
 - `sdlc/milestone-1.md`: milestone 1's implementation plan (crate layout, config schema, kit mapping, commands, build order) — done, kept for reference.
 - `sdlc/milestone-2.md`: milestone 2's implementation plan (M2a comparisons, done; M2b issue-worker migration, slices 0–13).
-- `sdlc/milestone-3.md`: milestone 3's plan, sandboxes from a prebuilt `sbx` template (issue #211, decisions 199-217); planned 2026-10-15, slice 0 done 2026-10-16 (decision 217).
+- `sdlc/milestone-3.md`: milestone 3's plan, sandboxes from a prebuilt `sbx` template (issue #211, decisions 199-218); planned 2026-10-15, slice 0 done 2026-10-16 (decision 217).
 - `sdlc/prd-m2b.md` and `sdlc/spec-m2b.md`: M2b's requirements (what and why, success criteria S1–S9) and exact behavior (modules, `sbxm-task.toml`, `task.json`, commands, pipelines, gates, git trust boundary).
 - `sdlc/decisions.md`: numbered design decisions and open research spikes. **Read it before designing anything**, and add new decisions there instead of silently departing from it.
 - `docs/workflow.md`: how the commands fit together, with the use cases and practical notes (disk, binaries, gates). `sdlc/evals-workflow-notes.md`: the log of gaps found while using `sbxm task` (G1 onwards, the issue 63 run log and the next-session agenda); `sdlc/spikes/`: spike write-ups (S9 done, S11 done 2026-10-11: templates work, about 7 s per sandbox instead of 68 s, and an empty allow list for a task that leaves `Cargo.lock` alone; the feature is issue #211, S13 done: the flaky tests of #104 don't show in a Linux sandbox).
