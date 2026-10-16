@@ -228,12 +228,19 @@ pub(crate) fn output_with_stdin(
             .stderr(Stdio::piped())
             .spawn()
             .context("cannot run `git`; is Git installed and on PATH?")?;
-        child
+        // A broken pipe means git exited without reading everything (a bad argument, say):
+        // its own status and stderr below say why, which is the failure worth reporting.
+        match child
             .stdin
             .take()
             .expect("stdin is piped")
             .write_all(stdin_data)
-            .context("cannot write to git's stdin")?;
+        {
+            Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => {
+                return Err(e).context("cannot write to git's stdin");
+            }
+            _ => {}
+        }
         child
             .wait_with_output()
             .context("cannot run `git`; is Git installed and on PATH?")
@@ -678,6 +685,22 @@ mod tests {
             None,
             &["hash-object", "-t", "bogus-type", "--stdin"],
             b"x",
+        )
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("hash-object"), "{err:#}");
+    }
+
+    #[test]
+    fn a_command_that_exits_before_reading_its_stdin_fails_with_gits_message() {
+        // More than a pipe buffer holds, so the write is still going when git rejects the
+        // type and exits: the pipe breaks every time, not only when git happens to be quick.
+        let err = run_with_stdin(
+            Path::new("."),
+            None,
+            None,
+            &["hash-object", "-t", "bogus-type", "--stdin"],
+            &vec![b'x'; 1 << 20],
         )
         .unwrap_err();
 
