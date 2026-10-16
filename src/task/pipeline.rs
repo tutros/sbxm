@@ -2146,6 +2146,10 @@ pub struct PrReview {
     /// Whether the review was posted as a comment on the PR.
     pub posted: bool,
     pub warnings: Vec<String>,
+    /// The accepted review was recorded, but `github.pr_comment` failed (issue 179, M-1): `Some`
+    /// here instead of an `Err` return, so a caller still sees `reviewed` (and so its risk, which
+    /// may need the unknown-risk warning) before it reports this error.
+    pub post_error: Option<anyhow::Error>,
 }
 
 /// Whether a pull request's review may start (or be tried again) now.
@@ -2380,12 +2384,13 @@ pub fn review_pr(
                 .notes
                 .push(format!("the review was not posted: {e:#}"));
             record::write(&prepared.meta, &prepared.record)?;
-            Err(e.context(format!(
+            report.post_error = Some(e.context(format!(
                 "the review is saved in {} but could not be posted on PR #{number}; post it \
                  yourself with `gh pr comment {number} --body-file {}`",
                 review_path.display(),
                 review_path.display()
-            )))
+            )));
+            Ok(report)
         }
     }
 }
