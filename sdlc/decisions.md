@@ -626,6 +626,15 @@ a documented `codex` floor of allowed hosts (option (b)), which would quietly we
 The user noted that Antigravity may be similar (the right endpoints allowed might let it use the user's subscription
 instead of an API key); that is a follow-up idea outside this milestone ([204]), not decided here.
 
+219. **A risky slice's parallel review reads in parallel but builds in turn (2026-10-16, PR 263 review Q-1, the user
+chose option A; refines [162]):** the independent reviewer of a risky slice still starts as soon as the slice is
+committed and reads the diff while the next slice is built, but its own compile, `cargo test` and other gate runs
+wait until no slice build is running, and the builder doesn't start a new build while those checks run. A reviewer
+on separate capacity (not this machine) can run its checks at once. Why: two local builds of the crate at the same
+time both died with no error (gap G48, 2026-10-14), and running one build at a time has worked since. Rejected:
+reviewing the whole slice before the next one starts (B), which loses [162]'s early feedback without need, and
+accepting parallel builds that may fail and be rerun (C).
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.
