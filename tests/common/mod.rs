@@ -210,10 +210,13 @@ pub fn file_link(link: &Path, target: &Path) {
     std::os::unix::fs::symlink(target, link).unwrap();
 }
 
-/// While it lives, nothing directly inside `dir` can be deleted or renamed away, modeling a folder
-/// Windows holds open or locked: on unix `dir` is made read-only. `None` where that doesn't take
-/// (running as root) or on Windows, and the calling test then returns early.
-pub struct Undeletable(PathBuf);
+/// While it lives, deleting the folder tree holding `dir` fails, modeling a folder Windows holds
+/// open or locked. On unix `dir` is made read-only, so nothing directly inside it can be deleted or
+/// renamed away; `None` where that doesn't take (running as root), and the calling test then
+/// returns early. On Windows `dir` itself is held open without delete sharing, so `dir` can't be
+/// deleted or renamed (its contents still can); a guard that doesn't lock it panics rather than
+/// letting the test pass without its assertions.
+pub struct Undeletable(#[cfg(unix)] PathBuf, #[cfg(windows)] std::fs::File);
 
 impl Undeletable {
     #[cfg(unix)]
@@ -229,9 +232,25 @@ impl Undeletable {
         Some(guard)
     }
 
-    #[cfg(not(unix))]
-    pub fn new(_dir: &Path) -> Option<Self> {
-        None
+    #[cfg(windows)]
+    pub fn new(dir: &Path) -> Option<Self> {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_SHARE_READ: u32 = 0x1;
+        const FILE_SHARE_WRITE: u32 = 0x2;
+        // Needed to open a folder at all.
+        const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
+        let handle = std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ | FILE_SHARE_WRITE)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(dir)
+            .unwrap();
+        let probe = dir.with_file_name(".undeletable-probe");
+        if std::fs::rename(dir, &probe).is_ok() {
+            std::fs::rename(&probe, dir).unwrap();
+            panic!("{} can still be renamed while held open", dir.display());
+        }
+        Some(Self(handle))
     }
 }
 

@@ -1136,8 +1136,8 @@ fn a_batch_restart_runs_to_its_end_when_the_screen_stops_taking_output() {
 }
 
 /// A `Confirm` that, right when the user says yes, removes the worker's secret (so the old task
-/// is put back) and makes the set-aside tree's `.sbxm` folder impossible to empty, so deleting
-/// the tree after the restore fails (issue #224).
+/// is put back) and makes the set-aside tree's `.sbxm` folder undeletable (`common::Undeletable`),
+/// so deleting the tree after the restore fails (issue #224).
 struct SecretVanishesAndCleanupFailsThenYes<'a> {
     backend: &'a FakeBackend,
     remnant: std::path::PathBuf,
