@@ -544,6 +544,32 @@ sandbox is `sbxm-template-<profile>-<harness>`, its workspace `<base>/.sbxm/temp
 interrupted one removes their leftovers first. No agent ever runs in a build sandbox: its home folder goes into the
 image, so agent sessions and transcripts would too (S11, risk 6).
 
+211. **Every template build gets a fresh tag (2026-10-15, PR 253 review Q-1, the user agreed with the
+recommendation; changes the tag format of [209]):** the tag is `sbxm-<profile>-<harness>:<hash12>-<UTC build time>`
+(for example `sbxm-sbxm-dev-claude:2a9974ee6210-20261015t2210`), so a save never lands on an existing tag. Why: the
+lock hash is not in the tag [209], so a warm rebuild after a lock file change would reuse the tag, and `sbx template
+save` onto an existing tag replaces the image silently (S11, question 8), which would break [205]'s promise to keep a
+template still in use. Refusing the rebuild while the tag is in use was rejected: any open task would block it, and
+strict sandboxes would be refused meanwhile. [205]'s cleanup is unchanged; staleness still compares the hash part,
+which the record holds too.
+
+212. **A build lock tells a live build from an interrupted one (2026-10-15, PR 253 review Q-2, the user agreed with
+the recommendation; adds to [210]):** `template build` writes `<base>/.sbxm/templates/<profile>-<harness>.build.json`
+with its process id and start time, the identity check of a task's `interrupted` test [163], reusing that helper. A
+second build while that process is alive is refused, naming the process; when the process is gone, the leftovers of
+[210] are removed and the build goes on. The lock file is removed at the end whether the build passes or fails. Why:
+[210]'s fixed names plus its leftover cleanup would let a second build remove a first build's live sandbox. Unique
+names per build (leftovers hard to find) and refusing whenever leftovers exist (no automatic recovery) were rejected.
+
+213. **A separate minimum `sbx` version for templates (2026-10-15, PR 253 review Q-3, the user agreed with the
+recommendation):** templates need `sbx` 0.46.0, the version S11 tested, built into sbxm as a constant (not a config
+key: below the tested version is unsupported). `doctor` checks it only when a profile has `[template]`; `template
+build` refuses below it before writing anything; a create that would use a template treats an older `sbx` like a
+missing template: refused for a strict profile [200], today's installs plus a warning otherwise [203]. The global
+`min_sbx_version` (default 0.43.0, `src/config.rs`) stays for everything else, and the README says which minimum
+applies to what. Why: raising the global minimum would make `doctor` fail for profiles without `[template]`,
+against [202].
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.
