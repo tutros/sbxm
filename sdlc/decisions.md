@@ -498,7 +498,8 @@ rm --merged` only stop recording it as in use. Why: 1.3 to 2.6 GB per template o
 and a rebuild makes a new tag [203].
 
 206. **Template commands and users (2026-10-15, the user agreed with the recommendation):** new commands `sbxm
-template build <profile> [--harness h] [--warm <repo>]` (`--harness` defaults to `claude`), `sbxm template ls` and
+template build <profile> [--harness h] [--warm <repo>] [--ignore-disk]` (`--harness` defaults to `claude`;
+`--ignore-disk` as on every command that creates a sandbox, [194], added after the PR 253 review round 2, S-1), `sbxm template ls` and
 `sbxm template rm <profile> [--harness h]`. Every command that creates a sandbox follows the profile's opt-in [202]:
 `new`, `open --rebuild`, every `sbxm task` sandbox (worker, reviewer, fix rounds) and `sbxm run`'s contestants and
 judge; no `--no-template` flag until a need shows. sbxm's template records live in
@@ -570,6 +571,28 @@ missing template: refused for a strict profile [200], today's installs plus a wa
 applies to what. Why: raising the global minimum would make `doctor` fail for profiles without `[template]`,
 against [202].
 
+214. **Templates belong to the profile, not the project (2026-10-15, PR 253 review round 2 Q-4, the user agreed
+with the recommendation):** `[template]` in a project's `sandbox.toml` [57] is refused. A project override that adds
+a baked input (`setup.install`, `network.allow` or `network.deny`) is refused for a strict profile, naming the
+override, and gets today's installs plus a warning for a non-strict one. Why: a template is built and recorded per
+profile and harness, so a project variant has no template that can match it; silently dropping the project's
+build inputs was rejected, and per-project templates wait for a need.
+
+215. **Strict mode forbids the profile's install steps, not sbxm's own configuration step (2026-10-15, PR 253
+review round 2 Q-5, the user agreed with the recommendation; narrows [200](a)):** a strict sandbox runs none of the
+profile's `setup.install` steps (software installs), but the harness kit's root step that writes Claude's
+`managed_settings` [64] (`src/kit.rs`) still runs at every create. It writes one local file and needs no egress, so
+a settings change applies without a rebuild; managed settings stay out of the template hash [209]. Baking them in
+was rejected: every settings change would need a template rebuild.
+
+216. **A task checks lock files at the commit its sandbox checks out (2026-10-15, PR 253 review round 2 Q-6, the
+user agreed with the recommendation; changes the base-commit rule of [206]):** issue and spec workers use their
+starting commit (a resumed worker the same one); a continued PR's worker the PR head it starts from; `task review
+--pr` the fetched PR head; an in-task reviewer and fix rounds the delivered branch's tip. All are read from the
+task's `repo.git` [159]. A failed check refuses a strict sandbox before it is created, naming `template build
+--warm`. Why: a PR that changes a lock file would otherwise pass a check made at its base and fail later in the
+gates with missing-dependency errors. A worker changing a lock file mid-task stays gap G1 [203].
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.
@@ -579,7 +602,7 @@ against [202].
 - **S10 (M2b, git bundle from a sandbox):** Done 2026-10-01 (passed), recorded in decision 161.
 - **S8 (GitHub access from a sandbox):** out of M2b [141]; written 2026-09-27, not run; spec `sdlc/spikes/S8.md`. Can issue workers [80–82] push, open PRs and edit issues through `sbx`'s proxy with a repo-scoped token, and do branch protection, no Workflows permission and a narrow allowlist hold? Q1–Q2 need no token; Q3–Q4 need a scratch repo and a stored `github` secret, which the repo owner doesn't plan to set up (a fork's owner may).
 - **S5 (M2):** Headless runs per harness inside `sbx`. Done: Claude, Codex, Antigravity (see "Spike results" below) [93][103]. Gemini CLI is blocked/deprecated upstream and dropped as an M2a harness [103]. Pi deferred. Prompt in, run to completion, extract answer + transcript + token usage (decision 13). Leads: the v3 kit spec has `agent-sessions@1` (`prompt: ["-p", "{{.Prompt}}"]` for claude), but `sbx` 0.43 has no CLI verb for it. Route used: `sbx exec <sandbox> <harness-cli> <headless flags>` (Claude, Codex) or `sbx run --kit <pinned> <agent> <workspace>` + `sbx exec` (Antigravity).
-- **S15 (templates milestone, Pi):** not run yet [204]. Does a template saved from a `pi` sandbox work with `sbx create -t TAG --pull never` plus sbxm's kits, given that Pi's `agent_arg` is a kit reference of its own [73]: does the sandbox start, does Pi answer headless, do the always-loaded `AGENTS.md` and the provider secret still work, and does the kit's allow list apply? Decides whether Pi joins the milestone.
+- **S15 (templates milestone, Pi):** not run yet [204]; spec `sdlc/spikes/S15.md` (approved by the user 2026-10-15), results template `sdlc/spikes/S15-results.md`. Does a template saved from a `pi` sandbox work with `sbx create -t TAG --pull never` plus sbxm's kits, given that Pi's `agent_arg` is a kit reference of its own [73]: does the sandbox start, does Pi answer headless, do the always-loaded `AGENTS.md` and the provider secret still work, and does the kit's allow list apply? Decides whether Pi joins the milestone.
 
 ## Spike results (2026-09-24, sbx v0.43.0, Windows)
 

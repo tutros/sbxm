@@ -1,7 +1,7 @@
 # Milestone 3: sandboxes from a prebuilt template
 
-Planned 2026-10-15 with the user (issue #211, decisions 199-213: the interview 199-206, the plan choices 207-210,
-the PR 253 review's questions 211-213), from spike S11 (`sdlc/spikes/S11.md`).
+Planned 2026-10-15 with the user (issue #211, decisions 199-216: the interview 199-206, the plan choices 207-210,
+the PR 253 reviews' questions 211-216), from spike S11 (`sdlc/spikes/S11.md`).
 
 ## Goal
 
@@ -66,7 +66,7 @@ allow = []      # runtime allow list, required [202]
 
 | Command | Behavior |
 |---|---|
-| `template build <profile> [--harness h] [--warm <repo>]` | refused for an unsupported harness, a profile without `[template]`, an `sbx` older than 0.46.0 [213], under `min_free_disk` [194], or with `--warm` on a repo with neither `[warm]` nor a `Cargo.toml` [207]. Creates the build sandbox with the full install kit and the build allow list, runs P1 when warm, stops it, `sbx template save`s it under the new tag, removes the build sandbox and workspace, writes the record, then removes the previous tag unless it is in use [205](a). Every build saves under a fresh tag [211], never onto an existing one (save onto an existing tag replaces silently, S11 Q8). |
+| `template build <profile> [--harness h] [--warm <repo>] [--ignore-disk]` | `--ignore-disk` bypasses only this invocation's free-space refusal [194]. Refused for an unsupported harness, a profile without `[template]`, an `sbx` older than 0.46.0 [213], under `min_free_disk` [194], or with `--warm` on a repo with neither `[warm]` nor a `Cargo.toml` [207]. Creates the build sandbox with the full install kit and the build allow list, runs P1 when warm, stops it, `sbx template save`s it under the new tag, removes the build sandbox and workspace, writes the record, then removes the previous tag unless it is in use [205](a). Every build saves under a fresh tag [211], never onto an existing one (save onto an existing tag replaces silently, S11 Q8). |
 | `template ls` | one line per record: profile, harness, tag, warm, size, age, in-use count; flags a record whose image is gone. |
 | `template rm <profile> [--harness h]` | refused while `state.json` or any `task.json` records the tag, naming them [205](b); else `sbx template rm --force` and the record goes. |
 | any create | resolve: `Use` → `-t TAG --pull never` + baked kit; `Stale`/`Missing` (or `sbx` older than 0.46.0 [213]) → strict: refuse naming `template build [--warm]`; not strict: install kit + one warning [200], [203]. |
@@ -77,27 +77,33 @@ allow = []      # runtime allow list, required [202]
    allow list applies. Done when written up in `sdlc/decisions.md`. Spike S15 (Pi) runs as its own session.
 1. **Profile `[template]`**: parse, `allow` required, unknown keys refused. Done: `tests/profile.rs` cases.
 2. **Baked kit and template hash**: snapshot of the baked `common` mixin; hash changes with each build-part field and
-   not with runtime-only fields. Done: `insta` snapshots, hash tests.
+   not with runtime-only fields; the Claude managed-settings step stays in the baked harness kit and out of the
+   hash [215]. Done: `insta` snapshots, hash tests.
 3. **Backend template calls**: `CreateSpec` template, `template_save`/`ls`/`rm` on the trait, fake and `sbx` parser
    from a captured fixture. Done: unit tests on args and parsing.
 4. **`template build` (cold) and records**: through `FakeBackend`, incl. refusals, cleanup on failure, removal of an
    unused previous tag and keeping a used one, and a rebuild with an unchanged hash saving under a new tag while the
    in-use old tag stays [211]; the build lock [212]: a second build refused while the first process is alive, and
-   an interrupted build's leftovers removed when it is gone. Done: `tests/template_build.rs`.
+   an interrupted build's leftovers removed when it is gone; a low-disk build refused before any write without
+   `--ignore-disk` and reaching sandbox creation with it [194]. Done: `tests/template_build.rs`.
 5. **`template build --warm`, cargo defaults** [207]: the copy rules, the built-in cargo sequence, the lock hash in
    the record, the refusal of a repo with neither `Cargo.toml` nor `[warm]`. Done: tests on the exec log.
 5b. **`[warm]` in `sbxm-task.toml`** [207]: `commands` and `lock_files` parsed (unknown keys refused), run in order
    under the in-sandbox timeout, a failing command saves nothing. Done: `tests/template_build.rs` cases.
 6. **`new` / `open --rebuild` use templates**: resolve, strict refusal, non-strict warning, `state.json` field, P2's
-   drift and hint. Done: `tests/new.rs`, `tests/open.rs` cases.
+   drift and hint; a project `sandbox.toml` with `[template]` refused, and one adding `setup.install` or build hosts
+   refused (strict) or falling back with a warning (non-strict) [214]. Done: `tests/new.rs`, `tests/open.rs` cases.
 7. **`template ls` and `template rm`** with the in-use check over `state.json` and every `task.json`. Done: tests.
 8. **`sbxm task` sandboxes**: worker, reviewer, fix rounds, `task resume`'s rebuilt worker; `task.json` field; the lock
-   check from the base commit in `repo.git` [206]. Done: `tests/task_*.rs` cases.
+   check at the commit each sandbox checks out [216], with tests for a PR whose head changes a lock file (refused
+   in strict mode before the reviewer sandbox exists, though the base still matches) and for a worker that changes
+   one after start (G1, fails inside the sandbox). Done: `tests/task_*.rs` cases.
 9. **`sbxm run`**: contestants and judge, the strict refusal in preflight before any write. Done: `tests/run_*.rs`.
 10. **`doctor`**: templates, total size, missing image, stale hash, older than 14 days; the template minimum `sbx`
     version [213] checked only when a profile has `[template]` (tests for an older `sbx` with and without one).
     Done: `tests/doctor.rs`.
-11. **Docs and real test**: README, `docs/workflow.md`, `profiles/sbxm-dev` gets `[template]`; `tests/real_sbx.rs`
+11. **Docs and real test**: README, `docs/workflow.md` (incl. `template build` among the commands the disk check and
+    `--ignore-disk` cover, and which minimum `sbx` version applies to what [213]), `profiles/sbxm-dev` gets `[template]`; `tests/real_sbx.rs`
     builds a cold template and creates one sandbox from it. Done: the real test passes.
 12. **End-to-end check** (below).
 
