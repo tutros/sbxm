@@ -69,6 +69,19 @@ pub fn gib(bytes: u64) -> String {
     format!("{:.1} GiB", bytes as f64 / GIB as f64)
 }
 
+/// Whether two paths are on the same drive, so a free-space report covering both would count the
+/// same space twice (decision 220): the same path always is; otherwise only a shared drive letter
+/// is, since a path without one (every path off Windows) carries no other sign of its drive.
+pub fn same_drive(a: &Path, b: &Path) -> bool {
+    if a == b {
+        return true;
+    }
+    matches!(
+        (a.components().next(), b.components().next()),
+        (Some(Component::Prefix(p1)), Some(Component::Prefix(p2))) if p1.as_os_str() == p2.as_os_str()
+    )
+}
+
 /// What a sandbox-creating command reads the drive with, passed in so tests don't depend on the
 /// machine. The default reads no platform folder, so only `sandbox_state_dir` is checked.
 #[derive(Debug, Clone)]

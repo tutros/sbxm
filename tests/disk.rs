@@ -216,3 +216,41 @@ fn a_path_without_a_drive_is_described_by_its_folder() {
         "the drive of /var/sbx/state"
     );
 }
+
+// `same_drive` (decision 220): whether a report covering two paths would double-count the same
+// free space. The same path always counts, on every platform; a shared drive letter only exists
+// on Windows, so that case is pinned there.
+#[test]
+fn the_same_path_is_always_the_same_drive() {
+    assert!(disk::same_drive(
+        Path::new("/sbx/base"),
+        Path::new("/sbx/base")
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn the_same_drive_letter_is_the_same_drive_even_with_different_folders() {
+    assert!(disk::same_drive(
+        Path::new(r"E:\sbxm-e2e\base"),
+        Path::new(r"E:\other\state")
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn different_drive_letters_are_different_drives() {
+    assert!(!disk::same_drive(
+        Path::new(r"E:\sbxm-e2e\base"),
+        Path::new(r"C:\other\state")
+    ));
+}
+
+#[cfg(not(windows))]
+#[test]
+fn different_folders_are_different_drives_without_a_drive_letter() {
+    assert!(!disk::same_drive(
+        Path::new("/sbx/base"),
+        Path::new("/other/state")
+    ));
+}
