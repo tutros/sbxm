@@ -75,10 +75,12 @@ allow = []      # runtime allow list, required [202]
 
 **Risky slices** (decision 162: a security guard, agent-written code run on the host, or destructive operations;
 reviewed in the background as each is committed, reading in parallel and building in turn, decision 219):
+- **3**: `SbxBackend::template_rm` is the backend call every template deletion goes through (destructive).
 - **4**: removes an interrupted build's leftovers and an unused previous tag (destructive), behind the build lock.
 - **6**: the strict refusal is the guard that keeps installs and extra hosts out of a strict sandbox [200].
 - **7**: `template rm` deletes images; its in-use check over `state.json` and every `task.json` is the guard.
 - **8**: the lock check reads a PR's head, which is untrusted input, before a strict reviewer sandbox exists [216].
+- **9**: the strict refusal in `sbxm run`'s preflight is the same guard [200] for contestants and the judge.
 
 The other slices are reviewed at the end of the milestone.
 
