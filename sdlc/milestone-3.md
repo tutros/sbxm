@@ -74,7 +74,11 @@ allow = []      # runtime allow list, required [202]
 ## Work order (vertical slices, each TDD, each ends with fmt, clippy, cargo test and a commit)
 
 0. **Real-`sbx` check of `codex` with `-t`** (as S11 did for `claude`): sandbox starts, `codex exec` answers, kit
-   allow list applies. Done when written up in `sdlc/decisions.md`. Spike S15 (Pi) runs as its own session.
+   allow list applies. Done when written up in `sdlc/decisions.md`. **Done 2026-10-16: decision 217.** Spike S15 (Pi) runs as its own session.
+0b. **Can `codex`'s network rules be limited to `[template].allow`?** [218] A bounded real-`sbx` check, before
+   slice 6 lets a strict `codex` sandbox be created: find a `codex` setup whose rules don't include the built-in
+   kit's hosts [217](c), with `codex exec` still answering. Done when written up in `sdlc/decisions.md`; if no such
+   setup exists, slice 6 refuses a strict profile with the `codex` harness [218].
 1. **Profile `[template]`**: parse, `allow` required, unknown keys refused. Done: `tests/profile.rs` cases.
 2. **Baked kit and template hash**: snapshot of the baked `common` mixin; hash changes with each build-part field and
    not with runtime-only fields; the Claude managed-settings step stays in the baked harness kit and out of the
