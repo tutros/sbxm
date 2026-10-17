@@ -177,6 +177,33 @@ pub struct Profile {
     /// doesn't change the hash (decision 64).
     #[serde(skip_deserializing)]
     pub claude_managed_settings: Option<String>,
+    #[serde(default, rename = "template", skip_serializing)]
+    template_table: Option<TemplateTable>,
+    /// `[template]`, checked by [`Profile::load`]: its presence opts the
+    /// profile in to prebuilt templates (decision 202). Left out of the
+    /// config hash until the template slices decide how it enters it.
+    #[serde(skip)]
+    pub template: Option<Template>,
+}
+
+/// The profile's opt-in to prebuilt templates (decision 202).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Template {
+    /// Refuse a sandbox without a matching template instead of installing
+    /// (decision 200).
+    pub strict: bool,
+    /// The runtime allow list of sandboxes created from the template.
+    pub allow: Vec<String>,
+}
+
+/// `allow` is required, but checked by hand so the error says how to fix it.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TemplateTable {
+    #[serde(default)]
+    strict: bool,
+    #[serde(default)]
+    allow: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -267,6 +294,13 @@ impl Profile {
         let project: Self = toml::from_str(&text)
             .with_context(|| format!("invalid project config {}", path.display()))?;
         project.check_env("project config", &path)?;
+        if project.template_table.is_some() {
+            bail!(
+                "[template] in project config {} is not allowed: templates belong to the profile; \
+                 move it to the profile or remove it",
+                path.display()
+            );
+        }
         self.network.allow.extend(project.network.allow);
         self.network.deny.extend(project.network.deny);
         self.env.extend(project.env);
@@ -320,6 +354,19 @@ impl Profile {
         let source = format!("profile '{name}'");
         profile.check_env(&source, &path)?;
         profile.skills_store = parse_skills_store(profile.skills.store.as_deref(), &source, &path)?;
+        if let Some(table) = profile.template_table.take() {
+            let Some(allow) = table.allow else {
+                bail!(
+                    "template.allow is missing in {source} ({}); list the hosts sandboxes from \
+                     the template may reach, or set allow = [] for none",
+                    path.display()
+                );
+            };
+            profile.template = Some(Template {
+                strict: table.strict,
+                allow,
+            });
+        }
         let dir = profiles_dir.join(name);
         profile.mandatory_instructions = read_instructions(
             "mandatory",

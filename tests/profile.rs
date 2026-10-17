@@ -237,3 +237,82 @@ fn skills_store_unknown_value_lists_the_allowed_ones() {
     assert!(message.contains("use \"readonly\" or \"off\""), "{message}");
     assert_nothing_created(&env, &backend);
 }
+
+// Milestone 3 slice 1: the `[template]` table opts a profile in (decision 202).
+
+fn loaded(env: &Env, contents: &str) -> anyhow::Result<sbxm::config::Profile> {
+    env.write_profile("default", contents);
+    sbxm::config::Profile::load(&env.profiles_dir(), "default")
+}
+
+#[test]
+fn profile_without_template_table_has_no_template() {
+    let env = Env::new();
+    assert!(loaded(&env, "").unwrap().template.is_none());
+}
+
+#[test]
+fn template_table_is_parsed() {
+    let env = Env::new();
+    let profile = loaded(
+        &env,
+        "[template]\nstrict = true\nallow = [\"example.org\"]\n",
+    )
+    .unwrap();
+
+    let template = profile.template.unwrap();
+    assert!(template.strict);
+    assert_eq!(template.allow, vec!["example.org".to_string()]);
+}
+
+#[test]
+fn template_strict_defaults_to_false_and_allow_can_be_empty() {
+    let env = Env::new();
+    let template = loaded(&env, "[template]\nallow = []\n")
+        .unwrap()
+        .template
+        .unwrap();
+
+    assert!(!template.strict);
+    assert!(template.allow.is_empty());
+}
+
+#[test]
+fn template_without_allow_is_an_error_naming_the_fix() {
+    let env = Env::new();
+
+    let err = loaded(&env, "[template]\nstrict = true\n").unwrap_err();
+
+    let message = format!("{err:#}");
+    let path = env.profiles_dir().join("default").join("profile.toml");
+    assert!(
+        message.contains(&format!(
+            "template.allow is missing in profile 'default' ({}); list the hosts sandboxes \
+             from the template may reach, or set allow = [] for none",
+            path.display()
+        )),
+        "{message}"
+    );
+}
+
+#[test]
+fn unknown_key_in_template_table_is_an_error() {
+    let env = Env::new();
+
+    let err = loaded(&env, "[template]\nallow = []\nwarm = true\n").unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("warm"), "{message}");
+}
+
+#[test]
+fn template_without_allow_is_refused_before_new_creates_anything() {
+    let env = Env::new();
+    env.write_profile("default", "[template]\n");
+    let backend = FakeBackend::default();
+
+    let err = new_with_profile(&env, None, &backend).unwrap_err();
+
+    assert!(format!("{err:#}").contains("template.allow is missing"));
+    assert_nothing_created(&env, &backend);
+}
