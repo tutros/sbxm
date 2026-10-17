@@ -671,6 +671,44 @@ before any agent command, sbxm reads the kit rule's hosts from `sbx policy ls <s
 allowed that is neither an OpenAI host, in `[template].allow` nor denied, removes the sandbox and refuses, naming the
 host, so a later `codex` kit that adds a host can't widen a strict sandbox silently.
 
+222. **A build's kits sit next to its workspace (2026-10-17, milestone 3 slice 4, announced to the user; adds to
+[210]):** `template build` writes the build sandbox's install kits to
+`<base>/.sbxm/templates/build/<profile>-<harness>.kits/` and removes them with the workspace after every build. Why:
+the kits are build leftovers like the workspace, so [212]'s cleanup finds both by the same fixed name.
+
+223. **A build refuses a tag that already exists (2026-10-17, milestone 3 slice 4, announced to the user; adds to
+[211]):** before any write, a build whose generated tag is already in `sbx template ls` (a second build in the same
+minute) is refused: "template TAG already exists; wait a minute and build again". Why: `sbx template save` replaces
+an existing tag silently (S11, question 8), and the tag has minute resolution.
+
+224. **A failed build removes what it made, its saved tag included (2026-10-17, milestone 3 slice 4, the user
+agreed):** once the kits are written, a failure removes the build sandbox (also after a failed `create`, which can
+leave one), a tag saved without its record, and the build folders; a cleanup step that fails is added to the error
+with the command that finishes it (`sbx rm`, `sbx template rm`, delete by hand). Why: an image no record names is
+1.3-2.6 GB that nothing would ever find or remove ([205]).
+
+225. **A previous tag stays in the record until it is gone (2026-10-17, milestone 3 slice 4, the user agreed; adds to
+[205](a)):** the new record lists the old tag and every kept `previous` tag when it is written; only then are they
+checked and removed. A tag in use, one that `sbx template rm` fails to remove, or one whose use can't be checked (an
+unreadable `task.json`) stays in `previous` and the next build tries again; a tag whose image is already gone is
+dropped silently. `template build` prints the new tag, then one line per previous tag removed or kept, with the
+reason, on stdout. Why: a sandbox created during the build still finds its tag recorded, and nothing is lost to a
+failed removal.
+
+226. **An interrupted build's saved tag is not cleaned up automatically (2026-10-17, milestone 3 slice 4, the user
+chose to defer):** a build killed between `sbx template save` and writing its record leaves an image no record names;
+[212]'s leftover cleanup removes only the build sandbox and folders. Trigger to fix: such an image is found on this
+machine (`sbx template ls` shows an `sbxm-` tag no record lists), or `template ls`/`doctor` (slices 7, 8) can list
+orphans cheaply.
+
+227. **A `new` racing a rebuild is accepted (2026-10-17, milestone 3 slice 4, the user accepted the risk):** a
+sandbox creation that reads the template record just before a rebuild rewrites it, and records its tag just after the
+rebuild checked for users, can lose its template to [205](a)'s removal. The window is milliseconds between two local
+commands; no lock covers `new`.
+
+228. **`template build` follows `new` on kit warnings and the base dir (2026-10-17, milestone 3 slice 4, the user
+agreed):** it prints `sbx kit validate`'s warnings and refuses a base dir that doesn't exist, with `new`'s messages.
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.

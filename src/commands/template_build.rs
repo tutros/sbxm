@@ -61,6 +61,11 @@ pub fn run(
     }
 
     let key = template::key(profile_name, options.harness);
+    // The record lists every earlier tag until it is removed, so one that cannot go now is
+    // retried by a later build (decision 205a).
+    let previous: Vec<String> = template::Record::load(&config.base_dir, &key)?
+        .map(|old| std::iter::once(old.tag).chain(old.previous).collect())
+        .unwrap_or_default();
     let build_dir = template::dir(&config.base_dir).join("build");
     let build = Build {
         sandbox: format!("sbxm-template-{key}"),
@@ -76,11 +81,11 @@ pub fn run(
             sbx_version,
             size_bytes: 0,
             created_at: format_timestamp(now),
-            previous: Vec::new(),
+            previous,
         },
     };
     let mut progress = Progress::default();
-    build
+    let record = build
         .run(
             &config,
             profile_name,
@@ -90,8 +95,82 @@ pub fn run(
             &mut progress,
         )
         .map_err(|err| build.clean_up(backend, &progress, err))?;
-    writeln!(out, "{}", build.record.tag)?;
+    writeln!(out, "{}", record.tag)?;
+    let kept = retire_previous(&config.base_dir, &record.previous, backend, out)?;
+    if kept != record.previous {
+        template::Record {
+            previous: kept,
+            ..record
+        }
+        .save(&config.base_dir, &build.key)?;
+    }
     Ok(())
+}
+
+/// Removes each earlier tag that no sandbox or task records (decision 205a), once the new record
+/// points at the new tag. Returns the tags kept: in use, or not removable now. A tag whose image
+/// is already gone is dropped without a word.
+fn retire_previous(
+    base_dir: &Path,
+    previous: &[String],
+    backend: &dyn SandboxBackend,
+    out: &mut dyn Write,
+) -> Result<Vec<String>> {
+    if previous.is_empty() {
+        return Ok(Vec::new());
+    }
+    let images = match backend.template_ls() {
+        Ok(images) => images,
+        Err(err) => {
+            writeln!(
+                out,
+                "kept previous templates {}: cannot list templates ({err:#}); a later build \
+                 retries",
+                previous.join(", ")
+            )?;
+            return Ok(previous.to_vec());
+        }
+    };
+    let mut kept = Vec::new();
+    for tag in previous {
+        if !images.iter().any(|t| t.reference() == *tag) {
+            continue;
+        }
+        let users = match template::users(base_dir, tag) {
+            Ok(users) => users,
+            Err(err) => {
+                writeln!(
+                    out,
+                    "kept previous template {tag}: cannot tell whether it is in use ({err:#}); a \
+                     later build retries"
+                )?;
+                kept.push(tag.clone());
+                continue;
+            }
+        };
+        if !users.is_empty() {
+            writeln!(
+                out,
+                "kept previous template {tag}: still used by {}; a later build removes it once \
+                 nothing uses it",
+                users.join(", ")
+            )?;
+            kept.push(tag.clone());
+            continue;
+        }
+        match backend.template_rm(tag) {
+            Ok(()) => writeln!(out, "removed previous template {tag}")?,
+            Err(err) => {
+                writeln!(
+                    out,
+                    "could not remove previous template {tag} ({err:#}); a later build retries, \
+                     or remove it with `sbx template rm {tag}`"
+                )?;
+                kept.push(tag.clone());
+            }
+        }
+    }
+    Ok(kept)
 }
 
 /// The names and folders one build uses (decision 210), and its record before the size is known.
@@ -114,7 +193,7 @@ struct Progress {
 
 impl Build {
     /// Writes and validates the kits, creates, stops, saves and removes the build sandbox, then
-    /// writes the record.
+    /// writes the record and returns it.
     fn run(
         &self,
         config: &GlobalConfig,
@@ -123,7 +202,7 @@ impl Build {
         harness: Harness,
         backend: &dyn SandboxBackend,
         progress: &mut Progress,
-    ) -> Result<()> {
+    ) -> Result<template::Record> {
         let config_hash = config::config_hash(profile_name, profile, &config.resources, harness);
         let kits = kit::all(profile_name, profile, &config_hash, harness)
             .map(|(name, spec)| (self.kits_dir.join(name), spec));
@@ -172,13 +251,13 @@ impl Build {
             .with_context(|| {
                 format!("template {tag} is missing after saving it; run `sbx template ls`")
             })?;
-        template::Record {
+        let record = template::Record {
             size_bytes,
             ..self.record.clone()
-        }
-        .save(&config.base_dir, &self.key)?;
+        };
+        record.save(&config.base_dir, &self.key)?;
         progress.saved = false;
-        Ok(())
+        Ok(record)
     }
 
     /// Removes what a failed build made: the build sandbox, a tag saved without its record, and

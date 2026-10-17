@@ -785,6 +785,7 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
             profile: Some(ctx.config.sandbox.profile.clone()),
             cpus: Some(kit_set.resources.cpus),
             memory: Some(kit_set.resources.memory.clone()),
+            template: None,
             run: None,
         });
         record::write(&meta, &task)?;
@@ -1014,6 +1015,7 @@ pub fn prepare_spec_resolved(
             profile: Some(ctx.config.sandbox.profile.clone()),
             cpus: Some(kit_set.resources.cpus),
             memory: Some(kit_set.resources.memory.clone()),
+            template: None,
             run: None,
         });
         record::write(&meta, &task)?;
@@ -2938,6 +2940,7 @@ fn open_review_workspace(
         profile: None,
         cpus: None,
         memory: None,
+        template: None,
         run: None,
     });
     record::write(&prepared.meta, &prepared.record)?;

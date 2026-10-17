@@ -455,3 +455,235 @@ fn a_failure_after_the_save_removes_the_saved_tag_and_names_the_leftover_sandbox
     );
     assert_nothing_left(&env, &backend);
 }
+
+// Step 4.4: the previous tag goes unless a sandbox or task still records it (decision 205a).
+
+/// One minute after [`NOW`], so a second build gets a fresh tag.
+const LATER: u64 = NOW + 60;
+
+fn build_at(env: &Env, now: u64, backend: &FakeBackend) -> String {
+    let mut out = Vec::new();
+    let options = template_build::Options {
+        now: Some(now),
+        ..options(Harness::Claude)
+    };
+    template_build::run(&env.config_dir(), &options, backend, &mut out).unwrap();
+    String::from_utf8(out).unwrap()
+}
+
+/// Records `tag` as the template of project `demo`'s Claude sandbox in its `state.json`.
+fn sandbox_uses(env: &Env, tag: &str) {
+    let dir = env.base_dir().join(".sbxm").join("demo");
+    let mut state = sbxm::state::State::default();
+    state.sandboxes.insert(
+        "claude".into(),
+        sbxm::state::SandboxState {
+            sandbox: "sbxm-demo-claude".into(),
+            workspace: env.base_dir().join("demo"),
+            created_at: NOW,
+            profile: Some("default".into()),
+            config_hash: None,
+            template: Some(tag.into()),
+        },
+    );
+    state.save(&dir).unwrap();
+}
+
+/// Writes a task whose worker records `tag` as its template; returns the task's id.
+fn task_uses(env: &Env, tag: &str) -> String {
+    use sbxm::task::record::{self, Agent, Kind, NewTask, Process, Record};
+    let mut task = Record::new(
+        &NewTask {
+            kind: Kind::Issue,
+            number: 7,
+            repo: "o/r",
+            title: "t",
+            base: "main",
+            branch: "b",
+            config_hash: "h",
+            id: None,
+        },
+        NOW,
+        Process::new(1, NOW),
+    );
+    task.worker = Some(Agent {
+        harness: "claude".into(),
+        model: None,
+        sandbox: "sbxm-task-7-claude".into(),
+        workspace: "w".into(),
+        profile: Some("default".into()),
+        cpus: None,
+        memory: None,
+        template: Some(tag.into()),
+        run: None,
+    });
+    record::write(&record::task_dir(&env.base_dir(), &task.id), &task).unwrap();
+    task.id
+}
+
+fn tag_at(env: &Env, now: u64) -> String {
+    let tag = expected_tag(env, Harness::Claude);
+    let stamp = if now == NOW {
+        "20231114t2213"
+    } else {
+        "20231114t2214"
+    };
+    format!("{}{stamp}", &tag[..tag.len() - 13])
+}
+
+fn template_tags(backend: &FakeBackend) -> Vec<String> {
+    backend
+        .template_ls()
+        .unwrap()
+        .iter()
+        .map(|t| t.reference())
+        .collect()
+}
+
+#[test]
+fn a_rebuild_removes_the_unused_previous_tag() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let backend = sbx_046();
+    build_at(&env, NOW, &backend);
+
+    let out = build_at(&env, LATER, &backend);
+
+    let (old, new) = (tag_at(&env, NOW), tag_at(&env, LATER));
+    assert_eq!(backend.log().last().unwrap(), &format!("template-rm {old}"));
+    assert_eq!(template_tags(&backend), [new.as_str()]);
+    assert_eq!(record(&env)["previous"], serde_json::json!([]));
+    assert_eq!(out, format!("{new}\nremoved previous template {old}\n"));
+}
+
+#[test]
+fn a_rebuild_with_an_unchanged_hash_keeps_a_previous_tag_a_sandbox_uses() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let backend = sbx_046();
+    build_at(&env, NOW, &backend);
+    let old = tag_at(&env, NOW);
+    sandbox_uses(&env, &old);
+
+    let out = build_at(&env, LATER, &backend);
+
+    let new = tag_at(&env, LATER);
+    assert!(!backend.log().iter().any(|l| l.starts_with("template-rm")));
+    assert_eq!(template_tags(&backend), [old.clone(), new.clone()]);
+    assert_eq!(record(&env)["tag"], serde_json::json!(new));
+    assert_eq!(record(&env)["previous"], serde_json::json!([old]));
+    assert_eq!(
+        out,
+        format!(
+            "{new}\nkept previous template {old}: still used by sandbox sbxm-demo-claude; a later \
+             build removes it once nothing uses it\n"
+        )
+    );
+}
+
+#[test]
+fn a_rebuild_keeps_a_previous_tag_a_task_uses() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let backend = sbx_046();
+    build_at(&env, NOW, &backend);
+    let old = tag_at(&env, NOW);
+    let id = task_uses(&env, &old);
+
+    let out = build_at(&env, LATER, &backend);
+
+    assert!(!backend.log().iter().any(|l| l.starts_with("template-rm")));
+    assert_eq!(record(&env)["previous"], serde_json::json!([old]));
+    assert!(out.contains(&format!("still used by task {id};")), "{out}");
+}
+
+#[test]
+fn a_kept_tag_goes_with_a_later_build_once_unused() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let backend = sbx_046();
+    build_at(&env, NOW, &backend);
+    let old = tag_at(&env, NOW);
+    sandbox_uses(&env, &old);
+    build_at(&env, LATER, &backend);
+    std::fs::remove_dir_all(env.base_dir().join(".sbxm").join("demo")).unwrap();
+
+    build_at(&env, LATER + 60, &backend);
+
+    let log = backend.log();
+    assert!(log.contains(&format!("template-rm {old}")), "{log:?}");
+    assert!(
+        log.contains(&format!("template-rm {}", tag_at(&env, LATER))),
+        "{log:?}"
+    );
+    assert_eq!(record(&env)["previous"], serde_json::json!([]));
+    assert_eq!(template_tags(&backend).len(), 1);
+}
+
+#[test]
+fn a_previous_tag_already_gone_is_skipped() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let backend = sbx_046();
+    build_at(&env, NOW, &backend);
+    backend.template_rm(&tag_at(&env, NOW)).unwrap();
+    let removals = backend.log().len();
+
+    let out = build_at(&env, LATER, &backend);
+
+    assert!(
+        !backend.log()[removals..]
+            .iter()
+            .any(|l| l.starts_with("template-rm")),
+        "{:?}",
+        backend.log()
+    );
+    assert_eq!(out, format!("{}\n", tag_at(&env, LATER)));
+    assert_eq!(record(&env)["previous"], serde_json::json!([]));
+}
+
+#[test]
+fn a_previous_tag_that_cannot_be_removed_stays_in_the_record() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let first = sbx_046();
+    build_at(&env, NOW, &first);
+    let old = tag_at(&env, NOW);
+    let backend = sbx_046()
+        .with_templates(first.template_ls().unwrap())
+        .failing_template_rm();
+
+    let out = build_at(&env, LATER, &backend);
+
+    assert!(
+        out.contains(&format!(
+            "could not remove previous template {old} (fake template rm failure); a later build \
+             retries, or remove it with `sbx template rm {old}`"
+        )),
+        "{out}"
+    );
+    assert_eq!(record(&env)["previous"], serde_json::json!([old]));
+}
+
+#[test]
+fn a_previous_tag_is_kept_when_a_task_record_cannot_be_read() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let backend = sbx_046();
+    build_at(&env, NOW, &backend);
+    let old = tag_at(&env, NOW);
+    let task = env.base_dir().join(".sbxm").join("tasks").join("broken");
+    std::fs::create_dir_all(&task).unwrap();
+    std::fs::write(task.join("task.json"), "not json").unwrap();
+
+    let out = build_at(&env, LATER, &backend);
+
+    assert!(
+        out.contains(&format!(
+            "kept previous template {old}: cannot tell whether it is in use ("
+        )),
+        "{out}"
+    );
+    assert!(!backend.log().iter().any(|l| l.starts_with("template-rm")));
+    assert_eq!(record(&env)["previous"], serde_json::json!([old]));
+}

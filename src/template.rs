@@ -84,3 +84,41 @@ impl Record {
             .with_context(|| format!("cannot write {}", path.display()))
     }
 }
+
+/// Who still records `tag` as their template (decision 205): `sandbox <name>` for each
+/// `state.json` entry and `task <id>` for each task whose worker or reviewer has it.
+pub fn users(base_dir: &Path, tag: &str) -> Result<Vec<String>> {
+    let mut users = Vec::new();
+    for (_, state) in crate::state::load_all(base_dir)? {
+        for sandbox in state.sandboxes.values() {
+            if sandbox.template.as_deref() == Some(tag) {
+                users.push(format!("sandbox {}", sandbox.sandbox));
+            }
+        }
+    }
+    for task in crate::task::record::load_all(base_dir)? {
+        let agents = [&task.worker, &task.reviewer];
+        if agents
+            .iter()
+            .any(|a| a.as_ref().and_then(|a| a.template.as_deref()) == Some(tag))
+        {
+            users.push(format!("task {}", task.id));
+        }
+    }
+    Ok(users)
+}
+
+impl Record {
+    /// The record of `key`, or `None` if there is none.
+    pub fn load(base_dir: &Path, key: &str) -> Result<Option<Self>> {
+        let path = dir(base_dir).join(format!("{key}.json"));
+        if !path.is_file() {
+            return Ok(None);
+        }
+        let text =
+            fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
+        serde_json::from_str(&text)
+            .map(Some)
+            .with_context(|| format!("cannot parse {}", path.display()))
+    }
+}

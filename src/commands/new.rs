@@ -155,6 +155,7 @@ pub fn run(
             created_at,
             profile: Some(profile_name.to_owned()),
             config_hash: Some(config_hash),
+            template: None,
         },
     );
     state.save(&metadata_dir)

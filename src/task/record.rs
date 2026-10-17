@@ -257,6 +257,10 @@ pub struct Agent {
     pub cpus: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<String>,
+    /// The template tag this sandbox was created from (decision 205): a template recorded here
+    /// is in use and stays. `None` for a sandbox built from the install kit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
     pub run: Option<RunInfo>,
 }
 

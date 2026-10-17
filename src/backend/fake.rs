@@ -71,6 +71,7 @@ pub struct FakeBackend {
     fail_create: bool,
     fail_stop: bool,
     fail_template_save: bool,
+    fail_template_rm: bool,
     sandboxes: Vec<SandboxInfo>,
     secrets: Mutex<Vec<String>>,
     /// `0.43.0` when `None`.
@@ -161,6 +162,14 @@ impl FakeBackend {
         Self {
             fail_template_save: true,
             ..Self::default()
+        }
+    }
+
+    /// A backend whose `template_rm` records the call and then fails.
+    pub fn failing_template_rm(self) -> Self {
+        Self {
+            fail_template_rm: true,
+            ..self
         }
     }
 
@@ -550,6 +559,9 @@ impl SandboxBackend for FakeBackend {
     fn template_rm(&self, tag: &str) -> Result<()> {
         super::check_template_tag(tag)?;
         self.record("template-rm", tag);
+        if self.fail_template_rm {
+            bail!("fake template rm failure");
+        }
         self.templates
             .lock()
             .unwrap()
