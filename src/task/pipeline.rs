@@ -798,6 +798,7 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
                 memory: kit_set.resources.memory.clone(),
                 skills: harness_kits.skills_store,
                 kits: harness_kits.dirs.clone(),
+                template: None,
             })
             .with_context(|| format!("cannot create sandbox {sandbox}"))?;
         Ok((task, harness_kits))
@@ -1026,6 +1027,7 @@ pub fn prepare_spec_resolved(
                 memory: kit_set.resources.memory.clone(),
                 skills: harness_kits.skills_store,
                 kits: harness_kits.dirs.clone(),
+                template: None,
             })
             .with_context(|| format!("cannot create sandbox {sandbox}"))?;
         Ok((task, harness_kits))
@@ -1526,6 +1528,7 @@ pub(super) fn ensure_worker_sandbox(
             memory: kit_set.resources.memory.clone(),
             skills: harness_kits.skills_store,
             kits: harness_kits.dirs.clone(),
+            template: None,
         })
         .with_context(|| format!("cannot create sandbox {sandbox}"))?;
     Ok(true)
@@ -2947,6 +2950,7 @@ fn open_review_workspace(
             memory: kit_set.resources.memory.clone(),
             skills: harness_kits.skills_store,
             kits: harness_kits.dirs.clone(),
+            template: None,
         })
         .with_context(|| format!("cannot create sandbox {sandbox}"))?;
     Ok(())

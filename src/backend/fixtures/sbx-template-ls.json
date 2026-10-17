@@ -1,0 +1,44 @@
+{
+  "images": [
+    {
+      "id": "549730947ed8",
+      "repository": "docker.io/docker/sandbox-templates",
+      "tag": "claude-code-docker",
+      "flavor": "claude-code-docker",
+      "created_at": "2026-09-23T17:59:07Z",
+      "size": 936766510
+    },
+    {
+      "id": "8b4cd0a46c8b",
+      "repository": "docker.io/docker/sandbox-templates",
+      "tag": "codex-docker",
+      "flavor": "codex-docker",
+      "created_at": "2026-08-26T12:58:18Z",
+      "size": 1346987464
+    },
+    {
+      "id": "0c5e071e46f0",
+      "repository": "docker.io/sbx/antigravity-image",
+      "tag": "latest",
+      "flavor": "antigravity",
+      "created_at": "2026-10-08T14:31:45Z",
+      "size": 662096934
+    },
+    {
+      "id": "a55863051b7c",
+      "repository": "docker.io/sbx/pi-image",
+      "tag": "latest",
+      "flavor": "pi",
+      "created_at": "2026-10-16T05:10:10Z",
+      "size": 656036557
+    },
+    {
+      "id": "3f1b2c4d5e6a",
+      "repository": "docker.io/library/sbxm-spike-s15",
+      "tag": "pi-1",
+      "flavor": "pi",
+      "created_at": "2026-10-16T21:04:12Z",
+      "size": 734437048
+    }
+  ]
+}

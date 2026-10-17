@@ -8,7 +8,10 @@ use serde::Deserialize;
 
 use std::path::Path;
 
-use super::{CreateSpec, ExecOutput, ExecSpec, KitValidation, SandboxBackend, SandboxInfo, Stdin};
+use super::{
+    CreateSpec, ExecOutput, ExecSpec, KitValidation, SandboxBackend, SandboxInfo, Stdin,
+    TemplateImage,
+};
 
 /// Shells out to the `sbx` CLI on PATH.
 #[derive(Debug, Default)]
@@ -153,6 +156,49 @@ impl SandboxBackend for SbxBackend {
             )
         })
     }
+
+    fn template_save(&self, sandbox: &str, tag: &str) -> Result<()> {
+        run_sbx_unprompted(&template_save_args(sandbox, tag))
+    }
+
+    fn template_ls(&self) -> Result<Vec<TemplateImage>> {
+        let output = Command::new("sbx")
+            .args(template_ls_args())
+            .stdin(Stdio::null())
+            .output()
+            .context(SBX_MISSING)?;
+        if !output.status.success() {
+            bail!(
+                "`sbx template ls --json` failed ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        parse_template_ls(&String::from_utf8_lossy(&output.stdout))
+    }
+
+    fn template_rm(&self, tag: &str) -> Result<()> {
+        run_sbx_unprompted(&template_rm_args(tag)?)
+    }
+}
+
+/// Runs `sbx <args>` with stdin closed, so a question `sbx` asks (S11: `template save` on a
+/// running sandbox, `template rm` without `--force`) fails instead of waiting.
+fn run_sbx_unprompted(args: &[&str]) -> Result<()> {
+    let output = Command::new("sbx")
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .context(SBX_MISSING)?;
+    if !output.status.success() {
+        bail!(
+            "`sbx {}` failed ({}): {}",
+            args.join(" "),
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(())
 }
 
 fn validate_args(dir: &Path) -> Vec<OsString> {
@@ -260,6 +306,47 @@ fn parse_version(json: &str) -> Result<String> {
     Ok(client.strip_prefix('v').unwrap_or(&client).to_owned())
 }
 
+fn template_save_args<'a>(sandbox: &'a str, tag: &'a str) -> [&'a str; 4] {
+    ["template", "save", sandbox, tag]
+}
+
+fn template_ls_args() -> [&'static str; 3] {
+    ["template", "ls", "--json"]
+}
+
+/// `sbx template rm --force` deletes any image, built-in agent images included, so only a tag
+/// sbxm itself saves gets through: `sbxm-<name>:<tag>`, in the characters sbxm's tags use
+/// (decision 211).
+fn template_rm_args(tag: &str) -> Result<[&str; 4]> {
+    let allowed = |s: &str, extra: &[char]| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || extra.contains(&c))
+    };
+    let ours = tag.split_once(':').is_some_and(|(name, version)| {
+        name.strip_prefix("sbxm-")
+            .is_some_and(|rest| allowed(rest, &['-']))
+            && allowed(version, &['-', '.', '_'])
+    });
+    if !ours {
+        bail!(
+            "refusing to remove template '{tag}': sbxm only removes the templates it saves \
+             (sbxm-<name>:<tag>); remove others with `sbx template rm` yourself"
+        );
+    }
+    Ok(["template", "rm", "--force", tag])
+}
+
+fn parse_template_ls(json: &str) -> Result<Vec<TemplateImage>> {
+    #[derive(Deserialize)]
+    struct Ls {
+        images: Vec<TemplateImage>,
+    }
+    let ls: Ls =
+        serde_json::from_str(json).context("unexpected `sbx template ls --json` output")?;
+    Ok(ls.images)
+}
+
 fn parse_ls(json: &str) -> Result<Vec<SandboxInfo>> {
     #[derive(Deserialize)]
     struct Ls {
@@ -281,6 +368,9 @@ fn create_args(spec: &CreateSpec) -> Vec<OsString> {
         "--skills".into(),
         spec.skills.as_arg().into(),
     ];
+    if let Some(tag) = &spec.template {
+        args.extend(["-t".into(), tag.into(), "--pull".into(), "never".into()]);
+    }
     for kit in &spec.kits {
         args.push("--kit".into());
         args.push(kit.into());
@@ -330,6 +420,7 @@ mod tests {
             memory: "8g".into(),
             skills: crate::backend::SkillsStore::Off,
             kits: vec![PathBuf::from("/k/common")],
+            template: None,
         };
 
         assert_eq!(
@@ -468,5 +559,140 @@ mod secret_tests {
     #[test]
     fn version_args_match_sbx_cli() {
         assert_eq!(version_args(), ["version", "--json"]);
+    }
+}
+
+#[cfg(test)]
+mod template_tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::backend::TemplateImage;
+
+    /// The first four entries captured from `sbx template ls --json` (v0.46.0, 2026-10-16). The
+    /// fifth is a saved template in the shape spike S15 recorded (repository, tag, flavor and size
+    /// as reported; id and created_at made up).
+    const TEMPLATE_LS: &str = include_str!("fixtures/sbx-template-ls.json");
+
+    #[test]
+    fn create_args_from_a_template_pin_it_and_never_pull() {
+        let spec = CreateSpec {
+            name: "sbxm-demo-claude".into(),
+            agent: "claude".into(),
+            workspace: PathBuf::from("/work/demo"),
+            cpus: 4,
+            memory: "8g".into(),
+            skills: crate::backend::SkillsStore::ReadOnly,
+            kits: vec![PathBuf::from("/k/common")],
+            template: Some("sbxm-dev-claude:2a9974ee6210-20261015t2210".into()),
+        };
+
+        assert_eq!(
+            create_args(&spec),
+            [
+                "create",
+                "--name",
+                "sbxm-demo-claude",
+                "--cpus",
+                "4",
+                "-m",
+                "8g",
+                "--skills",
+                "readonly",
+                "-t",
+                "sbxm-dev-claude:2a9974ee6210-20261015t2210",
+                "--pull",
+                "never",
+                "--kit",
+                "/k/common",
+                "claude",
+                "/work/demo"
+            ]
+            .map(OsString::from)
+        );
+    }
+
+    #[test]
+    fn template_save_args_match_sbx_cli() {
+        assert_eq!(
+            template_save_args(
+                "sbxm-template-dev-claude",
+                "sbxm-dev-claude:abc-20261016t1200"
+            ),
+            [
+                "template",
+                "save",
+                "sbxm-template-dev-claude",
+                "sbxm-dev-claude:abc-20261016t1200"
+            ]
+        );
+    }
+
+    #[test]
+    fn template_ls_args_match_sbx_cli() {
+        assert_eq!(template_ls_args(), ["template", "ls", "--json"]);
+    }
+
+    #[test]
+    fn template_rm_args_force_the_removal_of_an_sbxm_tag() {
+        assert_eq!(
+            template_rm_args("sbxm-dev-claude:abc-20261016t1200").unwrap(),
+            [
+                "template",
+                "rm",
+                "--force",
+                "sbxm-dev-claude:abc-20261016t1200"
+            ]
+        );
+    }
+
+    #[test]
+    fn template_rm_refuses_anything_but_an_sbxm_tag() {
+        for tag in [
+            "docker.io/docker/sandbox-templates:claude-code-docker",
+            "claude-code-docker",
+            "docker.io/library/sbxm-dev-claude:abc",
+            "sbxm-dev-claude",
+            "sbxm-dev-claude:",
+            "other:abc",
+            "sbxm-:abc",
+            "sbxm-dev-claude:abc --all",
+        ] {
+            let err = template_rm_args(tag).unwrap_err();
+            let message = format!("{err:#}");
+            assert!(
+                message.contains(&format!("refusing to remove template '{tag}'")),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn parses_sbx_template_ls_json() {
+        let images = parse_template_ls(TEMPLATE_LS).unwrap();
+
+        assert_eq!(images.len(), 5);
+        assert_eq!(
+            images[4],
+            TemplateImage {
+                id: "3f1b2c4d5e6a".into(),
+                repository: "docker.io/library/sbxm-spike-s15".into(),
+                tag: "pi-1".into(),
+                flavor: "pi".into(),
+                created_at: "2026-10-16T21:04:12Z".into(),
+                size: 734_437_048,
+            }
+        );
+    }
+
+    #[test]
+    fn a_saved_template_is_named_as_it_was_saved() {
+        let images = parse_template_ls(TEMPLATE_LS).unwrap();
+
+        assert_eq!(images[4].reference(), "sbxm-spike-s15:pi-1");
+        assert_eq!(
+            images[0].reference(),
+            "docker.io/docker/sandbox-templates:claude-code-docker"
+        );
     }
 }

@@ -268,6 +268,7 @@ pub fn judge_repeat(
                 memory: kits.resources.memory.clone(),
                 skills: harness_kits.skills_store,
                 kits: harness_kits.dirs.clone(),
+                template: None,
             })
             .map_err(|e| format!("cannot create the judge sandbox {sandbox}: {e:#}"))?;
         let opts = HeadlessOpts {

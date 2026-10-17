@@ -239,6 +239,7 @@ impl Pair<'_> {
             memory: self.kits.resources.memory.clone(),
             skills: harness_kits.skills_store,
             kits: harness_kits.dirs.clone(),
+            template: None,
         }) {
             return failed(
                 format!("cannot create sandbox {}: {e:#}", self.sandbox),

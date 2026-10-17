@@ -142,6 +142,7 @@ pub fn run(
         memory: config.resources.memory,
         skills: profile.skills_store,
         kits: kits.into_iter().map(|(dir, _)| dir).collect(),
+        template: None,
     })?;
 
     let created_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();

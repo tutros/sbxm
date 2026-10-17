@@ -619,6 +619,7 @@ fn exec_and_skills_against_real_sbx() {
             memory: "2g".into(),
             skills: SkillsStore::Off,
             kits: vec![],
+            template: None,
         })
         .unwrap();
 
@@ -694,6 +695,7 @@ fn claude_headless_against_real_sbx() {
             memory: "2g".into(),
             skills: SkillsStore::Off,
             kits: vec![],
+            template: None,
         })
         .unwrap();
     // The workspace is mounted at its host path in forward-slash form, drive
@@ -774,6 +776,7 @@ fn codex_headless_against_real_sbx() {
             memory: "2g".into(),
             skills: SkillsStore::Off,
             kits: vec![],
+            template: None,
         })
         .unwrap();
     // E:\sbxm-it\x is mounted as /e/sbxm-it/x.
@@ -1879,6 +1882,7 @@ fn task_sandbox_gates_against_real_sbx() {
             memory: "2g".into(),
             skills: SkillsStore::Off,
             kits: vec![],
+            template: None,
         })
         .unwrap();
     let dir = in_sandbox_path(&workspace);
@@ -2001,6 +2005,7 @@ fn task_bundle_round_trip_against_real_sbx() {
             memory: "2g".into(),
             skills: SkillsStore::Off,
             kits: vec![],
+            template: None,
         })
         .unwrap();
 

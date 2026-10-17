@@ -6,7 +6,9 @@ use anyhow::{Result, bail};
 
 use std::path::Path;
 
-use super::{CreateSpec, ExecOutput, ExecSpec, KitValidation, SandboxBackend, SandboxInfo};
+use super::{
+    CreateSpec, ExecOutput, ExecSpec, KitValidation, SandboxBackend, SandboxInfo, TemplateImage,
+};
 
 /// Holds every `exec` of a [`FakeBackend`] until [`ExecGate::open`], so a test
 /// can look at what exists while runs are "in progress".
@@ -94,6 +96,8 @@ pub struct FakeBackend {
     /// Flipped (via [`FakeBackend::secret_services_failure`]) to make `secret_services` fail from
     /// then on, modeling `sbx` not answering (issue #201 review M-2).
     fail_secret_services: Arc<std::sync::atomic::AtomicBool>,
+    /// What `template_ls` returns; `template_save` adds to it, `template_rm` takes away.
+    templates: Mutex<Vec<TemplateImage>>,
 }
 
 /// Runs inside every `exec` (after the gate), so a test can play the agent
@@ -365,6 +369,12 @@ impl FakeBackend {
         self.fail_secret_services.clone()
     }
 
+    /// A backend whose `template_ls` starts with these.
+    pub fn with_templates(self, templates: Vec<TemplateImage>) -> Self {
+        *self.templates.lock().unwrap() = templates;
+        self
+    }
+
     fn record(&self, call: &str, name: &str) {
         self.log.lock().unwrap().push(format!("{call} {name}"));
     }
@@ -490,5 +500,32 @@ impl SandboxBackend for FakeBackend {
     fn skills(&self) -> Result<serde_json::Value> {
         self.log.lock().unwrap().push("skills".to_owned());
         Ok(self.skills.clone().unwrap_or(serde_json::Value::Null))
+    }
+
+    fn template_save(&self, sandbox: &str, tag: &str) -> Result<()> {
+        self.record("template-save", &format!("{sandbox} {tag}"));
+        let (name, version) = tag.split_once(':').unwrap_or((tag, "latest"));
+        self.templates.lock().unwrap().push(TemplateImage {
+            id: "fake".into(),
+            repository: format!("docker.io/library/{name}"),
+            tag: version.into(),
+            flavor: "fake".into(),
+            created_at: "2026-10-16T00:00:00Z".into(),
+            size: 0,
+        });
+        Ok(())
+    }
+
+    fn template_ls(&self) -> Result<Vec<TemplateImage>> {
+        Ok(self.templates.lock().unwrap().clone())
+    }
+
+    fn template_rm(&self, tag: &str) -> Result<()> {
+        self.record("template-rm", tag);
+        self.templates
+            .lock()
+            .unwrap()
+            .retain(|t| t.reference() != tag);
+        Ok(())
     }
 }

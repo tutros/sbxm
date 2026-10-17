@@ -50,6 +50,7 @@ fn creates_a_pi_sandbox_from_the_pinned_kit() {
             memory: "8g".into(),
             skills: SkillsStore::ReadOnly,
             kits: vec![env.kit_dir("demo"), pi_kit_dir(&env)],
+            template: None,
         }]
     );
     insta::assert_snapshot!(

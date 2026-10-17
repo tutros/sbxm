@@ -33,6 +33,40 @@ pub trait SandboxBackend: Send + Sync {
     fn exec(&self, sandbox: &str, spec: &ExecSpec) -> Result<ExecOutput>;
     /// The skills store listing (`sbx skills ls --json`), shape undocumented.
     fn skills(&self) -> Result<serde_json::Value>;
+    /// Saves a stopped sandbox as a template under `tag` (`sbx template save`). Saving onto an
+    /// existing tag replaces it silently (S11, question 8), so callers pass a fresh one.
+    fn template_save(&self, sandbox: &str, tag: &str) -> Result<()>;
+    /// Every local template, built-in agent images included (`sbx template ls --json`).
+    fn template_ls(&self) -> Result<Vec<TemplateImage>>;
+    /// Removes a template sbxm saved (`sbx template rm --force`), even while a sandbox created
+    /// from it exists (S11, question 8): callers check that it is unused first (decision 205).
+    fn template_rm(&self, tag: &str) -> Result<()>;
+}
+
+/// One entry of `sbx template ls --json`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct TemplateImage {
+    pub id: String,
+    /// `docker.io/library/<name>` for a saved template (S11).
+    pub repository: String,
+    pub tag: String,
+    /// The agent image it came from, e.g. `claude-code-docker`.
+    pub flavor: String,
+    pub created_at: String,
+    /// Bytes, as `sbx` reports them.
+    pub size: u64,
+}
+
+impl TemplateImage {
+    /// The name the template was saved under, as `sbx create -t` takes it: `<name>:<tag>` for a
+    /// saved template, the full repository otherwise.
+    pub fn reference(&self) -> String {
+        let repository = self
+            .repository
+            .strip_prefix("docker.io/library/")
+            .unwrap_or(&self.repository);
+        format!("{repository}:{}", self.tag)
+    }
 }
 
 /// How stdin is wired for [`SandboxBackend::exec`].
@@ -92,6 +126,9 @@ pub struct CreateSpec {
     pub skills: SkillsStore,
     /// Mixin kit directories, passed as `--kit` in this order.
     pub kits: Vec<PathBuf>,
+    /// A saved template's tag, passed as `-t TAG --pull never` (S11); the agent's own image when
+    /// `None`.
+    pub template: Option<String>,
 }
 
 /// How `sbx`'s shared skills store is mounted (decision 46). sbxm never uses

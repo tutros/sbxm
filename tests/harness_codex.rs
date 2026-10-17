@@ -39,6 +39,7 @@ fn creates_a_codex_sandbox_with_a_harness_codex_mixin() {
             memory: "8g".into(),
             skills: SkillsStore::ReadOnly,
             kits: vec![env.kit_dir("demo"), codex_kit_dir(&env)],
+            template: None,
         }]
     );
     insta::assert_snapshot!(
