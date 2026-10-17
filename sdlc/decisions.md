@@ -635,6 +635,18 @@ time both died with no error (gap G48, 2026-10-14), and running one build at a t
 reviewing the whole slice before the next one starts (B), which loses [162]'s early feedback without need, and
 accepting parallel builds that may fail and be rerun (C).
 
+220. **`task rm --merged` also reports the free space of `sbx`'s sandbox state drive (2026-10-16,
+decided with the user, one point at a time, recorded on issue 258; workflow gap G51):** [195]'s
+"freed about" line names only the base dir's drive, but a task's sandboxes take their space on the
+drive `disk::state_dir` resolves (`sandbox_state_dir` or the platform default, [194]), so that line
+alone said nothing about what a removal actually freed (trigger: removing the merged tasks for
+issues 179 and 98 printed "freed about 0.0 GiB on drive H:" while C: gained about 20 GiB). `task rm
+--merged` now reads and reports that drive too, before and after, the same way as the base dir: left
+out when the folder isn't known on this platform or its free space can't be read, exactly as an
+unreadable base dir already is. When the base dir and the state dir are on the same drive (the
+same path, or on Windows the same drive letter), only one line is printed (the base dir's), so the
+same free space isn't counted twice.
+
 221. **`codex`'s extra hosts can be closed with per-sandbox deny rules, so strict `codex` sandboxes are possible
 (2026-10-16, milestone 3 slice 0b, a real-`sbx` check on `sbx` 0.46.0; answers [218]; 220 is reserved for issue
 258):** (a) The built-in `codex` kit's network rule (`sbx policy ls <sandbox> --json`: name `kit:<sandbox>`,

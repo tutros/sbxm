@@ -216,3 +216,72 @@ fn a_path_without_a_drive_is_described_by_its_folder() {
         "the drive of /var/sbx/state"
     );
 }
+
+// `same_drive` (decision 220): whether a report covering two paths would double-count the same
+// free space. The same path always counts, on every platform; a shared drive letter only exists
+// on Windows, so that case is pinned there.
+#[test]
+fn the_same_path_is_always_the_same_drive() {
+    assert!(disk::same_drive(
+        Path::new("/sbx/base"),
+        Path::new("/sbx/base")
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn the_same_drive_letter_is_the_same_drive_even_with_different_folders() {
+    assert!(disk::same_drive(
+        Path::new(r"E:\sbxm-e2e\base"),
+        Path::new(r"E:\other\state")
+    ));
+}
+
+// PR 264 review M-1: Windows drive letters are case-insensitive, and `\\?\C:` is the same drive
+// as `C:`, so neither spelling may make one drive print twice.
+#[cfg(windows)]
+#[test]
+fn drive_letters_that_differ_only_in_case_are_the_same_drive() {
+    assert!(disk::same_drive(
+        Path::new(r"c:\sbxm-e2e\base"),
+        Path::new(r"C:\Users\you\AppData\Local\DockerSandboxes")
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn a_verbatim_drive_prefix_is_the_same_drive_as_the_plain_one() {
+    assert!(disk::same_drive(
+        Path::new(r"\\?\C:\sbxm-e2e\base"),
+        Path::new(r"c:\other\state")
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn different_drive_letters_are_different_drives() {
+    assert!(!disk::same_drive(
+        Path::new(r"E:\sbxm-e2e\base"),
+        Path::new(r"C:\other\state")
+    ));
+}
+
+#[cfg(not(windows))]
+#[test]
+fn different_folders_are_different_drives_without_a_drive_letter() {
+    assert!(!disk::same_drive(
+        Path::new("/sbx/base"),
+        Path::new("/other/state")
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn different_existing_folders_on_the_same_filesystem_are_the_same_drive() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let a = tmp.path().join("base");
+    let b = tmp.path().join("state");
+    std::fs::create_dir(&a).unwrap();
+    std::fs::create_dir(&b).unwrap();
+    assert!(disk::same_drive(&a, &b));
+}
