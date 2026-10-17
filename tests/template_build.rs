@@ -337,3 +337,121 @@ fn a_tag_that_already_exists_is_refused_before_any_write() {
         "{message}"
     );
 }
+
+// Step 4.3: a failed build leaves nothing behind.
+
+/// The build's leftovers after a failed build: build folder entries, the record, and the
+/// templates sbxm saved.
+fn assert_nothing_left(env: &Env, backend: &FakeBackend) {
+    let left: Vec<_> = std::fs::read_dir(build_dir(env))
+        .map(|d| d.map(|e| e.unwrap().file_name()).collect())
+        .unwrap_or_default();
+    assert!(left.is_empty(), "{left:?}");
+    let record = env
+        .base_dir()
+        .join(".sbxm")
+        .join("templates")
+        .join("default-claude.json");
+    assert!(!record.exists());
+    assert!(backend.template_ls().unwrap().is_empty());
+}
+
+#[test]
+fn a_failed_create_removes_the_build_sandbox_and_folders() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let backend = FakeBackend::failing_create().with_version("0.46.0");
+
+    let err = build(&env, &at_now(Harness::Claude), &backend).unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains("fake create failure"),
+        "{err:#}"
+    );
+    assert_eq!(
+        &backend.log()[2..],
+        [
+            "create sbxm-template-default-claude",
+            "rm sbxm-template-default-claude"
+        ]
+    );
+    assert_nothing_left(&env, &backend);
+}
+
+#[test]
+fn a_failed_stop_removes_the_build_sandbox_and_folders() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let backend = FakeBackend::failing_stop().with_version("0.46.0");
+
+    let err = build(&env, &at_now(Harness::Claude), &backend).unwrap_err();
+
+    assert!(format!("{err:#}").contains("fake stop failure"), "{err:#}");
+    assert_eq!(
+        backend.log().last().unwrap(),
+        "rm sbxm-template-default-claude"
+    );
+    assert_nothing_left(&env, &backend);
+}
+
+#[test]
+fn a_failed_save_removes_the_build_sandbox_and_folders() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let backend = FakeBackend::failing_template_save().with_version("0.46.0");
+
+    let err = build(&env, &at_now(Harness::Claude), &backend).unwrap_err();
+
+    assert!(format!("{err:#}").contains("fake save failure"), "{err:#}");
+    assert_eq!(
+        backend.log().last().unwrap(),
+        "rm sbxm-template-default-claude"
+    );
+    assert_nothing_left(&env, &backend);
+}
+
+#[test]
+fn an_invalid_kit_removes_the_kits_without_a_sandbox_call() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let backend = FakeBackend::with_invalid_kit("bad kit").with_version("0.46.0");
+
+    let err = build(&env, &at_now(Harness::Claude), &backend).unwrap_err();
+
+    assert!(format!("{err:#}").contains("bad kit"), "{err:#}");
+    assert!(
+        backend.log().iter().all(|l| l.starts_with("validate ")),
+        "{:?}",
+        backend.log()
+    );
+    assert_nothing_left(&env, &backend);
+}
+
+#[test]
+fn a_failure_after_the_save_removes_the_saved_tag_and_names_the_leftover_sandbox() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let backend = FakeBackend::failing_remove().with_version("0.46.0");
+
+    let err = build(&env, &at_now(Harness::Claude), &backend).unwrap_err();
+
+    let tag = expected_tag(&env, Harness::Claude);
+    let message = format!("{err:#}");
+    assert!(message.contains("fake remove failure"), "{message}");
+    assert!(
+        message.contains(
+            "could not remove build sandbox sbxm-template-default-claude; remove it with \
+             `sbx rm sbxm-template-default-claude`"
+        ),
+        "{message}"
+    );
+    assert_eq!(
+        &backend.log()[5..],
+        [
+            "rm sbxm-template-default-claude".to_owned(),
+            "rm sbxm-template-default-claude".to_owned(),
+            format!("template-rm {tag}"),
+        ]
+    );
+    assert_nothing_left(&env, &backend);
+}

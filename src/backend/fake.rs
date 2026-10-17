@@ -69,6 +69,8 @@ pub struct FakeBackend {
     log: Mutex<Vec<String>>,
     invalid_kit: Option<String>,
     fail_create: bool,
+    fail_stop: bool,
+    fail_template_save: bool,
     sandboxes: Vec<SandboxInfo>,
     secrets: Mutex<Vec<String>>,
     /// `0.43.0` when `None`.
@@ -146,6 +148,22 @@ impl FakeBackend {
     }
 
     /// A backend whose `remove` records the call and then fails.
+    /// A backend whose `stop` fails.
+    pub fn failing_stop() -> Self {
+        Self {
+            fail_stop: true,
+            ..Self::default()
+        }
+    }
+
+    /// A backend whose `template_save` fails.
+    pub fn failing_template_save() -> Self {
+        Self {
+            fail_template_save: true,
+            ..Self::default()
+        }
+    }
+
     pub fn failing_remove() -> Self {
         Self {
             fail_remove: true,
@@ -413,6 +431,9 @@ impl SandboxBackend for FakeBackend {
     fn stop(&self, name: &str) -> Result<()> {
         self.stops.lock().unwrap().push(name.to_owned());
         self.record("stop", name);
+        if self.fail_stop {
+            bail!("fake stop failure");
+        }
         Ok(())
     }
 
@@ -504,6 +525,9 @@ impl SandboxBackend for FakeBackend {
 
     fn template_save(&self, sandbox: &str, tag: &str) -> Result<()> {
         self.record("template-save", &format!("{sandbox} {tag}"));
+        if self.fail_template_save {
+            bail!("fake save failure");
+        }
         let (name, version) = tag.split_once(':').unwrap_or((tag, "latest"));
         let mut templates = self.templates.lock().unwrap();
         // `sbx` replaces an existing tag without a question (S11, question 8).
