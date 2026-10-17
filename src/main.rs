@@ -6,6 +6,7 @@ use clap::{CommandFactory, FromArgMatches};
 use sbxm::backend::SbxBackend;
 use sbxm::cli::{
     Cli, Command, ConfigCommand, GateTier, RunArgs, RunCommand, RunTarget, TaskCommand,
+    TemplateCommand,
 };
 use sbxm::commands;
 use sbxm::config;
@@ -751,6 +752,23 @@ fn main() -> anyhow::Result<()> {
             )
         }
         Command::Run(_) => unreachable!("clap requires a config or a subcommand"),
+        Command::Template {
+            command:
+                TemplateCommand::Build {
+                    profile,
+                    harness,
+                    ignore_disk,
+                },
+        } => commands::template_build::run(
+            &config::config_dir()?,
+            &commands::template_build::Options {
+                profile,
+                harness,
+                disk: sbxm::disk::Guard::real(ignore_disk),
+            },
+            &SbxBackend,
+            &mut std::io::stdout(),
+        ),
         Command::Config {
             command: ConfigCommand::Init,
         } => commands::config_init::run(),

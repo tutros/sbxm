@@ -16,3 +16,4 @@ pub mod seed;
 pub mod state;
 pub mod status;
 pub mod task;
+pub mod template;

@@ -398,7 +398,7 @@ fn check_state_drive(report: &mut Report, config: &GlobalConfig, config_path: &P
 
 /// Compares dotted versions numerically (`0.9.0` < `0.43.0`); a part's
 /// non-digit suffix (e.g. `-rc1`) is ignored.
-fn older(version: &str, min: &str) -> bool {
+pub(crate) fn older(version: &str, min: &str) -> bool {
     let parts = |v: &str| -> Vec<u64> {
         v.split('.')
             .map(|p| {

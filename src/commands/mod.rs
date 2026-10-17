@@ -24,6 +24,7 @@ pub mod task_run;
 pub mod task_start;
 pub mod task_states;
 pub mod task_status;
+pub mod template_build;
 
 use std::io::Write;
 use std::path::Path;
