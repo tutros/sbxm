@@ -10,7 +10,7 @@ use std::path::Path;
 
 use super::{
     CreateSpec, ExecOutput, ExecSpec, KitValidation, SandboxBackend, SandboxInfo, Stdin,
-    TemplateImage,
+    TemplateImage, check_template_tag,
 };
 
 /// Shells out to the `sbx` CLI on PATH.
@@ -171,7 +171,7 @@ impl SandboxBackend for SbxBackend {
             bail!(
                 "`sbx template ls --json` failed ({}): {}",
                 output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
+                failure_reason(&output.stdout, &output.stderr)
             );
         }
         parse_template_ls(&String::from_utf8_lossy(&output.stdout))
@@ -195,10 +195,24 @@ fn run_sbx_unprompted(args: &[&str]) -> Result<()> {
             "`sbx {}` failed ({}): {}",
             args.join(" "),
             output.status,
-            String::from_utf8_lossy(&output.stderr).trim()
+            failure_reason(&output.stdout, &output.stderr)
         );
     }
     Ok(())
+}
+
+/// `sbx`'s stderr, or its stdout when stderr is empty: S11 didn't check which one carries a
+/// template command's error.
+fn failure_reason(stdout: &[u8], stderr: &[u8]) -> String {
+    let text = |bytes| String::from_utf8_lossy(bytes).trim().to_owned();
+    let (stdout, stderr) = (text(stdout), text(stderr));
+    if !stderr.is_empty() {
+        stderr
+    } else if !stdout.is_empty() {
+        stdout
+    } else {
+        "no output from sbx".into()
+    }
 }
 
 fn validate_args(dir: &Path) -> Vec<OsString> {
@@ -314,26 +328,8 @@ fn template_ls_args() -> [&'static str; 3] {
     ["template", "ls", "--json"]
 }
 
-/// `sbx template rm --force` deletes any image, built-in agent images included, so only a tag
-/// sbxm itself saves gets through: `sbxm-<name>:<tag>`, in the characters sbxm's tags use
-/// (decision 211).
 fn template_rm_args(tag: &str) -> Result<[&str; 4]> {
-    let allowed = |s: &str, extra: &[char]| {
-        !s.is_empty()
-            && s.chars()
-                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || extra.contains(&c))
-    };
-    let ours = tag.split_once(':').is_some_and(|(name, version)| {
-        name.strip_prefix("sbxm-")
-            .is_some_and(|rest| allowed(rest, &['-']))
-            && allowed(version, &['-', '.', '_'])
-    });
-    if !ours {
-        bail!(
-            "refusing to remove template '{tag}': sbxm only removes the templates it saves \
-             (sbxm-<name>:<tag>); remove others with `sbx template rm` yourself"
-        );
-    }
+    check_template_tag(tag)?;
     Ok(["template", "rm", "--force", tag])
 }
 
@@ -683,6 +679,13 @@ mod template_tests {
                 size: 734_437_048,
             }
         );
+    }
+
+    #[test]
+    fn a_failure_reason_falls_back_to_stdout_when_stderr_is_empty() {
+        assert_eq!(failure_reason(b"on stdout\n", b" \n"), "on stdout");
+        assert_eq!(failure_reason(b"on stdout", b"on stderr\n"), "on stderr");
+        assert_eq!(failure_reason(b"", b""), "no output from sbx");
     }
 
     #[test]

@@ -505,7 +505,10 @@ impl SandboxBackend for FakeBackend {
     fn template_save(&self, sandbox: &str, tag: &str) -> Result<()> {
         self.record("template-save", &format!("{sandbox} {tag}"));
         let (name, version) = tag.split_once(':').unwrap_or((tag, "latest"));
-        self.templates.lock().unwrap().push(TemplateImage {
+        let mut templates = self.templates.lock().unwrap();
+        // `sbx` replaces an existing tag without a question (S11, question 8).
+        templates.retain(|t| t.reference() != tag);
+        templates.push(TemplateImage {
             id: "fake".into(),
             repository: format!("docker.io/library/{name}"),
             tag: version.into(),
@@ -521,6 +524,7 @@ impl SandboxBackend for FakeBackend {
     }
 
     fn template_rm(&self, tag: &str) -> Result<()> {
+        super::check_template_tag(tag)?;
         self.record("template-rm", tag);
         self.templates
             .lock()

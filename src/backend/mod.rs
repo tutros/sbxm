@@ -57,6 +57,29 @@ pub struct TemplateImage {
     pub size: u64,
 }
 
+/// `sbx template rm --force` deletes any image, built-in agent images included, so every backend
+/// removes only a tag sbxm itself saves: `sbxm-<name>:<tag>`, in the characters sbxm's tags use
+/// (decision 211).
+pub fn check_template_tag(tag: &str) -> Result<()> {
+    let allowed = |s: &str, extra: &[char]| {
+        !s.is_empty()
+            && s.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || extra.contains(&c))
+    };
+    let ours = tag.split_once(':').is_some_and(|(name, version)| {
+        name.strip_prefix("sbxm-")
+            .is_some_and(|rest| allowed(rest, &['-']))
+            && allowed(version, &['-', '.', '_'])
+    });
+    if !ours {
+        anyhow::bail!(
+            "refusing to remove template '{tag}': sbxm only removes the templates it saves \
+             (sbxm-<name>:<tag>); remove others with `sbx template rm` yourself"
+        );
+    }
+    Ok(())
+}
+
 impl TemplateImage {
     /// The name the template was saved under, as `sbx create -t` takes it: `<name>:<tag>` for a
     /// saved template, the full repository otherwise.
