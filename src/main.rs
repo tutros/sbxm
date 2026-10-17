@@ -765,6 +765,7 @@ fn main() -> anyhow::Result<()> {
                 profile,
                 harness,
                 disk: sbxm::disk::Guard::real(ignore_disk),
+                now: None,
             },
             &SbxBackend,
             &mut std::io::stdout(),

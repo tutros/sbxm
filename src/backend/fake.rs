@@ -514,7 +514,7 @@ impl SandboxBackend for FakeBackend {
             tag: version.into(),
             flavor: "fake".into(),
             created_at: "2026-10-16T00:00:00Z".into(),
-            size: 0,
+            size: 1_234_567,
         });
         Ok(())
     }
