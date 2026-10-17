@@ -68,6 +68,7 @@ pub struct FakeBackend {
     fail_remove: bool,
     log: Mutex<Vec<String>>,
     invalid_kit: Option<String>,
+    kit_warning: Option<String>,
     fail_create: bool,
     fail_stop: bool,
     fail_template_save: bool,
@@ -169,6 +170,14 @@ impl FakeBackend {
     pub fn failing_template_rm(self) -> Self {
         Self {
             fail_template_rm: true,
+            ..self
+        }
+    }
+
+    /// A backend whose kit validation passes with this warning.
+    pub fn with_kit_warning(self, warning: &str) -> Self {
+        Self {
+            kit_warning: Some(warning.to_owned()),
             ..self
         }
     }
@@ -476,7 +485,11 @@ impl SandboxBackend for FakeBackend {
         Ok(KitValidation {
             valid: self.invalid_kit.is_none(),
             error: self.invalid_kit.clone(),
-            warnings: Vec::new(),
+            warnings: self
+                .kit_warning
+                .iter()
+                .map(|w| serde_json::Value::String(w.clone()))
+                .collect(),
         })
     }
 

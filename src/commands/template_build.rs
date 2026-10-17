@@ -29,6 +29,7 @@ pub fn run(
     options: &Options,
     backend: &dyn SandboxBackend,
     out: &mut dyn Write,
+    warn: &mut dyn Write,
 ) -> Result<()> {
     template::check_supported(options.harness)?;
     let config = GlobalConfig::load(config_dir)?;
@@ -43,6 +44,13 @@ pub fn run(
                 .join(&options.profile)
                 .join("profile.toml")
                 .display()
+        );
+    }
+    if !config.base_dir.is_dir() {
+        bail!(
+            "base dir {} does not exist; create it or change base_dir in {}",
+            config.base_dir.display(),
+            config_dir.join("config.toml").display()
         );
     }
     let sbx_version = backend.version()?;
@@ -93,6 +101,7 @@ pub fn run(
             options.harness,
             backend,
             &mut progress,
+            warn,
         )
         .map_err(|err| build.clean_up(backend, &progress, err))?;
     writeln!(out, "{}", record.tag)?;
@@ -202,6 +211,7 @@ impl Build {
         harness: Harness,
         backend: &dyn SandboxBackend,
         progress: &mut Progress,
+        warn: &mut dyn Write,
     ) -> Result<template::Record> {
         let config_hash = config::config_hash(profile_name, profile, &config.resources, harness);
         let kits = kit::all(profile_name, profile, &config_hash, harness)
@@ -211,6 +221,9 @@ impl Build {
         }
         for (dir, _) in &kits {
             let validation = backend.validate_kit(dir)?;
+            for warning in &validation.warnings {
+                writeln!(warn, "warning: kit {}: {warning}", dir.display())?;
+            }
             if !validation.valid {
                 bail!(
                     "generated kit {} is invalid: {}; check profile '{profile_name}'",

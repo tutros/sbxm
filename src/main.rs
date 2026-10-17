@@ -769,6 +769,7 @@ fn main() -> anyhow::Result<()> {
             },
             &SbxBackend,
             &mut std::io::stdout(),
+            &mut std::io::stderr(),
         ),
         Command::Config {
             command: ConfigCommand::Init,

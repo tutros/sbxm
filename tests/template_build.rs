@@ -24,7 +24,13 @@ fn build(
     options: &template_build::Options,
     backend: &FakeBackend,
 ) -> anyhow::Result<()> {
-    template_build::run(&env.config_dir(), options, backend, &mut Vec::new())
+    template_build::run(
+        &env.config_dir(),
+        options,
+        backend,
+        &mut Vec::new(),
+        &mut Vec::new(),
+    )
 }
 
 /// The refusal, after checking that nothing was written and no backend call was made.
@@ -277,6 +283,7 @@ fn a_cold_build_prints_its_tag() {
         &at_now(Harness::Codex),
         &sbx_046(),
         &mut out,
+        &mut Vec::new(),
     )
     .unwrap();
 
@@ -467,7 +474,14 @@ fn build_at(env: &Env, now: u64, backend: &FakeBackend) -> String {
         now: Some(now),
         ..options(Harness::Claude)
     };
-    template_build::run(&env.config_dir(), &options, backend, &mut out).unwrap();
+    template_build::run(
+        &env.config_dir(),
+        &options,
+        backend,
+        &mut out,
+        &mut Vec::new(),
+    )
+    .unwrap();
     String::from_utf8(out).unwrap()
 }
 
@@ -686,4 +700,51 @@ fn a_previous_tag_is_kept_when_a_task_record_cannot_be_read() {
     );
     assert!(!backend.log().iter().any(|l| l.starts_with("template-rm")));
     assert_eq!(record(&env)["previous"], serde_json::json!([old]));
+}
+
+// Decision 228: like `new`, a missing base dir is refused and kit warnings are shown.
+
+#[test]
+fn a_missing_base_dir_is_refused_before_any_write() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    std::fs::remove_dir_all(env.base_dir()).unwrap();
+
+    let message = refused(&env, &at_now(Harness::Claude), &sbx_046());
+
+    assert!(
+        message.contains(&format!(
+            "base dir {} does not exist; create it or change base_dir in {}",
+            env.base_dir().display(),
+            env.config_dir().join("config.toml").display()
+        )),
+        "{message}"
+    );
+}
+
+#[test]
+fn kit_warnings_are_shown() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let backend = sbx_046().with_kit_warning("unknown field x");
+    let mut warn = Vec::new();
+
+    template_build::run(
+        &env.config_dir(),
+        &at_now(Harness::Claude),
+        &backend,
+        &mut Vec::new(),
+        &mut warn,
+    )
+    .unwrap();
+
+    let kits = build_dir(&env).join("default-claude.kits");
+    assert_eq!(
+        String::from_utf8(warn).unwrap(),
+        format!(
+            "warning: kit {}: \"unknown field x\"\nwarning: kit {}: \"unknown field x\"\n",
+            kits.join("common").display(),
+            kits.join("harness-claude").display()
+        )
+    );
 }
