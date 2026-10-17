@@ -237,6 +237,26 @@ fn the_same_drive_letter_is_the_same_drive_even_with_different_folders() {
     ));
 }
 
+// PR 264 review M-1: Windows drive letters are case-insensitive, and `\\?\C:` is the same drive
+// as `C:`, so neither spelling may make one drive print twice.
+#[cfg(windows)]
+#[test]
+fn drive_letters_that_differ_only_in_case_are_the_same_drive() {
+    assert!(disk::same_drive(
+        Path::new(r"c:\sbxm-e2e\base"),
+        Path::new(r"C:\Users\you\AppData\Local\DockerSandboxes")
+    ));
+}
+
+#[cfg(windows)]
+#[test]
+fn a_verbatim_drive_prefix_is_the_same_drive_as_the_plain_one() {
+    assert!(disk::same_drive(
+        Path::new(r"\\?\C:\sbxm-e2e\base"),
+        Path::new(r"c:\other\state")
+    ));
+}
+
 #[cfg(windows)]
 #[test]
 fn different_drive_letters_are_different_drives() {

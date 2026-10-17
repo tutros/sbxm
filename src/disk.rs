@@ -2,7 +2,7 @@
 //! sandbox's disk file there never shrinks, and a full drive makes `sbx` answer "try: sbx login",
 //! so every command that creates a sandbox refuses first when the drive is low.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::{Component, Path, PathBuf, Prefix};
 
 use anyhow::{Result, bail};
 
@@ -73,8 +73,8 @@ pub fn gib(bytes: u64) -> String {
 /// same space twice (decision 220): the same path always is; otherwise, on Unix, two paths that
 /// both exist are compared by the filesystem device they sit on (`stat`'s device id), since two
 /// different folders can share a drive without sharing a prefix; everywhere else (a path that
-/// doesn't exist yet, or Windows, which has no such device id), a shared drive letter is the only
-/// other sign of a shared drive.
+/// doesn't exist yet, or Windows, which has no such device id), a shared drive letter (in either
+/// case, plain or `\\?\`) or an identical other prefix is the only other sign of a shared drive.
 pub fn same_drive(a: &Path, b: &Path) -> bool {
     if a == b {
         return true;
@@ -82,10 +82,25 @@ pub fn same_drive(a: &Path, b: &Path) -> bool {
     if let (Some(da), Some(db)) = (device_id(a), device_id(b)) {
         return da == db;
     }
+    if let (Some(la), Some(lb)) = (drive_letter(a), drive_letter(b)) {
+        return la.eq_ignore_ascii_case(&lb);
+    }
     matches!(
         (a.components().next(), b.components().next()),
         (Some(Component::Prefix(p1)), Some(Component::Prefix(p2))) if p1.as_os_str() == p2.as_os_str()
     )
+}
+
+/// A path's drive letter, for `C:` and `\\?\C:` alike, in whatever case it was written (Windows
+/// treats `c:` and `C:` as one drive; PR 264 review M-1).
+fn drive_letter(path: &Path) -> Option<u8> {
+    match path.components().next() {
+        Some(Component::Prefix(prefix)) => match prefix.kind() {
+            Prefix::Disk(letter) | Prefix::VerbatimDisk(letter) => Some(letter),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// The filesystem device a path sits on, or `None` when it can't be read (missing path, or a

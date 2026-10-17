@@ -579,6 +579,43 @@ fn removing_prints_one_line_when_the_state_dir_shares_the_base_dirs_drive() {
     assert_eq!(printed.matches("freed about").count(), 1, "{printed}");
 }
 
+/// PR 264 review M-1: a state dir on the base dir's drive, spelled with the other letter case
+/// (`c:` against `C:`), is still that one drive, so only one line is printed.
+#[cfg(windows)]
+#[test]
+fn removing_prints_one_line_when_the_state_dirs_drive_letter_differs_only_in_case() {
+    let f = fixture();
+    let url = finished_task(&f);
+    let number = sbxm::task::finish::pr_number(&url).unwrap();
+    let found = found_merged(&f, number);
+    let base = f.env.base_dir();
+    let letter = base.to_string_lossy().chars().next().unwrap();
+    let flipped = if letter.is_ascii_uppercase() {
+        letter.to_ascii_lowercase()
+    } else {
+        letter.to_ascii_uppercase()
+    };
+    let state = PathBuf::from(format!(r"{flipped}:\other-state"));
+    script(&base, vec![Some(GIB), Some(2 * GIB)]);
+    script(&state, vec![Some(3 * GIB), Some(5 * GIB)]);
+    let mut out = Vec::new();
+
+    remove(
+        &base,
+        &found,
+        true,
+        &FakeBackend::with_secrets(&["anthropic"]),
+        &Yes::new(),
+        scripted_free_space,
+        Some(&state),
+        &mut out,
+    )
+    .unwrap();
+
+    let printed = String::from_utf8(out).unwrap();
+    assert_eq!(printed.matches("freed about").count(), 1, "{printed}");
+}
+
 /// Issue 258 (decision 220): an unreadable state dir leaves its line out, as an unreadable base
 /// dir already does, without affecting the base dir's own line.
 #[test]
