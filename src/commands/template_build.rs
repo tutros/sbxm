@@ -76,6 +76,8 @@ pub fn run(
         .unwrap_or_default();
     let build_dir = template::dir(&config.base_dir).join("build");
     let build = Build {
+        profile_name: profile_name.to_owned(),
+        harness: options.harness,
         sandbox: format!("sbxm-template-{key}"),
         workspace: build_dir.join(&key),
         kits_dir: build_dir.join(format!("{key}.kits")),
@@ -94,15 +96,7 @@ pub fn run(
     };
     let mut progress = Progress::default();
     let record = build
-        .run(
-            &config,
-            profile_name,
-            &profile,
-            options.harness,
-            backend,
-            &mut progress,
-            warn,
-        )
+        .run(&config, &profile, backend, &mut progress, warn)
         .map_err(|err| build.clean_up(backend, &progress, err))?;
     writeln!(out, "{}", record.tag)?;
     let kept = retire_previous(&config.base_dir, &record.previous, backend, out)?;
@@ -184,6 +178,8 @@ fn retire_previous(
 
 /// The names and folders one build uses (decision 210), and its record before the size is known.
 struct Build {
+    profile_name: String,
+    harness: Harness,
     sandbox: String,
     workspace: PathBuf,
     kits_dir: PathBuf,
@@ -206,13 +202,12 @@ impl Build {
     fn run(
         &self,
         config: &GlobalConfig,
-        profile_name: &str,
         profile: &Profile,
-        harness: Harness,
         backend: &dyn SandboxBackend,
         progress: &mut Progress,
         warn: &mut dyn Write,
     ) -> Result<template::Record> {
+        let (profile_name, harness) = (self.profile_name.as_str(), self.harness);
         let config_hash = config::config_hash(profile_name, profile, &config.resources, harness);
         let kits = kit::all(profile_name, profile, &config_hash, harness)
             .map(|(name, spec)| (self.kits_dir.join(name), spec));
