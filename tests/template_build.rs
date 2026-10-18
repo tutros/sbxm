@@ -1444,3 +1444,217 @@ fn the_cli_takes_warm() {
         "{stderr}"
     );
 }
+
+// Slice 5b: `[warm]` in the repo's `sbxm-task.toml` (decision 207).
+
+/// A repo with no Cargo.toml whose `sbxm-task.toml` holds `toml`, and a `package-lock.json`.
+fn warm_repo(env: &Env, toml: &str) -> std::path::PathBuf {
+    let repo = env.tmp.path().join("repo");
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::write(repo.join("sbxm-task.toml"), toml).unwrap();
+    std::fs::write(repo.join("package-lock.json"), "{}").unwrap();
+    std::fs::write(repo.join("package.json"), "{}").unwrap();
+    repo
+}
+
+const NPM_WARM: &str = "[warm]\n\
+     commands = [\"npm ci\", \"npm run build\"]\n\
+     lock_files = [\"package-lock.json\"]\n";
+
+#[test]
+fn a_repo_with_warm_runs_its_commands_in_order_before_the_stop() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let repo = warm_repo(&env, NPM_WARM);
+    let backend = sbx_046();
+
+    build(&env, &warm(&repo), &backend).unwrap();
+
+    let commands = exec_commands(&backend);
+    assert_eq!(commands.len(), 2, "{commands:?}");
+    assert!(commands[0].ends_with("npm ci"), "{commands:?}");
+    assert!(commands[1].ends_with("npm run build"), "{commands:?}");
+    let log = backend.log();
+    let stop = log.iter().position(|l| l.starts_with("stop ")).unwrap();
+    let last_exec = log.iter().rposition(|l| l.starts_with("exec ")).unwrap();
+    assert!(last_exec < stop, "{log:?}");
+    for (_, spec) in backend.execs() {
+        assert_eq!(spec.argv[0], "timeout", "{:?}", spec.argv);
+    }
+}
+
+#[test]
+fn warm_replaces_the_cargo_steps_in_a_rust_repo() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let repo = cargo_repo(&env);
+    std::fs::write(
+        repo.join("sbxm-task.toml"),
+        "[warm]\ncommands = [\"cargo fetch\"]\nlock_files = [\"Cargo.lock\"]\n",
+    )
+    .unwrap();
+    let backend = sbx_046();
+
+    build(&env, &warm(&repo), &backend).unwrap();
+
+    let commands = exec_commands(&backend);
+    assert_eq!(commands.len(), 1, "{commands:?}");
+    assert!(commands[0].ends_with("cargo fetch"), "{commands:?}");
+}
+
+#[test]
+fn a_repo_with_warm_records_its_lock_files_and_hash() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let repo = warm_repo(&env, NPM_WARM);
+    let backend = sbx_046();
+
+    build(&env, &warm(&repo), &backend).unwrap();
+
+    let record = record(&env);
+    assert_eq!(record["warm"], true);
+    assert_eq!(
+        record["lock_files"],
+        serde_json::json!(["package-lock.json"])
+    );
+    let files = ["package-lock.json".to_owned()];
+    let lock_hash = sbxm::template::lock_hash(&repo, &files).unwrap();
+    assert_eq!(record["lock_hash"], lock_hash.as_str());
+}
+
+#[test]
+fn a_failing_warm_command_saves_nothing() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let repo = warm_repo(&env, NPM_WARM);
+    let backend = sbx_046().with_exec_output_matching(
+        "npm ci",
+        sbxm::backend::ExecOutput {
+            stdout: String::new(),
+            stderr: "npm ERR! missing script\n".into(),
+            exit_code: Some(1),
+        },
+    );
+
+    let err = build(&env, &warm(&repo), &backend).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("warm-up step `npm ci` failed with exit 1"),
+        "{message}"
+    );
+    assert_eq!(exec_commands(&backend).len(), 1);
+    assert_nothing_left(&env, &backend);
+}
+
+/// The refusal for a repo whose `sbxm-task.toml` is `toml`.
+fn warm_refused(toml: &str) -> (String, std::path::PathBuf) {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let repo = warm_repo(&env, toml);
+    let message = refused(&env, &warm(&repo), &sbx_046());
+    (message, repo)
+}
+
+#[test]
+fn an_unknown_key_in_warm_is_refused() {
+    let (message, repo) =
+        warm_refused("[warm]\ncommands = [\"npm ci\"]\nlock_files = []\nlockfiles = []\n");
+
+    let path = repo.join("sbxm-task.toml");
+    assert!(
+        message.contains(&format!("task config {}", path.display())),
+        "{message}"
+    );
+    assert!(message.contains("lockfiles"), "{message}");
+}
+
+#[test]
+fn warm_without_commands_is_refused() {
+    for toml in [
+        "[warm]\nlock_files = []\n",
+        "[warm]\ncommands = []\nlock_files = []\n",
+    ] {
+        let (message, _) = warm_refused(toml);
+
+        assert!(
+            message.contains(
+                "warm.commands is missing or empty; list the commands that fill the caches"
+            ),
+            "{message}"
+        );
+    }
+}
+
+#[test]
+fn warm_without_lock_files_is_refused() {
+    let (message, _) = warm_refused("[warm]\ncommands = [\"npm ci\"]\n");
+
+    assert!(
+        message.contains(
+            "warm.lock_files is missing; list the files whose change needs a new template, or \
+             write lock_files = [] for none"
+        ),
+        "{message}"
+    );
+}
+
+#[test]
+fn an_empty_or_multiline_warm_command_is_refused() {
+    let (message, _) = warm_refused("[warm]\ncommands = [\"npm ci\", \" \"]\nlock_files = []\n");
+    assert!(
+        message.contains("warm.commands[1] is empty; write a command or remove it"),
+        "{message}"
+    );
+
+    let (message, _) =
+        warm_refused("[warm]\ncommands = [\"npm ci\\nrm -rf /\"]\nlock_files = []\n");
+    assert!(
+        message
+            .contains("warm.commands[0] contains a line break; put one command in each list entry"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_lock_file_outside_the_repo_is_refused() {
+    for file in ["../outside.lock", "/etc/passwd", "sub/../../x.lock"] {
+        let (message, _) = warm_refused(&format!(
+            "[warm]\ncommands = [\"npm ci\"]\nlock_files = [\"{file}\"]\n"
+        ));
+
+        assert!(
+            message.contains(&format!(
+                "warm.lock_files entry `{file}` is not a relative path inside the repo"
+            )),
+            "{message}"
+        );
+    }
+}
+
+#[test]
+fn a_missing_lock_file_is_refused() {
+    let (message, repo) =
+        warm_refused("[warm]\ncommands = [\"npm ci\"]\nlock_files = [\"yarn.lock\"]\n");
+
+    assert!(
+        message.contains(&format!(
+            "lock file {} does not exist; create it or remove it from warm.lock_files",
+            repo.join("yarn.lock").display()
+        )),
+        "{message}"
+    );
+}
+
+#[test]
+fn task_commands_accept_a_warm_table() {
+    let env = Env::new();
+    let repo = cargo_repo(&env);
+    std::fs::write(
+        repo.join("sbxm-task.toml"),
+        "[sandbox]\nprofile = \"default\"\n\n[warm]\ncommands = [\"cargo fetch\"]\nlock_files = [\"Cargo.lock\"]\n",
+    )
+    .unwrap();
+
+    sbxm::task::config::TaskConfig::load(&repo).unwrap();
+}

@@ -17,7 +17,7 @@ use crate::task::config::DEFAULT_GATE_TIMEOUT;
 use crate::task::gates::{self, CARGO_ENV};
 use crate::task::record::{Process, ProcessProbe};
 use crate::template;
-use crate::{disk, kit, seed};
+use crate::{disk, kit, seed, task};
 
 #[derive(Debug, Default)]
 pub struct Options {
@@ -83,7 +83,7 @@ pub fn run(
         profile_name: profile_name.to_owned(),
         harness: options.harness,
         sandbox: format!("sbxm-template-{key}"),
-        repo: warm.as_ref().map(|w| w.repo.clone()),
+        warm: warm.clone(),
         workspace: build_dir.join(&key),
         kits_dir: build_dir.join(format!("{key}.kits")),
         key,
@@ -211,8 +211,11 @@ const CARGO_STEPS: [&str; 3] = [
 const CARGO_STEP_ENV: &str = "CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR=/tmp/target";
 
 /// What `--warm <repo>` warms the template with, checked before any write.
+#[derive(Clone)]
 struct Warm {
     repo: PathBuf,
+    /// The repo's `[warm]` commands; `None` runs the built-in cargo steps.
+    commands: Option<Vec<String>>,
     lock_files: Vec<String>,
     lock_hash: String,
 }
@@ -224,6 +227,16 @@ impl Warm {
                 "repo {} is not a directory; point --warm at the repo to warm the template with",
                 repo.display()
             );
+        }
+        if let Some(warm) = task::config::load_warm(repo)? {
+            seed::reject_repo_links(repo)?;
+            let lock_hash = template::lock_hash(repo, &warm.lock_files)?;
+            return Ok(Self {
+                repo: repo.to_path_buf(),
+                commands: Some(warm.commands),
+                lock_files: warm.lock_files,
+                lock_hash,
+            });
         }
         if !repo.join("Cargo.toml").is_file() {
             bail!(
@@ -245,6 +258,7 @@ impl Warm {
         let lock_hash = template::lock_hash(repo, &lock_files)?;
         Ok(Self {
             repo: repo.to_path_buf(),
+            commands: None,
             lock_files,
             lock_hash,
         })
@@ -279,8 +293,8 @@ struct Build {
     profile_name: String,
     harness: Harness,
     sandbox: String,
-    /// The repo to warm the template with, copied into the workspace (decision 207).
-    repo: Option<PathBuf>,
+    /// What to warm the template with; its repo is copied into the workspace (decision 207).
+    warm: Option<Warm>,
     workspace: PathBuf,
     kits_dir: PathBuf,
     key: String,
@@ -473,8 +487,8 @@ impl Build {
                 );
             }
         }
-        match &self.repo {
-            Some(repo) => seed::copy_repo(repo, &self.workspace)?,
+        match &self.warm {
+            Some(warm) => seed::copy_repo(&warm.repo, &self.workspace)?,
             None => fs::create_dir_all(&self.workspace)
                 .with_context(|| format!("cannot create {}", self.workspace.display()))?,
         }
@@ -491,8 +505,8 @@ impl Build {
             kits: kits.into_iter().map(|(dir, _)| dir).collect(),
             template: None,
         })?;
-        if let Some(repo) = &self.repo {
-            self.warm_up(repo, backend)?;
+        if let Some(warm) = &self.warm {
+            self.warm_up(warm, backend)?;
         }
         backend.stop(&self.sandbox)?;
         backend.template_save(&self.sandbox, tag)?;
@@ -520,9 +534,11 @@ impl Build {
         Ok(record)
     }
 
-    /// Runs the built-in cargo steps in the build sandbox, then cleans the repo's own packages
-    /// out of the target folder so only the dependencies stay (decision 207).
-    fn warm_up(&self, repo: &Path, backend: &dyn SandboxBackend) -> Result<()> {
+    /// Runs the repo's `[warm]` commands in the build sandbox, or else the built-in cargo steps
+    /// and then cleans the repo's own packages out of the target folder so only the dependencies
+    /// stay (decision 207).
+    fn warm_up(&self, warm: &Warm, backend: &dyn SandboxBackend) -> Result<()> {
+        let repo = warm.repo.as_path();
         let workdir = in_sandbox_path(&self.workspace);
         let run = |commands: Vec<String>| -> Result<()> {
             let outcomes = gates::run_sandbox_tier(
@@ -538,6 +554,9 @@ impl Build {
                 None => Ok(()),
             }
         };
+        if let Some(commands) = &warm.commands {
+            return run(commands.clone());
+        }
         run(CARGO_STEPS
             .iter()
             .map(|step| format!("{CARGO_STEP_ENV} {step}"))
