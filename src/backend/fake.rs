@@ -149,7 +149,6 @@ impl FakeBackend {
         }
     }
 
-    /// A backend whose `remove` records the call and then fails.
     /// A backend whose `stop` fails.
     pub fn failing_stop() -> Self {
         Self {
@@ -182,6 +181,7 @@ impl FakeBackend {
         }
     }
 
+    /// A backend whose `remove` records the call and then fails.
     pub fn failing_remove() -> Self {
         Self {
             fail_remove: true,

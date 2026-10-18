@@ -205,9 +205,24 @@ struct Build {
 /// passed or failed.
 struct BuildLock {
     path: PathBuf,
+    /// The lock's contents: removed only while it still names this process.
+    me: String,
 }
 
 impl Drop for BuildLock {
+    fn drop(&mut self) {
+        if fs::read_to_string(&self.path).is_ok_and(|text| text == self.me) {
+            let _ = fs::remove_file(&self.path);
+        }
+    }
+}
+
+/// The right to clear an interrupted build (`<key>.build.takeover`); dropping it gives it up.
+struct TakeoverClaim {
+    path: PathBuf,
+}
+
+impl Drop for TakeoverClaim {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
     }
@@ -237,14 +252,17 @@ impl Build {
         fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
         let path = dir.join(format!("{}.build.json", self.key));
         let me = serde_json::to_string(&Process::current(probe))?;
-        for _ in 0..2 {
+        for _ in 0..3 {
             match fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
                 .open(&path)
             {
                 Ok(mut file) => {
-                    let lock = BuildLock { path };
+                    let lock = BuildLock {
+                        path,
+                        me: me.clone(),
+                    };
                     file.write_all(me.as_bytes())
                         .with_context(|| format!("cannot write {}", lock.path.display()))?;
                     return Ok(lock);
@@ -254,17 +272,9 @@ impl Build {
                     return Err(err).with_context(|| format!("cannot create {}", path.display()));
                 }
             }
-            let held: Process = fs::read_to_string(&path)
-                .ok()
-                .and_then(|text| serde_json::from_str(&text).ok())
-                .with_context(|| {
-                    format!(
-                        "cannot read the build lock {}; if no template build of {} is running, \
-                         delete it",
-                        path.display(),
-                        self.key
-                    )
-                })?;
+            let Some((text, held)) = self.read_lock(&path)? else {
+                continue;
+            };
             if held.alive(probe) {
                 bail!(
                     "a template build of {} is already running (process {}, started {}); wait \
@@ -273,6 +283,32 @@ impl Build {
                     held.pid,
                     held.started_at
                 );
+            }
+            // Only the build that creates the takeover file clears an interrupted build, and only
+            // if the lock is still the one it found dead: a build that took over meanwhile is live
+            // and its sandbox must stay (slice 4 review M-1).
+            let takeover = dir.join(format!("{}.build.takeover", self.key));
+            let _claim = match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&takeover)
+            {
+                Ok(_) => TakeoverClaim {
+                    path: takeover.clone(),
+                },
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => bail!(
+                    "another template build of {} is clearing an interrupted build ({}); try \
+                     again, or delete it if no template build is running",
+                    self.key,
+                    takeover.display()
+                ),
+                Err(err) => {
+                    return Err(err)
+                        .with_context(|| format!("cannot create {}", takeover.display()));
+                }
+            };
+            if self.read_lock(&path)?.map(|(again, _)| again) != Some(text) {
+                continue;
             }
             self.remove_leftovers(backend)?;
             fs::remove_file(&path).with_context(|| format!("cannot remove {}", path.display()))?;
@@ -288,6 +324,23 @@ impl Build {
             path.display(),
             self.key
         )
+    }
+
+    /// The lock's text and the process it names, or `None` if it is gone.
+    fn read_lock(&self, path: &Path) -> Result<Option<(String, Process)>> {
+        let text = match fs::read_to_string(path) {
+            Ok(text) => text,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(err) => return Err(err).with_context(|| format!("cannot read {}", path.display())),
+        };
+        let held = serde_json::from_str(&text).with_context(|| {
+            format!(
+                "cannot read the build lock {}; if no template build of {} is running, delete it",
+                path.display(),
+                self.key
+            )
+        })?;
+        Ok(Some((text, held)))
     }
 
     /// An interrupted build's sandbox and folders (decision 210).

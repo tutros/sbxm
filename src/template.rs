@@ -76,12 +76,16 @@ pub struct Record {
 }
 
 impl Record {
+    /// Written to a temporary file and renamed over the old record, so a failed write never
+    /// loses the tags the old one names (slice 4 review S-2).
     pub fn save(&self, base_dir: &Path, key: &str) -> Result<()> {
         let dir = dir(base_dir);
         fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
         let path = dir.join(format!("{key}.json"));
-        fs::write(&path, serde_json::to_string_pretty(self)? + "\n")
-            .with_context(|| format!("cannot write {}", path.display()))
+        let tmp = dir.join(format!("{key}.json.tmp"));
+        fs::write(&tmp, serde_json::to_string_pretty(self)? + "\n")
+            .with_context(|| format!("cannot write {}", tmp.display()))?;
+        fs::rename(&tmp, &path).with_context(|| format!("cannot write {}", path.display()))
     }
 }
 
@@ -117,8 +121,12 @@ impl Record {
         }
         let text =
             fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
-        serde_json::from_str(&text)
-            .map(Some)
-            .with_context(|| format!("cannot parse {}", path.display()))
+        serde_json::from_str(&text).map(Some).with_context(|| {
+            format!(
+                "template record {} is not valid; delete it, then remove the sbxm- templates it \
+                 named with `sbx template ls` and `sbx template rm`",
+                path.display()
+            )
+        })
     }
 }

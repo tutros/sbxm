@@ -920,3 +920,182 @@ fn an_unreadable_lock_is_refused_with_how_to_clear_it() {
     );
     assert!(backend.log().is_empty(), "{:?}", backend.log());
 }
+
+// Slice 4 review: M-1 (taking over a stale lock), S-1 (the tag re-check), S-3 (leftover folders).
+
+/// Process 4242 is gone; the first time it is looked up, another build takes the lock over and
+/// writes its own (process 5555, alive).
+struct RacingProbe {
+    path: std::path::PathBuf,
+}
+
+impl sbxm::task::record::ProcessProbe for RacingProbe {
+    fn start_time(&self, pid: u32) -> Option<u64> {
+        if pid == 4242 {
+            std::fs::write(
+                &self.path,
+                r#"{"pid": 5555, "started_at": "2023-11-14T22:13:20Z"}"#,
+            )
+            .unwrap();
+            return None;
+        }
+        Some(NOW)
+    }
+}
+
+#[test]
+fn a_lock_another_build_took_over_meanwhile_is_left_alone() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    write_lock(&env);
+    let backend = sbx_046();
+    let probe = RacingProbe {
+        path: lock_path(&env),
+    };
+
+    let result = template_build::run(
+        &env.config_dir(),
+        &at_now(Harness::Claude),
+        &backend,
+        &probe,
+        &mut Vec::new(),
+        &mut Vec::new(),
+    );
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains("already running (process 5555, started 2023-11-14T22:13:20Z)"),
+        "{message}"
+    );
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert!(
+        std::fs::read_to_string(lock_path(&env))
+            .unwrap()
+            .contains("5555")
+    );
+}
+
+#[test]
+fn a_build_is_refused_while_another_takes_over_an_interrupted_one() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    write_lock(&env);
+    let takeover = lock_path(&env).with_file_name("default-claude.build.takeover");
+    std::fs::write(&takeover, "").unwrap();
+    let backend = sbx_046();
+
+    let (result, _) = build_with(&env, &Probe(None), &backend);
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains(&format!(
+            "another template build of default-claude is clearing an interrupted build ({}); \
+             try again, or delete it if no template build is running",
+            takeover.display()
+        )),
+        "{message}"
+    );
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert!(lock_path(&env).exists());
+}
+
+/// Saves `tag` into the backend the first time any process is looked up, as a build that
+/// finished while this one waited for the lock would have.
+struct SavingProbe<'a> {
+    backend: &'a FakeBackend,
+    tag: String,
+    done: std::sync::atomic::AtomicBool,
+}
+
+impl sbxm::task::record::ProcessProbe for SavingProbe<'_> {
+    fn start_time(&self, _pid: u32) -> Option<u64> {
+        if !self.done.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            self.backend.template_save("other", &self.tag).unwrap();
+        }
+        Some(NOW)
+    }
+}
+
+#[test]
+fn a_tag_saved_while_waiting_for_the_lock_is_refused() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let backend = sbx_046();
+    let tag = expected_tag(&env, Harness::Claude);
+    let probe = SavingProbe {
+        backend: &backend,
+        tag: tag.clone(),
+        done: Default::default(),
+    };
+
+    let result = template_build::run(
+        &env.config_dir(),
+        &at_now(Harness::Claude),
+        &backend,
+        &probe,
+        &mut Vec::new(),
+        &mut Vec::new(),
+    );
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains(&format!(
+            "template {tag} already exists; wait a minute and build again"
+        )),
+        "{message}"
+    );
+    assert!(backend.creates().is_empty());
+    assert!(!lock_path(&env).exists());
+}
+
+#[test]
+fn an_interrupted_builds_folders_are_gone_before_the_new_build_creates() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    write_lock(&env);
+    let olds: Vec<_> = ["default-claude", "default-claude.kits"]
+        .iter()
+        .map(|dir| build_dir(&env).join(dir).join("old"))
+        .collect();
+    for old in &olds {
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(old, "x").unwrap();
+    }
+    let seen = olds.clone();
+    let backend = sbx_046().with_create_hook(move |_| {
+        for old in &seen {
+            assert!(!old.exists(), "{}", old.display());
+        }
+    });
+
+    let (result, _) = build_with(&env, &Probe(None), &backend);
+
+    result.unwrap();
+}
+
+#[test]
+fn an_unreadable_record_is_refused_with_how_to_fix_it() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let path = env
+        .base_dir()
+        .join(".sbxm")
+        .join("templates")
+        .join("default-claude.json");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, "{\"tag\": ").unwrap();
+    let backend = sbx_046();
+
+    let (result, _) = build_with(&env, &Probe(Some(NOW)), &backend);
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains(&format!(
+            "template record {} is not valid; delete it, then remove the sbxm- templates it named \
+             with `sbx template ls` and `sbx template rm`",
+            path.display()
+        )),
+        "{message}"
+    );
+    assert!(backend.creates().is_empty());
+}
