@@ -10,10 +10,14 @@ use anyhow::{Context, Error, Result, anyhow, bail};
 use crate::backend::{CreateSpec, SandboxBackend};
 use crate::config::{self, GlobalConfig, Profile};
 use crate::harness::Harness;
+use crate::run::checks::timed_exec;
+use crate::run::orchestrate::in_sandbox_path;
 use crate::run::results::format_timestamp;
+use crate::task::config::DEFAULT_GATE_TIMEOUT;
+use crate::task::gates::{self, CARGO_ENV};
 use crate::task::record::{Process, ProcessProbe};
 use crate::template;
-use crate::{disk, kit};
+use crate::{disk, kit, seed};
 
 #[derive(Debug, Default)]
 pub struct Options {
@@ -23,6 +27,8 @@ pub struct Options {
     pub disk: disk::Guard,
     /// Seconds since the Unix epoch for the tag and record; the clock when `None`.
     pub now: Option<u64>,
+    /// The repo whose warm-up fills the template's caches (decision 207).
+    pub warm: Option<PathBuf>,
 }
 
 pub fn run(
@@ -55,6 +61,7 @@ pub fn run(
             config_dir.join("config.toml").display()
         );
     }
+    let warm = options.warm.as_deref().map(Warm::check).transpose()?;
     let sbx_version = backend.version()?;
     template::check_sbx_version(&sbx_version)?;
     disk::require(&config, config_dir, &options.disk)?;
@@ -63,7 +70,7 @@ pub fn run(
         None => SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),
     };
     let profile_name = options.profile.as_str();
-    let template_hash = kit::template_hash(&profile, options.harness, false);
+    let template_hash = kit::template_hash(&profile, options.harness, warm.is_some());
     let tag = template::tag(profile_name, options.harness, &template_hash, now);
     // Saving onto an existing tag replaces it without a word (S11, question 8).
     if backend.template_ls()?.iter().any(|t| t.reference() == tag) {
@@ -76,15 +83,19 @@ pub fn run(
         profile_name: profile_name.to_owned(),
         harness: options.harness,
         sandbox: format!("sbxm-template-{key}"),
+        repo: warm.as_ref().map(|w| w.repo.clone()),
         workspace: build_dir.join(&key),
         kits_dir: build_dir.join(format!("{key}.kits")),
         key,
         record: template::Record {
             tag,
             template_hash,
-            warm: false,
-            lock_files: Vec::new(),
-            lock_hash: None,
+            warm: warm.is_some(),
+            lock_files: warm
+                .as_ref()
+                .map(|w| w.lock_files.clone())
+                .unwrap_or_default(),
+            lock_hash: warm.as_ref().map(|w| w.lock_hash.clone()),
             sbx_version,
             size_bytes: 0,
             created_at: format_timestamp(now),
@@ -190,11 +201,86 @@ fn retire_previous(
     Ok(kept)
 }
 
+/// The built-in warm-up of a repo with a `Cargo.toml` (decision 207), in the default gates'
+/// environment so sandboxes reuse the compiled dependencies.
+const CARGO_STEPS: [&str; 3] = [
+    "cargo fetch --locked",
+    "cargo clippy --all-targets --locked",
+    "cargo test --no-run --locked",
+];
+const CARGO_STEP_ENV: &str = "CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR=/tmp/target";
+
+/// What `--warm <repo>` warms the template with, checked before any write.
+struct Warm {
+    repo: PathBuf,
+    lock_files: Vec<String>,
+    lock_hash: String,
+}
+
+impl Warm {
+    fn check(repo: &Path) -> Result<Self> {
+        if !repo.is_dir() {
+            bail!(
+                "repo {} is not a directory; point --warm at the repo to warm the template with",
+                repo.display()
+            );
+        }
+        if !repo.join("Cargo.toml").is_file() {
+            bail!(
+                "repo {} has neither a Cargo.toml nor a [warm] table in its sbxm-task.toml; add \
+                 [warm] with the commands that fill its caches",
+                repo.display()
+            );
+        }
+        let lock = repo.join("Cargo.lock");
+        if !lock.is_file() {
+            bail!(
+                "lock file {} does not exist; run `cargo generate-lockfile` in {} and build again",
+                lock.display(),
+                repo.display()
+            );
+        }
+        seed::reject_repo_links(repo)?;
+        let lock_files = vec!["Cargo.lock".to_owned()];
+        let lock_hash = template::lock_hash(repo, &lock_files)?;
+        Ok(Self {
+            repo: repo.to_path_buf(),
+            lock_files,
+            lock_hash,
+        })
+    }
+}
+
+/// Why a warm-up step stopped the build, with the end of its output.
+fn step_failed(repo: &Path, failed: &gates::GateOutcome) -> Error {
+    let command = &failed.result.command;
+    let what = if failed.could_not_run {
+        "could not run".to_owned()
+    } else if failed.timed_out {
+        format!(
+            "timed out after {} minutes",
+            DEFAULT_GATE_TIMEOUT.as_secs() / 60
+        )
+    } else {
+        match failed.result.exit {
+            Some(code) => format!("failed with exit {code}"),
+            None => "failed".to_owned(),
+        }
+    };
+    anyhow!(
+        "warm-up step `{command}` {what}; fix it in {} and build again; its output ends:\n{}",
+        repo.display(),
+        failed.output_tail.trim_end()
+    )
+}
+
 /// The names and folders one build uses (decision 210), and its record before the size is known.
 struct Build {
     profile_name: String,
     harness: Harness,
     sandbox: String,
+    /// The repo to warm the template with, copied into the workspace (decision 207).
+    repo: Option<PathBuf>,
     workspace: PathBuf,
     kits_dir: PathBuf,
     key: String,
@@ -387,8 +473,11 @@ impl Build {
                 );
             }
         }
-        fs::create_dir_all(&self.workspace)
-            .with_context(|| format!("cannot create {}", self.workspace.display()))?;
+        match &self.repo {
+            Some(repo) => seed::copy_repo(repo, &self.workspace)?,
+            None => fs::create_dir_all(&self.workspace)
+                .with_context(|| format!("cannot create {}", self.workspace.display()))?,
+        }
 
         let tag = &self.record.tag;
         progress.sandbox = true;
@@ -402,6 +491,9 @@ impl Build {
             kits: kits.into_iter().map(|(dir, _)| dir).collect(),
             template: None,
         })?;
+        if let Some(repo) = &self.repo {
+            self.warm_up(repo, backend)?;
+        }
         backend.stop(&self.sandbox)?;
         backend.template_save(&self.sandbox, tag)?;
         progress.saved = true;
@@ -426,6 +518,90 @@ impl Build {
         record.save(&config.base_dir, &self.key)?;
         progress.saved = false;
         Ok(record)
+    }
+
+    /// Runs the built-in cargo steps in the build sandbox, then cleans the repo's own packages
+    /// out of the target folder so only the dependencies stay (decision 207).
+    fn warm_up(&self, repo: &Path, backend: &dyn SandboxBackend) -> Result<()> {
+        let workdir = in_sandbox_path(&self.workspace);
+        let run = |commands: Vec<String>| -> Result<()> {
+            let outcomes = gates::run_sandbox_tier(
+                backend,
+                &self.sandbox,
+                &workdir,
+                "warm",
+                &commands,
+                DEFAULT_GATE_TIMEOUT,
+            );
+            match outcomes.iter().find(|o| !o.result.passed) {
+                Some(failed) => Err(step_failed(repo, failed)),
+                None => Ok(()),
+            }
+        };
+        run(CARGO_STEPS
+            .iter()
+            .map(|step| format!("{CARGO_STEP_ENV} {step}"))
+            .collect())?;
+        let packages = self.packages(repo, backend, &workdir)?;
+        run(packages
+            .iter()
+            .map(|p| format!("{CARGO_STEP_ENV} cargo clean -p {p}"))
+            .collect())
+    }
+
+    /// The repo's own packages, as `cargo metadata --no-deps` names them in the build sandbox.
+    fn packages(
+        &self,
+        repo: &Path,
+        backend: &dyn SandboxBackend,
+        workdir: &Path,
+    ) -> Result<Vec<String>> {
+        #[derive(serde::Deserialize)]
+        struct Metadata {
+            packages: Vec<Package>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Package {
+            name: String,
+        }
+        let command = "cargo metadata --no-deps --format-version 1";
+        let output = backend.exec(
+            &self.sandbox,
+            &timed_exec(
+                workdir,
+                DEFAULT_GATE_TIMEOUT.as_secs(),
+                &format!("{CARGO_ENV}{command}"),
+            ),
+        )?;
+        if output.exit_code != Some(0) {
+            bail!(
+                "warm-up step `{command}` failed{}; fix it in {} and build again; its output \
+                 ends:\n{}",
+                output
+                    .exit_code
+                    .map(|code| format!(" with exit {code}"))
+                    .unwrap_or_default(),
+                repo.display(),
+                output.stderr.trim_end()
+            );
+        }
+        let metadata: Metadata = serde_json::from_str(&output.stdout)
+            .with_context(|| format!("cannot read the output of `{command}`"))?;
+        let names: Vec<String> = metadata.packages.into_iter().map(|p| p.name).collect();
+        // Each name goes into a shell command.
+        if let Some(bad) = names.iter().find(|name| {
+            name.is_empty()
+                || !name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        }) {
+            bail!(
+                "cargo metadata named the package `{bad}`, which is not a valid package name; \
+                 check {}",
+                repo.join("Cargo.toml").display()
+            );
+        }
+        Ok(names)
     }
 
     /// Removes what a failed build made: the build sandbox, a tag saved without its record, and

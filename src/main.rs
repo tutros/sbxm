@@ -757,6 +757,7 @@ fn main() -> anyhow::Result<()> {
                 TemplateCommand::Build {
                     profile,
                     harness,
+                    warm,
                     ignore_disk,
                 },
         } => commands::template_build::run(
@@ -766,6 +767,7 @@ fn main() -> anyhow::Result<()> {
                 harness,
                 disk: sbxm::disk::Guard::real(ignore_disk),
                 now: None,
+                warm,
             },
             &SbxBackend,
             &sbxm::task::record::SystemProbe,

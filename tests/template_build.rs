@@ -17,6 +17,7 @@ fn options(harness: Harness) -> template_build::Options {
         harness,
         disk: sbxm::disk::Guard::default(),
         now: None,
+        warm: None,
     }
 }
 
@@ -1098,4 +1099,348 @@ fn an_unreadable_record_is_refused_with_how_to_fix_it() {
         "{message}"
     );
     assert!(backend.creates().is_empty());
+}
+
+// Slice 5: `template build --warm <repo>` with the built-in cargo steps (decision 207).
+
+const METADATA: &str = r#"{"packages":[{"name":"app"},{"name":"app-core"}],"version":1}"#;
+
+/// A repo with a Cargo.toml, a Cargo.lock, a source file, a `.git` and a `target` folder.
+fn cargo_repo(env: &Env) -> std::path::PathBuf {
+    let repo = env.tmp.path().join("repo");
+    std::fs::create_dir_all(repo.join("src")).unwrap();
+    std::fs::create_dir_all(repo.join(".git")).unwrap();
+    std::fs::create_dir_all(repo.join("target").join("debug")).unwrap();
+    std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"app\"\n").unwrap();
+    std::fs::write(repo.join("Cargo.lock"), "version = 4\n").unwrap();
+    std::fs::write(repo.join("src").join("main.rs"), "fn main() {}\n").unwrap();
+    std::fs::write(repo.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
+    std::fs::write(repo.join("target").join("debug").join("app"), "binary").unwrap();
+    repo
+}
+
+fn warm(repo: &std::path::Path) -> template_build::Options {
+    template_build::Options {
+        warm: Some(repo.to_path_buf()),
+        ..at_now(Harness::Claude)
+    }
+}
+
+fn warm_backend() -> FakeBackend {
+    sbx_046().with_exec_output_matching(
+        "cargo metadata",
+        sbxm::backend::ExecOutput {
+            stdout: METADATA.into(),
+            stderr: String::new(),
+            exit_code: Some(0),
+        },
+    )
+}
+
+/// The `sh -c` text of each exec, in order.
+fn exec_commands(backend: &FakeBackend) -> Vec<String> {
+    backend
+        .execs()
+        .into_iter()
+        .map(|(_, spec)| spec.argv.last().unwrap().clone())
+        .collect()
+}
+
+const STEP_ENV: &str = "CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR=/tmp/target";
+
+#[test]
+fn a_warm_build_runs_the_cargo_steps_before_the_stop() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let repo = cargo_repo(&env);
+    let backend = warm_backend();
+
+    build(&env, &warm(&repo), &backend).unwrap();
+
+    let log = backend.log();
+    let create = log.iter().position(|l| l.starts_with("create ")).unwrap();
+    let stop = log.iter().position(|l| l.starts_with("stop ")).unwrap();
+    let execs: Vec<_> = log
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.starts_with("exec "))
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(execs.len(), 6, "{log:?}");
+    assert!(execs.iter().all(|&i| create < i && i < stop), "{log:?}");
+    let commands = exec_commands(&backend);
+    for (command, step) in commands.iter().zip([
+        format!("{STEP_ENV} cargo fetch --locked"),
+        format!("{STEP_ENV} cargo clippy --all-targets --locked"),
+        format!("{STEP_ENV} cargo test --no-run --locked"),
+        "cargo metadata --no-deps --format-version 1".to_owned(),
+        format!("{STEP_ENV} cargo clean -p app"),
+        format!("{STEP_ENV} cargo clean -p app-core"),
+    ]) {
+        assert!(command.ends_with(&step), "{command} should end with {step}");
+    }
+}
+
+#[test]
+fn warm_steps_run_in_the_build_workspace_under_the_in_sandbox_timeout() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let repo = cargo_repo(&env);
+    let backend = warm_backend();
+
+    build(&env, &warm(&repo), &backend).unwrap();
+
+    let workdir = sbxm::run::orchestrate::in_sandbox_path(&build_dir(&env).join("default-claude"));
+    for (sandbox, spec) in backend.execs() {
+        assert_eq!(sandbox, "sbxm-template-default-claude");
+        assert_eq!(spec.workdir.as_deref(), Some(workdir.as_path()));
+        assert_eq!(spec.argv[0], "timeout", "{:?}", spec.argv);
+        assert!(
+            spec.argv.last().unwrap().contains(".cargo/env"),
+            "{:?}",
+            spec.argv
+        );
+    }
+}
+
+#[test]
+fn a_warm_build_copies_the_repo_without_git_or_target() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let repo = cargo_repo(&env);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let hook_seen = seen.clone();
+    let backend = warm_backend().with_create_hook(move |spec| {
+        let ws = &spec.workspace;
+        *hook_seen.lock().unwrap() = vec![
+            ws.join("Cargo.toml").is_file(),
+            ws.join("Cargo.lock").is_file(),
+            ws.join("src").join("main.rs").is_file(),
+            ws.join(".git").exists(),
+            ws.join("target").exists(),
+        ];
+    });
+
+    build(&env, &warm(&repo), &backend).unwrap();
+
+    assert_eq!(*seen.lock().unwrap(), vec![true, true, true, false, false]);
+    assert!(
+        repo.join(".git").join("HEAD").is_file(),
+        "the repo is left alone"
+    );
+}
+
+#[test]
+fn a_warm_build_records_its_lock_file_and_hash() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let repo = cargo_repo(&env);
+    let backend = warm_backend();
+
+    build(&env, &warm(&repo), &backend).unwrap();
+
+    let config = sbxm::config::GlobalConfig::load(&env.config_dir()).unwrap();
+    let profile = sbxm::config::Profile::load(config.profiles_dir(), "default").unwrap();
+    let hash = sbxm::kit::template_hash(&profile, Harness::Claude, true);
+    let record = record(&env);
+    assert_eq!(record["warm"], true);
+    assert_eq!(record["template_hash"], hash.as_str());
+    assert_eq!(
+        record["tag"],
+        format!("sbxm-default-claude:{}-20231114t2213", &hash[..12]).as_str()
+    );
+    assert_eq!(record["lock_files"], serde_json::json!(["Cargo.lock"]));
+    let lock_hash = sbxm::template::lock_hash(&repo, &["Cargo.lock".to_owned()]).unwrap();
+    assert_eq!(record["lock_hash"], lock_hash.as_str());
+}
+
+#[test]
+fn the_lock_hash_follows_the_lock_files_contents() {
+    let env = Env::new();
+    let repo = cargo_repo(&env);
+    let files = ["Cargo.lock".to_owned()];
+    let before = sbxm::template::lock_hash(&repo, &files).unwrap();
+    assert_eq!(before.len(), 64);
+    assert_eq!(sbxm::template::lock_hash(&repo, &files).unwrap(), before);
+
+    std::fs::write(repo.join("Cargo.lock"), "version = 3\n").unwrap();
+
+    assert_ne!(sbxm::template::lock_hash(&repo, &files).unwrap(), before);
+}
+
+#[test]
+fn a_failing_warm_step_saves_nothing() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let repo = cargo_repo(&env);
+    let backend = warm_backend().with_exec_output_matching(
+        "cargo clippy",
+        sbxm::backend::ExecOutput {
+            stdout: String::new(),
+            stderr: "error: could not compile `app`\n".into(),
+            exit_code: Some(101),
+        },
+    );
+
+    let err = build(&env, &warm(&repo), &backend).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains(&format!(
+            "warm-up step `{STEP_ENV} cargo clippy --all-targets --locked` failed with exit 101"
+        )),
+        "{message}"
+    );
+    assert!(message.contains("could not compile `app`"), "{message}");
+    assert_eq!(
+        exec_commands(&backend).len(),
+        2,
+        "no step after the failing one"
+    );
+    assert!(
+        !backend.log().iter().any(|l| l.starts_with("template-save")),
+        "{:?}",
+        backend.log()
+    );
+    assert!(
+        backend
+            .log()
+            .contains(&"rm sbxm-template-default-claude".to_owned())
+    );
+    assert_nothing_left(&env, &backend);
+}
+
+#[test]
+fn a_package_name_cargo_would_not_allow_is_refused() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let repo = cargo_repo(&env);
+    let backend = sbx_046().with_exec_output_matching(
+        "cargo metadata",
+        sbxm::backend::ExecOutput {
+            stdout: r#"{"packages":[{"name":"app; rm -rf ~"}]}"#.into(),
+            stderr: String::new(),
+            exit_code: Some(0),
+        },
+    );
+
+    let err = build(&env, &warm(&repo), &backend).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("cargo metadata named the package `app; rm -rf ~`"),
+        "{message}"
+    );
+    assert!(
+        !exec_commands(&backend)
+            .iter()
+            .any(|c| c.contains("cargo clean"))
+    );
+    assert_nothing_left(&env, &backend);
+}
+
+#[test]
+fn a_warm_repo_without_cargo_toml_is_refused_naming_warm() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let repo = env.tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::write(repo.join("package.json"), "{}").unwrap();
+
+    let message = refused(&env, &warm(&repo), &sbx_046());
+
+    assert!(
+        message.contains(&format!(
+            "repo {} has neither a Cargo.toml nor a [warm] table in its sbxm-task.toml; add \
+             [warm] with the commands that fill its caches",
+            repo.display()
+        )),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_warm_repo_without_cargo_lock_is_refused() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let repo = cargo_repo(&env);
+    std::fs::remove_file(repo.join("Cargo.lock")).unwrap();
+
+    let message = refused(&env, &warm(&repo), &sbx_046());
+
+    assert!(
+        message.contains(&format!(
+            "lock file {} does not exist; run `cargo generate-lockfile` in {} and build again",
+            repo.join("Cargo.lock").display(),
+            repo.display()
+        )),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_missing_warm_repo_is_refused() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let repo = env.tmp.path().join("nowhere");
+
+    let message = refused(&env, &warm(&repo), &sbx_046());
+
+    assert!(
+        message.contains(&format!(
+            "repo {} is not a directory; point --warm at the repo to warm the template with",
+            repo.display()
+        )),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_warm_repo_with_a_link_is_refused_before_any_write() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let repo = cargo_repo(&env);
+    let outside = env.tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    common::dir_link(&repo.join("src").join("linked"), &outside);
+
+    let message = refused(&env, &warm(&repo), &sbx_046());
+
+    assert!(message.contains("is a symlink or junction"), "{message}");
+}
+
+#[test]
+fn links_inside_git_or_target_are_neither_copied_nor_refused() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let repo = cargo_repo(&env);
+    let outside = env.tmp.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    common::dir_link(&repo.join("target").join("linked"), &outside);
+    common::dir_link(&repo.join(".git").join("linked"), &outside);
+    let backend = warm_backend();
+
+    build(&env, &warm(&repo), &backend).unwrap();
+}
+
+#[test]
+fn the_cli_takes_warm() {
+    let env = Env::new();
+    env.write_profile("default", OPTED_IN);
+    let repo = env.tmp.path().join("nowhere");
+
+    let output = Command::cargo_bin("sbxm")
+        .unwrap()
+        .env("SBXM_CONFIG_DIR", env.config_dir())
+        .args(["template", "build", "default", "--warm"])
+        .arg(&repo)
+        .output()
+        .unwrap();
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("is not a directory; point --warm at"),
+        "{stderr}"
+    );
 }

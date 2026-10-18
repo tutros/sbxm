@@ -130,3 +130,20 @@ impl Record {
         })
     }
 }
+
+/// The combined SHA-256 of `files` (paths relative to `repo`), in order (decision 207).
+/// Each file's path and length go in before its contents, so moving bytes between files changes
+/// the hash.
+pub fn lock_hash(repo: &Path, files: &[String]) -> Result<String> {
+    let mut bytes = Vec::new();
+    for file in files {
+        let path = repo.join(file);
+        let contents =
+            fs::read(&path).with_context(|| format!("cannot read lock file {}", path.display()))?;
+        bytes.extend_from_slice(file.as_bytes());
+        bytes.push(0);
+        bytes.extend_from_slice(&(contents.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(&contents);
+    }
+    Ok(crate::config::sha256_hex(&bytes))
+}

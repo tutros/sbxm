@@ -709,6 +709,13 @@ commands; no lock covers `new`.
 228. **`template build` follows `new` on kit warnings and the base dir (2026-10-17, milestone 3 slice 4, the user
 agreed):** it prints `sbx kit validate`'s warnings and refuses a base dir that doesn't exist, with `new`'s messages.
 
+229. **`template build --warm` checks the repo before any write (2026-10-18, milestone 3 slice 5, made while the user
+was away; to confirm):** a repo that is not a folder, has no `Cargo.toml` (until `[warm]` in slice 5b), has no
+`Cargo.lock` (the `--locked` steps would fail in the sandbox anyway, and the record needs its hash) or holds a link
+outside `.git` and `target` is refused before the first write. Links inside `.git` and the top `target` are neither
+copied nor refused. The package names `cargo metadata` returns go into `cargo clean -p` only if they are made of
+letters, digits, `-` and `_`. The warm-up steps use the default gate timeout (20 minutes each).
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.

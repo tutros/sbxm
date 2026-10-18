@@ -149,6 +149,10 @@ pub enum TemplateCommand {
         /// The harness the template is for.
         #[arg(long, value_enum, default_value_t)]
         harness: Harness,
+        /// Warm the template's caches from this repo: its [warm] steps, or the cargo steps for a
+        /// repo with a Cargo.toml.
+        #[arg(long, value_name = "REPO")]
+        warm: Option<PathBuf>,
         /// Build even when the drive of sbx's sandbox state has less than min_free_disk free.
         #[arg(long)]
         ignore_disk: bool,

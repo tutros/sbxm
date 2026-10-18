@@ -18,7 +18,7 @@ pub const FILE_NAME: &str = "sbxm-task.toml";
 
 const DEFAULT_WORKER_LIMIT: Duration = Duration::from_secs(2 * 3600);
 const DEFAULT_REVIEWER_LIMIT: Duration = Duration::from_secs(45 * 60);
-const DEFAULT_GATE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+pub(crate) const DEFAULT_GATE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 /// Applied when the repo has a `Cargo.toml` and `[gates] sandbox` is absent.
 const RUST_GATES: [&str; 3] = [
     "cargo fmt --check",
