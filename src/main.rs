@@ -768,6 +768,7 @@ fn main() -> anyhow::Result<()> {
                 now: None,
             },
             &SbxBackend,
+            &sbxm::task::record::SystemProbe,
             &mut std::io::stdout(),
             &mut std::io::stderr(),
         ),

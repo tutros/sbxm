@@ -193,6 +193,14 @@ impl Process {
         }
     }
 
+    /// Whether this process is still running: its pid with the same start time, so a reused pid
+    /// doesn't count (decision 163).
+    pub fn alive(&self, probe: &dyn ProcessProbe) -> bool {
+        probe
+            .start_time(self.pid)
+            .is_some_and(|started| format_timestamp(started) == self.started_at)
+    }
+
     /// This process, as the probe sees it.
     pub fn current(probe: &dyn ProcessProbe) -> Self {
         let pid = std::process::id();
@@ -626,11 +634,9 @@ impl Record {
     /// same start time, as [`Record::is_interrupted`] decides), whatever the status: a task
     /// between two stages is not `running`, but the process driving it is alive.
     pub fn process_alive(&self, probe: &dyn ProcessProbe) -> bool {
-        self.process.as_ref().is_some_and(|process| {
-            probe
-                .start_time(process.pid)
-                .is_some_and(|started| format_timestamp(started) == process.started_at)
-        })
+        self.process
+            .as_ref()
+            .is_some_and(|process| process.alive(probe))
     }
 
     /// Runs the current stage again (`task resume`, issue 118): a stage that failed, or was left

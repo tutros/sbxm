@@ -11,6 +11,7 @@ use crate::backend::{CreateSpec, SandboxBackend};
 use crate::config::{self, GlobalConfig, Profile};
 use crate::harness::Harness;
 use crate::run::results::format_timestamp;
+use crate::task::record::{Process, ProcessProbe};
 use crate::template;
 use crate::{disk, kit};
 
@@ -28,6 +29,7 @@ pub fn run(
     config_dir: &Path,
     options: &Options,
     backend: &dyn SandboxBackend,
+    probe: &dyn ProcessProbe,
     out: &mut dyn Write,
     warn: &mut dyn Write,
 ) -> Result<()> {
@@ -69,13 +71,8 @@ pub fn run(
     }
 
     let key = template::key(profile_name, options.harness);
-    // The record lists every earlier tag until it is removed, so one that cannot go now is
-    // retried by a later build (decision 205a).
-    let previous: Vec<String> = template::Record::load(&config.base_dir, &key)?
-        .map(|old| std::iter::once(old.tag).chain(old.previous).collect())
-        .unwrap_or_default();
     let build_dir = template::dir(&config.base_dir).join("build");
-    let build = Build {
+    let mut build = Build {
         profile_name: profile_name.to_owned(),
         harness: options.harness,
         sandbox: format!("sbxm-template-{key}"),
@@ -91,9 +88,26 @@ pub fn run(
             sbx_version,
             size_bytes: 0,
             created_at: format_timestamp(now),
-            previous,
+            previous: Vec::new(),
         },
     };
+    let _lock = build.lock(&config.base_dir, backend, probe, warn)?;
+    // Again under the lock: a build that finished since the first check may have saved this tag.
+    if backend
+        .template_ls()?
+        .iter()
+        .any(|t| t.reference() == build.record.tag)
+    {
+        bail!(
+            "template {} already exists; wait a minute and build again",
+            build.record.tag
+        );
+    }
+    // Read under the lock, so a build that finished meanwhile is not lost. The record lists every
+    // earlier tag until it is removed, so one that cannot go now is retried later (decision 225).
+    build.record.previous = template::Record::load(&config.base_dir, &build.key)?
+        .map(|old| std::iter::once(old.tag).chain(old.previous).collect())
+        .unwrap_or_default();
     let mut progress = Progress::default();
     let record = build
         .run(&config, &profile, backend, &mut progress, warn)
@@ -187,6 +201,18 @@ struct Build {
     record: template::Record,
 }
 
+/// Held for a whole build (decision 212); dropping it removes the lock file, whether the build
+/// passed or failed.
+struct BuildLock {
+    path: PathBuf,
+}
+
+impl Drop for BuildLock {
+    fn drop(&mut self) {
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
 /// What a build has made so far, for [`Build::clean_up`].
 #[derive(Default)]
 struct Progress {
@@ -197,6 +223,87 @@ struct Progress {
 }
 
 impl Build {
+    /// Takes `<base>/.sbxm/templates/<key>.build.json` for this process. A lock whose process is
+    /// alive refuses the build; one whose process is gone has its build's leftovers removed and
+    /// is taken over (decision 212). Created with `create_new`, so two builds can't both take it.
+    fn lock(
+        &self,
+        base_dir: &Path,
+        backend: &dyn SandboxBackend,
+        probe: &dyn ProcessProbe,
+        warn: &mut dyn Write,
+    ) -> Result<BuildLock> {
+        let dir = template::dir(base_dir);
+        fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+        let path = dir.join(format!("{}.build.json", self.key));
+        let me = serde_json::to_string(&Process::current(probe))?;
+        for _ in 0..2 {
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    let lock = BuildLock { path };
+                    file.write_all(me.as_bytes())
+                        .with_context(|| format!("cannot write {}", lock.path.display()))?;
+                    return Ok(lock);
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(err) => {
+                    return Err(err).with_context(|| format!("cannot create {}", path.display()));
+                }
+            }
+            let held: Process = fs::read_to_string(&path)
+                .ok()
+                .and_then(|text| serde_json::from_str(&text).ok())
+                .with_context(|| {
+                    format!(
+                        "cannot read the build lock {}; if no template build of {} is running, \
+                         delete it",
+                        path.display(),
+                        self.key
+                    )
+                })?;
+            if held.alive(probe) {
+                bail!(
+                    "a template build of {} is already running (process {}, started {}); wait \
+                     for it to finish",
+                    self.key,
+                    held.pid,
+                    held.started_at
+                );
+            }
+            self.remove_leftovers(backend)?;
+            fs::remove_file(&path).with_context(|| format!("cannot remove {}", path.display()))?;
+            writeln!(
+                warn,
+                "removed the leftovers of an interrupted template build (process {}, started {})",
+                held.pid, held.started_at
+            )?;
+        }
+        bail!(
+            "cannot take the build lock {}; another template build of {} may have started, try \
+             again",
+            path.display(),
+            self.key
+        )
+    }
+
+    /// An interrupted build's sandbox and folders (decision 210).
+    fn remove_leftovers(&self, backend: &dyn SandboxBackend) -> Result<()> {
+        if backend.list()?.iter().any(|s| s.name == self.sandbox) {
+            backend.remove(&self.sandbox)?;
+        }
+        for dir in [&self.workspace, &self.kits_dir] {
+            if dir.exists() {
+                fs::remove_dir_all(dir)
+                    .with_context(|| format!("cannot remove {}", dir.display()))?;
+            }
+        }
+        Ok(())
+    }
+
     /// Writes and validates the kits, creates, stops, saves and removes the build sandbox, then
     /// writes the record and returns it.
     fn run(

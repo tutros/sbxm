@@ -7,6 +7,7 @@ use common::{Env, LOW_DISK, low_disk};
 use sbxm::backend::{FakeBackend, SandboxBackend};
 use sbxm::commands::template_build;
 use sbxm::harness::Harness;
+use sbxm::task::record::SystemProbe;
 
 const OPTED_IN: &str = "[template]\nallow = []\n";
 
@@ -28,6 +29,7 @@ fn build(
         &env.config_dir(),
         options,
         backend,
+        &SystemProbe,
         &mut Vec::new(),
         &mut Vec::new(),
     )
@@ -282,6 +284,7 @@ fn a_cold_build_prints_its_tag() {
         &env.config_dir(),
         &at_now(Harness::Codex),
         &sbx_046(),
+        &SystemProbe,
         &mut out,
         &mut Vec::new(),
     )
@@ -478,6 +481,7 @@ fn build_at(env: &Env, now: u64, backend: &FakeBackend) -> String {
         &env.config_dir(),
         &options,
         backend,
+        &SystemProbe,
         &mut out,
         &mut Vec::new(),
     )
@@ -733,6 +737,7 @@ fn kit_warnings_are_shown() {
         &env.config_dir(),
         &at_now(Harness::Claude),
         &backend,
+        &SystemProbe,
         &mut Vec::new(),
         &mut warn,
     )
@@ -747,4 +752,171 @@ fn kit_warnings_are_shown() {
             kits.join("harness-claude").display()
         )
     );
+}
+
+// Step 4.5: the build lock (decision 212).
+
+/// A process table where every pid started at this time, or none exists.
+struct Probe(Option<u64>);
+
+impl sbxm::task::record::ProcessProbe for Probe {
+    fn start_time(&self, _pid: u32) -> Option<u64> {
+        self.0
+    }
+}
+
+fn lock_path(env: &Env) -> std::path::PathBuf {
+    env.base_dir()
+        .join(".sbxm")
+        .join("templates")
+        .join("default-claude.build.json")
+}
+
+/// A lock left by process 4242, started at [`NOW`].
+fn write_lock(env: &Env) {
+    std::fs::create_dir_all(lock_path(env).parent().unwrap()).unwrap();
+    std::fs::write(
+        lock_path(env),
+        r#"{"pid": 4242, "started_at": "2023-11-14T22:13:20Z"}"#,
+    )
+    .unwrap();
+}
+
+/// Builds with `probe`, returning the result and the warnings.
+fn build_with(env: &Env, probe: &Probe, backend: &FakeBackend) -> (anyhow::Result<()>, String) {
+    let mut warn = Vec::new();
+    let result = template_build::run(
+        &env.config_dir(),
+        &at_now(Harness::Claude),
+        backend,
+        probe,
+        &mut Vec::new(),
+        &mut warn,
+    );
+    (result, String::from_utf8(warn).unwrap())
+}
+
+#[test]
+fn a_build_is_refused_while_the_locking_process_is_alive() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    write_lock(&env);
+    let backend = sbx_046();
+
+    let (result, _) = build_with(&env, &Probe(Some(NOW)), &backend);
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains(
+            "a template build of default-claude is already running (process 4242, started \
+             2023-11-14T22:13:20Z); wait for it to finish"
+        ),
+        "{message}"
+    );
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert!(!build_dir(&env).exists());
+    assert!(lock_path(&env).exists());
+}
+
+#[test]
+fn an_interrupted_builds_leftovers_are_removed_and_the_build_goes_on() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    write_lock(&env);
+    for dir in ["default-claude", "default-claude.kits"] {
+        let dir = build_dir(&env).join(dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("old"), "x").unwrap();
+    }
+    let backend = FakeBackend::with_sandboxes(vec![sbxm::backend::SandboxInfo {
+        name: "sbxm-template-default-claude".into(),
+        agent: "claude".into(),
+        status: "stopped".into(),
+    }])
+    .with_version("0.46.0");
+
+    let (result, warn) = build_with(&env, &Probe(None), &backend);
+
+    result.unwrap();
+    assert_eq!(backend.log()[0], "rm sbxm-template-default-claude");
+    assert_eq!(
+        warn,
+        "removed the leftovers of an interrupted template build (process 4242, started \
+         2023-11-14T22:13:20Z)\n"
+    );
+    assert!(!build_dir(&env).join("default-claude").exists());
+    assert!(!lock_path(&env).exists());
+}
+
+#[test]
+fn a_lock_whose_pid_was_reused_counts_as_interrupted() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    write_lock(&env);
+    let backend = sbx_046();
+
+    let (result, _) = build_with(&env, &Probe(Some(NOW + 1)), &backend);
+
+    result.unwrap();
+    assert!(
+        backend.log()[0].starts_with("validate "),
+        "{:?}",
+        backend.log()
+    );
+}
+
+#[test]
+fn the_lock_names_this_process_during_the_build() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let path = lock_path(&env);
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+    let hook_seen = seen.clone();
+    let backend = sbx_046().with_create_hook(move |_| {
+        *hook_seen.lock().unwrap() = std::fs::read_to_string(&path).unwrap();
+    });
+
+    let (result, _) = build_with(&env, &Probe(Some(NOW)), &backend);
+
+    result.unwrap();
+    let lock: serde_json::Value = serde_json::from_str(&seen.lock().unwrap()).unwrap();
+    assert_eq!(
+        lock,
+        serde_json::json!({"pid": std::process::id(), "started_at": "2023-11-14T22:13:20Z"})
+    );
+    assert!(!lock_path(&env).exists());
+}
+
+#[test]
+fn the_lock_is_removed_after_a_failed_build() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let backend = FakeBackend::failing_create().with_version("0.46.0");
+
+    let (result, _) = build_with(&env, &Probe(Some(NOW)), &backend);
+
+    assert!(result.is_err());
+    assert!(!lock_path(&env).exists());
+}
+
+#[test]
+fn an_unreadable_lock_is_refused_with_how_to_clear_it() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    std::fs::create_dir_all(lock_path(&env).parent().unwrap()).unwrap();
+    std::fs::write(lock_path(&env), "not json").unwrap();
+    let backend = sbx_046();
+
+    let (result, _) = build_with(&env, &Probe(None), &backend);
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains(&format!(
+            "cannot read the build lock {}; if no template build of default-claude is running, \
+             delete it",
+            lock_path(&env).display()
+        )),
+        "{message}"
+    );
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
 }
