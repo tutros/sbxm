@@ -4,8 +4,8 @@
 mod common;
 
 use common::Env;
-use sbxm::backend::FakeBackend;
-use sbxm::commands::{new, template_build};
+use sbxm::backend::{FakeBackend, SandboxInfo};
+use sbxm::commands::{new, open, template_build};
 use sbxm::config;
 use sbxm::harness::Harness;
 
@@ -343,4 +343,91 @@ fn strict_is_part_of_the_hash_of_both_variants() {
     let strict_install = install();
     env.write_profile("default", PROFILE);
     assert_ne!(install(), strict_install);
+}
+
+fn open_demo(env: &Env, backend: &FakeBackend, rebuild: bool) -> (anyhow::Result<()>, String) {
+    let mut warn = Vec::new();
+    let result = open::run(
+        &env.config_dir(),
+        "demo",
+        &open::Options {
+            rebuild,
+            ..Default::default()
+        },
+        backend,
+        &mut warn,
+    );
+    (result, String::from_utf8(warn).unwrap())
+}
+
+fn running() -> Vec<SandboxInfo> {
+    vec![SandboxInfo {
+        name: "sbxm-demo-claude".into(),
+        agent: "claude".into(),
+        status: "running".into(),
+    }]
+}
+
+#[test]
+fn open_checks_a_template_sandbox_against_the_template_variant() {
+    let env = Env::new();
+    env.write_profile("default", PROFILE);
+    let backend = sbx_046();
+    build_template(&env, &backend);
+    new_demo(&env, &backend).0.unwrap();
+    let backend = backend.and_sandboxes(running());
+
+    let (result, warn) = open_demo(&env, &backend, false);
+
+    result.unwrap();
+    assert_eq!(warn, "");
+    assert_eq!(backend.log().last().unwrap(), "attach sbxm-demo-claude");
+}
+
+#[test]
+fn open_hints_at_a_rebuild_once_a_template_is_ready_and_rebuild_uses_it() {
+    let env = Env::new();
+    env.write_profile("default", PROFILE);
+    let backend = sbx_046();
+    new_demo(&env, &backend).0.unwrap();
+    let backend = backend.and_sandboxes(running());
+    let (result, warn) = open_demo(&env, &backend, false);
+    result.unwrap();
+    assert_eq!(warn, "", "no template yet, no hint");
+    let tag = build_template(&env, &backend);
+
+    let (result, warn) = open_demo(&env, &backend, false);
+
+    result.unwrap();
+    assert_eq!(
+        warn,
+        "hint: the template of profile 'default' for claude is ready; `sbxm open demo --harness claude --rebuild` \
+         recreates sbxm-demo-claude from it (its session history is lost; the workspace is kept)\n"
+    );
+    let (result, _) = open_demo(&env, &backend, true);
+    result.unwrap();
+    assert_eq!(
+        backend.creates().pop().unwrap().template.as_deref(),
+        Some(tag.as_str())
+    );
+    assert_eq!(state_template(&env), tag.as_str());
+}
+
+#[test]
+fn a_template_sandbox_whose_runtime_allow_list_changed_is_drift() {
+    let env = Env::new();
+    env.write_profile("default", PROFILE);
+    let backend = sbx_046();
+    build_template(&env, &backend);
+    new_demo(&env, &backend).0.unwrap();
+    let backend = backend.and_sandboxes(running());
+    env.write_profile("default", &PROFILE.replace("crates.io", "docs.rs"));
+
+    let (result, _) = open_demo(&env, &backend, false);
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains("the config of sbxm-demo-claude (profile 'default') changed"),
+        "{message}"
+    );
 }

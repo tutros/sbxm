@@ -194,6 +194,12 @@ pub fn choose(
     }
 }
 
+/// Whether `request.sandbox` could be created from the template now, for `open`'s hint on an
+/// install sandbox (decision 208).
+pub fn ready(request: &Request, backend: &dyn SandboxBackend) -> Result<bool> {
+    Ok(request.merged.template.is_some() && usable(request, backend)?.is_ok())
+}
+
 /// The template's tag, or why it can't be used and how to fix that.
 fn usable(
     request: &Request,
