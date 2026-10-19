@@ -431,3 +431,75 @@ fn a_template_sandbox_whose_runtime_allow_list_changed_is_drift() {
         "{message}"
     );
 }
+
+/// Builds a warm template of `default` from a Rust repo whose `Cargo.lock` holds `lock`.
+fn build_warm_template(env: &Env, lock: &str) -> FakeBackend {
+    let repo = env.tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::write(repo.join("Cargo.toml"), "[package]\nname = \"app\"\n").unwrap();
+    std::fs::write(repo.join("Cargo.lock"), lock).unwrap();
+    let backend = sbx_046().with_exec_output_matching(
+        "cargo metadata",
+        sbxm::backend::ExecOutput {
+            stdout: r#"{"packages":[{"name":"app"}],"version":1}"#.into(),
+            stderr: String::new(),
+            exit_code: Some(0),
+        },
+    );
+    template_build::run(
+        &env.config_dir(),
+        &template_build::Options {
+            profile: "default".into(),
+            harness: Harness::Claude,
+            warm: Some(repo),
+            ..Default::default()
+        },
+        &backend,
+        &sbxm::task::record::SystemProbe,
+        &mut Vec::new(),
+        &mut Vec::new(),
+    )
+    .unwrap();
+    backend
+}
+
+#[test]
+fn a_warm_template_is_used_while_the_workspace_lock_files_match() {
+    let env = Env::new();
+    env.write_profile("default", PROFILE);
+    let backend = build_warm_template(&env, "version = 4\n");
+    let workspace = env.base_dir().join("demo");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("Cargo.lock"), "version = 4\n").unwrap();
+
+    let (result, warn) = new_demo(&env, &backend);
+
+    result.unwrap();
+    assert_eq!(warn, "");
+    assert!(backend.creates().pop().unwrap().template.is_some());
+}
+
+#[test]
+fn a_warm_template_is_stale_when_the_workspace_lock_files_differ() {
+    let env = Env::new();
+    env.write_profile("default", PROFILE);
+    let backend = build_warm_template(&env, "version = 4\n");
+    let workspace = env.base_dir().join("demo");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("Cargo.lock"), "version = 3\n").unwrap();
+
+    let (result, warn) = new_demo(&env, &backend);
+
+    result.unwrap();
+    assert_eq!(
+        warn,
+        format!(
+            "warning: the template of profile 'default' for claude is stale: the lock files of {} \
+             (Cargo.lock) differ from the ones it was warmed with; creating sbxm-demo-claude with \
+             the profile's install steps instead (rebuild it with `sbxm template build default \
+             --warm <repo>`)\n",
+            workspace.display()
+        )
+    );
+    assert_eq!(backend.creates().pop().unwrap().template, None);
+}
