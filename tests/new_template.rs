@@ -705,3 +705,29 @@ fn only_a_strict_codex_sandbox_gets_deny_rules_and_the_check() {
         );
     }
 }
+
+// Slice 6 review M3S6-2: the check runs even when `[template].allow` names every extra host.
+#[test]
+fn a_strict_codex_sandbox_allowing_every_extra_host_is_still_checked() {
+    let env = Env::new();
+    let all = CODEX_EXTRA
+        .iter()
+        .map(|h| format!("\"{h}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
+    env.write_profile(
+        "default",
+        &strict(&PROFILE.replace("[\"crates.io\"]", &format!("[\"crates.io\", {all}]"))),
+    );
+    let backend = sbx_046().with_network_rules(codex_rules(&["telemetry.example.com:443"], &[]));
+    build_codex_template(&env, &backend);
+
+    let err = new_codex(&env, &backend).unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains("allows telemetry.example.com"),
+        "{err:#}"
+    );
+    assert!(backend.creates().pop().unwrap().deny_network.is_empty());
+    assert_eq!(codex_state(&env), serde_json::Value::Null);
+}

@@ -312,17 +312,23 @@ const CODEX_EXTRA_HOSTS: [&str; 9] = [
     "ports.ubuntu.com",
 ];
 
-/// The hosts a sandbox from `template` is created with `--deny-network` for: for a strict `codex`
-/// profile, every extra host of the `codex` kit not in `[template].allow` (decision 221); nothing
-/// otherwise, the other harnesses' kits allowing only their provider (decision 217, spike S15).
-pub fn denied_hosts(merged: &Profile, harness: Harness, template: Option<&str>) -> Vec<String> {
+/// For a strict `codex` sandbox from `template`, the hosts it is created with `--deny-network`
+/// for: every extra host of the `codex` kit not in `[template].allow`, possibly none (decision
+/// 221). `None` for any other sandbox, which [`check_codex_rules`] then leaves unchecked.
+pub fn denied_hosts(
+    merged: &Profile,
+    harness: Harness,
+    template: Option<&str>,
+) -> Option<Vec<String>> {
     match (&merged.template, harness, template) {
-        (Some(table), Harness::Codex, Some(_)) if table.strict => CODEX_EXTRA_HOSTS
-            .iter()
-            .filter(|host| !table.allow.iter().any(|a| a == *host))
-            .map(|host| (*host).to_owned())
-            .collect(),
-        _ => Vec::new(),
+        (Some(table), Harness::Codex, Some(_)) if table.strict => Some(
+            CODEX_EXTRA_HOSTS
+                .iter()
+                .filter(|host| !table.allow.iter().any(|a| a == *host))
+                .map(|host| (*host).to_owned())
+                .collect(),
+        ),
+        _ => None,
     }
 }
 
@@ -332,9 +338,9 @@ pub fn denied_hosts(merged: &Profile, harness: Harness, template: Option<&str>) 
 pub fn check_codex_rules(
     request: &Request,
     backend: &dyn SandboxBackend,
-    denied: &[String],
+    denied: Option<&[String]>,
 ) -> Result<()> {
-    if denied.is_empty() {
+    if denied.is_none() {
         return Ok(());
     }
     let allow = request

@@ -166,9 +166,9 @@ pub fn run(
         skills: profile.skills_store,
         kits: kits.into_iter().map(|(dir, _)| dir).collect(),
         template: template.clone(),
-        deny_network: deny_network.clone(),
+        deny_network: deny_network.clone().unwrap_or_default(),
     })?;
-    template::check_codex_rules(&request, backend, &deny_network)?;
+    template::check_codex_rules(&request, backend, deny_network.as_deref())?;
 
     let created_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let mut state = state::load(&metadata_dir)?.unwrap_or_else(State::default);
