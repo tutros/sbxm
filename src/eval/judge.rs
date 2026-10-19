@@ -269,6 +269,7 @@ pub fn judge_repeat(
                 skills: harness_kits.skills_store,
                 kits: harness_kits.dirs.clone(),
                 template: None,
+                deny_network: Vec::new(),
             })
             .map_err(|e| format!("cannot create the judge sandbox {sandbox}: {e:#}"))?;
         let opts = HeadlessOpts {

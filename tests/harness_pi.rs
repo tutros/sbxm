@@ -51,6 +51,7 @@ fn creates_a_pi_sandbox_from_the_pinned_kit() {
             skills: SkillsStore::ReadOnly,
             kits: vec![env.kit_dir("demo"), pi_kit_dir(&env)],
             template: None,
+            deny_network: Vec::new(),
         }]
     );
     insta::assert_snapshot!(

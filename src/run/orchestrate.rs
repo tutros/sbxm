@@ -240,6 +240,7 @@ impl Pair<'_> {
             skills: harness_kits.skills_store,
             kits: harness_kits.dirs.clone(),
             template: None,
+            deny_network: Vec::new(),
         }) {
             return failed(
                 format!("cannot create sandbox {}: {e:#}", self.sandbox),

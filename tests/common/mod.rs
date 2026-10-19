@@ -358,4 +358,8 @@ impl SandboxBackend for SecretCheckBlocksRestore<'_> {
     fn template_rm(&self, tag: &str) -> anyhow::Result<()> {
         self.inner.template_rm(tag)
     }
+
+    fn network_rules(&self, sandbox: &str) -> anyhow::Result<Vec<sbxm::backend::NetworkRule>> {
+        self.inner.network_rules(sandbox)
+    }
 }

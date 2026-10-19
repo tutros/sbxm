@@ -800,6 +800,7 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
                 skills: harness_kits.skills_store,
                 kits: harness_kits.dirs.clone(),
                 template: None,
+                deny_network: Vec::new(),
             })
             .with_context(|| format!("cannot create sandbox {sandbox}"))?;
         Ok((task, harness_kits))
@@ -1030,6 +1031,7 @@ pub fn prepare_spec_resolved(
                 skills: harness_kits.skills_store,
                 kits: harness_kits.dirs.clone(),
                 template: None,
+                deny_network: Vec::new(),
             })
             .with_context(|| format!("cannot create sandbox {sandbox}"))?;
         Ok((task, harness_kits))
@@ -1531,6 +1533,7 @@ pub(super) fn ensure_worker_sandbox(
             skills: harness_kits.skills_store,
             kits: harness_kits.dirs.clone(),
             template: None,
+            deny_network: Vec::new(),
         })
         .with_context(|| format!("cannot create sandbox {sandbox}"))?;
     Ok(true)
@@ -2954,6 +2957,7 @@ fn open_review_workspace(
             skills: harness_kits.skills_store,
             kits: harness_kits.dirs.clone(),
             template: None,
+            deny_network: Vec::new(),
         })
         .with_context(|| format!("cannot create sandbox {sandbox}"))?;
     Ok(())

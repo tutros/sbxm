@@ -168,6 +168,7 @@ pub fn run(
         skills: profile.skills_store,
         kits: kits.into_iter().map(|(dir, _)| dir).collect(),
         template: template.clone(),
+        deny_network: Vec::new(),
     })?;
 
     let created_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();

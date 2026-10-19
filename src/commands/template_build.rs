@@ -504,6 +504,7 @@ impl Build {
             skills: profile.skills_store,
             kits: kits.into_iter().map(|(dir, _)| dir).collect(),
             template: None,
+            deny_network: Vec::new(),
         })?;
         if let Some(warm) = &self.warm {
             self.warm_up(warm, backend)?;

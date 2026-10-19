@@ -122,6 +122,7 @@ fn fake_can_fail_create_or_exec_for_one_sandbox_only() {
             skills: sbxm::backend::SkillsStore::Off,
             kits: vec![],
             template: None,
+            deny_network: Vec::new(),
         })
     };
 

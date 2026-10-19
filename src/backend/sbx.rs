@@ -9,8 +9,8 @@ use serde::Deserialize;
 use std::path::Path;
 
 use super::{
-    CreateSpec, ExecOutput, ExecSpec, KitValidation, SandboxBackend, SandboxInfo, Stdin,
-    TemplateImage, check_template_tag,
+    CreateSpec, ExecOutput, ExecSpec, KitValidation, NetworkRule, SandboxBackend, SandboxInfo,
+    Stdin, TemplateImage, check_template_tag,
 };
 
 /// Shells out to the `sbx` CLI on PATH.
@@ -180,6 +180,22 @@ impl SandboxBackend for SbxBackend {
     fn template_rm(&self, tag: &str) -> Result<()> {
         run_sbx_unprompted(&template_rm_args(tag)?)
     }
+
+    fn network_rules(&self, sandbox: &str) -> Result<Vec<NetworkRule>> {
+        let output = Command::new("sbx")
+            .args(policy_ls_args(sandbox))
+            .stdin(Stdio::null())
+            .output()
+            .context(SBX_MISSING)?;
+        if !output.status.success() {
+            bail!(
+                "`sbx policy ls {sandbox} --json` failed ({}): {}",
+                output.status,
+                failure_reason(&output.stdout, &output.stderr)
+            );
+        }
+        parse_policy_ls(&String::from_utf8_lossy(&output.stdout))
+    }
 }
 
 /// Runs `sbx <args>` with stdin closed, so a question `sbx` asks (S11: `template save` on a
@@ -333,6 +349,46 @@ fn template_rm_args(tag: &str) -> Result<[&str; 4]> {
     Ok(["template", "rm", "--force", tag])
 }
 
+fn policy_ls_args(sandbox: &str) -> [&str; 4] {
+    ["policy", "ls", sandbox, "--json"]
+}
+
+/// The network rules of `sbx policy ls --json`; filesystem rules are left out.
+fn parse_policy_ls(json: &str) -> Result<Vec<NetworkRule>> {
+    #[derive(Deserialize)]
+    struct Ls {
+        rules: Vec<Rule>,
+    }
+    #[derive(Deserialize)]
+    struct Rule {
+        name: String,
+        resource_type: String,
+        decision: String,
+        #[serde(default)]
+        resources: Vec<String>,
+    }
+    let ls: Ls = serde_json::from_str(json).context("unexpected `sbx policy ls --json` output")?;
+    ls.rules
+        .into_iter()
+        .filter(|rule| rule.resource_type == "network")
+        .map(|rule| {
+            let allow = match rule.decision.as_str() {
+                "allow" => true,
+                "deny" => false,
+                other => bail!(
+                    "unexpected decision '{other}' of network rule '{}' in `sbx policy ls --json`",
+                    rule.name
+                ),
+            };
+            Ok(NetworkRule {
+                name: rule.name,
+                allow,
+                resources: rule.resources,
+            })
+        })
+        .collect()
+}
+
 fn parse_template_ls(json: &str) -> Result<Vec<TemplateImage>> {
     #[derive(Deserialize)]
     struct Ls {
@@ -370,6 +426,9 @@ fn create_args(spec: &CreateSpec) -> Vec<OsString> {
     for kit in &spec.kits {
         args.push("--kit".into());
         args.push(kit.into());
+    }
+    for host in &spec.deny_network {
+        args.extend(["--deny-network".into(), host.into()]);
     }
     args.extend([spec.agent.clone().into(), spec.workspace.clone().into()]);
     args
@@ -417,6 +476,7 @@ mod tests {
             skills: crate::backend::SkillsStore::Off,
             kits: vec![PathBuf::from("/k/common")],
             template: None,
+            deny_network: Vec::new(),
         };
 
         assert_eq!(
@@ -581,6 +641,7 @@ mod template_tests {
             skills: crate::backend::SkillsStore::ReadOnly,
             kits: vec![PathBuf::from("/k/common")],
             template: Some("sbxm-dev-claude:2a9974ee6210-20261015t2210".into()),
+            deny_network: Vec::new(),
         };
 
         assert_eq!(
@@ -697,5 +758,104 @@ mod template_tests {
             images[0].reference(),
             "docker.io/docker/sandbox-templates:claude-code-docker"
         );
+    }
+}
+
+// Milestone 3 slice 6: a strict `codex` sandbox's deny rules and the check of its kit rule
+// (decision 221).
+#[cfg(test)]
+mod policy_tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::backend::NetworkRule;
+
+    /// Captured from `sbx policy ls <sandbox> --json` (v0.46.0, 2026-10-19) for a `codex` sandbox
+    /// created with `--deny-network github.com --deny-network registry.npmjs.org`.
+    const POLICY_LS: &str = include_str!("fixtures/sbx-policy-ls.json");
+
+    #[test]
+    fn create_args_deny_each_host_before_the_agent() {
+        let spec = CreateSpec {
+            name: "sbxm-demo-codex".into(),
+            agent: "codex".into(),
+            workspace: PathBuf::from("/work/demo"),
+            cpus: 4,
+            memory: "8g".into(),
+            skills: crate::backend::SkillsStore::ReadOnly,
+            kits: vec![PathBuf::from("/k/common")],
+            template: None,
+            deny_network: vec!["github.com".into(), "registry.npmjs.org".into()],
+        };
+
+        let args = create_args(&spec);
+
+        assert_eq!(
+            args[args.len() - 8..],
+            [
+                "--kit",
+                "/k/common",
+                "--deny-network",
+                "github.com",
+                "--deny-network",
+                "registry.npmjs.org",
+                "codex",
+                "/work/demo"
+            ]
+            .map(OsString::from)
+        );
+    }
+
+    #[test]
+    fn policy_ls_args_match_sbx_cli() {
+        assert_eq!(
+            policy_ls_args("sbxm-demo-codex"),
+            ["policy", "ls", "sbxm-demo-codex", "--json"]
+        );
+    }
+
+    #[test]
+    fn policy_ls_keeps_the_network_rules_only() {
+        let rules = parse_policy_ls(POLICY_LS).unwrap();
+
+        assert_eq!(rules.len(), 3, "{rules:?}");
+        assert_eq!(
+            rules[0],
+            NetworkRule {
+                name: "kit:sbxm-fixture-policy-codex".into(),
+                allow: true,
+                resources: [
+                    "api.openai.com:443",
+                    "openai.com:443",
+                    "auth.openai.com:443",
+                    "chatgpt.com:443",
+                    "files.openai.com:443",
+                    "registry.npmjs.org:443",
+                    "releases.openai.com:443",
+                    "api.github.com:443",
+                    "github.com:443",
+                    "release-assets.githubusercontent.com:443",
+                    "codeload.github.com:443",
+                    "archive.ubuntu.com:80",
+                    "security.ubuntu.com:80",
+                    "ports.ubuntu.com:80",
+                    "download.docker.com:443",
+                ]
+                .map(String::from)
+                .to_vec(),
+            }
+        );
+        assert!(!rules[1].allow);
+        assert_eq!(rules[1].resources, ["github.com"]);
+        assert_eq!(rules[2].resources, ["registry.npmjs.org"]);
+    }
+
+    #[test]
+    fn a_rule_with_an_unknown_decision_is_an_error() {
+        let json = POLICY_LS.replacen("\"decision\": \"deny\"", "\"decision\": \"ask\"", 1);
+
+        let err = parse_policy_ls(&json).unwrap_err();
+
+        assert!(format!("{err:#}").contains("ask"), "{err:#}");
     }
 }

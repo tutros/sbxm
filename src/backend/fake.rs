@@ -7,7 +7,8 @@ use anyhow::{Result, bail};
 use std::path::Path;
 
 use super::{
-    CreateSpec, ExecOutput, ExecSpec, KitValidation, SandboxBackend, SandboxInfo, TemplateImage,
+    CreateSpec, ExecOutput, ExecSpec, KitValidation, NetworkRule, SandboxBackend, SandboxInfo,
+    TemplateImage,
 };
 
 /// Holds every `exec` of a [`FakeBackend`] until [`ExecGate::open`], so a test
@@ -102,6 +103,8 @@ pub struct FakeBackend {
     fail_secret_services: Arc<std::sync::atomic::AtomicBool>,
     /// What `template_ls` returns; `template_save` adds to it, `template_rm` takes away.
     templates: Mutex<Vec<TemplateImage>>,
+    /// What `network_rules` returns, for every sandbox.
+    network_rules: Vec<NetworkRule>,
 }
 
 /// Runs inside every `exec` (after the gate), so a test can play the agent
@@ -411,6 +414,14 @@ impl FakeBackend {
         self
     }
 
+    /// A backend whose `network_rules` returns these.
+    pub fn with_network_rules(self, network_rules: Vec<NetworkRule>) -> Self {
+        Self {
+            network_rules,
+            ..self
+        }
+    }
+
     fn record(&self, call: &str, name: &str) {
         self.log.lock().unwrap().push(format!("{call} {name}"));
     }
@@ -567,6 +578,11 @@ impl SandboxBackend for FakeBackend {
 
     fn template_ls(&self) -> Result<Vec<TemplateImage>> {
         Ok(self.templates.lock().unwrap().clone())
+    }
+
+    fn network_rules(&self, sandbox: &str) -> Result<Vec<NetworkRule>> {
+        self.record("network_rules", sandbox);
+        Ok(self.network_rules.clone())
     }
 
     fn template_rm(&self, tag: &str) -> Result<()> {

@@ -41,6 +41,20 @@ pub trait SandboxBackend: Send + Sync {
     /// Removes a template sbxm saved (`sbx template rm --force`), even while a sandbox created
     /// from it exists (S11, question 8): callers check that it is unused first (decision 205).
     fn template_rm(&self, tag: &str) -> Result<()>;
+    /// The network rules that apply to a sandbox (`sbx policy ls <sandbox> --json`), for the check
+    /// of a strict `codex` sandbox after its creation (decision 221).
+    fn network_rules(&self, sandbox: &str) -> Result<Vec<NetworkRule>>;
+}
+
+/// One network rule of `sbx policy ls --json`: the `codex` kit's is named `kit:<sandbox>`, and
+/// each `--deny-network` of `sbx create` is one deny rule (decision 221).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkRule {
+    pub name: String,
+    /// `decision` is `allow`; `false` for `deny`.
+    pub allow: bool,
+    /// Hosts, the kit's with a port (`github.com:443`).
+    pub resources: Vec<String>,
 }
 
 /// One entry of `sbx template ls --json`.
@@ -152,6 +166,9 @@ pub struct CreateSpec {
     /// A saved template's tag, passed as `-t TAG --pull never` (S11); the agent's own image when
     /// `None`.
     pub template: Option<String>,
+    /// Hosts passed as `--deny-network`, which win over the agent kit's own allow rule (decision
+    /// 221).
+    pub deny_network: Vec<String>,
 }
 
 /// How `sbx`'s shared skills store is mounted (decision 46). sbxm never uses
