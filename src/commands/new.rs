@@ -99,21 +99,19 @@ pub fn run(
     }
     disk::require(&config, config_dir, &options.disk)?;
     check_secrets(&profile.secrets.services, backend)?;
-    let template = template::choose(
-        &template::Request {
-            base_dir: &config.base_dir,
-            profile_name,
-            profile: &base_profile,
-            merged: &profile,
-            project_config: &metadata_dir.join("sandbox.toml"),
-            harness: options.harness,
-            sandbox: &sandbox,
-            // A warm template's lock files are compared with the workspace's (decision 203(b)).
-            lock_dir: options.seed.as_deref().unwrap_or(&workspace),
-        },
-        backend,
-        warn,
-    )?;
+    let request = template::Request {
+        base_dir: &config.base_dir,
+        profile_name,
+        profile: &base_profile,
+        merged: &profile,
+        project_config: &metadata_dir.join("sandbox.toml"),
+        harness: options.harness,
+        sandbox: &sandbox,
+        // A warm template's lock files are compared with the workspace's (decision 203(b)).
+        lock_dir: options.seed.as_deref().unwrap_or(&workspace),
+    };
+    let template = template::choose(&request, backend, warn)?;
+    let deny_network = template::denied_hosts(&profile, options.harness, template.as_deref());
     let config_hash = match template {
         Some(_) => config::template_config_hash,
         None => config::config_hash,
@@ -168,8 +166,9 @@ pub fn run(
         skills: profile.skills_store,
         kits: kits.into_iter().map(|(dir, _)| dir).collect(),
         template: template.clone(),
-        deny_network: Vec::new(),
+        deny_network: deny_network.clone(),
     })?;
+    template::check_codex_rules(&request, backend, &deny_network)?;
 
     let created_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let mut state = state::load(&metadata_dir)?.unwrap_or_else(State::default);

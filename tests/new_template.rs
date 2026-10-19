@@ -4,7 +4,7 @@
 mod common;
 
 use common::Env;
-use sbxm::backend::{FakeBackend, SandboxInfo};
+use sbxm::backend::{FakeBackend, NetworkRule, SandboxInfo};
 use sbxm::commands::{new, open, template_build};
 use sbxm::config;
 use sbxm::harness::Harness;
@@ -502,4 +502,206 @@ fn a_warm_template_is_stale_when_the_workspace_lock_files_differ() {
         )
     );
     assert_eq!(backend.creates().pop().unwrap().template, None);
+}
+
+// Decision 221: a strict `codex` sandbox denies the `codex` kit's extra hosts and is checked after
+// its creation.
+
+const CODEX_EXTRA: [&str; 9] = [
+    "github.com",
+    "api.github.com",
+    "codeload.github.com",
+    "release-assets.githubusercontent.com",
+    "registry.npmjs.org",
+    "download.docker.com",
+    "archive.ubuntu.com",
+    "security.ubuntu.com",
+    "ports.ubuntu.com",
+];
+
+/// The rules `sbx` reports for a `codex` sandbox: the kit's allow rule (with `extra` added to it)
+/// and one deny rule per host in `denied`.
+fn codex_rules(extra: &[&str], denied: &[&str]) -> Vec<NetworkRule> {
+    let mut kit: Vec<String> = ["api.openai.com:443", "chatgpt.com:443"]
+        .iter()
+        .chain(CODEX_EXTRA.iter())
+        .chain(extra)
+        .map(|h| {
+            if h.contains(':') {
+                h.to_string()
+            } else {
+                format!("{h}:443")
+            }
+        })
+        .collect();
+    kit.dedup();
+    let mut rules = vec![NetworkRule {
+        name: "kit:sbxm-demo-codex".into(),
+        allow: true,
+        resources: kit,
+    }];
+    rules.extend(denied.iter().map(|h| NetworkRule {
+        name: "some-uuid".into(),
+        allow: false,
+        resources: vec![h.to_string()],
+    }));
+    rules
+}
+
+fn build_codex_template(env: &Env, backend: &FakeBackend) {
+    template_build::run(
+        &env.config_dir(),
+        &template_build::Options {
+            profile: "default".into(),
+            harness: Harness::Codex,
+            ..Default::default()
+        },
+        backend,
+        &sbxm::task::record::SystemProbe,
+        &mut Vec::new(),
+        &mut Vec::new(),
+    )
+    .unwrap();
+}
+
+fn new_codex(env: &Env, backend: &FakeBackend) -> anyhow::Result<()> {
+    new::run(
+        &env.config_dir(),
+        "demo",
+        &new::Options {
+            harness: Harness::Codex,
+            ..Default::default()
+        },
+        backend,
+        &mut Vec::new(),
+    )
+}
+
+fn codex_state(env: &Env) -> serde_json::Value {
+    let path = env.base_dir().join(".sbxm").join("demo").join("state.json");
+    match std::fs::read_to_string(path) {
+        Ok(text) => {
+            serde_json::from_str::<serde_json::Value>(&text).unwrap()["sandboxes"]["codex"].clone()
+        }
+        Err(_) => serde_json::Value::Null,
+    }
+}
+
+#[test]
+fn a_strict_codex_sandbox_denies_the_kits_extra_hosts_not_in_its_allow_list() {
+    let env = Env::new();
+    env.write_profile(
+        "default",
+        &strict(&PROFILE.replace("[\"crates.io\"]", "[\"crates.io\", \"github.com\"]")),
+    );
+    let denied: Vec<&str> = CODEX_EXTRA[1..].to_vec();
+    let backend = sbx_046().with_network_rules(codex_rules(&[], &denied));
+    build_codex_template(&env, &backend);
+
+    new_codex(&env, &backend).unwrap();
+
+    let create = backend.creates().pop().unwrap();
+    assert!(create.template.is_some());
+    assert_eq!(create.deny_network, denied);
+    let log = backend.log();
+    assert_eq!(
+        log[log.len() - 2..],
+        ["create sbxm-demo-codex", "network_rules sbxm-demo-codex"]
+    );
+    assert!(codex_state(&env)["template"].is_string());
+}
+
+#[test]
+fn a_strict_codex_sandbox_whose_kit_allows_an_unknown_host_is_removed_and_refused() {
+    let env = Env::new();
+    env.write_profile("default", &strict(PROFILE));
+    let backend =
+        sbx_046().with_network_rules(codex_rules(&["telemetry.example.com:443"], &CODEX_EXTRA));
+    build_codex_template(&env, &backend);
+
+    let err = new_codex(&env, &backend).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains(
+            "the codex kit of sbxm-demo-codex allows telemetry.example.com, which strict profile \
+             'default' doesn't list in [template].allow and sbxm doesn't deny; sbxm removed the \
+             sandbox. Add the host to [template].allow if codex may reach it, or set strict = false"
+        ),
+        "{message}"
+    );
+    let log = backend.log();
+    assert_eq!(
+        log[log.len() - 3..],
+        [
+            "create sbxm-demo-codex",
+            "network_rules sbxm-demo-codex",
+            "rm sbxm-demo-codex"
+        ]
+    );
+    assert_eq!(codex_state(&env), serde_json::Value::Null);
+}
+
+#[test]
+fn a_host_the_kit_allows_but_a_rule_denies_or_the_allow_list_names_passes() {
+    let env = Env::new();
+    env.write_profile(
+        "default",
+        &strict(&PROFILE.replace(
+            "[\"crates.io\"]",
+            "[\"crates.io\", \"telemetry.example.com\"]",
+        )),
+    );
+    let backend = sbx_046().with_network_rules(codex_rules(
+        &["telemetry.example.com:443", "crates.io:443"],
+        &CODEX_EXTRA,
+    ));
+    build_codex_template(&env, &backend);
+
+    new_codex(&env, &backend).unwrap();
+}
+
+#[test]
+fn only_a_strict_codex_sandbox_gets_deny_rules_and_the_check() {
+    for (harness, profile) in [
+        (Harness::Codex, PROFILE.to_owned()),
+        (Harness::Claude, strict(PROFILE)),
+    ] {
+        let env = Env::new();
+        env.write_profile("default", &profile);
+        let backend = sbx_046();
+        template_build::run(
+            &env.config_dir(),
+            &template_build::Options {
+                profile: "default".into(),
+                harness,
+                ..Default::default()
+            },
+            &backend,
+            &sbxm::task::record::SystemProbe,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        new::run(
+            &env.config_dir(),
+            "demo",
+            &new::Options {
+                harness,
+                ..Default::default()
+            },
+            &backend,
+            &mut Vec::new(),
+        )
+        .unwrap();
+
+        let create = backend.creates().pop().unwrap();
+        assert!(create.template.is_some(), "{harness:?}");
+        assert!(create.deny_network.is_empty(), "{harness:?}");
+        assert!(
+            !backend.log().iter().any(|l| l.starts_with("network_rules")),
+            "{harness:?}"
+        );
+    }
 }

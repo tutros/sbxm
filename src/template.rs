@@ -285,3 +285,94 @@ fn added_build_input(profile: &Profile, merged: &Profile) -> Option<&'static str
         None
     }
 }
+
+/// The OpenAI hosts the built-in `codex` kit allows, which a strict `codex` sandbox keeps (decision
+/// 221).
+const CODEX_PROVIDER_HOSTS: [&str; 6] = [
+    "api.openai.com",
+    "openai.com",
+    "auth.openai.com",
+    "chatgpt.com",
+    "files.openai.com",
+    "releases.openai.com",
+];
+
+/// The other hosts the built-in `codex` kit allows (`sbx` 0.46.0, decision 221(a)). They can't be
+/// read before the sandbox exists, so sbxm keeps the list; [`check_codex_rules`] catches a newer
+/// kit that adds one.
+const CODEX_EXTRA_HOSTS: [&str; 9] = [
+    "github.com",
+    "api.github.com",
+    "codeload.github.com",
+    "release-assets.githubusercontent.com",
+    "registry.npmjs.org",
+    "download.docker.com",
+    "archive.ubuntu.com",
+    "security.ubuntu.com",
+    "ports.ubuntu.com",
+];
+
+/// The hosts a sandbox from `template` is created with `--deny-network` for: for a strict `codex`
+/// profile, every extra host of the `codex` kit not in `[template].allow` (decision 221); nothing
+/// otherwise, the other harnesses' kits allowing only their provider (decision 217, spike S15).
+pub fn denied_hosts(merged: &Profile, harness: Harness, template: Option<&str>) -> Vec<String> {
+    match (&merged.template, harness, template) {
+        (Some(table), Harness::Codex, Some(_)) if table.strict => CODEX_EXTRA_HOSTS
+            .iter()
+            .filter(|host| !table.allow.iter().any(|a| a == *host))
+            .map(|host| (*host).to_owned())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// After a strict `codex` sandbox is created and before any agent command: every host its kit
+/// rule allows must be an OpenAI host, in `[template].allow` or denied by a rule, or the sandbox
+/// is removed and refused, so a newer `codex` kit can't widen it silently (decision 221).
+pub fn check_codex_rules(
+    request: &Request,
+    backend: &dyn SandboxBackend,
+    denied: &[String],
+) -> Result<()> {
+    if denied.is_empty() {
+        return Ok(());
+    }
+    let allow = request
+        .merged
+        .template
+        .as_ref()
+        .map(|t| t.allow.as_slice())
+        .unwrap_or_default();
+    let rules = backend.network_rules(request.sandbox)?;
+    let deny_rules: Vec<&str> = rules
+        .iter()
+        .filter(|rule| !rule.allow)
+        .flat_map(|rule| rule.resources.iter().map(|r| host_of(r)))
+        .collect();
+    let kit = format!("kit:{}", request.sandbox);
+    let unexpected = rules
+        .iter()
+        .filter(|rule| rule.allow && rule.name == kit)
+        .flat_map(|rule| rule.resources.iter().map(|r| host_of(r)))
+        .find(|host| {
+            !CODEX_PROVIDER_HOSTS.contains(host)
+                && !allow.iter().any(|a| a == host)
+                && !deny_rules.contains(host)
+        });
+    if let Some(host) = unexpected {
+        backend.remove(request.sandbox)?;
+        bail!(
+            "the codex kit of {} allows {host}, which strict profile '{}' doesn't list in \
+             [template].allow and sbxm doesn't deny; sbxm removed the sandbox. Add the host to \
+             [template].allow if codex may reach it, or set strict = false",
+            request.sandbox,
+            request.profile_name
+        );
+    }
+    Ok(())
+}
+
+/// `github.com` from `github.com:443`.
+fn host_of(resource: &str) -> &str {
+    resource.rsplit_once(':').map_or(resource, |(host, _)| host)
+}
