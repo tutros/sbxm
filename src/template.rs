@@ -2,12 +2,16 @@
 //! they need.
 
 use std::fs;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 
+use crate::backend::SandboxBackend;
+use crate::config::Profile;
 use crate::harness::Harness;
+use crate::kit;
 use crate::run::results::format_timestamp;
 
 /// The `sbx` version templates were tested with (spike S11); older is unsupported (decision 213).
@@ -146,4 +150,132 @@ pub fn lock_hash(repo: &Path, files: &[String]) -> Result<String> {
         bytes.extend_from_slice(&contents);
     }
     Ok(crate::config::sha256_hex(&bytes))
+}
+
+/// What a sandbox of a profile is created from: its template's tag, or `None` for the profile's
+/// install steps.
+pub struct Request<'a> {
+    pub base_dir: &'a Path,
+    pub profile_name: &'a str,
+    /// The profile without the project's `sandbox.toml`.
+    pub profile: &'a Profile,
+    /// The profile with it.
+    pub merged: &'a Profile,
+    /// The project's `sandbox.toml`, named when it adds a build input (decision 214).
+    pub project_config: &'a Path,
+    pub harness: Harness,
+    pub sandbox: &'a str,
+    /// Where the lock files of a warm template are read for the workspace (decision 203(b)).
+    pub lock_dir: &'a Path,
+}
+
+/// The tag to create `request.sandbox` from, `None` for the install steps: a profile without
+/// `[template]` never asks `sbx`; an unusable template refuses a strict profile (decision 200)
+/// and warns once otherwise (decision 203).
+pub fn choose(
+    request: &Request,
+    backend: &dyn SandboxBackend,
+    warn: &mut dyn Write,
+) -> Result<Option<String>> {
+    let Some(table) = &request.merged.template else {
+        return Ok(None);
+    };
+    match usable(request, backend)? {
+        Ok(tag) => Ok(Some(tag)),
+        Err((reason, fix)) if table.strict => bail!("{reason}; {fix}"),
+        Err((reason, fix)) => {
+            writeln!(
+                warn,
+                "warning: {reason}; creating {} with the profile's install steps instead ({fix})",
+                request.sandbox
+            )?;
+            Ok(None)
+        }
+    }
+}
+
+/// The template's tag, or why it can't be used and how to fix that.
+fn usable(
+    request: &Request,
+    backend: &dyn SandboxBackend,
+) -> Result<std::result::Result<String, (String, String)>> {
+    let (profile_name, harness) = (request.profile_name, request.harness);
+    let flag = match harness {
+        Harness::Claude => String::new(),
+        other => format!(" --harness {}", other.as_str()),
+    };
+    if let Some(key) = added_build_input(request.profile, request.merged) {
+        return Ok(Err((
+            format!(
+                "project config {} adds {key}, which the template of profile '{profile_name}' \
+                 can't hold",
+                request.project_config.display()
+            ),
+            "move it to the profile and rebuild the template, or remove it".to_owned(),
+        )));
+    }
+    let version = backend.version()?;
+    if check_sbx_version(&version).is_err() {
+        return Ok(Err((
+            format!("sbx {version} is older than {MIN_SBX_VERSION}, the version templates need"),
+            "upgrade sbx".to_owned(),
+        )));
+    }
+    let missing = || {
+        Err((
+            format!(
+                "profile '{profile_name}' has no template for {}",
+                harness.as_str()
+            ),
+            format!("build one with `sbxm template build {profile_name}{flag}`"),
+        ))
+    };
+    let Some(record) = Record::load(request.base_dir, &key(profile_name, harness))? else {
+        return Ok(missing());
+    };
+    if !backend
+        .template_ls()?
+        .iter()
+        .any(|t| t.reference() == record.tag)
+    {
+        return Ok(missing());
+    }
+    let stale = format!(
+        "the template of profile '{profile_name}' for {} is stale",
+        harness.as_str()
+    );
+    if record.template_hash != kit::template_hash(request.merged, harness, record.warm) {
+        return Ok(Err((
+            format!(
+                "{stale}: the profile's install steps, build allow list or harness kit changed \
+                 since it was built"
+            ),
+            format!("rebuild it with `sbxm template build {profile_name}{flag}`"),
+        )));
+    }
+    if record.warm && lock_hash(request.lock_dir, &record.lock_files).ok() != record.lock_hash {
+        return Ok(Err((
+            format!(
+                "{stale}: the lock files of {} ({}) differ from the ones it was warmed with",
+                request.lock_dir.display(),
+                record.lock_files.join(", ")
+            ),
+            format!("rebuild it with `sbxm template build {profile_name}{flag} --warm <repo>`"),
+        )));
+    }
+    Ok(Ok(record.tag))
+}
+
+/// The first build input the project's `sandbox.toml` adds to the profile (decision 214): the
+/// project config only ever extends these lists.
+fn added_build_input(profile: &Profile, merged: &Profile) -> Option<&'static str> {
+    if merged.setup.install.len() != profile.setup.install.len() {
+        Some("setup.install")
+    } else if merged.network.allow.len() != profile.network.allow.len() {
+        Some("network.allow")
+    } else if merged.network.deny.len() != profile.network.deny.len() {
+        Some("network.deny")
+    } else {
+        None
+    }
 }

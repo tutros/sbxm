@@ -719,6 +719,14 @@ needs both keys, a non-empty `commands` and `lock_files` (`[]` allowed, saying "
 lock file a relative path inside the repo that exists; `[warm]` replaces the cargo steps in a Rust repo too, and
 `template build` reads only that table, so a repo that is not a task target can hold just `[warm]`.
 
+230. **The config hash of a template sandbox (2026-10-18, milestone 3 slice 6, made while building; to confirm; adds
+to [208]):** a profile with `[template]` adds a `template` part to the config hash: `strict` in both variants (it
+decides whether an install sandbox may exist at all, so turning it on is drift for one), and `[template].allow` only
+in a template sandbox's hash (its kit's runtime allow list; an install sandbox never sees it). A profile without
+`[template]` hashes as before, so existing sandboxes show no drift. The two variants of a profile therefore have
+different hashes and their kits sit in different folders. The template's tag is not hashed: a template rebuilt
+later is never drift [208].
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.

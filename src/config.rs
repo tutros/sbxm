@@ -180,8 +180,8 @@ pub struct Profile {
     #[serde(default, rename = "template", skip_serializing)]
     template_table: Option<TemplateTable>,
     /// `[template]`, checked by [`Profile::load`]: its presence opts the
-    /// profile in to prebuilt templates (decision 202). Left out of the
-    /// config hash until the template slices decide how it enters it.
+    /// profile in to prebuilt templates (decision 202). Hashed by hand by
+    /// [`HashInput`], per variant (decision 230).
     #[serde(skip)]
     pub template: Option<Template>,
 }
@@ -476,6 +476,28 @@ pub fn config_hash(
     )
 }
 
+/// [`config_hash`] of a sandbox created from the profile's template: it also
+/// covers `[template].allow`, the runtime allow list that replaces
+/// `network.allow` in its kit (decisions 208, 230).
+pub fn template_config_hash(
+    profile_name: &str,
+    profile: &Profile,
+    resources: &Resources,
+    harness: Harness,
+) -> String {
+    let mut input = HashInput::new(
+        profile_name,
+        profile,
+        resources,
+        harness,
+        harness.agent_kit(),
+    );
+    if let Some(template) = input.template.as_mut() {
+        template.allow = profile.template.as_ref().map(|t| t.allow.as_slice());
+    }
+    sha256_hex(&serde_json::to_vec(&input).expect("config serializes"))
+}
+
 /// [`config_hash`] with the pinned agent-kit ref given, so a test can show
 /// that re-pinning changes the hash (decisions 55, 104).
 fn config_hash_with_kit(
@@ -517,6 +539,19 @@ struct HashInput<'a> {
     /// The pinned kit a Pi or Antigravity sandbox is created from.
     #[serde(skip_serializing_if = "Option::is_none")]
     agent_kit: Option<&'a str>,
+    /// Absent for a profile without `[template]`, so older hashes still match.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    template: Option<TemplateInput<'a>>,
+}
+
+/// The part of `[template]` a sandbox's hash covers (decision 230): `strict`
+/// in both variants, since it decides whether an install sandbox may exist,
+/// and `allow` only in a template sandbox's.
+#[derive(Serialize)]
+struct TemplateInput<'a> {
+    strict: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allow: Option<&'a [String]>,
 }
 
 impl<'a> HashInput<'a> {
@@ -527,6 +562,7 @@ impl<'a> HashInput<'a> {
         harness: Harness,
         agent_kit: Option<&'a str>,
     ) -> Self {
+        let profile_template = profile.template.as_ref();
         // Settings that don't reach the harness mustn't show as drift there.
         let profile = harness.applied(profile);
         HashInput {
@@ -536,6 +572,10 @@ impl<'a> HashInput<'a> {
             profile,
             resources,
             agent_kit,
+            template: profile_template.map(|t| TemplateInput {
+                strict: t.strict,
+                allow: None,
+            }),
         }
     }
 }
