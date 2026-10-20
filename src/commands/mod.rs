@@ -25,6 +25,7 @@ pub mod task_start;
 pub mod task_states;
 pub mod task_status;
 pub mod template_build;
+pub mod template_ls;
 pub mod template_rm;
 
 use std::io::Write;

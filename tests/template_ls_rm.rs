@@ -1,11 +1,11 @@
-//! Milestone 3 slice 7: `sbxm template rm` (decision 205(b)).
+//! Milestone 3 slice 7: `sbxm template ls` and `sbxm template rm` (decisions 205, 206).
 
 mod common;
 
 use assert_cmd::Command;
 use common::Env;
 use sbxm::backend::{FakeBackend, SandboxBackend, TemplateImage};
-use sbxm::commands::template_rm;
+use sbxm::commands::{template_ls, template_rm};
 use sbxm::harness::Harness;
 use sbxm::template::Record;
 
@@ -314,4 +314,126 @@ fn the_cli_runs_template_rm_and_reports_a_refusal() {
         stderr.contains("profile 'default' has no template for codex"),
         "{stderr}"
     );
+}
+
+// `template ls`.
+
+fn ls(env: &Env, backend: &FakeBackend) -> String {
+    let mut out = Vec::new();
+    template_ls::run(
+        &env.config_dir(),
+        &template_ls::Options {
+            now: Some(NOW + 90_000),
+        },
+        backend,
+        &mut out,
+    )
+    .unwrap();
+    String::from_utf8(out).unwrap()
+}
+
+#[test]
+fn ls_without_records_says_how_to_build_one_and_asks_no_sbx() {
+    let env = Env::new();
+    let backend = backend_with(&[]);
+
+    let out = ls(&env, &backend);
+
+    assert_eq!(
+        out,
+        "no templates; build one with `sbxm template build <profile>`\n"
+    );
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+}
+
+#[test]
+fn ls_prints_one_line_per_record() {
+    let env = Env::new();
+    write_record(&env, Harness::Claude, TAG, &[]);
+
+    let out = ls(&env, &backend_with(&[TAG]));
+
+    assert_eq!(
+        out,
+        format!("default  claude  {TAG}  cold  1.4 GiB  1d01h old  used by 0\n")
+    );
+}
+
+#[test]
+fn ls_flags_a_record_whose_image_is_gone() {
+    let env = Env::new();
+    write_record(&env, Harness::Claude, TAG, &[]);
+
+    let out = ls(&env, &backend_with(&[]));
+
+    assert!(
+        out.trim_end().ends_with(
+            "used by 0  image missing; rebuild it with `sbxm template build default` or \
+             remove the record with `sbxm template rm default`"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn ls_counts_the_sandboxes_and_tasks_using_any_of_a_record_s_tags() {
+    let env = Env::new();
+    write_record(&env, Harness::Claude, TAG, &[OLD]);
+    sandbox_uses(&env, OLD);
+    task_uses(&env, TAG);
+
+    let out = ls(&env, &backend_with(&[OLD, TAG]));
+
+    assert!(out.contains("used by 2  (+1 previous)"), "{out}");
+}
+
+#[test]
+fn ls_skips_build_locks_and_temporary_files_and_sorts_the_records() {
+    let env = Env::new();
+    let codex = "sbxm-default-codex:0123456789ab-20231114t2213";
+    write_record(&env, Harness::Codex, codex, &[]);
+    write_record(&env, Harness::Claude, TAG, &[]);
+    let dir = env.base_dir().join(".sbxm").join("templates");
+    std::fs::write(dir.join("default-claude.build.json"), "{}").unwrap();
+    std::fs::write(dir.join("default-claude.json.tmp"), "{}").unwrap();
+    std::fs::create_dir_all(dir.join("build").join("default-claude")).unwrap();
+
+    let out = ls(&env, &backend_with(&[TAG, codex]));
+
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 2, "{out}");
+    assert!(lines[0].starts_with("default  claude  "), "{out}");
+    assert!(lines[1].starts_with("default  codex  "), "{out}");
+}
+
+#[test]
+fn the_cli_runs_template_ls() {
+    let env = Env::new();
+
+    let output = Command::cargo_bin("sbxm")
+        .unwrap()
+        .env("SBXM_CONFIG_DIR", env.config_dir())
+        .args(["template", "ls"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8(output.stdout).unwrap(),
+        "no templates; build one with `sbxm template build <profile>`\n"
+    );
+}
+
+#[test]
+fn ls_still_lists_when_a_task_record_cannot_be_read() {
+    let env = Env::new();
+    write_record(&env, Harness::Claude, TAG, &[]);
+    let id = task_uses(&env, TAG);
+    let path = sbxm::task::record::task_dir(&env.base_dir(), &id).join("task.json");
+    std::fs::write(&path, "not json").unwrap();
+
+    let out = ls(&env, &backend_with(&[TAG]));
+
+    assert!(out.contains("old  used by ? ("), "{out}");
+    assert!(out.contains("task.json isn't valid JSON"), "{out}");
 }

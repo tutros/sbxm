@@ -775,6 +775,14 @@ fn main() -> anyhow::Result<()> {
             &mut std::io::stderr(),
         ),
         Command::Template {
+            command: TemplateCommand::Ls,
+        } => commands::template_ls::run(
+            &config::config_dir()?,
+            &commands::template_ls::Options::default(),
+            &SbxBackend,
+            &mut std::io::stdout(),
+        ),
+        Command::Template {
             command: TemplateCommand::Rm { profile, harness },
         } => commands::template_rm::run(
             &config::config_dir()?,

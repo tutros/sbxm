@@ -157,6 +157,9 @@ pub enum TemplateCommand {
         #[arg(long)]
         ignore_disk: bool,
     },
+    /// List the templates sbxm built, with their size, age and how many sandboxes and tasks
+    /// use them.
+    Ls,
     /// Remove a profile's template and its record; refused while a sandbox or task uses it.
     Rm {
         /// The profile whose template goes.
