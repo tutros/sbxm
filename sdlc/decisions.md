@@ -727,6 +727,23 @@ in a template sandbox's hash (its kit's runtime allow list; an install sandbox n
 different hashes and their kits sit in different folders. The template's tag is not hashed: a template rebuilt
 later is never drift [208].
 
+231. **A strict profile is refused with the `pi` harness for now (2026-10-19, milestone 3 slice 6 review M3S6-1, the
+user agreed with the recommendation; adds to [200], [218]):** Pi's own kit allows `registry.npmjs.org` besides its
+provider (spike S15, question 4), so a strict `pi` sandbox would reach a host outside `[template].allow`. `new` (and
+every later command that creates from a template) refuses a strict profile with `pi` before any write, naming the
+host and the fix (`strict = false`, or `claude`/`codex`). Non-strict `pi` templates stay supported. Deferred: deny
+the host as [221] does for `codex`, after a bounded real-`sbx` check that Pi still works without it (issue #266,
+trigger: a strict profile wanted with `pi`).
+
+232. **The check after a strict `codex` creation fails closed (2026-10-19, milestone 3 slice 6 review Q-1, the user
+agreed with the recommendation; adds to [221]):** sbxm checks every network allow rule `sbx policy ls` reports as
+scoped to the sandbox (`scope: sandbox:<name>`), not only the kit's: each host must be an OpenAI host, in
+`[template].allow` or denied by a rule. If no `kit:<sandbox>` allow rule is reported at all (a future `sbx` renaming
+it, say), sbxm can't see what the kit allows, so it removes the sandbox and refuses too. A strict sandbox is kept
+only when sbxm can see exactly what it allows; a change in `sbx` makes strict `codex` refuse until sbxm is updated.
+Global rules (the user's own `sbx policy allow` for every sandbox) are left out: they are the user's deliberate
+setting, outside any profile.
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.

@@ -171,7 +171,8 @@ pub struct Request<'a> {
 
 /// The tag to create `request.sandbox` from, `None` for the install steps: a profile without
 /// `[template]` never asks `sbx`; an unusable template refuses a strict profile (decision 200)
-/// and warns once otherwise (decision 203).
+/// and warns once otherwise (decision 203). A strict profile is refused with `pi`, whose kit
+/// allows a host strict mode can't close yet (decision 231).
 pub fn choose(
     request: &Request,
     backend: &dyn SandboxBackend,
@@ -180,6 +181,14 @@ pub fn choose(
     let Some(table) = &request.merged.template else {
         return Ok(None);
     };
+    if table.strict && request.harness == Harness::Pi {
+        bail!(
+            "strict profile '{}' can't be used with the pi harness yet: pi's own kit allows \
+             registry.npmjs.org, which strict mode can't close (decision 231); set strict = false \
+             in the profile, or use --harness claude or codex",
+            request.profile_name
+        );
+    }
     match usable(request, backend)? {
         Ok(tag) => Ok(Some(tag)),
         Err((reason, fix)) if table.strict => bail!("{reason}; {fix}"),

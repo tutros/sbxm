@@ -731,3 +731,52 @@ fn a_strict_codex_sandbox_allowing_every_extra_host_is_still_checked() {
     assert!(backend.creates().pop().unwrap().deny_network.is_empty());
     assert_eq!(codex_state(&env), serde_json::Value::Null);
 }
+
+// Slice 6 review M3S6-1, decision 231: Pi's kit allows registry.npmjs.org, which strict mode can't
+// close yet.
+#[test]
+fn a_strict_profile_is_refused_with_pi_before_any_write() {
+    let env = Env::new();
+    env.write_profile("default", PROFILE);
+    let backend = sbx_046();
+    template_build::run(
+        &env.config_dir(),
+        &template_build::Options {
+            profile: "default".into(),
+            harness: Harness::Pi,
+            ..Default::default()
+        },
+        &backend,
+        &sbxm::task::record::SystemProbe,
+        &mut Vec::new(),
+        &mut Vec::new(),
+    )
+    .unwrap();
+    env.write_profile("default", &strict(PROFILE));
+    let creates = backend.creates().len();
+
+    let err = new::run(
+        &env.config_dir(),
+        "demo",
+        &new::Options {
+            harness: Harness::Pi,
+            ..Default::default()
+        },
+        &backend,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains(
+            "strict profile 'default' can't be used with the pi harness yet: pi's own kit allows \
+             registry.npmjs.org, which strict mode can't close (decision 231); set strict = false \
+             in the profile, or use --harness claude or codex"
+        ),
+        "{message}"
+    );
+    assert_eq!(backend.creates().len(), creates);
+    assert!(!env.base_dir().join("demo").exists());
+    assert!(!env.base_dir().join(".sbxm").join("demo").exists());
+}
