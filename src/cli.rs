@@ -157,6 +157,14 @@ pub enum TemplateCommand {
         #[arg(long)]
         ignore_disk: bool,
     },
+    /// Remove a profile's template and its record; refused while a sandbox or task uses it.
+    Rm {
+        /// The profile whose template goes.
+        profile: String,
+        /// The harness the template is for.
+        #[arg(long, value_enum, default_value_t)]
+        harness: Harness,
+    },
 }
 
 /// `sbxm run <config>` launches a comparison; `sbxm run init` writes a starter

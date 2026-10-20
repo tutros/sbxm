@@ -756,7 +756,7 @@ fn parse_skills_store(value: Option<&str>, source: &str, path: &Path) -> Result<
 
 /// Profile names become directory names, so they use the project-name
 /// characters (`default` is allowed here).
-fn validate_profile_name(name: &str) -> Result<()> {
+pub fn validate_profile_name(name: &str) -> Result<()> {
     let allowed = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-';
     if name.is_empty() || name.len() > 40 || name.starts_with('-') || !name.chars().all(allowed) {
         bail!(
