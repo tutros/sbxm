@@ -744,6 +744,12 @@ only when sbxm can see exactly what it allows; a change in `sbx` makes strict `c
 Global rules (the user's own `sbx policy allow` for every sandbox) are left out: they are the user's deliberate
 setting, outside any profile.
 
+233. **A `new` racing `template rm` is accepted (2026-10-20, milestone 3 slice 7 review Q-1, the user accepted the
+risk; adds to [227]):** `template rm` checks for users, then removes. A sandbox creation that chose the tag and
+created its sandbox but hasn't written `state.json` or `task.json` yet is invisible to that check, so `rm` can remove
+the tag that sandbox was just created from. The window is seconds between two local commands the user starts by
+hand, and `rm` is deliberate; no lock covers sandbox creation ([227]).
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.
