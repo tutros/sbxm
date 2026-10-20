@@ -139,17 +139,47 @@ impl Record {
 /// Each file's path and length go in before its contents, so moving bytes between files changes
 /// the hash.
 pub fn lock_hash(repo: &Path, files: &[String]) -> Result<String> {
-    let mut bytes = Vec::new();
-    for file in files {
-        let path = repo.join(file);
-        let contents =
-            fs::read(&path).with_context(|| format!("cannot read lock file {}", path.display()))?;
-        bytes.extend_from_slice(file.as_bytes());
-        bytes.push(0);
-        bytes.extend_from_slice(&(contents.len() as u64).to_le_bytes());
-        bytes.extend_from_slice(&contents);
+    Locks::Dir(repo).hash(files)
+}
+
+/// Where a sandbox's lock files are read for a warm template's check (decision 203(b)): a host
+/// folder, or a commit in a task's host-owned `repo.git`, so no host git runs in an agent's clone
+/// (decisions 159, 216).
+#[derive(Debug, Clone, Copy)]
+pub enum Locks<'a> {
+    Dir(&'a Path),
+    Commit { repo_git: &'a Path, commit: &'a str },
+}
+
+impl Locks<'_> {
+    /// [`lock_hash`] of `files` read from here.
+    pub fn hash(&self, files: &[String]) -> Result<String> {
+        let mut bytes = Vec::new();
+        for file in files {
+            let contents = self.read(file)?;
+            bytes.extend_from_slice(file.as_bytes());
+            bytes.push(0);
+            bytes.extend_from_slice(&(contents.len() as u64).to_le_bytes());
+            bytes.extend_from_slice(&contents);
+        }
+        Ok(crate::config::sha256_hex(&bytes))
     }
-    Ok(crate::config::sha256_hex(&bytes))
+
+    fn read(&self, file: &str) -> Result<Vec<u8>> {
+        match self {
+            Locks::Dir(dir) => {
+                let path = dir.join(file);
+                fs::read(&path).with_context(|| format!("cannot read lock file {}", path.display()))
+            }
+            Locks::Commit { repo_git, commit } => crate::git::run_bytes(
+                repo_git,
+                Some(repo_git),
+                None,
+                &["cat-file", "blob", &format!("{commit}:{file}")],
+            )
+            .with_context(|| format!("cannot read lock file {file} at commit {commit}")),
+        }
+    }
 }
 
 /// What a sandbox of a profile is created from: its template's tag, or `None` for the profile's
