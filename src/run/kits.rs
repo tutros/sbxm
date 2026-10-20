@@ -95,7 +95,15 @@ pub fn build(
             wanted.push(pair);
         }
     }
-    build_pairs(&global, run_profile, &overrides, wanted, kits_root, backend)
+    build_pairs(
+        &global,
+        run_profile,
+        &overrides,
+        wanted,
+        None,
+        kits_root,
+        backend,
+    )
 }
 
 /// `cpus` and `memory` that replace the global `[resources]` for one set of kits.
@@ -106,12 +114,14 @@ pub struct Overrides {
 }
 
 /// Kits for `harnesses` under one `profile`, for callers with no run-config (`sbxm task`).
-/// Same writing, hashing and validation as [`build`].
+/// Same writing, hashing and validation as [`build`]. With a `template` tag, the baked variant
+/// for a sandbox created from it (decisions 200, 230).
 pub fn build_for(
     config_dir: &Path,
     profile: &str,
     harnesses: &[Harness],
     overrides: &Overrides,
+    template: Option<&str>,
     kits_root: &Path,
     backend: &dyn SandboxBackend,
 ) -> Result<RunKits> {
@@ -128,6 +138,7 @@ pub fn build_for(
         profile.to_owned(),
         overrides,
         wanted,
+        template,
         kits_root,
         backend,
     )
@@ -138,6 +149,7 @@ fn build_pairs(
     run_profile: String,
     overrides: &Overrides,
     wanted: Vec<(String, Harness)>,
+    template: Option<&str>,
     kits_root: &Path,
     backend: &dyn SandboxBackend,
 ) -> Result<RunKits> {
@@ -162,12 +174,21 @@ fn build_pairs(
     let mut all = Vec::new();
     for (profile_name, harness) in wanted {
         let profile = profile_named(&profile_name);
-        let config_hash = config::config_hash(&profile_name, profile, &resources, harness);
+        let table = template.and(profile.template.as_ref());
+        let config_hash = match table {
+            Some(_) => config::template_config_hash,
+            None => config::config_hash,
+        }(&profile_name, profile, &resources, harness);
         let dir = kits_root.join(&config_hash[..12]);
-        let specs: Vec<_> = kit::all(&profile_name, profile, &config_hash, harness)
-            .map(|(name, spec)| (dir.join(name), spec))
-            .into_iter()
-            .collect();
+        let specs: Vec<_> = match table {
+            Some(table) => {
+                kit::all_from_template(&profile_name, profile, table, &config_hash, harness)
+            }
+            None => kit::all(&profile_name, profile, &config_hash, harness),
+        }
+        .map(|(name, spec)| (dir.join(name), spec))
+        .into_iter()
+        .collect();
         for (path, spec) in &specs {
             kit::write(path, spec)?;
         }

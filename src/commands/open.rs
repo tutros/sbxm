@@ -74,7 +74,7 @@ pub fn run(
                 project_config: &metadata_dir.join("sandbox.toml"),
                 harness,
                 sandbox: &sandbox,
-                lock_dir: &entry.workspace,
+                locks: template::Locks::Dir(&entry.workspace),
             };
             if entry.template.is_none() && template::ready(&request, backend)? {
                 writeln!(

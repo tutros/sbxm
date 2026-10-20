@@ -108,7 +108,7 @@ pub fn run(
         harness: options.harness,
         sandbox: &sandbox,
         // A warm template's lock files are compared with the workspace's (decision 203(b)).
-        lock_dir: options.seed.as_deref().unwrap_or(&workspace),
+        locks: template::Locks::Dir(options.seed.as_deref().unwrap_or(&workspace)),
     };
     let template = template::choose(&request, backend, warn)?;
     let deny_network = template::denied_hosts(&profile, options.harness, template.as_deref());
@@ -168,7 +168,13 @@ pub fn run(
         template: template.clone(),
         deny_network: deny_network.clone().unwrap_or_default(),
     })?;
-    template::check_codex_rules(&request, backend, deny_network.as_deref())?;
+    template::check_codex_rules(
+        profile_name,
+        &profile,
+        &sandbox,
+        backend,
+        deny_network.as_deref(),
+    )?;
 
     let created_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let mut state = state::load(&metadata_dir)?.unwrap_or_else(State::default);

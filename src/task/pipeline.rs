@@ -30,6 +30,7 @@ use crate::headless::{self, HeadlessOpts, RunStatus};
 use crate::run::kits::{self, HarnessKits, Overrides};
 use crate::run::orchestrate::in_sandbox_path;
 use crate::run::results::now;
+use crate::template::{self, Locks};
 
 /// Folder inside the workspace for sbxm's files (the issue, the prompt, `result.md`, the bundle).
 pub const AGENT_DIR: &str = ".sbxm-task";
@@ -202,6 +203,7 @@ pub fn prepare_pr(ctx: &Ctx, pr: &PrInfo) -> Result<Prepared> {
                 cpus: ctx.config.sandbox.cpus,
                 memory: ctx.config.sandbox.memory.clone(),
             },
+            None,
             &meta.join("kits-review"),
             ctx.backend,
         )?;
@@ -713,22 +715,6 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
 
     let sandbox = format!("sbxm-task-{id}-{}", worker.harness.as_str());
     let built = (|| -> Result<(Record, HarnessKits)> {
-        let kit_set = kits::build_for(
-            ctx.config_dir,
-            &ctx.config.sandbox.profile,
-            &[worker.harness],
-            &Overrides {
-                cpus: ctx.config.sandbox.cpus,
-                memory: ctx.config.sandbox.memory.clone(),
-            },
-            &meta.join("kits"),
-            ctx.backend,
-        )?;
-        let harness_kits = kit_set
-            .get(worker.harness)
-            .cloned()
-            .context("no kits were built for the worker's harness")?;
-
         let repo_git = meta.join("repo.git");
         repo::clone_bare(ctx.clone_source, &repo_git)?;
         let continued = match &continues {
@@ -742,6 +728,26 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
                 None
             }
         };
+        // The worker's starting commit, or the PR head it continues from (decision 216).
+        let start = repo::branch_tip(&repo_git, &branch)?;
+        let plan = plan_sandbox(
+            ctx.config_dir,
+            ctx.backend,
+            &ctx.config.sandbox.profile,
+            worker.harness,
+            &sandbox,
+            &Overrides {
+                cpus: ctx.config.sandbox.cpus,
+                memory: ctx.config.sandbox.memory.clone(),
+            },
+            &meta.join("kits"),
+            Locks::Commit {
+                repo_git: &repo_git,
+                commit: &start,
+            },
+            &mut warnings,
+        )?;
+        let (kit_set, harness_kits) = (&plan.kit_set, plan.kits.clone());
         repo::clone_workspace(&repo_git, &workspace, &branch, ctx.identity)?;
 
         // The agent's `git add -A` must not pick up sbxm's own files.
@@ -785,24 +791,12 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
             profile: Some(ctx.config.sandbox.profile.clone()),
             cpus: Some(kit_set.resources.cpus),
             memory: Some(kit_set.resources.memory.clone()),
-            template: None,
+            template: plan.template.clone(),
             run: None,
         });
         record::write(&meta, &task)?;
 
-        ctx.backend
-            .create(&CreateSpec {
-                name: sandbox.clone(),
-                agent: worker.harness.agent_arg().into(),
-                workspace: workspace.clone(),
-                cpus: kit_set.resources.cpus,
-                memory: kit_set.resources.memory.clone(),
-                skills: harness_kits.skills_store,
-                kits: harness_kits.dirs.clone(),
-                template: None,
-                deny_network: Vec::new(),
-            })
-            .with_context(|| format!("cannot create sandbox {sandbox}"))?;
+        plan.create(ctx.backend, &sandbox, worker.harness, &workspace)?;
         Ok((task, harness_kits))
     })();
 
@@ -955,25 +949,29 @@ pub fn prepare_spec_resolved(
 
     let sandbox = format!("sbxm-task-{id}-{}", worker.harness.as_str());
     let built = (|| -> Result<(Record, HarnessKits)> {
-        let kit_set = kits::build_for(
+        let repo_git = meta.join("repo.git");
+        repo::clone_bare(ctx.clone_source, &repo_git)?;
+        repo::create_branch(&repo_git, id, ctx.base_branch)?;
+        // The worker's starting commit (decision 216).
+        let start = repo::branch_tip(&repo_git, id)?;
+        let plan = plan_sandbox(
             ctx.config_dir,
+            ctx.backend,
             &ctx.config.sandbox.profile,
-            &[worker.harness],
+            worker.harness,
+            &sandbox,
             &Overrides {
                 cpus: ctx.config.sandbox.cpus,
                 memory: ctx.config.sandbox.memory.clone(),
             },
             &meta.join("kits"),
-            ctx.backend,
+            Locks::Commit {
+                repo_git: &repo_git,
+                commit: &start,
+            },
+            &mut warnings,
         )?;
-        let harness_kits = kit_set
-            .get(worker.harness)
-            .cloned()
-            .context("no kits were built for the worker's harness")?;
-
-        let repo_git = meta.join("repo.git");
-        repo::clone_bare(ctx.clone_source, &repo_git)?;
-        repo::create_branch(&repo_git, id, ctx.base_branch)?;
+        let (kit_set, harness_kits) = (&plan.kit_set, plan.kits.clone());
         repo::clone_workspace(&repo_git, &workspace, id, ctx.identity)?;
 
         // The agent's `git add -A` must not pick up sbxm's own files.
@@ -1016,24 +1014,12 @@ pub fn prepare_spec_resolved(
             profile: Some(ctx.config.sandbox.profile.clone()),
             cpus: Some(kit_set.resources.cpus),
             memory: Some(kit_set.resources.memory.clone()),
-            template: None,
+            template: plan.template.clone(),
             run: None,
         });
         record::write(&meta, &task)?;
 
-        ctx.backend
-            .create(&CreateSpec {
-                name: sandbox.clone(),
-                agent: worker.harness.agent_arg().into(),
-                workspace: workspace.clone(),
-                cpus: kit_set.resources.cpus,
-                memory: kit_set.resources.memory.clone(),
-                skills: harness_kits.skills_store,
-                kits: harness_kits.dirs.clone(),
-                template: None,
-                deny_network: Vec::new(),
-            })
-            .with_context(|| format!("cannot create sandbox {sandbox}"))?;
+        plan.create(ctx.backend, &sandbox, worker.harness, &workspace)?;
         Ok((task, harness_kits))
     })();
 
@@ -1481,6 +1467,110 @@ pub fn check_worker(env: &TaskEnv, prepared: &Prepared) -> Result<()> {
     )
 }
 
+/// What a task's sandbox is created from (decisions 206, 216): the profile's template when it can
+/// be used with the lock files at the commit the sandbox checks out, else its install steps (or a
+/// refusal for a strict profile, decision 200); the kits of that variant, and the hosts a strict
+/// `codex` sandbox denies (decision 221).
+pub(super) struct SandboxPlan {
+    pub(super) kit_set: kits::RunKits,
+    pub(super) kits: HarnessKits,
+    pub(super) template: Option<String>,
+    deny_network: Option<Vec<String>>,
+    profile_name: String,
+    profile: Profile,
+}
+
+/// Chooses and builds a [`SandboxPlan`] before anything is created; an unusable template's
+/// warning goes to `warnings`.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn plan_sandbox(
+    config_dir: &Path,
+    backend: &dyn SandboxBackend,
+    profile_name: &str,
+    harness: Harness,
+    sandbox: &str,
+    overrides: &Overrides,
+    kits_root: &Path,
+    locks: Locks,
+    warnings: &mut Vec<String>,
+) -> Result<SandboxPlan> {
+    let global = GlobalConfig::load(config_dir)?;
+    let profile = Profile::load(global.profiles_dir(), profile_name)?;
+    let request = template::Request {
+        base_dir: &global.base_dir,
+        profile_name,
+        profile: &profile,
+        // A task has no project `sandbox.toml`.
+        merged: &profile,
+        project_config: Path::new(""),
+        harness,
+        sandbox,
+        locks,
+    };
+    let mut warned = Vec::new();
+    let template = template::choose(&request, backend, &mut warned)?;
+    warnings.extend(
+        String::from_utf8_lossy(&warned)
+            .lines()
+            .map(|l| l.strip_prefix("warning: ").unwrap_or(l).to_owned()),
+    );
+    let deny_network = template::denied_hosts(&profile, harness, template.as_deref());
+    let kit_set = kits::build_for(
+        config_dir,
+        profile_name,
+        &[harness],
+        overrides,
+        template.as_deref(),
+        kits_root,
+        backend,
+    )?;
+    let kits = kit_set
+        .get(harness)
+        .cloned()
+        .with_context(|| format!("no kits were built for {sandbox}'s harness"))?;
+    Ok(SandboxPlan {
+        kit_set,
+        kits,
+        template,
+        deny_network,
+        profile_name: profile_name.to_owned(),
+        profile,
+    })
+}
+
+impl SandboxPlan {
+    /// Creates `sandbox` over `workspace`, then holds a strict `codex` sandbox to its allow list
+    /// (decisions 221, 232).
+    pub(super) fn create(
+        &self,
+        backend: &dyn SandboxBackend,
+        sandbox: &str,
+        harness: Harness,
+        workspace: &Path,
+    ) -> Result<()> {
+        backend
+            .create(&CreateSpec {
+                name: sandbox.to_owned(),
+                agent: harness.agent_arg().into(),
+                workspace: workspace.to_path_buf(),
+                cpus: self.kit_set.resources.cpus,
+                memory: self.kit_set.resources.memory.clone(),
+                skills: self.kits.skills_store,
+                kits: self.kits.dirs.clone(),
+                template: self.template.clone(),
+                deny_network: self.deny_network.clone().unwrap_or_default(),
+            })
+            .with_context(|| format!("cannot create sandbox {sandbox}"))?;
+        template::check_codex_rules(
+            &self.profile_name,
+            &self.profile,
+            sandbox,
+            backend,
+            self.deny_network.as_deref(),
+        )
+    }
+}
+
 /// Makes the worker's sandbox again from the profile and resources its record saved when it is
 /// gone (`task resume`, issue 118; a sandbox can vanish between stages, workflow note G17), over
 /// the same clone: the kits are built again under the task's `kits/`. With `replace`, a sandbox
@@ -1516,6 +1606,7 @@ pub(super) fn ensure_worker_sandbox(
             cpus: Some(resources.cpus),
             memory: Some(resources.memory.clone()),
         },
+        None,
         &prepared.meta.join("kits"),
         env.backend,
     )?;
@@ -2873,6 +2964,7 @@ fn open_review_workspace(
             cpus: env.config.sandbox.cpus,
             memory: env.config.sandbox.memory.clone(),
         },
+        None,
         &prepared.meta.join("kits-review"),
         env.backend,
     )?;

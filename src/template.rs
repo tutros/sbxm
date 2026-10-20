@@ -182,6 +182,15 @@ impl Locks<'_> {
     }
 }
 
+impl std::fmt::Display for Locks<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Locks::Dir(dir) => write!(f, "{}", dir.display()),
+            Locks::Commit { commit, .. } => write!(f, "commit {commit}"),
+        }
+    }
+}
+
 /// What a sandbox of a profile is created from: its template's tag, or `None` for the profile's
 /// install steps.
 pub struct Request<'a> {
@@ -195,8 +204,8 @@ pub struct Request<'a> {
     pub project_config: &'a Path,
     pub harness: Harness,
     pub sandbox: &'a str,
-    /// Where the lock files of a warm template are read for the workspace (decision 203(b)).
-    pub lock_dir: &'a Path,
+    /// Where the lock files of a warm template are read for the workspace (decisions 203(b), 216).
+    pub locks: Locks<'a>,
 }
 
 /// The tag to create `request.sandbox` from, `None` for the install steps: a profile without
@@ -298,11 +307,11 @@ fn usable(
             format!("rebuild it with `sbxm template build {profile_name}{flag}`"),
         )));
     }
-    if record.warm && lock_hash(request.lock_dir, &record.lock_files).ok() != record.lock_hash {
+    if record.warm && request.locks.hash(&record.lock_files).ok() != record.lock_hash {
         return Ok(Err((
             format!(
                 "{stale}: the lock files of {} ({}) differ from the ones it was warmed with",
-                request.lock_dir.display(),
+                request.locks,
                 record.lock_files.join(", ")
             ),
             format!("rebuild it with `sbxm template build {profile_name}{flag} --warm <repo>`"),
@@ -377,30 +386,27 @@ pub fn denied_hosts(
 /// (decision 221). It fails closed: no kit rule at all is refused too, and global rules are the
 /// user's own (decision 232).
 pub fn check_codex_rules(
-    request: &Request,
+    profile_name: &str,
+    merged: &Profile,
+    sandbox: &str,
     backend: &dyn SandboxBackend,
     denied: Option<&[String]>,
 ) -> Result<()> {
     if denied.is_none() {
         return Ok(());
     }
-    let allow = request
-        .merged
+    let allow = merged
         .template
         .as_ref()
         .map(|t| t.allow.as_slice())
         .unwrap_or_default();
-    let rules = backend.network_rules(request.sandbox)?;
+    let rules = backend.network_rules(sandbox)?;
     let deny_rules: Vec<&str> = rules
         .iter()
         .filter(|rule| !rule.allow)
         .flat_map(|rule| rule.resources.iter().map(|r| host_of(r)))
         .collect();
-    let (sandbox, scope, kit) = (
-        request.sandbox,
-        format!("sandbox:{}", request.sandbox),
-        format!("kit:{}", request.sandbox),
-    );
+    let (scope, kit) = (format!("sandbox:{sandbox}"), format!("kit:{sandbox}"));
     let scoped: Vec<_> = rules
         .iter()
         .filter(|rule| rule.allow && rule.scope == scope)
@@ -428,7 +434,7 @@ pub fn check_codex_rules(
              list in [template].allow and sbxm doesn't deny; sbxm removed the sandbox. Add the \
              host to [template].allow if codex may reach it, or set strict = false",
             rule.name,
-            request.profile_name
+            profile_name
         );
     }
     Ok(())
