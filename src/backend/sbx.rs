@@ -362,6 +362,7 @@ fn parse_policy_ls(json: &str) -> Result<Vec<NetworkRule>> {
     #[derive(Deserialize)]
     struct Rule {
         name: String,
+        scope: String,
         resource_type: String,
         decision: String,
         #[serde(default)]
@@ -382,6 +383,7 @@ fn parse_policy_ls(json: &str) -> Result<Vec<NetworkRule>> {
             };
             Ok(NetworkRule {
                 name: rule.name,
+                scope: rule.scope,
                 allow,
                 resources: rule.resources,
             })
@@ -823,6 +825,7 @@ mod policy_tests {
             rules[0],
             NetworkRule {
                 name: "kit:sbxm-fixture-policy-codex".into(),
+                scope: "sandbox:sbxm-fixture-policy-codex".into(),
                 allow: true,
                 resources: [
                     "api.openai.com:443",

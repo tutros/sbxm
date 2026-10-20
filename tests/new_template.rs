@@ -537,16 +537,20 @@ fn codex_rules(extra: &[&str], denied: &[&str]) -> Vec<NetworkRule> {
     kit.dedup();
     let mut rules = vec![NetworkRule {
         name: "kit:sbxm-demo-codex".into(),
+        scope: SCOPE.into(),
         allow: true,
         resources: kit,
     }];
     rules.extend(denied.iter().map(|h| NetworkRule {
         name: "some-uuid".into(),
+        scope: SCOPE.into(),
         allow: false,
         resources: vec![h.to_string()],
     }));
     rules
 }
+
+const SCOPE: &str = "sandbox:sbxm-demo-codex";
 
 fn build_codex_template(env: &Env, backend: &FakeBackend) {
     template_build::run(
@@ -624,8 +628,8 @@ fn a_strict_codex_sandbox_whose_kit_allows_an_unknown_host_is_removed_and_refuse
     let message = format!("{err:#}");
     assert!(
         message.contains(
-            "the codex kit of sbxm-demo-codex allows telemetry.example.com, which strict profile \
-             'default' doesn't list in [template].allow and sbxm doesn't deny; sbxm removed the \
+            "the network rule 'kit:sbxm-demo-codex' of sbxm-demo-codex allows \
+             telemetry.example.com, which strict profile 'default' doesn't list in [template].allow and sbxm doesn't deny; sbxm removed the \
              sandbox. Add the host to [template].allow if codex may reach it, or set strict = false"
         ),
         "{message}"
@@ -779,4 +783,77 @@ fn a_strict_profile_is_refused_with_pi_before_any_write() {
     assert_eq!(backend.creates().len(), creates);
     assert!(!env.base_dir().join("demo").exists());
     assert!(!env.base_dir().join(".sbxm").join("demo").exists());
+}
+
+// Decision 232: the check fails closed and covers every allow rule scoped to the sandbox.
+
+/// A strict codex profile with its template built, checked against `rules`.
+fn strict_codex_with(rules: Vec<NetworkRule>) -> (Env, FakeBackend, anyhow::Result<()>) {
+    let env = Env::new();
+    env.write_profile("default", &strict(PROFILE));
+    let backend = sbx_046().with_network_rules(rules);
+    build_codex_template(&env, &backend);
+    let result = new_codex(&env, &backend);
+    (env, backend, result)
+}
+
+fn assert_removed(env: &Env, backend: &FakeBackend) {
+    assert_eq!(backend.log().last().unwrap(), "rm sbxm-demo-codex");
+    assert_eq!(codex_state(env), serde_json::Value::Null);
+}
+
+#[test]
+fn a_strict_codex_sandbox_without_a_kit_rule_is_removed_and_refused() {
+    let rules = codex_rules(&[], &CODEX_EXTRA)
+        .into_iter()
+        .filter(|rule| !rule.allow)
+        .collect();
+
+    let (env, backend, result) = strict_codex_with(rules);
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains(
+            "sbx reported no network rule 'kit:sbxm-demo-codex' for sbxm-demo-codex, so sbxm can't \
+             see what the codex kit allows; sbxm removed the sandbox. Set strict = false, or update \
+             sbxm if a newer sbx renamed the rule"
+        ),
+        "{message}"
+    );
+    assert_removed(&env, &backend);
+}
+
+#[test]
+fn another_allow_rule_scoped_to_the_sandbox_is_checked_too() {
+    let mut rules = codex_rules(&[], &CODEX_EXTRA);
+    rules.push(NetworkRule {
+        name: "added-by-hand".into(),
+        scope: SCOPE.into(),
+        allow: true,
+        resources: vec!["example.org".into()],
+    });
+
+    let (env, backend, result) = strict_codex_with(rules);
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains("the network rule 'added-by-hand' of sbxm-demo-codex allows example.org,"),
+        "{message}"
+    );
+    assert_removed(&env, &backend);
+}
+
+#[test]
+fn a_global_allow_rule_is_left_to_the_user() {
+    let mut rules = codex_rules(&[], &CODEX_EXTRA);
+    rules.push(NetworkRule {
+        name: "users-own".into(),
+        scope: "global".into(),
+        allow: true,
+        resources: vec!["example.org".into()],
+    });
+
+    let (_env, _backend, result) = strict_codex_with(rules);
+
+    result.unwrap();
 }

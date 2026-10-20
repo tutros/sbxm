@@ -341,9 +341,11 @@ pub fn denied_hosts(
     }
 }
 
-/// After a strict `codex` sandbox is created and before any agent command: every host its kit
-/// rule allows must be an OpenAI host, in `[template].allow` or denied by a rule, or the sandbox
-/// is removed and refused, so a newer `codex` kit can't widen it silently (decision 221).
+/// After a strict `codex` sandbox is created and before any agent command: every host an allow
+/// rule scoped to the sandbox allows must be an OpenAI host, in `[template].allow` or denied by a
+/// rule, or the sandbox is removed and refused, so a newer `codex` kit can't widen it silently
+/// (decision 221). It fails closed: no kit rule at all is refused too, and global rules are the
+/// user's own (decision 232).
 pub fn check_codex_rules(
     request: &Request,
     backend: &dyn SandboxBackend,
@@ -364,23 +366,38 @@ pub fn check_codex_rules(
         .filter(|rule| !rule.allow)
         .flat_map(|rule| rule.resources.iter().map(|r| host_of(r)))
         .collect();
-    let kit = format!("kit:{}", request.sandbox);
-    let unexpected = rules
+    let (sandbox, scope, kit) = (
+        request.sandbox,
+        format!("sandbox:{}", request.sandbox),
+        format!("kit:{}", request.sandbox),
+    );
+    let scoped: Vec<_> = rules
         .iter()
-        .filter(|rule| rule.allow && rule.name == kit)
-        .flat_map(|rule| rule.resources.iter().map(|r| host_of(r)))
-        .find(|host| {
+        .filter(|rule| rule.allow && rule.scope == scope)
+        .collect();
+    if !scoped.iter().any(|rule| rule.name == kit) {
+        backend.remove(sandbox)?;
+        bail!(
+            "sbx reported no network rule '{kit}' for {sandbox}, so sbxm can't see what the codex \
+             kit allows; sbxm removed the sandbox. Set strict = false, or update sbxm if a newer \
+             sbx renamed the rule"
+        );
+    }
+    let unexpected = scoped
+        .iter()
+        .flat_map(|rule| rule.resources.iter().map(move |r| (rule, host_of(r))))
+        .find(|(_, host)| {
             !CODEX_PROVIDER_HOSTS.contains(host)
                 && !allow.iter().any(|a| a == host)
                 && !deny_rules.contains(host)
         });
-    if let Some(host) = unexpected {
-        backend.remove(request.sandbox)?;
+    if let Some((rule, host)) = unexpected {
+        backend.remove(sandbox)?;
         bail!(
-            "the codex kit of {} allows {host}, which strict profile '{}' doesn't list in \
-             [template].allow and sbxm doesn't deny; sbxm removed the sandbox. Add the host to \
-             [template].allow if codex may reach it, or set strict = false",
-            request.sandbox,
+            "the network rule '{}' of {sandbox} allows {host}, which strict profile '{}' doesn't \
+             list in [template].allow and sbxm doesn't deny; sbxm removed the sandbox. Add the \
+             host to [template].allow if codex may reach it, or set strict = false",
+            rule.name,
             request.profile_name
         );
     }

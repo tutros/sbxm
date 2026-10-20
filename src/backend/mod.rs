@@ -51,6 +51,8 @@ pub trait SandboxBackend: Send + Sync {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NetworkRule {
     pub name: String,
+    /// `sandbox:<name>` for a rule of one sandbox, `global` for one of every sandbox.
+    pub scope: String,
     /// `decision` is `allow`; `false` for `deny`.
     pub allow: bool,
     /// Hosts, the kit's with a port (`github.com:443`).
