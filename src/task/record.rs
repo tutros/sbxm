@@ -844,8 +844,13 @@ pub fn load_all(base: &Path) -> Result<Vec<Record>> {
 /// Every entry under `<base>/.sbxm/tasks/`, unread and unchecked: what [`load_all`] reads, for a
 /// caller that must check each folder before reading anything in it (`task rm --merged`).
 pub fn task_folders(base: &Path) -> Result<Vec<PathBuf>> {
-    let Ok(entries) = fs::read_dir(tasks_root(base)) else {
-        return Ok(Vec::new());
+    let root = tasks_root(base);
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(e).with_context(|| format!("cannot read {}", root.display()));
+        }
     };
     let mut folders = Vec::new();
     for entry in entries {

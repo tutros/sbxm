@@ -30,6 +30,15 @@ pub fn run(
     config::validate_profile_name(&options.profile)?;
     let config = GlobalConfig::load(config_dir)?;
     let key = template::key(&options.profile, options.harness);
+    // A build of the key changes its record and images too (decision 212); `rm` doesn't race it.
+    let lock = template::dir(&config.base_dir).join(format!("{key}.build.json"));
+    if lock.exists() {
+        bail!(
+            "a template build of {key} is running or was interrupted ({}); wait for it, or delete \
+             that file if no build is running",
+            lock.display()
+        );
+    }
     let Some(record) = template::Record::load(&config.base_dir, &key)? else {
         bail!(
             "profile '{}' has no template for {}; `sbxm template ls` lists the templates",

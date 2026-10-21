@@ -236,6 +236,45 @@ fn refused_when_a_task_record_cannot_be_read() {
 }
 
 #[test]
+fn refused_when_the_tasks_folder_cannot_be_read() {
+    let env = Env::new();
+    write_record(&env, Harness::Claude, TAG, &[]);
+    let tasks = sbxm::task::record::tasks_root(&env.base_dir());
+    std::fs::create_dir_all(tasks.parent().unwrap()).unwrap();
+    std::fs::write(&tasks, "not a folder").unwrap();
+    let backend = backend_with(&[TAG]);
+
+    let message = refused(&env, &options(Harness::Claude), &backend);
+
+    assert!(
+        message.contains(&format!("cannot read {}", tasks.display())),
+        "{message}"
+    );
+    assert!(record_path(&env, "default-claude").exists());
+}
+
+#[test]
+fn refused_while_a_build_of_the_key_holds_the_lock() {
+    let env = Env::new();
+    write_record(&env, Harness::Claude, TAG, &[]);
+    let lock = record_path(&env, "default-claude").with_extension("build.json");
+    std::fs::write(&lock, "{}").unwrap();
+    let backend = backend_with(&[TAG]);
+
+    let message = refused(&env, &options(Harness::Claude), &backend);
+
+    assert!(
+        message.contains(&format!(
+            "a template build of default-claude is running or was interrupted ({}); \
+             wait for it, or delete that file if no build is running",
+            lock.display()
+        )),
+        "{message}"
+    );
+    assert!(record_path(&env, "default-claude").exists());
+}
+
+#[test]
 fn refused_without_a_record_before_any_sbx_call() {
     let env = Env::new();
     let backend = backend_with(&[TAG]);
