@@ -194,11 +194,12 @@ pub enum Locks<'a> {
 }
 
 impl Locks<'_> {
-    /// [`lock_hash`] of `files` read from here.
+    /// [`lock_hash`] of `files` read from here. CRLF counts as LF, so a Windows checkout with
+    /// `core.autocrlf` hashes like its commit (decision 238).
     pub fn hash(&self, files: &[String]) -> Result<String> {
         let mut bytes = Vec::new();
         for file in files {
-            let contents = self.read(file)?;
+            let contents = crlf_to_lf(self.read(file)?);
             bytes.extend_from_slice(file.as_bytes());
             bytes.push(0);
             bytes.extend_from_slice(&(contents.len() as u64).to_le_bytes());
@@ -240,6 +241,16 @@ impl Locks<'_> {
             Locks::Unseeded | Locks::Unchecked => bail!("{self} has no lock files to read"),
         }
     }
+}
+
+fn crlf_to_lf(bytes: Vec<u8>) -> Vec<u8> {
+    let mut out = Vec::with_capacity(bytes.len());
+    for (i, &b) in bytes.iter().enumerate() {
+        if b != b'\r' || bytes.get(i + 1) != Some(&b'\n') {
+            out.push(b);
+        }
+    }
+    out
 }
 
 impl std::fmt::Display for Locks<'_> {

@@ -55,6 +55,42 @@ fn lock_files_at_a_commit_hash_like_the_same_files_in_a_folder() {
     assert!(missing.is_err());
 }
 
+#[test]
+fn a_crlf_checkout_of_a_lock_file_hashes_like_its_lf_commit() {
+    // A Windows checkout with core.autocrlf warms the template from CRLF files, while a task
+    // reads the commit's LF blob (decision 238).
+    let env = Env::new();
+    let repo = env.tmp.path().join("repo");
+    fs::create_dir_all(&repo).unwrap();
+    git(&repo, &["init", "-b", "main"]);
+    fs::write(repo.join("Cargo.lock"), "version = 4\n\n[[package]]\n").unwrap();
+    git(&repo, &["add", "-A"]);
+    git(&repo, &["commit", "-m", "lock"]);
+    let checkout = env.tmp.path().join("checkout");
+    fs::create_dir_all(&checkout).unwrap();
+    fs::write(
+        checkout.join("Cargo.lock"),
+        "version = 4\r\n\r\n[[package]]\r\n",
+    )
+    .unwrap();
+    let files = ["Cargo.lock".to_owned()];
+
+    let at_commit = Locks::Commit {
+        repo_git: &repo.join(".git"),
+        commit: &git(&repo, &["rev-parse", "HEAD"]),
+    }
+    .hash(&files)
+    .unwrap();
+
+    assert_eq!(Locks::Dir(&checkout).hash(&files).unwrap(), at_commit);
+    fs::write(
+        checkout.join("Cargo.lock"),
+        "version = 3\r\n\r\n[[package]]\r\n",
+    )
+    .unwrap();
+    assert_ne!(Locks::Dir(&checkout).hash(&files).unwrap(), at_commit);
+}
+
 const PROFILE: &str = "[network]\n\
      allow = [\"archive.ubuntu.com\"]\n\
      \n\
