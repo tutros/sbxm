@@ -1942,10 +1942,7 @@ pub fn check_can_review(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
         _ => format!("sbxm task status --issue {}", task.number),
     };
     // What continues a failed or interrupted stage (issue 118).
-    let resume = match task.kind {
-        record::Kind::Spec => "sbxm task resume --spec <file>".to_owned(),
-        _ => format!("sbxm task resume --issue {}", task.number),
-    };
+    let resume = resume_command(task);
     let state = machine::State {
         stage: task.stage,
         status: task.status,
@@ -2944,6 +2941,60 @@ fn combined_earlier_reviews(earlier: &[String]) -> Option<String> {
     )
 }
 
+/// Decision 235: an issue or spec task's reviewer refused because the lock files at the delivered
+/// tip differ from the warm template's gets the command that goes on and, when the lock files at
+/// the task's base still match, the task's own change named (gap G1). Any other error, and a PR
+/// task's, is returned as it is.
+fn with_stale_lock_hint(
+    env: &TaskEnv,
+    task: &Record,
+    repo_git: &Path,
+    tip: &str,
+    err: anyhow::Error,
+) -> anyhow::Error {
+    if task.kind == Kind::Pr || !format!("{err:#}").contains("differ from the ones it was warmed") {
+        return err;
+    }
+    let profile = &env.config.sandbox.profile;
+    let key = template::key(profile, env.config.reviewer.harness);
+    let warmed = GlobalConfig::load(env.config_dir)
+        .ok()
+        .and_then(|global| {
+            template::Record::load(&global.base_dir, &key)
+                .ok()
+                .flatten()
+        })
+        .and_then(|record| record.lock_hash.map(|hash| (record.lock_files, hash)));
+    let base_matches = warmed.is_some_and(|(files, hash)| {
+        repo::branch_tip(repo_git, &task.base).is_ok_and(|base| {
+            Locks::Commit {
+                repo_git,
+                commit: &base,
+            }
+            .hash(&files)
+            .is_ok_and(|at_base| at_base == hash)
+        })
+    });
+    let next = format!("then run `{}`", resume_command(task));
+    if base_matches {
+        anyhow::anyhow!(
+            "{err:#}; the lock files changed in this task's own commits (gap G1): set strict = \
+             false in profile '{profile}' to let its review install them, or warm a template \
+             from commit {tip}, {next}"
+        )
+    } else {
+        anyhow::anyhow!("{err:#}; once the template is rebuilt, {next}")
+    }
+}
+
+/// The command that continues a task's failed or interrupted stage (issue 118).
+fn resume_command(task: &Record) -> String {
+    match task.kind {
+        Kind::Spec => "sbxm task resume --spec <file>".to_owned(),
+        _ => format!("sbxm task resume --issue {}", task.number),
+    }
+}
+
 /// Makes the reviewer's workspace: a clean clone of the task branch (a pull request's head for
 /// a PR task) with the context and the prompt in `.sbxm-task/`, and the reviewer's own sandbox
 /// over it. Nothing has run in the sandbox yet. Returns the warning of a template it couldn't use.
@@ -2985,7 +3036,8 @@ fn open_review_workspace(
             commit: &tip,
         },
         &mut warnings,
-    )?;
+    )
+    .map_err(|e| with_stale_lock_hint(env, &prepared.record, &repo_git, &tip, e))?;
 
     repo::clean_checkout(&repo_git, &branch, clone)?;
     let info = clone.join(".git").join("info");

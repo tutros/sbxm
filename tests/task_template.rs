@@ -707,7 +707,65 @@ fn a_worker_that_changes_the_lock_file_keeps_its_sandbox_and_a_strict_reviewer_i
         .collect();
     assert_eq!(workers.len(), 1, "the worker's sandbox is never remade");
     assert_eq!(workers[0].template.as_deref(), Some(worker_tag.as_str()));
-    let err = review.err().unwrap();
-    assert!(format!("{err:#}").contains("--warm"), "{err:#}");
+    let err = format!("{:#}", review.err().unwrap());
+    assert!(err.contains("--warm"), "{err}");
+    assert!(reviewer_creates(&backend).is_empty());
+    // Decision 235: the refusal names the task's own change, the way round it and the command
+    // that goes on.
+    let tip = git(
+        &record::task_dir(&f.env.base_dir(), "issue-41").join("repo.git"),
+        &["rev-parse", &prepared.record.branch],
+    );
+    for part in [
+        "the lock files changed in this task's own commits (gap G1)",
+        "set strict = false in profile 'default'",
+        &format!("warm a template from commit {tip}"),
+        "then run `sbxm task resume --issue 41`",
+    ] {
+        assert!(err.contains(part), "{part}\n{err}");
+    }
+}
+
+/// Decision 235: a reviewer refused for lock files that already differed at the task's base
+/// isn't blamed on the task, but still gets the command that goes on.
+#[test]
+fn a_strict_reviewer_whose_template_differs_from_the_base_too_names_the_next_command() {
+    let f = task_fixture::fixture();
+    f.env.write_profile("default", &strict(PROFILE));
+    let main = push_lock(&f, "main-lock", "version = 4\n", "refs/heads/main");
+    let other = push_lock(&f, "other-lock", "version = 3\n", "refs/heads/other");
+    let worker = task_fixture::play_tasks(
+        &f.env.base_dir(),
+        "main",
+        task_fixture::Play {
+            commits: vec!["a.txt".into()],
+            result_md: Some(b"done\n".to_vec()),
+            bundle_bytes: None,
+        },
+    );
+    let backend = FakeBackend::with_secrets(&["anthropic", "openai"])
+        .with_version("0.46.0")
+        .with_exec_output_matching("claude", task_fixture::ok(task_fixture::CLAUDE_DONE))
+        .with_exec_output_matching(
+            "cargo metadata",
+            task_fixture::ok(r#"{"packages":[{"name":"x"}],"version":1}"#),
+        )
+        .with_exec_hook(worker);
+    build_warm(&f.env, &backend, &main, Harness::Claude);
+    build_warm(&f.env, &backend, &other, Harness::Codex);
+    let (github, source) = (FakeGitHub::default(), task_fixture::source(&f));
+    let ctx = task_fixture::ctx(&f, &source, &backend, &github);
+    let mut prepared = pipeline::prepare(&ctx, &task_fixture::issue_text(41)).unwrap();
+    pipeline::run_worker(&ctx, &mut prepared).unwrap();
+
+    let review = pipeline::review_issue(&ctx.env(), &mut prepared);
+
+    let err = format!("{:#}", review.err().unwrap());
+    assert!(err.contains("--warm"), "{err}");
+    assert!(
+        err.contains("then run `sbxm task resume --issue 41`"),
+        "{err}"
+    );
+    assert!(!err.contains("own commits"), "{err}");
     assert!(reviewer_creates(&backend).is_empty());
 }
