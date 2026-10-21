@@ -474,6 +474,13 @@ fn run_pr(
 
     let meta = record::task_dir(&base_dir, &id);
     let report = pipeline::review_pr(&ctx.env(), github, &mut prepared, opts.force)?;
+    for warning in report
+        .warnings
+        .iter()
+        .filter(|w| !config.warnings.contains(w))
+    {
+        writeln!(warn, "warning: {warning}")?;
+    }
     if let Some(failed) = &report.gates_failed {
         writeln!(
             out,

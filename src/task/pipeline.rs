@@ -2357,6 +2357,7 @@ pub fn review_pr(
             .begin_gating(now(), Process::current(env.probe))?;
         record::write(&prepared.meta, &prepared.record)?;
     }
+    let mut opened = Vec::new();
     let gated_or_ready = (|| -> Result<Option<Gated>> {
         if prepared.record.stage == Stage::Reviewing {
             // A review that failed is tried again; its gates passed before.
@@ -2364,10 +2365,10 @@ pub fn review_pr(
                 .record
                 .begin_review(now(), Process::current(env.probe))?;
             record::write(&prepared.meta, &prepared.record)?;
-            open_review_workspace(env, prepared, round, &clone, &sandbox, &earlier)?;
+            opened = open_review_workspace(env, prepared, round, &clone, &sandbox, &earlier)?;
             return Ok(None);
         }
-        open_review_workspace(env, prepared, round, &clone, &sandbox, &earlier)?;
+        opened = open_review_workspace(env, prepared, round, &clone, &sandbox, &earlier)?;
         let mut outcomes = gates::run_sandbox_tier(
             env.backend,
             &sandbox,
@@ -2381,6 +2382,7 @@ pub fn review_pr(
         }
         Ok(Some(finish_gating(prepared, "pr", outcomes, None)?))
     })();
+    report.warnings.extend(opened);
     let cleanup = |prepared: &mut Prepared| {
         let _ = env.backend.remove(&sandbox);
         if let Err(e) = remove_with_retries(&clone) {
@@ -2913,8 +2915,10 @@ fn review_round(
     sandbox: &str,
     earlier: &[String],
 ) -> Result<ReviewOutcome> {
-    open_review_workspace(env, prepared, round, clone, sandbox, earlier)?;
-    run_review_agent(env, prepared, round, clone, sandbox, earlier)
+    let warnings = open_review_workspace(env, prepared, round, clone, sandbox, earlier)?;
+    let mut outcome = run_review_agent(env, prepared, round, clone, sandbox, earlier)?;
+    outcome.warnings.splice(0..0, warnings);
+    Ok(outcome)
 }
 
 /// The reviewer's context for a re-review (spec §5.3, decisions 174(b), 177(o)): every earlier
@@ -2937,7 +2941,7 @@ fn combined_earlier_reviews(earlier: &[String]) -> Option<String> {
 
 /// Makes the reviewer's workspace: a clean clone of the task branch (a pull request's head for
 /// a PR task) with the context and the prompt in `.sbxm-task/`, and the reviewer's own sandbox
-/// over it. Nothing has run in the sandbox yet.
+/// over it. Nothing has run in the sandbox yet. Returns the warning of a template it couldn't use.
 fn open_review_workspace(
     env: &TaskEnv,
     prepared: &mut Prepared,
@@ -2945,7 +2949,7 @@ fn open_review_workspace(
     clone: &Path,
     sandbox: &str,
     earlier: &[String],
-) -> Result<()> {
+) -> Result<Vec<String>> {
     let reviewer = &env.config.reviewer;
     let repo_git = prepared.meta.join("repo.git");
     let branch = prepared.record.branch.clone();
@@ -2956,22 +2960,27 @@ fn open_review_workspace(
         remove_with_retries(clone)
             .with_context(|| format!("cannot clear {}, left by an earlier run", clone.display()))?;
     }
-    let kit_set = kits::build_for(
+    // The commit the reviewer checks out: the delivered branch's tip, or the PR's fetched head
+    // (decision 216).
+    let tip = repo::branch_tip(&repo_git, &branch)?;
+    let mut warnings = Vec::new();
+    let plan = plan_sandbox(
         env.config_dir,
+        env.backend,
         &env.config.sandbox.profile,
-        &[reviewer.harness],
+        reviewer.harness,
+        sandbox,
         &Overrides {
             cpus: env.config.sandbox.cpus,
             memory: env.config.sandbox.memory.clone(),
         },
-        None,
         &prepared.meta.join("kits-review"),
-        env.backend,
+        Locks::Commit {
+            repo_git: &repo_git,
+            commit: &tip,
+        },
+        &mut warnings,
     )?;
-    let harness_kits = kit_set
-        .get(reviewer.harness)
-        .cloned()
-        .context("no kits were built for the reviewer's harness")?;
 
     repo::clean_checkout(&repo_git, &branch, clone)?;
     let info = clone.join(".git").join("info");
@@ -3035,24 +3044,12 @@ fn open_review_workspace(
         profile: None,
         cpus: None,
         memory: None,
-        template: None,
+        template: plan.template.clone(),
         run: None,
     });
     record::write(&prepared.meta, &prepared.record)?;
-    env.backend
-        .create(&CreateSpec {
-            name: sandbox.to_owned(),
-            agent: reviewer.harness.agent_arg().into(),
-            workspace: clone.to_path_buf(),
-            cpus: kit_set.resources.cpus,
-            memory: kit_set.resources.memory.clone(),
-            skills: harness_kits.skills_store,
-            kits: harness_kits.dirs.clone(),
-            template: None,
-            deny_network: Vec::new(),
-        })
-        .with_context(|| format!("cannot create sandbox {sandbox}"))?;
-    Ok(())
+    plan.create(env.backend, sandbox, reviewer.harness, clone)?;
+    Ok(warnings)
 }
 
 /// Runs the reviewer in its (already open) sandbox, saves its transcript, and reads and saves what
