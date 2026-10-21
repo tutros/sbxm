@@ -230,6 +230,93 @@ fn a_run_without_a_seed_warns_once_and_installs_with_a_warm_template() {
         "{}",
         ran.warn
     );
+    // Rebuilding warm can never help a run without lock files (review M3S9-2).
+    assert!(warnings[0].contains("set task.seed"), "{}", ran.warn);
+    assert!(
+        warnings[0].contains("`sbxm template build default`"),
+        "{}",
+        ran.warn
+    );
+    assert!(!warnings[0].contains("--warm <repo>"), "{}", ran.warn);
+}
+
+#[test]
+fn a_strict_run_without_a_seed_and_a_warm_template_names_a_fix_that_works() {
+    let env = Env::new();
+    env.write_profile("default", &strict(PROFILE));
+    let backend = backend();
+    let repo = cargo_repo(&env, "repo", "version = 4\n");
+    build(&env, &backend, Harness::Claude, Some(&repo));
+
+    let ran = go(&env, None, TWO_CLAUDES, &backend);
+
+    let err = format!("{:#}", ran.result.err().unwrap());
+    assert!(
+        err.contains("is warm, and a run without a seed has no lock files to check it against"),
+        "{err}"
+    );
+    assert!(err.contains("set task.seed in the run-config"), "{err}");
+    assert!(err.contains("`sbxm template build default`"), "{err}");
+    assert!(!err.contains("--warm <repo>"), "{err}");
+    no_run_written(&env);
+}
+
+const CODEX_JUDGE: &str = "[[eval.rubric]]\nid = \"correctness\"\nkind = \"pass_fail\"\nweight = 1.0\n\n\
+                           [eval.judge]\nharness = \"codex\"\nmodel = \"judge-model\"\n";
+
+/// A strict profile with a cold claude template for the contestants and a warm codex template
+/// only the judge uses; returns the codex tag.
+fn judge_only_warm_codex(env: &Env, backend: &FakeBackend) -> String {
+    env.write_profile("default", &strict(PROFILE));
+    build(env, backend, Harness::Claude, None);
+    let repo = cargo_repo(env, "repo", "version = 4\n");
+    build(env, backend, Harness::Codex, Some(&repo))
+}
+
+fn judge_create(backend: &FakeBackend) -> sbxm::backend::CreateSpec {
+    run_creates(backend)
+        .into_iter()
+        .find(|c| c.name.contains("-judge-"))
+        .unwrap_or_else(|| panic!("{:?}", backend.creates()))
+}
+
+#[test]
+fn a_pair_only_the_judge_uses_gets_no_lock_check_without_a_seed() {
+    let env = Env::new();
+    let backend = backend();
+    let tag = judge_only_warm_codex(&env, &backend);
+
+    let ran = go(&env, None, &format!("{TWO_CLAUDES}{CODEX_JUDGE}"), &backend);
+
+    ran.result.unwrap();
+    assert_eq!(
+        judge_create(&backend).template.as_deref(),
+        Some(tag.as_str())
+    );
+    assert!(!ran.warn.contains("stale"), "{}", ran.warn);
+    assert!(!ran.warn.contains("install steps"), "{}", ran.warn);
+}
+
+#[test]
+fn a_pair_only_the_judge_uses_gets_no_lock_check_against_the_seed() {
+    let env = Env::new();
+    let backend = backend();
+    let tag = judge_only_warm_codex(&env, &backend);
+    let seed = cargo_repo(&env, "seed", "version = 4\n# changed\n");
+
+    let ran = go(
+        &env,
+        Some(&seed),
+        &format!("{TWO_CLAUDES}{CODEX_JUDGE}"),
+        &backend,
+    );
+
+    ran.result.unwrap();
+    assert_eq!(
+        judge_create(&backend).template.as_deref(),
+        Some(tag.as_str())
+    );
+    assert!(!ran.warn.contains("stale"), "{}", ran.warn);
 }
 
 const CODEX_EXTRA: [&str; 9] = [

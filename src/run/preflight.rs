@@ -94,9 +94,10 @@ pub fn check(
         );
     }
 
-    // One choice per pair holds for every sandbox of it; the judge builds nothing, so it follows
-    // its pair (decision 237). A strict profile is refused here, before any write.
-    let locks = match &run_config.task.seed {
+    // One choice per pair holds for every sandbox of it; the judge builds nothing, so a pair only
+    // it uses gets no lock check (decision 237). A strict profile is refused here, before any
+    // write.
+    let seed_locks = match &run_config.task.seed {
         Some(seed) => template::Locks::Dir(seed),
         None => template::Locks::Unseeded,
     };
@@ -104,6 +105,15 @@ pub fn check(
     let mut templates = Vec::new();
     for (name, harness) in kits::pairs(run_config, &run_profile) {
         let profile = &profiles.iter().find(|(n, _)| *n == name).unwrap().1;
+        let contestants_use = run_config
+            .contestants
+            .iter()
+            .any(|c| c.harness == harness && profile_of(c.profile.as_ref()) == name);
+        let locks = if contestants_use {
+            seed_locks
+        } else {
+            template::Locks::Unchecked
+        };
         let sandbox = format!(
             "the run's {} sandboxes of profile '{name}'",
             harness.as_str()

@@ -183,13 +183,14 @@ pub fn lock_hash(repo: &Path, files: &[String]) -> Result<String> {
 
 /// Where a sandbox's lock files are read for a warm template's check (decision 203(b)): a host
 /// folder, or a commit in a task's host-owned `repo.git`, so no host git runs in an agent's clone
-/// (decisions 159, 216). A run without a seed has none, so a warm template never matches it
-/// (decision 237).
+/// (decisions 159, 216). A run without a seed has none, so a warm template never matches it, and
+/// a pair only `sbxm run`'s judge uses builds nothing, so it is never checked (decision 237).
 #[derive(Debug, Clone, Copy)]
 pub enum Locks<'a> {
     Dir(&'a Path),
     Commit { repo_git: &'a Path, commit: &'a str },
     Unseeded,
+    Unchecked,
 }
 
 impl Locks<'_> {
@@ -236,7 +237,7 @@ impl Locks<'_> {
                 )
                 .with_context(cannot)
             }
-            Locks::Unseeded => bail!("a run without a seed has no lock files"),
+            Locks::Unseeded | Locks::Unchecked => bail!("{self} has no lock files to read"),
         }
     }
 }
@@ -247,6 +248,7 @@ impl std::fmt::Display for Locks<'_> {
             Locks::Dir(dir) => write!(f, "{}", dir.display()),
             Locks::Commit { commit, .. } => write!(f, "commit {commit}"),
             Locks::Unseeded => write!(f, "a run without a seed"),
+            Locks::Unchecked => write!(f, "the judge's workspace"),
         }
     }
 }
@@ -367,8 +369,21 @@ fn usable(
             format!("rebuild it with `sbxm template build {profile_name}{flag}`"),
         )));
     }
-    let locks = record
-        .warm
+    if record.warm && matches!(request.locks, Locks::Unseeded) {
+        // No rebuild can match a run with no lock files (review M3S9-2).
+        return Ok(Err((
+            format!(
+                "the template of profile '{profile_name}' for {} is warm, and a run without a \
+                 seed has no lock files to check it against",
+                harness.as_str()
+            ),
+            format!(
+                "set task.seed in the run-config, or build the template without --warm \
+                 (`sbxm template build {profile_name}{flag}`)"
+            ),
+        )));
+    }
+    let locks = (record.warm && !matches!(request.locks, Locks::Unchecked))
         .then(|| request.locks.hash(&record.lock_files))
         .filter(|locks| locks.as_ref().ok() != record.lock_hash.as_ref());
     if let Some(locks) = locks {
