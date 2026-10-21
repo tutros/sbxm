@@ -771,6 +771,14 @@ over 16 MiB is not read and counts as differing from the warm template's, with a
 a strict profile is refused, a non-strict one warns and installs. A PR's head is written by someone else, so its lock
 file must not be read into memory whole without a bound.
 
+237. **`sbxm run` chooses one template per profile and harness in its preflight (2026-10-21, milestone 3 slice 9,
+the user agreed with the recommendation; adds to [206], [216]):** before any write, the run's preflight resolves the
+template of every (profile, harness) pair a contestant or the judge uses, once, and that choice holds for every
+sandbox of the pair. A warm template's lock files are checked against the seed folder, which every contestant's
+workspace copies; a run without a seed has no lock files, so a warm template counts as stale (a strict profile is
+refused, a non-strict one warns and installs), while a cold template is always usable. The judge follows its pair's
+choice: it builds nothing, so it gets no lock check of its own.
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.

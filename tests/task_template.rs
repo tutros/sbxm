@@ -726,6 +726,83 @@ fn a_worker_that_changes_the_lock_file_keeps_its_sandbox_and_a_strict_reviewer_i
     }
 }
 
+/// Decision 236 (review M3S8-3): a lock file over 16 MiB at a PR's head is not read, and counts
+/// as differing.
+#[test]
+fn a_pr_head_with_a_lock_file_over_the_limit_refuses_a_strict_reviewer() {
+    let big = format!("version = 4\n{}\n", "#".repeat(16 * 1024 * 1024));
+
+    let (_f, backend, _tag, result) = review_pr_7(&strict(PROFILE), &big);
+
+    let err = format!("{:#}", result.err().unwrap());
+    for part in [
+        "lock file Cargo.lock at commit ",
+        &format!(" is {} bytes, over the 16777216-byte limit", big.len()),
+    ] {
+        assert!(err.contains(part), "{part}\n{err}");
+    }
+    assert!(reviewer_creates(&backend).is_empty());
+}
+
+/// Review M3S8-4: a spec task's worker follows the template as an issue's does.
+#[test]
+fn a_spec_worker_is_created_from_the_profiles_template() {
+    let f = task_fixture::fixture();
+    f.env.write_profile("default", PROFILE);
+    let backend = sbx_046();
+    let tag = build_template(&f.env, &backend);
+    let spec = f.env.tmp.path().join("idea.md");
+    fs::write(&spec, "Build a thing.\n").unwrap();
+    let (github, source) = (FakeGitHub::default(), task_fixture::source(&f));
+
+    let prepared =
+        pipeline::prepare_spec(&task_fixture::ctx(&f, &source, &backend, &github), &spec).unwrap();
+
+    let create = backend.creates().pop().unwrap();
+    assert_eq!(create.template.as_deref(), Some(tag.as_str()));
+    let saved = record::read(&prepared.meta.join("task.json")).unwrap();
+    assert_eq!(
+        saved.worker.unwrap().template.as_deref(),
+        Some(tag.as_str())
+    );
+}
+
+/// Review M3S8-4: a worker continuing PR 7 is checked at the PR's head, its starting commit
+/// (decision 216), not at `main`.
+#[test]
+fn a_continued_pr_worker_whose_head_changes_the_lock_file_is_refused_when_strict() {
+    let f = task_fixture::fixture();
+    f.env.write_profile("default", &strict(PROFILE));
+    let main = push_lock(&f, "main-lock", "version = 4\n", "refs/heads/main");
+    let backend = sbx_046().with_exec_output_matching(
+        "cargo metadata",
+        task_fixture::ok(r#"{"packages":[{"name":"x"}],"version":1}"#),
+    );
+    build_warm(&f.env, &backend, &main, Harness::Claude);
+    push_lock(
+        &f,
+        "pr-head",
+        "version = 4\n# a new dependency\n",
+        "refs/pull/7/head",
+    );
+    let github = FakeGitHub::default().with_pr(pr_7());
+    let source = task_fixture::source(&f);
+    let finding = sbxm::github::IssueText {
+        number: 41,
+        title: "Fix 41".into(),
+        state: "OPEN".into(),
+        text: "title:\tFix 41\nstate:\tOPEN\n--\nPR: #7\n\n**Acceptance criteria:** do it\n".into(),
+    };
+
+    let err = pipeline::prepare(&task_fixture::ctx(&f, &source, &backend, &github), &finding)
+        .err()
+        .unwrap();
+
+    assert!(format!("{err:#}").contains("--warm"), "{err:#}");
+    assert!(!backend.creates().iter().any(|c| c.name == WORKER));
+    assert!(!record::task_dir(&f.env.base_dir(), "issue-41").exists());
+}
+
 /// Decision 235: a reviewer refused for lock files that already differed at the task's base
 /// isn't blamed on the task, but still gets the command that goes on.
 #[test]

@@ -18,6 +18,10 @@ use crate::run::results::format_timestamp;
 /// The global `min_sbx_version` stays for everything else.
 pub const MIN_SBX_VERSION: &str = "0.46.0";
 
+/// The largest lock file read from a commit (decision 236): a PR's head is written by someone
+/// else, so it is never read into memory whole without a bound.
+pub const MAX_LOCK_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
 /// `claude` and `codex` (decisions 204, 217) and `pi` (spike S15); the rest are refused.
 pub fn check_supported(harness: Harness) -> Result<()> {
     if !matches!(harness, Harness::Claude | Harness::Codex | Harness::Pi) {
@@ -171,13 +175,30 @@ impl Locks<'_> {
                 let path = dir.join(file);
                 fs::read(&path).with_context(|| format!("cannot read lock file {}", path.display()))
             }
-            Locks::Commit { repo_git, commit } => crate::git::run_bytes(
-                repo_git,
-                Some(repo_git),
-                None,
-                &["cat-file", "blob", &format!("{commit}:{file}")],
-            )
-            .with_context(|| format!("cannot read lock file {file} at commit {commit}")),
+            Locks::Commit { repo_git, commit } => {
+                let object = format!("{commit}:{file}");
+                let cannot = || format!("cannot read lock file {file} at commit {commit}");
+                // Someone else may have written the commit (a PR's head): the size first.
+                let size: u64 =
+                    crate::git::run(repo_git, Some(repo_git), None, &["cat-file", "-s", &object])
+                        .with_context(cannot)?
+                        .trim()
+                        .parse()
+                        .with_context(cannot)?;
+                if size > MAX_LOCK_FILE_BYTES {
+                    bail!(
+                        "lock file {file} at commit {commit} is {size} bytes, over the \
+                         {MAX_LOCK_FILE_BYTES}-byte limit sbxm reads (decision 236)"
+                    );
+                }
+                crate::git::run_bytes(
+                    repo_git,
+                    Some(repo_git),
+                    None,
+                    &["cat-file", "blob", &object],
+                )
+                .with_context(cannot)
+            }
         }
     }
 }
@@ -307,10 +328,16 @@ fn usable(
             format!("rebuild it with `sbxm template build {profile_name}{flag}`"),
         )));
     }
-    if record.warm && request.locks.hash(&record.lock_files).ok() != record.lock_hash {
+    let locks = record
+        .warm
+        .then(|| request.locks.hash(&record.lock_files))
+        .filter(|locks| locks.as_ref().ok() != record.lock_hash.as_ref());
+    if let Some(locks) = locks {
+        // An unreadable or too big lock file counts as differing; its reason goes along.
+        let why = locks.err().map(|e| format!(" ({e:#})")).unwrap_or_default();
         return Ok(Err((
             format!(
-                "{stale}: the lock files of {} ({}) differ from the ones it was warmed with",
+                "{stale}: the lock files of {} ({}) differ from the ones it was warmed with{why}",
                 request.locks,
                 record.lock_files.join(", ")
             ),
