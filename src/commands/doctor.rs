@@ -10,9 +10,14 @@ use crate::backend::SandboxBackend;
 use crate::config::{self, GlobalConfig, Profile};
 use crate::disk::{self, gib};
 use crate::harness::Harness;
-use crate::{kit, project, state};
+use crate::run::results::parse_timestamp;
+use crate::status::tasks::format_duration;
+use crate::{kit, project, state, template};
 
 const GIB: u64 = 1024 * 1024 * 1024;
+const DAY: u64 = 86_400;
+/// After this many days a template's frozen agent is worth a rebuild (decision 203(c)).
+const MAX_TEMPLATE_DAYS: u64 = 14;
 /// Sandbox images and workspaces take several GB each (decision 67).
 const MIN_FREE: u64 = 10 * GIB;
 
@@ -27,6 +32,8 @@ pub struct Host {
     /// Where `sbx` keeps its sandboxes on this platform, when known
     /// ([`disk::platform_state_dir`]); `sandbox_state_dir` overrides it.
     pub sandbox_state_dir: Option<PathBuf>,
+    /// Seconds since the Unix epoch, for the age of a template.
+    pub now: fn() -> u64,
 }
 
 impl Host {
@@ -46,6 +53,11 @@ impl Host {
             },
             temp_dirs,
             sandbox_state_dir: disk::platform_state_dir(),
+            now: || {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs())
+            },
         }
     }
 }
@@ -120,8 +132,9 @@ pub fn run(config_dir: &Path, backend: &dyn SandboxBackend, host: &Host) -> Repo
     };
     report.pass(format!("config {}", config_path.display()));
 
-    match backend.version() {
-        Ok(version) if older(&version, &config.min_sbx_version) => report.fail(format!(
+    let sbx_version = backend.version();
+    match &sbx_version {
+        Ok(version) if older(version, &config.min_sbx_version) => report.fail(format!(
             "sbx {version} is older than min_sbx_version {}; upgrade sbx or lower \
              min_sbx_version in {}",
             config.min_sbx_version,
@@ -142,7 +155,147 @@ pub fn run(config_dir: &Path, backend: &dyn SandboxBackend, host: &Host) -> Repo
     check_base_dir(&mut report, &config.base_dir, &config_path, host);
     check_state_drive(&mut report, &config, &config_path, host);
     check_configs(&mut report, &config, &config_path, backend);
+    check_templates(
+        &mut report,
+        &config,
+        sbx_version.ok().as_deref(),
+        backend,
+        host,
+    );
     report
+}
+
+/// A template is listed with its size and age (decision 205(c)) and warned about when its image
+/// is gone, its profile's build part changed or it is over [`MAX_TEMPLATE_DAYS`] old (decision
+/// 203); only an `sbx` below the template minimum fails, and only when a profile has
+/// `[template]` (decision 213).
+fn check_templates(
+    report: &mut Report,
+    config: &GlobalConfig,
+    sbx_version: Option<&str>,
+    backend: &dyn SandboxBackend,
+    host: &Host,
+) {
+    let profiles_dir = config.profiles_dir();
+    let with_template: Vec<String> = profile_names(profiles_dir)
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|name| Profile::load(profiles_dir, name).is_ok_and(|p| p.template.is_some()))
+        .collect();
+    if let (Some(version), false) = (sbx_version, with_template.is_empty()) {
+        if older(version, template::MIN_SBX_VERSION) {
+            let quoted: Vec<String> = with_template.iter().map(|n| format!("'{n}'")).collect();
+            let (who, them) = match quoted.len() {
+                1 => (format!("profile {} has", quoted[0]), "the profile"),
+                _ => (
+                    format!("profiles {} have", quoted.join(", ")),
+                    "those profiles",
+                ),
+            };
+            report.fail(format!(
+                "sbx {version} is older than {}, the version templates need ({who} \
+                 [template]); upgrade sbx, or remove [template] from {them}",
+                template::MIN_SBX_VERSION
+            ));
+        } else {
+            report.pass(format!(
+                "sbx {version} (templates need {})",
+                template::MIN_SBX_VERSION
+            ));
+        }
+    }
+
+    let records = match template::records(&config.base_dir) {
+        Ok(records) if records.is_empty() => return,
+        Ok(records) => records,
+        Err(err) => {
+            report.warn(format!("template records: {err:#}"));
+            return;
+        }
+    };
+    let images = match backend.template_ls() {
+        Ok(images) => Some(images),
+        Err(err) => {
+            report.warn(format!(
+                "sbx template ls: {err:#}; template images aren't checked"
+            ));
+            None
+        }
+    };
+    let now = (host.now)();
+    let mut total = 0;
+    for (profile_name, harness, record) in &records {
+        total += record.size_bytes;
+        let tag = &record.tag;
+        let age = parse_timestamp(&record.created_at).map(|at| now.saturating_sub(at));
+        report.pass(format!(
+            "template {tag} ({profile_name}, {}, {}): {}, {} old",
+            harness.as_str(),
+            if record.warm { "warm" } else { "cold" },
+            gib(record.size_bytes),
+            age.map_or("?".to_owned(), format_duration)
+        ));
+        let flag = match harness {
+            Harness::Claude => String::new(),
+            other => format!(" --harness {}", other.as_str()),
+        };
+        let warm = if record.warm { " --warm <repo>" } else { "" };
+        let rebuild = format!("rebuild it with `sbxm template build {profile_name}{flag}{warm}`");
+        if images
+            .as_ref()
+            .is_some_and(|images| !images.iter().any(|t| t.reference() == *tag))
+        {
+            report.warn(format!(
+                "template {tag}: image missing; rebuild it with `sbxm template build \
+                 {profile_name}{flag}{warm}` or remove the record with `sbxm template rm \
+                 {profile_name}{flag}`"
+            ));
+        }
+        match Profile::load(profiles_dir, profile_name) {
+            Err(err) => report.warn(format!(
+                "template {tag}: profile '{profile_name}' doesn't load, so sbxm can't tell \
+                 whether the template is stale ({err:#})"
+            )),
+            Ok(profile) if profile.template.is_none() => report.warn(format!(
+                "template {tag}: profile '{profile_name}' no longer has [template]; remove the \
+                 template with `sbxm template rm {profile_name}{flag}`"
+            )),
+            Ok(profile)
+                if kit::template_hash(&profile, *harness, record.warm) != record.template_hash =>
+            {
+                report.warn(format!(
+                    "template {tag} is stale: profile '{profile_name}' changed its install steps, \
+                     build allow list or harness kit since it was built; {rebuild}"
+                ))
+            }
+            Ok(_) => {}
+        }
+        if let Some(age) = age.filter(|age| *age > MAX_TEMPLATE_DAYS * DAY) {
+            report.warn(format!(
+                "template {tag} is {} old, and its agent is frozen at the version it was saved \
+                 with; {rebuild}",
+                format_duration(age)
+            ));
+        }
+    }
+    report.pass(format!(
+        "{} template{}, {} in total",
+        records.len(),
+        if records.len() == 1 { "" } else { "s" },
+        gib(total)
+    ));
+}
+
+/// The folders in `profiles_dir`, sorted; `None` when it can't be read.
+fn profile_names(profiles_dir: &Path) -> Option<Vec<String>> {
+    let mut names: Vec<String> = fs::read_dir(profiles_dir)
+        .ok()?
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    names.sort();
+    Some(names)
 }
 
 /// Every profile, then every project merged over its recorded profile
@@ -155,22 +308,14 @@ fn check_configs(
     backend: &dyn SandboxBackend,
 ) {
     let profiles_dir = config.profiles_dir();
-    let mut names: Vec<String> = match fs::read_dir(profiles_dir) {
-        Ok(entries) => entries
-            .filter_map(|e| e.ok())
-            .filter(|e| e.path().is_dir())
-            .map(|e| e.file_name().to_string_lossy().into_owned())
-            .collect(),
-        Err(_) => {
-            report.fail(format!(
-                "profiles dir {} does not exist; run `sbxm config init` or change profiles_dir in {}",
-                profiles_dir.display(),
-                config_path.display()
-            ));
-            Vec::new()
-        }
-    };
-    names.sort();
+    let names = profile_names(profiles_dir).unwrap_or_else(|| {
+        report.fail(format!(
+            "profiles dir {} does not exist; run `sbxm config init` or change profiles_dir in {}",
+            profiles_dir.display(),
+            config_path.display()
+        ));
+        Vec::new()
+    });
     let mut stored = None;
     for name in names {
         let result = Profile::load(profiles_dir, &name).and_then(|profile| {

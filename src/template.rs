@@ -139,6 +139,41 @@ impl Record {
     }
 }
 
+/// Every `<profile>-<harness>.json` under `<base>/.sbxm/templates`, sorted by file name; build
+/// locks, temporary files and folders are skipped.
+pub fn records(base_dir: &Path) -> Result<Vec<(String, Harness, Record)>> {
+    let dir = dir(base_dir);
+    if !dir.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut keys = Vec::new();
+    for entry in fs::read_dir(&dir).with_context(|| format!("cannot read {}", dir.display()))? {
+        let entry = entry.with_context(|| format!("cannot read {}", dir.display()))?;
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(key) = name.strip_suffix(".json") else {
+            continue;
+        };
+        if key.ends_with(".build") || !entry.file_type()?.is_file() {
+            continue;
+        }
+        let Some((profile, harness)) = key.rsplit_once('-') else {
+            continue;
+        };
+        let Ok(harness) = <Harness as clap::ValueEnum>::from_str(harness, false) else {
+            continue;
+        };
+        keys.push((key.to_owned(), profile.to_owned(), harness));
+    }
+    keys.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut records = Vec::new();
+    for (key, profile, harness) in keys {
+        if let Some(record) = Record::load(base_dir, &key)? {
+            records.push((profile, harness, record));
+        }
+    }
+    Ok(records)
+}
+
 /// The combined SHA-256 of `files` (paths relative to `repo`), in order (decision 207).
 /// Each file's path and length go in before its contents, so moving bytes between files changes
 /// the hash.

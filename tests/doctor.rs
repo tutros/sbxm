@@ -8,6 +8,9 @@ use sbxm::backend::FakeBackend;
 use sbxm::commands::{doctor, new};
 
 const GIB: u64 = 1024 * 1024 * 1024;
+/// The clock of [`host`], in 2027.
+const NOW: u64 = 1_800_000_000;
+const DAY: u64 = 86_400;
 
 /// A host with 20 GiB free, a writable base dir and no temp dirs (the test
 /// dirs themselves are under `%TEMP%`).
@@ -17,6 +20,7 @@ fn host() -> doctor::Host {
         writable: |_| Ok(()),
         temp_dirs: Vec::new(),
         sandbox_state_dir: None,
+        now: || NOW,
     }
 }
 
@@ -699,4 +703,175 @@ fn an_unreadable_sandbox_drive_warns() {
         "{}",
         report.render()
     );
+}
+
+const TEMPLATE_PROFILE: &str = "[[setup.install]]\n\
+     command = \"apt-get install -y ripgrep\"\n\
+     \n\
+     [template]\n\
+     allow = []\n";
+
+fn sbx_046() -> FakeBackend {
+    FakeBackend::default().with_version("0.46.0")
+}
+
+/// Builds the cold template of `default` for claude, saved at `at`, and returns its record.
+fn build_template(env: &Env, backend: &FakeBackend, at: u64) -> sbxm::template::Record {
+    sbxm::commands::template_build::run(
+        &env.config_dir(),
+        &sbxm::commands::template_build::Options {
+            profile: "default".into(),
+            harness: sbxm::harness::Harness::Claude,
+            now: Some(at),
+            ..Default::default()
+        },
+        backend,
+        &sbxm::task::record::SystemProbe,
+        &mut Vec::new(),
+        &mut Vec::new(),
+    )
+    .unwrap();
+    sbxm::template::Record::load(&env.base_dir(), "default-claude")
+        .unwrap()
+        .unwrap()
+}
+
+#[test]
+fn doctor_lists_each_template_with_its_size_and_age_and_the_total() {
+    let env = Env::new();
+    env.write_profile("default", TEMPLATE_PROFILE);
+    let backend = sbx_046();
+    let record = build_template(&env, &backend, NOW - 2 * DAY);
+
+    let report = report(&env, &backend);
+
+    assert!(!report.failed(), "{}", report.render());
+    let text = report.render();
+    assert!(
+        text.contains("ok   sbx 0.46.0 (templates need 0.46.0)\n"),
+        "{text}"
+    );
+    let size = sbxm::disk::gib(record.size_bytes);
+    assert!(
+        text.contains(&format!(
+            "ok   template {} (default, claude, cold): {size}, 2d00h old\n",
+            record.tag
+        )),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!("ok   1 template, {size} in total\n")),
+        "{text}"
+    );
+    assert!(!text.contains("warn template"), "{text}");
+}
+
+#[test]
+fn a_template_whose_image_is_gone_warns() {
+    let env = Env::new();
+    env.write_profile("default", TEMPLATE_PROFILE);
+    let record = build_template(&env, &sbx_046(), NOW - DAY);
+
+    // A backend that never saved it: `sbx template ls` doesn't list the tag.
+    let report = report(&env, &sbx_046());
+
+    assert!(!report.failed(), "{}", report.render());
+    assert!(
+        report.render().contains(&format!(
+            "warn template {}: image missing; rebuild it with `sbxm template build default` or \
+             remove the record with `sbxm template rm default`\n",
+            record.tag
+        )),
+        "{}",
+        report.render()
+    );
+}
+
+#[test]
+fn a_template_whose_profile_changed_its_build_part_warns_that_it_is_stale() {
+    let env = Env::new();
+    env.write_profile("default", TEMPLATE_PROFILE);
+    let backend = sbx_046();
+    let record = build_template(&env, &backend, NOW - DAY);
+    env.write_profile(
+        "default",
+        &TEMPLATE_PROFILE.replace("ripgrep", "ripgrep jq"),
+    );
+
+    let report = report(&env, &backend);
+
+    assert!(!report.failed(), "{}", report.render());
+    assert!(
+        report.render().contains(&format!(
+            "warn template {} is stale: profile 'default' changed its install steps, build allow \
+             list or harness kit since it was built; rebuild it with `sbxm template build default`\n",
+            record.tag
+        )),
+        "{}",
+        report.render()
+    );
+}
+
+#[test]
+fn a_template_older_than_14_days_warns_and_does_not_fail() {
+    let env = Env::new();
+    env.write_profile("default", TEMPLATE_PROFILE);
+    let backend = sbx_046();
+    let record = build_template(&env, &backend, NOW - 15 * DAY);
+
+    let report = report(&env, &backend);
+
+    assert!(!report.failed(), "{}", report.render());
+    assert!(
+        report.render().contains(&format!(
+            "warn template {} is 15d00h old, and its agent is frozen at the version it was saved \
+             with; rebuild it with `sbxm template build default`\n",
+            record.tag
+        )),
+        "{}",
+        report.render()
+    );
+}
+
+#[test]
+fn a_template_of_exactly_14_days_does_not_warn() {
+    let env = Env::new();
+    env.write_profile("default", TEMPLATE_PROFILE);
+    let backend = sbx_046();
+    build_template(&env, &backend, NOW - 14 * DAY);
+
+    let text = report(&env, &backend).render();
+
+    assert!(!text.contains("warn template"), "{text}");
+}
+
+#[test]
+fn an_sbx_older_than_the_template_minimum_fails_when_a_profile_has_a_template() {
+    let env = Env::new();
+    env.write_profile("default", TEMPLATE_PROFILE);
+
+    // The fake's default version, 0.43.0, passes the global minimum.
+    let report = report(&env, &FakeBackend::default());
+
+    assert!(report.failed());
+    assert!(
+        report.render().contains(
+            "FAIL sbx 0.43.0 is older than 0.46.0, the version templates need (profile \
+             'default' has [template]); upgrade sbx, or remove [template] from the profile\n"
+        ),
+        "{}",
+        report.render()
+    );
+}
+
+#[test]
+fn an_sbx_older_than_the_template_minimum_passes_without_a_template_profile() {
+    let env = Env::new();
+
+    let report = report(&env, &FakeBackend::default());
+
+    assert!(!report.failed(), "{}", report.render());
+    let text = report.render();
+    assert!(!text.contains("templates need"), "{text}");
+    assert!(!text.contains("template"), "{text}");
 }
