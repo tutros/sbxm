@@ -148,11 +148,13 @@ pub fn lock_hash(repo: &Path, files: &[String]) -> Result<String> {
 
 /// Where a sandbox's lock files are read for a warm template's check (decision 203(b)): a host
 /// folder, or a commit in a task's host-owned `repo.git`, so no host git runs in an agent's clone
-/// (decisions 159, 216).
+/// (decisions 159, 216). A run without a seed has none, so a warm template never matches it
+/// (decision 237).
 #[derive(Debug, Clone, Copy)]
 pub enum Locks<'a> {
     Dir(&'a Path),
     Commit { repo_git: &'a Path, commit: &'a str },
+    Unseeded,
 }
 
 impl Locks<'_> {
@@ -199,6 +201,7 @@ impl Locks<'_> {
                 )
                 .with_context(cannot)
             }
+            Locks::Unseeded => bail!("a run without a seed has no lock files"),
         }
     }
 }
@@ -208,6 +211,7 @@ impl std::fmt::Display for Locks<'_> {
         match self {
             Locks::Dir(dir) => write!(f, "{}", dir.display()),
             Locks::Commit { commit, .. } => write!(f, "commit {commit}"),
+            Locks::Unseeded => write!(f, "a run without a seed"),
         }
     }
 }

@@ -18,6 +18,7 @@ use super::kits::RunKits;
 use crate::backend::{CreateSpec, SandboxBackend};
 use crate::headless::{self, HeadlessOpts, HeadlessResult};
 use crate::seed;
+use crate::template;
 
 /// What became of one (contestant, repeat) pair.
 #[derive(Debug)]
@@ -239,13 +240,28 @@ impl Pair<'_> {
             memory: self.kits.resources.memory.clone(),
             skills: harness_kits.skills_store,
             kits: harness_kits.dirs.clone(),
-            template: None,
-            deny_network: Vec::new(),
+            template: harness_kits.template.clone(),
+            deny_network: harness_kits.deny_network.clone().unwrap_or_default(),
         }) {
             return failed(
                 format!("cannot create sandbox {}: {e:#}", self.sandbox),
                 true,
             );
+        }
+        // A strict `codex` sandbox is held to its allow list before the agent runs (decision 221).
+        if let Err(e) = template::check_codex_rules(
+            &harness_kits.profile,
+            &harness_kits.loaded,
+            &self.sandbox,
+            self.backend,
+            harness_kits.deny_network.as_deref(),
+        ) {
+            // A refused sandbox is already removed; one whose rules couldn't be read is not.
+            let left = self
+                .backend
+                .list()
+                .map_or(true, |all| all.iter().any(|s| s.name == self.sandbox));
+            return failed(format!("{e:#}"), left);
         }
 
         let opts = HeadlessOpts {

@@ -1,6 +1,7 @@
 //! Everything `sbxm run` checks before it writes a file or calls `sbx`:
-//! the seed dir, the profiles, the stored secrets and the warnings
-//! (decisions 11, 30, 58, 98, 102). Read-only, apart from `sbx secret ls`.
+//! the seed dir, the profiles, the stored secrets, the templates and the warnings
+//! (decisions 11, 30, 58, 98, 102, 237). Read-only, apart from `sbx secret ls`,
+//! `sbx version` and `sbx template ls`.
 
 use std::fs;
 use std::path::Path;
@@ -8,16 +9,20 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 
 use super::config::{Cosine, RunConfig};
+use super::kits;
 use crate::backend::SandboxBackend;
 use crate::config::{GlobalConfig, Profile};
 use crate::eval::cosine;
 use crate::harness::Harness;
 use crate::seed;
+use crate::template;
 
 #[derive(Debug)]
 pub struct Preflight {
     /// One line each, without the `warning: ` prefix.
     pub warnings: Vec<String>,
+    /// The template of each (profile, harness) pair, `None` for the install steps (decision 237).
+    pub templates: Vec<(String, Harness, Option<String>)>,
 }
 
 pub fn check(
@@ -89,7 +94,39 @@ pub fn check(
         );
     }
 
-    let mut warnings = Vec::new();
+    // One choice per pair holds for every sandbox of it; the judge builds nothing, so it follows
+    // its pair (decision 237). A strict profile is refused here, before any write.
+    let locks = match &run_config.task.seed {
+        Some(seed) => template::Locks::Dir(seed),
+        None => template::Locks::Unseeded,
+    };
+    let mut warned = Vec::new();
+    let mut templates = Vec::new();
+    for (name, harness) in kits::pairs(run_config, &run_profile) {
+        let profile = &profiles.iter().find(|(n, _)| *n == name).unwrap().1;
+        let sandbox = format!(
+            "the run's {} sandboxes of profile '{name}'",
+            harness.as_str()
+        );
+        let request = template::Request {
+            base_dir: &global.base_dir,
+            profile_name: &name,
+            profile,
+            // A run has no project `sandbox.toml`.
+            merged: profile,
+            project_config: Path::new(""),
+            harness,
+            sandbox: &sandbox,
+            locks,
+        };
+        let tag = template::choose(&request, backend, &mut warned)?;
+        templates.push((name, harness, tag));
+    }
+
+    let mut warnings: Vec<String> = String::from_utf8_lossy(&warned)
+        .lines()
+        .map(|l| l.strip_prefix("warning: ").unwrap_or(l).to_owned())
+        .collect();
     if run_config.run.budget_usd.is_some() {
         for (i, c) in run_config.contestants.iter().enumerate() {
             if c.harness.budget_flag(run_config.run.budget_usd).is_none() {
@@ -139,7 +176,10 @@ pub fn check(
     if let Some(judge) = &run_config.eval.judge {
         unsupported(judge.harness, &run_profile, "the judge's sandbox".into());
     }
-    Ok(Preflight { warnings })
+    Ok(Preflight {
+        warnings,
+        templates,
+    })
 }
 
 /// The same checks `new --seed` makes (decision 47), before anything is copied.
