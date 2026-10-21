@@ -7,7 +7,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use common::{Env, git, task_fixture};
-use sbxm::backend::FakeBackend;
+use sbxm::backend::{FakeBackend, NetworkRule};
 use sbxm::commands::{task_resume, task_review, template_build};
 use sbxm::github::fake::FakeGitHub;
 use sbxm::github::{PrInfo, PrState};
@@ -276,10 +276,19 @@ fn setup_pr_7(
     profile: &str,
     head_lock: &str,
 ) -> (task_fixture::Fixture, FakeBackend, String, FakeGitHub) {
+    setup_pr_7_with(profile, head_lock, Vec::new())
+}
+
+/// [`setup_pr_7`] with `rules` as the network rules `sbx` reports for any sandbox.
+fn setup_pr_7_with(
+    profile: &str,
+    head_lock: &str,
+    rules: Vec<NetworkRule>,
+) -> (task_fixture::Fixture, FakeBackend, String, FakeGitHub) {
     let f = pr_fixture();
     f.env.write_profile("default", profile);
     let main = push_lock(&f, "main-lock", "version = 4\n", "refs/heads/main");
-    let backend = pr_backend(&f);
+    let backend = pr_backend(&f).with_network_rules(rules);
     let tag = build_warm_codex(&f.env, &backend, &main);
     push_lock(&f, "pr-head", head_lock, "refs/pull/7/head");
     (f, backend, tag, FakeGitHub::default().with_pr(pr_7()))
@@ -358,6 +367,128 @@ fn a_pr_head_that_changes_the_lock_file_refuses_a_strict_reviewer_before_its_san
     let err = result.err().unwrap();
     assert!(format!("{err:#}").contains("--warm"), "{err:#}");
     assert!(reviewer_creates(&backend).is_empty());
+}
+
+// Decisions 221, 232: a strict `codex` task sandbox denies the kit's extra hosts and is checked
+// after its creation, as `new`'s is.
+
+const CODEX_EXTRA: [&str; 9] = [
+    "github.com",
+    "api.github.com",
+    "codeload.github.com",
+    "release-assets.githubusercontent.com",
+    "registry.npmjs.org",
+    "download.docker.com",
+    "archive.ubuntu.com",
+    "security.ubuntu.com",
+    "ports.ubuntu.com",
+];
+
+/// The rules `sbx` reports for the `codex` sandbox `sandbox`: the kit's allow rule and one deny
+/// rule per host in `denied`.
+fn codex_rules(sandbox: &str, denied: &[&str]) -> Vec<NetworkRule> {
+    let scope = format!("sandbox:{sandbox}");
+    let mut rules = vec![NetworkRule {
+        name: format!("kit:{sandbox}"),
+        scope: scope.clone(),
+        allow: true,
+        resources: ["api.openai.com", "chatgpt.com"]
+            .iter()
+            .chain(CODEX_EXTRA.iter())
+            .map(|h| format!("{h}:443"))
+            .collect(),
+    }];
+    rules.extend(denied.iter().map(|h| NetworkRule {
+        name: "some-uuid".into(),
+        scope: scope.clone(),
+        allow: false,
+        resources: vec![h.to_string()],
+    }));
+    rules
+}
+
+#[test]
+fn a_strict_codex_reviewer_gets_the_deny_rules() {
+    const REVIEWER: &str = "sbxm-task-pr-7-review-codex";
+    let (f, backend, tag, github) = setup_pr_7_with(
+        &strict(PROFILE),
+        "version = 4\n",
+        codex_rules(REVIEWER, &CODEX_EXTRA),
+    );
+    let source = task_fixture::source(&f);
+    let host = FakeHostRunner::default();
+    let ctx = task_fixture::ctx_with_host(&f, &source, &backend, &github, &host);
+    let mut prepared = pipeline::prepare_pr(&ctx, &pr_7()).unwrap();
+
+    pipeline::review_pr(&ctx.env(), &github, &mut prepared, false).unwrap();
+
+    let creates = reviewer_creates(&backend);
+    assert_eq!(creates.len(), 1, "{creates:?}");
+    assert_eq!(creates[0].template.as_deref(), Some(tag.as_str()));
+    assert_eq!(creates[0].deny_network, CODEX_EXTRA);
+    let log = backend.log();
+    let created = log
+        .iter()
+        .position(|l| *l == format!("create {REVIEWER}"))
+        .unwrap();
+    assert_eq!(log[created + 1], format!("network_rules {REVIEWER}"));
+}
+
+#[test]
+fn a_strict_codex_worker_whose_kit_widens_is_removed() {
+    const CODEX_WORKER: &str = "sbxm-task-issue-41-codex";
+    let f = task_fixture::fixture_with(
+        "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = [\"cargo test\"]\n\n\
+         [worker]\nharness = \"codex\"\n",
+    );
+    f.env.write_profile("default", &strict(PROFILE));
+    // The kit allows `github.com` and no rule denies it.
+    let backend = FakeBackend::with_secrets(&["anthropic", "openai"])
+        .with_version("0.46.0")
+        .with_network_rules(codex_rules(CODEX_WORKER, &[]));
+    template_build::run(
+        &f.env.config_dir(),
+        &template_build::Options {
+            profile: "default".into(),
+            harness: Harness::Codex,
+            ..Default::default()
+        },
+        &backend,
+        &sbxm::task::record::SystemProbe,
+        &mut Vec::new(),
+        &mut Vec::new(),
+    )
+    .unwrap();
+    let (github, source) = (FakeGitHub::default(), task_fixture::source(&f));
+
+    let err = pipeline::prepare(
+        &task_fixture::ctx(&f, &source, &backend, &github),
+        &task_fixture::issue_text(41),
+    )
+    .err()
+    .unwrap();
+
+    assert!(format!("{err:#}").contains("allows github.com"), "{err:#}");
+    let log = backend.log();
+    let created = log
+        .iter()
+        .position(|l| *l == format!("create {CODEX_WORKER}"))
+        .unwrap();
+    assert_eq!(
+        log[created + 1..created + 3],
+        [
+            format!("network_rules {CODEX_WORKER}"),
+            format!("rm {CODEX_WORKER}"),
+        ]
+    );
+    assert!(
+        !f.env
+            .base_dir()
+            .join(".sbxm")
+            .join("tasks")
+            .join("issue-41")
+            .exists()
+    );
 }
 
 #[test]
@@ -498,6 +629,40 @@ fn a_resumed_worker_whose_template_is_gone_warns_and_installs() {
         .rfind(|c| c.name == WORKER)
         .unwrap();
     assert_eq!(last.template, None);
+    let saved = record::read(&task_json_41(&f)).unwrap();
+    assert_eq!(saved.worker.unwrap().template, None);
+}
+
+fn task_json_41(f: &task_fixture::Fixture) -> PathBuf {
+    record::task_dir(&f.env.base_dir(), "issue-41").join("task.json")
+}
+
+/// Review M3S8-2: the remade sandbox's template and hash are in `task.json` before a later step
+/// of the resume can fail, so `template rm` sees what the sandbox was made from.
+#[test]
+fn a_remade_worker_is_recorded_before_a_later_step_fails() {
+    let f = task_fixture::fixture();
+    let backend = resume_backend(&f);
+    failed_worker(&f, &backend);
+    let mut task = record::read(&task_json_41(&f)).unwrap();
+    task.status = record::Status::Completed;
+    record::write(task_json_41(&f).parent().unwrap(), &task).unwrap();
+    // No template image any more, so the sandbox is remade with the install steps; then
+    // collecting the worker's commits again fails.
+    let later = resume_backend(&f).with_failing_exec_matching("branch.bundle");
+
+    let (result, _, _) = resume_41(&f, &later);
+
+    assert!(result.is_err());
+    let remade = later
+        .creates()
+        .into_iter()
+        .rfind(|c| c.name == WORKER)
+        .unwrap();
+    assert_eq!(remade.template, None);
+    let saved = record::read(&task_json_41(&f)).unwrap();
+    assert_eq!(saved.worker.unwrap().template, None);
+    assert_ne!(saved.config_hash, task.config_hash);
 }
 
 /// Gap G1 (decisions 203, 216): a worker that changes `Cargo.lock` after it started is not

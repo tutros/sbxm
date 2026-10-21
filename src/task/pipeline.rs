@@ -1629,6 +1629,8 @@ pub(super) fn ensure_worker_sandbox(
     if let Some(worker) = prepared.record.worker.as_mut() {
         worker.template = plan.template.clone();
     }
+    // The record goes first, as in `prepare`: `template rm` reads it to see what the sandbox uses.
+    record::write(&prepared.meta, &prepared.record)?;
     plan.create(env.backend, &sandbox, harness, &prepared.workspace)?;
     Ok(true)
 }
