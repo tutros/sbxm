@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use common::{Env, git, task_fixture};
 use sbxm::backend::FakeBackend;
-use sbxm::commands::{task_review, template_build};
+use sbxm::commands::{task_resume, task_review, template_build};
 use sbxm::github::fake::FakeGitHub;
 use sbxm::github::{PrInfo, PrState};
 use sbxm::harness::Harness;
@@ -195,12 +195,17 @@ fn push_lock(f: &task_fixture::Fixture, name: &str, lock: &str, refname: &str) -
 
 /// Builds the warm template of `default` for codex from `repo`.
 fn build_warm_codex(env: &Env, backend: &FakeBackend, repo: &Path) -> String {
+    build_warm(env, backend, repo, Harness::Codex)
+}
+
+/// Builds the warm template of `default` for `harness` from `repo`.
+fn build_warm(env: &Env, backend: &FakeBackend, repo: &Path, harness: Harness) -> String {
     let mut out = Vec::new();
     template_build::run(
         &env.config_dir(),
         &template_build::Options {
             profile: "default".into(),
-            harness: Harness::Codex,
+            harness,
             warm: Some(repo.to_path_buf()),
             ..Default::default()
         },
@@ -371,4 +376,173 @@ fn a_non_strict_reviewer_whose_pr_head_changes_the_lock_file_warns_and_installs(
     let creates = reviewer_creates(&backend);
     assert_eq!(creates.len(), 1, "{creates:?}");
     assert_eq!(creates[0].template, None);
+}
+
+const WORKER: &str = "sbxm-task-issue-41-claude";
+
+/// Plays issue 41's worker (one commit) and a clean review, with `sbx` 0.46.0. The fake lists
+/// no sandboxes, so a resumed worker's sandbox is always gone.
+fn resume_backend(f: &task_fixture::Fixture) -> FakeBackend {
+    let worker = task_fixture::play_tasks(
+        &f.env.base_dir(),
+        "main",
+        task_fixture::Play {
+            commits: vec!["a.txt".into()],
+            result_md: Some(b"done\n".to_vec()),
+            bundle_bytes: None,
+        },
+    );
+    let reviewer = task_fixture::play_reviews(
+        &f.env.base_dir(),
+        "issue-41",
+        vec!["Must-fix findings: 0\n\nNothing found.\n".to_owned()],
+    );
+    FakeBackend::with_secrets(&["anthropic", "openai"])
+        .with_version("0.46.0")
+        .with_exec_output_matching("claude", task_fixture::ok(task_fixture::CLAUDE_DONE))
+        .with_exec_output_matching("codex", task_fixture::ok(task_fixture::CODEX_DONE))
+        .with_exec_hook(move |sandbox, spec| {
+            worker(sandbox, spec);
+            reviewer(sandbox, spec);
+        })
+}
+
+/// Issue 41's worker created from the template and run once, then left failed as a crash would
+/// leave it.
+fn failed_worker(f: &task_fixture::Fixture, backend: &FakeBackend) -> String {
+    f.env.write_profile("default", PROFILE);
+    let tag = build_template(&f.env, backend);
+    let mut prepared = task_fixture::worked_task(f, backend);
+    assert_eq!(
+        prepared.record.worker.as_ref().unwrap().template.as_deref(),
+        Some(tag.as_str())
+    );
+    prepared.record.stage = record::Stage::Working;
+    prepared.record.status = record::Status::Failed;
+    record::write(&prepared.meta, &prepared.record).unwrap();
+    tag
+}
+
+/// The process a record names is gone (the `sbxm` that wrote it was killed).
+struct Gone;
+
+impl record::ProcessProbe for Gone {
+    fn start_time(&self, _pid: u32) -> Option<u64> {
+        None
+    }
+}
+
+fn resume_41(
+    f: &task_fixture::Fixture,
+    backend: &FakeBackend,
+) -> (anyhow::Result<()>, String, String) {
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let result = task_resume::run(
+        &f.env.config_dir(),
+        &task_resume::Options {
+            repo_root: f.env.tmp.path().join("target-repo"),
+            target: task_resume::Target::Issue(41),
+            rounds: None,
+            disk: Default::default(),
+        },
+        backend,
+        &Gone,
+        &FakeHostRunner::default(),
+        &mut out,
+        &mut warn,
+    );
+    (
+        result,
+        String::from_utf8(out).unwrap(),
+        String::from_utf8(warn).unwrap(),
+    )
+}
+
+#[test]
+fn a_gone_worker_sandbox_is_made_again_from_the_profiles_template() {
+    let f = task_fixture::fixture();
+    let backend = resume_backend(&f);
+    let tag = failed_worker(&f, &backend);
+
+    let (result, out, _) = resume_41(&f, &backend);
+
+    result.unwrap();
+    assert!(out.contains("sandbox was gone"), "{out}");
+    let last = backend
+        .creates()
+        .into_iter()
+        .rfind(|c| c.name == WORKER)
+        .unwrap();
+    assert_eq!(last.template.as_deref(), Some(tag.as_str()));
+}
+
+#[test]
+fn a_resumed_worker_whose_template_is_gone_warns_and_installs() {
+    let f = task_fixture::fixture();
+    let backend = resume_backend(&f);
+    let tag = failed_worker(&f, &backend);
+    sbxm::backend::SandboxBackend::template_rm(&backend, &tag).unwrap();
+
+    let (result, _, warn) = resume_41(&f, &backend);
+
+    result.unwrap();
+    assert!(
+        warn.lines().any(|l| l.starts_with("warning: ")
+            && l.contains("has no template")
+            && l.contains("install steps")),
+        "{warn}"
+    );
+    let last = backend
+        .creates()
+        .into_iter()
+        .rfind(|c| c.name == WORKER)
+        .unwrap();
+    assert_eq!(last.template, None);
+}
+
+/// Gap G1 (decisions 203, 216): a worker that changes `Cargo.lock` after it started is not
+/// checked again inside its sandbox (a missing dependency fails there, clearly), but the
+/// reviewer checks out the changed lock file, so a strict profile refuses it before its sandbox.
+#[test]
+fn a_worker_that_changes_the_lock_file_keeps_its_sandbox_and_a_strict_reviewer_is_refused() {
+    let f = task_fixture::fixture();
+    f.env.write_profile("default", &strict(PROFILE));
+    let main = push_lock(&f, "main-lock", "version = 4\n", "refs/heads/main");
+    let worker = task_fixture::play_tasks(
+        &f.env.base_dir(),
+        "main",
+        task_fixture::Play {
+            commits: vec!["Cargo.lock".into()],
+            result_md: Some(b"done\n".to_vec()),
+            bundle_bytes: None,
+        },
+    );
+    let backend = FakeBackend::with_secrets(&["anthropic", "openai"])
+        .with_version("0.46.0")
+        .with_exec_output_matching("claude", task_fixture::ok(task_fixture::CLAUDE_DONE))
+        .with_exec_output_matching(
+            "cargo metadata",
+            task_fixture::ok(r#"{"packages":[{"name":"x"}],"version":1}"#),
+        )
+        .with_exec_hook(worker);
+    let worker_tag = build_warm(&f.env, &backend, &main, Harness::Claude);
+    build_warm(&f.env, &backend, &main, Harness::Codex);
+    let (github, source) = (FakeGitHub::default(), task_fixture::source(&f));
+    let ctx = task_fixture::ctx(&f, &source, &backend, &github);
+    let mut prepared = pipeline::prepare(&ctx, &task_fixture::issue_text(41)).unwrap();
+
+    let worked = pipeline::run_worker(&ctx, &mut prepared).unwrap();
+    let review = pipeline::review_issue(&ctx.env(), &mut prepared);
+
+    assert_eq!(worked.commits, 1);
+    let workers: Vec<_> = backend
+        .creates()
+        .into_iter()
+        .filter(|c| c.name == WORKER)
+        .collect();
+    assert_eq!(workers.len(), 1, "the worker's sandbox is never remade");
+    assert_eq!(workers[0].template.as_deref(), Some(worker_tag.as_str()));
+    let err = review.err().unwrap();
+    assert!(format!("{err:#}").contains("--warm"), "{err:#}");
+    assert!(reviewer_creates(&backend).is_empty());
 }

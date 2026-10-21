@@ -1431,7 +1431,12 @@ fn check_config_drift(
     let global = GlobalConfig::load(env.config_dir)?;
     let profile = Profile::load(global.profiles_dir(), profile_name)?;
     let harness = env.config.worker.harness;
-    let hash = config::config_hash(profile_name, &profile, resources, harness);
+    // The variant the worker was created with (decisions 208, 230).
+    let from_template = record.worker.as_ref().is_some_and(|w| w.template.is_some());
+    let hash = match from_template {
+        true => config::template_config_hash,
+        false => config::config_hash,
+    }(profile_name, &profile, resources, harness);
     if hash != record.config_hash {
         bail!(
             "task {}'s sandbox config changed since it started; restart it with `{}`, or restore \
@@ -1577,9 +1582,12 @@ impl SandboxPlan {
 /// that still exists is removed first (a preparation that was cut off may have left one half
 /// made), but only once the recorded profile and resources are confirmed and [`check_config_drift`]
 /// passes, so a refusal never removes, rebuilds or records anything. Returns whether it was made.
+/// It follows the profile's template as a new worker does (decisions 206, 216), at the delivered
+/// branch's tip; the record takes the variant it was made with, and an unusable template's
+/// warning goes to `prepared.warnings`.
 pub(super) fn ensure_worker_sandbox(
     env: &TaskEnv,
-    prepared: &Prepared,
+    prepared: &mut Prepared,
     replace: bool,
 ) -> Result<bool> {
     let worker = prepared
@@ -1594,39 +1602,34 @@ pub(super) fn ensure_worker_sandbox(
     let profile_name = worker_profile(&prepared.record, worker)?.to_owned();
     let resources = worker_resources(&prepared.record, worker)?;
     check_config_drift(env, &prepared.record, &profile_name, &resources)?;
-    if replace {
-        let _ = env.backend.remove(&sandbox);
-    }
     let harness = env.config.worker.harness;
-    let kit_set = kits::build_for(
+    let repo_git = prepared.meta.join("repo.git");
+    let tip = repo::branch_tip(&repo_git, &prepared.record.branch)?;
+    let plan = plan_sandbox(
         env.config_dir,
+        env.backend,
         &profile_name,
-        &[harness],
+        harness,
+        &sandbox,
         &Overrides {
             cpus: Some(resources.cpus),
             memory: Some(resources.memory.clone()),
         },
-        None,
         &prepared.meta.join("kits"),
-        env.backend,
+        Locks::Commit {
+            repo_git: &repo_git,
+            commit: &tip,
+        },
+        &mut prepared.warnings,
     )?;
-    let harness_kits = kit_set
-        .get(harness)
-        .cloned()
-        .context("no kits were built for the worker's harness")?;
-    env.backend
-        .create(&CreateSpec {
-            name: sandbox.clone(),
-            agent: harness.agent_arg().into(),
-            workspace: prepared.workspace.clone(),
-            cpus: kit_set.resources.cpus,
-            memory: kit_set.resources.memory.clone(),
-            skills: harness_kits.skills_store,
-            kits: harness_kits.dirs.clone(),
-            template: None,
-            deny_network: Vec::new(),
-        })
-        .with_context(|| format!("cannot create sandbox {sandbox}"))?;
+    if replace {
+        let _ = env.backend.remove(&sandbox);
+    }
+    prepared.record.config_hash = plan.kits.config_hash.clone();
+    if let Some(worker) = prepared.record.worker.as_mut() {
+        worker.template = plan.template.clone();
+    }
+    plan.create(env.backend, &sandbox, harness, &prepared.workspace)?;
     Ok(true)
 }
 
