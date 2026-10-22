@@ -82,12 +82,6 @@ fn part_label(i: usize, n: usize) -> String {
     format!("part {i} of {n}")
 }
 
-/// The widest [`part_label`] any part count can render, to size chunks before the number of
-/// parts is known.
-fn widest_part() -> String {
-    part_label(usize::MAX, usize::MAX)
-}
-
 /// One planned request of a pair: its `state`, and its weight when chunk results are combined
 /// (its diff's size in characters).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,14 +193,18 @@ pub fn plan(
              {TOKEN_CAP}); no call was made"
         ));
     }
-    let widest = widest_part();
-    let with_answer = estimate(&state(answer, "", Some(&widest)), &questions);
-    if with_answer > TOKEN_CAP {
-        return Err(format!(
-            "the answer is too long for Jev (about {with_answer} tokens with the task and the \
-             questions, the limit is {TOKEN_CAP}); no call was made"
-        ));
-    }
+    // The answer is checked with the diff heading of the request that is actually sent.
+    let answer_fits = |part: Option<&str>| {
+        let with_answer = estimate(&state(answer, "", part), &questions);
+        if with_answer > TOKEN_CAP {
+            return Err(format!(
+                "the answer is too long for Jev (about {with_answer} tokens with the task and \
+                 the questions, the limit is {TOKEN_CAP}); no call was made"
+            ));
+        }
+        Ok(())
+    };
+    answer_fits(None)?;
     let fits = |text: &str, part: Option<&str>| {
         estimate(&state(answer, text, part), &questions) <= TOKEN_CAP
     };
@@ -227,11 +225,16 @@ pub fn plan(
         });
     }
 
+    // Every chunk holds at least one file of its own, so a split has at most as many parts as
+    // files: the chunks are sized against that count's label, which no real label is wider than.
+    let files = split_files(diff);
+    let widest = part_label(files.len(), files.len());
+    answer_fits(Some(&widest))?;
     let part = Some(widest.as_str());
     let mut chunks: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut truncated = false;
-    for file in split_files(diff) {
+    for file in files {
         let joined = format!("{current}{file}");
         if fits(&joined, part) {
             current = joined;
@@ -259,7 +262,7 @@ pub fn plan(
             weight: chunk.chars().count().max(1),
         })
         .collect();
-    // The chunks were sized against `widest_part`; a request is only ever sent within the cap.
+    // The chunks were sized against `widest`; a request is only ever sent within the cap.
     if let Some(over) = requests
         .iter()
         .map(|r| estimate(&r.state, &questions))

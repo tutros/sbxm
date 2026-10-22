@@ -124,7 +124,21 @@ fn an_answer_just_under_the_cap_is_planned() {
     assert!(low > 3 * (jev::TOKEN_CAP - 600), "{low}");
     let plan = jev::plan("Task", &one_question(), &"a".repeat(low), None).unwrap();
     assert_eq!(plan.requests.len(), 1);
+    // The boundary is where the request actually sent reaches the cap, not a reserve for a
+    // request that is never sent (review round 3, M-1).
+    assert_eq!(
+        jev::estimate(&plan.requests[0].state, &plan.questions),
+        jev::TOKEN_CAP
+    );
     assert!(jev::plan("Task", &one_question(), &"a".repeat(low + 3), None).is_err());
+}
+
+#[test]
+fn an_answer_whose_unsplit_request_is_under_the_cap_is_planned() {
+    // Review round 3, M-1: accepted before round 2's fix, refused by a reserved split label.
+    let plan = jev::plan("Task", &rubric(), &"a".repeat(82_442), None).unwrap();
+    assert_eq!(plan.requests.len(), 1);
+    assert!(jev::estimate(&plan.requests[0].state, &plan.questions) <= jev::TOKEN_CAP);
 }
 
 // ---- chunking -----------------------------------------------------------------------------
@@ -189,7 +203,7 @@ fn a_single_file_over_the_budget_is_truncated_never_sent_whole() {
 fn the_longest_accepted_answer_with_an_oversized_file_stays_within_the_cap() {
     // Review M-1: at the answer's boundary even the cut note with nothing kept doesn't fit.
     let big = file("big.rs", 100_000);
-    let plan = jev::plan("Task", &rubric(), &longest_accepted_answer(), Some(&big)).unwrap();
+    let (_, plan) = longest_accepted_answer(&big);
     assert!(plan.truncated);
     for request in &plan.requests {
         let estimate = jev::estimate(&request.state, &plan.questions);
@@ -201,8 +215,10 @@ fn the_longest_accepted_answer_with_an_oversized_file_stays_within_the_cap() {
     }
 }
 
-/// The longest answer `plan` accepts on its own (found by bisection).
-fn longest_accepted_answer() -> String {
+/// The longest answer `plan` accepts with `diff`, and its plan. It starts from the answer whose
+/// unsplit request with no diff is exactly at the cap (checked here, so the boundary can't move
+/// with `plan`), then steps down while the diff's own heading makes the answer too long.
+fn longest_accepted_answer(diff: &str) -> (String, jev::Plan) {
     let accepted = |n: usize| jev::plan("Task", &rubric(), &"a".repeat(n), None).is_ok();
     let (mut low, mut high) = (0, 3 * jev::TOKEN_CAP);
     while low < high {
@@ -213,7 +229,18 @@ fn longest_accepted_answer() -> String {
             high = mid - 1
         }
     }
-    "a".repeat(low)
+    let alone = jev::plan("Task", &rubric(), &"a".repeat(low), None).unwrap();
+    assert_eq!(
+        jev::estimate(&alone.requests[0].state, &alone.questions),
+        jev::TOKEN_CAP
+    );
+    loop {
+        match jev::plan("Task", &rubric(), &"a".repeat(low), Some(diff)) {
+            Ok(plan) => return ("a".repeat(low), plan),
+            Err(e) if e.contains("answer is too long") => low -= 1,
+            Err(e) => panic!("{e}"),
+        }
+    }
 }
 
 #[test]
@@ -222,8 +249,7 @@ fn the_longest_accepted_answer_with_10_000_files_is_split_within_the_cap() {
     let diff: String = (0..10_000)
         .map(|i| file(&format!("f{i}.rs"), 100))
         .collect();
-    let answer = longest_accepted_answer();
-    let plan = jev::plan("Task", &rubric(), &answer, Some(&diff)).unwrap();
+    let (_, plan) = longest_accepted_answer(&diff);
     assert_eq!(plan.requests.len(), 10_000);
     assert!(plan.requests[9_999].state.contains("part 10000 of 10000"));
     for request in &plan.requests {
