@@ -12,7 +12,7 @@ use super::config::{Cosine, RunConfig};
 use super::kits;
 use crate::backend::SandboxBackend;
 use crate::config::{GlobalConfig, Profile};
-use crate::eval::cosine;
+use crate::eval::{cosine, jev};
 use crate::harness::Harness;
 use crate::seed;
 use crate::template;
@@ -36,6 +36,9 @@ pub fn check(
     }
     if let Some(c) = &run_config.eval.cosine {
         check_cosine_model(c, config_dir)?;
+    }
+    if let Some(j) = &run_config.eval.jev {
+        jev::preflight(j, backend)?;
     }
 
     // The run's profile applies to every contestant and the judge unless a
