@@ -274,11 +274,12 @@ fn file(
             "gh can't read the repo {repo}: {e:#}; check the name and run `gh auth status` ({stays})"
         )
     })?;
-    let mut needed: Vec<&str> = selected.iter().map(|f| f.label.as_str()).collect();
+    let mut needed: Vec<String> = selected.iter().map(|f| f.label.clone()).collect();
+    needed.extend(selected.iter().filter_map(|f| size_label(f)));
     needed.sort_unstable();
     needed.dedup();
     for label in needed {
-        if !existing_labels.iter().any(|l| l == label) {
+        if !existing_labels.contains(&label) {
             bail!(
                 "label '{label}' doesn't exist in {repo}; create it (this command creates no labels; {stays})"
             );
@@ -403,7 +404,7 @@ fn file(
         // the label rule (decision 169).
         if issue.open
             && let Some(done) = selected
-            && let Some(change) = label_change(&issue.labels, &done.label)
+            && let Some(change) = label_change(&issue.labels, &done.label, size_label(done))
         {
             relabel.insert(finding.id.clone(), change);
         }
@@ -492,13 +493,17 @@ fn file(
                     write!(out, ", would set its body's first line to PR: #{pr}")?;
                 }
                 writeln!(out)?;
+                write_no_size(out, finding)?;
                 continue;
             }
             writeln!(
                 out,
                 "would create [{}] {}: {}",
-                finding.label, finding.id, finding.title
+                labels_of(finding).join(", "),
+                finding.id,
+                finding.title
             )?;
+            write_no_size(out, finding)?;
             writeln!(out, "{}", render(finding, &numbers)?)?;
             writeln!(out, "---")?;
         }
@@ -542,7 +547,7 @@ fn file(
         let request = IssueRequest {
             title: format!("{}: {}", finding.id, finding.title),
             body: body.clone(),
-            labels: vec![finding.label.clone()],
+            labels: labels_of(finding),
         };
         match github.issue_create(&repo, &request) {
             Ok(number) => {
@@ -580,11 +585,13 @@ fn file(
     }
 
     // Adopted duplicates get the section's label in place of another severity's.
-    let mut relabeled: Vec<&str> = Vec::new();
+    let mut relabeled: BTreeMap<&str, &LabelChange> = BTreeMap::new();
     for (id, change) in &relabel {
         let number = numbers[id];
         match github.issue_labels(&repo, number, &change.add, &change.remove) {
-            Ok(()) => relabeled.push(id),
+            Ok(()) => {
+                relabeled.insert(id, change);
+            }
             Err(e) => failure = Some(format!("#{number} labels: {e:#}")),
         }
     }
@@ -598,8 +605,13 @@ fn file(
     for finding in &prepared {
         let status = if created.iter().any(|(f, ..)| f.id == finding.id) {
             "created"
-        } else if relabeled.contains(&finding.id.as_str()) {
-            &format!("skipped (exists, labeled {})", finding.label)
+        } else if let Some(change) = relabeled.get(finding.id.as_str()) {
+            // The severity is named even when it was only another severity's removal.
+            let mut shown = change.add.clone();
+            if !shown.contains(&finding.label) && !change.remove.is_empty() {
+                shown.insert(0, finding.label.clone());
+            }
+            &format!("skipped (exists, labeled {})", shown.join(", "))
         } else if numbers.contains_key(&finding.id) {
             "skipped (exists)"
         } else {
@@ -617,6 +629,9 @@ fn file(
             "{:<8} {:<11} {:<5} {url} {status}",
             finding.id, finding.label, number
         )?;
+    }
+    for finding in &prepared {
+        write_no_size(out, finding)?;
     }
     writeln!(
         out,
@@ -638,12 +653,43 @@ struct LabelChange {
 
 const SEVERITY_LABELS: [&str; 3] = ["must-fix", "should-fix", "question"];
 
-fn label_change(labels: &[String], label: &str) -> Option<LabelChange> {
-    let add: Vec<String> = if labels.iter().any(|l| l == label) {
+/// A finding's `size:*` label, when it has a size (issue 233).
+fn size_label(finding: &Finding) -> Option<String> {
+    finding.size().ok().map(|size| format!("size:{size}"))
+}
+
+/// The labels a new issue for the finding gets: its severity, then its size if it has one.
+fn labels_of(finding: &Finding) -> Vec<String> {
+    let mut labels = vec![finding.label.clone()];
+    labels.extend(size_label(finding));
+    labels
+}
+
+/// The report's line for a finding filed without a size label, or nothing.
+fn write_no_size(out: &mut dyn Write, finding: &Finding) -> Result<()> {
+    if let Err(why) = finding.size() {
+        writeln!(
+            out,
+            "{} has no size ({why}), so it gets no size:* label",
+            finding.id
+        )?;
+    }
+    Ok(())
+}
+
+/// The severity (and size) labels an existing issue gains and loses. A size label is only
+/// added to an issue with none: a size set by hand wins over the reviewer's (issue 233).
+fn label_change(labels: &[String], label: &str, size: Option<String>) -> Option<LabelChange> {
+    let mut add: Vec<String> = if labels.iter().any(|l| l == label) {
         Vec::new()
     } else {
         vec![label.to_owned()]
     };
+    if let Some(size) = size
+        && !labels.iter().any(|l| l.starts_with("size:"))
+    {
+        add.push(size);
+    }
     let remove: Vec<String> = labels
         .iter()
         .filter(|l| *l != label && SEVERITY_LABELS.contains(&l.as_str()))
