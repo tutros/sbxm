@@ -681,6 +681,132 @@ fn a_host_the_kit_allows_but_a_rule_denies_or_the_allow_list_names_passes() {
     new_codex(&env, &backend).unwrap();
 }
 
+/// Review PR 269 M-1: `*.x` in `[template].allow` covers every host under `x`, not `x` itself.
+const WILDCARD_ALLOW: &str = "[\"crates.io\", \"*.githubusercontent.com\", \"*.github.com\"]";
+
+#[test]
+fn a_wildcard_in_the_allow_list_keeps_its_hosts_out_of_the_deny_rules() {
+    let env = Env::new();
+    env.write_profile(
+        "default",
+        &strict(&PROFILE.replace("[\"crates.io\"]", WILDCARD_ALLOW)),
+    );
+    let denied = [
+        "github.com",
+        "registry.npmjs.org",
+        "download.docker.com",
+        "archive.ubuntu.com",
+        "security.ubuntu.com",
+        "ports.ubuntu.com",
+    ];
+    let backend = sbx_046().with_network_rules(codex_rules(&[], &denied));
+    build_codex_template(&env, &backend);
+
+    new_codex(&env, &backend).unwrap();
+
+    assert_eq!(backend.creates().pop().unwrap().deny_network, denied);
+}
+
+#[test]
+fn a_wildcard_in_the_allow_list_does_not_pass_an_unrelated_kit_host() {
+    let env = Env::new();
+    env.write_profile(
+        "default",
+        &strict(&PROFILE.replace("[\"crates.io\"]", WILDCARD_ALLOW)),
+    );
+    let denied = ["github.com", "registry.npmjs.org", "download.docker.com"];
+    let backend = sbx_046().with_network_rules(codex_rules(
+        &["archive.ubuntu.com", "telemetry.example.com"],
+        &denied,
+    ));
+    build_codex_template(&env, &backend);
+
+    let message = format!("{:#}", new_codex(&env, &backend).unwrap_err());
+
+    assert!(message.contains("allows archive.ubuntu.com"), "{message}");
+    assert_eq!(backend.log().last().unwrap(), "rm sbxm-demo-codex");
+}
+
+/// Review PR 269 M-2: a strict `codex` template built for `default`, and a fresh backend that
+/// knows its image, for a create whose rule check or removal fails.
+fn strict_codex_template(env: &Env) -> FakeBackend {
+    use sbxm::backend::SandboxBackend;
+    env.write_profile("default", &strict(PROFILE));
+    let builder = sbx_046();
+    build_codex_template(env, &builder);
+    sbx_046().with_templates(builder.template_ls().unwrap())
+}
+
+fn assert_removal_failed(message: &str) {
+    assert!(
+        message.contains("removing it failed; remove it with `sbx rm sbxm-demo-codex`"),
+        "{message}"
+    );
+    assert!(!message.contains("sbxm removed the sandbox"), "{message}");
+}
+
+#[test]
+fn unreadable_network_rules_remove_the_strict_codex_sandbox() {
+    let env = Env::new();
+    let backend = strict_codex_template(&env).failing_network_rules();
+
+    let message = format!("{:#}", new_codex(&env, &backend).unwrap_err());
+
+    assert!(message.contains("fake network_rules failure"), "{message}");
+    assert!(message.contains("sbxm removed the sandbox"), "{message}");
+    let log = backend.log();
+    assert_eq!(
+        log[log.len() - 2..],
+        ["network_rules sbxm-demo-codex", "rm sbxm-demo-codex"]
+    );
+    assert_eq!(codex_state(&env), serde_json::Value::Null);
+}
+
+#[test]
+fn a_failed_removal_after_unreadable_rules_keeps_the_cause_and_names_sbx_rm() {
+    let env = Env::new();
+    let backend = strict_codex_template(&env)
+        .failing_network_rules()
+        .and_failing_remove();
+
+    let message = format!("{:#}", new_codex(&env, &backend).unwrap_err());
+
+    assert!(message.contains("fake network_rules failure"), "{message}");
+    assert_removal_failed(&message);
+}
+
+#[test]
+fn a_failed_removal_after_a_missing_kit_rule_keeps_the_reason_and_names_sbx_rm() {
+    let env = Env::new();
+    let backend = strict_codex_template(&env)
+        .with_network_rules(Vec::new())
+        .and_failing_remove();
+
+    let message = format!("{:#}", new_codex(&env, &backend).unwrap_err());
+
+    assert!(
+        message.contains("sbx reported no network rule 'kit:sbxm-demo-codex'"),
+        "{message}"
+    );
+    assert_removal_failed(&message);
+}
+
+#[test]
+fn a_failed_removal_after_an_unexpected_host_keeps_the_reason_and_names_sbx_rm() {
+    let env = Env::new();
+    let backend = strict_codex_template(&env)
+        .with_network_rules(codex_rules(&["telemetry.example.com"], &CODEX_EXTRA))
+        .and_failing_remove();
+
+    let message = format!("{:#}", new_codex(&env, &backend).unwrap_err());
+
+    assert!(
+        message.contains("allows telemetry.example.com"),
+        "{message}"
+    );
+    assert_removal_failed(&message);
+}
+
 #[test]
 fn only_a_strict_codex_sandbox_gets_deny_rules_and_the_check() {
     for (harness, profile) in [

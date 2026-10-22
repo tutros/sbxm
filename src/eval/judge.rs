@@ -281,7 +281,7 @@ pub fn judge_repeat(
             backend,
             harness_kits.deny_network.as_deref(),
         ) {
-            // A refused sandbox is already removed; one whose rules couldn't be read is not.
+            // A refused sandbox is already removed, unless removing it failed.
             created = backend
                 .list()
                 .map_or(true, |all| all.iter().any(|s| s.name == sandbox));

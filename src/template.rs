@@ -464,7 +464,7 @@ pub fn denied_hosts(
         (Some(table), Harness::Codex, Some(_)) if table.strict => Some(
             CODEX_EXTRA_HOSTS
                 .iter()
-                .filter(|host| !table.allow.iter().any(|a| a == *host))
+                .filter(|host| !allows(&table.allow, host))
                 .map(|host| (*host).to_owned())
                 .collect(),
         ),
@@ -492,7 +492,25 @@ pub fn check_codex_rules(
         .as_ref()
         .map(|t| t.allow.as_slice())
         .unwrap_or_default();
-    let rules = backend.network_rules(sandbox)?;
+    // Every refusal removes the sandbox first and keeps its own reason even when that fails
+    // (review PR 269 M-2, decision 232).
+    let refuse = |reason: String, fix: &str| -> anyhow::Error {
+        match backend.remove(sandbox) {
+            Ok(()) => anyhow::anyhow!("{reason}; sbxm removed the sandbox. {fix}"),
+            Err(err) => anyhow::anyhow!(
+                "{reason}; removing it failed; remove it with `sbx rm {sandbox}` ({err:#}). {fix}"
+            ),
+        }
+    };
+    let rules = match backend.network_rules(sandbox) {
+        Ok(rules) => rules,
+        Err(err) => {
+            return Err(refuse(
+                format!("sbxm can't read the network rules of {sandbox} ({err:#})"),
+                "Check that `sbx policy ls` works, or set strict = false",
+            ));
+        }
+    };
     let deny_rules: Vec<&str> = rules
         .iter()
         .filter(|rule| !rule.allow)
@@ -504,35 +522,47 @@ pub fn check_codex_rules(
         .filter(|rule| rule.allow && rule.scope == scope)
         .collect();
     if !scoped.iter().any(|rule| rule.name == kit) {
-        backend.remove(sandbox)?;
-        bail!(
-            "sbx reported no network rule '{kit}' for {sandbox}, so sbxm can't see what the codex \
-             kit allows; sbxm removed the sandbox. Set strict = false, or update sbxm if a newer \
-             sbx renamed the rule"
-        );
+        return Err(refuse(
+            format!(
+                "sbx reported no network rule '{kit}' for {sandbox}, so sbxm can't see what the \
+                 codex kit allows"
+            ),
+            "Set strict = false, or update sbxm if a newer sbx renamed the rule",
+        ));
     }
     let unexpected = scoped
         .iter()
         .flat_map(|rule| rule.resources.iter().map(move |r| (rule, host_of(r))))
         .find(|(_, host)| {
             !CODEX_PROVIDER_HOSTS.contains(host)
-                && !allow.iter().any(|a| a == host)
+                && !allows(allow, host)
                 && !deny_rules.contains(host)
         });
     if let Some((rule, host)) = unexpected {
-        backend.remove(sandbox)?;
-        bail!(
-            "the network rule '{}' of {sandbox} allows {host}, which strict profile '{}' doesn't \
-             list in [template].allow and sbxm doesn't deny; sbxm removed the sandbox. Add the \
-             host to [template].allow if codex may reach it, or set strict = false",
-            rule.name,
-            profile_name
-        );
+        return Err(refuse(
+            format!(
+                "the network rule '{}' of {sandbox} allows {host}, which strict profile '{}' \
+                 doesn't list in [template].allow and sbxm doesn't deny",
+                rule.name, profile_name
+            ),
+            "Add the host to [template].allow if codex may reach it, or set strict = false",
+        ));
     }
     Ok(())
 }
 
 /// `github.com` from `github.com:443`.
+/// Whether an allow list names `host`, exactly or through a `*.<domain>` entry, which covers
+/// every host under the domain but not the domain itself (review PR 269 M-1).
+fn allows(allow: &[String], host: &str) -> bool {
+    allow.iter().any(|entry| match entry.strip_prefix("*.") {
+        Some(domain) => host
+            .strip_suffix(domain)
+            .is_some_and(|sub| sub.len() > 1 && sub.ends_with('.')),
+        None => entry == host,
+    })
+}
+
 fn host_of(resource: &str) -> &str {
     resource.rsplit_once(':').map_or(resource, |(host, _)| host)
 }

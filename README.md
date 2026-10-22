@@ -302,10 +302,13 @@ allow = []         # required: the hosts a sandbox created from the template may
 - **Harnesses:** `claude`, `codex` and `pi`; a strict profile is refused with `pi`, whose own kit allows
   `registry.npmjs.org`. A strict `codex` sandbox is created with `--deny-network` for each host the built-in `codex`
   kit adds (GitHub, npm, Ubuntu, Docker) that isn't in `[template].allow`, and is removed again if `sbx` reports the
-  kit allowing anything else.
+  kit allowing anything else, or if sbxm can't read its network rules. A `*.<domain>` entry in `[template].allow`
+  covers every host under the domain but not the domain itself (`*.github.com` doesn't allow `github.com`).
 - **Disk:** a template takes 1 to 3 GB on the drive of `sbx`'s state. A build replaces the previous one unless that
   one is in use; `rm`, `task rm` and `task rm --merged` never remove a template; `template rm` does. `doctor` lists
-  them all with their total size.
+  them all with their total size. "In use" means recorded in a project's `state.json` or a task's `task.json`; a
+  running `sbxm run` isn't counted, so don't remove or rebuild a template while a comparison run uses it (its later
+  repeats would fail to create).
 
 ## Config changes, drift and `--rebuild`
 

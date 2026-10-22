@@ -105,6 +105,7 @@ pub struct FakeBackend {
     templates: Mutex<Vec<TemplateImage>>,
     /// What `network_rules` returns, for every sandbox.
     network_rules: Vec<NetworkRule>,
+    fail_network_rules: bool,
 }
 
 /// Runs inside every `exec` (after the gate), so a test can play the agent
@@ -422,6 +423,22 @@ impl FakeBackend {
         }
     }
 
+    /// Makes `network_rules` record the call and then fail.
+    pub fn failing_network_rules(self) -> Self {
+        Self {
+            fail_network_rules: true,
+            ..self
+        }
+    }
+
+    /// Makes `remove` record the call and then fail, like [`FakeBackend::failing_remove`].
+    pub fn and_failing_remove(self) -> Self {
+        Self {
+            fail_remove: true,
+            ..self
+        }
+    }
+
     fn record(&self, call: &str, name: &str) {
         self.log.lock().unwrap().push(format!("{call} {name}"));
     }
@@ -582,6 +599,9 @@ impl SandboxBackend for FakeBackend {
 
     fn network_rules(&self, sandbox: &str) -> Result<Vec<NetworkRule>> {
         self.record("network_rules", sandbox);
+        if self.fail_network_rules {
+            bail!("fake network_rules failure");
+        }
         Ok(self.network_rules.clone())
     }
 

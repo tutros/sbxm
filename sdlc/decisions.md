@@ -785,6 +785,13 @@ folder or a commit. The end-to-end check found that a template warmed from a Win
 (CRLF files) never matched a task, which reads the commit's LF blob, so a strict profile refused every task. A lock
 file that differs only in its line endings parses the same, so the cached dependencies still fit.
 
+239. **A running `sbxm run` is not protected from `template rm` (2026-10-22, PR 269 review round 1 Q-1, the user
+chose option A; like [233]):** template users are still only `state.json` and every `task.json` [205]. A comparison
+run records nothing they read, so `template rm`, or a rebuild retiring the previous tag, can remove the tag a run
+chose between two of its repeat waves; the next wave's sandboxes then fail to create and are reported as not run.
+Protecting runs would mean treating every `run.json` without `completed_at` as a user, which needs rules for
+interrupted runs; it waits for gap G55's trigger.
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.
