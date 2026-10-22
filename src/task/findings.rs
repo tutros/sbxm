@@ -38,6 +38,34 @@ impl Finding {
             .find(|(n, _)| n == name)
             .map(|(_, v)| v.as_str())
     }
+
+    /// The finding's size, `S`, `M` or `L` (issue 233): the first word of its `**Size:**` field,
+    /// so `M (one command)`, `L: the state format` and `**S**, one bullet` all count. `Err` says
+    /// why there is none, for the report.
+    pub fn size(&self) -> Result<&'static str, String> {
+        let Some(value) = self.field("size") else {
+            return Err("no **Size:** line".to_owned());
+        };
+        let markup = |c: char| c == '*' || c == '`' || c.is_whitespace();
+        let mut chars = value.trim_start_matches(markup).chars();
+        let size = match chars.next() {
+            Some('S') => Some("S"),
+            Some('M') => Some("M"),
+            Some('L') => Some("L"),
+            _ => None,
+        };
+        let rest = chars.as_str();
+        // "Medium" is a word, not a size; "S | M | L" is the template left unfilled.
+        let alone = !rest.starts_with(char::is_alphanumeric)
+            && !rest.trim_start_matches(markup).starts_with(['|', '/']);
+        match size {
+            Some(size) if alone => Ok(size),
+            _ => Err(format!(
+                "'{}' is not S, M or L",
+                value.lines().next().unwrap_or_default()
+            )),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -622,6 +650,9 @@ pub fn issue_body(
     let mut parts = Vec::new();
     if let Some(pr) = render.pr {
         parts.push(format!("PR: #{pr}"));
+    }
+    if finding.size().is_ok() {
+        parts.push(format_field("Size", field("size")));
     }
     parts.extend([
         format_field(

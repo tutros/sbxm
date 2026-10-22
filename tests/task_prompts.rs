@@ -667,3 +667,44 @@ fn every_reviewer_prompt_knows_what_is_the_users_call() {
         }
     }
 }
+
+#[test]
+fn every_reviewer_prompt_asks_for_a_size_line_and_names_where_sizes_are_defined() {
+    for role in [Role::Reviewer, Role::ReviewerPr, Role::ReviewerSpec] {
+        let template = prompts::template(role, &Prompts::default()).unwrap();
+        assert!(
+            template.text.contains("**Size:** S | M | L"),
+            "{role:?}: {}",
+            template.text
+        );
+        assert!(
+            template
+                .text
+                .contains(".claude/skills/sdlc-code-review/SKILL.md"),
+            "{role:?} names the size table: {}",
+            template.text
+        );
+    }
+}
+
+#[test]
+fn every_rendered_reviewer_prompt_asks_for_a_size_on_question_findings_too() {
+    let prompts_and_values = [
+        (Role::Reviewer, review_values()),
+        (Role::ReviewerPr, review_values()),
+        (Role::ReviewerSpec, spec_values()),
+    ];
+    for (role, values) in prompts_and_values {
+        let template = prompts::template(role, &Prompts::default()).unwrap();
+        let text = prompts::render(&template.name, &template.text, &values).unwrap();
+        let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            flat.contains("every finding, a question included"),
+            "{role:?} asks for a size on every finding: {text}"
+        );
+        assert!(
+            !flat.contains("(must-fix and should-fix findings;"),
+            "{role:?} still limits the size to must-fix and should-fix: {text}"
+        );
+    }
+}

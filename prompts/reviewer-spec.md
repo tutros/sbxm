@@ -53,6 +53,9 @@ Scope: `<base sha>..<head sha>`
 **What happens:** the behavior, with evidence (a command and its trimmed output, or the quoted code)
 **Why it matters:** the decision or convention it breaks
 **Fix:** the smallest change that resolves it
+**Size:** S | M | L, with the reason in a few words (every finding, a question included; S is one module with no new
+state, M one command or feature with tests and docs, L the state format, the trust boundary or several open points;
+the full table is "Size" in section 8 of .claude/skills/sdlc-code-review/SKILL.md)
 **Depends on:** another finding or "none known"
 **Repeat of:** the earlier review's finding id this repeats, or "new" (leave out when this is the first review)
 **Acceptance criteria:**
