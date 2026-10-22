@@ -77,9 +77,16 @@ const PER_EXTRA_QUESTION_TOKENS: usize = 70;
 /// Characters per token: right for code, conservative for prose (S12).
 const CHARS_PER_TOKEN: usize = 3;
 
-/// The diff heading of a request whose diff was split, sized for the estimate before the number
-/// of parts is known.
-const WIDEST_PART: &str = "part 9999 of 9999";
+/// The diff heading of a split diff's part `i` of `n`.
+fn part_label(i: usize, n: usize) -> String {
+    format!("part {i} of {n}")
+}
+
+/// The widest [`part_label`] any part count can render, to size chunks before the number of
+/// parts is known.
+fn widest_part() -> String {
+    part_label(usize::MAX, usize::MAX)
+}
 
 /// One planned request of a pair: its `state`, and its weight when chunk results are combined
 /// (its diff's size in characters).
@@ -192,7 +199,8 @@ pub fn plan(
              {TOKEN_CAP}); no call was made"
         ));
     }
-    let with_answer = estimate(&state(answer, "", Some(WIDEST_PART)), &questions);
+    let widest = widest_part();
+    let with_answer = estimate(&state(answer, "", Some(&widest)), &questions);
     if with_answer > TOKEN_CAP {
         return Err(format!(
             "the answer is too long for Jev (about {with_answer} tokens with the task and the \
@@ -219,7 +227,7 @@ pub fn plan(
         });
     }
 
-    let part = Some(WIDEST_PART);
+    let part = Some(widest.as_str());
     let mut chunks: Vec<String> = Vec::new();
     let mut current = String::new();
     let mut truncated = false;
@@ -247,11 +255,11 @@ pub fn plan(
         .into_iter()
         .enumerate()
         .map(|(i, chunk)| Planned {
-            state: state(answer, &chunk, Some(&format!("part {} of {n}", i + 1))),
+            state: state(answer, &chunk, Some(&part_label(i + 1, n))),
             weight: chunk.chars().count().max(1),
         })
         .collect();
-    // The chunks were sized against `WIDEST_PART`; a request is only ever sent within the cap.
+    // The chunks were sized against `widest_part`; a request is only ever sent within the cap.
     if let Some(over) = requests
         .iter()
         .map(|r| estimate(&r.state, &questions))

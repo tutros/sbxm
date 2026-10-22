@@ -188,6 +188,21 @@ fn a_single_file_over_the_budget_is_truncated_never_sent_whole() {
 #[test]
 fn the_longest_accepted_answer_with_an_oversized_file_stays_within_the_cap() {
     // Review M-1: at the answer's boundary even the cut note with nothing kept doesn't fit.
+    let big = file("big.rs", 100_000);
+    let plan = jev::plan("Task", &rubric(), &longest_accepted_answer(), Some(&big)).unwrap();
+    assert!(plan.truncated);
+    for request in &plan.requests {
+        let estimate = jev::estimate(&request.state, &plan.questions);
+        assert!(
+            estimate <= jev::TOKEN_CAP,
+            "{estimate} > {}",
+            jev::TOKEN_CAP
+        );
+    }
+}
+
+/// The longest answer `plan` accepts on its own (found by bisection).
+fn longest_accepted_answer() -> String {
     let accepted = |n: usize| jev::plan("Task", &rubric(), &"a".repeat(n), None).is_ok();
     let (mut low, mut high) = (0, 3 * jev::TOKEN_CAP);
     while low < high {
@@ -198,16 +213,21 @@ fn the_longest_accepted_answer_with_an_oversized_file_stays_within_the_cap() {
             high = mid - 1
         }
     }
-    let big = file("big.rs", 100_000);
-    let plan = jev::plan("Task", &rubric(), &"a".repeat(low), Some(&big)).unwrap();
-    assert!(plan.truncated);
+    "a".repeat(low)
+}
+
+#[test]
+fn the_longest_accepted_answer_with_10_000_files_is_split_within_the_cap() {
+    // Review M-1 (round 2): a five-digit part count must not make a valid diff an error.
+    let diff: String = (0..10_000)
+        .map(|i| file(&format!("f{i}.rs"), 100))
+        .collect();
+    let answer = longest_accepted_answer();
+    let plan = jev::plan("Task", &rubric(), &answer, Some(&diff)).unwrap();
+    assert_eq!(plan.requests.len(), 10_000);
+    assert!(plan.requests[9_999].state.contains("part 10000 of 10000"));
     for request in &plan.requests {
-        let estimate = jev::estimate(&request.state, &plan.questions);
-        assert!(
-            estimate <= jev::TOKEN_CAP,
-            "{estimate} > {}",
-            jev::TOKEN_CAP
-        );
+        assert!(jev::estimate(&request.state, &plan.questions) <= jev::TOKEN_CAP);
     }
 }
 
