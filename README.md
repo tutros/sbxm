@@ -323,14 +323,15 @@ token_command = '/opt/tools/jev-token'   # an absolute path to a helper that pri
 # model = "jev-1.13.0"                   # default "jev-latest"; pin a version for a fixed comparison series
 ```
 
-- **The token never reaches sbxm, a file or a sandbox.** For each repeat, sbxm asks `sbx` for a custom secret scoped
-  to that repeat's evaluator sandbox (`sbx secret set-custom --sandbox sbxm-run-<id>-jev-<repeat> --host
-  api.typesafe.ai --env JEV_API_KEY --placeholder sbxm-jev-<id>-<repeat> --command <token_command>`), creates the
-  sandbox (a plain shell whose only egress is `api.typesafe.ai`), runs one fixed `curl` per call there, then removes
-  the sandbox and the secret, even after an error. `sbx` runs your helper on the host and its proxy puts the token
-  into the `Authorization` header to `api.typesafe.ai` only; the sandbox only ever sees a placeholder. The helper
-  must sit outside every workspace and the temp dir (`sbx` checks it). Store the token behind `--command` or `--ref`,
-  **never with `--value`**: `sbx secret ls` shows 12 characters of a `--value` secret.
+- **sbxm never reads or stores the token, and the sandbox only sees a placeholder.** Where the token itself lives (a
+  file your helper reads, a secret manager) is up to your `token_command` or `token_ref`. For each repeat, sbxm asks
+  `sbx` for a custom secret scoped to that repeat's evaluator sandbox (`sbx secret set-custom --sandbox
+  sbxm-run-<id>-jev-<repeat> --host api.typesafe.ai --env JEV_API_KEY --placeholder sbxm-jev-<id>-<repeat> --command
+  <token_command>`), creates the sandbox (a plain shell whose only egress is `api.typesafe.ai`), runs one fixed `curl`
+  per call there, then removes the sandbox and the secret, even after an error. `sbx` runs your helper on the host and
+  its proxy puts the token into the `Authorization` header to `api.typesafe.ai` only. The helper must sit outside every
+  workspace and the temp dir (`sbx` checks it). Store the token behind `--command` or `--ref`, **never with
+  `--value`**: `sbx secret ls` shows 12 characters of a `--value` secret.
 - **Before anything is written,** `sbxm run` refuses an `sbx` older than 0.46.0 (custom secrets are experimental in
   `sbx`), a `token_command` that doesn't exist, and a global custom secret for `JEV_API_KEY` on `api.typesafe.ai`
   (it would make the evaluator's sandbox fail to start; the message names the `sbx secret rm` command). It needs a
