@@ -325,7 +325,8 @@ settings, the *contents* of referenced files, resources and sbxm's version. A se
 - A sandbox created from a template is compared with the template variant of its config (runtime settings and
   `[template]`), one created with the install steps with the install variant; building or removing a template later
   is never drift. When a non-strict sandbox was created with the install steps and its template is ready now, `open`
-  prints a hint naming `open --rebuild`.
+  prints a hint naming `open --rebuild`. If it can't tell (an unreadable template record, or `sbx` not answering), it
+  warns once with the reason and attaches to the existing sandbox anyway.
 
 ## Security model
 

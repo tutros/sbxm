@@ -76,7 +76,21 @@ pub fn run(
                 sandbox: &sandbox,
                 locks: template::Locks::Dir(&entry.workspace),
             };
-            if entry.template.is_none() && template::ready(&request, backend)? {
+            // The lookup only decides a hint (decision 208), so a failure never stops the attach.
+            let ready = match entry.template {
+                Some(_) => false,
+                None => template::ready(&request, backend).or_else(|error| {
+                    writeln!(
+                        warn,
+                        "warning: cannot check whether the template of profile \
+                         '{profile_name}' for {} is ready ({error:#}); attaching to {sandbox} \
+                         as it is",
+                        harness.as_str()
+                    )
+                    .map(|()| false)
+                })?,
+            };
+            if ready {
                 writeln!(
                     warn,
                     "hint: the template of profile '{profile_name}' for {} is ready; `sbxm open \
