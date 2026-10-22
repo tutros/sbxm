@@ -667,3 +667,22 @@ fn every_reviewer_prompt_knows_what_is_the_users_call() {
         }
     }
 }
+
+#[test]
+fn every_reviewer_prompt_asks_for_a_size_line_and_names_where_sizes_are_defined() {
+    for role in [Role::Reviewer, Role::ReviewerPr, Role::ReviewerSpec] {
+        let template = prompts::template(role, &Prompts::default()).unwrap();
+        assert!(
+            template.text.contains("**Size:** S | M | L"),
+            "{role:?}: {}",
+            template.text
+        );
+        assert!(
+            template
+                .text
+                .contains(".claude/skills/sdlc-code-review/SKILL.md"),
+            "{role:?} names the size table: {}",
+            template.text
+        );
+    }
+}
