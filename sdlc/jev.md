@@ -1,10 +1,10 @@
-# Jev: status, roles and what is left (2026-10-03)
+# Jev: status, roles and what is left (2026-10-03, updated 2026-10-22)
 
 Jev is TypeSafe's System One model (docs: https://docs.typesafe.ai/llms.txt, Jev 1.13 when this was written). It returns
 typed answers with probabilities and confidence, not text: **Noul** (P(yes)), **Choice** (one of up to 255 options plus a
 distribution) and **Score** (2 to 10 ordered levels, probability-weighted). This file is the one place that says where Jev
-stands. Nothing here is a decision: the roles in section 2 are the user's stated direction (2026-10-03), the design in
-section 4 is a proposal. The API statements were checked against a real token on 2026-10-03 (spike S12,
+stands. The roles in section 2 are the user's stated direction (2026-10-03); the design in section 4
+was confirmed on 2026-10-22 as decision 241, which also answered section 5's first three questions. The API statements were checked against a real token on 2026-10-03 (spike S12,
 `sdlc/spikes/S12.md`); what S12 did not test is listed in section 3.
 
 ## 1. Status in one paragraph
@@ -13,8 +13,9 @@ Jev is **not built and not started**. Slice 14 of the M2a plan (the Jev evaluato
 138). The two blockers that existed are cleared: how the token reaches the call (spike S9, merged in PR #65) and cosine
 (PR #69, which touched the same files). **Spike S12 ran on 2026-10-03 with a real token and the API works as documented,
 with five corrections to the draft** (`model` is required, three error shapes, a 400 for oversize, a tokens-per-character
-measurement, small run-to-run noise). What is left before code: the user confirms the design and the section 5 questions,
-the draft issue (`sdlc/specs/jev-evaluator-14a.md`, updated with S12's corrections) is filed, and the work is built. Until
+measurement, small run-to-run noise). **The design is confirmed (decision 241, 2026-10-22):** the judge's
+ranking leads, one Jev call per contestant per repeat, `jev-latest` by default with the answering model recorded. What
+is left: the issue (`sdlc/specs/jev-evaluator-14a.md`, now the confirmed body) is filed, and the work is built. Until
 then there is no `[eval.jev]` key; it is an unknown key and refused.
 
 ## 2. The roles Jev is meant to play
@@ -118,9 +119,8 @@ Written in full in [`sdlc/specs/jev-evaluator-14a.md`](specs/jev-evaluator-14a.m
 1. **Done: a real Jev token.** It is behind a helper script that prints it (outside any workspace); it is passed as
    `set-custom --command`, never `--value`, and the assistant never reads the token file.
 2. **Done: spike S12** (2026-10-03, `sdlc/spikes/S12.md`).
-3. **User: confirm the design** (section 4, with S12's five corrections) and decide the section 5 questions that affect it
-   (headline ranking, how many calls per score given the small noise, pinning the model version). Then write the decision
-   into `sdlc/decisions.md` with the next free number.
+3. **Done: the design is confirmed** (decision 241, 2026-10-22): the judge's ranking is the headline, one call per
+   contestant per repeat, `model` defaults to `jev-latest` and the answering model is recorded.
 4. **Optional, before relying on Jev as the primary classifier: a calibration run.** Score the pairs of a few existing
    runs with Jev, the judge and a human, and compare. S12 measured the API, not whether Jev's verdicts are good.
 5. **File the slice 14a issue** from the draft (its corrections from S12 are listed at the top of the draft) and build it
