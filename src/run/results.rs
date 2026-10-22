@@ -26,6 +26,7 @@ use super::id::{date_from_days, days_from_civil};
 use super::kits::RunKits;
 use super::orchestrate::PairOutcome;
 use crate::eval::cosine::CosineEntry;
+use crate::eval::jev::JevRun;
 use crate::eval::judge::JudgeRun;
 use crate::headless::RunStatus;
 use std::collections::BTreeMap;
@@ -116,14 +117,19 @@ pub fn write_run_start(meta: &Path, start: &RunStart) -> Result<()> {
     Ok(())
 }
 
-/// Adds `completed_at` to `run.json`, keeping everything else as it was.
-pub fn mark_completed(meta: &Path, completed_at: u64) -> Result<()> {
+/// Adds `completed_at` to `run.json`, keeping everything else as it was, and with it
+/// `jev_models` when the run has `[eval.jev]`: the distinct models that answered, sorted
+/// (decision 241 c).
+pub fn mark_completed(meta: &Path, completed_at: u64, jev_models: Option<&[String]>) -> Result<()> {
     let path = meta.join("run.json");
     let text =
         fs::read_to_string(&path).with_context(|| format!("cannot read {}", path.display()))?;
     let mut record: Value = serde_json::from_str(&text)
         .with_context(|| format!("{} is not valid JSON", path.display()))?;
     record["completed_at"] = json!(format_timestamp(completed_at));
+    if let Some(models) = jev_models {
+        record["jev_models"] = json!(models);
+    }
     write_json(&path, &record)
 }
 
@@ -289,8 +295,52 @@ pub fn write_cosine(
     Ok(())
 }
 
+/// Merges one repeat's Jev results into each scored pair's `evals.json` (key `jev`, decision
+/// 241): the model that answered, the chunks, each criterion's 0-1 score and confidence, or
+/// `{"status": "error", "error": ...}`.
+pub fn write_jev(meta: &Path, run: &JevRun) -> Result<()> {
+    for (contestant, result) in &run.results {
+        let entry = match result {
+            Ok(scores) => {
+                let answered = &scores.answered;
+                let criteria: serde_json::Map<String, Value> = answered
+                    .criteria
+                    .iter()
+                    .map(|(id, s)| {
+                        let mut c = json!({"score": s.score});
+                        if let Some(confidence) = s.confidence {
+                            c["confidence"] = json!(confidence);
+                        }
+                        (id.clone(), c)
+                    })
+                    .collect();
+                let mut entry = json!({
+                    "status": "ok",
+                    "model": answered.model,
+                    "chunks": scores.chunks,
+                    "criteria": criteria,
+                    "unscored": answered.unscored,
+                    "usage": {
+                        "input_tokens": answered.input_tokens,
+                        "output_tokens": answered.output_tokens,
+                    },
+                });
+                if scores.truncated {
+                    entry["truncated"] = json!(true);
+                }
+                entry
+            }
+            Err(why) => json!({"status": "error", "error": why}),
+        };
+        let dir = pair_dir(meta, *contestant, run.repeat);
+        fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+        merge_evals(&dir, "jev", entry)?;
+    }
+    Ok(())
+}
+
 /// Sets `key` in the pair's `evals.json` (creating it), keeping the other
-/// evaluators' entries: checks, judge and cosine each own one key.
+/// evaluators' entries: checks, judge, cosine and jev each own one key.
 pub fn merge_evals(pair_dir: &Path, key: &str, value: Value) -> Result<()> {
     let path = pair_dir.join("evals.json");
     let mut evals = match fs::read_to_string(&path) {

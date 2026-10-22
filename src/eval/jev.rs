@@ -5,13 +5,22 @@
 //! scoped to that sandbox (decision 36).
 
 use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 use serde_json::{Value, json};
 
-use crate::backend::{SandboxBackend, SecretSource};
+use crate::backend::{CreateSpec, CustomSecretSpec, SandboxBackend, SecretSource, SkillsStore};
 use crate::commands::doctor;
-use crate::run::config::{Criterion, CriterionKind, Jev};
+use crate::config::{Profile, Resources, sha256_hex};
+use crate::headless::hit_timeout;
+use crate::kit;
+use crate::run::checks::timed_exec;
+use crate::run::config::{Criterion, CriterionKind, Jev, RunConfig};
+use crate::run::id::RunRoots;
+use crate::run::orchestrate::{PairOutcome, in_sandbox_path};
+use crate::task::repo::{AgentFile, read_file_in};
 
 /// The one host the evaluator sandbox can reach, and the one the secret is swapped for.
 pub const HOST: &str = "api.typesafe.ai";
@@ -376,6 +385,10 @@ fn scored(criterion: &Criterion, answer: &Value) -> Option<Scored> {
 /// criterion no chunk scored stays unscored. The model is the first chunk's (the caller has
 /// checked they agree).
 pub fn combine(chunks: &[(usize, Answered)], rubric: &[Criterion]) -> Answered {
+    // One chunk keeps Jev's numbers exactly, without a mean's rounding.
+    if let [(_, only)] = chunks {
+        return only.clone();
+    }
     let mut criteria = BTreeMap::new();
     let mut unscored = Vec::new();
     for criterion in rubric {
@@ -502,5 +515,371 @@ fn one_line(text: &str) -> String {
         flat.to_owned()
     } else {
         format!("{}...", flat.chars().take(MAX).collect::<String>())
+    }
+}
+
+// ---- the evaluator sandbox -----------------------------------------------------------------
+
+/// The `sbx` agent of the evaluator sandbox: a plain shell, since no agent runs in it.
+pub const AGENT: &str = "shell";
+/// The folder of the evaluator's workspace that holds `request.json` and `response.json`.
+const CALL_DIR: &str = "call";
+const REQUEST_FILE: &str = "request.json";
+const RESPONSE_FILE: &str = "response.json";
+/// The largest `response.json` read back (a response is a few kilobytes).
+const RESPONSE_CAP: u64 = 4 * 1024 * 1024;
+/// How long one call may take inside the sandbox (S12: about a second).
+pub const CALL_TIMEOUT: Duration = Duration::from_secs(120);
+/// The pauses before each retry of a 429 or 529; then it gives up.
+pub const BACKOFF: [Duration; 3] = [
+    Duration::from_secs(2),
+    Duration::from_secs(4),
+    Duration::from_secs(8),
+];
+
+/// The one fixed command (decision 241): the header in double quotes, so the sandbox shell
+/// expands `$JEV_API_KEY` to the placeholder the proxy swaps (S12). Its stdout is the status.
+const CURL: &str = "curl -sS -X POST https://api.typesafe.ai/v1/systemone \
+                    -H \"Authorization: Bearer $JEV_API_KEY\" \
+                    -H \"Content-Type: application/json\" \
+                    --data @request.json -o response.json -w \"%{http_code}\"";
+
+/// The evaluator sandbox's own kit, from a built-in profile whose only egress is [`HOST`]
+/// (never a contestant's profile): one `common` mixin, as the agent is a plain shell.
+#[derive(Debug, Clone)]
+pub struct EvaluatorKit {
+    pub dirs: Vec<PathBuf>,
+    /// The run's resources, as every sandbox of the run gets.
+    pub cpus: u32,
+    pub memory: String,
+}
+
+/// Writes the evaluator's kit under `kits_root/jev/` and validates it, before any sandbox exists.
+pub fn build_kit(
+    kits_root: &Path,
+    resources: &Resources,
+    backend: &dyn SandboxBackend,
+) -> Result<EvaluatorKit> {
+    let mut profile = Profile::default();
+    profile.network.allow = vec![HOST.to_owned()];
+    let hash = sha256_hex(format!("sbxm jev evaluator, egress {HOST}").as_bytes());
+    let dir = kits_root.join("jev").join("common");
+    kit::write(&dir, &kit::common("jev-evaluator", &profile, &hash))?;
+    let validation = backend.validate_kit(&dir)?;
+    if !validation.valid {
+        bail!(
+            "the Jev evaluator's generated kit {} is invalid: {}; report this as an sbxm bug",
+            dir.display(),
+            validation.error.as_deref().unwrap_or("no details from sbx")
+        );
+    }
+    Ok(EvaluatorKit {
+        dirs: vec![dir],
+        cpus: resources.cpus,
+        memory: resources.memory.clone(),
+    })
+}
+
+/// A pair's Jev result: its combined answer, how many requests it took, and whether a file of
+/// its diff was cut.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PairScores {
+    pub answered: Answered,
+    pub chunks: usize,
+    pub truncated: bool,
+}
+
+/// One repeat's evaluation: its sandbox and secret, and each pair's result.
+#[derive(Debug)]
+pub struct JevRun {
+    pub repeat: u32,
+    pub sandbox: String,
+    pub placeholder: String,
+    /// Contestant index and its result; `Err` is a one-line reason that never holds a token or
+    /// a raw error body.
+    pub results: Vec<(usize, Result<PairScores, String>)>,
+    /// The evaluator sandbox couldn't be removed; the results are kept.
+    pub remove_error: Option<String>,
+    /// Its scoped secret couldn't be removed.
+    pub secret_remove_error: Option<String>,
+}
+
+/// The evaluator sandbox of one repeat, and its secret's placeholder: both carry the run id and
+/// the repeat, so a rerun or another run never meets them.
+pub fn names(run_id: &str, repeat: u32) -> (String, String) {
+    (
+        format!("sbxm-run-{run_id}-jev-{repeat}"),
+        format!("sbxm-jev-{run_id}-{repeat}"),
+    )
+}
+
+/// Scores one repeat's pairs with Jev, one call per pair (plus one per extra chunk). `None` when
+/// there is no `[eval.jev]` or no pair that ran. Never fails: problems are in the results. The
+/// scoped secret is created before the sandbox and removed after it, on every path once it was
+/// asked for (decision 241). `sleep` waits between retries.
+pub fn evaluate_repeat(
+    backend: &dyn SandboxBackend,
+    run_config: &RunConfig,
+    kit: &EvaluatorKit,
+    roots: &RunRoots,
+    repeat: u32,
+    pairs: &[&PairOutcome],
+    sleep: &dyn Fn(Duration),
+) -> Option<JevRun> {
+    let jev = run_config.eval.jev.as_ref()?;
+    let scored: Vec<&&PairOutcome> = pairs.iter().filter(|p| p.result.is_ok()).collect();
+    if scored.is_empty() {
+        return None;
+    }
+    let (sandbox, placeholder) = names(&roots.id, repeat);
+    let mut run = JevRun {
+        repeat,
+        sandbox: sandbox.clone(),
+        placeholder: placeholder.clone(),
+        results: Vec::new(),
+        remove_error: None,
+        secret_remove_error: None,
+    };
+    // Every plan first: a pair too big for Jev is an error without a call.
+    let mut planned: Vec<(usize, Plan)> = Vec::new();
+    for pair in &scored {
+        let answer = pair
+            .result
+            .as_ref()
+            .map(|r| r.answer.as_str())
+            .unwrap_or_default();
+        let diff = match &pair.diff {
+            Some(Ok(diff)) => Some(diff.patch.as_str()),
+            _ => None,
+        };
+        match plan(
+            &run_config.task.prompt,
+            &run_config.eval.rubric,
+            answer,
+            diff,
+        ) {
+            Ok(p) => planned.push((pair.contestant, p)),
+            Err(why) => run.results.push((pair.contestant, Err(why))),
+        }
+    }
+    if planned.is_empty() {
+        return Some(run);
+    }
+
+    let workspace = roots.workspaces.join("jev").join(repeat.to_string());
+    let calls = workspace.join(CALL_DIR);
+    let mut secret_asked = false;
+    let mut created = false;
+    let prepared = (|| {
+        std::fs::create_dir_all(&calls).map_err(|e| {
+            format!(
+                "cannot prepare the Jev workspace {}: {e}",
+                workspace.display()
+            )
+        })?;
+        secret_asked = true;
+        backend
+            .set_custom_secret(&CustomSecretSpec {
+                sandbox: sandbox.clone(),
+                host: HOST.to_owned(),
+                env: ENV.to_owned(),
+                placeholder: placeholder.clone(),
+                source: jev.token.clone(),
+            })
+            .map_err(|e| format!("cannot store the Jev token's scoped secret: {e:#}"))?;
+        created = true;
+        backend
+            .create(&CreateSpec {
+                name: sandbox.clone(),
+                agent: AGENT.into(),
+                workspace: workspace.clone(),
+                cpus: kit.cpus,
+                memory: kit.memory.clone(),
+                skills: SkillsStore::Off,
+                kits: kit.dirs.clone(),
+                template: None,
+                deny_network: Vec::new(),
+            })
+            .map_err(|e| format!("cannot create the Jev sandbox {sandbox}: {e:#}"))
+    })();
+    match prepared {
+        Err(why) => {
+            for (contestant, _) in &planned {
+                run.results.push((*contestant, Err(why.clone())));
+            }
+        }
+        Ok(()) => {
+            let caller = Caller {
+                backend,
+                sandbox: &sandbox,
+                calls: &calls,
+                token: &jev.token,
+                sleep,
+            };
+            for (contestant, p) in &planned {
+                let result = score_pair(&caller, &jev.model, p, &run_config.eval.rubric);
+                run.results.push((*contestant, result));
+            }
+        }
+    }
+    // Always, once asked for: the sandbox, then its secret.
+    if created {
+        run.remove_error = backend
+            .remove(&sandbox)
+            .err()
+            .map(|e| format!("cannot remove sandbox {sandbox}: {e:#}; run `sbx rm -f {sandbox}`"));
+    }
+    if secret_asked {
+        run.secret_remove_error = backend
+            .remove_custom_secret(&placeholder, &sandbox)
+            .err()
+            .map(|e| {
+                format!(
+                    "cannot remove the Jev secret {placeholder}: {e:#}; run `sbx secret rm \
+                     --placeholder {placeholder} --sandbox {sandbox} -f`"
+                )
+            });
+    }
+    run.results.sort_by_key(|(contestant, _)| *contestant);
+    Some(run)
+}
+
+/// What every call of one repeat shares.
+struct Caller<'a> {
+    backend: &'a dyn SandboxBackend,
+    sandbox: &'a str,
+    /// The host folder of `request.json` and `response.json`.
+    calls: &'a Path,
+    token: &'a SecretSource,
+    sleep: &'a dyn Fn(Duration),
+}
+
+/// One pair's requests in order: the first names the configured model, every later one the model
+/// the first response named, and a response from another model is an error (decision 241 e).
+fn score_pair(
+    caller: &Caller,
+    model: &str,
+    plan: &Plan,
+    rubric: &[Criterion],
+) -> Result<PairScores, String> {
+    let n = plan.requests.len();
+    let mut answers: Vec<(usize, Answered)> = Vec::new();
+    for (i, request) in plan.requests.iter().enumerate() {
+        let asked = answers.first().map_or(model, |(_, a)| a.model.as_str());
+        let body = request_body(asked, &request.state, &plan.questions);
+        let answered = call(caller, &body, rubric).map_err(|why| {
+            if n > 1 {
+                format!("chunk {} of {n}: {why}", i + 1)
+            } else {
+                why
+            }
+        })?;
+        if let Some((_, first)) = answers.first()
+            && answered.model != first.model
+        {
+            return Err(format!(
+                "chunk {} of {n} was answered by {}, chunk 1 by {}; one pair's score must come \
+                 from one model",
+                i + 1,
+                answered.model,
+                first.model
+            ));
+        }
+        answers.push((request.weight, answered));
+    }
+    Ok(PairScores {
+        answered: combine(&answers, rubric),
+        chunks: n,
+        truncated: plan.truncated,
+    })
+}
+
+/// One request: written, sent by the fixed command, retried on 429 and 529 after each pause of
+/// [`BACKOFF`], each retry a fresh exec in the same sandbox.
+fn call(caller: &Caller, body: &Value, rubric: &[Criterion]) -> Result<Answered, String> {
+    let request = caller.calls.join(REQUEST_FILE);
+    let response = caller.calls.join(RESPONSE_FILE);
+    let spec = timed_exec(&in_sandbox_path(caller.calls), CALL_TIMEOUT.as_secs(), CURL);
+    let mut attempt = 0;
+    loop {
+        std::fs::write(&request, body.to_string())
+            .map_err(|e| format!("cannot write {}: {e}", request.display()))?;
+        // A response from an earlier call must never be read as this one's.
+        match std::fs::remove_file(&response) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(format!("cannot clear {}: {e}", response.display())),
+        }
+        let output = caller.backend.exec(caller.sandbox, &spec).map_err(|e| {
+            format!(
+                "cannot run the Jev call (exec) in {}: {e:#}",
+                caller.sandbox
+            )
+        })?;
+        if hit_timeout(output.exit_code, &output.stderr) {
+            return Err(format!(
+                "the Jev call timed out after {}s",
+                CALL_TIMEOUT.as_secs()
+            ));
+        }
+        // `sbx exec` may print its own lines first; the status is the last word.
+        let status = output
+            .stdout
+            .split_whitespace()
+            .last()
+            .and_then(|w| w.parse::<u16>().ok())
+            .filter(|&s| s != 0);
+        let Some(status) = status else {
+            let why = output
+                .stderr
+                .lines()
+                .map(str::trim)
+                .rfind(|l| !l.is_empty())
+                .map(one_line)
+                .unwrap_or_else(|| "no details".to_owned());
+            return Err(format!(
+                "the Jev call failed (exit code {}): {why}",
+                output
+                    .exit_code
+                    .map_or_else(|| "none".to_owned(), |c| c.to_string())
+            ));
+        };
+        let text = match read_file_in(
+            caller.calls.parent().unwrap_or(caller.calls),
+            CALL_DIR,
+            RESPONSE_FILE,
+            RESPONSE_CAP,
+        ) {
+            Ok(AgentFile::Text(text)) => Some(text),
+            Ok(AgentFile::Missing) => None,
+            Ok(AgentFile::TooLarge(n)) => {
+                return Err(format!(
+                    "Jev's response is too large ({n} bytes, the limit is {RESPONSE_CAP})"
+                ));
+            }
+            Err(e) => return Err(format!("cannot read Jev's response: {e:#}")),
+        };
+        // Read once and gone: an error body can echo the whole request (S12), so it isn't kept.
+        let _ = std::fs::remove_file(&response);
+        match classify(status, text.as_deref().unwrap_or(""), caller.token) {
+            Outcome::Answered => {
+                let text = text.ok_or_else(|| {
+                    format!("Jev answered {status}, but no {RESPONSE_FILE} was written")
+                })?;
+                return parse_response(&text, rubric);
+            }
+            Outcome::Retry(code) => {
+                let Some(pause) = BACKOFF.get(attempt) else {
+                    return Err(format!(
+                        "Jev answered {code} {} times; gave up after {} retries",
+                        attempt + 1,
+                        BACKOFF.len()
+                    ));
+                };
+                (caller.sleep)(*pause);
+                attempt += 1;
+            }
+            Outcome::Failed(why) => return Err(why),
+        }
     }
 }

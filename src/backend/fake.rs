@@ -87,6 +87,7 @@ pub struct FakeBackend {
     exec_outputs_for: HashMap<String, ExecOutput>,
     default_exec_output: Option<ExecOutput>,
     fail_create_for: Vec<String>,
+    fail_create_matching: Vec<String>,
     fail_exec_for: Vec<String>,
     gate: Option<ExecGate>,
     /// Only sandboxes whose name ends with this are held at the gate.
@@ -330,6 +331,13 @@ impl FakeBackend {
         self
     }
 
+    /// Makes `create` of every sandbox whose name contains `needle` record the call and then
+    /// fail, for a sandbox whose full name (a run id) isn't known in advance.
+    pub fn with_failing_create_matching(mut self, needle: &str) -> Self {
+        self.fail_create_matching.push(needle.to_owned());
+        self
+    }
+
     /// Makes `exec` in this one sandbox record the call and then fail.
     pub fn with_failing_exec_for(mut self, sandbox: &str) -> Self {
         self.fail_exec_for.push(sandbox.to_owned());
@@ -509,7 +517,13 @@ impl SandboxBackend for FakeBackend {
         }
         self.creates.lock().unwrap().push(spec.clone());
         self.record("create", &spec.name);
-        if self.fail_create || self.fail_create_for.contains(&spec.name) {
+        if self.fail_create
+            || self.fail_create_for.contains(&spec.name)
+            || self
+                .fail_create_matching
+                .iter()
+                .any(|n| spec.name.contains(n.as_str()))
+        {
             bail!("fake create failure");
         }
         Ok(())

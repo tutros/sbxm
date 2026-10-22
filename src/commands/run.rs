@@ -4,6 +4,7 @@
 
 use std::io::Write;
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 
@@ -11,7 +12,7 @@ use crate::backend::SandboxBackend;
 use crate::config::GlobalConfig;
 use crate::disk;
 use crate::eval::cosine::{self, CosineEntry, Embedder, FailingEmbedder, FastEmbedder};
-use crate::eval::{judge, score};
+use crate::eval::{jev, judge, score};
 use crate::headless::RunStatus;
 use crate::run::config::RunConfig;
 use crate::run::orchestrate::{self, PairOutcome};
@@ -63,7 +64,39 @@ pub fn run(
     out: &mut dyn Write,
     warn: &mut dyn Write,
 ) -> Result<Summary> {
-    run_with(config_dir, config_path, disk, backend, out, warn, None)
+    run_with(
+        config_dir,
+        config_path,
+        disk,
+        backend,
+        out,
+        warn,
+        None,
+        &std::thread::sleep,
+    )
+}
+
+/// Like [`run`], with `sleep` called for each pause between Jev retries instead of really
+/// sleeping: a seam for testing the backoff (issue 285).
+pub fn run_with_sleep(
+    config_dir: &Path,
+    config_path: &Path,
+    disk: &disk::Guard,
+    backend: &dyn SandboxBackend,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+    sleep: &dyn Fn(Duration),
+) -> Result<Summary> {
+    run_with(
+        config_dir,
+        config_path,
+        disk,
+        backend,
+        out,
+        warn,
+        None,
+        sleep,
+    )
 }
 
 /// Like [`run`], but runs `[eval.cosine]` (if configured) against `embedder`
@@ -87,9 +120,11 @@ pub fn run_with_embedder(
         out,
         warn,
         Some(embedder),
+        &std::thread::sleep,
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_with(
     config_dir: &Path,
     config_path: &Path,
@@ -98,6 +133,7 @@ fn run_with(
     out: &mut dyn Write,
     warn: &mut dyn Write,
     embedder_override: Option<&dyn Embedder>,
+    sleep: &dyn Fn(Duration),
 ) -> Result<Summary> {
     let run_config = RunConfig::load(config_path)?;
     let global = GlobalConfig::load(config_dir)?;
@@ -123,6 +159,15 @@ fn run_with(
         &roots.meta.join("kits"),
         backend,
     )?;
+    // The Jev evaluator's own kit, validated with the others before any sandbox exists.
+    let jev_kit = match &run_config.eval.jev {
+        Some(_) => Some(jev::build_kit(
+            &roots.meta.join("kits"),
+            &run_kits.resources,
+            backend,
+        )?),
+        None => None,
+    };
 
     // The run's identity goes to disk before any sandbox exists, so an
     // interrupted run still keeps its config hashes (decisions 28, 55).
@@ -307,6 +352,56 @@ fn run_with(
         }
     }
 
+    // Jev scores each pair on its own, in one evaluator sandbox per repeat; a failure is that
+    // pair's result and a warning, never fatal and never the judge's business (decision 241).
+    let mut jev_saved = true;
+    let mut jev_models = std::collections::BTreeSet::new();
+    if let (Some(jev_config), Some(jev_kit)) = (&run_config.eval.jev, &jev_kit) {
+        let repeats = run_config.run.repeat;
+        for repeat in 0..repeats {
+            let pairs: Vec<&PairOutcome> = outcomes.iter().filter(|o| o.repeat == repeat).collect();
+            let Some(scored) =
+                jev::evaluate_repeat(backend, &run_config, jev_kit, &roots, repeat, &pairs, sleep)
+            else {
+                continue;
+            };
+            let ok = scored.results.iter().filter(|(_, r)| r.is_ok()).count();
+            writeln!(
+                out,
+                "Jev {}: repeat {}/{repeats} scored {ok} of {} contestants",
+                jev_config.model,
+                repeat + 1,
+                scored.results.len()
+            )?;
+            for (contestant, result) in &scored.results {
+                match result {
+                    Ok(pair) => {
+                        jev_models.insert(pair.answered.model.clone());
+                    }
+                    Err(why) => writeln!(
+                        warn,
+                        "warning: Jev could not score contestants[{contestant}]{}: {why}",
+                        repeat_label(&run_config, repeat)
+                    )?,
+                }
+            }
+            for problem in [&scored.remove_error, &scored.secret_remove_error]
+                .into_iter()
+                .flatten()
+            {
+                writeln!(warn, "warning: {problem}")?;
+            }
+            if let Err(e) = results::write_jev(&roots.meta, &scored) {
+                jev_saved = false;
+                writeln!(
+                    warn,
+                    "warning: cannot save the Jev results for repeat {}/{repeats}: {e:#}",
+                    repeat + 1
+                )?;
+            }
+        }
+    }
+
     // The ranking is computed from what was just saved, exactly as `run show`
     // will later, so the two can't disagree (decisions 19, 120).
     match score::load(&roots.meta) {
@@ -333,9 +428,15 @@ fn run_with(
         )?;
     }
 
-    // Complete only if every pair's results (and the judge's and cosine's) are on disk.
-    if outcomes.iter().all(|o| o.save_error.is_none()) && judge_saved && cosine_saved {
-        if let Err(e) = results::mark_completed(&roots.meta, results::now()) {
+    // Complete only if every pair's results (and the judge's, cosine's and Jev's) are on disk.
+    if outcomes.iter().all(|o| o.save_error.is_none()) && judge_saved && cosine_saved && jev_saved {
+        let jev_models: Option<Vec<String>> = run_config
+            .eval
+            .jev
+            .as_ref()
+            .map(|_| jev_models.into_iter().collect());
+        if let Err(e) = results::mark_completed(&roots.meta, results::now(), jev_models.as_deref())
+        {
             writeln!(warn, "warning: cannot mark the run completed: {e:#}")?;
         }
     } else {
