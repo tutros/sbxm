@@ -346,4 +346,20 @@ impl SandboxBackend for SecretCheckBlocksRestore<'_> {
     fn skills(&self) -> anyhow::Result<serde_json::Value> {
         self.inner.skills()
     }
+
+    fn template_save(&self, sandbox: &str, tag: &str) -> anyhow::Result<()> {
+        self.inner.template_save(sandbox, tag)
+    }
+
+    fn template_ls(&self) -> anyhow::Result<Vec<sbxm::backend::TemplateImage>> {
+        self.inner.template_ls()
+    }
+
+    fn template_rm(&self, tag: &str) -> anyhow::Result<()> {
+        self.inner.template_rm(tag)
+    }
+
+    fn network_rules(&self, sandbox: &str) -> anyhow::Result<Vec<sbxm::backend::NetworkRule>> {
+        self.inner.network_rules(sandbox)
+    }
 }

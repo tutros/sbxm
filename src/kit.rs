@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Serialize;
 
-use crate::config::{InstallStep, Profile};
+use crate::config::{InstallStep, Profile, Template, sha256_hex};
 use crate::harness::Harness;
 
 /// The fields sbxm emits; field order is the order in `spec.yaml`.
@@ -195,6 +195,60 @@ pub fn all(
     ]
 }
 
+/// [`all`] for a sandbox created from a template: the `common` mixin has no
+/// install steps, which the template already ran, and the template's runtime
+/// allow list instead of `network.allow`, which only built it (decisions 200,
+/// 202). The harness mixin is unchanged, so Claude's managed settings step
+/// still runs at every create (decision 215).
+pub fn all_from_template(
+    profile_name: &str,
+    profile: &Profile,
+    template: &Template,
+    config_hash: &str,
+    harness: Harness,
+) -> [(String, Spec); 2] {
+    let [(common_dir, mut common), harness_kit] = all(profile_name, profile, config_hash, harness);
+    common.setup = None;
+    if let Some(permissions) = common.permissions.as_mut() {
+        permissions.network.allow = template.allow.clone();
+    }
+    [(common_dir, common), harness_kit]
+}
+
+/// SHA-256 (lowercase hex) of what a template is built from: the install
+/// steps, the build allow and deny lists, the harness with its pinned agent
+/// kit, and whether it is warm (decision 209). Runtime-only settings stay out,
+/// so changing them never makes a template stale.
+pub fn template_hash(profile: &Profile, harness: Harness, warm: bool) -> String {
+    template_hash_with_kit(profile, harness, harness.agent_kit(), warm)
+}
+
+fn template_hash_with_kit(
+    profile: &Profile,
+    harness: Harness,
+    agent_kit: Option<&str>,
+    warm: bool,
+) -> String {
+    #[derive(Serialize)]
+    struct Input<'a> {
+        harness: &'a str,
+        agent_kit: Option<&'a str>,
+        install: &'a [InstallStep],
+        allow: &'a [String],
+        deny: &'a [String],
+        warm: bool,
+    }
+    let input = Input {
+        harness: harness.as_str(),
+        agent_kit,
+        install: &profile.setup.install,
+        allow: &profile.network.allow,
+        deny: &profile.network.deny,
+        warm,
+    };
+    sha256_hex(&serde_json::to_vec(&input).expect("template hash input serializes"))
+}
+
 impl Spec {
     /// The contents of `spec.yaml`.
     pub fn yaml(&self) -> Result<String> {
@@ -223,4 +277,19 @@ pub fn write(dir: &Path, spec: &Spec) -> Result<()> {
         fs::write(&path, bytes).with_context(|| format!("cannot write {}", path.display()))?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod template_hash_tests {
+    use super::*;
+
+    #[test]
+    fn a_different_agent_kit_ref_changes_the_template_hash() {
+        let profile = Profile::default();
+        let hash = |kit| template_hash_with_kit(&profile, Harness::Pi, kit, false);
+
+        assert_ne!(hash(Some("kit:1")), hash(Some("kit:2")));
+        assert_ne!(hash(Some("kit:1")), hash(None));
+        assert_eq!(hash(Some("kit:1")), hash(Some("kit:1")));
+    }
 }

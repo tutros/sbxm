@@ -198,3 +198,21 @@ fn editing_project_config_is_drift_for_list_and_open() {
         "{err:#}"
     );
 }
+
+#[test]
+fn template_table_in_project_config_is_refused() {
+    let env = Env::new();
+    env.write_profile("default", "[template]\nallow = []\n");
+    write_project_config(&env, "[template]\nstrict = true\nallow = []\n");
+
+    let message = rejected(&env);
+
+    assert!(
+        message.contains(&format!(
+            "[template] in project config {} is not allowed: templates belong to the profile; \
+             move it to the profile or remove it",
+            project_config_path(&env)
+        )),
+        "{message}"
+    );
+}

@@ -31,6 +31,26 @@ The config has three layers: global `config.toml`, then a profile, then the proj
 merged result is recorded with the sandbox. If the config changed, `open` refuses until you run `open --rebuild`.
 `sbxm config show` previews exactly what would be built, and `sbxm doctor` checks the setup.
 
+### Faster sandboxes from a template (optional, per profile)
+
+```
+sbxm template build sbxm-dev --warm .   # once, and again when it goes stale
+sbxm new demo --profile sbxm-dev        # nothing is installed (about 7 s instead of 68 s in spike S11)
+sbxm template ls                        # tag, size, age, users
+sbxm template rm sbxm-dev               # refused while a sandbox or task uses it
+```
+
+A profile opts in with `[template]` (README, *Templates*). From then on every sandbox of that profile — `new`, `open`,
+every `sbxm task` sandbox, `sbxm run`'s contestants and judge — starts from the template and gets only
+`[template].allow`. When the template is stale or missing, a `strict` profile refuses and names the command to run;
+the usual one is `sbxm template build <profile> --warm <repo>` after a lock file changed. A non-strict profile warns
+and installs as before. `sbxm doctor` lists the templates and warns about stale ones, missing images and templates
+over 14 days old (the agent inside is frozen at the version it was saved with; rebuild to update it).
+
+Which minimum `sbx` version applies: `min_sbx_version` in `config.toml` (default 0.43.0) for everything, and 0.46.0
+built into sbxm for templates. `doctor` fails on the template minimum only when a profile has `[template]`;
+`template build` refuses below it; a create treats an older `sbx` like a missing template.
+
 ## Use case 2: compare agents on one task
 
 ```
@@ -196,7 +216,7 @@ same tasks and only reads).
   before starting a sandbox, run one sandbox at a time unless over 25 GB is free, and delete `/tmp/target` in a
   sandbox you keep. Deleting files inside a sandbox does not return space to the host; removing the sandbox does.
   sbxm checks this for you: `doctor` reports that drive's free space, and `new`, `open` (when it creates or rebuilds),
-  `run`, `task start`, `task review`, `task run` and `task resume` refuse before writing anything when it is under
+  `run`, `template build`, `task start`, `task review`, `task run` and `task resume` refuse before writing anything when it is under
   `min_free_disk` in `config.toml` (default `"10g"`; `"0"` switches the check off), naming the drive and its free
   space; `--ignore-disk` lets one command through. A `task run` list (decision 193) checks again before every task,
   not only the first, since a task's own sandbox can fill the drive the next one needs; a failure there stops the
@@ -211,7 +231,11 @@ same tasks and only reads).
   and `No space` lines as well as `FAILED` and `panicked`.
 - **Workers should not install software.** If a worker installs a package itself, its gates pass where a clean
   sandbox fails (`pkg-config` for `openssl-sys` was the case). Put what the build needs in the profile's
-  `setup.install`. Pre-built templates that make this strict are planned as their own milestone.
+  `setup.install`. A strict `[template]` profile makes this hold: its sandboxes reach only `[template].allow`, so a
+  worker can't install what the template doesn't have. A worker that changes `Cargo.lock` then fails its gates inside
+  the sandbox (gap G1, per-task egress).
+- **Templates take disk too.** Each is 1 to 3 GB on the same drive as the sandboxes. A build removes the template it
+  replaces unless a sandbox or task still records it; `sbxm template ls` shows who does.
 - **Tests after a hand fix.** A hand fix on a task's branch was not gated in a sandbox, so run the checks on the
   host: `cargo fmt --check`, clippy, and the tests the change touches (`cargo test --test <file>`, plus the unit
   tests of a changed module). The full `cargo test` takes about 12 minutes on Windows; run it when the change is

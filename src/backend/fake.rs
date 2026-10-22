@@ -6,7 +6,10 @@ use anyhow::{Result, bail};
 
 use std::path::Path;
 
-use super::{CreateSpec, ExecOutput, ExecSpec, KitValidation, SandboxBackend, SandboxInfo};
+use super::{
+    CreateSpec, ExecOutput, ExecSpec, KitValidation, NetworkRule, SandboxBackend, SandboxInfo,
+    TemplateImage,
+};
 
 /// Holds every `exec` of a [`FakeBackend`] until [`ExecGate::open`], so a test
 /// can look at what exists while runs are "in progress".
@@ -66,7 +69,11 @@ pub struct FakeBackend {
     fail_remove: bool,
     log: Mutex<Vec<String>>,
     invalid_kit: Option<String>,
+    kit_warning: Option<String>,
     fail_create: bool,
+    fail_stop: bool,
+    fail_template_save: bool,
+    fail_template_rm: bool,
     sandboxes: Vec<SandboxInfo>,
     secrets: Mutex<Vec<String>>,
     /// `0.43.0` when `None`.
@@ -94,6 +101,11 @@ pub struct FakeBackend {
     /// Flipped (via [`FakeBackend::secret_services_failure`]) to make `secret_services` fail from
     /// then on, modeling `sbx` not answering (issue #201 review M-2).
     fail_secret_services: Arc<std::sync::atomic::AtomicBool>,
+    /// What `template_ls` returns; `template_save` adds to it, `template_rm` takes away.
+    templates: Mutex<Vec<TemplateImage>>,
+    /// What `network_rules` returns, for every sandbox.
+    network_rules: Vec<NetworkRule>,
+    fail_network_rules: bool,
 }
 
 /// Runs inside every `exec` (after the gate), so a test can play the agent
@@ -138,6 +150,38 @@ impl FakeBackend {
         Self {
             fail_create: true,
             ..Self::default()
+        }
+    }
+
+    /// A backend whose `stop` fails.
+    pub fn failing_stop() -> Self {
+        Self {
+            fail_stop: true,
+            ..Self::default()
+        }
+    }
+
+    /// A backend whose `template_save` fails.
+    pub fn failing_template_save() -> Self {
+        Self {
+            fail_template_save: true,
+            ..Self::default()
+        }
+    }
+
+    /// A backend whose `template_rm` records the call and then fails.
+    pub fn failing_template_rm(self) -> Self {
+        Self {
+            fail_template_rm: true,
+            ..self
+        }
+    }
+
+    /// A backend whose kit validation passes with this warning.
+    pub fn with_kit_warning(self, warning: &str) -> Self {
+        Self {
+            kit_warning: Some(warning.to_owned()),
+            ..self
         }
     }
 
@@ -365,6 +409,36 @@ impl FakeBackend {
         self.fail_secret_services.clone()
     }
 
+    /// A backend whose `template_ls` starts with these.
+    pub fn with_templates(self, templates: Vec<TemplateImage>) -> Self {
+        *self.templates.lock().unwrap() = templates;
+        self
+    }
+
+    /// A backend whose `network_rules` returns these.
+    pub fn with_network_rules(self, network_rules: Vec<NetworkRule>) -> Self {
+        Self {
+            network_rules,
+            ..self
+        }
+    }
+
+    /// Makes `network_rules` record the call and then fail.
+    pub fn failing_network_rules(self) -> Self {
+        Self {
+            fail_network_rules: true,
+            ..self
+        }
+    }
+
+    /// Makes `remove` record the call and then fail, like [`FakeBackend::failing_remove`].
+    pub fn and_failing_remove(self) -> Self {
+        Self {
+            fail_remove: true,
+            ..self
+        }
+    }
+
     fn record(&self, call: &str, name: &str) {
         self.log.lock().unwrap().push(format!("{call} {name}"));
     }
@@ -403,6 +477,9 @@ impl SandboxBackend for FakeBackend {
     fn stop(&self, name: &str) -> Result<()> {
         self.stops.lock().unwrap().push(name.to_owned());
         self.record("stop", name);
+        if self.fail_stop {
+            bail!("fake stop failure");
+        }
         Ok(())
     }
 
@@ -436,7 +513,11 @@ impl SandboxBackend for FakeBackend {
         Ok(KitValidation {
             valid: self.invalid_kit.is_none(),
             error: self.invalid_kit.clone(),
-            warnings: Vec::new(),
+            warnings: self
+                .kit_warning
+                .iter()
+                .map(|w| serde_json::Value::String(w.clone()))
+                .collect(),
         })
     }
 
@@ -490,5 +571,50 @@ impl SandboxBackend for FakeBackend {
     fn skills(&self) -> Result<serde_json::Value> {
         self.log.lock().unwrap().push("skills".to_owned());
         Ok(self.skills.clone().unwrap_or(serde_json::Value::Null))
+    }
+
+    fn template_save(&self, sandbox: &str, tag: &str) -> Result<()> {
+        self.record("template-save", &format!("{sandbox} {tag}"));
+        if self.fail_template_save {
+            bail!("fake save failure");
+        }
+        let (name, version) = tag.split_once(':').unwrap_or((tag, "latest"));
+        let mut templates = self.templates.lock().unwrap();
+        // `sbx` replaces an existing tag without a question (S11, question 8).
+        templates.retain(|t| t.reference() != tag);
+        templates.push(TemplateImage {
+            id: "fake".into(),
+            repository: format!("docker.io/library/{name}"),
+            tag: version.into(),
+            flavor: "fake".into(),
+            created_at: "2026-10-16T00:00:00Z".into(),
+            size: 1_234_567,
+        });
+        Ok(())
+    }
+
+    fn template_ls(&self) -> Result<Vec<TemplateImage>> {
+        Ok(self.templates.lock().unwrap().clone())
+    }
+
+    fn network_rules(&self, sandbox: &str) -> Result<Vec<NetworkRule>> {
+        self.record("network_rules", sandbox);
+        if self.fail_network_rules {
+            bail!("fake network_rules failure");
+        }
+        Ok(self.network_rules.clone())
+    }
+
+    fn template_rm(&self, tag: &str) -> Result<()> {
+        super::check_template_tag(tag)?;
+        self.record("template-rm", tag);
+        if self.fail_template_rm {
+            bail!("fake template rm failure");
+        }
+        self.templates
+            .lock()
+            .unwrap()
+            .retain(|t| t.reference() != tag);
+        Ok(())
     }
 }

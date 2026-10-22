@@ -6,6 +6,7 @@ use clap::{CommandFactory, FromArgMatches};
 use sbxm::backend::SbxBackend;
 use sbxm::cli::{
     Cli, Command, ConfigCommand, GateTier, RunArgs, RunCommand, RunTarget, TaskCommand,
+    TemplateCommand,
 };
 use sbxm::commands;
 use sbxm::config;
@@ -751,6 +752,44 @@ fn main() -> anyhow::Result<()> {
             )
         }
         Command::Run(_) => unreachable!("clap requires a config or a subcommand"),
+        Command::Template {
+            command:
+                TemplateCommand::Build {
+                    profile,
+                    harness,
+                    warm,
+                    ignore_disk,
+                },
+        } => commands::template_build::run(
+            &config::config_dir()?,
+            &commands::template_build::Options {
+                profile,
+                harness,
+                disk: sbxm::disk::Guard::real(ignore_disk),
+                now: None,
+                warm,
+            },
+            &SbxBackend,
+            &sbxm::task::record::SystemProbe,
+            &mut std::io::stdout(),
+            &mut std::io::stderr(),
+        ),
+        Command::Template {
+            command: TemplateCommand::Ls,
+        } => commands::template_ls::run(
+            &config::config_dir()?,
+            &commands::template_ls::Options::default(),
+            &SbxBackend,
+            &mut std::io::stdout(),
+        ),
+        Command::Template {
+            command: TemplateCommand::Rm { profile, harness },
+        } => commands::template_rm::run(
+            &config::config_dir()?,
+            &commands::template_rm::Options { profile, harness },
+            &SbxBackend,
+            &mut std::io::stdout(),
+        ),
         Command::Config {
             command: ConfigCommand::Init,
         } => commands::config_init::run(),

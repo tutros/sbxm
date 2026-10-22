@@ -105,21 +105,23 @@ impl GlobalConfig {
     }
 
     /// [`config_hash`] of `profile_name` merged with `project`'s
-    /// `sandbox.toml`, as they are now on disk.
+    /// `sandbox.toml`, as they are now on disk, or [`template_config_hash`]
+    /// for a sandbox created from a template (decision 230).
     pub fn current_hash(
         &self,
         project: &str,
         profile_name: &str,
         harness: Harness,
+        from_template: bool,
     ) -> Result<String> {
         let profile = Profile::load(self.profiles_dir(), profile_name)?
             .with_project(&crate::project::metadata_dir(&self.base_dir, project))?;
-        Ok(config_hash(
-            profile_name,
-            &profile,
-            &self.resources,
-            harness,
-        ))
+        let hash = if from_template {
+            template_config_hash
+        } else {
+            config_hash
+        };
+        Ok(hash(profile_name, &profile, &self.resources, harness))
     }
 
     pub fn profiles_dir(&self) -> &Path {
@@ -177,6 +179,33 @@ pub struct Profile {
     /// doesn't change the hash (decision 64).
     #[serde(skip_deserializing)]
     pub claude_managed_settings: Option<String>,
+    #[serde(default, rename = "template", skip_serializing)]
+    template_table: Option<TemplateTable>,
+    /// `[template]`, checked by [`Profile::load`]: its presence opts the
+    /// profile in to prebuilt templates (decision 202). Hashed by hand by
+    /// [`HashInput`], per variant (decision 230).
+    #[serde(skip)]
+    pub template: Option<Template>,
+}
+
+/// The profile's opt-in to prebuilt templates (decision 202).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Template {
+    /// Refuse a sandbox without a matching template instead of installing
+    /// (decision 200).
+    pub strict: bool,
+    /// The runtime allow list of sandboxes created from the template.
+    pub allow: Vec<String>,
+}
+
+/// `allow` is required, but checked by hand so the error says how to fix it.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct TemplateTable {
+    #[serde(default)]
+    strict: bool,
+    #[serde(default)]
+    allow: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -267,6 +296,13 @@ impl Profile {
         let project: Self = toml::from_str(&text)
             .with_context(|| format!("invalid project config {}", path.display()))?;
         project.check_env("project config", &path)?;
+        if project.template_table.is_some() {
+            bail!(
+                "[template] in project config {} is not allowed: templates belong to the profile; \
+                 move it to the profile or remove it",
+                path.display()
+            );
+        }
         self.network.allow.extend(project.network.allow);
         self.network.deny.extend(project.network.deny);
         self.env.extend(project.env);
@@ -320,6 +356,19 @@ impl Profile {
         let source = format!("profile '{name}'");
         profile.check_env(&source, &path)?;
         profile.skills_store = parse_skills_store(profile.skills.store.as_deref(), &source, &path)?;
+        if let Some(table) = profile.template_table.take() {
+            let Some(allow) = table.allow else {
+                bail!(
+                    "template.allow is missing in {source} ({}); list the hosts sandboxes from \
+                     the template may reach, or set allow = [] for none",
+                    path.display()
+                );
+            };
+            profile.template = Some(Template {
+                strict: table.strict,
+                allow,
+            });
+        }
         let dir = profiles_dir.join(name);
         profile.mandatory_instructions = read_instructions(
             "mandatory",
@@ -429,6 +478,32 @@ pub fn config_hash(
     )
 }
 
+/// [`config_hash`] of a sandbox created from the profile's template: it also
+/// covers `[template].allow`, the runtime allow list that replaces
+/// `network.allow` in its kit (decisions 208, 230).
+pub fn template_config_hash(
+    profile_name: &str,
+    profile: &Profile,
+    resources: &Resources,
+    harness: Harness,
+) -> String {
+    let mut input = HashInput::new(
+        profile_name,
+        profile,
+        resources,
+        harness,
+        harness.agent_kit(),
+    );
+    with_template_allow(&mut input, profile);
+    sha256_hex(&serde_json::to_vec(&input).expect("config serializes"))
+}
+
+fn with_template_allow<'a>(input: &mut HashInput<'a>, profile: &'a Profile) {
+    if let Some(template) = input.template.as_mut() {
+        template.allow = profile.template.as_ref().map(|t| t.allow.as_slice());
+    }
+}
+
 /// [`config_hash`] with the pinned agent-kit ref given, so a test can show
 /// that re-pinning changes the hash (decisions 55, 104).
 fn config_hash_with_kit(
@@ -442,21 +517,25 @@ fn config_hash_with_kit(
     sha256_hex(&serde_json::to_vec(&input).expect("config serializes"))
 }
 
-/// What [`config_hash`] hashes, as TOML, so `config show` explains drift
-/// (decision 65).
+/// What [`config_hash`] hashes, or [`template_config_hash`] when
+/// `from_template`, as TOML, so `config show` explains drift (decision 65).
 pub fn hash_input_toml(
     profile_name: &str,
     profile: &Profile,
     resources: &Resources,
     harness: Harness,
+    from_template: bool,
 ) -> Result<String> {
-    let input = HashInput::new(
+    let mut input = HashInput::new(
         profile_name,
         profile,
         resources,
         harness,
         harness.agent_kit(),
     );
+    if from_template {
+        with_template_allow(&mut input, profile);
+    }
     toml::to_string(&input).context("cannot render the config as TOML")
 }
 
@@ -470,6 +549,19 @@ struct HashInput<'a> {
     /// The pinned kit a Pi or Antigravity sandbox is created from.
     #[serde(skip_serializing_if = "Option::is_none")]
     agent_kit: Option<&'a str>,
+    /// Absent for a profile without `[template]`, so older hashes still match.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    template: Option<TemplateInput<'a>>,
+}
+
+/// The part of `[template]` a sandbox's hash covers (decision 230): `strict`
+/// in both variants, since it decides whether an install sandbox may exist,
+/// and `allow` only in a template sandbox's.
+#[derive(Serialize)]
+struct TemplateInput<'a> {
+    strict: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    allow: Option<&'a [String]>,
 }
 
 impl<'a> HashInput<'a> {
@@ -480,6 +572,7 @@ impl<'a> HashInput<'a> {
         harness: Harness,
         agent_kit: Option<&'a str>,
     ) -> Self {
+        let profile_template = profile.template.as_ref();
         // Settings that don't reach the harness mustn't show as drift there.
         let profile = harness.applied(profile);
         HashInput {
@@ -489,11 +582,15 @@ impl<'a> HashInput<'a> {
             profile,
             resources,
             agent_kit,
+            template: profile_template.map(|t| TemplateInput {
+                strict: t.strict,
+                allow: None,
+            }),
         }
     }
 }
 
-fn sha256_hex(bytes: &[u8]) -> String {
+pub(crate) fn sha256_hex(bytes: &[u8]) -> String {
     Sha256::digest(bytes)
         .iter()
         .map(|b| format!("{b:02x}"))
@@ -669,7 +766,7 @@ fn parse_skills_store(value: Option<&str>, source: &str, path: &Path) -> Result<
 
 /// Profile names become directory names, so they use the project-name
 /// characters (`default` is allowed here).
-fn validate_profile_name(name: &str) -> Result<()> {
+pub fn validate_profile_name(name: &str) -> Result<()> {
     let allowed = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-';
     if name.is_empty() || name.len() > 40 || name.starts_with('-') || !name.chars().all(allowed) {
         bail!(
@@ -706,7 +803,7 @@ mod agent_kit_tests {
             memory: "8g".into(),
         };
         for harness in [Harness::Pi, Harness::Antigravity] {
-            let toml = hash_input_toml("default", &profile, &resources, harness).unwrap();
+            let toml = hash_input_toml("default", &profile, &resources, harness, false).unwrap();
             let kit = harness.agent_kit().unwrap();
             assert!(toml.contains(&format!("agent_kit = \"{kit}\"")), "{toml}");
         }
@@ -720,7 +817,7 @@ mod agent_kit_tests {
             memory: "8g".into(),
         };
         for harness in [Harness::Claude, Harness::Codex, Harness::Gemini] {
-            let toml = hash_input_toml("default", &profile, &resources, harness).unwrap();
+            let toml = hash_input_toml("default", &profile, &resources, harness, false).unwrap();
             assert!(!toml.contains("agent_kit"), "{toml}");
         }
     }

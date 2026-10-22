@@ -14,6 +14,7 @@ use crate::run::config::{Criterion, CriterionKind, RunConfig};
 use crate::run::id::RunRoots;
 use crate::run::kits::RunKits;
 use crate::run::orchestrate::{PairOutcome, in_sandbox_path};
+use crate::template;
 
 /// The file in the judge's workspace that holds its instructions. The prompt
 /// carries whole answers and diffs, which can be longer than a command line
@@ -268,8 +269,24 @@ pub fn judge_repeat(
                 memory: kits.resources.memory.clone(),
                 skills: harness_kits.skills_store,
                 kits: harness_kits.dirs.clone(),
+                template: harness_kits.template.clone(),
+                deny_network: harness_kits.deny_network.clone().unwrap_or_default(),
             })
             .map_err(|e| format!("cannot create the judge sandbox {sandbox}: {e:#}"))?;
+        // A strict `codex` judge is held to its allow list before it runs (decision 221).
+        if let Err(e) = template::check_codex_rules(
+            &harness_kits.profile,
+            &harness_kits.loaded,
+            &sandbox,
+            backend,
+            harness_kits.deny_network.as_deref(),
+        ) {
+            // A refused sandbox is already removed, unless removing it failed.
+            created = backend
+                .list()
+                .map_or(true, |all| all.iter().any(|s| s.name == sandbox));
+            return Err(format!("{e:#}"));
+        }
         let opts = HeadlessOpts {
             model: Some(judge.model.clone()),
             high_effort: false,

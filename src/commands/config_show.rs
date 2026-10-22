@@ -24,13 +24,17 @@ pub fn render(config_dir: &Path, project: Option<&str>, options: &Options) -> Re
     let config = GlobalConfig::load(config_dir)?;
     let mut profile_name = options.profile.clone();
     let mut metadata_dir = None;
+    // A recorded sandbox created from a template is shown as that variant (decision 230,
+    // review PR 269 round 2 M-2); `--profile` previews the install variant as before.
+    let mut from_template = false;
     if let Some(name) = project {
         project::validate_name(name)?;
         let dir = project::metadata_dir(&config.base_dir, name);
         if profile_name.is_none() {
-            profile_name = state::load(&dir)?
-                .and_then(|mut s| s.sandboxes.remove(options.harness.as_str()))
-                .and_then(|entry| entry.profile);
+            let entry =
+                state::load(&dir)?.and_then(|mut s| s.sandboxes.remove(options.harness.as_str()));
+            from_template = entry.as_ref().is_some_and(|e| e.template.is_some());
+            profile_name = entry.and_then(|entry| entry.profile);
         }
         metadata_dir = Some(dir);
     }
@@ -39,16 +43,32 @@ pub fn render(config_dir: &Path, project: Option<&str>, options: &Options) -> Re
     if let Some(dir) = &metadata_dir {
         profile = profile.with_project(dir)?;
     }
-    let hash = config::config_hash(&profile_name, &profile, &config.resources, options.harness);
+    let table = profile.template.clone().filter(|_| from_template);
+    let hash = match table {
+        Some(_) => config::template_config_hash,
+        None => config::config_hash,
+    }(&profile_name, &profile, &config.resources, options.harness);
 
     let mut out = format!("# profile: {profile_name}\n");
     if let Some(name) = project {
         out += &format!("# project: {name}\n");
     }
     out += &format!("# config hash: {hash}\n\n");
-    out += &config::hash_input_toml(&profile_name, &profile, &config.resources, options.harness)?;
+    out += &config::hash_input_toml(
+        &profile_name,
+        &profile,
+        &config.resources,
+        options.harness,
+        table.is_some(),
+    )?;
     if options.kits {
-        for (name, spec) in kit::all(&profile_name, &profile, &hash, options.harness) {
+        let kits = match &table {
+            Some(table) => {
+                kit::all_from_template(&profile_name, &profile, table, &hash, options.harness)
+            }
+            None => kit::all(&profile_name, &profile, &hash, options.harness),
+        };
+        for (name, spec) in kits {
             out += &format!("\n# kit: {name}\n");
             out += &spec.yaml()?;
             for path in spec.home_paths() {

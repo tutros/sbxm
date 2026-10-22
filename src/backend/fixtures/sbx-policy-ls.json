@@ -1,0 +1,135 @@
+{
+  "rules": [
+    {
+      "id": "default-fs-read-allow-all",
+      "name": "default-fs-read-allow-all",
+      "policy_id": "local-policy",
+      "scope": "global",
+      "applies_to": "all",
+      "resource_type": "filesystem:read",
+      "decision": "allow",
+      "resources": [
+        "**"
+      ],
+      "origin": "local",
+      "layer": "local",
+      "status": "active",
+      "editable": false,
+      "provenance": {
+        "created_via": "default"
+      },
+      "actions": [
+        "fs:mount:read"
+      ]
+    },
+    {
+      "id": "default-fs-write-allow-all",
+      "name": "default-fs-write-allow-all",
+      "policy_id": "local-policy",
+      "scope": "global",
+      "applies_to": "all",
+      "resource_type": "filesystem:write",
+      "decision": "allow",
+      "resources": [
+        "**"
+      ],
+      "origin": "local",
+      "layer": "local",
+      "status": "active",
+      "editable": false,
+      "provenance": {
+        "created_via": "default"
+      },
+      "actions": [
+        "fs:mount:read",
+        "fs:mount:write"
+      ]
+    },
+    {
+      "id": "8353294a-011f-4dae-a5d4-be26a52efdc4",
+      "name": "kit:sbxm-fixture-policy-codex",
+      "policy_id": "595c034c-07b9-4a07-b83a-af8264d8ed2b",
+      "scope": "sandbox:sbxm-fixture-policy-codex",
+      "applies_to": "sandbox:sbxm-fixture-policy-codex",
+      "resource_type": "network",
+      "decision": "allow",
+      "resources": [
+        "api.openai.com:443",
+        "openai.com:443",
+        "auth.openai.com:443",
+        "chatgpt.com:443",
+        "files.openai.com:443",
+        "registry.npmjs.org:443",
+        "releases.openai.com:443",
+        "api.github.com:443",
+        "github.com:443",
+        "release-assets.githubusercontent.com:443",
+        "codeload.github.com:443",
+        "archive.ubuntu.com:80",
+        "security.ubuntu.com:80",
+        "ports.ubuntu.com:80",
+        "download.docker.com:443"
+      ],
+      "origin": "scoped",
+      "layer": "local",
+      "status": "active",
+      "editable": false,
+      "sandbox_id": "sbxm-fixture-policy-codex",
+      "provenance": {
+        "created_via": "provisioned",
+        "source": "sandboxes"
+      },
+      "actions": [
+        "net:connect:tcp"
+      ]
+    },
+    {
+      "id": "56fcb644-f2f5-4d8b-8f49-69b2cce18c0a",
+      "name": "56fcb644-f2f5-4d8b-8f49-69b2cce18c0a",
+      "policy_id": "dcd95057-9111-4f8f-97d0-81b4ffd5d23f",
+      "scope": "sandbox:sbxm-fixture-policy-codex",
+      "applies_to": "sandbox:sbxm-fixture-policy-codex",
+      "resource_type": "network",
+      "decision": "deny",
+      "resources": [
+        "github.com"
+      ],
+      "origin": "scoped",
+      "layer": "local",
+      "status": "active",
+      "editable": true,
+      "sandbox_id": "sbxm-fixture-policy-codex",
+      "provenance": {
+        "created_via": "added"
+      },
+      "actions": [
+        "net:connect:tcp",
+        "net:connect:udp"
+      ]
+    },
+    {
+      "id": "87b54ff9-a0cd-4593-8cb8-43b05cf511d3",
+      "name": "87b54ff9-a0cd-4593-8cb8-43b05cf511d3",
+      "policy_id": "dcd95057-9111-4f8f-97d0-81b4ffd5d23f",
+      "scope": "sandbox:sbxm-fixture-policy-codex",
+      "applies_to": "sandbox:sbxm-fixture-policy-codex",
+      "resource_type": "network",
+      "decision": "deny",
+      "resources": [
+        "registry.npmjs.org"
+      ],
+      "origin": "scoped",
+      "layer": "local",
+      "status": "active",
+      "editable": true,
+      "sandbox_id": "sbxm-fixture-policy-codex",
+      "provenance": {
+        "created_via": "added"
+      },
+      "actions": [
+        "net:connect:tcp",
+        "net:connect:udp"
+      ]
+    }
+  ]
+}

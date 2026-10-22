@@ -82,8 +82,31 @@ fn prepare_repo(workspace: &Path, git_dir: &Path) -> Result<String> {
 /// Fails naming the first symlink or junction under `dir`. `new` calls it
 /// with the other seed checks, before anything is written (decision 47).
 pub fn reject_links(dir: &Path) -> Result<()> {
+    reject_links_except(dir, &|_| false)
+}
+
+/// Copies `repo` into `dest`, which must not exist yet, leaving out every `.git` and the top
+/// `target` folder (decision 207). Refuses before writing anything if what is copied holds a link.
+pub fn copy_repo(repo: &Path, dest: &Path) -> Result<()> {
+    reject_repo_links(repo)?;
+    copy_tree_except(repo, dest, &|path| not_copied(repo, path))
+}
+
+/// Fails naming the first link in what [`copy_repo`] would copy.
+pub fn reject_repo_links(repo: &Path) -> Result<()> {
+    reject_links_except(repo, &|path| not_copied(repo, path))
+}
+
+fn not_copied(repo: &Path, path: &Path) -> bool {
+    path.file_name().is_some_and(|n| n == ".git") || path == repo.join("target")
+}
+
+fn reject_links_except(dir: &Path, skip: &dyn Fn(&Path) -> bool) -> Result<()> {
     for entry in fs::read_dir(dir).with_context(|| format!("cannot read {}", dir.display()))? {
         let entry = entry?;
+        if skip(&entry.path()) {
+            continue;
+        }
         let file_type = entry.file_type()?;
         if file_type.is_symlink() {
             bail!(
@@ -92,19 +115,26 @@ pub fn reject_links(dir: &Path) -> Result<()> {
             );
         }
         if file_type.is_dir() {
-            reject_links(&entry.path())?;
+            reject_links_except(&entry.path(), skip)?;
         }
     }
     Ok(())
 }
 
 fn copy_tree(seed: &Path, dest: &Path) -> Result<()> {
+    copy_tree_except(seed, dest, &|_| false)
+}
+
+fn copy_tree_except(seed: &Path, dest: &Path, skip: &dyn Fn(&Path) -> bool) -> Result<()> {
     fs::create_dir(dest).with_context(|| format!("cannot create {}", dest.display()))?;
     for entry in fs::read_dir(seed).with_context(|| format!("cannot read {}", seed.display()))? {
         let entry = entry?;
+        if skip(&entry.path()) {
+            continue;
+        }
         let target = dest.join(entry.file_name());
         if entry.file_type()?.is_dir() {
-            copy_tree(&entry.path(), &target)?;
+            copy_tree_except(&entry.path(), &target, skip)?;
         } else {
             fs::copy(entry.path(), &target)
                 .with_context(|| format!("cannot copy {}", entry.path().display()))?;

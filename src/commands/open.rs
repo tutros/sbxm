@@ -8,7 +8,7 @@ use crate::backend::SandboxBackend;
 use crate::config::{self, GlobalConfig, Profile};
 use crate::disk;
 use crate::harness::Harness;
-use crate::{project, state};
+use crate::{project, state, template};
 
 #[derive(Debug, Default)]
 pub struct Options {
@@ -63,8 +63,29 @@ pub fn run(
             }
         }
         (Some(entry), true) => {
-            let profile = check_unchanged(&config, name, harness, &sandbox, &entry)?;
+            let (profile_name, base, profile) =
+                check_unchanged(&config, name, harness, &sandbox, &entry)?;
             super::write_unsupported_warnings(harness, &profile, &sandbox, warn)?;
+            let request = template::Request {
+                base_dir: &config.base_dir,
+                profile_name: &profile_name,
+                profile: &base,
+                merged: &profile,
+                project_config: &metadata_dir.join("sandbox.toml"),
+                harness,
+                sandbox: &sandbox,
+                locks: template::Locks::Dir(&entry.workspace),
+            };
+            if entry.template.is_none() && template::ready(&request, backend)? {
+                writeln!(
+                    warn,
+                    "hint: the template of profile '{profile_name}' for {} is ready; `sbxm open \
+                     {name}{} --rebuild` recreates {sandbox} from it (its session history is lost; \
+                     the workspace is kept)",
+                    harness.as_str(),
+                    open_harness_flag(harness)
+                )?;
+            }
         }
         (None, true) => bail!(
             "sandbox {sandbox} exists but sbxm has no state for it; it may lack sbxm's config, \
@@ -89,16 +110,18 @@ pub fn run(
 }
 
 /// Refuses when the config hash differs from the one the sandbox was built
-/// with, or when none was recorded (decisions 31, 55). Otherwise returns the
-/// profile it was built from, so the caller can warn about anything this
-/// harness can't apply before attaching (decisions 11, 78).
+/// with, or when none was recorded (decisions 31, 55); a sandbox from a
+/// template is compared with that variant's hash (decision 208). Otherwise
+/// returns the profile's name and the profile it was built from, without and
+/// with the project's `sandbox.toml`, so the caller can warn about anything
+/// this harness can't apply before attaching (decisions 11, 78).
 fn check_unchanged(
     config: &GlobalConfig,
     name: &str,
     harness: Harness,
     sandbox: &str,
     entry: &state::SandboxState,
-) -> Result<Profile> {
+) -> Result<(String, Profile, Profile)> {
     let fix = format!(
         "run `sbxm open {name}{} --rebuild` to recreate it (its session history is lost; \
          the workspace is kept)",
@@ -108,12 +131,18 @@ fn check_unchanged(
         bail!("{sandbox} was created before sbxm recorded config hashes; {fix}");
     };
     let profile_name = entry.profile.as_deref().unwrap_or(&config.default_profile);
-    let profile = Profile::load(config.profiles_dir(), profile_name)?
+    let base = Profile::load(config.profiles_dir(), profile_name)?;
+    let profile = base
+        .clone()
         .with_project(&project::metadata_dir(&config.base_dir, name))?;
-    if *stored != config::config_hash(profile_name, &profile, &config.resources, harness) {
+    let hash = match entry.template {
+        Some(_) => config::template_config_hash,
+        None => config::config_hash,
+    };
+    if *stored != hash(profile_name, &profile, &config.resources, harness) {
         bail!(
             "the config of {sandbox} (profile '{profile_name}') changed since it was created; {fix}"
         );
     }
-    Ok(profile)
+    Ok((profile_name.to_owned(), base, profile))
 }

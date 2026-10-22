@@ -16,6 +16,8 @@ fn expected_create(env: &Env, workspace: &Path) -> CreateSpec {
         memory: "8g".into(),
         skills: SkillsStore::ReadOnly,
         kits: vec![env.kit_dir("demo"), env.harness_kit_dir("demo")],
+        template: None,
+        deny_network: Vec::new(),
     }
 }
 

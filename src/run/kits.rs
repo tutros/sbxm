@@ -13,6 +13,7 @@ use crate::commands::invalid_kit_check;
 use crate::config::{self, GlobalConfig, Profile, Resources};
 use crate::harness::Harness;
 use crate::kit;
+use crate::template;
 
 /// The kits of one (profile, harness) pair, ready for `CreateSpec::kits`.
 #[derive(Debug, Clone)]
@@ -27,6 +28,13 @@ pub struct HarnessKits {
     pub dirs: Vec<PathBuf>,
     /// This profile's `skills.store`, passed to `sbx create --skills`.
     pub skills_store: SkillsStore,
+    /// The template the pair's sandboxes are created from, `None` for the install steps
+    /// (decision 237).
+    pub template: Option<String>,
+    /// [`template::denied_hosts`] for the pair's sandboxes.
+    pub deny_network: Option<Vec<String>>,
+    /// The loaded profile, for [`template::check_codex_rules`] after each create.
+    pub loaded: Profile,
 }
 
 #[derive(Debug)]
@@ -56,12 +64,48 @@ impl RunKits {
     }
 }
 
+/// The (profile, harness) pairs of a run in first-use order: each contestant under its own
+/// profile or the run's (`run_profile`), then the judge under the run's.
+pub fn pairs(run_config: &RunConfig, run_profile: &str) -> Vec<(String, Harness)> {
+    let mut wanted: Vec<(String, Harness)> = Vec::new();
+    let judge = run_config
+        .eval
+        .judge
+        .as_ref()
+        .map(|j| (run_profile.to_owned(), j.harness));
+    let contestants = run_config.contestants.iter().map(|c| {
+        (
+            c.profile.clone().unwrap_or_else(|| run_profile.to_owned()),
+            c.harness,
+        )
+    });
+    for pair in contestants.chain(judge) {
+        if !wanted.contains(&pair) {
+            wanted.push(pair);
+        }
+    }
+    wanted
+}
+
 /// Writes every kit under `kits_root` (never mounted into a sandbox, decision
 /// 112) and validates each with `sbx`. Any failure returns before a sandbox
-/// could be created, so an invalid kit leaves nothing behind.
+/// could be created, so an invalid kit leaves nothing behind. Every pair uses the
+/// install steps; [`build_with_templates`] takes the preflight's choice.
 pub fn build(
     config_dir: &Path,
     run_config: &RunConfig,
+    kits_root: &Path,
+    backend: &dyn SandboxBackend,
+) -> Result<RunKits> {
+    build_with_templates(config_dir, run_config, &[], kits_root, backend)
+}
+
+/// Like [`build`], with the template `templates` names for a (profile, harness) pair (the
+/// preflight's choice, decision 237); a pair it doesn't name uses the install steps.
+pub fn build_with_templates(
+    config_dir: &Path,
+    run_config: &RunConfig,
+    templates: &[(String, Harness, Option<String>)],
     kits_root: &Path,
     backend: &dyn SandboxBackend,
 ) -> Result<RunKits> {
@@ -75,26 +119,16 @@ pub fn build(
         cpus: run_config.run.cpus,
         memory: run_config.run.memory.clone(),
     };
-
-    // The (profile, harness) pairs in first-use order: each contestant under
-    // its own profile or the run's, then the judge under the run's.
-    let mut wanted: Vec<(String, Harness)> = Vec::new();
-    let judge = run_config
-        .eval
-        .judge
-        .as_ref()
-        .map(|j| (run_profile.clone(), j.harness));
-    let contestants = run_config.contestants.iter().map(|c| {
-        (
-            c.profile.clone().unwrap_or_else(|| run_profile.clone()),
-            c.harness,
-        )
-    });
-    for pair in contestants.chain(judge) {
-        if !wanted.contains(&pair) {
-            wanted.push(pair);
-        }
-    }
+    let wanted = pairs(run_config, &run_profile)
+        .into_iter()
+        .map(|(profile, harness)| {
+            let template = templates
+                .iter()
+                .find(|(p, h, _)| *p == profile && *h == harness)
+                .and_then(|(_, _, tag)| tag.clone());
+            (profile, harness, template)
+        })
+        .collect();
     build_pairs(&global, run_profile, &overrides, wanted, kits_root, backend)
 }
 
@@ -106,21 +140,22 @@ pub struct Overrides {
 }
 
 /// Kits for `harnesses` under one `profile`, for callers with no run-config (`sbxm task`).
-/// Same writing, hashing and validation as [`build`].
+/// Same writing, hashing and validation as [`build`]. With a `template` tag, the baked variant
+/// for a sandbox created from it (decisions 200, 230).
 pub fn build_for(
     config_dir: &Path,
     profile: &str,
     harnesses: &[Harness],
     overrides: &Overrides,
+    template: Option<&str>,
     kits_root: &Path,
     backend: &dyn SandboxBackend,
 ) -> Result<RunKits> {
     let global = GlobalConfig::load(config_dir)?;
-    let mut wanted: Vec<(String, Harness)> = Vec::new();
+    let mut wanted: Vec<(String, Harness, Option<String>)> = Vec::new();
     for harness in harnesses {
-        let pair = (profile.to_owned(), *harness);
-        if !wanted.contains(&pair) {
-            wanted.push(pair);
+        if !wanted.iter().any(|(_, h, _)| h == harness) {
+            wanted.push((profile.to_owned(), *harness, template.map(str::to_owned)));
         }
     }
     build_pairs(
@@ -137,7 +172,7 @@ fn build_pairs(
     global: &GlobalConfig,
     run_profile: String,
     overrides: &Overrides,
-    wanted: Vec<(String, Harness)>,
+    wanted: Vec<(String, Harness, Option<String>)>,
     kits_root: &Path,
     backend: &dyn SandboxBackend,
 ) -> Result<RunKits> {
@@ -152,7 +187,7 @@ fn build_pairs(
     // Every profile loads before anything is written, so an unknown one
     // leaves no trace.
     let mut profiles: Vec<(String, Profile)> = Vec::new();
-    for (name, _) in &wanted {
+    for (name, _, _) in &wanted {
         if !profiles.iter().any(|(n, _)| n == name) {
             profiles.push((name.clone(), Profile::load(global.profiles_dir(), name)?));
         }
@@ -160,14 +195,23 @@ fn build_pairs(
     let profile_named = |name: &str| &profiles.iter().find(|(n, _)| n == name).unwrap().1;
 
     let mut all = Vec::new();
-    for (profile_name, harness) in wanted {
+    for (profile_name, harness, template) in wanted {
         let profile = profile_named(&profile_name);
-        let config_hash = config::config_hash(&profile_name, profile, &resources, harness);
+        let table = template.as_ref().and(profile.template.as_ref());
+        let config_hash = match table {
+            Some(_) => config::template_config_hash,
+            None => config::config_hash,
+        }(&profile_name, profile, &resources, harness);
         let dir = kits_root.join(&config_hash[..12]);
-        let specs: Vec<_> = kit::all(&profile_name, profile, &config_hash, harness)
-            .map(|(name, spec)| (dir.join(name), spec))
-            .into_iter()
-            .collect();
+        let specs: Vec<_> = match table {
+            Some(table) => {
+                kit::all_from_template(&profile_name, profile, table, &config_hash, harness)
+            }
+            None => kit::all(&profile_name, profile, &config_hash, harness),
+        }
+        .map(|(name, spec)| (dir.join(name), spec))
+        .into_iter()
+        .collect();
         for (path, spec) in &specs {
             kit::write(path, spec)?;
         }
@@ -177,6 +221,9 @@ fn build_pairs(
             config_hash,
             dirs: specs.into_iter().map(|(path, _)| path).collect(),
             skills_store: profile.skills_store,
+            deny_network: template::denied_hosts(profile, harness, template.as_deref()),
+            template,
+            loaded: profile.clone(),
         });
     }
 

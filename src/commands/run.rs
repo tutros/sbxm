@@ -116,7 +116,13 @@ fn run_with(
     }
 
     let roots = id::reserve(&global.base_dir)?;
-    let run_kits = kits::build(config_dir, &run_config, &roots.meta.join("kits"), backend)?;
+    let run_kits = kits::build_with_templates(
+        config_dir,
+        &run_config,
+        &checked.templates,
+        &roots.meta.join("kits"),
+        backend,
+    )?;
 
     // The run's identity goes to disk before any sandbox exists, so an
     // interrupted run still keeps its config hashes (decisions 28, 55).

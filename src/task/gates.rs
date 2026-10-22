@@ -22,7 +22,7 @@ const OUTPUT_TAIL_BYTES: usize = 8 * 1024;
 
 /// Put in front of every sandbox gate command: `sbx exec` reads no login profile, so a toolchain
 /// the profile installs under `~/.cargo` (Rust) isn't on the PATH without it.
-const CARGO_ENV: &str = "[ -f \"$HOME/.cargo/env\" ] && . \"$HOME/.cargo/env\"; ";
+pub(crate) const CARGO_ENV: &str = "[ -f \"$HOME/.cargo/env\" ] && . \"$HOME/.cargo/env\"; ";
 
 /// How one gate command went.
 #[derive(Debug, Clone, PartialEq, Eq)]

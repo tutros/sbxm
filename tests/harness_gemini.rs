@@ -36,6 +36,8 @@ fn creates_a_gemini_sandbox_with_a_harness_gemini_mixin() {
             memory: "8g".into(),
             skills: SkillsStore::ReadOnly,
             kits: vec![env.kit_dir("demo"), gemini_kit_dir(&env)],
+            template: None,
+            deny_network: Vec::new(),
         }]
     );
     insta::assert_snapshot!(

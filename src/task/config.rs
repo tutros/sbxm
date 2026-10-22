@@ -2,7 +2,7 @@
 //! 155, 160): parsed and checked without touching `sbx`, `gh` or the profiles.
 //! Every struct denies unknown keys, as in the run-config.
 
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -18,7 +18,7 @@ pub const FILE_NAME: &str = "sbxm-task.toml";
 
 const DEFAULT_WORKER_LIMIT: Duration = Duration::from_secs(2 * 3600);
 const DEFAULT_REVIEWER_LIMIT: Duration = Duration::from_secs(45 * 60);
-const DEFAULT_GATE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+pub(crate) const DEFAULT_GATE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
 /// Applied when the repo has a `Cargo.toml` and `[gates] sandbox` is absent.
 const RUST_GATES: [&str; 3] = [
     "cargo fmt --check",
@@ -65,6 +65,17 @@ pub struct TaskConfig {
     pub risk: Vec<PathRule>,
     /// Things to say once and carry on (the same harness for both roles).
     pub warnings: Vec<String>,
+    /// `[warm]`, read by `template build --warm` (decision 207).
+    pub warm: Option<Warm>,
+}
+
+/// How `template build --warm` fills a template's caches from this repo (decision 207).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Warm {
+    /// Run in order with `sh -c` in the copied repo, each under the gate timeout.
+    pub commands: Vec<String>,
+    /// Paths from the repo's root, hashed into the template's record.
+    pub lock_files: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -126,6 +137,14 @@ struct RawConfig {
     #[serde(default)]
     finish: RawFinish,
     risk: Option<RawRisk>,
+    warm: Option<RawWarm>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawWarm {
+    commands: Option<Vec<String>>,
+    lock_files: Option<Vec<String>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -227,23 +246,54 @@ impl TaskConfig {
                 path.display()
             )
         })?;
-        let raw: RawConfig = toml::from_str(&text).map_err(|e| {
-            let line = e
-                .span()
-                .map(|s| format!(" (line {})", text[..s.start].matches('\n').count() + 1))
-                .unwrap_or_default();
-            anyhow::anyhow!(
-                "task config {}{line}: {}",
-                path.display(),
-                e.message().replace('\n', " ")
-            )
-        })?;
+        let raw: RawConfig = parse(&path, &text)?;
         Validator {
             path: &path,
             repo_root,
         }
         .validate(raw)
     }
+}
+
+/// `[warm]` of `<repo_root>/sbxm-task.toml`, or `None` when there is no such file or table
+/// (decision 207). Only that table is checked, so a repo that is not a task target can hold just
+/// `[warm]`.
+pub fn load_warm(repo_root: &Path) -> Result<Option<Warm>> {
+    #[derive(Deserialize)]
+    struct WarmOnly {
+        warm: Option<RawWarm>,
+    }
+    let path = repo_root.join(FILE_NAME);
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let text = std::fs::read_to_string(&path)
+        .with_context(|| format!("cannot read {}", path.display()))?;
+    let raw: WarmOnly = parse(&path, &text)?;
+    raw.warm
+        .map(|warm| {
+            Validator {
+                path: &path,
+                repo_root,
+            }
+            .warm(warm)
+        })
+        .transpose()
+}
+
+/// `text` as `T`, or `task config <file> (line n): <problem>`.
+fn parse<T: serde::de::DeserializeOwned>(path: &Path, text: &str) -> Result<T> {
+    toml::from_str(text).map_err(|e| {
+        let line = e
+            .span()
+            .map(|s| format!(" (line {})", text[..s.start].matches('\n').count() + 1))
+            .unwrap_or_default();
+        anyhow::anyhow!(
+            "task config {}{line}: {}",
+            path.display(),
+            e.message().replace('\n', " ")
+        )
+    })
 }
 
 struct Validator<'a> {
@@ -296,6 +346,7 @@ impl Validator<'_> {
             fix: self.prompt("fix", raw.prompts.fix)?,
         };
         let risk = self.risk(raw.risk)?;
+        let warm = raw.warm.map(|w| self.warm(w)).transpose()?;
         Ok(TaskConfig {
             worker,
             reviewer,
@@ -307,6 +358,7 @@ impl Validator<'_> {
             sink: raw.finish.sink,
             risk,
             warnings,
+            warm,
         })
     }
 
@@ -402,25 +454,66 @@ impl Validator<'_> {
             }
         };
         let host = raw.host.unwrap_or_default();
-        for (key, commands) in [("gates.sandbox", &sandbox), ("gates.host", &host)] {
-            for (i, command) in commands.iter().enumerate() {
-                if command.trim().is_empty() {
-                    return Err(
-                        self.err(format!("{key}[{i}] is empty; write a command or remove it"))
-                    );
-                }
-                // `sh -c` would run every line, `cmd /C` only the first: refuse instead.
-                if command.contains(['\n', '\r']) {
-                    return Err(self.err(format!(
-                        "{key}[{i}] contains a line break; put one command in each list entry"
-                    )));
-                }
-            }
-        }
+        self.commands("gates.sandbox", &sandbox)?;
+        self.commands("gates.host", &host)?;
         Ok(Gates {
             sandbox,
             host,
             timeout: self.duration("gates.timeout", raw.timeout, DEFAULT_GATE_TIMEOUT)?,
+        })
+    }
+
+    /// Refuses an empty command or one with a line break in `key`'s list.
+    fn commands(&self, key: &str, commands: &[String]) -> Result<()> {
+        for (i, command) in commands.iter().enumerate() {
+            if command.trim().is_empty() {
+                return Err(self.err(format!("{key}[{i}] is empty; write a command or remove it")));
+            }
+            // `sh -c` would run every line, `cmd /C` only the first: refuse instead.
+            if command.contains(['\n', '\r']) {
+                return Err(self.err(format!(
+                    "{key}[{i}] contains a line break; put one command in each list entry"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// `[warm]` (decision 207): commands to run and lock files to hash, both required; each lock
+    /// file a relative path inside the repo that exists.
+    fn warm(&self, raw: RawWarm) -> Result<Warm> {
+        let commands = raw.commands.filter(|c| !c.is_empty()).ok_or_else(|| {
+            self.err("warm.commands is missing or empty; list the commands that fill the caches")
+        })?;
+        self.commands("warm.commands", &commands)?;
+        let lock_files = raw.lock_files.ok_or_else(|| {
+            self.err(
+                "warm.lock_files is missing; list the files whose change needs a new template, \
+                 or write lock_files = [] for none",
+            )
+        })?;
+        for file in &lock_files {
+            let inside = !file.is_empty()
+                && Path::new(file)
+                    .components()
+                    .all(|c| matches!(c, Component::Normal(_)));
+            if !inside {
+                return Err(self.err(format!(
+                    "warm.lock_files entry `{file}` is not a relative path inside the repo; name \
+                     it from the repo's root, without `..`"
+                )));
+            }
+            let path = self.repo_root.join(file);
+            if !path.is_file() {
+                return Err(self.err(format!(
+                    "lock file {} does not exist; create it or remove it from warm.lock_files",
+                    path.display()
+                )));
+            }
+        }
+        Ok(Warm {
+            commands,
+            lock_files,
         })
     }
 

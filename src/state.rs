@@ -27,6 +27,10 @@ pub struct SandboxState {
     /// which counts as changed (decision 55).
     #[serde(default)]
     pub config_hash: Option<String>,
+    /// The template tag the sandbox was created from, so `template build` and `template rm` keep
+    /// it while in use (decision 205); `None` for a sandbox built from the install kit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
 }
 
 impl State {

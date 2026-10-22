@@ -671,6 +671,134 @@ before any agent command, sbxm reads the kit rule's hosts from `sbx policy ls <s
 allowed that is neither an OpenAI host, in `[template].allow` nor denied, removes the sandbox and refuses, naming the
 host, so a later `codex` kit that adds a host can't widen a strict sandbox silently.
 
+222. **A build's kits sit next to its workspace (2026-10-17, milestone 3 slice 4, announced to the user; adds to
+[210]):** `template build` writes the build sandbox's install kits to
+`<base>/.sbxm/templates/build/<profile>-<harness>.kits/` and removes them with the workspace after every build. Why:
+the kits are build leftovers like the workspace, so [212]'s cleanup finds both by the same fixed name.
+
+223. **A build refuses a tag that already exists (2026-10-17, milestone 3 slice 4, announced to the user; adds to
+[211]):** before any write, a build whose generated tag is already in `sbx template ls` (a second build in the same
+minute) is refused: "template TAG already exists; wait a minute and build again". Why: `sbx template save` replaces
+an existing tag silently (S11, question 8), and the tag has minute resolution.
+
+224. **A failed build removes what it made, its saved tag included (2026-10-17, milestone 3 slice 4, the user
+agreed):** once the kits are written, a failure removes the build sandbox (also after a failed `create`, which can
+leave one), a tag saved without its record, and the build folders; a cleanup step that fails is added to the error
+with the command that finishes it (`sbx rm`, `sbx template rm`, delete by hand). Why: an image no record names is
+1.3-2.6 GB that nothing would ever find or remove ([205]).
+
+225. **A previous tag stays in the record until it is gone (2026-10-17, milestone 3 slice 4, the user agreed; adds to
+[205](a)):** the new record lists the old tag and every kept `previous` tag when it is written; only then are they
+checked and removed. A tag in use, one that `sbx template rm` fails to remove, or one whose use can't be checked (an
+unreadable `task.json`) stays in `previous` and the next build tries again; a tag whose image is already gone is
+dropped silently. `template build` prints the new tag, then one line per previous tag removed or kept, with the
+reason, on stdout. Why: a sandbox created during the build still finds its tag recorded, and nothing is lost to a
+failed removal.
+
+226. **An interrupted build's saved tag is not cleaned up automatically (2026-10-17, milestone 3 slice 4, the user
+chose to defer):** a build killed between `sbx template save` and writing its record leaves an image no record names;
+[212]'s leftover cleanup removes only the build sandbox and folders. Trigger to fix: such an image is found on this
+machine (`sbx template ls` shows an `sbxm-` tag no record lists), or `template ls`/`doctor` (slices 7, 8) can list
+orphans cheaply.
+
+227. **A `new` racing a rebuild is accepted (2026-10-17, milestone 3 slice 4, the user accepted the risk):** a
+sandbox creation that reads the template record just before a rebuild rewrites it, and records its tag just after the
+rebuild checked for users, can lose its template to [205](a)'s removal. The window is milliseconds between two local
+commands; no lock covers `new`.
+
+228. **`template build` follows `new` on kit warnings and the base dir (2026-10-17, milestone 3 slice 4, the user
+agreed):** it prints `sbx kit validate`'s warnings and refuses a base dir that doesn't exist, with `new`'s messages.
+
+229. **`template build --warm` checks the repo before any write (2026-10-18, milestone 3 slice 5, made while the user
+was away; confirmed by the user 2026-10-18):** a repo that is not a folder, has no `Cargo.toml` (until `[warm]` in slice 5b), has no
+`Cargo.lock` (the `--locked` steps would fail in the sandbox anyway, and the record needs its hash) or holds a link
+outside `.git` and `target` is refused before the first write. Links inside `.git` and the top `target` are neither
+copied nor refused. The package names `cargo metadata` returns go into `cargo clean -p` only if they are made of
+letters, digits, `-` and `_`. The warm-up steps use the default gate timeout (20 minutes each). Slice 5b: `[warm]`
+needs both keys, a non-empty `commands` and `lock_files` (`[]` allowed, saying "never stale on dependencies"), each
+lock file a relative path inside the repo that exists; `[warm]` replaces the cargo steps in a Rust repo too, and
+`template build` reads only that table, so a repo that is not a task target can hold just `[warm]`.
+
+230. **The config hash of a template sandbox (2026-10-18, milestone 3 slice 6, made while building, confirmed by the user 2026-10-18; adds
+to [208]):** a profile with `[template]` adds a `template` part to the config hash: `strict` in both variants (it
+decides whether an install sandbox may exist at all, so turning it on is drift for one), and `[template].allow` only
+in a template sandbox's hash (its kit's runtime allow list; an install sandbox never sees it). A profile without
+`[template]` hashes as before, so existing sandboxes show no drift. The two variants of a profile therefore have
+different hashes and their kits sit in different folders. The template's tag is not hashed: a template rebuilt
+later is never drift [208].
+
+231. **A strict profile is refused with the `pi` harness for now (2026-10-19, milestone 3 slice 6 review M3S6-1, the
+user agreed with the recommendation; adds to [200], [218]):** Pi's own kit allows `registry.npmjs.org` besides its
+provider (spike S15, question 4), so a strict `pi` sandbox would reach a host outside `[template].allow`. `new` (and
+every later command that creates from a template) refuses a strict profile with `pi` before any write, naming the
+host and the fix (`strict = false`, or `claude`/`codex`). Non-strict `pi` templates stay supported. Deferred: deny
+the host as [221] does for `codex`, after a bounded real-`sbx` check that Pi still works without it (issue #266,
+trigger: a strict profile wanted with `pi`).
+
+232. **The check after a strict `codex` creation fails closed (2026-10-19, milestone 3 slice 6 review Q-1, the user
+agreed with the recommendation; adds to [221]):** sbxm checks every network allow rule `sbx policy ls` reports as
+scoped to the sandbox (`scope: sandbox:<name>`), not only the kit's: each host must be an OpenAI host, in
+`[template].allow` or denied by a rule. If no `kit:<sandbox>` allow rule is reported at all (a future `sbx` renaming
+it, say), sbxm can't see what the kit allows, so it removes the sandbox and refuses too. A strict sandbox is kept
+only when sbxm can see exactly what it allows; a change in `sbx` makes strict `codex` refuse until sbxm is updated.
+Global rules (the user's own `sbx policy allow` for every sandbox) are left out: they are the user's deliberate
+setting, outside any profile.
+
+233. **A `new` racing `template rm` is accepted (2026-10-20, milestone 3 slice 7 review Q-1, the user accepted the
+risk; adds to [227]):** `template rm` checks for users, then removes. A sandbox creation that chose the tag and
+created its sandbox but hasn't written `state.json` or `task.json` yet is invisible to that check, so `rm` can remove
+the tag that sandbox was just created from. The window is seconds between two local commands the user starts by
+hand, and `rm` is deliberate; no lock covers sandbox creation ([227]).
+
+234. **A remade worker sandbox is checked at the delivered branch's tip (2026-10-20, milestone 3 slice 8 review Q-2,
+the user chose it; narrows [216]):** when `task resume` makes a gone worker sandbox again, the template's lock files
+are compared with the delivered branch's tip, not with the worker's starting commit as [216]'s "a resumed worker the
+same one" said. The two differ only when the worker had already committed; the remade sandbox mounts the clone at
+that tip and also runs the fix rounds, which [216] already checks at the tip. A strict profile is refused for a
+`working (failed)` rerun whose own commits changed a lock file (gap G1).
+
+235. **A task's reviewer refused for stale lock files says how to go on (2026-10-20, milestone 3 slice 8 review Q-1,
+the user chose option a; adds to [216]):** when a strict profile refuses an issue or spec task's reviewer because
+the lock files at the delivered tip differ from the warm template's, the refusal keeps [216]'s `--warm` hint and adds
+the command that continues the task (`sbxm task resume --issue N`, or `--spec <file>`). When the lock files at the
+task's base still match the template, it also says the change came from the task's own commits (gap G1), that
+`strict = false` in the profile lets the review install them instead, and the tip commit to warm a template from.
+A PR task's refusal is unchanged.
+
+236. **A lock file read from a commit is capped at 16 MiB (2026-10-21, milestone 3 slice 8 review M3S8-3, the user
+chose the limit; like [198]):** `Locks::Commit` asks `git cat-file -s` for a lock file's size before reading it. One
+over 16 MiB is not read and counts as differing from the warm template's, with a reason naming the file and its size:
+a strict profile is refused, a non-strict one warns and installs. A PR's head is written by someone else, so its lock
+file must not be read into memory whole without a bound.
+
+237. **`sbxm run` chooses one template per profile and harness in its preflight (2026-10-21, milestone 3 slice 9,
+the user agreed with the recommendation; adds to [206], [216]):** before any write, the run's preflight resolves the
+template of every (profile, harness) pair a contestant or the judge uses, once, and that choice holds for every
+sandbox of the pair. A warm template's lock files are checked against the seed folder, which every contestant's
+workspace copies; a run without a seed has no lock files, so a warm template counts as stale (a strict profile is
+refused, a non-strict one warns and installs), while a cold template is always usable. The judge follows its pair's
+choice: it builds nothing, so it gets no lock check of its own.
+
+238. **A lock file's line endings don't count (2026-10-21, milestone 3 slice 12 end-to-end step 5, the user agreed
+with the recommendation; changes [207], [216]):** the lock hash reads every CRLF as LF, whether the file comes from a
+folder or a commit. The end-to-end check found that a template warmed from a Windows checkout with `core.autocrlf`
+(CRLF files) never matched a task, which reads the commit's LF blob, so a strict profile refused every task. A lock
+file that differs only in its line endings parses the same, so the cached dependencies still fit.
+
+239. **A running `sbxm run` is not protected from `template rm` (2026-10-22, PR 269 review round 1 Q-1, the user
+chose option A; like [233]):** template users are still only `state.json` and every `task.json` [205]. A comparison
+run records nothing they read, so `template rm`, or a rebuild retiring the previous tag, can remove the tag a run
+chose between two of its repeat waves; the next wave's sandboxes then fail to create and are reported as not run.
+Protecting runs would mean treating every `run.json` without `completed_at` as a user, which needs rules for
+interrupted runs; it waits for gap G55's trigger.
+
+240. **A harness templates don't support is an unusable template (2026-10-22, PR 269 review round 2 M-1, the user
+chose the recommendation; refines [204] with [200], [203]):** for a profile with `[template]`, creating an
+`antigravity` or `gemini` sandbox is decided like any other unusable template, before `sbx` is asked anything: a
+strict profile is refused with "templates are not supported for the <h> harness yet; use --harness claude, codex or
+pi", and a non-strict one prints that as its one warning and uses the install steps. Neither suggests `template
+build`, which refuses those harnesses.
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.

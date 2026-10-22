@@ -48,21 +48,7 @@ pub fn run_checks(
         .iter()
         .map(|check| {
             let timeout_secs = check.timeout.unwrap_or(default_timeout).as_secs().max(1);
-            let spec = ExecSpec {
-                workdir: Some(workdir.to_path_buf()),
-                argv: [
-                    "timeout",
-                    "-v",
-                    &format!("--kill-after={KILL_AFTER_SECS}"),
-                    &timeout_secs.to_string(),
-                    "sh",
-                    "-c",
-                    &check.command,
-                ]
-                .map(str::to_owned)
-                .into(),
-                stdin: Stdin::Closed,
-            };
+            let spec = timed_exec(workdir, timeout_secs, &check.command);
             let mut outcome = CheckOutcome {
                 id: check.id.clone(),
                 command: check.command.clone(),
@@ -88,6 +74,25 @@ pub fn run_checks(
             outcome
         })
         .collect()
+}
+
+/// `sh -c command` in `workdir` under the in-sandbox `timeout` (decision 114).
+pub(crate) fn timed_exec(workdir: &Path, timeout_secs: u64, command: &str) -> ExecSpec {
+    ExecSpec {
+        workdir: Some(workdir.to_path_buf()),
+        argv: [
+            "timeout",
+            "-v",
+            &format!("--kill-after={KILL_AFTER_SECS}"),
+            &timeout_secs.to_string(),
+            "sh",
+            "-c",
+            command,
+        ]
+        .map(str::to_owned)
+        .into(),
+        stdin: Stdin::Closed,
+    }
 }
 
 /// The last `max` bytes of `text` (rounded up to a character boundary).

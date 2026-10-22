@@ -103,7 +103,12 @@ pub fn run(
             prepared.record.stopped.map_or("", record::Stopped::name)
         )?;
     }
-    let resumed = resume::resume(&env, &mut prepared, opts.rounds)?;
+    let resumed = resume::resume(&env, &mut prepared, opts.rounds);
+    // A remade sandbox's warnings (a template it couldn't use), even when the resume then failed.
+    for warning in &prepared.warnings {
+        writeln!(warn, "warning: {warning}")?;
+    }
+    let resumed = resumed?;
     let flag = opts.target.flag();
 
     if resumed.sandbox_remade {

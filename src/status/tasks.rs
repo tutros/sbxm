@@ -81,7 +81,7 @@ fn strip_timestamp(line: &str) -> &str {
 }
 
 /// `45s`, `12m`, `1h05m`, `3d02h` (decided format).
-fn format_duration(secs: u64) -> String {
+pub fn format_duration(secs: u64) -> String {
     if secs < 60 {
         format!("{secs}s")
     } else if secs < 3_600 {

@@ -619,6 +619,8 @@ fn exec_and_skills_against_real_sbx() {
             memory: "2g".into(),
             skills: SkillsStore::Off,
             kits: vec![],
+            template: None,
+            deny_network: Vec::new(),
         })
         .unwrap();
 
@@ -694,6 +696,8 @@ fn claude_headless_against_real_sbx() {
             memory: "2g".into(),
             skills: SkillsStore::Off,
             kits: vec![],
+            template: None,
+            deny_network: Vec::new(),
         })
         .unwrap();
     // The workspace is mounted at its host path in forward-slash form, drive
@@ -774,6 +778,8 @@ fn codex_headless_against_real_sbx() {
             memory: "2g".into(),
             skills: SkillsStore::Off,
             kits: vec![],
+            template: None,
+            deny_network: Vec::new(),
         })
         .unwrap();
     // E:\sbxm-it\x is mounted as /e/sbxm-it/x.
@@ -1879,6 +1885,8 @@ fn task_sandbox_gates_against_real_sbx() {
             memory: "2g".into(),
             skills: SkillsStore::Off,
             kits: vec![],
+            template: None,
+            deny_network: Vec::new(),
         })
         .unwrap();
     let dir = in_sandbox_path(&workspace);
@@ -2001,6 +2009,8 @@ fn task_bundle_round_trip_against_real_sbx() {
             memory: "2g".into(),
             skills: SkillsStore::Off,
             kits: vec![],
+            template: None,
+            deny_network: Vec::new(),
         })
         .unwrap();
 
@@ -2027,5 +2037,175 @@ fn task_bundle_round_trip_against_real_sbx() {
     assert_eq!(
         repo::commits_ahead(&repo_git, "main", "issue-4").unwrap(),
         1
+    );
+}
+
+/// Removes a template's images, record and build leftovers even if the test fails.
+struct TemplateCleanup {
+    base_dir: PathBuf,
+    key: String,
+}
+
+impl Drop for TemplateCleanup {
+    fn drop(&mut self) {
+        let _ = Command::new("sbx")
+            .args(["rm", "-f", &format!("sbxm-template-{}", self.key)])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+        let dir = sbxm::template::dir(&self.base_dir);
+        if let Ok(Some(record)) = sbxm::template::Record::load(&self.base_dir, &self.key) {
+            for tag in std::iter::once(record.tag).chain(record.previous) {
+                let _ = SbxBackend.template_rm(&tag);
+            }
+        }
+        let _ = std::fs::remove_file(dir.join(format!("{}.json", self.key)));
+        let _ = std::fs::remove_dir_all(dir.join("build").join(&self.key));
+        let _ = std::fs::remove_dir_all(dir.join("build").join(format!("{}.kits", self.key)));
+        let _ = std::fs::remove_dir(dir.join("build"));
+        let _ = std::fs::remove_dir(&dir);
+        let _ = std::fs::remove_dir(self.base_dir.join(".sbxm"));
+    }
+}
+
+/// Milestone 3, slice 11: a cold template is built from a strict profile, and a sandbox created
+/// from it has the install step's result without running it, the runtime allow list instead of
+/// the build one, and its tag in `state.json`; `template rm` then removes the image.
+#[test]
+#[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
+fn template_against_real_sbx() {
+    use sbxm::commands::{template_build, template_rm};
+    use sbxm::harness::Harness;
+
+    let base_dir = real_base_dir();
+    let pid = std::process::id();
+    let profile = format!("sbxm-it-{pid}-tpl");
+    let project = format!("sbxm-it-{pid}-tpl");
+    let sandbox = format!("sbxm-{project}-claude");
+    let key = format!("{profile}-claude");
+    // Declared first, so it drops last: the sandbox goes before its template.
+    let _template_cleanup = TemplateCleanup {
+        base_dir: base_dir.clone(),
+        key: key.clone(),
+    };
+    let _cleanup = Cleanup {
+        sandbox: sandbox.clone(),
+        dirs: vec![
+            base_dir.join(&project),
+            base_dir.join(".sbxm").join(&project),
+        ],
+        shared_dirs: vec![],
+    };
+    let config_dir = TempDir::new().unwrap();
+    let base = toml::Value::String(base_dir.to_str().unwrap().to_owned());
+    std::fs::write(
+        config_dir.path().join("config.toml"),
+        format!("base_dir = {base}\n\n[resources]\ncpus = 2\nmemory = \"2g\"\n"),
+    )
+    .unwrap();
+    let profile_dir = config_dir.path().join("profiles").join(&profile);
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    // example.org is reachable only while building; example.com only from the template.
+    std::fs::write(
+        profile_dir.join("profile.toml"),
+        "description = \"real sbx template test\"\n\n[network]\nallow = [\"example.org\"]\n\n[secrets]\nservices = [\"anthropic\"]\n\n[instructions]\nmandatory = \"mandatory.md\"\n\n[[setup.install]]\ncommand = \"echo baked > /home/agent/sbxm-baked\"\nuser = \"agent\"\n\n[template]\nstrict = true\nallow = [\"example.com\"]\n",
+    )
+    .unwrap();
+    std::fs::write(
+        profile_dir.join("mandatory.md"),
+        "REAL TEMPLATE CANARY: the word is MEDLAR-7\n",
+    )
+    .unwrap();
+
+    let mut out = Vec::new();
+    template_build::run(
+        config_dir.path(),
+        &template_build::Options {
+            profile: profile.clone(),
+            harness: Harness::Claude,
+            ..Default::default()
+        },
+        &SbxBackend,
+        &sbxm::task::record::SystemProbe,
+        &mut out,
+        &mut std::io::stderr(),
+    )
+    .unwrap();
+    let tag = String::from_utf8(out).unwrap().trim().to_owned();
+    println!("built {tag}");
+    assert!(tag.starts_with(&format!("sbxm-{key}:")), "{tag}");
+    let record = sbxm::template::Record::load(&base_dir, &key)
+        .unwrap()
+        .expect("template record");
+    assert_eq!(record.tag, tag);
+    assert!(!record.warm);
+    let images = SbxBackend.template_ls().unwrap();
+    assert!(images.iter().any(|t| t.reference() == tag), "{images:?}");
+    let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
+    let ls = String::from_utf8_lossy(&ls.stdout).into_owned();
+    assert!(
+        !ls.contains(&format!("sbxm-template-{key}")),
+        "build sandbox left: {ls}"
+    );
+
+    new::run(
+        config_dir.path(),
+        &project,
+        &new::Options {
+            profile: Some(profile.clone()),
+            ..Default::default()
+        },
+        &SbxBackend,
+        &mut std::io::stderr(),
+    )
+    .unwrap();
+
+    let state = sbxm::state::load(&base_dir.join(".sbxm").join(&project))
+        .unwrap()
+        .expect("state.json");
+    assert_eq!(
+        state.sandboxes["claude"].template.as_deref(),
+        Some(tag.as_str())
+    );
+    let baked = Command::new("sbx")
+        .args(["exec", &sandbox, "cat", "/home/agent/sbxm-baked"])
+        .output()
+        .unwrap();
+    assert_eq!(String::from_utf8_lossy(&baked.stdout).trim(), "baked");
+    let claude_md = Command::new("sbx")
+        .args(["exec", &sandbox, "cat", "/home/agent/.claude/CLAUDE.md"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&claude_md.stdout).trim(),
+        "REAL TEMPLATE CANARY: the word is MEDLAR-7"
+    );
+    assert_eq!(http_status(&sandbox, "https://example.com"), "200");
+    assert_eq!(http_status(&sandbox, "https://example.org"), "403");
+
+    // In use: `template rm` refuses while the sandbox records the tag.
+    let options = template_rm::Options {
+        profile: profile.clone(),
+        harness: Harness::Claude,
+    };
+    let refused =
+        template_rm::run(config_dir.path(), &options, &SbxBackend, &mut Vec::new()).unwrap_err();
+    assert!(format!("{refused:#}").contains(&sandbox), "{refused:#}");
+
+    rm::run(
+        config_dir.path(),
+        &project,
+        &rm::Options::default(),
+        &SbxBackend,
+        &Terminal,
+    )
+    .unwrap();
+    template_rm::run(config_dir.path(), &options, &SbxBackend, &mut Vec::new()).unwrap();
+    let images = SbxBackend.template_ls().unwrap();
+    assert!(!images.iter().any(|t| t.reference() == tag), "{images:?}");
+    assert!(
+        sbxm::template::Record::load(&base_dir, &key)
+            .unwrap()
+            .is_none()
     );
 }

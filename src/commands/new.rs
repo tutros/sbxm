@@ -14,6 +14,7 @@ use crate::kit;
 use crate::project;
 use crate::seed;
 use crate::state::{self, SandboxState, State};
+use crate::template;
 
 #[derive(Debug, Default)]
 pub struct Options {
@@ -45,10 +46,10 @@ pub fn run(
         .profile
         .as_deref()
         .unwrap_or(&config.default_profile);
-    let profile = Profile::load(config.profiles_dir(), profile_name)?
+    let base_profile = Profile::load(config.profiles_dir(), profile_name)?;
+    let profile = base_profile
+        .clone()
         .with_project(&project::metadata_dir(&config.base_dir, name))?;
-    let config_hash =
-        config::config_hash(profile_name, &profile, &config.resources, options.harness);
 
     if !config.base_dir.is_dir() {
         bail!(
@@ -98,13 +99,35 @@ pub fn run(
     }
     disk::require(&config, config_dir, &options.disk)?;
     check_secrets(&profile.secrets.services, backend)?;
+    let request = template::Request {
+        base_dir: &config.base_dir,
+        profile_name,
+        profile: &base_profile,
+        merged: &profile,
+        project_config: &metadata_dir.join("sandbox.toml"),
+        harness: options.harness,
+        sandbox: &sandbox,
+        // A warm template's lock files are compared with the workspace's (decision 203(b)).
+        locks: template::Locks::Dir(options.seed.as_deref().unwrap_or(&workspace)),
+    };
+    let template = template::choose(&request, backend, warn)?;
+    let deny_network = template::denied_hosts(&profile, options.harness, template.as_deref());
+    let config_hash = match template {
+        Some(_) => config::template_config_hash,
+        None => config::config_hash,
+    }(profile_name, &profile, &config.resources, options.harness);
     // Named after the hash, so a changed config never overwrites the kit an
     // existing sandbox was built from (decision 55).
     let kits_dir = project::metadata_dir(&config.base_dir, name)
         .join("kits")
         .join(&config_hash[..12]);
-    let kits = kit::all(profile_name, &profile, &config_hash, options.harness)
-        .map(|(name, spec)| (kits_dir.join(name), spec));
+    let kits = match (&template, &profile.template) {
+        (Some(_), Some(table)) => {
+            kit::all_from_template(profile_name, &profile, table, &config_hash, options.harness)
+        }
+        _ => kit::all(profile_name, &profile, &config_hash, options.harness),
+    }
+    .map(|(name, spec)| (kits_dir.join(name), spec));
     for (dir, spec) in &kits {
         kit::write(dir, spec)?;
     }
@@ -142,7 +165,16 @@ pub fn run(
         memory: config.resources.memory,
         skills: profile.skills_store,
         kits: kits.into_iter().map(|(dir, _)| dir).collect(),
+        template: template.clone(),
+        deny_network: deny_network.clone().unwrap_or_default(),
     })?;
+    template::check_codex_rules(
+        profile_name,
+        &profile,
+        &sandbox,
+        backend,
+        deny_network.as_deref(),
+    )?;
 
     let created_at = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let mut state = state::load(&metadata_dir)?.unwrap_or_else(State::default);
@@ -154,6 +186,7 @@ pub fn run(
             created_at,
             profile: Some(profile_name.to_owned()),
             config_hash: Some(config_hash),
+            template,
         },
     );
     state.save(&metadata_dir)

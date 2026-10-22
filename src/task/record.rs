@@ -193,6 +193,14 @@ impl Process {
         }
     }
 
+    /// Whether this process is still running: its pid with the same start time, so a reused pid
+    /// doesn't count (decision 163).
+    pub fn alive(&self, probe: &dyn ProcessProbe) -> bool {
+        probe
+            .start_time(self.pid)
+            .is_some_and(|started| format_timestamp(started) == self.started_at)
+    }
+
     /// This process, as the probe sees it.
     pub fn current(probe: &dyn ProcessProbe) -> Self {
         let pid = std::process::id();
@@ -257,6 +265,10 @@ pub struct Agent {
     pub cpus: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory: Option<String>,
+    /// The template tag this sandbox was created from (decision 205): a template recorded here
+    /// is in use and stays. `None` for a sandbox built from the install kit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template: Option<String>,
     pub run: Option<RunInfo>,
 }
 
@@ -622,11 +634,9 @@ impl Record {
     /// same start time, as [`Record::is_interrupted`] decides), whatever the status: a task
     /// between two stages is not `running`, but the process driving it is alive.
     pub fn process_alive(&self, probe: &dyn ProcessProbe) -> bool {
-        self.process.as_ref().is_some_and(|process| {
-            probe
-                .start_time(process.pid)
-                .is_some_and(|started| format_timestamp(started) == process.started_at)
-        })
+        self.process
+            .as_ref()
+            .is_some_and(|process| process.alive(probe))
     }
 
     /// Runs the current stage again (`task resume`, issue 118): a stage that failed, or was left
@@ -834,8 +844,13 @@ pub fn load_all(base: &Path) -> Result<Vec<Record>> {
 /// Every entry under `<base>/.sbxm/tasks/`, unread and unchecked: what [`load_all`] reads, for a
 /// caller that must check each folder before reading anything in it (`task rm --merged`).
 pub fn task_folders(base: &Path) -> Result<Vec<PathBuf>> {
-    let Ok(entries) = fs::read_dir(tasks_root(base)) else {
-        return Ok(Vec::new());
+    let root = tasks_root(base);
+    let entries = match fs::read_dir(&root) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(e).with_context(|| format!("cannot read {}", root.display()));
+        }
     };
     let mut folders = Vec::new();
     for entry in entries {

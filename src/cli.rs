@@ -95,6 +95,11 @@ pub enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    /// Build and manage prebuilt sandbox templates of a profile.
+    Template {
+        #[command(subcommand)]
+        command: TemplateCommand,
+    },
     /// Show the Tasks dashboard: stage, status, time in stage, commits ahead, must-fix findings
     /// left, PR link and the last run.log line. Reads only; never calls `sbx`.
     Status {
@@ -132,6 +137,37 @@ pub enum ConfigCommand {
     },
     /// Print the folder profiles are read from (for scripts), or fail like any command would.
     ProfilesDir,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum TemplateCommand {
+    /// Build a template from a profile with a [template] table: its install steps run once, in
+    /// a build sandbox that is saved and then removed.
+    Build {
+        /// The profile to build from.
+        profile: String,
+        /// The harness the template is for.
+        #[arg(long, value_enum, default_value_t)]
+        harness: Harness,
+        /// Warm the template's caches from this repo: its [warm] steps, or the cargo steps for a
+        /// repo with a Cargo.toml.
+        #[arg(long, value_name = "REPO")]
+        warm: Option<PathBuf>,
+        /// Build even when the drive of sbx's sandbox state has less than min_free_disk free.
+        #[arg(long)]
+        ignore_disk: bool,
+    },
+    /// List the templates sbxm built, with their size, age and how many sandboxes and tasks
+    /// use them.
+    Ls,
+    /// Remove a profile's template and its record; refused while a sandbox or task uses it.
+    Rm {
+        /// The profile whose template goes.
+        profile: String,
+        /// The harness the template is for.
+        #[arg(long, value_enum, default_value_t)]
+        harness: Harness,
+    },
 }
 
 /// `sbxm run <config>` launches a comparison; `sbxm run init` writes a starter

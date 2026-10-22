@@ -38,3 +38,11 @@ description = "install Rust 1.93.0 with rustfmt and clippy"
 
 # Not installed: PowerShell, Pester and `just` (decision 183). The task gates only run cargo, and the three
 # cost about 100 s on every sandbox. A change to `scripts/` is tested on the host with `just script-test`.
+
+# Sandboxes come from a prebuilt template (`sbxm template build sbxm-dev --warm <repo>`, milestone 3):
+# the install steps and the hosts in [network] are used only while building it. A sandbox created
+# from it reaches only the hosts below, plus its harness's own. Strict: without a current template,
+# sbxm refuses to create a sandbox instead of installing in it (decision 200).
+[template]
+strict = true
+allow = []

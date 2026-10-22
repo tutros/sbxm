@@ -26,6 +26,7 @@ fn one_kit_set_per_harness_under_the_named_profile() {
         "task-profile",
         &[Harness::Claude, Harness::Codex],
         &Overrides::default(),
+        None,
         &root(&env),
         &FakeBackend::default(),
     )
@@ -53,6 +54,7 @@ fn a_repeated_harness_is_built_once() {
         "default",
         &[Harness::Claude, Harness::Claude],
         &Overrides::default(),
+        None,
         &root(&env),
         &FakeBackend::default(),
     )
@@ -73,6 +75,7 @@ fn cpus_and_memory_overrides_change_the_hash_and_the_resources() {
                 cpus,
                 memory: memory.map(str::to_owned),
             },
+            None,
             &root(&env),
             &FakeBackend::default(),
         )
@@ -99,6 +102,7 @@ fn an_unknown_profile_writes_nothing() {
         "no-such-profile",
         &[Harness::Claude],
         &Overrides::default(),
+        None,
         &root(&env),
         &FakeBackend::default(),
     )
@@ -121,6 +125,7 @@ fn an_invalid_kit_is_refused_before_any_sandbox() {
         "default",
         &[Harness::Claude],
         &Overrides::default(),
+        None,
         &root(&env),
         &backend,
     )

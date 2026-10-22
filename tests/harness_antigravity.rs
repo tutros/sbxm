@@ -52,6 +52,8 @@ fn creates_a_sandbox_from_the_pinned_kit() {
             memory: "8g".into(),
             skills: SkillsStore::ReadOnly,
             kits: vec![env.kit_dir("demo"), kit_dir(&env)],
+            template: None,
+            deny_network: Vec::new(),
         }]
     );
     insta::assert_snapshot!(
