@@ -413,6 +413,93 @@ fn open_hints_at_a_rebuild_once_a_template_is_ready_and_rebuild_uses_it() {
     assert_eq!(state_template(&env), tag.as_str());
 }
 
+/// An unchanged install sandbox under a profile with `[template]`, ready to open.
+fn install_sandbox(env: &Env, backend: FakeBackend) -> FakeBackend {
+    env.write_profile("default", PROFILE);
+    new_demo(env, &backend).0.unwrap();
+    backend.and_sandboxes(running())
+}
+
+#[test]
+fn open_attaches_when_the_template_record_is_invalid() {
+    // Issue 270: the readiness lookup only decides a hint (decision 208).
+    let env = Env::new();
+    let backend = install_sandbox(&env, sbx_046());
+    let templates = env.base_dir().join(".sbxm").join("templates");
+    std::fs::create_dir_all(&templates).unwrap();
+    std::fs::write(templates.join("default-claude.json"), "not json").unwrap();
+
+    let (result, warn) = open_demo(&env, &backend, false);
+
+    result.unwrap();
+    assert!(
+        warn.starts_with(
+            "warning: cannot check whether the template of profile 'default' for claude is \
+             ready (template record "
+        ),
+        "{warn}"
+    );
+    assert!(
+        warn.ends_with("); attaching to sbxm-demo-claude as it is\n"),
+        "{warn}"
+    );
+    assert_eq!(warn.lines().count(), 1, "{warn}");
+    assert_eq!(backend.log().last().unwrap(), "attach sbxm-demo-claude");
+}
+
+/// A warning writer whose every write fails, like a closed stderr pipe.
+struct BrokenPipe;
+
+impl std::io::Write for BrokenPipe {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::ErrorKind::BrokenPipe.into())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn open_attaches_when_the_recovery_warning_cannot_be_written() {
+    // Issue 282: the warning is best-effort, so a failed write doesn't stop the attach.
+    let env = Env::new();
+    let backend = install_sandbox(&env, sbx_046());
+    let templates = env.base_dir().join(".sbxm").join("templates");
+    std::fs::create_dir_all(&templates).unwrap();
+    std::fs::write(templates.join("default-claude.json"), "not json").unwrap();
+
+    open::run(
+        &env.config_dir(),
+        "demo",
+        &open::Options::default(),
+        &backend,
+        &mut BrokenPipe,
+    )
+    .unwrap();
+
+    assert_eq!(backend.log().last().unwrap(), "attach sbxm-demo-claude");
+}
+
+#[test]
+fn open_attaches_when_template_ls_fails() {
+    // Issue 270.
+    let env = Env::new();
+    let backend = install_sandbox(&env, sbx_046());
+    build_template(&env, &backend);
+    let backend = backend.failing_template_ls();
+
+    let (result, warn) = open_demo(&env, &backend, false);
+
+    result.unwrap();
+    assert_eq!(
+        warn,
+        "warning: cannot check whether the template of profile 'default' for claude is ready \
+         (fake template_ls failure); attaching to sbxm-demo-claude as it is\n"
+    );
+    assert_eq!(backend.log().last().unwrap(), "attach sbxm-demo-claude");
+}
+
 #[test]
 fn list_checks_a_template_sandbox_against_the_template_variant() {
     use sbxm::commands::list::{self, ConfigStatus};

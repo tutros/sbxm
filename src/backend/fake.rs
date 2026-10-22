@@ -74,6 +74,7 @@ pub struct FakeBackend {
     fail_stop: bool,
     fail_template_save: bool,
     fail_template_rm: bool,
+    fail_template_ls: bool,
     sandboxes: Vec<SandboxInfo>,
     secrets: Mutex<Vec<String>>,
     /// `0.43.0` when `None`.
@@ -173,6 +174,14 @@ impl FakeBackend {
     pub fn failing_template_rm(self) -> Self {
         Self {
             fail_template_rm: true,
+            ..self
+        }
+    }
+
+    /// A backend whose `template_ls` fails.
+    pub fn failing_template_ls(self) -> Self {
+        Self {
+            fail_template_ls: true,
             ..self
         }
     }
@@ -594,6 +603,9 @@ impl SandboxBackend for FakeBackend {
     }
 
     fn template_ls(&self) -> Result<Vec<TemplateImage>> {
+        if self.fail_template_ls {
+            bail!("fake template_ls failure");
+        }
         Ok(self.templates.lock().unwrap().clone())
     }
 
