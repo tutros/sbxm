@@ -219,8 +219,9 @@ A question gets a size as well: the size of the work its recommended answer lead
 The first size is a guess, and a reviewer's is rougher still, since it sees the diff and not the backlog. It is
 confirmed or changed when the issue's open points are answered, just before work starts (the "No open questions go
 to a worker" rule in `AGENTS.md`): that is the first moment the scope is fixed. Write the confirmed size and what
-changed it into the issue, and correct the label. Until issue #233 is built, `sbxm task file-findings` leaves a
-finding's `**Size:**` line out of the issue it files and sets no size label, so add both by hand after filing.
+changed it into the issue, and correct the label. `sbxm task file-findings` writes a finding's `**Size:**` line into
+the issue it files and adds the matching `size:*` label; on an issue that already exists for the finding it adds the
+label only when the issue has no `size:*` label, so a size confirmed by hand stays.
 
 **Dependencies.** Look for them across the whole set of findings, not one issue at a time: two issues editing the
 same function, one message that must match another, or a fix that only makes sense after a decision. A question
@@ -266,6 +267,11 @@ Issues: pending (<why>)                              the command rewrites this l
 - [ ] `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and `cargo test` pass
 - [ ] Docs updated where behavior users see changed, or "no user-visible change"
 ```
+
+The `**Size:**` value must start with `S`, `M` or `L` (`M (one command, tests and README)`, `L: the state format`):
+that letter becomes the issue's `size:S`, `size:M` or `size:L` label, and the line goes into the body. A finding with
+no size line, or another value, is still filed, with no size label, and the command says so; the `size:*` labels must
+exist in the repo like the severity labels.
 
 Text under other `##` headings (Summary, Verification and checklist notes, nits) is not filed. **Acceptance criteria
 are required for must-fix and should-fix findings**: a reviewer that leaves them out makes the finding impossible to
