@@ -792,6 +792,13 @@ chose between two of its repeat waves; the next wave's sandboxes then fail to cr
 Protecting runs would mean treating every `run.json` without `completed_at` as a user, which needs rules for
 interrupted runs; it waits for gap G55's trigger.
 
+240. **A harness templates don't support is an unusable template (2026-10-22, PR 269 review round 2 M-1, the user
+chose the recommendation; refines [204] with [200], [203]):** for a profile with `[template]`, creating an
+`antigravity` or `gemini` sandbox is decided like any other unusable template, before `sbx` is asked anything: a
+strict profile is refused with "templates are not supported for the <h> harness yet; use --harness claude, codex or
+pi", and a non-strict one prints that as its one warning and uses the install steps. Neither suggests `template
+build`, which refuses those harnesses.
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.

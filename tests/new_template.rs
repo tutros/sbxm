@@ -429,6 +429,137 @@ fn list_checks_a_template_sandbox_against_the_template_variant() {
     assert_eq!(config(), Some(ConfigStatus::Changed));
 }
 
+fn new_demo_with(
+    env: &Env,
+    backend: &FakeBackend,
+    harness: Harness,
+) -> (anyhow::Result<()>, String) {
+    let mut warn = Vec::new();
+    let result = new::run(
+        &env.config_dir(),
+        "demo",
+        &new::Options {
+            harness,
+            ..Default::default()
+        },
+        backend,
+        &mut warn,
+    );
+    (result, String::from_utf8(warn).unwrap())
+}
+
+#[test]
+fn a_strict_profile_refuses_a_harness_templates_do_not_support() {
+    // Review PR 269 round 2 M-1, decision 240.
+    for harness in [Harness::Antigravity, Harness::Gemini] {
+        let env = Env::new();
+        env.write_profile("default", &strict(PROFILE));
+        let backend = sbx_046();
+
+        let (result, _) = new_demo_with(&env, &backend, harness);
+
+        let message = format!("{:#}", result.unwrap_err());
+        assert!(
+            message.contains(&format!(
+                "templates are not supported for the {} harness yet; use --harness claude, codex or pi",
+                harness.as_str()
+            )),
+            "{message}"
+        );
+        assert!(!message.contains("template build"), "{message}");
+        assert!(backend.creates().is_empty());
+        assert!(!env.base_dir().join("demo").exists());
+    }
+}
+
+#[test]
+fn a_non_strict_profile_warns_and_installs_for_a_harness_templates_do_not_support() {
+    for harness in [Harness::Antigravity, Harness::Gemini] {
+        let env = Env::new();
+        env.write_profile("default", PROFILE);
+        let backend = sbx_046();
+
+        let (result, warn) = new_demo_with(&env, &backend, harness);
+
+        result.unwrap();
+        assert!(
+            warn.contains(&format!(
+                "warning: templates are not supported for the {} harness yet; creating \
+                 sbxm-demo-{} with the profile's install steps instead",
+                harness.as_str(),
+                harness.as_str()
+            )),
+            "{warn}"
+        );
+        assert!(!warn.contains("template build"), "{warn}");
+        assert_eq!(backend.creates().pop().unwrap().template, None);
+    }
+}
+
+/// `config show demo --kits`, and the hash `state.json` records for it.
+fn show_demo(env: &Env) -> (String, String) {
+    let output = sbxm::commands::config_show::render(
+        &env.config_dir(),
+        Some("demo"),
+        &sbxm::commands::config_show::Options {
+            kits: true,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    let path = env.base_dir().join(".sbxm").join("demo").join("state.json");
+    let state: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let recorded = state["sandboxes"]["claude"]["config_hash"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    (output, recorded)
+}
+
+#[test]
+fn config_show_explains_a_template_sandbox_with_the_template_variant() {
+    // Review PR 269 round 2 M-2.
+    let env = Env::new();
+    env.write_profile("default", PROFILE);
+    let backend = sbx_046();
+    build_template(&env, &backend);
+    new_demo(&env, &backend).0.unwrap();
+
+    let (output, recorded) = show_demo(&env);
+
+    assert!(
+        output.contains(&format!("# config hash: {recorded}\n")),
+        "{output}"
+    );
+    let (input, kits) = output.split_once("\n# kit: ").unwrap();
+    assert!(
+        input.contains("[template]\nstrict = false\nallow = [\"crates.io\"]"),
+        "{input}"
+    );
+    assert!(!kits.contains("apt-get install -y ripgrep"), "{kits}");
+    assert!(kits.contains("crates.io"), "{kits}");
+    assert!(!kits.contains("archive.ubuntu.com"), "{kits}");
+}
+
+#[test]
+fn config_show_explains_an_install_sandbox_with_the_install_variant() {
+    let env = Env::new();
+    env.write_profile("default", PROFILE);
+    let backend = sbx_046();
+    new_demo(&env, &backend).0.unwrap();
+
+    let (output, recorded) = show_demo(&env);
+
+    assert!(
+        output.contains(&format!("# config hash: {recorded}\n")),
+        "{output}"
+    );
+    let (_, kits) = output.split_once("\n# kit: ").unwrap();
+    assert!(kits.contains("apt-get install -y ripgrep"), "{kits}");
+    assert!(kits.contains("archive.ubuntu.com"), "{kits}");
+}
+
 #[test]
 fn a_template_sandbox_whose_runtime_allow_list_changed_is_drift() {
     let env = Env::new();

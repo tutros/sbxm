@@ -327,6 +327,16 @@ fn usable(
     backend: &dyn SandboxBackend,
 ) -> Result<std::result::Result<String, (String, String)>> {
     let (profile_name, harness) = (request.profile_name, request.harness);
+    // Decisions 204, 240: refused when strict, a warning and the install steps otherwise.
+    if check_supported(harness).is_err() {
+        return Ok(Err((
+            format!(
+                "templates are not supported for the {} harness yet",
+                harness.as_str()
+            ),
+            "use --harness claude, codex or pi".to_owned(),
+        )));
+    }
     let flag = match harness {
         Harness::Claude => String::new(),
         other => format!(" --harness {}", other.as_str()),

@@ -494,10 +494,14 @@ pub fn template_config_hash(
         harness,
         harness.agent_kit(),
     );
+    with_template_allow(&mut input, profile);
+    sha256_hex(&serde_json::to_vec(&input).expect("config serializes"))
+}
+
+fn with_template_allow<'a>(input: &mut HashInput<'a>, profile: &'a Profile) {
     if let Some(template) = input.template.as_mut() {
         template.allow = profile.template.as_ref().map(|t| t.allow.as_slice());
     }
-    sha256_hex(&serde_json::to_vec(&input).expect("config serializes"))
 }
 
 /// [`config_hash`] with the pinned agent-kit ref given, so a test can show
@@ -513,21 +517,25 @@ fn config_hash_with_kit(
     sha256_hex(&serde_json::to_vec(&input).expect("config serializes"))
 }
 
-/// What [`config_hash`] hashes, as TOML, so `config show` explains drift
-/// (decision 65).
+/// What [`config_hash`] hashes, or [`template_config_hash`] when
+/// `from_template`, as TOML, so `config show` explains drift (decision 65).
 pub fn hash_input_toml(
     profile_name: &str,
     profile: &Profile,
     resources: &Resources,
     harness: Harness,
+    from_template: bool,
 ) -> Result<String> {
-    let input = HashInput::new(
+    let mut input = HashInput::new(
         profile_name,
         profile,
         resources,
         harness,
         harness.agent_kit(),
     );
+    if from_template {
+        with_template_allow(&mut input, profile);
+    }
     toml::to_string(&input).context("cannot render the config as TOML")
 }
 
@@ -795,7 +803,7 @@ mod agent_kit_tests {
             memory: "8g".into(),
         };
         for harness in [Harness::Pi, Harness::Antigravity] {
-            let toml = hash_input_toml("default", &profile, &resources, harness).unwrap();
+            let toml = hash_input_toml("default", &profile, &resources, harness, false).unwrap();
             let kit = harness.agent_kit().unwrap();
             assert!(toml.contains(&format!("agent_kit = \"{kit}\"")), "{toml}");
         }
@@ -809,7 +817,7 @@ mod agent_kit_tests {
             memory: "8g".into(),
         };
         for harness in [Harness::Claude, Harness::Codex, Harness::Gemini] {
-            let toml = hash_input_toml("default", &profile, &resources, harness).unwrap();
+            let toml = hash_input_toml("default", &profile, &resources, harness, false).unwrap();
             assert!(!toml.contains("agent_kit"), "{toml}");
         }
     }
