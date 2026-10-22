@@ -447,6 +447,40 @@ fn open_attaches_when_the_template_record_is_invalid() {
     assert_eq!(backend.log().last().unwrap(), "attach sbxm-demo-claude");
 }
 
+/// A warning writer whose every write fails, like a closed stderr pipe.
+struct BrokenPipe;
+
+impl std::io::Write for BrokenPipe {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        Err(std::io::ErrorKind::BrokenPipe.into())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn open_attaches_when_the_recovery_warning_cannot_be_written() {
+    // Issue 282: the warning is best-effort, so a failed write doesn't stop the attach.
+    let env = Env::new();
+    let backend = install_sandbox(&env, sbx_046());
+    let templates = env.base_dir().join(".sbxm").join("templates");
+    std::fs::create_dir_all(&templates).unwrap();
+    std::fs::write(templates.join("default-claude.json"), "not json").unwrap();
+
+    open::run(
+        &env.config_dir(),
+        "demo",
+        &open::Options::default(),
+        &backend,
+        &mut BrokenPipe,
+    )
+    .unwrap();
+
+    assert_eq!(backend.log().last().unwrap(), "attach sbxm-demo-claude");
+}
+
 #[test]
 fn open_attaches_when_template_ls_fails() {
     // Issue 270.
