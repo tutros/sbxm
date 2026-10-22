@@ -414,6 +414,22 @@ fn open_hints_at_a_rebuild_once_a_template_is_ready_and_rebuild_uses_it() {
 }
 
 #[test]
+fn list_checks_a_template_sandbox_against_the_template_variant() {
+    use sbxm::commands::list::{self, ConfigStatus};
+    let env = Env::new();
+    env.write_profile("default", PROFILE);
+    let backend = sbx_046();
+    build_template(&env, &backend);
+    new_demo(&env, &backend).0.unwrap();
+    let backend = backend.and_sandboxes(running());
+    let config = || list::entries(&env.config_dir(), &backend).unwrap()[0].config;
+
+    assert_eq!(config(), Some(ConfigStatus::Current));
+    env.write_profile("default", &PROFILE.replace("crates.io", "docs.rs"));
+    assert_eq!(config(), Some(ConfigStatus::Changed));
+}
+
+#[test]
 fn a_template_sandbox_whose_runtime_allow_list_changed_is_drift() {
     let env = Env::new();
     env.write_profile("default", PROFILE);

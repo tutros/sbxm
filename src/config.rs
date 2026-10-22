@@ -105,21 +105,23 @@ impl GlobalConfig {
     }
 
     /// [`config_hash`] of `profile_name` merged with `project`'s
-    /// `sandbox.toml`, as they are now on disk.
+    /// `sandbox.toml`, as they are now on disk, or [`template_config_hash`]
+    /// for a sandbox created from a template (decision 230).
     pub fn current_hash(
         &self,
         project: &str,
         profile_name: &str,
         harness: Harness,
+        from_template: bool,
     ) -> Result<String> {
         let profile = Profile::load(self.profiles_dir(), profile_name)?
             .with_project(&crate::project::metadata_dir(&self.base_dir, project))?;
-        Ok(config_hash(
-            profile_name,
-            &profile,
-            &self.resources,
-            harness,
-        ))
+        let hash = if from_template {
+            template_config_hash
+        } else {
+            config_hash
+        };
+        Ok(hash(profile_name, &profile, &self.resources, harness))
     }
 
     pub fn profiles_dir(&self) -> &Path {

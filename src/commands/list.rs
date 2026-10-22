@@ -105,7 +105,7 @@ fn config_status(
     let Ok(harness) = Harness::from_str(harness, false) else {
         return ConfigStatus::Unknown;
     };
-    match config.current_hash(project, profile, harness) {
+    match config.current_hash(project, profile, harness, sandbox.template.is_some()) {
         Ok(current) if current == *stored => ConfigStatus::Current,
         Ok(_) => ConfigStatus::Changed,
         Err(_) => ConfigStatus::Unknown,
