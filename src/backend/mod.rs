@@ -44,6 +44,55 @@ pub trait SandboxBackend: Send + Sync {
     /// The network rules that apply to a sandbox (`sbx policy ls <sandbox> --json`), for the check
     /// of a strict `codex` sandbox after its creation (decision 221).
     fn network_rules(&self, sandbox: &str) -> Result<Vec<NetworkRule>>;
+    /// Every custom secret `sbx` holds (`sbx secret ls --json`, its `custom_secrets` array), for
+    /// the check that no global one clashes with a scoped one sbxm is about to create (S9).
+    fn custom_secrets(&self) -> Result<Vec<CustomSecret>>;
+    /// Stores a custom secret scoped to one sandbox (`sbx secret set-custom --sandbox ...`), from
+    /// a helper command or a reference, never a value (S9, decision 241). It can be created
+    /// before its sandbox exists.
+    fn set_custom_secret(&self, spec: &CustomSecretSpec) -> Result<()>;
+    /// Removes one sandbox's custom secret by its placeholder (`sbx secret rm --placeholder P
+    /// --sandbox N -f`). One that is already gone (removing the sandbox may remove it, S12) is
+    /// not an error.
+    fn remove_custom_secret(&self, placeholder: &str, sandbox: &str) -> Result<()>;
+}
+
+/// One entry of `sbx secret ls --json`'s `custom_secrets` (S9); the masked `secret` is never read.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct CustomSecret {
+    /// `global`, or the sandbox the secret is scoped to.
+    pub scope: String,
+    /// The hosts the proxy swaps the placeholder for.
+    #[serde(default)]
+    pub targets: Vec<String>,
+    pub env: String,
+    pub placeholder: String,
+}
+
+impl CustomSecret {
+    /// Applies to every sandbox: `sbx` prints the scope as `(global)` and stores `global`.
+    pub fn is_global(&self) -> bool {
+        matches!(self.scope.as_str(), "global" | "(global)")
+    }
+}
+
+/// Where `sbx` reads a custom secret's value from: never a value on the command line (S9).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SecretSource {
+    /// An absolute path to a helper that prints the value (`--command`).
+    Command(PathBuf),
+    /// A secret manager reference, `op://...` or an ARN (`--ref`).
+    Ref(String),
+}
+
+/// `sbx secret set-custom --sandbox <sandbox> --host <host> --env <env> --placeholder <p>`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CustomSecretSpec {
+    pub sandbox: String,
+    pub host: String,
+    pub env: String,
+    pub placeholder: String,
+    pub source: SecretSource,
 }
 
 /// One network rule of `sbx policy ls --json`: the `codex` kit's is named `kit:<sandbox>`, and

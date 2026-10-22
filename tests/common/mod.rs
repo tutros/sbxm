@@ -362,4 +362,16 @@ impl SandboxBackend for SecretCheckBlocksRestore<'_> {
     fn network_rules(&self, sandbox: &str) -> anyhow::Result<Vec<sbxm::backend::NetworkRule>> {
         self.inner.network_rules(sandbox)
     }
+
+    fn custom_secrets(&self) -> anyhow::Result<Vec<sbxm::backend::CustomSecret>> {
+        self.inner.custom_secrets()
+    }
+
+    fn set_custom_secret(&self, spec: &sbxm::backend::CustomSecretSpec) -> anyhow::Result<()> {
+        self.inner.set_custom_secret(spec)
+    }
+
+    fn remove_custom_secret(&self, placeholder: &str, sandbox: &str) -> anyhow::Result<()> {
+        self.inner.remove_custom_secret(placeholder, sandbox)
+    }
 }
