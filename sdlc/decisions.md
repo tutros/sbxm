@@ -812,6 +812,22 @@ user chose the recommendations): (d) a task plus answer that is over the budget 
 pair's Jev result is an `error` naming the oversized part, never a truncated answer; (e) in a chunked pair, every chunk
 after the first sends the model the first response named, and a response naming another model makes the pair an
 `error`, so one pair's score always comes from one model version.
+242. **No parked should-fix findings at a milestone review (2026-10-22, the first retro's proposal 1,
+`sdlc/retros/2026-10-22-retro.md`; changes how [162]'s slice reviews end):** a slice review's should-fix findings
+are fixed in the next slice or filed as an issue before the milestone review starts, and the milestone PR lists
+each filed one with its issue number, so the review doesn't raise it again. An experiment for the next milestone;
+its measure is the number of findings at the milestone review that a slice review raised first (milestone 3: 10, 3
+of them as must-fix) and the milestone review's rounds (milestone 3: 3).
+243. **Every retro measures the time from a stop to the next command (2026-10-22, the first retro's proposal 2):**
+the `sdlc-retro` skill's gather table gets a row for it, computed from `run.log` timestamps per task with the stop's
+cause and a total per cause. No code. Tried in the next retro; all three windows of the first one had it as unknown.
+244. **Boundary tests first, in place of the edge-case checklist (2026-10-22, the first retro's proposal 3):** when an
+issue's open points are answered, one question replaces the edge-case checklist tried since 2026-10-14 (its tasks
+had a round-1 must-fix as often as before, 3 of 6): does the change have a limit, a size, or an identity (path,
+drive, ref) that decides behavior? If yes, the issue body lists the boundary cases (at the limit, one over, one
+under, the largest input) and the worker writes those tests first. An experiment for the next three issues that
+answer yes; its measure is their round-1 must-fix and rounds (window 3's boundary changes: #244 7 rounds, #258 5,
+#285 4). In `AGENTS.md`'s "No open questions go to a worker" rule.
 
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
