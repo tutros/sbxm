@@ -229,7 +229,19 @@ pub fn plan(
     // files: the chunks are sized against that count's label, which no real label is wider than.
     let files = split_files(diff);
     let widest = part_label(files.len(), files.len());
-    answer_fits(Some(&widest))?;
+    if answer_fits(Some(&widest)).is_err() {
+        // The answer fits alone but leaves no room for a split's longer heading: one unsplit
+        // request with the diff cut, never an error (decision 241 d; review M-1, rounds 1-4).
+        let chunk = cut(diff, &|text| fits(text, None));
+        return Ok(Plan {
+            requests: vec![Planned {
+                state: state(answer, &chunk, None),
+                weight: chunk.chars().count().max(1),
+            }],
+            questions,
+            truncated: true,
+        });
+    }
     let part = Some(widest.as_str());
     let mut chunks: Vec<String> = Vec::new();
     let mut current = String::new();
@@ -298,7 +310,8 @@ fn split_files(diff: &str) -> Vec<&str> {
 }
 
 /// The longest start of `file` that, with a note saying it was cut, still `fits`; nothing at all
-/// when even the note alone doesn't (an empty diff always fits: `plan` checked it first).
+/// when even the note alone doesn't (an empty diff always fits: `plan` checked the answer alone
+/// first, and a split's heading before cutting under it).
 fn cut(file: &str, fits: &dyn Fn(&str) -> bool) -> String {
     let total = file.chars().count();
     let with_note = |keep: usize| {
