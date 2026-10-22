@@ -125,7 +125,8 @@ The other slices are reviewed at the end of the milestone.
     `--ignore-disk` cover, and which minimum `sbx` version applies to what [213]), `profiles/sbxm-dev` gets `[template]`; `tests/real_sbx.rs`
     builds a cold template and creates one sandbox from it. Done: the real test passes. **Done 2026-10-21:**
     `template_against_real_sbx` passed on `sbx` 0.46.0 in 110 s.
-12. **End-to-end check** (below).
+12. **End-to-end check** (below). **Done 2026-10-22:** all 8 steps pass after two fixes (M-1, decision 238; M-2);
+    record `sdlc/reviews/2026-10-22-m3-slice-12-end-to-end.md`.
 
 ## End-to-end checklist (real `sbx`, C: with at least 20 GB free)
 
