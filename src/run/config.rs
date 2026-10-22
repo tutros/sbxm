@@ -10,6 +10,7 @@ use anyhow::{Context, Result, bail};
 use clap::ValueEnum;
 use serde::Deserialize;
 
+use crate::backend::SecretSource;
 use crate::harness::Harness;
 
 const CONTESTANT_MIN: usize = 2;
@@ -56,7 +57,19 @@ pub struct EvalConfig {
     pub rubric: Vec<Criterion>,
     pub judge: Option<Judge>,
     pub cosine: Option<Cosine>,
+    pub jev: Option<Jev>,
 }
+
+/// `[eval.jev]` (decision 241): where `sbx` reads the token from, never the token itself
+/// (decision 36), and the model every request names (the API requires one).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Jev {
+    pub token: SecretSource,
+    pub model: String,
+}
+
+/// The model a request names when `[eval.jev]` sets none.
+pub const JEV_DEFAULT_MODEL: &str = "jev-latest";
 
 #[derive(Debug, Clone)]
 pub struct Check {
@@ -153,6 +166,15 @@ struct RawEval {
     rubric: Vec<RawCriterion>,
     judge: Option<RawJudge>,
     cosine: Option<RawCosine>,
+    jev: Option<RawJev>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawJev {
+    token_command: Option<PathBuf>,
+    token_ref: Option<String>,
+    model: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -386,12 +408,66 @@ impl Validator<'_> {
                     .map_or_else(|| dir.clone(), |base| base.join(&dir))
             }),
         });
+        let jev = raw
+            .jev
+            .map(|j| self.jev(j, rubric.is_empty()))
+            .transpose()?;
         Ok(EvalConfig {
             checks,
             rubric,
             judge,
             cosine,
+            jev,
         })
+    }
+
+    /// Exactly one token source, named and never read here (decision 241).
+    fn jev(&self, raw: RawJev, no_rubric: bool) -> Result<Jev> {
+        let token = match (raw.token_command, raw.token_ref) {
+            (Some(_), Some(_)) => {
+                return Err(self
+                    .err("eval.jev sets both token_command and token_ref; keep only one of them"));
+            }
+            (None, None) => {
+                return Err(self.err(
+                    "eval.jev has no token source; set token_command (an absolute path to a \
+                     helper that prints the token) or token_ref (op://... or an ARN)",
+                ));
+            }
+            (Some(command), None) => {
+                if !command.is_absolute() {
+                    return Err(self.err(format!(
+                        "eval.jev.token_command {} is not an absolute path; sbx needs the \
+                         helper's absolute path",
+                        command.display()
+                    )));
+                }
+                SecretSource::Command(command)
+            }
+            (None, Some(reference)) => {
+                if !(reference.starts_with("op://") || reference.starts_with("arn:")) {
+                    // The text itself is never repeated: it may be a token put there by mistake.
+                    return Err(self.err(
+                        "eval.jev.token_ref is not a secret reference; give an op://... \
+                         reference or an ARN, never the token itself",
+                    ));
+                }
+                SecretSource::Ref(reference)
+            }
+        };
+        let model = raw.model.unwrap_or_else(|| JEV_DEFAULT_MODEL.to_owned());
+        if model.trim().is_empty() {
+            return Err(self.err(format!(
+                "eval.jev.model is empty; name a Jev model or leave it out for {JEV_DEFAULT_MODEL}"
+            )));
+        }
+        if no_rubric {
+            return Err(self.err(
+                "eval.jev needs at least one [[eval.rubric]] criterion to score; add one or \
+                 remove [eval.jev]",
+            ));
+        }
+        Ok(Jev { token, model })
     }
 
     /// A non-empty id not seen before in its list.
