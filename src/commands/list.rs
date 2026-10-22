@@ -164,7 +164,7 @@ impl ConfigStatus {
 /// Orphan problems come first: a missing sandbox is recreated from the
 /// current config anyway.
 fn note(entry: &Entry) -> String {
-    // Hints name the harness unless it's the default, like other commands'.
+    // `open` hints always name the harness, including the default.
     let open = match Harness::from_str(&entry.harness, false) {
         Ok(harness) => format!("sbxm open {}{}", entry.project, open_harness_flag(harness)),
         Err(_) => format!("sbxm open {} --harness {}", entry.project, entry.harness),
