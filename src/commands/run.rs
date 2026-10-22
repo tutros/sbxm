@@ -404,17 +404,21 @@ fn run_with(
 
     // The ranking is computed from what was just saved, exactly as `run show`
     // will later, so the two can't disagree (decisions 19, 120).
+    let labels: Vec<String> = run_config
+        .contestants
+        .iter()
+        .map(|c| format!("{}/{}", c.harness.as_str(), c.model))
+        .collect();
     match score::load(&roots.meta) {
-        Ok(Some(ranking)) => {
-            let labels: Vec<String> = run_config
-                .contestants
-                .iter()
-                .map(|c| format!("{}/{}", c.harness.as_str(), c.model))
-                .collect();
-            write!(out, "{}", score::render(&ranking, &labels))?;
-        }
+        Ok(Some(ranking)) => write!(out, "{}", score::render(&ranking, &labels))?,
         Ok(None) => {}
         Err(e) => writeln!(warn, "warning: cannot rank the run: {e:#}")?,
+    }
+    // Jev's ranking after the judge's, which leads; never blended (decision 241 a).
+    match score::load_jev(&roots.meta) {
+        Ok(Some(ranking)) => write!(out, "{}", score::render_jev(&ranking, &labels))?,
+        Ok(None) => {}
+        Err(e) => writeln!(warn, "warning: cannot rank the run by Jev: {e:#}")?,
     }
     if run_config.eval.cosine.is_some() {
         write!(

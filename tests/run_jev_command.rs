@@ -814,3 +814,100 @@ fn the_canary_token_never_appears_in_the_run_folders_errors_or_warnings() {
         }
     }
 }
+
+// ---- rankings -----------------------------------------------------------------------------
+
+fn codex_verdict(a_correct: bool) -> String {
+    let verdict = json!({
+        "A": {"correct": a_correct, "quality": "good"},
+        "B": {"correct": !a_correct, "quality": "poor"},
+    })
+    .to_string();
+    let item = json!({"type": "item.completed", "item": {"id": "i", "type": "agent_message", "text": verdict}});
+    format!(
+        "{{\"type\":\"thread.started\",\"thread_id\":\"t\"}}\n{item}\n{{\"type\":\"turn.completed\",\"usage\":{{\"input_tokens\":3,\"output_tokens\":2}}}}\n"
+    )
+}
+
+fn show(env: &Env, ran: &Ran) -> String {
+    sbxm::commands::run_show::render(&env.config_dir(), &ran.summary.run_id, &Default::default())
+        .unwrap()
+}
+
+#[test]
+fn with_the_judge_and_jev_the_judges_ranking_leads_and_jevs_follows_never_blended() {
+    let env = Env::new();
+    // Jev prefers contestant 0: 0.9 and 0.2 on `correct`, 0.8 on quality for both.
+    let jev = FakeJev::new(vec![
+        (200, answer("jev-1.13.0", 0.9)),
+        (200, answer("jev-1.13.0", 0.2)),
+    ]);
+    let backend = jev
+        .backend(&env)
+        .with_exec_output_matching("judge-prompt.md", out(&codex_verdict(true), "", 0));
+    let body = format!(
+        "{}[eval.judge]\nharness = \"codex\"\nmodel = \"judge-model\"\n",
+        config(&env, "")
+    );
+    let ran = go(&env, &body, &backend);
+
+    for text in [ran.out.clone(), show(&env, &ran)] {
+        let judge = text.find("Ranking (judge scores 0-1").expect(&text);
+        let jev_at = text
+            .find("Jev ranking (jev-1.13.0; scores 0-1")
+            .expect(&text);
+        assert!(judge < jev_at, "{text}");
+        let jev_block = &text[jev_at..];
+        // (0.9 * 1 + 0.8 * 0.5) / 1.5 and (0.2 * 1 + 0.8 * 0.5) / 1.5.
+        assert!(
+            jev_block.contains("1. contestants[0] claude/one: 0.87"),
+            "{jev_block}"
+        );
+        assert!(
+            jev_block.contains("2. contestants[1] claude/two: 0.40"),
+            "{jev_block}"
+        );
+    }
+    let shown = show(&env, &ran);
+    assert!(
+        shown.contains("Jev (jev-1.13.0): correct 0.90, quality 0.80 (confidence 0.70)"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn with_jev_only_run_and_run_show_still_print_a_ranking() {
+    let env = Env::new();
+    let backend = FakeJev::new(vec![]).backend(&env);
+    let ran = go(&env, &config(&env, ""), &backend);
+    assert!(!ran.out.contains("Ranking (judge"), "{}", ran.out);
+    assert!(ran.out.contains("Jev ranking (jev-1.13.0;"), "{}", ran.out);
+    let shown = show(&env, &ran);
+    assert!(!shown.contains("Ranking (judge"), "{shown}");
+    assert!(shown.contains("Jev ranking (jev-1.13.0;"), "{shown}");
+    // Both tie: 0.9 on correct and 0.8 on quality each.
+    assert!(
+        shown.contains("1. contestants[0] claude/one: 0.87"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("1. contestants[1] claude/two: 0.87"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn a_pair_jev_could_not_score_is_left_out_of_jevs_ranking_and_shown_with_its_error() {
+    let env = Env::new();
+    let backend = FakeJev::new(vec![(401, AUTH_BODY.into())]).backend(&env);
+    let ran = go(&env, &config(&env, ""), &backend);
+    let shown = show(&env, &ran);
+    assert!(
+        shown.contains("contestants[0] claude/one: not scored (Jev scored none of its repeats)"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("Jev: not scored: Jev rejected the token (401"),
+        "{shown}"
+    );
+}

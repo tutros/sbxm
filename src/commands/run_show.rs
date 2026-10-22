@@ -66,13 +66,18 @@ pub fn render(config_dir: &Path, run_id: &str, options: &Options) -> Result<Stri
 
     // The ranking, recomputed from the saved files (decision 120); a run
     // without a judge has none, and a damaged config copy only loses this block.
+    let labels: Vec<String> = contestants
+        .iter()
+        .map(|c| format!("{}/{}", text(&c["harness"]), text(&c["model"])))
+        .collect();
     if let Ok(Some(ranking)) = score::load(&meta) {
-        let labels: Vec<String> = contestants
-            .iter()
-            .map(|c| format!("{}/{}", text(&c["harness"]), text(&c["model"])))
-            .collect();
         writeln!(out)?;
         write!(out, "{}", score::render(&ranking, &labels))?;
+    }
+    // Jev's ranking follows the judge's, never blended with it (decision 241 a).
+    if let Ok(Some(ranking)) = score::load_jev(&meta) {
+        writeln!(out)?;
+        write!(out, "{}", score::render_jev(&ranking, &labels))?;
     }
     let similarity = cosine::render(&meta, contestants.len(), repeat);
     if !similarity.is_empty() {
@@ -113,6 +118,7 @@ pub fn render(config_dir: &Path, run_id: &str, options: &Options) -> Result<Stri
             write_diff(&mut out, &dir, &result["diff"], options.full_diff)?;
             write_checks(&mut out, &dir)?;
             write_judge(&mut out, &dir)?;
+            write_jev(&mut out, &dir)?;
         }
     }
     Ok(out)
@@ -300,6 +306,66 @@ fn write_judge(out: &mut String, dir: &Path) -> Result<()> {
             writeln!(out, "      {id}: {reason}")?;
         }
     }
+    Ok(())
+}
+
+/// Jev's scores of the pair, with the model that answered and each Score answer's confidence
+/// (decision 241).
+fn write_jev(out: &mut String, dir: &Path) -> Result<()> {
+    let path = dir.join("evals.json");
+    let Ok(text) = fs::read_to_string(&path) else {
+        return Ok(());
+    };
+    let evals: Value = serde_json::from_str(&text)
+        .with_context(|| format!("{} is not valid JSON", path.display()))?;
+    let jev = &evals["jev"];
+    if !jev.is_object() {
+        return Ok(());
+    }
+    if jev["status"] != "ok" {
+        writeln!(
+            out,
+            "    Jev: not scored: {}",
+            jev["error"].as_str().unwrap_or("no details")
+        )?;
+        return Ok(());
+    }
+    let chunks = jev["chunks"].as_u64().unwrap_or(1);
+    let mut line = format!(
+        "    Jev ({}",
+        jev["model"].as_str().unwrap_or("unknown model")
+    );
+    if chunks > 1 {
+        line.push_str(&format!(", {chunks} chunks"));
+    }
+    if jev["truncated"] == true {
+        line.push_str(", a file was cut");
+    }
+    line.push_str("):");
+    let scored: Vec<String> = jev["criteria"]
+        .as_object()
+        .into_iter()
+        .flatten()
+        .map(|(id, c)| {
+            let score = c["score"].as_f64().unwrap_or(0.0);
+            match c["confidence"].as_f64() {
+                Some(confidence) => format!("{id} {score:.2} (confidence {confidence:.2})"),
+                None => format!("{id} {score:.2}"),
+            }
+        })
+        .collect();
+    if !scored.is_empty() {
+        line.push(' ');
+        line.push_str(&scored.join(", "));
+    }
+    let unscored: Vec<&str> = jev["unscored"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    if !unscored.is_empty() {
+        line.push_str(&format!("; unscored: {}", unscored.join(", ")));
+    }
+    writeln!(out, "{line}")?;
     Ok(())
 }
 
