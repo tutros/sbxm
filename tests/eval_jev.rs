@@ -186,6 +186,32 @@ fn a_single_file_over_the_budget_is_truncated_never_sent_whole() {
 }
 
 #[test]
+fn the_longest_accepted_answer_with_an_oversized_file_stays_within_the_cap() {
+    // Review M-1: at the answer's boundary even the cut note with nothing kept doesn't fit.
+    let accepted = |n: usize| jev::plan("Task", &rubric(), &"a".repeat(n), None).is_ok();
+    let (mut low, mut high) = (0, 3 * jev::TOKEN_CAP);
+    while low < high {
+        let mid = (low + high).div_ceil(2);
+        if accepted(mid) {
+            low = mid
+        } else {
+            high = mid - 1
+        }
+    }
+    let big = file("big.rs", 100_000);
+    let plan = jev::plan("Task", &rubric(), &"a".repeat(low), Some(&big)).unwrap();
+    assert!(plan.truncated);
+    for request in &plan.requests {
+        let estimate = jev::estimate(&request.state, &plan.questions);
+        assert!(
+            estimate <= jev::TOKEN_CAP,
+            "{estimate} > {}",
+            jev::TOKEN_CAP
+        );
+    }
+}
+
+#[test]
 fn no_diff_and_an_empty_diff_are_said_so() {
     let none = jev::plan("Task", &rubric(), "answer", None).unwrap();
     assert!(none.requests[0].state.contains("(no diff available)"));

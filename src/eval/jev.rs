@@ -147,7 +147,7 @@ fn tokens(text: &str) -> usize {
 
 /// The estimate for one request: the state plus the longest question, the fixed overhead and
 /// the extra questions.
-fn estimate(state: &str, questions: &Value) -> usize {
+pub fn estimate(state: &str, questions: &Value) -> usize {
     let map = questions.as_object();
     let longest = map
         .into_iter()
@@ -243,7 +243,7 @@ pub fn plan(
         chunks.push(current);
     }
     let n = chunks.len();
-    let requests = chunks
+    let requests: Vec<Planned> = chunks
         .into_iter()
         .enumerate()
         .map(|(i, chunk)| Planned {
@@ -251,6 +251,17 @@ pub fn plan(
             weight: chunk.chars().count().max(1),
         })
         .collect();
+    // The chunks were sized against `WIDEST_PART`; a request is only ever sent within the cap.
+    if let Some(over) = requests
+        .iter()
+        .map(|r| estimate(&r.state, &questions))
+        .find(|&e| e > TOKEN_CAP)
+    {
+        return Err(format!(
+            "the diff splits into too many parts for Jev (one is about {over} tokens, the limit \
+             is {TOKEN_CAP}); no call was made"
+        ));
+    }
     Ok(Plan {
         questions,
         requests,
@@ -275,7 +286,8 @@ fn split_files(diff: &str) -> Vec<&str> {
     starts.windows(2).map(|w| &diff[w[0]..w[1]]).collect()
 }
 
-/// The longest start of `file` that, with a note saying it was cut, still `fits`.
+/// The longest start of `file` that, with a note saying it was cut, still `fits`; nothing at all
+/// when even the note alone doesn't (an empty diff always fits: `plan` checked it first).
 fn cut(file: &str, fits: &dyn Fn(&str) -> bool) -> String {
     let total = file.chars().count();
     let with_note = |keep: usize| {
@@ -285,6 +297,9 @@ fn cut(file: &str, fits: &dyn Fn(&str) -> bool) -> String {
             total - keep
         )
     };
+    if !fits(&with_note(0)) {
+        return String::new();
+    }
     let (mut low, mut high) = (0, total);
     while low < high {
         let mid = (low + high).div_ceil(2);
