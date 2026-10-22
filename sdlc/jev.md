@@ -15,7 +15,8 @@ Jev is **not built and not started**. Slice 14 of the M2a plan (the Jev evaluato
 with five corrections to the draft** (`model` is required, three error shapes, a 400 for oversize, a tokens-per-character
 measurement, small run-to-run noise). **The design is confirmed (decision 241, 2026-10-22):** the judge's
 ranking leads, one Jev call per contestant per repeat, `jev-latest` by default with the answering model recorded. What
-is left: the issue (`sdlc/specs/jev-evaluator-14a.md`, now the confirmed body) is filed, and the work is built. Until
+is left: the slice 14a issue is **not filed yet**; its body is `sdlc/specs/jev-evaluator-14a.md`, and filing it is the
+next step, then building it. Until
 then there is no `[eval.jev]` key; it is an unknown key and refused.
 
 ## 2. The roles Jev is meant to play
@@ -25,8 +26,9 @@ then there is no `[eval.jev]` key; it is an unknown key and refused.
    transcript (decision 20). `pass_fail` criteria become Noul questions and `scale` criteria become Score questions
    (decision 18).
 2. **The primary classifier for evaluating responses (the user's direction, 2026-10-03).** This is a bigger role than the
-   plan's "second evaluator" and has consequences that are not decided yet (section 5): which ranking is the headline,
-   how stable its answers must be, and which model version a result came from.
+   plan's "second evaluator" and had consequences decision 241 settled for slice 14a (section 5): the judge's ranking leads,
+   one call per repeat, and every result records the model version that answered. Whether Jev can lead is left to a
+   calibration run.
 3. **Eventually, the basis of a model router (the user's direction, 2026-10-03):** classify a problem, then choose which
    model should work on it. The input is different from evaluation: it is the **task text**, before any model has
    answered, and the output is a choice among models (a Choice question) with a distribution, not a score for an answer.
@@ -76,30 +78,32 @@ Still not verified:
 - Stability over days and across model versions (only `jev-1.13.0` was seen), and whether `jev-latest` moves silently.
 - Whether any Choice question picks sensible models for a task: only a toy task type was tried.
 
-## 4. The proposed design (slice 14a)
+## 4. The confirmed design (slice 14a, decision 241)
 
-Written in full in [`sdlc/specs/jev-evaluator-14a.md`](specs/jev-evaluator-14a.md) (the unfiled issue draft). In short:
+Written in full in [`sdlc/specs/jev-evaluator-14a.md`](specs/jev-evaluator-14a.md) (the confirmed body of the issue, not filed yet). In short:
 - The call runs from a **throwaway evaluator sandbox that runs one fixed `curl` command**, never an agent (decisions 112
   and 120), with egress to `api.typesafe.ai` only and a secret scoped to that sandbox and removed after the call.
 - `[eval.jev]` names the token source (`token_command` or `token_ref`, never a value) and an optional `model`; it needs a
   rubric. The token never reaches config, results, errors or logs; a canary test enforces it.
 - One candidate per request, so nothing is blinded or shared between contestants. A diff that does not fit the budget is
-  split per file and the chunk results are combined (a provisional rule).
-- Results go in each pair's `evals.json` under `jev`; Jev gets **its own ranking beside the judge's, never blended**
-  (disagreement is information). 429 and 529 retry with backoff, 401 never; a failed evaluation never fails the run.
+  split per file and the chunk results are combined as the size-weighted mean. A task plus answer that is over the budget
+  on its own is an `error` result with no call; a chunked pair sends the first chunk's answering model for the rest, and
+  a different model in a response is an `error` result.
+- Results go in each pair's `evals.json` under `jev`; Jev gets **its own ranking after the judge's, which leads, never
+  blended** (disagreement is information). One call per contestant per repeat; `model` defaults to `jev-latest` and the
+  model that answered is recorded in `evals.json` and `run.json`. 429 and 529 retry with backoff, 401 never; a failed evaluation never fails the run.
 - Jev-specific raw questions (`[[eval.jev.questions]]`) are slice 14b, a later issue (decision 20).
-- The proposed decision is numbered **168** here. The draft and the S9 text called it 167, but decision 167 is now
-  cosine's `evals.json` key; use the next free number when it is written into `sdlc/decisions.md`.
+- The decision is **241** in `sdlc/decisions.md`. The draft and the S9 text called it 167 and later 168; neither number
+  was ever used for it.
 
-## 5. What the "primary classifier" and "router" direction changes (for the interview, not decided)
+## 5. What the "primary classifier" and "router" direction changes (first three answered by decision 241)
 
-- **Which ranking is the headline?** The proposal keeps the judge's and Jev's rankings separate and unblended. If Jev is
-  the primary classifier, the output needs a clear headline, with the judge as a cross-check, or the reverse. That is the
-  user's call.
-- **Stability.** A primary classifier needs known variance. S12 should measure it (same request repeated), and the answer
-  decides whether `--repeat` becomes mandatory for Jev scoring and whether results should show a spread.
-- **Reproducibility.** Record the exact model name and the Jev version with every result (`evals.json` and `run.json`),
-  and find out whether a pinned model exists. Without that, a score from one month cannot be compared with another.
+- **Which ranking is the headline? Answered (decision 241 a):** the LLM judge's, with Jev's beside it, never blended,
+  until a calibration run shows Jev's verdicts match the user's.
+- **Stability. Answered (decision 241 b):** S12 measured small noise, so one call per contestant per repeat, and
+  `--repeat` is how to reduce noise; `--repeat` is not mandatory.
+- **Reproducibility. Answered (decision 241 c):** `jev-latest` by default, the answering model recorded in `evals.json`
+  and `run.json` and shown by `run show`; pinning (`jev-1.13.0`) is opt-in.
 - **Calibration against the judge and humans.** The plan already has a human-review report. Comparing Jev's answers with
   human verdicts on the same pairs is the evidence that it is fit to be primary; the run folders already hold what is
   needed (answers, diffs, rubric, the judge's scores).
@@ -123,7 +127,8 @@ Written in full in [`sdlc/specs/jev-evaluator-14a.md`](specs/jev-evaluator-14a.m
    contestant per repeat, `model` defaults to `jev-latest` and the answering model is recorded.
 4. **Optional, before relying on Jev as the primary classifier: a calibration run.** Score the pairs of a few existing
    runs with Jev, the judge and a human, and compare. S12 measured the API, not whether Jev's verdicts are good.
-5. **File the slice 14a issue** from the draft (its corrections from S12 are listed at the top of the draft) and build it
+5. **Next: file the slice 14a issue** with `sdlc/specs/jev-evaluator-14a.md` as its body (S12's corrections and decision
+   241 are folded in) and build it
    with `sbxm task` (the PR-review gaps in `sdlc/evals-workflow-notes.md`, G16 onwards, apply: expect to fix review
    findings by hand until they are solved).
 6. **Later:** slice 14b (raw questions), then a planning interview for the router (the Choice shape is confirmed).
