@@ -339,7 +339,7 @@ fn write_jev(out: &mut String, dir: &Path) -> Result<()> {
         line.push_str(&format!(", {chunks} chunks"));
     }
     if jev["truncated"] == true {
-        line.push_str(", a file was cut");
+        line.push_str(", the diff was cut");
     }
     line.push_str("):");
     let scored: Vec<String> = jev["criteria"]

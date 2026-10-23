@@ -865,6 +865,11 @@ fn a_single_file_over_the_budget_is_truncated_and_recorded() {
     for request in jev.requests() {
         assert!(request["state"].as_str().unwrap().len() < 100_000);
     }
+    // PR 289 review round 2, S-2: the near-limit fallback can cut a multi-file diff, so the
+    // wording covers both kinds of cut.
+    let shown = show(&env, &ran);
+    assert!(shown.contains("the diff was cut"), "{shown}");
+    assert!(!shown.contains("a file was cut"), "{shown}");
 }
 
 // ---- the token ----------------------------------------------------------------------------

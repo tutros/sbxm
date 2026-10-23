@@ -242,6 +242,38 @@ fn a_task_just_over_its_own_boundary_is_named_as_the_task_even_with_an_empty_ans
 }
 
 #[test]
+fn a_one_character_answer_that_fits_is_never_refused_as_an_oversized_task() {
+    // PR 289 review round 2, M-1: the "(no answer)" placeholder is longer than a short real
+    // answer, so it must not decide whether the task alone fits. Every task length near the
+    // boundary: a plan for answer `a` that fits is accepted, and a refusal names the task only
+    // when even the bare headings don't fit.
+    let mut planned = 0;
+    for n in 82_780..82_830 {
+        let task = "t".repeat(n);
+        let questions = jev::questions(&task, &one_question());
+        // The smallest request `a` can be sent in, and the headings alone.
+        let with_a = jev::estimate("## Final answer\n\na\n\n## Diff\n\n\n", &questions);
+        let headings = jev::estimate("## Final answer\n\n\n\n## Diff\n\n\n", &questions);
+        match jev::plan(&task, &one_question(), "a", None) {
+            Ok(plan) => {
+                planned += 1;
+                for request in &plan.requests {
+                    assert!(jev::estimate(&request.state, &plan.questions) <= jev::TOKEN_CAP);
+                }
+            }
+            Err(e) => {
+                assert!(with_a > jev::TOKEN_CAP, "{n}: refused at {with_a}: {e}");
+                if e.contains("the task is too long") {
+                    assert!(headings > jev::TOKEN_CAP, "{n}: task blamed at {headings}");
+                }
+            }
+        }
+    }
+    // The range straddles the boundary: some lengths plan, some don't.
+    assert!(planned > 0 && planned < 50, "{planned}");
+}
+
+#[test]
 fn no_diff_at_the_answer_boundary_is_not_reported_as_a_cut_file() {
     // PR 289 review M-3: the "no diff" and "no changes" markers are not a diff; leaving one out
     // to fit is not a truncation.

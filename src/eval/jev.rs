@@ -169,6 +169,11 @@ fn state(answer: &str, diff: &str, part: Option<&str>) -> String {
     } else {
         answer
     };
+    layout(answer, diff, part)
+}
+
+/// The state's fixed layout around `answer` and `diff`, with no placeholder for an empty answer.
+fn layout(answer: &str, diff: &str, part: Option<&str>) -> String {
     let heading = match part {
         Some(part) => format!("## Diff ({part}, split per file)"),
         None => "## Diff".to_owned(),
@@ -186,19 +191,27 @@ pub fn plan(
     diff: Option<&str>,
 ) -> Result<Plan, String> {
     let questions = questions(task, rubric);
-    // The task alone is the request with no answer and no diff: the state's fixed headings count
-    // against the task, so an empty answer is never blamed for them (PR 289 review M-2).
-    let bare = estimate(&state("", "", None), &questions);
-    if bare > TOKEN_CAP {
-        return Err(format!(
-            "the task is too long for Jev (about {bare} tokens with the questions, the limit is \
+    let task_too_long = |tokens: usize| {
+        format!(
+            "the task is too long for Jev (about {tokens} tokens with the questions, the limit is \
              {TOKEN_CAP}); no call was made"
-        ));
+        )
+    };
+    // The task alone is the state's fixed headings with nothing in them; no placeholder is
+    // counted, since a short real answer can be shorter than one (PR 289 review round 2, M-1).
+    let bare = estimate(&layout("", "", None), &questions);
+    if bare > TOKEN_CAP {
+        return Err(task_too_long(bare));
     }
-    // The answer is checked with the diff heading of the request that is actually sent.
+    // The answer is checked with the diff heading of the request that is actually sent. An empty
+    // answer's request holds only sbxm's own placeholder, so its excess is the task's (PR 289
+    // review M-2).
     let answer_fits = |part: Option<&str>| {
         let with_answer = estimate(&state(answer, "", part), &questions);
         if with_answer > TOKEN_CAP {
+            if answer.trim().is_empty() {
+                return Err(task_too_long(with_answer));
+            }
             return Err(format!(
                 "the answer is too long for Jev (about {with_answer} tokens with the task and \
                  the questions, the limit is {TOKEN_CAP}); no call was made"
