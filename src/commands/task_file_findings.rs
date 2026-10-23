@@ -484,7 +484,13 @@ fn file(
             if let Some(number) = numbers.get(&finding.id) {
                 write!(out, "{} skipped (exists #{number})", finding.id)?;
                 if let Some(change) = relabel.get(&finding.id) {
-                    write!(out, ", would label it {}", change.add.join(", "))?;
+                    // A change that only removes another severity names the one the issue keeps.
+                    let target = if change.add.is_empty() {
+                        finding.label.clone()
+                    } else {
+                        change.add.join(", ")
+                    };
+                    write!(out, ", would label it {target}")?;
                     if !change.remove.is_empty() {
                         write!(out, " (removing {})", change.remove.join(", "))?;
                     }
