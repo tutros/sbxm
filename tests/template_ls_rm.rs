@@ -81,11 +81,16 @@ fn refused(env: &Env, options: &template_rm::Options, backend: &FakeBackend) -> 
 
 /// Records `tag` as the template of project `demo`'s Claude sandbox.
 fn sandbox_uses(env: &Env, tag: &str) {
+    harness_sandbox_uses(env, Harness::Claude, tag);
+}
+
+/// Records `tag` as the template of project `demo`'s `harness` sandbox.
+fn harness_sandbox_uses(env: &Env, harness: Harness, tag: &str) {
     let mut state = sbxm::state::State::default();
     state.sandboxes.insert(
-        "claude".into(),
+        harness.as_str().into(),
         sbxm::state::SandboxState {
-            sandbox: "sbxm-demo-claude".into(),
+            sandbox: format!("sbxm-demo-{}", harness.as_str()),
             workspace: env.base_dir().join("demo"),
             created_at: NOW,
             profile: Some("default".into()),
@@ -100,17 +105,28 @@ fn sandbox_uses(env: &Env, tag: &str) {
 
 /// Writes a task whose reviewer records `tag`; returns the task's id.
 fn task_uses(env: &Env, tag: &str) -> String {
-    use sbxm::task::record::{self, Agent, Kind, NewTask, Process};
+    kind_task_uses(env, sbxm::task::record::Kind::Issue, 7, None, tag)
+}
+
+/// Writes a `kind` task whose reviewer records `tag`; returns the task's id.
+fn kind_task_uses(
+    env: &Env,
+    kind: sbxm::task::record::Kind,
+    number: u32,
+    id: Option<&str>,
+    tag: &str,
+) -> String {
+    use sbxm::task::record::{self, Agent, NewTask, Process};
     let mut task = record::Record::new(
         &NewTask {
-            kind: Kind::Issue,
-            number: 7,
+            kind,
+            number,
             repo: "o/r",
             title: "t",
             base: "main",
             branch: "b",
             config_hash: "h",
-            id: None,
+            id,
         },
         NOW,
         Process::new(1, NOW),
@@ -202,6 +218,68 @@ fn refused_while_a_task_uses_it() {
         message.contains(&format!("in use by task {id}")),
         "{message}"
     );
+}
+
+#[test]
+fn an_in_use_refusal_names_sbxm_rm_with_the_harness_of_a_claude_sandbox() {
+    let env = Env::new();
+    write_record(&env, Harness::Claude, TAG, &[]);
+    sandbox_uses(&env, TAG);
+    let backend = backend_with(&[TAG]);
+
+    let message = refused(&env, &options(Harness::Claude), &backend);
+
+    // `--harness` is required on `sbxm rm` (decision 135), so even the default harness is named.
+    assert!(
+        message.ends_with("remove those first: `sbxm rm demo --harness claude`"),
+        "{message}"
+    );
+}
+
+#[test]
+fn an_in_use_refusal_names_sbxm_rm_with_a_codex_or_pi_sandbox_s_harness() {
+    for harness in [Harness::Codex, Harness::Pi] {
+        let env = Env::new();
+        let tag = format!(
+            "sbxm-default-{}:0123456789ab-20231114t2213",
+            harness.as_str()
+        );
+        write_record(&env, harness, &tag, &[]);
+        harness_sandbox_uses(&env, harness, &tag);
+        let backend = backend_with(&[&tag]);
+
+        let message = refused(&env, &options(harness), &backend);
+
+        assert!(
+            message.ends_with(&format!(
+                "remove those first: `sbxm rm demo --harness {}`",
+                harness.as_str()
+            )),
+            "{message}"
+        );
+    }
+}
+
+#[test]
+fn an_in_use_refusal_names_task_rm_for_each_kind_of_task() {
+    use sbxm::task::record::Kind;
+    let env = Env::new();
+    write_record(&env, Harness::Claude, TAG, &[]);
+    let issue = kind_task_uses(&env, Kind::Issue, 7, None, TAG);
+    let pr = kind_task_uses(&env, Kind::Pr, 12, None, TAG);
+    let spec = kind_task_uses(&env, Kind::Spec, 0, Some("spec-demo-0123456789ab"), TAG);
+    let backend = backend_with(&[TAG]);
+
+    let message = refused(&env, &options(Harness::Claude), &backend);
+
+    for (id, command) in [
+        (issue, "`sbxm task rm --issue 7`"),
+        (pr, "`sbxm task rm --pr 12`"),
+        (spec, "`sbxm task rm --spec <its spec file>`"),
+    ] {
+        assert!(message.contains(&format!("task {id}")), "{message}");
+        assert!(message.contains(command), "{message}");
+    }
 }
 
 #[test]
@@ -330,10 +408,31 @@ fn a_failed_removal_keeps_the_record() {
 
     let message = format!("{err:#}");
     assert!(
-        message.contains(&format!("could not remove template {TAG}")),
+        message.contains(&format!(
+            "could not remove template {TAG}; run `sbxm template rm default` again"
+        )),
         "{message}"
     );
     assert!(record_path(&env, "default-claude").exists());
+}
+
+#[test]
+fn a_failed_codex_removal_names_the_retry_with_its_harness() {
+    let env = Env::new();
+    let codex = "sbxm-default-codex:0123456789ab-20231114t2213";
+    write_record(&env, Harness::Codex, codex, &[]);
+    let backend = backend_with(&[codex]).failing_template_rm();
+
+    let err = rm(&env, &options(Harness::Codex), &backend).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains(&format!(
+            "could not remove template {codex}; run `sbxm template rm default --harness codex` again"
+        )),
+        "{message}"
+    );
+    assert!(record_path(&env, "default-codex").exists());
 }
 
 #[test]

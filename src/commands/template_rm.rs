@@ -50,12 +50,26 @@ pub fn run(
     for tag in &tags {
         let users = template::users(&config.base_dir, tag)?;
         if !users.is_empty() {
+            let names: Vec<String> = users.iter().map(ToString::to_string).collect();
+            let commands: Vec<String> = users
+                .iter()
+                .map(|u| format!("`{}`", u.remove_command()))
+                .collect();
             bail!(
-                "template {tag} is in use by {}; remove those first",
-                users.join(", ")
+                "template {tag} is in use by {}; remove those first: {}",
+                names.join(", "),
+                commands.join(", ")
             );
         }
     }
+    let retry = match options.harness {
+        Harness::Claude => format!("sbxm template rm {}", options.profile),
+        harness => format!(
+            "sbxm template rm {} --harness {}",
+            options.profile,
+            harness.as_str()
+        ),
+    };
     let images = backend.template_ls()?;
     for tag in tags {
         if !images.iter().any(|t| t.reference() == *tag) {
@@ -63,7 +77,7 @@ pub fn run(
         }
         backend
             .template_rm(tag)
-            .with_context(|| format!("could not remove template {tag}; run it again"))?;
+            .with_context(|| format!("could not remove template {tag}; run `{retry}` again"))?;
         writeln!(out, "removed template {tag}")?;
     }
     let path = template::dir(&config.base_dir).join(format!("{key}.json"));
