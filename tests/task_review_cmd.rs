@@ -854,6 +854,98 @@ fn a_new_commit_on_the_pr_is_reviewed_without_force() {
     assert!(posted(&github));
 }
 
+/// Issue 229: [`pr_github_at`] with PR 7 in `state` and from a fork or not.
+fn pr_github_with(head: &str, state: PrState, fork: bool) -> FakeGitHub {
+    let mut pr = pr_info();
+    pr.head_oid = head.to_owned();
+    pr.state = state;
+    pr.is_cross_repository = fork;
+    FakeGitHub::default()
+        .with_default_branch("main")
+        .with_pr(pr)
+        .with_issue_text(issue_text(4))
+}
+
+/// Issue 229: a PR that isn't reviewable is refused as such, before the already-reviewed check,
+/// whatever its head and `--force` say, and nothing is created.
+#[test]
+fn a_closed_merged_or_fork_pr_is_refused_as_such_before_the_already_reviewed_check() {
+    const OTHER: &str = "3333333333333333333333333333333333333333";
+    for (state, fork, head, force, expected) in [
+        (
+            PrState::Closed,
+            false,
+            REVIEWED,
+            false,
+            "PR #7 is closed; only open PRs are reviewed",
+        ),
+        (
+            PrState::Closed,
+            false,
+            REVIEWED,
+            true,
+            "PR #7 is closed; only open PRs are reviewed",
+        ),
+        (
+            PrState::Closed,
+            false,
+            OTHER,
+            false,
+            "PR #7 is closed; only open PRs are reviewed",
+        ),
+        (
+            PrState::Merged,
+            false,
+            REVIEWED,
+            false,
+            "PR #7 is merged; only open PRs are reviewed",
+        ),
+        (
+            PrState::Merged,
+            false,
+            REVIEWED,
+            true,
+            "PR #7 is merged; only open PRs are reviewed",
+        ),
+        (
+            PrState::Merged,
+            false,
+            OTHER,
+            false,
+            "PR #7 is merged; only open PRs are reviewed",
+        ),
+        (
+            PrState::Open,
+            true,
+            REVIEWED,
+            false,
+            "PR #7 comes from a fork",
+        ),
+    ] {
+        let case = format!("{state:?}, fork {fork}, head {head}, force {force}");
+        let f = config("codex");
+        add_pr_head(&f, 7);
+        finished_issue_task(&f, "https://github.com/o/r/pull/7", REVIEWED, false);
+        let github = pr_github_with(head, state, fork);
+        let backend = pr_backend(&f, &[CLEAN]);
+        let mut opts = pr_options(&f);
+        opts.force = force;
+
+        let out = go_pr(&f, &opts, &backend, &github);
+
+        let message = format!("{:#}", out.result.unwrap_err());
+        assert!(message.contains(expected), "{case}: {message}");
+        assert!(!message.contains("already reviewed"), "{case}: {message}");
+        assert!(!message.contains("--force"), "{case}: {message}");
+        assert!(
+            backend.creates().is_empty() && backend.execs().is_empty(),
+            "{case}"
+        );
+        assert!(!pr_meta(&f).exists(), "{case}");
+        assert!(!posted(&github), "{case}");
+    }
+}
+
 /// Only a local task folder decides: a PR body or comment that looks like a posted review, with
 /// no task recording the PR, changes nothing (sbxm reads no comments to decide).
 #[test]

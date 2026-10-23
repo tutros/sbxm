@@ -266,7 +266,7 @@ pub fn prepare_pr(ctx: &Ctx, pr: &PrInfo) -> Result<Prepared> {
 
 /// Only an open PR from a branch of `repo` itself is reviewed, both when its task is made and
 /// each time a `ready` task reviews it again (issue 195).
-fn check_pr_reviewable(pr: &PrInfo, repo: &str) -> Result<()> {
+pub(crate) fn check_pr_reviewable(pr: &PrInfo, repo: &str) -> Result<()> {
     let number = pr.number;
     match pr.state {
         PrState::Open => {}
