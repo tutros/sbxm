@@ -877,7 +877,7 @@ inform the plan only. (e) Order: Q1, Q3, Q4, Q2, Q7, Q6, Q5; a failing must-pass
 the spike stops. Question 7 was added to the issue on 2026-10-23.
 
 248. **Cloud sandboxes become milestone 4 (2026-10-23, the user's decision after spike S14; builds on [56], [159],
-[161], [199]-[239]):** the spike passed every must-pass question and Q7 (`sdlc/spikes/S14.md`, $0.69 spent), so
+[161], [199]-[239]):** the spike passed every must-pass question and Q7 (`sdlc/spikes/S14.md`, $0.79 spent in total), so
 running sbxm's sandboxes on Docker Cloud Sandboxes is planned as its own milestone, through a planning interview like
 the templates milestone's (issue 211), tracked by issue 310. Its inputs are the spike's design facts: a template
 can't be combined with a kit and has its size baked in, so a cloud template sandbox is configured by `create` flags;
