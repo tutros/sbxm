@@ -367,3 +367,104 @@ fn a_strict_codex_contestant_gets_the_deny_rules_and_is_checked_after_create() {
     assert!(err.contains("ended in error"), "{err}");
     assert!(backend.removes().contains(&codex_create.name));
 }
+
+#[test]
+fn a_strict_codex_judge_gets_the_deny_rules_is_checked_before_exec_and_removed_when_refused() {
+    let env = Env::new();
+    env.write_profile("default", &strict(PROFILE));
+    let backend = backend();
+    build(&env, &backend, Harness::Claude, None);
+    let tag = build(&env, &backend, Harness::Codex, None);
+
+    let ran = go(&env, None, &format!("{TWO_CLAUDES}{CODEX_JUDGE}"), &backend);
+
+    let judge = judge_create(&backend);
+    assert_eq!(judge.template.as_deref(), Some(tag.as_str()));
+    assert_eq!(judge.deny_network, CODEX_EXTRA);
+    let log = backend.log();
+    let created = log
+        .iter()
+        .position(|l| *l == format!("create {}", judge.name))
+        .unwrap_or_else(|| panic!("{log:?}"));
+    assert_eq!(log[created + 1], format!("network_rules {}", judge.name));
+    // The fake reports no kit rule, so the check fails closed: the judge never runs and its
+    // sandbox is removed.
+    assert!(!log.contains(&format!("exec {}", judge.name)), "{log:?}");
+    assert_eq!(
+        backend
+            .removes()
+            .iter()
+            .filter(|r| **r == judge.name)
+            .count(),
+        1,
+        "{log:?}"
+    );
+    let shown = match &ran.result {
+        Ok(_) => ran.warn.clone(),
+        Err(e) => format!("{e:#}\n{}", ran.warn),
+    };
+    assert!(shown.contains("no network rule"), "{shown}");
+}
+
+const PLAIN: &str = "[network]\nallow = [\"archive.ubuntu.com\"]\n";
+
+#[test]
+fn a_contestant_under_its_own_install_only_profile_gets_no_tag_next_to_one_with_the_template() {
+    let env = Env::new();
+    env.write_profile("default", PROFILE);
+    env.write_profile("plain", PLAIN);
+    let backend = backend();
+    let tag = build(&env, &backend, Harness::Claude, None);
+
+    let ran = go(
+        &env,
+        None,
+        "[[contestants]]\nharness = \"claude\"\nmodel = \"one\"\n\n\
+         [[contestants]]\nharness = \"claude\"\nmodel = \"two\"\nprofile = \"plain\"\n\n",
+        &backend,
+    );
+
+    ran.result.unwrap();
+    let creates = run_creates(&backend);
+    assert_eq!(creates.len(), 2, "{creates:?}");
+    let templates: Vec<Option<&str>> = creates.iter().map(|c| c.template.as_deref()).collect();
+    assert!(templates.contains(&Some(tag.as_str())), "{creates:?}");
+    assert!(templates.contains(&None), "{creates:?}");
+    let plain = creates.iter().find(|c| c.template.is_none()).unwrap();
+    let common = fs::read_to_string(plain.kits[0].join("spec.yaml")).unwrap();
+    assert!(!common.contains("crates.io"), "{common}");
+}
+
+#[test]
+fn an_unreadable_rule_set_leaves_no_codex_contestant_sandbox_after_one_removal() {
+    let env = Env::new();
+    env.write_profile("default", &strict(PROFILE));
+    let backend = backend().failing_network_rules();
+    build(&env, &backend, Harness::Claude, None);
+    build(&env, &backend, Harness::Codex, None);
+
+    let ran = go(&env, None, ONE_CODEX, &backend);
+
+    let creates = run_creates(&backend);
+    let codex = creates
+        .iter()
+        .find(|c| c.agent.contains("codex"))
+        .unwrap_or_else(|| panic!("{creates:?}"));
+    let log = backend.log();
+    let created = log
+        .iter()
+        .position(|l| *l == format!("create {}", codex.name))
+        .unwrap();
+    assert_eq!(log[created + 1], format!("network_rules {}", codex.name));
+    assert_eq!(log[created + 2], format!("rm {}", codex.name), "{log:?}");
+    assert_eq!(
+        log.iter()
+            .filter(|l| **l == format!("rm {}", codex.name))
+            .count(),
+        1,
+        "{log:?}"
+    );
+    assert!(!log.contains(&format!("exec {}", codex.name)), "{log:?}");
+    let err = format!("{:#}", ran.result.err().unwrap());
+    assert!(err.contains("ended in error"), "{err}");
+}
