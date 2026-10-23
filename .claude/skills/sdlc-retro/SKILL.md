@@ -32,6 +32,7 @@ Read only; nothing is written in this step. For every task and PR in the window:
 | Merged PRs, their issues and sizes | `gh pr list --state merged --search "merged:<start>..<end>" --limit 500`, the issues' `size:` labels; if the count it returns equals the limit, raise the limit and run it again, so no PR is cut off |
 | Review rounds and must-fix counts per round, `Repeat of:` findings, stop reasons | each task's `run.log` and `review-<n>.md` under `<base>/.sbxm/tasks/` (or `task-archive/`), PR review comments |
 | Wall time per command (each `run.log` header to that command's last line) and per task (first header to `ready`) | `run.log` timestamps |
+| Time from each stop to the next command (a command's last line to the next header), per task, with the stop's cause, and the total per cause (decision 243) | `run.log` timestamps; the cause from the stopping command's last lines |
 | Time the latest worker or fix-round run and the latest reviewer run took | `duration_s` of `worker.run` and `reviewer.run` in `task.json`: each keeps only its latest run |
 | Earlier fix-round and review runs, and the agent total per task; sandbox setup and gate time | not recorded: write unknown; if a retro needs them, propose that as a sized code issue |
 | Hand fixes after a task finished, and why | commits on the PR after `review.posted`, the session handoffs in memory |

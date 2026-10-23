@@ -151,8 +151,12 @@ A milestone is built as one batch, reviewed once at the end, plus a parallel rev
      parallel (decision 219): the reviewer's own compile, `cargo test` and other gate runs wait until no slice build
      is running, because two local builds of the crate at once can both die (gap G48); the builder doesn't start a
      new build while the reviewer's checks run. A must-fix in the finished slice
-     becomes a fix commit (TDD) on the milestone branch once the current step is green; the rest are collected for the
-     end-of-milestone review. The next slice report says what the reviewer found.
+     becomes a fix commit (TDD) on the milestone branch once the current step is green. A should-fix is fixed in the
+     next slice or filed as an issue before the milestone review starts; the slice report and then the milestone PR
+     list each filed one with its issue number, and the end-of-milestone reviewer is given that list
+     (`sdlc-code-review` section 1), so the review doesn't raise it again (decision 242, an experiment for the next milestone;
+     milestone 3 parked 10 that came back at its review, 3 as must-fix). The next slice report says what the reviewer
+     found.
 4. **At the end of the milestone,** one full review of `main..<milestone branch>` with the `sdlc-code-review` skill
    (full checklist plus the cross-cutting sweep), written to `sdlc/reviews/<date>-milestone-<n>.md`. Its findings become
    GitHub issues (`must-fix`, `should-fix`, `question`).
