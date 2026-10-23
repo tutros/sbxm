@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -6,7 +7,7 @@ use anyhow::{Result, bail};
 use clap::ValueEnum;
 
 use super::new;
-use crate::backend::SandboxBackend;
+use crate::backend::{SandboxBackend, TemplateImage};
 use crate::config::{self, GlobalConfig, Profile};
 use crate::disk::{self, gib};
 use crate::harness::Harness;
@@ -223,9 +224,7 @@ fn check_templates(
         }
     };
     let now = (host.now)();
-    let mut total = 0;
     for (profile_name, harness, record) in &records {
-        total += record.size_bytes;
         let tag = &record.tag;
         let age = parse_timestamp(&record.created_at).map(|at| now.saturating_sub(at));
         report.pass(format!(
@@ -278,12 +277,46 @@ fn check_templates(
             ));
         }
     }
-    report.pass(format!(
-        "{} template{}, {} in total",
+    let templates = format!(
+        "{} template{}",
         records.len(),
-        if records.len() == 1 { "" } else { "s" },
-        gib(total)
-    ));
+        if records.len() == 1 { "" } else { "s" }
+    );
+    match &images {
+        Some(images) => {
+            let (count, total) = owned_images(&records, images);
+            report.pass(format!(
+                "{templates} ({count} image{}), {} in total",
+                if count == 1 { "" } else { "s" },
+                gib(total)
+            ));
+        }
+        None => {
+            let total = records.iter().map(|(_, _, r)| r.size_bytes).sum();
+            report.pass(format!(
+                "{templates}, {} in total (previous images not counted: sbx template ls failed)",
+                gib(total)
+            ));
+        }
+    }
+}
+
+/// The distinct tags the records name, current and previous, that `sbx template ls` still
+/// reports, and the sum of their sizes as `sbx` reports them: a missing image takes no disk.
+fn owned_images(
+    records: &[(String, Harness, template::Record)],
+    images: &[TemplateImage],
+) -> (usize, u64) {
+    let tags: BTreeSet<&str> = records
+        .iter()
+        .flat_map(|(_, _, r)| std::iter::once(&r.tag).chain(&r.previous))
+        .map(String::as_str)
+        .collect();
+    tags.iter()
+        .filter_map(|tag| images.iter().find(|i| i.reference() == *tag))
+        .fold((0, 0), |(count, total), image| {
+            (count + 1, total + image.size)
+        })
 }
 
 /// The folders in `profiles_dir`, sorted; `None` when it can't be read.
