@@ -413,6 +413,8 @@ fn run_pr(
         && let Some((task, commit)) = finish::reviewed_pr_task(&base_dir, &repo_name, number)
     {
         let pr = github.pr(&repo_name, number)?;
+        // Issue 229: a closed, merged or fork PR is refused as such, never with a `--force` hint.
+        pipeline::check_pr_reviewable(&pr, &repo_name)?;
         if pr.head_oid == commit {
             bail!(
                 "PR #{number} is already reviewed at `{commit}`: its head is the commit task \
