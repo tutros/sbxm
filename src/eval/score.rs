@@ -28,8 +28,8 @@ pub struct PairInput {
     pub repeat: u32,
     /// `completed`, `timed_out`, `failed` or `error` (from `result.json`).
     pub status: String,
-    /// The judge's 0-1 score per criterion id; `None` if the judge didn't
-    /// score this pair at all (no judge, or it failed).
+    /// The evaluator's 0-1 score per criterion id (the judge's, or Jev's for
+    /// [`load_jev`]); `None` if it didn't score this pair at all (none, or it failed).
     pub judge: Option<BTreeMap<String, f64>>,
     pub checks_passed: usize,
     pub checks_total: usize,
@@ -196,9 +196,105 @@ fn read_json(path: &Path) -> Option<Value> {
     serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
 }
 
+/// Jev's own ranking (decision 241 a): ranked by the same rules as the judge's, never blended
+/// with it, and the models that answered.
+#[derive(Debug, Clone, PartialEq)]
+pub struct JevRanking {
+    pub ranking: Ranking,
+    /// The distinct models that answered, sorted (`jev-1.13.0` for `jev-latest`).
+    pub models: Vec<String>,
+}
+
+/// Ranks a saved run by Jev's scores alone, from the same files as [`load`] (the `jev` key of
+/// each pair's `evals.json`). `None` when the run has no `[eval.jev]`.
+pub fn load_jev(meta: &Path) -> Result<Option<JevRanking>> {
+    let config_path = meta.join("run-config.toml");
+    let config = RunConfig::load(&config_path).with_context(|| {
+        format!(
+            "cannot read the run's config copy {}",
+            config_path.display()
+        )
+    })?;
+    if config.eval.jev.is_none() || config.eval.rubric.is_empty() {
+        return Ok(None);
+    }
+    let mut pairs = Vec::new();
+    let mut models = std::collections::BTreeSet::new();
+    for contestant in 0..config.contestants.len() {
+        for repeat in 0..config.run.repeat {
+            let dir = meta.join(contestant.to_string()).join(repeat.to_string());
+            let Some(result) = read_json(&dir.join("result.json")) else {
+                continue;
+            };
+            let evals = read_json(&dir.join("evals.json")).unwrap_or(Value::Null);
+            let jev = &evals["jev"];
+            let scores = (jev["status"] == "ok").then(|| {
+                if let Some(model) = jev["model"].as_str() {
+                    models.insert(model.to_owned());
+                }
+                jev["criteria"]
+                    .as_object()
+                    .map(|criteria| {
+                        criteria
+                            .iter()
+                            .filter_map(|(id, c)| Some((id.clone(), c["score"].as_f64()?)))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            });
+            let checks = evals["checks"].as_array().cloned().unwrap_or_default();
+            pairs.push(PairInput {
+                contestant,
+                repeat,
+                status: result["status"].as_str().unwrap_or("").to_owned(),
+                judge: scores,
+                checks_passed: checks.iter().filter(|c| c["passed"] == true).count(),
+                checks_total: checks.len(),
+            });
+        }
+    }
+    Ok(Some(JevRanking {
+        ranking: rank(
+            &config.eval.rubric,
+            config.contestants.len(),
+            config.run.repeat,
+            &pairs,
+        ),
+        models: models.into_iter().collect(),
+    }))
+}
+
+/// Jev's ranking as text, under its own heading naming the models that answered; printed
+/// after the judge's, which leads (decision 241 a).
+pub fn render_jev(jev: &JevRanking, labels: &[String]) -> String {
+    let models = if jev.models.is_empty() {
+        "no model answered".to_owned()
+    } else {
+        jev.models.join(", ")
+    };
+    render_as(
+        &format!(
+            "Jev ranking ({models}; scores 0-1, repeats averaged, not blended with the judge's)"
+        ),
+        "Jev",
+        &jev.ranking,
+        labels,
+    )
+}
+
 /// The ranking as text, `labels[i]` being `harness/model` of contestant i.
 pub fn render(ranking: &Ranking, labels: &[String]) -> String {
-    let mut out = String::from("Ranking (judge scores 0-1, repeats averaged)\n");
+    render_as(
+        "Ranking (judge scores 0-1, repeats averaged)",
+        "the judge",
+        ranking,
+        labels,
+    )
+}
+
+/// A ranking under `heading`, `scorer` naming who left a contestant unscored.
+fn render_as(heading: &str, scorer: &str, ranking: &Ranking, labels: &[String]) -> String {
+    let mut out = format!("{heading}\n");
     for c in &ranking.contestants {
         let who = format!(
             "contestants[{}] {}",
@@ -208,7 +304,7 @@ pub fn render(ranking: &Ranking, labels: &[String]) -> String {
         let Some((score, rank)) = c.score.zip(c.rank) else {
             let _ = writeln!(
                 out,
-                "  -  {who}: not scored (the judge scored none of its repeats)"
+                "  -  {who}: not scored ({scorer} scored none of its repeats)"
             );
             continue;
         };

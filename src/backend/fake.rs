@@ -7,8 +7,8 @@ use anyhow::{Result, bail};
 use std::path::Path;
 
 use super::{
-    CreateSpec, ExecOutput, ExecSpec, KitValidation, NetworkRule, SandboxBackend, SandboxInfo,
-    TemplateImage,
+    CreateSpec, CustomSecret, CustomSecretSpec, ExecOutput, ExecSpec, KitValidation, NetworkRule,
+    SandboxBackend, SandboxInfo, TemplateImage,
 };
 
 /// Holds every `exec` of a [`FakeBackend`] until [`ExecGate::open`], so a test
@@ -87,6 +87,7 @@ pub struct FakeBackend {
     exec_outputs_for: HashMap<String, ExecOutput>,
     default_exec_output: Option<ExecOutput>,
     fail_create_for: Vec<String>,
+    fail_create_matching: Vec<String>,
     fail_exec_for: Vec<String>,
     gate: Option<ExecGate>,
     /// Only sandboxes whose name ends with this are held at the gate.
@@ -107,6 +108,14 @@ pub struct FakeBackend {
     /// What `network_rules` returns, for every sandbox.
     network_rules: Vec<NetworkRule>,
     fail_network_rules: bool,
+    /// What `custom_secrets` returns; `set_custom_secret` adds to it, `remove_custom_secret`
+    /// takes away.
+    custom_secrets: Mutex<Vec<CustomSecret>>,
+    /// Every `set_custom_secret` call.
+    custom_secret_sets: Mutex<Vec<CustomSecretSpec>>,
+    fail_custom_secrets: bool,
+    fail_set_custom_secret: bool,
+    fail_remove_custom_secret: bool,
 }
 
 /// Runs inside every `exec` (after the gate), so a test can play the agent
@@ -322,6 +331,13 @@ impl FakeBackend {
         self
     }
 
+    /// Makes `create` of every sandbox whose name contains `needle` record the call and then
+    /// fail, for a sandbox whose full name (a run id) isn't known in advance.
+    pub fn with_failing_create_matching(mut self, needle: &str) -> Self {
+        self.fail_create_matching.push(needle.to_owned());
+        self
+    }
+
     /// Makes `exec` in this one sandbox record the call and then fail.
     pub fn with_failing_exec_for(mut self, sandbox: &str) -> Self {
         self.fail_exec_for.push(sandbox.to_owned());
@@ -448,6 +464,47 @@ impl FakeBackend {
         }
     }
 
+    /// A backend whose `custom_secrets` starts with these.
+    pub fn with_custom_secrets(self, secrets: Vec<CustomSecret>) -> Self {
+        *self.custom_secrets.lock().unwrap() = secrets;
+        self
+    }
+
+    /// Makes `custom_secrets` fail.
+    pub fn failing_custom_secrets(self) -> Self {
+        Self {
+            fail_custom_secrets: true,
+            ..self
+        }
+    }
+
+    /// Makes `set_custom_secret` record the call and then fail.
+    pub fn failing_set_custom_secret(self) -> Self {
+        Self {
+            fail_set_custom_secret: true,
+            ..self
+        }
+    }
+
+    /// Makes `remove_custom_secret` record the call and then fail.
+    pub fn failing_remove_custom_secret(self) -> Self {
+        Self {
+            fail_remove_custom_secret: true,
+            ..self
+        }
+    }
+
+    /// Every `set_custom_secret` call, in order.
+    pub fn custom_secret_sets(&self) -> Vec<CustomSecretSpec> {
+        self.custom_secret_sets.lock().unwrap().clone()
+    }
+
+    /// The custom secrets that exist now: those it started with, plus each set, minus each
+    /// removed.
+    pub fn current_custom_secrets(&self) -> Vec<CustomSecret> {
+        self.custom_secrets.lock().unwrap().clone()
+    }
+
     fn record(&self, call: &str, name: &str) {
         self.log.lock().unwrap().push(format!("{call} {name}"));
     }
@@ -460,7 +517,13 @@ impl SandboxBackend for FakeBackend {
         }
         self.creates.lock().unwrap().push(spec.clone());
         self.record("create", &spec.name);
-        if self.fail_create || self.fail_create_for.contains(&spec.name) {
+        if self.fail_create
+            || self.fail_create_for.contains(&spec.name)
+            || self
+                .fail_create_matching
+                .iter()
+                .any(|n| spec.name.contains(n.as_str()))
+        {
             bail!("fake create failure");
         }
         Ok(())
@@ -615,6 +678,44 @@ impl SandboxBackend for FakeBackend {
             bail!("fake network_rules failure");
         }
         Ok(self.network_rules.clone())
+    }
+
+    fn custom_secrets(&self) -> Result<Vec<CustomSecret>> {
+        if self.fail_custom_secrets {
+            bail!("fake: cannot list custom secrets");
+        }
+        Ok(self.custom_secrets.lock().unwrap().clone())
+    }
+
+    fn set_custom_secret(&self, spec: &CustomSecretSpec) -> Result<()> {
+        self.custom_secret_sets.lock().unwrap().push(spec.clone());
+        self.record(
+            "secret-set",
+            &format!("{} {}", spec.sandbox, spec.placeholder),
+        );
+        if self.fail_set_custom_secret {
+            bail!("fake set-custom failure");
+        }
+        self.custom_secrets.lock().unwrap().push(CustomSecret {
+            scope: spec.sandbox.clone(),
+            targets: vec![spec.host.clone()],
+            env: spec.env.clone(),
+            placeholder: spec.placeholder.clone(),
+        });
+        Ok(())
+    }
+
+    fn remove_custom_secret(&self, placeholder: &str, sandbox: &str) -> Result<()> {
+        self.record("secret-rm", &format!("{sandbox} {placeholder}"));
+        if self.fail_remove_custom_secret {
+            bail!("fake secret rm failure");
+        }
+        // One that is already gone is removed all the same, as `SbxBackend` answers.
+        self.custom_secrets
+            .lock()
+            .unwrap()
+            .retain(|s| !(s.placeholder == placeholder && s.scope == sandbox));
+        Ok(())
     }
 
     fn template_rm(&self, tag: &str) -> Result<()> {

@@ -493,9 +493,18 @@ pub const BUNDLE_CAP: u64 = 500 * 1024 * 1024;
 /// resolve to a real folder inside the workspace (not a link out of it) and the file must be a
 /// plain file, checked on the open handle. `Ok(None)` when the folder or file doesn't exist.
 fn open_agent_file(workspace: &Path, name: &str) -> Result<Option<(std::fs::File, u64)>> {
+    open_file_in(workspace, BUNDLE_DIR, name)
+}
+
+/// [`open_agent_file`] for `<workspace>/<folder>/<name>`, `folder` being one plain name.
+fn open_file_in(
+    workspace: &Path,
+    folder_name: &str,
+    name: &str,
+) -> Result<Option<(std::fs::File, u64)>> {
     use std::io::ErrorKind::NotFound;
 
-    let folder = workspace.join(BUNDLE_DIR);
+    let folder = workspace.join(folder_name);
     let real_workspace = std::fs::canonicalize(workspace)
         .with_context(|| format!("cannot read the workspace {}", workspace.display()))?;
     let real_folder = match std::fs::canonicalize(&folder) {
@@ -503,7 +512,7 @@ fn open_agent_file(workspace: &Path, name: &str) -> Result<Option<(std::fs::File
         Err(e) if e.kind() == NotFound => return Ok(None),
         Err(e) => return Err(e).with_context(|| format!("cannot read {}", folder.display())),
     };
-    if real_folder != real_workspace.join(BUNDLE_DIR) {
+    if real_folder != real_workspace.join(folder_name) {
         bail!(
             "the folder {} doesn't resolve to a folder inside the workspace; refusing to read it",
             folder.display()
@@ -630,9 +639,15 @@ pub enum AgentFile {
 /// Reads `<workspace>/.sbxm-task/<name>` as text (lossily), at most `cap` bytes; never follows
 /// a link out of the workspace.
 pub fn read_agent_file(workspace: &Path, name: &str, cap: u64) -> Result<AgentFile> {
+    read_file_in(workspace, BUNDLE_DIR, name, cap)
+}
+
+/// [`read_agent_file`] for `<workspace>/<folder>/<name>`: the same link-free, size-capped read,
+/// e.g. of the Jev evaluator's `response.json` (decision 241).
+pub fn read_file_in(workspace: &Path, folder: &str, name: &str, cap: u64) -> Result<AgentFile> {
     use std::io::Read;
 
-    let Some((file, len)) = open_agent_file(workspace, name)? else {
+    let Some((file, len)) = open_file_in(workspace, folder, name)? else {
         return Ok(AgentFile::Missing);
     };
     if len > cap {

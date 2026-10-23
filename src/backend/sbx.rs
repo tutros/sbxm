@@ -9,8 +9,8 @@ use serde::Deserialize;
 use std::path::Path;
 
 use super::{
-    CreateSpec, ExecOutput, ExecSpec, KitValidation, NetworkRule, SandboxBackend, SandboxInfo,
-    Stdin, TemplateImage, check_template_tag,
+    CreateSpec, CustomSecret, CustomSecretSpec, ExecOutput, ExecSpec, KitValidation, NetworkRule,
+    SandboxBackend, SandboxInfo, SecretSource, Stdin, TemplateImage, check_template_tag,
 };
 
 /// Shells out to the `sbx` CLI on PATH.
@@ -196,6 +196,121 @@ impl SandboxBackend for SbxBackend {
         }
         parse_policy_ls(&String::from_utf8_lossy(&output.stdout))
     }
+
+    fn custom_secrets(&self) -> Result<Vec<CustomSecret>> {
+        let output = Command::new("sbx")
+            .args(secret_ls_args())
+            .stdin(Stdio::null())
+            .output()
+            .context(SBX_MISSING)?;
+        if !output.status.success() {
+            bail!(
+                "`sbx secret ls --json` failed ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        parse_custom_secrets(&String::from_utf8_lossy(&output.stdout))
+    }
+
+    fn set_custom_secret(&self, spec: &CustomSecretSpec) -> Result<()> {
+        let args = set_custom_args(spec);
+        let output = Command::new("sbx")
+            .args(&args)
+            .stdin(Stdio::null())
+            .output()
+            .context(SBX_MISSING)?;
+        if !output.status.success() {
+            // `sbx` verifies the helper by running it, so its output is never repeated here: it
+            // could carry the token (decision 36).
+            bail!(
+                "`sbx {}` failed ({}); run it yourself to see why",
+                args.join(" "),
+                output.status
+            );
+        }
+        Ok(())
+    }
+
+    fn remove_custom_secret(&self, placeholder: &str, sandbox: &str) -> Result<()> {
+        let args = remove_custom_args(placeholder, sandbox);
+        let output = Command::new("sbx")
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .context(SBX_MISSING)?;
+        if output.status.success() || custom_secret_absent(&output.stdout, &output.stderr) {
+            return Ok(());
+        }
+        bail!(
+            "`sbx {}` failed ({}): {}",
+            args.join(" "),
+            output.status,
+            failure_reason(&output.stdout, &output.stderr)
+        )
+    }
+}
+
+/// `sbx secret set-custom` for one sandbox, the value's source by `--command` or `--ref`.
+fn set_custom_args(spec: &CustomSecretSpec) -> Vec<String> {
+    let mut args: Vec<String> = [
+        "secret",
+        "set-custom",
+        "--sandbox",
+        &spec.sandbox,
+        "--host",
+        &spec.host,
+        "--env",
+        &spec.env,
+        "--placeholder",
+        &spec.placeholder,
+    ]
+    .map(str::to_owned)
+    .into();
+    match &spec.source {
+        SecretSource::Command(path) => {
+            args.extend(["--command".to_owned(), path.display().to_string()])
+        }
+        SecretSource::Ref(reference) => args.extend(["--ref".to_owned(), reference.clone()]),
+    }
+    args
+}
+
+/// By `--placeholder`, never positionally (a positional argument is a service name) and never
+/// `--all` (it removes the real secrets too; S9).
+fn remove_custom_args<'a>(placeholder: &'a str, sandbox: &'a str) -> [&'a str; 7] {
+    [
+        "secret",
+        "rm",
+        "--placeholder",
+        placeholder,
+        "--sandbox",
+        sandbox,
+        "-f",
+    ]
+}
+
+/// `sbx secret rm` answered that the secret is already gone (S12: removing the sandbox had
+/// removed it), which is what the caller wanted.
+fn custom_secret_absent(stdout: &[u8], stderr: &[u8]) -> bool {
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(stdout),
+        String::from_utf8_lossy(stderr)
+    );
+    text.to_lowercase().contains("no custom secret found")
+}
+
+/// The `custom_secrets` array of `sbx secret ls --json` (S9).
+fn parse_custom_secrets(json: &str) -> Result<Vec<CustomSecret>> {
+    #[derive(Deserialize)]
+    struct SecretLs {
+        #[serde(default)]
+        custom_secrets: Vec<CustomSecret>,
+    }
+    let ls: SecretLs =
+        serde_json::from_str(json).context("unexpected `sbx secret ls --json` output")?;
+    Ok(ls.custom_secrets)
 }
 
 /// Runs `sbx <args>` with stdin closed, so a question `sbx` asks (S11: `template save` on a
@@ -589,6 +704,8 @@ mod validate_tests {
 
 #[cfg(test)]
 mod secret_tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     /// Reconstructed (decision 58): field names and the global `anthropic`
@@ -599,6 +716,88 @@ mod secret_tests {
     #[test]
     fn keeps_only_global_service_secrets() {
         assert_eq!(parse_secret_ls(SECRET_LS).unwrap(), ["anthropic"]);
+    }
+
+    /// Reconstructed from spike S9's record of `sbx secret ls --json` on sbx v0.46.0 (the shape
+    /// `{scope, targets[], env, placeholder, secret?}`; a `--command` secret has no `secret`):
+    /// a global `--value` secret and one scoped to a sandbox, with the S9 fake values.
+    const SECRET_LS_CUSTOM: &str = include_str!("fixtures/sbx-secret-ls-custom.json");
+
+    #[test]
+    fn parses_custom_secrets_and_their_scope() {
+        let all = parse_custom_secrets(SECRET_LS_CUSTOM).unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(
+            all[0],
+            CustomSecret {
+                scope: "global".into(),
+                targets: vec!["httpbin.org".into()],
+                env: "JEV_API_KEY".into(),
+                placeholder: "sbx-cs-FAKE-PLACEHOLDER-ONE".into(),
+            }
+        );
+        assert!(all[0].is_global());
+        assert!(!all[1].is_global());
+        assert_eq!(all[1].placeholder, "sbxm-jev-two");
+        // The older listing has no custom secrets at all.
+        assert_eq!(parse_custom_secrets(SECRET_LS).unwrap(), []);
+    }
+
+    #[test]
+    fn set_custom_args_match_sbx_cli() {
+        let mut spec = CustomSecretSpec {
+            sandbox: "sbxm-run-x-jev-0".into(),
+            host: "api.typesafe.ai".into(),
+            env: "JEV_API_KEY".into(),
+            placeholder: "sbxm-jev-x-0".into(),
+            source: SecretSource::Command(PathBuf::from("/opt/jev-token")),
+        };
+        assert_eq!(
+            set_custom_args(&spec),
+            [
+                "secret",
+                "set-custom",
+                "--sandbox",
+                "sbxm-run-x-jev-0",
+                "--host",
+                "api.typesafe.ai",
+                "--env",
+                "JEV_API_KEY",
+                "--placeholder",
+                "sbxm-jev-x-0",
+                "--command",
+                "/opt/jev-token"
+            ]
+        );
+        spec.source = SecretSource::Ref("op://vault/jev/token".into());
+        let args = set_custom_args(&spec);
+        assert_eq!(args[10..], ["--ref", "op://vault/jev/token"]);
+        assert!(!args.iter().any(|a| a == "--value"));
+    }
+
+    #[test]
+    fn remove_custom_args_name_the_placeholder_and_never_all() {
+        assert_eq!(
+            remove_custom_args("sbxm-jev-x-0", "sbxm-run-x-jev-0"),
+            [
+                "secret",
+                "rm",
+                "--placeholder",
+                "sbxm-jev-x-0",
+                "--sandbox",
+                "sbxm-run-x-jev-0",
+                "-f"
+            ]
+        );
+    }
+
+    #[test]
+    fn an_already_removed_custom_secret_counts_as_removed() {
+        assert!(custom_secret_absent(
+            b"",
+            b"ERROR: no custom secret found for placeholder \"sbxm-jev-x-0\""
+        ));
+        assert!(!custom_secret_absent(b"", b"ERROR: daemon not running"));
     }
 
     #[test]
