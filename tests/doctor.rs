@@ -760,7 +760,7 @@ fn doctor_lists_each_template_with_its_size_and_age_and_the_total() {
         "{text}"
     );
     assert!(
-        text.contains(&format!("ok   1 template, {size} in total\n")),
+        text.contains(&format!("ok   1 template (1 image), {size} in total\n")),
         "{text}"
     );
     assert!(!text.contains("warn template"), "{text}");
@@ -874,4 +874,141 @@ fn an_sbx_older_than_the_template_minimum_passes_without_a_template_profile() {
     let text = report.render();
     assert!(!text.contains("templates need"), "{text}");
     assert!(!text.contains("template"), "{text}");
+}
+
+/// Saves the `default-claude` record with `tag` and `previous`, its own size 2 GiB.
+fn save_record(env: &Env, tag: &str, previous: &[&str]) {
+    env.write_profile("default", TEMPLATE_PROFILE);
+    sbxm::template::Record {
+        tag: tag.into(),
+        template_hash: "0".repeat(64),
+        warm: false,
+        lock_files: Vec::new(),
+        lock_hash: None,
+        sbx_version: "0.46.0".into(),
+        size_bytes: 2 * GIB,
+        created_at: "2026-10-16T00:00:00Z".into(),
+        previous: previous.iter().map(|t| (*t).to_owned()).collect(),
+    }
+    .save(&env.base_dir(), "default-claude")
+    .unwrap();
+}
+
+/// An image `sbx template ls` reports for `tag` with `size` bytes.
+fn image(tag: &str, size: u64) -> sbxm::backend::TemplateImage {
+    let (name, version) = tag.split_once(':').unwrap();
+    sbxm::backend::TemplateImage {
+        id: "fake".into(),
+        repository: format!("docker.io/library/{name}"),
+        tag: version.into(),
+        flavor: "fake".into(),
+        created_at: "2026-10-16T00:00:00Z".into(),
+        size,
+    }
+}
+
+const CURRENT: &str = "sbxm-default-claude:aaaaaaaaaaaa-20261016t0000";
+const OLD_1: &str = "sbxm-default-claude:bbbbbbbbbbbb-20261010t0000";
+const OLD_2: &str = "sbxm-default-claude:cccccccccccc-20261001t0000";
+
+fn total_line(env: &Env, images: Vec<sbxm::backend::TemplateImage>) -> String {
+    let text = report(env, &sbx_046().with_templates(images)).render();
+    text.lines()
+        .find(|l| l.contains("in total"))
+        .unwrap_or_else(|| panic!("no total line in {text}"))
+        .to_owned()
+}
+
+#[test]
+fn the_total_of_a_template_without_previous_tags_is_its_image() {
+    let env = Env::new();
+    save_record(&env, CURRENT, &[]);
+
+    let line = total_line(&env, vec![image(CURRENT, 3 * GIB)]);
+
+    assert_eq!(line, "ok   1 template (1 image), 3.0 GiB in total");
+}
+
+#[test]
+fn the_total_adds_a_present_previous_image() {
+    let env = Env::new();
+    save_record(&env, CURRENT, &[OLD_1]);
+
+    let line = total_line(&env, vec![image(CURRENT, 2 * GIB), image(OLD_1, 2 * GIB)]);
+
+    assert_eq!(line, "ok   1 template (2 images), 4.0 GiB in total");
+}
+
+#[test]
+fn the_total_adds_every_present_previous_image() {
+    let env = Env::new();
+    save_record(&env, CURRENT, &[OLD_1, OLD_2]);
+
+    let line = total_line(
+        &env,
+        vec![
+            image(CURRENT, 2 * GIB),
+            image(OLD_1, GIB),
+            image(OLD_2, GIB),
+        ],
+    );
+
+    assert_eq!(line, "ok   1 template (3 images), 4.0 GiB in total");
+}
+
+#[test]
+fn a_missing_previous_image_is_not_counted() {
+    let env = Env::new();
+    save_record(&env, CURRENT, &[OLD_1, OLD_2]);
+
+    let line = total_line(&env, vec![image(CURRENT, 2 * GIB), image(OLD_2, GIB)]);
+
+    assert_eq!(line, "ok   1 template (2 images), 3.0 GiB in total");
+}
+
+#[test]
+fn a_missing_current_image_is_not_counted_and_still_warns() {
+    let env = Env::new();
+    save_record(&env, CURRENT, &[OLD_1]);
+
+    let text = report(&env, &sbx_046().with_templates(vec![image(OLD_1, GIB)])).render();
+
+    assert!(
+        text.contains("ok   1 template (1 image), 1.0 GiB in total\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains(&format!(
+            "warn template {CURRENT}: image missing; rebuild it with `sbxm template build \
+             default` or remove the record with `sbxm template rm default`\n"
+        )),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_failing_template_ls_falls_back_to_the_recorded_sizes() {
+    let env = Env::new();
+    save_record(&env, CURRENT, &[OLD_1]);
+
+    let text = report(&env, &sbx_046().failing_template_ls()).render();
+
+    assert!(
+        text.contains(
+            "ok   1 template, 2.0 GiB in total (previous images not counted: sbx template ls \
+             failed)\n"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("template images aren't checked"), "{text}");
+}
+
+#[test]
+fn a_tag_both_current_and_previous_is_counted_once() {
+    let env = Env::new();
+    save_record(&env, CURRENT, &[CURRENT, OLD_1]);
+
+    let line = total_line(&env, vec![image(CURRENT, 2 * GIB), image(OLD_1, GIB)]);
+
+    assert_eq!(line, "ok   1 template (2 images), 3.0 GiB in total");
 }
