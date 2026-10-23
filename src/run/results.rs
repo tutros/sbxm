@@ -108,6 +108,8 @@ pub fn write_run_start(meta: &Path, start: &RunStart) -> Result<()> {
             "profile": h.profile,
             "harness": h.harness.as_str(),
             "config_hash": h.config_hash,
+            // Always present: the tag, or null for the install steps (decision 246).
+            "template": h.template,
             "kits": h.dirs.iter().map(|d| d.display().to_string()).collect::<Vec<_>>(),
         })).collect::<Vec<_>>(),
     });

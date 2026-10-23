@@ -82,7 +82,10 @@ fn run_json(env: &Env, completed: Option<&str>) {
                 {"index": 0, "harness": "claude", "model": "model-a", "profile": "default"},
                 {"index": 1, "harness": "codex", "model": "model-b", "profile": "default"},
             ],
-            "harnesses": [],
+            // A run from before decision 246: no `template` key.
+            "harnesses": [
+                {"profile": "default", "harness": "claude", "config_hash": "abc", "kits": []},
+            ],
         }),
     );
 }
