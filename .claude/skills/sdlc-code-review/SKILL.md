@@ -23,6 +23,13 @@ Read first: `git diff --stat <base>..<head>`, then the full diff, then the slice
 decision the commits cite. Read each changed function whole, not just its diff hunk: most real bugs sit next to the
 change, not in it.
 
+**Filed slice findings (decision 242).** Before an end-of-milestone review, the builder gives the reviewer the list of
+slice-review should-fix findings that were filed as issues instead of fixed: the slice reports collect it, and the
+milestone PR repeats it once it exists, so the list is there even when the review runs before the PR. A listed finding
+whose code the milestone hasn't changed since is recorded once, under `## Already filed`, with its issue number, and is
+not reported again as a new finding. One whose code changed, or that is now worse (for example a must-fix), is
+reviewed as a new finding that names the listed issue it supersedes.
+
 ## 2. Evidence rules
 
 - Every finding cites `file:line` (or a commit) and says **what happens**, not what might: a failing input, the wrong
