@@ -4,7 +4,7 @@
 //! use `task_writers` / `RunLog`, which would.
 
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{ErrorKind, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -64,10 +64,13 @@ pub fn run(config_dir: &Path, opts: &Options, env: &Env, out: &mut dyn Write) ->
         bail!("no task {id}; run `sbxm task status` to list the tasks");
     }
     let log = dir.join("run.log");
-    let mut file = File::open(&log)
-        .map_err(|_| anyhow::anyhow!("task {id} has no run.log yet; see {}", dir.display()))?;
+    // Issue 232: only a log that isn't there is "not there yet"; any other error names the file
+    // and the OS's own text. A first read that fails counts as not opening it, so a folder named
+    // `run.log` reads the same on Linux (open succeeds, read fails) as on Windows (open fails).
+    let mut file = File::open(&log).map_err(|e| open_error(&id, &dir, &log, &e))?;
     let mut buf = Vec::new();
-    file.read_to_end(&mut buf)?;
+    file.read_to_end(&mut buf)
+        .map_err(|e| open_error(&id, &dir, &log, &e))?;
     out.write_all(&buf)?;
     out.flush()?;
     if !opts.follow {
@@ -88,4 +91,44 @@ pub fn run(config_dir: &Path, opts: &Options, env: &Env, out: &mut dyn Write) ->
         }
     }
     Ok(())
+}
+
+/// The error for a `run.log` that couldn't be opened (issue 232).
+fn open_error(id: &str, dir: &Path, log: &Path, err: &std::io::Error) -> anyhow::Error {
+    if err.kind() == ErrorKind::NotFound {
+        anyhow::anyhow!("task {id} has no run.log yet; see {}", dir.display())
+    } else {
+        anyhow::anyhow!("cannot open {}: {err}", log.display())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue 232, the rule itself: every error other than not-found names the path and the OS
+    /// error text.
+    #[test]
+    fn every_error_but_not_found_names_the_path_and_the_os_error() {
+        let dir = Path::new("tasks").join("issue-41");
+        let log = dir.join("run.log");
+        for kind in [
+            ErrorKind::PermissionDenied,
+            ErrorKind::IsADirectory,
+            ErrorKind::InvalidInput,
+            ErrorKind::Other,
+        ] {
+            let err = std::io::Error::new(kind, "the os text");
+            assert_eq!(
+                open_error("issue-41", &dir, &log, &err).to_string(),
+                format!("cannot open {}: the os text", log.display()),
+                "{kind:?}"
+            );
+        }
+        let not_found = std::io::Error::from(ErrorKind::NotFound);
+        assert_eq!(
+            open_error("issue-41", &dir, &log, &not_found).to_string(),
+            format!("task issue-41 has no run.log yet; see {}", dir.display())
+        );
+    }
 }

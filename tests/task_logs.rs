@@ -229,3 +229,105 @@ fn the_cli_command_refuses_an_unknown_task_and_writes_nothing() {
     assert!(stderr.contains("no task issue-41") && stderr.contains("sbxm task status"));
     assert!(!record::task_dir(&env.base_dir(), "issue-41").exists());
 }
+
+/// Issue 232, boundary case 1 of 4, through the real CLI binary: a missing `run.log` keeps the
+/// message it always had, and exits 1.
+#[test]
+fn the_cli_command_reports_a_missing_log_as_not_there_yet_and_exits_1() {
+    let env = Env::new();
+    let task = save_task(&env.base_dir(), Kind::Issue, 41);
+    let dir = record::task_dir(&env.base_dir(), &task.id);
+
+    let output = assert_cmd::Command::cargo_bin("sbxm")
+        .unwrap()
+        .env("SBXM_CONFIG_DIR", env.config_dir())
+        .args(["task", "logs", "--issue", "41"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        stderr.contains(&format!(
+            "task issue-41 has no run.log yet; see {}",
+            dir.display()
+        )),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("cannot open"), "{stderr}");
+}
+
+/// Issue 232, boundary case 3 of 4: a `run.log` that is a folder is not "missing"; the error
+/// names the path and the operating system's own text for it (on Windows opening the folder
+/// fails, on Linux reading it does: both are reported the same way).
+#[test]
+fn a_log_that_is_a_folder_is_reported_with_its_path_and_the_os_error() {
+    let env = Env::new();
+    let task = save_task(&env.base_dir(), Kind::Issue, 41);
+    let log = record::task_dir(&env.base_dir(), &task.id).join("run.log");
+    fs::create_dir(&log).unwrap();
+    let os_error = fs::read(&log).unwrap_err().to_string();
+
+    let (result, out) = run_logs(&env, Target::Issue(41), false, &task_logs::Env::real());
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert_eq!(
+        message,
+        format!("cannot open {}: {os_error}", log.display())
+    );
+    assert!(out.is_empty());
+}
+
+/// Issue 232, boundary case 2 of 4: a `run.log` the user may not read. Skipped where the
+/// permission can't take effect (running as root).
+#[cfg(unix)]
+#[test]
+fn an_unreadable_log_is_reported_with_its_path_and_the_os_error() {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let env = Env::new();
+    let task = save_task(&env.base_dir(), Kind::Issue, 41);
+    let log = record::task_dir(&env.base_dir(), &task.id).join("run.log");
+    fs::write(&log, "secret\n").unwrap();
+    fs::set_permissions(&log, fs::Permissions::from_mode(0o000)).unwrap();
+    let Err(os_error) = fs::File::open(&log) else {
+        eprintln!("skipped: the permission has no effect for this user");
+        return;
+    };
+
+    let (result, out) = run_logs(&env, Target::Issue(41), true, &task_logs::Env::real());
+
+    fs::set_permissions(&log, fs::Permissions::from_mode(0o644)).unwrap();
+    let message = format!("{:#}", result.unwrap_err());
+    assert_eq!(
+        message,
+        format!("cannot open {}: {os_error}", log.display())
+    );
+    assert!(!message.contains("no run.log yet"), "{message}");
+    assert!(out.is_empty());
+}
+
+/// Issue 232, boundary case 4 of 4, through the real CLI binary: an open error other than
+/// not-found exits 1 and names the path, never the "no run.log yet" message.
+#[test]
+fn the_cli_command_reports_any_other_open_error_with_the_path_and_exits_1() {
+    let env = Env::new();
+    let task = save_task(&env.base_dir(), Kind::Issue, 41);
+    let log = record::task_dir(&env.base_dir(), &task.id).join("run.log");
+    fs::create_dir(&log).unwrap();
+
+    let output = assert_cmd::Command::cargo_bin("sbxm")
+        .unwrap()
+        .env("SBXM_CONFIG_DIR", env.config_dir())
+        .args(["task", "logs", "--issue", "41"])
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    assert!(
+        stderr.contains(&format!("cannot open {}: ", log.display())),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("no run.log yet"), "{stderr}");
+}
