@@ -292,6 +292,13 @@ fn step_failed(repo: &Path, failed: &gates::GateOutcome) -> Error {
     )
 }
 
+/// Writes one progress line and flushes it, so a long step after it is not mistaken for a hang.
+fn announce(warn: &mut dyn Write, line: &str) -> Result<()> {
+    writeln!(warn, "{line}")?;
+    warn.flush()?;
+    Ok(())
+}
+
 /// The names and folders one build uses (decision 210), and its record before the size is known.
 struct Build {
     profile_name: String,
@@ -511,7 +518,7 @@ impl Build {
             deny_network: Vec::new(),
         })?;
         if let Some(warm) = &self.warm {
-            self.warm_up(warm, backend)?;
+            self.warm_up(warm, backend, warn)?;
         }
         backend.stop(&self.sandbox)?;
         backend.template_save(&self.sandbox, tag)?;
@@ -541,17 +548,22 @@ impl Build {
 
     /// Runs the repo's `[warm]` commands in the build sandbox, or else the built-in cargo steps
     /// and then cleans the repo's own packages out of the target folder so only the dependencies
-    /// stay (decision 207).
-    fn warm_up(&self, warm: &Warm, backend: &dyn SandboxBackend) -> Result<()> {
+    /// stay (decision 207). Each step is announced on `warn` before it runs (issue 277).
+    fn warm_up(
+        &self,
+        warm: &Warm,
+        backend: &dyn SandboxBackend,
+        warn: &mut dyn Write,
+    ) -> Result<()> {
         let repo = warm.repo.as_path();
         let workdir = in_sandbox_path(&self.workspace);
-        let run = |commands: Vec<String>| -> Result<()> {
+        let run = |command: String| -> Result<()> {
             let outcomes = gates::run_sandbox_tier(
                 backend,
                 &self.sandbox,
                 &workdir,
                 "warm",
-                &commands,
+                &[command],
                 DEFAULT_GATE_TIMEOUT,
             );
             match outcomes.iter().find(|o| !o.result.passed) {
@@ -560,17 +572,36 @@ impl Build {
             }
         };
         if let Some(commands) = &warm.commands {
-            return run(commands.clone());
+            for (i, command) in commands.iter().enumerate() {
+                announce(
+                    warn,
+                    &format!("warm-up {} of {}: {command}", i + 1, commands.len()),
+                )?;
+                run(command.clone())?;
+            }
+            return Ok(());
         }
-        run(CARGO_STEPS
-            .iter()
-            .map(|step| format!("{CARGO_STEP_ENV} {step}"))
-            .collect())?;
+        for (i, step) in CARGO_STEPS.iter().enumerate() {
+            announce(
+                warn,
+                &format!("warm-up {} of {}: {step}", i + 1, CARGO_STEPS.len()),
+            )?;
+            run(format!("{CARGO_STEP_ENV} {step}"))?;
+        }
+        announce(warn, "warm-up: cargo metadata --no-deps")?;
         let packages = self.packages(repo, backend, &workdir)?;
-        run(packages
-            .iter()
-            .map(|p| format!("{CARGO_STEP_ENV} cargo clean -p {p}"))
-            .collect())
+        for (j, package) in packages.iter().enumerate() {
+            announce(
+                warn,
+                &format!(
+                    "warm-up: cargo clean -p {package} ({} of {})",
+                    j + 1,
+                    packages.len()
+                ),
+            )?;
+            run(format!("{CARGO_STEP_ENV} cargo clean -p {package}"))?;
+        }
+        Ok(())
     }
 
     /// The repo's own packages, as `cargo metadata --no-deps` names them in the build sandbox.

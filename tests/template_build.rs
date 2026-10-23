@@ -1658,3 +1658,211 @@ fn task_commands_accept_a_warm_table() {
 
     sbxm::task::config::TaskConfig::load(&repo).unwrap();
 }
+
+// Issue 277: one progress line on stderr before each warm-up step.
+
+/// What a build wrote to stderr and what the backend ran, in one order.
+type Events = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+/// A stderr writer that publishes its lines to `events` only when flushed, so a line that is
+/// not flushed before the next exec shows up after it.
+struct FlushedLines {
+    events: Events,
+    pending: Vec<u8>,
+}
+
+impl std::io::Write for FlushedLines {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.pending.extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let text = String::from_utf8(std::mem::take(&mut self.pending)).unwrap();
+        let mut events = self.events.lock().unwrap();
+        events.extend(text.lines().map(|l| format!("err: {l}")));
+        Ok(())
+    }
+}
+
+/// Builds with `backend`, returning the result, the warm-up lines and execs in the order they
+/// happened, and stdout.
+fn traced_build(
+    env: &Env,
+    options: &template_build::Options,
+    backend: FakeBackend,
+) -> (anyhow::Result<()>, Vec<String>, String, FakeBackend) {
+    let events = Events::default();
+    let hook_events = events.clone();
+    let backend = backend.with_exec_hook(move |_, spec| {
+        let command = spec.argv.last().unwrap();
+        hook_events.lock().unwrap().push(format!("exec: {command}"));
+    });
+    let mut warn = FlushedLines {
+        events: events.clone(),
+        pending: Vec::new(),
+    };
+    let mut out = Vec::new();
+    let result = template_build::run(
+        &env.config_dir(),
+        options,
+        &backend,
+        &SystemProbe,
+        &mut out,
+        &mut warn,
+    );
+    let events = events
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|e| e.starts_with("exec: ") || e.starts_with("err: warm-up"))
+        .map(|e| match e.strip_prefix("exec: ") {
+            // Keep only what the step runs, after the cargo environment and `sh -c` wrapping.
+            Some(command) => format!("exec: {}", step_of(command)),
+            None => e.clone(),
+        })
+        .collect();
+    (result, events, String::from_utf8(out).unwrap(), backend)
+}
+
+/// The warm-up command an exec's shell text ends with, without the step environment.
+fn step_of(command: &str) -> String {
+    let tail = command.rsplit(STEP_ENV).next().unwrap();
+    let tail = tail.rsplit(".cargo/env\"; ").next().unwrap();
+    tail.trim().to_owned()
+}
+
+#[test]
+fn a_single_warm_command_prints_one_of_one_before_its_exec() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let repo = warm_repo(
+        &env,
+        "[warm]\ncommands = [\"npm ci\"]\nlock_files = [\"package-lock.json\"]\n",
+    );
+
+    let (result, events, _, _) = traced_build(&env, &warm(&repo), sbx_046());
+
+    result.unwrap();
+    assert_eq!(events, ["err: warm-up 1 of 1: npm ci", "exec: npm ci"]);
+}
+
+#[test]
+fn several_warm_commands_print_each_line_before_its_exec() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let repo = warm_repo(&env, NPM_WARM);
+
+    let (result, events, _, _) = traced_build(&env, &warm(&repo), sbx_046());
+
+    result.unwrap();
+    assert_eq!(
+        events,
+        [
+            "err: warm-up 1 of 2: npm ci",
+            "exec: npm ci",
+            "err: warm-up 2 of 2: npm run build",
+            "exec: npm run build",
+        ]
+    );
+}
+
+#[test]
+fn a_failing_first_warm_command_prints_no_later_line() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let repo = warm_repo(&env, NPM_WARM);
+    let backend = sbx_046().with_exec_output_matching(
+        "npm ci",
+        sbxm::backend::ExecOutput {
+            stdout: String::new(),
+            stderr: "npm ERR! missing script\n".into(),
+            exit_code: Some(1),
+        },
+    );
+
+    let (result, events, _, backend) = traced_build(&env, &warm(&repo), backend);
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert_eq!(events, ["err: warm-up 1 of 2: npm ci", "exec: npm ci"]);
+    assert!(
+        message.contains("warm-up step `npm ci` failed with exit 1"),
+        "{message}"
+    );
+    assert!(message.contains("npm ERR! missing script"), "{message}");
+    assert_nothing_left(&env, &backend);
+}
+
+/// The built-in warm-up's lines and execs up to the package cleans.
+fn cargo_events_before_cleans() -> Vec<String> {
+    let mut events = Vec::new();
+    for (i, step) in [
+        "cargo fetch --locked",
+        "cargo clippy --all-targets --locked",
+        "cargo test --no-run --locked",
+    ]
+    .iter()
+    .enumerate()
+    {
+        events.push(format!("err: warm-up {} of 3: {step}", i + 1));
+        events.push(format!("exec: {step}"));
+    }
+    events.push("err: warm-up: cargo metadata --no-deps".to_owned());
+    events.push("exec: cargo metadata --no-deps --format-version 1".to_owned());
+    events
+}
+
+#[test]
+fn the_built_in_warm_up_with_one_package_prints_one_clean_line() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let repo = cargo_repo(&env);
+    let backend = sbx_046().with_exec_output_matching(
+        "cargo metadata",
+        sbxm::backend::ExecOutput {
+            stdout: r#"{"packages":[{"name":"app"}],"version":1}"#.into(),
+            stderr: String::new(),
+            exit_code: Some(0),
+        },
+    );
+
+    let (result, events, _, _) = traced_build(&env, &warm(&repo), backend);
+
+    result.unwrap();
+    let mut expected = cargo_events_before_cleans();
+    expected.push("err: warm-up: cargo clean -p app (1 of 1)".to_owned());
+    expected.push("exec: cargo clean -p app".to_owned());
+    assert_eq!(events, expected);
+}
+
+#[test]
+fn the_built_in_warm_up_prints_one_clean_line_per_package() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let repo = cargo_repo(&env);
+
+    let (result, events, _, _) = traced_build(&env, &warm(&repo), warm_backend());
+
+    result.unwrap();
+    let mut expected = cargo_events_before_cleans();
+    expected.extend([
+        "err: warm-up: cargo clean -p app (1 of 2)".to_owned(),
+        "exec: cargo clean -p app".to_owned(),
+        "err: warm-up: cargo clean -p app-core (2 of 2)".to_owned(),
+        "exec: cargo clean -p app-core".to_owned(),
+    ]);
+    assert_eq!(events, expected);
+}
+
+#[test]
+fn warm_up_progress_stays_off_stdout() {
+    let env = Env::new();
+    env.write_profile("default", BUILD_PROFILE);
+    let repo = cargo_repo(&env);
+
+    let (result, _, stdout, _) = traced_build(&env, &warm(&repo), warm_backend());
+
+    result.unwrap();
+    let tag = record(&env)["tag"].as_str().unwrap().to_owned();
+    assert_eq!(stdout, format!("{tag}\n"));
+}
