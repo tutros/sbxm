@@ -186,7 +186,9 @@ pub fn plan(
     diff: Option<&str>,
 ) -> Result<Plan, String> {
     let questions = questions(task, rubric);
-    let bare = estimate("", &questions);
+    // The task alone is the request with no answer and no diff: the state's fixed headings count
+    // against the task, so an empty answer is never blamed for them (PR 289 review M-2).
+    let bare = estimate(&state("", "", None), &questions);
     if bare > TOKEN_CAP {
         return Err(format!(
             "the task is too long for Jev (about {bare} tokens with the questions, the limit is \
@@ -208,11 +210,25 @@ pub fn plan(
     let fits = |text: &str, part: Option<&str>| {
         estimate(&state(answer, text, part), &questions) <= TOKEN_CAP
     };
-    let diff = match diff {
-        None => "(no diff available)",
-        Some(d) if d.trim().is_empty() => "(no changes)",
-        Some(d) => d,
+    let marker = match diff {
+        None => Some("(no diff available)"),
+        Some(d) if d.trim().is_empty() => Some("(no changes)"),
+        Some(_) => None,
     };
+    if let Some(marker) = marker {
+        // No diff to cut: a marker that doesn't fit is left out, which is not a truncation
+        // (PR 289 review M-3).
+        let text = if fits(marker, None) { marker } else { "" };
+        return Ok(Plan {
+            requests: vec![Planned {
+                state: state(answer, text, None),
+                weight: text.chars().count().max(1),
+            }],
+            questions,
+            truncated: false,
+        });
+    }
+    let diff = diff.unwrap_or_default();
     if fits(diff, None) {
         let weight = diff.chars().count().max(1);
         return Ok(Plan {
@@ -833,6 +849,17 @@ fn score_pair(
     })
 }
 
+/// Removes Jev's response file when dropped. An error body can echo the whole request (S12), so
+/// it is read at most once and never kept, however a call attempt ends: a timeout, no usable
+/// status, an oversized or unreadable file, or an answer (PR 289 review M-1).
+struct ResponseGone<'a>(&'a Path);
+
+impl Drop for ResponseGone<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(self.0);
+    }
+}
+
 /// One request: written, sent by the fixed command, retried on 429 and 529 after each pause of
 /// [`BACKOFF`], each retry a fresh exec in the same sandbox.
 fn call(caller: &Caller, body: &Value, rubric: &[Criterion]) -> Result<Answered, String> {
@@ -849,6 +876,7 @@ fn call(caller: &Caller, body: &Value, rubric: &[Criterion]) -> Result<Answered,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(format!("cannot clear {}: {e}", response.display())),
         }
+        let _gone = ResponseGone(&response);
         let output = caller.backend.exec(caller.sandbox, &spec).map_err(|e| {
             format!(
                 "cannot run the Jev call (exec) in {}: {e:#}",
@@ -898,8 +926,6 @@ fn call(caller: &Caller, body: &Value, rubric: &[Criterion]) -> Result<Answered,
             }
             Err(e) => return Err(format!("cannot read Jev's response: {e:#}")),
         };
-        // Read once and gone: an error body can echo the whole request (S12), so it isn't kept.
-        let _ = std::fs::remove_file(&response);
         match classify(status, text.as_deref().unwrap_or(""), caller.token) {
             Outcome::Answered => {
                 let text = text.ok_or_else(|| {

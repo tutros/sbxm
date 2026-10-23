@@ -643,6 +643,100 @@ fn a_422_echoing_the_request_leaves_its_text_in_no_result_log_or_warning() {
     }
 }
 
+/// A backend whose every Jev call runs `write` in the call folder (a fake `curl` writing its
+/// response) and then ends with `output`.
+fn jev_ending(
+    env: &Env,
+    write: impl Fn(&Path) + Send + Sync + 'static,
+    output: ExecOutput,
+) -> FakeBackend {
+    let base = env.base_dir();
+    FakeBackend::with_secrets(&["anthropic", "openai"])
+        .with_version("0.46.0")
+        .with_default_exec_output(out(CLAUDE_PONG, "", 0))
+        .with_exec_responder(move |sandbox, spec| {
+            if !is_jev(spec) {
+                return None;
+            }
+            write(&call_dir(&base, sandbox));
+            Some(output.clone())
+        })
+}
+
+/// Runs `backend` and checks that the pair's Jev result is an error and that `sentinel` is in no
+/// file under the base dir, nor in the run's output or warnings (PR 289 review M-1).
+fn assert_response_gone(env: &Env, backend: &FakeBackend, sentinel: &str) {
+    let ran = go(env, &config(env, ""), backend);
+    let error = evals(env, &ran, 0, 0)["jev"]["error"].clone();
+    assert!(error.is_string(), "{error}");
+    assert!(!error.as_str().unwrap().contains(sentinel), "{error}");
+    assert!(!ran.out.contains(sentinel) && !ran.warn.contains(sentinel));
+    for path in files(&env.base_dir()) {
+        let text = String::from_utf8_lossy(&std::fs::read(&path).unwrap()).into_owned();
+        assert!(
+            !text.contains(sentinel),
+            "{} holds the raw response",
+            path.display()
+        );
+    }
+}
+
+#[test]
+fn a_curl_with_no_usable_status_leaves_no_raw_response() {
+    let env = Env::new();
+    let sentinel = "RAW-RESPONSE-SENTINEL-NOSTATUS";
+    let backend = jev_ending(
+        &env,
+        move |dir| std::fs::write(dir.join("response.json"), sentinel).unwrap(),
+        out("", "curl: (18) transfer closed", 18),
+    );
+    assert_response_gone(&env, &backend, sentinel);
+}
+
+#[test]
+fn a_timed_out_call_leaves_no_raw_response() {
+    let env = Env::new();
+    let sentinel = "RAW-RESPONSE-SENTINEL-TIMEOUT";
+    let backend = jev_ending(
+        &env,
+        move |dir| std::fs::write(dir.join("response.json"), sentinel).unwrap(),
+        out("", "timeout: sending signal TERM to command 'curl'", 124),
+    );
+    assert_response_gone(&env, &backend, sentinel);
+}
+
+#[test]
+fn an_oversized_response_is_removed() {
+    let env = Env::new();
+    let sentinel = "RAW-RESPONSE-SENTINEL-OVERSIZE";
+    let backend = jev_ending(
+        &env,
+        move |dir| {
+            let body = format!("{sentinel}{}", "x".repeat(5 * 1024 * 1024));
+            std::fs::write(dir.join("response.json"), body).unwrap()
+        },
+        out("200", "", 0),
+    );
+    assert_response_gone(&env, &backend, sentinel);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_response_that_is_a_link_is_removed_and_its_target_never_read() {
+    // The link's target is outside the base dir, so a link left behind is found by the scan
+    // (which reads through it) and the target itself is never the scan's business.
+    let env = Env::new();
+    let sentinel = "RAW-RESPONSE-SENTINEL-LINK";
+    let target = env.tmp.path().join("outside.json");
+    std::fs::write(&target, sentinel).unwrap();
+    let backend = jev_ending(
+        &env,
+        move |dir| common::file_link(&dir.join("response.json"), &target),
+        out("200", "", 0),
+    );
+    assert_response_gone(&env, &backend, sentinel);
+}
+
 // ---- budget and chunks --------------------------------------------------------------------
 
 #[test]

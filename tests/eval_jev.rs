@@ -219,6 +219,42 @@ fn the_longest_answer_accepted_alone_with_an_oversized_file_is_truncated_within_
 }
 
 #[test]
+fn a_task_just_over_its_own_boundary_is_named_as_the_task_even_with_an_empty_answer() {
+    // PR 289 review M-2: the request's fixed scaffolding counts against the task, so an empty
+    // answer is never blamed for a task that uses up the budget.
+    let task = |n: usize| "t".repeat(n);
+    let accepted = |n: usize| jev::plan(&task(n), &rubric(), "", None).is_ok();
+    let (mut low, mut high) = (0, 3 * jev::TOKEN_CAP);
+    while low < high {
+        let mid = (low + high).div_ceil(2);
+        if accepted(mid) {
+            low = mid
+        } else {
+            high = mid - 1
+        }
+    }
+    let plan = jev::plan(&task(low), &rubric(), "", None).unwrap();
+    assert!(jev::estimate(&plan.requests[0].state, &plan.questions) <= jev::TOKEN_CAP);
+    for extra in 1..=6 {
+        let err = jev::plan(&task(low + extra), &rubric(), "", None).unwrap_err();
+        assert!(err.contains("the task is too long"), "{extra}: {err}");
+    }
+}
+
+#[test]
+fn no_diff_at_the_answer_boundary_is_not_reported_as_a_cut_file() {
+    // PR 289 review M-3: the "no diff" and "no changes" markers are not a diff; leaving one out
+    // to fit is not a truncation.
+    let n = longest_answer_accepted_alone();
+    for diff in [None, Some(""), Some("  \n")] {
+        let plan = jev::plan("Task", &rubric(), &"a".repeat(n), diff).unwrap();
+        assert!(!plan.truncated, "{diff:?}");
+        assert_eq!(plan.requests.len(), 1, "{diff:?}");
+        assert!(jev::estimate(&plan.requests[0].state, &plan.questions) <= jev::TOKEN_CAP);
+    }
+}
+
+#[test]
 fn an_answer_too_long_for_a_split_heading_gets_one_cut_request() {
     // Fifteen characters short of the boundary: under the 30 a split's longer heading adds, so
     // one unsplit request with the diff cut, not an error.

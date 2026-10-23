@@ -338,7 +338,8 @@ token_command = '/opt/tools/jev-token'   # an absolute path to a helper that pri
   rubric.
 - **What Jev sees:** the task, the contestant's final answer and its diff, never the transcript. Each request stays
   under an estimate of 28,000 tokens; a diff that doesn't fit is split per file into several requests, and a single
-  file too big for one is cut (`"truncated": true`). A task or answer too big on its own gets no call and an error
+  file too big for one is cut (`"truncated": true`); an answer so close to the limit that a split's longer heading
+  doesn't fit gets one request with the diff cut to what fits instead (also `"truncated": true`). A task or answer too big on its own gets no call and an error
   naming it.
 - **What the numbers mean:** a `pass_fail` criterion is Jev's probability that it is satisfied (0 to 1, so it can sit
   between the judge's 0 and 1); a `scale` criterion is Jev's expected level mapped to 0 to 1, with its `confidence`
