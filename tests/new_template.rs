@@ -413,6 +413,33 @@ fn open_hints_at_a_rebuild_once_a_template_is_ready_and_rebuild_uses_it() {
     assert_eq!(state_template(&env), tag.as_str());
 }
 
+#[test]
+fn a_strict_rebuild_without_a_usable_template_keeps_the_old_sandbox() {
+    // Issue 272: the refusal comes before `new` removes the sandbox it replaces.
+    let env = Env::new();
+    let backend = install_sandbox(&env, sbx_046());
+    let state_path = env.base_dir().join(".sbxm").join("demo").join("state.json");
+    let state = std::fs::read_to_string(&state_path).unwrap();
+    env.write_profile("default", &strict(PROFILE));
+    let calls = backend.log().len();
+
+    let (result, _) = open_demo(&env, &backend, true);
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains("profile 'default' has no template for claude"),
+        "{message}"
+    );
+    let after = &backend.log()[calls..];
+    assert!(
+        !after
+            .iter()
+            .any(|l| l.starts_with("rm ") || l.starts_with("create ")),
+        "{after:?}"
+    );
+    assert_eq!(std::fs::read_to_string(&state_path).unwrap(), state);
+}
+
 /// An unchanged install sandbox under a profile with `[template]`, ready to open.
 fn install_sandbox(env: &Env, backend: FakeBackend) -> FakeBackend {
     env.write_profile("default", PROFILE);
