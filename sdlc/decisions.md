@@ -837,7 +837,8 @@ of its planned 2-3 nights):** (a) a Claude Code session keeps a queue and runs `
 triages stops and opens PRs; the user merges; no sbxm code, and an `sbxm task loop` feature is designed only from
 the trial's numbers; (b) the queue is the open issues labeled `ready-for-worker`, a label set only once an issue's
 open points are answered with the user (decision 244's boundary question included) and its size is confirmed; the
-user's named order wins, otherwise the oldest labeled issue first, S before M before L; (c) an empty queue stops the
+user's named order wins, otherwise size first (S, then M, then L) and, within a size, the oldest issue by creation
+date first (PR 292 review Q-1, the user's choice); (c) an empty queue stops the
 loop with a report of the almost-ready issues, the questions blocking each and a recommended answer, gathered read-only:
 no new PRs, no sandboxes, no decisions taken for the user; (d) an environment stop (free disk, `sbx` not answering,
 the usage limit, a killed process, a flaky gate) has its cause cleared where possible and the task resumed once, and
