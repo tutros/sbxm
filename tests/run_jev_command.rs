@@ -13,6 +13,8 @@ use std::time::Duration;
 use common::Env;
 use sbxm::backend::{ExecOutput, ExecSpec, FakeBackend, SecretSource};
 use sbxm::commands::run;
+use sbxm::eval::jev;
+use sbxm::run::config::{Criterion, CriterionKind};
 use serde_json::{Value, json};
 
 const CLAUDE_PONG: &str = include_str!("../src/fixtures/claude-stream-json-pong.jsonl");
@@ -770,10 +772,16 @@ fn an_answer_over_the_budget_makes_no_call_for_that_pair_and_names_the_answer() 
     assert!(error.as_str().unwrap().contains("answer"), "{error}");
 }
 
-/// Contestants write three files of about 15k tokens each, so no two fit one request.
+/// Contestants write one file per entry of `sizes`, each that many characters (45k is about 15k
+/// tokens, so no two such files fit one request).
 fn big_files_backend(env: &Env, jev: &FakeJev, sizes: &'static [usize]) -> FakeBackend {
+    with_files(env, jev.backend(env), sizes)
+}
+
+/// `backend` with contestants that also write one file per entry of `sizes`.
+fn with_files(env: &Env, backend: FakeBackend, sizes: &'static [usize]) -> FakeBackend {
     let base = env.base_dir();
-    jev.backend(env).with_exec_hook(move |sandbox, spec| {
+    backend.with_exec_hook(move |sandbox, spec| {
         if !is_jev(spec) && !sandbox.contains("-jev-") {
             for (i, size) in sizes.iter().enumerate() {
                 std::fs::write(
@@ -865,11 +873,117 @@ fn a_single_file_over_the_budget_is_truncated_and_recorded() {
     for request in jev.requests() {
         assert!(request["state"].as_str().unwrap().len() < 100_000);
     }
-    // PR 289 review round 2, S-2: the near-limit fallback can cut a multi-file diff, so the
-    // wording covers both kinds of cut.
+    // A one-file diff only: the near-limit multi-file fallback has its own tests below.
     let shown = show(&env, &ran);
     assert!(shown.contains("the diff was cut"), "{shown}");
     assert!(!shown.contains("a file was cut"), "{shown}");
+}
+
+/// `config`'s task and rubric as the planner sees them.
+fn planned_rubric() -> Vec<Criterion> {
+    let criterion = |id: &str, kind, levels: &[&str], weight| Criterion {
+        id: id.into(),
+        kind,
+        levels: levels.iter().map(|l| l.to_string()).collect(),
+        weight,
+        notes: None,
+    };
+    vec![
+        criterion("correct", CriterionKind::PassFail, &[], 1.0),
+        criterion("quality", CriterionKind::Scale, &["poor", "good"], 0.5),
+    ]
+}
+
+/// The longest answer Jev's planner accepts for `config`'s task with no diff, found without any
+/// diff so the boundary can't move with the diff under test.
+fn longest_answer_accepted_alone() -> usize {
+    let rubric = planned_rubric();
+    let accepted =
+        |n: usize| jev::plan("Implement feature X", &rubric, &"a".repeat(n), None).is_ok();
+    let (mut low, mut high) = (0, 3 * jev::TOKEN_CAP);
+    while low < high {
+        let mid = (low + high).div_ceil(2);
+        if accepted(mid) {
+            low = mid
+        } else {
+            high = mid - 1
+        }
+    }
+    assert!(accepted(low) && !accepted(low + 1), "{low}");
+    low
+}
+
+/// Runs both contestants answering `answer_len` characters with two 45k-character files, and
+/// returns the run, Jev's requests and `run show`'s text.
+fn two_files_with_answer(answer_len: usize) -> (Env, Ran, Vec<Value>, String) {
+    let env = Env::new();
+    let jev = FakeJev::new(vec![]);
+    let answering = jev.backend_answering(&env, &claude_answer(&"a".repeat(answer_len)));
+    let backend = with_files(&env, answering, &[45_000, 45_000]);
+    let ran = go(&env, &config(&env, ""), &backend);
+    let shown = show(&env, &ran);
+    (env, ran, jev.requests(), shown)
+}
+
+/// Both pairs were scored from one unsplit request each with the diff cut, and saved and shown
+/// as cut (PR 289 review round 3, S-1).
+fn assert_one_cut_request_each(env: &Env, ran: &Ran, requests: &[Value], shown: &str) {
+    assert_eq!(requests.len(), 2, "one request per pair");
+    for request in requests {
+        let state = request["state"].as_str().unwrap();
+        assert!(state.contains("\n## Diff\n\n"), "{state}");
+        assert!(!state.contains("split per file"), "{state}");
+        assert!(
+            state.matches("diff --git").count() <= 1,
+            "both files sent: {state}"
+        );
+    }
+    for contestant in 0..2 {
+        let entry = &evals(env, ran, contestant, 0)["jev"];
+        assert_eq!(entry["status"], "ok", "{entry}");
+        assert_eq!(entry["truncated"], true, "{entry}");
+        assert!(entry.get("chunks").is_none_or(|c| c == 1), "{entry}");
+    }
+    assert_eq!(shown.matches("the diff was cut").count(), 2, "{shown}");
+    assert!(!shown.contains("a file was cut"), "{shown}");
+}
+
+#[test]
+fn the_longest_answer_accepted_alone_with_two_oversized_files_gets_the_diff_cut_to_nothing() {
+    let (env, ran, requests, shown) = two_files_with_answer(longest_answer_accepted_alone());
+    assert_one_cut_request_each(&env, &ran, &requests, &shown);
+    for request in &requests {
+        let state = request["state"].as_str().unwrap();
+        assert!(
+            state.ends_with("\n## Diff\n\n\n"),
+            "nothing of the diff left"
+        );
+    }
+}
+
+#[test]
+fn an_answer_15_short_of_the_boundary_gets_one_request_with_the_diff_cut() {
+    // Under the 30 characters a split's longer heading adds, so still one unsplit request.
+    let (env, ran, requests, shown) = two_files_with_answer(longest_answer_accepted_alone() - 15);
+    assert_one_cut_request_each(&env, &ran, &requests, &shown);
+}
+
+#[test]
+fn a_short_answer_with_two_oversized_files_is_split_per_file_and_not_cut() {
+    let (env, ran, requests, shown) = two_files_with_answer(10);
+    assert_eq!(requests.len(), 4, "two parts per pair");
+    for request in &requests {
+        let state = request["state"].as_str().unwrap();
+        assert!(state.contains(", split per file)"), "{state}");
+        assert!(!state.contains("[file truncated: "), "{state}");
+    }
+    for contestant in 0..2 {
+        let entry = &evals(&env, &ran, contestant, 0)["jev"];
+        assert_eq!(entry["chunks"], 2, "{entry}");
+        assert!(entry.get("truncated").is_none(), "{entry}");
+    }
+    assert!(shown.contains("2 chunks"), "{shown}");
+    assert!(!shown.contains("was cut"), "{shown}");
 }
 
 // ---- the token ----------------------------------------------------------------------------
