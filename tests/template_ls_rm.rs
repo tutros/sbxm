@@ -146,6 +146,17 @@ fn kind_task_uses(
     task.id
 }
 
+/// Writes a task whose worker, not its reviewer, records `tag`; returns the task's id.
+fn worker_task_uses(env: &Env, tag: &str) -> String {
+    use sbxm::task::record;
+    let id = task_uses(env, tag);
+    let dir = record::task_dir(&env.base_dir(), &id);
+    let mut task = record::read(&dir.join("task.json")).unwrap();
+    task.worker = task.reviewer.take();
+    record::write(&dir, &task).unwrap();
+    id
+}
+
 #[test]
 fn removes_the_template_and_its_record() {
     let env = Env::new();
@@ -433,6 +444,91 @@ fn a_failed_codex_removal_names_the_retry_with_its_harness() {
         "{message}"
     );
     assert!(record_path(&env, "default-codex").exists());
+}
+
+#[test]
+fn refused_while_a_task_s_worker_uses_it() {
+    let env = Env::new();
+    write_record(&env, Harness::Claude, TAG, &[]);
+    let id = worker_task_uses(&env, TAG);
+    let backend = backend_with(&[TAG]);
+
+    let message = refused(&env, &options(Harness::Claude), &backend);
+
+    assert!(
+        message.contains(&format!("template {TAG} is in use by task {id}")),
+        "{message}"
+    );
+    assert!(record_path(&env, "default-claude").exists());
+}
+
+#[test]
+fn refused_when_a_project_s_state_json_is_invalid_before_listing_templates() {
+    let env = Env::new();
+    write_record(&env, Harness::Claude, TAG, &[]);
+    let project = env.base_dir().join(".sbxm").join("demo");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("state.json"), "not json").unwrap();
+    // A `template_ls` call would fail with its own message instead of the state's.
+    let backend = backend_with(&[TAG]).failing_template_ls();
+
+    let message = format!(
+        "{:#}",
+        rm(&env, &options(Harness::Claude), &backend).unwrap_err()
+    );
+
+    assert!(message.contains("state.json"), "{message}");
+    assert!(!message.contains("template_ls"), "{message}");
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert!(record_path(&env, "default-claude").exists());
+}
+
+#[test]
+fn a_failed_removal_of_the_first_tag_removes_nothing_and_keeps_the_record() {
+    let env = Env::new();
+    write_record(&env, Harness::Claude, TAG, &[OLD]);
+    let backend = backend_with(&[OLD, TAG]).failing_template_rm_for(OLD);
+
+    let err = rm(&env, &options(Harness::Claude), &backend).unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains(&format!("could not remove template {OLD}")),
+        "{err:#}"
+    );
+    assert_eq!(backend.log(), vec![format!("template-rm {OLD}")]);
+    assert_eq!(backend.template_ls().unwrap(), vec![image(OLD), image(TAG)]);
+    assert!(record_path(&env, "default-claude").exists());
+}
+
+#[test]
+fn a_failed_removal_after_a_previous_tag_went_keeps_the_record_and_a_rerun_finishes() {
+    let env = Env::new();
+    write_record(&env, Harness::Claude, TAG, &[OLD]);
+    let backend = backend_with(&[OLD, TAG]).failing_template_rm_for(TAG);
+
+    let err = rm(&env, &options(Harness::Claude), &backend).unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains(&format!(
+            "could not remove template {TAG}; run `sbxm template rm default` again"
+        )),
+        "{err:#}"
+    );
+    assert_eq!(
+        backend.log(),
+        vec![format!("template-rm {OLD}"), format!("template-rm {TAG}")]
+    );
+    assert_eq!(backend.template_ls().unwrap(), vec![image(TAG)]);
+    assert!(record_path(&env, "default-claude").exists());
+
+    // The rerun, once `sbx` can remove the current tag: the gone tag is skipped.
+    let rerun = backend_with(&[TAG]);
+    let out = rm(&env, &options(Harness::Claude), &rerun).unwrap();
+
+    assert_eq!(rerun.log(), vec![format!("template-rm {TAG}")]);
+    assert!(rerun.template_ls().unwrap().is_empty());
+    assert!(!record_path(&env, "default-claude").exists());
+    assert_eq!(out, format!("removed template {TAG}\n"));
 }
 
 #[test]

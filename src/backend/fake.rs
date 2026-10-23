@@ -74,6 +74,8 @@ pub struct FakeBackend {
     fail_stop: bool,
     fail_template_save: bool,
     fail_template_rm: bool,
+    /// Only this tag's `template_rm` fails.
+    fail_template_rm_for: Option<String>,
     fail_template_ls: bool,
     sandboxes: Vec<SandboxInfo>,
     secrets: Mutex<Vec<String>>,
@@ -183,6 +185,15 @@ impl FakeBackend {
     pub fn failing_template_rm(self) -> Self {
         Self {
             fail_template_rm: true,
+            ..self
+        }
+    }
+
+    /// A backend whose `template_rm` of `tag` records the call and then fails; other tags are
+    /// removed.
+    pub fn failing_template_rm_for(self, tag: &str) -> Self {
+        Self {
+            fail_template_rm_for: Some(tag.into()),
             ..self
         }
     }
@@ -721,7 +732,7 @@ impl SandboxBackend for FakeBackend {
     fn template_rm(&self, tag: &str) -> Result<()> {
         super::check_template_tag(tag)?;
         self.record("template-rm", tag);
-        if self.fail_template_rm {
+        if self.fail_template_rm || self.fail_template_rm_for.as_deref() == Some(tag) {
             bail!("fake template rm failure");
         }
         self.templates
