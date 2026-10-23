@@ -294,3 +294,39 @@ fn a_missing_size_label_in_the_repo_is_refused_before_anything_is_filed() {
         );
     }
 }
+
+// Issue 99 (PR #86 review round 4, S-1): the dry run names the label an adopted issue ends up
+// with, even when the only change is removing a conflicting severity. Boundary cases first.
+#[test]
+fn a_dry_run_names_the_target_label_in_every_kind_of_label_change() {
+    for (labels, line) in [
+        // Nothing to add, a conflicting severity to remove: the desired severity is named.
+        (
+            &["must-fix", "should-fix", "size:L"][..],
+            "S-1 skipped (exists #77), would label it must-fix (removing should-fix)\n",
+        ),
+        // Only a severity to add.
+        (
+            &["size:L"][..],
+            "S-1 skipped (exists #77), would label it must-fix\n",
+        ),
+        // Only a size to add.
+        (
+            &["must-fix"][..],
+            "S-1 skipped (exists #77), would label it size:M\n",
+        ),
+        // A severity and a size to add.
+        (
+            &[][..],
+            "S-1 skipped (exists #77), would label it must-fix, size:M\n",
+        ),
+        // No label change at all.
+        (&["must-fix", "size:L"][..], "S-1 skipped (exists #77)\n"),
+    ] {
+        let gh = github().with_issues(vec![adopted(labels)]);
+        let dry = run(&review(None), &gh, false, Some(7));
+        assert!(dry.result.is_ok(), "{labels:?}: {}", dry.error());
+        assert!(dry.out.contains(line), "{labels:?}: {}", dry.out);
+        assert!(writes(&gh).is_empty(), "{labels:?}: {:?}", writes(&gh));
+    }
+}
