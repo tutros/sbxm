@@ -823,7 +823,7 @@ its measure is the number of findings at the milestone review that a slice revie
 of them as must-fix) and the milestone review's rounds (milestone 3: 3).
 243. **Every retro measures the time from a stop to the next command (2026-10-22, the first retro's proposal 2):**
 the `sdlc-retro` skill's gather table gets a row for it, computed from `run.log` timestamps per task with the stop's
-cause and a total per cause. No code. Tried in the next retro; all three windows of the first one had it as unknown.
+cause and a total per cause. No code. To be tried in the next retro; all three windows of the first one had it as unknown.
 244. **Boundary tests first, in place of the edge-case checklist (2026-10-22, the first retro's proposal 3):** when an
 issue's open points are answered, one question replaces the edge-case checklist tried since 2026-10-14 (its tasks
 had a round-1 must-fix as often as before, 3 of 6): does the change have a limit, a size, or an identity (path,
