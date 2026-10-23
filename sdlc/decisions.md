@@ -863,6 +863,31 @@ always written, never omitted, so a reader can tell "no template" from a run old
 without the key (written before this decision) still loads. A rebuilt template keeps its config hash but freezes a
 different agent version, so the tag is part of the run's provenance. README describes it in the `sbxm run` row.
 
+## Round 10: spike S14, Docker Cloud Sandboxes (2026-10-23, issue 245)
+
+247. **How spike S14 runs (2026-10-23, the user's five answers):** (a) Claude runs it hands-on in the main session
+between loop tasks, since it needs the host's `sbx --cloud` and the cloud's secrets (no spec for a worker). (b) A
+hard cap of $10; every spike sandbox gets `--ttl 1h` and is removed after its question; the default shape except one
+large shape for the build timing; the user reads the bill before and after, and Claude stops and asks before the cap.
+(c) Secrets: a fake value scoped to one sandbox first, then the user's real Claude and OpenAI logins through
+`sbx secret set <provider> --oauth --cloud` (the user signs in), stored only in the cloud and removed at the end unless
+a cloud milestone follows. (d) Q1-Q4 (egress, secrets, timeout, bundle in and out) must pass or there is no milestone;
+Q7 (Codex in the cloud, added by the user) decides whether reviews move too; Q5 (time and cost) and Q6 (templates)
+inform the plan only. (e) Order: Q1, Q3, Q4, Q2, Q7, Q6, Q5; a failing must-pass question is narrowed down once, then
+the spike stops. Question 7 was added to the issue on 2026-10-23.
+
+248. **Cloud sandboxes become milestone 4 (2026-10-23, the user's decision after spike S14; builds on [56], [159],
+[161], [199]-[239]):** the spike passed every must-pass question and Q7 (`sdlc/spikes/S14.md`, $0.69 spent), so
+running sbxm's sandboxes on Docker Cloud Sandboxes is planned as its own milestone, through a planning interview like
+the templates milestone's (issue 211), tracked by issue 310. Its inputs are the spike's design facts: a template
+can't be combined with a kit and has its size baked in, so a cloud template sandbox is configured by `create` flags;
+`exec` can't run as root, so root setup happens only through a kit at create; secrets attach at create, are scoped by
+sandbox name, take literal values and set a header; global cloud secrets reach every cloud sandbox, so each one is
+scoped to its sandbox; egress is refused at DNS or by a proxy 403; a timeout with an orphaned child ends in a stream
+error rather than 137; `/tmp` is a tmpfs of half the memory; removal can need a retry; there is no workspace mount, so
+code goes in and out by bundle. Until the planning starts, the user's two cloud OAuth secrets and the spike's template
+(`sbxm-spike-s14-rust`) stay in the cloud.
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.
