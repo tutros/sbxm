@@ -1,6 +1,6 @@
 //! The Tasks section of `sbxm status` (decision 171, issue 90): one row per task, read straight
-//! from `task.json` and `run.log`. Never calls `sbx` (decision 171's point 3): a missing sandbox
-//! belongs to the Sandboxes section (issue 92).
+//! from `task.json`, `repo.git` and `run.log`. Never calls `sbx` (decision 171's point 3): a
+//! missing sandbox belongs to the Sandboxes section (issue 92).
 
 use std::fs;
 use std::path::Path;
