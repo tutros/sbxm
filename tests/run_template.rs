@@ -367,3 +367,111 @@ fn a_strict_codex_contestant_gets_the_deny_rules_and_is_checked_after_create() {
     assert!(err.contains("ended in error"), "{err}");
     assert!(backend.removes().contains(&codex_create.name));
 }
+
+// ---- run.json's template provenance (issue 276, decision 246) ---------------------------------
+
+/// The finished run's `run.json`.
+fn run_record(env: &Env, ran: Ran) -> serde_json::Value {
+    let id = ran.result.unwrap().run_id;
+    let path = env
+        .base_dir()
+        .join(".sbxm")
+        .join("runs")
+        .join(&id)
+        .join("run.json");
+    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+}
+
+/// `run.json`'s `harnesses` entry of (`profile`, `harness`); panics if there is none.
+fn harness_entry(record: &serde_json::Value, profile: &str, harness: &str) -> serde_json::Value {
+    record["harnesses"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|h| h["profile"] == profile && h["harness"] == harness)
+        .unwrap_or_else(|| panic!("no {profile}/{harness} in {record}"))
+        .clone()
+}
+
+#[test]
+fn an_install_built_pair_records_a_null_template() {
+    let env = Env::new();
+    env.write_profile("default", PROFILE);
+    let backend = backend();
+
+    let ran = go(&env, None, TWO_CLAUDES, &backend);
+
+    let entry = harness_entry(&run_record(&env, ran), "default", "claude");
+    // The key is there, and null: not a run from before the field.
+    assert_eq!(
+        entry.get("template"),
+        Some(&serde_json::Value::Null),
+        "{entry}"
+    );
+}
+
+#[test]
+fn a_template_pair_records_its_exact_tag() {
+    let env = Env::new();
+    env.write_profile("default", PROFILE);
+    let backend = backend();
+    let tag = build(&env, &backend, Harness::Claude, None);
+
+    let ran = go(&env, None, TWO_CLAUDES, &backend);
+
+    let entry = harness_entry(&run_record(&env, ran), "default", "claude");
+    assert_eq!(entry["template"], tag.as_str(), "{entry}");
+}
+
+#[test]
+fn the_same_harness_under_two_profiles_records_each_pairs_own_template() {
+    let env = Env::new();
+    env.write_profile("default", PROFILE);
+    env.write_profile("plain", "[env]\nWHO = \"plain\"\n");
+    let backend = backend();
+    let tag = build(&env, &backend, Harness::Claude, None);
+    let contestants = "[[contestants]]\nharness = \"claude\"\nmodel = \"one\"\n\n\
+                       [[contestants]]\nharness = \"claude\"\nmodel = \"two\"\nprofile = \"plain\"\n\n";
+
+    let ran = go(&env, None, contestants, &backend);
+
+    let record = run_record(&env, ran);
+    assert_eq!(record["harnesses"].as_array().unwrap().len(), 2, "{record}");
+    let with = harness_entry(&record, "default", "claude");
+    assert_eq!(with["template"], tag.as_str(), "{record}");
+    let without = harness_entry(&record, "plain", "claude");
+    assert_eq!(
+        without.get("template"),
+        Some(&serde_json::Value::Null),
+        "{record}"
+    );
+}
+
+#[test]
+fn a_harness_only_the_judge_uses_records_its_template() {
+    let env = Env::new();
+    let backend = backend();
+    let tag = judge_only_warm_codex(&env, &backend);
+
+    let ran = go(&env, None, &format!("{TWO_CLAUDES}{CODEX_JUDGE}"), &backend);
+
+    let entry = harness_entry(&run_record(&env, ran), "default", "codex");
+    assert_eq!(entry["template"], tag.as_str(), "{entry}");
+}
+
+#[test]
+fn a_harness_only_the_judge_uses_records_null_without_a_template() {
+    let env = Env::new();
+    env.write_profile("default", PROFILE);
+    let backend = backend();
+    build(&env, &backend, Harness::Claude, None);
+
+    let ran = go(&env, None, &format!("{TWO_CLAUDES}{CODEX_JUDGE}"), &backend);
+
+    let entry = harness_entry(&run_record(&env, ran), "default", "codex");
+    assert_eq!(
+        entry.get("template"),
+        Some(&serde_json::Value::Null),
+        "{entry}"
+    );
+}
