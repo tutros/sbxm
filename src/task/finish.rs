@@ -782,8 +782,9 @@ pub fn pr_body(
     review: Option<&str>,
 ) -> (String, Vec<String>) {
     // Everything but the `Fixes #N` line is agent text, neutralised before any cut so a cut can't
-    // separate a keyword from its zero-width space and leave the reference active.
-    let (risk, risk_cut) = risk::cap_section(&defang(risk));
+    // separate a keyword from its zero-width space and leave the reference active. The risk
+    // section is the same text the in-task review comment opens with (issue 228).
+    let (risk, risk_cut) = review::published_risk(risk);
     let mut body = format!("{}\nFixes #{number}\n", risk.trim_end());
     if let Some(section) = unresolved {
         body.push_str(&format!("\n{}\n", defang(section).trim_end()));
