@@ -115,14 +115,22 @@ pub(crate) fn defang(text: &str) -> String {
     defang_closing_refs(&defang_mentions(text))
 }
 
+/// The risk section as it is published, in the PR description and in the in-task review comment
+/// alike (issue 228): neutralised ([`defang`]) before it is capped ([`risk::cap_section`]), so a
+/// cut can't separate a keyword from its zero-width space. Returns the text and the cut's note.
+pub(crate) fn published_risk(section: &str) -> (String, Option<String>) {
+    risk::cap_section(&defang(section))
+}
+
 /// The comment posted on a pull request: `risk_section` (decision 176(b), rendered by
 /// [`super::risk::render_section`]) first, then a line naming the review, then the reviewer's
 /// text; both the risk section and the review text have mentions neutralised, and the review
 /// text is cut (with a note) if it is longer than GitHub accepts.
 pub fn pr_comment(number: u32, risk_section: &str, review: &str) -> String {
+    let (risk_section, _) = risk::cap_section(&defang_mentions(risk_section.trim_end()));
     titled_comment(
         &format!("sbxm review of PR #{number}"),
-        risk_section,
+        &risk_section,
         review,
     )
 }
@@ -147,22 +155,24 @@ pub fn review_pr_command(
 
 /// The comment `task finish` posts on the PR it opened (issue 198): an issue task's in-task
 /// review, under a line naming the issue and the commit it covered, which is the PR's head, so
-/// the review counts as that head's. Laid out and cut like [`pr_comment`].
+/// the review counts as that head's. Laid out and cut like [`pr_comment`], but its risk section is
+/// the [`published_risk`] text, byte for byte the one the PR description opens with.
 pub fn in_task_pr_comment(issue: u32, commit: &str, risk_section: &str, review: &str) -> String {
     let title = format!(
         "sbxm in-task review of issue #{issue}'s task, at commit {commit} (this PR's head when \
          `sbxm task finish` opened it); it counts as the review of that commit"
     );
-    titled_comment(&title, risk_section, review)
+    titled_comment(&title, &published_risk(risk_section).0, review)
 }
 
+/// `risk_section` is already neutralised and capped by the caller.
 fn titled_comment(title: &str, risk_section: &str, review: &str) -> String {
     let defanged = defang_mentions(review);
     let (body, cut) = match defanged.char_indices().nth(COMMENT_CAP) {
         Some((at, _)) => (&defanged[..at], true),
         None => (defanged.as_str(), false),
     };
-    let (risk_section, _) = risk::cap_section(&defang_mentions(risk_section.trim_end()));
+    let risk_section = risk_section.trim_end();
     let header = if risk_section.is_empty() {
         String::new()
     } else {

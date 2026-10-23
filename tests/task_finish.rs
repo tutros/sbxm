@@ -1002,6 +1002,86 @@ fn a_draft_pr_gets_the_failing_in_task_review_posted_the_same_way() {
     assert_eq!(done.review_posted.as_deref(), Some(commit.as_str()));
 }
 
+/// Issue 228: the risk section with `reason` as its one reason, as the PR description and the
+/// in-task review comment carry it, after checking the two are byte for byte the same.
+fn risk_sections_with(reason: &str) -> String {
+    let f = fixture();
+    let mut prepared = ready(&f);
+    let commit = tip(&prepared);
+    reviewed_at(&mut prepared, &commit, 0, REVIEW);
+    prepared.record.review.as_mut().unwrap().risk_reasons = vec![reason.to_owned()];
+    record::write(&prepared.meta, &prepared.record).unwrap();
+    let github = FakeGitHub::default();
+
+    run(&f, &github).unwrap();
+
+    let (request, _, body) = pr_and_comment(&github);
+    let in_comment = risk_part(&body, "sbxm in-task review");
+    let in_description = risk_part(&request.body, "Fixes #41");
+    assert_eq!(in_comment, in_description);
+    in_description.to_owned()
+}
+
+/// A reason whose risk section, once rendered and neutralised, is `len` characters, for a
+/// reason starting with `prefix`, which neutralising makes `neutralised_extra` characters longer.
+fn reason_of_section_len(len: usize, prefix: &str, neutralised_extra: usize) -> String {
+    let one = sbxm::task::risk::render_section(Level::High, &["x".to_owned()]);
+    let fill =
+        len + 1 - one.trim_end().chars().count() - prefix.chars().count() - neutralised_extra;
+    format!("{prefix}{}", "x".repeat(fill))
+}
+
+#[test]
+fn a_risk_reason_with_a_mention_is_the_same_neutralised_text_in_the_pr_and_its_comment() {
+    let section = risk_sections_with("ask @user first");
+    assert!(section.contains("ask @\u{200b}user first"), "{section}");
+}
+
+#[test]
+fn a_risk_reason_with_a_closing_reference_is_the_same_neutralised_text_in_the_pr_and_its_comment() {
+    for (reason, active) in [
+        ("fixes #12 too", "fixes #12"),
+        ("closes owner/repo#3 too", "closes owner/repo#3"),
+        (
+            "resolves https://github.com/o/r/issues/5 too",
+            "resolves https://",
+        ),
+    ] {
+        let section = risk_sections_with(reason);
+        assert!(!section.contains(active), "{section}");
+        assert!(section.contains('\u{200b}'), "{section}");
+    }
+}
+
+#[test]
+fn a_risk_section_at_the_cap_once_neutralised_is_whole_and_the_same_in_the_pr_and_its_comment() {
+    let cap = sbxm::task::risk::RISK_CAP;
+    let section = risk_sections_with(&reason_of_section_len(cap, "@user fixes #12 ", 2));
+    assert_eq!(section.trim_end().chars().count(), cap, "{section}");
+    assert!(!section.contains("(cut:"), "{section}");
+    assert!(
+        section.contains("@\u{200b}user fixes\u{200b} #12"),
+        "{section}"
+    );
+}
+
+#[test]
+fn a_risk_section_one_over_the_cap_once_neutralised_is_cut_the_same_in_the_pr_and_its_comment() {
+    let cap = sbxm::task::risk::RISK_CAP;
+    let section = risk_sections_with(&reason_of_section_len(cap + 1, "@user fixes #12 ", 2));
+    assert!(
+        section.contains(&format!(
+            "(cut: the risk section has {} characters",
+            cap + 1
+        )),
+        "{section}"
+    );
+    assert!(
+        section.contains("@\u{200b}user fixes\u{200b} #12"),
+        "{section}"
+    );
+}
+
 #[test]
 fn a_review_of_another_commit_is_not_posted_as_the_prs_review() {
     let f = fixture();
