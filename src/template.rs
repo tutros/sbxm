@@ -97,14 +97,63 @@ impl Record {
     }
 }
 
-/// Who still records `tag` as their template (decision 205): `sandbox <name>` for each
-/// `state.json` entry and `task <id>` for each task whose worker or reviewer has it.
-pub fn users(base_dir: &Path, tag: &str) -> Result<Vec<String>> {
+/// One sandbox or task that records a template (decision 205).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum User {
+    /// A `state.json` entry of `project`.
+    Sandbox {
+        name: String,
+        project: String,
+        harness: String,
+    },
+    /// A task whose worker or reviewer has the template.
+    Task {
+        id: String,
+        kind: crate::task::record::Kind,
+        number: u32,
+    },
+}
+
+impl User {
+    /// The command that removes this user. `--harness` is required on `sbxm rm` (decision 135),
+    /// so a sandbox always names it; a spec task's `task.json` records no spec path, so its file
+    /// is a placeholder.
+    pub fn remove_command(&self) -> String {
+        use crate::task::record::Kind;
+        match self {
+            Self::Sandbox {
+                project, harness, ..
+            } => format!("sbxm rm {project} --harness {harness}"),
+            Self::Task { kind, number, .. } => match kind {
+                Kind::Issue => format!("sbxm task rm --issue {number}"),
+                Kind::Pr => format!("sbxm task rm --pr {number}"),
+                Kind::Spec => "sbxm task rm --spec <its spec file>".to_owned(),
+            },
+        }
+    }
+}
+
+impl std::fmt::Display for User {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Sandbox { name, .. } => write!(f, "sandbox {name}"),
+            Self::Task { id, .. } => write!(f, "task {id}"),
+        }
+    }
+}
+
+/// Who still records `tag` as their template (decision 205): each `state.json` entry and each
+/// task whose worker or reviewer has it.
+pub fn users(base_dir: &Path, tag: &str) -> Result<Vec<User>> {
     let mut users = Vec::new();
-    for (_, state) in crate::state::load_all(base_dir)? {
-        for sandbox in state.sandboxes.values() {
+    for (project, state) in crate::state::load_all(base_dir)? {
+        for (harness, sandbox) in &state.sandboxes {
             if sandbox.template.as_deref() == Some(tag) {
-                users.push(format!("sandbox {}", sandbox.sandbox));
+                users.push(User::Sandbox {
+                    name: sandbox.sandbox.clone(),
+                    project: project.clone(),
+                    harness: harness.clone(),
+                });
             }
         }
     }
@@ -114,7 +163,11 @@ pub fn users(base_dir: &Path, tag: &str) -> Result<Vec<String>> {
             .iter()
             .any(|a| a.as_ref().and_then(|a| a.template.as_deref()) == Some(tag))
         {
-            users.push(format!("task {}", task.id));
+            users.push(User::Task {
+                id: task.id,
+                kind: task.kind,
+                number: task.number,
+            });
         }
     }
     Ok(users)

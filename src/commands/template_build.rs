@@ -181,7 +181,11 @@ fn retire_previous(
                 out,
                 "kept previous template {tag}: still used by {}; a later build removes it once \
                  nothing uses it",
-                users.join(", ")
+                users
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )?;
             kept.push(tag.clone());
             continue;
