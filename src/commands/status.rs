@@ -2,6 +2,8 @@
 //! `sbx`; `backend` is threaded through unused so the Sandboxes and Comparison-runs sections
 //! (separate issues, decision 171(b), (e)) can add calls here without reshaping this signature.
 
+#[cfg(any(unix, test))]
+use std::ffi::c_ulong;
 use std::io::{IsTerminal, Write};
 use std::path::Path;
 use std::time::Duration;
@@ -81,7 +83,8 @@ pub fn run(
 /// The terminal's column count, queried straight from the OS with no new dependency (decision
 /// 171(a)): `TIOCGWINSZ` on Unix, `GetConsoleScreenBufferInfo` on Windows (unverified here, this
 /// build's primary platform is Windows but this sandbox is Linux; same pattern as
-/// `task::record::path_hash_bytes`'s platform split). `None` anywhere else, or if the call fails.
+/// `task::record::path_hash_bytes`'s platform split). `None` anywhere else, on a Unix target
+/// [`tiocgwinsz`] doesn't know (no `ioctl` call at all), or if the call fails.
 #[cfg(unix)]
 fn terminal_width() -> Option<usize> {
     #[repr(C)]
@@ -91,18 +94,44 @@ fn terminal_width() -> Option<usize> {
         ws_xpixel: u16,
         ws_ypixel: u16,
     }
-    const TIOCGWINSZ: u64 = 0x5413;
     unsafe extern "C" {
-        fn ioctl(fd: i32, request: u64, ...) -> i32;
+        fn ioctl(fd: std::ffi::c_int, request: c_ulong, ...) -> std::ffi::c_int;
     }
+    let request = tiocgwinsz(std::env::consts::OS, std::env::consts::ARCH)?;
     let mut size = Winsize {
         ws_row: 0,
         ws_col: 0,
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
-    let ok = unsafe { ioctl(1, TIOCGWINSZ, std::ptr::addr_of_mut!(size)) == 0 };
-    (ok && size.ws_col > 0).then_some(size.ws_col as usize)
+    let ok = unsafe { ioctl(1, request, std::ptr::addr_of_mut!(size)) == 0 };
+    columns(ok, size.ws_col)
+}
+
+/// `TIOCGWINSZ`'s request value for a Unix target (issue 221), as `std::env::consts::OS` and
+/// `ARCH` name it, from the `libc` crate's definitions: Linux uses `0x5413` except on mips,
+/// powerpc and sparc, which share the BSD encoding `_IOR('t', 104, struct winsize)`, as macOS and
+/// FreeBSD do. `None` for any other target, which then falls back to 80 columns.
+#[cfg(any(unix, test))]
+fn tiocgwinsz(os: &str, arch: &str) -> Option<c_ulong> {
+    const LINUX_GENERIC: c_ulong = 0x5413;
+    const BSD_ENCODED: c_ulong = 0x4008_7468;
+    match (os, arch) {
+        (
+            "linux",
+            "mips" | "mips64" | "mips32r6" | "mips64r6" | "powerpc" | "powerpc64" | "sparc"
+            | "sparc64",
+        ) => Some(BSD_ENCODED),
+        ("linux", _) => Some(LINUX_GENERIC),
+        ("macos" | "freebsd", _) => Some(BSD_ENCODED),
+        _ => None,
+    }
+}
+
+/// The width a successful probe reports; a failed call or a zero width is no answer.
+#[cfg(any(unix, test))]
+fn columns(ok: bool, ws_col: u16) -> Option<usize> {
+    (ok && ws_col > 0).then_some(ws_col as usize)
 }
 
 #[cfg(windows)]
@@ -150,4 +179,69 @@ fn terminal_width() -> Option<usize> {
 #[cfg(not(any(unix, windows)))]
 fn terminal_width() -> Option<usize> {
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{columns, tiocgwinsz};
+
+    #[test]
+    fn linux_generic_architectures_use_0x5413() {
+        for arch in [
+            "x86",
+            "x86_64",
+            "arm",
+            "aarch64",
+            "riscv64",
+            "s390x",
+            "loongarch64",
+        ] {
+            assert_eq!(tiocgwinsz("linux", arch), Some(0x5413), "{arch}");
+        }
+    }
+
+    #[test]
+    fn linux_mips_powerpc_and_sparc_use_the_bsd_encoding() {
+        for arch in [
+            "mips",
+            "mips64",
+            "mips32r6",
+            "mips64r6",
+            "powerpc",
+            "powerpc64",
+            "sparc",
+            "sparc64",
+        ] {
+            assert_eq!(tiocgwinsz("linux", arch), Some(0x4008_7468), "{arch}");
+        }
+    }
+
+    #[test]
+    fn macos_and_freebsd_use_the_bsd_encoding() {
+        for arch in ["x86_64", "aarch64"] {
+            assert_eq!(tiocgwinsz("macos", arch), Some(0x4008_7468), "macos {arch}");
+            assert_eq!(
+                tiocgwinsz("freebsd", arch),
+                Some(0x4008_7468),
+                "freebsd {arch}"
+            );
+        }
+    }
+
+    #[test]
+    fn other_unix_targets_get_no_request() {
+        for os in [
+            "netbsd", "openbsd", "solaris", "illumos", "android", "aix", "haiku",
+        ] {
+            assert_eq!(tiocgwinsz(os, "x86_64"), None, "{os}");
+        }
+    }
+
+    #[test]
+    fn a_failed_probe_or_a_zero_width_is_no_answer() {
+        assert_eq!(columns(true, 132), Some(132));
+        assert_eq!(columns(true, 1), Some(1));
+        assert_eq!(columns(true, 0), None);
+        assert_eq!(columns(false, 132), None);
+    }
 }
