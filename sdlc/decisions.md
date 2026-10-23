@@ -888,6 +888,27 @@ error rather than 137; `/tmp` is a tmpfs of half the memory; removal can need a 
 code goes in and out by bundle. Until the planning starts, the user's two cloud OAuth secrets and the spike's template
 (`sbxm-spike-s14-rust`) stay in the cloud.
 
+## Round 11: the second retro (2026-10-23)
+
+249. **A full queue before a loop window (2026-10-23, the second retro's proposal 1, `sdlc/retros/2026-10-23-retro.md`;
+amends [245]'s start):** before a loop window starts, at least as many issues as the window's task count are labeled
+`ready-for-worker`, M issues included where any are decided, and a merge time is agreed with the user so the cap of 5
+PRs awaiting the user isn't reached while the user is away. An experiment for the next loop window; its measure is the
+share of the loop's gaps spent waiting for the user (the first window: 56%, 1h57m48s of 3h30m28s) and tasks per hour
+of the window's span (2.6).
+250. **An issue body is read back before it's labeled (2026-10-23, the second retro's proposal 2; amends [245](b)'s
+labeling step):** before adding `ready-for-worker`, the issue is read back with `gh issue view` and checked for three
+things: no `PR: #n` line names a merged or closed PR, the body kept its line breaks (bodies are written with the Write
+tool and passed with `--body-file`), and every recorded answer agrees with the decisions it touches. An experiment for
+the next 15 labeled issues; its measure is how many need a body fix or are refused before any write (the first window:
+3 of 15, #222, #272, #273).
+251. **Hand-made PRs get a self-review, and late commits a re-review (2026-10-23, the second retro's proposal 3):** a PR
+made in the session, not by a worker, goes through the worker's self-review checklist ([188], `sdlc-implementation`)
+before its independent review (`task review --pr N`); a commit pushed after a PR's last review gets a narrow re-review,
+or the PR names it as unreviewed. An experiment for the next three hand-made PRs, dropped if they still need a fix
+round; its measure is the hand-made PRs with a must-fix or a question in review round 1 (the second retro's window: 3
+of 3, #289, #292, #311) and the commits merged after the last review (2, #304 and #311). In `AGENTS.md`'s "Workflow".
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.
