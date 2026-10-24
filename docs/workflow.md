@@ -179,7 +179,11 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
 3. The independent review: for a PR `task finish` opened, the in-task review it posted is that review (decision
    187); run `task review --pr N` after any later commit on the PR, and on a PR made some other way. Fix what it
    finds, with a test first.
-4. The user merges. Never push to `main`; every change, docs included, goes through a PR.
+4. A low-risk PR (the reviewer's level and the path-rule floor) whose latest review covered its head commit with
+   0 must-fix is merged by GitHub's auto-merge, armed with `gh pr merge <N> --auto --merge --match-head-commit <sha>`
+   for that reviewed commit; before any later push, disarm it (`gh pr merge <N> --disable-auto`) and review the new
+   head before arming it again (decision 266, an experiment). The user merges a medium- or high-risk PR. Never push
+   to `main`; every change, docs included, goes through a PR.
 5. `task rm` the finished task, which also gives back the disk its sandbox used.
 
 Work in a sandbox needs no approval of single commands; work an agent session does on the host asks for each one.
