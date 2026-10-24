@@ -527,3 +527,36 @@ fn an_unknown_risk_key_is_an_error_naming_the_file() {
         "{message}"
     );
 }
+
+/// Milestone 4 slice 1 (P1, decision 262(a)): `[sandbox] location` is `local` or `cloud`, local
+/// when absent; any other value (case included) is an error naming the file.
+#[test]
+fn the_sandbox_location_defaults_to_local_and_accepts_cloud() {
+    use sbxm::backend::Location;
+
+    let dir = repo(MINIMAL, true);
+    assert_eq!(
+        TaskConfig::load(dir.path()).unwrap().sandbox.location,
+        Location::Local
+    );
+    for (value, location) in [("local", Location::Local), ("cloud", Location::Cloud)] {
+        let dir = repo(&format!("{MINIMAL}location = \"{value}\"\n"), true);
+        assert_eq!(
+            TaskConfig::load(dir.path()).unwrap().sandbox.location,
+            location,
+            "{value}"
+        );
+    }
+}
+
+#[test]
+fn a_location_other_than_local_or_cloud_is_an_error_naming_the_file() {
+    for value in ["Cloud", "remote", ""] {
+        let message = load_err(&format!("{MINIMAL}location = \"{value}\"\n"), true);
+        assert!(message.contains(FILE_NAME), "{message}");
+        assert!(
+            message.contains(&format!("`{value}`, expected `local` or `cloud`")),
+            "{message}"
+        );
+    }
+}

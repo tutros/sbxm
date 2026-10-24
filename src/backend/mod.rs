@@ -222,6 +222,25 @@ pub struct CreateSpec {
     pub deny_network: Vec<String>,
 }
 
+/// Where a sandbox runs (milestone 4, decisions 253, 262): on this machine, or in Docker Cloud
+/// Sandboxes, where every `sbx` call takes `--cloud`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Location {
+    #[default]
+    Local,
+    Cloud,
+}
+
+impl Location {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Location::Local => "local",
+            Location::Cloud => "cloud",
+        }
+    }
+}
+
 /// How `sbx`'s shared skills store is mounted (decision 46). sbxm never uses
 /// `readwrite`: an agent could plant skills that every other sandbox loads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
