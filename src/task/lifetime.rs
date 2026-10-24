@@ -83,13 +83,6 @@ pub enum Removal {
     Failed(String),
 }
 
-impl Removal {
-    /// Whether the sandbox is gone now.
-    pub fn gone(&self) -> bool {
-        !matches!(self, Removal::Failed(_))
-    }
-}
-
 /// Removes the sandbox `name` (`sbx rm <name> -f` on the backend's instance), retrying only an
 /// error that says it is temporarily unavailable, after 5, 10 and 20 seconds through `sleep`;
 /// any other error ends it at once. Never fails: the caller reports what it returns.
