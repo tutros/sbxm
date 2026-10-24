@@ -16,7 +16,10 @@ Milestone 1 complete (slices 0–21, end-to-end check passed 2026-09-27). Milest
 
 ## Workflow
 
-The repo is `tutros/sbxm` on GitHub (public since 2026-09-27, `MIT OR Apache-2.0`; `origin`, branch `main`). Code review findings are GitHub issues there (decision 79); close them from fix commits with `Fixes #n`. Every change, docs and planning files included, goes to a branch and a PR after an initial code review, and the independent reviewer runs on the PR before the user merges: for a PR `sbxm task finish` opened, that is the in-task review it posts while the PR's head is the reviewed commit, and `sbxm task review --pr N` for any later commit and every other PR; never push to `main` (decisions 86, 187).
+The repo is `tutros/sbxm` on GitHub (public since 2026-09-27, `MIT OR Apache-2.0`; `origin`, branch `main`). Code review findings are GitHub issues there (decision 79); close them from fix commits with `Fixes #n`. Every change, docs and planning files included, goes to a branch and a PR after an initial code review, and the independent reviewer runs on the PR before the user merges: for a PR `sbxm task finish` opened, that is the in-task review it posts while the PR's head is the reviewed commit, and `sbxm task review --pr N` for any later commit and every other PR; never push to `main` (decisions 86, 187). A PR made in the session, not by a worker, first goes
+through the self-review in `sdlc-implementation` ("Before reporting a change done"), and a commit pushed after a PR's
+last review gets a narrow re-review or is named in the PR as unreviewed (decision 251, an experiment for the next three
+hand-made PRs).
 
 
 Each SDLC phase has a project skill in `.claude/skills/`; follow it for that phase:
