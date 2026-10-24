@@ -167,6 +167,7 @@ pub fn run(
         kits: kits.into_iter().map(|(dir, _)| dir).collect(),
         template: template.clone(),
         deny_network: deny_network.clone().unwrap_or_default(),
+        ttl: None,
     })?;
     template::check_codex_rules(
         profile_name,

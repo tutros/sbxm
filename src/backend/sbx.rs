@@ -592,7 +592,8 @@ fn parse_ls(json: &str) -> Result<Vec<SandboxInfo>> {
 
 /// A local create mounts the workspace and names the skills store; a cloud create has neither (S14
 /// Q1; `--skills` is refused with `--cloud`, `sbx-cloud-create-skills-refused.txt`) and no
-/// template (decision 254).
+/// template (decision 254), and always a TTL, deleting the sandbox when it runs out (decisions
+/// 259, 263).
 fn create_args(spec: &CreateSpec, location: Location) -> Result<Vec<OsString>> {
     let mut args: Vec<OsString> = vec![
         "create".into(),
@@ -617,6 +618,17 @@ fn create_args(spec: &CreateSpec, location: Location) -> Result<Vec<OsString>> {
             bail!("cloud sandboxes aren't created from templates (decision 254)")
         }
         (Location::Cloud, None) => {}
+    }
+    match (location, spec.ttl) {
+        (Location::Cloud, Some(ttl)) => args.extend([
+            "--ttl".into(),
+            super::ttl_arg(ttl).into(),
+            "--on-timeout".into(),
+            "delete".into(),
+        ]),
+        (Location::Cloud, None) => bail!("a cloud sandbox needs a TTL (decision 259)"),
+        (Location::Local, Some(_)) => bail!("a local sandbox takes no TTL"),
+        (Location::Local, None) => {}
     }
     if let Some(tag) = &spec.template {
         args.extend(["-t".into(), tag.into(), "--pull".into(), "never".into()]);
@@ -702,6 +714,7 @@ mod tests {
             kits: vec![PathBuf::from("/k/common")],
             template: None,
             deny_network: Vec::new(),
+            ttl: None,
         };
 
         assert_eq!(
@@ -951,6 +964,7 @@ mod template_tests {
             kits: vec![PathBuf::from("/k/common")],
             template: Some("sbxm-dev-claude:2a9974ee6210-20261015t2210".into()),
             deny_network: Vec::new(),
+            ttl: None,
         };
 
         assert_eq!(
@@ -1095,6 +1109,7 @@ mod policy_tests {
             kits: vec![PathBuf::from("/k/common")],
             template: None,
             deny_network: vec!["github.com".into(), "registry.npmjs.org".into()],
+            ttl: None,
         };
 
         let args = create_args(&spec, Location::Local).unwrap();
@@ -1205,6 +1220,10 @@ mod cloud_tests {
             ],
             template: None,
             deny_network: Vec::new(),
+            // A cloud sandbox has a TTL, a local one none.
+            ttl: workspace
+                .is_none()
+                .then(|| std::time::Duration::from_secs(195 * 60)),
         }
     }
 
@@ -1251,6 +1270,10 @@ mod cloud_tests {
                 "2",
                 "-m",
                 "4g",
+                "--ttl",
+                "3h15m",
+                "--on-timeout",
+                "delete",
                 "--kit",
                 "/k/common",
                 "--kit",
@@ -1271,6 +1294,15 @@ mod cloud_tests {
         templated.template = Some("sbxm-dev-claude:abc".into());
         let template = create_args(&templated, Location::Cloud).unwrap_err();
         assert!(format!("{template:#}").contains("template"), "{template:#}");
+        // Every cloud sandbox has a TTL (decision 259), and a local one has none.
+        let mut endless = spec(None);
+        endless.ttl = None;
+        let cloud = create_args(&endless, Location::Cloud).unwrap_err();
+        assert!(format!("{cloud:#}").contains("TTL"), "{cloud:#}");
+        let mut timed = spec(Some("/work/x"));
+        timed.ttl = Some(std::time::Duration::from_secs(60));
+        let local = create_args(&timed, Location::Local).unwrap_err();
+        assert!(format!("{local:#}").contains("TTL"), "{local:#}");
     }
 
     #[test]

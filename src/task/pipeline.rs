@@ -7,10 +7,11 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::config::TaskConfig;
 use super::gates::{self, GateOutcome, HostRunner};
+use super::lifetime;
 use super::machine;
 use super::prompts::{self, Role};
 use super::record::{
@@ -1185,7 +1186,8 @@ pub fn prepare_spec_resolved(
         match location {
             Location::Local => plan.create(ctx.backend, &sandbox, worker.harness, &workspace)?,
             Location::Cloud => {
-                plan.create_cloud(ctx.backend, &sandbox, worker.harness)?;
+                let ttl = lifetime::worker_ttl(ctx.config);
+                plan.create_cloud(ctx.backend, &sandbox, worker.harness, ttl)?;
                 created = true;
                 let clone = seed_cloud_clone(ctx.backend, &meta, &sandbox, &task, ctx.identity)?;
                 if let Some(agent) = task.worker.as_mut() {
@@ -1745,6 +1747,7 @@ impl SandboxPlan {
                 kits: self.kits.dirs.clone(),
                 template: self.template.clone(),
                 deny_network: self.deny_network.clone().unwrap_or_default(),
+                ttl: None,
             })
             .with_context(|| format!("cannot create sandbox {sandbox}"))?;
         template::check_codex_rules(
@@ -1817,12 +1820,13 @@ fn plan_cloud_sandbox(
 
 impl SandboxPlan {
     /// Creates the cloud sandbox `sandbox`: no workspace, the profile's two kits in order
-    /// (decision 254).
+    /// (decision 254), deleted by the cloud after `ttl` (decision 259).
     fn create_cloud(
         &self,
         backend: &dyn SandboxBackend,
         sandbox: &str,
         harness: Harness,
+        ttl: Duration,
     ) -> Result<()> {
         backend
             .create(&CreateSpec {
@@ -1835,6 +1839,7 @@ impl SandboxPlan {
                 kits: self.kits.dirs.clone(),
                 template: None,
                 deny_network: Vec::new(),
+                ttl: Some(ttl),
             })
             .with_context(|| format!("cannot create sandbox {sandbox}"))
     }

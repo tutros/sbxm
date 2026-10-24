@@ -242,6 +242,7 @@ impl Pair<'_> {
             kits: harness_kits.dirs.clone(),
             template: harness_kits.template.clone(),
             deny_network: harness_kits.deny_network.clone().unwrap_or_default(),
+            ttl: None,
         }) {
             return failed(
                 format!("cannot create sandbox {}: {e:#}", self.sandbox),

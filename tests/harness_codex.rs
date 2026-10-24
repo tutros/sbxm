@@ -41,6 +41,7 @@ fn creates_a_codex_sandbox_with_a_harness_codex_mixin() {
             kits: vec![env.kit_dir("demo"), codex_kit_dir(&env)],
             template: None,
             deny_network: Vec::new(),
+            ttl: None,
         }]
     );
     insta::assert_snapshot!(

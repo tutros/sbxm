@@ -38,6 +38,7 @@ fn creates_a_gemini_sandbox_with_a_harness_gemini_mixin() {
             kits: vec![env.kit_dir("demo"), gemini_kit_dir(&env)],
             template: None,
             deny_network: Vec::new(),
+            ttl: None,
         }]
     );
     insta::assert_snapshot!(

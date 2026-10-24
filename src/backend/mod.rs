@@ -240,6 +240,9 @@ pub struct CreateSpec {
     /// Hosts passed as `--deny-network`, which win over the agent kit's own allow rule (decision
     /// 221).
     pub deny_network: Vec<String>,
+    /// `--ttl` with `--on-timeout delete` (decisions 259, 263): every cloud sandbox has one, a
+    /// local sandbox none.
+    pub ttl: Option<std::time::Duration>,
 }
 
 /// Where a sandbox runs (milestone 4, decisions 253, 262): on this machine, or in Docker Cloud

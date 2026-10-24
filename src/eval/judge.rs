@@ -271,6 +271,7 @@ pub fn judge_repeat(
                 kits: harness_kits.dirs.clone(),
                 template: harness_kits.template.clone(),
                 deny_network: harness_kits.deny_network.clone().unwrap_or_default(),
+                ttl: None,
             })
             .map_err(|e| format!("cannot create the judge sandbox {sandbox}: {e:#}"))?;
         // A strict `codex` judge is held to its allow list before it runs (decision 221).

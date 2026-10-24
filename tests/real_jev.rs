@@ -150,6 +150,7 @@ fn scoped_custom_secret_swaps_the_placeholder_in_the_header_only() {
             kits: vec![kit_dir],
             template: None,
             deny_network: vec![],
+            ttl: None,
         })
         .unwrap();
 

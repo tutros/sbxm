@@ -767,6 +767,7 @@ pub fn evaluate_repeat(
                 kits: kit.dirs.clone(),
                 template: None,
                 deny_network: Vec::new(),
+                ttl: None,
             })
             .map_err(|e| format!("cannot create the Jev sandbox {sandbox}: {e:#}"))
     })();

@@ -52,6 +52,7 @@ fn creates_a_pi_sandbox_from_the_pinned_kit() {
             kits: vec![env.kit_dir("demo"), pi_kit_dir(&env)],
             template: None,
             deny_network: Vec::new(),
+            ttl: None,
         }]
     );
     insta::assert_snapshot!(

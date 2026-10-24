@@ -516,6 +516,7 @@ impl Build {
             kits: kits.into_iter().map(|(dir, _)| dir).collect(),
             template: None,
             deny_network: Vec::new(),
+            ttl: None,
         })?;
         if let Some(warm) = &self.warm {
             self.warm_up(warm, backend, warn)?;

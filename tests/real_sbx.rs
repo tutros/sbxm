@@ -628,6 +628,7 @@ fn exec_and_skills_against_real_sbx() {
             kits: vec![],
             template: None,
             deny_network: Vec::new(),
+            ttl: None,
         })
         .unwrap();
 
@@ -705,6 +706,7 @@ fn claude_headless_against_real_sbx() {
             kits: vec![],
             template: None,
             deny_network: Vec::new(),
+            ttl: None,
         })
         .unwrap();
     // The workspace is mounted at its host path in forward-slash form, drive
@@ -787,6 +789,7 @@ fn codex_headless_against_real_sbx() {
             kits: vec![],
             template: None,
             deny_network: Vec::new(),
+            ttl: None,
         })
         .unwrap();
     // E:\sbxm-it\x is mounted as /e/sbxm-it/x.
@@ -1902,6 +1905,7 @@ fn task_sandbox_gates_against_real_sbx() {
             kits: vec![],
             template: None,
             deny_network: Vec::new(),
+            ttl: None,
         })
         .unwrap();
     let dir = in_sandbox_path(&workspace);
@@ -2026,6 +2030,7 @@ fn task_bundle_round_trip_against_real_sbx() {
             kits: vec![],
             template: None,
             deny_network: Vec::new(),
+            ttl: None,
         })
         .unwrap();
 

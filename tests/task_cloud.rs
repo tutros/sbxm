@@ -350,6 +350,11 @@ fn a_cloud_spec_start_clones_runs_gates_and_collects_through_copies() {
     let create = &backend.creates()[0];
     assert_eq!(create.workspace, None);
     assert_eq!(create.template, None);
+    // With the worker TTL (slice 3, P5 (d)).
+    assert_eq!(
+        create.ttl,
+        Some(sbxm::task::lifetime::worker_ttl(&f.config))
+    );
     let kits: Vec<_> = create
         .kits
         .iter()
