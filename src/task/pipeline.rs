@@ -59,6 +59,14 @@ fn cloud_preflight(backend: &dyn SandboxBackend) -> Result<()> {
              upgrade sbx, {LOCAL_INSTEAD}"
         );
     }
+    // 2. The cloud answers (decision 267): `sbx --cloud ls --json`, failing for any reason. No
+    // wording of the not-logged-in message is matched; none has been captured.
+    backend.list().map_err(|e| {
+        SbxUnavailable(format!(
+            "the cloud didn't answer `sbx --cloud ls --json`: {e:#}; if you're not logged in, \
+             run `sbx login`, {LOCAL_INSTEAD}"
+        ))
+    })?;
     Ok(())
 }
 

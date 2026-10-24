@@ -83,6 +83,8 @@ pub struct FakeBackend {
     version: Option<String>,
     no_sbx: bool,
     fail_list: bool,
+    /// What `list` fails with under `fail_list`, instead of the daemon-not-running text.
+    list_failure: Option<String>,
     execs: Mutex<Vec<(String, ExecSpec)>>,
     exec_outputs: Mutex<VecDeque<ExecOutput>>,
     skills: Option<serde_json::Value>,
@@ -307,6 +309,15 @@ impl FakeBackend {
     pub fn failing_list(self) -> Self {
         Self {
             fail_list: true,
+            ..self
+        }
+    }
+
+    /// Makes `list` fail with `sbx`'s own words, as the real backend passes them on.
+    pub fn failing_list_with(self, message: &str) -> Self {
+        Self {
+            fail_list: true,
+            list_failure: Some(message.to_owned()),
             ..self
         }
     }
@@ -661,7 +672,10 @@ impl SandboxBackend for FakeBackend {
             bail!("fake: sbx not found");
         }
         if self.fail_list {
-            bail!("fake: daemon not running");
+            match &self.list_failure {
+                Some(message) => bail!("{message}"),
+                None => bail!("fake: daemon not running"),
+            }
         }
         Ok(self.sandboxes.clone())
     }
