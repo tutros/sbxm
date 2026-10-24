@@ -47,7 +47,7 @@ fn creates_a_sandbox_from_the_pinned_kit() {
         vec![CreateSpec {
             name: "sbxm-demo-antigravity".into(),
             agent: KIT.into(),
-            workspace: env.base_dir().join("demo"),
+            workspace: Some(env.base_dir().join("demo")),
             cpus: 4,
             memory: "8g".into(),
             skills: SkillsStore::ReadOnly,

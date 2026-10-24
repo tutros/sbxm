@@ -235,7 +235,7 @@ impl Pair<'_> {
         if let Err(e) = self.backend.create(&CreateSpec {
             name: self.sandbox.clone(),
             agent: harness.agent_arg().into(),
-            workspace: self.workspace.clone(),
+            workspace: Some(self.workspace.clone()),
             cpus: self.kits.resources.cpus,
             memory: self.kits.resources.memory.clone(),
             skills: harness_kits.skills_store,

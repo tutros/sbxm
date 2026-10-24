@@ -160,7 +160,7 @@ pub fn run(
     backend.create(&CreateSpec {
         name: sandbox.clone(),
         agent: options.harness.agent_arg().into(),
-        workspace: workspace.clone(),
+        workspace: Some(workspace.clone()),
         cpus: config.resources.cpus,
         memory: config.resources.memory,
         skills: profile.skills_store,

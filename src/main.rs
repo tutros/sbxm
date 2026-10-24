@@ -129,11 +129,11 @@ fn main() -> anyhow::Result<()> {
                 disk: sbxm::disk::Guard::real(ignore_disk),
                 ..Default::default()
             },
-            &SbxBackend,
+            &SbxBackend::LOCAL,
             &mut std::io::stderr(),
         ),
         Command::List { json } => {
-            let entries = commands::list::entries(&config::config_dir()?, &SbxBackend)?;
+            let entries = commands::list::entries(&config::config_dir()?, &SbxBackend::LOCAL)?;
             let render = if json {
                 commands::list::render_json
             } else {
@@ -155,12 +155,15 @@ fn main() -> anyhow::Result<()> {
                 harness,
                 disk: sbxm::disk::Guard::real(ignore_disk),
             },
-            &SbxBackend,
+            &SbxBackend::LOCAL,
             &mut std::io::stderr(),
         ),
-        Command::Stop { project, harness } => {
-            commands::stop::run(&config::config_dir()?, &project, harness, &SbxBackend)
-        }
+        Command::Stop { project, harness } => commands::stop::run(
+            &config::config_dir()?,
+            &project,
+            harness,
+            &SbxBackend::LOCAL,
+        ),
         Command::Rm {
             project,
             purge,
@@ -174,13 +177,13 @@ fn main() -> anyhow::Result<()> {
                 yes,
                 harness: harness.unwrap_or_default(),
             },
-            &SbxBackend,
+            &SbxBackend::LOCAL,
             &Terminal,
         ),
         Command::Doctor => {
             let report = commands::doctor::run(
                 &config::config_dir()?,
-                &SbxBackend,
+                &SbxBackend::LOCAL,
                 &commands::doctor::Host::real(),
             );
             print!("{}", report.render());
@@ -210,7 +213,7 @@ fn main() -> anyhow::Result<()> {
                 &config::config_dir()?,
                 &config_path,
                 &sbxm::disk::Guard::real(ignore_disk),
-                &SbxBackend,
+                &SbxBackend::LOCAL,
                 &mut std::io::stdout(),
                 &mut std::io::stderr(),
             )?;
@@ -328,7 +331,7 @@ fn main() -> anyhow::Result<()> {
                         identity: None,
                         disk: sbxm::disk::Guard::real(ignore_disk),
                     },
-                    &SbxBackend,
+                    &SbxBackend::LOCAL,
                     &sbxm::github::gh::GhBackend::default(),
                     &task::record::SystemProbe,
                     &mut out,
@@ -377,7 +380,7 @@ fn main() -> anyhow::Result<()> {
                         confirm: &Terminal,
                         yes,
                     }),
-                    &SbxBackend,
+                    &SbxBackend::LOCAL,
                     &sbxm::github::gh::GhBackend::default(),
                     &task::record::SystemProbe,
                     &mut out,
@@ -408,7 +411,7 @@ fn main() -> anyhow::Result<()> {
                         },
                         dry_run,
                     },
-                    &SbxBackend,
+                    &SbxBackend::LOCAL,
                     &task::record::SystemProbe,
                     &task::gates::ShellHostRunner,
                     &mut out,
@@ -524,7 +527,7 @@ fn main() -> anyhow::Result<()> {
                         force,
                         disk: sbxm::disk::Guard::real(ignore_disk),
                     },
-                    &SbxBackend,
+                    &SbxBackend::LOCAL,
                     &sbxm::github::gh::GhBackend::default(),
                     &task::record::SystemProbe,
                     &task::gates::ShellHostRunner,
@@ -564,7 +567,7 @@ fn main() -> anyhow::Result<()> {
                         rounds,
                         disk: sbxm::disk::Guard::real(ignore_disk),
                     },
-                    &SbxBackend,
+                    &SbxBackend::LOCAL,
                     &task::record::SystemProbe,
                     &task::gates::ShellHostRunner,
                     &mut out,
@@ -632,7 +635,7 @@ fn main() -> anyhow::Result<()> {
                         confirm: &Terminal,
                         yes,
                     }),
-                    &SbxBackend,
+                    &SbxBackend::LOCAL,
                     &sbxm::github::gh::GhBackend::default(),
                     &task::record::SystemProbe,
                     &task::gates::ShellHostRunner,
@@ -718,7 +721,7 @@ fn main() -> anyhow::Result<()> {
                         repo_root: std::env::current_dir()?,
                         dry_run,
                     },
-                    &SbxBackend,
+                    &SbxBackend::LOCAL,
                     &sbxm::github::gh::GhBackend::default(),
                     &task::record::SystemProbe,
                     &Terminal,
@@ -769,7 +772,7 @@ fn main() -> anyhow::Result<()> {
                 now: None,
                 warm,
             },
-            &SbxBackend,
+            &SbxBackend::LOCAL,
             &sbxm::task::record::SystemProbe,
             &mut std::io::stdout(),
             &mut std::io::stderr(),
@@ -779,7 +782,7 @@ fn main() -> anyhow::Result<()> {
         } => commands::template_ls::run(
             &config::config_dir()?,
             &commands::template_ls::Options::default(),
-            &SbxBackend,
+            &SbxBackend::LOCAL,
             &mut std::io::stdout(),
         ),
         Command::Template {
@@ -787,7 +790,7 @@ fn main() -> anyhow::Result<()> {
         } => commands::template_rm::run(
             &config::config_dir()?,
             &commands::template_rm::Options { profile, harness },
-            &SbxBackend,
+            &SbxBackend::LOCAL,
             &mut std::io::stdout(),
         ),
         Command::Config {
@@ -830,7 +833,7 @@ fn main() -> anyhow::Result<()> {
             let watch = watch.then(|| std::time::Duration::from_secs(interval.unwrap_or(2)));
             commands::status::run(
                 &global.base_dir,
-                &SbxBackend,
+                &SbxBackend::LOCAL,
                 &task::record::SystemProbe,
                 &env,
                 watch,

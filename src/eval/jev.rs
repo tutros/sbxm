@@ -760,7 +760,7 @@ pub fn evaluate_repeat(
             .create(&CreateSpec {
                 name: sandbox.clone(),
                 agent: AGENT.into(),
-                workspace: workspace.clone(),
+                workspace: Some(workspace.clone()),
                 cpus: kit.cpus,
                 memory: kit.memory.clone(),
                 skills: SkillsStore::Off,

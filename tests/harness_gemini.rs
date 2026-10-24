@@ -31,7 +31,7 @@ fn creates_a_gemini_sandbox_with_a_harness_gemini_mixin() {
         vec![CreateSpec {
             name: "sbxm-demo-gemini".into(),
             agent: "gemini".into(),
-            workspace: env.base_dir().join("demo"),
+            workspace: Some(env.base_dir().join("demo")),
             cpus: 4,
             memory: "8g".into(),
             skills: SkillsStore::ReadOnly,

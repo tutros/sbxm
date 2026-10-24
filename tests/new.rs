@@ -11,7 +11,7 @@ fn expected_create(env: &Env, workspace: &Path) -> CreateSpec {
     CreateSpec {
         name: "sbxm-demo-claude".into(),
         agent: "claude".into(),
-        workspace: workspace.to_path_buf(),
+        workspace: Some(workspace.to_path_buf()),
         cpus: 4,
         memory: "8g".into(),
         skills: SkillsStore::ReadOnly,

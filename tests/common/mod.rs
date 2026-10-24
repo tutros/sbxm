@@ -295,8 +295,25 @@ pub struct SecretCheckBlocksRestore<'a> {
 }
 
 impl SandboxBackend for SecretCheckBlocksRestore<'_> {
+    fn located(&self, _location: sbxm::backend::Location) -> &dyn SandboxBackend {
+        self
+    }
+
     fn create(&self, spec: &CreateSpec) -> anyhow::Result<()> {
         self.inner.create(spec)
+    }
+
+    fn copy_in(&self, sandbox: &str, host: &Path, path: &str) -> anyhow::Result<()> {
+        self.inner.copy_in(sandbox, host, path)
+    }
+
+    fn copy_out(
+        &self,
+        sandbox: &str,
+        path: &str,
+        host: &Path,
+    ) -> anyhow::Result<sbxm::backend::CopyOut> {
+        self.inner.copy_out(sandbox, path, host)
     }
 
     fn list(&self) -> anyhow::Result<Vec<SandboxInfo>> {

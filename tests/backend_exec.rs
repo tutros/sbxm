@@ -116,7 +116,7 @@ fn fake_can_fail_create_or_exec_for_one_sandbox_only() {
         fake.create(&sbxm::backend::CreateSpec {
             name: name.into(),
             agent: "claude".into(),
-            workspace: PathBuf::from("/w"),
+            workspace: Some(PathBuf::from("/w")),
             cpus: 1,
             memory: "1g".into(),
             skills: sbxm::backend::SkillsStore::Off,

@@ -264,7 +264,7 @@ pub fn judge_repeat(
             .create(&CreateSpec {
                 name: sandbox.clone(),
                 agent: judge.harness.agent_arg().into(),
-                workspace: workspace.clone(),
+                workspace: Some(workspace.clone()),
                 cpus: kits.resources.cpus,
                 memory: kits.resources.memory.clone(),
                 skills: harness_kits.skills_store,

@@ -116,7 +116,7 @@ fn lifecycle_against_real_sbx() {
         config_dir.path(),
         &project,
         &new::Options::default(),
-        &SbxBackend,
+        &SbxBackend::LOCAL,
         &mut std::io::stderr(),
     )
     .unwrap();
@@ -126,7 +126,7 @@ fn lifecycle_against_real_sbx() {
         config_dir.path(),
         &project,
         &new::Options::default(),
-        &SbxBackend,
+        &SbxBackend::LOCAL,
         &mut std::io::stderr(),
     )
     .unwrap_err();
@@ -240,7 +240,7 @@ fn lifecycle_against_real_sbx() {
         config_dir.path(),
         &project,
         &rebuild,
-        &SbxBackend,
+        &SbxBackend::LOCAL,
         &mut std::io::stderr(),
     )
     .unwrap();
@@ -251,7 +251,7 @@ fn lifecycle_against_real_sbx() {
     );
 
     // Slice 5: `list` sees it through the real `sbx ls --json`, joined with state.
-    let entries = list::entries(config_dir.path(), &SbxBackend).unwrap();
+    let entries = list::entries(config_dir.path(), &SbxBackend::LOCAL).unwrap();
     let entry = entries
         .iter()
         .find(|e| e.sandbox == sandbox)
@@ -268,10 +268,10 @@ fn lifecycle_against_real_sbx() {
         config_dir.path(),
         &project,
         sbxm::harness::Harness::Claude,
-        &SbxBackend,
+        &SbxBackend::LOCAL,
     )
     .unwrap();
-    let entries = list::entries(config_dir.path(), &SbxBackend).unwrap();
+    let entries = list::entries(config_dir.path(), &SbxBackend::LOCAL).unwrap();
     let entry = entries.iter().find(|e| e.sandbox == sandbox).unwrap();
     assert_eq!(entry.status, "stopped");
 
@@ -280,11 +280,11 @@ fn lifecycle_against_real_sbx() {
         config_dir.path(),
         &project,
         &rm::Options::default(),
-        &SbxBackend,
+        &SbxBackend::LOCAL,
         &Terminal,
     )
     .unwrap();
-    let entries = list::entries(config_dir.path(), &SbxBackend).unwrap();
+    let entries = list::entries(config_dir.path(), &SbxBackend::LOCAL).unwrap();
     assert!(!entries.iter().any(|e| e.sandbox == sandbox), "{entries:?}");
     assert!(base_dir.join(&project).is_dir());
     assert!(!base_dir.join(".sbxm").join(&project).exists());
@@ -293,7 +293,7 @@ fn lifecycle_against_real_sbx() {
 #[test]
 #[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR"]
 fn missing_secret_is_refused_before_create() {
-    let stored = SbxBackend.secret_services().unwrap();
+    let stored = SbxBackend::LOCAL.secret_services().unwrap();
     // Services `sbx secret set` accepts (v0.43.0); use one that isn't stored.
     let missing = ["xai", "groq", "mistral", "nebius", "openrouter", "devin"]
         .into_iter()
@@ -339,7 +339,7 @@ services = ["{missing}"]
         config_dir.path(),
         &project,
         &new::Options::default(),
-        &SbxBackend,
+        &SbxBackend::LOCAL,
         &mut std::io::stderr(),
     )
     .unwrap_err();
@@ -399,7 +399,7 @@ fn codex_mandatory_instructions_against_real_sbx() {
         config_dir.path(),
         &project,
         &options,
-        &SbxBackend,
+        &SbxBackend::LOCAL,
         &mut std::io::stderr(),
     )
     .unwrap();
@@ -424,7 +424,7 @@ fn codex_mandatory_instructions_against_real_sbx() {
 
     // Slice 18c: stop and rm act on the Codex sandbox.
     let codex = sbxm::harness::Harness::Codex;
-    stop::run(config_dir.path(), &project, codex, &SbxBackend).unwrap();
+    stop::run(config_dir.path(), &project, codex, &SbxBackend::LOCAL).unwrap();
     let rm_codex = rm::Options {
         harness: codex,
         ..Default::default()
@@ -433,7 +433,7 @@ fn codex_mandatory_instructions_against_real_sbx() {
         config_dir.path(),
         &project,
         &rm_codex,
-        &SbxBackend,
+        &SbxBackend::LOCAL,
         &Terminal,
     )
     .unwrap();
@@ -487,7 +487,7 @@ fn gemini_mandatory_instructions_against_real_sbx() {
         config_dir.path(),
         &project,
         &options,
-        &SbxBackend,
+        &SbxBackend::LOCAL,
         &mut std::io::stderr(),
     )
     .unwrap();
@@ -500,7 +500,7 @@ fn gemini_mandatory_instructions_against_real_sbx() {
         String::from_utf8_lossy(&gemini_md.stdout).trim(),
         "REAL TEST CANARY: the word is MEDLAR-3"
     );
-    stop::run(config_dir.path(), &project, gemini, &SbxBackend).unwrap();
+    stop::run(config_dir.path(), &project, gemini, &SbxBackend::LOCAL).unwrap();
     let rm_gemini = rm::Options {
         harness: gemini,
         ..Default::default()
@@ -509,7 +509,7 @@ fn gemini_mandatory_instructions_against_real_sbx() {
         config_dir.path(),
         &project,
         &rm_gemini,
-        &SbxBackend,
+        &SbxBackend::LOCAL,
         &Terminal,
     )
     .unwrap();
@@ -564,7 +564,7 @@ fn pi_mandatory_instructions_against_real_sbx() {
         config_dir.path(),
         &project,
         &options,
-        &SbxBackend,
+        &SbxBackend::LOCAL,
         &mut std::io::stderr(),
     )
     .unwrap();
@@ -586,12 +586,19 @@ fn pi_mandatory_instructions_against_real_sbx() {
         String::from_utf8_lossy(&agents_md.stdout).trim(),
         "REAL TEST CANARY: the word is ROWAN-4"
     );
-    stop::run(config_dir.path(), &project, pi, &SbxBackend).unwrap();
+    stop::run(config_dir.path(), &project, pi, &SbxBackend::LOCAL).unwrap();
     let rm_pi = rm::Options {
         harness: pi,
         ..Default::default()
     };
-    rm::run(config_dir.path(), &project, &rm_pi, &SbxBackend, &Terminal).unwrap();
+    rm::run(
+        config_dir.path(),
+        &project,
+        &rm_pi,
+        &SbxBackend::LOCAL,
+        &Terminal,
+    )
+    .unwrap();
     let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
     assert!(!String::from_utf8_lossy(&ls.stdout).contains(&sandbox));
 }
@@ -610,11 +617,11 @@ fn exec_and_skills_against_real_sbx() {
         shared_dirs: vec![],
     };
     std::fs::create_dir_all(&workspace).unwrap();
-    SbxBackend
+    SbxBackend::LOCAL
         .create(&CreateSpec {
             name: name.clone(),
             agent: "claude".into(),
-            workspace,
+            workspace: Some(workspace),
             cpus: 2,
             memory: "2g".into(),
             skills: SkillsStore::Off,
@@ -625,7 +632,7 @@ fn exec_and_skills_against_real_sbx() {
         .unwrap();
 
     let run = |workdir: Option<&str>, argv: &[&str], stdin: Stdin| {
-        SbxBackend
+        SbxBackend::LOCAL
             .exec(
                 &name,
                 &ExecSpec {
@@ -666,7 +673,7 @@ fn exec_and_skills_against_real_sbx() {
         ("piped input", Some(0))
     );
 
-    assert!(SbxBackend.skills().unwrap().is_object());
+    assert!(SbxBackend::LOCAL.skills().unwrap().is_object());
 }
 
 #[test]
@@ -687,11 +694,11 @@ fn claude_headless_against_real_sbx() {
         shared_dirs: vec![],
     };
     std::fs::create_dir_all(&workspace).unwrap();
-    SbxBackend
+    SbxBackend::LOCAL
         .create(&CreateSpec {
             name: name.clone(),
             agent: "claude".into(),
-            workspace: workspace.clone(),
+            workspace: Some(workspace.clone()),
             cpus: 2,
             memory: "2g".into(),
             skills: SkillsStore::Off,
@@ -712,7 +719,7 @@ fn claude_headless_against_real_sbx() {
     };
 
     let result = headless::run(
-        &SbxBackend,
+        &SbxBackend::LOCAL,
         &name,
         &in_sandbox,
         Harness::Claude,
@@ -728,7 +735,7 @@ fn claude_headless_against_real_sbx() {
     // A run that can't finish in 3 s is killed inside the sandbox: TimedOut,
     // and no `claude` process is left behind (decision 114).
     let result = headless::run(
-        &SbxBackend,
+        &SbxBackend::LOCAL,
         &name,
         &in_sandbox,
         Harness::Claude,
@@ -738,7 +745,7 @@ fn claude_headless_against_real_sbx() {
     )
     .unwrap();
     assert_eq!(result.status, RunStatus::TimedOut, "{result:?}");
-    let left = SbxBackend
+    let left = SbxBackend::LOCAL
         .exec(
             &name,
             &ExecSpec {
@@ -769,11 +776,11 @@ fn codex_headless_against_real_sbx() {
         shared_dirs: vec![],
     };
     std::fs::create_dir_all(&workspace).unwrap();
-    SbxBackend
+    SbxBackend::LOCAL
         .create(&CreateSpec {
             name: name.clone(),
             agent: "codex".into(),
-            workspace: workspace.clone(),
+            workspace: Some(workspace.clone()),
             cpus: 2,
             memory: "2g".into(),
             skills: SkillsStore::Off,
@@ -794,7 +801,7 @@ fn codex_headless_against_real_sbx() {
     };
 
     let result = headless::run(
-        &SbxBackend,
+        &SbxBackend::LOCAL,
         &name,
         &in_sandbox,
         Harness::Codex,
@@ -809,7 +816,7 @@ fn codex_headless_against_real_sbx() {
 
     // Killed inside the sandbox after 3 s: TimedOut, and no `codex` process left.
     let result = headless::run(
-        &SbxBackend,
+        &SbxBackend::LOCAL,
         &name,
         &in_sandbox,
         Harness::Codex,
@@ -819,7 +826,7 @@ fn codex_headless_against_real_sbx() {
     )
     .unwrap();
     assert_eq!(result.status, RunStatus::TimedOut, "{result:?}");
-    let left = SbxBackend
+    let left = SbxBackend::LOCAL
         .exec(
             &name,
             &ExecSpec {
@@ -880,7 +887,7 @@ fn antigravity_sandbox_against_real_sbx() {
         config_dir.path(),
         &project,
         &options,
-        &SbxBackend,
+        &SbxBackend::LOCAL,
         &mut std::io::stderr(),
     )
     .unwrap();
@@ -911,7 +918,7 @@ fn antigravity_sandbox_against_real_sbx() {
     let path = workspace.to_string_lossy().replace(char::from(92), "/");
     let in_sandbox = PathBuf::from(format!("/{}{}", path[..1].to_lowercase(), &path[2..]));
     let result = headless::run(
-        &SbxBackend,
+        &SbxBackend::LOCAL,
         &sandbox,
         &in_sandbox,
         agy,
@@ -927,12 +934,19 @@ fn antigravity_sandbox_against_real_sbx() {
     .unwrap();
     assert!(matches!(result.status, RunStatus::Failed(_)), "{result:?}");
 
-    stop::run(config_dir.path(), &project, agy, &SbxBackend).unwrap();
+    stop::run(config_dir.path(), &project, agy, &SbxBackend::LOCAL).unwrap();
     let rm_agy = rm::Options {
         harness: agy,
         ..Default::default()
     };
-    rm::run(config_dir.path(), &project, &rm_agy, &SbxBackend, &Terminal).unwrap();
+    rm::run(
+        config_dir.path(),
+        &project,
+        &rm_agy,
+        &SbxBackend::LOCAL,
+        &Terminal,
+    )
+    .unwrap();
     let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
     assert!(!String::from_utf8_lossy(&ls.stdout).contains(&sandbox));
 }
@@ -979,7 +993,7 @@ fn run_against_real_sbx() {
         config_dir.path(),
         &run_config,
         &Default::default(),
-        &SbxBackend,
+        &SbxBackend::LOCAL,
         &mut out,
         &mut warn,
     )
@@ -1096,7 +1110,7 @@ fn run_diffs_against_real_sbx() {
             config_dir.path(),
             &run_config,
             &Default::default(),
-            &SbxBackend,
+            &SbxBackend::LOCAL,
             &mut out,
             &mut warn,
         )
@@ -1217,7 +1231,7 @@ fn run_checks_against_real_sbx() {
         config_dir.path(),
         &run_config,
         &Default::default(),
-        &SbxBackend,
+        &SbxBackend::LOCAL,
         &mut out,
         &mut warn,
     )
@@ -1318,7 +1332,7 @@ fn run_judge_against_real_sbx() {
         config_dir.path(),
         &run_config,
         &Default::default(),
-        &SbxBackend,
+        &SbxBackend::LOCAL,
         &mut out,
         &mut warn,
     )
@@ -1447,7 +1461,7 @@ fn run_profiles_against_real_sbx() {
         config_dir.path(),
         &run_config,
         &Default::default(),
-        &SbxBackend,
+        &SbxBackend::LOCAL,
         &mut out,
         &mut warn,
     )
@@ -1543,7 +1557,7 @@ fn run_kits_validate_against_real_sbx() {
         config_dir.path(),
         &run_config,
         &run_dir.join("kits"),
-        &SbxBackend,
+        &SbxBackend::LOCAL,
     )
     .unwrap();
 
@@ -1718,7 +1732,7 @@ fn real_task_start(world: &RealTask) {
             }),
             disk: Default::default(),
         },
-        &SbxBackend,
+        &SbxBackend::LOCAL,
         &world.github,
         &SystemProbe,
         &mut out,
@@ -1812,7 +1826,7 @@ fn task_review_against_real_sbx() {
             force: false,
             disk: Default::default(),
         },
-        &SbxBackend,
+        &SbxBackend::LOCAL,
         &world.github,
         &SystemProbe,
         &ShellHostRunner,
@@ -1876,11 +1890,11 @@ fn task_sandbox_gates_against_real_sbx() {
     };
     std::fs::create_dir_all(&workspace).unwrap();
     std::fs::write(workspace.join("marker.txt"), "here\n").unwrap();
-    SbxBackend
+    SbxBackend::LOCAL
         .create(&CreateSpec {
             name: name.clone(),
             agent: "claude".into(),
-            workspace: workspace.clone(),
+            workspace: Some(workspace.clone()),
             cpus: 2,
             memory: "2g".into(),
             skills: SkillsStore::Off,
@@ -1894,7 +1908,7 @@ fn task_sandbox_gates_against_real_sbx() {
 
     // Runs in the workspace; a failing command (exit 3) stops the tier.
     let outcomes = run_sandbox_tier(
-        &SbxBackend,
+        &SbxBackend::LOCAL,
         &name,
         &dir,
         "after-worker",
@@ -1913,7 +1927,7 @@ fn task_sandbox_gates_against_real_sbx() {
 
     // A command that outlives its limit is killed inside the sandbox.
     let outcomes = run_sandbox_tier(
-        &SbxBackend,
+        &SbxBackend::LOCAL,
         &name,
         &dir,
         "after-worker",
@@ -1924,7 +1938,7 @@ fn task_sandbox_gates_against_real_sbx() {
         outcomes[0].timed_out && !outcomes[0].result.passed,
         "{outcomes:?}"
     );
-    let left = SbxBackend
+    let left = SbxBackend::LOCAL
         .exec(
             &name,
             &ExecSpec {
@@ -2000,11 +2014,11 @@ fn task_bundle_round_trip_against_real_sbx() {
     };
     repo::clone_workspace(&repo_git, &workspace, "issue-4", &identity).unwrap();
 
-    SbxBackend
+    SbxBackend::LOCAL
         .create(&CreateSpec {
             name: name.clone(),
             agent: "claude".into(),
-            workspace: workspace.clone(),
+            workspace: Some(workspace.clone()),
             cpus: 2,
             memory: "2g".into(),
             skills: SkillsStore::Off,
@@ -2019,7 +2033,7 @@ fn task_bundle_round_trip_against_real_sbx() {
     let script = "echo agent > agent.txt && git add -A && git commit -q -m 'agent work' \
                   && mkdir -p .sbxm-task \
                   && git bundle create .sbxm-task/branch.bundle issue-4 ^origin/main";
-    let out = SbxBackend
+    let out = SbxBackend::LOCAL
         .exec(
             &name,
             &ExecSpec {
@@ -2056,7 +2070,7 @@ impl Drop for TemplateCleanup {
         let dir = sbxm::template::dir(&self.base_dir);
         if let Ok(Some(record)) = sbxm::template::Record::load(&self.base_dir, &self.key) {
             for tag in std::iter::once(record.tag).chain(record.previous) {
-                let _ = SbxBackend.template_rm(&tag);
+                let _ = SbxBackend::LOCAL.template_rm(&tag);
             }
         }
         let _ = std::fs::remove_file(dir.join(format!("{}.json", self.key)));
@@ -2125,7 +2139,7 @@ fn template_against_real_sbx() {
             harness: Harness::Claude,
             ..Default::default()
         },
-        &SbxBackend,
+        &SbxBackend::LOCAL,
         &sbxm::task::record::SystemProbe,
         &mut out,
         &mut std::io::stderr(),
@@ -2139,7 +2153,7 @@ fn template_against_real_sbx() {
         .expect("template record");
     assert_eq!(record.tag, tag);
     assert!(!record.warm);
-    let images = SbxBackend.template_ls().unwrap();
+    let images = SbxBackend::LOCAL.template_ls().unwrap();
     assert!(images.iter().any(|t| t.reference() == tag), "{images:?}");
     let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
     let ls = String::from_utf8_lossy(&ls.stdout).into_owned();
@@ -2155,7 +2169,7 @@ fn template_against_real_sbx() {
             profile: Some(profile.clone()),
             ..Default::default()
         },
-        &SbxBackend,
+        &SbxBackend::LOCAL,
         &mut std::io::stderr(),
     )
     .unwrap();
@@ -2188,20 +2202,31 @@ fn template_against_real_sbx() {
         profile: profile.clone(),
         harness: Harness::Claude,
     };
-    let refused =
-        template_rm::run(config_dir.path(), &options, &SbxBackend, &mut Vec::new()).unwrap_err();
+    let refused = template_rm::run(
+        config_dir.path(),
+        &options,
+        &SbxBackend::LOCAL,
+        &mut Vec::new(),
+    )
+    .unwrap_err();
     assert!(format!("{refused:#}").contains(&sandbox), "{refused:#}");
 
     rm::run(
         config_dir.path(),
         &project,
         &rm::Options::default(),
-        &SbxBackend,
+        &SbxBackend::LOCAL,
         &Terminal,
     )
     .unwrap();
-    template_rm::run(config_dir.path(), &options, &SbxBackend, &mut Vec::new()).unwrap();
-    let images = SbxBackend.template_ls().unwrap();
+    template_rm::run(
+        config_dir.path(),
+        &options,
+        &SbxBackend::LOCAL,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    let images = SbxBackend::LOCAL.template_ls().unwrap();
     assert!(!images.iter().any(|t| t.reference() == tag), "{images:?}");
     assert!(
         sbxm::template::Record::load(&base_dir, &key)

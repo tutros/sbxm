@@ -1557,7 +1557,7 @@ impl SandboxPlan {
             .create(&CreateSpec {
                 name: sandbox.to_owned(),
                 agent: harness.agent_arg().into(),
-                workspace: workspace.to_path_buf(),
+                workspace: Some(workspace.to_path_buf()),
                 cpus: self.kit_set.resources.cpus,
                 memory: self.kit_set.resources.memory.clone(),
                 skills: self.kits.skills_store,

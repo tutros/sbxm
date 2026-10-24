@@ -8,11 +8,21 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-pub use fake::{ExecGate, FakeBackend};
+pub use fake::{ExecGate, FakeBackend, FakeCopy};
+
 pub use sbx::SbxBackend;
 
 pub trait SandboxBackend: Send + Sync {
+    /// The backend for sandboxes at `location` (P3 (a), decision 262(c)): a task gets the
+    /// instance for the location it runs in, and passes only that one on.
+    fn located(&self, location: Location) -> &dyn SandboxBackend;
     fn create(&self, spec: &CreateSpec) -> Result<()>;
+    /// Copies a host file into a running sandbox (`sbx cp <host> <sandbox>:<path>`), for a sandbox
+    /// with no mounted workspace (decision 257).
+    fn copy_in(&self, sandbox: &str, host: &Path, path: &str) -> Result<()>;
+    /// Copies `<sandbox>:<path>` to `host` (`sbx cp`). The sandbox decides what is at `path`: a
+    /// folder comes out whole (P2), so the caller checks what landed before reading it.
+    fn copy_out(&self, sandbox: &str, path: &str, host: &Path) -> Result<CopyOut>;
     fn list(&self) -> Result<Vec<SandboxInfo>>;
     fn stop(&self, name: &str) -> Result<()>;
     /// Removes the sandbox without prompting (`sbx rm -f`).
@@ -202,11 +212,21 @@ pub struct SandboxInfo {
     pub status: String,
 }
 
+/// What [`SandboxBackend::copy_out`] found at the sandbox's path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyOut {
+    Copied,
+    /// Nothing there; nothing was written on the host.
+    Missing,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateSpec {
     pub name: String,
     pub agent: String,
-    pub workspace: PathBuf,
+    /// The folder mounted as the sandbox's workspace; `None` for a cloud sandbox, which has none
+    /// (S14 Q1).
+    pub workspace: Option<PathBuf>,
     pub cpus: u32,
     pub memory: String,
     /// Always passed explicitly: without `--skills`, `sbx` falls back to its

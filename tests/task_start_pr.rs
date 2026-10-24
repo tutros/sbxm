@@ -97,7 +97,7 @@ fn an_issue_of_an_open_pr_starts_from_the_prs_branch_head_and_records_it() {
     let creates = backend.creates();
     assert_eq!(creates.len(), 1);
     assert_eq!(creates[0].name, "sbxm-task-issue-41-claude");
-    assert_eq!(&creates[0].workspace, ws);
+    assert_eq!(creates[0].workspace.as_ref(), Some(ws));
 }
 
 #[test]

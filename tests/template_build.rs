@@ -209,7 +209,8 @@ fn the_build_sandbox_gets_the_install_steps_and_the_build_allow_list() {
     let backend = sbx_046().with_create_hook(move |spec| {
         let common = std::fs::read_to_string(spec.kits[0].join("spec.yaml")).unwrap();
         *hook_seen.lock().unwrap() = common;
-        assert!(spec.workspace.is_dir(), "{}", spec.workspace.display());
+        let ws = spec.workspace.as_ref().unwrap();
+        assert!(ws.is_dir(), "{}", ws.display());
     });
 
     build(&env, &at_now(Harness::Claude), &backend).unwrap();
@@ -218,7 +219,10 @@ fn the_build_sandbox_gets_the_install_steps_and_the_build_allow_list() {
     let kits = build_dir(&env).join("default-claude.kits");
     assert_eq!(create.template, None);
     assert_eq!(create.agent, "claude");
-    assert_eq!(create.workspace, build_dir(&env).join("default-claude"));
+    assert_eq!(
+        create.workspace,
+        Some(build_dir(&env).join("default-claude"))
+    );
     assert_eq!(
         create.kits,
         vec![kits.join("common"), kits.join("harness-claude")]
@@ -1211,7 +1215,7 @@ fn a_warm_build_copies_the_repo_without_git_or_target() {
     let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let hook_seen = seen.clone();
     let backend = warm_backend().with_create_hook(move |spec| {
-        let ws = &spec.workspace;
+        let ws = spec.workspace.as_ref().unwrap();
         *hook_seen.lock().unwrap() = vec![
             ws.join("Cargo.toml").is_file(),
             ws.join("Cargo.lock").is_file(),
