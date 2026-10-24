@@ -1045,7 +1045,9 @@ pushes, so the SHA guard alone only covers the moment it is armed. The `sbxm/rev
 GitHub enforce this is issue #317, built if the experiment works. (c) Measure: over the next 10
 auto-merged PRs, the breaks found after a merge (CI red on `main`, a revert, a later must-fix traced to one of them)
 and the time from the PR being opened to its merge, GitHub's `createdAt` to `mergedAt` (the loop trial's median
-for the same interval: 29m12s, `sdlc/retros/2026-10-23-retro.md`). The first break pauses auto-merge and the
+for the same interval: 29m12s, `sdlc/retros/2026-10-23-retro.md`); the user's first answer said "ready to merged"
+and the user changed it to this interval on 2026-10-24 (PR 318 review S-2), because the baseline was measured from
+the PR being opened. The first break pauses auto-merge and the
 session tells the user, who decides. Every auto-merged PR is logged in `sdlc/batches/2026-10-24-auto-merge.md`.
 (d) GitHub settings, made by the user on 2026-10-24: the ruleset `sbxm-ruleset` requires 0 approvals and no
 code-owner review, requires the checks `build (ubuntu-latest)` and `build (windows-latest)` (CodeQL stays enforced by
