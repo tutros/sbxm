@@ -1268,7 +1268,6 @@ pub fn prepare_spec_resolved(
             }
             Err(e.context(FailedAfterCreate {
                 id: id.to_owned(),
-                spec: source_path.to_path_buf(),
                 events,
                 kept,
             }))
@@ -1283,8 +1282,6 @@ pub fn prepare_spec_resolved(
 pub struct FailedAfterCreate {
     /// The task's id.
     pub id: String,
-    /// The spec file the task was started from.
-    pub spec: PathBuf,
     /// The create, and the removal once the sandbox is gone: one line each.
     pub events: Vec<String>,
     /// Why the task's folder stays, as the warning to show: the sandbox's removal failed (or
@@ -1295,13 +1292,13 @@ pub struct FailedAfterCreate {
 
 impl std::fmt::Display for FailedAfterCreate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The manual `sbx --cloud rm` in `why` is the one recovery named: `task rm` doesn't
+        // follow the recorded location until slice 6 (review round 3, M-1).
         match &self.kept {
             Some(why) => write!(
                 f,
-                "the start failed, and {why}; the task {} keeps its record of the sandbox until \
-                 `sbxm task rm --spec {}`",
-                self.id,
-                self.spec.display()
+                "the start failed, and {why}; the task {} keeps its record of the sandbox",
+                self.id
             ),
             None => f.write_str("the start failed"),
         }

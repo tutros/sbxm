@@ -1289,6 +1289,9 @@ fn a_start_that_fails_after_its_create_and_cannot_remove_the_sandbox_keeps_the_r
         message.contains("HOME") && message.contains(&command) && message.contains(&id),
         "{message}"
     );
+    // The only recovery named is the manual cloud removal: `task rm` doesn't follow the recorded
+    // location until slice 6 (review round 3, M-1).
+    assert!(!message.contains("task rm"), "{message}");
     assert_eq!(backend.removes().len(), 4);
     assert_eq!(started.waits, secs(&[5, 10, 20]));
 
