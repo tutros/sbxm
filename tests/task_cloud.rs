@@ -994,10 +994,20 @@ struct Started {
 
 /// `task start --spec FILE --cloud` with the removal's sleep recorded instead of slept.
 fn start_cloud(f: &common::task_fixture::Fixture, backend: &sbxm::backend::FakeBackend) -> Started {
+    start_cloud_with_secrets(f, backend, &[])
+}
+
+/// [`start_cloud`] with the task's scoped secrets (slice 4): empty in production, so only a test
+/// fills the list, with a fake value.
+fn start_cloud_with_secrets(
+    f: &common::task_fixture::Fixture,
+    backend: &sbxm::backend::FakeBackend,
+    scoped_secrets: &[sbxm::backend::ScopedSecret],
+) -> Started {
     let spec = common::task_fixture::spec_file(f, "Build a thing.\n");
     let (mut out, mut warn) = (Vec::new(), Vec::new());
     let waits = std::sync::Mutex::new(Vec::new());
-    let result = sbxm::commands::task_start::run_spec_with_sleep(
+    let result = sbxm::commands::task_start::run_spec_with_seams(
         &f.env.config_dir(),
         &spec_options(f, spec, Some(Location::Cloud)),
         backend,
@@ -1006,6 +1016,7 @@ fn start_cloud(f: &common::task_fixture::Fixture, backend: &sbxm::backend::FakeB
         &mut out,
         &mut warn,
         &|d| waits.lock().unwrap().push(d),
+        scoped_secrets,
     );
     Started {
         result,
@@ -1330,4 +1341,158 @@ fn a_worker_ttl_too_large_is_refused_before_anything() {
     assert!(message.contains("time_limit"), "{message}");
     assert!(backend.creates().is_empty(), "{:?}", backend.log());
     assert!(!sbxm::task::record::task_dir(&f.env.base_dir(), &id).exists());
+}
+
+// Slice 4: scoped secrets (`sdlc/milestone-4.md` P8, decisions 256, 262(f); S14 Q2; P2 point 6).
+// Every scoped secret is set before the sandbox's `create` and removed after the sandbox on every
+// path; the cloud's own list says what to remove; the value is written nowhere.
+
+const FAKE_VALUE: &str = "fake-scoped-value-NOT-REAL";
+
+/// The one scoped secret the tests use, with a fake value (no production path fills one in while
+/// P8 (a) holds).
+fn fake_secret() -> sbxm::backend::ScopedSecret {
+    sbxm::backend::ScopedSecret {
+        host: "postman-echo.com".into(),
+        env: "P2_FAKE".into(),
+        value: FAKE_VALUE.into(),
+    }
+}
+
+/// The service name `sbx` makes for [`fake_secret`] (`sbx-cloud-secret-set-custom.txt`).
+const FAKE_NAME: &str = "postman-echo-com";
+
+/// Asserts the fake value is in no log line, nothing printed, and no file of the task folder,
+/// whether or not the folder still exists.
+fn assert_value_nowhere(
+    f: &common::task_fixture::Fixture,
+    id: &str,
+    backend: &sbxm::backend::FakeBackend,
+    started: &Started,
+) {
+    assert!(
+        !backend.log().join("\n").contains(FAKE_VALUE),
+        "{:?}",
+        backend.log()
+    );
+    assert!(!started.out.contains(FAKE_VALUE), "{}", started.out);
+    assert!(!started.warn.contains(FAKE_VALUE), "{}", started.warn);
+    if let Err(e) = &started.result {
+        assert!(!format!("{e:#}").contains(FAKE_VALUE), "{e:#}");
+    }
+    let meta = sbxm::task::record::task_dir(&f.env.base_dir(), id);
+    let mut pending = vec![meta];
+    while let Some(dir) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else if let Ok(bytes) = std::fs::read(&path) {
+                assert!(
+                    !String::from_utf8_lossy(&bytes).contains(FAKE_VALUE),
+                    "{} holds the value",
+                    path.display()
+                );
+            }
+        }
+    }
+}
+
+/// Boundary (one secret): `secret-set`, `create`, ..., the sandbox's `rm`, then the cloud's list
+/// read and `secret-rm`, in that order, on a worker failure that stops the task; one line for the
+/// removal; the value nowhere.
+#[test]
+fn one_scoped_secret_is_set_before_the_create_and_removed_after_the_sandbox() {
+    let f = fixture_with(LOCAL_TOML);
+    let id = spec_id(&f);
+    let sandbox = format!("sbxm-task-{id}-claude");
+    let backend = cloud_backend_with(&f.env.tmp.path().join("cloud-fs"), &id, failed_worker());
+
+    let started = start_cloud_with_secrets(&f, &backend, &[fake_secret()]);
+
+    assert!(started.result.is_err());
+    let log = described_log(&backend);
+    assert_eq!(
+        log[0],
+        format!("secret-set {sandbox} {FAKE_NAME}"),
+        "{log:?}"
+    );
+    assert_eq!(log[1], format!("create {sandbox}"), "{log:?}");
+    assert_eq!(
+        log[log.len() - 3..],
+        [
+            format!("rm {sandbox}"),
+            format!("secret-ls {sandbox}"),
+            format!("secret-rm {sandbox} {FAKE_NAME}"),
+        ],
+        "{log:?}"
+    );
+    assert_eq!(
+        backend.scoped_secret_sets(),
+        [(sandbox.clone(), fake_secret())]
+    );
+    assert_eq!(backend.cloud_secrets(), Vec::<(String, String)>::new());
+    assert_removed(&f, &id, &started, "removed");
+    let line = format!("scoped secret {FAKE_NAME} of {sandbox} removed");
+    assert_eq!(started.out.matches(&line).count(), 1, "{}", started.out);
+    assert!(started.warn.is_empty(), "{}", started.warn);
+    assert_value_nowhere(&f, &id, &backend, &started);
+}
+
+/// Boundary (no scoped secrets): no `secret-set`, no `secret-rm`, and the cloud's secret list is
+/// never read, on a start that hands over and on one that stops.
+#[test]
+fn without_scoped_secrets_no_secret_call_is_made() {
+    for worker in [
+        common::task_fixture::ok(common::task_fixture::CLAUDE_DONE),
+        failed_worker(),
+    ] {
+        let f = fixture_with(LOCAL_TOML);
+        let id = spec_id(&f);
+        let backend = cloud_backend_with(&f.env.tmp.path().join("cloud-fs"), &id, worker);
+
+        let _ = start_cloud(&f, &backend);
+
+        let secret_calls: Vec<_> = backend
+            .log()
+            .into_iter()
+            .filter(|entry| entry.starts_with("secret-"))
+            .collect();
+        assert_eq!(secret_calls, Vec::<String>::new());
+        assert!(backend.scoped_secret_sets().is_empty());
+    }
+}
+
+/// A start that hands over to the review keeps its sandbox (slice 3), and its scoped secret with
+/// it: the review and fix rounds run in that sandbox.
+#[test]
+fn a_start_that_hands_over_keeps_the_sandbox_and_its_scoped_secret() {
+    let f = fixture_with(LOCAL_TOML);
+    let id = spec_id(&f);
+    let sandbox = format!("sbxm-task-{id}-claude");
+    let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &id);
+
+    let started = start_cloud_with_secrets(&f, &backend, &[fake_secret()]);
+
+    started.result.as_ref().unwrap();
+    assert!(backend.removes().is_empty());
+    assert_eq!(
+        backend.cloud_secrets(),
+        [(sandbox.clone(), FAKE_NAME.to_owned())]
+    );
+    let log = described_log(&backend);
+    assert_eq!(
+        log[0],
+        format!("secret-set {sandbox} {FAKE_NAME}"),
+        "{log:?}"
+    );
+    assert!(
+        !log.iter()
+            .any(|e| e.starts_with("secret-rm") || e.starts_with("secret-ls")),
+        "{log:?}"
+    );
+    assert_value_nowhere(&f, &id, &backend, &started);
 }

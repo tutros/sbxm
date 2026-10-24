@@ -9,7 +9,8 @@ use anyhow::{Context, Result};
 
 use super::config::TaskConfig;
 use super::record::{self, Record, SandboxRole};
-use crate::backend::{Location, SandboxBackend, ttl_arg, whole_minutes};
+use super::secrets;
+use crate::backend::{Location, SandboxBackend, ScopedSecret, ttl_arg, whole_minutes};
 use crate::run::results::now;
 
 /// What every TTL adds to the time its sandbox is expected to need (decision 259).
@@ -134,37 +135,75 @@ pub enum Released {
     Warning(String),
 }
 
+/// Everything [`release_worker`] has to say, in the order it happened.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Stopped {
+    /// The worker sandbox's removal: `None` for a local task, or when the worker sandbox has no
+    /// entry still open (it was never created, or is already removed).
+    pub sandbox: Option<Released>,
+    /// The task's scoped secrets, removed after the sandbox (slice 4, decision 256): one entry
+    /// per secret the cloud listed, or one warning for a list it wouldn't give; empty for a task
+    /// without scoped secrets, whose list is never read.
+    pub secrets: Vec<Released>,
+}
+
+impl Stopped {
+    /// The sandbox's outcome, then each secret's.
+    pub fn all(&self) -> impl Iterator<Item = &Released> {
+        self.sandbox.iter().chain(self.secrets.iter())
+    }
+}
+
 /// The task stops, ready or for any reason: its cloud worker sandbox goes now (P5 (d), decision
-/// 263), with the removal retry, and its lifetime entry is stamped and saved. The one function
-/// every "the task stops" path calls. `None` for a local task, or when the worker sandbox has no
-/// entry still open (it was never created, or is already removed).
+/// 263), with the removal retry, and its lifetime entry is stamped and saved; then every secret
+/// scoped to it, when the task has `scoped_secrets` (slice 4), whatever the sandbox's removal
+/// said: the cloud's `rm` leaves them behind, and a sandbox that couldn't be removed shouldn't
+/// keep them either. The one function every "the task stops" path calls.
 pub fn release_worker(
     backend: &dyn SandboxBackend,
     meta: &Path,
     task: &mut Record,
     sleep: &dyn Fn(Duration),
-) -> Option<Released> {
+    scoped_secrets: &[ScopedSecret],
+) -> Stopped {
+    let mut stopped = Stopped::default();
     if task.location != Location::Cloud {
-        return None;
+        return stopped;
     }
-    let name = task.worker.as_ref()?.sandbox.clone();
-    if !task
+    let Some(name) = task.worker.as_ref().map(|w| w.sandbox.clone()) else {
+        return stopped;
+    };
+    if task
         .sandboxes
         .iter()
         .any(|s| s.name == name && s.removed_at.is_none())
     {
-        return None;
+        stopped.sandbox = Some(remove_worker(backend, meta, task, &name, sleep));
     }
-    let how = match remove_sandbox(backend, &name, sleep) {
+    if !scoped_secrets.is_empty() {
+        stopped.secrets = secrets::remove_all(backend, &name);
+    }
+    stopped
+}
+
+/// The worker sandbox's removal, retried, and its lifetime entry stamped and saved.
+fn remove_worker(
+    backend: &dyn SandboxBackend,
+    meta: &Path,
+    task: &mut Record,
+    name: &str,
+    sleep: &dyn Fn(Duration),
+) -> Released {
+    let how = match remove_sandbox(backend, name, sleep) {
         Removal::Removed => "removed",
         Removal::AlreadyGone => "already gone",
-        Removal::Failed(error) => return Some(Released::Warning(not_removed(&name, &error))),
+        Removal::Failed(error) => return Released::Warning(not_removed(name, &error)),
     };
-    task.sandbox_removed(&name, now());
-    Some(match record::write(meta, task) {
+    task.sandbox_removed(name, now());
+    match record::write(meta, task) {
         Ok(()) => Released::Line(format!("cloud sandbox {name} {how}")),
         Err(e) => Released::Warning(format!(
             "cloud sandbox {name} {how}, but task.json couldn't record it: {e:#}"
         )),
-    })
+    }
 }

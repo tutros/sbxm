@@ -458,6 +458,8 @@ fn run_pr(
         probe,
         host,
         sleep: &std::thread::sleep,
+        // No review runs in the cloud yet (decision 261, slice 5), so no scoped secrets.
+        scoped_secrets: &[],
     };
 
     // A task that already exists is resumed when its review can be tried again (a failed

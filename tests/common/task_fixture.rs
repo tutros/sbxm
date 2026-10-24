@@ -148,6 +148,7 @@ pub fn ctx_with_host<'a>(
         identity: &f.identity,
         probe: &Probe,
         sleep: &std::thread::sleep,
+        scoped_secrets: &[],
     }
 }
 

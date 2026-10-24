@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, anyhow, bail};
 
-use crate::backend::{Location, SandboxBackend};
+use crate::backend::{Location, SandboxBackend, ScopedSecret};
 use crate::config::GlobalConfig;
 use crate::confirm::Confirm;
 use crate::disk;
@@ -392,6 +392,8 @@ fn start(
         probe,
         host: &ShellHostRunner,
         sleep: &std::thread::sleep,
+        // An issue task can't run in the cloud yet (decision 261), so it has no scoped secrets.
+        scoped_secrets: &[],
     };
     // Resolved once, before any task is set aside, and reused for the rest of this function: a
     // second load after the discard could itself fail (issue #207 review M-1) outside the path
@@ -793,6 +795,35 @@ pub fn run_spec_with_sleep(
     warn: &mut dyn Write,
     sleep: &(dyn Fn(std::time::Duration) + Sync),
 ) -> Result<()> {
+    run_spec_with_seams(
+        config_dir,
+        opts,
+        backend,
+        github,
+        probe,
+        out,
+        warn,
+        sleep,
+        &[],
+    )
+}
+
+/// [`run_spec_with_sleep`], with the task's `scoped_secrets` as well (milestone 4 slice 4,
+/// decision 256): set scoped to the cloud sandbox before its create and removed after it. Empty
+/// in production, where P8 (a) refuses every profile secret but the provider logins; a test fills
+/// it with a fake value. No config key or flag reads one.
+#[allow(clippy::too_many_arguments)]
+pub fn run_spec_with_seams(
+    config_dir: &std::path::Path,
+    opts: &SpecOptions,
+    backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+    sleep: &(dyn Fn(std::time::Duration) + Sync),
+    scoped_secrets: &[ScopedSecret],
+) -> Result<()> {
     let start = resolve_spec_start(opts)?;
     // A cloud sandbox doesn't use the drive holding `sbx`'s local sandbox state (P11, decision
     // 262(h)); `--ignore-disk` is still accepted there and does nothing more.
@@ -810,6 +841,7 @@ pub fn run_spec_with_sleep(
         warn,
         &|_| {},
         sleep,
+        scoped_secrets,
     )
 }
 
@@ -831,6 +863,7 @@ pub(crate) fn run_spec_from(
     warn: &mut dyn Write,
     on_prepared: &dyn Fn(&str),
     sleep: &(dyn Fn(std::time::Duration) + Sync),
+    scoped_secrets: &[ScopedSecret],
 ) -> Result<()> {
     let SpecStart {
         config,
@@ -861,6 +894,7 @@ pub(crate) fn run_spec_from(
         probe,
         host: &ShellHostRunner,
         sleep,
+        scoped_secrets,
     };
     writeln!(out, "Starting a task from {} ...", opts.spec.display())?;
     let prepared =
@@ -879,6 +913,9 @@ pub(crate) fn run_spec_from(
                 }
                 if let Some(why) = &after.kept {
                     let _ = writeln!(warn, "warning: {why}");
+                }
+                for warning in &after.warnings {
+                    let _ = writeln!(warn, "warning: {warning}");
                 }
             }
             return Err(e);
@@ -986,16 +1023,25 @@ pub(crate) fn run_spec_from(
         Err(e) => e.is::<GatesFailed>(),
     };
     if !hands_over {
-        // The task stopped: its cloud worker sandbox goes now (P5 (d)). What the screen gets
-        // can't change the outcome, which is the command's own error.
-        match lifetime::release_worker(ctx.backend, &prepared.meta, &mut prepared.record, sleep) {
-            Some(lifetime::Released::Line(line)) => {
-                let _ = writeln!(out, "{line}");
+        // The task stopped: its cloud worker sandbox goes now (P5 (d)), then its scoped secrets
+        // (slice 4). What the screen gets can't change the outcome, which is the command's own
+        // error.
+        let stopped = lifetime::release_worker(
+            ctx.backend,
+            &prepared.meta,
+            &mut prepared.record,
+            sleep,
+            scoped_secrets,
+        );
+        for said in stopped.all() {
+            match said {
+                lifetime::Released::Line(line) => {
+                    let _ = writeln!(out, "{line}");
+                }
+                lifetime::Released::Warning(warning) => {
+                    let _ = writeln!(warn, "warning: {warning}");
+                }
             }
-            Some(lifetime::Released::Warning(warning)) => {
-                let _ = writeln!(warn, "warning: {warning}");
-            }
-            None => {}
         }
     }
     outcome

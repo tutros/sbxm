@@ -22,8 +22,9 @@ use super::repo::{self, AgentFile, BUNDLE_CAP, Existing, Identity};
 use super::review;
 use super::rewrite;
 use super::risk;
+use super::secrets;
 use super::select::{self, Selection};
-use crate::backend::{CreateSpec, ExecSpec, Location, SandboxBackend, Stdin};
+use crate::backend::{CreateSpec, ExecSpec, Location, SandboxBackend, ScopedSecret, Stdin};
 use crate::config::{self, GlobalConfig, Profile, Resources};
 use crate::github::{GitHubBackend, Issue, IssueText, PrInfo, PrState};
 use crate::harness::Harness;
@@ -161,6 +162,10 @@ pub struct Ctx<'a> {
     /// Waits between a cloud sandbox's removal retries (P6 (a)); `std::thread::sleep` outside
     /// tests.
     pub sleep: &'a (dyn Fn(Duration) + Sync),
+    /// The secrets scoped to the task's cloud sandbox before its create and removed after it
+    /// (slice 4, decision 256). Empty in production while P8 (a) holds; tests fill it with a fake
+    /// value. No config key or flag reads one.
+    pub scoped_secrets: &'a [ScopedSecret],
 }
 
 /// A task that is ready for its worker.
@@ -1105,6 +1110,9 @@ pub fn prepare_spec_resolved(
     // The sandbox's name is the task's, so a cloud sandbox of that name may predate this start;
     // only one this start's own `create` made is its to remove (review M-1).
     let mut created = false;
+    // Whether this start asked the cloud for its scoped secrets (slice 4): from then on the
+    // cloud's list may hold one of them, to remove after the sandbox on a failure.
+    let mut secrets_asked = false;
     // What this start did that the screen (and so `run.log`) should show: a cloud create.
     let mut events = Vec::new();
     // The task's record, once written: kept outside the closure so a failure after a cloud
@@ -1205,6 +1213,10 @@ pub fn prepare_spec_resolved(
         match cloud_ttl {
             None => plan.create(ctx.backend, &sandbox, worker.harness, &workspace)?,
             Some(ttl) => {
+                // Every scoped secret before the create: secrets attach at create (S14 Q2,
+                // decision 256).
+                secrets_asked = true;
+                secrets::set_all(ctx.backend, &sandbox, ctx.scoped_secrets)?;
                 plan.create_cloud(ctx.backend, &sandbox, worker.harness, ttl)?;
                 created = true;
                 task.add_sandbox(
@@ -1248,13 +1260,17 @@ pub fn prepare_spec_resolved(
             // A cloud start removes only the sandbox its own `create` made (review M-1 of slice
             // 1), and has no host clone, so a folder there isn't its own. The removal is every
             // other stop's (behavior 2): retried, the lifetime entry stamped, one line for the
-            // screen. The folder goes only once the sandbox is gone: while it may still be
-            // there, `task.json` is its only record and stays (review M-1 of slice 3).
-            let Some(task) = record.as_mut().filter(|_| created) else {
+            // screen, then the scoped secrets this start set, read back from the cloud's list,
+            // whether the create succeeded, failed or was never reached after them (slice 4).
+            // The folder goes only once the sandbox is gone: while it may still be there,
+            // `task.json` is its only record and stays (review M-1 of slice 3).
+            let Some(task) = record.as_mut().filter(|_| created || secrets_asked) else {
                 let _ = fs::remove_dir_all(&meta);
                 return Err(e);
             };
-            let kept = match lifetime::release_worker(ctx.backend, &meta, task, ctx.sleep) {
+            let stopped =
+                lifetime::release_worker(ctx.backend, &meta, task, ctx.sleep, ctx.scoped_secrets);
+            let kept = match stopped.sandbox {
                 Some(lifetime::Released::Warning(why)) => Some(why),
                 Some(lifetime::Released::Line(line)) => {
                     events.push(line);
@@ -1263,6 +1279,13 @@ pub fn prepare_spec_resolved(
                 // No open entry for the worker sandbox: nothing of this start's to remove.
                 None => None,
             };
+            let mut warnings = Vec::new();
+            for said in stopped.secrets {
+                match said {
+                    lifetime::Released::Line(line) => events.push(line),
+                    lifetime::Released::Warning(warning) => warnings.push(warning),
+                }
+            }
             if kept.is_none() {
                 let _ = fs::remove_dir_all(&meta);
             }
@@ -1270,24 +1293,31 @@ pub fn prepare_spec_resolved(
                 id: id.to_owned(),
                 events,
                 kept,
+                warnings,
             }))
         }
     }
 }
 
-/// A spec start that failed after its cloud sandbox was created (milestone 4 slice 3, review
-/// M-1): the context on the failure itself, carrying what the screen, and so `run.log`, still
-/// has to show (decision 265). `task_start::run_spec_from` reads it back with `downcast_ref`.
+/// A spec start that failed after its first changing cloud call, a scoped secret's set or the
+/// sandbox's create (milestone 4 slice 3, review M-1; slice 4): the context on the failure
+/// itself, carrying what the screen, and so `run.log`, still has to show (decision 265).
+/// `task_start::run_spec_from` reads it back with `downcast_ref`.
 #[derive(Debug)]
 pub struct FailedAfterCreate {
     /// The task's id.
     pub id: String,
-    /// The create, and the removal once the sandbox is gone: one line each.
+    /// The create, the removal once the sandbox is gone, and each scoped secret removed: one line
+    /// each.
     pub events: Vec<String>,
     /// Why the task's folder stays, as the warning to show: the sandbox's removal failed (or
     /// couldn't be recorded), so `task.json`, its only record, keeps the entry open. `None` when
     /// the sandbox is gone and the folder went with it.
     pub kept: Option<String>,
+    /// A scoped secret that couldn't be removed, or a secret list the cloud wouldn't give: one
+    /// warning each, never dropped. The folder doesn't stay for them: `task.json` records no
+    /// secret, the cloud's list does.
+    pub warnings: Vec<String>,
 }
 
 impl std::fmt::Display for FailedAfterCreate {

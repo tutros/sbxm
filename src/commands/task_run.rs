@@ -483,6 +483,8 @@ fn run_spec_task(
         &mut warn,
         &on_prepared,
         &std::thread::sleep,
+        // `task run --spec` refuses the cloud before this (decision 261), so no scoped secrets.
+        &[],
     );
     out.write_all(without_next(&started).as_bytes())?;
 

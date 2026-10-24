@@ -17,4 +17,5 @@ pub mod review;
 pub mod rewrite;
 pub mod risk;
 pub mod runlog;
+pub mod secrets;
 pub mod select;
