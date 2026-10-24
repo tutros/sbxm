@@ -1,0 +1,301 @@
+# Milestone 4: `sbxm task` sandboxes on Docker Cloud Sandboxes
+
+Planned 2026-10-23 with the user (issue #310, decisions 252-261, one answer each), from spike S14
+(`sdlc/spikes/S14.md`, decision 248) and spike S17 (`sdlc/spikes/S17.md`, decision 255).
+
+## Goal
+
+A repo can have its `sbxm task` sandboxes, workers and reviewers, run on Docker Cloud Sandboxes (`sbx --cloud`)
+instead of the local machine [252]. A repo opts in with `[sandbox] location = "cloud"` in `sbxm-task.toml`, and
+`--cloud` or `--local` overrides that for one command; a task remembers where it runs [253]. A cloud sandbox gets
+the profile's two kits at create [254], a strict profile has its build hosts removed before the agent starts [255],
+provider logins stay global while every other secret is scoped to its sandbox [256], and the pipeline keeps its
+phases, with bundles in and out by `sbx --cloud cp` [257]. Every cloud sandbox has a TTL and a recorded lifetime
+[259]. When the cloud can't be used, sbxm refuses before any write and never falls back to local [261]. Repos
+without the key work exactly as today.
+
+Deferred, each with its trigger where the answers give one:
+- a cloud mode for `sbxm run`, `new` and `open` [252]: later, no trigger named;
+- cloud templates [254]: when cloud setup takes over about 2 minutes a task;
+- parallel orchestration (`--parallel`) [258]: only if the after-merge experiment with 2, then 3, background
+  `task run`s justifies it;
+- a daily budget [259]: a surprising bill.
+
+## Plan-level choices to confirm
+
+None of these is decided. Each needs the user's answer before the slice that depends on it.
+
+- **P1. The `location` key's values and default.** [253] names `[sandbox] location = "cloud"`. Options: (a)
+  `"local"` or `"cloud"`, default `"local"`, any other value an error naming the file (like every unknown key in
+  `sbxm-task.toml`); (b) `"cloud"` only, with absence meaning local. **Recommend (a):** a repo can then write its
+  choice either way, and the error matches the file's other keys. Needed by slice 1.
+- **P2. Fixtures for the cloud parsers.** [260] says the parsers are tested on S14's captured output, but the S14
+  write-up holds prose, not raw output, and `src/backend/fixtures/` has none from the cloud. Options: (a) one short
+  capture run by hand before slice 1 (a default-shape `shell` sandbox, `--ttl 1h`, cents), saving the cloud's `ls
+  --json`, `policy ls --json`, `secret ls --json` output, the not-logged-in message and the `rm` "temporarily
+  unavailable" message, and trying the points S14 left open: whether `exec`, `cp` and `rm` take the name or only the
+  `sbx_...` id, whether `exec -w` and `--skills` are accepted with `--cloud`, what `--ttl` accepts beyond `1h`,
+  whether `--cpus`/`-m` pick the shape, and whether `rm` also removes the sandbox-scoped secrets as it does locally
+  (S1); (b) write fixtures from S14's prose and check them only at slice 9's real test. **Recommend (a):** the
+  parsers and command lines would otherwise be built on guesses, and a wrong guess shows up only at the end.
+- **P3. The cloud backend: a second backend or a mode.** Options: (a) `SbxBackend` gains a location, and a task
+  gets the local or the cloud instance, every call prefixed with `--cloud` in the cloud one; (b) a new
+  `SbxCloudBackend` implementing `SandboxBackend`; (c) a location parameter on every trait method. In each case the
+  trait gains copy in and out (`sbx --cloud cp`) and rule removal (`policy rm`/`policy deny`), and `CreateSpec`
+  gains a TTL and an optional workspace (a cloud create has none, S14 Q1). **Recommend (a):** the command lines
+  differ mostly by one flag, and a task already passes one `&dyn SandboxBackend` everywhere, so callers don't change.
+- **P4. Where a cloud task's clone lives.** Options: (a) `$HOME/work/<task id>`, the path read once with `exec
+  printenv HOME` and recorded in `task.json`; (b) `/home/agent/work/<task id>`, written into the code (S14 Q5 saw
+  `/home/agent` as the agent's home; that it is always so is **inferred**); (c) the repo's own name under `$HOME`.
+  **Recommend (a):** nothing assumes the home folder, and the recorded path is what `task gates` and `resume` use.
+- **P5. What "the phase's time limit" is, and when a cloud worker sandbox goes.** [259] sets `--ttl` to a phase's
+  time limit plus 30 minutes. Locally the worker sandbox lives from `task start` through every fix round to `task
+  rm`, across several commands. Options: (a) TTL per phase: the worker phase is `[worker] time_limit` plus every
+  sandbox gate's `[gates] timeout` plus 30 minutes, a review round `[reviewer] time_limit` plus 30 minutes, a fix
+  round like the worker phase, `task gates` the gate timeouts plus 30 minutes; each phase that ends with its commits
+  in `repo.git` removes its cloud sandbox, and the next phase that needs a worker sandbox creates one from the
+  recorded profile and a bundle of the task's branch, as `task resume` rebuilds a gone one today; (b) one TTL for
+  the whole task (the worker's limit plus `fix_rounds` times the reviewer's and worker's limits, plus 30 minutes),
+  the sandbox kept until `task rm` as locally; (c) like (a) but the role's time limit only, gates not counted.
+  **Recommend (a):** it follows [259]'s wording, a cloud sandbox isn't paid for while the task waits for the user,
+  and the commits are already safe in `repo.git`. Needed by slice 3.
+- **P6. The removal retry.** [259] says up to 3 retries. Options for the wait: (a) 5 s, then 10 s, then 20 s; (b) a
+  fixed 10 s. Only an error that names a retry ("temporarily unavailable", S14 Q5) is retried; any other error is
+  reported at once. **Recommend (a),** through an injected sleep as Jev's retries do [241]. The cause list is P2's
+  captured message.
+- **P7. How `task.json` records location and lifetimes.** Options: (a) a task-level `location` (absent means
+  `local`) and an append-only `sandboxes` list, one entry per created sandbox: `name`, `role` (`worker`,
+  `reviewer`, `fix`), `location`, `created_at`, `ttl_s`, `removed_at` (null while it exists or when removal
+  failed); (b) the same fields on each `Agent`, which a new review round or a rebuilt worker overwrites. **Recommend
+  (a):** a retro needs every sandbox's hours, and (b) loses all but the last of each role.
+- **P8. A profile's other secrets: where the value comes from.** [256] scopes every secret a profile names, other
+  than the provider login, to the sandbox. S14 Q2 found a cloud custom secret takes a literal value only (no
+  `--command`), and `sbx` can't read a local value back (S4). Options: (a) in this milestone, refuse a cloud task
+  whose profile names a secret other than a provider OAuth login, naming the secret and `--local`, until a value
+  source is decided (none of this repo's profiles does: `sbxm-dev` names only `anthropic`); (b) run a host helper
+  and pass its output as the literal value, which puts the value on `sbx`'s command line on the host; (c) the user
+  stores each one in the cloud by hand before every task. Also: (d) a profile naming the *other* provider's login
+  (`anthropic` for a `codex` worker) is checked at global scope like the harness's own. **Recommend (a) and (d):**
+  (b) is a new trust question for the user, (c) can't work for a sandbox name made at start. The scoping code is
+  still built and tested with a fake value (slice 4), so lifting (a) later is a small change.
+- **P9. The runtime list a strict cloud check accepts.** [255] keeps only the runtime list. Options: (a) the
+  harness's own provider hosts, a fixed list per harness in code ([221]'s six OpenAI hosts for `codex`; for
+  `claude`, `api.anthropic.com`, `claude.ai` and `console.anthropic.com`, the Anthropic hosts in S17's built-in
+  list, **inferred** to be enough), plus `[template].allow`; (b) `[template].allow` alone, the user listing the
+  provider hosts there. Removal by (i) `policy deny` per host, as [221] does at create locally, or (ii) `policy rm`.
+  **Recommend (a) with (i):** the check stays the shape of [232], and a deny rule wins over any allow rule added
+  later, which an `rm` doesn't promise. Slice 9's real test proves the agent still answers.
+  [255] names the worker; the same removal before a strict reviewer or fix-round sandbox's agent starts is part of
+  this choice. **Recommend yes,** since [200](b) holds for every sandbox of a strict profile.
+- **P10. A non-strict `[template]` profile in the cloud.** There are no cloud templates [254]. Options: (a) build
+  from the kits as for any profile, with one line saying cloud templates aren't used; (b) silently. **Recommend
+  (a),** in the spirit of [200]'s one warning for a non-strict fallback.
+- **P11. The free-disk check for a cloud task.** [194] refuses every sandbox-creating command under
+  `min_free_disk` on the drive holding `sbx`'s local sandbox state, which a cloud sandbox doesn't use. Options: (a)
+  skip the check for a cloud create; a cloud task still writes `repo.git` and host-gate checkouts under the base
+  dir; (b) keep it. **Recommend (a),** with `--ignore-disk` still accepted. This changes [194]'s scope, so it is a
+  new decision if confirmed.
+- **P12. A minimum `sbx` version for the cloud.** Options: (a) 0.46.0, the version S14 and S17 ran, a constant like
+  [213]'s, checked only for a cloud command; (b) none. **Recommend (a).**
+- **P13. How `doctor` finds a cloud repo and matches `/tmp`.** [257] has `doctor` warn when a cloud repo's gates name
+  `/tmp`. `doctor` doesn't read `sbxm-task.toml` today. Options for which repo: (a) the current directory's repo, when
+  it has an `sbxm-task.toml` with `location = "cloud"`; (b) every repo a task record names. For the match: (i) a gate
+  command containing `/tmp/` or ending in `/tmp` as a word; (ii) any `/tmp` substring. **Recommend (a) with (i):**
+  `doctor` stays a check of where the user is, and (i) doesn't warn about `/tmpfoo`.
+- **P14. Which commands take `--cloud`/`--local`.** Options: (a) only the commands that start a task, `task start`,
+  `task run` and `task review --pr N`; every other command, `task review --issue/--spec` included, uses the
+  location recorded in `task.json` and has no such flag; (b) every `task` command takes them, and one that
+  contradicts the recorded location is refused. **Recommend (a):** [253] makes the record the truth once a task
+  exists, and a flag that can only be refused adds nothing.
+- **P15. `--workers N` in the cloud.** `task start --workers N` already runs workers in parallel today. Options: (a)
+  unchanged in the cloud; (b) refused above 1 in the cloud until [258]'s experiment. **Recommend (a):** [258] rules
+  out new parallel code, not code that exists, and the experiment can use either path.
+- **P16. This repo's gate path.** [257] changes this repo's `/tmp/target` to `$HOME/target`, but no `sbxm-task.toml`
+  is tracked in this repo today (the gates live in the user's copy). Options: (a) the docs slice adds the file to
+  the repo with the cloud-safe path; (b) the user edits their own copy and the docs show the line. **Recommend (b):**
+  adding the file changes what every checkout of the repo runs, which is the user's call.
+
+## Structure (dependency order)
+
+| Module | Responsibility |
+|---|---|
+| `src/task/config.rs` | `[sandbox] location` (P1); unknown values are errors. |
+| `src/backend/` | cloud command lines (P3): `--cloud` prefix, `create` with `--ttl`/`--on-timeout delete` and no workspace, `cp` in and out, `policy rm`/`policy deny`, cloud `ls`, `policy ls` and `secret ls` parsers on fixtures (P2), the removal retry (P6); `FakeBackend` records the new calls. |
+| `src/task/record.rs` | `location` and the sandbox lifetimes (P7); absent in old files means local and no entries. |
+| `src/task/repo.rs` | the bundle of a task branch for a cloud clone (from `repo.git`, never from an agent's clone [159]); `fetch_bundle` reading from a host staging folder the copied-out file lands in. |
+| `src/task/pipeline.rs` | one place that chooses the location (flag, then config, then record); cloud preflight [261]; `run_worker`, `bundle_and_fetch`, `collect`, `run_gates`, `open_review_workspace`, `run_review_agent` and `run_fix_round` through copy in/out instead of the mount; the TTL per phase (P5); the strict removal and check (P9) before any agent starts. |
+| `src/headless.rs` | the cloud's stream error after `timeout -v`'s lines is a timeout, never `ExecUnavailable` (S14 Q3); without those lines it stops the task as `sbx` not answering [261]. |
+| `src/task/resume.rs`, `src/task/finish.rs`, `src/task/merged.rs` | the recorded location decides where a sandbox is rebuilt, found and removed. |
+| `src/template.rs` | the per-harness runtime host list and the cloud rule check, beside `check_codex_rules` [232]. |
+| `src/commands/status.rs`, `src/commands/doctor.rs` | running cloud sandboxes [259]; `doctor`'s `/tmp` warning (P13) and the cloud version (P12). |
+| `tests/real_sbx_cloud.rs` (new) | the ignored real-cloud walk [260]. |
+
+## Interfaces
+
+### `sbxm-task.toml`
+
+```toml
+[sandbox]
+profile = "sbxm-dev"
+location = "cloud"   # [253]; "local" or absent: today's behavior (P1)
+
+[gates]
+# One list for both locations [257]: build under $HOME, never /tmp, in the cloud.
+sandbox = [
+  "cargo fmt --check",
+  "CARGO_TARGET_DIR=$HOME/target cargo clippy --all-targets -- -D warnings",
+  "CARGO_TARGET_DIR=$HOME/target cargo test",
+]
+```
+
+### `task.json` additions (P7 (a))
+
+```json
+{
+  "location": "cloud",
+  "sandboxes": [
+    { "name": "sbxm-task-<id>-claude", "role": "worker", "location": "cloud",
+      "created_at": "2026-10-24T10:00:00Z", "ttl_s": 7200, "removed_at": "2026-10-24T10:41:12Z" }
+  ]
+}
+```
+
+`Agent.workspace` holds the in-sandbox clone path (P4) for a cloud task. A record without `location` is local.
+
+### Commands
+
+| Command | Local (today) | Cloud |
+|---|---|---|
+| `task start`, `task run` | unchanged | location from `--cloud`/`--local`, else `[sandbox] location` (P14). Preflight [261], all before any write: `sbx` version (P12), cloud logged in, the harness's provider secret in the cloud [256], no unsupported profile secret (P8), the profile's kits valid. Then `create --cloud --ttl --on-timeout delete --kit common --kit harness-<h>` (P5), scoped secrets set before it [256], the strict removal and check (P9) before the agent, bundle and prompt files in by `cp`, worker, sandbox gates, bundle out by `cp`, verify, fetch, host gates [257]. |
+| `task review --issue/--spec` | unchanged | the task's recorded location; a reviewer sandbox per round as for the worker; a fix round in a worker sandbox (rebuilt from `repo.git` under P5 (a)). |
+| `task review --pr N` | unchanged | location as for `start` (P14); the PR head goes in as a bundle from `repo.git`. |
+| `task resume` | unchanged | in the cloud, always [261]: a gone sandbox (TTL, a failure) is rebuilt from the recorded profile and a bundle of the branch; preflight again first. |
+| `task gates` | unchanged | in the recorded location; the worker sandbox rebuilt if gone (P5). |
+| `task finish` | unchanged | host-side only (`repo.git`); removes any cloud sandbox of the task still listed, with retries (P6). |
+| `task rm`, `task rm --merged` | unchanged | removes the task's cloud sandboxes (`sbx --cloud rm`, retried, P6) and its scoped secrets [256], then the folder; a sandbox already gone counts as removed. |
+| `task status`, `status` | unchanged | the task's location; `status` adds the running cloud sandboxes named `sbxm-` (`sbx --cloud ls`), one line if the cloud can't be read, never a failure [259]. |
+| `doctor` | unchanged | also lists running cloud sandboxes; warns when the current repo is a cloud repo and its gates name `/tmp` (P13). |
+
+### Refusals [261]
+
+Every refusal comes before the first write, delete or backend call that changes anything, and ends with "or run it
+here with `--local`".
+
+| Cause | Message names |
+|---|---|
+| not logged in to the cloud | `sbx login` |
+| the harness's provider secret missing in the cloud | `sbx secret set <provider> --oauth --cloud` |
+| `sbx` older than the cloud minimum (P12) | the version found and the minimum |
+| a profile secret with no cloud value source (P8 (a)) | the secret and the profile |
+| a strict sandbox whose rules still allow a host outside the runtime list after removal (P9) | the host; the sandbox is removed, as in [232] |
+
+A cloud failure mid-task (`sbx --cloud` not answering, an exec stream error without `timeout -v`'s lines) stops the
+task the way `SbxUnavailable` and `ExecUnavailable` do today, and the message names `task resume`.
+
+## Work order (vertical slices, each TDD, each ends with fmt, clippy, cargo test and a commit)
+
+**Risky slices** (decision 162, reviewed in the background as each is committed):
+- **1**: copying a file out of an agent-controlled sandbox onto the host is a trust boundary [159].
+- **3**: cloud removal and its retries are destructive, and a TTL too short loses a worker's commits.
+- **4**: scoped secrets are a security guard [256].
+- **6**: `resume`, `finish` and `rm` find and remove cloud sandboxes (destructive).
+- **7**: the strict removal and its check are the guard of [255].
+
+The other slices are reviewed at the end of the milestone.
+
+1. **Thinnest path: `task start --spec FILE --cloud`, non-strict, through `FakeBackend`.** The `location` key and the
+   `--cloud`/`--local` flags (P1, P14); the backend's cloud command lines (P3) with `create` taking two kits and no
+   workspace; the branch bundled from `repo.git`, copied in and cloned under the recorded path (P4); prompt files in
+   and `result.md` and the bundle out by `cp` into a fresh host staging folder, each checked as one regular file
+   under its cap before it is read; verify and fetch; sandbox gates by `exec` in the clone; `location` in
+   `task.json`. Done when: a `tests/task_cloud.rs` case shows the backend log in order, `repo.git` holds the
+   worker's commit, `task.json` says `cloud`, and a staged file that is a link or over its cap is refused.
+2. **Cloud preflight and refusals** [261]: logged in, provider secret in the cloud, version (P12), the free-disk rule
+   (P11), each refusal before any write, naming its fix and `--local`. Done when: one test per refusal in the table
+   asserts the message and an empty backend log of changing calls and no task folder.
+3. **Lifetimes**: `--ttl` per phase and `--on-timeout delete` (P5), the removal retry with an injected sleep (P6),
+   the `sandboxes` list in `task.json` (P7); with P5 (a), the phase-end removal and the rebuild from a bundle for
+   the next phase. Done when: tests on the computed TTL for each phase, a removal that succeeds on the third try, one
+   that fails after three and is reported, and a record whose entries add up to the sandbox hours.
+4. **Scoped secrets** [256], P8: a non-provider secret refused (P8 (a)) or, with a fake value in the tests, set
+   with `--sandbox <name>` before `create` and removed after the sandbox on every path, including a failed create.
+   Done when: `tests/task_cloud.rs` cases on the `secret-set`/`secret-rm` log order.
+5. **Reviews and fix rounds in the cloud**: `task review --issue/--spec` and `task run` (reviewer bundle in,
+   `review.md` out by `cp`, the same staging checks as slice 1), fix rounds, `task review --pr N` with the PR head
+   bundled from `repo.git`. Done when: a cloud `task run --spec` through `FakeBackend` reaches `ready` with the
+   expected log.
+6. **`resume`, `gates`, `finish`, `rm` by the recorded location**, and mid-task failures: a gone sandbox rebuilt in the
+   cloud by `resume`; `rm` and `rm --merged` removing cloud sandboxes and scoped secrets; the stream error after
+   `timeout -v`'s lines classified as a timeout (S14 Q3's captured text), and without them as `ExecUnavailable`.
+   Done when: tests per command, including a record that says `cloud` while the config says `local`.
+7. **Strict mode in the cloud** [255], P9, P10: create with the build allow list, then one `policy deny` (or `rm`)
+   per host outside the runtime list, then `policy ls` parsed and checked as in [232]: any other allowed host, or a
+   list sbxm can't read, removes the sandbox and refuses, naming the host. Done when: tests on the parsed S17-shape
+   list, a kept host, a host left over, and an unreadable list; no agent `exec` happens before the check passes.
+8. **`status` and `doctor`**: running cloud sandboxes [259], `doctor`'s `/tmp` warning (P13) and the cloud version
+   (P12). Done when: `tests/doctor.rs` and status golden cases, including the cloud not answering.
+9. **Real-cloud test** [260]: an ignored `tests/real_sbx_cloud.rs`, gated on its own environment variable (for
+   example `SBXM_REAL_CLOUD=1`) besides `SBXM_REAL_BASE_DIR`, on the small shape: one tiny spec task through
+   `task run`; egress accepting all three refusal shapes (DNS failure, connection refused, proxy 403, S14 Q1); a
+   fake scoped secret's value found in no file and no env var; the TTL in the create; the bundle in and out; a
+   strict sandbox's list after the removal; removal confirmed by `sbx --cloud ls` and `policy ls`. Done when: it
+   passes by hand once, recorded with time and the bill's change.
+10. **Docs**: README (the key, the flags, the refusals, the cost note), `docs/workflow.md` (build under `$HOME` in
+    the cloud [257], the TTL [259], the parallel experiment [258]), and this repo's gate path per P16. Done when:
+    README and `docs/workflow.md` describe every row of the command table above.
+11. **End-to-end check** (below). Done when: every step passes and the record is in `sdlc/reviews/`.
+
+## End-to-end checklist (real `sbx --cloud`, small shape)
+
+1. The user reads the bill before starting.
+2. `sbxm doctor`: the cloud version passes, no running cloud sandboxes, the `/tmp` warning shown for a repo whose
+   gates still say `/tmp/target` and gone after the change to `$HOME/target`.
+3. Logged out (or with the provider secret removed): `task start --cloud` refuses before any write, naming the fix
+   and `--local`.
+4. `sbxm task run --spec <tiny spec> --cloud` on a scratch repo: `ready`; `task.json` records `cloud` and one entry
+   per sandbox with its TTL; `sbx --cloud ls` shows the sandbox while it runs with the TTL set.
+5. The same with a strict profile: `sbx --cloud policy ls` on the worker shows only the runtime list before the
+   worker starts, and a build host refuses in one of the three shapes.
+6. Kill `task run` during the worker, then `task resume`: the task continues in the cloud.
+7. `task rm`: `sbx --cloud ls` has no sandbox of the task, `policy ls` has no rule scoped to it, no scoped secret is
+   left, and the global policy is as it was.
+8. `sbxm status` during step 4 lists the running cloud sandbox; afterwards, none.
+9. `tests/real_sbx_cloud.rs` passes.
+10. The user reads the bill after; the change is recorded with the total sandbox hours from `task.json`.
+
+## Out of scope
+
+`sbxm run`, `new` and `open` in the cloud [252]; cloud templates [254]; parallel orchestration and `--parallel`
+[258]; a daily budget [259]; a value source for non-provider secrets beyond P8 (a); cloud credentials in GitHub CI
+[260]; any quiet fallback to local [261].
+
+## Risks
+
+1. **Three shapes of egress refusal** (S14 Q1: DNS failure, connection refused, a proxy 403), none of them
+   explained. A test or a gate that expects 403 misreads the cloud. Mitigation: the real test accepts all three
+   [260]; nothing in sbxm's own logic depends on the shape.
+2. **The timeout's stream error** (S14 Q3): a timed-out command with an orphaned child ends in exit 1 and
+   `RunExecSession: stream error`, not 137. Read as `sbx` unavailable, it would stop a task that only timed out.
+   Mitigation: slice 6 classifies by `timeout -v`'s lines first, on S14's captured text.
+3. **Removal can fail once** (S14 Q5: "temporarily unavailable"). Mitigation: up to 3 retries (P6) [259], the TTL as
+   the backstop, `status`/`doctor` listing what is left.
+4. **`/tmp` is small** (S14 Q5: a tmpfs of half the memory, filled by a cargo target folder). Mitigation: the clone
+   under `$HOME` (P4), one gate list building under `$HOME`, `doctor`'s warning [257].
+5. **Global provider secrets reach every cloud sandbox** (S14 Q7). A `claude` sandbox also gets the OpenAI login.
+   Mitigation: the value never enters the sandbox (S14 Q2, Q7), egress allows the harness's hosts only in strict
+   mode [255]; in a non-strict sandbox the agent's built-in list can include other providers' hosts (S17), which the
+   end-to-end check records.
+6. **The agent's built-in host lists** are wide even for `shell` (S17: Anthropic, OpenAI, GitHub, Google, Mistral,
+   Nebius, OpenRouter, xAI). Strict mode must remove all of them except the runtime list. Mitigation: the check reads
+   the whole list after removal and fails closed [232], [255]; that every built-in host can be removed is shown for
+   one host only (S17, **inferred** for the rest).
+7. **A forgotten sandbox costs money.** Mitigation: every sandbox has a TTL with `--on-timeout delete` [259], phase-end
+   removal if P5 (a) is chosen, `status` and `doctor` list running cloud sandboxes, and the user reads the bill.
+8. **A TTL too short loses uncollected work.** A sandbox deleted by its TTL before the bundle comes out takes the
+   worker's commits with it. Mitigation: the TTL covers the phase's limits plus 30 minutes (P5); `resume` rebuilds
+   from what `repo.git` holds and says so.
+9. **Copying out of an agent-controlled sandbox** (`sbx --cloud cp`): what `cp` does with a link or a folder at the
+   source path is unknown. Mitigation: a fresh host staging folder per copy and the same one-regular-file and cap
+   checks as `read_agent_file` before anything reads it (slice 1).
+10. **Unverified `sbx` details** (name or id for `exec`/`cp`/`rm`, `-w`, `--skills`, `--ttl` units, shape flags).
+    Mitigation: P2's capture run before slice 1.
