@@ -57,7 +57,7 @@ output is in `src/backend/fixtures/sbx-cloud-*`, unchanged.
   (slice 1) is still needed, for the folder case.
 - `rm` took 3 s and did not need a retry this time.
 
-## Not captured (P2 stays open on these two)
+## Not captured (moved to slice 9's real test, decision 267)
 
 - **The not-logged-in message:** capturing it needs `sbx logout`, which signs the user out of both OAuth logins in
   the cloud. Left for slice 9's real test or a moment the user chooses.

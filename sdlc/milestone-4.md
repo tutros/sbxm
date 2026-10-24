@@ -43,7 +43,7 @@ All of these are answered: the user confirmed each on 2026-10-24 (decisions 262-
   **Confirmed:** (a) [262]. **Run 2026-10-24, partial:** `sdlc/spikes/m4-p2-capture.md`, fixtures
   `src/backend/fixtures/sbx-cloud-*`; every trial is done (`rm` does not remove a sandbox's scoped secrets in the
   cloud, `--skills` is refused with `--cloud`), but two outputs are not captured: the not-logged-in message and
-  `rm`'s retryable error. P2 is not done until they are, or a decision changes that.
+  `rm`'s retryable error. Those two move to slice 9's real test [267]; with that, P2 is done.
 - **P3. The cloud backend: a second backend or a mode.** Options: (a) `SbxBackend` gains a location, and a task
   gets the local or the cloud instance, every call prefixed with `--cloud` in the cloud one; (b) a new
   `SbxCloudBackend` implementing `SandboxBackend`; (c) a location parameter on every trait method. In each case the
@@ -399,7 +399,7 @@ The other slices are reviewed at the end of the milestone.
    and cap checks as `read_agent_file` before anything reads it (slice 1), for the folder case and any other shape.
 10. **`sbx` details:** P2's capture run verified name or id for `exec`/`cp`/`policy ls`/`rm`, `-w`, `--skills`
     (refused), a `--ttl` beyond `1h` and the five billable shapes. Still open: the not-logged-in message and `rm`'s
-    retryable "temporarily unavailable" error, neither captured (see P2).
+    retryable "temporarily unavailable" error, neither captured; slice 9 captures them [267].
 11. **A denied host that is needed** [264]: sbxm removes hosts from a strict cloud sandbox, so a host the agent or a
     gate needs shows up as an unexpected agent or gate failure. Mitigation: check the denied hosts in `run.log`
     first; the docs' troubleshooting line says so (slice 10).
