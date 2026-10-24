@@ -88,3 +88,104 @@ fn the_ttl_text_takes_the_forms_sbx_names() {
     assert_eq!(ttl_arg(Duration::from_secs(59 * MIN + 1)), "1h");
     assert_eq!(ttl_arg(Duration::from_millis(1)), "1m");
 }
+
+// The removal retry (P6 (a), decisions 262, 267): only "temporarily unavailable" is retried, up to
+// 3 times after the first attempt, after 5, 10 and 20 seconds.
+
+use std::sync::Mutex;
+
+use sbxm::backend::FakeBackend;
+use sbxm::task::lifetime::{Removal, remove_sandbox};
+
+const SANDBOX: &str = "sbxm-task-x-claude";
+
+/// S14 Q5's wording of the one error worth retrying, as `SbxBackend::remove` reports a failure.
+fn unavailable() -> String {
+    format!(
+        "`sbx rm` failed for sandbox {SANDBOX} (exit status: 1): error: sandbox {SANDBOX} is \
+         temporarily unavailable; retry the delete"
+    )
+}
+
+/// Removes [`SANDBOX`] through `backend`; returns the outcome and the waits it asked for.
+fn remove(backend: &FakeBackend, name: &str) -> (Removal, Vec<Duration>) {
+    let waits = Mutex::new(Vec::new());
+    let removal = remove_sandbox(backend, name, &|d| waits.lock().unwrap().push(d));
+    (removal, waits.into_inner().unwrap())
+}
+
+fn secs(list: &[u64]) -> Vec<Duration> {
+    list.iter().map(|s| Duration::from_secs(*s)).collect()
+}
+
+#[test]
+fn a_removal_that_succeeds_at_once_waits_for_nothing() {
+    let backend = FakeBackend::default();
+
+    let (removal, waits) = remove(&backend, SANDBOX);
+
+    assert_eq!(removal, Removal::Removed);
+    assert_eq!(backend.removes(), [SANDBOX]);
+    assert!(waits.is_empty());
+}
+
+#[test]
+fn a_removal_that_succeeds_on_the_third_retry_waits_5_10_and_20_seconds() {
+    let error = unavailable();
+    let backend = FakeBackend::default().with_remove_errors(&[&error, &error, &error]);
+
+    let (removal, waits) = remove(&backend, SANDBOX);
+
+    assert_eq!(removal, Removal::Removed);
+    assert_eq!(backend.removes().len(), 4);
+    assert_eq!(waits, secs(&[5, 10, 20]));
+}
+
+#[test]
+fn a_removal_that_still_fails_after_three_retries_stops_at_four_calls_and_is_reported() {
+    let error = unavailable();
+    let backend = FakeBackend::default().with_remove_errors(&[&error, &error, &error, &error]);
+
+    let (removal, waits) = remove(&backend, SANDBOX);
+
+    match removal {
+        Removal::Failed(why) => assert!(why.contains("temporarily unavailable"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(backend.removes().len(), 4);
+    assert_eq!(waits, secs(&[5, 10, 20]));
+}
+
+#[test]
+fn any_other_error_is_reported_after_one_call() {
+    let backend =
+        FakeBackend::default().with_remove_errors(&["`sbx rm` failed: permission denied"]);
+
+    let (removal, waits) = remove(&backend, SANDBOX);
+
+    match removal {
+        Removal::Failed(why) => assert!(why.contains("permission denied"), "{why}"),
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(backend.removes().len(), 1);
+    assert!(waits.is_empty());
+}
+
+/// `sbx-cloud-rm-not-found.txt`: a sandbox already gone counts as removed.
+#[test]
+fn a_sandbox_that_is_not_found_counts_as_removed() {
+    let fixture = include_str!("../src/backend/fixtures/sbx-cloud-rm-not-found.txt");
+    let error = format!("`sbx rm` failed for sandbox sbxm-p2-capture (exit status: 1): {fixture}");
+    let backend = FakeBackend::default().with_remove_errors(&[&error]);
+
+    let (removal, waits) = remove(&backend, "sbxm-p2-capture");
+
+    assert_eq!(removal, Removal::AlreadyGone);
+    assert_eq!(backend.removes().len(), 1);
+    assert!(waits.is_empty());
+
+    // Another sandbox's "not found" isn't this one's.
+    let backend = FakeBackend::default().with_remove_errors(&[&error]);
+    let (removal, _) = remove(&backend, SANDBOX);
+    assert!(matches!(removal, Removal::Failed(_)), "{removal:?}");
+}

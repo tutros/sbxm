@@ -67,6 +67,9 @@ pub struct FakeBackend {
     stops: Mutex<Vec<String>>,
     removes: Mutex<Vec<String>>,
     fail_remove: bool,
+    /// What the next calls of `remove` fail with, one each, in order; `remove` succeeds once
+    /// they are used up.
+    remove_errors: Mutex<std::collections::VecDeque<String>>,
     log: Mutex<Vec<String>>,
     invalid_kit: Option<String>,
     kit_warning: Option<String>,
@@ -498,6 +501,13 @@ impl FakeBackend {
         }
     }
 
+    /// Makes the next `remove` calls fail with these errors, one each, in order, and the ones
+    /// after them succeed.
+    pub fn with_remove_errors(self, errors: &[&str]) -> Self {
+        *self.remove_errors.lock().unwrap() = errors.iter().map(|e| (*e).to_owned()).collect();
+        self
+    }
+
     /// Makes `remove` record the call and then fail, like [`FakeBackend::failing_remove`].
     pub fn and_failing_remove(self) -> Self {
         Self {
@@ -701,6 +711,9 @@ impl SandboxBackend for FakeBackend {
         self.record("rm", name);
         if self.fail_remove {
             bail!("fake remove failure");
+        }
+        if let Some(error) = self.remove_errors.lock().unwrap().pop_front() {
+            bail!("{error}");
         }
         Ok(())
     }
