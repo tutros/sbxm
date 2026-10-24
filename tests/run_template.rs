@@ -121,6 +121,16 @@ fn no_run_written(env: &Env) {
     assert!(!env.base_dir().join("runs").exists());
 }
 
+/// The backend's log entries for one sandbox only, in order. Contestant pairs run in parallel,
+/// so another pair's calls can land between two calls on this sandbox in the shared log.
+fn own_log(backend: &FakeBackend, sandbox: &str) -> Vec<String> {
+    backend
+        .log()
+        .into_iter()
+        .filter(|l| l.split_once(' ').is_some_and(|(_, name)| name == sandbox))
+        .collect()
+}
+
 fn run_creates(backend: &FakeBackend) -> Vec<sbxm::backend::CreateSpec> {
     backend
         .creates()
@@ -352,14 +362,14 @@ fn a_strict_codex_contestant_gets_the_deny_rules_and_is_checked_after_create() {
     assert_eq!(codex_create.deny_network, CODEX_EXTRA);
     let claude_create = creates.iter().find(|c| c.agent == "claude").unwrap();
     assert!(claude_create.deny_network.is_empty());
-    let log = backend.log();
-    let created = log
-        .iter()
-        .position(|l| *l == format!("create {}", codex_create.name))
-        .unwrap();
+    let log = own_log(&backend, &codex_create.name);
     assert_eq!(
-        log[created + 1],
-        format!("network_rules {}", codex_create.name)
+        log[..2],
+        [
+            format!("create {}", codex_create.name),
+            format!("network_rules {}", codex_create.name),
+        ],
+        "{log:?}"
     );
     // The fake reports no kit rule, so the check fails closed: the pair errors and its sandbox
     // is removed.
@@ -558,13 +568,16 @@ fn an_unreadable_rule_set_leaves_no_codex_contestant_sandbox_after_one_removal()
         .iter()
         .find(|c| c.agent.contains("codex"))
         .unwrap_or_else(|| panic!("{creates:?}"));
-    let log = backend.log();
-    let created = log
-        .iter()
-        .position(|l| *l == format!("create {}", codex.name))
-        .unwrap();
-    assert_eq!(log[created + 1], format!("network_rules {}", codex.name));
-    assert_eq!(log[created + 2], format!("rm {}", codex.name), "{log:?}");
+    let log = own_log(&backend, &codex.name);
+    assert_eq!(
+        log[..3],
+        [
+            format!("create {}", codex.name),
+            format!("network_rules {}", codex.name),
+            format!("rm {}", codex.name),
+        ],
+        "{log:?}"
+    );
     assert_eq!(
         log.iter()
             .filter(|l| **l == format!("rm {}", codex.name))
