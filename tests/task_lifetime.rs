@@ -25,7 +25,7 @@ fn the_worker_ttl_adds_the_gates_and_every_fix_round() {
          [gates]\nsandbox = [\"a\", \"b\"]\ntimeout = \"5m\"\n",
     );
     // 60 + 10 + 2 x (10 + 60 + 10) + 30 = 260 minutes.
-    assert_eq!(worker_ttl(&c), Duration::from_secs(260 * MIN));
+    assert_eq!(worker_ttl(&c).unwrap(), Duration::from_secs(260 * MIN));
 }
 
 #[test]
@@ -34,7 +34,10 @@ fn with_no_fix_rounds_the_worker_ttl_is_the_worker_and_its_gates() {
         "[worker]\ntime_limit = \"1h\"\nfix_rounds = 0\n[reviewer]\ntime_limit = \"10m\"\n\
          [gates]\nsandbox = [\"a\"]\ntimeout = \"5m\"\n",
     );
-    assert_eq!(worker_ttl(&c), Duration::from_secs((60 + 5 + 30) * MIN));
+    assert_eq!(
+        worker_ttl(&c).unwrap(),
+        Duration::from_secs((60 + 5 + 30) * MIN)
+    );
 }
 
 #[test]
@@ -44,7 +47,7 @@ fn with_no_sandbox_gates_the_gates_count_nothing() {
          [gates]\nsandbox = []\nhost = [\"h\"]\ntimeout = \"5m\"\n",
     );
     // 20 + 0 + 1 x (10 + 20 + 0) + 30 = 80 minutes; a host gate doesn't run in the sandbox.
-    assert_eq!(worker_ttl(&c), Duration::from_secs(80 * MIN));
+    assert_eq!(worker_ttl(&c).unwrap(), Duration::from_secs(80 * MIN));
 }
 
 /// The large case: W = 2h, three gates of 20m, F = 3, R = 45m.
@@ -55,15 +58,15 @@ fn a_large_worker_ttl() {
          [gates]\nsandbox = [\"a\", \"b\", \"c\"]\ntimeout = \"20m\"\n",
     );
     // 120 + 60 + 3 x (45 + 120 + 60) + 30 = 885 minutes = 14h45m.
-    assert_eq!(worker_ttl(&c), Duration::from_secs(885 * MIN));
-    assert_eq!(ttl_arg(worker_ttl(&c)), "14h45m");
+    assert_eq!(worker_ttl(&c).unwrap(), Duration::from_secs(885 * MIN));
+    assert_eq!(ttl_arg(worker_ttl(&c).unwrap()), "14h45m");
 }
 
 #[test]
 fn the_reviewer_ttl_is_its_time_limit_and_half_an_hour() {
     let c = config("[reviewer]\ntime_limit = \"45m\"\n[gates]\nsandbox = []\n");
-    assert_eq!(reviewer_ttl(&c), Duration::from_secs(75 * MIN));
-    assert_eq!(ttl_arg(reviewer_ttl(&c)), "1h15m");
+    assert_eq!(reviewer_ttl(&c).unwrap(), Duration::from_secs(75 * MIN));
+    assert_eq!(ttl_arg(reviewer_ttl(&c).unwrap()), "1h15m");
 }
 
 /// Time limits that aren't whole minutes give a TTL rounded up to the next minute.
@@ -71,8 +74,26 @@ fn the_reviewer_ttl_is_its_time_limit_and_half_an_hour() {
 fn a_ttl_that_is_not_whole_minutes_is_rounded_up() {
     let c = config("[worker]\ntime_limit = \"90s\"\nfix_rounds = 0\n[gates]\nsandbox = []\n");
     // 1m30s + 30m = 31m30s, so 32m.
-    assert_eq!(worker_ttl(&c), Duration::from_secs(32 * MIN));
-    assert_eq!(ttl_arg(worker_ttl(&c)), "32m");
+    assert_eq!(worker_ttl(&c).unwrap(), Duration::from_secs(32 * MIN));
+    assert_eq!(ttl_arg(worker_ttl(&c).unwrap()), "32m");
+}
+
+/// The largest time limits a config accepts don't add up to a TTL: refused, never a panic.
+#[test]
+fn a_ttl_too_large_to_add_up_is_refused() {
+    let max = u64::MAX;
+    let c = config(&format!(
+        "[worker]\ntime_limit = \"{max}s\"\nfix_rounds = 3\n[reviewer]\ntime_limit = \"{max}s\"\n\
+         [gates]\nsandbox = [\"a\"]\n"
+    ));
+    let worker = format!("{:#}", worker_ttl(&c).unwrap_err());
+    assert!(worker.contains("time_limit"), "{worker}");
+    let reviewer = format!("{:#}", reviewer_ttl(&c).unwrap_err());
+    assert!(reviewer.contains("[reviewer] time_limit"), "{reviewer}");
+
+    // One second under the largest whole minute the seconds can hold still rounds up.
+    let edge = Duration::from_secs(max / 60 * 60 - 1);
+    assert_eq!(ttl_arg(edge), "5124095576030431h");
 }
 
 #[test]

@@ -364,7 +364,7 @@ fn a_cloud_spec_start_clones_runs_gates_and_collects_through_copies() {
     // With the worker TTL (slice 3, P5 (d)).
     assert_eq!(
         create.ttl,
-        Some(sbxm::task::lifetime::worker_ttl(&f.config))
+        Some(sbxm::task::lifetime::worker_ttl(&f.config).unwrap())
     );
     let kits: Vec<_> = create
         .kits
@@ -391,7 +391,7 @@ fn a_cloud_spec_start_clones_runs_gates_and_collects_through_copies() {
     assert_eq!(task.worker.as_ref().unwrap().workspace, clone);
     // One lifetime entry, still open: the start hands over to the review, which continues the
     // automatic run in the same sandbox (slice 3, P5 (d), P7 (a)); one line at its create.
-    let ttl = sbxm::task::lifetime::worker_ttl(&f.config);
+    let ttl = sbxm::task::lifetime::worker_ttl(&f.config).unwrap();
     assert_eq!(task.sandboxes.len(), 1, "{:?}", task.sandboxes);
     let entry = &task.sandboxes[0];
     assert_eq!(entry.name, sandbox);
@@ -1216,4 +1216,23 @@ fn a_start_that_fails_after_its_create_removes_the_sandbox_with_retries() {
         "{message}"
     );
     assert_eq!(backend.removes().len(), 4);
+}
+
+/// A worker TTL that can't be added up is refused with the preflight, before any write or create.
+#[test]
+fn a_worker_ttl_too_large_is_refused_before_anything() {
+    let f = fixture_with(&format!(
+        "[sandbox]\nprofile = \"default\"\n[worker]\ntime_limit = \"{}s\"\n\
+         [gates]\nsandbox = [\"cargo test\"]\n",
+        u64::MAX
+    ));
+    let id = spec_id(&f);
+    let backend = cloud_ready();
+
+    let started = start_cloud(&f, &backend);
+
+    let message = format!("{:#}", started.result.unwrap_err());
+    assert!(message.contains("time_limit"), "{message}");
+    assert!(backend.creates().is_empty(), "{:?}", backend.log());
+    assert!(!sbxm::task::record::task_dir(&f.env.base_dir(), &id).exists());
 }

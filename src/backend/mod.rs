@@ -277,7 +277,9 @@ pub fn ttl_arg(ttl: std::time::Duration) -> String {
 
 /// `ttl` in minutes, part of a minute counting as a whole one.
 pub fn whole_minutes(ttl: std::time::Duration) -> u64 {
-    (ttl.as_secs() + u64::from(ttl.subsec_nanos() > 0)).div_ceil(60)
+    ttl.as_secs()
+        .saturating_add(u64::from(ttl.subsec_nanos() > 0))
+        .div_ceil(60)
 }
 
 /// How `sbx`'s shared skills store is mounted (decision 46). sbxm never uses

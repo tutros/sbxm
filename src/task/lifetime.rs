@@ -5,6 +5,8 @@
 use std::path::Path;
 use std::time::Duration;
 
+use anyhow::{Context, Result};
+
 use super::config::TaskConfig;
 use super::record::{self, Record, SandboxRole};
 use crate::backend::{Location, SandboxBackend, ttl_arg, whole_minutes};
@@ -15,27 +17,49 @@ const MARGIN: Duration = Duration::from_secs(30 * 60);
 
 /// The worker sandbox lives through the task's automatic run (P5 (d), decision 263): the worker,
 /// its sandbox gates, and `fix_rounds` times a review, a fix round and the gates again, plus the
-/// margin, rounded up to whole minutes as `sbx` takes it.
-pub fn worker_ttl(config: &TaskConfig) -> Duration {
+/// margin, rounded up to whole minutes as `sbx` takes it. Refused when the config's limits are
+/// too large to add up.
+pub fn worker_ttl(config: &TaskConfig) -> Result<Duration> {
     let worker = config.worker.time_limit;
-    let gates = sandbox_gates(config);
-    let round = config.reviewer.time_limit + worker + gates;
-    rounded(worker + gates + round * config.fix_rounds + MARGIN)
+    let sum = || {
+        let gates = config
+            .gates
+            .timeout
+            .checked_mul(u32::try_from(config.gates.sandbox.len()).ok()?)?;
+        let round = config
+            .reviewer
+            .time_limit
+            .checked_add(worker)?
+            .checked_add(gates)?;
+        worker
+            .checked_add(gates)?
+            .checked_add(round.checked_mul(config.fix_rounds)?)?
+            .checked_add(MARGIN)
+    };
+    sum().and_then(rounded).with_context(|| {
+        "the worker sandbox's TTL ([worker] time_limit, plus every [gates] sandbox command's \
+         timeout, plus fix_rounds times the reviewer's, the worker's and the gates' time, plus \
+         30 minutes) is too large to add up; lower those limits or fix_rounds in sbxm-task.toml"
+    })
 }
 
 /// A reviewer sandbox lives for one review round (P5 (d)): the reviewer's time limit plus the
 /// margin, rounded up to whole minutes.
-pub fn reviewer_ttl(config: &TaskConfig) -> Duration {
-    rounded(config.reviewer.time_limit + MARGIN)
+pub fn reviewer_ttl(config: &TaskConfig) -> Result<Duration> {
+    config
+        .reviewer
+        .time_limit
+        .checked_add(MARGIN)
+        .and_then(rounded)
+        .with_context(|| {
+            "the reviewer sandbox's TTL ([reviewer] time_limit plus 30 minutes) is too large; \
+             lower [reviewer] time_limit in sbxm-task.toml"
+        })
 }
 
-/// Every sandbox gate's timeout: `[gates] timeout` once per `[gates] sandbox` command.
-fn sandbox_gates(config: &TaskConfig) -> Duration {
-    config.gates.timeout * u32::try_from(config.gates.sandbox.len()).unwrap_or(u32::MAX)
-}
-
-fn rounded(ttl: Duration) -> Duration {
-    Duration::from_secs(whole_minutes(ttl) * 60)
+/// `ttl` rounded up to whole minutes; `None` past what a `Duration` holds.
+fn rounded(ttl: Duration) -> Option<Duration> {
+    whole_minutes(ttl).checked_mul(60).map(Duration::from_secs)
 }
 
 /// The waits before each retry of a removal that `sbx` says to retry (P6 (a), decision 262): up

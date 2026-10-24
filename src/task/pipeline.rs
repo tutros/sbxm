@@ -1055,14 +1055,18 @@ pub fn prepare_spec_resolved(
     spec_startable(&global.base_dir, id, source_path)?;
     let worker = &ctx.config.worker;
     let profile = Profile::load(global.profiles_dir(), &ctx.config.sandbox.profile)?;
-    match location {
-        Location::Local => check_secrets(
-            ctx.backend,
-            worker.harness,
-            "the worker",
-            &ctx.config.sandbox.profile,
-            &profile,
-        )?,
+    // A cloud worker's TTL (P5 (d)), checked with the rest before anything is written.
+    let cloud_ttl = match location {
+        Location::Local => {
+            check_secrets(
+                ctx.backend,
+                worker.harness,
+                "the worker",
+                &ctx.config.sandbox.profile,
+                &profile,
+            )?;
+            None
+        }
         Location::Cloud => {
             cloud_preflight(
                 ctx.backend,
@@ -1071,8 +1075,9 @@ pub fn prepare_spec_resolved(
                 &profile,
             )?;
             refuse_strict_cloud(&ctx.config.sandbox.profile, &profile)?;
+            Some(lifetime::worker_ttl(ctx.config)?)
         }
-    }
+    };
     let mut warnings = ctx.config.warnings.clone();
     warnings.extend(worker.harness.unsupported(&profile, "the worker's sandbox"));
     let prompt = spec_worker_prompt(ctx.config, id, ctx.base_branch, ctx.repo)?;
@@ -1194,10 +1199,9 @@ pub fn prepare_spec_resolved(
         });
         record::write(&meta, &task)?;
 
-        match location {
-            Location::Local => plan.create(ctx.backend, &sandbox, worker.harness, &workspace)?,
-            Location::Cloud => {
-                let ttl = lifetime::worker_ttl(ctx.config);
+        match cloud_ttl {
+            None => plan.create(ctx.backend, &sandbox, worker.harness, &workspace)?,
+            Some(ttl) => {
                 plan.create_cloud(ctx.backend, &sandbox, worker.harness, ttl)?;
                 created = true;
                 task.add_sandbox(
