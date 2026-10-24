@@ -87,6 +87,15 @@ pub struct Prepared {
 }
 
 impl Prepared {
+    /// The worker's clone as its sandbox sees it: the recorded path in a cloud sandbox (P4),
+    /// else the mounted workspace.
+    pub fn sandbox_clone(&self) -> PathBuf {
+        match (self.record.location, &self.record.worker) {
+            (Location::Cloud, Some(worker)) => PathBuf::from(&worker.workspace),
+            _ => in_sandbox_path(&self.workspace),
+        }
+    }
+
     /// A task that already exists, read back from its record (`<base>/.sbxm/tasks/<id>/`).
     /// `id` must look like `issue-<n>` or `pr-<n>` before any path is built from it.
     pub fn open(base_dir: &Path, id: &str) -> Result<Self> {
@@ -897,7 +906,7 @@ pub fn preflight_spec(config_dir: &Path, source_path: &Path) -> Result<()> {
 pub fn prepare_spec(ctx: &Ctx, source_path: &Path) -> Result<Prepared> {
     let text = validate_spec_file(source_path)?;
     let (id, title) = record::spec_id(source_path)?;
-    prepare_spec_resolved(ctx, source_path, &text, &id, &title)
+    prepare_spec_resolved(ctx, source_path, &text, &id, &title, Location::Local)
 }
 
 /// The spec worker's prompt, rendered. It needs only the config and the resolved names, so
@@ -928,12 +937,18 @@ pub fn spec_worker_prompt(
 /// destructive action elsewhere (`--restart`'s discard, issue #194 review finding M-1, repeat)
 /// passes that same snapshot here, so the file is never read again after the file could have
 /// changed or vanished.
+///
+/// At [`Location::Cloud`] (milestone 4) there is no host clone and no mount: the sandbox is created
+/// from the profile's two kits with no workspace, the task branch goes in as a bundle of
+/// `repo.git` and is cloned under `$HOME/work/<id>` inside it, and the prompt files are copied in
+/// ([`seed_cloud_clone`]); the record carries the location and that clone path.
 pub fn prepare_spec_resolved(
     ctx: &Ctx,
     source_path: &Path,
     text: &str,
     id: &str,
     title: &str,
+    location: Location,
 ) -> Result<Prepared> {
     let global = GlobalConfig::load(ctx.config_dir)?;
     let meta = record::task_dir(&global.base_dir, id);
@@ -950,18 +965,28 @@ pub fn prepare_spec_resolved(
         &ctx.config.sandbox.profile,
         &profile,
     )?;
+    if location == Location::Cloud {
+        refuse_strict_cloud(&ctx.config.sandbox.profile, &profile)?;
+    }
     let mut warnings = ctx.config.warnings.clone();
     warnings.extend(worker.harness.unsupported(&profile, "the worker's sandbox"));
     let prompt = spec_worker_prompt(ctx.config, id, ctx.base_branch, ctx.repo)?;
 
-    // Reserve both folders; `create_dir` fails if either appeared meanwhile.
-    for dir in [&meta, &workspace] {
+    // Reserve the folders (a cloud task has no host clone); `create_dir` fails if one appeared
+    // meanwhile.
+    let local = location == Location::Local;
+    let reserved: &[&PathBuf] = if local {
+        &[&meta, &workspace]
+    } else {
+        &[&meta]
+    };
+    for dir in reserved {
         let parent = dir.parent().unwrap_or(Path::new("."));
         fs::create_dir_all(parent)
             .with_context(|| format!("cannot create {}", parent.display()))?;
     }
     fs::create_dir(&meta).with_context(|| format!("cannot reserve {}", meta.display()))?;
-    if let Err(e) = fs::create_dir(&workspace) {
+    if local && let Err(e) = fs::create_dir(&workspace) {
         let _ = fs::remove_dir_all(&meta);
         return Err(e).with_context(|| format!("cannot reserve {}", workspace.display()));
     }
@@ -973,38 +998,53 @@ pub fn prepare_spec_resolved(
         repo::create_branch(&repo_git, id, ctx.base_branch)?;
         // The worker's starting commit (decision 216).
         let start = repo::branch_tip(&repo_git, id)?;
-        let plan = plan_sandbox(
-            ctx.config_dir,
-            ctx.backend,
-            &ctx.config.sandbox.profile,
-            worker.harness,
-            &sandbox,
-            &Overrides {
-                cpus: ctx.config.sandbox.cpus,
-                memory: ctx.config.sandbox.memory.clone(),
-            },
-            &meta.join("kits"),
-            Locks::Commit {
-                repo_git: &repo_git,
-                commit: &start,
-            },
-            &mut warnings,
-        )?;
+        let overrides = Overrides {
+            cpus: ctx.config.sandbox.cpus,
+            memory: ctx.config.sandbox.memory.clone(),
+        };
+        let plan = match location {
+            Location::Local => plan_sandbox(
+                ctx.config_dir,
+                ctx.backend,
+                &ctx.config.sandbox.profile,
+                worker.harness,
+                &sandbox,
+                &overrides,
+                &meta.join("kits"),
+                Locks::Commit {
+                    repo_git: &repo_git,
+                    commit: &start,
+                },
+                &mut warnings,
+            )?,
+            Location::Cloud => plan_cloud_sandbox(
+                ctx.config_dir,
+                ctx.backend,
+                &ctx.config.sandbox.profile,
+                worker.harness,
+                &sandbox,
+                &overrides,
+                &meta.join("kits"),
+                &mut warnings,
+            )?,
+        };
         let (kit_set, harness_kits) = (&plan.kit_set, plan.kits.clone());
-        repo::clone_workspace(&repo_git, &workspace, id, ctx.identity)?;
+        if local {
+            repo::clone_workspace(&repo_git, &workspace, id, ctx.identity)?;
 
-        // The agent's `git add -A` must not pick up sbxm's own files.
-        let info = workspace.join(".git").join("info");
-        fs::create_dir_all(&info)?;
-        fs::write(info.join("exclude"), format!("# sbxm\n{AGENT_DIR}/\n"))?;
-        repo::write_agent_files(
-            &workspace,
-            &[
-                ("source.md", text.as_bytes()),
-                ("prompt.md", prompt.as_bytes()),
-            ],
-            Existing::Replace,
-        )?;
+            // The agent's `git add -A` must not pick up sbxm's own files.
+            let info = workspace.join(".git").join("info");
+            fs::create_dir_all(&info)?;
+            fs::write(info.join("exclude"), format!("# sbxm\n{AGENT_DIR}/\n"))?;
+            repo::write_agent_files(
+                &workspace,
+                &[
+                    ("source.md", text.as_bytes()),
+                    ("prompt.md", prompt.as_bytes()),
+                ],
+                Existing::Replace,
+            )?;
+        }
         fs::write(meta.join("source.md"), text)?;
         fs::write(meta.join("worker-prompt.md"), &prompt)?;
 
@@ -1025,11 +1065,17 @@ pub fn prepare_spec_resolved(
             Process::current(ctx.probe),
         );
         task.fix_rounds = ctx.config.fix_rounds;
+        task.location = location;
         task.worker = Some(Agent {
             harness: worker.harness.as_str().to_owned(),
             model: worker.model.clone(),
             sandbox: sandbox.clone(),
-            workspace: slashes(&workspace),
+            // A cloud clone's path is known once the sandbox answers `printenv HOME`.
+            workspace: if local {
+                slashes(&workspace)
+            } else {
+                String::new()
+            },
             profile: Some(ctx.config.sandbox.profile.clone()),
             cpus: Some(kit_set.resources.cpus),
             memory: Some(kit_set.resources.memory.clone()),
@@ -1038,7 +1084,17 @@ pub fn prepare_spec_resolved(
         });
         record::write(&meta, &task)?;
 
-        plan.create(ctx.backend, &sandbox, worker.harness, &workspace)?;
+        match location {
+            Location::Local => plan.create(ctx.backend, &sandbox, worker.harness, &workspace)?,
+            Location::Cloud => {
+                plan.create_cloud(ctx.backend, &sandbox, worker.harness)?;
+                let clone = seed_cloud_clone(ctx.backend, &meta, &sandbox, &task, ctx.identity)?;
+                if let Some(agent) = task.worker.as_mut() {
+                    agent.workspace = clone;
+                }
+                record::write(&meta, &task)?;
+            }
+        }
         Ok((task, harness_kits))
     })();
 
@@ -1257,7 +1313,7 @@ pub fn run_gates(
         let ran = gates::run_sandbox_tier(
             env.backend,
             &sandbox,
-            &in_sandbox_path(&prepared.workspace),
+            &prepared.sandbox_clone(),
             phase,
             &gates.sandbox,
             gates.timeout,
@@ -1595,6 +1651,260 @@ impl SandboxPlan {
     }
 }
 
+/// Refuses a strict profile for a cloud sandbox: its removal of the build hosts and the check after
+/// it (decision 255) are milestone 4's slice 7.
+fn refuse_strict_cloud(profile_name: &str, profile: &Profile) -> Result<()> {
+    if profile.template.as_ref().is_some_and(|t| t.strict) {
+        bail!(
+            "profile '{profile_name}' is strict, and strict cloud sandboxes come in milestone 4's \
+             slice 7; start it with --local, or use a profile without strict = true"
+        );
+    }
+    Ok(())
+}
+
+/// [`plan_sandbox`] for a cloud sandbox: always the profile's kits, since there are no cloud
+/// templates (decision 254); a profile with a `[template]` gets one line saying so (decision
+/// 262(g)).
+#[allow(clippy::too_many_arguments)]
+fn plan_cloud_sandbox(
+    config_dir: &Path,
+    backend: &dyn SandboxBackend,
+    profile_name: &str,
+    harness: Harness,
+    sandbox: &str,
+    overrides: &Overrides,
+    kits_root: &Path,
+    warnings: &mut Vec<String>,
+) -> Result<SandboxPlan> {
+    let global = GlobalConfig::load(config_dir)?;
+    let profile = Profile::load(global.profiles_dir(), profile_name)?;
+    refuse_strict_cloud(profile_name, &profile)?;
+    if profile.template.is_some() {
+        warnings.push(format!(
+            "cloud templates aren't used (decision 254); {sandbox} is built from profile \
+             '{profile_name}''s kits"
+        ));
+    }
+    let kit_set = kits::build_for(
+        config_dir,
+        profile_name,
+        &[harness],
+        overrides,
+        None,
+        kits_root,
+        backend,
+    )?;
+    let kits = kit_set
+        .get(harness)
+        .cloned()
+        .with_context(|| format!("no kits were built for {sandbox}'s harness"))?;
+    Ok(SandboxPlan {
+        kit_set,
+        kits,
+        template: None,
+        deny_network: None,
+        profile_name: profile_name.to_owned(),
+        profile,
+    })
+}
+
+impl SandboxPlan {
+    /// Creates the cloud sandbox `sandbox`: no workspace, the profile's two kits in order
+    /// (decision 254).
+    fn create_cloud(
+        &self,
+        backend: &dyn SandboxBackend,
+        sandbox: &str,
+        harness: Harness,
+    ) -> Result<()> {
+        backend
+            .create(&CreateSpec {
+                name: sandbox.to_owned(),
+                agent: harness.agent_arg().into(),
+                workspace: None,
+                cpus: self.kit_set.resources.cpus,
+                memory: self.kit_set.resources.memory.clone(),
+                skills: self.kits.skills_store,
+                kits: self.kits.dirs.clone(),
+                template: None,
+                deny_network: Vec::new(),
+            })
+            .with_context(|| format!("cannot create sandbox {sandbox}"))
+    }
+}
+
+/// An `exec` in the cloud sandbox with no working folder; a non-zero exit is an error naming
+/// `what`.
+fn exec_in(
+    backend: &dyn SandboxBackend,
+    sandbox: &str,
+    what: &str,
+    argv: &[&str],
+) -> Result<String> {
+    let out = backend
+        .exec(
+            sandbox,
+            &ExecSpec {
+                workdir: None,
+                argv: argv.iter().map(|a| (*a).to_owned()).collect(),
+                stdin: Stdin::Closed,
+            },
+        )
+        .with_context(|| format!("cannot {what} in {sandbox}"))?;
+    if out.exit_code != Some(0) {
+        bail!("cannot {what} in {sandbox}: {}", out.stderr.trim());
+    }
+    Ok(out.stdout)
+}
+
+/// What clones a cloud task's branch inside its sandbox, run by `sh -c` with the values as
+/// positional arguments (never pasted into the script): `$1` the bundle, `$2` the clone, `$3` the
+/// branch, `$4`/`$5` the committer's name and email. Like `repo::clone_workspace`, no hooks come
+/// along, and `.sbxm-task/` is excluded so the agent's `git add -A` leaves sbxm's files alone.
+const CLONE_SCRIPT: &str = concat!(
+    "set -e; ",
+    "git clone --quiet --template= --branch \"$3\" -- \"$1\" \"$2\"; ",
+    "git -C \"$2\" config user.name \"$4\"; ",
+    "git -C \"$2\" config user.email \"$5\"; ",
+    "mkdir -p \"$2/.git/info\"; ",
+    "printf '# sbxm\\n.sbxm-task/\\n' >> \"$2/.git/info/exclude\"",
+);
+
+/// Clones a cloud task's branch inside its sandbox (P4 (a), decision 262(d)) and returns the
+/// clone's path: `$HOME` is read once (`printenv HOME`), a bundle of the branch and its base is
+/// made from `repo.git` on the host and copied in, cloned under `$HOME/work/<id>`, and the task's
+/// prompt files go into the clone's `.sbxm-task/` by copy.
+fn seed_cloud_clone(
+    backend: &dyn SandboxBackend,
+    meta: &Path,
+    sandbox: &str,
+    task: &Record,
+    identity: &Identity,
+) -> Result<String> {
+    let reported = exec_in(backend, sandbox, "read $HOME", &["printenv", "HOME"])?;
+    let home = reported.trim_end_matches(['\n', '\r']);
+    if !home.starts_with('/') || home.chars().any(|c| c.is_control() || c.is_whitespace()) {
+        bail!(
+            "{sandbox} reports HOME as {home:?}, which isn't an absolute path; sbxm can't place \
+             the task's clone there"
+        );
+    }
+    let home = home.trim_end_matches('/');
+    let clone = format!("{home}/work/{}", task.id);
+    let bundle = format!("{home}/.sbxm-task-{}.bundle", task.id);
+
+    let staging = Staged::fresh(meta, "clone-bundle")?;
+    let host_bundle = staging.dir().join("task.bundle");
+    repo::bundle_for_clone(
+        &meta.join("repo.git"),
+        &task.branch,
+        &task.base,
+        &host_bundle,
+    )?;
+    backend
+        .copy_in(sandbox, &host_bundle, &bundle)
+        .with_context(|| format!("cannot copy the task's bundle into {sandbox}"))?;
+    drop(staging);
+
+    exec_in(
+        backend,
+        sandbox,
+        "clone the task's branch",
+        &[
+            "sh",
+            "-c",
+            CLONE_SCRIPT,
+            "sh",
+            &bundle,
+            &clone,
+            &task.branch,
+            &identity.name,
+            &identity.email,
+        ],
+    )?;
+    let control = format!("{clone}/{AGENT_DIR}");
+    exec_in(
+        backend,
+        sandbox,
+        "make the clone's .sbxm-task folder",
+        &["mkdir", "-p", &control],
+    )?;
+    for (host, name) in [
+        ("source.md", "source.md"),
+        ("worker-prompt.md", "prompt.md"),
+    ] {
+        backend
+            .copy_in(sandbox, &meta.join(host), &format!("{control}/{name}"))
+            .with_context(|| format!("cannot copy {name} into {sandbox}"))?;
+    }
+    Ok(clone)
+}
+
+/// A new, empty host folder under the task's `staging/`, made for one copy out of (or into) a
+/// cloud sandbox and removed with everything in it when dropped. What a copy out leaves in it
+/// came from the sandbox, so it is read only through `repo`'s link-free, size-capped readers.
+pub struct Staged {
+    dir: PathBuf,
+}
+
+impl Staged {
+    /// `<meta>/staging/<name>-<n>`, the first `n` free: `create_dir` refuses anything already
+    /// there, so the folder is always new and empty.
+    fn fresh(meta: &Path, name: &str) -> Result<Self> {
+        let root = meta.join("staging");
+        fs::create_dir_all(&root).with_context(|| format!("cannot create {}", root.display()))?;
+        for n in 0..1000 {
+            let dir = root.join(format!("{name}-{n}"));
+            match fs::create_dir(&dir) {
+                Ok(()) => return Ok(Self { dir }),
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => {
+                    return Err(e).with_context(|| format!("cannot create {}", dir.display()));
+                }
+            }
+        }
+        bail!(
+            "{} is full of earlier staging folders; delete them",
+            root.display()
+        )
+    }
+
+    /// The folder; a copied-out file is at `<dir>/.sbxm-task/<name>`.
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
+}
+
+impl Drop for Staged {
+    fn drop(&mut self) {
+        // `remove_dir_all` removes a link the sandbox sent, never what it points at.
+        let _ = fs::remove_dir_all(&self.dir);
+    }
+}
+
+/// Copies `<clone>/.sbxm-task/<name>` out of a cloud sandbox into a fresh staging folder, laid
+/// out as `<staging>/.sbxm-task/<name>` so `repo::read_agent_file` and `repo::fetch_bundle` read
+/// it with their link and size checks (a folder or a link the sandbox sent is refused there).
+/// Nothing is written for a path that isn't there.
+pub fn copy_out_staged(
+    backend: &dyn SandboxBackend,
+    meta: &Path,
+    sandbox: &str,
+    clone: &str,
+    name: &str,
+) -> Result<Staged> {
+    let staged = Staged::fresh(meta, name)?;
+    let control = staged.dir.join(AGENT_DIR);
+    fs::create_dir(&control).with_context(|| format!("cannot create {}", control.display()))?;
+    backend.copy_out(
+        sandbox,
+        &format!("{clone}/{AGENT_DIR}/{name}"),
+        &control.join(name),
+    )?;
+    Ok(staged)
+}
+
 /// Makes the worker's sandbox again from the profile and resources its record saved when it is
 /// gone (`task resume`, issue 118; a sandbox can vanish between stages, workflow note G17), over
 /// the same clone: the kits are built again under the task's `kits/`. With `replace`, a sandbox
@@ -1752,7 +2062,7 @@ pub(super) fn work(env: &TaskEnv, prepared: &mut Prepared) -> Result<Worked> {
     let result = match headless::run(
         env.backend,
         &sandbox,
-        &in_sandbox_path(&prepared.workspace),
+        &prepared.sandbox_clone(),
         worker.harness,
         AGENT_PROMPT,
         &opts,
@@ -1818,9 +2128,7 @@ fn bundle_and_fetch(
     sandbox: &str,
 ) -> Result<Bundled> {
     let branch = prepared.record.branch.clone();
-    let ws = in_sandbox_path(&prepared.workspace)
-        .to_string_lossy()
-        .into_owned();
+    let ws = prepared.sandbox_clone().to_string_lossy().into_owned();
     let origin = prepared.record.bundle_exclusion();
     let out = backend.exec(
         sandbox,
@@ -1843,7 +2151,16 @@ fn bundle_and_fetch(
     )?;
     if out.exit_code == Some(0) {
         let repo_git = prepared.meta.join("repo.git");
-        repo::fetch_bundle(&repo_git, &prepared.workspace, &branch, BUNDLE_CAP)?;
+        match prepared.record.location {
+            Location::Local => {
+                repo::fetch_bundle(&repo_git, &prepared.workspace, &branch, BUNDLE_CAP)?
+            }
+            Location::Cloud => {
+                let staged =
+                    copy_out_staged(backend, &prepared.meta, sandbox, &ws, "branch.bundle")?;
+                repo::fetch_bundle(&repo_git, staged.dir(), &branch, BUNDLE_CAP)?
+            }
+        }
         rewrite::rebuild(&repo_git, &prepared.record.rewrite_start(), &branch)?;
         Ok(Bundled::Commits(prepared.record.commits_ahead(&repo_git)?))
     } else if out.stderr.contains("empty bundle") {
@@ -1884,9 +2201,7 @@ fn collect(
     status: &mut RunStatus,
     notes: &mut Vec<String>,
 ) -> Result<u32> {
-    let ws = in_sandbox_path(&prepared.workspace)
-        .to_string_lossy()
-        .into_owned();
+    let ws = prepared.sandbox_clone().to_string_lossy().into_owned();
     let in_sandbox = |argv: &[&str]| ExecSpec {
         workdir: None,
         argv: argv.iter().map(|a| (*a).to_owned()).collect(),
@@ -1932,7 +2247,12 @@ fn collect(
         }
     }
 
-    match repo::read_agent_file(&prepared.workspace, "result.md", RESULT_CAP) {
+    let result = match prepared.record.location {
+        Location::Local => repo::read_agent_file(&prepared.workspace, "result.md", RESULT_CAP),
+        Location::Cloud => copy_out_staged(backend, &prepared.meta, sandbox, &ws, "result.md")
+            .and_then(|staged| repo::read_agent_file(staged.dir(), "result.md", RESULT_CAP)),
+    };
+    match result {
         Ok(AgentFile::Text(text)) => fs::write(prepared.meta.join("result.md"), text)?,
         Ok(AgentFile::Missing) => notes.push("the worker wrote no result.md".to_owned()),
         Ok(AgentFile::TooLarge(_)) => notes.push(

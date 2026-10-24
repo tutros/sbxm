@@ -809,11 +809,12 @@ pub(crate) fn run_spec_from(
         id: spec_id,
         title,
     } = start;
-    pipeline::refuse_cloud(location, "`task start --spec`", "start it with --local")?;
     for warning in &config.warnings {
         writeln!(warn, "warning: {warning}")?;
     }
 
+    // The task's sandboxes run where it was started (decision 253).
+    let backend = backend.located(location);
     let ctx = Ctx {
         config_dir,
         repo: &repo_name,
@@ -827,8 +828,14 @@ pub(crate) fn run_spec_from(
         host: &ShellHostRunner,
     };
     writeln!(out, "Starting a task from {} ...", opts.spec.display())?;
-    let mut prepared =
-        pipeline::prepare_spec_resolved(&ctx, &opts.spec, &source_text, &spec_id, &title)?;
+    let mut prepared = pipeline::prepare_spec_resolved(
+        &ctx,
+        &opts.spec,
+        &source_text,
+        &spec_id,
+        &title,
+        location,
+    )?;
     let id = prepared.record.id.clone();
     on_prepared(&id);
     for warning in &prepared.warnings {

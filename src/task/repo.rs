@@ -161,6 +161,29 @@ pub fn clone_workspace(
     Ok(())
 }
 
+/// Writes a bundle of `branch` and `base` from `repo_git` to `dest`, for a cloud sandbox to clone
+/// the task from (decision 257): made from the host-owned `repo.git`, never from an agent's clone
+/// (decision 159). `base` comes along so the clone has `origin/<base>`, which the worker's own
+/// bundle excludes.
+pub fn bundle_for_clone(repo_git: &Path, branch: &str, base: &str, dest: &Path) -> Result<()> {
+    check_ref("branch", branch)?;
+    check_ref("base", base)?;
+    git::run(
+        repo_git,
+        Some(repo_git),
+        None,
+        &[
+            "bundle",
+            "create",
+            text(dest)?,
+            &format!("refs/heads/{branch}"),
+            &format!("refs/heads/{base}"),
+        ],
+    )
+    .with_context(|| format!("cannot bundle {branch} from the task repo"))?;
+    Ok(())
+}
+
 /// Checks out `branch` of `repo_git` into the new folder `dest`: only committed files, no hooks
 /// and no line-ending conversion, made by the hardened runner (no user config, so no filters or
 /// helpers run). This is where host gates and a reviewer's clone come from: no file the agent
