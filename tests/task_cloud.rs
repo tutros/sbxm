@@ -785,3 +785,54 @@ fn a_cloud_that_does_not_answer_ls_is_refused_naming_sbx_login() {
         "{message}"
     );
 }
+
+/// The "no cloud value source" row (P8 (a), decision 262(f)): a `secrets.services` entry that
+/// isn't one of the two provider OAuth logins, `google` included, is refused naming the secret
+/// and the profile, before the cloud's logins are looked at (`anthropic` is stored here).
+#[test]
+fn a_profile_secret_with_no_cloud_value_source_is_refused_naming_it_and_the_profile() {
+    for secret in ["github", "google"] {
+        let f = fixture_with(LOCAL_TOML);
+        f.env.write_profile(
+            "default",
+            &format!("[secrets]\nservices = [\"{secret}\"]\n"),
+        );
+        let backend = cloud_ready();
+
+        let (result, _) = start_spec(&f, &backend, Some(Location::Cloud));
+
+        let message = assert_preflight_refusal(result, &f, &backend);
+        assert!(
+            message.contains(&format!("'{secret}'")) && message.contains("profile 'default'"),
+            "{message}"
+        );
+    }
+}
+
+/// A worker whose own provider login isn't one the cloud stores (Antigravity's `google`) is
+/// refused the same way, naming the harness, instead of being sent to a `sbx secret set google
+/// --oauth --cloud` that doesn't exist.
+#[test]
+fn a_worker_harness_whose_provider_has_no_cloud_login_is_refused() {
+    let f = fixture_with(LOCAL_TOML);
+    let backend = cloud_ready().and_secrets(&["google"]);
+    let spec = common::task_fixture::spec_file(&f, "Build a thing.\n");
+    let mut options = spec_options(&f, spec, Some(Location::Cloud));
+    options.worker_harness = Some(sbxm::harness::Harness::Antigravity);
+
+    let result = sbxm::commands::task_start::run_spec(
+        &f.env.config_dir(),
+        &options,
+        &backend,
+        &sbxm::github::fake::FakeGitHub::default(),
+        &common::task_fixture::Probe,
+        &mut Vec::new(),
+        &mut Vec::new(),
+    );
+
+    let message = assert_preflight_refusal(result, &f, &backend);
+    assert!(
+        message.contains("antigravity") && message.contains("'google'"),
+        "{message}"
+    );
+}

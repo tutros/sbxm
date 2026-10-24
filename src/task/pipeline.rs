@@ -43,12 +43,21 @@ pub const CLOUD_MIN_SBX_VERSION: &str = "0.46.0";
 /// What every refusal of [`cloud_preflight`] ends with (decision 261).
 const LOCAL_INSTEAD: &str = "or run it here with `--local`";
 
+/// The provider OAuth logins the cloud stores (`sbx secret set <provider> --oauth --cloud`), the
+/// only secrets with a value source in the cloud (P8 (a), decision 262(f)); `google` isn't one.
+const CLOUD_OAUTH_PROVIDERS: [&str; 2] = ["anthropic", "openai"];
+
 /// The cloud preflight (milestone 4 slice 2, decision 261): everything a cloud task needs from
 /// `sbx` and the cloud, checked in this order before any write, delete or changing backend call,
 /// and before the task folder exists. The first failure refuses, naming its fix and `--local`.
 /// `backend` is the cloud instance. The strict-policy check isn't here: it reads the sandbox's
 /// own policy, which exists only after `create` (slice 7).
-fn cloud_preflight(backend: &dyn SandboxBackend) -> Result<()> {
+fn cloud_preflight(
+    backend: &dyn SandboxBackend,
+    harness: Harness,
+    profile_name: &str,
+    profile: &Profile,
+) -> Result<()> {
     // 1. The `sbx` version (P12).
     let version = backend
         .version()
@@ -67,6 +76,29 @@ fn cloud_preflight(backend: &dyn SandboxBackend) -> Result<()> {
              run `sbx login`, {LOCAL_INSTEAD}"
         ))
     })?;
+    // 3. A secret with no cloud value source (P8 (a)): the harness's own provider login, then
+    // every `secrets.services` entry of the profile.
+    let own = harness.provider_secret();
+    if !CLOUD_OAUTH_PROVIDERS.contains(&own) {
+        bail!(
+            "the worker harness {}'s provider login '{own}' can't be stored in the cloud (only \
+             the anthropic and openai OAuth logins can); use a claude or codex worker, \
+             {LOCAL_INSTEAD}",
+            harness.as_str()
+        );
+    }
+    if let Some(secret) = profile
+        .secrets
+        .services
+        .iter()
+        .find(|s| !CLOUD_OAUTH_PROVIDERS.contains(&s.as_str()))
+    {
+        bail!(
+            "secret '{secret}' (in secrets.services of profile '{profile_name}') has no value \
+             source in the cloud yet; only the anthropic and openai OAuth logins do (decision \
+             262(f)), so take it out of the profile, {LOCAL_INSTEAD}"
+        );
+    }
     Ok(())
 }
 
@@ -993,16 +1025,23 @@ pub fn prepare_spec_resolved(
     spec_startable(&global.base_dir, id, source_path)?;
     let worker = &ctx.config.worker;
     let profile = Profile::load(global.profiles_dir(), &ctx.config.sandbox.profile)?;
-    check_secrets(
-        ctx.backend,
-        worker.harness,
-        "the worker",
-        &ctx.config.sandbox.profile,
-        &profile,
-    )?;
-    if location == Location::Cloud {
-        cloud_preflight(ctx.backend)?;
-        refuse_strict_cloud(&ctx.config.sandbox.profile, &profile)?;
+    match location {
+        Location::Local => check_secrets(
+            ctx.backend,
+            worker.harness,
+            "the worker",
+            &ctx.config.sandbox.profile,
+            &profile,
+        )?,
+        Location::Cloud => {
+            cloud_preflight(
+                ctx.backend,
+                worker.harness,
+                &ctx.config.sandbox.profile,
+                &profile,
+            )?;
+            refuse_strict_cloud(&ctx.config.sandbox.profile, &profile)?;
+        }
     }
     let mut warnings = ctx.config.warnings.clone();
     warnings.extend(worker.harness.unsupported(&profile, "the worker's sandbox"));
