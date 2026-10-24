@@ -40,7 +40,10 @@ All of these are answered: the user confirmed each on 2026-10-24 (decisions 262-
   whether `--cpus`/`-m` pick the shape, and whether `rm` also removes the sandbox-scoped secrets as it does locally
   (S1); (b) write fixtures from S14's prose and check them only at slice 9's real test. **Recommend (a):** the
   parsers and command lines would otherwise be built on guesses, and a wrong guess shows up only at the end.
-  **Confirmed:** (a) [262].
+  **Confirmed:** (a) [262]. **Run 2026-10-24, partial:** `sdlc/spikes/m4-p2-capture.md`, fixtures
+  `src/backend/fixtures/sbx-cloud-*`; every trial is done (`rm` does not remove a sandbox's scoped secrets in the
+  cloud, `--skills` is refused with `--cloud`), but two outputs are not captured: the not-logged-in message and
+  `rm`'s retryable error. Those two move to slice 9's real test [267]; with that, P2 is done.
 - **P3. The cloud backend: a second backend or a mode.** Options: (a) `SbxBackend` gains a location, and a task
   gets the local or the cloud instance, every call prefixed with `--cloud` in the cloud one; (b) a new
   `SbxCloudBackend` implementing `SandboxBackend`; (c) a location parameter on every trait method. In each case the
@@ -329,8 +332,12 @@ The other slices are reviewed at the end of the milestone.
    example `SBXM_REAL_CLOUD=1`) besides `SBXM_REAL_BASE_DIR`, on the small shape: one tiny spec task through
    `task run`; egress accepting all three refusal shapes (DNS failure, connection refused, proxy 403, S14 Q1); a
    fake scoped secret's value found in no file and no env var; the TTL in the create; the bundle in and out; a
-   strict sandbox's list after the removal; removal confirmed by `sbx --cloud ls` and `policy ls`. Done when: it
-   passes by hand once, recorded with time and the bill's change.
+   strict sandbox's list after the removal; removal confirmed by `sbx --cloud ls` and `policy ls`. Also the two
+   captures P2 left [267]: the not-logged-in message (by hand, at a moment the user chooses, as it needs `sbx
+   logout`), which replaces slice 2's made-up fixture, and `rm`'s retryable error, which replaces slice 3's S14-worded
+   fixture if any removal shows it. Done when: it passes by hand once, recorded with time and the bill's change, and
+   the record says for each of the two captures whether real output was saved and its fixture replaced, or (for the
+   retryable error, which can't be triggered) that it didn't show.
 10. **Docs**: README (the key, the flags, the refusals, the cost note), `docs/workflow.md` (build under `$HOME` in
     the cloud [257], the TTL [259], [263], the parallel experiment [258], and a troubleshooting line: when something
     fails unexpectedly in a strict cloud sandbox, check first whether a host listed as denied in the task's `run.log`
@@ -391,10 +398,12 @@ The other slices are reviewed at the end of the milestone.
    worker's commits with it. Mitigation: the worker TTL covers the worker, every sandbox gate and every fix round's
    reviewer, worker and gates, plus 30 minutes (P5 (d)) [263]; `resume` rebuilds from what `repo.git` holds and says so.
 9. **Copying out of an agent-controlled sandbox** (`sbx --cloud cp`): what `cp` does with a link or a folder at the
-   source path is unknown. Mitigation: a fresh host staging folder per copy and the same one-regular-file and cap
-   checks as `read_agent_file` before anything reads it (slice 1).
-10. **Unverified `sbx` details** (name or id for `exec`/`cp`/`rm`, `-w`, `--skills`, `--ttl` units, shape flags).
-    Mitigation: P2's capture run before slice 1.
+   source path was unknown; P2's capture run saw a symlink refused and a folder copied whole
+   (`sdlc/spikes/m4-p2-capture.md`). Mitigation: a fresh host staging folder per copy and the same one-regular-file
+   and cap checks as `read_agent_file` before anything reads it (slice 1), for the folder case and any other shape.
+10. **`sbx` details:** P2's capture run verified name or id for `exec`/`cp`/`policy ls`/`rm`, `-w`, `--skills`
+    (refused), a `--ttl` beyond `1h` and the five billable shapes. Still open: the not-logged-in message and `rm`'s
+    retryable "temporarily unavailable" error, neither captured; slice 9 captures them [267].
 11. **A denied host that is needed** [264]: sbxm removes hosts from a strict cloud sandbox, so a host the agent or a
     gate needs shows up as an unexpected agent or gate failure. Mitigation: check the denied hosts in `run.log`
     first; the docs' troubleshooting line says so (slice 10).

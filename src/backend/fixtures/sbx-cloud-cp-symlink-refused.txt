@@ -1,0 +1,3 @@
+   → download sbx_001m5pex92zhbq34a32qqc078r9:/home/agent/link.txt
+   ✗ download sbx_001m5pex92zhbq34a32qqc078r9:/home/agent/link.txt (0s)
+error: download sbx_001m5pex92zhbq34a32qqc078r9:/home/agent/link.txt: get file from cloud sandbox "sbx_001m5pex92zhbq34a32qqc078r9" (path "/home/agent/link.txt"): failed_precondition: download does not read through a symlink: /home/agent/link.txt

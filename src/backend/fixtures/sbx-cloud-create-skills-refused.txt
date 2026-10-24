@@ -1,0 +1,2 @@
+error: --skills is not supported with --cloud; the skills store is backed by a host-side directory; cloud sandboxes do not support host-path bind mounts
+  try: sbx --cloud create --help

@@ -1,0 +1,2 @@
+error: sandbox 'sbxm-p2-capture' not found
+  try: sbx --cloud ls
