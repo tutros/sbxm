@@ -135,7 +135,19 @@ None of these is decided. Each needs the user's answer before the slice that dep
   name an explicit export or retro step to run before `task rm`, and the hours of a task removed without it are lost;
   (c) each lifetime entry is also appended to a separate durable ledger under `.sbxm/`, a new file format. **Recommend
   (a):** the guarded archive exists already, and the normal cleanup then can't erase the promised measurement. This
-  changes what `task rm` keeps, so it is a new decision if confirmed. Needed by slices 3 and 6.
+  changes what `task rm` keeps, so it is a new decision if confirmed. Under (b), `task rm` doesn't refuse without
+  the export; refusing until it is done would be another option for the user. Needed by slices 3 and 6.
+- **P19. The archive's identity for a reused task id (only under P18 (a)).** Task ids are reused: an issue or PR id
+  comes from its number and a spec id from its canonical path (`src/task/record.rs`), and `--restart` removes and
+  re-creates a task under the same id. [195]'s archive at `.sbxm/task-archive/<id>/` is never overwritten and takes
+  a second archive only when every record is byte-identical (`src/task/merged.rs`, `same_records`), so under P18 (a)
+  the second removal of a task with a reused id would refuse until the user moved the first archive aside. Options:
+  (a) one immutable archive per task attempt, `.sbxm/task-archive/<id>/<attempt>/` (for example the time of the
+  first entry of the task's `stages` list), with `--restart` archiving the old attempt before it removes it and,
+  when the restart is restored, keeping that archive as the record of the attempt; (b) an append-only lifetime ledger instead, which is
+  P18 (c); (c) one archive per id, the first attempt's kept and a later attempt's lifetimes lost, said in the docs.
+  **Recommend (a):** every attempt's records survive and no earlier archive changes. It refines [195]'s path, so it
+  is a new decision if confirmed, recorded before slice 3. Needed by slices 3 and 6.
 
 ## Structure (dependency order)
 
@@ -259,8 +271,11 @@ The other slices are reviewed at the end of the milestone.
    cloud by `resume`; `rm` and `rm --merged` removing cloud sandboxes and scoped secrets; the stream error after
    `timeout -v`'s lines classified as a timeout (S14 Q3's captured text), and without them as `ExecUnavailable`;
    the lifetimes kept on removal per P18. Done when: tests per command, including a record that says `cloud` while
-   the config says `local`, and an ordinary `task rm` of a cloud task that, per P18's answer, leaves the lifetime
-   entries readable afterwards or refuses until the required export is done.
+   the config says `local`, and the removal case of P18's answer: under (a), an ordinary `task rm` of a cloud task
+   leaves its lifetime entries readable in the archive afterwards, and so do two successive removals of tasks with
+   the same id, and a successful and a restored `--restart`, laid out per P19's answer; under (b), the export or
+   retro step run before `task rm` reports the task's total sandbox hours, and a `task rm` without it removes the
+   entries with the folder (the documented loss); under (c), the ledger holds the entries after `task rm`.
 7. **Strict mode in the cloud** [255], P9, P10: create with the build allow list, then one `policy deny` (or `rm`)
    per host outside the runtime list, then `policy ls` parsed and checked as in [232]: any other allowed host, or a
    list sbxm can't read, removes the sandbox, then the scoped secrets, then refuses, naming the host ("After create:
@@ -299,8 +314,9 @@ The other slices are reviewed at the end of the milestone.
    left, and the global policy is as it was.
 8. `sbxm status` during step 4 lists the running cloud sandbox; afterwards, none.
 9. `tests/real_sbx_cloud.rs` passes.
-10. The user reads the bill after; the change is recorded with the total sandbox hours, read from where P18 keeps
-    them after step 7's `task rm`.
+10. The user reads the bill after; the change is recorded with the total sandbox hours: under P18 (a) or (c), read
+    from the archive or the ledger after step 7's `task rm`; under P18 (b), from the export or retro step run just
+    before step 7's `task rm`.
 
 ## Out of scope
 
