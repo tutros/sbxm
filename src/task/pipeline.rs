@@ -22,7 +22,7 @@ use super::review;
 use super::rewrite;
 use super::risk;
 use super::select::{self, Selection};
-use crate::backend::{CreateSpec, ExecSpec, SandboxBackend, Stdin};
+use crate::backend::{CreateSpec, ExecSpec, Location, SandboxBackend, Stdin};
 use crate::config::{self, GlobalConfig, Profile, Resources};
 use crate::github::{GitHubBackend, Issue, IssueText, PrInfo, PrState};
 use crate::harness::Harness;
@@ -34,6 +34,25 @@ use crate::template::{self, Locks};
 
 /// Folder inside the workspace for sbxm's files (the issue, the prompt, `result.md`, the bundle).
 pub const AGENT_DIR: &str = ".sbxm-task";
+
+/// Where a new task's sandboxes run: `--cloud` or `--local`, else `[sandbox] location` (P14,
+/// decision 262(k)). The only place the two are weighed; once the task exists, its record decides.
+pub fn choose_location(flag: Option<Location>, config: &TaskConfig) -> Location {
+    flag.unwrap_or(config.sandbox.location)
+}
+
+/// Refuses a cloud location for a command whose sandboxes can't run in the cloud yet (milestone
+/// 4 builds them slice by slice), rather than running them here: sbxm never falls back to a local
+/// sandbox quietly (decision 261).
+pub fn refuse_cloud(location: Location, command: &str, instead: &str) -> Result<()> {
+    if location == Location::Cloud {
+        bail!(
+            "{command} can't run its sandboxes in the cloud yet (milestone 4 builds it later); \
+             {instead}"
+        );
+    }
+    Ok(())
+}
 
 /// What every phase of a task needs; the command layer builds it from flags and the environment.
 pub struct Ctx<'a> {

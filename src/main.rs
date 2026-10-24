@@ -309,6 +309,8 @@ fn main() -> anyhow::Result<()> {
                     yes: _,
                     spec: Some(spec),
                     ignore_disk,
+                    cloud,
+                    local,
                 },
         } => {
             let ids = task::record::spec_id(&spec)
@@ -330,6 +332,7 @@ fn main() -> anyhow::Result<()> {
                         clone_source: None,
                         identity: None,
                         disk: sbxm::disk::Guard::real(ignore_disk),
+                        location: sbxm::cli::location_flag(cloud, local),
                     },
                     &SbxBackend::LOCAL,
                     &sbxm::github::gh::GhBackend::default(),
@@ -355,6 +358,8 @@ fn main() -> anyhow::Result<()> {
                     yes,
                     spec: None,
                     ignore_disk,
+                    cloud,
+                    local,
                 },
         } => {
             let ids = issues.iter().map(|n| format!("issue-{n}")).collect();
@@ -375,6 +380,7 @@ fn main() -> anyhow::Result<()> {
                         clone_source: None,
                         identity: None,
                         disk: sbxm::disk::Guard::real(ignore_disk),
+                        location: sbxm::cli::location_flag(cloud, local),
                     },
                     restart.then_some(&commands::task_start::Restart {
                         confirm: &Terminal,

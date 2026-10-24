@@ -219,3 +219,21 @@ fn sandbox_creating_commands_take_ignore_disk() {
         assert!(stdout.contains("--ignore-disk"), "{args:?}:\n{stdout}");
     }
 }
+
+/// Milestone 4 slice 1 (P14, decision 262(k)): `task start` runs here or in the cloud, never both.
+#[test]
+fn task_start_cloud_and_local_conflict() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let output = sbxm()
+        .env("SBXM_CONFIG_DIR", tmp.path())
+        .args(["task", "start", "--spec", "idea.md", "--cloud", "--local"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("'--cloud' cannot be used with '--local'"),
+        "{stderr}"
+    );
+}

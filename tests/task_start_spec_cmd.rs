@@ -35,6 +35,7 @@ fn options(f: &Fixture, spec: PathBuf) -> SpecOptions {
             email: "dev@example.com".into(),
         }),
         disk: Default::default(),
+        location: None,
     }
 }
 

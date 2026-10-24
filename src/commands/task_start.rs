@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, anyhow, bail};
 
-use crate::backend::SandboxBackend;
+use crate::backend::{Location, SandboxBackend};
 use crate::config::GlobalConfig;
 use crate::confirm::Confirm;
 use crate::disk;
@@ -44,6 +44,8 @@ pub struct Options {
     pub identity: Option<Identity>,
     /// The free-space check of the sandbox drive before a sandbox is created (decision 194).
     pub disk: disk::Guard,
+    /// `--cloud` or `--local`; `None` leaves it to `[sandbox] location`.
+    pub location: Option<Location>,
 }
 
 fn name_ok(segment: &str) -> bool {
@@ -336,6 +338,11 @@ fn start(
 
     // Everything that can be wrong with the inputs, before anything is created.
     let mut config = TaskConfig::load(&opts.repo_root)?;
+    pipeline::refuse_cloud(
+        pipeline::choose_location(opts.location, &config),
+        "`task start --issue`",
+        "start it with --local, or start a spec task with --spec <file> --cloud",
+    )?;
     if let Some(harness) = opts.worker_harness {
         let harness = headless_harness("--worker-harness", harness.as_str(), "tasks")
             .map_err(|e| anyhow!(e))?;
@@ -657,6 +664,8 @@ pub struct SpecOptions {
     pub identity: Option<Identity>,
     /// The free-space check of the sandbox drive before a sandbox is created (decision 194).
     pub disk: disk::Guard,
+    /// `--cloud` or `--local`; `None` leaves it to `[sandbox] location`.
+    pub location: Option<Location>,
 }
 
 /// Every input [`run_spec`] resolves before it does anything with the backend or writes
@@ -670,6 +679,8 @@ pub struct SpecOptions {
 /// was pending (decision 184).
 pub(crate) struct SpecStart {
     pub config: TaskConfig,
+    /// Where the task runs: the flag, else the config (decision 262(k)).
+    pub location: Location,
     pub repo_name: String,
     pub identity: Identity,
     pub base_branch: String,
@@ -728,8 +739,10 @@ pub(crate) fn resolve_spec_start(opts: &SpecOptions) -> Result<SpecStart> {
         .clone_source
         .clone()
         .unwrap_or_else(|| format!("https://github.com/{repo_name}.git"));
+    let location = pipeline::choose_location(opts.location, &config);
     Ok(SpecStart {
         config,
+        location,
         repo_name,
         identity,
         base_branch,
@@ -787,6 +800,7 @@ pub(crate) fn run_spec_from(
 ) -> Result<()> {
     let SpecStart {
         config,
+        location,
         repo_name,
         identity,
         base_branch,
@@ -795,6 +809,7 @@ pub(crate) fn run_spec_from(
         id: spec_id,
         title,
     } = start;
+    pipeline::refuse_cloud(location, "`task start --spec`", "start it with --local")?;
     for warning in &config.warnings {
         writeln!(warn, "warning: {warning}")?;
     }

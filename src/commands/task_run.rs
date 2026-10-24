@@ -156,6 +156,11 @@ fn run_issue(
     // phases will build from their flags.
     {
         let mut config = TaskConfig::load(&opts.repo_root)?;
+        pipeline::refuse_cloud(
+            config.sandbox.location,
+            "`task run`",
+            "set [sandbox] location = \"local\" in sbxm-task.toml to run it here",
+        )?;
         if let Some(harness) = opts.worker_harness {
             let harness = headless_harness("--worker-harness", harness.as_str(), "tasks")
                 .map_err(|e| anyhow!(e))?;
@@ -186,6 +191,7 @@ fn run_issue(
         clone_source: opts.clone_source.clone(),
         identity: opts.identity.clone(),
         disk: opts.disk.clone(),
+        location: None,
     };
     let mut warn = Once {
         inner: warn,
@@ -355,6 +361,11 @@ fn run_spec_task(
     // has spent its time (spec §5.2).
     {
         let mut config = TaskConfig::load(&opts.repo_root)?;
+        pipeline::refuse_cloud(
+            config.sandbox.location,
+            "`task run`",
+            "set [sandbox] location = \"local\" in sbxm-task.toml to run it here",
+        )?;
         if let Some(harness) = opts.worker_harness {
             let harness = headless_harness("--worker-harness", harness.as_str(), "tasks")
                 .map_err(|e| anyhow!(e))?;
@@ -384,6 +395,7 @@ fn run_spec_task(
         clone_source: opts.clone_source.clone(),
         identity: opts.identity.clone(),
         disk: opts.disk.clone(),
+        location: None,
     };
     // The same preflight `task_start::run_spec` itself runs, so a bad --time-limit, repo,
     // identity, base or spec file is caught here too: `--restart`'s discard below must not cost

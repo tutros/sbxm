@@ -279,6 +279,13 @@ pub enum TaskCommand {
         /// min_free_disk free.
         #[arg(long)]
         ignore_disk: bool,
+        /// Run the task's sandboxes in Docker Cloud Sandboxes (default: [sandbox] location in
+        /// sbxm-task.toml, else here). The task remembers where it runs.
+        #[arg(long, conflicts_with = "local")]
+        cloud: bool,
+        /// Run the task's sandboxes on this machine, whatever [sandbox] location says.
+        #[arg(long)]
+        local: bool,
     },
     /// Review a task: gates, an independent reviewer in its own sandbox, at most one fix round by
     /// the worker, gates and a second review; ends ready. Blocks until it is done.
@@ -566,6 +573,16 @@ pub fn run_target_order(matches: &clap::ArgMatches) -> Vec<RunTarget> {
     }
     targets.sort_by_key(|(i, _)| *i);
     targets.into_iter().map(|(_, target)| target).collect()
+}
+
+/// `--cloud` or `--local` as the location a flag chose, `None` for neither (clap refuses both).
+pub fn location_flag(cloud: bool, local: bool) -> Option<crate::backend::Location> {
+    use crate::backend::Location;
+    match (cloud, local) {
+        (true, _) => Some(Location::Cloud),
+        (_, true) => Some(Location::Local),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

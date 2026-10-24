@@ -1731,6 +1731,7 @@ fn real_task_start(world: &RealTask) {
                 email: "dev@example.com".into(),
             }),
             disk: Default::default(),
+            location: None,
         },
         &SbxBackend::LOCAL,
         &world.github,

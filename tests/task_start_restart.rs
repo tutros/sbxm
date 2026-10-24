@@ -61,6 +61,7 @@ fn options(f: &Fixture) -> Options {
             email: "dev@example.com".into(),
         }),
         disk: Default::default(),
+        location: None,
     }
 }
 

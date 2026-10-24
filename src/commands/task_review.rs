@@ -110,6 +110,13 @@ pub fn run(
     }
     // Every input is checked before anything is created.
     let mut config = TaskConfig::load(&opts.repo_root)?;
+    if let Target::Pr(_) = opts.target {
+        pipeline::refuse_cloud(
+            config.sandbox.location,
+            "`task review --pr`",
+            "set [sandbox] location = \"local\" in sbxm-task.toml to review it here",
+        )?;
+    }
     if let Some(harness) = opts.reviewer_harness {
         let harness = headless_harness("--reviewer-harness", harness.as_str(), "tasks")
             .map_err(|e| anyhow!(e))?;
