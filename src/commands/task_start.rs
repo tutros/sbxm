@@ -886,7 +886,10 @@ pub(crate) fn run_spec_from(
         let worked = pipeline::run_worker(&ctx, &mut prepared)?;
         let (label, bad) = match &worked.status {
             RunStatus::Completed => ("completed".to_owned(), false),
-            RunStatus::TimedOut => ("timed out".to_owned(), false),
+            // A timed-out cloud worker stops the task, keeping its partial commits (slice 3 of
+            // milestone 4, behavior 2): its sandbox isn't kept running for a review. A local one
+            // still hands over as before.
+            RunStatus::TimedOut => ("timed out".to_owned(), location == Location::Cloud),
             RunStatus::Failed(why) => (format!("failed: {why}"), true),
         };
         writeln!(out, "{id}: worker {label}, {} commit(s)", worked.commits)?;
@@ -895,7 +898,7 @@ pub(crate) fn run_spec_from(
         }
         if bad {
             bail!(
-                "{id}: the worker failed; see `sbxm task status` and the task's folder for what it left"
+                "{id}: the worker {label}; see `sbxm task status` and the task's folder for what it left"
             );
         }
 

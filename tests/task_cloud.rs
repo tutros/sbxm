@@ -1072,6 +1072,38 @@ fn a_failed_worker_stops_the_task_and_its_cloud_sandbox_is_removed() {
     assert!(!described_log(&backend).contains(&"exec gate".to_owned()));
 }
 
+/// A timed-out cloud worker stops the task too (slice 3, behavior 2): its partial commits are
+/// kept, no gates run, no review is named, and its sandbox is removed once.
+#[test]
+fn a_timed_out_worker_keeps_its_commits_stops_the_task_and_its_cloud_sandbox_is_removed() {
+    let f = fixture_with(LOCAL_TOML);
+    let id = spec_id(&f);
+    let timed_out = sbxm::backend::ExecOutput {
+        stdout: String::new(),
+        stderr: "timeout: sending signal TERM to command 'claude'\n".into(),
+        exit_code: Some(124),
+    };
+    let backend = cloud_backend_with(&f.env.tmp.path().join("cloud-fs"), &id, timed_out);
+
+    let started = start_cloud(&f, &backend);
+
+    let message = format!("{:#}", started.result.as_ref().unwrap_err());
+    assert!(message.contains("timed out"), "{message}");
+    assert!(
+        started.out.contains("worker timed out, 1 commit(s)"),
+        "{}",
+        started.out
+    );
+    assert!(
+        !started.out.contains("next: sbxm task review"),
+        "{}",
+        started.out
+    );
+    assert!(!described_log(&backend).contains(&"exec gate".to_owned()));
+    assert_eq!(backend.removes(), [format!("sbxm-task-{id}-claude")]);
+    assert_removed(&f, &id, &started, "removed");
+}
+
 /// A worker that couldn't be run at all (`exec` itself failing) stops the task too.
 #[test]
 fn a_worker_that_cannot_run_stops_the_task_and_its_cloud_sandbox_is_removed() {
