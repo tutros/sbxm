@@ -195,7 +195,7 @@ fn cloud_backend(root: &std::path::Path, id: &str) -> sbxm::backend::FakeBackend
     let map = move |arg: &str| arg.replace(HOME, &format!("{inside}{HOME}"));
     let worker_map = map.clone();
     let clone = format!("{HOME}/work/{id}");
-    common::task_fixture::backend()
+    cloud_ready()
         .with_sandbox_root(root)
         .with_exec_output_matching("printenv", ok(&format!("{HOME}\n")))
         .with_exec_output_matching("claude", ok(CLAUDE_DONE))
@@ -629,8 +629,8 @@ fn a_template_profile_is_built_from_its_kits_with_one_line_in_the_cloud() {
 fn a_home_that_is_not_an_absolute_path_fails_the_start_and_undoes_it() {
     let f = fixture_with(LOCAL_TOML);
     let id = spec_id(&f);
-    let backend = common::task_fixture::backend()
-        .with_exec_output_matching("printenv", common::task_fixture::ok("work\n"));
+    let backend =
+        cloud_ready().with_exec_output_matching("printenv", common::task_fixture::ok("work\n"));
 
     let (result, _) = start_spec(&f, &backend, Some(Location::Cloud));
 
@@ -651,7 +651,7 @@ fn a_failed_cloud_start_leaves_a_host_folder_it_did_not_make() {
     let id = spec_id(&f);
     let folder = f.env.base_dir().join("tasks").join(&id);
     let made = folder.clone();
-    let backend = common::task_fixture::backend()
+    let backend = cloud_ready()
         .with_exec_output_matching("printenv", common::task_fixture::ok("work\n"))
         .with_create_hook(move |_| {
             std::fs::create_dir_all(&made).unwrap();
@@ -675,14 +675,14 @@ fn a_cloud_start_that_fails_before_or_at_its_create_removes_no_sandbox() {
     let id = spec_id(&f);
     let sandbox = format!("sbxm-task-{id}-claude");
 
-    let failing = common::task_fixture::backend().with_failing_create_for(&sandbox);
+    let failing = cloud_ready().with_failing_create_for(&sandbox);
     let (result, _) = start_spec(&f, &failing, Some(Location::Cloud));
     let message = format!("{:#}", result.unwrap_err());
     assert!(message.contains(&sandbox), "{message}");
     assert_eq!(failing.removes(), Vec::<String>::new());
     assert!(!sbxm::task::record::task_dir(&f.env.base_dir(), &id).exists());
 
-    let backend = common::task_fixture::backend();
+    let backend = cloud_ready();
     let spec = common::task_fixture::spec_file(&f, "Build a thing.\n");
     let mut options = spec_options(&f, spec, Some(Location::Cloud));
     let missing = f.env.tmp.path().join("no-such-repo");
@@ -700,4 +700,59 @@ fn a_cloud_start_that_fails_before_or_at_its_create_removes_no_sandbox() {
     assert!(backend.creates().is_empty(), "{:?}", backend.log());
     assert_eq!(backend.removes(), Vec::<String>::new());
     assert!(!sbxm::task::record::task_dir(&f.env.base_dir(), &id).exists());
+}
+
+// Slice 2: the cloud preflight (`sdlc/milestone-4.md`, "Preflight refusals", P8, P11, P12;
+// decisions 256, 261, 262, 267). Every refusal comes before any write, delete or changing backend
+// call, before the task folder exists, and ends with "or run it here with `--local`".
+
+/// The cloud minimum (P12).
+const CLOUD_MIN: &str = "0.46.0";
+
+/// A fake cloud that passes every preflight check: `sbx` at the cloud minimum, the cloud
+/// answering `ls` with no sandboxes, and the worker's `anthropic` login stored globally.
+fn cloud_ready() -> sbxm::backend::FakeBackend {
+    common::task_fixture::backend().with_version(CLOUD_MIN)
+}
+
+/// Asserts a preflight refusal: the message's ending, no changing backend call, no task folder.
+/// Returns the message for the caller's own checks.
+fn assert_preflight_refusal(
+    result: anyhow::Result<()>,
+    f: &common::task_fixture::Fixture,
+    backend: &sbxm::backend::FakeBackend,
+) -> String {
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.ends_with("or run it here with `--local`"),
+        "{message}"
+    );
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert!(!f.env.base_dir().join(".sbxm").join("tasks").exists());
+    message
+}
+
+/// P12, decision 244's boundary: one under the cloud minimum is refused, naming the version found
+/// and the minimum; at it and one over are accepted.
+#[test]
+fn an_sbx_under_the_cloud_minimum_is_refused_and_at_or_over_it_is_accepted() {
+    let f = fixture_with(LOCAL_TOML);
+    let backend = cloud_ready().with_version("0.45.9");
+
+    let (result, _) = start_spec(&f, &backend, Some(Location::Cloud));
+
+    let message = assert_preflight_refusal(result, &f, &backend);
+    assert!(
+        message.contains("sbx 0.45.9") && message.contains(CLOUD_MIN),
+        "{message}"
+    );
+
+    for version in [CLOUD_MIN, "0.46.1"] {
+        let f = fixture_with(LOCAL_TOML);
+        let id = spec_id(&f);
+        let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &id).with_version(version);
+        let (result, _) = start_spec(&f, &backend, Some(Location::Cloud));
+        result.unwrap();
+        assert_eq!(backend.creates().len(), 1, "{version}");
+    }
 }

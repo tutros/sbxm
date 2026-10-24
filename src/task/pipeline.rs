@@ -35,6 +35,33 @@ use crate::template::{self, Locks};
 /// Folder inside the workspace for sbxm's files (the issue, the prompt, `result.md`, the bundle).
 pub const AGENT_DIR: &str = ".sbxm-task";
 
+/// The `sbx` version the cloud was spiked with (S14, S17, P2); older is refused for a cloud task
+/// (P12, decision 262). The counterpart of `template::MIN_SBX_VERSION`; the global
+/// `min_sbx_version` stays for everything else.
+pub const CLOUD_MIN_SBX_VERSION: &str = "0.46.0";
+
+/// What every refusal of [`cloud_preflight`] ends with (decision 261).
+const LOCAL_INSTEAD: &str = "or run it here with `--local`";
+
+/// The cloud preflight (milestone 4 slice 2, decision 261): everything a cloud task needs from
+/// `sbx` and the cloud, checked in this order before any write, delete or changing backend call,
+/// and before the task folder exists. The first failure refuses, naming its fix and `--local`.
+/// `backend` is the cloud instance. The strict-policy check isn't here: it reads the sandbox's
+/// own policy, which exists only after `create` (slice 7).
+fn cloud_preflight(backend: &dyn SandboxBackend) -> Result<()> {
+    // 1. The `sbx` version (P12).
+    let version = backend
+        .version()
+        .map_err(|e| SbxUnavailable(format!("{e:#}; {LOCAL_INSTEAD}")))?;
+    if crate::commands::doctor::older(&version, CLOUD_MIN_SBX_VERSION) {
+        bail!(
+            "sbx {version} is older than {CLOUD_MIN_SBX_VERSION}, the version a cloud task needs; \
+             upgrade sbx, {LOCAL_INSTEAD}"
+        );
+    }
+    Ok(())
+}
+
 /// Where a new task's sandboxes run: `--cloud` or `--local`, else `[sandbox] location` (P14,
 /// decision 262(k)). The only place the two are weighed; once the task exists, its record decides.
 pub fn choose_location(flag: Option<Location>, config: &TaskConfig) -> Location {
@@ -966,6 +993,7 @@ pub fn prepare_spec_resolved(
         &profile,
     )?;
     if location == Location::Cloud {
+        cloud_preflight(ctx.backend)?;
         refuse_strict_cloud(&ctx.config.sandbox.profile, &profile)?;
     }
     let mut warnings = ctx.config.warnings.clone();
