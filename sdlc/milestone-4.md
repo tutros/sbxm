@@ -166,7 +166,7 @@ sandbox = [
 
 | Command | Local (today) | Cloud |
 |---|---|---|
-| `task start`, `task run` | unchanged | location from `--cloud`/`--local`, else `[sandbox] location` (P14). Preflight [261], all before any write: `sbx` version (P12), cloud logged in, the harness's provider secret in the cloud [256], no unsupported profile secret (P8), the profile's kits valid. Then `create --cloud --ttl --on-timeout delete --kit common --kit harness-<h>` (P5), scoped secrets set before it [256], the strict removal and check (P9) before the agent, bundle and prompt files in by `cp`, worker, sandbox gates, bundle out by `cp`, verify, fetch, host gates [257]. |
+| `task start`, `task run` | unchanged | location from `--cloud`/`--local`, else `[sandbox] location` (P14). Preflight [261], all before any write: `sbx` version (P12), cloud logged in, the harness's provider secret in the cloud [256], no unsupported profile secret (P8), the profile's kits valid. Then `create --cloud --ttl --on-timeout delete --kit common --kit harness-<h>` (P5), scoped secrets set before it [256], the strict removal and check (P9) before the agent, failing closed after create (below), bundle and prompt files in by `cp`, worker, sandbox gates, bundle out by `cp`, verify, fetch, host gates [257]. |
 | `task review --issue/--spec` | unchanged | the task's recorded location; a reviewer sandbox per round as for the worker; a fix round in a worker sandbox (rebuilt from `repo.git` under P5 (a)). |
 | `task review --pr N` | unchanged | location as for `start` (P14); the PR head goes in as a bundle from `repo.git`. |
 | `task resume` | unchanged | in the cloud, always [261]: a gone sandbox (TTL, a failure) is rebuilt from the recorded profile and a bundle of the branch; preflight again first. |
@@ -176,10 +176,10 @@ sandbox = [
 | `task status`, `status` | unchanged | the task's location; `status` adds the running cloud sandboxes named `sbxm-` (`sbx --cloud ls`), one line if the cloud can't be read, never a failure [259]. |
 | `doctor` | unchanged | also lists running cloud sandboxes; warns when the current repo is a cloud repo and its gates name `/tmp` (P13). |
 
-### Refusals [261]
+### Preflight refusals [261]
 
-Every refusal comes before the first write, delete or backend call that changes anything, and ends with "or run it
-here with `--local`".
+Every refusal in this table is detectable before `create`: it comes before the first write, delete or backend call
+that changes anything, and ends with "or run it here with `--local`".
 
 | Cause | Message names |
 |---|---|
@@ -187,7 +187,16 @@ here with `--local`".
 | the harness's provider secret missing in the cloud | `sbx secret set <provider> --oauth --cloud` |
 | `sbx` older than the cloud minimum (P12) | the version found and the minimum |
 | a profile secret with no cloud value source (P8 (a)) | the secret and the profile |
-| a strict sandbox whose rules still allow a host outside the runtime list after removal (P9) | the host; the sandbox is removed, as in [232] |
+
+### After create: the strict-policy check fails closed [255]
+
+The strict check can't be a preflight refusal: it reads the sandbox's own policy, which exists only after `create`
+and the rule removals (P9). In order: scoped secrets set [256], `create`, one removal per host outside the runtime
+list, `policy ls`. If the list still allows a host outside the runtime list, or sbxm can't read it, sbxm removes the
+sandbox (with P6's retries), then the task's scoped secrets, and only then refuses, naming the host (or the unread
+list), as in [232]. No agent `exec` runs before the check passes. The task is left as a failed start that `task rm`
+removes; nothing in the cloud is left behind unless a removal itself fails, which the message names with the
+sandbox or secret left.
 
 A cloud failure mid-task (`sbx --cloud` not answering, an exec stream error without `timeout -v`'s lines) stops the
 task the way `SbxUnavailable` and `ExecUnavailable` do today, and the message names `task resume`.
@@ -211,8 +220,9 @@ The other slices are reviewed at the end of the milestone.
    `task.json`. Done when: a `tests/task_cloud.rs` case shows the backend log in order, `repo.git` holds the
    worker's commit, `task.json` says `cloud`, and a staged file that is a link or over its cap is refused.
 2. **Cloud preflight and refusals** [261]: logged in, provider secret in the cloud, version (P12), the free-disk rule
-   (P11), each refusal before any write, naming its fix and `--local`. Done when: one test per refusal in the table
-   asserts the message and an empty backend log of changing calls and no task folder.
+   (P11), each refusal before any write, naming its fix and `--local`. Done when: one test per row of the preflight
+   refusals table asserts the message and an empty backend log of changing calls and no task folder. The strict-policy
+   refusal isn't one of them; it is slice 7's.
 3. **Lifetimes**: `--ttl` per phase and `--on-timeout delete` (P5), the removal retry with an injected sleep (P6),
    the `sandboxes` list in `task.json` (P7); with P5 (a), the phase-end removal and the rebuild from a bundle for
    the next phase. Done when: tests on the computed TTL for each phase, a removal that succeeds on the third try, one
@@ -230,8 +240,11 @@ The other slices are reviewed at the end of the milestone.
    Done when: tests per command, including a record that says `cloud` while the config says `local`.
 7. **Strict mode in the cloud** [255], P9, P10: create with the build allow list, then one `policy deny` (or `rm`)
    per host outside the runtime list, then `policy ls` parsed and checked as in [232]: any other allowed host, or a
-   list sbxm can't read, removes the sandbox and refuses, naming the host. Done when: tests on the parsed S17-shape
-   list, a kept host, a host left over, and an unreadable list; no agent `exec` happens before the check passes.
+   list sbxm can't read, removes the sandbox, then the scoped secrets, then refuses, naming the host ("After create:
+   the strict-policy check fails closed" above). Done when: tests on the parsed S17-shape list, a kept host, a host
+   left over, and an unreadable list; for the last two the backend log is, in order, `secret-set`, `create`, the
+   removals, `policy ls`, the sandbox `rm`, `secret-rm`, then the refusal; no agent `exec` happens before the check
+   passes.
 8. **`status` and `doctor`**: running cloud sandboxes [259], `doctor`'s `/tmp` warning (P13) and the cloud version
    (P12). Done when: `tests/doctor.rs` and status golden cases, including the cloud not answering.
 9. **Real-cloud test** [260]: an ignored `tests/real_sbx_cloud.rs`, gated on its own environment variable (for
