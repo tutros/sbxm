@@ -55,7 +55,7 @@ fn set_list_and_remove_are_logged_in_order_without_the_value() {
 
 #[test]
 fn each_call_can_be_scripted_to_fail() {
-    let backend = FakeBackend::default().failing_set_scoped_secret();
+    let backend = FakeBackend::default().failing_set_scoped_secret_for("postman-echo.com");
     let error = backend
         .set_scoped_secret("sbxm-task-x-claude", &fake())
         .unwrap_err();

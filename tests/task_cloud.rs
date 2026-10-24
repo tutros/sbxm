@@ -1609,3 +1609,178 @@ fn a_failed_sandbox_removal_still_removes_the_scoped_secret_and_reports_both() {
         std::fs::remove_dir_all(sbxm::task::record::task_dir(&f.env.base_dir(), &id)).unwrap();
     }
 }
+
+/// A second secret for the tests, so an order and a failure in the middle can show.
+fn second_secret() -> sbxm::backend::ScopedSecret {
+    sbxm::backend::ScopedSecret {
+        host: "api.example.com".into(),
+        env: "SECOND_FAKE".into(),
+        value: FAKE_VALUE.into(),
+    }
+}
+
+const SECOND_NAME: &str = "api-example-com";
+
+/// Boundary (another sandbox's secret in the cloud's list): left alone; only the task's own
+/// secrets, in the list's order, go. With two of the task's: both set before the create, in
+/// order, and both removed.
+#[test]
+fn only_the_secrets_scoped_to_the_task_sandbox_are_removed() {
+    let f = fixture_with(LOCAL_TOML);
+    let id = spec_id(&f);
+    let sandbox = format!("sbxm-task-{id}-claude");
+    let other = "sbxm-task-other-claude";
+    let backend = cloud_backend_with(&f.env.tmp.path().join("cloud-fs"), &id, failed_worker())
+        .with_cloud_secret(other, FAKE_NAME);
+
+    let started = start_cloud_with_secrets(&f, &backend, &[fake_secret(), second_secret()]);
+
+    assert!(started.result.is_err());
+    let log = described_log(&backend);
+    assert_eq!(
+        log[..3],
+        [
+            format!("secret-set {sandbox} {FAKE_NAME}"),
+            format!("secret-set {sandbox} {SECOND_NAME}"),
+            format!("create {sandbox}"),
+        ],
+        "{log:?}"
+    );
+    assert_eq!(
+        log[log.len() - 4..],
+        [
+            format!("rm {sandbox}"),
+            format!("secret-ls {sandbox}"),
+            format!("secret-rm {sandbox} {FAKE_NAME}"),
+            format!("secret-rm {sandbox} {SECOND_NAME}"),
+        ],
+        "{log:?}"
+    );
+    assert_eq!(
+        backend.cloud_secrets(),
+        [(other.to_owned(), FAKE_NAME.to_owned())]
+    );
+    assert!(!started.out.contains(other), "{}", started.out);
+    assert!(started.warn.is_empty(), "{}", started.warn);
+    assert_value_nowhere(&f, &id, &backend, &started);
+}
+
+/// A set that fails in the middle: no create, the secrets that landed are removed (the cloud's
+/// list says which), the error names the secret and the sandbox, never the value, and no task
+/// folder stays.
+#[test]
+fn a_scoped_secret_that_cannot_be_set_stops_the_start_before_the_create() {
+    let f = fixture_with(LOCAL_TOML);
+    let id = spec_id(&f);
+    let sandbox = format!("sbxm-task-{id}-claude");
+    let backend = cloud_ready().failing_set_scoped_secret_for("api.example.com");
+
+    let started = start_cloud_with_secrets(&f, &backend, &[fake_secret(), second_secret()]);
+
+    let message = format!("{:#}", started.result.as_ref().unwrap_err());
+    assert!(
+        message.contains("SECOND_FAKE")
+            && message.contains("api.example.com")
+            && message.contains(&sandbox),
+        "{message}"
+    );
+    assert_eq!(
+        described_log(&backend),
+        [
+            format!("secret-set {sandbox} {FAKE_NAME}"),
+            format!("secret-set {sandbox} {SECOND_NAME}"),
+            format!("secret-ls {sandbox}"),
+            format!("secret-rm {sandbox} {FAKE_NAME}"),
+        ]
+    );
+    assert!(backend.creates().is_empty());
+    assert_eq!(backend.cloud_secrets(), Vec::<(String, String)>::new());
+    assert!(!sbxm::task::record::task_dir(&f.env.base_dir(), &id).exists());
+    assert!(started.warn.is_empty(), "{}", started.warn);
+    assert_value_nowhere(&f, &id, &backend, &started);
+}
+
+/// A secret list the cloud won't give: one warning naming `sbx --cloud secret ls` and the
+/// sandbox, no `secret-rm`, and the task's own outcome unchanged.
+#[test]
+fn a_secret_list_that_cannot_be_read_is_one_warning_naming_the_command() {
+    let f = fixture_with(LOCAL_TOML);
+    let id = spec_id(&f);
+    let sandbox = format!("sbxm-task-{id}-claude");
+    let backend = cloud_backend_with(&f.env.tmp.path().join("cloud-fs"), &id, failed_worker())
+        .failing_scoped_secrets();
+
+    let started = start_cloud_with_secrets(&f, &backend, &[fake_secret()]);
+
+    let message = format!("{:#}", started.result.as_ref().unwrap_err());
+    assert!(message.contains("worker"), "{message}");
+    let log = described_log(&backend);
+    assert_eq!(
+        log[log.len() - 2..],
+        [format!("rm {sandbox}"), format!("secret-ls {sandbox}")],
+        "{log:?}"
+    );
+    assert_removed(&f, &id, &started, "removed");
+    let warning = format!(
+        "warning: the cloud's secret list couldn't be read, so any secret scoped to {sandbox} is \
+         still there: "
+    );
+    assert_eq!(
+        started.warn.matches(&warning).count(),
+        1,
+        "{}",
+        started.warn
+    );
+    assert!(
+        started.warn.contains("`sbx --cloud secret ls`")
+            && started.warn.contains(&format!("--sandbox {sandbox} -f")),
+        "{}",
+        started.warn
+    );
+    assert!(!started.out.contains("scoped secret"), "{}", started.out);
+    assert_value_nowhere(&f, &id, &backend, &started);
+}
+
+/// A secret the cloud won't remove: one warning naming the command that removes it by hand; the
+/// others still go; the folder doesn't stay for it (`task.json` records no secret).
+#[test]
+fn a_scoped_secret_that_cannot_be_removed_is_one_warning_naming_the_command() {
+    let f = fixture_with(LOCAL_TOML);
+    let id = spec_id(&f);
+    let sandbox = format!("sbxm-task-{id}-claude");
+    let backend = cloud_ready()
+        .with_exec_output_matching("printenv", common::task_fixture::ok("work\n"))
+        .failing_remove_secret_for(FAKE_NAME);
+
+    let started = start_cloud_with_secrets(&f, &backend, &[fake_secret(), second_secret()]);
+
+    assert!(started.result.is_err());
+    let log = described_log(&backend);
+    assert_eq!(
+        log[log.len() - 4..],
+        [
+            format!("rm {sandbox}"),
+            format!("secret-ls {sandbox}"),
+            format!("secret-rm {sandbox} {FAKE_NAME}"),
+            format!("secret-rm {sandbox} {SECOND_NAME}"),
+        ],
+        "{log:?}"
+    );
+    assert_eq!(
+        backend.cloud_secrets(),
+        [(sandbox.clone(), FAKE_NAME.to_owned())]
+    );
+    let warning = format!("warning: scoped secret {FAKE_NAME} of {sandbox} could not be removed: ");
+    assert_eq!(
+        started.warn.matches(&warning).count(),
+        1,
+        "{}",
+        started.warn
+    );
+    let command = format!("sbx --cloud secret rm {FAKE_NAME} --sandbox {sandbox} -f");
+    assert!(started.warn.contains(&command), "{}", started.warn);
+    let line = format!("scoped secret {SECOND_NAME} of {sandbox} removed");
+    assert_eq!(started.out.matches(&line).count(), 1, "{}", started.out);
+    assert!(!sbxm::task::record::task_dir(&f.env.base_dir(), &id).exists());
+    assert_value_nowhere(&f, &id, &backend, &started);
+}

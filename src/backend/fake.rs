@@ -128,7 +128,8 @@ pub struct FakeBackend {
     cloud_secrets: Mutex<Vec<(String, String)>>,
     /// Every `set_scoped_secret` call, as `(sandbox, secret)`.
     scoped_secret_sets: Mutex<Vec<(String, ScopedSecret)>>,
-    fail_set_scoped_secret: bool,
+    /// The hosts whose `set_scoped_secret` fails.
+    fail_set_scoped_secret_for: Vec<String>,
     fail_scoped_secrets: bool,
     /// The service names whose `remove_secret` fails.
     fail_remove_secret_for: Vec<String>,
@@ -564,12 +565,11 @@ impl FakeBackend {
         self
     }
 
-    /// Makes `set_scoped_secret` record the call and then fail, storing nothing.
-    pub fn failing_set_scoped_secret(self) -> Self {
-        Self {
-            fail_set_scoped_secret: true,
-            ..self
-        }
+    /// Makes `set_scoped_secret` of a secret for `host` record the call and then fail, storing
+    /// nothing.
+    pub fn failing_set_scoped_secret_for(mut self, host: &str) -> Self {
+        self.fail_set_scoped_secret_for.push(host.to_owned());
+        self
     }
 
     /// Makes `scoped_secrets` fail.
@@ -931,7 +931,7 @@ impl SandboxBackend for FakeBackend {
             .unwrap()
             .push((sandbox.to_owned(), secret.clone()));
         self.record("secret-set", &format!("{sandbox} {name}"));
-        if self.fail_set_scoped_secret {
+        if self.fail_set_scoped_secret_for.contains(&secret.host) {
             bail!(
                 "fake set-custom failure for {} on {}",
                 secret.env,
