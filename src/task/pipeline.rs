@@ -1107,9 +1107,12 @@ pub fn prepare_spec_resolved(
             warnings,
         }),
         Err(e) => {
-            // Back to nothing: the sandbox (if it got created) and both folders.
+            // Back to nothing: the sandbox (if it got created) and the folders this start
+            // reserved; a cloud start has no host clone, so a folder there isn't its own.
             let _ = ctx.backend.remove(&sandbox);
-            let _ = fs::remove_dir_all(&workspace);
+            if local {
+                let _ = fs::remove_dir_all(&workspace);
+            }
             let _ = fs::remove_dir_all(&meta);
             Err(e)
         }

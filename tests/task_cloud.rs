@@ -641,3 +641,26 @@ fn a_home_that_is_not_an_absolute_path_fails_the_start_and_undoes_it() {
     assert!(!sbxm::task::record::task_dir(&f.env.base_dir(), &id).exists());
     assert!(!backend.log().iter().any(|e| e.starts_with("cp-in")));
 }
+
+/// Self-review: a failed cloud start removes only what it made. It never reserves a host clone, so
+/// a folder that appears at `<base>/tasks/<id>` while the sandbox is being set up isn't its own to
+/// delete.
+#[test]
+fn a_failed_cloud_start_leaves_a_host_folder_it_did_not_make() {
+    let f = fixture_with(LOCAL_TOML);
+    let id = spec_id(&f);
+    let folder = f.env.base_dir().join("tasks").join(&id);
+    let made = folder.clone();
+    let backend = common::task_fixture::backend()
+        .with_exec_output_matching("printenv", common::task_fixture::ok("work\n"))
+        .with_create_hook(move |_| {
+            std::fs::create_dir_all(&made).unwrap();
+            std::fs::write(made.join("keep.txt"), "not sbxm's\n").unwrap();
+        });
+
+    let (result, _) = start_spec(&f, &backend, Some(Location::Cloud));
+
+    assert!(result.is_err());
+    assert!(folder.join("keep.txt").is_file());
+    assert!(!sbxm::task::record::task_dir(&f.env.base_dir(), &id).exists());
+}

@@ -1289,6 +1289,14 @@ mod cloud_tests {
         assert_eq!(copy_out_result(true, b"", b"").unwrap(), CopyOut::Copied);
     }
 
+    /// A cloud start checks the worker's provider secret through the cloud instance, whose
+    /// `secret ls --json` has the local shape: two global logins and a sandbox-scoped secret.
+    #[test]
+    fn the_cloud_secret_ls_keeps_the_global_service_logins() {
+        let json = include_str!("fixtures/sbx-cloud-secret-ls.json");
+        assert_eq!(parse_secret_ls(json).unwrap(), ["anthropic", "openai"]);
+    }
+
     #[test]
     fn parses_the_cloud_ls_json() {
         assert_eq!(
