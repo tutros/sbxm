@@ -355,6 +355,38 @@ pub struct OpenFinding {
     pub place: Option<String>,
 }
 
+/// What a cloud sandbox of a task was for (P7 (a)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxRole {
+    Worker,
+    Reviewer,
+    Fix,
+}
+
+impl SandboxRole {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Worker => "worker",
+            Self::Reviewer => "reviewer",
+            Self::Fix => "fix",
+        }
+    }
+}
+
+/// One cloud sandbox's lifetime (P7 (a), decision 265).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxLife {
+    pub name: String,
+    pub role: SandboxRole,
+    pub location: Location,
+    pub created_at: String,
+    /// The TTL it was created with, in seconds.
+    pub ttl_s: u64,
+    /// `null` while it exists, and when its removal failed.
+    pub removed_at: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Record {
     pub schema: u32,
@@ -415,6 +447,11 @@ pub struct Record {
     /// a missing `result.md`); never a secret.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// Every cloud sandbox the task created, in order, never rewritten except to stamp its
+    /// removal (P7 (a), decision 265): what a retro sums for the task's sandbox hours. Absent in
+    /// older records and for a task that never had a cloud sandbox.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sandboxes: Vec<SandboxLife>,
     /// Free-form; later stages attach here and M2b leaves it alone (decision 139).
     pub hooks: Value,
     pub sbxm_version: String,
@@ -483,6 +520,42 @@ impl Record {
         }
     }
 
+    /// Appends the entry of a cloud sandbox just created, not yet removed.
+    pub fn add_sandbox(
+        &mut self,
+        name: &str,
+        role: SandboxRole,
+        location: Location,
+        now: u64,
+        ttl_s: u64,
+    ) {
+        self.sandboxes.push(SandboxLife {
+            name: name.to_owned(),
+            role,
+            location,
+            created_at: format_timestamp(now),
+            ttl_s,
+            removed_at: None,
+        });
+    }
+
+    /// Stamps the removal of the sandbox `name`'s latest entry still open; `false` if it has
+    /// none.
+    pub fn sandbox_removed(&mut self, name: &str, now: u64) -> bool {
+        match self
+            .sandboxes
+            .iter_mut()
+            .rev()
+            .find(|s| s.name == name && s.removed_at.is_none())
+        {
+            Some(entry) => {
+                entry.removed_at = Some(format_timestamp(now));
+                true
+            }
+            None => false,
+        }
+    }
+
     /// A task that has just been created: stage `prepared`, running.
     pub fn new(task: &NewTask, now: u64, process: Process) -> Self {
         Self {
@@ -519,6 +592,7 @@ impl Record {
             continues: None,
             related: Vec::new(),
             notes: Vec::new(),
+            sandboxes: Vec::new(),
             hooks: Value::Object(serde_json::Map::new()),
             sbxm_version: env!("CARGO_PKG_VERSION").to_owned(),
             config_hash: task.config_hash.to_owned(),

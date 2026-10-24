@@ -16,7 +16,7 @@ use super::machine;
 use super::prompts::{self, Role};
 use super::record::{
     self, Agent, GateResult, GateRun, Kind, NewTask, OpenFinding, PrBranch, Process, ProcessProbe,
-    Record, RunInfo, Stage, Status,
+    Record, RunInfo, SandboxRole, Stage, Status,
 };
 use super::repo::{self, AgentFile, BUNDLE_CAP, Existing, Identity};
 use super::review;
@@ -172,6 +172,9 @@ pub struct Prepared {
     pub kits: Option<HarnessKits>,
     /// One line each, to print before the run.
     pub warnings: Vec<String>,
+    /// What the preparation did that the screen and `run.log` show (decision 265): a cloud
+    /// sandbox's create. One line each, to print before the run.
+    pub events: Vec<String>,
 }
 
 impl Prepared {
@@ -201,6 +204,7 @@ impl Prepared {
             workspace: base_dir.join("tasks").join(id),
             kits: None,
             warnings: Vec::new(),
+            events: Vec::new(),
         })
     }
 }
@@ -372,6 +376,7 @@ pub fn prepare_pr(ctx: &Ctx, pr: &PrInfo) -> Result<Prepared> {
             workspace,
             kits: None,
             warnings,
+            events: Vec::new(),
         }),
         Err(e) => {
             let _ = fs::remove_dir_all(&meta);
@@ -923,6 +928,7 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
             workspace,
             kits: Some(kits),
             warnings,
+            events: Vec::new(),
         }),
         Err(e) => {
             // Back to nothing: the sandbox (if it got created) and both folders.
@@ -1091,6 +1097,8 @@ pub fn prepare_spec_resolved(
     // The sandbox's name is the task's, so a cloud sandbox of that name may predate this start;
     // only one this start's own `create` made is its to remove (review M-1).
     let mut created = false;
+    // What this start did that the screen (and so `run.log`) should show: a cloud create.
+    let mut events = Vec::new();
     let built = (|| -> Result<(Record, HarnessKits)> {
         let repo_git = meta.join("repo.git");
         repo::clone_bare(ctx.clone_source, &repo_git)?;
@@ -1189,6 +1197,15 @@ pub fn prepare_spec_resolved(
                 let ttl = lifetime::worker_ttl(ctx.config);
                 plan.create_cloud(ctx.backend, &sandbox, worker.harness, ttl)?;
                 created = true;
+                task.add_sandbox(
+                    &sandbox,
+                    SandboxRole::Worker,
+                    location,
+                    now(),
+                    ttl.as_secs(),
+                );
+                record::write(&meta, &task)?;
+                events.push(lifetime::created_line(&sandbox, SandboxRole::Worker, ttl));
                 let clone = seed_cloud_clone(ctx.backend, &meta, &sandbox, &task, ctx.identity)?;
                 if let Some(agent) = task.worker.as_mut() {
                     agent.workspace = clone;
@@ -1206,6 +1223,7 @@ pub fn prepare_spec_resolved(
             workspace,
             kits: Some(kits),
             warnings,
+            events,
         }),
         Err(e) => {
             // Back to nothing: the sandbox and the folders this start made. A local start

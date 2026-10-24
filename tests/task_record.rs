@@ -850,3 +850,122 @@ fn a_record_without_a_location_reads_as_local_and_cloud_round_trips() {
     assert!(text.contains("\"location\": \"cloud\""), "{text}");
     assert_eq!(record::read(&task.join("task.json")).unwrap(), record);
 }
+
+/// Milestone 4 slice 3 (P7 (a), decision 265): an append-only list of the task's cloud sandboxes,
+/// absent from a record from before it.
+#[test]
+fn a_record_without_sandboxes_reads_as_none_and_the_list_round_trips() {
+    use sbxm::backend::Location;
+    use sbxm::task::record::SandboxRole;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("task.json");
+    let mut value = serde_json::to_value(new_record()).unwrap();
+    value.as_object_mut().unwrap().remove("sandboxes");
+    fs::write(&path, value.to_string()).unwrap();
+    assert!(record::read(&path).unwrap().sandboxes.is_empty());
+
+    let task = dir.path().join("tasks").join("issue-41");
+    let mut record = new_record();
+    record.add_sandbox(
+        "sbxm-task-issue-41-claude",
+        SandboxRole::Worker,
+        Location::Cloud,
+        1_000,
+        7_200,
+    );
+    record::write(&task, &record).unwrap();
+
+    let text = fs::read_to_string(task.join("task.json")).unwrap();
+    let saved: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(
+        saved["sandboxes"],
+        serde_json::json!([{
+            "name": "sbxm-task-issue-41-claude",
+            "role": "worker",
+            "location": "cloud",
+            "created_at": "1970-01-01T00:16:40Z",
+            "ttl_s": 7200,
+            "removed_at": null,
+        }])
+    );
+    assert_eq!(record::read(&task.join("task.json")).unwrap(), record);
+}
+
+/// A removal stamps the entry of the sandbox still there, never an earlier one of the same name.
+#[test]
+fn a_removal_stamps_the_open_entry_of_that_sandbox_only() {
+    use sbxm::backend::Location;
+    use sbxm::task::record::SandboxRole;
+
+    let mut record = new_record();
+    record.add_sandbox("w", SandboxRole::Worker, Location::Cloud, 100, 600);
+    assert!(record.sandbox_removed("w", 200));
+    record.add_sandbox("w", SandboxRole::Worker, Location::Cloud, 300, 600);
+    record.add_sandbox("r", SandboxRole::Reviewer, Location::Cloud, 310, 600);
+
+    assert!(record.sandbox_removed("w", 400));
+    assert!(!record.sandbox_removed("w", 500), "no open entry is left");
+
+    let removed: Vec<_> = record
+        .sandboxes
+        .iter()
+        .map(|s| (s.name.as_str(), s.removed_at.clone()))
+        .collect();
+    assert_eq!(
+        removed,
+        [
+            ("w", Some("1970-01-01T00:03:20Z".to_owned())),
+            ("w", Some("1970-01-01T00:06:40Z".to_owned())),
+            ("r", None),
+        ]
+    );
+}
+
+/// What a retro reads (decision 265): the sandbox hours are the sum of `removed_at - created_at`
+/// over the entries, each sandbox once, whatever its role.
+#[test]
+fn the_entries_add_up_to_the_sandbox_hours() {
+    use sbxm::backend::Location;
+    use sbxm::run::results::parse_timestamp;
+    use sbxm::task::record::SandboxRole;
+
+    let hour = 3_600;
+    let start = 1_790_000_000;
+    let mut record = new_record();
+    // A worker for 2h, a reviewer for 30m during it, a fix-round sandbox for 1h after.
+    record.add_sandbox("w", SandboxRole::Worker, Location::Cloud, start, 4 * hour);
+    record.add_sandbox(
+        "r",
+        SandboxRole::Reviewer,
+        Location::Cloud,
+        start + hour,
+        hour,
+    );
+    assert!(record.sandbox_removed("r", start + hour + hour / 2));
+    assert!(record.sandbox_removed("w", start + 2 * hour));
+    record.add_sandbox(
+        "f",
+        SandboxRole::Fix,
+        Location::Cloud,
+        start + 3 * hour,
+        4 * hour,
+    );
+    assert!(record.sandbox_removed("f", start + 4 * hour));
+
+    let dir = tempfile::tempdir().unwrap();
+    let task = dir.path().join("tasks").join("issue-41");
+    record::write(&task, &record).unwrap();
+    let saved = record::read(&task.join("task.json")).unwrap();
+
+    let seconds: u64 = saved
+        .sandboxes
+        .iter()
+        .map(|s| {
+            let created = parse_timestamp(&s.created_at).unwrap();
+            let removed = parse_timestamp(s.removed_at.as_deref().unwrap()).unwrap();
+            removed - created
+        })
+        .sum();
+    assert_eq!(seconds, 3 * hour + hour / 2);
+}

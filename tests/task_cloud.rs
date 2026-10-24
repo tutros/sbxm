@@ -378,6 +378,28 @@ fn a_cloud_spec_start_clones_runs_gates_and_collects_through_copies() {
     let task = sbxm::task::record::read(&meta.join("task.json")).unwrap();
     assert_eq!(task.location, Location::Cloud);
     assert_eq!(task.worker.as_ref().unwrap().workspace, clone);
+    // One lifetime entry, still open: the start hands over to the review, which continues the
+    // automatic run in the same sandbox (slice 3, P5 (d), P7 (a)); one line at its create.
+    let ttl = sbxm::task::lifetime::worker_ttl(&f.config);
+    assert_eq!(task.sandboxes.len(), 1, "{:?}", task.sandboxes);
+    let entry = &task.sandboxes[0];
+    assert_eq!(entry.name, sandbox);
+    assert_eq!(entry.role, sbxm::task::record::SandboxRole::Worker);
+    assert_eq!(entry.location, Location::Cloud);
+    assert_eq!(entry.ttl_s, ttl.as_secs());
+    assert_eq!(entry.removed_at, None);
+    assert!(
+        sbxm::run::results::parse_timestamp(&entry.created_at).is_some(),
+        "{}",
+        entry.created_at
+    );
+    let created = format!(
+        "cloud sandbox {sandbox} created (worker, TTL {})",
+        sbxm::backend::ttl_arg(ttl)
+    );
+    assert_eq!(out.matches(&created).count(), 1, "{out}");
+    assert!(!out.contains("removed"), "{out}");
+    assert!(backend.removes().is_empty());
     let log = common::git(
         &meta.join("repo.git"),
         &["log", "--format=%s", &format!("refs/heads/{id}")],

@@ -4,7 +4,8 @@
 use std::time::Duration;
 
 use super::config::TaskConfig;
-use crate::backend::{SandboxBackend, whole_minutes};
+use super::record::SandboxRole;
+use crate::backend::{SandboxBackend, ttl_arg, whole_minutes};
 
 /// What every TTL adds to the time its sandbox is expected to need (decision 259).
 const MARGIN: Duration = Duration::from_secs(30 * 60);
@@ -84,4 +85,13 @@ pub fn remove_sandbox(
             _ => return Removal::Failed(error),
         }
     }
+}
+
+/// The line the screen and `run.log` show at a cloud create (decision 265).
+pub fn created_line(name: &str, role: SandboxRole, ttl: Duration) -> String {
+    format!(
+        "cloud sandbox {name} created ({}, TTL {})",
+        role.name(),
+        ttl_arg(ttl)
+    )
 }

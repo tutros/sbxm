@@ -845,6 +845,9 @@ pub(crate) fn run_spec_from(
     for warning in &prepared.warnings {
         writeln!(warn, "warning: {warning}")?;
     }
+    for event in &prepared.events {
+        writeln!(out, "{event}")?;
+    }
 
     let worked = pipeline::run_worker(&ctx, &mut prepared)?;
     let (label, bad) = match &worked.status {
