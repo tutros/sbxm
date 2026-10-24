@@ -261,6 +261,22 @@ impl Location {
     }
 }
 
+/// A TTL as `sbx create --ttl` takes it (decision 263): whole minutes, part of a minute rounded
+/// up, written `<h>h<m>m`, `<h>h` when the minutes are 0, or `<m>m` under an hour.
+pub fn ttl_arg(ttl: std::time::Duration) -> String {
+    let minutes = whole_minutes(ttl);
+    match (minutes / 60, minutes % 60) {
+        (0, m) => format!("{m}m"),
+        (h, 0) => format!("{h}h"),
+        (h, m) => format!("{h}h{m}m"),
+    }
+}
+
+/// `ttl` in minutes, part of a minute counting as a whole one.
+pub fn whole_minutes(ttl: std::time::Duration) -> u64 {
+    (ttl.as_secs() + u64::from(ttl.subsec_nanos() > 0)).div_ceil(60)
+}
+
 /// How `sbx`'s shared skills store is mounted (decision 46). sbxm never uses
 /// `readwrite`: an agent could plant skills that every other sandbox loads.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize)]
