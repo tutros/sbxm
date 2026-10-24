@@ -863,14 +863,27 @@ pub(crate) fn run_spec_from(
         sleep,
     };
     writeln!(out, "Starting a task from {} ...", opts.spec.display())?;
-    let mut prepared = pipeline::prepare_spec_resolved(
-        &ctx,
-        &opts.spec,
-        &source_text,
-        &spec_id,
-        &title,
-        location,
-    )?;
+    let prepared =
+        pipeline::prepare_spec_resolved(&ctx, &opts.spec, &source_text, &spec_id, &title, location);
+    let mut prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(e) => {
+            // A failure after the cloud create still shows the create and the removal, or the
+            // warning of a removal that failed and kept the task's folder, so `run.log` has them
+            // (decision 265, review M-1). Best-effort writes: the start's own error is the
+            // outcome, and a failed write must not hide it. `on_prepared` isn't called: no
+            // `--restart` path reaches a cloud start yet (every one refuses the cloud).
+            if let Some(after) = e.downcast_ref::<pipeline::FailedAfterCreate>() {
+                for event in &after.events {
+                    let _ = writeln!(out, "{event}");
+                }
+                if let Some(why) = &after.kept {
+                    let _ = writeln!(warn, "warning: {why}");
+                }
+            }
+            return Err(e);
+        }
+    };
     let id = prepared.record.id.clone();
     on_prepared(&id);
 

@@ -1213,8 +1213,9 @@ fn a_removal_that_still_fails_at_the_stop_is_reported_and_the_entry_stays_open()
     assert_eq!(task.sandboxes[0].removed_at, None);
 }
 
-/// A start that fails after its create removes the sandbox with the same retries, and a removal
-/// that still fails is reported in the error, naming the command; the task's folder goes as before.
+/// A start that fails after its create removes the sandbox with the same retries; what it did
+/// (the create, the removal) is printed as at any stop, and the task's folder goes as before once
+/// the sandbox is gone.
 #[test]
 fn a_start_that_fails_after_its_create_removes_the_sandbox_with_retries() {
     let f = fixture_with(LOCAL_TOML);
@@ -1227,7 +1228,7 @@ fn a_start_that_fails_after_its_create_removes_the_sandbox_with_retries() {
         .with_exec_output_matching("printenv", common::task_fixture::ok("work\n"))
         .with_remove_errors(&[&error, &error, &error]);
     let started = start_cloud(&f, &backend);
-    let message = format!("{:#}", started.result.unwrap_err());
+    let message = format!("{:#}", started.result.as_ref().unwrap_err());
     assert!(
         message.contains("HOME") && !message.contains("rm"),
         "{message}"
@@ -1235,19 +1236,78 @@ fn a_start_that_fails_after_its_create_removes_the_sandbox_with_retries() {
     assert_eq!(backend.removes().len(), 4);
     assert_eq!(started.waits, secs(&[5, 10, 20]));
     assert!(!sbxm::task::record::task_dir(&f.env.base_dir(), &id).exists());
+    assert_start_lines(&started, &sandbox, "removed");
 
-    // Still failing after three retries.
+    // Already gone when the start fails: counts as removed, the folder goes.
+    let gone = format!(
+        "`sbx rm` failed for sandbox {sandbox} (exit status: 1): error: sandbox '{sandbox}' not \
+         found\n  try: sbx --cloud ls"
+    );
+    let backend = cloud_ready()
+        .with_exec_output_matching("printenv", common::task_fixture::ok("work\n"))
+        .with_remove_errors(&[&gone]);
+    let started = start_cloud(&f, &backend);
+    assert!(started.result.is_err());
+    assert_eq!(backend.removes(), std::slice::from_ref(&sandbox));
+    assert!(!sbxm::task::record::task_dir(&f.env.base_dir(), &id).exists());
+    assert_start_lines(&started, &sandbox, "already gone");
+}
+
+/// Asserts a failed start's screen shows the create once and the removal once, as `run.log` tees
+/// them (decision 265), and no removal warning.
+fn assert_start_lines(started: &Started, sandbox: &str, how: &str) {
+    let created = format!("cloud sandbox {sandbox} created (worker, TTL ");
+    assert_eq!(started.out.matches(&created).count(), 1, "{}", started.out);
+    let removed = format!("cloud sandbox {sandbox} {how}");
+    assert_eq!(started.out.matches(&removed).count(), 1, "{}", started.out);
+    assert!(
+        !started.warn.contains("could not be removed"),
+        "{}",
+        started.warn
+    );
+}
+
+/// Review M-1: a start that fails after its create, whose removal still fails after the retries,
+/// keeps the task's folder: `task.json` is the only record of a cloud sandbox that may still be
+/// running (its entry keeps `removed_at: null`, behavior 3), and the screen, so `run.log`, shows
+/// the create and the failed removal (behavior 5). The error names the manual removal command.
+#[test]
+fn a_start_that_fails_after_its_create_and_cannot_remove_the_sandbox_keeps_the_record() {
+    let f = fixture_with(LOCAL_TOML);
+    let id = spec_id(&f);
+    let sandbox = format!("sbxm-task-{id}-claude");
+    let error = unavailable(&sandbox);
     let backend = cloud_ready()
         .with_exec_output_matching("printenv", common::task_fixture::ok("work\n"))
         .with_remove_errors(&[&error, &error, &error, &error]);
+
     let started = start_cloud(&f, &backend);
-    let message = format!("{:#}", started.result.unwrap_err());
+
+    let message = format!("{:#}", started.result.as_ref().unwrap_err());
     let command = format!("sbx --cloud rm {sandbox} -f");
     assert!(
-        message.contains("HOME") && message.contains(&command),
+        message.contains("HOME") && message.contains(&command) && message.contains(&id),
         "{message}"
     );
     assert_eq!(backend.removes().len(), 4);
+    assert_eq!(started.waits, secs(&[5, 10, 20]));
+
+    let task = task_record(&f, &id);
+    assert_eq!(task.location, Location::Cloud);
+    assert_eq!(task.sandboxes.len(), 1, "{:?}", task.sandboxes);
+    assert_eq!(task.sandboxes[0].name, sandbox);
+    assert_eq!(task.sandboxes[0].removed_at, None);
+
+    let created = format!("cloud sandbox {sandbox} created (worker, TTL ");
+    assert_eq!(started.out.matches(&created).count(), 1, "{}", started.out);
+    assert!(!started.out.contains(" removed"), "{}", started.out);
+    let failed = format!("warning: cloud sandbox {sandbox} could not be removed: ");
+    assert_eq!(started.warn.matches(&failed).count(), 1, "{}", started.warn);
+    assert!(
+        started.warn.contains(&command) && started.warn.contains("temporarily unavailable"),
+        "{}",
+        started.warn
+    );
 }
 
 /// A worker TTL that can't be added up is refused with the preflight, before any write or create.

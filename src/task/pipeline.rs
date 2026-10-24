@@ -1107,7 +1107,10 @@ pub fn prepare_spec_resolved(
     let mut created = false;
     // What this start did that the screen (and so `run.log`) should show: a cloud create.
     let mut events = Vec::new();
-    let built = (|| -> Result<(Record, HarnessKits)> {
+    // The task's record, once written: kept outside the closure so a failure after a cloud
+    // create still has it for the stop below (review M-1 of slice 3).
+    let mut record: Option<Record> = None;
+    let built = (|| -> Result<HarnessKits> {
         let repo_git = meta.join("repo.git");
         repo::clone_bare(ctx.clone_source, &repo_git)?;
         repo::create_branch(&repo_git, id, ctx.base_branch)?;
@@ -1165,7 +1168,7 @@ pub fn prepare_spec_resolved(
 
         // The record goes first: sandbox setup takes minutes, and `status` (and a restart after a
         // kill) must see the task during it.
-        let mut task = Record::new(
+        let task = record.insert(Record::new(
             &NewTask {
                 kind: Kind::Spec,
                 number: 0,
@@ -1178,7 +1181,7 @@ pub fn prepare_spec_resolved(
             },
             now(),
             Process::current(ctx.probe),
-        );
+        ));
         task.fix_rounds = ctx.config.fix_rounds;
         task.location = location;
         task.worker = Some(Agent {
@@ -1197,7 +1200,7 @@ pub fn prepare_spec_resolved(
             template: plan.template.clone(),
             run: None,
         });
-        record::write(&meta, &task)?;
+        record::write(&meta, task)?;
 
         match cloud_ttl {
             None => plan.create(ctx.backend, &sandbox, worker.harness, &workspace)?,
@@ -1211,50 +1214,96 @@ pub fn prepare_spec_resolved(
                     now(),
                     ttl.as_secs(),
                 );
-                record::write(&meta, &task)?;
+                record::write(&meta, task)?;
                 events.push(lifetime::created_line(&sandbox, SandboxRole::Worker, ttl));
-                let clone = seed_cloud_clone(ctx.backend, &meta, &sandbox, &task, ctx.identity)?;
+                let clone = seed_cloud_clone(ctx.backend, &meta, &sandbox, task, ctx.identity)?;
                 if let Some(agent) = task.worker.as_mut() {
                     agent.workspace = clone;
                 }
-                record::write(&meta, &task)?;
+                record::write(&meta, task)?;
             }
         }
-        Ok((task, harness_kits))
+        Ok(harness_kits)
     })();
 
     match built {
-        Ok((record, kits)) => Ok(Prepared {
-            record,
+        Ok(kits) => Ok(Prepared {
+            record: record.expect("the record is written before the preparation succeeds"),
             meta,
             workspace,
             kits: Some(kits),
             warnings,
             events,
         }),
-        Err(mut e) => {
+        Err(e) => {
             // Back to nothing: the sandbox and the folders this start made. A local start
-            // removes its sandbox even if `create` failed, as before this milestone; a cloud
-            // start only the one its `create` returned, and it has no host clone, so a folder
-            // there isn't its own.
+            // removes its sandbox even if `create` failed, as before this milestone, and keeps
+            // no record of it.
             if local {
                 let _ = ctx.backend.remove(&sandbox);
-            } else if created
-                && let lifetime::Removal::Failed(why) =
-                    lifetime::remove_sandbox(ctx.backend, &sandbox, ctx.sleep)
-            {
-                // Retried as at any stop (P6 (a)), and never dropped: the folder that would
-                // have recorded it goes below.
-                e = e.context(format!(
-                    "the start failed, and {}",
-                    lifetime::not_removed(&sandbox, &why)
-                ));
-            }
-            if local {
                 let _ = fs::remove_dir_all(&workspace);
+                let _ = fs::remove_dir_all(&meta);
+                return Err(e);
             }
-            let _ = fs::remove_dir_all(&meta);
-            Err(e)
+            // A cloud start removes only the sandbox its own `create` made (review M-1 of slice
+            // 1), and has no host clone, so a folder there isn't its own. The removal is every
+            // other stop's (behavior 2): retried, the lifetime entry stamped, one line for the
+            // screen. The folder goes only once the sandbox is gone: while it may still be
+            // there, `task.json` is its only record and stays (review M-1 of slice 3).
+            let Some(task) = record.as_mut().filter(|_| created) else {
+                let _ = fs::remove_dir_all(&meta);
+                return Err(e);
+            };
+            let kept = match lifetime::release_worker(ctx.backend, &meta, task, ctx.sleep) {
+                Some(lifetime::Released::Warning(why)) => Some(why),
+                Some(lifetime::Released::Line(line)) => {
+                    events.push(line);
+                    None
+                }
+                // No open entry for the worker sandbox: nothing of this start's to remove.
+                None => None,
+            };
+            if kept.is_none() {
+                let _ = fs::remove_dir_all(&meta);
+            }
+            Err(e.context(FailedAfterCreate {
+                id: id.to_owned(),
+                spec: source_path.to_path_buf(),
+                events,
+                kept,
+            }))
+        }
+    }
+}
+
+/// A spec start that failed after its cloud sandbox was created (milestone 4 slice 3, review
+/// M-1): the context on the failure itself, carrying what the screen, and so `run.log`, still
+/// has to show (decision 265). `task_start::run_spec_from` reads it back with `downcast_ref`.
+#[derive(Debug)]
+pub struct FailedAfterCreate {
+    /// The task's id.
+    pub id: String,
+    /// The spec file the task was started from.
+    pub spec: PathBuf,
+    /// The create, and the removal once the sandbox is gone: one line each.
+    pub events: Vec<String>,
+    /// Why the task's folder stays, as the warning to show: the sandbox's removal failed (or
+    /// couldn't be recorded), so `task.json`, its only record, keeps the entry open. `None` when
+    /// the sandbox is gone and the folder went with it.
+    pub kept: Option<String>,
+}
+
+impl std::fmt::Display for FailedAfterCreate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.kept {
+            Some(why) => write!(
+                f,
+                "the start failed, and {why}; the task {} keeps its record of the sandbox until \
+                 `sbxm task rm --spec {}`",
+                self.id,
+                self.spec.display()
+            ),
+            None => f.write_str("the start failed"),
         }
     }
 }
