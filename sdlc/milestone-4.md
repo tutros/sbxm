@@ -216,9 +216,8 @@ The strict check can't be a preflight refusal: it reads the sandbox's own policy
 and the rule removals (P9). In order: scoped secrets set [256], `create`, one removal per host outside the runtime
 list, `policy ls`. If the list still allows a host outside the runtime list, or sbxm can't read it, sbxm removes the
 sandbox (with P6's retries), then the task's scoped secrets, and only then refuses, naming the host (or the unread
-list), as in [232]. No agent `exec` runs before the check passes. The task is left as a failed start that `task rm`
-removes; nothing in the cloud is left behind unless a removal itself fails, which the message names with the
-sandbox or secret left.
+list), as in [232]. No agent `exec` runs before the check passes. The task's record and folder are left as a local strict
+`codex` start that [232] refuses leaves them today, and a removal that fails is reported as P6 reports one.
 
 A cloud failure mid-task (`sbx --cloud` not answering, an exec stream error without `timeout -v`'s lines) stops the
 task the way `SbxUnavailable` and `ExecUnavailable` do today, and the message names `task resume`.
