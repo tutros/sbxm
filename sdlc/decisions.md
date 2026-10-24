@@ -1030,6 +1030,23 @@ task attempt) are dropped. Grounds: merged tasks, almost all of them, are archiv
 number nobody has needed yet goes against optimizing just in time. Gap G62 in `sdlc/evals-workflow-notes.md` names
 the trigger for revisiting it.
 
+## Round 13: auto-merge (2026-10-24)
+
+266. **Low-risk PRs merge without the user, as an experiment (2026-10-24, the user's four answers; narrows [86] and
+[187], where the user merges):** (a) scope: a PR whose risk is low, both the reviewer's level and the path-rule floor
+[176], [179]; medium and high stay the user's to merge, for now; (b) it starts now, as a process: before running `gh
+pr merge <N> --auto --merge`, the session checks that the latest sbxm review covered exactly the PR's current head
+commit, found 0 must-fix, and rated it low; GitHub then merges once the required checks pass; the `sbxm/review` status
+check that would make GitHub enforce this is issue #317, built if the experiment works; (c) measure: over the next 10
+auto-merged PRs, the breaks found after a merge (CI red on `main`, a revert, a later must-fix traced to one of them)
+and the time from ready to merged (the loop trial's median: 29m12s); the first break pauses auto-merge and the session
+tells the user, who decides; every auto-merged PR is logged in `sdlc/batches/2026-10-24-auto-merge.md`; (d) GitHub
+settings, made by the user on 2026-10-24: the ruleset `sbxm-ruleset` requires 0 approvals and no code-owner review,
+requires the checks `build (ubuntu-latest)` and `build (windows-latest)` (CodeQL stays enforced by its code-scanning
+rule), with 'require branches to be up to date' off (updating a branch adds an unreviewed merge commit; a clash
+between two merged PRs shows as red CI on `main`, a break); auto-merge and automatic deletion of head branches are on.
+Why: the user wants merges to happen without them; low risk only keeps the trust-boundary code with them.
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.

@@ -230,7 +230,7 @@ The entries survive as every other record of the task does: `task rm --merged` a
 
 | Command | Local (today) | Cloud |
 |---|---|---|
-| `task start`, `task run` | unchanged | location from `--cloud`/`--local`, else `[sandbox] location` (P14). Preflight [261], all before any write: `sbx` version (P12), cloud logged in, the harness's provider secret in the cloud [256], no unsupported profile secret (P8), the profile's kits valid. Then `create --cloud --ttl --on-timeout delete --kit common --kit harness-<h>` with the worker TTL (P5 (d)), scoped secrets set before it [256], the strict removal and check (P9) before the agent, failing closed after create (below), bundle and prompt files in by `cp`, worker, sandbox gates, bundle out by `cp`, verify, fetch, host gates [257]; the worker sandbox is removed when the task stops (P5 (d)). |
+| `task start`, `task run` | unchanged | location from `--cloud`/`--local`, else `[sandbox] location` (P14). Preflight [261], all before any write: `sbx` version (P12), cloud logged in, every provider OAuth login the task needs in the cloud (the harness's own and every provider service the profile names, P8 (d)) [256], no unsupported profile secret (P8), the profile's kits valid. Then `create --cloud --ttl --on-timeout delete --kit common --kit harness-<h>` with the worker TTL (P5 (d)), scoped secrets set before it [256], the strict removal and check (P9) before the agent, failing closed after create (below), bundle and prompt files in by `cp`, worker, sandbox gates, bundle out by `cp`, verify, fetch, host gates [257]; the worker sandbox is removed when the task stops (P5 (d)). |
 | `task review --issue/--spec` | unchanged | the task's recorded location; a reviewer sandbox per round, each with the reviewer TTL (P5 (d)); a fix round in the task's worker sandbox, kept through the automatic run and rebuilt from a bundle of the branch if gone (P5 (d)). |
 | `task review --pr N` | unchanged | location as for `start` (P14); the PR head goes in as a bundle from `repo.git`. |
 | `task resume` | unchanged | in the cloud, always [261]: a gone sandbox (TTL, a failure) is rebuilt from the recorded profile and a bundle of the branch; preflight again first. |
@@ -248,7 +248,7 @@ that changes anything, and ends with "or run it here with `--local`".
 | Cause | Message names |
 |---|---|
 | not logged in to the cloud | `sbx login` |
-| the harness's provider secret missing in the cloud | `sbx secret set <provider> --oauth --cloud` |
+| a provider OAuth login the task needs missing in the cloud: the harness's own, or any provider service the profile names (P8 (d)) | `sbx secret set <provider> --oauth --cloud` |
 | `sbx` older than the cloud minimum (P12) | the version found and the minimum |
 | a profile secret with no cloud value source (P8 (a)) | the secret and the profile |
 
@@ -284,17 +284,20 @@ The other slices are reviewed at the end of the milestone.
    under its cap before it is read; verify and fetch; sandbox gates by `exec` in the clone; `location` in
    `task.json`. Done when: a `tests/task_cloud.rs` case shows the backend log in order, `repo.git` holds the
    worker's commit, `task.json` says `cloud`, and a staged file that is a link or over its cap is refused.
-2. **Cloud preflight and refusals** [261]: logged in, provider secret in the cloud, version (P12), the free-disk rule
-   (P11), each refusal before any write, naming its fix and `--local`. Done when: one test per row of the preflight
-   refusals table asserts the message and an empty backend log of changing calls and no task folder. The strict-policy
-   refusal isn't one of them; it is slice 7's.
+2. **Cloud preflight and refusals** [261]: logged in, every provider OAuth login the task needs in the cloud (P8
+   (d)), version (P12), the free-disk rule (P11), each refusal before any write, naming its fix and `--local`. Done
+   when: one test per row of the preflight refusals table asserts the message and an empty backend log of changing
+   calls and no task folder, plus the opposite-provider case: a `codex` task whose profile names `anthropic`, with
+   `anthropic` missing in the cloud, is refused before any write, naming `sbx secret set anthropic --oauth --cloud`.
+   The strict-policy refusal isn't one of them; it is slice 7's.
 3. **Lifetimes**: `--ttl` and `--on-timeout delete` with the worker TTL and the reviewer TTL (P5 (d)), the removal
    retry with an injected sleep (P6), the `sandboxes` list in `task.json` and a `run.log` line at each cloud create
    and removal (P7, [265]); the worker sandbox kept through the automatic run, removed when the task stops (ready or
    stopped), and rebuilt from a bundle of the branch when a later command needs it. Done when: tests on the computed
    worker and reviewer TTLs, the worker sandbox removed when the task stops ready and when it stops on a failure, a
-   removal that succeeds on the third try, one that fails after three and is reported, and a record whose entries add
-   up to the sandbox hours.
+   removal that succeeds on the third retry, one that fails after the initial attempt plus three retries (4 calls in
+   all) and is reported, the injected-sleep test observing 5, 10 and 20 seconds, in order, and a record whose entries
+   add up to the sandbox hours.
 4. **Scoped secrets** [256], P8: a non-provider secret refused (P8 (a)) or, with a fake value in the tests, set
    with `--sandbox <name>` before `create` and removed after the sandbox on every path, including a failed create.
    Done when: `tests/task_cloud.rs` cases on the `secret-set`/`secret-rm` log order.
