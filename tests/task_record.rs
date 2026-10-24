@@ -826,3 +826,27 @@ fn spec_id_refuses_a_name_that_sanitizes_to_nothing_usable() {
     let message = format!("{:#}", spec_id(&path).unwrap_err());
     assert!(message.contains("---.md"), "{message}");
 }
+
+/// Milestone 4 slice 1 (P7, decision 265): a task records where it runs; a record from before
+/// this field reads as local.
+#[test]
+fn a_record_without_a_location_reads_as_local_and_cloud_round_trips() {
+    use sbxm::backend::Location;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("task.json");
+    let mut value = serde_json::to_value(new_record()).unwrap();
+    value.as_object_mut().unwrap().remove("location");
+    fs::write(&path, value.to_string()).unwrap();
+    assert_eq!(record::read(&path).unwrap().location, Location::Local);
+    assert_eq!(new_record().location, Location::Local);
+
+    let task = dir.path().join("tasks").join("issue-41");
+    let mut record = new_record();
+    record.location = Location::Cloud;
+    record::write(&task, &record).unwrap();
+
+    let text = fs::read_to_string(task.join("task.json")).unwrap();
+    assert!(text.contains("\"location\": \"cloud\""), "{text}");
+    assert_eq!(record::read(&task.join("task.json")).unwrap(), record);
+}

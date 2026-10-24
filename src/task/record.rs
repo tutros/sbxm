@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::backend::Location;
 use crate::run::results::format_timestamp;
 
 pub const SCHEMA: u32 = 1;
@@ -364,6 +365,11 @@ pub struct Record {
     pub title: String,
     pub base: String,
     pub branch: String,
+    /// Where the task's sandboxes run (decisions 253, 265): chosen once at its start, and read by
+    /// every later command of the task, whatever the config or a flag says then. A record from
+    /// before milestone 4 has none and is local.
+    #[serde(default)]
+    pub location: Location,
     pub stage: Stage,
     pub status: Status,
     pub stages: Vec<Stamp>,
@@ -491,6 +497,7 @@ impl Record {
             title: task.title.to_owned(),
             base: task.base.to_owned(),
             branch: task.branch.to_owned(),
+            location: Location::Local,
             stage: Stage::Prepared,
             status: Status::Running,
             stages: vec![Stamp {
