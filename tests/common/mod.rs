@@ -391,4 +391,20 @@ impl SandboxBackend for SecretCheckBlocksRestore<'_> {
     fn remove_custom_secret(&self, placeholder: &str, sandbox: &str) -> anyhow::Result<()> {
         self.inner.remove_custom_secret(placeholder, sandbox)
     }
+
+    fn set_scoped_secret(
+        &self,
+        sandbox: &str,
+        secret: &sbxm::backend::ScopedSecret,
+    ) -> anyhow::Result<()> {
+        self.inner.set_scoped_secret(sandbox, secret)
+    }
+
+    fn scoped_secrets(&self, sandbox: &str) -> anyhow::Result<Vec<String>> {
+        self.inner.scoped_secrets(sandbox)
+    }
+
+    fn remove_secret(&self, service: &str, sandbox: &str) -> anyhow::Result<()> {
+        self.inner.remove_secret(service, sandbox)
+    }
 }

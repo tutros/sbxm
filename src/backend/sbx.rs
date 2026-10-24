@@ -10,8 +10,8 @@ use std::path::Path;
 
 use super::{
     CopyOut, CreateSpec, CustomSecret, CustomSecretSpec, ExecOutput, ExecSpec, KitValidation,
-    Location, NetworkRule, SandboxBackend, SandboxInfo, SecretSource, Stdin, TemplateImage,
-    check_template_tag,
+    Location, NetworkRule, SandboxBackend, SandboxInfo, ScopedSecret, SecretSource, Stdin,
+    TemplateImage, check_template_tag,
 };
 
 /// Shells out to the `sbx` CLI on PATH, for sandboxes on this machine or, in the cloud instance,
@@ -352,6 +352,145 @@ impl SandboxBackend for SbxBackend {
             failure_reason(&output.stdout, &output.stderr)
         )
     }
+
+    fn set_scoped_secret(&self, sandbox: &str, secret: &ScopedSecret) -> Result<()> {
+        let args = set_scoped_args(self.location, sandbox, secret)?;
+        let output = self
+            .command()
+            .args(&args)
+            .stdin(Stdio::null())
+            .output()
+            .context(SBX_MISSING)?;
+        if !output.status.success() {
+            bail!(
+                "{}",
+                set_scoped_failed(sandbox, secret, &output.status.to_string())
+            );
+        }
+        Ok(())
+    }
+
+    fn scoped_secrets(&self, sandbox: &str) -> Result<Vec<String>> {
+        let output = self
+            .command()
+            .args(secret_ls_args())
+            .stdin(Stdio::null())
+            .output()
+            .context(SBX_MISSING)?;
+        if !output.status.success() {
+            bail!(
+                "`sbx secret ls --json` failed ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        parse_scoped_secrets(&String::from_utf8_lossy(&output.stdout), sandbox)
+    }
+
+    fn remove_secret(&self, service: &str, sandbox: &str) -> Result<()> {
+        let args = remove_secret_args(service, sandbox);
+        let output = self
+            .command()
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .context(SBX_MISSING)?;
+        if output.status.success() || secret_gone(&output.stdout, &output.stderr) {
+            return Ok(());
+        }
+        bail!(
+            "`sbx {}` failed ({}): {}",
+            args.join(" "),
+            output.status,
+            failure_reason(&output.stdout, &output.stderr)
+        )
+    }
+}
+
+/// `sbx --cloud secret set-custom` for one sandbox, by value and without a placeholder (`sbx`
+/// makes it, `sbx-cloud-secret-set-custom.txt`): the form the capture run used (P2). Refused on
+/// the local instance, where a value comes from `--command` or `--ref` (S9) and `--command` is
+/// local-only in the cloud (S14 Q2).
+fn set_scoped_args(
+    location: Location,
+    sandbox: &str,
+    secret: &ScopedSecret,
+) -> Result<Vec<String>> {
+    if location == Location::Local {
+        bail!(
+            "a secret scoped to {sandbox} by its value ({} for {}) can be stored only in the \
+             cloud; on this machine `sbx secret set-custom` takes `--command` or `--ref`",
+            secret.env,
+            secret.host
+        );
+    }
+    Ok([
+        "secret",
+        "set-custom",
+        "--host",
+        &secret.host,
+        "--env",
+        &secret.env,
+        "--value",
+        &secret.value,
+        "--sandbox",
+        sandbox,
+    ]
+    .map(str::to_owned)
+    .into())
+}
+
+/// The error of a scoped secret `sbx` refused to store: names the secret and the sandbox, never
+/// the command line (it carries the value) and never `sbx`'s output (it could).
+fn set_scoped_failed(sandbox: &str, secret: &ScopedSecret, status: &str) -> String {
+    format!(
+        "`sbx --cloud secret set-custom` failed ({status}) for {} on {} scoped to {sandbox}; its \
+         output isn't repeated here, as it could carry the value",
+        secret.env, secret.host
+    )
+}
+
+/// `sbx secret rm <service> --sandbox <sandbox> -f`, the form the capture run used (P2 point 6).
+fn remove_secret_args<'a>(service: &'a str, sandbox: &'a str) -> [&'a str; 6] {
+    ["secret", "rm", service, "--sandbox", sandbox, "-f"]
+}
+
+/// `sbx secret rm` answered that the secret is already gone (`sbx-cloud-secret-rm-not-found.txt`,
+/// sbx 0.46.0): what the caller wanted.
+fn secret_gone(stdout: &[u8], stderr: &[u8]) -> bool {
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(stdout),
+        String::from_utf8_lossy(stderr)
+    );
+    text.contains("sbxcloud: not found")
+}
+
+/// The service names of `sbx secret ls --json`'s `secrets` entries scoped to `sandbox`
+/// (`sbx-cloud-secret-ls.json`, sbx 0.46.0); the masked values are never read. The `global`
+/// scope is every sandbox's, never one sandbox's name, so nothing is ever listed for it: the
+/// caller removes what this lists.
+fn parse_scoped_secrets(json: &str, sandbox: &str) -> Result<Vec<String>> {
+    #[derive(Deserialize)]
+    struct SecretLs {
+        secrets: Vec<Secret>,
+    }
+    #[derive(Deserialize)]
+    struct Secret {
+        scope: String,
+        name: String,
+    }
+    let ls: SecretLs =
+        serde_json::from_str(json).context("unexpected `sbx secret ls --json` output")?;
+    if sandbox == "global" {
+        return Ok(Vec::new());
+    }
+    Ok(ls
+        .secrets
+        .into_iter()
+        .filter(|s| s.scope == sandbox)
+        .map(|s| s.name)
+        .collect())
 }
 
 /// `sbx secret set-custom` for one sandbox, the value's source by `--command` or `--ref`.
@@ -1370,5 +1509,104 @@ mod cloud_tests {
             }]
         );
         assert_eq!(parse_ls(CLOUD_LS_EMPTY).unwrap(), []);
+    }
+
+    // Milestone 4 slice 4 (decision 256, S14 Q2, P2 point 6): a secret scoped to one cloud sandbox
+    // takes a literal value and no placeholder, is listed by `scope`/`name`, and is removed by its
+    // service name; the cloud's `rm` of the sandbox leaves it behind.
+
+    fn fake() -> ScopedSecret {
+        ScopedSecret {
+            host: "postman-echo.com".into(),
+            env: "P2_FAKE".into(),
+            value: "fake-value-NOT-REAL".into(),
+        }
+    }
+
+    #[test]
+    fn a_scoped_secret_is_set_by_value_in_the_cloud_and_refused_here() {
+        assert_eq!(
+            set_scoped_args(Location::Cloud, "sbxm-task-x-claude", &fake()).unwrap(),
+            [
+                "secret",
+                "set-custom",
+                "--host",
+                "postman-echo.com",
+                "--env",
+                "P2_FAKE",
+                "--value",
+                "fake-value-NOT-REAL",
+                "--sandbox",
+                "sbxm-task-x-claude"
+            ]
+        );
+        let local = set_scoped_args(Location::Local, "sbxm-task-x-claude", &fake()).unwrap_err();
+        let shown = format!("{local:#}");
+        assert!(shown.contains("--command"), "{shown}");
+        assert!(!shown.contains("NOT-REAL"), "{shown}");
+    }
+
+    /// The value never reaches a message: not through `Debug`, not through a failed set's error.
+    #[test]
+    fn a_scoped_secret_never_shows_its_value() {
+        let debug = format!("{:?}", fake());
+        assert!(
+            debug.contains("P2_FAKE") && !debug.contains("NOT-REAL"),
+            "{debug}"
+        );
+        let error = set_scoped_failed("sbxm-task-x-claude", &fake(), "exit status: 1");
+        assert!(
+            error.contains("P2_FAKE")
+                && error.contains("postman-echo.com")
+                && error.contains("sbxm-task-x-claude"),
+            "{error}"
+        );
+        assert!(!error.contains("NOT-REAL"), "{error}");
+    }
+
+    /// `sbx --cloud secret ls --json` (sbx 0.46.0, P2): every entry whose `scope` is the sandbox,
+    /// by its `name`; the global logins and another sandbox's secrets are not.
+    #[test]
+    fn the_secrets_scoped_to_a_sandbox_are_listed_by_name() {
+        let json = include_str!("fixtures/sbx-cloud-secret-ls.json");
+        assert_eq!(
+            parse_scoped_secrets(json, "sbxm-p2-capture").unwrap(),
+            ["postman-echo-com"]
+        );
+        assert_eq!(
+            parse_scoped_secrets(json, "sbxm-task-x-claude").unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            parse_scoped_secrets(json, "global").unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_secret_is_removed_by_its_service_name_in_its_scope() {
+        assert_eq!(
+            remove_secret_args("postman-echo-com", "sbxm-p2-capture"),
+            [
+                "secret",
+                "rm",
+                "postman-echo-com",
+                "--sandbox",
+                "sbxm-p2-capture",
+                "-f"
+            ]
+        );
+    }
+
+    /// `sbx-cloud-secret-rm-not-found.txt`: one already gone counts as removed.
+    #[test]
+    fn a_secret_already_gone_counts_as_removed() {
+        let gone = include_str!("fixtures/sbx-cloud-secret-rm-not-found.txt");
+        assert!(secret_gone(b"", gone.as_bytes()));
+        assert!(!secret_gone(
+            b"",
+            b"error: sbxcloud: temporarily unavailable"
+        ));
+        assert!(!secret_gone(b"", b""));
     }
 }

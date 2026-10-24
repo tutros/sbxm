@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use super::{
     CopyOut, CreateSpec, CustomSecret, CustomSecretSpec, ExecOutput, ExecSpec, KitValidation,
-    Location, NetworkRule, SandboxBackend, SandboxInfo, TemplateImage,
+    Location, NetworkRule, SandboxBackend, SandboxInfo, ScopedSecret, TemplateImage,
 };
 
 /// Holds every `exec` of a [`FakeBackend`] until [`ExecGate::open`], so a test
@@ -123,6 +123,15 @@ pub struct FakeBackend {
     fail_custom_secrets: bool,
     fail_set_custom_secret: bool,
     fail_remove_custom_secret: bool,
+    /// The cloud's secret list as `(scope, service name)`: what `scoped_secrets` reads;
+    /// `set_scoped_secret` adds to it, `remove_secret` takes away (milestone 4 slice 4).
+    cloud_secrets: Mutex<Vec<(String, String)>>,
+    /// Every `set_scoped_secret` call, as `(sandbox, secret)`.
+    scoped_secret_sets: Mutex<Vec<(String, ScopedSecret)>>,
+    fail_set_scoped_secret: bool,
+    fail_scoped_secrets: bool,
+    /// The service names whose `remove_secret` fails.
+    fail_remove_secret_for: Vec<String>,
     /// Every location `located` was asked for, in order.
     locations: Mutex<Vec<Location>>,
     /// What `copy_out` of an in-sandbox path produces, before `sandbox_root` is looked at.
@@ -546,6 +555,47 @@ impl FakeBackend {
         }
     }
 
+    /// A backend whose cloud secret list starts with `name` scoped to `scope`.
+    pub fn with_cloud_secret(self, scope: &str, name: &str) -> Self {
+        self.cloud_secrets
+            .lock()
+            .unwrap()
+            .push((scope.to_owned(), name.to_owned()));
+        self
+    }
+
+    /// Makes `set_scoped_secret` record the call and then fail, storing nothing.
+    pub fn failing_set_scoped_secret(self) -> Self {
+        Self {
+            fail_set_scoped_secret: true,
+            ..self
+        }
+    }
+
+    /// Makes `scoped_secrets` fail.
+    pub fn failing_scoped_secrets(self) -> Self {
+        Self {
+            fail_scoped_secrets: true,
+            ..self
+        }
+    }
+
+    /// Makes `remove_secret` of the service `name` record the call and then fail.
+    pub fn failing_remove_secret_for(mut self, name: &str) -> Self {
+        self.fail_remove_secret_for.push(name.to_owned());
+        self
+    }
+
+    /// Every `set_scoped_secret` call, in order, as `(sandbox, secret)`.
+    pub fn scoped_secret_sets(&self) -> Vec<(String, ScopedSecret)> {
+        self.scoped_secret_sets.lock().unwrap().clone()
+    }
+
+    /// The cloud's secret list now, as `(scope, service name)`.
+    pub fn cloud_secrets(&self) -> Vec<(String, String)> {
+        self.cloud_secrets.lock().unwrap().clone()
+    }
+
     /// Every `set_custom_secret` call, in order.
     pub fn custom_secret_sets(&self) -> Vec<CustomSecretSpec> {
         self.custom_secret_sets.lock().unwrap().clone()
@@ -869,6 +919,59 @@ impl SandboxBackend for FakeBackend {
             .lock()
             .unwrap()
             .retain(|s| !(s.placeholder == placeholder && s.scope == sandbox));
+        Ok(())
+    }
+
+    fn set_scoped_secret(&self, sandbox: &str, secret: &ScopedSecret) -> Result<()> {
+        // The service name `sbx` makes from the host (`sbx-cloud-secret-set-custom.txt`:
+        // `postman-echo.com` became `postman-echo-com`). Never the value.
+        let name = secret.host.replace('.', "-");
+        self.scoped_secret_sets
+            .lock()
+            .unwrap()
+            .push((sandbox.to_owned(), secret.clone()));
+        self.record("secret-set", &format!("{sandbox} {name}"));
+        if self.fail_set_scoped_secret {
+            bail!(
+                "fake set-custom failure for {} on {}",
+                secret.env,
+                secret.host
+            );
+        }
+        self.cloud_secrets
+            .lock()
+            .unwrap()
+            .push((sandbox.to_owned(), name));
+        Ok(())
+    }
+
+    fn scoped_secrets(&self, sandbox: &str) -> Result<Vec<String>> {
+        // A read, logged all the same: whether and when the list is read is part of the
+        // contract (after the sandbox's removal, never without scoped secrets).
+        self.record("secret-ls", sandbox);
+        if self.fail_scoped_secrets {
+            bail!("fake: cannot list the cloud's secrets");
+        }
+        Ok(self
+            .cloud_secrets
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(scope, _)| scope == sandbox)
+            .map(|(_, name)| name.clone())
+            .collect())
+    }
+
+    fn remove_secret(&self, service: &str, sandbox: &str) -> Result<()> {
+        self.record("secret-rm", &format!("{sandbox} {service}"));
+        if self.fail_remove_secret_for.iter().any(|n| n == service) {
+            bail!("fake secret rm failure for {service}");
+        }
+        // One that is already gone is removed all the same, as `SbxBackend` answers.
+        self.cloud_secrets
+            .lock()
+            .unwrap()
+            .retain(|(scope, name)| !(scope == sandbox && name == service));
         Ok(())
     }
 

@@ -65,6 +65,42 @@ pub trait SandboxBackend: Send + Sync {
     /// --sandbox N -f`). One that is already gone (removing the sandbox may remove it, S12) is
     /// not an error.
     fn remove_custom_secret(&self, placeholder: &str, sandbox: &str) -> Result<()>;
+    /// Stores a secret scoped to the cloud sandbox `sandbox`, by its literal value, before that
+    /// sandbox is created (`sbx --cloud secret set-custom --host H --env E --value V --sandbox
+    /// N`; secrets attach at create, S14 Q2). `sbx` makes the placeholder and the service name.
+    /// The local instance refuses it: there a value comes from `--command` or `--ref`
+    /// ([`SandboxBackend::set_custom_secret`]). Decision 256, milestone 4 slice 4.
+    fn set_scoped_secret(&self, sandbox: &str, secret: &ScopedSecret) -> Result<()>;
+    /// The service names of every secret scoped to `sandbox` (`sbx secret ls --json`, the entries
+    /// of `secrets` whose `scope` is that name). The cloud's `rm` of a sandbox leaves its scoped
+    /// secrets behind (P2 point 6), so this list, not sbxm's records, says what to remove.
+    fn scoped_secrets(&self, sandbox: &str) -> Result<Vec<String>>;
+    /// Removes the secret `service` scoped to `sandbox` (`sbx secret rm <service> --sandbox N
+    /// -f`). One that is already gone (`sbxcloud: not found`) is not an error.
+    fn remove_secret(&self, service: &str, sandbox: &str) -> Result<()>;
+}
+
+/// A secret scoped to one cloud sandbox, by its value (decision 256): what the proxy sets for
+/// `host`, named `env` inside the sandbox. In this milestone no production path fills one in
+/// (P8 (a) refuses every profile secret but the provider logins); tests use a fake value. Its
+/// `Debug` never shows the value, so no message or record of sbxm can carry it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ScopedSecret {
+    /// The exact DNS name the proxy sets the header for.
+    pub host: String,
+    /// The environment variable holding the placeholder inside the sandbox.
+    pub env: String,
+    pub value: String,
+}
+
+impl std::fmt::Debug for ScopedSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScopedSecret")
+            .field("host", &self.host)
+            .field("env", &self.env)
+            .field("value", &"<redacted>")
+            .finish()
+    }
 }
 
 /// One entry of `sbx secret ls --json`'s `custom_secrets` (S9); the masked `secret` is never read.
