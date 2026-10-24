@@ -1,0 +1,6 @@
+── CONFIGURE AGENT
+   → configure 1 kit(s)
+sbx_001m5pex92zhbq34a32qqc078r9
+   ✓ configure 1 kit(s) (6s)
+✓ Created sandbox sbx_001m5pex92zhbq34a32qqc078r9 (image docker/sandbox-templates:shell-docker)
+To connect to this sandbox, run: sbx --cloud attach sbx_001m5pex92zhbq34a32qqc078r9

@@ -40,7 +40,8 @@ All of these are answered: the user confirmed each on 2026-10-24 (decisions 262-
   whether `--cpus`/`-m` pick the shape, and whether `rm` also removes the sandbox-scoped secrets as it does locally
   (S1); (b) write fixtures from S14's prose and check them only at slice 9's real test. **Recommend (a):** the
   parsers and command lines would otherwise be built on guesses, and a wrong guess shows up only at the end.
-  **Confirmed:** (a) [262].
+  **Confirmed:** (a) [262]. **Done 2026-10-24:** `sdlc/spikes/m4-p2-capture.md`, fixtures `src/backend/fixtures/sbx-cloud-*`;
+  `rm` does not remove a sandbox's scoped secrets in the cloud, and `--skills` is refused with `--cloud`.
 - **P3. The cloud backend: a second backend or a mode.** Options: (a) `SbxBackend` gains a location, and a task
   gets the local or the cloud instance, every call prefixed with `--cloud` in the cloud one; (b) a new
   `SbxCloudBackend` implementing `SandboxBackend`; (c) a location parameter on every trait method. In each case the

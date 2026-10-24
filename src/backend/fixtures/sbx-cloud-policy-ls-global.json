@@ -1,0 +1,5 @@
+{
+  "allowNetworks": [],
+  "denyNetworks": [],
+  "mode": "deny-all"
+}

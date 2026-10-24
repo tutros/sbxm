@@ -1,0 +1,7 @@
+{
+  "allowNetworks": [
+    "postman-echo.com"
+  ],
+  "denyNetworks": [],
+  "mode": "deny-all"
+}
