@@ -766,7 +766,11 @@ pub fn run_spec(
     warn: &mut dyn Write,
 ) -> Result<()> {
     let start = resolve_spec_start(opts)?;
-    disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?;
+    // A cloud sandbox doesn't use the drive holding `sbx`'s local sandbox state (P11, decision
+    // 262(h)); `--ignore-disk` is still accepted there and does nothing more.
+    if start.location == Location::Local {
+        disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?;
+    }
     run_spec_from(
         config_dir,
         opts,

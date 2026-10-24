@@ -902,3 +902,43 @@ fn a_codex_task_whose_profile_names_anthropic_needs_that_login_in_the_cloud_too(
     assert!(result.is_err());
     assert_eq!(backend.creates().len(), 1, "{:?}", backend.log());
 }
+
+/// P11, decision 262(h): a cloud create doesn't use the drive holding `sbx`'s local sandbox
+/// state, so a cloud start goes past the free-disk check; a local one is still refused by it.
+#[test]
+fn too_little_free_disk_refuses_a_local_start_but_not_a_cloud_one() {
+    let start = |location, ignore| {
+        let f = fixture_with(LOCAL_TOML);
+        let id = spec_id(&f);
+        let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &id);
+        let spec = common::task_fixture::spec_file(&f, "Build a thing.\n");
+        let mut options = spec_options(&f, spec, Some(location));
+        options.disk = sbxm::disk::Guard {
+            ignore,
+            ..common::low_disk(&f.env)
+        };
+        let result = sbxm::commands::task_start::run_spec(
+            &f.env.config_dir(),
+            &options,
+            &backend,
+            &sbxm::github::fake::FakeGitHub::default(),
+            &common::task_fixture::Probe,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        );
+        (f, backend, result)
+    };
+
+    let (f, backend, result) = start(Location::Local, false);
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(message.starts_with(common::LOW_DISK), "{message}");
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert!(!f.env.base_dir().join(".sbxm").join("tasks").exists());
+
+    // `--ignore-disk` is still accepted for a cloud start and changes nothing.
+    for ignore in [false, true] {
+        let (_, backend, result) = start(Location::Cloud, ignore);
+        result.unwrap();
+        assert_eq!(backend.creates().len(), 1, "ignore {ignore}");
+    }
+}
