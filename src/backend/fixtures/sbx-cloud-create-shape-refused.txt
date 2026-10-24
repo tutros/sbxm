@@ -1,0 +1,2 @@
+error: 3 vCPU / 5120 MiB is not a billable sandbox shape; use one of: micro (1 vCPU / 2048 MiB), small (2 vCPU / 4096 MiB), medium (4 vCPU / 8192 MiB), large (8 vCPU / 16384 MiB), xl (16 vCPU / 32768 MiB)
+  try: sbx --cloud create --help

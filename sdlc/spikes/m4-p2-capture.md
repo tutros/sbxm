@@ -2,7 +2,8 @@
 
 `sdlc/milestone-4.md` P2 (a), before slice 1. Run 2026-10-24, about 08:00-08:06 UTC, by hand in the main session,
 `sbx` v0.46.0 (`991967dc`), Windows host, `--cloud`. One default-shape `shell` sandbox, `sbxm-p2-capture`, with
-`--ttl 1h --on-timeout delete`, alive for about 4 minutes. Everything is observed unless marked **inferred**. The raw
+`--ttl 1h --on-timeout delete`, alive for about 4 minutes, and at 08:15 a second, `sbxm-p2-shape` (medium shape,
+`--ttl 1h30m`), alive for under a minute. Everything is observed unless marked **inferred**. The raw
 output is in `src/backend/fixtures/sbx-cloud-*`, unchanged.
 
 ## Fixtures
@@ -17,6 +18,7 @@ output is in `src/backend/fixtures/sbx-cloud-*`, unchanged.
 | `sbx-cloud-secret-set-custom.txt` | `sbx --cloud secret set-custom --host H --env E --value V --sandbox <name>` |
 | `sbx-cloud-create.txt` | `sbx --cloud create --name <name> --ttl 1h --on-timeout delete --cpus 2 --memory 4g --allow-network H shell` |
 | `sbx-cloud-create-skills-refused.txt` | the same with `--skills off` |
+| `sbx-cloud-create-shape-refused.txt` | `sbx --cloud create ... --cpus 3 --memory 5g shell`, not a billable shape |
 | `sbx-cloud-cp-not-found.txt` | `sbx --cloud cp <name>:<missing path> <host file>` |
 | `sbx-cloud-cp-symlink-refused.txt` | `sbx --cloud cp <name>:<a symlink> <host file>` |
 | `sbx-cloud-rm-not-found.txt` | `sbx --cloud rm <name> -f` for a sandbox already removed |
@@ -30,11 +32,14 @@ output is in `src/backend/fixtures/sbx-cloud-*`, unchanged.
    `/home/agent/workspace`, as user `agent`.
 3. **`--skills`:** refused with `--cloud`, before anything is created: "--skills is not supported with --cloud; the
    skills store is backed by a host-side directory". sbxm must not pass it to a cloud create.
-4. **`--ttl`:** the help says a Go-style duration ("e.g. 30m, 2h, 1h30m; units are case-insensitive"); only `1h` was
-   tried. `--on-timeout restart` needs a TTL of at least 1h.
-5. **Shape:** the help says `--cpus` and `--memory` "must land on a billable shape; without them a cloud sandbox gets
-   2 CPUs and 4 GiB". `--cpus 2 --memory 4g` was accepted and `ls` reported `cpus: 2`, `memory_mib: 4096`. Other
-   shapes were not tried here (S14's large shape: 8 vCPU, 15 GiB).
+4. **`--ttl`:** the help says a Go-style duration ("e.g. 30m, 2h, 1h30m; units are case-insensitive").
+   `--ttl 1h30m` was accepted: `ls` showed `expires_at` 90 minutes after `created_at` (less the 5 s of the create).
+   `--on-timeout restart` needs a TTL of at least 1h.
+5. **Shape:** `--cpus` and `--memory` pick the shape, and only five are accepted. `--cpus 3 --memory 5g` was refused
+   before anything was created, naming them: micro (1 vCPU / 2048 MiB), small (2 / 4096), medium (4 / 8192), large
+   (8 / 16384), xl (16 / 32768) (`sbx-cloud-create-shape-refused.txt`). `--cpus 4 --memory 8g` gave `cpus: 4`,
+   `memory_mib: 8192` in `ls`; `--cpus 2 --memory 4g` gave the default, small. Without the flags a sandbox is small.
+   (S14's "8 vCPU, 15 GiB" large shape was its in-sandbox reading; the shape is 16384 MiB.)
 6. **Does `rm` remove the sandbox's scoped secrets?** **No.** After `rm`, `secret ls` still listed the custom secret
    scoped to the removed sandbox's name. Locally it goes with the sandbox (S1). sbxm must remove every scoped secret
    itself after the sandbox, on every path (slice 4); an already-removed secret answers `sbxcloud: not found`, exit 1.
@@ -52,11 +57,11 @@ output is in `src/backend/fixtures/sbx-cloud-*`, unchanged.
   (slice 1) is still needed, for the folder case.
 - `rm` took 3 s and did not need a retry this time.
 
-## Not captured
+## Not captured (P2 stays open on these two)
 
 - **The not-logged-in message:** capturing it needs `sbx logout`, which signs the user out of both OAuth logins in
   the cloud. Left for slice 9's real test or a moment the user chooses.
 - **`rm`'s "temporarily unavailable" error:** it can't be triggered on demand. S14 recorded its words ("temporarily
   unavailable; retry the delete"); slice 3's fixture uses that text until a real one turns up.
 
-Spend: not measured; one default-shape sandbox for about 4 minutes (**inferred**: cents).
+Spend: not measured; a small sandbox for about 4 minutes and a medium one for under a minute (**inferred**: cents).
