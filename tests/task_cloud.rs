@@ -836,3 +836,69 @@ fn a_worker_harness_whose_provider_has_no_cloud_login_is_refused() {
         "{message}"
     );
 }
+
+/// The "provider OAuth login missing" row (P8 (d), decision 256): the harness's own login absent
+/// from the cloud is a `MissingSecret` (a `task run` list stops on it, decision 193(a)) naming the
+/// exact `sbx secret set <provider> --oauth --cloud`. The scope rule, a global entry counts and a
+/// sandbox-scoped one doesn't, is the parser's: `the_cloud_secret_ls_keeps_the_global_service_logins`
+/// and `a_login_only_at_a_sandbox_scope_is_not_listed` in `backend::sbx`.
+#[test]
+fn a_provider_login_missing_in_the_cloud_is_refused_naming_the_oauth_command() {
+    let f = fixture_with(LOCAL_TOML);
+    let backend = cloud_ready().and_secrets(&[]);
+
+    let (result, _) = start_spec(&f, &backend, Some(Location::Cloud));
+
+    let error = result.unwrap_err();
+    assert!(
+        error.is::<sbxm::task::pipeline::MissingSecret>(),
+        "{error:#}"
+    );
+    let message = assert_preflight_refusal(Err(error), &f, &backend);
+    assert!(
+        message.contains("'anthropic'")
+            && message.contains("`sbx secret set anthropic --oauth --cloud`"),
+        "{message}"
+    );
+}
+
+/// The opposite-provider case the plan names: a `codex` worker whose profile names `anthropic`,
+/// with `anthropic` missing in the cloud, is refused naming `sbx secret set anthropic --oauth
+/// --cloud`; with both logins stored it starts.
+#[test]
+fn a_codex_task_whose_profile_names_anthropic_needs_that_login_in_the_cloud_too() {
+    let start = |backend: &sbxm::backend::FakeBackend| {
+        let f = fixture_with(LOCAL_TOML);
+        f.env
+            .write_profile("default", "[secrets]\nservices = [\"anthropic\"]\n");
+        let spec = common::task_fixture::spec_file(&f, "Build a thing.\n");
+        let mut options = spec_options(&f, spec, Some(Location::Cloud));
+        options.worker_harness = Some(sbxm::harness::Harness::Codex);
+        let result = sbxm::commands::task_start::run_spec(
+            &f.env.config_dir(),
+            &options,
+            backend,
+            &sbxm::github::fake::FakeGitHub::default(),
+            &common::task_fixture::Probe,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        );
+        (f, result)
+    };
+
+    let backend = cloud_ready().and_secrets(&["openai"]);
+    let (f, result) = start(&backend);
+    let message = assert_preflight_refusal(result, &f, &backend);
+    assert!(
+        message.contains("'anthropic'")
+            && message.contains("profile 'default'")
+            && message.contains("`sbx secret set anthropic --oauth --cloud`"),
+        "{message}"
+    );
+
+    let backend = cloud_ready().and_secrets(&["openai", "anthropic"]);
+    let (_, result) = start(&backend);
+    // Past the preflight: the start reached the cloud (and failed there, in this bare fake).
+    assert!(result.is_err());
+    assert_eq!(backend.creates().len(), 1, "{:?}", backend.log());
+}

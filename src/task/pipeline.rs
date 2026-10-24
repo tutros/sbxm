@@ -99,6 +99,26 @@ fn cloud_preflight(
              262(f)), so take it out of the profile, {LOCAL_INSTEAD}"
         );
     }
+    // 4. Every provider login the task needs is stored in the cloud at global scope (P8 (d),
+    // decision 256): the harness's own and every one the profile names. `secret_services` on
+    // the cloud instance lists `sbx --cloud secret ls --json`'s global service entries only.
+    let stored = backend
+        .secret_services()
+        .map_err(|e| SbxUnavailable(format!("{e:#}; {LOCAL_INSTEAD}")))?;
+    let mut needed = vec![(own, format!("the worker, {}", harness.as_str()))];
+    needed.extend(profile.secrets.services.iter().map(|s| {
+        (
+            s.as_str(),
+            format!("secrets.services of profile '{profile_name}'"),
+        )
+    }));
+    if let Some((missing, reason)) = needed.iter().find(|(s, _)| !stored.iter().any(|t| t == s)) {
+        return Err(MissingSecret(format!(
+            "the cloud has no global '{missing}' login (needed by {reason}); store it with \
+             `sbx secret set {missing} --oauth --cloud`, {LOCAL_INSTEAD}"
+        ))
+        .into());
+    }
     Ok(())
 }
 

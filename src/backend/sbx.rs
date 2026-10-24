@@ -1297,6 +1297,16 @@ mod cloud_tests {
         assert_eq!(parse_secret_ls(json).unwrap(), ["anthropic", "openai"]);
     }
 
+    /// A login scoped to one sandbox isn't the global one a cloud task needs (decision 256).
+    #[test]
+    fn a_login_only_at_a_sandbox_scope_is_not_listed() {
+        let json = r#"{"secrets": [
+            {"scope": "sbxm-task-x-claude", "type": "service", "name": "anthropic",
+             "secret_type": "oauth_refresh", "created_at": "2026-10-23T19:18:44Z"}
+        ]}"#;
+        assert_eq!(parse_secret_ls(json).unwrap(), Vec::<String>::new());
+    }
+
     #[test]
     fn parses_the_cloud_ls_json() {
         assert_eq!(
