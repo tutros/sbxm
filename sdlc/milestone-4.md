@@ -67,7 +67,8 @@ None of these is decided. Each needs the user's answer before the slice that dep
   `local`) and an append-only `sandboxes` list, one entry per created sandbox: `name`, `role` (`worker`,
   `reviewer`, `fix`), `location`, `created_at`, `ttl_s`, `removed_at` (null while it exists or when removal
   failed); (b) the same fields on each `Agent`, which a new review round or a rebuilt worker overwrites. **Recommend
-  (a):** a retro needs every sandbox's hours, and (b) loses all but the last of each role.
+  (a):** a retro needs every sandbox's hours, and (b) loses all but the last of each role. How the list outlives
+  `task rm` is P18.
 - **P8. A profile's other secrets: where the value comes from.** [256] scopes every secret a profile names, other
   than the provider login, to the sandbox. S14 Q2 found a cloud custom secret takes a literal value only (no
   `--command`), and `sbx` can't read a local value back (S4). Options: (a) in this milestone, refuse a cloud task
@@ -114,6 +115,27 @@ None of these is decided. Each needs the user's answer before the slice that dep
   is tracked in this repo today (the gates live in the user's copy). Options: (a) the docs slice adds the file to
   the repo with the cloud-safe path; (b) the user edits their own copy and the docs show the line. **Recommend (b):**
   adding the file changes what every checkout of the repo runs, which is the user's call.
+
+- **P17. What `task status`, `status` and `doctor` do when the cloud can't be read.** [259] has `status` and
+  `doctor` list the running cloud sandboxes; it doesn't say what an unreadable cloud (not logged in, `sbx --cloud
+  ls` failing) does to them. Today `task status` and `status` never call `sbx` (`src/commands/task_status.rs`,
+  `src/commands/status.rs`), and `doctor` records an unreadable local `sbx` as a failed check
+  (`src/commands/doctor.rs`). Options: (a) `task status` keeps reading only `task.json` and shows the recorded
+  location, with no cloud call; `status` prints one line saying the cloud couldn't be read in place of its cloud
+  rows and exits 0; `doctor` shows a warning, not a failed check; (b) as (a), but `doctor` fails the check, as it
+  does for the local `sbx`; (c) as (b), and `status` exits non-zero too; (d) as (a), but `doctor` fails the check
+  only when the current repo is a cloud repo (P13 (a)), and warns otherwise. **Recommend (a):** `status --watch` is a
+  view that shouldn't stop for a cloud outage, and a user who never uses the cloud (not logged in to it) must not
+  see `doctor` fail. Needed by slice 8.
+- **P18. How the sandbox lifetimes survive task removal.** P7 keeps the lifetimes only in `task.json` so a retro can
+  total the sandbox hours [259], but `task rm` (and `task rm --pr`, and `--restart`'s removal) deletes the task folder
+  with its `task.json` once the sandboxes are gone (`src/task/finish.rs`); only `task rm --merged` archives the
+  records to `.sbxm/task-archive/<id>/` [195]. Options: (a) every removal of a task that has a cloud sandbox entry
+  archives its text records first, reusing `.sbxm/task-archive/` and its collision rules from [195]; (b) the docs
+  name an explicit export or retro step to run before `task rm`, and the hours of a task removed without it are lost;
+  (c) each lifetime entry is also appended to a separate durable ledger under `.sbxm/`, a new file format. **Recommend
+  (a):** the guarded archive exists already, and the normal cleanup then can't erase the promised measurement. This
+  changes what `task rm` keeps, so it is a new decision if confirmed. Needed by slices 3 and 6.
 
 ## Structure (dependency order)
 
@@ -172,9 +194,9 @@ sandbox = [
 | `task resume` | unchanged | in the cloud, always [261]: a gone sandbox (TTL, a failure) is rebuilt from the recorded profile and a bundle of the branch; preflight again first. |
 | `task gates` | unchanged | in the recorded location; the worker sandbox rebuilt if gone (P5). |
 | `task finish` | unchanged | host-side only (`repo.git`); removes any cloud sandbox of the task still listed, with retries (P6). |
-| `task rm`, `task rm --merged` | unchanged | removes the task's cloud sandboxes (`sbx --cloud rm`, retried, P6) and its scoped secrets [256], then the folder; a sandbox already gone counts as removed. |
-| `task status`, `status` | unchanged | the task's location; `status` adds the running cloud sandboxes named `sbxm-` (`sbx --cloud ls`), one line if the cloud can't be read, never a failure [259]. |
-| `doctor` | unchanged | also lists running cloud sandboxes; warns when the current repo is a cloud repo and its gates name `/tmp` (P13). |
+| `task rm`, `task rm --merged` | unchanged | removes the task's cloud sandboxes (`sbx --cloud rm`, retried, P6) and its scoped secrets [256], then the folder, keeping the lifetimes as P18 decides; a sandbox already gone counts as removed. |
+| `task status`, `status` | unchanged | the task's location; `status` adds the running cloud sandboxes named `sbxm-` (`sbx --cloud ls`) [259]; what an unreadable cloud does is P17. |
+| `doctor` | unchanged | also lists running cloud sandboxes, an unreadable cloud handled per P17; warns when the current repo is a cloud repo and its gates name `/tmp` (P13). |
 
 ### Preflight refusals [261]
 
@@ -236,8 +258,10 @@ The other slices are reviewed at the end of the milestone.
    expected log.
 6. **`resume`, `gates`, `finish`, `rm` by the recorded location**, and mid-task failures: a gone sandbox rebuilt in the
    cloud by `resume`; `rm` and `rm --merged` removing cloud sandboxes and scoped secrets; the stream error after
-   `timeout -v`'s lines classified as a timeout (S14 Q3's captured text), and without them as `ExecUnavailable`.
-   Done when: tests per command, including a record that says `cloud` while the config says `local`.
+   `timeout -v`'s lines classified as a timeout (S14 Q3's captured text), and without them as `ExecUnavailable`;
+   the lifetimes kept on removal per P18. Done when: tests per command, including a record that says `cloud` while
+   the config says `local`, and an ordinary `task rm` of a cloud task that, per P18's answer, leaves the lifetime
+   entries readable afterwards or refuses until the required export is done.
 7. **Strict mode in the cloud** [255], P9, P10: create with the build allow list, then one `policy deny` (or `rm`)
    per host outside the runtime list, then `policy ls` parsed and checked as in [232]: any other allowed host, or a
    list sbxm can't read, removes the sandbox, then the scoped secrets, then refuses, naming the host ("After create:
@@ -246,7 +270,9 @@ The other slices are reviewed at the end of the milestone.
    removals, `policy ls`, the sandbox `rm`, `secret-rm`, then the refusal; no agent `exec` happens before the check
    passes.
 8. **`status` and `doctor`**: running cloud sandboxes [259], `doctor`'s `/tmp` warning (P13) and the cloud version
-   (P12). Done when: `tests/doctor.rs` and status golden cases, including the cloud not answering.
+   (P12), and the unreadable cloud per P17's answer. Done when: `tests/doctor.rs` and status golden cases, including
+   the cloud not answering, assert P17's chosen output and exit status (or doctor check result) for `task status`,
+   `status` and `doctor`, each failing before its implementation.
 9. **Real-cloud test** [260]: an ignored `tests/real_sbx_cloud.rs`, gated on its own environment variable (for
    example `SBXM_REAL_CLOUD=1`) besides `SBXM_REAL_BASE_DIR`, on the small shape: one tiny spec task through
    `task run`; egress accepting all three refusal shapes (DNS failure, connection refused, proxy 403, S14 Q1); a
@@ -274,7 +300,8 @@ The other slices are reviewed at the end of the milestone.
    left, and the global policy is as it was.
 8. `sbxm status` during step 4 lists the running cloud sandbox; afterwards, none.
 9. `tests/real_sbx_cloud.rs` passes.
-10. The user reads the bill after; the change is recorded with the total sandbox hours from `task.json`.
+10. The user reads the bill after; the change is recorded with the total sandbox hours, read from where P18 keeps
+    them after step 7's `task rm`.
 
 ## Out of scope
 
