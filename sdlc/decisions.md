@@ -909,6 +909,127 @@ or the PR names it as unreviewed. An experiment for the next three hand-made PRs
 round; its measure is the hand-made PRs with a must-fix or a question in review round 1 (the second retro's window: 3
 of 3, #289, #292, #311) and the commits merged after the last review (2, #304 and #311). In `AGENTS.md`'s "Workflow".
 
+## Round 12: milestone 4 planning, cloud sandboxes (2026-10-23, issue 310)
+
+Planning interview for running `sbxm task`'s sandboxes on Docker Cloud Sandboxes, one question at a time, from spike
+S14 (`sdlc/spikes/S14.md`) and decision 248; spike S17 (`sdlc/spikes/S17.md`) ran during the interview. The plan is
+`sdlc/milestone-4.md`.
+
+252. **Milestone 4 covers `sbxm task` only (2026-10-23, the user's answer; builds on [248]):** the cloud mode is for
+`sbxm task`'s sandboxes, the workers and the reviewers. `sbxm run`, `new` and `open` stay local in this milestone and
+get a cloud mode later.
+253. **A repo chooses the cloud, a flag overrides one command, and the task remembers (2026-10-23, the user's answer;
+builds on [248]):** the per-repo default is `[sandbox] location = "cloud"` in `sbxm-task.toml`; `--cloud` and
+`--local` override it for one command. The profile stays free of any location, so one profile serves both. A task
+records its location in `task.json`, so `task resume`, `task finish` and `task rm` find its sandbox where it was
+created, whatever the config says later.
+254. **A cloud sandbox is built from the profile's kits; cloud templates come later (2026-10-23, the user's answer;
+builds on [62], [199]-[206], [248]):** a cloud sandbox gets the profile's two kits at `sbx --cloud create` (S14 Q1),
+and the install steps run at create. Cloud templates are deferred; the trigger is cloud setup taking over about 2
+minutes a task. Grounds: S14 Q6 showed a cloud template can't be combined with a kit and has its size baked in, so a
+template design needs its own work, while kits work today (24 s to ready for `sbxm-dev`'s install steps on the large
+shape, S14 Q5).
+255. **A strict profile in the cloud: install at create, then remove the build hosts (2026-10-23, the user's answer
+B, confirmed by spike S17; builds on [200], [221], [232]):** a strict profile's cloud sandbox is created with the
+build allow list so its install steps can run. Before the worker starts, sbxm removes every host
+outside the runtime list from the sandbox's cloud policy and checks that `policy ls` shows only the runtime list,
+like decision 232 does for a strict `codex` sandbox. In the cloud this replaces [200](a)'s "no install steps" (there
+is no template to start from, [254]); [200](b), only the runtime list while the agent runs, and [200](c), never a
+quiet fallback, still hold. The fallback the user named, A (refuse strict profiles in the cloud until cloud
+templates, a non-strict cloud profile instead), was to apply if rules couldn't be removed from a running cloud
+sandbox. Spike S17 (2026-10-23, `sbx` v0.46.0) showed they can: `policy rm network --sandbox <name> --resource
+<host> -f` and `policy deny network --sandbox <name> <host>` both exit 0, print the resulting list and take effect
+at once on the running sandbox, for a kit's host and for a host of the agent's own built-in list alike. So B holds
+and A is not needed.
+256. **Provider logins stay global; every other secret is scoped to its sandbox (2026-10-23, the user's answer;
+builds on [30], [241]; refines [248]):** this refines [248]'s conclusion that "global cloud secrets reach every cloud
+sandbox, so each one is scoped to its sandbox": provider OAuth logins are the exception and stay global, and every
+other secret is still scoped. The provider OAuth secrets (`sbx secret set <provider> --oauth --cloud`) stay at
+global scope. Their value never enters a sandbox (S14 Q2, Q7), and egress lets a sandbox reach only its harness's own
+hosts. Preflight checks that the harness's provider secret exists in the cloud. Every other secret a profile names is
+scoped to the sandbox's name before `create` and removed after the sandbox is gone, the pattern of Jev's scoped
+secret [241]. Grounds: S14 Q7 showed global cloud secrets reach every cloud sandbox, which a provider login's
+value never enters; a scoped secret reaches only the sandbox it names.
+257. **The task pipeline without a mount: same phases, bundles in and out (2026-10-23, the user's answer A for gates;
+builds on [159], [160], [161]):** a cloud task runs the same phases as a local one. The repo goes in as a bundle by
+`sbx --cloud cp`, the clone lives under `$HOME` in the sandbox, and the result comes out as a bundle that the host
+verifies before fetching it into `repo.git` (S14 Q4). Host-tier gates are unchanged. There is one gate list for both
+locations: this repo's `/tmp/target` becomes `$HOME/target`, the docs say to build under `$HOME` in the cloud, and
+`doctor` warns when a cloud repo's gates name `/tmp`. Grounds: S14 Q5 found `/tmp` is a tmpfs of half the memory and a
+cargo target folder filled it; one list keeps a repo's gates from drifting between locations.
+258. **No parallel orchestration in milestone 4; an experiment after the merge (2026-10-23, the user's answer;
+builds on [245](g)):** milestone 4 adds no code for running cloud tasks in parallel. After the merge, an experiment
+runs 2, then 3, cloud tasks at once as separate background `task run`s, and measures tasks per hour, cost and
+failures. A `--parallel` option is built only if the experiment justifies it.
+259. **Every cloud sandbox has a lifetime, and sbxm shows what is running (2026-10-23, the user's answer):** every
+cloud sandbox is created with `--ttl` set to its phase's time limit plus 30 minutes and `--on-timeout delete`.
+Removal is retried up to 3 times (S14 Q5: the first `rm` can fail with "temporarily unavailable"). `task.json`
+records each sandbox's lifetime, so a retro can total the sandbox hours. The user reads the bill; `status` and
+`doctor` list the running cloud sandboxes. A daily budget is a known gap; its trigger is a surprising bill.
+260. **Cloud tests: fakes in CI, one real cloud test by hand (2026-10-23, the user's answer; builds on [248]):** CI
+uses `FakeBackend`; the cloud command lines and parsers are tested on S14's captured output. An ignored
+`tests/real_sbx_cloud.rs`, run by hand with an environment variable, walks one tiny task through the cloud on the
+small shape: egress accepting all three refusal shapes (S14 Q1), a fake-secret leak check, the TTL set, the bundle
+in and out, and removal. It runs at the milestone's end-to-end check. No cloud credentials go into GitHub CI.
+261. **The cloud unavailable: refuse first, stop mid-task, never fall back (2026-10-23, the user's answer; builds on
+[193], [200](c)):** when the cloud can't be used, a cloud command refuses before any write, naming the cause and its
+fix (`sbx login`, or the exact `sbx secret set ... --cloud` command) and saying that `--local` runs the task here.
+sbxm never falls back to a local sandbox quietly. A cloud failure in the middle of a task stops it the way `sbx` not
+answering does today, and `task resume` continues it in the cloud.
+262. **Milestone 4's plan-level choices, as the plan recommended (2026-10-24, the user's answers to milestone 4's
+P-choices):** the user confirmed each of these as `sdlc/milestone-4.md` recommends it.
+(a) P1: `location` takes `"local"` or `"cloud"`, default `"local"`, and any other value is an error naming the file.
+(b) P2: a short capture run by hand before slice 1 saves the cloud's real output as fixtures and tries the points S14
+left open.
+(c) P3: `SbxBackend` gains a location, and a cloud task gets the instance that prefixes every call with `--cloud`.
+(d) P4: a cloud task's clone lives at `$HOME/work/<task id>`, the path read once with `exec printenv HOME` and recorded
+in `task.json`.
+(e) P6: a removal that fails with a message naming a retry is retried after 5 s, 10 s and 20 s, through an injected
+sleep; any other error is reported at once.
+(f) P8: a cloud task whose profile names a secret other than a provider OAuth login is refused, naming the secret and
+`--local`, and a profile naming the other provider's login is checked at global scope like the harness's own ((a)
+and (d)).
+(g) P10: a non-strict `[template]` profile in the cloud is built from its kits, with one line saying cloud templates
+aren't used.
+(h) P11: the free-disk check is skipped for a cloud create, `--ignore-disk` still accepted, which narrows [194]'s
+scope for a cloud create.
+(i) P12: a cloud command needs `sbx` 0.46.0 or later, a constant like [213]'s, checked only for a cloud command.
+(j) P13: `doctor` checks the current directory's repo when its `sbxm-task.toml` says `location = "cloud"`, and warns for
+a gate command containing `/tmp/` or ending in `/tmp` as a word ((a) with (i)).
+(k) P14: only `task start`, `task run` and `task review --pr N` take `--cloud`/`--local`; every other command uses
+the location recorded in `task.json`.
+(l) P15: `task start --workers N` is unchanged in the cloud.
+(m) P16: the user edits their own `sbxm-task.toml` to build under `$HOME`, and the docs show the line; no
+`sbxm-task.toml` is added to the repo.
+(n) P17: when the cloud can't be read, `task status` reads only `task.json` and shows the recorded location,
+`status` prints one line in place of its cloud rows and exits 0, and `doctor` shows a warning, not a failed check.
+263. **A cloud worker sandbox lives through the task's automatic run (2026-10-24, the user's answers to milestone 4's
+P-choices; P5, a new option (d); builds on [118], [259]):** the cloud worker sandbox lives through the task's
+automatic run (worker, sandbox gates, review rounds, fix rounds) and is removed when the task stops (ready, or
+stopped for any reason). `task resume` rebuilds it from the recorded profile and a bundle of the task's branch when
+needed, as it rebuilds a gone worker sandbox today [118]. Its TTL is the worker's time limit + every sandbox gate's
+timeout + `fix_rounds` x (the reviewer's time limit + the worker's time limit + every sandbox gate's timeout) + 30
+minutes. Reviewer sandboxes stay one per round, each with a TTL of the reviewer's time limit + 30 minutes. This
+gives [259]'s "its phase's time limit" its meaning for the worker sandbox. Grounds: fix rounds keep a warm build (a
+cold build is 233 s on the large shape, S14 Q5), and nothing is billed while a task waits for the user (up to 2h25m
+from open to merge in the loop trial).
+264. **A strict cloud sandbox denies every host outside a fixed provider list, and says which (2026-10-24, the user's
+answers to milestone 4's P-choices; P9 (a) with (i), to match [221], [232]; builds on [255]):** the runtime list is a
+fixed provider host list per harness in code plus the profile's `[template].allow`; every other host gets a
+per-sandbox `policy deny`. This applies to strict worker, reviewer and fix-round sandboxes alike. The user added:
+sbxm is *removing* hosts, so when something fails unexpectedly in a strict cloud sandbox, the first check is whether
+a denied host is actually needed. So each sandbox's denied hosts are written to the task's `run.log`, the docs slice
+adds a troubleshooting line for this check, and the plan's Risks section names it.
+265. **Cloud sandbox lifetimes live in `task.json` and `run.log`; removal is unchanged (2026-10-24, the user's answers
+to milestone 4's P-choices; P7 (a) kept, P18 and P19 dropped; builds on [195], [259]):** `task.json` keeps an
+append-only `sandboxes` list (name, role, location, created_at, ttl_s, removed_at), and `run.log` gets one line at
+each cloud create and each removal. They survive as every other retro number does today: `task rm --merged`
+archives `task.json` and `run.log` [195]; a plain `task rm` loses them, as it already loses rounds and times. No
+change to `task rm`, `--restart` or the archive layout, so P18 (archiving on every removal) and P19 (an archive per
+task attempt) are dropped. Grounds: merged tasks, almost all of them, are archived already; changing removal for a
+number nobody has needed yet goes against optimizing just in time. Gap G62 in `sdlc/evals-workflow-notes.md` names
+the trigger for revisiting it.
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.
@@ -959,6 +1080,11 @@ of 3, #289, #292, #311) and the commits merged after the last review (2, #304 an
 - Values never enter the sandbox. Service secrets (anthropic, openai, google, openrouter, github, …) and custom secrets use placeholders that the proxy swaps on requests to allowed hosts. Verified: a filesystem-wide search inside the sandbox found no secret value.
 - There is no command to read values back. `sbx secret ls --json` returns scope, service/env and a **masked** value, which is enough for an existence check. Secret scanning of outputs isn't needed; only placeholders can leak.
 - Secrets apply at sandbox creation (existing sandboxes don't pick up new ones). Sources can be `--ref op://…` (1Password), AWS Secrets Manager or `--command`. OpenAI OAuth is supported: `sbx secret set openai --oauth`.
+
+**S17 (2026-10-23, `sbx` v0.46.0, cloud): network rules can be removed from a running cloud sandbox**
+- `policy rm network --sandbox <name> --resource <host> -f` and `policy deny network --sandbox <name> <host>` exit 0,
+  print the new list and take effect at once, also for a host of the agent's built-in list. Answer 4 B holds
+  [255]. Write-up: `sdlc/spikes/S17.md`.
 
 ### Jev facts relevant to design (from docs, Jev 1.13)
 - HTTP API only (`POST https://api.typesafe.ai/v1/systemone`, Bearer auth). SDKs exist only for Python and JS, so Rust calls it with `reqwest`.
