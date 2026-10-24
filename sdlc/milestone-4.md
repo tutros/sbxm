@@ -332,8 +332,12 @@ The other slices are reviewed at the end of the milestone.
    example `SBXM_REAL_CLOUD=1`) besides `SBXM_REAL_BASE_DIR`, on the small shape: one tiny spec task through
    `task run`; egress accepting all three refusal shapes (DNS failure, connection refused, proxy 403, S14 Q1); a
    fake scoped secret's value found in no file and no env var; the TTL in the create; the bundle in and out; a
-   strict sandbox's list after the removal; removal confirmed by `sbx --cloud ls` and `policy ls`. Done when: it
-   passes by hand once, recorded with time and the bill's change.
+   strict sandbox's list after the removal; removal confirmed by `sbx --cloud ls` and `policy ls`. Also the two
+   captures P2 left [267]: the not-logged-in message (by hand, at a moment the user chooses, as it needs `sbx
+   logout`), which replaces slice 2's made-up fixture, and `rm`'s retryable error, which replaces slice 3's S14-worded
+   fixture if any removal shows it. Done when: it passes by hand once, recorded with time and the bill's change, and
+   the record says for each of the two captures whether real output was saved and its fixture replaced, or (for the
+   retryable error, which can't be triggered) that it didn't show.
 10. **Docs**: README (the key, the flags, the refusals, the cost note), `docs/workflow.md` (build under `$HOME` in
     the cloud [257], the TTL [259], [263], the parallel experiment [258], and a troubleshooting line: when something
     fails unexpectedly in a strict cloud sandbox, check first whether a host listed as denied in the task's `run.log`
