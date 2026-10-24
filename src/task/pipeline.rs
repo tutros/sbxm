@@ -992,6 +992,9 @@ pub fn prepare_spec_resolved(
     }
 
     let sandbox = format!("sbxm-task-{id}-{}", worker.harness.as_str());
+    // The sandbox's name is the task's, so a cloud sandbox of that name may predate this start;
+    // only one this start's own `create` made is its to remove (review M-1).
+    let mut created = false;
     let built = (|| -> Result<(Record, HarnessKits)> {
         let repo_git = meta.join("repo.git");
         repo::clone_bare(ctx.clone_source, &repo_git)?;
@@ -1088,6 +1091,7 @@ pub fn prepare_spec_resolved(
             Location::Local => plan.create(ctx.backend, &sandbox, worker.harness, &workspace)?,
             Location::Cloud => {
                 plan.create_cloud(ctx.backend, &sandbox, worker.harness)?;
+                created = true;
                 let clone = seed_cloud_clone(ctx.backend, &meta, &sandbox, &task, ctx.identity)?;
                 if let Some(agent) = task.worker.as_mut() {
                     agent.workspace = clone;
@@ -1107,9 +1111,13 @@ pub fn prepare_spec_resolved(
             warnings,
         }),
         Err(e) => {
-            // Back to nothing: the sandbox (if it got created) and the folders this start
-            // reserved; a cloud start has no host clone, so a folder there isn't its own.
-            let _ = ctx.backend.remove(&sandbox);
+            // Back to nothing: the sandbox and the folders this start made. A local start
+            // removes its sandbox even if `create` failed, as before this milestone; a cloud
+            // start only the one its `create` returned, and it has no host clone, so a folder
+            // there isn't its own.
+            if local || created {
+                let _ = ctx.backend.remove(&sandbox);
+            }
             if local {
                 let _ = fs::remove_dir_all(&workspace);
             }
@@ -1685,8 +1693,8 @@ fn plan_cloud_sandbox(
     refuse_strict_cloud(profile_name, &profile)?;
     if profile.template.is_some() {
         warnings.push(format!(
-            "cloud templates aren't used (decision 254); {sandbox} is built from profile \
-             '{profile_name}''s kits"
+            "cloud templates aren't used (decision 254); {sandbox} is built from \
+             the kits of profile '{profile_name}'"
         ));
     }
     let kit_set = kits::build_for(

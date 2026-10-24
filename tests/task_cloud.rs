@@ -664,3 +664,40 @@ fn a_failed_cloud_start_leaves_a_host_folder_it_did_not_make() {
     assert!(folder.join("keep.txt").is_file());
     assert!(!sbxm::task::record::task_dir(&f.env.base_dir(), &id).exists());
 }
+
+/// Review M-1: the sandbox name is the task's, so one may already exist; a failed start removes it
+/// only if this start's own `create` made it. A failure before the create (here the clone of the
+/// source), or the create itself failing, removes nothing. (A failure after a successful create
+/// removes that sandbox once: `a_home_that_is_not_an_absolute_path_fails_the_start_and_undoes_it`.)
+#[test]
+fn a_cloud_start_that_fails_before_or_at_its_create_removes_no_sandbox() {
+    let f = fixture_with(LOCAL_TOML);
+    let id = spec_id(&f);
+    let sandbox = format!("sbxm-task-{id}-claude");
+
+    let failing = common::task_fixture::backend().with_failing_create_for(&sandbox);
+    let (result, _) = start_spec(&f, &failing, Some(Location::Cloud));
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(message.contains(&sandbox), "{message}");
+    assert_eq!(failing.removes(), Vec::<String>::new());
+    assert!(!sbxm::task::record::task_dir(&f.env.base_dir(), &id).exists());
+
+    let backend = common::task_fixture::backend();
+    let spec = common::task_fixture::spec_file(&f, "Build a thing.\n");
+    let mut options = spec_options(&f, spec, Some(Location::Cloud));
+    let missing = f.env.tmp.path().join("no-such-repo");
+    options.clone_source = Some(missing.to_string_lossy().into_owned());
+    let result = sbxm::commands::task_start::run_spec(
+        &f.env.config_dir(),
+        &options,
+        &backend,
+        &sbxm::github::fake::FakeGitHub::default(),
+        &common::task_fixture::Probe,
+        &mut Vec::new(),
+        &mut Vec::new(),
+    );
+    assert!(result.is_err());
+    assert!(backend.creates().is_empty(), "{:?}", backend.log());
+    assert_eq!(backend.removes(), Vec::<String>::new());
+    assert!(!sbxm::task::record::task_dir(&f.env.base_dir(), &id).exists());
+}
