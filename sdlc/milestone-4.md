@@ -193,7 +193,7 @@ sandbox = [
 | `task review --pr N` | unchanged | location as for `start` (P14); the PR head goes in as a bundle from `repo.git`. |
 | `task resume` | unchanged | in the cloud, always [261]: a gone sandbox (TTL, a failure) is rebuilt from the recorded profile and a bundle of the branch; preflight again first. |
 | `task gates` | unchanged | in the recorded location; the worker sandbox rebuilt if gone (P5). |
-| `task finish` | unchanged | host-side only (`repo.git`); removes any cloud sandbox of the task still listed, with retries (P6). |
+| `task finish` | unchanged | host-side only (`repo.git`); under P5 (a), removes any cloud sandbox of the task still listed, with retries (P6); under P5 (b) the sandbox stays until `task rm`, as locally. |
 | `task rm`, `task rm --merged` | unchanged | removes the task's cloud sandboxes (`sbx --cloud rm`, retried, P6) and its scoped secrets [256], then the folder, keeping the lifetimes as P18 decides; a sandbox already gone counts as removed. |
 | `task status`, `status` | unchanged | the task's location; `status` adds the running cloud sandboxes named `sbxm-` (`sbx --cloud ls`) [259]; what an unreadable cloud does is P17. |
 | `doctor` | unchanged | also lists running cloud sandboxes, an unreadable cloud handled per P17; warns when the current repo is a cloud repo and its gates name `/tmp` (P13). |
