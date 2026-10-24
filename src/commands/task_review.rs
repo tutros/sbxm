@@ -457,6 +457,7 @@ fn run_pr(
         identity: &identity,
         probe,
         host,
+        sleep: &std::thread::sleep,
     };
 
     // A task that already exists is resumed when its review can be tried again (a failed

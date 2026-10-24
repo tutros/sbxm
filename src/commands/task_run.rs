@@ -482,6 +482,7 @@ fn run_spec_task(
         &mut started,
         &mut warn,
         &on_prepared,
+        &std::thread::sleep,
     );
     out.write_all(without_next(&started).as_bytes())?;
 

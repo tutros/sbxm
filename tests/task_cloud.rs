@@ -188,7 +188,18 @@ const HOME: &str = "/home/agent";
 /// run on the host with their in-sandbox paths moved under `<root>`. The worker's headless run
 /// commits `a.txt` in its clone and writes `result.md`; every other command (the gates) passes.
 fn cloud_backend(root: &std::path::Path, id: &str) -> sbxm::backend::FakeBackend {
-    use common::task_fixture::{CLAUDE_DONE, is_headless, ok};
+    use common::task_fixture::{CLAUDE_DONE, ok};
+
+    cloud_backend_with(root, id, ok(CLAUDE_DONE))
+}
+
+/// [`cloud_backend`] whose worker's headless run answers `worker`.
+fn cloud_backend_with(
+    root: &std::path::Path,
+    id: &str,
+    worker: sbxm::backend::ExecOutput,
+) -> sbxm::backend::FakeBackend {
+    use common::task_fixture::{is_headless, ok};
 
     std::fs::create_dir_all(root.join(HOME.trim_start_matches('/'))).unwrap();
     let inside = root.to_string_lossy().into_owned();
@@ -198,7 +209,7 @@ fn cloud_backend(root: &std::path::Path, id: &str) -> sbxm::backend::FakeBackend
     cloud_ready()
         .with_sandbox_root(root)
         .with_exec_output_matching("printenv", ok(&format!("{HOME}\n")))
-        .with_exec_output_matching("claude", ok(CLAUDE_DONE))
+        .with_exec_output_matching("claude", worker)
         .with_exec_hook(move |_sandbox, spec| {
             if is_headless(spec) {
                 let clone = std::path::PathBuf::from(worker_map(&clone));
@@ -968,4 +979,241 @@ fn too_little_free_disk_refuses_a_local_start_but_not_a_cloud_one() {
         result.unwrap();
         assert_eq!(backend.creates().len(), 1, "ignore {ignore}");
     }
+}
+
+// Slice 3: the worker sandbox is removed when the task stops (P5 (d), decision 263), with the
+// removal retry (P6 (a)), its lifetime entry stamped (P7 (a)) and one line for `run.log` (265).
+
+/// What a start printed and the waits its removal asked for.
+struct Started {
+    result: anyhow::Result<()>,
+    out: String,
+    warn: String,
+    waits: Vec<std::time::Duration>,
+}
+
+/// `task start --spec FILE --cloud` with the removal's sleep recorded instead of slept.
+fn start_cloud(f: &common::task_fixture::Fixture, backend: &sbxm::backend::FakeBackend) -> Started {
+    let spec = common::task_fixture::spec_file(f, "Build a thing.\n");
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let waits = std::sync::Mutex::new(Vec::new());
+    let result = sbxm::commands::task_start::run_spec_with_sleep(
+        &f.env.config_dir(),
+        &spec_options(f, spec, Some(Location::Cloud)),
+        backend,
+        &sbxm::github::fake::FakeGitHub::default(),
+        &common::task_fixture::Probe,
+        &mut out,
+        &mut warn,
+        &|d| waits.lock().unwrap().push(d),
+    );
+    Started {
+        result,
+        out: String::from_utf8(out).unwrap(),
+        warn: String::from_utf8(warn).unwrap(),
+        waits: waits.into_inner().unwrap(),
+    }
+}
+
+/// The worker's headless run, failing as the harness reports it.
+fn failed_worker() -> sbxm::backend::ExecOutput {
+    sbxm::backend::ExecOutput {
+        stdout: String::new(),
+        stderr: "boom".into(),
+        exit_code: Some(1),
+    }
+}
+
+fn unavailable(sandbox: &str) -> String {
+    format!(
+        "`sbx rm` failed for sandbox {sandbox} (exit status: 1): error: sandbox {sandbox} is \
+         temporarily unavailable; retry the delete"
+    )
+}
+
+fn secs(list: &[u64]) -> Vec<std::time::Duration> {
+    list.iter()
+        .map(|s| std::time::Duration::from_secs(*s))
+        .collect()
+}
+
+/// Asserts the task's one worker entry was stamped removed, and the line for it printed.
+fn assert_removed(f: &common::task_fixture::Fixture, id: &str, started: &Started, how: &str) {
+    let sandbox = format!("sbxm-task-{id}-claude");
+    let task = task_record(f, id);
+    assert_eq!(task.sandboxes.len(), 1, "{:?}", task.sandboxes);
+    let entry = &task.sandboxes[0];
+    assert_eq!(entry.name, sandbox);
+    let removed = entry.removed_at.as_deref().expect("removed_at is set");
+    let (created, removed) = (
+        sbxm::run::results::parse_timestamp(&entry.created_at).unwrap(),
+        sbxm::run::results::parse_timestamp(removed).unwrap(),
+    );
+    assert!(removed >= created);
+    let line = format!("cloud sandbox {sandbox} {how}");
+    assert_eq!(started.out.matches(&line).count(), 1, "{}", started.out);
+}
+
+#[test]
+fn a_failed_worker_stops_the_task_and_its_cloud_sandbox_is_removed() {
+    let f = fixture_with(LOCAL_TOML);
+    let id = spec_id(&f);
+    let backend = cloud_backend_with(&f.env.tmp.path().join("cloud-fs"), &id, failed_worker());
+
+    let started = start_cloud(&f, &backend);
+
+    assert!(started.result.is_err());
+    let sandbox = format!("sbxm-task-{id}-claude");
+    assert_eq!(backend.removes(), [sandbox]);
+    assert_eq!(backend.locations(), [Location::Cloud]);
+    assert_removed(&f, &id, &started, "removed");
+    assert!(started.waits.is_empty());
+    // The gates never ran: the task stopped at its worker.
+    assert!(!described_log(&backend).contains(&"exec gate".to_owned()));
+}
+
+/// A worker that couldn't be run at all (`exec` itself failing) stops the task too.
+#[test]
+fn a_worker_that_cannot_run_stops_the_task_and_its_cloud_sandbox_is_removed() {
+    let f = fixture_with(LOCAL_TOML);
+    let id = spec_id(&f);
+    let backend =
+        cloud_backend(&f.env.tmp.path().join("cloud-fs"), &id).with_failing_exec_matching("claude");
+
+    let started = start_cloud(&f, &backend);
+
+    assert!(started.result.is_err());
+    assert_eq!(backend.removes(), [format!("sbxm-task-{id}-claude")]);
+    assert_removed(&f, &id, &started, "removed");
+}
+
+/// A gate that could not run at all stops the task (issue 186): nothing for a review to react to.
+#[test]
+fn a_gate_that_could_not_run_stops_the_task_and_its_cloud_sandbox_is_removed() {
+    let f = fixture_with(LOCAL_TOML);
+    let id = spec_id(&f);
+    let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &id)
+        .with_failing_exec_matching("cargo test");
+
+    let started = start_cloud(&f, &backend);
+
+    let message = format!("{:#}", started.result.as_ref().unwrap_err());
+    assert!(message.contains("could not run"), "{message}");
+    assert_eq!(backend.removes(), [format!("sbxm-task-{id}-claude")]);
+    assert_removed(&f, &id, &started, "removed");
+}
+
+/// Gates that ran and failed hand over to the review (decision 180), which continues the
+/// automatic run in the same sandbox: it is kept.
+#[test]
+fn gates_that_ran_and_failed_hand_over_and_keep_the_cloud_sandbox() {
+    let f = fixture_with(LOCAL_TOML);
+    let id = spec_id(&f);
+    let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &id).with_exec_output_matching(
+        "cargo test",
+        sbxm::backend::ExecOutput {
+            stdout: String::new(),
+            stderr: "test failed".into(),
+            exit_code: Some(101),
+        },
+    );
+
+    let started = start_cloud(&f, &backend);
+
+    let error = started.result.as_ref().unwrap_err();
+    assert!(
+        error.is::<sbxm::commands::task_start::GatesFailed>(),
+        "{error:#}"
+    );
+    assert!(backend.removes().is_empty(), "{:?}", backend.log());
+    let task = task_record(&f, &id);
+    assert_eq!(task.sandboxes[0].removed_at, None);
+    assert!(!started.out.contains("removed"), "{}", started.out);
+}
+
+#[test]
+fn a_sandbox_already_gone_at_the_stop_counts_as_removed() {
+    let f = fixture_with(LOCAL_TOML);
+    let id = spec_id(&f);
+    let sandbox = format!("sbxm-task-{id}-claude");
+    let gone = format!(
+        "`sbx rm` failed for sandbox {sandbox} (exit status: 1): error: sandbox '{sandbox}' not \
+         found\n  try: sbx --cloud ls"
+    );
+    let backend = cloud_backend_with(&f.env.tmp.path().join("cloud-fs"), &id, failed_worker())
+        .with_remove_errors(&[&gone]);
+
+    let started = start_cloud(&f, &backend);
+
+    assert!(started.result.is_err());
+    assert_eq!(backend.removes(), [sandbox]);
+    assert_removed(&f, &id, &started, "already gone");
+}
+
+/// The first attempt and three retries all fail: reported as a warning naming the sandbox and the
+/// command to remove it, never dropped, and the entry keeps `removed_at: null`.
+#[test]
+fn a_removal_that_still_fails_at_the_stop_is_reported_and_the_entry_stays_open() {
+    let f = fixture_with(LOCAL_TOML);
+    let id = spec_id(&f);
+    let sandbox = format!("sbxm-task-{id}-claude");
+    let error = unavailable(&sandbox);
+    let backend = cloud_backend_with(&f.env.tmp.path().join("cloud-fs"), &id, failed_worker())
+        .with_remove_errors(&[&error, &error, &error, &error]);
+
+    let started = start_cloud(&f, &backend);
+
+    assert!(started.result.is_err());
+    assert_eq!(backend.removes().len(), 4);
+    assert_eq!(started.waits, secs(&[5, 10, 20]));
+    let command = format!("sbx --cloud rm {sandbox} -f");
+    assert!(
+        started.warn.contains(&sandbox) && started.warn.contains(&command),
+        "{}",
+        started.warn
+    );
+    assert!(
+        started.warn.contains("temporarily unavailable"),
+        "{}",
+        started.warn
+    );
+    let task = task_record(&f, &id);
+    assert_eq!(task.sandboxes[0].removed_at, None);
+}
+
+/// A start that fails after its create removes the sandbox with the same retries, and a removal
+/// that still fails is reported in the error, naming the command; the task's folder goes as before.
+#[test]
+fn a_start_that_fails_after_its_create_removes_the_sandbox_with_retries() {
+    let f = fixture_with(LOCAL_TOML);
+    let id = spec_id(&f);
+    let sandbox = format!("sbxm-task-{id}-claude");
+    let error = unavailable(&sandbox);
+
+    // Succeeds on the third retry.
+    let backend = cloud_ready()
+        .with_exec_output_matching("printenv", common::task_fixture::ok("work\n"))
+        .with_remove_errors(&[&error, &error, &error]);
+    let started = start_cloud(&f, &backend);
+    let message = format!("{:#}", started.result.unwrap_err());
+    assert!(
+        message.contains("HOME") && !message.contains("rm"),
+        "{message}"
+    );
+    assert_eq!(backend.removes().len(), 4);
+    assert_eq!(started.waits, secs(&[5, 10, 20]));
+    assert!(!sbxm::task::record::task_dir(&f.env.base_dir(), &id).exists());
+
+    // Still failing after three retries.
+    let backend = cloud_ready()
+        .with_exec_output_matching("printenv", common::task_fixture::ok("work\n"))
+        .with_remove_errors(&[&error, &error, &error, &error]);
+    let started = start_cloud(&f, &backend);
+    let message = format!("{:#}", started.result.unwrap_err());
+    let command = format!("sbx --cloud rm {sandbox} -f");
+    assert!(
+        message.contains("HOME") && message.contains(&command),
+        "{message}"
+    );
+    assert_eq!(backend.removes().len(), 4);
 }

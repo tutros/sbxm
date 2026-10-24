@@ -19,6 +19,7 @@ use crate::run::config::{check_model_flag, headless_harness, parse_duration};
 use crate::task::config::TaskConfig;
 use crate::task::finish;
 use crate::task::gates::ShellHostRunner;
+use crate::task::lifetime;
 use crate::task::pipeline::{self, Ctx};
 use crate::task::record::{self, ProcessProbe};
 use crate::task::repo::{self, Identity};
@@ -390,6 +391,7 @@ fn start(
         identity: &identity,
         probe,
         host: &ShellHostRunner,
+        sleep: &std::thread::sleep,
     };
     // Resolved once, before any task is set aside, and reused for the rest of this function: a
     // second load after the discard could itself fail (issue #207 review M-1) outside the path
@@ -765,6 +767,32 @@ pub fn run_spec(
     out: &mut dyn Write,
     warn: &mut dyn Write,
 ) -> Result<()> {
+    run_spec_with_sleep(
+        config_dir,
+        opts,
+        backend,
+        github,
+        probe,
+        out,
+        warn,
+        &std::thread::sleep,
+    )
+}
+
+/// Like [`run_spec`], with `sleep` called for each wait between a cloud sandbox's removal retries
+/// instead of really sleeping: a seam for testing them (P6 (a)), as `commands::run::
+/// run_with_sleep` is for Jev's.
+#[allow(clippy::too_many_arguments)]
+pub fn run_spec_with_sleep(
+    config_dir: &std::path::Path,
+    opts: &SpecOptions,
+    backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+    sleep: &(dyn Fn(std::time::Duration) + Sync),
+) -> Result<()> {
     let start = resolve_spec_start(opts)?;
     // A cloud sandbox doesn't use the drive holding `sbx`'s local sandbox state (P11, decision
     // 262(h)); `--ignore-disk` is still accepted there and does nothing more.
@@ -781,6 +809,7 @@ pub fn run_spec(
         out,
         warn,
         &|_| {},
+        sleep,
     )
 }
 
@@ -801,6 +830,7 @@ pub(crate) fn run_spec_from(
     out: &mut dyn Write,
     warn: &mut dyn Write,
     on_prepared: &dyn Fn(&str),
+    sleep: &(dyn Fn(std::time::Duration) + Sync),
 ) -> Result<()> {
     let SpecStart {
         config,
@@ -830,6 +860,7 @@ pub(crate) fn run_spec_from(
         identity: &identity,
         probe,
         host: &ShellHostRunner,
+        sleep,
     };
     writeln!(out, "Starting a task from {} ...", opts.spec.display())?;
     let mut prepared = pipeline::prepare_spec_resolved(
@@ -842,94 +873,116 @@ pub(crate) fn run_spec_from(
     )?;
     let id = prepared.record.id.clone();
     on_prepared(&id);
-    for warning in &prepared.warnings {
-        writeln!(warn, "warning: {warning}")?;
-    }
-    for event in &prepared.events {
-        writeln!(out, "{event}")?;
-    }
 
-    let worked = pipeline::run_worker(&ctx, &mut prepared)?;
-    let (label, bad) = match &worked.status {
-        RunStatus::Completed => ("completed".to_owned(), false),
-        RunStatus::TimedOut => ("timed out".to_owned(), false),
-        RunStatus::Failed(why) => (format!("failed: {why}"), true),
-    };
-    writeln!(out, "{id}: worker {label}, {} commit(s)", worked.commits)?;
-    for note in &worked.notes {
-        writeln!(out, "  note: {note}")?;
-    }
-    if bad {
-        bail!(
-            "{id}: the worker failed; see `sbxm task status` and the task's folder for what it left"
-        );
-    }
+    // Everything after the preparation; the task stops wherever this fails, except at gates that
+    // ran and failed, which hand over to the review (decision 180), as passing gates do.
+    let outcome = (|| -> Result<()> {
+        for warning in &prepared.warnings {
+            writeln!(warn, "warning: {warning}")?;
+        }
+        for event in &prepared.events {
+            writeln!(out, "{event}")?;
+        }
+        let worked = pipeline::run_worker(&ctx, &mut prepared)?;
+        let (label, bad) = match &worked.status {
+            RunStatus::Completed => ("completed".to_owned(), false),
+            RunStatus::TimedOut => ("timed out".to_owned(), false),
+            RunStatus::Failed(why) => (format!("failed: {why}"), true),
+        };
+        writeln!(out, "{id}: worker {label}, {} commit(s)", worked.commits)?;
+        for note in &worked.notes {
+            writeln!(out, "  note: {note}")?;
+        }
+        if bad {
+            bail!(
+                "{id}: the worker failed; see `sbxm task status` and the task's folder for what it left"
+            );
+        }
 
-    let gated = pipeline::run_gates(
-        &ctx.env(),
-        &mut prepared,
-        "after-worker",
-        pipeline::Tiers::ALL,
-    )?;
-    if gated.passed {
-        if gated.outcomes.is_empty() {
-            writeln!(out, "  gates: none configured")?;
+        let gated = pipeline::run_gates(
+            &ctx.env(),
+            &mut prepared,
+            "after-worker",
+            pipeline::Tiers::ALL,
+        )?;
+        if gated.passed {
+            if gated.outcomes.is_empty() {
+                writeln!(out, "  gates: none configured")?;
+            } else {
+                writeln!(out, "  gates: passed")?;
+            }
+            writeln!(out, "  next: sbxm task review {}", spec_flag(&opts.spec))?;
+            Ok(())
         } else {
-            writeln!(out, "  gates: passed")?;
+            let first = gated
+                .failed
+                .clone()
+                .expect("failed gates name the first failure");
+            // A gate that could not run at all gives the review nothing to react to, so it is not
+            // named as the next step (issue 186).
+            match gated.failed_outcome().filter(|o| o.could_not_run) {
+                Some(outcome) => {
+                    writeln!(
+                        out,
+                        "  gates: could not run: `{}` ({}); {}",
+                        first.command, first.tier, outcome.output_tail
+                    )?;
+                    bail!(
+                        "{id}: gates could not run: `{}` ({}); {}",
+                        first.command,
+                        first.tier,
+                        outcome.output_tail
+                    )
+                }
+                None => {
+                    let exit = first
+                        .exit
+                        .map_or_else(|| "no exit code".to_owned(), |c| format!("exit {c}"));
+                    writeln!(
+                        out,
+                        "  gates: failed: `{}` ({}, {exit})",
+                        first.command, first.tier
+                    )?;
+                    writeln!(
+                        out,
+                        "  next: sbxm task review {} (it reruns the gates and gives a failure to a \
+                         fix round)",
+                        spec_flag(&opts.spec)
+                    )?;
+                    // A gate that ran and failed goes on to the review, which reruns it and gives a
+                    // failure to a fix round (decision 180): `task run --spec` catches this typed
+                    // error to tell it apart from any other failure, the same way it does for
+                    // `--issue` (`GatesFailed`, defined above for the issue path).
+                    Err(GatesFailed(format!(
+                        "{id}: gates failed: `{}` ({}, {exit}); next: sbxm task review {} (it reruns \
+                         the gates and gives a failure to a fix round)",
+                        first.command,
+                        first.tier,
+                        spec_flag(&opts.spec)
+                    ))
+                    .into())
+                }
+            }
         }
-        writeln!(out, "  next: sbxm task review {}", spec_flag(&opts.spec))?;
-        Ok(())
-    } else {
-        let first = gated
-            .failed
-            .clone()
-            .expect("failed gates name the first failure");
-        // A gate that could not run at all gives the review nothing to react to, so it is not
-        // named as the next step (issue 186).
-        match gated.failed_outcome().filter(|o| o.could_not_run) {
-            Some(outcome) => {
-                writeln!(
-                    out,
-                    "  gates: could not run: `{}` ({}); {}",
-                    first.command, first.tier, outcome.output_tail
-                )?;
-                bail!(
-                    "{id}: gates could not run: `{}` ({}); {}",
-                    first.command,
-                    first.tier,
-                    outcome.output_tail
-                )
+    })();
+    let hands_over = match &outcome {
+        Ok(()) => true,
+        Err(e) => e.is::<GatesFailed>(),
+    };
+    if !hands_over {
+        // The task stopped: its cloud worker sandbox goes now (P5 (d)). What the screen gets
+        // can't change the outcome, which is the command's own error.
+        match lifetime::release_worker(ctx.backend, &prepared.meta, &mut prepared.record, sleep) {
+            Some(lifetime::Released::Line(line)) => {
+                let _ = writeln!(out, "{line}");
             }
-            None => {
-                let exit = first
-                    .exit
-                    .map_or_else(|| "no exit code".to_owned(), |c| format!("exit {c}"));
-                writeln!(
-                    out,
-                    "  gates: failed: `{}` ({}, {exit})",
-                    first.command, first.tier
-                )?;
-                writeln!(
-                    out,
-                    "  next: sbxm task review {} (it reruns the gates and gives a failure to a \
-                     fix round)",
-                    spec_flag(&opts.spec)
-                )?;
-                // A gate that ran and failed goes on to the review, which reruns it and gives a
-                // failure to a fix round (decision 180): `task run --spec` catches this typed
-                // error to tell it apart from any other failure, the same way it does for
-                // `--issue` (`GatesFailed`, defined above for the issue path).
-                Err(GatesFailed(format!(
-                    "{id}: gates failed: `{}` ({}, {exit}); next: sbxm task review {} (it reruns \
-                     the gates and gives a failure to a fix round)",
-                    first.command,
-                    first.tier,
-                    spec_flag(&opts.spec)
-                ))
-                .into())
+            Some(lifetime::Released::Warning(warning)) => {
+                let _ = writeln!(warn, "warning: {warning}");
             }
+            None => {}
         }
     }
+    outcome
 }
 
 #[cfg(test)]

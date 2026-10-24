@@ -1,11 +1,14 @@
 //! How long a cloud sandbox of a task lives (milestone 4 slice 3; P5 (d), P6, P7; decisions 259,
-//! 262, 263, 265): the TTL each role's sandbox is created with.
+//! 262, 263, 265): the TTL each role's sandbox is created with, and its removal, retried, when the
+//! task stops.
 
+use std::path::Path;
 use std::time::Duration;
 
 use super::config::TaskConfig;
-use super::record::SandboxRole;
-use crate::backend::{SandboxBackend, ttl_arg, whole_minutes};
+use super::record::{self, Record, SandboxRole};
+use crate::backend::{Location, SandboxBackend, ttl_arg, whole_minutes};
+use crate::run::results::now;
 
 /// What every TTL adds to the time its sandbox is expected to need (decision 259).
 const MARGIN: Duration = Duration::from_secs(30 * 60);
@@ -94,4 +97,57 @@ pub fn created_line(name: &str, role: SandboxRole, ttl: Duration) -> String {
         role.name(),
         ttl_arg(ttl)
     )
+}
+
+/// The warning for a cloud sandbox whose removal still failed: never dropped silently (P6 (a)),
+/// and naming the command that removes it by hand.
+pub fn not_removed(name: &str, error: &str) -> String {
+    format!(
+        "cloud sandbox {name} could not be removed: {error}; remove it with `sbx --cloud rm \
+         {name} -f`"
+    )
+}
+
+/// What [`release_worker`] has to say, for the screen and so `run.log` (decision 265).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Released {
+    /// The sandbox is gone (removed, or already gone).
+    Line(String),
+    /// It may still be there, or its removal couldn't be recorded.
+    Warning(String),
+}
+
+/// The task stops, ready or for any reason: its cloud worker sandbox goes now (P5 (d), decision
+/// 263), with the removal retry, and its lifetime entry is stamped and saved. The one function
+/// every "the task stops" path calls. `None` for a local task, or when the worker sandbox has no
+/// entry still open (it was never created, or is already removed).
+pub fn release_worker(
+    backend: &dyn SandboxBackend,
+    meta: &Path,
+    task: &mut Record,
+    sleep: &dyn Fn(Duration),
+) -> Option<Released> {
+    if task.location != Location::Cloud {
+        return None;
+    }
+    let name = task.worker.as_ref()?.sandbox.clone();
+    if !task
+        .sandboxes
+        .iter()
+        .any(|s| s.name == name && s.removed_at.is_none())
+    {
+        return None;
+    }
+    let how = match remove_sandbox(backend, &name, sleep) {
+        Removal::Removed => "removed",
+        Removal::AlreadyGone => "already gone",
+        Removal::Failed(error) => return Some(Released::Warning(not_removed(&name, &error))),
+    };
+    task.sandbox_removed(&name, now());
+    Some(match record::write(meta, task) {
+        Ok(()) => Released::Line(format!("cloud sandbox {name} {how}")),
+        Err(e) => Released::Warning(format!(
+            "cloud sandbox {name} {how}, but task.json couldn't record it: {e:#}"
+        )),
+    })
 }

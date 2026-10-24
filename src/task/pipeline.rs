@@ -158,6 +158,9 @@ pub struct Ctx<'a> {
     pub probe: &'a dyn ProcessProbe,
     /// Runs host-tier gates (never the agent's own commands anywhere else).
     pub host: &'a dyn HostRunner,
+    /// Waits between a cloud sandbox's removal retries (P6 (a)); `std::thread::sleep` outside
+    /// tests.
+    pub sleep: &'a (dyn Fn(Duration) + Sync),
 }
 
 /// A task that is ready for its worker.
@@ -1225,13 +1228,23 @@ pub fn prepare_spec_resolved(
             warnings,
             events,
         }),
-        Err(e) => {
+        Err(mut e) => {
             // Back to nothing: the sandbox and the folders this start made. A local start
             // removes its sandbox even if `create` failed, as before this milestone; a cloud
             // start only the one its `create` returned, and it has no host clone, so a folder
             // there isn't its own.
-            if local || created {
+            if local {
                 let _ = ctx.backend.remove(&sandbox);
+            } else if created
+                && let lifetime::Removal::Failed(why) =
+                    lifetime::remove_sandbox(ctx.backend, &sandbox, ctx.sleep)
+            {
+                // Retried as at any stop (P6 (a)), and never dropped: the folder that would
+                // have recorded it goes below.
+                e = e.context(format!(
+                    "the start failed, and {}",
+                    lifetime::not_removed(&sandbox, &why)
+                ));
             }
             if local {
                 let _ = fs::remove_dir_all(&workspace);
