@@ -58,7 +58,7 @@ fn cloud_preflight(
     profile_name: &str,
     profile: &Profile,
 ) -> Result<()> {
-    // 1. The `sbx` version (P12).
+    // 1. The `sbx` version (P12): the client's, which the cloud instance reads without `--cloud`.
     let version = backend
         .version()
         .map_err(|e| SbxUnavailable(format!("{e:#}; {LOCAL_INSTEAD}")))?;

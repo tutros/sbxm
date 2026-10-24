@@ -46,6 +46,15 @@ impl SbxBackend {
         command
     }
 
+    /// `sbx version --json`, never with `--cloud`: the version is the client binary's, the same
+    /// for both instances, and a cloud preflight's version check (P12) comes before the cloud is
+    /// asked anything (`sbx --cloud version` was never captured, P2).
+    fn version_command(&self) -> Command {
+        let mut command = Self::LOCAL.command();
+        command.args(version_args());
+        command
+    }
+
     /// Runs `sbx <args>` with the terminal attached, so `sbx`'s own progress
     /// and errors reach the user.
     fn run_sbx<I, S>(&self, args: I, sandbox: &str) -> Result<()>
@@ -169,11 +178,7 @@ impl SandboxBackend for SbxBackend {
     }
 
     fn version(&self) -> Result<String> {
-        let output = self
-            .command()
-            .args(version_args())
-            .output()
-            .context(SBX_MISSING)?;
+        let output = self.version_command().output().context(SBX_MISSING)?;
         if !output.status.success() {
             bail!(
                 "`sbx version --json` failed ({}): {}",
@@ -1208,6 +1213,21 @@ mod cloud_tests {
         assert_eq!(args(&SbxBackend::CLOUD.command()), ["--cloud"]);
         assert!(args(&SbxBackend::LOCAL.command()).is_empty());
         assert_eq!(SbxBackend::default().location, Location::Local);
+    }
+
+    /// The version is the client binary's, the same for both instances: the cloud instance reads
+    /// it without `--cloud` (`sbx --cloud version` was never captured, P2), so a cloud preflight's
+    /// version check (P12) never depends on the cloud answering.
+    #[test]
+    fn the_cloud_instance_reads_the_version_without_cloud() {
+        assert_eq!(
+            args(&SbxBackend::CLOUD.version_command()),
+            ["version", "--json"]
+        );
+        assert_eq!(
+            args(&SbxBackend::LOCAL.version_command()),
+            ["version", "--json"]
+        );
     }
 
     #[test]
