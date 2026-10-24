@@ -401,3 +401,243 @@ fn the_config_alone_starts_a_cloud_task() {
     assert_eq!(backend.locations(), [Location::Cloud]);
     assert_eq!(backend.creates()[0].workspace, None);
 }
+
+/// The biggest `result.md` brought to the host (the pipeline's `RESULT_CAP`).
+const RESULT_CAP: usize = 1024 * 1024;
+
+fn result_path(id: &str) -> String {
+    format!("{HOME}/work/{id}/.sbxm-task/result.md")
+}
+
+fn bundle_path(id: &str) -> String {
+    format!("{HOME}/work/{id}/.sbxm-task/branch.bundle")
+}
+
+fn task_record(f: &common::task_fixture::Fixture, id: &str) -> sbxm::task::record::Record {
+    let meta = sbxm::task::record::task_dir(&f.env.base_dir(), id);
+    sbxm::task::record::read(&meta.join("task.json")).unwrap()
+}
+
+/// Starts a cloud task whose copy out of `path` produces `copy`; returns the result, the record
+/// and the copied-in `result.md` if any.
+fn start_with_copy(
+    path: impl Fn(&str) -> String,
+    copy: sbxm::backend::FakeCopy,
+) -> (
+    anyhow::Result<()>,
+    sbxm::task::record::Record,
+    Option<Vec<u8>>,
+) {
+    let f = fixture_with(LOCAL_TOML);
+    let id = spec_id(&f);
+    let backend =
+        cloud_backend(&f.env.tmp.path().join("cloud-fs"), &id).with_copy_out(&path(&id), copy);
+    let (result, _) = start_spec(&f, &backend, Some(Location::Cloud));
+    let meta = sbxm::task::record::task_dir(&f.env.base_dir(), &id);
+    let staged = std::fs::read_dir(meta.join("staging")).map_or(0, |d| d.count());
+    assert_eq!(staged, 0, "a staging folder was left behind");
+    let result_md = std::fs::read(meta.join("result.md")).ok();
+    (result, task_record(&f, &id), result_md)
+}
+
+fn notes(record: &sbxm::task::record::Record) -> String {
+    record.notes.join("\n")
+}
+
+/// Decision 244's boundary: a staged `result.md` at its cap is read, one byte over is not.
+#[test]
+fn a_staged_result_at_its_cap_is_read_and_one_byte_over_is_not() {
+    use sbxm::backend::FakeCopy;
+
+    let (result, _, copied) = start_with_copy(result_path, FakeCopy::File(vec![b'x'; RESULT_CAP]));
+    result.unwrap();
+    assert_eq!(copied.map(|c| c.len()), Some(RESULT_CAP));
+
+    let (result, record, copied) =
+        start_with_copy(result_path, FakeCopy::File(vec![b'x'; RESULT_CAP + 1]));
+    result.unwrap();
+    assert_eq!(copied, None);
+    assert!(
+        notes(&record).contains("larger than 1 MiB"),
+        "{}",
+        notes(&record)
+    );
+}
+
+/// The cloud refuses a symlink but copies a folder whole (P2); whatever lands, only one plain file
+/// is read.
+#[test]
+fn a_staged_result_that_is_a_link_or_a_folder_is_refused() {
+    use sbxm::backend::FakeCopy;
+
+    for copy in [FakeCopy::Link("/etc/passwd".into()), FakeCopy::Folder] {
+        let (result, record, copied) = start_with_copy(result_path, copy.clone());
+        result.unwrap();
+        assert_eq!(copied, None, "{copy:?}");
+        assert!(
+            notes(&record).contains("result.md was refused")
+                && notes(&record).contains("not a plain file"),
+            "{copy:?}: {}",
+            notes(&record)
+        );
+    }
+}
+
+#[test]
+fn a_staged_bundle_that_is_a_link_or_a_folder_is_refused_and_the_worker_fails() {
+    use sbxm::backend::FakeCopy;
+
+    for copy in [FakeCopy::Link("/etc/passwd".into()), FakeCopy::Folder] {
+        let (result, record, _) = start_with_copy(bundle_path, copy.clone());
+        assert!(result.is_err(), "{copy:?}");
+        assert_eq!(
+            record.status,
+            sbxm::task::record::Status::Failed,
+            "{copy:?}"
+        );
+        assert!(
+            notes(&record).contains("could not collect the worker's commits")
+                && notes(&record).contains("not a plain file"),
+            "{copy:?}: {}",
+            notes(&record)
+        );
+    }
+}
+
+/// A missing bundle (the copy out finds nothing) is an error, never an empty success.
+#[test]
+fn a_bundle_missing_from_the_sandbox_fails_the_worker() {
+    let (result, record, _) = start_with_copy(bundle_path, sbxm::backend::FakeCopy::Missing);
+    assert!(result.is_err());
+    assert!(notes(&record).contains("cannot find"), "{}", notes(&record));
+}
+
+/// The bundle's cap applies to the staged copy as it did to the mounted one: at the cap it is
+/// fetched, one byte over it is refused.
+#[test]
+fn a_staged_bundle_at_its_cap_is_fetched_and_one_byte_over_is_refused() {
+    use sbxm::backend::FakeCopy;
+    use sbxm::task::pipeline::copy_out_staged;
+    use sbxm::task::repo;
+
+    let f = fixture_with(LOCAL_TOML);
+    let meta = f.env.tmp.path().join("meta");
+    std::fs::create_dir_all(&meta).unwrap();
+    let repo_git = meta.join("repo.git");
+    repo::clone_bare(&common::task_fixture::source(&f), &repo_git).unwrap();
+    repo::create_branch(&repo_git, "work", "main").unwrap();
+    // A real bundle with one commit on `work`, made the way the sandbox makes it.
+    let scratch = f.env.tmp.path().join("scratch");
+    common::git(
+        f.env.tmp.path(),
+        &[
+            "clone",
+            "-q",
+            repo_git.to_str().unwrap(),
+            scratch.to_str().unwrap(),
+        ],
+    );
+    common::git(&scratch, &["checkout", "-q", "work"]);
+    std::fs::write(scratch.join("b.txt"), "b\n").unwrap();
+    common::git(&scratch, &["add", "-A"]);
+    common::git(&scratch, &["commit", "-q", "-m", "b"]);
+    common::git(
+        &scratch,
+        &[
+            "bundle",
+            "create",
+            "-q",
+            "../w.bundle",
+            "work",
+            "^origin/main",
+        ],
+    );
+    let bytes = std::fs::read(f.env.tmp.path().join("w.bundle")).unwrap();
+    let len = bytes.len() as u64;
+    let clone = "/home/agent/work/t";
+    let backend = sbxm::backend::FakeBackend::default().with_copy_out(
+        &format!("{clone}/.sbxm-task/branch.bundle"),
+        FakeCopy::File(bytes),
+    );
+
+    let staged = copy_out_staged(&backend, &meta, "sb", clone, "branch.bundle").unwrap();
+    let over = repo::fetch_bundle(&repo_git, staged.dir(), "work", len - 1).unwrap_err();
+    assert!(format!("{over:#}").contains("too large"), "{over:#}");
+    repo::fetch_bundle(&repo_git, staged.dir(), "work", len).unwrap();
+    assert_eq!(
+        backend.log(),
+        [format!("cp-out sb {clone}/.sbxm-task/branch.bundle")]
+    );
+    let dir = staged.dir().to_path_buf();
+    drop(staged);
+    assert!(!dir.exists(), "the staging folder goes with its Staged");
+}
+
+/// Only slice 7 makes strict cloud sandboxes: refused before anything is written or created.
+#[test]
+fn a_strict_profile_is_refused_for_the_cloud_before_anything() {
+    let f = fixture_with(LOCAL_TOML);
+    f.env.write_profile(
+        "default",
+        "[template]\nstrict = true\nallow = [\"crates.io\"]\n",
+    );
+    let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &spec_id(&f));
+
+    let (result, _) = start_spec(&f, &backend, Some(Location::Cloud));
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains("strict") && message.contains("slice 7") && message.contains("--local"),
+        "{message}"
+    );
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert!(!f.env.base_dir().join(".sbxm").join("tasks").exists());
+}
+
+/// Decision 262(g): a non-strict `[template]` profile is built from its kits, with one line.
+#[test]
+fn a_template_profile_is_built_from_its_kits_with_one_line_in_the_cloud() {
+    let f = fixture_with(LOCAL_TOML);
+    f.env
+        .write_profile("default", "[template]\nallow = [\"crates.io\"]\n");
+    let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &spec_id(&f));
+    let spec = common::task_fixture::spec_file(&f, "Build a thing.\n");
+    let mut warn = Vec::new();
+
+    sbxm::commands::task_start::run_spec(
+        &f.env.config_dir(),
+        &spec_options(&f, spec, Some(Location::Cloud)),
+        &backend,
+        &sbxm::github::fake::FakeGitHub::default(),
+        &common::task_fixture::Probe,
+        &mut Vec::new(),
+        &mut warn,
+    )
+    .unwrap();
+
+    let warn = String::from_utf8(warn).unwrap();
+    assert_eq!(
+        warn.matches("cloud templates aren't used").count(),
+        1,
+        "{warn}"
+    );
+    assert_eq!(backend.creates()[0].template, None);
+}
+
+/// A sandbox whose HOME isn't an absolute path gets no clone: the start fails and is undone.
+#[test]
+fn a_home_that_is_not_an_absolute_path_fails_the_start_and_undoes_it() {
+    let f = fixture_with(LOCAL_TOML);
+    let id = spec_id(&f);
+    let backend = common::task_fixture::backend()
+        .with_exec_output_matching("printenv", common::task_fixture::ok("work\n"));
+
+    let (result, _) = start_spec(&f, &backend, Some(Location::Cloud));
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(message.contains("HOME"), "{message}");
+    let sandbox = format!("sbxm-task-{id}-claude");
+    assert_eq!(backend.removes(), [sandbox]);
+    assert!(!sbxm::task::record::task_dir(&f.env.base_dir(), &id).exists());
+    assert!(!backend.log().iter().any(|e| e.starts_with("cp-in")));
+}
