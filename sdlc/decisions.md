@@ -1034,10 +1034,15 @@ the trigger for revisiting it.
 
 266. **Low-risk PRs merge without the user, as an experiment (2026-10-24, the user's four answers; narrows [86] and
 [187], where the user merges):** (a) scope: a PR whose risk is low, both the reviewer's level and the path-rule floor
-[176], [179]; medium and high stay the user's to merge, for now. (b) It starts now, as a process: before running
-`gh pr merge <N> --auto --merge`, the session checks that the latest sbxm review covered exactly the PR's current head
-commit, found 0 must-fix, and rated it low; GitHub then merges once the required checks pass. The `sbxm/review` status
-check that would make GitHub enforce this is issue #317, built if the experiment works. (c) Measure: over the next 10
+[176], [179]; medium and high stay the user's to merge, for now. (b) It starts now, as a process: the session checks
+that the latest sbxm review covered exactly the PR's current head commit, found 0 must-fix, and rated it low, then
+runs `gh pr merge <N> --auto --merge --match-head-commit <sha>`, where `<sha>` is the full SHA of the commit that
+review covered (the end of its `Scope:` range); GitHub refuses the request if the PR's head is not that commit, and
+otherwise merges once the required checks pass. A session never pushes to a PR whose auto-merge is armed: it first
+runs `gh pr merge <N> --disable-auto`, then pushes, and the new head gets a review (`task review --pr N`) before
+auto-merge is armed again with the new reviewed SHA. Why: GitHub keeps auto-merge armed when someone with write access
+pushes, so the SHA guard alone only covers the moment it is armed. The `sbxm/review` status check that would make
+GitHub enforce this is issue #317, built if the experiment works. (c) Measure: over the next 10
 auto-merged PRs, the breaks found after a merge (CI red on `main`, a revert, a later must-fix traced to one of them)
 and the time from ready to merged (the loop trial's median: 29m12s). The first break pauses auto-merge and the
 session tells the user, who decides. Every auto-merged PR is logged in `sdlc/batches/2026-10-24-auto-merge.md`.
