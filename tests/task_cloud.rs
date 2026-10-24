@@ -1784,3 +1784,59 @@ fn a_scoped_secret_that_cannot_be_removed_is_one_warning_naming_the_command() {
     assert!(!sbxm::task::record::task_dir(&f.env.base_dir(), &id).exists());
     assert_value_nowhere(&f, &id, &backend, &started);
 }
+
+/// Self-review (check before acting): the list is an input, so its shape is refused before any
+/// write or changing backend call, naming the field and never the value; and a local start never
+/// drops a list silently.
+#[test]
+fn a_malformed_or_misplaced_scoped_secret_is_refused_before_anything() {
+    let f = fixture_with(LOCAL_TOML);
+    let id = spec_id(&f);
+    let bad = |host: &str, env: &str, value: &str| sbxm::backend::ScopedSecret {
+        host: host.into(),
+        env: env.into(),
+        value: value.into(),
+    };
+    let cases: [(sbxm::backend::ScopedSecret, &str); 5] = [
+        (bad("", "P2_FAKE", FAKE_VALUE), "host"),
+        (bad("postman echo.com", "P2_FAKE", FAKE_VALUE), "host"),
+        (bad("postman-echo.com", "", FAKE_VALUE), "env"),
+        (bad("postman-echo.com", "2BAD", FAKE_VALUE), "env"),
+        (bad("postman-echo.com", "P2_FAKE", ""), "value"),
+    ];
+    for (secret, field) in cases {
+        let backend = cloud_ready();
+        let started = start_cloud_with_secrets(&f, &backend, &[fake_secret(), secret]);
+        let message = format!("{:#}", started.result.as_ref().unwrap_err());
+        assert!(
+            message.contains(field) && message.contains("scoped secret 2"),
+            "{message}"
+        );
+        assert!(!message.contains(FAKE_VALUE), "{message}");
+        assert!(backend.log().is_empty(), "{:?}", backend.log());
+        assert!(!f.env.base_dir().join(".sbxm").join("tasks").exists());
+    }
+
+    // A local start with scoped secrets: refused, not ignored (decision 11).
+    let backend = cloud_ready();
+    let spec = common::task_fixture::spec_file(&f, "Build a thing.\n");
+    let result = sbxm::commands::task_start::run_spec_with_seams(
+        &f.env.config_dir(),
+        &spec_options(&f, spec, Some(Location::Local)),
+        &backend,
+        &sbxm::github::fake::FakeGitHub::default(),
+        &common::task_fixture::Probe,
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &std::thread::sleep,
+        &[fake_secret()],
+    );
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains("scoped secret") && message.contains("cloud"),
+        "{message}"
+    );
+    assert!(!message.contains(FAKE_VALUE), "{message}");
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert!(!sbxm::task::record::task_dir(&f.env.base_dir(), &id).exists());
+}

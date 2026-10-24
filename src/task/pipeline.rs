@@ -1058,6 +1058,7 @@ pub fn prepare_spec_resolved(
 
     // Check before acting: nothing is written until every one of these passes.
     spec_startable(&global.base_dir, id, source_path)?;
+    secrets::check(location, ctx.scoped_secrets)?;
     let worker = &ctx.config.worker;
     let profile = Profile::load(global.profiles_dir(), &ctx.config.sandbox.profile)?;
     // A cloud worker's TTL (P5 (d)), checked with the rest before anything is written.
