@@ -654,3 +654,119 @@ fn rounds_exhausted_with_a_finding_left_is_ready_with_every_sandbox_removed() {
     assert_eq!(backend.log().last(), Some(&format!("rm {worker}")));
     assert!(ran.out.contains("must-fix finding(s) left"), "{}", ran.out);
 }
+
+const CLOUD_TOML: &str = "[sandbox]\nprofile = \"default\"\nlocation = \"cloud\"\n\n[gates]\nsandbox = [\"cargo test\"]\n";
+
+fn spec_review_options(f: &Fixture, spec: PathBuf) -> sbxm::commands::task_review::Options {
+    let mut opts = pr_options(f, None);
+    opts.target = sbxm::commands::task_review::Target::Spec(spec);
+    opts.identity = Some(identity());
+    opts
+}
+
+/// `task start --spec FILE --cloud` alone: the task waits for its review at `gating/passed`, its
+/// worker sandbox kept.
+fn start_cloud(f: &Fixture, spec: PathBuf, backend: &FakeBackend) {
+    sbxm::commands::task_start::run_spec(
+        &f.env.config_dir(),
+        &sbxm::commands::task_start::SpecOptions {
+            repo_root: f.env.tmp.path().join("target-repo"),
+            spec,
+            worker_harness: None,
+            worker_model: None,
+            time_limit: None,
+            profile: None,
+            base: Some("main".into()),
+            repo: Some("o/r".into()),
+            clone_source: Some(common::task_fixture::source(f)),
+            identity: Some(identity()),
+            disk: Default::default(),
+            location: Some(Location::Cloud),
+        },
+        backend,
+        &sbxm::github::fake::FakeGitHub::default(),
+        &common::task_fixture::Probe,
+        &mut Vec::new(),
+        &mut Vec::new(),
+    )
+    .unwrap();
+}
+
+/// Decision 253: `task review --spec` takes no location flag; a task recorded `cloud` is reviewed
+/// in the cloud though `sbxm-task.toml` says `local`.
+#[test]
+fn a_spec_review_of_a_task_recorded_cloud_runs_in_the_cloud_with_no_flag() {
+    let f = fixture_with(LOCAL_TOML);
+    let (spec, id) = spec(&f);
+    let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &id, &[CLEAN]);
+    start_cloud(&f, spec.clone(), &backend);
+
+    let ran = task_review(
+        &f,
+        &spec_review_options(&f, spec),
+        &backend,
+        &sbxm::github::fake::FakeGitHub::default(),
+    );
+
+    ran.result.unwrap();
+    assert_eq!(backend.locations(), [Location::Cloud, Location::Cloud]);
+    let review = &backend.creates()[1];
+    assert_eq!(review.name, reviewer_sandbox(&id));
+    assert_eq!(review.workspace, None);
+    let task = task_record(&f, &id);
+    assert_eq!(task.stage, record::Stage::Ready);
+    assert_all_removed(&task, &[SandboxRole::Worker, SandboxRole::Reviewer]);
+}
+
+/// Decision 253, the other way: a task recorded `local` is reviewed here though `sbxm-task.toml`
+/// now says `cloud`.
+#[test]
+fn a_spec_review_of_a_task_recorded_local_runs_here_with_no_flag() {
+    use common::task_fixture::{Play, play, play_reviews};
+
+    let f = fixture_with(CLOUD_TOML);
+    let (spec, id) = spec(&f);
+    let worker = play(
+        &f.env.base_dir().join("tasks").join(&id),
+        "main",
+        &id,
+        Play {
+            commits: vec!["a.txt".into()],
+            result_md: Some(b"done\n".to_vec()),
+            bundle_bytes: None,
+        },
+    );
+    let reviewer = play_reviews(&f.env.base_dir(), &id, vec![CLEAN.to_owned()]);
+    let backend = FakeBackend::with_secrets(&["anthropic", "openai"])
+        .with_exec_output_matching("claude", ok(CLAUDE_DONE))
+        .with_exec_output_matching("codex", ok(CODEX_DONE))
+        .with_exec_hook(move |sandbox, spec| {
+            worker(sandbox, spec);
+            reviewer(sandbox, spec);
+        });
+    let github = sbxm::github::fake::FakeGitHub::default();
+    let source = common::task_fixture::source(&f);
+    let context = common::task_fixture::ctx(&f, &source, &backend, &github);
+    let mut prepared = sbxm::task::pipeline::prepare_spec(&context, &spec).unwrap();
+    sbxm::task::pipeline::run_worker(&context, &mut prepared).unwrap();
+
+    let ran = task_review(&f, &spec_review_options(&f, spec), &backend, &github);
+
+    ran.result.unwrap();
+    assert_eq!(backend.locations(), [Location::Local]);
+    let review = backend
+        .creates()
+        .into_iter()
+        .find(|c| c.name == reviewer_sandbox(&id))
+        .unwrap();
+    assert!(
+        review.workspace.is_some() && review.ttl.is_none(),
+        "{review:?}"
+    );
+    let task = task_record(&f, &id);
+    assert_eq!(
+        (task.stage, task.location),
+        (record::Stage::Ready, Location::Local)
+    );
+    assert!(task.sandboxes.is_empty(), "{:?}", task.sandboxes);
+}
