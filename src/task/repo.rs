@@ -184,6 +184,62 @@ pub fn bundle_for_clone(repo_git: &Path, branch: &str, base: &str, dest: &Path) 
     Ok(())
 }
 
+/// Like [`bundle_for_clone`], but the bundle's `branch` is the agent's own ref ([`agent_ref`]),
+/// not the delivered branch: a cloud worker sandbox made again for a fix round (milestone 4 slice
+/// 5) continues the history its last clone had, so the fix round's commits come back as a
+/// fast-forward of that ref, as they do from a local clone that was never gone. A bundle names
+/// refs as they are, so the two refs are fetched into the new bare repo `scratch` (host-owned,
+/// made here, no hooks) under `refs/heads/` and bundled from there.
+pub fn bundle_agent_for_clone(
+    repo_git: &Path,
+    branch: &str,
+    base: &str,
+    scratch: &Path,
+    dest: &Path,
+) -> Result<()> {
+    check_ref("branch", branch)?;
+    check_ref("base", base)?;
+    ensure_agent_ref(repo_git, branch)?;
+    let agent = agent_ref(branch);
+    let made = (|| -> Result<()> {
+        git::run(
+            repo_git,
+            Some(scratch),
+            None,
+            &["init", "--bare", "--quiet", "--template="],
+        )?;
+        git::run(
+            repo_git,
+            Some(scratch),
+            None,
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "fetch",
+                "--no-tags",
+                "--quiet",
+                text(repo_git)?,
+                &format!("{agent}:refs/heads/{branch}"),
+                &format!("refs/heads/{base}:refs/heads/{base}"),
+            ],
+        )?;
+        git::run(
+            repo_git,
+            Some(scratch),
+            None,
+            &[
+                "bundle",
+                "create",
+                text(dest)?,
+                &format!("refs/heads/{branch}"),
+                &format!("refs/heads/{base}"),
+            ],
+        )?;
+        Ok(())
+    })();
+    made.with_context(|| format!("cannot bundle the agent's {branch} from the task repo"))
+}
+
 /// Checks out `branch` of `repo_git` into the new folder `dest`: only committed files, no hooks
 /// and no line-ending conversion, made by the hardened runner (no user config, so no filters or
 /// helpers run). This is where host gates and a reviewer's clone come from: no file the agent

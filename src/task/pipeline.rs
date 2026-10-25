@@ -57,6 +57,7 @@ const CLOUD_OAUTH_PROVIDERS: [&str; 2] = ["anthropic", "openai"];
 fn cloud_preflight(
     backend: &dyn SandboxBackend,
     harness: Harness,
+    who: &str,
     profile_name: &str,
     profile: &Profile,
 ) -> Result<()> {
@@ -83,8 +84,8 @@ fn cloud_preflight(
     let own = harness.provider_secret();
     if !CLOUD_OAUTH_PROVIDERS.contains(&own) {
         bail!(
-            "the worker harness {}'s provider login '{own}' can't be stored in the cloud (only \
-             the anthropic and openai OAuth logins can); use a claude or codex worker, \
+            "{who}'s harness {}'s provider login '{own}' can't be stored in the cloud (only \
+             the anthropic and openai OAuth logins can); use a claude or codex harness, \
              {LOCAL_INSTEAD}",
             harness.as_str()
         );
@@ -107,7 +108,7 @@ fn cloud_preflight(
     let stored = backend
         .secret_services()
         .map_err(|e| SbxUnavailable(format!("{e:#}; {LOCAL_INSTEAD}")))?;
-    let mut needed = vec![(own, format!("the worker, {}", harness.as_str()))];
+    let mut needed = vec![(own, format!("{who}, {}", harness.as_str()))];
     needed.extend(profile.secrets.services.iter().map(|s| {
         (
             s.as_str(),
@@ -264,9 +265,18 @@ pub fn check_can_gate(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
 pub struct TaskEnv<'a> {
     pub config_dir: &'a Path,
     pub config: &'a TaskConfig,
+    /// The instance for the task's own location (decision 253).
     pub backend: &'a dyn SandboxBackend,
     pub probe: &'a dyn ProcessProbe,
     pub host: &'a dyn HostRunner,
+    /// Waits between a cloud sandbox's removal retries (P6 (a)); `std::thread::sleep` outside
+    /// tests.
+    pub sleep: &'a (dyn Fn(Duration) + Sync),
+    /// The secrets scoped to each of the task's cloud sandboxes, as [`Ctx::scoped_secrets`].
+    pub scoped_secrets: &'a [ScopedSecret],
+    /// The committer identity a cloud worker sandbox made again for a fix round gives its clone
+    /// (milestone 4 slice 5); `None` where no such sandbox can be made (a local task, a PR).
+    pub identity: Option<&'a Identity>,
 }
 
 impl Ctx<'_> {
@@ -277,6 +287,9 @@ impl Ctx<'_> {
             backend: self.backend,
             probe: self.probe,
             host: self.host,
+            sleep: self.sleep,
+            scoped_secrets: self.scoped_secrets,
+            identity: Some(self.identity),
         }
     }
 }
@@ -287,6 +300,13 @@ impl Ctx<'_> {
 /// PR's head as the local branch `pr-<n>`, the review context (the PR and the issues it closes)
 /// and the first record. No worker, no clone, no sandbox yet; a failure removes the folder again.
 pub fn prepare_pr(ctx: &Ctx, pr: &PrInfo) -> Result<Prepared> {
+    prepare_pr_at(ctx, pr, Location::Local)
+}
+
+/// [`prepare_pr`] at `location`. At [`Location::Cloud`] (milestone 4 slice 5) the reviewer's
+/// checks are the cloud preflight (decision 261), its strict refusal and its TTL, and the record
+/// carries the location; `ctx`'s backend is the cloud instance.
+pub fn prepare_pr_at(ctx: &Ctx, pr: &PrInfo, location: Location) -> Result<Prepared> {
     let global = GlobalConfig::load(ctx.config_dir)?;
     let number = pr.number;
     let id = format!("pr-{number}");
@@ -303,20 +323,8 @@ pub fn prepare_pr(ctx: &Ctx, pr: &PrInfo) -> Result<Prepared> {
         );
     }
     let reviewer = &ctx.config.reviewer;
-    let profile = Profile::load(global.profiles_dir(), &ctx.config.sandbox.profile)?;
-    check_secrets(
-        ctx.backend,
-        reviewer.harness,
-        "the reviewer",
-        &ctx.config.sandbox.profile,
-        &profile,
-    )?;
-    let mut warnings = ctx.config.warnings.clone();
-    warnings.extend(
-        reviewer
-            .harness
-            .unsupported(&profile, "the reviewer's sandbox"),
-    );
+    secrets::check(location, ctx.scoped_secrets)?;
+    let warnings = check_reviewer_inputs(ctx.config_dir, ctx.backend, ctx.config, location)?;
 
     let parent = meta.parent().unwrap_or(Path::new("."));
     fs::create_dir_all(parent).with_context(|| format!("cannot create {}", parent.display()))?;
@@ -362,6 +370,7 @@ pub fn prepare_pr(ctx: &Ctx, pr: &PrInfo) -> Result<Prepared> {
         );
         // A PR task has no worker, so it never fixes anything (decision 173(d)).
         task.fix_rounds = 0;
+        task.location = location;
         // An issue task for something this PR closes is related work (spec §5.2).
         task.related = pr
             .closing_issues
@@ -1077,6 +1086,7 @@ pub fn prepare_spec_resolved(
             cloud_preflight(
                 ctx.backend,
                 worker.harness,
+                "the worker",
                 &ctx.config.sandbox.profile,
                 &profile,
             )?;
@@ -1229,7 +1239,17 @@ pub fn prepare_spec_resolved(
                 );
                 record::write(&meta, task)?;
                 events.push(lifetime::created_line(&sandbox, SandboxRole::Worker, ttl));
-                let clone = seed_cloud_clone(ctx.backend, &meta, &sandbox, task, ctx.identity)?;
+                let repo_git = meta.join("repo.git");
+                let clone = seed_cloud_clone(
+                    ctx.backend,
+                    &meta,
+                    &sandbox,
+                    &task.id,
+                    &task.branch,
+                    &|dest| repo::bundle_for_clone(&repo_git, &task.branch, &task.base, dest),
+                    ctx.identity,
+                    &worker_files(&meta, task.kind),
+                )?;
                 if let Some(agent) = task.worker.as_mut() {
                     agent.workspace = clone;
                 }
@@ -1995,15 +2015,20 @@ const CLONE_SCRIPT: &str = concat!(
 );
 
 /// Clones a cloud task's branch inside its sandbox (P4 (a), decision 262(d)) and returns the
-/// clone's path: `$HOME` is read once (`printenv HOME`), a bundle of the branch and its base is
-/// made from `repo.git` on the host and copied in, cloned under `$HOME/work/<id>`, and the task's
-/// prompt files go into the clone's `.sbxm-task/` by copy.
+/// clone's path: `$HOME` is read once (`printenv HOME`), a bundle of `branch` and its base, which
+/// `bundle` makes on the host from `repo.git` (never from an agent's clone, decision 159), is
+/// copied in and cloned under `$HOME/work/<name>`, and each of `files` (a host file, the name it
+/// gets) goes into the clone's `.sbxm-task/` by copy.
+#[allow(clippy::too_many_arguments)]
 fn seed_cloud_clone(
     backend: &dyn SandboxBackend,
     meta: &Path,
     sandbox: &str,
-    task: &Record,
+    name: &str,
+    branch: &str,
+    bundle: &dyn Fn(&Path) -> Result<()>,
     identity: &Identity,
+    files: &[(PathBuf, &str)],
 ) -> Result<String> {
     let reported = exec_in(backend, sandbox, "read $HOME", &["printenv", "HOME"])?;
     let home = reported.trim_end_matches(['\n', '\r']);
@@ -2014,19 +2039,14 @@ fn seed_cloud_clone(
         );
     }
     let home = home.trim_end_matches('/');
-    let clone = format!("{home}/work/{}", task.id);
-    let bundle = format!("{home}/.sbxm-task-{}.bundle", task.id);
+    let clone = format!("{home}/work/{name}");
+    let in_sandbox = format!("{home}/.sbxm-task-{name}.bundle");
 
     let staging = Staged::fresh(meta, "clone-bundle")?;
     let host_bundle = staging.dir().join("task.bundle");
-    repo::bundle_for_clone(
-        &meta.join("repo.git"),
-        &task.branch,
-        &task.base,
-        &host_bundle,
-    )?;
+    bundle(&host_bundle)?;
     backend
-        .copy_in(sandbox, &host_bundle, &bundle)
+        .copy_in(sandbox, &host_bundle, &in_sandbox)
         .with_context(|| format!("cannot copy the task's bundle into {sandbox}"))?;
     drop(staging);
 
@@ -2039,9 +2059,9 @@ fn seed_cloud_clone(
             "-c",
             CLONE_SCRIPT,
             "sh",
-            &bundle,
+            &in_sandbox,
             &clone,
-            &task.branch,
+            branch,
             &identity.name,
             &identity.email,
         ],
@@ -2053,15 +2073,37 @@ fn seed_cloud_clone(
         "make the clone's .sbxm-task folder",
         &["mkdir", "-p", &control],
     )?;
-    for (host, name) in [
-        ("source.md", "source.md"),
-        ("worker-prompt.md", "prompt.md"),
-    ] {
+    copy_in_all(backend, sandbox, &control, files)?;
+    Ok(clone)
+}
+
+/// Copies each of `files` (a host file, the name it gets) into `control`, a cloud clone's
+/// `.sbxm-task` folder.
+fn copy_in_all(
+    backend: &dyn SandboxBackend,
+    sandbox: &str,
+    control: &str,
+    files: &[(PathBuf, &str)],
+) -> Result<()> {
+    for (host, name) in files {
         backend
-            .copy_in(sandbox, &meta.join(host), &format!("{control}/{name}"))
+            .copy_in(sandbox, host, &format!("{control}/{name}"))
             .with_context(|| format!("cannot copy {name} into {sandbox}"))?;
     }
-    Ok(clone)
+    Ok(())
+}
+
+/// The task's own text files a worker's clone gets, as `(host file, name in .sbxm-task/)`: the
+/// source (`source.md` for a spec task, `issue.md` otherwise) and the worker's prompt.
+fn worker_files(meta: &Path, kind: Kind) -> Vec<(PathBuf, &'static str)> {
+    let source = match kind {
+        Kind::Spec => "source.md",
+        _ => "issue.md",
+    };
+    vec![
+        (meta.join(source), source),
+        (meta.join("worker-prompt.md"), "prompt.md"),
+    ]
 }
 
 /// A new, empty host folder under the task's `staging/`, made for one copy out of (or into) a
@@ -2185,6 +2227,81 @@ pub(super) fn ensure_worker_sandbox(
     record::write(&prepared.meta, &prepared.record)?;
     plan.create(env.backend, &sandbox, harness, &prepared.workspace)?;
     Ok(true)
+}
+
+/// A cloud task's fix round runs in its worker sandbox, kept through the automatic run (P5 (d),
+/// decision 263). When that sandbox is gone (removed, or its TTL lapsed; `sbx --cloud ls` no
+/// longer lists it), its open lifetime entry is closed and it is made again as slice 1 makes it:
+/// from the profile and resources the record saved (refused, before anything, when they changed
+/// since, as [`ensure_worker_sandbox`] refuses), with the worker's TTL, its scoped secrets and a
+/// `fix` lifetime entry, and a clone of the agent's own history, bundled from `repo.git`
+/// ([`repo::bundle_agent_for_clone`]). Nothing for a local task.
+fn ensure_cloud_worker(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
+    if prepared.record.location != Location::Cloud {
+        return Ok(());
+    }
+    let worker = prepared
+        .record
+        .worker
+        .as_ref()
+        .context("the task has no worker")?;
+    let sandbox = worker.sandbox.clone();
+    if env.backend.list()?.iter().any(|s| s.name == sandbox) {
+        return Ok(());
+    }
+    let profile_name = worker_profile(&prepared.record, worker)?.to_owned();
+    let resources = worker_resources(&prepared.record, worker)?;
+    check_config_drift(env, &prepared.record, &profile_name, &resources)?;
+    let identity = env
+        .identity
+        .context("no committer identity for the worker's new clone")?;
+    let ttl = lifetime::worker_ttl(env.config)?;
+    let plan = plan_cloud_sandbox(
+        env.config_dir,
+        env.backend,
+        &profile_name,
+        env.config.worker.harness,
+        &sandbox,
+        &Overrides {
+            cpus: Some(resources.cpus),
+            memory: Some(resources.memory.clone()),
+        },
+        &prepared.meta.join("kits"),
+        &mut prepared.warnings,
+    )?;
+    if prepared.record.sandbox_removed(&sandbox, now()) {
+        record::write(&prepared.meta, &prepared.record)?;
+        prepared.events.push(format!(
+            "cloud sandbox {sandbox} is gone; it is made again for the fix round"
+        ));
+    }
+    create_cloud_sandbox(env, prepared, &plan, &sandbox, SandboxRole::Fix, ttl)?;
+    let (meta, record) = (&prepared.meta, &prepared.record);
+    let repo_git = meta.join("repo.git");
+    let clone = seed_cloud_clone(
+        env.backend,
+        meta,
+        &sandbox,
+        &record.id,
+        &record.branch,
+        &|dest| {
+            let scratch = Staged::fresh(meta, "clone-repo")?;
+            repo::bundle_agent_for_clone(
+                &repo_git,
+                &record.branch,
+                &record.base,
+                &scratch.dir().join("repo.git"),
+                dest,
+            )
+        },
+        identity,
+        &worker_files(meta, record.kind),
+    )?;
+    if let Some(agent) = prepared.record.worker.as_mut() {
+        agent.workspace = clone;
+    }
+    record::write(&prepared.meta, &prepared.record)?;
+    Ok(())
 }
 
 /// Whether the last passed gate run covered the sandbox tier and, when one is configured, the host
@@ -2613,16 +2730,30 @@ fn pass_gates(
 /// before the task is `ready`, so nothing a narrow scope missed stands in the way. The task never
 /// ends `ready` with must-fix findings while rounds are left; when the budget runs out first, it
 /// ends `ready` with `Record::stopped` set to `rounds-exhausted`.
+///
+/// Every way it ends after those checks is the task stopping: `ready`, gates that stopped it, or
+/// a failure. A cloud task's worker sandbox is removed then (P5 (d), decision 263), and what that
+/// says is in `prepared.events` and `prepared.warnings`.
 pub fn review_issue(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewReport> {
     check_can_review(&prepared.record, env.probe)?;
-    let mut report = ReviewReport {
+    let report = ReviewReport {
         warnings: check_reviewer(env, prepared)?,
         ..ReviewReport::default()
     };
     // Refused before the gates run when no review round number is left (worked out again after
     // them, as their fix rounds count).
     next_review_round(prepared)?;
+    let reviewed = review_checked(env, prepared, report);
+    stop_cloud_worker(env, prepared);
+    reviewed
+}
 
+/// [`review_issue`] once its checks have passed.
+fn review_checked(
+    env: &TaskEnv,
+    prepared: &mut Prepared,
+    mut report: ReviewReport,
+) -> Result<ReviewReport> {
     let gates_current = match (prepared.record.stage, prepared.record.status) {
         // Passed gates count only if they covered every configured tier on the branch as it is now.
         (Stage::Gating, Status::Passed) => gates_cover_everything(env, prepared),
@@ -2867,7 +2998,12 @@ pub fn review_pr(
     let number = prepared.record.number;
     let repo_git = prepared.meta.join("repo.git");
     let mut report = PrReview {
-        warnings: check_reviewer_inputs(env.config_dir, env.backend, env.config)?,
+        warnings: check_reviewer_inputs(
+            env.config_dir,
+            env.backend,
+            env.config,
+            prepared.record.location,
+        )?,
         ..PrReview::default()
     };
     let mut context = None;
@@ -2936,7 +3072,7 @@ pub fn review_pr(
         let mut outcomes = gates::run_sandbox_tier(
             env.backend,
             &sandbox,
-            &in_sandbox_path(&clone),
+            &reviewer_clone(prepared, &clone),
             "pr",
             &gates.sandbox,
             gates.timeout,
@@ -2947,15 +3083,7 @@ pub fn review_pr(
         Ok(Some(finish_gating(prepared, "pr", outcomes, None)?))
     })();
     report.warnings.extend(opened);
-    let cleanup = |prepared: &mut Prepared| {
-        let _ = env.backend.remove(&sandbox);
-        if let Err(e) = remove_with_retries(&clone) {
-            prepared
-                .record
-                .notes
-                .push(format!("could not remove {}: {e}", clone.display()));
-        }
-    };
+    let cleanup = |prepared: &mut Prepared| remove_reviewer(env, prepared, &sandbox, &clone);
     match gated_or_ready {
         Err(e) => {
             cleanup(prepared);
@@ -3100,16 +3228,30 @@ pub(super) struct FixInput {
 }
 
 impl FixInput {
-    /// Writes the input and the prompt into the worker's clone, refusing a link the agent left.
-    pub(super) fn place(&self, workspace: &Path) -> Result<()> {
-        repo::write_agent_files(
-            workspace,
-            &[
-                (self.extra_name, self.extra_text.as_bytes()),
-                ("fix-prompt.md", self.prompt.as_bytes()),
-            ],
-            Existing::Refuse,
-        )
+    /// Writes the input and the prompt into the worker's clone, refusing a link the agent left;
+    /// into a cloud clone they go by copy, from a fresh staging folder (milestone 4 slice 5).
+    pub(super) fn place(&self, backend: &dyn SandboxBackend, prepared: &Prepared) -> Result<()> {
+        let files = [
+            (self.extra_name, self.extra_text.as_bytes()),
+            ("fix-prompt.md", self.prompt.as_bytes()),
+        ];
+        if prepared.record.location == Location::Local {
+            return repo::write_agent_files(&prepared.workspace, &files, Existing::Refuse);
+        }
+        let worker = prepared
+            .record
+            .worker
+            .as_ref()
+            .context("the task has no worker")?;
+        let staging = Staged::fresh(&prepared.meta, "fix-input")?;
+        let mut staged = Vec::new();
+        for (name, bytes) in files {
+            let host = staging.dir().join(name);
+            fs::write(&host, bytes).with_context(|| format!("cannot write {}", host.display()))?;
+            staged.push((host, name));
+        }
+        let control = format!("{}/{AGENT_DIR}", prepared.sandbox_clone().to_string_lossy());
+        copy_in_all(backend, &worker.sandbox, &control, &staged)
     }
 }
 
@@ -3177,6 +3319,16 @@ pub(super) fn start_fix_round(
         .record
         .advance(Stage::Fixing, now(), Process::current(env.probe))?;
     record::write(&prepared.meta, &prepared.record)?;
+    // A cloud fix round runs in the task's worker sandbox, made again when it is gone (P5 (d)).
+    if let Err(e) = ensure_cloud_worker(env, prepared) {
+        prepared
+            .record
+            .notes
+            .push(format!("fix round: the worker sandbox: {e:#}"));
+        prepared.record.finish(Status::Failed)?;
+        record::write(&prepared.meta, &prepared.record)?;
+        return Err(e);
+    }
 
     // The round's input is kept in the task's folder too: a gate's output as `gate-failure.md`
     // (a review's is `review.md` already), so `task resume` can run the round again with it.
@@ -3186,7 +3338,7 @@ pub(super) fn start_fix_round(
     } else {
         let _ = fs::remove_file(&gate_copy);
     }
-    input.place(&prepared.workspace)?;
+    input.place(env.backend, prepared)?;
     fs::write(prepared.meta.join("fix-prompt.md"), &input.prompt)?;
     fix(env, prepared)
 }
@@ -3238,7 +3390,7 @@ fn fix(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
     let result = match headless::run(
         env.backend,
         &sandbox,
-        &in_sandbox_path(&prepared.workspace),
+        &prepared.sandbox_clone(),
         worker.harness,
         FIX_PROMPT,
         &HeadlessOpts {
@@ -3308,7 +3460,52 @@ pub struct Reviewed {
 /// (the risk floor needs them; decision 176). Returns the warnings to print.
 pub fn check_reviewer(env: &TaskEnv, task: &Prepared) -> Result<Vec<String>> {
     check_changed_paths(task)?;
-    check_reviewer_inputs(env.config_dir, env.backend, env.config)
+    let warnings = check_reviewer_inputs(
+        env.config_dir,
+        env.backend,
+        env.config,
+        task.record.location,
+    )?;
+    if task.record.location == Location::Cloud && may_fix(&task.record) {
+        check_cloud_rebuild(env, &task.record)?;
+    }
+    Ok(warnings)
+}
+
+/// Whether a review of this task may still run a fix round: it has a worker and fix rounds left
+/// in its budget (a gate's failure or a review's findings can each start one).
+fn may_fix(record: &Record) -> bool {
+    record.kind != Kind::Pr && record.worker.is_some() && record.round < record.fix_rounds
+}
+
+/// The cloud preflight of the worker sandbox a fix round would make again if it is gone by then
+/// (milestone 4 slice 5): with the worker's own recorded profile and resources, never the
+/// reviewer's, the worker's TTL and a committer identity for its clone, all before the review
+/// changes anything. Whether it is gone is only known at the fix round, so this runs whenever one
+/// may come.
+fn check_cloud_rebuild(env: &TaskEnv, record: &Record) -> Result<()> {
+    let worker = record.worker.as_ref().context("the task has no worker")?;
+    let profile_name = worker_profile(record, worker)?;
+    worker_resources(record, worker)?;
+    let global = GlobalConfig::load(env.config_dir)?;
+    let profile = Profile::load(global.profiles_dir(), profile_name)?;
+    cloud_preflight(
+        env.backend,
+        env.config.worker.harness,
+        "the worker",
+        profile_name,
+        &profile,
+    )?;
+    refuse_strict_cloud(profile_name, &profile)?;
+    lifetime::worker_ttl(env.config)?;
+    if env.identity.is_none() {
+        bail!(
+            "task {} may need its cloud worker sandbox made again for a fix round, and there is \
+             no committer identity for its clone; set git's user.name and user.email",
+            record.id
+        );
+    }
+    Ok(())
 }
 
 /// The changed-paths part of [`check_reviewer`], for a caller that must make it after fetching
@@ -3322,21 +3519,42 @@ fn check_changed_paths(task: &Prepared) -> Result<()> {
 
 /// The checks of [`check_reviewer`] without a task, so `task run` can make them before its worker
 /// has created anything.
+///
+/// At [`Location::Cloud`], `backend` is the cloud instance and the checks are the cloud preflight
+/// (decision 261) for the reviewer's harness and profile, its strict refusal (slice 7) and its
+/// TTL (milestone 4 slice 5), instead of the local secret check.
 pub fn check_reviewer_inputs(
     config_dir: &Path,
     backend: &dyn SandboxBackend,
     config: &TaskConfig,
+    location: Location,
 ) -> Result<Vec<String>> {
     let global = GlobalConfig::load(config_dir)?;
     let reviewer = &config.reviewer;
-    let profile = Profile::load(global.profiles_dir(), &config.sandbox.profile)?;
-    check_secrets(
-        backend,
-        reviewer.harness,
-        "the reviewer",
-        &config.sandbox.profile,
-        &profile,
-    )?;
+    let profile_name = &config.sandbox.profile;
+    let profile = Profile::load(global.profiles_dir(), profile_name)?;
+    match location {
+        Location::Local => {
+            check_secrets(
+                backend,
+                reviewer.harness,
+                "the reviewer",
+                profile_name,
+                &profile,
+            )?;
+        }
+        Location::Cloud => {
+            cloud_preflight(
+                backend,
+                reviewer.harness,
+                "the reviewer",
+                profile_name,
+                &profile,
+            )?;
+            refuse_strict_cloud(profile_name, &profile)?;
+            lifetime::reviewer_ttl(config)?;
+        }
+    }
     let mut warnings = config.warnings.clone();
     warnings.extend(
         reviewer
@@ -3350,21 +3568,40 @@ pub fn check_reviewer_inputs(
 /// caller can check the worker's secret before a destructive action (`task run --spec --restart`'s
 /// discard, issue #194 review finding M-2) rather than only inside the preparation that runs after
 /// it. Mirrors [`check_reviewer_inputs`] for the worker.
+/// At [`Location::Cloud`], as [`check_reviewer_inputs`] there: the cloud preflight, the strict
+/// refusal and the worker's TTL.
 pub fn check_worker_inputs(
     config_dir: &Path,
     backend: &dyn SandboxBackend,
     config: &TaskConfig,
+    location: Location,
 ) -> Result<Vec<String>> {
     let global = GlobalConfig::load(config_dir)?;
     let worker = &config.worker;
-    let profile = Profile::load(global.profiles_dir(), &config.sandbox.profile)?;
-    check_secrets(
-        backend,
-        worker.harness,
-        "the worker",
-        &config.sandbox.profile,
-        &profile,
-    )?;
+    let profile_name = &config.sandbox.profile;
+    let profile = Profile::load(global.profiles_dir(), profile_name)?;
+    match location {
+        Location::Local => {
+            check_secrets(
+                backend,
+                worker.harness,
+                "the worker",
+                profile_name,
+                &profile,
+            )?;
+        }
+        Location::Cloud => {
+            cloud_preflight(
+                backend,
+                worker.harness,
+                "the worker",
+                profile_name,
+                &profile,
+            )?;
+            refuse_strict_cloud(profile_name, &profile)?;
+            lifetime::worker_ttl(config)?;
+        }
+    }
     let mut warnings = config.warnings.clone();
     warnings.extend(worker.harness.unsupported(&profile, "the worker's sandbox"));
     Ok(warnings)
@@ -3408,13 +3645,7 @@ pub fn run_reviewer(env: &TaskEnv, prepared: &mut Prepared, round: u32) -> Resul
     let result = review_round(env, prepared, round, &clone, &sandbox, &earlier);
 
     // Always: the reviewer's sandbox and clone are gone, whatever happened.
-    let _ = env.backend.remove(&sandbox);
-    if let Err(e) = remove_with_retries(&clone) {
-        prepared
-            .record
-            .notes
-            .push(format!("could not remove {}: {e}", clone.display()));
-    }
+    remove_reviewer(env, prepared, &sandbox, &clone);
     match result {
         Ok(outcome) => {
             let must_fix = outcome.must_fix;
@@ -3450,6 +3681,23 @@ pub fn run_reviewer(env: &TaskEnv, prepared: &mut Prepared, round: u32) -> Resul
             record::write(&prepared.meta, &prepared.record)?;
             Err(e)
         }
+    }
+}
+
+/// Removes the reviewer's sandbox and its host clone after its round, on every path: a cloud
+/// one through [`release_cloud_sandbox`] (retried, stamped, then its scoped secrets), which has
+/// no host clone.
+fn remove_reviewer(env: &TaskEnv, prepared: &mut Prepared, sandbox: &str, clone: &Path) {
+    if prepared.record.location == Location::Cloud {
+        release_cloud_sandbox(env, prepared, sandbox);
+        return;
+    }
+    let _ = env.backend.remove(sandbox);
+    if let Err(e) = remove_with_retries(clone) {
+        prepared
+            .record
+            .notes
+            .push(format!("could not remove {}: {e}", clone.display()));
     }
 }
 
@@ -3549,6 +3797,15 @@ fn with_stale_lock_hint(
     }
 }
 
+/// The reviewer's clone as its sandbox sees it: the recorded path in a cloud sandbox, else the
+/// mounted host clone.
+fn reviewer_clone(prepared: &Prepared, clone: &Path) -> PathBuf {
+    match (prepared.record.location, &prepared.record.reviewer) {
+        (Location::Cloud, Some(reviewer)) => PathBuf::from(&reviewer.workspace),
+        _ => in_sandbox_path(clone),
+    }
+}
+
 /// The command that continues a task's failed or interrupted stage (issue 118).
 fn resume_command(task: &Record) -> String {
     match task.kind {
@@ -3560,6 +3817,7 @@ fn resume_command(task: &Record) -> String {
 /// Makes the reviewer's workspace: a clean clone of the task branch (a pull request's head for
 /// a PR task) with the context and the prompt in `.sbxm-task/`, and the reviewer's own sandbox
 /// over it. Nothing has run in the sandbox yet. Returns the warning of a template it couldn't use.
+/// A cloud task's goes through [`open_cloud_review`] instead: there is no host clone.
 fn open_review_workspace(
     env: &TaskEnv,
     prepared: &mut Prepared,
@@ -3568,6 +3826,9 @@ fn open_review_workspace(
     sandbox: &str,
     earlier: &[String],
 ) -> Result<Vec<String>> {
+    if prepared.record.location == Location::Cloud {
+        return open_cloud_review(env, prepared, round, sandbox, earlier);
+    }
     let reviewer = &env.config.reviewer;
     let repo_git = prepared.meta.join("repo.git");
     let branch = prepared.record.branch.clone();
@@ -3605,6 +3866,48 @@ fn open_review_workspace(
     let info = clone.join(".git").join("info");
     fs::create_dir_all(&info)?;
     fs::write(info.join("exclude"), format!("# sbxm\n{AGENT_DIR}/\n"))?;
+    let files = review_files(env, prepared, round, earlier)?;
+    // The checkout is the worker's committed tree, so `.sbxm-task` may be a link it planted.
+    let agent_files: Vec<(&str, &[u8])> = files
+        .iter()
+        .map(|(name, text)| (*name, text.as_bytes()))
+        .collect();
+    repo::write_agent_files(clone, &agent_files, Existing::Replace)?;
+
+    // The record goes first: the create takes minutes, and a kill during it must leave the name
+    // that `task rm` needs to find the sandbox.
+    prepared.record.reviewer = Some(reviewer_agent(env, sandbox, slashes(clone), &plan));
+    record::write(&prepared.meta, &prepared.record)?;
+    plan.create(env.backend, sandbox, reviewer.harness, clone)?;
+    Ok(warnings)
+}
+
+/// The reviewer's record entry. Its sandbox is rebuilt from the current config every round and is
+/// never resumed, so it has no reconstruction settings to save (issue 118, PR 163 review M-2).
+fn reviewer_agent(env: &TaskEnv, sandbox: &str, workspace: String, plan: &SandboxPlan) -> Agent {
+    let reviewer = &env.config.reviewer;
+    Agent {
+        harness: reviewer.harness.as_str().to_owned(),
+        model: reviewer.model.clone(),
+        sandbox: sandbox.to_owned(),
+        workspace,
+        profile: None,
+        cpus: None,
+        memory: None,
+        template: plan.template.clone(),
+        run: None,
+    }
+}
+
+/// What a review round's `.sbxm-task/` holds, as `(name, text)`: the task's source (the issue,
+/// the PR's context or the spec), the rendered prompt, and every earlier round's review when there
+/// is one. The prompt is also kept as `reviewer-prompt-<round>.md` in the task's folder.
+fn review_files(
+    env: &TaskEnv,
+    prepared: &Prepared,
+    round: u32,
+    earlier: &[String],
+) -> Result<Vec<(&'static str, String)>> {
     let (source_file, role) = match prepared.record.kind {
         Kind::Pr => ("issue.md", Role::ReviewerPr),
         Kind::Spec => ("source.md", Role::ReviewerSpec),
@@ -3626,7 +3929,7 @@ fn open_review_workspace(
         &[
             ("issue", &issue),
             ("number", &prepared.record.number.to_string()),
-            ("branch", &branch),
+            ("branch", &prepared.record.branch),
             ("base", &prepared.record.base),
             ("scope_base", &scope_base),
             ("repo", &prepared.record.repo),
@@ -3636,39 +3939,158 @@ fn open_review_workspace(
             ("previous_review_path", ".sbxm-task/previous-review.md"),
         ],
     )?;
-    // The checkout is the worker's committed tree, so `.sbxm-task` may be a link it planted.
-    let mut agent_files: Vec<(&str, &[u8])> = vec![
-        (source_file, issue.as_bytes()),
-        ("prompt.md", prompt.as_bytes()),
-    ];
-    let combined_earlier_reviews = combined_earlier_reviews(earlier);
-    if let Some(text) = &combined_earlier_reviews {
-        agent_files.push(("previous-review.md", text.as_bytes()));
-    }
-    repo::write_agent_files(clone, &agent_files, Existing::Replace)?;
     fs::write(
         prepared.meta.join(format!("reviewer-prompt-{round}.md")),
         &prompt,
     )?;
+    let mut files = vec![(source_file, issue), ("prompt.md", prompt)];
+    if let Some(text) = combined_earlier_reviews(earlier) {
+        files.push(("previous-review.md", text));
+    }
+    Ok(files)
+}
 
-    // The record goes first: the create takes minutes, and a kill during it must leave the name
-    // that `task rm` needs to find the sandbox.
-    prepared.record.reviewer = Some(Agent {
-        harness: reviewer.harness.as_str().to_owned(),
-        model: reviewer.model.clone(),
-        sandbox: sandbox.to_owned(),
-        workspace: slashes(clone),
-        // The reviewer's sandbox is rebuilt from the current config every round and is never
-        // resumed, so it has no reconstruction settings to save (issue 118, PR 163 review M-2).
-        profile: None,
-        cpus: None,
-        memory: None,
-        template: plan.template.clone(),
-        run: None,
-    });
+/// The committer identity a reviewer's cloud clone is given: the reviewer commits nothing.
+fn reviewer_identity() -> Identity {
+    Identity {
+        name: "sbxm".into(),
+        email: "sbxm@localhost".into(),
+    }
+}
+
+/// [`open_review_workspace`] for a cloud task (milestone 4 slice 5): a reviewer sandbox of its
+/// own, from the reviewer profile's two kits (no templates in the cloud, decision 254), with the
+/// reviewer TTL and a `reviewer` lifetime entry; the task branch goes in as a bundle made on the
+/// host from `repo.git` (decision 159), cloned under `$HOME/work/<id>-review`, and the round's
+/// files are copied in. A reviewer sandbox a killed run left behind is removed first.
+fn open_cloud_review(
+    env: &TaskEnv,
+    prepared: &mut Prepared,
+    round: u32,
+    sandbox: &str,
+    earlier: &[String],
+) -> Result<Vec<String>> {
+    let reviewer = &env.config.reviewer;
+    let ttl = lifetime::reviewer_ttl(env.config)?;
+    if prepared.record.has_open_sandbox(sandbox) {
+        release_cloud_sandbox(env, prepared, sandbox);
+    }
+    let mut warnings = Vec::new();
+    let plan = plan_cloud_sandbox(
+        env.config_dir,
+        env.backend,
+        &env.config.sandbox.profile,
+        reviewer.harness,
+        sandbox,
+        &Overrides {
+            cpus: env.config.sandbox.cpus,
+            memory: env.config.sandbox.memory.clone(),
+        },
+        &prepared.meta.join("kits-review"),
+        &mut warnings,
+    )?;
+    let files = review_files(env, prepared, round, earlier)?;
+
+    // The record goes first, as for a local reviewer; the clone's path is known once the sandbox
+    // answers `printenv HOME`.
+    prepared.record.reviewer = Some(reviewer_agent(env, sandbox, String::new(), &plan));
     record::write(&prepared.meta, &prepared.record)?;
-    plan.create(env.backend, sandbox, reviewer.harness, clone)?;
+    create_cloud_sandbox(env, prepared, &plan, sandbox, SandboxRole::Reviewer, ttl)?;
+
+    let staging = Staged::fresh(&prepared.meta, "review-input")?;
+    let mut staged = Vec::new();
+    for (name, text) in &files {
+        let host = staging.dir().join(name);
+        fs::write(&host, text).with_context(|| format!("cannot write {}", host.display()))?;
+        staged.push((host, *name));
+    }
+    let repo_git = prepared.meta.join("repo.git");
+    let (id, branch, base) = (
+        prepared.record.id.clone(),
+        prepared.record.branch.clone(),
+        prepared.record.base.clone(),
+    );
+    let clone = seed_cloud_clone(
+        env.backend,
+        &prepared.meta,
+        sandbox,
+        &format!("{id}-review"),
+        &branch,
+        &|dest| repo::bundle_for_clone(&repo_git, &branch, &base, dest),
+        &reviewer_identity(),
+        &staged,
+    )?;
+    drop(staging);
+    if let Some(agent) = prepared.record.reviewer.as_mut() {
+        agent.workspace = clone;
+    }
+    record::write(&prepared.meta, &prepared.record)?;
     Ok(warnings)
+}
+
+/// Creates one of a task's cloud sandboxes from `plan`: every scoped secret first, since secrets
+/// attach at create (S14 Q2, decision 256), then the create with `ttl`, then its lifetime entry
+/// saved and its line for the screen (decision 265). What a failure leaves is removed by
+/// [`release_cloud_sandbox`].
+fn create_cloud_sandbox(
+    env: &TaskEnv,
+    prepared: &mut Prepared,
+    plan: &SandboxPlan,
+    sandbox: &str,
+    role: SandboxRole,
+    ttl: Duration,
+) -> Result<()> {
+    let harness = match role {
+        SandboxRole::Reviewer => env.config.reviewer.harness,
+        _ => env.config.worker.harness,
+    };
+    secrets::set_all(env.backend, sandbox, env.scoped_secrets)?;
+    plan.create_cloud(env.backend, sandbox, harness, ttl)?;
+    prepared
+        .record
+        .add_sandbox(sandbox, role, Location::Cloud, now(), ttl.as_secs());
+    record::write(&prepared.meta, &prepared.record)?;
+    prepared
+        .events
+        .push(lifetime::created_line(sandbox, role, ttl));
+    Ok(())
+}
+
+/// Removes one of a cloud task's sandboxes, its lifetime entry stamped, then the secrets scoped
+/// to it (slice 3's retried removal, then slice 4's), whatever went before: never fails, and what
+/// it has to say goes to `prepared.events` (a line) and `prepared.warnings`.
+fn release_cloud_sandbox(env: &TaskEnv, prepared: &mut Prepared, sandbox: &str) {
+    let stopped = lifetime::release(
+        env.backend,
+        &prepared.meta,
+        &mut prepared.record,
+        sandbox,
+        env.sleep,
+        env.scoped_secrets,
+    );
+    said(prepared, stopped);
+}
+
+/// The task stops (ready, or for any reason): its cloud worker sandbox goes now (P5 (d),
+/// decision 263), then its scoped secrets; nothing for a local task.
+fn stop_cloud_worker(env: &TaskEnv, prepared: &mut Prepared) {
+    let stopped = lifetime::release_worker(
+        env.backend,
+        &prepared.meta,
+        &mut prepared.record,
+        env.sleep,
+        env.scoped_secrets,
+    );
+    said(prepared, stopped);
+}
+
+fn said(prepared: &mut Prepared, stopped: lifetime::Stopped) {
+    for said in stopped.all() {
+        match said {
+            lifetime::Released::Line(line) => prepared.events.push(line.clone()),
+            lifetime::Released::Warning(warning) => prepared.warnings.push(warning.clone()),
+        }
+    }
 }
 
 /// Runs the reviewer in its (already open) sandbox, saves its transcript, and reads and saves what
@@ -3693,10 +4115,11 @@ fn run_review_agent(
         .changed_paths(&prepared.meta.join("repo.git"))
         .context("cannot list the task's changed paths for the risk floor")?;
     let started = Instant::now();
+    let workdir = reviewer_clone(prepared, clone);
     let result = headless::run(
         env.backend,
         sandbox,
-        &in_sandbox_path(clone),
+        &workdir,
         reviewer.harness,
         AGENT_PROMPT,
         &HeadlessOpts {
@@ -3736,7 +4159,16 @@ fn run_review_agent(
         RunStatus::Failed(why) => bail!("the reviewer failed ({why}), so its review isn't used"),
     }
 
-    let text = match repo::read_agent_file(clone, "review.md", REVIEW_CAP)? {
+    let read = match prepared.record.location {
+        Location::Local => repo::read_agent_file(clone, "review.md", REVIEW_CAP),
+        // Copied out into a fresh staging folder and read there with the same checks (slice 1).
+        Location::Cloud => {
+            let ws = workdir.to_string_lossy().into_owned();
+            copy_out_staged(env.backend, &prepared.meta, sandbox, &ws, "review.md")
+                .and_then(|staged| repo::read_agent_file(staged.dir(), "review.md", REVIEW_CAP))
+        }
+    };
+    let text = match read? {
         AgentFile::Text(text) => text,
         AgentFile::Missing => bail!("the reviewer wrote no review.md"),
         AgentFile::TooLarge(_) => {

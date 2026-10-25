@@ -68,6 +68,10 @@ pub fn run(
         backend,
         probe,
         host,
+        sleep: &std::thread::sleep,
+        // A cloud task's sandboxes follow its location from slice 6 on; no scoped secrets here.
+        scoped_secrets: &[],
+        identity: None,
     };
     pipeline::recollect_commits(&env, &prepared)?;
     let gated = pipeline::run_gates(&env, &mut prepared, "on-demand", opts.tiers)?;

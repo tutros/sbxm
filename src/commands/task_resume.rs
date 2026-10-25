@@ -86,6 +86,10 @@ pub fn run(
         backend,
         probe,
         host,
+        sleep: &std::thread::sleep,
+        // A cloud task's sandboxes follow its location from slice 6 on; no scoped secrets here.
+        scoped_secrets: &[],
+        identity: None,
     };
     resume::check_can_resume(&prepared.record, probe, opts.rounds)?;
     disk::require(&global, config_dir, &opts.disk)?;

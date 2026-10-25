@@ -116,12 +116,11 @@ pub fn run(
     }
     // Every input is checked before anything is created.
     let mut config = TaskConfig::load(&opts.repo_root)?;
-    if let Target::Pr(_) = opts.target {
-        pipeline::refuse_cloud(
-            pipeline::choose_location(opts.location, &config),
-            "`task review --pr`",
-            "set [sandbox] location = \"local\" in sbxm-task.toml to review it here",
-        )?;
+    if opts.location.is_some() && !matches!(opts.target, Target::Pr(_)) {
+        bail!(
+            "--cloud and --local go with --pr only; a task under review runs where its task.json \
+             says (decision 253)"
+        );
     }
     if let Some(harness) = opts.reviewer_harness {
         let harness = headless_harness("--reviewer-harness", harness.as_str(), "tasks")
@@ -146,7 +145,6 @@ pub fn run(
     for warning in &config.warnings {
         writeln!(warn, "warning: {warning}")?;
     }
-    disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?;
     match &opts.target {
         Target::Issue(n) => run_issue(
             config_dir, opts, &config, *n, backend, probe, host, out, warn,
@@ -156,6 +154,7 @@ pub fn run(
         ),
         Target::Spec(path) => run_spec(
             config_dir,
+            opts,
             &config,
             path,
             opts.resolved_spec_id.as_deref(),
@@ -168,10 +167,43 @@ pub fn run(
     }
 }
 
+/// The free-space check of the sandbox drive (decision 194), for a review whose sandboxes run
+/// here: a cloud sandbox doesn't use that drive (P11, decision 262(h)).
+fn check_disk(config_dir: &std::path::Path, opts: &Options, location: Location) -> Result<()> {
+    if location == Location::Local {
+        disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?;
+    }
+    Ok(())
+}
+
+/// The committer identity a cloud worker sandbox made again for a fix round gives its clone
+/// (milestone 4 slice 5): the flag's (tests), else the user's global git config, read before
+/// anything changes; `None` for a local task, which never makes one.
+fn cloud_identity(opts: &Options, task: &record::Record) -> Result<Option<Identity>> {
+    if task.location == Location::Local || task.worker.is_none() {
+        return Ok(None);
+    }
+    match &opts.identity {
+        Some(identity) => Ok(Some(identity.clone())),
+        None => Identity::read_from(None).map(Some),
+    }
+}
+
+/// What the review's cloud sandboxes said on the way (their creates and removals, decision
+/// 265): printed whether the review succeeded or not, so `run.log` has every one.
+fn print_said(out: &mut dyn Write, warn: &mut dyn Write, prepared: &mut Prepared) {
+    for line in prepared.events.drain(..) {
+        let _ = writeln!(out, "{line}");
+    }
+    for warning in prepared.warnings.drain(..) {
+        let _ = writeln!(warn, "warning: {warning}");
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_issue(
     config_dir: &std::path::Path,
-    _opts: &Options,
+    opts: &Options,
     config: &TaskConfig,
     number: u32,
     backend: &dyn SandboxBackend,
@@ -183,6 +215,11 @@ fn run_issue(
     let base_dir = GlobalConfig::load(config_dir)?.base_dir;
     let id = format!("issue-{number}");
     let mut prepared = Prepared::open(&base_dir, &id)?;
+    // The task's sandboxes run where it was started (decision 253).
+    let location = prepared.record.location;
+    check_disk(config_dir, opts, location)?;
+    let identity = cloud_identity(opts, &prepared.record)?;
+    let backend = backend.located(location);
     // The worker is whoever the task recorded: a flag of `task start`/`run` may have chosen it, and
     // the file read now can say something else. The fix round runs that harness in that sandbox,
     // and the default reviewer must differ from it (decision 148).
@@ -200,8 +237,13 @@ fn run_issue(
         backend,
         probe,
         host,
+        sleep: &std::thread::sleep,
+        scoped_secrets: &[],
+        identity: identity.as_ref(),
     };
-    let report = pipeline::review_issue(&env, &mut prepared)?;
+    let reviewed = pipeline::review_issue(&env, &mut prepared);
+    print_said(out, warn, &mut prepared);
+    let report = reviewed?;
     let meta = record::task_dir(&base_dir, &id);
     if let Some(failed) = print_review(out, warn, config, &id, &meta, &report, &prepared.record)? {
         match &report.gates_could_not_run {
@@ -337,6 +379,7 @@ pub(super) fn print_review<'a>(
 #[allow(clippy::too_many_arguments)]
 fn run_spec(
     config_dir: &std::path::Path,
+    opts: &Options,
     config: &TaskConfig,
     path: &std::path::Path,
     id_hint: Option<&str>,
@@ -352,7 +395,11 @@ fn run_spec(
         None => record::spec_id(path)?.0,
     };
     let mut prepared = Prepared::open(&base_dir, &id)?;
-    // As `run_issue`: the worker is whoever the task recorded.
+    // As `run_issue`: where the task was started, and the worker it recorded.
+    let location = prepared.record.location;
+    check_disk(config_dir, opts, location)?;
+    let identity = cloud_identity(opts, &prepared.record)?;
+    let backend = backend.located(location);
     let mut config = config.clone();
     if let Some(worker) = &prepared.record.worker {
         if let Ok(harness) = <Harness as clap::ValueEnum>::from_str(&worker.harness, true) {
@@ -367,8 +414,13 @@ fn run_spec(
         backend,
         probe,
         host,
+        sleep: &std::thread::sleep,
+        scoped_secrets: &[],
+        identity: identity.as_ref(),
     };
-    let report = pipeline::review_issue(&env, &mut prepared)?;
+    let reviewed = pipeline::review_issue(&env, &mut prepared);
+    print_said(out, warn, &mut prepared);
+    let report = reviewed?;
     let meta = record::task_dir(&base_dir, &id);
     if let Some(failed) = print_review(out, warn, config, &id, &meta, &report, &prepared.record)? {
         match &report.gates_could_not_run {
@@ -390,6 +442,14 @@ fn run_spec(
         writeln!(out, "{hint}")?;
     }
     Ok(())
+}
+
+/// "here" or "in the cloud", for a message.
+fn where_(location: Location) -> &'static str {
+    match location {
+        Location::Local => "here",
+        Location::Cloud => "in the cloud",
+    }
 }
 
 fn check_base(base: &str) -> Result<()> {
@@ -414,6 +474,27 @@ fn run_pr(
 ) -> Result<()> {
     let base_dir = GlobalConfig::load(config_dir)?.base_dir;
     let id = format!("pr-{number}");
+    // A new task's location is the flag's, else the config's (P14); a task that exists runs
+    // where its record says (decision 253), and a flag that says otherwise is refused rather
+    // than quietly ignored.
+    let location = match finish::exists(&base_dir, &id) {
+        false => pipeline::choose_location(opts.location, config),
+        true => {
+            let recorded = Prepared::open(&base_dir, &id)?.record.location;
+            if let Some(flag) = opts.location.filter(|l| *l != recorded) {
+                bail!(
+                    "task {id} runs {} (its task.json says so), not {}; review it again without \
+                     --{}, or remove it first with `sbxm task rm --pr {number}`",
+                    where_(recorded),
+                    where_(flag),
+                    flag.as_str()
+                );
+            }
+            recorded
+        }
+    };
+    check_disk(config_dir, opts, location)?;
+    let backend = backend.located(location);
     let repo_name = resolve_repo(opts.repo.as_deref(), &opts.repo_root)?;
     // Checked before the refusal below, which prints it in a command.
     if let Some(base) = &opts.base {
@@ -464,7 +545,7 @@ fn run_pr(
         probe,
         host,
         sleep: &std::thread::sleep,
-        // No review runs in the cloud yet (decision 261, slice 5), so no scoped secrets.
+        // Empty in production while P8 (a) holds (slice 4).
         scoped_secrets: &[],
     };
 
@@ -479,7 +560,7 @@ fn run_pr(
             Some(pr) => pr,
             None => github.pr(&repo_name, number)?,
         };
-        let prepared = pipeline::prepare_pr(&ctx, &pr)?;
+        let prepared = pipeline::prepare_pr_at(&ctx, &pr, location)?;
         for warning in prepared
             .warnings
             .iter()
@@ -491,7 +572,9 @@ fn run_pr(
     };
 
     let meta = record::task_dir(&base_dir, &id);
-    let report = pipeline::review_pr(&ctx.env(), github, &mut prepared, opts.force)?;
+    let reviewed = pipeline::review_pr(&ctx.env(), github, &mut prepared, opts.force);
+    print_said(out, warn, &mut prepared);
+    let report = reviewed?;
     for warning in report
         .warnings
         .iter()

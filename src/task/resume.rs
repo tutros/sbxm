@@ -196,7 +196,7 @@ pub fn resume(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Re
     // prompt written into the clone, before the sandbox, the budget or the stage change.
     let fix_input = if prepared.record.stage == Stage::Ready {
         let input = pipeline::fix_input(env, prepared, None)?;
-        input.place(&prepared.workspace)?;
+        input.place(env.backend, prepared)?;
         Some(input)
     } else {
         None

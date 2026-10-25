@@ -138,8 +138,8 @@ pub enum Released {
 /// Everything [`release_worker`] has to say, in the order it happened.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Stopped {
-    /// The worker sandbox's removal: `None` for a local task, or when the worker sandbox has no
-    /// entry still open (it was never created, or is already removed).
+    /// The sandbox's removal: `None` for a local task, or when the sandbox has no entry still
+    /// open (it was never created, or is already removed).
     pub sandbox: Option<Released>,
     /// The task's scoped secrets, removed after the sandbox (slice 4, decision 256): one entry
     /// per secret the cloud listed, or one warning for a list it wouldn't give; empty for a task
@@ -166,28 +166,38 @@ pub fn release_worker(
     sleep: &dyn Fn(Duration),
     scoped_secrets: &[ScopedSecret],
 ) -> Stopped {
+    match task.worker.as_ref().map(|w| w.sandbox.clone()) {
+        Some(name) => release(backend, meta, task, &name, sleep, scoped_secrets),
+        None => Stopped::default(),
+    }
+}
+
+/// [`release_worker`] for any of a cloud task's sandboxes, by name (a reviewer's after its round,
+/// milestone 4 slice 5): removed, retried, when it has an entry still open, then every secret
+/// scoped to it when the task has `scoped_secrets`. Nothing for a local task.
+pub fn release(
+    backend: &dyn SandboxBackend,
+    meta: &Path,
+    task: &mut Record,
+    name: &str,
+    sleep: &dyn Fn(Duration),
+    scoped_secrets: &[ScopedSecret],
+) -> Stopped {
     let mut stopped = Stopped::default();
     if task.location != Location::Cloud {
         return stopped;
     }
-    let Some(name) = task.worker.as_ref().map(|w| w.sandbox.clone()) else {
-        return stopped;
-    };
-    if task
-        .sandboxes
-        .iter()
-        .any(|s| s.name == name && s.removed_at.is_none())
-    {
-        stopped.sandbox = Some(remove_worker(backend, meta, task, &name, sleep));
+    if task.has_open_sandbox(name) {
+        stopped.sandbox = Some(remove_entry(backend, meta, task, name, sleep));
     }
     if !scoped_secrets.is_empty() {
-        stopped.secrets = secrets::remove_all(backend, &name);
+        stopped.secrets = secrets::remove_all(backend, name);
     }
     stopped
 }
 
-/// The worker sandbox's removal, retried, and its lifetime entry stamped and saved.
-fn remove_worker(
+/// A sandbox's removal, retried, and its lifetime entry stamped and saved.
+fn remove_entry(
     backend: &dyn SandboxBackend,
     meta: &Path,
     task: &mut Record,

@@ -539,6 +539,14 @@ impl Record {
         });
     }
 
+    /// Whether the sandbox `name` has an entry not yet stamped removed: one of the task's own
+    /// creates made it, and no removal has been recorded since.
+    pub fn has_open_sandbox(&self, name: &str) -> bool {
+        self.sandboxes
+            .iter()
+            .any(|s| s.name == name && s.removed_at.is_none())
+    }
+
     /// Stamps the removal of the sandbox `name`'s latest entry still open; `false` if it has
     /// none.
     pub fn sandbox_removed(&mut self, name: &str, now: u64) -> bool {

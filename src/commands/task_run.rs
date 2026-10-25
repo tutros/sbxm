@@ -158,10 +158,12 @@ fn run_issue(
     // phases will build from their flags.
     {
         let mut config = TaskConfig::load(&opts.repo_root)?;
+        // An issue task's sandboxes can't run in the cloud yet (milestone 4 slice 5b builds
+        // them): refused rather than run here (decision 261).
         pipeline::refuse_cloud(
             pipeline::choose_location(opts.location, &config),
-            "`task run`",
-            "set [sandbox] location = \"local\" in sbxm-task.toml to run it here",
+            "`task run --issue`",
+            "run it with --local, or run a spec task with --spec <file> --cloud",
         )?;
         if let Some(harness) = opts.worker_harness {
             let harness = headless_harness("--worker-harness", harness.as_str(), "tasks")
@@ -177,7 +179,7 @@ fn run_issue(
             config.sandbox.profile = profile.clone();
         }
         disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?;
-        pipeline::check_reviewer_inputs(config_dir, backend, &config)?;
+        pipeline::check_reviewer_inputs(config_dir, backend, &config, Location::Local)?;
     }
 
     let start = task_start::Options {
@@ -366,13 +368,18 @@ fn run_spec_task(
 
     // As for `--issue`: the reviewer's secret and profile are checked now too, before the worker
     // has spent its time (spec §5.2).
-    {
+    let location = {
         let mut config = TaskConfig::load(&opts.repo_root)?;
-        pipeline::refuse_cloud(
-            pipeline::choose_location(opts.location, &config),
-            "`task run`",
-            "set [sandbox] location = \"local\" in sbxm-task.toml to run it here",
-        )?;
+        let location = pipeline::choose_location(opts.location, &config);
+        if restart.is_some() {
+            // `--restart` removes the old task's sandboxes, which follows the recorded location
+            // only from milestone 4 slice 6 on.
+            pipeline::refuse_cloud(
+                location,
+                "`task run --restart`",
+                "restart it with --local, or remove the task first and run it again",
+            )?;
+        }
         if let Some(harness) = opts.worker_harness {
             let harness = headless_harness("--worker-harness", harness.as_str(), "tasks")
                 .map_err(|e| anyhow!(e))?;
@@ -386,9 +393,15 @@ fn run_spec_task(
         if let Some(profile) = &opts.profile {
             config.sandbox.profile = profile.clone();
         }
-        disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?;
-        pipeline::check_reviewer_inputs(config_dir, backend, &config)?;
-    }
+        // A cloud sandbox doesn't use the drive of `sbx`'s local sandbox state (P11, decision
+        // 262(h)).
+        if location == Location::Local {
+            disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?;
+        }
+        // At the cloud, the cloud preflight for the reviewer's sandboxes too (decision 261).
+        pipeline::check_reviewer_inputs(config_dir, backend.located(location), &config, location)?;
+        location
+    };
 
     let start = task_start::SpecOptions {
         repo_root: opts.repo_root.clone(),
@@ -402,7 +415,7 @@ fn run_spec_task(
         clone_source: opts.clone_source.clone(),
         identity: opts.identity.clone(),
         disk: opts.disk.clone(),
-        location: None,
+        location: Some(location),
     };
     // The same preflight `task_start::run_spec` itself runs, so a bad --time-limit, repo,
     // identity, base or spec file is caught here too: `--restart`'s discard below must not cost
@@ -412,7 +425,12 @@ fn run_spec_task(
     // The worker's secret, checked the same way the reviewer's already is above, before anything
     // is discarded: a missing one must not be found only after the old task is gone (issue #194
     // review finding M-2).
-    pipeline::check_worker_inputs(config_dir, backend, &resolved.config)?;
+    pipeline::check_worker_inputs(
+        config_dir,
+        backend.located(location),
+        &resolved.config,
+        location,
+    )?;
 
     let mut aside: Option<finish::SetAside> = None;
     if let Some(restart) = restart {
@@ -490,7 +508,7 @@ fn run_spec_task(
         &mut warn,
         &on_prepared,
         &std::thread::sleep,
-        // `task run --spec` refuses the cloud before this (decision 261), so no scoped secrets.
+        // Empty in production while P8 (a) holds (slice 4).
         &[],
     );
     out.write_all(without_next(&started).as_bytes())?;
@@ -517,7 +535,12 @@ fn run_spec_task(
         return Err(e);
     }
 
-    let disk = review_has_room(config_dir, &opts.disk, &task_start::spec_flag(&opts.spec))?;
+    let disk = match location {
+        Location::Local => {
+            review_has_room(config_dir, &opts.disk, &task_start::spec_flag(&opts.spec))?
+        }
+        Location::Cloud => opts.disk.clone(),
+    };
     task_review::run(
         config_dir,
         &task_review::Options {

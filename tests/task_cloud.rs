@@ -107,80 +107,46 @@ fn an_issue_start_in_a_cloud_repo_is_refused_before_anything_and_local_overrides
     assert!(!github.calls().is_empty());
 }
 
+/// Milestone 4 slice 5 keeps slice 1's refusal for an issue target (slice 5b builds it): `task run
+/// --issue` in the cloud, by the config or by `--cloud`, is refused before anything.
 #[test]
-fn task_run_in_a_cloud_repo_is_refused_before_anything() {
-    use sbxm::commands::task_run::{self, SpecOptions};
+fn task_run_issue_in_the_cloud_is_refused_before_anything() {
+    use sbxm::commands::task_run::{self, Options};
 
-    let f = fixture_with(CLOUD_TOML);
-    let spec = common::task_fixture::spec_file(&f, "Build a thing.\n");
-    let backend = common::task_fixture::backend();
-    let github = sbxm::github::fake::FakeGitHub::default();
-    let result = task_run::run_spec(
-        &f.env.config_dir(),
-        &SpecOptions {
-            repo_root: f.env.tmp.path().join("target-repo"),
-            spec,
-            worker_harness: None,
-            worker_model: None,
-            reviewer_harness: None,
-            reviewer_model: None,
-            time_limit: None,
-            reviewer_time_limit: None,
-            profile: None,
-            base: Some("main".into()),
-            repo: Some("o/r".into()),
-            clone_source: Some(common::task_fixture::source(&f)),
-            identity: Some(identity()),
-            disk: Default::default(),
-            location: None,
-        },
-        None,
-        &backend,
-        &github,
-        &common::task_fixture::Probe,
-        &sbxm::task::gates::FakeHostRunner::default(),
-        &mut Vec::new(),
-        &mut Vec::new(),
-    );
+    for (toml, location) in [(CLOUD_TOML, None), (LOCAL_TOML, Some(Location::Cloud))] {
+        let f = fixture_with(toml);
+        let backend = common::task_fixture::backend();
+        let github = sbxm::github::fake::FakeGitHub::default();
+        let result = task_run::run(
+            &f.env.config_dir(),
+            &Options {
+                repo_root: f.env.tmp.path().join("target-repo"),
+                issue: 41,
+                worker_harness: None,
+                worker_model: None,
+                reviewer_harness: None,
+                reviewer_model: None,
+                time_limit: None,
+                reviewer_time_limit: None,
+                profile: None,
+                base: Some("main".into()),
+                repo: Some("o/r".into()),
+                clone_source: Some(common::task_fixture::source(&f)),
+                identity: Some(identity()),
+                disk: Default::default(),
+                location,
+            },
+            None,
+            &backend,
+            &github,
+            &common::task_fixture::Probe,
+            &sbxm::task::gates::FakeHostRunner::default(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+        );
 
-    assert_refused_before_anything(result, &f, &backend, &github, "task run");
-}
-
-#[test]
-fn a_pr_review_in_a_cloud_repo_is_refused_before_anything() {
-    use sbxm::commands::task_review::{self, Options, Target};
-
-    let f = fixture_with(CLOUD_TOML);
-    let backend = common::task_fixture::backend();
-    let github = sbxm::github::fake::FakeGitHub::default();
-    let result = task_review::run(
-        &f.env.config_dir(),
-        &Options {
-            repo_root: f.env.tmp.path().join("target-repo"),
-            target: Target::Pr(7),
-            repo: Some("o/r".into()),
-            base: Some("main".into()),
-            clone_source: Some(common::task_fixture::source(&f)),
-            reviewer_harness: None,
-            reviewer_model: None,
-            reviewer_time_limit: None,
-            time_limit: None,
-            profile: None,
-            resolved_spec_id: None,
-            force: false,
-            disk: Default::default(),
-            location: None,
-            identity: None,
-        },
-        &backend,
-        &github,
-        &common::task_fixture::Probe,
-        &sbxm::task::gates::FakeHostRunner::default(),
-        &mut Vec::new(),
-        &mut Vec::new(),
-    );
-
-    assert_refused_before_anything(result, &f, &backend, &github, "task review --pr");
+        assert_refused_before_anything(result, &f, &backend, &github, "task run --issue");
+    }
 }
 
 /// The cloud sandbox's home, as `printenv HOME` reports it in the fake.
