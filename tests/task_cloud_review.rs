@@ -16,6 +16,8 @@ const LOCAL_TOML: &str = "[sandbox]\nprofile = \"default\"\nlocation = \"local\"
 const HOME: &str = "/home/agent";
 
 const CLEAN: &str = "Must-fix findings: 0\n\nRisk: low\n\nNothing found.\n";
+const ONE: &str = "Must-fix findings: 1\n\nRisk: low\n\n## Must fix\n\n### M-1 - a.txt:1 does the \
+                   wrong thing.\n";
 
 /// The cloud minimum (P12).
 const CLOUD_MIN: &str = "0.46.0";
@@ -53,9 +55,20 @@ fn cloud_backend(root: &Path, id: &str, reviews: &[&str]) -> FakeBackend {
     cloud_backend_listing(root, id, reviews, true)
 }
 
-/// [`cloud_backend`], with the worker sandbox listed as running (`listed`) or not.
+/// [`cloud_backend`], with the worker sandbox listed as running (`listed`) or not: gone
+/// (removed, or its TTL lapsed) by the time a fix round wants it. Each create of a sandbox that
+/// was there before stands for a new sandbox, so what the old one's clone held is gone from the
+/// fake's filesystem then.
 fn cloud_backend_listing(root: &Path, id: &str, reviews: &[&str], listed: bool) -> FakeBackend {
     std::fs::create_dir_all(root.join(HOME.trim_start_matches('/'))).unwrap();
+    let in_root = |path: &str| root.join(path.trim_start_matches('/'));
+    let fresh = [
+        (worker_sandbox(id), in_root(&format!("{HOME}/work/{id}"))),
+        (
+            reviewer_sandbox(id),
+            in_root(&format!("{HOME}/work/{id}-review")),
+        ),
+    ];
     let inside = root.to_string_lossy().into_owned();
     let map = move |arg: &str| arg.replace(HOME, &format!("{inside}{HOME}"));
     let hook_map = map.clone();
@@ -74,6 +87,13 @@ fn cloud_backend_listing(root: &Path, id: &str, reviews: &[&str], listed: bool) 
         Vec::new()
     };
     FakeBackend::with_secrets(&["anthropic", "openai"])
+        .with_create_hook(move |spec| {
+            for (name, clone) in &fresh {
+                if spec.name == *name && clone.exists() {
+                    std::fs::remove_dir_all(clone).unwrap();
+                }
+            }
+        })
         .with_version(CLOUD_MIN)
         .and_sandboxes(sandboxes)
         .with_sandbox_root(root)
@@ -89,7 +109,12 @@ fn cloud_backend_listing(root: &Path, id: &str, reviews: &[&str], listed: bool) 
                 let clone = PathBuf::from(hook_map(&clone));
                 std::fs::write(clone.join("a.txt"), format!("run {n}\n")).unwrap();
                 common::git(&clone, &["add", "-A"]);
-                common::git(&clone, &["commit", "-q", "-m", &format!("run {n}")]);
+                // A closing reference: the delivered branch's copy of this commit is rewritten
+                // (issue 244), so it differs from the agent's own.
+                common::git(
+                    &clone,
+                    &["commit", "-q", "-m", &format!("run {n}\n\nFixes #9")],
+                );
                 std::fs::write(clone.join(".sbxm-task").join("result.md"), "done\n").unwrap();
             } else if sandbox.contains("-review-") {
                 let n = reviewed.fetch_add(1, Ordering::SeqCst);
@@ -459,4 +484,173 @@ fn a_cloud_pr_review_runs_in_a_reviewer_sandbox_and_posts_the_review() {
         ran.out
     );
     assert!(!f.env.base_dir().join("tasks").join("pr-7-review").exists());
+}
+
+/// A fix round in the worker's clone: its input copied in, the worker, and its collection.
+fn fixed(sandbox: &str, clone: &str) -> Vec<String> {
+    let mut calls = vec![
+        format!("cp-in {sandbox} {clone}/.sbxm-task/review.md"),
+        format!("cp-in {sandbox} {clone}/.sbxm-task/fix-prompt.md"),
+    ];
+    calls.extend(worked(sandbox, clone));
+    calls
+}
+
+/// The start of a cloud `task run --spec`: the worker's sandbox, its run and its gates.
+fn started(id: &str) -> Vec<String> {
+    let (worker, clone) = (worker_sandbox(id), format!("{HOME}/work/{id}"));
+    let mut calls = seeded(&worker, &clone, id, &["source.md", "prompt.md"]);
+    calls.extend(worked(&worker, &clone));
+    calls.push("exec gate".to_owned());
+    calls
+}
+
+const LATER_ROUND: [&str; 3] = ["source.md", "prompt.md", "previous-review.md"];
+
+/// One fix round, then nothing must be fixed: a reviewer sandbox for each round (the narrow
+/// review after the fix finds nothing, so a full one confirms it, spec §5.2), and the fix round in
+/// the worker sandbox the run kept, which is removed at ready.
+#[test]
+fn one_fix_round_reuses_the_worker_sandbox_and_each_review_gets_its_own() {
+    let f = fixture_with(LOCAL_TOML);
+    let (spec, id) = spec(&f);
+    let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &id, &[ONE, CLEAN]);
+    let (worker, clone) = (worker_sandbox(&id), format!("{HOME}/work/{id}"));
+
+    let ran = task_run(&f, spec, Some(Location::Cloud), &backend);
+
+    ran.result.unwrap();
+    let mut expected = started(&id);
+    expected.extend(review_round(&id, &["source.md", "prompt.md"]));
+    expected.extend(fixed(&worker, &clone));
+    expected.push("exec gate".to_owned());
+    expected.extend(review_round(&id, &LATER_ROUND));
+    expected.extend(review_round(&id, &LATER_ROUND));
+    expected.push(format!("rm {worker}"));
+    assert_eq!(described_log(&backend), expected, "{}", ran.out);
+    // The fix round ran in the worker's recorded clone.
+    let fix = backend
+        .execs()
+        .into_iter()
+        .filter(|(sandbox, spec)| *sandbox == worker && is_headless(spec))
+        .nth(1)
+        .unwrap();
+    assert_eq!(fix.1.workdir.as_deref(), Some(Path::new(&clone)));
+
+    let task = task_record(&f, &id);
+    assert_eq!((task.stage, task.round), (record::Stage::Ready, 1));
+    assert_eq!(task.review.as_ref().unwrap().must_fix, 0);
+    assert_all_removed(
+        &task,
+        &[
+            SandboxRole::Worker,
+            SandboxRole::Reviewer,
+            SandboxRole::Reviewer,
+            SandboxRole::Reviewer,
+        ],
+    );
+    // The fix round's commit is in `repo.git`, past the worker's.
+    let meta = record::task_dir(&f.env.base_dir(), &id);
+    let log = common::git(
+        &meta.join("repo.git"),
+        &["log", "--format=%s", &format!("refs/heads/{id}")],
+    );
+    assert_eq!(log.lines().take(2).collect::<Vec<_>>(), ["run 1", "run 0"]);
+    assert_eq!(
+        ran.out
+            .matches(&format!("cloud sandbox {worker} removed"))
+            .count(),
+        1,
+        "{}",
+        ran.out
+    );
+}
+
+/// The worker sandbox gone before a fix round: made again (role `fix`) from the recorded profile
+/// and a bundle of the agent's own branch from `repo.git`, and the fix round's commits come back
+/// as for the worker's (a fast-forward of the agent's ref, though the delivered branch's commits
+/// were rewritten); removed at ready, and the gone sandbox's entry is closed.
+#[test]
+fn a_worker_sandbox_gone_before_a_fix_round_is_made_again_and_removed_at_ready() {
+    let f = fixture_with(LOCAL_TOML);
+    let (spec, id) = spec(&f);
+    let root = f.env.tmp.path().join("cloud-fs");
+    let backend = cloud_backend_listing(&root, &id, &[ONE, CLEAN], false);
+    let (worker, clone) = (worker_sandbox(&id), format!("{HOME}/work/{id}"));
+
+    let ran = task_run(&f, spec, Some(Location::Cloud), &backend);
+
+    ran.result.unwrap();
+    let mut expected = started(&id);
+    expected.extend(review_round(&id, &["source.md", "prompt.md"]));
+    expected.extend(seeded(&worker, &clone, &id, &["source.md", "prompt.md"]));
+    expected.extend(fixed(&worker, &clone));
+    expected.push("exec gate".to_owned());
+    expected.extend(review_round(&id, &LATER_ROUND));
+    expected.extend(review_round(&id, &LATER_ROUND));
+    expected.push(format!("rm {worker}"));
+    assert_eq!(described_log(&backend), expected, "{}", ran.out);
+
+    let task = task_record(&f, &id);
+    assert_eq!((task.stage, task.round), (record::Stage::Ready, 1));
+    assert_all_removed(
+        &task,
+        &[
+            SandboxRole::Worker,
+            SandboxRole::Reviewer,
+            SandboxRole::Fix,
+            SandboxRole::Reviewer,
+            SandboxRole::Reviewer,
+        ],
+    );
+    // Made again as slice 1 makes it: the worker TTL, the recorded profile's two kits.
+    let rebuilt = &backend.creates()[2];
+    assert_eq!(rebuilt.name, worker);
+    assert_eq!(
+        rebuilt.ttl,
+        Some(sbxm::task::lifetime::worker_ttl(&f.config).unwrap())
+    );
+    assert_eq!(rebuilt.workspace, None);
+    let ttl = sbxm::backend::ttl_arg(sbxm::task::lifetime::worker_ttl(&f.config).unwrap());
+    for line in [
+        format!("cloud sandbox {worker} is gone; it is made again for the fix round"),
+        format!("cloud sandbox {worker} created (fix, TTL {ttl})"),
+        format!("cloud sandbox {worker} removed"),
+    ] {
+        assert_eq!(ran.out.matches(&line).count(), 1, "{line}\n{}", ran.out);
+    }
+    let meta = record::task_dir(&f.env.base_dir(), &id);
+    let log = common::git(
+        &meta.join("repo.git"),
+        &["log", "--format=%s", &format!("refs/heads/{id}")],
+    );
+    assert_eq!(log.lines().take(2).collect::<Vec<_>>(), ["run 1", "run 0"]);
+}
+
+/// The fix-round budget used with a must-fix finding left: the task stops `ready` (rounds
+/// exhausted) and every sandbox it made is removed.
+#[test]
+fn rounds_exhausted_with_a_finding_left_is_ready_with_every_sandbox_removed() {
+    let f = fixture_with(&format!("{LOCAL_TOML}\n[worker]\nfix_rounds = 1\n"));
+    let (spec, id) = spec(&f);
+    let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &id, &[ONE]);
+    let worker = worker_sandbox(&id);
+
+    let ran = task_run(&f, spec, Some(Location::Cloud), &backend);
+
+    ran.result.unwrap();
+    let task = task_record(&f, &id);
+    assert_eq!(task.stage, record::Stage::Ready);
+    assert_eq!(task.stopped, Some(record::Stopped::RoundsExhausted));
+    assert_eq!(task.review.as_ref().unwrap().must_fix, 1);
+    assert_all_removed(
+        &task,
+        &[
+            SandboxRole::Worker,
+            SandboxRole::Reviewer,
+            SandboxRole::Reviewer,
+        ],
+    );
+    assert_eq!(backend.log().last(), Some(&format!("rm {worker}")));
+    assert!(ran.out.contains("must-fix finding(s) left"), "{}", ran.out);
 }
