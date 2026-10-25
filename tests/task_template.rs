@@ -351,6 +351,8 @@ fn task_review_pr_prints_the_warning_of_a_template_it_could_not_use() {
             resolved_spec_id: None,
             force: false,
             disk: Default::default(),
+            location: None,
+            identity: None,
         },
         &backend,
         &github,

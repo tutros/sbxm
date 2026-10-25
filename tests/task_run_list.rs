@@ -120,6 +120,7 @@ fn opts(f: &Fixture) -> ListOptions {
             email: "dev@example.com".into(),
         }),
         disk: Default::default(),
+        location: None,
     }
 }
 

@@ -1829,6 +1829,8 @@ fn task_review_against_real_sbx() {
             resolved_spec_id: None,
             force: false,
             disk: Default::default(),
+            location: None,
+            identity: None,
         },
         &SbxBackend::LOCAL,
         &world.github,

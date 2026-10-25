@@ -498,6 +498,8 @@ fn main() -> anyhow::Result<()> {
                     profile,
                     force,
                     ignore_disk,
+                    cloud,
+                    local,
                 },
         } => {
             let target = match (issue, pr, spec) {
@@ -532,6 +534,8 @@ fn main() -> anyhow::Result<()> {
                         resolved_spec_id: None,
                         force,
                         disk: sbxm::disk::Guard::real(ignore_disk),
+                        location: sbxm::cli::location_flag(cloud, local),
+                        identity: None,
                     },
                     &SbxBackend::LOCAL,
                     &sbxm::github::gh::GhBackend::default(),
@@ -599,6 +603,8 @@ fn main() -> anyhow::Result<()> {
                     restart,
                     yes,
                     ignore_disk,
+                    cloud,
+                    local,
                 },
         } => {
             let targets: Vec<commands::task_run::Target> = sbxm::cli::run_target_order(&matches)
@@ -635,6 +641,7 @@ fn main() -> anyhow::Result<()> {
                         clone_source: None,
                         identity: None,
                         disk: sbxm::disk::Guard::real(ignore_disk),
+                        location: sbxm::cli::location_flag(cloud, local),
                     },
                     &targets,
                     restart.then_some(&commands::task_start::Restart {

@@ -237,3 +237,48 @@ fn task_start_cloud_and_local_conflict() {
         "{stderr}"
     );
 }
+
+/// Milestone 4 slice 5 (P14, decision 262(k)): `task run` and `task review --pr` take the flags
+/// too, each refusing both at once.
+#[test]
+fn task_run_and_review_pr_cloud_and_local_conflict() {
+    for args in [
+        &["task", "run", "--spec", "idea.md", "--cloud", "--local"][..],
+        &["task", "review", "--pr", "7", "--cloud", "--local"][..],
+    ] {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let output = sbxm()
+            .env("SBXM_CONFIG_DIR", tmp.path())
+            .args(args)
+            .assert()
+            .failure()
+            .get_output()
+            .clone();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(
+            stderr.contains("'--cloud' cannot be used with '--local'"),
+            "{args:?}: {stderr}"
+        );
+    }
+}
+
+/// P14 (decision 262(k)): `task review --issue/--spec` take no location flag, only `--pr` does;
+/// the task's record says where it runs (decision 253).
+#[test]
+fn task_review_of_an_existing_task_takes_no_location_flag() {
+    for args in [
+        &["task", "review", "--issue", "4", "--cloud"][..],
+        &["task", "review", "--spec", "idea.md", "--local"][..],
+    ] {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let output = sbxm()
+            .env("SBXM_CONFIG_DIR", tmp.path())
+            .args(args)
+            .assert()
+            .failure()
+            .get_output()
+            .clone();
+        let stderr = String::from_utf8(output.stderr).unwrap();
+        assert!(stderr.contains("cannot be used with"), "{args:?}: {stderr}");
+    }
+}

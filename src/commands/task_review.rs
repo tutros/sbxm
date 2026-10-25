@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use anyhow::{Result, anyhow, bail};
 
 use super::task_start::{resolve_repo, spec_flag};
-use crate::backend::SandboxBackend;
+use crate::backend::{Location, SandboxBackend};
 use crate::config::GlobalConfig;
 use crate::disk;
 use crate::github::GitHubBackend;
@@ -61,6 +61,12 @@ pub struct Options {
     pub force: bool,
     /// The free-space check of the sandbox drive before a sandbox is created (decision 194).
     pub disk: disk::Guard,
+    /// `--cloud` or `--local`, for a pull request's new task only (P14); `None` leaves it to
+    /// `[sandbox] location`. A task that exists runs where its record says (decision 253).
+    pub location: Option<Location>,
+    /// For tests: the committer identity a cloud worker sandbox rebuilt for a fix round gives
+    /// its clone, instead of the user's global git config.
+    pub identity: Option<Identity>,
 }
 
 /// The line for a gate that ran and failed (an exit the shell reported, or a timeout).
@@ -112,7 +118,7 @@ pub fn run(
     let mut config = TaskConfig::load(&opts.repo_root)?;
     if let Target::Pr(_) = opts.target {
         pipeline::refuse_cloud(
-            config.sandbox.location,
+            pipeline::choose_location(opts.location, &config),
             "`task review --pr`",
             "set [sandbox] location = \"local\" in sbxm-task.toml to review it here",
         )?;

@@ -323,6 +323,14 @@ pub enum TaskCommand {
         /// The sandbox profile (default: sbxm-task.toml).
         #[arg(long)]
         profile: Option<String>,
+        /// Review the pull request's sandboxes in Docker Cloud Sandboxes (default: [sandbox]
+        /// location in sbxm-task.toml, else here). A task under review already runs where its
+        /// task.json says.
+        #[arg(long, conflicts_with_all = ["local", "issue", "spec"])]
+        cloud: bool,
+        /// Review the pull request on this machine, whatever [sandbox] location says.
+        #[arg(long, conflicts_with_all = ["issue", "spec"])]
+        local: bool,
         /// Review the pull request even though its head is already reviewed: the commit a local
         /// issue task's in-task review covered (posted by `task finish` as the PR's review), or
         /// the commit the PR task's own last review covered.
@@ -435,6 +443,13 @@ pub enum TaskCommand {
         /// min_free_disk free.
         #[arg(long)]
         ignore_disk: bool,
+        /// Run the tasks' sandboxes in Docker Cloud Sandboxes (default: [sandbox] location in
+        /// sbxm-task.toml, else here). Each task remembers where it runs.
+        #[arg(long, conflicts_with = "local")]
+        cloud: bool,
+        /// Run the tasks' sandboxes on this machine, whatever [sandbox] location says.
+        #[arg(long)]
+        local: bool,
     },
     /// Publish a ready task: an issue's task pushes its branch and opens its PR (`Fixes #N`, with
     /// the result and the review in the body); a spec task goes to its `[finish] sink` (the

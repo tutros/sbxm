@@ -10,7 +10,7 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use super::task_review;
 use super::task_start::{self, Restart};
-use crate::backend::SandboxBackend;
+use crate::backend::{Location, SandboxBackend};
 use crate::config::GlobalConfig;
 use crate::disk;
 use crate::github::GitHubBackend;
@@ -44,6 +44,8 @@ pub struct Options {
     pub identity: Option<Identity>,
     /// The free-space check of the sandbox drive before a sandbox is created (decision 194).
     pub disk: disk::Guard,
+    /// `--cloud` or `--local`; `None` leaves it to `[sandbox] location` (P14).
+    pub location: Option<Location>,
 }
 
 /// The drive can fill up while the worker runs, so it is checked again before the reviewer's
@@ -157,7 +159,7 @@ fn run_issue(
     {
         let mut config = TaskConfig::load(&opts.repo_root)?;
         pipeline::refuse_cloud(
-            config.sandbox.location,
+            pipeline::choose_location(opts.location, &config),
             "`task run`",
             "set [sandbox] location = \"local\" in sbxm-task.toml to run it here",
         )?;
@@ -235,6 +237,9 @@ fn run_issue(
             resolved_spec_id: None,
             force: false,
             disk,
+            // A task that exists runs where its record says (decision 253).
+            location: None,
+            identity: opts.identity.clone(),
         },
         backend,
         github,
@@ -267,6 +272,8 @@ pub struct SpecOptions {
     pub identity: Option<Identity>,
     /// The free-space check of the sandbox drive before a sandbox is created (decision 194).
     pub disk: disk::Guard,
+    /// `--cloud` or `--local`; `None` leaves it to `[sandbox] location` (P14).
+    pub location: Option<Location>,
 }
 
 /// Sets the spec task of `spec` aside, if one exists, instead of deleting it (decision 185): the
@@ -362,7 +369,7 @@ fn run_spec_task(
     {
         let mut config = TaskConfig::load(&opts.repo_root)?;
         pipeline::refuse_cloud(
-            config.sandbox.location,
+            pipeline::choose_location(opts.location, &config),
             "`task run`",
             "set [sandbox] location = \"local\" in sbxm-task.toml to run it here",
         )?;
@@ -527,6 +534,9 @@ fn run_spec_task(
             resolved_spec_id: Some(spec_id),
             force: false,
             disk,
+            // A task that exists runs where its record says (decision 253).
+            location: None,
+            identity: opts.identity.clone(),
         },
         backend,
         github,
@@ -589,6 +599,8 @@ pub struct ListOptions {
     /// only the first (decision 193 point 2): a task's own sandbox can fill the drive the next
     /// one needs.
     pub disk: disk::Guard,
+    /// `--cloud` or `--local`; `None` leaves it to `[sandbox] location` (P14).
+    pub location: Option<Location>,
 }
 
 impl ListOptions {
@@ -608,6 +620,7 @@ impl ListOptions {
             clone_source: self.clone_source.clone(),
             identity: self.identity.clone(),
             disk: self.disk.clone(),
+            location: self.location,
         }
     }
 
@@ -627,6 +640,7 @@ impl ListOptions {
             clone_source: self.clone_source.clone(),
             identity: self.identity.clone(),
             disk: self.disk.clone(),
+            location: self.location,
         }
     }
 }
