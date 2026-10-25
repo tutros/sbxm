@@ -770,3 +770,151 @@ fn a_spec_review_of_a_task_recorded_local_runs_here_with_no_flag() {
     );
     assert!(task.sandboxes.is_empty(), "{:?}", task.sandboxes);
 }
+
+/// Behavior 2: a cloud `task run` preflights the reviewer's sandboxes too, before any write: a
+/// `codex` reviewer whose `openai` login is missing in the cloud refuses the run, naming the
+/// command that stores it, with no changing backend call and no task folder.
+#[test]
+fn a_codex_reviewer_without_its_cloud_login_refuses_a_cloud_run_before_any_write() {
+    let f = fixture_with(LOCAL_TOML);
+    let (spec, id) = spec(&f);
+    let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &id, &[CLEAN])
+        .and_secrets(&["anthropic"]);
+
+    let ran = task_run(&f, spec, Some(Location::Cloud), &backend);
+
+    let error = ran.result.unwrap_err();
+    assert!(
+        error.is::<sbxm::task::pipeline::MissingSecret>(),
+        "{error:#}"
+    );
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("'openai'")
+            && message.contains("the reviewer, codex")
+            && message.contains("`sbx secret set openai --oauth --cloud`")
+            && message.ends_with("or run it here with `--local`"),
+        "{message}"
+    );
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert!(!f.env.base_dir().join(".sbxm").join("tasks").exists());
+}
+
+/// What a refused review must leave as it was: the task's record and the backend's calls.
+struct Before {
+    record: Vec<u8>,
+    calls: usize,
+}
+
+fn before(f: &Fixture, id: &str, backend: &FakeBackend) -> Before {
+    let meta = record::task_dir(&f.env.base_dir(), id);
+    Before {
+        record: std::fs::read(meta.join("task.json")).unwrap(),
+        calls: backend.log().len(),
+    }
+}
+
+fn assert_unchanged(f: &Fixture, id: &str, backend: &FakeBackend, was: &Before) {
+    let meta = record::task_dir(&f.env.base_dir(), id);
+    assert_eq!(std::fs::read(meta.join("task.json")).unwrap(), was.record);
+    assert_eq!(
+        backend.log()[was.calls..],
+        [] as [String; 0],
+        "{:?}",
+        backend.log()
+    );
+}
+
+/// Lesson 2 of the earlier run: a review that may make the worker sandbox again for a fix round
+/// preflights that with the worker's recorded profile, not the reviewer's. The worker sandbox is
+/// gone and its recorded profile now names a secret the cloud has no value source for: the review
+/// is refused before it changes anything, though the reviewer's profile passes.
+#[test]
+fn a_gone_worker_whose_recorded_profile_fails_preflight_refuses_the_review_before_any_change() {
+    let f = fixture_with(LOCAL_TOML);
+    f.env.write_profile("other", "");
+    let (spec, id) = spec(&f);
+    let backend = cloud_backend_listing(&f.env.tmp.path().join("cloud-fs"), &id, &[ONE], false);
+    let mut start = run_options(&f, spec.clone(), Some(Location::Cloud));
+    start.profile = Some("other".into());
+    sbxm::commands::task_start::run_spec(
+        &f.env.config_dir(),
+        &sbxm::commands::task_start::SpecOptions {
+            repo_root: start.repo_root,
+            spec: spec.clone(),
+            worker_harness: None,
+            worker_model: None,
+            time_limit: None,
+            profile: start.profile,
+            base: start.base,
+            repo: start.repo,
+            clone_source: start.clone_source,
+            identity: start.identity,
+            disk: Default::default(),
+            location: start.location,
+        },
+        &backend,
+        &sbxm::github::fake::FakeGitHub::default(),
+        &common::task_fixture::Probe,
+        &mut Vec::new(),
+        &mut Vec::new(),
+    )
+    .unwrap();
+    f.env
+        .write_profile("other", "[secrets]\nservices = [\"github\"]\n");
+    let was = before(&f, &id, &backend);
+
+    let ran = task_review(
+        &f,
+        &spec_review_options(&f, spec),
+        &backend,
+        &sbxm::github::fake::FakeGitHub::default(),
+    );
+
+    let message = format!("{:#}", ran.result.unwrap_err());
+    assert!(
+        message.contains("'github'") && message.contains("profile 'other'"),
+        "{message}"
+    );
+    assert_unchanged(&f, &id, &backend, &was);
+}
+
+/// Lesson 3: a cloud review refuses a strict reviewer profile (slice 7 builds strict) or a
+/// reviewer TTL that doesn't add up (slice 3's check) before anything changes.
+#[test]
+fn a_cloud_review_refuses_a_strict_profile_or_a_ttl_too_large_before_any_change() {
+    let strict = |f: &Fixture| {
+        f.env.write_profile(
+            "default",
+            "[template]\nstrict = true\nallow = [\"crates.io\"]\n",
+        );
+    };
+    let huge = |f: &Fixture| {
+        std::fs::write(
+            f.env.tmp.path().join("target-repo").join("sbxm-task.toml"),
+            format!("{LOCAL_TOML}\n[reviewer]\ntime_limit = \"{}s\"\n", u64::MAX),
+        )
+        .unwrap();
+    };
+    type Change<'a> = &'a dyn Fn(&Fixture);
+    let cases: [(Change, &str); 2] = [(&strict, "strict"), (&huge, "time_limit")];
+    for (change, said) in cases {
+        let f = fixture_with(LOCAL_TOML);
+        let (spec, id) = spec(&f);
+        let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &id, &[CLEAN]);
+        start_cloud(&f, spec.clone(), &backend);
+        change(&f);
+        let was = before(&f, &id, &backend);
+
+        let ran = task_review(
+            &f,
+            &spec_review_options(&f, spec),
+            &backend,
+            &sbxm::github::fake::FakeGitHub::default(),
+        );
+
+        let message = format!("{:#}", ran.result.unwrap_err());
+        assert!(message.contains(said), "{said}: {message}");
+        assert_unchanged(&f, &id, &backend, &was);
+    }
+}
