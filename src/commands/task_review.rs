@@ -178,9 +178,10 @@ fn check_disk(config_dir: &std::path::Path, opts: &Options, location: Location) 
 
 /// The committer identity a cloud worker sandbox made again for a fix round gives its clone
 /// (milestone 4 slice 5): the flag's (tests), else the user's global git config, read before
-/// anything changes; `None` for a local task, which never makes one.
+/// anything changes; `None` for a task that never makes one (a local task, or one with no fix
+/// round left).
 fn cloud_identity(opts: &Options, task: &record::Record) -> Result<Option<Identity>> {
-    if task.location == Location::Local || task.worker.is_none() {
+    if task.location == Location::Local || !pipeline::may_fix(task) {
         return Ok(None);
     }
     match &opts.identity {

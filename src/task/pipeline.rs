@@ -3474,7 +3474,7 @@ pub fn check_reviewer(env: &TaskEnv, task: &Prepared) -> Result<Vec<String>> {
 
 /// Whether a review of this task may still run a fix round: it has a worker and fix rounds left
 /// in its budget (a gate's failure or a review's findings can each start one).
-fn may_fix(record: &Record) -> bool {
+pub fn may_fix(record: &Record) -> bool {
     record.kind != Kind::Pr && record.worker.is_some() && record.round < record.fix_rounds
 }
 

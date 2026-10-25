@@ -1280,3 +1280,57 @@ fn a_pr_review_flag_that_contradicts_the_recorded_location_is_refused_before_any
     assert_unchanged(&f, "pr-7", &backend, &was);
     assert_eq!(github.calls().len(), asked, "{:?}", github.calls());
 }
+
+/// The biggest `review.md` read (the pipeline's `REVIEW_CAP`).
+const REVIEW_CAP: usize = 1024 * 1024;
+
+/// Behavior 3: `review.md` comes out of the reviewer's sandbox into a fresh staging folder and is
+/// read with slice 1's checks: at its cap it is read, one byte over it, or a link or a folder the
+/// sandbox sent, is not used, and the staging folder is gone either way.
+#[test]
+fn a_staged_review_at_its_cap_is_read_and_one_over_it_a_link_or_a_folder_is_not() {
+    use sbxm::backend::FakeCopy;
+
+    let at_cap = {
+        let mut text = CLEAN.as_bytes().to_vec();
+        text.resize(REVIEW_CAP, b' ');
+        text
+    };
+    let mut over = at_cap.clone();
+    over.push(b' ');
+    let cases = [
+        (FakeCopy::File(at_cap), None),
+        (FakeCopy::File(over), Some("larger than 1 MiB")),
+        (
+            FakeCopy::Link("/etc/passwd".into()),
+            Some("not a plain file"),
+        ),
+        (FakeCopy::Folder, Some("not a plain file")),
+    ];
+    for (copy, refused) in cases {
+        let f = fixture_with(LOCAL_TOML);
+        let (spec, id) = spec(&f);
+        let path = format!("{HOME}/work/{id}-review/.sbxm-task/review.md");
+        let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &id, &[CLEAN])
+            .with_copy_out(&path, copy.clone());
+
+        let ran = task_run(&f, spec, Some(Location::Cloud), &backend);
+
+        let task = task_record(&f, &id);
+        match refused {
+            None => {
+                ran.result.unwrap();
+                assert_eq!(task.stage, record::Stage::Ready, "{copy:?}");
+            }
+            Some(why) => {
+                let message = format!("{:#}", ran.result.unwrap_err());
+                assert!(message.contains(why), "{copy:?}: {message}");
+                assert_eq!(task.status, record::Status::Failed, "{copy:?}");
+            }
+        }
+        assert_all_removed(&task, &[SandboxRole::Worker, SandboxRole::Reviewer]);
+        let meta = record::task_dir(&f.env.base_dir(), &id);
+        let staged = std::fs::read_dir(meta.join("staging")).map_or(0, |d| d.count());
+        assert_eq!(staged, 0, "{copy:?}");
+    }
+}

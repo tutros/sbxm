@@ -906,7 +906,8 @@ pub(crate) fn run_spec_from(
             // warning of a removal that failed and kept the task's folder, so `run.log` has them
             // (decision 265, review M-1). Best-effort writes: the start's own error is the
             // outcome, and a failed write must not hide it. `on_prepared` isn't called: no
-            // `--restart` path reaches a cloud start yet (every one refuses the cloud).
+            // `--restart` path reaches a cloud start (`task run --restart` refuses the cloud
+            // until its removal of the old task follows the recorded location, slice 6).
             if let Some(after) = e.downcast_ref::<pipeline::FailedAfterCreate>() {
                 for event in &after.events {
                     let _ = writeln!(out, "{event}");
