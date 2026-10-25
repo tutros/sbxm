@@ -1106,3 +1106,177 @@ fn a_restart_into_the_cloud_or_of_a_cloud_task_is_refused_before_anything() {
     );
     assert_unchanged(&f, &id, &backend, &was);
 }
+
+/// A fake scoped secret (slice 4): no production path fills one in while P8 (a) holds.
+fn fake_secret() -> sbxm::backend::ScopedSecret {
+    sbxm::backend::ScopedSecret {
+        host: "postman-echo.com".into(),
+        env: "P2_FAKE".into(),
+        value: "fake-scoped-value-NOT-REAL".into(),
+    }
+}
+
+/// Behavior 3: a reviewer sandbox gets the task's scoped secrets before its create, and after its
+/// round it is removed with slice 3's retry (here once "temporarily unavailable", then gone after
+/// 5 s), then its scoped secrets; the worker sandbox and its secrets go at ready.
+#[test]
+fn a_reviewer_sandbox_gets_the_scoped_secrets_and_its_removal_is_retried_then_they_go() {
+    let f = fixture_with(LOCAL_TOML);
+    let (spec, id) = spec(&f);
+    let (worker, reviewer) = (worker_sandbox(&id), reviewer_sandbox(&id));
+    let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &id, &[CLEAN])
+        .with_remove_errors(&[&format!(
+            "`sbx rm` failed for sandbox {reviewer} (exit status: 1): error: sandbox {reviewer} \
+             is temporarily unavailable; retry the delete"
+        )]);
+    let secrets = [fake_secret()];
+    sbxm::commands::task_start::run_spec_with_seams(
+        &f.env.config_dir(),
+        &sbxm::commands::task_start::SpecOptions {
+            repo_root: f.env.tmp.path().join("target-repo"),
+            spec,
+            worker_harness: None,
+            worker_model: None,
+            time_limit: None,
+            profile: None,
+            base: Some("main".into()),
+            repo: Some("o/r".into()),
+            clone_source: Some(common::task_fixture::source(&f)),
+            identity: Some(identity()),
+            disk: Default::default(),
+            location: Some(Location::Cloud),
+        },
+        &backend,
+        &sbxm::github::fake::FakeGitHub::default(),
+        &common::task_fixture::Probe,
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &|_| {},
+        &secrets,
+    )
+    .unwrap();
+    let started = backend.log().len();
+    let mut prepared = sbxm::task::pipeline::Prepared::open(&f.env.base_dir(), &id).unwrap();
+    let waits = std::sync::Mutex::new(Vec::new());
+    let who = identity();
+    let env = sbxm::task::pipeline::TaskEnv {
+        config_dir: &f.env.config_dir(),
+        config: &f.config,
+        backend: &backend,
+        probe: &common::task_fixture::Probe,
+        host: &sbxm::task::gates::FakeHostRunner::default(),
+        sleep: &|d| waits.lock().unwrap().push(d),
+        scoped_secrets: &secrets,
+        identity: Some(&who),
+    };
+
+    sbxm::task::pipeline::review_issue(&env, &mut prepared).unwrap();
+
+    let calls: Vec<String> = backend.log()[started..]
+        .iter()
+        .filter(|c| c.starts_with("secret-") || c.starts_with("create ") || c.starts_with("rm "))
+        .cloned()
+        .collect();
+    assert_eq!(
+        calls,
+        [
+            format!("secret-set {reviewer} postman-echo-com"),
+            format!("create {reviewer}"),
+            format!("rm {reviewer}"),
+            format!("rm {reviewer}"),
+            format!("secret-ls {reviewer}"),
+            format!("secret-rm {reviewer} postman-echo-com"),
+            format!("rm {worker}"),
+            format!("secret-ls {worker}"),
+            format!("secret-rm {worker} postman-echo-com"),
+        ]
+    );
+    assert_eq!(
+        waits.into_inner().unwrap(),
+        [std::time::Duration::from_secs(5)]
+    );
+    assert!(
+        backend.cloud_secrets().is_empty(),
+        "{:?}",
+        backend.cloud_secrets()
+    );
+    assert!(
+        prepared.events.contains(&format!(
+            "scoped secret postman-echo-com of {reviewer} removed"
+        )),
+        "{:?}",
+        prepared.events
+    );
+    assert_all_removed(
+        &prepared.record,
+        &[SandboxRole::Worker, SandboxRole::Reviewer],
+    );
+}
+
+/// Behavior 5: a review that fails stops the task: its reviewer sandbox is removed after the round
+/// and its worker sandbox then, so a stopped cloud task has no sandbox left either.
+#[test]
+fn a_review_that_fails_removes_the_reviewer_and_the_worker_sandbox() {
+    let f = fixture_with(LOCAL_TOML);
+    let (spec, id) = spec(&f);
+    let backend = cloud_backend(
+        &f.env.tmp.path().join("cloud-fs"),
+        &id,
+        &["no count on the first line\n"],
+    );
+
+    let ran = task_run(&f, spec, Some(Location::Cloud), &backend);
+
+    let message = format!("{:#}", ran.result.unwrap_err());
+    assert!(message.contains("Must-fix findings: <count>"), "{message}");
+    let task = task_record(&f, &id);
+    assert_eq!(
+        (task.stage, task.status),
+        (record::Stage::Reviewing, record::Status::Failed)
+    );
+    assert_all_removed(&task, &[SandboxRole::Worker, SandboxRole::Reviewer]);
+    let worker = worker_sandbox(&id);
+    assert_eq!(backend.log().last(), Some(&format!("rm {worker}")));
+    assert!(
+        ran.out.contains(&format!("cloud sandbox {worker} removed")),
+        "{}",
+        ran.out
+    );
+}
+
+/// P14 and decision 253: a pull request's task that exists runs where its record says; a flag
+/// that says otherwise is refused before anything changes, not quietly ignored.
+#[test]
+fn a_pr_review_flag_that_contradicts_the_recorded_location_is_refused_before_any_change() {
+    let f = fixture_with(LOCAL_TOML);
+    common::task_fixture::add_pr_head(&f, 7);
+    let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), "pr-7", &[CLEAN]);
+    let github = sbxm::github::fake::FakeGitHub::default()
+        .with_pr(pr_7())
+        .with_issue_text(common::task_fixture::issue_text(4));
+    task_review(
+        &f,
+        &pr_options(&f, Some(Location::Cloud)),
+        &backend,
+        &github,
+    )
+    .result
+    .unwrap();
+    let was = before(&f, "pr-7", &backend);
+    let asked = github.calls().len();
+
+    let ran = task_review(
+        &f,
+        &pr_options(&f, Some(Location::Local)),
+        &backend,
+        &github,
+    );
+
+    let message = format!("{:#}", ran.result.unwrap_err());
+    assert!(
+        message.contains("in the cloud") && message.contains("--local"),
+        "{message}"
+    );
+    assert_unchanged(&f, "pr-7", &backend, &was);
+    assert_eq!(github.calls().len(), asked, "{:?}", github.calls());
+}
