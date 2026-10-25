@@ -1038,3 +1038,71 @@ fn a_cloud_run_list_of_two_specs_with_too_little_local_disk_runs_both_to_ready()
     }
     assert!(!out.contains(common::LOW_DISK), "{out}");
 }
+
+struct Yes;
+
+impl sbxm::confirm::Confirm for Yes {
+    fn is_interactive(&self) -> bool {
+        true
+    }
+
+    fn confirm(&self, _prompt: &str) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+}
+
+/// `task run --spec FILE --restart` with `location`.
+fn task_run_restart(
+    f: &Fixture,
+    spec: PathBuf,
+    location: Option<Location>,
+    backend: &FakeBackend,
+) -> anyhow::Result<()> {
+    sbxm::commands::task_run::run_spec(
+        &f.env.config_dir(),
+        &run_options(f, spec, location),
+        Some(&sbxm::commands::task_start::Restart {
+            confirm: &Yes,
+            yes: true,
+        }),
+        backend,
+        &sbxm::github::fake::FakeGitHub::default(),
+        &common::task_fixture::Probe,
+        &sbxm::task::gates::FakeHostRunner::default(),
+        &mut Vec::new(),
+        &mut Vec::new(),
+    )
+}
+
+/// `--restart` removes the old task's sandboxes, which follows a task's recorded location only
+/// from slice 6 on: a restart into the cloud, or of a task recorded `cloud`, is refused before
+/// anything, and the old task stays as it was.
+#[test]
+fn a_restart_into_the_cloud_or_of_a_cloud_task_is_refused_before_anything() {
+    let f = fixture_with(LOCAL_TOML);
+    let (spec, id) = spec(&f);
+    let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &id, &[CLEAN]);
+
+    let message = format!(
+        "{:#}",
+        task_run_restart(&f, spec.clone(), Some(Location::Cloud), &backend).unwrap_err()
+    );
+    assert!(
+        message.contains("--restart") && message.contains("cloud"),
+        "{message}"
+    );
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert!(!f.env.base_dir().join(".sbxm").join("tasks").exists());
+
+    start_cloud(&f, spec.clone(), &backend);
+    let was = before(&f, &id, &backend);
+    let message = format!(
+        "{:#}",
+        task_run_restart(&f, spec, Some(Location::Local), &backend).unwrap_err()
+    );
+    assert!(
+        message.contains("--restart") && message.contains("cloud"),
+        "{message}"
+    );
+    assert_unchanged(&f, &id, &backend, &was);
+}

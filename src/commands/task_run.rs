@@ -300,6 +300,14 @@ fn discard_existing_spec(
     if !finish::exists(&base_dir, &id) {
         return Ok(None);
     }
+    // Its sandboxes would be removed here, which follows the recorded location only from
+    // milestone 4 slice 6 on.
+    let recorded = record::read(&record::task_dir(&base_dir, &id).join("task.json"))?;
+    pipeline::refuse_cloud(
+        recorded.location,
+        "`task run --restart` of a task recorded in the cloud",
+        "remove the task first and run it again",
+    )?;
     finish::check_spec_result_fetched(&base_dir, &id, repo_root)?;
     let aside = finish::set_aside(
         &base_dir,
