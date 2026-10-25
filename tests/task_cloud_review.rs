@@ -60,38 +60,52 @@ fn cloud_backend(root: &Path, id: &str, reviews: &[&str]) -> FakeBackend {
 /// was there before stands for a new sandbox, so what the old one's clone held is gone from the
 /// fake's filesystem then.
 fn cloud_backend_listing(root: &Path, id: &str, reviews: &[&str], listed: bool) -> FakeBackend {
+    cloud_backend_for(root, &[id], reviews, listed)
+}
+
+/// The task id a sandbox of [`worker_sandbox`] or [`reviewer_sandbox`]'s name belongs to, and
+/// whether it is the reviewer's.
+fn sandbox_task(sandbox: &str) -> Option<(String, bool)> {
+    let rest = sandbox.strip_prefix("sbxm-task-")?;
+    if let Some(id) = rest.strip_suffix("-review-codex") {
+        return Some((id.to_owned(), true));
+    }
+    Some((rest.strip_suffix("-claude")?.to_owned(), false))
+}
+
+/// [`cloud_backend_listing`] for the tasks `ids` at once (a `task run` list): each sandbox's name
+/// says whose clone it works in.
+fn cloud_backend_for(root: &Path, ids: &[&str], reviews: &[&str], listed: bool) -> FakeBackend {
     std::fs::create_dir_all(root.join(HOME.trim_start_matches('/'))).unwrap();
-    let in_root = |path: &str| root.join(path.trim_start_matches('/'));
-    let fresh = [
-        (worker_sandbox(id), in_root(&format!("{HOME}/work/{id}"))),
-        (
-            reviewer_sandbox(id),
-            in_root(&format!("{HOME}/work/{id}-review")),
-        ),
-    ];
     let inside = root.to_string_lossy().into_owned();
     let map = move |arg: &str| arg.replace(HOME, &format!("{inside}{HOME}"));
-    let hook_map = map.clone();
-    let worker = worker_sandbox(id);
-    let clone = format!("{HOME}/work/{id}");
-    let review_clone = format!("{HOME}/work/{id}-review");
+    let (hook_map, fresh_map) = (map.clone(), map.clone());
+    // The clone a sandbox of this name works in.
+    let clone_of = |sandbox: &str| {
+        sandbox_task(sandbox).map(|(id, review)| match review {
+            true => format!("{HOME}/work/{id}-review"),
+            false => format!("{HOME}/work/{id}"),
+        })
+    };
     let reviews: Vec<String> = reviews.iter().map(|r| (*r).to_owned()).collect();
     let (runs, reviewed) = (AtomicUsize::new(0), AtomicUsize::new(0));
-    let sandboxes = if listed {
-        vec![SandboxInfo {
-            name: worker.clone(),
-            agent: "claude".into(),
-            status: "running".into(),
-        }]
-    } else {
-        Vec::new()
+    let sandboxes = match listed {
+        true => ids
+            .iter()
+            .map(|id| SandboxInfo {
+                name: worker_sandbox(id),
+                agent: "claude".into(),
+                status: "running".into(),
+            })
+            .collect(),
+        false => Vec::new(),
     };
     FakeBackend::with_secrets(&["anthropic", "openai"])
         .with_create_hook(move |spec| {
-            for (name, clone) in &fresh {
-                if spec.name == *name && clone.exists() {
-                    std::fs::remove_dir_all(clone).unwrap();
-                }
+            if let Some(clone) = clone_of(&spec.name).map(|c| PathBuf::from(fresh_map(&c)))
+                && clone.exists()
+            {
+                std::fs::remove_dir_all(clone).unwrap();
             }
         })
         .with_version(CLOUD_MIN)
@@ -101,12 +115,14 @@ fn cloud_backend_listing(root: &Path, id: &str, reviews: &[&str], listed: bool) 
         .with_exec_output_matching("claude", ok(CLAUDE_DONE))
         .with_exec_output_matching("codex", ok(CODEX_DONE))
         .with_exec_hook(move |sandbox, spec| {
+            let Some(clone) = clone_of(sandbox).map(|c| PathBuf::from(hook_map(&c))) else {
+                return;
+            };
             if !is_headless(spec) {
                 return;
             }
-            if sandbox == worker {
+            if !sandbox.contains("-review-") {
                 let n = runs.fetch_add(1, Ordering::SeqCst);
-                let clone = PathBuf::from(hook_map(&clone));
                 std::fs::write(clone.join("a.txt"), format!("run {n}\n")).unwrap();
                 common::git(&clone, &["add", "-A"]);
                 // A closing reference: the delivered branch's copy of this commit is rewritten
@@ -116,10 +132,10 @@ fn cloud_backend_listing(root: &Path, id: &str, reviews: &[&str], listed: bool) 
                     &["commit", "-q", "-m", &format!("run {n}\n\nFixes #9")],
                 );
                 std::fs::write(clone.join(".sbxm-task").join("result.md"), "done\n").unwrap();
-            } else if sandbox.contains("-review-") {
+            } else {
                 let n = reviewed.fetch_add(1, Ordering::SeqCst);
-                let dir = PathBuf::from(hook_map(&review_clone)).join(".sbxm-task");
-                std::fs::write(dir.join("review.md"), &reviews[n.min(reviews.len() - 1)]).unwrap();
+                let text = &reviews[n.min(reviews.len() - 1)];
+                std::fs::write(clone.join(".sbxm-task").join("review.md"), text).unwrap();
             }
         })
         .with_exec_responder(move |_sandbox, spec| {
@@ -917,4 +933,108 @@ fn a_cloud_review_refuses_a_strict_profile_or_a_ttl_too_large_before_any_change(
         assert!(message.contains(said), "{said}: {message}");
         assert_unchanged(&f, &id, &backend, &was);
     }
+}
+
+fn list_options(f: &Fixture) -> sbxm::commands::task_run::ListOptions {
+    sbxm::commands::task_run::ListOptions {
+        repo_root: f.env.tmp.path().join("target-repo"),
+        worker_harness: None,
+        worker_model: None,
+        reviewer_harness: None,
+        reviewer_model: None,
+        time_limit: None,
+        reviewer_time_limit: None,
+        profile: None,
+        base: Some("main".into()),
+        repo: Some("o/r".into()),
+        clone_source: Some(common::task_fixture::source(f)),
+        identity: Some(identity()),
+        disk: Default::default(),
+        location: None,
+    }
+}
+
+/// Behavior 7: an issue target stays refused in the cloud (slice 5b), and in a list that is found
+/// before any target starts.
+#[test]
+fn a_cloud_run_list_with_an_issue_target_is_refused_before_anything() {
+    let f = fixture_with(CLOUD_TOML);
+    let (spec, _) = spec(&f);
+    let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), "x", &[CLEAN]);
+    let github = sbxm::github::fake::FakeGitHub::default();
+
+    let result = sbxm::commands::task_run::run_list(
+        &f.env.config_dir(),
+        &list_options(&f),
+        &[
+            sbxm::commands::task_run::Target::Spec(spec),
+            sbxm::commands::task_run::Target::Issue(41),
+        ],
+        None,
+        &backend,
+        &github,
+        &common::task_fixture::Probe,
+        &sbxm::task::gates::FakeHostRunner::default(),
+        &mut Vec::new(),
+        &mut Vec::new(),
+    );
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains("--issue 41") && message.contains("cloud"),
+        "{message}"
+    );
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert!(github.calls().is_empty(), "{:?}", github.calls());
+    assert!(!f.env.base_dir().join(".sbxm").join("tasks").exists());
+}
+
+/// Lesson 1: a `task run` list of cloud targets resolves the location once for the list and skips
+/// the local free-disk check for every target (P11), not only the first: both of two cloud spec
+/// targets run to `ready` with too little local free disk.
+#[test]
+fn a_cloud_run_list_of_two_specs_with_too_little_local_disk_runs_both_to_ready() {
+    use sbxm::commands::task_run::{ListOptions, Target, run_list};
+
+    let f = fixture_with(CLOUD_TOML);
+    let specs: Vec<PathBuf> = ["one.md", "two.md"]
+        .iter()
+        .map(|name| {
+            let path = f.env.tmp.path().join(name);
+            std::fs::write(&path, format!("Build {name}.\n")).unwrap();
+            path
+        })
+        .collect();
+    let ids: Vec<String> = specs
+        .iter()
+        .map(|p| record::spec_id(p).unwrap().0)
+        .collect();
+    let id_refs: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let backend = cloud_backend_for(&f.env.tmp.path().join("cloud-fs"), &id_refs, &[CLEAN], true);
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+
+    let result = run_list(
+        &f.env.config_dir(),
+        &ListOptions {
+            disk: common::low_disk(&f.env),
+            ..list_options(&f)
+        },
+        &specs.into_iter().map(Target::Spec).collect::<Vec<_>>(),
+        None,
+        &backend,
+        &sbxm::github::fake::FakeGitHub::default(),
+        &common::task_fixture::Probe,
+        &sbxm::task::gates::FakeHostRunner::default(),
+        &mut out,
+        &mut warn,
+    );
+
+    let out = String::from_utf8(out).unwrap();
+    result.unwrap();
+    for id in &ids {
+        let task = task_record(&f, id);
+        assert_eq!(task.stage, record::Stage::Ready, "{id}\n{out}");
+        assert_all_removed(&task, &[SandboxRole::Worker, SandboxRole::Reviewer]);
+    }
+    assert!(!out.contains(common::LOW_DISK), "{out}");
 }

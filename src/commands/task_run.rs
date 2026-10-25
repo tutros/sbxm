@@ -601,6 +601,7 @@ impl Target {
 
 /// The flags every task of a `task run` list shares (decision 193): the same as [`Options`] and
 /// [`SpecOptions`] minus the one target each task carries on its own.
+#[derive(Clone)]
 pub struct ListOptions {
     /// The target repo's root, where `sbxm-task.toml` is.
     pub repo_root: PathBuf,
@@ -753,8 +754,25 @@ fn preflight_targets(
     config_dir: &Path,
     opts: &ListOptions,
     targets: &[Target],
+    location: Location,
     github: &dyn GitHubBackend,
 ) -> Result<()> {
+    // An issue target can't run in the cloud yet (slice 5b): refused before any target starts.
+    if location == Location::Cloud {
+        let issues: Vec<String> = targets
+            .iter()
+            .filter(|t| matches!(t, Target::Issue(_)))
+            .map(Target::flag)
+            .collect();
+        if !issues.is_empty() {
+            bail!(
+                "`task run --issue` can't run its sandboxes in the cloud yet (milestone 4 builds \
+                 it later), so the list doesn't start ({}); run it with --local, or list only \
+                 --spec targets",
+                issues.join(", ")
+            );
+        }
+    }
     let Ok(repo) = task_start::resolve_repo(opts.repo.as_deref(), &opts.repo_root) else {
         return Ok(());
     };
@@ -854,7 +872,18 @@ pub fn run_list(
         };
     }
 
-    preflight_targets(config_dir, opts, targets, github)?;
+    // One location for the whole list (P14), resolved once: every target runs where the first
+    // does, whatever happens to `sbxm-task.toml` meanwhile. A config that can't be read is each
+    // target's own failure, found as it starts (decision 193 point 1), as before.
+    let location = match TaskConfig::load(&opts.repo_root) {
+        Ok(config) => pipeline::choose_location(opts.location, &config),
+        Err(_) => opts.location.unwrap_or_default(),
+    };
+    let opts = &ListOptions {
+        location: Some(location),
+        ..opts.clone()
+    };
+    preflight_targets(config_dir, opts, targets, location, github)?;
 
     let mut summaries: Vec<(String, bool)> = Vec::new();
     for (i, target) in targets.iter().enumerate() {
@@ -865,7 +894,15 @@ pub fn run_list(
             targets.len(),
             target.flag()
         )?;
-        if let Err(e) = disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk) {
+        // A cloud sandbox doesn't use the drive of `sbx`'s local sandbox state (P11, decision
+        // 262(h)), for any target of the list.
+        let room = match location {
+            Location::Local => {
+                disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)
+            }
+            Location::Cloud => Ok(()),
+        };
+        if let Err(e) = room {
             let reason = format!("{e:#}");
             writeln!(out, "{}: not started: {reason}", target.flag())?;
             summaries.push((format!("{}: not started: {reason}", target.flag()), false));
