@@ -73,6 +73,17 @@ pub fn sandbox_task(sandbox: &str) -> Option<(String, bool)> {
 /// [`cloud_backend_listing`] for the tasks `ids` at once (a `task run` list): each sandbox's name
 /// says whose clone it works in.
 pub fn cloud_backend_for(root: &Path, ids: &[&str], reviews: &[&str], listed: bool) -> FakeBackend {
+    cloud_backend_worker(root, ids, reviews, listed, ok(CLAUDE_DONE))
+}
+
+/// [`cloud_backend_for`], with `worker` as what the worker's headless command gives back.
+pub fn cloud_backend_worker(
+    root: &Path,
+    ids: &[&str],
+    reviews: &[&str],
+    listed: bool,
+    worker: ExecOutput,
+) -> FakeBackend {
     std::fs::create_dir_all(root.join(HOME.trim_start_matches('/'))).unwrap();
     let inside = root.to_string_lossy().into_owned();
     let map = move |arg: &str| arg.replace(HOME, &format!("{inside}{HOME}"));
@@ -109,7 +120,7 @@ pub fn cloud_backend_for(root: &Path, ids: &[&str], reviews: &[&str], listed: bo
         .and_sandboxes(sandboxes)
         .with_sandbox_root(root)
         .with_exec_output_matching("printenv", ok(&format!("{HOME}\n")))
-        .with_exec_output_matching("claude", ok(CLAUDE_DONE))
+        .with_exec_output_matching("claude", worker)
         .with_exec_output_matching("codex", ok(CODEX_DONE))
         .with_exec_hook(move |sandbox, spec| {
             let Some(clone) = clone_of(sandbox).map(|c| PathBuf::from(hook_map(&c))) else {
@@ -123,10 +134,17 @@ pub fn cloud_backend_for(root: &Path, ids: &[&str], reviews: &[&str], listed: bo
                 std::fs::write(clone.join("a.txt"), format!("run {n}\n")).unwrap();
                 super::git(&clone, &["add", "-A"]);
                 // A closing reference: the delivered branch's copy of this commit is rewritten
-                // (issue 244), so it differs from the agent's own.
+                // (issue 244), so it differs from the agent's own. Empty when a clone made
+                // again from the agent's history already has this run's text.
                 super::git(
                     &clone,
-                    &["commit", "-q", "-m", &format!("run {n}\n\nFixes #9")],
+                    &[
+                        "commit",
+                        "-q",
+                        "--allow-empty",
+                        "-m",
+                        &format!("run {n}\n\nFixes #9"),
+                    ],
                 );
                 std::fs::write(clone.join(".sbxm-task").join("result.md"), "done\n").unwrap();
             } else {

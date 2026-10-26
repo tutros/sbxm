@@ -579,6 +579,7 @@ fn main() -> anyhow::Result<()> {
                         target,
                         rounds,
                         disk: sbxm::disk::Guard::real(ignore_disk),
+                        identity: None,
                     },
                     &SbxBackend::LOCAL,
                     &task::record::SystemProbe,

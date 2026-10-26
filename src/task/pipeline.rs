@@ -2165,6 +2165,9 @@ pub(super) fn ensure_worker_sandbox(
     prepared: &mut Prepared,
     replace: bool,
 ) -> Result<bool> {
+    if prepared.record.location == Location::Cloud {
+        return ensure_cloud_worker_for_resume(env, prepared, replace);
+    }
     let worker = prepared
         .record
         .worker
@@ -2224,6 +2227,18 @@ fn ensure_cloud_worker(
     role: SandboxRole,
     purpose: &str,
 ) -> Result<bool> {
+    ensure_cloud_worker_as(env, prepared, role, purpose, false)
+}
+
+/// [`ensure_cloud_worker`]; with `replace`, the sandbox is made again whether or not the cloud
+/// lists it (the caller has removed a half-made one).
+fn ensure_cloud_worker_as(
+    env: &TaskEnv,
+    prepared: &mut Prepared,
+    role: SandboxRole,
+    purpose: &str,
+    replace: bool,
+) -> Result<bool> {
     if prepared.record.location != Location::Cloud {
         return Ok(false);
     }
@@ -2233,7 +2248,7 @@ fn ensure_cloud_worker(
         .as_ref()
         .context("the task has no worker")?;
     let sandbox = worker.sandbox.clone();
-    if env.backend.list()?.iter().any(|s| s.name == sandbox) {
+    if !replace && env.backend.list()?.iter().any(|s| s.name == sandbox) {
         return Ok(false);
     }
     let profile_name = worker_profile(&prepared.record, worker)?.to_owned();
@@ -2289,6 +2304,48 @@ fn ensure_cloud_worker(
     }
     record::write(&prepared.meta, &prepared.record)?;
     Ok(true)
+}
+
+/// [`ensure_worker_sandbox`] for a task recorded in the cloud (`task resume`, milestone 4 slice
+/// 6): the worker sandbox, made again when gone (or, with `replace`, after the one a cut-off
+/// preparation may have left half made is removed, retried), as a fix round makes it: a `fix`
+/// lifetime entry for a fix round, a `worker` one otherwise. The caller ran
+/// [`check_cloud_rebuild`] first.
+fn ensure_cloud_worker_for_resume(
+    env: &TaskEnv,
+    prepared: &mut Prepared,
+    replace: bool,
+) -> Result<bool> {
+    let role = match prepared.record.stage {
+        Stage::Fixing => SandboxRole::Fix,
+        _ => SandboxRole::Worker,
+    };
+    if replace {
+        let worker = prepared
+            .record
+            .worker
+            .as_ref()
+            .context("the task has no worker")?;
+        let sandbox = worker.sandbox.clone();
+        // Its entry stamped when it has one; a create cut off before its entry was written
+        // left none, and the sandbox may still be there.
+        let removed = if prepared.record.has_open_sandbox(&sandbox) {
+            stop_cloud_worker(env, prepared);
+            !prepared.record.has_open_sandbox(&sandbox)
+        } else {
+            !matches!(
+                lifetime::remove_sandbox(env.backend, &sandbox, env.sleep),
+                lifetime::Removal::Failed(_)
+            )
+        };
+        if !removed {
+            bail!(
+                "the half-made cloud sandbox {sandbox} could not be removed, so it isn't made \
+                 again; remove it with `sbx --cloud rm {sandbox} -f`, then resume again"
+            );
+        }
+    }
+    ensure_cloud_worker_as(env, prepared, role, "the resumed task", replace)
 }
 
 /// Whether a cloud task's worker sandbox is gone (`sbx --cloud ls` doesn't list it), so the next
@@ -2378,7 +2435,25 @@ pub fn run_worker(ctx: &Ctx, prepared: &mut Prepared) -> Result<Worked> {
 /// worker's clone again from the copies in the task's folder, for a worker that runs again (`task
 /// resume`, issue 118): the last run could change or delete the clone's copies. Refuses a control
 /// folder or file the agent replaced with a link.
-pub(super) fn restore_worker_input(prepared: &Prepared) -> Result<()> {
+pub(super) fn restore_worker_input(
+    backend: &dyn SandboxBackend,
+    prepared: &Prepared,
+) -> Result<()> {
+    // A cloud clone has no host copy: the task's copies go in by `cp` (milestone 4 slice 6).
+    if prepared.record.location == Location::Cloud {
+        let worker = prepared
+            .record
+            .worker
+            .as_ref()
+            .context("the task has no worker")?;
+        let control = format!("{}/{AGENT_DIR}", prepared.sandbox_clone().to_string_lossy());
+        return copy_in_all(
+            backend,
+            &worker.sandbox,
+            &control,
+            &worker_files(&prepared.meta, prepared.record.kind),
+        );
+    }
     let source = match prepared.record.kind {
         Kind::Spec => "source.md",
         _ => "issue.md",
@@ -3379,14 +3454,13 @@ pub(super) fn rerun_fix_round(env: &TaskEnv, prepared: &mut Prepared) -> Result<
     // The clone is agent-controlled, so it is validated and the input placed in it before the
     // record says the retry is running (as `restore_worker_input` and the stopped-ready fix path
     // already do): a link the failed worker left must be refused with nothing recorded yet.
-    repo::write_agent_files(
-        &prepared.workspace,
-        &[
-            (extra_name, extra_text.as_bytes()),
-            ("fix-prompt.md", prompt.as_bytes()),
-        ],
-        Existing::Refuse,
-    )?;
+    // A cloud clone gets them by `cp` instead (milestone 4 slice 6).
+    FixInput {
+        extra_name,
+        extra_text,
+        prompt,
+    }
+    .place(env.backend, prepared)?;
     prepared.record.rerun(now(), Process::current(env.probe))?;
     record::write(&prepared.meta, &prepared.record)?;
     fix(env, prepared)
@@ -3500,7 +3574,7 @@ pub fn may_fix(record: &Record) -> bool {
 /// task started, a committer identity for its clone and the worker's TTL), plus the cloud
 /// preflight of that profile, all before the review changes anything. Whether it is gone is only
 /// known at the fix round, so this runs whenever one may come.
-fn check_cloud_rebuild(env: &TaskEnv, record: &Record) -> Result<()> {
+pub(super) fn check_cloud_rebuild(env: &TaskEnv, record: &Record) -> Result<()> {
     let worker = record.worker.as_ref().context("the task has no worker")?;
     let profile_name = worker_profile(record, worker)?;
     let resources = worker_resources(record, worker)?;
@@ -4091,7 +4165,7 @@ fn release_cloud_sandbox(env: &TaskEnv, prepared: &mut Prepared, sandbox: &str) 
 
 /// The task stops (ready, or for any reason): its cloud worker sandbox goes now (P5 (d),
 /// decision 263), then its scoped secrets; nothing for a local task.
-fn stop_cloud_worker(env: &TaskEnv, prepared: &mut Prepared) {
+pub(super) fn stop_cloud_worker(env: &TaskEnv, prepared: &mut Prepared) {
     let stopped = lifetime::release_worker(
         env.backend,
         &prepared.meta,

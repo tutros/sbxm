@@ -10,7 +10,7 @@ use anyhow::{Result, bail};
 
 use super::task_review::{print_review, resume_hint};
 use super::task_start::spec_flag;
-use crate::backend::SandboxBackend;
+use crate::backend::{Location, SandboxBackend};
 use crate::config::GlobalConfig;
 use crate::disk;
 use crate::harness::Harness;
@@ -19,6 +19,7 @@ use crate::task::config::TaskConfig;
 use crate::task::gates::HostRunner;
 use crate::task::pipeline::{Prepared, TaskEnv};
 use crate::task::record::{self, ProcessProbe};
+use crate::task::repo::Identity;
 use crate::task::resume;
 
 /// Which task is resumed.
@@ -37,6 +38,9 @@ pub struct Options {
     pub rounds: Option<u32>,
     /// The free-space check of the sandbox drive before a sandbox is created (decision 194).
     pub disk: disk::Guard,
+    /// For tests: the committer identity a cloud worker sandbox made again gives its clone,
+    /// instead of the user's global git config (milestone 4 slice 6).
+    pub identity: Option<Identity>,
 }
 
 impl Target {
@@ -80,19 +84,31 @@ pub fn run(
     for warning in &config.warnings {
         writeln!(warn, "warning: {warning}")?;
     }
+    // The task resumes where its record says (decision 253), whatever the config says now; a
+    // cloud one may make its worker sandbox again, whose clone needs a committer identity.
+    let location = prepared.record.location;
+    let identity = match (location, &opts.identity) {
+        (Location::Local, _) => None,
+        (Location::Cloud, Some(identity)) => Some(identity.clone()),
+        (Location::Cloud, None) => Identity::read_from(None).ok(),
+    };
     let env = TaskEnv {
         config_dir,
         config: &config,
-        backend,
+        backend: backend.located(location),
         probe,
         host,
         sleep: &std::thread::sleep,
-        // A cloud task's sandboxes follow its location from slice 6 on; no scoped secrets here.
+        // Empty in production while P8 (a) holds (slice 4).
         scoped_secrets: &[],
-        identity: None,
+        identity: identity.as_ref(),
     };
     resume::check_can_resume(&prepared.record, probe, opts.rounds)?;
-    disk::require(&global, config_dir, &opts.disk)?;
+    // A cloud sandbox doesn't use the drive of `sbx`'s local sandbox state (P11, decision
+    // 262(h)).
+    if location == Location::Local {
+        disk::require(&global, config_dir, &opts.disk)?;
+    }
     writeln!(
         out,
         "{id}: resuming from {} ({})",
@@ -108,7 +124,11 @@ pub fn run(
         )?;
     }
     let resumed = resume::resume(&env, &mut prepared, opts.rounds);
-    // A remade sandbox's warnings (a template it couldn't use), even when the resume then failed.
+    // What the cloud sandboxes did (their creates and removals, decision 265) and a remade
+    // sandbox's warnings (a template it couldn't use), even when the resume then failed.
+    for line in prepared.events.drain(..) {
+        writeln!(out, "{line}")?;
+    }
     for warning in &prepared.warnings {
         writeln!(warn, "warning: {warning}")?;
     }

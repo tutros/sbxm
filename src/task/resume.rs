@@ -9,6 +9,7 @@ use anyhow::{Context, Result, bail};
 use super::machine::{self, Event};
 use super::pipeline::{self, Prepared, ReviewReport, TaskEnv, Worked};
 use super::record::{self, Kind, Process, ProcessProbe, Record, Stage, Status, Stopped};
+use crate::backend::Location;
 use crate::headless::RunStatus;
 use crate::run::results::now;
 
@@ -166,10 +167,19 @@ fn resume_runs_worker(task: &Record) -> bool {
 /// Continues the task from its recorded stage (issue 118). Checks first: nothing runs or is
 /// written when [`check_can_resume`], the reviewer's checks, (when the worker will run) the
 /// worker's checks, or (when a recorded review is replayed) [`pipeline::check_replay`] refuse.
+///
+/// A task recorded in the cloud (milestone 4 slice 6) is resumed there: `env.backend` is the
+/// cloud instance, the worker's checks are the cloud preflight of its sandbox's rebuild, made
+/// whatever the stage (decision 261), a gone worker sandbox is made again from the recorded
+/// profile and a bundle of the branch (P5 (d)), the task's input goes into it by `cp`, and it is
+/// removed when the task stops, whichever way the resume ends after the checks.
 pub fn resume(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Result<Resumed> {
     check_can_resume(&prepared.record, env.probe, rounds)?;
     pipeline::check_reviewer(env, prepared)?;
-    if resume_runs_worker(&prepared.record) {
+    let cloud = prepared.record.location == Location::Cloud;
+    if cloud {
+        pipeline::check_cloud_rebuild(env, &prepared.record)?;
+    } else if resume_runs_worker(&prepared.record) {
         pipeline::check_worker(env, prepared)?;
     }
     if (prepared.record.stage, prepared.record.status) == (Stage::Reviewing, Status::Completed)
@@ -177,6 +187,15 @@ pub fn resume(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Re
     {
         pipeline::check_replay(prepared, result)?;
     }
+    let resumed = resume_checked(env, prepared, rounds);
+    // The task stops here, whichever way: a cloud worker sandbox goes (P5 (d), decision 263).
+    pipeline::stop_cloud_worker(env, prepared);
+    resumed
+}
+
+/// [`resume`] once its checks have passed.
+fn resume_checked(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Result<Resumed> {
+    let cloud = prepared.record.location == Location::Cloud;
     let mut resumed = Resumed {
         from: (prepared.record.stage, prepared.record.status),
         sandbox_remade: false,
@@ -185,26 +204,32 @@ pub fn resume(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Re
     };
     let probe = env.probe;
     // A worker that runs again gets the task's own input back first, before any sandbox is
-    // touched: the last run could change it, or leave a link where it goes.
-    if matches!(
+    // touched: the last run could change it, or leave a link where it goes. A cloud clone gets it
+    // once its sandbox is there, below.
+    let reruns_worker = matches!(
         (prepared.record.stage, prepared.record.status),
         (Stage::Prepared, _) | (Stage::Working, Status::Running | Status::Failed)
-    ) {
-        pipeline::restore_worker_input(prepared)?;
+    );
+    if reruns_worker && !cloud {
+        pipeline::restore_worker_input(env.backend, prepared)?;
     }
     // A stopped `ready` task's fix round works from its recorded review: it is read, and with the
-    // prompt written into the clone, before the sandbox, the budget or the stage change.
+    // prompt written into the clone, before the sandbox, the budget or the stage change. A cloud
+    // task's worker sandbox went at its stop: the fix round makes it again and places the input.
     let fix_input = if prepared.record.stage == Stage::Ready {
         let input = pipeline::fix_input(env, prepared, None)?;
-        input.place(env.backend, prepared)?;
+        if !cloud {
+            input.place(env.backend, prepared)?;
+        }
         Some(input)
     } else {
         None
     };
     // The worker's sandbox runs the worker, the sandbox gates and every fix round; it can vanish
     // between stages (workflow note G17), so it is made again first when it is gone. A
-    // preparation makes it afresh below instead.
-    if prepared.record.stage != Stage::Prepared {
+    // preparation makes it afresh below instead, and a cloud fix round from `ready` makes its own.
+    if prepared.record.stage != Stage::Prepared && !(cloud && prepared.record.stage == Stage::Ready)
+    {
         resumed.sandbox_remade = pipeline::ensure_worker_sandbox(env, prepared, false)?;
         if resumed.sandbox_remade {
             prepared
@@ -212,6 +237,9 @@ pub fn resume(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Re
                 .notes
                 .push("resume: the worker's sandbox was gone and was made again".to_owned());
         }
+    }
+    if reruns_worker && cloud && prepared.record.stage != Stage::Prepared {
+        pipeline::restore_worker_input(env.backend, prepared)?;
     }
     // Whether the worker runs again (its stage is set up below, running).
     let mut run_worker = false;

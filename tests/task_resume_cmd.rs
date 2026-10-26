@@ -68,6 +68,7 @@ fn options(f: &Fixture, rounds: Option<u32>) -> Options {
         target: Target::Issue(41),
         rounds,
         disk: Default::default(),
+        identity: None,
     }
 }
 

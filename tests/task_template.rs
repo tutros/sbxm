@@ -613,6 +613,7 @@ fn resume_41(
             target: task_resume::Target::Issue(41),
             rounds: None,
             disk: Default::default(),
+            identity: None,
         },
         backend,
         &Gone,
