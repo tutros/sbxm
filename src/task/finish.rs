@@ -550,8 +550,11 @@ pub fn restore_after_failed_start(aside: &SetAside, start_failed: anyhow::Error)
 /// (decision 185): the confirmation and the sandbox removal are the same. A caller gets back one
 /// [`SetAside`] per task and decides, once it knows whether the task that replaced it finished
 /// preparing, whether to [`SetAside::restore`] or [`SetAside::settle`] it; nothing here decides
-/// that. A sandbox that can't be removed is reported but doesn't stop the rest (as [`remove`]
-/// does): the sandboxes are gone either way, only the folders are undoable.
+/// that. A local sandbox that can't be removed is reported but doesn't stop the rest (as
+/// [`remove`] does): it is gone or left behind either way, only the folders are undoable. A
+/// cloud sandbox that may still be there stops the batch before its task is set aside, and
+/// every task already set aside in this call goes back (milestone 4 slice 6): the task's
+/// record is the only trace of a sandbox that may still be running.
 pub fn set_aside_many(
     base_dir: &Path,
     ids: &[String],
