@@ -738,3 +738,39 @@ fn an_issue_restart_into_the_cloud_or_of_a_cloud_issue_task_is_refused_before_an
     assert_eq!(backend.log(), log);
     assert_eq!(task_record(&f, id), record_was);
 }
+
+/// A timed-out cloud worker stops its issue task too, as a spec task's (slice 3, behavior 2): no
+/// gate runs, its partial commit is kept and its sandbox is removed.
+#[test]
+fn a_timed_out_cloud_issue_worker_stops_and_its_sandbox_is_removed() {
+    let f = fixture_with(CLOUD_TOML);
+    let id = "issue-41";
+    let timed_out = ExecOutput {
+        stdout: String::new(),
+        stderr: "timeout: sending signal TERM to command 'claude'\n".into(),
+        exit_code: Some(124),
+    };
+    let backend = cloud_backend_with(&f.env.tmp.path().join("cloud-fs"), &[id], timed_out);
+
+    let ran = task_start(
+        &f,
+        &start_options(&f, vec![41], None, None),
+        &backend,
+        &github(),
+    );
+
+    assert!(ran.result.is_err(), "{}", ran.out);
+    assert!(
+        ran.out.contains("worker timed out, 1 commit"),
+        "{}",
+        ran.out
+    );
+    assert!(!ran.out.contains("next:"), "{}", ran.out);
+    assert!(!ran.out.contains("gates:"), "{}", ran.out);
+    let task = task_record(&f, id);
+    assert_all_removed(&task, &[SandboxRole::Worker]);
+    assert_eq!(
+        backend.log().last(),
+        Some(&format!("rm {}", worker_sandbox(id)))
+    );
+}
