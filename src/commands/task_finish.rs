@@ -4,14 +4,17 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 
+use crate::backend::{Location, SandboxBackend};
 use crate::commands::task_start::{path_arg, spec_flag};
 use crate::config::GlobalConfig;
 use crate::github::GitHubBackend;
 use crate::task::config::{Sink, TaskConfig};
 use crate::task::finish;
+use crate::task::lifetime::{self, Released};
 use crate::task::record::{self, ProcessProbe};
 
 /// What `finish` is asked for.
@@ -32,6 +35,84 @@ pub struct Options {
 }
 
 pub fn run(
+    config_dir: &Path,
+    opts: &Options,
+    backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    out: &mut dyn Write,
+) -> Result<()> {
+    run_with_sleep(
+        config_dir,
+        opts,
+        backend,
+        github,
+        probe,
+        out,
+        &std::thread::sleep,
+    )
+}
+
+/// [`run`], with `sleep` called for each wait between a cloud sandbox's removal retries (P6 (a))
+/// instead of really sleeping. The finish itself is host-side; once it is done, any cloud sandbox
+/// the task's record still holds open (its removal at the task's stop failed) is removed, then
+/// its scoped secrets (milestone 4 slice 6). What that says is printed; a sandbox that still
+/// can't be removed doesn't fail the finish.
+#[allow(clippy::too_many_arguments)]
+pub fn run_with_sleep(
+    config_dir: &Path,
+    opts: &Options,
+    backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    out: &mut dyn Write,
+    sleep: &dyn Fn(Duration),
+) -> Result<()> {
+    let id = match &opts.target {
+        Target::Issue(0) => bail!("issue numbers start at 1; pass --issue <n>"),
+        Target::Issue(n) => format!("issue-{n}"),
+        Target::Spec(path) => record::spec_id(path)?.0,
+    };
+    let base_dir = GlobalConfig::load(config_dir)?.base_dir;
+    // Read and checked before anything is published (check before acting).
+    let open = match record::is_valid_id(&id) {
+        true => record::read(&record::task_dir(&base_dir, &id).join("task.json"))
+            .ok()
+            .map(|task| finish::open_cloud_sandboxes(&task))
+            .transpose()?
+            .unwrap_or_default(),
+        false => Vec::new(),
+    };
+    publish(config_dir, opts, github, probe, out)?;
+    if open.is_empty() {
+        return Ok(());
+    }
+    let meta = record::task_dir(&base_dir, &id);
+    let mut task = match record::read(&meta.join("task.json")) {
+        Ok(task) => task,
+        Err(e) => {
+            for name in &open {
+                writeln!(
+                    out,
+                    "warning: {}",
+                    lifetime::not_removed(name, &format!("task.json couldn't be read: {e:#}"))
+                )?;
+            }
+            return Ok(());
+        }
+    };
+    let cloud = backend.located(Location::Cloud);
+    for said in lifetime::release_open(cloud, &meta, &mut task, &open, sleep) {
+        match said {
+            Released::Line(line) => writeln!(out, "{line}")?,
+            Released::Warning(warning) => writeln!(out, "warning: {warning}")?,
+        }
+    }
+    Ok(())
+}
+
+/// The finish itself: host-side only (`repo.git`, GitHub).
+fn publish(
     config_dir: &Path,
     opts: &Options,
     github: &dyn GitHubBackend,

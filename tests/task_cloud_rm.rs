@@ -74,7 +74,7 @@ fn reopen(f: &Fixture, id: &str, name: &str) {
 fn to_cloud_config(f: &Fixture) {
     std::fs::write(
         f.env.tmp.path().join("target-repo").join("sbxm-task.toml"),
-        "[sandbox]\nprofile = \"default\"\nlocation = \"cloud\"\n",
+        "[sandbox]\nprofile = \"default\"\nlocation = \"cloud\"\n\n[gates]\nsandbox = [\"cargo test\"]\n",
     )
     .unwrap();
 }

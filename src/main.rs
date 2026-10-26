@@ -688,6 +688,7 @@ fn main() -> anyhow::Result<()> {
                         repo_root: std::env::current_dir()?,
                         push_unresolved,
                     },
+                    &SbxBackend::LOCAL,
                     &sbxm::github::gh::GhBackend::default(),
                     &task::record::SystemProbe,
                     &mut out,

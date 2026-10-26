@@ -43,6 +43,7 @@ fn kept_spec_task(f: &Fixture) -> (PathBuf, String) {
             repo_root: target_repo(f),
             push_unresolved: false,
         },
+        &sbxm::backend::FakeBackend::default(),
         &FakeGitHub::default(),
         &Probe,
         &mut Vec::new(),

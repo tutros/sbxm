@@ -200,6 +200,16 @@ fn sandbox_names(id: &str, task: &Record) -> Result<Vec<String>> {
     Ok(names)
 }
 
+/// The sandboxes a cloud task's record still holds open (a removal at its stop that failed),
+/// each checked to be one of the task's own before any goes to `sbx --cloud rm`; none for a local
+/// task (milestone 4 slice 6).
+pub fn open_cloud_sandboxes(task: &Record) -> Result<Vec<String>> {
+    match task.location {
+        Location::Local => Ok(Vec::new()),
+        Location::Cloud => sandbox_names(&task.id, task),
+    }
+}
+
 /// Refuses a folder that is a link, or whose real place isn't `<base>/<rel...>`.
 pub(crate) fn check_own_folder(base_dir: &Path, dir: &Path) -> Result<()> {
     if dir.symlink_metadata()?.file_type().is_symlink() {

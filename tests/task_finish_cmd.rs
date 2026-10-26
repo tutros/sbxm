@@ -45,6 +45,7 @@ fn go(f: &Fixture, issue: u32, github: &FakeGitHub) -> (anyhow::Result<()>, Stri
             repo_root: f.env.tmp.path().join("target-repo"),
             push_unresolved: false,
         },
+        &sbxm::backend::FakeBackend::default(),
         github,
         &Probe,
         &mut out,

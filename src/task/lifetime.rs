@@ -196,6 +196,27 @@ pub fn release(
     stopped
 }
 
+/// A command that acts on a cloud task after its run (`task finish`, milestone 4 slice 6) removes
+/// each of `names`, its sandboxes still open in the record: retried, its entry stamped and saved,
+/// then every secret the cloud lists as scoped to it, by scope (slice 4: the command has no list
+/// of its own). `backend` is the cloud instance. Never fails: the caller shows what it says.
+pub fn release_open(
+    backend: &dyn SandboxBackend,
+    meta: &Path,
+    task: &mut Record,
+    names: &[String],
+    sleep: &dyn Fn(Duration),
+) -> Vec<Released> {
+    let mut said = Vec::new();
+    for name in names {
+        if task.has_open_sandbox(name) {
+            said.push(remove_entry(backend, meta, task, name, sleep));
+        }
+        said.extend(secrets::remove_all(backend, name));
+    }
+    said
+}
+
 /// A sandbox's removal, retried, and its lifetime entry stamped and saved.
 fn remove_entry(
     backend: &dyn SandboxBackend,
