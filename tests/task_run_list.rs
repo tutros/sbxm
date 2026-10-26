@@ -512,3 +512,30 @@ fn a_target_repeated_in_the_same_list_reports_the_refusal_not_the_other_copys_st
         "two lines for the same target, but only one of them reached ready this run: {text}"
     );
 }
+
+/// P14 (decision 262(k)): `--local` overrides a cloud `[sandbox] location` for every issue target
+/// of the list, each start included: both run here to `ready`, with no call to the cloud.
+#[test]
+fn local_overrides_a_cloud_config_for_every_issue_target() {
+    let f = fixture_with(
+        "[sandbox]\nprofile = \"default\"\nlocation = \"cloud\"\n\n[gates]\nsandbox = [\"cargo test\"]\n\n\
+         [reviewer]\nharness = \"codex\"\n",
+    );
+    let (b, gh) = (backend(&f), github());
+    let targets = [Target::Issue(41), Target::Issue(42)];
+    let opts = ListOptions {
+        location: Some(sbxm::backend::Location::Local),
+        ..opts(&f)
+    };
+
+    let out = go(&f, &opts, &targets, None, &b, &gh);
+
+    out.result.expect(&out.out);
+    assert_eq!(stage(&f, "issue-41"), (Stage::Ready, Status::Ok));
+    assert_eq!(stage(&f, "issue-42"), (Stage::Ready, Status::Ok));
+    assert!(
+        !b.locations().contains(&sbxm::backend::Location::Cloud),
+        "{:?}",
+        b.locations()
+    );
+}

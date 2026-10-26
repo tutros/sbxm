@@ -156,12 +156,15 @@ fn run_issue(
     // The reviewer's secret and profile are checked now too: a missing one must not be found only
     // after the worker has spent its time (spec §5.2). The effective config is the one both
     // phases will build from their flags.
-    {
+    // The location is resolved once, here, and handed to the start as it is, so `--local` over
+    // a cloud `[sandbox] location` holds for the whole command (P14).
+    let location = {
         let mut config = TaskConfig::load(&opts.repo_root)?;
+        let location = pipeline::choose_location(opts.location, &config);
         // An issue task's sandboxes can't run in the cloud yet (milestone 4 slice 5b builds
         // them): refused rather than run here (decision 261).
         pipeline::refuse_cloud(
-            pipeline::choose_location(opts.location, &config),
+            location,
             "`task run --issue`",
             "run it with --local, or run a spec task with --spec <file> --cloud",
         )?;
@@ -179,8 +182,9 @@ fn run_issue(
             config.sandbox.profile = profile.clone();
         }
         disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?;
-        pipeline::check_reviewer_inputs(config_dir, backend, &config, Location::Local)?;
-    }
+        pipeline::check_reviewer_inputs(config_dir, backend, &config, location)?;
+        location
+    };
 
     let start = task_start::Options {
         repo_root: opts.repo_root.clone(),
@@ -195,7 +199,7 @@ fn run_issue(
         clone_source: opts.clone_source.clone(),
         identity: opts.identity.clone(),
         disk: opts.disk.clone(),
-        location: None,
+        location: Some(location),
     };
     let mut warn = Once {
         inner: warn,

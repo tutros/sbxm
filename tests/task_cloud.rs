@@ -1809,3 +1809,53 @@ fn a_malformed_or_misplaced_scoped_secret_is_refused_before_anything() {
     assert!(backend.log().is_empty(), "{:?}", backend.log());
     assert!(!sbxm::task::record::task_dir(&f.env.base_dir(), &id).exists());
 }
+
+/// P14 (decision 262(k)): `task run --issue --local` overrides a cloud `[sandbox] location` for
+/// the whole command, the start included: it gets past both refusals and asks GitHub for the issue,
+/// with no cloud call.
+#[test]
+fn task_run_issue_local_overrides_a_cloud_config_for_the_start_too() {
+    use sbxm::commands::task_run::{self, Options};
+
+    let f = fixture_with(CLOUD_TOML);
+    let backend = sbxm::backend::FakeBackend::with_secrets(&["anthropic", "openai"]);
+    let github = sbxm::github::fake::FakeGitHub::default();
+    let result = task_run::run(
+        &f.env.config_dir(),
+        &Options {
+            repo_root: f.env.tmp.path().join("target-repo"),
+            issue: 41,
+            worker_harness: None,
+            worker_model: None,
+            reviewer_harness: None,
+            reviewer_model: None,
+            time_limit: None,
+            reviewer_time_limit: None,
+            profile: None,
+            base: Some("main".into()),
+            repo: Some("o/r".into()),
+            clone_source: Some(common::task_fixture::source(&f)),
+            identity: Some(identity()),
+            disk: Default::default(),
+            location: Some(Location::Local),
+        },
+        None,
+        &backend,
+        &github,
+        &common::task_fixture::Probe,
+        &sbxm::task::gates::FakeHostRunner::default(),
+        &mut Vec::new(),
+        &mut Vec::new(),
+    );
+
+    if let Err(e) = result {
+        let message = format!("{e:#}");
+        assert!(!message.contains("cloud"), "{message}");
+    }
+    assert!(!github.calls().is_empty());
+    assert!(
+        !backend.locations().contains(&Location::Cloud),
+        "{:?}",
+        backend.locations()
+    );
+}
