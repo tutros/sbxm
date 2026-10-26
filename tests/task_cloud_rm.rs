@@ -220,3 +220,149 @@ fn rm_of_a_local_task_under_a_cloud_config_removes_it_here() {
     );
     assert!(!meta(&f, &id).exists(), "{out}");
 }
+
+/// The cloud task finished through the `local` sink, then merged into `main` the way
+/// `tests/task_merged_remove.rs`'s `merged_spec_task` merges one; returns the checkout that
+/// `task rm --merged` runs from.
+fn merge_cloud_task(f: &Fixture, spec: &Path, id: &str) -> PathBuf {
+    sbxm::commands::task_finish::run(
+        &f.env.config_dir(),
+        &sbxm::commands::task_finish::Options {
+            target: sbxm::commands::task_finish::Target::Spec(spec.to_path_buf()),
+            repo_root: f.env.tmp.path().join("target-repo"),
+            push_unresolved: false,
+        },
+        &FakeBackend::default(),
+        &FakeGitHub::default(),
+        &Probe,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    let repo_git = meta(f, id).join("repo.git");
+    let branch = format!("{id}:{id}");
+    let (checkout, scratch) = (
+        f.env.tmp.path().join("checkout"),
+        f.env.tmp.path().join("merge-scratch"),
+    );
+    for dir in [&checkout, &scratch] {
+        common::git(
+            f.env.tmp.path(),
+            &[
+                "clone",
+                "-q",
+                f.origin.to_str().unwrap(),
+                dir.to_str().unwrap(),
+            ],
+        );
+        common::git(dir, &["fetch", "-q", repo_git.to_str().unwrap(), &branch]);
+    }
+    common::git(&scratch, &["merge", "--ff-only", "-q", id]);
+    common::git(&scratch, &["push", "-q", "origin", "main"]);
+    checkout
+}
+
+/// Boundary case: `task rm --merged` of a merged cloud task archives its `task.json` with the
+/// `sandboxes` list first (decision 265), then removes the sandbox still listed, in the cloud,
+/// and the folder.
+#[test]
+fn rm_merged_of_a_cloud_task_archives_its_lifetimes_then_removes_it_in_the_cloud() {
+    let (f, spec, id) = ready_cloud_task();
+    let checkout = merge_cloud_task(&f, &spec, &id);
+    let worker = worker_sandbox(&id);
+    reopen(&f, &id, &worker);
+    // What `main` writes for a command (an in-process run has none of its own).
+    let log_line = format!("cloud sandbox {worker} created (worker, TTL 3h)\n");
+    std::fs::write(meta(&f, &id).join("run.log"), &log_line).unwrap();
+    let backend = FakeBackend::default();
+    let mut out = Vec::new();
+
+    run_with_sleep(
+        &f.env.config_dir(),
+        &Options {
+            target: Target::Merged,
+            yes: true,
+            force: false,
+            repo_root: checkout,
+            dry_run: false,
+        },
+        &backend,
+        &FakeGitHub::default(),
+        &Probe,
+        &Never,
+        &mut out,
+        &|_| {},
+    )
+    .unwrap();
+
+    let out = String::from_utf8(out).unwrap();
+    let archived = f
+        .env
+        .base_dir()
+        .join(".sbxm")
+        .join("task-archive")
+        .join(&id);
+    let task = record::read(&archived.join("task.json")).unwrap();
+    let names: Vec<&str> = task.sandboxes.iter().map(|e| e.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec![worker.as_str(), reviewer_sandbox(&id).as_str()],
+        "{out}"
+    );
+    assert_eq!(task.location, Location::Cloud);
+    assert_eq!(
+        std::fs::read_to_string(archived.join("run.log")).unwrap(),
+        log_line
+    );
+    assert_eq!(backend.removes(), vec![worker.clone()], "{out}");
+    assert_eq!(backend.locations(), vec![Location::Cloud]);
+    assert!(!meta(&f, &id).exists(), "{out}");
+}
+
+/// `task rm --merged` whose cloud removal still fails after its retries leaves the task as it is
+/// (its `task.json` byte for byte), so a second run reuses its own identical archive and finishes
+/// the job.
+#[test]
+fn rm_merged_whose_cloud_removal_fails_leaves_the_task_for_a_second_run() {
+    let (f, spec, id) = ready_cloud_task();
+    let checkout = merge_cloud_task(&f, &spec, &id);
+    let worker = worker_sandbox(&id);
+    reopen(&f, &id, &worker);
+    let before = std::fs::read(meta(&f, &id).join("task.json")).unwrap();
+    let merged = |backend: &FakeBackend| {
+        let mut out = Vec::new();
+        let result = run_with_sleep(
+            &f.env.config_dir(),
+            &Options {
+                target: Target::Merged,
+                yes: true,
+                force: false,
+                repo_root: checkout.clone(),
+                dry_run: false,
+            },
+            backend,
+            &FakeGitHub::default(),
+            &Probe,
+            &Never,
+            &mut out,
+            &|_| {},
+        );
+        (result, String::from_utf8(out).unwrap())
+    };
+
+    let (result, out) = merged(&FakeBackend::default().with_remove_errors(&[UNAVAILABLE; 4]));
+
+    assert!(result.is_err(), "{out}");
+    assert!(
+        out.contains(&format!("sbx --cloud rm {worker} -f")),
+        "{out}"
+    );
+    assert_eq!(
+        std::fs::read(meta(&f, &id).join("task.json")).unwrap(),
+        before
+    );
+
+    let (result, out) = merged(&FakeBackend::default());
+
+    result.unwrap();
+    assert!(!meta(&f, &id).exists(), "{out}");
+}
