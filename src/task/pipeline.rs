@@ -3479,14 +3479,16 @@ pub fn may_fix(record: &Record) -> bool {
 }
 
 /// The cloud preflight of the worker sandbox a fix round would make again if it is gone by then
-/// (milestone 4 slice 5): with the worker's own recorded profile and resources, never the
-/// reviewer's, the worker's TTL and a committer identity for its clone, all before the review
-/// changes anything. Whether it is gone is only known at the fix round, so this runs whenever one
-/// may come.
+/// (milestone 4 slice 5): every refusal [`ensure_cloud_worker`] makes before it creates anything
+/// (the worker's own recorded profile and resources, never the reviewer's, their drift since the
+/// task started, a committer identity for its clone and the worker's TTL), plus the cloud
+/// preflight of that profile, all before the review changes anything. Whether it is gone is only
+/// known at the fix round, so this runs whenever one may come.
 fn check_cloud_rebuild(env: &TaskEnv, record: &Record) -> Result<()> {
     let worker = record.worker.as_ref().context("the task has no worker")?;
     let profile_name = worker_profile(record, worker)?;
-    worker_resources(record, worker)?;
+    let resources = worker_resources(record, worker)?;
+    check_config_drift(env, record, profile_name, &resources)?;
     let global = GlobalConfig::load(env.config_dir)?;
     let profile = Profile::load(global.profiles_dir(), profile_name)?;
     cloud_preflight(

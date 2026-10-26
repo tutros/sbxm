@@ -842,9 +842,9 @@ fn assert_unchanged(f: &Fixture, id: &str, backend: &FakeBackend, was: &Before) 
 }
 
 /// Lesson 2 of the earlier run: a review that may make the worker sandbox again for a fix round
-/// preflights that with the worker's recorded profile, not the reviewer's. The worker sandbox is
-/// gone and its recorded profile now names a secret the cloud has no value source for: the review
-/// is refused before it changes anything, though the reviewer's profile passes.
+/// preflights that with the worker's recorded profile and harness, not the reviewer's. The worker
+/// sandbox is gone and the cloud no longer holds the worker's own login: the review is refused
+/// before it changes anything, though the reviewer's preflight passes.
 #[test]
 fn a_gone_worker_whose_recorded_profile_fails_preflight_refuses_the_review_before_any_change() {
     let f = fixture_with(LOCAL_TOML);
@@ -876,8 +876,9 @@ fn a_gone_worker_whose_recorded_profile_fails_preflight_refuses_the_review_befor
         &mut Vec::new(),
     )
     .unwrap();
-    f.env
-        .write_profile("other", "[secrets]\nservices = [\"github\"]\n");
+    // The worker's own login is gone from the cloud; the reviewer's (codex, `openai`) is still
+    // there, so the reviewer's preflight passes and only the worker's fails.
+    backend.set_secrets(&["openai"]);
     let was = before(&f, &id, &backend);
 
     let ran = task_review(
@@ -889,7 +890,61 @@ fn a_gone_worker_whose_recorded_profile_fails_preflight_refuses_the_review_befor
 
     let message = format!("{:#}", ran.result.unwrap_err());
     assert!(
-        message.contains("'github'") && message.contains("profile 'other'"),
+        message.contains("'anthropic'") && message.contains("the worker, claude"),
+        "{message}"
+    );
+    assert_unchanged(&f, &id, &backend, &was);
+}
+
+/// The same preflight covers the rebuild's own drift refusal (`ensure_worker_sandbox`'s rule):
+/// the recorded profile still passes every cloud check, but its contents changed since the task
+/// started, so the fix round's rebuild would refuse. The review says so before a reviewer
+/// sandbox exists or `task.json` changes, instead of after a review it then can't act on.
+#[test]
+fn a_gone_worker_whose_recorded_profile_drifted_refuses_the_review_before_any_change() {
+    let f = fixture_with(LOCAL_TOML);
+    f.env.write_profile("other", "");
+    let (spec, id) = spec(&f);
+    let backend = cloud_backend_listing(&f.env.tmp.path().join("cloud-fs"), &id, &[ONE], false);
+    let mut start = run_options(&f, spec.clone(), Some(Location::Cloud));
+    start.profile = Some("other".into());
+    sbxm::commands::task_start::run_spec(
+        &f.env.config_dir(),
+        &sbxm::commands::task_start::SpecOptions {
+            repo_root: start.repo_root,
+            spec: spec.clone(),
+            worker_harness: None,
+            worker_model: None,
+            time_limit: None,
+            profile: start.profile,
+            base: start.base,
+            repo: start.repo,
+            clone_source: start.clone_source,
+            identity: start.identity,
+            disk: Default::default(),
+            location: start.location,
+        },
+        &backend,
+        &sbxm::github::fake::FakeGitHub::default(),
+        &common::task_fixture::Probe,
+        &mut Vec::new(),
+        &mut Vec::new(),
+    )
+    .unwrap();
+    f.env
+        .write_profile("other", "[network]\nallow = [\"crates.io\"]\n");
+    let was = before(&f, &id, &backend);
+
+    let ran = task_review(
+        &f,
+        &spec_review_options(&f, spec),
+        &backend,
+        &sbxm::github::fake::FakeGitHub::default(),
+    );
+
+    let message = format!("{:#}", ran.result.unwrap_err());
+    assert!(
+        message.contains("sandbox config changed") && message.contains("\"other\""),
         "{message}"
     );
     assert_unchanged(&f, &id, &backend, &was);
