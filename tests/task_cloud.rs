@@ -107,6 +107,7 @@ fn spec_options(
         worker_harness: None,
         worker_model: None,
         time_limit: None,
+        reviewer_time_limit: None,
         profile: None,
         base: Some("main".into()),
         repo: Some("o/r".into()),

@@ -1725,6 +1725,7 @@ fn real_task_start(world: &RealTask) {
             worker_harness: None,
             worker_model: Some("claude-haiku-4-5-20251001".into()),
             time_limit: Some("5m".into()),
+            reviewer_time_limit: None,
             profile: None,
             base: None,
             repo: Some("o/r".into()),

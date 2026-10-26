@@ -34,6 +34,10 @@ pub struct Options {
     pub worker_harness: Option<Harness>,
     pub worker_model: Option<String>,
     pub time_limit: Option<String>,
+    /// `task run`'s `--reviewer-time-limit`: every review round is part of a cloud worker
+    /// sandbox's TTL (decision 263), so the start uses the limit the review will. `task start`
+    /// has no such flag and leaves it to `[reviewer] time_limit`.
+    pub reviewer_time_limit: Option<String>,
     pub profile: Option<String>,
     /// Default: the repo's default branch on GitHub.
     pub base: Option<String>,
@@ -373,6 +377,10 @@ fn start(
     }
     if let Some(limit) = &opts.time_limit {
         config.worker.time_limit = parse_duration("--time-limit", limit).map_err(|e| anyhow!(e))?;
+    }
+    if let Some(limit) = &opts.reviewer_time_limit {
+        config.reviewer.time_limit =
+            parse_duration("--reviewer-time-limit", limit).map_err(|e| anyhow!(e))?;
     }
     if let Some(profile) = &opts.profile {
         config.sandbox.profile = profile.clone();
@@ -718,6 +726,10 @@ pub struct SpecOptions {
     pub worker_harness: Option<Harness>,
     pub worker_model: Option<String>,
     pub time_limit: Option<String>,
+    /// `task run`'s `--reviewer-time-limit`: every review round is part of a cloud worker
+    /// sandbox's TTL (decision 263), so the start uses the limit the review will. `task start`
+    /// has no such flag and leaves it to `[reviewer] time_limit`.
+    pub reviewer_time_limit: Option<String>,
     pub profile: Option<String>,
     /// Default: the repo's default branch on GitHub.
     pub base: Option<String>,
@@ -768,6 +780,10 @@ pub(crate) fn resolve_spec_start(opts: &SpecOptions) -> Result<SpecStart> {
     }
     if let Some(limit) = &opts.time_limit {
         config.worker.time_limit = parse_duration("--time-limit", limit).map_err(|e| anyhow!(e))?;
+    }
+    if let Some(limit) = &opts.reviewer_time_limit {
+        config.reviewer.time_limit =
+            parse_duration("--reviewer-time-limit", limit).map_err(|e| anyhow!(e))?;
     }
     if let Some(profile) = &opts.profile {
         config.sandbox.profile = profile.clone();

@@ -258,6 +258,7 @@ fn start_options(
         worker_harness: None,
         worker_model: None,
         time_limit: None,
+        reviewer_time_limit: None,
         profile: None,
         base: None,
         repo: Some("o/r".into()),
@@ -773,4 +774,135 @@ fn a_timed_out_cloud_issue_worker_stops_and_its_sandbox_is_removed() {
         backend.log().last(),
         Some(&format!("rm {}", worker_sandbox(id)))
     );
+}
+
+/// Review M-1: `--reviewer-time-limit` is part of the worker sandbox's TTL (decision 263), so
+/// `task run` creates the worker with the TTL of the effective reviewer limit, not the config's,
+/// and the reviewer with its own TTL from that same limit.
+#[test]
+fn a_cloud_run_s_reviewer_time_limit_goes_into_the_worker_and_reviewer_ttls() {
+    for spec in [false, true] {
+        let f = fixture_with(CLOUD_TOML);
+        let spec_file = common::task_fixture::spec_file(&f, "Build a thing.\n");
+        let id = match spec {
+            false => "issue-41".to_owned(),
+            true => record::spec_id(&spec_file).unwrap().0,
+        };
+        let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &[&id]);
+        let mut effective = f.config.clone();
+        effective.reviewer.time_limit = std::time::Duration::from_secs(7 * 60 * 60);
+
+        let ran = run_with_reviewer_limit(&f, spec, spec_file, "7h", &backend);
+
+        ran.result.expect(&ran.out);
+        let task = task_record(&f, &id);
+        assert_eq!(task.stage, record::Stage::Ready, "{}", ran.out);
+        let ttls: Vec<_> = backend.creates().into_iter().map(|c| c.ttl).collect();
+        assert_eq!(
+            ttls,
+            [
+                Some(sbxm::task::lifetime::worker_ttl(&effective).unwrap()),
+                Some(sbxm::task::lifetime::reviewer_ttl(&effective).unwrap()),
+            ],
+            "spec: {spec}"
+        );
+    }
+}
+
+/// Review M-1: a `--reviewer-time-limit` whose TTL can't be added up is refused before any task
+/// folder or sandbox exists, not after the worker has run.
+#[test]
+fn a_cloud_run_s_reviewer_time_limit_too_large_is_refused_before_anything() {
+    for spec in [false, true] {
+        let f = fixture_with(CLOUD_TOML);
+        let spec_file = common::task_fixture::spec_file(&f, "Build a thing.\n");
+        let id = match spec {
+            false => "issue-41".to_owned(),
+            true => record::spec_id(&spec_file).unwrap().0,
+        };
+        let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &[&id]);
+
+        let limit = format!("{}s", u64::MAX);
+        let ran = run_with_reviewer_limit(&f, spec, spec_file, &limit, &backend);
+
+        let message = format!("{:#}", ran.result.unwrap_err());
+        assert!(message.contains("TTL"), "{message}");
+        assert!(backend.creates().is_empty(), "{:?}", backend.log());
+        let changing: Vec<_> = backend
+            .log()
+            .into_iter()
+            .filter(|l| {
+                ["create", "rm ", "secret-set", "secret-rm", "exec"]
+                    .iter()
+                    .any(|p| l.starts_with(p))
+            })
+            .collect();
+        assert!(changing.is_empty(), "{changing:?}");
+        assert!(!record::task_dir(&f.env.base_dir(), &id).exists());
+    }
+}
+
+/// `task run --issue 41` (or `--spec spec_file` when `spec`) in the cloud with
+/// `--reviewer-time-limit limit`.
+fn run_with_reviewer_limit(
+    f: &Fixture,
+    spec: bool,
+    spec_file: PathBuf,
+    limit: &str,
+    backend: &FakeBackend,
+) -> Ran {
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let (config_dir, probe, host) = (
+        f.env.config_dir(),
+        common::task_fixture::Probe,
+        sbxm::task::gates::FakeHostRunner::default(),
+    );
+    let result = if spec {
+        sbxm::commands::task_run::run_spec(
+            &config_dir,
+            &sbxm::commands::task_run::SpecOptions {
+                repo_root: f.env.tmp.path().join("target-repo"),
+                spec: spec_file,
+                worker_harness: None,
+                worker_model: None,
+                reviewer_harness: None,
+                reviewer_model: None,
+                time_limit: None,
+                reviewer_time_limit: Some(limit.into()),
+                profile: None,
+                base: Some("main".into()),
+                repo: Some("o/r".into()),
+                clone_source: Some(common::task_fixture::source(f)),
+                identity: Some(identity()),
+                disk: Default::default(),
+                location: None,
+            },
+            None,
+            backend,
+            &github(),
+            &probe,
+            &host,
+            &mut out,
+            &mut warn,
+        )
+    } else {
+        let mut opts = run_options(f, 41, None);
+        opts.reviewer_time_limit = Some(limit.into());
+        sbxm::commands::task_run::run(
+            &config_dir,
+            &opts,
+            None,
+            backend,
+            &github(),
+            &probe,
+            &host,
+            &mut out,
+            &mut warn,
+        )
+    };
+    Ran {
+        result,
+        out: String::from_utf8(out).unwrap(),
+        warn: String::from_utf8(warn).unwrap(),
+    }
 }

@@ -149,9 +149,6 @@ fn run_issue(
     if let Some(model) = &opts.worker_model {
         check_model_flag("--worker-model", model).map_err(|e| anyhow!(e))?;
     }
-    if let Some(limit) = &opts.reviewer_time_limit {
-        parse_duration("--reviewer-time-limit", limit).map_err(|e| anyhow!(e))?;
-    }
 
     // The reviewer's secret and profile are checked now too: a missing one must not be found only
     // after the worker has spent its time (spec §5.2). The effective config is the one both
@@ -180,6 +177,11 @@ fn run_issue(
                 .map_err(|e| anyhow!(e))?;
             config.set_reviewer_harness(harness);
         }
+        // The reviewer's limit is part of both TTLs the cloud preflight checks (decision 263).
+        if let Some(limit) = &opts.reviewer_time_limit {
+            config.reviewer.time_limit =
+                parse_duration("--reviewer-time-limit", limit).map_err(|e| anyhow!(e))?;
+        }
         if let Some(profile) = &opts.profile {
             config.sandbox.profile = profile.clone();
         }
@@ -200,6 +202,7 @@ fn run_issue(
         worker_harness: opts.worker_harness,
         worker_model: opts.worker_model.clone(),
         time_limit: opts.time_limit.clone(),
+        reviewer_time_limit: opts.reviewer_time_limit.clone(),
         profile: opts.profile.clone(),
         base: opts.base.clone(),
         repo: opts.repo.clone(),
@@ -386,9 +389,6 @@ fn run_spec_task(
     if let Some(model) = &opts.worker_model {
         check_model_flag("--worker-model", model).map_err(|e| anyhow!(e))?;
     }
-    if let Some(limit) = &opts.reviewer_time_limit {
-        parse_duration("--reviewer-time-limit", limit).map_err(|e| anyhow!(e))?;
-    }
 
     // As for `--issue`: the reviewer's secret and profile are checked now too, before the worker
     // has spent its time (spec §5.2).
@@ -414,6 +414,11 @@ fn run_spec_task(
                 .map_err(|e| anyhow!(e))?;
             config.set_reviewer_harness(harness);
         }
+        // The reviewer's limit is part of both TTLs the cloud preflight checks (decision 263).
+        if let Some(limit) = &opts.reviewer_time_limit {
+            config.reviewer.time_limit =
+                parse_duration("--reviewer-time-limit", limit).map_err(|e| anyhow!(e))?;
+        }
         if let Some(profile) = &opts.profile {
             config.sandbox.profile = profile.clone();
         }
@@ -433,6 +438,7 @@ fn run_spec_task(
         worker_harness: opts.worker_harness,
         worker_model: opts.worker_model.clone(),
         time_limit: opts.time_limit.clone(),
+        reviewer_time_limit: opts.reviewer_time_limit.clone(),
         profile: opts.profile.clone(),
         base: opts.base.clone(),
         repo: opts.repo.clone(),
