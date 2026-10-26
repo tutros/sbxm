@@ -913,3 +913,193 @@ fn run_with_reviewer_limit(
         warn: String::from_utf8(warn).unwrap(),
     }
 }
+
+/// `task gates --issue 41` (all tiers) through `backend`.
+fn task_gates(f: &Fixture, backend: &FakeBackend) -> Ran {
+    let mut out = Vec::new();
+    let result = sbxm::commands::task_gates::run(
+        &f.env.config_dir(),
+        &sbxm::commands::task_gates::Options {
+            repo_root: f.env.tmp.path().join("target-repo"),
+            issue: 41,
+            tiers: sbxm::task::pipeline::Tiers::ALL,
+            dry_run: false,
+            identity: Some(identity()),
+        },
+        backend,
+        &common::task_fixture::Probe,
+        &sbxm::task::gates::FakeHostRunner::default(),
+        &mut out,
+    );
+    Ran {
+        result,
+        out: String::from_utf8(out).unwrap(),
+        warn: String::new(),
+    }
+}
+
+/// A cloud issue task after `task start`: its worker sandbox kept, the config saying `local`.
+fn started_cloud_issue(f: &Fixture) {
+    let started = task_start(
+        f,
+        &start_options(f, vec![41], None, Some(Location::Cloud)),
+        &cloud_backend(&f.env.tmp.path().join("cloud-fs"), &["issue-41"]),
+        &github(),
+    );
+    started.result.expect(&started.out);
+}
+
+/// The sandbox gates' own execs, as `(sandbox, workdir)`.
+fn gate_execs(backend: &FakeBackend) -> Vec<(String, Option<PathBuf>)> {
+    backend
+        .execs()
+        .into_iter()
+        .filter(|(_, spec)| spec.argv.join(" ").contains("cargo test"))
+        .map(|(sandbox, spec)| (sandbox, spec.workdir))
+        .collect()
+}
+
+/// Milestone 4 slice 6: `task gates` of a task recorded `cloud` runs its sandbox gates in the cloud
+/// worker sandbox, at the recorded clone path, though the config says `local`; a sandbox that is
+/// there is neither made nor removed.
+#[test]
+fn gates_of_a_cloud_task_run_in_its_cloud_worker_sandbox_at_the_recorded_clone() {
+    let f = fixture_with(LOCAL_TOML);
+    started_cloud_issue(&f);
+    let worker = worker_sandbox("issue-41");
+    let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &["issue-41"]);
+
+    let ran = task_gates(&f, &backend);
+
+    ran.result.expect(&ran.out);
+    assert_eq!(backend.locations(), vec![Location::Cloud]);
+    let clone = PathBuf::from(format!("{HOME}/work/issue-41"));
+    assert_eq!(gate_execs(&backend), vec![(worker, Some(clone))]);
+    assert!(backend.creates().is_empty(), "{:?}", backend.log());
+    assert!(backend.removes().is_empty(), "{:?}", backend.log());
+    assert_eq!(task_record(&f, "issue-41").sandboxes.len(), 1);
+}
+
+/// A cloud worker sandbox that is gone is made again for the gates, from the recorded profile
+/// and a bundle of the branch (a new `worker` lifetime entry), and removed when they end.
+#[test]
+fn gates_of_a_cloud_task_whose_sandbox_is_gone_make_it_again_then_remove_it() {
+    let f = fixture_with(LOCAL_TOML);
+    started_cloud_issue(&f);
+    let worker = worker_sandbox("issue-41");
+    let gone = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &[]);
+
+    let ran = task_gates(&f, &gone);
+
+    ran.result.expect(&ran.out);
+    let creates: Vec<String> = gone.creates().into_iter().map(|c| c.name).collect();
+    assert_eq!(creates, vec![worker.clone()]);
+    assert!(gone.creates()[0].ttl.is_some());
+    let clone = PathBuf::from(format!("{HOME}/work/issue-41"));
+    assert_eq!(gate_execs(&gone), vec![(worker.clone(), Some(clone))]);
+    let log = gone.log();
+    let (create, gate_rm) = (
+        log.iter()
+            .position(|l| *l == format!("create {worker}"))
+            .unwrap(),
+        log.iter()
+            .rposition(|l| *l == format!("rm {worker}"))
+            .unwrap(),
+    );
+    assert!(create < gate_rm, "{log:?}");
+    let task = task_record(&f, "issue-41");
+    let roles: Vec<SandboxRole> = task.sandboxes.iter().map(|e| e.role).collect();
+    assert_eq!(roles, vec![SandboxRole::Worker, SandboxRole::Worker]);
+    assert!(
+        task.sandboxes.iter().all(|e| e.removed_at.is_some()),
+        "{:?}",
+        task.sandboxes
+    );
+    assert!(
+        ran.out.contains(&format!("cloud sandbox {worker} removed")),
+        "{}",
+        ran.out
+    );
+}
+
+/// Check before acting: a gone cloud worker sandbox whose rebuild would fail the cloud preflight
+/// (here an `sbx` under the cloud minimum) refuses before anything is written or made.
+#[test]
+fn gates_of_a_cloud_task_whose_rebuild_fails_preflight_change_nothing() {
+    let f = fixture_with(LOCAL_TOML);
+    started_cloud_issue(&f);
+    let before = task_record(&f, "issue-41");
+    let gone = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &[]).with_version("0.45.0");
+
+    let ran = task_gates(&f, &gone);
+
+    let err = format!("{:#}", ran.result.unwrap_err());
+    assert!(err.contains("0.46.0"), "{err}");
+    assert!(gone.log().is_empty(), "{:?}", gone.log());
+    assert_eq!(task_record(&f, "issue-41"), before);
+}
+
+/// The reverse: a task recorded `local` runs its gates here though the config now says `cloud`.
+#[test]
+fn gates_of_a_local_task_under_a_cloud_config_run_here() {
+    let f = fixture_with(LOCAL_TOML);
+    let backend = local_backend(&f);
+    let started = task_start(
+        &f,
+        &start_options(&f, vec![41], None, None),
+        &backend,
+        &github(),
+    );
+    started.result.expect(&started.out);
+    std::fs::write(
+        f.env.tmp.path().join("target-repo").join("sbxm-task.toml"),
+        CLOUD_TOML,
+    )
+    .unwrap();
+
+    let ran = task_gates(&f, &backend);
+
+    ran.result.expect(&ran.out);
+    assert!(
+        !backend.locations().contains(&Location::Cloud),
+        "{:?}",
+        backend.locations()
+    );
+    assert_eq!(gate_execs(&backend).len(), 2, "{:?}", backend.log());
+}
+
+/// `task gates --dry-run` of a task recorded `cloud` says the sandbox tier runs in its cloud
+/// worker sandbox at the recorded clone path, and calls nothing.
+#[test]
+fn gates_dry_run_of_a_cloud_task_names_its_cloud_sandbox_and_recorded_clone() {
+    let f = fixture_with(LOCAL_TOML);
+    started_cloud_issue(&f);
+    let backend = FakeBackend::default();
+    let mut out = Vec::new();
+
+    sbxm::commands::task_gates::run(
+        &f.env.config_dir(),
+        &sbxm::commands::task_gates::Options {
+            repo_root: f.env.tmp.path().join("target-repo"),
+            issue: 41,
+            tiers: sbxm::task::pipeline::Tiers::ALL,
+            dry_run: true,
+            identity: None,
+        },
+        &backend,
+        &common::task_fixture::Probe,
+        &sbxm::task::gates::FakeHostRunner::default(),
+        &mut out,
+    )
+    .unwrap();
+
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        out.contains(&format!(
+            "in cloud sandbox {}, in {HOME}/work/issue-41,",
+            worker_sandbox("issue-41")
+        )),
+        "{out}"
+    );
+    assert!(backend.log().is_empty());
+}

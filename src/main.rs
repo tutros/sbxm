@@ -418,6 +418,7 @@ fn main() -> anyhow::Result<()> {
                             GateTier::All => task::pipeline::Tiers::ALL,
                         },
                         dry_run,
+                        identity: None,
                     },
                     &SbxBackend::LOCAL,
                     &task::record::SystemProbe,

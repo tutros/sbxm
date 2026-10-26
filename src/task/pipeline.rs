@@ -2215,11 +2215,17 @@ pub(super) fn ensure_worker_sandbox(
 /// longer lists it), its open lifetime entry is closed and it is made again as slice 1 makes it:
 /// from the profile and resources the record saved (refused, before anything, when they changed
 /// since, as [`ensure_worker_sandbox`] refuses), with the worker's TTL, its scoped secrets and a
-/// `fix` lifetime entry, and a clone of the agent's own history, bundled from `repo.git`
-/// ([`repo::bundle_agent_for_clone`]). Nothing for a local task.
-fn ensure_cloud_worker(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
+/// lifetime entry of `role` (`fix` for a fix round), and a clone of the agent's own history,
+/// bundled from `repo.git` ([`repo::bundle_agent_for_clone`]); `purpose` names what it is made
+/// for. Returns whether it was made; nothing for a local task.
+fn ensure_cloud_worker(
+    env: &TaskEnv,
+    prepared: &mut Prepared,
+    role: SandboxRole,
+    purpose: &str,
+) -> Result<bool> {
     if prepared.record.location != Location::Cloud {
-        return Ok(());
+        return Ok(false);
     }
     let worker = prepared
         .record
@@ -2228,7 +2234,7 @@ fn ensure_cloud_worker(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
         .context("the task has no worker")?;
     let sandbox = worker.sandbox.clone();
     if env.backend.list()?.iter().any(|s| s.name == sandbox) {
-        return Ok(());
+        return Ok(false);
     }
     let profile_name = worker_profile(&prepared.record, worker)?.to_owned();
     let resources = worker_resources(&prepared.record, worker)?;
@@ -2253,10 +2259,10 @@ fn ensure_cloud_worker(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
     if prepared.record.sandbox_removed(&sandbox, now()) {
         record::write(&prepared.meta, &prepared.record)?;
         prepared.events.push(format!(
-            "cloud sandbox {sandbox} is gone; it is made again for the fix round"
+            "cloud sandbox {sandbox} is gone; it is made again for {purpose}"
         ));
     }
-    create_cloud_sandbox(env, prepared, &plan, &sandbox, SandboxRole::Fix, ttl)?;
+    create_cloud_sandbox(env, prepared, &plan, &sandbox, role, ttl)?;
     let (meta, record) = (&prepared.meta, &prepared.record);
     let repo_git = meta.join("repo.git");
     let clone = seed_cloud_clone(
@@ -2282,7 +2288,36 @@ fn ensure_cloud_worker(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
         agent.workspace = clone;
     }
     record::write(&prepared.meta, &prepared.record)?;
-    Ok(())
+    Ok(true)
+}
+
+/// Whether a cloud task's worker sandbox is gone (`sbx --cloud ls` doesn't list it), so the next
+/// phase that needs it makes it again; `false` for a local task.
+fn cloud_worker_gone(env: &TaskEnv, record: &Record) -> Result<bool> {
+    if record.location != Location::Cloud {
+        return Ok(false);
+    }
+    let worker = record.worker.as_ref().context("the task has no worker")?;
+    Ok(!env.backend.list()?.iter().any(|s| s.name == worker.sandbox))
+}
+
+/// `task gates` (spec §4, §7): whatever is committed in the worker's clone is collected, then the
+/// gates of `tiers` run. A cloud task's (milestone 4 slice 6) run in its worker sandbox at the
+/// recorded clone path; when that sandbox is gone, the cloud preflight of its rebuild runs first,
+/// before anything changes, then it is made again as `task resume` makes it (a new `worker`
+/// lifetime entry, P5 (d)), and removed again when the gates end. What that says is in
+/// `prepared.events` and `prepared.warnings`.
+pub fn gate_on_demand(env: &TaskEnv, prepared: &mut Prepared, tiers: Tiers) -> Result<Gated> {
+    let rebuild = cloud_worker_gone(env, &prepared.record)?;
+    if !rebuild {
+        recollect_commits(env, prepared)?;
+        return run_gates(env, prepared, "on-demand", tiers);
+    }
+    check_cloud_rebuild(env, &prepared.record)?;
+    let gated = ensure_cloud_worker(env, prepared, SandboxRole::Worker, "the gates")
+        .and_then(|_| run_gates(env, prepared, "on-demand", tiers));
+    stop_cloud_worker(env, prepared);
+    gated
 }
 
 /// Whether the last passed gate run covered the sandbox tier and, when one is configured, the host
@@ -3301,7 +3336,7 @@ pub(super) fn start_fix_round(
         .advance(Stage::Fixing, now(), Process::current(env.probe))?;
     record::write(&prepared.meta, &prepared.record)?;
     // A cloud fix round runs in the task's worker sandbox, made again when it is gone (P5 (d)).
-    if let Err(e) = ensure_cloud_worker(env, prepared) {
+    if let Err(e) = ensure_cloud_worker(env, prepared, SandboxRole::Fix, "the fix round") {
         prepared
             .record
             .notes
