@@ -40,10 +40,9 @@ pub fn read(backend: &dyn SandboxBackend) -> Cloud {
     }
 }
 
-/// The one line an unreadable cloud prints, without its newline.
-pub fn unreadable_line(error: &str) -> String {
-    format!("Cloud sandboxes couldn't be read (`sbx --cloud ls --json`): {error}")
-}
+/// What an unreadable cloud's line says after "Cloud sandboxes" (`status`) or "cloud sandboxes"
+/// (`doctor`), before the error.
+pub const UNREADABLE: &str = "couldn't be read (`sbx --cloud ls --json`)";
 
 /// `2 CPUs, 4 GiB`, `1 CPU, 1536 MiB`; `-` when either is missing.
 pub fn shape(sandbox: &SandboxDetail) -> String {
@@ -63,17 +62,33 @@ pub fn shape(sandbox: &SandboxDetail) -> String {
     format!("{cpus}, {memory}")
 }
 
-/// The time until `expires_at` at `now`, `expiring` once it is reached or past (never a negative
-/// time), `-` when there is none or it can't be read. The cloud writes fractional seconds
+/// How long a sandbox has left.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Left {
+    /// Seconds until `expires_at`, never 0.
+    Secs(u64),
+    /// `expires_at` is reached or past: the cloud is about to delete it (never a negative time).
+    Expiring,
+    /// No `expires_at`, or one that can't be read.
+    Unknown,
+}
+
+/// The time until `expires_at` at `now`. The cloud writes fractional seconds
 /// (`...21.604457Z`), which are dropped.
-pub fn time_left(sandbox: &SandboxDetail, now: u64) -> String {
-    let Some(at) = sandbox.expires_at.as_deref().and_then(expiry) else {
-        return DASH.to_owned();
-    };
-    if at <= now {
-        "expiring".to_owned()
-    } else {
-        format_duration(at - now)
+pub fn time_left(sandbox: &SandboxDetail, now: u64) -> Left {
+    match sandbox.expires_at.as_deref().and_then(expiry) {
+        None => Left::Unknown,
+        Some(at) if at <= now => Left::Expiring,
+        Some(at) => Left::Secs(at - now),
+    }
+}
+
+/// The LEFT cell: `1h05m`, `expiring` or `-`.
+fn left_cell(left: Left) -> String {
+    match left {
+        Left::Secs(secs) => format_duration(secs),
+        Left::Expiring => "expiring".to_owned(),
+        Left::Unknown => DASH.to_owned(),
     }
 }
 
@@ -96,9 +111,9 @@ const HEADER: [&str; 4] = ["CLOUD SANDBOX", "STATUS", "SHAPE", "LEFT"];
 /// or nothing at all for an empty list. Each line is cut to `width` on a terminal (`None`: shown
 /// in full), like the Tasks table.
 pub fn render(cloud: &Cloud, now: u64, width: Option<usize>) -> String {
-    let lines = match cloud {
+    let lines: Vec<String> = match cloud {
         Cloud::Sandboxes(sandboxes) if sandboxes.is_empty() => return String::new(),
-        Cloud::Unreadable(error) => vec![unreadable_line(error)],
+        Cloud::Unreadable(error) => vec![format!("Cloud sandboxes {UNREADABLE}: {error}")],
         Cloud::Sandboxes(sandboxes) => {
             let data: Vec<[String; 4]> = sandboxes
                 .iter()
@@ -107,7 +122,7 @@ pub fn render(cloud: &Cloud, now: u64, width: Option<usize>) -> String {
                         s.name.clone(),
                         s.status.clone(),
                         shape(s),
-                        time_left(s, now),
+                        left_cell(time_left(s, now)),
                     ]
                 })
                 .collect();

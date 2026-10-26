@@ -4,7 +4,7 @@
 mod common;
 
 use common::{Env, toml_path};
-use sbxm::backend::FakeBackend;
+use sbxm::backend::{FakeBackend, Location, SandboxDetail};
 use sbxm::commands::{doctor, new};
 
 const GIB: u64 = 1024 * 1024 * 1024;
@@ -1011,4 +1011,94 @@ fn a_tag_both_current_and_previous_is_counted_once() {
     let line = total_line(&env, vec![image(CURRENT, 2 * GIB), image(OLD_1, GIB)]);
 
     assert_eq!(line, "ok   1 template (2 images), 3.0 GiB in total");
+}
+
+// ---- milestone 4 slice 8: the cloud (decision 259, P12, P13, P17 (a)) ----
+
+/// [`NOW`] is 2027-01-15T08:00:00Z; this expires 1h05m after it.
+const IN_1H05M: &str = "2027-01-15T09:05:00.25Z";
+
+fn cloud_box(name: &str, expires_at: &str) -> SandboxDetail {
+    SandboxDetail {
+        name: name.to_owned(),
+        status: "running".to_owned(),
+        cpus: Some(2),
+        memory_mib: Some(4096),
+        expires_at: Some(expires_at.to_owned()),
+    }
+}
+
+#[test]
+fn doctor_lists_the_running_sbxm_cloud_sandboxes() {
+    let env = Env::new();
+    let backend = FakeBackend::default().with_cloud_sandboxes(vec![
+        cloud_box("sbxm-issue-7-claude", IN_1H05M),
+        cloud_box("sbxm-pr-3-codex", "2027-01-15T07:59:59Z"),
+        cloud_box("someone-else", IN_1H05M),
+    ]);
+
+    let report = report(&env, &backend);
+
+    assert!(!report.failed(), "{}", report.render());
+    let text = report.render();
+    let cloud: Vec<&str> = text.lines().filter(|l| l.contains("cloud")).collect();
+    assert_eq!(
+        cloud,
+        [
+            "ok   cloud sandbox sbxm-issue-7-claude: running, 2 CPUs, 4 GiB, 1h05m left",
+            "ok   cloud sandbox sbxm-pr-3-codex: running, 2 CPUs, 4 GiB, expiring",
+        ],
+        "{text}"
+    );
+    assert!(!text.contains("someone-else"), "{text}");
+    assert_eq!(backend.locations(), [Location::Cloud]);
+}
+
+#[test]
+fn doctor_with_an_empty_cloud_says_nothing_about_it() {
+    let env = Env::new();
+
+    let text = report(&env, &FakeBackend::default()).render();
+
+    assert!(!text.to_lowercase().contains("cloud"), "{text}");
+}
+
+#[test]
+fn an_unreadable_cloud_is_a_warning_and_doctor_still_passes() {
+    let env = Env::new();
+    let backend =
+        FakeBackend::default().failing_cloud_list("sbxcloud: unauthorized (401)\nsecond line");
+
+    let report = report(&env, &backend);
+
+    assert!(!report.failed(), "{}", report.render());
+    let text = report.render();
+    let cloud: Vec<&str> = text.lines().filter(|l| l.contains("cloud")).collect();
+    assert_eq!(
+        cloud,
+        [
+            "warn cloud sandboxes couldn't be read (`sbx --cloud ls --json`): sbxcloud: \
+             unauthorized (401); if you use the cloud, log in with `sbx login`"
+        ],
+        "{text}"
+    );
+}
+
+#[test]
+fn an_unreadable_cloud_leaves_a_failing_doctor_failing() {
+    let env = Env::new();
+    let backend = FakeBackend::default()
+        .with_version("0.1.0")
+        .failing_cloud_list("sbxcloud: unauthorized (401)");
+
+    let report = report(&env, &backend);
+
+    assert!(report.failed(), "{}", report.render());
+    assert!(
+        report
+            .render()
+            .contains("warn cloud sandboxes couldn't be read"),
+        "{}",
+        report.render()
+    );
 }

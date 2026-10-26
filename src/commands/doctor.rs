@@ -12,6 +12,7 @@ use crate::config::{self, GlobalConfig, Profile};
 use crate::disk::{self, gib};
 use crate::harness::Harness;
 use crate::run::results::parse_timestamp;
+use crate::status::cloud::{self, Cloud, Left};
 use crate::status::tasks::format_duration;
 use crate::{kit, project, state, template};
 
@@ -152,6 +153,7 @@ pub fn run(config_dir: &Path, backend: &dyn SandboxBackend, host: &Host) -> Repo
         Ok(_) => report.pass("sbx daemon answers".into()),
         Err(err) => report.fail(format!("sbx daemon: {err:#}")),
     }
+    check_cloud(&mut report, backend, host);
 
     check_base_dir(&mut report, &config.base_dir, &config_path, host);
     check_state_drive(&mut report, &config, &config_path, host);
@@ -164,6 +166,33 @@ pub fn run(config_dir: &Path, backend: &dyn SandboxBackend, host: &Host) -> Repo
         host,
     );
     report
+}
+
+/// The running cloud sandboxes named `sbxm-`, one line each (decision 259). A cloud that can't
+/// be read only warns (P17 (a)): a user who never uses the cloud must not see `doctor` fail.
+fn check_cloud(report: &mut Report, backend: &dyn SandboxBackend, host: &Host) {
+    match cloud::read(backend) {
+        Cloud::Sandboxes(sandboxes) => {
+            let now = (host.now)();
+            for sandbox in &sandboxes {
+                let left = match cloud::time_left(sandbox, now) {
+                    Left::Secs(secs) => format!("{} left", format_duration(secs)),
+                    Left::Expiring => "expiring".to_owned(),
+                    Left::Unknown => "expiry unknown".to_owned(),
+                };
+                report.pass(format!(
+                    "cloud sandbox {}: {}, {}, {left}",
+                    sandbox.name,
+                    sandbox.status,
+                    cloud::shape(sandbox)
+                ));
+            }
+        }
+        Cloud::Unreadable(error) => report.warn(format!(
+            "cloud sandboxes {}: {error}; if you use the cloud, log in with `sbx login`",
+            cloud::UNREADABLE
+        )),
+    }
 }
 
 /// A template is listed with its size and age (decision 205(c)) and warned about when its image
