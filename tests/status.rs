@@ -1,7 +1,8 @@
 //! `sbxm status [--watch]` (decision 171, issue 90): the Tasks section. Pure rendering is
 //! golden-tested with a passed-in clock; `rows()` is tested against on-disk task fixtures like
 //! `tests/task_status.rs`; the CLI and the `--watch` loop are tested at the edges only (a
-//! non-terminal always prints once, `backend` is never called).
+//! non-terminal always prints once, `backend` is never asked to change anything). Milestone 4
+//! slice 8 adds the running cloud sandboxes: the cloud instance's list, a read, once per frame.
 
 mod common;
 
