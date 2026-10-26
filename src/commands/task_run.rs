@@ -158,15 +158,6 @@ fn run_issue(
     let location = {
         let mut config = TaskConfig::load(&opts.repo_root)?;
         let location = pipeline::choose_location(opts.location, &config);
-        if restart.is_some() {
-            // `--restart` removes the old task's sandboxes, which follows the recorded location
-            // only from milestone 4 slice 6 on.
-            pipeline::refuse_cloud(
-                location,
-                "`task run --restart`",
-                "restart it with --local, or remove the task first and run it again",
-            )?;
-        }
         if let Some(harness) = opts.worker_harness {
             let harness = headless_harness("--worker-harness", harness.as_str(), "tasks")
                 .map_err(|e| anyhow!(e))?;
@@ -319,14 +310,7 @@ fn discard_existing_spec(
     if !finish::exists(&base_dir, &id) {
         return Ok(None);
     }
-    // Its sandboxes would be removed here, which follows the recorded location only from
-    // milestone 4 slice 6 on.
-    let recorded = record::read(&record::task_dir(&base_dir, &id).join("task.json"))?;
-    pipeline::refuse_cloud(
-        recorded.location,
-        "`task run --restart` of a task recorded in the cloud",
-        "remove the task first and run it again",
-    )?;
+    // Its sandboxes are removed where its record says they are (milestone 4 slice 6).
     finish::check_spec_result_fetched(&base_dir, &id, repo_root)?;
     let aside = finish::set_aside(
         &base_dir,
@@ -395,15 +379,6 @@ fn run_spec_task(
     let location = {
         let mut config = TaskConfig::load(&opts.repo_root)?;
         let location = pipeline::choose_location(opts.location, &config);
-        if restart.is_some() {
-            // `--restart` removes the old task's sandboxes, which follows the recorded location
-            // only from milestone 4 slice 6 on.
-            pipeline::refuse_cloud(
-                location,
-                "`task run --restart`",
-                "restart it with --local, or remove the task first and run it again",
-            )?;
-        }
         if let Some(harness) = opts.worker_harness {
             let harness = headless_harness("--worker-harness", harness.as_str(), "tasks")
                 .map_err(|e| anyhow!(e))?;

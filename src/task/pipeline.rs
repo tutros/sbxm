@@ -131,19 +131,6 @@ pub fn choose_location(flag: Option<Location>, config: &TaskConfig) -> Location 
     flag.unwrap_or(config.sandbox.location)
 }
 
-/// Refuses a cloud location for a command whose sandboxes can't run in the cloud yet (milestone
-/// 4 builds them slice by slice), rather than running them here: sbxm never falls back to a local
-/// sandbox quietly (decision 261).
-pub fn refuse_cloud(location: Location, command: &str, instead: &str) -> Result<()> {
-    if location == Location::Cloud {
-        bail!(
-            "{command} can't run its sandboxes in the cloud yet (milestone 4 builds it later); \
-             {instead}"
-        );
-    }
-    Ok(())
-}
-
 /// What every phase of a task needs; the command layer builds it from flags and the environment.
 pub struct Ctx<'a> {
     pub config_dir: &'a Path,

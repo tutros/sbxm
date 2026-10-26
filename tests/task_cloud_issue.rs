@@ -673,71 +673,78 @@ impl sbxm::confirm::Confirm for Yes {
     }
 }
 
-/// As for a spec task: `--restart` removes the old task's sandboxes, which follows a task's
-/// recorded location only from slice 6 on, so `task run --issue N --restart` and `task start
-/// --restart` into the cloud, or of an issue task recorded `cloud`, are refused before anything,
-/// and the old task stays as it was.
+/// Milestone 4 slice 6, as for a spec task: `task start --restart` and `task run --restart` of an
+/// issue task recorded `cloud` remove its open sandboxes in the cloud, whatever the config says,
+/// then start it again.
 #[test]
-fn an_issue_restart_into_the_cloud_or_of_a_cloud_issue_task_is_refused_before_anything() {
+fn an_issue_restart_of_a_cloud_issue_task_removes_its_sandbox_in_the_cloud_first() {
     let f = fixture_with(LOCAL_TOML);
     let id = "issue-41";
-    let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &[id]);
-    let gh = github();
+    let worker = worker_sandbox(id);
     let restart = sbxm::commands::task_start::Restart {
         confirm: &Yes,
         yes: true,
     };
-    let run_restart = |location| {
-        sbxm::commands::task_run::run(
-            &f.env.config_dir(),
-            &run_options(&f, 41, location),
-            Some(&restart),
-            &backend,
+    let gh = github();
+    let start = |backend: &FakeBackend| {
+        let started = task_start(
+            &f,
+            &start_options(&f, vec![41], None, Some(Location::Cloud)),
+            backend,
             &gh,
-            &common::task_fixture::Probe,
-            &sbxm::task::gates::FakeHostRunner::default(),
-            &mut Vec::new(),
-            &mut Vec::new(),
-        )
-    };
-    let start_restart = |location| {
-        sbxm::commands::task_start::run_with(
-            &f.env.config_dir(),
-            &start_options(&f, vec![41], None, location),
-            Some(&restart),
-            &backend,
-            &gh,
-            &common::task_fixture::Probe,
-            &mut Vec::new(),
-            &mut Vec::new(),
-        )
-    };
-    let refused = |result: anyhow::Result<()>| {
-        let message = format!("{:#}", result.unwrap_err());
-        assert!(
-            message.contains("--restart") && message.contains("cloud"),
-            "{message}"
         );
+        started.result.expect(&started.out);
+    };
+    // Left open, as a removal at the task's stop that failed leaves it.
+    let reopen = || {
+        let mut task = task_record(&f, id);
+        for entry in task.sandboxes.iter_mut() {
+            entry.removed_at = None;
+        }
+        record::write(&record::task_dir(&f.env.base_dir(), id), &task).unwrap();
+    };
+    let removed_first = |backend: &FakeBackend| {
+        let log = backend.log();
+        let first_rm = log.iter().position(|l| l.starts_with("rm ")).unwrap();
+        let create = log.iter().position(|l| l.starts_with("create ")).unwrap();
+        assert_eq!(log[first_rm], format!("rm {worker}"), "{log:?}");
+        assert!(first_rm < create, "{log:?}");
+        assert!(backend.locations().contains(&Location::Cloud));
     };
 
-    refused(run_restart(Some(Location::Cloud)));
-    refused(start_restart(Some(Location::Cloud)));
-    assert!(backend.log().is_empty(), "{:?}", backend.log());
-    assert!(gh.calls().is_empty(), "{:?}", gh.calls());
-    assert!(!record::task_dir(&f.env.base_dir(), id).exists());
-
-    let started = task_start(
-        &f,
+    start(&cloud_backend(&f.env.tmp.path().join("cloud-fs"), &[id]));
+    reopen();
+    let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &[id]);
+    let started = sbxm::commands::task_start::run_with(
+        &f.env.config_dir(),
         &start_options(&f, vec![41], None, Some(Location::Cloud)),
+        Some(&restart),
         &backend,
         &gh,
+        &common::task_fixture::Probe,
+        &mut Vec::new(),
+        &mut Vec::new(),
     );
-    started.result.expect(&started.out);
-    let (log, record_was) = (backend.log(), task_record(&f, id));
-    refused(run_restart(Some(Location::Local)));
-    refused(start_restart(Some(Location::Local)));
-    assert_eq!(backend.log(), log);
-    assert_eq!(task_record(&f, id), record_was);
+    started.unwrap();
+    removed_first(&backend);
+    assert_eq!(task_record(&f, id).location, Location::Cloud);
+
+    reopen();
+    let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &[id]);
+    sbxm::commands::task_run::run(
+        &f.env.config_dir(),
+        &run_options(&f, 41, Some(Location::Cloud)),
+        Some(&restart),
+        &backend,
+        &gh,
+        &common::task_fixture::Probe,
+        &sbxm::task::gates::FakeHostRunner::default(),
+        &mut Vec::new(),
+        &mut Vec::new(),
+    )
+    .unwrap();
+    removed_first(&backend);
+    assert_eq!(task_record(&f, id).stage, record::Stage::Ready);
 }
 
 /// A timed-out cloud worker stops its issue task too, as a spec task's (slice 3, behavior 2): no

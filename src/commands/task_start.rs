@@ -123,19 +123,6 @@ fn discard_existing(
             ids.push((number, id));
         }
     }
-    // Its sandboxes would be removed here, which follows the recorded location only from
-    // milestone 4 slice 6 on, as for `task run --restart` of a spec task. A record that can't be
-    // read is left to `finish::plan_removal` below, as before.
-    for (_, id) in &ids {
-        let Ok(recorded) = record::read(&record::task_dir(base_dir, id).join("task.json")) else {
-            continue;
-        };
-        pipeline::refuse_cloud(
-            recorded.location,
-            "`--restart` of a task recorded in the cloud",
-            "remove the task first and start it again",
-        )?;
-    }
     for (number, id) in &ids {
         let issue = github.issue(repo, *number)?;
         if issue.state != "OPEN" {
@@ -357,15 +344,6 @@ fn start(
     // Everything that can be wrong with the inputs, before anything is created.
     let mut config = TaskConfig::load(&opts.repo_root)?;
     let location = pipeline::choose_location(opts.location, &config);
-    if restart.is_some() {
-        // `--restart` removes the old task's sandboxes, which follows the recorded location only
-        // from milestone 4 slice 6 on, as for `task run --restart`.
-        pipeline::refuse_cloud(
-            location,
-            "`task start --restart`",
-            "restart it with --local, or remove the task first and start it again",
-        )?;
-    }
     if let Some(harness) = opts.worker_harness {
         let harness = headless_harness("--worker-harness", harness.as_str(), "tasks")
             .map_err(|e| anyhow!(e))?;
@@ -982,9 +960,9 @@ pub(crate) fn run_spec_from(
             // A failure after the cloud create still shows the create and the removal, or the
             // warning of a removal that failed and kept the task's folder, so `run.log` has them
             // (decision 265, review M-1). Best-effort writes: the start's own error is the
-            // outcome, and a failed write must not hide it. `on_prepared` isn't called: no
-            // `--restart` path reaches a cloud start (`task run --restart` refuses the cloud
-            // until its removal of the old task follows the recorded location, slice 6).
+            // outcome, and a failed write must not hide it. `on_prepared` isn't called: the
+            // caller puts a `--restart`'s old task back, which a kept record refuses to
+            // overwrite, naming where the old task is still set aside.
             if let Some(after) = e.downcast_ref::<pipeline::FailedAfterCreate>() {
                 for event in &after.events {
                     let _ = writeln!(out, "{event}");

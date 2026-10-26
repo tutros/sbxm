@@ -1097,37 +1097,86 @@ fn task_run_restart(
     )
 }
 
-/// `--restart` removes the old task's sandboxes, which follows a task's recorded location only
-/// from slice 6 on: a restart into the cloud, or of a task recorded `cloud`, is refused before
-/// anything, and the old task stays as it was.
+/// Fetches task `id`'s result into the checkout, as `--restart` asks before discarding it.
+fn fetch_result(f: &Fixture, id: &str) {
+    let checkout = f.env.tmp.path().join("target-repo");
+    if !checkout.join(".git").exists() {
+        common::git(&checkout, &["init", "-q"]);
+    }
+    let repo_git = record::task_dir(&f.env.base_dir(), id).join("repo.git");
+    common::git(
+        &checkout,
+        &[
+            "fetch",
+            "-q",
+            repo_git.to_str().unwrap(),
+            &format!("{id}:{id}"),
+        ],
+    );
+}
+
+/// Milestone 4 slice 6: `--restart` removes the old task's sandboxes where its record says they
+/// are, whatever the config says: a cloud task whose worker sandbox's removal failed at its stop
+/// has it removed in the cloud first, then starts again (here in the cloud, by the flag) and runs
+/// to `ready` with a new record.
 #[test]
-fn a_restart_into_the_cloud_or_of_a_cloud_task_is_refused_before_anything() {
+fn a_restart_of_a_cloud_task_removes_its_open_sandbox_in_the_cloud_first() {
     let f = fixture_with(LOCAL_TOML);
     let (spec, id) = spec(&f);
+    let worker = worker_sandbox(&id);
+    let root = f.env.tmp.path().join("cloud-fs");
+    task_run(
+        &f,
+        spec.clone(),
+        Some(Location::Cloud),
+        &cloud_backend(&root, &id, &[CLEAN]),
+    )
+    .result
+    .unwrap();
+    let mut task = task_record(&f, &id);
+    for entry in task.sandboxes.iter_mut().filter(|e| e.name == worker) {
+        entry.removed_at = None;
+    }
+    record::write(&record::task_dir(&f.env.base_dir(), &id), &task).unwrap();
+    fetch_result(&f, &id);
+    let backend = cloud_backend(&root, &id, &[CLEAN]);
+
+    task_run_restart(&f, spec, Some(Location::Cloud), &backend).unwrap();
+
+    let log = backend.log();
+    let first_rm = log.iter().position(|l| l.starts_with("rm ")).unwrap();
+    let create = log.iter().position(|l| l.starts_with("create ")).unwrap();
+    assert_eq!(log[first_rm], format!("rm {worker}"), "{log:?}");
+    assert!(first_rm < create, "{log:?}");
+    let task = task_record(&f, &id);
+    assert_eq!(task.stage, record::Stage::Ready);
+    assert_eq!(task.location, Location::Cloud);
+    assert_all_removed(&task, &[SandboxRole::Worker, SandboxRole::Reviewer]);
+}
+
+/// The reverse: a task recorded `local` is restarted into the cloud, its old sandboxes removed
+/// here (never in the cloud) before the new one is made in the cloud.
+#[test]
+fn a_restart_of_a_local_task_into_the_cloud_removes_it_here_first() {
+    let f = fixture_with(LOCAL_TOML);
+    let (spec, id) = common::task_fixture::ready_spec_task(&f);
+    fetch_result(&f, &id);
+    let worker = worker_sandbox(&id);
     let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &id, &[CLEAN]);
 
-    let message = format!(
-        "{:#}",
-        task_run_restart(&f, spec.clone(), Some(Location::Cloud), &backend).unwrap_err()
-    );
-    assert!(
-        message.contains("--restart") && message.contains("cloud"),
-        "{message}"
-    );
-    assert!(backend.log().is_empty(), "{:?}", backend.log());
-    assert!(!f.env.base_dir().join(".sbxm").join("tasks").exists());
+    task_run_restart(&f, spec, Some(Location::Cloud), &backend).unwrap();
 
-    start_cloud(&f, spec.clone(), &backend);
-    let was = before(&f, &id, &backend);
-    let message = format!(
-        "{:#}",
-        task_run_restart(&f, spec, Some(Location::Local), &backend).unwrap_err()
-    );
-    assert!(
-        message.contains("--restart") && message.contains("cloud"),
-        "{message}"
-    );
-    assert_unchanged(&f, &id, &backend, &was);
+    let log = backend.log();
+    let first_rm = log.iter().position(|l| l.starts_with("rm ")).unwrap();
+    let create = log.iter().position(|l| l.starts_with("create ")).unwrap();
+    assert_eq!(log[first_rm], format!("rm {worker}"), "{log:?}");
+    assert!(first_rm < create, "{log:?}");
+    let locations = backend.locations();
+    let first_cloud = locations.iter().position(|l| *l == Location::Cloud);
+    assert!(first_cloud.is_some(), "{locations:?}");
+    let task = task_record(&f, &id);
+    assert_eq!(task.location, Location::Cloud);
+    assert_eq!(task.stage, record::Stage::Ready);
 }
 
 /// A fake scoped secret (slice 4): no production path fills one in while P8 (a) holds.
