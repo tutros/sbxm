@@ -1171,9 +1171,20 @@ fn a_restart_of_a_local_task_into_the_cloud_removes_it_here_first() {
     let create = log.iter().position(|l| l.starts_with("create ")).unwrap();
     assert_eq!(log[first_rm], format!("rm {worker}"), "{log:?}");
     assert!(first_rm < create, "{log:?}");
+    // The command selects the cloud for the new task first; the removal of the old one selects
+    // the recorded location after that, and nothing else selects the local backend.
     let locations = backend.locations();
-    let first_cloud = locations.iter().position(|l| *l == Location::Cloud);
-    assert!(first_cloud.is_some(), "{locations:?}");
+    let first_cloud = locations
+        .iter()
+        .position(|l| *l == Location::Cloud)
+        .unwrap();
+    let local = locations.iter().position(|l| *l == Location::Local);
+    assert!(local.is_some_and(|i| i > first_cloud), "{locations:?}");
+    assert_eq!(
+        locations.iter().filter(|l| **l == Location::Local).count(),
+        1,
+        "{locations:?}"
+    );
     let task = task_record(&f, &id);
     assert_eq!(task.location, Location::Cloud);
     assert_eq!(task.stage, record::Stage::Ready);

@@ -233,16 +233,20 @@ pub(crate) fn check_own_folder(base_dir: &Path, dir: &Path) -> Result<()> {
 }
 
 /// Removes `plan`'s sandboxes where its record says they are (decision 253), best effort, into
-/// `report`. A cloud task's (milestone 4 slice 6) go through the retried removal, `sleep`
-/// waiting between tries (P6, decision 262(e)), one already gone counting as removed; then the
-/// secrets the cloud lists as scoped to each (slice 4), whatever its removal said. Returns `false`
-/// when a cloud sandbox may still be there: the task's record is then its only trace.
+/// `report`. The recorded location is selected here, from `plan`, whatever `backend` the caller
+/// holds: a `--restart` into the cloud passes the new task's cloud backend, and the old task's
+/// local sandbox must still go through the local `sbx rm`. A cloud task's (milestone 4 slice 6)
+/// go through the retried removal, `sleep` waiting between tries (P6, decision 262(e)), one
+/// already gone counting as removed; then the secrets the cloud lists as scoped to each (slice
+/// 4), whatever its removal said. Returns `false` when a cloud sandbox may still be there: the
+/// task's record is then its only trace.
 fn remove_sandboxes(
     plan: &RemovalPlan,
     backend: &dyn SandboxBackend,
     sleep: &dyn Fn(Duration),
     report: &mut RemovalReport,
 ) -> bool {
+    let backend = backend.located(plan.location);
     if plan.location == Location::Local {
         for sandbox in &plan.sandboxes {
             match crate::commands::rm::remove_sandbox(backend, sandbox) {
@@ -254,7 +258,7 @@ fn remove_sandboxes(
         }
         return true;
     }
-    let cloud = backend.located(Location::Cloud);
+    let cloud = backend;
     let mut all_gone = true;
     for sandbox in &plan.sandboxes {
         match lifetime::remove_sandbox(cloud, sandbox, sleep) {

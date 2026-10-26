@@ -747,6 +747,95 @@ fn an_issue_restart_of_a_cloud_issue_task_removes_its_sandbox_in_the_cloud_first
     assert_eq!(task_record(&f, id).stage, record::Stage::Ready);
 }
 
+/// The reverse of the test above (decision 253, P14): an issue task recorded `local` is restarted
+/// into the cloud. Its old sandbox is removed here, with the local backend selected for that
+/// removal, before the replacement is created in the cloud. The task's record decides, not the
+/// new task's `--cloud`, for both entry points: `task start --restart` and `task run --restart`.
+fn restart_of_a_local_issue_task_into_the_cloud(
+    restart_into_the_cloud: &dyn Fn(&Fixture, &FakeBackend, &FakeGitHub),
+) {
+    let f = fixture_with(LOCAL_TOML);
+    let id = "issue-41";
+    let worker = worker_sandbox(id);
+    let gh = github();
+    let started = task_start(
+        &f,
+        &start_options(&f, vec![41], None, None),
+        &local_backend(&f),
+        &gh,
+    );
+    started.result.expect(&started.out);
+    assert_eq!(task_record(&f, id).location, Location::Local);
+
+    let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &[id]);
+    restart_into_the_cloud(&f, &backend, &gh);
+
+    let log = backend.log();
+    let first_rm = log.iter().position(|l| l.starts_with("rm ")).unwrap();
+    let create = log.iter().position(|l| l.starts_with("create ")).unwrap();
+    assert_eq!(log[first_rm], format!("rm {worker}"), "{log:?}");
+    assert!(first_rm < create, "{log:?}");
+    // The command selects the cloud for the new task first; the removal of the old one selects
+    // the recorded location after that, and nothing else selects the local backend.
+    let locations = backend.locations();
+    let first_cloud = locations
+        .iter()
+        .position(|l| *l == Location::Cloud)
+        .unwrap();
+    let local = locations.iter().position(|l| *l == Location::Local);
+    assert!(local.is_some_and(|i| i > first_cloud), "{locations:?}");
+    assert_eq!(
+        locations.iter().filter(|l| **l == Location::Local).count(),
+        1,
+        "{locations:?}"
+    );
+    let task = task_record(&f, id);
+    assert_eq!(task.location, Location::Cloud);
+    assert_eq!(task.worker.as_ref().unwrap().sandbox, worker);
+}
+
+#[test]
+fn a_start_restart_of_a_local_issue_task_into_the_cloud_removes_it_here_first() {
+    restart_of_a_local_issue_task_into_the_cloud(&|f, backend, gh| {
+        sbxm::commands::task_start::run_with(
+            &f.env.config_dir(),
+            &start_options(f, vec![41], None, Some(Location::Cloud)),
+            Some(&sbxm::commands::task_start::Restart {
+                confirm: &Yes,
+                yes: true,
+            }),
+            backend,
+            gh,
+            &common::task_fixture::Probe,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+    });
+}
+
+#[test]
+fn a_run_restart_of_a_local_issue_task_into_the_cloud_removes_it_here_first() {
+    restart_of_a_local_issue_task_into_the_cloud(&|f, backend, gh| {
+        sbxm::commands::task_run::run(
+            &f.env.config_dir(),
+            &run_options(f, 41, Some(Location::Cloud)),
+            Some(&sbxm::commands::task_start::Restart {
+                confirm: &Yes,
+                yes: true,
+            }),
+            backend,
+            gh,
+            &common::task_fixture::Probe,
+            &sbxm::task::gates::FakeHostRunner::default(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+        assert_eq!(task_record(f, "issue-41").stage, record::Stage::Ready);
+    });
+}
+
 /// A timed-out cloud worker stops its issue task too, as a spec task's (slice 3, behavior 2): no
 /// gate runs, its partial commit is kept and its sandbox is removed.
 #[test]
