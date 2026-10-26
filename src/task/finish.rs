@@ -166,7 +166,7 @@ pub fn plan_removal(base_dir: &Path, id: &str, probe: &dyn ProcessProbe) -> Resu
         }
         Err(e) => {
             note = Some(format!(
-                "task.json can't be read ({e:#}), so its sandboxes can't be named; check `sbx ls` for sbxm-task-{id}-*"
+                "task.json can't be read ({e:#}), so its sandboxes can't be named; check `sbx ls`, and `sbx --cloud ls` for a cloud task, for sbxm-task-{id}-*"
             ));
         }
     }

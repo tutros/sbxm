@@ -366,3 +366,48 @@ fn rm_merged_whose_cloud_removal_fails_leaves_the_task_for_a_second_run() {
     result.unwrap();
     assert!(!meta(&f, &id).exists(), "{out}");
 }
+
+/// A task whose `task.json` can't be read may have been a cloud task: the note names where to
+/// look in the cloud too, since its sandboxes can't be named.
+#[test]
+fn rm_of_a_task_with_an_unreadable_record_names_the_cloud_list_too() {
+    let (f, spec, id) = ready_cloud_task();
+    std::fs::write(meta(&f, &id).join("task.json"), "not json").unwrap();
+    let confirm = Asked::default();
+    let mut out = Vec::new();
+
+    let _ = run_with_sleep(
+        &f.env.config_dir(),
+        &Options {
+            target: Target::Spec(spec),
+            yes: false,
+            force: true,
+            repo_root: f.env.tmp.path().join("target-repo"),
+            dry_run: false,
+        },
+        &FakeBackend::default(),
+        &FakeGitHub::default(),
+        &Probe,
+        &confirm,
+        &mut out,
+        &|_| {},
+    );
+
+    let prompt = confirm.0.lock().unwrap().join("\n");
+    assert!(prompt.contains("`sbx --cloud ls`"), "{prompt}");
+}
+
+/// Says no, keeping each prompt.
+#[derive(Default)]
+struct Asked(Mutex<Vec<String>>);
+
+impl Confirm for Asked {
+    fn is_interactive(&self) -> bool {
+        true
+    }
+
+    fn confirm(&self, prompt: &str) -> anyhow::Result<bool> {
+        self.0.lock().unwrap().push(prompt.to_owned());
+        Ok(false)
+    }
+}
