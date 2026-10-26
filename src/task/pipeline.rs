@@ -783,38 +783,38 @@ pub fn preflight_issues(
 }
 
 /// Spec §5.1 steps 1 and 2: checks, then the task's folders, `repo.git`, the worker's clone,
-/// `issue.md` and the prompt, the sandbox and the first record.
+/// `issue.md` and the prompt, the sandbox and the first record. Here; [`prepare_at`] takes the
+/// location.
 pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
-    let global = GlobalConfig::load(ctx.config_dir)?;
-    let id = format!("issue-{}", issue.number);
-    let meta = record::task_dir(&global.base_dir, &id);
-    let workspace = global.base_dir.join("tasks").join(&id);
+    prepare_at(ctx, issue, Location::Local)
+}
 
-    // Check before acting: nothing is written until every one of these passes.
-    let continues = issue_startable(&global.base_dir, ctx.repo, ctx.github, issue)?;
-    let worker = &ctx.config.worker;
-    let profile = Profile::load(global.profiles_dir(), &ctx.config.sandbox.profile)?;
-    check_secrets(
-        ctx.backend,
-        worker.harness,
-        "the worker",
-        &ctx.config.sandbox.profile,
-        &profile,
-    )?;
-    let mut warnings = ctx.config.warnings.clone();
-    warnings.extend(worker.harness.unsupported(&profile, "the worker's sandbox"));
+/// [`prepare`] at `location` (milestone 4 slice 5b): an issue task takes the path a spec task
+/// takes ([`prepare_spec_resolved`]), the cloud's included. Only its source differs: the issue is
+/// checked first, its text is the worker's input, and its branch is the one of the pull request
+/// it continues, if any.
+pub fn prepare_at(ctx: &Ctx, issue: &IssueText, location: Location) -> Result<Prepared> {
+    let id = format!("issue-{}", issue.number);
+    prepare_source(ctx, &id, Source::Issue(issue), location)
+}
+
+/// The issue worker's prompt, rendered: `continues` is the pull request the issue belongs to and
+/// that pull request's branch, if any.
+fn issue_worker_prompt(
+    ctx: &Ctx,
+    issue: &IssueText,
+    branch: &str,
+    continues: Option<&(u32, String)>,
+) -> Result<String> {
     let template = prompts::template(Role::Worker, &ctx.config.prompts)?;
-    let branch = continues
-        .as_ref()
-        .map_or_else(|| id.clone(), |(_, branch)| branch.clone());
-    let pr_context = continues.as_ref().map_or_else(String::new, |(pr, branch)| {
+    let pr_context = continues.map_or_else(String::new, |(pr, branch)| {
         format!(
             " This issue belongs to pull request #{pr}, and {branch} is that pull request's \
              branch: it already has commits, so build on them instead of starting over."
         )
     });
     // Where the branch starts (issue 107): the base for a new branch, else the PR's own branch.
-    let branch_context = continues.as_ref().map_or_else(
+    let branch_context = continues.map_or_else(
         || format!("which started from {}.", ctx.base_branch),
         |(pr, _)| {
             format!(
@@ -823,13 +823,13 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
             )
         },
     );
-    let prompt = prompts::render(
+    prompts::render(
         &template.name,
         &template.text,
         &[
             ("issue", &issue.text),
             ("number", &issue.number.to_string()),
-            ("branch", &branch),
+            ("branch", branch),
             ("base", ctx.base_branch),
             ("repo", ctx.repo),
             ("pr_context", &pr_context),
@@ -837,124 +837,7 @@ pub fn prepare(ctx: &Ctx, issue: &IssueText) -> Result<Prepared> {
             ("gates_sandbox", &bullets(&ctx.config.gates.sandbox)),
             ("gates_host", &bullets(&ctx.config.gates.host)),
         ],
-    )?;
-
-    // Reserve both folders; `create_dir` fails if either appeared meanwhile.
-    for dir in [&meta, &workspace] {
-        let parent = dir.parent().unwrap_or(Path::new("."));
-        fs::create_dir_all(parent)
-            .with_context(|| format!("cannot create {}", parent.display()))?;
-    }
-    fs::create_dir(&meta).with_context(|| format!("cannot reserve {}", meta.display()))?;
-    if let Err(e) = fs::create_dir(&workspace) {
-        let _ = fs::remove_dir_all(&meta);
-        return Err(e).with_context(|| format!("cannot reserve {}", workspace.display()));
-    }
-
-    let sandbox = format!("sbxm-task-{id}-{}", worker.harness.as_str());
-    let built = (|| -> Result<(Record, HarnessKits)> {
-        let repo_git = meta.join("repo.git");
-        repo::clone_bare(ctx.clone_source, &repo_git)?;
-        let continued = match &continues {
-            Some((pr, pr_branch)) => Some(PrBranch {
-                pr: *pr,
-                branch: pr_branch.clone(),
-                base: repo::fetch_pr_branch(&repo_git, *pr, pr_branch)?,
-            }),
-            None => {
-                repo::create_branch(&repo_git, &branch, ctx.base_branch)?;
-                None
-            }
-        };
-        // The worker's starting commit, or the PR head it continues from (decision 216).
-        let start = repo::branch_tip(&repo_git, &branch)?;
-        let plan = plan_sandbox(
-            ctx.config_dir,
-            ctx.backend,
-            &ctx.config.sandbox.profile,
-            worker.harness,
-            &sandbox,
-            &Overrides {
-                cpus: ctx.config.sandbox.cpus,
-                memory: ctx.config.sandbox.memory.clone(),
-            },
-            &meta.join("kits"),
-            Locks::Commit {
-                repo_git: &repo_git,
-                commit: &start,
-            },
-            &mut warnings,
-        )?;
-        let (kit_set, harness_kits) = (&plan.kit_set, plan.kits.clone());
-        repo::clone_workspace(&repo_git, &workspace, &branch, ctx.identity)?;
-
-        // The agent's `git add -A` must not pick up sbxm's own files.
-        let info = workspace.join(".git").join("info");
-        fs::create_dir_all(&info)?;
-        fs::write(info.join("exclude"), format!("# sbxm\n{AGENT_DIR}/\n"))?;
-        repo::write_agent_files(
-            &workspace,
-            &[
-                ("issue.md", issue.text.as_bytes()),
-                ("prompt.md", prompt.as_bytes()),
-            ],
-            Existing::Replace,
-        )?;
-        fs::write(meta.join("issue.md"), &issue.text)?;
-        fs::write(meta.join("worker-prompt.md"), &prompt)?;
-
-        // The record goes first: sandbox setup takes minutes, and `status` (and a restart after a
-        // kill) must see the task during it.
-        let mut task = Record::new(
-            &NewTask {
-                kind: Kind::Issue,
-                number: issue.number,
-                repo: ctx.repo,
-                title: &issue.title,
-                base: ctx.base_branch,
-                branch: &branch,
-                config_hash: &harness_kits.config_hash,
-                id: None,
-            },
-            now(),
-            Process::current(ctx.probe),
-        );
-        task.continues = continued;
-        task.fix_rounds = ctx.config.fix_rounds;
-        task.worker = Some(Agent {
-            harness: worker.harness.as_str().to_owned(),
-            model: worker.model.clone(),
-            sandbox: sandbox.clone(),
-            workspace: slashes(&workspace),
-            profile: Some(ctx.config.sandbox.profile.clone()),
-            cpus: Some(kit_set.resources.cpus),
-            memory: Some(kit_set.resources.memory.clone()),
-            template: plan.template.clone(),
-            run: None,
-        });
-        record::write(&meta, &task)?;
-
-        plan.create(ctx.backend, &sandbox, worker.harness, &workspace)?;
-        Ok((task, harness_kits))
-    })();
-
-    match built {
-        Ok((record, kits)) => Ok(Prepared {
-            record,
-            meta,
-            workspace,
-            kits: Some(kits),
-            warnings,
-            events: Vec::new(),
-        }),
-        Err(e) => {
-            // Back to nothing: the sandbox (if it got created) and both folders.
-            let _ = ctx.backend.remove(&sandbox);
-            let _ = fs::remove_dir_all(&workspace);
-            let _ = fs::remove_dir_all(&meta);
-            Err(e)
-        }
-    }
+    )
 }
 
 /// Checks that `source_path` is a plain, readable UTF-8 file and returns its text: the part of
@@ -1061,12 +944,39 @@ pub fn prepare_spec_resolved(
     title: &str,
     location: Location,
 ) -> Result<Prepared> {
+    let source = Source::Spec {
+        path: source_path,
+        text,
+        title,
+    };
+    prepare_source(ctx, id, source, location)
+}
+
+/// What a task starts from: an issue, or a spec file already read.
+enum Source<'a> {
+    Issue(&'a IssueText),
+    Spec {
+        path: &'a Path,
+        text: &'a str,
+        title: &'a str,
+    },
+}
+
+/// Spec §5.1 steps 1 and 2 for either source, here or in the cloud: the one preparation
+/// [`prepare_at`] and [`prepare_spec_resolved`] share (milestone 4 slice 5b).
+fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Result<Prepared> {
     let global = GlobalConfig::load(ctx.config_dir)?;
     let meta = record::task_dir(&global.base_dir, id);
     let workspace = global.base_dir.join("tasks").join(id);
 
     // Check before acting: nothing is written until every one of these passes.
-    spec_startable(&global.base_dir, id, source_path)?;
+    let continues = match &source {
+        Source::Issue(issue) => issue_startable(&global.base_dir, ctx.repo, ctx.github, issue)?,
+        Source::Spec { path, .. } => {
+            spec_startable(&global.base_dir, id, path)?;
+            None
+        }
+    };
     secrets::check(location, ctx.scoped_secrets)?;
     let worker = &ctx.config.worker;
     let profile = Profile::load(global.profiles_dir(), &ctx.config.sandbox.profile)?;
@@ -1096,7 +1006,28 @@ pub fn prepare_spec_resolved(
     };
     let mut warnings = ctx.config.warnings.clone();
     warnings.extend(worker.harness.unsupported(&profile, "the worker's sandbox"));
-    let prompt = spec_worker_prompt(ctx.config, id, ctx.base_branch, ctx.repo)?;
+    // An issue that continues a pull request works on that pull request's branch.
+    let branch = continues
+        .as_ref()
+        .map_or_else(|| id.to_owned(), |(_, branch)| branch.clone());
+    let (kind, number, title, source_file, text, prompt) = match &source {
+        Source::Issue(issue) => (
+            Kind::Issue,
+            issue.number,
+            issue.title.as_str(),
+            "issue.md",
+            issue.text.as_str(),
+            issue_worker_prompt(ctx, issue, &branch, continues.as_ref())?,
+        ),
+        Source::Spec { text, title, .. } => (
+            Kind::Spec,
+            0,
+            *title,
+            "source.md",
+            *text,
+            spec_worker_prompt(ctx.config, id, ctx.base_branch, ctx.repo)?,
+        ),
+    };
 
     // Reserve the folders (a cloud task has no host clone); `create_dir` fails if one appeared
     // meanwhile.
@@ -1132,9 +1063,19 @@ pub fn prepare_spec_resolved(
     let built = (|| -> Result<HarnessKits> {
         let repo_git = meta.join("repo.git");
         repo::clone_bare(ctx.clone_source, &repo_git)?;
-        repo::create_branch(&repo_git, id, ctx.base_branch)?;
-        // The worker's starting commit (decision 216).
-        let start = repo::branch_tip(&repo_git, id)?;
+        let continued = match &continues {
+            Some((pr, pr_branch)) => Some(PrBranch {
+                pr: *pr,
+                branch: pr_branch.clone(),
+                base: repo::fetch_pr_branch(&repo_git, *pr, pr_branch)?,
+            }),
+            None => {
+                repo::create_branch(&repo_git, &branch, ctx.base_branch)?;
+                None
+            }
+        };
+        // The worker's starting commit, or the PR head it continues from (decision 216).
+        let start = repo::branch_tip(&repo_git, &branch)?;
         let overrides = Overrides {
             cpus: ctx.config.sandbox.cpus,
             memory: ctx.config.sandbox.memory.clone(),
@@ -1167,7 +1108,7 @@ pub fn prepare_spec_resolved(
         };
         let (kit_set, harness_kits) = (&plan.kit_set, plan.kits.clone());
         if local {
-            repo::clone_workspace(&repo_git, &workspace, id, ctx.identity)?;
+            repo::clone_workspace(&repo_git, &workspace, &branch, ctx.identity)?;
 
             // The agent's `git add -A` must not pick up sbxm's own files.
             let info = workspace.join(".git").join("info");
@@ -1176,31 +1117,32 @@ pub fn prepare_spec_resolved(
             repo::write_agent_files(
                 &workspace,
                 &[
-                    ("source.md", text.as_bytes()),
+                    (source_file, text.as_bytes()),
                     ("prompt.md", prompt.as_bytes()),
                 ],
                 Existing::Replace,
             )?;
         }
-        fs::write(meta.join("source.md"), text)?;
+        fs::write(meta.join(source_file), text)?;
         fs::write(meta.join("worker-prompt.md"), &prompt)?;
 
         // The record goes first: sandbox setup takes minutes, and `status` (and a restart after a
         // kill) must see the task during it.
         let task = record.insert(Record::new(
             &NewTask {
-                kind: Kind::Spec,
-                number: 0,
+                kind,
+                number,
                 repo: ctx.repo,
                 title,
                 base: ctx.base_branch,
-                branch: id,
+                branch: &branch,
                 config_hash: &harness_kits.config_hash,
-                id: Some(id),
+                id: (kind == Kind::Spec).then_some(id),
             },
             now(),
             Process::current(ctx.probe),
         ));
+        task.continues = continued;
         task.fix_rounds = ctx.config.fix_rounds;
         task.location = location;
         task.worker = Some(Agent {
@@ -1320,10 +1262,10 @@ pub fn prepare_spec_resolved(
     }
 }
 
-/// A spec start that failed after its first changing cloud call, a scoped secret's set or the
+/// A start that failed after its first changing cloud call, a scoped secret's set or the
 /// sandbox's create (milestone 4 slice 3, review M-1; slice 4): the context on the failure
 /// itself, carrying what the screen, and so `run.log`, still has to show (decision 265).
-/// `task_start::run_spec_from` reads it back with `downcast_ref`.
+/// `task_start::run_spec_from` and the issue start read it back with `downcast_ref`.
 #[derive(Debug)]
 pub struct FailedAfterCreate {
     /// The task's id.
@@ -1367,6 +1309,12 @@ pub struct TaskReport {
     pub result: Result<Worked>,
     /// The gates after the worker; `None` when the worker failed or never ran.
     pub gates: Option<Result<Gated>>,
+    /// What the preparation did that the screen should show (a cloud create), printed before
+    /// the worker's line.
+    pub events: Vec<String>,
+    /// What the task's stop said, when it stopped instead of handing over to the review: its cloud
+    /// worker sandbox's removal and its scoped secrets', printed after everything else.
+    pub stopped: Vec<lifetime::Released>,
 }
 
 /// [`start`], taking `on_prepared` as well: called with each issue's number the moment its
@@ -1379,10 +1327,22 @@ pub fn start_with(
     numbers: &[u32],
     on_prepared: &(dyn Fn(u32) + Sync),
 ) -> Vec<TaskReport> {
+    start_at(ctx, numbers, Location::Local, on_prepared)
+}
+
+/// [`start_with`] at `location` (milestone 4 slice 5b): in the cloud, each issue gets its own cloud
+/// worker sandbox (P15 (a)), and `ctx`'s backend is the cloud instance. The caller makes the cloud
+/// preflight before this, so every worker is checked before any is created.
+pub fn start_at(
+    ctx: &Ctx,
+    numbers: &[u32],
+    location: Location,
+    on_prepared: &(dyn Fn(u32) + Sync),
+) -> Vec<TaskReport> {
     std::thread::scope(|scope| {
         let handles: Vec<_> = numbers
             .iter()
-            .map(|&number| scope.spawn(move || start_one(ctx, number, on_prepared)))
+            .map(|&number| scope.spawn(move || start_one(ctx, number, location, on_prepared)))
             .collect();
         handles
             .into_iter()
@@ -1395,6 +1355,8 @@ pub fn start_with(
                         "the task for issue #{number} stopped unexpectedly"
                     )),
                     gates: None,
+                    events: Vec::new(),
+                    stopped: Vec::new(),
                 })
             })
             .collect()
@@ -1408,31 +1370,63 @@ pub fn start(ctx: &Ctx, numbers: &[u32]) -> Vec<TaskReport> {
     start_with(ctx, numbers, &|_| {})
 }
 
-fn start_one(ctx: &Ctx, number: u32, on_prepared: &(dyn Fn(u32) + Sync)) -> TaskReport {
+fn start_one(
+    ctx: &Ctx,
+    number: u32,
+    location: Location,
+    on_prepared: &(dyn Fn(u32) + Sync),
+) -> TaskReport {
     let mut warnings = Vec::new();
     let mut gates = None;
+    let mut events = Vec::new();
+    let mut started: Option<Prepared> = None;
     let result = (|| {
         let issue = ctx.github.issue(ctx.repo, number)?;
-        let mut prepared = prepare(ctx, &issue)?;
+        let prepared = started.insert(prepare_at(ctx, &issue, location)?);
         warnings.clone_from(&prepared.warnings);
+        events = std::mem::take(&mut prepared.events);
         on_prepared(number);
-        let worked = run_worker(ctx, &mut prepared)?;
-        // A failed worker is not gated; a timed-out one is (its partial commits count).
-        if !matches!(worked.status, RunStatus::Failed(_)) {
-            gates = Some(run_gates(
-                &ctx.env(),
-                &mut prepared,
-                "after-worker",
-                Tiers::ALL,
-            ));
+        let worked = run_worker(ctx, prepared)?;
+        // A failed worker is not gated; a timed-out one is (its partial commits count), except in
+        // the cloud, where it stops the task (milestone 4 slice 3, behavior 2), as a spec task's.
+        let stops = match worked.status {
+            RunStatus::Failed(_) => true,
+            RunStatus::TimedOut => location == Location::Cloud,
+            RunStatus::Completed => false,
+        };
+        if !stops {
+            gates = Some(run_gates(&ctx.env(), prepared, "after-worker", Tiers::ALL));
         }
         Ok(worked)
     })();
+    // Gates that passed, or ran and failed, hand over to the review (decision 180); anything
+    // else stops the task, and its cloud worker sandbox goes now (P5 (d)), as a spec task's.
+    let hands_over = result.is_ok()
+        && matches!(
+            &gates,
+            Some(Ok(gated)) if gated.passed
+                || !gated.failed_outcome().is_some_and(|o| o.could_not_run)
+        );
+    let mut stopped = Vec::new();
+    if let Some(prepared) = started.as_mut()
+        && !hands_over
+    {
+        let said = lifetime::release_worker(
+            ctx.backend,
+            &prepared.meta,
+            &mut prepared.record,
+            ctx.sleep,
+            ctx.scoped_secrets,
+        );
+        stopped = said.all().cloned().collect();
+    }
     TaskReport {
         number,
         warnings,
         result,
         gates,
+        events,
+        stopped,
     }
 }
 

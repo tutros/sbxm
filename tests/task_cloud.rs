@@ -39,116 +39,6 @@ fn identity() -> sbxm::task::repo::Identity {
     }
 }
 
-fn assert_refused_before_anything(
-    result: anyhow::Result<()>,
-    f: &common::task_fixture::Fixture,
-    backend: &sbxm::backend::FakeBackend,
-    github: &sbxm::github::fake::FakeGitHub,
-    command: &str,
-) {
-    let message = format!("{:#}", result.unwrap_err());
-    assert!(
-        message.contains(command) && message.contains("cloud"),
-        "{message}"
-    );
-    assert!(backend.log().is_empty(), "{:?}", backend.log());
-    assert!(github.calls().is_empty(), "{:?}", github.calls());
-    assert!(!f.env.base_dir().join(".sbxm").join("tasks").exists());
-}
-
-/// Decision 261: a command whose sandboxes can't run in the cloud yet refuses a cloud location
-/// before anything, instead of running them here.
-#[test]
-fn an_issue_start_in_a_cloud_repo_is_refused_before_anything_and_local_overrides_it() {
-    use sbxm::commands::task_start::{self, Options};
-
-    let f = fixture_with(CLOUD_TOML);
-    let options = |location| Options {
-        repo_root: f.env.tmp.path().join("target-repo"),
-        issues: vec![41],
-        workers: None,
-        worker_harness: None,
-        worker_model: None,
-        time_limit: None,
-        profile: None,
-        base: Some("main".into()),
-        repo: Some("o/r".into()),
-        clone_source: Some(common::task_fixture::source(&f)),
-        identity: Some(identity()),
-        disk: Default::default(),
-        location,
-    };
-    let run = |opts: &Options,
-               backend: &sbxm::backend::FakeBackend,
-               github: &sbxm::github::fake::FakeGitHub| {
-        task_start::run_with(
-            &f.env.config_dir(),
-            opts,
-            None,
-            backend,
-            github,
-            &common::task_fixture::Probe,
-            &mut Vec::new(),
-            &mut Vec::new(),
-        )
-    };
-
-    for location in [None, Some(Location::Cloud)] {
-        let backend = common::task_fixture::backend();
-        let github = sbxm::github::fake::FakeGitHub::default();
-        let result = run(&options(location), &backend, &github);
-        assert_refused_before_anything(result, &f, &backend, &github, "task start --issue");
-    }
-
-    // `--local` gets past it: the start goes on to ask GitHub for the issue.
-    let backend = common::task_fixture::backend();
-    let github = sbxm::github::fake::FakeGitHub::default();
-    let _ = run(&options(Some(Location::Local)), &backend, &github);
-    assert!(!github.calls().is_empty());
-}
-
-/// Milestone 4 slice 5 keeps slice 1's refusal for an issue target (slice 5b builds it): `task run
-/// --issue` in the cloud, by the config or by `--cloud`, is refused before anything.
-#[test]
-fn task_run_issue_in_the_cloud_is_refused_before_anything() {
-    use sbxm::commands::task_run::{self, Options};
-
-    for (toml, location) in [(CLOUD_TOML, None), (LOCAL_TOML, Some(Location::Cloud))] {
-        let f = fixture_with(toml);
-        let backend = common::task_fixture::backend();
-        let github = sbxm::github::fake::FakeGitHub::default();
-        let result = task_run::run(
-            &f.env.config_dir(),
-            &Options {
-                repo_root: f.env.tmp.path().join("target-repo"),
-                issue: 41,
-                worker_harness: None,
-                worker_model: None,
-                reviewer_harness: None,
-                reviewer_model: None,
-                time_limit: None,
-                reviewer_time_limit: None,
-                profile: None,
-                base: Some("main".into()),
-                repo: Some("o/r".into()),
-                clone_source: Some(common::task_fixture::source(&f)),
-                identity: Some(identity()),
-                disk: Default::default(),
-                location,
-            },
-            None,
-            &backend,
-            &github,
-            &common::task_fixture::Probe,
-            &sbxm::task::gates::FakeHostRunner::default(),
-            &mut Vec::new(),
-            &mut Vec::new(),
-        );
-
-        assert_refused_before_anything(result, &f, &backend, &github, "task run --issue");
-    }
-}
-
 /// The cloud sandbox's home, as `printenv HOME` reports it in the fake.
 const HOME: &str = "/home/agent";
 
@@ -1811,8 +1701,7 @@ fn a_malformed_or_misplaced_scoped_secret_is_refused_before_anything() {
 }
 
 /// P14 (decision 262(k)): `task run --issue --local` overrides a cloud `[sandbox] location` for
-/// the whole command, the start included: it gets past both refusals and asks GitHub for the issue,
-/// with no cloud call.
+/// the whole command, the start included: it asks GitHub for the issue, with no cloud call.
 #[test]
 fn task_run_issue_local_overrides_a_cloud_config_for_the_start_too() {
     use sbxm::commands::task_run::{self, Options};

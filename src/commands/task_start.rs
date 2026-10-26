@@ -119,6 +119,19 @@ fn discard_existing(
             ids.push((number, id));
         }
     }
+    // Its sandboxes would be removed here, which follows the recorded location only from
+    // milestone 4 slice 6 on, as for `task run --restart` of a spec task. A record that can't be
+    // read is left to `finish::plan_removal` below, as before.
+    for (_, id) in &ids {
+        let Ok(recorded) = record::read(&record::task_dir(base_dir, id).join("task.json")) else {
+            continue;
+        };
+        pipeline::refuse_cloud(
+            recorded.location,
+            "`--restart` of a task recorded in the cloud",
+            "remove the task first and start it again",
+        )?;
+    }
     for (number, id) in &ids {
         let issue = github.issue(repo, *number)?;
         if issue.state != "OPEN" {
@@ -339,11 +352,16 @@ fn start(
 
     // Everything that can be wrong with the inputs, before anything is created.
     let mut config = TaskConfig::load(&opts.repo_root)?;
-    pipeline::refuse_cloud(
-        pipeline::choose_location(opts.location, &config),
-        "`task start --issue`",
-        "start it with --local, or start a spec task with --spec <file> --cloud",
-    )?;
+    let location = pipeline::choose_location(opts.location, &config);
+    if restart.is_some() {
+        // `--restart` removes the old task's sandboxes, which follows the recorded location only
+        // from milestone 4 slice 6 on, as for `task run --restart`.
+        pipeline::refuse_cloud(
+            location,
+            "`task start --restart`",
+            "restart it with --local, or remove the task first and start it again",
+        )?;
+    }
     if let Some(harness) = opts.worker_harness {
         let harness = headless_harness("--worker-harness", harness.as_str(), "tasks")
             .map_err(|e| anyhow!(e))?;
@@ -359,7 +377,17 @@ fn start(
     if let Some(profile) = &opts.profile {
         config.sandbox.profile = profile.clone();
     }
-    disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?;
+    // The task's sandboxes run where it was started (decision 253).
+    let backend = backend.located(location);
+    match location {
+        Location::Local => disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?,
+        // A cloud sandbox doesn't use the drive of `sbx`'s local sandbox state (P11, decision
+        // 262(h)). Every worker is preflighted here, before any is created (P15 (a)): they share
+        // the harness and the profile, so one check covers them all.
+        Location::Cloud => {
+            pipeline::check_worker_inputs(config_dir, backend, &config, location)?;
+        }
+    }
     let repo_name = resolve_repo(opts.repo.as_deref(), &opts.repo_root)?;
     let identity = match &opts.identity {
         Some(identity) => identity.clone(),
@@ -392,7 +420,7 @@ fn start(
         probe,
         host: &ShellHostRunner,
         sleep: &std::thread::sleep,
-        // An issue task can't run in the cloud yet (decision 261), so it has no scoped secrets.
+        // Empty in production while P8 (a) holds (slice 4), as for a spec task.
         scoped_secrets: &[],
     };
     // Resolved once, before any task is set aside, and reused for the rest of this function: a
@@ -450,7 +478,12 @@ fn start(
             .map(|n| format!("issue-{n}"))
             .collect();
         writeln!(out, "Starting {} ...", names.join(", "))?;
-        Ok(pipeline::start_with(&ctx, &selection.picks, &on_prepared))
+        Ok(pipeline::start_at(
+            &ctx,
+            &selection.picks,
+            location,
+            &on_prepared,
+        ))
     })();
 
     for warning in settle_warnings.into_inner().unwrap() {
@@ -491,10 +524,15 @@ fn start(
             warnings,
             result,
             gates,
+            events,
+            stopped,
         } = report;
         let id = format!("issue-{number}");
         for warning in &warnings {
             writeln!(warn, "warning: {warning}")?;
+        }
+        for event in &events {
+            writeln!(out, "{event}")?;
         }
         // A task whose preparation completed was already settled by `on_prepared`, whether or
         // not its worker then failed, so this only ever finds something for a task whose
@@ -504,7 +542,9 @@ fn start(
             Ok(worked) => {
                 let (label, bad) = match &worked.status {
                     RunStatus::Completed => ("completed".to_owned(), false),
-                    RunStatus::TimedOut => ("timed out".to_owned(), false),
+                    // A timed-out cloud worker stops the task, as a spec task's (milestone 4
+                    // slice 3, behavior 2).
+                    RunStatus::TimedOut => ("timed out".to_owned(), location == Location::Cloud),
                     RunStatus::Failed(why) => (format!("failed: {why}"), true),
                 };
                 writeln!(
@@ -601,6 +641,20 @@ fn start(
                 if e.is::<crate::headless::ExecUnavailable>() {
                     exec_unavailable += 1;
                 }
+                // A failure after the cloud create still shows the create and the removal, or
+                // the warning of a removal that failed and kept the task's folder (decision 265),
+                // as for a spec task.
+                if let Some(after) = e.downcast_ref::<pipeline::FailedAfterCreate>() {
+                    for event in &after.events {
+                        writeln!(out, "{event}")?;
+                    }
+                    if let Some(why) = &after.kept {
+                        writeln!(warn, "warning: {why}")?;
+                    }
+                    for warning in &after.warnings {
+                        writeln!(warn, "warning: {warning}")?;
+                    }
+                }
                 match aside {
                     // The task's preparation never completed, so its old copy goes back.
                     Some(aside) => {
@@ -611,6 +665,13 @@ fn start(
                     }
                     None => writeln!(out, "{id}: failed: {e:#}")?,
                 }
+            }
+        }
+        // The task stopped: what its cloud worker sandbox's removal said (P5 (d)).
+        for said in &stopped {
+            match said {
+                lifetime::Released::Line(line) => writeln!(out, "{line}")?,
+                lifetime::Released::Warning(warning) => writeln!(warn, "warning: {warning}")?,
             }
         }
     }

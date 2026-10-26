@@ -161,13 +161,15 @@ fn run_issue(
     let location = {
         let mut config = TaskConfig::load(&opts.repo_root)?;
         let location = pipeline::choose_location(opts.location, &config);
-        // An issue task's sandboxes can't run in the cloud yet (milestone 4 slice 5b builds
-        // them): refused rather than run here (decision 261).
-        pipeline::refuse_cloud(
-            location,
-            "`task run --issue`",
-            "run it with --local, or run a spec task with --spec <file> --cloud",
-        )?;
+        if restart.is_some() {
+            // `--restart` removes the old task's sandboxes, which follows the recorded location
+            // only from milestone 4 slice 6 on.
+            pipeline::refuse_cloud(
+                location,
+                "`task run --restart`",
+                "restart it with --local, or remove the task first and run it again",
+            )?;
+        }
         if let Some(harness) = opts.worker_harness {
             let harness = headless_harness("--worker-harness", harness.as_str(), "tasks")
                 .map_err(|e| anyhow!(e))?;
@@ -181,8 +183,13 @@ fn run_issue(
         if let Some(profile) = &opts.profile {
             config.sandbox.profile = profile.clone();
         }
-        disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?;
-        pipeline::check_reviewer_inputs(config_dir, backend, &config, location)?;
+        // A cloud sandbox doesn't use the drive of `sbx`'s local sandbox state (P11, decision
+        // 262(h)).
+        if location == Location::Local {
+            disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?;
+        }
+        // At the cloud, the cloud preflight for the reviewer's sandboxes too (decision 261).
+        pipeline::check_reviewer_inputs(config_dir, backend.located(location), &config, location)?;
         location
     };
 
@@ -226,7 +233,12 @@ fn run_issue(
         return Err(e);
     }
 
-    let disk = review_has_room(config_dir, &opts.disk, &format!("--issue {}", opts.issue))?;
+    let disk = match location {
+        Location::Local => {
+            review_has_room(config_dir, &opts.disk, &format!("--issue {}", opts.issue))?
+        }
+        Location::Cloud => opts.disk.clone(),
+    };
     task_review::run(
         config_dir,
         &task_review::Options {
@@ -766,25 +778,8 @@ fn preflight_targets(
     config_dir: &Path,
     opts: &ListOptions,
     targets: &[Target],
-    location: Location,
     github: &dyn GitHubBackend,
 ) -> Result<()> {
-    // An issue target can't run in the cloud yet (slice 5b): refused before any target starts.
-    if location == Location::Cloud {
-        let issues: Vec<String> = targets
-            .iter()
-            .filter(|t| matches!(t, Target::Issue(_)))
-            .map(Target::flag)
-            .collect();
-        if !issues.is_empty() {
-            bail!(
-                "`task run --issue` can't run its sandboxes in the cloud yet (milestone 4 builds \
-                 it later), so the list doesn't start ({}); run it with --local, or list only \
-                 --spec targets",
-                issues.join(", ")
-            );
-        }
-    }
     let Ok(repo) = task_start::resolve_repo(opts.repo.as_deref(), &opts.repo_root) else {
         return Ok(());
     };
@@ -895,7 +890,7 @@ pub fn run_list(
         location: Some(location),
         ..opts.clone()
     };
-    preflight_targets(config_dir, opts, targets, location, github)?;
+    preflight_targets(config_dir, opts, targets, github)?;
 
     let mut summaries: Vec<(String, bool)> = Vec::new();
     for (i, target) in targets.iter().enumerate() {

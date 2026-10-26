@@ -1009,41 +1009,6 @@ fn list_options(f: &Fixture) -> sbxm::commands::task_run::ListOptions {
     }
 }
 
-/// Behavior 7: an issue target stays refused in the cloud (slice 5b), and in a list that is found
-/// before any target starts.
-#[test]
-fn a_cloud_run_list_with_an_issue_target_is_refused_before_anything() {
-    let f = fixture_with(CLOUD_TOML);
-    let (spec, _) = spec(&f);
-    let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), "x", &[CLEAN]);
-    let github = sbxm::github::fake::FakeGitHub::default();
-
-    let result = sbxm::commands::task_run::run_list(
-        &f.env.config_dir(),
-        &list_options(&f),
-        &[
-            sbxm::commands::task_run::Target::Spec(spec),
-            sbxm::commands::task_run::Target::Issue(41),
-        ],
-        None,
-        &backend,
-        &github,
-        &common::task_fixture::Probe,
-        &sbxm::task::gates::FakeHostRunner::default(),
-        &mut Vec::new(),
-        &mut Vec::new(),
-    );
-
-    let message = format!("{:#}", result.unwrap_err());
-    assert!(
-        message.contains("--issue 41") && message.contains("cloud"),
-        "{message}"
-    );
-    assert!(backend.log().is_empty(), "{:?}", backend.log());
-    assert!(github.calls().is_empty(), "{:?}", github.calls());
-    assert!(!f.env.base_dir().join(".sbxm").join("tasks").exists());
-}
-
 /// Lesson 1: a `task run` list of cloud targets resolves the location once for the list and skips
 /// the local free-disk check for every target (P11), not only the first: both of two cloud spec
 /// targets run to `ready` with too little local free disk.
