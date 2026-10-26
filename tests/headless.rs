@@ -245,3 +245,46 @@ fn high_effort_changes_nothing_for_claude() {
         Harness::Claude.headless_argv("do it", &opts()).unwrap()
     );
 }
+
+/// A cloud exec of a command that ignores TERM (S14 Q3, `sbx` 0.46.0): `timeout -v`'s TERM and
+/// KILL lines, then the cloud's stream error, exit 1. The error line is S14's captured text; the
+/// two `timeout` lines are coreutils' own wording, as above.
+const CLOUD_STREAM_ERROR_AFTER_TIMEOUT: &str =
+    include_str!("../src/backend/fixtures/sbx-cloud-exec-stream-error-after-timeout.txt");
+/// The same stream error with no `timeout` line before it: the cloud stopped answering.
+const CLOUD_STREAM_ERROR: &str =
+    include_str!("../src/backend/fixtures/sbx-cloud-exec-stream-error.txt");
+
+#[test]
+fn the_cloud_stream_error_after_the_timeout_lines_is_timed_out() {
+    let (_, result) = run_with(exec_output(TRUNCATED, CLOUD_STREAM_ERROR_AFTER_TIMEOUT, 1));
+    assert_eq!(result.status, RunStatus::TimedOut);
+    assert_eq!(result.answer, "PONG");
+    assert_eq!(result.transcript, TRUNCATED);
+}
+
+#[test]
+fn the_cloud_stream_error_without_the_timeout_lines_is_exec_unavailable() {
+    let fake = FakeBackend::default().with_exec_outputs(vec![exec_output(
+        TRUNCATED,
+        CLOUD_STREAM_ERROR,
+        1,
+    )]);
+    let err = headless::run(
+        &fake,
+        "sb",
+        Path::new("/work"),
+        Harness::Claude,
+        "Reply with exactly: PONG",
+        &opts(),
+        Duration::from_secs(600),
+    )
+    .unwrap_err();
+    let unavailable = err
+        .downcast_ref::<headless::ExecUnavailable>()
+        .expect("an ExecUnavailable");
+    assert!(
+        unavailable.0.contains("RunExecSession: stream error"),
+        "{unavailable}"
+    );
+}

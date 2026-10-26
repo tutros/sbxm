@@ -22,10 +22,26 @@ const NO_TURN_COMPLETED: &str = "no turn.completed event in the output";
 /// what an OOM kill returns, so the exit code alone can't say "timeout":
 /// `timeout -v` announces the signals it sends on stderr.
 pub(crate) fn hit_timeout(exit_code: Option<i32>, stderr: &str) -> bool {
-    matches!(exit_code, Some(124 | 137))
-        && stderr
-            .lines()
-            .any(|line| line.starts_with("timeout: sending signal"))
+    matches!(exit_code, Some(124 | 137)) && timeout_lines(stderr)
+}
+
+/// The line a cloud exec ends with when its stream to the sandbox closed before the command
+/// exited (S14 Q3): after `timeout -v`'s lines it is the end of a timeout, and without them the
+/// cloud stopped answering.
+const CLOUD_STREAM_ERROR: &str = "error: RunExecSession: stream error:";
+
+/// Whether `timeout -v` announced a signal it sent.
+fn timeout_lines(stderr: &str) -> bool {
+    stderr
+        .lines()
+        .any(|line| line.starts_with("timeout: sending signal"))
+}
+
+/// Whether a cloud exec lost its stream (S14 Q3).
+fn cloud_stream_error(stderr: &str) -> bool {
+    stderr
+        .lines()
+        .any(|line| line.starts_with(CLOUD_STREAM_ERROR))
 }
 
 /// Whether the status is a failure the harness reported, not just the parser
@@ -119,8 +135,16 @@ pub fn run(
             },
         )
         .map_err(|e| anyhow::Error::new(ExecUnavailable(format!("{e:#}"))))?;
+    // A cloud stream error after `timeout -v`'s lines ends a timeout (S14 Q3); without them, `sbx`
+    // stopped answering (decision 261), never a failure of the agent's own.
+    let stream_error = cloud_stream_error(&output.stderr);
+    if stream_error && !timeout_lines(&output.stderr) {
+        return Err(anyhow::Error::new(ExecUnavailable(
+            output.stderr.trim().to_owned(),
+        )));
+    }
     let mut result = harness.parse_headless_output(&output.stdout)?;
-    if hit_timeout(output.exit_code, &output.stderr) {
+    if hit_timeout(output.exit_code, &output.stderr) || stream_error {
         result.status = RunStatus::TimedOut;
     } else if output.exit_code != Some(0) && !reported_failure(&result.status) {
         // A failure the harness itself reported says more than stderr does, so
