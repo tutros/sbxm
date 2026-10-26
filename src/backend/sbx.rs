@@ -10,8 +10,8 @@ use std::path::Path;
 
 use super::{
     CopyOut, CreateSpec, CustomSecret, CustomSecretSpec, ExecOutput, ExecSpec, KitValidation,
-    Location, NetworkRule, SandboxBackend, SandboxInfo, ScopedSecret, SecretSource, Stdin,
-    TemplateImage, check_template_tag,
+    Location, NetworkRule, SandboxBackend, SandboxDetail, SandboxInfo, ScopedSecret, SecretSource,
+    Stdin, TemplateImage, check_template_tag,
 };
 
 /// Shells out to the `sbx` CLI on PATH, for sandboxes on this machine or, in the cloud instance,
@@ -53,6 +53,26 @@ impl SbxBackend {
         let mut command = Self::LOCAL.command();
         command.args(version_args());
         command
+    }
+
+    /// `sbx ls --json`, with `--cloud` in the cloud instance.
+    fn ls_command(&self) -> Command {
+        let mut command = self.command();
+        command.args(["ls", "--json"]);
+        command
+    }
+
+    /// `sbx ls --json`'s output; a failing `ls` is an error with `sbx`'s own message.
+    fn ls_json(&self) -> Result<String> {
+        let output = self.ls_command().output().context(SBX_MISSING)?;
+        if !output.status.success() {
+            bail!(
+                "`sbx ls --json` failed ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
     }
 
     /// Runs `sbx <args>` with the terminal attached, so `sbx`'s own progress
@@ -118,19 +138,11 @@ impl SandboxBackend for SbxBackend {
     }
 
     fn list(&self) -> Result<Vec<SandboxInfo>> {
-        let output = self
-            .command()
-            .args(["ls", "--json"])
-            .output()
-            .context(SBX_MISSING)?;
-        if !output.status.success() {
-            bail!(
-                "`sbx ls --json` failed ({}): {}",
-                output.status,
-                String::from_utf8_lossy(&output.stderr).trim()
-            );
-        }
-        parse_ls(&String::from_utf8_lossy(&output.stdout))
+        parse_ls(&self.ls_json()?)
+    }
+
+    fn list_detailed(&self) -> Result<Vec<SandboxDetail>> {
+        parse_ls_detailed(&self.ls_json()?)
     }
 
     fn stop(&self, name: &str) -> Result<()> {
@@ -724,6 +736,15 @@ fn parse_ls(json: &str) -> Result<Vec<SandboxInfo>> {
     #[derive(Deserialize)]
     struct Ls {
         sandboxes: Vec<SandboxInfo>,
+    }
+    let ls: Ls = serde_json::from_str(json).context("unexpected `sbx ls --json` output")?;
+    Ok(ls.sandboxes)
+}
+
+fn parse_ls_detailed(json: &str) -> Result<Vec<SandboxDetail>> {
+    #[derive(Deserialize)]
+    struct Ls {
+        sandboxes: Vec<SandboxDetail>,
     }
     let ls: Ls = serde_json::from_str(json).context("unexpected `sbx ls --json` output")?;
     Ok(ls.sandboxes)
@@ -1509,6 +1530,48 @@ mod cloud_tests {
             }]
         );
         assert_eq!(parse_ls(CLOUD_LS_EMPTY).unwrap(), []);
+    }
+
+    // Milestone 4 slice 8 (decision 259): `status` and `doctor` show a cloud sandbox's shape and
+    // time left, from the same `ls --json`.
+    #[test]
+    fn parses_the_cloud_ls_json_with_its_shape_and_expiry() {
+        assert_eq!(
+            parse_ls_detailed(CLOUD_LS).unwrap(),
+            [SandboxDetail {
+                name: "sbxm-p2-capture".into(),
+                status: "running".into(),
+                cpus: Some(2),
+                memory_mib: Some(4096),
+                expires_at: Some("2026-10-24T09:02:21.604457Z".into()),
+            }]
+        );
+        assert_eq!(parse_ls_detailed(CLOUD_LS_EMPTY).unwrap(), []);
+    }
+
+    #[test]
+    fn a_local_ls_entry_without_shape_or_expiry_parses_with_none() {
+        let json = r#"{"sandboxes": [{"name": "sbxm-a-claude", "agent": "claude",
+            "status": "running"}]}"#;
+        assert_eq!(
+            parse_ls_detailed(json).unwrap(),
+            [SandboxDetail {
+                name: "sbxm-a-claude".into(),
+                status: "running".into(),
+                cpus: None,
+                memory_mib: None,
+                expires_at: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn the_cloud_instance_lists_with_cloud() {
+        assert_eq!(
+            args(&SbxBackend::CLOUD.ls_command()),
+            ["--cloud", "ls", "--json"]
+        );
+        assert_eq!(args(&SbxBackend::LOCAL.ls_command()), ["ls", "--json"]);
     }
 
     // Milestone 4 slice 4 (decision 256, S14 Q2, P2 point 6): a secret scoped to one cloud sandbox

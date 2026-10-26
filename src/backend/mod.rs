@@ -24,6 +24,22 @@ pub trait SandboxBackend: Send + Sync {
     /// folder comes out whole (P2), so the caller checks what landed before reading it.
     fn copy_out(&self, sandbox: &str, path: &str, host: &Path) -> Result<CopyOut>;
     fn list(&self) -> Result<Vec<SandboxInfo>>;
+    /// The same `sbx ls --json`, with each sandbox's shape and expiry where `sbx` reports them
+    /// (the cloud's does; decision 259), for `status` and `doctor` to show. By default, `list`
+    /// with no shape or expiry.
+    fn list_detailed(&self) -> Result<Vec<SandboxDetail>> {
+        Ok(self
+            .list()?
+            .into_iter()
+            .map(|info| SandboxDetail {
+                name: info.name,
+                status: info.status,
+                cpus: None,
+                memory_mib: None,
+                expires_at: None,
+            })
+            .collect())
+    }
     fn stop(&self, name: &str) -> Result<()>;
     /// Removes the sandbox without prompting (`sbx rm -f`).
     fn remove(&self, name: &str) -> Result<()>;
@@ -246,6 +262,20 @@ pub struct SandboxInfo {
     pub name: String,
     pub agent: String,
     pub status: String,
+}
+
+/// One entry of `sbx ls --json` with its shape and lifetime (`cpus`, `memory_mib`, `expires_at`,
+/// which a cloud sandbox has, S14); a field `sbx` leaves out is `None`, other fields are ignored.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SandboxDetail {
+    pub name: String,
+    pub status: String,
+    #[serde(default)]
+    pub cpus: Option<u32>,
+    #[serde(default)]
+    pub memory_mib: Option<u64>,
+    #[serde(default)]
+    pub expires_at: Option<String>,
 }
 
 /// What [`SandboxBackend::copy_out`] found at the sandbox's path.
