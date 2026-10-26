@@ -505,6 +505,34 @@ pub fn remove(
     state_dir: Option<&Path>,
     out: &mut dyn Write,
 ) -> Result<()> {
+    remove_with_sleep(
+        base_dir,
+        merged,
+        yes,
+        backend,
+        confirm,
+        free_space,
+        state_dir,
+        out,
+        &std::thread::sleep,
+    )
+}
+
+/// [`remove`], with `sleep` called for each wait between a cloud sandbox's removal retries (P6
+/// (a)) instead of really sleeping. A cloud task's sandboxes are removed in the cloud, after its
+/// archive (decision 265), and when one may still be there the task is left as it is.
+#[allow(clippy::too_many_arguments)]
+pub fn remove_with_sleep(
+    base_dir: &Path,
+    merged: &MergedPlan,
+    yes: bool,
+    backend: &dyn SandboxBackend,
+    confirm: &dyn Confirm,
+    free_space: fn(&Path) -> std::io::Result<u64>,
+    state_dir: Option<&Path>,
+    out: &mut dyn Write,
+    sleep: &dyn Fn(std::time::Duration),
+) -> Result<()> {
     // Every task left alone is named whichever way this goes (decision 195 a, c): in the
     // confirmation prompt, the refusal without a terminal, or printed here when nothing is asked.
     let listing = merged.listing();
@@ -556,7 +584,7 @@ pub fn remove(
                 continue;
             }
         }
-        let report = finish::remove(&candidate.plan, backend);
+        let report = finish::remove_with_sleep(&candidate.plan, backend, sleep);
         for line in &report.removed {
             writeln!(out, "removed {line}")?;
         }

@@ -9,16 +9,18 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 
+use super::lifetime::{self, Removal};
 use super::machine;
 use super::pipeline::Prepared;
 use super::record::{self, OpenFinding, Process, ProcessProbe, Record};
 use super::repo;
 use super::review::{self, COMMENT_CAP, defang, defang_mentions};
 use super::risk;
-use crate::backend::SandboxBackend;
+use crate::backend::{Location, SandboxBackend};
 use crate::confirm::Confirm;
 use crate::github::{GitHubBackend, PrRequest};
 use crate::run::results::now;
@@ -28,8 +30,11 @@ use crate::run::results::now;
 pub struct RemovalPlan {
     pub id: String,
     base_dir: PathBuf,
-    /// Worker's then reviewer's, as `task.json` names them.
+    /// Worker's then reviewer's, as `task.json` names them; for a cloud task, every sandbox its
+    /// `sandboxes` list has with no `removed_at` (milestone 4 slice 6, decision 265).
     pub sandboxes: Vec<String>,
+    /// Where the sandboxes are, as `task.json` records it (decision 253): never the config's.
+    pub location: Location,
     /// The folders that exist, the task folder last.
     pub folders: Vec<PathBuf>,
     /// Set when `task.json` couldn't be read, so no sandbox names are known.
@@ -42,7 +47,10 @@ impl RemovalPlan {
         let mut lines: Vec<String> = self
             .sandboxes
             .iter()
-            .map(|s| format!("  sandbox {s}"))
+            .map(|s| match self.location {
+                Location::Local => format!("  sandbox {s}"),
+                Location::Cloud => format!("  cloud sandbox {s}"),
+            })
             .collect();
         lines.extend(self.folders.iter().map(|f| format!("  {}", f.display())));
         if let Some(note) = &self.note {
@@ -133,6 +141,7 @@ pub fn plan_removal(base_dir: &Path, id: &str, probe: &dyn ProcessProbe) -> Resu
 
     let json = meta.join("task.json");
     let mut sandboxes = Vec::new();
+    let mut location = Location::Local;
     let mut note = None;
     if json.is_file() && schema_too_new(&json) {
         // Only a newer sbxm knows what is in it; don't delete a task this one can't read.
@@ -153,6 +162,7 @@ pub fn plan_removal(base_dir: &Path, id: &str, probe: &dyn ProcessProbe) -> Resu
                 );
             }
             sandboxes = sandbox_names(id, &task)?;
+            location = task.location;
         }
         Err(e) => {
             note = Some(format!(
@@ -164,13 +174,25 @@ pub fn plan_removal(base_dir: &Path, id: &str, probe: &dyn ProcessProbe) -> Resu
         id: id.to_owned(),
         base_dir: base_dir.to_path_buf(),
         sandboxes,
+        location,
         folders,
         note,
     })
 }
 
 fn sandbox_names(id: &str, task: &Record) -> Result<Vec<String>> {
-    let mut names = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    // A cloud task's sandboxes are the ones its lifetime entries still hold open: a sandbox
+    // removed at the task's stop is gone already (P5 (d), decision 263).
+    if task.location == Location::Cloud {
+        for entry in task.sandboxes.iter().filter(|e| e.removed_at.is_none()) {
+            check_sandbox_name(id, &entry.name)?;
+            if !names.contains(&entry.name) {
+                names.push(entry.name.clone());
+            }
+        }
+        return Ok(names);
+    }
     for agent in [&task.worker, &task.reviewer].into_iter().flatten() {
         check_sandbox_name(id, &agent.sandbox)?;
         names.push(agent.sandbox.clone());
@@ -200,17 +222,100 @@ pub(crate) fn check_own_folder(base_dir: &Path, dir: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Removes what `plan` lists, best effort: sandboxes first, then the clones, then the task folder,
-/// which stays if anything else did (it holds the sandbox names a second `rm` needs).
-pub fn remove(plan: &RemovalPlan, backend: &dyn SandboxBackend) -> RemovalReport {
-    let mut report = RemovalReport::default();
-    for sandbox in &plan.sandboxes {
-        match crate::commands::rm::remove_sandbox(backend, sandbox) {
-            Ok(()) => report.removed.push(format!("sandbox {sandbox}")),
-            Err(e) => report
-                .stayed
-                .push(format!("sandbox {sandbox} stayed: {e:#}")),
+/// Removes `plan`'s sandboxes where its record says they are (decision 253), best effort, into
+/// `report`. A cloud task's (milestone 4 slice 6) go through the retried removal, `sleep`
+/// waiting between tries (P6, decision 262(e)), one already gone counting as removed; then the
+/// secrets the cloud lists as scoped to each (slice 4), whatever its removal said. Returns `false`
+/// when a cloud sandbox may still be there: the task's record is then its only trace.
+fn remove_sandboxes(
+    plan: &RemovalPlan,
+    backend: &dyn SandboxBackend,
+    sleep: &dyn Fn(Duration),
+    report: &mut RemovalReport,
+) -> bool {
+    if plan.location == Location::Local {
+        for sandbox in &plan.sandboxes {
+            match crate::commands::rm::remove_sandbox(backend, sandbox) {
+                Ok(()) => report.removed.push(format!("sandbox {sandbox}")),
+                Err(e) => report
+                    .stayed
+                    .push(format!("sandbox {sandbox} stayed: {e:#}")),
+            }
         }
+        return true;
+    }
+    let cloud = backend.located(Location::Cloud);
+    let mut all_gone = true;
+    for sandbox in &plan.sandboxes {
+        match lifetime::remove_sandbox(cloud, sandbox, sleep) {
+            Removal::Removed => report.removed.push(format!("cloud sandbox {sandbox}")),
+            Removal::AlreadyGone => report
+                .removed
+                .push(format!("cloud sandbox {sandbox} (already gone)")),
+            Removal::Failed(e) => {
+                all_gone = false;
+                report.stayed.push(format!(
+                    "cloud sandbox {sandbox}: {e}; remove it with `sbx --cloud rm {sandbox} -f`"
+                ));
+            }
+        }
+        remove_scoped_secrets(cloud, sandbox, report);
+    }
+    all_gone
+}
+
+/// The secrets the cloud lists as scoped to `sandbox` (slice 4, by scope: `task.json` holds none
+/// of them), each removed, into `report`; a failure names the command that finishes it by hand.
+fn remove_scoped_secrets(cloud: &dyn SandboxBackend, sandbox: &str, report: &mut RemovalReport) {
+    let names = match cloud.scoped_secrets(sandbox) {
+        Ok(names) => names,
+        Err(e) => {
+            report.stayed.push(format!(
+                "the secrets scoped to {sandbox}: the cloud's list couldn't be read ({e:#}); list \
+                 them with `sbx --cloud secret ls` and remove each with `sbx --cloud secret rm \
+                 <name> --sandbox {sandbox} -f`"
+            ));
+            return;
+        }
+    };
+    for name in names {
+        match cloud.remove_secret(&name, sandbox) {
+            Ok(()) => report
+                .removed
+                .push(format!("scoped secret {name} of {sandbox}")),
+            Err(e) => report.stayed.push(format!(
+                "scoped secret {name} of {sandbox}: {e:#}; remove it with `sbx --cloud secret rm \
+                 {name} --sandbox {sandbox} -f`"
+            )),
+        }
+    }
+}
+
+/// Removes what `plan` lists, best effort: sandboxes first (where the task's record says, see
+/// [`remove_sandboxes`]), then the clones, then the task folder, which stays if anything else did
+/// (it holds the sandbox names a second `rm` needs). When a cloud sandbox may still be there,
+/// nothing else is touched: its folder holds the only record of a sandbox that may be running.
+pub fn remove(plan: &RemovalPlan, backend: &dyn SandboxBackend) -> RemovalReport {
+    remove_with_sleep(plan, backend, &std::thread::sleep)
+}
+
+/// [`remove`], with `sleep` called for each wait between a cloud sandbox's removal retries (P6
+/// (a)) instead of really sleeping.
+pub fn remove_with_sleep(
+    plan: &RemovalPlan,
+    backend: &dyn SandboxBackend,
+    sleep: &dyn Fn(Duration),
+) -> RemovalReport {
+    let mut report = RemovalReport::default();
+    if !remove_sandboxes(plan, backend, sleep, &mut report) {
+        report.stayed.extend(plan.folders.iter().map(|folder| {
+            format!(
+                "{}: a cloud sandbox of the task may still be running, and the task's record is \
+                 its only trace; the task is left as it is",
+                folder.display()
+            )
+        }));
+        return report;
     }
     let meta_dir = record::task_dir(&plan.base_dir, &plan.id);
     for folder in &plan.folders {
@@ -442,6 +547,32 @@ pub fn set_aside_many(
     confirm: &dyn Confirm,
     out: &mut dyn Write,
 ) -> Result<Vec<SetAside>> {
+    set_aside_many_with_sleep(
+        base_dir,
+        ids,
+        yes,
+        backend,
+        probe,
+        confirm,
+        out,
+        &std::thread::sleep,
+    )
+}
+
+/// [`set_aside_many`], with `sleep` called for each wait between a cloud sandbox's removal
+/// retries (P6 (a)) instead of really sleeping. A cloud sandbox that still can't be removed
+/// stops the restart before its task is moved, and every task already set aside goes back.
+#[allow(clippy::too_many_arguments)]
+pub fn set_aside_many_with_sleep(
+    base_dir: &Path,
+    ids: &[String],
+    yes: bool,
+    backend: &dyn SandboxBackend,
+    probe: &dyn ProcessProbe,
+    confirm: &dyn Confirm,
+    out: &mut dyn Write,
+    sleep: &dyn Fn(Duration),
+) -> Result<Vec<SetAside>> {
     let plans = ids
         .iter()
         .map(|id| plan_removal(base_dir, id, probe))
@@ -471,14 +602,28 @@ pub fn set_aside_many(
     }
     let mut result: Vec<SetAside> = Vec::new();
     for plan in &plans {
-        for sandbox in &plan.sandboxes {
-            let line = match crate::commands::rm::remove_sandbox(backend, sandbox) {
-                Ok(()) => format!("removed sandbox {sandbox}"),
-                Err(e) => format!("could not remove sandbox {sandbox}: {e:#}"),
-            };
+        let mut report = RemovalReport::default();
+        let all_gone = remove_sandboxes(plan, backend, sleep, &mut report);
+        let lines = report.removed.iter().map(|l| format!("removed {l}"));
+        let lines = lines.chain(
+            report
+                .stayed
+                .iter()
+                .map(|l| format!("could not remove {l}")),
+        );
+        for line in lines {
             if let Err(e) = writeln!(out, "{line}") {
                 return Err(undo_set_asides(&result, e.into()));
             }
+        }
+        // A cloud sandbox that may still run keeps its task where it is (milestone 4 slice 6).
+        if !all_gone {
+            let failed = anyhow::anyhow!(
+                "a cloud sandbox of task {} could not be removed, so the task is left as it is; \
+                 remove the sandbox as said above, then restart again",
+                plan.id
+            );
+            return Err(undo_set_asides(&result, failed));
         }
         match set_aside_one(base_dir, plan) {
             Ok(aside) => result.push(aside),
@@ -513,8 +658,33 @@ pub fn set_aside(
     confirm: &dyn Confirm,
     out: &mut dyn Write,
 ) -> Result<SetAside> {
+    set_aside_with_sleep(
+        base_dir,
+        id,
+        yes,
+        backend,
+        probe,
+        confirm,
+        out,
+        &std::thread::sleep,
+    )
+}
+
+/// [`set_aside`], with `sleep` as for [`set_aside_many_with_sleep`].
+#[allow(clippy::too_many_arguments)]
+pub fn set_aside_with_sleep(
+    base_dir: &Path,
+    id: &str,
+    yes: bool,
+    backend: &dyn SandboxBackend,
+    probe: &dyn ProcessProbe,
+    confirm: &dyn Confirm,
+    out: &mut dyn Write,
+    sleep: &dyn Fn(Duration),
+) -> Result<SetAside> {
     let ids = [id.to_owned()];
-    let mut all = set_aside_many(base_dir, &ids, yes, backend, probe, confirm, out)?;
+    let mut all =
+        set_aside_many_with_sleep(base_dir, &ids, yes, backend, probe, confirm, out, sleep)?;
     Ok(all.remove(0))
 }
 
@@ -677,6 +847,7 @@ pub fn check_spec_result_fetched(base_dir: &Path, id: &str, checkout: &Path) -> 
 
 /// Shows what removing `id` would delete, asks (unless `yes`), removes it and says what went and
 /// what stayed. Nothing is touched before the answer. Fails if anything stayed.
+#[allow(clippy::too_many_arguments)]
 pub fn discard(
     base_dir: &Path,
     id: &str,
@@ -685,6 +856,7 @@ pub fn discard(
     probe: &dyn ProcessProbe,
     confirm: &dyn Confirm,
     out: &mut dyn Write,
+    sleep: &dyn Fn(Duration),
 ) -> Result<()> {
     discard_many(
         base_dir,
@@ -694,12 +866,14 @@ pub fn discard(
         probe,
         confirm,
         out,
+        sleep,
     )
 }
 
 /// [`discard`] for several tasks at once (`start --restart --issue 1 --issue 2`): every task is
 /// planned first, all of them are listed and confirmed with ONE question, and only then is the
 /// first deleted, so a "no" (or a task that can't be planned) deletes nothing at all.
+#[allow(clippy::too_many_arguments)]
 pub fn discard_many(
     base_dir: &Path,
     ids: &[String],
@@ -708,6 +882,7 @@ pub fn discard_many(
     probe: &dyn ProcessProbe,
     confirm: &dyn Confirm,
     out: &mut dyn Write,
+    sleep: &dyn Fn(Duration),
 ) -> Result<()> {
     let plans = ids
         .iter()
@@ -736,7 +911,7 @@ pub fn discard_many(
     }
     let mut stayed = 0;
     for plan in &plans {
-        let report = remove(plan, backend);
+        let report = remove_with_sleep(plan, backend, sleep);
         for line in &report.removed {
             writeln!(out, "removed {line}")?;
         }
