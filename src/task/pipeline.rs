@@ -1157,16 +1157,16 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
                 // decision 256).
                 secrets_asked = true;
                 secrets::set_all(ctx.backend, &sandbox, ctx.scoped_secrets)?;
-                plan.create_cloud(ctx.backend, &sandbox, worker.harness, ttl)?;
-                created = true;
-                task.add_sandbox(
+                create_recorded(
+                    ctx.backend,
+                    &meta,
+                    task,
+                    &plan,
                     &sandbox,
-                    SandboxRole::Worker,
-                    location,
-                    now(),
-                    ttl.as_secs(),
-                );
-                record::write(&meta, task)?;
+                    (worker.harness, SandboxRole::Worker),
+                    ttl,
+                )?;
+                created = true;
                 events.push(lifetime::created_line(&sandbox, SandboxRole::Worker, ttl));
                 plan.hold_strict(ctx.backend, &sandbox, worker.harness, &mut events)?;
                 let repo_git = meta.join("repo.git");
@@ -4130,9 +4130,9 @@ fn open_cloud_review(
 }
 
 /// Creates one of a task's cloud sandboxes from `plan`: every scoped secret first, since secrets
-/// attach at create (S14 Q2, decision 256), then the create with `ttl`, then its lifetime entry
-/// saved and its line for the screen (decision 265). What a failure leaves is removed by
-/// [`release_cloud_sandbox`].
+/// attach at create (S14 Q2, decision 256), then the create with `ttl` and its lifetime entry
+/// ([`create_recorded`]), then its line for the screen (decision 265). What a failure leaves is
+/// removed by [`release_cloud_sandbox`].
 fn create_cloud_sandbox(
     env: &TaskEnv,
     prepared: &mut Prepared,
@@ -4146,15 +4146,54 @@ fn create_cloud_sandbox(
         _ => env.config.worker.harness,
     };
     secrets::set_all(env.backend, sandbox, env.scoped_secrets)?;
-    plan.create_cloud(env.backend, sandbox, harness, ttl)?;
-    prepared
-        .record
-        .add_sandbox(sandbox, role, Location::Cloud, now(), ttl.as_secs());
-    record::write(&prepared.meta, &prepared.record)?;
+    create_recorded(
+        env.backend,
+        &prepared.meta,
+        &mut prepared.record,
+        plan,
+        sandbox,
+        (harness, role),
+        ttl,
+    )?;
     prepared
         .events
         .push(lifetime::created_line(sandbox, role, ttl));
     plan.hold_strict(env.backend, sandbox, harness, &mut prepared.events)
+}
+
+/// The cloud create of `sandbox` with `ttl`, its lifetime entry saved in `task.json` *before*
+/// the create (PR 322 review M-1): a run killed while the cloud may already have accepted the
+/// create leaves an open entry, so `task rm`, `--restart`, `rm --merged` and `task resume` remove
+/// the sandbox and its scoped secrets. A create that returns an error makes no sandbox of the
+/// task's, so its entry is dropped again and saved: a sandbox of that name the cloud already had
+/// is never the task's to remove (review M-1 of slice 1).
+fn create_recorded(
+    backend: &dyn SandboxBackend,
+    meta: &Path,
+    task: &mut Record,
+    plan: &SandboxPlan,
+    sandbox: &str,
+    (harness, role): (Harness, SandboxRole),
+    ttl: Duration,
+) -> Result<()> {
+    let entries = task.sandboxes.len();
+    task.add_sandbox(sandbox, role, Location::Cloud, now(), ttl.as_secs());
+    if let Err(e) = record::write(meta, task) {
+        task.sandboxes.truncate(entries);
+        return Err(e);
+    }
+    let created = plan.create_cloud(backend, sandbox, harness, ttl);
+    if let Err(e) = created {
+        task.sandboxes.truncate(entries);
+        return match record::write(meta, task) {
+            Ok(()) => Err(e),
+            Err(w) => Err(e.context(format!(
+                "and task.json still names {sandbox} as created ({w:#}), so `sbxm task rm` would \
+                 remove a sandbox of that name"
+            ))),
+        };
+    }
+    Ok(())
 }
 
 /// Removes one of a cloud task's sandboxes, its lifetime entry stamped, then the secrets scoped

@@ -623,7 +623,9 @@ continues it in the cloud. A stream error after `timeout -v`'s lines is a timeou
 A removal that `sbx` answers with "temporarily unavailable" is retried after 5, 10 and 20 seconds; a sandbox already
 gone counts as removed, and one that still can't be removed is a warning naming `sbx --cloud rm <name> -f`. `task.json`
 keeps a `sandboxes` list, one entry per cloud sandbox (`name`, `role` `worker`/`reviewer`/`fix`, `location`,
-`created_at`, `ttl_s`, `removed_at`, null while it exists or when its removal failed), and `run.log` a line at each
+`created_at`, `ttl_s`, `removed_at`, null while it exists or when its removal failed), saved as its create starts
+and dropped again if the create fails, so `task rm` removes a sandbox whose create a killed `sbxm` never saw end, and
+leaves alone one of the same name that a failed create didn't make; and `run.log` a line at each
 create (`cloud sandbox <name> created (<role>, TTL <ttl>)`) and each removal (`cloud sandbox <name> removed`). Add
 up the entries for a task's sandbox hours: `task rm --merged` archives them with `task.json` and `run.log`, a plain
 `task rm` deletes them with the folder.
