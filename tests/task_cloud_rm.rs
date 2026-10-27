@@ -437,11 +437,13 @@ fn rm_merged_leaves_a_task_with_an_ambiguous_create_alone_until_told_to_forget_i
     assert!(!meta(&f, &id).exists(), "{out}");
 }
 
-/// Self-review of decision 268: `task rm --merged --forget-ambiguous` whose cloud removal of the
-/// task's own sandbox still fails leaves `task.json` byte for byte as archived, so a second run
-/// with the same flags reuses its archive and finishes, the ambiguous sandbox never touched.
+/// PR 322 round 2, M-2: `task rm --merged --forget-ambiguous` whose cloud removal of the task's
+/// own sandbox still fails has dropped the ambiguous create from `task.json` before archiving it,
+/// so the live record and its archive agree, and the retry the error names, without
+/// `--forget-ambiguous`, passes the ambiguity check, reuses the archive and finishes. The
+/// ambiguous sandbox is never touched.
 #[test]
-fn rm_merged_forgetting_whose_removal_fails_leaves_the_task_for_a_second_run() {
+fn rm_merged_forgetting_whose_removal_fails_drops_the_entry_for_a_plain_second_run() {
     let (f, spec, id) = ready_cloud_task();
     let checkout = merge_cloud_task(&f, &spec, &id);
     let (worker, reviewer) = (worker_sandbox(&id), reviewer_sandbox(&id));
@@ -453,8 +455,7 @@ fn rm_merged_forgetting_whose_removal_fails_leaves_the_task_for_a_second_run() {
         since: "2026-10-27T10:00:00Z".into(),
     });
     record::write(&meta(&f, &id), &task).unwrap();
-    let before = std::fs::read_to_string(meta(&f, &id).join("task.json")).unwrap();
-    let merged = |backend: &FakeBackend| {
+    let merged = |backend: &FakeBackend, forget: bool| {
         let mut out = Vec::new();
         let result = run_with_sleep(
             &f.env.config_dir(),
@@ -464,7 +465,7 @@ fn rm_merged_forgetting_whose_removal_fails_leaves_the_task_for_a_second_run() {
                 force: false,
                 repo_root: checkout.clone(),
                 dry_run: false,
-                forget_ambiguous: true,
+                forget_ambiguous: forget,
             },
             backend,
             &FakeGitHub::default(),
@@ -477,16 +478,87 @@ fn rm_merged_forgetting_whose_removal_fails_leaves_the_task_for_a_second_run() {
     };
 
     let failing = FakeBackend::default().with_remove_errors(&[UNAVAILABLE; 4]);
-    let (result, out) = merged(&failing);
+    let (result, out) = merged(&failing, true);
 
     assert!(result.is_err(), "{out}");
-    assert_eq!(
-        std::fs::read_to_string(meta(&f, &id).join("task.json")).unwrap(),
-        before
-    );
+    let live = std::fs::read_to_string(meta(&f, &id).join("task.json")).unwrap();
+    let archived = std::fs::read_to_string(
+        f.env
+            .base_dir()
+            .join(".sbxm")
+            .join("task-archive")
+            .join(&id)
+            .join("task.json"),
+    )
+    .unwrap();
+    assert_eq!(live, archived);
+    let task = task_record(&f, &id);
+    assert_eq!(task.ambiguous_create(), None);
+    assert!(task.has_open_sandbox(&worker));
 
     let backend = FakeBackend::default();
-    let (result, out) = merged(&backend);
+    let (result, out) = merged(&backend, false);
+
+    result.expect(&out);
+    assert_eq!(backend.removes(), vec![worker.clone()], "{out}");
+    for b in [&failing, &backend] {
+        assert!(
+            !b.log().iter().any(|l| l.contains(&reviewer)),
+            "{:?}",
+            b.log()
+        );
+    }
+    assert!(!meta(&f, &id).exists(), "{out}");
+}
+
+/// PR 322 round 2, M-2: plain `task rm --forget-ambiguous` whose cloud removal of the task's own
+/// sandbox fails has already dropped the ambiguous create from `task.json`, so the retry the
+/// error names, without the flag, finishes; the ambiguous sandbox is never touched.
+#[test]
+fn rm_forgetting_whose_removal_fails_drops_the_entry_for_a_plain_second_run() {
+    let (f, spec, id) = ready_cloud_task();
+    let (worker, reviewer) = (worker_sandbox(&id), reviewer_sandbox(&id));
+    reopen(&f, &id, &worker);
+    let mut task = task_record(&f, &id);
+    task.creating = Some(record::SandboxClaim {
+        name: reviewer.clone(),
+        role: record::SandboxRole::Reviewer,
+        since: "2026-10-27T10:00:00Z".into(),
+    });
+    record::write(&meta(&f, &id), &task).unwrap();
+    let rm = |backend: &FakeBackend, forget: bool| {
+        let mut out = Vec::new();
+        let result = run_with_sleep(
+            &f.env.config_dir(),
+            &Options {
+                target: Target::Spec(spec.clone()),
+                yes: true,
+                force: true,
+                repo_root: f.env.tmp.path().join("target-repo"),
+                dry_run: false,
+                forget_ambiguous: forget,
+            },
+            backend,
+            &FakeGitHub::default(),
+            &Probe,
+            &Never,
+            &mut out,
+            &|_| {},
+        );
+        (result, String::from_utf8(out).unwrap())
+    };
+
+    let failing = FakeBackend::default().with_remove_errors(&[UNAVAILABLE; 4]);
+    let (result, out) = rm(&failing, true);
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(message.contains("run `sbxm task rm` again"), "{message}");
+    let task = task_record(&f, &id);
+    assert_eq!(task.ambiguous_create(), None, "{out}");
+    assert!(task.has_open_sandbox(&worker));
+
+    let backend = FakeBackend::default();
+    let (result, out) = rm(&backend, false);
 
     result.expect(&out);
     assert_eq!(backend.removes(), vec![worker.clone()], "{out}");

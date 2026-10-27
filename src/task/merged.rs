@@ -590,6 +590,18 @@ pub fn remove_with_sleep(
     let mut screen = finish::Unfailing::new(out);
     let out = &mut screen;
     for candidate in &merged.candidates {
+        // `--forget-ambiguous` drops the entry before the archive is made (PR 322 round 2, M-2),
+        // so the archive and the live record agree and a plain retry reuses the archive.
+        if let Err(e) = finish::forget_in_record(&candidate.plan) {
+            writeln!(
+                out,
+                "could not drop task {}'s ambiguous create from task.json, so it is left as it \
+                 is: {e:#}",
+                candidate.id
+            )?;
+            stayed += 1;
+            continue;
+        }
         match archive_task(base_dir, &candidate.id) {
             Ok(archive) => writeln!(
                 out,

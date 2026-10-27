@@ -239,7 +239,8 @@ sandbox's own policy, so it runs after `create` and before any agent, and remove
   task (`task finish` only warns), naming the sandbox. Look with `sbx --cloud ls` and `sbx --cloud secret ls`; if it
   is the task's, remove it with `sbx --cloud rm <name> -f` and each secret with `sbx --cloud secret rm <service>
   --sandbox <name> -f`. Then rerun with `--forget-ambiguous`: on `task rm` (or `task rm --merged`) it drops the entry
-  from `task.json` with no cloud call for it and removes the rest; on `task resume` it drops it and resumes. One you
+  from `task.json` with no cloud call for it, before anything is removed or archived, and removes the rest (if that
+  stops part way, a plain `task rm` finishes it); on `task resume` it drops it and resumes. One you
   forget without removing is deleted by its TTL eventually.
 - **One task at a time, for now (decision 258).** Milestone 4 adds no parallel orchestration. The experiment still
   to run after the merge: 2, then 3, cloud tasks at once as separate background `task run`s, measuring tasks per

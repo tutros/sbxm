@@ -642,8 +642,8 @@ of the same name. Every recovery and removal path (`task resume`, `task finish`,
 task (`task finish` publishes and warns), naming the sandbox and the commands: look with `sbx --cloud ls` and `sbx
 --cloud secret ls`, and if it is the task's, remove it with `sbx --cloud rm <name> -f` and each secret with `sbx
 --cloud secret rm <service> --sandbox <name> -f`. Then tell sbxm it's handled: `task rm ... --forget-ambiguous` (or
-`task rm --merged --forget-ambiguous`) drops it from `task.json` without any cloud call for it and removes the rest;
-`task resume ... --forget-ambiguous` drops it and resumes (a sandbox of that name still there is then refused like
+`task rm --merged --forget-ambiguous`) drops it from `task.json` without any cloud call for it, before anything is
+removed or archived, then removes the rest; if that removal stops part way, a plain `task rm` finishes it. `task resume ... --forget-ambiguous` drops it and resumes (a sandbox of that name still there is then refused like
 any other name the task didn't find free). Its TTL deletes an ambiguous sandbox eventually anyway. A create that
 returned an error takes back the secrets it set and stops the task, so nothing of that name is removed later. Add up
 the entries for a task's sandbox hours: `task rm --merged` archives them with `task.json` and `run.log`, a plain

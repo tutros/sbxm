@@ -39,8 +39,9 @@ pub struct RemovalPlan {
     pub folders: Vec<PathBuf>,
     /// Set when `task.json` couldn't be read, so no sandbox names are known.
     pub note: Option<String>,
-    /// The cloud sandbox of an ambiguous create `--forget-ambiguous` drops with the task's
-    /// record, with no cloud call for it (decision 268).
+    /// The cloud sandbox of an ambiguous create `--forget-ambiguous` drops from the task's
+    /// record before anything is removed ([`forget_in_record`]), with no cloud call for it
+    /// (decision 268).
     pub forget: Option<String>,
 }
 
@@ -357,10 +358,18 @@ pub fn remove_with_sleep(
     sleep: &dyn Fn(Duration),
 ) -> RemovalReport {
     let mut report = RemovalReport::default();
-    // An ambiguous create `--forget-ambiguous` forgets goes with the task folder, never
-    // rewritten here: a removal that stops part way leaves `task.json` as it was (as
-    // `--merged` archived it), and a second run with the same flag finishes the job.
+    // `--forget-ambiguous` drops the ambiguous create from `task.json` before anything is removed
+    // (PR 322 round 2, M-2): a removal that stops part way leaves a record a plain `task rm` can
+    // retry. A drop that can't be saved removes nothing.
     if let Some(name) = &plan.forget {
+        if let Err(e) = forget_in_record(plan) {
+            report.stayed.push(format!(
+                "cloud sandbox {name}'s ambiguous create couldn't be dropped from task.json \
+                 ({e:#}), so nothing of task {} was removed",
+                plan.id
+            ));
+            return report;
+        }
         report.removed.push(format!(
             "cloud sandbox {name}'s ambiguous create, forgotten (the sandbox and its secrets left \
              alone)"
@@ -397,6 +406,30 @@ pub fn remove_with_sleep(
         }
     }
     report
+}
+
+/// Drops `plan`'s forgotten ambiguous create (`--forget-ambiguous`, decision 268) from the task's
+/// `task.json`, with no cloud call for it; nothing to do once the record no longer has it, as
+/// after `task rm --merged` dropped it before archiving. A different ambiguous create recorded
+/// since the plan was made is refused.
+pub fn forget_in_record(plan: &RemovalPlan) -> Result<()> {
+    let Some(name) = &plan.forget else {
+        return Ok(());
+    };
+    let meta = record::task_dir(&plan.base_dir, &plan.id);
+    check_own_folder(&plan.base_dir, &meta)?;
+    let mut task = record::read(&meta.join("task.json"))?;
+    match task.ambiguous_create() {
+        None => Ok(()),
+        Some(recorded) if recorded == name => record::write_change(&meta, &mut task, |t| {
+            t.forget_ambiguous();
+        }),
+        Some(recorded) => bail!(
+            "task {} now records the ambiguous create of {recorded}, not {name}; run `sbxm task \
+             rm` again",
+            plan.id
+        ),
+    }
 }
 
 /// Where a set-aside task's folders live while a `--restart` discard is undoable (decision 185):
