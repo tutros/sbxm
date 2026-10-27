@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 
 use std::time::{Duration, Instant};
 
@@ -4208,12 +4208,12 @@ fn create_cloud_sandbox(
     plan.hold_strict(env.backend, sandbox, harness, &mut prepared.events)
 }
 
-/// The cloud create of `sandbox` with `ttl`, its lifetime entry saved in `task.json` *before*
-/// the create (PR 322 review M-1): a run killed while the cloud may already have accepted the
-/// create leaves an open entry, so `task rm`, `--restart`, `rm --merged` and `task resume` remove
-/// the sandbox and its scoped secrets. A create that returns an error makes no sandbox of the
-/// task's, so its entry is dropped again and saved: a sandbox of that name the cloud already had
-/// is never the task's to remove (review M-1 of slice 1).
+/// The cloud create of `sandbox` with `ttl`, then its lifetime entry saved in `task.json`: only
+/// a create that returned makes a sandbox the task's (decision 265), so one that returned an
+/// error never claims a sandbox of that name the cloud already had (review M-1 of slice 1). A
+/// run killed before it heard back leaves the task interrupted and no entry; removal looks for
+/// the sandbox by the record's names then ([`crate::task::finish::plan_removal`], PR 322
+/// review M-1).
 fn create_recorded(
     backend: &dyn SandboxBackend,
     meta: &Path,
@@ -4223,24 +4223,9 @@ fn create_recorded(
     (harness, role): (Harness, SandboxRole),
     ttl: Duration,
 ) -> Result<()> {
-    let entries = task.sandboxes.len();
+    plan.create_cloud(backend, sandbox, harness, ttl)?;
     task.add_sandbox(sandbox, role, Location::Cloud, now(), ttl.as_secs());
-    if let Err(e) = record::write(meta, task) {
-        task.sandboxes.truncate(entries);
-        return Err(e);
-    }
-    let created = plan.create_cloud(backend, sandbox, harness, ttl);
-    if let Err(e) = created {
-        task.sandboxes.truncate(entries);
-        return match record::write(meta, task) {
-            Ok(()) => Err(e),
-            Err(w) => Err(anyhow!(
-                "{e:#}; task.json couldn't drop its entry for {sandbox} ({w:#}), so a later \
-                 `sbxm task rm` would remove a sandbox of that name"
-            )),
-        };
-    }
-    Ok(())
+    record::write(meta, task)
 }
 
 /// Removes one of a cloud task's sandboxes, its lifetime entry stamped, then the secrets scoped

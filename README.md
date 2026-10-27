@@ -623,14 +623,16 @@ continues it in the cloud. A stream error after `timeout -v`'s lines is a timeou
 - a reviewer sandbox: `[reviewer] time_limit` + 30 minutes (1h15m by default), one per review round, removed after it.
 
 A removal that `sbx` answers with "temporarily unavailable" is retried after 5, 10 and 20 seconds; a sandbox already
-gone counts as removed, and one that still can't be removed is a warning naming `sbx --cloud rm <name> -f`. `task.json`
-keeps a `sandboxes` list, one entry per cloud sandbox (`name`, `role` `worker`/`reviewer`/`fix`, `location`,
-`created_at`, `ttl_s`, `removed_at`, null while it exists or when its removal failed), saved as its create starts
-and dropped again if the create fails, so `task rm` removes a sandbox whose create a killed `sbxm` never saw end, and
-leaves alone one of the same name that a failed create didn't make; and `run.log` a line at each
-create (`cloud sandbox <name> created (<role>, TTL <ttl>)`) and each removal (`cloud sandbox <name> removed`). Add
-up the entries for a task's sandbox hours: `task rm --merged` archives them with `task.json` and `run.log`, a plain
-`task rm` deletes them with the folder.
+gone counts as removed, and one that still can't be removed is a warning naming `sbx --cloud rm <name> -f`.
+`task.json` keeps a `sandboxes` list, one entry per cloud sandbox (`name`, `role` `worker`/`reviewer`/`fix`,
+`location`, `created_at`, `ttl_s`, `removed_at`, null while it exists or when its removal failed), saved once its
+create has returned, and `run.log` a line at each create (`cloud sandbox <name> created (<role>, TTL <ttl>)`) and
+each removal (`cloud sandbox <name> removed`). An `sbxm` killed during a create leaves the task interrupted and no
+entry for that sandbox, so `task rm` (and `--restart`, `task rm --merged`) of an interrupted cloud task also removes
+the worker and reviewer sandboxes `task.json` names, then the secrets scoped to them; one the cloud never made counts
+as removed. A create that failed stops the task without making the sandbox its own, so a sandbox of that name that
+was already there is left alone. Add up the entries for a task's sandbox hours: `task rm --merged` archives them with
+`task.json` and `run.log`, a plain `task rm` deletes them with the folder.
 
 The other commands of a cloud task:
 - `task review --issue/--spec`: a reviewer sandbox per round in the cloud; a fix round runs in the task's worker

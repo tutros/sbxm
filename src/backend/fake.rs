@@ -105,6 +105,12 @@ pub struct FakeBackend {
     exec_hook: Option<ExecHook>,
     exec_responder: Option<ExecResponder>,
     create_hook: Option<CreateHook>,
+    /// Called once a `create` succeeded, as `create_hook` is at its start.
+    accepted_create_hook: Option<CreateHook>,
+    /// The cloud's sandboxes under [`FakeBackend::with_live_cloud`]: a `create` that succeeds
+    /// adds one, a `remove` takes it away, and removing one that isn't there answers as
+    /// `sbx --cloud rm` does. `None`: every `remove` succeeds.
+    live_cloud: Option<Mutex<Vec<String>>>,
     /// How many times `secret_services` was called; a read, so it's not in `log`.
     secret_service_calls: Mutex<usize>,
     /// Flipped (via [`FakeBackend::secret_services_failure`]) to make `secret_services` fail from
@@ -424,6 +430,36 @@ impl FakeBackend {
             create_hook: Some(CreateHook(Arc::new(hook))),
             ..self
         }
+    }
+
+    /// Calls `hook(spec)` once a `create` has succeeded: the sandbox exists (in
+    /// [`FakeBackend::with_live_cloud`]'s cloud), and the caller hasn't heard back yet.
+    pub fn with_accepted_create_hook(
+        self,
+        hook: impl Fn(&CreateSpec) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            accepted_create_hook: Some(CreateHook(Arc::new(hook))),
+            ..self
+        }
+    }
+
+    /// Keeps track of the sandboxes there are, starting with `names`: each successful `create`
+    /// adds its sandbox, each `remove` takes one away, and removing one that isn't there fails
+    /// with `sbx --cloud rm`'s `sandbox '<name>' not found` (`sbx-cloud-rm-not-found.txt`).
+    pub fn with_live_cloud(self, names: &[&str]) -> Self {
+        Self {
+            live_cloud: Some(Mutex::new(names.iter().map(|n| (*n).to_owned()).collect())),
+            ..self
+        }
+    }
+
+    /// The sandboxes there are under [`FakeBackend::with_live_cloud`].
+    pub fn live_cloud(&self) -> Vec<String> {
+        self.live_cloud
+            .as_ref()
+            .map(|live| live.lock().unwrap().clone())
+            .unwrap_or_default()
     }
 
     /// Calls `hook(sandbox, spec)` inside every successful `exec`, before it
@@ -794,6 +830,15 @@ impl SandboxBackend for FakeBackend {
         {
             bail!("fake create failure");
         }
+        if let Some(live) = &self.live_cloud {
+            let mut live = live.lock().unwrap();
+            if !live.contains(&spec.name) {
+                live.push(spec.name.clone());
+            }
+        }
+        if let Some(hook) = &self.accepted_create_hook {
+            (hook.0)(spec);
+        }
         Ok(())
     }
 
@@ -845,6 +890,13 @@ impl SandboxBackend for FakeBackend {
         }
         if let Some(error) = self.remove_errors.lock().unwrap().pop_front() {
             bail!("{error}");
+        }
+        if let Some(live) = &self.live_cloud {
+            let mut live = live.lock().unwrap();
+            let Some(at) = live.iter().position(|n| n == name) else {
+                bail!("sandbox '{name}' not found\n  try: sbx --cloud ls");
+            };
+            live.remove(at);
         }
         Ok(())
     }

@@ -149,10 +149,11 @@ pub fn plan_removal(base_dir: &Path, id: &str, probe: &dyn ProcessProbe) -> Resu
     }
     match record::read(&json) {
         Ok(task) => {
+            let interrupted = task.is_interrupted(probe);
             let state = machine::State {
                 stage: task.stage,
                 status: task.status,
-                interrupted: task.is_interrupted(probe),
+                interrupted,
                 kind: task.kind,
             };
             if !machine::verdict(&state, machine::Event::Rm) {
@@ -161,7 +162,7 @@ pub fn plan_removal(base_dir: &Path, id: &str, probe: &dyn ProcessProbe) -> Resu
                     task.stage.name()
                 );
             }
-            sandboxes = sandbox_names(id, &task)?;
+            sandboxes = sandbox_names(id, &task, interrupted)?;
             location = task.location;
         }
         Err(e) => {
@@ -180,15 +181,33 @@ pub fn plan_removal(base_dir: &Path, id: &str, probe: &dyn ProcessProbe) -> Resu
     })
 }
 
-fn sandbox_names(id: &str, task: &Record) -> Result<Vec<String>> {
+/// The sandboxes removing `task` removes. `interrupted`: its process was gone while a stage ran
+/// ([`Record::is_interrupted`]).
+fn sandbox_names(id: &str, task: &Record, interrupted: bool) -> Result<Vec<String>> {
     let mut names: Vec<String> = Vec::new();
     // A cloud task's sandboxes are the ones its lifetime entries still hold open: a sandbox
     // removed at the task's stop is gone already (P5 (d), decision 263).
     if task.location == Location::Cloud {
-        for entry in task.sandboxes.iter().filter(|e| e.removed_at.is_none()) {
-            check_sandbox_name(id, &entry.name)?;
-            if !names.contains(&entry.name) {
-                names.push(entry.name.clone());
+        let open = task.sandboxes.iter().filter(|e| e.removed_at.is_none());
+        let mut candidates: Vec<&str> = open.map(|e| e.name.as_str()).collect();
+        // An entry is saved only once its create returned (decision 265), so a run killed in a
+        // create left none, and the cloud may have accepted it: the record's worker and
+        // reviewer names go too, as resume's remade worker does for its own (PR 322 review M-1).
+        // `sbx --cloud rm` of one the cloud never made answers "not found", which counts as
+        // removed. A create that returned an error stopped the task, so it isn't interrupted
+        // and a sandbox of that name the cloud already had is left alone (slice 1 review M-1).
+        if interrupted {
+            candidates.extend(
+                [&task.worker, &task.reviewer]
+                    .into_iter()
+                    .flatten()
+                    .map(|agent| agent.sandbox.as_str()),
+            );
+        }
+        for name in candidates {
+            check_sandbox_name(id, name)?;
+            if !names.iter().any(|n| n == name) {
+                names.push(name.to_owned());
             }
         }
         return Ok(names);
@@ -206,7 +225,8 @@ fn sandbox_names(id: &str, task: &Record) -> Result<Vec<String>> {
 pub fn open_cloud_sandboxes(task: &Record) -> Result<Vec<String>> {
     match task.location {
         Location::Local => Ok(Vec::new()),
-        Location::Cloud => sandbox_names(&task.id, task),
+        // `task finish` refuses an interrupted task, so only open entries count here.
+        Location::Cloud => sandbox_names(&task.id, task, false),
     }
 }
 
