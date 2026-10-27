@@ -427,8 +427,48 @@ fn real_git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
 }
 
-/// `sbx --cloud policy ls [<sandbox>] --json`'s allowed and denied hosts, or `None` when it fails.
-fn policy(sandbox: Option<&str>) -> Option<(serde_json::Value, serde_json::Value)> {
+/// What `sbx --cloud policy ls [<sandbox>] --json` gave.
+#[derive(Debug, PartialEq)]
+enum PolicyRead {
+    /// Its allowed and denied hosts.
+    Rules(serde_json::Value, serde_json::Value),
+    /// The sandbox's read failed with sbx's "not found" for that sandbox
+    /// (`sbx-cloud-rm-not-found.txt`'s wording): it is gone.
+    Absent,
+    /// Anything else: a failed command, or an answer that isn't the two lists.
+    Failed(String),
+}
+
+/// Sorts one `policy ls` answer: only the two lists or the named sandbox's "not found" count, so
+/// a login, network or CLI failure can never pass for "no rules left".
+fn classify_policy(
+    sandbox: Option<&str>,
+    success: bool,
+    stdout: &[u8],
+    stderr: &[u8],
+) -> PolicyRead {
+    let stderr = String::from_utf8_lossy(stderr).trim().to_owned();
+    if !success {
+        return match sandbox {
+            Some(name) if stderr.contains(&format!("sandbox '{name}' not found")) => {
+                PolicyRead::Absent
+            }
+            _ => PolicyRead::Failed(format!("failed: {stderr}")),
+        };
+    }
+    let json: serde_json::Value = match serde_json::from_slice(stdout) {
+        Ok(json) => json,
+        Err(e) => return PolicyRead::Failed(format!("not JSON: {e}")),
+    };
+    let (allow, deny) = (&json["allowNetworks"], &json["denyNetworks"]);
+    if !allow.is_array() || !deny.is_array() {
+        return PolicyRead::Failed(format!("no allowNetworks and denyNetworks lists: {json}"));
+    }
+    PolicyRead::Rules(allow.clone(), deny.clone())
+}
+
+/// `sbx --cloud policy ls [<sandbox>] --json`, sorted by [`classify_policy`].
+fn policy(sandbox: Option<&str>) -> PolicyRead {
     let mut args = vec!["policy", "ls"];
     args.extend(sandbox);
     args.push("--json");
@@ -439,11 +479,15 @@ fn policy(sandbox: Option<&str>) -> Option<(serde_json::Value, serde_json::Value
         String::from_utf8_lossy(&out.stdout).trim(),
         String::from_utf8_lossy(&out.stderr).trim()
     );
-    if !out.status.success() {
-        return None;
+    classify_policy(sandbox, out.status.success(), &out.stdout, &out.stderr)
+}
+
+/// The account's own lists, which must be readable: without them nothing confirms a removal.
+fn read_account_policy() -> (serde_json::Value, serde_json::Value) {
+    match policy(None) {
+        PolicyRead::Rules(allow, deny) => (allow, deny),
+        other => panic!("`sbx --cloud policy ls` unreadable: {other:?}"),
     }
-    let json: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-    Some((json["allowNetworks"].clone(), json["denyNetworks"].clone()))
 }
 
 const WORKER_PROMPT: &str = "Do exactly this and nothing else:\n\
@@ -513,7 +557,7 @@ fn cloud_walk_against_real_sbx() {
         watched: Arc::clone(&watched),
         dirs: vec![base_dir.clone()],
     };
-    let account_policy = policy(None);
+    let account_policy = read_account_policy();
 
     // The config: a strict profile allowing one host, on the small shape.
     let config_dir = tmp.path().join("config");
@@ -677,16 +721,25 @@ fn cloud_walk_against_real_sbx() {
     assert!(real_git(&repo_git, &["show", &format!("{}:hello.txt", task.branch)]).contains("hi"));
 
     // Removal: no sandbox of the task in `sbx --cloud ls`, none of its rules in `policy ls`, the
-    // account's policy as it was. A gone sandbox's `policy ls` may fail or show the account's.
+    // account's policy as it was. A gone sandbox's `policy ls` may say it is not found or show
+    // the account's lists; any other answer fails the walk.
     let names = watched.names.lock().unwrap().clone();
     let listed: Vec<String> = CLOUD.list().unwrap().into_iter().map(|s| s.name).collect();
     for name in &names {
         assert!(!listed.contains(name), "{name} still listed: {listed:?}");
-        if let Some(rules) = policy(Some(name)) {
-            assert_eq!(Some(rules), account_policy, "rules left for {name}");
+        match policy(Some(name)) {
+            PolicyRead::Absent => {}
+            PolicyRead::Rules(allow, deny) => {
+                assert_eq!((allow, deny), account_policy, "rules left for {name}")
+            }
+            PolicyRead::Failed(why) => panic!("`sbx --cloud policy ls {name}`: {why}"),
         }
     }
-    assert_eq!(policy(None), account_policy, "the account's policy changed");
+    assert_eq!(
+        read_account_policy(),
+        account_policy,
+        "the account's policy changed"
+    );
 }
 
 /// Decision 267's first capture, run by hand after `sbx logout` with
@@ -719,4 +772,51 @@ fn capture_not_logged_in() {
         format!("{stderr}\n"),
     )
     .unwrap();
+}
+
+/// M-1 of slice 9's review: only a read `policy ls` or a sandbox's captured "not found" confirms
+/// a removal; every other failure is a failure, never "no rules left".
+#[test]
+fn a_policy_read_counts_only_when_it_was_read_or_names_the_sandbox_absent() {
+    let global = include_str!("../src/backend/fixtures/sbx-cloud-policy-ls-global.json");
+    let not_found = include_str!("../src/backend/fixtures/sbx-cloud-rm-not-found.txt");
+    let captured = "sbxm-p2-capture";
+
+    assert!(matches!(
+        classify_policy(None, true, global.as_bytes(), b""),
+        PolicyRead::Rules(..)
+    ));
+    assert!(matches!(
+        classify_policy(Some(captured), true, global.as_bytes(), b""),
+        PolicyRead::Rules(..)
+    ));
+    assert_eq!(
+        classify_policy(Some(captured), false, b"", not_found.as_bytes()),
+        PolicyRead::Absent
+    );
+    for (sandbox, success, stdout, stderr) in [
+        // Another sandbox's "not found", or the account's read failing with one.
+        (Some("sbxm-other"), false, "", not_found),
+        (None, false, "", not_found),
+        // Any other failure: login, network, the CLI.
+        (Some(captured), false, "", "error: not logged in"),
+        (None, false, "", "error: connection reset"),
+        (Some(captured), false, "", ""),
+        // A success that isn't the lists.
+        (None, true, "not json", ""),
+        (Some(captured), true, "", ""),
+        (None, true, r#"{"denyNetworks": []}"#, ""),
+        (
+            None,
+            true,
+            r#"{"allowNetworks": "github.com", "denyNetworks": []}"#,
+            "",
+        ),
+    ] {
+        let read = classify_policy(sandbox, success, stdout.as_bytes(), stderr.as_bytes());
+        assert!(
+            matches!(read, PolicyRead::Failed(_)),
+            "{sandbox:?} {success} {stdout:?} {stderr:?}: {read:?}"
+        );
+    }
 }
