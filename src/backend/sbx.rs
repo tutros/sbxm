@@ -91,6 +91,14 @@ impl SbxBackend {
         Ok(())
     }
 
+    /// Refuses a call whose command line or output only the cloud has.
+    fn cloud_only(&self, what: &str) -> Result<()> {
+        if self.location == Location::Local {
+            bail!("`sbx {what}` of one sandbox's network rules is only run in the cloud here");
+        }
+        Ok(())
+    }
+
     /// Runs `sbx <args>` with stdin closed, so a question `sbx` asks (S11: `template save` on a
     /// running sandbox, `template rm` without `--force`) fails instead of waiting.
     fn run_sbx_unprompted<S: AsRef<std::ffi::OsStr>>(&self, args: &[S]) -> Result<()> {
@@ -307,6 +315,29 @@ impl SandboxBackend for SbxBackend {
             );
         }
         parse_policy_ls(&String::from_utf8_lossy(&output.stdout))
+    }
+
+    fn cloud_allowed_hosts(&self, sandbox: &str) -> Result<Vec<String>> {
+        self.cloud_only("policy ls")?;
+        let output = self
+            .command()
+            .args(cloud_policy_ls_args(sandbox))
+            .stdin(Stdio::null())
+            .output()
+            .context(SBX_MISSING)?;
+        if !output.status.success() {
+            bail!(
+                "`sbx --cloud policy ls {sandbox} --json` failed ({}): {}",
+                output.status,
+                failure_reason(&output.stdout, &output.stderr)
+            );
+        }
+        parse_cloud_policy_ls(&String::from_utf8_lossy(&output.stdout))
+    }
+
+    fn cloud_deny_host(&self, sandbox: &str, host: &str) -> Result<()> {
+        self.cloud_only("policy deny")?;
+        self.run_sbx_unprompted(&cloud_policy_deny_args(sandbox, host))
     }
 
     fn custom_secrets(&self) -> Result<Vec<CustomSecret>> {
@@ -720,6 +751,27 @@ fn parse_policy_ls(json: &str) -> Result<Vec<NetworkRule>> {
             })
         })
         .collect()
+}
+
+fn cloud_policy_ls_args(sandbox: &str) -> [&str; 4] {
+    ["policy", "ls", sandbox, "--json"]
+}
+
+fn cloud_policy_deny_args<'a>(sandbox: &'a str, host: &'a str) -> [&'a str; 6] {
+    ["policy", "deny", "network", "--sandbox", sandbox, host]
+}
+
+/// The `allowNetworks` of `sbx --cloud policy ls <sandbox> --json` (`sbx-cloud-policy-ls.json`,
+/// v0.46.0); a missing or mistyped field is an error, so the strict check fails closed.
+fn parse_cloud_policy_ls(json: &str) -> Result<Vec<String>> {
+    #[derive(Deserialize)]
+    struct Ls {
+        #[serde(rename = "allowNetworks")]
+        allow_networks: Vec<String>,
+    }
+    let ls: Ls =
+        serde_json::from_str(json).context("unexpected `sbx --cloud policy ls --json` output")?;
+    Ok(ls.allow_networks)
 }
 
 fn parse_template_ls(json: &str) -> Result<Vec<TemplateImage>> {
@@ -1671,5 +1723,90 @@ mod cloud_tests {
             b"error: sbxcloud: temporarily unavailable"
         ));
         assert!(!secret_gone(b"", b""));
+    }
+}
+
+// Milestone 4 slice 7 (P9 (a) with (i), decisions 255, 264): a strict cloud sandbox's list of
+// allowed hosts and the per-sandbox deny rules that close the build hosts.
+#[cfg(test)]
+mod cloud_policy_tests {
+    use super::*;
+    use crate::backend::Location;
+
+    /// `sbx --cloud policy ls <name> --json` (v0.46.0, the P2 capture run).
+    const CLOUD_POLICY_LS: &str = include_str!("fixtures/sbx-cloud-policy-ls.json");
+    /// `sbx --cloud policy ls --json`, the account default: nothing allowed.
+    const CLOUD_POLICY_LS_GLOBAL: &str = include_str!("fixtures/sbx-cloud-policy-ls-global.json");
+
+    #[test]
+    fn cloud_policy_ls_args_name_the_sandbox() {
+        assert_eq!(
+            cloud_policy_ls_args("sbxm-task-x-claude"),
+            ["policy", "ls", "sbxm-task-x-claude", "--json"]
+        );
+    }
+
+    #[test]
+    fn cloud_policy_deny_args_deny_one_host_in_one_sandbox() {
+        assert_eq!(
+            cloud_policy_deny_args("sbxm-task-x-claude", "api.x.ai"),
+            [
+                "policy",
+                "deny",
+                "network",
+                "--sandbox",
+                "sbxm-task-x-claude",
+                "api.x.ai"
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_the_hosts_a_cloud_sandbox_allows() {
+        assert_eq!(
+            parse_cloud_policy_ls(CLOUD_POLICY_LS).unwrap(),
+            ["postman-echo.com"]
+        );
+        assert!(
+            parse_cloud_policy_ls(CLOUD_POLICY_LS_GLOBAL)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// The claude agent's built-in hosts as S17 saw them, in the same shape.
+    #[test]
+    fn parses_a_list_of_the_claude_agents_built_in_hosts() {
+        let json = r#"{"allowNetworks": ["api.anthropic.com", "claude.ai", "console.anthropic.com",
+            "api.github.com", "github.com", "api.x.ai", "openrouter.ai"], "denyNetworks": [],
+            "mode": "deny-all"}"#;
+
+        let hosts = parse_cloud_policy_ls(json).unwrap();
+
+        assert_eq!(hosts.len(), 7);
+        assert_eq!(hosts[0], "api.anthropic.com");
+        assert_eq!(hosts[6], "openrouter.ai");
+    }
+
+    /// Fails closed: a list sbxm can't read is an error, never an empty list.
+    #[test]
+    fn an_unparsable_or_incomplete_cloud_list_is_an_error() {
+        for json in [
+            "not json",
+            r#"{"denyNetworks": [], "mode": "deny-all"}"#,
+            r#"{"allowNetworks": "github.com"}"#,
+            "",
+        ] {
+            let err = parse_cloud_policy_ls(json).unwrap_err();
+            assert!(format!("{err:#}").contains("policy ls"), "{err:#}");
+        }
+    }
+
+    /// The local instance never runs them: a local `policy ls` has another shape.
+    #[test]
+    fn the_local_instance_refuses_the_cloud_policy_calls() {
+        let local = SbxBackend::at(Location::Local);
+        assert!(local.cloud_allowed_hosts("sb").is_err());
+        assert!(local.cloud_deny_host("sb", "api.x.ai").is_err());
     }
 }

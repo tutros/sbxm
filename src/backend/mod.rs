@@ -70,6 +70,14 @@ pub trait SandboxBackend: Send + Sync {
     /// The network rules that apply to a sandbox (`sbx policy ls <sandbox> --json`), for the check
     /// of a strict `codex` sandbox after its creation (decision 221).
     fn network_rules(&self, sandbox: &str) -> Result<Vec<NetworkRule>>;
+    /// The hosts a cloud sandbox's policy allows (`sbx --cloud policy ls <sandbox> --json`, its
+    /// `allowNetworks`), for the check of a strict cloud sandbox (decision 255). A list that
+    /// can't be read or parsed is an error, never an empty list. The local instance refuses it.
+    fn cloud_allowed_hosts(&self, sandbox: &str) -> Result<Vec<String>>;
+    /// Denies `host` in the cloud sandbox `sandbox` only (`sbx --cloud policy deny network
+    /// --sandbox <sandbox> <host>`), which replaces an allow rule for it and wins over one added
+    /// later (S17, P9 (i)). The local instance refuses it.
+    fn cloud_deny_host(&self, sandbox: &str, host: &str) -> Result<()>;
     /// Every custom secret `sbx` holds (`sbx secret ls --json`, its `custom_secrets` array), for
     /// the check that no global one clashes with a scoped one sbxm is about to create (S9).
     fn custom_secrets(&self) -> Result<Vec<CustomSecret>>;

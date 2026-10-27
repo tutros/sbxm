@@ -381,6 +381,14 @@ impl SandboxBackend for SecretCheckBlocksRestore<'_> {
         self.inner.network_rules(sandbox)
     }
 
+    fn cloud_allowed_hosts(&self, sandbox: &str) -> anyhow::Result<Vec<String>> {
+        self.inner.cloud_allowed_hosts(sandbox)
+    }
+
+    fn cloud_deny_host(&self, sandbox: &str, host: &str) -> anyhow::Result<()> {
+        self.inner.cloud_deny_host(sandbox, host)
+    }
+
     fn custom_secrets(&self) -> anyhow::Result<Vec<sbxm::backend::CustomSecret>> {
         self.inner.custom_secrets()
     }

@@ -115,6 +115,17 @@ pub struct FakeBackend {
     /// What `network_rules` returns, for every sandbox.
     network_rules: Vec<NetworkRule>,
     fail_network_rules: bool,
+    /// What a cloud sandbox's `cloud_allowed_hosts` starts with, the same for every sandbox;
+    /// `cloud_deny_host` takes a host away from that sandbox's own copy (S17).
+    cloud_allow: Vec<String>,
+    /// Each sandbox's own allow list once it was read or changed.
+    cloud_policies: Mutex<HashMap<String, Vec<String>>>,
+    /// Hosts a `cloud_deny_host` leaves allowed, standing in for a rule sbxm's deny doesn't win
+    /// over.
+    undeniable_cloud_hosts: Vec<String>,
+    /// `cloud_allowed_hosts` fails from this call on, counting from 0.
+    fail_cloud_policy_ls_from: Option<usize>,
+    cloud_policy_ls_calls: Mutex<usize>,
     /// What `custom_secrets` returns; `set_custom_secret` adds to it, `remove_custom_secret`
     /// takes away.
     custom_secrets: Mutex<Vec<CustomSecret>>,
@@ -514,6 +525,29 @@ impl FakeBackend {
     pub fn failing_network_rules(self) -> Self {
         Self {
             fail_network_rules: true,
+            ..self
+        }
+    }
+
+    /// A backend whose cloud sandboxes each start out allowing these hosts.
+    pub fn with_cloud_allow(self, hosts: &[&str]) -> Self {
+        Self {
+            cloud_allow: hosts.iter().map(|h| (*h).to_owned()).collect(),
+            ..self
+        }
+    }
+
+    /// Makes `cloud_deny_host` of this host succeed but leave it allowed.
+    pub fn with_undeniable_cloud_host(mut self, host: &str) -> Self {
+        self.undeniable_cloud_hosts.push(host.to_owned());
+        self
+    }
+
+    /// Makes `cloud_allowed_hosts` record the call and fail from its `n`th call on (0 for every
+    /// call), as a list `sbx` can't give or sbxm can't parse.
+    pub fn failing_cloud_policy_ls_from(self, n: usize) -> Self {
+        Self {
+            fail_cloud_policy_ls_from: Some(n),
             ..self
         }
     }
@@ -921,6 +955,38 @@ impl SandboxBackend for FakeBackend {
             bail!("fake network_rules failure");
         }
         Ok(self.network_rules.clone())
+    }
+
+    fn cloud_allowed_hosts(&self, sandbox: &str) -> Result<Vec<String>> {
+        self.record("policy-ls", sandbox);
+        let call = {
+            let mut calls = self.cloud_policy_ls_calls.lock().unwrap();
+            *calls += 1;
+            *calls - 1
+        };
+        if self.fail_cloud_policy_ls_from.is_some_and(|n| call >= n) {
+            bail!("fake: unexpected `sbx --cloud policy ls --json` output");
+        }
+        Ok(self
+            .cloud_policies
+            .lock()
+            .unwrap()
+            .entry(sandbox.to_owned())
+            .or_insert_with(|| self.cloud_allow.clone())
+            .clone())
+    }
+
+    fn cloud_deny_host(&self, sandbox: &str, host: &str) -> Result<()> {
+        self.record("policy-deny", &format!("{sandbox} {host}"));
+        if !self.undeniable_cloud_hosts.iter().any(|h| h == host) {
+            self.cloud_policies
+                .lock()
+                .unwrap()
+                .entry(sandbox.to_owned())
+                .or_insert_with(|| self.cloud_allow.clone())
+                .retain(|h| h != host);
+        }
+        Ok(())
     }
 
     fn custom_secrets(&self) -> Result<Vec<CustomSecret>> {
