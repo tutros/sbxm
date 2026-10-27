@@ -234,9 +234,9 @@ sandbox's own policy, so it runs after `create` and before any agent, and remove
 - **A cloud create sbxm never heard return is left to you (decision 268).** A cloud sandbox is a task's own only
   once its create returned and `task.json` saved its entry. An `sbxm` killed after starting a create (Ctrl-C, a
   crash, the machine going down) leaves it **ambiguous**: names are deterministic, so sbxm can't tell its own sandbox
-  from one another caller made under the same name. `task resume`, `task finish`, `task rm`, `--restart` and `task
+  from one another caller made under the same name. `task resume`, `task gates`, `task review` (a fix round too), `task finish`, `task rm`, `--restart` and `task
   rm --merged` all leave that sandbox and the secrets scoped to its name alone, and refuse to delete or archive the
-  task (`task finish` only warns), naming the sandbox. Look with `sbx --cloud ls` and `sbx --cloud secret ls`; if it
+  task (`task finish` only warns; `task gates` and `task review` refuse before any call), naming the sandbox. Look with `sbx --cloud ls` and `sbx --cloud secret ls`; if it
   is the task's, remove it with `sbx --cloud rm <name> -f` and each secret with `sbx --cloud secret rm <service>
   --sandbox <name> -f`. Then rerun with `--forget-ambiguous`: on `task rm` (or `task rm --merged`) it drops the entry
   from `task.json` with no cloud call for it, before anything is removed or archived, and removes the rest (if that
