@@ -138,8 +138,8 @@ struct Live {
     allowed_answer: String,
     /// Each of [`DENIED_HOSTS`] with the refusal shape it showed (`None`: not refused).
     denied: Vec<(String, Option<&'static str>, String)>,
-    /// The fake secret's placeholder in [`SECRET_ENV`], the files holding its value, and the
-    /// count of process environments holding it.
+    /// The fake secret's placeholder in [`SECRET_ENV`], the files the agent can read that hold
+    /// its value, and the count of process environments holding it.
     placeholder: String,
     files: FileScan,
     envs_with_value: String,
@@ -148,14 +148,17 @@ struct Live {
 /// The in-sandbox search for the fake secret's value, run as `sh -c SCAN_SCRIPT sh <first half>
 /// <second half> <root> <timeout in seconds>`: the value goes in as two halves, so no command line
 /// in the sandbox holds it whole but grep's own (in /proc, which the file search leaves out). Run
-/// as the sandbox's default user, so files it can't read are skipped ("Permission denied" is the
-/// one error left out of `scan_error`). Every line is a marker [`classify_scan`] reads: grep's own
-/// status, not the last pipeline stage's, and `scan_done` last, so a cut-off answer shows.
+/// as the agent, the sandbox's default user (`sbx --cloud exec` can't run as root, S14 Q5): the
+/// threat is the agent seeing the value, so it checks every file the agent can read, and counts
+/// the paths it can't (`unreadable`, its "Permission denied" lines, the one error left out of
+/// `scan_error`). Every line is a marker [`classify_scan`] reads: grep's own status, not the last
+/// pipeline stage's, and `scan_done` last, so a cut-off answer shows.
 const SCAN_SCRIPT: &str = r#"v="$1$2"; root="$3"; secs="$4"
 e=$(mktemp) || { echo "scan_error=mktemp failed"; exit 0; }
 found=$(timeout "$secs" grep -rlF --exclude-dir=proc --exclude-dir=sys --exclude-dir=dev -- "$v" "$root" 2>"$e")
 echo "scan_status=$?"
 echo "files=$(printf '%s' "$found" | head -5 | tr '\n' ' ')"
+echo "unreadable=$(grep -c -e 'Permission denied$' "$e")"
 echo "scan_error=$(grep -v -e 'Permission denied$' "$e" | head -1)"
 rm -f "$e"
 echo "envs=$(for f in /proc/[0-9]*/environ; do tr '\0' '\n' < "$f" 2>/dev/null; done | grep -cF -- "$v")"
@@ -165,12 +168,34 @@ echo scan_done
 /// What the file search of [`SCAN_SCRIPT`] showed.
 #[derive(Debug, PartialEq)]
 enum FileScan {
-    /// It searched everything readable and found the value nowhere.
+    /// It searched every path and found the value nowhere.
     Clean,
+    /// It found the value in no file the agent can read; `unreadable` paths it couldn't read
+    /// weren't checked.
+    CleanForAgent { unreadable: u64 },
     /// The files holding the value (the first five).
     Found(String),
     /// It didn't finish, or its answer didn't arrive whole: no evidence either way.
     Incomplete(String),
+}
+
+impl FileScan {
+    /// Whether no file the agent can read holds the value.
+    fn agent_readable_clean(&self) -> bool {
+        matches!(self, FileScan::Clean | FileScan::CleanForAgent { .. })
+    }
+
+    fn describe(&self) -> String {
+        match self {
+            FileScan::Clean => "no file holds the value".to_owned(),
+            FileScan::CleanForAgent { unreadable } => format!(
+                "no file the agent can read holds the value; {unreadable} paths were unreadable \
+                 to it and not checked"
+            ),
+            FileScan::Found(files) => format!("files the agent can read hold the value: {files}"),
+            FileScan::Incomplete(why) => format!("the search is incomplete: {why}"),
+        }
+    }
 }
 
 impl Default for FileScan {
@@ -179,9 +204,10 @@ impl Default for FileScan {
     }
 }
 
-/// Sorts [`SCAN_SCRIPT`]'s answer: clean only from a successful `sbx exec` whose answer ends in
-/// `scan_done`, listing no file, with grep's status 1 (no match) or 2 with only unreadable files
-/// skipped.
+/// Sorts [`SCAN_SCRIPT`]'s answer: a listed file is a leak, whatever was unreadable. Otherwise
+/// clean only from a successful `sbx exec` whose answer ends in `scan_done`: grep's status 1 with
+/// nothing unreadable is [`FileScan::Clean`], status 2 with only "Permission denied" diagnostics is
+/// [`FileScan::CleanForAgent`]; anything else is incomplete.
 fn classify_scan(exec_ok: bool, stdout: &str) -> FileScan {
     if !exec_ok {
         return FileScan::Incomplete(format!("`sbx exec` failed: {stdout}"));
@@ -207,11 +233,17 @@ fn classify_scan(exec_ok: bool, stdout: &str) -> FileScan {
         Some(files) => return FileScan::Found(files.to_owned()),
         None => return FileScan::Incomplete(format!("no files line: {stdout}")),
     }
-    match field("scan_status") {
-        Some("0") => FileScan::Incomplete("a match but no file listed".to_owned()),
-        Some("1" | "2") => FileScan::Clean,
-        Some("124") => FileScan::Incomplete("timed out".to_owned()),
-        other => FileScan::Incomplete(format!("grep's status {other:?}")),
+    let unreadable = match field("unreadable").map(str::parse::<u64>) {
+        Some(Ok(n)) => n,
+        _ => return FileScan::Incomplete(format!("no unreadable count: {stdout}")),
+    };
+    match (field("scan_status"), unreadable) {
+        (Some("0"), _) => FileScan::Incomplete("a match but no file listed".to_owned()),
+        (Some("1"), 0) => FileScan::Clean,
+        (Some("2"), 1..) => FileScan::CleanForAgent { unreadable },
+        (Some("2"), 0) => FileScan::Incomplete("grep's status 2 with no diagnostic".to_owned()),
+        (Some("124"), _) => FileScan::Incomplete("timed out".to_owned()),
+        (other, n) => FileScan::Incomplete(format!("grep's status {other:?}, {n} unreadable")),
     }
 }
 
@@ -773,13 +805,19 @@ fn cloud_walk_against_real_sbx() {
         assert!(shape.is_some(), "{host} was not refused: {codes}");
     }
 
-    // The fake scoped secret: only its placeholder is in the sandbox.
+    // The fake scoped secret: only its placeholder is in the environment, and no file the agent
+    // can read holds the value (paths it can't read are counted, not checked).
     assert!(
         !live.placeholder.is_empty() && live.placeholder != value,
         "{SECRET_ENV}={}",
         live.placeholder
     );
-    assert_eq!(live.files, FileScan::Clean, "files holding the value");
+    println!("secret scan: {}", live.files.describe());
+    assert!(
+        live.files.agent_readable_clean(),
+        "a file the agent can read holds the value: {}",
+        live.files.describe()
+    );
     assert_eq!(live.envs_with_value, "0", "environments holding the value");
 
     // The bundle in and out: the worker's commit is in `repo.git`.
@@ -917,15 +955,17 @@ fn a_secret_scan_is_clean_only_when_it_completed_without_a_match() {
     let (scan, out) = scan_here(value, &root, "60");
     assert_eq!(scan, FileScan::Clean, "{out}");
 
-    // A file the default user can't read is skipped, as on the sandbox's `/`.
+    // A file the agent can't read is counted, not checked, as on the sandbox's `/`. Run as
+    // root, every file is readable and this part has nothing to show.
     let locked = root.join("locked.txt");
-    std::fs::write(&locked, "nothing\n").unwrap();
+    std::fs::write(&locked, format!("x={value}\n")).unwrap();
     let mut perms = std::fs::metadata(&locked).unwrap().permissions();
     std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o000);
     std::fs::set_permissions(&locked, perms).unwrap();
-    if std::fs::read(&locked).is_err() {
+    let unreadable = std::fs::read(&locked).is_err();
+    if unreadable {
         let (scan, out) = scan_here(value, &root, "60");
-        assert_eq!(scan, FileScan::Clean, "{out}");
+        assert_eq!(scan, FileScan::CleanForAgent { unreadable: 1 }, "{out}");
     }
 
     std::fs::write(root.join("sub").join("leak.txt"), format!("x={value}\n")).unwrap();
@@ -934,6 +974,9 @@ fn a_secret_scan_is_clean_only_when_it_completed_without_a_match() {
         matches!(&scan, FileScan::Found(files) if files.contains("leak.txt")),
         "{scan:?} {out}"
     );
+    if unreadable {
+        assert!(out.contains("unreadable=1"), "{out}");
+    }
 
     // A search error: the root isn't there.
     let (scan, out) = scan_here(value, &tmp.path().join("missing"), "60");
@@ -955,18 +998,71 @@ fn a_secret_scan_is_clean_only_when_it_completed_without_a_match() {
     );
 }
 
+/// M-1 of slice 9's review: a readable tree with no match is clean.
+#[test]
+fn a_secret_scan_of_a_readable_tree_without_a_match_is_clean() {
+    assert_eq!(classify_scan(true, CLEAN_ANSWER), FileScan::Clean);
+}
+
+/// M-1 of slice 9's review: with only `Permission denied` diagnostics and no match, no file the
+/// agent can read holds the value, and the unreadable paths are counted.
+#[test]
+fn a_secret_scan_with_only_unreadable_paths_is_clean_for_the_agent() {
+    let denied = CLEAN_ANSWER
+        .replace("scan_status=1", "scan_status=2")
+        .replace("unreadable=0", "unreadable=37");
+    assert_eq!(
+        classify_scan(true, &denied),
+        FileScan::CleanForAgent { unreadable: 37 }
+    );
+    assert!(
+        FileScan::CleanForAgent { unreadable: 37 }
+            .describe()
+            .contains("37 paths were unreadable to it and not checked")
+    );
+}
+
+/// M-1 of slice 9's review: a match is a leak even with unreadable paths next to it.
+#[test]
+fn a_secret_scan_match_is_a_leak_even_with_unreadable_paths() {
+    let found = CLEAN_ANSWER
+        .replace("scan_status=1", "scan_status=2")
+        .replace("unreadable=0", "unreadable=3")
+        .replace("files=", "files=/home/agent/leak.txt ");
+    assert_eq!(
+        classify_scan(true, &found),
+        FileScan::Found("/home/agent/leak.txt".to_owned())
+    );
+}
+
+/// M-1 of slice 9's review: any diagnostic other than `Permission denied` leaves the search
+/// incomplete, whatever else it counted.
+#[test]
+fn a_secret_scan_with_another_diagnostic_is_incomplete() {
+    for answer in [
+        CLEAN_ANSWER.replace("scan_error=", "scan_error=grep: /x: Input/output error"),
+        CLEAN_ANSWER
+            .replace("scan_status=1", "scan_status=2")
+            .replace("unreadable=0", "unreadable=4")
+            .replace("scan_error=", "scan_error=grep: /y: No such device"),
+    ] {
+        assert!(
+            matches!(classify_scan(true, &answer), FileScan::Incomplete(_)),
+            "{answer:?}"
+        );
+    }
+}
+
+/// A whole, clean answer of [`SCAN_SCRIPT`], for the tests to vary.
+const CLEAN_ANSWER: &str =
+    "placeholder=x\nscan_status=1\nfiles=\nunreadable=0\nscan_error=\nenvs=0\nscan_done\n";
+
 /// M-2 of slice 9's review: a clean answer counts only from an `sbx exec` that succeeded and
 /// printed the whole answer.
 #[test]
 fn a_secret_scan_answer_counts_only_from_a_whole_successful_exec() {
-    let clean = "placeholder=x\nscan_status=1\nfiles=\nscan_error=\nenvs=0\nscan_done\n";
+    let clean = CLEAN_ANSWER;
     assert_eq!(classify_scan(true, clean), FileScan::Clean);
-    let denied = clean.replace("scan_status=1", "scan_status=2");
-    assert_eq!(
-        classify_scan(true, &denied),
-        FileScan::Clean,
-        "only skipped files"
-    );
     assert!(matches!(
         classify_scan(false, clean),
         FileScan::Incomplete(_)
@@ -975,6 +1071,13 @@ fn a_secret_scan_answer_counts_only_from_a_whole_successful_exec() {
         clean.replace("scan_done", ""),
         clean.replace("scan_status=1\n", ""),
         clean.replace("files=\n", ""),
+        clean.replace("unreadable=0\n", ""),
+        clean.replace("unreadable=0", "unreadable="),
+        clean.replace("unreadable=0", "unreadable=x"),
+        // grep's status 2 with nothing unreadable: an error it didn't name.
+        clean.replace("scan_status=1", "scan_status=2"),
+        // No match and a clean status, yet unreadable paths: the answer doesn't add up.
+        clean.replace("unreadable=0", "unreadable=2"),
         clean.replace("scan_status=1", "scan_status=0"),
         clean.replace("scan_status=1", "scan_status="),
         clean.replace("scan_status=1", "scan_status=124"),
