@@ -222,7 +222,8 @@ sandbox's own policy, so it runs after `create` and before any agent, and remove
   still names `/tmp`.
 - **How long a cloud sandbox lives (decisions 259, 263).** Each is created with `--ttl` and `--on-timeout delete`.
   The worker sandbox's TTL is the worker's time limit + every sandbox gate's timeout + `fix_rounds` x (the reviewer's
-  time limit + the worker's + every sandbox gate's timeout) + 30 minutes (14h45m with the defaults and three gates):
+  time limit + the worker's + every sandbox gate's timeout) + 30 minutes (14h45m with the defaults and three gates),
+  `fix_rounds` being the task's own budget (recorded at its start, plus any `task resume --rounds N`):
   it lives through the task's automatic run, so fix rounds keep a warm build, and is removed when the task stops,
   `ready` or for any other reason, so nothing is billed while the task waits for you. `task resume`, `task gates` or
   a later review's fix round makes it again from a bundle of the branch when needed. A reviewer sandbox lives for one

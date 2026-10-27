@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 use std::time::{Duration, Instant};
 
@@ -4219,10 +4219,10 @@ fn create_recorded(
         task.sandboxes.truncate(entries);
         return match record::write(meta, task) {
             Ok(()) => Err(e),
-            Err(w) => Err(e.context(format!(
-                "and task.json still names {sandbox} as created ({w:#}), so `sbxm task rm` would \
-                 remove a sandbox of that name"
-            ))),
+            Err(w) => Err(anyhow!(
+                "{e:#}; task.json couldn't drop its entry for {sandbox} ({w:#}), so a later \
+                 `sbxm task rm` would remove a sandbox of that name"
+            )),
         };
     }
     Ok(())
