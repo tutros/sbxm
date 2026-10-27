@@ -195,7 +195,7 @@ every detail.
 | `task resume` | Always in the cloud: the preflight again, then a gone worker sandbox made again from the recorded profile and a bundle of the branch. |
 | `task gates` | In the recorded location; a gone worker sandbox is made again first, and removed when the gates end. |
 | `task finish` | Host-side only; then removes any cloud sandbox of the task still open (one whose removal at the stop failed), retried. |
-| `task rm`, `task rm --merged` | Remove the task's open cloud sandboxes (retried) and their scoped secrets, then the folder; a sandbox already gone counts as removed, and one that may still run keeps the folder. `--merged` archives `task.json` and `run.log`, with the lifetimes, first. |
+| `task rm`, `task rm --merged` | Remove the task's open cloud sandboxes (retried) and their scoped secrets, then the folder; a sandbox already gone counts as removed, and one that may still run keeps the folder. `--merged` archives `task.json` and `run.log`, with the lifetimes, first. An ambiguous create (below) is refused until `--forget-ambiguous`. |
 | `task status`, `status` | `task status` shows the recorded location; `status` adds the running `sbxm-` cloud sandboxes, or one line when the cloud can't be read (still exit 0). |
 | `doctor` | Lists the running cloud sandboxes (a warning when the cloud can't be read), warns about an `sbx` older than 0.46.0 while the cloud is in use, and about `/tmp` in the gates of a cloud repo (the current folder's). |
 
@@ -231,6 +231,16 @@ sandbox's own policy, so it runs after `create` and before any agent, and remove
   after 5, 10 and 20 s; the TTL is the backstop, and `sbxm status` and `sbxm doctor` list what is still running.
   Every sandbox's lifetime is in `task.json`'s `sandboxes` and in `run.log`, so a retro can add up the hours (read
   them before a plain `task rm`, which deletes them; `task rm --merged` archives them).
+- **A cloud create sbxm never heard return is left to you (decision 268).** A cloud sandbox is a task's own only
+  once its create returned and `task.json` saved its entry. An `sbxm` killed after starting a create (Ctrl-C, a
+  crash, the machine going down) leaves it **ambiguous**: names are deterministic, so sbxm can't tell its own sandbox
+  from one another caller made under the same name. `task resume`, `task finish`, `task rm`, `--restart` and `task
+  rm --merged` all leave that sandbox and the secrets scoped to its name alone, and refuse to delete or archive the
+  task (`task finish` only warns), naming the sandbox. Look with `sbx --cloud ls` and `sbx --cloud secret ls`; if it
+  is the task's, remove it with `sbx --cloud rm <name> -f` and each secret with `sbx --cloud secret rm <service>
+  --sandbox <name> -f`. Then rerun with `--forget-ambiguous`: on `task rm` (or `task rm --merged`) it drops the entry
+  from `task.json` with no cloud call for it and removes the rest; on `task resume` it drops it and resumes. One you
+  forget without removing is deleted by its TTL eventually.
 - **One task at a time, for now (decision 258).** Milestone 4 adds no parallel orchestration. The experiment still
   to run after the merge: 2, then 3, cloud tasks at once as separate background `task run`s, measuring tasks per
   hour, cost and failures; a `--parallel` option is built only if it justifies one. `task start --workers N` works
