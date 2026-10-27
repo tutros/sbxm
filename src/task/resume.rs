@@ -139,17 +139,29 @@ pub fn refuse_ambiguous(task: &Record, what: &str) -> Result<()> {
         Some(name) => bail!(
             "task {} can't {what} yet: {}",
             task.id,
-            lifetime::ambiguous_create(
-                name,
-                &format!(
-                    "once you have removed it or decided to keep it, run `sbxm task resume {} \
-                     --forget-ambiguous`, which drops it from task.json and touches nothing in the \
-                     cloud",
-                    target_flag(task)
-                )
-            )
+            lifetime::ambiguous_create(name, &recovery(task))
         ),
         None => Ok(()),
+    }
+}
+
+/// What the user runs once the sandbox is removed or kept: a PR task can't be resumed (its
+/// `task resume` target doesn't exist), so `task rm --pr` drops the entry and the review is asked
+/// for again; an issue or spec task is resumed.
+fn recovery(task: &Record) -> String {
+    match task.kind {
+        Kind::Pr => format!(
+            "once you have removed it or decided to keep it, run `sbxm task rm --pr {n} \
+             --forget-ambiguous` and then `sbxm task review --pr {n}`; the first drops it from \
+             task.json and touches nothing in the cloud",
+            n = task.number
+        ),
+        _ => format!(
+            "once you have removed it or decided to keep it, run `sbxm task resume {} \
+             --forget-ambiguous`, which drops it from task.json and touches nothing in the \
+             cloud",
+            target_flag(task)
+        ),
     }
 }
 

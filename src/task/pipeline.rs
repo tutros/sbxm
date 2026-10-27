@@ -2375,13 +2375,21 @@ fn ensure_cloud_worker_for_resume(
 }
 
 /// Whether a cloud task's worker sandbox is gone (`sbx --cloud ls` doesn't list it), so the next
-/// phase that needs it makes it again; `false` for a local task.
+/// phase that needs it makes it again; `false` for a local task. A listed name is the task's own
+/// only with an open lifetime entry; otherwise it is refused, as [`ensure_cloud_worker_as`]
+/// refuses it (decision 268).
 fn cloud_worker_gone(env: &TaskEnv, record: &Record) -> Result<bool> {
     if record.location != Location::Cloud {
         return Ok(false);
     }
     let worker = record.worker.as_ref().context("the task has no worker")?;
-    Ok(!env.backend.list()?.iter().any(|s| s.name == worker.sandbox))
+    if !env.backend.list()?.iter().any(|s| s.name == worker.sandbox) {
+        return Ok(true);
+    }
+    if !record.has_open_sandbox(&worker.sandbox) {
+        return Err(name_taken(&worker.sandbox));
+    }
+    Ok(false)
 }
 
 /// `task gates` (spec §4, §7): whatever is committed in the worker's clone is collected, then the

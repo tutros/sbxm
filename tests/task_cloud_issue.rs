@@ -1208,6 +1208,63 @@ fn review_refuses_a_task_with_an_ambiguous_create_before_any_call() {
     }
 }
 
+/// PR 322 round 3, M-1, the kind: a listed worker name is the task's only with an open lifetime
+/// entry. After `--forget-ambiguous` dropped the create but the name is still listed, `task
+/// gates` refuses it before any call beyond the listing.
+#[test]
+fn gates_refuse_a_listed_worker_with_no_open_entry_after_forgetting() {
+    let f = fixture_with(LOCAL_TOML);
+    with_ambiguous_worker(&f);
+    let dir = record::task_dir(&f.env.base_dir(), "issue-41");
+    let mut task = task_record(&f, "issue-41");
+    assert!(task.forget_ambiguous());
+    record::write(&dir, &task).unwrap();
+    let before = std::fs::read(dir.join("task.json")).unwrap();
+    let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &["issue-41"]);
+
+    let ran = task_gates(&f, &backend);
+
+    let err = format!("{:#}", ran.result.unwrap_err());
+    assert!(err.contains("isn't one this task made"), "{err}");
+    assert!(backend.execs().is_empty());
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert_eq!(std::fs::read(dir.join("task.json")).unwrap(), before);
+}
+
+/// PR 322 round 3, M-2: the recovery a refusal names works for the kind of task: `task resume`
+/// for an issue or spec task, `task rm --pr N --forget-ambiguous` then `task review --pr N` for
+/// a PR task.
+#[test]
+fn the_ambiguous_refusal_names_a_recovery_that_fits_each_task_kind() {
+    use sbxm::task::record::Kind;
+    let f = fixture_with(LOCAL_TOML);
+    with_ambiguous_worker(&f);
+    let base = task_record(&f, "issue-41");
+    for (kind, want, never) in [
+        (Kind::Issue, "task resume --issue 41 --forget-ambiguous", ""),
+        (
+            Kind::Spec,
+            "task resume --spec <file> --forget-ambiguous",
+            "",
+        ),
+        (
+            Kind::Pr,
+            "task rm --pr 41 --forget-ambiguous` and then `sbxm task review --pr 41",
+            "task resume",
+        ),
+    ] {
+        let mut task = base.clone();
+        task.kind = kind;
+        let err = sbxm::task::resume::refuse_ambiguous(&task, "be reviewed")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains(want), "{want:?} missing from: {err}");
+        if !never.is_empty() {
+            assert!(!err.contains(never) && !err.contains("--issue"), "{err}");
+        }
+    }
+}
+
 /// The PR form of the same guard: `check_can_review_pr` refuses a record with an ambiguous create.
 #[test]
 fn pr_review_check_refuses_a_task_with_an_ambiguous_create() {
