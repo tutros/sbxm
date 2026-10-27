@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
 
 use std::time::{Duration, Instant};
 
@@ -1040,14 +1040,10 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
     }
 
     let sandbox = format!("sbxm-task-{id}-{}", worker.harness.as_str());
-    // The sandbox's name is the task's, so a cloud sandbox of that name may predate this start;
-    // only one this start's own `create` made is its to remove (review M-1).
-    let mut created = false;
-    // Whether this start asked the cloud for its scoped secrets (slice 4): from then on the
-    // cloud's list may hold one of them, to remove after the sandbox on a failure.
-    let mut secrets_asked = false;
     // What this start did that the screen (and so `run.log`) should show: a cloud create.
     let mut events = Vec::new();
+    // What a cloud create that failed had to say about the secrets it took back (slice 4).
+    let mut cleanup_warnings = Vec::new();
     // The task's record, once written: kept outside the closure so a failure after a cloud
     // create still has it for the stop below (review M-1 of slice 3).
     let mut record: Option<Record> = None;
@@ -1157,10 +1153,6 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
         match cloud_ttl {
             None => plan.create(ctx.backend, &sandbox, worker.harness, &workspace)?,
             Some(ttl) => {
-                // Every scoped secret before the create: secrets attach at create (S14 Q2,
-                // decision 256).
-                secrets_asked = true;
-                secrets::set_all(ctx.backend, &sandbox, ctx.scoped_secrets)?;
                 create_recorded(
                     ctx.backend,
                     &meta,
@@ -1169,8 +1161,9 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
                     &sandbox,
                     (worker.harness, SandboxRole::Worker),
                     ttl,
+                    ctx.scoped_secrets,
+                    (&mut events, &mut cleanup_warnings),
                 )?;
-                created = true;
                 events.push(lifetime::created_line(&sandbox, SandboxRole::Worker, ttl));
                 plan.hold_strict(ctx.backend, &sandbox, worker.harness, &mut events)?;
                 let repo_git = meta.join("repo.git");
@@ -1212,16 +1205,26 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
                 let _ = fs::remove_dir_all(&meta);
                 return Err(e);
             }
-            // A cloud start removes only the sandbox its own `create` made (review M-1 of slice
-            // 1), and has no host clone, so a folder there isn't its own. The removal is every
-            // other stop's (behavior 2): retried, the lifetime entry stamped, one line for the
-            // screen, then the scoped secrets this start set, read back from the cloud's list,
-            // whether the create succeeded, failed or was never reached after them (slice 4).
-            // The folder goes only once the sandbox is gone: while it may still be there,
-            // `task.json` is its only record and stays (review M-1 of slice 3).
-            let Some(task) = record.as_mut().filter(|_| created || secrets_asked) else {
+            // A cloud start removes only the sandbox its record holds, the one its own `create`
+            // made (review M-1 of slice 1; PR 322 review M-1), and has no host clone, so a
+            // folder there isn't its own. The removal is every other stop's (behavior 2):
+            // retried, the lifetime entry stamped, one line for the screen, then the scoped
+            // secrets this start set, read back from the cloud's list (slice 4); a create that
+            // failed took its secrets back itself and holds nothing. The folder goes only once
+            // the sandbox is gone: while it may still be there, `task.json` is its only record
+            // and stays (review M-1 of slice 3).
+            let Some(task) = record.as_mut().filter(|t| t.holds_sandbox(&sandbox)) else {
                 let _ = fs::remove_dir_all(&meta);
-                return Err(e);
+                // A create that failed took its secrets back: what that said still shows.
+                if events.is_empty() && cleanup_warnings.is_empty() {
+                    return Err(e);
+                }
+                return Err(e.context(FailedAfterCreate {
+                    id: id.to_owned(),
+                    events,
+                    kept: None,
+                    warnings: cleanup_warnings,
+                }));
             };
             let stopped =
                 lifetime::release_worker(ctx.backend, &meta, task, ctx.sleep, ctx.scoped_secrets);
@@ -1231,10 +1234,9 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
                     events.push(line);
                     None
                 }
-                // No open entry for the worker sandbox: nothing of this start's to remove.
                 None => None,
             };
-            let mut warnings = Vec::new();
+            let mut warnings = cleanup_warnings;
             for said in stopped.secrets {
                 match said {
                     lifetime::Released::Line(line) => events.push(line),
@@ -2262,6 +2264,12 @@ fn ensure_cloud_worker_as(
         .context("the task has no worker")?;
     let sandbox = worker.sandbox.clone();
     if !replace && env.backend.list()?.iter().any(|s| s.name == sandbox) {
+        // Still there: the task's own worker, if the record holds it. One the record doesn't
+        // hold (its own went at a stop) is someone else's, never used or removed (PR 322
+        // review M-1, round 3).
+        if !prepared.record.holds_sandbox(&sandbox) {
+            return Err(name_taken(&sandbox));
+        }
         return Ok(false);
     }
     let profile_name = worker_profile(&prepared.record, worker)?.to_owned();
@@ -2341,18 +2349,13 @@ fn ensure_cloud_worker_for_resume(
             .as_ref()
             .context("the task has no worker")?;
         let sandbox = worker.sandbox.clone();
-        // Its entry stamped when it has one; a create cut off before its entry was written
-        // left none, and the sandbox may still be there.
-        let removed = if prepared.record.has_open_sandbox(&sandbox) {
+        // What the record holds goes: an open entry, or the claim of a create the cut-off run
+        // never heard back from (PR 322 review M-1, round 3). A record holding neither was cut
+        // off before it asked for the sandbox, so there is nothing of its own to remove.
+        if prepared.record.holds_sandbox(&sandbox) {
             stop_cloud_worker(env, prepared);
-            !prepared.record.has_open_sandbox(&sandbox)
-        } else {
-            !matches!(
-                lifetime::remove_sandbox(env.backend, &sandbox, env.sleep),
-                lifetime::Removal::Failed(_)
-            )
-        };
-        if !removed {
+        }
+        if prepared.record.holds_sandbox(&sandbox) {
             bail!(
                 "the half-made cloud sandbox {sandbox} could not be removed, so it isn't made \
                  again; remove it with `sbx --cloud rm {sandbox} -f`, then resume again"
@@ -4120,7 +4123,7 @@ fn open_cloud_review(
 ) -> Result<Vec<String>> {
     let reviewer = &env.config.reviewer;
     let ttl = lifetime::reviewer_ttl(env.config)?;
-    if prepared.record.has_open_sandbox(sandbox) {
+    if prepared.record.holds_sandbox(sandbox) {
         release_cloud_sandbox(env, prepared, sandbox);
     }
     let mut warnings = Vec::new();
@@ -4176,10 +4179,10 @@ fn open_cloud_review(
     Ok(warnings)
 }
 
-/// Creates one of a task's cloud sandboxes from `plan`: every scoped secret first, since secrets
-/// attach at create (S14 Q2, decision 256), then the create with `ttl` and its lifetime entry
-/// ([`create_recorded`]), then its line for the screen (decision 265). What a failure leaves is
-/// removed by [`release_cloud_sandbox`].
+/// Creates one of a task's cloud sandboxes from `plan` ([`create_recorded`]: the name checked
+/// free and claimed, every scoped secret, the create with `ttl`, its lifetime entry), then its
+/// line for the screen (decision 265). What a failure after the create leaves is removed by
+/// [`release_cloud_sandbox`].
 fn create_cloud_sandbox(
     env: &TaskEnv,
     prepared: &mut Prepared,
@@ -4192,7 +4195,6 @@ fn create_cloud_sandbox(
         SandboxRole::Reviewer => env.config.reviewer.harness,
         _ => env.config.worker.harness,
     };
-    secrets::set_all(env.backend, sandbox, env.scoped_secrets)?;
     create_recorded(
         env.backend,
         &prepared.meta,
@@ -4201,6 +4203,8 @@ fn create_cloud_sandbox(
         sandbox,
         (harness, role),
         ttl,
+        env.scoped_secrets,
+        (&mut prepared.events, &mut prepared.warnings),
     )?;
     prepared
         .events
@@ -4208,12 +4212,47 @@ fn create_cloud_sandbox(
     plan.hold_strict(env.backend, sandbox, harness, &mut prepared.events)
 }
 
-/// The cloud create of `sandbox` with `ttl`, then its lifetime entry saved in `task.json`: only
-/// a create that returned makes a sandbox the task's (decision 265), so one that returned an
-/// error never claims a sandbox of that name the cloud already had (review M-1 of slice 1). A
-/// run killed before it heard back leaves the task interrupted and no entry; removal looks for
-/// the sandbox by the record's names then ([`crate::task::finish::plan_removal`], PR 322
-/// review M-1).
+/// Refuses a cloud sandbox name that `sbx --cloud ls` already lists, before any secret is scoped
+/// to it or its create asked for (PR 322 review M-1, round 3): the task can't tell a sandbox of
+/// its own name that was already there from one it made, so it never sets a secret on, creates
+/// or, later, removes under a name it didn't find free. The cloud would refuse the duplicate
+/// create anyway; this refusal comes before the secrets, which the cloud lists by scope. A name
+/// `task` still holds (its removal just failed) gets its own words.
+fn check_name_free(backend: &dyn SandboxBackend, task: &Record, sandbox: &str) -> Result<()> {
+    let listed = backend
+        .list_detailed()
+        .with_context(|| format!("cannot list the cloud's sandboxes before creating {sandbox}"))?;
+    if !listed.iter().any(|s| s.name == sandbox) {
+        return Ok(());
+    }
+    if task.holds_sandbox(sandbox) {
+        bail!(
+            "cloud sandbox {sandbox} is still there after its removal failed, so it can't be made \
+             again; remove it with `sbx --cloud rm {sandbox} -f`, then run the command again"
+        );
+    }
+    Err(name_taken(sandbox))
+}
+
+/// The refusal of a cloud sandbox name that exists and isn't the task's own.
+fn name_taken(sandbox: &str) -> anyhow::Error {
+    anyhow!(
+        "cloud sandbox {sandbox} already exists and isn't one this task made; remove it with \
+         `sbx --cloud rm {sandbox} -f` if it is nobody's, then run the command again"
+    )
+}
+
+/// Makes one of a cloud task's sandboxes the task's own, each step recorded before the cloud
+/// sees it (decisions 256, 265; PR 322 review M-1, round 3): the name must be free in
+/// `sbx --cloud ls` ([`check_name_free`]), then `task.json` holds its claim, then every one of
+/// `scoped_secrets` is set under it (secrets attach at create, S14 Q2), then the create with
+/// `ttl` is asked for, and its lifetime entry appended once it returned, which ends the claim.
+/// A run killed anywhere after the claim leaves it, so the sandbox the cloud may have made goes
+/// with the task, and so do the secrets ([`Record::holds_sandbox`]). A secret or the create that
+/// failed ends the claim too, once the secrets set under the name are taken back (their lines
+/// and warnings go to `said`): the task then holds nothing of that name, and never removes a
+/// sandbox a failed create didn't make (review M-1 of slice 1).
+#[allow(clippy::too_many_arguments)]
 fn create_recorded(
     backend: &dyn SandboxBackend,
     meta: &Path,
@@ -4222,10 +4261,36 @@ fn create_recorded(
     sandbox: &str,
     (harness, role): (Harness, SandboxRole),
     ttl: Duration,
+    scoped_secrets: &[ScopedSecret],
+    said: (&mut Vec<String>, &mut Vec<String>),
 ) -> Result<()> {
-    plan.create_cloud(backend, sandbox, harness, ttl)?;
-    task.add_sandbox(sandbox, role, Location::Cloud, now(), ttl.as_secs());
-    record::write(meta, task)
+    check_name_free(backend, task, sandbox)?;
+    task.claim_sandbox(sandbox, role, now());
+    record::write(meta, task)?;
+    let asked = secrets::set_all(backend, sandbox, scoped_secrets)
+        .and_then(|()| plan.create_cloud(backend, sandbox, harness, ttl));
+    let Err(e) = asked else {
+        task.add_sandbox(sandbox, role, Location::Cloud, now(), ttl.as_secs());
+        return record::write(meta, task);
+    };
+    if !scoped_secrets.is_empty() {
+        for released in secrets::remove_all(backend, sandbox) {
+            match released {
+                lifetime::Released::Line(line) => said.0.push(line),
+                lifetime::Released::Warning(warning) => said.1.push(warning),
+            }
+        }
+    }
+    task.create_failed();
+    // The claim must not outlive a failed create: while task.json holds it, a later `task rm`
+    // would remove a sandbox of that name.
+    record::write(meta, task).map_err(|w| {
+        anyhow!(
+            "{e:#}; task.json couldn't drop its claim on {sandbox} ({w:#}), so a later \
+             `sbxm task rm` would remove a sandbox of that name"
+        )
+    })?;
+    Err(e)
 }
 
 /// Removes one of a cloud task's sandboxes, its lifetime entry stamped, then the secrets scoped

@@ -387,6 +387,18 @@ pub struct SandboxLife {
     pub removed_at: Option<String>,
 }
 
+/// A cloud create the task asked for and hasn't heard back from (PR 322 review M-1, round 3):
+/// saved before the create, once `sbx --cloud ls` showed the name free, and cleared by the write
+/// that appends the sandbox's entry, or by the one that records the create's error. While it is
+/// here a sandbox of this name is the task's own: a run killed in the create may have left it,
+/// and removal takes it as it takes an open entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxClaim {
+    pub name: String,
+    pub role: SandboxRole,
+    pub since: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Record {
     pub schema: u32,
@@ -452,6 +464,9 @@ pub struct Record {
     /// older records and for a task that never had a cloud sandbox.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub sandboxes: Vec<SandboxLife>,
+    /// The cloud create in flight, if any: at most one runs at a time. Absent once it returned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creating: Option<SandboxClaim>,
     /// Free-form; later stages attach here and M2b leaves it alone (decision 139).
     pub hooks: Value,
     pub sbxm_version: String,
@@ -520,7 +535,24 @@ impl Record {
         }
     }
 
-    /// Appends the entry of a cloud sandbox just created, not yet removed.
+    /// Claims the name of a cloud sandbox whose create is about to be asked for, the name found
+    /// free (PR 322 review M-1, round 3); [`add_sandbox`](Self::add_sandbox) or
+    /// [`create_failed`](Self::create_failed) ends the claim.
+    pub fn claim_sandbox(&mut self, name: &str, role: SandboxRole, now: u64) {
+        self.creating = Some(SandboxClaim {
+            name: name.to_owned(),
+            role,
+            since: format_timestamp(now),
+        });
+    }
+
+    /// The create the claim was for returned an error: the task owns nothing of that name.
+    pub fn create_failed(&mut self) {
+        self.creating = None;
+    }
+
+    /// Appends the entry of a cloud sandbox just created, not yet removed, ending the claim on
+    /// its name.
     pub fn add_sandbox(
         &mut self,
         name: &str,
@@ -537,6 +569,9 @@ impl Record {
             ttl_s,
             removed_at: None,
         });
+        if self.creating.as_ref().is_some_and(|c| c.name == name) {
+            self.creating = None;
+        }
     }
 
     /// Whether the sandbox `name` has an entry not yet stamped removed: one of the task's own
@@ -547,9 +582,37 @@ impl Record {
             .any(|s| s.name == name && s.removed_at.is_none())
     }
 
-    /// Stamps the removal of the sandbox `name`'s latest entry still open; `false` if it has
-    /// none.
+    /// Whether a cloud sandbox of this name is the task's own to use and remove: it has an
+    /// entry still open, or the claim of a create the task never heard back from. A name the
+    /// cloud lists that the record doesn't hold belongs to someone else (PR 322 review M-1).
+    pub fn holds_sandbox(&self, name: &str) -> bool {
+        self.has_open_sandbox(name) || self.creating.as_ref().is_some_and(|c| c.name == name)
+    }
+
+    /// Every cloud sandbox name the record holds ([`holds_sandbox`](Self::holds_sandbox)), each
+    /// once, entries first.
+    pub fn held_sandboxes(&self) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        let open = self
+            .sandboxes
+            .iter()
+            .filter(|s| s.removed_at.is_none())
+            .map(|s| s.name.as_str());
+        for name in open.chain(self.creating.iter().map(|c| c.name.as_str())) {
+            if !names.iter().any(|n| n == name) {
+                names.push(name.to_owned());
+            }
+        }
+        names
+    }
+
+    /// Stamps the removal of the sandbox `name`'s latest entry still open, and ends a claim on
+    /// that name; `false` if the record held neither.
     pub fn sandbox_removed(&mut self, name: &str, now: u64) -> bool {
+        let claimed = self.creating.as_ref().is_some_and(|c| c.name == name);
+        if claimed {
+            self.creating = None;
+        }
         match self
             .sandboxes
             .iter_mut()
@@ -560,7 +623,7 @@ impl Record {
                 entry.removed_at = Some(format_timestamp(now));
                 true
             }
-            None => false,
+            None => claimed,
         }
     }
 
@@ -601,6 +664,7 @@ impl Record {
             related: Vec::new(),
             notes: Vec::new(),
             sandboxes: Vec::new(),
+            creating: None,
             hooks: Value::Object(serde_json::Map::new()),
             sbxm_version: env!("CARGO_PKG_VERSION").to_owned(),
             config_hash: task.config_hash.to_owned(),

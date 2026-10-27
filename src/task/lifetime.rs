@@ -191,8 +191,10 @@ pub fn release_worker(
 }
 
 /// [`release_worker`] for any of a cloud task's sandboxes, by name (a reviewer's after its round,
-/// milestone 4 slice 5): removed, retried, when it has an entry still open, then every secret
-/// scoped to it when the task has `scoped_secrets`. Nothing for a local task.
+/// milestone 4 slice 5), when the record holds it (an entry still open, or the claim of a create
+/// cut off before it returned; [`Record::holds_sandbox`]): removed, retried, then every secret
+/// scoped to it when the task has `scoped_secrets`. Nothing for a local task, or for a name the
+/// record doesn't hold.
 pub fn release(
     backend: &dyn SandboxBackend,
     meta: &Path,
@@ -202,12 +204,12 @@ pub fn release(
     scoped_secrets: &[ScopedSecret],
 ) -> Stopped {
     let mut stopped = Stopped::default();
-    if task.location != Location::Cloud {
+    // Only a name the record holds is the task's to touch (PR 322 review M-1, round 3): one it
+    // doesn't hold was never its own, or its create failed and took its secrets back already.
+    if task.location != Location::Cloud || !task.holds_sandbox(name) {
         return stopped;
     }
-    if task.has_open_sandbox(name) {
-        stopped.sandbox = Some(remove_entry(backend, meta, task, name, sleep));
-    }
+    stopped.sandbox = Some(remove_entry(backend, meta, task, name, sleep));
     if !scoped_secrets.is_empty() {
         stopped.secrets = secrets::remove_all(backend, name);
     }
@@ -215,9 +217,10 @@ pub fn release(
 }
 
 /// A command that acts on a cloud task after its run (`task finish`, milestone 4 slice 6) removes
-/// each of `names`, its sandboxes still open in the record: retried, its entry stamped and saved,
-/// then every secret the cloud lists as scoped to it, by scope (slice 4: the command has no list
-/// of its own). `backend` is the cloud instance. Never fails: the caller shows what it says.
+/// each of `names` the record holds: retried, its entry stamped and saved, then every secret
+/// the cloud lists as scoped to it, by scope (slice 4: the command has no list of its own). A
+/// name the record doesn't hold is left alone. `backend` is the cloud instance. Never fails: the
+/// caller shows what it says.
 pub fn release_open(
     backend: &dyn SandboxBackend,
     meta: &Path,
@@ -227,15 +230,16 @@ pub fn release_open(
 ) -> Vec<Released> {
     let mut said = Vec::new();
     for name in names {
-        if task.has_open_sandbox(name) {
-            said.push(remove_entry(backend, meta, task, name, sleep));
+        if !task.holds_sandbox(name) {
+            continue;
         }
+        said.push(remove_entry(backend, meta, task, name, sleep));
         said.extend(secrets::remove_all(backend, name));
     }
     said
 }
 
-/// A sandbox's removal, retried, and its lifetime entry stamped and saved.
+/// A sandbox's removal, retried, and its lifetime entry stamped (or its claim ended) and saved.
 fn remove_entry(
     backend: &dyn SandboxBackend,
     meta: &Path,

@@ -447,6 +447,7 @@ impl FakeBackend {
     /// Keeps track of the sandboxes there are, starting with `names`: each successful `create`
     /// adds its sandbox, each `remove` takes one away, and removing one that isn't there fails
     /// with `sbx --cloud rm`'s `sandbox '<name>' not found` (`sbx-cloud-rm-not-found.txt`).
+    /// `list` and `list_detailed` show them too, after whatever their own scripted lists hold.
     pub fn with_live_cloud(self, names: &[&str]) -> Self {
         Self {
             live_cloud: Some(Mutex::new(names.iter().map(|n| (*n).to_owned()).collect())),
@@ -852,7 +853,17 @@ impl SandboxBackend for FakeBackend {
                 None => bail!("fake: daemon not running"),
             }
         }
-        Ok(self.sandboxes.clone())
+        let mut listed = self.sandboxes.clone();
+        for name in self.live_cloud() {
+            if !listed.iter().any(|s| s.name == name) {
+                listed.push(SandboxInfo {
+                    name,
+                    agent: String::new(),
+                    status: "running".into(),
+                });
+            }
+        }
+        Ok(listed)
     }
 
     fn list_detailed(&self) -> Result<Vec<SandboxDetail>> {
@@ -863,7 +874,19 @@ impl SandboxBackend for FakeBackend {
         if let Some(message) = &self.cloud_list_failure {
             bail!("{message}");
         }
-        Ok(self.cloud_sandboxes.clone())
+        let mut listed = self.cloud_sandboxes.clone();
+        for name in self.live_cloud() {
+            if !listed.iter().any(|s| s.name == name) {
+                listed.push(SandboxDetail {
+                    name,
+                    status: "running".into(),
+                    cpus: None,
+                    memory_mib: None,
+                    expires_at: None,
+                });
+            }
+        }
+        Ok(listed)
     }
 
     fn version(&self) -> Result<String> {

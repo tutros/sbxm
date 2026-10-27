@@ -1,11 +1,13 @@
-//! PR 322 review M-1, round 2: a cloud create cut off before `sbxm` heard back. `task.json`
-//! gets a sandbox's lifetime entry only once its create returned (decision 265), so a run killed
-//! after the cloud accepted a create leaves no entry for it; `task rm` (with `--restart` and
-//! `rm --merged`, which plan the same way) still removes it, then the secrets scoped to it, then
-//! the folder, because the task is interrupted and the record names the sandbox. A create that
-//! returned an error leaves the task stopped, not interrupted, so a sandbox of that name the
-//! cloud already had is never removed. Each test runs and removes the task through one fake
-//! cloud ([`FakeBackend::with_live_cloud`]) that knows whether the cut-off create was accepted.
+//! PR 322 review M-1, rounds 2 and 3: a cloud create cut off before `sbxm` heard back, and a
+//! cloud that already has a sandbox of the task's name. `task.json` gets a sandbox's lifetime
+//! entry only once its create returned (decision 265), and holds the claim of a create from the
+//! moment the name was found free in `sbx --cloud ls` until the create returned; `task rm`
+//! (with `--restart` and `rm --merged`, which plan the same way) removes what the record holds,
+//! entries and claim, then the secrets scoped to them, then the folder. A name the cloud already
+//! had is refused before any secret is set on it or a create asked for, so a sandbox the task
+//! didn't make is never removed. Each test runs and removes the task through one fake cloud
+//! ([`FakeBackend::with_live_cloud`]) that lists what it holds and knows whether a cut-off create
+//! was accepted.
 
 mod common;
 
@@ -116,6 +118,21 @@ fn secrets_of(backend: &FakeBackend, name: &str) -> Vec<String> {
         .into_iter()
         .filter(|(scope, _)| scope == name)
         .map(|(_, secret)| secret)
+        .collect()
+}
+
+/// The calls of `backend` that touched the sandbox `name` or anything scoped to it: its
+/// create, removal, and each secret set, listed or removed under its name.
+fn touches(backend: &FakeBackend, name: &str) -> Vec<String> {
+    backend
+        .log()
+        .into_iter()
+        .filter(|line| {
+            ["create ", "rm ", "secret-set ", "secret-ls ", "secret-rm "]
+                .iter()
+                .any(|call| line.starts_with(call))
+                && line.contains(name)
+        })
         .collect()
 }
 
@@ -248,10 +265,11 @@ fn rm_after_a_resume_killed_once_its_rebuilt_fix_was_accepted_removes_it_despite
 }
 
 /// Boundary, before acceptance: killed in the start's worker create before the cloud had it.
-/// No entry claims the sandbox; `task rm` finds none in the cloud, removes the secret the start
-/// scoped to its name, then the folder.
+/// No entry, but the claim of the create the run never heard back from, its name found free;
+/// `task rm` removes by that name (one the cloud never made counts as removed), the secret the
+/// start scoped to it, then the folder.
 #[test]
-fn rm_after_a_start_killed_before_its_worker_was_accepted_claims_no_sandbox() {
+fn rm_after_a_start_killed_before_its_worker_was_accepted_removes_by_its_claim() {
     let f = fixture_with(LOCAL_TOML);
     let (spec, id) = spec(&f);
     let worker = worker_sandbox(&id);
@@ -265,34 +283,51 @@ fn rm_after_a_start_killed_before_its_worker_was_accepted_claims_no_sandbox() {
         task_run(&f, spec.clone(), Some(Location::Cloud), &cloud);
     });
     assert!(cloud.live_cloud().is_empty());
-    assert!(task_record(&f, &id).sandboxes.is_empty());
+    let task = task_record(&f, &id);
+    assert!(task.sandboxes.is_empty());
+    assert_eq!(
+        task.creating.as_ref().map(|c| c.name.clone()),
+        Some(worker.clone())
+    );
 
     let (result, out) = rm(&f, &spec, &cloud);
 
     result.expect(&out);
+    assert!(cloud.removes().contains(&worker), "{:?}", cloud.log());
     assert!(cloud.live_cloud().is_empty(), "{:?}", cloud.log());
     assert!(secrets_of(&cloud, &worker).is_empty(), "{:?}", cloud.log());
     assert!(!meta(&f, &id).exists(), "{out}");
 }
 
-/// The guard kept: a reviewer create that returned an error (the cloud already had a sandbox of
-/// that name) made nothing of the task's and stopped it, so that sandbox and its secret are
-/// left alone, then and at `task rm`.
+/// The guard, moved before anything touches the name (review round 3, M-1): a review whose
+/// reviewer name the cloud already has is refused before the reviewer's scoped secrets are set
+/// and before its create, since the task can't tell that sandbox from its own, so a kill can't
+/// come in a create that collides; the sandbox and its secret are left alone, then and at
+/// `task rm`.
 #[test]
-fn a_reviewer_create_that_failed_leaves_a_same_named_sandbox_to_rm() {
+fn a_review_whose_reviewer_name_the_cloud_already_has_is_refused_and_leaves_it_to_rm() {
     let f = fixture_with(LOCAL_TOML);
     let (spec, id) = spec(&f);
     let (worker, reviewer) = (worker_sandbox(&id), reviewer_sandbox(&id));
     let root = f.env.tmp.path().join("cloud-fs");
     let cloud = one_cloud(
-        cloud_backend(&root, &id, &[CLEAN]).with_failing_create_for(&reviewer),
+        killed_at_create_of(cloud_backend(&root, &id, &[CLEAN]), &reviewer),
         &[&reviewer],
         &[&reviewer],
     );
 
     let ran = task_run(&f, spec.clone(), Some(Location::Cloud), &cloud);
 
-    assert!(ran.result.is_err(), "{}", ran.out);
+    let message = format!("{:#}", ran.result.unwrap_err());
+    assert!(
+        message.contains(&format!("cloud sandbox {reviewer} already exists")),
+        "{message}"
+    );
+    assert!(
+        message.contains(&format!("sbx --cloud rm {reviewer} -f")),
+        "{message}"
+    );
+    assert!(touches(&cloud, &reviewer).is_empty(), "{:?}", cloud.log());
     let task = task_record(&f, &id);
     assert!(
         task.sandboxes
@@ -305,17 +340,47 @@ fn a_reviewer_create_that_failed_leaves_a_same_named_sandbox_to_rm() {
     let (result, out) = rm(&f, &spec, &cloud);
 
     result.expect(&out);
-    assert!(!cloud.removes().contains(&reviewer), "{:?}", cloud.log());
+    assert!(touches(&cloud, &reviewer).is_empty(), "{:?}", cloud.log());
     assert_eq!(cloud.live_cloud(), vec![reviewer.clone()]);
     assert_eq!(secrets_of(&cloud, &reviewer), vec!["sbxm-fake".to_owned()]);
     assert!(!cloud.live_cloud().contains(&worker));
     assert!(!meta(&f, &id).exists(), "{out}");
 }
 
-/// The guard kept for a rebuilt worker: a fix round's create that returned an error leaves no
-/// open entry and a stopped task, so `task rm` leaves a sandbox of the worker's name alone.
+/// Boundary, before acceptance, the cloud already holding the worker's name (review round 3,
+/// M-1): the start is refused before it sets a secret on that name or asks for the create, so
+/// that sandbox and its secret are left alone and no task is left to remove.
 #[test]
-fn a_rebuilt_fix_create_that_failed_leaves_a_same_named_sandbox_to_rm() {
+fn a_start_whose_worker_name_the_cloud_already_has_is_refused_before_its_secrets_and_create() {
+    let f = fixture_with(LOCAL_TOML);
+    let (spec, id) = spec(&f);
+    let worker = worker_sandbox(&id);
+    let root = f.env.tmp.path().join("cloud-fs");
+    let cloud = one_cloud(
+        killed_at_create_of(cloud_backend(&root, &id, &[CLEAN]), &worker),
+        &[&worker],
+        &[&worker],
+    );
+
+    let ran = task_run(&f, spec.clone(), Some(Location::Cloud), &cloud);
+
+    let message = format!("{:#}", ran.result.unwrap_err());
+    assert!(
+        message.contains(&format!("cloud sandbox {worker} already exists")),
+        "{message}"
+    );
+    assert!(touches(&cloud, &worker).is_empty(), "{:?}", cloud.log());
+    assert_eq!(cloud.live_cloud(), vec![worker.clone()]);
+    assert_eq!(secrets_of(&cloud, &worker), vec!["sbxm-fake".to_owned()]);
+    assert!(!meta(&f, &id).exists(), "{}", ran.out);
+}
+
+/// The guard for a rebuilt worker (review round 3, M-1): a task stopped `ready` (its worker's
+/// entry stamped removed) resumed while the cloud has a sandbox of the worker's name again is
+/// refused before any secret is set on that name and before its create, since the record holds
+/// no such sandbox; `task rm` leaves it and its secret alone.
+#[test]
+fn a_resume_whose_rebuilt_fix_name_the_cloud_already_has_is_refused_and_leaves_it_to_rm() {
     let f = fixture_with(LOCAL_TOML);
     let (spec, id) = spec(&f);
     let worker = worker_sandbox(&id);
@@ -323,23 +388,283 @@ fn a_rebuilt_fix_create_that_failed_leaves_a_same_named_sandbox_to_rm() {
     let entries = task_record(&f, &id).sandboxes.len();
     let root = f.env.tmp.path().join("cloud-fs");
     let cloud = one_cloud(
-        cloud_backend_listing(&root, &id, &[CLEAN], false).with_failing_create_for(&worker),
+        cloud_backend_listing(&root, &id, &[CLEAN], false),
         &[&worker],
         &[&worker],
     );
 
-    assert!(resume_one_round(&f, &spec, &cloud).is_err());
+    let message = format!("{:#}", resume_one_round(&f, &spec, &cloud).unwrap_err());
+
+    assert!(
+        message.contains(&format!("cloud sandbox {worker} already exists")),
+        "{message}"
+    );
+    assert!(touches(&cloud, &worker).is_empty(), "{:?}", cloud.log());
     assert_eq!(task_record(&f, &id).sandboxes.len(), entries);
 
     let (result, out) = rm(&f, &spec, &cloud);
 
     result.expect(&out);
+    assert!(touches(&cloud, &worker).is_empty(), "{:?}", cloud.log());
+    assert_eq!(cloud.live_cloud(), vec![worker.clone()]);
+    assert_eq!(secrets_of(&cloud, &worker), vec!["sbxm-fake".to_owned()]);
+    assert!(!meta(&f, &id).exists(), "{out}");
+}
+
+/// `task resume --spec FILE` through `backend`, the task's process gone.
+fn resume_plain(f: &Fixture, spec: &Path, backend: &FakeBackend) -> anyhow::Result<()> {
+    sbxm::commands::task_resume::run(
+        &f.env.config_dir(),
+        &sbxm::commands::task_resume::Options {
+            repo_root: f.env.tmp.path().join("target-repo"),
+            target: sbxm::commands::task_resume::Target::Spec(spec.to_path_buf()),
+            rounds: None,
+            disk: Default::default(),
+            identity: Some(identity()),
+        },
+        backend,
+        &Gone,
+        &sbxm::task::gates::FakeHostRunner::default(),
+        &mut Vec::new(),
+        &mut Vec::new(),
+    )
+}
+
+/// A start killed in its worker create, so the record holds the claim of that create.
+fn start_killed_at_its_create(f: &Fixture, spec: &Path, id: &str) {
+    let worker = worker_sandbox(id);
+    let root = f.env.tmp.path().join("cloud-fs");
+    let cloud = one_cloud(
+        killed_at_create_of(cloud_backend(&root, id, &[CLEAN]), &worker),
+        &[],
+        &[&worker],
+    );
+    killed(|| {
+        task_run(f, spec.to_path_buf(), Some(Location::Cloud), &cloud);
+    });
+    assert_eq!(
+        task_record(f, id).creating.as_ref().map(|c| c.name.clone()),
+        Some(worker)
+    );
+}
+
+/// `task resume` of a start killed in its worker create removes the sandbox the claim names
+/// first, the cloud may have made it, then makes the worker afresh.
+#[test]
+fn resume_of_a_start_killed_in_its_worker_create_removes_the_claimed_name_first() {
+    let f = fixture_with(LOCAL_TOML);
+    let (spec, id) = spec(&f);
+    let worker = worker_sandbox(&id);
+    start_killed_at_its_create(&f, &spec, &id);
+    let root = f.env.tmp.path().join("cloud-fs");
+    let cloud = one_cloud(cloud_backend(&root, &id, &[CLEAN]), &[], &[&worker]);
+
+    resume_plain(&f, &spec, &cloud).unwrap();
+
+    let log = cloud.log();
+    assert_eq!(log[0], format!("rm {worker}"), "{log:?}");
     assert!(
-        cloud.removes().iter().all(|n| n != &worker),
+        log.iter().any(|l| l == &format!("create {worker}")),
+        "{log:?}"
+    );
+    let task = task_record(&f, &id);
+    assert!(task.creating.is_none(), "{:?}", task.creating);
+    assert!(cloud.live_cloud().is_empty(), "{log:?}");
+}
+
+/// `task resume` of a start killed before it claimed its worker's name (nothing of its own can
+/// be in the cloud) removes nothing before making the worker.
+#[test]
+fn resume_of_a_start_killed_before_its_claim_removes_nothing_first() {
+    let f = fixture_with(LOCAL_TOML);
+    let (spec, id) = spec(&f);
+    let worker = worker_sandbox(&id);
+    start_killed_at_its_create(&f, &spec, &id);
+    let mut task = task_record(&f, &id);
+    task.creating = None;
+    record::write(&meta(&f, &id), &task).unwrap();
+    let root = f.env.tmp.path().join("cloud-fs");
+    let cloud = one_cloud(cloud_backend(&root, &id, &[CLEAN]), &[], &[]);
+
+    resume_plain(&f, &spec, &cloud).unwrap();
+
+    let log = cloud.log();
+    let created = log
+        .iter()
+        .position(|l| l == &format!("create {worker}"))
+        .expect("the worker is made");
+    assert!(
+        !log[..created].iter().any(|l| l.starts_with("rm ")),
+        "{log:?}"
+    );
+}
+
+/// The one scoped secret these tests give a task, with a fake value (no production path fills
+/// one in while P8 (a) holds); `sbx` names its service `postman-echo-com`.
+fn fake_secret() -> sbxm::backend::ScopedSecret {
+    sbxm::backend::ScopedSecret {
+        host: "postman-echo.com".into(),
+        env: "P2_FAKE".into(),
+        value: "fake-value-never-shown".into(),
+    }
+}
+
+/// `task start --spec FILE --cloud` with `secrets` through `backend`.
+fn start_with_secrets(
+    f: &Fixture,
+    spec: &Path,
+    backend: &FakeBackend,
+    secrets: &[sbxm::backend::ScopedSecret],
+) -> anyhow::Result<()> {
+    let options = common::cloud_task::run_options(f, spec.to_path_buf(), Some(Location::Cloud));
+    sbxm::commands::task_start::run_spec_with_seams(
+        &f.env.config_dir(),
+        &sbxm::commands::task_start::SpecOptions {
+            repo_root: options.repo_root,
+            spec: options.spec,
+            worker_harness: None,
+            worker_model: None,
+            time_limit: None,
+            reviewer_time_limit: None,
+            profile: None,
+            base: options.base,
+            repo: options.repo,
+            clone_source: options.clone_source,
+            identity: options.identity,
+            disk: Default::default(),
+            location: Some(Location::Cloud),
+        },
+        backend,
+        &FakeGitHub::default(),
+        &common::task_fixture::Probe,
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &|_| {},
+        secrets,
+    )
+}
+
+/// The review of the started task `id` through `backend`, with `secrets` as the task's scoped
+/// secrets (the review phase gets them from its environment).
+fn review_with_secrets(
+    f: &Fixture,
+    id: &str,
+    backend: &FakeBackend,
+    secrets: &[sbxm::backend::ScopedSecret],
+) -> anyhow::Result<()> {
+    let mut prepared = sbxm::task::pipeline::Prepared::open(&f.env.base_dir(), id)?;
+    let who = identity();
+    let env = sbxm::task::pipeline::TaskEnv {
+        config_dir: &f.env.config_dir(),
+        config: &f.config,
+        backend,
+        probe: &common::task_fixture::Probe,
+        host: &sbxm::task::gates::FakeHostRunner::default(),
+        sleep: &|_| {},
+        scoped_secrets: secrets,
+        identity: Some(&who),
+    };
+    sbxm::task::pipeline::review_issue(&env, &mut prepared).map(|_| ())
+}
+
+/// The refusal of a reviewer name the cloud already has, with scoped secrets (review round 3,
+/// M-1): nothing is set, listed or removed under that name, so the secrets scoped to the
+/// sandbox that was there stay; the task's own worker still goes with its secret.
+#[test]
+fn a_refused_reviewer_name_keeps_the_secrets_scoped_to_the_sandbox_already_there() {
+    let f = fixture_with(LOCAL_TOML);
+    let (spec, id) = spec(&f);
+    let (worker, reviewer) = (worker_sandbox(&id), reviewer_sandbox(&id));
+    let root = f.env.tmp.path().join("cloud-fs");
+    let cloud = one_cloud(
+        cloud_backend(&root, &id, &[CLEAN]),
+        &[&reviewer],
+        &[&reviewer],
+    );
+    let secrets = [fake_secret()];
+    start_with_secrets(&f, &spec, &cloud, &secrets).unwrap();
+    let started = cloud.log().len();
+
+    let message = format!(
+        "{:#}",
+        review_with_secrets(&f, &id, &cloud, &secrets).unwrap_err()
+    );
+
+    assert!(
+        message.contains(&format!("cloud sandbox {reviewer} already exists")),
+        "{message}"
+    );
+    assert!(touches(&cloud, &reviewer).is_empty(), "{:?}", cloud.log());
+    assert_eq!(secrets_of(&cloud, &reviewer), vec!["sbxm-fake".to_owned()]);
+    assert_eq!(cloud.live_cloud(), vec![reviewer.clone()]);
+    let after: Vec<String> = cloud.log()[started..]
+        .iter()
+        .filter(|l| l.starts_with("rm ") || l.starts_with("secret-"))
+        .cloned()
+        .collect();
+    assert_eq!(
+        after,
+        [
+            format!("rm {worker}"),
+            format!("secret-ls {worker}"),
+            format!("secret-rm {worker} postman-echo-com"),
+        ],
         "{:?}",
         cloud.log()
     );
-    assert_eq!(cloud.live_cloud(), vec![worker.clone()]);
-    assert_eq!(secrets_of(&cloud, &worker), vec!["sbxm-fake".to_owned()]);
+}
+
+/// A reviewer create that returned an error, with scoped secrets: the secrets it set under the
+/// name are taken back at once, no sandbox of that name is removed (the guard of slice 1's
+/// M-1), and the record holds nothing of it, so `task rm` leaves the name alone.
+#[test]
+fn a_reviewer_create_that_failed_takes_its_secrets_back_and_removes_no_sandbox() {
+    let f = fixture_with(LOCAL_TOML);
+    let (spec, id) = spec(&f);
+    let (worker, reviewer) = (worker_sandbox(&id), reviewer_sandbox(&id));
+    let root = f.env.tmp.path().join("cloud-fs");
+    let cloud = one_cloud(
+        cloud_backend(&root, &id, &[CLEAN]).with_failing_create_for(&reviewer),
+        &[],
+        &[],
+    );
+    let secrets = [fake_secret()];
+    start_with_secrets(&f, &spec, &cloud, &secrets).unwrap();
+    let started = cloud.log().len();
+
+    assert!(review_with_secrets(&f, &id, &cloud, &secrets).is_err());
+
+    let after: Vec<String> = cloud.log()[started..]
+        .iter()
+        .filter(|l| l.starts_with("rm ") || l.starts_with("secret-") || l.starts_with("create "))
+        .cloned()
+        .collect();
+    assert_eq!(
+        after,
+        [
+            format!("secret-set {reviewer} postman-echo-com"),
+            format!("create {reviewer}"),
+            format!("secret-ls {reviewer}"),
+            format!("secret-rm {reviewer} postman-echo-com"),
+            format!("rm {worker}"),
+            format!("secret-ls {worker}"),
+            format!("secret-rm {worker} postman-echo-com"),
+        ],
+        "{:?}",
+        cloud.log()
+    );
+    let task = task_record(&f, &id);
+    assert!(task.creating.is_none(), "{:?}", task.creating);
+    assert!(!task.holds_sandbox(&reviewer));
+    assert!(
+        cloud.cloud_secrets().is_empty(),
+        "{:?}",
+        cloud.cloud_secrets()
+    );
+
+    let (result, out) = rm(&f, &spec, &cloud);
+
+    result.expect(&out);
+    assert!(!cloud.removes().contains(&reviewer), "{:?}", cloud.log());
     assert!(!meta(&f, &id).exists(), "{out}");
 }

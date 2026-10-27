@@ -627,12 +627,18 @@ gone counts as removed, and one that still can't be removed is a warning naming 
 `task.json` keeps a `sandboxes` list, one entry per cloud sandbox (`name`, `role` `worker`/`reviewer`/`fix`,
 `location`, `created_at`, `ttl_s`, `removed_at`, null while it exists or when its removal failed), saved once its
 create has returned, and `run.log` a line at each create (`cloud sandbox <name> created (<role>, TTL <ttl>)`) and
-each removal (`cloud sandbox <name> removed`). An `sbxm` killed during a create leaves the task interrupted and no
-entry for that sandbox, so `task rm` (and `--restart`, `task rm --merged`) of an interrupted cloud task also removes
-the worker and reviewer sandboxes `task.json` names, then the secrets scoped to them; one the cloud never made counts
-as removed. A create that failed stops the task without making the sandbox its own, so a sandbox of that name that
-was already there is left alone. Add up the entries for a task's sandbox hours: `task rm --merged` archives them with
-`task.json` and `run.log`, a plain `task rm` deletes them with the folder.
+each removal (`cloud sandbox <name> removed`). A sandbox is the task's own only when it found the name free: before
+any cloud create (the worker at the start, each reviewer, a worker made again) sbxm checks `sbx --cloud ls` and
+refuses a name already there, before any secret is scoped to it (`cloud sandbox <name> already exists and isn't one
+this task made; remove it with sbx --cloud rm <name> -f if it is nobody's`); a worker sandbox still listed after
+the task removed its own is refused the same way instead of being reused. Then `task.json` holds the claim of the
+create (`creating`) from before its secrets are set until the create returns, so an `sbxm` killed anywhere in
+between leaves that claim, and `task rm` (and `--restart`, `task rm --merged`, `task resume`) removes the sandbox
+under the claimed name, which the cloud may have made (one it never made counts as removed), then the secrets
+scoped to it. A create that failed takes back the secrets it set, drops the claim and stops the task, so nothing of
+that name is removed later: sbxm sets, lists or removes a secret, and removes a sandbox, only under a name its
+record holds. Add up the entries for a task's sandbox hours: `task rm --merged` archives them with `task.json` and
+`run.log`, a plain `task rm` deletes them with the folder.
 
 The other commands of a cloud task:
 - `task review --issue/--spec`: a reviewer sandbox per round in the cloud; a fix round runs in the task's worker
