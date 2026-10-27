@@ -75,6 +75,7 @@ fn rm(
             force: false,
             repo_root: f.env.tmp.path().join("target-repo"),
             dry_run: false,
+            forget_ambiguous: false,
         },
         backend,
         &sbxm::github::fake::FakeGitHub::default(),

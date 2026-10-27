@@ -39,6 +39,9 @@ pub struct RemovalPlan {
     pub folders: Vec<PathBuf>,
     /// Set when `task.json` couldn't be read, so no sandbox names are known.
     pub note: Option<String>,
+    /// The cloud sandbox of an ambiguous create `--forget-ambiguous` drops from `task.json`
+    /// before anything is removed, with no cloud call for it (decision 268).
+    pub forget: Option<String>,
 }
 
 impl RemovalPlan {
@@ -53,6 +56,12 @@ impl RemovalPlan {
             })
             .collect();
         lines.extend(self.folders.iter().map(|f| format!("  {}", f.display())));
+        if let Some(name) = &self.forget {
+            lines.push(format!(
+                "  note: cloud sandbox {name}, whose create sbxm never heard return, is only \
+                 dropped from task.json, not removed; look with `sbx --cloud ls`"
+            ));
+        }
         if let Some(note) = &self.note {
             lines.push(format!("  note: {note}"));
         }
@@ -126,6 +135,18 @@ pub fn exists(base_dir: &Path, id: &str) -> bool {
 /// Checks that `id` can be discarded and lists what that removes. The id is validated before any
 /// path is built from it; a task whose process is alive is refused.
 pub fn plan_removal(base_dir: &Path, id: &str, probe: &dyn ProcessProbe) -> Result<RemovalPlan> {
+    plan_removal_forgetting(base_dir, id, probe, false)
+}
+
+/// [`plan_removal`], with `--forget-ambiguous` when `forget`: a cloud create that was started
+/// and never recorded as returned (decision 268) is refused, naming the manual commands, unless
+/// `forget`, when the plan drops it from `task.json` first and never removes it or its secrets.
+pub fn plan_removal_forgetting(
+    base_dir: &Path,
+    id: &str,
+    probe: &dyn ProcessProbe,
+    forget: bool,
+) -> Result<RemovalPlan> {
     if !record::is_valid_id(id) {
         bail!("{id:?} isn't a task id; task ids look like issue-41 or pr-7");
     }
@@ -143,6 +164,7 @@ pub fn plan_removal(base_dir: &Path, id: &str, probe: &dyn ProcessProbe) -> Resu
     let mut sandboxes = Vec::new();
     let mut location = Location::Local;
     let mut note = None;
+    let mut forgotten = None;
     if json.is_file() && schema_too_new(&json) {
         // Only a newer sbxm knows what is in it; don't delete a task this one can't read.
         record::read(&json)?;
@@ -162,6 +184,15 @@ pub fn plan_removal(base_dir: &Path, id: &str, probe: &dyn ProcessProbe) -> Resu
                     task.stage.name()
                 );
             }
+            if let Some(name) = task.ambiguous_create() {
+                if !forget {
+                    bail!(
+                        "task {id} is left as it is: {}",
+                        lifetime::ambiguous_create(name, lifetime::FORGET_BY_RM)
+                    );
+                }
+                forgotten = Some(name.to_owned());
+            }
             sandboxes = sandbox_names(id, &task)?;
             location = task.location;
         }
@@ -178,21 +209,21 @@ pub fn plan_removal(base_dir: &Path, id: &str, probe: &dyn ProcessProbe) -> Resu
         location,
         folders,
         note,
+        forget: forgotten,
     })
 }
 
 /// The sandboxes removing `task` removes.
 fn sandbox_names(id: &str, task: &Record) -> Result<Vec<String>> {
     let mut names: Vec<String> = Vec::new();
-    // A cloud task's sandboxes are the ones its record holds (P5 (d), decision 263; PR 322
-    // review M-1): each lifetime entry still open, and the claim of a create a killed run never
-    // heard back from, which the cloud may have accepted (`sbx --cloud rm` of one it never made
-    // answers "not found", which counts as removed). A sandbox removed at the task's stop is
-    // gone already, and a name the record doesn't hold was never the task's: a create that
-    // returned an error ended its claim, and one refused because the cloud already had the name
-    // never made one, so such a sandbox is left alone (slice 1 review M-1).
+    // A cloud task's sandboxes are the ones it owns (P5 (d), decision 263; decision 268): each
+    // lifetime entry still open, its create having returned. A sandbox removed at the task's stop
+    // is gone already, and no other name is the task's: a create that returned an error made
+    // none, one refused because the cloud already had the name never asked, and an ambiguous one
+    // (started, never heard back from) is the user's to look at, refused or forgotten by
+    // `plan_removal_forgetting` (slice 1 review M-1).
     if task.location == Location::Cloud {
-        for name in task.held_sandboxes() {
+        for name in task.open_sandboxes() {
             check_sandbox_name(id, &name)?;
             names.push(name);
         }
@@ -205,8 +236,8 @@ fn sandbox_names(id: &str, task: &Record) -> Result<Vec<String>> {
     Ok(names)
 }
 
-/// The sandboxes a cloud task's record still holds (a removal at its stop that failed, or a
-/// create it never heard back from), each checked to be one of the task's own before any goes
+/// The sandboxes a cloud task still owns (a removal at its stop that failed; never an ambiguous
+/// create, decision 268), each checked to be one of the task's own before any goes
 /// to `sbx --cloud rm`; none for a local task (milestone 4 slice 6).
 pub fn open_cloud_sandboxes(task: &Record) -> Result<Vec<String>> {
     match task.location {
@@ -326,6 +357,26 @@ pub fn remove_with_sleep(
     sleep: &dyn Fn(Duration),
 ) -> RemovalReport {
     let mut report = RemovalReport::default();
+    if let Some(name) = &plan.forget {
+        // Dropped first, so a removal that stops part way leaves a record a second `task rm`
+        // can plan without `--forget-ambiguous` again.
+        let meta = record::task_dir(&plan.base_dir, &plan.id);
+        let forgot = record::read(&meta.join("task.json")).and_then(|mut task| {
+            task.forget_ambiguous();
+            record::write(&meta, &task)
+        });
+        if let Err(e) = forgot {
+            report.stayed.push(format!(
+                "task.json couldn't drop the ambiguous create of cloud sandbox {name} ({e:#}), so \
+                 nothing was removed; run `sbxm task rm` again"
+            ));
+            return report;
+        }
+        report.removed.push(format!(
+            "the record of cloud sandbox {name}'s ambiguous create (the sandbox and its secrets \
+             left alone)"
+        ));
+    }
     if !remove_sandboxes(plan, backend, sleep, &mut report) {
         report.stayed.extend(plan.folders.iter().map(|folder| {
             format!(
@@ -874,6 +925,7 @@ pub fn discard(
     base_dir: &Path,
     id: &str,
     yes: bool,
+    forget_ambiguous: bool,
     backend: &dyn SandboxBackend,
     probe: &dyn ProcessProbe,
     confirm: &dyn Confirm,
@@ -884,6 +936,7 @@ pub fn discard(
         base_dir,
         &[id.to_owned()],
         yes,
+        forget_ambiguous,
         backend,
         probe,
         confirm,
@@ -900,6 +953,7 @@ pub fn discard_many(
     base_dir: &Path,
     ids: &[String],
     yes: bool,
+    forget_ambiguous: bool,
     backend: &dyn SandboxBackend,
     probe: &dyn ProcessProbe,
     confirm: &dyn Confirm,
@@ -908,7 +962,7 @@ pub fn discard_many(
 ) -> Result<()> {
     let plans = ids
         .iter()
-        .map(|id| plan_removal(base_dir, id, probe))
+        .map(|id| plan_removal_forgetting(base_dir, id, probe, forget_ambiguous))
         .collect::<Result<Vec<_>>>()?;
     let listing = plans
         .iter()

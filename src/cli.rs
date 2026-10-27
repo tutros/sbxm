@@ -360,6 +360,11 @@ pub enum TaskCommand {
         /// min_free_disk free.
         #[arg(long)]
         ignore_disk: bool,
+        /// Drop a cloud sandbox whose create was started but never heard back from (sbxm can't
+        /// tell whether it made it) from the task's record, touching nothing in the cloud, then
+        /// resume; remove or keep that sandbox by hand first (decision 268).
+        #[arg(long)]
+        forget_ambiguous: bool,
     },
     /// Run a task's gates now (the checks that decide whether its work may go on), or with
     /// --dry-run say what would run and where.
@@ -498,6 +503,11 @@ pub enum TaskCommand {
         /// Delete a spec task's result even though it was never fetched out of its repo.git.
         #[arg(long, conflicts_with = "merged")]
         force: bool,
+        /// Drop a cloud sandbox whose create was started but never heard back from (sbxm can't
+        /// tell whether it made it) from the task's record, touching nothing in the cloud for
+        /// it, then remove the task; look at and remove that sandbox by hand (decision 268).
+        #[arg(long)]
+        forget_ambiguous: bool,
         /// With --merged: list what would be removed and why, and remove nothing.
         #[arg(long)]
         dry_run: bool,

@@ -68,6 +68,7 @@ fn rm(
             force,
             repo_root: repo_root.to_path_buf(),
             dry_run: false,
+            forget_ambiguous: false,
         },
         &backend(),
         &FakeGitHub::default(),

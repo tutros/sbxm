@@ -69,6 +69,7 @@ fn options(f: &Fixture, rounds: Option<u32>) -> Options {
         rounds,
         disk: Default::default(),
         identity: None,
+        forget_ambiguous: false,
     }
 }
 

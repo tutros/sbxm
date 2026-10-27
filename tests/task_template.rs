@@ -614,6 +614,7 @@ fn resume_41(
             rounds: None,
             disk: Default::default(),
             identity: None,
+            forget_ambiguous: false,
         },
         backend,
         &Gone,

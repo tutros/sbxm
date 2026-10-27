@@ -39,6 +39,9 @@ pub struct Options {
     pub repo_root: PathBuf,
     /// With `Target::Merged`: list what would be removed and why, and remove nothing.
     pub dry_run: bool,
+    /// `--forget-ambiguous` (decision 268): drop a cloud create that was started and never
+    /// recorded as returned from the record, touching nothing in the cloud for it, then go on.
+    pub forget_ambiguous: bool,
 }
 
 pub fn run(
@@ -95,7 +98,13 @@ pub fn run_with_sleep(
             id
         }
         Target::Merged => {
-            let found = merged::plan(&base_dir, &opts.repo_root, github, probe)?;
+            let found = merged::plan_forgetting(
+                &base_dir,
+                &opts.repo_root,
+                github,
+                probe,
+                opts.forget_ambiguous,
+            )?;
             if opts.dry_run {
                 if found.is_empty() && found.left_alone.is_empty() {
                     writeln!(out, "no merged tasks to remove")?;
@@ -119,6 +128,14 @@ pub fn run_with_sleep(
         }
     };
     finish::discard(
-        &base_dir, &id, opts.yes, backend, probe, confirm, out, sleep,
+        &base_dir,
+        &id,
+        opts.yes,
+        opts.forget_ambiguous,
+        backend,
+        probe,
+        confirm,
+        out,
+        sleep,
     )
 }

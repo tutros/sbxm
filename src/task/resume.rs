@@ -6,6 +6,7 @@
 
 use anyhow::{Context, Result, bail};
 
+use super::lifetime;
 use super::machine::{self, Event};
 use super::pipeline::{self, Prepared, ReviewReport, TaskEnv, Worked};
 use super::record::{self, Kind, Process, ProcessProbe, Record, Stage, Status, Stopped};
@@ -117,6 +118,29 @@ pub fn check_can_resume(
     }
 }
 
+/// Refuses to resume a task whose record holds a cloud create that was started and never
+/// recorded as returned (decision 268), unless `forget` (`--forget-ambiguous`): sbxm can't tell
+/// whether that sandbox is the one it asked for or another caller's, so it neither uses nor
+/// removes it, and the user looks first.
+pub fn check_ambiguous(task: &Record, forget: bool) -> Result<()> {
+    match task.ambiguous_create() {
+        Some(name) if !forget => bail!(
+            "task {} can't be resumed yet: {}",
+            task.id,
+            lifetime::ambiguous_create(
+                name,
+                &format!(
+                    "once you have removed it or decided to keep it, run `sbxm task resume {} \
+                     --forget-ambiguous`, which drops it from task.json and touches nothing in the \
+                     cloud",
+                    target_flag(task)
+                )
+            )
+        ),
+        _ => Ok(()),
+    }
+}
+
 /// The flag that names a task on the command line again: a spec task's file isn't recorded, so
 /// it is named by its placeholder.
 fn target_flag(task: &Record) -> String {
@@ -174,7 +198,20 @@ fn resume_runs_worker(task: &Record) -> bool {
 /// profile and a bundle of the branch (P5 (d)), the task's input goes into it by `cp`, and it is
 /// removed when the task stops, whichever way the resume ends after the checks.
 pub fn resume(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Result<Resumed> {
+    resume_forgetting(env, prepared, rounds, false)
+}
+
+/// [`resume`], with `--forget-ambiguous` when `forget` (decision 268): a cloud create that was
+/// started and never recorded as returned is refused ([`check_ambiguous`]) unless `forget`, when
+/// it is dropped from `task.json` once every other check passed, with no cloud call for it.
+pub fn resume_forgetting(
+    env: &TaskEnv,
+    prepared: &mut Prepared,
+    rounds: Option<u32>,
+    forget: bool,
+) -> Result<Resumed> {
     check_can_resume(&prepared.record, env.probe, rounds)?;
+    check_ambiguous(&prepared.record, forget)?;
     pipeline::check_reviewer(env, prepared)?;
     let cloud = prepared.record.location == Location::Cloud;
     if cloud {
@@ -186,6 +223,14 @@ pub fn resume(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Re
         && let Some(result) = &prepared.record.review
     {
         pipeline::check_replay(prepared, result)?;
+    }
+    if let Some(name) = prepared.record.ambiguous_create().map(str::to_owned) {
+        prepared.record.forget_ambiguous();
+        record::write(&prepared.meta, &prepared.record)?;
+        prepared.events.push(format!(
+            "cloud sandbox {name}'s ambiguous create is dropped from task.json; nothing in the \
+             cloud was touched for it"
+        ));
     }
     let resumed = resume_checked(env, prepared, rounds);
     // The task stops here, whichever way: a cloud worker sandbox goes (P5 (d), decision 263).

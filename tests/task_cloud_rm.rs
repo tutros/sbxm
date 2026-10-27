@@ -95,6 +95,7 @@ fn rm(f: &Fixture, spec: &Path, backend: &FakeBackend) -> (anyhow::Result<()>, S
             force: true,
             repo_root: f.env.tmp.path().join("target-repo"),
             dry_run: false,
+            forget_ambiguous: false,
         },
         backend,
         &FakeGitHub::default(),
@@ -284,6 +285,7 @@ fn rm_merged_of_a_cloud_task_archives_its_lifetimes_then_removes_it_in_the_cloud
             force: false,
             repo_root: checkout,
             dry_run: false,
+            forget_ambiguous: false,
         },
         &backend,
         &FakeGitHub::default(),
@@ -338,6 +340,7 @@ fn rm_merged_whose_cloud_removal_fails_leaves_the_task_for_a_second_run() {
                 force: false,
                 repo_root: checkout.clone(),
                 dry_run: false,
+                forget_ambiguous: false,
             },
             backend,
             &FakeGitHub::default(),
@@ -367,6 +370,73 @@ fn rm_merged_whose_cloud_removal_fails_leaves_the_task_for_a_second_run() {
     assert!(!meta(&f, &id).exists(), "{out}");
 }
 
+/// Decision 268: `task rm --merged` of a merged cloud task whose record holds a create that was
+/// started and never recorded as returned leaves the task alone, saying why with the manual
+/// commands, and touches nothing; with `--forget-ambiguous` it archives and removes the task,
+/// the sandbox of its open entry in the cloud, and never the ambiguous one.
+#[test]
+fn rm_merged_leaves_a_task_with_an_ambiguous_create_alone_until_told_to_forget_it() {
+    let (f, spec, id) = ready_cloud_task();
+    let checkout = merge_cloud_task(&f, &spec, &id);
+    let (worker, reviewer) = (worker_sandbox(&id), reviewer_sandbox(&id));
+    reopen(&f, &id, &worker);
+    let mut task = task_record(&f, &id);
+    task.creating = Some(record::SandboxClaim {
+        name: reviewer.clone(),
+        role: record::SandboxRole::Reviewer,
+        since: "2026-10-27T10:00:00Z".into(),
+    });
+    record::write(&meta(&f, &id), &task).unwrap();
+    let merged = |backend: &FakeBackend, forget: bool| {
+        let mut out = Vec::new();
+        let result = run_with_sleep(
+            &f.env.config_dir(),
+            &Options {
+                target: Target::Merged,
+                yes: true,
+                force: false,
+                repo_root: checkout.clone(),
+                dry_run: false,
+                forget_ambiguous: forget,
+            },
+            backend,
+            &FakeGitHub::default(),
+            &Probe,
+            &Never,
+            &mut out,
+            &|_| {},
+        );
+        (result, String::from_utf8(out).unwrap())
+    };
+    let backend = FakeBackend::default();
+
+    let (result, out) = merged(&backend, false);
+
+    let said = format!("{out}{:?}", result.as_ref().err());
+    assert!(
+        said.contains(&format!("cloud sandbox {reviewer}")),
+        "{said}"
+    );
+    assert!(said.contains("--forget-ambiguous"), "{said}");
+    assert!(
+        said.contains(&format!("`sbx --cloud rm {reviewer} -f`")),
+        "{said}"
+    );
+    assert!(backend.removes().is_empty(), "{:?}", backend.log());
+    assert!(meta(&f, &id).join("task.json").is_file(), "{said}");
+
+    let (result, out) = merged(&backend, true);
+
+    result.expect(&out);
+    assert_eq!(backend.removes(), vec![worker.clone()], "{out}");
+    assert!(
+        !backend.log().iter().any(|l| l.contains(&reviewer)),
+        "{:?}",
+        backend.log()
+    );
+    assert!(!meta(&f, &id).exists(), "{out}");
+}
+
 /// A task whose `task.json` can't be read may have been a cloud task: the note names where to
 /// look in the cloud too, since its sandboxes can't be named.
 #[test]
@@ -384,6 +454,7 @@ fn rm_of_a_task_with_an_unreadable_record_names_the_cloud_list_too() {
             force: true,
             repo_root: f.env.tmp.path().join("target-repo"),
             dry_run: false,
+            forget_ambiguous: false,
         },
         &FakeBackend::default(),
         &FakeGitHub::default(),

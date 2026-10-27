@@ -41,6 +41,9 @@ pub struct Options {
     /// For tests: the committer identity a cloud worker sandbox made again gives its clone,
     /// instead of the user's global git config (milestone 4 slice 6).
     pub identity: Option<Identity>,
+    /// `--forget-ambiguous` (decision 268): drop a cloud create that was started and never
+    /// recorded as returned from the record, touching nothing in the cloud for it, then resume.
+    pub forget_ambiguous: bool,
 }
 
 impl Target {
@@ -104,6 +107,7 @@ pub fn run(
         identity: identity.as_ref(),
     };
     resume::check_can_resume(&prepared.record, probe, opts.rounds)?;
+    resume::check_ambiguous(&prepared.record, opts.forget_ambiguous)?;
     // A cloud sandbox doesn't use the drive of `sbx`'s local sandbox state (P11, decision
     // 262(h)).
     if location == Location::Local {
@@ -123,7 +127,8 @@ pub fn run(
             prepared.record.stopped.map_or("", record::Stopped::name)
         )?;
     }
-    let resumed = resume::resume(&env, &mut prepared, opts.rounds);
+    let resumed =
+        resume::resume_forgetting(&env, &mut prepared, opts.rounds, opts.forget_ambiguous);
     // What the cloud sandboxes did (their creates and removals, decision 265) and a remade
     // sandbox's warnings (a template it couldn't use), even when the resume then failed.
     for line in prepared.events.drain(..) {

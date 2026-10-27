@@ -75,15 +75,28 @@ pub fn run_with_sleep(
     };
     let base_dir = GlobalConfig::load(config_dir)?.base_dir;
     // Read and checked before anything is published (check before acting).
-    let open = match record::is_valid_id(&id) {
-        true => record::read(&record::task_dir(&base_dir, &id).join("task.json"))
-            .ok()
-            .map(|task| finish::open_cloud_sandboxes(&task))
-            .transpose()?
-            .unwrap_or_default(),
-        false => Vec::new(),
+    let recorded = match record::is_valid_id(&id) {
+        true => record::read(&record::task_dir(&base_dir, &id).join("task.json")).ok(),
+        false => None,
     };
+    let open = recorded
+        .as_ref()
+        .map(finish::open_cloud_sandboxes)
+        .transpose()?
+        .unwrap_or_default();
+    // An ambiguous create (decision 268) isn't the task's to remove: the finish leaves it, and
+    // its record keeps it for `task rm` to refuse over.
+    let ambiguous = recorded
+        .as_ref()
+        .and_then(|task| task.ambiguous_create().map(str::to_owned));
     publish(config_dir, opts, github, probe, out)?;
+    if let Some(name) = &ambiguous {
+        writeln!(
+            out,
+            "warning: {}",
+            lifetime::ambiguous_create(name, lifetime::FORGET_BY_RM)
+        )?;
+    }
     if open.is_empty() {
         return Ok(());
     }

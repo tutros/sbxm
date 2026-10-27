@@ -112,6 +112,7 @@ fn rm_merged(
             force: false,
             repo_root: f.env.tmp.path().join("target-repo"),
             dry_run,
+            forget_ambiguous: false,
         },
         backend,
         github,

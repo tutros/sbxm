@@ -387,11 +387,13 @@ pub struct SandboxLife {
     pub removed_at: Option<String>,
 }
 
-/// A cloud create the task asked for and hasn't heard back from (PR 322 review M-1, round 3):
-/// saved before the create, once `sbx --cloud ls` showed the name free, and cleared by the write
-/// that appends the sandbox's entry, or by the one that records the create's error. While it is
-/// here a sandbox of this name is the task's own: a run killed in the create may have left it,
-/// and removal takes it as it takes an open entry.
+/// A cloud create the task started and hasn't heard back from (decision 268): saved before the
+/// create (and before the secrets scoped to its name), and cleared by the write that appends the
+/// sandbox's entry, or by the one that records the create's error. It is **not** ownership: a
+/// run killed in between leaves it, and since names are deterministic sbxm can't tell whether a
+/// sandbox of this name is the one it asked for or another caller's. Every recovery and removal
+/// path then leaves that sandbox and its scoped secrets alone and refuses to delete the record
+/// until `--forget-ambiguous` drops this ([`Record::forget_ambiguous`]).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SandboxClaim {
     pub name: String,
@@ -535,10 +537,10 @@ impl Record {
         }
     }
 
-    /// Claims the name of a cloud sandbox whose create is about to be asked for, the name found
-    /// free (PR 322 review M-1, round 3); [`add_sandbox`](Self::add_sandbox) or
-    /// [`create_failed`](Self::create_failed) ends the claim.
-    pub fn claim_sandbox(&mut self, name: &str, role: SandboxRole, now: u64) {
+    /// Records that the create of the cloud sandbox `name` is about to be asked for (decision
+    /// 268): not ownership. [`add_sandbox`](Self::add_sandbox) (it returned) or
+    /// [`create_failed`](Self::create_failed) (it returned an error) clears it.
+    pub fn create_started(&mut self, name: &str, role: SandboxRole, now: u64) {
         self.creating = Some(SandboxClaim {
             name: name.to_owned(),
             role,
@@ -546,13 +548,13 @@ impl Record {
         });
     }
 
-    /// The create the claim was for returned an error: the task owns nothing of that name.
+    /// The started create returned an error: the task owns nothing of that name.
     pub fn create_failed(&mut self) {
         self.creating = None;
     }
 
-    /// Appends the entry of a cloud sandbox just created, not yet removed, ending the claim on
-    /// its name.
+    /// Appends the entry of a cloud sandbox whose create just returned success, not yet removed,
+    /// which makes it the task's own (decision 268), and clears its started create.
     pub fn add_sandbox(
         &mut self,
         name: &str,
@@ -574,6 +576,19 @@ impl Record {
         }
     }
 
+    /// The name of the cloud sandbox whose create was started and never recorded as returned
+    /// (decision 268). Only a task whose process is gone has one: a running create clears it
+    /// itself once it returns.
+    pub fn ambiguous_create(&self) -> Option<&str> {
+        self.creating.as_ref().map(|c| c.name.as_str())
+    }
+
+    /// `--forget-ambiguous` (decision 268): drops the ambiguous create from the record, nothing
+    /// in the cloud touched; `true` if there was one.
+    pub fn forget_ambiguous(&mut self) -> bool {
+        self.creating.take().is_some()
+    }
+
     /// Whether the sandbox `name` has an entry not yet stamped removed: one of the task's own
     /// creates made it, and no removal has been recorded since.
     pub fn has_open_sandbox(&self, name: &str) -> bool {
@@ -582,37 +597,21 @@ impl Record {
             .any(|s| s.name == name && s.removed_at.is_none())
     }
 
-    /// Whether a cloud sandbox of this name is the task's own to use and remove: it has an
-    /// entry still open, or the claim of a create the task never heard back from. A name the
-    /// cloud lists that the record doesn't hold belongs to someone else (PR 322 review M-1).
-    pub fn holds_sandbox(&self, name: &str) -> bool {
-        self.has_open_sandbox(name) || self.creating.as_ref().is_some_and(|c| c.name == name)
-    }
-
-    /// Every cloud sandbox name the record holds ([`holds_sandbox`](Self::holds_sandbox)), each
-    /// once, entries first.
-    pub fn held_sandboxes(&self) -> Vec<String> {
+    /// Every cloud sandbox the task owns and hasn't removed (decision 268: an entry still open,
+    /// whose create returned), each name once, in entry order. An ambiguous create is never one.
+    pub fn open_sandboxes(&self) -> Vec<String> {
         let mut names: Vec<String> = Vec::new();
-        let open = self
-            .sandboxes
-            .iter()
-            .filter(|s| s.removed_at.is_none())
-            .map(|s| s.name.as_str());
-        for name in open.chain(self.creating.iter().map(|c| c.name.as_str())) {
-            if !names.iter().any(|n| n == name) {
-                names.push(name.to_owned());
+        for entry in self.sandboxes.iter().filter(|s| s.removed_at.is_none()) {
+            if !names.contains(&entry.name) {
+                names.push(entry.name.clone());
             }
         }
         names
     }
 
-    /// Stamps the removal of the sandbox `name`'s latest entry still open, and ends a claim on
-    /// that name; `false` if the record held neither.
+    /// Stamps the removal of the sandbox `name`'s latest entry still open; `false` if it has
+    /// none.
     pub fn sandbox_removed(&mut self, name: &str, now: u64) -> bool {
-        let claimed = self.creating.as_ref().is_some_and(|c| c.name == name);
-        if claimed {
-            self.creating = None;
-        }
         match self
             .sandboxes
             .iter_mut()
@@ -623,7 +622,7 @@ impl Record {
                 entry.removed_at = Some(format_timestamp(now));
                 true
             }
-            None => claimed,
+            None => false,
         }
     }
 

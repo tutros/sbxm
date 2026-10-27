@@ -73,6 +73,7 @@ fn resume_rounds(f: &Fixture, spec: PathBuf, rounds: Option<u32>, backend: &Fake
             rounds,
             disk: Default::default(),
             identity: Some(identity()),
+            forget_ambiguous: false,
         },
         backend,
         &Gone,

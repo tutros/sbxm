@@ -71,6 +71,9 @@ pub struct LeftAlone {
 pub struct MergedPlan {
     pub candidates: Vec<Candidate>,
     pub left_alone: Vec<LeftAlone>,
+    /// `--forget-ambiguous` (decision 268): each candidate's plan drops an ambiguous cloud create
+    /// from its record instead of leaving the task alone for it.
+    forget_ambiguous: bool,
 }
 
 impl MergedPlan {
@@ -111,7 +114,7 @@ fn add_merged(
     probe: &dyn ProcessProbe,
     out: &mut MergedPlan,
 ) {
-    match finish::plan_removal(base_dir, id, probe) {
+    match finish::plan_removal_forgetting(base_dir, id, probe, out.forget_ambiguous) {
         Ok(plan) => out.candidates.push(Candidate {
             id: id.to_owned(),
             reason,
@@ -334,7 +337,23 @@ pub fn plan(
     github: &dyn GitHubBackend,
     probe: &dyn ProcessProbe,
 ) -> Result<MergedPlan> {
-    let mut out = MergedPlan::default();
+    plan_forgetting(base_dir, repo_root, github, probe, false)
+}
+
+/// [`plan`], with `--forget-ambiguous` when `forget` (decision 268): a merged task whose record
+/// holds a cloud create that was started and never heard back from is left alone, saying why,
+/// unless `forget`, when its plan drops that create from the record and removes the rest.
+pub fn plan_forgetting(
+    base_dir: &Path,
+    repo_root: &Path,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    forget: bool,
+) -> Result<MergedPlan> {
+    let mut out = MergedPlan {
+        forget_ambiguous: forget,
+        ..MergedPlan::default()
+    };
     for task in load_own(base_dir, &mut out)? {
         // Nothing below runs through a task folder that is a link, or sits under one: not the
         // spec check's fetch into its `repo.git`, not the archive (README's removal contract).

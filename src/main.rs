@@ -557,6 +557,7 @@ fn main() -> anyhow::Result<()> {
                     spec,
                     rounds,
                     ignore_disk,
+                    forget_ambiguous,
                 },
         } => {
             let target = match (issue, spec) {
@@ -580,6 +581,7 @@ fn main() -> anyhow::Result<()> {
                         rounds,
                         disk: sbxm::disk::Guard::real(ignore_disk),
                         identity: None,
+                        forget_ambiguous,
                     },
                     &SbxBackend::LOCAL,
                     &task::record::SystemProbe,
@@ -708,6 +710,7 @@ fn main() -> anyhow::Result<()> {
                     yes,
                     force,
                     dry_run,
+                    forget_ambiguous,
                 },
         } => {
             let target = match (issue, pr, spec, merged) {
@@ -738,6 +741,7 @@ fn main() -> anyhow::Result<()> {
                         force,
                         repo_root: std::env::current_dir()?,
                         dry_run,
+                        forget_ambiguous,
                     },
                     &SbxBackend::LOCAL,
                     &sbxm::github::gh::GhBackend::default(),
