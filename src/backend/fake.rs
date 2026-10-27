@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use super::{
     CopyOut, CreateSpec, CustomSecret, CustomSecretSpec, ExecOutput, ExecSpec, KitValidation,
-    Location, NetworkRule, SandboxBackend, SandboxInfo, ScopedSecret, TemplateImage,
+    Location, NetworkRule, SandboxBackend, SandboxDetail, SandboxInfo, ScopedSecret, TemplateImage,
 };
 
 /// Holds every `exec` of a [`FakeBackend`] until [`ExecGate::open`], so a test
@@ -135,6 +135,13 @@ pub struct FakeBackend {
     fail_remove_secret_for: Vec<String>,
     /// Every location `located` was asked for, in order.
     locations: Mutex<Vec<Location>>,
+    /// What `list_detailed` returns: the cloud's list, the only one `status` and `doctor` ask
+    /// for in detail (milestone 4 slice 8).
+    cloud_sandboxes: Vec<SandboxDetail>,
+    /// What `list_detailed` fails with, when set.
+    cloud_list_failure: Option<String>,
+    /// How many times `list_detailed` was called; a read, so it's not in `log`.
+    cloud_list_calls: Mutex<usize>,
     /// What `copy_out` of an in-sandbox path produces, before `sandbox_root` is looked at.
     copy_outs: HashMap<String, FakeCopy>,
     /// A host folder standing in for every sandbox's filesystem: `copy_in` writes
@@ -607,6 +614,27 @@ impl FakeBackend {
         self.custom_secrets.lock().unwrap().clone()
     }
 
+    /// A backend whose `list_detailed` (the cloud's list) returns these.
+    pub fn with_cloud_sandboxes(self, sandboxes: Vec<SandboxDetail>) -> Self {
+        Self {
+            cloud_sandboxes: sandboxes,
+            ..self
+        }
+    }
+
+    /// Makes `list_detailed` fail with `message`, as an unreadable cloud does.
+    pub fn failing_cloud_list(self, message: &str) -> Self {
+        Self {
+            cloud_list_failure: Some(message.to_owned()),
+            ..self
+        }
+    }
+
+    /// How many times `list_detailed` was called.
+    pub fn cloud_list_calls(&self) -> usize {
+        *self.cloud_list_calls.lock().unwrap()
+    }
+
     /// Every location `located` was asked for, in order.
     pub fn locations(&self) -> Vec<Location> {
         self.locations.lock().unwrap().clone()
@@ -738,6 +766,17 @@ impl SandboxBackend for FakeBackend {
             }
         }
         Ok(self.sandboxes.clone())
+    }
+
+    fn list_detailed(&self) -> Result<Vec<SandboxDetail>> {
+        *self.cloud_list_calls.lock().unwrap() += 1;
+        if self.no_sbx {
+            bail!("fake: sbx not found");
+        }
+        if let Some(message) = &self.cloud_list_failure {
+            bail!("{message}");
+        }
+        Ok(self.cloud_sandboxes.clone())
     }
 
     fn version(&self) -> Result<String> {

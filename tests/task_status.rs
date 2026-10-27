@@ -8,6 +8,7 @@ use std::fs;
 use std::path::Path;
 
 use common::Env;
+use sbxm::backend::Location;
 use sbxm::commands::task_status;
 use sbxm::task::record::{self, Kind, NewTask, Process, ProcessProbe, Record, Stage, Status};
 
@@ -185,6 +186,37 @@ fn the_recorded_risk_level_is_shown() {
 
     assert!(lines[0].contains("risk: unknown"), "{text}");
     assert!(lines[1].contains("risk: high"), "{text}");
+}
+
+/// Milestone 4 slice 8 (P17 (a), decision 262): `task status` shows each task's recorded location,
+/// `local` for a record from before milestone 4 that has none, and reads only `task.json` (it
+/// takes no backend at all).
+#[test]
+fn each_task_shows_its_recorded_location_and_a_record_without_one_is_local() {
+    let base = tempfile::tempdir().unwrap();
+    let mut cloud = working(1, None);
+    cloud.location = Location::Cloud;
+    save(base.path(), &cloud);
+    save(base.path(), &working(2, None));
+    let old = working(3, None);
+    save(base.path(), &old);
+    let path = record::task_dir(base.path(), &old.id).join("task.json");
+    let mut json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    json.as_object_mut().unwrap().remove("location").unwrap();
+    fs::write(&path, serde_json::to_string(&json).unwrap()).unwrap();
+
+    let (text, _ids) = task_status::render(base.path(), None, false, &Probe(Some(T0))).unwrap();
+    let line = |id: &str| {
+        text.lines()
+            .find(|l| l.starts_with(&format!("{id} ")))
+            .unwrap_or_else(|| panic!("no {id} in {text}"))
+            .to_owned()
+    };
+
+    assert!(line("issue-1").contains("location: cloud"), "{text}");
+    assert!(line("issue-2").contains("location: local"), "{text}");
+    assert!(line("issue-3").contains("location: local"), "{text}");
 }
 
 #[test]

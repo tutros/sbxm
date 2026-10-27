@@ -97,14 +97,14 @@ pub fn format_duration(secs: u64) -> String {
 /// values, either of which undercounts a wide character like `界` or `😀`), from the Unicode
 /// width tables `unicode-width` carries, emoji presentation sequences included. Every column
 /// measurement in this module goes through it, padding and cutting alike.
-fn display_width(text: &str) -> usize {
+pub(crate) fn display_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
 
 /// `text`, or cut to at most `max` terminal columns with a trailing `…` (always 1 column) if it's
 /// wider; empty if `max` is 0. The cut is checked with [`display_width`] itself, so a character
 /// whose width depends on what follows it (a variation selector) can't push it past `max`.
-fn truncate(text: &str, max: usize) -> String {
+pub(crate) fn truncate(text: &str, max: usize) -> String {
     if display_width(text) <= max {
         return text.to_owned();
     }
@@ -131,7 +131,7 @@ fn truncate(text: &str, max: usize) -> String {
 
 /// `cell` followed by spaces up to `width` terminal columns (`format!`'s own padding counts
 /// characters, which leaves a wide character's column short).
-fn pad(cell: &str, width: usize) -> String {
+pub(crate) fn pad(cell: &str, width: usize) -> String {
     let fill = width.saturating_sub(display_width(cell));
     format!("{cell}{}", " ".repeat(fill))
 }

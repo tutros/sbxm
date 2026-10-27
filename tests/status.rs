@@ -1,7 +1,8 @@
 //! `sbxm status [--watch]` (decision 171, issue 90): the Tasks section. Pure rendering is
 //! golden-tested with a passed-in clock; `rows()` is tested against on-disk task fixtures like
 //! `tests/task_status.rs`; the CLI and the `--watch` loop are tested at the edges only (a
-//! non-terminal always prints once, `backend` is never called).
+//! non-terminal always prints once, `backend` is never asked to change anything). Milestone 4
+//! slice 8 adds the running cloud sandboxes: the cloud instance's list, a read, once per frame.
 
 mod common;
 
@@ -12,8 +13,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use common::Env as TestEnv;
-use sbxm::backend::FakeBackend;
+use sbxm::backend::{FakeBackend, Location, SandboxDetail};
 use sbxm::commands::status::{self, Env};
+use sbxm::status::cloud::{self, Cloud};
 use sbxm::status::tasks::{self, TaskRow};
 use sbxm::task::record::{self, Kind, NewTask, Process, ProcessProbe, Record, Stage, Status};
 
@@ -659,4 +661,200 @@ fn interval_below_one_second_is_refused() {
         .unwrap();
 
     assert!(!output.status.success());
+}
+
+// ---- milestone 4 slice 8: the running cloud sandboxes (decision 259, P17 (a)) ----
+
+fn cloud_box(
+    name: &str,
+    cpus: Option<u32>,
+    memory_mib: Option<u64>,
+    expires: Option<&str>,
+) -> SandboxDetail {
+    SandboxDetail {
+        name: name.to_owned(),
+        status: "running".to_owned(),
+        cpus,
+        memory_mib,
+        expires_at: expires.map(str::to_owned),
+    }
+}
+
+/// T0 is 2026-09-21T14:13:20Z; these expire 1h05m after it and 5 s before it.
+const IN_1H05M: &str = "2026-09-21T15:18:20.604457Z";
+const PAST: &str = "2026-09-21T14:13:15Z";
+
+#[test]
+fn cloud_sandboxes_are_a_table_of_name_status_shape_and_time_left() {
+    let listing = Cloud::Sandboxes(vec![
+        cloud_box("sbxm-issue-7-claude", Some(2), Some(4096), Some(IN_1H05M)),
+        cloud_box("sbxm-pr-3-codex", Some(1), Some(1536), Some(PAST)),
+    ]);
+
+    assert_eq!(
+        cloud::render(&listing, T0, None),
+        "\n\
+         CLOUD SANDBOX        STATUS   SHAPE            LEFT\n\
+         sbxm-issue-7-claude  running  2 CPUs, 4 GiB    1h05m\n\
+         sbxm-pr-3-codex      running  1 CPU, 1536 MiB  expiring\n"
+    );
+}
+
+#[test]
+fn a_cloud_sandbox_at_its_expiry_is_expiring_never_a_negative_time() {
+    for at in ["2026-09-21T14:13:20Z", PAST, "2020-01-01T00:00:00Z"] {
+        let listing = Cloud::Sandboxes(vec![cloud_box("sbxm-a", Some(2), Some(4096), Some(at))]);
+        let text = cloud::render(&listing, T0, None);
+        let row = text.lines().last().unwrap();
+        assert!(row.ends_with("  expiring"), "{at}: {text}");
+        assert!(!row["sbxm-a".len()..].contains('-'), "{at}: {text}");
+    }
+    let listing = Cloud::Sandboxes(vec![cloud_box(
+        "sbxm-a",
+        Some(2),
+        Some(4096),
+        Some("2026-09-21T14:13:21Z"),
+    )]);
+    assert!(
+        cloud::render(&listing, T0, None).ends_with("  1s\n"),
+        "one second before its expiry it still has 1s"
+    );
+}
+
+#[test]
+fn a_cloud_sandbox_without_shape_or_expiry_shows_dashes() {
+    let listing = Cloud::Sandboxes(vec![cloud_box("sbxm-a", None, None, None)]);
+    assert_eq!(
+        cloud::render(&listing, T0, None),
+        "\nCLOUD SANDBOX  STATUS   SHAPE  LEFT\nsbxm-a         running  -      -\n"
+    );
+}
+
+#[test]
+fn an_empty_cloud_list_prints_nothing() {
+    assert_eq!(cloud::render(&Cloud::Sandboxes(Vec::new()), T0, None), "");
+    assert_eq!(
+        cloud::render(&Cloud::Sandboxes(Vec::new()), T0, Some(80)),
+        ""
+    );
+}
+
+#[test]
+fn an_unreadable_cloud_is_one_line_with_the_errors_first_line() {
+    let listing = Cloud::Unreadable("sbxcloud: unauthorized (401)".to_owned());
+    assert_eq!(
+        cloud::render(&listing, T0, None),
+        "\nCloud sandboxes couldn't be read (`sbx --cloud ls --json`): sbxcloud: unauthorized (401)\n"
+    );
+}
+
+#[test]
+fn on_a_terminal_each_cloud_line_is_cut_to_the_width() {
+    let listing = Cloud::Sandboxes(vec![cloud_box(
+        "sbxm-issue-7-claude",
+        Some(2),
+        Some(4096),
+        Some(IN_1H05M),
+    )]);
+    let text = cloud::render(&listing, T0, Some(30));
+    assert_eq!(
+        text,
+        "\nCLOUD SANDBOX        STATUS  …\nsbxm-issue-7-claude  running …\n"
+    );
+    let unreadable = cloud::render(&Cloud::Unreadable("x".repeat(100)), T0, Some(30));
+    assert_eq!(
+        unreadable.lines().nth(1).map(cells),
+        Some(30),
+        "{unreadable}"
+    );
+    assert!(unreadable.ends_with("…\n"), "{unreadable}");
+}
+
+fn run_status(backend: &FakeBackend, base: &Path, env: &Env) -> String {
+    let mut out = Vec::new();
+    status::run(base, backend, &Probe(Some(T0)), env, None, &mut out).unwrap();
+    String::from_utf8(out).unwrap()
+}
+
+#[test]
+fn status_lists_only_the_cloud_sandboxes_named_sbxm_from_the_cloud_instance() {
+    let base = tempfile::tempdir().unwrap();
+    save(base.path(), &working(1));
+    let backend = FakeBackend::default().with_cloud_sandboxes(vec![
+        cloud_box("sbxm-issue-1-claude", Some(2), Some(4096), Some(IN_1H05M)),
+        cloud_box("someone-else", Some(2), Some(4096), Some(IN_1H05M)),
+        cloud_box("xsbxm-a", Some(2), Some(4096), Some(IN_1H05M)),
+    ]);
+
+    let text = run_status(&backend, base.path(), &real_env(false, 80, None));
+
+    let rows = tasks::rows(base.path(), &Probe(Some(T0))).unwrap();
+    let cloud_part = text
+        .strip_prefix(&tasks::render(&rows, T0, None))
+        .unwrap_or_else(|| panic!("the Tasks section comes first: {text}"));
+    assert_eq!(
+        cloud_part,
+        "\n\
+         CLOUD SANDBOX        STATUS   SHAPE          LEFT\n\
+         sbxm-issue-1-claude  running  2 CPUs, 4 GiB  1h05m\n"
+    );
+    assert_eq!(backend.locations(), [Location::Cloud]);
+    assert_eq!(backend.cloud_list_calls(), 1);
+}
+
+#[test]
+fn status_with_no_cloud_sandboxes_prints_only_the_tasks() {
+    let base = tempfile::tempdir().unwrap();
+    save(base.path(), &working(1));
+    let backend = FakeBackend::default().with_cloud_sandboxes(vec![cloud_box(
+        "other",
+        Some(2),
+        Some(4096),
+        Some(IN_1H05M),
+    )]);
+
+    let text = run_status(&backend, base.path(), &real_env(false, 80, None));
+
+    let rows = tasks::rows(base.path(), &Probe(Some(T0))).unwrap();
+    assert_eq!(text, tasks::render(&rows, T0, None));
+}
+
+#[test]
+fn status_with_an_unreadable_cloud_prints_one_line_and_succeeds() {
+    let base = tempfile::tempdir().unwrap();
+    save(base.path(), &working(1));
+    let backend =
+        FakeBackend::default().failing_cloud_list("sbxcloud: unauthorized (401)\nsecond line");
+
+    let text = run_status(&backend, base.path(), &real_env(false, 80, None));
+
+    let rows = tasks::rows(base.path(), &Probe(Some(T0))).unwrap();
+    assert_eq!(
+        text,
+        format!(
+            "{}\nCloud sandboxes couldn't be read (`sbx --cloud ls --json`): sbxcloud: \
+             unauthorized (401)\n",
+            tasks::render(&rows, T0, None)
+        )
+    );
+}
+
+#[test]
+fn watch_reads_the_cloud_on_every_frame() {
+    let base = tempfile::tempdir().unwrap();
+    save(base.path(), &working(1));
+    let backend = FakeBackend::default();
+    let mut out = Vec::new();
+
+    status::run(
+        base.path(),
+        &backend,
+        &Probe(Some(T0)),
+        &real_env(true, 80, Some(3)),
+        Some(Duration::from_secs(2)),
+        &mut out,
+    )
+    .unwrap();
+
+    assert_eq!(backend.cloud_list_calls(), 3);
 }

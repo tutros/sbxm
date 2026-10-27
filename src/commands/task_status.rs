@@ -62,7 +62,7 @@ pub fn render(
         };
         writeln!(
             out,
-            "{:<width$}  {:<9}  {:<12}  ahead: {:<3}  result: {:<3}  review: {:<3}  risk: {:<7}  {}{}{}",
+            "{:<width$}  {:<9}  {:<12}  ahead: {:<3}  result: {:<3}  review: {:<3}  risk: {:<7}  location: {:<5}  {}{}{}",
             record.id,
             record.stage.name(),
             status,
@@ -74,6 +74,7 @@ pub fn render(
                 .as_ref()
                 .map_or_else(Default::default, |r| r.risk)
                 .word(),
+            record.location.as_str(),
             record.title,
             record
                 .continues

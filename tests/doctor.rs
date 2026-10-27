@@ -4,8 +4,9 @@
 mod common;
 
 use common::{Env, toml_path};
-use sbxm::backend::FakeBackend;
+use sbxm::backend::{FakeBackend, Location, SandboxDetail};
 use sbxm::commands::{doctor, new};
+use sbxm::task::record::{self, Kind, NewTask, Process, Record};
 
 const GIB: u64 = 1024 * 1024 * 1024;
 /// The clock of [`host`], in 2027.
@@ -21,6 +22,7 @@ fn host() -> doctor::Host {
         temp_dirs: Vec::new(),
         sandbox_state_dir: None,
         now: || NOW,
+        current_dir: None,
     }
 }
 
@@ -1011,4 +1013,314 @@ fn a_tag_both_current_and_previous_is_counted_once() {
     let line = total_line(&env, vec![image(CURRENT, 2 * GIB), image(OLD_1, GIB)]);
 
     assert_eq!(line, "ok   1 template (2 images), 3.0 GiB in total");
+}
+
+// ---- milestone 4 slice 8: the cloud (decision 259, P12, P13, P17 (a)) ----
+
+/// [`NOW`] is 2027-01-15T08:00:00Z; this expires 1h05m after it.
+const IN_1H05M: &str = "2027-01-15T09:05:00.25Z";
+
+fn cloud_box(name: &str, expires_at: &str) -> SandboxDetail {
+    SandboxDetail {
+        name: name.to_owned(),
+        status: "running".to_owned(),
+        cpus: Some(2),
+        memory_mib: Some(4096),
+        expires_at: Some(expires_at.to_owned()),
+    }
+}
+
+#[test]
+fn doctor_lists_the_running_sbxm_cloud_sandboxes() {
+    let env = Env::new();
+    let backend = FakeBackend::default().with_cloud_sandboxes(vec![
+        cloud_box("sbxm-issue-7-claude", IN_1H05M),
+        cloud_box("sbxm-pr-3-codex", "2027-01-15T07:59:59Z"),
+        cloud_box("someone-else", IN_1H05M),
+    ]);
+
+    let report = report(&env, &backend);
+
+    assert!(!report.failed(), "{}", report.render());
+    let text = report.render();
+    let cloud: Vec<&str> = text.lines().filter(|l| l.contains("cloud")).collect();
+    assert_eq!(
+        cloud,
+        [
+            "ok   cloud sandbox sbxm-issue-7-claude: running, 2 CPUs, 4 GiB, 1h05m left",
+            "ok   cloud sandbox sbxm-pr-3-codex: running, 2 CPUs, 4 GiB, expiring",
+        ],
+        "{text}"
+    );
+    assert!(!text.contains("someone-else"), "{text}");
+    assert_eq!(backend.locations(), [Location::Cloud]);
+}
+
+#[test]
+fn doctor_with_an_empty_cloud_says_nothing_about_it() {
+    let env = Env::new();
+
+    let text = report(&env, &FakeBackend::default()).render();
+
+    assert!(!text.to_lowercase().contains("cloud"), "{text}");
+}
+
+#[test]
+fn an_unreadable_cloud_is_a_warning_and_doctor_still_passes() {
+    let env = Env::new();
+    let backend =
+        FakeBackend::default().failing_cloud_list("sbxcloud: unauthorized (401)\nsecond line");
+
+    let report = report(&env, &backend);
+
+    assert!(!report.failed(), "{}", report.render());
+    let text = report.render();
+    let cloud: Vec<&str> = text.lines().filter(|l| l.contains("cloud")).collect();
+    assert_eq!(
+        cloud,
+        [
+            "warn cloud sandboxes couldn't be read (`sbx --cloud ls --json`): sbxcloud: \
+             unauthorized (401); if you use the cloud, log in with `sbx login`"
+        ],
+        "{text}"
+    );
+}
+
+#[test]
+fn an_unreadable_cloud_leaves_a_failing_doctor_failing() {
+    let env = Env::new();
+    let backend = FakeBackend::default()
+        .with_version("0.1.0")
+        .failing_cloud_list("sbxcloud: unauthorized (401)");
+
+    let report = report(&env, &backend);
+
+    assert!(report.failed(), "{}", report.render());
+    assert!(
+        report
+            .render()
+            .contains("warn cloud sandboxes couldn't be read"),
+        "{}",
+        report.render()
+    );
+}
+
+// P13 (a) with (i), decision 262: a cloud repo's gates naming `/tmp`; P12: the cloud version.
+
+const CLOUD_MIN: &str = "0.46.0";
+
+/// A repo folder holding `toml` as its `sbxm-task.toml`, and a host whose current directory it is.
+fn repo_with(env: &Env, toml: &str) -> (std::path::PathBuf, doctor::Host) {
+    let repo = env.tmp.path().join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    std::fs::write(repo.join("sbxm-task.toml"), toml).unwrap();
+    let host = doctor::Host {
+        current_dir: Some(repo.clone()),
+        ..host()
+    };
+    (repo, host)
+}
+
+fn gates_toml(location: &str, gates: &[&str]) -> String {
+    let quoted: Vec<String> = gates.iter().map(|g| format!("{g:?}")).collect();
+    format!(
+        "[sandbox]\nprofile = \"default\"\nlocation = \"{location}\"\n\n[gates]\nsandbox = [{}]\n",
+        quoted.join(", ")
+    )
+}
+
+const BOUNDARY_GATES: [&str; 6] = [
+    "CARGO_TARGET_DIR=/tmp/target cargo test",
+    "cd /tmp",
+    "ls /tmpfoo",
+    "ls /var/tmp2",
+    "CARGO_TARGET_DIR=$HOME/target cargo build",
+    "cd /tmp && cargo build",
+];
+
+fn tmp_lines(text: &str) -> Vec<&str> {
+    text.lines().filter(|l| l.contains("tmpfs")).collect()
+}
+
+#[test]
+fn a_cloud_repos_gates_naming_tmp_warn_each_and_doctor_still_passes() {
+    let env = Env::new();
+    let (repo, host) = repo_with(&env, &gates_toml("cloud", &BOUNDARY_GATES));
+    let backend = FakeBackend::default().with_version(CLOUD_MIN);
+
+    let report = doctor::run(&env.config_dir(), &backend, &host);
+
+    assert!(!report.failed(), "{}", report.render());
+    let text = report.render();
+    let file = repo.join("sbxm-task.toml").display().to_string();
+    let warn = |gate: &str| {
+        format!(
+            "warn gate `{gate}` in {file} uses /tmp, which is a small tmpfs in a cloud sandbox; \
+             build under $HOME instead (e.g. $HOME/target)"
+        )
+    };
+    assert_eq!(
+        tmp_lines(&text),
+        [
+            warn("CARGO_TARGET_DIR=/tmp/target cargo test"),
+            warn("cd /tmp"),
+            warn("cd /tmp && cargo build"),
+        ],
+        "{text}"
+    );
+}
+
+#[test]
+fn a_local_repo_or_no_sbxm_task_toml_gets_no_tmp_warning() {
+    let env = Env::new();
+    let (_repo, local) = repo_with(&env, &gates_toml("local", &BOUNDARY_GATES));
+    let no_location = doctor::Host {
+        current_dir: local.current_dir.clone(),
+        ..host()
+    };
+    let without_file = env.tmp.path().join("plain");
+    std::fs::create_dir_all(&without_file).unwrap();
+    let no_file = doctor::Host {
+        current_dir: Some(without_file),
+        ..host()
+    };
+
+    for host in [&local, &no_file, &host()] {
+        let text = doctor::run(&env.config_dir(), &FakeBackend::default(), host).render();
+        assert!(tmp_lines(&text).is_empty(), "{text}");
+    }
+    std::fs::write(
+        no_location
+            .current_dir
+            .as_ref()
+            .unwrap()
+            .join("sbxm-task.toml"),
+        "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = [\"cd /tmp\"]\n",
+    )
+    .unwrap();
+    let text = doctor::run(&env.config_dir(), &FakeBackend::default(), &no_location).render();
+    assert!(tmp_lines(&text).is_empty(), "{text}");
+}
+
+fn cloud_version_lines(text: &str) -> Vec<&str> {
+    text.lines().filter(|l| l.contains(CLOUD_MIN)).collect()
+}
+
+#[test]
+fn an_old_sbx_warns_when_the_current_repo_is_a_cloud_repo() {
+    let env = Env::new();
+    let (repo, host) = repo_with(&env, &gates_toml("cloud", &["cargo test"]));
+    let backend = FakeBackend::default().with_version("0.45.9");
+
+    let report = doctor::run(&env.config_dir(), &backend, &host);
+
+    assert!(!report.failed(), "{}", report.render());
+    let text = report.render();
+    assert_eq!(
+        cloud_version_lines(&text),
+        [format!(
+            "warn sbx 0.45.9 is older than {CLOUD_MIN}, the version a cloud task needs (the \
+             cloud is in use: {} has location = \"cloud\"); upgrade sbx",
+            repo.join("sbxm-task.toml").display()
+        )],
+        "{text}"
+    );
+}
+
+#[test]
+fn an_old_sbx_warns_when_a_task_record_says_cloud() {
+    let env = Env::new();
+    let mut task = Record::new(
+        &NewTask {
+            kind: Kind::Issue,
+            number: 7,
+            repo: "o/r",
+            title: "t",
+            base: "main",
+            branch: "b",
+            config_hash: "h",
+            id: None,
+        },
+        NOW,
+        Process::new(1, NOW),
+    );
+    task.location = Location::Cloud;
+    record::write(&record::task_dir(&env.base_dir(), &task.id), &task).unwrap();
+    let backend = FakeBackend::default().with_version("0.45.0");
+
+    let report = report(&env, &backend);
+
+    assert!(!report.failed(), "{}", report.render());
+    let text = report.render();
+    assert_eq!(
+        cloud_version_lines(&text),
+        [format!(
+            "warn sbx 0.45.0 is older than {CLOUD_MIN}, the version a cloud task needs (the \
+             cloud is in use: task issue-7 runs in the cloud); upgrade sbx"
+        )],
+        "{text}"
+    );
+}
+
+#[test]
+fn a_malformed_sibling_record_does_not_hide_a_cloud_task_from_the_version_check() {
+    let env = Env::new();
+    let mut task = Record::new(
+        &NewTask {
+            kind: Kind::Issue,
+            number: 7,
+            repo: "o/r",
+            title: "t",
+            base: "main",
+            branch: "b",
+            config_hash: "h",
+            id: None,
+        },
+        NOW,
+        Process::new(1, NOW),
+    );
+    task.location = Location::Cloud;
+    record::write(&record::task_dir(&env.base_dir(), &task.id), &task).unwrap();
+    // Sorted before and after `issue-7`, so the scan meets a bad record whichever order it reads in.
+    for id in ["aaa-bad", "zzz-bad"] {
+        let dir = record::task_dir(&env.base_dir(), id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("task.json"), "{ not json").unwrap();
+    }
+    let backend = FakeBackend::default().with_version("0.45.0");
+
+    let report = report(&env, &backend);
+
+    let text = report.render();
+    assert_eq!(
+        cloud_version_lines(&text),
+        [format!(
+            "warn sbx 0.45.0 is older than {CLOUD_MIN}, the version a cloud task needs (the \
+             cloud is in use: task issue-7 runs in the cloud); upgrade sbx"
+        )],
+        "{text}"
+    );
+}
+
+#[test]
+fn the_cloud_version_says_nothing_at_the_minimum_or_when_the_cloud_is_not_in_use() {
+    let env = Env::new();
+    let (_repo, cloud_host) = repo_with(&env, &gates_toml("cloud", &["cargo test"]));
+
+    let at_min = doctor::run(
+        &env.config_dir(),
+        &FakeBackend::default().with_version(CLOUD_MIN),
+        &cloud_host,
+    )
+    .render();
+    assert!(
+        !at_min.contains("the version a cloud task needs"),
+        "{at_min}"
+    );
+
+    let not_in_use = report(&env, &FakeBackend::default().with_version("0.45.0")).render();
+    assert!(
+        !not_in_use.contains("the version a cloud task needs"),
+        "{not_in_use}"
+    );
 }
