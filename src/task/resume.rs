@@ -225,8 +225,9 @@ pub fn resume_forgetting(
         pipeline::check_replay(prepared, result)?;
     }
     if let Some(name) = prepared.record.ambiguous_create().map(str::to_owned) {
-        prepared.record.forget_ambiguous();
-        record::write(&prepared.meta, &prepared.record)?;
+        record::write_change(&prepared.meta, &mut prepared.record, |t| {
+            t.forget_ambiguous();
+        })?;
         prepared.events.push(format!(
             "cloud sandbox {name}'s ambiguous create is dropped from task.json; nothing in the \
              cloud was touched for it"

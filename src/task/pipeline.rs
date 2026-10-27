@@ -1214,15 +1214,23 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
             // the sandbox is gone: while it may still be there, `task.json` is its only record
             // and stays (review M-1 of slice 3).
             let Some(task) = record.as_mut().filter(|t| t.has_open_sandbox(&sandbox)) else {
-                let _ = fs::remove_dir_all(&meta);
+                // A create whose return couldn't be saved (round 2, M-1) is ambiguous: the
+                // sandbox and its secrets stay, and so does `task.json`, its only record.
+                let kept = record
+                    .as_ref()
+                    .and_then(Record::ambiguous_create)
+                    .map(|name| lifetime::ambiguous_create(name, lifetime::FORGET_BY_RM));
+                if kept.is_none() {
+                    let _ = fs::remove_dir_all(&meta);
+                }
                 // A create that failed took its secrets back: what that said still shows.
-                if events.is_empty() && cleanup_warnings.is_empty() {
+                if events.is_empty() && cleanup_warnings.is_empty() && kept.is_none() {
                     return Err(e);
                 }
                 return Err(e.context(FailedAfterCreate {
                     id: id.to_owned(),
                     events,
-                    kept: None,
+                    kept,
                     warnings: cleanup_warnings,
                 }));
             };
@@ -4277,13 +4285,16 @@ fn create_recorded(
         );
     }
     check_name_free(backend, task, sandbox)?;
-    task.create_started(sandbox, role, now());
-    record::write(meta, task)?;
+    // Each change to the record below is made in memory only once it is saved (round 2, M-1):
+    // the cleanup that follows an error trusts the in-memory record, and an open entry there
+    // that `task.json` doesn't have would remove a sandbox the task can't prove is its own.
+    record::write_change(meta, task, |t| t.create_started(sandbox, role, now()))?;
     let asked = secrets::set_all(backend, sandbox, scoped_secrets)
         .and_then(|()| plan.create_cloud(backend, sandbox, harness, ttl));
     let Err(e) = asked else {
-        task.add_sandbox(sandbox, role, Location::Cloud, now(), ttl.as_secs());
-        return record::write(meta, task);
+        return record::write_change(meta, task, |t| {
+            t.add_sandbox(sandbox, role, Location::Cloud, now(), ttl.as_secs());
+        });
     };
     if !scoped_secrets.is_empty() {
         for released in secrets::remove_all(backend, sandbox) {
@@ -4293,10 +4304,9 @@ fn create_recorded(
             }
         }
     }
-    task.create_failed();
     // A create that returned an error is no ambiguous one: left in task.json, a later `task rm`
     // would refuse over a sandbox the cloud never made.
-    record::write(meta, task).map_err(|w| {
+    record::write_change(meta, task, Record::create_failed).map_err(|w| {
         anyhow!(
             "{e:#}; task.json couldn't record that the create of {sandbox} failed ({w:#}), so a \
              later `sbxm task rm` would take it for an ambiguous one and need --forget-ambiguous"

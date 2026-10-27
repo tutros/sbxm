@@ -955,6 +955,22 @@ pub fn write(dir: &Path, record: &Record) -> Result<()> {
     fs::rename(&tmp, &path).with_context(|| format!("cannot write {}", path.display()))
 }
 
+/// Applies `change` to a copy of `record`, saves the copy, and only then makes it `record`: an
+/// error leaves `record` as `task.json` still has it, so nothing read from it later trusts an
+/// unsaved change (PR 322 round 2, M-1: ownership is a create that returned *and* its saved
+/// lifetime entry, decision 268).
+pub fn write_change(
+    dir: &Path,
+    record: &mut Record,
+    change: impl FnOnce(&mut Record),
+) -> Result<()> {
+    let mut staged = record.clone();
+    change(&mut staged);
+    write(dir, &staged)?;
+    *record = staged;
+    Ok(())
+}
+
 pub fn read(path: &Path) -> Result<Record> {
     let text =
         fs::read_to_string(path).with_context(|| format!("cannot read {}", path.display()))?;

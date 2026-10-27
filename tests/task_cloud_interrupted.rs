@@ -884,3 +884,51 @@ fn a_reviewer_create_that_failed_takes_its_secrets_back_and_removes_no_sandbox()
     assert!(!cloud.removes().contains(&reviewer), "{:?}", cloud.log());
     assert!(!meta(&f, &id).exists(), "{out}");
 }
+
+/// PR 322 round 2, M-1: the create returned success, but its lifetime entry couldn't be saved
+/// (`task.json.tmp` made a folder once the cloud accepted it). Ownership needs both (decision
+/// 268), so the start's cleanup removes neither the sandbox nor a secret scoped to it, and keeps
+/// `task.json`, which still records the create as ambiguous.
+#[test]
+fn a_start_whose_lifetime_entry_was_not_saved_leaves_its_sandbox_and_secrets_alone() {
+    let f = fixture_with(LOCAL_TOML);
+    let (spec, id) = spec(&f);
+    let worker = worker_sandbox(&id);
+    let root = f.env.tmp.path().join("cloud-fs");
+    let tmp = meta(&f, &id).join("task.json.tmp");
+    let name = worker.clone();
+    let cloud = one_cloud(
+        cloud_backend(&root, &id, &[CLEAN]).with_accepted_create_hook(move |spec| {
+            if spec.name == name {
+                std::fs::create_dir_all(&tmp).unwrap();
+            }
+        }),
+        &[],
+        &[],
+    );
+
+    let message = format!(
+        "{:#}",
+        start_with_secrets(&f, &spec, &cloud, &[fake_secret()]).unwrap_err()
+    );
+
+    assert_ambiguous(&message, &worker, "--forget-ambiguous");
+    let touched = touches(&cloud, &worker);
+    assert_eq!(
+        touched,
+        [
+            format!("secret-set {worker} postman-echo-com"),
+            format!("create {worker}"),
+        ],
+        "{:?}",
+        cloud.log()
+    );
+    assert_eq!(cloud.live_cloud(), vec![worker.clone()]);
+    assert_eq!(
+        secrets_of(&cloud, &worker),
+        vec!["postman-echo-com".to_owned()]
+    );
+    let task = task_record(&f, &id);
+    assert_eq!(task.ambiguous_create(), Some(worker.as_str()));
+    assert!(!task.has_open_sandbox(&worker));
+}
