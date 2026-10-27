@@ -16,7 +16,8 @@ For how the commands fit together (sandboxes, comparisons, working on GitHub iss
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) with `sbx` **0.43.0 or newer**, logged in
   (`sbx login`). Prebuilt templates (see *Templates*) need `sbx` **0.46.0 or newer**; that minimum only applies to
-  a profile with `[template]`.
+  a profile with `[template]`. `sbxm task` sandboxes in Docker Cloud Sandboxes also need `sbx` **0.46.0 or newer**,
+  logged in to the cloud; that minimum only applies to a cloud task (see *Running tasks in Docker Cloud Sandboxes*).
 - The secrets your agents need, stored in `sbx` (sbxm only names them): for example `sbx secret set anthropic`.
 - [Rust](https://rustup.rs/) to build sbxm. [`just`](https://github.com/casey/just) is optional, for the recipes in
   the `justfile`.
@@ -95,7 +96,9 @@ that).
 Every command that can create a sandbox (`new`, `open` when it creates or rebuilds one, `run`, `template build`, and
 `task start`, `task review`, `task run` and `task resume`) first checks the free space of the drive `sbx` keeps its sandboxes on and
 refuses, before writing anything, when it is under `min_free_disk`, naming the drive, the free space and the flag
-that overrides it: `--ignore-disk` lets that one command through. See *The sandbox drive*.
+that overrides it: `--ignore-disk` lets that one command through. See *The sandbox drive*. A task whose sandboxes
+run in the cloud skips this check, since they don't use that drive (`--ignore-disk` is still accepted); see
+*Running tasks in Docker Cloud Sandboxes*.
 
 ### The `justfile`
 
@@ -379,6 +382,8 @@ settings, the *contents* of referenced files, resources and sbxm's version. A se
 - sbxm never changes `sbx`'s settings, secrets, skills store or policies. When one of them blocks something, sbxm
   tells you the command to run.
   The one secret it creates is the Jev evaluator's, scoped to its own throwaway sandbox and removed with it.
+  The one policy change it makes is in a strict profile's cloud sandbox: a `policy deny` per host outside the
+  runtime list, scoped to that one sandbox (see *Running tasks in Docker Cloud Sandboxes*).
 - Deleting files needs `rm --purge` plus a confirmation showing the exact paths; links and junctions are refused.
 
 ## Checking on a sandbox
@@ -543,6 +548,109 @@ shrink the builds (its effect on this repo's builds was not measured).
 Deleting files inside a sandbox does not return space to the host; removing the sandbox (`task rm`) does.
 `sbxm doctor` checks the free space of both the base dir and the drive `sbx` keeps its sandboxes on, and the commands
 that create a sandbox refuse under `min_free_disk` (see *The sandbox drive*).
+
+#### Running tasks in Docker Cloud Sandboxes
+
+A repo can run its `sbxm task` sandboxes, workers and reviewers, in Docker Cloud Sandboxes (`sbx --cloud`) instead
+of on this machine (milestone 4, decisions 252-265). `sbxm run`, `new` and `open` always run here.
+
+```toml
+# sbxm-task.toml
+[sandbox]
+profile = "sbxm-dev"
+location = "cloud"   # or "local", the default when the key is absent
+```
+
+Any other value is an error naming the file (`` `remote`, expected `local` or `cloud` ``). `--cloud` or `--local`
+overrides the key for one command, and only the commands that start a task take them: `task start`, `task run` (for
+every task of a list) and `task review --pr N`. The task records its location in `task.json` (`"location":
+"cloud"`; a record without it is local), and every later command (`task review --issue/--spec`, `task resume`, `task
+gates`, `task finish`, `task rm`, `task status`) uses the recorded location, whatever the key says by then. sbxm
+never falls back to a local sandbox by itself.
+
+What changes in the cloud:
+- **No mount.** Each sandbox is created by `sbx --cloud create` with the profile's two kits, a `--ttl` and
+  `--on-timeout delete`. The task branch goes in as a `git bundle` made from the task's `repo.git`, copied in with
+  `sbx --cloud cp` and cloned under `$HOME/work/<id>` (the path is recorded in `task.json`); the prompt files go in
+  the same way. `result.md`, `review.md` and the bundle of the agent's commits come out by `cp` into a fresh host
+  staging folder, each checked to be one regular file under its size cap before it is read, and the bundle is
+  verified before it is fetched, as locally. Host-tier gates are unchanged. Build under `$HOME` in your gates, never
+  `/tmp` (see [`docs/workflow.md`](docs/workflow.md)).
+- **No templates.** A profile with `[template]` is built from its kits in the cloud, with one line saying cloud
+  templates aren't used.
+- **A strict profile** (`strict = true`) is created with its build allow list so its install steps run; then, before
+  any agent runs, sbxm denies in that one sandbox (`sbx --cloud policy deny network --sandbox <name> <host>`) every
+  allowed host outside the runtime list: the harness's provider hosts (for `claude` `api.anthropic.com`,
+  `claude.ai` and `console.anthropic.com`; for `codex` its OpenAI hosts) plus `[template].allow`. The denied hosts go
+  to the task's `run.log` (`strict cloud sandbox <name>: sbxm denied <hosts>`). It then reads `sbx --cloud policy ls`
+  again: a host still allowed outside the runtime list, or a list it can't read, removes the sandbox (then its scoped
+  secrets) and refuses, naming the host. This holds for worker, reviewer and fix-round sandboxes alike. A strict
+  profile with a harness other than `claude` or `codex` is refused before anything is created.
+- **Secrets.** The provider logins stay global in the cloud: `sbx secret set anthropic --oauth --cloud` and `sbx
+  secret set openai --oauth --cloud`. Their values never enter a sandbox. No other secret has a value source in the
+  cloud yet, so a profile whose `secrets.services` names anything else is refused for a cloud task.
+- **No free-disk check.** The `min_free_disk` check of the sandbox drive is skipped for a cloud task.
+- **`task start --workers N`** works as it does locally.
+
+**Before anything is written**, a cloud command (`task start`, `task run`, `task review`, `task resume`, and `task
+gates` when it has to make the worker sandbox again) checks the harness and profile of each cloud sandbox it may
+create in this order, and refuses at the first failure, naming the fix and ending with "or run it here with
+`--local`":
+
+| Refused when | The message names |
+|---|---|
+| `sbx` is older than 0.46.0, the cloud minimum | the version found and 0.46.0: upgrade `sbx` |
+| the cloud doesn't answer `sbx --cloud ls --json` (not logged in, for example) | `sbx login` |
+| the harness's provider login can't be stored in the cloud (only `anthropic` and `openai` can, so a `pi` or `antigravity` harness is refused) | a `claude` or `codex` harness |
+| a profile secret with no cloud value source: any `secrets.services` entry other than `anthropic` or `openai` | the secret and the profile: take it out of the profile |
+| a provider login the task needs is missing in the cloud: the harness's own, or any provider the profile names (a `codex` worker whose profile names `anthropic` needs both) | `sbx secret set <provider> --oauth --cloud` |
+
+`task run` checks the reviewer's sandbox too before the worker starts, and a review that may still run a fix round
+also checks
+what making the worker sandbox again would need (its recorded profile, a committer identity in git's `user.name` and
+`user.email`, its TTL). A failure of the cloud in the middle of a task (`sbx --cloud` not answering, an `exec`
+stream error without `timeout -v`'s lines) stops the task the way `sbx` not answering does locally, and `task resume`
+continues it in the cloud. A stream error after `timeout -v`'s lines is a timeout, as locally.
+
+**Lifetimes.** Every cloud sandbox has a TTL, rounded up to whole minutes:
+- the worker sandbox: `[worker] time_limit` + every `[gates] sandbox` command's timeout + `fix_rounds` x
+  (`[reviewer] time_limit` + `[worker] time_limit` + every sandbox gate's timeout) + 30 minutes (14h45m with the
+  defaults and three gates). It lives through the task's automatic run (worker, sandbox gates, review rounds, fix
+  rounds) and is removed when the task stops, `ready` or stopped for any reason, so nothing is billed while the task
+  waits for you;
+- a reviewer sandbox: `[reviewer] time_limit` + 30 minutes (1h15m by default), one per review round, removed after it.
+
+A removal that `sbx` answers with "temporarily unavailable" is retried after 5, 10 and 20 seconds; a sandbox already
+gone counts as removed, and one that still can't be removed is a warning naming `sbx --cloud rm <name> -f`. `task.json`
+keeps a `sandboxes` list, one entry per cloud sandbox (`name`, `role` `worker`/`reviewer`/`fix`, `location`,
+`created_at`, `ttl_s`, `removed_at`, null while it exists or when its removal failed), and `run.log` a line at each
+create (`cloud sandbox <name> created (<role>, TTL <ttl>)`) and each removal (`cloud sandbox <name> removed`). Add
+up the entries for a task's sandbox hours: `task rm --merged` archives them with `task.json` and `run.log`, a plain
+`task rm` deletes them with the folder.
+
+The other commands of a cloud task:
+- `task review --issue/--spec`: a reviewer sandbox per round in the cloud; a fix round runs in the task's worker
+  sandbox, made again from a bundle of the branch if it is gone.
+- `task review --pr N --cloud`: the PR's head goes in as a bundle from `repo.git`.
+- `task resume`: always in the cloud. The preflight runs again first; a worker sandbox that is gone (its TTL ran
+  out, a failure) is made again from the recorded profile and a bundle of the branch.
+- `task gates --issue N`: runs the sandbox tier in the worker sandbox at the recorded clone; a sandbox that is gone
+  is made again first and removed when the gates end.
+- `task finish`: host-side only (`repo.git`, GitHub); afterwards it removes any cloud sandbox the record still holds
+  open (one whose removal at the task's stop failed), retried, and the secrets scoped to it.
+- `task rm` and `task rm --merged`: remove each cloud sandbox the record still holds open (`sbx --cloud rm`, retried)
+  and the secrets scoped to it, then the clones and the folder. While a cloud sandbox may still be running, the
+  task's folder stays: its record is the only trace of that sandbox.
+- `task status` shows each task's `location:` (`local` for a record without one); `sbxm status` adds a table of
+  the running cloud sandboxes named `sbxm-` (`CLOUD SANDBOX`, `STATUS`, `SHAPE`, `LEFT`); `sbxm doctor` lists each
+  one with its time left. When the cloud can't be read, `status` prints one line instead and still exits 0, and
+  `doctor` warns instead of failing. `doctor` also warns when `sbx` is older than 0.46.0 while the cloud is in use
+  (the current repo's `sbxm-task.toml` says `location = "cloud"`, or a task record says `cloud`), and when the
+  current repo is a cloud repo whose `[gates] sandbox` commands name `/tmp`.
+
+**Cost.** Cloud sandboxes are billed by Docker. Every one has a TTL with `--on-timeout delete` and is removed when
+the task stops, but a removal can fail and a TTL can be long, so check `sbxm status` or `sbxm doctor` for running
+ones (or `sbx --cloud ls`), and read your bill. There is no budget limit in sbxm.
 
 [`docs/workflow.md`](docs/workflow.md) shows how the commands fit together, with the use cases and these practical
 notes in one place.

@@ -172,6 +172,75 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
   `run.log`, `gates.log`, `task.json`) are archived to `.sbxm/task-archive/<id>/` before its folder goes (a rerun after a failed removal reuses an identical archive; one that differs is refused), and the output names the disk
   given back.
 
+### The same tasks in Docker Cloud Sandboxes (milestone 4)
+
+```
+sbxm task run --spec idea.md --cloud   # this task's sandboxes in the cloud; the task remembers it
+sbxm task review --pr 69 --local       # this review here, whatever [sandbox] location says
+sbxm status                            # the tasks, then the running cloud sandboxes and their time left
+```
+
+`[sandbox] location = "cloud"` in `sbxm-task.toml` makes the cloud a repo's default (`"local"`, or no key, keeps
+it here); `--cloud`/`--local` on `task start`, `task run` and `task review --pr N` override it for that command.
+After that, `task.json`'s `location` decides for every command of the task. The phases are the same as locally;
+what differs is how the work gets in and out (bundles copied by `sbx --cloud cp`, a clone under `$HOME/work/<id>`),
+how long each sandbox lives, and what is refused up front. README, *Running tasks in Docker Cloud Sandboxes*, has
+every detail.
+
+| Command | In the cloud |
+|---|---|
+| `task start`, `task run` | Location from the flag, else the key. The preflight below, then the worker sandbox (the profile's kits, a TTL, `--on-timeout delete`, the strict denies before the agent), bundle and prompt in, worker, sandbox gates, bundle out, verify, fetch, host gates. The worker sandbox goes when the task stops. |
+| `task review --issue/--spec` | The recorded location. A reviewer sandbox per round; a fix round in the worker sandbox, made again from a bundle of the branch if it is gone. |
+| `task review --pr N` | Location as for `start`; the PR's head goes in as a bundle from `repo.git`. |
+| `task resume` | Always in the cloud: the preflight again, then a gone worker sandbox made again from the recorded profile and a bundle of the branch. |
+| `task gates` | In the recorded location; a gone worker sandbox is made again first, and removed when the gates end. |
+| `task finish` | Host-side only; then removes any cloud sandbox of the task still open (one whose removal at the stop failed), retried. |
+| `task rm`, `task rm --merged` | Remove the task's open cloud sandboxes (retried) and their scoped secrets, then the folder; a sandbox already gone counts as removed, and one that may still run keeps the folder. `--merged` archives `task.json` and `run.log`, with the lifetimes, first. |
+| `task status`, `status` | `task status` shows the recorded location; `status` adds the running `sbxm-` cloud sandboxes, or one line when the cloud can't be read (still exit 0). |
+| `doctor` | Lists the running cloud sandboxes (a warning when the cloud can't be read), warns about an `sbx` older than 0.46.0 while the cloud is in use, and about `/tmp` in the gates of a cloud repo (the current folder's). |
+
+**Refused before anything is written,** each message ending "or run it here with `--local`" (decision 261): `sbx`
+older than 0.46.0 (upgrade it); the cloud not answering `sbx --cloud ls` (`sbx login`); a harness whose provider
+login the cloud can't store (only `claude` and `codex` run there); a profile secret other than the `anthropic` and
+`openai` logins, which has no value source in the cloud yet (take it out of the profile); a provider login the task
+needs missing in the cloud, the harness's own or one the profile names (`sbx secret set <provider> --oauth
+--cloud`). sbxm never falls back to a local sandbox. The strict check can't be made up front: it reads the
+sandbox's own policy, so it runs after `create` and before any agent, and removes the sandbox when it fails.
+
+- **Build under `$HOME`, never `/tmp` (decision 257).** In a cloud sandbox `/tmp` is a tmpfs of half the memory,
+  and a cargo target folder filled it (spike S14, Q5). There is one gate list for both locations, so change your
+  own `sbxm-task.toml` (it isn't in this repo) to build under `$HOME`:
+  ```toml
+  [gates]
+  sandbox = [
+    "cargo fmt --check",
+    "CARGO_TARGET_DIR=$HOME/target cargo clippy --all-targets -- -D warnings",   # was /tmp/target
+    "CARGO_TARGET_DIR=$HOME/target cargo test",
+  ]
+  ```
+  `sbxm doctor`, run in a repo whose `sbxm-task.toml` says `location = "cloud"`, warns about each sandbox gate that
+  still names `/tmp`.
+- **How long a cloud sandbox lives (decisions 259, 263).** Each is created with `--ttl` and `--on-timeout delete`.
+  The worker sandbox's TTL is the worker's time limit + every sandbox gate's timeout + `fix_rounds` x (the reviewer's
+  time limit + the worker's + every sandbox gate's timeout) + 30 minutes (14h45m with the defaults and three gates):
+  it lives through the task's automatic run, so fix rounds keep a warm build, and is removed when the task stops,
+  `ready` or for any other reason, so nothing is billed while the task waits for you. `task resume`, `task gates` or
+  a later review's fix round makes it again from a bundle of the branch when needed. A reviewer sandbox lives for one
+  round, with the reviewer's time limit + 30 minutes. A removal that fails with "temporarily unavailable" is retried
+  after 5, 10 and 20 s; the TTL is the backstop, and `sbxm status` and `sbxm doctor` list what is still running.
+  Every sandbox's lifetime is in `task.json`'s `sandboxes` and in `run.log`, so a retro can add up the hours (read
+  them before a plain `task rm`, which deletes them; `task rm --merged` archives them).
+- **One task at a time, for now (decision 258).** Milestone 4 adds no parallel orchestration. The experiment still
+  to run after the merge: 2, then 3, cloud tasks at once as separate background `task run`s, measuring tasks per
+  hour, cost and failures; a `--parallel` option is built only if it justifies one. `task start --workers N` works
+  in the cloud as it does here.
+- **Troubleshooting a strict cloud sandbox (decision 264).** sbxm *removes* hosts from a strict profile's cloud
+  sandbox: every host outside the harness's provider hosts and `[template].allow` is denied, and the list goes to the
+  task's `run.log` (`strict cloud sandbox <name>: sbxm denied <hosts>`). When something fails unexpectedly in a strict
+  cloud sandbox (the agent or a gate; the install steps ran before the denies), first check whether one of the hosts
+  listed as denied there is actually needed; if it is, add it to `[template].allow`. A denied host can fail at DNS,
+  with connection refused or with a proxy 403 (S14, Q1), so don't look only for a 403.
+
 ## How a change to sbxm itself goes
 
 1. Plan with the `sdlc-planning` skill: numbered decisions in `sdlc/decisions.md`, spikes for unknowns.
@@ -224,7 +293,7 @@ same tasks and only reads).
   `min_free_disk` in `config.toml` (default `"10g"`; `"0"` switches the check off), naming the drive and its free
   space; `--ignore-disk` lets one command through. A `task run` list (decision 193) checks again before every task,
   not only the first, since a task's own sandbox can fill the drive the next one needs; a failure there stops the
-  rest of the list. The folder is `%LOCALAPPDATA%\DockerSandboxes` on Windows, or
+  rest of the list. A cloud task skips the check (its sandboxes don't use that drive). The folder is `%LOCALAPPDATA%\DockerSandboxes` on Windows, or
   `sandbox_state_dir` in `config.toml` on any platform; on macOS and Linux without that key nothing is checked (a full
   drive makes `sbx` answer `try: sbx login`, which looks like a login problem).
   A junction from `sbx`'s `state` folder to a bigger drive was tried (2026-10-03, `sbx` 0.46.0) and does not work for the
