@@ -211,7 +211,8 @@ fn check_cloud(report: &mut Report, backend: &dyn SandboxBackend, host: &Host) {
 /// When the cloud is in use, the `sbx` version it needs (P12), and a cloud repo's sandbox gates
 /// that name `/tmp` (P13 (a) with (i), decision 262). The cloud is in use when the current
 /// directory's `sbxm-task.toml` says `location = "cloud"` or a task record runs in the cloud. The
-/// file is read only for this: one that doesn't load is left to the `task` commands to report.
+/// file is read only for this: one that doesn't load is left to the `task` commands to report,
+/// and so is a task record that doesn't load.
 fn check_cloud_use(report: &mut Report, base_dir: &Path, sbx_version: Option<&str>, host: &Host) {
     let cloud_repo = host.current_dir.as_deref().and_then(|dir| {
         let path = dir.join(task_config::FILE_NAME);
@@ -220,11 +221,19 @@ fn check_cloud_use(report: &mut Report, base_dir: &Path, sbx_version: Option<&st
     });
     let reason = match &cloud_repo {
         Some((path, _)) => Some(format!("{} has location = \"cloud\"", path.display())),
-        None => record::load_all(base_dir)
-            .unwrap_or_default()
-            .into_iter()
-            .find(|task| task.location == Location::Cloud)
-            .map(|task| format!("task {} runs in the cloud", task.id)),
+        // Each record is read on its own, so one that doesn't load hides no other.
+        None => {
+            let mut tasks: Vec<_> = record::task_folders(base_dir)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|dir| record::read(&dir.join("task.json")).ok())
+                .collect();
+            record::sort(&mut tasks);
+            tasks
+                .into_iter()
+                .find(|task| task.location == Location::Cloud)
+                .map(|task| format!("task {} runs in the cloud", task.id))
+        }
     };
     if let (Some(version), Some(reason)) = (sbx_version, reason)
         && older(version, CLOUD_MIN_SBX_VERSION)

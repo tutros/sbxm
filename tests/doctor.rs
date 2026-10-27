@@ -1263,6 +1263,46 @@ fn an_old_sbx_warns_when_a_task_record_says_cloud() {
 }
 
 #[test]
+fn a_malformed_sibling_record_does_not_hide_a_cloud_task_from_the_version_check() {
+    let env = Env::new();
+    let mut task = Record::new(
+        &NewTask {
+            kind: Kind::Issue,
+            number: 7,
+            repo: "o/r",
+            title: "t",
+            base: "main",
+            branch: "b",
+            config_hash: "h",
+            id: None,
+        },
+        NOW,
+        Process::new(1, NOW),
+    );
+    task.location = Location::Cloud;
+    record::write(&record::task_dir(&env.base_dir(), &task.id), &task).unwrap();
+    // Sorted before and after `issue-7`, so the scan meets a bad record whichever order it reads in.
+    for id in ["aaa-bad", "zzz-bad"] {
+        let dir = record::task_dir(&env.base_dir(), id);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("task.json"), "{ not json").unwrap();
+    }
+    let backend = FakeBackend::default().with_version("0.45.0");
+
+    let report = report(&env, &backend);
+
+    let text = report.render();
+    assert_eq!(
+        cloud_version_lines(&text),
+        [format!(
+            "warn sbx 0.45.0 is older than {CLOUD_MIN}, the version a cloud task needs (the \
+             cloud is in use: task issue-7 runs in the cloud); upgrade sbx"
+        )],
+        "{text}"
+    );
+}
+
+#[test]
 fn the_cloud_version_says_nothing_at_the_minimum_or_when_the_cloud_is_not_in_use() {
     let env = Env::new();
     let (_repo, cloud_host) = repo_with(&env, &gates_toml("cloud", &["cargo test"]));
