@@ -953,44 +953,32 @@ fn a_gone_worker_whose_recorded_profile_drifted_refuses_the_review_before_any_ch
     assert_unchanged(&f, &id, &backend, &was);
 }
 
-/// Lesson 3: a cloud review refuses a strict reviewer profile (slice 7 builds strict) or a
-/// reviewer TTL that doesn't add up (slice 3's check) before anything changes.
+/// Lesson 3: a cloud review refuses a reviewer TTL that doesn't add up (slice 3's check) before
+/// anything changes. (Its strict-profile case went with slice 1's refusal: slice 7 runs strict
+/// reviewers in the cloud.)
 #[test]
-fn a_cloud_review_refuses_a_strict_profile_or_a_ttl_too_large_before_any_change() {
-    let strict = |f: &Fixture| {
-        f.env.write_profile(
-            "default",
-            "[template]\nstrict = true\nallow = [\"crates.io\"]\n",
-        );
-    };
-    let huge = |f: &Fixture| {
-        std::fs::write(
-            f.env.tmp.path().join("target-repo").join("sbxm-task.toml"),
-            format!("{LOCAL_TOML}\n[reviewer]\ntime_limit = \"{}s\"\n", u64::MAX),
-        )
-        .unwrap();
-    };
-    type Change<'a> = &'a dyn Fn(&Fixture);
-    let cases: [(Change, &str); 2] = [(&strict, "strict"), (&huge, "time_limit")];
-    for (change, said) in cases {
-        let f = fixture_with(LOCAL_TOML);
-        let (spec, id) = spec(&f);
-        let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &id, &[CLEAN]);
-        start_cloud(&f, spec.clone(), &backend);
-        change(&f);
-        let was = before(&f, &id, &backend);
+fn a_cloud_review_refuses_a_ttl_too_large_before_any_change() {
+    let f = fixture_with(LOCAL_TOML);
+    let (spec, id) = spec(&f);
+    let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &id, &[CLEAN]);
+    start_cloud(&f, spec.clone(), &backend);
+    std::fs::write(
+        f.env.tmp.path().join("target-repo").join("sbxm-task.toml"),
+        format!("{LOCAL_TOML}\n[reviewer]\ntime_limit = \"{}s\"\n", u64::MAX),
+    )
+    .unwrap();
+    let was = before(&f, &id, &backend);
 
-        let ran = task_review(
-            &f,
-            &spec_review_options(&f, spec),
-            &backend,
-            &sbxm::github::fake::FakeGitHub::default(),
-        );
+    let ran = task_review(
+        &f,
+        &spec_review_options(&f, spec),
+        &backend,
+        &sbxm::github::fake::FakeGitHub::default(),
+    );
 
-        let message = format!("{:#}", ran.result.unwrap_err());
-        assert!(message.contains(said), "{said}: {message}");
-        assert_unchanged(&f, &id, &backend, &was);
-    }
+    let message = format!("{:#}", ran.result.unwrap_err());
+    assert!(message.contains("time_limit"), "{message}");
+    assert_unchanged(&f, &id, &backend, &was);
 }
 
 fn list_options(f: &Fixture) -> sbxm::commands::task_run::ListOptions {
@@ -1417,4 +1405,334 @@ fn a_staged_review_at_its_cap_is_read_and_one_over_it_a_link_or_a_folder_is_not(
         let staged = std::fs::read_dir(meta.join("staging")).map_or(0, |d| d.count());
         assert_eq!(staged, 0, "{copy:?}");
     }
+}
+
+// Slice 7: strict mode in the cloud (P9, decisions 255, 264). A strict reviewer sandbox and a
+// rebuilt fix-round sandbox are held to their runtime lists like the worker's: the denies, one
+// `run.log` line, the check, before any agent `exec`; failing closed the same way.
+
+const ANTHROPIC_HOSTS: [&str; 3] = ["api.anthropic.com", "claude.ai", "console.anthropic.com"];
+const OPENAI_HOSTS: [&str; 6] = [
+    "api.openai.com",
+    "openai.com",
+    "auth.openai.com",
+    "chatgpt.com",
+    "files.openai.com",
+    "releases.openai.com",
+];
+
+const STRICT_PROFILE: &str = "[template]\nstrict = true\nallow = [\"crates.io\"]\n";
+
+/// What every sandbox of these tests starts out allowing: both providers' hosts, a kept host and
+/// a build host.
+fn strict_list() -> Vec<&'static str> {
+    let mut list = ANTHROPIC_HOSTS.to_vec();
+    list.extend(OPENAI_HOSTS);
+    list.extend(["crates.io", "github.com"]);
+    list
+}
+
+/// The calls that hold `sandbox` to its runtime list right after its create.
+fn held(sandbox: &str, denied: &[&str]) -> Vec<String> {
+    let mut calls = vec![format!("policy-ls {sandbox}")];
+    calls.extend(denied.iter().map(|h| format!("policy-deny {sandbox} {h}")));
+    calls.push(format!("policy-ls {sandbox}"));
+    calls
+}
+
+/// The `run.log` line of a strict sandbox's denies.
+fn denied_line(sandbox: &str, denied: &[&str]) -> String {
+    format!(
+        "strict cloud sandbox {sandbox}: sbxm denied {}",
+        denied.join(", ")
+    )
+}
+
+/// `log` with the calls of [`held`] for every create of a sandbox in `held_by` inserted right
+/// after that create.
+fn with_holds(log: Vec<String>, held_by: &[(&str, Vec<&str>)]) -> Vec<String> {
+    let mut out = Vec::new();
+    for call in log {
+        let hold = held_by
+            .iter()
+            .find(|(sandbox, _)| call == format!("create {sandbox}"));
+        out.push(call);
+        if let Some((sandbox, denied)) = hold {
+            out.extend(held(sandbox, denied));
+        }
+    }
+    out
+}
+
+/// A strict cloud `task run --spec` with a fix round in a rebuilt worker sandbox: the worker's,
+/// each reviewer's and the fix round's sandbox each deny the hosts outside their own harness's
+/// list (a `claude` worker keeps the Anthropic hosts, a `codex` reviewer the OpenAI ones, both
+/// `[template].allow`), each says so in one line, and the run reaches ready.
+#[test]
+fn a_strict_cloud_run_holds_the_worker_each_reviewer_and_a_rebuilt_fix_sandbox() {
+    let f = fixture_with(LOCAL_TOML);
+    f.env.write_profile("default", STRICT_PROFILE);
+    let (spec, id) = spec(&f);
+    let root = f.env.tmp.path().join("cloud-fs");
+    let backend =
+        cloud_backend_listing(&root, &id, &[ONE, CLEAN], false).with_cloud_allow(&strict_list());
+    let (worker, reviewer, clone) = (
+        worker_sandbox(&id),
+        reviewer_sandbox(&id),
+        format!("{HOME}/work/{id}"),
+    );
+
+    let ran = task_run(&f, spec, Some(Location::Cloud), &backend);
+
+    ran.result.unwrap();
+    let mut worker_denies = OPENAI_HOSTS.to_vec();
+    worker_denies.push("github.com");
+    let mut reviewer_denies = ANTHROPIC_HOSTS.to_vec();
+    reviewer_denies.push("github.com");
+    let mut plain = started(&id);
+    plain.extend(review_round(&id, &["source.md", "prompt.md"]));
+    plain.extend(seeded(&worker, &clone, &id, &["source.md", "prompt.md"]));
+    plain.extend(fixed(&worker, &clone));
+    plain.push("exec gate".to_owned());
+    plain.extend(review_round(&id, &LATER_ROUND));
+    plain.extend(review_round(&id, &LATER_ROUND));
+    plain.push(format!("rm {worker}"));
+    let expected = with_holds(
+        plain,
+        &[
+            (&worker, worker_denies.clone()),
+            (&reviewer, reviewer_denies.clone()),
+        ],
+    );
+    assert_eq!(described_log(&backend), expected, "{}", ran.out);
+    // The worker's sandbox twice (its start and the fix round's rebuild), three reviewers.
+    assert_eq!(
+        ran.out
+            .matches(&denied_line(&worker, &worker_denies))
+            .count(),
+        2,
+        "{}",
+        ran.out
+    );
+    assert_eq!(
+        ran.out
+            .matches(&denied_line(&reviewer, &reviewer_denies))
+            .count(),
+        3,
+        "{}",
+        ran.out
+    );
+    let task = task_record(&f, &id);
+    assert_eq!((task.stage, task.round), (record::Stage::Ready, 1));
+}
+
+/// Starts a strict cloud task with the fake scoped secret and opens it for its review.
+fn started_strict(
+    f: &Fixture,
+    backend: &FakeBackend,
+    secrets: &[sbxm::backend::ScopedSecret],
+) -> (String, sbxm::task::pipeline::Prepared) {
+    let (spec, id) = spec(f);
+    sbxm::commands::task_start::run_spec_with_seams(
+        &f.env.config_dir(),
+        &sbxm::commands::task_start::SpecOptions {
+            repo_root: f.env.tmp.path().join("target-repo"),
+            spec,
+            worker_harness: None,
+            worker_model: None,
+            time_limit: None,
+            reviewer_time_limit: None,
+            profile: None,
+            base: Some("main".into()),
+            repo: Some("o/r".into()),
+            clone_source: Some(common::task_fixture::source(f)),
+            identity: Some(identity()),
+            disk: Default::default(),
+            location: Some(Location::Cloud),
+        },
+        backend,
+        &sbxm::github::fake::FakeGitHub::default(),
+        &common::task_fixture::Probe,
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &|_| {},
+        secrets,
+    )
+    .unwrap();
+    let prepared = sbxm::task::pipeline::Prepared::open(&f.env.base_dir(), &id).unwrap();
+    (id, prepared)
+}
+
+/// The fail-closed path for a strict reviewer sandbox (behavior 4): a host left after the denies
+/// removes the reviewer sandbox, then its scoped secret, and the review is refused naming the
+/// host, with no `exec` in the reviewer's sandbox; the task stops, so its worker sandbox goes
+/// too.
+#[test]
+fn a_strict_reviewer_with_a_host_left_is_removed_then_its_secret_then_refused() {
+    let f = fixture_with(LOCAL_TOML);
+    f.env.write_profile("default", STRICT_PROFILE);
+    let probe_id = spec(&f).1;
+    let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &probe_id, &[CLEAN])
+        .with_undeniable_cloud_host_in("-review-", "api.x.ai")
+        .with_cloud_allow(&{
+            let mut list = strict_list();
+            list.push("api.x.ai");
+            list
+        });
+    let secrets = [fake_secret()];
+    let (id, mut prepared) = started_strict(&f, &backend, &secrets);
+    let (worker, reviewer) = (worker_sandbox(&id), reviewer_sandbox(&id));
+    let started = backend.log().len();
+    let who = identity();
+    let env = sbxm::task::pipeline::TaskEnv {
+        config_dir: &f.env.config_dir(),
+        config: &f.config,
+        backend: &backend,
+        probe: &common::task_fixture::Probe,
+        host: &sbxm::task::gates::FakeHostRunner::default(),
+        sleep: &|_| {},
+        scoped_secrets: &secrets,
+        identity: Some(&who),
+    };
+
+    let result = sbxm::task::pipeline::review_issue(&env, &mut prepared);
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains("api.x.ai") && message.contains(&reviewer),
+        "{message}"
+    );
+    let mut denied = ANTHROPIC_HOSTS.to_vec();
+    denied.extend(["github.com", "api.x.ai"]);
+    let mut expected = vec![
+        format!("secret-set {reviewer} postman-echo-com"),
+        format!("create {reviewer}"),
+    ];
+    expected.extend(held(&reviewer, &denied));
+    expected.extend([
+        format!("rm {reviewer}"),
+        format!("secret-ls {reviewer}"),
+        format!("secret-rm {reviewer} postman-echo-com"),
+        format!("rm {worker}"),
+        format!("secret-ls {worker}"),
+        format!("secret-rm {worker} postman-echo-com"),
+    ]);
+    let log: Vec<String> = backend.log()[started..]
+        .iter()
+        .filter(|c| !c.starts_with("validate "))
+        .cloned()
+        .collect();
+    assert_eq!(log, expected);
+    assert!(
+        !backend
+            .execs()
+            .iter()
+            .any(|(sandbox, _)| *sandbox == reviewer),
+        "an exec ran in the reviewer's sandbox"
+    );
+    assert!(
+        prepared.events.contains(&denied_line(&reviewer, &denied)),
+        "{:?}",
+        prepared.events
+    );
+    assert!(
+        backend.cloud_secrets().is_empty(),
+        "{:?}",
+        backend.cloud_secrets()
+    );
+    assert_all_removed(
+        &prepared.record,
+        &[SandboxRole::Worker, SandboxRole::Reviewer],
+    );
+}
+
+/// The fail-closed path for a rebuilt fix-round sandbox: its policy list can't be read, so it is
+/// removed, then its scoped secret, and the fix round is refused naming the unread list, before
+/// the fix round's worker runs.
+#[test]
+fn a_rebuilt_strict_fix_sandbox_whose_list_cannot_be_read_is_removed_then_refused() {
+    let f = fixture_with(LOCAL_TOML);
+    f.env.write_profile("default", STRICT_PROFILE);
+    let probe_id = spec(&f).1;
+    // Two reads for the worker's start and two for the first reviewer; the fifth, the rebuilt
+    // fix sandbox's first, fails.
+    let backend =
+        cloud_backend_listing(&f.env.tmp.path().join("cloud-fs"), &probe_id, &[ONE], false)
+            .with_cloud_allow(&strict_list())
+            .failing_cloud_policy_ls_from(4);
+    let secrets = [fake_secret()];
+    let (id, mut prepared) = started_strict(&f, &backend, &secrets);
+    let worker = worker_sandbox(&id);
+    let who = identity();
+    let env = sbxm::task::pipeline::TaskEnv {
+        config_dir: &f.env.config_dir(),
+        config: &f.config,
+        backend: &backend,
+        probe: &common::task_fixture::Probe,
+        host: &sbxm::task::gates::FakeHostRunner::default(),
+        sleep: &|_| {},
+        scoped_secrets: &secrets,
+        identity: Some(&who),
+    };
+    let headless_before = backend
+        .execs()
+        .iter()
+        .filter(|(s, spec)| *s == worker && is_headless(spec))
+        .count();
+
+    let result = sbxm::task::pipeline::review_issue(&env, &mut prepared);
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains("can't read")
+            && message.contains(&format!("sbx --cloud policy ls {worker} --json")),
+        "{message}"
+    );
+    let log = backend.log();
+    let rebuilt = log
+        .iter()
+        .rposition(|c| *c == format!("create {worker}"))
+        .unwrap();
+    // The gone sandbox's secret from the start is still listed with the new one's (the cloud's
+    // `rm` leaves them, P2 point 6), so the list read removes both.
+    assert_eq!(
+        log[rebuilt - 1..],
+        [
+            format!("secret-set {worker} postman-echo-com"),
+            format!("create {worker}"),
+            format!("policy-ls {worker}"),
+            format!("rm {worker}"),
+            format!("secret-ls {worker}"),
+            format!("secret-rm {worker} postman-echo-com"),
+            format!("secret-rm {worker} postman-echo-com"),
+        ]
+    );
+    assert_eq!(
+        backend
+            .execs()
+            .iter()
+            .filter(|(s, spec)| *s == worker && is_headless(spec))
+            .count(),
+        headless_before,
+        "the fix round's worker ran"
+    );
+    assert!(
+        backend.cloud_secrets().is_empty(),
+        "{:?}",
+        backend.cloud_secrets()
+    );
+    let roles: Vec<SandboxRole> = prepared.record.sandboxes.iter().map(|s| s.role).collect();
+    assert_eq!(
+        roles,
+        [SandboxRole::Worker, SandboxRole::Reviewer, SandboxRole::Fix]
+    );
+    assert!(
+        prepared
+            .record
+            .sandboxes
+            .iter()
+            .all(|s| s.removed_at.is_some()),
+        "{:?}",
+        prepared.record.sandboxes
+    );
 }

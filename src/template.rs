@@ -614,6 +614,105 @@ pub fn check_codex_rules(
     Ok(())
 }
 
+/// The Anthropic hosts of the `claude` agent's built-in list (S17), which a strict `claude` cloud
+/// sandbox keeps (P9 (a), decision 264).
+const CLAUDE_PROVIDER_HOSTS: [&str; 3] =
+    ["api.anthropic.com", "claude.ai", "console.anthropic.com"];
+
+/// The provider hosts a strict cloud sandbox of `harness` keeps besides `[template].allow` (P9
+/// (a), decision 264); `None` for a harness sbxm knows no list for.
+fn cloud_provider_hosts(harness: Harness) -> Option<&'static [&'static str]> {
+    match harness {
+        Harness::Claude => Some(&CLAUDE_PROVIDER_HOSTS),
+        Harness::Codex => Some(&CODEX_PROVIDER_HOSTS),
+        Harness::Gemini | Harness::Pi | Harness::Antigravity => None,
+    }
+}
+
+/// Refuses a strict profile for a cloud sandbox of a harness with no provider host list, before
+/// anything is written (decision 264): sbxm couldn't tell which of its hosts to keep.
+pub fn check_strict_cloud(profile_name: &str, merged: &Profile, harness: Harness) -> Result<()> {
+    if merged.template.as_ref().is_some_and(|t| t.strict) && cloud_provider_hosts(harness).is_none()
+    {
+        bail!(
+            "strict profile '{profile_name}' can't run in the cloud with the {} harness: sbxm \
+             knows no provider host list for it to keep (decision 264); use a claude or codex \
+             harness, a profile without strict = true, or run it here with `--local`",
+            harness.as_str()
+        );
+    }
+    Ok(())
+}
+
+/// Holds a strict profile's cloud sandbox to its runtime list once it is created and before any
+/// `exec` in it (decisions 255, 264, P9 (a) with (i)): reads `sbx --cloud policy ls`, denies every
+/// allowed host outside the harness's provider hosts and `[template].allow`, pushes one line naming
+/// the denied hosts to `lines` (for `run.log`), then reads the list again and checks it, as [232]
+/// checks locally. Any host still allowed outside the runtime list, or a list that can't be read,
+/// is an error naming it; the caller removes the sandbox, then its scoped secrets (fails closed).
+/// Nothing for a profile that isn't strict.
+pub fn hold_strict_cloud(
+    profile_name: &str,
+    merged: &Profile,
+    harness: Harness,
+    sandbox: &str,
+    backend: &dyn SandboxBackend,
+    lines: &mut Vec<String>,
+) -> Result<()> {
+    let Some(table) = merged.template.as_ref().filter(|t| t.strict) else {
+        return Ok(());
+    };
+    check_strict_cloud(profile_name, merged, harness)?;
+    let provider = cloud_provider_hosts(harness).unwrap_or_default();
+    let keeps = |entry: &str| {
+        let host = host_of(entry);
+        provider.contains(&host) || allows(&table.allow, host)
+    };
+    let read = || {
+        backend.cloud_allowed_hosts(sandbox).map_err(|err| {
+            anyhow::anyhow!(
+                "sbxm can't read the network policy of strict cloud sandbox {sandbox} ({err:#}), \
+                 so it can't tell what the sandbox allows; check that `sbx --cloud policy ls \
+                 {sandbox} --json` works, or set strict = false in profile '{profile_name}'"
+            )
+        })
+    };
+    let mut denied = Vec::new();
+    let closed = (|| -> Result<()> {
+        for host in read()?.into_iter().filter(|h| !keeps(h)) {
+            backend
+                .cloud_deny_host(sandbox, &host)
+                .with_context(|| format!("cannot deny {host} in strict cloud sandbox {sandbox}"))?;
+            denied.push(host);
+        }
+        Ok(())
+    })();
+    // Written whatever comes next: a denied host is the first thing to check when something
+    // fails in a strict cloud sandbox (decision 264). A first list that couldn't be read denied
+    // nothing and says so in its error.
+    if closed.is_ok() || !denied.is_empty() {
+        lines.push(if denied.is_empty() {
+            format!("strict cloud sandbox {sandbox}: sbxm denied no hosts")
+        } else {
+            format!(
+                "strict cloud sandbox {sandbox}: sbxm denied {}",
+                denied.join(", ")
+            )
+        });
+    }
+    closed?;
+    if let Some(host) = read()?.into_iter().find(|h| !keeps(h)) {
+        bail!(
+            "strict cloud sandbox {sandbox} still allows {host} after sbxm's denies, and {host} is \
+             neither a {} provider host nor in [template].allow of strict profile \
+             '{profile_name}', so the sandbox isn't used; add the host to [template].allow if \
+             the agent may reach it, or set strict = false",
+            harness.as_str()
+        );
+    }
+    Ok(())
+}
+
 /// `github.com` from `github.com:443`.
 /// Whether an allow list names `host`, exactly or through a `*.<domain>` entry, which covers
 /// every host under the domain but not the domain itself (review PR 269 M-1).

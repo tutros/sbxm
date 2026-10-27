@@ -471,27 +471,6 @@ fn a_staged_bundle_at_its_cap_is_fetched_and_one_byte_over_is_refused() {
     assert!(!dir.exists(), "the staging folder goes with its Staged");
 }
 
-/// Only slice 7 makes strict cloud sandboxes: refused before anything is written or created.
-#[test]
-fn a_strict_profile_is_refused_for_the_cloud_before_anything() {
-    let f = fixture_with(LOCAL_TOML);
-    f.env.write_profile(
-        "default",
-        "[template]\nstrict = true\nallow = [\"crates.io\"]\n",
-    );
-    let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &spec_id(&f));
-
-    let (result, _) = start_spec(&f, &backend, Some(Location::Cloud));
-
-    let message = format!("{:#}", result.unwrap_err());
-    assert!(
-        message.contains("strict") && message.contains("slice 7") && message.contains("--local"),
-        "{message}"
-    );
-    assert!(backend.log().is_empty(), "{:?}", backend.log());
-    assert!(!f.env.base_dir().join(".sbxm").join("tasks").exists());
-}
-
 /// Decision 262(g): a non-strict `[template]` profile is built from its kits, with one line.
 #[test]
 fn a_template_profile_is_built_from_its_kits_with_one_line_in_the_cloud() {
@@ -1748,4 +1727,309 @@ fn task_run_issue_local_overrides_a_cloud_config_for_the_start_too() {
         "{:?}",
         backend.locations()
     );
+}
+
+// Slice 7: strict mode in the cloud (`sdlc/milestone-4.md` P9, P10, "After create: the
+// strict-policy check fails closed"; decisions 255, 264). A strict sandbox is created with the
+// build allow list, every allowed host outside the runtime list (the harness's provider hosts plus
+// `[template].allow`) is denied in it, the denied hosts go to `run.log`, and the list read again
+// must hold only the runtime list before any agent `exec`.
+
+/// The claude harness's runtime hosts (P9 (a)).
+const CLAUDE_HOSTS: [&str; 3] = ["api.anthropic.com", "claude.ai", "console.anthropic.com"];
+
+/// The rest of the claude agent's built-in list as S17 saw it, none of them a runtime host.
+const BUILT_IN_OTHERS: [&str; 6] = [
+    "api.github.com",
+    "github.com",
+    "api.mistral.ai",
+    "api.openai.com",
+    "openrouter.ai",
+    "api.x.ai",
+];
+
+const STRICT_PROFILE: &str =
+    "[template]\nstrict = true\nallow = [\"crates.io\", \"*.example.org\"]\n";
+
+/// The `run.log` line (decision 264) of a strict cloud sandbox's denies.
+fn denied_line(sandbox: &str, hosts: &[&str]) -> String {
+    if hosts.is_empty() {
+        format!("strict cloud sandbox {sandbox}: sbxm denied no hosts")
+    } else {
+        format!(
+            "strict cloud sandbox {sandbox}: sbxm denied {}",
+            hosts.join(", ")
+        )
+    }
+}
+
+/// Boundary: a list that is exactly the runtime list passes with no deny, and the agent runs.
+#[test]
+fn a_strict_cloud_worker_whose_list_is_the_runtime_list_runs_the_agent() {
+    let f = fixture_with(LOCAL_TOML);
+    f.env.write_profile("default", STRICT_PROFILE);
+    let id = spec_id(&f);
+    let sandbox = format!("sbxm-task-{id}-claude");
+    let mut runtime = CLAUDE_HOSTS.to_vec();
+    runtime.push("crates.io");
+    let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &id).with_cloud_allow(&runtime);
+
+    let (result, out) = start_spec(&f, &backend, Some(Location::Cloud));
+
+    result.unwrap();
+    let log = described_log(&backend);
+    assert_eq!(
+        log[..4],
+        [
+            format!("create {sandbox}"),
+            format!("policy-ls {sandbox}"),
+            format!("policy-ls {sandbox}"),
+            "exec printenv HOME".to_owned(),
+        ]
+    );
+    assert!(log.contains(&"exec worker".to_owned()), "{log:?}");
+    assert!(!log.iter().any(|e| e.starts_with("policy-deny")), "{log:?}");
+    assert_eq!(out.matches(&denied_line(&sandbox, &[])).count(), 1, "{out}");
+    // Created from the profile's kits with the build allow list: no template, no create-time deny.
+    let create = &backend.creates()[0];
+    assert_eq!(create.template, None);
+    assert!(create.deny_network.is_empty());
+}
+
+/// The S17-shape list of the claude agent's built-in hosts plus a build host: every host outside
+/// the runtime list is denied, in the list's order; `[template].allow` hosts, exact and through
+/// `*.`, are kept; one line names the denied hosts; then the list is checked and the agent runs.
+#[test]
+fn a_strict_cloud_worker_denies_every_host_outside_the_runtime_list_and_keeps_the_allowed_ones() {
+    let f = fixture_with(LOCAL_TOML);
+    f.env.write_profile("default", STRICT_PROFILE);
+    let id = spec_id(&f);
+    let sandbox = format!("sbxm-task-{id}-claude");
+    let mut list = CLAUDE_HOSTS.to_vec();
+    list.extend(BUILT_IN_OTHERS);
+    list.extend([
+        "crates.io",
+        "static.example.org",
+        "example.org",
+        "postman-echo.com",
+    ]);
+    let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &id).with_cloud_allow(&list);
+
+    let (result, out) = start_spec(&f, &backend, Some(Location::Cloud));
+
+    result.unwrap();
+    // `*.example.org` covers hosts under the domain, not the domain itself (as [232]).
+    let mut denied = BUILT_IN_OTHERS.to_vec();
+    denied.extend(["example.org", "postman-echo.com"]);
+    let mut expected = vec![format!("create {sandbox}"), format!("policy-ls {sandbox}")];
+    expected.extend(denied.iter().map(|h| format!("policy-deny {sandbox} {h}")));
+    expected.extend([
+        format!("policy-ls {sandbox}"),
+        "exec printenv HOME".to_owned(),
+    ]);
+    let log = described_log(&backend);
+    assert_eq!(log[..expected.len()], expected[..], "{log:?}");
+    assert!(log.contains(&"exec worker".to_owned()), "{log:?}");
+    assert_eq!(
+        out.matches(&denied_line(&sandbox, &denied)).count(),
+        1,
+        "{out}"
+    );
+}
+
+/// The `codex` harness keeps decision 221's six OpenAI hosts.
+#[test]
+fn a_strict_cloud_codex_worker_keeps_the_openai_hosts() {
+    let f = fixture_with(LOCAL_TOML);
+    f.env.write_profile("default", STRICT_PROFILE);
+    let id = spec_id(&f);
+    let sandbox = format!("sbxm-task-{id}-codex");
+    let openai = [
+        "api.openai.com",
+        "openai.com",
+        "auth.openai.com",
+        "chatgpt.com",
+        "files.openai.com",
+        "releases.openai.com",
+    ];
+    let mut list = openai.to_vec();
+    list.extend(["github.com", "api.anthropic.com"]);
+    let backend = cloud_ready()
+        .and_secrets(&["openai"])
+        .with_cloud_allow(&list);
+    let spec = common::task_fixture::spec_file(&f, "Build a thing.\n");
+    let mut options = spec_options(&f, spec, Some(Location::Cloud));
+    options.worker_harness = Some(sbxm::harness::Harness::Codex);
+    let mut out = Vec::new();
+
+    // The fake's `printenv HOME` answers nothing, so the start fails after the check passed.
+    let _ = sbxm::commands::task_start::run_spec(
+        &f.env.config_dir(),
+        &options,
+        &backend,
+        &sbxm::github::fake::FakeGitHub::default(),
+        &common::task_fixture::Probe,
+        &mut out,
+        &mut Vec::new(),
+    );
+
+    let out = String::from_utf8(out).unwrap();
+    let log = described_log(&backend);
+    assert_eq!(
+        log[..5],
+        [
+            format!("create {sandbox}"),
+            format!("policy-ls {sandbox}"),
+            format!("policy-deny {sandbox} github.com"),
+            format!("policy-deny {sandbox} api.anthropic.com"),
+            format!("policy-ls {sandbox}"),
+        ],
+        "{log:?}"
+    );
+    assert_eq!(log[5], "exec printenv HOME", "{log:?}");
+    assert!(
+        out.contains(&denied_line(&sandbox, &["github.com", "api.anthropic.com"])),
+        "{out}"
+    );
+}
+
+/// Asserts the fail-closed order (behavior 4): `secret-set`, `create`, the first `policy ls`, the
+/// denies, the `policy ls` that fails the check, the sandbox's `rm`, the cloud's secret list and
+/// `secret-rm`; no `exec` at all, so no agent ran. The task folder goes with the sandbox, as a
+/// local strict `codex` start that [232] refuses leaves it.
+fn assert_failed_closed(
+    f: &common::task_fixture::Fixture,
+    id: &str,
+    backend: &sbxm::backend::FakeBackend,
+    started: &Started,
+    denies: &[&str],
+    reads: usize,
+) {
+    let sandbox = format!("sbxm-task-{id}-claude");
+    let mut expected = vec![
+        format!("secret-set {sandbox} {FAKE_NAME}"),
+        format!("create {sandbox}"),
+        format!("policy-ls {sandbox}"),
+    ];
+    expected.extend(denies.iter().map(|h| format!("policy-deny {sandbox} {h}")));
+    if reads == 2 {
+        expected.push(format!("policy-ls {sandbox}"));
+    }
+    expected.extend([
+        format!("rm {sandbox}"),
+        format!("secret-ls {sandbox}"),
+        format!("secret-rm {sandbox} {FAKE_NAME}"),
+    ]);
+    assert_eq!(described_log(backend), expected);
+    assert!(backend.execs().is_empty());
+    assert_eq!(backend.cloud_secrets(), Vec::<(String, String)>::new());
+    assert!(!sbxm::task::record::task_dir(&f.env.base_dir(), id).exists());
+    assert_start_lines(started, &sandbox, "removed");
+    let line = format!("scoped secret {FAKE_NAME} of {sandbox} removed");
+    assert_eq!(started.out.matches(&line).count(), 1, "{}", started.out);
+    // The removal lines come before the refusal: the refusal is the command's result.
+    assert!(started.result.is_err());
+}
+
+/// Boundary: one extra host still allowed after the denies (a rule sbxm's deny doesn't win over):
+/// the sandbox goes, then its scoped secret, then the refusal names the host; no agent `exec`.
+#[test]
+fn a_host_left_after_the_denies_removes_the_sandbox_then_the_secret_then_refuses() {
+    let f = fixture_with(LOCAL_TOML);
+    f.env.write_profile("default", STRICT_PROFILE);
+    let id = spec_id(&f);
+    let sandbox = format!("sbxm-task-{id}-claude");
+    let mut list = CLAUDE_HOSTS.to_vec();
+    list.extend(["api.x.ai", "github.com"]);
+    let backend = cloud_ready()
+        .with_cloud_allow(&list)
+        .with_undeniable_cloud_host("api.x.ai");
+
+    let started = start_cloud_with_secrets(&f, &backend, &[fake_secret()]);
+
+    assert_failed_closed(&f, &id, &backend, &started, &["api.x.ai", "github.com"], 2);
+    let message = format!("{:#}", started.result.as_ref().unwrap_err());
+    assert!(
+        message.contains("api.x.ai") && message.contains(&sandbox) && message.contains("strict"),
+        "{message}"
+    );
+    assert!(!message.contains("github.com"), "{message}");
+    // The denied hosts were written before the check failed.
+    assert_eq!(
+        started
+            .out
+            .matches(&denied_line(&sandbox, &["api.x.ai", "github.com"]))
+            .count(),
+        1,
+        "{}",
+        started.out
+    );
+    assert_value_nowhere(&f, &id, &backend, &started);
+}
+
+/// Boundary: a `policy ls` sbxm can't read or parse, after the denies or before them, takes the
+/// same fail-closed path, naming the unread list.
+#[test]
+fn an_unreadable_policy_list_removes_the_sandbox_then_the_secret_then_refuses() {
+    for (from, denies, reads) in [(1, vec!["github.com"], 2), (0, vec![], 1)] {
+        let f = fixture_with(LOCAL_TOML);
+        f.env.write_profile("default", STRICT_PROFILE);
+        let id = spec_id(&f);
+        let sandbox = format!("sbxm-task-{id}-claude");
+        let mut list = CLAUDE_HOSTS.to_vec();
+        list.push("github.com");
+        let backend = cloud_ready()
+            .with_cloud_allow(&list)
+            .failing_cloud_policy_ls_from(from);
+
+        let started = start_cloud_with_secrets(&f, &backend, &[fake_secret()]);
+
+        assert_failed_closed(&f, &id, &backend, &started, &denies, reads);
+        let message = format!("{:#}", started.result.as_ref().unwrap_err());
+        assert!(
+            message.contains("can't read")
+                && message.contains(&format!("sbx --cloud policy ls {sandbox} --json")),
+            "{message}"
+        );
+        let line = denied_line(&sandbox, &denies);
+        assert_eq!(
+            started.out.matches(&line).count(),
+            reads - 1,
+            "{}",
+            started.out
+        );
+    }
+}
+
+/// A strict profile with a harness sbxm has no provider list for is refused, naming the harness;
+/// claude and codex have one, and a non-strict profile needs none. Unit level: of those harnesses
+/// a task can't run `pi` at all, and the cloud preflight refuses `antigravity`'s google login
+/// first.
+#[test]
+fn a_strict_profile_with_an_unsupported_harness_is_refused_for_the_cloud() {
+    use sbxm::harness::Harness;
+
+    let f = fixture_with(LOCAL_TOML);
+    f.env.write_profile("default", STRICT_PROFILE);
+    f.env
+        .write_profile("loose", "[template]\nallow = [\"crates.io\"]\n");
+    let strict = sbxm::config::Profile::load(&f.env.profiles_dir(), "default").unwrap();
+    let loose = sbxm::config::Profile::load(&f.env.profiles_dir(), "loose").unwrap();
+
+    for harness in [Harness::Pi, Harness::Antigravity, Harness::Gemini] {
+        let message = format!(
+            "{:#}",
+            sbxm::template::check_strict_cloud("default", &strict, harness).unwrap_err()
+        );
+        assert!(
+            message.contains("strict")
+                && message.contains(&format!("the {} harness", harness.as_str()))
+                && message.contains("--local"),
+            "{message}"
+        );
+        sbxm::template::check_strict_cloud("loose", &loose, harness).unwrap();
+    }
+    for harness in [Harness::Claude, Harness::Codex] {
+        sbxm::template::check_strict_cloud("default", &strict, harness).unwrap();
+    }
 }

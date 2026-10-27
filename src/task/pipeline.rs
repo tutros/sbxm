@@ -53,7 +53,7 @@ const CLOUD_OAUTH_PROVIDERS: [&str; 2] = ["anthropic", "openai"];
 /// `sbx` and the cloud, checked in this order before any write, delete or changing backend call,
 /// and before the task folder exists. The first failure refuses, naming its fix and `--local`.
 /// `backend` is the cloud instance. The strict-policy check isn't here: it reads the sandbox's
-/// own policy, which exists only after `create` (slice 7).
+/// own policy, which exists only after `create` (slice 7, [`template::hold_strict_cloud`]).
 fn cloud_preflight(
     backend: &dyn SandboxBackend,
     harness: Harness,
@@ -291,7 +291,7 @@ pub fn prepare_pr(ctx: &Ctx, pr: &PrInfo) -> Result<Prepared> {
 }
 
 /// [`prepare_pr`] at `location`. At [`Location::Cloud`] (milestone 4 slice 5) the reviewer's
-/// checks are the cloud preflight (decision 261), its strict refusal and its TTL, and the record
+/// checks are the cloud preflight (decision 261), its strict harness check and its TTL, and the record
 /// carries the location; `ctx`'s backend is the cloud instance.
 pub fn prepare_pr_at(ctx: &Ctx, pr: &PrInfo, location: Location) -> Result<Prepared> {
     let global = GlobalConfig::load(ctx.config_dir)?;
@@ -987,7 +987,7 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
                 &ctx.config.sandbox.profile,
                 &profile,
             )?;
-            refuse_strict_cloud(&ctx.config.sandbox.profile, &profile)?;
+            template::check_strict_cloud(&ctx.config.sandbox.profile, &profile, worker.harness)?;
             Some(lifetime::worker_ttl(ctx.config)?)
         }
     };
@@ -1168,6 +1168,7 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
                 );
                 record::write(&meta, task)?;
                 events.push(lifetime::created_line(&sandbox, SandboxRole::Worker, ttl));
+                plan.hold_strict(ctx.backend, &sandbox, worker.harness, &mut events)?;
                 let repo_git = meta.join("repo.git");
                 let clone = seed_cloud_clone(
                     ctx.backend,
@@ -1873,18 +1874,6 @@ impl SandboxPlan {
     }
 }
 
-/// Refuses a strict profile for a cloud sandbox: its removal of the build hosts and the check after
-/// it (decision 255) are milestone 4's slice 7.
-fn refuse_strict_cloud(profile_name: &str, profile: &Profile) -> Result<()> {
-    if profile.template.as_ref().is_some_and(|t| t.strict) {
-        bail!(
-            "profile '{profile_name}' is strict, and strict cloud sandboxes come in milestone 4's \
-             slice 7; start it with --local, or use a profile without strict = true"
-        );
-    }
-    Ok(())
-}
-
 /// [`plan_sandbox`] for a cloud sandbox: always the profile's kits, since there are no cloud
 /// templates (decision 254); a profile with a `[template]` gets one line saying so (decision
 /// 262(g)).
@@ -1901,7 +1890,7 @@ fn plan_cloud_sandbox(
 ) -> Result<SandboxPlan> {
     let global = GlobalConfig::load(config_dir)?;
     let profile = Profile::load(global.profiles_dir(), profile_name)?;
-    refuse_strict_cloud(profile_name, &profile)?;
+    template::check_strict_cloud(profile_name, &profile, harness)?;
     if profile.template.is_some() {
         warnings.push(format!(
             "cloud templates aren't used (decision 254); {sandbox} is built from \
@@ -1955,6 +1944,26 @@ impl SandboxPlan {
                 ttl: Some(ttl),
             })
             .with_context(|| format!("cannot create sandbox {sandbox}"))
+    }
+
+    /// Holds a strict profile's cloud sandbox to its runtime list before anything runs in it
+    /// (decisions 255, 264): the denied hosts' line goes to `lines`; an error means the caller
+    /// removes the sandbox, then its scoped secrets. Nothing for a profile that isn't strict.
+    fn hold_strict(
+        &self,
+        backend: &dyn SandboxBackend,
+        sandbox: &str,
+        harness: Harness,
+        lines: &mut Vec<String>,
+    ) -> Result<()> {
+        template::hold_strict_cloud(
+            &self.profile_name,
+            &self.profile,
+            harness,
+            sandbox,
+            backend,
+            lines,
+        )
     }
 }
 
@@ -3588,7 +3597,7 @@ pub(super) fn check_cloud_rebuild(env: &TaskEnv, record: &Record) -> Result<()> 
         profile_name,
         &profile,
     )?;
-    refuse_strict_cloud(profile_name, &profile)?;
+    template::check_strict_cloud(profile_name, &profile, env.config.worker.harness)?;
     lifetime::worker_ttl(env.config)?;
     if env.identity.is_none() {
         bail!(
@@ -3613,7 +3622,7 @@ fn check_changed_paths(task: &Prepared) -> Result<()> {
 /// has created anything.
 ///
 /// At [`Location::Cloud`], `backend` is the cloud instance and the checks are the cloud preflight
-/// (decision 261) for the reviewer's harness and profile, its strict refusal (slice 7) and its
+/// (decision 261) for the reviewer's harness and profile, its strict harness check (slice 7) and its
 /// TTL (milestone 4 slice 5), instead of the local secret check.
 pub fn check_reviewer_inputs(
     config_dir: &Path,
@@ -3643,7 +3652,7 @@ pub fn check_reviewer_inputs(
                 profile_name,
                 &profile,
             )?;
-            refuse_strict_cloud(profile_name, &profile)?;
+            template::check_strict_cloud(profile_name, &profile, reviewer.harness)?;
             lifetime::reviewer_ttl(config)?;
         }
     }
@@ -3661,7 +3670,7 @@ pub fn check_reviewer_inputs(
 /// discard, issue #194 review finding M-2) rather than only inside the preparation that runs after
 /// it. Mirrors [`check_reviewer_inputs`] for the worker.
 /// At [`Location::Cloud`], as [`check_reviewer_inputs`] there: the cloud preflight, the strict
-/// refusal and the worker's TTL.
+/// harness check and the worker's TTL.
 pub fn check_worker_inputs(
     config_dir: &Path,
     backend: &dyn SandboxBackend,
@@ -3690,7 +3699,7 @@ pub fn check_worker_inputs(
                 profile_name,
                 &profile,
             )?;
-            refuse_strict_cloud(profile_name, &profile)?;
+            template::check_strict_cloud(profile_name, &profile, worker.harness)?;
             lifetime::worker_ttl(config)?;
         }
     }
@@ -4145,7 +4154,7 @@ fn create_cloud_sandbox(
     prepared
         .events
         .push(lifetime::created_line(sandbox, role, ttl));
-    Ok(())
+    plan.hold_strict(env.backend, sandbox, harness, &mut prepared.events)
 }
 
 /// Removes one of a cloud task's sandboxes, its lifetime entry stamped, then the secrets scoped

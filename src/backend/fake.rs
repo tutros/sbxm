@@ -121,8 +121,8 @@ pub struct FakeBackend {
     /// Each sandbox's own allow list once it was read or changed.
     cloud_policies: Mutex<HashMap<String, Vec<String>>>,
     /// Hosts a `cloud_deny_host` leaves allowed, standing in for a rule sbxm's deny doesn't win
-    /// over.
-    undeniable_cloud_hosts: Vec<String>,
+    /// over, as `(part of the sandbox's name, host)`.
+    undeniable_cloud_hosts: Vec<(String, String)>,
     /// `cloud_allowed_hosts` fails from this call on, counting from 0.
     fail_cloud_policy_ls_from: Option<usize>,
     cloud_policy_ls_calls: Mutex<usize>,
@@ -537,9 +537,15 @@ impl FakeBackend {
         }
     }
 
-    /// Makes `cloud_deny_host` of this host succeed but leave it allowed.
-    pub fn with_undeniable_cloud_host(mut self, host: &str) -> Self {
-        self.undeniable_cloud_hosts.push(host.to_owned());
+    /// Makes `cloud_deny_host` of this host succeed but leave it allowed, in every sandbox.
+    pub fn with_undeniable_cloud_host(self, host: &str) -> Self {
+        self.with_undeniable_cloud_host_in("", host)
+    }
+
+    /// [`FakeBackend::with_undeniable_cloud_host`] only in sandboxes whose name contains `part`.
+    pub fn with_undeniable_cloud_host_in(mut self, part: &str, host: &str) -> Self {
+        self.undeniable_cloud_hosts
+            .push((part.to_owned(), host.to_owned()));
         self
     }
 
@@ -777,6 +783,8 @@ impl SandboxBackend for FakeBackend {
         }
         self.creates.lock().unwrap().push(spec.clone());
         self.record("create", &spec.name);
+        // A new sandbox of the same name starts from the list again.
+        self.cloud_policies.lock().unwrap().remove(&spec.name);
         if self.fail_create
             || self.fail_create_for.contains(&spec.name)
             || self
@@ -978,7 +986,11 @@ impl SandboxBackend for FakeBackend {
 
     fn cloud_deny_host(&self, sandbox: &str, host: &str) -> Result<()> {
         self.record("policy-deny", &format!("{sandbox} {host}"));
-        if !self.undeniable_cloud_hosts.iter().any(|h| h == host) {
+        if !self
+            .undeniable_cloud_hosts
+            .iter()
+            .any(|(part, h)| sandbox.contains(part.as_str()) && h == host)
+        {
             self.cloud_policies
                 .lock()
                 .unwrap()
