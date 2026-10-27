@@ -2033,3 +2033,41 @@ fn a_strict_profile_with_an_unsupported_harness_is_refused_for_the_cloud() {
         sbxm::template::check_strict_cloud("default", &strict, harness).unwrap();
     }
 }
+
+/// Behavior 4: a strict refusal whose sandbox removal fails after the retries is reported as
+/// slice 3 reports one: the warning naming `sbx --cloud rm`, the record kept with its entry open,
+/// the scoped secret still removed after the last attempt, and the refusal still names the host.
+#[test]
+fn a_strict_refusal_whose_removal_fails_keeps_the_record_and_reports_it() {
+    let f = fixture_with(LOCAL_TOML);
+    f.env.write_profile("default", STRICT_PROFILE);
+    let id = spec_id(&f);
+    let sandbox = format!("sbxm-task-{id}-claude");
+    let error = unavailable(&sandbox);
+    let mut list = CLAUDE_HOSTS.to_vec();
+    list.push("api.x.ai");
+    let backend = cloud_ready()
+        .with_cloud_allow(&list)
+        .with_undeniable_cloud_host("api.x.ai")
+        .with_remove_errors(&[&error, &error, &error, &error]);
+
+    let started = start_cloud_with_secrets(&f, &backend, &[fake_secret()]);
+
+    let message = format!("{:#}", started.result.as_ref().unwrap_err());
+    assert!(
+        message.contains("api.x.ai") && message.contains(&format!("sbx --cloud rm {sandbox} -f")),
+        "{message}"
+    );
+    assert_eq!(backend.removes().len(), 4);
+    assert_eq!(started.waits, secs(&[5, 10, 20]));
+    assert!(backend.execs().is_empty());
+    assert_eq!(
+        backend.log().last(),
+        Some(&format!("secret-rm {sandbox} {FAKE_NAME}"))
+    );
+    let task = task_record(&f, &id);
+    assert_eq!(task.sandboxes.len(), 1, "{:?}", task.sandboxes);
+    assert_eq!(task.sandboxes[0].removed_at, None);
+    let failed = format!("warning: cloud sandbox {sandbox} could not be removed: ");
+    assert_eq!(started.warn.matches(&failed).count(), 1, "{}", started.warn);
+}

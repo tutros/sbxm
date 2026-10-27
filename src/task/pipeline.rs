@@ -291,8 +291,8 @@ pub fn prepare_pr(ctx: &Ctx, pr: &PrInfo) -> Result<Prepared> {
 }
 
 /// [`prepare_pr`] at `location`. At [`Location::Cloud`] (milestone 4 slice 5) the reviewer's
-/// checks are the cloud preflight (decision 261), its strict harness check and its TTL, and the record
-/// carries the location; `ctx`'s backend is the cloud instance.
+/// checks are the cloud preflight (decision 261), its strict harness check and its TTL, and the
+/// record carries the location; `ctx`'s backend is the cloud instance.
 pub fn prepare_pr_at(ctx: &Ctx, pr: &PrInfo, location: Location) -> Result<Prepared> {
     let global = GlobalConfig::load(ctx.config_dir)?;
     let number = pr.number;
@@ -3622,8 +3622,8 @@ fn check_changed_paths(task: &Prepared) -> Result<()> {
 /// has created anything.
 ///
 /// At [`Location::Cloud`], `backend` is the cloud instance and the checks are the cloud preflight
-/// (decision 261) for the reviewer's harness and profile, its strict harness check (slice 7) and its
-/// TTL (milestone 4 slice 5), instead of the local secret check.
+/// (decision 261) for the reviewer's harness and profile, its strict harness check (slice 7) and
+/// its TTL (milestone 4 slice 5), instead of the local secret check.
 pub fn check_reviewer_inputs(
     config_dir: &Path,
     backend: &dyn SandboxBackend,
