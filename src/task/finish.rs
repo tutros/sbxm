@@ -39,8 +39,8 @@ pub struct RemovalPlan {
     pub folders: Vec<PathBuf>,
     /// Set when `task.json` couldn't be read, so no sandbox names are known.
     pub note: Option<String>,
-    /// The cloud sandbox of an ambiguous create `--forget-ambiguous` drops from `task.json`
-    /// before anything is removed, with no cloud call for it (decision 268).
+    /// The cloud sandbox of an ambiguous create `--forget-ambiguous` drops with the task's
+    /// record, with no cloud call for it (decision 268).
     pub forget: Option<String>,
 }
 
@@ -357,24 +357,13 @@ pub fn remove_with_sleep(
     sleep: &dyn Fn(Duration),
 ) -> RemovalReport {
     let mut report = RemovalReport::default();
+    // An ambiguous create `--forget-ambiguous` forgets goes with the task folder, never
+    // rewritten here: a removal that stops part way leaves `task.json` as it was (as
+    // `--merged` archived it), and a second run with the same flag finishes the job.
     if let Some(name) = &plan.forget {
-        // Dropped first, so a removal that stops part way leaves a record a second `task rm`
-        // can plan without `--forget-ambiguous` again.
-        let meta = record::task_dir(&plan.base_dir, &plan.id);
-        let forgot = record::read(&meta.join("task.json")).and_then(|mut task| {
-            task.forget_ambiguous();
-            record::write(&meta, &task)
-        });
-        if let Err(e) = forgot {
-            report.stayed.push(format!(
-                "task.json couldn't drop the ambiguous create of cloud sandbox {name} ({e:#}), so \
-                 nothing was removed; run `sbxm task rm` again"
-            ));
-            return report;
-        }
         report.removed.push(format!(
-            "the record of cloud sandbox {name}'s ambiguous create (the sandbox and its secrets \
-             left alone)"
+            "cloud sandbox {name}'s ambiguous create, forgotten (the sandbox and its secrets left \
+             alone)"
         ));
     }
     if !remove_sandboxes(plan, backend, sleep, &mut report) {

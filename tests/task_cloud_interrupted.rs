@@ -794,6 +794,42 @@ fn a_refused_reviewer_name_keeps_the_secrets_scoped_to_the_sandbox_already_there
     );
 }
 
+/// The backstop in the create itself (decision 268): a review of a task whose record still holds
+/// an ambiguous create is refused before the reviewer's secrets are set or its create asked for,
+/// naming the ambiguous sandbox; `task.json` holds one started create at a time.
+#[test]
+fn a_create_while_an_ambiguous_one_is_recorded_is_refused_before_its_secrets() {
+    let f = fixture_with(LOCAL_TOML);
+    let (spec, id) = spec(&f);
+    let (worker, reviewer) = (worker_sandbox(&id), reviewer_sandbox(&id));
+    let root = f.env.tmp.path().join("cloud-fs");
+    let cloud = one_cloud(cloud_backend(&root, &id, &[CLEAN]), &[], &[]);
+    let secrets = [fake_secret()];
+    start_with_secrets(&f, &spec, &cloud, &secrets).unwrap();
+    let mut task = task_record(&f, &id);
+    let ambiguous = format!("sbxm-task-{id}-earlier");
+    task.creating = Some(record::SandboxClaim {
+        name: ambiguous.clone(),
+        role: SandboxRole::Reviewer,
+        since: "2026-10-27T10:00:00Z".into(),
+    });
+    record::write(&meta(&f, &id), &task).unwrap();
+
+    let message = format!(
+        "{:#}",
+        review_with_secrets(&f, &id, &cloud, &secrets).unwrap_err()
+    );
+
+    assert_ambiguous(&message, &ambiguous, "--forget-ambiguous");
+    assert!(touches(&cloud, &reviewer).is_empty(), "{:?}", cloud.log());
+    assert!(touches(&cloud, &ambiguous).is_empty(), "{:?}", cloud.log());
+    assert!(cloud.removes().contains(&worker), "{:?}", cloud.log());
+    assert_eq!(
+        task_record(&f, &id).ambiguous_create(),
+        Some(ambiguous.as_str())
+    );
+}
+
 /// A reviewer create that returned an error, with scoped secrets: the secrets it set under the
 /// name are taken back at once, no sandbox of that name is removed (the guard of slice 1's
 /// M-1), and the record holds nothing of it, so `task rm` leaves the name alone.
