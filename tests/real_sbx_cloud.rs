@@ -141,8 +141,78 @@ struct Live {
     /// The fake secret's placeholder in [`SECRET_ENV`], the files holding its value, and the
     /// count of process environments holding it.
     placeholder: String,
-    files_with_value: String,
+    files: FileScan,
     envs_with_value: String,
+}
+
+/// The in-sandbox search for the fake secret's value, run as `sh -c SCAN_SCRIPT sh <first half>
+/// <second half> <root> <timeout in seconds>`: the value goes in as two halves, so no command line
+/// in the sandbox holds it whole but grep's own (in /proc, which the file search leaves out). Run
+/// as the sandbox's default user, so files it can't read are skipped ("Permission denied" is the
+/// one error left out of `scan_error`). Every line is a marker [`classify_scan`] reads: grep's own
+/// status, not the last pipeline stage's, and `scan_done` last, so a cut-off answer shows.
+const SCAN_SCRIPT: &str = r#"v="$1$2"; root="$3"; secs="$4"
+e=$(mktemp) || { echo "scan_error=mktemp failed"; exit 0; }
+found=$(timeout "$secs" grep -rlF --exclude-dir=proc --exclude-dir=sys --exclude-dir=dev -- "$v" "$root" 2>"$e")
+echo "scan_status=$?"
+echo "files=$(printf '%s' "$found" | head -5 | tr '\n' ' ')"
+echo "scan_error=$(grep -v -e 'Permission denied$' "$e" | head -1)"
+rm -f "$e"
+echo "envs=$(for f in /proc/[0-9]*/environ; do tr '\0' '\n' < "$f" 2>/dev/null; done | grep -cF -- "$v")"
+echo scan_done
+"#;
+
+/// What the file search of [`SCAN_SCRIPT`] showed.
+#[derive(Debug, PartialEq)]
+enum FileScan {
+    /// It searched everything readable and found the value nowhere.
+    Clean,
+    /// The files holding the value (the first five).
+    Found(String),
+    /// It didn't finish, or its answer didn't arrive whole: no evidence either way.
+    Incomplete(String),
+}
+
+impl Default for FileScan {
+    fn default() -> Self {
+        FileScan::Incomplete("not run".to_owned())
+    }
+}
+
+/// Sorts [`SCAN_SCRIPT`]'s answer: clean only from a successful `sbx exec` whose answer ends in
+/// `scan_done`, listing no file, with grep's status 1 (no match) or 2 with only unreadable files
+/// skipped.
+fn classify_scan(exec_ok: bool, stdout: &str) -> FileScan {
+    if !exec_ok {
+        return FileScan::Incomplete(format!("`sbx exec` failed: {stdout}"));
+    }
+    if !stdout.lines().any(|l| l == "scan_done") {
+        return FileScan::Incomplete(format!("cut off: {stdout}"));
+    }
+    let field = |name: &str| {
+        stdout
+            .lines()
+            .find_map(|l| l.strip_prefix(name)?.strip_prefix('='))
+            .map(str::trim)
+    };
+    match field("scan_error") {
+        Some("") => {}
+        Some(error) => return FileScan::Incomplete(format!("search error: {error}")),
+        None => return FileScan::Incomplete(format!("no scan_error line: {stdout}")),
+    }
+    // A listed file is a find whatever the status: status 2 also covers a match next to a file
+    // it couldn't read.
+    match field("files") {
+        Some("") => {}
+        Some(files) => return FileScan::Found(files.to_owned()),
+        None => return FileScan::Incomplete(format!("no files line: {stdout}")),
+    }
+    match field("scan_status") {
+        Some("0") => FileScan::Incomplete("a match but no file listed".to_owned()),
+        Some("1" | "2") => FileScan::Clean,
+        Some("124") => FileScan::Incomplete("timed out".to_owned()),
+        other => FileScan::Incomplete(format!("grep's status {other:?}")),
+    }
 }
 
 /// The cloud instance of [`SbxBackend`], watched: it records each create (name and TTL), sets the
@@ -192,18 +262,8 @@ impl Watched {
             live.denied
                 .push((host.to_owned(), refusal_shape(exit, &codes), codes));
         }
-        // The value goes in as two halves, so no command line in the sandbox holds it whole but
-        // grep's own (in /proc, which the file search leaves out). Run as the sandbox's default
-        // user: files it can't read are skipped.
         let half = self.secret.value.len() / 2;
-        let script = format!(
-            "v=\"$1$2\"; \
-             echo \"placeholder=${{{SECRET_ENV}:-}}\"; \
-             echo \"files=$(timeout 600 grep -rlsF --exclude-dir=proc --exclude-dir=sys \
-             --exclude-dir=dev -- \"$v\" / 2>/dev/null | head -5 | tr '\\n' ' ')\"; \
-             echo \"envs=$(for f in /proc/[0-9]*/environ; do tr '\\0' '\\n' < \"$f\" 2>/dev/null; \
-             done | grep -cF -- \"$v\")\""
-        );
+        let script = format!("echo \"placeholder=${{{SECRET_ENV}:-}}\"\n{SCAN_SCRIPT}");
         let out = sbx_cloud(&[
             "exec",
             sandbox,
@@ -213,12 +273,19 @@ impl Watched {
             "sh",
             &self.secret.value[..half],
             &self.secret.value[half..],
+            "/",
+            "600",
         ]);
-        for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        println!(
+            "secret scan: exit {:?}, {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+        live.files = classify_scan(out.status.success(), &stdout);
+        for line in stdout.lines() {
             if let Some(v) = line.strip_prefix("placeholder=") {
                 live.placeholder = v.to_owned();
-            } else if let Some(v) = line.strip_prefix("files=") {
-                live.files_with_value = v.trim().to_owned();
             } else if let Some(v) = line.strip_prefix("envs=") {
                 live.envs_with_value = v.trim().to_owned();
             }
@@ -712,7 +779,7 @@ fn cloud_walk_against_real_sbx() {
         "{SECRET_ENV}={}",
         live.placeholder
     );
-    assert_eq!(live.files_with_value, "", "files holding the value");
+    assert_eq!(live.files, FileScan::Clean, "files holding the value");
     assert_eq!(live.envs_with_value, "0", "environments holding the value");
 
     // The bundle in and out: the worker's commit is in `repo.git`.
@@ -817,6 +884,107 @@ fn a_policy_read_counts_only_when_it_was_read_or_names_the_sandbox_absent() {
         assert!(
             matches!(read, PolicyRead::Failed(_)),
             "{sandbox:?} {success} {stdout:?} {stderr:?}: {read:?}"
+        );
+    }
+}
+
+/// Runs [`SCAN_SCRIPT`] on this machine over `root`, for its tests.
+#[cfg(unix)]
+fn scan_here(value: &str, root: &Path, secs: &str) -> (FileScan, String) {
+    let half = value.len() / 2;
+    let out = Command::new("sh")
+        .args(["-c", SCAN_SCRIPT, "sh", &value[..half], &value[half..]])
+        .arg(root)
+        .arg(secs)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+    (classify_scan(out.status.success(), &stdout), stdout)
+}
+
+/// M-2 of slice 9's review: only a search that completed says "no file holds the value"; a
+/// timeout or a search error is incomplete, never clean.
+#[cfg(unix)]
+#[test]
+fn a_secret_scan_is_clean_only_when_it_completed_without_a_match() {
+    let value = "sbxm-it-value-0123456789";
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("root");
+    std::fs::create_dir_all(root.join("sub")).unwrap();
+    std::fs::write(root.join("sub").join("plain.txt"), "nothing here\n").unwrap();
+
+    let (scan, out) = scan_here(value, &root, "60");
+    assert_eq!(scan, FileScan::Clean, "{out}");
+
+    // A file the default user can't read is skipped, as on the sandbox's `/`.
+    let locked = root.join("locked.txt");
+    std::fs::write(&locked, "nothing\n").unwrap();
+    let mut perms = std::fs::metadata(&locked).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o000);
+    std::fs::set_permissions(&locked, perms).unwrap();
+    if std::fs::read(&locked).is_err() {
+        let (scan, out) = scan_here(value, &root, "60");
+        assert_eq!(scan, FileScan::Clean, "{out}");
+    }
+
+    std::fs::write(root.join("sub").join("leak.txt"), format!("x={value}\n")).unwrap();
+    let (scan, out) = scan_here(value, &root, "60");
+    assert!(
+        matches!(&scan, FileScan::Found(files) if files.contains("leak.txt")),
+        "{scan:?} {out}"
+    );
+
+    // A search error: the root isn't there.
+    let (scan, out) = scan_here(value, &tmp.path().join("missing"), "60");
+    assert!(matches!(scan, FileScan::Incomplete(_)), "{scan:?} {out}");
+
+    // A timeout: grep blocks opening a FIFO named on its command line.
+    let fifo = tmp.path().join("fifo");
+    assert!(
+        Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let (scan, out) = scan_here(value, &fifo, "1");
+    assert!(
+        matches!(&scan, FileScan::Incomplete(why) if why.contains("timed out")),
+        "{scan:?} {out}"
+    );
+}
+
+/// M-2 of slice 9's review: a clean answer counts only from an `sbx exec` that succeeded and
+/// printed the whole answer.
+#[test]
+fn a_secret_scan_answer_counts_only_from_a_whole_successful_exec() {
+    let clean = "placeholder=x\nscan_status=1\nfiles=\nscan_error=\nenvs=0\nscan_done\n";
+    assert_eq!(classify_scan(true, clean), FileScan::Clean);
+    let denied = clean.replace("scan_status=1", "scan_status=2");
+    assert_eq!(
+        classify_scan(true, &denied),
+        FileScan::Clean,
+        "only skipped files"
+    );
+    assert!(matches!(
+        classify_scan(false, clean),
+        FileScan::Incomplete(_)
+    ));
+    for cut in [
+        clean.replace("scan_done", ""),
+        clean.replace("scan_status=1\n", ""),
+        clean.replace("files=\n", ""),
+        clean.replace("scan_status=1", "scan_status=0"),
+        clean.replace("scan_status=1", "scan_status="),
+        clean.replace("scan_status=1", "scan_status=124"),
+        clean.replace("scan_status=1", "scan_status=137"),
+        clean.replace("scan_error=", "scan_error=grep: /x: Input/output error"),
+        String::new(),
+    ] {
+        assert!(
+            matches!(classify_scan(true, &cut), FileScan::Incomplete(_)),
+            "{cut:?}"
         );
     }
 }
