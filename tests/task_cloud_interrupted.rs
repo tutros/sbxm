@@ -794,8 +794,9 @@ fn a_refused_reviewer_name_keeps_the_secrets_scoped_to_the_sandbox_already_there
     );
 }
 
-/// The backstop in the create itself (decision 268): a review of a task whose record still holds
-/// an ambiguous create is refused before the reviewer's secrets are set or its create asked for,
+/// A review of a task whose record still holds an ambiguous create is refused before any cloud
+/// call (PR 322 round 2, M-1: `check_can_review`; the create's own backstop behind it is the same
+/// guard), so neither the reviewer's secrets nor its create nor the worker's removal happen,
 /// naming the ambiguous sandbox; `task.json` holds one started create at a time.
 #[test]
 fn a_create_while_an_ambiguous_one_is_recorded_is_refused_before_its_secrets() {
@@ -814,6 +815,7 @@ fn a_create_while_an_ambiguous_one_is_recorded_is_refused_before_its_secrets() {
         since: "2026-10-27T10:00:00Z".into(),
     });
     record::write(&meta(&f, &id), &task).unwrap();
+    let before = cloud.log().len();
 
     let message = format!(
         "{:#}",
@@ -821,9 +823,10 @@ fn a_create_while_an_ambiguous_one_is_recorded_is_refused_before_its_secrets() {
     );
 
     assert_ambiguous(&message, &ambiguous, "--forget-ambiguous");
+    assert_eq!(cloud.log().len(), before, "{:?}", cloud.log());
     assert!(touches(&cloud, &reviewer).is_empty(), "{:?}", cloud.log());
     assert!(touches(&cloud, &ambiguous).is_empty(), "{:?}", cloud.log());
-    assert!(cloud.removes().contains(&worker), "{:?}", cloud.log());
+    assert!(!cloud.removes().contains(&worker), "{:?}", cloud.log());
     assert_eq!(
         task_record(&f, &id).ambiguous_create(),
         Some(ambiguous.as_str())

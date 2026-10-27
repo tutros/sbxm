@@ -1128,6 +1128,99 @@ fn gates_of_a_cloud_task_whose_rebuild_fails_preflight_change_nothing() {
     assert_eq!(task_record(&f, "issue-41"), before);
 }
 
+/// Decision 268 (PR 322 round 2, M-1): a cloud task whose worker create is ambiguous (started,
+/// never recorded as returned, no open entry) is refused by `task gates` before any backend call,
+/// write or gate, whether the cloud lists the name (it may be another caller's) or not.
+fn gates_refuse_an_ambiguous_worker(listed: bool) {
+    let f = fixture_with(LOCAL_TOML);
+    started_cloud_issue(&f);
+    let worker = worker_sandbox("issue-41");
+    let dir = record::task_dir(&f.env.base_dir(), "issue-41");
+    let mut task = task_record(&f, "issue-41");
+    for entry in task.sandboxes.iter_mut() {
+        entry.removed_at = Some("2026-10-27T00:00:00Z".into());
+    }
+    task.create_started(&worker, SandboxRole::Worker, 1_000);
+    record::write(&dir, &task).unwrap();
+    let before = std::fs::read(dir.join("task.json")).unwrap();
+    let names: &[&str] = if listed { &["issue-41"] } else { &[] };
+    let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), names);
+
+    let ran = task_gates(&f, &backend);
+
+    let err = format!("{:#}", ran.result.unwrap_err());
+    for part in [
+        format!("cloud sandbox {worker}"),
+        "can't tell whether it made".to_owned(),
+        format!("`sbx --cloud rm {worker} -f`"),
+        "`sbxm task resume --issue 41 --forget-ambiguous`".to_owned(),
+    ] {
+        assert!(err.contains(&part), "{part:?} missing from: {err}");
+    }
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert!(backend.execs().is_empty());
+    assert_eq!(std::fs::read(dir.join("task.json")).unwrap(), before);
+}
+
+#[test]
+fn gates_refuse_a_listed_worker_whose_rebuild_create_is_ambiguous() {
+    gates_refuse_an_ambiguous_worker(true);
+}
+
+#[test]
+fn gates_refuse_an_absent_worker_whose_rebuild_create_is_ambiguous() {
+    gates_refuse_an_ambiguous_worker(false);
+}
+
+/// A started cloud issue task whose worker create is ambiguous (decision 268); returns the
+/// record's bytes.
+fn with_ambiguous_worker(f: &Fixture) -> Vec<u8> {
+    started_cloud_issue(f);
+    let dir = record::task_dir(&f.env.base_dir(), "issue-41");
+    let mut task = task_record(f, "issue-41");
+    for entry in task.sandboxes.iter_mut() {
+        entry.removed_at = Some("2026-10-27T00:00:00Z".into());
+    }
+    task.create_started(&worker_sandbox("issue-41"), SandboxRole::Worker, 1_000);
+    record::write(&dir, &task).unwrap();
+    std::fs::read(dir.join("task.json")).unwrap()
+}
+
+/// PR 322 round 2, M-1, the kind: `task review` of a cloud task with an ambiguous create (its
+/// reviewer and any fix round would use or rebuild the worker's name) refuses before any backend
+/// call or write.
+#[test]
+fn review_refuses_a_task_with_an_ambiguous_create_before_any_call() {
+    for listed in [true, false] {
+        let f = fixture_with(LOCAL_TOML);
+        let before = with_ambiguous_worker(&f);
+        let names: &[&str] = if listed { &["issue-41"] } else { &[] };
+        let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), names);
+
+        let ran = task_review(&f, 41, &backend, &github());
+
+        let err = format!("{:#}", ran.result.unwrap_err());
+        assert!(err.contains("can't tell whether it made"), "{err}");
+        assert!(err.contains("--forget-ambiguous"), "{err}");
+        assert!(backend.log().is_empty(), "{:?}", backend.log());
+        let dir = record::task_dir(&f.env.base_dir(), "issue-41");
+        assert_eq!(std::fs::read(dir.join("task.json")).unwrap(), before);
+    }
+}
+
+/// The PR form of the same guard: `check_can_review_pr` refuses a record with an ambiguous create.
+#[test]
+fn pr_review_check_refuses_a_task_with_an_ambiguous_create() {
+    let f = fixture_with(LOCAL_TOML);
+    with_ambiguous_worker(&f);
+
+    let err = sbxm::task::pipeline::check_can_review_pr(&task_record(&f, "issue-41"))
+        .unwrap_err()
+        .to_string();
+
+    assert!(err.contains("can't tell whether it made"), "{err}");
+}
+
 /// The reverse: a task recorded `local` runs its gates here though the config now says `cloud`.
 #[test]
 fn gates_of_a_local_task_under_a_cloud_config_run_here() {

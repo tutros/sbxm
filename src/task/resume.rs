@@ -123,9 +123,21 @@ pub fn check_can_resume(
 /// whether that sandbox is the one it asked for or another caller's, so it neither uses nor
 /// removes it, and the user looks first.
 pub fn check_ambiguous(task: &Record, forget: bool) -> Result<()> {
+    if forget {
+        return Ok(());
+    }
+    refuse_ambiguous(task, "be resumed")
+}
+
+/// The one guard of decision 268 for every path that would list, copy to or from, `exec` in,
+/// reuse, rebuild over or remove a cloud sandbox by its name: refuses, `task <id> can't <what>
+/// yet`, when the record holds a create that was started and never recorded as returned. Such a
+/// sandbox is never inferred to be the task's from the cloud's listing; the user looks first and
+/// then runs `task resume --forget-ambiguous`.
+pub fn refuse_ambiguous(task: &Record, what: &str) -> Result<()> {
     match task.ambiguous_create() {
-        Some(name) if !forget => bail!(
-            "task {} can't be resumed yet: {}",
+        Some(name) => bail!(
+            "task {} can't {what} yet: {}",
             task.id,
             lifetime::ambiguous_create(
                 name,
@@ -137,7 +149,7 @@ pub fn check_ambiguous(task: &Record, forget: bool) -> Result<()> {
                 )
             )
         ),
-        _ => Ok(()),
+        None => Ok(()),
     }
 }
 

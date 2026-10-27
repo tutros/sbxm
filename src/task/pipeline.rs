@@ -2265,6 +2265,7 @@ fn ensure_cloud_worker_as(
     if prepared.record.location != Location::Cloud {
         return Ok(false);
     }
+    super::resume::refuse_ambiguous(&prepared.record, "use its worker sandbox")?;
     let worker = prepared
         .record
         .worker
@@ -2390,6 +2391,8 @@ fn cloud_worker_gone(env: &TaskEnv, record: &Record) -> Result<bool> {
 /// lifetime entry, P5 (d)), and removed again when the gates end. What that says is in
 /// `prepared.events` and `prepared.warnings`.
 pub fn gate_on_demand(env: &TaskEnv, prepared: &mut Prepared, tiers: Tiers) -> Result<Gated> {
+    // Before any listing: a listed name proves nothing about an ambiguous create (decision 268).
+    super::resume::refuse_ambiguous(&prepared.record, "run its gates")?;
     let rebuild = cloud_worker_gone(env, &prepared.record)?;
     if !rebuild {
         recollect_commits(env, prepared)?;
@@ -2731,6 +2734,9 @@ const FIX_PROMPT: &str =
 /// for a refusal says what to do.
 pub fn check_can_review(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
     let id = &task.id;
+    // The reviewer's and any fix round's sandbox names are decided against the record, never the
+    // cloud's listing (decision 268).
+    super::resume::refuse_ambiguous(task, "be reviewed")?;
     // A spec task has no issue number: its status is read without a filter.
     let status_hint = match task.kind {
         record::Kind::Spec => "sbxm task status".to_owned(),
@@ -3065,6 +3071,8 @@ pub struct PrReview {
 /// Whether a pull request's review may start (or be tried again) now.
 pub fn check_can_review_pr(task: &Record) -> Result<()> {
     let (id, number) = (&task.id, task.number);
+    // A PR task's reviewer name is decided against the record too (decision 268).
+    super::resume::refuse_ambiguous(task, "be reviewed")?;
     let state = machine::State {
         stage: task.stage,
         status: task.status,
@@ -3431,6 +3439,8 @@ pub(super) fn start_fix_round(
     prepared: &mut Prepared,
     input: &FixInput,
 ) -> Result<()> {
+    // Before the stage changes: a fix round uses or rebuilds the worker's name (decision 268).
+    super::resume::refuse_ambiguous(&prepared.record, "run a fix round")?;
     prepared
         .record
         .advance(Stage::Fixing, now(), Process::current(env.probe))?;
