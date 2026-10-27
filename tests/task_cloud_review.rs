@@ -624,10 +624,12 @@ fn a_worker_sandbox_gone_before_a_fix_round_is_made_again_and_removed_at_ready()
     assert_eq!(rebuilt.name, worker);
     assert_eq!(
         rebuilt.ttl,
-        Some(sbxm::task::lifetime::worker_ttl(&f.config).unwrap())
+        Some(sbxm::task::lifetime::worker_ttl(&f.config, f.config.fix_rounds).unwrap())
     );
     assert_eq!(rebuilt.workspace, None);
-    let ttl = sbxm::backend::ttl_arg(sbxm::task::lifetime::worker_ttl(&f.config).unwrap());
+    let ttl = sbxm::backend::ttl_arg(
+        sbxm::task::lifetime::worker_ttl(&f.config, f.config.fix_rounds).unwrap(),
+    );
     for line in [
         format!("cloud sandbox {worker} is gone; it is made again for the fix round"),
         format!("cloud sandbox {worker} created (fix, TTL {ttl})"),

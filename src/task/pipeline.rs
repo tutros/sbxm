@@ -988,7 +988,7 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
                 &profile,
             )?;
             template::check_strict_cloud(&ctx.config.sandbox.profile, &profile, worker.harness)?;
-            Some(lifetime::worker_ttl(ctx.config)?)
+            Some(lifetime::worker_ttl(ctx.config, ctx.config.fix_rounds)?)
         }
     };
     let mut warnings = ctx.config.warnings.clone();
@@ -2266,7 +2266,8 @@ fn ensure_cloud_worker_as(
     let identity = env
         .identity
         .context("no committer identity for the worker's new clone")?;
-    let ttl = lifetime::worker_ttl(env.config)?;
+    // The task's own budget, `--rounds N` included, never the config's now (PR 322 review M-2).
+    let ttl = lifetime::worker_ttl(env.config, prepared.record.fix_rounds)?;
     let plan = plan_cloud_sandbox(
         env.config_dir,
         env.backend,
@@ -2379,7 +2380,7 @@ pub fn gate_on_demand(env: &TaskEnv, prepared: &mut Prepared, tiers: Tiers) -> R
         recollect_commits(env, prepared)?;
         return run_gates(env, prepared, "on-demand", tiers);
     }
-    check_cloud_rebuild(env, &prepared.record)?;
+    check_cloud_rebuild(env, &prepared.record, None)?;
     let gated = ensure_cloud_worker(env, prepared, SandboxRole::Worker, "the gates")
         .and_then(|_| run_gates(env, prepared, "on-demand", tiers));
     stop_cloud_worker(env, prepared);
@@ -3566,7 +3567,7 @@ pub fn check_reviewer(env: &TaskEnv, task: &Prepared) -> Result<Vec<String>> {
         task.record.location,
     )?;
     if task.record.location == Location::Cloud && may_fix(&task.record) {
-        check_cloud_rebuild(env, &task.record)?;
+        check_cloud_rebuild(env, &task.record, None)?;
     }
     Ok(warnings)
 }
@@ -3582,8 +3583,14 @@ pub fn may_fix(record: &Record) -> bool {
 /// (the worker's own recorded profile and resources, never the reviewer's, their drift since the
 /// task started, a committer identity for its clone and the worker's TTL), plus the cloud
 /// preflight of that profile, all before the review changes anything. Whether it is gone is only
-/// known at the fix round, so this runs whenever one may come.
-pub(super) fn check_cloud_rebuild(env: &TaskEnv, record: &Record) -> Result<()> {
+/// known at the fix round, so this runs whenever one may come. The TTL is the one the rebuild
+/// will get: from the task's recorded `fix_rounds` plus `rounds`, a `task resume --rounds N` not
+/// yet added to the record (PR 322 review M-2).
+pub(super) fn check_cloud_rebuild(
+    env: &TaskEnv,
+    record: &Record,
+    rounds: Option<u32>,
+) -> Result<()> {
     let worker = record.worker.as_ref().context("the task has no worker")?;
     let profile_name = worker_profile(record, worker)?;
     let resources = worker_resources(record, worker)?;
@@ -3598,7 +3605,7 @@ pub(super) fn check_cloud_rebuild(env: &TaskEnv, record: &Record) -> Result<()> 
         &profile,
     )?;
     template::check_strict_cloud(profile_name, &profile, env.config.worker.harness)?;
-    lifetime::worker_ttl(env.config)?;
+    check_rebuild_ttl(env.config, record, rounds)?;
     if env.identity.is_none() {
         bail!(
             "task {} may need its cloud worker sandbox made again for a fix round, and there is \
@@ -3606,6 +3613,31 @@ pub(super) fn check_cloud_rebuild(env: &TaskEnv, record: &Record) -> Result<()> 
             record.id
         );
     }
+    Ok(())
+}
+
+/// The TTL a rebuilt worker sandbox of `record` gets ([`check_cloud_rebuild`]), refused when the
+/// task's budget, with `rounds` added, makes it too large to add up.
+fn check_rebuild_ttl(config: &TaskConfig, record: &Record, rounds: Option<u32>) -> Result<()> {
+    let Some(n) = rounds else {
+        lifetime::worker_ttl(config, record.fix_rounds)?;
+        return Ok(());
+    };
+    let budget = record.fix_rounds.checked_add(n).with_context(|| {
+        format!(
+            "--rounds {n} is too many: task {} has {} fix rounds, and the total can be at most {}",
+            record.id,
+            record.fix_rounds,
+            u32::MAX
+        )
+    })?;
+    lifetime::worker_ttl(config, budget).with_context(|| {
+        format!(
+            "--rounds {n} gives task {} {budget} fix rounds, and its worker sandbox's TTL for \
+             them doesn't add up; resume it with a smaller --rounds",
+            record.id
+        )
+    })?;
     Ok(())
 }
 
@@ -3700,7 +3732,7 @@ pub fn check_worker_inputs(
                 &profile,
             )?;
             template::check_strict_cloud(profile_name, &profile, worker.harness)?;
-            lifetime::worker_ttl(config)?;
+            lifetime::worker_ttl(config, config.fix_rounds)?;
         }
     }
     let mut warnings = config.warnings.clone();

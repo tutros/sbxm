@@ -897,7 +897,7 @@ fn a_cloud_run_s_reviewer_time_limit_goes_into_the_worker_and_reviewer_ttls() {
         assert_eq!(
             ttls,
             [
-                Some(sbxm::task::lifetime::worker_ttl(&effective).unwrap()),
+                Some(sbxm::task::lifetime::worker_ttl(&effective, effective.fix_rounds).unwrap()),
                 Some(sbxm::task::lifetime::reviewer_ttl(&effective).unwrap()),
             ],
             "spec: {spec}"

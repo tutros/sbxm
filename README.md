@@ -615,7 +615,9 @@ continues it in the cloud. A stream error after `timeout -v`'s lines is a timeou
 **Lifetimes.** Every cloud sandbox has a TTL, rounded up to whole minutes:
 - the worker sandbox: `[worker] time_limit` + every `[gates] sandbox` command's timeout + `fix_rounds` x
   (`[reviewer] time_limit` + `[worker] time_limit` + every sandbox gate's timeout) + 30 minutes (14h45m with the
-  defaults and three gates). It lives through the task's automatic run (worker, sandbox gates, review rounds, fix
+  defaults and three gates), where `fix_rounds` is the task's own budget: the config's at its start, plus any
+  `task resume --rounds N` (a `--rounds` whose TTL doesn't add up is refused before anything changes), never what
+  `sbxm-task.toml` says later. It lives through the task's automatic run (worker, sandbox gates, review rounds, fix
   rounds) and is removed when the task stops, `ready` or stopped for any reason, so nothing is billed while the task
   waits for you;
 - a reviewer sandbox: `[reviewer] time_limit` + 30 minutes (1h15m by default), one per review round, removed after it.

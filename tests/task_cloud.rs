@@ -224,7 +224,7 @@ fn a_cloud_spec_start_clones_runs_gates_and_collects_through_copies() {
     // With the worker TTL (slice 3, P5 (d)).
     assert_eq!(
         create.ttl,
-        Some(sbxm::task::lifetime::worker_ttl(&f.config).unwrap())
+        Some(sbxm::task::lifetime::worker_ttl(&f.config, f.config.fix_rounds).unwrap())
     );
     let kits: Vec<_> = create
         .kits
@@ -251,7 +251,7 @@ fn a_cloud_spec_start_clones_runs_gates_and_collects_through_copies() {
     assert_eq!(task.worker.as_ref().unwrap().workspace, clone);
     // One lifetime entry, still open: the start hands over to the review, which continues the
     // automatic run in the same sandbox (slice 3, P5 (d), P7 (a)); one line at its create.
-    let ttl = sbxm::task::lifetime::worker_ttl(&f.config).unwrap();
+    let ttl = sbxm::task::lifetime::worker_ttl(&f.config, f.config.fix_rounds).unwrap();
     assert_eq!(task.sandboxes.len(), 1, "{:?}", task.sandboxes);
     let entry = &task.sandboxes[0];
     assert_eq!(entry.name, sandbox);

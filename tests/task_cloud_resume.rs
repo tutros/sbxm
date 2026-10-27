@@ -330,3 +330,146 @@ fn resume_of_a_cloud_task_whose_fix_round_failed_runs_it_again_in_a_remade_sandb
         task.sandboxes
     );
 }
+
+// PR 322 review M-2: a rebuilt worker sandbox's TTL comes from the task's own recorded budget
+// (`fix_rounds` as it started, plus any `--rounds N`), never from what `sbxm-task.toml` says
+// now; an added count whose TTL doesn't add up is refused before any write or changing call.
+
+/// The config with one fix round and one sandbox gate of a minute.
+const ONE_ROUND_TOML: &str = "[sandbox]\nprofile = \"default\"\nlocation = \"local\"\n\n[worker]\nfix_rounds = 1\n\n[gates]\nsandbox = [\"cargo test\"]\ntimeout = \"60s\"\n";
+
+/// The repo's `sbxm-task.toml` is now `toml`.
+fn set_config(f: &Fixture, toml: &str) {
+    std::fs::write(
+        f.env.tmp.path().join("target-repo").join("sbxm-task.toml"),
+        toml,
+    )
+    .unwrap();
+}
+
+fn load_config(f: &Fixture) -> sbxm::task::config::TaskConfig {
+    sbxm::task::config::TaskConfig::load(&f.env.tmp.path().join("target-repo")).unwrap()
+}
+
+/// A cloud spec task under `toml`, run to `ready` with its one fix round used
+/// (`rounds-exhausted`); its worker sandbox went at that stop.
+fn exhausted_cloud_task(toml: &str) -> (Fixture, PathBuf, String) {
+    let f = fixture_with(toml);
+    let (spec, id) = spec(&f);
+    let root = f.env.tmp.path().join("cloud-fs");
+    let ran = task_run(
+        &f,
+        spec.clone(),
+        Some(Location::Cloud),
+        &cloud_backend(&root, &id, &[ONE]),
+    );
+    ran.result.expect(&ran.out);
+    let task = task_record(&f, &id);
+    assert_eq!((task.stage, task.fix_rounds), (Stage::Ready, 1));
+    assert!(task.stopped.is_some(), "{task:?}");
+    (f, spec, id)
+}
+
+/// The TTL the first create of `backend` (the rebuilt worker's) was given.
+fn first_ttl(backend: &FakeBackend, worker: &str) -> Option<std::time::Duration> {
+    let create = backend.creates().into_iter().next().unwrap();
+    assert_eq!(create.name, worker);
+    create.ttl
+}
+
+/// Started with `fix_rounds = 1` and resumed from `ready` with `--rounds 2`: the rebuilt worker
+/// lives for the 3 rounds the task now has.
+#[test]
+fn resume_rounds_gives_the_rebuilt_worker_the_ttl_of_the_task_s_new_budget() {
+    let (f, spec, id) = exhausted_cloud_task(ONE_ROUND_TOML);
+    let gone = cloud_backend_listing(&f.env.tmp.path().join("cloud-fs"), &id, &[CLEAN], false);
+
+    let ran = resume_rounds(&f, spec, Some(2), &gone);
+
+    ran.result.expect(&ran.out);
+    assert_eq!(task_record(&f, &id).fix_rounds, 3);
+    let config = load_config(&f);
+    assert_eq!(
+        first_ttl(&gone, &worker_sandbox(&id)),
+        Some(sbxm::task::lifetime::worker_ttl(&config, 3).unwrap())
+    );
+}
+
+/// `[worker] fix_rounds` raised after the task started changes nothing of its rebuilt worker's
+/// TTL: the task's budget is the one it recorded.
+#[test]
+fn a_fix_rounds_changed_after_the_start_leaves_the_rebuilt_worker_s_ttl_alone() {
+    let f = fixture_with(ONE_ROUND_TOML);
+    let (spec, id) = spec(&f);
+    let root = f.env.tmp.path().join("cloud-fs");
+    let backend = cloud_backend_worker(&root, &[&id], &[CLEAN], true, failed());
+    let ran = task_run(&f, spec.clone(), Some(Location::Cloud), &backend);
+    assert!(ran.result.is_err(), "{}", ran.out);
+    assert_eq!(task_record(&f, &id).fix_rounds, 1);
+    set_config(
+        &f,
+        &ONE_ROUND_TOML.replace("fix_rounds = 1", "fix_rounds = 5"),
+    );
+    let gone = cloud_backend_listing(&root, &id, &[CLEAN], false);
+
+    let ran = resume(&f, spec, &gone);
+
+    ran.result.expect(&ran.out);
+    let config = load_config(&f);
+    assert_eq!(config.fix_rounds, 5);
+    assert_eq!(
+        first_ttl(&gone, &worker_sandbox(&id)),
+        Some(sbxm::task::lifetime::worker_ttl(&config, 1).unwrap())
+    );
+}
+
+/// A reviewer time limit chosen so that a worker TTL of 2 fix rounds is the largest one that
+/// adds up: the worker 60 s, one gate of 60 s, and the TTL `1920 + 2 x round` seconds.
+fn at_limit_toml() -> String {
+    let limit = u64::MAX / 60 * 60;
+    let round = (limit - 1920) / 2 / 60 * 60;
+    let reviewer = round - 120;
+    format!(
+        "[sandbox]\nprofile = \"default\"\nlocation = \"local\"\n\n[worker]\nfix_rounds = 1\n\
+         time_limit = \"60s\"\n\n[reviewer]\ntime_limit = \"{reviewer}s\"\n\n[gates]\n\
+         sandbox = [\"cargo test\"]\ntimeout = \"60s\"\n"
+    )
+}
+
+/// Boundary, at the limit: `--rounds 1` makes the budget 2, the largest whose worker TTL adds
+/// up, and the rebuilt worker gets that TTL.
+#[test]
+fn resume_rounds_at_the_ttl_limit_creates_the_rebuilt_worker_with_it() {
+    let toml = at_limit_toml();
+    let (f, spec, id) = exhausted_cloud_task(&toml);
+    let config = load_config(&f);
+    let ttl = sbxm::task::lifetime::worker_ttl(&config, 2).unwrap();
+    assert!(sbxm::task::lifetime::worker_ttl(&config, 3).is_err());
+    let gone = cloud_backend_listing(&f.env.tmp.path().join("cloud-fs"), &id, &[CLEAN], false);
+
+    let ran = resume_rounds(&f, spec, Some(1), &gone);
+
+    ran.result.expect(&ran.out);
+    assert_eq!(first_ttl(&gone, &worker_sandbox(&id)), Some(ttl));
+}
+
+/// Boundary, one over: `--rounds 2` makes the budget 3, whose worker TTL doesn't add up: refused
+/// before any write or changing cloud call.
+#[test]
+fn resume_rounds_one_over_the_ttl_limit_is_refused_before_any_change() {
+    let toml = at_limit_toml();
+    let (f, spec, id) = exhausted_cloud_task(&toml);
+    let path = record::task_dir(&f.env.base_dir(), &id).join("task.json");
+    let before = std::fs::read(&path).unwrap();
+    let gone = cloud_backend_listing(&f.env.tmp.path().join("cloud-fs"), &id, &[CLEAN], false);
+
+    let ran = resume_rounds(&f, spec, Some(2), &gone);
+
+    let err = format!("{:#}", ran.result.unwrap_err());
+    assert!(
+        err.contains("fix_rounds") && err.contains("--rounds"),
+        "{err}"
+    );
+    assert!(gone.log().is_empty(), "{:?}", gone.log());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}

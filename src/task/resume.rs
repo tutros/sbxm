@@ -178,7 +178,7 @@ pub fn resume(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Re
     pipeline::check_reviewer(env, prepared)?;
     let cloud = prepared.record.location == Location::Cloud;
     if cloud {
-        pipeline::check_cloud_rebuild(env, &prepared.record)?;
+        pipeline::check_cloud_rebuild(env, &prepared.record, rounds)?;
     } else if resume_runs_worker(&prepared.record) {
         pipeline::check_worker(env, prepared)?;
     }

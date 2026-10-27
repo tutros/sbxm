@@ -18,9 +18,10 @@ const MARGIN: Duration = Duration::from_secs(30 * 60);
 
 /// The worker sandbox lives through the task's automatic run (P5 (d), decision 263): the worker,
 /// its sandbox gates, and `fix_rounds` times a review, a fix round and the gates again, plus the
-/// margin, rounded up to whole minutes as `sbx` takes it. Refused when the config's limits are
-/// too large to add up.
-pub fn worker_ttl(config: &TaskConfig) -> Result<Duration> {
+/// margin, rounded up to whole minutes as `sbx` takes it. `fix_rounds` is the task's budget: the
+/// config's at its start, then the one its record holds (with any `--rounds N` added), never the
+/// config's again (PR 322 review M-2). Refused when the limits are too large to add up.
+pub fn worker_ttl(config: &TaskConfig, fix_rounds: u32) -> Result<Duration> {
     let worker = config.worker.time_limit;
     let sum = || {
         let gates = config
@@ -34,7 +35,7 @@ pub fn worker_ttl(config: &TaskConfig) -> Result<Duration> {
             .checked_add(gates)?;
         worker
             .checked_add(gates)?
-            .checked_add(round.checked_mul(config.fix_rounds)?)?
+            .checked_add(round.checked_mul(fix_rounds)?)?
             .checked_add(MARGIN)
     };
     sum().and_then(rounded).with_context(|| {
