@@ -988,7 +988,11 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
                 &profile,
             )?;
             template::check_strict_cloud(&ctx.config.sandbox.profile, &profile, worker.harness)?;
-            Some(lifetime::worker_ttl(ctx.config, ctx.config.fix_rounds)?)
+            Some(lifetime::worker_ttl_or(
+                ctx.config,
+                ctx.config.fix_rounds,
+                lifetime::new_task_fix,
+            )?)
         }
     };
     let mut warnings = ctx.config.warnings.clone();
@@ -2267,7 +2271,7 @@ fn ensure_cloud_worker_as(
         .identity
         .context("no committer identity for the worker's new clone")?;
     // The task's own budget, `--rounds N` included, never the config's now (PR 322 review M-2).
-    let ttl = lifetime::worker_ttl(env.config, prepared.record.fix_rounds)?;
+    let ttl = rebuild_ttl(env.config, &prepared.record)?;
     let plan = plan_cloud_sandbox(
         env.config_dir,
         env.backend,
@@ -3620,7 +3624,7 @@ pub(super) fn check_cloud_rebuild(
 /// task's budget, with `rounds` added, makes it too large to add up.
 fn check_rebuild_ttl(config: &TaskConfig, record: &Record, rounds: Option<u32>) -> Result<()> {
     let Some(n) = rounds else {
-        lifetime::worker_ttl(config, record.fix_rounds)?;
+        rebuild_ttl(config, record)?;
         return Ok(());
     };
     let budget = record.fix_rounds.checked_add(n).with_context(|| {
@@ -3631,14 +3635,25 @@ fn check_rebuild_ttl(config: &TaskConfig, record: &Record, rounds: Option<u32>) 
             u32::MAX
         )
     })?;
-    lifetime::worker_ttl(config, budget).with_context(|| {
+    lifetime::worker_ttl_or(config, budget, || {
         format!(
-            "--rounds {n} gives task {} {budget} fix rounds, and its worker sandbox's TTL for \
-             them doesn't add up; resume it with a smaller --rounds",
+            "resume task {} with a smaller --rounds, or lower the time limits in sbxm-task.toml",
             record.id
         )
     })?;
     Ok(())
+}
+
+/// A rebuilt worker sandbox's TTL, from the task's recorded budget: the time limits are the
+/// config's now, but `[worker] fix_rounds` was read once, at the start (PR 322 review S-1).
+fn rebuild_ttl(config: &TaskConfig, record: &Record) -> Result<Duration> {
+    lifetime::worker_ttl_or(config, record.fix_rounds, || {
+        format!(
+            "task {}'s {} fix rounds were fixed at its start, so lower the time limits in \
+             sbxm-task.toml",
+            record.id, record.fix_rounds
+        )
+    })
 }
 
 /// The changed-paths part of [`check_reviewer`], for a caller that must make it after fetching
@@ -3732,7 +3747,7 @@ pub fn check_worker_inputs(
                 &profile,
             )?;
             template::check_strict_cloud(profile_name, &profile, worker.harness)?;
-            lifetime::worker_ttl(config, config.fix_rounds)?;
+            lifetime::worker_ttl_or(config, config.fix_rounds, lifetime::new_task_fix)?;
         }
     }
     let mut warnings = config.warnings.clone();

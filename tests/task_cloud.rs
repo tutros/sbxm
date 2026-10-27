@@ -1178,6 +1178,11 @@ fn a_worker_ttl_too_large_is_refused_before_anything() {
 
     let message = format!("{:#}", started.result.unwrap_err());
     assert!(message.contains("time_limit"), "{message}");
+    // PR 322 review S-1: before the start, the config's fix_rounds is the budget to lower.
+    assert!(
+        message.contains("lower those limits or [worker] fix_rounds in sbxm-task.toml"),
+        "{message}"
+    );
     assert!(backend.creates().is_empty(), "{:?}", backend.log());
     assert!(!sbxm::task::record::task_dir(&f.env.base_dir(), &id).exists());
 }

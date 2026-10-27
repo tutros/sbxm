@@ -5,7 +5,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 
 use super::config::TaskConfig;
 use super::record::{self, Record, SandboxRole};
@@ -39,10 +39,27 @@ pub fn worker_ttl(config: &TaskConfig, fix_rounds: u32) -> Result<Duration> {
             .checked_add(MARGIN)
     };
     sum().and_then(rounded).with_context(|| {
-        "the worker sandbox's TTL ([worker] time_limit, plus every [gates] sandbox command's \
-         timeout, plus fix_rounds times the reviewer's, the worker's and the gates' time, plus \
-         30 minutes) is too large to add up; lower those limits or fix_rounds in sbxm-task.toml"
+        format!(
+            "the worker sandbox's TTL ([worker] time_limit, plus every [gates] sandbox command's \
+             timeout, plus {fix_rounds} fix rounds times the reviewer's, the worker's and the \
+             gates' time, plus 30 minutes) is too large to add up"
+        )
     })
+}
+
+/// [`worker_ttl`], its refusal ending with `fix`, the way out for the caller's case: only a new
+/// task reads `[worker] fix_rounds` (PR 322 review S-1).
+pub fn worker_ttl_or(
+    config: &TaskConfig,
+    fix_rounds: u32,
+    fix: impl FnOnce() -> String,
+) -> Result<Duration> {
+    worker_ttl(config, fix_rounds).map_err(|e| anyhow!("{e:#}; {}", fix()))
+}
+
+/// The way out of a new task's [`worker_ttl`] refusal: its budget is still the config's.
+pub fn new_task_fix() -> String {
+    "lower those limits or [worker] fix_rounds in sbxm-task.toml".to_owned()
 }
 
 /// A reviewer sandbox lives for one review round (P5 (d)): the reviewer's time limit plus the

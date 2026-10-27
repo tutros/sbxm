@@ -466,10 +466,36 @@ fn resume_rounds_one_over_the_ttl_limit_is_refused_before_any_change() {
     let ran = resume_rounds(&f, spec, Some(2), &gone);
 
     let err = format!("{:#}", ran.result.unwrap_err());
+    assert!(err.contains("smaller --rounds"), "{err}");
+    // PR 322 review S-1: `fix_rounds` in the config can't change this task's budget.
+    assert!(!err.contains("fix_rounds in sbxm-task.toml"), "{err}");
+    assert!(gone.log().is_empty(), "{:?}", gone.log());
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+/// PR 322 review S-1: a rebuild whose recorded budget no longer adds up to a TTL (the worker's
+/// time limit raised since the start) is refused before any change, with a fix that changes the
+/// next attempt: the time limits, never `[worker] fix_rounds`, which the task doesn't read again.
+#[test]
+fn a_rebuild_whose_ttl_no_longer_adds_up_names_the_time_limits_not_fix_rounds() {
+    let (f, spec, id) = failed_cloud_task();
+    set_config(
+        &f,
+        &format!("{LOCAL_TOML}\n[worker]\ntime_limit = \"{}s\"\n", u64::MAX),
+    );
+    let path = record::task_dir(&f.env.base_dir(), &id).join("task.json");
+    let before = std::fs::read(&path).unwrap();
+    let gone = cloud_backend_listing(&f.env.tmp.path().join("cloud-fs"), &id, &[CLEAN], false);
+
+    let ran = resume(&f, spec, &gone);
+
+    let err = format!("{:#}", ran.result.unwrap_err());
     assert!(
-        err.contains("fix_rounds") && err.contains("--rounds"),
+        err.contains("lower the time limits in sbxm-task.toml"),
         "{err}"
     );
+    assert!(err.contains(&id), "{err}");
+    assert!(!err.contains("fix_rounds in sbxm-task.toml"), "{err}");
     assert!(gone.log().is_empty(), "{:?}", gone.log());
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
