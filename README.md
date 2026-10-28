@@ -655,7 +655,9 @@ task (`task finish` publishes and warns), naming the sandbox and the commands: l
 --cloud secret rm <service> --sandbox <name> -f`. Then tell sbxm it's handled: `task rm ... --forget-ambiguous` (or
 `task rm --merged --forget-ambiguous`) drops it from `task.json` without any cloud call for it, before anything is
 removed or archived, then removes the rest; if that removal stops part way, a plain `task rm` finishes it. `task resume ... --forget-ambiguous` drops it and resumes (a sandbox of that name still there is then refused like
-any other name the task didn't find free). Its TTL deletes an ambiguous sandbox eventually anyway. A create that
+any other name the task didn't find free). `task gates`, `task review` and a fix round refuse before using its sandbox
+too, with no cloud call. A PR task can't be resumed: run `task rm --pr N --forget-ambiguous`, then `task review --pr
+N`. Its TTL deletes an ambiguous sandbox eventually anyway. A create that
 returned an error takes back the secrets it set and stops the task, so nothing of that name is removed later. Add up
 the entries for a task's sandbox hours: `task rm --merged` archives them with `task.json` and `run.log`, a plain
 `task rm` deletes them with the folder.

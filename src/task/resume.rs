@@ -133,7 +133,7 @@ pub fn check_ambiguous(task: &Record, forget: bool) -> Result<()> {
 /// reuse, rebuild over or remove a cloud sandbox by its name: refuses, `task <id> can't <what>
 /// yet`, when the record holds a create that was started and never recorded as returned. Such a
 /// sandbox is never inferred to be the task's from the cloud's listing; the user looks first and
-/// then runs `task resume --forget-ambiguous`.
+/// then follows the task's kind of recovery (`recovery`).
 pub fn refuse_ambiguous(task: &Record, what: &str) -> Result<()> {
     match task.ambiguous_create() {
         Some(name) => bail!(
