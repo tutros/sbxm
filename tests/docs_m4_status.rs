@@ -26,6 +26,8 @@ fn project_and_agents_say_the_end_to_end_check_passed_and_link_its_record() {
         }
         assert!(text.contains(RECORD), "{path} doesn't link {RECORD}");
     }
+    // Round 6, S-1: the state section is dated no earlier than the check it records.
+    assert!(read("docs/project.md").contains("## State (as of 2026-10-27)"));
 }
 
 #[test]
