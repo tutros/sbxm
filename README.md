@@ -313,6 +313,11 @@ allow = []         # required: the hosts a sandbox created from the template may
   them all with their total size, kept previous images included. "In use" means recorded in a project's `state.json`
   or a task's `task.json`; a running `sbxm run` isn't counted, so don't remove or rebuild a template while a
   comparison run uses it (its later repeats would fail to create).
+- **Rebuild an ageing template:** a template is a snapshot of a sandbox at build time, and it can stop working as it
+  ages even though nothing in the profile changed. On 2026-10-27 every Claude worker made from a 5-day-old
+  `sbxm-dev` template failed to sign in ("OAuth session expired and could not be refreshed") while a plain
+  `sbx create claude` sandbox signed in fine; `sbxm template build <profile> --harness <h>` fixed it. If sandboxes
+  from a template fail in a way a plain sandbox doesn't, rebuild the template first (see *Troubleshooting*).
 
 ### The Jev evaluator: `[eval.jev]` in a run-config
 
@@ -450,6 +455,12 @@ for a task. Check `sbx ls` for stopped leftovers.
   `just deploy-profiles` (it refuses to write if `config.toml` is invalid), then rebuild the sandbox.
 - **`git` fails with `Permission denied` on Windows (`.git/config`, `.git/objects/…`):** antivirus or the file indexer
   briefly holds a file git just created. It passes by itself, so run the command again.
+- **A worker fails at once with "OAuth session expired and could not be refreshed"** (in its transcript's `result`;
+  `sbxm task` may report it as "claude reported success, 0 commit(s)"): first refresh the stored login (`sbx setup`
+  for Claude). Then test a plain sandbox: `sbx create --name auth-check claude <empty dir>`, `sbx exec auth-check
+  claude -p pong`, `sbx rm auth-check -f`. If the plain one answers and the task's still fails, the profile's
+  template has aged: run `sbxm template build <profile> --harness <h>` (about 15 minutes warm), then start the task
+  again. A fresh task is needed, not `task resume`: resume reuses the sandbox that can't sign in.
 - **`sbx exec`/`sbx run` print `context deadline exceeded` after the sandbox was created:** the sandbox exists; only
   the attach step timed out in a non-interactive shell. Check `sbx ls`.
 
