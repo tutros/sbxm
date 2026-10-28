@@ -72,7 +72,7 @@ fn cloud_preflight(
         );
     }
     // 2. The cloud answers (decision 267): `sbx --cloud ls --json`, failing for any reason. No
-    // wording of the not-logged-in message is matched; none has been captured.
+    // wording of the not-logged-in message is matched (captured in sbx-cloud-not-logged-in.txt).
     backend.list().map_err(|e| {
         SbxUnavailable(format!(
             "the cloud didn't answer `sbx --cloud ls --json`: {e:#}; if you're not logged in, \

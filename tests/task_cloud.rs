@@ -634,10 +634,9 @@ fn an_sbx_under_the_cloud_minimum_is_refused_and_at_or_over_it_is_accepted() {
     }
 }
 
-/// Decision 267: the real not-logged-in message was never captured, so this one is made up, and
-/// sbxm matches no wording of it.
-const NOT_LOGGED_IN: &str =
-    include_str!("../src/backend/fixtures/sbx-cloud-ls-not-logged-in-made-up.txt");
+/// Decision 267: the real not-logged-in message, captured by `capture_not_logged_in` in
+/// `tests/real_sbx_cloud.rs` after `sbx logout`; sbxm matches no wording of it.
+const NOT_LOGGED_IN: &str = include_str!("../src/backend/fixtures/sbx-cloud-not-logged-in.txt");
 
 /// The "not logged in" row (decision 267): the probe `sbx --cloud ls --json` failing for any
 /// reason refuses with `sbx`'s own words and `sbx login`, as an `SbxUnavailable`, so a `task run`

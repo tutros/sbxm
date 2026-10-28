@@ -753,7 +753,12 @@ fn cloud_walk_against_real_sbx() {
         assert!(life.ttl_s > 0, "{life:?}");
         assert!(life.removed_at.is_some(), "{life:?}");
     }
-    let run_log = std::fs::read_to_string(meta.join("run.log")).unwrap();
+    // `main` tees the screen into `run.log`; called in-process, the lines are in `out` and `warn`.
+    let run_log = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out),
+        String::from_utf8_lossy(&warn)
+    );
     assert!(
         run_log.contains(&format!("cloud sandbox {worker} created")),
         "{run_log}"
