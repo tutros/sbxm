@@ -153,7 +153,7 @@ struct RawRun {
 #[serde(deny_unknown_fields)]
 struct RawContestant {
     harness: String,
-    model: String,
+    model: Option<String>,
     profile: Option<String>,
 }
 
@@ -200,7 +200,7 @@ struct RawCriterion {
 #[serde(deny_unknown_fields)]
 struct RawJudge {
     harness: String,
-    model: String,
+    model: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -262,15 +262,10 @@ impl Validator<'_> {
         for (i, c) in raw.contestants.into_iter().enumerate() {
             let at = format!("contestants[{i}]");
             let harness = self.harness(&format!("{at}.harness"), &c.harness)?;
-            if c.model.trim().is_empty() {
-                return Err(self.err(format!(
-                    "{at}.model is empty; name a model for {}",
-                    harness.as_str()
-                )));
-            }
+            let model = self.model(&format!("{at}.model"), harness, c.model)?;
             contestants.push(Contestant {
                 harness,
-                model: c.model,
+                model,
                 profile: c.profile,
             });
         }
@@ -385,19 +380,14 @@ impl Validator<'_> {
         let judge = match raw.judge {
             Some(j) => {
                 let harness = self.harness("eval.judge.harness", &j.harness)?;
-                if j.model.trim().is_empty() {
-                    return Err(self.err("eval.judge.model is empty; name a model"));
-                }
+                let model = self.model("eval.judge.model", harness, j.model)?;
                 if rubric.is_empty() {
                     return Err(self.err(
                         "eval.judge needs at least one [[eval.rubric]] criterion to score; add \
                          one or remove [eval.judge]",
                     ));
                 }
-                Some(Judge {
-                    harness,
-                    model: j.model,
-                })
+                Some(Judge { harness, model })
             }
             None => None,
         };
@@ -485,6 +475,24 @@ impl Validator<'_> {
             );
         }
         Ok(())
+    }
+
+    /// A contestant's or the judge's `model`: an empty one is refused, and an omitted one is the
+    /// harness's [`Harness::default_model`] (issue 314), refused for a harness that has none.
+    fn model(&self, at: &str, harness: Harness, model: Option<String>) -> Result<String> {
+        match model {
+            Some(model) if model.trim().is_empty() => Err(self.err(format!(
+                "{at} is empty; name a model for {}",
+                harness.as_str()
+            ))),
+            Some(model) => Ok(model),
+            None => harness.model_or_default(None).ok_or_else(|| {
+                self.err(format!(
+                    "{at} is missing; name a model for {}",
+                    harness.as_str()
+                ))
+            }),
+        }
     }
 
     fn harness(&self, at: &str, name: &str) -> Result<Harness> {
