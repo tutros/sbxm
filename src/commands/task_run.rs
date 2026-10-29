@@ -10,7 +10,7 @@ use anyhow::{Context, Result, anyhow, bail};
 
 use super::task_review;
 use super::task_start::{self, Restart};
-use crate::backend::SandboxBackend;
+use crate::backend::{Location, SandboxBackend};
 use crate::config::GlobalConfig;
 use crate::disk;
 use crate::github::GitHubBackend;
@@ -44,6 +44,8 @@ pub struct Options {
     pub identity: Option<Identity>,
     /// The free-space check of the sandbox drive before a sandbox is created (decision 194).
     pub disk: disk::Guard,
+    /// `--cloud` or `--local`; `None` leaves it to `[sandbox] location` (P14).
+    pub location: Option<Location>,
 }
 
 /// The drive can fill up while the worker runs, so it is checked again before the reviewer's
@@ -147,15 +149,15 @@ fn run_issue(
     if let Some(model) = &opts.worker_model {
         check_model_flag("--worker-model", model).map_err(|e| anyhow!(e))?;
     }
-    if let Some(limit) = &opts.reviewer_time_limit {
-        parse_duration("--reviewer-time-limit", limit).map_err(|e| anyhow!(e))?;
-    }
 
     // The reviewer's secret and profile are checked now too: a missing one must not be found only
     // after the worker has spent its time (spec §5.2). The effective config is the one both
     // phases will build from their flags.
-    {
+    // The location is resolved once, here, and handed to the start as it is, so `--local` over
+    // a cloud `[sandbox] location` holds for the whole command (P14).
+    let location = {
         let mut config = TaskConfig::load(&opts.repo_root)?;
+        let location = pipeline::choose_location(opts.location, &config);
         if let Some(harness) = opts.worker_harness {
             let harness = headless_harness("--worker-harness", harness.as_str(), "tasks")
                 .map_err(|e| anyhow!(e))?;
@@ -166,12 +168,23 @@ fn run_issue(
                 .map_err(|e| anyhow!(e))?;
             config.set_reviewer_harness(harness);
         }
+        // The reviewer's limit is part of both TTLs the cloud preflight checks (decision 263).
+        if let Some(limit) = &opts.reviewer_time_limit {
+            config.reviewer.time_limit =
+                parse_duration("--reviewer-time-limit", limit).map_err(|e| anyhow!(e))?;
+        }
         if let Some(profile) = &opts.profile {
             config.sandbox.profile = profile.clone();
         }
-        disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?;
-        pipeline::check_reviewer_inputs(config_dir, backend, &config)?;
-    }
+        // A cloud sandbox doesn't use the drive of `sbx`'s local sandbox state (P11, decision
+        // 262(h)).
+        if location == Location::Local {
+            disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?;
+        }
+        // At the cloud, the cloud preflight for the reviewer's sandboxes too (decision 261).
+        pipeline::check_reviewer_inputs(config_dir, backend.located(location), &config, location)?;
+        location
+    };
 
     let start = task_start::Options {
         repo_root: opts.repo_root.clone(),
@@ -180,12 +193,14 @@ fn run_issue(
         worker_harness: opts.worker_harness,
         worker_model: opts.worker_model.clone(),
         time_limit: opts.time_limit.clone(),
+        reviewer_time_limit: opts.reviewer_time_limit.clone(),
         profile: opts.profile.clone(),
         base: opts.base.clone(),
         repo: opts.repo.clone(),
         clone_source: opts.clone_source.clone(),
         identity: opts.identity.clone(),
         disk: opts.disk.clone(),
+        location: Some(location),
     };
     let mut warn = Once {
         inner: warn,
@@ -212,7 +227,12 @@ fn run_issue(
         return Err(e);
     }
 
-    let disk = review_has_room(config_dir, &opts.disk, &format!("--issue {}", opts.issue))?;
+    let disk = match location {
+        Location::Local => {
+            review_has_room(config_dir, &opts.disk, &format!("--issue {}", opts.issue))?
+        }
+        Location::Cloud => opts.disk.clone(),
+    };
     task_review::run(
         config_dir,
         &task_review::Options {
@@ -229,6 +249,9 @@ fn run_issue(
             resolved_spec_id: None,
             force: false,
             disk,
+            // A task that exists runs where its record says (decision 253).
+            location: None,
+            identity: opts.identity.clone(),
         },
         backend,
         github,
@@ -261,6 +284,8 @@ pub struct SpecOptions {
     pub identity: Option<Identity>,
     /// The free-space check of the sandbox drive before a sandbox is created (decision 194).
     pub disk: disk::Guard,
+    /// `--cloud` or `--local`; `None` leaves it to `[sandbox] location` (P14).
+    pub location: Option<Location>,
 }
 
 /// Sets the spec task of `spec` aside, if one exists, instead of deleting it (decision 185): the
@@ -285,6 +310,7 @@ fn discard_existing_spec(
     if !finish::exists(&base_dir, &id) {
         return Ok(None);
     }
+    // Its sandboxes are removed where its record says they are (milestone 4 slice 6).
     finish::check_spec_result_fetched(&base_dir, &id, repo_root)?;
     let aside = finish::set_aside(
         &base_dir,
@@ -347,14 +373,12 @@ fn run_spec_task(
     if let Some(model) = &opts.worker_model {
         check_model_flag("--worker-model", model).map_err(|e| anyhow!(e))?;
     }
-    if let Some(limit) = &opts.reviewer_time_limit {
-        parse_duration("--reviewer-time-limit", limit).map_err(|e| anyhow!(e))?;
-    }
 
     // As for `--issue`: the reviewer's secret and profile are checked now too, before the worker
     // has spent its time (spec §5.2).
-    {
+    let location = {
         let mut config = TaskConfig::load(&opts.repo_root)?;
+        let location = pipeline::choose_location(opts.location, &config);
         if let Some(harness) = opts.worker_harness {
             let harness = headless_harness("--worker-harness", harness.as_str(), "tasks")
                 .map_err(|e| anyhow!(e))?;
@@ -365,12 +389,23 @@ fn run_spec_task(
                 .map_err(|e| anyhow!(e))?;
             config.set_reviewer_harness(harness);
         }
+        // The reviewer's limit is part of both TTLs the cloud preflight checks (decision 263).
+        if let Some(limit) = &opts.reviewer_time_limit {
+            config.reviewer.time_limit =
+                parse_duration("--reviewer-time-limit", limit).map_err(|e| anyhow!(e))?;
+        }
         if let Some(profile) = &opts.profile {
             config.sandbox.profile = profile.clone();
         }
-        disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?;
-        pipeline::check_reviewer_inputs(config_dir, backend, &config)?;
-    }
+        // A cloud sandbox doesn't use the drive of `sbx`'s local sandbox state (P11, decision
+        // 262(h)).
+        if location == Location::Local {
+            disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?;
+        }
+        // At the cloud, the cloud preflight for the reviewer's sandboxes too (decision 261).
+        pipeline::check_reviewer_inputs(config_dir, backend.located(location), &config, location)?;
+        location
+    };
 
     let start = task_start::SpecOptions {
         repo_root: opts.repo_root.clone(),
@@ -378,12 +413,14 @@ fn run_spec_task(
         worker_harness: opts.worker_harness,
         worker_model: opts.worker_model.clone(),
         time_limit: opts.time_limit.clone(),
+        reviewer_time_limit: opts.reviewer_time_limit.clone(),
         profile: opts.profile.clone(),
         base: opts.base.clone(),
         repo: opts.repo.clone(),
         clone_source: opts.clone_source.clone(),
         identity: opts.identity.clone(),
         disk: opts.disk.clone(),
+        location: Some(location),
     };
     // The same preflight `task_start::run_spec` itself runs, so a bad --time-limit, repo,
     // identity, base or spec file is caught here too: `--restart`'s discard below must not cost
@@ -393,7 +430,12 @@ fn run_spec_task(
     // The worker's secret, checked the same way the reviewer's already is above, before anything
     // is discarded: a missing one must not be found only after the old task is gone (issue #194
     // review finding M-2).
-    pipeline::check_worker_inputs(config_dir, backend, &resolved.config)?;
+    pipeline::check_worker_inputs(
+        config_dir,
+        backend.located(location),
+        &resolved.config,
+        location,
+    )?;
 
     let mut aside: Option<finish::SetAside> = None;
     if let Some(restart) = restart {
@@ -470,6 +512,9 @@ fn run_spec_task(
         &mut started,
         &mut warn,
         &on_prepared,
+        &std::thread::sleep,
+        // Empty in production while P8 (a) holds (slice 4).
+        &[],
     );
     out.write_all(without_next(&started).as_bytes())?;
 
@@ -495,7 +540,12 @@ fn run_spec_task(
         return Err(e);
     }
 
-    let disk = review_has_room(config_dir, &opts.disk, &task_start::spec_flag(&opts.spec))?;
+    let disk = match location {
+        Location::Local => {
+            review_has_room(config_dir, &opts.disk, &task_start::spec_flag(&opts.spec))?
+        }
+        Location::Cloud => opts.disk.clone(),
+    };
     task_review::run(
         config_dir,
         &task_review::Options {
@@ -512,6 +562,9 @@ fn run_spec_task(
             resolved_spec_id: Some(spec_id),
             force: false,
             disk,
+            // A task that exists runs where its record says (decision 253).
+            location: None,
+            identity: opts.identity.clone(),
         },
         backend,
         github,
@@ -553,6 +606,7 @@ impl Target {
 
 /// The flags every task of a `task run` list shares (decision 193): the same as [`Options`] and
 /// [`SpecOptions`] minus the one target each task carries on its own.
+#[derive(Clone)]
 pub struct ListOptions {
     /// The target repo's root, where `sbxm-task.toml` is.
     pub repo_root: PathBuf,
@@ -574,6 +628,8 @@ pub struct ListOptions {
     /// only the first (decision 193 point 2): a task's own sandbox can fill the drive the next
     /// one needs.
     pub disk: disk::Guard,
+    /// `--cloud` or `--local`; `None` leaves it to `[sandbox] location` (P14).
+    pub location: Option<Location>,
 }
 
 impl ListOptions {
@@ -593,6 +649,7 @@ impl ListOptions {
             clone_source: self.clone_source.clone(),
             identity: self.identity.clone(),
             disk: self.disk.clone(),
+            location: self.location,
         }
     }
 
@@ -612,6 +669,7 @@ impl ListOptions {
             clone_source: self.clone_source.clone(),
             identity: self.identity.clone(),
             disk: self.disk.clone(),
+            location: self.location,
         }
     }
 }
@@ -802,6 +860,17 @@ pub fn run_list(
         };
     }
 
+    // One location for the whole list (P14), resolved once: every target runs where the first
+    // does, whatever happens to `sbxm-task.toml` meanwhile. A config that can't be read is each
+    // target's own failure, found as it starts (decision 193 point 1), as before.
+    let location = match TaskConfig::load(&opts.repo_root) {
+        Ok(config) => pipeline::choose_location(opts.location, &config),
+        Err(_) => opts.location.unwrap_or_default(),
+    };
+    let opts = &ListOptions {
+        location: Some(location),
+        ..opts.clone()
+    };
     preflight_targets(config_dir, opts, targets, github)?;
 
     let mut summaries: Vec<(String, bool)> = Vec::new();
@@ -813,7 +882,15 @@ pub fn run_list(
             targets.len(),
             target.flag()
         )?;
-        if let Err(e) = disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk) {
+        // A cloud sandbox doesn't use the drive of `sbx`'s local sandbox state (P11, decision
+        // 262(h)), for any target of the list.
+        let room = match location {
+            Location::Local => {
+                disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)
+            }
+            Location::Cloud => Ok(()),
+        };
+        if let Err(e) = room {
             let reason = format!("{e:#}");
             writeln!(out, "{}: not started: {reason}", target.flag())?;
             summaries.push((format!("{}: not started: {reason}", target.flag()), false));

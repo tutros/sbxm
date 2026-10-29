@@ -160,13 +160,14 @@ pub fn run(
     backend.create(&CreateSpec {
         name: sandbox.clone(),
         agent: options.harness.agent_arg().into(),
-        workspace: workspace.clone(),
+        workspace: Some(workspace.clone()),
         cpus: config.resources.cpus,
         memory: config.resources.memory,
         skills: profile.skills_store,
         kits: kits.into_iter().map(|(dir, _)| dir).collect(),
         template: template.clone(),
         deny_network: deny_network.clone().unwrap_or_default(),
+        ttl: None,
     })?;
     template::check_codex_rules(
         profile_name,

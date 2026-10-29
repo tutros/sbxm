@@ -147,6 +147,8 @@ pub fn ctx_with_host<'a>(
         github,
         identity: &f.identity,
         probe: &Probe,
+        sleep: &std::thread::sleep,
+        scoped_secrets: &[],
     }
 }
 

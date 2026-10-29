@@ -37,6 +37,7 @@ fn finish(
             repo_root: repo_root(f),
             push_unresolved,
         },
+        &sbxm::backend::FakeBackend::default(),
         github,
         &Probe,
         &mut out,

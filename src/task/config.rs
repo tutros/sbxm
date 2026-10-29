@@ -8,6 +8,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use crate::backend::Location;
 use crate::config::resolve_inside;
 use crate::harness::Harness;
 use crate::run::config::{headless_harness, parse_duration};
@@ -89,6 +90,9 @@ pub struct Role {
 #[derive(Debug, Clone)]
 pub struct Sandbox {
     pub profile: String,
+    /// `[sandbox] location` (decision 262(a)): where a new task's sandboxes run unless a flag
+    /// says otherwise; local when absent.
+    pub location: Location,
     pub cpus: Option<u32>,
     pub memory: Option<String>,
 }
@@ -177,6 +181,8 @@ struct RawWorkerRole {
 #[serde(deny_unknown_fields)]
 struct RawSandbox {
     profile: Option<String>,
+    #[serde(default)]
+    location: Location,
     cpus: Option<u32>,
     memory: Option<String>,
 }
@@ -435,6 +441,7 @@ impl Validator<'_> {
         }
         Ok(Sandbox {
             profile,
+            location: raw.location,
             cpus: raw.cpus,
             memory: raw.memory,
         })

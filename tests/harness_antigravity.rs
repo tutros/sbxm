@@ -47,13 +47,14 @@ fn creates_a_sandbox_from_the_pinned_kit() {
         vec![CreateSpec {
             name: "sbxm-demo-antigravity".into(),
             agent: KIT.into(),
-            workspace: env.base_dir().join("demo"),
+            workspace: Some(env.base_dir().join("demo")),
             cpus: 4,
             memory: "8g".into(),
             skills: SkillsStore::ReadOnly,
             kits: vec![env.kit_dir("demo"), kit_dir(&env)],
             template: None,
             deny_network: Vec::new(),
+            ttl: None,
         }]
     );
     insta::assert_snapshot!(

@@ -6,9 +6,11 @@
 
 use anyhow::{Context, Result, bail};
 
+use super::lifetime;
 use super::machine::{self, Event};
 use super::pipeline::{self, Prepared, ReviewReport, TaskEnv, Worked};
 use super::record::{self, Kind, Process, ProcessProbe, Record, Stage, Status, Stopped};
+use crate::backend::Location;
 use crate::headless::RunStatus;
 use crate::run::results::now;
 
@@ -116,6 +118,53 @@ pub fn check_can_resume(
     }
 }
 
+/// Refuses to resume a task whose record holds a cloud create that was started and never
+/// recorded as returned (decision 268), unless `forget` (`--forget-ambiguous`): sbxm can't tell
+/// whether that sandbox is the one it asked for or another caller's, so it neither uses nor
+/// removes it, and the user looks first.
+pub fn check_ambiguous(task: &Record, forget: bool) -> Result<()> {
+    if forget {
+        return Ok(());
+    }
+    refuse_ambiguous(task, "be resumed")
+}
+
+/// The one guard of decision 268 for every path that would list, copy to or from, `exec` in,
+/// reuse, rebuild over or remove a cloud sandbox by its name: refuses, `task <id> can't <what>
+/// yet`, when the record holds a create that was started and never recorded as returned. Such a
+/// sandbox is never inferred to be the task's from the cloud's listing; the user looks first and
+/// then follows the task's kind of recovery (`recovery`).
+pub fn refuse_ambiguous(task: &Record, what: &str) -> Result<()> {
+    match task.ambiguous_create() {
+        Some(name) => bail!(
+            "task {} can't {what} yet: {}",
+            task.id,
+            lifetime::ambiguous_create(name, &recovery(task))
+        ),
+        None => Ok(()),
+    }
+}
+
+/// What the user runs once the sandbox is removed or kept: a PR task can't be resumed (its
+/// `task resume` target doesn't exist), so `task rm --pr` drops the entry and the review is asked
+/// for again; an issue or spec task is resumed.
+fn recovery(task: &Record) -> String {
+    match task.kind {
+        Kind::Pr => format!(
+            "once you have removed it or decided to keep it, run `sbxm task rm --pr {n} \
+             --forget-ambiguous` and then `sbxm task review --pr {n}`; the first drops it from \
+             task.json and touches nothing in the cloud",
+            n = task.number
+        ),
+        _ => format!(
+            "once you have removed it or decided to keep it, run `sbxm task resume {} \
+             --forget-ambiguous`, which drops it from task.json and touches nothing in the \
+             cloud",
+            target_flag(task)
+        ),
+    }
+}
+
 /// The flag that names a task on the command line again: a spec task's file isn't recorded, so
 /// it is named by its placeholder.
 fn target_flag(task: &Record) -> String {
@@ -166,10 +215,32 @@ fn resume_runs_worker(task: &Record) -> bool {
 /// Continues the task from its recorded stage (issue 118). Checks first: nothing runs or is
 /// written when [`check_can_resume`], the reviewer's checks, (when the worker will run) the
 /// worker's checks, or (when a recorded review is replayed) [`pipeline::check_replay`] refuse.
+///
+/// A task recorded in the cloud (milestone 4 slice 6) is resumed there: `env.backend` is the
+/// cloud instance, the worker's checks are the cloud preflight of its sandbox's rebuild, made
+/// whatever the stage (decision 261), a gone worker sandbox is made again from the recorded
+/// profile and a bundle of the branch (P5 (d)), the task's input goes into it by `cp`, and it is
+/// removed when the task stops, whichever way the resume ends after the checks.
 pub fn resume(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Result<Resumed> {
+    resume_forgetting(env, prepared, rounds, false)
+}
+
+/// [`resume`], with `--forget-ambiguous` when `forget` (decision 268): a cloud create that was
+/// started and never recorded as returned is refused ([`check_ambiguous`]) unless `forget`, when
+/// it is dropped from `task.json` once every other check passed, with no cloud call for it.
+pub fn resume_forgetting(
+    env: &TaskEnv,
+    prepared: &mut Prepared,
+    rounds: Option<u32>,
+    forget: bool,
+) -> Result<Resumed> {
     check_can_resume(&prepared.record, env.probe, rounds)?;
+    check_ambiguous(&prepared.record, forget)?;
     pipeline::check_reviewer(env, prepared)?;
-    if resume_runs_worker(&prepared.record) {
+    let cloud = prepared.record.location == Location::Cloud;
+    if cloud {
+        pipeline::check_cloud_rebuild(env, &prepared.record, rounds)?;
+    } else if resume_runs_worker(&prepared.record) {
         pipeline::check_worker(env, prepared)?;
     }
     if (prepared.record.stage, prepared.record.status) == (Stage::Reviewing, Status::Completed)
@@ -177,6 +248,24 @@ pub fn resume(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Re
     {
         pipeline::check_replay(prepared, result)?;
     }
+    if let Some(name) = prepared.record.ambiguous_create().map(str::to_owned) {
+        record::write_change(&prepared.meta, &mut prepared.record, |t| {
+            t.forget_ambiguous();
+        })?;
+        prepared.events.push(format!(
+            "cloud sandbox {name}'s ambiguous create is dropped from task.json; nothing in the \
+             cloud was touched for it"
+        ));
+    }
+    let resumed = resume_checked(env, prepared, rounds);
+    // The task stops here, whichever way: a cloud worker sandbox goes (P5 (d), decision 263).
+    pipeline::stop_cloud_worker(env, prepared);
+    resumed
+}
+
+/// [`resume`] once its checks have passed.
+fn resume_checked(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Result<Resumed> {
+    let cloud = prepared.record.location == Location::Cloud;
     let mut resumed = Resumed {
         from: (prepared.record.stage, prepared.record.status),
         sandbox_remade: false,
@@ -185,26 +274,32 @@ pub fn resume(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Re
     };
     let probe = env.probe;
     // A worker that runs again gets the task's own input back first, before any sandbox is
-    // touched: the last run could change it, or leave a link where it goes.
-    if matches!(
+    // touched: the last run could change it, or leave a link where it goes. A cloud clone gets it
+    // once its sandbox is there, below.
+    let reruns_worker = matches!(
         (prepared.record.stage, prepared.record.status),
         (Stage::Prepared, _) | (Stage::Working, Status::Running | Status::Failed)
-    ) {
-        pipeline::restore_worker_input(prepared)?;
+    );
+    if reruns_worker && !cloud {
+        pipeline::restore_worker_input(env.backend, prepared)?;
     }
     // A stopped `ready` task's fix round works from its recorded review: it is read, and with the
-    // prompt written into the clone, before the sandbox, the budget or the stage change.
+    // prompt written into the clone, before the sandbox, the budget or the stage change. A cloud
+    // task's worker sandbox went at its stop: the fix round makes it again and places the input.
     let fix_input = if prepared.record.stage == Stage::Ready {
         let input = pipeline::fix_input(env, prepared, None)?;
-        input.place(&prepared.workspace)?;
+        if !cloud {
+            input.place(env.backend, prepared)?;
+        }
         Some(input)
     } else {
         None
     };
     // The worker's sandbox runs the worker, the sandbox gates and every fix round; it can vanish
     // between stages (workflow note G17), so it is made again first when it is gone. A
-    // preparation makes it afresh below instead.
-    if prepared.record.stage != Stage::Prepared {
+    // preparation makes it afresh below instead, and a cloud fix round from `ready` makes its own.
+    if prepared.record.stage != Stage::Prepared && !(cloud && prepared.record.stage == Stage::Ready)
+    {
         resumed.sandbox_remade = pipeline::ensure_worker_sandbox(env, prepared, false)?;
         if resumed.sandbox_remade {
             prepared
@@ -212,6 +307,9 @@ pub fn resume(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Re
                 .notes
                 .push("resume: the worker's sandbox was gone and was made again".to_owned());
         }
+    }
+    if reruns_worker && cloud && prepared.record.stage != Stage::Prepared {
+        pipeline::restore_worker_input(env.backend, prepared)?;
     }
     // Whether the worker runs again (its stage is set up below, running).
     let mut run_worker = false;

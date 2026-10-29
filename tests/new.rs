@@ -11,13 +11,14 @@ fn expected_create(env: &Env, workspace: &Path) -> CreateSpec {
     CreateSpec {
         name: "sbxm-demo-claude".into(),
         agent: "claude".into(),
-        workspace: workspace.to_path_buf(),
+        workspace: Some(workspace.to_path_buf()),
         cpus: 4,
         memory: "8g".into(),
         skills: SkillsStore::ReadOnly,
         kits: vec![env.kit_dir("demo"), env.harness_kit_dir("demo")],
         template: None,
         deny_network: Vec::new(),
+        ttl: None,
     }
 }
 

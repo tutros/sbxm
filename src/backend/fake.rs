@@ -4,11 +4,11 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use super::{
-    CreateSpec, CustomSecret, CustomSecretSpec, ExecOutput, ExecSpec, KitValidation, NetworkRule,
-    SandboxBackend, SandboxInfo, TemplateImage,
+    CopyOut, CreateSpec, CustomSecret, CustomSecretSpec, ExecOutput, ExecSpec, KitValidation,
+    Location, NetworkRule, SandboxBackend, SandboxDetail, SandboxInfo, ScopedSecret, TemplateImage,
 };
 
 /// Holds every `exec` of a [`FakeBackend`] until [`ExecGate::open`], so a test
@@ -67,6 +67,9 @@ pub struct FakeBackend {
     stops: Mutex<Vec<String>>,
     removes: Mutex<Vec<String>>,
     fail_remove: bool,
+    /// What the next calls of `remove` fail with, one each, in order; `remove` succeeds once
+    /// they are used up.
+    remove_errors: Mutex<std::collections::VecDeque<String>>,
     log: Mutex<Vec<String>>,
     invalid_kit: Option<String>,
     kit_warning: Option<String>,
@@ -83,6 +86,8 @@ pub struct FakeBackend {
     version: Option<String>,
     no_sbx: bool,
     fail_list: bool,
+    /// What `list` fails with under `fail_list`, instead of the daemon-not-running text.
+    list_failure: Option<String>,
     execs: Mutex<Vec<(String, ExecSpec)>>,
     exec_outputs: Mutex<VecDeque<ExecOutput>>,
     skills: Option<serde_json::Value>,
@@ -100,6 +105,12 @@ pub struct FakeBackend {
     exec_hook: Option<ExecHook>,
     exec_responder: Option<ExecResponder>,
     create_hook: Option<CreateHook>,
+    /// Called once a `create` succeeded, as `create_hook` is at its start.
+    accepted_create_hook: Option<CreateHook>,
+    /// The cloud's sandboxes under [`FakeBackend::with_live_cloud`]: a `create` that succeeds
+    /// adds one, a `remove` takes it away, and removing one that isn't there answers as
+    /// `sbx --cloud rm` does. `None`: every `remove` succeeds.
+    live_cloud: Option<Mutex<Vec<String>>>,
     /// How many times `secret_services` was called; a read, so it's not in `log`.
     secret_service_calls: Mutex<usize>,
     /// Flipped (via [`FakeBackend::secret_services_failure`]) to make `secret_services` fail from
@@ -110,6 +121,17 @@ pub struct FakeBackend {
     /// What `network_rules` returns, for every sandbox.
     network_rules: Vec<NetworkRule>,
     fail_network_rules: bool,
+    /// What a cloud sandbox's `cloud_allowed_hosts` starts with, the same for every sandbox;
+    /// `cloud_deny_host` takes a host away from that sandbox's own copy (S17).
+    cloud_allow: Vec<String>,
+    /// Each sandbox's own allow list once it was read or changed.
+    cloud_policies: Mutex<HashMap<String, Vec<String>>>,
+    /// Hosts a `cloud_deny_host` leaves allowed, standing in for a rule sbxm's deny doesn't win
+    /// over, as `(part of the sandbox's name, host)`.
+    undeniable_cloud_hosts: Vec<(String, String)>,
+    /// `cloud_allowed_hosts` fails from this call on, counting from 0.
+    fail_cloud_policy_ls_from: Option<usize>,
+    cloud_policy_ls_calls: Mutex<usize>,
     /// What `custom_secrets` returns; `set_custom_secret` adds to it, `remove_custom_secret`
     /// takes away.
     custom_secrets: Mutex<Vec<CustomSecret>>,
@@ -118,6 +140,43 @@ pub struct FakeBackend {
     fail_custom_secrets: bool,
     fail_set_custom_secret: bool,
     fail_remove_custom_secret: bool,
+    /// The cloud's secret list as `(scope, service name)`: what `scoped_secrets` reads;
+    /// `set_scoped_secret` adds to it, `remove_secret` takes away (milestone 4 slice 4).
+    cloud_secrets: Mutex<Vec<(String, String)>>,
+    /// Every `set_scoped_secret` call, as `(sandbox, secret)`.
+    scoped_secret_sets: Mutex<Vec<(String, ScopedSecret)>>,
+    /// The hosts whose `set_scoped_secret` fails.
+    fail_set_scoped_secret_for: Vec<String>,
+    fail_scoped_secrets: bool,
+    /// The service names whose `remove_secret` fails.
+    fail_remove_secret_for: Vec<String>,
+    /// Every location `located` was asked for, in order.
+    locations: Mutex<Vec<Location>>,
+    /// What `list_detailed` returns: the cloud's list, the only one `status` and `doctor` ask
+    /// for in detail (milestone 4 slice 8).
+    cloud_sandboxes: Vec<SandboxDetail>,
+    /// What `list_detailed` fails with, when set.
+    cloud_list_failure: Option<String>,
+    /// How many times `list_detailed` was called; a read, so it's not in `log`.
+    cloud_list_calls: Mutex<usize>,
+    /// What `copy_out` of an in-sandbox path produces, before `sandbox_root` is looked at.
+    copy_outs: HashMap<String, FakeCopy>,
+    /// A host folder standing in for every sandbox's filesystem: `copy_in` writes
+    /// `<root>/<path>`, `copy_out` copies whatever is at `<root>/<path>` as it is (a link as a
+    /// link, a folder whole).
+    sandbox_root: Option<PathBuf>,
+}
+
+/// What a scripted [`FakeBackend`] `copy_out` leaves at the host path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FakeCopy {
+    File(Vec<u8>),
+    /// A symbolic link pointing at this target.
+    Link(PathBuf),
+    /// A folder holding one file, as `sbx cp` copies a folder whole (P2).
+    Folder,
+    /// Nothing at the path ([`CopyOut::Missing`]).
+    Missing,
 }
 
 /// Runs inside every `exec` (after the gate), so a test can play the agent
@@ -291,6 +350,15 @@ impl FakeBackend {
         }
     }
 
+    /// Makes `list` fail with `sbx`'s own words, as the real backend passes them on.
+    pub fn failing_list_with(self, message: &str) -> Self {
+        Self {
+            fail_list: true,
+            list_failure: Some(message.to_owned()),
+            ..self
+        }
+    }
+
     /// Makes `exec` return these outputs in order, then empty successes.
     pub fn with_exec_outputs(self, outputs: Vec<ExecOutput>) -> Self {
         Self {
@@ -362,6 +430,37 @@ impl FakeBackend {
             create_hook: Some(CreateHook(Arc::new(hook))),
             ..self
         }
+    }
+
+    /// Calls `hook(spec)` once a `create` has succeeded: the sandbox exists (in
+    /// [`FakeBackend::with_live_cloud`]'s cloud), and the caller hasn't heard back yet.
+    pub fn with_accepted_create_hook(
+        self,
+        hook: impl Fn(&CreateSpec) + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            accepted_create_hook: Some(CreateHook(Arc::new(hook))),
+            ..self
+        }
+    }
+
+    /// Keeps track of the sandboxes there are, starting with `names`: each successful `create`
+    /// adds its sandbox, each `remove` takes one away, and removing one that isn't there fails
+    /// with `sbx --cloud rm`'s `sandbox '<name>' not found` (`sbx-cloud-rm-not-found.txt`).
+    /// `list` and `list_detailed` show them too, after whatever their own scripted lists hold.
+    pub fn with_live_cloud(self, names: &[&str]) -> Self {
+        Self {
+            live_cloud: Some(Mutex::new(names.iter().map(|n| (*n).to_owned()).collect())),
+            ..self
+        }
+    }
+
+    /// The sandboxes there are under [`FakeBackend::with_live_cloud`].
+    pub fn live_cloud(&self) -> Vec<String> {
+        self.live_cloud
+            .as_ref()
+            .map(|live| live.lock().unwrap().clone())
+            .unwrap_or_default()
     }
 
     /// Calls `hook(sandbox, spec)` inside every successful `exec`, before it
@@ -467,6 +566,42 @@ impl FakeBackend {
         }
     }
 
+    /// A backend whose cloud sandboxes each start out allowing these hosts.
+    pub fn with_cloud_allow(self, hosts: &[&str]) -> Self {
+        Self {
+            cloud_allow: hosts.iter().map(|h| (*h).to_owned()).collect(),
+            ..self
+        }
+    }
+
+    /// Makes `cloud_deny_host` of this host succeed but leave it allowed, in every sandbox.
+    pub fn with_undeniable_cloud_host(self, host: &str) -> Self {
+        self.with_undeniable_cloud_host_in("", host)
+    }
+
+    /// [`FakeBackend::with_undeniable_cloud_host`] only in sandboxes whose name contains `part`.
+    pub fn with_undeniable_cloud_host_in(mut self, part: &str, host: &str) -> Self {
+        self.undeniable_cloud_hosts
+            .push((part.to_owned(), host.to_owned()));
+        self
+    }
+
+    /// Makes `cloud_allowed_hosts` record the call and fail from its `n`th call on (0 for every
+    /// call), as a list `sbx` can't give or sbxm can't parse.
+    pub fn failing_cloud_policy_ls_from(self, n: usize) -> Self {
+        Self {
+            fail_cloud_policy_ls_from: Some(n),
+            ..self
+        }
+    }
+
+    /// Makes the next `remove` calls fail with these errors, one each, in order, and the ones
+    /// after them succeed.
+    pub fn with_remove_errors(self, errors: &[&str]) -> Self {
+        *self.remove_errors.lock().unwrap() = errors.iter().map(|e| (*e).to_owned()).collect();
+        self
+    }
+
     /// Makes `remove` record the call and then fail, like [`FakeBackend::failing_remove`].
     pub fn and_failing_remove(self) -> Self {
         Self {
@@ -505,6 +640,46 @@ impl FakeBackend {
         }
     }
 
+    /// A backend whose cloud secret list starts with `name` scoped to `scope`.
+    pub fn with_cloud_secret(self, scope: &str, name: &str) -> Self {
+        self.cloud_secrets
+            .lock()
+            .unwrap()
+            .push((scope.to_owned(), name.to_owned()));
+        self
+    }
+
+    /// Makes `set_scoped_secret` of a secret for `host` record the call and then fail, storing
+    /// nothing.
+    pub fn failing_set_scoped_secret_for(mut self, host: &str) -> Self {
+        self.fail_set_scoped_secret_for.push(host.to_owned());
+        self
+    }
+
+    /// Makes `scoped_secrets` fail.
+    pub fn failing_scoped_secrets(self) -> Self {
+        Self {
+            fail_scoped_secrets: true,
+            ..self
+        }
+    }
+
+    /// Makes `remove_secret` of the service `name` record the call and then fail.
+    pub fn failing_remove_secret_for(mut self, name: &str) -> Self {
+        self.fail_remove_secret_for.push(name.to_owned());
+        self
+    }
+
+    /// Every `set_scoped_secret` call, in order, as `(sandbox, secret)`.
+    pub fn scoped_secret_sets(&self) -> Vec<(String, ScopedSecret)> {
+        self.scoped_secret_sets.lock().unwrap().clone()
+    }
+
+    /// The cloud's secret list now, as `(scope, service name)`.
+    pub fn cloud_secrets(&self) -> Vec<(String, String)> {
+        self.cloud_secrets.lock().unwrap().clone()
+    }
+
     /// Every `set_custom_secret` call, in order.
     pub fn custom_secret_sets(&self) -> Vec<CustomSecretSpec> {
         self.custom_secret_sets.lock().unwrap().clone()
@@ -516,18 +691,137 @@ impl FakeBackend {
         self.custom_secrets.lock().unwrap().clone()
     }
 
+    /// A backend whose `list_detailed` (the cloud's list) returns these.
+    pub fn with_cloud_sandboxes(self, sandboxes: Vec<SandboxDetail>) -> Self {
+        Self {
+            cloud_sandboxes: sandboxes,
+            ..self
+        }
+    }
+
+    /// Makes `list_detailed` fail with `message`, as an unreadable cloud does.
+    pub fn failing_cloud_list(self, message: &str) -> Self {
+        Self {
+            cloud_list_failure: Some(message.to_owned()),
+            ..self
+        }
+    }
+
+    /// How many times `list_detailed` was called.
+    pub fn cloud_list_calls(&self) -> usize {
+        *self.cloud_list_calls.lock().unwrap()
+    }
+
+    /// Every location `located` was asked for, in order.
+    pub fn locations(&self) -> Vec<Location> {
+        self.locations.lock().unwrap().clone()
+    }
+
+    /// Makes `copy_out` of the in-sandbox `path` produce `copy`, in any sandbox.
+    pub fn with_copy_out(mut self, path: &str, copy: FakeCopy) -> Self {
+        self.copy_outs.insert(path.to_owned(), copy);
+        self
+    }
+
+    /// Lets `root` stand in for every sandbox's filesystem in `copy_in` and `copy_out`.
+    pub fn with_sandbox_root(self, root: &Path) -> Self {
+        Self {
+            sandbox_root: Some(root.to_path_buf()),
+            ..self
+        }
+    }
+
+    /// `<root>/<path>` for an in-sandbox absolute path.
+    fn in_root(&self, path: &str) -> Option<PathBuf> {
+        let root = self.sandbox_root.as_ref()?;
+        Some(root.join(path.trim_start_matches('/')))
+    }
+
     fn record(&self, call: &str, name: &str) {
         self.log.lock().unwrap().push(format!("{call} {name}"));
     }
 }
 
+/// Writes `copy` at `host`.
+fn produce(copy: &FakeCopy, host: &Path) -> Result<CopyOut> {
+    match copy {
+        FakeCopy::File(bytes) => std::fs::write(host, bytes)?,
+        FakeCopy::Link(target) => symlink(target, host)?,
+        FakeCopy::Folder => {
+            std::fs::create_dir(host)?;
+            std::fs::write(host.join("inside.txt"), "a file in a folder\n")?;
+        }
+        FakeCopy::Missing => return Ok(CopyOut::Missing),
+    }
+    Ok(CopyOut::Copied)
+}
+
+#[cfg(unix)]
+fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
+}
+
+#[cfg(windows)]
+fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::windows::fs::symlink_file(target, link)
+}
+
+/// Copies `from` to `to` as it is: a link as a link, a folder with everything in it.
+fn copy_as_is(from: &Path, to: &Path) -> Result<()> {
+    let kind = std::fs::symlink_metadata(from)?.file_type();
+    if kind.is_symlink() {
+        symlink(&std::fs::read_link(from)?, to)?;
+    } else if kind.is_dir() {
+        std::fs::create_dir(to)?;
+        for entry in std::fs::read_dir(from)? {
+            let entry = entry?;
+            copy_as_is(&entry.path(), &to.join(entry.file_name()))?;
+        }
+    } else {
+        std::fs::copy(from, to)?;
+    }
+    Ok(())
+}
+
 impl SandboxBackend for FakeBackend {
+    fn located(&self, location: Location) -> &dyn SandboxBackend {
+        self.locations.lock().unwrap().push(location);
+        self
+    }
+
+    fn copy_in(&self, sandbox: &str, host: &Path, path: &str) -> Result<()> {
+        self.record("cp-in", &format!("{sandbox} {path}"));
+        if let Some(target) = self.in_root(path) {
+            if !target.parent().is_some_and(Path::is_dir) {
+                bail!("fake cp: the folder of {path} does not exist in {sandbox}");
+            }
+            std::fs::copy(host, &target)?;
+        }
+        Ok(())
+    }
+
+    fn copy_out(&self, sandbox: &str, path: &str, host: &Path) -> Result<CopyOut> {
+        self.record("cp-out", &format!("{sandbox} {path}"));
+        if let Some(copy) = self.copy_outs.get(path) {
+            return produce(copy, host);
+        }
+        match self.in_root(path) {
+            Some(source) if std::fs::symlink_metadata(&source).is_ok() => {
+                copy_as_is(&source, host)?;
+                Ok(CopyOut::Copied)
+            }
+            _ => Ok(CopyOut::Missing),
+        }
+    }
+
     fn create(&self, spec: &CreateSpec) -> Result<()> {
         if let Some(hook) = &self.create_hook {
             (hook.0)(spec);
         }
         self.creates.lock().unwrap().push(spec.clone());
         self.record("create", &spec.name);
+        // A new sandbox of the same name starts from the list again.
+        self.cloud_policies.lock().unwrap().remove(&spec.name);
         if self.fail_create
             || self.fail_create_for.contains(&spec.name)
             || self
@@ -537,6 +831,15 @@ impl SandboxBackend for FakeBackend {
         {
             bail!("fake create failure");
         }
+        if let Some(live) = &self.live_cloud {
+            let mut live = live.lock().unwrap();
+            if !live.contains(&spec.name) {
+                live.push(spec.name.clone());
+            }
+        }
+        if let Some(hook) = &self.accepted_create_hook {
+            (hook.0)(spec);
+        }
         Ok(())
     }
 
@@ -545,9 +848,45 @@ impl SandboxBackend for FakeBackend {
             bail!("fake: sbx not found");
         }
         if self.fail_list {
-            bail!("fake: daemon not running");
+            match &self.list_failure {
+                Some(message) => bail!("{message}"),
+                None => bail!("fake: daemon not running"),
+            }
         }
-        Ok(self.sandboxes.clone())
+        let mut listed = self.sandboxes.clone();
+        for name in self.live_cloud() {
+            if !listed.iter().any(|s| s.name == name) {
+                listed.push(SandboxInfo {
+                    name,
+                    agent: String::new(),
+                    status: "running".into(),
+                });
+            }
+        }
+        Ok(listed)
+    }
+
+    fn list_detailed(&self) -> Result<Vec<SandboxDetail>> {
+        *self.cloud_list_calls.lock().unwrap() += 1;
+        if self.no_sbx {
+            bail!("fake: sbx not found");
+        }
+        if let Some(message) = &self.cloud_list_failure {
+            bail!("{message}");
+        }
+        let mut listed = self.cloud_sandboxes.clone();
+        for name in self.live_cloud() {
+            if !listed.iter().any(|s| s.name == name) {
+                listed.push(SandboxDetail {
+                    name,
+                    status: "running".into(),
+                    cpus: None,
+                    memory_mib: None,
+                    expires_at: None,
+                });
+            }
+        }
+        Ok(listed)
     }
 
     fn version(&self) -> Result<String> {
@@ -571,6 +910,16 @@ impl SandboxBackend for FakeBackend {
         self.record("rm", name);
         if self.fail_remove {
             bail!("fake remove failure");
+        }
+        if let Some(error) = self.remove_errors.lock().unwrap().pop_front() {
+            bail!("{error}");
+        }
+        if let Some(live) = &self.live_cloud {
+            let mut live = live.lock().unwrap();
+            let Some(at) = live.iter().position(|n| n == name) else {
+                bail!("sandbox '{name}' not found\n  try: sbx --cloud ls");
+            };
+            live.remove(at);
         }
         Ok(())
     }
@@ -691,6 +1040,42 @@ impl SandboxBackend for FakeBackend {
         Ok(self.network_rules.clone())
     }
 
+    fn cloud_allowed_hosts(&self, sandbox: &str) -> Result<Vec<String>> {
+        self.record("policy-ls", sandbox);
+        let call = {
+            let mut calls = self.cloud_policy_ls_calls.lock().unwrap();
+            *calls += 1;
+            *calls - 1
+        };
+        if self.fail_cloud_policy_ls_from.is_some_and(|n| call >= n) {
+            bail!("fake: unexpected `sbx --cloud policy ls --json` output");
+        }
+        Ok(self
+            .cloud_policies
+            .lock()
+            .unwrap()
+            .entry(sandbox.to_owned())
+            .or_insert_with(|| self.cloud_allow.clone())
+            .clone())
+    }
+
+    fn cloud_deny_host(&self, sandbox: &str, host: &str) -> Result<()> {
+        self.record("policy-deny", &format!("{sandbox} {host}"));
+        if !self
+            .undeniable_cloud_hosts
+            .iter()
+            .any(|(part, h)| sandbox.contains(part.as_str()) && h == host)
+        {
+            self.cloud_policies
+                .lock()
+                .unwrap()
+                .entry(sandbox.to_owned())
+                .or_insert_with(|| self.cloud_allow.clone())
+                .retain(|h| h != host);
+        }
+        Ok(())
+    }
+
     fn custom_secrets(&self) -> Result<Vec<CustomSecret>> {
         if self.fail_custom_secrets {
             bail!("fake: cannot list custom secrets");
@@ -726,6 +1111,59 @@ impl SandboxBackend for FakeBackend {
             .lock()
             .unwrap()
             .retain(|s| !(s.placeholder == placeholder && s.scope == sandbox));
+        Ok(())
+    }
+
+    fn set_scoped_secret(&self, sandbox: &str, secret: &ScopedSecret) -> Result<()> {
+        // The service name `sbx` makes from the host (`sbx-cloud-secret-set-custom.txt`:
+        // `postman-echo.com` became `postman-echo-com`). Never the value.
+        let name = secret.host.replace('.', "-");
+        self.scoped_secret_sets
+            .lock()
+            .unwrap()
+            .push((sandbox.to_owned(), secret.clone()));
+        self.record("secret-set", &format!("{sandbox} {name}"));
+        if self.fail_set_scoped_secret_for.contains(&secret.host) {
+            bail!(
+                "fake set-custom failure for {} on {}",
+                secret.env,
+                secret.host
+            );
+        }
+        self.cloud_secrets
+            .lock()
+            .unwrap()
+            .push((sandbox.to_owned(), name));
+        Ok(())
+    }
+
+    fn scoped_secrets(&self, sandbox: &str) -> Result<Vec<String>> {
+        // A read, logged all the same: whether and when the list is read is part of the
+        // contract (after the sandbox's removal, never without scoped secrets).
+        self.record("secret-ls", sandbox);
+        if self.fail_scoped_secrets {
+            bail!("fake: cannot list the cloud's secrets");
+        }
+        Ok(self
+            .cloud_secrets
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(scope, _)| scope == sandbox)
+            .map(|(_, name)| name.clone())
+            .collect())
+    }
+
+    fn remove_secret(&self, service: &str, sandbox: &str) -> Result<()> {
+        self.record("secret-rm", &format!("{sandbox} {service}"));
+        if self.fail_remove_secret_for.iter().any(|n| n == service) {
+            bail!("fake secret rm failure for {service}");
+        }
+        // One that is already gone is removed all the same, as `SbxBackend` answers.
+        self.cloud_secrets
+            .lock()
+            .unwrap()
+            .retain(|(scope, name)| !(scope == sandbox && name == service));
         Ok(())
     }
 

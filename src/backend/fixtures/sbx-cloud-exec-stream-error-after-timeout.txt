@@ -1,0 +1,3 @@
+timeout: sending signal TERM to command 'sh'
+timeout: sending signal KILL to command 'sh'
+error: RunExecSession: stream error: sbxcloud: API unreachable interact stream closed before the process exited

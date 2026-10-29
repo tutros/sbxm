@@ -7,13 +7,15 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 
-use crate::backend::SandboxBackend;
+use crate::backend::{Location, SandboxBackend};
 use crate::config::GlobalConfig;
+use crate::harness::Harness;
 use crate::run::orchestrate::in_sandbox_path;
 use crate::task::config::TaskConfig;
 use crate::task::gates::HostRunner;
 use crate::task::pipeline::{self, Prepared, TaskEnv, Tiers};
 use crate::task::record::ProcessProbe;
+use crate::task::repo::Identity;
 
 pub struct Options {
     /// The target repo's root, where `sbxm-task.toml` is.
@@ -21,6 +23,9 @@ pub struct Options {
     pub issue: u32,
     pub tiers: Tiers,
     pub dry_run: bool,
+    /// For tests: the committer identity a cloud worker sandbox made again for the gates gives
+    /// its clone, instead of the user's global git config (milestone 4 slice 6).
+    pub identity: Option<Identity>,
 }
 
 fn limit(duration: Duration) -> String {
@@ -62,15 +67,40 @@ pub fn run(
 
     let mut prepared = Prepared::open(&base_dir, &id)?;
     pipeline::check_can_gate(&prepared.record, probe)?;
+    // The gates run where the task's record says (decision 253), whatever the config says now.
+    let location = prepared.record.location;
+    let identity = match (location, &opts.identity) {
+        (Location::Local, _) => None,
+        (Location::Cloud, Some(identity)) => Some(identity.clone()),
+        (Location::Cloud, None) => Identity::read_from(None).ok(),
+    };
+    // The worker is whoever the task recorded, as for `task resume`: a cloud sandbox made again
+    // for the gates is that harness's.
+    let mut config = config;
+    if let Some(worker) = &prepared.record.worker
+        && let Ok(harness) = <Harness as clap::ValueEnum>::from_str(&worker.harness, true)
+    {
+        config.set_worker_harness(harness);
+    }
     let env = TaskEnv {
         config_dir,
         config: &config,
-        backend,
+        backend: backend.located(location),
         probe,
         host,
+        sleep: &std::thread::sleep,
+        // Empty in production while P8 (a) holds (slice 4).
+        scoped_secrets: &[],
+        identity: identity.as_ref(),
     };
-    pipeline::recollect_commits(&env, &prepared)?;
-    let gated = pipeline::run_gates(&env, &mut prepared, "on-demand", opts.tiers)?;
+    let gated = pipeline::gate_on_demand(&env, &mut prepared, opts.tiers);
+    for line in prepared.events.drain(..) {
+        writeln!(out, "{line}")?;
+    }
+    for warning in prepared.warnings.drain(..) {
+        writeln!(out, "warning: {warning}")?;
+    }
+    let gated = gated?;
     let log = prepared.meta.join("gates.log");
     if gated.passed {
         let count = |tier: &str| {
@@ -118,14 +148,27 @@ fn dry_run(
 ) -> Result<()> {
     let gates = &config.gates;
     let timeout = limit(gates.timeout);
-    let sandbox = match Prepared::open(base_dir, id)
-        .ok()
-        .and_then(|p| p.record.worker)
-    {
-        Some(worker) => worker.sandbox,
-        None => format!("sbxm-task-{id}-{}", config.worker.harness.as_str()),
-    };
+    let recorded = Prepared::open(base_dir, id).ok().map(|p| p.record);
     let workspace = base_dir.join("tasks").join(id);
+    // Where the sandbox tier runs: the recorded worker's sandbox and, for a task recorded in the
+    // cloud, its recorded clone (milestone 4 slice 6), else the mounted workspace.
+    let (sandbox, clone) = match recorded
+        .as_ref()
+        .and_then(|r| r.worker.as_ref().map(|w| (r, w)))
+    {
+        Some((task, worker)) if task.location == Location::Cloud => (
+            format!("cloud sandbox {}", worker.sandbox),
+            PathBuf::from(&worker.workspace),
+        ),
+        Some((_, worker)) => (
+            format!("sandbox {}", worker.sandbox),
+            in_sandbox_path(&workspace),
+        ),
+        None => (
+            format!("sandbox sbxm-task-{id}-{}", config.worker.harness.as_str()),
+            in_sandbox_path(&workspace),
+        ),
+    };
     writeln!(out, "Gates for {id} (dry run: nothing is run or changed)")?;
 
     if !opts.tiers.sandbox {
@@ -138,8 +181,8 @@ fn dry_run(
     } else {
         writeln!(
             out,
-            "sandbox tier: in sandbox {sandbox}, in {}, each command limited to {timeout}, stops at the first failure:\n{}",
-            in_sandbox_path(&workspace).display(),
+            "sandbox tier: in {sandbox}, in {}, each command limited to {timeout}, stops at the first failure:\n{}",
+            clone.display(),
             numbered(&gates.sandbox).trim_end()
         )?;
     }

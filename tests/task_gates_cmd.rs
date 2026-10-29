@@ -47,6 +47,7 @@ fn options(f: &Fixture, tiers: Tiers, dry_run: bool) -> Options {
         issue: 41,
         tiers,
         dry_run,
+        identity: None,
     }
 }
 

@@ -39,6 +39,9 @@ pub struct Options {
     pub repo_root: PathBuf,
     /// With `Target::Merged`: list what would be removed and why, and remove nothing.
     pub dry_run: bool,
+    /// `--forget-ambiguous` (decision 268): drop a cloud create that was started and never
+    /// recorded as returned from the record, touching nothing in the cloud for it, then go on.
+    pub forget_ambiguous: bool,
 }
 
 pub fn run(
@@ -49,6 +52,32 @@ pub fn run(
     probe: &dyn ProcessProbe,
     confirm: &dyn Confirm,
     out: &mut dyn Write,
+) -> Result<()> {
+    run_with_sleep(
+        config_dir,
+        opts,
+        backend,
+        github,
+        probe,
+        confirm,
+        out,
+        &std::thread::sleep,
+    )
+}
+
+/// [`run`], with `sleep` called for each wait between a cloud sandbox's removal retries (P6 (a))
+/// instead of really sleeping: a seam for testing them, as `task_start::run_spec_with_sleep` is.
+/// A task's sandboxes are removed where its `task.json` says they are (decision 253).
+#[allow(clippy::too_many_arguments)]
+pub fn run_with_sleep(
+    config_dir: &Path,
+    opts: &Options,
+    backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    confirm: &dyn Confirm,
+    out: &mut dyn Write,
+    sleep: &dyn Fn(std::time::Duration),
 ) -> Result<()> {
     if opts.dry_run && opts.target != Target::Merged {
         bail!("--dry-run only makes sense with --merged");
@@ -69,7 +98,13 @@ pub fn run(
             id
         }
         Target::Merged => {
-            let found = merged::plan(&base_dir, &opts.repo_root, github, probe)?;
+            let found = merged::plan_forgetting(
+                &base_dir,
+                &opts.repo_root,
+                github,
+                probe,
+                opts.forget_ambiguous,
+            )?;
             if opts.dry_run {
                 if found.is_empty() && found.left_alone.is_empty() {
                     writeln!(out, "no merged tasks to remove")?;
@@ -79,7 +114,7 @@ pub fn run(
                 return Ok(());
             }
             let state_dir = disk::state_dir(&config, disk::platform_state_dir().as_deref());
-            return merged::remove(
+            return merged::remove_with_sleep(
                 &base_dir,
                 &found,
                 opts.yes,
@@ -88,8 +123,19 @@ pub fn run(
                 |p| fs4::available_space(p),
                 state_dir.as_deref(),
                 out,
+                sleep,
             );
         }
     };
-    finish::discard(&base_dir, &id, opts.yes, backend, probe, confirm, out)
+    finish::discard(
+        &base_dir,
+        &id,
+        opts.yes,
+        opts.forget_ambiguous,
+        backend,
+        probe,
+        confirm,
+        out,
+        sleep,
+    )
 }

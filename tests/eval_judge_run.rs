@@ -186,7 +186,10 @@ fn the_judge_gets_its_own_sandbox_that_is_created_used_and_removed() {
     assert_eq!(create.agent, Harness::Claude.agent_arg());
     assert_eq!(create.kits, s.kits.get(Harness::Claude).unwrap().dirs);
     assert_eq!(create.skills, SkillsStore::ReadOnly);
-    assert_eq!(create.workspace, s.roots.workspaces.join("judge").join("0"));
+    assert_eq!(
+        create.workspace,
+        Some(s.roots.workspaces.join("judge").join("0"))
+    );
     assert!(run.remove_error.is_none());
 }
 

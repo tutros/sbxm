@@ -181,10 +181,10 @@ fn the_reviewer_gets_its_own_sandbox_over_a_clone_of_the_task_branch() {
     let created = backend.creates();
     let reviewer_spec = created.iter().find(|c| c.name.contains("review")).unwrap();
     assert_eq!(reviewer_spec.agent, "codex");
-    assert_eq!(reviewer_spec.workspace, clone_dir(&f));
+    assert_eq!(reviewer_spec.workspace, Some(clone_dir(&f)));
     assert_ne!(
         reviewer_spec.workspace,
-        f.env.base_dir().join("tasks").join("issue-41")
+        Some(f.env.base_dir().join("tasks").join("issue-41"))
     );
 }
 

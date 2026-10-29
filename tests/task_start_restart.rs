@@ -52,6 +52,7 @@ fn options(f: &Fixture) -> Options {
         worker_harness: None,
         worker_model: None,
         time_limit: None,
+        reviewer_time_limit: None,
         profile: None,
         base: None,
         repo: Some("o/r".into()),
@@ -61,6 +62,7 @@ fn options(f: &Fixture) -> Options {
             email: "dev@example.com".into(),
         }),
         disk: Default::default(),
+        location: None,
     }
 }
 

@@ -235,13 +235,14 @@ impl Pair<'_> {
         if let Err(e) = self.backend.create(&CreateSpec {
             name: self.sandbox.clone(),
             agent: harness.agent_arg().into(),
-            workspace: self.workspace.clone(),
+            workspace: Some(self.workspace.clone()),
             cpus: self.kits.resources.cpus,
             memory: self.kits.resources.memory.clone(),
             skills: harness_kits.skills_store,
             kits: harness_kits.dirs.clone(),
             template: harness_kits.template.clone(),
             deny_network: harness_kits.deny_network.clone().unwrap_or_default(),
+            ttl: None,
         }) {
             return failed(
                 format!("cannot create sandbox {}: {e:#}", self.sandbox),

@@ -264,13 +264,14 @@ pub fn judge_repeat(
             .create(&CreateSpec {
                 name: sandbox.clone(),
                 agent: judge.harness.agent_arg().into(),
-                workspace: workspace.clone(),
+                workspace: Some(workspace.clone()),
                 cpus: kits.resources.cpus,
                 memory: kits.resources.memory.clone(),
                 skills: harness_kits.skills_store,
                 kits: harness_kits.dirs.clone(),
                 template: harness_kits.template.clone(),
                 deny_network: harness_kits.deny_network.clone().unwrap_or_default(),
+                ttl: None,
             })
             .map_err(|e| format!("cannot create the judge sandbox {sandbox}: {e:#}"))?;
         // A strict `codex` judge is held to its allow list before it runs (decision 221).

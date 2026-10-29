@@ -42,8 +42,9 @@ All of these are answered: the user confirmed each on 2026-10-24 (decisions 262-
   parsers and command lines would otherwise be built on guesses, and a wrong guess shows up only at the end.
   **Confirmed:** (a) [262]. **Run 2026-10-24, partial:** `sdlc/spikes/m4-p2-capture.md`, fixtures
   `src/backend/fixtures/sbx-cloud-*`; every trial is done (`rm` does not remove a sandbox's scoped secrets in the
-  cloud, `--skills` is refused with `--cloud`), but two outputs are not captured: the not-logged-in message and
-  `rm`'s retryable error. Those two move to slice 9's real test [267]; with that, P2 is done.
+  cloud, `--skills` is refused with `--cloud`), but two outputs were left for slice 9's real test [267]: the not-logged-in
+  message, captured in the end-to-end check on 2026-10-27 (`src/backend/fixtures/sbx-cloud-not-logged-in.txt`),
+  and `rm`'s retryable error, which that check never met, so its fixture stays S14-worded.
 - **P3. The cloud backend: a second backend or a mode.** Options: (a) `SbxBackend` gains a location, and a task
   gets the local or the cloud instance, every call prefixed with `--cloud` in the cloud one; (b) a new
   `SbxCloudBackend` implementing `SandboxBackend`; (c) a location parameter on every trait method. In each case the
@@ -402,8 +403,9 @@ The other slices are reviewed at the end of the milestone.
    (`sdlc/spikes/m4-p2-capture.md`). Mitigation: a fresh host staging folder per copy and the same one-regular-file
    and cap checks as `read_agent_file` before anything reads it (slice 1), for the folder case and any other shape.
 10. **`sbx` details:** P2's capture run verified name or id for `exec`/`cp`/`policy ls`/`rm`, `-w`, `--skills`
-    (refused), a `--ttl` beyond `1h` and the five billable shapes. Still open: the not-logged-in message and `rm`'s
-    retryable "temporarily unavailable" error, neither captured; slice 9 captures them [267].
+    (refused), a `--ttl` beyond `1h` and the five billable shapes. Slice 9's real test [267] captured the not-logged-in
+    message on 2026-10-27 (`sbx-cloud-not-logged-in.txt`); `rm`'s retryable "temporarily unavailable" error didn't
+    occur, so its fixture stays S14-worded.
 11. **A denied host that is needed** [264]: sbxm removes hosts from a strict cloud sandbox, so a host the agent or a
     gate needs shows up as an unexpected agent or gate failure. Mitigation: check the denied hosts in `run.log`
     first; the docs' troubleshooting line says so (slice 10).

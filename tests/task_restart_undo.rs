@@ -78,6 +78,9 @@ fn env<'a>(f: &'a Fixture, backend: &'a FakeBackend) -> TaskEnv<'a> {
         backend,
         probe: &Gone,
         host: host(),
+        sleep: &std::thread::sleep,
+        scoped_secrets: &[],
+        identity: None,
     }
 }
 

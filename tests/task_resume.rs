@@ -118,6 +118,9 @@ fn env<'a>(f: &'a Fixture, backend: &'a FakeBackend, probe: &'a dyn ProcessProbe
         backend,
         probe,
         host,
+        sleep: &std::thread::sleep,
+        scoped_secrets: &[],
+        identity: None,
     }
 }
 
@@ -341,6 +344,9 @@ fn the_worker_s_sandbox_is_remade_from_the_profile_recorded_at_start_not_the_cur
         backend: &backend,
         probe: &Gone,
         host,
+        sleep: &std::thread::sleep,
+        scoped_secrets: &[],
+        identity: None,
     };
 
     resume::resume(&env, &mut prepared, None).unwrap();

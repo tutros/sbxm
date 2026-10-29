@@ -131,7 +131,10 @@ fn the_sandbox_is_sized_named_and_given_the_right_kits() {
     {
         assert_eq!(create.name, name(i, 0));
         assert_eq!(create.agent, harness.agent_arg());
-        assert_eq!(create.workspace, s.workspaces.join(i.to_string()).join("0"));
+        assert_eq!(
+            create.workspace,
+            Some(s.workspaces.join(i.to_string()).join("0"))
+        );
         assert_eq!((create.cpus, create.memory.as_str()), (2, "3g"));
         assert_eq!(create.skills, SkillsStore::ReadOnly);
         assert_eq!(create.kits, s.kits.get(harness).unwrap().dirs);

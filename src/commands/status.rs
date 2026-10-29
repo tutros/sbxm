@@ -1,6 +1,7 @@
-//! `sbxm status [--watch]` (decision 171, issue 90): the Tasks section. Reads only, never calls
-//! `sbx`; `backend` is threaded through unused so the Sandboxes and Comparison-runs sections
-//! (separate issues, decision 171(b), (e)) can add calls here without reshaping this signature.
+//! `sbxm status [--watch]` (decision 171, issue 90): the Tasks section, then the running cloud
+//! sandboxes (milestone 4 slice 8, decision 259). Reads only: the one `sbx` call is the cloud
+//! instance's `ls`, once per frame, and a cloud that can't be read is one line, not an error
+//! (P17 (a)).
 
 #[cfg(any(unix, test))]
 use std::ffi::c_ulong;
@@ -11,7 +12,7 @@ use std::time::Duration;
 use anyhow::Result;
 
 use crate::backend::SandboxBackend;
-use crate::status::tasks;
+use crate::status::{cloud, tasks};
 use crate::task::record::ProcessProbe;
 
 /// What `sbxm status` needs from the environment, so tests don't depend on real time, real
@@ -51,7 +52,7 @@ const CLEAR_SCREEN: &str = "\x1B[2J\x1B[H";
 /// prints exactly one frame and returns, whether or not `watch` is set.
 pub fn run(
     base: &Path,
-    _backend: &dyn SandboxBackend,
+    backend: &dyn SandboxBackend,
     probe: &dyn ProcessProbe,
     env: &Env,
     watch: Option<Duration>,
@@ -60,12 +61,14 @@ pub fn run(
     let mut drawn = 0usize;
     loop {
         let rows = tasks::rows(base, probe)?;
+        let sandboxes = cloud::read(backend);
         let now = (env.now)();
         let width = env.terminal.then_some(env.width);
         if env.terminal && watch.is_some() {
             write!(out, "{CLEAR_SCREEN}")?;
         }
         write!(out, "{}", tasks::render(&rows, now, width))?;
+        write!(out, "{}", cloud::render(&sandboxes, now, width))?;
         out.flush()?;
         drawn += 1;
         let Some(interval) = watch else { break };

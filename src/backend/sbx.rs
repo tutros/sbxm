@@ -9,24 +9,62 @@ use serde::Deserialize;
 use std::path::Path;
 
 use super::{
-    CreateSpec, CustomSecret, CustomSecretSpec, ExecOutput, ExecSpec, KitValidation, NetworkRule,
-    SandboxBackend, SandboxInfo, SecretSource, Stdin, TemplateImage, check_template_tag,
+    CopyOut, CreateSpec, CustomSecret, CustomSecretSpec, ExecOutput, ExecSpec, KitValidation,
+    Location, NetworkRule, SandboxBackend, SandboxDetail, SandboxInfo, ScopedSecret, SecretSource,
+    Stdin, TemplateImage, check_template_tag,
 };
 
-/// Shells out to the `sbx` CLI on PATH.
-#[derive(Debug, Default)]
-pub struct SbxBackend;
+/// Shells out to the `sbx` CLI on PATH, for sandboxes on this machine or, in the cloud instance,
+/// in Docker Cloud Sandboxes: every call of that one takes `--cloud` (P3 (a), decision 262(c)).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct SbxBackend {
+    location: Location,
+}
 
-impl SandboxBackend for SbxBackend {
-    fn create(&self, spec: &CreateSpec) -> Result<()> {
-        run_sbx(create_args(spec), &spec.name)
+impl SbxBackend {
+    pub const LOCAL: SbxBackend = SbxBackend {
+        location: Location::Local,
+    };
+    pub const CLOUD: SbxBackend = SbxBackend {
+        location: Location::Cloud,
+    };
+
+    /// The instance for sandboxes at `location`.
+    pub fn at(location: Location) -> &'static SbxBackend {
+        match location {
+            Location::Local => &Self::LOCAL,
+            Location::Cloud => &Self::CLOUD,
+        }
     }
 
-    fn list(&self) -> Result<Vec<SandboxInfo>> {
-        let output = Command::new("sbx")
-            .args(["ls", "--json"])
-            .output()
-            .context(SBX_MISSING)?;
+    /// `sbx`, with `--cloud` before the subcommand in the cloud instance.
+    fn command(&self) -> Command {
+        let mut command = Command::new("sbx");
+        if self.location == Location::Cloud {
+            command.arg("--cloud");
+        }
+        command
+    }
+
+    /// `sbx version --json`, never with `--cloud`: the version is the client binary's, the same
+    /// for both instances, and a cloud preflight's version check (P12) comes before the cloud is
+    /// asked anything (`sbx --cloud version` was never captured, P2).
+    fn version_command(&self) -> Command {
+        let mut command = Self::LOCAL.command();
+        command.args(version_args());
+        command
+    }
+
+    /// `sbx ls --json`, with `--cloud` in the cloud instance.
+    fn ls_command(&self) -> Command {
+        let mut command = self.command();
+        command.args(["ls", "--json"]);
+        command
+    }
+
+    /// `sbx ls --json`'s output; a failing `ls` is an error with `sbx`'s own message.
+    fn ls_json(&self) -> Result<String> {
+        let output = self.ls_command().output().context(SBX_MISSING)?;
         if !output.status.success() {
             bail!(
                 "`sbx ls --json` failed ({}): {}",
@@ -34,17 +72,96 @@ impl SandboxBackend for SbxBackend {
                 String::from_utf8_lossy(&output.stderr).trim()
             );
         }
-        parse_ls(&String::from_utf8_lossy(&output.stdout))
+        Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    /// Runs `sbx <args>` with the terminal attached, so `sbx`'s own progress
+    /// and errors reach the user.
+    fn run_sbx<I, S>(&self, args: I, sandbox: &str) -> Result<()>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<std::ffi::OsStr>,
+    {
+        let args: Vec<OsString> = args.into_iter().map(|a| a.as_ref().to_owned()).collect();
+        let verb = args[0].to_string_lossy().into_owned();
+        let status = self.command().args(&args).status().context(SBX_MISSING)?;
+        if !status.success() {
+            bail!("`sbx {verb}` failed for sandbox {sandbox} ({status})");
+        }
+        Ok(())
+    }
+
+    /// Refuses a call whose command line or output only the cloud has.
+    fn cloud_only(&self, what: &str) -> Result<()> {
+        if self.location == Location::Local {
+            bail!("`sbx {what}` of one sandbox's network rules is only run in the cloud here");
+        }
+        Ok(())
+    }
+
+    /// Runs `sbx <args>` with stdin closed, so a question `sbx` asks (S11: `template save` on a
+    /// running sandbox, `template rm` without `--force`) fails instead of waiting.
+    fn run_sbx_unprompted<S: AsRef<std::ffi::OsStr>>(&self, args: &[S]) -> Result<()> {
+        let output = self
+            .command()
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .context(SBX_MISSING)?;
+        if !output.status.success() {
+            let shown: Vec<_> = args.iter().map(|a| a.as_ref().to_string_lossy()).collect();
+            bail!(
+                "`sbx {}` failed ({}): {}",
+                shown.join(" "),
+                output.status,
+                failure_reason(&output.stdout, &output.stderr)
+            );
+        }
+        Ok(())
+    }
+}
+
+impl SandboxBackend for SbxBackend {
+    fn located(&self, location: Location) -> &dyn SandboxBackend {
+        Self::at(location)
+    }
+
+    fn create(&self, spec: &CreateSpec) -> Result<()> {
+        self.run_sbx(create_args(spec, self.location)?, &spec.name)
+    }
+
+    fn copy_in(&self, sandbox: &str, host: &Path, path: &str) -> Result<()> {
+        self.run_sbx_unprompted(&copy_in_args(sandbox, host, path))
+    }
+
+    fn copy_out(&self, sandbox: &str, path: &str, host: &Path) -> Result<CopyOut> {
+        let output = self
+            .command()
+            .args(copy_out_args(sandbox, path, host))
+            .stdin(Stdio::null())
+            .output()
+            .context(SBX_MISSING)?;
+        copy_out_result(output.status.success(), &output.stdout, &output.stderr)
+            .with_context(|| format!("cannot copy {sandbox}:{path} out of the sandbox"))
+    }
+
+    fn list(&self) -> Result<Vec<SandboxInfo>> {
+        parse_ls(&self.ls_json()?)
+    }
+
+    fn list_detailed(&self) -> Result<Vec<SandboxDetail>> {
+        parse_ls_detailed(&self.ls_json()?)
     }
 
     fn stop(&self, name: &str) -> Result<()> {
-        run_sbx(stop_args(name), name)
+        self.run_sbx(stop_args(name), name)
     }
 
     fn remove(&self, name: &str) -> Result<()> {
         // sbx's own "sandbox not found" is held back: callers check `list` and treat a sandbox
         // that is already gone as removed, so printing it would be alarming noise.
-        let output = Command::new("sbx")
+        let output = self
+            .command()
             .args(remove_args(name))
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::inherit())
@@ -61,11 +178,12 @@ impl SandboxBackend for SbxBackend {
     }
 
     fn attach(&self, name: &str) -> Result<()> {
-        run_sbx(attach_args(name), name)
+        self.run_sbx(attach_args(name), name)
     }
 
     fn secret_services(&self) -> Result<Vec<String>> {
-        let output = Command::new("sbx")
+        let output = self
+            .command()
             .args(secret_ls_args())
             .output()
             .context(SBX_MISSING)?;
@@ -80,10 +198,7 @@ impl SandboxBackend for SbxBackend {
     }
 
     fn version(&self) -> Result<String> {
-        let output = Command::new("sbx")
-            .args(version_args())
-            .output()
-            .context(SBX_MISSING)?;
+        let output = self.version_command().output().context(SBX_MISSING)?;
         if !output.status.success() {
             bail!(
                 "`sbx version --json` failed ({}): {}",
@@ -95,7 +210,8 @@ impl SandboxBackend for SbxBackend {
     }
 
     fn exec(&self, sandbox: &str, spec: &ExecSpec) -> Result<ExecOutput> {
-        let mut child = Command::new("sbx")
+        let mut child = self
+            .command()
             .args(exec_args(sandbox, spec))
             .stdin(match spec.stdin {
                 Stdin::Closed => Stdio::null(),
@@ -127,7 +243,8 @@ impl SandboxBackend for SbxBackend {
     }
 
     fn skills(&self) -> Result<serde_json::Value> {
-        let output = Command::new("sbx")
+        let output = self
+            .command()
             .args(skills_args())
             .output()
             .context(SBX_MISSING)?;
@@ -143,7 +260,8 @@ impl SandboxBackend for SbxBackend {
 
     fn validate_kit(&self, dir: &Path) -> Result<KitValidation> {
         // Exits non-zero for an invalid kit but still prints the JSON result.
-        let output = Command::new("sbx")
+        let output = self
+            .command()
             .args(validate_args(dir))
             .output()
             .context(SBX_MISSING)?;
@@ -158,11 +276,12 @@ impl SandboxBackend for SbxBackend {
     }
 
     fn template_save(&self, sandbox: &str, tag: &str) -> Result<()> {
-        run_sbx_unprompted(&template_save_args(sandbox, tag))
+        self.run_sbx_unprompted(&template_save_args(sandbox, tag))
     }
 
     fn template_ls(&self) -> Result<Vec<TemplateImage>> {
-        let output = Command::new("sbx")
+        let output = self
+            .command()
             .args(template_ls_args())
             .stdin(Stdio::null())
             .output()
@@ -178,11 +297,12 @@ impl SandboxBackend for SbxBackend {
     }
 
     fn template_rm(&self, tag: &str) -> Result<()> {
-        run_sbx_unprompted(&template_rm_args(tag)?)
+        self.run_sbx_unprompted(&template_rm_args(tag)?)
     }
 
     fn network_rules(&self, sandbox: &str) -> Result<Vec<NetworkRule>> {
-        let output = Command::new("sbx")
+        let output = self
+            .command()
             .args(policy_ls_args(sandbox))
             .stdin(Stdio::null())
             .output()
@@ -197,8 +317,32 @@ impl SandboxBackend for SbxBackend {
         parse_policy_ls(&String::from_utf8_lossy(&output.stdout))
     }
 
+    fn cloud_allowed_hosts(&self, sandbox: &str) -> Result<Vec<String>> {
+        self.cloud_only("policy ls")?;
+        let output = self
+            .command()
+            .args(cloud_policy_ls_args(sandbox))
+            .stdin(Stdio::null())
+            .output()
+            .context(SBX_MISSING)?;
+        if !output.status.success() {
+            bail!(
+                "`sbx --cloud policy ls {sandbox} --json` failed ({}): {}",
+                output.status,
+                failure_reason(&output.stdout, &output.stderr)
+            );
+        }
+        parse_cloud_policy_ls(&String::from_utf8_lossy(&output.stdout))
+    }
+
+    fn cloud_deny_host(&self, sandbox: &str, host: &str) -> Result<()> {
+        self.cloud_only("policy deny")?;
+        self.run_sbx_unprompted(&cloud_policy_deny_args(sandbox, host))
+    }
+
     fn custom_secrets(&self) -> Result<Vec<CustomSecret>> {
-        let output = Command::new("sbx")
+        let output = self
+            .command()
             .args(secret_ls_args())
             .stdin(Stdio::null())
             .output()
@@ -215,7 +359,8 @@ impl SandboxBackend for SbxBackend {
 
     fn set_custom_secret(&self, spec: &CustomSecretSpec) -> Result<()> {
         let args = set_custom_args(spec);
-        let output = Command::new("sbx")
+        let output = self
+            .command()
             .args(&args)
             .stdin(Stdio::null())
             .output()
@@ -234,7 +379,8 @@ impl SandboxBackend for SbxBackend {
 
     fn remove_custom_secret(&self, placeholder: &str, sandbox: &str) -> Result<()> {
         let args = remove_custom_args(placeholder, sandbox);
-        let output = Command::new("sbx")
+        let output = self
+            .command()
             .args(args)
             .stdin(Stdio::null())
             .output()
@@ -249,6 +395,145 @@ impl SandboxBackend for SbxBackend {
             failure_reason(&output.stdout, &output.stderr)
         )
     }
+
+    fn set_scoped_secret(&self, sandbox: &str, secret: &ScopedSecret) -> Result<()> {
+        let args = set_scoped_args(self.location, sandbox, secret)?;
+        let output = self
+            .command()
+            .args(&args)
+            .stdin(Stdio::null())
+            .output()
+            .context(SBX_MISSING)?;
+        if !output.status.success() {
+            bail!(
+                "{}",
+                set_scoped_failed(sandbox, secret, &output.status.to_string())
+            );
+        }
+        Ok(())
+    }
+
+    fn scoped_secrets(&self, sandbox: &str) -> Result<Vec<String>> {
+        let output = self
+            .command()
+            .args(secret_ls_args())
+            .stdin(Stdio::null())
+            .output()
+            .context(SBX_MISSING)?;
+        if !output.status.success() {
+            bail!(
+                "`sbx secret ls --json` failed ({}): {}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        parse_scoped_secrets(&String::from_utf8_lossy(&output.stdout), sandbox)
+    }
+
+    fn remove_secret(&self, service: &str, sandbox: &str) -> Result<()> {
+        let args = remove_secret_args(service, sandbox);
+        let output = self
+            .command()
+            .args(args)
+            .stdin(Stdio::null())
+            .output()
+            .context(SBX_MISSING)?;
+        if output.status.success() || secret_gone(&output.stdout, &output.stderr) {
+            return Ok(());
+        }
+        bail!(
+            "`sbx {}` failed ({}): {}",
+            args.join(" "),
+            output.status,
+            failure_reason(&output.stdout, &output.stderr)
+        )
+    }
+}
+
+/// `sbx --cloud secret set-custom` for one sandbox, by value and without a placeholder (`sbx`
+/// makes it, `sbx-cloud-secret-set-custom.txt`): the form the capture run used (P2). Refused on
+/// the local instance, where a value comes from `--command` or `--ref` (S9) and `--command` is
+/// local-only in the cloud (S14 Q2).
+fn set_scoped_args(
+    location: Location,
+    sandbox: &str,
+    secret: &ScopedSecret,
+) -> Result<Vec<String>> {
+    if location == Location::Local {
+        bail!(
+            "a secret scoped to {sandbox} by its value ({} for {}) can be stored only in the \
+             cloud; on this machine `sbx secret set-custom` takes `--command` or `--ref`",
+            secret.env,
+            secret.host
+        );
+    }
+    Ok([
+        "secret",
+        "set-custom",
+        "--host",
+        &secret.host,
+        "--env",
+        &secret.env,
+        "--value",
+        &secret.value,
+        "--sandbox",
+        sandbox,
+    ]
+    .map(str::to_owned)
+    .into())
+}
+
+/// The error of a scoped secret `sbx` refused to store: names the secret and the sandbox, never
+/// the command line (it carries the value) and never `sbx`'s output (it could).
+fn set_scoped_failed(sandbox: &str, secret: &ScopedSecret, status: &str) -> String {
+    format!(
+        "`sbx --cloud secret set-custom` failed ({status}) for {} on {} scoped to {sandbox}; its \
+         output isn't repeated here, as it could carry the value",
+        secret.env, secret.host
+    )
+}
+
+/// `sbx secret rm <service> --sandbox <sandbox> -f`, the form the capture run used (P2 point 6).
+fn remove_secret_args<'a>(service: &'a str, sandbox: &'a str) -> [&'a str; 6] {
+    ["secret", "rm", service, "--sandbox", sandbox, "-f"]
+}
+
+/// `sbx secret rm` answered that the secret is already gone (`sbx-cloud-secret-rm-not-found.txt`,
+/// sbx 0.46.0): what the caller wanted.
+fn secret_gone(stdout: &[u8], stderr: &[u8]) -> bool {
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(stdout),
+        String::from_utf8_lossy(stderr)
+    );
+    text.contains("sbxcloud: not found")
+}
+
+/// The service names of `sbx secret ls --json`'s `secrets` entries scoped to `sandbox`
+/// (`sbx-cloud-secret-ls.json`, sbx 0.46.0); the masked values are never read. The `global`
+/// scope is every sandbox's, never one sandbox's name, so nothing is ever listed for it: the
+/// caller removes what this lists.
+fn parse_scoped_secrets(json: &str, sandbox: &str) -> Result<Vec<String>> {
+    #[derive(Deserialize)]
+    struct SecretLs {
+        secrets: Vec<Secret>,
+    }
+    #[derive(Deserialize)]
+    struct Secret {
+        scope: String,
+        name: String,
+    }
+    let ls: SecretLs =
+        serde_json::from_str(json).context("unexpected `sbx secret ls --json` output")?;
+    if sandbox == "global" {
+        return Ok(Vec::new());
+    }
+    Ok(ls
+        .secrets
+        .into_iter()
+        .filter(|s| s.scope == sandbox)
+        .map(|s| s.name)
+        .collect())
 }
 
 /// `sbx secret set-custom` for one sandbox, the value's source by `--command` or `--ref`.
@@ -313,25 +598,6 @@ fn parse_custom_secrets(json: &str) -> Result<Vec<CustomSecret>> {
     Ok(ls.custom_secrets)
 }
 
-/// Runs `sbx <args>` with stdin closed, so a question `sbx` asks (S11: `template save` on a
-/// running sandbox, `template rm` without `--force`) fails instead of waiting.
-fn run_sbx_unprompted(args: &[&str]) -> Result<()> {
-    let output = Command::new("sbx")
-        .args(args)
-        .stdin(Stdio::null())
-        .output()
-        .context(SBX_MISSING)?;
-    if !output.status.success() {
-        bail!(
-            "`sbx {}` failed ({}): {}",
-            args.join(" "),
-            output.status,
-            failure_reason(&output.stdout, &output.stderr)
-        );
-    }
-    Ok(())
-}
-
 /// `sbx`'s stderr, or its stdout when stderr is empty: S11 didn't check which one carries a
 /// template command's error.
 fn failure_reason(stdout: &[u8], stderr: &[u8]) -> String {
@@ -355,25 +621,6 @@ fn parse_validate(json: &str) -> Result<KitValidation> {
 }
 
 const SBX_MISSING: &str = "cannot run `sbx`; is Docker Sandboxes installed and on PATH?";
-
-/// Runs `sbx <args>` with the terminal attached, so `sbx`'s own progress
-/// and errors reach the user.
-fn run_sbx<I, S>(args: I, sandbox: &str) -> Result<()>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<std::ffi::OsStr>,
-{
-    let args: Vec<OsString> = args.into_iter().map(|a| a.as_ref().to_owned()).collect();
-    let verb = args[0].to_string_lossy().into_owned();
-    let status = Command::new("sbx")
-        .args(&args)
-        .status()
-        .context(SBX_MISSING)?;
-    if !status.success() {
-        bail!("`sbx {verb}` failed for sandbox {sandbox} ({status})");
-    }
-    Ok(())
-}
 
 fn exec_args(sandbox: &str, spec: &ExecSpec) -> Vec<OsString> {
     let mut args: Vec<OsString> = vec!["exec".into()];
@@ -506,6 +753,27 @@ fn parse_policy_ls(json: &str) -> Result<Vec<NetworkRule>> {
         .collect()
 }
 
+fn cloud_policy_ls_args(sandbox: &str) -> [&str; 4] {
+    ["policy", "ls", sandbox, "--json"]
+}
+
+fn cloud_policy_deny_args<'a>(sandbox: &'a str, host: &'a str) -> [&'a str; 6] {
+    ["policy", "deny", "network", "--sandbox", sandbox, host]
+}
+
+/// The `allowNetworks` of `sbx --cloud policy ls <sandbox> --json` (`sbx-cloud-policy-ls.json`,
+/// v0.46.0); a missing or mistyped field is an error, so the strict check fails closed.
+fn parse_cloud_policy_ls(json: &str) -> Result<Vec<String>> {
+    #[derive(Deserialize)]
+    struct Ls {
+        #[serde(rename = "allowNetworks")]
+        allow_networks: Vec<String>,
+    }
+    let ls: Ls =
+        serde_json::from_str(json).context("unexpected `sbx --cloud policy ls --json` output")?;
+    Ok(ls.allow_networks)
+}
+
 fn parse_template_ls(json: &str) -> Result<Vec<TemplateImage>> {
     #[derive(Deserialize)]
     struct Ls {
@@ -525,7 +793,20 @@ fn parse_ls(json: &str) -> Result<Vec<SandboxInfo>> {
     Ok(ls.sandboxes)
 }
 
-fn create_args(spec: &CreateSpec) -> Vec<OsString> {
+fn parse_ls_detailed(json: &str) -> Result<Vec<SandboxDetail>> {
+    #[derive(Deserialize)]
+    struct Ls {
+        sandboxes: Vec<SandboxDetail>,
+    }
+    let ls: Ls = serde_json::from_str(json).context("unexpected `sbx ls --json` output")?;
+    Ok(ls.sandboxes)
+}
+
+/// A local create mounts the workspace and names the skills store; a cloud create has neither (S14
+/// Q1; `--skills` is refused with `--cloud`, `sbx-cloud-create-skills-refused.txt`) and no
+/// template (decision 254), and always a TTL, deleting the sandbox when it runs out (decisions
+/// 259, 263).
+fn create_args(spec: &CreateSpec, location: Location) -> Result<Vec<OsString>> {
     let mut args: Vec<OsString> = vec![
         "create".into(),
         "--name".into(),
@@ -534,9 +815,33 @@ fn create_args(spec: &CreateSpec) -> Vec<OsString> {
         spec.cpus.to_string().into(),
         "-m".into(),
         spec.memory.clone().into(),
-        "--skills".into(),
-        spec.skills.as_arg().into(),
     ];
+    match (location, &spec.workspace) {
+        (Location::Local, Some(_)) => {
+            args.extend(["--skills".into(), spec.skills.as_arg().into()]);
+        }
+        (Location::Local, None) => bail!("a local sandbox needs a workspace to mount"),
+        (Location::Cloud, Some(ws)) => bail!(
+            "a cloud sandbox has no workspace; {} can't be mounted in {}",
+            ws.display(),
+            spec.name
+        ),
+        (Location::Cloud, None) if spec.template.is_some() => {
+            bail!("cloud sandboxes aren't created from templates (decision 254)")
+        }
+        (Location::Cloud, None) => {}
+    }
+    match (location, spec.ttl) {
+        (Location::Cloud, Some(ttl)) => args.extend([
+            "--ttl".into(),
+            super::ttl_arg(ttl).into(),
+            "--on-timeout".into(),
+            "delete".into(),
+        ]),
+        (Location::Cloud, None) => bail!("a cloud sandbox needs a TTL (decision 259)"),
+        (Location::Local, Some(_)) => bail!("a local sandbox takes no TTL"),
+        (Location::Local, None) => {}
+    }
     if let Some(tag) = &spec.template {
         args.extend(["-t".into(), tag.into(), "--pull".into(), "never".into()]);
     }
@@ -547,8 +852,35 @@ fn create_args(spec: &CreateSpec) -> Vec<OsString> {
     for host in &spec.deny_network {
         args.extend(["--deny-network".into(), host.into()]);
     }
-    args.extend([spec.agent.clone().into(), spec.workspace.clone().into()]);
-    args
+    args.push(spec.agent.clone().into());
+    args.extend(spec.workspace.clone().map(OsString::from));
+    Ok(args)
+}
+
+/// `sbx cp <host file> <sandbox>:<path>`; `cp` takes the sandbox's name as well as its id (P2).
+fn copy_in_args(sandbox: &str, host: &Path, path: &str) -> [OsString; 3] {
+    ["cp".into(), host.into(), format!("{sandbox}:{path}").into()]
+}
+
+/// `sbx cp <sandbox>:<path> <host file>`.
+fn copy_out_args(sandbox: &str, path: &str, host: &Path) -> [OsString; 3] {
+    ["cp".into(), format!("{sandbox}:{path}").into(), host.into()]
+}
+
+/// A copy out that failed because the path isn't there (`sbx-cloud-cp-not-found.txt`) is
+/// [`CopyOut::Missing`]; any other failure, a refused symlink included, is an error.
+fn copy_out_result(success: bool, stdout: &[u8], stderr: &[u8]) -> Result<CopyOut> {
+    if success {
+        return Ok(CopyOut::Copied);
+    }
+    let reason = failure_reason(stdout, stderr);
+    let missing = reason
+        .lines()
+        .any(|l| l.starts_with("error: path ") && l.ends_with(" not found"));
+    if missing {
+        return Ok(CopyOut::Missing);
+    }
+    bail!("`sbx cp` failed: {reason}")
 }
 
 #[cfg(test)]
@@ -587,17 +919,18 @@ mod tests {
         let spec = CreateSpec {
             name: "sbxm-demo-claude".into(),
             agent: "claude".into(),
-            workspace: PathBuf::from("/work/demo"),
+            workspace: Some(PathBuf::from("/work/demo")),
             cpus: 4,
             memory: "8g".into(),
             skills: crate::backend::SkillsStore::Off,
             kits: vec![PathBuf::from("/k/common")],
             template: None,
             deny_network: Vec::new(),
+            ttl: None,
         };
 
         assert_eq!(
-            create_args(&spec),
+            create_args(&spec, Location::Local).unwrap(),
             [
                 "create",
                 "--name",
@@ -836,17 +1169,18 @@ mod template_tests {
         let spec = CreateSpec {
             name: "sbxm-demo-claude".into(),
             agent: "claude".into(),
-            workspace: PathBuf::from("/work/demo"),
+            workspace: Some(PathBuf::from("/work/demo")),
             cpus: 4,
             memory: "8g".into(),
             skills: crate::backend::SkillsStore::ReadOnly,
             kits: vec![PathBuf::from("/k/common")],
             template: Some("sbxm-dev-claude:2a9974ee6210-20261015t2210".into()),
             deny_network: Vec::new(),
+            ttl: None,
         };
 
         assert_eq!(
-            create_args(&spec),
+            create_args(&spec, Location::Local).unwrap(),
             [
                 "create",
                 "--name",
@@ -980,16 +1314,17 @@ mod policy_tests {
         let spec = CreateSpec {
             name: "sbxm-demo-codex".into(),
             agent: "codex".into(),
-            workspace: PathBuf::from("/work/demo"),
+            workspace: Some(PathBuf::from("/work/demo")),
             cpus: 4,
             memory: "8g".into(),
             skills: crate::backend::SkillsStore::ReadOnly,
             kits: vec![PathBuf::from("/k/common")],
             template: None,
             deny_network: vec!["github.com".into(), "registry.npmjs.org".into()],
+            ttl: None,
         };
 
-        let args = create_args(&spec);
+        let args = create_args(&spec, Location::Local).unwrap();
 
         assert_eq!(
             args[args.len() - 8..],
@@ -1059,5 +1394,419 @@ mod policy_tests {
         let err = parse_policy_ls(&json).unwrap_err();
 
         assert!(format!("{err:#}").contains("ask"), "{err:#}");
+    }
+}
+
+// Milestone 4 slice 1 (P3 (a), decision 262(c)): the cloud instance's command lines, on the output
+// P2's capture run saved (`sdlc/spikes/m4-p2-capture.md`, sbx v0.46.0).
+#[cfg(test)]
+mod cloud_tests {
+    use std::path::PathBuf;
+
+    use super::*;
+    use crate::backend::{CopyOut, Location, SkillsStore};
+
+    const CLOUD_LS: &str = include_str!("fixtures/sbx-cloud-ls.json");
+    const CLOUD_LS_EMPTY: &str = include_str!("fixtures/sbx-cloud-ls-empty.json");
+    const CP_NOT_FOUND: &str = include_str!("fixtures/sbx-cloud-cp-not-found.txt");
+    const CP_SYMLINK: &str = include_str!("fixtures/sbx-cloud-cp-symlink-refused.txt");
+
+    fn args(command: &Command) -> Vec<String> {
+        command
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    fn spec(workspace: Option<&str>) -> CreateSpec {
+        CreateSpec {
+            name: "sbxm-task-x-claude".into(),
+            agent: "claude".into(),
+            workspace: workspace.map(PathBuf::from),
+            cpus: 2,
+            memory: "4g".into(),
+            skills: SkillsStore::ReadOnly,
+            kits: vec![
+                PathBuf::from("/k/common"),
+                PathBuf::from("/k/harness-claude"),
+            ],
+            template: None,
+            deny_network: Vec::new(),
+            // A cloud sandbox has a TTL, a local one none.
+            ttl: workspace
+                .is_none()
+                .then(|| std::time::Duration::from_secs(195 * 60)),
+        }
+    }
+
+    #[test]
+    fn the_cloud_instance_prefixes_every_call_with_cloud() {
+        assert_eq!(args(&SbxBackend::CLOUD.command()), ["--cloud"]);
+        assert!(args(&SbxBackend::LOCAL.command()).is_empty());
+        assert_eq!(SbxBackend::default().location, Location::Local);
+    }
+
+    /// The version is the client binary's, the same for both instances: the cloud instance reads
+    /// it without `--cloud` (`sbx --cloud version` was never captured, P2), so a cloud preflight's
+    /// version check (P12) never depends on the cloud answering.
+    #[test]
+    fn the_cloud_instance_reads_the_version_without_cloud() {
+        assert_eq!(
+            args(&SbxBackend::CLOUD.version_command()),
+            ["version", "--json"]
+        );
+        assert_eq!(
+            args(&SbxBackend::LOCAL.version_command()),
+            ["version", "--json"]
+        );
+    }
+
+    #[test]
+    fn located_gives_the_instance_for_each_location() {
+        for location in [Location::Local, Location::Cloud] {
+            assert_eq!(SbxBackend::at(location).location, location);
+        }
+    }
+
+    #[test]
+    fn a_cloud_create_takes_two_kits_no_skills_and_no_workspace() {
+        let args = create_args(&spec(None), Location::Cloud).unwrap();
+
+        assert_eq!(
+            args,
+            [
+                "create",
+                "--name",
+                "sbxm-task-x-claude",
+                "--cpus",
+                "2",
+                "-m",
+                "4g",
+                "--ttl",
+                "3h15m",
+                "--on-timeout",
+                "delete",
+                "--kit",
+                "/k/common",
+                "--kit",
+                "/k/harness-claude",
+                "claude"
+            ]
+            .map(OsString::from)
+        );
+    }
+
+    #[test]
+    fn a_cloud_create_with_a_workspace_and_a_local_one_without_are_refused() {
+        let cloud = create_args(&spec(Some("/work/x")), Location::Cloud).unwrap_err();
+        assert!(format!("{cloud:#}").contains("workspace"), "{cloud:#}");
+        let local = create_args(&spec(None), Location::Local).unwrap_err();
+        assert!(format!("{local:#}").contains("workspace"), "{local:#}");
+        let mut templated = spec(None);
+        templated.template = Some("sbxm-dev-claude:abc".into());
+        let template = create_args(&templated, Location::Cloud).unwrap_err();
+        assert!(format!("{template:#}").contains("template"), "{template:#}");
+        // Every cloud sandbox has a TTL (decision 259), and a local one has none.
+        let mut endless = spec(None);
+        endless.ttl = None;
+        let cloud = create_args(&endless, Location::Cloud).unwrap_err();
+        assert!(format!("{cloud:#}").contains("TTL"), "{cloud:#}");
+        let mut timed = spec(Some("/work/x"));
+        timed.ttl = Some(std::time::Duration::from_secs(60));
+        let local = create_args(&timed, Location::Local).unwrap_err();
+        assert!(format!("{local:#}").contains("TTL"), "{local:#}");
+    }
+
+    #[test]
+    fn copy_args_name_the_sandbox_and_its_path() {
+        assert_eq!(
+            copy_in_args(
+                "sbxm-task-x-claude",
+                Path::new("/host/x.bundle"),
+                "/home/agent/x.bundle"
+            ),
+            [
+                "cp",
+                "/host/x.bundle",
+                "sbxm-task-x-claude:/home/agent/x.bundle"
+            ]
+            .map(OsString::from)
+        );
+        assert_eq!(
+            copy_out_args(
+                "sbxm-task-x-claude",
+                "/home/agent/r.md",
+                Path::new("/host/r.md")
+            ),
+            ["cp", "sbxm-task-x-claude:/home/agent/r.md", "/host/r.md"].map(OsString::from)
+        );
+    }
+
+    #[test]
+    fn a_copy_out_of_a_missing_path_is_missing_and_a_refused_symlink_is_an_error() {
+        assert_eq!(
+            copy_out_result(false, b"", CP_NOT_FOUND.as_bytes()).unwrap(),
+            CopyOut::Missing
+        );
+        let err = copy_out_result(false, CP_SYMLINK.as_bytes(), b"").unwrap_err();
+        assert!(format!("{err:#}").contains("symlink"), "{err:#}");
+        assert_eq!(copy_out_result(true, b"", b"").unwrap(), CopyOut::Copied);
+    }
+
+    /// A cloud start checks the worker's provider secret through the cloud instance, whose
+    /// `secret ls --json` has the local shape: two global logins and a sandbox-scoped secret.
+    #[test]
+    fn the_cloud_secret_ls_keeps_the_global_service_logins() {
+        let json = include_str!("fixtures/sbx-cloud-secret-ls.json");
+        assert_eq!(parse_secret_ls(json).unwrap(), ["anthropic", "openai"]);
+    }
+
+    /// A login scoped to one sandbox isn't the global one a cloud task needs (decision 256).
+    #[test]
+    fn a_login_only_at_a_sandbox_scope_is_not_listed() {
+        let json = r#"{"secrets": [
+            {"scope": "sbxm-task-x-claude", "type": "service", "name": "anthropic",
+             "secret_type": "oauth_refresh", "created_at": "2026-10-23T19:18:44Z"}
+        ]}"#;
+        assert_eq!(parse_secret_ls(json).unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn parses_the_cloud_ls_json() {
+        assert_eq!(
+            parse_ls(CLOUD_LS).unwrap(),
+            [SandboxInfo {
+                name: "sbxm-p2-capture".into(),
+                agent: "shell".into(),
+                status: "running".into(),
+            }]
+        );
+        assert_eq!(parse_ls(CLOUD_LS_EMPTY).unwrap(), []);
+    }
+
+    // Milestone 4 slice 8 (decision 259): `status` and `doctor` show a cloud sandbox's shape and
+    // time left, from the same `ls --json`.
+    #[test]
+    fn parses_the_cloud_ls_json_with_its_shape_and_expiry() {
+        assert_eq!(
+            parse_ls_detailed(CLOUD_LS).unwrap(),
+            [SandboxDetail {
+                name: "sbxm-p2-capture".into(),
+                status: "running".into(),
+                cpus: Some(2),
+                memory_mib: Some(4096),
+                expires_at: Some("2026-10-24T09:02:21.604457Z".into()),
+            }]
+        );
+        assert_eq!(parse_ls_detailed(CLOUD_LS_EMPTY).unwrap(), []);
+    }
+
+    #[test]
+    fn a_local_ls_entry_without_shape_or_expiry_parses_with_none() {
+        let json = r#"{"sandboxes": [{"name": "sbxm-a-claude", "agent": "claude",
+            "status": "running"}]}"#;
+        assert_eq!(
+            parse_ls_detailed(json).unwrap(),
+            [SandboxDetail {
+                name: "sbxm-a-claude".into(),
+                status: "running".into(),
+                cpus: None,
+                memory_mib: None,
+                expires_at: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn the_cloud_instance_lists_with_cloud() {
+        assert_eq!(
+            args(&SbxBackend::CLOUD.ls_command()),
+            ["--cloud", "ls", "--json"]
+        );
+        assert_eq!(args(&SbxBackend::LOCAL.ls_command()), ["ls", "--json"]);
+    }
+
+    // Milestone 4 slice 4 (decision 256, S14 Q2, P2 point 6): a secret scoped to one cloud sandbox
+    // takes a literal value and no placeholder, is listed by `scope`/`name`, and is removed by its
+    // service name; the cloud's `rm` of the sandbox leaves it behind.
+
+    fn fake() -> ScopedSecret {
+        ScopedSecret {
+            host: "postman-echo.com".into(),
+            env: "P2_FAKE".into(),
+            value: "fake-value-NOT-REAL".into(),
+        }
+    }
+
+    #[test]
+    fn a_scoped_secret_is_set_by_value_in_the_cloud_and_refused_here() {
+        assert_eq!(
+            set_scoped_args(Location::Cloud, "sbxm-task-x-claude", &fake()).unwrap(),
+            [
+                "secret",
+                "set-custom",
+                "--host",
+                "postman-echo.com",
+                "--env",
+                "P2_FAKE",
+                "--value",
+                "fake-value-NOT-REAL",
+                "--sandbox",
+                "sbxm-task-x-claude"
+            ]
+        );
+        let local = set_scoped_args(Location::Local, "sbxm-task-x-claude", &fake()).unwrap_err();
+        let shown = format!("{local:#}");
+        assert!(shown.contains("--command"), "{shown}");
+        assert!(!shown.contains("NOT-REAL"), "{shown}");
+    }
+
+    /// The value never reaches a message: not through `Debug`, not through a failed set's error.
+    #[test]
+    fn a_scoped_secret_never_shows_its_value() {
+        let debug = format!("{:?}", fake());
+        assert!(
+            debug.contains("P2_FAKE") && !debug.contains("NOT-REAL"),
+            "{debug}"
+        );
+        let error = set_scoped_failed("sbxm-task-x-claude", &fake(), "exit status: 1");
+        assert!(
+            error.contains("P2_FAKE")
+                && error.contains("postman-echo.com")
+                && error.contains("sbxm-task-x-claude"),
+            "{error}"
+        );
+        assert!(!error.contains("NOT-REAL"), "{error}");
+    }
+
+    /// `sbx --cloud secret ls --json` (sbx 0.46.0, P2): every entry whose `scope` is the sandbox,
+    /// by its `name`; the global logins and another sandbox's secrets are not.
+    #[test]
+    fn the_secrets_scoped_to_a_sandbox_are_listed_by_name() {
+        let json = include_str!("fixtures/sbx-cloud-secret-ls.json");
+        assert_eq!(
+            parse_scoped_secrets(json, "sbxm-p2-capture").unwrap(),
+            ["postman-echo-com"]
+        );
+        assert_eq!(
+            parse_scoped_secrets(json, "sbxm-task-x-claude").unwrap(),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            parse_scoped_secrets(json, "global").unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn a_secret_is_removed_by_its_service_name_in_its_scope() {
+        assert_eq!(
+            remove_secret_args("postman-echo-com", "sbxm-p2-capture"),
+            [
+                "secret",
+                "rm",
+                "postman-echo-com",
+                "--sandbox",
+                "sbxm-p2-capture",
+                "-f"
+            ]
+        );
+    }
+
+    /// `sbx-cloud-secret-rm-not-found.txt`: one already gone counts as removed.
+    #[test]
+    fn a_secret_already_gone_counts_as_removed() {
+        let gone = include_str!("fixtures/sbx-cloud-secret-rm-not-found.txt");
+        assert!(secret_gone(b"", gone.as_bytes()));
+        assert!(!secret_gone(
+            b"",
+            b"error: sbxcloud: temporarily unavailable"
+        ));
+        assert!(!secret_gone(b"", b""));
+    }
+}
+
+// Milestone 4 slice 7 (P9 (a) with (i), decisions 255, 264): a strict cloud sandbox's list of
+// allowed hosts and the per-sandbox deny rules that close the build hosts.
+#[cfg(test)]
+mod cloud_policy_tests {
+    use super::*;
+    use crate::backend::Location;
+
+    /// `sbx --cloud policy ls <name> --json` (v0.46.0, the P2 capture run).
+    const CLOUD_POLICY_LS: &str = include_str!("fixtures/sbx-cloud-policy-ls.json");
+    /// `sbx --cloud policy ls --json`, the account default: nothing allowed.
+    const CLOUD_POLICY_LS_GLOBAL: &str = include_str!("fixtures/sbx-cloud-policy-ls-global.json");
+
+    #[test]
+    fn cloud_policy_ls_args_name_the_sandbox() {
+        assert_eq!(
+            cloud_policy_ls_args("sbxm-task-x-claude"),
+            ["policy", "ls", "sbxm-task-x-claude", "--json"]
+        );
+    }
+
+    #[test]
+    fn cloud_policy_deny_args_deny_one_host_in_one_sandbox() {
+        assert_eq!(
+            cloud_policy_deny_args("sbxm-task-x-claude", "api.x.ai"),
+            [
+                "policy",
+                "deny",
+                "network",
+                "--sandbox",
+                "sbxm-task-x-claude",
+                "api.x.ai"
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_the_hosts_a_cloud_sandbox_allows() {
+        assert_eq!(
+            parse_cloud_policy_ls(CLOUD_POLICY_LS).unwrap(),
+            ["postman-echo.com"]
+        );
+        assert!(
+            parse_cloud_policy_ls(CLOUD_POLICY_LS_GLOBAL)
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    /// The claude agent's built-in hosts as S17 saw them, in the same shape.
+    #[test]
+    fn parses_a_list_of_the_claude_agents_built_in_hosts() {
+        let json = r#"{"allowNetworks": ["api.anthropic.com", "claude.ai", "console.anthropic.com",
+            "api.github.com", "github.com", "api.x.ai", "openrouter.ai"], "denyNetworks": [],
+            "mode": "deny-all"}"#;
+
+        let hosts = parse_cloud_policy_ls(json).unwrap();
+
+        assert_eq!(hosts.len(), 7);
+        assert_eq!(hosts[0], "api.anthropic.com");
+        assert_eq!(hosts[6], "openrouter.ai");
+    }
+
+    /// Fails closed: a list sbxm can't read is an error, never an empty list.
+    #[test]
+    fn an_unparsable_or_incomplete_cloud_list_is_an_error() {
+        for json in [
+            "not json",
+            r#"{"denyNetworks": [], "mode": "deny-all"}"#,
+            r#"{"allowNetworks": "github.com"}"#,
+            "",
+        ] {
+            let err = parse_cloud_policy_ls(json).unwrap_err();
+            assert!(format!("{err:#}").contains("policy ls"), "{err:#}");
+        }
+    }
+
+    /// The local instance never runs them: a local `policy ls` has another shape.
+    #[test]
+    fn the_local_instance_refuses_the_cloud_policy_calls() {
+        let local = SbxBackend::at(Location::Local);
+        assert!(local.cloud_allowed_hosts("sb").is_err());
+        assert!(local.cloud_deny_host("sb", "api.x.ai").is_err());
     }
 }

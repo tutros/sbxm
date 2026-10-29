@@ -87,6 +87,7 @@ fn options(f: &Fixture, spec: PathBuf) -> SpecOptions {
             email: "dev@example.com".into(),
         }),
         disk: Default::default(),
+        location: None,
     }
 }
 
@@ -448,6 +449,7 @@ fn restart_discards_the_old_task_then_runs() {
             repo_root: f.env.tmp.path().join("target-repo"),
             push_unresolved: false,
         },
+        &sbxm::backend::FakeBackend::default(),
         &FakeGitHub::default(),
         &Probe,
         &mut Vec::new(),
@@ -477,6 +479,7 @@ fn restart_refuses_to_discard_an_unfetched_finished_result() {
             repo_root: f.env.tmp.path().join("target-repo"),
             push_unresolved: false,
         },
+        &sbxm::backend::FakeBackend::default(),
         &FakeGitHub::default(),
         &Probe,
         &mut Vec::new(),

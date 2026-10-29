@@ -113,7 +113,7 @@ fn the_sandbox_is_created_over_the_workspace_with_the_profiles_kits() {
 
     let specs = backend.creates();
     assert_eq!(specs.len(), 1);
-    assert_eq!(specs[0].workspace, prepared.workspace);
+    assert_eq!(specs[0].workspace, Some(prepared.workspace.clone()));
     assert_eq!(specs[0].agent, "claude");
     assert_eq!((specs[0].cpus, specs[0].memory.as_str()), (4, "8g"));
     assert_eq!(specs[0].kits.len(), 2);

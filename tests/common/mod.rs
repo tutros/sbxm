@@ -1,6 +1,7 @@
 //! Shared test helpers. Each test crate uses only some of them.
 #![allow(dead_code)]
 
+pub mod cloud_task;
 pub mod task_fixture;
 
 use std::path::{Path, PathBuf};
@@ -295,8 +296,25 @@ pub struct SecretCheckBlocksRestore<'a> {
 }
 
 impl SandboxBackend for SecretCheckBlocksRestore<'_> {
+    fn located(&self, _location: sbxm::backend::Location) -> &dyn SandboxBackend {
+        self
+    }
+
     fn create(&self, spec: &CreateSpec) -> anyhow::Result<()> {
         self.inner.create(spec)
+    }
+
+    fn copy_in(&self, sandbox: &str, host: &Path, path: &str) -> anyhow::Result<()> {
+        self.inner.copy_in(sandbox, host, path)
+    }
+
+    fn copy_out(
+        &self,
+        sandbox: &str,
+        path: &str,
+        host: &Path,
+    ) -> anyhow::Result<sbxm::backend::CopyOut> {
+        self.inner.copy_out(sandbox, path, host)
     }
 
     fn list(&self) -> anyhow::Result<Vec<SandboxInfo>> {
@@ -363,6 +381,14 @@ impl SandboxBackend for SecretCheckBlocksRestore<'_> {
         self.inner.network_rules(sandbox)
     }
 
+    fn cloud_allowed_hosts(&self, sandbox: &str) -> anyhow::Result<Vec<String>> {
+        self.inner.cloud_allowed_hosts(sandbox)
+    }
+
+    fn cloud_deny_host(&self, sandbox: &str, host: &str) -> anyhow::Result<()> {
+        self.inner.cloud_deny_host(sandbox, host)
+    }
+
     fn custom_secrets(&self) -> anyhow::Result<Vec<sbxm::backend::CustomSecret>> {
         self.inner.custom_secrets()
     }
@@ -373,5 +399,21 @@ impl SandboxBackend for SecretCheckBlocksRestore<'_> {
 
     fn remove_custom_secret(&self, placeholder: &str, sandbox: &str) -> anyhow::Result<()> {
         self.inner.remove_custom_secret(placeholder, sandbox)
+    }
+
+    fn set_scoped_secret(
+        &self,
+        sandbox: &str,
+        secret: &sbxm::backend::ScopedSecret,
+    ) -> anyhow::Result<()> {
+        self.inner.set_scoped_secret(sandbox, secret)
+    }
+
+    fn scoped_secrets(&self, sandbox: &str) -> anyhow::Result<Vec<String>> {
+        self.inner.scoped_secrets(sandbox)
+    }
+
+    fn remove_secret(&self, service: &str, sandbox: &str) -> anyhow::Result<()> {
+        self.inner.remove_secret(service, sandbox)
     }
 }

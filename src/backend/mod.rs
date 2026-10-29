@@ -8,12 +8,38 @@ use std::path::{Path, PathBuf};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-pub use fake::{ExecGate, FakeBackend};
+pub use fake::{ExecGate, FakeBackend, FakeCopy};
+
 pub use sbx::SbxBackend;
 
 pub trait SandboxBackend: Send + Sync {
+    /// The backend for sandboxes at `location` (P3 (a), decision 262(c)): a task gets the
+    /// instance for the location it runs in, and passes only that one on.
+    fn located(&self, location: Location) -> &dyn SandboxBackend;
     fn create(&self, spec: &CreateSpec) -> Result<()>;
+    /// Copies a host file into a running sandbox (`sbx cp <host> <sandbox>:<path>`), for a sandbox
+    /// with no mounted workspace (decision 257).
+    fn copy_in(&self, sandbox: &str, host: &Path, path: &str) -> Result<()>;
+    /// Copies `<sandbox>:<path>` to `host` (`sbx cp`). The sandbox decides what is at `path`: a
+    /// folder comes out whole (P2), so the caller checks what landed before reading it.
+    fn copy_out(&self, sandbox: &str, path: &str, host: &Path) -> Result<CopyOut>;
     fn list(&self) -> Result<Vec<SandboxInfo>>;
+    /// The same `sbx ls --json`, with each sandbox's shape and expiry where `sbx` reports them
+    /// (the cloud's does; decision 259), for `status` and `doctor` to show. By default, `list`
+    /// with no shape or expiry.
+    fn list_detailed(&self) -> Result<Vec<SandboxDetail>> {
+        Ok(self
+            .list()?
+            .into_iter()
+            .map(|info| SandboxDetail {
+                name: info.name,
+                status: info.status,
+                cpus: None,
+                memory_mib: None,
+                expires_at: None,
+            })
+            .collect())
+    }
     fn stop(&self, name: &str) -> Result<()>;
     /// Removes the sandbox without prompting (`sbx rm -f`).
     fn remove(&self, name: &str) -> Result<()>;
@@ -44,6 +70,14 @@ pub trait SandboxBackend: Send + Sync {
     /// The network rules that apply to a sandbox (`sbx policy ls <sandbox> --json`), for the check
     /// of a strict `codex` sandbox after its creation (decision 221).
     fn network_rules(&self, sandbox: &str) -> Result<Vec<NetworkRule>>;
+    /// The hosts a cloud sandbox's policy allows (`sbx --cloud policy ls <sandbox> --json`, its
+    /// `allowNetworks`), for the check of a strict cloud sandbox (decision 255). A list that
+    /// can't be read or parsed is an error, never an empty list. The local instance refuses it.
+    fn cloud_allowed_hosts(&self, sandbox: &str) -> Result<Vec<String>>;
+    /// Denies `host` in the cloud sandbox `sandbox` only (`sbx --cloud policy deny network
+    /// --sandbox <sandbox> <host>`), which replaces an allow rule for it and wins over one added
+    /// later (S17, P9 (i)). The local instance refuses it.
+    fn cloud_deny_host(&self, sandbox: &str, host: &str) -> Result<()>;
     /// Every custom secret `sbx` holds (`sbx secret ls --json`, its `custom_secrets` array), for
     /// the check that no global one clashes with a scoped one sbxm is about to create (S9).
     fn custom_secrets(&self) -> Result<Vec<CustomSecret>>;
@@ -55,6 +89,42 @@ pub trait SandboxBackend: Send + Sync {
     /// --sandbox N -f`). One that is already gone (removing the sandbox may remove it, S12) is
     /// not an error.
     fn remove_custom_secret(&self, placeholder: &str, sandbox: &str) -> Result<()>;
+    /// Stores a secret scoped to the cloud sandbox `sandbox`, by its literal value, before that
+    /// sandbox is created (`sbx --cloud secret set-custom --host H --env E --value V --sandbox
+    /// N`; secrets attach at create, S14 Q2). `sbx` makes the placeholder and the service name.
+    /// The local instance refuses it: there a value comes from `--command` or `--ref`
+    /// ([`SandboxBackend::set_custom_secret`]). Decision 256, milestone 4 slice 4.
+    fn set_scoped_secret(&self, sandbox: &str, secret: &ScopedSecret) -> Result<()>;
+    /// The service names of every secret scoped to `sandbox` (`sbx secret ls --json`, the entries
+    /// of `secrets` whose `scope` is that name). The cloud's `rm` of a sandbox leaves its scoped
+    /// secrets behind (P2 point 6), so this list, not sbxm's records, says what to remove.
+    fn scoped_secrets(&self, sandbox: &str) -> Result<Vec<String>>;
+    /// Removes the secret `service` scoped to `sandbox` (`sbx secret rm <service> --sandbox N
+    /// -f`). One that is already gone (`sbxcloud: not found`) is not an error.
+    fn remove_secret(&self, service: &str, sandbox: &str) -> Result<()>;
+}
+
+/// A secret scoped to one cloud sandbox, by its value (decision 256): what the proxy sets for
+/// `host`, named `env` inside the sandbox. In this milestone no production path fills one in
+/// (P8 (a) refuses every profile secret but the provider logins); tests use a fake value. Its
+/// `Debug` never shows the value, so no message or record of sbxm can carry it.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ScopedSecret {
+    /// The exact DNS name the proxy sets the header for.
+    pub host: String,
+    /// The environment variable holding the placeholder inside the sandbox.
+    pub env: String,
+    pub value: String,
+}
+
+impl std::fmt::Debug for ScopedSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ScopedSecret")
+            .field("host", &self.host)
+            .field("env", &self.env)
+            .field("value", &"<redacted>")
+            .finish()
+    }
 }
 
 /// One entry of `sbx secret ls --json`'s `custom_secrets` (S9); the masked `secret` is never read.
@@ -202,11 +272,35 @@ pub struct SandboxInfo {
     pub status: String,
 }
 
+/// One entry of `sbx ls --json` with its shape and lifetime (`cpus`, `memory_mib`, `expires_at`,
+/// which a cloud sandbox has, S14); a field `sbx` leaves out is `None`, other fields are ignored.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SandboxDetail {
+    pub name: String,
+    pub status: String,
+    #[serde(default)]
+    pub cpus: Option<u32>,
+    #[serde(default)]
+    pub memory_mib: Option<u64>,
+    #[serde(default)]
+    pub expires_at: Option<String>,
+}
+
+/// What [`SandboxBackend::copy_out`] found at the sandbox's path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CopyOut {
+    Copied,
+    /// Nothing there; nothing was written on the host.
+    Missing,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateSpec {
     pub name: String,
     pub agent: String,
-    pub workspace: PathBuf,
+    /// The folder mounted as the sandbox's workspace; `None` for a cloud sandbox, which has none
+    /// (S14 Q1).
+    pub workspace: Option<PathBuf>,
     pub cpus: u32,
     pub memory: String,
     /// Always passed explicitly: without `--skills`, `sbx` falls back to its
@@ -220,6 +314,46 @@ pub struct CreateSpec {
     /// Hosts passed as `--deny-network`, which win over the agent kit's own allow rule (decision
     /// 221).
     pub deny_network: Vec<String>,
+    /// `--ttl` with `--on-timeout delete` (decisions 259, 263): every cloud sandbox has one, a
+    /// local sandbox none.
+    pub ttl: Option<std::time::Duration>,
+}
+
+/// Where a sandbox runs (milestone 4, decisions 253, 262): on this machine, or in Docker Cloud
+/// Sandboxes, where every `sbx` call takes `--cloud`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Location {
+    #[default]
+    Local,
+    Cloud,
+}
+
+impl Location {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Location::Local => "local",
+            Location::Cloud => "cloud",
+        }
+    }
+}
+
+/// A TTL as `sbx create --ttl` takes it (decision 263): whole minutes, part of a minute rounded
+/// up, written `<h>h<m>m`, `<h>h` when the minutes are 0, or `<m>m` under an hour.
+pub fn ttl_arg(ttl: std::time::Duration) -> String {
+    let minutes = whole_minutes(ttl);
+    match (minutes / 60, minutes % 60) {
+        (0, m) => format!("{m}m"),
+        (h, 0) => format!("{h}h"),
+        (h, m) => format!("{h}h{m}m"),
+    }
+}
+
+/// `ttl` in minutes, part of a minute counting as a whole one.
+pub fn whole_minutes(ttl: std::time::Duration) -> u64 {
+    ttl.as_secs()
+        .saturating_add(u64::from(ttl.subsec_nanos() > 0))
+        .div_ceil(60)
 }
 
 /// How `sbx`'s shared skills store is mounted (decision 46). sbxm never uses

@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use crate::backend::Location;
 use crate::run::results::format_timestamp;
 
 pub const SCHEMA: u32 = 1;
@@ -354,6 +355,52 @@ pub struct OpenFinding {
     pub place: Option<String>,
 }
 
+/// What a cloud sandbox of a task was for (P7 (a)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxRole {
+    Worker,
+    Reviewer,
+    Fix,
+}
+
+impl SandboxRole {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Worker => "worker",
+            Self::Reviewer => "reviewer",
+            Self::Fix => "fix",
+        }
+    }
+}
+
+/// One cloud sandbox's lifetime (P7 (a), decision 265).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxLife {
+    pub name: String,
+    pub role: SandboxRole,
+    pub location: Location,
+    pub created_at: String,
+    /// The TTL it was created with, in seconds.
+    pub ttl_s: u64,
+    /// `null` while it exists, and when its removal failed.
+    pub removed_at: Option<String>,
+}
+
+/// A cloud create the task started and hasn't heard back from (decision 268): saved before the
+/// create (and before the secrets scoped to its name), and cleared by the write that appends the
+/// sandbox's entry, or by the one that records the create's error. It is **not** ownership: a
+/// run killed in between leaves it, and since names are deterministic sbxm can't tell whether a
+/// sandbox of this name is the one it asked for or another caller's. Every recovery and removal
+/// path then leaves that sandbox and its scoped secrets alone and refuses to delete the record
+/// until `--forget-ambiguous` drops this ([`Record::forget_ambiguous`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SandboxClaim {
+    pub name: String,
+    pub role: SandboxRole,
+    pub since: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Record {
     pub schema: u32,
@@ -364,6 +411,11 @@ pub struct Record {
     pub title: String,
     pub base: String,
     pub branch: String,
+    /// Where the task's sandboxes run (decisions 253, 265): chosen once at its start, and read by
+    /// every later command of the task, whatever the config or a flag says then. A record from
+    /// before milestone 4 has none and is local.
+    #[serde(default)]
+    pub location: Location,
     pub stage: Stage,
     pub status: Status,
     pub stages: Vec<Stamp>,
@@ -409,6 +461,14 @@ pub struct Record {
     /// a missing `result.md`); never a secret.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub notes: Vec<String>,
+    /// Every cloud sandbox the task created, in order, never rewritten except to stamp its
+    /// removal (P7 (a), decision 265): what a retro sums for the task's sandbox hours. Absent in
+    /// older records and for a task that never had a cloud sandbox.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sandboxes: Vec<SandboxLife>,
+    /// The cloud create in flight, if any: at most one runs at a time. Absent once it returned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub creating: Option<SandboxClaim>,
     /// Free-form; later stages attach here and M2b leaves it alone (decision 139).
     pub hooks: Value,
     pub sbxm_version: String,
@@ -477,6 +537,95 @@ impl Record {
         }
     }
 
+    /// Records that the create of the cloud sandbox `name` is about to be asked for (decision
+    /// 268): not ownership. [`add_sandbox`](Self::add_sandbox) (it returned) or
+    /// [`create_failed`](Self::create_failed) (it returned an error) clears it.
+    pub fn create_started(&mut self, name: &str, role: SandboxRole, now: u64) {
+        self.creating = Some(SandboxClaim {
+            name: name.to_owned(),
+            role,
+            since: format_timestamp(now),
+        });
+    }
+
+    /// The started create returned an error: the task owns nothing of that name.
+    pub fn create_failed(&mut self) {
+        self.creating = None;
+    }
+
+    /// Appends the entry of a cloud sandbox whose create just returned success, not yet removed,
+    /// which makes it the task's own (decision 268), and clears its started create.
+    pub fn add_sandbox(
+        &mut self,
+        name: &str,
+        role: SandboxRole,
+        location: Location,
+        now: u64,
+        ttl_s: u64,
+    ) {
+        self.sandboxes.push(SandboxLife {
+            name: name.to_owned(),
+            role,
+            location,
+            created_at: format_timestamp(now),
+            ttl_s,
+            removed_at: None,
+        });
+        if self.creating.as_ref().is_some_and(|c| c.name == name) {
+            self.creating = None;
+        }
+    }
+
+    /// The name of the cloud sandbox whose create was started and never recorded as returned
+    /// (decision 268). Only a task whose process is gone has one: a running create clears it
+    /// itself once it returns.
+    pub fn ambiguous_create(&self) -> Option<&str> {
+        self.creating.as_ref().map(|c| c.name.as_str())
+    }
+
+    /// `--forget-ambiguous` (decision 268): drops the ambiguous create from the record, nothing
+    /// in the cloud touched; `true` if there was one.
+    pub fn forget_ambiguous(&mut self) -> bool {
+        self.creating.take().is_some()
+    }
+
+    /// Whether the sandbox `name` has an entry not yet stamped removed: one of the task's own
+    /// creates made it, and no removal has been recorded since.
+    pub fn has_open_sandbox(&self, name: &str) -> bool {
+        self.sandboxes
+            .iter()
+            .any(|s| s.name == name && s.removed_at.is_none())
+    }
+
+    /// Every cloud sandbox the task owns and hasn't removed (decision 268: an entry still open,
+    /// whose create returned), each name once, in entry order. An ambiguous create is never one.
+    pub fn open_sandboxes(&self) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        for entry in self.sandboxes.iter().filter(|s| s.removed_at.is_none()) {
+            if !names.contains(&entry.name) {
+                names.push(entry.name.clone());
+            }
+        }
+        names
+    }
+
+    /// Stamps the removal of the sandbox `name`'s latest entry still open; `false` if it has
+    /// none.
+    pub fn sandbox_removed(&mut self, name: &str, now: u64) -> bool {
+        match self
+            .sandboxes
+            .iter_mut()
+            .rev()
+            .find(|s| s.name == name && s.removed_at.is_none())
+        {
+            Some(entry) => {
+                entry.removed_at = Some(format_timestamp(now));
+                true
+            }
+            None => false,
+        }
+    }
+
     /// A task that has just been created: stage `prepared`, running.
     pub fn new(task: &NewTask, now: u64, process: Process) -> Self {
         Self {
@@ -491,6 +640,7 @@ impl Record {
             title: task.title.to_owned(),
             base: task.base.to_owned(),
             branch: task.branch.to_owned(),
+            location: Location::Local,
             stage: Stage::Prepared,
             status: Status::Running,
             stages: vec![Stamp {
@@ -512,6 +662,8 @@ impl Record {
             continues: None,
             related: Vec::new(),
             notes: Vec::new(),
+            sandboxes: Vec::new(),
+            creating: None,
             hooks: Value::Object(serde_json::Map::new()),
             sbxm_version: env!("CARGO_PKG_VERSION").to_owned(),
             config_hash: task.config_hash.to_owned(),
@@ -801,6 +953,22 @@ pub fn write(dir: &Path, record: &Record) -> Result<()> {
     text.push('\n');
     fs::write(&tmp, text).with_context(|| format!("cannot write {}", tmp.display()))?;
     fs::rename(&tmp, &path).with_context(|| format!("cannot write {}", path.display()))
+}
+
+/// Applies `change` to a copy of `record`, saves the copy, and only then makes it `record`: an
+/// error leaves `record` as `task.json` still has it, so nothing read from it later trusts an
+/// unsaved change (PR 322 round 2, M-1: ownership is a create that returned *and* its saved
+/// lifetime entry, decision 268).
+pub fn write_change(
+    dir: &Path,
+    record: &mut Record,
+    change: impl FnOnce(&mut Record),
+) -> Result<()> {
+    let mut staged = record.clone();
+    change(&mut staged);
+    write(dir, &staged)?;
+    *record = staged;
+    Ok(())
 }
 
 pub fn read(path: &Path) -> Result<Record> {

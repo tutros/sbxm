@@ -397,6 +397,7 @@ fn merged_spec_task(f: &Fixture) -> (String, std::path::PathBuf) {
             repo_root: repo_root(f),
             push_unresolved: false,
         },
+        &sbxm::backend::FakeBackend::default(),
         &FakeGitHub::default(),
         &Probe,
         &mut Vec::new(),

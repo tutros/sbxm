@@ -71,6 +71,9 @@ pub struct LeftAlone {
 pub struct MergedPlan {
     pub candidates: Vec<Candidate>,
     pub left_alone: Vec<LeftAlone>,
+    /// `--forget-ambiguous` (decision 268): each candidate's plan drops an ambiguous cloud create
+    /// from its record instead of leaving the task alone for it.
+    forget_ambiguous: bool,
 }
 
 impl MergedPlan {
@@ -111,7 +114,7 @@ fn add_merged(
     probe: &dyn ProcessProbe,
     out: &mut MergedPlan,
 ) {
-    match finish::plan_removal(base_dir, id, probe) {
+    match finish::plan_removal_forgetting(base_dir, id, probe, out.forget_ambiguous) {
         Ok(plan) => out.candidates.push(Candidate {
             id: id.to_owned(),
             reason,
@@ -334,7 +337,23 @@ pub fn plan(
     github: &dyn GitHubBackend,
     probe: &dyn ProcessProbe,
 ) -> Result<MergedPlan> {
-    let mut out = MergedPlan::default();
+    plan_forgetting(base_dir, repo_root, github, probe, false)
+}
+
+/// [`plan`], with `--forget-ambiguous` when `forget` (decision 268): a merged task whose record
+/// holds a cloud create that was started and never heard back from is left alone, saying why,
+/// unless `forget`, when its plan drops that create from the record and removes the rest.
+pub fn plan_forgetting(
+    base_dir: &Path,
+    repo_root: &Path,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    forget: bool,
+) -> Result<MergedPlan> {
+    let mut out = MergedPlan {
+        forget_ambiguous: forget,
+        ..MergedPlan::default()
+    };
     for task in load_own(base_dir, &mut out)? {
         // Nothing below runs through a task folder that is a link, or sits under one: not the
         // spec check's fetch into its `repo.git`, not the archive (README's removal contract).
@@ -505,6 +524,34 @@ pub fn remove(
     state_dir: Option<&Path>,
     out: &mut dyn Write,
 ) -> Result<()> {
+    remove_with_sleep(
+        base_dir,
+        merged,
+        yes,
+        backend,
+        confirm,
+        free_space,
+        state_dir,
+        out,
+        &std::thread::sleep,
+    )
+}
+
+/// [`remove`], with `sleep` called for each wait between a cloud sandbox's removal retries (P6
+/// (a)) instead of really sleeping. A cloud task's sandboxes are removed in the cloud, after its
+/// archive (decision 265), and when one may still be there the task is left as it is.
+#[allow(clippy::too_many_arguments)]
+pub fn remove_with_sleep(
+    base_dir: &Path,
+    merged: &MergedPlan,
+    yes: bool,
+    backend: &dyn SandboxBackend,
+    confirm: &dyn Confirm,
+    free_space: fn(&Path) -> std::io::Result<u64>,
+    state_dir: Option<&Path>,
+    out: &mut dyn Write,
+    sleep: &dyn Fn(std::time::Duration),
+) -> Result<()> {
     // Every task left alone is named whichever way this goes (decision 195 a, c): in the
     // confirmation prompt, the refusal without a terminal, or printed here when nothing is asked.
     let listing = merged.listing();
@@ -543,6 +590,18 @@ pub fn remove(
     let mut screen = finish::Unfailing::new(out);
     let out = &mut screen;
     for candidate in &merged.candidates {
+        // `--forget-ambiguous` drops the entry before the archive is made (PR 322 round 2, M-2),
+        // so the archive and the live record agree and a plain retry reuses the archive.
+        if let Err(e) = finish::forget_in_record(&candidate.plan) {
+            writeln!(
+                out,
+                "could not drop task {}'s ambiguous create from task.json, so it is left as it \
+                 is: {e:#}",
+                candidate.id
+            )?;
+            stayed += 1;
+            continue;
+        }
         match archive_task(base_dir, &candidate.id) {
             Ok(archive) => writeln!(
                 out,
@@ -556,7 +615,7 @@ pub fn remove(
                 continue;
             }
         }
-        let report = finish::remove(&candidate.plan, backend);
+        let report = finish::remove_with_sleep(&candidate.plan, backend, sleep);
         for line in &report.removed {
             writeln!(out, "removed {line}")?;
         }

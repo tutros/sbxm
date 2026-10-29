@@ -7,12 +7,16 @@ use anyhow::{Result, bail};
 use clap::ValueEnum;
 
 use super::new;
-use crate::backend::{SandboxBackend, TemplateImage};
+use crate::backend::{Location, SandboxBackend, TemplateImage};
 use crate::config::{self, GlobalConfig, Profile};
 use crate::disk::{self, gib};
 use crate::harness::Harness;
 use crate::run::results::parse_timestamp;
+use crate::status::cloud::{self, Cloud, Left};
 use crate::status::tasks::format_duration;
+use crate::task::config::{self as task_config, TaskConfig};
+use crate::task::pipeline::CLOUD_MIN_SBX_VERSION;
+use crate::task::record;
 use crate::{kit, project, state, template};
 
 const GIB: u64 = 1024 * 1024 * 1024;
@@ -35,6 +39,9 @@ pub struct Host {
     pub sandbox_state_dir: Option<PathBuf>,
     /// Seconds since the Unix epoch, for the age of a template.
     pub now: fn() -> u64,
+    /// The folder `doctor` runs in, whose `sbxm-task.toml` says whether it is a cloud repo
+    /// (P13 (a), decision 262); `None` when it can't be read.
+    pub current_dir: Option<PathBuf>,
 }
 
 impl Host {
@@ -59,6 +66,7 @@ impl Host {
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_secs())
             },
+            current_dir: std::env::current_dir().ok(),
         }
     }
 }
@@ -152,6 +160,13 @@ pub fn run(config_dir: &Path, backend: &dyn SandboxBackend, host: &Host) -> Repo
         Ok(_) => report.pass("sbx daemon answers".into()),
         Err(err) => report.fail(format!("sbx daemon: {err:#}")),
     }
+    check_cloud(&mut report, backend, host);
+    check_cloud_use(
+        &mut report,
+        &config.base_dir,
+        sbx_version.as_ref().ok().map(String::as_str),
+        host,
+    );
 
     check_base_dir(&mut report, &config.base_dir, &config_path, host);
     check_state_drive(&mut report, &config, &config_path, host);
@@ -164,6 +179,92 @@ pub fn run(config_dir: &Path, backend: &dyn SandboxBackend, host: &Host) -> Repo
         host,
     );
     report
+}
+
+/// The running cloud sandboxes named `sbxm-`, one line each (decision 259). A cloud that can't
+/// be read only warns (P17 (a)): a user who never uses the cloud must not see `doctor` fail.
+fn check_cloud(report: &mut Report, backend: &dyn SandboxBackend, host: &Host) {
+    match cloud::read(backend) {
+        Cloud::Sandboxes(sandboxes) => {
+            let now = (host.now)();
+            for sandbox in &sandboxes {
+                let left = match cloud::time_left(sandbox, now) {
+                    Left::Secs(secs) => format!("{} left", format_duration(secs)),
+                    Left::Expiring => "expiring".to_owned(),
+                    Left::Unknown => "expiry unknown".to_owned(),
+                };
+                report.pass(format!(
+                    "cloud sandbox {}: {}, {}, {left}",
+                    sandbox.name,
+                    sandbox.status,
+                    cloud::shape(sandbox)
+                ));
+            }
+        }
+        Cloud::Unreadable(error) => report.warn(format!(
+            "cloud sandboxes {}: {error}; if you use the cloud, log in with `sbx login`",
+            cloud::UNREADABLE
+        )),
+    }
+}
+
+/// When the cloud is in use, the `sbx` version it needs (P12), and a cloud repo's sandbox gates
+/// that name `/tmp` (P13 (a) with (i), decision 262). The cloud is in use when the current
+/// directory's `sbxm-task.toml` says `location = "cloud"` or a task record runs in the cloud. The
+/// file is read only for this: one that doesn't load is left to the `task` commands to report,
+/// and so is a task record that doesn't load.
+fn check_cloud_use(report: &mut Report, base_dir: &Path, sbx_version: Option<&str>, host: &Host) {
+    let cloud_repo = host.current_dir.as_deref().and_then(|dir| {
+        let path = dir.join(task_config::FILE_NAME);
+        let config = TaskConfig::load(dir).ok()?;
+        (config.sandbox.location == Location::Cloud).then_some((path, config))
+    });
+    let reason = match &cloud_repo {
+        Some((path, _)) => Some(format!("{} has location = \"cloud\"", path.display())),
+        // Each record is read on its own, so one that doesn't load hides no other.
+        None => {
+            let mut tasks: Vec<_> = record::task_folders(base_dir)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|dir| record::read(&dir.join("task.json")).ok())
+                .collect();
+            record::sort(&mut tasks);
+            tasks
+                .into_iter()
+                .find(|task| task.location == Location::Cloud)
+                .map(|task| format!("task {} runs in the cloud", task.id))
+        }
+    };
+    if let (Some(version), Some(reason)) = (sbx_version, reason)
+        && older(version, CLOUD_MIN_SBX_VERSION)
+    {
+        report.warn(format!(
+            "sbx {version} is older than {CLOUD_MIN_SBX_VERSION}, the version a cloud task \
+             needs (the cloud is in use: {reason}); upgrade sbx"
+        ));
+    }
+    let Some((path, config)) = cloud_repo else {
+        return;
+    };
+    for gate in config.gates.sandbox.iter().filter(|gate| names_tmp(gate)) {
+        report.warn(format!(
+            "gate `{gate}` in {} uses /tmp, which is a small tmpfs in a cloud sandbox; build \
+             under $HOME instead (e.g. $HOME/target)",
+            path.display()
+        ));
+    }
+}
+
+/// Whether a gate command names `/tmp` (P13 (i)): `/tmp/`, or `/tmp` ending a path, followed by
+/// the end or a character that can't continue a file name, so `/tmpfoo`, `/tmp2`, `/tmp-x` and
+/// `/tmp.d` don't count. What comes before `/tmp` isn't looked at.
+fn names_tmp(command: &str) -> bool {
+    command.match_indices("/tmp").any(|(at, _)| {
+        command[at + "/tmp".len()..]
+            .chars()
+            .next()
+            .is_none_or(|c| c == '/' || !(c.is_alphanumeric() || matches!(c, '_' | '-' | '.')))
+    })
 }
 
 /// A template is listed with its size and age (decision 205(c)) and warned about when its image
@@ -586,4 +687,34 @@ pub(crate) fn older(version: &str, min: &str) -> bool {
             .collect()
     };
     parts(version) < parts(min)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::names_tmp;
+
+    #[test]
+    fn tmp_counts_only_as_a_whole_path_part() {
+        for command in [
+            "CARGO_TARGET_DIR=/tmp/target cargo test",
+            "cd /tmp",
+            "cd /tmp && cargo build",
+            "cd /tmp; ls",
+            "TMPDIR='/tmp' cargo test",
+            "/tmp",
+        ] {
+            assert!(names_tmp(command), "{command}");
+        }
+        for command in [
+            "ls /tmpfoo",
+            "ls /var/tmp2",
+            "ls /tmp-x",
+            "ls /tmp.d",
+            "ls /tmp_x",
+            "CARGO_TARGET_DIR=$HOME/target cargo build",
+            "cargo test",
+        ] {
+            assert!(!names_tmp(command), "{command}");
+        }
+    }
 }

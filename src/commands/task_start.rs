@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, anyhow, bail};
 
-use crate::backend::SandboxBackend;
+use crate::backend::{Location, SandboxBackend, ScopedSecret};
 use crate::config::GlobalConfig;
 use crate::confirm::Confirm;
 use crate::disk;
@@ -19,6 +19,7 @@ use crate::run::config::{check_model_flag, headless_harness, parse_duration};
 use crate::task::config::TaskConfig;
 use crate::task::finish;
 use crate::task::gates::ShellHostRunner;
+use crate::task::lifetime;
 use crate::task::pipeline::{self, Ctx};
 use crate::task::record::{self, ProcessProbe};
 use crate::task::repo::{self, Identity};
@@ -33,6 +34,10 @@ pub struct Options {
     pub worker_harness: Option<Harness>,
     pub worker_model: Option<String>,
     pub time_limit: Option<String>,
+    /// `task run`'s `--reviewer-time-limit`: every review round is part of a cloud worker
+    /// sandbox's TTL (decision 263), so the start uses the limit the review will. `task start`
+    /// has no such flag and leaves it to `[reviewer] time_limit`.
+    pub reviewer_time_limit: Option<String>,
     pub profile: Option<String>,
     /// Default: the repo's default branch on GitHub.
     pub base: Option<String>,
@@ -44,6 +49,8 @@ pub struct Options {
     pub identity: Option<Identity>,
     /// The free-space check of the sandbox drive before a sandbox is created (decision 194).
     pub disk: disk::Guard,
+    /// `--cloud` or `--local`; `None` leaves it to `[sandbox] location`.
+    pub location: Option<Location>,
 }
 
 fn name_ok(segment: &str) -> bool {
@@ -336,6 +343,7 @@ fn start(
 
     // Everything that can be wrong with the inputs, before anything is created.
     let mut config = TaskConfig::load(&opts.repo_root)?;
+    let location = pipeline::choose_location(opts.location, &config);
     if let Some(harness) = opts.worker_harness {
         let harness = headless_harness("--worker-harness", harness.as_str(), "tasks")
             .map_err(|e| anyhow!(e))?;
@@ -348,10 +356,24 @@ fn start(
     if let Some(limit) = &opts.time_limit {
         config.worker.time_limit = parse_duration("--time-limit", limit).map_err(|e| anyhow!(e))?;
     }
+    if let Some(limit) = &opts.reviewer_time_limit {
+        config.reviewer.time_limit =
+            parse_duration("--reviewer-time-limit", limit).map_err(|e| anyhow!(e))?;
+    }
     if let Some(profile) = &opts.profile {
         config.sandbox.profile = profile.clone();
     }
-    disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?;
+    // The task's sandboxes run where it was started (decision 253).
+    let backend = backend.located(location);
+    match location {
+        Location::Local => disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?,
+        // A cloud sandbox doesn't use the drive of `sbx`'s local sandbox state (P11, decision
+        // 262(h)). Every worker is preflighted here, before any is created (P15 (a)): they share
+        // the harness and the profile, so one check covers them all.
+        Location::Cloud => {
+            pipeline::check_worker_inputs(config_dir, backend, &config, location)?;
+        }
+    }
     let repo_name = resolve_repo(opts.repo.as_deref(), &opts.repo_root)?;
     let identity = match &opts.identity {
         Some(identity) => identity.clone(),
@@ -383,6 +405,9 @@ fn start(
         identity: &identity,
         probe,
         host: &ShellHostRunner,
+        sleep: &std::thread::sleep,
+        // Empty in production while P8 (a) holds (slice 4), as for a spec task.
+        scoped_secrets: &[],
     };
     // Resolved once, before any task is set aside, and reused for the rest of this function: a
     // second load after the discard could itself fail (issue #207 review M-1) outside the path
@@ -439,7 +464,12 @@ fn start(
             .map(|n| format!("issue-{n}"))
             .collect();
         writeln!(out, "Starting {} ...", names.join(", "))?;
-        Ok(pipeline::start_with(&ctx, &selection.picks, &on_prepared))
+        Ok(pipeline::start_at(
+            &ctx,
+            &selection.picks,
+            location,
+            &on_prepared,
+        ))
     })();
 
     for warning in settle_warnings.into_inner().unwrap() {
@@ -480,10 +510,15 @@ fn start(
             warnings,
             result,
             gates,
+            events,
+            stopped,
         } = report;
         let id = format!("issue-{number}");
         for warning in &warnings {
             writeln!(warn, "warning: {warning}")?;
+        }
+        for event in &events {
+            writeln!(out, "{event}")?;
         }
         // A task whose preparation completed was already settled by `on_prepared`, whether or
         // not its worker then failed, so this only ever finds something for a task whose
@@ -493,7 +528,9 @@ fn start(
             Ok(worked) => {
                 let (label, bad) = match &worked.status {
                     RunStatus::Completed => ("completed".to_owned(), false),
-                    RunStatus::TimedOut => ("timed out".to_owned(), false),
+                    // A timed-out cloud worker stops the task, as a spec task's (milestone 4
+                    // slice 3, behavior 2).
+                    RunStatus::TimedOut => ("timed out".to_owned(), location == Location::Cloud),
                     RunStatus::Failed(why) => (format!("failed: {why}"), true),
                 };
                 writeln!(
@@ -590,6 +627,20 @@ fn start(
                 if e.is::<crate::headless::ExecUnavailable>() {
                     exec_unavailable += 1;
                 }
+                // A failure after the cloud create still shows the create and the removal, or
+                // the warning of a removal that failed and kept the task's folder (decision 265),
+                // as for a spec task.
+                if let Some(after) = e.downcast_ref::<pipeline::FailedAfterCreate>() {
+                    for event in &after.events {
+                        writeln!(out, "{event}")?;
+                    }
+                    if let Some(why) = &after.kept {
+                        writeln!(warn, "warning: {why}")?;
+                    }
+                    for warning in &after.warnings {
+                        writeln!(warn, "warning: {warning}")?;
+                    }
+                }
                 match aside {
                     // The task's preparation never completed, so its old copy goes back.
                     Some(aside) => {
@@ -600,6 +651,13 @@ fn start(
                     }
                     None => writeln!(out, "{id}: failed: {e:#}")?,
                 }
+            }
+        }
+        // The task stopped: what its cloud worker sandbox's removal said (P5 (d)).
+        for said in &stopped {
+            match said {
+                lifetime::Released::Line(line) => writeln!(out, "{line}")?,
+                lifetime::Released::Warning(warning) => writeln!(warn, "warning: {warning}")?,
             }
         }
     }
@@ -646,6 +704,10 @@ pub struct SpecOptions {
     pub worker_harness: Option<Harness>,
     pub worker_model: Option<String>,
     pub time_limit: Option<String>,
+    /// `task run`'s `--reviewer-time-limit`: every review round is part of a cloud worker
+    /// sandbox's TTL (decision 263), so the start uses the limit the review will. `task start`
+    /// has no such flag and leaves it to `[reviewer] time_limit`.
+    pub reviewer_time_limit: Option<String>,
     pub profile: Option<String>,
     /// Default: the repo's default branch on GitHub.
     pub base: Option<String>,
@@ -657,6 +719,8 @@ pub struct SpecOptions {
     pub identity: Option<Identity>,
     /// The free-space check of the sandbox drive before a sandbox is created (decision 194).
     pub disk: disk::Guard,
+    /// `--cloud` or `--local`; `None` leaves it to `[sandbox] location`.
+    pub location: Option<Location>,
 }
 
 /// Every input [`run_spec`] resolves before it does anything with the backend or writes
@@ -670,6 +734,8 @@ pub struct SpecOptions {
 /// was pending (decision 184).
 pub(crate) struct SpecStart {
     pub config: TaskConfig,
+    /// Where the task runs: the flag, else the config (decision 262(k)).
+    pub location: Location,
     pub repo_name: String,
     pub identity: Identity,
     pub base_branch: String,
@@ -692,6 +758,10 @@ pub(crate) fn resolve_spec_start(opts: &SpecOptions) -> Result<SpecStart> {
     }
     if let Some(limit) = &opts.time_limit {
         config.worker.time_limit = parse_duration("--time-limit", limit).map_err(|e| anyhow!(e))?;
+    }
+    if let Some(limit) = &opts.reviewer_time_limit {
+        config.reviewer.time_limit =
+            parse_duration("--reviewer-time-limit", limit).map_err(|e| anyhow!(e))?;
     }
     if let Some(profile) = &opts.profile {
         config.sandbox.profile = profile.clone();
@@ -728,8 +798,10 @@ pub(crate) fn resolve_spec_start(opts: &SpecOptions) -> Result<SpecStart> {
         .clone_source
         .clone()
         .unwrap_or_else(|| format!("https://github.com/{repo_name}.git"));
+    let location = pipeline::choose_location(opts.location, &config);
     Ok(SpecStart {
         config,
+        location,
         repo_name,
         identity,
         base_branch,
@@ -752,8 +824,67 @@ pub fn run_spec(
     out: &mut dyn Write,
     warn: &mut dyn Write,
 ) -> Result<()> {
+    run_spec_with_sleep(
+        config_dir,
+        opts,
+        backend,
+        github,
+        probe,
+        out,
+        warn,
+        &std::thread::sleep,
+    )
+}
+
+/// Like [`run_spec`], with `sleep` called for each wait between a cloud sandbox's removal retries
+/// instead of really sleeping: a seam for testing them (P6 (a)), as `commands::run::
+/// run_with_sleep` is for Jev's.
+#[allow(clippy::too_many_arguments)]
+pub fn run_spec_with_sleep(
+    config_dir: &std::path::Path,
+    opts: &SpecOptions,
+    backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+    sleep: &(dyn Fn(std::time::Duration) + Sync),
+) -> Result<()> {
+    run_spec_with_seams(
+        config_dir,
+        opts,
+        backend,
+        github,
+        probe,
+        out,
+        warn,
+        sleep,
+        &[],
+    )
+}
+
+/// [`run_spec_with_sleep`], with the task's `scoped_secrets` as well (milestone 4 slice 4,
+/// decision 256): set scoped to the cloud sandbox before its create and removed after it. Empty
+/// in production, where P8 (a) refuses every profile secret but the provider logins; a test fills
+/// it with a fake value. No config key or flag reads one.
+#[allow(clippy::too_many_arguments)]
+pub fn run_spec_with_seams(
+    config_dir: &std::path::Path,
+    opts: &SpecOptions,
+    backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+    sleep: &(dyn Fn(std::time::Duration) + Sync),
+    scoped_secrets: &[ScopedSecret],
+) -> Result<()> {
     let start = resolve_spec_start(opts)?;
-    disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?;
+    // A cloud sandbox doesn't use the drive holding `sbx`'s local sandbox state (P11, decision
+    // 262(h)); `--ignore-disk` is still accepted there and does nothing more.
+    if start.location == Location::Local {
+        disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?;
+    }
     run_spec_from(
         config_dir,
         opts,
@@ -764,6 +895,8 @@ pub fn run_spec(
         out,
         warn,
         &|_| {},
+        sleep,
+        scoped_secrets,
     )
 }
 
@@ -784,9 +917,12 @@ pub(crate) fn run_spec_from(
     out: &mut dyn Write,
     warn: &mut dyn Write,
     on_prepared: &dyn Fn(&str),
+    sleep: &(dyn Fn(std::time::Duration) + Sync),
+    scoped_secrets: &[ScopedSecret],
 ) -> Result<()> {
     let SpecStart {
         config,
+        location,
         repo_name,
         identity,
         base_branch,
@@ -799,6 +935,8 @@ pub(crate) fn run_spec_from(
         writeln!(warn, "warning: {warning}")?;
     }
 
+    // The task's sandboxes run where it was started (decision 253).
+    let backend = backend.located(location);
     let ctx = Ctx {
         config_dir,
         repo: &repo_name,
@@ -810,97 +948,159 @@ pub(crate) fn run_spec_from(
         identity: &identity,
         probe,
         host: &ShellHostRunner,
+        sleep,
+        scoped_secrets,
     };
     writeln!(out, "Starting a task from {} ...", opts.spec.display())?;
-    let mut prepared =
-        pipeline::prepare_spec_resolved(&ctx, &opts.spec, &source_text, &spec_id, &title)?;
+    let prepared =
+        pipeline::prepare_spec_resolved(&ctx, &opts.spec, &source_text, &spec_id, &title, location);
+    let mut prepared = match prepared {
+        Ok(prepared) => prepared,
+        Err(e) => {
+            // A failure after the cloud create still shows the create and the removal, or the
+            // warning of a removal that failed and kept the task's folder, so `run.log` has them
+            // (decision 265, review M-1). Best-effort writes: the start's own error is the
+            // outcome, and a failed write must not hide it. `on_prepared` isn't called: the
+            // caller puts a `--restart`'s old task back, which a kept record refuses to
+            // overwrite, naming where the old task is still set aside.
+            if let Some(after) = e.downcast_ref::<pipeline::FailedAfterCreate>() {
+                for event in &after.events {
+                    let _ = writeln!(out, "{event}");
+                }
+                if let Some(why) = &after.kept {
+                    let _ = writeln!(warn, "warning: {why}");
+                }
+                for warning in &after.warnings {
+                    let _ = writeln!(warn, "warning: {warning}");
+                }
+            }
+            return Err(e);
+        }
+    };
     let id = prepared.record.id.clone();
     on_prepared(&id);
-    for warning in &prepared.warnings {
-        writeln!(warn, "warning: {warning}")?;
-    }
 
-    let worked = pipeline::run_worker(&ctx, &mut prepared)?;
-    let (label, bad) = match &worked.status {
-        RunStatus::Completed => ("completed".to_owned(), false),
-        RunStatus::TimedOut => ("timed out".to_owned(), false),
-        RunStatus::Failed(why) => (format!("failed: {why}"), true),
-    };
-    writeln!(out, "{id}: worker {label}, {} commit(s)", worked.commits)?;
-    for note in &worked.notes {
-        writeln!(out, "  note: {note}")?;
-    }
-    if bad {
-        bail!(
-            "{id}: the worker failed; see `sbxm task status` and the task's folder for what it left"
-        );
-    }
+    // Everything after the preparation; the task stops wherever this fails, except at gates that
+    // ran and failed, which hand over to the review (decision 180), as passing gates do.
+    let outcome = (|| -> Result<()> {
+        for warning in &prepared.warnings {
+            writeln!(warn, "warning: {warning}")?;
+        }
+        for event in &prepared.events {
+            writeln!(out, "{event}")?;
+        }
+        let worked = pipeline::run_worker(&ctx, &mut prepared)?;
+        let (label, bad) = match &worked.status {
+            RunStatus::Completed => ("completed".to_owned(), false),
+            // A timed-out cloud worker stops the task, keeping its partial commits (slice 3 of
+            // milestone 4, behavior 2): its sandbox isn't kept running for a review. A local one
+            // still hands over as before.
+            RunStatus::TimedOut => ("timed out".to_owned(), location == Location::Cloud),
+            RunStatus::Failed(why) => (format!("failed: {why}"), true),
+        };
+        writeln!(out, "{id}: worker {label}, {} commit(s)", worked.commits)?;
+        for note in &worked.notes {
+            writeln!(out, "  note: {note}")?;
+        }
+        if bad {
+            bail!(
+                "{id}: the worker {label}; see `sbxm task status` and the task's folder for what it left"
+            );
+        }
 
-    let gated = pipeline::run_gates(
-        &ctx.env(),
-        &mut prepared,
-        "after-worker",
-        pipeline::Tiers::ALL,
-    )?;
-    if gated.passed {
-        if gated.outcomes.is_empty() {
-            writeln!(out, "  gates: none configured")?;
+        let gated = pipeline::run_gates(
+            &ctx.env(),
+            &mut prepared,
+            "after-worker",
+            pipeline::Tiers::ALL,
+        )?;
+        if gated.passed {
+            if gated.outcomes.is_empty() {
+                writeln!(out, "  gates: none configured")?;
+            } else {
+                writeln!(out, "  gates: passed")?;
+            }
+            writeln!(out, "  next: sbxm task review {}", spec_flag(&opts.spec))?;
+            Ok(())
         } else {
-            writeln!(out, "  gates: passed")?;
-        }
-        writeln!(out, "  next: sbxm task review {}", spec_flag(&opts.spec))?;
-        Ok(())
-    } else {
-        let first = gated
-            .failed
-            .clone()
-            .expect("failed gates name the first failure");
-        // A gate that could not run at all gives the review nothing to react to, so it is not
-        // named as the next step (issue 186).
-        match gated.failed_outcome().filter(|o| o.could_not_run) {
-            Some(outcome) => {
-                writeln!(
-                    out,
-                    "  gates: could not run: `{}` ({}); {}",
-                    first.command, first.tier, outcome.output_tail
-                )?;
-                bail!(
-                    "{id}: gates could not run: `{}` ({}); {}",
-                    first.command,
-                    first.tier,
-                    outcome.output_tail
-                )
+            let first = gated
+                .failed
+                .clone()
+                .expect("failed gates name the first failure");
+            // A gate that could not run at all gives the review nothing to react to, so it is not
+            // named as the next step (issue 186).
+            match gated.failed_outcome().filter(|o| o.could_not_run) {
+                Some(outcome) => {
+                    writeln!(
+                        out,
+                        "  gates: could not run: `{}` ({}); {}",
+                        first.command, first.tier, outcome.output_tail
+                    )?;
+                    bail!(
+                        "{id}: gates could not run: `{}` ({}); {}",
+                        first.command,
+                        first.tier,
+                        outcome.output_tail
+                    )
+                }
+                None => {
+                    let exit = first
+                        .exit
+                        .map_or_else(|| "no exit code".to_owned(), |c| format!("exit {c}"));
+                    writeln!(
+                        out,
+                        "  gates: failed: `{}` ({}, {exit})",
+                        first.command, first.tier
+                    )?;
+                    writeln!(
+                        out,
+                        "  next: sbxm task review {} (it reruns the gates and gives a failure to a \
+                         fix round)",
+                        spec_flag(&opts.spec)
+                    )?;
+                    // A gate that ran and failed goes on to the review, which reruns it and gives a
+                    // failure to a fix round (decision 180): `task run --spec` catches this typed
+                    // error to tell it apart from any other failure, the same way it does for
+                    // `--issue` (`GatesFailed`, defined above for the issue path).
+                    Err(GatesFailed(format!(
+                        "{id}: gates failed: `{}` ({}, {exit}); next: sbxm task review {} (it reruns \
+                         the gates and gives a failure to a fix round)",
+                        first.command,
+                        first.tier,
+                        spec_flag(&opts.spec)
+                    ))
+                    .into())
+                }
             }
-            None => {
-                let exit = first
-                    .exit
-                    .map_or_else(|| "no exit code".to_owned(), |c| format!("exit {c}"));
-                writeln!(
-                    out,
-                    "  gates: failed: `{}` ({}, {exit})",
-                    first.command, first.tier
-                )?;
-                writeln!(
-                    out,
-                    "  next: sbxm task review {} (it reruns the gates and gives a failure to a \
-                     fix round)",
-                    spec_flag(&opts.spec)
-                )?;
-                // A gate that ran and failed goes on to the review, which reruns it and gives a
-                // failure to a fix round (decision 180): `task run --spec` catches this typed
-                // error to tell it apart from any other failure, the same way it does for
-                // `--issue` (`GatesFailed`, defined above for the issue path).
-                Err(GatesFailed(format!(
-                    "{id}: gates failed: `{}` ({}, {exit}); next: sbxm task review {} (it reruns \
-                     the gates and gives a failure to a fix round)",
-                    first.command,
-                    first.tier,
-                    spec_flag(&opts.spec)
-                ))
-                .into())
+        }
+    })();
+    let hands_over = match &outcome {
+        Ok(()) => true,
+        Err(e) => e.is::<GatesFailed>(),
+    };
+    if !hands_over {
+        // The task stopped: its cloud worker sandbox goes now (P5 (d)), then its scoped secrets
+        // (slice 4). What the screen gets can't change the outcome, which is the command's own
+        // error.
+        let stopped = lifetime::release_worker(
+            ctx.backend,
+            &prepared.meta,
+            &mut prepared.record,
+            sleep,
+            scoped_secrets,
+        );
+        for said in stopped.all() {
+            match said {
+                lifetime::Released::Line(line) => {
+                    let _ = writeln!(out, "{line}");
+                }
+                lifetime::Released::Warning(warning) => {
+                    let _ = writeln!(warn, "warning: {warning}");
+                }
             }
         }
     }
+    outcome
 }
 
 #[cfg(test)]

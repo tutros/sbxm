@@ -279,6 +279,13 @@ pub enum TaskCommand {
         /// min_free_disk free.
         #[arg(long)]
         ignore_disk: bool,
+        /// Run the task's sandboxes in Docker Cloud Sandboxes (default: [sandbox] location in
+        /// sbxm-task.toml, else here). The task remembers where it runs.
+        #[arg(long, conflicts_with = "local")]
+        cloud: bool,
+        /// Run the task's sandboxes on this machine, whatever [sandbox] location says.
+        #[arg(long)]
+        local: bool,
     },
     /// Review a task: gates, an independent reviewer in its own sandbox, at most one fix round by
     /// the worker, gates and a second review; ends ready. Blocks until it is done.
@@ -316,6 +323,14 @@ pub enum TaskCommand {
         /// The sandbox profile (default: sbxm-task.toml).
         #[arg(long)]
         profile: Option<String>,
+        /// Review the pull request's sandboxes in Docker Cloud Sandboxes (default: [sandbox]
+        /// location in sbxm-task.toml, else here). A task under review already runs where its
+        /// task.json says.
+        #[arg(long, conflicts_with_all = ["local", "issue", "spec"])]
+        cloud: bool,
+        /// Review the pull request on this machine, whatever [sandbox] location says.
+        #[arg(long, conflicts_with_all = ["issue", "spec"])]
+        local: bool,
         /// Review the pull request even though its head is already reviewed: the commit a local
         /// issue task's in-task review covered (posted by `task finish` as the PR's review), or
         /// the commit the PR task's own last review covered.
@@ -345,6 +360,11 @@ pub enum TaskCommand {
         /// min_free_disk free.
         #[arg(long)]
         ignore_disk: bool,
+        /// Drop a cloud sandbox whose create was started but never heard back from (sbxm can't
+        /// tell whether it made it) from the task's record, touching nothing in the cloud, then
+        /// resume; remove or keep that sandbox by hand first (decision 268).
+        #[arg(long)]
+        forget_ambiguous: bool,
     },
     /// Run a task's gates now (the checks that decide whether its work may go on), or with
     /// --dry-run say what would run and where.
@@ -428,6 +448,13 @@ pub enum TaskCommand {
         /// min_free_disk free.
         #[arg(long)]
         ignore_disk: bool,
+        /// Run the tasks' sandboxes in Docker Cloud Sandboxes (default: [sandbox] location in
+        /// sbxm-task.toml, else here). Each task remembers where it runs.
+        #[arg(long, conflicts_with = "local")]
+        cloud: bool,
+        /// Run the tasks' sandboxes on this machine, whatever [sandbox] location says.
+        #[arg(long)]
+        local: bool,
     },
     /// Publish a ready task: an issue's task pushes its branch and opens its PR (`Fixes #N`, with
     /// the result and the review in the body); a spec task goes to its `[finish] sink` (the
@@ -476,6 +503,11 @@ pub enum TaskCommand {
         /// Delete a spec task's result even though it was never fetched out of its repo.git.
         #[arg(long, conflicts_with = "merged")]
         force: bool,
+        /// Drop a cloud sandbox whose create was started but never heard back from (sbxm can't
+        /// tell whether it made it) from the task's record, touching nothing in the cloud for
+        /// it, then remove the task; look at and remove that sandbox by hand (decision 268).
+        #[arg(long)]
+        forget_ambiguous: bool,
         /// With --merged: list what would be removed and why, and remove nothing.
         #[arg(long)]
         dry_run: bool,
@@ -566,6 +598,16 @@ pub fn run_target_order(matches: &clap::ArgMatches) -> Vec<RunTarget> {
     }
     targets.sort_by_key(|(i, _)| *i);
     targets.into_iter().map(|(_, target)| target).collect()
+}
+
+/// `--cloud` or `--local` as the location a flag chose, `None` for neither (clap refuses both).
+pub fn location_flag(cloud: bool, local: bool) -> Option<crate::backend::Location> {
+    use crate::backend::Location;
+    match (cloud, local) {
+        (true, _) => Some(Location::Cloud),
+        (_, true) => Some(Location::Local),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

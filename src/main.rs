@@ -129,11 +129,11 @@ fn main() -> anyhow::Result<()> {
                 disk: sbxm::disk::Guard::real(ignore_disk),
                 ..Default::default()
             },
-            &SbxBackend,
+            &SbxBackend::LOCAL,
             &mut std::io::stderr(),
         ),
         Command::List { json } => {
-            let entries = commands::list::entries(&config::config_dir()?, &SbxBackend)?;
+            let entries = commands::list::entries(&config::config_dir()?, &SbxBackend::LOCAL)?;
             let render = if json {
                 commands::list::render_json
             } else {
@@ -155,12 +155,15 @@ fn main() -> anyhow::Result<()> {
                 harness,
                 disk: sbxm::disk::Guard::real(ignore_disk),
             },
-            &SbxBackend,
+            &SbxBackend::LOCAL,
             &mut std::io::stderr(),
         ),
-        Command::Stop { project, harness } => {
-            commands::stop::run(&config::config_dir()?, &project, harness, &SbxBackend)
-        }
+        Command::Stop { project, harness } => commands::stop::run(
+            &config::config_dir()?,
+            &project,
+            harness,
+            &SbxBackend::LOCAL,
+        ),
         Command::Rm {
             project,
             purge,
@@ -174,13 +177,13 @@ fn main() -> anyhow::Result<()> {
                 yes,
                 harness: harness.unwrap_or_default(),
             },
-            &SbxBackend,
+            &SbxBackend::LOCAL,
             &Terminal,
         ),
         Command::Doctor => {
             let report = commands::doctor::run(
                 &config::config_dir()?,
-                &SbxBackend,
+                &SbxBackend::LOCAL,
                 &commands::doctor::Host::real(),
             );
             print!("{}", report.render());
@@ -210,7 +213,7 @@ fn main() -> anyhow::Result<()> {
                 &config::config_dir()?,
                 &config_path,
                 &sbxm::disk::Guard::real(ignore_disk),
-                &SbxBackend,
+                &SbxBackend::LOCAL,
                 &mut std::io::stdout(),
                 &mut std::io::stderr(),
             )?;
@@ -306,6 +309,8 @@ fn main() -> anyhow::Result<()> {
                     yes: _,
                     spec: Some(spec),
                     ignore_disk,
+                    cloud,
+                    local,
                 },
         } => {
             let ids = task::record::spec_id(&spec)
@@ -321,14 +326,16 @@ fn main() -> anyhow::Result<()> {
                         worker_harness,
                         worker_model,
                         time_limit,
+                        reviewer_time_limit: None,
                         profile,
                         base,
                         repo,
                         clone_source: None,
                         identity: None,
                         disk: sbxm::disk::Guard::real(ignore_disk),
+                        location: sbxm::cli::location_flag(cloud, local),
                     },
-                    &SbxBackend,
+                    &SbxBackend::LOCAL,
                     &sbxm::github::gh::GhBackend::default(),
                     &task::record::SystemProbe,
                     &mut out,
@@ -352,6 +359,8 @@ fn main() -> anyhow::Result<()> {
                     yes,
                     spec: None,
                     ignore_disk,
+                    cloud,
+                    local,
                 },
         } => {
             let ids = issues.iter().map(|n| format!("issue-{n}")).collect();
@@ -366,18 +375,20 @@ fn main() -> anyhow::Result<()> {
                         worker_harness,
                         worker_model,
                         time_limit,
+                        reviewer_time_limit: None,
                         profile,
                         base,
                         repo,
                         clone_source: None,
                         identity: None,
                         disk: sbxm::disk::Guard::real(ignore_disk),
+                        location: sbxm::cli::location_flag(cloud, local),
                     },
                     restart.then_some(&commands::task_start::Restart {
                         confirm: &Terminal,
                         yes,
                     }),
-                    &SbxBackend,
+                    &SbxBackend::LOCAL,
                     &sbxm::github::gh::GhBackend::default(),
                     &task::record::SystemProbe,
                     &mut out,
@@ -407,8 +418,9 @@ fn main() -> anyhow::Result<()> {
                             GateTier::All => task::pipeline::Tiers::ALL,
                         },
                         dry_run,
+                        identity: None,
                     },
-                    &SbxBackend,
+                    &SbxBackend::LOCAL,
                     &task::record::SystemProbe,
                     &task::gates::ShellHostRunner,
                     &mut out,
@@ -489,6 +501,8 @@ fn main() -> anyhow::Result<()> {
                     profile,
                     force,
                     ignore_disk,
+                    cloud,
+                    local,
                 },
         } => {
             let target = match (issue, pr, spec) {
@@ -523,8 +537,10 @@ fn main() -> anyhow::Result<()> {
                         resolved_spec_id: None,
                         force,
                         disk: sbxm::disk::Guard::real(ignore_disk),
+                        location: sbxm::cli::location_flag(cloud, local),
+                        identity: None,
                     },
-                    &SbxBackend,
+                    &SbxBackend::LOCAL,
                     &sbxm::github::gh::GhBackend::default(),
                     &task::record::SystemProbe,
                     &task::gates::ShellHostRunner,
@@ -541,6 +557,7 @@ fn main() -> anyhow::Result<()> {
                     spec,
                     rounds,
                     ignore_disk,
+                    forget_ambiguous,
                 },
         } => {
             let target = match (issue, spec) {
@@ -563,8 +580,10 @@ fn main() -> anyhow::Result<()> {
                         target,
                         rounds,
                         disk: sbxm::disk::Guard::real(ignore_disk),
+                        identity: None,
+                        forget_ambiguous,
                     },
-                    &SbxBackend,
+                    &SbxBackend::LOCAL,
                     &task::record::SystemProbe,
                     &task::gates::ShellHostRunner,
                     &mut out,
@@ -590,6 +609,8 @@ fn main() -> anyhow::Result<()> {
                     restart,
                     yes,
                     ignore_disk,
+                    cloud,
+                    local,
                 },
         } => {
             let targets: Vec<commands::task_run::Target> = sbxm::cli::run_target_order(&matches)
@@ -626,13 +647,14 @@ fn main() -> anyhow::Result<()> {
                         clone_source: None,
                         identity: None,
                         disk: sbxm::disk::Guard::real(ignore_disk),
+                        location: sbxm::cli::location_flag(cloud, local),
                     },
                     &targets,
                     restart.then_some(&commands::task_start::Restart {
                         confirm: &Terminal,
                         yes,
                     }),
-                    &SbxBackend,
+                    &SbxBackend::LOCAL,
                     &sbxm::github::gh::GhBackend::default(),
                     &task::record::SystemProbe,
                     &task::gates::ShellHostRunner,
@@ -670,6 +692,7 @@ fn main() -> anyhow::Result<()> {
                         repo_root: std::env::current_dir()?,
                         push_unresolved,
                     },
+                    &SbxBackend::LOCAL,
                     &sbxm::github::gh::GhBackend::default(),
                     &task::record::SystemProbe,
                     &mut out,
@@ -687,6 +710,7 @@ fn main() -> anyhow::Result<()> {
                     yes,
                     force,
                     dry_run,
+                    forget_ambiguous,
                 },
         } => {
             let target = match (issue, pr, spec, merged) {
@@ -717,8 +741,9 @@ fn main() -> anyhow::Result<()> {
                         force,
                         repo_root: std::env::current_dir()?,
                         dry_run,
+                        forget_ambiguous,
                     },
-                    &SbxBackend,
+                    &SbxBackend::LOCAL,
                     &sbxm::github::gh::GhBackend::default(),
                     &task::record::SystemProbe,
                     &Terminal,
@@ -769,7 +794,7 @@ fn main() -> anyhow::Result<()> {
                 now: None,
                 warm,
             },
-            &SbxBackend,
+            &SbxBackend::LOCAL,
             &sbxm::task::record::SystemProbe,
             &mut std::io::stdout(),
             &mut std::io::stderr(),
@@ -779,7 +804,7 @@ fn main() -> anyhow::Result<()> {
         } => commands::template_ls::run(
             &config::config_dir()?,
             &commands::template_ls::Options::default(),
-            &SbxBackend,
+            &SbxBackend::LOCAL,
             &mut std::io::stdout(),
         ),
         Command::Template {
@@ -787,7 +812,7 @@ fn main() -> anyhow::Result<()> {
         } => commands::template_rm::run(
             &config::config_dir()?,
             &commands::template_rm::Options { profile, harness },
-            &SbxBackend,
+            &SbxBackend::LOCAL,
             &mut std::io::stdout(),
         ),
         Command::Config {
@@ -830,7 +855,7 @@ fn main() -> anyhow::Result<()> {
             let watch = watch.then(|| std::time::Duration::from_secs(interval.unwrap_or(2)));
             commands::status::run(
                 &global.base_dir,
-                &SbxBackend,
+                &SbxBackend::LOCAL,
                 &task::record::SystemProbe,
                 &env,
                 watch,

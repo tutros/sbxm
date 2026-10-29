@@ -45,13 +45,14 @@ fn creates_a_pi_sandbox_from_the_pinned_kit() {
         vec![CreateSpec {
             name: "sbxm-demo-pi".into(),
             agent: "docker.io/sbx/pi-kit:20260924-d058fedc156325f87612d9bcd9bd313ab74ba100".into(),
-            workspace: env.base_dir().join("demo"),
+            workspace: Some(env.base_dir().join("demo")),
             cpus: 4,
             memory: "8g".into(),
             skills: SkillsStore::ReadOnly,
             kits: vec![env.kit_dir("demo"), pi_kit_dir(&env)],
             template: None,
             deny_network: Vec::new(),
+            ttl: None,
         }]
     );
     insta::assert_snapshot!(

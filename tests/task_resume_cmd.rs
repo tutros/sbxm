@@ -68,6 +68,8 @@ fn options(f: &Fixture, rounds: Option<u32>) -> Options {
         target: Target::Issue(41),
         rounds,
         disk: Default::default(),
+        identity: None,
+        forget_ambiguous: false,
     }
 }
 
@@ -146,6 +148,9 @@ fn rounds_says_how_many_rounds_the_task_now_has_and_a_new_stop_names_rounds_agai
         backend: &first,
         probe: &Gone,
         host: &FakeHostRunner::default(),
+        sleep: &std::thread::sleep,
+        scoped_secrets: &[],
+        identity: None,
     };
     sbxm::task::pipeline::review_issue(&env, &mut prepared).unwrap();
     let backend = backend(&f, &[ONE]);
@@ -289,6 +294,9 @@ fn stopped(f: &Fixture) {
         backend: &first,
         probe: &Gone,
         host: &FakeHostRunner::default(),
+        sleep: &std::thread::sleep,
+        scoped_secrets: &[],
+        identity: None,
     };
     sbxm::task::pipeline::review_issue(&env, &mut prepared).unwrap();
 }
@@ -346,6 +354,9 @@ fn gates_that_cannot_run_fail_the_resume_with_the_reason_and_no_further_round() 
         backend: &first,
         probe: &Gone,
         host: &FakeHostRunner::default(),
+        sleep: &std::thread::sleep,
+        scoped_secrets: &[],
+        identity: None,
     };
     sbxm::task::pipeline::review_issue(&env, &mut prepared).unwrap();
     let red = backend(&f, &[CLEAN]).with_failing_exec_matching("cargo test");

@@ -103,7 +103,7 @@ fn sh(backend: &SbxBackend, sandbox: &str, command: &str) -> String {
 #[test]
 #[ignore = "needs a logged-in sbx 0.46.0+ and SBXM_REAL_BASE_DIR"]
 fn scoped_custom_secret_swaps_the_placeholder_in_the_header_only() {
-    let backend = SbxBackend;
+    let backend = SbxBackend::LOCAL;
     let base = real_base_dir();
     let name = format!("sbxm-it-{}-jev", std::process::id());
     let sandbox = format!("sbxm-{name}");
@@ -143,13 +143,14 @@ fn scoped_custom_secret_swaps_the_placeholder_in_the_header_only() {
         .create(&CreateSpec {
             name: sandbox.clone(),
             agent: jev::AGENT.into(),
-            workspace: workspace.clone(),
+            workspace: Some(workspace.clone()),
             cpus: 2,
             memory: "2g".into(),
             skills: SkillsStore::Off,
             kits: vec![kit_dir],
             template: None,
             deny_network: vec![],
+            ttl: None,
         })
         .unwrap();
 
@@ -206,7 +207,7 @@ fn live_jev_call() {
         eprintln!("SBXM_TEST_JEV_TOKEN_COMMAND is not set; skipping the live Jev call");
         return;
     };
-    let backend = SbxBackend;
+    let backend = SbxBackend::LOCAL;
     let base = real_base_dir();
     let roots: RunRoots = id::reserve(&base).unwrap();
     let (sandbox, placeholder) = jev::names(&roots.id, 0);

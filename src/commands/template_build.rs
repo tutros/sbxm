@@ -509,13 +509,14 @@ impl Build {
         backend.create(&CreateSpec {
             name: self.sandbox.clone(),
             agent: harness.agent_arg().into(),
-            workspace: self.workspace.clone(),
+            workspace: Some(self.workspace.clone()),
             cpus: config.resources.cpus,
             memory: config.resources.memory.clone(),
             skills: profile.skills_store,
             kits: kits.into_iter().map(|(dir, _)| dir).collect(),
             template: None,
             deny_network: Vec::new(),
+            ttl: None,
         })?;
         if let Some(warm) = &self.warm {
             self.warm_up(warm, backend, warn)?;
