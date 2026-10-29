@@ -915,6 +915,57 @@ fn antigravity_sandbox_against_real_sbx() {
         "REAL TEST CANARY: the word is QUINCE-7"
     );
 
+    // Issue 287: the headless command drops `sbx`'s `mcp-gateway` entry and
+    // keeps every other server. `agy --version` stands in for the prompt run.
+    let mcp_config = "/home/agent/.gemini/config/mcp_config.json";
+    let read_mcp_config = || -> serde_json::Value {
+        let out = Command::new("sbx")
+            .args(["exec", &sandbox, "cat", mcp_config])
+            .output()
+            .unwrap();
+        serde_json::from_slice(&out.stdout).expect("mcp_config.json is JSON")
+    };
+    assert!(
+        read_mcp_config()["mcpServers"]["mcp-gateway"].is_object(),
+        "sbx wrote the gateway entry at create (S16)"
+    );
+    let add_server = Command::new("sbx")
+        .args([
+            "exec",
+            &sandbox,
+            "sh",
+            "-c",
+            r#"jq "$1" "$0" > "$0.t" && mv "$0.t" "$0""#,
+            mcp_config,
+            r#".mcpServers.mine = {"command": "true"}"#,
+        ])
+        .status()
+        .unwrap();
+    assert!(add_server.success());
+    let mut wrapped = agy
+        .headless_argv(
+            "unused",
+            &HeadlessOpts {
+                model: None,
+                high_effort: false,
+                budget_usd: None,
+                is_git_repo: false,
+            },
+        )
+        .unwrap();
+    let agy_at = wrapped.iter().position(|a| a == "agy").unwrap();
+    wrapped.truncate(agy_at + 1);
+    wrapped.push("--version".to_owned());
+    let version = Command::new("sbx")
+        .arg("exec")
+        .arg(&sandbox)
+        .args(&wrapped)
+        .output()
+        .unwrap();
+    assert!(version.status.success(), "{version:?}");
+    let servers = read_mcp_config()["mcpServers"].clone();
+    assert_eq!(servers, serde_json::json!({"mine": {"command": "true"}}));
+
     // Nobody signed in to this fresh sandbox, so `agy -p` fails at auth. The
     // primitive reports that as `Failed`, not an error and not a timeout.
     let workspace = base_dir.join(&project);

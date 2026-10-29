@@ -57,6 +57,10 @@ fn argv_always_passes_the_model() {
         .unwrap();
     insta::assert_debug_snapshot!(argv, @r#"
     [
+        "sh",
+        "-c",
+        "f=\"$HOME/.gemini/config/mcp_config.json\"; if [ -f \"$f\" ] && jq -e '.mcpServers | has(\"mcp-gateway\")' \"$f\" >/dev/null 2>&1; then t=\"$f.sbxm-tmp.$$\"; if jq 'del(.mcpServers[\"mcp-gateway\"])' \"$f\" >\"$t\" 2>/dev/null; then mv -f \"$t\" \"$f\" 2>/dev/null || rm -f \"$t\"; else rm -f \"$t\"; fi; fi; exec \"$@\"",
+        "sh",
         "agy",
         "-p",
         "do it",
@@ -135,6 +139,10 @@ fn run_wraps_the_command_in_an_in_sandbox_timeout() {
             "-v",
             "--kill-after=10",
             "600",
+            "sh",
+            "-c",
+            "f=\"$HOME/.gemini/config/mcp_config.json\"; if [ -f \"$f\" ] && jq -e '.mcpServers | has(\"mcp-gateway\")' \"$f\" >/dev/null 2>&1; then t=\"$f.sbxm-tmp.$$\"; if jq 'del(.mcpServers[\"mcp-gateway\"])' \"$f\" >\"$t\" 2>/dev/null; then mv -f \"$t\" \"$f\" 2>/dev/null || rm -f \"$t\"; else rm -f \"$t\"; fi; fi; exec \"$@\"",
+            "sh",
             "agy",
             "-p",
             "Reply with exactly: PONG",

@@ -24,6 +24,14 @@ pub enum Harness {
 /// allows `docker.io/` by default, so no `kit.allowedSources` change is needed.
 const PI_KIT: &str = "docker.io/sbx/pi-kit:20260924-d058fedc156325f87612d9bcd9bd313ab74ba100";
 
+/// Removes `sbx`'s `mcp-gateway` entry from Antigravity's MCP config, then
+/// `exec`s the command given as its arguments (issue 287). `agy` waits for
+/// that server on every turn and never connects, and `sbx` writes the entry
+/// back whenever the sandbox starts, so the removal runs in the same `sbx exec`
+/// as `agy`. Every other server stays; a missing file, a file without the
+/// entry, or one `jq` can't read is left as it is, and the command runs anyway.
+const DROP_MCP_GATEWAY: &str = r#"f="$HOME/.gemini/config/mcp_config.json"; if [ -f "$f" ] && jq -e '.mcpServers | has("mcp-gateway")' "$f" >/dev/null 2>&1; then t="$f.sbxm-tmp.$$"; if jq 'del(.mcpServers["mcp-gateway"])' "$f" >"$t" 2>/dev/null; then mv -f "$t" "$f" 2>/dev/null || rm -f "$t"; else rm -f "$t"; fi; fi; exec "$@""#;
+
 /// The Antigravity kit on Docker Hub, pinned to an immutable tag (decision
 /// 104; the same image as `latest` on 2026-09-28, looked up 2026-09-29).
 const ANTIGRAVITY_KIT: &str =
@@ -103,7 +111,10 @@ impl Harness {
                 argv
             }
             Harness::Antigravity => {
-                let mut argv: Vec<String> = ["agy", "-p", prompt].map(str::to_owned).into();
+                let mut argv: Vec<String> =
+                    ["sh", "-c", DROP_MCP_GATEWAY, "sh", "agy", "-p", prompt]
+                        .map(str::to_owned)
+                        .into();
                 argv.extend(model_flag("--model"));
                 argv.extend(
                     [
