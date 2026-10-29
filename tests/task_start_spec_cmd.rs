@@ -353,3 +353,30 @@ fn a_low_sandbox_drive_refuses_before_anything_is_written() {
     assert!(backend.log().is_empty(), "{:?}", backend.log());
     assert!(!record::task_dir(&f.env.base_dir(), &id).exists());
 }
+
+/// Issue 314, boundary case 3: a blank `--worker-model` is refused before anything is created.
+#[test]
+fn an_empty_or_blank_worker_model_flag_is_refused_before_anything_happens() {
+    for bad in ["", "  "] {
+        let f = fixture();
+        let spec = spec_file(&f, "Build a thing.\n");
+        let (id, _) = record::spec_id(&spec).unwrap();
+        let backend = playing(&f, &id);
+        let github = FakeGitHub::default();
+        let mut opts = options(&f, spec);
+        opts.worker_model = Some(bad.into());
+
+        let message = format!(
+            "{:#}",
+            run(&f, &opts, &backend, &github).result.unwrap_err()
+        );
+
+        assert!(message.contains("--worker-model"), "{bad:?}: {message}");
+        assert!(backend.creates().is_empty(), "{bad:?}");
+        assert_eq!(backend.secret_service_calls(), 0, "{bad:?}");
+        assert!(
+            !record::task_dir(&f.env.base_dir(), &id).exists(),
+            "{bad:?}"
+        );
+    }
+}

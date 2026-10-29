@@ -1208,3 +1208,25 @@ fn the_review_after_the_worker_reads_the_drive_once_so_its_refusal_names_task_re
     assert_eq!(READS.load(Ordering::SeqCst), 2);
     assert_eq!(b.creates().len(), 2, "{:?}", b.log());
 }
+
+/// Issue 314, boundary case 3: a blank `--worker-model` is refused before anything is created.
+#[test]
+fn an_empty_or_blank_worker_model_flag_is_refused_before_anything_happens() {
+    for bad in ["", "  "] {
+        let f = config();
+        let s = spec(&f);
+        let id = id_of(&s);
+        let b = backend_for(&f, &id, &[CLEAN_REVIEW]);
+        let mut opts = options(&f, s);
+        opts.worker_model = Some(bad.into());
+        let gh = FakeGitHub::default();
+
+        let out = go(&f, &opts, None, &b, &gh);
+
+        let message = format!("{:#}", out.result.unwrap_err());
+        assert!(message.contains("--worker-model"), "{bad:?}: {message}");
+        assert!(b.creates().is_empty(), "{bad:?}");
+        assert_eq!(b.secret_service_calls(), 0, "{bad:?}");
+        assert!(gh.calls().is_empty(), "{bad:?}");
+    }
+}
