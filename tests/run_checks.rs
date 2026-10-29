@@ -450,7 +450,7 @@ fn the_run_summary_counts_passed_checks_per_pair() {
     let ran = go(TWO_CHECKS, &backend);
 
     assert!(
-        ran.out.contains("contestants[0] claude/one: completed"),
+        ran.out.contains("contestants[0] claude (one): completed"),
         "{}",
         ran.out
     );

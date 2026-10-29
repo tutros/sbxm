@@ -175,7 +175,7 @@ Run 2026-09-30-abc123
 Started 2026-09-30T18:00:00Z, completed 2026-09-30T18:01:10Z
 Profile default, sbx 0.43.0, 2 contestants, repeat 2
 
-contestants[0] claude/model-a
+contestants[0] claude (model-a)
   repeat 1/2: completed (100 in, 20 out tokens, $0.0100)
     Answer:
       PONG
@@ -192,7 +192,7 @@ contestants[0] claude/model-a
     Diff: no changes
     Left out (links): linked
 
-contestants[1] codex/model-b
+contestants[1] codex (model-b)
   repeat 1/2: failed: exit code 1: boom
     Answer: (none)
     Diff: could not be captured: cannot capture the diff: gone
@@ -256,7 +256,7 @@ fn a_run_still_going_or_interrupted_says_so() {
         "{out}"
     );
     assert!(
-        out.contains("contestants[1] codex/model-b\n  repeat 1/2: no results saved"),
+        out.contains("contestants[1] codex (model-b)\n  repeat 1/2: no results saved"),
         "{out}"
     );
 }
@@ -375,7 +375,7 @@ fn a_real_run_can_be_shown_right_after_it_finishes() {
     );
     assert!(
         out.contains(
-            "contestants[0] claude/one\n  repeat 1/1: completed (27651 in, 44 out tokens, $0.0295)"
+            "contestants[0] claude (one)\n  repeat 1/1: completed (27651 in, 44 out tokens, $0.0295)"
         ),
         "{out}"
     );
@@ -404,7 +404,10 @@ fn the_cli_prints_a_saved_run() {
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.starts_with("Run 2026-09-30-abc123\n"), "{stdout}");
-    assert!(stdout.contains("contestants[1] codex/model-b"), "{stdout}");
+    assert!(
+        stdout.contains("contestants[1] codex (model-b)"),
+        "{stdout}"
+    );
     assert!(!stdout.contains("+alpha edited"));
 }
 

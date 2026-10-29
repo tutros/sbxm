@@ -65,12 +65,12 @@ fn a_run_prints_its_id_and_one_line_per_contestant() {
     let lines: Vec<&str> = ran.out.lines().collect();
     assert_eq!(lines[0], format!("Run {}", summary.run_id));
     assert!(
-        lines[1].starts_with("contestants[0] claude/one: completed"),
+        lines[1].starts_with("contestants[0] claude (one): completed"),
         "{}",
         lines[1]
     );
     assert!(
-        lines[2].starts_with("contestants[1] claude/two: completed"),
+        lines[2].starts_with("contestants[1] claude (two): completed"),
         "{}",
         lines[2]
     );
@@ -144,13 +144,13 @@ fn repeats_are_reported_per_repeat() {
     ran.result.unwrap();
     assert!(
         ran.out
-            .contains("contestants[0] claude/one repeat 1/2: completed"),
+            .contains("contestants[0] claude (one) repeat 1/2: completed"),
         "{}",
         ran.out
     );
     assert!(
         ran.out
-            .contains("contestants[1] claude/two repeat 2/2: completed"),
+            .contains("contestants[1] claude (two) repeat 2/2: completed"),
         "{}",
         ran.out
     );
@@ -173,7 +173,7 @@ fn a_failed_command_is_reported_with_its_reason_and_the_run_still_succeeds() {
 
     ran.result.unwrap();
     assert!(
-        ran.out.contains("contestants[0] claude/one: failed:"),
+        ran.out.contains("contestants[0] claude (one): failed:"),
         "{}",
         ran.out
     );
@@ -195,7 +195,7 @@ fn a_timeout_is_labelled_and_keeps_the_partial_output_note() {
     ran.result.unwrap();
     assert!(
         ran.out
-            .contains("contestants[0] claude/one: timed out (partial output kept)"),
+            .contains("contestants[0] claude (one): timed out (partial output kept)"),
         "{}",
         ran.out
     );
@@ -210,7 +210,7 @@ fn a_backend_error_is_reported_per_pair_and_cleaned_up() {
 
     assert!(
         ran.out
-            .contains("contestants[0] claude/one: error: cannot create sandbox"),
+            .contains("contestants[0] claude (one): error: cannot create sandbox"),
         "{}",
         ran.out
     );
@@ -232,12 +232,12 @@ fn one_errored_pair_is_counted_against_the_total_the_other_pair_still_completing
     let ran = go(&env, &format!("{TASK}{TWO_CLAUDES}"), &backend);
 
     assert!(
-        ran.out.contains("contestants[0] claude/one: completed"),
+        ran.out.contains("contestants[0] claude (one): completed"),
         "{}",
         ran.out
     );
     assert!(
-        ran.out.contains("contestants[1] claude/two: error:"),
+        ran.out.contains("contestants[1] claude (two): error:"),
         "{}",
         ran.out
     );
@@ -654,6 +654,29 @@ fn an_antigravity_contestant_and_judge_without_a_model_run_and_save_the_default(
     assert_eq!(
         saved_agy_models(&env, &summary.run_id),
         [DEFAULT_AGY_MODEL; 4]
+    );
+    let label = format!("antigravity ({DEFAULT_AGY_MODEL})");
+    assert!(
+        ran.out
+            .contains(&format!("contestants[1] {label}: completed")),
+        "{}",
+        ran.out
+    );
+    assert!(
+        ran.out
+            .contains(&format!("Judge {label}: repeat 1/1 failed")),
+        "{}",
+        ran.out
+    );
+    let shown = sbxm::commands::run_show::render(
+        &env.config_dir(),
+        &summary.run_id,
+        &sbxm::commands::run_show::Options { full_diff: false },
+    )
+    .unwrap();
+    assert!(
+        shown.contains(&format!("\ncontestants[1] {label}\n")),
+        "{shown}"
     );
 }
 

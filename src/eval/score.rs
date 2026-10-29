@@ -282,7 +282,7 @@ pub fn render_jev(jev: &JevRanking, labels: &[String]) -> String {
     )
 }
 
-/// The ranking as text, `labels[i]` being `harness/model` of contestant i.
+/// The ranking as text, `labels[i]` being `harness (model)` of contestant i.
 pub fn render(ranking: &Ranking, labels: &[String]) -> String {
     render_as(
         "Ranking (judge scores 0-1, repeats averaged)",

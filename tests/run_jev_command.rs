@@ -1073,11 +1073,11 @@ fn with_the_judge_and_jev_the_judges_ranking_leads_and_jevs_follows_never_blende
         let jev_block = &text[jev_at..];
         // (0.9 * 1 + 0.8 * 0.5) / 1.5 and (0.2 * 1 + 0.8 * 0.5) / 1.5.
         assert!(
-            jev_block.contains("1. contestants[0] claude/one: 0.87"),
+            jev_block.contains("1. contestants[0] claude (one): 0.87"),
             "{jev_block}"
         );
         assert!(
-            jev_block.contains("2. contestants[1] claude/two: 0.40"),
+            jev_block.contains("2. contestants[1] claude (two): 0.40"),
             "{jev_block}"
         );
     }
@@ -1100,11 +1100,11 @@ fn with_jev_only_run_and_run_show_still_print_a_ranking() {
     assert!(shown.contains("Jev ranking (jev-1.13.0;"), "{shown}");
     // Both tie: 0.9 on correct and 0.8 on quality each.
     assert!(
-        shown.contains("1. contestants[0] claude/one: 0.87"),
+        shown.contains("1. contestants[0] claude (one): 0.87"),
         "{shown}"
     );
     assert!(
-        shown.contains("1. contestants[1] claude/two: 0.87"),
+        shown.contains("1. contestants[1] claude (two): 0.87"),
         "{shown}"
     );
 }
@@ -1116,7 +1116,7 @@ fn a_pair_jev_could_not_score_is_left_out_of_jevs_ranking_and_shown_with_its_err
     let ran = go(&env, &config(&env, ""), &backend);
     let shown = show(&env, &ran);
     assert!(
-        shown.contains("contestants[0] claude/one: not scored (Jev scored none of its repeats)"),
+        shown.contains("contestants[0] claude (one): not scored (Jev scored none of its repeats)"),
         "{shown}"
     );
     assert!(

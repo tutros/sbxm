@@ -126,7 +126,7 @@ fn a_model_that_fails_to_load_is_one_warning_and_an_error_entry_per_pair_without
     // The run still completes normally.
     let record = read_json(&meta(&ran).join("run.json"));
     assert!(record["completed_at"].is_string());
-    assert!(ran.out.contains("contestants[0] claude/one"));
+    assert!(ran.out.contains("contestants[0] claude (one)"));
 }
 
 #[test]

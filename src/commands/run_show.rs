@@ -12,6 +12,7 @@ use serde_json::Value;
 use crate::config::GlobalConfig;
 use crate::eval::{cosine, score};
 use crate::run::id;
+use crate::task::review::agent_label;
 
 #[derive(Debug, Default)]
 pub struct Options {
@@ -68,7 +69,7 @@ pub fn render(config_dir: &Path, run_id: &str, options: &Options) -> Result<Stri
     // without a judge has none, and a damaged config copy only loses this block.
     let labels: Vec<String> = contestants
         .iter()
-        .map(|c| format!("{}/{}", text(&c["harness"]), text(&c["model"])))
+        .map(|c| agent_label(&text(&c["harness"]), Some(&text(&c["model"]))))
         .collect();
     if let Ok(Some(ranking)) = score::load(&meta) {
         writeln!(out)?;
@@ -97,9 +98,11 @@ pub fn render(config_dir: &Path, run_id: &str, options: &Options) -> Result<Stri
         };
         writeln!(
             out,
-            "contestants[{i}] {}/{}{own_profile}",
-            text(&contestant["harness"]),
-            text(&contestant["model"])
+            "contestants[{i}] {}{own_profile}",
+            agent_label(
+                &text(&contestant["harness"]),
+                Some(&text(&contestant["model"]))
+            )
         )?;
         for r in 0..repeat {
             let dir = meta.join(i.to_string()).join(r.to_string());

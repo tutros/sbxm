@@ -300,9 +300,9 @@ fn run_show_marks_a_contestant_whose_profile_differs_from_the_runs() {
     )
     .unwrap();
 
-    assert!(shown.contains("\ncontestants[0] claude/a\n"), "{shown}");
+    assert!(shown.contains("\ncontestants[0] claude (a)\n"), "{shown}");
     assert!(
-        shown.contains("\ncontestants[1] claude/b (profile strict)\n"),
+        shown.contains("\ncontestants[1] claude (b) (profile strict)\n"),
         "{shown}"
     );
 }
