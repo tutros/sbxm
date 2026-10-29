@@ -149,7 +149,11 @@ pub fn run(
             RunStatus::TimedOut => "timed out".to_owned(),
             RunStatus::Failed(why) => format!("failed: {why}"),
         };
-        writeln!(out, "{id}: worker {label}, {} commit(s)", worked.commits)?;
+        writeln!(
+            out,
+            "{id}: worker {} {label}, {} commit(s)",
+            worked.agent, worked.commits
+        )?;
         for note in &worked.notes {
             writeln!(out, "  note: {note}")?;
         }

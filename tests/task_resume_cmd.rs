@@ -118,13 +118,14 @@ fn a_failed_worker_is_resumed_and_the_output_says_from_where_and_how_it_ended() 
         out.out
     );
     assert!(
-        out.out.contains("issue-41: worker completed"),
+        out.out
+            .contains("issue-41: worker claude (default model) completed"),
         "{}",
         out.out
     );
     assert!(
         out.out
-            .contains("issue-41: review round 1: 0 must-fix finding(s)"),
+            .contains("issue-41: review round 1 by codex (default model): 0 must-fix finding(s)"),
         "{}",
         out.out
     );

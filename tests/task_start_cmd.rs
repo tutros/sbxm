@@ -735,6 +735,12 @@ fn an_antigravity_worker_without_a_model_runs_and_records_the_default() {
 
     out.result.unwrap();
     assert_eq!(agy_models(&backend), ["gemini-3.8-flash-medium"]);
+    assert!(
+        out.out
+            .contains("issue-41: worker antigravity (gemini-3.8-flash-medium) completed, 1 commit"),
+        "{}",
+        out.out
+    );
     assert_eq!(
         worker_record(&f).model.as_deref(),
         Some("gemini-3.8-flash-medium")
@@ -756,6 +762,12 @@ fn an_antigravity_worker_with_a_model_runs_and_records_that_model() {
 
     out.result.unwrap();
     assert_eq!(agy_models(&backend), ["gemini-4-argon-high"]);
+    assert!(
+        out.out
+            .contains("issue-41: worker antigravity (gemini-4-argon-high) completed"),
+        "{}",
+        out.out
+    );
     assert_eq!(
         worker_record(&f).model.as_deref(),
         Some("gemini-4-argon-high")
@@ -779,4 +791,10 @@ fn a_claude_worker_without_a_model_records_none() {
             .all(|(_, spec)| !spec.argv.iter().any(|a| a == "--model"))
     );
     assert_eq!(worker_record(&f).model, None);
+    assert!(
+        out.out
+            .contains("issue-41: worker claude (default model) completed"),
+        "{}",
+        out.out
+    );
 }

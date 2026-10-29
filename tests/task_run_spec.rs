@@ -140,7 +140,9 @@ fn it_starts_then_reviews_and_stops_before_finish() {
 
     out.result.unwrap();
     let text = &out.out;
-    let worker = text.find(&format!("{id}: worker completed")).expect(text);
+    let worker = text
+        .find(&format!("{id}: worker claude (default model) completed"))
+        .expect(text);
     let review = text.find(&format!("{id}: review round 1")).expect(text);
     assert!(worker < review, "{text}");
     assert!(text.contains(&format!("{id}: ready")), "{text}");

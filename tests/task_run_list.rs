@@ -227,7 +227,10 @@ fn a_failed_task_does_not_stop_the_list() {
         "{message}"
     );
     let text = &out.out;
-    assert!(text.contains("issue-41: worker failed:"), "{text}");
+    assert!(
+        text.contains("issue-41: worker claude (default model) failed:"),
+        "{text}"
+    );
     assert_eq!(stage(&f, "issue-42"), (Stage::Ready, Status::Ok));
     assert!(
         text.contains("--issue 42: stage ready, must-fix 0; next: sbxm task finish --issue 42"),

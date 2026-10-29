@@ -2441,6 +2441,8 @@ pub struct Worked {
     pub notes: Vec<String>,
     /// Commits the worker's branch has over the base, after collecting its bundle.
     pub commits: u32,
+    /// The harness and model that ran, as [`review::agent_label`] names them (issue 314).
+    pub agent: String,
 }
 
 fn run_label(status: &RunStatus) -> String {
@@ -2573,6 +2575,13 @@ pub(super) fn work(env: &TaskEnv, prepared: &mut Prepared) -> Result<Worked> {
         status,
         notes,
         commits,
+        agent: review::agent_label(
+            worker.harness.as_str(),
+            worker
+                .harness
+                .model_or_default(worker.model.as_deref())
+                .as_deref(),
+        ),
     })
 }
 

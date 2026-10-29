@@ -135,7 +135,9 @@ fn it_starts_then_reviews_and_stops_before_finish() {
 
     out.result.unwrap();
     let text = &out.out;
-    let worker = text.find("issue-41: worker completed").expect(text);
+    let worker = text
+        .find("issue-41: worker claude (default model) completed")
+        .expect(text);
     let review = text.find("issue-41: review round 1").expect(text);
     assert!(worker < review, "{text}");
     assert!(text.contains("issue-41: ready"), "{text}");
@@ -242,7 +244,8 @@ fn a_sandbox_gate_that_cannot_run_stops_before_any_reviewer() {
     assert!(message.contains("1 of 1"), "{message}");
     // The start step's own report says the worker ran and the gate could not run.
     assert!(
-        out.out.contains("issue-41: worker completed"),
+        out.out
+            .contains("issue-41: worker claude (default model) completed"),
         "{}",
         out.out
     );
@@ -310,7 +313,12 @@ fn a_failed_worker_stops_before_any_reviewer_and_fails_the_command() {
     let message = format!("{:#}", out.result.unwrap_err());
     assert!(message.contains("1 of 1 task(s) failed"), "{message}");
     assert_eq!(count(&b, "claude"), 1, "the worker ran");
-    assert!(out.out.contains("issue-41: worker failed"), "{}", out.out);
+    assert!(
+        out.out
+            .contains("issue-41: worker claude (default model) failed"),
+        "{}",
+        out.out
+    );
     assert!(!out.out.contains("review round"), "{}", out.out);
     assert_eq!(b.creates().len(), 1, "no reviewer sandbox");
     assert_eq!(count(&b, "codex"), 0, "no reviewer");
@@ -767,7 +775,8 @@ fn a_drive_that_fills_during_the_worker_stops_before_the_review_naming_task_revi
         "{err}"
     );
     assert!(
-        out.out.contains("issue-41: worker completed"),
+        out.out
+            .contains("issue-41: worker claude (default model) completed"),
         "{}",
         out.out
     );

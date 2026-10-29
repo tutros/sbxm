@@ -119,7 +119,7 @@ fn a_clean_review_prints_the_round_and_where_the_review_is() {
     out.result.unwrap();
     assert!(
         out.out
-            .contains("issue-41: review round 1: 0 must-fix finding(s)"),
+            .contains("issue-41: review round 1 by codex (default model): 0 must-fix finding(s)"),
         "{}",
         out.out
     );
@@ -174,9 +174,15 @@ fn must_fix_findings_show_the_fix_round_and_the_second_review() {
 
     out.result.unwrap();
     let text = &out.out;
-    assert!(text.contains("review round 1: 1 must-fix"), "{text}");
+    assert!(
+        text.contains("review round 1 by codex (default model): 1 must-fix"),
+        "{text}"
+    );
     assert!(text.contains("fix round ran"), "{text}");
-    assert!(text.contains("review round 2: 0 must-fix"), "{text}");
+    assert!(
+        text.contains("review round 2 by codex (default model): 0 must-fix"),
+        "{text}"
+    );
     assert!(text.contains("issue-41: ready"), "{text}");
 }
 
@@ -489,7 +495,7 @@ fn a_pr_review_prints_the_result_and_that_it_was_posted() {
     out.result.unwrap();
     assert!(
         out.out
-            .contains("pr-7: review round 1: 1 must-fix finding(s)"),
+            .contains("pr-7: review round 1 by codex (default model): 1 must-fix finding(s)"),
         "{}",
         out.out
     );
@@ -631,7 +637,7 @@ fn a_pr_with_an_unchanged_head_is_refused_unless_forced() {
     out.result.unwrap();
     assert!(
         out.out
-            .contains("pr-7: review round 2: 1 must-fix finding(s)"),
+            .contains("pr-7: review round 2 by codex (default model): 1 must-fix finding(s)"),
         "{}",
         out.out
     );
@@ -1055,6 +1061,13 @@ fn an_antigravity_reviewer_without_a_model_records_the_default() {
     let out = go(&f, &options(&f), &backend);
 
     out.result.unwrap();
+    assert!(
+        out.out.contains(
+            "issue-41: review round 1 by antigravity (gemini-3.8-flash-medium): 0 must-fix finding(s)"
+        ),
+        "{}",
+        out.out
+    );
     let task = record::read(&meta(&f).join("task.json")).unwrap();
     assert_eq!(
         task.reviewer.unwrap().model.as_deref(),

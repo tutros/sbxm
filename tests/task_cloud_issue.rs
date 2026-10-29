@@ -858,7 +858,8 @@ fn a_timed_out_cloud_issue_worker_stops_and_its_sandbox_is_removed() {
 
     assert!(ran.result.is_err(), "{}", ran.out);
     assert!(
-        ran.out.contains("worker timed out, 1 commit"),
+        ran.out
+            .contains("worker claude (default model) timed out, 1 commit"),
         "{}",
         ran.out
     );
