@@ -37,6 +37,10 @@ const DROP_MCP_GATEWAY: &str = r#"f="$HOME/.gemini/config/mcp_config.json"; if [
 const ANTIGRAVITY_KIT: &str =
     "docker.io/sbx/antigravity-kit:20260928-7da9425e640d172e36abe6de3499a1c75d416c0f";
 
+/// The model a headless Antigravity run uses when none is set (issue 314, the user's choice of
+/// 2026-10-24): without `--model`, `agy` picks its own and its output never names it.
+const ANTIGRAVITY_DEFAULT_MODEL: &str = "gemini-3.8-flash-medium";
+
 impl Harness {
     /// The `sbx` agent name, also used in sandbox names and state keys.
     pub fn as_str(self) -> &'static str {
@@ -77,6 +81,20 @@ impl Harness {
         }
     }
 
+    /// The model sbxm passes to a headless run of this harness when none is set (issue 314).
+    /// `None` leaves the choice to the harness itself.
+    pub fn default_model(self) -> Option<&'static str> {
+        match self {
+            Harness::Antigravity => Some(ANTIGRAVITY_DEFAULT_MODEL),
+            _ => None,
+        }
+    }
+
+    /// `model`, else [`Self::default_model`]: the model a headless run uses and its record names.
+    pub fn model_or_default(self, model: Option<&str>) -> Option<String> {
+        model.or(self.default_model()).map(str::to_owned)
+    }
+
     /// The always-loaded user-level instructions file, relative to home
     /// (decisions 37, 49).
     pub fn instructions_file(self) -> PathBuf {
@@ -94,8 +112,9 @@ impl Harness {
     /// The headless command `headless::run` executes in the sandbox (S5).
     pub fn headless_argv(self, prompt: &str, opts: &HeadlessOpts) -> Result<Vec<String>> {
         self.require_headless()?;
+        let model = self.model_or_default(opts.model.as_deref());
         let model_flag = |flag: &str| -> Vec<String> {
-            opts.model
+            model
                 .iter()
                 .flat_map(|m| [flag.to_owned(), m.clone()])
                 .collect()
