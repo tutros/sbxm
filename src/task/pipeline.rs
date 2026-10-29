@@ -1134,7 +1134,7 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
         task.location = location;
         task.worker = Some(Agent {
             harness: worker.harness.as_str().to_owned(),
-            model: worker.model.clone(),
+            model: worker.harness.model_or_default(worker.model.as_deref()),
             sandbox: sandbox.clone(),
             // A cloud clone's path is known once the sandbox answers `printenv HOME`.
             workspace: if local {
@@ -4065,7 +4065,7 @@ fn reviewer_agent(env: &TaskEnv, sandbox: &str, workspace: String, plan: &Sandbo
     let reviewer = &env.config.reviewer;
     Agent {
         harness: reviewer.harness.as_str().to_owned(),
-        model: reviewer.model.clone(),
+        model: reviewer.harness.model_or_default(reviewer.model.as_deref()),
         sandbox: sandbox.to_owned(),
         workspace,
         profile: None,
@@ -4452,7 +4452,8 @@ fn run_review_agent(
             bail!("the reviewer's review.md is larger than 1 MiB, so it isn't used")
         }
     };
-    let saved = review::with_header(reviewer.harness.as_str(), reviewer.model.as_deref(), &text);
+    let model = reviewer.harness.model_or_default(reviewer.model.as_deref());
+    let saved = review::with_header(reviewer.harness.as_str(), model.as_deref(), &text);
     fs::write(prepared.meta.join(format!("review-{round}.md")), &saved)?;
     let Some(must_fix) = review::must_fix_count(&text) else {
         bail!(

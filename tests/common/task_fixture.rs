@@ -49,7 +49,10 @@ pub fn play_reviews(
     let runs = std::sync::atomic::AtomicUsize::new(0);
     move |sandbox: &str, spec: &ExecSpec| {
         // Any harness can be the reviewer; it is the sandbox that says it is one.
-        let headless = spec.argv.iter().any(|a| a == "codex" || a == "claude");
+        let headless = spec
+            .argv
+            .iter()
+            .any(|a| a == "codex" || a == "claude" || a == "agy");
         if sandbox.contains("-review-") && headless {
             let n = runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let text = &reviews[n.min(reviews.len() - 1)];
@@ -231,7 +234,9 @@ pub struct Play {
 }
 
 pub fn is_headless(spec: &ExecSpec) -> bool {
-    spec.argv.iter().any(|a| a == "claude" || a == "codex")
+    spec.argv
+        .iter()
+        .any(|a| a == "claude" || a == "codex" || a == "agy")
 }
 
 pub fn is_bundle(spec: &ExecSpec) -> bool {

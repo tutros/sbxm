@@ -1039,3 +1039,47 @@ fn a_low_sandbox_drive_refuses_before_the_review() {
     assert!(backend.log().is_empty(), "{:?}", backend.log());
     assert_eq!(std::fs::read(meta(&f).join("task.json")).unwrap(), before);
 }
+
+const AGY_DONE: &str = include_str!("../src/fixtures/antigravity-stream-json-pong.jsonl");
+
+/// Issue 314: an Antigravity reviewer with no model runs Antigravity's default, and the record and
+/// the saved review name it; a Codex reviewer with no model still names no model.
+#[test]
+fn an_antigravity_reviewer_without_a_model_records_the_default() {
+    let f = config("antigravity");
+    let backend = backend(&f, &[CLEAN])
+        .and_secrets(&["anthropic", "openai", "google"])
+        .with_exec_output_matching("agy", ok(AGY_DONE));
+    worked_task(&f, &backend);
+
+    let out = go(&f, &options(&f), &backend);
+
+    out.result.unwrap();
+    let task = record::read(&meta(&f).join("task.json")).unwrap();
+    assert_eq!(
+        task.reviewer.unwrap().model.as_deref(),
+        Some("gemini-3.8-flash-medium")
+    );
+    let saved = std::fs::read_to_string(meta(&f).join("review.md")).unwrap();
+    assert!(
+        saved.starts_with("Reviewer: antigravity (gemini-3.8-flash-medium)\n"),
+        "{saved}"
+    );
+}
+
+#[test]
+fn a_codex_reviewer_without_a_model_records_none() {
+    let f = config("codex");
+    let backend = backend(&f, &[CLEAN]);
+    worked_task(&f, &backend);
+
+    go(&f, &options(&f), &backend).result.unwrap();
+
+    let task = record::read(&meta(&f).join("task.json")).unwrap();
+    assert_eq!(task.reviewer.unwrap().model, None);
+    let saved = std::fs::read_to_string(meta(&f).join("review.md")).unwrap();
+    assert!(
+        saved.starts_with("Reviewer: codex (default model)\n"),
+        "{saved}"
+    );
+}
