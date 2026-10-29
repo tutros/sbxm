@@ -272,16 +272,26 @@ fn write_judge(out: &mut String, dir: &Path) -> Result<()> {
         return Ok(());
     }
     let label = judge["label"].as_str().unwrap_or("?");
+    // The judge that ran, so a default model is visible (issue 314); an entry saved
+    // without it keeps the bare label.
+    let who = match judge["judge"]["harness"].as_str() {
+        Some(harness) => format!(
+            " {}",
+            agent_label(harness, judge["judge"]["model"].as_str())
+        ),
+        None => String::new(),
+    };
+    let head = format!("    Judge{who} (candidate {label}):");
     if judge["status"] != "ok" {
         writeln!(
             out,
-            "    Judge (candidate {label}): not scored: {}",
+            "{head} not scored: {}",
             judge["error"].as_str().unwrap_or("no details")
         )?;
         return Ok(());
     }
     let criteria = judge["criteria"].as_object().cloned().unwrap_or_default();
-    let mut line = format!("    Judge (candidate {label}):");
+    let mut line = head;
     let scored: Vec<String> = criteria
         .iter()
         .map(|(id, c)| {

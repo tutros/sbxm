@@ -203,6 +203,45 @@ contestants[1] codex (model-b)
     assert_eq!(shown(&env), expected);
 }
 
+/// Issue 314: a judge whose run-config left out `model` is shown with the model it ran on, also
+/// when it is the run's only Antigravity role; an `evals.json` from before the judge was saved
+/// with it keeps the bare label.
+#[test]
+fn the_judge_is_named_with_its_harness_and_model() {
+    let env = fixture();
+    let verdict = |judge: Value| {
+        let mut entry = json!({
+            "label": "A", "status": "ok", "error": null,
+            "criteria": {"correctness": {"value": true, "score": 1.0, "reason": ""}},
+            "unscored": [],
+        });
+        if !judge.is_null() {
+            entry["judge"] = judge;
+        }
+        json!({"judge": entry})
+    };
+    write_json(
+        &meta(&env).join("0").join("0").join("evals.json"),
+        &verdict(json!({"harness": "antigravity", "model": "gemini-3.8-flash-medium"})),
+    );
+    write_json(
+        &meta(&env).join("0").join("1").join("evals.json"),
+        &verdict(Value::Null),
+    );
+
+    let out = shown(&env);
+    assert!(
+        out.contains(
+            "    Judge antigravity (gemini-3.8-flash-medium) (candidate A): correctness true (1.00)\n"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains("    Judge (candidate A): correctness true (1.00)\n"),
+        "{out}"
+    );
+}
+
 #[test]
 fn full_diff_prints_every_patch_indented_under_its_summary() {
     let env = fixture();

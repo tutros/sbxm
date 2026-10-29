@@ -1454,7 +1454,8 @@ fn run_judge_against_real_sbx() {
     )
     .unwrap();
     assert!(
-        shown.contains("Judge (candidate A):") && shown.contains("Judge (candidate B):"),
+        shown.contains("Judge claude (claude-haiku-4-5-20251001) (candidate A):")
+            && shown.contains("Judge claude (claude-haiku-4-5-20251001) (candidate B):"),
         "{shown}"
     );
     // The claude judge shares a provider with a claude contestant: warned, not refused.
