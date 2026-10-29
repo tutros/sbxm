@@ -1106,6 +1106,16 @@ readiness run; a summary file next to the drafts, plus a Windows toast in the tr
 draft: cost, time, the share of recommended answers the user accepts unchanged, and the time from a draft to the
 issue's label; the trial is 2 weeks or 10 drafts, whichever comes first, then an assessment decides about adopting it.
 
+270. **Antigravity sandboxes use the user's Google login through a proxy placeholder (2026-10-29, the user's choice
+after spike S16; the user asked for it because Codex limits are being hit; builds on [7], [137]):** route A of #288
+is adopted. A sandbox holds only a token file with placeholder values and a far-future `expiry`; a custom secret
+scoped to the sandbox, on `daily-cloudcode-pa.googleapis.com` and `www.googleapis.com`, has `sbx`'s proxy swap in an
+access token that a host helper refreshes with `agy`'s own OAuth client, so the refresh token never enters a sandbox.
+The helper is called for every proxied request, so it caches the token and must start fast; the MCP gateway entry
+(#287) is emptied before every run; a `real_sbx` check guards against `agy`'s self-updates. The API-key route [137]
+stays as the fallback. The build is issue #330 (size L, five open points to answer before a worker starts).
+Write-up: `sdlc/spikes/S16.md`.
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.
@@ -1161,6 +1171,11 @@ issue's label; the trial is 2 weeks or 10 drafts, whichever comes first, then an
 - `policy rm network --sandbox <name> --resource <host> -f` and `policy deny network --sandbox <name> <host>` exit 0,
   print the new list and take effect at once, also for a host of the agent's built-in list. Answer 4 B holds
   [255]. Write-up: `sdlc/spikes/S17.md`.
+
+**S16 (2026-10-29, `sbx` v0.46.0, `agy` 1.4.10): Antigravity runs on a placeholder token with a host-refreshed secret**
+- A placeholder token file plus a scoped `set-custom --command` secret on two hosts gives a working headless `pong`;
+  `agy` never refreshes or validates the token itself; `sbx` calls the helper per request. Adopted as [270].
+  Write-up: `sdlc/spikes/S16.md`.
 
 ### Jev facts relevant to design (from docs, Jev 1.13)
 - HTTP API only (`POST https://api.typesafe.ai/v1/systemone`, Bearer auth). SDKs exist only for Python and JS, so Rust calls it with `reqwest`.
