@@ -12,3 +12,4 @@ who decides.
 
 | # | PR | Risk | Head reviewed | Opened | Merged | Open to merged | Breaks found later |
 |---|---|---|---|---|---|---|---|
+| 1 | #326 (decision 269, docs) | low | f485501 | 2026-10-29 06:26Z | 2026-10-29 06:49Z | 22m56s | none so far |
