@@ -91,3 +91,18 @@ fn g31_is_not_marked_done_while_an_old_binary_is_still_accepted() {
     assert!(!row.starts_with("| G31 | **Done"), "{row}");
     assert!(row.starts_with("| G31 | **Partly done"), "{row}");
 }
+
+/// PR 329 review round 2, S-1: since decision 266(d) the ruleset requires both build checks,
+/// so G46 can't still say a red Windows job doesn't block a merge.
+#[test]
+fn g46_names_the_required_build_checks_not_the_missing_branch_protection() {
+    let notes = read("sdlc/evals-workflow-notes.md");
+    let row = notes
+        .lines()
+        .find(|line| line.starts_with("| G46 | "))
+        .expect("the gap log has G46");
+
+    assert!(!row.contains("a red job does not block a merge"), "{row}");
+    assert!(row.contains("`build (windows-latest)`"), "{row}");
+    assert!(row.contains("after `task finish`"), "{row}");
+}
