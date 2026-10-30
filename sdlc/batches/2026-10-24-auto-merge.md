@@ -13,3 +13,5 @@ who decides.
 | # | PR | Risk | Head reviewed | Opened | Merged | Open to merged | Breaks found later |
 |---|---|---|---|---|---|---|---|
 | 1 | #326 (decision 269, docs) | low | f485501 | 2026-10-29 06:26Z | 2026-10-29 06:49Z | 22m56s | none so far |
+| 2 | #333 (issue 287, MCP gateway entry removed before headless `agy`) | low | f05f2a1 | 2026-10-29 21:15Z | 2026-10-29 21:42Z | 27m18s | none so far |
+| 3 | #335 (fake tokens in the run-log redaction test) | low | 0eb3601 | 2026-10-30 00:35Z | 2026-10-30 00:54Z | 19m25s | none so far |
