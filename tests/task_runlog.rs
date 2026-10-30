@@ -131,15 +131,17 @@ fn secret_looking_values_never_reach_the_log() {
     task_dir(base.path(), "issue-5");
     let mut log = log(base.path(), &["issue-5"], None);
 
-    log.line("token sk-ant-api03-AbCdEf0123456789xyz and ghp_0123456789abcdefABCDEF01 and AIzaSyA0123456789abcdefghij");
-    log.line("github_pat_11ABCDEFG0123456789_abcdefghijklmnop");
+    log.line(
+        "token sk-ant-FAKE-NOT-A-REAL-KEY and ghp_FAKEnotAREALtoken0 and AIzaFAKE-NOT-A-REAL-KEY",
+    );
+    log.line("github_pat_FAKE_NOT_A_REAL_TOKEN");
 
     let text = read(base.path(), "issue-5");
     for secret in [
-        "sk-ant-api03-AbCdEf0123456789xyz",
-        "ghp_0123456789abcdefABCDEF01",
-        "AIzaSyA0123456789abcdefghij",
-        "github_pat_11ABCDEFG0123456789_abcdefghijklmnop",
+        "sk-ant-FAKE-NOT-A-REAL-KEY",
+        "ghp_FAKEnotAREALtoken0",
+        "AIzaFAKE-NOT-A-REAL-KEY",
+        "github_pat_FAKE_NOT_A_REAL_TOKEN",
     ] {
         assert!(!text.contains(secret), "{secret} leaked: {text}");
     }
@@ -273,14 +275,14 @@ fn a_secret_on_the_command_line_is_masked_in_the_header() {
         &[
             "sbxm".to_owned(),
             "--token".to_owned(),
-            "ghp_0123456789abcdefABCDEF01".to_owned(),
+            "ghp_FAKEnotAREALtoken0".to_owned(),
         ],
         Path::new("x"),
         "h",
         None,
         1,
     );
-    assert!(!text.contains("ghp_0123456789abcdefABCDEF01"), "{text}");
+    assert!(!text.contains("ghp_FAKEnotAREALtoken0"), "{text}");
     assert!(text.contains("--token [redacted]"), "{text}");
 }
 
