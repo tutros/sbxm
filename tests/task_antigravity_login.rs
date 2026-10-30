@@ -349,3 +349,128 @@ fn a_task_refused_by_a_later_check_leaves_no_token_cache() {
     assert_eq!(endpoint.calls(), 1);
     assert!(!sbxm::auth::cache_path(&f.env.config_dir()).exists());
 }
+
+#[test]
+fn a_failed_start_whose_secret_stays_names_the_removal_and_keeps_the_task() {
+    let f = login_fixture();
+    write_login(&f.env.config_dir());
+    let backend = FakeBackend::failing_create().failing_remove_custom_secret();
+    let github = FakeGitHub::default();
+    let endpoint = Endpoint::fresh("new", 3599);
+    let source = source(&f);
+    let host = endpoint.host();
+    let mut ctx = ctx(&f, &source, &backend, &github);
+    ctx.auth = &host;
+    let err = format!(
+        "{:#}",
+        pipeline::prepare(&ctx, &issue_text(41)).unwrap_err()
+    );
+    let placeholder = sbxm::auth::placeholder(WORKER_SANDBOX);
+    assert!(
+        err.contains(&format!(
+            "sbx secret rm --placeholder {placeholder} --sandbox {WORKER_SANDBOX} -f"
+        )),
+        "{err}"
+    );
+    assert!(err.contains("cannot create sandbox"), "{err}");
+    // The task stays, so `sbxm task rm` can remove the secret later.
+    let plan = sbxm::task::finish::plan_removal(&f.env.base_dir(), "issue-41", &Gone).unwrap();
+    assert_eq!(plan.antigravity, vec![WORKER_SANDBOX.to_owned()]);
+}
+
+/// A worked Claude task whose reviewer is a login-mode Antigravity one, on `backend`'s scripts.
+fn reviewer_fixture() -> Fixture {
+    let f = fixture_with(
+        "[sandbox]\nprofile = \"default\"\n\n[reviewer]\nharness = \"antigravity\"\n\n[gates]\n\
+         sandbox = [\"cargo test\"]\n",
+    );
+    f.env.set_config("antigravity_auth = \"login\"");
+    write_login(&f.env.config_dir());
+    f
+}
+
+fn reviewer_backend(f: &Fixture) -> FakeBackend {
+    let worker = common::task_fixture::play_tasks(
+        &f.env.base_dir(),
+        "main",
+        common::task_fixture::Play {
+            commits: vec!["a.txt".into()],
+            result_md: Some(b"done\n".to_vec()),
+            bundle_bytes: None,
+        },
+    );
+    let reviewer = common::task_fixture::play_reviews(
+        &f.env.base_dir(),
+        "issue-41",
+        vec!["Must-fix findings: 0\n\nNothing found.\n".into()],
+    );
+    FakeBackend::with_secrets(&["anthropic"])
+        .with_exec_output_matching(
+            "claude",
+            common::task_fixture::ok(common::task_fixture::CLAUDE_DONE),
+        )
+        .with_exec_output_matching("agy", common::task_fixture::ok(AGY_DONE))
+        .with_exec_hook(move |sandbox, spec| {
+            worker(sandbox, spec);
+            reviewer(sandbox, spec);
+        })
+        .failing_remove_custom_secret()
+}
+
+fn gate(ctx: &pipeline::Ctx, prepared: &mut pipeline::Prepared) {
+    let gated =
+        pipeline::run_gates(&ctx.env(), prepared, "after-worker", pipeline::Tiers::ALL).unwrap();
+    assert!(gated.passed);
+}
+
+const REVIEW_SANDBOX: &str = "sbxm-task-issue-41-review-antigravity";
+
+#[test]
+fn a_reviewer_secret_that_stays_is_noted_with_its_removal() {
+    let f = reviewer_fixture();
+    let backend = reviewer_backend(&f);
+    let mut prepared = common::task_fixture::worked_task(&f, &backend);
+    let github = FakeGitHub::default();
+    let source = source(&f);
+    let endpoint = Endpoint::fresh("new", 3599);
+    let host = endpoint.host();
+    let mut ctx = ctx(&f, &source, &backend, &github);
+    ctx.auth = &host;
+    gate(&ctx, &mut prepared);
+    pipeline::run_reviewer(&ctx.env(), &mut prepared, 1).unwrap();
+
+    let removal = format!(
+        "sbx secret rm --placeholder {} --sandbox {REVIEW_SANDBOX} -f",
+        sbxm::auth::placeholder(REVIEW_SANDBOX)
+    );
+    assert!(
+        prepared.record.notes.iter().any(|n| n.contains(&removal)),
+        "{:#?}",
+        prepared.record.notes
+    );
+}
+
+#[test]
+fn a_leftover_reviewer_whose_secret_stays_stops_the_round_before_a_new_sandbox() {
+    let f = reviewer_fixture();
+    let backend = reviewer_backend(&f);
+    let mut prepared = common::task_fixture::worked_task(&f, &backend);
+    fs::create_dir_all(prepared.workspace.with_file_name("issue-41-review")).unwrap();
+    let github = FakeGitHub::default();
+    let source = source(&f);
+    let endpoint = Endpoint::fresh("new", 3599);
+    let host = endpoint.host();
+    let mut ctx = ctx(&f, &source, &backend, &github);
+    ctx.auth = &host;
+    gate(&ctx, &mut prepared);
+    let err = format!(
+        "{:#}",
+        pipeline::run_reviewer(&ctx.env(), &mut prepared, 1).unwrap_err()
+    );
+    assert!(err.contains("sbx secret rm --placeholder"), "{err}");
+    assert!(
+        !backend.log().contains(&format!("create {REVIEW_SANDBOX}")),
+        "{:#?}",
+        backend.log()
+    );
+}

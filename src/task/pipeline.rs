@@ -1243,10 +1243,25 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
             // removes its sandbox even if `create` failed, as before this milestone, and keeps
             // no record of it.
             if local {
-                remove_local_sandbox(ctx.backend, &sandbox, ctx.config.worker.harness);
+                let secret = remove_local_sandbox(ctx.backend, &sandbox, ctx.config.worker.harness);
                 let _ = fs::remove_dir_all(&workspace);
-                let _ = fs::remove_dir_all(&meta);
-                return Err(e);
+                return match secret {
+                    Ok(()) => {
+                        let _ = fs::remove_dir_all(&meta);
+                        Err(e)
+                    }
+                    // The secret is set only after `task.json` is written, which stays, marked
+                    // failed, so `sbxm task rm` can try again.
+                    Err(stayed) => {
+                        let stayed = format!("{stayed:#}");
+                        if let Some(task) = record.as_mut() {
+                            task.notes.push(stayed.clone());
+                            let _ = task.finish(Status::Failed);
+                            let _ = record::write(&meta, task);
+                        }
+                        Err(e.context(format!("{stayed}; the start failed")))
+                    }
+                };
             }
             // A cloud start removes only the sandbox it owns, the one whose `create` returned
             // (review M-1 of slice 1; decision 268), and has no host clone, so a
@@ -1952,14 +1967,20 @@ fn login_helper(config_dir: &Path, harness: Harness, host: &auth::Host) -> Resul
     Ok(uses_login(&global, harness).then(|| host.helper.clone()))
 }
 
-/// Removes a local task sandbox, best effort, then the login secret an Antigravity one may hold
-/// (decision 270), whatever `antigravity_auth` says now: one that was never stored counts as
-/// removed.
-pub(crate) fn remove_local_sandbox(backend: &dyn SandboxBackend, sandbox: &str, harness: Harness) {
+/// Removes a local task sandbox, best effort as before decision 270 (it is often already gone),
+/// then the login secret an Antigravity one may hold, whatever `antigravity_auth` says now: one
+/// that was never stored counts as removed. A secret that stays is the error, naming the command
+/// that removes it; the caller keeps the task record that names the sandbox.
+pub(crate) fn remove_local_sandbox(
+    backend: &dyn SandboxBackend,
+    sandbox: &str,
+    harness: Harness,
+) -> Result<()> {
     let _ = backend.remove(sandbox);
     if harness == Harness::Antigravity {
-        let _ = auth::remove_sandbox_secret(backend, sandbox);
+        auth::remove_sandbox_secret(backend, sandbox)?;
     }
+    Ok(())
 }
 
 /// [`plan_sandbox`] for a cloud sandbox: always the profile's kits, since there are no cloud
@@ -2299,7 +2320,7 @@ pub(super) fn ensure_worker_sandbox(
     )?;
     let login = login_helper(env.config_dir, harness, env.auth)?;
     if replace {
-        remove_local_sandbox(env.backend, &sandbox, harness);
+        remove_local_sandbox(env.backend, &sandbox, harness)?;
     }
     prepared.record.config_hash = plan.kits.config_hash.clone();
     if let Some(worker) = prepared.record.worker.as_mut() {
@@ -3973,7 +3994,9 @@ fn remove_reviewer(env: &TaskEnv, prepared: &mut Prepared, sandbox: &str, clone:
         release_cloud_sandbox(env, prepared, sandbox);
         return;
     }
-    remove_local_sandbox(env.backend, sandbox, env.config.reviewer.harness);
+    if let Err(e) = remove_local_sandbox(env.backend, sandbox, env.config.reviewer.harness) {
+        prepared.record.notes.push(format!("{e:#}"));
+    }
     if let Err(e) = remove_with_retries(clone) {
         prepared
             .record
@@ -4117,7 +4140,7 @@ fn open_review_workspace(
 
     // A clone left by a killed run (and its sandbox) goes first.
     if clone.exists() {
-        remove_local_sandbox(env.backend, sandbox, reviewer.harness);
+        remove_local_sandbox(env.backend, sandbox, reviewer.harness)?;
         remove_with_retries(clone)
             .with_context(|| format!("cannot clear {}, left by an earlier run", clone.display()))?;
     }

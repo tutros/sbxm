@@ -310,11 +310,7 @@ fn remove_sandboxes(
             if plan.antigravity.contains(sandbox)
                 && let Err(e) = auth::remove_sandbox_secret(backend, sandbox)
             {
-                report.stayed.push(format!(
-                    "the Antigravity login secret of {sandbox} stayed: {e:#}; remove it with \
-                     `sbx secret rm --placeholder {} --sandbox {sandbox} -f`",
-                    auth::placeholder(sandbox)
-                ));
+                report.stayed.push(format!("{e:#}"));
             }
         }
         return true;

@@ -357,13 +357,7 @@ fn effective_login<'a>(contestant: &Contestant, kits: &'a RunKits) -> Option<&'a
 pub(crate) fn remove_secret(backend: &dyn SandboxBackend, sandbox: &str) -> Option<String> {
     auth::remove_sandbox_secret(backend, sandbox)
         .err()
-        .map(|e| {
-            format!(
-                "cannot remove the Antigravity login secret of {sandbox}: {e:#}; run `sbx secret \
-                 rm --placeholder {} --sandbox {sandbox} -f`",
-                auth::placeholder(sandbox)
-            )
-        })
+        .map(|e| format!("{e:#}"))
 }
 
 /// Both removal errors, in order, as one.

@@ -366,9 +366,18 @@ pub fn set_sandbox_secret(
         .with_context(|| format!("cannot store the Antigravity login secret for {sandbox}"))
 }
 
-/// Removes the scoped secret of `sandbox`, after the sandbox itself.
+/// Removes the scoped secret of `sandbox`, after the sandbox itself. The error names the command
+/// that removes it by hand.
 pub fn remove_sandbox_secret(backend: &dyn SandboxBackend, sandbox: &str) -> Result<()> {
-    backend.remove_custom_secret(&placeholder(sandbox), sandbox)
+    let placeholder = placeholder(sandbox);
+    backend
+        .remove_custom_secret(&placeholder, sandbox)
+        .map_err(|e| {
+            anyhow!(
+                "cannot remove the Antigravity login secret of {sandbox}: {e:#}; run `sbx secret \
+                 rm --placeholder {placeholder} --sandbox {sandbox} -f`"
+            )
+        })
 }
 
 /// Writes `agy`'s token file into the new sandbox `sandbox`: placeholders only, with a far-future
