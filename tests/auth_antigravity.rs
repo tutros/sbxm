@@ -486,14 +486,20 @@ mod sandbox {
             panic!("the file goes through stdin, never the command line")
         };
         let file: serde_json::Value = serde_json::from_str(json).unwrap();
-        assert_eq!(file["access_token"], auth::placeholder("sbxm-run-x-0-0"));
-        assert_ne!(file["refresh_token"], file["access_token"]);
+        // agy 1.4.12's layout: the tokens nested under `token` (checked 2026-10-30).
+        let token = &file["token"];
+        assert_eq!(token["access_token"], auth::placeholder("sbxm-run-x-0-0"));
+        assert_ne!(token["refresh_token"], token["access_token"]);
         assert!(
-            file["refresh_token"].as_str().unwrap().starts_with("sbxm-"),
+            token["refresh_token"]
+                .as_str()
+                .unwrap()
+                .starts_with("sbxm-"),
             "{file}"
         );
+        assert_eq!(token["expiry"], "2099-01-01T00:00:00Z");
         assert_eq!(file["auth_method"], "consumer");
-        assert_eq!(file["expiry"], "2099-01-01T00:00:00Z");
+        assert!(file.get("access_token").is_none(), "{file}");
     }
 
     #[test]

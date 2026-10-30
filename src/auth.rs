@@ -449,13 +449,16 @@ pub fn remove_sandbox_secret(backend: &dyn SandboxBackend, sandbox: &str) -> Res
 }
 
 /// Writes `agy`'s token file into the new sandbox `sandbox`: placeholders only, with a far-future
-/// expiry so `agy` never refreshes it itself (spike S16, Q2). The file goes through stdin.
+/// expiry so `agy` never refreshes it itself (spike S16, Q2), in agy 1.4.12's layout with the
+/// tokens nested under `token` (checked 2026-10-30). The file goes through stdin.
 pub fn write_token_file(backend: &dyn SandboxBackend, sandbox: &str) -> Result<()> {
     let file = serde_json::json!({
-        "access_token": placeholder(sandbox),
-        "token_type": "Bearer",
-        "refresh_token": "sbxm-refresh-token-stays-on-the-host",
-        "expiry": "2099-01-01T00:00:00Z",
+        "token": {
+            "access_token": placeholder(sandbox),
+            "token_type": "Bearer",
+            "refresh_token": "sbxm-refresh-token-stays-on-the-host",
+            "expiry": "2099-01-01T00:00:00Z",
+        },
         "auth_method": "consumer",
         "id_token_email": "sbxm@placeholder.invalid",
     });

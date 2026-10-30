@@ -2405,7 +2405,10 @@ fn antigravity_login_sandbox_against_real_sbx() {
         .output()
         .unwrap();
     let token: serde_json::Value = serde_json::from_slice(&token.stdout).unwrap();
-    assert_eq!(token["access_token"], auth::placeholder(&sandbox).as_str());
+    assert_eq!(
+        token["token"]["access_token"],
+        auth::placeholder(&sandbox).as_str()
+    );
     assert_eq!(token["auth_method"], "consumer");
 
     let workspace = base_dir.join(&project);

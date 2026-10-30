@@ -46,6 +46,21 @@ fn workspace(env: &Env) -> std::path::PathBuf {
     env.base_dir().join(".sbxm").join(".auth-antigravity")
 }
 
+/// agy 1.4.12 (2026-10-30) nests its tokens under `token`; spike S16's agy wrote them flat.
+const NESTED_TOKEN_FILE: &str = r#"{"token":{"access_token":"ya29.fake-access","token_type":"Bearer","refresh_token":"fake-nested-refresh","expiry":"2026-10-30T12:00:00Z","expires_in":3599},"auth_method":"consumer","id_token_email":"fake@example.invalid"}"#;
+
+#[test]
+fn signing_in_reads_the_refresh_token_nested_under_token() {
+    let env = Env::new();
+    let backend = FakeBackend::default()
+        .with_exec_output_matching("antigravity-oauth-token", ok(NESTED_TOKEN_FILE))
+        .with_exec_output_matching("GOCSPX", ok(CLIENTS));
+    run(&env, &backend, &good()).unwrap();
+
+    let login = auth::load_login(&env.config_dir()).unwrap();
+    assert_eq!(login.refresh_token, "fake-nested-refresh");
+}
+
 #[test]
 fn signing_in_saves_the_login_with_the_client_pair_that_refreshes() {
     let env = Env::new();

@@ -107,7 +107,14 @@ fn sign_in(
     })?;
     let refresh_token = serde_json::from_str::<serde_json::Value>(&token)
         .ok()
-        .and_then(|v| v.get("refresh_token")?.as_str().map(str::to_owned))
+        // agy 1.4.12 nests the tokens under `token`; spike S16's agy wrote them flat.
+        .and_then(|v| {
+            v.get("token")
+                .and_then(|t| t.get("refresh_token"))
+                .or_else(|| v.get("refresh_token"))?
+                .as_str()
+                .map(str::to_owned)
+        })
         .filter(|t| !t.is_empty())
         .ok_or_else(|| {
             anyhow!(
