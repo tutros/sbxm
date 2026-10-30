@@ -70,7 +70,7 @@ impl Host {
                     .map_or(0, |d| d.as_secs())
             },
             current_dir: std::env::current_dir().ok(),
-            token_endpoint: &auth::HostEndpoint,
+            token_endpoint: &auth::HostEndpoint::GOOGLE,
         }
     }
 }

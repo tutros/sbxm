@@ -237,8 +237,10 @@ so `sbxm task rm` can try again. Interactive `new`/`open` sandboxes are unchange
 itself, and an update can break this route: `cargo test --test real_sbx antigravity_login -- --ignored` checks it with
 your saved login, and `sbxm doctor` checks the login and one refresh.
 
-**Not usable yet:** this build of sbxm has no HTTP client to call Google's token endpoint, so the refresh, and with it
-`sbxm auth antigravity` and the `"login"` checks, fail saying so; the choice of client is still open (issue 330).
+The refresh is a POST from your machine to `https://oauth2.googleapis.com/token` (decision 271), through the proxy
+`HTTPS_PROXY` names, if any, and with your system's root certificates. It may take 10 seconds to connect and 30 seconds
+in all; a refresh that times out, can't connect or is refused (400/401) is an error naming `sbxm auth antigravity`, and
+never shows Google's answer or the saved login.
 
 ### Profiles: `<profiles_dir>/<name>/profile.toml`
 

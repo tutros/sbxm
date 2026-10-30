@@ -829,7 +829,7 @@ fn main() -> anyhow::Result<()> {
         } => commands::auth_token::run(
             &config::config_dir()?,
             sbxm::auth::now(),
-            &sbxm::auth::HostEndpoint,
+            &sbxm::auth::HostEndpoint::GOOGLE,
             &mut std::io::stdout(),
         ),
         Command::Config {

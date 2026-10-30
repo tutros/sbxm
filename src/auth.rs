@@ -43,20 +43,50 @@ pub trait TokenEndpoint {
     fn post_form(&self, url: &str, form: &[(&str, &str)]) -> Result<(u16, String)>;
 }
 
-/// The host's way to reach [`TOKEN_URL`]. sbxm has no HTTP client of its own yet: which one to
-/// use is left to the user (issue 330), so every refresh fails with that said.
-pub struct HostEndpoint;
+/// The host's way to reach [`TOKEN_URL`] (decision 271): `ureq` over the platform's TLS and
+/// its root certificates, through the proxy the environment names (`HTTPS_PROXY`, `NO_PROXY`).
+pub struct HostEndpoint {
+    /// How long connecting may take.
+    pub connect: std::time::Duration,
+    /// How long the whole call may take, the answer read included.
+    pub overall: std::time::Duration,
+}
+
+impl HostEndpoint {
+    /// The endpoint sbxm uses: 10 s to connect, 30 s in all.
+    pub const GOOGLE: HostEndpoint = HostEndpoint {
+        connect: std::time::Duration::from_secs(10),
+        overall: std::time::Duration::from_secs(30),
+    };
+}
 
 impl TokenEndpoint for HostEndpoint {
-    fn check(&self) -> Result<()> {
-        bail!(
-            "this build of sbxm has no HTTP client to call {TOKEN_URL} with (issue 330 leaves \
-             the choice to the user)"
-        )
-    }
-
-    fn post_form(&self, _url: &str, _form: &[(&str, &str)]) -> Result<(u16, String)> {
-        self.check().map(|()| (0, String::new()))
+    /// Any answer is a status and a body: only a call that got none (no connection, a timeout)
+    /// is an error, and it never carries the form.
+    fn post_form(&self, url: &str, form: &[(&str, &str)]) -> Result<(u16, String)> {
+        use ureq::tls::{RootCerts, TlsConfig, TlsProvider};
+        let agent: ureq::Agent = ureq::Agent::config_builder()
+            .timeout_connect(Some(self.connect))
+            .timeout_global(Some(self.overall))
+            .http_status_as_error(false)
+            .tls_config(
+                TlsConfig::builder()
+                    .provider(TlsProvider::NativeTls)
+                    .root_certs(RootCerts::PlatformVerifier)
+                    .build(),
+            )
+            .build()
+            .into();
+        let mut response = agent
+            .post(url)
+            .send_form(form.iter().copied())
+            .map_err(|e| anyhow!("{e}"))?;
+        let status = response.status().as_u16();
+        let body = response
+            .body_mut()
+            .read_to_string()
+            .map_err(|e| anyhow!("cannot read the answer: {e}"))?;
+        Ok((status, body))
     }
 }
 
@@ -74,7 +104,7 @@ impl Host<'static> {
     /// The running sbxm and the real clock.
     pub fn real() -> Self {
         Host {
-            endpoint: &HostEndpoint,
+            endpoint: &HostEndpoint::GOOGLE,
             helper: std::env::current_exe().unwrap_or_default(),
             now: now(),
         }
@@ -222,7 +252,12 @@ fn try_refresh(
                 ("client_secret", &login.client_secret),
             ],
         )
-        .map_err(|e| anyhow!("cannot reach {TOKEN_URL} to refresh the Antigravity login: {e:#}"))?;
+        .map_err(|e| {
+            anyhow!(
+                "cannot reach {TOKEN_URL} to refresh the Antigravity login: {e:#}; check this \
+                 host's network, then {LOGIN_FIX} if it still fails"
+            )
+        })?;
     #[derive(Deserialize)]
     struct Answer {
         access_token: String,
