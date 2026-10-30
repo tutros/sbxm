@@ -111,6 +111,33 @@ pub fn run(
     out: &mut dyn Write,
     warn: &mut dyn Write,
 ) -> Result<()> {
+    run_with_auth(
+        config_dir,
+        opts,
+        backend,
+        github,
+        probe,
+        host,
+        out,
+        warn,
+        &crate::auth::Host::real(),
+    )
+}
+
+/// Like [`run`], with `auth` instead of the real token endpoint, sbxm's own path and the clock:
+/// a seam for testing `antigravity_auth = "login"` (issue 330).
+#[allow(clippy::too_many_arguments)]
+pub fn run_with_auth(
+    config_dir: &std::path::Path,
+    opts: &Options,
+    backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    host: &dyn HostRunner,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+    auth: &crate::auth::Host,
+) -> Result<()> {
     if let Target::Issue(0) | Target::Pr(0) = opts.target {
         bail!("issue and PR numbers start at 1");
     }
@@ -147,10 +174,10 @@ pub fn run(
     }
     match &opts.target {
         Target::Issue(n) => run_issue(
-            config_dir, opts, &config, *n, backend, probe, host, out, warn,
+            config_dir, opts, &config, *n, backend, probe, host, out, warn, auth,
         ),
         Target::Pr(n) => run_pr(
-            config_dir, opts, &config, *n, backend, github, probe, host, out, warn,
+            config_dir, opts, &config, *n, backend, github, probe, host, out, warn, auth,
         ),
         Target::Spec(path) => run_spec(
             config_dir,
@@ -163,6 +190,7 @@ pub fn run(
             host,
             out,
             warn,
+            auth,
         ),
     }
 }
@@ -212,6 +240,7 @@ fn run_issue(
     host: &dyn HostRunner,
     out: &mut dyn Write,
     warn: &mut dyn Write,
+    auth: &crate::auth::Host,
 ) -> Result<()> {
     let base_dir = GlobalConfig::load(config_dir)?.base_dir;
     let id = format!("issue-{number}");
@@ -233,7 +262,7 @@ fn run_issue(
     }
     let config = &config;
     let env = TaskEnv {
-        auth: &crate::auth::Host::real(),
+        auth,
         config_dir,
         config,
         backend,
@@ -401,6 +430,7 @@ fn run_spec(
     host: &dyn HostRunner,
     out: &mut dyn Write,
     warn: &mut dyn Write,
+    auth: &crate::auth::Host,
 ) -> Result<()> {
     let base_dir = GlobalConfig::load(config_dir)?.base_dir;
     let id = match id_hint {
@@ -422,7 +452,7 @@ fn run_spec(
     }
     let config = &config;
     let env = TaskEnv {
-        auth: &crate::auth::Host::real(),
+        auth,
         config_dir,
         config,
         backend,
@@ -485,6 +515,7 @@ fn run_pr(
     host: &dyn HostRunner,
     out: &mut dyn Write,
     warn: &mut dyn Write,
+    auth: &crate::auth::Host,
 ) -> Result<()> {
     let base_dir = GlobalConfig::load(config_dir)?.base_dir;
     let id = format!("pr-{number}");
@@ -548,7 +579,7 @@ fn run_pr(
         email: "sbxm@localhost".into(),
     };
     let ctx = Ctx {
-        auth: &crate::auth::Host::real(),
+        auth,
         config_dir,
         repo: &repo_name,
         clone_source: &clone_source,

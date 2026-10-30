@@ -389,6 +389,10 @@ fn reviewer_fixture() -> Fixture {
 }
 
 fn reviewer_backend(f: &Fixture) -> FakeBackend {
+    reviewer_backend_with(f, "Must-fix findings: 0\n\nNothing found.\n")
+}
+
+fn reviewer_backend_with(f: &Fixture, review: &str) -> FakeBackend {
     let worker = common::task_fixture::play_tasks(
         &f.env.base_dir(),
         "main",
@@ -398,11 +402,8 @@ fn reviewer_backend(f: &Fixture) -> FakeBackend {
             bundle_bytes: None,
         },
     );
-    let reviewer = common::task_fixture::play_reviews(
-        &f.env.base_dir(),
-        "issue-41",
-        vec!["Must-fix findings: 0\n\nNothing found.\n".into()],
-    );
+    let reviewer =
+        common::task_fixture::play_reviews(&f.env.base_dir(), "issue-41", vec![review.to_owned()]);
     FakeBackend::with_secrets(&["anthropic"])
         .with_exec_output_matching(
             "claude",
@@ -446,6 +447,90 @@ fn a_reviewer_secret_that_stays_is_noted_with_its_removal() {
         prepared.record.notes.iter().any(|n| n.contains(&removal)),
         "{:#?}",
         prepared.record.notes
+    );
+}
+
+fn removal(sandbox: &str) -> String {
+    format!(
+        "sbx secret rm --placeholder {} --sandbox {sandbox} -f",
+        sbxm::auth::placeholder(sandbox)
+    )
+}
+
+/// `sbxm task review --issue 41` with a scripted token endpoint: the result, stdout, stderr.
+fn review_command(f: &Fixture, backend: &FakeBackend) -> (anyhow::Result<()>, String, String) {
+    use sbxm::commands::task_review::{Options, Target, run_with_auth};
+    let opts = Options {
+        repo_root: f.env.tmp.path().join("target-repo"),
+        target: Target::Issue(41),
+        repo: Some("o/r".into()),
+        base: None,
+        clone_source: None,
+        reviewer_harness: None,
+        reviewer_model: None,
+        reviewer_time_limit: None,
+        time_limit: None,
+        profile: None,
+        resolved_spec_id: None,
+        force: false,
+        disk: Default::default(),
+        location: None,
+        identity: None,
+    };
+    let endpoint = Endpoint::fresh("new", 3599);
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let result = run_with_auth(
+        &f.env.config_dir(),
+        &opts,
+        backend,
+        &FakeGitHub::default(),
+        &common::task_fixture::Probe,
+        &sbxm::task::gates::FakeHostRunner::default(),
+        &mut out,
+        &mut warn,
+        &endpoint.host(),
+    );
+    (
+        result,
+        String::from_utf8(out).unwrap(),
+        String::from_utf8(warn).unwrap(),
+    )
+}
+
+#[test]
+fn task_review_warns_with_the_removal_of_a_reviewer_secret_that_stays_and_is_still_ready() {
+    let f = reviewer_fixture();
+    let backend = reviewer_backend(&f);
+    common::task_fixture::worked_task(&f, &backend);
+
+    let (result, out, warn) = review_command(&f, &backend);
+
+    result.unwrap();
+    assert!(out.contains("issue-41: ready"), "{out}");
+    let line = warn
+        .lines()
+        .find(|l| l.contains(&removal(REVIEW_SANDBOX)))
+        .unwrap_or_else(|| panic!("no warning with the removal command: {warn}"));
+    assert!(line.starts_with("warning: "), "{line}");
+    assert!(line.contains(REVIEW_SANDBOX), "{line}");
+}
+
+#[test]
+fn a_failed_review_whose_secret_stays_reports_both_failures() {
+    let f = reviewer_fixture();
+    let backend = reviewer_backend_with(&f, "I looked, but wrote no count.\n");
+    common::task_fixture::worked_task(&f, &backend);
+
+    let (result, _out, warn) = review_command(&f, &backend);
+
+    let err = format!("{:#}", result.unwrap_err());
+    assert!(
+        warn.contains(&removal(REVIEW_SANDBOX)),
+        "the removal goes to the warnings, whatever the round did: {warn}"
+    );
+    assert!(
+        err.to_lowercase().contains("must-fix"),
+        "the review's own failure: {err}"
     );
 }
 

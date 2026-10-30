@@ -3988,7 +3988,8 @@ pub fn run_reviewer(env: &TaskEnv, prepared: &mut Prepared, round: u32) -> Resul
 
 /// Removes the reviewer's sandbox and its host clone after its round, on every path: a cloud
 /// one through [`release_cloud_sandbox`] (retried, stamped, then its scoped secrets), which has
-/// no host clone.
+/// no host clone. A login secret that stays is noted in the task and goes to `prepared.warnings`
+/// with the command that removes it, whether the round succeeded or not.
 fn remove_reviewer(env: &TaskEnv, prepared: &mut Prepared, sandbox: &str, clone: &Path) {
     if prepared.record.location == Location::Cloud {
         release_cloud_sandbox(env, prepared, sandbox);
@@ -3996,6 +3997,7 @@ fn remove_reviewer(env: &TaskEnv, prepared: &mut Prepared, sandbox: &str, clone:
     }
     if let Err(e) = remove_local_sandbox(env.backend, sandbox, env.config.reviewer.harness) {
         prepared.record.notes.push(format!("{e:#}"));
+        prepared.warnings.push(format!("{e:#}"));
     }
     if let Err(e) = remove_with_retries(clone) {
         prepared
