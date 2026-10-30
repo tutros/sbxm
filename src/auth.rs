@@ -177,15 +177,31 @@ fn read_cache(config_dir: &Path) -> Option<Cached> {
 /// Asks Google for a new access token with the saved login and caches it. Anything but a 200
 /// carrying a token is an error naming [`LOGIN_FIX`], never the body.
 pub fn refresh(config_dir: &Path, now: u64, endpoint: &dyn TokenEndpoint) -> Result<String> {
+    let cached = refresh_unsaved(config_dir, now, endpoint)?;
+    save_cache(config_dir, &cached);
+    Ok(cached.access_token)
+}
+
+/// `sbxm doctor`'s check (decision 270, point 5): the config dir is outside the base dir, the
+/// saved login is there and one refresh succeeds. Nothing is written, the cache included.
+pub fn check_login(
+    config_dir: &Path,
+    base_dir: &Path,
+    now: u64,
+    endpoint: &dyn TokenEndpoint,
+) -> Result<()> {
+    check_config_dir(config_dir, base_dir)?;
+    refresh_unsaved(config_dir, now, endpoint).map(|_| ())
+}
+
+fn refresh_unsaved(config_dir: &Path, now: u64, endpoint: &dyn TokenEndpoint) -> Result<Cached> {
     let login = load_login(config_dir)?;
-    let cached = match try_refresh(&login, now, endpoint)? {
-        Ok(cached) => cached,
+    match try_refresh(&login, now, endpoint)? {
+        Ok(cached) => Ok(cached),
         Err(status) => {
             bail!("Google refused to refresh the Antigravity login (HTTP {status}); {LOGIN_FIX}")
         }
-    };
-    save_cache(config_dir, &cached);
-    Ok(cached.access_token)
+    }
 }
 
 /// One refresh with `login`: the new token, or the status of an answer that wasn't a 200 carrying

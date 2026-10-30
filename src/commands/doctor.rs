@@ -7,8 +7,9 @@ use anyhow::{Result, bail};
 use clap::ValueEnum;
 
 use super::new;
+use crate::auth::{self, TokenEndpoint};
 use crate::backend::{Location, SandboxBackend, TemplateImage};
-use crate::config::{self, GlobalConfig, Profile};
+use crate::config::{self, AntigravityAuth, GlobalConfig, Profile};
 use crate::disk::{self, gib};
 use crate::harness::Harness;
 use crate::run::results::parse_timestamp;
@@ -42,6 +43,8 @@ pub struct Host {
     /// The folder `doctor` runs in, whose `sbxm-task.toml` says whether it is a cloud repo
     /// (P13 (a), decision 262); `None` when it can't be read.
     pub current_dir: Option<PathBuf>,
+    /// Where the Antigravity login is refreshed, checked in login mode (decision 270).
+    pub token_endpoint: &'static (dyn TokenEndpoint + Sync),
 }
 
 impl Host {
@@ -67,6 +70,7 @@ impl Host {
                     .map_or(0, |d| d.as_secs())
             },
             current_dir: std::env::current_dir().ok(),
+            token_endpoint: &auth::HostEndpoint,
         }
     }
 }
@@ -171,6 +175,7 @@ pub fn run(config_dir: &Path, backend: &dyn SandboxBackend, host: &Host) -> Repo
     check_base_dir(&mut report, &config.base_dir, &config_path, host);
     check_state_drive(&mut report, &config, &config_path, host);
     check_configs(&mut report, &config, &config_path, backend);
+    check_antigravity_login(&mut report, &config, config_dir, host);
     check_templates(
         &mut report,
         &config,
@@ -179,6 +184,34 @@ pub fn run(config_dir: &Path, backend: &dyn SandboxBackend, host: &Host) -> Repo
         host,
     );
     report
+}
+
+/// In login mode, the saved Antigravity login and one refresh, with no sandbox (decision 270,
+/// point 5); the refreshed token isn't cached or shown.
+fn check_antigravity_login(
+    report: &mut Report,
+    config: &GlobalConfig,
+    config_dir: &Path,
+    host: &Host,
+) {
+    if config.antigravity_auth != AntigravityAuth::Login {
+        return;
+    }
+    let path = auth::login_path(config_dir);
+    let checked = host.token_endpoint.check().and_then(|()| {
+        auth::check_login(
+            config_dir,
+            &config.base_dir,
+            (host.now)(),
+            host.token_endpoint,
+        )
+    });
+    match checked {
+        Ok(()) => report.pass(format!("Antigravity login {} refreshes", path.display())),
+        Err(err) => report.fail(format!(
+            "Antigravity login (antigravity_auth = \"login\"): {err:#}"
+        )),
+    }
 }
 
 /// The running cloud sandboxes named `sbxm-`, one line each (decision 259). A cloud that can't
