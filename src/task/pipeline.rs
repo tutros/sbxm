@@ -997,6 +997,7 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
     };
     secrets::check(location, ctx.scoped_secrets)?;
     let worker = &ctx.config.worker;
+    let login = uses_login(&global, worker.harness).then(|| ctx.auth.helper.clone());
     let profile = Profile::load(global.profiles_dir(), &ctx.config.sandbox.profile)?;
     // A cloud worker's TTL (P5 (d)), checked with the rest before anything is written.
     let cloud_ttl = match location {
@@ -1187,7 +1188,13 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
         record::write(&meta, task)?;
 
         match cloud_ttl {
-            None => plan.create(ctx.backend, &sandbox, worker.harness, &workspace)?,
+            None => plan.create(
+                ctx.backend,
+                &sandbox,
+                worker.harness,
+                &workspace,
+                login.as_deref(),
+            )?,
             Some(ttl) => {
                 create_recorded(
                     ctx.backend,
@@ -1236,7 +1243,7 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
             // removes its sandbox even if `create` failed, as before this milestone, and keeps
             // no record of it.
             if local {
-                let _ = ctx.backend.remove(&sandbox);
+                remove_local_sandbox(ctx.backend, &sandbox, ctx.config.worker.harness);
                 let _ = fs::remove_dir_all(&workspace);
                 let _ = fs::remove_dir_all(&meta);
                 return Err(e);
@@ -1897,14 +1904,20 @@ pub(super) fn plan_sandbox(
 
 impl SandboxPlan {
     /// Creates `sandbox` over `workspace`, then holds a strict `codex` sandbox to its allow list
-    /// (decisions 221, 232).
+    /// (decisions 221, 232). With `login` (sbxm's own path, for a login-mode Antigravity sandbox,
+    /// decision 270), its scoped secret is stored first and its placeholder token file written
+    /// last; [`remove_local_sandbox`] removes the secret with the sandbox.
     pub(super) fn create(
         &self,
         backend: &dyn SandboxBackend,
         sandbox: &str,
         harness: Harness,
         workspace: &Path,
+        login: Option<&Path>,
     ) -> Result<()> {
+        if let Some(helper) = login {
+            auth::set_sandbox_secret(backend, sandbox, helper)?;
+        }
         backend
             .create(&CreateSpec {
                 name: sandbox.to_owned(),
@@ -1925,7 +1938,27 @@ impl SandboxPlan {
             sandbox,
             backend,
             self.deny_network.as_deref(),
-        )
+        )?;
+        if login.is_some() {
+            auth::write_token_file(backend, sandbox)?;
+        }
+        Ok(())
+    }
+}
+
+/// sbxm's own path when `harness`'s sandbox is signed in with the user's login (decision 270).
+fn login_helper(config_dir: &Path, harness: Harness, host: &auth::Host) -> Result<Option<PathBuf>> {
+    let global = GlobalConfig::load(config_dir)?;
+    Ok(uses_login(&global, harness).then(|| host.helper.clone()))
+}
+
+/// Removes a local task sandbox, best effort, then the login secret an Antigravity one may hold
+/// (decision 270), whatever `antigravity_auth` says now: one that was never stored counts as
+/// removed.
+pub(crate) fn remove_local_sandbox(backend: &dyn SandboxBackend, sandbox: &str, harness: Harness) {
+    let _ = backend.remove(sandbox);
+    if harness == Harness::Antigravity {
+        let _ = auth::remove_sandbox_secret(backend, sandbox);
     }
 }
 
@@ -2264,8 +2297,9 @@ pub(super) fn ensure_worker_sandbox(
         },
         &mut prepared.warnings,
     )?;
+    let login = login_helper(env.config_dir, harness, env.auth)?;
     if replace {
-        let _ = env.backend.remove(&sandbox);
+        remove_local_sandbox(env.backend, &sandbox, harness);
     }
     prepared.record.config_hash = plan.kits.config_hash.clone();
     if let Some(worker) = prepared.record.worker.as_mut() {
@@ -2273,7 +2307,13 @@ pub(super) fn ensure_worker_sandbox(
     }
     // The record goes first, as in `prepare`: `template rm` reads it to see what the sandbox uses.
     record::write(&prepared.meta, &prepared.record)?;
-    plan.create(env.backend, &sandbox, harness, &prepared.workspace)?;
+    plan.create(
+        env.backend,
+        &sandbox,
+        harness,
+        &prepared.workspace,
+        login.as_deref(),
+    )?;
     Ok(true)
 }
 
@@ -3933,7 +3973,7 @@ fn remove_reviewer(env: &TaskEnv, prepared: &mut Prepared, sandbox: &str, clone:
         release_cloud_sandbox(env, prepared, sandbox);
         return;
     }
-    let _ = env.backend.remove(sandbox);
+    remove_local_sandbox(env.backend, sandbox, env.config.reviewer.harness);
     if let Err(e) = remove_with_retries(clone) {
         prepared
             .record
@@ -4073,10 +4113,11 @@ fn open_review_workspace(
     let reviewer = &env.config.reviewer;
     let repo_git = prepared.meta.join("repo.git");
     let branch = prepared.record.branch.clone();
+    let login = login_helper(env.config_dir, reviewer.harness, env.auth)?;
 
     // A clone left by a killed run (and its sandbox) goes first.
     if clone.exists() {
-        let _ = env.backend.remove(sandbox);
+        remove_local_sandbox(env.backend, sandbox, reviewer.harness);
         remove_with_retries(clone)
             .with_context(|| format!("cannot clear {}, left by an earlier run", clone.display()))?;
     }
@@ -4119,7 +4160,13 @@ fn open_review_workspace(
     // that `task rm` needs to find the sandbox.
     prepared.record.reviewer = Some(reviewer_agent(env, sandbox, slashes(clone), &plan));
     record::write(&prepared.meta, &prepared.record)?;
-    plan.create(env.backend, sandbox, reviewer.harness, clone)?;
+    plan.create(
+        env.backend,
+        sandbox,
+        reviewer.harness,
+        clone,
+        login.as_deref(),
+    )?;
     Ok(warnings)
 }
 
