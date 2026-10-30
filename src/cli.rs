@@ -124,6 +124,14 @@ pub enum Command {
 
 #[derive(Debug, Subcommand)]
 pub enum AuthCommand {
+    /// Sign in to Antigravity with your Google account in a throwaway sandbox and save the
+    /// login under the config dir, for antigravity_auth = "login".
+    Antigravity {
+        /// Create the sandbox even when the drive of sbx's sandbox state has less than
+        /// min_free_disk free.
+        #[arg(long)]
+        ignore_disk: bool,
+    },
     /// Print the access token of a saved login, refreshed when it expires within 5 minutes:
     /// the helper `sbx`'s proxy runs. Prints only the token.
     Token {

@@ -82,3 +82,64 @@ pub fn write_cache(config_dir: &Path, token: &str, expires_at: u64) {
     )
     .unwrap();
 }
+
+/// Answers 200 with `token` only for the client pair `good`, 401 for any other pair.
+pub struct PairEndpoint {
+    pub good: (String, String),
+    pub token: String,
+    pub calls: Mutex<Vec<Call>>,
+}
+
+impl PairEndpoint {
+    pub fn new(id: &str, secret: &str, token: &str) -> Self {
+        PairEndpoint {
+            good: (id.to_owned(), secret.to_owned()),
+            token: token.to_owned(),
+            calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub fn host(&self) -> Host<'_> {
+        Host {
+            endpoint: self,
+            helper: helper_path(),
+            now: NOW,
+        }
+    }
+}
+
+impl TokenEndpoint for PairEndpoint {
+    fn post_form(&self, url: &str, form: &[(&str, &str)]) -> anyhow::Result<(u16, String)> {
+        let field = |name: &str| form.iter().find(|(k, _)| *k == name).map(|(_, v)| *v);
+        let call = (
+            url.to_owned(),
+            form.iter()
+                .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
+                .collect(),
+        );
+        self.calls.lock().unwrap().push(call);
+        if field("client_id") == Some(self.good.0.as_str())
+            && field("client_secret") == Some(self.good.1.as_str())
+        {
+            Ok((
+                200,
+                format!(r#"{{"access_token":"{}","expires_in":3599}}"#, self.token),
+            ))
+        } else {
+            Ok((401, r#"{"error":"invalid_client"}"#.to_owned()))
+        }
+    }
+}
+
+/// An endpoint the host can't use at all, refused before any sandbox exists.
+pub struct UnusableEndpoint;
+
+impl TokenEndpoint for UnusableEndpoint {
+    fn check(&self) -> anyhow::Result<()> {
+        anyhow::bail!("no HTTP client here")
+    }
+
+    fn post_form(&self, _url: &str, _form: &[(&str, &str)]) -> anyhow::Result<(u16, String)> {
+        panic!("an unusable endpoint is never posted to")
+    }
+}

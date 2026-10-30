@@ -35,6 +35,11 @@ pub fn cache_path(config_dir: &Path) -> PathBuf {
 /// One HTTP form POST, answered with its status and body. The real one runs on the host; tests
 /// script it.
 pub trait TokenEndpoint {
+    /// Whether this host can make the call at all, asked before any sandbox exists.
+    fn check(&self) -> Result<()> {
+        Ok(())
+    }
+
     fn post_form(&self, url: &str, form: &[(&str, &str)]) -> Result<(u16, String)>;
 }
 
@@ -43,11 +48,15 @@ pub trait TokenEndpoint {
 pub struct HostEndpoint;
 
 impl TokenEndpoint for HostEndpoint {
-    fn post_form(&self, url: &str, _form: &[(&str, &str)]) -> Result<(u16, String)> {
+    fn check(&self) -> Result<()> {
         bail!(
-            "this build of sbxm has no HTTP client to call {url} with (issue 330 leaves the \
-             choice to the user)"
+            "this build of sbxm has no HTTP client to call {TOKEN_URL} with (issue 330 leaves \
+             the choice to the user)"
         )
+    }
+
+    fn post_form(&self, _url: &str, _form: &[(&str, &str)]) -> Result<(u16, String)> {
+        self.check().map(|()| (0, String::new()))
     }
 }
 
@@ -169,6 +178,23 @@ fn read_cache(config_dir: &Path) -> Option<Cached> {
 /// carrying a token is an error naming [`LOGIN_FIX`], never the body.
 pub fn refresh(config_dir: &Path, now: u64, endpoint: &dyn TokenEndpoint) -> Result<String> {
     let login = load_login(config_dir)?;
+    let cached = match try_refresh(&login, now, endpoint)? {
+        Ok(cached) => cached,
+        Err(status) => {
+            bail!("Google refused to refresh the Antigravity login (HTTP {status}); {LOGIN_FIX}")
+        }
+    };
+    save_cache(config_dir, &cached);
+    Ok(cached.access_token)
+}
+
+/// One refresh with `login`: the new token, or the status of an answer that wasn't a 200 carrying
+/// one (a 200 without a token counts as 200). Only an unreachable endpoint is an error.
+fn try_refresh(
+    login: &Login,
+    now: u64,
+    endpoint: &dyn TokenEndpoint,
+) -> Result<std::result::Result<Cached, u16>> {
     let (status, body) = endpoint
         .post_form(
             TOKEN_URL,
@@ -180,30 +206,66 @@ pub fn refresh(config_dir: &Path, now: u64, endpoint: &dyn TokenEndpoint) -> Res
             ],
         )
         .map_err(|e| anyhow!("cannot reach {TOKEN_URL} to refresh the Antigravity login: {e:#}"))?;
-    if status != 200 {
-        bail!("Google refused to refresh the Antigravity login (HTTP {status}); {LOGIN_FIX}");
-    }
     #[derive(Deserialize)]
     struct Answer {
         access_token: String,
         expires_in: u64,
     }
-    let answer: Answer = serde_json::from_str(&body)
+    if status != 200 {
+        return Ok(Err(status));
+    }
+    Ok(serde_json::from_str(&body)
         .ok()
         .filter(|a: &Answer| !a.access_token.is_empty())
-        .ok_or_else(|| {
-            anyhow!("Google's answer to the Antigravity refresh had no access token; {LOGIN_FIX}")
-        })?;
-    let cached = Cached {
-        access_token: answer.access_token,
-        expires_at: now.saturating_add(answer.expires_in),
-    };
-    // Best effort: a cache that can't be written only costs the next call a refresh.
-    let _ = write_private(
-        &cache_path(config_dir),
-        serde_json::to_string(&cached)?.as_bytes(),
-    );
-    Ok(cached.access_token)
+        .map(|answer| Cached {
+            access_token: answer.access_token,
+            expires_at: now.saturating_add(answer.expires_in),
+        })
+        .ok_or(status))
+}
+
+/// Best effort: a cache that can't be written only costs the next call a refresh.
+fn save_cache(config_dir: &Path, cached: &Cached) {
+    if let Ok(json) = serde_json::to_string(cached) {
+        let _ = write_private(&cache_path(config_dir), json.as_bytes());
+    }
+}
+
+/// Saves `login` once one of `pairs` (`agy`'s client id and secret, tried in order) refreshes it,
+/// with that pair, and caches the access token it got (`sbxm auth antigravity`). Nothing is
+/// written when no pair answers 200 with a token.
+pub fn save_login(
+    config_dir: &Path,
+    refresh_token: &str,
+    pairs: &[(String, String)],
+    now: u64,
+    endpoint: &dyn TokenEndpoint,
+) -> Result<()> {
+    let mut statuses = Vec::new();
+    for (client_id, client_secret) in pairs {
+        let login = Login {
+            client_id: client_id.clone(),
+            client_secret: client_secret.clone(),
+            refresh_token: refresh_token.to_owned(),
+        };
+        match try_refresh(&login, now, endpoint)? {
+            Ok(cached) => {
+                write_private(
+                    &login_path(config_dir),
+                    serde_json::to_string(&login)?.as_bytes(),
+                )?;
+                save_cache(config_dir, &cached);
+                return Ok(());
+            }
+            Err(status) => statuses.push(status.to_string()),
+        }
+    }
+    bail!(
+        "none of the {} client pairs found in agy refreshed the new login (HTTP {}): agy may have \
+         changed how it signs in; set antigravity_auth = \"api-key\" meanwhile",
+        pairs.len(),
+        statuses.join(", ")
+    )
 }
 
 /// Writes `bytes` to `path` through a temporary file in the same folder, readable by the user

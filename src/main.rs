@@ -816,6 +816,15 @@ fn main() -> anyhow::Result<()> {
             &mut std::io::stdout(),
         ),
         Command::Auth {
+            command: AuthCommand::Antigravity { ignore_disk },
+        } => commands::auth_antigravity::run(
+            &config::config_dir()?,
+            &SbxBackend::LOCAL,
+            &sbxm::auth::Host::real(),
+            &sbxm::disk::Guard::real(ignore_disk),
+            &mut std::io::stdout(),
+        ),
+        Command::Auth {
             command: AuthCommand::Token { login: _ },
         } => commands::auth_token::run(
             &config::config_dir()?,
