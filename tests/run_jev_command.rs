@@ -268,7 +268,7 @@ fn the_secret_comes_before_the_sandbox_and_goes_after_it_one_call_per_pair_per_r
     );
     // The secret names the helper, the host and the env, never a value.
     let set = &backend.custom_secret_sets()[0];
-    assert_eq!(set.host, "api.typesafe.ai");
+    assert_eq!(set.hosts, ["api.typesafe.ai"]);
     assert_eq!(set.env, "JEV_API_KEY");
     assert_eq!(set.source, SecretSource::Command(helper(&env)));
     // The evaluator is a plain shell with its own kit, never a contestant's.

@@ -1234,6 +1234,7 @@ fn a_reviewer_sandbox_gets_the_scoped_secrets_and_its_removal_is_retried_then_th
     let waits = std::sync::Mutex::new(Vec::new());
     let who = identity();
     let env = sbxm::task::pipeline::TaskEnv {
+        auth: Box::leak(Box::new(sbxm::auth::Host::real())),
         config_dir: &f.env.config_dir(),
         config: &f.config,
         backend: &backend,
@@ -1587,6 +1588,7 @@ fn a_strict_reviewer_with_a_host_left_is_removed_then_its_secret_then_refused() 
     let started = backend.log().len();
     let who = identity();
     let env = sbxm::task::pipeline::TaskEnv {
+        auth: Box::leak(Box::new(sbxm::auth::Host::real())),
         config_dir: &f.env.config_dir(),
         config: &f.config,
         backend: &backend,
@@ -1667,6 +1669,7 @@ fn a_rebuilt_strict_fix_sandbox_whose_list_cannot_be_read_is_removed_then_refuse
     let worker = worker_sandbox(&id);
     let who = identity();
     let env = sbxm::task::pipeline::TaskEnv {
+        auth: Box::leak(Box::new(sbxm::auth::Host::real())),
         config_dir: &f.env.config_dir(),
         config: &f.config,
         backend: &backend,

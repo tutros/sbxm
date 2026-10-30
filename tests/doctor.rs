@@ -23,6 +23,7 @@ fn host() -> doctor::Host {
         sandbox_state_dir: None,
         now: || NOW,
         current_dir: None,
+        token_endpoint: &sbxm::auth::HostEndpoint::GOOGLE,
     }
 }
 

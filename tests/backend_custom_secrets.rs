@@ -8,7 +8,7 @@ use sbxm::backend::{CustomSecret, CustomSecretSpec, FakeBackend, SandboxBackend,
 fn spec() -> CustomSecretSpec {
     CustomSecretSpec {
         sandbox: "sbxm-run-x-jev-0".into(),
-        host: "api.typesafe.ai".into(),
+        hosts: vec!["api.typesafe.ai".into()],
         env: "JEV_API_KEY".into(),
         placeholder: "sbxm-jev-x-0".into(),
         source: SecretSource::Command(PathBuf::from("/opt/jev-token")),

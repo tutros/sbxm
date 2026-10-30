@@ -10,8 +10,9 @@ use anyhow::{Context, Result, bail};
 
 use super::config::{Cosine, RunConfig};
 use super::kits;
+use crate::auth;
 use crate::backend::SandboxBackend;
-use crate::config::{GlobalConfig, Profile};
+use crate::config::{AntigravityAuth, GlobalConfig, Profile};
 use crate::eval::{cosine, jev};
 use crate::harness::Harness;
 use crate::seed;
@@ -29,8 +30,23 @@ pub fn check(
     config_dir: &Path,
     run_config: &RunConfig,
     backend: &dyn SandboxBackend,
+    host: &auth::Host,
 ) -> Result<Preflight> {
     let global = GlobalConfig::load(config_dir)?;
+    // With the user's Google login, an Antigravity sandbox needs the saved login and a working
+    // refresh instead of the `google` secret (decision 270).
+    let login = global.antigravity_auth == AntigravityAuth::Login;
+    let uses_login = |harness: Harness| login && harness == Harness::Antigravity;
+    let mut harnesses = run_config.contestants.iter().map(|c| c.harness);
+    if harnesses.any(uses_login)
+        || run_config
+            .eval
+            .judge
+            .as_ref()
+            .is_some_and(|j| uses_login(j.harness))
+    {
+        auth::preflight(config_dir, &global.base_dir, host)?;
+    }
     if let Some(seed_dir) = &run_config.task.seed {
         check_seed(seed_dir, &global.base_dir, config_dir)?;
     }
@@ -70,12 +86,20 @@ pub fn check(
         }
     };
     for (i, c) in run_config.contestants.iter().enumerate() {
+        if uses_login(c.harness) {
+            continue;
+        }
         need(
             c.harness.provider_secret().to_owned(),
             format!("contestants[{i}], {}", c.harness.as_str()),
         );
     }
-    if let Some(judge) = &run_config.eval.judge {
+    if let Some(judge) = run_config
+        .eval
+        .judge
+        .as_ref()
+        .filter(|j| !uses_login(j.harness))
+    {
         need(
             judge.harness.provider_secret().to_owned(),
             format!("eval.judge, {}", judge.harness.as_str()),

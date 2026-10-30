@@ -96,6 +96,7 @@ pub fn run(
         (Location::Cloud, None) => Identity::read_from(None).ok(),
     };
     let env = TaskEnv {
+        auth: &crate::auth::Host::real(),
         config_dir,
         config: &config,
         backend: backend.located(location),

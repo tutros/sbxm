@@ -47,10 +47,26 @@ pub struct GlobalConfig {
     /// Where `sbx` keeps its sandboxes, overriding the platform default (decision 194).
     #[serde(default)]
     pub sandbox_state_dir: Option<PathBuf>,
+    /// How Antigravity sandboxes sign in (decision 270). Account-level, so it is not part of any
+    /// config hash.
+    #[serde(default)]
+    pub antigravity_auth: AntigravityAuth,
     /// Written by `config init` before decision 76 but never read; refused
     /// by [`GlobalConfig::load`] rather than silently ignored.
     #[serde(default)]
     default_harness: Option<toml::Value>,
+}
+
+/// `antigravity_auth` in `config.toml` (decision 270, issue 330).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AntigravityAuth {
+    /// The user's Google login, saved by `sbxm auth antigravity`; each sandbox holds only
+    /// placeholders and `sbx`'s proxy swaps in the access token.
+    Login,
+    /// The `google` secret as a Gemini API key (decision 137).
+    #[default]
+    ApiKey,
 }
 
 fn default_profile_name() -> String {

@@ -117,7 +117,13 @@ fn a_scoped_secret_or_another_host_or_env_is_no_conflict() {
         secret("global", "api.typesafe.ai", "OTHER_KEY"),
     ]);
     let config = sbxm::run::config::RunConfig::load(&config(&env, &helper(&env))).unwrap();
-    sbxm::run::preflight::check(&env.config_dir(), &config, &backend).unwrap();
+    sbxm::run::preflight::check(
+        &env.config_dir(),
+        &config,
+        &backend,
+        &sbxm::auth::Host::real(),
+    )
+    .unwrap();
     assert!(backend.log().is_empty(), "{:?}", backend.log());
 }
 
@@ -135,5 +141,11 @@ fn a_run_without_jev_never_lists_custom_secrets() {
     )
     .unwrap();
     let config = sbxm::run::config::RunConfig::load(&path).unwrap();
-    sbxm::run::preflight::check(&env.config_dir(), &config, &backend).unwrap();
+    sbxm::run::preflight::check(
+        &env.config_dir(),
+        &config,
+        &backend,
+        &sbxm::auth::Host::real(),
+    )
+    .unwrap();
 }

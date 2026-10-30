@@ -423,9 +423,14 @@ fn a_failed_judge_create_is_an_error_and_is_still_cleaned_up() {
 fn warnings(contestants: &str, judge: &str) -> Vec<String> {
     let s = setup("", contestants, judge);
     let backend = FakeBackend::with_secrets(&["anthropic", "openai", "google"]);
-    preflight::check(&s.env.config_dir(), &s.config, &backend)
-        .unwrap()
-        .warnings
+    preflight::check(
+        &s.env.config_dir(),
+        &s.config,
+        &backend,
+        &sbxm::auth::Host::real(),
+    )
+    .unwrap()
+    .warnings
 }
 
 #[test]

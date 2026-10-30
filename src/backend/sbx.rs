@@ -538,24 +538,18 @@ fn parse_scoped_secrets(json: &str, sandbox: &str) -> Result<Vec<String>> {
 
 /// `sbx secret set-custom` for one sandbox, the value's source by `--command` or `--ref`.
 fn set_custom_args(spec: &CustomSecretSpec) -> Vec<String> {
-    let mut args: Vec<String> = [
-        "secret",
-        "set-custom",
-        "--sandbox",
-        &spec.sandbox,
-        "--host",
-        &spec.host,
-        "--env",
-        &spec.env,
-        "--placeholder",
-        &spec.placeholder,
-    ]
-    .map(str::to_owned)
-    .into();
+    let mut args: Vec<String> = ["secret", "set-custom", "--sandbox", &spec.sandbox]
+        .map(str::to_owned)
+        .into();
+    for host in &spec.hosts {
+        args.extend(["--host".to_owned(), host.clone()]);
+    }
+    args.extend(["--env", &spec.env, "--placeholder", &spec.placeholder].map(str::to_owned));
     match &spec.source {
         SecretSource::Command(path) => {
             args.extend(["--command".to_owned(), path.display().to_string()])
         }
+        SecretSource::CommandLine(line) => args.extend(["--command".to_owned(), line.clone()]),
         SecretSource::Ref(reference) => args.extend(["--ref".to_owned(), reference.clone()]),
     }
     args
@@ -1080,7 +1074,7 @@ mod secret_tests {
     fn set_custom_args_match_sbx_cli() {
         let mut spec = CustomSecretSpec {
             sandbox: "sbxm-run-x-jev-0".into(),
-            host: "api.typesafe.ai".into(),
+            hosts: vec!["api.typesafe.ai".into()],
             env: "JEV_API_KEY".into(),
             placeholder: "sbxm-jev-x-0".into(),
             source: SecretSource::Command(PathBuf::from("/opt/jev-token")),
@@ -1106,6 +1100,39 @@ mod secret_tests {
         let args = set_custom_args(&spec);
         assert_eq!(args[10..], ["--ref", "op://vault/jev/token"]);
         assert!(!args.iter().any(|a| a == "--value"));
+    }
+
+    #[test]
+    fn set_custom_args_repeat_host_and_take_a_command_line() {
+        let spec = CustomSecretSpec {
+            sandbox: "sbxm-run-x-0-0".into(),
+            hosts: vec![
+                "daily-cloudcode-pa.googleapis.com".into(),
+                "www.googleapis.com".into(),
+            ],
+            env: "SBXM_AGY_TOKEN".into(),
+            placeholder: "sbxm-agy-x".into(),
+            source: SecretSource::CommandLine("/opt/sbxm auth token antigravity".into()),
+        };
+        assert_eq!(
+            set_custom_args(&spec),
+            [
+                "secret",
+                "set-custom",
+                "--sandbox",
+                "sbxm-run-x-0-0",
+                "--host",
+                "daily-cloudcode-pa.googleapis.com",
+                "--host",
+                "www.googleapis.com",
+                "--env",
+                "SBXM_AGY_TOKEN",
+                "--placeholder",
+                "sbxm-agy-x",
+                "--command",
+                "/opt/sbxm auth token antigravity"
+            ]
+        );
     }
 
     #[test]

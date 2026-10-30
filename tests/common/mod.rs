@@ -2,6 +2,7 @@
 #![allow(dead_code)]
 
 pub mod cloud_task;
+pub mod login;
 pub mod task_fixture;
 
 use std::path::{Path, PathBuf};

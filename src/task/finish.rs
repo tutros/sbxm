@@ -20,9 +20,11 @@ use super::record::{self, OpenFinding, Process, ProcessProbe, Record};
 use super::repo;
 use super::review::{self, COMMENT_CAP, defang, defang_mentions};
 use super::risk;
+use crate::auth;
 use crate::backend::{Location, SandboxBackend};
 use crate::confirm::Confirm;
 use crate::github::{GitHubBackend, PrRequest};
+use crate::harness::Harness;
 use crate::run::results::now;
 
 /// Everything `task rm` would delete, worked out before anything is.
@@ -35,6 +37,9 @@ pub struct RemovalPlan {
     pub sandboxes: Vec<String>,
     /// Where the sandboxes are, as `task.json` records it (decision 253): never the config's.
     pub location: Location,
+    /// The local sandboxes whose recorded harness is Antigravity: each may hold a login secret
+    /// (decision 270), removed after it.
+    pub antigravity: Vec<String>,
     /// The folders that exist, the task folder last.
     pub folders: Vec<PathBuf>,
     /// Set when `task.json` couldn't be read, so no sandbox names are known.
@@ -163,6 +168,7 @@ pub fn plan_removal_forgetting(
 
     let json = meta.join("task.json");
     let mut sandboxes = Vec::new();
+    let mut antigravity = Vec::new();
     let mut location = Location::Local;
     let mut note = None;
     let mut forgotten = None;
@@ -196,6 +202,14 @@ pub fn plan_removal_forgetting(
             }
             sandboxes = sandbox_names(id, &task)?;
             location = task.location;
+            if location == Location::Local {
+                antigravity = [&task.worker, &task.reviewer]
+                    .into_iter()
+                    .flatten()
+                    .filter(|agent| agent.harness == Harness::Antigravity.as_str())
+                    .map(|agent| agent.sandbox.clone())
+                    .collect();
+            }
         }
         Err(e) => {
             note = Some(format!(
@@ -208,6 +222,7 @@ pub fn plan_removal_forgetting(
         base_dir: base_dir.to_path_buf(),
         sandboxes,
         location,
+        antigravity,
         folders,
         note,
         forget: forgotten,
@@ -291,6 +306,11 @@ fn remove_sandboxes(
                 Err(e) => report
                     .stayed
                     .push(format!("sandbox {sandbox} stayed: {e:#}")),
+            }
+            if plan.antigravity.contains(sandbox)
+                && let Err(e) = auth::remove_sandbox_secret(backend, sandbox)
+            {
+                report.stayed.push(format!("{e:#}"));
             }
         }
         return true;

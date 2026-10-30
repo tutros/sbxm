@@ -126,7 +126,7 @@ fn scoped_custom_secret_swaps_the_placeholder_in_the_header_only() {
     backend
         .set_custom_secret(&CustomSecretSpec {
             sandbox: sandbox.clone(),
-            host: "httpbin.org".into(),
+            hosts: vec!["httpbin.org".into()],
             env: jev::ENV.into(),
             placeholder: placeholder.clone(),
             source: SecretSource::Command(helper),

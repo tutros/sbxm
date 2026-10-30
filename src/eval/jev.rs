@@ -520,6 +520,7 @@ pub fn classify(status: u16, body: &str, token: &SecretSource) -> Outcome {
         401 => {
             let source = match token {
                 SecretSource::Command(path) => format!("eval.jev.token_command {}", path.display()),
+                SecretSource::CommandLine(line) => format!("eval.jev.token_command {line}"),
                 SecretSource::Ref(_) => "eval.jev.token_ref".to_owned(),
             };
             Outcome::Failed(format!(
@@ -749,7 +750,7 @@ pub fn evaluate_repeat(
         backend
             .set_custom_secret(&CustomSecretSpec {
                 sandbox: sandbox.clone(),
-                host: HOST.to_owned(),
+                hosts: vec![HOST.to_owned()],
                 env: ENV.to_owned(),
                 placeholder: placeholder.clone(),
                 source: jev.token.clone(),

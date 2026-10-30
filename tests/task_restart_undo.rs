@@ -73,6 +73,7 @@ fn host() -> &'static sbxm::task::gates::FakeHostRunner {
 
 fn env<'a>(f: &'a Fixture, backend: &'a FakeBackend) -> TaskEnv<'a> {
     TaskEnv {
+        auth: Box::leak(Box::new(sbxm::auth::Host::real())),
         config_dir: Box::leak(Box::new(f.env.config_dir())),
         config: &f.config,
         backend,

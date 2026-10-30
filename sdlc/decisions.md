@@ -1116,6 +1116,14 @@ The helper is called for every proxied request, so it caches the token and must 
 stays as the fallback. The build is issue #330 (size L, five open points to answer before a worker starts).
 Write-up: `sdlc/spikes/S16.md`.
 
+271. **The host's token refresh uses `ureq` (2026-10-30, the user's answer to Q-1 of issue 330's review round 2;
+builds on [270]):** `ureq` becomes a direct dependency at the 3.x version `Cargo.lock` already has through another
+crate (3.4.2, with `native-tls`, so nothing new enters the lock). The production `auth::HostEndpoint` posts the form to
+`https://oauth2.googleapis.com/token` with a 10 s connect timeout and a 30 s overall one. A 400/401, a transport error
+or a timeout is an error naming `sbxm auth antigravity` that never holds the response body, the refresh token or the
+client secret. `cargo test` checks the transport against a local server on `127.0.0.1`, never Google; the real call
+stays in the ignored real-`sbx` test.
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.

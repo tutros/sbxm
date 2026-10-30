@@ -1,0 +1,319 @@
+//! Issue 330 (decision 270, point 3): `sbxm run` with `antigravity_auth = "login"`: before any
+//! write or sandbox, the saved login and one refresh are checked for every Antigravity contestant
+//! or judge, and the `google` secret isn't required.
+
+mod common;
+
+use std::path::{Path, PathBuf};
+
+use common::Env;
+use common::login::{Endpoint, write_login};
+use sbxm::backend::FakeBackend;
+use sbxm::commands::run;
+use sbxm::run::config::RunConfig;
+use sbxm::run::preflight;
+
+fn config(env: &Env, contestants: &[&str], judge: Option<&str>) -> PathBuf {
+    let path = env.tmp.path().join("run.toml");
+    let mut text = "[task]\nprompt = \"Do it\"\n\n".to_owned();
+    for (i, harness) in contestants.iter().enumerate() {
+        text.push_str(&format!(
+            "[[contestants]]\nharness = \"{harness}\"\nmodel = \"m{i}\"\n\n"
+        ));
+    }
+    if let Some(judge) = judge {
+        text.push_str("[[eval.rubric]]\nid = \"correct\"\nkind = \"pass_fail\"\nweight = 1.0\n\n");
+        text.push_str(&format!(
+            "[eval.judge]\nharness = \"{judge}\"\nmodel = \"j\"\n"
+        ));
+    }
+    std::fs::write(&path, text).unwrap();
+    path
+}
+
+fn login_env() -> Env {
+    let env = Env::new();
+    env.set_config("antigravity_auth = \"login\"");
+    env
+}
+
+fn check(env: &Env, path: &Path, backend: &FakeBackend, endpoint: &Endpoint) -> String {
+    let config = RunConfig::load(path).unwrap();
+    match preflight::check(&env.config_dir(), &config, backend, &endpoint.host()) {
+        Ok(_) => String::new(),
+        Err(e) => format!("{e:#}"),
+    }
+}
+
+#[test]
+fn login_mode_needs_no_google_secret_and_refreshes_once() {
+    let env = login_env();
+    write_login(&env.config_dir());
+    let backend = FakeBackend::with_secrets(&["anthropic"]);
+    let endpoint = Endpoint::fresh("new", 3599);
+    let path = config(&env, &["claude", "antigravity"], None);
+    assert_eq!(check(&env, &path, &backend, &endpoint), "");
+    assert_eq!(endpoint.calls(), 1);
+}
+
+#[test]
+fn login_mode_covers_an_antigravity_judge() {
+    let env = login_env();
+    write_login(&env.config_dir());
+    let backend = FakeBackend::with_secrets(&["anthropic"]);
+    let endpoint = Endpoint::fresh("new", 3599);
+    let path = config(&env, &["claude", "claude"], Some("antigravity"));
+    assert_eq!(check(&env, &path, &backend, &endpoint), "");
+    assert_eq!(endpoint.calls(), 1);
+}
+
+#[test]
+fn login_mode_without_antigravity_never_reads_the_login() {
+    let env = login_env();
+    let backend = FakeBackend::with_secrets(&["anthropic"]);
+    let endpoint = Endpoint::fresh("new", 3599);
+    let path = config(&env, &["claude", "claude"], None);
+    assert_eq!(check(&env, &path, &backend, &endpoint), "");
+    assert_eq!(endpoint.calls(), 0);
+}
+
+#[test]
+fn api_key_mode_still_needs_the_google_secret_and_no_login() {
+    let env = Env::new();
+    let backend = FakeBackend::with_secrets(&["anthropic"]);
+    let endpoint = Endpoint::fresh("new", 3599);
+    let path = config(&env, &["claude", "antigravity"], None);
+    let err = check(&env, &path, &backend, &endpoint);
+    assert!(err.contains("'google'"), "{err}");
+    assert_eq!(endpoint.calls(), 0);
+}
+
+fn refused(env: &Env, endpoint: &Endpoint) -> String {
+    let backend = FakeBackend::with_secrets(&["anthropic"]);
+    let err = run::run_with_auth(
+        &env.config_dir(),
+        &config(env, &["claude", "antigravity"], None),
+        &Default::default(),
+        &backend,
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &endpoint.host(),
+    )
+    .unwrap_err();
+    // Nothing written, nothing created.
+    assert!(!env.base_dir().join(".sbxm").exists());
+    assert_eq!(std::fs::read_dir(env.base_dir()).unwrap().count(), 0);
+    assert!(
+        !backend.log().iter().any(|l| l.starts_with("create")
+            || l.starts_with("secret-set")
+            || l.starts_with("validate")),
+        "{:?}",
+        backend.log()
+    );
+    let err = format!("{err:#}");
+    assert_eq!(err.lines().count(), 1, "{err}");
+    err
+}
+
+#[test]
+fn login_mode_without_a_login_file_is_refused_before_anything_is_written() {
+    let env = login_env();
+    let endpoint = Endpoint::fresh("new", 3599);
+    let err = refused(&env, &endpoint);
+    assert!(err.contains("sbxm auth antigravity"), "{err}");
+    assert_eq!(endpoint.calls(), 0);
+}
+
+#[test]
+fn login_mode_with_a_refused_refresh_is_refused_before_anything_is_written() {
+    let env = login_env();
+    write_login(&env.config_dir());
+    let endpoint = Endpoint::answering(400, r#"{"error":"invalid_grant"}"#);
+    let err = refused(&env, &endpoint);
+    assert!(err.contains("sbxm auth antigravity"), "{err}");
+    assert!(!err.contains("invalid_grant"), "{err}");
+}
+
+const CLAUDE_PONG: &str = include_str!("../src/fixtures/claude-stream-json-pong.jsonl");
+
+fn pong() -> FakeBackend {
+    FakeBackend::with_secrets(&["anthropic"]).with_default_exec_output(sbxm::backend::ExecOutput {
+        stdout: CLAUDE_PONG.into(),
+        stderr: String::new(),
+        exit_code: Some(0),
+    })
+}
+
+fn ran(env: &Env, path: &Path, backend: &FakeBackend, endpoint: &Endpoint) -> run::Summary {
+    run::run_with_auth(
+        &env.config_dir(),
+        path,
+        &Default::default(),
+        backend,
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &endpoint.host(),
+    )
+    .unwrap()
+}
+
+/// The positions in `log` of the entries equal to `entry`.
+fn at(log: &[String], entry: &str) -> usize {
+    log.iter()
+        .position(|l| l == entry)
+        .unwrap_or_else(|| panic!("no {entry:?} in {log:#?}"))
+}
+
+#[test]
+fn a_login_mode_antigravity_contestant_gets_its_secret_then_its_token_file_and_loses_both() {
+    let env = login_env();
+    write_login(&env.config_dir());
+    let backend = pong();
+    let endpoint = Endpoint::fresh("new", 3599);
+    let path = config(&env, &["claude", "antigravity"], None);
+    let summary = ran(&env, &path, &backend, &endpoint);
+
+    let agy = &summary.outcomes[1].sandbox;
+    let claude = &summary.outcomes[0].sandbox;
+    let log = backend.log();
+    let placeholder = sbxm::auth::placeholder(agy);
+    let set = at(&log, &format!("secret-set {agy} {placeholder}"));
+    let create = at(&log, &format!("create {agy}"));
+    let removed = at(&log, &format!("rm {agy}"));
+    let unset = at(&log, &format!("secret-rm {agy} {placeholder}"));
+    assert!(
+        set < create && create < removed && removed < unset,
+        "{log:#?}"
+    );
+
+    // The token file is written before `agy` runs.
+    let execs: Vec<_> = backend
+        .execs()
+        .into_iter()
+        .filter(|(s, _)| s == agy)
+        .collect();
+    assert!(
+        execs[0]
+            .1
+            .argv
+            .join(" ")
+            .contains("antigravity-oauth-token"),
+        "{execs:#?}"
+    );
+    assert!(execs[1].1.argv.iter().any(|a| a == "agy"), "{execs:#?}");
+
+    // Only the Antigravity sandbox gets them.
+    assert!(
+        !log.iter()
+            .any(|l| l.starts_with("secret-") && l.contains(claude.as_str())),
+        "{log:#?}"
+    );
+    let token_writes = backend
+        .execs()
+        .iter()
+        .filter(|(_, e)| e.argv.join(" ").contains("antigravity-oauth-token"))
+        .count();
+    assert_eq!(token_writes, 1);
+}
+
+#[test]
+fn a_login_mode_antigravity_judge_gets_its_secret_and_loses_it() {
+    let env = login_env();
+    write_login(&env.config_dir());
+    let backend = pong();
+    let endpoint = Endpoint::fresh("new", 3599);
+    let path = config(&env, &["claude", "claude"], Some("antigravity"));
+    ran(&env, &path, &backend, &endpoint);
+
+    let log = backend.log();
+    let judge = log
+        .iter()
+        .find_map(|l| l.strip_prefix("secret-set "))
+        .map(|rest| rest.split(' ').next().unwrap().to_owned())
+        .expect("the judge's secret");
+    assert!(judge.contains("judge"), "{judge}");
+    let placeholder = sbxm::auth::placeholder(&judge);
+    let create = at(&log, &format!("create {judge}"));
+    let set = at(&log, &format!("secret-set {judge} {placeholder}"));
+    let removed = at(&log, &format!("rm {judge}"));
+    let unset = at(&log, &format!("secret-rm {judge} {placeholder}"));
+    assert!(
+        set < create && create < removed && removed < unset,
+        "{log:#?}"
+    );
+}
+
+#[test]
+fn an_api_key_mode_antigravity_contestant_gets_neither() {
+    let env = Env::new();
+    let backend = FakeBackend::with_secrets(&["anthropic", "google"]).with_default_exec_output(
+        sbxm::backend::ExecOutput {
+            stdout: CLAUDE_PONG.into(),
+            stderr: String::new(),
+            exit_code: Some(0),
+        },
+    );
+    let endpoint = Endpoint::fresh("new", 3599);
+    let path = config(&env, &["claude", "antigravity"], Some("antigravity"));
+    ran(&env, &path, &backend, &endpoint);
+    assert!(
+        !backend.log().iter().any(|l| l.starts_with("secret-")),
+        "{:#?}",
+        backend.log()
+    );
+    assert!(
+        !backend
+            .execs()
+            .iter()
+            .any(|(_, e)| e.argv.join(" ").contains("antigravity-oauth-token"))
+    );
+}
+
+#[test]
+fn a_login_secret_that_cant_be_stored_fails_the_pair_without_a_sandbox() {
+    let env = login_env();
+    write_login(&env.config_dir());
+    let backend = pong().failing_set_custom_secret();
+    let endpoint = Endpoint::fresh("new", 3599);
+    let path = config(&env, &["claude", "antigravity"], None);
+    let err = run::run_with_auth(
+        &env.config_dir(),
+        &path,
+        &Default::default(),
+        &backend,
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &endpoint.host(),
+    )
+    .unwrap_err();
+    let summary = &err.downcast_ref::<run::PairsErrored>().unwrap().summary;
+    let agy = &summary.outcomes[1];
+    assert!(
+        agy.result
+            .as_ref()
+            .unwrap_err()
+            .contains("Antigravity login secret"),
+        "{:?}",
+        agy.result
+    );
+    assert!(!backend.log().contains(&format!("create {}", agy.sandbox)));
+}
+
+#[test]
+fn a_run_refused_by_a_later_check_leaves_no_token_cache() {
+    let env = login_env();
+    write_login(&env.config_dir());
+    let backend = FakeBackend::with_secrets(&["anthropic"]);
+    let endpoint = Endpoint::fresh("new", 3599);
+    let path = env.tmp.path().join("run.toml");
+    std::fs::write(
+        &path,
+        "[task]\nprompt = \"Do it\"\n\n[[contestants]]\nharness = \"claude\"\nmodel = \"m0\"\n\n\
+         [[contestants]]\nharness = \"antigravity\"\nmodel = \"m1\"\nprofile = \"no-such-profile\"\n",
+    )
+    .unwrap();
+    let err = check(&env, &path, &backend, &endpoint);
+    assert!(err.contains("no-such-profile"), "{err}");
+    assert_eq!(endpoint.calls(), 1);
+    assert!(!sbxm::auth::cache_path(&env.config_dir()).exists());
+}
