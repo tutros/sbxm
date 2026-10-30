@@ -94,6 +94,7 @@ pub fn preflight(config_dir: &Path, base_dir: &Path, host: &Host) -> Result<()> 
             host.helper.display()
         );
     }
+    helper_command(&host.helper)?;
     refresh_unsaved(config_dir, host.now, host.endpoint).map(|_| ())
 }
 
@@ -358,12 +359,27 @@ pub fn set_sandbox_secret(
             hosts: SECRET_HOSTS.map(str::to_owned).into(),
             env: SECRET_ENV.to_owned(),
             placeholder: placeholder(sandbox),
-            source: SecretSource::CommandLine(format!(
-                "{} auth token antigravity",
-                helper.display()
-            )),
+            source: SecretSource::CommandLine(helper_command(helper)?),
         })
         .with_context(|| format!("cannot store the Antigravity login secret for {sandbox}"))
+}
+
+/// The command line `sbx` runs for the access token: `<helper> auth token antigravity`. How `sbx`
+/// splits it into a program and arguments isn't known for a quoted path (spike S16 used a bare
+/// one), so a path with anything but ASCII letters, digits and `/\:._-` is refused rather than
+/// quoted by a guess: a space or a shell character could run another program.
+fn helper_command(helper: &Path) -> Result<String> {
+    let path = helper.to_string_lossy();
+    let plain = |c: char| c.is_ascii_alphanumeric() || "/\\:._-".contains(c);
+    if path.is_empty() || !path.chars().all(plain) {
+        bail!(
+            "sbxm's path {} has a space or another character sbx may split a command on, so it \
+             can't be the Antigravity token helper; run sbxm from a folder whose path has only \
+             letters, digits and /\\:._-, or set antigravity_auth = \"api-key\"",
+            helper.display()
+        );
+    }
+    Ok(format!("{path} auth token antigravity"))
 }
 
 /// Removes the scoped secret of `sandbox`, after the sandbox itself. The error names the command

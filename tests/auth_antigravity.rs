@@ -238,6 +238,25 @@ mod token {
     }
 
     #[test]
+    fn preflight_refuses_a_helper_path_with_a_space_before_any_refresh() {
+        let env = Env::new();
+        write_login(&env.config_dir());
+        let endpoint = Endpoint::fresh("new", 3599);
+        let host = auth::Host {
+            endpoint: &endpoint,
+            helper: env.tmp.path().join("my bin").join("sbxm"),
+            now: NOW,
+        };
+        let err = format!(
+            "{:#}",
+            auth::preflight(&env.config_dir(), &env.base_dir(), &host).unwrap_err()
+        );
+        assert!(err.contains("my bin"), "{err}");
+        assert_eq!(err.lines().count(), 1, "{err}");
+        assert_eq!(endpoint.calls(), 0);
+    }
+
+    #[test]
     fn a_config_dir_inside_the_base_dir_is_refused() {
         let env = Env::new();
         let inside = env.base_dir().join("cfg");
@@ -376,6 +395,35 @@ mod sandbox {
         assert_eq!(
             spec.source,
             SecretSource::CommandLine("/opt/sbxm/sbxm auth token antigravity".into())
+        );
+    }
+
+    #[test]
+    fn a_helper_path_with_a_space_or_a_shell_character_is_refused_before_any_secret() {
+        for helper in [
+            "/opt/my sbxm/sbxm",
+            "/opt/sbxm;rm/sbxm",
+            "/opt/$HOME/sbxm",
+            "/opt/a\"b/sbxm",
+            "/opt/a&b/sbxm",
+        ] {
+            let backend = FakeBackend::default();
+            let err = auth::set_sandbox_secret(&backend, "s", Path::new(helper)).unwrap_err();
+            let err = format!("{err:#}");
+            assert!(err.contains(helper), "{err}");
+            assert!(err.contains("antigravity_auth = \"api-key\""), "{err}");
+            assert!(backend.custom_secret_sets().is_empty(), "{helper}");
+        }
+    }
+
+    #[test]
+    fn a_windows_helper_path_is_kept_as_it_is() {
+        let helper = format!("C:{0}tools{0}sbxm-1.2{0}sbxm.exe", char::from(92));
+        let backend = FakeBackend::default();
+        auth::set_sandbox_secret(&backend, "s", Path::new(&helper)).unwrap();
+        assert_eq!(
+            backend.custom_secret_sets()[0].source,
+            SecretSource::CommandLine(format!("{helper} auth token antigravity"))
         );
     }
 

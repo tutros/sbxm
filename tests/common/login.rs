@@ -49,9 +49,14 @@ impl Endpoint {
     }
 }
 
-/// The absolute path a test's [`Host`] gives sbxm.
+/// The absolute path a test's [`Host`] gives sbxm: fixed, since a temp dir under a user name
+/// with a space would be refused as the helper.
 pub fn helper_path() -> PathBuf {
-    std::env::temp_dir().join("sbxm-test-bin").join("sbxm")
+    if cfg!(windows) {
+        PathBuf::from(r"C:\sbxm-test-bin\sbxm.exe")
+    } else {
+        PathBuf::from("/opt/sbxm-test-bin/sbxm")
+    }
 }
 
 impl TokenEndpoint for Endpoint {
