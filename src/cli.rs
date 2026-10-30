@@ -90,6 +90,11 @@ pub enum Command {
         #[command(subcommand)]
         command: TaskCommand,
     },
+    /// Sign in with your own account for harnesses that can use it (Antigravity, decision 270).
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
     /// Manage sbxm configuration.
     Config {
         #[command(subcommand)]
@@ -115,6 +120,22 @@ pub enum Command {
         )]
         interval: Option<u64>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AuthCommand {
+    /// Print the access token of a saved login, refreshed when it expires within 5 minutes:
+    /// the helper `sbx`'s proxy runs. Prints only the token.
+    Token {
+        #[arg(value_enum)]
+        login: AuthLogin,
+    },
+}
+
+/// A login sbxm keeps for a harness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub enum AuthLogin {
+    Antigravity,
 }
 
 #[derive(Debug, Subcommand)]

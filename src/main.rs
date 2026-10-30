@@ -5,8 +5,8 @@ use clap::{CommandFactory, FromArgMatches};
 
 use sbxm::backend::SbxBackend;
 use sbxm::cli::{
-    Cli, Command, ConfigCommand, GateTier, RunArgs, RunCommand, RunTarget, TaskCommand,
-    TemplateCommand,
+    AuthCommand, Cli, Command, ConfigCommand, GateTier, RunArgs, RunCommand, RunTarget,
+    TaskCommand, TemplateCommand,
 };
 use sbxm::commands;
 use sbxm::config;
@@ -813,6 +813,14 @@ fn main() -> anyhow::Result<()> {
             &config::config_dir()?,
             &commands::template_rm::Options { profile, harness },
             &SbxBackend::LOCAL,
+            &mut std::io::stdout(),
+        ),
+        Command::Auth {
+            command: AuthCommand::Token { login: _ },
+        } => commands::auth_token::run(
+            &config::config_dir()?,
+            sbxm::auth::now(),
+            &sbxm::auth::HostEndpoint,
             &mut std::io::stdout(),
         ),
         Command::Config {

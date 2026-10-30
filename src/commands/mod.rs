@@ -1,3 +1,4 @@
+pub mod auth_token;
 pub mod config_init;
 pub mod config_profiles_dir;
 pub mod config_show;

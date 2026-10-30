@@ -45,20 +45,20 @@ mod token {
     use super::Env;
     use sbxm::auth::{self, TokenEndpoint};
 
-    const NOW: u64 = 1_800_000_000;
+    pub const NOW: u64 = 1_800_000_000;
 
     /// One POST: the URL and the form's fields.
     type Call = (String, Vec<(String, String)>);
 
     /// Answers every POST with `status` and `body`, recording each form it was sent.
-    struct Endpoint {
+    pub struct Endpoint {
         status: u16,
         body: String,
         calls: RefCell<Vec<Call>>,
     }
 
     impl Endpoint {
-        fn answering(status: u16, body: &str) -> Self {
+        pub fn answering(status: u16, body: &str) -> Self {
             Endpoint {
                 status,
                 body: body.to_owned(),
@@ -66,7 +66,7 @@ mod token {
             }
         }
 
-        fn fresh(token: &str, expires_in: u64) -> Self {
+        pub fn fresh(token: &str, expires_in: u64) -> Self {
             Self::answering(
                 200,
                 &format!(
@@ -92,7 +92,7 @@ mod token {
         }
     }
 
-    fn write_login(config_dir: &Path) {
+    pub fn write_login(config_dir: &Path) {
         std::fs::create_dir_all(config_dir.join("auth")).unwrap();
         std::fs::write(
             auth::login_path(config_dir),
@@ -101,7 +101,7 @@ mod token {
         .unwrap();
     }
 
-    fn write_cache(config_dir: &Path, token: &str, expires_at: u64) {
+    pub fn write_cache(config_dir: &Path, token: &str, expires_at: u64) {
         std::fs::write(
             auth::cache_path(config_dir),
             format!(r#"{{"access_token":"{token}","expires_at":{expires_at}}}"#),
@@ -320,5 +320,60 @@ mod token {
         let sibling = env.tmp.path().join("base-config");
         std::fs::create_dir_all(&sibling).unwrap();
         auth::check_config_dir(&sibling, &env.base_dir()).unwrap();
+    }
+}
+
+mod token_command {
+    use assert_cmd::Command;
+
+    use super::Env;
+    use super::token::{Endpoint, NOW, write_cache, write_login};
+    use sbxm::commands::auth_token;
+
+    #[test]
+    fn prints_only_the_access_token() {
+        let env = Env::new();
+        write_login(&env.config_dir());
+        write_cache(&env.config_dir(), "cached-token", NOW + 3000);
+        let mut out = Vec::new();
+        auth_token::run(
+            &env.config_dir(),
+            NOW,
+            &Endpoint::fresh("new", 3599),
+            &mut out,
+        )
+        .unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "cached-token");
+    }
+
+    #[test]
+    fn prints_nothing_when_the_refresh_fails() {
+        let env = Env::new();
+        write_login(&env.config_dir());
+        let mut out = Vec::new();
+        let err = auth_token::run(
+            &env.config_dir(),
+            NOW,
+            &Endpoint::answering(401, "{}"),
+            &mut out,
+        )
+        .unwrap_err();
+        assert!(out.is_empty());
+        assert!(format!("{err:#}").contains("sbxm auth antigravity"));
+    }
+
+    #[test]
+    fn the_cli_has_auth_token_antigravity() {
+        let env = Env::new();
+        let assert = Command::cargo_bin("sbxm")
+            .unwrap()
+            .env("SBXM_CONFIG_DIR", env.config_dir())
+            .args(["auth", "token", "antigravity"])
+            .assert()
+            .failure();
+        let output = assert.get_output();
+        assert!(output.stdout.is_empty());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("sbxm auth antigravity"), "{stderr}");
     }
 }

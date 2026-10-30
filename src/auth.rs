@@ -36,6 +36,26 @@ pub trait TokenEndpoint {
     fn post_form(&self, url: &str, form: &[(&str, &str)]) -> Result<(u16, String)>;
 }
 
+/// The host's way to reach [`TOKEN_URL`]. sbxm has no HTTP client of its own yet: which one to
+/// use is left to the user (issue 330), so every refresh fails with that said.
+pub struct HostEndpoint;
+
+impl TokenEndpoint for HostEndpoint {
+    fn post_form(&self, url: &str, _form: &[(&str, &str)]) -> Result<(u16, String)> {
+        bail!(
+            "this build of sbxm has no HTTP client to call {url} with (issue 330 leaves the \
+             choice to the user)"
+        )
+    }
+}
+
+/// Seconds since the Unix epoch, for the token's expiry.
+pub fn now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 /// The saved login: `agy`'s own installed-app client and the user's refresh token. Its `Debug`
 /// shows only the client id.
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
