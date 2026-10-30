@@ -313,3 +313,82 @@ mod token_command {
         assert!(stderr.contains("sbxm auth antigravity"), "{stderr}");
     }
 }
+
+mod sandbox {
+    use std::path::Path;
+
+    use sbxm::auth;
+    use sbxm::backend::{FakeBackend, SandboxBackend, SecretSource, Stdin};
+
+    #[test]
+    fn the_secret_is_scoped_to_the_sandbox_on_both_google_hosts_with_sbxms_helper() {
+        let backend = FakeBackend::default();
+        auth::set_sandbox_secret(&backend, "sbxm-run-x-0-0", Path::new("/opt/sbxm/sbxm")).unwrap();
+        let sets = backend.custom_secret_sets();
+        assert_eq!(sets.len(), 1);
+        let spec = &sets[0];
+        assert_eq!(spec.sandbox, "sbxm-run-x-0-0");
+        assert_eq!(
+            spec.hosts,
+            ["daily-cloudcode-pa.googleapis.com", "www.googleapis.com"]
+        );
+        assert_eq!(spec.placeholder, auth::placeholder("sbxm-run-x-0-0"));
+        assert_eq!(
+            spec.source,
+            SecretSource::CommandLine("/opt/sbxm/sbxm auth token antigravity".into())
+        );
+    }
+
+    #[test]
+    fn the_token_file_holds_only_placeholders_and_a_far_future_expiry() {
+        let backend = FakeBackend::default();
+        auth::write_token_file(&backend, "sbxm-run-x-0-0").unwrap();
+        let execs = backend.execs();
+        assert_eq!(execs.len(), 1);
+        let (sandbox, spec) = &execs[0];
+        assert_eq!(sandbox, "sbxm-run-x-0-0");
+        let script = spec.argv.join(" ");
+        assert!(
+            script.contains(".gemini/antigravity-cli/antigravity-oauth-token"),
+            "{script}"
+        );
+        let Stdin::Piped(json) = &spec.stdin else {
+            panic!("the file goes through stdin, never the command line")
+        };
+        let file: serde_json::Value = serde_json::from_str(json).unwrap();
+        assert_eq!(file["access_token"], auth::placeholder("sbxm-run-x-0-0"));
+        assert_ne!(file["refresh_token"], file["access_token"]);
+        assert!(
+            file["refresh_token"].as_str().unwrap().starts_with("sbxm-"),
+            "{file}"
+        );
+        assert_eq!(file["auth_method"], "consumer");
+        assert_eq!(file["expiry"], "2099-01-01T00:00:00Z");
+    }
+
+    #[test]
+    fn a_token_file_that_cant_be_written_is_an_error() {
+        let backend = FakeBackend::default().with_default_exec_output(sbxm::backend::ExecOutput {
+            stdout: String::new(),
+            stderr: "disk full".into(),
+            exit_code: Some(1),
+        });
+        let err = auth::write_token_file(&backend, "s").unwrap_err();
+        assert!(
+            format!("{err:#}").contains("antigravity-oauth-token"),
+            "{err:#}"
+        );
+    }
+
+    #[test]
+    fn the_secret_is_removed_by_its_placeholder() {
+        let backend = FakeBackend::default();
+        auth::set_sandbox_secret(&backend, "s", Path::new("/opt/sbxm")).unwrap();
+        auth::remove_sandbox_secret(&backend, "s").unwrap();
+        assert!(backend.custom_secrets().unwrap().is_empty());
+        assert_eq!(
+            backend.log().last().unwrap(),
+            &format!("secret-rm s {}", auth::placeholder("s"))
+        );
+    }
+}

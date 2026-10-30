@@ -9,6 +9,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
+
+use crate::backend::{CustomSecretSpec, ExecSpec, SandboxBackend, SecretSource, Stdin};
 use serde::{Deserialize, Serialize};
 
 /// Where Google refreshes an access token (`grant_type=refresh_token`).
@@ -238,6 +240,81 @@ pub fn check_config_dir(config_dir: &Path, base_dir: &Path) -> Result<()> {
              Antigravity login can't be kept there; set SBXM_CONFIG_DIR to a folder outside it",
             config_dir.display(),
             base_dir.display()
+        );
+    }
+    Ok(())
+}
+
+/// The hosts `agy` sends the bearer token to (spike S16, Q1): the model calls and the user-info
+/// lookup. The proxy swaps the placeholder only in requests to these.
+pub const SECRET_HOSTS: [&str; 2] = ["daily-cloudcode-pa.googleapis.com", "www.googleapis.com"];
+
+/// The environment variable the scoped secret's placeholder is set in inside the sandbox; `agy`
+/// reads the token file, not this.
+const SECRET_ENV: &str = "SBXM_AGY_TOKEN";
+
+/// Where `agy` keeps its OAuth token, relative to the sandbox user's home.
+const TOKEN_FILE: &str = ".gemini/antigravity-cli/antigravity-oauth-token";
+
+/// The access-token placeholder of `sandbox`: in its token file and its scoped secret.
+pub fn placeholder(sandbox: &str) -> String {
+    format!("sbxm-agy-{sandbox}")
+}
+
+/// The scoped secret of a login-mode Antigravity sandbox, set before it is created: `sbx` runs
+/// `<helper> auth token antigravity` on the host for the access token.
+pub fn set_sandbox_secret(
+    backend: &dyn SandboxBackend,
+    sandbox: &str,
+    helper: &Path,
+) -> Result<()> {
+    backend
+        .set_custom_secret(&CustomSecretSpec {
+            sandbox: sandbox.to_owned(),
+            hosts: SECRET_HOSTS.map(str::to_owned).into(),
+            env: SECRET_ENV.to_owned(),
+            placeholder: placeholder(sandbox),
+            source: SecretSource::CommandLine(format!(
+                "{} auth token antigravity",
+                helper.display()
+            )),
+        })
+        .with_context(|| format!("cannot store the Antigravity login secret for {sandbox}"))
+}
+
+/// Removes the scoped secret of `sandbox`, after the sandbox itself.
+pub fn remove_sandbox_secret(backend: &dyn SandboxBackend, sandbox: &str) -> Result<()> {
+    backend.remove_custom_secret(&placeholder(sandbox), sandbox)
+}
+
+/// Writes `agy`'s token file into the new sandbox `sandbox`: placeholders only, with a far-future
+/// expiry so `agy` never refreshes it itself (spike S16, Q2). The file goes through stdin.
+pub fn write_token_file(backend: &dyn SandboxBackend, sandbox: &str) -> Result<()> {
+    let file = serde_json::json!({
+        "access_token": placeholder(sandbox),
+        "token_type": "Bearer",
+        "refresh_token": "sbxm-refresh-token-stays-on-the-host",
+        "expiry": "2099-01-01T00:00:00Z",
+        "auth_method": "consumer",
+        "id_token_email": "sbxm@placeholder.invalid",
+    });
+    let script = format!(
+        "umask 077 && mkdir -p \"$HOME/$(dirname {TOKEN_FILE})\" && cat > \"$HOME/{TOKEN_FILE}\""
+    );
+    let output = backend
+        .exec(
+            sandbox,
+            &ExecSpec {
+                workdir: None,
+                argv: vec!["sh".into(), "-c".into(), script],
+                stdin: Stdin::Piped(file.to_string()),
+            },
+        )
+        .with_context(|| format!("cannot write ~/{TOKEN_FILE} in {sandbox}"))?;
+    if output.exit_code != Some(0) {
+        bail!(
+            "cannot write ~/{TOKEN_FILE} in {sandbox}: {}",
+            output.stderr.trim()
         );
     }
     Ok(())
