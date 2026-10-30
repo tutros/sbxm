@@ -12,7 +12,8 @@ this file shows how the commands fit together and when to use which. `sbxm` has 
    Linux, `sandbox_state_dir` for the sandbox drive), and a `warn` line is a problem that doesn't fail `doctor` yet
    (the sandbox drive under `min_free_disk`).
 4. Store the provider secrets in `sbx` (`sbx secret ls`): `anthropic` for Claude, `openai` for Codex (also the default
-   reviewer for a Claude worker), `google` for Antigravity. For `sbxm task`, run `gh auth setup-git` once.
+   reviewer for a Claude worker), `google` for Antigravity (or, with `antigravity_auth = "login"`, a login saved by
+   `sbxm auth antigravity`, see the README). For `sbxm task`, run `gh auth setup-git` once.
 5. `just deploy-profiles` copies the repo's `profiles/*` into the folder `sbxm config profiles-dir` reports. It replaces
    whole profiles, so deploy from an up-to-date `main`: a profile change that is still on an open PR is lost if you
    deploy from another branch.
