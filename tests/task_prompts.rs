@@ -605,6 +605,9 @@ fn the_fix_prompts_hand_back_a_finding_that_needs_a_change_that_is_not_theirs() 
             "a dependency, or code whose main purpose is to avoid one",
             "don't make it and don't build around it",
             "much larger than its finding",
+            // Decision 272: an unverifiable external fact or an unsettled choice is handed back.
+            "a fact about an external tool's behavior that you can't check from inside this sandbox",
+            "the decisions and the review don't settle",
             "\"Needs a decision\"",
             "\"Choices made\"",
             "never end your turn while waiting on a background command",

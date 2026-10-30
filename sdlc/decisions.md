@@ -1116,6 +1116,31 @@ The helper is called for every proxied request, so it caches the token and must 
 stays as the fallback. The build is issue #330 (size L, five open points to answer before a worker starts).
 Write-up: `sdlc/spikes/S16.md`.
 
+## Round 16: the third retro (2026-10-30)
+
+Number 271 is taken by issue 330's HTTP transport (`ureq`), recorded on the parked branch of PR #339.
+
+272. **A fix round doesn't choose; it hands the question back (2026-10-30, the third retro's proposal 1,
+`sdlc/retros/2026-10-30-retro.md`; extends [188]):** when fixing a finding needs a fact about an external tool's
+behavior that can't be checked from inside the sandbox, or a choice between behaviors that the issue, the decisions
+and the review don't settle, the fix round leaves that finding unfixed and writes it under "Needs a decision" in
+`result.md`, with the options. The rule is a bullet in `prompts/fix.md` and `prompts/fix-spec.md`. An experiment for
+the next three tasks with a fix round; its measure is repeat findings per task (the third retro's window: 3 in 2 of
+10 tasks, #314 and #330).
+
+273. **External facts are checked first, and the real check runs early (2026-10-30, the third retro's proposal 2;
+extends [244] and the no-open-questions rule):** before a worker starts on an issue that depends on an external
+tool's behavior a spike recorded, the session re-runs the spike's key check by hand; after the worker, before the
+review rounds, it runs the issue's real test (an ignored test or a by-hand smoke) and gives the result to the review.
+An experiment for the next three issues that depend on an external tool; its measure is the problems found by real use
+after the review rounds ended (the third retro's window: 2 on #330, and G67-G70 in milestone 4's end-to-end check).
+
+274. **The review loop stops at the first round with 0 must-fix (2026-10-30, the third retro's proposal 3; narrows
+[251]'s re-review):** that round's should-fix items are fixed by hand and re-reviewed narrowly, on the fix's diff
+only; anything the narrow re-review finds outside that diff is filed as an issue with a trigger, not fixed in another
+round. An experiment for the next three PRs that reach a 0-must-fix round with should-fix items; its measure is the
+review rounds after the first 0-must-fix round (the third retro's window: 5, #322 three and #329 two).
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.

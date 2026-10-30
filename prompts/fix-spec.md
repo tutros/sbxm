@@ -22,6 +22,8 @@ A finding is no licence for a change that is the user's to decide:
   or config key);
 - adding user-visible behavior the spec doesn't ask for;
 - a fix much larger than its finding.
+- a fact about an external tool's behavior that you can't check from inside this sandbox, or a choice between
+  behaviors that the issue, the decisions and the review don't settle (decision 272).
 
 When a finding can only be fixed by such a change, don't make it and don't build around it: leave the code as it is
 and hand the question back.

@@ -155,7 +155,9 @@ must-fix findings is a good result, so don't pad. Put each nit in one closing li
 Re-review only the fix commits, not the whole change again. Run another round only if the last one found a
 must-fix, or the fixes themselves introduced a contradiction, a regression or a new must-fix. Stop, and let the
 user merge, when a round finds no must-fix: file the remaining should-fix items and nits as issues instead of
-looping. If three rounds in a row keep finding must-fix in the same document, stop and ask the user whether the
+looping. A should-fix item fixed by hand after that round gets a narrow re-review of the fix's diff only, and anything
+that re-review finds outside the diff is filed as an issue with a trigger, never another round (decision 274; #322
+and #329 ran five rounds past this point). If three rounds in a row keep finding must-fix in the same document, stop and ask the user whether the
 scope or the design needs rethinking; more review won't converge it.
 
 Write each as: severity, `file:line`, what happens (with the evidence), why it matters (decision or convention), and
