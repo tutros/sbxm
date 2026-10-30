@@ -312,7 +312,7 @@ mod token_command {
         let err = auth_token::run(
             &env.config_dir(),
             NOW,
-            &Endpoint::fresh("ya29.fresh-token", 3599),
+            &Endpoint::fresh("ya29.fake-fresh-token", 3599),
             &mut out,
         )
         .unwrap_err();

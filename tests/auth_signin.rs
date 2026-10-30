@@ -13,8 +13,8 @@ use sbxm::commands::auth_antigravity::{self, SANDBOX};
 use sbxm::disk::Guard;
 
 const TOKEN_FILE: &str = r#"{"access_token":"ya29.fake-access","token_type":"Bearer","refresh_token":"fake-user-refresh","expiry":"2026-10-30T12:00:00Z","auth_method":"consumer"}"#;
-const CLIENTS: &str = "111-aaa.apps.googleusercontent.com\n222-bbb.apps.googleusercontent.com\n\
-                       GOCSPX-one\nGOCSPX-two\nGOCSPX-three\n";
+const CLIENTS: &str = "111-fakeaaa.apps.googleusercontent.com\n222-fakebbb.apps.googleusercontent.com\n\
+                       GOCSPX-FAKE-one\nGOCSPX-FAKE-two\nGOCSPX-FAKE-three\n";
 
 fn signed_in() -> FakeBackend {
     FakeBackend::default()
@@ -24,9 +24,9 @@ fn signed_in() -> FakeBackend {
 
 fn good() -> PairEndpoint {
     PairEndpoint::new(
-        "111-aaa.apps.googleusercontent.com",
-        "GOCSPX-two",
-        "fresh-access",
+        "111-fakeaaa.apps.googleusercontent.com",
+        "GOCSPX-FAKE-two",
+        "fake-fresh-access",
     )
 }
 
@@ -54,14 +54,14 @@ fn signing_in_saves_the_login_with_the_client_pair_that_refreshes() {
     let out = run(&env, &backend, &endpoint).unwrap();
 
     let login = auth::load_login(&env.config_dir()).unwrap();
-    assert_eq!(login.client_id, "111-aaa.apps.googleusercontent.com");
-    assert_eq!(login.client_secret, "GOCSPX-two");
+    assert_eq!(login.client_id, "111-fakeaaa.apps.googleusercontent.com");
+    assert_eq!(login.client_secret, "GOCSPX-FAKE-two");
     assert_eq!(login.refresh_token, "fake-user-refresh");
     // The access token the right pair got is cached, so the next call needs no refresh.
     let token = auth::access_token(&env.config_dir(), NOW, &UnusableEndpoint).unwrap();
-    assert_eq!(token, "fresh-access");
+    assert_eq!(token, "fake-fresh-access");
     // Nothing secret reaches the screen.
-    for secret in ["fake-user-refresh", "GOCSPX", "fresh-access", "ya29"] {
+    for secret in ["fake-user-refresh", "GOCSPX", "fake-fresh-access", "ya29"] {
         assert!(!out.contains(secret), "{out}");
     }
     assert!(out.contains(&auth::login_path(&env.config_dir()).display().to_string()));
@@ -126,14 +126,14 @@ fn a_pair_that_answers_only_the_last_try_is_still_found() {
     let env = Env::new();
     let backend = signed_in();
     let endpoint = PairEndpoint::new(
-        "222-bbb.apps.googleusercontent.com",
-        "GOCSPX-three",
-        "fresh-access",
+        "222-fakebbb.apps.googleusercontent.com",
+        "GOCSPX-FAKE-three",
+        "fake-fresh-access",
     );
     run(&env, &backend, &endpoint).unwrap();
     let login = auth::load_login(&env.config_dir()).unwrap();
-    assert_eq!(login.client_id, "222-bbb.apps.googleusercontent.com");
-    assert_eq!(login.client_secret, "GOCSPX-three");
+    assert_eq!(login.client_id, "222-fakebbb.apps.googleusercontent.com");
+    assert_eq!(login.client_secret, "GOCSPX-FAKE-three");
     assert_eq!(endpoint.calls.lock().unwrap().len(), 6);
 }
 
@@ -155,7 +155,7 @@ fn no_client_in_agy_saves_nothing_and_removes_the_sandbox() {
     let env = Env::new();
     let backend = FakeBackend::default()
         .with_exec_output_matching("antigravity-oauth-token", ok(TOKEN_FILE))
-        .with_exec_output_matching("GOCSPX", ok("111-aaa.apps.googleusercontent.com\n"));
+        .with_exec_output_matching("GOCSPX", ok("111-fakeaaa.apps.googleusercontent.com\n"));
     let err = format!("{:#}", run(&env, &backend, &good()).unwrap_err());
     assert!(err.contains("agy"), "{err}");
     assert!(!auth::login_path(&env.config_dir()).exists());
