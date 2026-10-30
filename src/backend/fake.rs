@@ -1094,7 +1094,7 @@ impl SandboxBackend for FakeBackend {
         }
         self.custom_secrets.lock().unwrap().push(CustomSecret {
             scope: spec.sandbox.clone(),
-            targets: vec![spec.host.clone()],
+            targets: spec.hosts.clone(),
             env: spec.env.clone(),
             placeholder: spec.placeholder.clone(),
         });

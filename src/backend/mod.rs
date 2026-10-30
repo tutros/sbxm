@@ -151,15 +151,19 @@ impl CustomSecret {
 pub enum SecretSource {
     /// An absolute path to a helper that prints the value (`--command`).
     Command(PathBuf),
+    /// A helper with arguments (`--command "<program> <args>"`): sbxm's own `auth token
+    /// antigravity` (decision 270). The program is an absolute path.
+    CommandLine(String),
     /// A secret manager reference, `op://...` or an ARN (`--ref`).
     Ref(String),
 }
 
-/// `sbx secret set-custom --sandbox <sandbox> --host <host> --env <env> --placeholder <p>`.
+/// `sbx secret set-custom --sandbox <sandbox> --host <host>... --env <env> --placeholder <p>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomSecretSpec {
     pub sandbox: String,
-    pub host: String,
+    /// One `--host` each: the proxy swaps the placeholder in requests to any of them.
+    pub hosts: Vec<String>,
     pub env: String,
     pub placeholder: String,
     pub source: SecretSource,
