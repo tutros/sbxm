@@ -364,22 +364,39 @@ pub fn set_sandbox_secret(
         .with_context(|| format!("cannot store the Antigravity login secret for {sandbox}"))
 }
 
-/// The command line `sbx` runs for the access token: `<helper> auth token antigravity`. How `sbx`
-/// splits it into a program and arguments isn't known for a quoted path (spike S16 used a bare
-/// one), so a path with anything but ASCII letters, digits and `/\:._-` is refused rather than
-/// quoted by a guess: a space or a shell character could run another program.
-fn helper_command(helper: &Path) -> Result<String> {
-    let path = helper.to_string_lossy();
-    let plain = |c: char| c.is_ascii_alphanumeric() || "/\\:._-".contains(c);
-    if path.is_empty() || !path.chars().all(plain) {
-        bail!(
-            "sbxm's path {} has a space or another character sbx may split a command on, so it \
-             can't be the Antigravity token helper; run sbxm from a folder whose path has only \
-             letters, digits and /\\:._-, or set antigravity_auth = \"api-key\"",
+/// The command line `sbx` runs for the access token: `<helper> auth token antigravity`, with the
+/// path quoted the way of this host ([`helper_command_line`]).
+pub fn helper_command(helper: &Path) -> Result<String> {
+    let path = helper.to_str().with_context(|| {
+        format!(
+            "sbxm's path {} isn't valid Unicode, so it can't be put in the Antigravity token \
+             helper's command line; set antigravity_auth = \"api-key\"",
             helper.display()
-        );
-    }
-    Ok(format!("{path} auth token antigravity"))
+        )
+    })?;
+    helper_command_line(path, cfg!(windows))
+}
+
+/// `<path> auth token antigravity`, with `path` quoted so `sbx` runs that exact file. On Windows
+/// `sbx` runs the text through `cmd` (checked by hand against `sbx` 0.46.0, issue 330): a
+/// double-quoted path holding a space, `&`, `'`, `$`, `^`, `(` or `)` runs that file, but `%NAME%`
+/// is expanded even inside the quotes, so a path with `%` (or `"`, which Windows paths can't
+/// hold) is refused. On Unix the path is single-quoted, each `'` written as `'\''`, for a shell;
+/// that form hasn't been tried against a real `sbx`.
+pub fn helper_command_line(path: &str, windows: bool) -> Result<String> {
+    let quoted = if windows {
+        if path.contains(['%', '"']) {
+            bail!(
+                "sbxm's path {path} has a % or a \", which sbx's command line on Windows can't \
+                 hold, so it can't be the Antigravity token helper; run sbxm from a folder \
+                 without them, or set antigravity_auth = \"api-key\""
+            );
+        }
+        format!("\"{path}\"")
+    } else {
+        format!("'{}'", path.replace('\'', r"'\''"))
+    };
+    Ok(format!("{quoted} auth token antigravity"))
 }
 
 /// Removes the scoped secret of `sandbox`, after the sandbox itself. The error names the command

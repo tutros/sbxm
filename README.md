@@ -225,8 +225,9 @@ that create a sandbox refuse when it is low:
    doesn't make a sandbox's config `changed`.
 
 Before any sandbox exists, a run or task with an Antigravity sandbox checks that the login is saved, that one refresh
-succeeds and that sbxm's own path has only ASCII letters, digits and `/\:._-` (`sbx` runs it as a command line, and how
-it would split a path with a space isn't known yet); the `google` secret isn't needed. Each such sandbox gets `agy`'s token file with placeholder values and a
+succeeds and that sbxm knows its own absolute path; the `google` secret isn't needed. `sbx` runs that path as a command
+line, quoted: on Windows in double quotes (a path with `%` is refused, since `sbx`'s `cmd` expands `%NAME%` even inside
+them), on Unix in single quotes (this form hasn't been tried against a real `sbx`). Each such sandbox gets `agy`'s token file with placeholder values and a
 far-future expiry, so `agy` never refreshes it itself, and a custom secret scoped to the sandbox on
 `daily-cloudcode-pa.googleapis.com` and `www.googleapis.com`: `sbx`'s proxy swaps the placeholder for the access token
 `sbxm auth token antigravity` prints. The secret is removed after the sandbox (`sbxm task rm` removes it for any

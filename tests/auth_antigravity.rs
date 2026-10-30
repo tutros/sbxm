@@ -238,7 +238,7 @@ mod token {
     }
 
     #[test]
-    fn preflight_refuses_a_helper_path_with_a_space_before_any_refresh() {
+    fn preflight_accepts_a_helper_path_with_a_space() {
         let env = Env::new();
         write_login(&env.config_dir());
         let endpoint = Endpoint::fresh("new", 3599);
@@ -247,13 +247,8 @@ mod token {
             helper: env.tmp.path().join("my bin").join("sbxm"),
             now: NOW,
         };
-        let err = format!(
-            "{:#}",
-            auth::preflight(&env.config_dir(), &env.base_dir(), &host).unwrap_err()
-        );
-        assert!(err.contains("my bin"), "{err}");
-        assert_eq!(err.lines().count(), 1, "{err}");
-        assert_eq!(endpoint.calls(), 0);
+        auth::preflight(&env.config_dir(), &env.base_dir(), &host).unwrap();
+        assert_eq!(endpoint.calls(), 1);
     }
 
     #[test]
@@ -382,7 +377,8 @@ mod sandbox {
     #[test]
     fn the_secret_is_scoped_to_the_sandbox_on_both_google_hosts_with_sbxms_helper() {
         let backend = FakeBackend::default();
-        auth::set_sandbox_secret(&backend, "sbxm-run-x-0-0", Path::new("/opt/sbxm/sbxm")).unwrap();
+        let helper = Path::new("/opt/sbxm/sbxm");
+        auth::set_sandbox_secret(&backend, "sbxm-run-x-0-0", helper).unwrap();
         let sets = backend.custom_secret_sets();
         assert_eq!(sets.len(), 1);
         let spec = &sets[0];
@@ -394,37 +390,83 @@ mod sandbox {
         assert_eq!(spec.placeholder, auth::placeholder("sbxm-run-x-0-0"));
         assert_eq!(
             spec.source,
-            SecretSource::CommandLine("/opt/sbxm/sbxm auth token antigravity".into())
+            SecretSource::CommandLine(auth::helper_command(helper).unwrap())
         );
     }
 
+    fn windows(path: &str) -> String {
+        path.replace('/', &char::from(92).to_string())
+    }
+
     #[test]
-    fn a_helper_path_with_a_space_or_a_shell_character_is_refused_before_any_secret() {
+    fn a_windows_helper_path_is_double_quoted_even_with_a_space_or_a_cmd_character() {
         for helper in [
-            "/opt/my sbxm/sbxm",
-            "/opt/sbxm;rm/sbxm",
-            "/opt/$HOME/sbxm",
-            "/opt/a\"b/sbxm",
-            "/opt/a&b/sbxm",
+            windows("C:/tools/sbxm-1.2/sbxm.exe"),
+            windows("C:/Users/First Last/.cargo/bin/sbxm.exe"),
+            windows("C:/a&b/it's/sbxm.exe"),
+            windows("C:/a$b^(c)/sbxm.exe"),
+            windows("C:/Übung/sbxm.exe"),
         ] {
-            let backend = FakeBackend::default();
-            let err = auth::set_sandbox_secret(&backend, "s", Path::new(helper)).unwrap_err();
-            let err = format!("{err:#}");
-            assert!(err.contains(helper), "{err}");
-            assert!(err.contains("antigravity_auth = \"api-key\""), "{err}");
-            assert!(backend.custom_secret_sets().is_empty(), "{helper}");
+            assert_eq!(
+                auth::helper_command_line(&helper, true).unwrap(),
+                format!("\"{helper}\" auth token antigravity")
+            );
         }
     }
 
     #[test]
-    fn a_windows_helper_path_is_kept_as_it_is() {
-        let helper = format!("C:{0}tools{0}sbxm-1.2{0}sbxm.exe", char::from(92));
-        let backend = FakeBackend::default();
-        auth::set_sandbox_secret(&backend, "s", Path::new(&helper)).unwrap();
+    fn a_windows_helper_path_with_a_percent_or_a_quote_is_refused_naming_it() {
+        for helper in [
+            windows("C:/100%/sbxm.exe"),
+            windows("C:/%PATH%/sbxm.exe"),
+            windows("C:/a\"b/sbxm.exe"),
+        ] {
+            let err = auth::helper_command_line(&helper, true).unwrap_err();
+            let err = format!("{err:#}");
+            assert!(err.contains(&helper), "{err}");
+            assert!(err.contains("antigravity_auth = \"api-key\""), "{err}");
+            assert_eq!(err.lines().count(), 1, "{err}");
+        }
+    }
+
+    #[test]
+    fn a_unix_helper_path_is_single_quoted_with_its_quotes_escaped() {
+        for (helper, quoted) in [
+            ("/opt/sbxm/sbxm", "'/opt/sbxm/sbxm'"),
+            ("/home/first last/bin/sbxm", "'/home/first last/bin/sbxm'"),
+            ("/opt/it's/sbxm", "'/opt/it'\\''s/sbxm'"),
+            (
+                "/opt/$HOME;rm/a\"b&c/%x%/sbxm",
+                "'/opt/$HOME;rm/a\"b&c/%x%/sbxm'",
+            ),
+        ] {
+            assert_eq!(
+                auth::helper_command_line(helper, false).unwrap(),
+                format!("{quoted} auth token antigravity")
+            );
+        }
+    }
+
+    #[test]
+    fn the_helper_command_is_quoted_the_way_of_the_host() {
+        let helper = if cfg!(windows) {
+            windows("C:/Users/First Last/sbxm.exe")
+        } else {
+            "/home/first last/sbxm".to_owned()
+        };
         assert_eq!(
-            backend.custom_secret_sets()[0].source,
-            SecretSource::CommandLine(format!("{helper} auth token antigravity"))
+            auth::helper_command(Path::new(&helper)).unwrap(),
+            auth::helper_command_line(&helper, cfg!(windows)).unwrap()
         );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn a_refused_windows_helper_path_stores_no_secret() {
+        let backend = FakeBackend::default();
+        let helper = windows("C:/100%/sbxm.exe");
+        assert!(auth::set_sandbox_secret(&backend, "s", Path::new(&helper)).is_err());
+        assert!(backend.custom_secret_sets().is_empty());
     }
 
     #[test]

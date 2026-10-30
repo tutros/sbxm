@@ -172,10 +172,9 @@ fn a_login_mode_worker_gets_its_secret_before_its_sandbox_and_its_token_file_aft
     assert!(spec.argv.join(" ").contains("antigravity-oauth-token"));
     assert_eq!(
         backend.custom_secret_sets()[0].source,
-        sbxm::backend::SecretSource::CommandLine(format!(
-            "{} auth token antigravity",
-            common::login::helper_path().display()
-        ))
+        sbxm::backend::SecretSource::CommandLine(
+            sbxm::auth::helper_command(&common::login::helper_path()).unwrap()
+        )
     );
 }
 

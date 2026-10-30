@@ -49,8 +49,8 @@ impl Endpoint {
     }
 }
 
-/// The absolute path a test's [`Host`] gives sbxm: fixed, since a temp dir under a user name
-/// with a space would be refused as the helper.
+/// The absolute path a test's [`Host`] gives sbxm: fixed, so a test doesn't depend on where the
+/// suite runs.
 pub fn helper_path() -> PathBuf {
     if cfg!(windows) {
         PathBuf::from(r"C:\sbxm-test-bin\sbxm.exe")
