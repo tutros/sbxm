@@ -1141,6 +1141,12 @@ only; anything the narrow re-review finds outside that diff is filed as an issue
 round. An experiment for the next three PRs that reach a 0-must-fix round with should-fix items; its measure is the
 review rounds after the first 0-must-fix round (the third retro's window: 5, #322 three and #329 two).
 
+275. **The gemini harness is removed (2026-10-30, the user's choice; settles [103]'s pending follow-up):** `--harness
+gemini` goes from sbxm. The built-in `gemini` sbx agent can't reach Google from a sandbox here ([103], spike S5),
+Gemini CLI is deprecated upstream in favor of Antigravity, and `antigravity` is already sbxm's Google harness, so the
+variant only costs upkeep. The removal is issue #345 (size M; two open points about saved `gemini` sandboxes and
+configs naming it, to answer before a worker starts).
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.
