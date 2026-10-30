@@ -83,7 +83,8 @@ impl Host<'static> {
 
 /// The login-mode checks made before any sandbox exists (decision 270, point 3): the config dir
 /// is outside the base dir, sbxm knows its own absolute path, the login file is there and one
-/// refresh succeeds. Each failure is one line naming the fix.
+/// refresh succeeds. Each failure is one line naming the fix. Nothing is written, the cache
+/// included: a later check may still refuse the command.
 pub fn preflight(config_dir: &Path, base_dir: &Path, host: &Host) -> Result<()> {
     check_config_dir(config_dir, base_dir)?;
     if !host.helper.is_absolute() {
@@ -93,8 +94,7 @@ pub fn preflight(config_dir: &Path, base_dir: &Path, host: &Host) -> Result<()> 
             host.helper.display()
         );
     }
-    refresh(config_dir, host.now, host.endpoint)?;
-    Ok(())
+    refresh_unsaved(config_dir, host.now, host.endpoint).map(|_| ())
 }
 
 /// Seconds since the Unix epoch, for the token's expiry.

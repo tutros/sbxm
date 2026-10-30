@@ -298,3 +298,22 @@ fn a_login_secret_that_cant_be_stored_fails_the_pair_without_a_sandbox() {
     );
     assert!(!backend.log().contains(&format!("create {}", agy.sandbox)));
 }
+
+#[test]
+fn a_run_refused_by_a_later_check_leaves_no_token_cache() {
+    let env = login_env();
+    write_login(&env.config_dir());
+    let backend = FakeBackend::with_secrets(&["anthropic"]);
+    let endpoint = Endpoint::fresh("new", 3599);
+    let path = env.tmp.path().join("run.toml");
+    std::fs::write(
+        &path,
+        "[task]\nprompt = \"Do it\"\n\n[[contestants]]\nharness = \"claude\"\nmodel = \"m0\"\n\n\
+         [[contestants]]\nharness = \"antigravity\"\nmodel = \"m1\"\nprofile = \"no-such-profile\"\n",
+    )
+    .unwrap();
+    let err = check(&env, &path, &backend, &endpoint);
+    assert!(err.contains("no-such-profile"), "{err}");
+    assert_eq!(endpoint.calls(), 1);
+    assert!(!sbxm::auth::cache_path(&env.config_dir()).exists());
+}

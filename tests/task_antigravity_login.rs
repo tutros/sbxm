@@ -328,3 +328,24 @@ fn a_login_mode_reviewer_gets_its_secret_and_token_file_and_loses_the_secret_aft
         "{log:#?}"
     );
 }
+
+#[test]
+fn a_task_refused_by_a_later_check_leaves_no_token_cache() {
+    let f = login_fixture();
+    write_login(&f.env.config_dir());
+    let backend = FakeBackend::with_secrets(&[]);
+    backend
+        .secret_services_failure()
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let endpoint = Endpoint::fresh("new", 3599);
+    pipeline::check_worker_inputs(
+        &f.env.config_dir(),
+        &backend,
+        &f.config,
+        Location::Local,
+        &endpoint.host(),
+    )
+    .unwrap_err();
+    assert_eq!(endpoint.calls(), 1);
+    assert!(!sbxm::auth::cache_path(&f.env.config_dir()).exists());
+}
