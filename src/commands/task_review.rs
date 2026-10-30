@@ -233,6 +233,7 @@ fn run_issue(
     }
     let config = &config;
     let env = TaskEnv {
+        auth: &crate::auth::Host::real(),
         config_dir,
         config,
         backend,
@@ -421,6 +422,7 @@ fn run_spec(
     }
     let config = &config;
     let env = TaskEnv {
+        auth: &crate::auth::Host::real(),
         config_dir,
         config,
         backend,
@@ -546,6 +548,7 @@ fn run_pr(
         email: "sbxm@localhost".into(),
     };
     let ctx = Ctx {
+        auth: &crate::auth::Host::real(),
         config_dir,
         repo: &repo_name,
         clone_source: &clone_source,

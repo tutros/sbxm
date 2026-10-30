@@ -152,6 +152,7 @@ pub fn ctx_with_host<'a>(
         probe: &Probe,
         sleep: &std::thread::sleep,
         scoped_secrets: &[],
+        auth: Box::leak(Box::new(sbxm::auth::Host::real())),
     }
 }
 

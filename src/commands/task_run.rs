@@ -182,7 +182,13 @@ fn run_issue(
             disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?;
         }
         // At the cloud, the cloud preflight for the reviewer's sandboxes too (decision 261).
-        pipeline::check_reviewer_inputs(config_dir, backend.located(location), &config, location)?;
+        pipeline::check_reviewer_inputs(
+            config_dir,
+            backend.located(location),
+            &config,
+            location,
+            &crate::auth::Host::real(),
+        )?;
         location
     };
 
@@ -403,7 +409,13 @@ fn run_spec_task(
             disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?;
         }
         // At the cloud, the cloud preflight for the reviewer's sandboxes too (decision 261).
-        pipeline::check_reviewer_inputs(config_dir, backend.located(location), &config, location)?;
+        pipeline::check_reviewer_inputs(
+            config_dir,
+            backend.located(location),
+            &config,
+            location,
+            &crate::auth::Host::real(),
+        )?;
         location
     };
 
@@ -435,6 +447,7 @@ fn run_spec_task(
         backend.located(location),
         &resolved.config,
         location,
+        &crate::auth::Host::real(),
     )?;
 
     let mut aside: Option<finish::SetAside> = None;

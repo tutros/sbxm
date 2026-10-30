@@ -371,7 +371,13 @@ fn start(
         // 262(h)). Every worker is preflighted here, before any is created (P15 (a)): they share
         // the harness and the profile, so one check covers them all.
         Location::Cloud => {
-            pipeline::check_worker_inputs(config_dir, backend, &config, location)?;
+            pipeline::check_worker_inputs(
+                config_dir,
+                backend,
+                &config,
+                location,
+                &crate::auth::Host::real(),
+            )?;
         }
     }
     let repo_name = resolve_repo(opts.repo.as_deref(), &opts.repo_root)?;
@@ -395,6 +401,7 @@ fn start(
     }
 
     let ctx = Ctx {
+        auth: &crate::auth::Host::real(),
         config_dir,
         repo: &repo_name,
         clone_source: &clone_source,
@@ -939,6 +946,7 @@ pub(crate) fn run_spec_from(
     // The task's sandboxes run where it was started (decision 253).
     let backend = backend.located(location);
     let ctx = Ctx {
+        auth: &crate::auth::Host::real(),
         config_dir,
         repo: &repo_name,
         clone_source: &clone_source,

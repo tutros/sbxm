@@ -83,6 +83,7 @@ pub fn run(
         config.set_worker_harness(harness);
     }
     let env = TaskEnv {
+        auth: &crate::auth::Host::real(),
         config_dir,
         config: &config,
         backend: backend.located(location),
