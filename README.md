@@ -229,7 +229,9 @@ succeeds; the `google` secret isn't needed. Each such sandbox gets `agy`'s token
 far-future expiry, so `agy` never refreshes it itself, and a custom secret scoped to the sandbox on
 `daily-cloudcode-pa.googleapis.com` and `www.googleapis.com`: `sbx`'s proxy swaps the placeholder for the access token
 `sbxm auth token antigravity` prints. The secret is removed after the sandbox (`sbxm task rm` removes it for any
-Antigravity task sandbox, whatever the mode is now). Interactive `new`/`open` sandboxes are unchanged. `agy` updates
+Antigravity task sandbox, whatever the mode is now). A secret that can't be removed is reported with the `sbx secret rm
+--placeholder ... --sandbox ... -f` command that removes it; a failed task start then keeps its task, marked failed,
+so `sbxm task rm` can try again. Interactive `new`/`open` sandboxes are unchanged. `agy` updates
 itself, and an update can break this route: `cargo test --test real_sbx antigravity_login -- --ignored` checks it with
 your saved login, and `sbxm doctor` checks the login and one refresh.
 
