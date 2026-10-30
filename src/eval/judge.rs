@@ -8,12 +8,13 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::rubric;
+use crate::auth;
 use crate::backend::{CreateSpec, SandboxBackend};
 use crate::headless::{self, HeadlessOpts, RunStatus};
 use crate::run::config::{Criterion, CriterionKind, RunConfig};
 use crate::run::id::RunRoots;
 use crate::run::kits::RunKits;
-use crate::run::orchestrate::{PairOutcome, in_sandbox_path};
+use crate::run::orchestrate::{self, PairOutcome, in_sandbox_path};
 use crate::template;
 
 /// The file in the judge's workspace that holds its instructions. The prompt
@@ -240,6 +241,9 @@ pub fn judge_repeat(
         remove_error: None,
     };
     let mut created = false;
+    // A login-mode Antigravity judge's secret: stored before its sandbox, removed after it
+    // (decision 270).
+    let login = kits.get(judge.harness).and_then(|k| k.login.as_deref());
     run.result = (|| {
         std::fs::create_dir_all(&workspace)
             .and_then(|()| {
@@ -259,6 +263,9 @@ pub fn judge_repeat(
         let harness_kits = kits
             .get(judge.harness)
             .ok_or_else(|| format!("no kits were built for {}", judge.harness.as_str()))?;
+        if let Some(helper) = login {
+            auth::set_sandbox_secret(backend, &sandbox, helper).map_err(|e| format!("{e:#}"))?;
+        }
         created = true;
         backend
             .create(&CreateSpec {
@@ -287,6 +294,9 @@ pub fn judge_repeat(
                 .list()
                 .map_or(true, |all| all.iter().any(|s| s.name == sandbox));
             return Err(format!("{e:#}"));
+        }
+        if login.is_some() {
+            auth::write_token_file(backend, &sandbox).map_err(|e| format!("{e:#}"))?;
         }
         let opts = HeadlessOpts {
             model: Some(judge.model.clone()),
@@ -331,6 +341,12 @@ pub fn judge_repeat(
             .remove(&sandbox)
             .err()
             .map(|e| format!("cannot remove sandbox {sandbox}: {e:#}; run `sbx rm -f {sandbox}`"));
+    }
+    if login.is_some() {
+        run.remove_error = orchestrate::join(
+            run.remove_error.take(),
+            orchestrate::remove_secret(backend, &sandbox),
+        );
     }
     Some(run)
 }

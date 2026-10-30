@@ -10,10 +10,11 @@ use anyhow::{Result, bail};
 
 use crate::auth;
 use crate::backend::SandboxBackend;
-use crate::config::GlobalConfig;
+use crate::config::{AntigravityAuth, GlobalConfig};
 use crate::disk;
 use crate::eval::cosine::{self, CosineEntry, Embedder, FailingEmbedder, FastEmbedder};
 use crate::eval::{jev, judge, score};
+use crate::harness::Harness;
 use crate::headless::RunStatus;
 use crate::run::config::RunConfig;
 use crate::run::orchestrate::{self, PairOutcome};
@@ -182,13 +183,20 @@ fn run_with(
     }
 
     let roots = id::reserve(&global.base_dir)?;
-    let run_kits = kits::build_with_templates(
+    let mut run_kits = kits::build_with_templates(
         config_dir,
         &run_config,
         &checked.templates,
         &roots.meta.join("kits"),
         backend,
     )?;
+    if global.antigravity_auth == AntigravityAuth::Login {
+        for kits in &mut run_kits.harnesses {
+            if kits.harness == Harness::Antigravity {
+                kits.login = Some(host.helper.clone());
+            }
+        }
+    }
     // The Jev evaluator's own kit, validated with the others before any sandbox exists.
     let jev_kit = match &run_config.eval.jev {
         Some(_) => Some(jev::build_kit(

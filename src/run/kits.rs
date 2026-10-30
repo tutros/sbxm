@@ -35,6 +35,10 @@ pub struct HarnessKits {
     pub deny_network: Option<Vec<String>>,
     /// The loaded profile, for [`template::check_codex_rules`] after each create.
     pub loaded: Profile,
+    /// sbxm's own path, for an Antigravity sandbox signed in with the user's login (decision
+    /// 270): each one gets a scoped secret served by it and a placeholder token file. `None`
+    /// otherwise.
+    pub login: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -224,6 +228,7 @@ fn build_pairs(
             deny_network: template::denied_hosts(profile, harness, template.as_deref()),
             template,
             loaded: profile.clone(),
+            login: None,
         });
     }
 

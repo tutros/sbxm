@@ -15,6 +15,7 @@ use super::config::{Contestant, RunConfig};
 use super::diff::{self, Diff};
 use super::id::RunRoots;
 use super::kits::RunKits;
+use crate::auth;
 use crate::backend::{CreateSpec, SandboxBackend};
 use crate::headless::{self, HeadlessOpts, HeadlessResult};
 use crate::seed;
@@ -112,7 +113,10 @@ pub fn execute_with(
                 .into_iter()
                 .map(|(i, sandbox, workspace, handle)| {
                     handle.join().unwrap_or_else(|_| {
-                        let remove_error = remove(backend, &sandbox);
+                        let mut remove_error = remove(backend, &sandbox);
+                        if effective_login(&run_config.contestants[i], kits).is_some() {
+                            remove_error = join(remove_error, remove_secret(backend, &sandbox));
+                        }
                         let mut outcome = PairOutcome {
                             contestant: i,
                             repeat,
@@ -163,14 +167,30 @@ struct Attempt {
 
 impl Pair<'_> {
     fn run(self) -> PairOutcome {
-        let attempt = self.attempt();
+        // A login-mode Antigravity sandbox's secret is stored before it is created, and removed
+        // after it on every path (decision 270).
+        let login = effective_login(self.contestant, self.kits);
+        let attempt = match login
+            .map(|helper| auth::set_sandbox_secret(self.backend, &self.sandbox, helper))
+        {
+            Some(Err(e)) => Attempt {
+                result: Err(format!("{e:#}")),
+                diff: None,
+                checks: Vec::new(),
+                created: false,
+            },
+            _ => self.attempt(),
+        };
         // Cleans up a failed create too, but only if create was asked for:
         // removing a sandbox that never existed would only add noise.
-        let remove_error = if attempt.created {
+        let mut remove_error = if attempt.created {
             remove(self.backend, &self.sandbox)
         } else {
             None
         };
+        if login.is_some() {
+            remove_error = join(remove_error, remove_secret(self.backend, &self.sandbox));
+        }
         let _ = std::fs::remove_dir_all(&self.work_dir);
         let mut outcome = PairOutcome {
             contestant: self.index,
@@ -264,6 +284,11 @@ impl Pair<'_> {
                 .map_or(true, |all| all.iter().any(|s| s.name == self.sandbox));
             return failed(format!("{e:#}"), left);
         }
+        if harness_kits.login.is_some()
+            && let Err(e) = auth::write_token_file(self.backend, &self.sandbox)
+        {
+            return failed(format!("{e:#}"), true);
+        }
 
         let opts = HeadlessOpts {
             model: Some(self.contestant.model.clone()),
@@ -320,6 +345,33 @@ fn effective_profile(contestant: &Contestant, kits: &RunKits) -> String {
         .profile
         .clone()
         .unwrap_or_else(|| kits.profile_name.clone())
+}
+
+/// sbxm's own path when the pair's sandbox is a login-mode Antigravity one (decision 270).
+fn effective_login<'a>(contestant: &Contestant, kits: &'a RunKits) -> Option<&'a Path> {
+    kits.get_for(&effective_profile(contestant, kits), contestant.harness)
+        .and_then(|k| k.login.as_deref())
+}
+
+/// Removes the sandbox's login secret, after the sandbox itself.
+pub(crate) fn remove_secret(backend: &dyn SandboxBackend, sandbox: &str) -> Option<String> {
+    auth::remove_sandbox_secret(backend, sandbox)
+        .err()
+        .map(|e| {
+            format!(
+                "cannot remove the Antigravity login secret of {sandbox}: {e:#}; run `sbx secret \
+                 rm --placeholder {} --sandbox {sandbox} -f`",
+                auth::placeholder(sandbox)
+            )
+        })
+}
+
+/// Both removal errors, in order, as one.
+pub(crate) fn join(first: Option<String>, second: Option<String>) -> Option<String> {
+    match (first, second) {
+        (Some(a), Some(b)) => Some(format!("{a}; {b}")),
+        (a, b) => a.or(b),
+    }
 }
 
 fn remove(backend: &dyn SandboxBackend, sandbox: &str) -> Option<String> {
