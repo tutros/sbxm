@@ -2295,3 +2295,148 @@ fn template_against_real_sbx() {
             .is_none()
     );
 }
+
+/// Removes a sandbox's scoped Antigravity login secret, even if the test fails.
+struct SecretCleanup(String);
+
+impl Drop for SecretCleanup {
+    fn drop(&mut self) {
+        let _ = Command::new("sbx")
+            .args([
+                "secret",
+                "rm",
+                "--placeholder",
+                &sbxm::auth::placeholder(&self.0),
+                "--sandbox",
+                &self.0,
+                "-f",
+            ])
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status();
+    }
+}
+
+/// Issue 330 (decision 270, point 5): a login-mode Antigravity sandbox, as `run` and `task` make
+/// one, answers a headless prompt through the proxy placeholder. Guards against `agy` updates
+/// (spike S16, Q4). Uses the login `sbxm auth antigravity` saved in the user's own config dir,
+/// which it only reads (the helper `sbx` runs keeps its token cache there, as in real use), and
+/// skips with a message when there is none.
+#[test]
+#[ignore = "needs a logged-in sbx, SBXM_REAL_BASE_DIR and a saved Antigravity login"]
+fn antigravity_login_sandbox_against_real_sbx() {
+    use std::time::Duration;
+
+    use sbxm::auth;
+    use sbxm::headless::{self, HeadlessOpts, RunStatus};
+
+    let user_config = sbxm::config::config_dir().unwrap();
+    if !auth::login_path(&user_config).exists() {
+        eprintln!(
+            "skipped: no Antigravity login at {}; run `sbxm auth antigravity` first",
+            auth::login_path(&user_config).display()
+        );
+        return;
+    }
+    let base_dir = real_base_dir();
+    let helper = PathBuf::from(env!("CARGO_BIN_EXE_sbxm"));
+    // The saved login and one refresh, as the preflight checks them.
+    auth::preflight(
+        &user_config,
+        &base_dir,
+        &auth::Host {
+            helper: helper.clone(),
+            ..auth::Host::real()
+        },
+    )
+    .unwrap();
+
+    let project = format!("sbxm-it-{}-agylogin", std::process::id());
+    let sandbox = format!("sbxm-{project}-antigravity");
+    let _cleanup = Cleanup {
+        sandbox: sandbox.clone(),
+        dirs: vec![
+            base_dir.join(&project),
+            base_dir.join(".sbxm").join(&project),
+        ],
+        shared_dirs: vec![base_dir.join(".sbxm")],
+    };
+    let _secret = SecretCleanup(sandbox.clone());
+    let config_dir = TempDir::new().unwrap();
+    let base = toml::Value::String(base_dir.to_str().unwrap().to_owned());
+    std::fs::write(
+        config_dir.path().join("config.toml"),
+        format!("base_dir = {base}\n\n[resources]\ncpus = 2\nmemory = \"2g\"\n"),
+    )
+    .unwrap();
+    let profile_dir = config_dir.path().join("profiles").join("default");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    std::fs::write(
+        profile_dir.join("profile.toml"),
+        "[skills]\nstore = \"off\"\n",
+    )
+    .unwrap();
+    let agy = sbxm::harness::Harness::Antigravity;
+
+    // The scoped secret first (sbx runs the helper once to verify it), then the sandbox, then
+    // the placeholder token file.
+    auth::set_sandbox_secret(&SbxBackend::LOCAL, &sandbox, &helper).unwrap();
+    new::run(
+        config_dir.path(),
+        &project,
+        &new::Options {
+            harness: agy,
+            ..Default::default()
+        },
+        &SbxBackend::LOCAL,
+        &mut std::io::stderr(),
+    )
+    .unwrap();
+    auth::write_token_file(&SbxBackend::LOCAL, &sandbox).unwrap();
+
+    // The sandbox holds only the placeholder.
+    let token = Command::new("sbx")
+        .args([
+            "exec",
+            &sandbox,
+            "cat",
+            "/home/agent/.gemini/antigravity-cli/antigravity-oauth-token",
+        ])
+        .output()
+        .unwrap();
+    let token: serde_json::Value = serde_json::from_slice(&token.stdout).unwrap();
+    assert_eq!(token["access_token"], auth::placeholder(&sandbox).as_str());
+    assert_eq!(token["auth_method"], "consumer");
+
+    let workspace = base_dir.join(&project);
+    let path = workspace.to_string_lossy().replace(char::from(92), "/");
+    let in_sandbox = if path.as_bytes().get(1) == Some(&b':') {
+        PathBuf::from(format!("/{}{}", path[..1].to_lowercase(), &path[2..]))
+    } else {
+        PathBuf::from(path)
+    };
+    let result = headless::run(
+        &SbxBackend::LOCAL,
+        &sandbox,
+        &in_sandbox,
+        agy,
+        "Reply with exactly: PONG",
+        &HeadlessOpts {
+            model: None,
+            high_effort: false,
+            budget_usd: None,
+            is_git_repo: false,
+        },
+        Duration::from_secs(180),
+    )
+    .unwrap();
+    assert_eq!(result.status, RunStatus::Completed, "{:?}", result.status);
+    assert!(
+        result.answer.to_uppercase().contains("PONG"),
+        "{}",
+        result.answer
+    );
+
+    SbxBackend::LOCAL.remove(&sandbox).unwrap();
+    auth::remove_sandbox_secret(&SbxBackend::LOCAL, &sandbox).unwrap();
+}
