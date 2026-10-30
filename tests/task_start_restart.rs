@@ -151,7 +151,10 @@ fn restart_asks_discards_the_old_task_and_starts_a_new_one() {
         out.contains("removed sandbox sbxm-task-issue-41-claude"),
         "{out}"
     );
-    assert!(out.contains("issue-41: worker completed"), "{out}");
+    assert!(
+        out.contains("issue-41: worker claude (default model) completed"),
+        "{out}"
+    );
     assert_eq!(b.creates().len(), 1);
     assert!(
         !meta(&f).join("old-run.marker").exists(),
@@ -600,7 +603,10 @@ fn restart_without_issues_is_refused_and_a_task_that_does_not_exist_just_starts(
         confirm.prompts.borrow().is_empty(),
         "nothing to discard, nothing to ask"
     );
-    assert!(out.contains("issue-41: worker completed"), "{out}");
+    assert!(
+        out.contains("issue-41: worker claude (default model) completed"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -801,7 +807,8 @@ fn several_restarts_accepted_once_delete_and_start_them_all() {
     assert_eq!(confirm.prompts.borrow().len(), 1);
     assert_eq!(b.creates().len(), 2);
     assert!(
-        out.contains("issue-41: worker completed") && out.contains("issue-42: worker completed"),
+        out.contains("issue-41: worker claude (default model) completed")
+            && out.contains("issue-42: worker claude (default model) completed"),
         "{out}"
     );
     assert!(

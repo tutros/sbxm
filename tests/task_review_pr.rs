@@ -477,7 +477,7 @@ fn a_failed_post_still_prints_the_round_line_and_the_unknown_risk_warning() {
     let message = format!("{:#}", result.unwrap_err());
     assert!(message.contains("rate limited"), "{message}");
     assert!(
-        out.contains("pr-7: review round 1: 0 must-fix finding(s)"),
+        out.contains("pr-7: review round 1 by codex (default model): 0 must-fix finding(s)"),
         "{out}"
     );
     assert!(warn.contains("risk is \"unknown\""), "{warn}");
@@ -500,7 +500,7 @@ fn a_failed_post_with_a_readable_risk_line_prints_no_risk_warning() {
     let message = format!("{:#}", result.unwrap_err());
     assert!(message.contains("rate limited"), "{message}");
     assert!(
-        out.contains("pr-7: review round 1: 0 must-fix finding(s)"),
+        out.contains("pr-7: review round 1 by codex (default model): 0 must-fix finding(s)"),
         "{out}"
     );
     assert!(!warn.contains("risk is"), "{warn}");
@@ -527,7 +527,7 @@ fn a_failed_post_with_a_failing_warning_writer_still_returns_the_post_error() {
     );
     let out = String::from_utf8(out).unwrap();
     assert!(
-        out.contains("pr-7: review round 1: 0 must-fix finding(s)"),
+        out.contains("pr-7: review round 1 by codex (default model): 0 must-fix finding(s)"),
         "{out}"
     );
 }

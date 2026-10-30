@@ -687,3 +687,59 @@ fn unsupported_profile_settings_warn_for_each_contestant_and_the_judge() {
     );
     assert!(!joined.contains("but claude"), "{joined}");
 }
+
+// ---- a harness's default model (issue 314) -------------------------------
+
+const RUBRIC: &str = "[[eval.rubric]]\nid = \"a\"\nkind = \"pass_fail\"\nweight = 1.0\n\n";
+
+#[test]
+fn an_antigravity_contestant_and_judge_without_a_model_get_the_default() {
+    let config = load_ok(&format!(
+        "{TASK}{CLAUDE}[[contestants]]\nharness = \"antigravity\"\n\n{RUBRIC}\
+         [eval.judge]\nharness = \"antigravity\"\n"
+    ));
+    assert_eq!(config.contestants[1].model, "gemini-3.8-flash-medium");
+    assert_eq!(config.eval.judge.unwrap().model, "gemini-3.8-flash-medium");
+}
+
+#[test]
+fn an_explicit_antigravity_model_is_kept() {
+    let config = load_ok(&format!(
+        "{TASK}{CLAUDE}{ANTIGRAVITY}{RUBRIC}\
+         [eval.judge]\nharness = \"antigravity\"\nmodel = \"gemini-4-argon-high\"\n"
+    ));
+    assert_eq!(config.contestants[1].model, "gemini-3.8-flash-low");
+    assert_eq!(config.eval.judge.unwrap().model, "gemini-4-argon-high");
+}
+
+#[test]
+fn an_empty_antigravity_model_is_still_refused() {
+    let err = load_err(&format!(
+        "{TASK}{CLAUDE}[[contestants]]\nharness = \"antigravity\"\nmodel = \" \"\n\n"
+    ));
+    assert!(err.contains("contestants[1].model is empty"), "{err}");
+    let err = load_err(&valid(&format!(
+        "{RUBRIC}[eval.judge]\nharness = \"antigravity\"\nmodel = \"\"\n"
+    )));
+    assert!(err.contains("eval.judge.model is empty"), "{err}");
+}
+
+#[test]
+fn claude_and_codex_without_a_model_are_refused_naming_the_key() {
+    for harness in ["claude", "codex"] {
+        let err = load_err(&format!(
+            "{TASK}{ANTIGRAVITY}[[contestants]]\nharness = \"{harness}\"\n\n"
+        ));
+        assert!(
+            err.contains("contestants[1].model") && err.contains(harness),
+            "{harness}: {err}"
+        );
+        let err = load_err(&valid(&format!(
+            "{RUBRIC}[eval.judge]\nharness = \"{harness}\"\n"
+        )));
+        assert!(
+            err.contains("eval.judge.model") && err.contains(harness),
+            "{harness}: {err}"
+        );
+    }
+}

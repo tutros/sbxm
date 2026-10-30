@@ -535,7 +535,8 @@ fn start(
                 };
                 writeln!(
                     out,
-                    "{id}: worker {label}, {}",
+                    "{id}: worker {} {label}, {}",
+                    worked.agent,
                     plural(worked.commits, "commit")
                 )?;
                 for note in &worked.notes {
@@ -998,7 +999,11 @@ pub(crate) fn run_spec_from(
             RunStatus::TimedOut => ("timed out".to_owned(), location == Location::Cloud),
             RunStatus::Failed(why) => (format!("failed: {why}"), true),
         };
-        writeln!(out, "{id}: worker {label}, {} commit(s)", worked.commits)?;
+        writeln!(
+            out,
+            "{id}: worker {} {label}, {} commit(s)",
+            worked.agent, worked.commits
+        )?;
         for note in &worked.notes {
             writeln!(out, "  note: {note}")?;
         }

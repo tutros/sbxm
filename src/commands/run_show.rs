@@ -12,6 +12,7 @@ use serde_json::Value;
 use crate::config::GlobalConfig;
 use crate::eval::{cosine, score};
 use crate::run::id;
+use crate::task::review::agent_label;
 
 #[derive(Debug, Default)]
 pub struct Options {
@@ -68,7 +69,7 @@ pub fn render(config_dir: &Path, run_id: &str, options: &Options) -> Result<Stri
     // without a judge has none, and a damaged config copy only loses this block.
     let labels: Vec<String> = contestants
         .iter()
-        .map(|c| format!("{}/{}", text(&c["harness"]), text(&c["model"])))
+        .map(|c| agent_label(&text(&c["harness"]), Some(&text(&c["model"]))))
         .collect();
     if let Ok(Some(ranking)) = score::load(&meta) {
         writeln!(out)?;
@@ -97,9 +98,11 @@ pub fn render(config_dir: &Path, run_id: &str, options: &Options) -> Result<Stri
         };
         writeln!(
             out,
-            "contestants[{i}] {}/{}{own_profile}",
-            text(&contestant["harness"]),
-            text(&contestant["model"])
+            "contestants[{i}] {}{own_profile}",
+            agent_label(
+                &text(&contestant["harness"]),
+                Some(&text(&contestant["model"]))
+            )
         )?;
         for r in 0..repeat {
             let dir = meta.join(i.to_string()).join(r.to_string());
@@ -269,16 +272,26 @@ fn write_judge(out: &mut String, dir: &Path) -> Result<()> {
         return Ok(());
     }
     let label = judge["label"].as_str().unwrap_or("?");
+    // The judge that ran, so a default model is visible (issue 314); an entry saved
+    // without it keeps the bare label.
+    let who = match judge["judge"]["harness"].as_str() {
+        Some(harness) => format!(
+            " {}",
+            agent_label(harness, judge["judge"]["model"].as_str())
+        ),
+        None => String::new(),
+    };
+    let head = format!("    Judge{who} (candidate {label}):");
     if judge["status"] != "ok" {
         writeln!(
             out,
-            "    Judge (candidate {label}): not scored: {}",
+            "{head} not scored: {}",
             judge["error"].as_str().unwrap_or("no details")
         )?;
         return Ok(());
     }
     let criteria = judge["criteria"].as_object().cloned().unwrap_or_default();
-    let mut line = format!("    Judge (candidate {label}):");
+    let mut line = head;
     let scored: Vec<String> = criteria
         .iter()
         .map(|(id, c)| {

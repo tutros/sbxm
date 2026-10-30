@@ -253,7 +253,7 @@ pub enum TaskCommand {
         /// The worker's harness (default: sbxm-task.toml, else claude).
         #[arg(long, value_enum)]
         worker_harness: Option<Harness>,
-        /// The worker's model (default: the harness's own).
+        /// The worker's model (default: the harness's own; gemini-3.8-flash-medium for antigravity).
         #[arg(long)]
         worker_model: Option<String>,
         /// The worker's time limit, e.g. 90s, 45m, 2h.
@@ -311,7 +311,7 @@ pub enum TaskCommand {
         /// The reviewer's harness (default: sbxm-task.toml, else one different from the worker's).
         #[arg(long, value_enum)]
         reviewer_harness: Option<Harness>,
-        /// The reviewer's model (default: the harness's own).
+        /// The reviewer's model (default: the harness's own; gemini-3.8-flash-medium for antigravity).
         #[arg(long)]
         reviewer_model: Option<String>,
         /// The reviewer's time limit, e.g. 45m.
@@ -412,13 +412,13 @@ pub enum TaskCommand {
         /// The worker's harness (default: sbxm-task.toml, else claude).
         #[arg(long, value_enum)]
         worker_harness: Option<Harness>,
-        /// The worker's model (default: the harness's own).
+        /// The worker's model (default: the harness's own; gemini-3.8-flash-medium for antigravity).
         #[arg(long)]
         worker_model: Option<String>,
         /// The reviewer's harness (default: sbxm-task.toml, else one different from the worker's).
         #[arg(long, value_enum)]
         reviewer_harness: Option<Harness>,
-        /// The reviewer's model (default: the harness's own).
+        /// The reviewer's model (default: the harness's own; gemini-3.8-flash-medium for antigravity).
         #[arg(long)]
         reviewer_model: Option<String>,
         /// The worker's time limit, e.g. 90s, 45m, 2h (also for the fix round).

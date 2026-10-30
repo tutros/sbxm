@@ -175,7 +175,7 @@ Run 2026-09-30-abc123
 Started 2026-09-30T18:00:00Z, completed 2026-09-30T18:01:10Z
 Profile default, sbx 0.43.0, 2 contestants, repeat 2
 
-contestants[0] claude/model-a
+contestants[0] claude (model-a)
   repeat 1/2: completed (100 in, 20 out tokens, $0.0100)
     Answer:
       PONG
@@ -192,7 +192,7 @@ contestants[0] claude/model-a
     Diff: no changes
     Left out (links): linked
 
-contestants[1] codex/model-b
+contestants[1] codex (model-b)
   repeat 1/2: failed: exit code 1: boom
     Answer: (none)
     Diff: could not be captured: cannot capture the diff: gone
@@ -201,6 +201,45 @@ contestants[1] codex/model-b
     Diff: none (the pair never got a sandbox)
 ";
     assert_eq!(shown(&env), expected);
+}
+
+/// Issue 314: a judge whose run-config left out `model` is shown with the model it ran on, also
+/// when it is the run's only Antigravity role; an `evals.json` from before the judge was saved
+/// with it keeps the bare label.
+#[test]
+fn the_judge_is_named_with_its_harness_and_model() {
+    let env = fixture();
+    let verdict = |judge: Value| {
+        let mut entry = json!({
+            "label": "A", "status": "ok", "error": null,
+            "criteria": {"correctness": {"value": true, "score": 1.0, "reason": ""}},
+            "unscored": [],
+        });
+        if !judge.is_null() {
+            entry["judge"] = judge;
+        }
+        json!({"judge": entry})
+    };
+    write_json(
+        &meta(&env).join("0").join("0").join("evals.json"),
+        &verdict(json!({"harness": "antigravity", "model": "gemini-3.8-flash-medium"})),
+    );
+    write_json(
+        &meta(&env).join("0").join("1").join("evals.json"),
+        &verdict(Value::Null),
+    );
+
+    let out = shown(&env);
+    assert!(
+        out.contains(
+            "    Judge antigravity (gemini-3.8-flash-medium) (candidate A): correctness true (1.00)\n"
+        ),
+        "{out}"
+    );
+    assert!(
+        out.contains("    Judge (candidate A): correctness true (1.00)\n"),
+        "{out}"
+    );
 }
 
 #[test]
@@ -256,7 +295,7 @@ fn a_run_still_going_or_interrupted_says_so() {
         "{out}"
     );
     assert!(
-        out.contains("contestants[1] codex/model-b\n  repeat 1/2: no results saved"),
+        out.contains("contestants[1] codex (model-b)\n  repeat 1/2: no results saved"),
         "{out}"
     );
 }
@@ -375,7 +414,7 @@ fn a_real_run_can_be_shown_right_after_it_finishes() {
     );
     assert!(
         out.contains(
-            "contestants[0] claude/one\n  repeat 1/1: completed (27651 in, 44 out tokens, $0.0295)"
+            "contestants[0] claude (one)\n  repeat 1/1: completed (27651 in, 44 out tokens, $0.0295)"
         ),
         "{out}"
     );
@@ -404,7 +443,10 @@ fn the_cli_prints_a_saved_run() {
 
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.starts_with("Run 2026-09-30-abc123\n"), "{stdout}");
-    assert!(stdout.contains("contestants[1] codex/model-b"), "{stdout}");
+    assert!(
+        stdout.contains("contestants[1] codex (model-b)"),
+        "{stdout}"
+    );
     assert!(!stdout.contains("+alpha edited"));
 }
 

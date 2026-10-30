@@ -276,18 +276,18 @@ fn the_ranking_is_rendered_best_first_with_its_caveats() {
     ];
     let ranking = score::rank(&rubric(), 3, 2, &pairs);
     let labels = [
-        "claude/model-a".to_owned(),
-        "codex/model-b".to_owned(),
-        "antigravity/model-c".to_owned(),
+        "claude (model-a)".to_owned(),
+        "codex (model-b)".to_owned(),
+        "antigravity (model-c)".to_owned(),
     ];
 
     let text = score::render(&ranking, &labels);
 
     let expected = "\
 Ranking (judge scores 0-1, repeats averaged)
-  1. contestants[1] codex/model-b: 1.00 (2/2 repeats scored)
-  2. contestants[0] claude/model-a: 0.50 (2/2 repeats scored; checks 1/2 passed; 1 timed out; unscored: clarity)
-  -  contestants[2] antigravity/model-c: not scored (the judge scored none of its repeats)
+  1. contestants[1] codex (model-b): 1.00 (2/2 repeats scored)
+  2. contestants[0] claude (model-a): 0.50 (2/2 repeats scored; checks 1/2 passed; 1 timed out; unscored: clarity)
+  -  contestants[2] antigravity (model-c): not scored (the judge scored none of its repeats)
 ";
     assert_eq!(text, expected);
 }

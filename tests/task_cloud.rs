@@ -939,7 +939,9 @@ fn a_timed_out_worker_keeps_its_commits_stops_the_task_and_its_cloud_sandbox_is_
     let message = format!("{:#}", started.result.as_ref().unwrap_err());
     assert!(message.contains("timed out"), "{message}");
     assert!(
-        started.out.contains("worker timed out, 1 commit(s)"),
+        started
+            .out
+            .contains("worker claude (default model) timed out, 1 commit(s)"),
         "{}",
         started.out
     );

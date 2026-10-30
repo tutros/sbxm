@@ -119,7 +119,7 @@ fn a_clean_review_prints_the_round_and_where_the_review_is() {
     out.result.unwrap();
     assert!(
         out.out
-            .contains("issue-41: review round 1: 0 must-fix finding(s)"),
+            .contains("issue-41: review round 1 by codex (default model): 0 must-fix finding(s)"),
         "{}",
         out.out
     );
@@ -174,9 +174,15 @@ fn must_fix_findings_show_the_fix_round_and_the_second_review() {
 
     out.result.unwrap();
     let text = &out.out;
-    assert!(text.contains("review round 1: 1 must-fix"), "{text}");
+    assert!(
+        text.contains("review round 1 by codex (default model): 1 must-fix"),
+        "{text}"
+    );
     assert!(text.contains("fix round ran"), "{text}");
-    assert!(text.contains("review round 2: 0 must-fix"), "{text}");
+    assert!(
+        text.contains("review round 2 by codex (default model): 0 must-fix"),
+        "{text}"
+    );
     assert!(text.contains("issue-41: ready"), "{text}");
 }
 
@@ -489,7 +495,7 @@ fn a_pr_review_prints_the_result_and_that_it_was_posted() {
     out.result.unwrap();
     assert!(
         out.out
-            .contains("pr-7: review round 1: 1 must-fix finding(s)"),
+            .contains("pr-7: review round 1 by codex (default model): 1 must-fix finding(s)"),
         "{}",
         out.out
     );
@@ -631,7 +637,7 @@ fn a_pr_with_an_unchanged_head_is_refused_unless_forced() {
     out.result.unwrap();
     assert!(
         out.out
-            .contains("pr-7: review round 2: 1 must-fix finding(s)"),
+            .contains("pr-7: review round 2 by codex (default model): 1 must-fix finding(s)"),
         "{}",
         out.out
     );
@@ -1038,4 +1044,55 @@ fn a_low_sandbox_drive_refuses_before_the_review() {
     assert!(err.starts_with(common::LOW_DISK), "{err}");
     assert!(backend.log().is_empty(), "{:?}", backend.log());
     assert_eq!(std::fs::read(meta(&f).join("task.json")).unwrap(), before);
+}
+
+const AGY_DONE: &str = include_str!("../src/fixtures/antigravity-stream-json-pong.jsonl");
+
+/// Issue 314: an Antigravity reviewer with no model runs Antigravity's default, and the record and
+/// the saved review name it; a Codex reviewer with no model still names no model.
+#[test]
+fn an_antigravity_reviewer_without_a_model_records_the_default() {
+    let f = config("antigravity");
+    let backend = backend(&f, &[CLEAN])
+        .and_secrets(&["anthropic", "openai", "google"])
+        .with_exec_output_matching("agy", ok(AGY_DONE));
+    worked_task(&f, &backend);
+
+    let out = go(&f, &options(&f), &backend);
+
+    out.result.unwrap();
+    assert!(
+        out.out.contains(
+            "issue-41: review round 1 by antigravity (gemini-3.8-flash-medium): 0 must-fix finding(s)"
+        ),
+        "{}",
+        out.out
+    );
+    let task = record::read(&meta(&f).join("task.json")).unwrap();
+    assert_eq!(
+        task.reviewer.unwrap().model.as_deref(),
+        Some("gemini-3.8-flash-medium")
+    );
+    let saved = std::fs::read_to_string(meta(&f).join("review.md")).unwrap();
+    assert!(
+        saved.starts_with("Reviewer: antigravity (gemini-3.8-flash-medium)\n"),
+        "{saved}"
+    );
+}
+
+#[test]
+fn a_codex_reviewer_without_a_model_records_none() {
+    let f = config("codex");
+    let backend = backend(&f, &[CLEAN]);
+    worked_task(&f, &backend);
+
+    go(&f, &options(&f), &backend).result.unwrap();
+
+    let task = record::read(&meta(&f).join("task.json")).unwrap();
+    assert_eq!(task.reviewer.unwrap().model, None);
+    let saved = std::fs::read_to_string(meta(&f).join("review.md")).unwrap();
+    assert!(
+        saved.starts_with("Reviewer: codex (default model)\n"),
+        "{saved}"
+    );
 }

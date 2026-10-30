@@ -65,12 +65,12 @@ fn a_run_prints_its_id_and_one_line_per_contestant() {
     let lines: Vec<&str> = ran.out.lines().collect();
     assert_eq!(lines[0], format!("Run {}", summary.run_id));
     assert!(
-        lines[1].starts_with("contestants[0] claude/one: completed"),
+        lines[1].starts_with("contestants[0] claude (one): completed"),
         "{}",
         lines[1]
     );
     assert!(
-        lines[2].starts_with("contestants[1] claude/two: completed"),
+        lines[2].starts_with("contestants[1] claude (two): completed"),
         "{}",
         lines[2]
     );
@@ -144,13 +144,13 @@ fn repeats_are_reported_per_repeat() {
     ran.result.unwrap();
     assert!(
         ran.out
-            .contains("contestants[0] claude/one repeat 1/2: completed"),
+            .contains("contestants[0] claude (one) repeat 1/2: completed"),
         "{}",
         ran.out
     );
     assert!(
         ran.out
-            .contains("contestants[1] claude/two repeat 2/2: completed"),
+            .contains("contestants[1] claude (two) repeat 2/2: completed"),
         "{}",
         ran.out
     );
@@ -173,7 +173,7 @@ fn a_failed_command_is_reported_with_its_reason_and_the_run_still_succeeds() {
 
     ran.result.unwrap();
     assert!(
-        ran.out.contains("contestants[0] claude/one: failed:"),
+        ran.out.contains("contestants[0] claude (one): failed:"),
         "{}",
         ran.out
     );
@@ -195,7 +195,7 @@ fn a_timeout_is_labelled_and_keeps_the_partial_output_note() {
     ran.result.unwrap();
     assert!(
         ran.out
-            .contains("contestants[0] claude/one: timed out (partial output kept)"),
+            .contains("contestants[0] claude (one): timed out (partial output kept)"),
         "{}",
         ran.out
     );
@@ -210,7 +210,7 @@ fn a_backend_error_is_reported_per_pair_and_cleaned_up() {
 
     assert!(
         ran.out
-            .contains("contestants[0] claude/one: error: cannot create sandbox"),
+            .contains("contestants[0] claude (one): error: cannot create sandbox"),
         "{}",
         ran.out
     );
@@ -232,12 +232,12 @@ fn one_errored_pair_is_counted_against_the_total_the_other_pair_still_completing
     let ran = go(&env, &format!("{TASK}{TWO_CLAUDES}"), &backend);
 
     assert!(
-        ran.out.contains("contestants[0] claude/one: completed"),
+        ran.out.contains("contestants[0] claude (one): completed"),
         "{}",
         ran.out
     );
     assert!(
-        ran.out.contains("contestants[1] claude/two: error:"),
+        ran.out.contains("contestants[1] claude (two): error:"),
         "{}",
         ran.out
     );
@@ -580,4 +580,120 @@ fn run_takes_ignore_disk() {
     let stderr = String::from_utf8(assert.get_output().stderr.clone()).unwrap();
     assert!(stderr.contains("missing.toml"), "{stderr}");
     assert!(!stderr.contains("unexpected argument"), "{stderr}");
+}
+
+// ---- Antigravity's default model (issue 314) -----------------------------
+
+const AGY_PONG: &str = include_str!("../src/fixtures/antigravity-stream-json-pong.jsonl");
+const DEFAULT_AGY_MODEL: &str = "gemini-3.8-flash-medium";
+
+/// A Claude contestant and an Antigravity one whose `model` is `agy_model` (omitted when `None`),
+/// judged by Antigravity with the same `model`; the judge's reply has no verdict.
+fn claude_and_agy(agy_model: Option<&str>) -> String {
+    let model = agy_model.map_or(String::new(), |m| format!("model = \"{m}\"\n"));
+    format!(
+        "{TASK}[[contestants]]\nharness = \"claude\"\nmodel = \"one\"\n\n\
+         [[contestants]]\nharness = \"antigravity\"\n{model}\n\
+         [[eval.rubric]]\nid = \"a\"\nkind = \"pass_fail\"\nweight = 1.0\n\n\
+         [eval.judge]\nharness = \"antigravity\"\n{model}"
+    )
+}
+
+fn agy_backend() -> FakeBackend {
+    pong()
+        .and_secrets(&["anthropic", "google"])
+        .with_exec_output_matching(
+            "agy",
+            ExecOutput {
+                stdout: AGY_PONG.into(),
+                stderr: String::new(),
+                exit_code: Some(0),
+            },
+        )
+}
+
+/// The `--model` of every `agy` command the backend ran.
+fn agy_models(backend: &FakeBackend) -> Vec<String> {
+    backend
+        .execs()
+        .iter()
+        .filter(|(_, spec)| spec.argv.iter().any(|a| a == "agy"))
+        .map(|(_, spec)| {
+            let at = spec.argv.iter().position(|a| a == "--model").unwrap();
+            spec.argv[at + 1].clone()
+        })
+        .collect()
+}
+
+fn read_json(path: PathBuf) -> serde_json::Value {
+    serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap()
+}
+
+/// The model every record names for the Antigravity contestant (`run.json`, its `result.json`)
+/// and for the judge (`judge.json`, the pair's `evals.json`).
+fn saved_agy_models(env: &Env, run_id: &str) -> Vec<serde_json::Value> {
+    let meta = env.base_dir().join(".sbxm").join("runs").join(run_id);
+    let pair = meta.join("1").join("0");
+    vec![
+        read_json(meta.join("run.json"))["contestants"][1]["model"].clone(),
+        read_json(pair.join("result.json"))["model"].clone(),
+        read_json(meta.join("judge").join("0").join("judge.json"))["judge"]["model"].clone(),
+        read_json(pair.join("evals.json"))["judge"]["judge"]["model"].clone(),
+    ]
+}
+
+#[test]
+fn an_antigravity_contestant_and_judge_without_a_model_run_and_save_the_default() {
+    let env = Env::new();
+    let backend = agy_backend();
+
+    let ran = go(&env, &claude_and_agy(None), &backend);
+
+    let summary = ran.result.unwrap();
+    assert_eq!(agy_models(&backend), [DEFAULT_AGY_MODEL, DEFAULT_AGY_MODEL]);
+    assert_eq!(
+        saved_agy_models(&env, &summary.run_id),
+        [DEFAULT_AGY_MODEL; 4]
+    );
+    let label = format!("antigravity ({DEFAULT_AGY_MODEL})");
+    assert!(
+        ran.out
+            .contains(&format!("contestants[1] {label}: completed")),
+        "{}",
+        ran.out
+    );
+    assert!(
+        ran.out
+            .contains(&format!("Judge {label}: repeat 1/1 failed")),
+        "{}",
+        ran.out
+    );
+    let shown = sbxm::commands::run_show::render(
+        &env.config_dir(),
+        &summary.run_id,
+        &sbxm::commands::run_show::Options { full_diff: false },
+    )
+    .unwrap();
+    assert!(
+        shown.contains(&format!("\ncontestants[1] {label}\n")),
+        "{shown}"
+    );
+}
+
+#[test]
+fn an_explicit_antigravity_model_is_run_and_saved_instead_of_the_default() {
+    let env = Env::new();
+    let backend = agy_backend();
+
+    let ran = go(&env, &claude_and_agy(Some("gemini-4-argon-high")), &backend);
+
+    let summary = ran.result.unwrap();
+    assert_eq!(
+        agy_models(&backend),
+        ["gemini-4-argon-high", "gemini-4-argon-high"]
+    );
+    assert_eq!(
+        saved_agy_models(&env, &summary.run_id),
+        ["gemini-4-argon-high"; 4]
+    );
 }

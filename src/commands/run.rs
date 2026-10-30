@@ -17,6 +17,7 @@ use crate::headless::RunStatus;
 use crate::run::config::RunConfig;
 use crate::run::orchestrate::{self, PairOutcome};
 use crate::run::{id, kits, preflight, results};
+use crate::task::review::agent_label;
 
 #[derive(Debug)]
 pub struct Summary {
@@ -219,10 +220,9 @@ fn run_with(
         let repeat = repeat_label(&run_config, outcome.repeat);
         writeln!(
             out,
-            "contestants[{}] {}/{}{repeat}: {}{}",
+            "contestants[{}] {}{repeat}: {}{}",
             outcome.contestant,
-            contestant.harness.as_str(),
-            contestant.model,
+            agent_label(contestant.harness.as_str(), Some(&contestant.model)),
             describe(&outcome.result),
             checks_suffix(&outcome.checks)
         )?;
@@ -267,7 +267,7 @@ fn run_with(
             else {
                 continue;
             };
-            let who = format!("{}/{}", judge.harness.as_str(), judge.model);
+            let who = agent_label(judge.harness.as_str(), Some(&judge.model));
             match &judged.result {
                 Ok(_) => writeln!(
                     out,
@@ -407,7 +407,7 @@ fn run_with(
     let labels: Vec<String> = run_config
         .contestants
         .iter()
-        .map(|c| format!("{}/{}", c.harness.as_str(), c.model))
+        .map(|c| agent_label(c.harness.as_str(), Some(&c.model)))
         .collect();
     match score::load(&roots.meta) {
         Ok(Some(ranking)) => write!(out, "{}", score::render(&ranking, &labels))?,

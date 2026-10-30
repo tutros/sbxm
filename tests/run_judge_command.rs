@@ -204,13 +204,13 @@ fn the_judge_runs_once_per_repeat_after_every_pair_and_is_removed() {
     }
     assert!(
         ran.out
-            .contains("Judge codex/judge-model: repeat 1/2 scored 2 contestants"),
+            .contains("Judge codex (judge-model): repeat 1/2 scored 2 contestants"),
         "{}",
         ran.out
     );
     assert!(
         ran.out
-            .contains("Judge codex/judge-model: repeat 2/2 scored 2 contestants"),
+            .contains("Judge codex (judge-model): repeat 2/2 scored 2 contestants"),
         "{}",
         ran.out
     );
@@ -236,7 +236,7 @@ fn a_failing_judge_is_recorded_warned_about_and_does_not_fail_the_run() {
     );
     assert!(
         ran.out.contains(
-            "Judge codex/judge-model: repeat 1/1 failed: the judge's reply has no JSON object"
+            "Judge codex (judge-model): repeat 1/1 failed: the judge's reply has no JSON object"
         ),
         "{}",
         ran.out
@@ -316,11 +316,13 @@ fn run_show_reveals_the_label_scores_and_reasons() {
     // Contestant blocks start at a line beginning `contestants[`; the ranking's lines are indented.
     let block = shown.split("\ncontestants[").nth(a_contestant + 1).unwrap();
     assert!(
-        block.contains("    Judge (candidate A): correctness true (1.00), quality good (1.00)\n      correctness: works\n      quality: tidy\n"),
+        block.contains("    Judge codex (judge-model) (candidate A): correctness true (1.00), quality good (1.00)\n      correctness: works\n      quality: tidy\n"),
         "{shown}"
     );
     assert!(
-        shown.contains("Judge (candidate B): correctness false (0.00), quality poor (0.00)"),
+        shown.contains(
+            "Judge codex (judge-model) (candidate B): correctness false (0.00), quality poor (0.00)"
+        ),
         "{shown}"
     );
 }
@@ -339,7 +341,7 @@ fn run_show_reports_a_judge_that_did_not_score_and_unscored_criteria() {
     )
     .unwrap();
     assert!(
-        shown.contains("Judge (candidate A): not scored: the judge's reply has no JSON object"),
+        shown.contains("Judge codex (judge-model) (candidate A): not scored: the judge's reply has no JSON object"),
         "{shown}"
     );
 

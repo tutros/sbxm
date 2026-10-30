@@ -689,3 +689,112 @@ fn ignore_disk_starts_the_task_anyway() {
     out.result.unwrap();
     assert_eq!(backend.creates().len(), 1);
 }
+
+const AGY_DONE: &str = include_str!("../src/fixtures/antigravity-stream-json-pong.jsonl");
+
+fn antigravity_options(f: &Fixture, model: Option<&str>) -> Options {
+    let mut opts = options(f);
+    opts.worker_harness = Some(Harness::Antigravity);
+    opts.worker_model = model.map(str::to_owned);
+    opts
+}
+
+fn playing_agy(f: &Fixture) -> FakeBackend {
+    playing(f)
+        .and_secrets(&["anthropic", "google"])
+        .with_exec_output_matching("agy", ok(AGY_DONE))
+}
+
+fn worker_record(f: &Fixture) -> record::Agent {
+    let dir = record::task_dir(&f.env.base_dir(), "issue-41");
+    record::read(&dir.join("task.json"))
+        .unwrap()
+        .worker
+        .unwrap()
+}
+
+fn agy_models(backend: &FakeBackend) -> Vec<String> {
+    backend
+        .execs()
+        .iter()
+        .filter(|(_, spec)| spec.argv.iter().any(|a| a == "agy"))
+        .map(|(_, spec)| {
+            let at = spec.argv.iter().position(|a| a == "--model").unwrap();
+            spec.argv[at + 1].clone()
+        })
+        .collect()
+}
+
+/// Issue 314, boundary case 1: no model set means Antigravity's default, passed and recorded.
+#[test]
+fn an_antigravity_worker_without_a_model_runs_and_records_the_default() {
+    let f = fixture();
+    let backend = playing_agy(&f);
+
+    let out = run(&f, &antigravity_options(&f, None), &backend, &github());
+
+    out.result.unwrap();
+    assert_eq!(agy_models(&backend), ["gemini-3.8-flash-medium"]);
+    assert!(
+        out.out
+            .contains("issue-41: worker antigravity (gemini-3.8-flash-medium) completed, 1 commit"),
+        "{}",
+        out.out
+    );
+    assert_eq!(
+        worker_record(&f).model.as_deref(),
+        Some("gemini-3.8-flash-medium")
+    );
+}
+
+/// Issue 314, boundary case 2: an explicit model is passed and recorded, never the default.
+#[test]
+fn an_antigravity_worker_with_a_model_runs_and_records_that_model() {
+    let f = fixture();
+    let backend = playing_agy(&f);
+
+    let out = run(
+        &f,
+        &antigravity_options(&f, Some("gemini-4-argon-high")),
+        &backend,
+        &github(),
+    );
+
+    out.result.unwrap();
+    assert_eq!(agy_models(&backend), ["gemini-4-argon-high"]);
+    assert!(
+        out.out
+            .contains("issue-41: worker antigravity (gemini-4-argon-high) completed"),
+        "{}",
+        out.out
+    );
+    assert_eq!(
+        worker_record(&f).model.as_deref(),
+        Some("gemini-4-argon-high")
+    );
+}
+
+/// Issue 314, boundary case 4: Claude without a model gets no default, in the argv or the record.
+#[test]
+fn a_claude_worker_without_a_model_records_none() {
+    let f = fixture();
+    let backend = playing(&f);
+
+    let out = run(&f, &options(&f), &backend, &github());
+
+    out.result.unwrap();
+    assert!(
+        backend
+            .execs()
+            .iter()
+            .filter(|(_, spec)| spec.argv.iter().any(|a| a == "claude"))
+            .all(|(_, spec)| !spec.argv.iter().any(|a| a == "--model"))
+    );
+    assert_eq!(worker_record(&f).model, None);
+    assert!(
+        out.out
+            .contains("issue-41: worker claude (default model) completed"),
+        "{}",
+        out.out
+    );
+}

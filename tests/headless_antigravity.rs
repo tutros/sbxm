@@ -187,8 +187,9 @@ fn the_unauthenticated_error_is_reported_as_failed() {
     );
 }
 
+/// Issue 314: no model set means sbxm's chosen default, never `agy`'s own pick.
 #[test]
-fn argv_omits_the_model_flag_when_absent() {
+fn argv_passes_the_default_model_when_none_is_set() {
     let no_model = HeadlessOpts {
         model: None,
         ..opts()
@@ -196,5 +197,41 @@ fn argv_omits_the_model_flag_when_absent() {
     let argv = Harness::Antigravity
         .headless_argv("do it", &no_model)
         .unwrap();
-    assert!(!argv.contains(&"--model".to_owned()));
+    let at = argv.iter().position(|a| a == "--model").unwrap();
+    assert_eq!(argv[at + 1], "gemini-3.8-flash-medium");
+    assert_eq!(argv.iter().filter(|a| *a == "--model").count(), 1);
+}
+
+#[test]
+fn an_explicit_model_is_passed_instead_of_the_default() {
+    let argv = Harness::Antigravity
+        .headless_argv("do it", &opts())
+        .unwrap();
+    assert!(argv.contains(&"gemini-3.8-flash-low".to_owned()));
+    assert!(!argv.contains(&"gemini-3.8-flash-medium".to_owned()));
+}
+
+#[test]
+fn only_antigravity_has_a_default_model() {
+    assert_eq!(
+        Harness::Antigravity.default_model(),
+        Some("gemini-3.8-flash-medium")
+    );
+    for harness in [
+        Harness::Claude,
+        Harness::Codex,
+        Harness::Gemini,
+        Harness::Pi,
+    ] {
+        assert_eq!(harness.default_model(), None, "{}", harness.as_str());
+        assert_eq!(harness.model_or_default(None), None, "{}", harness.as_str());
+    }
+    assert_eq!(
+        Harness::Antigravity.model_or_default(None).as_deref(),
+        Some("gemini-3.8-flash-medium")
+    );
+    assert_eq!(
+        Harness::Antigravity.model_or_default(Some("x")).as_deref(),
+        Some("x")
+    );
 }

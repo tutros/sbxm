@@ -298,6 +298,16 @@ pub(super) fn resume_hint(record: &record::Record, flag: &str) -> Option<String>
     )
 }
 
+/// ` by <harness> (<model>)` for a review round line: the reviewer the record names (issue 314).
+fn reviewed_by(record: &record::Record) -> String {
+    record.reviewer.as_ref().map_or_else(String::new, |agent| {
+        format!(
+            " by {}",
+            review::agent_label(&agent.harness, agent.model.as_deref())
+        )
+    })
+}
+
 /// Prints how the review of a task with a worker went (`task review`, `task resume`): warnings
 /// not already printed, each review round, the fix rounds, and where the task ended. When the
 /// gates stopped it, prints that instead of the ready line and returns the failed gate, so the
@@ -318,6 +328,7 @@ pub(super) fn print_review<'a>(
     {
         writeln!(warn, "warning: {warning}")?;
     }
+    let by = reviewed_by(record);
     if let Some(failed) = &report.gates_failed {
         let log = meta.join("gates.log");
         let line = match &report.gates_could_not_run {
@@ -328,7 +339,7 @@ pub(super) fn print_review<'a>(
         for round in &report.rounds {
             writeln!(
                 out,
-                "{id}: review round {}: {} must-fix finding(s)",
+                "{id}: review round {}{by}: {} must-fix finding(s)",
                 round.round, round.must_fix
             )?;
             print_risk_warning(warn, round.risk)?;
@@ -339,7 +350,7 @@ pub(super) fn print_review<'a>(
     for round in &report.rounds {
         writeln!(
             out,
-            "{id}: review round {}: {} must-fix finding(s){}",
+            "{id}: review round {}{by}: {} must-fix finding(s){}",
             round.round,
             round.must_fix,
             if round.full { "" } else { " (narrow)" }
@@ -600,8 +611,10 @@ fn run_pr(
     if let Some(reviewed) = &report.reviewed {
         match writeln!(
             out,
-            "{id}: review round {}: {} must-fix finding(s)",
-            reviewed.round, reviewed.must_fix
+            "{id}: review round {}{}: {} must-fix finding(s)",
+            reviewed.round,
+            reviewed_by(&prepared.record),
+            reviewed.must_fix
         ) {
             Ok(()) => write_err = print_risk_warning(warn, reviewed.risk).err(),
             Err(e) => write_err = Some(e.into()),
