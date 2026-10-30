@@ -8,6 +8,7 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 
+use crate::auth;
 use crate::backend::SandboxBackend;
 use crate::config::GlobalConfig;
 use crate::disk;
@@ -74,6 +75,31 @@ pub fn run(
         warn,
         None,
         &std::thread::sleep,
+        &auth::Host::real(),
+    )
+}
+
+/// Like [`run`], with `host` instead of the real token endpoint, sbxm's own path and the clock:
+/// a seam for testing `antigravity_auth = "login"` (issue 330).
+pub fn run_with_auth(
+    config_dir: &Path,
+    config_path: &Path,
+    disk: &disk::Guard,
+    backend: &dyn SandboxBackend,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+    host: &auth::Host,
+) -> Result<Summary> {
+    run_with(
+        config_dir,
+        config_path,
+        disk,
+        backend,
+        out,
+        warn,
+        None,
+        &std::thread::sleep,
+        host,
     )
 }
 
@@ -97,6 +123,7 @@ pub fn run_with_sleep(
         warn,
         None,
         sleep,
+        &auth::Host::real(),
     )
 }
 
@@ -122,6 +149,7 @@ pub fn run_with_embedder(
         warn,
         Some(embedder),
         &std::thread::sleep,
+        &auth::Host::real(),
     )
 }
 
@@ -135,12 +163,13 @@ fn run_with(
     warn: &mut dyn Write,
     embedder_override: Option<&dyn Embedder>,
     sleep: &dyn Fn(Duration),
+    host: &auth::Host,
 ) -> Result<Summary> {
     let run_config = RunConfig::load(config_path)?;
     let global = GlobalConfig::load(config_dir)?;
     // Before preflight's calls to `sbx`, like every other refusal (decision 194).
     disk::require(&global, config_dir, disk)?;
-    let checked = preflight::check(config_dir, &run_config, backend)?;
+    let checked = preflight::check(config_dir, &run_config, backend, host)?;
     for warning in &checked.warnings {
         writeln!(warn, "warning: {warning}")?;
     }

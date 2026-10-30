@@ -49,6 +49,43 @@ impl TokenEndpoint for HostEndpoint {
     }
 }
 
+/// What a login-mode Antigravity sandbox needs from the host: the token endpoint for the
+/// preflight's refresh, sbxm's own absolute path for the helper `sbx` runs, and the clock.
+pub struct Host<'a> {
+    pub endpoint: &'a (dyn TokenEndpoint + Sync),
+    /// sbxm's own executable; `sbx` runs `<helper> auth token antigravity`.
+    pub helper: PathBuf,
+    /// Unix seconds.
+    pub now: u64,
+}
+
+impl Host<'static> {
+    /// The running sbxm and the real clock.
+    pub fn real() -> Self {
+        Host {
+            endpoint: &HostEndpoint,
+            helper: std::env::current_exe().unwrap_or_default(),
+            now: now(),
+        }
+    }
+}
+
+/// The login-mode checks made before any sandbox exists (decision 270, point 3): the config dir
+/// is outside the base dir, sbxm knows its own absolute path, the login file is there and one
+/// refresh succeeds. Each failure is one line naming the fix.
+pub fn preflight(config_dir: &Path, base_dir: &Path, host: &Host) -> Result<()> {
+    check_config_dir(config_dir, base_dir)?;
+    if !host.helper.is_absolute() {
+        bail!(
+            "sbxm can't find its own absolute path ({}) to hand to sbx as the Antigravity token \
+             helper; run sbxm by its full path, or set antigravity_auth = \"api-key\"",
+            host.helper.display()
+        );
+    }
+    refresh(config_dir, host.now, host.endpoint)?;
+    Ok(())
+}
+
 /// Seconds since the Unix epoch, for the token's expiry.
 pub fn now() -> u64 {
     std::time::SystemTime::now()

@@ -371,7 +371,12 @@ fn preflight_of(
     backend: &FakeBackend,
 ) -> anyhow::Result<preflight::Preflight> {
     let config = RunConfig::load(&write(env, body))?;
-    preflight::check(&env.config_dir(), &config, backend)
+    preflight::check(
+        &env.config_dir(),
+        &config,
+        backend,
+        &sbxm::auth::Host::real(),
+    )
 }
 
 fn assert_nothing_created(env: &Env, backend: &FakeBackend) {

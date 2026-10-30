@@ -39,75 +39,11 @@ fn another_antigravity_auth_value_is_refused_naming_the_file() {
 }
 
 mod token {
-    use std::cell::RefCell;
     use std::path::Path;
 
     use super::Env;
-    use sbxm::auth::{self, TokenEndpoint};
-
-    pub const NOW: u64 = 1_800_000_000;
-
-    /// One POST: the URL and the form's fields.
-    type Call = (String, Vec<(String, String)>);
-
-    /// Answers every POST with `status` and `body`, recording each form it was sent.
-    pub struct Endpoint {
-        status: u16,
-        body: String,
-        calls: RefCell<Vec<Call>>,
-    }
-
-    impl Endpoint {
-        pub fn answering(status: u16, body: &str) -> Self {
-            Endpoint {
-                status,
-                body: body.to_owned(),
-                calls: RefCell::new(Vec::new()),
-            }
-        }
-
-        pub fn fresh(token: &str, expires_in: u64) -> Self {
-            Self::answering(
-                200,
-                &format!(
-                    r#"{{"access_token":"{token}","expires_in":{expires_in},"token_type":"Bearer"}}"#
-                ),
-            )
-        }
-
-        fn calls(&self) -> usize {
-            self.calls.borrow().len()
-        }
-    }
-
-    impl TokenEndpoint for Endpoint {
-        fn post_form(&self, url: &str, form: &[(&str, &str)]) -> anyhow::Result<(u16, String)> {
-            self.calls.borrow_mut().push((
-                url.to_owned(),
-                form.iter()
-                    .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
-                    .collect(),
-            ));
-            Ok((self.status, self.body.clone()))
-        }
-    }
-
-    pub fn write_login(config_dir: &Path) {
-        std::fs::create_dir_all(config_dir.join("auth")).unwrap();
-        std::fs::write(
-            auth::login_path(config_dir),
-            r#"{"client_id":"fake-id.apps.googleusercontent.com","client_secret":"fake-secret","refresh_token":"fake-refresh"}"#,
-        )
-        .unwrap();
-    }
-
-    pub fn write_cache(config_dir: &Path, token: &str, expires_at: u64) {
-        std::fs::write(
-            auth::cache_path(config_dir),
-            format!(r#"{{"access_token":"{token}","expires_at":{expires_at}}}"#),
-        )
-        .unwrap();
-    }
+    use crate::common::login::{Endpoint, NOW, write_cache, write_login};
+    use sbxm::auth;
 
     #[test]
     fn the_paths_are_under_the_config_dirs_auth_folder() {
@@ -170,7 +106,7 @@ mod token {
         write_login(&env.config_dir());
         let endpoint = Endpoint::fresh("new", 3599);
         auth::access_token(&env.config_dir(), NOW, &endpoint).unwrap();
-        let calls = endpoint.calls.borrow();
+        let calls = endpoint.calls.lock().unwrap();
         let (url, form) = &calls[0];
         assert_eq!(url, "https://oauth2.googleapis.com/token");
         let field = |k: &str| form.iter().find(|(f, _)| f == k).map(|(_, v)| v.as_str());
@@ -327,7 +263,7 @@ mod token_command {
     use assert_cmd::Command;
 
     use super::Env;
-    use super::token::{Endpoint, NOW, write_cache, write_login};
+    use crate::common::login::{Endpoint, NOW, write_cache, write_login};
     use sbxm::commands::auth_token;
 
     #[test]
