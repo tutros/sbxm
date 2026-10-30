@@ -68,6 +68,29 @@ fn signing_in_saves_the_login_with_the_client_pair_that_refreshes() {
 }
 
 #[test]
+fn a_cache_that_cant_be_written_saves_no_login_and_claims_nothing() {
+    let env = Env::new();
+    let cache = auth::cache_path(&env.config_dir());
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join("keep"), "").unwrap();
+    let backend = signed_in();
+    let mut out = Vec::new();
+    let err = auth_antigravity::run(
+        &env.config_dir(),
+        &backend,
+        &good().host(),
+        &Guard::default(),
+        &mut out,
+    )
+    .unwrap_err();
+    let err = format!("{err:#}");
+    assert!(err.contains(&cache.display().to_string()), "{err}");
+    assert!(!auth::login_path(&env.config_dir()).exists());
+    let out = String::from_utf8(out).unwrap();
+    assert!(!out.contains("Saved"), "{out}");
+}
+
+#[test]
 fn the_sandbox_is_made_from_the_pinned_kit_attached_to_then_removed_with_its_workspace() {
     let env = Env::new();
     let backend = signed_in();

@@ -282,6 +282,46 @@ mod token_command {
         assert_eq!(String::from_utf8(out).unwrap(), "cached-token");
     }
 
+    /// Makes the cache path a folder with a file in it, so no file can replace it.
+    fn block_cache(config_dir: &std::path::Path) {
+        let cache = sbxm::auth::cache_path(config_dir);
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("keep"), "").unwrap();
+    }
+
+    #[test]
+    fn a_cache_that_cant_be_written_prints_nothing_and_names_the_cache() {
+        let env = Env::new();
+        write_login(&env.config_dir());
+        block_cache(&env.config_dir());
+        let mut out = Vec::new();
+        let err = auth_token::run(
+            &env.config_dir(),
+            NOW,
+            &Endpoint::fresh("ya29.fresh-token", 3599),
+            &mut out,
+        )
+        .unwrap_err();
+        assert!(out.is_empty());
+        let err = format!("{err:#}");
+        let cache = sbxm::auth::cache_path(&env.config_dir());
+        assert!(err.contains(&cache.display().to_string()), "{err}");
+        assert!(!err.contains("ya29"), "{err}");
+    }
+
+    #[test]
+    fn the_call_after_a_refresh_is_served_from_the_cache() {
+        let env = Env::new();
+        write_login(&env.config_dir());
+        let mut out = Vec::new();
+        let endpoint = Endpoint::fresh("new", 3599);
+        auth_token::run(&env.config_dir(), NOW, &endpoint, &mut out).unwrap();
+        let mut again = Vec::new();
+        auth_token::run(&env.config_dir(), NOW + 1, &endpoint, &mut again).unwrap();
+        assert_eq!(String::from_utf8(again).unwrap(), "new");
+        assert_eq!(endpoint.calls(), 1);
+    }
+
     #[test]
     fn prints_nothing_when_the_refresh_fails() {
         let env = Env::new();

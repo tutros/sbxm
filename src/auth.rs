@@ -178,7 +178,7 @@ fn read_cache(config_dir: &Path) -> Option<Cached> {
 /// carrying a token is an error naming [`LOGIN_FIX`], never the body.
 pub fn refresh(config_dir: &Path, now: u64, endpoint: &dyn TokenEndpoint) -> Result<String> {
     let cached = refresh_unsaved(config_dir, now, endpoint)?;
-    save_cache(config_dir, &cached);
+    save_cache(config_dir, &cached)?;
     Ok(cached.access_token)
 }
 
@@ -240,16 +240,22 @@ fn try_refresh(
         .ok_or(status))
 }
 
-/// Best effort: a cache that can't be written only costs the next call a refresh.
-fn save_cache(config_dir: &Path, cached: &Cached) {
-    if let Ok(json) = serde_json::to_string(cached) {
-        let _ = write_private(&cache_path(config_dir), json.as_bytes());
-    }
+/// Caches `cached`. A failure is an error: without the cache `sbx`'s calls, about one a second,
+/// would each ask Google for a new token (decision 270, point 2).
+fn save_cache(config_dir: &Path, cached: &Cached) -> Result<()> {
+    let path = cache_path(config_dir);
+    let json = serde_json::to_string(cached)?;
+    write_private(&path, json.as_bytes()).map_err(|e| {
+        anyhow!(
+            "cannot save the Antigravity token cache: {e:#}; make sure sbxm can replace that file"
+        )
+    })
 }
 
 /// Saves `login` once one of `pairs` (`agy`'s client id and secret, tried in order) refreshes it,
 /// with that pair, and caches the access token it got (`sbxm auth antigravity`). Nothing is
-/// written when no pair answers 200 with a token.
+/// written when no pair answers 200 with a token, and the login isn't saved when the cache can't
+/// be: the helper `sbx` runs would fail on it too.
 pub fn save_login(
     config_dir: &Path,
     refresh_token: &str,
@@ -266,11 +272,11 @@ pub fn save_login(
         };
         match try_refresh(&login, now, endpoint)? {
             Ok(cached) => {
+                save_cache(config_dir, &cached)?;
                 write_private(
                     &login_path(config_dir),
                     serde_json::to_string(&login)?.as_bytes(),
                 )?;
-                save_cache(config_dir, &cached);
                 return Ok(());
             }
             Err(status) => statuses.push(status.to_string()),
