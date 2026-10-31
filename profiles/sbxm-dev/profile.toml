@@ -21,10 +21,13 @@ deny = []
 [secrets]
 services = ["anthropic"]
 
-# The Claude kit runs its own `apt-get update` at startup, so wait for its lock. The image's
-# download.docker.com source isn't allowed and makes `update` fail; Ubuntu's own sources still refresh.
+# The image runs its own `apt-get` at startup (the Claude kit locally, the image itself in the
+# cloud), so wait until no `apt-get` runs, polling every 2 s for at most 5 minutes (decision 276,
+# issue 337): `update` doesn't wait for the package lists' lock, and DPkg::Lock::Timeout only
+# covers dpkg's. The image's download.docker.com source isn't allowed and makes `update` fail;
+# Ubuntu's own sources still refresh.
 [[setup.install]]
-command = "apt-get -o DPkg::Lock::Timeout=300 update || true; apt-get -o DPkg::Lock::Timeout=300 install -y build-essential pkg-config libssl-dev"
+command = "i=0; while pgrep -x apt-get >/dev/null && [ $i -lt 150 ]; do sleep 2; i=$((i+1)); done; apt-get -o DPkg::Lock::Timeout=300 update || true; apt-get -o DPkg::Lock::Timeout=300 install -y build-essential pkg-config libssl-dev"
 user = "0"
 description = "install a C toolchain, pkg-config and OpenSSL headers for cargo (openssl-sys needs them)"
 
