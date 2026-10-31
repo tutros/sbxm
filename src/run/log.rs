@@ -30,7 +30,9 @@ pub struct RunFolderLog {
     stage: &'static str,
     /// `run.log`, once the run folder exists.
     path: Option<PathBuf>,
-    /// The stamped lines printed before the run folder existed.
+    /// The stamped lines printed before the run folder existed, and from `attach` on the header
+    /// before them: kept until an append succeeds, so a log that recovers from a failed append
+    /// still starts with them (issue 353).
     pending: Vec<String>,
     warned: bool,
 }
@@ -72,12 +74,9 @@ impl RunFolderLog {
         let Some(header) = &self.header else {
             return;
         };
-        let mut text = format!("{header}\n");
+        self.pending.insert(0, format!("{header}\n"));
         self.path = Some(dir.join("run.log"));
-        for line in std::mem::take(&mut self.pending) {
-            text.push_str(&line);
-        }
-        self.append(&text);
+        self.append("");
     }
 
     /// Every line of `text` (an error's chain, say), each on its own stamped line.
@@ -91,17 +90,20 @@ impl RunFolderLog {
         let Some(path) = &self.path else {
             return;
         };
+        let text = self.pending.concat() + text;
         let written = OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)
             .and_then(|mut file| file.write_all(text.as_bytes()));
-        if let Err(err) = written
-            && !self.warned
-        {
-            self.warned = true;
-            let message = format!("warning: cannot write {}: {err}", path.display());
-            (self.warn)(&message);
+        match written {
+            Ok(()) => self.pending.clear(),
+            Err(err) if !self.warned => {
+                self.warned = true;
+                let message = format!("warning: cannot write {}: {err}", path.display());
+                (self.warn)(&message);
+            }
+            Err(_) => {}
         }
     }
 }

@@ -299,3 +299,109 @@ fn an_append_failure_warns_once_naming_the_path() {
         "{warnings:?}"
     );
 }
+
+/// A `RunFolderLog` with header `# header`, the clock at 0, and the warnings it gave.
+fn folder_log() -> (
+    sbxm::run::log::RunFolderLog,
+    std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+) {
+    use std::sync::{Arc, Mutex};
+
+    let warnings = Arc::new(Mutex::new(Vec::<String>::new()));
+    let seen = Arc::clone(&warnings);
+    let log = sbxm::run::log::RunFolderLog::new(
+        "# header".to_owned(),
+        Box::new(|| 0),
+        Box::new(move |msg| seen.lock().unwrap().push(msg.to_owned())),
+    );
+    (log, warnings)
+}
+
+/// Issue 353: the header and the preflight lines wait for the first append that succeeds.
+#[test]
+fn a_recovered_append_still_gets_the_header_and_the_preflight_lines() {
+    let dir = tempfile::TempDir::new().unwrap();
+    // `run.log` is a directory, so the first append fails deterministically.
+    std::fs::create_dir(dir.path().join("run.log")).unwrap();
+    let (mut log, warnings) = folder_log();
+
+    log.line("preflight warning");
+    log.attach(dir.path());
+    std::fs::remove_dir(dir.path().join("run.log")).unwrap();
+    log.line("Run example");
+
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("run.log")).unwrap(),
+        "# header\n\
+         1970-01-01T00:00:00Z [preflight] preflight warning\n\
+         1970-01-01T00:00:00Z [preflight] Run example\n"
+    );
+    assert_eq!(warnings.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn two_failed_appends_then_one_that_succeeds_write_the_header_once_and_warn_once() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join("run.log")).unwrap();
+    let (mut log, warnings) = folder_log();
+
+    log.line("preflight warning");
+    log.attach(dir.path());
+    log.line("lost");
+    std::fs::remove_dir(dir.path().join("run.log")).unwrap();
+    log.line("Run example");
+    log.line("after");
+
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("run.log")).unwrap(),
+        "# header\n\
+         1970-01-01T00:00:00Z [preflight] preflight warning\n\
+         1970-01-01T00:00:00Z [preflight] Run example\n\
+         1970-01-01T00:00:00Z [preflight] after\n"
+    );
+    let warnings = warnings.lock().unwrap();
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert!(
+        warnings[0].contains(&dir.path().join("run.log").display().to_string()),
+        "{warnings:?}"
+    );
+}
+
+#[test]
+fn without_a_failure_the_header_is_written_once_at_attach() {
+    let dir = tempfile::TempDir::new().unwrap();
+    let (mut log, warnings) = folder_log();
+
+    log.line("preflight warning");
+    log.attach(dir.path());
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("run.log")).unwrap(),
+        "# header\n1970-01-01T00:00:00Z [preflight] preflight warning\n"
+    );
+    log.line("Run example");
+
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("run.log")).unwrap(),
+        "# header\n\
+         1970-01-01T00:00:00Z [preflight] preflight warning\n\
+         1970-01-01T00:00:00Z [preflight] Run example\n"
+    );
+    assert!(warnings.lock().unwrap().is_empty());
+}
+
+#[test]
+fn nothing_buffered_then_a_failed_attach_recovers_with_the_header_and_the_new_line() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::create_dir(dir.path().join("run.log")).unwrap();
+    let (mut log, warnings) = folder_log();
+
+    log.attach(dir.path());
+    std::fs::remove_dir(dir.path().join("run.log")).unwrap();
+    log.line("Run example");
+
+    assert_eq!(
+        std::fs::read_to_string(dir.path().join("run.log")).unwrap(),
+        "# header\n1970-01-01T00:00:00Z [preflight] Run example\n"
+    );
+    assert_eq!(warnings.lock().unwrap().len(), 1);
+}
