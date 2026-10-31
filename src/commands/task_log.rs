@@ -3,7 +3,7 @@
 //! command knows: the command line, the executable and its hash, the clock and the base folder.
 
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use anyhow::{Context, Result};
 use sha2::{Digest, Sha256};
@@ -22,15 +22,7 @@ pub fn open(
     identity: Option<Process>,
 ) -> Result<Arc<Mutex<RunLog>>> {
     let base = GlobalConfig::load(config_dir)?.base_dir;
-    let exe = std::env::current_exe().context("cannot find this executable")?;
-    let bytes = std::fs::read(&exe).with_context(|| format!("cannot read {}", exe.display()))?;
-    let sha256: String = Sha256::digest(&bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
-    let pid = std::process::id();
-    let args: Vec<String> = std::env::args().collect();
-    let header = runlog::header(now(), &args, &exe, &sha256, option_env!("SBXM_COMMIT"), pid);
+    let header = header()?;
     Ok(Arc::new(Mutex::new(RunLog::new(
         &base,
         header,
@@ -40,6 +32,36 @@ pub fn open(
         Box::new(runlog::recorded_stage),
         Box::new(|msg| eprintln!("{msg}")),
     ))))
+}
+
+/// This invocation's header line (decision 170 (c)): now, the command line, the executable and its
+/// SHA-256, the commit if the build knows it, and the process id. `sbxm run`'s `run.log` uses it
+/// too (part 3). The executable is hashed once per process: it doesn't change while it runs.
+pub fn header() -> Result<String> {
+    static SHA256: OnceLock<String> = OnceLock::new();
+    let exe = std::env::current_exe().context("cannot find this executable")?;
+    let sha256 = match SHA256.get() {
+        Some(sha256) => sha256,
+        None => {
+            let bytes =
+                std::fs::read(&exe).with_context(|| format!("cannot read {}", exe.display()))?;
+            SHA256.get_or_init(|| {
+                Sha256::digest(&bytes)
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect()
+            })
+        }
+    };
+    let args: Vec<String> = std::env::args().collect();
+    Ok(runlog::header(
+        now(),
+        &args,
+        &exe,
+        sha256,
+        option_env!("SBXM_COMMIT"),
+        std::process::id(),
+    ))
 }
 
 /// A log that writes nowhere: for a command with no task folder to log into, and for a command

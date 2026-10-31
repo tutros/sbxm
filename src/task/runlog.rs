@@ -24,7 +24,8 @@ static SECRET: LazyLock<Regex> = LazyLock::new(|| {
         .expect("the secret pattern is valid")
 });
 
-fn redact(text: &str) -> String {
+/// `text` with every value that looks like a secret replaced by `[redacted]`.
+pub fn redact(text: &str) -> String {
     SECRET.replace_all(text, "[redacted]").into_owned()
 }
 
@@ -201,15 +202,27 @@ impl RunLog {
     }
 }
 
+/// Where a [`Tee`] sends each whole line: a task's [`RunLog`], or a run folder's log
+/// (`run::log::RunFolderLog`, decision 170, part 3).
+pub trait LineSink {
+    fn line(&mut self, text: &str);
+}
+
+impl LineSink for RunLog {
+    fn line(&mut self, text: &str) {
+        RunLog::line(self, text);
+    }
+}
+
 /// A writer that passes everything to `inner` unchanged and hands each whole line to the log.
-pub struct Tee<W: Write> {
+pub struct Tee<W: Write, L: LineSink = RunLog> {
     inner: W,
-    log: Arc<Mutex<RunLog>>,
+    log: Arc<Mutex<L>>,
     partial: Vec<u8>,
 }
 
-impl<W: Write> Tee<W> {
-    pub fn new(inner: W, log: Arc<Mutex<RunLog>>) -> Self {
+impl<W: Write, L: LineSink> Tee<W, L> {
+    pub fn new(inner: W, log: Arc<Mutex<L>>) -> Self {
         Self {
             inner,
             log,
@@ -236,7 +249,7 @@ impl<W: Write> Tee<W> {
     }
 }
 
-impl<W: Write> Write for Tee<W> {
+impl<W: Write, L: LineSink> Write for Tee<W, L> {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let written = self.inner.write(buf)?;
         self.partial.extend_from_slice(&buf[..written]);
@@ -249,7 +262,7 @@ impl<W: Write> Write for Tee<W> {
     }
 }
 
-impl<W: Write> Drop for Tee<W> {
+impl<W: Write, L: LineSink> Drop for Tee<W, L> {
     fn drop(&mut self) {
         self.ship(true);
     }

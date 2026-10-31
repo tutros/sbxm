@@ -4,20 +4,24 @@
 
 use std::io::Write;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::{Result, bail};
 
 use crate::backend::SandboxBackend;
+use crate::commands::task_log;
 use crate::config::GlobalConfig;
 use crate::disk;
 use crate::eval::cosine::{self, CosineEntry, Embedder, FailingEmbedder, FastEmbedder};
 use crate::eval::{jev, judge, score};
 use crate::headless::RunStatus;
 use crate::run::config::RunConfig;
+use crate::run::log::{self as run_log, RunFolderLog};
 use crate::run::orchestrate::{self, PairOutcome};
 use crate::run::{id, kits, preflight, results};
 use crate::task::review::agent_label;
+use crate::task::runlog::Tee;
 
 #[derive(Debug)]
 pub struct Summary {
@@ -125,6 +129,8 @@ pub fn run_with_embedder(
     )
 }
 
+/// Copies everything printed to `out` and `warn` into the run folder's `run.log` (decision 170,
+/// part 3), and ends it with the error `main` prints for a failed run, so the screen is unchanged.
 #[allow(clippy::too_many_arguments)]
 fn run_with(
     config_dir: &Path,
@@ -136,6 +142,58 @@ fn run_with(
     embedder_override: Option<&dyn Embedder>,
     sleep: &dyn Fn(Duration),
 ) -> Result<Summary> {
+    let log = match task_log::header() {
+        Ok(header) => RunFolderLog::new(
+            header,
+            Box::new(results::now),
+            Box::new(|msg| eprintln!("{msg}")),
+        ),
+        Err(e) => {
+            writeln!(warn, "warning: cannot open the run log: {e:#}")?;
+            RunFolderLog::disabled()
+        }
+    };
+    let log = Arc::new(Mutex::new(log));
+    let result = {
+        let mut out = Tee::new(out, Arc::clone(&log));
+        let mut warn = Tee::new(warn, Arc::clone(&log));
+        run_logged(
+            config_dir,
+            config_path,
+            disk,
+            backend,
+            &mut out,
+            &mut warn,
+            &log,
+            embedder_override,
+            sleep,
+        )
+    };
+    if let Err(err) = &result
+        && let Ok(mut log) = log.lock()
+    {
+        log.lines(&format!("Error: {err:?}"));
+    }
+    result
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_logged(
+    config_dir: &Path,
+    config_path: &Path,
+    disk: &disk::Guard,
+    backend: &dyn SandboxBackend,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+    log: &Mutex<RunFolderLog>,
+    embedder_override: Option<&dyn Embedder>,
+    sleep: &dyn Fn(Duration),
+) -> Result<Summary> {
+    let stage = |stage| {
+        if let Ok(mut log) = log.lock() {
+            log.set_stage(stage);
+        }
+    };
     let run_config = RunConfig::load(config_path)?;
     let global = GlobalConfig::load(config_dir)?;
     // Before preflight's calls to `sbx`, like every other refusal (decision 194).
@@ -153,6 +211,9 @@ fn run_with(
     }
 
     let roots = id::reserve(&global.base_dir)?;
+    if let Ok(mut log) = log.lock() {
+        log.attach(&roots.meta);
+    }
     let run_kits = kits::build_with_templates(
         config_dir,
         &run_config,
@@ -202,6 +263,7 @@ fn run_with(
         },
     )?;
 
+    stage(run_log::PAIRS);
     writeln!(out, "Run {}", roots.id)?;
     // Each pair's files are saved the moment it finishes (decision 16).
     let save = |outcome: &PairOutcome| {
@@ -259,6 +321,7 @@ fn run_with(
     // (P9); a judge that fails is recorded and warned about, not fatal.
     let mut judge_saved = true;
     if let Some(judge) = &run_config.eval.judge {
+        stage(run_log::JUDGE);
         let repeats = run_config.run.repeat;
         for repeat in 0..repeats {
             let pairs: Vec<&PairOutcome> = outcomes.iter().filter(|o| o.repeat == repeat).collect();
@@ -310,6 +373,7 @@ fn run_with(
     // warning above (review finding M-1).
     let mut cosine_saved = true;
     if let Some(cosine_cfg) = &run_config.eval.cosine {
+        stage(run_log::COSINE);
         let (embedder, report_runtime_errors): (Box<dyn Embedder>, bool) = match embedder_override {
             Some(e) => (Box::new(e), true),
             None => {
@@ -357,6 +421,7 @@ fn run_with(
     let mut jev_saved = true;
     let mut jev_models = std::collections::BTreeSet::new();
     if let (Some(jev_config), Some(jev_kit)) = (&run_config.eval.jev, &jev_kit) {
+        stage(run_log::JEV);
         let repeats = run_config.run.repeat;
         for repeat in 0..repeats {
             let pairs: Vec<&PairOutcome> = outcomes.iter().filter(|o| o.repeat == repeat).collect();
@@ -402,6 +467,7 @@ fn run_with(
         }
     }
 
+    stage(run_log::RESULTS);
     // The ranking is computed from what was just saved, exactly as `run show`
     // will later, so the two can't disagree (decisions 19, 120).
     let labels: Vec<String> = run_config
