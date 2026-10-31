@@ -1156,6 +1156,28 @@ polls every 2 s while `pgrep -x apt-get` finds one, for at most 5 minutes, then 
 cloud on 2026-10-31: it waited 6 s, then installed. The small race (another `apt-get` starting between the check and
 `update`) is left until it is seen.
 
+277. **Human review of a comparison run: a checked file, CLI only (2026-10-31, the user's answers on issue #347;
+builds on [18], [21], [22], [100]):** `sbxm run review <run-id>` lays out each repeat under blind A/B/C labels of its
+own (a shuffle with a seed other than the judge's, since `run` and `run show` already reveal the judge's mapping):
+each pair's answer and diff, and a `scores.toml` asking for every rubric criterion. `--submit` checks the file
+(`pass_fail` true or false, a `scale` value one of its levels), saves the scores in `evals.json` under `human` and
+prints a third ranking with the real contestant names. One reviewer; a second `--submit` overwrites; a blank
+criterion is unscored, never 0; a file with no scores is refused. A local web page stays later; it would read the
+same saved scores.
+
+278. **Promised work lives on GitHub, not in an agent's memory (2026-10-31, the user's choice; an experiment judged
+at the next retro):** every follow-up promised to the user and not done in the same turn is recorded at once, as a
+checkbox under `## Follow-ups` in its open home issue, else as an issue labelled `follow-up` with a size; done means
+ticked or closed. An agent's memory keeps only pointers and facts local to one machine. Grounds: an orchestrator may
+run elsewhere without that memory, and on 2026-10-31 six promised items lived only in one session. Measure: follow-ups
+the next retro finds only in memory (target 0).
+
+279. **The `sdlc-issue-flow` skill (2026-10-31, the user's choice; an experiment for the next three issues):** one
+page connecting the stages an issue goes through (ready, machine checks, run, real check, review loop, finish,
+merge, clean-up, follow-ups), with the rules that until then lived only in an agent's local memory. It is also the
+checklist an orchestrator follows. Measure: steps the user had to prompt for or that were missed (2026-10-31: at
+least two, a review refused for disk and untracked follow-ups).
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.

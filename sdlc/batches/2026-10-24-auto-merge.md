@@ -16,3 +16,5 @@ who decides.
 | 2 | #333 (issue 287, MCP gateway entry removed before headless `agy`) | low | f05f2a1 | 2026-10-29 21:15Z | 2026-10-29 21:42Z | 27m18s | none so far |
 | 3 | #335 (fake tokens in the run-log redaction test) | low | 0eb3601 | 2026-10-30 00:35Z | 2026-10-30 00:54Z | 19m25s | none so far |
 | 4 | #342 (third retro, decisions 272-274) | low | a82d094 | 2026-10-30 22:27Z | 2026-10-30 22:49Z | 21m44s | none so far |
+| 5 | #346 (decision 275, gemini harness removal) | low | 71d4250 | 2026-10-30 23:21Z | 2026-10-30 23:35Z | 14m15s | none so far |
+| 6 | #348 (issue 337, `sbxm-dev` waits for the image's `apt-get`) | low | 4308a73 | 2026-10-31 16:24Z | 2026-10-31 16:39Z | 14m56s | none so far |
