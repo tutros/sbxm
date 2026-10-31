@@ -23,20 +23,28 @@ build sbxm tasks run with (a machine's own wrapper; never a fresh `cargo run`).
 
 ## 3. Check the machine
 
-- Free space on the drive holding `sbx`'s state (`<sbxm> doctor`, or the drive itself): a Rust worker needs about
-  9 GiB above `min_free_disk`. Free it by removing finished workers' sandboxes (stage 5), never by moving `sbx` state.
-- Templates (G1): a changed `Cargo.lock` or profile makes a strict template stale, and the review refuses. Rebuild
-  from a clean checkout of `main`: `<sbxm> template build <profile> --harness <h> --warm <checkout>`, one harness at
-  a time. After a profile change: `just deploy-profiles` first.
-- Secrets: `sbx secret ls` has each provider the task needs (an OAuth login, not a stray API key).
+- Location first: `--local`/`--cloud`, else `[sandbox] location` in `sbxm-task.toml`. Every `sbx` command below
+  takes `--cloud` for a cloud task (`sbx --cloud secret ls`, `sbx --cloud rm`); disk and templates are local only.
+- Local: free space on the drive holding `sbx`'s state (`<sbxm> doctor`): a Rust worker needs about 9 GiB above
+  `min_free_disk`. Free it by removing finished workers' sandboxes (stage 4), never by moving `sbx` state.
+- Local templates (G1): a strict template is stale when the profile or `main`'s lock files changed since it was
+  built; rebuild from a clean checkout of `main`: `<sbxm> template build <profile> --harness <h> --warm <checkout>`,
+  one harness at a time (after a profile change, `just deploy-profiles` first). When the **worker** changed
+  `Cargo.lock`, the review refuses on the task's own commit: warm the reviewer's template from a clean checkout of
+  the commit the refusal names, taken from the task's `repo.git`, not from `main` (decision 235).
+- Secrets: each provider the task needs is listed (an OAuth login, not a stray API key).
 
 ## 4. Run
 
-- `<sbxm> task run --issue N --worker-harness claude --reviewer-harness codex [--local]`, in the background.
-- Once the worker's commits are saved (`worker completed, N commit`), its sandbox may go: `sbx rm -f <name>`.
-  A refused review (disk, stale template) resumes with `<sbxm> task review --issue N` after the fix.
-- Decision 273: run the issue's real check (an ignored test or a by-hand smoke) after the worker, before the
-  review, and give the result to the review; if it costs money or model calls, ask first.
+- No separate real check needed: `<sbxm> task run --issue N --worker-harness claude --reviewer-harness codex
+  [--local]`, in the background. It runs the worker, gates, reviews and fix rounds without a pause.
+- A real check needed (decision 273: the issue depends on an external tool, or it has an ignored real test):
+  `<sbxm> task start --issue N ...`; when it ends, run the check (ask first if it costs money or model calls),
+  append its result to `issue.md` in the task's folder (the reviewer reads that file), then `<sbxm> task review
+  --issue N`.
+- Once the worker's commits are saved (`worker completed, N commit`), its local sandbox may go: `sbx rm -f <name>`.
+  A refused review goes on with the command its refusal names (`<sbxm> task resume --issue N` for stale lock
+  files, decision 235; `<sbxm> task review --issue N` after freeing disk).
 
 ## 5. Review loop
 
