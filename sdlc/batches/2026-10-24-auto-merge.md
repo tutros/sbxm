@@ -18,3 +18,5 @@ who decides.
 | 4 | #342 (third retro, decisions 272-274) | low | a82d094 | 2026-10-30 22:27Z | 2026-10-30 22:49Z | 21m44s | none so far |
 | 5 | #346 (decision 275, gemini harness removal) | low | 71d4250 | 2026-10-30 23:21Z | 2026-10-30 23:35Z | 14m15s | none so far |
 | 6 | #348 (issue 337, `sbxm-dev` waits for the image's `apt-get`) | low | 4308a73 | 2026-10-31 16:24Z | 2026-10-31 16:39Z | 14m56s | none so far |
+| 7 | #354 (the `sdlc-issue-flow` skill, decisions 277-279) | low | cd23aed | 2026-10-31 17:25Z | 2026-10-31 18:01Z | 36m00s | none so far |
+| 8 | #356 (issue 353, a recovered run-log write keeps its header) | low | 4dcec3c | 2026-10-31 21:28Z | 2026-10-31 21:49Z | 21m39s | none so far |
