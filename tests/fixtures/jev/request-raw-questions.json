@@ -1,0 +1,48 @@
+{
+  "model": "jev-latest",
+  "questions": {
+    "approach": {
+      "criteria": {
+        "refactor": "Restructured the existing code",
+        "rewrite": "Replaced it"
+      },
+      "instructions": "Which approach did the contestant take? The state holds one candidate's final answer and the diff of its changes, for the task below. Answer this question only.\n\nTask:\nWrite sum.",
+      "type": "choice"
+    },
+    "correct": {
+      "criteria": {
+        "false": "Not satisfied: the function returns the right sum",
+        "true": "Satisfied: the function returns the right sum"
+      },
+      "instructions": "Criterion `correct`: the function returns the right sum. The state holds one candidate's final answer and the diff of its changes, for the task below. Judge this criterion only.\n\nTask:\nWrite sum.",
+      "type": "noul"
+    },
+    "depth": {
+      "criteria": [
+        "none",
+        "partial",
+        "full"
+      ],
+      "instructions": "How fully are the edge cases handled? The state holds one candidate's final answer and the diff of its changes, for the task below. Answer this question only.\n\nTask:\nWrite sum.",
+      "type": "score"
+    },
+    "quality": {
+      "criteria": [
+        "poor",
+        "fair",
+        "good"
+      ],
+      "instructions": "Criterion `quality`. The state holds one candidate's final answer and the diff of its changes, for the task below. Judge this criterion only.\n\nTask:\nWrite sum.",
+      "type": "score"
+    },
+    "tests": {
+      "criteria": {
+        "false": "No",
+        "true": "Yes"
+      },
+      "instructions": "Did the contestant add tests? The state holds one candidate's final answer and the diff of its changes, for the task below. Answer this question only.\n\nTask:\nWrite sum.",
+      "type": "noul"
+    }
+  },
+  "state": "## Final answer\n\nAdded sum.\n\n## Diff\n\ndiff --git a/src/sum.rs b/src/sum.rs\n--- a/src/sum.rs\n+++ b/src/sum.rs\n@@ -1 +1 @@\n-fn sum() {}\n+fn sum(a: i32, b: i32) -> i32 { a + b }\n\n"
+}

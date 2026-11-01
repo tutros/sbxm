@@ -43,7 +43,7 @@ const DIFF: &str = "diff --git a/src/sum.rs b/src/sum.rs\n--- a/src/sum.rs\n+++ 
 
 #[test]
 fn the_request_matches_the_golden_file() {
-    let plan = jev::plan("Write sum.", &rubric(), "Added sum.", Some(DIFF)).unwrap();
+    let plan = jev::plan("Write sum.", &rubric(), &[], "Added sum.", Some(DIFF)).unwrap();
     assert_eq!(plan.requests.len(), 1);
     assert!(!plan.truncated);
     let body = jev::request_body("jev-latest", &plan.requests[0].state, &plan.questions);
@@ -72,14 +72,14 @@ fn the_request_matches_the_golden_file() {
 fn the_state_never_carries_the_transcript() {
     // The plan takes only the answer and the diff; a transcript sentinel given as neither
     // cannot appear (the runner's tests check it end to end).
-    let plan = jev::plan("Task", &rubric(), "the answer", Some(DIFF)).unwrap();
+    let plan = jev::plan("Task", &rubric(), &[], "the answer", Some(DIFF)).unwrap();
     let body = jev::request_body("m", &plan.requests[0].state, &plan.questions).to_string();
     assert!(!body.contains("TRANSCRIPT-SENTINEL"));
 }
 
 #[test]
 fn instructions_carry_the_id_the_notes_and_the_task() {
-    let q = jev::questions("Write sum.", &rubric());
+    let q = jev::questions("Write sum.", &rubric(), &[]);
     let text = q["correct"]["instructions"].as_str().unwrap();
     assert!(text.contains("correct") && text.contains("right sum") && text.contains("Write sum."));
     assert!(
@@ -100,14 +100,14 @@ fn one_question() -> Vec<Criterion> {
 #[test]
 fn a_task_over_the_budget_on_its_own_makes_no_call_and_names_the_task() {
     let task = "t".repeat(3 * jev::TOKEN_CAP);
-    let err = jev::plan(&task, &one_question(), "short", Some(DIFF)).unwrap_err();
+    let err = jev::plan(&task, &one_question(), &[], "short", Some(DIFF)).unwrap_err();
     assert!(err.contains("task") && err.contains("no call"), "{err}");
 }
 
 #[test]
 fn an_answer_over_the_budget_with_the_task_makes_no_call_and_names_the_answer() {
     let answer = "a".repeat(3 * jev::TOKEN_CAP);
-    let err = jev::plan("Task", &one_question(), &answer, Some(DIFF)).unwrap_err();
+    let err = jev::plan("Task", &one_question(), &[], &answer, Some(DIFF)).unwrap_err();
     assert!(err.contains("answer") && err.contains("no call"), "{err}");
     assert!(!err.contains("aaaa"), "{err}");
 }
@@ -115,14 +115,14 @@ fn an_answer_over_the_budget_with_the_task_makes_no_call_and_names_the_answer() 
 #[test]
 fn an_answer_just_under_the_cap_is_planned() {
     // Find the longest answer that still plans, then show one more character is refused.
-    let fits = |n: usize| jev::plan("Task", &one_question(), &"a".repeat(n), None).is_ok();
+    let fits = |n: usize| jev::plan("Task", &one_question(), &[], &"a".repeat(n), None).is_ok();
     let (mut low, mut high) = (0, 3 * jev::TOKEN_CAP);
     while low < high {
         let mid = (low + high).div_ceil(2);
         if fits(mid) { low = mid } else { high = mid - 1 }
     }
     assert!(low > 3 * (jev::TOKEN_CAP - 600), "{low}");
-    let plan = jev::plan("Task", &one_question(), &"a".repeat(low), None).unwrap();
+    let plan = jev::plan("Task", &one_question(), &[], &"a".repeat(low), None).unwrap();
     assert_eq!(plan.requests.len(), 1);
     // The boundary is where the request actually sent reaches the cap, not a reserve for a
     // request that is never sent (review round 3, M-1).
@@ -130,13 +130,13 @@ fn an_answer_just_under_the_cap_is_planned() {
         jev::estimate(&plan.requests[0].state, &plan.questions),
         jev::TOKEN_CAP
     );
-    assert!(jev::plan("Task", &one_question(), &"a".repeat(low + 3), None).is_err());
+    assert!(jev::plan("Task", &one_question(), &[], &"a".repeat(low + 3), None).is_err());
 }
 
 #[test]
 fn an_answer_whose_unsplit_request_is_under_the_cap_is_planned() {
     // Review round 3, M-1: accepted before round 2's fix, refused by a reserved split label.
-    let plan = jev::plan("Task", &rubric(), &"a".repeat(82_442), None).unwrap();
+    let plan = jev::plan("Task", &rubric(), &[], &"a".repeat(82_442), None).unwrap();
     assert_eq!(plan.requests.len(), 1);
     assert!(jev::estimate(&plan.requests[0].state, &plan.questions) <= jev::TOKEN_CAP);
 }
@@ -155,7 +155,7 @@ fn a_diff_over_the_budget_is_split_per_file() {
     // Three files of about 15k tokens each: no two fit together.
     let files: Vec<String> = ["a.rs", "b.rs", "c.rs"].map(|n| file(n, 45_000)).into();
     let diff = files.concat();
-    let plan = jev::plan("Task", &rubric(), "answer", Some(&diff)).unwrap();
+    let plan = jev::plan("Task", &rubric(), &[], "answer", Some(&diff)).unwrap();
     assert_eq!(plan.requests.len(), 3);
     assert!(!plan.truncated);
     for (i, (request, file)) in plan.requests.iter().zip(&files).enumerate() {
@@ -175,7 +175,7 @@ fn small_files_share_a_chunk() {
         file("d.rs", 45_000),
     ]
     .concat();
-    let plan = jev::plan("Task", &rubric(), "answer", Some(&diff)).unwrap();
+    let plan = jev::plan("Task", &rubric(), &[], "answer", Some(&diff)).unwrap();
     assert_eq!(
         plan.requests.len(),
         2,
@@ -188,7 +188,7 @@ fn small_files_share_a_chunk() {
 #[test]
 fn a_single_file_over_the_budget_is_truncated_never_sent_whole() {
     let big = file("big.rs", 200_000);
-    let plan = jev::plan("Task", &rubric(), "answer", Some(&big)).unwrap();
+    let plan = jev::plan("Task", &rubric(), &[], "answer", Some(&big)).unwrap();
     assert!(plan.truncated);
     assert_eq!(plan.requests.len(), 1);
     let state = &plan.requests[0].state;
@@ -205,7 +205,7 @@ fn the_longest_answer_accepted_alone_with_an_oversized_file_is_truncated_within_
     // the diff (decision 241 d); the diff is cut instead, here to nothing.
     let n = longest_answer_accepted_alone();
     let big = file("big.rs", 100_000);
-    let plan = jev::plan("Task", &rubric(), &"a".repeat(n), Some(&big)).unwrap();
+    let plan = jev::plan("Task", &rubric(), &[], &"a".repeat(n), Some(&big)).unwrap();
     assert!(plan.truncated);
     assert_eq!(plan.requests.len(), 1);
     for request in &plan.requests {
@@ -223,7 +223,7 @@ fn a_task_just_over_its_own_boundary_is_named_as_the_task_even_with_an_empty_ans
     // PR 289 review M-2: the request's fixed scaffolding counts against the task, so an empty
     // answer is never blamed for a task that uses up the budget.
     let task = |n: usize| "t".repeat(n);
-    let accepted = |n: usize| jev::plan(&task(n), &rubric(), "", None).is_ok();
+    let accepted = |n: usize| jev::plan(&task(n), &rubric(), &[], "", None).is_ok();
     let (mut low, mut high) = (0, 3 * jev::TOKEN_CAP);
     while low < high {
         let mid = (low + high).div_ceil(2);
@@ -233,10 +233,10 @@ fn a_task_just_over_its_own_boundary_is_named_as_the_task_even_with_an_empty_ans
             high = mid - 1
         }
     }
-    let plan = jev::plan(&task(low), &rubric(), "", None).unwrap();
+    let plan = jev::plan(&task(low), &rubric(), &[], "", None).unwrap();
     assert!(jev::estimate(&plan.requests[0].state, &plan.questions) <= jev::TOKEN_CAP);
     for extra in 1..=6 {
-        let err = jev::plan(&task(low + extra), &rubric(), "", None).unwrap_err();
+        let err = jev::plan(&task(low + extra), &rubric(), &[], "", None).unwrap_err();
         assert!(err.contains("the task is too long"), "{extra}: {err}");
     }
 }
@@ -250,11 +250,11 @@ fn a_one_character_answer_that_fits_is_never_refused_as_an_oversized_task() {
     let mut planned = 0;
     for n in 82_780..82_830 {
         let task = "t".repeat(n);
-        let questions = jev::questions(&task, &one_question());
+        let questions = jev::questions(&task, &one_question(), &[]);
         // The smallest request `a` can be sent in, and the headings alone.
         let with_a = jev::estimate("## Final answer\n\na\n\n## Diff\n\n\n", &questions);
         let headings = jev::estimate("## Final answer\n\n\n\n## Diff\n\n\n", &questions);
-        match jev::plan(&task, &one_question(), "a", None) {
+        match jev::plan(&task, &one_question(), &[], "a", None) {
             Ok(plan) => {
                 planned += 1;
                 for request in &plan.requests {
@@ -279,7 +279,7 @@ fn no_diff_at_the_answer_boundary_is_not_reported_as_a_cut_file() {
     // to fit is not a truncation.
     let n = longest_answer_accepted_alone();
     for diff in [None, Some(""), Some("  \n")] {
-        let plan = jev::plan("Task", &rubric(), &"a".repeat(n), diff).unwrap();
+        let plan = jev::plan("Task", &rubric(), &[], &"a".repeat(n), diff).unwrap();
         assert!(!plan.truncated, "{diff:?}");
         assert_eq!(plan.requests.len(), 1, "{diff:?}");
         assert!(jev::estimate(&plan.requests[0].state, &plan.questions) <= jev::TOKEN_CAP);
@@ -292,7 +292,7 @@ fn an_answer_too_long_for_a_split_heading_gets_one_cut_request() {
     // one unsplit request with the diff cut, not an error.
     let n = longest_answer_accepted_alone() - 15;
     let diff = [file("a.rs", 45_000), file("b.rs", 45_000)].concat();
-    let plan = jev::plan("Task", &rubric(), &"a".repeat(n), Some(&diff)).unwrap();
+    let plan = jev::plan("Task", &rubric(), &[], &"a".repeat(n), Some(&diff)).unwrap();
     assert!(plan.truncated);
     assert_eq!(plan.requests.len(), 1);
     assert!(!plan.requests[0].state.contains("split per file"));
@@ -302,7 +302,7 @@ fn an_answer_too_long_for_a_split_heading_gets_one_cut_request() {
 /// The longest answer `plan` accepts with no diff, found without any diff so the boundary can't
 /// move with the diff under test; its unsplit request is exactly at the cap (checked here).
 fn longest_answer_accepted_alone() -> usize {
-    let accepted = |n: usize| jev::plan("Task", &rubric(), &"a".repeat(n), None).is_ok();
+    let accepted = |n: usize| jev::plan("Task", &rubric(), &[], &"a".repeat(n), None).is_ok();
     let (mut low, mut high) = (0, 3 * jev::TOKEN_CAP);
     while low < high {
         let mid = (low + high).div_ceil(2);
@@ -312,7 +312,7 @@ fn longest_answer_accepted_alone() -> usize {
             high = mid - 1
         }
     }
-    let alone = jev::plan("Task", &rubric(), &"a".repeat(low), None).unwrap();
+    let alone = jev::plan("Task", &rubric(), &[], &"a".repeat(low), None).unwrap();
     assert_eq!(
         jev::estimate(&alone.requests[0].state, &alone.questions),
         jev::TOKEN_CAP
@@ -329,7 +329,7 @@ fn the_longest_answer_that_still_splits_10_000_files_stays_within_the_cap() {
         .collect();
     let mut n = longest_answer_accepted_alone();
     let plan = loop {
-        let plan = jev::plan("Task", &rubric(), &"a".repeat(n), Some(&diff)).unwrap();
+        let plan = jev::plan("Task", &rubric(), &[], &"a".repeat(n), Some(&diff)).unwrap();
         if plan.requests.len() > 1 {
             break plan;
         }
@@ -344,9 +344,9 @@ fn the_longest_answer_that_still_splits_10_000_files_stays_within_the_cap() {
 
 #[test]
 fn no_diff_and_an_empty_diff_are_said_so() {
-    let none = jev::plan("Task", &rubric(), "answer", None).unwrap();
+    let none = jev::plan("Task", &rubric(), &[], "answer", None).unwrap();
     assert!(none.requests[0].state.contains("(no diff available)"));
-    let empty = jev::plan("Task", &rubric(), "answer", Some("")).unwrap();
+    let empty = jev::plan("Task", &rubric(), &[], "answer", Some("")).unwrap();
     assert!(empty.requests[0].state.contains("(no changes)"));
 }
 

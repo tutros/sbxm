@@ -899,7 +899,7 @@ fn planned_rubric() -> Vec<Criterion> {
 fn longest_answer_accepted_alone() -> usize {
     let rubric = planned_rubric();
     let accepted =
-        |n: usize| jev::plan("Implement feature X", &rubric, &"a".repeat(n), None).is_ok();
+        |n: usize| jev::plan("Implement feature X", &rubric, &[], &"a".repeat(n), None).is_ok();
     let (mut low, mut high) = (0, 3 * jev::TOKEN_CAP);
     while low < high {
         let mid = (low + high).div_ceil(2);

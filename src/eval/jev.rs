@@ -17,7 +17,7 @@ use crate::config::{Profile, Resources, sha256_hex};
 use crate::headless::hit_timeout;
 use crate::kit;
 use crate::run::checks::timed_exec;
-use crate::run::config::{Criterion, CriterionKind, Jev, RunConfig};
+use crate::run::config::{Criterion, CriterionKind, Jev, JevQuestion, QuestionKind, RunConfig};
 use crate::run::id::RunRoots;
 use crate::run::orchestrate::{PairOutcome, in_sandbox_path};
 use crate::task::repo::{AgentFile, read_file_in};
@@ -101,8 +101,10 @@ pub struct Plan {
 
 /// The questions for `rubric`, one per criterion (decision 241): a `pass_fail` criterion is a
 /// Noul, a `scale` criterion a Score over its levels in order. `instructions` carry the
-/// criterion's id, its notes and the task.
-pub fn questions(task: &str, rubric: &[Criterion]) -> Value {
+/// criterion's id, its notes and the task. Then each raw question of `raw` under its own id
+/// (issue 343): a Noul, a Choice over its options (S12: an object id -> description) or a Score
+/// over its levels, its `instructions` the question and the task.
+pub fn questions(task: &str, rubric: &[Criterion], raw: &[JevQuestion]) -> Value {
     let mut all = serde_json::Map::new();
     for criterion in rubric {
         let subject = criterion.notes.as_deref().unwrap_or(&criterion.id);
@@ -133,6 +135,32 @@ pub fn questions(task: &str, rubric: &[Criterion]) -> Value {
             }),
         };
         all.insert(criterion.id.clone(), question);
+    }
+    for question in raw {
+        let instructions = format!(
+            "{} The state holds one candidate's final answer and the diff of its changes, for \
+             the task below. Answer this question only.\n\nTask:\n{}",
+            question.question.trim(),
+            task.trim()
+        );
+        let asked = match question.kind {
+            QuestionKind::Noul => json!({
+                "type": "noul",
+                "instructions": instructions,
+                "criteria": {"true": "Yes", "false": "No"},
+            }),
+            QuestionKind::Choice => json!({
+                "type": "choice",
+                "instructions": instructions,
+                "criteria": question.options,
+            }),
+            QuestionKind::Score => json!({
+                "type": "score",
+                "instructions": instructions,
+                "criteria": question.levels,
+            }),
+        };
+        all.insert(question.id.clone(), asked);
     }
     Value::Object(all)
 }
@@ -187,10 +215,11 @@ fn layout(answer: &str, diff: &str, part: Option<&str>) -> String {
 pub fn plan(
     task: &str,
     rubric: &[Criterion],
+    raw: &[JevQuestion],
     answer: &str,
     diff: Option<&str>,
 ) -> Result<Plan, String> {
-    let questions = questions(task, rubric);
+    let questions = questions(task, rubric, raw);
     let task_too_long = |tokens: usize| {
         format!(
             "the task is too long for Jev (about {tokens} tokens with the questions, the limit is \
@@ -201,6 +230,21 @@ pub fn plan(
     // counted, since a short real answer can be shorter than one (PR 289 review round 2, M-1).
     let bare = estimate(&layout("", "", None), &questions);
     if bare > TOKEN_CAP {
+        // The task fits with the rubric's questions (and the raw ones' count), so a raw question
+        // is too big on its own (issue 343): the longest is named.
+        let rubric_only = estimate(&layout("", "", None), &self::questions(task, rubric, &[]))
+            + PER_EXTRA_QUESTION_TOKENS * raw.len();
+        if let Some(longest) = raw
+            .iter()
+            .max_by_key(|q| tokens(&questions[&q.id].to_string()))
+            .filter(|_| rubric_only <= TOKEN_CAP)
+        {
+            return Err(format!(
+                "the question `{}` is too long for Jev (about {bare} tokens with the task, the \
+                 limit is {TOKEN_CAP}); no call was made",
+                longest.id
+            ));
+        }
         return Err(task_too_long(bare));
     }
     // The answer is checked with the diff heading of the request that is actually sent. An empty
@@ -723,6 +767,7 @@ pub fn evaluate_repeat(
         match plan(
             &run_config.task.prompt,
             &run_config.eval.rubric,
+            &jev.questions,
             answer,
             diff,
         ) {
