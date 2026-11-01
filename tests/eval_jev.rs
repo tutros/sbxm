@@ -364,7 +364,7 @@ fn noul_and_score_answers_map_to_0_to_1() {
             "correct": {"type": "noul", "noul": 0.95},
             "quality": {"type": "score", "score": 1.05, "confidence": 0.73, "legend": {}, "probabilities": {}},
         })),
-        &rubric(),
+        &rubric(), &[],
     )
     .unwrap();
     assert_eq!(parsed.model, "jev-1.13.0");
@@ -389,6 +389,7 @@ fn out_of_range_values_are_clamped() {
             "quality": {"type": "score", "score": -0.4, "confidence": 2.0},
         })),
         &rubric(),
+        &[],
     )
     .unwrap();
     assert_eq!(parsed.criteria["correct"].score, 1.0);
@@ -401,6 +402,7 @@ fn a_missing_or_mistyped_answer_is_unscored_never_0() {
     let parsed = jev::parse_response(
         &response(json!({"quality": {"type": "noul", "noul": 0.5}})),
         &rubric(),
+        &[],
     )
     .unwrap();
     assert!(parsed.criteria.is_empty());
@@ -414,7 +416,7 @@ fn a_malformed_response_is_an_error_without_its_text() {
         r#"{"answers": {}}"#,
         r#"{"model": "jev-1.13.0", "answers": []}"#,
     ] {
-        let err = jev::parse_response(text, &rubric()).unwrap_err();
+        let err = jev::parse_response(text, &rubric(), &[]).unwrap_err();
         assert!(err.contains("malformed"), "{err}");
         assert!(!err.contains("SECRET"), "{err}");
     }
@@ -443,12 +445,15 @@ fn chunks_combine_as_the_size_weighted_mean() {
         }))
         .collect(),
         unscored: vec![],
+        questions: Default::default(),
+        unanswered: vec![],
         input_tokens: 10,
         output_tokens: 1,
     };
     let combined = jev::combine(
         &[(300, answered(1.0, Some(0.5))), (100, answered(0.0, None))],
         &rubric(),
+        &[],
     );
     assert_eq!(combined.criteria["correct"].score, 0.75);
     // Only the first chunk scored quality.

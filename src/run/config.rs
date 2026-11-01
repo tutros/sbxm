@@ -535,14 +535,17 @@ impl Validator<'_> {
                 "{at}.question is empty; say what Jev should answer"
             )));
         }
-        let (options, levels) = match raw.kind {
-            QuestionKind::Noul => (None, None),
-            QuestionKind::Choice => (Some("options"), None),
-            QuestionKind::Score => (None, Some("levels")),
-        };
         for (key, given, wanted) in [
-            ("options", raw.options.is_some(), options.is_some()),
-            ("levels", raw.levels.is_some(), levels.is_some()),
+            (
+                "options",
+                raw.options.is_some(),
+                raw.kind == QuestionKind::Choice,
+            ),
+            (
+                "levels",
+                raw.levels.is_some(),
+                raw.kind == QuestionKind::Score,
+            ),
         ] {
             if given && !wanted {
                 return Err(self.err(format!(

@@ -5,7 +5,8 @@
 //!   proves on a header-echo host (`httpbin.org`) that the proxy swaps the placeholder in a header
 //!   and nowhere else; then removes the sandbox and the secret. Needs `sbx` 0.46.0 or newer.
 //! - Also set `SBXM_TEST_JEV_TOKEN_COMMAND=<absolute path to a helper printing the real token>` to
-//!   run `live_jev_call`: one real Jev call against a two-criterion rubric.
+//!   run `live_jev_call`: one real Jev call against a two-criterion rubric, plus a Choice and a
+//!   Score raw question (issue 343).
 //!
 //! Every name carries `sbxm-it-<pid>`; cleanup runs in `Drop`, even when an assertion fails.
 
@@ -226,7 +227,11 @@ fn live_jev_call() {
              [[contestants]]\nharness = \"claude\"\nmodel = \"b\"\n\n\
              [[eval.rubric]]\nid = \"correct\"\nkind = \"pass_fail\"\nweight = 1.0\nnotes = \"the function returns a + b\"\n\n\
              [[eval.rubric]]\nid = \"quality\"\nkind = \"scale\"\nlevels = [\"poor\", \"fair\", \"good\"]\nweight = 0.5\n\n\
-             [eval.jev]\ntoken_command = {command}\n"
+             [eval.jev]\ntoken_command = {command}\n\n\
+             [[eval.jev.questions]]\nid = \"approach\"\nkind = \"choice\"\nquestion = \"How did the contestant write the function?\"\n\
+             options = {{ one_line = \"A single expression body\", several = \"Several statements\" }}\n\n\
+             [[eval.jev.questions]]\nid = \"naming\"\nkind = \"score\"\nquestion = \"How clear are the names?\"\n\
+             levels = [\"unclear\", \"fair\", \"clear\"]\n"
         ),
     )
     .unwrap();
@@ -282,4 +287,21 @@ fn live_jev_call() {
     assert!(scores.answered.model.starts_with("jev-"), "{scores:?}");
     assert!(scores.answered.unscored.is_empty(), "{scores:?}");
     assert_eq!(scores.chunks, 1);
+    // Issue 343: the raw Choice and Score questions are answered in the same call.
+    assert!(scores.answered.unanswered.is_empty(), "{scores:?}");
+    match &scores.answered.questions["approach"] {
+        jev::RawAnswer::Choice {
+            choice,
+            probabilities,
+            ..
+        } => {
+            assert!(choice == "one_line" || choice == "several", "{choice}");
+            assert!(!probabilities.is_empty(), "{probabilities:?}");
+        }
+        other => panic!("not a choice: {other:?}"),
+    }
+    match &scores.answered.questions["naming"] {
+        jev::RawAnswer::Score { score, .. } => assert!((0.0..=2.0).contains(score), "{score}"),
+        other => panic!("not a score: {other:?}"),
+    }
 }

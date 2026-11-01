@@ -420,21 +420,44 @@ pub struct Scored {
 }
 
 /// One response, or a pair's combined responses.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct Answered {
     /// The model that answered (`jev-1.13.0` for `jev-latest`), from the response.
     pub model: String,
     pub criteria: BTreeMap<String, Scored>,
     /// Criteria with no valid answer, in rubric order: never counted as 0.
     pub unscored: Vec<String>,
+    /// The raw questions' answers (issue 343), shown and never ranked.
+    pub questions: BTreeMap<String, RawAnswer>,
+    /// Raw questions with no valid answer, in config order.
+    pub unanswered: Vec<String>,
     pub input_tokens: u64,
     pub output_tokens: u64,
+}
+
+/// One raw question's answer (issue 343), in Jev's own terms.
+#[derive(Debug, Clone, PartialEq)]
+pub enum RawAnswer {
+    /// P(yes), 0-1.
+    Noul { yes: f64 },
+    /// The picked option, its probability, and the whole distribution over the options.
+    Choice {
+        choice: String,
+        probability: f64,
+        probabilities: BTreeMap<String, f64>,
+    },
+    /// 0 to (levels - 1), as Jev gives it.
+    Score { score: f64, confidence: Option<f64> },
 }
 
 /// Reads a 200 response. `Err` (one line, no response text) when it isn't the documented
 /// shape; an answer that is missing or of the wrong type leaves its criterion unscored, and an
 /// out-of-range value is clamped.
-pub fn parse_response(text: &str, rubric: &[Criterion]) -> Result<Answered, String> {
+pub fn parse_response(
+    text: &str,
+    rubric: &[Criterion],
+    raw: &[JevQuestion],
+) -> Result<Answered, String> {
     let malformed = |what: &str| format!("Jev's response is malformed: {what}");
     let root: Value = serde_json::from_str(text).map_err(|_| malformed("not JSON"))?;
     let model = root["model"]
@@ -458,10 +481,25 @@ pub fn parse_response(text: &str, rubric: &[Criterion]) -> Result<Answered, Stri
             None => unscored.push(criterion.id.clone()),
         }
     }
+    let mut questions = BTreeMap::new();
+    let mut unanswered = Vec::new();
+    for question in raw {
+        match answers
+            .get(&question.id)
+            .and_then(|a| raw_answer(question, a))
+        {
+            Some(a) => {
+                questions.insert(question.id.clone(), a);
+            }
+            None => unanswered.push(question.id.clone()),
+        }
+    }
     Ok(Answered {
         model,
         criteria,
         unscored,
+        questions,
+        unanswered,
         input_tokens: root["usage"]["input_tokens"].as_u64().unwrap_or(0),
         output_tokens: root["usage"]["output_tokens"].as_u64().unwrap_or(0),
     })
@@ -493,10 +531,66 @@ fn scored(criterion: &Criterion, answer: &Value) -> Option<Scored> {
     }
 }
 
+/// A raw question's answer, checked like a criterion's: the right type, a Choice's pick one of
+/// the options (its distribution kept over the options only), values clamped. `None` leaves it
+/// unanswered.
+fn raw_answer(question: &JevQuestion, answer: &Value) -> Option<RawAnswer> {
+    match question.kind {
+        QuestionKind::Noul => {
+            if answer["type"] != "noul" {
+                return None;
+            }
+            Some(RawAnswer::Noul {
+                yes: answer["noul"].as_f64()?.clamp(0.0, 1.0),
+            })
+        }
+        QuestionKind::Choice => {
+            if answer["type"] != "choice" {
+                return None;
+            }
+            let choice = answer["choice"].as_str()?;
+            if !question.options.contains_key(choice) {
+                return None;
+            }
+            let probabilities: BTreeMap<String, f64> = answer["probabilities"]
+                .as_object()
+                .into_iter()
+                .flatten()
+                .filter(|(id, _)| question.options.contains_key(id.as_str()))
+                .filter_map(|(id, p)| Some((id.clone(), p.as_f64()?.clamp(0.0, 1.0))))
+                .collect();
+            let probability = probabilities
+                .get(choice)
+                .copied()
+                .or_else(|| answer["confidence"].as_f64())?
+                .clamp(0.0, 1.0);
+            Some(RawAnswer::Choice {
+                choice: choice.to_owned(),
+                probability,
+                probabilities,
+            })
+        }
+        QuestionKind::Score => {
+            if answer["type"] != "score" {
+                return None;
+            }
+            let top = question.levels.len().saturating_sub(1) as f64;
+            Some(RawAnswer::Score {
+                score: answer["score"].as_f64()?.clamp(0.0, top),
+                confidence: answer["confidence"].as_f64().map(|c| c.clamp(0.0, 1.0)),
+            })
+        }
+    }
+}
+
 /// A pair's chunk answers combined per criterion as the mean weighted by each chunk's size; a
 /// criterion no chunk scored stays unscored. The model is the first chunk's (the caller has
 /// checked they agree).
-pub fn combine(chunks: &[(usize, Answered)], rubric: &[Criterion]) -> Answered {
+pub fn combine(
+    chunks: &[(usize, Answered)],
+    rubric: &[Criterion],
+    raw: &[JevQuestion],
+) -> Answered {
     // One chunk keeps Jev's numbers exactly, without a mean's rounding.
     if let [(_, only)] = chunks {
         return only.clone();
@@ -523,6 +617,20 @@ pub fn combine(chunks: &[(usize, Answered)], rubric: &[Criterion]) -> Answered {
             .then(|| confident.iter().map(|(w, c)| w * c).sum::<f64>() / confidence_weight);
         criteria.insert(criterion.id.clone(), Scored { score, confidence });
     }
+    let mut questions = BTreeMap::new();
+    let mut unanswered = Vec::new();
+    for question in raw {
+        let answered: Vec<(f64, &RawAnswer)> = chunks
+            .iter()
+            .filter_map(|(w, a)| Some((*w as f64, a.questions.get(&question.id)?)))
+            .collect();
+        match combine_raw(&answered) {
+            Some(a) => {
+                questions.insert(question.id.clone(), a);
+            }
+            None => unanswered.push(question.id.clone()),
+        }
+    }
     Answered {
         model: chunks
             .first()
@@ -530,8 +638,86 @@ pub fn combine(chunks: &[(usize, Answered)], rubric: &[Criterion]) -> Answered {
             .unwrap_or_default(),
         criteria,
         unscored,
+        questions,
+        unanswered,
         input_tokens: chunks.iter().map(|(_, a)| a.input_tokens).sum(),
         output_tokens: chunks.iter().map(|(_, a)| a.output_tokens).sum(),
+    }
+}
+
+/// One raw question's chunk answers as the mean weighted by chunk size: P(yes) and a Score's
+/// value and confidence averaged; a Choice's distributions averaged and the most probable option
+/// picked (the first in id order on a tie). `None` when no chunk answered it.
+fn combine_raw(answered: &[(f64, &RawAnswer)]) -> Option<RawAnswer> {
+    let weight: f64 = answered.iter().map(|(w, _)| w).sum();
+    if answered.is_empty() || weight <= 0.0 {
+        return None;
+    }
+    let mean = |values: &[(f64, f64)]| {
+        let weight: f64 = values.iter().map(|(w, _)| w).sum();
+        (!values.is_empty() && weight > 0.0)
+            .then(|| values.iter().map(|(w, v)| w * v).sum::<f64>() / weight)
+    };
+    match answered[0].1 {
+        RawAnswer::Noul { .. } => {
+            let yes: Vec<(f64, f64)> = answered
+                .iter()
+                .filter_map(|(w, a)| match a {
+                    RawAnswer::Noul { yes } => Some((*w, *yes)),
+                    _ => None,
+                })
+                .collect();
+            Some(RawAnswer::Noul { yes: mean(&yes)? })
+        }
+        RawAnswer::Score { .. } => {
+            let (mut scores, mut confidences) = (Vec::new(), Vec::new());
+            for (w, a) in answered {
+                if let RawAnswer::Score { score, confidence } = a {
+                    scores.push((*w, *score));
+                    confidences.extend(confidence.map(|c| (*w, c)));
+                }
+            }
+            Some(RawAnswer::Score {
+                score: mean(&scores)?,
+                confidence: mean(&confidences),
+            })
+        }
+        RawAnswer::Choice { .. } => {
+            let mut sums: BTreeMap<String, f64> = BTreeMap::new();
+            for (w, a) in answered {
+                if let RawAnswer::Choice {
+                    choice,
+                    probability,
+                    probabilities,
+                } = a
+                {
+                    // A chunk without a distribution counts its pick at its probability.
+                    let one = BTreeMap::from([(choice.clone(), *probability)]);
+                    let distribution = if probabilities.is_empty() {
+                        &one
+                    } else {
+                        probabilities
+                    };
+                    for (id, p) in distribution {
+                        *sums.entry(id.clone()).or_default() += w * p;
+                    }
+                }
+            }
+            let probabilities: BTreeMap<String, f64> =
+                sums.into_iter().map(|(id, p)| (id, p / weight)).collect();
+            let (choice, probability) =
+                probabilities
+                    .iter()
+                    .fold(None::<(&String, f64)>, |best, (id, &p)| match best {
+                        Some((_, top)) if top >= p => best,
+                        _ => Some((id, p)),
+                    })?;
+            Some(RawAnswer::Choice {
+                choice: choice.clone(),
+                probability,
+                probabilities,
+            })
+        }
     }
 }
 
@@ -831,7 +1017,13 @@ pub fn evaluate_repeat(
                 sleep,
             };
             for (contestant, p) in &planned {
-                let result = score_pair(&caller, &jev.model, p, &run_config.eval.rubric);
+                let result = score_pair(
+                    &caller,
+                    &jev.model,
+                    p,
+                    &run_config.eval.rubric,
+                    &jev.questions,
+                );
                 run.results.push((*contestant, result));
             }
         }
@@ -875,13 +1067,14 @@ fn score_pair(
     model: &str,
     plan: &Plan,
     rubric: &[Criterion],
+    raw: &[JevQuestion],
 ) -> Result<PairScores, String> {
     let n = plan.requests.len();
     let mut answers: Vec<(usize, Answered)> = Vec::new();
     for (i, request) in plan.requests.iter().enumerate() {
         let asked = answers.first().map_or(model, |(_, a)| a.model.as_str());
         let body = request_body(asked, &request.state, &plan.questions);
-        let answered = call(caller, &body, rubric).map_err(|why| {
+        let answered = call(caller, &body, rubric, raw).map_err(|why| {
             if n > 1 {
                 format!("chunk {} of {n}: {why}", i + 1)
             } else {
@@ -902,7 +1095,7 @@ fn score_pair(
         answers.push((request.weight, answered));
     }
     Ok(PairScores {
-        answered: combine(&answers, rubric),
+        answered: combine(&answers, rubric, raw),
         chunks: n,
         truncated: plan.truncated,
     })
@@ -921,7 +1114,12 @@ impl Drop for ResponseGone<'_> {
 
 /// One request: written, sent by the fixed command, retried on 429 and 529 after each pause of
 /// [`BACKOFF`], each retry a fresh exec in the same sandbox.
-fn call(caller: &Caller, body: &Value, rubric: &[Criterion]) -> Result<Answered, String> {
+fn call(
+    caller: &Caller,
+    body: &Value,
+    rubric: &[Criterion],
+    raw: &[JevQuestion],
+) -> Result<Answered, String> {
     let request = caller.calls.join(REQUEST_FILE);
     let response = caller.calls.join(RESPONSE_FILE);
     let spec = timed_exec(&in_sandbox_path(caller.calls), CALL_TIMEOUT.as_secs(), CURL);
@@ -990,7 +1188,7 @@ fn call(caller: &Caller, body: &Value, rubric: &[Criterion]) -> Result<Answered,
                 let text = text.ok_or_else(|| {
                     format!("Jev answered {status}, but no {RESPONSE_FILE} was written")
                 })?;
-                return parse_response(&text, rubric);
+                return parse_response(&text, rubric, raw);
             }
             Outcome::Retry(code) => {
                 let Some(pause) = BACKOFF.get(attempt) else {

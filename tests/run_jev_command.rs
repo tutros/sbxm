@@ -1124,3 +1124,198 @@ fn a_pair_jev_could_not_score_is_left_out_of_jevs_ranking_and_shown_with_its_err
         "{shown}"
     );
 }
+
+// ---- raw questions (issue 343) ------------------------------------------------------------
+
+const QUESTIONS: &str = "[[eval.jev.questions]]\nid = \"tests\"\nkind = \"noul\"\n\
+                         question = \"Did it add tests?\"\n\n\
+                         [[eval.jev.questions]]\nid = \"approach\"\nkind = \"choice\"\n\
+                         question = \"Which approach did the contestant take?\"\n\
+                         options = { refactor = \"Restructured the existing code\", rewrite = \"Replaced it\" }\n\n\
+                         [[eval.jev.questions]]\nid = \"depth\"\nkind = \"score\"\n\
+                         question = \"How fully are edge cases handled?\"\n\
+                         levels = [\"none\", \"partial\", \"full\"]\n";
+
+/// A 200 body answering both criteria (`correct` at `noul`) and the three raw questions.
+fn answer_with_questions(noul: f64, tests: f64, refactor: f64) -> String {
+    let mut body: Value = serde_json::from_str(&answer("jev-1.14.0", noul)).unwrap();
+    let answers = body["answers"].as_object_mut().unwrap();
+    answers.insert("tests".into(), json!({"type": "noul", "noul": tests}));
+    let choice = if refactor >= 0.5 {
+        "refactor"
+    } else {
+        "rewrite"
+    };
+    answers.insert(
+        "approach".into(),
+        json!({"type": "choice", "choice": choice, "confidence": 0.9,
+               "probabilities": {"refactor": refactor, "rewrite": 1.0 - refactor}}),
+    );
+    answers.insert(
+        "depth".into(),
+        json!({"type": "score", "score": 1.18, "confidence": 0.73, "legend": {}, "probabilities": {}}),
+    );
+    body.to_string()
+}
+
+fn config_with_questions(env: &Env) -> String {
+    format!("{}{QUESTIONS}", config(env, ""))
+}
+
+#[test]
+fn raw_questions_are_asked_in_the_same_call_as_the_rubric() {
+    let env = Env::new();
+    let jev = FakeJev::new(vec![]);
+    let backend = jev.backend(&env);
+    go(&env, &config_with_questions(&env), &backend);
+    let requests = jev.requests();
+    // Still one call per contestant per repeat.
+    assert_eq!(requests.len(), 2);
+    for request in &requests {
+        let questions = &request["questions"];
+        assert_eq!(questions["correct"]["type"], "noul");
+        assert_eq!(questions["tests"]["type"], "noul");
+        assert_eq!(questions["approach"]["type"], "choice");
+        assert_eq!(
+            questions["approach"]["criteria"],
+            json!({"refactor": "Restructured the existing code", "rewrite": "Replaced it"})
+        );
+        assert_eq!(
+            questions["depth"]["criteria"],
+            json!(["none", "partial", "full"])
+        );
+    }
+}
+
+#[test]
+fn evals_json_keeps_the_raw_answers_with_a_choices_whole_distribution() {
+    let env = Env::new();
+    let jev = FakeJev::new(vec![
+        (200, answer_with_questions(0.9, 0.95, 0.72)),
+        (200, answer_with_questions(0.2, 0.1, 0.25)),
+    ]);
+    let backend = jev.backend(&env);
+    let ran = go(&env, &config_with_questions(&env), &backend);
+    let first = &evals(&env, &ran, 0, 0)["jev"];
+    assert_eq!(
+        first["questions"],
+        json!({
+            "tests": {"kind": "noul", "yes": 0.95},
+            "approach": {
+                "kind": "choice",
+                "choice": "refactor",
+                "probability": 0.72,
+                "probabilities": {"refactor": 0.72, "rewrite": 1.0 - 0.72},
+            },
+            "depth": {"kind": "score", "score": 1.18, "confidence": 0.73},
+        })
+    );
+    assert_eq!(first["unanswered"], json!([]));
+    // The criteria are what they were without raw questions.
+    assert_eq!(
+        first["criteria"],
+        json!({"correct": {"score": 0.9}, "quality": {"score": 0.8, "confidence": 0.7}})
+    );
+}
+
+#[test]
+fn raw_answers_are_shown_one_line_per_contestant_and_never_change_the_ranking() {
+    let env = Env::new();
+    // Contestant 1's raw answers are better in every way; the ranking must not notice.
+    let jev = FakeJev::new(vec![
+        (200, answer_with_questions(0.9, 0.05, 0.72)),
+        (200, answer_with_questions(0.2, 0.99, 0.25)),
+    ]);
+    let backend = jev.backend(&env);
+    let ran = go(&env, &config_with_questions(&env), &backend);
+    for text in [ran.out.clone(), show(&env, &ran)] {
+        let ranking = text.find("Jev ranking (jev-1.14.0;").expect(&text);
+        let block_at = text
+            .find("Jev questions (shown only, never ranked)")
+            .expect(&text);
+        assert!(ranking < block_at, "{text}");
+        let ranking_block = &text[ranking..block_at];
+        assert!(
+            ranking_block.contains("1. contestants[0] claude (one): 0.87"),
+            "{ranking_block}"
+        );
+        assert!(
+            ranking_block.contains("2. contestants[1] claude (two): 0.40"),
+            "{ranking_block}"
+        );
+        assert!(
+            text.contains(
+                "  contestants[0] claude (one): tests: no (0.95); approach: refactor (0.72); \
+                 depth: partial (1.18 on 0-2, confidence 0.73)\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains(
+                "  contestants[1] claude (two): tests: yes (0.99); approach: rewrite (0.75); \
+                 depth: partial (1.18 on 0-2, confidence 0.73)\n"
+            ),
+            "{text}"
+        );
+        // The distribution is saved, never printed.
+        assert!(!text.contains("0.28") && !text.contains("0.25"), "{text}");
+    }
+}
+
+#[test]
+fn an_unanswered_raw_question_and_a_pair_jev_could_not_score_are_said_so() {
+    let env = Env::new();
+    let mut partial: Value = serde_json::from_str(&answer_with_questions(0.9, 0.95, 0.72)).unwrap();
+    partial["answers"].as_object_mut().unwrap().remove("depth");
+    let jev = FakeJev::new(vec![(200, partial.to_string()), (401, AUTH_BODY.into())]);
+    let backend = jev.backend(&env);
+    let ran = go(&env, &config_with_questions(&env), &backend);
+    assert_eq!(
+        evals(&env, &ran, 0, 0)["jev"]["unanswered"],
+        json!(["depth"])
+    );
+    for text in [ran.out.clone(), show(&env, &ran)] {
+        assert!(
+            text.contains(
+                "  contestants[0] claude (one): tests: yes (0.95); approach: refactor (0.72); \
+                 unanswered: depth\n"
+            ),
+            "{text}"
+        );
+        assert!(
+            text.contains("  contestants[1] claude (two): not answered (Jev could not score it)\n"),
+            "{text}"
+        );
+    }
+}
+
+#[test]
+fn every_repeat_gets_its_own_line() {
+    let env = Env::new();
+    let backend = FakeJev::new(vec![]).backend(&env);
+    let body = format!("{}{QUESTIONS}", config(&env, "[run]\nrepeat = 2\n\n"));
+    let ran = go(&env, &body, &backend);
+    for text in [ran.out.clone(), show(&env, &ran)] {
+        for line in [
+            "  contestants[0] claude (one), repeat 1/2: unanswered: tests, approach, depth\n",
+            "  contestants[0] claude (one), repeat 2/2: unanswered: tests, approach, depth\n",
+            "  contestants[1] claude (two), repeat 2/2: unanswered: tests, approach, depth\n",
+        ] {
+            assert!(text.contains(line), "{line:?} in {text}");
+        }
+    }
+}
+
+#[test]
+fn without_raw_questions_there_is_no_questions_block_or_key() {
+    let env = Env::new();
+    let backend = FakeJev::new(vec![]).backend(&env);
+    let ran = go(&env, &config(&env, ""), &backend);
+    assert!(!ran.out.contains("Jev questions"), "{}", ran.out);
+    assert!(!show(&env, &ran).contains("Jev questions"));
+    let jev = &evals(&env, &ran, 0, 0)["jev"];
+    assert!(
+        jev.get("questions").is_none() && jev.get("unanswered").is_none(),
+        "{jev:#}"
+    );
+}

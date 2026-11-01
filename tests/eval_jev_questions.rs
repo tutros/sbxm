@@ -3,7 +3,7 @@
 
 use std::collections::BTreeMap;
 
-use sbxm::eval::jev;
+use sbxm::eval::jev::{self, Answered, RawAnswer};
 use sbxm::run::config::{Criterion, CriterionKind, JevQuestion, QuestionKind};
 use serde_json::{Value, json};
 
@@ -250,4 +250,214 @@ fn the_largest_choice_counts_every_option_toward_its_size() {
     )
     .unwrap_err();
     assert!(err.contains("question `approach`"), "{err}");
+}
+
+// ---- answers ------------------------------------------------------------------------------
+
+fn response(answers: Value) -> String {
+    json!({"model": "jev-1.14.0", "answers": answers, "usage": {"input_tokens": 400, "output_tokens": 40}})
+        .to_string()
+}
+
+fn rubric_answers() -> Value {
+    json!({
+        "correct": {"type": "noul", "noul": 0.9},
+        "quality": {"type": "score", "score": 2.0, "confidence": 0.8},
+    })
+}
+
+fn with(extra: Value) -> Value {
+    let mut all = rubric_answers();
+    for (k, v) in extra.as_object().unwrap() {
+        all[k] = v.clone();
+    }
+    all
+}
+
+#[test]
+fn raw_answers_are_kept_in_jevs_own_terms_next_to_the_criteria() {
+    let parsed = jev::parse_response(
+        &response(with(json!({
+            "tests": {"type": "noul", "noul": 0.95},
+            "approach": {"type": "choice", "choice": "refactor", "confidence": 0.9,
+                         "probabilities": {"refactor": 0.72, "rewrite": 0.28}},
+            "depth": {"type": "score", "score": 1.82, "confidence": 0.73,
+                      "legend": {}, "probabilities": {}},
+        }))),
+        &rubric(),
+        &raw(),
+    )
+    .unwrap();
+    // The rubric is scored as before; the raw questions never join the criteria.
+    assert_eq!(
+        parsed.criteria.keys().collect::<Vec<_>>(),
+        ["correct", "quality"]
+    );
+    assert_eq!(parsed.questions["tests"], RawAnswer::Noul { yes: 0.95 });
+    assert_eq!(
+        parsed.questions["approach"],
+        RawAnswer::Choice {
+            choice: "refactor".into(),
+            probability: 0.72,
+            probabilities: [("refactor".into(), 0.72), ("rewrite".into(), 0.28)].into(),
+        }
+    );
+    assert_eq!(
+        parsed.questions["depth"],
+        RawAnswer::Score {
+            score: 1.82,
+            confidence: Some(0.73)
+        }
+    );
+    assert!(parsed.unanswered.is_empty());
+}
+
+#[test]
+fn a_missing_mistyped_or_unknown_raw_answer_is_unanswered_and_scores_stay() {
+    let parsed = jev::parse_response(
+        &response(with(json!({
+            "tests": {"type": "score", "score": 1.0},
+            "approach": {"type": "choice", "choice": "delete-everything", "confidence": 1.0},
+        }))),
+        &rubric(),
+        &raw(),
+    )
+    .unwrap();
+    assert!(parsed.questions.is_empty());
+    assert_eq!(parsed.unanswered, ["tests", "approach", "depth"]);
+    assert_eq!(parsed.criteria.len(), 2);
+    assert!(parsed.unscored.is_empty());
+}
+
+#[test]
+fn raw_values_are_clamped_and_a_distribution_keeps_only_the_options() {
+    let parsed = jev::parse_response(
+        &response(with(json!({
+            "tests": {"type": "noul", "noul": 1.4},
+            "approach": {"type": "choice", "choice": "rewrite",
+                         "probabilities": {"rewrite": 1.3, "refactor": -0.1, "other": 0.5}},
+            "depth": {"type": "score", "score": 7.0, "confidence": -1.0},
+        }))),
+        &rubric(),
+        &raw(),
+    )
+    .unwrap();
+    assert_eq!(parsed.questions["tests"], RawAnswer::Noul { yes: 1.0 });
+    assert_eq!(
+        parsed.questions["approach"],
+        RawAnswer::Choice {
+            choice: "rewrite".into(),
+            probability: 1.0,
+            probabilities: [("refactor".into(), 0.0), ("rewrite".into(), 1.0)].into(),
+        }
+    );
+    // Three levels: 0 to 2.
+    assert_eq!(
+        parsed.questions["depth"],
+        RawAnswer::Score {
+            score: 2.0,
+            confidence: Some(0.0)
+        }
+    );
+}
+
+#[test]
+fn a_choice_without_its_picks_probability_falls_back_to_its_confidence() {
+    let parsed = jev::parse_response(
+        &response(with(json!({
+            "approach": {"type": "choice", "choice": "refactor", "confidence": 0.6},
+        }))),
+        &rubric(),
+        &raw(),
+    )
+    .unwrap();
+    assert_eq!(
+        parsed.questions["approach"],
+        RawAnswer::Choice {
+            choice: "refactor".into(),
+            probability: 0.6,
+            probabilities: BTreeMap::new(),
+        }
+    );
+}
+
+fn answered(questions: &[(&str, RawAnswer)]) -> Answered {
+    Answered {
+        model: "jev-1.14.0".into(),
+        questions: questions
+            .iter()
+            .map(|(id, a)| (id.to_string(), a.clone()))
+            .collect(),
+        input_tokens: 10,
+        output_tokens: 1,
+        ..Answered::default()
+    }
+}
+
+fn picked(choice: &str, probabilities: &[(&str, f64)]) -> RawAnswer {
+    let probabilities: BTreeMap<String, f64> = probabilities
+        .iter()
+        .map(|(id, p)| (id.to_string(), *p))
+        .collect();
+    RawAnswer::Choice {
+        choice: choice.into(),
+        probability: probabilities[choice],
+        probabilities,
+    }
+}
+
+#[test]
+fn chunk_answers_combine_by_size_and_a_choice_picks_the_most_probable_mean() {
+    let first = answered(&[
+        ("tests", RawAnswer::Noul { yes: 1.0 }),
+        (
+            "approach",
+            picked("refactor", &[("refactor", 0.6), ("rewrite", 0.4)]),
+        ),
+        (
+            "depth",
+            RawAnswer::Score {
+                score: 2.0,
+                confidence: Some(0.8),
+            },
+        ),
+    ]);
+    let second = answered(&[
+        ("tests", RawAnswer::Noul { yes: 0.0 }),
+        (
+            "approach",
+            picked("rewrite", &[("refactor", 0.0), ("rewrite", 1.0)]),
+        ),
+    ]);
+    let combined = jev::combine(&[(100, first), (300, second)], &rubric(), &raw());
+    assert_eq!(combined.questions["tests"], RawAnswer::Noul { yes: 0.25 });
+    // refactor: (100 * 0.6) / 400 = 0.15; rewrite: (100 * 0.4 + 300 * 1.0) / 400 = 0.85.
+    assert_eq!(
+        combined.questions["approach"],
+        RawAnswer::Choice {
+            choice: "rewrite".into(),
+            probability: 0.85,
+            probabilities: [("refactor".into(), 0.15), ("rewrite".into(), 0.85)].into(),
+        }
+    );
+    // Only the first chunk answered depth.
+    assert_eq!(
+        combined.questions["depth"],
+        RawAnswer::Score {
+            score: 2.0,
+            confidence: Some(0.8)
+        }
+    );
+    assert!(combined.unanswered.is_empty());
+}
+
+#[test]
+fn a_raw_question_no_chunk_answered_stays_unanswered() {
+    let combined = jev::combine(
+        &[(100, answered(&[])), (100, answered(&[]))],
+        &rubric(),
+        &raw(),
+    );
+    assert!(combined.questions.is_empty());
+    assert_eq!(combined.unanswered, ["tests", "approach", "depth"]);
 }
