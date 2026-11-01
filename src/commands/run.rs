@@ -486,6 +486,12 @@ fn run_logged(
         Ok(None) => {}
         Err(e) => writeln!(warn, "warning: cannot rank the run by Jev: {e:#}")?,
     }
+    // Jev's raw answers after its ranking, shown only (issue 343).
+    match score::render_jev_questions(&roots.meta, &labels) {
+        Ok(Some(text)) => write!(out, "{text}")?,
+        Ok(None) => {}
+        Err(e) => writeln!(warn, "warning: cannot show Jev's raw answers: {e:#}")?,
+    }
     if run_config.eval.cosine.is_some() {
         write!(
             out,

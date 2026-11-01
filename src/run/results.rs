@@ -26,7 +26,7 @@ use super::id::{date_from_days, days_from_civil};
 use super::kits::RunKits;
 use super::orchestrate::PairOutcome;
 use crate::eval::cosine::CosineEntry;
-use crate::eval::jev::JevRun;
+use crate::eval::jev::{JevRun, RawAnswer};
 use crate::eval::judge::JudgeRun;
 use crate::headless::RunStatus;
 use std::collections::BTreeMap;
@@ -330,6 +330,17 @@ pub fn write_jev(meta: &Path, run: &JevRun) -> Result<()> {
                 if scores.truncated {
                     entry["truncated"] = json!(true);
                 }
+                // Raw questions (issue 343), in Jev's own terms, with a Choice's whole
+                // distribution; only when the run asked any.
+                if !answered.questions.is_empty() || !answered.unanswered.is_empty() {
+                    let questions: serde_json::Map<String, Value> = answered
+                        .questions
+                        .iter()
+                        .map(|(id, a)| (id.clone(), raw_answer_json(a)))
+                        .collect();
+                    entry["questions"] = Value::Object(questions);
+                    entry["unanswered"] = json!(answered.unanswered);
+                }
                 entry
             }
             Err(why) => json!({"status": "error", "error": why}),
@@ -339,6 +350,29 @@ pub fn write_jev(meta: &Path, run: &JevRun) -> Result<()> {
         merge_evals(&dir, "jev", entry)?;
     }
     Ok(())
+}
+
+fn raw_answer_json(answer: &RawAnswer) -> Value {
+    match answer {
+        RawAnswer::Noul { yes } => json!({"kind": "noul", "yes": yes}),
+        RawAnswer::Choice {
+            choice,
+            probability,
+            probabilities,
+        } => json!({
+            "kind": "choice",
+            "choice": choice,
+            "probability": probability,
+            "probabilities": probabilities,
+        }),
+        RawAnswer::Score { score, confidence } => {
+            let mut entry = json!({"kind": "score", "score": score});
+            if let Some(confidence) = confidence {
+                entry["confidence"] = json!(confidence);
+            }
+            entry
+        }
+    }
 }
 
 /// Sets `key` in the pair's `evals.json` (creating it), keeping the other

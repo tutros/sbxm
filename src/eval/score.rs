@@ -16,7 +16,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde_json::Value;
 
-use crate::run::config::{Criterion, RunConfig};
+use crate::run::config::{Criterion, JevQuestion, QuestionKind, RunConfig};
 
 /// Scores closer than this are a tie (floating-point noise).
 const TIE_EPSILON: f64 = 1e-9;
@@ -280,6 +280,101 @@ pub fn render_jev(jev: &JevRanking, labels: &[String]) -> String {
         &jev.ranking,
         labels,
     )
+}
+
+/// Jev's answers to the raw questions (issue 343) as text, one line per contestant and repeat,
+/// read from the same files as [`load_jev`]: a Choice's pick with its probability (its
+/// distribution stays in `evals.json`), a Noul's likelier answer with its probability, a Score's
+/// nearest level with its value. Shown only: nothing here touches a ranking. `None` when the
+/// run asked no raw questions.
+pub fn render_jev_questions(meta: &Path, labels: &[String]) -> Result<Option<String>> {
+    let config_path = meta.join("run-config.toml");
+    let config = RunConfig::load(&config_path).with_context(|| {
+        format!(
+            "cannot read the run's config copy {}",
+            config_path.display()
+        )
+    })?;
+    let Some(jev) = config.eval.jev.as_ref().filter(|j| !j.questions.is_empty()) else {
+        return Ok(None);
+    };
+    let repeats = config.run.repeat;
+    let mut out = "Jev questions (shown only, never ranked)\n".to_owned();
+    for contestant in 0..config.contestants.len() {
+        for repeat in 0..repeats {
+            let dir = meta.join(contestant.to_string()).join(repeat.to_string());
+            if read_json(&dir.join("result.json")).is_none() {
+                continue;
+            }
+            let mut who = format!(
+                "contestants[{contestant}] {}",
+                labels.get(contestant).map_or("?", String::as_str)
+            );
+            if repeats > 1 {
+                let _ = write!(who, ", repeat {}/{repeats}", repeat + 1);
+            }
+            let evals = read_json(&dir.join("evals.json")).unwrap_or(Value::Null);
+            let entry = &evals["jev"];
+            if entry["status"] != "ok" {
+                let _ = writeln!(out, "  {who}: not answered (Jev could not score it)");
+                continue;
+            }
+            let mut parts: Vec<String> = jev
+                .questions
+                .iter()
+                .filter_map(|q| {
+                    Some(format!(
+                        "{}: {}",
+                        q.id,
+                        shown(q, &entry["questions"][&q.id])?
+                    ))
+                })
+                .collect();
+            let unanswered: Vec<&str> = jev
+                .questions
+                .iter()
+                .filter(|q| shown(q, &entry["questions"][&q.id]).is_none())
+                .map(|q| q.id.as_str())
+                .collect();
+            if !unanswered.is_empty() {
+                parts.push(format!("unanswered: {}", unanswered.join(", ")));
+            }
+            let _ = writeln!(out, "  {who}: {}", parts.join("; "));
+        }
+    }
+    Ok(Some(out))
+}
+
+/// One saved raw answer as text; `None` when it is missing or not of the question's kind.
+fn shown(question: &JevQuestion, answer: &Value) -> Option<String> {
+    match question.kind {
+        QuestionKind::Noul if answer["kind"] == "noul" => {
+            let yes = answer["yes"].as_f64()?;
+            Some(if yes >= 0.5 {
+                format!("yes ({yes:.2})")
+            } else {
+                format!("no ({:.2})", 1.0 - yes)
+            })
+        }
+        QuestionKind::Choice if answer["kind"] == "choice" => Some(format!(
+            "{} ({:.2})",
+            answer["choice"].as_str()?,
+            answer["probability"].as_f64()?
+        )),
+        QuestionKind::Score if answer["kind"] == "score" => {
+            let score = answer["score"].as_f64()?;
+            let top = question.levels.len().saturating_sub(1);
+            let nearest = question
+                .levels
+                .get((score.round().max(0.0) as usize).min(top))?;
+            let confidence = answer["confidence"]
+                .as_f64()
+                .map(|c| format!(", confidence {c:.2}"))
+                .unwrap_or_default();
+            Some(format!("{nearest} ({score:.2} on 0-{top}{confidence})"))
+        }
+        _ => None,
+    }
 }
 
 /// The ranking as text, `labels[i]` being `harness (model)` of contestant i.

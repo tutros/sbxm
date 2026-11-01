@@ -2,7 +2,7 @@
 //! a standalone TOML file, parsed and checked without touching the disk or
 //! `sbx`. Every struct denies unknown keys, as in `config.rs` (decision 11).
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -66,6 +66,37 @@ pub struct EvalConfig {
 pub struct Jev {
     pub token: SecretSource,
     pub model: String,
+    /// `[[eval.jev.questions]]` (slice 14b, issue 343): raw questions asked next to the rubric,
+    /// shown and never ranked.
+    pub questions: Vec<JevQuestion>,
+}
+
+/// A raw question's Jev primitive.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum QuestionKind {
+    /// Yes or no; Jev gives P(yes).
+    Noul,
+    /// One of 2 to 255 options, with a distribution.
+    Choice,
+    /// One of 2 to 10 ordered levels.
+    Score,
+}
+
+/// Jev's limits on a Choice's options and a Score's levels.
+pub const CHOICE_OPTIONS: std::ops::RangeInclusive<usize> = 2..=255;
+pub const SCORE_LEVELS: std::ops::RangeInclusive<usize> = 2..=10;
+
+/// One `[[eval.jev.questions]]` entry (issue 343).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JevQuestion {
+    pub id: String,
+    pub kind: QuestionKind,
+    pub question: String,
+    /// Choice only: option id -> description (S12: Choice's `criteria` is this object).
+    pub options: BTreeMap<String, String>,
+    /// Score only: worst to best.
+    pub levels: Vec<String>,
 }
 
 /// The model a request names when `[eval.jev]` sets none.
@@ -175,6 +206,18 @@ struct RawJev {
     token_command: Option<PathBuf>,
     token_ref: Option<String>,
     model: Option<String>,
+    #[serde(default)]
+    questions: Vec<RawJevQuestion>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawJevQuestion {
+    id: String,
+    kind: QuestionKind,
+    question: String,
+    options: Option<BTreeMap<String, String>>,
+    levels: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -398,10 +441,7 @@ impl Validator<'_> {
                     .map_or_else(|| dir.clone(), |base| base.join(&dir))
             }),
         });
-        let jev = raw
-            .jev
-            .map(|j| self.jev(j, rubric.is_empty()))
-            .transpose()?;
+        let jev = raw.jev.map(|j| self.jev(j, &rubric)).transpose()?;
         Ok(EvalConfig {
             checks,
             rubric,
@@ -412,7 +452,7 @@ impl Validator<'_> {
     }
 
     /// Exactly one token source, named and never read here (decision 241).
-    fn jev(&self, raw: RawJev, no_rubric: bool) -> Result<Jev> {
+    fn jev(&self, raw: RawJev, rubric: &[Criterion]) -> Result<Jev> {
         let token = match (raw.token_command, raw.token_ref) {
             (Some(_), Some(_)) => {
                 return Err(self
@@ -451,13 +491,119 @@ impl Validator<'_> {
                 "eval.jev.model is empty; name a Jev model or leave it out for {JEV_DEFAULT_MODEL}"
             )));
         }
-        if no_rubric {
+        if rubric.is_empty() {
             return Err(self.err(
                 "eval.jev needs at least one [[eval.rubric]] criterion to score; add one or \
                  remove [eval.jev]",
             ));
         }
-        Ok(Jev { token, model })
+        let mut seen = HashSet::new();
+        let questions = raw
+            .questions
+            .into_iter()
+            .enumerate()
+            .map(|(i, q)| self.jev_question(i, q, rubric, &mut seen))
+            .collect::<Result<_>>()?;
+        Ok(Jev {
+            token,
+            model,
+            questions,
+        })
+    }
+
+    /// One raw question (issue 343): `options` only on a choice, `levels` only on a score, each
+    /// within Jev's limits; its id unique among the questions and no rubric criterion's, since
+    /// both are keys of one request's `questions`.
+    fn jev_question(
+        &self,
+        i: usize,
+        raw: RawJevQuestion,
+        rubric: &[Criterion],
+        seen: &mut HashSet<String>,
+    ) -> Result<JevQuestion> {
+        let at = format!("eval.jev.questions[{i}]");
+        self.id(&at, &raw.id, seen)?;
+        let at = format!("{at} (\"{}\")", raw.id);
+        if rubric.iter().any(|c| c.id == raw.id) {
+            return Err(self.err(format!(
+                "{at} has the id of a rubric criterion; Jev answers both in one request, so \
+                 give the question another id"
+            )));
+        }
+        if raw.question.trim().is_empty() {
+            return Err(self.err(format!(
+                "{at}.question is empty; say what Jev should answer"
+            )));
+        }
+        for (key, given, wanted) in [
+            (
+                "options",
+                raw.options.is_some(),
+                raw.kind == QuestionKind::Choice,
+            ),
+            (
+                "levels",
+                raw.levels.is_some(),
+                raw.kind == QuestionKind::Score,
+            ),
+        ] {
+            if given && !wanted {
+                return Err(self.err(format!(
+                    "{at}.{key} is set on a {} question; remove {key} or change its kind",
+                    kind_name(raw.kind)
+                )));
+            }
+            if wanted && !given {
+                return Err(self.err(format!(
+                    "{at} is a {} question without {key}; add {key}",
+                    kind_name(raw.kind)
+                )));
+            }
+        }
+        let options = raw.options.unwrap_or_default();
+        if raw.kind == QuestionKind::Choice {
+            if !CHOICE_OPTIONS.contains(&options.len()) {
+                return Err(self.err(format!(
+                    "{at} is a choice with {} options; give {} to {}",
+                    options.len(),
+                    CHOICE_OPTIONS.start(),
+                    CHOICE_OPTIONS.end()
+                )));
+            }
+            if options
+                .iter()
+                .any(|(id, text)| id.trim().is_empty() || text.trim().is_empty())
+            {
+                return Err(self.err(format!(
+                    "{at}.options has an empty option id or description; give every option \
+                     both"
+                )));
+            }
+        }
+        let levels = raw.levels.unwrap_or_default();
+        if raw.kind == QuestionKind::Score {
+            let distinct = levels.iter().collect::<HashSet<_>>().len();
+            if !SCORE_LEVELS.contains(&distinct) || distinct != levels.len() {
+                return Err(self.err(format!(
+                    "{at} is a score with {distinct} distinct levels{}; give {} to {} distinct \
+                     levels, worst to best",
+                    if distinct == levels.len() {
+                        ""
+                    } else {
+                        " and repeats"
+                    },
+                    SCORE_LEVELS.start(),
+                    SCORE_LEVELS.end()
+                )));
+            }
+        }
+        Ok(JevQuestion {
+            id: raw.id,
+            kind: raw.kind,
+            question: raw.question,
+            options,
+            levels,
+        })
     }
 
     /// A non-empty id not seen before in its list.
@@ -562,4 +708,12 @@ pub(crate) fn parse_duration(at: &str, text: &str) -> std::result::Result<Durati
              \"10m\" or \"2h\""
         )
     })
+}
+
+fn kind_name(kind: QuestionKind) -> &'static str {
+    match kind {
+        QuestionKind::Noul => "noul",
+        QuestionKind::Choice => "choice",
+        QuestionKind::Score => "score",
+    }
 }

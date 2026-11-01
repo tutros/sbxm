@@ -80,6 +80,11 @@ pub fn render(config_dir: &Path, run_id: &str, options: &Options) -> Result<Stri
         writeln!(out)?;
         write!(out, "{}", score::render_jev(&ranking, &labels))?;
     }
+    // Then Jev's raw answers, shown only (issue 343).
+    if let Ok(Some(text)) = score::render_jev_questions(&meta, &labels) {
+        writeln!(out)?;
+        write!(out, "{text}")?;
+    }
     let similarity = cosine::render(&meta, contestants.len(), repeat);
     if !similarity.is_empty() {
         writeln!(out)?;
