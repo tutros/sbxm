@@ -58,7 +58,8 @@ build sbxm tasks run with (a machine's own wrapper; never a fresh `cargo run`).
 - `<sbxm> task finish --issue N`. A line in `result.md` that looks like a secret is refused: test values must be
   obviously fake; reword the line in the task folder and finish again.
 - Should-fix and question findings: `<sbxm> task file-findings --issue N --create` (each issue gets a size).
-- CodeQL alerts on fake test values: dismiss them as "used in tests".
+- CodeQL skips `tests/` (`.github/codeql/codeql-config.yml`, issue 336); an alert on fake test values elsewhere:
+  dismiss it as "used in tests". Secret-shaped test values stay obviously fake.
 
 ## 7. Merge
 
