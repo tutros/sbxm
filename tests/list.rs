@@ -136,10 +136,7 @@ fn table_aligns_columns_and_explains_orphans() {
             ConfigStatus::Changed,
         ),
         // Hints always name --harness explicitly, including the default (Claude).
-        with_config(
-            entry("demo", "gemini", "running", None),
-            ConfigStatus::Changed,
-        ),
+        with_config(entry("demo", "pi", "running", None), ConfigStatus::Changed),
         with_config(
             entry("web", "claude", "running", None),
             ConfigStatus::Unknown,
@@ -153,7 +150,7 @@ fn table_aligns_columns_and_explains_orphans() {
          api      claude   running  current\n\
          demo     claude   stopped  changed  config changed; `sbxm open demo --harness claude --rebuild` recreates it\n\
          demo     codex    missing  changed  sandbox missing; `sbxm open demo --harness codex` recreates it\n\
-         demo     gemini   running  changed  config changed; `sbxm open demo --harness gemini --rebuild` recreates it\n\
+         demo     pi       running  changed  config changed; `sbxm open demo --harness pi --rebuild` recreates it\n\
          web      claude   running  unknown  its profile or sandbox.toml doesn't load; `sbxm open web --harness claude` shows why\n\
          website  claude   stopped           no sbxm state under this base_dir; remove it with `sbx rm sbxm-website-claude` if it's stale\n"
     );

@@ -662,10 +662,6 @@ pub(crate) fn headless_harness(
     let allowed = "use claude, codex or antigravity";
     match Harness::from_str(name, false) {
         Ok(h @ (Harness::Claude | Harness::Codex | Harness::Antigravity)) => Ok(h),
-        Ok(Harness::Gemini) => Err(format!(
-            "{at} \"gemini\" can't run {what}: Gemini CLI is deprecated upstream and \
-             blocked by egress on this setup; use antigravity for Google models"
-        )),
         Ok(Harness::Pi) => Err(format!(
             "{at} \"pi\" can't run {what} yet: its headless mode is deferred; {allowed}"
         )),

@@ -565,49 +565,47 @@ fn new_demo_with(
 #[test]
 fn a_strict_profile_refuses_a_harness_templates_do_not_support() {
     // Review PR 269 round 2 M-1, decision 240.
-    for harness in [Harness::Antigravity, Harness::Gemini] {
-        let env = Env::new();
-        env.write_profile("default", &strict(PROFILE));
-        let backend = sbx_046();
+    let harness = Harness::Antigravity;
+    let env = Env::new();
+    env.write_profile("default", &strict(PROFILE));
+    let backend = sbx_046();
 
-        let (result, _) = new_demo_with(&env, &backend, harness);
+    let (result, _) = new_demo_with(&env, &backend, harness);
 
-        let message = format!("{:#}", result.unwrap_err());
-        assert!(
-            message.contains(&format!(
-                "templates are not supported for the {} harness yet; use --harness claude, codex or pi",
-                harness.as_str()
-            )),
-            "{message}"
-        );
-        assert!(!message.contains("template build"), "{message}");
-        assert!(backend.creates().is_empty());
-        assert!(!env.base_dir().join("demo").exists());
-    }
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains(&format!(
+            "templates are not supported for the {} harness yet; use --harness claude, codex or pi",
+            harness.as_str()
+        )),
+        "{message}"
+    );
+    assert!(!message.contains("template build"), "{message}");
+    assert!(backend.creates().is_empty());
+    assert!(!env.base_dir().join("demo").exists());
 }
 
 #[test]
 fn a_non_strict_profile_warns_and_installs_for_a_harness_templates_do_not_support() {
-    for harness in [Harness::Antigravity, Harness::Gemini] {
-        let env = Env::new();
-        env.write_profile("default", PROFILE);
-        let backend = sbx_046();
+    let harness = Harness::Antigravity;
+    let env = Env::new();
+    env.write_profile("default", PROFILE);
+    let backend = sbx_046();
 
-        let (result, warn) = new_demo_with(&env, &backend, harness);
+    let (result, warn) = new_demo_with(&env, &backend, harness);
 
-        result.unwrap();
-        assert!(
-            warn.contains(&format!(
-                "warning: templates are not supported for the {} harness yet; creating \
-                 sbxm-demo-{} with the profile's install steps instead",
-                harness.as_str(),
-                harness.as_str()
-            )),
-            "{warn}"
-        );
-        assert!(!warn.contains("template build"), "{warn}");
-        assert_eq!(backend.creates().pop().unwrap().template, None);
-    }
+    result.unwrap();
+    assert!(
+        warn.contains(&format!(
+            "warning: templates are not supported for the {} harness yet; creating \
+             sbxm-demo-{} with the profile's install steps instead",
+            harness.as_str(),
+            harness.as_str()
+        )),
+        "{warn}"
+    );
+    assert!(!warn.contains("template build"), "{warn}");
+    assert_eq!(backend.creates().pop().unwrap().template, None);
 }
 
 /// `config show demo --kits`, and the hash `state.json` records for it.

@@ -217,12 +217,7 @@ fn only_antigravity_has_a_default_model() {
         Harness::Antigravity.default_model(),
         Some("gemini-3.8-flash-medium")
     );
-    for harness in [
-        Harness::Claude,
-        Harness::Codex,
-        Harness::Gemini,
-        Harness::Pi,
-    ] {
+    for harness in [Harness::Claude, Harness::Codex, Harness::Pi] {
         assert_eq!(harness.default_model(), None, "{}", harness.as_str());
         assert_eq!(harness.model_or_default(None), None, "{}", harness.as_str());
     }

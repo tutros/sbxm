@@ -317,7 +317,7 @@ fn a_harness_without_an_adapter_is_refused_before_any_exec() {
         &fake,
         "sb",
         Path::new("/work"),
-        Harness::Gemini,
+        Harness::Pi,
         "p",
         &opts(),
         Duration::from_secs(60),
@@ -325,7 +325,7 @@ fn a_harness_without_an_adapter_is_refused_before_any_exec() {
     .unwrap_err();
     assert_eq!(
         err.to_string(),
-        "gemini has no headless adapter; use claude, codex or antigravity"
+        "pi has no headless adapter; use claude, codex or antigravity"
     );
     assert!(fake.execs().is_empty());
 }

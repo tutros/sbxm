@@ -61,7 +61,6 @@ show project="" harness="claude":
 demo project="just-demo":
     {{sbxm}} new {{project}} --harness claude
     {{sbxm}} new {{project}} --harness codex
-    {{sbxm}} new {{project}} --harness gemini
     {{sbxm}} new {{project}} --harness pi
     {{sbxm}} list
 

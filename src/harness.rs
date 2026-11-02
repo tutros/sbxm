@@ -15,7 +15,6 @@ pub enum Harness {
     #[default]
     Claude,
     Codex,
-    Gemini,
     Pi,
     Antigravity,
 }
@@ -47,7 +46,6 @@ impl Harness {
         match self {
             Harness::Claude => "claude",
             Harness::Codex => "codex",
-            Harness::Gemini => "gemini",
             Harness::Pi => "pi",
             Harness::Antigravity => "antigravity",
         }
@@ -66,7 +64,7 @@ impl Harness {
         match self {
             Harness::Claude | Harness::Pi => "anthropic",
             Harness::Codex => "openai",
-            Harness::Gemini | Harness::Antigravity => "google",
+            Harness::Antigravity => "google",
         }
     }
 
@@ -101,7 +99,6 @@ impl Harness {
         match self {
             Harness::Claude => PathBuf::from(".claude").join("CLAUDE.md"),
             Harness::Codex => PathBuf::from(".codex").join("AGENTS.md"),
-            Harness::Gemini => PathBuf::from(".gemini").join("GEMINI.md"),
             Harness::Pi => PathBuf::from(".pi").join("agent").join("AGENTS.md"),
             // Verified on real sbx (M2a P5): `agy -p` loads `~/.gemini/AGENTS.md`
             // (and GEMINI.md), but not the same names in `~/.gemini/antigravity-cli/`.
@@ -233,10 +230,10 @@ impl Harness {
                 ));
             }
         }
-        // The sbx skills store doesn't serve Gemini CLI or Pi (decisions 46, 72, 78),
+        // The sbx skills store doesn't serve Pi (decisions 46, 72, 78),
         // and isn't known to serve Antigravity (not on decision 46's list; an empty
         // store can't be observed without changing it).
-        if matches!(self, Harness::Gemini | Harness::Pi | Harness::Antigravity)
+        if matches!(self, Harness::Pi | Harness::Antigravity)
             && profile.skills_store != SkillsStore::Off
         {
             warnings.push(format!(
