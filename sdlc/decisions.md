@@ -1247,6 +1247,13 @@ later must-fix traced to one) pauses auto-merge, and the session tells the user,
   `agy` never refreshes or validates the token itself; `sbx` calls the helper per request. Adopted as [270].
   Write-up: `sdlc/spikes/S16.md`.
 
+**S18 (2026-11-02, `sbx` v0.46.0, local): no harness can use `sbx`'s MCP gateway yet**
+- The gateway serves a registered server (`sbx mcp add`, chosen per sandbox by `--static-mcp` or `mcp load`) to a raw
+  client, but never answers a notification; Claude Code times out after 30 s, Codex ignores the image's
+  `headers`/`type` keys. #287's hang is likely the same. Claude Code also reaches the account's claude.ai connectors
+  through Anthropic's MCP proxy, past the allow list; `ENABLE_CLAUDEAI_MCP_SERVERS=false` removes them. Answers #332's
+  point 1. Write-up: `sdlc/spikes/S18.md`.
+
 ### Jev facts relevant to design (from docs, Jev 1.13)
 - HTTP API only (`POST https://api.typesafe.ai/v1/systemone`, Bearer auth). SDKs exist only for Python and JS, so Rust calls it with `reqwest`.
 - Primitives: **Noul** (P(yes)), **Choice** (one of ≤255 options + distribution), **Score** (2–10 ordered levels, probability-weighted). Returns typed answers + probabilities/confidence, not text.
