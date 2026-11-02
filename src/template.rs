@@ -124,12 +124,16 @@ impl User {
             Self::Sandbox {
                 project, harness, ..
             } => format!("sbxm rm {project} --harness {harness}"),
-            Self::Task { kind, number, .. } => match kind {
+            Self::Task { id, kind, number } => match kind {
                 Kind::Issue => format!("sbxm task rm --issue {number}"),
                 Kind::Pr => format!("sbxm task rm --pr {number}"),
                 Kind::Spec => "sbxm task rm --spec <its spec file>".to_owned(),
-                // No `task rm` flag names a fix task (issue 313); it goes once its PR merges.
-                Kind::Fix => format!("sbxm task rm --merged (once PR #{number} is merged)"),
+                // No `task rm` flag names a fix task (issue 313); it goes once its PR merges,
+                // unless its result was never pushed (review M-1), which only a hand removes.
+                Kind::Fix => format!(
+                    "sbxm task rm --merged (once PR #{number} is merged, if its result was pushed; \
+                     else remove tasks/{id} and .sbxm/tasks/{id} by hand)"
+                ),
             },
         }
     }
