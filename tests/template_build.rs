@@ -53,17 +53,16 @@ fn an_unsupported_harness_is_refused() {
     let env = Env::new();
     env.write_profile("default", OPTED_IN);
 
-    for harness in [Harness::Antigravity, Harness::Gemini] {
-        let message = refused(&env, &options(harness), &sbx_046());
+    let harness = Harness::Antigravity;
+    let message = refused(&env, &options(harness), &sbx_046());
 
-        assert!(
-            message.contains(&format!(
-                "templates are not supported for the {} harness yet; build one for claude, codex or pi",
-                harness.as_str()
-            )),
-            "{message}"
-        );
-    }
+    assert!(
+        message.contains(&format!(
+            "templates are not supported for the {} harness yet; build one for claude, codex or pi",
+            harness.as_str()
+        )),
+        "{message}"
+    );
 }
 
 #[test]
@@ -120,14 +119,14 @@ fn the_cli_runs_template_build_and_reports_a_refusal() {
     let output = Command::cargo_bin("sbxm")
         .unwrap()
         .env("SBXM_CONFIG_DIR", env.config_dir())
-        .args(["template", "build", "default", "--harness", "gemini"])
+        .args(["template", "build", "default", "--harness", "antigravity"])
         .output()
         .unwrap();
 
     assert!(!output.status.success());
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        stderr.contains("templates are not supported for the gemini harness yet"),
+        stderr.contains("templates are not supported for the antigravity harness yet"),
         "{stderr}"
     );
 }

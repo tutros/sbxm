@@ -816,7 +816,7 @@ mod agent_kit_tests {
             cpus: 4,
             memory: "8g".into(),
         };
-        for harness in [Harness::Claude, Harness::Codex, Harness::Gemini] {
+        for harness in [Harness::Claude, Harness::Codex] {
             let toml = hash_input_toml("default", &profile, &resources, harness, false).unwrap();
             assert!(!toml.contains("agent_kit"), "{toml}");
         }

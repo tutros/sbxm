@@ -2022,7 +2022,7 @@ fn a_strict_profile_with_an_unsupported_harness_is_refused_for_the_cloud() {
     let strict = sbxm::config::Profile::load(&f.env.profiles_dir(), "default").unwrap();
     let loose = sbxm::config::Profile::load(&f.env.profiles_dir(), "loose").unwrap();
 
-    for harness in [Harness::Pi, Harness::Antigravity, Harness::Gemini] {
+    for harness in [Harness::Pi, Harness::Antigravity] {
         let message = format!(
             "{:#}",
             sbxm::template::check_strict_cloud("default", &strict, harness).unwrap_err()

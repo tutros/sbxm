@@ -302,3 +302,23 @@ fn task_review_of_an_existing_task_takes_no_location_flag() {
         assert!(stderr.contains("cannot be used with"), "{args:?}: {stderr}");
     }
 }
+
+/// Decision 275 (issue 345): `gemini` is no longer a harness, and clap's refusal lists the ones
+/// that are.
+#[test]
+fn harness_gemini_is_an_invalid_value_naming_the_valid_ones() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let output = sbxm()
+        .env("SBXM_CONFIG_DIR", tmp.path())
+        .args(["new", "demo", "--harness", "gemini"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("invalid value 'gemini'")
+            && stderr.contains("[possible values: claude, codex, pi, antigravity]"),
+        "{stderr}"
+    );
+}

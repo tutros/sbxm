@@ -221,8 +221,7 @@ fn only_claude_codex_and_antigravity_can_be_contestants() {
     ));
     assert!(
         gemini.contains("contestants[1]")
-            && gemini.contains("gemini")
-            && gemini.contains("antigravity"),
+            && gemini.contains("\"gemini\" is not a harness; use claude, codex or antigravity"),
         "{gemini}"
     );
     let pi = load_err(&format!(
@@ -243,11 +242,14 @@ fn only_claude_codex_and_antigravity_can_be_contestants() {
 
 #[test]
 fn only_claude_codex_and_antigravity_can_judge() {
-    for harness in ["gemini", "pi"] {
+    for (harness, needle) in [("gemini", "not a harness"), ("pi", "deferred")] {
         let err = load_err(&valid(&format!(
             "[[eval.rubric]]\nid = \"a\"\nkind = \"pass_fail\"\nweight = 1.0\n\n[eval.judge]\nharness = \"{harness}\"\nmodel = \"m\"\n"
         )));
-        assert!(err.contains("eval.judge") && err.contains(harness), "{err}");
+        assert!(
+            err.contains("eval.judge") && err.contains(harness) && err.contains(needle),
+            "{err}"
+        );
     }
 }
 

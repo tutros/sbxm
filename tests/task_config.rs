@@ -342,7 +342,10 @@ fn the_same_harness_set_explicitly_warns_once_and_loads() {
 #[test]
 fn harness_and_duration_values_are_checked() {
     for (toml, needle) in [
-        ("[worker]\nharness = \"gemini\"\n", "gemini"),
+        (
+            "[worker]\nharness = \"gemini\"\n",
+            "\"gemini\" is not a harness",
+        ),
         ("[worker]\nharness = \"pi\"\n", "pi"),
         ("[reviewer]\nharness = \"vim\"\n", "not a harness"),
         ("[worker]\ntime_limit = \"2 hours\"\n", "isn't a duration"),

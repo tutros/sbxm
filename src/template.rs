@@ -625,7 +625,7 @@ fn cloud_provider_hosts(harness: Harness) -> Option<&'static [&'static str]> {
     match harness {
         Harness::Claude => Some(&CLAUDE_PROVIDER_HOSTS),
         Harness::Codex => Some(&CODEX_PROVIDER_HOSTS),
-        Harness::Gemini | Harness::Pi | Harness::Antigravity => None,
+        Harness::Pi | Harness::Antigravity => None,
     }
 }
 
