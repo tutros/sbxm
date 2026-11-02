@@ -3462,6 +3462,16 @@ pub(super) fn start_fix_round(
         .record
         .advance(Stage::Fixing, now(), Process::current(env.probe))?;
     record::write(&prepared.meta, &prepared.record)?;
+    // The round's input is kept in the task's folder too, before anything can fail: a gate's
+    // output as `gate-failure.md` (a review's is `review.md` already) and the prompt, so `task
+    // resume` can run this round again with it, a round whose sandbox could not be made included.
+    let gate_copy = prepared.meta.join("gate-failure.md");
+    if input.extra_name == "gate-failure.md" {
+        fs::write(&gate_copy, &input.extra_text)?;
+    } else {
+        let _ = fs::remove_file(&gate_copy);
+    }
+    fs::write(prepared.meta.join("fix-prompt.md"), &input.prompt)?;
     // A fix round runs in the task's worker sandbox, made again when it is gone: a cloud one as
     // P5 (d) makes it, a local one as `task resume` does (issue 359), since stage 4 of
     // `sdlc-issue-flow` lets it be removed once the worker's commits are saved.
@@ -3485,16 +3495,7 @@ pub(super) fn start_fix_round(
         return Err(e);
     }
 
-    // The round's input is kept in the task's folder too: a gate's output as `gate-failure.md`
-    // (a review's is `review.md` already), so `task resume` can run the round again with it.
-    let gate_copy = prepared.meta.join("gate-failure.md");
-    if input.extra_name == "gate-failure.md" {
-        fs::write(&gate_copy, &input.extra_text)?;
-    } else {
-        let _ = fs::remove_file(&gate_copy);
-    }
     input.place(env.backend, prepared)?;
-    fs::write(prepared.meta.join("fix-prompt.md"), &input.prompt)?;
     fix(env, prepared)
 }
 
