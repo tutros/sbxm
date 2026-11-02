@@ -341,6 +341,24 @@ pub enum TaskCommand {
         #[arg(long)]
         ignore_disk: bool,
     },
+    /// Fix the must-fix findings of an open PR's latest sbxm review (by you, covering its head) in
+    /// a sandbox, then gates and an in-task review; the result is pushed onto the PR's own branch
+    /// as a fast-forward (never a force) and the review posted as the new head's.
+    Fix {
+        /// The open pull request, from a branch of this repo.
+        #[arg(long, value_name = "N")]
+        pr: u32,
+        /// The GitHub repo, owner/name (default: this checkout's origin).
+        #[arg(long)]
+        repo: Option<String>,
+        /// The task's base branch (default: the repo's default branch).
+        #[arg(long)]
+        base: Option<String>,
+        /// Create the sandboxes even when the drive of sbx's sandbox state has less than
+        /// min_free_disk free.
+        #[arg(long)]
+        ignore_disk: bool,
+    },
     /// Continue a task from its recorded stage, keeping its clone and commits: a failed or
     /// interrupted preparation, worker, review or fix round runs again, and the task goes on to
     /// ready like `task review`. Refused while the sbxm process that recorded it is still running.
