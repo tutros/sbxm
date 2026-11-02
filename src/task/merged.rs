@@ -233,12 +233,35 @@ fn check_spec(
     if task.commits_ahead(&repo_git)? == 0 {
         return Ok(());
     }
-    repo::fetch_base(&repo_git, &task.base).with_context(|| {
-        format!(
+    if let Err(fetch) = repo::fetch_base(&repo_git, &task.base) {
+        let context = format!(
             "task {}: cannot check whether its branch is merged into {}",
             task.id, task.base
-        )
-    })?;
+        );
+        // Issue 319: a base GitHub deleted (a merged PR's head branch, decision 266) leaves this
+        // one task alone instead of stopping the scan. "Gone" is `ls-remote` finding no such
+        // branch, asked only after the fetch failed, never read from the fetch's error text; a
+        // base still there, or an `ls-remote` that fails too, stops the scan as before.
+        return match repo::remote_branch_head(&repo_git, &task.base) {
+            Ok(None) => {
+                out.left_alone.push(LeftAlone {
+                    id: task.id.clone(),
+                    reason: format!(
+                        "its base branch {} is gone on origin, so whether it is merged can't be \
+                         checked (a deleted branch isn't proof its work landed); remove it with \
+                         `sbxm task rm --spec` naming its file if you're sure it's done",
+                        task.base
+                    ),
+                });
+                Ok(())
+            }
+            Ok(Some(_)) => Err(fetch.context(context)),
+            Err(ls_remote) => Err(fetch.context(format!(
+                "{context}; nor can it tell whether {} is still on origin: {ls_remote:#}",
+                task.base
+            ))),
+        };
+    }
     let tip = repo::branch_tip(&repo_git, &task.branch)?;
     if !repo::is_ancestor_of_remote_base(&repo_git, &tip, &task.base)? {
         out.left_alone.push(LeftAlone {

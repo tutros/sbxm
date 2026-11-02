@@ -764,3 +764,135 @@ fn a_merged_spec_task_whose_tip_no_checkout_ref_points_at_is_left_alone() {
         found.left_alone[0].reason
     );
 }
+
+/// Issue 319: points `id`'s record at a base branch `base` that its `repo.git` has (at `main`'s
+/// commit, as `--base <pr-branch>` would have cloned it) but that `origin` never had or has
+/// since deleted, as GitHub does to a merged PR's head branch.
+fn rebase_record_onto(f: &Fixture, id: &str, base: &str) -> std::path::PathBuf {
+    let meta = record::task_dir(&f.env.base_dir(), id);
+    let path = meta.join("task.json");
+    let mut json: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    json["base"] = serde_json::Value::String(base.to_owned());
+    fs::write(&path, serde_json::to_string_pretty(&json).unwrap()).unwrap();
+    let repo_git = meta.join("repo.git");
+    common::git(
+        &repo_git,
+        &["--git-dir", ".", "branch", base, "refs/heads/main"],
+    );
+    repo_git
+}
+
+#[test]
+fn a_spec_task_whose_base_is_gone_on_origin_is_left_alone_with_its_removal_command() {
+    let f = fixture();
+    let (_spec, id) = ready_spec_task(&f);
+    rebase_record_onto(&f, &id, "m4-plan");
+
+    let found = plan(
+        &f.env.base_dir(),
+        &repo_root(&f),
+        &FakeGitHub::default(),
+        &Probe,
+    )
+    .unwrap();
+
+    assert!(found.candidates.is_empty(), "{found:?}");
+    assert_eq!(found.left_alone.len(), 1, "{found:?}");
+    assert_eq!(found.left_alone[0].id, id);
+    let reason = &found.left_alone[0].reason;
+    assert!(reason.contains("m4-plan"), "{reason}");
+    assert!(reason.contains("gone on origin"), "{reason}");
+    assert!(reason.contains("sbxm task rm --spec"), "{reason}");
+    let listing = found.listing();
+    assert!(
+        listing.contains(&format!("left alone, task {id}: ")) && listing.contains("gone on origin"),
+        "{listing}"
+    );
+}
+
+#[test]
+fn a_gone_base_does_not_stop_the_scan_for_a_merged_task_next_to_it() {
+    let f = fixture();
+    let url = finished(&f);
+    let number = pr_number(&url);
+    let (_spec, id) = ready_spec_task(&f);
+    rebase_record_onto(&f, &id, "m4-plan");
+    let github = FakeGitHub::default().with_pr(PrInfo {
+        number,
+        head_ref: "issue-41".into(),
+        head_oid: "0".repeat(40),
+        is_cross_repository: false,
+        state: PrState::Merged,
+        title: "Fix 41".into(),
+        body: String::new(),
+        closing_issues: vec![41],
+    });
+
+    let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
+
+    assert_eq!(found.candidates.len(), 1, "{found:?}");
+    assert_eq!(found.candidates[0].id, "issue-41");
+    assert_eq!(found.left_alone.len(), 1, "{found:?}");
+    assert_eq!(found.left_alone[0].id, id);
+    assert!(
+        found.left_alone[0].reason.contains("gone on origin"),
+        "{}",
+        found.left_alone[0].reason
+    );
+}
+
+#[test]
+fn a_fetch_failing_while_the_base_is_still_on_origin_stops_the_scan() {
+    let f = fixture();
+    let (_spec, id) = ready_spec_task(&f);
+    let repo_git = record::task_dir(&f.env.base_dir(), &id).join("repo.git");
+    // A stale lock on the remote-tracking ref: the fetch can't update it, but `origin` still has
+    // `main`, so `ls-remote` finds it.
+    fs::create_dir_all(repo_git.join("refs/remotes/origin")).unwrap();
+    fs::write(repo_git.join("refs/remotes/origin/main.lock"), "").unwrap();
+
+    let err = plan(
+        &f.env.base_dir(),
+        &repo_root(&f),
+        &FakeGitHub::default(),
+        &Probe,
+    )
+    .unwrap_err();
+
+    let text = format!("{err:#}");
+    assert!(text.contains("cannot fetch main from origin"), "{text}");
+    assert!(text.contains(&id), "{text}");
+}
+
+#[test]
+fn a_failing_ls_remote_after_a_failed_fetch_stops_the_scan() {
+    let f = fixture();
+    let (_spec, id) = ready_spec_task(&f);
+    let repo_git = rebase_record_onto(&f, &id, "m4-plan");
+    let nowhere = f.env.tmp.path().join("no-such-origin");
+    common::git(
+        &repo_git,
+        &[
+            "--git-dir",
+            ".",
+            "remote",
+            "set-url",
+            "origin",
+            nowhere.to_str().unwrap(),
+        ],
+    );
+
+    let err = plan(
+        &f.env.base_dir(),
+        &repo_root(&f),
+        &FakeGitHub::default(),
+        &Probe,
+    )
+    .unwrap_err();
+
+    let text = format!("{err:#}");
+    assert!(text.contains(&id), "{text}");
+    assert!(text.contains("cannot fetch m4-plan from origin"), "{text}");
+    assert!(text.contains("still on origin"), "{text}");
+}
