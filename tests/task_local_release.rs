@@ -494,3 +494,34 @@ fn task_resume_on_a_task_whose_sandbox_was_removed_makes_it_again() {
         lives(&f)
     );
 }
+
+#[test]
+fn task_resume_of_a_failed_review_whose_sandbox_was_removed_does_not_make_it_again() {
+    let f = config(1);
+    let backend = gates(backend(&f, &[CLEAN]), &[]);
+    start(&f, &backend);
+    // The review failed after its gates passed: it runs again, and needs no worker sandbox.
+    let mut task = saved(&f);
+    task.stage = Stage::Reviewing;
+    task.status = Status::Failed;
+    record::write(&record::task_dir(&f.env.base_dir(), "issue-41"), &task).unwrap();
+    let github = FakeGitHub::default();
+    let source = source(&f);
+    let mut prepared = Prepared::open(&f.env.base_dir(), "issue-41").unwrap();
+    let ctx = ctx(&f, &source, &backend, &github);
+    let env = pipeline::TaskEnv {
+        probe: &Gone,
+        ..ctx.env()
+    };
+
+    let resumed = sbxm::task::resume::resume(&env, &mut prepared, None).unwrap();
+
+    assert!(!resumed.sandbox_remade);
+    assert_eq!(
+        all(&backend, &format!("create {WORKER}")).len(),
+        1,
+        "{:?}",
+        backend.log()
+    );
+    assert_eq!(saved(&f).stage, Stage::Ready);
+}
