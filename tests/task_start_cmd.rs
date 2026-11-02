@@ -425,6 +425,7 @@ fn pr_in_state(number: u32, state: PrState) -> PrInfo {
         head_ref: format!("issue-{number}"),
         head_oid: "0000000000000000000000000000000000000000".into(),
         is_cross_repository: false,
+        head_repo: String::new(),
         state,
         title: format!("PR {number}"),
         body: String::new(),

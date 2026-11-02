@@ -41,10 +41,21 @@ pub struct PrInfo {
     /// The commit the PR's head branch is at (`headRefOid`).
     pub head_oid: String,
     pub is_cross_repository: bool,
+    /// `owner/name` of the repository the head branch lives in (`headRepositoryOwner` and
+    /// `headRepository`); empty when `gh` didn't say.
+    pub head_repo: String,
     pub state: PrState,
     pub title: String,
     pub body: String,
     pub closing_issues: Vec<u32>,
+}
+
+/// A comment on a pull request's conversation, as `gh pr view --json comments` lists it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrComment {
+    /// The author's login.
+    pub author: String,
+    pub body: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -74,6 +85,8 @@ pub trait GitHubBackend: Send + Sync {
     /// Returns the new PR's URL.
     fn pr_create(&self, repo: &str, request: &PrRequest) -> Result<String>;
     fn pr_comment(&self, repo: &str, number: u32, body: &str) -> Result<()>;
+    /// Every comment on PR `number`'s conversation, oldest first.
+    fn pr_comments(&self, repo: &str, number: u32) -> Result<Vec<PrComment>>;
     /// Returns the new issue's number.
     fn issue_create(&self, repo: &str, request: &IssueRequest) -> Result<u32>;
     fn labels(&self, repo: &str) -> Result<Vec<String>>;

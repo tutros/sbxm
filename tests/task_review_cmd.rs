@@ -457,6 +457,7 @@ fn pr_info() -> PrInfo {
         head_ref: "feature-x".into(),
         head_oid: "0000000000000000000000000000000000000000".into(),
         is_cross_repository: false,
+        head_repo: String::new(),
         state: PrState::Open,
         title: "Add the x feature".into(),
         body: "Adds x.\n\nFixes #4".into(),

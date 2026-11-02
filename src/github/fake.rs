@@ -4,7 +4,7 @@ use std::sync::Mutex;
 
 use anyhow::{Result, anyhow};
 
-use super::{GitHubBackend, Issue, IssueRequest, IssueText, PrInfo, PrRequest};
+use super::{GitHubBackend, Issue, IssueRequest, IssueText, PrComment, PrInfo, PrRequest};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GhCall {
@@ -15,6 +15,7 @@ pub enum GhCall {
     Pr(String, u32),
     PrCreate(String, PrRequest),
     PrComment(String, u32, String),
+    PrComments(String, u32),
     IssueCreate(String, IssueRequest),
     Labels(String),
     IssuesAll(String, u32),
@@ -30,6 +31,7 @@ pub struct FakeGitHub {
     open_issues: Mutex<Vec<Issue>>,
     issue_texts: Vec<IssueText>,
     prs: Vec<PrInfo>,
+    pr_comments: Vec<(u32, Vec<PrComment>)>,
     labels: Vec<String>,
     /// Every issue in any state: the scripted ones, then those created through the fake.
     all_issues: Mutex<Vec<Issue>>,
@@ -77,6 +79,12 @@ impl FakeGitHub {
 
     pub fn with_pr(mut self, pr: PrInfo) -> Self {
         self.prs.push(pr);
+        self
+    }
+
+    /// What `pr_comments` returns for PR `number` (no comments for a PR not scripted).
+    pub fn with_pr_comments(mut self, number: u32, comments: Vec<PrComment>) -> Self {
+        self.pr_comments.push((number, comments));
         self
     }
 
@@ -185,6 +193,16 @@ impl GitHubBackend for FakeGitHub {
             Some(message) => Err(anyhow!("{message}")),
             None => Ok(()),
         }
+    }
+
+    fn pr_comments(&self, repo: &str, number: u32) -> Result<Vec<PrComment>> {
+        self.record(GhCall::PrComments(repo.to_owned(), number))?;
+        Ok(self
+            .pr_comments
+            .iter()
+            .find(|(n, _)| *n == number)
+            .map(|(_, comments)| comments.clone())
+            .unwrap_or_default())
     }
 
     fn issue_create(&self, repo: &str, request: &IssueRequest) -> Result<u32> {
