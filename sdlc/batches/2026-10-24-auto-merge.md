@@ -20,3 +20,10 @@ who decides.
 | 6 | #348 (issue 337, `sbxm-dev` waits for the image's `apt-get`) | low | 4308a73 | 2026-10-31 16:24Z | 2026-10-31 16:39Z | 14m56s | none so far |
 | 7 | #354 (the `sdlc-issue-flow` skill, decisions 277-279) | low | cd23aed | 2026-10-31 17:25Z | 2026-10-31 18:01Z | 36m00s | none so far |
 | 8 | #356 (issue 353, a recovered run-log write keeps its header) | low | 4dcec3c | 2026-10-31 21:28Z | 2026-10-31 21:49Z | 21m39s | none so far |
+| 9 | #365 (issue 364, AGENTS.md 14b status line) | low | 098b6ac | 2026-11-02 02:51Z | 2026-11-02 03:13Z | 22m01s | none so far |
+| 10 | #367 (issue 359, a local fix round rebuilds a gone worker sandbox) | low | c97b251 | 2026-11-02 03:26Z | 2026-11-02 03:47Z | 20m57s | none so far |
+
+## Result (2026-11-02)
+
+10 of 10 PRs auto-merged with no break found. Median open-to-merged time 21m42s (range 14m15s to 36m00s), against
+the baseline's 29m12s. The user kept auto-merge for low-risk PRs (decision 280); this log ends here.
