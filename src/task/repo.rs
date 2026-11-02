@@ -356,6 +356,17 @@ pub fn branch_tip(repo_git: &Path, branch: &str) -> Result<String> {
     Ok(out.trim().to_owned())
 }
 
+/// `rev` resolved to a full commit id in `repo_git`.
+pub fn resolve_commit(repo_git: &Path, rev: &str) -> Result<String> {
+    let out = git::run(
+        repo_git,
+        Some(repo_git),
+        None,
+        &["rev-parse", "--verify", &format!("{rev}^{{commit}}")],
+    )?;
+    Ok(out.trim().to_owned())
+}
+
 /// Pushes `branch` (and only it) from `repo_git` to GitHub, never forcing.
 pub fn push(repo_git: &Path, branch: &str) -> Result<()> {
     check_ref("branch", branch)?;

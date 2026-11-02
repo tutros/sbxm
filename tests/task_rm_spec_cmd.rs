@@ -180,3 +180,53 @@ fn no_task_for_the_file_says_so() {
 
     assert!(format!("{:#}", result.unwrap_err()).contains("no task"));
 }
+
+/// A clone of `f.origin`, standing in for the user's checkout.
+fn checkout(f: &Fixture) -> PathBuf {
+    let checkout = f.env.tmp.path().join("checkout");
+    common::git(
+        f.env.tmp.path(),
+        &[
+            "clone",
+            "-q",
+            f.origin.to_str().unwrap(),
+            checkout.to_str().unwrap(),
+        ],
+    );
+    checkout
+}
+
+/// Issue 324 (gap G63): a fetch that failed partway left the tip commit object, and a ref to it,
+/// but not its tree.
+#[test]
+fn a_tip_commit_without_its_tree_is_refused() {
+    let f = fixture();
+    let (spec, id) = kept_spec_task(&f);
+    let checkout = checkout(&f);
+    common::plant_tip_commit_only(&task_dir(&f, &id).join("repo.git"), &checkout, &id);
+
+    let (result, _, asked) = rm(&f, &spec, false, &checkout);
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(message.contains("git fetch"), "{message}");
+    assert!(message.contains(&format!("{id}:{id}")), "{message}");
+    assert!(task_dir(&f, &id).join("repo.git").is_dir());
+    assert_eq!(asked, 0, "refused before the question");
+}
+
+/// Issue 324: the whole history is in the checkout, but no ref there points at the tip, so the
+/// next `git gc` may drop it.
+#[test]
+fn a_tip_no_ref_points_at_is_refused() {
+    let f = fixture();
+    let (spec, id) = kept_spec_task(&f);
+    let checkout = checkout(&f);
+    common::fetch_without_ref(&task_dir(&f, &id).join("repo.git"), &checkout, &id);
+
+    let (result, _, asked) = rm(&f, &spec, false, &checkout);
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(message.contains(&format!("{id}:{id}")), "{message}");
+    assert!(task_dir(&f, &id).join("repo.git").is_dir());
+    assert_eq!(asked, 0, "refused before the question");
+}

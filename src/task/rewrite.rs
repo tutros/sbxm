@@ -23,7 +23,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-use super::repo::{agent_ref, check_ref, no_hooks_config};
+use super::repo::{agent_ref, check_ref, no_hooks_config, resolve_commit};
 use super::review::defang;
 use crate::git;
 
@@ -75,14 +75,14 @@ fn rebuilt_marker(branch: &str) -> String {
 /// before.
 pub fn rebuild(repo_git: &Path, start: &str, branch: &str) -> Result<()> {
     check_ref("branch", branch)?;
-    let start_id = resolve(repo_git, start).with_context(|| {
+    let start_id = resolve_commit(repo_git, start).with_context(|| {
         format!("cannot resolve {start} in the task repo; the task record may be damaged")
     })?;
     let agent = agent_ref(branch);
-    let agent_tip = resolve(repo_git, &agent).with_context(|| {
+    let agent_tip = resolve_commit(repo_git, &agent).with_context(|| {
         format!("{agent} is missing; collect the agent's commits before rewriting them")
     })?;
-    let old_tip = resolve(repo_git, &format!("refs/heads/{branch}")).with_context(|| {
+    let old_tip = resolve_commit(repo_git, &format!("refs/heads/{branch}")).with_context(|| {
         format!("{branch} isn't in the task repo; the task record may be damaged")
     })?;
     let marker = rebuilt_marker(branch);
@@ -135,17 +135,6 @@ pub fn rebuild(repo_git: &Path, start: &str, branch: &str) -> Result<()> {
         last_rebuilt.as_deref(),
         &agent_tip,
     )
-}
-
-/// `rev` resolved to a full commit id in `repo_git`.
-fn resolve(repo_git: &Path, rev: &str) -> Result<String> {
-    let out = git::run(
-        repo_git,
-        Some(repo_git),
-        None,
-        &["rev-parse", "--verify", &format!("{rev}^{{commit}}")],
-    )?;
-    Ok(out.trim().to_owned())
 }
 
 /// Whether commit `ancestor` is `tip` or one of its ancestors in `repo_git`.

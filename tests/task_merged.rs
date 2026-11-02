@@ -700,3 +700,67 @@ fn a_record_whose_id_is_not_its_folder_is_left_alone_and_selects_nothing() {
         found.left_alone[0].reason
     );
 }
+
+/// Issue 324 (gap G63): a merged spec task whose fetch into the checkout failed partway, leaving
+/// the tip commit object and a ref to it but not its tree, is left alone, not removed.
+#[test]
+fn a_merged_spec_task_whose_tip_tree_is_missing_from_the_checkout_is_left_alone() {
+    let f = fixture();
+    let (_spec, id) = kept_spec_task(&f);
+    let checkout = f.env.tmp.path().join("checkout");
+    common::git(
+        f.env.tmp.path(),
+        &[
+            "clone",
+            "-q",
+            f.origin.to_str().unwrap(),
+            checkout.to_str().unwrap(),
+        ],
+    );
+    let repo_git = record::task_dir(&f.env.base_dir(), &id).join("repo.git");
+    common::plant_tip_commit_only(&repo_git, &checkout, &id);
+    merge_into_origin_main(&f, &id);
+
+    let found = plan(&f.env.base_dir(), &checkout, &FakeGitHub::default(), &Probe).unwrap();
+
+    assert!(found.candidates.is_empty(), "{found:?}");
+    assert_eq!(found.left_alone.len(), 1, "{found:?}");
+    assert_eq!(found.left_alone[0].id, id);
+    assert!(
+        found.left_alone[0].reason.contains("git fetch"),
+        "{}",
+        found.left_alone[0].reason
+    );
+}
+
+/// Issue 324: a merged spec task whose history is complete in the checkout but that no ref there
+/// points at is left alone too.
+#[test]
+fn a_merged_spec_task_whose_tip_no_checkout_ref_points_at_is_left_alone() {
+    let f = fixture();
+    let (_spec, id) = kept_spec_task(&f);
+    let checkout = f.env.tmp.path().join("checkout");
+    common::git(
+        f.env.tmp.path(),
+        &[
+            "clone",
+            "-q",
+            f.origin.to_str().unwrap(),
+            checkout.to_str().unwrap(),
+        ],
+    );
+    let repo_git = record::task_dir(&f.env.base_dir(), &id).join("repo.git");
+    common::fetch_without_ref(&repo_git, &checkout, &id);
+    merge_into_origin_main(&f, &id);
+
+    let found = plan(&f.env.base_dir(), &checkout, &FakeGitHub::default(), &Probe).unwrap();
+
+    assert!(found.candidates.is_empty(), "{found:?}");
+    assert_eq!(found.left_alone.len(), 1, "{found:?}");
+    assert_eq!(found.left_alone[0].id, id);
+    assert!(
+        found.left_alone[0].reason.contains("git fetch"),
+        "{}",
+        found.left_alone[0].reason
+    );
+}
