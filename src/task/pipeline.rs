@@ -2947,22 +2947,13 @@ fn pass_gates(
     report: &mut ReviewReport,
     phase: &str,
 ) -> Result<bool> {
-    let passed = pass_gates_held(env, prepared, report, phase);
-    // The gates (and any fix rounds they fed) are over: a local worker sandbox goes now, before
-    // a reviewer is created or the task stops (issue 341).
-    release_local_worker_into(env, prepared);
-    passed
-}
-
-/// [`pass_gates`] while the worker's sandbox is held.
-fn pass_gates_held(
-    env: &TaskEnv,
-    prepared: &mut Prepared,
-    report: &mut ReviewReport,
-    phase: &str,
-) -> Result<bool> {
     loop {
-        let gated = run_gates(env, prepared, phase, Tiers::ALL)?;
+        let gated = run_gates(env, prepared, phase, Tiers::ALL);
+        // Each gate run ends the phase of the worker or fix round before it, whatever its
+        // outcome: a local worker sandbox goes now, before a reviewer is created, the task stops
+        // or the next fix round makes it again (issue 341).
+        release_local_worker_into(env, prepared);
+        let gated = gated?;
         let Some(failed) = gated.failed.clone() else {
             return Ok(false);
         };

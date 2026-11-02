@@ -216,11 +216,13 @@ fn a_worker_whose_gates_fail_has_its_sandbox_removed_and_made_again_for_the_fix_
 
     let report = reviewed.unwrap();
     assert!(report.fix_ran);
+    // Made again for the gates before the review, removed when they fail, and made again for
+    // the fix round.
     let created = all(&backend, &format!("create {WORKER}"));
-    assert_eq!(created.len(), 2, "{:?}", backend.log());
+    assert_eq!(created.len(), 3, "{:?}", backend.log());
     assert!(first_rm < created[1]);
     let fix = execs(&backend, "fix-prompt.md");
-    assert!(created[1] < fix[0], "{:?}", backend.log());
+    assert!(created[2] < fix[0], "{:?}", backend.log());
     assert!(
         prepared
             .events
@@ -230,9 +232,10 @@ fn a_worker_whose_gates_fail_has_its_sandbox_removed_and_made_again_for_the_fix_
     );
     // Removed again after the fix round's gates, before the reviewer.
     let removed = all(&backend, &format!("rm {WORKER}"));
-    assert_eq!(removed.len(), 2, "{:?}", backend.log());
-    assert!(execs(&backend, "cargo test").last().unwrap() < &removed[1]);
-    assert!(removed[1] < all(&backend, &format!("create {REVIEWER}"))[0]);
+    assert_eq!(removed.len(), 3, "{:?}", backend.log());
+    assert!(removed[1] < created[2]);
+    assert!(execs(&backend, "cargo test").last().unwrap() < &removed[2]);
+    assert!(removed[2] < all(&backend, &format!("create {REVIEWER}"))[0]);
     assert!(
         lives(&f).iter().all(|(_, removed)| *removed),
         "{:?}",
@@ -524,4 +527,50 @@ fn task_resume_of_a_failed_review_whose_sandbox_was_removed_does_not_make_it_aga
         backend.log()
     );
     assert_eq!(saved(&f).stage, Stage::Ready);
+}
+
+// ---- Review findings (issue 341, review round 1) ----
+
+/// M-3: a fix round's gates that fail end that round's phase: the sandbox goes before the next
+/// fix round makes it again, as it does before a review.
+#[test]
+fn each_fix_round_fed_by_failing_gates_removes_its_sandbox_before_the_next_one() {
+    let f = config(2);
+    // Red after the worker, before the review and after fix round 1; green after fix round 2.
+    let backend = gates(backend(&f, &[CLEAN]), &[true, true, true]);
+    start(&f, &backend);
+
+    let (_, reviewed) = review(&f, &backend);
+
+    assert!(reviewed.unwrap().fix_ran);
+    let created = all(&backend, &format!("create {WORKER}"));
+    let removed = all(&backend, &format!("rm {WORKER}"));
+    let fixes = execs(&backend, "fix-prompt.md");
+    assert_eq!(fixes.len(), 2, "{:?}", backend.log());
+    let gate_after_fix_1 = *execs(&backend, "cargo test")
+        .iter()
+        .find(|&&g| fixes[0] < g)
+        .unwrap();
+    let rm = removed
+        .iter()
+        .find(|&&r| gate_after_fix_1 < r)
+        .copied()
+        .unwrap_or(usize::MAX);
+    let made = created
+        .iter()
+        .find(|&&c| rm < c)
+        .copied()
+        .unwrap_or(usize::MAX);
+    assert!(
+        rm < made && made < fixes[1],
+        "gates {gate_after_fix_1}, rm {rm}, create {made}, fix {}: {:?}",
+        fixes[1],
+        backend.log()
+    );
+    assert!(
+        lives(&f).iter().all(|(_, removed)| *removed),
+        "{:?}",
+        lives(&f)
+    );
+    assert!(removed.last().unwrap() < &all(&backend, &format!("create {REVIEWER}"))[0]);
 }
