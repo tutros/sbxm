@@ -2,7 +2,7 @@
 
 `sbxm` creates and manages per-project Docker Sandboxes (`sbx`) from one
 shared, versioned config. Each project gets a folder on your machine, and each coding agent (Claude Code, Codex,
-Gemini CLI, Pi or Antigravity) gets its own sandbox for it, built with your network allowlist, environment, secrets, instructions
+Pi or Antigravity) gets its own sandbox for it, built with your network allowlist, environment, secrets, instructions
 and setup steps.
 
 sbxm enforces nothing itself: `sbx` does the isolation, the deny-by-default egress proxy and secret injection. sbxm
@@ -155,12 +155,16 @@ run in the cloud skips this check, since they don't use that drive (`--ignore-di
 |---|---|---|---|
 | `claude` (default) | Claude Code | `~/.claude/CLAUDE.md` | Supports `harness.claude.home_files` and `harness.claude.managed_settings`. |
 | `codex` | Codex | `~/.codex/AGENTS.md` | |
-| `gemini` | Gemini CLI | `~/.gemini/GEMINI.md` | `sbx`'s skills store doesn't serve Gemini: sbxm warns unless `skills.store = "off"`. |
 | `antigravity` | Antigravity (`agy`) | `~/.gemini/AGENTS.md` | Uses the Antigravity kit from Docker Hub, pinned to a fixed tag. With a `google` secret stored (`sbx secret set -g google`), `agy` uses it as a Gemini API key and needs no sign-in (decision 137). Before every headless run (`sbxm run`, `sbxm task`), sbxm removes `sbx`'s `mcp-gateway` entry from `~/.gemini/config/mcp_config.json`, since `agy` waits on that server and hangs until the timeout; other MCP servers stay (issue 287). A headless run with no model set (an `sbxm task` worker or reviewer without `--worker-model`/`--reviewer-model` or a `model` in `sbxm-task.toml`, or an `sbxm run` contestant or judge whose run-config entry leaves out `model`) passes `--model gemini-3.8-flash-medium`, so `agy` never picks its own; `task.json`, the saved review, `run.json`, `result.json`, `judge.json`, `evals.json` and the output of `sbxm task`, `sbxm run` and `run show` name the model that ran, for example `antigravity (gemini-3.8-flash-medium)` (issue 314). Claude and Codex have no default: their run-config entries still need `model`. Interactive `new`/`open` are unchanged: switch there with `/model`. `sbx`'s skills store isn't known to serve it: sbxm warns unless `skills.store = "off"`. |
 | `pi` | Pi | `~/.pi/agent/AGENTS.md` | Uses the Pi kit from Docker Hub, pinned to a fixed tag. See below. `sbx`'s skills store doesn't serve Pi either: sbxm warns unless `skills.store = "off"`. |
 
 Settings a harness can't use are never dropped silently: `sbxm new`/`open` print a `warning:` line for each, e.g.
 `harness.claude.managed_settings` on a Codex sandbox.
+
+**No `gemini` harness:** Gemini CLI is deprecated upstream, and `sbx`'s `gemini` agent can't reach Google from a
+sandbox here, so sbxm no longer offers it (decision 275); use `antigravity` for Google models. `--harness gemini` is
+refused as an invalid value. A `gemini` sandbox left from an older sbxm still shows in `sbxm list` (config
+`unknown`); remove it with `sbxm rm <project> --purge`, or `sbx rm sbxm-<project>-gemini` for just that sandbox.
 
 **Pi, first time:** the Pi kit asks `sbx` for your `anthropic` credential, and `sbx` wants your approval once. Run
 your first `sbxm new … --harness pi` in a terminal and approve when asked (`This kit wants to use these credentials:
@@ -303,7 +307,7 @@ allow = []         # required: the hosts a sandbox created from the template may
   `network.allow` or `network.deny` can't use the profile's template (strict: refused; otherwise the warning and the
   install steps).
 - **Harnesses:** `claude`, `codex` and `pi`; a strict profile is refused with `pi`, whose own kit allows
-  `registry.npmjs.org`. With `antigravity` or `gemini`, a strict profile is refused ("templates are not supported for
+  `registry.npmjs.org`. With `antigravity`, a strict profile is refused ("templates are not supported for
   this harness yet") and a non-strict one warns and uses the install steps. A strict `codex` sandbox is created with `--deny-network` for each host the built-in `codex`
   kit adds (GitHub, npm, Ubuntu, Docker) that isn't in `[template].allow`, and is removed again if `sbx` reports the
   kit allowing anything else, or if sbxm can't read its network rules. A `*.<domain>` entry in `[template].allow`
