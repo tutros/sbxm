@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, bail};
 
 use super::finish::{self, RemovalPlan};
-use super::record::{self, Kind, ProcessProbe, Record};
+use super::record::{self, Kind, ProcessProbe, Record, Stage};
 use super::repo;
 use super::review;
 use crate::backend::SandboxBackend;
@@ -188,6 +188,68 @@ fn check_pr_review(
     out: &mut MergedPlan,
 ) -> Result<()> {
     check_pr_number(base_dir, task, task.number, github, probe, out)
+}
+
+/// A fix task (issue 313): merged once its PR is, but only when its result reached the PR's
+/// branch (`finished`) or it has none. A result whose push was refused, or never ran, stays in
+/// its `repo.git` alone, and the PR merging with some other head says nothing about it (review
+/// M-1): left alone, naming where it is kept.
+fn check_fix(
+    base_dir: &Path,
+    task: &Record,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    out: &mut MergedPlan,
+) -> Result<()> {
+    let number = task.number;
+    let info = github.pr(&task.repo, number).with_context(|| {
+        format!(
+            "task {}: cannot read PR #{number} of {}",
+            task.id, task.repo
+        )
+    })?;
+    if info.state != PrState::Merged {
+        return Ok(());
+    }
+    if task.stage != Stage::Finished {
+        let repo_git = record::task_dir(base_dir, &task.id).join("repo.git");
+        // Checked without following it (decision 159), as for a spec task.
+        if fs::symlink_metadata(&repo_git).is_ok() {
+            let unpushed = finish::check_own_folder(base_dir, &repo_git)
+                .and_then(|()| task.commits_ahead(&repo_git));
+            let kept = match unpushed {
+                Ok(0) => None,
+                Ok(_) => Some(format!(
+                    "its result was never pushed to PR #{number}'s branch, so the PR being merged \
+                     doesn't mean it landed; it is kept in {} as {}; remove {} and {} by hand \
+                     once you don't need it",
+                    repo_git.display(),
+                    task.branch,
+                    base_dir.join("tasks").join(&task.id).display(),
+                    record::task_dir(base_dir, &task.id).display()
+                )),
+                Err(e) => Some(format!(
+                    "whether its result reached PR #{number}'s branch can't be checked: {e:#}"
+                )),
+            };
+            if let Some(reason) = kept {
+                out.left_alone.push(LeftAlone {
+                    id: task.id.clone(),
+                    reason,
+                });
+                return Ok(());
+            }
+        }
+    }
+    add_merged(
+        base_dir,
+        &task.id,
+        format!("PR #{number} is merged"),
+        None,
+        probe,
+        out,
+    );
+    Ok(())
 }
 
 /// A spec task (decision 195 point 1): merged is "the branch's tip is reachable from the base
@@ -390,8 +452,8 @@ pub fn plan_forgetting(
         }
         match task.kind {
             Kind::Issue => check_issue(base_dir, &task, github, probe, &mut out)?,
-            // A fix task's work is its PR's (issue 313): merged once the PR is.
-            Kind::Pr | Kind::Fix => check_pr_review(base_dir, &task, github, probe, &mut out)?,
+            Kind::Pr => check_pr_review(base_dir, &task, github, probe, &mut out)?,
+            Kind::Fix => check_fix(base_dir, &task, github, probe, &mut out)?,
             Kind::Spec => check_spec(base_dir, &task, repo_root, probe, &mut out)?,
         }
     }

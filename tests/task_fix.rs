@@ -16,6 +16,7 @@ use sbxm::backend::{FakeBackend, Location};
 use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::github::{PrComment, PrInfo, PrState};
 use sbxm::task::finish::finish_fix;
+use sbxm::task::merged;
 use sbxm::task::pipeline::{self, Prepared};
 use sbxm::task::pr_fix::{ReviewToFix, review_to_fix};
 use sbxm::task::record::{self, Kind, Stage, Status};
@@ -339,4 +340,70 @@ fn task_finish_refuses_a_fix_task() {
     );
     assert!(message.contains("is a fix task"), "{message}");
     assert_eq!(origin_head(&f), head);
+}
+
+fn merged(pr: &PrInfo) -> PrInfo {
+    PrInfo {
+        state: PrState::Merged,
+        ..pr.clone()
+    }
+}
+
+/// Review M-1: a fix task whose push was refused holds the only copy of its result, so the PR
+/// merging later (with someone else's head) doesn't make it a `task rm --merged` candidate.
+#[test]
+fn an_unpushed_fix_result_is_left_alone_by_task_rm_merged_once_its_pr_merges() {
+    let f = fixture();
+    let (prepared, head) = ready_fix(&f);
+    push_from_elsewhere(&f);
+    finish_fix(
+        &f.env.base_dir(),
+        &prepared.record.id,
+        &FakeGitHub::default(),
+        &Probe,
+    )
+    .unwrap_err();
+    let github = FakeGitHub::default().with_pr(merged(&pr7(&head)));
+
+    let found = merged::plan(&f.env.base_dir(), &f.env.base_dir(), &github, &Probe).unwrap();
+
+    assert!(found.candidates.is_empty(), "{found:?}");
+    let [left] = found.left_alone.as_slice() else {
+        panic!("{found:?}");
+    };
+    assert_eq!(left.id, prepared.record.id);
+    let repo_git = prepared.meta.join("repo.git");
+    assert!(
+        left.reason.contains(&format!(
+            "its result was never pushed to PR #7's branch, so the PR being merged doesn't mean \
+             it landed; it is kept in {} as feature-x",
+            repo_git.display()
+        )),
+        "{}",
+        left.reason
+    );
+    assert!(repo_git.is_dir());
+}
+
+/// A fix task whose result reached the PR's branch goes once the PR is merged.
+#[test]
+fn a_pushed_fix_task_is_a_task_rm_merged_candidate_once_its_pr_merges() {
+    let f = fixture();
+    let (prepared, head) = ready_fix(&f);
+    finish_fix(
+        &f.env.base_dir(),
+        &prepared.record.id,
+        &FakeGitHub::default(),
+        &Probe,
+    )
+    .unwrap();
+    let github = FakeGitHub::default().with_pr(merged(&pr7(&head)));
+
+    let found = merged::plan(&f.env.base_dir(), &f.env.base_dir(), &github, &Probe).unwrap();
+
+    assert!(found.left_alone.is_empty(), "{found:?}");
+    let [candidate] = found.candidates.as_slice() else {
+        panic!("{found:?}");
+    };
+    assert_eq!(candidate.id, prepared.record.id);
 }
