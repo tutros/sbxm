@@ -265,7 +265,7 @@ sandbox's own policy, so it runs after `create` and before any agent, and remove
 4. A low-risk PR (the reviewer's level and the path-rule floor) whose latest review covered its head commit with
    0 must-fix is merged by GitHub's auto-merge, armed with `gh pr merge <N> --auto --merge --match-head-commit <sha>`
    for that reviewed commit; before any later push, disarm it (`gh pr merge <N> --disable-auto`) and review the new
-   head before arming it again (decision 266, an experiment). The user merges a medium- or high-risk PR. Never push
+   head before arming it again (decisions 266, 280). The user merges a medium- or high-risk PR. Never push
    to `main`; every change, docs included, goes through a PR.
 5. `task rm` the finished task, which also gives back the disk its sandbox used.
 

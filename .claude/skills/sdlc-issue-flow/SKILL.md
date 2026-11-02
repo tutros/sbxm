@@ -64,8 +64,8 @@ build sbxm tasks run with (a machine's own wrapper; never a fresh `cargo run`).
 ## 7. Merge
 
 - Low risk (the reviewer's level and the path-rule floor), 0 must-fix, and the review covered the PR's head
-  (`gh pr view N --json headRefOid`): `gh pr merge N --auto --merge --match-head-commit <reviewed sha>` (decision
-  266). Before any later push: `gh pr merge N --disable-auto`, push, review the new head, arm again.
+  (`gh pr view N --json headRefOid`): `gh pr merge N --auto --merge --match-head-commit <reviewed sha>` (decisions
+  266, 280). Before any later push: `gh pr merge N --disable-auto`, push, review the new head, arm again.
 - Medium or high risk: the user merges. While a review runs say **don't merge yet**; when done say **ready to
   merge**, and mark a draft ready yourself (`gh pr ready N`).
 
@@ -74,7 +74,8 @@ build sbxm tasks run with (a machine's own wrapper; never a fresh `cargo run`).
 - `gh pr view N --json state` says `MERGED` before anything is removed ("merged" has come early twice).
 - `<sbxm> task rm --merged --yes`; remove the worktree and local branch (GitHub deletes the remote one). Never
   chain a `task rm` after a fetch of its result: check the fetched branch first.
-- Add the auto-merge log row (`sdlc/batches/2026-10-24-auto-merge.md`) for an auto-merged PR.
+- A break found after an auto-merge (CI red on `main`, a revert, a later must-fix traced to it) pauses auto-merge:
+  tell the user, who decides (decision 280).
 
 ## 9. Follow-ups and handoff (decision 278)
 
