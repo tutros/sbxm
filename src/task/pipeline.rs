@@ -3462,8 +3462,30 @@ pub(super) fn start_fix_round(
         .record
         .advance(Stage::Fixing, now(), Process::current(env.probe))?;
     record::write(&prepared.meta, &prepared.record)?;
-    // A cloud fix round runs in the task's worker sandbox, made again when it is gone (P5 (d)).
-    if let Err(e) = ensure_cloud_worker(env, prepared, SandboxRole::Fix, "the fix round") {
+    // The round's input is kept in the task's folder too, before anything can fail: a gate's
+    // output as `gate-failure.md` (a review's is `review.md` already) and the prompt, so `task
+    // resume` can run this round again with it, a round whose sandbox could not be made included.
+    let gate_copy = prepared.meta.join("gate-failure.md");
+    if input.extra_name == "gate-failure.md" {
+        fs::write(&gate_copy, &input.extra_text)?;
+    } else {
+        let _ = fs::remove_file(&gate_copy);
+    }
+    fs::write(prepared.meta.join("fix-prompt.md"), &input.prompt)?;
+    // A fix round runs in the task's worker sandbox, made again when it is gone: a cloud one as
+    // P5 (d) makes it, a local one as `task resume` does (issue 359), since stage 4 of
+    // `sdlc-issue-flow` lets it be removed once the worker's commits are saved.
+    let ensured = match prepared.record.location {
+        Location::Cloud => ensure_cloud_worker(env, prepared, SandboxRole::Fix, "the fix round"),
+        Location::Local => ensure_worker_sandbox(env, prepared, false),
+    };
+    if prepared.record.location == Location::Local && matches!(ensured, Ok(true)) {
+        prepared.events.push(format!(
+            "{}: the worker's sandbox was gone; made it again",
+            prepared.record.id
+        ));
+    }
+    if let Err(e) = ensured {
         prepared
             .record
             .notes
@@ -3473,16 +3495,7 @@ pub(super) fn start_fix_round(
         return Err(e);
     }
 
-    // The round's input is kept in the task's folder too: a gate's output as `gate-failure.md`
-    // (a review's is `review.md` already), so `task resume` can run the round again with it.
-    let gate_copy = prepared.meta.join("gate-failure.md");
-    if input.extra_name == "gate-failure.md" {
-        fs::write(&gate_copy, &input.extra_text)?;
-    } else {
-        let _ = fs::remove_file(&gate_copy);
-    }
     input.place(env.backend, prepared)?;
-    fs::write(prepared.meta.join("fix-prompt.md"), &input.prompt)?;
     fix(env, prepared)
 }
 
