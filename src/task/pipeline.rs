@@ -3462,8 +3462,20 @@ pub(super) fn start_fix_round(
         .record
         .advance(Stage::Fixing, now(), Process::current(env.probe))?;
     record::write(&prepared.meta, &prepared.record)?;
-    // A cloud fix round runs in the task's worker sandbox, made again when it is gone (P5 (d)).
-    if let Err(e) = ensure_cloud_worker(env, prepared, SandboxRole::Fix, "the fix round") {
+    // A fix round runs in the task's worker sandbox, made again when it is gone: a cloud one as
+    // P5 (d) makes it, a local one as `task resume` does (issue 359), since stage 4 of
+    // `sdlc-issue-flow` lets it be removed once the worker's commits are saved.
+    let ensured = match prepared.record.location {
+        Location::Cloud => ensure_cloud_worker(env, prepared, SandboxRole::Fix, "the fix round"),
+        Location::Local => ensure_worker_sandbox(env, prepared, false),
+    };
+    if prepared.record.location == Location::Local && matches!(ensured, Ok(true)) {
+        prepared.events.push(format!(
+            "{}: the worker's sandbox was gone; made it again",
+            prepared.record.id
+        ));
+    }
+    if let Err(e) = ensured {
         prepared
             .record
             .notes

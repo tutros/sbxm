@@ -186,6 +186,33 @@ fn must_fix_findings_show_the_fix_round_and_the_second_review() {
     assert!(text.contains("issue-41: ready"), "{text}");
 }
 
+/// Issue 359: a fix round whose worker sandbox is gone makes it again and says so, in the words
+/// `task resume` uses; one still there is used without a word.
+#[test]
+fn a_fix_round_whose_worker_sandbox_is_gone_says_it_was_made_again() {
+    let line = "issue-41: the worker's sandbox was gone; made it again";
+    let f = config("codex");
+    worked_task(&f, &backend(&f, &[CLEAN]));
+
+    let gone = go(&f, &options(&f), &backend(&f, &[ONE, CLEAN]));
+
+    gone.result.unwrap();
+    assert!(gone.out.contains(line), "{}", gone.out);
+
+    let f = config("codex");
+    worked_task(&f, &backend(&f, &[CLEAN]));
+    let there = backend(&f, &[ONE, CLEAN]).and_sandboxes(vec![sbxm::backend::SandboxInfo {
+        name: "sbxm-task-issue-41-claude".into(),
+        agent: "claude".into(),
+        status: "running".into(),
+    }]);
+
+    let kept = go(&f, &options(&f), &there);
+
+    kept.result.unwrap();
+    assert!(!kept.out.contains(line), "{}", kept.out);
+}
+
 #[test]
 fn findings_left_after_the_fix_round_are_reported_and_the_command_still_succeeds() {
     let f = config("codex");
