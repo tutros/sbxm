@@ -171,6 +171,44 @@ pub fn git(dir: &Path, args: &[&str]) -> String {
     String::from_utf8_lossy(&out.stdout).trim().to_owned()
 }
 
+/// Copies only `branch`'s tip commit object from `repo_git` into `checkout`, without its tree or
+/// parents, and points `refs/heads/<branch>` at it: what a `git fetch` that failed partway left
+/// behind in issue 324 (gap G63).
+pub fn plant_tip_commit_only(repo_git: &Path, checkout: &Path, branch: &str) {
+    use std::io::Write;
+    let tip = git(repo_git, &["rev-parse", &format!("refs/heads/{branch}")]);
+    let raw = std::process::Command::new("git")
+        .current_dir(repo_git)
+        .args(["cat-file", "commit", &tip])
+        .output()
+        .unwrap();
+    assert!(raw.status.success());
+    let mut child = std::process::Command::new("git")
+        .current_dir(checkout)
+        .args(["hash-object", "-t", "commit", "-w", "--stdin"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child.stdin.take().unwrap().write_all(&raw.stdout).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), tip);
+    git(
+        checkout,
+        &["update-ref", &format!("refs/heads/{branch}"), &tip],
+    );
+}
+
+/// Fetches `branch` from `repo_git` into `checkout` completely, but only into `FETCH_HEAD`: no
+/// ref in the checkout points at its tip.
+pub fn fetch_without_ref(repo_git: &Path, checkout: &Path, branch: &str) {
+    git(
+        checkout,
+        &["fetch", "-q", repo_git.to_str().unwrap(), branch],
+    );
+}
+
 /// A local bare repo standing in for GitHub, with `main` holding one commit (a README).
 pub fn git_origin(root: &Path) -> PathBuf {
     let origin = root.join("origin.git");
