@@ -472,8 +472,8 @@ for a task. Check `sbx ls` for stopped leftovers.
   `just deploy-profiles` (it refuses to write if `config.toml` is invalid), then rebuild the sandbox.
 - **`git` fails with `Permission denied` on Windows (`.git/config`, `.git/objects/…`):** antivirus or the file indexer
   briefly holds a file git just created. It passes by itself, so run the command again.
-- **A worker fails at once with "OAuth session expired and could not be refreshed"** (in its transcript's `result`;
-  `sbxm task` may report it as "claude reported success, 0 commit(s)"): first refresh the stored login (`sbx setup`
+- **A worker fails at once with "OAuth session expired and could not be refreshed"** (`sbxm task` reports it as
+  "claude reported an error: OAuth session expired…", the first 300 characters of its transcript's `result`): first refresh the stored login (`sbx setup`
   for Claude). Then test a plain sandbox: `sbx create --name auth-check claude <empty dir>`, `sbx exec auth-check
   claude -p pong`, `sbx rm auth-check -f`. If the plain one answers and the task's still fails, the profile's
   template has aged: run `sbxm template build <profile> --harness <h>` (about 15 minutes warm), then start the task

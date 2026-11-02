@@ -196,8 +196,7 @@ pub(crate) fn parse_claude(raw: &str) -> HeadlessResult {
                 }
                 usage = claude_usage(&event["usage"], event["total_cost_usd"].as_f64());
                 status = if event["is_error"].as_bool().unwrap_or(false) {
-                    let subtype = event["subtype"].as_str().unwrap_or("error");
-                    RunStatus::Failed(format!("claude reported {subtype}"))
+                    RunStatus::Failed(claude_error(&event))
                 } else {
                     RunStatus::Completed
                 };
@@ -211,6 +210,42 @@ pub(crate) fn parse_claude(raw: &str) -> HeadlessResult {
         transcript: raw.to_owned(),
         usage,
     }
+}
+
+/// The longest `result` text a Claude error message shows, in characters.
+const MAX_ERROR_TEXT_CHARS: usize = 300;
+
+/// The failure message for a `result` event with `is_error: true` (G65, issue 325). The
+/// `result` text says what went wrong; the subtype can still say "success" (an API error ends
+/// that way), so it is named only when it says something else.
+fn claude_error(event: &Value) -> String {
+    let what = match event["subtype"].as_str() {
+        Some(subtype) if subtype != "success" => subtype.to_owned(),
+        _ => "an error".to_owned(),
+    };
+    let text = one_line(event["result"].as_str().unwrap_or(""), MAX_ERROR_TEXT_CHARS);
+    if text.is_empty() {
+        format!("claude reported {what} with no result text")
+    } else {
+        format!("claude reported {what}: {text}")
+    }
+}
+
+/// `text`'s lines, trimmed and joined by single spaces with the empty ones dropped, cut to
+/// `max` characters, the last of them `…` when anything was cut.
+fn one_line(text: &str, max: usize) -> String {
+    let joined = text
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ");
+    if joined.chars().count() <= max {
+        return joined;
+    }
+    let mut cut: String = joined.chars().take(max - 1).collect();
+    cut.push('…');
+    cut
 }
 
 fn claude_usage(usage: &Value, cost_usd: Option<f64>) -> Usage {

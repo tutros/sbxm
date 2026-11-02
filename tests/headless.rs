@@ -10,6 +10,10 @@ use sbxm::headless::{self, HeadlessOpts, RunStatus, Usage};
 const PONG: &str = include_str!("../src/fixtures/claude-stream-json-pong.jsonl");
 /// The same run cut off mid-line, as a `timeout` KILL can leave it.
 const TRUNCATED: &str = include_str!("../src/fixtures/claude-stream-json-truncated.jsonl");
+/// An error result whose subtype still says "success" (G65, issue 325): the shape and the
+/// `is_error`/`subtype`/`terminal_reason`/`result` values of issue 330's worker on 2026-10-30,
+/// scrubbed (ids, path, model and numbers replaced).
+const IS_ERROR: &str = include_str!("../src/fixtures/claude-stream-json-is-error.jsonl");
 /// Real `timeout -v` stderr from `sbx exec` (coreutils in the sandbox).
 const TERM_MARKER: &str = "timeout: sending signal TERM to command 'claude'\n";
 const KILL_MARKER: &str = "timeout: sending signal TERM to command 'claude'\ntimeout: sending signal KILL to command 'claude'\n";
@@ -118,9 +122,107 @@ fn an_error_result_is_failed_with_its_answer_kept() {
     let result = Harness::Claude.parse_headless_output(&error).unwrap();
     assert_eq!(
         result.status,
-        RunStatus::Failed("claude reported error_max_budget_usd".into())
+        RunStatus::Failed("claude reported error_max_budget_usd: PONG".into())
     );
     assert_eq!(result.answer, "PONG");
+}
+
+/// The fixture's result event with its `result` field replaced (`None` drops the field).
+fn is_error_with_result(text: Option<&str>) -> String {
+    let field = "\"result\":\"Credit balance is too low\",";
+    assert!(IS_ERROR.contains(field));
+    let replacement = match text {
+        Some(text) => format!("\"result\":{},", serde_json::to_string(text).unwrap()),
+        None => String::new(),
+    };
+    IS_ERROR.replace(field, &replacement)
+}
+
+fn failure_of(raw: &str) -> String {
+    match Harness::Claude.parse_headless_output(raw).unwrap().status {
+        RunStatus::Failed(why) => why,
+        other => panic!("expected a failure, got {other:?}"),
+    }
+}
+
+#[test]
+fn an_error_result_with_subtype_success_shows_the_result_text_not_success() {
+    let result = Harness::Claude.parse_headless_output(IS_ERROR).unwrap();
+    assert_eq!(
+        result.status,
+        RunStatus::Failed("claude reported an error: Credit balance is too low".into())
+    );
+    assert_eq!(result.answer, "Credit balance is too low");
+}
+
+#[test]
+fn a_result_with_is_error_false_or_missing_is_completed() {
+    let not_error = IS_ERROR.replace("\"is_error\":true", "\"is_error\":false");
+    assert_eq!(
+        Harness::Claude
+            .parse_headless_output(&not_error)
+            .unwrap()
+            .status,
+        RunStatus::Completed
+    );
+    let missing = IS_ERROR.replace("\"is_error\":true,", "");
+    assert_ne!(missing, IS_ERROR);
+    assert_eq!(
+        Harness::Claude
+            .parse_headless_output(&missing)
+            .unwrap()
+            .status,
+        RunStatus::Completed
+    );
+}
+
+#[test]
+fn a_result_text_of_300_characters_is_kept_whole_and_301_is_cut() {
+    let prefix = "claude reported an error: ";
+    // Multi-byte characters, so a cut by bytes would show.
+    let at_limit = "é".repeat(300);
+    assert_eq!(
+        failure_of(&is_error_with_result(Some(&at_limit))),
+        format!("{prefix}{at_limit}")
+    );
+    let one_under = "é".repeat(299);
+    assert_eq!(
+        failure_of(&is_error_with_result(Some(&one_under))),
+        format!("{prefix}{one_under}")
+    );
+    let one_over = "é".repeat(301);
+    let shown = failure_of(&is_error_with_result(Some(&one_over)));
+    let text = shown.strip_prefix(prefix).unwrap();
+    assert_eq!(text.chars().count(), 300);
+    assert_eq!(text, format!("{}…", "é".repeat(299)));
+    let largest = "x".repeat(1 << 20);
+    let shown = failure_of(&is_error_with_result(Some(&largest)));
+    assert_eq!(shown.strip_prefix(prefix).unwrap().chars().count(), 300);
+}
+
+#[test]
+fn a_multi_line_result_text_is_shown_on_one_line() {
+    let shown = failure_of(&is_error_with_result(Some(
+        "API Error: 401\n\n  OAuth token has expired.\r\nPlease run /login\n",
+    )));
+    assert_eq!(
+        shown,
+        "claude reported an error: API Error: 401 OAuth token has expired. Please run /login"
+    );
+}
+
+#[test]
+fn an_empty_or_missing_result_text_is_named() {
+    for raw in [
+        is_error_with_result(Some("")),
+        is_error_with_result(Some(" \n ")),
+        is_error_with_result(None),
+    ] {
+        assert_eq!(
+            failure_of(&raw),
+            "claude reported an error with no result text"
+        );
+    }
 }
 
 #[test]
