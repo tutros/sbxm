@@ -165,6 +165,18 @@ pub fn in_task_pr_comment(issue: u32, commit: &str, risk_section: &str, review: 
     titled_comment(&title, &published_risk(risk_section).0, review)
 }
 
+/// The comment `task fix --pr` posts on the PR it pushed to (issue 313): the fix task's in-task
+/// review, under a line naming the PR and the commit it covered, the PR's new head, so the review
+/// counts as that head's and a later `task fix --pr` can work from it. Laid out like
+/// [`in_task_pr_comment`].
+pub fn in_task_fix_comment(pr: u32, commit: &str, risk_section: &str, review: &str) -> String {
+    let title = format!(
+        "sbxm in-task review of PR #{pr}'s fix task, at commit {commit} (this PR's head once \
+         `sbxm task fix` pushed it); it counts as the review of that commit"
+    );
+    titled_comment(&title, &published_risk(risk_section).0, review)
+}
+
 /// `risk_section` is already neutralised and capped by the caller.
 fn titled_comment(title: &str, risk_section: &str, review: &str) -> String {
     let defanged = defang_mentions(review);

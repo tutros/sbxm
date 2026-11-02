@@ -1582,6 +1582,159 @@ fn post_in_task_review(
     )))
 }
 
+/// What `task fix --pr` did after its review (issue 313): its commits are on the PR's branch.
+#[derive(Debug)]
+pub struct FixPushed {
+    pub url: String,
+    pub branch: String,
+    /// The PR's head now: the fix task's tip.
+    pub commit: String,
+    /// The fix task's own commits, `<short id> <subject>`, oldest first.
+    pub commits: Vec<String>,
+    /// Why the review still has something unresolved ([`unresolved_reasons`]); empty when clean.
+    pub unresolved: Vec<String>,
+    /// Whether the in-task review was posted as the review of [`commit`](Self::commit); `false`
+    /// when no recorded review covered it.
+    pub review_posted: bool,
+    /// The `sbxm task review --pr` command for the PR's head.
+    pub review_again: String,
+}
+
+/// The line that says where a fix task's result stays when it can't be pushed (issue 313,
+/// decision 3 of the issue): the task's `repo.git` and the branch there.
+fn kept_in(prepared: &Prepared, branch: &str) -> String {
+    format!(
+        "the result is kept in {} as {branch}",
+        prepared.meta.join("repo.git").display()
+    )
+}
+
+/// The `task fix --pr` sink (issue 313): pushes a `ready` fix task's branch onto its PR's own
+/// branch, as a fast-forward from the head the task started at or not at all (never a force or a
+/// rebase), then posts the in-task review as the review of the new head. Every check comes
+/// before the push; a branch that moved on the remote leaves the task `ready` with its result in
+/// `repo.git`, and the error names it and says to run `task fix --pr` again on the new head.
+pub fn finish_fix(
+    base_dir: &Path,
+    id: &str,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+) -> Result<FixPushed> {
+    let mut prepared = Prepared::open(base_dir, id)?;
+    let task = prepared.record.clone();
+    if task.kind != record::Kind::Fix {
+        bail!("task {id} isn't a fix task; only `sbxm task fix` pushes onto a PR's own branch");
+    }
+    check_can_finish(&task)?;
+    crate::commands::task_start::check_repo(&task.repo)?;
+    let Some(continued) = task.continues.clone() else {
+        bail!("task {id} records no PR branch to push to; see task.json");
+    };
+    let pr = continued.pr;
+    let branch = &task.branch;
+    if !repo::valid_ref_name(branch) {
+        bail!(
+            "task {id} records branch {branch:?}, which isn't a usable branch name; see task.json"
+        );
+    }
+    let repo_git = prepared.meta.join("repo.git");
+    if !repo_git.is_dir() {
+        bail!("task {id} has no repo.git, so there is nothing to push; see `sbxm task status`");
+    }
+    if task.commits_ahead(&repo_git)? == 0 {
+        bail!(
+            "task {id} has no commits on {branch} beyond {}, so there is nothing to push to PR \
+             #{pr}; see result.md in {}",
+            continued.base,
+            prepared.meta.display()
+        );
+    }
+    refuse_workflow_changes(id, &task.changed_paths(&repo_git)?)?;
+    let tip = repo::branch_tip(&repo_git, branch)?;
+    let commits = repo::commit_lines(&repo_git, &continued.base, branch)?;
+    let review = read_capped(&prepared.meta.join("review.md"))?;
+    if let Some(text) = &review {
+        refuse_secrets("review.md", text)?;
+    }
+    let unresolved = unresolved_reasons(&task, review.as_deref());
+    let risk_text = risk_section(&task, &unresolved);
+    refuse_secrets("the risk section", &risk_text)?;
+    // The in-task review becomes the review of the PR's new head when it covered that commit.
+    let posting = reviewed_head(&task, &tip).zip(review);
+    let review_again = review::review_pr_command(pr, &task.repo, Some(&task.base), false);
+    let again = format!(
+        "run `sbxm task fix --pr {pr} --repo {}` again on the new head",
+        task.repo
+    );
+
+    match repo::remote_branch_head(&repo_git, branch)? {
+        None => bail!(
+            "PR #{pr}'s branch {branch} isn't on the remote any more (deleted, or the PR \
+             merged?), so nothing was pushed; {}",
+            kept_in(&prepared, branch)
+        ),
+        // A rerun after a post that failed: the push itself is done.
+        Some(head) if head == tip => {}
+        Some(head) if head == continued.base => {
+            repo::push_from(&repo_git, branch, &continued.base).with_context(|| {
+                format!(
+                    "PR #{pr}'s branch {branch} wasn't updated (sbxm never forces a push; it may \
+                     have moved while the task ran); {}; {again}",
+                    kept_in(&prepared, branch)
+                )
+            })?;
+        }
+        Some(head) => bail!(
+            "PR #{pr}'s branch moved from {} to {head} while the task ran; {}; {again}",
+            continued.base,
+            kept_in(&prepared, branch)
+        ),
+    }
+
+    let url = format!("https://github.com/{}/pull/{pr}", task.repo);
+    prepared
+        .record
+        .advance(record::Stage::Finished, now(), Process::current(probe))?;
+    prepared.record.pr = Some(url.clone());
+    record::write(&prepared.meta, &prepared.record)
+        .with_context(|| format!("{id} is pushed to PR #{pr} but task.json couldn't be updated"))?;
+    let review_posted = match posting {
+        Some((commit, text)) => {
+            let body = review::in_task_fix_comment(pr, &commit, &risk_text, &text);
+            if let Err(e) = github.pr_comment(&task.repo, pr, &body) {
+                prepared.record.notes.push(format!(
+                    "the in-task review was not posted on PR #{pr}: {e:#}"
+                ));
+                let _ = record::write(&prepared.meta, &prepared.record);
+                return Err(e.context(format!(
+                    "pushed {branch} to PR #{pr}, but the in-task review couldn't be posted on \
+                     it; review the new head with `{review_again}`"
+                )));
+            }
+            if let Some(review) = &mut prepared.record.review {
+                review.posted = Some(commit);
+            }
+            record::write(&prepared.meta, &prepared.record).with_context(|| {
+                format!(
+                    "the in-task review is posted on PR #{pr}, but task.json couldn't be updated \
+                     to say so"
+                )
+            })?;
+            true
+        }
+        None => false,
+    };
+    Ok(FixPushed {
+        url,
+        branch: branch.clone(),
+        commit: tip,
+        commits,
+        unresolved,
+        review_posted,
+        review_again,
+    })
+}
+
 /// Where the `local` sink left a spec task's result.
 #[derive(Debug)]
 pub struct Kept {
