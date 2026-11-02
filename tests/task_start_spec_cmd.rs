@@ -106,6 +106,42 @@ fn a_started_spec_task_prints_what_happened_and_the_next_step() {
     assert!(out.warn.is_empty(), "{}", out.warn);
 }
 
+/// Issue 341: the worker's phase over, a local spec task's worker sandbox goes, after its gates,
+/// and `task.json` records it.
+#[test]
+fn a_started_spec_task_removes_its_worker_sandbox_after_the_gates() {
+    let f = fixture();
+    let spec = spec_file(&f, "Build a thing.\n");
+    let (id, _) = record::spec_id(&spec).unwrap();
+    let sandbox = format!("sbxm-task-{id}-claude");
+    let backend = playing(&f, &id);
+    let github = FakeGitHub::default();
+
+    let out = run(&f, &options(&f, spec), &backend, &github);
+
+    out.result.unwrap();
+    let log = backend.log();
+    let removed = log
+        .iter()
+        .position(|l| l == &format!("rm {sandbox}"))
+        .unwrap_or_else(|| panic!("{log:?}"));
+    let last_exec = log.iter().rposition(|l| l.starts_with("exec ")).unwrap();
+    assert!(last_exec < removed, "{log:?}");
+    assert!(
+        out.out.contains(&format!("sandbox {sandbox} removed")),
+        "{}",
+        out.out
+    );
+    let task = record::read(&record::task_dir(&f.env.base_dir(), &id).join("task.json")).unwrap();
+    assert!(
+        task.sandboxes
+            .iter()
+            .any(|s| s.name == sandbox && s.removed_at.is_some()),
+        "{:?}",
+        task.sandboxes
+    );
+}
+
 #[test]
 fn a_failed_worker_is_reported_and_the_command_fails() {
     let f = fixture();

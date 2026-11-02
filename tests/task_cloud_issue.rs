@@ -401,7 +401,12 @@ fn a_local_flag_over_a_cloud_config_runs_an_issue_here_to_ready() {
     let task = task_record(&f, "issue-41");
     assert_eq!(task.stage, record::Stage::Ready);
     assert_eq!(task.location, Location::Local);
-    assert!(task.sandboxes.is_empty(), "{:?}", task.sandboxes);
+    // Its lifetime entries are local ones only (issue 341).
+    assert!(
+        task.sandboxes.iter().all(|s| s.location == Location::Local),
+        "{:?}",
+        task.sandboxes
+    );
     assert!(
         !backend.locations().contains(&Location::Cloud),
         "{:?}",
@@ -1015,6 +1020,7 @@ fn task_gates(f: &Fixture, backend: &FakeBackend) -> Ran {
             tiers: sbxm::task::pipeline::Tiers::ALL,
             dry_run: false,
             identity: Some(identity()),
+            disk: sbxm::disk::Guard::default(),
         },
         backend,
         &common::task_fixture::Probe,
@@ -1325,6 +1331,7 @@ fn gates_dry_run_of_a_cloud_task_names_its_cloud_sandbox_and_recorded_clone() {
             tiers: sbxm::task::pipeline::Tiers::ALL,
             dry_run: true,
             identity: None,
+            disk: sbxm::disk::Guard::default(),
         },
         &backend,
         &common::task_fixture::Probe,

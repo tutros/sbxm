@@ -1151,7 +1151,12 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
         record::write(&meta, task)?;
 
         match cloud_ttl {
-            None => plan.create(ctx.backend, &sandbox, worker.harness, &workspace)?,
+            None => {
+                plan.create(ctx.backend, &sandbox, worker.harness, &workspace)?;
+                // Its removal once the worker's phase ends is recorded against it (issue 341).
+                task.add_sandbox(&sandbox, SandboxRole::Worker, Location::Local, now(), 0);
+                record::write(&meta, task)?;
+            }
             Some(ttl) => {
                 create_recorded(
                     ctx.backend,
@@ -1315,7 +1320,8 @@ pub struct TaskReport {
     /// the worker's line.
     pub events: Vec<String>,
     /// What the task's stop said, when it stopped instead of handing over to the review: its cloud
-    /// worker sandbox's removal and its scoped secrets', printed after everything else.
+    /// worker sandbox's removal and its scoped secrets'; and a local worker sandbox's removal at
+    /// the end of the worker's phase (issue 341). Printed after everything else.
     pub stopped: Vec<lifetime::Released>,
 }
 
@@ -1410,17 +1416,20 @@ fn start_one(
                 || !gated.failed_outcome().is_some_and(|o| o.could_not_run)
         );
     let mut stopped = Vec::new();
-    if let Some(prepared) = started.as_mut()
-        && !hands_over
-    {
-        let said = lifetime::release_worker(
-            ctx.backend,
-            &prepared.meta,
-            &mut prepared.record,
-            ctx.sleep,
-            ctx.scoped_secrets,
-        );
-        stopped = said.all().cloned().collect();
+    if let Some(prepared) = started.as_mut() {
+        if !hands_over {
+            let said = lifetime::release_worker(
+                ctx.backend,
+                &prepared.meta,
+                &mut prepared.record,
+                ctx.sleep,
+                ctx.scoped_secrets,
+            );
+            stopped = said.all().cloned().collect();
+        }
+        // The worker's phase is over, whatever its outcome: a local worker sandbox goes now
+        // (issue 341).
+        stopped.extend(release_local_worker(ctx.backend, prepared));
     }
     TaskReport {
         number,
@@ -2230,10 +2239,122 @@ pub(super) fn ensure_worker_sandbox(
     if let Some(worker) = prepared.record.worker.as_mut() {
         worker.template = plan.template.clone();
     }
+    // One that vanished or was replaced is gone: its open entry, if any, is closed.
+    prepared.record.sandbox_removed(&sandbox, now());
     // The record goes first, as in `prepare`: `template rm` reads it to see what the sandbox uses.
     record::write(&prepared.meta, &prepared.record)?;
     plan.create(env.backend, &sandbox, harness, &prepared.workspace)?;
+    let role = match prepared.record.stage {
+        Stage::Fixing => SandboxRole::Fix,
+        _ => SandboxRole::Worker,
+    };
+    prepared
+        .record
+        .add_sandbox(&sandbox, role, Location::Local, now(), 0);
+    record::write(&prepared.meta, &prepared.record)?;
     Ok(true)
+}
+
+/// A local task's worker sandbox, made again through [`ensure_worker_sandbox`] for a phase that
+/// starts without it (the gates before a review, `task gates`; issue 341) when the task has no
+/// open entry for it: it removed the sandbox when the last phase ended, or its record is from
+/// before those entries. Nothing for a cloud task, or one whose sandbox the task still holds.
+fn ensure_local_worker(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
+    let Some(worker) = prepared.record.worker.as_ref() else {
+        return Ok(());
+    };
+    if prepared.record.location != Location::Local
+        || prepared.record.has_open_sandbox(&worker.sandbox)
+    {
+        return Ok(());
+    }
+    if ensure_worker_sandbox(env, prepared, false)? {
+        prepared.events.push(format!(
+            "{}: the worker's sandbox was gone; made it again",
+            prepared.record.id
+        ));
+    }
+    Ok(())
+}
+
+/// A local task's worker sandbox goes when the phase that uses it ends (issue 341): the worker
+/// and its gates, or a fix round and its gates, whatever the outcome, and always before a
+/// reviewer sandbox is created. Uncommitted changes in the worker's clone are named first (they
+/// stay in the workspace); then the removal ([`lifetime::release_local`]). Nothing for a cloud
+/// task, whose worker sandbox lives through the automatic run (P5 (d), decision 263), or when
+/// the task has no open entry for the sandbox. A record with no entry for it at all (saved
+/// before issue 341) gets one first when `sbx ls` lists the sandbox. Never fails: what it says
+/// is returned in order.
+pub fn release_local_worker(
+    backend: &dyn SandboxBackend,
+    prepared: &mut Prepared,
+) -> Vec<lifetime::Released> {
+    let Some(sandbox) = prepared.record.worker.as_ref().map(|w| w.sandbox.clone()) else {
+        return Vec::new();
+    };
+    if prepared.record.location != Location::Local {
+        return Vec::new();
+    }
+    let mut said = Vec::new();
+    // A record saved before issue 341 has no entry for its worker sandbox at all (one whose entry
+    // is closed was removed): when `sbx ls` still lists it, it is the task's, and goes like any.
+    if !prepared.record.sandboxes.iter().any(|s| s.name == sandbox) {
+        match backend.list() {
+            Ok(listed) if listed.iter().any(|s| s.name == sandbox) => {
+                prepared.record.add_sandbox(
+                    &sandbox,
+                    SandboxRole::Worker,
+                    Location::Local,
+                    now(),
+                    0,
+                );
+            }
+            Ok(_) => {}
+            Err(e) => said.push(lifetime::Released::Warning(format!(
+                "could not check whether sandbox {sandbox} is still there: {e:#}"
+            ))),
+        }
+    }
+    if !prepared.record.has_open_sandbox(&sandbox) {
+        return said;
+    }
+    let ws = prepared.sandbox_clone().to_string_lossy().into_owned();
+    if let Ok(out) = backend.exec(
+        &sandbox,
+        &ExecSpec {
+            workdir: None,
+            argv: ["git", "-C", &ws, "status", "--porcelain"]
+                .map(str::to_owned)
+                .into(),
+            stdin: Stdin::Closed,
+        },
+    ) {
+        let changed = out.stdout.lines().filter(|l| !l.trim().is_empty()).count();
+        if out.exit_code == Some(0) && changed > 0 {
+            said.push(lifetime::Released::Line(format!(
+                "{changed} uncommitted change(s) in the worker's clone stay in {}; its sandbox \
+                 {sandbox} is removed",
+                prepared.workspace.display()
+            )));
+        }
+    }
+    said.extend(lifetime::release_local(
+        backend,
+        &prepared.meta,
+        &mut prepared.record,
+        &sandbox,
+    ));
+    said
+}
+
+/// [`release_local_worker`], what it says going to `prepared.events` and `prepared.warnings`.
+pub(super) fn release_local_worker_into(env: &TaskEnv, prepared: &mut Prepared) {
+    for said in release_local_worker(env.backend, prepared) {
+        match said {
+            lifetime::Released::Line(line) => prepared.events.push(line),
+            lifetime::Released::Warning(warning) => prepared.warnings.push(warning),
+        }
+    }
 }
 
 /// A cloud task's fix round runs in its worker sandbox, kept through the automatic run (P5 (d),
@@ -2401,6 +2522,15 @@ fn cloud_worker_gone(env: &TaskEnv, record: &Record) -> Result<bool> {
 pub fn gate_on_demand(env: &TaskEnv, prepared: &mut Prepared, tiers: Tiers) -> Result<Gated> {
     // Before any listing: a listed name proves nothing about an ambiguous create (decision 268).
     super::resume::refuse_ambiguous(&prepared.record, "run its gates")?;
+    if prepared.record.location == Location::Local {
+        // A local task's worker sandbox went when its last phase ended (issue 341): made again,
+        // and removed again once the gates end.
+        let gated = ensure_local_worker(env, prepared)
+            .and_then(|()| recollect_commits(env, prepared))
+            .and_then(|()| run_gates(env, prepared, "on-demand", tiers));
+        release_local_worker_into(env, prepared);
+        return gated;
+    }
     let rebuild = cloud_worker_gone(env, &prepared.record)?;
     if !rebuild {
         recollect_commits(env, prepared)?;
@@ -2842,7 +2972,12 @@ fn pass_gates(
     phase: &str,
 ) -> Result<bool> {
     loop {
-        let gated = run_gates(env, prepared, phase, Tiers::ALL)?;
+        let gated = run_gates(env, prepared, phase, Tiers::ALL);
+        // Each gate run ends the phase of the worker or fix round before it, whatever its
+        // outcome: a local worker sandbox goes now, before a reviewer is created, the task stops
+        // or the next fix round makes it again (issue 341).
+        release_local_worker_into(env, prepared);
+        let gated = gated?;
         let Some(failed) = gated.failed.clone() else {
             return Ok(false);
         };
@@ -2884,6 +3019,8 @@ pub fn review_issue(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewRepo
     next_review_round(prepared)?;
     let reviewed = review_checked(env, prepared, report);
     stop_cloud_worker(env, prepared);
+    // A fix round that failed, or gates that stopped the task, end its phase too (issue 341).
+    release_local_worker_into(env, prepared);
     reviewed
 }
 
@@ -2900,8 +3037,13 @@ fn review_checked(
         (Stage::Reviewing, Status::Failed) => true,
         _ => false,
     };
-    if !gates_current && pass_gates(env, prepared, &mut report, "before-review")? {
-        return Ok(report);
+    if !gates_current {
+        // The gates run in the worker's sandbox, which a local task removed when its last phase
+        // ended (issue 341).
+        ensure_local_worker(env, prepared)?;
+        if pass_gates(env, prepared, &mut report, "before-review")? {
+            return Ok(report);
+        }
     }
 
     let round = next_review_round(prepared)?;
@@ -3495,15 +3637,46 @@ pub(super) fn start_fix_round(
         return Err(e);
     }
 
-    input.place(env.backend, prepared)?;
-    fix(env, prepared)
+    let fixed = input
+        .place(env.backend, prepared)
+        .and_then(|()| fix(env, prepared));
+    if fixed.is_err() {
+        // The round's phase ended there (issue 341).
+        release_local_worker_into(env, prepared);
+    }
+    fixed
 }
 
 /// A fix round that failed, or whose process was gone while it ran, runs again (`task resume`,
 /// issue 118) in the same clone, which keeps what the last run did: the prompt and the input it
 /// was given (the review, or the gate's output) are written into the clone again from the task's
 /// folder, and the worker runs. Like [`run_fix_round`], the caller counts the round.
-pub(super) fn rerun_fix_round(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
+pub(super) fn rerun_fix_round(
+    env: &TaskEnv,
+    prepared: &mut Prepared,
+    input: &FixInput,
+) -> Result<()> {
+    // The clone is agent-controlled, so it is validated and the input placed in it before the
+    // record says the retry is running (as `restore_worker_input` and the stopped-ready fix path
+    // already do): a link the failed worker left must be refused with nothing recorded yet. A
+    // local clone got it from `task resume` before its sandbox was made again (issue 341); a
+    // cloud clone gets it by `cp` here, its sandbox there (milestone 4 slice 6).
+    if prepared.record.location == Location::Cloud {
+        input.place(env.backend, prepared)?;
+    }
+    prepared.record.rerun(now(), Process::current(env.probe))?;
+    record::write(&prepared.meta, &prepared.record)?;
+    let fixed = fix(env, prepared);
+    if fixed.is_err() {
+        // The round's phase ended there (issue 341).
+        release_local_worker_into(env, prepared);
+    }
+    fixed
+}
+
+/// What a failed fix round ran with, read back from the task's folder for [`rerun_fix_round`]:
+/// its prompt, and the input it was given (the gate's output, else the review).
+pub(super) fn rerun_fix_input(prepared: &Prepared) -> Result<FixInput> {
     let prompt = fs::read_to_string(prepared.meta.join("fix-prompt.md"))
         .context("the failed fix round's prompt (fix-prompt.md) is missing from the task folder")?;
     let gate_copy = prepared.meta.join("gate-failure.md");
@@ -3516,19 +3689,11 @@ pub(super) fn rerun_fix_round(env: &TaskEnv, prepared: &mut Prepared) -> Result<
                 .context("the review to fix is missing; run the review again")?,
         )
     };
-    // The clone is agent-controlled, so it is validated and the input placed in it before the
-    // record says the retry is running (as `restore_worker_input` and the stopped-ready fix path
-    // already do): a link the failed worker left must be refused with nothing recorded yet.
-    // A cloud clone gets them by `cp` instead (milestone 4 slice 6).
-    FixInput {
+    Ok(FixInput {
         extra_name,
         extra_text,
         prompt,
-    }
-    .place(env.backend, prepared)?;
-    prepared.record.rerun(now(), Process::current(env.probe))?;
-    record::write(&prepared.meta, &prepared.record)?;
-    fix(env, prepared)
+    })
 }
 
 /// The fix round's run itself, in a task at `fixing/running` whose prompt is in the clone: the
@@ -3816,6 +3981,9 @@ pub fn check_worker_inputs(
 /// must-fix findings narrows the next one to this one's commit, and a clean one clears it so the
 /// next review (the confirmatory full one, if this was narrow) starts fresh.
 pub fn run_reviewer(env: &TaskEnv, prepared: &mut Prepared, round: u32) -> Result<Reviewed> {
+    // The worker's or the fix round's phase is over before a reviewer sandbox exists: a local
+    // worker sandbox still held goes first (issue 341).
+    release_local_worker_into(env, prepared);
     let id = prepared.record.id.clone();
     let reviewer = &env.config.reviewer;
     let clone = prepared.workspace.with_file_name(format!("{id}-review"));

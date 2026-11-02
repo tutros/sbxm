@@ -378,6 +378,10 @@ pub enum TaskCommand {
         /// Print the commands, where they run and which tiers are off; run nothing.
         #[arg(long)]
         dry_run: bool,
+        /// Make a removed worker sandbox again even when the drive of sbx's sandbox state has
+        /// less than min_free_disk free.
+        #[arg(long)]
+        ignore_disk: bool,
     },
     /// Print the task state machine's transition table (states, events, next state), generated
     /// from the code (decision 174's "code is the documentation"; spec section 5.2).

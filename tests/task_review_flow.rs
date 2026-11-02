@@ -645,8 +645,9 @@ fn a_gate_failure_before_any_review_feeds_a_fix_round_with_the_gates_own_output(
 fn failing_gates_after_the_fix_round_stop_before_the_second_review() {
     let f = config();
     // Execs that no scripted rule matches are answered from this queue, in order: the worker's
-    // bundle and status, the gates before the review (pass), the fix round's bundle and status,
-    // then the gates after the fix round (fail).
+    // bundle and status, the gates before the review (pass), the status check before the worker's
+    // sandbox is removed (issue 341), the fix round's bundle and status, then the gates after the
+    // fix round (fail).
     let pass = || ok("");
     let red = ExecOutput {
         stdout: String::new(),
@@ -654,6 +655,7 @@ fn failing_gates_after_the_fix_round_stop_before_the_second_review() {
         exit_code: Some(1),
     };
     let backend = backend(&f, &[ONE, CLEAN]).with_exec_outputs(vec![
+        pass(),
         pass(),
         pass(),
         pass(),

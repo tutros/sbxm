@@ -110,10 +110,13 @@ fn exec_at(backend: &FakeBackend, n: usize) -> usize {
 fn a_worker_sandbox_still_there_is_used_as_is() {
     let f = config();
     let mut prepared = worked_task(&f, &backend(&f, &[CLEAN]));
-    // Gates fail, the fix round's bundle and status, the gates again (pass).
+    // Gates fail, the fix round's bundle and status, the gates again (pass). The failed gates
+    // end the worker's phase, but its sandbox's removal fails (issue 341), so it is still there
+    // for the fix round.
     let backend = backend(&f, &[CLEAN])
         .with_exec_outputs(vec![red(), ok(""), ok(""), ok("")])
-        .and_sandboxes(listed());
+        .and_sandboxes(listed())
+        .with_remove_errors(&["`sbx rm` failed: busy"]);
 
     let report = review(&f, &backend, &mut prepared).unwrap();
 
@@ -121,8 +124,16 @@ fn a_worker_sandbox_still_there_is_used_as_is() {
     assert!(fix_exec(&backend).is_some());
     let log = backend.log();
     assert!(
-        !log.iter()
-            .any(|l| l == &format!("create {WORKER}") || l == &format!("rm {WORKER}")),
+        !log.iter().any(|l| l == &format!("create {WORKER}")),
+        "{log:?}"
+    );
+    // Removed only once the fix round's gates are over (issue 341).
+    let removed = log
+        .iter()
+        .rposition(|l| l == &format!("rm {WORKER}"))
+        .unwrap();
+    assert!(
+        exec_at(&backend, fix_exec(&backend).unwrap()) < removed,
         "{log:?}"
     );
     assert!(
@@ -199,7 +210,10 @@ fn a_gone_worker_sandbox_whose_config_changed_is_refused_and_the_task_fails() {
         "{:?}",
         backend.log()
     );
-    assert!(backend.removes().is_empty(), "{:?}", backend.log());
+    // Nothing is replaced: the one removal is the gates' phase ending, after the refusal (issue
+    // 341).
+    assert_eq!(backend.removes(), [WORKER], "{:?}", backend.log());
+    assert_eq!(backend.log().last().unwrap(), &format!("rm {WORKER}"));
     assert!(fix_exec(&backend).is_none());
     let record = saved(&f);
     assert_eq!(

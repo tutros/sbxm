@@ -48,6 +48,7 @@ fn options(f: &Fixture, tiers: Tiers, dry_run: bool) -> Options {
         tiers,
         dry_run,
         identity: None,
+        disk: sbxm::disk::Guard::default(),
     }
 }
 

@@ -787,7 +787,12 @@ fn a_spec_review_of_a_task_recorded_local_runs_here_with_no_flag() {
         (task.stage, task.location),
         (record::Stage::Ready, Location::Local)
     );
-    assert!(task.sandboxes.is_empty(), "{:?}", task.sandboxes);
+    // Its lifetime entries are local ones only (issue 341).
+    assert!(
+        task.sandboxes.iter().all(|s| s.location == Location::Local),
+        "{:?}",
+        task.sandboxes
+    );
 }
 
 /// Behavior 2: a cloud `task run` preflights the reviewer's sandboxes too, before any write: a
