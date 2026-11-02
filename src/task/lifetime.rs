@@ -258,6 +258,33 @@ pub fn release_open(
     said
 }
 
+/// [`release`] for a local task's worker sandbox (issue 341), once the phase that uses it ends:
+/// removed with `sbx rm` (one `sbx ls` no longer lists counts as removed), then its lifetime entry
+/// stamped and saved. A removal that fails is a warning, the entry left open. Nothing for a cloud
+/// task, or for a name with no open entry. Never fails: the caller shows what it says.
+pub fn release_local(
+    backend: &dyn SandboxBackend,
+    meta: &Path,
+    task: &mut Record,
+    name: &str,
+) -> Option<Released> {
+    if task.location != Location::Local || !task.has_open_sandbox(name) {
+        return None;
+    }
+    if let Err(e) = crate::commands::rm::remove_sandbox(backend, name) {
+        return Some(Released::Warning(format!(
+            "sandbox {name} could not be removed: {e:#}; remove it with `sbx rm {name}`"
+        )));
+    }
+    task.sandbox_removed(name, now());
+    Some(match record::write(meta, task) {
+        Ok(()) => Released::Line(format!("sandbox {name} removed")),
+        Err(e) => Released::Warning(format!(
+            "sandbox {name} removed, but task.json couldn't record it: {e:#}"
+        )),
+    })
+}
+
 /// A sandbox's removal, retried, and its lifetime entry stamped and saved.
 fn remove_entry(
     backend: &dyn SandboxBackend,

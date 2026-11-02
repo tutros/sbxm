@@ -121,8 +121,16 @@ fn a_worker_sandbox_still_there_is_used_as_is() {
     assert!(fix_exec(&backend).is_some());
     let log = backend.log();
     assert!(
-        !log.iter()
-            .any(|l| l == &format!("create {WORKER}") || l == &format!("rm {WORKER}")),
+        !log.iter().any(|l| l == &format!("create {WORKER}")),
+        "{log:?}"
+    );
+    // Removed only once the fix round's gates are over (issue 341).
+    let removed = log
+        .iter()
+        .position(|l| l == &format!("rm {WORKER}"))
+        .unwrap();
+    assert!(
+        exec_at(&backend, fix_exec(&backend).unwrap()) < removed,
         "{log:?}"
     );
     assert!(
@@ -199,7 +207,10 @@ fn a_gone_worker_sandbox_whose_config_changed_is_refused_and_the_task_fails() {
         "{:?}",
         backend.log()
     );
-    assert!(backend.removes().is_empty(), "{:?}", backend.log());
+    // Nothing is replaced: the one removal is the gates' phase ending, after the refusal (issue
+    // 341).
+    assert_eq!(backend.removes(), [WORKER], "{:?}", backend.log());
+    assert_eq!(backend.log().last().unwrap(), &format!("rm {WORKER}"));
     assert!(fix_exec(&backend).is_none());
     let record = saved(&f);
     assert_eq!(

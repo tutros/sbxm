@@ -259,6 +259,7 @@ pub fn resume_forgetting(
     }
     let resumed = resume_checked(env, prepared, rounds);
     // The task stops here, whichever way: a cloud worker sandbox goes (P5 (d), decision 263).
+    // A local one goes where the phase that used it ends (issue 341), never after a refusal.
     pipeline::stop_cloud_worker(env, prepared);
     resumed
 }
@@ -286,19 +287,27 @@ fn resume_checked(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -
     // A stopped `ready` task's fix round works from its recorded review: it is read, and with the
     // prompt written into the clone, before the sandbox, the budget or the stage change. A cloud
     // task's worker sandbox went at its stop: the fix round makes it again and places the input.
-    let fix_input = if prepared.record.stage == Stage::Ready {
-        let input = pipeline::fix_input(env, prepared, None)?;
-        if !cloud {
-            input.place(env.backend, prepared)?;
+    // A failed fix round's retry is given the input it had, read and placed the same way, before
+    // a local sandbox is made again (issue 341: it is usually gone by then).
+    let fix_input = match (prepared.record.stage, prepared.record.status) {
+        (Stage::Ready, _) => Some(pipeline::fix_input(env, prepared, None)?),
+        (Stage::Fixing, Status::Running | Status::Failed) => {
+            Some(pipeline::rerun_fix_input(prepared)?)
         }
-        Some(input)
-    } else {
-        None
+        _ => None,
     };
+    if let Some(input) = &fix_input
+        && !cloud
+    {
+        input.place(env.backend, prepared)?;
+    }
     // The worker's sandbox runs the worker, the sandbox gates and every fix round; it can vanish
     // between stages (workflow note G17), so it is made again first when it is gone. A
     // preparation makes it afresh below instead, and a cloud fix round from `ready` makes its own.
-    if prepared.record.stage != Stage::Prepared && !(cloud && prepared.record.stage == Stage::Ready)
+    // A local review needs none: its gates make it again when they run (issue 341).
+    if prepared.record.stage != Stage::Prepared
+        && !(cloud && prepared.record.stage == Stage::Ready)
+        && (cloud || prepared.record.stage != Stage::Reviewing)
     {
         resumed.sandbox_remade = pipeline::ensure_worker_sandbox(env, prepared, false)?;
         if resumed.sandbox_remade {
@@ -344,7 +353,10 @@ fn resume_checked(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -
         // fetch of what `repo.git` already has changes nothing). A fix round is counted once its
         // run is over (`review_issue` adds it then), so this one was never counted.
         (Stage::Working | Stage::Fixing, Status::Completed | Status::TimedOut) => {
-            pipeline::recollect_commits(env, prepared)?;
+            if let Err(e) = pipeline::recollect_commits(env, prepared) {
+                pipeline::release_local_worker_into(env, prepared);
+                return Err(e);
+            }
             if prepared.record.stage == Stage::Fixing {
                 prepared.record.round += 1;
             }
@@ -367,7 +379,8 @@ fn resume_checked(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -
         // T5, T9: the fix round runs again in the same clone with the input it was given, then
         // the gates and the review rounds go on.
         (Stage::Fixing, Status::Running | Status::Failed) => {
-            pipeline::rerun_fix_round(env, prepared)?;
+            let input = fix_input.context("the fix round's input was not read")?;
+            pipeline::rerun_fix_round(env, prepared, &input)?;
             resumed.review = Some(pipeline::continue_after_fix(env, prepared)?);
             return Ok(resumed);
         }
@@ -416,10 +429,18 @@ fn resume_checked(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -
     }
     if run_worker {
         record::write(&prepared.meta, &prepared.record)?;
-        let worked = pipeline::work(env, prepared)?;
+        // A failed worker ends its phase here; one that completed goes on to its gates.
+        let worked = match pipeline::work(env, prepared) {
+            Ok(worked) => worked,
+            Err(e) => {
+                pipeline::release_local_worker_into(env, prepared);
+                return Err(e);
+            }
+        };
         let failed = matches!(worked.status, RunStatus::Failed(_));
         resumed.worked = Some(worked);
         if failed {
+            pipeline::release_local_worker_into(env, prepared);
             return Ok(resumed);
         }
     }

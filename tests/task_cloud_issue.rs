@@ -401,7 +401,12 @@ fn a_local_flag_over_a_cloud_config_runs_an_issue_here_to_ready() {
     let task = task_record(&f, "issue-41");
     assert_eq!(task.stage, record::Stage::Ready);
     assert_eq!(task.location, Location::Local);
-    assert!(task.sandboxes.is_empty(), "{:?}", task.sandboxes);
+    // Its lifetime entries are local ones only (issue 341).
+    assert!(
+        task.sandboxes.iter().all(|s| s.location == Location::Local),
+        "{:?}",
+        task.sandboxes
+    );
     assert!(
         !backend.locations().contains(&Location::Cloud),
         "{:?}",

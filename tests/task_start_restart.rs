@@ -146,7 +146,11 @@ fn restart_asks_discards_the_old_task_and_starts_a_new_one() {
         "{}",
         prompts[0]
     );
-    assert_eq!(b.removes(), vec!["sbxm-task-issue-41-claude"]);
+    // The old task's sandbox, then the new worker's once its phase is over (issue 341).
+    assert_eq!(
+        b.removes(),
+        vec!["sbxm-task-issue-41-claude", "sbxm-task-issue-41-claude"]
+    );
     assert!(
         out.contains("removed sandbox sbxm-task-issue-41-claude"),
         "{out}"

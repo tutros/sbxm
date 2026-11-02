@@ -1105,6 +1105,18 @@ pub(crate) fn run_spec_from(
             }
         }
     }
+    // The worker's phase is over, whatever its outcome: a local worker sandbox goes now (issue
+    // 341).
+    for said in pipeline::release_local_worker(ctx.backend, &mut prepared) {
+        match said {
+            lifetime::Released::Line(line) => {
+                let _ = writeln!(out, "{line}");
+            }
+            lifetime::Released::Warning(warning) => {
+                let _ = writeln!(warn, "warning: {warning}");
+            }
+        }
+    }
     outcome
 }
 
