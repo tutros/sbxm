@@ -23,6 +23,10 @@ pub fn must_fix_count(review: &str) -> Option<u32> {
 /// GitHub accepts at most 65,536 characters in a comment; the review is cut well below that.
 pub(crate) const COMMENT_CAP: usize = 60_000;
 
+/// How the note under a review cut to [`COMMENT_CAP`] starts, on a line of its own: `task fix
+/// --pr` refuses a review carrying it, since some of its findings aren't on the PR (issue 313).
+pub(crate) const CUT_NOTE_START: &str = "(sbxm cut this review at ";
+
 /// An `@name` at the start of a word would notify that user or team; a zero-width space after the
 /// `@` keeps the text readable and the notification away. An `@` inside a word (an e-mail
 /// address) is left alone.
@@ -193,8 +197,8 @@ fn titled_comment(title: &str, risk_section: &str, review: &str) -> String {
     let mut text = format!("{header}{title}\n\n{}\n", body.trim_end());
     if cut {
         text.push_str(&format!(
-            "\n(sbxm cut this review at {COMMENT_CAP} characters; the whole text is review.md in \
-             the task folder.)\n"
+            "\n{CUT_NOTE_START}{COMMENT_CAP} characters; the whole text is review.md in the task \
+             folder.)\n"
         ));
     }
     text

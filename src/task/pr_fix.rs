@@ -6,7 +6,7 @@
 use anyhow::{Result, bail};
 
 use super::findings;
-use super::review::review_pr_command;
+use super::review::{CUT_NOTE_START, review_pr_command};
 use crate::github::{PrComment, PrInfo, PrState};
 
 /// The review a fix task works from.
@@ -99,25 +99,44 @@ pub fn review_to_fix(
     }
     let commit = pr.head_oid.clone();
     let lines = findings::lines_of(&latest.body);
+    // The worker's input must be every must-fix finding (decision 2): a review cut to fit
+    // GitHub, or one whose stated count isn't what was read, is refused, never used in part.
+    if lines.iter().any(|line| line.starts_with(CUT_NOTE_START)) {
+        bail!(
+            "the latest sbxm review of PR #{number} (commit {commit}) was cut to fit a GitHub \
+             comment, so not all of its must-fix findings are on the PR; review the head again \
+             with `{review_again}`"
+        );
+    }
     let must_fix: Vec<String> = parsed
         .findings
         .iter()
         .filter(|f| f.label == "must-fix")
         .map(|f| lines[f.start_line - 1..f.end_line.min(lines.len())].join("\n"))
         .collect();
-    if must_fix.is_empty() {
-        match stated_must_fix(&latest.body) {
-            Some(stated) if stated > 0 => bail!(
-                "the latest sbxm review of PR #{number} (commit {commit}) says it has {stated} \
-                 must-fix finding(s), but none could be read (each needs a `### M-1 - <title>` \
-                 heading under `## Must fix`); review the head again with `{review_again}`"
-            ),
-            _ => bail!(
-                "the latest sbxm review of PR #{number} (commit {commit}) has no must-fix \
-                 findings, so there is nothing to fix; file its other findings with \
-                 `sbxm task file-findings`"
-            ),
-        }
+    let Some(stated) = stated_must_fix(&latest.body) else {
+        bail!(
+            "the latest sbxm review of PR #{number} (commit {commit}) has no `Must-fix findings: \
+             <n>` line, so whether all its must-fix findings were read can't be told; review the \
+             head again with `{review_again}`"
+        );
+    };
+    if stated == 0 && must_fix.is_empty() {
+        bail!(
+            "the latest sbxm review of PR #{number} (commit {commit}) has no must-fix findings, \
+             so there is nothing to fix; file its other findings with `sbxm task file-findings`"
+        );
+    }
+    if usize::try_from(stated).ok() != Some(must_fix.len()) {
+        let read = match must_fix.len() {
+            0 => "none".to_owned(),
+            n => n.to_string(),
+        };
+        bail!(
+            "the latest sbxm review of PR #{number} (commit {commit}) says it has {stated} \
+             must-fix finding(s), but {read} could be read (each needs a `### M-1 - <title>` \
+             heading under `## Must fix`); review the head again with `{review_again}`"
+        );
     }
     let mut text = format!(
         "# The must-fix findings of the sbxm review of PR #{number}\n\n\

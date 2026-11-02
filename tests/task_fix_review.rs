@@ -248,3 +248,105 @@ fn the_base_is_named_in_the_review_hint_when_given() {
         "{message}"
     );
 }
+
+/// `review(HEAD, must_fix)` with `pad` characters added to M-`at`'s **What happens:**, so a
+/// posted comment is cut where the caller wants it.
+fn padded(must_fix: u32, at: u32, pad: usize) -> String {
+    let marker = format!("`src/lock.rs:{at}`\n**What happens:** it stays held");
+    let text = review(HEAD, must_fix);
+    assert!(text.contains(&marker));
+    text.replace(&marker, &format!("{marker} {}", "x".repeat(pad)))
+}
+
+/// Review M-2: a review cut to fit GitHub before a later must-fix finding would give the worker
+/// only part of its input.
+#[test]
+fn a_review_cut_before_a_later_must_fix_finding_is_refused() {
+    let body = pr_comment(7, "", &padded(2, 1, 60_000));
+    assert!(body.contains("sbxm cut this review"));
+    assert!(!body.contains("### M-2"));
+
+    let message = refusal(&pr(), &[by("tutros", body)]);
+
+    assert!(
+        message.contains(&format!(
+            "the latest sbxm review of PR #7 (commit {HEAD}) was cut to fit a GitHub comment, so \
+             not all of its must-fix findings are on the PR; review the head again with \
+             `sbxm task review --pr 7 --repo o/r`"
+        )),
+        "{message}"
+    );
+}
+
+/// Review M-2: a cut inside the last must-fix finding is refused too, though the count matches.
+#[test]
+fn a_review_cut_inside_its_last_must_fix_finding_is_refused() {
+    let body = pr_comment(7, "", &padded(1, 1, 60_000));
+    assert!(body.contains("sbxm cut this review"));
+    assert!(body.contains("### M-1"));
+
+    let message = refusal(&pr(), &[by("tutros", body)]);
+
+    assert!(
+        message.contains("was cut to fit a GitHub comment"),
+        "{message}"
+    );
+}
+
+/// Review M-2: the stated count must match the findings read, not only when none were.
+#[test]
+fn a_must_fix_count_above_the_findings_read_is_refused() {
+    let text = review(HEAD, 2).replace("### M-2 - ", "M-2 - ");
+    let body = pr_comment(7, "", &text);
+
+    let message = refusal(&pr(), &[by("tutros", body)]);
+
+    assert!(
+        message.contains(&format!(
+            "the latest sbxm review of PR #7 (commit {HEAD}) says it has 2 must-fix finding(s), \
+             but 1 could be read"
+        )),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_must_fix_count_below_the_findings_read_is_refused() {
+    let text = review(HEAD, 2).replace("Must-fix findings: 2", "Must-fix findings: 1");
+    let body = pr_comment(7, "", &text);
+
+    let message = refusal(&pr(), &[by("tutros", body)]);
+
+    assert!(
+        message.contains("says it has 1 must-fix finding(s), but 2 could be read"),
+        "{message}"
+    );
+}
+
+#[test]
+fn a_review_with_no_must_fix_count_is_refused() {
+    let text = review(HEAD, 1).replace("Must-fix findings: 1\n", "");
+    let body = pr_comment(7, "", &text);
+
+    let message = refusal(&pr(), &[by("tutros", body)]);
+
+    assert!(
+        message.contains(&format!(
+            "the latest sbxm review of PR #7 (commit {HEAD}) has no `Must-fix findings: <n>` \
+             line, so whether all its must-fix findings were read can't be told"
+        )),
+        "{message}"
+    );
+}
+
+/// A complete review whose count matches still gives every must-fix finding.
+#[test]
+fn a_long_review_that_was_not_cut_and_whose_count_matches_runs() {
+    let body = pr_comment(7, "", &padded(3, 2, 50_000));
+    assert!(!body.contains("sbxm cut this review"));
+
+    let chosen = review_to_fix(&pr(), "o/r", None, "tutros", &[by("tutros", body)]).unwrap();
+
+    assert_eq!(chosen.must_fix, 3);
+    assert!(chosen.text.contains("### M-3"));
+}
