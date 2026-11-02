@@ -512,8 +512,8 @@ pub enum TaskCommand {
         /// task's repo.git (not yet fetched into this checkout) unless --force (issue 143).
         #[arg(long, value_name = "FILE")]
         spec: Option<PathBuf>,
-        /// Remove every task whose work is merged (decision 195, issue 202): an issue or
-        /// PR-review task whose PR is merged, or a spec task whose branch is reachable from its
+        /// Remove every task whose work is merged (decision 195, issue 202): an issue,
+        /// PR-review or fix task whose PR is merged, or a spec task whose branch is reachable from its
         /// base branch after a fetch. Archives each task's text records first (review.md,
         /// review-<n>.md, result.md, run.log, gates.log, task.json) under
         /// .sbxm/task-archive/<id>/.

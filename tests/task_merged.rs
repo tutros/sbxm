@@ -906,3 +906,44 @@ fn a_failing_ls_remote_after_a_failed_fetch_stops_the_scan() {
     assert!(text.contains("cannot fetch m4-plan from origin"), "{text}");
     assert!(text.contains("still on origin"), "{text}");
 }
+
+/// Issue 313: a fix task's work is its PR's, so it goes once that PR is merged.
+#[test]
+fn a_fix_task_whose_pr_is_merged_is_a_candidate() {
+    let f = fixture();
+    let id = "fix-7-1234567890ab";
+    let mut task = record::Record::new(
+        &record::NewTask {
+            kind: record::Kind::Fix,
+            number: 7,
+            repo: "o/r",
+            title: "Add the x feature",
+            base: "main",
+            branch: "feature-x",
+            config_hash: "h",
+            id: Some(id),
+        },
+        0,
+        Process::new(1, 0),
+    );
+    task.stage = Stage::Finished;
+    task.status = Status::Ok;
+    record::write(&record::task_dir(&f.env.base_dir(), id), &task).unwrap();
+    let github = FakeGitHub::default().with_pr(PrInfo {
+        number: 7,
+        head_ref: "feature-x".into(),
+        head_oid: "0".repeat(40),
+        is_cross_repository: false,
+        head_repo: String::new(),
+        state: PrState::Merged,
+        title: "Add the x feature".into(),
+        body: String::new(),
+        closing_issues: vec![],
+    });
+
+    let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Gone).unwrap();
+
+    assert_eq!(found.candidates.len(), 1, "{found:?}");
+    assert_eq!(found.candidates[0].id, id);
+    assert!(found.candidates[0].reason.contains("#7"));
+}
