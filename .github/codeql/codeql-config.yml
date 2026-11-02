@@ -1,0 +1,9 @@
+# CodeQL configuration for .github/workflows/codeql.yml (issue 336).
+# Test code is not analysed: its assertion messages print fake backend values, which
+# rust/cleartext-logging counted as logged secrets (over 150 alerts, all dismissed as
+# "used in tests"). src/ stays fully analysed. Secret-shaped values in tests must still be
+# obviously fake (for example sk-ant-FAKE-NOT-A-REAL-KEY).
+name: sbxm CodeQL config
+
+paths-ignore:
+  - tests
