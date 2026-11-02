@@ -403,6 +403,7 @@ fn main() -> anyhow::Result<()> {
                     issue,
                     tier,
                     dry_run,
+                    ignore_disk,
                 },
         } => {
             let (mut out, warn) = task_writers(vec![format!("issue-{issue}")], None)?;
@@ -419,6 +420,7 @@ fn main() -> anyhow::Result<()> {
                         },
                         dry_run,
                         identity: None,
+                        disk: sbxm::disk::Guard::real(ignore_disk),
                     },
                     &SbxBackend::LOCAL,
                     &task::record::SystemProbe,

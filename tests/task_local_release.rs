@@ -574,3 +574,62 @@ fn each_fix_round_fed_by_failing_gates_removes_its_sandbox_before_the_next_one()
     );
     assert!(removed.last().unwrap() < &all(&backend, &format!("create {REVIEWER}"))[0]);
 }
+
+fn task_gates_cmd(
+    f: &Fixture,
+    backend: &FakeBackend,
+    disk: sbxm::disk::Guard,
+) -> anyhow::Result<()> {
+    sbxm::commands::task_gates::run(
+        &f.env.config_dir(),
+        &sbxm::commands::task_gates::Options {
+            repo_root: f.env.tmp.path().join("target-repo"),
+            issue: 41,
+            tiers: Tiers::ALL,
+            dry_run: false,
+            identity: None,
+            disk,
+        },
+        backend,
+        &common::task_fixture::Probe,
+        &sbxm::task::gates::FakeHostRunner::default(),
+        &mut Vec::new(),
+    )
+}
+
+/// M-1: `task gates` that would make the worker's sandbox again checks the free disk first
+/// (decision 194), and refuses before any `sbx` call or write.
+#[test]
+fn task_gates_that_would_make_the_sandbox_again_refuse_on_low_disk() {
+    let f = config(1);
+    let backend = gates(backend(&f, &[CLEAN]), &[]);
+    start(&f, &backend);
+    let before =
+        std::fs::read(record::task_dir(&f.env.base_dir(), "issue-41").join("task.json")).unwrap();
+    let calls = backend.log().len();
+
+    let err = task_gates_cmd(&f, &backend, common::low_disk(&f.env)).unwrap_err();
+
+    assert!(format!("{err:#}").starts_with(common::LOW_DISK), "{err:#}");
+    assert_eq!(backend.log().len(), calls, "{:?}", backend.log());
+    assert_eq!(
+        std::fs::read(record::task_dir(&f.env.base_dir(), "issue-41").join("task.json")).unwrap(),
+        before
+    );
+}
+
+/// M-1: `--ignore-disk` lets it make the sandbox again.
+#[test]
+fn task_gates_with_ignore_disk_make_the_sandbox_again_on_low_disk() {
+    let f = config(1);
+    let backend = gates(backend(&f, &[CLEAN]), &[]);
+    start(&f, &backend);
+    let disk = sbxm::disk::Guard {
+        ignore: true,
+        ..common::low_disk(&f.env)
+    };
+
+    task_gates_cmd(&f, &backend, disk).unwrap();
+
+    assert_eq!(all(&backend, &format!("create {WORKER}")).len(), 2);
+}

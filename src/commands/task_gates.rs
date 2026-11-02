@@ -9,6 +9,7 @@ use anyhow::{Result, bail};
 
 use crate::backend::{Location, SandboxBackend};
 use crate::config::GlobalConfig;
+use crate::disk;
 use crate::harness::Harness;
 use crate::run::orchestrate::in_sandbox_path;
 use crate::task::config::TaskConfig;
@@ -26,6 +27,8 @@ pub struct Options {
     /// For tests: the committer identity a cloud worker sandbox made again for the gates gives
     /// its clone, instead of the user's global git config (milestone 4 slice 6).
     pub identity: Option<Identity>,
+    /// The free-space check before the worker's sandbox is made again (decision 194).
+    pub disk: disk::Guard,
 }
 
 fn limit(duration: Duration) -> String {
@@ -59,7 +62,8 @@ pub fn run(
         bail!("issue numbers start at 1; pass --issue <n>");
     }
     let config = TaskConfig::load(&opts.repo_root)?;
-    let base_dir = GlobalConfig::load(config_dir)?.base_dir;
+    let global = GlobalConfig::load(config_dir)?;
+    let base_dir = global.base_dir.clone();
     let id = format!("issue-{}", opts.issue);
     if opts.dry_run {
         return dry_run(&config, &base_dir, &id, opts, out);
@@ -69,6 +73,17 @@ pub fn run(
     pipeline::check_can_gate(&prepared.record, probe)?;
     // The gates run where the task's record says (decision 253), whatever the config says now.
     let location = prepared.record.location;
+    // A local task whose worker sandbox went when its last phase ended makes it again for the
+    // gates (issue 341), so the drive of `sbx`'s sandbox state is checked first (decision 194).
+    if location == Location::Local
+        && prepared
+            .record
+            .worker
+            .as_ref()
+            .is_some_and(|w| !prepared.record.has_open_sandbox(&w.sandbox))
+    {
+        disk::require(&global, config_dir, &opts.disk)?;
+    }
     let identity = match (location, &opts.identity) {
         (Location::Local, _) => None,
         (Location::Cloud, Some(identity)) => Some(identity.clone()),
