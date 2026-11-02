@@ -209,6 +209,11 @@ fn a_multi_line_result_text_is_shown_on_one_line() {
         shown,
         "claude reported an error: API Error: 401 OAuth token has expired. Please run /login"
     );
+    // A lone carriage return would also move the cursor back over the message.
+    assert_eq!(
+        failure_of(&is_error_with_result(Some("first\rsecond"))),
+        "claude reported an error: first second"
+    );
 }
 
 #[test]

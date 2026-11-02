@@ -231,11 +231,12 @@ fn claude_error(event: &Value) -> String {
     }
 }
 
-/// `text`'s lines, trimmed and joined by single spaces with the empty ones dropped, cut to
-/// `max` characters, the last of them `…` when anything was cut.
+/// `text`'s lines (split at every line feed and carriage return), trimmed and joined by single
+/// spaces with the empty ones dropped, cut to `max` characters, the last of them `…` when
+/// anything was cut.
 fn one_line(text: &str, max: usize) -> String {
     let joined = text
-        .lines()
+        .split(['\n', '\r'])
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>()
