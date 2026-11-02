@@ -294,3 +294,49 @@ fn a_second_fix_of_the_same_head_is_refused_before_any_write() {
     );
     assert!(backend.log().is_empty(), "{:?}", backend.log());
 }
+
+#[test]
+fn a_review_that_looks_like_it_holds_a_secret_stops_the_push_and_names_where_the_result_is() {
+    let f = fixture();
+    let (prepared, head) = ready_fix(&f);
+    fs::write(
+        prepared.meta.join("review.md"),
+        "Must-fix findings: 0\n\npassword = hunter2\n",
+    )
+    .unwrap();
+    let github = FakeGitHub::default();
+
+    let message = format!(
+        "{:#}",
+        finish_fix(&f.env.base_dir(), &prepared.record.id, &github, &Probe).unwrap_err()
+    );
+
+    assert!(
+        message.contains(&format!(
+            "review.md line 3 looks like a secret (a password or token assignment), so nothing \
+             was pushed to PR #7 and nothing posted; the result is kept in {} as feature-x",
+            prepared.meta.join("repo.git").display()
+        )),
+        "{message}"
+    );
+    assert_eq!(origin_head(&f), head);
+    assert!(github.calls().is_empty());
+}
+
+#[test]
+fn task_finish_refuses_a_fix_task() {
+    let f = fixture();
+    let (prepared, head) = ready_fix(&f);
+    let message = format!(
+        "{:#}",
+        sbxm::task::finish::finish(
+            &f.env.base_dir(),
+            &prepared.record.id,
+            &FakeGitHub::default(),
+            &Probe
+        )
+        .unwrap_err()
+    );
+    assert!(message.contains("is a fix task"), "{message}");
+    assert_eq!(origin_head(&f), head);
+}

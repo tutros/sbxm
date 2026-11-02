@@ -1396,16 +1396,21 @@ fn refuse_workflow_changes(id: &str, changed: &[String]) -> Result<()> {
     );
 }
 
+/// `<name> line <n> looks like a secret (<kind>)` for the first line of `text` that does.
+fn secret_line(name: &str, text: &str) -> Option<String> {
+    text.lines().enumerate().find_map(|(n, line)| {
+        super::findings::secret_kind(line)
+            .map(|kind| format!("{name} line {} looks like a secret ({kind})", n + 1))
+    })
+}
+
 fn refuse_secrets(name: &str, text: &str) -> Result<()> {
-    for (n, line) in text.lines().enumerate() {
-        if let Some(kind) = super::findings::secret_kind(line) {
-            bail!(
-                "{name} line {} looks like a secret ({kind}); remove it from the file in the task folder, then run `sbxm task finish` again",
-                n + 1
-            );
-        }
+    match secret_line(name, text) {
+        Some(found) => bail!(
+            "{found}; remove it from the file in the task folder, then run `sbxm task finish` again"
+        ),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Pushes the task's branch from its `repo.git` and opens the PR (spec §4): every check first,
@@ -1421,6 +1426,9 @@ pub fn finish(
     let mut prepared = Prepared::open(base_dir, id)?;
     if prepared.record.kind == record::Kind::Spec {
         bail!("task {id} is a spec task; it finishes through its [finish] sink, never a PR");
+    }
+    if prepared.record.kind == record::Kind::Fix {
+        bail!("task {id} is a fix task; `sbxm task fix` pushes it onto its PR's branch itself");
     }
     check_can_finish(&prepared.record)?;
     let task = prepared.record.clone();
@@ -1653,12 +1661,20 @@ pub fn finish_fix(
     let tip = repo::branch_tip(&repo_git, branch)?;
     let commits = repo::commit_lines(&repo_git, &continued.base, branch)?;
     let review = read_capped(&prepared.meta.join("review.md"))?;
-    if let Some(text) = &review {
-        refuse_secrets("review.md", text)?;
-    }
     let unresolved = unresolved_reasons(&task, review.as_deref());
     let risk_text = risk_section(&task, &unresolved);
-    refuse_secrets("the risk section", &risk_text)?;
+    // The review is published with the push, so a secret in it stops both; no command pushes a
+    // fix task later, so the result's place is what helps.
+    let secret = review
+        .as_deref()
+        .and_then(|text| secret_line("review.md", text))
+        .or_else(|| secret_line("the risk section", &risk_text));
+    if let Some(found) = secret {
+        bail!(
+            "{found}, so nothing was pushed to PR #{pr} and nothing posted; {}",
+            kept_in(&prepared, branch)
+        );
+    }
     // The in-task review becomes the review of the PR's new head when it covered that commit.
     let posting = reviewed_head(&task, &tip).zip(review);
     let review_again = review::review_pr_command(pr, &task.repo, Some(&task.base), false);
