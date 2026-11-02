@@ -25,8 +25,10 @@ build sbxm tasks run with (a machine's own wrapper; never a fresh `cargo run`).
 
 - Location first: `--local`/`--cloud`, else `[sandbox] location` in `sbxm-task.toml`. Every `sbx` command below
   takes `--cloud` for a cloud task (`sbx --cloud secret ls`, `sbx --cloud rm`); disk and templates are local only.
-- Local: free space on the drive holding `sbx`'s state (`<sbxm> doctor`): a Rust worker needs about 9 GiB above
-  `min_free_disk`. Free it by removing finished workers' sandboxes (stage 4), never by moving `sbx` state.
+- Local: free space on the drive holding `sbx`'s state (`<sbxm> doctor`): a Rust worker needs about 15-20 GiB above
+  `min_free_disk` (about 19 GiB per worker in milestone 4, 2026-10-30 retro; issue 343's worker took about 15 GB on
+  2026-10-31 and its sandbox went read-only). Free it by removing finished workers' sandboxes (stage 4), never by
+  moving `sbx` state.
 - Local templates (G1): a strict template is stale when the profile or `main`'s lock files changed since it was
   built; rebuild from a clean checkout of `main`: `<sbxm> template build <profile> --harness <h> --warm <checkout>`,
   one harness at a time (after a profile change, `just deploy-profiles` first). When the **worker** changed
