@@ -575,6 +575,45 @@ fn each_fix_round_fed_by_failing_gates_removes_its_sandbox_before_the_next_one()
     assert!(removed.last().unwrap() < &all(&backend, &format!("create {REVIEWER}"))[0]);
 }
 
+/// M-2: a local task saved before issue 341 has no lifetime entries; its worker sandbox, still
+/// there, is taken as the task's and removed before the reviewer is created.
+#[test]
+fn a_task_saved_without_lifetime_entries_still_has_its_worker_sandbox_removed() {
+    let f = config(1);
+    // The removal at the end of the worker's phase fails, so the sandbox stays.
+    let backend = gates(backend(&f, &[CLEAN]), &[]).with_remove_errors(&["`sbx rm` failed: busy"]);
+    start(&f, &backend);
+    let mut task = saved(&f);
+    task.sandboxes.clear();
+    record::write(&record::task_dir(&f.env.base_dir(), "issue-41"), &task).unwrap();
+
+    let (_, reviewed) = review(&f, &backend);
+
+    assert_eq!(reviewed.unwrap().must_fix_left, 0);
+    let removed = all(&backend, &format!("rm {WORKER}"));
+    assert_eq!(removed.len(), 2, "{:?}", backend.log());
+    assert!(removed[1] < all(&backend, &format!("create {REVIEWER}"))[0]);
+    assert_eq!(lives(&f), vec![(SandboxRole::Worker, true)]);
+}
+
+/// M-2: a task saved without lifetime entries whose sandbox is gone records nothing and removes
+/// nothing.
+#[test]
+fn a_task_saved_without_lifetime_entries_and_no_sandbox_removes_nothing() {
+    let f = config(1);
+    let backend = gates(backend(&f, &[CLEAN]), &[]);
+    start(&f, &backend);
+    let mut task = saved(&f);
+    task.sandboxes.clear();
+    record::write(&record::task_dir(&f.env.base_dir(), "issue-41"), &task).unwrap();
+
+    let (_, reviewed) = review(&f, &backend);
+
+    assert_eq!(reviewed.unwrap().must_fix_left, 0);
+    assert_eq!(all(&backend, &format!("rm {WORKER}")).len(), 1);
+    assert!(lives(&f).is_empty(), "{:?}", lives(&f));
+}
+
 fn task_gates_cmd(
     f: &Fixture,
     backend: &FakeBackend,

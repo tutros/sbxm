@@ -2282,7 +2282,9 @@ fn ensure_local_worker(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
 /// reviewer sandbox is created. Uncommitted changes in the worker's clone are named first (they
 /// stay in the workspace); then the removal ([`lifetime::release_local`]). Nothing for a cloud
 /// task, whose worker sandbox lives through the automatic run (P5 (d), decision 263), or when
-/// the task has no open entry for the sandbox. Never fails: what it says is returned in order.
+/// the task has no open entry for the sandbox. A record with no entry for it at all (saved
+/// before issue 341) gets one first when `sbx ls` lists the sandbox. Never fails: what it says
+/// is returned in order.
 pub fn release_local_worker(
     backend: &dyn SandboxBackend,
     prepared: &mut Prepared,
@@ -2290,10 +2292,32 @@ pub fn release_local_worker(
     let Some(sandbox) = prepared.record.worker.as_ref().map(|w| w.sandbox.clone()) else {
         return Vec::new();
     };
-    if prepared.record.location != Location::Local || !prepared.record.has_open_sandbox(&sandbox) {
+    if prepared.record.location != Location::Local {
         return Vec::new();
     }
     let mut said = Vec::new();
+    // A record saved before issue 341 has no entry for its worker sandbox at all (one whose entry
+    // is closed was removed): when `sbx ls` still lists it, it is the task's, and goes like any.
+    if !prepared.record.sandboxes.iter().any(|s| s.name == sandbox) {
+        match backend.list() {
+            Ok(listed) if listed.iter().any(|s| s.name == sandbox) => {
+                prepared.record.add_sandbox(
+                    &sandbox,
+                    SandboxRole::Worker,
+                    Location::Local,
+                    now(),
+                    0,
+                );
+            }
+            Ok(_) => {}
+            Err(e) => said.push(lifetime::Released::Warning(format!(
+                "could not check whether sandbox {sandbox} is still there: {e:#}"
+            ))),
+        }
+    }
+    if !prepared.record.has_open_sandbox(&sandbox) {
+        return said;
+    }
     let ws = prepared.sandbox_clone().to_string_lossy().into_owned();
     if let Ok(out) = backend.exec(
         &sandbox,
