@@ -128,6 +128,8 @@ impl User {
                 Kind::Issue => format!("sbxm task rm --issue {number}"),
                 Kind::Pr => format!("sbxm task rm --pr {number}"),
                 Kind::Spec => "sbxm task rm --spec <its spec file>".to_owned(),
+                // No `task rm` flag names a fix task (issue 313); it goes once its PR merges.
+                Kind::Fix => format!("sbxm task rm --merged (once PR #{number} is merged)"),
             },
         }
     }

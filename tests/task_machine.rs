@@ -26,7 +26,11 @@ impl ProcessProbe for Probe {
 fn record_in(state: &State) -> Record {
     // A spec id isn't `<prefix>-<number>` (record::spec_id's format), so the default naming
     // would build an id `plan_removal` refuses as invalid before it even reads the state.
-    let id = (state.kind == Kind::Spec).then_some("spec-t-abc123");
+    let id = match state.kind {
+        Kind::Spec => Some("spec-t-abc123"),
+        Kind::Fix => Some("fix-7-1234567890ab"),
+        Kind::Issue | Kind::Pr => None,
+    };
     let mut record = Record::new(
         &NewTask {
             kind: state.kind,
@@ -55,7 +59,7 @@ fn guard(state: &State, event: Event) -> bool {
     match event {
         Event::Gates => check_can_gate(&record, &probe).is_ok(),
         Event::Review => match state.kind {
-            Kind::Issue | Kind::Spec => check_can_review(&record, &probe).is_ok(),
+            Kind::Issue | Kind::Spec | Kind::Fix => check_can_review(&record, &probe).is_ok(),
             Kind::Pr => check_can_review_pr(&record).is_ok(),
         },
         Event::Finish => check_can_finish(&record).is_ok(),
@@ -122,7 +126,7 @@ fn is_asked(state: &State, event: Event) -> bool {
 /// The differences between the table and the guards, as `<key>: table says X, guard says Y`.
 fn differences() -> BTreeSet<String> {
     let mut found = BTreeSet::new();
-    for kind in [Kind::Issue, Kind::Pr, Kind::Spec] {
+    for kind in [Kind::Issue, Kind::Pr, Kind::Spec, Kind::Fix] {
         for state in states(kind) {
             for event in events() {
                 if !is_asked(&state, event) {
@@ -174,7 +178,7 @@ const EXPECTED: &[&str] = &[];
 /// is no hidden ambiguity for a row's destination and action to resolve.
 #[test]
 fn every_state_event_pair_matches_at_most_one_row() {
-    for kind in [Kind::Issue, Kind::Pr, Kind::Spec] {
+    for kind in [Kind::Issue, Kind::Pr, Kind::Spec, Kind::Fix] {
         for state in states(kind) {
             for event in events() {
                 let rows = matching(&state, event);
@@ -225,4 +229,6 @@ fn the_dead_ends_are_the_gaps_the_spec_lists() {
     // A spec task runs the same stages as an issue task (issue 142), and since issue 143 its
     // `ready` moves on through `finish` and the `[finish] sink`, so it has the same dead ends.
     assert!(names(Kind::Spec).is_empty(), "{:?}", names(Kind::Spec));
+    // A fix task of a PR (issue 313) runs the stages of an issue task too.
+    assert!(names(Kind::Fix).is_empty(), "{:?}", names(Kind::Fix));
 }

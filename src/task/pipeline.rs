@@ -1692,6 +1692,9 @@ fn task_flag(record: &Record) -> String {
         Kind::Pr => format!("--pr {}", record.number),
         Kind::Spec => "--spec <file>".to_owned(),
         Kind::Issue => format!("--issue {}", record.number),
+        // No flag names a fix task yet (issue 313): the placeholder says so, never another
+        // task's flag.
+        Kind::Fix => format!("<no flag names fix task {} yet>", record.id),
     }
 }
 
@@ -2886,7 +2889,7 @@ pub fn check_can_review(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
     super::resume::refuse_ambiguous(task, "be reviewed")?;
     // A spec task has no issue number: its status is read without a filter.
     let status_hint = match task.kind {
-        record::Kind::Spec => "sbxm task status".to_owned(),
+        record::Kind::Spec | record::Kind::Fix => "sbxm task status".to_owned(),
         _ => format!("sbxm task status --issue {}", task.number),
     };
     // What continues a failed or interrupted stage (issue 118).
@@ -2924,9 +2927,11 @@ pub fn check_can_review(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
             "task {id} is already being reviewed or has been (stage reviewing); if the sbxm \
              process that ran it is gone, continue it with `{resume}`, or see `{status_hint}`"
         ),
-        (Stage::Prepared, _) if task.kind == record::Kind::Spec => bail!(
-            "no worker has run for task {id}; see `{status_hint}`, and remove its folders under the base dir to start it again"
-        ),
+        (Stage::Prepared, _) if matches!(task.kind, record::Kind::Spec | record::Kind::Fix) => {
+            bail!(
+                "no worker has run for task {id}; see `{status_hint}`, and remove its folders under the base dir to start it again"
+            )
+        }
         (Stage::Prepared, _) => {
             bail!("no worker has run for task {id}; run `sbxm task start` first")
         }
@@ -3549,19 +3554,23 @@ pub(super) fn fix_input(
         .worker
         .as_ref()
         .context("the task has no worker")?;
-    let is_spec = prepared.record.kind == Kind::Spec;
+    let kind = prepared.record.kind;
     let (role, extra_name, extra_text) = match gate_failure {
         None => (
-            if is_spec { Role::FixSpec } else { Role::Fix },
+            match kind {
+                Kind::Spec => Role::FixSpec,
+                Kind::Fix => Role::FixPrFix,
+                Kind::Issue | Kind::Pr => Role::Fix,
+            },
             "review.md",
             fs::read_to_string(prepared.meta.join("review.md"))
                 .context("the review to fix is missing; run the review again")?,
         ),
         Some(outcome) => (
-            if is_spec {
-                Role::FixGateSpec
-            } else {
-                Role::FixGate
+            match kind {
+                Kind::Spec => Role::FixGateSpec,
+                Kind::Fix => Role::FixGatePrFix,
+                Kind::Issue | Kind::Pr => Role::FixGate,
             },
             "gate-failure.md",
             gate_failure_text(outcome),
@@ -4177,6 +4186,7 @@ fn reviewer_clone(prepared: &Prepared, clone: &Path) -> PathBuf {
 fn resume_command(task: &Record) -> String {
     match task.kind {
         Kind::Spec => "sbxm task resume --spec <file>".to_owned(),
+        Kind::Fix => format!("sbxm task resume {}", task_flag(task)),
         _ => format!("sbxm task resume --issue {}", task.number),
     }
 }
@@ -4279,6 +4289,7 @@ fn review_files(
         Kind::Pr => ("issue.md", Role::ReviewerPr),
         Kind::Spec => ("source.md", Role::ReviewerSpec),
         Kind::Issue => ("issue.md", Role::Reviewer),
+        Kind::Fix => ("issue.md", Role::ReviewerPrFix),
     };
     let issue = fs::read_to_string(prepared.meta.join(source_file)).unwrap_or_default();
     // Narrow to the commits since the last review when one is recorded, else the task's whole

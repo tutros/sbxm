@@ -1328,7 +1328,7 @@ pub fn check_can_finish(task: &Record) -> Result<()> {
     }
     match task.kind {
         record::Kind::Pr => bail!("task {id} is a PR review; only an issue's task can be finished"),
-        record::Kind::Issue | record::Kind::Spec => {}
+        record::Kind::Issue | record::Kind::Spec | record::Kind::Fix => {}
     }
     let spec = task.kind == record::Kind::Spec;
     match (task.stage, task.status) {

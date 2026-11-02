@@ -390,7 +390,8 @@ pub fn plan_forgetting(
         }
         match task.kind {
             Kind::Issue => check_issue(base_dir, &task, github, probe, &mut out)?,
-            Kind::Pr => check_pr_review(base_dir, &task, github, probe, &mut out)?,
+            // A fix task's work is its PR's (issue 313): merged once the PR is.
+            Kind::Pr | Kind::Fix => check_pr_review(base_dir, &task, github, probe, &mut out)?,
             Kind::Spec => check_spec(base_dir, &task, repo_root, probe, &mut out)?,
         }
     }

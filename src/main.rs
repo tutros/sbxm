@@ -20,7 +20,9 @@ fn task_id(kind: task::record::Kind, number: u32) -> String {
     match kind {
         task::record::Kind::Issue => format!("issue-{number}"),
         task::record::Kind::Pr => format!("pr-{number}"),
-        task::record::Kind::Spec => unreachable!("the CLI never passes --spec here"),
+        task::record::Kind::Spec | task::record::Kind::Fix => {
+            unreachable!("the CLI never passes --spec or a fix task here")
+        }
     }
 }
 
