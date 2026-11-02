@@ -461,3 +461,89 @@ fn a_raw_question_no_chunk_answered_stays_unanswered() {
     assert!(combined.questions.is_empty());
     assert_eq!(combined.unanswered, ["tests", "approach", "depth"]);
 }
+
+// Issue 361: a Choice whose distribution omits its pick, recovered from `confidence`.
+fn partial_choice() -> Answered {
+    jev::parse_response(
+        &response(with(json!({
+            "approach": {
+                "type": "choice",
+                "choice": "refactor",
+                "confidence": 0.8,
+                "probabilities": {"rewrite": 0.2},
+            },
+        }))),
+        &rubric(),
+        &raw(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn identical_chunks_omitting_the_pick_keep_its_recovered_probability() {
+    let parsed = partial_choice();
+    let combined = jev::combine(&[(100, parsed.clone()), (100, parsed)], &rubric(), &raw());
+    assert_eq!(
+        combined.questions["approach"],
+        RawAnswer::Choice {
+            choice: "refactor".into(),
+            probability: 0.8,
+            probabilities: [("refactor".into(), 0.8), ("rewrite".into(), 0.2)].into(),
+        }
+    );
+}
+
+#[test]
+fn identical_chunks_with_a_complete_distribution_combine_unchanged() {
+    let one = answered(&[(
+        "approach",
+        picked("refactor", &[("refactor", 0.6), ("rewrite", 0.4)]),
+    )]);
+    let combined = jev::combine(&[(100, one.clone()), (100, one)], &rubric(), &raw());
+    assert_eq!(
+        combined.questions["approach"],
+        picked("refactor", &[("refactor", 0.6), ("rewrite", 0.4)])
+    );
+}
+
+#[test]
+fn identical_confidence_only_chunks_combine_to_their_pick() {
+    let one = answered(&[(
+        "approach",
+        RawAnswer::Choice {
+            choice: "refactor".into(),
+            probability: 0.6,
+            probabilities: BTreeMap::new(),
+        },
+    )]);
+    let combined = jev::combine(&[(100, one.clone()), (100, one)], &rubric(), &raw());
+    assert_eq!(
+        combined.questions["approach"],
+        picked("refactor", &[("refactor", 0.6)])
+    );
+}
+
+#[test]
+fn a_recovered_pick_enters_the_size_weighted_mean_like_a_listed_entry() {
+    let complete = answered(&[(
+        "approach",
+        picked("rewrite", &[("refactor", 0.2), ("rewrite", 0.8)]),
+    )]);
+    let combined = jev::combine(
+        &[(100, partial_choice()), (300, complete)],
+        &rubric(),
+        &raw(),
+    );
+    // refactor: (100 * 0.8 + 300 * 0.2) / 400 = 0.35; rewrite: (100 * 0.2 + 300 * 0.8) / 400 = 0.65.
+    assert_eq!(
+        combined.questions["approach"],
+        picked("rewrite", &[("refactor", 0.35), ("rewrite", 0.65)])
+    );
+}
+
+#[test]
+fn a_single_chunk_omitting_its_pick_is_kept_as_parsed() {
+    let parsed = partial_choice();
+    let combined = jev::combine(&[(100, parsed.clone())], &rubric(), &raw());
+    assert_eq!(combined, parsed);
+}

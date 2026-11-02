@@ -691,14 +691,11 @@ fn combine_raw(answered: &[(f64, &RawAnswer)]) -> Option<RawAnswer> {
                     probabilities,
                 } = a
                 {
-                    // A chunk without a distribution counts its pick at its probability.
-                    let one = BTreeMap::from([(choice.clone(), *probability)]);
-                    let distribution = if probabilities.is_empty() {
-                        &one
-                    } else {
-                        probabilities
-                    };
-                    for (id, p) in distribution {
+                    // A distribution that omits the pick (or a chunk without one) counts the pick
+                    // at its probability, recovered from `confidence`, next to the listed entries.
+                    let pick =
+                        (!probabilities.contains_key(choice)).then_some((choice, probability));
+                    for (id, p) in probabilities.iter().chain(pick) {
                         *sums.entry(id.clone()).or_default() += w * p;
                     }
                 }
