@@ -71,14 +71,14 @@ stateDiagram-v2
   Gating --> Fixing: gates-failed + rounds left
   Gating --> GateStop: gates-failed, no rounds left<br/>or gate could not run
 
-  Reviewing --> Fixing: must-fix > 0, rounds left, no repeat
-  Reviewing --> Reviewing: narrow review clean → one full review
-  Reviewing --> Ready: full review clean
-  Reviewing --> ReadyStopped: rounds-exhausted / repeat-finding
+  Reviewing --> Fixing: issue/spec: must-fix > 0, rounds left, no repeat
+  Reviewing --> Reviewing: issue/spec: narrow review clean → one full review
+  Reviewing --> Ready: issue/spec: full review clean<br/>PR task: any finding count (no fix rounds)
+  Reviewing --> ReadyStopped: issue/spec: rounds-exhausted / repeat-finding
 
-  Ready --> Finished: task finish
-  ReadyStopped --> Finished: task finish (draft PR)
-  ReadyStopped --> Fixing: task resume [--rounds N]
+  Ready --> Finished: issue/spec: task finish
+  ReadyStopped --> Finished: issue: task finish (draft PR)<br/>spec: local sink, or push with --push-unresolved
+  ReadyStopped --> Fixing: issue/spec: task resume [--rounds N]
   Ready --> Gating: PR task: review --pr on a new head
 
   state "Ready (ok)" as Ready
@@ -95,13 +95,15 @@ stateDiagram-v2
   state "prepared failed / interrupted" as P
   state "working failed / interrupted" as W
   state "gating ended / interrupted" as G
-  state "reviewing failed / interrupted" as RV
+  state "reviewing failed" as RVF
+  state "reviewing interrupted" as RVI
   state "reviewing completed (process gone)" as RC
   state "fixing failed / interrupted" as F
   P --> Working: resume (sandbox made again)
   W --> Working: resume (same clone)
   G --> Reviewing: resume / review (gates re-run if failed)
-  RV --> Reviewing: resume / review (retry)
+  RVF --> Reviewing: resume / review (retry)
+  RVI --> Reviewing: resume only (review refuses it)
   RC --> Fixing: resume replays recorded review<br/>(fix round, else ready)
   F --> Fixing: resume (same input)
 ```
@@ -128,7 +130,7 @@ flowchart TD
   GT -- failed, no rounds --> GSTOP2([stop: gates-failed])
   FX --> GT
   GT -- passed --> RVW[reviewer sandbox<br/>review-n.md: Must-fix, Risk]
-  RVW -- reviewer failed --> RFAIL([reviewing/failed → resume/review])
+  RVW -- reviewer failed --> RFAIL([reviewing/failed → resume or review])
   RVW --> MF{must-fix?}
   MF -- 0, narrow --> RVW
   MF -- 0, full --> RDY([ready ok])
@@ -150,8 +152,10 @@ flowchart TD
   PRQ -- no --> PROPEN([PR opened, risk section first → finished])
   PRQ -- yes --> PRDRAFT([draft PR with Unresolved → finished])
   FN -- spec, sink local --> LOC([branch kept in repo.git,<br/>fetch hint printed → finished])
-  FN -- spec, sink push --> SP([branch pushed to origin, no PR → finished])
-  FN -- spec, findings left --> SREF([refused unless push_unresolved])
+  FN -- spec, sink push --> SPQ{findings left?}
+  SPQ -- no --> SP([branch pushed to origin, no PR → finished])
+  SPQ -- yes --> SREF([refused unless --push-unresolved])
+  FN -- PR task --> PRREF([refused: a PR task has no finish])
   ANY([any non-running task]) --> RM{task rm}
   RM -- unfetched spec result --> RMREF([refused])
   RM --> GONE([sandboxes, secrets, folders removed])
