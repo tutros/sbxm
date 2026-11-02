@@ -75,6 +75,9 @@ pub fn review_to_fix(
     let number = pr.number;
     check_fixable(pr, repo, base)?;
     let review_again = review_pr_command(number, repo, base, false);
+    // The local `pr-N` task records the head an unusable review covers (or may cover) as
+    // reviewed, so only a forced review runs again; a review of an older head needs no force.
+    let review_head_again = review_pr_command(number, repo, base, true);
     let Some(latest) = comments
         .iter()
         .rev()
@@ -86,7 +89,7 @@ pub fn review_to_fix(
     let Some(covered) = parsed.head_sha.as_deref() else {
         bail!(
             "the latest sbxm review of PR #{number} has no `Scope:` range, so which commit it \
-             covers is unknown; review the head again with `{review_again}`"
+             covers is unknown; review the head again with `{review_head_again}`"
         );
     };
     let covered = covered.to_ascii_lowercase();
@@ -105,7 +108,7 @@ pub fn review_to_fix(
         bail!(
             "the latest sbxm review of PR #{number} (commit {commit}) was cut to fit a GitHub \
              comment, so not all of its must-fix findings are on the PR; review the head again \
-             with `{review_again}`"
+             with `{review_head_again}`"
         );
     }
     let must_fix: Vec<String> = parsed
@@ -118,7 +121,7 @@ pub fn review_to_fix(
         bail!(
             "the latest sbxm review of PR #{number} (commit {commit}) has no `Must-fix findings: \
              <n>` line, so whether all its must-fix findings were read can't be told; review the \
-             head again with `{review_again}`"
+             head again with `{review_head_again}`"
         );
     };
     if stated == 0 && must_fix.is_empty() {
@@ -135,7 +138,7 @@ pub fn review_to_fix(
         bail!(
             "the latest sbxm review of PR #{number} (commit {commit}) says it has {stated} \
              must-fix finding(s), but {read} could be read (each needs a `### M-1 - <title>` \
-             heading under `## Must fix`); review the head again with `{review_again}`"
+             heading under `## Must fix`); review the head again with `{review_head_again}`"
         );
     }
     let mut text = format!(

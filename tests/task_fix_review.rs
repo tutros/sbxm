@@ -221,6 +221,10 @@ fn a_review_without_a_scope_range_is_refused() {
         message.contains("the latest sbxm review of PR #7 has no `Scope:` range"),
         "{message}"
     );
+    assert!(
+        message.ends_with("`sbxm task review --pr 7 --repo o/r --force`"),
+        "{message}"
+    );
 }
 
 #[test]
@@ -233,6 +237,10 @@ fn a_must_fix_count_with_no_readable_findings_is_refused() {
     let message = refusal(&pr(), &[by("tutros", body)]);
     assert!(
         message.contains("says it has 2 must-fix finding(s), but none could be read"),
+        "{message}"
+    );
+    assert!(
+        message.ends_with("`sbxm task review --pr 7 --repo o/r --force`"),
         "{message}"
     );
 }
@@ -272,7 +280,7 @@ fn a_review_cut_before_a_later_must_fix_finding_is_refused() {
         message.contains(&format!(
             "the latest sbxm review of PR #7 (commit {HEAD}) was cut to fit a GitHub comment, so \
              not all of its must-fix findings are on the PR; review the head again with \
-             `sbxm task review --pr 7 --repo o/r`"
+             `sbxm task review --pr 7 --repo o/r --force`"
         )),
         "{message}"
     );
@@ -289,6 +297,10 @@ fn a_review_cut_inside_its_last_must_fix_finding_is_refused() {
 
     assert!(
         message.contains("was cut to fit a GitHub comment"),
+        "{message}"
+    );
+    assert!(
+        message.ends_with("`sbxm task review --pr 7 --repo o/r --force`"),
         "{message}"
     );
 }
@@ -321,6 +333,10 @@ fn a_must_fix_count_below_the_findings_read_is_refused() {
         message.contains("says it has 1 must-fix finding(s), but 2 could be read"),
         "{message}"
     );
+    assert!(
+        message.ends_with("`sbxm task review --pr 7 --repo o/r --force`"),
+        "{message}"
+    );
 }
 
 #[test]
@@ -337,6 +353,10 @@ fn a_review_with_no_must_fix_count_is_refused() {
         )),
         "{message}"
     );
+    assert!(
+        message.ends_with("`sbxm task review --pr 7 --repo o/r --force`"),
+        "{message}"
+    );
 }
 
 /// A complete review whose count matches still gives every must-fix finding.
@@ -349,4 +369,35 @@ fn a_long_review_that_was_not_cut_and_whose_count_matches_runs() {
 
     assert_eq!(chosen.must_fix, 3);
     assert!(chosen.text.contains("### M-3"));
+}
+
+/// Review round 2, M-1: a review of the current head that can't be used was published, so the
+/// local `pr-N` task records that head as reviewed, and only a forced review runs again; the
+/// base, when given, stays in the command.
+#[test]
+fn an_unusable_review_of_the_head_names_a_forced_review_with_the_base() {
+    let body = pr_comment(7, "", &padded(1, 1, 60_000));
+
+    let message = format!(
+        "{:#}",
+        review_to_fix(&pr(), "o/r", Some("dev"), "tutros", &[by("tutros", body)]).unwrap_err()
+    );
+
+    assert!(
+        message.ends_with("`sbxm task review --pr 7 --repo o/r --base dev --force`"),
+        "{message}"
+    );
+}
+
+/// Review round 2, M-1: no review, or one of an older head, needs no `--force`.
+#[test]
+fn no_review_and_a_stale_review_name_an_ordinary_review() {
+    for comments in [vec![], vec![by("tutros", posted(OLD, 1))]] {
+        let message = refusal(&pr(), &comments);
+        assert!(!message.contains("--force"), "{message}");
+        assert!(
+            message.contains("`sbxm task review --pr 7 --repo o/r`"),
+            "{message}"
+        );
+    }
 }

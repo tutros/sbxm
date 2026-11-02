@@ -1124,3 +1124,68 @@ fn a_codex_reviewer_without_a_model_records_none() {
         "{saved}"
     );
 }
+
+/// Issue 313, review round 2, M-1: a review of the PR's head that was cut to fit GitHub is
+/// refused by `task fix --pr`, and the command its refusal names reviews the head again though
+/// the local `pr-7` task already records that head as reviewed.
+#[test]
+fn the_command_a_cut_review_refusal_names_reviews_the_head_again() {
+    use sbxm::github::PrComment;
+    use sbxm::task::pr_fix::review_to_fix;
+
+    let f = config("codex");
+    let head = add_pr_head(&f, 7);
+    let github = pr_github();
+    let long = format!(
+        "Must-fix findings: 1\n\nScope: `0000000..{head}`\n\n## Must fix\n\n\
+         ### M-1 - a.txt:1 wrong.\n\n**What happens:** {}\n",
+        "x".repeat(60_000)
+    );
+    let backend = pr_backend(&f, &[&long, ONE]);
+    go_pr(&f, &pr_options(&f), &backend, &github)
+        .result
+        .unwrap();
+    let posted = github
+        .calls()
+        .iter()
+        .find_map(|c| match c {
+            GhCall::PrComment(_, 7, body) => Some(body.clone()),
+            _ => None,
+        })
+        .expect("the review is posted");
+    let mut pr = pr_info();
+    pr.head_oid = head;
+
+    let refusal = format!(
+        "{:#}",
+        review_to_fix(
+            &pr,
+            "o/r",
+            None,
+            "tutros",
+            &[PrComment {
+                author: "tutros".into(),
+                body: posted,
+            }],
+        )
+        .unwrap_err()
+    );
+    assert!(refusal.contains("was cut"), "{refusal}");
+    let command = refusal
+        .rsplit('`')
+        .nth(1)
+        .expect("the refusal names a command");
+    assert_eq!(command, "sbxm task review --pr 7 --repo o/r --force");
+
+    let mut follow = pr_options(&f);
+    follow.force = command.split(' ').any(|word| word == "--force");
+    let out = go_pr(&f, &follow, &backend, &github);
+
+    out.result.unwrap();
+    assert!(
+        out.out
+            .contains("pr-7: review round 2 by codex (default model): 1 must-fix finding(s)"),
+        "{}",
+        out.out
+    );
+}
