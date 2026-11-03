@@ -127,6 +127,12 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
     `ready`, with `stopped` set to `rounds-exhausted` in `task.json`, and `task finish` opens its PR as a draft whose
     body lists the reason and the must-fix findings left (issue 120); a clean task gets a normal PR. A task that
     continues an open PR puts the same list in its comment on that PR instead (it can't make the PR a draft).
+  - **The worker's hand-backs are on the PR (decision 283):** the PR description `task finish` opens, a draft's too,
+    has the `Needs a decision` and `Choices made` sections of the worker's `result.md` right after the risk section
+    and `Fixes #N`, in that order, so a choice the worker flagged is seen without reading the whole result. A
+    section that is absent, empty or "none" is left out; one over 2,500 characters is cut (the whole of it
+    stays in `result.md` in the task folder). The worker never stops to wait for an answer: it picks, flags the pick and goes on, and the user answers
+    on the PR. The review comment is unchanged.
   - `task start --spec FILE` makes a task from a file instead of a GitHub issue (id `spec-<name>-<hash>`,
     `source.md` in place of `issue.md`); `task review --spec FILE` continues it through the same gates/review/fix
     loop, and `task run --spec FILE` does both in one go, stopping before `finish` (with `--restart`, the spec is
