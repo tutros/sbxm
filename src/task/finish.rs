@@ -1105,7 +1105,7 @@ pub fn pr_body(
             let head: String = text.chars().take(HANDBACK_CAP).collect();
             body.push_str(head.trim_end());
             body.push_str(&format!(
-                "\n\n(cut: the \"{name}\" section has {total} characters; the first {HANDBACK_CAP} are shown, the whole of it is in the result below and in the task folder)\n"
+                "\n\n(cut: the \"{name}\" section has {total} characters; the first {HANDBACK_CAP} are shown, the whole of it is in result.md in the task folder)\n"
             ));
             cuts.push(format!(
                 "result.md's \"{name}\" section is {total} characters; the PR body's copy carries the first {HANDBACK_CAP}"
