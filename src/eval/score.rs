@@ -282,6 +282,72 @@ pub fn render_jev(jev: &JevRanking, labels: &[String]) -> String {
     )
 }
 
+/// Ranks a saved run by the human review's scores alone (issue 347), from the `human` key of
+/// each pair's `evals.json`, by the same rules as the judge's. `None` until scores are saved.
+pub fn load_human(meta: &Path) -> Result<Option<Ranking>> {
+    let config_path = meta.join("run-config.toml");
+    let config = RunConfig::load(&config_path).with_context(|| {
+        format!(
+            "cannot read the run's config copy {}",
+            config_path.display()
+        )
+    })?;
+    if config.eval.rubric.is_empty() {
+        return Ok(None);
+    }
+    let mut pairs = Vec::new();
+    for contestant in 0..config.contestants.len() {
+        for repeat in 0..config.run.repeat {
+            let dir = meta.join(contestant.to_string()).join(repeat.to_string());
+            let Some(result) = read_json(&dir.join("result.json")) else {
+                continue;
+            };
+            let evals = read_json(&dir.join("evals.json")).unwrap_or(Value::Null);
+            let human = &evals["human"];
+            let scores = human.is_object().then(|| {
+                human["criteria"]
+                    .as_object()
+                    .map(|criteria| {
+                        criteria
+                            .iter()
+                            .filter_map(|(id, c)| Some((id.clone(), c["score"].as_f64()?)))
+                            .collect()
+                    })
+                    .unwrap_or_default()
+            });
+            let checks = evals["checks"].as_array().cloned().unwrap_or_default();
+            pairs.push(PairInput {
+                contestant,
+                repeat,
+                status: result["status"].as_str().unwrap_or("").to_owned(),
+                judge: scores,
+                checks_passed: checks.iter().filter(|c| c["passed"] == true).count(),
+                checks_total: checks.len(),
+            });
+        }
+    }
+    if pairs.iter().all(|p| p.judge.is_none()) {
+        return Ok(None);
+    }
+    Ok(Some(rank(
+        &config.eval.rubric,
+        config.contestants.len(),
+        config.run.repeat,
+        &pairs,
+    )))
+}
+
+/// The human review's ranking as text, under its own heading; printed after the judge's and
+/// Jev's, never blended with them.
+pub fn render_human(ranking: &Ranking, labels: &[String]) -> String {
+    render_as(
+        "Human ranking (reviewer scores 0-1, repeats averaged, not blended with the others)",
+        "the reviewer",
+        ranking,
+        labels,
+    )
+}
+
 /// Jev's answers to the raw questions (issue 343) as text, one line per contestant and repeat,
 /// read from the same files as [`load_jev`]: a Choice's pick with its probability (its
 /// distribution stays in `evals.json`), a Noul's likelier answer with its probability, a Score's

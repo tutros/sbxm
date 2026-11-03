@@ -231,6 +231,35 @@ fn main() -> anyhow::Result<()> {
             print!("{text}");
             Ok(())
         }
+        Command::Run(RunArgs {
+            command:
+                Some(RunCommand::Review {
+                    run_id,
+                    submit: true,
+                    ..
+                }),
+            ..
+        }) => {
+            print!(
+                "{}",
+                commands::run_review::submit(&config::config_dir()?, &run_id)?
+            );
+            Ok(())
+        }
+        Command::Run(RunArgs {
+            command: Some(RunCommand::Review {
+                run_id, restart, ..
+            }),
+            ..
+        }) => {
+            let dir =
+                commands::run_review::prepare(&config::config_dir()?, &run_id, restart, &Terminal)?;
+            println!("Wrote the review of run {run_id} to {}", dir.display());
+            println!(
+                "Fill in each repeat-<n>/scores.toml, then run: sbxm run review {run_id} --submit"
+            );
+            Ok(())
+        }
         Command::Task {
             command: TaskCommand::Init { path },
         } => {

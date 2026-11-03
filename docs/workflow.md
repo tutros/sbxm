@@ -57,6 +57,7 @@ built into sbxm for templates. `doctor` fails on the template minimum only when 
 sbxm run init run.toml               # starter run-config: Claude against Codex
 sbxm run run.toml                    # one throwaway sandbox per contestant and repeat
 sbxm run show <run-id> [--diff]      # read a saved run
+sbxm run review <run-id> [--submit]  # score it yourself under blind labels, then save the scores
 ```
 
 Each contestant (harness, model, optional profile) gets a fresh copy of an optional seed folder. The answer, the diff

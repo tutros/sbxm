@@ -8,6 +8,7 @@ pub mod open;
 pub mod rm;
 pub mod run;
 pub mod run_init;
+pub mod run_review;
 pub mod run_show;
 pub mod status;
 pub mod stop;
