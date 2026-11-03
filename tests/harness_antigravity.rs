@@ -28,7 +28,7 @@ fn warnings(env: &Env) -> String {
         &env.config_dir(),
         "demo",
         &antigravity(),
-        &FakeBackend::default(),
+        &FakeBackend::with_secrets(&["google"]),
         &mut warn,
     )
     .unwrap();
@@ -38,7 +38,7 @@ fn warnings(env: &Env) -> String {
 #[test]
 fn creates_a_sandbox_from_the_pinned_kit() {
     let env = Env::new();
-    let backend = FakeBackend::default();
+    let backend = FakeBackend::with_secrets(&["google"]);
 
     env.run_with("demo", &antigravity(), &backend).unwrap();
 
@@ -90,8 +90,12 @@ fn mandatory_instructions_become_the_gemini_agents_home_file() {
     )
     .unwrap();
 
-    env.run_with("demo", &antigravity(), &FakeBackend::default())
-        .unwrap();
+    env.run_with(
+        "demo",
+        &antigravity(),
+        &FakeBackend::with_secrets(&["google"]),
+    )
+    .unwrap();
 
     let home_file = kit_dir(&env)
         .join("files")

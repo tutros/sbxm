@@ -13,6 +13,9 @@ this file shows how the commands fit together and when to use which. `sbxm` has 
    (the sandbox drive under `min_free_disk`).
 4. Store the provider secrets in `sbx` (`sbx secret ls`): `anthropic` for Claude, `openai` for Codex (also the default
    reviewer for a Claude worker), `google` for Antigravity. For `sbxm task`, run `gh auth setup-git` once.
+   For interactive Antigravity you can sign in inside the sandbox instead: `antigravity_auth = "login"` in
+   `config.toml` (see "Antigravity, interactive" below); `sbxm run` and `sbxm task` still need `google`, and
+   login mode refuses while `google` is stored globally, since `sbx` would inject it into the sandbox anyway.
 5. `just deploy-profiles` copies the repo's `profiles/*` into the folder `sbxm config profiles-dir` reports. It replaces
    whole profiles, so deploy from an up-to-date `main`: a profile change that is still on an open PR is lost if you
    deploy from another branch.
@@ -30,6 +33,22 @@ sbxm rm demo --harness claude        # keeps the workspace; --purge deletes it (
 The config has three layers: global `config.toml`, then a profile, then the project's `sandbox.toml`. A hash of the
 merged result is recorded with the sandbox. If the config changed, `open` refuses until you run `open --rebuild`.
 `sbxm config show` previews exactly what would be built, and `sbxm doctor` checks the setup.
+
+### Antigravity, interactive
+
+```
+# config.toml: antigravity_auth = "login"
+sbxm open demo --harness antigravity    # creates it without the `google` secret and attaches
+                                        # first time: sign in to Google inside agy
+sbxm open demo --harness antigravity    # later: the same sandbox, still signed in
+```
+
+With `antigravity_auth = "login"` the sign-in lives inside the sandbox, and `agy` refreshes its own token: sbxm stores
+none (decision 281). It lasts as long as the sandbox, across `open`, `stop` and `open`; a fresh `new` or an
+`open --rebuild` makes a new sandbox and needs a fresh sign-in. With the default `"api-key"`, `new`/`open` need the
+`google` secret and `agy` uses it as an API key instead. `sbxm run` and `sbxm task` always need `google`: their
+sandboxes are throwaway and unattended, so nobody can sign in to them. The `mcp-gateway` workaround of issue 287 runs
+only before headless runs; an interactive attach starts `agy` as the kit leaves it.
 
 ### Faster sandboxes from a template (optional, per profile)
 

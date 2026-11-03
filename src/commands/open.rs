@@ -41,6 +41,9 @@ pub fn run(
     if options.rebuild || !exists {
         disk::require(&config, config_dir, &options.disk)?;
     }
+    // Every path, attaching to an existing sandbox too: a `google` secret stored or removed since it
+    // was made would change what it gets on this restart (decision 284). Before the rebuild warning.
+    new::check_antigravity_key(&config, harness, config_dir, backend)?;
 
     match (entry, exists) {
         (Some(entry), true) if options.rebuild => {

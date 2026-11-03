@@ -426,6 +426,25 @@ fn antigravity_needs_the_google_secret() {
     );
 }
 
+/// Issue 384: `antigravity_auth = "login"` frees only interactive sandboxes; a headless
+/// contestant or judge can't sign in, so it still needs the `google` secret.
+#[test]
+fn login_mode_still_needs_the_google_secret_for_a_run() {
+    let env = Env::new();
+    env.set_config("antigravity_auth = \"login\"");
+    let backend = FakeBackend::with_secrets(&["anthropic", "openai"]);
+
+    let err = preflight_of(&env, &format!("{TASK}{CLAUDE}{ANTIGRAVITY}"), &backend)
+        .unwrap_err()
+        .to_string();
+
+    assert!(
+        err.contains("'google'") && err.contains("antigravity"),
+        "{err}"
+    );
+    assert_nothing_created(&env, &backend);
+}
+
 #[test]
 fn the_judges_provider_is_checked_even_if_no_contestant_uses_it() {
     let env = Env::new();

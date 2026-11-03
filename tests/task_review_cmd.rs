@@ -325,6 +325,25 @@ fn the_reviewer_flags_override_the_file_and_are_checked_before_anything_is_creat
     assert_eq!(good.creates().len(), before, "nothing was created");
 }
 
+/// Issue 384: `antigravity_auth = "login"` frees only interactive sandboxes; a headless
+/// reviewer still needs the `google` secret.
+#[test]
+fn login_mode_still_needs_the_google_secret_for_an_antigravity_reviewer() {
+    let f = config("codex");
+    let good = backend(&f, &[CLEAN]);
+    worked_task(&f, &good);
+    f.env.set_config("antigravity_auth = \"login\"");
+    let mut opts = options(&f);
+    opts.reviewer_harness = Some(Harness::Antigravity);
+    let before = good.creates().len();
+
+    let out = go(&f, &opts, &good);
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(message.contains("'google'"), "{message}");
+    assert_eq!(good.creates().len(), before, "nothing was created");
+}
+
 #[test]
 fn a_harness_that_cannot_run_headless_is_refused_before_anything_happens() {
     let f = config("codex");
