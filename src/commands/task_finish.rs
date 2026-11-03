@@ -179,6 +179,16 @@ fn publish(
              on the PR gets: {}",
             done.review_again
         )?;
+    } else if let Some(pr) = finish::pr_number(&done.url) {
+        writeln!(
+            out,
+            "  no review covers PR #{pr}'s head, so it has no sbxm/review status; review it \
+             with: {}",
+            done.review_again
+        )?;
+    }
+    for warning in &done.warnings {
+        writeln!(out, "warning: {warning}")?;
     }
     writeln!(
         out,

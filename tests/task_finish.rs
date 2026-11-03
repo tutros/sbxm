@@ -925,18 +925,33 @@ fn reviewed_at(prepared: &mut Prepared, commit: &str, must_fix: u32, review: &st
 }
 
 /// The one PR `finish` opened and the one comment it posted, after checking it made exactly
-/// those two calls, in that order.
+/// those calls, in that order, with the `sbxm/review` status last (issue 317).
 fn pr_and_comment(github: &FakeGitHub) -> (sbxm::github::PrRequest, u32, String) {
     let calls = github.calls();
     let [
         GhCall::PrCreate(_, request),
         GhCall::PrComment(repo, pr, body),
+        GhCall::CommitStatus(..),
     ] = calls.as_slice()
     else {
         panic!("{calls:?}")
     };
     assert_eq!(repo, "o/r");
     (request.clone(), *pr, body.clone())
+}
+
+/// The one status `finish` posted, as (repo, commit, status).
+fn the_status(github: &FakeGitHub) -> (String, String, sbxm::github::CommitStatus) {
+    let statuses: Vec<_> = github
+        .calls()
+        .into_iter()
+        .filter_map(|c| match c {
+            GhCall::CommitStatus(repo, sha, status) => Some((repo, sha, status)),
+            _ => None,
+        })
+        .collect();
+    let [status] = statuses.try_into().unwrap();
+    status
 }
 
 /// The risk section at the top of `text`: everything before `until`.
@@ -1136,5 +1151,98 @@ fn a_review_that_cannot_be_posted_leaves_the_pr_recorded_and_says_how_to_go_on()
     assert_eq!(
         sbxm::task::finish::reviewed_pr_task(&f.env.base_dir(), &record.repo, number),
         None
+    );
+}
+
+// ---- Issue 317: the `sbxm/review` status on the reviewed commit ----
+
+#[test]
+fn a_clean_in_task_review_posts_success_on_the_reviewed_commit() {
+    let f = fixture();
+    let mut prepared = ready(&f);
+    let commit = tip(&prepared);
+    reviewed_at(&mut prepared, &commit, 0, REVIEW);
+    let github = FakeGitHub::default();
+
+    let done = run(&f, &github).unwrap();
+
+    pr_and_comment(&github);
+    let (repo, sha, status) = the_status(&github);
+    assert_eq!((repo.as_str(), sha.as_str()), ("o/r", commit.as_str()));
+    assert_eq!(status.state, sbxm::github::StatusState::Success);
+    assert_eq!(status.context, "sbxm/review");
+    // The risk level is the recorded one, and doesn't change the state.
+    assert!(
+        status
+            .description
+            .starts_with("0 must-fix, 0 questions, risk high"),
+        "{status:?}"
+    );
+    assert!(done.warnings.is_empty(), "{:?}", done.warnings);
+}
+
+#[test]
+fn a_draft_with_must_fix_left_posts_failure_on_the_reviewed_commit() {
+    let f = fixture();
+    let mut prepared = ready(&f);
+    let commit = tip(&prepared);
+    reviewed_at(&mut prepared, &commit, 2, REVIEW_WITH_MUST_FIX);
+    let github = FakeGitHub::default();
+
+    let done = run(&f, &github).unwrap();
+
+    assert!(done.draft);
+    let (_, sha, status) = the_status(&github);
+    assert_eq!(sha, commit);
+    assert_eq!(status.state, sbxm::github::StatusState::Failure);
+    assert!(status.description.starts_with("2 must-fix"), "{status:?}");
+}
+
+#[test]
+fn a_failed_status_is_a_warning_and_the_finish_and_its_comment_stand() {
+    let f = fixture();
+    let mut prepared = ready(&f);
+    let commit = tip(&prepared);
+    reviewed_at(&mut prepared, &commit, 0, REVIEW);
+    let github = FakeGitHub::default().failing_statuses("HTTP 403");
+
+    let done = run(&f, &github).unwrap();
+
+    let (_, pr, _) = pr_and_comment(&github);
+    let [warning] = done.warnings.as_slice() else {
+        panic!("{:?}", done.warnings)
+    };
+    assert!(
+        warning.contains(&format!("sbxm/review status on commit {commit}")),
+        "{warning}"
+    );
+    assert!(warning.contains("HTTP 403"), "{warning}");
+    // The in-task review is recorded as the head's, so only `--force` reviews it again.
+    assert!(
+        warning.contains(&format!(
+            "`sbxm task review --pr {pr} --repo o/r --base main --force`"
+        )),
+        "{warning}"
+    );
+    let record = reread(&f);
+    assert_eq!(record.stage, Stage::Finished);
+    assert_eq!(record.review.unwrap().posted, Some(commit));
+}
+
+#[test]
+fn a_comment_that_fails_posts_no_status() {
+    let f = fixture();
+    let mut prepared = ready(&f);
+    let commit = tip(&prepared);
+    reviewed_at(&mut prepared, &commit, 0, REVIEW);
+    let github = FakeGitHub::default().failing_comments("HTTP 502");
+
+    run(&f, &github).unwrap_err();
+
+    assert!(
+        !github
+            .calls()
+            .iter()
+            .any(|c| matches!(c, GhCall::CommitStatus(..)))
     );
 }

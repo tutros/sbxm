@@ -105,6 +105,11 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
   - `task review --pr` has no fix round (a PR task's `fix_rounds` is always 0): the author fixes the findings and
     runs `task review --pr N` again, which reviews the new head in place, keeping the earlier rounds (decision 190;
     an unchanged head is refused unless `--force`).
+  - **A posted review sets the `sbxm/review` commit status (issue 317)** on the commit it covered: `success` with 0
+    must-fix at any risk (an open question too, shown in the description), `failure` otherwise. Both `task review
+    --pr N` and `task finish` post it, after the review comment; a later commit has none until it is reviewed, so
+    with `sbxm/review` among the ruleset's required checks GitHub merges only a reviewed commit. A status that can't
+    be posted is a warning naming the `task review --pr N --force` command that posts it again.
   - **The in-task review counts as the PR's review (decision 187):** `task finish --issue N` posts the review
     recorded in `task.json` on the PR it opens (risk section first, the same one the description opens with, then a
     line naming the reviewed commit), a draft's failing review included, when that review covered the PR's head.

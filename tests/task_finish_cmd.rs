@@ -8,7 +8,7 @@ use common::task_fixture::{
     CLAUDE_DONE, Fixture, Play, Probe, backend, fixture, ok, play, worked_task,
 };
 use sbxm::commands::task_finish::{Options, Target, run};
-use sbxm::github::fake::FakeGitHub;
+use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::task::record::{self, Process, Stage, Status};
 
 fn ready(f: &Fixture) {
@@ -132,6 +132,67 @@ fn a_posted_in_task_review_is_reported_with_its_commit() {
     );
     assert!(
         out.contains("sbxm task review --pr 9 --repo owner/target --base main"),
+        "{out}"
+    );
+}
+
+/// Issue 317: a PR whose head no review covered gets no `sbxm/review` status, and the command
+/// says how to review it.
+#[test]
+fn a_pr_whose_head_is_not_the_reviewed_commit_gets_no_status_and_the_review_command() {
+    let f = fixture();
+    ready(&f);
+    let meta = record::task_dir(&f.env.base_dir(), "issue-41");
+    let mut task = record::read(&meta.join("task.json")).unwrap();
+    let base = common::git(&meta.join("repo.git"), &["rev-parse", "main"]);
+    task.review = Some(record::ReviewResult {
+        round: 1,
+        commit: Some(base),
+        ..Default::default()
+    });
+    record::write(&meta, &task).unwrap();
+    let github = FakeGitHub::default();
+
+    let (result, out) = go(&f, 41, &github);
+
+    result.unwrap();
+    assert!(
+        !github
+            .calls()
+            .iter()
+            .any(|c| matches!(c, GhCall::CommitStatus(..)))
+    );
+    assert!(
+        out.contains(
+            "no review covers PR #9's head, so it has no sbxm/review status; review it with: \
+             sbxm task review --pr 9 --repo o/r --base main"
+        ),
+        "{out}"
+    );
+}
+
+/// Issue 317: a status that can't be posted is a warning, and the finish still succeeds.
+#[test]
+fn a_failed_status_is_printed_as_a_warning() {
+    let f = fixture();
+    ready(&f);
+    let meta = record::task_dir(&f.env.base_dir(), "issue-41");
+    let mut task = record::read(&meta.join("task.json")).unwrap();
+    let tip = common::git(&meta.join("repo.git"), &["rev-parse", "issue-41"]);
+    task.review = Some(record::ReviewResult {
+        round: 1,
+        commit: Some(tip.clone()),
+        ..Default::default()
+    });
+    record::write(&meta, &task).unwrap();
+
+    let (result, out) = go(&f, 41, &FakeGitHub::default().failing_statuses("HTTP 403"));
+
+    result.unwrap();
+    assert!(
+        out.contains(&format!(
+            "warning: the sbxm/review status on commit {tip} couldn't be posted"
+        )),
         "{out}"
     );
 }
