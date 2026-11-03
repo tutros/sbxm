@@ -92,9 +92,6 @@ pub fn run_with_sleep(
             if !finish::exists(&base_dir, &id) {
                 bail!("no task {id}; run `sbxm task status` to list the tasks");
             }
-            if !opts.force {
-                finish::check_spec_result_fetched(&base_dir, &id, &opts.repo_root)?;
-            }
             id
         }
         Target::Merged => {
@@ -137,5 +134,12 @@ pub fn run_with_sleep(
         confirm,
         out,
         sleep,
+        // Under the task's lock (issue 58): its record and `repo.git` can't change after this.
+        &|| match (&opts.target, opts.force) {
+            (Target::Spec(_), false) => {
+                finish::check_spec_result_fetched(&base_dir, &id, &opts.repo_root)
+            }
+            _ => Ok(()),
+        },
     )
 }

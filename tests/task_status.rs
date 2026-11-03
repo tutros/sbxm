@@ -555,3 +555,21 @@ fn the_cli_appends_unfiltered_output_to_every_displayed_tasks_run_log() {
         }
     }
 }
+
+/// Issue 58: `task status` only reads, so a task another command holds is still listed, and its
+/// lock is left exactly as it was.
+#[test]
+fn status_is_not_blocked_by_a_held_lock_and_takes_none() {
+    let base = tempfile::tempdir().unwrap();
+    save(base.path(), &working(41, None));
+    let meta = record::task_dir(base.path(), "issue-41");
+    let probe = Probe(Some(T0));
+    let _held = sbxm::task::lock::ProcessLock::acquire(&meta, "task issue-41", &probe).unwrap();
+    let lock = fs::read(meta.join("lock.json")).unwrap();
+
+    let (text, ids) = task_status::render(base.path(), None, false, &probe).unwrap();
+
+    assert!(text.contains("issue-41"), "{text}");
+    assert_eq!(ids, vec!["issue-41".to_owned()]);
+    assert_eq!(fs::read(meta.join("lock.json")).unwrap(), lock);
+}
