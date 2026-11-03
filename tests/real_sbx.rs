@@ -963,6 +963,29 @@ fn login_check_skips_only_without_the_token_file() {
     ));
 }
 
+/// Issue 384 review S-1 (round 3): only `test -s`'s own answers say whether the token file is
+/// there; a probe that couldn't run fails the check with its diagnostic instead of skipping.
+#[test]
+fn token_probe_fails_on_anything_but_test_s_answers() {
+    use sbxm::backend::ExecOutput;
+
+    let probe = |exit_code, stderr: &str| ExecOutput {
+        stdout: String::new(),
+        stderr: stderr.into(),
+        exit_code,
+    };
+    assert_eq!(token_probe(&probe(Some(0), "")), Ok(true));
+    assert_eq!(token_probe(&probe(Some(1), "")), Ok(false));
+    assert!(matches!(
+        token_probe(&probe(Some(125), "error: exec transport unavailable")),
+        Err(reason) if reason.contains("125") && reason.contains("exec transport unavailable")
+    ));
+    assert!(matches!(
+        token_probe(&probe(None, "Killed")),
+        Err(reason) if reason.contains("signal") && reason.contains("Killed")
+    ));
+}
+
 /// Issue 384, decision 281 (a): a login-mode Antigravity sandbox is created without the `google`
 /// secret, and once the user has signed in inside it, `agy` answers with that login. The
 /// sandbox has a fixed name and is kept until the check passes, so the sign-in it needs (one
@@ -1028,7 +1051,7 @@ fn antigravity_login_against_real_sbx() {
     let in_sandbox = PathBuf::from(format!("/{}{}", path[..1].to_lowercase(), &path[2..]));
     let ask = || {
         // Read before every request: an `sbx exec` restarts a stopped sandbox.
-        let token = SbxBackend::LOCAL
+        let probe = SbxBackend::LOCAL
             .exec(
                 &sandbox,
                 &ExecSpec {
@@ -1041,9 +1064,8 @@ fn antigravity_login_against_real_sbx() {
                     stdin: Stdin::Closed,
                 },
             )
-            .unwrap()
-            .exit_code
-            == Some(0);
+            .unwrap();
+        let token = token_probe(&probe).unwrap_or_else(|reason| panic!("{sandbox}: {reason}"));
         let result = headless::run(
             &SbxBackend::LOCAL,
             &sandbox,
@@ -1089,6 +1111,23 @@ fn antigravity_login_against_real_sbx() {
 
 /// Where `agy` keeps its Google sign-in, under the sandbox user's home (decision 124 (f)).
 const AGY_TOKEN_FILE: &str = ".gemini/antigravity-cli/antigravity-oauth-token";
+
+/// Reads the `test -s` token probe: 0 is present, 1 absent; any other exit, or a signal, is the
+/// probe failing, an error carrying its diagnostic rather than "not signed in" (S-1).
+fn token_probe(out: &sbxm::backend::ExecOutput) -> Result<bool, String> {
+    match out.exit_code {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        Some(code) => Err(format!(
+            "the token probe exited {code}: {}",
+            out.stderr.trim()
+        )),
+        None => Err(format!(
+            "the token probe was killed by a signal: {}",
+            out.stderr.trim()
+        )),
+    }
+}
 
 #[derive(Debug, PartialEq)]
 enum LoginOutcome {
