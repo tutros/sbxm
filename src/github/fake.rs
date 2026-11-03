@@ -6,7 +6,7 @@ use anyhow::{Result, anyhow};
 
 use super::{
     CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, ListedPr, PrComment, PrInfo,
-    PrRequest, PrState,
+    PrMergeState, PrRequest, PrState,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,6 +16,7 @@ pub enum GhCall {
     IssuesOpen(String),
     Issue(String, u32),
     Pr(String, u32),
+    PrMergeState(String, u32),
     /// Repo, head, base.
     OpenPrFor(String, String, String),
     PrCreate(String, PrRequest),
@@ -38,6 +39,8 @@ pub struct FakeGitHub {
     open_issues: Mutex<Vec<Issue>>,
     issue_texts: Vec<IssueText>,
     prs: Vec<PrInfo>,
+    /// The scripted PRs with auto-merge armed.
+    auto_merge: Vec<u32>,
     /// What `open_pr_for` searches: repo, PR, state. `pr_create` adds the PRs it opens.
     listed: Mutex<Vec<(String, ListedPr, PrState)>>,
     lookups: Mutex<usize>,
@@ -92,6 +95,12 @@ impl FakeGitHub {
 
     pub fn with_pr(mut self, pr: PrInfo) -> Self {
         self.prs.push(pr);
+        self
+    }
+
+    /// Arms auto-merge on the scripted PR `number`, as `pr_merge_state` reports it.
+    pub fn with_auto_merge(mut self, number: u32) -> Self {
+        self.auto_merge.push(number);
         self
     }
 
@@ -218,6 +227,19 @@ impl GitHubBackend for FakeGitHub {
             .find(|p| p.number == number)
             .cloned()
             .ok_or_else(|| anyhow!("FakeGitHub: pr {number} is not scripted"))
+    }
+
+    fn pr_merge_state(&self, repo: &str, number: u32) -> Result<PrMergeState> {
+        self.record(GhCall::PrMergeState(repo.to_owned(), number))?;
+        let pr = self
+            .prs
+            .iter()
+            .find(|p| p.number == number)
+            .ok_or_else(|| anyhow!("FakeGitHub: pr {number} is not scripted"))?;
+        Ok(PrMergeState {
+            state: pr.state,
+            auto_merge: self.auto_merge.contains(&number),
+        })
     }
 
     fn open_pr_for(&self, repo: &str, head: &str, base: &str) -> Result<Option<ListedPr>> {
@@ -370,16 +392,25 @@ impl GitHubBackend for FakeGitHub {
             add.to_vec(),
             remove.to_vec(),
         ))?;
+        // The same issue in both lists, as GitHub has it once: `issues_open` sees the change too.
         let mut all = self.all_issues.lock().unwrap();
-        let issue = all
+        let mut open = self.open_issues.lock().unwrap();
+        let mut found = false;
+        for issue in all
             .iter_mut()
-            .find(|i| i.number == number)
-            .ok_or_else(|| anyhow!("FakeGitHub: issue {number} does not exist"))?;
-        issue.labels.retain(|l| !remove.contains(l));
-        for label in add {
-            if !issue.labels.contains(label) {
-                issue.labels.push(label.clone());
+            .chain(open.iter_mut())
+            .filter(|i| i.number == number)
+        {
+            found = true;
+            issue.labels.retain(|l| !remove.contains(l));
+            for label in add {
+                if !issue.labels.contains(label) {
+                    issue.labels.push(label.clone());
+                }
             }
+        }
+        if !found {
+            return Err(anyhow!("FakeGitHub: issue {number} does not exist"));
         }
         Ok(())
     }

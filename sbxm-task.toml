@@ -38,6 +38,12 @@ timeout = "20m"                # per command
 [risk]
 high = ["src/git.rs", "src/task/repo.rs", "src/kit.rs", "src/task/record.rs", "src/state.rs"]
 
+# How `sbxm task loop` waits out a harness's usage limit: usage_wait before each resume, and
+# the loop stops once the waits in a row reach usage_wait_total.
+[loop]
+usage_wait = "30m"
+usage_wait_total = "5h"
+
 # Replace a built-in prompt with a file inside this repo:
 # [prompts]
 # worker = "prompts/worker.md"
