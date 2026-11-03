@@ -248,6 +248,30 @@ fn a_contestant_that_could_not_run_gets_a_note_and_no_answer_or_diff() {
 }
 
 #[test]
+fn a_contestant_that_could_not_run_with_an_empty_captured_diff_gets_a_note() {
+    let env = fixture();
+    // An execution error after the sandbox existed: the diff was still captured, and is empty.
+    pair(&env, 1, 1, "error", None, Some(""));
+    let dir = prepare(&env).unwrap();
+
+    let folder = dir.join("repeat-2").join(label_of(1, 1).to_string());
+    let note = read(&folder.join("no-output.md"));
+    assert!(note.contains("no answer and no diff"), "{note}");
+    assert!(!folder.join("diff.patch").exists());
+}
+
+#[test]
+fn a_contestant_that_could_not_run_keeps_its_partial_diff() {
+    let env = fixture();
+    pair(&env, 1, 1, "error", None, Some(PATCH));
+    let dir = prepare(&env).unwrap();
+
+    let folder = dir.join("repeat-2").join(label_of(1, 1).to_string());
+    assert_eq!(read(&folder.join("diff.patch")), PATCH);
+    assert!(!folder.join("no-output.md").exists());
+}
+
+#[test]
 fn the_review_folder_never_names_a_contestant_harness_or_model() {
     let env = fixture();
     let dir = prepare(&env).unwrap();
@@ -567,6 +591,69 @@ fn an_unknown_criterion_is_refused_naming_the_line() {
 #[test]
 fn a_toml_syntax_error_is_refused_naming_the_line() {
     refused_at_line("correct = true", "correct = ", 5, "");
+}
+
+/// The fixture's run, but scored on `rubric` (the run-config's `[[eval.rubric]]` tables).
+fn fixture_with_rubric(rubric: &str) -> Env {
+    let env = fixture();
+    let config = CONFIG.split("[[eval.rubric]]").next().unwrap();
+    write(
+        &meta(&env).join("run-config.toml"),
+        &format!("{config}{rubric}"),
+    );
+    env
+}
+
+/// Prepares the review, fills every blank value of every repeat with `value`, submits, and
+/// returns the first repeat's saved `human` entry of label A's contestant.
+fn prepare_fill_and_submit(env: &Env, value: &str) -> Value {
+    prepare(env).unwrap();
+    for r in 0..2 {
+        let text = read(&scores_path(env, r));
+        toml::from_str::<toml::Table>(&text).unwrap_or_else(|e| panic!("{e}\n{text}"));
+        write(&scores_path(env, r), &text.replace("= \"\"", value));
+    }
+    submit(env).unwrap();
+    evals(env, label_of_a(), 0)["human"].clone()
+}
+
+fn label_of_a() -> usize {
+    human::assign_labels(ID, 0, &[0, 1])[0].0
+}
+
+#[test]
+fn a_criterion_id_with_a_newline_gives_a_valid_scores_file_and_is_saved_as_spelled() {
+    let env = fixture_with_rubric(
+        "[[eval.rubric]]\nid = \"correct\\nanswer\"\nkind = \"pass_fail\"\nweight = 1.0\n",
+    );
+
+    let human = prepare_fill_and_submit(&env, "= true");
+
+    assert_eq!(human["criteria"]["correct\nanswer"]["value"], true);
+}
+
+#[test]
+fn a_scale_level_with_a_newline_gives_a_valid_scores_file_and_is_saved_as_spelled() {
+    let env = fixture_with_rubric(
+        "[[eval.rubric]]\nid = \"clarity\"\nkind = \"scale\"\n\
+         levels = [\"poor\\nneeds work\", \"good\"]\nweight = 1.0\n",
+    );
+
+    let human = prepare_fill_and_submit(&env, "= \"poor\\nneeds work\"");
+
+    assert_eq!(human["criteria"]["clarity"]["value"], "poor\nneeds work");
+}
+
+#[test]
+fn notes_with_control_characters_give_a_valid_scores_file() {
+    let env = fixture_with_rubric(
+        "[[eval.rubric]]\nid = \"correct\"\nkind = \"pass_fail\"\nweight = 1.0\n\
+         notes = \"one\\rtwo\\bthree\\nfour\"\n",
+    );
+
+    let human = prepare_fill_and_submit(&env, "= true");
+
+    assert_eq!(human["criteria"]["correct"]["value"], true);
 }
 
 #[test]

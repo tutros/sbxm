@@ -185,7 +185,9 @@ fn layout(run: &Run) -> Result<Vec<(PathBuf, Vec<u8>)>> {
             } else {
                 None
             };
-            if answer.is_none() && diff.is_none() {
+            // An empty diff is no output: a pair that failed after its sandbox existed still has
+            // one captured.
+            if answer.is_none() && diff.as_ref().is_none_or(|d| d.is_empty()) {
                 files.push((
                     folder.join("no-output.md"),
                     b"This candidate left no answer and no diff (it could not run, or produced \

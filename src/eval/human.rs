@@ -47,7 +47,7 @@ pub fn scores_template(
         for criterion in rubric {
             if let Some(notes) = &criterion.notes {
                 for line in notes.lines() {
-                    let _ = writeln!(out, "# {line}");
+                    let _ = writeln!(out, "# {}", escape(line, false));
                 }
             }
             let _ = writeln!(out, "# {}", allowed(criterion));
@@ -73,8 +73,32 @@ fn allowed(criterion: &Criterion) -> String {
     }
 }
 
+/// `text` as a one-line TOML basic string, usable as a key and inside a comment alike: `toml`'s
+/// own serializer picks a multi-line string for text with a newline, which is neither.
 fn toml_string(text: &str) -> String {
-    toml::Value::String(text.to_owned()).to_string()
+    format!("\"{}\"", escape(text, true))
+}
+
+/// `text` with every control character TOML forbids in a one-line string or a comment written as
+/// an escape (a tab is allowed in both), and, for a string, `"` and the backslash too.
+fn escape(text: &str, quoted: bool) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        match c {
+            '"' | '\\' if quoted => {
+                out.push('\\');
+                out.push(c);
+            }
+            '\t' => out.push(c),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c if c.is_control() && (c as u32) < 0x80 => {
+                let _ = write!(out, "\\u{:04X}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// A bare key when the id allows one, else a quoted one.
