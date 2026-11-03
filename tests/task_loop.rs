@@ -996,3 +996,127 @@ fn task_loop_with_cap_0_runs_nothing_from_the_command_line() {
     assert!(output.status.success());
     assert!(String::from_utf8_lossy(&output.stdout).contains("--cap 0: no task runs"));
 }
+
+// --- self-review fixes ---
+
+#[test]
+fn a_run_refused_before_its_record_keeps_the_label() {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S"), labeled(4, "size:S")]);
+    let script = Script::new(&f.base()).plays(3, &[Act::Fail("profile nope not found", false)]);
+
+    let run = run_loop(&f, opts(&f), &script, &gh);
+
+    run.result.unwrap();
+    assert_eq!(runs(&script), ["run 3", "run 4"]);
+    assert!(
+        !gh.calls()
+            .iter()
+            .any(|c| matches!(c, GhCall::IssueLabels(_, 3, _, _))),
+        "{:?}",
+        gh.calls()
+    );
+    assert!(run.out.contains("profile nope not found"), "{}", run.out);
+}
+
+#[test]
+fn only_issue_tasks_prs_count_and_each_once() {
+    let f = fixture();
+    let mut gh = awaiting(&f, github(vec![labeled(3, "size:S")]), 4, 0);
+    // A second task continuing PR #1050 (decision 169) and a PR task naming PR #1070.
+    write_record(&f.base(), 70, Stage::Finished, Some(0), Some(1050));
+    let dir = record::task_dir(&f.base(), "pr-1070");
+    let mut rec = read_record(&f.base(), 70);
+    rec.id = "pr-1070".into();
+    rec.kind = Kind::Pr;
+    rec.number = 1070;
+    rec.pr = Some(format!("https://github.com/{REPO}/pull/1070"));
+    record::write(&dir, &rec).unwrap();
+    gh = gh.with_pr(pr(1070, PrState::Open));
+    let script = Script::new(&f.base());
+
+    let run = run_loop(&f, with_cap(&f, 1), &script, &gh);
+
+    run.result.unwrap();
+    assert!(run.sleeps.is_empty(), "{}", run.out);
+}
+
+#[test]
+fn an_issue_whose_dependency_closes_mid_loop_is_picked_then() {
+    let f = fixture();
+    let blocked = open_issue(4, &[READY, "size:S"], "**Depends on:** #9\n");
+    let gh = github(vec![
+        blocked.clone(),
+        open_issue(9, &["size:L"], ""),
+        labeled(5, "size:M"),
+    ]);
+    let script = Script::new(&f.base());
+    // #9 is closed while #5 runs.
+    let stop = || {
+        if script.calls().contains(&"finish 5".to_owned()) {
+            gh.set_open_issues(vec![blocked.clone()]);
+        }
+        false
+    };
+
+    let run = run_loop_with(&f, opts(&f), &script, &gh, &Probe, &stop);
+
+    run.result.unwrap();
+    assert_eq!(runs(&script), ["run 5", "run 4"]);
+}
+
+#[test]
+fn the_issues_own_words_about_a_usage_limit_are_not_a_usage_limit() {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S")]);
+    struct Wordy(Script);
+    impl Steps for Wordy {
+        fn run(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
+            writeln!(out, "the issue: wait out the usage limit")?;
+            self.0.run(issue, out, warn)
+        }
+        fn resume(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
+            self.0.resume(issue, out, warn)
+        }
+        fn finish(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
+            self.0.finish(issue, out, warn)
+        }
+        fn file_findings(
+            &self,
+            issue: u32,
+            out: &mut dyn Write,
+            warn: &mut dyn Write,
+        ) -> Result<()> {
+            self.0.file_findings(issue, out, warn)
+        }
+        fn room(&self) -> Result<()> {
+            self.0.room()
+        }
+    }
+    let script =
+        Wordy(Script::new(&f.base()).plays(3, &[Act::Fail("1 task failed", true), Act::Ready(0)]));
+
+    let sleeps = RefCell::new(Vec::new());
+    let now = || script.0.clock.get();
+    let sleep = |d: Duration| sleeps.borrow_mut().push(d);
+    let env = Env {
+        now: &now,
+        sleep: &sleep,
+        stop_requested: &|| false,
+    };
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    task_loop::run(
+        &f.env.config_dir(),
+        &opts(&f),
+        &script,
+        &gh,
+        &Probe,
+        &env,
+        &mut out,
+        &mut warn,
+    )
+    .unwrap();
+
+    assert!(sleeps.borrow().is_empty(), "no usage wait");
+    assert_eq!(runs(&script.0), ["run 3", "resume 3"]);
+}

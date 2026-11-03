@@ -200,12 +200,39 @@ struct Loop<'a> {
     usage_waited: Duration,
     /// Warnings already given, so a pause's polls don't repeat them.
     warned: HashSet<String>,
+    /// Lines already said, so a skip seen again on the next pick isn't repeated.
+    said: HashSet<String>,
     log: PathBuf,
 }
 
 impl Loop<'_> {
     fn now(&self) -> u64 {
         (self.env.now)()
+    }
+
+    fn say_once(&mut self, out: &mut dyn Write, text: String) -> Result<()> {
+        if self.said.insert(text.clone()) {
+            writeln!(out, "{text}")?;
+        }
+        Ok(())
+    }
+
+    /// Removes the loop's label from a started task's issue (decision 4): only once its record
+    /// exists, so a run refused before any write leaves the issue in the queue.
+    fn unlabel(&mut self, issue: u32, labeled: bool, warn: &mut dyn Write) -> Result<()> {
+        if !labeled || self.record(issue).is_none() {
+            return Ok(());
+        }
+        if let Err(e) = self
+            .github
+            .issue_labels(&self.repo, issue, &[], &[READY_LABEL.to_owned()])
+        {
+            self.warn_once(
+                warn,
+                format!("#{issue}'s {READY_LABEL} label could not be removed: {e:#}"),
+            )?;
+        }
+        Ok(())
     }
 
     fn warn_once(&mut self, warn: &mut dyn Write, text: String) -> Result<()> {
@@ -215,8 +242,8 @@ impl Loop<'_> {
         Ok(())
     }
 
-    /// The open PRs the loop's tasks opened that await the user (decision 3): every task record
-    /// naming a PR that is open and has no auto-merge armed. A PR that can't be read (gone, or
+    /// The open PRs the loop's tasks opened that await the user (decision 3): every issue task's
+    /// record naming a PR that is open and has no auto-merge armed, each PR once. A PR that can't be read (gone, or
     /// `gh` failing) is left out with a warning.
     fn awaiting_prs(&mut self, warn: &mut dyn Write) -> Result<Vec<u32>> {
         let mut awaiting = Vec::new();
@@ -227,6 +254,11 @@ impl Loop<'_> {
             let Ok(rec) = record::read(&dir.join("task.json")) else {
                 continue;
             };
+            // An issue's task opened its PR (or continued one, decision 169); a PR task's PR
+            // isn't the loop's.
+            if rec.kind != Kind::Issue {
+                continue;
+            }
             let Some(url) = rec.pr.as_deref() else {
                 continue;
             };
@@ -257,6 +289,7 @@ impl Loop<'_> {
             }
         }
         awaiting.sort_unstable();
+        awaiting.dedup();
         Ok(awaiting)
     }
 
@@ -317,58 +350,56 @@ impl Loop<'_> {
         record::read(&self.task_dir(issue).join("task.json")).ok()
     }
 
-    /// The next issue to start and the labeled ones passed over on the way (decision 2, 245(e)):
-    /// one whose `Depends on:` names an unmerged issue or PR is skipped, one that `task run`
-    /// would refuse before any write is reported. `None` when nothing is left.
+    /// The next issue to start (decision 2, 245(e)), and the labeled ones waiting on an unmerged
+    /// `Depends on:` issue or PR, looked at again on every call: a dependency merged meanwhile
+    /// frees its issue. One that `task run` would refuse before any write is reported into
+    /// `refused` and not tried again. `None` when nothing is left.
     fn next(
         &mut self,
         open: &[Issue],
         named: &[u32],
         tried: &mut HashSet<u32>,
-        skipped: &mut Vec<Skipped>,
+        refused: &mut Vec<Skipped>,
         out: &mut dyn Write,
-    ) -> Result<Option<u32>> {
+    ) -> Result<(Option<u32>, Vec<Skipped>)> {
         let candidates = if named.is_empty() {
             queue::queue_order(open)
         } else {
             named.to_vec()
         };
+        let mut waiting = Vec::new();
         for number in candidates {
-            if !tried.insert(number) {
+            if tried.contains(&number) {
                 continue;
             }
-            let title = open
-                .iter()
-                .find(|i| i.number == number)
-                .map_or_else(String::new, |i| format!(" {}", i.title));
-            let body = open
-                .iter()
-                .find(|i| i.number == number)
-                .map_or("", |i| i.body.as_str());
+            let found = open.iter().find(|i| i.number == number);
+            let title = found.map_or_else(String::new, |i| format!(" {}", i.title));
+            let body = found.map_or("", |i| i.body.as_str());
             let unmerged = self.unmerged_dependencies(open, body);
             if !unmerged.is_empty() {
                 let reason = format!("depends on {}, not merged", unmerged.join(", "));
-                writeln!(out, "skipped #{number}{title}: {reason}")?;
-                skipped.push(Skipped {
+                self.say_once(out, format!("skipped #{number}{title}: {reason}"))?;
+                waiting.push(Skipped {
                     issue: number,
                     reason,
                 });
                 continue;
             }
+            tried.insert(number);
             let problems =
                 pipeline::preflight_issues(self.config_dir, &self.repo, self.github, &[number])?;
             if let Some(reason) = problems.get(&number) {
                 let reason = format!("refused before any write: {reason}");
                 writeln!(out, "skipped #{number}{title}: {reason}")?;
-                skipped.push(Skipped {
+                refused.push(Skipped {
                     issue: number,
                     reason,
                 });
                 continue;
             }
-            return Ok(Some(number));
+            return Ok((Some(number), waiting));
         }
-        Ok(None)
+        Ok((None, waiting))
     }
 
     /// The `Depends on:` numbers that are an open issue or a PR not merged. A number that is
@@ -444,11 +475,13 @@ impl Loop<'_> {
                 (Ok(()), None) => anyhow!("the task did not reach ready"),
                 (Err(e), _) => e,
             };
-            let text = format!("{e:#}\n{}", String::from_utf8_lossy(&captured));
             if e.is::<pipeline::MissingSecret>() {
                 return Err(Halt::Error(e));
             }
-            if queue::is_usage_limit(&text) {
+            if queue::failure_says_usage_limit(
+                &format!("{e:#}"),
+                &String::from_utf8_lossy(&captured),
+            ) {
                 let total = self.settings.usage_wait_total;
                 if self.usage_waited >= total {
                     return Err(Halt::UsageLimit(total));
@@ -606,6 +639,7 @@ pub fn run(
         env,
         usage_waited: Duration::ZERO,
         warned: HashSet::new(),
+        said: HashSet::new(),
         log: opts
             .repo_root
             .join("sdlc")
@@ -614,7 +648,7 @@ pub fn run(
     };
 
     let mut tried = HashSet::new();
-    let mut skipped = Vec::new();
+    let mut refused = Vec::new();
     let mut tasks_run = 0u32;
     let mut parked_in_row = 0;
     let mut last_end: Option<u64> = None;
@@ -632,7 +666,9 @@ pub fn run(
             return Ok(());
         }
         let open = github.issues_open(&lp.repo)?;
-        let Some(issue) = lp.next(&open, &opts.issues, &mut tried, &mut skipped, out)? else {
+        let (next, waiting) = lp.next(&open, &opts.issues, &mut tried, &mut refused, out)?;
+        let Some(issue) = next else {
+            let skipped: Vec<Skipped> = refused.iter().chain(&waiting).cloned().collect();
             if opts.issues.is_empty() {
                 writeln!(out, "the queue is empty; the loop stops")?;
                 write!(
@@ -656,14 +692,7 @@ pub fn run(
         let size = found
             .and_then(|i| queue::size(&i.labels))
             .map(str::to_owned);
-        if found.is_some_and(|i| i.labels.iter().any(|l| l == READY_LABEL))
-            && let Err(e) = github.issue_labels(&lp.repo, issue, &[], &[READY_LABEL.to_owned()])
-        {
-            lp.warn_once(
-                warn,
-                format!("#{issue}'s {READY_LABEL} label could not be removed: {e:#}"),
-            )?;
-        }
+        let labeled = found.is_some_and(|i| i.labels.iter().any(|l| l == READY_LABEL));
 
         let started = lp.now();
         writeln!(
@@ -673,7 +702,9 @@ pub fn run(
             size.as_deref().unwrap_or("unknown")
         )?;
         let mut stops = Vec::new();
-        let end = match lp.task(issue, &mut stops, out, warn) {
+        let ended = lp.task(issue, &mut stops, out, warn);
+        lp.unlabel(issue, labeled, warn)?;
+        let end = match ended {
             Ok(end) => end,
             Err(Halt::Error(e)) => return Err(e),
             Err(Halt::UsageLimit(total)) => {
@@ -706,7 +737,7 @@ pub fn run(
         let (ready, outcome, parked) = match end {
             End::Refused(reason) => {
                 writeln!(out, "skipped #{issue}: refused before any write: {reason}")?;
-                skipped.push(Skipped {
+                refused.push(Skipped {
                     issue,
                     reason: format!("refused before any write: {reason}"),
                 });

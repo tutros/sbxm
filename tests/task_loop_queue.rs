@@ -195,3 +195,17 @@ fn the_report_of_nothing_says_so() {
     });
     assert!(text.contains("no almost-ready issues"), "{text}");
 }
+
+#[test]
+fn a_usage_limit_counts_in_the_error_or_a_failure_line_only() {
+    assert!(queue::failure_says_usage_limit("usage limit reached", ""));
+    assert!(queue::failure_says_usage_limit(
+        "1 task failed",
+        "issue-3: worker claude failed: claude reported an error: Claude AI usage limit reached\n"
+    ));
+    // The issue's own words, printed on the way, are not a failure.
+    assert!(!queue::failure_says_usage_limit(
+        "1 task failed",
+        "task 1: #320 Wait out the usage limit\nissue-3: worker claude failed: exit 1\n"
+    ));
+}

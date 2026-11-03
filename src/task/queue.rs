@@ -54,6 +54,16 @@ pub fn is_usage_limit(text: &str) -> bool {
     text.to_lowercase().contains("usage limit")
 }
 
+/// Whether a failed phase stopped on a usage limit: said in its error, or in a line of its output
+/// that reports a failure (`issue-3: worker claude failed: …`). The rest of the output is left
+/// out: an issue's own words about a usage limit, printed on the way, are not one.
+pub fn failure_says_usage_limit(error: &str, output: &str) -> bool {
+    is_usage_limit(error)
+        || output
+            .lines()
+            .any(|line| line.to_lowercase().contains("failed") && is_usage_limit(line))
+}
+
 /// The number of a PR from its URL (`…/pull/<n>`), as `task finish` records it.
 pub fn pr_number(url: &str) -> Option<u32> {
     let (_, tail) = url.rsplit_once("/pull/")?;
