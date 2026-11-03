@@ -1065,8 +1065,16 @@ pub fn risk_section(task: &Record, unresolved: &[String]) -> String {
 /// 65,536 for the whole body).
 pub const SECTION_CAP: usize = 25_000;
 
-/// The PR body: the [`risk_section`] first, then `Fixes #N`, the [`unresolved_section`] of a
-/// draft, and each file under a heading. A file longer than the cap is cut and the body says so.
+/// The longest "Needs a decision" or "Choices made" section copied from `result.md` to the top
+/// of a PR description, in characters (issue 220, decision 283). With the risk section's
+/// `risk::RISK_CAP`, the draft's 5,000 and two [`SECTION_CAP`]s, the body stays under GitHub's
+/// 65,536.
+pub const HANDBACK_CAP: usize = 2_500;
+
+/// The PR body: the [`risk_section`] first, then `Fixes #N`, the result's "Needs a decision" and
+/// "Choices made" sections when they say something (issue 220, decision 283; each cut to
+/// [`HANDBACK_CAP`]), the [`unresolved_section`] of a draft, and each file under a heading. A file
+/// longer than the cap is cut and the body says so.
 /// All of it but the `Fixes #N` line is agent text, so mentions and closing references in it are
 /// neutralised ([`review::defang`]); the files in the task folder stay as they are. Returns the
 /// body and one line per cut for the command to print.
@@ -1082,10 +1090,31 @@ pub fn pr_body(
     // section is the same text the in-task review comment opens with (issue 228).
     let (risk, risk_cut) = review::published_risk(risk);
     let mut body = format!("{}\nFixes #{number}\n", risk.trim_end());
+    let mut cuts: Vec<String> = risk_cut.into_iter().collect();
+    for name in HANDBACK_SECTIONS {
+        let Some(text) = result.and_then(|r| handback_section(r, name)) else {
+            continue;
+        };
+        let text = defang(&text);
+        let total = text.chars().count();
+        body.push_str(&format!("\n## {name}\n\n"));
+        if total <= HANDBACK_CAP {
+            body.push_str(text.trim_end());
+            body.push('\n');
+        } else {
+            let head: String = text.chars().take(HANDBACK_CAP).collect();
+            body.push_str(head.trim_end());
+            body.push_str(&format!(
+                "\n\n(cut: the \"{name}\" section has {total} characters; the first {HANDBACK_CAP} are shown, the whole of it is in the result below and in the task folder)\n"
+            ));
+            cuts.push(format!(
+                "result.md's \"{name}\" section is {total} characters; the PR body's copy carries the first {HANDBACK_CAP}"
+            ));
+        }
+    }
     if let Some(section) = unresolved {
         body.push_str(&format!("\n{}\n", defang(section).trim_end()));
     }
-    let mut cuts: Vec<String> = risk_cut.into_iter().collect();
     for (file, heading, text) in [
         ("result.md", "Result", result),
         ("review.md", "Review", review),
@@ -1112,6 +1141,108 @@ pub fn pr_body(
         }
     }
     (body, cuts)
+}
+
+/// The two sections of a worker's `result.md` copied to the top of a PR description, in their
+/// order there (issue 220, decision 283).
+const HANDBACK_SECTIONS: [&str; 2] = ["Needs a decision", "Choices made"];
+
+/// The text of `result`'s section called `name` (issue 220, decision 283): under a heading of any
+/// level whose text is `name` in any case, with bold or italic marks and a trailing colon allowed
+/// (`## Needs a decision: none` starts its text with `none`), up to the next heading at its level
+/// or above; a heading inside a code fence neither starts nor ends a section. Several such
+/// sections are joined. `None` when there is none, or all of it is empty or "none".
+fn handback_section(result: &str, name: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    let mut current: Option<(usize, Vec<&str>)> = None;
+    let mut fence: Option<(char, usize)> = None;
+    for line in result.lines() {
+        let heading = match fence {
+            None => heading_of(line),
+            Some(_) => None,
+        };
+        fence = next_fence(fence, line);
+        if let Some((level, text)) = heading {
+            if current.as_ref().is_some_and(|(at, _)| level <= *at) {
+                parts.extend(current.take().map(|(_, lines)| lines.join("\n")));
+            }
+            if current.is_none() {
+                current = named_text(text, name).map(|inline| (level, vec![inline]));
+                if current.is_some() {
+                    continue;
+                }
+            }
+        }
+        if let Some((_, lines)) = &mut current {
+            lines.push(line);
+        }
+    }
+    parts.extend(current.map(|(_, lines)| lines.join("\n")));
+    let parts: Vec<&str> = parts
+        .iter()
+        .map(|p| p.trim())
+        .filter(|p| !is_none(p))
+        .collect();
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
+}
+
+/// An ATX heading's level and text (`### Text ##` is level 3, `Text`).
+fn heading_of(line: &str) -> Option<(usize, &str)> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 {
+        return None;
+    }
+    let rest = &line[indent..];
+    let level = rest.len() - rest.trim_start_matches('#').len();
+    let text = &rest[level..];
+    if !(1..=6).contains(&level) || !(text.is_empty() || text.starts_with([' ', '\t'])) {
+        return None;
+    }
+    Some((level, text.trim().trim_end_matches('#').trim()))
+}
+
+/// The heading `text` without its bold and italic marks, when it names `name`: the rest of the
+/// text after a colon (empty without one), or `None` for another heading.
+fn named_text<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let plain = text.trim_matches(['*', '_', ' ']);
+    let start = plain.get(..name.len())?;
+    if !start.eq_ignore_ascii_case(name) {
+        return None;
+    }
+    let rest = plain[name.len()..].trim_start_matches(['*', '_']);
+    match rest.strip_prefix(':') {
+        Some(inline) => Some(inline.trim_matches(['*', '_', ' '])),
+        None => rest.is_empty().then_some(""),
+    }
+}
+
+/// The code fence open after `line`, given the one open before it (a run of three or more
+/// backticks or tildes opens one; the same character, at least as many, alone closes it).
+fn next_fence(open: Option<(char, usize)>, line: &str) -> Option<(char, usize)> {
+    let trimmed = line.trim_start_matches(' ');
+    if line.len() - trimmed.len() > 3 {
+        return open;
+    }
+    let marker = ['`', '~'].into_iter().find_map(|c| {
+        let run = trimmed.len() - trimmed.trim_start_matches(c).len();
+        (run >= 3).then_some((c, run))
+    });
+    match (open, marker) {
+        (None, Some(found)) => Some(found),
+        (Some((c, n)), Some((m, run)))
+            if c == m && run >= n && trimmed[run..].trim().is_empty() =>
+        {
+            None
+        }
+        (open, _) => open,
+    }
+}
+
+/// Whether a section's text says nothing: empty, or "none" give or take list, bold and italic
+/// marks and a full stop.
+fn is_none(text: &str) -> bool {
+    let plain = text.trim_matches(|c: char| c.is_whitespace() || "-*_+.".contains(c));
+    plain.is_empty() || plain.eq_ignore_ascii_case("none")
 }
 
 /// Why task `task`'s PR must be a draft (decision 173(b)), one line per reason; empty when it is
