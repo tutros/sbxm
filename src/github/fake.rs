@@ -4,7 +4,7 @@ use std::sync::Mutex;
 
 use anyhow::{Result, anyhow};
 
-use super::{GitHubBackend, Issue, IssueRequest, IssueText, PrInfo, PrRequest};
+use super::{CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, PrInfo, PrRequest};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum GhCall {
@@ -21,6 +21,8 @@ pub enum GhCall {
     IssueEdit(String, u32, String),
     /// Repo, number, labels added, labels removed.
     IssueLabels(String, u32, Vec<String>, Vec<String>),
+    /// Repo, commit, status.
+    CommitStatus(String, String, CommitStatus),
 }
 
 #[derive(Default)]
@@ -41,6 +43,7 @@ pub struct FakeGitHub {
     fail_issues_all: bool,
     failure: Option<String>,
     comment_failure: Option<String>,
+    status_failure: Option<String>,
     calls: Mutex<Vec<GhCall>>,
 }
 
@@ -115,6 +118,12 @@ impl FakeGitHub {
     /// Only `pr_comment` fails (and is still recorded).
     pub fn failing_comments(mut self, message: &str) -> Self {
         self.comment_failure = Some(message.to_owned());
+        self
+    }
+
+    /// Only `commit_status` fails (and is still recorded).
+    pub fn failing_statuses(mut self, message: &str) -> Self {
+        self.status_failure = Some(message.to_owned());
         self
     }
 
@@ -275,5 +284,17 @@ impl GitHubBackend for FakeGitHub {
             }
         }
         Ok(())
+    }
+
+    fn commit_status(&self, repo: &str, sha: &str, status: &CommitStatus) -> Result<()> {
+        self.record(GhCall::CommitStatus(
+            repo.to_owned(),
+            sha.to_owned(),
+            status.clone(),
+        ))?;
+        match &self.status_failure {
+            Some(message) => Err(anyhow!("{message}")),
+            None => Ok(()),
+        }
     }
 }

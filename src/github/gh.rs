@@ -7,7 +7,9 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
-use super::{GitHubBackend, Issue, IssueRequest, IssueText, PrInfo, PrRequest, PrState};
+use super::{
+    CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, PrInfo, PrRequest, PrState,
+};
 
 /// Runs `gh` with arguments and optional stdin, returning stdout.
 pub trait GhRunner: Send + Sync {
@@ -320,5 +322,29 @@ impl GitHubBackend for GhBackend {
             "label", "list", "--repo", repo, "--json", "name", "--limit", "200",
         ]))?;
         Ok(raw.into_iter().map(|l| l.name).collect())
+    }
+
+    fn commit_status(&self, repo: &str, sha: &str, status: &CommitStatus) -> Result<()> {
+        // The sha goes into the API path: only a full commit id is accepted.
+        if !matches!(sha.len(), 40 | 64) || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+            bail!("`{sha}` is not a full commit id, so no status can be posted on it");
+        }
+        self.run(
+            &strings(&[
+                "api",
+                &format!("repos/{repo}/statuses/{sha}"),
+                "--method",
+                "POST",
+                "--silent",
+                "-f",
+                &format!("state={}", status.state.word()),
+                "-f",
+                &format!("context={}", status.context),
+                "-f",
+                &format!("description={}", status.description),
+            ]),
+            None,
+        )?;
+        Ok(())
     }
 }

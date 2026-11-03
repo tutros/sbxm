@@ -4,6 +4,8 @@
 use std::fs;
 use std::path::Path;
 
+use crate::github::{CommitStatus, StatusState};
+
 use super::findings;
 use super::record::OpenFinding;
 use super::risk::{self, Level};
@@ -133,6 +135,53 @@ pub fn pr_comment(number: u32, risk_section: &str, review: &str) -> String {
         &risk_section,
         review,
     )
+}
+
+/// The context of the commit status a review posts on the commit it covered (issue 317), which a
+/// ruleset can require.
+pub const STATUS_CONTEXT: &str = "sbxm/review";
+
+/// GitHub's limit on a commit status's description, in characters.
+pub const STATUS_DESCRIPTION_CAP: usize = 140;
+
+/// The commit status for a review that found `must_fix` must-fix findings, with `review` its text
+/// (its questions are counted) and `risk` its level (issue 317): `success` when it found none, at
+/// any risk and with any questions open (decisions 1, 3 and 4 of the issue), else `failure`.
+pub fn status(must_fix: u32, review: &str, risk: Level) -> CommitStatus {
+    let questions = findings::parse(review)
+        .findings
+        .iter()
+        .filter(|f| f.label == "question")
+        .count();
+    let noun = if questions == 1 {
+        "question"
+    } else {
+        "questions"
+    };
+    let base = format!(
+        "{must_fix} must-fix, {questions} {noun}, risk {}",
+        risk.word()
+    );
+    let pointed = format!("{base} -- see the sbxm review comment");
+    let description = if pointed.chars().count() <= STATUS_DESCRIPTION_CAP {
+        pointed
+    } else {
+        fit_status_description(&base)
+    };
+    CommitStatus {
+        state: if must_fix == 0 {
+            StatusState::Success
+        } else {
+            StatusState::Failure
+        },
+        context: STATUS_CONTEXT.to_owned(),
+        description,
+    }
+}
+
+/// `text` cut to [`STATUS_DESCRIPTION_CAP`] characters.
+pub fn fit_status_description(text: &str) -> String {
+    text.chars().take(STATUS_DESCRIPTION_CAP).collect()
 }
 
 /// The `sbxm task review --pr` command a hint prints: with `force: false`, after `task finish`

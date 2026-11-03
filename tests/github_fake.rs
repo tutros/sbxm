@@ -1,7 +1,10 @@
 //! M2b slice 2: `FakeGitHub` records calls and is scripted per test (spec §9).
 
 use sbxm::github::fake::{FakeGitHub, GhCall};
-use sbxm::github::{GitHubBackend, Issue, IssueRequest, IssueText, PrInfo, PrRequest, PrState};
+use sbxm::github::{
+    CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, PrInfo, PrRequest, PrState,
+    StatusState,
+};
 
 fn issue(number: u32) -> Issue {
     Issue {
@@ -129,4 +132,32 @@ fn a_draft_pr_request_is_recorded_as_a_draft() {
         panic!("{calls:?}")
     };
     assert!(recorded.draft);
+}
+
+fn a_status() -> CommitStatus {
+    CommitStatus {
+        state: StatusState::Success,
+        context: "sbxm/review".into(),
+        description: "0 must-fix".into(),
+    }
+}
+
+#[test]
+fn a_commit_status_is_recorded_and_can_fail_alone() {
+    let fake = FakeGitHub::default().failing_statuses("HTTP 422");
+
+    let message = format!(
+        "{:#}",
+        fake.commit_status("o/r", "abc", &a_status()).unwrap_err()
+    );
+    fake.pr_comment("o/r", 7, "hi").unwrap();
+
+    assert!(message.contains("HTTP 422"), "{message}");
+    assert_eq!(
+        fake.calls(),
+        [
+            GhCall::CommitStatus("o/r".into(), "abc".into(), a_status()),
+            GhCall::PrComment("o/r".into(), 7, "hi".into()),
+        ]
+    );
 }

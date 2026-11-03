@@ -65,6 +65,31 @@ pub struct IssueRequest {
     pub labels: Vec<String>,
 }
 
+/// A commit status's state (`gh api repos/<repo>/statuses/<sha>`); sbxm only posts these two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusState {
+    Success,
+    Failure,
+}
+
+impl StatusState {
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Success => "success",
+            Self::Failure => "failure",
+        }
+    }
+}
+
+/// A commit status, as GitHub shows it next to a commit and checks it against a ruleset's
+/// required checks (issue 317).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommitStatus {
+    pub state: StatusState,
+    pub context: String,
+    pub description: String,
+}
+
 pub trait GitHubBackend: Send + Sync {
     fn whoami(&self) -> Result<String>;
     fn default_branch(&self, repo: &str) -> Result<String>;
@@ -89,4 +114,6 @@ pub trait GitHubBackend: Send + Sync {
         add: &[String],
         remove: &[String],
     ) -> Result<()>;
+    /// Posts `status` on commit `sha` (a full commit id).
+    fn commit_status(&self, repo: &str, sha: &str, status: &CommitStatus) -> Result<()>;
 }
