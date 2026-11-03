@@ -1200,3 +1200,52 @@ fn the_real_file_findings_step_files_nothing_for_a_review_without_should_fix() {
 
     assert!(gh.calls().is_empty(), "{:?}", gh.calls());
 }
+
+/// Issue 320 review M-1: the loop runs `task run` in its own process, so a failed phase leaves
+/// the task owned by the loop itself; the real resume must take it over once that phase has
+/// returned, and still refuse a task another live process owns.
+fn resume_owned_by(f: &Fixture, owner: Process) -> (String, Record) {
+    write_record(&f.base(), 3, Stage::Working, None, None);
+    let dir = record::task_dir(&f.base(), "issue-3");
+    let mut rec = read_record(&f.base(), 3);
+    rec.process = Some(owner);
+    record::write(&dir, &rec).unwrap();
+    let gh = FakeGitHub::default().with_user("me");
+    let backend = sbxm::backend::FakeBackend::default();
+    let host = sbxm::task::gates::FakeHostRunner::default();
+    let steps = task_loop::TaskSteps {
+        config_dir: &f.env.config_dir(),
+        repo_root: f.repo_root.clone(),
+        repo: Some(REPO.into()),
+        backend: &backend,
+        github: &gh,
+        probe: &Probe,
+        host: &host,
+        disk: sbxm::disk::Guard::default(),
+    };
+    let error = match steps.resume(3, &mut Vec::new(), &mut Vec::new()) {
+        Ok(()) => String::new(),
+        Err(e) => format!("{e:#}"),
+    };
+    (error, read_record(&f.base(), 3))
+}
+
+#[test]
+fn the_real_resume_takes_over_a_task_the_loop_itself_left_failed() {
+    let f = fixture();
+
+    let (error, _) = resume_owned_by(&f, Process::current(&Probe));
+
+    assert!(!error.contains("still running"), "{error}");
+}
+
+#[test]
+fn the_real_resume_still_refuses_a_task_another_live_process_owns() {
+    let f = fixture();
+    let other = Process::new(std::process::id().wrapping_add(1), 0);
+
+    let (error, rec) = resume_owned_by(&f, other.clone());
+
+    assert!(error.contains("still running"), "{error}");
+    assert_eq!(rec.process, Some(other));
+}

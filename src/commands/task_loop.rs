@@ -820,6 +820,22 @@ impl TaskSteps<'_> {
         }
         result
     }
+
+    /// Gives up this process's own claim on `issue-<n>`'s record before `task resume` (review
+    /// M-1): the phase that left it ran here and has returned, so the loop being alive doesn't
+    /// mean the task is running. A task another process owns keeps its owner, and `task resume`
+    /// refuses it while that process lives.
+    fn release(&self, issue: u32) -> Result<()> {
+        let base_dir = GlobalConfig::load(self.config_dir)?.base_dir;
+        let dir = record::task_dir(&base_dir, &format!("issue-{issue}"));
+        let Ok(mut rec) = record::read(&dir.join("task.json")) else {
+            return Ok(());
+        };
+        if rec.process.as_ref() == Some(&Process::current(self.probe)) {
+            record::write_change(&dir, &mut rec, |r| r.process = None)?;
+        }
+        Ok(())
+    }
 }
 
 impl Steps for TaskSteps<'_> {
@@ -856,6 +872,7 @@ impl Steps for TaskSteps<'_> {
     }
 
     fn resume(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
+        self.release(issue)?;
         self.logged(issue, out, warn, &|out, warn| {
             task_resume::run(
                 self.config_dir,
