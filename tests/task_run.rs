@@ -807,3 +807,222 @@ fn the_review_after_the_worker_reads_the_drive_once_so_its_refusal_names_task_re
     assert_eq!(READS.load(Ordering::SeqCst), 3);
     assert_eq!(b.creates().len(), 2, "{:?}", b.log());
 }
+
+// Issue 389: the space the worker's removed sandbox used can come back a moment after `sbx rm`,
+// so the check before the review reads the drive again every 5 s for up to 60 s before refusing.
+
+const GIB: u64 = 1024 * 1024 * 1024;
+
+/// The line `task run` says while it waits, for [`common::low_disk`]'s state folder.
+fn waiting_line(f: &Fixture, free: &str) -> String {
+    format!(
+        "waiting for disk space: {free} free on {}, need 10.0 GiB\n",
+        sbxm::disk::describe(&f.env.tmp.path().join("sbx-state"))
+    )
+}
+
+#[test]
+fn free_space_exactly_at_the_minimum_before_the_review_goes_on_without_waiting() {
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    static READS: AtomicUsize = AtomicUsize::new(0);
+    static SLEPT: AtomicU64 = AtomicU64::new(0);
+    let f = config();
+    let (b, gh) = (backend(&f, &[CLEAN]), github());
+    let mut opts = options(&f);
+    opts.disk = sbxm::disk::Guard {
+        // `task run`'s own check and the start's find room; the review's finds exactly 10 GiB.
+        free_space: |_| {
+            Ok(if READS.fetch_add(1, Ordering::SeqCst) < 2 {
+                20 * GIB
+            } else {
+                10 * GIB
+            })
+        },
+        sleep: |d| {
+            SLEPT.fetch_add(d.as_millis() as u64, Ordering::SeqCst);
+        },
+        ..common::low_disk(&f.env)
+    };
+
+    let out = go(&f, &opts, None, &b, &gh);
+
+    out.result.unwrap();
+    assert_eq!(SLEPT.load(Ordering::SeqCst), 0);
+    assert!(!out.warn.contains("waiting for disk space"), "{}", out.warn);
+    assert_eq!(b.creates().len(), 2, "{:?}", b.log());
+}
+
+#[test]
+fn free_space_back_at_the_minimum_after_one_wait_goes_on_to_the_review() {
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    static READS: AtomicUsize = AtomicUsize::new(0);
+    static SLEPT: AtomicU64 = AtomicU64::new(0);
+    let f = config();
+    let (b, gh) = (backend(&f, &[CLEAN]), github());
+    let mut opts = options(&f);
+    opts.disk = sbxm::disk::Guard {
+        // Room before the worker, 1 GiB at the review's first read, the minimum at its second.
+        free_space: |_| {
+            Ok(match READS.fetch_add(1, Ordering::SeqCst) {
+                0 | 1 => 20 * GIB,
+                2 => GIB,
+                _ => 10 * GIB,
+            })
+        },
+        sleep: |d| {
+            SLEPT.fetch_add(d.as_millis() as u64, Ordering::SeqCst);
+        },
+        ..common::low_disk(&f.env)
+    };
+
+    let out = go(&f, &opts, None, &b, &gh);
+
+    out.result.unwrap();
+    assert_eq!(SLEPT.load(Ordering::SeqCst), 5_000);
+    assert_eq!(READS.load(Ordering::SeqCst), 4);
+    assert_eq!(
+        out.warn.matches("waiting for disk space").count(),
+        1,
+        "{}",
+        out.warn
+    );
+    assert!(
+        out.warn.contains(&waiting_line(&f, "1.0 GiB")),
+        "{}",
+        out.warn
+    );
+    assert_eq!(b.creates().len(), 2, "{:?}", b.log());
+}
+
+#[test]
+fn free_space_still_low_after_60_seconds_refuses_the_review_as_before() {
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    static READS: AtomicUsize = AtomicUsize::new(0);
+    static SLEPT: AtomicU64 = AtomicU64::new(0);
+    static SLEEPS: AtomicUsize = AtomicUsize::new(0);
+    let f = config();
+    let (b, gh) = (backend(&f, &[CLEAN]), github());
+    let mut opts = options(&f);
+    opts.disk = sbxm::disk::Guard {
+        free_space: |_| {
+            Ok(if READS.fetch_add(1, Ordering::SeqCst) < 2 {
+                20 * GIB
+            } else {
+                GIB
+            })
+        },
+        sleep: |d| {
+            SLEEPS.fetch_add(1, Ordering::SeqCst);
+            SLEPT.fetch_add(d.as_millis() as u64, Ordering::SeqCst);
+        },
+        ..common::low_disk(&f.env)
+    };
+
+    let out = go(&f, &opts, None, &b, &gh);
+
+    let err = format!("{:#}", out.result.unwrap_err());
+    assert!(
+        err.starts_with(
+            "the worker is done but its review was not started; continue with `sbxm task review \
+             --issue 41`: only 1.0 GiB free on "
+        ),
+        "{err}"
+    );
+    assert_eq!(SLEPT.load(Ordering::SeqCst), 60_000);
+    assert_eq!(SLEEPS.load(Ordering::SeqCst), 12);
+    // One read after each sleep, and the first.
+    assert_eq!(READS.load(Ordering::SeqCst), 2 + 13);
+    assert_eq!(
+        out.warn.matches("waiting for disk space").count(),
+        1,
+        "{}",
+        out.warn
+    );
+    assert_eq!(b.creates().len(), 1, "{:?}", b.log());
+}
+
+#[test]
+fn ignore_disk_reads_no_drive_and_never_waits() {
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    static READS: AtomicUsize = AtomicUsize::new(0);
+    static SLEPT: AtomicU64 = AtomicU64::new(0);
+    let f = config();
+    let (b, gh) = (backend(&f, &[CLEAN]), github());
+    let mut opts = options(&f);
+    opts.disk = sbxm::disk::Guard {
+        free_space: |_| {
+            READS.fetch_add(1, Ordering::SeqCst);
+            Ok(GIB)
+        },
+        sleep: |d| {
+            SLEPT.fetch_add(d.as_millis() as u64, Ordering::SeqCst);
+        },
+        ignore: true,
+        ..common::low_disk(&f.env)
+    };
+
+    let out = go(&f, &opts, None, &b, &gh);
+
+    out.result.unwrap();
+    assert_eq!(READS.load(Ordering::SeqCst), 0);
+    assert_eq!(SLEPT.load(Ordering::SeqCst), 0);
+    assert_eq!(b.creates().len(), 2, "{:?}", b.log());
+}
+
+#[test]
+fn a_min_free_disk_of_zero_reads_no_drive_and_never_waits() {
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    static READS: AtomicUsize = AtomicUsize::new(0);
+    static SLEPT: AtomicU64 = AtomicU64::new(0);
+    let f = config();
+    f.env.set_config("min_free_disk = \"0\"");
+    let (b, gh) = (backend(&f, &[CLEAN]), github());
+    let mut opts = options(&f);
+    opts.disk = sbxm::disk::Guard {
+        free_space: |_| {
+            READS.fetch_add(1, Ordering::SeqCst);
+            Ok(GIB)
+        },
+        sleep: |d| {
+            SLEPT.fetch_add(d.as_millis() as u64, Ordering::SeqCst);
+        },
+        ..common::low_disk(&f.env)
+    };
+
+    let out = go(&f, &opts, None, &b, &gh);
+
+    out.result.unwrap();
+    assert_eq!(READS.load(Ordering::SeqCst), 0);
+    assert_eq!(SLEPT.load(Ordering::SeqCst), 0);
+    assert_eq!(b.creates().len(), 2, "{:?}", b.log());
+}
+
+#[test]
+fn an_unreadable_drive_before_the_review_goes_on_at_once() {
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    static READS: AtomicUsize = AtomicUsize::new(0);
+    static SLEPT: AtomicU64 = AtomicU64::new(0);
+    let f = config();
+    let (b, gh) = (backend(&f, &[CLEAN]), github());
+    let mut opts = options(&f);
+    opts.disk = sbxm::disk::Guard {
+        free_space: |_| {
+            if READS.fetch_add(1, Ordering::SeqCst) < 2 {
+                Ok(20 * GIB)
+            } else {
+                Err(std::io::Error::other("no statvfs"))
+            }
+        },
+        sleep: |d| {
+            SLEPT.fetch_add(d.as_millis() as u64, Ordering::SeqCst);
+        },
+        ..common::low_disk(&f.env)
+    };
+
+    let out = go(&f, &opts, None, &b, &gh);
+
+    out.result.unwrap();
+    assert_eq!(READS.load(Ordering::SeqCst), 3);
+    assert_eq!(SLEPT.load(Ordering::SeqCst), 0);
+    assert_eq!(b.creates().len(), 2, "{:?}", b.log());
+}

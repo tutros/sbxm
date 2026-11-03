@@ -214,6 +214,10 @@ that create a sandbox refuse when it is low:
 - **When it can't be checked:** if the folder doesn't exist or its free space can't be read, `doctor` warns and the
   other commands go ahead.
 - `doctor` only warns about a low drive (a `warn` line, not a failure): the commands refuse on it themselves.
+- **Before `task run`'s review:** the space the worker's just-removed sandbox used can take a moment to come back,
+  so a drive under `min_free_disk` there is read again every 5 s for up to 60 s, with one line
+  `waiting for disk space: <free> free on <drive>, need <min_free_disk>`, before the review is refused (issue 389).
+  Every other check refuses at once.
 
 ### Profiles: `<profiles_dir>/<name>/profile.toml`
 
