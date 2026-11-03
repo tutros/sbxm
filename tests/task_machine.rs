@@ -60,7 +60,7 @@ fn guard(state: &State, event: Event) -> bool {
         Event::Gates => check_can_gate(&record, &probe).is_ok(),
         Event::Review => match state.kind {
             Kind::Issue | Kind::Spec | Kind::Fix => check_can_review(&record, &probe).is_ok(),
-            Kind::Pr => check_can_review_pr(&record).is_ok(),
+            Kind::Pr => check_can_review_pr(&record, &probe).is_ok(),
         },
         Event::Finish => check_can_finish(&record).is_ok(),
         Event::Rm => {
@@ -210,22 +210,15 @@ fn names(kind: Kind) -> Vec<String> {
 /// The gaps T3-T6 and T9 of the spec fall out of the table: the states a task can be left in (not
 /// finished, not in flight) from which no command moves it on, only `rm`. `Prepared/Failed` is one
 /// the spec did not list (finding F4). `task resume` (issue 118) closed them row by row for a task
-/// with a worker, so an issue or spec task has none left. A PR task's stay: it has no worker or
-/// fix rounds, and `resume` is refused for it (spec section 5.2); from these, the way on is `rm`,
-/// then `review --pr` again (decision 169(f)). Its `ready` is not one of them: since issue 195,
-/// `review --pr` reviews a `ready` PR task again in place (decision 190).
+/// with a worker, so an issue or spec task has none left. A PR task has no worker and `resume` is
+/// refused for it (spec section 5.2); since issue 379 (decision 282) `review --pr` itself moves it
+/// on from the four states it used to be stuck in (`prepared/failed`, interrupted gates or review,
+/// a completed review never recorded as `ready`), so it has none left either. Its `ready` is not
+/// one: since issue 195, `review --pr` reviews a `ready` PR task again in place (decision 190).
 #[test]
 fn the_dead_ends_are_the_gaps_the_spec_lists() {
     assert!(names(Kind::Issue).is_empty(), "{:?}", names(Kind::Issue));
-    assert_eq!(
-        names(Kind::Pr),
-        [
-            "Prepared/Failed",
-            "Gating/Running+interrupted",
-            "Reviewing/Running+interrupted",
-            "Reviewing/Completed",
-        ]
-    );
+    assert!(names(Kind::Pr).is_empty(), "{:?}", names(Kind::Pr));
     // A spec task runs the same stages as an issue task (issue 142), and since issue 143 its
     // `ready` moves on through `finish` and the `[finish] sink`, so it has the same dead ends.
     assert!(names(Kind::Spec).is_empty(), "{:?}", names(Kind::Spec));

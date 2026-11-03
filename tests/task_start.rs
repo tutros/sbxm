@@ -155,3 +155,64 @@ fn the_picks_really_run_at_the_same_time() {
     releaser.join().unwrap();
     assert!(reports.iter().all(|r| r.result.is_ok()));
 }
+
+/// Pauses the first process probe that runs while `meta` is reserved and not yet locked: the
+/// start that reserved it is then between its `create_dir` and its lock (issue 58 review M-2).
+struct PauseAfterReservation {
+    meta: std::path::PathBuf,
+    paused: std::sync::atomic::AtomicBool,
+    arrived: std::sync::Barrier,
+    resume: std::sync::Barrier,
+}
+
+impl record::ProcessProbe for PauseAfterReservation {
+    fn start_time(&self, _pid: u32) -> Option<u64> {
+        if self.meta.is_dir()
+            && !self.meta.join("lock.json").exists()
+            && !self.paused.swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.arrived.wait();
+            self.resume.wait();
+        }
+        Some(0)
+    }
+}
+
+#[test]
+fn a_start_that_loses_the_lock_leaves_the_winners_folder_alone() {
+    let f = fixture();
+    let (backend, github) = (playing(&f), github_with(&[41]));
+    let source = source(&f);
+    let meta = meta(&f, 41);
+    let pausing = PauseAfterReservation {
+        meta: meta.clone(),
+        paused: false.into(),
+        arrived: std::sync::Barrier::new(2),
+        resume: std::sync::Barrier::new(2),
+    };
+    let plain = ctx(&f, &source, &backend, &github);
+    let paused_ctx = pipeline::Ctx {
+        probe: &pausing,
+        ..ctx(&f, &source, &backend, &github)
+    };
+
+    std::thread::scope(|s| {
+        let a = s.spawn(|| pipeline::prepare(&paused_ctx, &issue_text(41)));
+        pausing.arrived.wait();
+        // While start A is paused: its unfinished reservation is removed, and start B makes the
+        // task again and keeps it, lock and all.
+        fs::remove_dir(&meta).unwrap();
+        let b = pipeline::prepare(&plain, &issue_text(41)).unwrap();
+        pausing.resume.wait();
+
+        let message = format!("{:#}", a.join().unwrap().unwrap_err());
+        assert!(
+            message.contains("task issue-41 is in use by another sbxm command"),
+            "{message}"
+        );
+        assert!(meta.join("task.json").is_file(), "B's record survives");
+        assert!(meta.join("repo.git").is_dir(), "B's repo.git survives");
+        assert!(meta.join("lock.json").is_file(), "B's lock survives");
+        drop(b);
+    });
+}

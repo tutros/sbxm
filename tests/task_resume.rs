@@ -121,6 +121,7 @@ fn env<'a>(f: &'a Fixture, backend: &'a FakeBackend, probe: &'a dyn ProcessProbe
         sleep: &std::thread::sleep,
         scoped_secrets: &[],
         identity: None,
+        clone_source: None,
     }
 }
 
@@ -347,6 +348,7 @@ fn the_worker_s_sandbox_is_remade_from_the_profile_recorded_at_start_not_the_cur
         sleep: &std::thread::sleep,
         scoped_secrets: &[],
         identity: None,
+        clone_source: None,
     };
 
     resume::resume(&env, &mut prepared, None).unwrap();
@@ -1474,18 +1476,18 @@ fn a_failed_task_whose_process_is_still_alive_is_refused() {
     assert!(backend.execs().is_empty());
 }
 
-/// Issue 195: a PR task that `task review --pr` can move on (a `ready` one, decision 190, or a
-/// failed reviewer to retry) is pointed straight at it; one the state table still lists as a dead
-/// end is pointed at `task rm --pr`, then `task review --pr`, since a direct review is refused there.
+/// Issue 195: a PR task is pointed straight at `task review --pr`, which moves it on from a
+/// `ready` state (decision 190) or a failed reviewer, and since issue 379 (decision 282) from the
+/// states it used to be stuck in too, so `task rm --pr` is never part of the hint.
 #[test]
 fn a_pr_task_is_refused_with_the_recovery_its_state_allows() {
     let cases = [
-        (Stage::Ready, Status::Ok, false),
-        (Stage::Reviewing, Status::Failed, false),
-        (Stage::Prepared, Status::Failed, true),
-        (Stage::Reviewing, Status::Completed, true),
+        (Stage::Ready, Status::Ok),
+        (Stage::Reviewing, Status::Failed),
+        (Stage::Prepared, Status::Failed),
+        (Stage::Reviewing, Status::Completed),
     ];
-    for (stage, status, needs_rm) in cases {
+    for (stage, status) in cases {
         let f = config();
         let mut prepared = task_left_in(&f, stage, status);
         prepared.record.kind = Kind::Pr;
@@ -1499,7 +1501,7 @@ fn a_pr_task_is_refused_with_the_recovery_its_state_allows() {
         let case = format!("{stage:?}/{status:?}: {message}");
         assert!(message.contains("PR task"), "{case}");
         assert!(message.contains("task review --pr"), "{case}");
-        assert_eq!(message.contains("task rm --pr"), needs_rm, "{case}");
+        assert!(!message.contains("task rm --pr"), "{case}");
         assert!(backend.execs().is_empty(), "{case}");
     }
 }

@@ -1208,3 +1208,43 @@ fn the_command_a_cut_review_refusal_names_reviews_the_head_again() {
         out.out
     );
 }
+
+// ---- The task's lock (issue 58) ----
+
+#[test]
+fn a_review_is_refused_while_another_live_command_holds_the_task() {
+    let f = config("codex");
+    let backend = backend(&f, &[CLEAN]);
+    worked_task(&f, &backend);
+    let meta = record::task_dir(&f.env.base_dir(), "issue-41");
+    let _held = sbxm::task::lock::ProcessLock::acquire(&meta, "task issue-41", &Probe).unwrap();
+    let before = (
+        std::fs::read(meta.join("task.json")).unwrap(),
+        backend.execs().len(),
+    );
+
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let result = run(
+        &f.env.config_dir(),
+        &options(&f),
+        &backend,
+        &FakeGitHub::default(),
+        &Probe,
+        &FakeHostRunner::default(),
+        &mut out,
+        &mut warn,
+    );
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains("task issue-41 is in use by another sbxm command (process "),
+        "{message}"
+    );
+    assert_eq!(
+        (
+            std::fs::read(meta.join("task.json")).unwrap(),
+            backend.execs().len()
+        ),
+        before
+    );
+}

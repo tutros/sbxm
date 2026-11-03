@@ -8,8 +8,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
 use super::{
-    CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, PrComment, PrInfo, PrRequest,
-    PrState,
+    CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, ListedPr, PrComment, PrInfo,
+    PrRequest, PrState,
 };
 
 /// Runs `gh` with arguments and optional stdin, returning stdout.
@@ -140,6 +140,17 @@ struct RawPr {
     body: String,
     #[serde(default)]
     closing_issues_references: Vec<Number>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawListedPr {
+    number: u32,
+    url: String,
+    head_ref_name: String,
+    base_ref_name: String,
+    is_cross_repository: bool,
+    state: String,
 }
 
 #[derive(Deserialize)]
@@ -286,6 +297,42 @@ impl GitHubBackend for GhBackend {
                 .map(|n| n.number)
                 .collect(),
         })
+    }
+
+    fn open_pr_for(&self, repo: &str, head: &str, base: &str) -> Result<Option<ListedPr>> {
+        // No `--base`: an open PR of the same head with another base is returned too, so the
+        // caller can name it. `--head` matches the branch name only, a fork's included, so the
+        // head's repository and the state are checked here as well.
+        let raw: Vec<RawListedPr> = self.json(&strings(&[
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--head",
+            head,
+            "--state",
+            "open",
+            "--limit",
+            "100",
+            "--json",
+            "number,url,headRefName,baseRefName,isCrossRepository,state",
+        ]))?;
+        let mut candidates: Vec<ListedPr> = raw
+            .into_iter()
+            .filter(|p| p.state == "OPEN" && p.head_ref_name == head && !p.is_cross_repository)
+            .map(|p| ListedPr {
+                number: p.number,
+                url: p.url,
+                head_ref: p.head_ref_name,
+                base_ref: p.base_ref_name,
+                is_cross_repository: p.is_cross_repository,
+            })
+            .collect();
+        let pick = candidates
+            .iter()
+            .position(|p| p.base_ref == base)
+            .unwrap_or(0);
+        Ok((!candidates.is_empty()).then(|| candidates.swap_remove(pick)))
     }
 
     fn pr_create(&self, repo: &str, request: &PrRequest) -> Result<String> {

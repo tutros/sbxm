@@ -75,7 +75,7 @@ pub fn run(
         Target::Issue(n) => format!("issue-{n}"),
         Target::Spec(path) => record::spec_id(path)?.0,
     };
-    let mut prepared = Prepared::open(&base_dir, &id)?;
+    let mut prepared = Prepared::open_locked(&base_dir, &id, probe)?;
     // The worker is whoever the task recorded, as for `task review`: its sandbox and clone are
     // that harness's, and the default reviewer must differ from it (decision 148).
     if let Some(worker) = &prepared.record.worker {
@@ -105,6 +105,7 @@ pub fn run(
         // Empty in production while P8 (a) holds (slice 4).
         scoped_secrets: &[],
         identity: identity.as_ref(),
+        clone_source: None,
     };
     resume::check_can_resume(&prepared.record, probe, opts.rounds)?;
     resume::check_ambiguous(&prepared.record, opts.forget_ambiguous)?;

@@ -14,15 +14,16 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 use super::lifetime::{self, Removal};
+use super::lock::ProcessLock;
 use super::machine;
-use super::pipeline::Prepared;
+use super::pipeline::{self, Prepared};
 use super::record::{self, OpenFinding, Process, ProcessProbe, Record};
 use super::repo;
 use super::review::{self, COMMENT_CAP, defang, defang_mentions};
 use super::risk;
 use crate::backend::{Location, SandboxBackend};
 use crate::confirm::Confirm;
-use crate::github::{GitHubBackend, PrRequest};
+use crate::github::{GitHubBackend, ListedPr, PrRequest};
 use crate::run::results::now;
 
 /// Everything `task rm` would delete, worked out before anything is.
@@ -43,6 +44,9 @@ pub struct RemovalPlan {
     /// record before anything is removed ([`forget_in_record`]), with no cloud call for it
     /// (decision 268).
     pub forget: Option<String>,
+    /// The task's mutation lock (issue 58), taken before its record was read and held until the
+    /// plan is dropped; `None` when the task has no `.sbxm/tasks/<id>/` folder to lock.
+    lock: Option<ProcessLock>,
 }
 
 impl RemovalPlan {
@@ -160,6 +164,8 @@ pub fn plan_removal_forgetting(
     if folders.is_empty() {
         bail!("no task {id}; run `sbxm task status` to list the tasks");
     }
+    // Before the record is read: a task another live command holds is refused (issue 58).
+    let lock = pipeline::lock_task(base_dir, id, probe)?;
 
     let json = meta.join("task.json");
     let mut sandboxes = Vec::new();
@@ -211,6 +217,7 @@ pub fn plan_removal_forgetting(
         folders,
         note,
         forget: forgotten,
+        lock,
     })
 }
 
@@ -651,12 +658,15 @@ pub fn set_aside_many(
         confirm,
         out,
         &std::thread::sleep,
+        &|| Ok(()),
     )
 }
 
 /// [`set_aside_many`], with `sleep` called for each wait between a cloud sandbox's removal
 /// retries (P6 (a)) instead of really sleeping. A cloud sandbox that still can't be removed
 /// stops the restart before its task is moved, and every task already set aside goes back.
+/// `check` runs once every task is planned, under their locks (issue 58), and before the question:
+/// an error refuses the restart with nothing touched.
 #[allow(clippy::too_many_arguments)]
 pub fn set_aside_many_with_sleep(
     base_dir: &Path,
@@ -667,11 +677,13 @@ pub fn set_aside_many_with_sleep(
     confirm: &dyn Confirm,
     out: &mut dyn Write,
     sleep: &dyn Fn(Duration),
+    check: &dyn Fn() -> Result<()>,
 ) -> Result<Vec<SetAside>> {
-    let plans = ids
+    let mut plans = ids
         .iter()
         .map(|id| plan_removal(base_dir, id, probe))
         .collect::<Result<Vec<_>>>()?;
+    check()?;
     let listing = plans
         .iter()
         .map(RemovalPlan::listing)
@@ -696,7 +708,7 @@ pub fn set_aside_many_with_sleep(
         }
     }
     let mut result: Vec<SetAside> = Vec::new();
-    for plan in &plans {
+    for plan in &mut plans {
         let mut report = RemovalReport::default();
         let all_gone = remove_sandboxes(plan, backend, sleep, &mut report);
         let lines = report.removed.iter().map(|l| format!("removed {l}"));
@@ -721,7 +733,15 @@ pub fn set_aside_many_with_sleep(
             return Err(undo_set_asides(&result, failed));
         }
         match set_aside_one(base_dir, plan) {
-            Ok(aside) => result.push(aside),
+            Ok(aside) => {
+                // Its lock moved aside with its folder, and is released there: a task put back
+                // later comes back unlocked.
+                if let Some(mut lock) = plan.lock.take() {
+                    let (_, meta) = aside.pair(&Path::new(".sbxm").join("tasks").join(&plan.id));
+                    lock.moved_to(&meta);
+                }
+                result.push(aside);
+            }
             Err(e) => return Err(undo_set_asides(&result, e)),
         }
     }
@@ -762,10 +782,11 @@ pub fn set_aside(
         confirm,
         out,
         &std::thread::sleep,
+        &|| Ok(()),
     )
 }
 
-/// [`set_aside`], with `sleep` as for [`set_aside_many_with_sleep`].
+/// [`set_aside`], with `sleep` and `check` as for [`set_aside_many_with_sleep`].
 #[allow(clippy::too_many_arguments)]
 pub fn set_aside_with_sleep(
     base_dir: &Path,
@@ -776,10 +797,12 @@ pub fn set_aside_with_sleep(
     confirm: &dyn Confirm,
     out: &mut dyn Write,
     sleep: &dyn Fn(Duration),
+    check: &dyn Fn() -> Result<()>,
 ) -> Result<SetAside> {
     let ids = [id.to_owned()];
-    let mut all =
-        set_aside_many_with_sleep(base_dir, &ids, yes, backend, probe, confirm, out, sleep)?;
+    let mut all = set_aside_many_with_sleep(
+        base_dir, &ids, yes, backend, probe, confirm, out, sleep, check,
+    )?;
     Ok(all.remove(0))
 }
 
@@ -964,7 +987,9 @@ fn holds_result(checkout: &Path, start: &str, tip: &str) -> bool {
 }
 
 /// Shows what removing `id` would delete, asks (unless `yes`), removes it and says what went and
-/// what stayed. Nothing is touched before the answer. Fails if anything stayed.
+/// what stayed. Nothing is touched before the answer. Fails if anything stayed. `check` runs once
+/// the task is planned, under its lock (issue 58), and before the question: an error refuses the
+/// removal with nothing touched.
 #[allow(clippy::too_many_arguments)]
 pub fn discard(
     base_dir: &Path,
@@ -976,6 +1001,7 @@ pub fn discard(
     confirm: &dyn Confirm,
     out: &mut dyn Write,
     sleep: &dyn Fn(Duration),
+    check: &dyn Fn() -> Result<()>,
 ) -> Result<()> {
     discard_many(
         base_dir,
@@ -987,6 +1013,7 @@ pub fn discard(
         confirm,
         out,
         sleep,
+        check,
     )
 }
 
@@ -1004,11 +1031,13 @@ pub fn discard_many(
     confirm: &dyn Confirm,
     out: &mut dyn Write,
     sleep: &dyn Fn(Duration),
+    check: &dyn Fn() -> Result<()>,
 ) -> Result<()> {
     let plans = ids
         .iter()
         .map(|id| plan_removal_forgetting(base_dir, id, probe, forget_ambiguous))
         .collect::<Result<Vec<_>>>()?;
+    check()?;
     let listing = plans
         .iter()
         .map(RemovalPlan::listing)
@@ -1065,8 +1094,16 @@ pub fn risk_section(task: &Record, unresolved: &[String]) -> String {
 /// 65,536 for the whole body).
 pub const SECTION_CAP: usize = 25_000;
 
-/// The PR body: the [`risk_section`] first, then `Fixes #N`, the [`unresolved_section`] of a
-/// draft, and each file under a heading. A file longer than the cap is cut and the body says so.
+/// The longest "Needs a decision" or "Choices made" section copied from `result.md` to the top
+/// of a PR description, in characters (issue 220, decision 283). With the risk section's
+/// `risk::RISK_CAP`, the draft's 5,000 and two [`SECTION_CAP`]s, the body stays under GitHub's
+/// 65,536.
+pub const HANDBACK_CAP: usize = 2_500;
+
+/// The PR body: the [`risk_section`] first, then `Fixes #N`, the result's "Needs a decision" and
+/// "Choices made" sections when they say something (issue 220, decision 283; each cut to
+/// [`HANDBACK_CAP`]), the [`unresolved_section`] of a draft, and each file under a heading. A file
+/// longer than the cap is cut and the body says so.
 /// All of it but the `Fixes #N` line is agent text, so mentions and closing references in it are
 /// neutralised ([`review::defang`]); the files in the task folder stay as they are. Returns the
 /// body and one line per cut for the command to print.
@@ -1082,10 +1119,31 @@ pub fn pr_body(
     // section is the same text the in-task review comment opens with (issue 228).
     let (risk, risk_cut) = review::published_risk(risk);
     let mut body = format!("{}\nFixes #{number}\n", risk.trim_end());
+    let mut cuts: Vec<String> = risk_cut.into_iter().collect();
+    for name in HANDBACK_SECTIONS {
+        let Some(text) = result.and_then(|r| handback_section(r, name)) else {
+            continue;
+        };
+        let text = defang(&text);
+        let total = text.chars().count();
+        body.push_str(&format!("\n## {name}\n\n"));
+        if total <= HANDBACK_CAP {
+            body.push_str(text.trim_end());
+            body.push('\n');
+        } else {
+            let head: String = text.chars().take(HANDBACK_CAP).collect();
+            body.push_str(head.trim_end());
+            body.push_str(&format!(
+                "\n\n(cut: the \"{name}\" section has {total} characters; the first {HANDBACK_CAP} are shown, the whole of it is in result.md in the task folder)\n"
+            ));
+            cuts.push(format!(
+                "result.md's \"{name}\" section is {total} characters; the PR body's copy carries the first {HANDBACK_CAP}"
+            ));
+        }
+    }
     if let Some(section) = unresolved {
         body.push_str(&format!("\n{}\n", defang(section).trim_end()));
     }
-    let mut cuts: Vec<String> = risk_cut.into_iter().collect();
     for (file, heading, text) in [
         ("result.md", "Result", result),
         ("review.md", "Review", review),
@@ -1112,6 +1170,108 @@ pub fn pr_body(
         }
     }
     (body, cuts)
+}
+
+/// The two sections of a worker's `result.md` copied to the top of a PR description, in their
+/// order there (issue 220, decision 283).
+const HANDBACK_SECTIONS: [&str; 2] = ["Needs a decision", "Choices made"];
+
+/// The text of `result`'s section called `name` (issue 220, decision 283): under a heading of any
+/// level whose text is `name` in any case, with bold or italic marks and a trailing colon allowed
+/// (`## Needs a decision: none` starts its text with `none`), up to the next heading at its level
+/// or above; a heading inside a code fence neither starts nor ends a section. Several such
+/// sections are joined. `None` when there is none, or all of it is empty or "none".
+fn handback_section(result: &str, name: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    let mut current: Option<(usize, Vec<&str>)> = None;
+    let mut fence: Option<(char, usize)> = None;
+    for line in result.lines() {
+        let heading = match fence {
+            None => heading_of(line),
+            Some(_) => None,
+        };
+        fence = next_fence(fence, line);
+        if let Some((level, text)) = heading {
+            if current.as_ref().is_some_and(|(at, _)| level <= *at) {
+                parts.extend(current.take().map(|(_, lines)| lines.join("\n")));
+            }
+            if current.is_none() {
+                current = named_text(text, name).map(|inline| (level, vec![inline]));
+                if current.is_some() {
+                    continue;
+                }
+            }
+        }
+        if let Some((_, lines)) = &mut current {
+            lines.push(line);
+        }
+    }
+    parts.extend(current.map(|(_, lines)| lines.join("\n")));
+    let parts: Vec<&str> = parts
+        .iter()
+        .map(|p| p.trim())
+        .filter(|p| !is_none(p))
+        .collect();
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
+}
+
+/// An ATX heading's level and text (`### Text ##` is level 3, `Text`).
+fn heading_of(line: &str) -> Option<(usize, &str)> {
+    let indent = line.len() - line.trim_start_matches(' ').len();
+    if indent > 3 {
+        return None;
+    }
+    let rest = &line[indent..];
+    let level = rest.len() - rest.trim_start_matches('#').len();
+    let text = &rest[level..];
+    if !(1..=6).contains(&level) || !(text.is_empty() || text.starts_with([' ', '\t'])) {
+        return None;
+    }
+    Some((level, text.trim().trim_end_matches('#').trim()))
+}
+
+/// The heading `text` without its bold and italic marks, when it names `name`: the rest of the
+/// text after a colon (empty without one), or `None` for another heading.
+fn named_text<'a>(text: &'a str, name: &str) -> Option<&'a str> {
+    let plain = text.trim_matches(['*', '_', ' ']);
+    let start = plain.get(..name.len())?;
+    if !start.eq_ignore_ascii_case(name) {
+        return None;
+    }
+    let rest = plain[name.len()..].trim_start_matches(['*', '_']);
+    match rest.strip_prefix(':') {
+        Some(inline) => Some(inline.trim_matches(['*', '_', ' '])),
+        None => rest.is_empty().then_some(""),
+    }
+}
+
+/// The code fence open after `line`, given the one open before it (a run of three or more
+/// backticks or tildes opens one; the same character, at least as many, alone closes it).
+fn next_fence(open: Option<(char, usize)>, line: &str) -> Option<(char, usize)> {
+    let trimmed = line.trim_start_matches(' ');
+    if line.len() - trimmed.len() > 3 {
+        return open;
+    }
+    let marker = ['`', '~'].into_iter().find_map(|c| {
+        let run = trimmed.len() - trimmed.trim_start_matches(c).len();
+        (run >= 3).then_some((c, run))
+    });
+    match (open, marker) {
+        (None, Some(found)) => Some(found),
+        (Some((c, n)), Some((m, run)))
+            if c == m && run >= n && trimmed[run..].trim().is_empty() =>
+        {
+            None
+        }
+        (open, _) => open,
+    }
+}
+
+/// Whether a section's text says nothing: empty, or "none" give or take list, bold and italic
+/// marks and a full stop.
+fn is_none(text: &str) -> bool {
+    let plain = text.trim_matches(|c: char| c.is_whitespace() || "-*_+.".contains(c));
+    plain.is_empty() || plain.eq_ignore_ascii_case("none")
 }
 
 /// Why task `task`'s PR must be a draft (decision 173(b)), one line per reason; empty when it is
@@ -1255,6 +1415,9 @@ pub struct Finished {
     pub cuts: Vec<String>,
     /// The PR the task pushed to, when it continues one (decision 169): no PR was opened.
     pub continued: Option<u32>,
+    /// The PR was already open for the branch and base, so it was recorded instead of opened
+    /// (issue 60): a create whose answer was lost, or one opened by hand.
+    pub adopted: bool,
     /// Whether the PR was opened as a draft, and why ([`unresolved_reasons`]).
     pub draft: bool,
     pub unresolved: Vec<String>,
@@ -1491,6 +1654,22 @@ pub fn finish(
     let tip = repo::branch_tip(&repo_git, &task.branch)?;
     let posting = reviewed_head(&task, &tip).zip(review.clone());
 
+    // Issue 60: an open PR of this branch is looked for before anything is pushed. One into the
+    // task's base is adopted rather than opened again; one into another base is named and left
+    // alone, since pushing would move its head.
+    let existing = open_pr(github, &task)?;
+    if let Some(Found::OtherBase(pr)) = &existing {
+        bail!(
+            "{} is already open for branch {} but into {}, not {}; nothing was pushed and no \
+             second PR was opened; close or retarget that PR, then run `sbxm task finish --issue \
+             {}` again",
+            pr.url,
+            task.branch,
+            pr.base_ref,
+            task.base,
+            task.number
+        );
+    }
     repo::push(&repo_git, &task.branch)?;
     let request = PrRequest {
         head: task.branch.clone(),
@@ -1499,18 +1678,26 @@ pub fn finish(
         body,
         draft,
     };
-    let url = match github.pr_create(&task.repo, &request) {
-        Ok(url) => url,
-        Err(e) => {
-            if !prepared.record.notes.iter().any(|n| n == PUSHED_NOTE) {
-                prepared.record.notes.push(PUSHED_NOTE.to_owned());
-                let _ = record::write(&prepared.meta, &prepared.record);
-            }
-            return Err(e).context(format!(
-                "pushed {} but could not open the PR; run `sbxm task finish --issue {}` again, which only retries the PR",
-                task.branch, task.number
-            ));
-        }
+    let (url, adopted) = match existing {
+        Some(Found::Matching(pr)) => (pr.url, true),
+        _ => match github.pr_create(&task.repo, &request) {
+            Ok(url) => (url, false),
+            // A failed create is decided by reading the PR state again, never by its error
+            // text (the lesson of #319): GitHub may have opened the PR and lost only its answer.
+            Err(e) => match open_pr(github, &task) {
+                Ok(Some(Found::Matching(pr))) => (pr.url, true),
+                _ => {
+                    if !prepared.record.notes.iter().any(|n| n == PUSHED_NOTE) {
+                        prepared.record.notes.push(PUSHED_NOTE.to_owned());
+                        let _ = record::write(&prepared.meta, &prepared.record);
+                    }
+                    return Err(e).context(format!(
+                        "pushed {} but could not open the PR; run `sbxm task finish --issue {}` again, which only retries the PR",
+                        task.branch, task.number
+                    ));
+                }
+            },
+        },
     };
     prepared.record.notes.retain(|n| n != PUSHED_NOTE);
     prepared
@@ -1550,11 +1737,43 @@ pub fn finish(
         branch: task.branch,
         cuts,
         continued: None,
+        adopted,
         draft,
         unresolved,
         review_posted,
         warnings,
     })
+}
+
+/// What [`open_pr`] found for a task's branch.
+enum Found {
+    /// Open, of the task's repo, head and base: the task's PR.
+    Matching(ListedPr),
+    /// Open, of the task's repo and head, into another base.
+    OtherBase(ListedPr),
+}
+
+/// The open PR of `task`'s branch, by repo, head and base (issue 60); a failed lookup says which
+/// call failed.
+fn open_pr(github: &dyn GitHubBackend, task: &record::Record) -> Result<Option<Found>> {
+    let found = github
+        .open_pr_for(&task.repo, &task.branch, &task.base)
+        .with_context(|| {
+            format!(
+                "could not look up an open PR of branch {}; nothing was opened; run `sbxm task \
+                 finish --issue {}` again",
+                task.branch, task.number
+            )
+        })?;
+    Ok(found
+        .filter(|pr| pr.head_ref == task.branch && !pr.is_cross_repository)
+        .map(|pr| {
+            if pr.base_ref == task.base {
+                Found::Matching(pr)
+            } else {
+                Found::OtherBase(pr)
+            }
+        }))
 }
 
 /// Posts the in-task review of `commit` on the PR at `url` (issue 198), with `risk_text`, the
@@ -2026,6 +2245,7 @@ fn finish_continued(
         branch: task.branch.clone(),
         cuts: Vec::new(),
         continued: Some(pr),
+        adopted: false,
         draft: false,
         unresolved,
         review_posted: None,

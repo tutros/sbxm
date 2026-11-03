@@ -12,6 +12,9 @@ const ISSUE_VIEW: &str = include_str!("../src/github/fixtures/issue-view-31.txt"
 const PR_CLOSING: &str = include_str!("../src/github/fixtures/pr-view-closing.json");
 const PR_MERGED: &str = include_str!("../src/github/fixtures/pr-view-merged.json");
 const DEFAULT_BRANCH: &str = include_str!("../src/github/fixtures/repo-default-branch.json");
+/// Written by hand in the shape `gh pr list --json` prints (no GitHub access where issue 60 was
+/// built): a same-repo PR on another base, a fork's PR of the same branch name, then the match.
+const PR_LIST_HEAD: &str = include_str!("../src/github/fixtures/pr-list-head.json");
 const LABELS: &str = include_str!("../src/github/fixtures/label-list.json");
 
 /// Plays `gh`: records every call and answers with the queued outputs in order.
@@ -441,4 +444,69 @@ fn pr_comments_are_read_oldest_first_with_their_authors() {
     assert_eq!(comments[0].body, "Looks good to me.");
     assert_eq!(comments[1].author, "tutros");
     assert!(comments[1].body.starts_with("sbxm review of PR #312\n"));
+}
+
+/// Issue 60: the open PR of a head is looked up by head and state only, so one on another base
+/// can be named; the match on the base wins, and a fork's branch of the same name never does.
+#[test]
+fn the_open_pr_of_a_head_is_listed_and_the_one_on_the_base_is_picked() {
+    let (gh, script) = backend(Scripted::answering(PR_LIST_HEAD));
+
+    let pr = gh.open_pr_for("o/r", "issue-4", "main").unwrap().unwrap();
+
+    assert_eq!(
+        args(script, 0),
+        [
+            "pr",
+            "list",
+            "--repo",
+            "o/r",
+            "--head",
+            "issue-4",
+            "--state",
+            "open",
+            "--limit",
+            "100",
+            "--json",
+            "number,url,headRefName,baseRefName,isCrossRepository,state"
+        ]
+    );
+    assert_eq!(pr.number, 9);
+    assert_eq!(pr.url, "https://github.com/o/r/pull/9");
+    assert_eq!(
+        (pr.head_ref.as_str(), pr.base_ref.as_str()),
+        ("issue-4", "main")
+    );
+    assert!(!pr.is_cross_repository);
+}
+
+#[test]
+fn an_open_pr_of_the_head_on_another_base_is_returned_for_the_caller_to_name() {
+    let (gh, _) = backend(Scripted::answering(PR_LIST_HEAD));
+
+    let pr = gh
+        .open_pr_for("o/r", "issue-4", "develop")
+        .unwrap()
+        .unwrap();
+
+    assert_eq!((pr.number, pr.base_ref.as_str()), (12, "release"));
+}
+
+#[test]
+fn a_fork_pr_a_closed_pr_or_another_head_is_no_open_pr_of_the_head() {
+    let listed = r#"[
+        {"baseRefName":"main","headRefName":"issue-4","isCrossRepository":true,"number":11,"state":"OPEN","url":"https://github.com/o/r/pull/11"},
+        {"baseRefName":"main","headRefName":"issue-4","isCrossRepository":false,"number":8,"state":"MERGED","url":"https://github.com/o/r/pull/8"},
+        {"baseRefName":"main","headRefName":"issue-40","isCrossRepository":false,"number":7,"state":"OPEN","url":"https://github.com/o/r/pull/7"}
+    ]"#;
+    let (gh, _) = backend(Scripted::answering(listed));
+
+    assert_eq!(gh.open_pr_for("o/r", "issue-4", "main").unwrap(), None);
+}
+
+#[test]
+fn no_pr_listed_is_no_open_pr() {
+    let (gh, _) = backend(Scripted::answering("[]\n"));
+
+    assert_eq!(gh.open_pr_for("o/r", "issue-4", "main").unwrap(), None);
 }

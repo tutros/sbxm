@@ -130,3 +130,32 @@ fn kit_dir_is_named_after_the_hash_prefix() {
     let harness = expected.with_file_name("harness-claude");
     assert_eq!(backend.creates()[0].kits, vec![expected, harness]);
 }
+
+/// Issue 381: Claude's claude.ai connectors are off in every Claude sandbox,
+/// and the hash covers it, so an older Claude sandbox shows drift. Other
+/// harnesses don't get the variable, so their hashes stay as they were.
+#[test]
+fn claude_hash_covers_the_disabled_claude_ai_connectors() {
+    let resources = sbxm::config::Resources {
+        cpus: 4,
+        memory: "8g".into(),
+    };
+    let profile = sbxm::config::Profile::default();
+    let input = |harness| {
+        sbxm::config::hash_input_toml("default", &profile, &resources, harness, false).unwrap()
+    };
+
+    let claude = input(sbxm::harness::Harness::Claude);
+    assert!(
+        claude.contains("ENABLE_CLAUDEAI_MCP_SERVERS = \"false\""),
+        "{claude}"
+    );
+    for harness in [
+        sbxm::harness::Harness::Codex,
+        sbxm::harness::Harness::Pi,
+        sbxm::harness::Harness::Antigravity,
+    ] {
+        let other = input(harness);
+        assert!(!other.contains("ENABLE_CLAUDEAI_MCP_SERVERS"), "{other}");
+    }
+}

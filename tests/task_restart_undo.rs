@@ -59,6 +59,8 @@ fn resumable_task_for(f: &Fixture, backend: &FakeBackend, number: u32) -> Prepar
     prepared.record.stage = Stage::Working;
     prepared.record.status = Status::Failed;
     record::write(&prepared.meta, &prepared.record).unwrap();
+    // The start that made it has ended: its lock (issue 58) goes with it.
+    prepared.lock = None;
     prepared
 }
 
@@ -81,6 +83,7 @@ fn env<'a>(f: &'a Fixture, backend: &'a FakeBackend) -> TaskEnv<'a> {
         sleep: &std::thread::sleep,
         scoped_secrets: &[],
         identity: None,
+        clone_source: None,
     }
 }
 
@@ -123,6 +126,32 @@ fn a_restored_task_has_no_sandbox_but_resume_makes_it_again() {
         "{:?}",
         fresh.creates()
     );
+}
+
+/// Issue 58: the restart held the old task's lock while it set the task aside, and released it
+/// there, so a task put back comes back unlocked and the next command on it runs.
+#[test]
+fn a_restored_task_comes_back_without_the_restarts_lock() {
+    let f = fixture();
+    let backend = FakeBackend::with_secrets(&["anthropic", "openai"]);
+    resumable_task(&f, &backend);
+    let base_dir = f.env.base_dir();
+
+    let aside = finish::set_aside(
+        &base_dir,
+        "issue-41",
+        true,
+        &backend,
+        &Probe,
+        &Never,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    aside.restore().unwrap();
+
+    assert!(meta(&f).join("task.json").is_file());
+    assert!(!meta(&f).join("lock.json").exists());
+    Prepared::open_locked(&base_dir, "issue-41", &Probe).unwrap();
 }
 
 /// Decision 185 point 3: once the new task's preparation is complete, the set-aside copy is gone

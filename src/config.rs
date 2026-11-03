@@ -568,6 +568,10 @@ struct HashInput<'a> {
     /// Absent for a profile without `[template]`, so older hashes still match.
     #[serde(skip_serializing_if = "Option::is_none")]
     template: Option<TemplateInput<'a>>,
+    /// [`Harness::kit_env`]; absent when empty, so other harnesses' hashes
+    /// still match (issue 381).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    harness_env: BTreeMap<&'static str, &'static str>,
 }
 
 /// The part of `[template]` a sandbox's hash covers (decision 230): `strict`
@@ -602,6 +606,7 @@ impl<'a> HashInput<'a> {
                 strict: t.strict,
                 allow: None,
             }),
+            harness_env: harness.kit_env().iter().copied().collect(),
         }
     }
 }
