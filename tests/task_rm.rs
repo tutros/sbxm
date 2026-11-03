@@ -279,10 +279,19 @@ fn a_task_folder_that_resolves_elsewhere_is_not_deleted() {
     let moved = f.env.base_dir().join(".sbxm").join("tasks-real");
     fs::rename(&root, &moved).unwrap();
     dir_link(&root, &elsewhere);
-    let plan = plan_removal(&f.env.base_dir(), "issue-41", &Probe).unwrap();
 
-    let report = remove(&plan, &b);
+    // Refused while planning, before the task's lock is taken there (issue 58 review M-1).
+    let message = format!(
+        "{:#}",
+        plan_removal(&f.env.base_dir(), "issue-41", &Probe).unwrap_err()
+    );
 
-    assert!(!report.is_clean(), "{report:?}");
+    assert!(message.contains("resolves to"), "{message}");
     assert!(elsewhere.join("issue-41").join("keep.txt").exists());
+    assert!(!elsewhere.join("issue-41").join("lock.json").exists());
+    assert!(
+        tasks(&f).join("issue-41").exists(),
+        "nothing else was removed"
+    );
+    assert!(b.removes().is_empty(), "no sandbox was removed");
 }
