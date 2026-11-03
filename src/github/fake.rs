@@ -285,16 +285,25 @@ impl GitHubBackend for FakeGitHub {
             add.to_vec(),
             remove.to_vec(),
         ))?;
+        // The same issue in both lists, as GitHub has it once: `issues_open` sees the change too.
         let mut all = self.all_issues.lock().unwrap();
-        let issue = all
+        let mut open = self.open_issues.lock().unwrap();
+        let mut found = false;
+        for issue in all
             .iter_mut()
-            .find(|i| i.number == number)
-            .ok_or_else(|| anyhow!("FakeGitHub: issue {number} does not exist"))?;
-        issue.labels.retain(|l| !remove.contains(l));
-        for label in add {
-            if !issue.labels.contains(label) {
-                issue.labels.push(label.clone());
+            .chain(open.iter_mut())
+            .filter(|i| i.number == number)
+        {
+            found = true;
+            issue.labels.retain(|l| !remove.contains(l));
+            for label in add {
+                if !issue.labels.contains(label) {
+                    issue.labels.push(label.clone());
+                }
             }
+        }
+        if !found {
+            return Err(anyhow!("FakeGitHub: issue {number} does not exist"));
         }
         Ok(())
     }
