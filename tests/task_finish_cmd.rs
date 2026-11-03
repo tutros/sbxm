@@ -185,6 +185,12 @@ fn a_failed_status_is_printed_as_a_warning() {
         ..Default::default()
     });
     record::write(&meta, &task).unwrap();
+    let base = common::git(&meta.join("repo.git"), &["rev-parse", "main"]);
+    fs::write(
+        meta.join("review.md"),
+        format!("Must-fix findings: 0\n\nScope: `{base}..{tip}`\n"),
+    )
+    .unwrap();
 
     let (result, out) = go(&f, 41, &FakeGitHub::default().failing_statuses("HTTP 403"));
 
@@ -193,6 +199,51 @@ fn a_failed_status_is_printed_as_a_warning() {
         out.contains(&format!(
             "warning: the sbxm/review status on commit {tip} couldn't be posted"
         )),
+        "{out}"
+    );
+}
+
+/// Issue 317, review M-1: a review whose `Scope:` ends at another commit certifies nothing, so
+/// the PR's head gets no status, and the warning says why and how to review it again.
+#[test]
+fn a_review_scoped_to_another_commit_posts_no_status_and_says_why() {
+    let f = fixture();
+    ready(&f);
+    let meta = record::task_dir(&f.env.base_dir(), "issue-41");
+    let mut task = record::read(&meta.join("task.json")).unwrap();
+    let tip = common::git(&meta.join("repo.git"), &["rev-parse", "issue-41"]);
+    let base = common::git(&meta.join("repo.git"), &["rev-parse", "main"]);
+    task.review = Some(record::ReviewResult {
+        round: 1,
+        commit: Some(tip.clone()),
+        ..Default::default()
+    });
+    record::write(&meta, &task).unwrap();
+    fs::write(
+        meta.join("review.md"),
+        format!("Must-fix findings: 0\n\nScope: `{base}..{base}`\n"),
+    )
+    .unwrap();
+    let github = FakeGitHub::default();
+
+    let (result, out) = go(&f, 41, &github);
+
+    result.unwrap();
+    assert!(
+        !github
+            .calls()
+            .iter()
+            .any(|c| matches!(c, GhCall::CommitStatus(..)))
+    );
+    assert!(
+        out.contains(&format!(
+            "warning: the sbxm/review status wasn't posted: the review's Scope ends at {base}, \
+             not at the reviewed commit {tip}"
+        )),
+        "{out}"
+    );
+    assert!(
+        out.contains("`sbxm task review --pr 9 --repo o/r --base main --force`"),
         "{out}"
     );
 }

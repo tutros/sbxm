@@ -907,6 +907,15 @@ fn tip(prepared: &Prepared) -> String {
     git(&prepared.meta.join("repo.git"), &["rev-parse", "issue-41"])
 }
 
+/// `review` with a `Scope:` line from the task's base to `end` after its must-fix line, as the
+/// reviewer writes it (issue 317, review M-1).
+fn scoped(prepared: &Prepared, review: &str, end: &str) -> String {
+    let base = git(&prepared.meta.join("repo.git"), &["rev-parse", "main"]);
+    let (count, rest) = review.split_at(review.find("Must-fix findings:").unwrap());
+    let (line, rest) = rest.split_at(rest.find('\n').unwrap() + 1);
+    format!("{count}{line}\nScope: `{base}..{end}`\n{rest}")
+}
+
 /// Records a review of `commit` with `must_fix` findings and a high risk, as the in-task review
 /// would have, and saves `review` as review.md.
 fn reviewed_at(prepared: &mut Prepared, commit: &str, must_fix: u32, review: &str) {
@@ -964,7 +973,8 @@ fn a_ready_task_posts_its_in_task_review_on_the_new_pr_naming_the_reviewed_commi
     let f = fixture();
     let mut prepared = ready(&f);
     let commit = tip(&prepared);
-    reviewed_at(&mut prepared, &commit, 0, REVIEW);
+    let review = scoped(&prepared, REVIEW, &commit);
+    reviewed_at(&mut prepared, &commit, 0, &review);
     let github = FakeGitHub::default();
 
     let done = run(&f, &github).unwrap();
@@ -998,7 +1008,8 @@ fn a_draft_pr_gets_the_failing_in_task_review_posted_the_same_way() {
     let f = fixture();
     let mut prepared = ready(&f);
     let commit = tip(&prepared);
-    reviewed_at(&mut prepared, &commit, 2, REVIEW_WITH_MUST_FIX);
+    let review = scoped(&prepared, REVIEW_WITH_MUST_FIX, &commit);
+    reviewed_at(&mut prepared, &commit, 2, &review);
     let github = FakeGitHub::default();
 
     let done = run(&f, &github).unwrap();
@@ -1023,7 +1034,8 @@ fn risk_sections_with(reason: &str) -> String {
     let f = fixture();
     let mut prepared = ready(&f);
     let commit = tip(&prepared);
-    reviewed_at(&mut prepared, &commit, 0, REVIEW);
+    let review = scoped(&prepared, REVIEW, &commit);
+    reviewed_at(&mut prepared, &commit, 0, &review);
     prepared.record.review.as_mut().unwrap().risk_reasons = vec![reason.to_owned()];
     record::write(&prepared.meta, &prepared.record).unwrap();
     let github = FakeGitHub::default();
@@ -1161,7 +1173,8 @@ fn a_clean_in_task_review_posts_success_on_the_reviewed_commit() {
     let f = fixture();
     let mut prepared = ready(&f);
     let commit = tip(&prepared);
-    reviewed_at(&mut prepared, &commit, 0, REVIEW);
+    let review = scoped(&prepared, REVIEW, &commit);
+    reviewed_at(&mut prepared, &commit, 0, &review);
     let github = FakeGitHub::default();
 
     let done = run(&f, &github).unwrap();
@@ -1186,7 +1199,8 @@ fn a_draft_with_must_fix_left_posts_failure_on_the_reviewed_commit() {
     let f = fixture();
     let mut prepared = ready(&f);
     let commit = tip(&prepared);
-    reviewed_at(&mut prepared, &commit, 2, REVIEW_WITH_MUST_FIX);
+    let review = scoped(&prepared, REVIEW_WITH_MUST_FIX, &commit);
+    reviewed_at(&mut prepared, &commit, 2, &review);
     let github = FakeGitHub::default();
 
     let done = run(&f, &github).unwrap();
@@ -1203,7 +1217,8 @@ fn a_failed_status_is_a_warning_and_the_finish_and_its_comment_stand() {
     let f = fixture();
     let mut prepared = ready(&f);
     let commit = tip(&prepared);
-    reviewed_at(&mut prepared, &commit, 0, REVIEW);
+    let review = scoped(&prepared, REVIEW, &commit);
+    reviewed_at(&mut prepared, &commit, 0, &review);
     let github = FakeGitHub::default().failing_statuses("HTTP 403");
 
     let done = run(&f, &github).unwrap();
@@ -1234,7 +1249,8 @@ fn a_comment_that_fails_posts_no_status() {
     let f = fixture();
     let mut prepared = ready(&f);
     let commit = tip(&prepared);
-    reviewed_at(&mut prepared, &commit, 0, REVIEW);
+    let review = scoped(&prepared, REVIEW, &commit);
+    reviewed_at(&mut prepared, &commit, 0, &review);
     let github = FakeGitHub::default().failing_comments("HTTP 502");
 
     run(&f, &github).unwrap_err();
@@ -1244,5 +1260,64 @@ fn a_comment_that_fails_posts_no_status() {
             .calls()
             .iter()
             .any(|c| matches!(c, GhCall::CommitStatus(..)))
+    );
+}
+
+#[test]
+fn a_review_scoped_to_another_commit_posts_no_status_and_the_comment_stands() {
+    let f = fixture();
+    let mut prepared = ready(&f);
+    let commit = tip(&prepared);
+    let other = git(&prepared.meta.join("repo.git"), &["rev-parse", "main"]);
+    let review = scoped(&prepared, REVIEW, &other);
+    reviewed_at(&mut prepared, &commit, 0, &review);
+    let github = FakeGitHub::default();
+
+    let done = run(&f, &github).unwrap();
+
+    let calls = github.calls();
+    assert!(
+        matches!(
+            calls.as_slice(),
+            [GhCall::PrCreate(..), GhCall::PrComment(..)]
+        ),
+        "{calls:?}"
+    );
+    let [warning] = done.warnings.as_slice() else {
+        panic!("{:?}", done.warnings)
+    };
+    assert!(
+        warning.contains(&format!(
+            "the review's Scope ends at {other}, not at the reviewed commit {commit}"
+        )),
+        "{warning}"
+    );
+    assert!(warning.contains("--force`"), "{warning}");
+}
+
+#[test]
+fn a_review_without_a_scope_posts_no_status() {
+    let f = fixture();
+    let mut prepared = ready(&f);
+    let commit = tip(&prepared);
+    reviewed_at(&mut prepared, &commit, 0, REVIEW);
+    let github = FakeGitHub::default();
+
+    let done = run(&f, &github).unwrap();
+
+    assert!(
+        !github
+            .calls()
+            .iter()
+            .any(|c| matches!(c, GhCall::CommitStatus(..)))
+    );
+    let [warning] = done.warnings.as_slice() else {
+        panic!("{:?}", done.warnings)
+    };
+    assert!(
+        warning.contains(&format!(
+            "the review has no `Scope: <base>..<head>` line to show it covered commit {commit}"
+        )),
+        "{warning}"
     );
 }

@@ -179,6 +179,28 @@ pub fn status(must_fix: u32, review: &str, risk: Level) -> CommitStatus {
     }
 }
 
+/// Checks that `review`'s `Scope:` line ends at `commit`, the commit the reviewer was given
+/// (issue 317, review M-1): a status certifies the end of that range, so a review that declares
+/// another commit, or none, certifies nothing. The end may be abbreviated (at least 7 hex
+/// digits, as [`findings::parse`] reads it) if it is a prefix of `commit`. The error says why.
+pub fn check_scope_end(review: &str, commit: &str) -> Result<(), String> {
+    match findings::parse(review).head_sha {
+        Some(end)
+            if commit
+                .to_ascii_lowercase()
+                .starts_with(&end.to_ascii_lowercase()) =>
+        {
+            Ok(())
+        }
+        Some(end) => Err(format!(
+            "the review's Scope ends at {end}, not at the reviewed commit {commit}"
+        )),
+        None => Err(format!(
+            "the review has no `Scope: <base>..<head>` line to show it covered commit {commit}"
+        )),
+    }
+}
+
 /// `text` cut to [`STATUS_DESCRIPTION_CAP`] characters.
 pub fn fit_status_description(text: &str) -> String {
     text.chars().take(STATUS_DESCRIPTION_CAP).collect()

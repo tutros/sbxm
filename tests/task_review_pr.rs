@@ -1101,6 +1101,20 @@ fn the_posted_comment_opens_with_the_risk_section() {
 
 // ---- Issue 317: the `sbxm/review` status on the reviewed commit ----
 
+/// `review` with a `Scope:` line from `main` to `end` after its must-fix line, as the reviewer
+/// writes it (review M-1).
+fn scoped(f: &Fixture, review: &str, end: &str) -> String {
+    let base = common::git(&f.origin, &["rev-parse", "main"]);
+    let (line, rest) = review.split_at(review.find('\n').unwrap() + 1);
+    format!("{line}\nScope: `{base}..{end}`\n{rest}")
+}
+
+/// [`prepared`] on the PR head already pushed, so a review can name it beforehand.
+fn prepared_on_head(f: &Fixture, backend: &FakeBackend, github: &FakeGitHub) -> Prepared {
+    let source = source(f);
+    pipeline::prepare_pr(&ctx(f, &source, backend, github), &pr()).unwrap()
+}
+
 /// The statuses posted, as (repo, commit, status).
 fn statuses(github: &FakeGitHub) -> Vec<(String, String, sbxm::github::CommitStatus)> {
     github
@@ -1116,8 +1130,10 @@ fn statuses(github: &FakeGitHub) -> Vec<(String, String, sbxm::github::CommitSta
 #[test]
 fn a_clean_review_posts_success_on_the_reviewed_commit_after_its_comment() {
     let f = config("");
-    let (backend, github) = (backend(&f, &[CLEAN]), github());
-    let mut prepared = prepared(&f, &backend, &github);
+    let head = add_pr_head(&f, 7);
+    let review = scoped(&f, CLEAN, &head);
+    let (backend, github) = (backend(&f, &[&review]), github());
+    let mut prepared = prepared_on_head(&f, &backend, &github);
 
     let report = review_it(
         &f,
@@ -1154,8 +1170,10 @@ fn a_clean_review_posts_success_on_the_reviewed_commit_after_its_comment() {
 #[test]
 fn a_review_with_must_fix_posts_failure_on_the_reviewed_commit() {
     let f = config("");
-    let (backend, github) = (backend(&f, &[ONE]), github());
-    let mut prepared = prepared(&f, &backend, &github);
+    let head = add_pr_head(&f, 7);
+    let review = scoped(&f, ONE, &head);
+    let (backend, github) = (backend(&f, &[&review]), github());
+    let mut prepared = prepared_on_head(&f, &backend, &github);
 
     review_it(
         &f,
@@ -1197,8 +1215,12 @@ fn a_review_whose_comment_fails_posts_no_status() {
 #[test]
 fn a_failed_status_is_a_warning_naming_the_commit_and_the_command_and_the_review_stands() {
     let f = config("");
-    add_pr_head(&f, 7);
-    let (backend, github) = (backend(&f, &[CLEAN]), github().failing_statuses("HTTP 403"));
+    let head = add_pr_head(&f, 7);
+    let review = scoped(&f, CLEAN, &head);
+    let (backend, github) = (
+        backend(&f, &[&review]),
+        github().failing_statuses("HTTP 403"),
+    );
 
     let (result, out, warn) = run_it(&f, &backend, &github);
 
@@ -1220,4 +1242,112 @@ fn a_failed_status_is_a_warning_naming_the_commit_and_the_command_and_the_review
             .iter()
             .any(|c| matches!(c, GhCall::PrComment(..)))
     );
+}
+
+/// Review M-1: a review that declares it covered an older head A certifies nothing on the
+/// fetched head B; neither gets a status, and the warning says why and how to review again.
+#[test]
+fn a_review_scoped_to_an_older_head_posts_no_status_on_the_fetched_one() {
+    let f = config("");
+    let older = add_pr_head(&f, 7);
+    let review = scoped(&f, CLEAN, &older);
+    let (backend, github) = (backend(&f, &[&review]), github());
+    let mut prepared = prepared(&f, &backend, &github);
+
+    let report = review_it(
+        &f,
+        &backend,
+        &github,
+        &FakeHostRunner::default(),
+        &mut prepared,
+    )
+    .unwrap();
+
+    let reviewed = saved(&f).review.unwrap().commit.unwrap();
+    assert_ne!(reviewed, older);
+    assert!(report.posted);
+    assert!(statuses(&github).is_empty(), "{:?}", github.calls());
+    let [warning] = report.warnings.as_slice() else {
+        panic!("{:?}", report.warnings)
+    };
+    assert!(
+        warning.contains(&format!(
+            "the sbxm/review status wasn't posted: the review's Scope ends at {older}, not at \
+             the reviewed commit {reviewed}"
+        )),
+        "{warning}"
+    );
+    assert!(
+        warning.contains("`sbxm task review --pr 7 --repo o/r --base main --force`"),
+        "{warning}"
+    );
+}
+
+#[test]
+fn a_review_without_a_scope_posts_no_status() {
+    let f = config("");
+    let (backend, github) = (backend(&f, &[CLEAN]), github());
+    let mut prepared = prepared(&f, &backend, &github);
+
+    let report = review_it(
+        &f,
+        &backend,
+        &github,
+        &FakeHostRunner::default(),
+        &mut prepared,
+    )
+    .unwrap();
+
+    assert!(statuses(&github).is_empty());
+    let [warning] = report.warnings.as_slice() else {
+        panic!("{:?}", report.warnings)
+    };
+    assert!(
+        warning.contains("the review has no `Scope: <base>..<head>` line"),
+        "{warning}"
+    );
+}
+
+#[test]
+fn a_scope_ending_in_the_reviewed_commits_abbreviation_still_posts_on_the_full_commit() {
+    let f = config("");
+    let head = add_pr_head(&f, 7);
+    let review = scoped(&f, CLEAN, &head[..12].to_ascii_uppercase());
+    let (backend, github) = (backend(&f, &[&review]), github());
+    let mut prepared = prepared_on_head(&f, &backend, &github);
+
+    review_it(
+        &f,
+        &backend,
+        &github,
+        &FakeHostRunner::default(),
+        &mut prepared,
+    )
+    .unwrap();
+
+    let [(_, sha, status)] = statuses(&github).try_into().unwrap();
+    assert_eq!(sha, head);
+    assert_eq!(status.state, sbxm::github::StatusState::Success);
+}
+
+#[test]
+fn a_scope_ending_in_a_7_digit_prefix_of_another_commit_posts_nothing() {
+    let f = config("");
+    let head = add_pr_head(&f, 7);
+    let other: String = head[..6].to_owned() + if &head[6..7] == "0" { "1" } else { "0" };
+    let review = scoped(&f, CLEAN, &other);
+    let (backend, github) = (backend(&f, &[&review]), github());
+    let mut prepared = prepared_on_head(&f, &backend, &github);
+
+    let report = review_it(
+        &f,
+        &backend,
+        &github,
+        &FakeHostRunner::default(),
+        &mut prepared,
+    )
+    .unwrap();
+
+    assert!(statuses(&github).is_empty());
+    assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
 }

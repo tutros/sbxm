@@ -26,7 +26,7 @@ use super::secrets;
 use super::select::{self, Selection};
 use crate::backend::{CreateSpec, ExecSpec, Location, SandboxBackend, ScopedSecret, Stdin};
 use crate::config::{self, GlobalConfig, Profile, Resources};
-use crate::github::{CommitStatus, GitHubBackend, Issue, IssueText, PrInfo, PrState};
+use crate::github::{GitHubBackend, Issue, IssueText, PrInfo, PrState};
 use crate::harness::Harness;
 use crate::headless::{self, HeadlessOpts, RunStatus};
 use crate::run::kits::{self, HarnessKits, Overrides};
@@ -3453,10 +3453,15 @@ pub fn review_pr(
                 .push(format!("the review was posted on PR #{number}"));
             record::write(&prepared.meta, &prepared.record)?;
             let again = review::review_pr_command(number, &repo, Some(&prepared.record.base), true);
-            let status = review::status(must_fix, &text, risk);
+            let reviewed = StatusInput {
+                commit: tip.as_deref(),
+                must_fix,
+                text: &text,
+                risk,
+            };
             report
                 .warnings
-                .extend(post_status(github, &repo, tip.as_deref(), &status, &again));
+                .extend(post_status(github, &repo, &reviewed, &again));
             Ok(report)
         }
         Err(e) => {
@@ -3476,21 +3481,39 @@ pub fn review_pr(
     }
 }
 
-/// Posts a review's `status` on `commit`, the commit it covered (issue 317). A failure doesn't fail
-/// the command: the review is already posted, so it is a warning naming the commit and `again`,
-/// the command that reviews the PR (and so posts the status) again.
+/// What a review's `sbxm/review` status is built from (issue 317): the commit the reviewer was
+/// given, its must-fix count, its text and its risk level.
+pub struct StatusInput<'a> {
+    pub commit: Option<&'a str>,
+    pub must_fix: u32,
+    pub text: &'a str,
+    pub risk: risk::Level,
+}
+
+/// Posts the status of `reviewed` on its commit (issue 317), the only way a status is posted, and
+/// only once the review's own `Scope:` line is checked to end at that commit
+/// ([`review::check_scope_end`], review M-1): otherwise nothing is posted. A status not posted
+/// doesn't fail the command: the review is already posted, so it is a warning saying why and
+/// naming `again`, the command that reviews the PR (and so posts the status) again.
 pub fn post_status(
     github: &dyn GitHubBackend,
     repo: &str,
-    commit: Option<&str>,
-    status: &CommitStatus,
+    reviewed: &StatusInput,
     again: &str,
 ) -> Option<String> {
-    let context = &status.context;
-    let failed = match commit {
-        Some(commit) => match github.commit_status(repo, commit, status) {
-            Ok(()) => return None,
-            Err(e) => format!("the {context} status on commit {commit} couldn't be posted: {e:#}"),
+    let context = review::STATUS_CONTEXT;
+    let failed = match reviewed.commit {
+        Some(commit) => match review::check_scope_end(reviewed.text, commit) {
+            Ok(()) => {
+                let status = review::status(reviewed.must_fix, reviewed.text, reviewed.risk);
+                match github.commit_status(repo, commit, &status) {
+                    Ok(()) => return None,
+                    Err(e) => {
+                        format!("the {context} status on commit {commit} couldn't be posted: {e:#}")
+                    }
+                }
+            }
+            Err(why) => format!("the {context} status wasn't posted: {why}"),
         },
         None => format!("the {context} status wasn't posted: the reviewed commit is unknown"),
     };

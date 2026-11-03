@@ -1523,13 +1523,14 @@ pub fn finish(
                 .review
                 .as_ref()
                 .map_or((0, risk::Level::default()), |r| (r.must_fix, r.risk));
-            let status = review::status(must_fix, &text, level);
+            let reviewed = super::pipeline::StatusInput {
+                commit: Some(&commit),
+                must_fix,
+                text: &text,
+                risk: level,
+            };
             warnings.extend(super::pipeline::post_status(
-                github,
-                &task.repo,
-                Some(&commit),
-                &status,
-                &again,
+                github, &task.repo, &reviewed, &again,
             ));
             Some(commit)
         }
