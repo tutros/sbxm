@@ -80,6 +80,35 @@ pub struct Env<'a> {
     pub stop_requested: &'a dyn Fn() -> bool,
 }
 
+/// What a Ctrl-C press means (the user's answer, 2026-11-02).
+#[derive(Debug, PartialEq, Eq)]
+pub enum Press {
+    /// Stop after the current task.
+    First,
+    /// Stop now.
+    Again,
+}
+
+/// The loop's stop request, set from the Ctrl-C handler `main` installs for `task loop`.
+#[derive(Default)]
+pub struct StopFlag(std::sync::atomic::AtomicU32);
+
+impl StopFlag {
+    /// Counts one press.
+    pub fn press(&self) -> Press {
+        use std::sync::atomic::Ordering;
+        match self.0.fetch_add(1, Ordering::SeqCst) {
+            0 => Press::First,
+            _ => Press::Again,
+        }
+    }
+
+    /// Whether a stop was asked: what `Env::stop_requested` reads.
+    pub fn requested(&self) -> bool {
+        self.0.load(std::sync::atomic::Ordering::SeqCst) > 0
+    }
+}
+
 /// `<base>/.sbxm/task-loop.lock`: held while a loop runs; dropping it removes the file while it
 /// still names this process.
 struct LoopLock {
@@ -191,6 +220,8 @@ enum End {
 
 /// Why the whole loop stops early.
 enum Halt {
+    /// A stop was asked before the task started: nothing to log.
+    Stopped,
     UsageLimit(Duration),
     Error(anyhow::Error),
 }
@@ -377,8 +408,9 @@ impl Loop<'_> {
         }
     }
 
-    /// Waits while the disk is low (decision 245(g)); returns how long it waited.
-    fn wait_for_room(&mut self, out: &mut dyn Write) -> Result<u64> {
+    /// Waits while the disk is low (decision 245(g)); returns how long it waited, or `None` when
+    /// a stop was asked meanwhile.
+    fn wait_for_room(&mut self, out: &mut dyn Write) -> Result<Option<u64>> {
         let start = self.now();
         let mut said = false;
         while let Err(e) = self.steps.room() {
@@ -391,8 +423,39 @@ impl Loop<'_> {
                 said = true;
             }
             (self.env.sleep)(PAUSE_POLL);
+            if (self.env.stop_requested)() {
+                return Ok(None);
+            }
         }
-        Ok(self.now().saturating_sub(start))
+        Ok(Some(self.now().saturating_sub(start)))
+    }
+
+    /// The usage-limit wait, slept in `PAUSE_POLL` steps so a stop request is seen within one
+    /// (the user's Ctrl-C answer, 2026-11-02). Returns how long it slept and whether a stop was
+    /// asked.
+    fn usage_sleep(&self, wait: Duration) -> (Duration, bool) {
+        let mut slept = Duration::ZERO;
+        while slept < wait {
+            let step = (wait - slept).min(PAUSE_POLL);
+            (self.env.sleep)(step);
+            slept += step;
+            if (self.env.stop_requested)() {
+                return (slept, true);
+            }
+        }
+        (slept, false)
+    }
+
+    /// A task cut short by a stop request: says how to continue it.
+    fn stopped(issue: u32, out: &mut dyn Write) -> std::io::Result<End> {
+        writeln!(
+            out,
+            "#{issue}: stopped on request; continue it with `sbxm task resume --issue {issue}`"
+        )?;
+        Ok(End::Parked {
+            ready: None,
+            outcome: "stopped on request before its resume".to_owned(),
+        })
     }
 
     fn task_dir(&self, issue: u32) -> PathBuf {
@@ -494,7 +557,12 @@ impl Loop<'_> {
         let mut failures = 0;
         let mut pending: Option<(String, u64)> = None;
         loop {
-            let paused = self.wait_for_room(out).map_err(Halt::Error)?;
+            let Some(paused) = self.wait_for_room(out).map_err(Halt::Error)? else {
+                if self.record(issue).is_none() {
+                    return Err(Halt::Stopped);
+                }
+                return Self::stopped(issue, out).map_err(io);
+            };
             if paused > 0 {
                 stops.push(("disk".to_owned(), paused));
             }
@@ -557,9 +625,12 @@ impl Loop<'_> {
                     queue::span(total.as_secs())
                 )
                 .map_err(io)?;
-                (self.env.sleep)(wait);
-                self.usage_waited += wait;
-                stops.push(("usage limit".to_owned(), wait.as_secs()));
+                let (slept, asked) = self.usage_sleep(wait);
+                self.usage_waited += slept;
+                stops.push(("usage limit".to_owned(), slept.as_secs()));
+                if asked {
+                    return Self::stopped(issue, out).map_err(io);
+                }
                 continue;
             }
             self.usage_waited = Duration::ZERO;
@@ -589,10 +660,7 @@ impl Loop<'_> {
             writeln!(out, "#{issue}: stopped ({e:#}); resuming it once").map_err(io)?;
             pending = Some((cause, self.now()));
             if (self.env.stop_requested)() {
-                return Ok(End::Parked {
-                    ready: None,
-                    outcome: "stopped on request before its resume".to_owned(),
-                });
+                return Self::stopped(issue, out).map_err(io);
             }
         }
     }
@@ -799,6 +867,10 @@ pub fn run(
         let end = match ended {
             Ok(end) => end,
             Err(Halt::Error(e)) => return Err(e),
+            Err(Halt::Stopped) => {
+                writeln!(out, "stopped on request")?;
+                return Ok(());
+            }
             Err(Halt::UsageLimit(total)) => {
                 let rec = lp.record(issue);
                 let stage = rec.map_or("no record".to_owned(), |r| r.stage.name().to_owned());

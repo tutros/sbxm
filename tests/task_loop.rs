@@ -664,6 +664,36 @@ fn the_loop_pauses_while_the_disk_is_low_and_goes_on_once_it_has_room() {
     assert!(f.log_text().contains("disk, 10m00s"), "{}", f.log_text());
 }
 
+/// The user's Ctrl-C answer (2026-11-02): the disk pause asks for a stop after each check.
+#[test]
+fn a_stop_asked_during_the_disk_pause_ends_the_loop_before_any_task() {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S")]);
+    let script = Script::new(&f.base());
+    script.room.borrow_mut().extend([false, false, false]);
+    let asked = || script.clock.get() > START;
+
+    let run = run_loop_with(&f, opts(&f), &script, &gh, &Probe, &asked);
+
+    run.result.unwrap();
+    assert_eq!(run.sleeps, [task_loop::PAUSE_POLL]);
+    assert!(runs(&script).is_empty(), "{:?}", runs(&script));
+    assert!(run.out.contains("stopped on request"), "{}", run.out);
+}
+
+// --- Ctrl-C ---
+
+#[test]
+fn the_first_ctrl_c_asks_for_a_stop_and_the_second_stops_now() {
+    let flag = task_loop::StopFlag::default();
+    assert!(!flag.requested());
+
+    assert_eq!(flag.press(), task_loop::Press::First);
+    assert!(flag.requested());
+    assert_eq!(flag.press(), task_loop::Press::Again);
+    assert_eq!(flag.press(), task_loop::Press::Again);
+}
+
 // --- the usage limit ---
 
 #[test]
@@ -681,7 +711,8 @@ fn a_usage_limit_is_waited_out_then_resumed() {
     let run = run_loop(&f, opts(&f), &script, &gh);
 
     run.result.unwrap();
-    assert_eq!(run.sleeps, [Duration::from_secs(30 * 60)]);
+    // The 30m wait sleeps in `PAUSE_POLL` steps, so a stop request is seen within one.
+    assert_eq!(run.sleeps, [task_loop::PAUSE_POLL; 6]);
     assert_eq!(runs(&script), ["run 3", "resume 3"]);
     assert!(run.out.contains("usage limit"), "{}", run.out);
     assert!(
@@ -704,7 +735,7 @@ fn usage_waits_reaching_the_total_stop_the_loop() {
     assert!(err.contains("usage limit"), "{err}");
     assert!(err.contains("1h00m00s"), "{err}");
     // 30m twice reaches the 1h total: the third limit stops the loop.
-    assert_eq!(run.sleeps, [Duration::from_secs(1800); 2]);
+    assert_eq!(run.sleeps, [task_loop::PAUSE_POLL; 12]);
     assert_eq!(runs(&script), ["run 3", "resume 3", "resume 3"]);
 }
 
@@ -724,7 +755,74 @@ fn a_usage_wait_equal_to_its_total_waits_once() {
     let run = run_loop(&f, opts(&f), &script, &gh);
 
     assert!(run.result.is_err());
-    assert_eq!(run.sleeps, [Duration::from_secs(3600)]);
+    assert_eq!(run.sleeps, [task_loop::PAUSE_POLL; 12]);
+}
+
+/// `usage_wait` set to `wait` in the repo's `sbxm-task.toml`, with a 5h total.
+fn with_usage_wait(f: &Fixture, wait: &str) {
+    fs::write(
+        f.repo_root.join("sbxm-task.toml"),
+        format!(
+            "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = []\n\n[loop]\nusage_wait = \
+             \"{wait}\"\nusage_wait_total = \"5h\"\n"
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_usage_wait_shorter_than_the_poll_is_one_sleep_of_its_length() {
+    let f = fixture();
+    with_usage_wait(&f, "1m");
+    let gh = github(vec![labeled(3, "size:S")]);
+    let script = Script::new(&f.base()).plays(3, &[Act::Fail("usage limit reached", true)]);
+
+    let run = run_loop(&f, opts(&f), &script, &gh);
+
+    run.result.unwrap();
+    assert_eq!(run.sleeps, [Duration::from_secs(60)]);
+    assert_eq!(runs(&script), ["run 3", "resume 3"]);
+}
+
+#[test]
+fn a_usage_wait_equal_to_the_poll_is_one_sleep() {
+    let f = fixture();
+    with_usage_wait(&f, "5m");
+    let gh = github(vec![labeled(3, "size:S")]);
+    let script = Script::new(&f.base()).plays(3, &[Act::Fail("usage limit reached", true)]);
+
+    let run = run_loop(&f, opts(&f), &script, &gh);
+
+    run.result.unwrap();
+    assert_eq!(run.sleeps, [task_loop::PAUSE_POLL]);
+}
+
+/// The user's Ctrl-C answer (2026-11-02): a stop asked during a usage wait ends the task after
+/// the step in which it was asked, before its resume, naming the command that continues it.
+#[test]
+fn a_stop_asked_during_a_usage_wait_ends_it_after_that_step() {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S"), labeled(4, "size:S")]);
+    let script = Script::new(&f.base()).plays(3, &[Act::Fail("usage limit reached", true)]);
+    // The scripted run takes 300 s on the clock; the stop is asked during the third step.
+    let asked = || script.clock.get() >= START + 300 + 3 * task_loop::PAUSE_POLL.as_secs();
+
+    let run = run_loop_with(&f, opts(&f), &script, &gh, &Probe, &asked);
+
+    run.result.unwrap();
+    assert_eq!(run.sleeps, [task_loop::PAUSE_POLL; 3]);
+    assert_eq!(runs(&script), ["run 3"]);
+    assert!(
+        run.out.contains("sbxm task resume --issue 3"),
+        "{}",
+        run.out
+    );
+    assert!(run.out.contains("stopped on request"), "{}", run.out);
+    assert!(
+        f.log_text().contains("usage limit, 15m00s"),
+        "{}",
+        f.log_text()
+    );
 }
 
 // --- the PR cap ---

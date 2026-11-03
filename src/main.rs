@@ -774,6 +774,22 @@ fn main() -> anyhow::Result<()> {
                     host: &task::gates::ShellHostRunner,
                     disk: sbxm::disk::Guard::real(false),
                 };
+                // Ctrl-C (the user's answer, 2026-11-02): the first press stops the loop after the
+                // current task, a second stops it now. On Windows the press also reaches the `sbx`
+                // children, so the current phase fails and the loop parks that task.
+                let stop = std::sync::Arc::new(commands::task_loop::StopFlag::default());
+                let pressed = std::sync::Arc::clone(&stop);
+                if let Err(e) = ctrlc::set_handler(move || match pressed.press() {
+                    commands::task_loop::Press::First => {
+                        eprintln!("stopping after the current task; press Ctrl-C again to stop now")
+                    }
+                    commands::task_loop::Press::Again => std::process::exit(130),
+                }) {
+                    writeln!(
+                        warn,
+                        "warning: Ctrl-C can't be caught ({e}); it stops the loop at once"
+                    )?;
+                }
                 commands::task_loop::run(
                     &config_dir,
                     &commands::task_loop::Options {
@@ -788,7 +804,7 @@ fn main() -> anyhow::Result<()> {
                     &commands::task_loop::Env {
                         now: &sbxm::run::results::now,
                         sleep: &std::thread::sleep,
-                        stop_requested: &|| false,
+                        stop_requested: &|| stop.requested(),
                     },
                     &mut out,
                     &mut warn,
