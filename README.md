@@ -156,7 +156,7 @@ run in the cloud skips this check, since they don't use that drive (`--ignore-di
 
 | `--harness` | Agent | Mandatory instructions file | Notes |
 |---|---|---|---|
-| `claude` (default) | Claude Code | `~/.claude/CLAUDE.md` | Supports `harness.claude.home_files` and `harness.claude.managed_settings`. |
+| `claude` (default) | Claude Code | `~/.claude/CLAUDE.md` | Supports `harness.claude.home_files` and `harness.claude.managed_settings`. The signed-in account's claude.ai connectors (Gmail and the like) are off in every Claude sandbox (`ENABLE_CLAUDEAI_MCP_SERVERS=false`): they would reach the account's connected services through Anthropic's MCP proxy, past the egress allow list. MCP servers you register in `sbx` are not affected (issue 381). |
 | `codex` | Codex | `~/.codex/AGENTS.md` | |
 | `antigravity` | Antigravity (`agy`) | `~/.gemini/AGENTS.md` | Uses the Antigravity kit from Docker Hub, pinned to a fixed tag. With a `google` secret stored (`sbx secret set -g google`), `agy` uses it as a Gemini API key and needs no sign-in (decision 137). Before every headless run (`sbxm run`, `sbxm task`), sbxm removes `sbx`'s `mcp-gateway` entry from `~/.gemini/config/mcp_config.json`, since `agy` waits on that server and hangs until the timeout; other MCP servers stay (issue 287). A headless run with no model set (an `sbxm task` worker or reviewer without `--worker-model`/`--reviewer-model` or a `model` in `sbxm-task.toml`, or an `sbxm run` contestant or judge whose run-config entry leaves out `model`) passes `--model gemini-3.8-flash-medium`, so `agy` never picks its own; `task.json`, the saved review, `run.json`, `result.json`, `judge.json`, `evals.json` and the output of `sbxm task`, `sbxm run` and `run show` name the model that ran, for example `antigravity (gemini-3.8-flash-medium)` (issue 314). Claude and Codex have no default: their run-config entries still need `model`. Interactive `new`/`open` are unchanged: switch there with `/model`. `sbx`'s skills store isn't known to serve it: sbxm warns unless `skills.store = "off"`. |
 | `pi` | Pi | `~/.pi/agent/AGENTS.md` | Uses the Pi kit from Docker Hub, pinned to a fixed tag. See below. `sbx`'s skills store doesn't serve Pi either: sbxm warns unless `skills.store = "off"`. |
@@ -409,7 +409,8 @@ settings, the *contents* of referenced files, resources and sbxm's version. A se
 ## Security model
 
 - Egress is deny-by-default and enforced by `sbx`'s proxy; only `network.allow` hosts (plus what the agent's kit
-  needs) are reachable. `sbx policy log <sandbox>` shows what was allowed and blocked.
+  needs) are reachable. `sbx policy log <sandbox>` shows what was allowed and blocked. Claude's claude.ai account
+  connectors, which would get past it through Anthropic's MCP proxy, are off in every Claude sandbox (see *Harnesses*).
 - Config only *names* secrets. Values stay in `sbx`, which injects them at the proxy.
 - sbxm's metadata sits outside the mounted workspace, so an agent can't widen its own next sandbox.
 - sbxm never changes `sbx`'s settings, secrets, skills store or policies. When one of them blocks something, sbxm
