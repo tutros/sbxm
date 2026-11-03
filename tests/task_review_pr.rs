@@ -1351,3 +1351,34 @@ fn a_scope_ending_in_a_7_digit_prefix_of_another_commit_posts_nothing() {
     assert!(statuses(&github).is_empty());
     assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
 }
+
+#[test]
+fn a_scope_ending_at_a_revision_of_the_reviewed_commit_posts_nothing() {
+    for suffix in ["^1", "~1"] {
+        let f = config("");
+        let head = add_pr_head(&f, 7);
+        let review = scoped(&f, CLEAN, &format!("{head}{suffix}"));
+        let (backend, github) = (backend(&f, &[&review]), github());
+        let mut prepared = prepared_on_head(&f, &backend, &github);
+
+        let report = review_it(
+            &f,
+            &backend,
+            &github,
+            &FakeHostRunner::default(),
+            &mut prepared,
+        )
+        .unwrap();
+
+        assert!(statuses(&github).is_empty(), "{suffix}");
+        let [warning] = report.warnings.as_slice() else {
+            panic!("{suffix}: {:?}", report.warnings)
+        };
+        assert!(warning.contains(&format!("{head}{suffix}")), "{warning}");
+        assert!(
+            warning.contains(&format!("the reviewed commit {head}")),
+            "{warning}"
+        );
+        assert!(warning.contains("sbxm task review --pr"), "{warning}");
+    }
+}

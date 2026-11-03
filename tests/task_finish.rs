@@ -1321,3 +1321,35 @@ fn a_review_without_a_scope_posts_no_status() {
         "{warning}"
     );
 }
+
+#[test]
+fn a_scope_ending_at_a_revision_of_the_reviewed_commit_posts_no_status() {
+    for suffix in ["^1", "~1"] {
+        let f = fixture();
+        let mut prepared = ready(&f);
+        let commit = tip(&prepared);
+        let review = scoped(&prepared, REVIEW, &format!("{commit}{suffix}"));
+        reviewed_at(&mut prepared, &commit, 0, &review);
+        let github = FakeGitHub::default();
+
+        let done = run(&f, &github).unwrap();
+
+        let calls = github.calls();
+        assert!(
+            matches!(
+                calls.as_slice(),
+                [GhCall::PrCreate(..), GhCall::PrComment(..)]
+            ),
+            "{suffix}: {calls:?}"
+        );
+        let [warning] = done.warnings.as_slice() else {
+            panic!("{suffix}: {:?}", done.warnings)
+        };
+        assert!(warning.contains(&format!("{commit}{suffix}")), "{warning}");
+        assert!(
+            warning.contains(&format!("the reviewed commit {commit}")),
+            "{warning}"
+        );
+        assert!(warning.contains("--force`"), "{warning}");
+    }
+}

@@ -4,7 +4,9 @@
 //! both and names the risk, within GitHub's 140 characters.
 
 use sbxm::github::StatusState;
-use sbxm::task::review::{STATUS_CONTEXT, STATUS_DESCRIPTION_CAP, fit_status_description, status};
+use sbxm::task::review::{
+    STATUS_CONTEXT, STATUS_DESCRIPTION_CAP, check_scope_end, fit_status_description, status,
+};
 use sbxm::task::risk::Level;
 
 const CLEAN: &str = "Must-fix findings: 0\n\nNothing found.\n";
@@ -103,4 +105,54 @@ fn the_largest_count_still_fits_with_the_pointer_to_the_comment() {
         posted.description,
         format!("4294967295 must-fix, 0 questions, risk medium{SEE}")
     );
+}
+
+const SHA: &str = "4e658e11f7b6317e1f735367f4ce1677b73638a6";
+const BASE: &str = "c0327544f7485351a7d946be0b3bd3b9dc8b130d";
+
+#[test]
+fn a_scope_ending_at_the_commit_as_its_own_token_counts() {
+    for scope in [
+        format!("Scope: `{BASE}..{SHA}`"),
+        format!("Scope: `{BASE}..{SHA}` (3 commits)"),
+        format!("Scope: {BASE}..{SHA}"),
+        format!("Scope: {BASE}..{SHA} (3 commits)"),
+        format!("Scope: `{BASE}..{}`", &SHA[..7]),
+    ] {
+        assert_eq!(
+            check_scope_end(&format!("{scope}\n"), SHA),
+            Ok(()),
+            "{scope}"
+        );
+    }
+}
+
+#[test]
+fn a_scope_end_that_goes_on_past_the_hex_digits_is_refused() {
+    for end in [
+        "^1",
+        "~1",
+        "^",
+        "~",
+        "^{commit}",
+        "@{u}",
+        ":src/a.rs",
+        "/x",
+        "-x",
+        ".",
+        "..x",
+    ] {
+        let scope = format!("Scope: `{BASE}..{SHA}{end}`\n");
+        let why = check_scope_end(&scope, SHA).expect_err(end);
+        assert!(why.contains(&format!("{SHA}{end}")), "{why}");
+        assert!(why.contains(&format!("the reviewed commit {SHA}")), "{why}");
+    }
+}
+
+#[test]
+fn a_scope_start_that_is_not_its_own_token_is_refused() {
+    for start in ["main~", "x/", "^"] {
+        let scope = format!("Scope: `{start}{BASE}..{SHA}`\n");
+        assert!(check_scope_end(&scope, SHA).is_err(), "{start}");
+    }
 }
