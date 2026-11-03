@@ -753,6 +753,40 @@ impl Record {
         Ok(())
     }
 
+    /// Whether this is a PR task stuck where `task review --pr` starts its gates over (issue 379,
+    /// decision 282): a preparation that failed, or gates or a review left `running`. Whether a
+    /// `running` one's process is really gone is the caller's check (`check_can_review_pr`).
+    pub fn restarts_pr_gating(&self) -> bool {
+        self.kind == Kind::Pr
+            && matches!(
+                (self.stage, self.status),
+                (Stage::Prepared, Status::Failed)
+                    | (Stage::Gating | Stage::Reviewing, Status::Running)
+            )
+    }
+
+    /// Starts a stuck PR task's gates over ([`Record::restarts_pr_gating`]), owned by `process`.
+    /// Refused for any other task, with nothing changed.
+    pub fn restart_pr_gating(&mut self, now: u64, process: Process) -> Result<()> {
+        if !self.restarts_pr_gating() {
+            bail!(
+                "task {} is {} in stage {}, so its gates can't start over; see `sbxm task status`",
+                self.id,
+                self.status.name(),
+                self.stage.name()
+            );
+        }
+        self.stage = Stage::Gating;
+        self.status = Status::Running;
+        self.gate_run = None;
+        self.stages.push(Stamp {
+            stage: Stage::Gating,
+            at: format_timestamp(now),
+        });
+        self.process = Some(process);
+        Ok(())
+    }
+
     /// Gates that were running but whose `sbxm` process is gone (a crash, Ctrl-C) never finished:
     /// restarts them in place, owned by `process`, so they stay `running` (never recorded as
     /// `gates-failed`, which would consume a fix round once #117 lands) and are re-runnable at

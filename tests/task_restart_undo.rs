@@ -83,6 +83,7 @@ fn env<'a>(f: &'a Fixture, backend: &'a FakeBackend) -> TaskEnv<'a> {
         sleep: &std::thread::sleep,
         scoped_secrets: &[],
         identity: None,
+        clone_source: None,
     }
 }
 

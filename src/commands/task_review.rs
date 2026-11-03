@@ -241,6 +241,7 @@ fn run_issue(
         sleep: &std::thread::sleep,
         scoped_secrets: &[],
         identity: identity.as_ref(),
+        clone_source: None,
     };
     let reviewed = pipeline::review_issue(&env, &mut prepared);
     print_said(out, warn, &mut prepared);
@@ -429,6 +430,7 @@ fn run_spec(
         sleep: &std::thread::sleep,
         scoped_secrets: &[],
         identity: identity.as_ref(),
+        clone_source: None,
     };
     let reviewed = pipeline::review_issue(&env, &mut prepared);
     print_said(out, warn, &mut prepared);
@@ -565,7 +567,7 @@ fn run_pr(
     // reviewer, failed gates); otherwise the refusal says what to do.
     let mut prepared = if finish::exists(&base_dir, &id) {
         let prepared = Prepared::open_locked(&base_dir, &id, probe)?;
-        pipeline::check_can_review_pr(&prepared.record)?;
+        pipeline::check_can_review_pr(&prepared.record, probe)?;
         prepared
     } else {
         let pr = match pr_info {
