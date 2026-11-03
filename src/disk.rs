@@ -3,6 +3,7 @@
 //! so every command that creates a sandbox refuses first when the drive is low.
 
 use std::path::{Component, Path, PathBuf, Prefix};
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 
@@ -126,6 +127,8 @@ pub struct Guard {
     pub default_state_dir: Option<PathBuf>,
     /// `--ignore-disk`: skip the check for this command.
     pub ignore: bool,
+    /// How a check that waits for space to come back sleeps between reads (issue 389).
+    pub sleep: fn(Duration),
 }
 
 impl Default for Guard {
@@ -134,6 +137,7 @@ impl Default for Guard {
             free_space: |path| fs4::available_space(path),
             default_state_dir: None,
             ignore: false,
+            sleep: std::thread::sleep,
         }
     }
 }
@@ -148,29 +152,40 @@ impl Guard {
     }
 }
 
-/// Refuses when the state drive has less than `min_free_disk` free. Goes ahead without reading
-/// it under `--ignore-disk` or `min_free_disk = "0"`, and when the folder is unknown, missing or
-/// its free space can't be read: `doctor` reports those (decision 194).
-pub fn require(config: &GlobalConfig, config_dir: &Path, guard: &Guard) -> Result<()> {
+/// The state folder and its free space when it has less than `min_free_disk` free; `None` without
+/// reading it under `--ignore-disk` or `min_free_disk = "0"`, and when the folder is unknown,
+/// missing or its free space can't be read: `doctor` reports those (decision 194).
+pub fn shortfall(config: &GlobalConfig, guard: &Guard) -> Option<(PathBuf, u64)> {
     if guard.ignore || config.min_free_disk == 0 {
-        return Ok(());
+        return None;
     }
-    let Some(dir) = state_dir(config, guard.default_state_dir.as_deref()) else {
-        return Ok(());
-    };
+    let dir = state_dir(config, guard.default_state_dir.as_deref())?;
     if !dir.is_dir() {
-        return Ok(());
+        return None;
     }
     match (guard.free_space)(&dir) {
-        Ok(free) if free < config.min_free_disk => bail!(
-            "only {} free on {} (sbx's sandbox state), under min_free_disk {}; free up space, \
-             or pass --ignore-disk to go ahead anyway (min_free_disk in {} sets the threshold, \
-             \"0\" switches the check off)",
-            gib(free),
-            describe(&dir),
-            gib(config.min_free_disk),
-            config_dir.join("config.toml").display()
-        ),
-        _ => Ok(()),
+        Ok(free) if free < config.min_free_disk => Some((dir, free)),
+        _ => None,
+    }
+}
+
+/// The refusal for `free` bytes on the drive of `dir`, under `min_free_disk`.
+pub fn refusal(config: &GlobalConfig, config_dir: &Path, dir: &Path, free: u64) -> anyhow::Error {
+    anyhow::anyhow!(
+        "only {} free on {} (sbx's sandbox state), under min_free_disk {}; free up space, or pass \
+         --ignore-disk to go ahead anyway (min_free_disk in {} sets the threshold, \"0\" switches \
+         the check off)",
+        gib(free),
+        describe(dir),
+        gib(config.min_free_disk),
+        config_dir.join("config.toml").display()
+    )
+}
+
+/// Refuses when the state drive has less than `min_free_disk` free ([`shortfall`]).
+pub fn require(config: &GlobalConfig, config_dir: &Path, guard: &Guard) -> Result<()> {
+    match shortfall(config, guard) {
+        Some((dir, free)) => Err(refusal(config, config_dir, &dir, free)),
+        None => Ok(()),
     }
 }

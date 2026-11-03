@@ -254,6 +254,18 @@ impl Harness {
         warnings
     }
 
+    /// Environment variables sbxm sets in every sandbox of this harness, in
+    /// its own mixin and its config hash. Claude's turn off the signed-in
+    /// account's claude.ai connectors, which reach its connected services
+    /// through Anthropic's MCP proxy past the egress allow list; MCP servers
+    /// registered in `sbx` are unaffected (issue 381, spike S18).
+    pub fn kit_env(self) -> &'static [(&'static str, &'static str)] {
+        match self {
+            Harness::Claude => &[("ENABLE_CLAUDEAI_MCP_SERVERS", "false")],
+            _ => &[],
+        }
+    }
+
     /// `profile` without the Claude-only settings: what reaches this
     /// harness's sandbox, and so what its kit and hash cover (decision 69).
     /// `skills.store` stays, since it's still passed to `sbx create`.

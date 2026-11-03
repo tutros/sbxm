@@ -38,10 +38,16 @@ pub struct Candidate {
 /// the run, the repeat and each index, and on nothing else: reproducible, but
 /// no contestant is always first. Returned in label order.
 pub fn assign_labels(run_id: &str, repeat: u32, contestants: &[usize]) -> Vec<(usize, char)> {
+    shuffle_labels(run_id, repeat, contestants)
+}
+
+/// The shuffle behind [`assign_labels`], keyed by `seed` instead of the run id alone, so another
+/// evaluator (human review) can have labels of its own.
+pub fn shuffle_labels(seed: &str, repeat: u32, contestants: &[usize]) -> Vec<(usize, char)> {
     let mut keyed: Vec<([u8; 32], usize)> = contestants
         .iter()
         .map(|&c| {
-            let digest = Sha256::digest(format!("{run_id}:{repeat}:{c}").as_bytes());
+            let digest = Sha256::digest(format!("{seed}:{repeat}:{c}").as_bytes());
             (digest.into(), c)
         })
         .collect();

@@ -230,6 +230,37 @@ fn a_ready_task_with_must_fix_left_opens_a_draft_that_lists_the_findings() {
     assert_eq!(record.pr.as_deref(), Some(done.url.as_str()));
 }
 
+/// Issue 220 part 2, decision 283: a draft carries the worker's hand-back sections the same way,
+/// after the risk section and above the result.
+#[test]
+fn a_draft_carries_the_results_needs_a_decision_and_choices_made_sections() {
+    let f = fixture();
+    let prepared = ready(&f);
+    fs::write(prepared.meta.join("review.md"), REVIEW_WITH_MUST_FIX).unwrap();
+    fs::write(
+        prepared.meta.join("result.md"),
+        "## Done\n\nyes\n\n## Choices made\n\n- A over B.\n\n## Needs a decision\n\n- Q? I'd pick A.\n",
+    )
+    .unwrap();
+    let github = FakeGitHub::default();
+
+    let done = run(&f, &github).unwrap();
+
+    let request = only_pr_request(&github);
+    assert!(request.draft && done.draft);
+    let body = &request.body;
+    let risk = body.find("## Risk:").expect(body);
+    let needs = body
+        .find("## Needs a decision\n\n- Q? I'd pick A.\n")
+        .expect(body);
+    let choices = body.find("## Choices made\n\n- A over B.\n").expect(body);
+    let result = body.find("## Result\n").expect(body);
+    assert!(
+        risk < needs && needs < choices && choices < result,
+        "{body}"
+    );
+}
+
 #[test]
 fn a_stopped_task_opens_a_draft_that_names_the_reason() {
     let f = fixture();

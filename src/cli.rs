@@ -200,6 +200,18 @@ pub enum RunCommand {
         #[arg(long)]
         diff: bool,
     },
+    /// Score a saved run yourself: lays out each repeat's answers and diffs under blind labels
+    /// with a scores.toml to fill in; --submit checks and saves it.
+    Review {
+        /// The run id `sbxm run` printed, e.g. 2026-09-30-a1b2c3.
+        run_id: String,
+        /// Check every scores.toml and save the scores; replaces scores saved earlier.
+        #[arg(long, conflicts_with = "restart")]
+        submit: bool,
+        /// Delete the existing review folder (asks, showing it) and lay the run out again.
+        #[arg(long)]
+        restart: bool,
+    },
 }
 
 /// `--tier` of `task gates`.
