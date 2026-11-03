@@ -105,6 +105,12 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
   - `task review --pr` has no fix round (a PR task's `fix_rounds` is always 0): the author fixes the findings and
     runs `task review --pr N` again, which reviews the new head in place, keeping the earlier rounds (decision 190;
     an unchanged head is refused unless `--force`).
+  - **A stuck PR task recovers with `task review --pr N` itself (decision 282, issue 379):** after a failed
+    preparation, or gates or a review whose `sbxm` process is gone, it keeps the task folder, fetches the PR's head
+    again (making `repo.git` again if needed), removes the reviewer sandbox and clone the interrupted run left, and
+    runs the gates and the reviewer as the next round, every earlier `review-<n>.md` kept. A review that completed
+    but was never recorded `ready` runs the reviewer again. No `task rm --pr N` first; while the process that
+    recorded the gates or the review still runs, it is refused.
   - **The in-task review counts as the PR's review (decision 187):** `task finish --issue N` posts the review
     recorded in `task.json` on the PR it opens (risk section first, the same one the description opens with, then a
     line naming the reviewed commit), a draft's failing review included, when that review covered the PR's head.

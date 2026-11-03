@@ -110,8 +110,9 @@ stateDiagram-v2
 
 `task gates` re-runs gates from `working`/`fixing` done or any ended `gating`. `task rm` is allowed from
 any state that is not running (or running but interrupted). Issue and spec tasks have no dead ends
-(`tests/task_machine.rs`). A PR task has four, where only `rm` then `review --pr` again moves on:
-prepared/failed, gating interrupted, reviewing interrupted, reviewing completed (issue #379).
+(`tests/task_machine.rs`). Neither does a PR task since issue #379 (decision 282): `review --pr` itself moves
+it on from prepared/failed, gating interrupted and reviewing interrupted (head fetched again, leftover reviewer
+removed, gates then reviewer) and from reviewing completed (the reviewer again).
 
 ## 4. `task run` / `task review` processing (issue or spec)
 

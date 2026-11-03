@@ -152,6 +152,7 @@ fn rounds_says_how_many_rounds_the_task_now_has_and_a_new_stop_names_rounds_agai
         sleep: &std::thread::sleep,
         scoped_secrets: &[],
         identity: None,
+        clone_source: None,
     };
     sbxm::task::pipeline::review_issue(&env, &mut prepared).unwrap();
     let backend = backend(&f, &[ONE]);
@@ -298,6 +299,7 @@ fn stopped(f: &Fixture) {
         sleep: &std::thread::sleep,
         scoped_secrets: &[],
         identity: None,
+        clone_source: None,
     };
     sbxm::task::pipeline::review_issue(&env, &mut prepared).unwrap();
 }
@@ -358,6 +360,7 @@ fn gates_that_cannot_run_fail_the_resume_with_the_reason_and_no_further_round() 
         sleep: &std::thread::sleep,
         scoped_secrets: &[],
         identity: None,
+        clone_source: None,
     };
     sbxm::task::pipeline::review_issue(&env, &mut prepared).unwrap();
     let red = backend(&f, &[CLEAN]).with_failing_exec_matching("cargo test");

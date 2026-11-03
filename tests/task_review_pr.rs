@@ -1098,3 +1098,171 @@ fn the_posted_comment_opens_with_the_risk_section() {
         "{comment}"
     );
 }
+
+/// Issue 379: a PR task left at `stage`/`status` by an earlier run, as its `task.json` says. With
+/// `alive`, the recorded process is this one (the fixture's `Probe` finds it); otherwise it is a
+/// process that is gone.
+fn leave_stuck(f: &Fixture, stage: Stage, status: Status, alive: bool) -> record::Record {
+    let mut record = saved(f);
+    record.stage = stage;
+    record.status = status;
+    record.process = Some(if alive {
+        record::Process::current(&Probe)
+    } else {
+        record::Process::new(4321, 1_790_000_000)
+    });
+    record::write(&meta(f), &record).unwrap();
+    record
+}
+
+/// Where a stuck PR task ends after `task review --pr 7`.
+fn assert_reviewed_to_ready(f: &Fixture, round: u32, gates: usize) {
+    let record = saved(f);
+    assert_eq!((record.stage, record.status), (Stage::Ready, Status::Ok));
+    let result = record.review.unwrap();
+    assert_eq!(result.round, round);
+    assert_eq!(record.gates.len(), gates, "{:?}", record.gates);
+    assert!(meta(f).join(format!("review-{round}.md")).is_file());
+}
+
+fn posted(github: &FakeGitHub) -> usize {
+    github
+        .calls()
+        .iter()
+        .filter(|c| matches!(c, GhCall::PrComment(..)))
+        .count()
+}
+
+/// Issue 379, case 1 and its boundary case: a preparation that failed before `repo.git` was
+/// fetched is moved on by `task review --pr` itself: it fetches the PR's head, runs the gates and
+/// the reviewer, and posts the review.
+#[test]
+fn a_prepared_failed_pr_task_with_no_repo_is_fetched_and_reviewed_to_ready() {
+    let f = config("");
+    let (backend, github) = (backend(&f, &[CLEAN]), github());
+    prepared(&f, &backend, &github);
+    leave_stuck(&f, Stage::Prepared, Status::Failed, false);
+    fs::remove_dir_all(meta(&f).join("repo.git")).unwrap();
+    fs::remove_file(meta(&f).join("issue.md")).unwrap();
+
+    let (result, out, _) = run_it(&f, &backend, &github);
+
+    result.unwrap();
+    assert_reviewed_to_ready(&f, 1, 1);
+    assert!(meta(&f).join("repo.git").is_dir());
+    assert!(
+        fs::read_to_string(meta(&f).join("issue.md"))
+            .unwrap()
+            .contains("Add the x feature")
+    );
+    assert_eq!(posted(&github), 1);
+    assert!(out.contains("review round 1"), "{out}");
+}
+
+/// Issue 379, case 2 and its boundary cases: gates whose process is gone run again on the PR's
+/// head fetched again, the reviewer sandbox and clone the interrupted run left are removed before
+/// a new one is made, and the earlier round's `review-1.md` is kept with the new round numbered 2.
+#[test]
+fn interrupted_pr_gates_run_again_after_the_leftover_reviewer_goes() {
+    let f = config("");
+    let (backend, github) = (backend(&f, &[CLEAN, ONE]), github());
+    let mut prepared = prepared(&f, &backend, &github);
+    review_it(
+        &f,
+        &backend,
+        &github,
+        &FakeHostRunner::default(),
+        &mut prepared,
+    )
+    .unwrap();
+    let new_head = add_pr_head(&f, 7);
+    leave_stuck(&f, Stage::Gating, Status::Running, false);
+    let clone = f.env.base_dir().join("tasks").join("pr-7-review");
+    fs::create_dir_all(&clone).unwrap();
+    let before = backend.log().len();
+
+    let (result, _, _) = run_it(&f, &backend, &github);
+
+    result.unwrap();
+    assert_reviewed_to_ready(&f, 2, 2);
+    assert!(meta(&f).join("review-1.md").is_file(), "round 1 is kept");
+    assert_eq!(
+        saved(&f).review.unwrap().commit.as_deref(),
+        Some(new_head.as_str()),
+        "the PR's head was fetched again"
+    );
+    let log = backend.log()[before..].to_vec();
+    let sandbox = "sbxm-task-pr-7-review-codex";
+    let removed = log.iter().position(|l| l == &format!("rm {sandbox}"));
+    let created = log.iter().position(|l| l == &format!("create {sandbox}"));
+    assert!(
+        removed.is_some() && removed < created,
+        "the leftover goes before the new one is made: {log:?}"
+    );
+    assert!(!clone.exists());
+    assert_eq!(posted(&github), 2);
+}
+
+/// Issue 379, case 3: a review whose process is gone runs the gates and the reviewer again, on
+/// the PR's head fetched again, as the next round.
+#[test]
+fn an_interrupted_pr_review_runs_the_gates_and_the_reviewer_again() {
+    let f = config("");
+    let (backend, github) = (backend(&f, &[ONE]), github());
+    let mut prepared = prepared(&f, &backend, &github);
+    review_it(
+        &f,
+        &backend,
+        &github,
+        &FakeHostRunner::default(),
+        &mut prepared,
+    )
+    .unwrap();
+    leave_stuck(&f, Stage::Reviewing, Status::Running, false);
+
+    let (result, _, _) = run_it(&f, &backend, &github);
+
+    result.unwrap();
+    assert_reviewed_to_ready(&f, 2, 2);
+    assert!(meta(&f).join("review-1.md").is_file(), "round 1 is kept");
+    assert_eq!(saved(&f).review.unwrap().must_fix, 1);
+    assert_eq!(posted(&github), 2);
+}
+
+/// Issue 379, case 4: a review recorded `completed` but never `ready` (a hand-written
+/// `task.json`: `review_pr` never saves this state itself) runs the reviewer again, like a failed
+/// one, without the gates.
+#[test]
+fn a_completed_but_unrecorded_pr_review_runs_the_reviewer_again() {
+    let f = config("");
+    let (backend, github) = (backend(&f, &[CLEAN]), github());
+    prepared(&f, &backend, &github);
+    leave_stuck(&f, Stage::Reviewing, Status::Completed, false);
+
+    let (result, _, _) = run_it(&f, &backend, &github);
+
+    result.unwrap();
+    assert_reviewed_to_ready(&f, 1, 0);
+    assert_eq!(posted(&github), 1);
+}
+
+/// Issue 379's boundary case: while the recorded process is still alive, the gates or the review
+/// are in flight, so `task review --pr` still refuses, with nothing changed.
+#[test]
+fn a_pr_task_whose_gates_or_review_are_still_running_is_refused() {
+    for stage in [Stage::Gating, Stage::Reviewing] {
+        let f = config("");
+        let (backend, github) = (backend(&f, &[CLEAN]), github());
+        prepared(&f, &backend, &github);
+        let before = leave_stuck(&f, stage, Status::Running, true);
+        let log = backend.log().len();
+
+        let (result, _, _) = run_it(&f, &backend, &github);
+
+        let message = format!("{:#}", result.unwrap_err());
+        assert!(message.contains("sbxm task status --pr 7"), "{message}");
+        assert_eq!(saved(&f), before, "task.json is unchanged");
+        assert_eq!(backend.log().len(), log, "{:?}", backend.log());
+        assert_eq!(posted(&github), 0);
+    }
+}

@@ -322,6 +322,38 @@ pub const TABLE: &[Row] = &[
         to: Some(Stage::Reviewing),
         action: "retry the reviewer",
     },
+    // A PR task stuck where only `rm` used to move it on (issue 379, decision 282): a preparation
+    // that failed, or gates or a review whose process is gone, start over from the PR's head
+    // fetched again, the earlier `review-<n>.md` kept and any leftover reviewer removed first.
+    Row {
+        stages: &[Stage::Prepared],
+        statuses: &[Status::Failed],
+        live: Live::Any,
+        kinds: PR,
+        event: Event::Review,
+        to: Some(Stage::Gating),
+        action: "fetch the PR's head again, run the gates, then the reviewer",
+    },
+    Row {
+        stages: &[Stage::Gating, Stage::Reviewing],
+        statuses: &[Status::Running],
+        live: Live::Interrupted,
+        kinds: PR,
+        event: Event::Review,
+        to: Some(Stage::Gating),
+        action: "remove the leftover reviewer, fetch the PR's head again, run the gates, then the reviewer",
+    },
+    // A completed review never recorded as `ready` (a PR task never saves this state itself:
+    // `review_pr` records `ready` in the same write): the reviewer runs again, as after a failure.
+    Row {
+        stages: &[Stage::Reviewing],
+        statuses: &[Status::Completed],
+        live: Live::Any,
+        kinds: PR,
+        event: Event::Review,
+        to: Some(Stage::Reviewing),
+        action: "run the reviewer again",
+    },
     // A `ready` PR task is reviewed again (issue 195, gap G34): refused while the PR's head is
     // still the commit the last review covered, unless `--force` (`task review --pr`'s own
     // check, which this table does not model since it needs a GitHub call).

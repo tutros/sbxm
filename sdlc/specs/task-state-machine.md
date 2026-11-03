@@ -36,7 +36,7 @@ new branch (`repo::push_new`, an empty `--force-with-lease`), opens no PR, and k
 **Issue 118 (part 4 of 7) built `task resume` and `--rounds N`** (decisions 173(c), 175, 177(b)(n)(q)):
 `machine::TABLE`'s `task resume` rows (5.2 "Today"), `resume::check_can_resume` and `resume::resume`, and
 `commands::task_resume`. It closes T3, T4, T5, T6, T9 and F4 for issue and spec tasks (the dead-end list in
-`tests/task_machine.rs` is empty for both; a PR task's stay, see 5.2), and records part of 5.1's `review` (round,
+`tests/task_machine.rs` is empty for both; a PR task's were closed by `task review --pr` itself, issue 379, see 5.2), and records part of 5.1's `review` (round,
 must-fix count, scope, repeat). Where it differs from the target table is listed after it in 5.2.
 
 ## 1. States of an issue task (`stage` / `status`)
@@ -114,7 +114,8 @@ The only exits from several states are "delete the task and start over" (about 1
 | T9 | S1 / S3 / S6 / S9 / S12 interrupted | `rm` only | Resume at the interrupted stage |
 
 **Closed by issue 118:** T3, T4, T5, T6 and T9 for issue and spec tasks (`task resume`; T1's "a further fix round" is
-`task resume --rounds N`). A PR task keeps its gaps by design (5.2: `resume` is refused for it).
+`task resume --rounds N`). A PR task's were left by design (5.2: `resume` is refused for it) until issue 379
+(decision 282) let `task review --pr` itself move it on from them.
 
 Pattern: every stage that can fail or be interrupted has no retry except S11 (review) and S8 (gates). Round count is
 fixed at one (decision 116), so "one more round" is a design question, not only a missing command.
@@ -200,6 +201,9 @@ kept here as the design for issues #117-121 to build toward.
 | prepared running (pr) | task review | gating | run the gates, then the reviewer |
 | gating passed/gates-failed (pr) | task review | reviewing | run the reviewer |
 | reviewing failed (pr) | task review | reviewing | retry the reviewer |
+| prepared failed (pr) | task review | gating | fetch the PR's head again, run the gates, then the reviewer |
+| gating/reviewing running (pr), interrupted | task review | gating | remove the leftover reviewer, fetch the PR's head again, run the gates, then the reviewer |
+| reviewing completed (pr) | task review | reviewing | run the reviewer again |
 | ready ok (pr) | task review | gating | fetch the PR's new head, keep the review as review-<n>.md, run the gates, then the reviewer |
 | ready ok (issue) | task finish | finished | push the branch and open the PR |
 | ready ok (spec) | task finish | finished | deliver the branch through the [finish] sink |
@@ -286,8 +290,8 @@ tasks, with these differences from the target rows above:
   not yet the SHA-256, findings or risk); a record without it runs the reviewer again.
 - 5.4a's reconciliation is built only for collecting commits (collected again, a fetch of what `repo.git` has
   changes nothing); the lock file of 5.1 is not built.
-- A PR task is refused, as above; its dead ends (`prepared failed`, interrupted `gating` and `reviewing`, `reviewing
-  completed`) stay `rm` then `review --pr` (decision 169(f)).
+- A PR task is refused, as above; its former dead ends (`prepared failed`, interrupted `gating` and `reviewing`,
+  `reviewing completed`) are moved on by `task review --pr` itself since issue 379 (decision 282, below).
 
 **Issue 142 status:** a spec task's `prepared` through `ready` rows are built, but through the section 5.2 "Today
 (generated)" mechanics (the `HAS_WORKER` kind list covers `Kind::Issue` and `Kind::Spec` alike), not this target
@@ -303,6 +307,14 @@ outright with only `rm` left. The refusal for an unchanged head (named commit, `
 business rule inside `review_pr` itself, not a row here, since it needs a GitHub call this table does not model; a
 refused attempt or a failed fetch leaves `review.md` and `task.json` untouched. `resume` stays refused for a PR
 task either way: it has no worker, so there is nothing for `resume` to continue.
+
+**Issue 379 status (decision 282):** a PR task has no dead ends left. `task review --pr N` moves it on from the four
+states that used to need `rm` first, keeping its folder: from `prepared failed`, or `gating running` or `reviewing
+running` whose process is gone (`check_can_review_pr` now asks the process probe; a live one is still refused), it
+reads the PR and fetches its head again (cloning `repo.git` first when the failed preparation never made it),
+removes the reviewer sandbox and clone the interrupted run left, then runs the gates and the reviewer as the next
+round, every earlier `review-<n>.md` kept. From `reviewing completed` (which `review_pr` never saves itself: it records
+`ready` in the same write) it runs the reviewer again, as after a failure, with no replay.
 
 `resume` is refused while the recorded process is alive (pid and start time, as `interrupted` is decided today).
 `--rounds N` is additive ("N more rounds", N >= 1; 0 is refused) and is valid from any `ready` with `stopped`,

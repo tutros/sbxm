@@ -105,6 +105,7 @@ pub fn run(
         // Empty in production while P8 (a) holds (slice 4).
         scoped_secrets: &[],
         identity: identity.as_ref(),
+        clone_source: None,
     };
     resume::check_can_resume(&prepared.record, probe, opts.rounds)?;
     resume::check_ambiguous(&prepared.record, opts.forget_ambiguous)?;

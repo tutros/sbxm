@@ -107,6 +107,7 @@ pub fn run(
         // Empty in production while P8 (a) holds (slice 4).
         scoped_secrets: &[],
         identity: identity.as_ref(),
+        clone_source: None,
     };
     let gated = pipeline::gate_on_demand(&env, &mut prepared, opts.tiers);
     for line in prepared.events.drain(..) {

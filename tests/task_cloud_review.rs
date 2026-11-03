@@ -502,6 +502,65 @@ fn a_cloud_pr_review_runs_in_a_reviewer_sandbox_and_posts_the_review() {
     assert!(!f.env.base_dir().join("tasks").join("pr-7-review").exists());
 }
 
+/// Issue 379's boundary case, in the cloud: a PR review whose process was gone while its reviewer
+/// sandbox still ran is moved on by `task review --pr` again: the leftover reviewer sandbox is
+/// removed (never refused as a name taken), then the gates and the reviewer run in a new one.
+#[test]
+fn an_interrupted_cloud_pr_review_removes_the_leftover_reviewer_and_runs_again() {
+    let f = fixture_with(LOCAL_TOML);
+    common::task_fixture::add_pr_head(&f, 7);
+    let root = f.env.tmp.path().join("cloud-fs");
+    let github = sbxm::github::fake::FakeGitHub::default()
+        .with_pr(pr_7())
+        .with_issue_text(common::task_fixture::issue_text(4));
+    let opts = pr_options(&f, Some(Location::Cloud));
+    task_review(&f, &opts, &cloud_backend(&root, "pr-7", &[CLEAN]), &github)
+        .result
+        .unwrap();
+    let sandbox = reviewer_sandbox("pr-7");
+    let meta = record::task_dir(&f.env.base_dir(), "pr-7");
+    let mut stuck = task_record(&f, "pr-7");
+    stuck.stage = record::Stage::Reviewing;
+    stuck.status = record::Status::Running;
+    stuck.process = Some(record::Process::new(4321, 1_790_000_000));
+    stuck.add_sandbox(
+        &sandbox,
+        SandboxRole::Reviewer,
+        Location::Cloud,
+        1_790_000_000,
+        3600,
+    );
+    record::write(&meta, &stuck).unwrap();
+    let backend = cloud_backend(&root, "pr-7", &[CLEAN]).with_live_cloud(&[&sandbox]);
+
+    let ran = task_review(&f, &pr_options(&f, None), &backend, &github);
+
+    ran.result.unwrap();
+    let log = described_log(&backend);
+    let removed = log.iter().position(|l| l == &format!("rm {sandbox}"));
+    let created = log.iter().position(|l| l == &format!("create {sandbox}"));
+    assert!(
+        removed.is_some() && removed < created,
+        "the leftover goes before the new one is made: {log:?}"
+    );
+    let task = task_record(&f, "pr-7");
+    assert_eq!(task.stage, record::Stage::Ready);
+    assert_eq!(task.review.as_ref().map(|r| r.round), Some(2));
+    assert_all_removed(
+        &task,
+        &[
+            SandboxRole::Reviewer,
+            SandboxRole::Reviewer,
+            SandboxRole::Reviewer,
+        ],
+    );
+    assert!(
+        backend.live_cloud().is_empty(),
+        "{:?}",
+        backend.live_cloud()
+    );
+}
+
 /// A fix round in the worker's clone: its input copied in, the worker, and its collection.
 fn fixed(sandbox: &str, clone: &str) -> Vec<String> {
     let mut calls = vec![
@@ -1247,6 +1306,7 @@ fn a_reviewer_sandbox_gets_the_scoped_secrets_and_its_removal_is_retried_then_th
         sleep: &|d| waits.lock().unwrap().push(d),
         scoped_secrets: &secrets,
         identity: Some(&who),
+        clone_source: None,
     };
 
     sbxm::task::pipeline::review_issue(&env, &mut prepared).unwrap();
@@ -1600,6 +1660,7 @@ fn a_strict_reviewer_with_a_host_left_is_removed_then_its_secret_then_refused() 
         sleep: &|_| {},
         scoped_secrets: &secrets,
         identity: Some(&who),
+        clone_source: None,
     };
 
     let result = sbxm::task::pipeline::review_issue(&env, &mut prepared);
@@ -1680,6 +1741,7 @@ fn a_rebuilt_strict_fix_sandbox_whose_list_cannot_be_read_is_removed_then_refuse
         sleep: &|_| {},
         scoped_secrets: &secrets,
         identity: Some(&who),
+        clone_source: None,
     };
     let headless_before = backend
         .execs()
