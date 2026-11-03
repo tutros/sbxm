@@ -10,6 +10,7 @@ pub mod machine;
 pub mod merged;
 pub mod pipeline;
 pub mod prompts;
+pub mod queue;
 pub mod record;
 pub mod repo;
 pub mod resume;
