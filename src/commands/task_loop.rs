@@ -37,7 +37,8 @@ use crate::task::{findings, pipeline};
 /// How many open PRs the loop opened may await the user before it pauses (decision 245(e)).
 pub const PR_CAP: usize = 5;
 /// The key in a task record's free-form `hooks` (decisions 139, 146) marking a task the loop
-/// finished: its PR is one the loop opened, which counts toward [`PR_CAP`] (decision 3).
+/// finished: unless the task continued an open PR, its PR is one the loop opened, which counts
+/// toward [`PR_CAP`] (decision 3).
 pub const LOOP_HOOK: &str = "task_loop";
 /// How often a pause looks again.
 pub const PAUSE_POLL: Duration = Duration::from_secs(5 * 60);
@@ -593,8 +594,8 @@ impl Loop<'_> {
         }
     }
 
-    /// Marks a ready task as the loop's before its `task finish` opens the PR, so the PR counts
-    /// toward [`PR_CAP`], after a restart too.
+    /// Marks a ready task as the loop's before its `task finish`, so a PR that finish opens counts
+    /// toward [`PR_CAP`], after a restart too ([`opened_by_loop`]).
     fn claim(&self, issue: u32) -> Result<()> {
         let dir = self.task_dir(issue);
         let mut rec = record::read(&dir.join("task.json"))?;
@@ -673,9 +674,11 @@ impl Loop<'_> {
     }
 }
 
-/// Whether a loop finished this task, so its PR is one the loop opened.
+/// Whether this task's PR is one a loop opened: a loop finished it, and it didn't continue an open
+/// PR (decision 169), whose finish only pushes to it (review M-3, repeat). A continued PR a loop
+/// did open still counts through the record of the task that opened it.
 fn opened_by_loop(rec: &Record) -> bool {
-    rec.hooks.get(LOOP_HOOK) == Some(&serde_json::Value::Bool(true))
+    rec.continues.is_none() && rec.hooks.get(LOOP_HOOK) == Some(&serde_json::Value::Bool(true))
 }
 
 fn first_line(text: &str) -> String {

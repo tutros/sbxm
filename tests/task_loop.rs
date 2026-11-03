@@ -19,7 +19,7 @@ use sbxm::commands::task_loop::{self, Env, Options, Steps};
 use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::github::{Issue, PrInfo, PrState};
 use sbxm::task::record::{
-    self, Kind, NewTask, Process, ProcessProbe, Record, ReviewResult, Stage, Status,
+    self, Kind, NewTask, PrBranch, Process, ProcessProbe, Record, ReviewResult, Stage, Status,
 };
 
 const REPO: &str = "o/r";
@@ -48,6 +48,8 @@ struct Script {
     clock: Cell<u64>,
     /// Seconds each `finish` takes on the clock.
     finish_takes: Cell<u64>,
+    /// Issues whose task continues an open PR (decision 169), with that PR's number.
+    continues: RefCell<HashMap<u32, u32>>,
 }
 
 impl Script {
@@ -59,7 +61,13 @@ impl Script {
             room: RefCell::default(),
             clock: Cell::new(START),
             finish_takes: Cell::new(0),
+            continues: RefCell::default(),
         }
+    }
+
+    fn continuing(self, issue: u32, pr: u32) -> Self {
+        self.continues.borrow_mut().insert(issue, pr);
+        self
     }
 
     fn plays(self, issue: u32, acts: &[Act]) -> Self {
@@ -85,6 +93,15 @@ impl Script {
         match act {
             Act::Ready(must_fix) => {
                 write_record(&self.base, issue, Stage::Ready, Some(must_fix), None);
+                if let Some(&pr) = self.continues.borrow().get(&issue) {
+                    let mut rec = read_record(&self.base, issue);
+                    rec.continues = Some(PrBranch {
+                        pr,
+                        branch: format!("fix-{pr}"),
+                        base: "0".repeat(40),
+                    });
+                    record::write(&record::task_dir(&self.base, &rec.id), &rec).unwrap();
+                }
                 Ok(())
             }
             Act::Fail(text, leaves_record) => {
@@ -115,7 +132,9 @@ impl Steps for Script {
         self.clock.set(self.clock.get() + self.finish_takes.get());
         let mut rec = read_record(&self.base, issue);
         rec.stage = Stage::Finished;
-        rec.pr = Some(format!("https://github.com/{REPO}/pull/{}", 100 + issue));
+        // A continued PR keeps its number; a new one is 100 past the issue's.
+        let pr = rec.continues.as_ref().map_or(100 + issue, |c| c.pr);
+        rec.pr = Some(format!("https://github.com/{REPO}/pull/{pr}"));
         record::write(&record::task_dir(&self.base, &rec.id), &rec).unwrap();
         Ok(())
     }
@@ -849,6 +868,34 @@ fn five_prs_a_loop_opened_pause_the_next_loop() {
 
     assert!(run.out.contains("5 PRs await you"), "{}", run.out);
     assert!(runs(&again).is_empty());
+}
+
+#[test]
+fn five_tasks_continuing_prs_opened_by_hand_do_not_pause_the_next_loop() {
+    let f = fixture();
+    let mut issues: Vec<Issue> = (1..=5).map(|n| labeled(n, "size:S")).collect();
+    issues.push(labeled(6, "size:M"));
+    let mut gh = github(issues);
+    let mut script = Script::new(&f.base());
+    for issue in 1..=5 {
+        // Each continues an open PR opened by hand (decision 169).
+        gh = gh.with_pr(pr(100 + issue, PrState::Open));
+        script = script.continuing(issue, 100 + issue);
+    }
+    run_loop(&f, with_cap(&f, 5), &script, &gh).result.unwrap();
+
+    let again = Script::new(&f.base());
+    // A pause would wait for ever: asked to stop after the loop's first look at the PRs.
+    let asked = Cell::new(0);
+    let stop = || {
+        asked.set(asked.get() + 1);
+        asked.get() > 1
+    };
+    let run = run_loop_with(&f, with_cap(&f, 1), &again, &gh, &Probe, &stop);
+
+    run.result.unwrap();
+    assert!(!run.out.contains("await you"), "{}", run.out);
+    assert_eq!(runs(&again), ["run 6"]);
 }
 
 #[test]
