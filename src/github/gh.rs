@@ -7,7 +7,9 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
-use super::{GitHubBackend, Issue, IssueRequest, IssueText, PrInfo, PrRequest, PrState};
+use super::{
+    GitHubBackend, Issue, IssueRequest, IssueText, PrInfo, PrMergeState, PrRequest, PrState,
+};
 
 /// Runs `gh` with arguments and optional stdin, returning stdout.
 pub trait GhRunner: Send + Sync {
@@ -137,6 +139,27 @@ struct RawPr {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct RawMergeState {
+    state: String,
+    /// `null` unless auto-merge is armed; its fields aren't read.
+    #[serde(default)]
+    auto_merge_request: Option<serde_json::Value>,
+}
+
+/// A PR state as `gh` names it.
+fn pr_state(number: u32, state: &str) -> Result<PrState> {
+    match state {
+        "OPEN" => Ok(PrState::Open),
+        "CLOSED" => Ok(PrState::Closed),
+        "MERGED" => Ok(PrState::Merged),
+        other => Err(anyhow!(
+            "`gh pr view {number}` reported an unknown state {other}"
+        )),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct RawRepo {
     default_branch_ref: Named,
 }
@@ -232,16 +255,7 @@ impl GitHubBackend for GhBackend {
             "--json",
             "headRefName,headRefOid,isCrossRepository,state,title,body,closingIssuesReferences",
         ]))?;
-        let state = match raw.state.as_str() {
-            "OPEN" => PrState::Open,
-            "CLOSED" => PrState::Closed,
-            "MERGED" => PrState::Merged,
-            other => {
-                return Err(anyhow!(
-                    "`gh pr view {number}` reported an unknown state {other}"
-                ));
-            }
-        };
+        let state = pr_state(number, &raw.state)?;
         Ok(PrInfo {
             number,
             head_ref: raw.head_ref_name,
@@ -255,6 +269,22 @@ impl GitHubBackend for GhBackend {
                 .into_iter()
                 .map(|n| n.number)
                 .collect(),
+        })
+    }
+
+    fn pr_merge_state(&self, repo: &str, number: u32) -> Result<PrMergeState> {
+        let raw: RawMergeState = self.json(&strings(&[
+            "pr",
+            "view",
+            &number.to_string(),
+            "--repo",
+            repo,
+            "--json",
+            "state,autoMergeRequest",
+        ]))?;
+        Ok(PrMergeState {
+            state: pr_state(number, &raw.state)?,
+            auto_merge: raw.auto_merge_request.is_some_and(|r| !r.is_null()),
         })
     }
 

@@ -348,3 +348,34 @@ fn bad_json_names_the_command() {
     let message = format!("{:#}", gh.issues_open("o/r").unwrap_err());
     assert!(message.contains("gh issue list"), "{message}");
 }
+
+#[test]
+fn a_pr_merge_state_reads_the_state_and_whether_auto_merge_is_armed() {
+    // The shape of `gh pr view --json state,autoMergeRequest` (gh 2.83 field names; written by
+    // hand, not captured: no PR with auto-merge armed was at hand).
+    let (gh, script) = backend(Scripted::with(vec![
+        Ok(r#"{"autoMergeRequest":null,"state":"OPEN"}"#.to_owned()),
+        Ok(r#"{"autoMergeRequest":{"enabledAt":"2026-11-02T10:00:00Z","mergeMethod":"MERGE","enabledBy":{"login":"tutros"}},"state":"OPEN"}"#.to_owned()),
+        Ok(r#"{"autoMergeRequest":null,"state":"MERGED"}"#.to_owned()),
+    ]));
+
+    let plain = gh.pr_merge_state("o/r", 7).unwrap();
+    assert_eq!(plain.state, PrState::Open);
+    assert!(!plain.auto_merge);
+    let armed = gh.pr_merge_state("o/r", 8).unwrap();
+    assert_eq!(armed.state, PrState::Open);
+    assert!(armed.auto_merge);
+    assert_eq!(gh.pr_merge_state("o/r", 9).unwrap().state, PrState::Merged);
+    assert_eq!(
+        args(script, 0),
+        [
+            "pr",
+            "view",
+            "7",
+            "--repo",
+            "o/r",
+            "--json",
+            "state,autoMergeRequest"
+        ]
+    );
+}

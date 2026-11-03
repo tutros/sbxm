@@ -47,6 +47,15 @@ pub struct PrInfo {
     pub closing_issues: Vec<u32>,
 }
 
+/// A PR's state and whether auto-merge is armed on it (`gh pr view --json
+/// state,autoMergeRequest`): what `task loop` needs to count the PRs awaiting the user (issue 320,
+/// decision 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrMergeState {
+    pub state: PrState,
+    pub auto_merge: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrRequest {
     pub head: String,
@@ -71,6 +80,7 @@ pub trait GitHubBackend: Send + Sync {
     fn issues_open(&self, repo: &str) -> Result<Vec<Issue>>;
     fn issue(&self, repo: &str, number: u32) -> Result<IssueText>;
     fn pr(&self, repo: &str, number: u32) -> Result<PrInfo>;
+    fn pr_merge_state(&self, repo: &str, number: u32) -> Result<PrMergeState>;
     /// Returns the new PR's URL.
     fn pr_create(&self, repo: &str, request: &PrRequest) -> Result<String>;
     fn pr_comment(&self, repo: &str, number: u32, body: &str) -> Result<()>;
