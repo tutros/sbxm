@@ -14,7 +14,8 @@ this file shows how the commands fit together and when to use which. `sbxm` has 
 4. Store the provider secrets in `sbx` (`sbx secret ls`): `anthropic` for Claude, `openai` for Codex (also the default
    reviewer for a Claude worker), `google` for Antigravity. For `sbxm task`, run `gh auth setup-git` once.
    For interactive Antigravity you can sign in inside the sandbox instead: `antigravity_auth = "login"` in
-   `config.toml` (see "Antigravity, interactive" below); `sbxm run` and `sbxm task` still need `google`.
+   `config.toml` (see "Antigravity, interactive" below); `sbxm run` and `sbxm task` still need `google`, and
+   login mode refuses while `google` is stored globally, since `sbx` would inject it into the sandbox anyway.
 5. `just deploy-profiles` copies the repo's `profiles/*` into the folder `sbxm config profiles-dir` reports. It replaces
    whole profiles, so deploy from an up-to-date `main`: a profile change that is still on an open PR is lost if you
    deploy from another branch.

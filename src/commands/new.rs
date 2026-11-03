@@ -196,18 +196,34 @@ pub fn run(
 
 /// An interactive Antigravity sandbox in `api-key` mode needs the `google` secret, used as its
 /// Gemini API key; in `login` mode the user signs in inside the sandbox and none is needed
-/// (decision 281 (a), issue 384). Headless sandboxes check it in their own preflights.
-fn check_antigravity_key(
+/// (decision 281 (a), issue 384). In `login` mode a stored global `google` secret is refused
+/// instead: the pinned Antigravity kit makes `sbx` inject it into every sandbox, so the sandbox
+/// would get the key anyway (decision 284, issue 384 review M-1). `open` also calls this
+/// before attaching to an existing sandbox. Headless sandboxes check it in their own preflights.
+pub(crate) fn check_antigravity_key(
     config: &GlobalConfig,
     harness: Harness,
     config_dir: &Path,
     backend: &dyn SandboxBackend,
 ) -> Result<()> {
-    if harness != Harness::Antigravity || config.antigravity_auth == AntigravityAuth::Login {
+    if harness != Harness::Antigravity {
         return Ok(());
     }
     let secret = harness.provider_secret();
-    if !backend.secret_services()?.iter().any(|s| s == secret) {
+    let stored = backend.secret_services()?.iter().any(|s| s == secret);
+    if config.antigravity_auth == AntigravityAuth::Login {
+        if stored {
+            bail!(
+                "secret '{secret}' is stored globally in sbx, and sbx injects it into every \
+                 antigravity sandbox, so this one would get the key although antigravity_auth is \
+                 \"login\". Remove it with `sbx secret rm {secret}` (headless antigravity runs \
+                 need it again later), or set antigravity_auth = \"api-key\" in {} to use it",
+                config_dir.join("config.toml").display()
+            );
+        }
+        return Ok(());
+    }
+    if !stored {
         bail!(
             "secret '{secret}' is not stored in sbx; antigravity uses it as its Gemini API key \
              (antigravity_auth is \"api-key\"). Add it with `sbx secret set -g {secret}`, or set \

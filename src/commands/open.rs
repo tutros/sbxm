@@ -65,6 +65,8 @@ pub fn run(
         (Some(entry), true) => {
             let (profile_name, base, profile) =
                 check_unchanged(&config, name, harness, &sandbox, &entry)?;
+            // A secret stored since the sandbox was made would reach it on this restart too.
+            new::check_antigravity_key(&config, harness, config_dir, backend)?;
             super::write_unsupported_warnings(harness, &profile, &sandbox, warn)?;
             let request = template::Request {
                 base_dir: &config.base_dir,

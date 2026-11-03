@@ -171,6 +171,91 @@ fn login_still_checks_the_profiles_own_secrets() {
     assert_nothing_created(&env, &backend);
 }
 
+// login × interactive with a global `google` secret: refused (issue 384 review M-1, the user's
+// option (a), 2026-11-03). The pinned Antigravity kit makes `sbx` inject that secret into every
+// sandbox, so login mode would hand the stored key to the sandbox anyway; it is refused instead,
+// before anything is created or attached.
+
+const GOOGLE_STORED: &str = "secret 'google' is stored globally in sbx";
+
+fn assert_google_stored_refusal(err: &anyhow::Error) {
+    let message = format!("{err:#}");
+    assert!(message.contains(GOOGLE_STORED), "{message}");
+    assert!(message.contains("sbx secret rm google"), "{message}");
+    assert!(
+        message.contains("antigravity_auth = \"api-key\""),
+        "{message}"
+    );
+}
+
+#[test]
+fn login_new_with_a_global_google_secret_is_refused_before_anything_is_created() {
+    let env = Env::new();
+    login(&env);
+    let backend = FakeBackend::with_secrets(&["google"]);
+
+    let err = env.run_with("demo", &antigravity(), &backend).unwrap_err();
+
+    assert_google_stored_refusal(&err);
+    assert_nothing_created(&env, &backend);
+}
+
+#[test]
+fn login_open_with_a_global_google_secret_creates_and_attaches_nothing() {
+    let env = Env::new();
+    login(&env);
+    let backend = FakeBackend::with_secrets(&["google"]);
+
+    let err = open_with(&env, false, &backend).unwrap_err();
+
+    assert_google_stored_refusal(&err);
+    assert!(backend.creates().is_empty() && !attached(&backend));
+    assert!(!env.base_dir().join("demo").exists());
+}
+
+/// A sandbox made while no `google` secret was stored: storing one later must not reach it on
+/// the next `open`, which restarts and attaches to it.
+#[test]
+fn login_open_of_an_existing_sandbox_with_a_global_google_secret_does_not_attach() {
+    let env = Env::new();
+    login(&env);
+    env.run_with("demo", &antigravity(), &FakeBackend::default())
+        .unwrap();
+    let backend = FakeBackend::with_secrets(&["google"]).and_sandboxes(existing_sandbox());
+
+    let err = open_with(&env, false, &backend).unwrap_err();
+
+    assert_google_stored_refusal(&err);
+    assert!(!attached(&backend), "{:?}", backend.log());
+}
+
+#[test]
+fn login_open_of_an_existing_sandbox_without_a_google_secret_attaches() {
+    let env = Env::new();
+    login(&env);
+    env.run_with("demo", &antigravity(), &FakeBackend::default())
+        .unwrap();
+    let backend = FakeBackend::default().and_sandboxes(existing_sandbox());
+
+    open_with(&env, false, &backend).unwrap();
+
+    assert!(attached(&backend), "{:?}", backend.log());
+}
+
+#[test]
+fn login_open_rebuild_with_a_global_google_secret_keeps_the_old_sandbox() {
+    let env = Env::new();
+    login(&env);
+    env.run_with("demo", &antigravity(), &FakeBackend::default())
+        .unwrap();
+    let backend = FakeBackend::with_secrets(&["google"]).and_sandboxes(existing_sandbox());
+
+    let err = open_with(&env, true, &backend).unwrap_err();
+
+    assert_google_stored_refusal(&err);
+    assert!(backend.removes().is_empty() && backend.creates().is_empty());
+}
+
 // api-key × interactive: the `google` secret is required, before anything is written.
 
 #[test]
