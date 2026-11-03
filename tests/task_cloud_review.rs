@@ -561,6 +561,69 @@ fn an_interrupted_cloud_pr_review_removes_the_leftover_reviewer_and_runs_again()
     );
 }
 
+/// Issue 379 review M-1: the interrupted cloud review ran a `claude` reviewer, and the retry's
+/// reviewer is `codex`, so their sandbox names differ. The recorded reviewer, which has an open
+/// lifetime entry, is still removed before the new one is made, and none is left running.
+#[test]
+fn an_interrupted_cloud_pr_review_removes_the_recorded_reviewer_of_another_harness() {
+    let f = fixture_with(LOCAL_TOML);
+    common::task_fixture::add_pr_head(&f, 7);
+    let root = f.env.tmp.path().join("cloud-fs");
+    let github = sbxm::github::fake::FakeGitHub::default()
+        .with_pr(pr_7())
+        .with_issue_text(common::task_fixture::issue_text(4));
+    let opts = pr_options(&f, Some(Location::Cloud));
+    task_review(&f, &opts, &cloud_backend(&root, "pr-7", &[CLEAN]), &github)
+        .result
+        .unwrap();
+    let old = "sbxm-task-pr-7-review-claude";
+    let meta = record::task_dir(&f.env.base_dir(), "pr-7");
+    let mut stuck = task_record(&f, "pr-7");
+    stuck.stage = record::Stage::Reviewing;
+    stuck.status = record::Status::Running;
+    stuck.process = Some(record::Process::new(4321, 1_790_000_000));
+    let reviewer = stuck.reviewer.as_mut().unwrap();
+    reviewer.harness = "claude".into();
+    reviewer.sandbox = old.into();
+    stuck.add_sandbox(
+        old,
+        SandboxRole::Reviewer,
+        Location::Cloud,
+        1_790_000_000,
+        3600,
+    );
+    record::write(&meta, &stuck).unwrap();
+    let backend = cloud_backend(&root, "pr-7", &[CLEAN]).with_live_cloud(&[old]);
+
+    let ran = task_review(&f, &pr_options(&f, None), &backend, &github);
+
+    ran.result.unwrap();
+    let log = described_log(&backend);
+    let removed = log.iter().position(|l| l == &format!("rm {old}"));
+    let created = log
+        .iter()
+        .position(|l| l == &format!("create {}", reviewer_sandbox("pr-7")));
+    assert!(
+        removed.is_some() && removed < created,
+        "the recorded reviewer goes before the new one is made: {log:?}"
+    );
+    let task = task_record(&f, "pr-7");
+    assert_eq!(task.stage, record::Stage::Ready);
+    assert_all_removed(
+        &task,
+        &[
+            SandboxRole::Reviewer,
+            SandboxRole::Reviewer,
+            SandboxRole::Reviewer,
+        ],
+    );
+    assert!(
+        backend.live_cloud().is_empty(),
+        "left running: {:?}",
+        backend.live_cloud()
+    );
+}
+
 /// A fix round in the worker's clone: its input copied in, the worker, and its collection.
 fn fixed(sandbox: &str, clone: &str) -> Vec<String> {
     let mut calls = vec![

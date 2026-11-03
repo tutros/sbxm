@@ -3364,11 +3364,10 @@ pub fn review_pr(
 
     // Gating: in the reviewer's sandbox, over a clean clone of the PR's head.
     if restart {
-        // What the interrupted run left goes first (a cloud reviewer's is removed by
-        // `open_cloud_review`, from its open lifetime entry), after every check above.
-        if prepared.record.location == Location::Local
-            && let Some(left) = prepared.record.reviewer.as_ref().map(|a| a.sandbox.clone())
-        {
+        // What the interrupted run left goes first, after every check above: the recorded
+        // reviewer, whose name can differ from this round's when the reviewer harness changed
+        // (issue 379 review M-1). A cloud one goes only with an open lifetime entry (decision 268).
+        if let Some(left) = prepared.record.reviewer.as_ref().map(|a| a.sandbox.clone()) {
             remove_reviewer(env, prepared, &left, &clone);
         }
         prepared
