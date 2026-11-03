@@ -5,6 +5,7 @@
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 
@@ -48,12 +49,25 @@ pub struct Options {
     pub location: Option<Location>,
 }
 
+/// How often the check before the review reads the drive again while it is under
+/// `min_free_disk`, and for how long at most (issue 389).
+const DISK_WAIT_STEP: Duration = Duration::from_secs(5);
+const DISK_WAIT_MAX: Duration = Duration::from_secs(60);
+
 /// The drive can fill up while the worker runs, so it is checked again before the reviewer's
-/// sandbox (decision 194). A refusal names `task review`, which goes on from here: `task run`
-/// would not pick the task up again. Returns the guard to hand the review, which has nothing left
-/// to check: its own refusal would name no way to continue.
-fn review_has_room(config_dir: &Path, guard: &disk::Guard, flag: &str) -> Result<disk::Guard> {
-    disk::require(&GlobalConfig::load(config_dir)?, config_dir, guard).with_context(|| {
+/// sandbox (decision 194). The space the worker's just-removed sandbox used can take a moment to
+/// come back (issue 389), so a drive under `min_free_disk` is read again every
+/// [`DISK_WAIT_STEP`] for up to [`DISK_WAIT_MAX`], saying so once, before refusing. A refusal
+/// names `task review`, which goes on from here: `task run` would not pick the task up again.
+/// Returns the guard to hand the review, which has nothing left to check: its own refusal would
+/// name no way to continue.
+fn review_has_room(
+    config_dir: &Path,
+    guard: &disk::Guard,
+    flag: &str,
+    warn: &mut dyn Write,
+) -> Result<disk::Guard> {
+    wait_for_room(config_dir, guard, warn).with_context(|| {
         format!(
             "the worker is done but its review was not started; continue with `sbxm task review \
              {flag}`"
@@ -63,6 +77,28 @@ fn review_has_room(config_dir: &Path, guard: &disk::Guard, flag: &str) -> Result
         ignore: true,
         ..guard.clone()
     })
+}
+
+fn wait_for_room(config_dir: &Path, guard: &disk::Guard, warn: &mut dyn Write) -> Result<()> {
+    let config = GlobalConfig::load(config_dir)?;
+    let mut waited = Duration::ZERO;
+    while let Some((dir, free)) = disk::shortfall(&config, guard) {
+        if waited >= DISK_WAIT_MAX {
+            return Err(disk::refusal(&config, config_dir, &dir, free));
+        }
+        if waited.is_zero() {
+            writeln!(
+                warn,
+                "waiting for disk space: {} free on {}, need {}",
+                disk::gib(free),
+                disk::describe(&dir),
+                disk::gib(config.min_free_disk)
+            )?;
+        }
+        (guard.sleep)(DISK_WAIT_STEP);
+        waited += DISK_WAIT_STEP;
+    }
+    Ok(())
 }
 
 /// Drops the `next:` hint of a step that isn't the last one.
@@ -228,9 +264,12 @@ fn run_issue(
     }
 
     let disk = match location {
-        Location::Local => {
-            review_has_room(config_dir, &opts.disk, &format!("--issue {}", opts.issue))?
-        }
+        Location::Local => review_has_room(
+            config_dir,
+            &opts.disk,
+            &format!("--issue {}", opts.issue),
+            &mut warn,
+        )?,
         Location::Cloud => opts.disk.clone(),
     };
     task_review::run(
@@ -541,9 +580,12 @@ fn run_spec_task(
     }
 
     let disk = match location {
-        Location::Local => {
-            review_has_room(config_dir, &opts.disk, &task_start::spec_flag(&opts.spec))?
-        }
+        Location::Local => review_has_room(
+            config_dir,
+            &opts.disk,
+            &task_start::spec_flag(&opts.spec),
+            &mut warn,
+        )?,
         Location::Cloud => opts.disk.clone(),
     };
     task_review::run(

@@ -309,6 +309,7 @@ fn a_low_disk_before_a_later_task_stops_the_list_and_keeps_the_earlier_result() 
         },
         default_state_dir: Some(state),
         ignore: false,
+        sleep: |_| {},
     };
     let targets = [Target::Issue(41), Target::Issue(42)];
 

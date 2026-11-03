@@ -314,7 +314,8 @@ same tasks and only reads).
   `min_free_disk` in `config.toml` (default `"10g"`; `"0"` switches the check off), naming the drive and its free
   space; `--ignore-disk` lets one command through. A `task run` list (decision 193) checks again before every task,
   not only the first, since a task's own sandbox can fill the drive the next one needs; a failure there stops the
-  rest of the list. A cloud task skips the check (its sandboxes don't use that drive). The folder is `%LOCALAPPDATA%\DockerSandboxes` on Windows, or
+  rest of the list. The check before `task run`'s review waits up to 60 s (every 5 s) for the space the worker's
+  removed sandbox used to come back before refusing (issue 389). A cloud task skips the check (its sandboxes don't use that drive). The folder is `%LOCALAPPDATA%\DockerSandboxes` on Windows, or
   `sandbox_state_dir` in `config.toml` on any platform; on macOS and Linux without that key nothing is checked (a full
   drive makes `sbx` answer `try: sbx login`, which looks like a login problem).
   A junction from `sbx`'s `state` folder to a bigger drive was tried (2026-10-03, `sbx` 0.46.0) and does not work for the
