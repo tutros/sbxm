@@ -158,7 +158,7 @@ run in the cloud skips this check, since they don't use that drive (`--ignore-di
 |---|---|---|---|
 | `claude` (default) | Claude Code | `~/.claude/CLAUDE.md` | Supports `harness.claude.home_files` and `harness.claude.managed_settings`. |
 | `codex` | Codex | `~/.codex/AGENTS.md` | |
-| `antigravity` | Antigravity (`agy`) | `~/.gemini/AGENTS.md` | Uses the Antigravity kit from Docker Hub, pinned to a fixed tag. With a `google` secret stored (`sbx secret set -g google`), `agy` uses it as a Gemini API key and needs no sign-in (decision 137). Before every headless run (`sbxm run`, `sbxm task`), sbxm removes `sbx`'s `mcp-gateway` entry from `~/.gemini/config/mcp_config.json`, since `agy` waits on that server and hangs until the timeout; other MCP servers stay (issue 287). A headless run with no model set (an `sbxm task` worker or reviewer without `--worker-model`/`--reviewer-model` or a `model` in `sbxm-task.toml`, or an `sbxm run` contestant or judge whose run-config entry leaves out `model`) passes `--model gemini-3.8-flash-medium`, so `agy` never picks its own; `task.json`, the saved review, `run.json`, `result.json`, `judge.json`, `evals.json` and the output of `sbxm task`, `sbxm run` and `run show` name the model that ran, for example `antigravity (gemini-3.8-flash-medium)` (issue 314). Claude and Codex have no default: their run-config entries still need `model`. Interactive `new`/`open` are unchanged: switch there with `/model`. `sbx`'s skills store isn't known to serve it: sbxm warns unless `skills.store = "off"`. |
+| `antigravity` | Antigravity (`agy`) | `~/.gemini/AGENTS.md` | Uses the Antigravity kit from Docker Hub, pinned to a fixed tag. With a `google` secret stored (`sbx secret set -g google`), `agy` uses it as a Gemini API key and needs no sign-in (decision 137); `sbxm new`/`open` refuse to create a sandbox without it unless `antigravity_auth = "login"` (see below). Before every headless run (`sbxm run`, `sbxm task`), sbxm removes `sbx`'s `mcp-gateway` entry from `~/.gemini/config/mcp_config.json`, since `agy` waits on that server and hangs until the timeout; other MCP servers stay (issue 287). A headless run with no model set (an `sbxm task` worker or reviewer without `--worker-model`/`--reviewer-model` or a `model` in `sbxm-task.toml`, or an `sbxm run` contestant or judge whose run-config entry leaves out `model`) passes `--model gemini-3.8-flash-medium`, so `agy` never picks its own; `task.json`, the saved review, `run.json`, `result.json`, `judge.json`, `evals.json` and the output of `sbxm task`, `sbxm run` and `run show` name the model that ran, for example `antigravity (gemini-3.8-flash-medium)` (issue 314). Claude and Codex have no default: their run-config entries still need `model`. Interactive `new`/`open` are unchanged: switch there with `/model`. `sbx`'s skills store isn't known to serve it: sbxm warns unless `skills.store = "off"`. |
 | `pi` | Pi | `~/.pi/agent/AGENTS.md` | Uses the Pi kit from Docker Hub, pinned to a fixed tag. See below. `sbx`'s skills store doesn't serve Pi either: sbxm warns unless `skills.store = "off"`. |
 
 Settings a harness can't use are never dropped silently: `sbxm new`/`open` print a `warning:` line for each, e.g.
@@ -168,6 +168,17 @@ Settings a harness can't use are never dropped silently: `sbxm new`/`open` print
 sandbox here, so sbxm no longer offers it (decision 275); use `antigravity` for Google models. `--harness gemini` is
 refused as an invalid value. A `gemini` sandbox left from an older sbxm still shows in `sbxm list` (config
 `unknown`); remove it with `sbxm rm <project> --purge`, or `sbx rm sbxm-<project>-gemini` for just that sandbox.
+
+**Antigravity, interactive:** with `antigravity_auth = "login"` in `config.toml`, `sbxm new`/`open --harness
+antigravity` (and `open --rebuild`) create the sandbox without the `google` secret, and you sign in inside it once
+(decision 281, issue 384): `sbxm open <project> --harness antigravity` attaches, and `agy` asks for its Google sign-in;
+it keeps and refreshes the token itself, and sbxm stores none. The login lives in the sandbox, so it persists across
+`open`, `stop` and `open` again, but a fresh `new`, or `open --rebuild`, starts a new sandbox that needs a fresh
+sign-in. Once signed in, `agy` uses that login even if `sbx` injects a `GEMINI_API_KEY` from a stored `google` secret.
+With the default `"api-key"`, creating an interactive Antigravity sandbox needs the `google` secret, which `agy` uses
+as its API key. Headless Antigravity (`sbxm run` contestants and judges, `sbxm task` workers and reviewers) always
+needs the `google` secret, in both modes: nobody can sign in to a throwaway sandbox. `sbx`'s `mcp-gateway` entry is
+removed only before a headless run (issue 287), not before an interactive attach.
 
 **Pi, first time:** the Pi kit asks `sbx` for your `anthropic` credential, and `sbx` wants your approval once. Run
 your first `sbxm new … --harness pi` in a terminal and approve when asked (`This kit wants to use these credentials:
@@ -191,6 +202,7 @@ default_profile = "default"                            # used when --profile isn
 min_sbx_version = "0.43.0"                             # checked by `sbxm doctor`
 min_free_disk = "10g"                                  # default; "0" switches the sandbox-drive check off
 # sandbox_state_dir = 'C:\Users\you\AppData\Local\DockerSandboxes'  # where sbx keeps its sandboxes
+antigravity_auth = "api-key"                           # default; "login" signs in inside interactive Antigravity sandboxes
 
 [resources]            # per sandbox; sbx would otherwise take all CPUs and 16 GiB
 cpus = 4
@@ -198,6 +210,9 @@ memory = "8g"
 ```
 
 There's no `default_harness` setting: use `--harness`.
+
+`antigravity_auth` is account-level, so it isn't part of the config hash: switching it never makes an existing
+sandbox count as changed. See *Antigravity, interactive* above.
 
 #### The sandbox drive
 

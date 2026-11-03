@@ -788,7 +788,11 @@ fn antigravity_sandbox_against_real_sbx() {
     let base = toml::Value::String(base_dir.to_str().unwrap().to_owned());
     std::fs::write(
         config_dir.path().join("config.toml"),
-        format!("base_dir = {base}\n\n[resources]\ncpus = 2\nmemory = \"2g\"\n"),
+        // Login mode (issue 384): created without the `google` secret, and nobody signs in.
+        format!(
+            "base_dir = {base}\nantigravity_auth = \"login\"\n\n[resources]\ncpus = 2\n\
+             memory = \"2g\"\n"
+        ),
     )
     .unwrap();
     let profile_dir = config_dir.path().join("profiles").join("default");
@@ -927,6 +931,100 @@ fn antigravity_sandbox_against_real_sbx() {
     .unwrap();
     let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
     assert!(!String::from_utf8_lossy(&ls.stdout).contains(&sandbox));
+}
+
+/// Issue 384, decision 281 (a): a login-mode Antigravity sandbox is created without the `google`
+/// secret, and once the user has signed in inside it, `agy` answers with that login. The
+/// sandbox has a fixed name and is kept until the check passes, so the sign-in it needs (one
+/// interactive `sbx run`, which a test can't do) persists across runs of this test, the way it
+/// persists across `sbxm open`. `sbx run` needs a terminal, so `sbx exec` stands in for the
+/// attach. Not signed in yet: the test prints how to sign in and returns without failing.
+#[test]
+#[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR; signing in inside the sandbox once"]
+fn antigravity_login_against_real_sbx() {
+    use std::time::Duration;
+
+    use sbxm::headless::{self, HeadlessOpts, RunStatus};
+
+    let base_dir = real_base_dir();
+    let project = "sbxm-it-agy-login";
+    let sandbox = format!("sbxm-{project}-antigravity");
+    let config_dir = TempDir::new().unwrap();
+    let base = toml::Value::String(base_dir.to_str().unwrap().to_owned());
+    std::fs::write(
+        config_dir.path().join("config.toml"),
+        format!(
+            "base_dir = {base}\nantigravity_auth = \"login\"\n\n[resources]\ncpus = 2\n\
+             memory = \"2g\"\n"
+        ),
+    )
+    .unwrap();
+    let profile_dir = config_dir.path().join("profiles").join("default");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    std::fs::write(
+        profile_dir.join("profile.toml"),
+        "[skills]\nstore = \"off\"\n",
+    )
+    .unwrap();
+    let agy = sbxm::harness::Harness::Antigravity;
+
+    let listed = SbxBackend::LOCAL
+        .list()
+        .unwrap()
+        .iter()
+        .any(|s| s.name == sandbox);
+    if !listed {
+        // Login mode never asks `sbx` for the `google` secret, stored or not.
+        new::run(
+            config_dir.path(),
+            project,
+            &new::Options {
+                harness: agy,
+                // State left by a sandbox removed by hand doesn't block a fresh one.
+                recreate: true,
+                ..Default::default()
+            },
+            &SbxBackend::LOCAL,
+            &mut std::io::stderr(),
+        )
+        .unwrap();
+    }
+
+    let workspace = base_dir.join(project);
+    let path = workspace.to_string_lossy().replace(char::from(92), "/");
+    let in_sandbox = PathBuf::from(format!("/{}{}", path[..1].to_lowercase(), &path[2..]));
+    let result = headless::run(
+        &SbxBackend::LOCAL,
+        &sandbox,
+        &in_sandbox,
+        agy,
+        "Reply with exactly: PONG",
+        &HeadlessOpts {
+            model: None,
+            high_effort: false,
+            budget_usd: None,
+            is_git_repo: false,
+        },
+        Duration::from_secs(120),
+    )
+    .unwrap();
+    if let RunStatus::Failed(reason) = &result.status {
+        eprintln!(
+            "SKIPPED: {sandbox} is not signed in ({reason}). Sign in once with `sbx run {sandbox}` \
+             (Google sign-in inside agy), quit agy, and run this test again; the sandbox is kept \
+             for that. Remove it afterwards with `sbx rm {sandbox}`."
+        );
+        return;
+    }
+    assert!(matches!(result.status, RunStatus::Completed), "{result:?}");
+    assert!(result.answer.contains("PONG"), "{result:?}");
+
+    // Checked: remove it, so the next run starts from a fresh sign-in.
+    let _cleanup = Cleanup {
+        sandbox: sandbox.clone(),
+        dirs: vec![workspace, base_dir.join(".sbxm").join(project)],
+        shared_dirs: vec![base_dir.join(".sbxm")],
+    };
 }
 
 #[test]
