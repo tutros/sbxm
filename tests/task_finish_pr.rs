@@ -87,6 +87,8 @@ fn ready_with(f: &Fixture, files: &[&str]) -> (Prepared, String) {
     r.advance(Stage::Ready, 3, p()).unwrap();
     record::write(&prepared.meta, &prepared.record).unwrap();
     fs::write(prepared.meta.join("review.md"), REVIEW).unwrap();
+    // The start that made it has ended: its lock (issue 58) goes with it.
+    prepared.lock = None;
     (prepared, head)
 }
 

@@ -422,3 +422,25 @@ fn a_refused_resume_is_refused_for_its_own_reason_first() {
     let err = format!("{:#}", out.result.unwrap_err());
     assert!(!err.starts_with(common::LOW_DISK), "{err}");
 }
+
+// ---- The task's lock (issue 58) ----
+
+#[test]
+fn a_resume_is_refused_while_another_live_command_holds_the_task() {
+    let f = config();
+    leave_in(&f, Stage::Working, Status::Failed);
+    let meta = record::task_dir(&f.env.base_dir(), "issue-41");
+    let _held = sbxm::task::lock::ProcessLock::acquire(&meta, "task issue-41", &Alive).unwrap();
+    let before = std::fs::read(meta.join("task.json")).unwrap();
+    let backend = backend(&f, &[CLEAN]);
+
+    let out = go(&f, &options(&f, None), &backend, &Alive);
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(
+        message.contains("task issue-41 is in use by another sbxm command (process "),
+        "{message}"
+    );
+    assert_eq!(std::fs::read(meta.join("task.json")).unwrap(), before);
+    assert!(backend.creates().is_empty() && backend.execs().is_empty());
+}

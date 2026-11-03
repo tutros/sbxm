@@ -349,9 +349,9 @@ fn discard_existing_spec(
     if !finish::exists(&base_dir, &id) {
         return Ok(None);
     }
-    // Its sandboxes are removed where its record says they are (milestone 4 slice 6).
-    finish::check_spec_result_fetched(&base_dir, &id, repo_root)?;
-    let aside = finish::set_aside(
+    // Its sandboxes are removed where its record says they are (milestone 4 slice 6). The
+    // result is checked under the task's lock (issue 58), once it is planned.
+    let aside = finish::set_aside_with_sleep(
         &base_dir,
         &id,
         restart.yes,
@@ -359,6 +359,8 @@ fn discard_existing_spec(
         probe,
         restart.confirm,
         out,
+        &std::thread::sleep,
+        &|| finish::check_spec_result_fetched(&base_dir, &id, repo_root),
     )?;
     Ok(Some(aside))
 }

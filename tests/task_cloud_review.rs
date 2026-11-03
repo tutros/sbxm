@@ -891,6 +891,8 @@ fn a_spec_review_of_a_task_recorded_local_runs_here_with_no_flag() {
     let context = common::task_fixture::ctx(&f, &source, &backend, &github);
     let mut prepared = sbxm::task::pipeline::prepare_spec(&context, &spec).unwrap();
     sbxm::task::pipeline::run_worker(&context, &mut prepared).unwrap();
+    // The start that made it has ended: its lock (issue 58) goes with it.
+    prepared.lock = None;
 
     let ran = task_review(&f, &spec_review_options(&f, spec), &backend, &github);
 

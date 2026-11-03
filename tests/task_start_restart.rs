@@ -1350,3 +1350,68 @@ fn a_combined_failure_names_the_preparation_restore_folder_and_output_failures()
         "the old task is still set aside: {message}"
     );
 }
+
+// ---- The task's lock (issue 58) ----
+
+#[test]
+fn restart_is_refused_while_another_live_command_holds_the_old_task() {
+    let f = fixture();
+    started(&f);
+    let _held = sbxm::task::lock::ProcessLock::acquire(&meta(&f), "task issue-41", &Probe).unwrap();
+    let before = std::fs::read(meta(&f).join("task.json")).unwrap();
+    let b = playing(&f);
+
+    let (result, _) = go(
+        &f,
+        &options(&f),
+        Some(&Restart {
+            confirm: &FakeConfirm::new(true, true),
+            yes: true,
+        }),
+        &b,
+        &github(),
+    );
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains("task issue-41 is in use by another sbxm command (process "),
+        "{message}"
+    );
+    assert_eq!(std::fs::read(meta(&f).join("task.json")).unwrap(), before);
+    assert!(b.creates().is_empty() && b.removes().is_empty());
+}
+
+#[test]
+fn a_finished_start_and_restart_leave_no_lock_behind() {
+    let f = fixture();
+    started(&f);
+    assert!(
+        !meta(&f).join("lock.json").exists(),
+        "the start released it"
+    );
+
+    let (result, _) = go(
+        &f,
+        &options(&f),
+        Some(&Restart {
+            confirm: &FakeConfirm::new(true, true),
+            yes: true,
+        }),
+        &playing(&f),
+        &github(),
+    );
+
+    result.unwrap();
+    assert!(!meta(&f).join("lock.json").exists());
+    let replaced = f.env.base_dir().join(".sbxm").join("tasks-replaced");
+    assert!(
+        !replaced
+            .join("issue-41")
+            .join(".sbxm")
+            .join("tasks")
+            .join("issue-41")
+            .join("lock.json")
+            .exists(),
+        "the old task's lock was released where it was set aside"
+    );
+}

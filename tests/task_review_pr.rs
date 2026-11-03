@@ -1176,6 +1176,8 @@ fn interrupted_pr_gates_run_again_after_the_leftover_reviewer_goes() {
         &mut prepared,
     )
     .unwrap();
+    // The first command has ended: its task lock (issue 58) goes with it.
+    drop(prepared);
     let new_head = add_pr_head(&f, 7);
     leave_stuck(&f, Stage::Gating, Status::Running, false);
     let clone = f.env.base_dir().join("tasks").join("pr-7-review");
@@ -1219,6 +1221,8 @@ fn an_interrupted_pr_review_runs_the_gates_and_the_reviewer_again() {
         &mut prepared,
     )
     .unwrap();
+    // The first command has ended: its task lock (issue 58) goes with it.
+    drop(prepared);
     leave_stuck(&f, Stage::Reviewing, Status::Running, false);
 
     let (result, _, _) = run_it(&f, &backend, &github);

@@ -14,15 +14,16 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 use super::lifetime::{self, Removal};
+use super::lock::ProcessLock;
 use super::machine;
-use super::pipeline::Prepared;
+use super::pipeline::{self, Prepared};
 use super::record::{self, OpenFinding, Process, ProcessProbe, Record};
 use super::repo;
 use super::review::{self, COMMENT_CAP, defang, defang_mentions};
 use super::risk;
 use crate::backend::{Location, SandboxBackend};
 use crate::confirm::Confirm;
-use crate::github::{GitHubBackend, PrRequest};
+use crate::github::{GitHubBackend, ListedPr, PrRequest};
 use crate::run::results::now;
 
 /// Everything `task rm` would delete, worked out before anything is.
@@ -43,6 +44,9 @@ pub struct RemovalPlan {
     /// record before anything is removed ([`forget_in_record`]), with no cloud call for it
     /// (decision 268).
     pub forget: Option<String>,
+    /// The task's mutation lock (issue 58), taken before its record was read and held until the
+    /// plan is dropped; `None` when the task has no `.sbxm/tasks/<id>/` folder to lock.
+    lock: Option<ProcessLock>,
 }
 
 impl RemovalPlan {
@@ -160,6 +164,8 @@ pub fn plan_removal_forgetting(
     if folders.is_empty() {
         bail!("no task {id}; run `sbxm task status` to list the tasks");
     }
+    // Before the record is read: a task another live command holds is refused (issue 58).
+    let lock = pipeline::lock_task(base_dir, id, probe)?;
 
     let json = meta.join("task.json");
     let mut sandboxes = Vec::new();
@@ -211,6 +217,7 @@ pub fn plan_removal_forgetting(
         folders,
         note,
         forget: forgotten,
+        lock,
     })
 }
 
@@ -651,12 +658,15 @@ pub fn set_aside_many(
         confirm,
         out,
         &std::thread::sleep,
+        &|| Ok(()),
     )
 }
 
 /// [`set_aside_many`], with `sleep` called for each wait between a cloud sandbox's removal
 /// retries (P6 (a)) instead of really sleeping. A cloud sandbox that still can't be removed
 /// stops the restart before its task is moved, and every task already set aside goes back.
+/// `check` runs once every task is planned, under their locks (issue 58), and before the question:
+/// an error refuses the restart with nothing touched.
 #[allow(clippy::too_many_arguments)]
 pub fn set_aside_many_with_sleep(
     base_dir: &Path,
@@ -667,11 +677,13 @@ pub fn set_aside_many_with_sleep(
     confirm: &dyn Confirm,
     out: &mut dyn Write,
     sleep: &dyn Fn(Duration),
+    check: &dyn Fn() -> Result<()>,
 ) -> Result<Vec<SetAside>> {
-    let plans = ids
+    let mut plans = ids
         .iter()
         .map(|id| plan_removal(base_dir, id, probe))
         .collect::<Result<Vec<_>>>()?;
+    check()?;
     let listing = plans
         .iter()
         .map(RemovalPlan::listing)
@@ -696,7 +708,7 @@ pub fn set_aside_many_with_sleep(
         }
     }
     let mut result: Vec<SetAside> = Vec::new();
-    for plan in &plans {
+    for plan in &mut plans {
         let mut report = RemovalReport::default();
         let all_gone = remove_sandboxes(plan, backend, sleep, &mut report);
         let lines = report.removed.iter().map(|l| format!("removed {l}"));
@@ -721,7 +733,15 @@ pub fn set_aside_many_with_sleep(
             return Err(undo_set_asides(&result, failed));
         }
         match set_aside_one(base_dir, plan) {
-            Ok(aside) => result.push(aside),
+            Ok(aside) => {
+                // Its lock moved aside with its folder, and is released there: a task put back
+                // later comes back unlocked.
+                if let Some(mut lock) = plan.lock.take() {
+                    let (_, meta) = aside.pair(&Path::new(".sbxm").join("tasks").join(&plan.id));
+                    lock.moved_to(&meta);
+                }
+                result.push(aside);
+            }
             Err(e) => return Err(undo_set_asides(&result, e)),
         }
     }
@@ -762,10 +782,11 @@ pub fn set_aside(
         confirm,
         out,
         &std::thread::sleep,
+        &|| Ok(()),
     )
 }
 
-/// [`set_aside`], with `sleep` as for [`set_aside_many_with_sleep`].
+/// [`set_aside`], with `sleep` and `check` as for [`set_aside_many_with_sleep`].
 #[allow(clippy::too_many_arguments)]
 pub fn set_aside_with_sleep(
     base_dir: &Path,
@@ -776,10 +797,12 @@ pub fn set_aside_with_sleep(
     confirm: &dyn Confirm,
     out: &mut dyn Write,
     sleep: &dyn Fn(Duration),
+    check: &dyn Fn() -> Result<()>,
 ) -> Result<SetAside> {
     let ids = [id.to_owned()];
-    let mut all =
-        set_aside_many_with_sleep(base_dir, &ids, yes, backend, probe, confirm, out, sleep)?;
+    let mut all = set_aside_many_with_sleep(
+        base_dir, &ids, yes, backend, probe, confirm, out, sleep, check,
+    )?;
     Ok(all.remove(0))
 }
 
@@ -964,7 +987,9 @@ fn holds_result(checkout: &Path, start: &str, tip: &str) -> bool {
 }
 
 /// Shows what removing `id` would delete, asks (unless `yes`), removes it and says what went and
-/// what stayed. Nothing is touched before the answer. Fails if anything stayed.
+/// what stayed. Nothing is touched before the answer. Fails if anything stayed. `check` runs once
+/// the task is planned, under its lock (issue 58), and before the question: an error refuses the
+/// removal with nothing touched.
 #[allow(clippy::too_many_arguments)]
 pub fn discard(
     base_dir: &Path,
@@ -976,6 +1001,7 @@ pub fn discard(
     confirm: &dyn Confirm,
     out: &mut dyn Write,
     sleep: &dyn Fn(Duration),
+    check: &dyn Fn() -> Result<()>,
 ) -> Result<()> {
     discard_many(
         base_dir,
@@ -987,6 +1013,7 @@ pub fn discard(
         confirm,
         out,
         sleep,
+        check,
     )
 }
 
@@ -1004,11 +1031,13 @@ pub fn discard_many(
     confirm: &dyn Confirm,
     out: &mut dyn Write,
     sleep: &dyn Fn(Duration),
+    check: &dyn Fn() -> Result<()>,
 ) -> Result<()> {
     let plans = ids
         .iter()
         .map(|id| plan_removal_forgetting(base_dir, id, probe, forget_ambiguous))
         .collect::<Result<Vec<_>>>()?;
+    check()?;
     let listing = plans
         .iter()
         .map(RemovalPlan::listing)
@@ -1386,6 +1415,9 @@ pub struct Finished {
     pub cuts: Vec<String>,
     /// The PR the task pushed to, when it continues one (decision 169): no PR was opened.
     pub continued: Option<u32>,
+    /// The PR was already open for the branch and base, so it was recorded instead of opened
+    /// (issue 60): a create whose answer was lost, or one opened by hand.
+    pub adopted: bool,
     /// Whether the PR was opened as a draft, and why ([`unresolved_reasons`]).
     pub draft: bool,
     pub unresolved: Vec<String>,
@@ -1622,6 +1654,22 @@ pub fn finish(
     let tip = repo::branch_tip(&repo_git, &task.branch)?;
     let posting = reviewed_head(&task, &tip).zip(review.clone());
 
+    // Issue 60: an open PR of this branch is looked for before anything is pushed. One into the
+    // task's base is adopted rather than opened again; one into another base is named and left
+    // alone, since pushing would move its head.
+    let existing = open_pr(github, &task)?;
+    if let Some(Found::OtherBase(pr)) = &existing {
+        bail!(
+            "{} is already open for branch {} but into {}, not {}; nothing was pushed and no \
+             second PR was opened; close or retarget that PR, then run `sbxm task finish --issue \
+             {}` again",
+            pr.url,
+            task.branch,
+            pr.base_ref,
+            task.base,
+            task.number
+        );
+    }
     repo::push(&repo_git, &task.branch)?;
     let request = PrRequest {
         head: task.branch.clone(),
@@ -1630,18 +1678,26 @@ pub fn finish(
         body,
         draft,
     };
-    let url = match github.pr_create(&task.repo, &request) {
-        Ok(url) => url,
-        Err(e) => {
-            if !prepared.record.notes.iter().any(|n| n == PUSHED_NOTE) {
-                prepared.record.notes.push(PUSHED_NOTE.to_owned());
-                let _ = record::write(&prepared.meta, &prepared.record);
-            }
-            return Err(e).context(format!(
-                "pushed {} but could not open the PR; run `sbxm task finish --issue {}` again, which only retries the PR",
-                task.branch, task.number
-            ));
-        }
+    let (url, adopted) = match existing {
+        Some(Found::Matching(pr)) => (pr.url, true),
+        _ => match github.pr_create(&task.repo, &request) {
+            Ok(url) => (url, false),
+            // A failed create is decided by reading the PR state again, never by its error
+            // text (the lesson of #319): GitHub may have opened the PR and lost only its answer.
+            Err(e) => match open_pr(github, &task) {
+                Ok(Some(Found::Matching(pr))) => (pr.url, true),
+                _ => {
+                    if !prepared.record.notes.iter().any(|n| n == PUSHED_NOTE) {
+                        prepared.record.notes.push(PUSHED_NOTE.to_owned());
+                        let _ = record::write(&prepared.meta, &prepared.record);
+                    }
+                    return Err(e).context(format!(
+                        "pushed {} but could not open the PR; run `sbxm task finish --issue {}` again, which only retries the PR",
+                        task.branch, task.number
+                    ));
+                }
+            },
+        },
     };
     prepared.record.notes.retain(|n| n != PUSHED_NOTE);
     prepared
@@ -1681,11 +1737,43 @@ pub fn finish(
         branch: task.branch,
         cuts,
         continued: None,
+        adopted,
         draft,
         unresolved,
         review_posted,
         warnings,
     })
+}
+
+/// What [`open_pr`] found for a task's branch.
+enum Found {
+    /// Open, of the task's repo, head and base: the task's PR.
+    Matching(ListedPr),
+    /// Open, of the task's repo and head, into another base.
+    OtherBase(ListedPr),
+}
+
+/// The open PR of `task`'s branch, by repo, head and base (issue 60); a failed lookup says which
+/// call failed.
+fn open_pr(github: &dyn GitHubBackend, task: &record::Record) -> Result<Option<Found>> {
+    let found = github
+        .open_pr_for(&task.repo, &task.branch, &task.base)
+        .with_context(|| {
+            format!(
+                "could not look up an open PR of branch {}; nothing was opened; run `sbxm task \
+                 finish --issue {}` again",
+                task.branch, task.number
+            )
+        })?;
+    Ok(found
+        .filter(|pr| pr.head_ref == task.branch && !pr.is_cross_repository)
+        .map(|pr| {
+            if pr.base_ref == task.base {
+                Found::Matching(pr)
+            } else {
+                Found::OtherBase(pr)
+            }
+        }))
 }
 
 /// Posts the in-task review of `commit` on the PR at `url` (issue 198), with `risk_text`, the
@@ -2157,6 +2245,7 @@ fn finish_continued(
         branch: task.branch.clone(),
         cuts: Vec::new(),
         continued: Some(pr),
+        adopted: false,
         draft: false,
         unresolved,
         review_posted: None,

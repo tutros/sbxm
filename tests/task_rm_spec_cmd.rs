@@ -164,6 +164,8 @@ fn a_spec_task_without_commits_is_removed_without_force() {
     // Its start failed before the worker committed anything.
     prepared.record.finish(record::Status::Failed).unwrap();
     record::write(&prepared.meta, &prepared.record).unwrap();
+    // The start that made it has ended: its lock (issue 58) goes with it.
+    prepared.lock = None;
 
     let (result, _, _) = rm(&f, &spec, false, &target_repo(&f));
 
