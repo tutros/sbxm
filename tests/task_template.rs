@@ -265,6 +265,7 @@ fn pr_7() -> PrInfo {
         head_ref: "feature-x".into(),
         head_oid: "0000000000000000000000000000000000000000".into(),
         is_cross_repository: false,
+        head_repo: String::new(),
         state: PrState::Open,
         title: "Add the x feature".into(),
         body: "Adds x.".into(),
@@ -885,4 +886,21 @@ fn a_strict_reviewer_whose_template_differs_from_the_base_too_names_the_next_com
     );
     assert!(!err.contains("own commits"), "{err}");
     assert!(reviewer_creates(&backend).is_empty());
+}
+
+/// Issue 313 review M-1: `task rm --merged` removes a fix task only once its result was pushed,
+/// so the hint says what happens to one that wasn't.
+#[test]
+fn a_fix_task_users_remove_command_names_the_unpushed_case() {
+    let user = sbxm::template::User::Task {
+        id: "fix-7-1234567890ab".into(),
+        kind: sbxm::task::record::Kind::Fix,
+        number: 7,
+    };
+
+    assert_eq!(
+        user.remove_command(),
+        "sbxm task rm --merged (once PR #7 is merged, if its result was pushed; else remove \
+         tasks/fix-7-1234567890ab and .sbxm/tasks/fix-7-1234567890ab by hand)"
+    );
 }

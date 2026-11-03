@@ -106,6 +106,7 @@ fn an_issue_task_whose_pr_is_merged_is_a_candidate() {
         head_ref: "issue-41".into(),
         head_oid: "0".repeat(40),
         is_cross_repository: false,
+        head_repo: String::new(),
         state: PrState::Merged,
         title: "Fix 41".into(),
         body: String::new(),
@@ -134,6 +135,7 @@ fn an_issue_task_whose_pr_is_open_is_left_alone() {
         head_ref: "issue-41".into(),
         head_oid: "0".repeat(40),
         is_cross_repository: false,
+        head_repo: String::new(),
         state: PrState::Open,
         title: "Fix 41".into(),
         body: String::new(),
@@ -152,6 +154,7 @@ fn open_pr(number: u32, head_oid: String) -> PrInfo {
         head_ref: "feature-x".into(),
         head_oid,
         is_cross_repository: false,
+        head_repo: String::new(),
         state: PrState::Open,
         title: "Add the x feature".into(),
         body: "This adds x.".into(),
@@ -180,6 +183,7 @@ fn a_pr_review_task_whose_pr_is_merged_is_a_candidate() {
         head_ref: "feature-x".into(),
         head_oid: "0".repeat(40),
         is_cross_repository: false,
+        head_repo: String::new(),
         state: PrState::Merged,
         title: "Add the x feature".into(),
         body: String::new(),
@@ -203,6 +207,7 @@ fn a_pr_review_task_whose_pr_is_still_open_is_left_alone() {
         head_ref: "feature-x".into(),
         head_oid: "0".repeat(40),
         is_cross_repository: false,
+        head_repo: String::new(),
         state: PrState::Open,
         title: "Add the x feature".into(),
         body: String::new(),
@@ -224,6 +229,7 @@ fn a_running_pr_review_task_whose_pr_is_merged_is_left_alone() {
         head_ref: "feature-x".into(),
         head_oid: "0".repeat(40),
         is_cross_repository: false,
+        head_repo: String::new(),
         state: PrState::Merged,
         title: "Add the x feature".into(),
         body: String::new(),
@@ -248,6 +254,7 @@ fn an_issue_task_whose_pr_closed_without_merging_is_left_alone() {
         head_ref: "issue-41".into(),
         head_oid: "0".repeat(40),
         is_cross_repository: false,
+        head_repo: String::new(),
         state: PrState::Closed,
         title: "Fix 41".into(),
         body: String::new(),
@@ -422,6 +429,7 @@ fn an_issue_candidate_has_no_local_cleanup() {
         head_ref: "issue-41".into(),
         head_oid: "0".repeat(40),
         is_cross_repository: false,
+        head_repo: String::new(),
         state: PrState::Merged,
         title: "Fix 41".into(),
         body: String::new(),
@@ -683,6 +691,7 @@ fn a_record_whose_id_is_not_its_folder_is_left_alone_and_selects_nothing() {
             head_ref: "issue-41".into(),
             head_oid: "0".repeat(40),
             is_cross_repository: false,
+            head_repo: String::new(),
             state: PrState::Merged,
             title: "Fix 41".into(),
             body: String::new(),
@@ -823,6 +832,7 @@ fn a_gone_base_does_not_stop_the_scan_for_a_merged_task_next_to_it() {
         head_ref: "issue-41".into(),
         head_oid: "0".repeat(40),
         is_cross_repository: false,
+        head_repo: String::new(),
         state: PrState::Merged,
         title: "Fix 41".into(),
         body: String::new(),
@@ -895,4 +905,45 @@ fn a_failing_ls_remote_after_a_failed_fetch_stops_the_scan() {
     assert!(text.contains(&id), "{text}");
     assert!(text.contains("cannot fetch m4-plan from origin"), "{text}");
     assert!(text.contains("still on origin"), "{text}");
+}
+
+/// Issue 313: a fix task's work is its PR's, so it goes once that PR is merged.
+#[test]
+fn a_fix_task_whose_pr_is_merged_is_a_candidate() {
+    let f = fixture();
+    let id = "fix-7-1234567890ab";
+    let mut task = record::Record::new(
+        &record::NewTask {
+            kind: record::Kind::Fix,
+            number: 7,
+            repo: "o/r",
+            title: "Add the x feature",
+            base: "main",
+            branch: "feature-x",
+            config_hash: "h",
+            id: Some(id),
+        },
+        0,
+        Process::new(1, 0),
+    );
+    task.stage = Stage::Finished;
+    task.status = Status::Ok;
+    record::write(&record::task_dir(&f.env.base_dir(), id), &task).unwrap();
+    let github = FakeGitHub::default().with_pr(PrInfo {
+        number: 7,
+        head_ref: "feature-x".into(),
+        head_oid: "0".repeat(40),
+        is_cross_repository: false,
+        head_repo: String::new(),
+        state: PrState::Merged,
+        title: "Add the x feature".into(),
+        body: String::new(),
+        closing_issues: vec![],
+    });
+
+    let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Gone).unwrap();
+
+    assert_eq!(found.candidates.len(), 1, "{found:?}");
+    assert_eq!(found.candidates[0].id, id);
+    assert!(found.candidates[0].reason.contains("#7"));
 }

@@ -31,7 +31,8 @@ fn names_both_kinds_where_a_row_is_not_for_both() {
     let text = task_states::render();
     assert!(text.contains("(issue)"), "{text}");
     assert!(text.contains("(pr)"), "{text}");
-    assert!(text.contains("(issue/spec)"), "{text}");
+    assert!(text.contains("(issue/spec/fix)"), "{text}");
+    assert!(text.contains("(fix)"), "{text}");
 }
 
 #[test]

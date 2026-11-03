@@ -13,6 +13,7 @@ use super::config::TaskConfig;
 use super::gates::{self, GateOutcome, HostRunner};
 use super::lifetime;
 use super::machine;
+use super::pr_fix::ReviewToFix;
 use super::prompts::{self, Role};
 use super::record::{
     self, Agent, GateResult, GateRun, Kind, NewTask, OpenFinding, PrBranch, Process, ProcessProbe,
@@ -939,7 +940,7 @@ pub fn prepare_spec_resolved(
     prepare_source(ctx, id, source, location)
 }
 
-/// What a task starts from: an issue, or a spec file already read.
+/// What a task starts from: an issue, a spec file already read, or a pull request's review.
 enum Source<'a> {
     Issue(&'a IssueText),
     Spec {
@@ -947,6 +948,81 @@ enum Source<'a> {
         text: &'a str,
         title: &'a str,
     },
+    /// `task fix --pr N` (issue 313): the must-fix findings of the PR's latest review, already
+    /// chosen and checked by [`super::pr_fix::review_to_fix`].
+    Fix {
+        pr: &'a PrInfo,
+        review: &'a ReviewToFix,
+    },
+}
+
+/// Spec section 5.1 steps 1 and 2 for `task fix --pr N` (issue 313): a task on the PR's own
+/// branch, starting at the head `review` covered, whose worker gets that review's must-fix
+/// findings. The PR's state, its branch and the review were checked by
+/// [`super::pr_fix::review_to_fix`]; this checks the rest (no task of this id yet, the branch's
+/// name, the worker's inputs) before any write, and refuses after the fetch, removing what it
+/// made, if the head moved meanwhile.
+pub fn prepare_fix(
+    ctx: &Ctx,
+    pr: &PrInfo,
+    review: &ReviewToFix,
+    location: Location,
+) -> Result<Prepared> {
+    let Some(id) = record::fix_id(pr.number, &review.commit) else {
+        bail!(
+            "PR #{}'s head {:?} isn't a full commit id; check `gh pr view {}`",
+            pr.number,
+            review.commit,
+            pr.number
+        );
+    };
+    prepare_source(ctx, &id, Source::Fix { pr, review }, location)
+}
+
+/// The fix task's worker prompt, rendered.
+fn pr_fix_worker_prompt(ctx: &Ctx, pr: &PrInfo) -> Result<String> {
+    let template = prompts::template(Role::WorkerPrFix, &ctx.config.prompts)?;
+    prompts::render(
+        &template.name,
+        &template.text,
+        &[
+            ("number", &pr.number.to_string()),
+            ("branch", &pr.head_ref),
+            ("base", ctx.base_branch),
+            ("repo", ctx.repo),
+            ("gates_sandbox", &bullets(&ctx.config.gates.sandbox)),
+            ("gates_host", &bullets(&ctx.config.gates.host)),
+        ],
+    )
+}
+
+/// The check [`prepare_fix`] makes before any write: no task of this id (a fix of the same PR at
+/// the same head) exists, whatever stage it is at, since its folder may hold the only copy of a
+/// result.
+fn fix_startable(base_dir: &Path, id: &str, pr: &PrInfo) -> Result<(u32, String)> {
+    let meta = record::task_dir(base_dir, id);
+    let workspace = base_dir.join("tasks").join(id);
+    if meta.exists() || workspace.exists() {
+        let stage = record::read(&meta.join("task.json"))
+            .map(|r| r.stage.name().to_owned())
+            .unwrap_or_else(|_| "no readable record".to_owned());
+        bail!(
+            "task {id} exists (stage {stage}): a fix of PR #{} at this head was started before, \
+             and its folder may hold its only result; see `sbxm task status`, and remove {} and \
+             {} by hand to start it again",
+            pr.number,
+            meta.display(),
+            workspace.display()
+        );
+    }
+    if !repo::valid_ref_name(&pr.head_ref) {
+        bail!(
+            "PR #{}'s branch {:?} isn't a usable branch name, so sbxm can't push to it",
+            pr.number,
+            pr.head_ref
+        );
+    }
+    Ok((pr.number, pr.head_ref.clone()))
 }
 
 /// Spec §5.1 steps 1 and 2 for either source, here or in the cloud: the one preparation
@@ -963,6 +1039,7 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
             spec_startable(&global.base_dir, id, path)?;
             None
         }
+        Source::Fix { pr, .. } => Some(fix_startable(&global.base_dir, id, pr)?),
     };
     secrets::check(location, ctx.scoped_secrets)?;
     let worker = &ctx.config.worker;
@@ -1018,6 +1095,19 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
             *text,
             spec_worker_prompt(ctx.config, id, ctx.base_branch, ctx.repo)?,
         ),
+        Source::Fix { pr, review } => (
+            Kind::Fix,
+            pr.number,
+            pr.title.as_str(),
+            "issue.md",
+            review.text.as_str(),
+            pr_fix_worker_prompt(ctx, pr)?,
+        ),
+    };
+    // The head a fix task's review covered: the fetched branch must still be there.
+    let expected_start = match &source {
+        Source::Fix { review, .. } => Some(review.commit.as_str()),
+        _ => None,
     };
 
     // Reserve the folders (a cloud task has no host clone); `create_dir` fails if one appeared
@@ -1063,6 +1153,15 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
         };
         // The worker's starting commit, or the PR head it continues from (decision 216).
         let start = repo::branch_tip(&repo_git, &branch)?;
+        if let Some(expected) = expected_start
+            && start != expected
+        {
+            bail!(
+                "the latest sbxm review covers {expected}, but PR #{number}'s head is now \
+                 {start}; review the new head first with `{}`",
+                review::review_pr_command(number, ctx.repo, Some(ctx.base_branch), false)
+            );
+        }
         let overrides = Overrides {
             cpus: ctx.config.sandbox.cpus,
             memory: ctx.config.sandbox.memory.clone(),
@@ -1124,7 +1223,7 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
                 base: ctx.base_branch,
                 branch: &branch,
                 config_hash: &harness_kits.config_hash,
-                id: (kind == Kind::Spec).then_some(id),
+                id: (kind != Kind::Issue).then_some(id),
             },
             now(),
             Process::current(ctx.probe),
@@ -1692,6 +1791,9 @@ fn task_flag(record: &Record) -> String {
         Kind::Pr => format!("--pr {}", record.number),
         Kind::Spec => "--spec <file>".to_owned(),
         Kind::Issue => format!("--issue {}", record.number),
+        // No flag names a fix task yet (issue 313): the placeholder says so, never another
+        // task's flag.
+        Kind::Fix => format!("<no flag names fix task {} yet>", record.id),
     }
 }
 
@@ -2886,7 +2988,7 @@ pub fn check_can_review(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
     super::resume::refuse_ambiguous(task, "be reviewed")?;
     // A spec task has no issue number: its status is read without a filter.
     let status_hint = match task.kind {
-        record::Kind::Spec => "sbxm task status".to_owned(),
+        record::Kind::Spec | record::Kind::Fix => "sbxm task status".to_owned(),
         _ => format!("sbxm task status --issue {}", task.number),
     };
     // What continues a failed or interrupted stage (issue 118).
@@ -2924,9 +3026,11 @@ pub fn check_can_review(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
             "task {id} is already being reviewed or has been (stage reviewing); if the sbxm \
              process that ran it is gone, continue it with `{resume}`, or see `{status_hint}`"
         ),
-        (Stage::Prepared, _) if task.kind == record::Kind::Spec => bail!(
-            "no worker has run for task {id}; see `{status_hint}`, and remove its folders under the base dir to start it again"
-        ),
+        (Stage::Prepared, _) if matches!(task.kind, record::Kind::Spec | record::Kind::Fix) => {
+            bail!(
+                "no worker has run for task {id}; see `{status_hint}`, and remove its folders under the base dir to start it again"
+            )
+        }
         (Stage::Prepared, _) => {
             bail!("no worker has run for task {id}; run `sbxm task start` first")
         }
@@ -3600,19 +3704,23 @@ pub(super) fn fix_input(
         .worker
         .as_ref()
         .context("the task has no worker")?;
-    let is_spec = prepared.record.kind == Kind::Spec;
+    let kind = prepared.record.kind;
     let (role, extra_name, extra_text) = match gate_failure {
         None => (
-            if is_spec { Role::FixSpec } else { Role::Fix },
+            match kind {
+                Kind::Spec => Role::FixSpec,
+                Kind::Fix => Role::FixPrFix,
+                Kind::Issue | Kind::Pr => Role::Fix,
+            },
             "review.md",
             fs::read_to_string(prepared.meta.join("review.md"))
                 .context("the review to fix is missing; run the review again")?,
         ),
         Some(outcome) => (
-            if is_spec {
-                Role::FixGateSpec
-            } else {
-                Role::FixGate
+            match kind {
+                Kind::Spec => Role::FixGateSpec,
+                Kind::Fix => Role::FixGatePrFix,
+                Kind::Issue | Kind::Pr => Role::FixGate,
             },
             "gate-failure.md",
             gate_failure_text(outcome),
@@ -4228,6 +4336,7 @@ fn reviewer_clone(prepared: &Prepared, clone: &Path) -> PathBuf {
 fn resume_command(task: &Record) -> String {
     match task.kind {
         Kind::Spec => "sbxm task resume --spec <file>".to_owned(),
+        Kind::Fix => format!("sbxm task resume {}", task_flag(task)),
         _ => format!("sbxm task resume --issue {}", task.number),
     }
 }
@@ -4330,6 +4439,7 @@ fn review_files(
         Kind::Pr => ("issue.md", Role::ReviewerPr),
         Kind::Spec => ("source.md", Role::ReviewerSpec),
         Kind::Issue => ("issue.md", Role::Reviewer),
+        Kind::Fix => ("issue.md", Role::ReviewerPrFix),
     };
     let issue = fs::read_to_string(prepared.meta.join(source_file)).unwrap_or_default();
     // Narrow to the commits since the last review when one is recorded, else the task's whole

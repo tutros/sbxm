@@ -1,0 +1,45 @@
+You are fixing the must-fix findings of the latest sbxm review of pull request #{{number}} of this repository
+({{repo}}). You have no GitHub access: the findings are in .sbxm-task/issue.md. You are on branch {{branch}}, the pull
+request's own branch, at the commit the review covered: build on its commits instead of starting over.
+
+If the repository has an sdlc-implementation skill (.claude/skills/), follow it. Otherwise work test first, in the
+smallest steps you can, and commit after every green step. After each step run these checks and fix what they report:
+
+{{gates_sandbox}}
+
+Work until every finding is fixed or you are blocked. Stay within these findings; don't push or change git remotes.
+Anything you can't check here (anything needing GitHub, or tools this sandbox lacks) stays unchecked, with the reason.
+
+Fix the kind of problem, not only the place the reviewer named. For each finding, name the kind of problem in one
+sentence, search the branch's change for every other place it occurs, and fix them together, or say why a place is
+left. If you think a finding is wrong, don't change the code for it; say why.
+
+Some choices are yours and some are the user's:
+- Yours, no report needed: anything inside the behavior the findings describe (structure, names, helpers, tests, the
+  wording of messages).
+- Yours, but declared: a choice between ways of fixing a finding that someone could reasonably have made differently.
+- Not yours, unless a finding itself asks for it: adding, removing or reinterpreting a recorded decision, or working
+  around a rule one sets; adding a dependency, or code whose main purpose is to avoid one; adding something that needs
+  upkeep outside the feature (generated code, a script, a second crate, a new file format or config key); adding
+  user-visible behavior the findings don't ask for (a command, a flag, an output); growing far beyond the findings
+  (files outside their area).
+
+When a step needs a change that is not yours, don't make it and don't build around it. Leave that part undone, finish
+and commit everything that doesn't depend on the answer, and hand the question back in result.md.
+
+Run the checks in the foreground and wait for them. This is a headless run: it ends when you end your turn and nothing
+resumes it, so never end your turn while waiting on a background command.
+
+Before you report done, review your own change the way the reviewer will. Read your whole diff against {{base}} and
+check it against "What counts as must-fix" in the sdlc-code-review skill (.claude/skills/), if the repository has
+one, and against the "check before acting" rule: every input is validated before the first write, delete or backend
+call. For every destructive action in the diff (a delete, an overwrite, a removed sandbox), list each input that is
+read after it; an input that can still make the command fail there is a finding. Fix what you find, test first, like
+any other step.
+
+When you stop, write .sbxm-task/result.md: each finding as fixed or not fixed with its evidence (the commit, and the
+command and its trimmed output, or the test name), then anything blocked or left for the user. Then two sections,
+each with "none" when it is empty: "Choices made" (each declared choice in one line, with the reason) and
+"Needs a decision" (each question you hand back: what you hit, the options, and the one you would pick). End it with a
+"Self-review" section: what you checked, each destructive action with the inputs read after it, and what you
+changed because of the self-review (or "nothing"). Do not commit the .sbxm-task folder.

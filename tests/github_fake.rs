@@ -22,6 +22,7 @@ fn pr_info() -> PrInfo {
         head_ref: "feature".into(),
         head_oid: "0000000000000000000000000000000000000000".into(),
         is_cross_repository: false,
+        head_repo: String::new(),
         state: PrState::Open,
         title: "t".into(),
         body: "b".into(),
@@ -158,6 +159,26 @@ fn a_commit_status_is_recorded_and_can_fail_alone() {
         [
             GhCall::CommitStatus("o/r".into(), "abc".into(), a_status()),
             GhCall::PrComment("o/r".into(), 7, "hi".into()),
+        ]
+    );
+}
+
+#[test]
+fn scripted_pr_comments_come_back_for_their_pr_only_and_the_call_is_recorded() {
+    use sbxm::github::PrComment;
+    let comment = PrComment {
+        author: "tutros".into(),
+        body: "hello".into(),
+    };
+    let fake = FakeGitHub::default().with_pr_comments(5, vec![comment.clone()]);
+
+    assert_eq!(fake.pr_comments("o/r", 5).unwrap(), [comment]);
+    assert!(fake.pr_comments("o/r", 6).unwrap().is_empty());
+    assert_eq!(
+        fake.calls(),
+        [
+            GhCall::PrComments("o/r".into(), 5),
+            GhCall::PrComments("o/r".into(), 6)
         ]
     );
 }

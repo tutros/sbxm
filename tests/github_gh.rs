@@ -131,7 +131,7 @@ fn a_pr_with_closing_issues_is_parsed() {
             "--repo",
             "tutros/sbxm",
             "--json",
-            "headRefName,headRefOid,isCrossRepository,state,title,body,closingIssuesReferences"
+            "headRefName,headRefOid,headRepository,headRepositoryOwner,isCrossRepository,state,title,body,closingIssuesReferences"
         ]
     );
     assert_eq!(pr.number, 34);
@@ -399,4 +399,46 @@ fn a_status_on_anything_but_a_full_commit_id_is_refused_without_calling_gh() {
     }
 
     assert!(script.calls.lock().unwrap().is_empty());
+}
+
+const PR_FORK: &str = include_str!("../src/github/fixtures/pr-view-fork.json");
+const PR_COMMENTS: &str = include_str!("../src/github/fixtures/pr-view-comments.json");
+
+#[test]
+fn a_fork_pr_names_the_repository_its_head_comes_from() {
+    let (gh, _) = backend(Scripted::answering(PR_FORK));
+    let pr = gh.pr("tutros/sbxm", 9).unwrap();
+    assert!(pr.is_cross_repository);
+    assert_eq!(pr.head_repo, "someone/sbxm-fork");
+}
+
+#[test]
+fn a_pr_without_head_repository_fields_has_an_empty_head_repo() {
+    let (gh, _) = backend(Scripted::answering(PR_CLOSING));
+    assert_eq!(gh.pr("tutros/sbxm", 34).unwrap().head_repo, "");
+}
+
+#[test]
+fn pr_comments_are_read_oldest_first_with_their_authors() {
+    let (gh, script) = backend(Scripted::answering(PR_COMMENTS));
+
+    let comments = gh.pr_comments("tutros/sbxm", 312).unwrap();
+
+    assert_eq!(
+        args(script, 0),
+        [
+            "pr",
+            "view",
+            "312",
+            "--repo",
+            "tutros/sbxm",
+            "--json",
+            "comments"
+        ]
+    );
+    assert_eq!(comments.len(), 2);
+    assert_eq!(comments[0].author, "someone");
+    assert_eq!(comments[0].body, "Looks good to me.");
+    assert_eq!(comments[1].author, "tutros");
+    assert!(comments[1].body.starts_with("sbxm review of PR #312\n"));
 }
