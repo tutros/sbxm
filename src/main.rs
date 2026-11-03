@@ -755,6 +755,48 @@ fn main() -> anyhow::Result<()> {
             finish_task(result, out, warn)
         }
         Command::Task {
+            command: TaskCommand::Loop { cap, issues },
+        } => {
+            // Each task's own phases log into its `run.log` (`TaskSteps`); the loop's lines
+            // between tasks belong to none.
+            let (mut out, mut warn) = task_writers(Vec::new(), None)?;
+            let result = (|| -> anyhow::Result<()> {
+                let config_dir = config::config_dir()?;
+                let repo_root = std::env::current_dir()?;
+                let github = sbxm::github::gh::GhBackend::default();
+                let steps = commands::task_loop::TaskSteps {
+                    config_dir: &config_dir,
+                    repo_root: repo_root.clone(),
+                    repo: None,
+                    backend: &SbxBackend::LOCAL,
+                    github: &github,
+                    probe: &task::record::SystemProbe,
+                    host: &task::gates::ShellHostRunner,
+                    disk: sbxm::disk::Guard::real(false),
+                };
+                commands::task_loop::run(
+                    &config_dir,
+                    &commands::task_loop::Options {
+                        repo_root,
+                        issues,
+                        cap,
+                        repo: None,
+                    },
+                    &steps,
+                    &github,
+                    &task::record::SystemProbe,
+                    &commands::task_loop::Env {
+                        now: &sbxm::run::results::now,
+                        sleep: &std::thread::sleep,
+                        stop_requested: &|| false,
+                    },
+                    &mut out,
+                    &mut warn,
+                )
+            })();
+            finish_task(result, out, warn)
+        }
+        Command::Task {
             command:
                 TaskCommand::Logs {
                     issue,

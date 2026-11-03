@@ -516,6 +516,22 @@ pub enum TaskCommand {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Work through the open issues labeled ready-for-worker, one task at a time end to end
+    /// (decision 245): size S, then M, then L, oldest first; `task run`, then `task finish` (a
+    /// draft PR for a work stop) and, for a clean task, `task file-findings --create`. Removes the
+    /// label when a task starts. Pauses while 5 of the tasks' PRs await you (auto-merge armed
+    /// doesn't count) or the disk is low; resumes a task once after an environment stop and parks
+    /// it after a second; waits out a usage limit ([loop] in sbxm-task.toml). Stops on an empty
+    /// queue (with a report of the almost-ready issues), two parked tasks in a row, or --cap. One
+    /// log row per task goes to sdlc/batches/<date>-loop.md.
+    Loop {
+        /// Run at most this many tasks.
+        #[arg(long, value_name = "N")]
+        cap: Option<u32>,
+        /// Run these issues in this order instead of the queue (repeatable).
+        #[arg(long = "issue", value_name = "N")]
+        issues: Vec<u32>,
+    },
     /// Print a task's run.log (decision 170, part 1). Read-only: never writes to the log itself.
     #[command(group(clap::ArgGroup::new("logs_target").required(true).args(["issue", "pr", "spec"])))]
     Logs {

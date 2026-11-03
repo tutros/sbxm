@@ -966,3 +966,33 @@ fn a_stop_request_ends_the_loop_after_the_current_task() {
     assert_eq!(runs(&script), ["run 3"]);
     assert!(run.out.contains("stopped on request"), "{}", run.out);
 }
+
+// --- the command line ---
+
+#[test]
+fn task_loop_is_a_command_with_cap_and_issue() {
+    let output = assert_cmd::Command::cargo_bin("sbxm")
+        .unwrap()
+        .args(["task", "loop", "--help"])
+        .output()
+        .unwrap();
+    let help = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(output.status.success(), "{help}");
+    assert!(help.contains("--cap"), "{help}");
+    assert!(help.contains("--issue"), "{help}");
+    assert!(help.contains("ready-for-worker"), "{help}");
+}
+
+#[test]
+fn task_loop_with_cap_0_runs_nothing_from_the_command_line() {
+    let f = fixture();
+    let output = assert_cmd::Command::cargo_bin("sbxm")
+        .unwrap()
+        .current_dir(&f.repo_root)
+        .env("SBXM_CONFIG_DIR", f.env.config_dir())
+        .args(["task", "loop", "--cap", "0"])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("--cap 0: no task runs"));
+}
