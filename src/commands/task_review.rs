@@ -215,7 +215,7 @@ fn run_issue(
 ) -> Result<()> {
     let base_dir = GlobalConfig::load(config_dir)?.base_dir;
     let id = format!("issue-{number}");
-    let mut prepared = Prepared::open(&base_dir, &id)?;
+    let mut prepared = Prepared::open_locked(&base_dir, &id, probe)?;
     // The task's sandboxes run where it was started (decision 253).
     let location = prepared.record.location;
     check_disk(config_dir, opts, location)?;
@@ -241,6 +241,7 @@ fn run_issue(
         sleep: &std::thread::sleep,
         scoped_secrets: &[],
         identity: identity.as_ref(),
+        clone_source: None,
     };
     let reviewed = pipeline::review_issue(&env, &mut prepared);
     print_said(out, warn, &mut prepared);
@@ -406,7 +407,7 @@ fn run_spec(
         Some(id) => id.to_owned(),
         None => record::spec_id(path)?.0,
     };
-    let mut prepared = Prepared::open(&base_dir, &id)?;
+    let mut prepared = Prepared::open_locked(&base_dir, &id, probe)?;
     // As `run_issue`: where the task was started, and the worker it recorded.
     let location = prepared.record.location;
     check_disk(config_dir, opts, location)?;
@@ -429,6 +430,7 @@ fn run_spec(
         sleep: &std::thread::sleep,
         scoped_secrets: &[],
         identity: identity.as_ref(),
+        clone_source: None,
     };
     let reviewed = pipeline::review_issue(&env, &mut prepared);
     print_said(out, warn, &mut prepared);
@@ -564,8 +566,8 @@ fn run_pr(
     // A task that already exists is resumed when its review can be tried again (a failed
     // reviewer, failed gates); otherwise the refusal says what to do.
     let mut prepared = if finish::exists(&base_dir, &id) {
-        let prepared = Prepared::open(&base_dir, &id)?;
-        pipeline::check_can_review_pr(&prepared.record)?;
+        let prepared = Prepared::open_locked(&base_dir, &id, probe)?;
+        pipeline::check_can_review_pr(&prepared.record, probe)?;
         prepared
     } else {
         let pr = match pr_info {

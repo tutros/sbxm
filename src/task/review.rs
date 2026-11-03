@@ -4,6 +4,8 @@
 use std::fs;
 use std::path::Path;
 
+use crate::github::{CommitStatus, StatusState};
+
 use super::findings;
 use super::record::OpenFinding;
 use super::risk::{self, Level};
@@ -22,6 +24,10 @@ pub fn must_fix_count(review: &str) -> Option<u32> {
 
 /// GitHub accepts at most 65,536 characters in a comment; the review is cut well below that.
 pub(crate) const COMMENT_CAP: usize = 60_000;
+
+/// How the note under a review cut to [`COMMENT_CAP`] starts, on a line of its own: `task fix
+/// --pr` refuses a review carrying it, since some of its findings aren't on the PR (issue 313).
+pub(crate) const CUT_NOTE_START: &str = "(sbxm cut this review at ";
 
 /// An `@name` at the start of a word would notify that user or team; a zero-width space after the
 /// `@` keeps the text readable and the notification away. An `@` inside a word (an e-mail
@@ -135,6 +141,102 @@ pub fn pr_comment(number: u32, risk_section: &str, review: &str) -> String {
     )
 }
 
+/// The context of the commit status a review posts on the commit it covered (issue 317), which a
+/// ruleset can require.
+pub const STATUS_CONTEXT: &str = "sbxm/review";
+
+/// GitHub's limit on a commit status's description, in characters.
+pub const STATUS_DESCRIPTION_CAP: usize = 140;
+
+/// The commit status for a review that found `must_fix` must-fix findings, with `review` its text
+/// (its questions are counted) and `risk` its level (issue 317): `success` when it found none, at
+/// any risk and with any questions open (decisions 1, 3 and 4 of the issue), else `failure`.
+pub fn status(must_fix: u32, review: &str, risk: Level) -> CommitStatus {
+    let questions = findings::parse(review)
+        .findings
+        .iter()
+        .filter(|f| f.label == "question")
+        .count();
+    let noun = if questions == 1 {
+        "question"
+    } else {
+        "questions"
+    };
+    let base = format!(
+        "{must_fix} must-fix, {questions} {noun}, risk {}",
+        risk.word()
+    );
+    let pointed = format!("{base} -- see the sbxm review comment");
+    let description = if pointed.chars().count() <= STATUS_DESCRIPTION_CAP {
+        pointed
+    } else {
+        fit_status_description(&base)
+    };
+    CommitStatus {
+        state: if must_fix == 0 {
+            StatusState::Success
+        } else {
+            StatusState::Failure
+        },
+        context: STATUS_CONTEXT.to_owned(),
+        description,
+    }
+}
+
+/// Checks that `review`'s `Scope:` line ends at `commit`, the commit the reviewer was given
+/// (issue 317, review M-1): a status certifies the end of that range, so a review that declares
+/// another commit, or none, certifies nothing. The end may be abbreviated (at least 7 hex
+/// digits, as [`findings::parse`] reads it) if it is a prefix of `commit`. The range must be a
+/// token of its own, `<base sha>..<head sha>` between whitespace, backticks or the line's ends
+/// (review round 2, M-1): [`findings::parse`] finds the hex digits inside any text, so a range
+/// such as `<base>..<head>^1` that ends somewhere else is refused here, not read as `<head>`.
+/// The error says why.
+pub fn check_scope_end(review: &str, commit: &str) -> Result<(), String> {
+    let parsed = findings::parse(review);
+    let (Some(end), Some(range), Some(scope)) = (parsed.head_sha, parsed.range, parsed.scope)
+    else {
+        return Err(format!(
+            "the review has no `Scope: <base>..<head>` line to show it covered commit {commit}"
+        ));
+    };
+    let token = range_token(&scope, &range);
+    if token != range {
+        return Err(format!(
+            "the review's Scope range {token} isn't `<base sha>..<head sha>`, so it doesn't show \
+             it covered the reviewed commit {commit}"
+        ));
+    }
+    if commit
+        .to_ascii_lowercase()
+        .starts_with(&end.to_ascii_lowercase())
+    {
+        Ok(())
+    } else {
+        Err(format!(
+            "the review's Scope ends at {end}, not at the reviewed commit {commit}"
+        ))
+    }
+}
+
+/// The whole token of `scope` holding the first `range` in it: up to the nearest whitespace or
+/// backtick on each side, or the end of `scope`.
+fn range_token<'a>(scope: &'a str, range: &str) -> &'a str {
+    let edge = |c: char| c.is_whitespace() || c == '`';
+    let at = scope.find(range).unwrap_or(0);
+    let start = scope[..at]
+        .char_indices()
+        .rfind(|&(_, c)| edge(c))
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    let after = at + range.len();
+    let end = scope[after..].find(edge).map_or(scope.len(), |i| after + i);
+    &scope[start..end]
+}
+
+/// `text` cut to [`STATUS_DESCRIPTION_CAP`] characters.
+pub fn fit_status_description(text: &str) -> String {
+    text.chars().take(STATUS_DESCRIPTION_CAP).collect()
+}
+
 /// The `sbxm task review --pr` command a hint prints: with `force: false`, after `task finish`
 /// opens a PR (issue 198, review M-1); with `force: true`, to review an unchanged head again
 /// anyway, both when an issue task's in-task review already covered it (issue 198) and when the
@@ -165,6 +267,18 @@ pub fn in_task_pr_comment(issue: u32, commit: &str, risk_section: &str, review: 
     titled_comment(&title, &published_risk(risk_section).0, review)
 }
 
+/// The comment `task fix --pr` posts on the PR it pushed to (issue 313): the fix task's in-task
+/// review, under a line naming the PR and the commit it covered, the PR's new head, so the review
+/// counts as that head's and a later `task fix --pr` can work from it. Laid out like
+/// [`in_task_pr_comment`].
+pub fn in_task_fix_comment(pr: u32, commit: &str, risk_section: &str, review: &str) -> String {
+    let title = format!(
+        "sbxm in-task review of PR #{pr}'s fix task, at commit {commit} (this PR's head once \
+         `sbxm task fix` pushed it); it counts as the review of that commit"
+    );
+    titled_comment(&title, &published_risk(risk_section).0, review)
+}
+
 /// `risk_section` is already neutralised and capped by the caller.
 fn titled_comment(title: &str, risk_section: &str, review: &str) -> String {
     let defanged = defang_mentions(review);
@@ -181,8 +295,8 @@ fn titled_comment(title: &str, risk_section: &str, review: &str) -> String {
     let mut text = format!("{header}{title}\n\n{}\n", body.trim_end());
     if cut {
         text.push_str(&format!(
-            "\n(sbxm cut this review at {COMMENT_CAP} characters; the whole text is review.md in \
-             the task folder.)\n"
+            "\n{CUT_NOTE_START}{COMMENT_CAP} characters; the whole text is review.md in the task \
+             folder.)\n"
         ));
     }
     text

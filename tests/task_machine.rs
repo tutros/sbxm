@@ -26,7 +26,11 @@ impl ProcessProbe for Probe {
 fn record_in(state: &State) -> Record {
     // A spec id isn't `<prefix>-<number>` (record::spec_id's format), so the default naming
     // would build an id `plan_removal` refuses as invalid before it even reads the state.
-    let id = (state.kind == Kind::Spec).then_some("spec-t-abc123");
+    let id = match state.kind {
+        Kind::Spec => Some("spec-t-abc123"),
+        Kind::Fix => Some("fix-7-1234567890ab"),
+        Kind::Issue | Kind::Pr => None,
+    };
     let mut record = Record::new(
         &NewTask {
             kind: state.kind,
@@ -55,8 +59,8 @@ fn guard(state: &State, event: Event) -> bool {
     match event {
         Event::Gates => check_can_gate(&record, &probe).is_ok(),
         Event::Review => match state.kind {
-            Kind::Issue | Kind::Spec => check_can_review(&record, &probe).is_ok(),
-            Kind::Pr => check_can_review_pr(&record).is_ok(),
+            Kind::Issue | Kind::Spec | Kind::Fix => check_can_review(&record, &probe).is_ok(),
+            Kind::Pr => check_can_review_pr(&record, &probe).is_ok(),
         },
         Event::Finish => check_can_finish(&record).is_ok(),
         Event::Rm => {
@@ -122,7 +126,7 @@ fn is_asked(state: &State, event: Event) -> bool {
 /// The differences between the table and the guards, as `<key>: table says X, guard says Y`.
 fn differences() -> BTreeSet<String> {
     let mut found = BTreeSet::new();
-    for kind in [Kind::Issue, Kind::Pr, Kind::Spec] {
+    for kind in [Kind::Issue, Kind::Pr, Kind::Spec, Kind::Fix] {
         for state in states(kind) {
             for event in events() {
                 if !is_asked(&state, event) {
@@ -174,7 +178,7 @@ const EXPECTED: &[&str] = &[];
 /// is no hidden ambiguity for a row's destination and action to resolve.
 #[test]
 fn every_state_event_pair_matches_at_most_one_row() {
-    for kind in [Kind::Issue, Kind::Pr, Kind::Spec] {
+    for kind in [Kind::Issue, Kind::Pr, Kind::Spec, Kind::Fix] {
         for state in states(kind) {
             for event in events() {
                 let rows = matching(&state, event);
@@ -206,23 +210,18 @@ fn names(kind: Kind) -> Vec<String> {
 /// The gaps T3-T6 and T9 of the spec fall out of the table: the states a task can be left in (not
 /// finished, not in flight) from which no command moves it on, only `rm`. `Prepared/Failed` is one
 /// the spec did not list (finding F4). `task resume` (issue 118) closed them row by row for a task
-/// with a worker, so an issue or spec task has none left. A PR task's stay: it has no worker or
-/// fix rounds, and `resume` is refused for it (spec section 5.2); from these, the way on is `rm`,
-/// then `review --pr` again (decision 169(f)). Its `ready` is not one of them: since issue 195,
-/// `review --pr` reviews a `ready` PR task again in place (decision 190).
+/// with a worker, so an issue or spec task has none left. A PR task has no worker and `resume` is
+/// refused for it (spec section 5.2); since issue 379 (decision 282) `review --pr` itself moves it
+/// on from the four states it used to be stuck in (`prepared/failed`, interrupted gates or review,
+/// a completed review never recorded as `ready`), so it has none left either. Its `ready` is not
+/// one: since issue 195, `review --pr` reviews a `ready` PR task again in place (decision 190).
 #[test]
 fn the_dead_ends_are_the_gaps_the_spec_lists() {
     assert!(names(Kind::Issue).is_empty(), "{:?}", names(Kind::Issue));
-    assert_eq!(
-        names(Kind::Pr),
-        [
-            "Prepared/Failed",
-            "Gating/Running+interrupted",
-            "Reviewing/Running+interrupted",
-            "Reviewing/Completed",
-        ]
-    );
+    assert!(names(Kind::Pr).is_empty(), "{:?}", names(Kind::Pr));
     // A spec task runs the same stages as an issue task (issue 142), and since issue 143 its
     // `ready` moves on through `finish` and the `[finish] sink`, so it has the same dead ends.
     assert!(names(Kind::Spec).is_empty(), "{:?}", names(Kind::Spec));
+    // A fix task of a PR (issue 313) runs the stages of an issue task too.
+    assert!(names(Kind::Fix).is_empty(), "{:?}", names(Kind::Fix));
 }

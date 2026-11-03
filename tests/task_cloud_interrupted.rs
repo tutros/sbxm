@@ -743,6 +743,7 @@ fn review_with_secrets(
         sleep: &|_| {},
         scoped_secrets: secrets,
         identity: Some(&who),
+        clone_source: None,
     };
     sbxm::task::pipeline::review_issue(&env, &mut prepared).map(|_| ())
 }

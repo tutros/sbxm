@@ -88,6 +88,7 @@ fn merged_github(number: u32) -> FakeGitHub {
         head_ref: "issue-41".into(),
         head_oid: "0".repeat(40),
         is_cross_repository: false,
+        head_repo: String::new(),
         state: PrState::Merged,
         title: "Fix 41".into(),
         body: String::new(),

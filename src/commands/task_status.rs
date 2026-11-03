@@ -17,6 +17,9 @@ fn id_of(kind: Kind, number: u32) -> Result<String> {
         Kind::Spec => bail!(
             "sbxm task status doesn't filter by --spec yet; run it without a filter to see spec tasks"
         ),
+        Kind::Fix => {
+            bail!("sbxm task status doesn't filter fix tasks; run it without a filter to see them")
+        }
     }
 }
 

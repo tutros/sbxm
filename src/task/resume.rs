@@ -31,7 +31,7 @@ pub struct Resumed {
 /// The status command to point at: a spec task has no number to filter by.
 fn status_hint(task: &Record) -> String {
     match task.kind {
-        Kind::Spec => "sbxm task status".to_owned(),
+        Kind::Spec | Kind::Fix => "sbxm task status".to_owned(),
         _ => format!("sbxm task status --issue {}", task.number),
     }
 }
@@ -51,17 +51,13 @@ pub fn check_can_resume(
         kind: task.kind,
     };
     if task.kind == Kind::Pr {
-        // `task review --pr` moves a `ready` PR task on (decision 190) and retries a failed one;
-        // from a dead end of the state table it is refused, so the task goes first.
-        let n = task.number;
-        let review = if machine::dead_ends(Kind::Pr).contains(&state) {
-            format!("`sbxm task rm --pr {n}`, then `sbxm task review --pr {n}`")
-        } else {
-            format!("`sbxm task review --pr {n}`")
-        };
+        // `task review --pr` moves a PR task on from every state it can be left in: a `ready`
+        // one (decision 190), a failed reviewer, and since issue 379 the states it used to be
+        // stuck in (decision 282).
         bail!(
             "task {id} is a PR task, which has no worker or fix rounds to resume; to review the PR \
-             again, run {review}"
+             again, run `sbxm task review --pr {}`",
+            task.number
         );
     }
     if task.process_alive(probe)
@@ -170,6 +166,8 @@ fn recovery(task: &Record) -> String {
 fn target_flag(task: &Record) -> String {
     match task.kind {
         Kind::Spec => "--spec <file>".to_owned(),
+        // No flag names a fix task yet (issue 313): never another task's flag.
+        Kind::Fix => format!("<no flag names fix task {} yet>", task.id),
         _ => format!("--issue {}", task.number),
     }
 }

@@ -110,7 +110,7 @@ impl Env {
 
 /// Plain `git` for building fixtures; returns trimmed stdout.
 /// A [`sbxm::disk::Guard`] that finds 1 GiB free on the drive of an existing sandbox state
-/// folder in `env`, under the default threshold of 10 GiB (issue 210).
+/// folder in `env`, under the default threshold of 10 GiB (issue 210), and never really sleeps.
 pub fn low_disk(env: &Env) -> sbxm::disk::Guard {
     let state = env.tmp.path().join("sbx-state");
     std::fs::create_dir_all(&state).unwrap();
@@ -118,6 +118,8 @@ pub fn low_disk(env: &Env) -> sbxm::disk::Guard {
         free_space: |_| Ok(1024 * 1024 * 1024),
         default_state_dir: Some(state),
         ignore: false,
+        // A wait for space to come back takes no real time (issue 389).
+        sleep: |_| {},
     }
 }
 

@@ -711,3 +711,79 @@ fn every_rendered_reviewer_prompt_asks_for_a_size_on_question_findings_too() {
         );
     }
 }
+
+/// Issue 313: a fix task's prompts name the pull request and its findings, never an issue, and
+/// ask for no closing keyword.
+fn pr_fix_values() -> Vec<(&'static str, &'static str)> {
+    vec![
+        ("number", "7"),
+        ("repo", "o/r"),
+        ("branch", "feature-x"),
+        ("base", "main"),
+        ("scope_base", "1234567890abcdef1234567890abcdef12345678"),
+        ("gates_sandbox", "- `cargo test`"),
+        ("review_path", ".sbxm-task/review.md"),
+        ("previous_review_path", ".sbxm-task/previous-review.md"),
+        ("gate_output_path", ".sbxm-task/gate-failure.md"),
+    ]
+}
+
+#[test]
+fn the_pr_fix_prompts_render_and_name_the_pull_request_never_an_issue() {
+    for role in [
+        Role::WorkerPrFix,
+        Role::ReviewerPrFix,
+        Role::FixPrFix,
+        Role::FixGatePrFix,
+    ] {
+        let template = prompts::template(role, &Prompts::default()).unwrap();
+        let text = prompts::render(&template.name, &template.text, &pr_fix_values()).unwrap();
+        assert!(text.contains("pull request #7"), "{role:?}: {text}");
+        assert!(text.contains("feature-x"), "{role:?}: {text}");
+        assert!(!text.contains("Fixes #"), "{role:?}: {text}");
+        assert!(!text.contains("issue #"), "{role:?}: {text}");
+        assert!(!text.contains("{{"), "{role:?}: {text}");
+    }
+}
+
+#[test]
+fn the_pr_fix_worker_prompt_points_at_the_findings_and_says_not_to_push() {
+    let template = prompts::template(Role::WorkerPrFix, &Prompts::default()).unwrap();
+    let text = prompts::render(&template.name, &template.text, &pr_fix_values()).unwrap();
+    assert!(text.contains(".sbxm-task/issue.md"), "{text}");
+    assert!(text.contains("must-fix findings"), "{text}");
+    assert!(text.contains("no GitHub access"), "{text}");
+    assert!(text.to_lowercase().contains("don't push"), "{text}");
+}
+
+#[test]
+fn the_pr_fix_reviewer_prompt_keeps_the_scope_line_and_the_repeat_marker() {
+    let template = prompts::template(Role::ReviewerPrFix, &Prompts::default()).unwrap();
+    let text = prompts::render(&template.name, &template.text, &pr_fix_values()).unwrap();
+    assert!(text.contains("Scope: `<base sha>..<head sha>`"), "{text}");
+    assert!(text.contains("Repeat of:"), "{text}");
+    assert!(text.contains("git log 1234567890abcdef"), "{text}");
+}
+
+#[test]
+fn a_pr_fix_role_reuses_the_same_override_keys_as_its_issue_counterpart() {
+    let dir = tempfile::tempdir().unwrap();
+    let (worker, reviewer, fix) = (
+        dir.path().join("w.md"),
+        dir.path().join("r.md"),
+        dir.path().join("f.md"),
+    );
+    fs::write(&worker, "W").unwrap();
+    fs::write(&reviewer, "R").unwrap();
+    fs::write(&fix, "F").unwrap();
+    let config = Prompts {
+        worker: Some(worker),
+        reviewer: Some(reviewer),
+        fix: Some(fix),
+    };
+    let text = |role| prompts::template(role, &config).unwrap().text;
+    assert_eq!(text(Role::WorkerPrFix), "W");
+    assert_eq!(text(Role::ReviewerPrFix), "R");
+    assert_eq!(text(Role::FixPrFix), "F");
+    assert_eq!(text(Role::FixGatePrFix), "F");
+}

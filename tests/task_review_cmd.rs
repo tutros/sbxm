@@ -457,6 +457,7 @@ fn pr_info() -> PrInfo {
         head_ref: "feature-x".into(),
         head_oid: "0000000000000000000000000000000000000000".into(),
         is_cross_repository: false,
+        head_repo: String::new(),
         state: PrState::Open,
         title: "Add the x feature".into(),
         body: "Adds x.\n\nFixes #4".into(),
@@ -1121,5 +1122,110 @@ fn a_codex_reviewer_without_a_model_records_none() {
     assert!(
         saved.starts_with("Reviewer: codex (default model)\n"),
         "{saved}"
+    );
+}
+
+/// Issue 313, review round 2, M-1: a review of the PR's head that was cut to fit GitHub is
+/// refused by `task fix --pr`, and the command its refusal names reviews the head again though
+/// the local `pr-7` task already records that head as reviewed.
+#[test]
+fn the_command_a_cut_review_refusal_names_reviews_the_head_again() {
+    use sbxm::github::PrComment;
+    use sbxm::task::pr_fix::review_to_fix;
+
+    let f = config("codex");
+    let head = add_pr_head(&f, 7);
+    let github = pr_github();
+    let long = format!(
+        "Must-fix findings: 1\n\nScope: `0000000..{head}`\n\n## Must fix\n\n\
+         ### M-1 - a.txt:1 wrong.\n\n**What happens:** {}\n",
+        "x".repeat(60_000)
+    );
+    let backend = pr_backend(&f, &[&long, ONE]);
+    go_pr(&f, &pr_options(&f), &backend, &github)
+        .result
+        .unwrap();
+    let posted = github
+        .calls()
+        .iter()
+        .find_map(|c| match c {
+            GhCall::PrComment(_, 7, body) => Some(body.clone()),
+            _ => None,
+        })
+        .expect("the review is posted");
+    let mut pr = pr_info();
+    pr.head_oid = head;
+
+    let refusal = format!(
+        "{:#}",
+        review_to_fix(
+            &pr,
+            "o/r",
+            None,
+            "tutros",
+            &[PrComment {
+                author: "tutros".into(),
+                body: posted,
+            }],
+        )
+        .unwrap_err()
+    );
+    assert!(refusal.contains("was cut"), "{refusal}");
+    let command = refusal
+        .rsplit('`')
+        .nth(1)
+        .expect("the refusal names a command");
+    assert_eq!(command, "sbxm task review --pr 7 --repo o/r --force");
+
+    let mut follow = pr_options(&f);
+    follow.force = command.split(' ').any(|word| word == "--force");
+    let out = go_pr(&f, &follow, &backend, &github);
+
+    out.result.unwrap();
+    assert!(
+        out.out
+            .contains("pr-7: review round 2 by codex (default model): 1 must-fix finding(s)"),
+        "{}",
+        out.out
+    );
+}
+
+// ---- The task's lock (issue 58) ----
+
+#[test]
+fn a_review_is_refused_while_another_live_command_holds_the_task() {
+    let f = config("codex");
+    let backend = backend(&f, &[CLEAN]);
+    worked_task(&f, &backend);
+    let meta = record::task_dir(&f.env.base_dir(), "issue-41");
+    let _held = sbxm::task::lock::ProcessLock::acquire(&meta, "task issue-41", &Probe).unwrap();
+    let before = (
+        std::fs::read(meta.join("task.json")).unwrap(),
+        backend.execs().len(),
+    );
+
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let result = run(
+        &f.env.config_dir(),
+        &options(&f),
+        &backend,
+        &FakeGitHub::default(),
+        &Probe,
+        &FakeHostRunner::default(),
+        &mut out,
+        &mut warn,
+    );
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains("task issue-41 is in use by another sbxm command (process "),
+        "{message}"
+    );
+    assert_eq!(
+        (
+            std::fs::read(meta.join("task.json")).unwrap(),
+            backend.execs().len()
+        ),
+        before
     );
 }

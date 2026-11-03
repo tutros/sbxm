@@ -69,7 +69,8 @@ pub fn run(
         return dry_run(&config, &base_dir, &id, opts, out);
     }
 
-    let mut prepared = Prepared::open(&base_dir, &id)?;
+    // Held until the gates' last write (issue 58): a second command on this task refuses.
+    let mut prepared = Prepared::open_locked(&base_dir, &id, probe)?;
     pipeline::check_can_gate(&prepared.record, probe)?;
     // The gates run where the task's record says (decision 253), whatever the config says now.
     let location = prepared.record.location;
@@ -107,6 +108,7 @@ pub fn run(
         // Empty in production while P8 (a) holds (slice 4).
         scoped_secrets: &[],
         identity: identity.as_ref(),
+        clone_source: None,
     };
     let gated = pipeline::gate_on_demand(&env, &mut prepared, opts.tiers);
     for line in prepared.events.drain(..) {

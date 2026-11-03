@@ -270,6 +270,7 @@ fn found_merged(f: &Fixture, number: u32) -> sbxm::task::merged::MergedPlan {
         head_ref: "issue-41".into(),
         head_oid: "0".repeat(40),
         is_cross_repository: false,
+        head_repo: String::new(),
         state: PrState::Merged,
         title: "Fix 41".into(),
         body: String::new(),

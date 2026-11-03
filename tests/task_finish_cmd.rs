@@ -8,7 +8,8 @@ use common::task_fixture::{
     CLAUDE_DONE, Fixture, Play, Probe, backend, fixture, ok, play, worked_task,
 };
 use sbxm::commands::task_finish::{Options, Target, run};
-use sbxm::github::fake::FakeGitHub;
+use sbxm::github::fake::{FakeGitHub, GhCall};
+use sbxm::github::{ListedPr, PrState};
 use sbxm::task::record::{self, Process, Stage, Status};
 
 fn ready(f: &Fixture) {
@@ -134,4 +135,168 @@ fn a_posted_in_task_review_is_reported_with_its_commit() {
         out.contains("sbxm task review --pr 9 --repo owner/target --base main"),
         "{out}"
     );
+}
+
+/// Issue 317: a PR whose head no review covered gets no `sbxm/review` status, and the command
+/// says how to review it.
+#[test]
+fn a_pr_whose_head_is_not_the_reviewed_commit_gets_no_status_and_the_review_command() {
+    let f = fixture();
+    ready(&f);
+    let meta = record::task_dir(&f.env.base_dir(), "issue-41");
+    let mut task = record::read(&meta.join("task.json")).unwrap();
+    let base = common::git(&meta.join("repo.git"), &["rev-parse", "main"]);
+    task.review = Some(record::ReviewResult {
+        round: 1,
+        commit: Some(base),
+        ..Default::default()
+    });
+    record::write(&meta, &task).unwrap();
+    let github = FakeGitHub::default();
+
+    let (result, out) = go(&f, 41, &github);
+
+    result.unwrap();
+    assert!(
+        !github
+            .calls()
+            .iter()
+            .any(|c| matches!(c, GhCall::CommitStatus(..)))
+    );
+    assert!(
+        out.contains(
+            "no review covers PR #9's head, so it has no sbxm/review status; review it with: \
+             sbxm task review --pr 9 --repo o/r --base main"
+        ),
+        "{out}"
+    );
+}
+
+/// Issue 317: a status that can't be posted is a warning, and the finish still succeeds.
+#[test]
+fn a_failed_status_is_printed_as_a_warning() {
+    let f = fixture();
+    ready(&f);
+    let meta = record::task_dir(&f.env.base_dir(), "issue-41");
+    let mut task = record::read(&meta.join("task.json")).unwrap();
+    let tip = common::git(&meta.join("repo.git"), &["rev-parse", "issue-41"]);
+    task.review = Some(record::ReviewResult {
+        round: 1,
+        commit: Some(tip.clone()),
+        ..Default::default()
+    });
+    record::write(&meta, &task).unwrap();
+    let base = common::git(&meta.join("repo.git"), &["rev-parse", "main"]);
+    fs::write(
+        meta.join("review.md"),
+        format!("Must-fix findings: 0\n\nScope: `{base}..{tip}`\n"),
+    )
+    .unwrap();
+
+    let (result, out) = go(&f, 41, &FakeGitHub::default().failing_statuses("HTTP 403"));
+
+    result.unwrap();
+    assert!(
+        out.contains(&format!(
+            "warning: the sbxm/review status on commit {tip} couldn't be posted"
+        )),
+        "{out}"
+    );
+}
+
+/// Issue 317, review M-1: a review whose `Scope:` ends at another commit certifies nothing, so
+/// the PR's head gets no status, and the warning says why and how to review it again.
+#[test]
+fn a_review_scoped_to_another_commit_posts_no_status_and_says_why() {
+    let f = fixture();
+    ready(&f);
+    let meta = record::task_dir(&f.env.base_dir(), "issue-41");
+    let mut task = record::read(&meta.join("task.json")).unwrap();
+    let tip = common::git(&meta.join("repo.git"), &["rev-parse", "issue-41"]);
+    let base = common::git(&meta.join("repo.git"), &["rev-parse", "main"]);
+    task.review = Some(record::ReviewResult {
+        round: 1,
+        commit: Some(tip.clone()),
+        ..Default::default()
+    });
+    record::write(&meta, &task).unwrap();
+    fs::write(
+        meta.join("review.md"),
+        format!("Must-fix findings: 0\n\nScope: `{base}..{base}`\n"),
+    )
+    .unwrap();
+    let github = FakeGitHub::default();
+
+    let (result, out) = go(&f, 41, &github);
+
+    result.unwrap();
+    assert!(
+        !github
+            .calls()
+            .iter()
+            .any(|c| matches!(c, GhCall::CommitStatus(..)))
+    );
+    assert!(
+        out.contains(&format!(
+            "warning: the sbxm/review status wasn't posted: the review's Scope ends at {base}, \
+             not at the reviewed commit {tip}"
+        )),
+        "{out}"
+    );
+    assert!(
+        out.contains("`sbxm task review --pr 9 --repo o/r --base main --force`"),
+        "{out}"
+    );
+}
+
+/// Issue 60: an open PR of the branch is recorded, and the output says it was found, not opened.
+#[test]
+fn an_adopted_pr_is_called_found_not_opened() {
+    let f = fixture();
+    ready(&f);
+    let github = FakeGitHub::default().with_listed_pr(
+        "o/r",
+        ListedPr {
+            number: 9,
+            url: "https://github.com/o/r/pull/9".into(),
+            head_ref: "issue-41".into(),
+            base_ref: "main".into(),
+            is_cross_repository: false,
+        },
+        PrState::Open,
+    );
+
+    let (result, out) = go(&f, 41, &github);
+
+    result.unwrap();
+    assert!(
+        out.contains(
+            "issue-41: pushed issue-41 and found https://github.com/o/r/pull/9 already open for \
+             it; recorded it as the task's PR"
+        ),
+        "{out}"
+    );
+    assert!(!out.contains("opened"), "{out}");
+}
+
+// ---- The task's lock (issue 58) ----
+
+#[test]
+fn a_finish_is_refused_while_another_live_command_holds_the_task() {
+    let f = fixture();
+    ready(&f);
+    let meta = record::task_dir(&f.env.base_dir(), "issue-41");
+    let _held = sbxm::task::lock::ProcessLock::acquire(&meta, "task issue-41", &Probe).unwrap();
+    let before = fs::read(meta.join("task.json")).unwrap();
+    let github = FakeGitHub::default();
+
+    let (result, _) = go(&f, 41, &github);
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains("task issue-41 is in use by another sbxm command (process "),
+        "{message}"
+    );
+    assert_eq!(fs::read(meta.join("task.json")).unwrap(), before);
+    assert!(github.calls().is_empty(), "nothing was published");
 }

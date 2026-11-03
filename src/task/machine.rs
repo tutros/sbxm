@@ -81,11 +81,13 @@ pub const STAGES: [Stage; 7] = [
 const ISSUE: &[Kind] = &[Kind::Issue];
 const PR: &[Kind] = &[Kind::Pr];
 const SPEC: &[Kind] = &[Kind::Spec];
+const FIX: &[Kind] = &[Kind::Fix];
 /// Issue and spec tasks both have a worker and go through gates, review and fix rounds the same
 /// way (issue 142, decision 174(d)): a spec source adds this one answer set, no new rows.
-const HAS_WORKER: &[Kind] = &[Kind::Issue, Kind::Spec];
+/// A fix task of a PR (issue 313) runs them the same way too.
+const HAS_WORKER: &[Kind] = &[Kind::Issue, Kind::Spec, Kind::Fix];
 /// Every kind: the rows that don't care which source a task has.
-const ANY: &[Kind] = &[Kind::Issue, Kind::Pr, Kind::Spec];
+const ANY: &[Kind] = &[Kind::Issue, Kind::Pr, Kind::Spec, Kind::Fix];
 
 const WORKER_DONE: &[Status] = &[Status::Completed, Status::TimedOut];
 const GATES_ENDED: &[Status] = &[Status::Passed, Status::GatesFailed];
@@ -206,6 +208,15 @@ pub const TABLE: &[Row] = &[
         to: Some(Stage::Finished),
         action: "deliver the branch through the [finish] sink",
     },
+    Row {
+        stages: &[Stage::Ready],
+        statuses: &[Status::Ok],
+        live: Live::Any,
+        kinds: FIX,
+        event: Event::Advance(Stage::Finished),
+        to: Some(Stage::Finished),
+        action: "push the branch onto the PR's own branch, a fast-forward or nothing",
+    },
     // `task resume` on a task that stopped `ready` (issue 118); `resume` checks `stopped`
     // and the budget, which this table does not model.
     Row {
@@ -322,6 +333,38 @@ pub const TABLE: &[Row] = &[
         to: Some(Stage::Reviewing),
         action: "retry the reviewer",
     },
+    // A PR task stuck where only `rm` used to move it on (issue 379, decision 282): a preparation
+    // that failed, or gates or a review whose process is gone, start over from the PR's head
+    // fetched again, the earlier `review-<n>.md` kept and any leftover reviewer removed first.
+    Row {
+        stages: &[Stage::Prepared],
+        statuses: &[Status::Failed],
+        live: Live::Any,
+        kinds: PR,
+        event: Event::Review,
+        to: Some(Stage::Gating),
+        action: "fetch the PR's head again, run the gates, then the reviewer",
+    },
+    Row {
+        stages: &[Stage::Gating, Stage::Reviewing],
+        statuses: &[Status::Running],
+        live: Live::Interrupted,
+        kinds: PR,
+        event: Event::Review,
+        to: Some(Stage::Gating),
+        action: "remove the leftover reviewer, fetch the PR's head again, run the gates, then the reviewer",
+    },
+    // A completed review never recorded as `ready` (a PR task never saves this state itself:
+    // `review_pr` records `ready` in the same write): the reviewer runs again, as after a failure.
+    Row {
+        stages: &[Stage::Reviewing],
+        statuses: &[Status::Completed],
+        live: Live::Any,
+        kinds: PR,
+        event: Event::Review,
+        to: Some(Stage::Reviewing),
+        action: "run the reviewer again",
+    },
     // A `ready` PR task is reviewed again (issue 195, gap G34): refused while the PR's head is
     // still the commit the last review covered, unless `--force` (`task review --pr`'s own
     // check, which this table does not model since it needs a GitHub call).
@@ -352,6 +395,15 @@ pub const TABLE: &[Row] = &[
         event: Event::Finish,
         to: Some(Stage::Finished),
         action: "deliver the branch through the [finish] sink",
+    },
+    Row {
+        stages: &[Stage::Ready],
+        statuses: &[Status::Ok],
+        live: Live::Any,
+        kinds: FIX,
+        event: Event::Finish,
+        to: Some(Stage::Finished),
+        action: "push the branch onto the PR's own branch, a fast-forward or nothing",
     },
     // `task resume` (decisions 173(c), 175; issue 118), a task with a worker: a failed or
     // interrupted stage runs again in the task's own clone, and the task goes on to `ready`.

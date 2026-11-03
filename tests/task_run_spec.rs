@@ -1230,3 +1230,47 @@ fn an_empty_or_blank_worker_model_flag_is_refused_before_anything_happens() {
         assert!(gh.calls().is_empty(), "{bad:?}");
     }
 }
+
+/// Issue 389: the space the worker's removed sandbox used can come back a moment later, so the
+/// check before the review waits for it, saying so once, instead of refusing at once.
+#[test]
+fn free_space_back_at_the_minimum_after_one_wait_goes_on_to_the_review() {
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    static READS: AtomicUsize = AtomicUsize::new(0);
+    static SLEPT: AtomicU64 = AtomicU64::new(0);
+    let f = config();
+    let s = spec(&f);
+    let id = id_of(&s);
+    let b = backend_for(&f, &id, &[CLEAN_REVIEW]);
+    let mut opts = options(&f, s);
+    opts.disk = sbxm::disk::Guard {
+        // Room for `task run`'s own check, 1 GiB at the review's first read, 10 GiB at its second.
+        free_space: |_| {
+            let gib = 1024 * 1024 * 1024;
+            Ok(match READS.fetch_add(1, Ordering::SeqCst) {
+                0 => 20 * gib,
+                1 => gib,
+                _ => 10 * gib,
+            })
+        },
+        sleep: |d| {
+            SLEPT.fetch_add(d.as_millis() as u64, Ordering::SeqCst);
+        },
+        ..common::low_disk(&f.env)
+    };
+
+    let out = go(&f, &opts, None, &b, &FakeGitHub::default());
+
+    out.result.unwrap();
+    assert_eq!(SLEPT.load(Ordering::SeqCst), 5_000);
+    assert_eq!(
+        out.warn
+            .matches("waiting for disk space: 1.0 GiB free on ")
+            .count(),
+        1,
+        "{}",
+        out.warn
+    );
+    assert!(out.warn.contains(", need 10.0 GiB\n"), "{}", out.warn);
+    assert_eq!(b.creates().len(), 2, "{:?}", b.log());
+}

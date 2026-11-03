@@ -223,6 +223,20 @@ fn lifecycle_against_real_sbx() {
     assert_eq!(printenv(&sandbox, "SBXM_CONFIG_HASH"), hash);
     assert_eq!(printenv(&sandbox, "SBXM_PROFILE"), "default");
 
+    // Issue 381: the account's claude.ai connectors are off, so they can't
+    // reach its connected services through Anthropic's MCP proxy; `sbx`'s own
+    // `mcp-gateway` stays. (Without a claude.ai sign-in in the sandbox there
+    // are no connectors to list either way.)
+    assert_eq!(printenv(&sandbox, "ENABLE_CLAUDEAI_MCP_SERVERS"), "false");
+    let mcp = Command::new("sbx")
+        .args(["exec", &sandbox, "claude", "mcp", "list"])
+        .output()
+        .unwrap();
+    let mcp = String::from_utf8_lossy(&mcp.stdout);
+    println!("claude mcp list:\n{mcp}");
+    assert!(!mcp.contains("claude.ai"), "{mcp}");
+    assert!(mcp.contains("mcp-gateway"), "{mcp}");
+
     // Slice 11c: a rebuild (what `open --rebuild` does before attaching)
     // recreates the sandbox with the changed config and keeps the workspace.
     let workspace = base_dir.join(&project);

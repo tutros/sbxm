@@ -256,6 +256,7 @@ fn pr(number: u32, state: PrState) -> PrInfo {
         head_ref: format!("b{number}"),
         head_oid: "abc".into(),
         is_cross_repository: false,
+        head_repo: String::new(),
         state,
         title: "t".into(),
         body: String::new(),

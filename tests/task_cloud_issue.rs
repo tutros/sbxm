@@ -1278,9 +1278,12 @@ fn pr_review_check_refuses_a_task_with_an_ambiguous_create() {
     let f = fixture_with(LOCAL_TOML);
     with_ambiguous_worker(&f);
 
-    let err = sbxm::task::pipeline::check_can_review_pr(&task_record(&f, "issue-41"))
-        .unwrap_err()
-        .to_string();
+    let err = sbxm::task::pipeline::check_can_review_pr(
+        &task_record(&f, "issue-41"),
+        &common::task_fixture::Probe,
+    )
+    .unwrap_err()
+    .to_string();
 
     assert!(err.contains("can't tell whether it made"), "{err}");
 }

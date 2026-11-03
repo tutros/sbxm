@@ -57,6 +57,7 @@ built into sbxm for templates. `doctor` fails on the template minimum only when 
 sbxm run init run.toml               # starter run-config: Claude against Codex
 sbxm run run.toml                    # one throwaway sandbox per contestant and repeat
 sbxm run show <run-id> [--diff]      # read a saved run
+sbxm run review <run-id> [--submit]  # score it yourself under blind labels, then save the scores
 ```
 
 Each contestant (harness, model, optional profile) gets a fresh copy of an optional seed folder. The answer, the diff
@@ -105,6 +106,18 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
   - `task review --pr` has no fix round (a PR task's `fix_rounds` is always 0): the author fixes the findings and
     runs `task review --pr N` again, which reviews the new head in place, keeping the earlier rounds (decision 190;
     an unchanged head is refused unless `--force`).
+  - **A stuck PR task recovers with `task review --pr N` itself (decision 282, issue 379):** after a failed
+    preparation, or gates or a review whose `sbxm` process is gone, it keeps the task folder, fetches the PR's head
+    again (making `repo.git` again if needed), removes the reviewer sandbox and clone the interrupted run left, and
+    runs the gates and the reviewer as the next round, every earlier `review-<n>.md` kept. A review that completed
+    but was never recorded `ready` runs the reviewer again. No `task rm --pr N` first; while the process that
+    recorded the gates or the review still runs, it is refused.
+  - **A posted review sets the `sbxm/review` commit status (issue 317)** on the commit it covered: `success` with 0
+    must-fix at any risk (an open question too, shown in the description), `failure` otherwise. Both `task review
+    --pr N` and `task finish` post it, after the review comment; a later commit has none until it is reviewed, so
+    with `sbxm/review` among the ruleset's required checks GitHub merges only a reviewed commit. The status goes on
+    only when the review's `Scope:` line ends at the commit the reviewer was given, as a range of two shas on its own
+    (`<sha>..<sha>^1` is refused). A status not posted (another, unreadable or no scope, or a `gh` error) is a warning naming the `task review --pr N --force` command that posts it again.
   - **The in-task review counts as the PR's review (decision 187):** `task finish --issue N` posts the review
     recorded in `task.json` on the PR it opens (risk section first, the same one the description opens with, then a
     line naming the reviewed commit), a draft's failing review included, when that review covered the PR's head.
@@ -120,6 +133,12 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
     `ready`, with `stopped` set to `rounds-exhausted` in `task.json`, and `task finish` opens its PR as a draft whose
     body lists the reason and the must-fix findings left (issue 120); a clean task gets a normal PR. A task that
     continues an open PR puts the same list in its comment on that PR instead (it can't make the PR a draft).
+  - **The worker's hand-backs are on the PR (decision 283):** the PR description `task finish` opens, a draft's too,
+    has the `Needs a decision` and `Choices made` sections of the worker's `result.md` right after the risk section
+    and `Fixes #N`, in that order, so a choice the worker flagged is seen without reading the whole result. A
+    section that is absent, empty or "none" is left out; one over 2,500 characters is cut (the whole of it
+    stays in `result.md` in the task folder). The worker never stops to wait for an answer: it picks, flags the pick and goes on, and the user answers
+    on the PR. The review comment is unchanged.
   - `task start --spec FILE` makes a task from a file instead of a GitHub issue (id `spec-<name>-<hash>`,
     `source.md` in place of `issue.md`); `task review --spec FILE` continues it through the same gates/review/fix
     loop, and `task run --spec FILE` does both in one go, stopping before `finish` (with `--restart`, the spec is
@@ -307,7 +326,8 @@ same tasks and only reads).
   `min_free_disk` in `config.toml` (default `"10g"`; `"0"` switches the check off), naming the drive and its free
   space; `--ignore-disk` lets one command through. A `task run` list (decision 193) checks again before every task,
   not only the first, since a task's own sandbox can fill the drive the next one needs; a failure there stops the
-  rest of the list. A cloud task skips the check (its sandboxes don't use that drive). The folder is `%LOCALAPPDATA%\DockerSandboxes` on Windows, or
+  rest of the list. The check before `task run`'s review waits up to 60 s (every 5 s) for the space the worker's
+  removed sandbox used to come back before refusing (issue 389). A cloud task skips the check (its sandboxes don't use that drive). The folder is `%LOCALAPPDATA%\DockerSandboxes` on Windows, or
   `sandbox_state_dir` in `config.toml` on any platform; on macOS and Linux without that key nothing is checked (a full
   drive makes `sbx` answer `try: sbx login`, which looks like a login problem).
   A junction from `sbx`'s `state` folder to a bigger drive was tried (2026-10-03, `sbx` 0.46.0) and does not work for the

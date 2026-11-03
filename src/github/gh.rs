@@ -8,7 +8,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
 use super::{
-    GitHubBackend, Issue, IssueRequest, IssueText, PrInfo, PrMergeState, PrRequest, PrState,
+    CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, ListedPr, PrComment, PrInfo,
+    PrMergeState, PrRequest, PrState,
 };
 
 /// Runs `gh` with arguments and optional stdin, returning stdout.
@@ -128,6 +129,10 @@ struct Number {
 struct RawPr {
     head_ref_name: String,
     head_ref_oid: String,
+    #[serde(default)]
+    head_repository: Option<Named>,
+    #[serde(default)]
+    head_repository_owner: Option<Login>,
     is_cross_repository: bool,
     state: String,
     title: String,
@@ -156,6 +161,36 @@ fn pr_state(number: u32, state: &str) -> Result<PrState> {
             "`gh pr view {number}` reported an unknown state {other}"
         )),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawListedPr {
+    number: u32,
+    url: String,
+    head_ref_name: String,
+    base_ref_name: String,
+    is_cross_repository: bool,
+    state: String,
+}
+
+#[derive(Deserialize)]
+struct Login {
+    login: String,
+}
+
+#[derive(Deserialize)]
+struct RawComment {
+    /// `null` for a deleted account.
+    #[serde(default)]
+    author: Option<Login>,
+    #[serde(default)]
+    body: String,
+}
+
+#[derive(Deserialize)]
+struct RawComments {
+    comments: Vec<RawComment>,
 }
 
 #[derive(Deserialize)]
@@ -253,7 +288,7 @@ impl GitHubBackend for GhBackend {
             "--repo",
             repo,
             "--json",
-            "headRefName,headRefOid,isCrossRepository,state,title,body,closingIssuesReferences",
+            "headRefName,headRefOid,headRepository,headRepositoryOwner,isCrossRepository,state,title,body,closingIssuesReferences",
         ]))?;
         let state = pr_state(number, &raw.state)?;
         Ok(PrInfo {
@@ -261,6 +296,10 @@ impl GitHubBackend for GhBackend {
             head_ref: raw.head_ref_name,
             head_oid: raw.head_ref_oid,
             is_cross_repository: raw.is_cross_repository,
+            head_repo: match (raw.head_repository_owner, raw.head_repository) {
+                (Some(owner), Some(repo)) => format!("{}/{}", owner.login, repo.name),
+                _ => String::new(),
+            },
             state,
             title: raw.title,
             body: raw.body,
@@ -286,6 +325,42 @@ impl GitHubBackend for GhBackend {
             state: pr_state(number, &raw.state)?,
             auto_merge: raw.auto_merge_request.is_some_and(|r| !r.is_null()),
         })
+    }
+
+    fn open_pr_for(&self, repo: &str, head: &str, base: &str) -> Result<Option<ListedPr>> {
+        // No `--base`: an open PR of the same head with another base is returned too, so the
+        // caller can name it. `--head` matches the branch name only, a fork's included, so the
+        // head's repository and the state are checked here as well.
+        let raw: Vec<RawListedPr> = self.json(&strings(&[
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--head",
+            head,
+            "--state",
+            "open",
+            "--limit",
+            "100",
+            "--json",
+            "number,url,headRefName,baseRefName,isCrossRepository,state",
+        ]))?;
+        let mut candidates: Vec<ListedPr> = raw
+            .into_iter()
+            .filter(|p| p.state == "OPEN" && p.head_ref_name == head && !p.is_cross_repository)
+            .map(|p| ListedPr {
+                number: p.number,
+                url: p.url,
+                head_ref: p.head_ref_name,
+                base_ref: p.base_ref_name,
+                is_cross_repository: p.is_cross_repository,
+            })
+            .collect();
+        let pick = candidates
+            .iter()
+            .position(|p| p.base_ref == base)
+            .unwrap_or(0);
+        Ok((!candidates.is_empty()).then(|| candidates.swap_remove(pick)))
     }
 
     fn pr_create(&self, repo: &str, request: &PrRequest) -> Result<String> {
@@ -325,6 +400,26 @@ impl GitHubBackend for GhBackend {
         Ok(())
     }
 
+    fn pr_comments(&self, repo: &str, number: u32) -> Result<Vec<PrComment>> {
+        let raw: RawComments = self.json(&strings(&[
+            "pr",
+            "view",
+            &number.to_string(),
+            "--repo",
+            repo,
+            "--json",
+            "comments",
+        ]))?;
+        Ok(raw
+            .comments
+            .into_iter()
+            .map(|c| PrComment {
+                author: c.author.map(|a| a.login).unwrap_or_default(),
+                body: c.body,
+            })
+            .collect())
+    }
+
     fn issue_create(&self, repo: &str, request: &IssueRequest) -> Result<u32> {
         let mut args = strings(&["issue", "create", "--repo", repo, "--title", &request.title]);
         for label in &request.labels {
@@ -350,5 +445,29 @@ impl GitHubBackend for GhBackend {
             "label", "list", "--repo", repo, "--json", "name", "--limit", "200",
         ]))?;
         Ok(raw.into_iter().map(|l| l.name).collect())
+    }
+
+    fn commit_status(&self, repo: &str, sha: &str, status: &CommitStatus) -> Result<()> {
+        // The sha goes into the API path: only a full commit id is accepted.
+        if !matches!(sha.len(), 40 | 64) || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+            bail!("`{sha}` is not a full commit id, so no status can be posted on it");
+        }
+        self.run(
+            &strings(&[
+                "api",
+                &format!("repos/{repo}/statuses/{sha}"),
+                "--method",
+                "POST",
+                "--silent",
+                "-f",
+                &format!("state={}", status.state.word()),
+                "-f",
+                &format!("context={}", status.context),
+                "-f",
+                &format!("description={}", status.description),
+            ]),
+            None,
+        )?;
+        Ok(())
     }
 }

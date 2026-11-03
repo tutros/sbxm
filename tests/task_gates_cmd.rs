@@ -528,3 +528,132 @@ fn a_commit_made_by_hand_in_the_workers_clone_reaches_repo_git_before_the_gates_
         "review, the host gates and finish read repo.git, so it must have the fix"
     );
 }
+
+// ---- The task's lock (issue 58) ----
+
+#[test]
+fn two_gate_runs_released_together_run_once_and_refuse_once() {
+    let f = config("\"cargo test\"", "");
+    let backend = playing(&f);
+    worked_task(&f, &backend);
+    // Every exec waits at the gate: a run that got past the checks stops there.
+    let (backend, gate) = backend.with_exec_gate();
+    let host = FakeHostRunner::default();
+    let opts = options(&f, Tiers::ALL, false);
+    let barrier = std::sync::Barrier::new(2);
+    let (done, results) = std::sync::mpsc::channel();
+
+    let outs: Vec<Out> = std::thread::scope(|s| {
+        let threads: Vec<_> = (0..2)
+            .map(|_| {
+                let done = done.clone();
+                let (f, opts, backend, host, barrier) = (&f, &opts, &backend, &host, &barrier);
+                s.spawn(move || {
+                    barrier.wait();
+                    let out = go(f, opts, backend, &Probe, host);
+                    done.send(()).unwrap();
+                    out
+                })
+            })
+            .collect();
+        gate.wait_for_blocked(1);
+        // The other run refuses without reaching the gate: two runs at the gate is the race.
+        let refused = results.recv_timeout(std::time::Duration::from_secs(10));
+        gate.open();
+        let outs = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        assert!(
+            refused.is_ok(),
+            "the second gate run got past the checks too"
+        );
+        outs
+    });
+
+    let ran: Vec<&Out> = outs.iter().filter(|o| o.result.is_ok()).collect();
+    assert_eq!(ran.len(), 1, "exactly one run");
+    let refusal = outs
+        .iter()
+        .find_map(|o| o.result.as_ref().err())
+        .map(|e| format!("{e:#}"))
+        .unwrap();
+    assert!(
+        refusal.contains("task issue-41 is in use by another sbxm command (process "),
+        "{refusal}"
+    );
+    let record = saved(&f);
+    assert_eq!(
+        (record.stage, record.status),
+        (Stage::Gating, Status::Passed)
+    );
+    assert_eq!(record.gates.len(), 1, "{:?}", record.gates);
+    let log =
+        std::fs::read_to_string(record::task_dir(&f.env.base_dir(), "issue-41").join("gates.log"))
+            .unwrap();
+    assert_eq!(log.matches("== on-demand").count(), 1, "{log}");
+    assert!(
+        !record::task_dir(&f.env.base_dir(), "issue-41")
+            .join("lock.json")
+            .exists(),
+        "the lock goes with the run that held it"
+    );
+}
+
+#[test]
+fn a_gate_run_is_refused_while_another_live_command_holds_the_task() {
+    let f = config("\"cargo test\"", "");
+    let backend = playing(&f);
+    worked_task(&f, &backend);
+    let meta = record::task_dir(&f.env.base_dir(), "issue-41");
+    let _held = sbxm::task::lock::ProcessLock::acquire(&meta, "task issue-41", &Probe).unwrap();
+    let before = (
+        backend.execs().len(),
+        std::fs::read(meta.join("task.json")).unwrap(),
+    );
+
+    let out = go(
+        &f,
+        &options(&f, Tiers::ALL, false),
+        &backend,
+        &Probe,
+        &FakeHostRunner::default(),
+    );
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(
+        message.contains("task issue-41 is in use by another sbxm command (process ")
+            && message.contains("started "),
+        "{message}"
+    );
+    assert_eq!(
+        (
+            backend.execs().len(),
+            std::fs::read(meta.join("task.json")).unwrap()
+        ),
+        before,
+        "nothing ran and the record is untouched"
+    );
+}
+
+#[test]
+fn a_stale_lock_of_a_gone_command_is_taken_over_and_the_gates_run() {
+    let f = config("\"cargo test\"", "");
+    let backend = playing(&f);
+    worked_task(&f, &backend);
+    let meta = record::task_dir(&f.env.base_dir(), "issue-41");
+    std::fs::write(
+        meta.join("lock.json"),
+        r#"{"pid":4000000,"started_at":"2026-01-01T00:00:00Z","token":"t"}"#,
+    )
+    .unwrap();
+
+    let out = go(
+        &f,
+        &options(&f, Tiers::ALL, false),
+        &backend,
+        &Dead,
+        &FakeHostRunner::default(),
+    );
+
+    out.result.unwrap();
+    assert_eq!(saved(&f).status, Status::Passed);
+    assert!(!meta.join("lock.json").exists());
+}
