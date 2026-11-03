@@ -1233,7 +1233,11 @@ real key was stored to test precedence (#384, comment of 2026-11-03), and (c) ac
 mode and headless Antigravity (which needs `google` stored, [281](b)) can't be used at the same time; if both are
 wanted, test (b) with a real key first. `open` runs the same check before attaching to an existing sandbox in either mode, so
 an `"api-key"` sandbox whose `google` secret was removed is refused too, since `agy` would have no key (PR 408 narrow
-review).
+review). **Interactive attach is checked by hand** (the user, 2026-11-03, PR 408 review M-2): no
+automated test drives `sbxm open --harness antigravity`, because it needs a real terminal and a signed-in Google
+account. Instead, on each change to Antigravity's interactive path, a person runs the four-step check (sign in on the
+first `open`, a request answers, `stop` then `open` with no second sign-in, a request answers) and records the result
+on the PR. The first such check passed on 2026-11-03 (#384, with `agy` 1.4.12 and the `mcp-gateway` entry present).
 
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
