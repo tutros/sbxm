@@ -5,7 +5,8 @@ use std::sync::Mutex;
 use anyhow::{Result, anyhow};
 
 use super::{
-    CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, PrComment, PrInfo, PrRequest,
+    CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, ListedPr, PrComment, PrInfo,
+    PrRequest, PrState,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -15,6 +16,8 @@ pub enum GhCall {
     IssuesOpen(String),
     Issue(String, u32),
     Pr(String, u32),
+    /// Repo, head, base.
+    OpenPrFor(String, String, String),
     PrCreate(String, PrRequest),
     PrComment(String, u32, String),
     PrComments(String, u32),
@@ -35,6 +38,11 @@ pub struct FakeGitHub {
     open_issues: Mutex<Vec<Issue>>,
     issue_texts: Vec<IssueText>,
     prs: Vec<PrInfo>,
+    /// What `open_pr_for` searches: repo, PR, state. `pr_create` adds the PRs it opens.
+    listed: Mutex<Vec<(String, ListedPr, PrState)>>,
+    lookups: Mutex<usize>,
+    fail_lookup_from: Option<usize>,
+    create_failure: Option<(String, bool)>,
     pr_comments: Vec<(u32, Vec<PrComment>)>,
     labels: Vec<String>,
     /// Every issue in any state: the scripted ones, then those created through the fake.
@@ -84,6 +92,28 @@ impl FakeGitHub {
 
     pub fn with_pr(mut self, pr: PrInfo) -> Self {
         self.prs.push(pr);
+        self
+    }
+
+    /// A PR of `repo` that `open_pr_for` finds while `state` is open.
+    pub fn with_listed_pr(self, repo: &str, pr: ListedPr, state: PrState) -> Self {
+        self.listed
+            .lock()
+            .unwrap()
+            .push((repo.to_owned(), pr, state));
+        self
+    }
+
+    /// `pr_create` fails with `message` (and is still recorded); with `opened`, GitHub opened the
+    /// PR all the same, as when only its answer is lost, so `open_pr_for` finds it afterwards.
+    pub fn failing_pr_create(mut self, message: &str, opened: bool) -> Self {
+        self.create_failure = Some((message.to_owned(), opened));
+        self
+    }
+
+    /// The nth `open_pr_for` (1-based) and every later one fail.
+    pub fn failing_pr_lookup_from(mut self, n: usize) -> Self {
+        self.fail_lookup_from = Some(n);
         self
     }
 
@@ -190,12 +220,60 @@ impl GitHubBackend for FakeGitHub {
             .ok_or_else(|| anyhow!("FakeGitHub: pr {number} is not scripted"))
     }
 
+    fn open_pr_for(&self, repo: &str, head: &str, base: &str) -> Result<Option<ListedPr>> {
+        self.record(GhCall::OpenPrFor(
+            repo.to_owned(),
+            head.to_owned(),
+            base.to_owned(),
+        ))?;
+        let attempt = {
+            let mut lookups = self.lookups.lock().unwrap();
+            *lookups += 1;
+            *lookups
+        };
+        if self.fail_lookup_from.is_some_and(|n| attempt >= n) {
+            return Err(anyhow!("FakeGitHub: `gh pr list` {attempt} fails"));
+        }
+        let listed = self.listed.lock().unwrap();
+        let candidates: Vec<&ListedPr> = listed
+            .iter()
+            .filter(|(r, p, state)| {
+                r == repo && *state == PrState::Open && p.head_ref == head && !p.is_cross_repository
+            })
+            .map(|(_, p, _)| p)
+            .collect();
+        Ok(candidates
+            .iter()
+            .find(|p| p.base_ref == base)
+            .or(candidates.first())
+            .map(|p| (*p).clone()))
+    }
+
     fn pr_create(&self, repo: &str, request: &PrRequest) -> Result<String> {
         self.record(GhCall::PrCreate(repo.to_owned(), request.clone()))?;
-        Ok(format!(
-            "https://github.com/{repo}/pull/{}",
-            request.head.len() + 1
-        ))
+        let number = u32::try_from(request.head.len()).unwrap_or(u32::MAX - 1) + 1;
+        let url = format!("https://github.com/{repo}/pull/{number}");
+        let opened = self
+            .create_failure
+            .as_ref()
+            .is_none_or(|(_, opened)| *opened);
+        if opened {
+            let pr = ListedPr {
+                number,
+                url: url.clone(),
+                head_ref: request.head.clone(),
+                base_ref: request.base.clone(),
+                is_cross_repository: false,
+            };
+            self.listed
+                .lock()
+                .unwrap()
+                .push((repo.to_owned(), pr, PrState::Open));
+        }
+        match &self.create_failure {
+            Some((message, _)) => Err(anyhow!("{message}")),
+            None => Ok(url),
+        }
     }
 
     fn pr_comment(&self, repo: &str, number: u32, body: &str) -> Result<()> {

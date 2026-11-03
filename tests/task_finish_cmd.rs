@@ -9,6 +9,7 @@ use common::task_fixture::{
 };
 use sbxm::commands::task_finish::{Options, Target, run};
 use sbxm::github::fake::{FakeGitHub, GhCall};
+use sbxm::github::{ListedPr, PrState};
 use sbxm::task::record::{self, Process, Stage, Status};
 
 fn ready(f: &Fixture) {
@@ -246,6 +247,36 @@ fn a_review_scoped_to_another_commit_posts_no_status_and_says_why() {
         out.contains("`sbxm task review --pr 9 --repo o/r --base main --force`"),
         "{out}"
     );
+}
+
+/// Issue 60: an open PR of the branch is recorded, and the output says it was found, not opened.
+#[test]
+fn an_adopted_pr_is_called_found_not_opened() {
+    let f = fixture();
+    ready(&f);
+    let github = FakeGitHub::default().with_listed_pr(
+        "o/r",
+        ListedPr {
+            number: 9,
+            url: "https://github.com/o/r/pull/9".into(),
+            head_ref: "issue-41".into(),
+            base_ref: "main".into(),
+            is_cross_repository: false,
+        },
+        PrState::Open,
+    );
+
+    let (result, out) = go(&f, 41, &github);
+
+    result.unwrap();
+    assert!(
+        out.contains(
+            "issue-41: pushed issue-41 and found https://github.com/o/r/pull/9 already open for \
+             it; recorded it as the task's PR"
+        ),
+        "{out}"
+    );
+    assert!(!out.contains("opened"), "{out}");
 }
 
 // ---- The task's lock (issue 58) ----
