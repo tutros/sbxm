@@ -162,6 +162,8 @@ pub fn worked_task(f: &Fixture, backend: &FakeBackend) -> sbxm::task::pipeline::
     let ctx = ctx(f, &source, backend, &github);
     let mut prepared = sbxm::task::pipeline::prepare(&ctx, &issue_text(41)).unwrap();
     sbxm::task::pipeline::run_worker(&ctx, &mut prepared).unwrap();
+    // The start that made it has ended: its lock (issue 58) goes with it.
+    prepared.lock = None;
     prepared
 }
 

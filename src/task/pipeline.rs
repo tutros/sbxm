@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use super::config::TaskConfig;
 use super::gates::{self, GateOutcome, HostRunner};
 use super::lifetime;
+use super::lock::ProcessLock;
 use super::machine;
 use super::pr_fix::ReviewToFix;
 use super::prompts::{self, Role};
@@ -172,6 +173,10 @@ pub struct Prepared {
     /// What the preparation did that the screen and `run.log` show (decision 265): a cloud
     /// sandbox's create. One line each, to print before the run.
     pub events: Vec<String>,
+    /// The task's mutation lock (issue 58), held while this command changes the task: taken by
+    /// the start that made the folder and by [`Prepared::open_locked`]; `None` from
+    /// [`Prepared::open`], which only reads.
+    pub lock: Option<ProcessLock>,
 }
 
 impl Prepared {
@@ -202,8 +207,37 @@ impl Prepared {
             kits: None,
             warnings: Vec::new(),
             events: Vec::new(),
+            lock: None,
         })
     }
+
+    /// [`Prepared::open`] for a command that changes the task: its lock (issue 58) is taken
+    /// before the record is read, and held until the returned value is dropped. A task another
+    /// live command holds is refused, naming that command's process.
+    pub fn open_locked(base_dir: &Path, id: &str, probe: &dyn ProcessProbe) -> Result<Self> {
+        let lock = lock_task(base_dir, id, probe)?;
+        let mut prepared = Self::open(base_dir, id)?;
+        prepared.lock = lock;
+        Ok(prepared)
+    }
+}
+
+/// Takes task `id`'s mutation lock (issue 58); `None` when the task has no folder, so there is
+/// nothing to lock (the caller's own read then says there is no task). The id is checked before
+/// any path is built from it.
+pub fn lock_task(
+    base_dir: &Path,
+    id: &str,
+    probe: &dyn ProcessProbe,
+) -> Result<Option<ProcessLock>> {
+    if !record::is_valid_id(id) {
+        bail!("{id:?} isn't a task id; task ids look like issue-41 or pr-7");
+    }
+    let meta = record::task_dir(base_dir, id);
+    if !meta.is_dir() {
+        return Ok(None);
+    }
+    ProcessLock::acquire(&meta, &format!("task {id}"), probe).map(Some)
 }
 
 /// Whether gates may run on this task now (`task gates`): after the worker or the fix round has
@@ -317,6 +351,13 @@ pub fn prepare_pr_at(ctx: &Ctx, pr: &PrInfo, location: Location) -> Result<Prepa
     let parent = meta.parent().unwrap_or(Path::new("."));
     fs::create_dir_all(parent).with_context(|| format!("cannot create {}", parent.display()))?;
     fs::create_dir(&meta).with_context(|| format!("cannot reserve {}", meta.display()))?;
+    let lock = match ProcessLock::acquire(&meta, &format!("task {id}"), ctx.probe) {
+        Ok(lock) => lock,
+        Err(e) => {
+            let _ = fs::remove_dir_all(&meta);
+            return Err(e);
+        }
+    };
     let built = (|| -> Result<Record> {
         // The reviewer's kits must validate before anything else is made.
         let kit_set = kits::build_for(
@@ -382,6 +423,7 @@ pub fn prepare_pr_at(ctx: &Ctx, pr: &PrInfo, location: Location) -> Result<Prepa
             kits: None,
             warnings,
             events: Vec::new(),
+            lock: Some(lock),
         }),
         Err(e) => {
             let _ = fs::remove_dir_all(&meta);
@@ -1124,6 +1166,13 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
             .with_context(|| format!("cannot create {}", parent.display()))?;
     }
     fs::create_dir(&meta).with_context(|| format!("cannot reserve {}", meta.display()))?;
+    let lock = match ProcessLock::acquire(&meta, &format!("task {id}"), ctx.probe) {
+        Ok(lock) => lock,
+        Err(e) => {
+            let _ = fs::remove_dir_all(&meta);
+            return Err(e);
+        }
+    };
     if local && let Err(e) = fs::create_dir(&workspace) {
         let _ = fs::remove_dir_all(&meta);
         return Err(e).with_context(|| format!("cannot reserve {}", workspace.display()));
@@ -1298,6 +1347,7 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
             kits: Some(kits),
             warnings,
             events,
+            lock: Some(lock),
         }),
         Err(e) => {
             // Back to nothing: the sandbox and the folders this start made. A local start
