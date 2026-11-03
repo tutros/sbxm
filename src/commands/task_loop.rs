@@ -58,8 +58,8 @@ pub trait Steps {
     fn resume(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()>;
     /// `task finish --issue N`: its PR, a draft when something is left unresolved.
     fn finish(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()>;
-    /// `task file-findings --issue N --create`: the review's findings as sized issues, without
-    /// the loop's label; nothing when the review has none.
+    /// `task file-findings --issue N --create`: the review's should-fix findings as sized
+    /// issues, without the loop's label; nothing when the review has none.
     fn file_findings(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()>;
     /// The free-disk check of `sbx`'s sandbox drive: an error while it is under `min_free_disk`.
     fn room(&self) -> Result<()>;
@@ -898,7 +898,15 @@ impl Steps for TaskSteps<'_> {
         let review = record::task_dir(&base_dir, &format!("issue-{issue}")).join("review.md");
         let text = fs::read_to_string(&review)
             .with_context(|| format!("cannot read {}", review.display()))?;
-        if findings::parse(&text).findings.is_empty() {
+        // Should-fix findings alone (decision 245(d)): a clean review has no must-fix, and its
+        // questions stay in the PR's review text for the user.
+        let only: Vec<String> = findings::parse(&text)
+            .findings
+            .into_iter()
+            .filter(|f| f.label == "should-fix")
+            .map(|f| f.id)
+            .collect();
+        if only.is_empty() {
             return Ok(());
         }
         self.logged(issue, out, warn, &|out, warn| {
@@ -915,7 +923,7 @@ impl Steps for TaskSteps<'_> {
                     pr: None,
                     standard_criteria: false,
                     keep_paths: false,
-                    only: Vec::new(),
+                    only: only.clone(),
                 },
                 self.github,
                 out,

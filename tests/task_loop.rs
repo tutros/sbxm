@@ -1120,3 +1120,83 @@ fn the_issues_own_words_about_a_usage_limit_are_not_a_usage_limit() {
     assert!(sleeps.borrow().is_empty(), "no usage wait");
     assert_eq!(runs(&script.0), ["run 3", "resume 3"]);
 }
+
+// --- the real steps ---
+
+#[test]
+fn the_real_file_findings_step_files_only_should_fix_findings() {
+    let f = fixture();
+    write_record(&f.base(), 12, Stage::Finished, Some(0), Some(112));
+    let review = include_str!("fixtures/review-findings/review-small.md")
+        .replace("\r\n", "\n")
+        .replace("## Must fix", "## Should fix");
+    fs::write(
+        record::task_dir(&f.base(), "issue-12").join("review.md"),
+        review,
+    )
+    .unwrap();
+    let gh = FakeGitHub::default()
+        .with_user("me")
+        .with_labels(&["must-fix", "should-fix", "question", "size:S", "size:M"])
+        .with_next_issue_number(40);
+    let backend = sbxm::backend::FakeBackend::default();
+    let host = sbxm::task::gates::FakeHostRunner::default();
+    let steps = task_loop::TaskSteps {
+        config_dir: &f.env.config_dir(),
+        repo_root: f.repo_root.clone(),
+        repo: Some(REPO.into()),
+        backend: &backend,
+        github: &gh,
+        probe: &Probe,
+        host: &host,
+        disk: sbxm::disk::Guard::default(),
+    };
+
+    steps
+        .file_findings(12, &mut Vec::new(), &mut Vec::new())
+        .unwrap();
+
+    let created: Vec<String> = gh
+        .calls()
+        .into_iter()
+        .filter_map(|c| match c {
+            GhCall::IssueCreate(_, request) => Some(request.title),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(created.len(), 2, "{created:?}");
+    assert!(
+        created.iter().all(|t| !t.contains("Keep the thing")),
+        "{created:?}"
+    );
+}
+
+#[test]
+fn the_real_file_findings_step_files_nothing_for_a_review_without_should_fix() {
+    let f = fixture();
+    write_record(&f.base(), 12, Stage::Finished, Some(0), Some(112));
+    fs::write(
+        record::task_dir(&f.base(), "issue-12").join("review.md"),
+        "Must-fix findings: 0\n\nRisk: low\n\n## Summary\n\nFine.\n",
+    )
+    .unwrap();
+    let gh = FakeGitHub::default().with_user("me");
+    let backend = sbxm::backend::FakeBackend::default();
+    let host = sbxm::task::gates::FakeHostRunner::default();
+    let steps = task_loop::TaskSteps {
+        config_dir: &f.env.config_dir(),
+        repo_root: f.repo_root.clone(),
+        repo: Some(REPO.into()),
+        backend: &backend,
+        github: &gh,
+        probe: &Probe,
+        host: &host,
+        disk: sbxm::disk::Guard::default(),
+    };
+
+    steps
+        .file_findings(12, &mut Vec::new(), &mut Vec::new())
+        .unwrap();
+
+    assert!(gh.calls().is_empty(), "{:?}", gh.calls());
+}
