@@ -36,6 +36,9 @@ use crate::task::{findings, pipeline};
 
 /// How many open PRs the loop opened may await the user before it pauses (decision 245(e)).
 pub const PR_CAP: usize = 5;
+/// The key in a task record's free-form `hooks` (decisions 139, 146) marking a task the loop
+/// finished: its PR is one the loop opened, which counts toward [`PR_CAP`] (decision 3).
+pub const LOOP_HOOK: &str = "task_loop";
 /// How often a pause looks again.
 pub const PAUSE_POLL: Duration = Duration::from_secs(5 * 60);
 /// How often a task's first phase is looked at for its record, to take its label off.
@@ -289,9 +292,10 @@ impl Loop<'_> {
         Ok(())
     }
 
-    /// The open PRs the loop's tasks opened that await the user (decision 3): every issue task's
-    /// record naming a PR that is open and has no auto-merge armed, each PR once. A PR that can't be read (gone, or
-    /// `gh` failing) is left out with a warning.
+    /// The open PRs a loop opened that await the user (decision 3): every issue task of this repo
+    /// a loop finished ([`LOOP_HOOK`]) whose record names a PR that is open and has no auto-merge
+    /// armed, each PR once. A PR that can't be read (gone, or `gh` failing) is left out with a
+    /// warning.
     fn awaiting_prs(&mut self, warn: &mut dyn Write) -> Result<Vec<u32>> {
         let mut awaiting = Vec::new();
         for dir in record::task_folders(&self.base_dir)? {
@@ -301,9 +305,9 @@ impl Loop<'_> {
             let Ok(rec) = record::read(&dir.join("task.json")) else {
                 continue;
             };
-            // An issue's task opened its PR (or continued one, decision 169); a PR task's PR
-            // isn't the loop's.
-            if rec.kind != Kind::Issue {
+            // Only the PRs a loop opened for this repo (review M-3): a task finished by hand, a
+            // PR task, or another repo's task doesn't take this loop's room.
+            if rec.kind != Kind::Issue || rec.repo != self.repo || !opened_by_loop(&rec) {
                 continue;
             }
             let Some(url) = rec.pr.as_deref() else {
@@ -589,6 +593,19 @@ impl Loop<'_> {
         }
     }
 
+    /// Marks a ready task as the loop's before its `task finish` opens the PR, so the PR counts
+    /// toward [`PR_CAP`], after a restart too.
+    fn claim(&self, issue: u32) -> Result<()> {
+        let dir = self.task_dir(issue);
+        let mut rec = record::read(&dir.join("task.json"))?;
+        record::write_change(&dir, &mut rec, |r| {
+            if !r.hooks.is_object() {
+                r.hooks = serde_json::Value::Object(serde_json::Map::new());
+            }
+            r.hooks[LOOP_HOOK] = serde_json::Value::Bool(true);
+        })
+    }
+
     /// A ready task: `task finish`, then for a clean one its findings filed.
     fn finish(&mut self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<End> {
         let ready = self.now();
@@ -599,6 +616,15 @@ impl Loop<'_> {
             .map_or(0, |r| r.must_fix);
         let stopped = rec.as_ref().and_then(|r| r.stopped);
         let clean = must_fix == 0 && stopped.is_none();
+        if let Err(e) = self.claim(issue) {
+            self.warn_once(
+                warn,
+                format!(
+                    "#{issue} could not be marked as the loop's ({e:#}); its PR won't count \
+                     among the PRs awaiting you"
+                ),
+            )?;
+        }
         if let Err(e) = self.steps.finish(issue, out, warn) {
             writeln!(
                 out,
@@ -645,6 +671,11 @@ impl Loop<'_> {
         }
         Ok(())
     }
+}
+
+/// Whether a loop finished this task, so its PR is one the loop opened.
+fn opened_by_loop(rec: &Record) -> bool {
+    rec.hooks.get(LOOP_HOOK) == Some(&serde_json::Value::Bool(true))
 }
 
 fn first_line(text: &str) -> String {

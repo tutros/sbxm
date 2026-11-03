@@ -664,6 +664,17 @@ fn a_usage_wait_equal_to_its_total_waits_once() {
 // --- the PR cap ---
 
 /// `count` finished tasks whose PRs are open, numbered from 50; `armed` of them auto-merge.
+/// Marks task `id`'s record as one the loop finished, for `repo`.
+fn loops_own(base: &Path, id: &str, repo: &str) {
+    let dir = record::task_dir(base, id);
+    let mut rec = record::read(&dir.join("task.json")).unwrap();
+    rec.repo = repo.into();
+    rec.hooks[task_loop::LOOP_HOOK] = serde_json::Value::Bool(true);
+    record::write(&dir, &rec).unwrap();
+}
+
+/// `count` finished issue tasks the loop opened open PRs for (`#1050` on), `armed` of them with
+/// auto-merge armed.
 fn awaiting(f: &Fixture, gh: FakeGitHub, count: u32, armed: u32) -> FakeGitHub {
     let mut gh = gh;
     for i in 0..count {
@@ -675,6 +686,7 @@ fn awaiting(f: &Fixture, gh: FakeGitHub, count: u32, armed: u32) -> FakeGitHub {
             Some(0),
             Some(issue + 1000),
         );
+        loops_own(&f.base(), &format!("issue-{issue}"), REPO);
         gh = gh.with_pr(pr(issue + 1000, PrState::Open));
         if i < armed {
             gh = gh.with_auto_merge(issue + 1000);
@@ -733,11 +745,98 @@ fn five_prs_with_one_armed_let_the_loop_run() {
     assert!(run.sleeps.is_empty());
 }
 
+/// Review M-3: the cap counts the PRs a loop opened, not every task's.
+#[test]
+fn five_hand_finished_prs_do_not_pause_a_loop_that_opened_none() {
+    let f = fixture();
+    let mut gh = github(vec![labeled(3, "size:S")]);
+    for issue in 50..55 {
+        write_record(
+            &f.base(),
+            issue,
+            Stage::Finished,
+            Some(0),
+            Some(issue + 1000),
+        );
+        gh = gh.with_pr(pr(issue + 1000, PrState::Open));
+    }
+    let script = Script::new(&f.base());
+
+    // A pause would wait for ever: asked to stop after the loop's first look at the PRs.
+    let asked = Cell::new(0);
+    let stop = || {
+        asked.set(asked.get() + 1);
+        asked.get() > 1
+    };
+    let run = run_loop_with(&f, with_cap(&f, 1), &script, &gh, &Probe, &stop);
+
+    run.result.unwrap();
+    assert!(run.sleeps.is_empty(), "{}", run.out);
+    assert_eq!(runs(&script), ["run 3"]);
+}
+
+#[test]
+fn another_repos_loop_prs_do_not_count() {
+    let f = fixture();
+    let mut gh = github(vec![labeled(3, "size:S")]);
+    for issue in 50..55 {
+        write_record(
+            &f.base(),
+            issue,
+            Stage::Finished,
+            Some(0),
+            Some(issue + 1000),
+        );
+        loops_own(&f.base(), &format!("issue-{issue}"), "o/other");
+        gh = gh.with_pr(pr(issue + 1000, PrState::Open));
+    }
+    let script = Script::new(&f.base());
+
+    // A pause would wait for ever: asked to stop after the loop's first look at the PRs.
+    let asked = Cell::new(0);
+    let stop = || {
+        asked.set(asked.get() + 1);
+        asked.get() > 1
+    };
+    let run = run_loop_with(&f, with_cap(&f, 1), &script, &gh, &Probe, &stop);
+
+    run.result.unwrap();
+    assert!(run.sleeps.is_empty(), "{}", run.out);
+    assert_eq!(runs(&script), ["run 3"]);
+}
+
+#[test]
+fn five_prs_a_loop_opened_pause_the_next_loop() {
+    let f = fixture();
+    let mut issues: Vec<Issue> = (1..=5).map(|n| labeled(n, "size:S")).collect();
+    issues.push(labeled(6, "size:M"));
+    let mut gh = github(issues);
+    for issue in 1..=5 {
+        gh = gh.with_pr(pr(100 + issue, PrState::Open));
+    }
+    run_loop(&f, with_cap(&f, 5), &Script::new(&f.base()), &gh)
+        .result
+        .unwrap();
+
+    let again = Script::new(&f.base());
+    // Asked to stop after its first look at the PRs.
+    let asked = Cell::new(0);
+    let stop = || {
+        asked.set(asked.get() + 1);
+        asked.get() > 1
+    };
+    let run = run_loop_with(&f, opts(&f), &again, &gh, &Probe, &stop);
+
+    assert!(run.out.contains("5 PRs await you"), "{}", run.out);
+    assert!(runs(&again).is_empty());
+}
+
 #[test]
 fn a_merged_pr_is_not_counted() {
     let f = fixture();
     let mut gh = awaiting(&f, github(vec![labeled(3, "size:S")]), 4, 0);
     write_record(&f.base(), 60, Stage::Finished, Some(0), Some(1060));
+    loops_own(&f.base(), "issue-60", REPO);
     gh = gh.with_pr(pr(1060, PrState::Merged));
     let script = Script::new(&f.base());
 
@@ -753,6 +852,7 @@ fn a_task_naming_a_pr_that_no_longer_exists_is_left_out_with_a_warning() {
     let gh = awaiting(&f, github(vec![labeled(3, "size:S")]), 4, 0);
     // PR #1099 isn't scripted: `gh` can't find it.
     write_record(&f.base(), 99, Stage::Finished, Some(0), Some(1099));
+    loops_own(&f.base(), "issue-99", REPO);
     let script = Script::new(&f.base());
 
     let run = run_loop(&f, with_cap(&f, 1), &script, &gh);
@@ -1025,6 +1125,7 @@ fn only_issue_tasks_prs_count_and_each_once() {
     let mut gh = awaiting(&f, github(vec![labeled(3, "size:S")]), 4, 0);
     // A second task continuing PR #1050 (decision 169) and a PR task naming PR #1070.
     write_record(&f.base(), 70, Stage::Finished, Some(0), Some(1050));
+    loops_own(&f.base(), "issue-70", REPO);
     let dir = record::task_dir(&f.base(), "pr-1070");
     let mut rec = read_record(&f.base(), 70);
     rec.id = "pr-1070".into();
