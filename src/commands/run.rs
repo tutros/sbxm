@@ -486,6 +486,13 @@ fn run_logged(
         Ok(None) => {}
         Err(e) => writeln!(warn, "warning: cannot rank the run by Jev: {e:#}")?,
     }
+    // The human review's ranking (issue 347): a fresh run has no human scores yet, but the
+    // block keeps `run` and `run show` printing the same rankings from the same files.
+    match score::load_human(&roots.meta) {
+        Ok(Some(ranking)) => write!(out, "{}", score::render_human(&ranking, &labels))?,
+        Ok(None) => {}
+        Err(e) => writeln!(warn, "warning: cannot rank the run by human scores: {e:#}")?,
+    }
     // Jev's raw answers after its ranking, shown only (issue 343).
     match score::render_jev_questions(&roots.meta, &labels) {
         Ok(Some(text)) => write!(out, "{text}")?,
