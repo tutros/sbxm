@@ -969,3 +969,82 @@ fn the_entries_add_up_to_the_sandbox_hours() {
         .sum();
     assert_eq!(seconds, 3 * hour + hour / 2);
 }
+
+/// Issue 313: a fix task's id names the PR and the head its review covered.
+#[test]
+fn fix_ids_name_the_pr_and_the_reviewed_head_and_are_valid() {
+    let head = "1234567890ABCDEF1234567890abcdef12345678";
+    let id = sbxm::task::record::fix_id(7, head).unwrap();
+    assert_eq!(id, "fix-7-1234567890ab");
+    assert!(is_valid_id(&id));
+    assert_eq!(sbxm::task::record::fix_id(7, "1234567"), None);
+    assert_eq!(sbxm::task::record::fix_id(0, head), None);
+    for bad in [
+        "fix-7",
+        "fix-07-1234567890ab",
+        "fix-7-1234567890a",
+        "fix-7-1234567890abc",
+        "fix-7-1234567890AB",
+        "fix-7-12345678/0ab",
+        "fix--1234567890ab",
+        "fix-x-1234567890ab",
+    ] {
+        assert!(!is_valid_id(bad), "{bad:?}");
+    }
+}
+
+#[test]
+fn a_fix_task_moves_through_the_stages_an_issue_task_does() {
+    for stage in [
+        Stage::Prepared,
+        Stage::Working,
+        Stage::Gating,
+        Stage::Reviewing,
+        Stage::Fixing,
+        Stage::Ready,
+        Stage::Finished,
+    ] {
+        let mut issue = Record::new(
+            &NewTask {
+                kind: Kind::Issue,
+                number: 7,
+                repo: "o/r",
+                title: "t",
+                base: "main",
+                branch: "b",
+                config_hash: "h",
+                id: None,
+            },
+            0,
+            Process::new(1, 0),
+        );
+        let mut fix = issue.clone();
+        fix.kind = Kind::Fix;
+        issue.stage = stage;
+        fix.stage = stage;
+        for to in [
+            Stage::Working,
+            Stage::Gating,
+            Stage::Reviewing,
+            Stage::Fixing,
+            Stage::Ready,
+            Stage::Finished,
+        ] {
+            for status in [
+                Status::Completed,
+                Status::Passed,
+                Status::GatesFailed,
+                Status::Ok,
+            ] {
+                let (mut a, mut b) = (issue.clone(), fix.clone());
+                a.status = status;
+                b.status = status;
+                assert_eq!(
+                    a.advance(to, 1, Process::new(1, 0)).is_ok(),
+                    b.advance(to, 1, Process::new(1, 0)).is_ok(),
+                    "{stage:?}/{status:?} -> {to:?}"
+                );
+            }
+        }
+    }
+}

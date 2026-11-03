@@ -387,6 +387,7 @@ fn pr_7() -> sbxm::github::PrInfo {
         head_ref: "feature-x".into(),
         head_oid: "0000000000000000000000000000000000000000".into(),
         is_cross_repository: false,
+        head_repo: String::new(),
         state: sbxm::github::PrState::Open,
         title: "Add the x feature".into(),
         body: "Adds x.\n\nFixes #4".into(),

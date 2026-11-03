@@ -31,6 +31,10 @@ pub enum Kind {
     /// id is given explicitly (`spec-<name>-<hash>`, see [`spec_id`]), never derived from
     /// `number`, which is unused (always 0).
     Spec,
+    /// A task that fixes the must-fix findings of a pull request's latest sbxm review on that
+    /// pull request's own branch (issue 313): `number` is the PR's, and the id names the head
+    /// the review covered ([`fix_id`]), so a fix of a later head is a task of its own.
+    Fix,
 }
 
 impl Kind {
@@ -39,6 +43,7 @@ impl Kind {
             Self::Issue => "issue",
             Self::Pr => "pr",
             Self::Spec => "spec",
+            Self::Fix => "fix",
         }
     }
 }
@@ -78,18 +83,20 @@ impl Stage {
     /// for another review round once its head changes (issue 195).
     pub(crate) fn next(self, kind: Kind) -> &'static [Stage] {
         match (self, kind) {
-            (Self::Prepared, Kind::Issue | Kind::Spec) => &[Self::Working],
+            (Self::Prepared, Kind::Issue | Kind::Spec | Kind::Fix) => &[Self::Working],
             // A PR task has no worker: it goes to its gates (run in the reviewer's sandbox) or
             // straight to review when none are configured (decision 175, finding F3).
             (Self::Prepared, Kind::Pr) => &[Self::Gating, Self::Reviewing],
-            (Self::Working | Self::Fixing, Kind::Issue | Kind::Spec) => &[Self::Gating],
+            (Self::Working | Self::Fixing, Kind::Issue | Kind::Spec | Kind::Fix) => &[Self::Gating],
             (Self::Working | Self::Fixing, Kind::Pr) => &[],
-            (Self::Gating, Kind::Issue | Kind::Spec) => &[Self::Reviewing, Self::Fixing],
+            (Self::Gating, Kind::Issue | Kind::Spec | Kind::Fix) => {
+                &[Self::Reviewing, Self::Fixing]
+            }
             (Self::Gating, Kind::Pr) => &[Self::Reviewing],
-            (Self::Reviewing, Kind::Issue | Kind::Spec) => &[Self::Fixing, Self::Ready],
+            (Self::Reviewing, Kind::Issue | Kind::Spec | Kind::Fix) => &[Self::Fixing, Self::Ready],
             (Self::Reviewing, Kind::Pr) => &[Self::Ready],
             // `task resume` reopens a task that stopped `ready` for another fix round (issue 118).
-            (Self::Ready, Kind::Issue | Kind::Spec) => &[Self::Finished, Self::Fixing],
+            (Self::Ready, Kind::Issue | Kind::Spec | Kind::Fix) => &[Self::Finished, Self::Fixing],
             (Self::Ready, Kind::Pr) => &[Self::Gating],
             (Self::Finished, _) => &[],
         }
@@ -860,15 +867,39 @@ impl Record {
     }
 }
 
-/// `issue-<n>` or `pr-<n>`, with a plain positive number, or a `spec-<name>-<hash>` id built by
-/// [`spec_id`]: the only ids that may become a path.
+/// `issue-<n>` or `pr-<n>`, with a plain positive number, a `spec-<name>-<hash>` id built by
+/// [`spec_id`], or a `fix-<n>-<head>` id built by [`fix_id`]: the only ids that may become a path.
 pub fn is_valid_id(id: &str) -> bool {
     if let Some(digits) = id.strip_prefix("issue-").or_else(|| id.strip_prefix("pr-")) {
-        return !digits.starts_with('0')
-            && !digits.is_empty()
-            && digits.bytes().all(|b| b.is_ascii_digit());
+        return is_plain_number(digits);
+    }
+    if let Some(rest) = id.strip_prefix("fix-") {
+        return rest.split_once('-').is_some_and(|(digits, head)| {
+            is_plain_number(digits)
+                && head.len() == FIX_ID_HEAD
+                && head
+                    .bytes()
+                    .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+        });
     }
     is_valid_spec_id(id)
+}
+
+fn is_plain_number(digits: &str) -> bool {
+    !digits.starts_with('0') && !digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// How many hex digits of the PR head a [`fix_id`] keeps.
+const FIX_ID_HEAD: usize = 12;
+
+/// `fix-<pr>-<head>` for `task fix --pr <pr>` (issue 313): `head` is the first 12 hex digits of
+/// the commit the fixed review covered, so a fix of the PR's next head is a task of its own and
+/// never meets the folder of an earlier one, whose result may still be kept there. `None` when
+/// `head` isn't a full commit id.
+pub fn fix_id(pr: u32, head: &str) -> Option<String> {
+    let head = head.to_ascii_lowercase();
+    let full = head.len() == 40 && head.bytes().all(|b| b.is_ascii_hexdigit());
+    (pr > 0 && full).then(|| format!("fix-{pr}-{}", &head[..FIX_ID_HEAD]))
 }
 
 /// `spec-<name>-<hash>`: `name` passes [`crate::project::validate_name`] and `hash` is exactly 6

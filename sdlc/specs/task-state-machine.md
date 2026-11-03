@@ -178,26 +178,27 @@ kept here as the design for issues #117-121 to build toward.
 
 | From | Event | To | Action |
 |---|---|---|---|
-| prepared running (issue/spec) | advance | working | run the worker |
+| prepared running (issue/spec/fix) | advance | working | run the worker |
 | prepared running (pr) | advance | gating | run the gates |
 | prepared running (pr) | advance | reviewing | run the reviewer |
-| working completed/timed-out (issue/spec) | advance | gating | run the gates |
+| working completed/timed-out (issue/spec/fix) | advance | gating | run the gates |
 | gating passed | advance | reviewing | run the reviewer |
-| gating gates-failed (issue/spec) | advance | fixing | run the fix round for the gate's own output |
-| reviewing completed (issue/spec) | advance | fixing | run the fix round |
+| gating gates-failed (issue/spec/fix) | advance | fixing | run the fix round for the gate's own output |
+| reviewing completed (issue/spec/fix) | advance | fixing | run the fix round |
 | reviewing completed | advance | ready | record the task as ready |
-| fixing completed/timed-out (issue/spec) | advance | gating | run the gates |
+| fixing completed/timed-out (issue/spec/fix) | advance | gating | run the gates |
 | ready ok (issue) | advance | finished | push the branch and open the PR |
 | ready ok (spec) | advance | finished | deliver the branch through the [finish] sink |
-| ready ok (issue/spec) | advance | fixing | run a fix round from the recorded review |
+| ready ok (fix) | advance | finished | push the branch onto the PR's own branch, a fast-forward or nothing |
+| ready ok (issue/spec/fix) | advance | fixing | run a fix round from the recorded review |
 | ready ok (pr) | advance | gating | fetch the PR's new head, then run the gates |
-| working/fixing completed/timed-out (issue/spec) | task gates | gating | run the gates |
-| gating passed/gates-failed (issue/spec) | task gates | gating | re-run the gates |
-| gating running (issue/spec), interrupted | task gates | gating | re-run the abandoned gates |
-| working/fixing completed/timed-out (issue/spec) | task review | reviewing | run the gates, then the reviewer |
-| gating passed/gates-failed (issue/spec) | task review | reviewing | run the reviewer |
-| gating running (issue/spec), interrupted | task review | reviewing | re-run the abandoned gates, then the reviewer |
-| reviewing failed (issue/spec) | task review | reviewing | retry the reviewer |
+| working/fixing completed/timed-out (issue/spec/fix) | task gates | gating | run the gates |
+| gating passed/gates-failed (issue/spec/fix) | task gates | gating | re-run the gates |
+| gating running (issue/spec/fix), interrupted | task gates | gating | re-run the abandoned gates |
+| working/fixing completed/timed-out (issue/spec/fix) | task review | reviewing | run the gates, then the reviewer |
+| gating passed/gates-failed (issue/spec/fix) | task review | reviewing | run the reviewer |
+| gating running (issue/spec/fix), interrupted | task review | reviewing | re-run the abandoned gates, then the reviewer |
+| reviewing failed (issue/spec/fix) | task review | reviewing | retry the reviewer |
 | prepared running (pr) | task review | gating | run the gates, then the reviewer |
 | gating passed/gates-failed (pr) | task review | reviewing | run the reviewer |
 | reviewing failed (pr) | task review | reviewing | retry the reviewer |
@@ -207,19 +208,20 @@ kept here as the design for issues #117-121 to build toward.
 | ready ok (pr) | task review | gating | fetch the PR's new head, keep the review as review-<n>.md, run the gates, then the reviewer |
 | ready ok (issue) | task finish | finished | push the branch and open the PR |
 | ready ok (spec) | task finish | finished | deliver the branch through the [finish] sink |
-| prepared running (issue/spec), interrupted | task resume | working | make the worker's sandbox again, then run the worker and review |
-| prepared failed (issue/spec) | task resume | working | make the worker's sandbox again, then run the worker and review |
-| working running (issue/spec), interrupted | task resume | working | run the worker again in its clone, then review |
-| working failed (issue/spec) | task resume | working | run the worker again in its clone, then review |
-| working/fixing completed/timed-out (issue/spec) | task resume | reviewing | run the gates, then the reviewer |
-| gating passed/gates-failed (issue/spec) | task resume | reviewing | run the reviewer (after the gates again, when they failed) |
-| gating running (issue/spec), interrupted | task resume | reviewing | re-run the abandoned gates, then the reviewer |
-| reviewing running (issue/spec), interrupted | task resume | reviewing | run the reviewer again |
-| reviewing failed (issue/spec) | task resume | reviewing | run the reviewer again |
-| fixing running (issue/spec), interrupted | task resume | fixing | run the fix round again in its clone, then the gates and the review |
-| fixing failed (issue/spec) | task resume | fixing | run the fix round again in its clone, then the gates and the review |
-| reviewing completed (issue/spec) | task resume | fixing | replay the recorded review: a fix round for its findings, else ready |
-| ready ok (issue/spec) | task resume | fixing | when stopped: a fix round from the recorded review (--rounds N adds N rounds) |
+| ready ok (fix) | task finish | finished | push the branch onto the PR's own branch, a fast-forward or nothing |
+| prepared running (issue/spec/fix), interrupted | task resume | working | make the worker's sandbox again, then run the worker and review |
+| prepared failed (issue/spec/fix) | task resume | working | make the worker's sandbox again, then run the worker and review |
+| working running (issue/spec/fix), interrupted | task resume | working | run the worker again in its clone, then review |
+| working failed (issue/spec/fix) | task resume | working | run the worker again in its clone, then review |
+| working/fixing completed/timed-out (issue/spec/fix) | task resume | reviewing | run the gates, then the reviewer |
+| gating passed/gates-failed (issue/spec/fix) | task resume | reviewing | run the reviewer (after the gates again, when they failed) |
+| gating running (issue/spec/fix), interrupted | task resume | reviewing | re-run the abandoned gates, then the reviewer |
+| reviewing running (issue/spec/fix), interrupted | task resume | reviewing | run the reviewer again |
+| reviewing failed (issue/spec/fix) | task resume | reviewing | run the reviewer again |
+| fixing running (issue/spec/fix), interrupted | task resume | fixing | run the fix round again in its clone, then the gates and the review |
+| fixing failed (issue/spec/fix) | task resume | fixing | run the fix round again in its clone, then the gates and the review |
+| reviewing completed (issue/spec/fix) | task resume | fixing | replay the recorded review: a fix round for its findings, else ready |
+| ready ok (issue/spec/fix) | task resume | fixing | when stopped: a fix round from the recorded review (--rounds N adds N rounds) |
 | any completed/timed-out/failed/passed/gates-failed/ok | task rm | removed | remove the task's folders and sandboxes |
 | any running, interrupted | task rm | removed | remove the task's folders and sandboxes |
 

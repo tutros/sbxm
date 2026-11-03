@@ -31,7 +31,7 @@ pub struct Resumed {
 /// The status command to point at: a spec task has no number to filter by.
 fn status_hint(task: &Record) -> String {
     match task.kind {
-        Kind::Spec => "sbxm task status".to_owned(),
+        Kind::Spec | Kind::Fix => "sbxm task status".to_owned(),
         _ => format!("sbxm task status --issue {}", task.number),
     }
 }
@@ -166,6 +166,8 @@ fn recovery(task: &Record) -> String {
 fn target_flag(task: &Record) -> String {
     match task.kind {
         Kind::Spec => "--spec <file>".to_owned(),
+        // No flag names a fix task yet (issue 313): never another task's flag.
+        Kind::Fix => format!("<no flag names fix task {} yet>", task.id),
         _ => format!("--issue {}", task.number),
     }
 }

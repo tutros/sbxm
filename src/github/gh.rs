@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
-use super::{GitHubBackend, Issue, IssueRequest, IssueText, PrInfo, PrRequest, PrState};
+use super::{GitHubBackend, Issue, IssueRequest, IssueText, PrComment, PrInfo, PrRequest, PrState};
 
 /// Runs `gh` with arguments and optional stdin, returning stdout.
 pub trait GhRunner: Send + Sync {
@@ -126,6 +126,10 @@ struct Number {
 struct RawPr {
     head_ref_name: String,
     head_ref_oid: String,
+    #[serde(default)]
+    head_repository: Option<Named>,
+    #[serde(default)]
+    head_repository_owner: Option<Login>,
     is_cross_repository: bool,
     state: String,
     title: String,
@@ -133,6 +137,25 @@ struct RawPr {
     body: String,
     #[serde(default)]
     closing_issues_references: Vec<Number>,
+}
+
+#[derive(Deserialize)]
+struct Login {
+    login: String,
+}
+
+#[derive(Deserialize)]
+struct RawComment {
+    /// `null` for a deleted account.
+    #[serde(default)]
+    author: Option<Login>,
+    #[serde(default)]
+    body: String,
+}
+
+#[derive(Deserialize)]
+struct RawComments {
+    comments: Vec<RawComment>,
 }
 
 #[derive(Deserialize)]
@@ -230,7 +253,7 @@ impl GitHubBackend for GhBackend {
             "--repo",
             repo,
             "--json",
-            "headRefName,headRefOid,isCrossRepository,state,title,body,closingIssuesReferences",
+            "headRefName,headRefOid,headRepository,headRepositoryOwner,isCrossRepository,state,title,body,closingIssuesReferences",
         ]))?;
         let state = match raw.state.as_str() {
             "OPEN" => PrState::Open,
@@ -247,6 +270,10 @@ impl GitHubBackend for GhBackend {
             head_ref: raw.head_ref_name,
             head_oid: raw.head_ref_oid,
             is_cross_repository: raw.is_cross_repository,
+            head_repo: match (raw.head_repository_owner, raw.head_repository) {
+                (Some(owner), Some(repo)) => format!("{}/{}", owner.login, repo.name),
+                _ => String::new(),
+            },
             state,
             title: raw.title,
             body: raw.body,
@@ -293,6 +320,26 @@ impl GitHubBackend for GhBackend {
             Some(body),
         )?;
         Ok(())
+    }
+
+    fn pr_comments(&self, repo: &str, number: u32) -> Result<Vec<PrComment>> {
+        let raw: RawComments = self.json(&strings(&[
+            "pr",
+            "view",
+            &number.to_string(),
+            "--repo",
+            repo,
+            "--json",
+            "comments",
+        ]))?;
+        Ok(raw
+            .comments
+            .into_iter()
+            .map(|c| PrComment {
+                author: c.author.map(|a| a.login).unwrap_or_default(),
+                body: c.body,
+            })
+            .collect())
     }
 
     fn issue_create(&self, repo: &str, request: &IssueRequest) -> Result<u32> {

@@ -13,6 +13,7 @@ pub mod status;
 pub mod stop;
 pub mod task_file_findings;
 pub mod task_finish;
+pub mod task_fix;
 pub mod task_gates;
 pub mod task_init;
 pub mod task_log;

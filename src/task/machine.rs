@@ -81,11 +81,13 @@ pub const STAGES: [Stage; 7] = [
 const ISSUE: &[Kind] = &[Kind::Issue];
 const PR: &[Kind] = &[Kind::Pr];
 const SPEC: &[Kind] = &[Kind::Spec];
+const FIX: &[Kind] = &[Kind::Fix];
 /// Issue and spec tasks both have a worker and go through gates, review and fix rounds the same
 /// way (issue 142, decision 174(d)): a spec source adds this one answer set, no new rows.
-const HAS_WORKER: &[Kind] = &[Kind::Issue, Kind::Spec];
+/// A fix task of a PR (issue 313) runs them the same way too.
+const HAS_WORKER: &[Kind] = &[Kind::Issue, Kind::Spec, Kind::Fix];
 /// Every kind: the rows that don't care which source a task has.
-const ANY: &[Kind] = &[Kind::Issue, Kind::Pr, Kind::Spec];
+const ANY: &[Kind] = &[Kind::Issue, Kind::Pr, Kind::Spec, Kind::Fix];
 
 const WORKER_DONE: &[Status] = &[Status::Completed, Status::TimedOut];
 const GATES_ENDED: &[Status] = &[Status::Passed, Status::GatesFailed];
@@ -205,6 +207,15 @@ pub const TABLE: &[Row] = &[
         event: Event::Advance(Stage::Finished),
         to: Some(Stage::Finished),
         action: "deliver the branch through the [finish] sink",
+    },
+    Row {
+        stages: &[Stage::Ready],
+        statuses: &[Status::Ok],
+        live: Live::Any,
+        kinds: FIX,
+        event: Event::Advance(Stage::Finished),
+        to: Some(Stage::Finished),
+        action: "push the branch onto the PR's own branch, a fast-forward or nothing",
     },
     // `task resume` on a task that stopped `ready` (issue 118); `resume` checks `stopped`
     // and the budget, which this table does not model.
@@ -384,6 +395,15 @@ pub const TABLE: &[Row] = &[
         event: Event::Finish,
         to: Some(Stage::Finished),
         action: "deliver the branch through the [finish] sink",
+    },
+    Row {
+        stages: &[Stage::Ready],
+        statuses: &[Status::Ok],
+        live: Live::Any,
+        kinds: FIX,
+        event: Event::Finish,
+        to: Some(Stage::Finished),
+        action: "push the branch onto the PR's own branch, a fast-forward or nothing",
     },
     // `task resume` (decisions 173(c), 175; issue 118), a task with a worker: a failed or
     // interrupted stage runs again in the task's own clone, and the task goes on to `ready`.
