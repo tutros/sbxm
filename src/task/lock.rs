@@ -126,6 +126,16 @@ impl ProcessLock {
             }
             take_over_stale(&path, &text)?;
         }
+        let claim = takeover_path(&path);
+        if claim.exists() {
+            bail!(
+                "cannot take the stale lock {} of {what}: {} says another sbxm command is taking \
+                 it over; if none is running, delete {} and run this command again",
+                path.display(),
+                claim.display(),
+                claim.display()
+            );
+        }
         bail!(
             "cannot take the lock {} of {what}; another sbxm command may be taking it, run this \
              command again",
@@ -140,10 +150,15 @@ impl ProcessLock {
     }
 }
 
+/// The takeover claim next to the lock at `path`: `lock.json.takeover`.
+fn takeover_path(path: &Path) -> PathBuf {
+    path.with_extension("json.takeover")
+}
+
 /// Removes the stale lock at `path` if it still reads `stale`, under the takeover claim; a claim
 /// held by another command leaves it to that command.
 fn take_over_stale(path: &Path, stale: &str) -> Result<()> {
-    let claim = path.with_extension("json.takeover");
+    let claim = takeover_path(path);
     match fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -324,6 +339,29 @@ mod tests {
         lock.moved_to(&to);
         drop(lock);
         assert!(!to.join(FILE_NAME).exists());
+    }
+
+    #[test]
+    fn a_takeover_left_by_a_crash_is_named_with_how_to_clear_it() {
+        let dir = tempfile::tempdir().unwrap();
+        write_holder(dir.path(), 4_000_006, 2000);
+        let claim = dir.path().join("lock.json.takeover");
+        fs::write(&claim, "").unwrap();
+
+        let err = ProcessLock::acquire(dir.path(), "task issue-1", &ME)
+            .unwrap_err()
+            .to_string();
+
+        assert_eq!(
+            err,
+            format!(
+                "cannot take the stale lock {} of task issue-1: {} says another sbxm command is \
+                 taking it over; if none is running, delete {} and run this command again",
+                dir.path().join(FILE_NAME).display(),
+                claim.display(),
+                claim.display()
+            )
+        );
     }
 
     #[test]

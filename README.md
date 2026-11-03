@@ -588,6 +588,14 @@ are `<base_dir>\tasks\<id>`, `<id>-review` and `<id>-gates`. A task killed halfw
 retries a stage that failed), and `task start --restart --issue <n>` (after the same confirmation as `task rm`)
 starts it over instead.
 
+One command changes a task at a time (issue 58): `task start`, `run`, `gates`, `review`, `fix`, `resume`, `finish`
+and `rm` (with `--restart` and `--merged`) hold the task's lock, `<base_dir>\.sbxm\tasks\<id>\lock.json`, from before
+they read `task.json` until their last write. A second one on the same task stops at once, changing nothing: `task
+issue-1 is in use by another sbxm command (process 4242, started 2026-11-02T10:00:00Z); wait for it to finish, then
+run this command again` (`task rm --merged` lists such a task as left alone with that reason). A lock whose process
+is gone (killed, or its pid reused by another process) is taken over by the next command. `task status`, `task
+logs` and `sbxm status` only read, so they never take the lock and are never blocked by it.
+
 Sandbox setup takes about 1 minute per sandbox (apt 44 s, rustup 13 s, measured 2026-10-11). `base_dir` only moves the
 workspace: each sandbox's own disk lives in the folder `sbx` keeps its state in, on the system drive, and `sbx` has no
 setting to move it (a junction to a bigger drive was tried and failed for the `claude` agent; see [`docs/workflow.md`](docs/workflow.md)).
