@@ -20,6 +20,9 @@ pub const FILE_NAME: &str = "sbxm-task.toml";
 const DEFAULT_WORKER_LIMIT: Duration = Duration::from_secs(2 * 3600);
 const DEFAULT_REVIEWER_LIMIT: Duration = Duration::from_secs(45 * 60);
 pub(crate) const DEFAULT_GATE_TIMEOUT: Duration = Duration::from_secs(20 * 60);
+/// `[loop] usage_wait` and `usage_wait_total` when absent (issue 320, decision 6).
+const DEFAULT_USAGE_WAIT: Duration = Duration::from_secs(30 * 60);
+const DEFAULT_USAGE_WAIT_TOTAL: Duration = Duration::from_secs(5 * 3600);
 /// Applied when the repo has a `Cargo.toml` and `[gates] sandbox` is absent.
 const RUST_GATES: [&str; 3] = [
     "cargo fmt --check",
@@ -68,6 +71,16 @@ pub struct TaskConfig {
     pub warnings: Vec<String>,
     /// `[warm]`, read by `template build --warm` (decision 207).
     pub warm: Option<Warm>,
+    /// `[loop]`, read by `task loop` (issue 320).
+    pub task_loop: Loop,
+}
+
+/// How `task loop` waits out a harness's usage limit (issue 320, decision 6): `usage_wait` before
+/// each `task resume`, and the loop stops once the waits in a row reach `usage_wait_total`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Loop {
+    pub usage_wait: Duration,
+    pub usage_wait_total: Duration,
 }
 
 /// How `template build --warm` fills a template's caches from this repo (decision 207).
@@ -142,6 +155,15 @@ struct RawConfig {
     finish: RawFinish,
     risk: Option<RawRisk>,
     warm: Option<RawWarm>,
+    #[serde(default, rename = "loop")]
+    task_loop: RawLoop,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawLoop {
+    usage_wait: Option<String>,
+    usage_wait_total: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -353,6 +375,7 @@ impl Validator<'_> {
         };
         let risk = self.risk(raw.risk)?;
         let warm = raw.warm.map(|w| self.warm(w)).transpose()?;
+        let task_loop = self.task_loop(raw.task_loop)?;
         Ok(TaskConfig {
             worker,
             reviewer,
@@ -365,6 +388,28 @@ impl Validator<'_> {
             risk,
             warnings,
             warm,
+            task_loop,
+        })
+    }
+
+    /// `[loop]`: both waits are durations, and one wait can't be longer than the waits in a row
+    /// the loop allows.
+    fn task_loop(&self, raw: RawLoop) -> Result<Loop> {
+        let usage_wait = self.duration("loop.usage_wait", raw.usage_wait, DEFAULT_USAGE_WAIT)?;
+        let usage_wait_total = self.duration(
+            "loop.usage_wait_total",
+            raw.usage_wait_total,
+            DEFAULT_USAGE_WAIT_TOTAL,
+        )?;
+        if usage_wait > usage_wait_total {
+            return Err(self.err(
+                "loop.usage_wait is longer than loop.usage_wait_total; shorten the one or \
+                 lengthen the other",
+            ));
+        }
+        Ok(Loop {
+            usage_wait,
+            usage_wait_total,
         })
     }
 

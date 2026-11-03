@@ -563,3 +563,58 @@ fn a_location_other_than_local_or_cloud_is_an_error_naming_the_file() {
         );
     }
 }
+
+#[test]
+fn the_loop_waits_default_to_30m_and_5h() {
+    let dir = repo(MINIMAL, true);
+    let config = TaskConfig::load(dir.path()).unwrap();
+    assert_eq!(config.task_loop.usage_wait, Duration::from_secs(30 * 60));
+    assert_eq!(
+        config.task_loop.usage_wait_total,
+        Duration::from_secs(5 * 3600)
+    );
+}
+
+#[test]
+fn the_loop_waits_are_read_from_the_loop_table() {
+    let dir = repo(
+        &format!("{MINIMAL}\n[loop]\nusage_wait = \"10m\"\nusage_wait_total = \"10m\"\n"),
+        true,
+    );
+    let config = TaskConfig::load(dir.path()).unwrap();
+    assert_eq!(config.task_loop.usage_wait, Duration::from_secs(600));
+    assert_eq!(config.task_loop.usage_wait_total, Duration::from_secs(600));
+}
+
+#[test]
+fn an_unknown_loop_key_is_an_error_naming_the_file() {
+    let err = load_err(&format!("{MINIMAL}\n[loop]\nwait = \"10m\"\n"), true);
+    assert!(err.contains(FILE_NAME), "{err}");
+    assert!(err.contains("wait"), "{err}");
+}
+
+#[test]
+fn a_usage_wait_longer_than_its_total_is_refused() {
+    let err = load_err(
+        &format!("{MINIMAL}\n[loop]\nusage_wait = \"2h\"\nusage_wait_total = \"1h\"\n"),
+        true,
+    );
+    assert!(err.contains("loop.usage_wait"), "{err}");
+    assert!(err.contains("loop.usage_wait_total"), "{err}");
+}
+
+#[test]
+fn a_loop_wait_that_isnt_a_duration_names_its_key() {
+    let err = load_err(&format!("{MINIMAL}\n[loop]\nusage_wait = \"soon\"\n"), true);
+    assert!(err.contains("loop.usage_wait"), "{err}");
+}
+
+#[test]
+fn this_repos_own_file_loads_with_the_loop_defaults() {
+    let config = TaskConfig::load(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+    assert_eq!(config.task_loop.usage_wait, Duration::from_secs(30 * 60));
+    assert_eq!(
+        config.task_loop.usage_wait_total,
+        Duration::from_secs(5 * 3600)
+    );
+}
