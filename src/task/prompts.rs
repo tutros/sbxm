@@ -46,6 +46,15 @@ pub enum Role {
     FixSpec,
     /// The fix round of a spec task after a gate failure.
     FixGateSpec,
+    /// The worker of a fix task (issue 313): the source is a pull request review's must-fix
+    /// findings (`.sbxm-task/issue.md`), on the pull request's own branch.
+    WorkerPrFix,
+    /// The reviewer of a fix task: checks the findings are fixed.
+    ReviewerPrFix,
+    /// The fix round of a fix task after a review found must-fix findings.
+    FixPrFix,
+    /// The fix round of a fix task after a gate failure.
+    FixGatePrFix,
 }
 
 /// A template and the name errors are reported under (the embedded name, or the override's path).
@@ -64,6 +73,10 @@ const WORKER_SPEC: &str = include_str!("../../prompts/worker-spec.md");
 const REVIEWER_SPEC: &str = include_str!("../../prompts/reviewer-spec.md");
 const FIX_SPEC: &str = include_str!("../../prompts/fix-spec.md");
 const FIX_GATE_SPEC: &str = include_str!("../../prompts/fix-gate-spec.md");
+const WORKER_PR_FIX: &str = include_str!("../../prompts/worker-pr-fix.md");
+const REVIEWER_PR_FIX: &str = include_str!("../../prompts/reviewer-pr-fix.md");
+const FIX_PR_FIX: &str = include_str!("../../prompts/fix-pr-fix.md");
+const FIX_GATE_PR_FIX: &str = include_str!("../../prompts/fix-gate-pr-fix.md");
 
 /// The template for `role`: the repo's override when configured, else the embedded one.
 pub fn template(role: Role, prompts: &Prompts) -> Result<Template> {
@@ -85,6 +98,19 @@ pub fn template(role: Role, prompts: &Prompts) -> Result<Template> {
         ),
         Role::FixSpec => ("fix-spec.md", FIX_SPEC, prompts.fix.as_deref()),
         Role::FixGateSpec => ("fix-gate-spec.md", FIX_GATE_SPEC, prompts.fix.as_deref()),
+        // A fix task (issue 313) takes the same override keys again.
+        Role::WorkerPrFix => ("worker-pr-fix.md", WORKER_PR_FIX, prompts.worker.as_deref()),
+        Role::ReviewerPrFix => (
+            "reviewer-pr-fix.md",
+            REVIEWER_PR_FIX,
+            prompts.reviewer.as_deref(),
+        ),
+        Role::FixPrFix => ("fix-pr-fix.md", FIX_PR_FIX, prompts.fix.as_deref()),
+        Role::FixGatePrFix => (
+            "fix-gate-pr-fix.md",
+            FIX_GATE_PR_FIX,
+            prompts.fix.as_deref(),
+        ),
     };
     match custom {
         Some(path) => read_override(path),

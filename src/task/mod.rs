@@ -9,6 +9,7 @@ pub mod lifetime;
 pub mod machine;
 pub mod merged;
 pub mod pipeline;
+pub mod pr_fix;
 pub mod prompts;
 pub mod record;
 pub mod repo;

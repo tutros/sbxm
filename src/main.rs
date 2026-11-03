@@ -20,7 +20,9 @@ fn task_id(kind: task::record::Kind, number: u32) -> String {
     match kind {
         task::record::Kind::Issue => format!("issue-{number}"),
         task::record::Kind::Pr => format!("pr-{number}"),
-        task::record::Kind::Spec => unreachable!("the CLI never passes --spec here"),
+        task::record::Kind::Spec | task::record::Kind::Fix => {
+            unreachable!("the CLI never passes --spec or a fix task here")
+        }
     }
 }
 
@@ -482,6 +484,40 @@ fn main() -> anyhow::Result<()> {
                         only,
                     },
                     &sbxm::github::gh::GhBackend::default(),
+                    &mut out,
+                    &mut warn,
+                )
+            })();
+            finish_task(result, out, warn)
+        }
+        Command::Task {
+            command:
+                TaskCommand::Fix {
+                    pr,
+                    repo,
+                    base,
+                    ignore_disk,
+                },
+        } => {
+            // The task's id names the head its review covered, known only once GitHub answered:
+            // its run.log is found by this process's identity, as `task start`'s are.
+            let (mut out, mut warn) = task_writers(Vec::new(), Some(&task::record::SystemProbe))?;
+            let result = (|| -> anyhow::Result<()> {
+                commands::task_fix::run(
+                    &config::config_dir()?,
+                    &commands::task_fix::Options {
+                        repo_root: std::env::current_dir()?,
+                        pr,
+                        repo,
+                        base,
+                        clone_source: None,
+                        identity: None,
+                        disk: sbxm::disk::Guard::real(ignore_disk),
+                    },
+                    &SbxBackend::LOCAL,
+                    &sbxm::github::gh::GhBackend::default(),
+                    &task::record::SystemProbe,
+                    &task::gates::ShellHostRunner,
                     &mut out,
                     &mut warn,
                 )

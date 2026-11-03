@@ -32,7 +32,7 @@ fn task(
     let id = match kind {
         Kind::Issue => format!("issue-{number}"),
         Kind::Pr => format!("pr-{number}"),
-        Kind::Spec => unreachable!("this fixture is only used with Issue and Pr"),
+        Kind::Spec | Kind::Fix => unreachable!("this fixture is only used with Issue and Pr"),
     };
     let record = Record::new(
         &NewTask {

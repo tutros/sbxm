@@ -26,6 +26,7 @@ fn pr(number: u32, state: PrState, fork: bool) -> PrInfo {
         head_ref: "feature-x".into(),
         head_oid: "0000000000000000000000000000000000000000".into(),
         is_cross_repository: fork,
+        head_repo: String::new(),
         state,
         title: "Add the x feature".into(),
         body: "This adds x.".into(),

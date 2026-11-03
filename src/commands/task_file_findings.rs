@@ -134,6 +134,9 @@ fn file(
                 // Issue 142 is start-only for spec tasks; a spec task has no PR to file
                 // findings against yet (its review has nothing to comment on).
                 Kind::Spec => bail!("sbxm task file-findings doesn't take a spec task yet"),
+                // `--issue`/`--pr` never name a fix task (issue 313): its review is posted on
+                // its PR, where `task review --pr` reviews the PR again.
+                Kind::Fix => bail!("sbxm task file-findings doesn't take a fix task"),
             };
             let dir = record::task_dir(base_dir, &id);
             if !dir.join("task.json").is_file() {
