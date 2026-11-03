@@ -26,7 +26,7 @@ use super::secrets;
 use super::select::{self, Selection};
 use crate::backend::{CreateSpec, ExecSpec, Location, SandboxBackend, ScopedSecret, Stdin};
 use crate::config::{self, GlobalConfig, Profile, Resources};
-use crate::github::{GitHubBackend, Issue, IssueText, PrInfo, PrState};
+use crate::github::{CommitStatus, GitHubBackend, Issue, IssueText, PrInfo, PrState};
 use crate::harness::Harness;
 use crate::headless::{self, HeadlessOpts, RunStatus};
 use crate::run::kits::{self, HarnessKits, Overrides};
@@ -3417,7 +3417,7 @@ pub fn review_pr(
     prepared.record.open_findings = Some(outcome.open);
     prepared.record.review = Some(record::ReviewResult {
         round,
-        commit: tip,
+        commit: tip.clone(),
         posted: None,
         must_fix,
         full: true,
@@ -3452,6 +3452,11 @@ pub fn review_pr(
                 .notes
                 .push(format!("the review was posted on PR #{number}"));
             record::write(&prepared.meta, &prepared.record)?;
+            let again = review::review_pr_command(number, &repo, Some(&prepared.record.base), true);
+            let status = review::status(must_fix, &text, risk);
+            report
+                .warnings
+                .extend(post_status(github, &repo, tip.as_deref(), &status, &again));
             Ok(report)
         }
         Err(e) => {
@@ -3469,6 +3474,29 @@ pub fn review_pr(
             Ok(report)
         }
     }
+}
+
+/// Posts a review's `status` on `commit`, the commit it covered (issue 317). A failure doesn't fail
+/// the command: the review is already posted, so it is a warning naming the commit and `again`,
+/// the command that reviews the PR (and so posts the status) again.
+pub fn post_status(
+    github: &dyn GitHubBackend,
+    repo: &str,
+    commit: Option<&str>,
+    status: &CommitStatus,
+    again: &str,
+) -> Option<String> {
+    let context = &status.context;
+    let failed = match commit {
+        Some(commit) => match github.commit_status(repo, commit, status) {
+            Ok(()) => return None,
+            Err(e) => format!("the {context} status on commit {commit} couldn't be posted: {e:#}"),
+        },
+        None => format!("the {context} status wasn't posted: the reviewed commit is unknown"),
+    };
+    Some(format!(
+        "{failed}; GitHub won't count the review until it is, so post it with `{again}`"
+    ))
 }
 
 /// The text written as `.sbxm-task/gate-failure.md`: the failing command, its tier and exit

@@ -1098,3 +1098,126 @@ fn the_posted_comment_opens_with_the_risk_section() {
         "{comment}"
     );
 }
+
+// ---- Issue 317: the `sbxm/review` status on the reviewed commit ----
+
+/// The statuses posted, as (repo, commit, status).
+fn statuses(github: &FakeGitHub) -> Vec<(String, String, sbxm::github::CommitStatus)> {
+    github
+        .calls()
+        .into_iter()
+        .filter_map(|c| match c {
+            GhCall::CommitStatus(repo, sha, status) => Some((repo, sha, status)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_clean_review_posts_success_on_the_reviewed_commit_after_its_comment() {
+    let f = config("");
+    let (backend, github) = (backend(&f, &[CLEAN]), github());
+    let mut prepared = prepared(&f, &backend, &github);
+
+    let report = review_it(
+        &f,
+        &backend,
+        &github,
+        &FakeHostRunner::default(),
+        &mut prepared,
+    )
+    .unwrap();
+
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    let reviewed = saved(&f).review.unwrap().commit.expect("a reviewed commit");
+    let [(repo, sha, status)] = statuses(&github).try_into().unwrap();
+    assert_eq!((repo.as_str(), sha.as_str()), ("o/r", reviewed.as_str()));
+    // The PR's head as GitHub reports it now is another commit: it gets no status.
+    assert_ne!(sha, pr().head_oid);
+    assert_eq!(status.state, sbxm::github::StatusState::Success);
+    assert_eq!(status.context, "sbxm/review");
+    assert!(
+        status
+            .description
+            .starts_with("0 must-fix, 0 questions, risk unknown"),
+        "{status:?}"
+    );
+    let calls = github.calls();
+    let comment_at = calls
+        .iter()
+        .position(|c| matches!(c, GhCall::PrComment(..)))
+        .unwrap();
+    assert!(matches!(calls.last(), Some(GhCall::CommitStatus(..))));
+    assert!(comment_at < calls.len() - 1);
+}
+
+#[test]
+fn a_review_with_must_fix_posts_failure_on_the_reviewed_commit() {
+    let f = config("");
+    let (backend, github) = (backend(&f, &[ONE]), github());
+    let mut prepared = prepared(&f, &backend, &github);
+
+    review_it(
+        &f,
+        &backend,
+        &github,
+        &FakeHostRunner::default(),
+        &mut prepared,
+    )
+    .unwrap();
+
+    let reviewed = saved(&f).review.unwrap().commit.unwrap();
+    let [(_, sha, status)] = statuses(&github).try_into().unwrap();
+    assert_eq!(sha, reviewed);
+    assert_eq!(status.state, sbxm::github::StatusState::Failure);
+    assert!(status.description.starts_with("1 must-fix"), "{status:?}");
+}
+
+#[test]
+fn a_review_whose_comment_fails_posts_no_status() {
+    let f = config("");
+    let (backend, github) = (
+        backend(&f, &[CLEAN]),
+        github().failing_comments("rate limited"),
+    );
+    let mut prepared = prepared(&f, &backend, &github);
+
+    review_it(
+        &f,
+        &backend,
+        &github,
+        &FakeHostRunner::default(),
+        &mut prepared,
+    )
+    .unwrap();
+
+    assert!(statuses(&github).is_empty());
+}
+
+#[test]
+fn a_failed_status_is_a_warning_naming_the_commit_and_the_command_and_the_review_stands() {
+    let f = config("");
+    add_pr_head(&f, 7);
+    let (backend, github) = (backend(&f, &[CLEAN]), github().failing_statuses("HTTP 403"));
+
+    let (result, out, warn) = run_it(&f, &backend, &github);
+
+    result.unwrap();
+    let reviewed = saved(&f).review.unwrap().commit.unwrap();
+    assert!(out.contains("the review was posted on PR #7"), "{out}");
+    assert!(
+        warn.contains(&format!("sbxm/review status on commit {reviewed}")),
+        "{warn}"
+    );
+    assert!(warn.contains("HTTP 403"), "{warn}");
+    assert!(
+        warn.contains("`sbxm task review --pr 7 --repo o/r --base main --force`"),
+        "{warn}"
+    );
+    assert!(
+        github
+            .calls()
+            .iter()
+            .any(|c| matches!(c, GhCall::PrComment(..)))
+    );
+}
