@@ -1261,6 +1261,9 @@ pub struct Finished {
     /// The commit whose in-task review was posted on the new PR as its review (issue 198);
     /// `None` when no recorded review covered the PR's head.
     pub review_posted: Option<String>,
+    /// What went wrong after the PR was opened without failing the finish: the `sbxm/review`
+    /// status that couldn't be posted (issue 317).
+    pub warnings: Vec<String>,
     /// The `sbxm task review --pr` command for the PR's next commit
     /// ([`review::review_pr_command`]).
     pub review_again: String,
@@ -1517,14 +1520,30 @@ pub fn finish(
     record::write(&prepared.meta, &prepared.record).with_context(|| {
         format!("the PR is open at {url} but task.json couldn't be updated; note the URL")
     })?;
+    let pr = pr_number(&url).map_or_else(|| "<N>".to_owned(), |n| n.to_string());
+    let mut warnings = Vec::new();
     let review_posted = match posting {
         Some((commit, text)) => {
             post_in_task_review(&mut prepared, &url, &commit, &risk_text, &text, github)?;
+            // Issue 317: the review is the PR head's now, so only `--force` reviews it again.
+            let again = review::review_pr_command(&pr, &task.repo, Some(&task.base), true);
+            let (must_fix, level) = task
+                .review
+                .as_ref()
+                .map_or((0, risk::Level::default()), |r| (r.must_fix, r.risk));
+            let reviewed = super::pipeline::StatusInput {
+                commit: Some(&commit),
+                must_fix,
+                text: &text,
+                risk: level,
+            };
+            warnings.extend(super::pipeline::post_status(
+                github, &task.repo, &reviewed, &again,
+            ));
             Some(commit)
         }
         None => None,
     };
-    let pr = pr_number(&url).map_or_else(|| "<N>".to_owned(), |n| n.to_string());
     Ok(Finished {
         review_again: review::review_pr_command(pr, &task.repo, Some(&task.base), false),
         url,
@@ -1534,6 +1553,7 @@ pub fn finish(
         draft,
         unresolved,
         review_posted,
+        warnings,
     })
 }
 
@@ -2009,5 +2029,6 @@ fn finish_continued(
         draft: false,
         unresolved,
         review_posted: None,
+        warnings: Vec::new(),
     })
 }

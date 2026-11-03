@@ -5,7 +5,7 @@ use std::sync::Mutex;
 
 use anyhow::{Result, bail};
 use sbxm::github::gh::{GhBackend, GhRunner};
-use sbxm::github::{GitHubBackend, IssueRequest, PrRequest, PrState};
+use sbxm::github::{CommitStatus, GitHubBackend, IssueRequest, PrRequest, PrState, StatusState};
 
 const ISSUE_LIST: &str = include_str!("../src/github/fixtures/issue-list.json");
 const ISSUE_VIEW: &str = include_str!("../src/github/fixtures/issue-view-31.txt");
@@ -347,6 +347,58 @@ fn bad_json_names_the_command() {
     let (gh, _) = backend(Scripted::answering("[{"));
     let message = format!("{:#}", gh.issues_open("o/r").unwrap_err());
     assert!(message.contains("gh issue list"), "{message}");
+}
+
+const SHA: &str = "0123456789abcdef0123456789abcdef01234567";
+
+#[test]
+fn a_commit_status_is_posted_through_the_statuses_api() {
+    let (gh, script) = backend(Scripted::answering(""));
+
+    gh.commit_status(
+        "o/r",
+        SHA,
+        &CommitStatus {
+            state: StatusState::Failure,
+            context: "sbxm/review".into(),
+            description: "1 must-fix, 0 questions, risk low".into(),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        args(script, 0),
+        [
+            "api",
+            &format!("repos/o/r/statuses/{SHA}"),
+            "--method",
+            "POST",
+            "--silent",
+            "-f",
+            "state=failure",
+            "-f",
+            "context=sbxm/review",
+            "-f",
+            "description=1 must-fix, 0 questions, risk low",
+        ]
+    );
+}
+
+#[test]
+fn a_status_on_anything_but_a_full_commit_id_is_refused_without_calling_gh() {
+    let (gh, script) = backend(Scripted::answering(""));
+    let status = CommitStatus {
+        state: StatusState::Success,
+        context: "sbxm/review".into(),
+        description: String::new(),
+    };
+
+    for sha in ["abc1234", "../../pulls", &SHA.replace('0', "g")] {
+        let message = format!("{:#}", gh.commit_status("o/r", sha, &status).unwrap_err());
+        assert!(message.contains("not a full commit id"), "{message}");
+    }
+
+    assert!(script.calls.lock().unwrap().is_empty());
 }
 
 const PR_FORK: &str = include_str!("../src/github/fixtures/pr-view-fork.json");

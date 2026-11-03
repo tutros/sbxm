@@ -111,6 +111,12 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
     runs the gates and the reviewer as the next round, every earlier `review-<n>.md` kept. A review that completed
     but was never recorded `ready` runs the reviewer again. No `task rm --pr N` first; while the process that
     recorded the gates or the review still runs, it is refused.
+  - **A posted review sets the `sbxm/review` commit status (issue 317)** on the commit it covered: `success` with 0
+    must-fix at any risk (an open question too, shown in the description), `failure` otherwise. Both `task review
+    --pr N` and `task finish` post it, after the review comment; a later commit has none until it is reviewed, so
+    with `sbxm/review` among the ruleset's required checks GitHub merges only a reviewed commit. The status goes on
+    only when the review's `Scope:` line ends at the commit the reviewer was given, as a range of two shas on its own
+    (`<sha>..<sha>^1` is refused). A status not posted (another, unreadable or no scope, or a `gh` error) is a warning naming the `task review --pr N --force` command that posts it again.
   - **The in-task review counts as the PR's review (decision 187):** `task finish --issue N` posts the review
     recorded in `task.json` on the PR it opens (risk section first, the same one the description opens with, then a
     line naming the reviewed commit), a draft's failing review included, when that review covered the PR's head.
