@@ -22,7 +22,7 @@ use super::review::{self, COMMENT_CAP, defang, defang_mentions};
 use super::risk;
 use crate::backend::{Location, SandboxBackend};
 use crate::confirm::Confirm;
-use crate::github::{GitHubBackend, PrRequest};
+use crate::github::{GitHubBackend, ListedPr, PrRequest};
 use crate::run::results::now;
 
 /// Everything `task rm` would delete, worked out before anything is.
@@ -1255,6 +1255,9 @@ pub struct Finished {
     pub cuts: Vec<String>,
     /// The PR the task pushed to, when it continues one (decision 169): no PR was opened.
     pub continued: Option<u32>,
+    /// The PR was already open for the branch and base, so it was recorded instead of opened
+    /// (issue 60): a create whose answer was lost, or one opened by hand.
+    pub adopted: bool,
     /// Whether the PR was opened as a draft, and why ([`unresolved_reasons`]).
     pub draft: bool,
     pub unresolved: Vec<String>,
@@ -1491,6 +1494,22 @@ pub fn finish(
     let tip = repo::branch_tip(&repo_git, &task.branch)?;
     let posting = reviewed_head(&task, &tip).zip(review.clone());
 
+    // Issue 60: an open PR of this branch is looked for before anything is pushed. One into the
+    // task's base is adopted rather than opened again; one into another base is named and left
+    // alone, since pushing would move its head.
+    let existing = open_pr(github, &task)?;
+    if let Some(Found::OtherBase(pr)) = &existing {
+        bail!(
+            "{} is already open for branch {} but into {}, not {}; nothing was pushed and no \
+             second PR was opened; close or retarget that PR, then run `sbxm task finish --issue \
+             {}` again",
+            pr.url,
+            task.branch,
+            pr.base_ref,
+            task.base,
+            task.number
+        );
+    }
     repo::push(&repo_git, &task.branch)?;
     let request = PrRequest {
         head: task.branch.clone(),
@@ -1499,18 +1518,26 @@ pub fn finish(
         body,
         draft,
     };
-    let url = match github.pr_create(&task.repo, &request) {
-        Ok(url) => url,
-        Err(e) => {
-            if !prepared.record.notes.iter().any(|n| n == PUSHED_NOTE) {
-                prepared.record.notes.push(PUSHED_NOTE.to_owned());
-                let _ = record::write(&prepared.meta, &prepared.record);
-            }
-            return Err(e).context(format!(
-                "pushed {} but could not open the PR; run `sbxm task finish --issue {}` again, which only retries the PR",
-                task.branch, task.number
-            ));
-        }
+    let (url, adopted) = match existing {
+        Some(Found::Matching(pr)) => (pr.url, true),
+        _ => match github.pr_create(&task.repo, &request) {
+            Ok(url) => (url, false),
+            // A failed create is decided by reading the PR state again, never by its error
+            // text (the lesson of #319): GitHub may have opened the PR and lost only its answer.
+            Err(e) => match open_pr(github, &task) {
+                Ok(Some(Found::Matching(pr))) => (pr.url, true),
+                _ => {
+                    if !prepared.record.notes.iter().any(|n| n == PUSHED_NOTE) {
+                        prepared.record.notes.push(PUSHED_NOTE.to_owned());
+                        let _ = record::write(&prepared.meta, &prepared.record);
+                    }
+                    return Err(e).context(format!(
+                        "pushed {} but could not open the PR; run `sbxm task finish --issue {}` again, which only retries the PR",
+                        task.branch, task.number
+                    ));
+                }
+            },
+        },
     };
     prepared.record.notes.retain(|n| n != PUSHED_NOTE);
     prepared
@@ -1550,11 +1577,43 @@ pub fn finish(
         branch: task.branch,
         cuts,
         continued: None,
+        adopted,
         draft,
         unresolved,
         review_posted,
         warnings,
     })
+}
+
+/// What [`open_pr`] found for a task's branch.
+enum Found {
+    /// Open, of the task's repo, head and base: the task's PR.
+    Matching(ListedPr),
+    /// Open, of the task's repo and head, into another base.
+    OtherBase(ListedPr),
+}
+
+/// The open PR of `task`'s branch, by repo, head and base (issue 60); a failed lookup says which
+/// call failed.
+fn open_pr(github: &dyn GitHubBackend, task: &record::Record) -> Result<Option<Found>> {
+    let found = github
+        .open_pr_for(&task.repo, &task.branch, &task.base)
+        .with_context(|| {
+            format!(
+                "could not look up an open PR of branch {}; nothing was opened; run `sbxm task \
+                 finish --issue {}` again",
+                task.branch, task.number
+            )
+        })?;
+    Ok(found
+        .filter(|pr| pr.head_ref == task.branch && !pr.is_cross_repository)
+        .map(|pr| {
+            if pr.base_ref == task.base {
+                Found::Matching(pr)
+            } else {
+                Found::OtherBase(pr)
+            }
+        }))
 }
 
 /// Posts the in-task review of `commit` on the PR at `url` (issue 198), with `risk_text`, the
@@ -2026,6 +2085,7 @@ fn finish_continued(
         branch: task.branch.clone(),
         cuts: Vec::new(),
         continued: Some(pr),
+        adopted: false,
         draft: false,
         unresolved,
         review_posted: None,

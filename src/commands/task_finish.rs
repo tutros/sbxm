@@ -169,6 +169,12 @@ fn publish(
         for reason in &done.unresolved {
             writeln!(out, "  unresolved: {reason}")?;
         }
+    } else if done.adopted {
+        writeln!(
+            out,
+            "{id}: pushed {id} and found {} already open for it; recorded it as the task's PR",
+            done.url
+        )?;
     } else {
         writeln!(out, "{id}: pushed {id} and opened {}", done.url)?;
     }
