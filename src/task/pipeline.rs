@@ -10,6 +10,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use std::time::{Duration, Instant};
 
 use super::config::TaskConfig;
+use super::finish;
 use super::gates::{self, GateOutcome, HostRunner};
 use super::lifetime;
 use super::lock::ProcessLock;
@@ -234,10 +235,40 @@ pub fn lock_task(
         bail!("{id:?} isn't a task id; task ids look like issue-41 or pr-7");
     }
     let meta = record::task_dir(base_dir, id);
-    if !meta.is_dir() {
-        return Ok(None);
+    match meta.symlink_metadata() {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Ok(m) if !m.is_dir() && !m.file_type().is_symlink() => return Ok(None),
+        _ => {}
     }
-    ProcessLock::acquire(&meta, &format!("task {id}"), probe).map(Some)
+    lock_folder(base_dir, &meta, id, probe).map(Some)
+}
+
+/// Takes the lock of `meta`, task `id`'s folder, once it is checked to be that folder itself
+/// under `base_dir`, with no link on the way (`finish::check_own_folder`): a lock is never
+/// written, taken over or removed anywhere else (issue 58 review M-1).
+fn lock_folder(
+    base_dir: &Path,
+    meta: &Path,
+    id: &str,
+    probe: &dyn ProcessProbe,
+) -> Result<ProcessLock> {
+    finish::check_own_folder(base_dir, meta)?;
+    ProcessLock::acquire(meta, &format!("task {id}"), probe)
+}
+
+/// Reserves `meta`, a new task's folder (`create_dir` fails if it appeared meanwhile), and takes
+/// its lock. A lock that can't be taken means another command may own the folder by now, so it
+/// is removed only while still empty, never with what is in it (issue 58 review M-2).
+fn reserve_locked(
+    base_dir: &Path,
+    meta: &Path,
+    id: &str,
+    probe: &dyn ProcessProbe,
+) -> Result<ProcessLock> {
+    fs::create_dir(meta).with_context(|| format!("cannot reserve {}", meta.display()))?;
+    lock_folder(base_dir, meta, id, probe).inspect_err(|_| {
+        let _ = fs::remove_dir(meta);
+    })
 }
 
 /// Whether gates may run on this task now (`task gates`): after the worker or the fix round has
@@ -350,14 +381,7 @@ pub fn prepare_pr_at(ctx: &Ctx, pr: &PrInfo, location: Location) -> Result<Prepa
 
     let parent = meta.parent().unwrap_or(Path::new("."));
     fs::create_dir_all(parent).with_context(|| format!("cannot create {}", parent.display()))?;
-    fs::create_dir(&meta).with_context(|| format!("cannot reserve {}", meta.display()))?;
-    let lock = match ProcessLock::acquire(&meta, &format!("task {id}"), ctx.probe) {
-        Ok(lock) => lock,
-        Err(e) => {
-            let _ = fs::remove_dir_all(&meta);
-            return Err(e);
-        }
-    };
+    let lock = reserve_locked(&global.base_dir, &meta, &id, ctx.probe)?;
     let built = (|| -> Result<Record> {
         // The reviewer's kits must validate before anything else is made.
         let kit_set = kits::build_for(
@@ -1165,14 +1189,7 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
         fs::create_dir_all(parent)
             .with_context(|| format!("cannot create {}", parent.display()))?;
     }
-    fs::create_dir(&meta).with_context(|| format!("cannot reserve {}", meta.display()))?;
-    let lock = match ProcessLock::acquire(&meta, &format!("task {id}"), ctx.probe) {
-        Ok(lock) => lock,
-        Err(e) => {
-            let _ = fs::remove_dir_all(&meta);
-            return Err(e);
-        }
-    };
+    let lock = reserve_locked(&global.base_dir, &meta, id, ctx.probe)?;
     if local && let Err(e) = fs::create_dir(&workspace) {
         let _ = fs::remove_dir_all(&meta);
         return Err(e).with_context(|| format!("cannot reserve {}", workspace.display()));
