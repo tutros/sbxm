@@ -58,6 +58,12 @@ timeout = "20m"                # per command
 # medium = ["migrations/"]
 # high = ["src/auth/"]
 
+# How `sbxm task loop` waits out a harness's usage limit: usage_wait before each resume, and
+# the loop stops once the waits in a row reach usage_wait_total.
+# [loop]
+# usage_wait = "30m"
+# usage_wait_total = "5h"
+
 # Replace a built-in prompt with a file inside this repo:
 # [prompts]
 # worker = "prompts/worker.md"

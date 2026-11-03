@@ -64,7 +64,7 @@ pub struct Selection {
 }
 
 /// The `#<digits>` numbers on the first line of `body` that starts with `**<field>:**`.
-fn field_numbers(body: &str, field: &str) -> Vec<u32> {
+pub(crate) fn field_numbers(body: &str, field: &str) -> Vec<u32> {
     let prefix = format!("**{field}:**");
     let Some(line) = body.lines().find_map(|line| line.strip_prefix(&prefix)) else {
         return Vec::new();

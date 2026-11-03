@@ -120,3 +120,21 @@ fn refuses_to_overwrite_and_leaves_the_file_alone() {
     assert!(stderr.contains("not overwriting it"), "{stderr}");
     assert_eq!(fs::read_to_string(&file).unwrap(), "mine");
 }
+
+#[test]
+fn the_starter_loads_with_its_loop_section_uncommented() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    task_init(tmp.path(), &[]).success();
+    let path = tmp.path().join("sbxm-task.toml");
+    let text = std::fs::read_to_string(&path).unwrap();
+    let text = text
+        .replace("# [loop]", "[loop]")
+        .replace("# usage_wait", "usage_wait");
+    std::fs::write(&path, text).unwrap();
+    std::fs::write(tmp.path().join("Cargo.toml"), "[package]\n").unwrap();
+    let config = sbxm::task::config::TaskConfig::load(tmp.path()).unwrap();
+    assert_eq!(
+        config.task_loop.usage_wait,
+        std::time::Duration::from_secs(30 * 60)
+    );
+}

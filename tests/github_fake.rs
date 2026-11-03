@@ -135,6 +135,33 @@ fn a_draft_pr_request_is_recorded_as_a_draft() {
     assert!(recorded.draft);
 }
 
+#[test]
+fn the_fake_answers_a_pr_merge_state_from_its_scripted_prs() {
+    use sbxm::github::{PrInfo, PrState};
+    let pr = |number, state| PrInfo {
+        number,
+        head_ref: "b".into(),
+        head_oid: "abc".into(),
+        is_cross_repository: false,
+        head_repo: String::new(),
+        state,
+        title: "t".into(),
+        body: String::new(),
+        closing_issues: Vec::new(),
+    };
+    let gh = sbxm::github::fake::FakeGitHub::default()
+        .with_pr(pr(7, PrState::Open))
+        .with_pr(pr(8, PrState::Open))
+        .with_auto_merge(8);
+    assert!(!gh.pr_merge_state("o/r", 7).unwrap().auto_merge);
+    assert!(gh.pr_merge_state("o/r", 8).unwrap().auto_merge);
+    assert!(gh.pr_merge_state("o/r", 9).is_err());
+    assert!(
+        gh.calls()
+            .contains(&sbxm::github::fake::GhCall::PrMergeState("o/r".into(), 7))
+    );
+}
+
 fn a_status() -> CommitStatus {
     CommitStatus {
         state: StatusState::Success,

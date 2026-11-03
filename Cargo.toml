@@ -7,6 +7,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 anyhow = "1.0.104"
 clap = { version = "4.6.7", features = ["derive"] }
+ctrlc = "3.5.2"
 dirs = "7.0.0"
 fastembed = { version = "7.1.0", default-features = false, features = ["ort-download-binaries-native-tls"] }
 fs4 = "1.1.0"
