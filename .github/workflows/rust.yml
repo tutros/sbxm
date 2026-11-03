@@ -8,6 +8,9 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Less debug info to write and link, slowest on Windows (issue 395).
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
 
 jobs:
   build:
@@ -21,7 +24,17 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-    - name: Build
-      run: cargo build --verbose
+    # Third-party actions are pinned to a full commit SHA, the release tag in the comment (issue 395).
+    # Its default key is the OS, the rustc version and Cargo.lock.
+    - uses: Swatinem/rust-cache@PIN-FULL-COMMIT-SHA # v2
+    - uses: taiki-e/install-action@PIN-FULL-COMMIT-SHA # v2
+      with:
+        tool: cargo-nextest
+    # No separate `cargo build`: the tests build the binary they run themselves.
+    # nextest runs every test binary at once, one process per test; `cargo test` ran the
+    # binaries one after another.
     - name: Run tests
-      run: cargo test --verbose
+      run: cargo nextest run
+    # nextest doesn't run doc tests.
+    - name: Run doc tests
+      run: cargo test --doc
