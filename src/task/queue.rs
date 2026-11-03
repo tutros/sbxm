@@ -99,7 +99,8 @@ pub struct Row {
     pub outcome: String,
     /// Each stop's cause and how long it held the task, in seconds.
     pub stops: Vec<(String, u64)>,
-    /// From the previous task's end to this one's start; `None` for the loop's first task.
+    /// From the previous task's ready (or its end, if it never got ready) to this one's start;
+    /// `None` for the loop's first task.
     pub idle_before: Option<u64>,
 }
 

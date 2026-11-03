@@ -46,6 +46,8 @@ struct Script {
     /// The free-disk checks' answers, in order; `true` (room) once used up.
     room: RefCell<VecDeque<bool>>,
     clock: Cell<u64>,
+    /// Seconds each `finish` takes on the clock.
+    finish_takes: Cell<u64>,
 }
 
 impl Script {
@@ -56,6 +58,7 @@ impl Script {
             calls: RefCell::default(),
             room: RefCell::default(),
             clock: Cell::new(START),
+            finish_takes: Cell::new(0),
         }
     }
 
@@ -109,6 +112,7 @@ impl Steps for Script {
 
     fn finish(&self, issue: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
         self.calls.borrow_mut().push(format!("finish {issue}"));
+        self.clock.set(self.clock.get() + self.finish_takes.get());
         let mut rec = read_record(&self.base, issue);
         rec.stage = Stage::Finished;
         rec.pr = Some(format!("https://github.com/{REPO}/pull/{}", 100 + issue));
@@ -483,6 +487,22 @@ fn a_clean_task_is_logged_with_its_pr_and_times() {
         log.contains("| 1 (0) | PR #103, clean | none | - |"),
         "{log}"
     );
+}
+
+/// Review S-1: idle time runs from one task's ready to the next one's start (decision 249), so
+/// the loop's own `task finish` and findings filing count as idle.
+#[test]
+fn the_idle_time_runs_from_ready_to_the_next_start() {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S"), labeled(4, "size:S")]);
+    let script = Script::new(&f.base());
+    script.finish_takes.set(600);
+
+    run_loop(&f, opts(&f), &script, &gh).result.unwrap();
+
+    let log = f.log_text();
+    let row = log.lines().find(|l| l.contains("| #4 ")).expect("#4's row");
+    assert!(row.contains("| 10m00s |"), "{log}");
 }
 
 // --- environment stops ---

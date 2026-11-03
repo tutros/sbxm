@@ -737,7 +737,7 @@ pub fn run(
     let mut refused = Vec::new();
     let mut tasks_run = 0u32;
     let mut parked_in_row = 0;
-    let mut last_end: Option<u64> = None;
+    let mut idle_from: Option<u64> = None;
     loop {
         if (env.stop_requested)() {
             writeln!(out, "stopped on request")?;
@@ -808,7 +808,7 @@ pub fn run(
                         must_fix: None,
                         outcome: format!("stopped at {stage}: usage limit"),
                         stops,
-                        idle_before: last_end.map(|end| started.saturating_sub(end)),
+                        idle_before: idle_from.map(|end| started.saturating_sub(end)),
                     },
                     warn,
                 )?;
@@ -852,11 +852,13 @@ pub fn run(
                 .map(|r| r.must_fix),
             outcome: outcome.clone(),
             stops,
-            idle_before: last_end.map(|end| started.saturating_sub(end)),
+            idle_before: idle_from.map(|end| started.saturating_sub(end)),
         };
         writeln!(out, "#{issue}: {outcome}")?;
         lp.append(&row, warn)?;
-        last_end = Some(lp.now());
+        // Idle runs from a task's ready to the next start (decision 249, review S-1), so the
+        // loop's own finish and findings filing count; a task that never got ready, from its end.
+        idle_from = Some(ready.unwrap_or_else(|| lp.now()));
         if parked {
             parked_in_row += 1;
             if parked_in_row >= 2 {
