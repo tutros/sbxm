@@ -182,8 +182,9 @@ impl Write for Capture<'_> {
 enum End {
     /// Finished into a PR, a draft for a work stop.
     Done { ready: u64, outcome: String },
-    /// Stopped short of `ready` twice, or its finish failed: left as it is for the user.
-    Parked { outcome: String },
+    /// Stopped short of `ready` twice, or its finish failed: left as it is for the user. `ready`:
+    /// when it reached ready, for one whose finish failed.
+    Parked { ready: Option<u64>, outcome: String },
     /// Refused before anything was written: not a task.
     Refused(String),
 }
@@ -581,6 +582,7 @@ impl Loop<'_> {
                 )
                 .map_err(io)?;
                 return Ok(End::Parked {
+                    ready: None,
                     outcome: format!("parked at {stage}"),
                 });
             }
@@ -588,6 +590,7 @@ impl Loop<'_> {
             pending = Some((cause, self.now()));
             if (self.env.stop_requested)() {
                 return Ok(End::Parked {
+                    ready: None,
                     outcome: "stopped on request before its resume".to_owned(),
                 });
             }
@@ -633,6 +636,7 @@ impl Loop<'_> {
                  --issue {issue}`"
             )?;
             return Ok(End::Parked {
+                ready: Some(ready),
                 outcome: format!(
                     "parked at ready: finish failed ({})",
                     first_line(&format!("{e:#}"))
@@ -832,7 +836,7 @@ pub fn run(
                 continue;
             }
             End::Done { ready, outcome } => (Some(ready), outcome, false),
-            End::Parked { outcome } => (None, outcome, true),
+            End::Parked { ready, outcome } => (ready, outcome, true),
         };
         tasks_run += 1;
         let rec = lp.record(issue);
@@ -860,7 +864,8 @@ pub fn run(
         writeln!(out, "#{issue}: {outcome}")?;
         lp.append(&row, warn)?;
         // Idle runs from a task's ready to the next start (decision 249, review S-1), so the
-        // loop's own finish and findings filing count; a task that never got ready, from its end.
+        // loop's own finish and findings filing count, a failed finish too; a task that never got
+        // ready, from its end.
         idle_from = Some(ready.unwrap_or_else(|| lp.now()));
         if parked {
             parked_in_row += 1;

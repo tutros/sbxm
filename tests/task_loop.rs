@@ -48,6 +48,8 @@ struct Script {
     clock: Cell<u64>,
     /// Seconds each `finish` takes on the clock.
     finish_takes: Cell<u64>,
+    /// Issues whose `finish` fails, after taking its time.
+    finish_fails: RefCell<Vec<u32>>,
     /// Issues whose task continues an open PR (decision 169), with that PR's number.
     continues: RefCell<HashMap<u32, u32>>,
 }
@@ -61,6 +63,7 @@ impl Script {
             room: RefCell::default(),
             clock: Cell::new(START),
             finish_takes: Cell::new(0),
+            finish_fails: RefCell::default(),
             continues: RefCell::default(),
         }
     }
@@ -130,6 +133,9 @@ impl Steps for Script {
     fn finish(&self, issue: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
         self.calls.borrow_mut().push(format!("finish {issue}"));
         self.clock.set(self.clock.get() + self.finish_takes.get());
+        if self.finish_fails.borrow().contains(&issue) {
+            return Err(anyhow!("push refused"));
+        }
         let mut rec = read_record(&self.base, issue);
         rec.stage = Stage::Finished;
         // A continued PR keeps its number; a new one is 100 past the issue's.
@@ -520,6 +526,27 @@ fn the_idle_time_runs_from_ready_to_the_next_start() {
     run_loop(&f, opts(&f), &script, &gh).result.unwrap();
 
     let log = f.log_text();
+    let row = log.lines().find(|l| l.contains("| #4 ")).expect("#4's row");
+    assert!(row.contains("| 10m00s |"), "{log}");
+}
+
+#[test]
+fn a_failed_finish_keeps_its_ready_as_the_idle_baseline() {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S"), labeled(4, "size:S")]);
+    let script = Script::new(&f.base());
+    script.finish_takes.set(600);
+    script.finish_fails.borrow_mut().push(3);
+
+    run_loop(&f, opts(&f), &script, &gh).result.unwrap();
+
+    let log = f.log_text();
+    let parked = log.lines().find(|l| l.contains("| #3 ")).expect("#3's row");
+    assert!(parked.contains("finish failed"), "{log}");
+    assert!(
+        parked.contains("| 10:05:00 (5m00s) |"),
+        "it reached ready: {log}"
+    );
     let row = log.lines().find(|l| l.contains("| #4 ")).expect("#4's row");
     assert!(row.contains("| 10m00s |"), "{log}");
 }
