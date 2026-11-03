@@ -278,14 +278,13 @@ fn refused_through_a_link(
 
 #[test]
 fn a_linked_task_folder_is_refused_before_its_lock_is_touched() {
-    refused_through_a_link(std::path::Path::new(".sbxm/tasks/issue-41"), |outside| {
-        outside.join("lock.json")
-    });
+    // Joined, not ".sbxm/tasks/...": `cmd`'s `mklink` reads a `/` inside its argument as a switch.
+    let link = std::path::Path::new(".sbxm").join("tasks").join("issue-41");
+    refused_through_a_link(&link, |outside| outside.join("lock.json"));
 }
 
 #[test]
 fn a_linked_tasks_folder_is_refused_before_a_tasks_lock_is_touched() {
-    refused_through_a_link(std::path::Path::new(".sbxm/tasks"), |outside| {
-        outside.join("issue-41").join("lock.json")
-    });
+    let link = std::path::Path::new(".sbxm").join("tasks");
+    refused_through_a_link(&link, |outside| outside.join("issue-41").join("lock.json"));
 }
