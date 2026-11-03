@@ -101,6 +101,8 @@ fn ready_fix(f: &Fixture) -> (Prepared, String) {
         (prepared.record.stage, prepared.record.status),
         (Stage::Ready, Status::Ok)
     );
+    // The start that made it has ended: its lock (issue 58) goes with it.
+    prepared.lock = None;
     (prepared, pr.head_oid)
 }
 
@@ -406,4 +408,42 @@ fn a_pushed_fix_task_is_a_task_rm_merged_candidate_once_its_pr_merges() {
         panic!("{found:?}");
     };
     assert_eq!(candidate.id, prepared.record.id);
+}
+
+/// Issue 58: a merged task another live command holds is left alone, with that command named,
+/// and keeps its folder.
+#[test]
+fn a_merged_task_another_command_holds_is_left_alone_by_rm_merged() {
+    let f = fixture();
+    let (prepared, head) = ready_fix(&f);
+    finish_fix(
+        &f.env.base_dir(),
+        &prepared.record.id,
+        &FakeGitHub::default(),
+        &Probe,
+    )
+    .unwrap();
+    let github = FakeGitHub::default().with_pr(merged(&pr7(&head)));
+    let _held = sbxm::task::lock::ProcessLock::acquire(
+        &prepared.meta,
+        &format!("task {}", prepared.record.id),
+        &Probe,
+    )
+    .unwrap();
+
+    let found = merged::plan(&f.env.base_dir(), &f.env.base_dir(), &github, &Probe).unwrap();
+
+    assert!(found.candidates.is_empty(), "{found:?}");
+    let [left] = found.left_alone.as_slice() else {
+        panic!("{found:?}");
+    };
+    assert!(
+        left.reason.contains(&format!(
+            "task {} is in use by another sbxm command (process ",
+            prepared.record.id
+        )),
+        "{}",
+        left.reason
+    );
+    assert!(prepared.meta.join("task.json").is_file());
 }

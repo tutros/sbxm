@@ -215,3 +215,24 @@ fn the_run_log_goes_with_the_task() {
     assert!(!log.exists());
     assert!(!meta(&f).exists());
 }
+
+// ---- The task's lock (issue 58) ----
+
+#[test]
+fn rm_is_refused_while_another_live_command_holds_the_task() {
+    let f = fixture();
+    let backend = worked(&f);
+    let meta = sbxm::task::record::task_dir(&f.env.base_dir(), "issue-41");
+    let _held = sbxm::task::lock::ProcessLock::acquire(&meta, "task issue-41", &Probe).unwrap();
+    let removes = backend.removes().len();
+
+    let (result, _) = rm(&f, 41, true, &backend, &FakeConfirm::new(true, true));
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains("task issue-41 is in use by another sbxm command (process "),
+        "{message}"
+    );
+    assert!(meta.join("task.json").is_file());
+    assert_eq!(backend.removes().len(), removes, "no sandbox was removed");
+}

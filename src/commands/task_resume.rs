@@ -75,7 +75,7 @@ pub fn run(
         Target::Issue(n) => format!("issue-{n}"),
         Target::Spec(path) => record::spec_id(path)?.0,
     };
-    let mut prepared = Prepared::open(&base_dir, &id)?;
+    let mut prepared = Prepared::open_locked(&base_dir, &id, probe)?;
     // The worker is whoever the task recorded, as for `task review`: its sandbox and clone are
     // that harness's, and the default reviewer must differ from it (decision 148).
     if let Some(worker) = &prepared.record.worker {

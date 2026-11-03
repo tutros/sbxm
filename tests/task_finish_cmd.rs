@@ -247,3 +247,25 @@ fn a_review_scoped_to_another_commit_posts_no_status_and_says_why() {
         "{out}"
     );
 }
+
+// ---- The task's lock (issue 58) ----
+
+#[test]
+fn a_finish_is_refused_while_another_live_command_holds_the_task() {
+    let f = fixture();
+    ready(&f);
+    let meta = record::task_dir(&f.env.base_dir(), "issue-41");
+    let _held = sbxm::task::lock::ProcessLock::acquire(&meta, "task issue-41", &Probe).unwrap();
+    let before = fs::read(meta.join("task.json")).unwrap();
+    let github = FakeGitHub::default();
+
+    let (result, _) = go(&f, 41, &github);
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains("task issue-41 is in use by another sbxm command (process "),
+        "{message}"
+    );
+    assert_eq!(fs::read(meta.join("task.json")).unwrap(), before);
+    assert!(github.calls().is_empty(), "nothing was published");
+}
