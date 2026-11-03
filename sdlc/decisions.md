@@ -1231,7 +1231,9 @@ attach to an existing sandbox, and `--rebuild`) therefore refuse before anything
 sandbox-scoped dummy `google` secret to override the global one (`sbx secret set --sandbox`), unproven because no
 real key was stored to test precedence (#384, comment of 2026-11-03), and (c) accepting the injection. Cost: login
 mode and headless Antigravity (which needs `google` stored, [281](b)) can't be used at the same time; if both are
-wanted, test (b) with a real key first.
+wanted, test (b) with a real key first. `open` runs the same check before attaching to an existing sandbox in either mode, so
+an `"api-key"` sandbox whose `google` secret was removed is refused too, since `agy` would have no key (PR 408 narrow
+review).
 
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.

@@ -177,7 +177,7 @@ it keeps and refreshes the token itself, and sbxm stores none. The login lives i
 sign-in. Login mode refuses while a `google` secret is stored globally (`new`, `open` and `open --rebuild` alike,
 before anything is created or attached): the Antigravity kit makes `sbx` inject that secret into every sandbox, so the
 sandbox would get the key anyway. Remove it with `sbx secret rm google`, or switch back to `"api-key"`.
-With the default `"api-key"`, creating an interactive Antigravity sandbox needs the `google` secret, which `agy` uses
+With the default `"api-key"`, creating or reopening an interactive Antigravity sandbox needs the `google` secret, which `agy` uses
 as its API key. Headless Antigravity (`sbxm run` contestants and judges, `sbxm task` workers and reviewers) always
 needs the `google` secret, in both modes: nobody can sign in to a throwaway sandbox. `sbx`'s `mcp-gateway` entry is
 removed only before a headless run (issue 287), not before an interactive attach.

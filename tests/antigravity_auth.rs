@@ -250,10 +250,43 @@ fn login_open_rebuild_with_a_global_google_secret_keeps_the_old_sandbox() {
         .unwrap();
     let backend = FakeBackend::with_secrets(&["google"]).and_sandboxes(existing_sandbox());
 
-    let err = open_with(&env, true, &backend).unwrap_err();
+    let mut warn = Vec::new();
+    let err = open::run(
+        &env.config_dir(),
+        "demo",
+        &open::Options {
+            rebuild: true,
+            harness: Harness::Antigravity,
+            ..Default::default()
+        },
+        &backend,
+        &mut warn,
+    )
+    .unwrap_err();
 
     assert_google_stored_refusal(&err);
     assert!(backend.removes().is_empty() && backend.creates().is_empty());
+    // Refused before it says the session history will be lost (PR 408 narrow review, nit).
+    assert!(warn.is_empty(), "{}", String::from_utf8_lossy(&warn));
+}
+
+/// An existing `api-key` sandbox: once `google` is removed, `agy` has no key, so `open` refuses
+/// to attach and names the fix (PR 408 narrow review, should-fix).
+#[test]
+fn api_key_open_of_an_existing_sandbox_without_the_google_secret_does_not_attach() {
+    let env = Env::new();
+    env.run_with(
+        "demo",
+        &antigravity(),
+        &FakeBackend::with_secrets(&["google"]),
+    )
+    .unwrap();
+    let backend = FakeBackend::default().and_sandboxes(existing_sandbox());
+
+    let err = open_with(&env, false, &backend).unwrap_err();
+
+    assert!(format!("{err:#}").contains(MISSING_GOOGLE), "{err:#}");
+    assert!(!attached(&backend), "{:?}", backend.log());
 }
 
 // api-key × interactive: the `google` secret is required, before anything is written.
