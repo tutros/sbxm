@@ -933,18 +933,51 @@ fn antigravity_sandbox_against_real_sbx() {
     assert!(!String::from_utf8_lossy(&ls.stdout).contains(&sandbox));
 }
 
+/// Issue 384 review S-1: only a missing sign-in skips the login check; any other failure fails it.
+#[test]
+fn login_check_skips_only_without_the_token_file() {
+    use sbxm::headless::RunStatus;
+
+    let failed = RunStatus::Failed("HTTP 500 provider unavailable".into());
+    assert_eq!(login_outcome(false, &failed, ""), LoginOutcome::NotSignedIn);
+    assert!(matches!(
+        login_outcome(true, &failed, ""),
+        LoginOutcome::Fail(reason) if reason.contains("HTTP 500")
+    ));
+    assert_eq!(
+        login_outcome(true, &RunStatus::Completed, "PONG\n"),
+        LoginOutcome::Pass
+    );
+    assert!(matches!(
+        login_outcome(true, &RunStatus::Completed, "pong?"),
+        LoginOutcome::Fail(_)
+    ));
+    assert!(matches!(
+        login_outcome(true, &RunStatus::TimedOut, ""),
+        LoginOutcome::Fail(_)
+    ));
+    // An answer with no token file is no proof of the login: the path moved, or a key answered.
+    assert!(matches!(
+        login_outcome(false, &RunStatus::Completed, "PONG"),
+        LoginOutcome::Fail(reason) if reason.contains(AGY_TOKEN_FILE)
+    ));
+}
+
 /// Issue 384, decision 281 (a): a login-mode Antigravity sandbox is created without the `google`
 /// secret, and once the user has signed in inside it, `agy` answers with that login. The
 /// sandbox has a fixed name and is kept until the check passes, so the sign-in it needs (one
 /// interactive `sbx run`, which a test can't do) persists across runs of this test, the way it
 /// persists across `sbxm open`. `sbx run` needs a terminal, so `sbx exec` stands in for the
-/// attach. Not signed in yet: the test prints how to sign in and returns without failing.
+/// attach, and it doesn't check the interactive attach itself (#287 there is for the user).
+/// No token file yet: the test prints how to sign in and returns without failing; with one,
+/// any failure fails. It asks again after stopping the sandbox, so the login must survive it.
 #[test]
 #[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR; signing in inside the sandbox once"]
 fn antigravity_login_against_real_sbx() {
     use std::time::Duration;
 
-    use sbxm::headless::{self, HeadlessOpts, RunStatus};
+    use sbxm::backend::{ExecSpec, Stdin};
+    use sbxm::headless::{self, HeadlessOpts};
 
     let base_dir = real_base_dir();
     let project = "sbxm-it-agy-login";
@@ -993,31 +1026,58 @@ fn antigravity_login_against_real_sbx() {
     let workspace = base_dir.join(project);
     let path = workspace.to_string_lossy().replace(char::from(92), "/");
     let in_sandbox = PathBuf::from(format!("/{}{}", path[..1].to_lowercase(), &path[2..]));
-    let result = headless::run(
-        &SbxBackend::LOCAL,
-        &sandbox,
-        &in_sandbox,
-        agy,
-        "Reply with exactly: PONG",
-        &HeadlessOpts {
-            model: None,
-            high_effort: false,
-            budget_usd: None,
-            is_git_repo: false,
-        },
-        Duration::from_secs(120),
-    )
-    .unwrap();
-    if let RunStatus::Failed(reason) = &result.status {
-        eprintln!(
-            "SKIPPED: {sandbox} is not signed in ({reason}). Sign in once with `sbx run {sandbox}` \
-             (Google sign-in inside agy), quit agy, and run this test again; the sandbox is kept \
-             for that. Remove it afterwards with `sbx rm {sandbox}`."
-        );
-        return;
+    let ask = || {
+        // Read before every request: an `sbx exec` restarts a stopped sandbox.
+        let token = SbxBackend::LOCAL
+            .exec(
+                &sandbox,
+                &ExecSpec {
+                    workdir: None,
+                    argv: vec![
+                        "sh".into(),
+                        "-c".into(),
+                        format!("test -s \"$HOME/{AGY_TOKEN_FILE}\""),
+                    ],
+                    stdin: Stdin::Closed,
+                },
+            )
+            .unwrap()
+            .exit_code
+            == Some(0);
+        let result = headless::run(
+            &SbxBackend::LOCAL,
+            &sandbox,
+            &in_sandbox,
+            agy,
+            "Reply with exactly: PONG",
+            &HeadlessOpts {
+                model: None,
+                high_effort: false,
+                budget_usd: None,
+                is_git_repo: false,
+            },
+            Duration::from_secs(120),
+        )
+        .unwrap();
+        login_outcome(token, &result.status, &result.answer)
+    };
+
+    match ask() {
+        LoginOutcome::Pass => {}
+        LoginOutcome::NotSignedIn => {
+            eprintln!(
+                "SKIPPED: {sandbox} is not signed in (no ~/{AGY_TOKEN_FILE}). Sign in once with \
+                 `sbx run {sandbox}` (Google sign-in inside agy), quit agy, and run this test \
+                 again; the sandbox is kept for that. Remove it afterwards with `sbx rm {sandbox}`."
+            );
+            return;
+        }
+        LoginOutcome::Fail(reason) => panic!("{sandbox}: {reason}"),
     }
-    assert!(matches!(result.status, RunStatus::Completed), "{result:?}");
-    assert!(result.answer.contains("PONG"), "{result:?}");
+
+    // The login survives the sandbox stopping, as it does between two `sbxm open`s.
+    SbxBackend::LOCAL.stop(&sandbox).unwrap();
+    assert_eq!(ask(), LoginOutcome::Pass, "after a stop");
 
     // Checked: remove it, so the next run starts from a fresh sign-in.
     let _cleanup = Cleanup {
@@ -1025,6 +1085,37 @@ fn antigravity_login_against_real_sbx() {
         dirs: vec![workspace, base_dir.join(".sbxm").join(project)],
         shared_dirs: vec![base_dir.join(".sbxm")],
     };
+}
+
+/// Where `agy` keeps its Google sign-in, under the sandbox user's home (decision 124 (f)).
+const AGY_TOKEN_FILE: &str = ".gemini/antigravity-cli/antigravity-oauth-token";
+
+#[derive(Debug, PartialEq)]
+enum LoginOutcome {
+    Pass,
+    NotSignedIn,
+    Fail(String),
+}
+
+/// Classifies one login-mode request: only a missing token file is "not signed in" (S-1).
+fn login_outcome(
+    token_file_present: bool,
+    status: &sbxm::headless::RunStatus,
+    answer: &str,
+) -> LoginOutcome {
+    use sbxm::headless::RunStatus;
+
+    match (token_file_present, status) {
+        (false, RunStatus::Failed(_) | RunStatus::TimedOut) => LoginOutcome::NotSignedIn,
+        (false, RunStatus::Completed) => LoginOutcome::Fail(format!(
+            "agy answered with no ~/{AGY_TOKEN_FILE}: the file moved, or a key answered instead \
+             of the login"
+        )),
+        (true, RunStatus::Completed) if answer.contains("PONG") => LoginOutcome::Pass,
+        (true, RunStatus::Completed) => LoginOutcome::Fail(format!("no PONG in {answer:?}")),
+        (true, RunStatus::TimedOut) => LoginOutcome::Fail("timed out (#287?)".into()),
+        (true, RunStatus::Failed(reason)) => LoginOutcome::Fail(reason.clone()),
+    }
 }
 
 #[test]
