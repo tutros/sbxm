@@ -14,7 +14,7 @@ use std::collections::HashSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -38,6 +38,8 @@ use crate::task::{findings, pipeline};
 pub const PR_CAP: usize = 5;
 /// How often a pause looks again.
 pub const PAUSE_POLL: Duration = Duration::from_secs(5 * 60);
+/// How often a task's first phase is looked at for its record, to take its label off.
+const LABEL_POLL: Duration = Duration::from_secs(2);
 
 pub struct Options {
     /// The target repo's root, where `sbxm-task.toml` is and the log is written.
@@ -217,22 +219,67 @@ impl Loop<'_> {
         Ok(())
     }
 
-    /// Removes the loop's label from a started task's issue (decision 4): only once its record
-    /// exists, so a run refused before any write leaves the issue in the queue.
-    fn unlabel(&mut self, issue: u32, labeled: bool, warn: &mut dyn Write) -> Result<()> {
-        if !labeled || self.record(issue).is_none() {
-            return Ok(());
-        }
-        if let Err(e) = self
-            .github
-            .issue_labels(&self.repo, issue, &[], &[READY_LABEL.to_owned()])
-        {
+    /// The first phase of a task whose issue still has the loop's label, with the label taken off
+    /// as soon as the task's record exists (decision 4, review M-2): the record is written before
+    /// the worker's sandbox is made, so the label is gone while the worker runs. A run refused
+    /// before any write leaves the issue in the queue. Returns the phase's result and, if the
+    /// label was taken off meanwhile, how that went.
+    fn run_unlabeling(
+        &self,
+        issue: u32,
+        step: impl FnOnce() -> Result<()>,
+    ) -> (Result<()>, Option<Result<()>>) {
+        let task_json = self.task_dir(issue).join("task.json");
+        let (github, repo) = (self.github, self.repo.as_str());
+        let (done, ended) = mpsc::channel::<()>();
+        std::thread::scope(|scope| {
+            let watcher = scope.spawn(move || {
+                loop {
+                    if task_json.is_file() {
+                        return Some(github.issue_labels(
+                            repo,
+                            issue,
+                            &[],
+                            &[READY_LABEL.to_owned()],
+                        ));
+                    }
+                    if !matches!(
+                        ended.recv_timeout(LABEL_POLL),
+                        Err(mpsc::RecvTimeoutError::Timeout)
+                    ) {
+                        return None;
+                    }
+                }
+            });
+            let result = step();
+            drop(done);
+            (result, watcher.join().unwrap_or(None))
+        })
+    }
+
+    /// After a phase: the label's removal reported, or done now if the watcher didn't see the
+    /// record in time. `true` once the label is no longer the loop's to take off.
+    fn unlabeled(
+        &mut self,
+        issue: u32,
+        removed: Option<Result<()>>,
+        warn: &mut dyn Write,
+    ) -> Result<bool> {
+        let removed = match removed {
+            Some(removed) => removed,
+            None if self.record(issue).is_some() => {
+                self.github
+                    .issue_labels(&self.repo, issue, &[], &[READY_LABEL.to_owned()])
+            }
+            None => return Ok(false),
+        };
+        if let Err(e) = removed {
             self.warn_once(
                 warn,
                 format!("#{issue}'s {READY_LABEL} label could not be removed: {e:#}"),
             )?;
         }
-        Ok(())
+        Ok(true)
     }
 
     fn warn_once(&mut self, warn: &mut dyn Write, text: String) -> Result<()> {
@@ -427,10 +474,12 @@ impl Loop<'_> {
             .collect()
     }
 
-    /// One task, to its PR or its parking (decision 245(d)).
+    /// One task, to its PR or its parking (decision 245(d)). `label`: its issue has the loop's
+    /// label, taken off once the task exists.
     fn task(
         &mut self,
         issue: u32,
+        mut label: bool,
         stops: &mut Vec<(String, u64)>,
         out: &mut dyn Write,
         warn: &mut dyn Write,
@@ -457,15 +506,21 @@ impl Loop<'_> {
                     inner: warn,
                     text: Vec::new(),
                 };
-                let result = if resuming {
-                    self.steps.resume(issue, &mut out, &mut warn)
+                let (result, removed) = if resuming {
+                    (self.steps.resume(issue, &mut out, &mut warn), None)
+                } else if label {
+                    self.run_unlabeling(issue, || self.steps.run(issue, &mut out, &mut warn))
                 } else {
-                    self.steps.run(issue, &mut out, &mut warn)
+                    (self.steps.run(issue, &mut out, &mut warn), None)
                 };
                 captured.extend(out.text);
                 captured.extend(warn.text);
-                result
+                (result, removed)
             };
+            let (result, removed) = result;
+            if label && self.unlabeled(issue, removed, warn).map_err(Halt::Error)? {
+                label = false;
+            }
             let ready = self.record(issue).filter(|r| r.stage == Stage::Ready);
             let e = match (result, ready) {
                 (Ok(()), Some(_)) => {
@@ -702,8 +757,7 @@ pub fn run(
             size.as_deref().unwrap_or("unknown")
         )?;
         let mut stops = Vec::new();
-        let ended = lp.task(issue, &mut stops, out, warn);
-        lp.unlabel(issue, labeled, warn)?;
+        let ended = lp.task(issue, labeled, &mut stops, out, warn);
         let end = match ended {
             Ok(end) => end,
             Err(Halt::Error(e)) => return Err(e),

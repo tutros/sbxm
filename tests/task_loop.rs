@@ -1249,3 +1249,115 @@ fn the_real_resume_still_refuses_a_task_another_live_process_owns() {
     assert!(error.contains("still running"), "{error}");
     assert_eq!(rec.process, Some(other));
 }
+
+/// Notes, at each phase, whether the loop had taken `#3`'s label off yet; in `run`, once the
+/// record exists, it gives the loop a few seconds to notice while the phase is still running.
+struct LabelWatch<'a> {
+    script: Script,
+    gh: &'a FakeGitHub,
+    seen: RefCell<Vec<(String, bool)>>,
+}
+
+impl LabelWatch<'_> {
+    fn removed(&self) -> bool {
+        self.gh.calls().contains(&GhCall::IssueLabels(
+            REPO.into(),
+            3,
+            Vec::new(),
+            vec![READY.to_owned()],
+        ))
+    }
+
+    fn note(&self, phase: &str) {
+        let removed = self.removed();
+        self.seen.borrow_mut().push((phase.to_owned(), removed));
+    }
+}
+
+impl Steps for LabelWatch<'_> {
+    fn run(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
+        let result = self.script.run(issue, out, warn);
+        if record::task_dir(&self.script.base, "issue-3")
+            .join("task.json")
+            .is_file()
+        {
+            let until = std::time::Instant::now() + Duration::from_secs(10);
+            while !self.removed() && std::time::Instant::now() < until {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+        self.note("run");
+        result
+    }
+    fn resume(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
+        self.note("resume");
+        self.script.resume(issue, out, warn)
+    }
+    fn finish(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
+        self.note("finish");
+        self.script.finish(issue, out, warn)
+    }
+    fn file_findings(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
+        self.script.file_findings(issue, out, warn)
+    }
+    fn room(&self) -> Result<()> {
+        self.script.room()
+    }
+}
+
+fn watch_label(acts: &[Act]) -> Vec<(String, bool)> {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S")]);
+    let steps = LabelWatch {
+        script: Script::new(&f.base()).plays(3, acts),
+        gh: &gh,
+        seen: RefCell::default(),
+    };
+    let now = || steps.script.clock.get();
+    let env = Env {
+        now: &now,
+        sleep: &|_| {},
+        stop_requested: &|| false,
+    };
+    task_loop::run(
+        &f.env.config_dir(),
+        &with_cap(&f, 1),
+        &steps,
+        &gh,
+        &Probe,
+        &env,
+        &mut Vec::new(),
+        &mut Vec::new(),
+    )
+    .unwrap();
+    steps.seen.into_inner()
+}
+
+/// Review M-2: the label goes once the task's record exists, while its first phase still runs,
+/// not after `task finish`.
+#[test]
+fn the_label_is_gone_while_the_first_phase_runs_and_before_finish() {
+    let seen = watch_label(&[Act::Ready(0)]);
+
+    assert_eq!(
+        seen,
+        [("run".to_owned(), true), ("finish".to_owned(), true)]
+    );
+}
+
+#[test]
+fn the_label_is_gone_before_a_usage_wait_s_resume() {
+    let seen = watch_label(&[
+        Act::Fail("Claude AI usage limit reached", true),
+        Act::Ready(0),
+    ]);
+
+    assert_eq!(
+        seen,
+        [
+            ("run".to_owned(), true),
+            ("resume".to_owned(), true),
+            ("finish".to_owned(), true)
+        ]
+    );
+}
