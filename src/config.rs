@@ -47,10 +47,26 @@ pub struct GlobalConfig {
     /// Where `sbx` keeps its sandboxes, overriding the platform default (decision 194).
     #[serde(default)]
     pub sandbox_state_dir: Option<PathBuf>,
+    /// How an interactive Antigravity sandbox signs in (decision 281, issue 384). Account-level,
+    /// so it's not in the config hash.
+    #[serde(default)]
+    pub antigravity_auth: AntigravityAuth,
     /// Written by `config init` before decision 76 but never read; refused
     /// by [`GlobalConfig::load`] rather than silently ignored.
     #[serde(default)]
     default_harness: Option<toml::Value>,
+}
+
+/// `antigravity_auth`: how `agy` authenticates in an interactive sandbox (`new`/`open`). Headless
+/// sandboxes (`run`, `task`) use the `google` secret in both modes (decision 281 (b)).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum AntigravityAuth {
+    /// The `google` secret, used as a Gemini API key (decision 137); required to create one.
+    #[default]
+    ApiKey,
+    /// The user signs in inside the sandbox once; `agy` keeps and refreshes the token itself.
+    Login,
 }
 
 fn default_profile_name() -> String {

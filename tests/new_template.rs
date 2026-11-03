@@ -568,7 +568,7 @@ fn a_strict_profile_refuses_a_harness_templates_do_not_support() {
     let harness = Harness::Antigravity;
     let env = Env::new();
     env.write_profile("default", &strict(PROFILE));
-    let backend = sbx_046();
+    let backend = sbx_046().and_secrets(&["google"]);
 
     let (result, _) = new_demo_with(&env, &backend, harness);
 
@@ -590,7 +590,7 @@ fn a_non_strict_profile_warns_and_installs_for_a_harness_templates_do_not_suppor
     let harness = Harness::Antigravity;
     let env = Env::new();
     env.write_profile("default", PROFILE);
-    let backend = sbx_046();
+    let backend = sbx_046().and_secrets(&["google"]);
 
     let (result, warn) = new_demo_with(&env, &backend, harness);
 

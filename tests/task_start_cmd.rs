@@ -726,6 +726,28 @@ fn agy_models(backend: &FakeBackend) -> Vec<String> {
         .collect()
 }
 
+/// Issue 384: `antigravity_auth = "login"` frees only interactive sandboxes; a headless
+/// worker still needs the `google` secret and is refused before any sandbox exists.
+#[test]
+fn login_mode_still_needs_the_google_secret_for_an_antigravity_worker() {
+    let f = fixture();
+    f.env.set_config("antigravity_auth = \"login\"");
+    let backend = playing(&f)
+        .and_secrets(&["anthropic"])
+        .with_exec_output_matching("agy", ok(AGY_DONE));
+
+    let out = run(&f, &antigravity_options(&f, None), &backend, &github());
+
+    assert!(out.result.is_err());
+    assert!(
+        out.out
+            .contains("secret 'google' (needed by the worker, antigravity) is not stored"),
+        "{}",
+        out.out
+    );
+    assert!(backend.creates().is_empty(), "{:?}", backend.log());
+}
+
 /// Issue 314, boundary case 1: no model set means Antigravity's default, passed and recorded.
 #[test]
 fn an_antigravity_worker_without_a_model_runs_and_records_the_default() {
