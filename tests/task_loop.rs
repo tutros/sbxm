@@ -36,6 +36,28 @@ enum Act {
     Fail(&'static str, bool),
     /// `sbx` couldn't run, before any record.
     ExecUnavailable,
+    /// Reaches `ready`, and a command run by hand then holds the task's lock (issue 409):
+    /// a live holder when `true`, a gone one otherwise.
+    ReadyLocked(bool),
+    /// `task resume` finds the task's lock held by a live command run by hand, which keeps it.
+    Held,
+}
+
+/// A live process `Probe` reports for every pid: the holder of a lock planted by hand.
+const HAND: u32 = 4242;
+
+fn lock_file(base: &Path, issue: u32) -> PathBuf {
+    record::task_dir(base, &format!("issue-{issue}")).join("lock.json")
+}
+
+/// Plants `issue-<n>`'s lock as a command run by hand holds it: alive under `Probe` when
+/// `live`, else started at another time than `Probe` reports, so gone.
+fn plant_lock(base: &Path, issue: u32, live: bool) -> String {
+    let mut held = serde_json::to_value(Process::new(HAND, if live { 0 } else { 5 })).unwrap();
+    held["token"] = "hand".into();
+    let text = held.to_string();
+    fs::write(lock_file(base, issue), &text).unwrap();
+    text
 }
 
 /// Plays `task run`, `task resume`, `task finish` and `task file-findings` for the loop.
@@ -52,6 +74,24 @@ struct Script {
     finish_fails: RefCell<Vec<u32>>,
     /// Issues whose task continues an open PR (decision 169), with that PR's number.
     continues: RefCell<HashMap<u32, u32>>,
+    /// When this call is made, the command run by hand on this issue's task ends, freeing its
+    /// lock, after leaving the task as [`Hand`] says.
+    unlock_on: RefCell<Option<(String, u32, Hand)>>,
+}
+
+/// What the command run by hand leaves of the task when it ends (review M-1 of issue 409).
+#[derive(Clone, Copy, PartialEq)]
+enum Hand {
+    /// The task as it found it.
+    Unchanged,
+    /// Finished into a PR, as `task finish` does.
+    Finished,
+    /// At `ready`, as `task resume` does.
+    Ready,
+    /// Gone, as `task rm` does.
+    Removed,
+    /// Stopped at `working`, as a failed `task resume --rounds` leaves it.
+    Working,
 }
 
 impl Script {
@@ -65,7 +105,17 @@ impl Script {
             finish_takes: Cell::new(0),
             finish_fails: RefCell::default(),
             continues: RefCell::default(),
+            unlock_on: RefCell::default(),
         }
+    }
+
+    fn unlocking(self, call: &str, issue: u32) -> Self {
+        self.hand_ends(call, issue, Hand::Unchanged)
+    }
+
+    fn hand_ends(self, call: &str, issue: u32, hand: Hand) -> Self {
+        *self.unlock_on.borrow_mut() = Some((call.to_owned(), issue, hand));
+        self
     }
 
     fn continuing(self, issue: u32, pr: u32) -> Self {
@@ -84,8 +134,36 @@ impl Script {
         self.calls.borrow().clone()
     }
 
+    fn note(&self, call: String) {
+        if let Some((_, locked, hand)) = self
+            .unlock_on
+            .borrow()
+            .as_ref()
+            .filter(|(when, ..)| *when == call)
+        {
+            let dir = record::task_dir(&self.base, &format!("issue-{locked}"));
+            match hand {
+                Hand::Unchanged => {}
+                Hand::Finished => {
+                    write_record(
+                        &self.base,
+                        *locked,
+                        Stage::Finished,
+                        None,
+                        Some(500 + locked),
+                    );
+                }
+                Hand::Ready => write_record(&self.base, *locked, Stage::Ready, Some(0), None),
+                Hand::Removed => fs::remove_dir_all(&dir).unwrap(),
+                Hand::Working => write_record(&self.base, *locked, Stage::Working, None, None),
+            }
+            let _ = fs::remove_file(lock_file(&self.base, *locked));
+        }
+        self.calls.borrow_mut().push(call);
+    }
+
     fn act(&self, what: &str, issue: u32) -> Result<()> {
-        self.calls.borrow_mut().push(format!("{what} {issue}"));
+        self.note(format!("{what} {issue}"));
         self.clock.set(self.clock.get() + 300);
         let act = self
             .acts
@@ -116,6 +194,17 @@ impl Script {
             Act::ExecUnavailable => Err(anyhow::Error::new(sbxm::headless::ExecUnavailable(
                 "sbx exec failed".into(),
             ))),
+            Act::ReadyLocked(live) => {
+                write_record(&self.base, issue, Stage::Ready, Some(0), None);
+                plant_lock(&self.base, issue, live);
+                Ok(())
+            }
+            Act::Held => {
+                plant_lock(&self.base, issue, true);
+                let dir = record::task_dir(&self.base, &format!("issue-{issue}"));
+                sbxm::task::lock::ProcessLock::acquire(&dir, &format!("task issue-{issue}"), &Probe)
+                    .map(drop)
+            }
         }
     }
 }
@@ -131,7 +220,7 @@ impl Steps for Script {
     }
 
     fn finish(&self, issue: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
-        self.calls.borrow_mut().push(format!("finish {issue}"));
+        self.note(format!("finish {issue}"));
         self.clock.set(self.clock.get() + self.finish_takes.get());
         if self.finish_fails.borrow().contains(&issue) {
             return Err(anyhow!("push refused"));
@@ -146,9 +235,7 @@ impl Steps for Script {
     }
 
     fn file_findings(&self, issue: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
-        self.calls
-            .borrow_mut()
-            .push(format!("file-findings {issue}"));
+        self.note(format!("file-findings {issue}"));
         Ok(())
     }
 
@@ -550,6 +637,364 @@ fn a_failed_finish_keeps_its_ready_as_the_idle_baseline() {
     );
     let row = log.lines().find(|l| l.contains("| #4 ")).expect("#4's row");
     assert!(row.contains("| 10m00s |"), "{log}");
+}
+
+// --- the per-task lock (issue 409) ---
+
+fn phases(script: &Script) -> Vec<String> {
+    script.calls().into_iter().filter(|c| c != "room").collect()
+}
+
+fn loops_hook(base: &Path, issue: u32) -> Option<serde_json::Value> {
+    read_record(base, issue)
+        .hooks
+        .get(task_loop::LOOP_HOOK)
+        .cloned()
+}
+
+#[test]
+fn a_free_lock_is_taken_for_the_claim_and_free_again_after_it() {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S")]);
+    let script = Script::new(&f.base());
+
+    run_loop(&f, opts(&f), &script, &gh).result.unwrap();
+
+    assert_eq!(
+        loops_hook(&f.base(), 3),
+        Some(serde_json::Value::Bool(true))
+    );
+    assert!(!lock_file(&f.base(), 3).exists());
+}
+
+#[test]
+fn a_lock_held_at_the_claim_skips_the_finish_and_the_task_is_tried_after_the_next_one() {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S"), labeled(4, "size:M")]);
+    let script = Script::new(&f.base())
+        .plays(3, &[Act::ReadyLocked(true)])
+        .unlocking("run 4", 3);
+
+    let run = run_loop(&f, opts(&f), &script, &gh);
+
+    run.result.unwrap();
+    assert_eq!(
+        phases(&script),
+        [
+            "run 3",
+            "run 4",
+            "finish 4",
+            "file-findings 4",
+            "finish 3",
+            "file-findings 3"
+        ]
+    );
+    let line = run
+        .out
+        .lines()
+        .find(|l| l.contains("in use by another sbxm command"))
+        .unwrap_or_else(|| panic!("{}", run.out));
+    assert!(line.starts_with("#3: "), "{line}");
+    assert!(line.contains(&format!("process {HAND}")), "{line}");
+    assert!(line.contains("task finish"), "{line}");
+    assert_eq!(
+        run.out.matches("in use by another sbxm command").count(),
+        1,
+        "{}",
+        run.out
+    );
+    assert_eq!(
+        loops_hook(&f.base(), 3),
+        Some(serde_json::Value::Bool(true))
+    );
+    assert!(!lock_file(&f.base(), 3).exists());
+    let log = f.log_text();
+    assert_eq!(log.matches("| #3 ").count(), 1, "{log}");
+}
+
+#[test]
+fn a_lock_held_at_the_claim_writes_nothing_and_never_calls_finish() {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S")]);
+    let script = Script::new(&f.base()).plays(3, &[Act::ReadyLocked(true)]);
+    let task_json = record::task_dir(&f.base(), "issue-3").join("task.json");
+
+    let run = run_loop(&f, opts(&f), &script, &gh);
+
+    run.result.unwrap();
+    assert_eq!(phases(&script), ["run 3"]);
+    assert_eq!(loops_hook(&f.base(), 3), None);
+    assert_eq!(read_record(&f.base(), 3).stage, Stage::Ready);
+    assert!(task_json.is_file());
+    let lock: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(lock_file(&f.base(), 3)).unwrap()).unwrap();
+    assert_eq!(lock["token"], "hand", "the hand command's lock stays");
+    assert!(
+        run.out.contains("sbxm task finish --issue 3"),
+        "the loop's end names what is left: {}",
+        run.out
+    );
+    assert!(!f.log_text().contains("| #3 "), "{}", f.log_text());
+}
+
+#[test]
+fn a_stale_lock_at_the_claim_is_taken_over() {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S")]);
+    let script = Script::new(&f.base()).plays(3, &[Act::ReadyLocked(false)]);
+
+    let run = run_loop(&f, opts(&f), &script, &gh);
+
+    run.result.unwrap();
+    assert_eq!(phases(&script), ["run 3", "finish 3", "file-findings 3"]);
+    assert_eq!(
+        loops_hook(&f.base(), 3),
+        Some(serde_json::Value::Bool(true))
+    );
+    assert!(!lock_file(&f.base(), 3).exists());
+    assert!(!run.out.contains("in use"), "{}", run.out);
+}
+
+#[test]
+fn a_lock_held_at_the_resume_skips_it_and_the_task_is_tried_after_the_next_one() {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S"), labeled(4, "size:M")]);
+    let script = Script::new(&f.base())
+        .plays(
+            3,
+            &[
+                Act::Fail("sbx stopped answering", true),
+                Act::Held,
+                Act::Ready(0),
+            ],
+        )
+        .unlocking("run 4", 3);
+
+    let run = run_loop(&f, opts(&f), &script, &gh);
+
+    run.result.unwrap();
+    assert_eq!(
+        phases(&script),
+        [
+            "run 3",
+            "resume 3",
+            "run 4",
+            "finish 4",
+            "file-findings 4",
+            "resume 3",
+            "finish 3",
+            "file-findings 3"
+        ]
+    );
+    let line = run
+        .out
+        .lines()
+        .find(|l| l.contains("in use by another sbxm command"))
+        .unwrap_or_else(|| panic!("{}", run.out));
+    assert!(line.starts_with("#3: "), "{line}");
+    assert!(line.contains("task resume"), "{line}");
+    assert!(!run.out.contains("parked"), "{}", run.out);
+}
+
+#[test]
+fn a_held_resume_is_not_a_failure_so_the_retry_still_counts_the_first_one() {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S"), labeled(4, "size:M")]);
+    let script = Script::new(&f.base())
+        .plays(
+            3,
+            &[
+                Act::Fail("sbx stopped answering", true),
+                Act::Held,
+                Act::Fail("sbx stopped answering", true),
+            ],
+        )
+        .unlocking("run 4", 3);
+
+    let run = run_loop(&f, opts(&f), &script, &gh);
+
+    run.result.unwrap();
+    assert_eq!(
+        runs(&script),
+        ["run 3", "resume 3", "run 4", "resume 3"],
+        "the retry's failure is the task's second: parked, not resumed again"
+    );
+    assert!(run.out.contains("#3: parked"), "{}", run.out);
+}
+
+#[test]
+fn a_task_held_with_nothing_else_to_run_ends_the_loop_naming_its_resume() {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S")]);
+    let script =
+        Script::new(&f.base()).plays(3, &[Act::Fail("sbx stopped answering", true), Act::Held]);
+
+    let run = run_loop(&f, opts(&f), &script, &gh);
+
+    run.result.unwrap();
+    assert_eq!(runs(&script), ["run 3", "resume 3"]);
+    assert!(
+        run.out.contains("sbxm task resume --issue 3"),
+        "{}",
+        run.out
+    );
+}
+
+/// Review M-1: a task the command run by hand finished while the loop waited is that command's:
+/// no claim, no second finish, no row and not parked.
+#[test]
+fn a_held_finish_whose_holder_finished_the_task_is_left_to_it() {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S"), labeled(4, "size:M")]);
+    let script = Script::new(&f.base())
+        .plays(3, &[Act::ReadyLocked(true)])
+        .hand_ends("run 4", 3, Hand::Finished);
+
+    let run = run_loop(&f, opts(&f), &script, &gh);
+
+    run.result.unwrap();
+    assert_eq!(
+        phases(&script),
+        ["run 3", "run 4", "finish 4", "file-findings 4"]
+    );
+    assert_eq!(
+        loops_hook(&f.base(), 3),
+        None,
+        "a PR opened by hand is not the loop's"
+    );
+    assert!(!run.out.contains("parked"), "{}", run.out);
+    let line = run
+        .out
+        .lines()
+        .find(|l| l.starts_with("#3: ") && l.contains("finished by a command run by hand"))
+        .unwrap_or_else(|| panic!("{}", run.out));
+    assert!(line.contains("pull/503"), "{line}");
+    assert!(!f.log_text().contains("| #3 "), "{}", f.log_text());
+    assert!(
+        !run.out.contains("sbxm task finish --issue 3"),
+        "{}",
+        run.out
+    );
+}
+
+#[test]
+fn a_held_resume_whose_holder_finished_the_task_is_left_to_it() {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S"), labeled(4, "size:M")]);
+    let script = Script::new(&f.base())
+        .plays(3, &[Act::Fail("sbx stopped answering", true), Act::Held])
+        .hand_ends("run 4", 3, Hand::Finished);
+
+    let run = run_loop(&f, opts(&f), &script, &gh);
+
+    run.result.unwrap();
+    assert_eq!(
+        phases(&script),
+        ["run 3", "resume 3", "run 4", "finish 4", "file-findings 4"]
+    );
+    assert_eq!(loops_hook(&f.base(), 3), None);
+    assert!(!run.out.contains("parked"), "{}", run.out);
+    assert!(
+        run.out.contains("finished by a command run by hand"),
+        "{}",
+        run.out
+    );
+}
+
+#[test]
+fn a_held_resume_whose_holder_got_the_task_ready_goes_on_to_its_finish() {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S"), labeled(4, "size:M")]);
+    let script = Script::new(&f.base())
+        .plays(3, &[Act::Fail("sbx stopped answering", true), Act::Held])
+        .hand_ends("run 4", 3, Hand::Ready);
+
+    let run = run_loop(&f, opts(&f), &script, &gh);
+
+    run.result.unwrap();
+    assert_eq!(
+        phases(&script),
+        [
+            "run 3",
+            "resume 3",
+            "run 4",
+            "finish 4",
+            "file-findings 4",
+            "finish 3",
+            "file-findings 3"
+        ],
+        "a ready task is not resumed again"
+    );
+    assert_eq!(
+        loops_hook(&f.base(), 3),
+        Some(serde_json::Value::Bool(true))
+    );
+}
+
+#[test]
+fn a_held_finish_whose_holder_left_the_task_short_of_ready_resumes_it() {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S"), labeled(4, "size:M")]);
+    let script = Script::new(&f.base())
+        .plays(3, &[Act::ReadyLocked(true), Act::Ready(0)])
+        .hand_ends("run 4", 3, Hand::Working);
+
+    run_loop(&f, opts(&f), &script, &gh).result.unwrap();
+
+    assert_eq!(
+        phases(&script),
+        [
+            "run 3",
+            "run 4",
+            "finish 4",
+            "file-findings 4",
+            "resume 3",
+            "finish 3",
+            "file-findings 3"
+        ]
+    );
+}
+
+#[test]
+fn a_held_task_its_holder_removed_is_left_to_it() {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S"), labeled(4, "size:M")]);
+    let script = Script::new(&f.base())
+        .plays(3, &[Act::ReadyLocked(true)])
+        .hand_ends("run 4", 3, Hand::Removed);
+
+    let run = run_loop(&f, opts(&f), &script, &gh);
+
+    run.result.unwrap();
+    assert_eq!(
+        phases(&script),
+        ["run 3", "run 4", "finish 4", "file-findings 4"],
+        "neither finished nor run again"
+    );
+    assert!(!run.out.contains("parked"), "{}", run.out);
+    assert!(
+        run.out
+            .contains("#3: its task was removed by a command run by hand"),
+        "{}",
+        run.out
+    );
+    assert!(!f.log_text().contains("| #3 "), "{}", f.log_text());
+}
+
+#[test]
+fn a_held_task_does_not_count_toward_the_cap() {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S"), labeled(4, "size:M")]);
+    let script = Script::new(&f.base())
+        .plays(3, &[Act::ReadyLocked(true)])
+        .unlocking("run 4", 3);
+
+    run_loop(&f, with_cap(&f, 1), &script, &gh).result.unwrap();
+
+    assert_eq!(
+        phases(&script),
+        ["run 3", "run 4", "finish 4", "file-findings 4"]
+    );
 }
 
 // --- environment stops ---
@@ -1499,11 +1944,24 @@ fn the_real_file_findings_step_files_nothing_for_a_review_without_should_fix() {
 /// the task owned by the loop itself; the real resume must take it over once that phase has
 /// returned, and still refuse a task another live process owns.
 fn resume_owned_by(f: &Fixture, owner: Process) -> (String, Record) {
+    resume_locked(f, owner, None).0
+}
+
+/// [`resume_owned_by`] with `issue-3`'s lock planted first by a command run by hand, live or
+/// gone (issue 409); also returns the error itself.
+fn resume_locked(
+    f: &Fixture,
+    owner: Process,
+    lock: Option<bool>,
+) -> ((String, Record), Option<anyhow::Error>) {
     write_record(&f.base(), 3, Stage::Working, None, None);
     let dir = record::task_dir(&f.base(), "issue-3");
     let mut rec = read_record(&f.base(), 3);
     rec.process = Some(owner);
     record::write(&dir, &rec).unwrap();
+    if let Some(live) = lock {
+        plant_lock(&f.base(), 3, live);
+    }
     let gh = FakeGitHub::default().with_user("me");
     let backend = sbxm::backend::FakeBackend::default();
     let host = sbxm::task::gates::FakeHostRunner::default();
@@ -1517,11 +1975,59 @@ fn resume_owned_by(f: &Fixture, owner: Process) -> (String, Record) {
         host: &host,
         disk: sbxm::disk::Guard::default(),
     };
-    let error = match steps.resume(3, &mut Vec::new(), &mut Vec::new()) {
+    let result = steps.resume(3, &mut Vec::new(), &mut Vec::new());
+    let error = match &result {
         Ok(()) => String::new(),
         Err(e) => format!("{e:#}"),
     };
-    (error, read_record(&f.base(), 3))
+    ((error, read_record(&f.base(), 3)), result.err())
+}
+
+#[test]
+fn the_real_release_skips_a_task_whose_lock_a_live_command_holds() {
+    let f = fixture();
+    let me = Process::current(&Probe);
+    let task_json = record::task_dir(&f.base(), "issue-3").join("task.json");
+
+    let ((error, rec), err) = resume_locked(&f, me.clone(), Some(true));
+
+    let err = err.expect("refused");
+    assert!(
+        err.is::<sbxm::task::lock::InUse>(),
+        "the lock's refusal, not task resume's: {error}"
+    );
+    assert!(error.contains(&format!("process {HAND}")), "{error}");
+    assert_eq!(rec.process, Some(me), "nothing written");
+    assert!(task_json.is_file());
+    let lock: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(lock_file(&f.base(), 3)).unwrap()).unwrap();
+    assert_eq!(lock["token"], "hand", "the hand command's lock stays");
+    let run_log = record::task_dir(&f.base(), "issue-3").join("run.log");
+    assert!(
+        !run_log.exists() || !fs::read_to_string(&run_log).unwrap().contains("resume"),
+        "task resume never ran"
+    );
+}
+
+#[test]
+fn the_real_release_takes_over_a_stale_lock_and_frees_it() {
+    let f = fixture();
+
+    let ((error, _), _) = resume_locked(&f, Process::current(&Probe), Some(false));
+
+    assert!(!error.contains("in use"), "{error}");
+    assert!(!error.contains("still running"), "{error}");
+    assert!(!lock_file(&f.base(), 3).exists());
+}
+
+#[test]
+fn the_real_release_leaves_the_lock_free_once_the_loops_own_command_returned() {
+    let f = fixture();
+
+    let ((error, _), _) = resume_locked(&f, Process::current(&Probe), None);
+
+    assert!(!error.contains("in use"), "{error}");
+    assert!(!lock_file(&f.base(), 3).exists());
 }
 
 #[test]
