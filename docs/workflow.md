@@ -293,6 +293,25 @@ sandbox's own policy, so it runs after `create` and before any agent, and remove
   listed as denied there is actually needed; if it is, add it to `[template].allow`. A denied host can fail at DNS,
   with connection refused or with a proxy 403 (S14, Q1), so don't look only for a 403.
 
+## Fix an open PR (or a task's branch) with a worker
+
+A worker can fix a PR's review finding from a spec. The branch to fix must be where the worker can start from:
+
+1. Under a strict warm template, merge `main` into the branch first when its lock files (`Cargo.lock`) are behind
+   `main`'s: the template was warmed with `main`'s, and a branch with different ones is refused.
+2. Push the branch to `origin` after that merge (`git push -u origin <branch>`), also when the branch is already
+   there: the worker starts from the branch on `origin`, so a merge that is only in your checkout is never seen,
+   and `--base` can't find a branch that only exists in your checkout or in a task's `repo.git`.
+3. Write a complete spec file. A worker can't ask or look anything up, so put in it every fact it needs (the finding,
+   the files, the expected behavior, the boundary cases, the checks).
+4. `sbxm task run --spec FILE --base <branch>`. Without `--base`, a spec task starts from the checkout's
+   `origin/HEAD` (the default branch), not from the branch you have checked out, and finds nothing to fix.
+5. `sbxm task finish --spec FILE` (the `local` sink keeps the result in the task's `repo.git` and prints the
+   `git fetch` command).
+6. Fetch the branch from the task's `repo.git` with that command, check the diff, fast-forward the PR branch to it
+   and push.
+7. `sbxm task review --pr N` reviews the new head.
+
 ## How a change to sbxm itself goes
 
 1. Plan with the `sdlc-planning` skill: numbered decisions in `sdlc/decisions.md`, spikes for unknowns.
