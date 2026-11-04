@@ -28,25 +28,49 @@ pub const CAP: u64 = 64 * 1024 * 1024;
 /// (checked by hand on 2026-11-04).
 const NOT_FOUND: &str = "No conversation found with session ID";
 
+/// Shell functions the session scripts share, so nothing they write or remove goes through a link
+/// the agent left (the clone and `~/.claude` are the agent's; review M-1): `plain_dir` refuses a
+/// folder that is a link or no folder, `free_file` a file that is a link or no plain file, and
+/// `put` copies into a fresh file (`mktemp`) and renames it over the destination, so an existing
+/// plain file, hard links included, is replaced rather than written through.
+const GUARDS: &str = concat!(
+    "set -e; ",
+    "plain_dir() { if [ -L \"$1\" ] || [ ! -d \"$1\" ]; then ",
+    "echo \"$1 is a link or not a folder; refusing to write into it\" >&2; exit 1; fi; }; ",
+    "free_file() { if [ -L \"$1\" ] || { [ -e \"$1\" ] && [ ! -f \"$1\" ]; }; then ",
+    "echo \"$1 is a link or not a file; refusing to write it\" >&2; exit 1; fi; }; ",
+    "put() { t=$(mktemp \"${2%/*}/.sbxm-session.XXXXXX\"); chmod 644 \"$t\"; ",
+    "cp -- \"$1\" \"$t\" && mv -f -- \"$t\" \"$2\" || { rm -f -- \"$t\"; exit 1; }; }; ",
+);
+
 /// Copies the session out of the CLI's projects folder into the clone, run by `sh -c` with `$1`
 /// that folder (`$HOME/.claude/projects`), `$2` the session id and `$3` the copy's path. The
 /// session is found by its file name, whatever project folder the CLI chose for it.
 const SAVE_SCRIPT: &str = concat!(
-    "set -e; ",
     "f=$(find \"$1\" -mindepth 2 -maxdepth 2 -type f -name \"$2.jsonl\" 2>/dev/null | head -n 1); ",
     "if [ -z \"$f\" ]; then echo \"no $2.jsonl under $1\" >&2; exit 1; fi; ",
-    "cp -- \"$f\" \"$3\"",
+    "plain_dir \"${3%/*}\"; free_file \"$3\"; put \"$f\" \"$3\"",
 );
+
+/// Removes `$1`, a file in the clone's `.sbxm-task/`, unless that folder is a link.
+const REMOVE_SCRIPT: &str = "plain_dir \"${1%/*}\"; rm -f -- \"$1\"";
 
 /// Puts the session back where the CLI looks for it, run by `sh -c` with `$1` the clone's project
 /// folder under `$HOME/.claude/projects`, `$2` the session id and `$3` the copy in the clone
 /// (removed once in place).
 const RESTORE_SCRIPT: &str = concat!(
-    "set -e; ",
-    "mkdir -p -- \"$1\"; ",
-    "cp -- \"$3\" \"$1/$2.jsonl\"; ",
+    "[ -e \"$1\" ] || [ -L \"$1\" ] || mkdir -p -- \"$1\"; ",
+    "plain_dir \"$1\"; free_file \"$1/$2.jsonl\"; ",
+    "plain_dir \"${3%/*}\"; if [ -L \"$3\" ] || [ ! -f \"$3\" ]; then ",
+    "echo \"$3 is a link or not a file; refusing to read it\" >&2; exit 1; fi; ",
+    "put \"$3\" \"$1/$2.jsonl\"; ",
     "rm -f -- \"$3\"",
 );
+
+/// Clears the way for a copy into a cloud clone's `.sbxm-task/` at `$1`: refused when that folder
+/// is a link or `$1` is a link or no plain file, removed when it is one, so the copy makes a new
+/// file instead of writing through what the agent left there.
+const CLEAR_SCRIPT: &str = "plain_dir \"${1%/*}\"; free_file \"$1\"; rm -f -- \"$1\"";
 
 /// The CLI's projects folder in `sandbox`, `$HOME/.claude/projects`, with `$HOME` read once
 /// (`printenv HOME`) and passed to the scripts as a value.
@@ -162,7 +186,7 @@ fn copy_out(
     };
     // The copy in the clone goes (the task's folder keeps its own), removed inside the sandbox:
     // the clone is the agent's, so the host never deletes through what it may have linked there.
-    let _ = backend.exec(sandbox, &script("rm -f -- \"$1\"", &[&in_clone]));
+    let _ = backend.exec(sandbox, &script(REMOVE_SCRIPT, &[&in_clone]));
     match read {
         Ok(AgentFile::Text(text)) if text.is_empty() => Err("it is empty".to_owned()),
         Ok(AgentFile::Text(text)) => Ok(text),
@@ -263,9 +287,20 @@ fn place(
             repo::write_agent_files(&prepared.workspace, &[(FILE, &bytes)], Existing::Refuse)
                 .map_err(|e| format!("{e:#}"))
         }
-        Location::Cloud => backend
-            .copy_in(sandbox, kept_at, in_clone)
-            .map_err(|e| format!("cannot copy the session into {sandbox}: {e:#}")),
+        Location::Cloud => {
+            let out = backend
+                .exec(sandbox, &script(CLEAR_SCRIPT, &[in_clone]))
+                .map_err(|e| format!("cannot copy the session into {sandbox}: {e:#}"))?;
+            if out.exit_code != Some(0) {
+                return Err(format!(
+                    "the session could not be copied into {sandbox}: {}",
+                    out.stderr.trim()
+                ));
+            }
+            backend
+                .copy_in(sandbox, kept_at, in_clone)
+                .map_err(|e| format!("cannot copy the session into {sandbox}: {e:#}"))
+        }
     }
 }
 
@@ -282,10 +317,12 @@ pub(super) fn not_found(result: &HeadlessResult) -> bool {
             .any(|line| line.trim_start().starts_with(NOT_FOUND))
 }
 
-/// `sh -c <script> sh <args…>`, with no working folder: the values are positional arguments,
-/// never pasted into the script.
+/// `sh -c <GUARDS><script> sh <args…>`, with no working folder: the values are positional
+/// arguments, never pasted into the script.
 fn script(script: &str, args: &[&str]) -> ExecSpec {
-    let mut argv: Vec<String> = ["sh", "-c", script, "sh"].map(str::to_owned).into();
+    let mut argv: Vec<String> = ["sh", "-c", &format!("{GUARDS}{script}"), "sh"]
+        .map(str::to_owned)
+        .into();
     argv.extend(args.iter().map(|a| (*a).to_owned()));
     ExecSpec {
         workdir: None,

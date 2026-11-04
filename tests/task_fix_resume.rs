@@ -189,10 +189,9 @@ fn the_workers_session_is_kept_in_the_task_folder() {
     // The copy left in the clone is removed inside the sandbox, never by the host.
     let copy = save.argv.last().unwrap().clone();
     assert!(
-        backend.execs().iter().any(
-            |(_, s)| s.argv.get(2).is_some_and(|a| a.starts_with("rm -f"))
-                && s.argv.last() == Some(&copy)
-        ),
+        backend.execs().iter().any(|(_, s)| !is_save(s)
+            && s.argv.get(2).is_some_and(|a| a.contains("rm -f"))
+            && s.argv.last() == Some(&copy)),
         "{copy}"
     );
 }
@@ -523,4 +522,181 @@ fn a_fix_round_that_runs_fresh_says_so_in_the_commands_output() {
     }
     let record = cloud_task::task_record(&f, &id);
     assert_eq!(record.stage, Stage::Ready);
+}
+
+/// The clone is the agent's: whatever it leaves at the paths the session travels through (a link
+/// or a hard link in `.sbxm-task`, a linked `.sbxm-task`, a link under `~/.claude/projects`), the
+/// session's copies never write through it or delete what it points at (review M-1). The session
+/// scripts run for real here, with the sandbox's home in a temp folder.
+#[cfg(unix)]
+mod links {
+    use super::*;
+    use common::task_fixture::issue_text;
+    use std::os::unix::fs::symlink;
+
+    /// Like [`backend`], but the `sh` scripts run for real, `printenv HOME` answers `home` (where
+    /// the worker's session is), and `meddle` runs in the clone once the worker's run is done.
+    fn real_backend(
+        f: &Fixture,
+        reviews: &[&str],
+        home: &Path,
+        meddle: impl Fn(&Path) + Send + Sync + 'static,
+    ) -> FakeBackend {
+        let worker = play_tasks(
+            &f.env.base_dir(),
+            "main",
+            Play {
+                commits: vec!["a.txt".into()],
+                result_md: Some(b"done\n".to_vec()),
+                bundle_bytes: None,
+            },
+        );
+        let reviewer = play_reviews(
+            &f.env.base_dir(),
+            "issue-41",
+            reviews.iter().map(|s| (*s).to_owned()).collect(),
+        );
+        let session = home.join(".claude/projects/-somewhere");
+        fs::create_dir_all(&session).unwrap();
+        fs::write(session.join(format!("{SESSION}.jsonl")), "{\"turn\":1}\n").unwrap();
+        let home = format!("{}\n", home.display());
+        FakeBackend::with_secrets(&["anthropic", "openai"])
+            .with_exec_responder(move |_sandbox, spec| {
+                if spec.argv == ["printenv", "HOME"] {
+                    return Some(ok(&home));
+                }
+                if spec.argv.first().is_none_or(|a| a != "sh") {
+                    return None;
+                }
+                let out = std::process::Command::new("sh")
+                    .args(&spec.argv[1..])
+                    .output()
+                    .unwrap();
+                Some(ExecOutput {
+                    stdout: String::from_utf8_lossy(&out.stdout).into_owned(),
+                    stderr: String::from_utf8_lossy(&out.stderr).into_owned(),
+                    exit_code: out.status.code(),
+                })
+            })
+            .with_exec_output_matching("claude", ok(CLAUDE_DONE))
+            .with_exec_output_matching("codex", ok(CODEX_DONE))
+            .with_exec_hook(move |sandbox, spec| {
+                worker(sandbox, spec);
+                reviewer(sandbox, spec);
+                let first_run = is_claude(spec) && !spec.argv.iter().any(|a| a.contains("fix-"));
+                if let (true, Some(dir)) = (first_run, &spec.workdir) {
+                    meddle(dir);
+                }
+            })
+    }
+
+    /// The worker's run, without failing the test when a link the worker left makes a later
+    /// step of it refuse.
+    fn run_worker(f: &Fixture, backend: &FakeBackend) -> Prepared {
+        let github = FakeGitHub::default();
+        let source = source(f);
+        let ctx = ctx(f, &source, backend, &github);
+        let mut prepared = pipeline::prepare(&ctx, &issue_text(41)).unwrap();
+        let _ = pipeline::run_worker(&ctx, &mut prepared);
+        prepared.lock = None;
+        prepared
+    }
+
+    #[test]
+    fn a_link_left_where_the_session_is_copied_is_not_written_through() {
+        let f = config(true);
+        let home = f.env.tmp.path().join("sandbox-home");
+        let backend = real_backend(&f, &[CLEAN], &home, |clone| {
+            fs::write(clone.join("a.txt"), "mine\n").unwrap();
+            symlink("../a.txt", clone.join(".sbxm-task/worker-session.jsonl")).unwrap();
+        });
+
+        let prepared = run_worker(&f, &backend);
+
+        assert_eq!(
+            fs::read_to_string(prepared.workspace.join("a.txt")).unwrap(),
+            "mine\n"
+        );
+        assert!(said(&prepared).contains("not kept"), "{}", said(&prepared));
+        assert_eq!(saved_session(&f), None);
+        assert!(!kept(&f).exists());
+    }
+
+    #[test]
+    fn a_hard_link_left_where_the_session_is_copied_is_replaced_not_written_through() {
+        let f = config(true);
+        let home = f.env.tmp.path().join("sandbox-home");
+        let backend = real_backend(&f, &[CLEAN], &home, |clone| {
+            fs::write(clone.join("a.txt"), "mine\n").unwrap();
+            fs::hard_link(
+                clone.join("a.txt"),
+                clone.join(".sbxm-task/worker-session.jsonl"),
+            )
+            .unwrap();
+        });
+
+        let prepared = run_worker(&f, &backend);
+
+        assert_eq!(
+            fs::read_to_string(prepared.workspace.join("a.txt")).unwrap(),
+            "mine\n"
+        );
+        assert_eq!(fs::read_to_string(kept(&f)).unwrap(), "{\"turn\":1}\n");
+        assert_eq!(saved_session(&f).as_deref(), Some(SESSION));
+    }
+
+    #[test]
+    fn a_linked_control_folder_is_neither_written_into_nor_cleaned_up() {
+        let f = config(true);
+        let home = f.env.tmp.path().join("sandbox-home");
+        let elsewhere = f.env.tmp.path().join("elsewhere");
+        fs::create_dir_all(&elsewhere).unwrap();
+        fs::write(elsewhere.join("worker-session.jsonl"), "mine\n").unwrap();
+        let target = elsewhere.clone();
+        let backend = real_backend(&f, &[CLEAN], &home, move |clone| {
+            let control = clone.join(".sbxm-task");
+            fs::rename(&control, clone.join("moved")).unwrap();
+            symlink(&target, &control).unwrap();
+        });
+
+        let prepared = run_worker(&f, &backend);
+
+        assert_eq!(
+            fs::read_to_string(elsewhere.join("worker-session.jsonl")).unwrap(),
+            "mine\n"
+        );
+        assert!(said(&prepared).contains("not kept"), "{}", said(&prepared));
+        assert_eq!(saved_session(&f), None);
+    }
+
+    #[test]
+    fn a_link_left_where_the_session_is_put_back_is_not_written_through() {
+        let f = config(true);
+        let home = f.env.tmp.path().join("sandbox-home");
+        let victim = f.env.tmp.path().join("victim.txt");
+        fs::write(&victim, "mine\n").unwrap();
+        let (target, projects) = (victim.clone(), home.join(".claude/projects"));
+        let backend = real_backend(&f, &[ONE, CLEAN], &home, move |clone| {
+            let dir = projects.join(
+                clone
+                    .to_string_lossy()
+                    .replace(|c: char| !c.is_ascii_alphanumeric(), "-"),
+            );
+            fs::create_dir_all(&dir).unwrap();
+            symlink(&target, dir.join(format!("{SESSION}.jsonl"))).unwrap();
+        });
+        let mut prepared = run_worker(&f, &backend);
+        assert_eq!(saved_session(&f).as_deref(), Some(SESSION));
+
+        let report = review(&f, &backend, &mut prepared).unwrap();
+
+        assert!(report.fix_ran);
+        assert_eq!(fs::read_to_string(&victim).unwrap(), "mine\n");
+        assert_eq!(resumes(&fix_runs(&backend)[0]), None);
+        assert!(
+            said(&prepared).contains("runs fresh"),
+            "{}",
+            said(&prepared)
+        );
+    }
 }
