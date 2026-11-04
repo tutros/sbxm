@@ -24,6 +24,7 @@ fn opts() -> HeadlessOpts {
         high_effort: false,
         budget_usd: None,
         is_git_repo: false,
+        resume: None,
     }
 }
 
@@ -394,4 +395,43 @@ fn the_cloud_stream_error_without_the_timeout_lines_is_exec_unavailable() {
         unavailable.0.contains("RunExecSession: stream error"),
         "{unavailable}"
     );
+}
+
+/// Issue 418: the session a Claude run used, read from its stream-json, so a fix round can resume
+/// it.
+#[test]
+fn a_claude_stream_names_its_session() {
+    let result = Harness::Claude.parse_headless_output(PONG).unwrap();
+    assert_eq!(
+        result.session_id.as_deref(),
+        Some("92ae7cb6-403a-4abc-a295-072f335d20cb")
+    );
+    let truncated = Harness::Claude.parse_headless_output(TRUNCATED).unwrap();
+    assert_eq!(
+        truncated.session_id.as_deref(),
+        Some("92ae7cb6-403a-4abc-a295-072f335d20cb")
+    );
+    assert_eq!(
+        Harness::Claude
+            .parse_headless_output("not json\n")
+            .unwrap()
+            .session_id,
+        None
+    );
+}
+
+/// Issue 418: `--resume <session>` continues a Claude session; the prompt is the next turn.
+#[test]
+fn claude_resumes_a_session_when_asked() {
+    let resuming = HeadlessOpts {
+        resume: Some("92ae7cb6-403a-4abc-a295-072f335d20cb".into()),
+        ..opts()
+    };
+    let argv = Harness::Claude.headless_argv("fix it", &resuming).unwrap();
+    assert_eq!(&argv[..3], ["claude", "-p", "fix it"]);
+    let at = argv.iter().position(|a| a == "--resume").unwrap();
+    assert_eq!(argv[at + 1], "92ae7cb6-403a-4abc-a295-072f335d20cb");
+    // Without it, no `--resume`.
+    let fresh = Harness::Claude.headless_argv("fix it", &opts()).unwrap();
+    assert!(!fresh.iter().any(|a| a == "--resume"));
 }

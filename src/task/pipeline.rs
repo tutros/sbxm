@@ -2830,6 +2830,7 @@ pub(super) fn work(env: &TaskEnv, prepared: &mut Prepared) -> Result<Worked> {
         high_effort: false,
         budget_usd: None,
         is_git_repo: true,
+        resume: None,
     };
     let result = match headless::run(
         env.backend,
@@ -3984,6 +3985,7 @@ fn fix(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
             high_effort: false,
             budget_usd: None,
             is_git_repo: true,
+            resume: None,
         },
         worker.time_limit,
     ) {
@@ -4863,6 +4865,7 @@ fn run_review_agent(
             high_effort: true,
             budget_usd: None,
             is_git_repo: true,
+            resume: None,
         },
         reviewer.time_limit,
     )

@@ -21,6 +21,7 @@ fn opts() -> HeadlessOpts {
         high_effort: false,
         budget_usd: None,
         is_git_repo: false,
+        resume: None,
     }
 }
 

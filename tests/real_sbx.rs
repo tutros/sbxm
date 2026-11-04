@@ -656,6 +656,7 @@ fn claude_headless_against_real_sbx() {
         high_effort: false,
         budget_usd: None,
         is_git_repo: false,
+        resume: None,
     };
 
     let result = headless::run(
@@ -739,6 +740,7 @@ fn codex_headless_against_real_sbx() {
         high_effort: false,
         budget_usd: None,
         is_git_repo: false,
+        resume: None,
     };
 
     let result = headless::run(
@@ -892,6 +894,7 @@ fn antigravity_sandbox_against_real_sbx() {
                 high_effort: false,
                 budget_usd: None,
                 is_git_repo: false,
+                resume: None,
             },
         )
         .unwrap();
@@ -924,6 +927,7 @@ fn antigravity_sandbox_against_real_sbx() {
             high_effort: false,
             budget_usd: None,
             is_git_repo: false,
+            resume: None,
         },
         Duration::from_secs(60),
     )
@@ -1091,6 +1095,7 @@ fn antigravity_login_against_real_sbx() {
                 high_effort: false,
                 budget_usd: None,
                 is_git_repo: false,
+                resume: None,
             },
             Duration::from_secs(120),
         )
