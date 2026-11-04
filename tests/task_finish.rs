@@ -10,6 +10,7 @@ use common::task_fixture::{
     CLAUDE_DONE, Fixture, Play, Probe, backend, fixture, ok, play, worked_task,
 };
 use sbxm::github::fake::{FakeGitHub, GhCall};
+use sbxm::github::{ListedPr, PrState};
 use sbxm::task::finish::{
     SECTION_CAP, check_can_finish, finish, pr_body, risk_section, unresolved_section,
 };
@@ -91,7 +92,7 @@ fn a_ready_task_is_pushed_and_its_pr_is_opened_with_the_result_and_review() {
         git(&f.origin, &["rev-parse", "issue-41"]),
         git(&prepared.meta.join("repo.git"), &["rev-parse", "issue-41"])
     );
-    let calls = github.calls();
+    let calls = writes(&github);
     let [GhCall::PrCreate(repo, request)] = calls.as_slice() else {
         panic!("{calls:?}")
     };
@@ -181,7 +182,7 @@ const REVIEW_WITH_MUST_FIX: &str = "Reviewer: codex (default)\n\nMust-fix findin
 
 /// The PR request `finish` made, after checking it made exactly one.
 fn only_pr_request(github: &FakeGitHub) -> sbxm::github::PrRequest {
-    let calls = github.calls();
+    let calls = writes(github);
     let [GhCall::PrCreate(_, request)] = calls.as_slice() else {
         panic!("{calls:?}")
     };
@@ -228,6 +229,37 @@ fn a_ready_task_with_must_fix_left_opens_a_draft_that_lists_the_findings() {
     let record = reread(&f);
     assert_eq!(record.stage, Stage::Finished);
     assert_eq!(record.pr.as_deref(), Some(done.url.as_str()));
+}
+
+/// Issue 220 part 2, decision 283: a draft carries the worker's hand-back sections the same way,
+/// after the risk section and above the result.
+#[test]
+fn a_draft_carries_the_results_needs_a_decision_and_choices_made_sections() {
+    let f = fixture();
+    let prepared = ready(&f);
+    fs::write(prepared.meta.join("review.md"), REVIEW_WITH_MUST_FIX).unwrap();
+    fs::write(
+        prepared.meta.join("result.md"),
+        "## Done\n\nyes\n\n## Choices made\n\n- A over B.\n\n## Needs a decision\n\n- Q? I'd pick A.\n",
+    )
+    .unwrap();
+    let github = FakeGitHub::default();
+
+    let done = run(&f, &github).unwrap();
+
+    let request = only_pr_request(&github);
+    assert!(request.draft && done.draft);
+    let body = &request.body;
+    let risk = body.find("## Risk:").expect(body);
+    let needs = body
+        .find("## Needs a decision\n\n- Q? I'd pick A.\n")
+        .expect(body);
+    let choices = body.find("## Choices made\n\n- A over B.\n").expect(body);
+    let result = body.find("## Result\n").expect(body);
+    assert!(
+        risk < needs && needs < choices && choices < result,
+        "{body}"
+    );
 }
 
 #[test]
@@ -332,7 +364,7 @@ fn a_task_that_is_not_ready_is_refused_before_anything_is_pushed_or_opened() {
         message.contains("not ready; run `sbxm task review --issue 41`"),
         "{message}"
     );
-    assert!(github.calls().is_empty());
+    assert!(writes(&github).is_empty());
     assert!(!origin_has(&f, "issue-41"));
 }
 
@@ -347,7 +379,7 @@ fn a_task_with_a_pr_is_refused_and_nothing_is_pushed_again() {
     let err = run(&f, &github).unwrap_err();
 
     assert!(format!("{err:#}").contains("already has a PR"), "{err:#}");
-    assert_eq!(github.calls().len(), 1);
+    assert_eq!(writes(&github).len(), 1);
     assert_eq!(git(&f.origin, &["rev-parse", "issue-41"]), before);
 }
 
@@ -355,7 +387,7 @@ fn a_task_with_a_pr_is_refused_and_nothing_is_pushed_again() {
 fn a_pr_that_cannot_be_opened_leaves_a_ready_task_with_a_note_and_a_rerun_opens_it() {
     let f = fixture();
     ready(&f);
-    let down = FakeGitHub::default().failing("gh: HTTP 502");
+    let down = FakeGitHub::default().failing_pr_create("gh: HTTP 502", false);
 
     let err = run(&f, &down).unwrap_err();
 
@@ -395,7 +427,7 @@ fn a_failed_push_opens_no_pr_and_leaves_the_record_as_it_was() {
         format!("{err:#}").contains("cannot push issue-41"),
         "{err:#}"
     );
-    assert!(github.calls().is_empty());
+    assert!(writes(&github).is_empty());
     assert_eq!(
         fs::read_to_string(prepared.meta.join("task.json")).unwrap(),
         before
@@ -413,7 +445,7 @@ fn a_task_without_commits_beyond_the_base_is_refused() {
     let err = run(&f, &github).unwrap_err();
 
     assert!(format!("{err:#}").contains("no commits"), "{err:#}");
-    assert!(github.calls().is_empty());
+    assert!(writes(&github).is_empty());
     assert!(!origin_has(&f, "issue-41"));
 }
 
@@ -436,7 +468,7 @@ fn a_secret_in_review_or_result_stops_the_publish_without_echoing_it() {
         "{message}"
     );
     assert!(!message.contains("ghp_abc"), "{message}");
-    assert!(github.calls().is_empty());
+    assert!(writes(&github).is_empty());
     assert!(!origin_has(&f, "issue-41"));
 }
 
@@ -509,7 +541,7 @@ fn a_record_that_names_a_hostile_branch_is_refused() {
         format!("{err:#}").contains("isn't a usable branch name"),
         "{err:#}"
     );
-    assert!(github.calls().is_empty());
+    assert!(writes(&github).is_empty());
 }
 
 // ---- Slice 10 review, must-fix 2: the agent's commits must not start CI before anyone looks ----
@@ -540,7 +572,7 @@ fn a_branch_that_changes_a_workflow_is_refused_before_anything_is_pushed() {
             !origin_has(&f, "issue-41"),
             "{path}: the branch must not have been pushed"
         );
-        assert!(github.calls().is_empty(), "{path}: no PR may be opened");
+        assert!(writes(&github).is_empty(), "{path}: no PR may be opened");
         let after =
             fs::read_to_string(record::task_dir(&f.env.base_dir(), "issue-41").join("task.json"))
                 .unwrap();
@@ -621,7 +653,7 @@ fn the_pr_path_refuses_a_spec_task() {
 
     let message = format!("{:#}", result.unwrap_err());
     assert!(message.contains("never a PR"), "{message}");
-    assert!(github.calls().is_empty());
+    assert!(writes(&github).is_empty());
 }
 
 #[test]
@@ -811,7 +843,7 @@ fn a_secret_in_a_recorded_open_finding_stops_the_publish_without_echoing_it() {
         assert!(message.contains("looks like a secret"), "{message}");
         assert!(message.contains("open findings"), "{message}");
         assert!(!message.contains("ghp_abc"), "{message}");
-        assert!(github.calls().is_empty(), "{review:?}");
+        assert!(writes(&github).is_empty(), "{review:?}");
         assert!(!origin_has(&f, "issue-41"), "{review:?}");
     }
 }
@@ -834,7 +866,7 @@ fn a_secret_past_the_cut_of_a_long_recorded_finding_still_stops_the_publish() {
     let message = format!("{err:#}");
     assert!(message.contains("looks like a secret"), "{message}");
     assert!(!message.contains("ghp_abc"), "{message}");
-    assert!(github.calls().is_empty());
+    assert!(writes(&github).is_empty());
     assert!(!origin_has(&f, "issue-41"));
 }
 
@@ -936,7 +968,7 @@ fn reviewed_at(prepared: &mut Prepared, commit: &str, must_fix: u32, review: &st
 /// The one PR `finish` opened and the one comment it posted, after checking it made exactly
 /// those calls, in that order, with the `sbxm/review` status last (issue 317).
 fn pr_and_comment(github: &FakeGitHub) -> (sbxm::github::PrRequest, u32, String) {
-    let calls = github.calls();
+    let calls = writes(github);
     let [
         GhCall::PrCreate(_, request),
         GhCall::PrComment(repo, pr, body),
@@ -1275,7 +1307,7 @@ fn a_review_scoped_to_another_commit_posts_no_status_and_the_comment_stands() {
 
     let done = run(&f, &github).unwrap();
 
-    let calls = github.calls();
+    let calls = writes(&github);
     assert!(
         matches!(
             calls.as_slice(),
@@ -1334,7 +1366,7 @@ fn a_scope_ending_at_a_revision_of_the_reviewed_commit_posts_no_status() {
 
         let done = run(&f, &github).unwrap();
 
-        let calls = github.calls();
+        let calls = writes(&github);
         assert!(
             matches!(
                 calls.as_slice(),
@@ -1352,4 +1384,214 @@ fn a_scope_ending_at_a_revision_of_the_reviewed_commit_posts_no_status() {
         );
         assert!(warning.contains("--force`"), "{warning}");
     }
+}
+
+fn listed(number: u32, head: &str, base: &str) -> ListedPr {
+    ListedPr {
+        number,
+        url: format!("https://github.com/o/r/pull/{number}"),
+        head_ref: head.into(),
+        base_ref: base.into(),
+        is_cross_repository: false,
+    }
+}
+
+fn pr_creates(github: &FakeGitHub) -> usize {
+    github
+        .calls()
+        .iter()
+        .filter(|c| matches!(c, GhCall::PrCreate(..)))
+        .count()
+}
+
+/// Issue 60: GitHub opened the PR but its answer was lost. The lookup after the failed create
+/// finds it, so the task ends `finished` with its URL and no second create.
+#[test]
+fn a_pr_opened_remotely_whose_answer_was_lost_is_adopted_after_the_failed_create() {
+    let f = fixture();
+    ready(&f);
+    let lost = FakeGitHub::default().failing_pr_create("gh: HTTP 502", true);
+
+    let done = run(&f, &lost).unwrap();
+
+    assert_eq!(pr_creates(&lost), 1, "{:?}", lost.calls());
+    let record = reread(&f);
+    assert_eq!((record.stage, record.status), (Stage::Finished, Status::Ok));
+    assert_eq!(record.pr.as_deref(), Some(done.url.as_str()));
+    assert!(done.adopted);
+    assert!(record.notes.is_empty(), "{:?}", record.notes);
+}
+
+/// Issue 60, the acceptance criterion: the create failed and the PR wasn't visible yet, so the
+/// task stayed `ready`; the next `task finish` finds the PR, records it and creates nothing.
+#[test]
+fn the_next_finish_adopts_a_pr_the_failed_create_opened_without_creating_another() {
+    let f = fixture();
+    ready(&f);
+    let down = FakeGitHub::default().failing_pr_create("gh: HTTP 502", false);
+    let err = run(&f, &down).unwrap_err();
+    assert!(format!("{err:#}").contains("gh: HTTP 502"), "{err:#}");
+    assert_eq!(reread(&f).stage, Stage::Ready);
+
+    let up =
+        FakeGitHub::default().with_listed_pr("o/r", listed(9, "issue-41", "main"), PrState::Open);
+    let done = run(&f, &up).unwrap();
+
+    assert_eq!(pr_creates(&up), 0, "{:?}", up.calls());
+    assert_eq!(done.url, "https://github.com/o/r/pull/9");
+    assert!(done.adopted);
+    let record = reread(&f);
+    assert_eq!((record.stage, record.status), (Stage::Finished, Status::Ok));
+    assert_eq!(record.pr.as_deref(), Some("https://github.com/o/r/pull/9"));
+    assert!(record.notes.is_empty(), "{:?}", record.notes);
+}
+
+#[test]
+fn a_matching_open_pr_found_before_the_create_is_adopted_and_none_is_created() {
+    let f = fixture();
+    ready(&f);
+    let github =
+        FakeGitHub::default().with_listed_pr("o/r", listed(9, "issue-41", "main"), PrState::Open);
+
+    let done = run(&f, &github).unwrap();
+
+    assert_eq!(pr_creates(&github), 0, "{:?}", github.calls());
+    assert_eq!(
+        github.calls()[0],
+        GhCall::OpenPrFor("o/r".into(), "issue-41".into(), "main".into())
+    );
+    assert!(origin_has(&f, "issue-41"));
+    assert_eq!(done.url, "https://github.com/o/r/pull/9");
+    assert_eq!(reread(&f).stage, Stage::Finished);
+}
+
+#[test]
+fn no_open_pr_of_the_branch_means_one_is_created_as_before() {
+    let f = fixture();
+    ready(&f);
+    let github = FakeGitHub::default();
+
+    let done = run(&f, &github).unwrap();
+
+    assert_eq!(pr_creates(&github), 1);
+    assert!(!done.adopted);
+    assert_eq!(reread(&f).stage, Stage::Finished);
+}
+
+/// An open PR of the branch into another base is named, not adopted, and no second PR is made;
+/// nothing is pushed either, since a push would move that PR's head.
+#[test]
+fn an_open_pr_of_the_branch_on_another_base_is_named_and_nothing_is_pushed_or_created() {
+    let f = fixture();
+    let prepared = ready(&f);
+    let before = fs::read_to_string(prepared.meta.join("task.json")).unwrap();
+    let github = FakeGitHub::default().with_listed_pr(
+        "o/r",
+        listed(12, "issue-41", "release"),
+        PrState::Open,
+    );
+
+    let err = run(&f, &github).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("https://github.com/o/r/pull/12"),
+        "{message}"
+    );
+    assert!(message.contains("release"), "{message}");
+    assert_eq!(pr_creates(&github), 0);
+    assert!(!origin_has(&f, "issue-41"));
+    assert_eq!(
+        fs::read_to_string(prepared.meta.join("task.json")).unwrap(),
+        before
+    );
+}
+
+#[test]
+fn a_closed_or_merged_pr_of_the_branch_is_not_adopted_and_one_is_created() {
+    for state in [PrState::Closed, PrState::Merged] {
+        let f = fixture();
+        ready(&f);
+        let github =
+            FakeGitHub::default().with_listed_pr("o/r", listed(99, "issue-41", "main"), state);
+
+        let done = run(&f, &github).unwrap();
+
+        assert_eq!(pr_creates(&github), 1, "{state:?}");
+        assert!(!done.adopted, "{state:?}");
+        assert_ne!(done.url, "https://github.com/o/r/pull/99", "{state:?}");
+    }
+}
+
+/// Only a PR whose repo, head and base all match is adopted: a fork's branch of the same name, a
+/// PR of another repo or of another head is not this task's, and a PR is created.
+#[test]
+fn a_pr_differing_in_repo_or_head_is_not_adopted_and_one_is_created() {
+    let fork = ListedPr {
+        is_cross_repository: true,
+        ..listed(9, "issue-41", "main")
+    };
+    let cases = [
+        ("o/r", fork),
+        ("x/y", listed(9, "issue-41", "main")),
+        ("o/r", listed(9, "issue-410", "main")),
+    ];
+    for (repo, pr) in cases {
+        let f = fixture();
+        ready(&f);
+        let github = FakeGitHub::default().with_listed_pr(repo, pr.clone(), PrState::Open);
+
+        let done = run(&f, &github).unwrap();
+
+        assert_eq!(pr_creates(&github), 1, "{repo} {pr:?}");
+        assert!(!done.adopted, "{repo} {pr:?}");
+    }
+}
+
+#[test]
+fn a_lookup_that_fails_before_the_create_pushes_and_creates_nothing() {
+    let f = fixture();
+    let prepared = ready(&f);
+    let before = fs::read_to_string(prepared.meta.join("task.json")).unwrap();
+    let github = FakeGitHub::default().failing_pr_lookup_from(1);
+
+    let err = run(&f, &github).unwrap_err();
+
+    assert!(format!("{err:#}").contains("gh pr list"), "{err:#}");
+    assert_eq!(pr_creates(&github), 0);
+    assert!(!origin_has(&f, "issue-41"));
+    assert_eq!(
+        fs::read_to_string(prepared.meta.join("task.json")).unwrap(),
+        before
+    );
+}
+
+/// The create's own error is kept, never parsed: when the lookup after it can't answer, the task
+/// stays `ready` with the retry note and that error.
+#[test]
+fn a_failed_create_whose_lookup_also_fails_keeps_the_retry_note_and_the_create_error() {
+    let f = fixture();
+    ready(&f);
+    let github = FakeGitHub::default()
+        .failing_pr_create("a pull request for branch issue-41 already exists", true)
+        .failing_pr_lookup_from(2);
+
+    let err = run(&f, &github).unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(message.contains("could not open the PR"), "{message}");
+    assert!(message.contains("already exists"), "{message}");
+    let record = reread(&f);
+    assert_eq!((record.stage, record.status), (Stage::Ready, Status::Ok));
+    assert!(record.pr.is_none());
+    assert_eq!(record.notes.len(), 1, "{:?}", record.notes);
+}
+
+/// What `finish` asked of GitHub besides looking up the branch's open PR (issue 60).
+fn writes(github: &FakeGitHub) -> Vec<GhCall> {
+    github
+        .calls()
+        .into_iter()
+        .filter(|c| !matches!(c, GhCall::OpenPrFor(..)))
+        .collect()
 }

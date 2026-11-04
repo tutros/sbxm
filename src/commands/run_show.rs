@@ -80,6 +80,11 @@ pub fn render(config_dir: &Path, run_id: &str, options: &Options) -> Result<Stri
         writeln!(out)?;
         write!(out, "{}", score::render_jev(&ranking, &labels))?;
     }
+    // The human review's ranking, once scores are saved (issue 347); never blended.
+    if let Ok(Some(ranking)) = score::load_human(&meta) {
+        writeln!(out)?;
+        write!(out, "{}", score::render_human(&ranking, &labels))?;
+    }
     // Then Jev's raw answers, shown only (issue 343).
     if let Ok(Some(text)) = score::render_jev_questions(&meta, &labels) {
         writeln!(out)?;

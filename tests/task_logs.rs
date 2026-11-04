@@ -331,3 +331,27 @@ fn the_cli_command_reports_any_other_open_error_with_the_path_and_exits_1() {
     );
     assert!(!stderr.contains("no run.log yet"), "{stderr}");
 }
+
+/// Issue 58: `task logs` only reads, so a task another command holds still shows its log, and
+/// its lock is left exactly as it was.
+#[test]
+fn logs_are_not_blocked_by_a_held_lock_and_take_none() {
+    struct Alive;
+    impl record::ProcessProbe for Alive {
+        fn start_time(&self, _pid: u32) -> Option<u64> {
+            Some(T0)
+        }
+    }
+    let env = Env::new();
+    let task = save_task(&env.base_dir(), Kind::Issue, 41);
+    let meta = record::task_dir(&env.base_dir(), &task.id);
+    fs::write(meta.join("run.log"), "# header\nline\n").unwrap();
+    let _held = sbxm::task::lock::ProcessLock::acquire(&meta, "task issue-41", &Alive).unwrap();
+    let lock = fs::read(meta.join("lock.json")).unwrap();
+
+    let (result, out) = run_logs(&env, Target::Issue(41), false, &task_logs::Env::real());
+
+    result.unwrap();
+    assert_eq!(out, "# header\nline\n");
+    assert_eq!(fs::read(meta.join("lock.json")).unwrap(), lock);
+}

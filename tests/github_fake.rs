@@ -2,8 +2,8 @@
 
 use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::github::{
-    CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, PrInfo, PrRequest, PrState,
-    StatusState,
+    CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, ListedPr, PrInfo, PrRequest,
+    PrState, StatusState,
 };
 
 fn issue(number: u32) -> Issue {
@@ -135,6 +135,33 @@ fn a_draft_pr_request_is_recorded_as_a_draft() {
     assert!(recorded.draft);
 }
 
+#[test]
+fn the_fake_answers_a_pr_merge_state_from_its_scripted_prs() {
+    use sbxm::github::{PrInfo, PrState};
+    let pr = |number, state| PrInfo {
+        number,
+        head_ref: "b".into(),
+        head_oid: "abc".into(),
+        is_cross_repository: false,
+        head_repo: String::new(),
+        state,
+        title: "t".into(),
+        body: String::new(),
+        closing_issues: Vec::new(),
+    };
+    let gh = sbxm::github::fake::FakeGitHub::default()
+        .with_pr(pr(7, PrState::Open))
+        .with_pr(pr(8, PrState::Open))
+        .with_auto_merge(8);
+    assert!(!gh.pr_merge_state("o/r", 7).unwrap().auto_merge);
+    assert!(gh.pr_merge_state("o/r", 8).unwrap().auto_merge);
+    assert!(gh.pr_merge_state("o/r", 9).is_err());
+    assert!(
+        gh.calls()
+            .contains(&sbxm::github::fake::GhCall::PrMergeState("o/r".into(), 7))
+    );
+}
+
 fn a_status() -> CommitStatus {
     CommitStatus {
         state: StatusState::Success,
@@ -181,4 +208,82 @@ fn scripted_pr_comments_come_back_for_their_pr_only_and_the_call_is_recorded() {
             GhCall::PrComments("o/r".into(), 6)
         ]
     );
+}
+
+fn listed(number: u32, head: &str, base: &str) -> ListedPr {
+    ListedPr {
+        number,
+        url: format!("https://github.com/o/r/pull/{number}"),
+        head_ref: head.into(),
+        base_ref: base.into(),
+        is_cross_repository: false,
+    }
+}
+
+/// Issue 60: the fake finds an open PR by repo, head and state, preferring the base.
+#[test]
+fn open_pr_for_finds_only_an_open_same_repo_pr_of_the_head() {
+    let fork = ListedPr {
+        is_cross_repository: true,
+        ..listed(3, "issue-4", "main")
+    };
+    let fake = FakeGitHub::default()
+        .with_listed_pr("o/r", listed(1, "issue-4", "main"), PrState::Merged)
+        .with_listed_pr("o/r", fork, PrState::Open)
+        .with_listed_pr("x/y", listed(4, "issue-4", "main"), PrState::Open)
+        .with_listed_pr("o/r", listed(5, "issue-40", "main"), PrState::Open)
+        .with_listed_pr("o/r", listed(6, "issue-4", "release"), PrState::Open)
+        .with_listed_pr("o/r", listed(7, "issue-4", "main"), PrState::Open);
+
+    assert_eq!(
+        fake.open_pr_for("o/r", "issue-4", "main")
+            .unwrap()
+            .unwrap()
+            .number,
+        7
+    );
+    assert_eq!(
+        fake.open_pr_for("o/r", "issue-4", "dev")
+            .unwrap()
+            .unwrap()
+            .number,
+        6
+    );
+    assert_eq!(fake.open_pr_for("o/r", "issue-9", "main").unwrap(), None);
+    assert_eq!(
+        fake.calls()[0],
+        GhCall::OpenPrFor("o/r".into(), "issue-4".into(), "main".into())
+    );
+}
+
+#[test]
+fn a_pr_create_that_fails_after_opening_leaves_a_pr_to_find() {
+    let request = PrRequest {
+        head: "issue-4".into(),
+        base: "main".into(),
+        title: "t".into(),
+        body: "Fixes #4".into(),
+        draft: false,
+    };
+    let lost = FakeGitHub::default().failing_pr_create("gh: HTTP 502", true);
+    let refused = FakeGitHub::default().failing_pr_create("gh: HTTP 502", false);
+
+    assert!(lost.pr_create("o/r", &request).is_err());
+    assert!(refused.pr_create("o/r", &request).is_err());
+
+    assert!(
+        lost.open_pr_for("o/r", "issue-4", "main")
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(refused.open_pr_for("o/r", "issue-4", "main").unwrap(), None);
+}
+
+#[test]
+fn pr_lookups_fail_from_the_nth() {
+    let fake = FakeGitHub::default().failing_pr_lookup_from(2);
+
+    assert!(fake.open_pr_for("o/r", "issue-4", "main").is_ok());
+    assert!(fake.open_pr_for("o/r", "issue-4", "main").is_err());
+    assert!(fake.open_pr_for("o/r", "issue-4", "main").is_err());
 }

@@ -51,17 +51,13 @@ pub fn check_can_resume(
         kind: task.kind,
     };
     if task.kind == Kind::Pr {
-        // `task review --pr` moves a `ready` PR task on (decision 190) and retries a failed one;
-        // from a dead end of the state table it is refused, so the task goes first.
-        let n = task.number;
-        let review = if machine::dead_ends(Kind::Pr).contains(&state) {
-            format!("`sbxm task rm --pr {n}`, then `sbxm task review --pr {n}`")
-        } else {
-            format!("`sbxm task review --pr {n}`")
-        };
+        // `task review --pr` moves a PR task on from every state it can be left in: a `ready`
+        // one (decision 190), a failed reviewer, and since issue 379 the states it used to be
+        // stuck in (decision 282).
         bail!(
             "task {id} is a PR task, which has no worker or fix rounds to resume; to review the PR \
-             again, run {review}"
+             again, run `sbxm task review --pr {}`",
+            task.number
         );
     }
     if task.process_alive(probe)

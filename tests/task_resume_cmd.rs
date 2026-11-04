@@ -152,6 +152,7 @@ fn rounds_says_how_many_rounds_the_task_now_has_and_a_new_stop_names_rounds_agai
         sleep: &std::thread::sleep,
         scoped_secrets: &[],
         identity: None,
+        clone_source: None,
     };
     sbxm::task::pipeline::review_issue(&env, &mut prepared).unwrap();
     let backend = backend(&f, &[ONE]);
@@ -298,6 +299,7 @@ fn stopped(f: &Fixture) {
         sleep: &std::thread::sleep,
         scoped_secrets: &[],
         identity: None,
+        clone_source: None,
     };
     sbxm::task::pipeline::review_issue(&env, &mut prepared).unwrap();
 }
@@ -358,6 +360,7 @@ fn gates_that_cannot_run_fail_the_resume_with_the_reason_and_no_further_round() 
         sleep: &std::thread::sleep,
         scoped_secrets: &[],
         identity: None,
+        clone_source: None,
     };
     sbxm::task::pipeline::review_issue(&env, &mut prepared).unwrap();
     let red = backend(&f, &[CLEAN]).with_failing_exec_matching("cargo test");
@@ -418,4 +421,26 @@ fn a_refused_resume_is_refused_for_its_own_reason_first() {
 
     let err = format!("{:#}", out.result.unwrap_err());
     assert!(!err.starts_with(common::LOW_DISK), "{err}");
+}
+
+// ---- The task's lock (issue 58) ----
+
+#[test]
+fn a_resume_is_refused_while_another_live_command_holds_the_task() {
+    let f = config();
+    leave_in(&f, Stage::Working, Status::Failed);
+    let meta = record::task_dir(&f.env.base_dir(), "issue-41");
+    let _held = sbxm::task::lock::ProcessLock::acquire(&meta, "task issue-41", &Alive).unwrap();
+    let before = std::fs::read(meta.join("task.json")).unwrap();
+    let backend = backend(&f, &[CLEAN]);
+
+    let out = go(&f, &options(&f, None), &backend, &Alive);
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(
+        message.contains("task issue-41 is in use by another sbxm command (process "),
+        "{message}"
+    );
+    assert_eq!(std::fs::read(meta.join("task.json")).unwrap(), before);
+    assert!(backend.creates().is_empty() && backend.execs().is_empty());
 }

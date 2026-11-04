@@ -13,6 +13,9 @@ this file shows how the commands fit together and when to use which. `sbxm` has 
    (the sandbox drive under `min_free_disk`).
 4. Store the provider secrets in `sbx` (`sbx secret ls`): `anthropic` for Claude, `openai` for Codex (also the default
    reviewer for a Claude worker), `google` for Antigravity. For `sbxm task`, run `gh auth setup-git` once.
+   For interactive Antigravity you can sign in inside the sandbox instead: `antigravity_auth = "login"` in
+   `config.toml` (see "Antigravity, interactive" below); `sbxm run` and `sbxm task` still need `google`, and
+   login mode refuses while `google` is stored globally, since `sbx` would inject it into the sandbox anyway.
 5. `just deploy-profiles` copies the repo's `profiles/*` into the folder `sbxm config profiles-dir` reports. It replaces
    whole profiles, so deploy from an up-to-date `main`: a profile change that is still on an open PR is lost if you
    deploy from another branch.
@@ -30,6 +33,22 @@ sbxm rm demo --harness claude        # keeps the workspace; --purge deletes it (
 The config has three layers: global `config.toml`, then a profile, then the project's `sandbox.toml`. A hash of the
 merged result is recorded with the sandbox. If the config changed, `open` refuses until you run `open --rebuild`.
 `sbxm config show` previews exactly what would be built, and `sbxm doctor` checks the setup.
+
+### Antigravity, interactive
+
+```
+# config.toml: antigravity_auth = "login"
+sbxm open demo --harness antigravity    # creates it without the `google` secret and attaches
+                                        # first time: sign in to Google inside agy
+sbxm open demo --harness antigravity    # later: the same sandbox, still signed in
+```
+
+With `antigravity_auth = "login"` the sign-in lives inside the sandbox, and `agy` refreshes its own token: sbxm stores
+none (decision 281). It lasts as long as the sandbox, across `open`, `stop` and `open`; a fresh `new` or an
+`open --rebuild` makes a new sandbox and needs a fresh sign-in. With the default `"api-key"`, `new`/`open` need the
+`google` secret and `agy` uses it as an API key instead. `sbxm run` and `sbxm task` always need `google`: their
+sandboxes are throwaway and unattended, so nobody can sign in to them. The `mcp-gateway` workaround of issue 287 runs
+only before headless runs; an interactive attach starts `agy` as the kit leaves it.
 
 ### Faster sandboxes from a template (optional, per profile)
 
@@ -57,6 +76,7 @@ built into sbxm for templates. `doctor` fails on the template minimum only when 
 sbxm run init run.toml               # starter run-config: Claude against Codex
 sbxm run run.toml                    # one throwaway sandbox per contestant and repeat
 sbxm run show <run-id> [--diff]      # read a saved run
+sbxm run review <run-id> [--submit]  # score it yourself under blind labels, then save the scores
 ```
 
 Each contestant (harness, model, optional profile) gets a fresh copy of an optional seed folder. The answer, the diff
@@ -105,6 +125,12 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
   - `task review --pr` has no fix round (a PR task's `fix_rounds` is always 0): the author fixes the findings and
     runs `task review --pr N` again, which reviews the new head in place, keeping the earlier rounds (decision 190;
     an unchanged head is refused unless `--force`).
+  - **A stuck PR task recovers with `task review --pr N` itself (decision 282, issue 379):** after a failed
+    preparation, or gates or a review whose `sbxm` process is gone, it keeps the task folder, fetches the PR's head
+    again (making `repo.git` again if needed), removes the reviewer sandbox and clone the interrupted run left, and
+    runs the gates and the reviewer as the next round, every earlier `review-<n>.md` kept. A review that completed
+    but was never recorded `ready` runs the reviewer again. No `task rm --pr N` first; while the process that
+    recorded the gates or the review still runs, it is refused.
   - **A posted review sets the `sbxm/review` commit status (issue 317)** on the commit it covered: `success` with 0
     must-fix at any risk (an open question too, shown in the description), `failure` otherwise. Both `task review
     --pr N` and `task finish` post it, after the review comment; a later commit has none until it is reviewed, so
@@ -126,6 +152,12 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
     `ready`, with `stopped` set to `rounds-exhausted` in `task.json`, and `task finish` opens its PR as a draft whose
     body lists the reason and the must-fix findings left (issue 120); a clean task gets a normal PR. A task that
     continues an open PR puts the same list in its comment on that PR instead (it can't make the PR a draft).
+  - **The worker's hand-backs are on the PR (decision 283):** the PR description `task finish` opens, a draft's too,
+    has the `Needs a decision` and `Choices made` sections of the worker's `result.md` right after the risk section
+    and `Fixes #N`, in that order, so a choice the worker flagged is seen without reading the whole result. A
+    section that is absent, empty or "none" is left out; one over 2,500 characters is cut (the whole of it
+    stays in `result.md` in the task folder). The worker never stops to wait for an answer: it picks, flags the pick and goes on, and the user answers
+    on the PR. The review comment is unchanged.
   - `task start --spec FILE` makes a task from a file instead of a GitHub issue (id `spec-<name>-<hash>`,
     `source.md` in place of `issue.md`); `task review --spec FILE` continues it through the same gates/review/fix
     loop, and `task run --spec FILE` does both in one go, stopping before `finish` (with `--restart`, the spec is
@@ -313,7 +345,8 @@ same tasks and only reads).
   `min_free_disk` in `config.toml` (default `"10g"`; `"0"` switches the check off), naming the drive and its free
   space; `--ignore-disk` lets one command through. A `task run` list (decision 193) checks again before every task,
   not only the first, since a task's own sandbox can fill the drive the next one needs; a failure there stops the
-  rest of the list. A cloud task skips the check (its sandboxes don't use that drive). The folder is `%LOCALAPPDATA%\DockerSandboxes` on Windows, or
+  rest of the list. The check before `task run`'s review waits up to 60 s (every 5 s) for the space the worker's
+  removed sandbox used to come back before refusing (issue 389). A cloud task skips the check (its sandboxes don't use that drive). The folder is `%LOCALAPPDATA%\DockerSandboxes` on Windows, or
   `sandbox_state_dir` in `config.toml` on any platform; on macOS and Linux without that key nothing is checked (a full
   drive makes `sbx` answer `try: sbx login`, which looks like a login problem).
   A junction from `sbx`'s `state` folder to a bigger drive was tried (2026-10-03, `sbx` 0.46.0) and does not work for the

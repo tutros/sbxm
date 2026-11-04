@@ -124,7 +124,8 @@ pub fn common(profile_name: &str, profile: &Profile, config_hash: &str) -> Spec 
 /// The `harness-<h>` mixin: what only applies to one harness. Mandatory
 /// instructions go in its always-loaded user-level file (decisions 37, 62).
 /// For Claude, the profile's `harness.claude.home_files` (decision 63) and
-/// managed settings (decision 64) join them.
+/// managed settings (decision 64) join them. [`Harness::kit_env`] is its
+/// environment.
 pub fn harness(profile_name: &str, profile: &Profile, harness: Harness) -> Spec {
     let profile = harness.applied(profile);
     let mandatory = profile
@@ -147,7 +148,13 @@ pub fn harness(profile_name: &str, profile: &Profile, harness: Harness) -> Spec 
         ),
         requires: Some(Requires { agent }),
         permissions: None,
-        environment: None,
+        environment: (!harness.kit_env().is_empty()).then(|| Environment {
+            variables: harness
+                .kit_env()
+                .iter()
+                .map(|&(name, value)| (name.into(), value.into()))
+                .collect(),
+        }),
         setup: profile
             .claude_managed_settings
             .as_deref()

@@ -15,6 +15,7 @@ use crate::github::GitHubBackend;
 use crate::task::config::{Sink, TaskConfig};
 use crate::task::finish;
 use crate::task::lifetime::{self, Released};
+use crate::task::pipeline;
 use crate::task::record::{self, ProcessProbe};
 
 /// What `finish` is asked for.
@@ -74,6 +75,8 @@ pub fn run_with_sleep(
         Target::Spec(path) => record::spec_id(path)?.0,
     };
     let base_dir = GlobalConfig::load(config_dir)?.base_dir;
+    // Held until the finish's last write (issue 58): a second command on this task refuses.
+    let _lock = pipeline::lock_task(&base_dir, &id, probe)?;
     // Read and checked before anything is published (check before acting).
     let recorded = match record::is_valid_id(&id) {
         true => record::read(&record::task_dir(&base_dir, &id).join("task.json")).ok(),
@@ -169,6 +172,12 @@ fn publish(
         for reason in &done.unresolved {
             writeln!(out, "  unresolved: {reason}")?;
         }
+    } else if done.adopted {
+        writeln!(
+            out,
+            "{id}: pushed {id} and found {} already open for it; recorded it as the task's PR",
+            done.url
+        )?;
     } else {
         writeln!(out, "{id}: pushed {id} and opened {}", done.url)?;
     }

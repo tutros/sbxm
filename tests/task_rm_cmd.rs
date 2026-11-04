@@ -215,3 +215,76 @@ fn the_run_log_goes_with_the_task() {
     assert!(!log.exists());
     assert!(!meta(&f).exists());
 }
+
+// ---- The task's lock (issue 58) ----
+
+#[test]
+fn rm_is_refused_while_another_live_command_holds_the_task() {
+    let f = fixture();
+    let backend = worked(&f);
+    let meta = sbxm::task::record::task_dir(&f.env.base_dir(), "issue-41");
+    let _held = sbxm::task::lock::ProcessLock::acquire(&meta, "task issue-41", &Probe).unwrap();
+    let removes = backend.removes().len();
+
+    let (result, _) = rm(&f, 41, true, &backend, &FakeConfirm::new(true, true));
+
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains("task issue-41 is in use by another sbxm command (process "),
+        "{message}"
+    );
+    assert!(meta.join("task.json").is_file());
+    assert_eq!(backend.removes().len(), removes, "no sandbox was removed");
+}
+
+/// A lock whose holder is gone: the fixture's probe gives every pid another start time.
+const STALE_LOCK: &str = r#"{"pid":4000000,"started_at":"2026-01-01T00:00:00Z","token":"t"}"#;
+
+/// `link` is moved to `outside` and replaced by a link to it, with a stale lock in the task's
+/// folder at its destination; every command that takes the task's lock refuses before the lock
+/// file is touched (issue 58 review M-1).
+fn refused_through_a_link(
+    link: &std::path::Path,
+    lock_at: impl Fn(&std::path::Path) -> std::path::PathBuf,
+) {
+    let f = fixture();
+    let backend = worked(&f);
+    let link = f.env.base_dir().join(link);
+    let outside = f.env.tmp.path().join("outside");
+    fs::rename(&link, &outside).unwrap();
+    common::dir_link(&link, &outside);
+    let lock = lock_at(&outside);
+    fs::write(&lock, STALE_LOCK).unwrap();
+
+    let (result, _) = rm(&f, 41, true, &backend, &FakeConfirm::new(true, true));
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains("symlink or junction") || message.contains("resolves to"),
+        "{message}"
+    );
+    let opened = sbxm::task::pipeline::Prepared::open_locked(&f.env.base_dir(), "issue-41", &Probe);
+    let message = format!("{:#}", opened.unwrap_err());
+    assert!(
+        message.contains("symlink or junction") || message.contains("resolves to"),
+        "{message}"
+    );
+    assert_eq!(
+        fs::read_to_string(&lock).unwrap(),
+        STALE_LOCK,
+        "the lock is untouched"
+    );
+    assert!(!lock.with_extension("json.takeover").exists());
+}
+
+#[test]
+fn a_linked_task_folder_is_refused_before_its_lock_is_touched() {
+    // Joined, not ".sbxm/tasks/...": `cmd`'s `mklink` reads a `/` inside its argument as a switch.
+    let link = std::path::Path::new(".sbxm").join("tasks").join("issue-41");
+    refused_through_a_link(&link, |outside| outside.join("lock.json"));
+}
+
+#[test]
+fn a_linked_tasks_folder_is_refused_before_a_tasks_lock_is_touched() {
+    let link = std::path::Path::new(".sbxm").join("tasks");
+    refused_through_a_link(&link, |outside| outside.join("issue-41").join("lock.json"));
+}

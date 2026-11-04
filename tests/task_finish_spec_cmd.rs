@@ -168,6 +168,8 @@ fn a_ready_spec_task_without_commits_is_refused_and_stays_ready() {
     }
     r.advance(Stage::Ready, 0, p()).unwrap();
     record::write(&prepared.meta, &prepared.record).unwrap();
+    // The start that made it has ended: its lock (issue 58) goes with it.
+    prepared.lock = None;
 
     let (result, _) = finish(&f, &spec, &FakeGitHub::default());
 

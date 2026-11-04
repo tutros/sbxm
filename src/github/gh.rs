@@ -8,8 +8,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
 use super::{
-    CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, PrComment, PrInfo, PrRequest,
-    PrState,
+    CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, ListedPr, PrComment, PrInfo,
+    PrMergeState, PrRequest, PrState,
 };
 
 /// Runs `gh` with arguments and optional stdin, returning stdout.
@@ -143,6 +143,38 @@ struct RawPr {
 }
 
 #[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawMergeState {
+    state: String,
+    /// `null` unless auto-merge is armed; its fields aren't read.
+    #[serde(default)]
+    auto_merge_request: Option<serde_json::Value>,
+}
+
+/// A PR state as `gh` names it.
+fn pr_state(number: u32, state: &str) -> Result<PrState> {
+    match state {
+        "OPEN" => Ok(PrState::Open),
+        "CLOSED" => Ok(PrState::Closed),
+        "MERGED" => Ok(PrState::Merged),
+        other => Err(anyhow!(
+            "`gh pr view {number}` reported an unknown state {other}"
+        )),
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawListedPr {
+    number: u32,
+    url: String,
+    head_ref_name: String,
+    base_ref_name: String,
+    is_cross_repository: bool,
+    state: String,
+}
+
+#[derive(Deserialize)]
 struct Login {
     login: String,
 }
@@ -258,16 +290,7 @@ impl GitHubBackend for GhBackend {
             "--json",
             "headRefName,headRefOid,headRepository,headRepositoryOwner,isCrossRepository,state,title,body,closingIssuesReferences",
         ]))?;
-        let state = match raw.state.as_str() {
-            "OPEN" => PrState::Open,
-            "CLOSED" => PrState::Closed,
-            "MERGED" => PrState::Merged,
-            other => {
-                return Err(anyhow!(
-                    "`gh pr view {number}` reported an unknown state {other}"
-                ));
-            }
-        };
+        let state = pr_state(number, &raw.state)?;
         Ok(PrInfo {
             number,
             head_ref: raw.head_ref_name,
@@ -286,6 +309,58 @@ impl GitHubBackend for GhBackend {
                 .map(|n| n.number)
                 .collect(),
         })
+    }
+
+    fn pr_merge_state(&self, repo: &str, number: u32) -> Result<PrMergeState> {
+        let raw: RawMergeState = self.json(&strings(&[
+            "pr",
+            "view",
+            &number.to_string(),
+            "--repo",
+            repo,
+            "--json",
+            "state,autoMergeRequest",
+        ]))?;
+        Ok(PrMergeState {
+            state: pr_state(number, &raw.state)?,
+            auto_merge: raw.auto_merge_request.is_some_and(|r| !r.is_null()),
+        })
+    }
+
+    fn open_pr_for(&self, repo: &str, head: &str, base: &str) -> Result<Option<ListedPr>> {
+        // No `--base`: an open PR of the same head with another base is returned too, so the
+        // caller can name it. `--head` matches the branch name only, a fork's included, so the
+        // head's repository and the state are checked here as well.
+        let raw: Vec<RawListedPr> = self.json(&strings(&[
+            "pr",
+            "list",
+            "--repo",
+            repo,
+            "--head",
+            head,
+            "--state",
+            "open",
+            "--limit",
+            "100",
+            "--json",
+            "number,url,headRefName,baseRefName,isCrossRepository,state",
+        ]))?;
+        let mut candidates: Vec<ListedPr> = raw
+            .into_iter()
+            .filter(|p| p.state == "OPEN" && p.head_ref_name == head && !p.is_cross_repository)
+            .map(|p| ListedPr {
+                number: p.number,
+                url: p.url,
+                head_ref: p.head_ref_name,
+                base_ref: p.base_ref_name,
+                is_cross_repository: p.is_cross_repository,
+            })
+            .collect();
+        let pick = candidates
+            .iter()
+            .position(|p| p.base_ref == base)
+            .unwrap_or(0);
+        Ok((!candidates.is_empty()).then(|| candidates.swap_remove(pick)))
     }
 
     fn pr_create(&self, repo: &str, request: &PrRequest) -> Result<String> {

@@ -223,6 +223,20 @@ fn lifecycle_against_real_sbx() {
     assert_eq!(printenv(&sandbox, "SBXM_CONFIG_HASH"), hash);
     assert_eq!(printenv(&sandbox, "SBXM_PROFILE"), "default");
 
+    // Issue 381: the account's claude.ai connectors are off, so they can't
+    // reach its connected services through Anthropic's MCP proxy; `sbx`'s own
+    // `mcp-gateway` stays. (Without a claude.ai sign-in in the sandbox there
+    // are no connectors to list either way.)
+    assert_eq!(printenv(&sandbox, "ENABLE_CLAUDEAI_MCP_SERVERS"), "false");
+    let mcp = Command::new("sbx")
+        .args(["exec", &sandbox, "claude", "mcp", "list"])
+        .output()
+        .unwrap();
+    let mcp = String::from_utf8_lossy(&mcp.stdout);
+    println!("claude mcp list:\n{mcp}");
+    assert!(!mcp.contains("claude.ai"), "{mcp}");
+    assert!(mcp.contains("mcp-gateway"), "{mcp}");
+
     // Slice 11c: a rebuild (what `open --rebuild` does before attaching)
     // recreates the sandbox with the changed config and keeps the workspace.
     let workspace = base_dir.join(&project);
@@ -788,7 +802,11 @@ fn antigravity_sandbox_against_real_sbx() {
     let base = toml::Value::String(base_dir.to_str().unwrap().to_owned());
     std::fs::write(
         config_dir.path().join("config.toml"),
-        format!("base_dir = {base}\n\n[resources]\ncpus = 2\nmemory = \"2g\"\n"),
+        // Login mode (issue 384): created without the `google` secret, and nobody signs in.
+        format!(
+            "base_dir = {base}\nantigravity_auth = \"login\"\n\n[resources]\ncpus = 2\n\
+             memory = \"2g\"\n"
+        ),
     )
     .unwrap();
     let profile_dir = config_dir.path().join("profiles").join("default");
@@ -927,6 +945,230 @@ fn antigravity_sandbox_against_real_sbx() {
     .unwrap();
     let ls = Command::new("sbx").args(["ls", "--json"]).output().unwrap();
     assert!(!String::from_utf8_lossy(&ls.stdout).contains(&sandbox));
+}
+
+/// Issue 384 review S-1: only a missing sign-in skips the login check; any other failure fails it.
+#[test]
+fn login_check_skips_only_without_the_token_file() {
+    use sbxm::headless::RunStatus;
+
+    let failed = RunStatus::Failed("HTTP 500 provider unavailable".into());
+    assert_eq!(login_outcome(false, &failed, ""), LoginOutcome::NotSignedIn);
+    assert!(matches!(
+        login_outcome(true, &failed, ""),
+        LoginOutcome::Fail(reason) if reason.contains("HTTP 500")
+    ));
+    assert_eq!(
+        login_outcome(true, &RunStatus::Completed, "PONG\n"),
+        LoginOutcome::Pass
+    );
+    assert!(matches!(
+        login_outcome(true, &RunStatus::Completed, "pong?"),
+        LoginOutcome::Fail(_)
+    ));
+    assert!(matches!(
+        login_outcome(true, &RunStatus::TimedOut, ""),
+        LoginOutcome::Fail(_)
+    ));
+    // An answer with no token file is no proof of the login: the path moved, or a key answered.
+    assert!(matches!(
+        login_outcome(false, &RunStatus::Completed, "PONG"),
+        LoginOutcome::Fail(reason) if reason.contains(AGY_TOKEN_FILE)
+    ));
+}
+
+/// Issue 384 review S-1 (round 3): only `test -s`'s own answers say whether the token file is
+/// there; a probe that couldn't run fails the check with its diagnostic instead of skipping.
+#[test]
+fn token_probe_fails_on_anything_but_test_s_answers() {
+    use sbxm::backend::ExecOutput;
+
+    let probe = |exit_code, stderr: &str| ExecOutput {
+        stdout: String::new(),
+        stderr: stderr.into(),
+        exit_code,
+    };
+    assert_eq!(token_probe(&probe(Some(0), "")), Ok(true));
+    assert_eq!(token_probe(&probe(Some(1), "")), Ok(false));
+    assert!(matches!(
+        token_probe(&probe(Some(125), "error: exec transport unavailable")),
+        Err(reason) if reason.contains("125") && reason.contains("exec transport unavailable")
+    ));
+    assert!(matches!(
+        token_probe(&probe(None, "Killed")),
+        Err(reason) if reason.contains("signal") && reason.contains("Killed")
+    ));
+}
+
+/// Issue 384, decision 281 (a): a login-mode Antigravity sandbox is created without the `google`
+/// secret, and once the user has signed in inside it, `agy` answers with that login. The
+/// sandbox has a fixed name and is kept until the check passes, so the sign-in it needs (one
+/// interactive `sbx run`, which a test can't do) persists across runs of this test, the way it
+/// persists across `sbxm open`. `sbx run` needs a terminal, so `sbx exec` stands in for the
+/// attach, and it doesn't check the interactive attach itself (#287 there is for the user).
+/// No token file yet: the test prints how to sign in and returns without failing; with one,
+/// any failure fails. It asks again after stopping the sandbox, so the login must survive it.
+#[test]
+#[ignore = "needs a logged-in sbx and SBXM_REAL_BASE_DIR; signing in inside the sandbox once"]
+fn antigravity_login_against_real_sbx() {
+    use std::time::Duration;
+
+    use sbxm::backend::{ExecSpec, Stdin};
+    use sbxm::headless::{self, HeadlessOpts};
+
+    let base_dir = real_base_dir();
+    let project = "sbxm-it-agy-login";
+    let sandbox = format!("sbxm-{project}-antigravity");
+    let config_dir = TempDir::new().unwrap();
+    let base = toml::Value::String(base_dir.to_str().unwrap().to_owned());
+    std::fs::write(
+        config_dir.path().join("config.toml"),
+        format!(
+            "base_dir = {base}\nantigravity_auth = \"login\"\n\n[resources]\ncpus = 2\n\
+             memory = \"2g\"\n"
+        ),
+    )
+    .unwrap();
+    let profile_dir = config_dir.path().join("profiles").join("default");
+    std::fs::create_dir_all(&profile_dir).unwrap();
+    std::fs::write(
+        profile_dir.join("profile.toml"),
+        "[skills]\nstore = \"off\"\n",
+    )
+    .unwrap();
+    let agy = sbxm::harness::Harness::Antigravity;
+
+    let listed = SbxBackend::LOCAL
+        .list()
+        .unwrap()
+        .iter()
+        .any(|s| s.name == sandbox);
+    if !listed {
+        // Login mode never asks `sbx` for the `google` secret, stored or not.
+        new::run(
+            config_dir.path(),
+            project,
+            &new::Options {
+                harness: agy,
+                // State left by a sandbox removed by hand doesn't block a fresh one.
+                recreate: true,
+                ..Default::default()
+            },
+            &SbxBackend::LOCAL,
+            &mut std::io::stderr(),
+        )
+        .unwrap();
+    }
+
+    let workspace = base_dir.join(project);
+    let path = workspace.to_string_lossy().replace(char::from(92), "/");
+    let in_sandbox = PathBuf::from(format!("/{}{}", path[..1].to_lowercase(), &path[2..]));
+    let ask = || {
+        // Read before every request: an `sbx exec` restarts a stopped sandbox.
+        let probe = SbxBackend::LOCAL
+            .exec(
+                &sandbox,
+                &ExecSpec {
+                    workdir: None,
+                    argv: vec![
+                        "sh".into(),
+                        "-c".into(),
+                        format!("test -s \"$HOME/{AGY_TOKEN_FILE}\""),
+                    ],
+                    stdin: Stdin::Closed,
+                },
+            )
+            .unwrap();
+        let token = token_probe(&probe).unwrap_or_else(|reason| panic!("{sandbox}: {reason}"));
+        let result = headless::run(
+            &SbxBackend::LOCAL,
+            &sandbox,
+            &in_sandbox,
+            agy,
+            "Reply with exactly: PONG",
+            &HeadlessOpts {
+                model: None,
+                high_effort: false,
+                budget_usd: None,
+                is_git_repo: false,
+            },
+            Duration::from_secs(120),
+        )
+        .unwrap();
+        login_outcome(token, &result.status, &result.answer)
+    };
+
+    match ask() {
+        LoginOutcome::Pass => {}
+        LoginOutcome::NotSignedIn => {
+            eprintln!(
+                "SKIPPED: {sandbox} is not signed in (no ~/{AGY_TOKEN_FILE}). Sign in once with \
+                 `sbx run {sandbox}` (Google sign-in inside agy), quit agy, and run this test \
+                 again; the sandbox is kept for that. Remove it afterwards with `sbx rm {sandbox}`."
+            );
+            return;
+        }
+        LoginOutcome::Fail(reason) => panic!("{sandbox}: {reason}"),
+    }
+
+    // The login survives the sandbox stopping, as it does between two `sbxm open`s.
+    SbxBackend::LOCAL.stop(&sandbox).unwrap();
+    assert_eq!(ask(), LoginOutcome::Pass, "after a stop");
+
+    // Checked: remove it, so the next run starts from a fresh sign-in.
+    let _cleanup = Cleanup {
+        sandbox: sandbox.clone(),
+        dirs: vec![workspace, base_dir.join(".sbxm").join(project)],
+        shared_dirs: vec![base_dir.join(".sbxm")],
+    };
+}
+
+/// Where `agy` keeps its Google sign-in, under the sandbox user's home (decision 124 (f)).
+const AGY_TOKEN_FILE: &str = ".gemini/antigravity-cli/antigravity-oauth-token";
+
+/// Reads the `test -s` token probe: 0 is present, 1 absent; any other exit, or a signal, is the
+/// probe failing, an error carrying its diagnostic rather than "not signed in" (S-1).
+fn token_probe(out: &sbxm::backend::ExecOutput) -> Result<bool, String> {
+    match out.exit_code {
+        Some(0) => Ok(true),
+        Some(1) => Ok(false),
+        Some(code) => Err(format!(
+            "the token probe exited {code}: {}",
+            out.stderr.trim()
+        )),
+        None => Err(format!(
+            "the token probe was killed by a signal: {}",
+            out.stderr.trim()
+        )),
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum LoginOutcome {
+    Pass,
+    NotSignedIn,
+    Fail(String),
+}
+
+/// Classifies one login-mode request: only a missing token file is "not signed in" (S-1).
+fn login_outcome(
+    token_file_present: bool,
+    status: &sbxm::headless::RunStatus,
+    answer: &str,
+) -> LoginOutcome {
+    use sbxm::headless::RunStatus;
+
+    match (token_file_present, status) {
+        (false, RunStatus::Failed(_) | RunStatus::TimedOut) => LoginOutcome::NotSignedIn,
+        (false, RunStatus::Completed) => LoginOutcome::Fail(format!(
+            "agy answered with no ~/{AGY_TOKEN_FILE}: the file moved, or a key answered instead \
+             of the login"
+        )),
+        (true, RunStatus::Completed) if answer.contains("PONG") => LoginOutcome::Pass,
+        (true, RunStatus::Completed) => LoginOutcome::Fail(format!("no PONG in {answer:?}")),
+        (true, RunStatus::TimedOut) => LoginOutcome::Fail("timed out (#287?)".into()),
+        (true, RunStatus::Failed(reason)) => LoginOutcome::Fail(reason.clone()),
+    }
 }
 
 #[test]

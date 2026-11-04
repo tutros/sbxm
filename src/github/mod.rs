@@ -50,6 +50,27 @@ pub struct PrInfo {
     pub closing_issues: Vec<u32>,
 }
 
+/// A PR's state and whether auto-merge is armed on it (`gh pr view --json
+/// state,autoMergeRequest`): what `task loop` needs to count the PRs awaiting the user (issue 320,
+/// decision 3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PrMergeState {
+    pub state: PrState,
+    pub auto_merge: bool,
+}
+
+/// An open pull request as `gh pr list` lists it, for finding the PR a branch already has
+/// (issue 60).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ListedPr {
+    pub number: u32,
+    pub url: String,
+    pub head_ref: String,
+    pub base_ref: String,
+    /// `true` when the head branch lives in a fork, not in the repository the PR is listed in.
+    pub is_cross_repository: bool,
+}
+
 /// A comment on a pull request's conversation, as `gh pr view --json comments` lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrComment {
@@ -107,6 +128,12 @@ pub trait GitHubBackend: Send + Sync {
     fn issues_open(&self, repo: &str) -> Result<Vec<Issue>>;
     fn issue(&self, repo: &str, number: u32) -> Result<IssueText>;
     fn pr(&self, repo: &str, number: u32) -> Result<PrInfo>;
+    fn pr_merge_state(&self, repo: &str, number: u32) -> Result<PrMergeState>;
+    /// The open PR of `repo` whose head is the branch `head` of `repo` itself (never a fork's
+    /// branch of the same name), with base `base` if there is one, else one with another base,
+    /// which the caller reports instead of adopting (issue 60). Closed and merged PRs are never
+    /// returned.
+    fn open_pr_for(&self, repo: &str, head: &str, base: &str) -> Result<Option<ListedPr>>;
     /// Returns the new PR's URL.
     fn pr_create(&self, repo: &str, request: &PrRequest) -> Result<String>;
     fn pr_comment(&self, repo: &str, number: u32, body: &str) -> Result<()>;
