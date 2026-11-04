@@ -74,6 +74,9 @@ At most three, ranked by the time or rework they would save. For each:
 - **The cost**, including any added process. Say so when a change adds more process than it removes
   (the project's "flag over-specifying" rule).
 
+Every retro also proposes removing one rule or harness component (decision 287): name the assumption it encodes,
+test it on the current models, and delete it if the numbers hold. It counts as one of the three.
+
 A change to the sbxm code itself is a GitHub issue with a size, not an experiment.
 
 ## 5. Write it down and decide

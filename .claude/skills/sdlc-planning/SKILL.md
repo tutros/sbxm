@@ -60,6 +60,7 @@ Spike rules:
 2. **Plan-level choices to confirm** (P1, P2, …) that the decisions don't cover yet, each with a recommendation. Ask before implementation starts, then record them as decisions.
 3. **Structure:** modules/components and their responsibilities, in dependency order; dependencies.
 4. **Interfaces:** config schemas (with examples), data mappings, command behavior tables, including edge cases and error behavior.
+4b. **Failure modes and trust boundaries** (decision 288): what an agent, a tool's output or the user's input controls, what happens when each step is interrupted or fails, and what differs per platform. Most review findings were of this kind.
 5. **Work order**, written as **vertical slices** (see the `sdlc-implementation` skill), each with how you know it's done.
 6. **Manual end-to-end checklist** against the real system.
 7. **Out of scope** and **risks** (with mitigations).

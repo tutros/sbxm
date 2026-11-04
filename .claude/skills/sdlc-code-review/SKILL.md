@@ -63,7 +63,7 @@ The most common miss in this project is a change applied in one place but not in
   same thing, e.g. `new` and `open` both create sandboxes; `doctor` must check what `new` would do.
 - **State and hash.** Anything that changes what a sandbox is built from joins the config hash (decisions 55, 69), and
   anything stored in `state.json` survives old state files (`#[serde(default)]`).
-- **Docs.** `README.md` (user-facing behavior), `AGENTS.md` (code layout), `sdlc/milestone-1.md` (progress) and
+- **Docs.** `README.md` (user-facing behavior), `AGENTS.md` (commands, constraints, the short code layout), `sdlc/milestone-1.md` (progress) and
   `sdlc/decisions.md` are updated in the same change. Example commands in docs are ones that actually run.
 
 ## 5. Checklist: tests

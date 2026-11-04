@@ -1,6 +1,6 @@
 # sbxm project context
 
-This file is the one place for the project's goals and current state; `AGENTS.md` and the `sbxm-context` skill link here for them. The code layout, commands, constraints and the always-on working rules stay in `AGENTS.md` (loaded every session), so they are linked below, not copied. Read the files your task touches; verify anything time-bound with `gh` before trusting it.
+This file is the one place for the project's goals and current state; `AGENTS.md` and the `sbxm-context` skill link here for them. The short code layout, commands, constraints and the always-on working rules stay in `AGENTS.md` (loaded every session), so they are linked below, not copied. Read the files your task touches; verify anything time-bound with `gh` before trusting it.
 
 ## Goals (user-confirmed 2026-10-05)
 
