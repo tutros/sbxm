@@ -618,3 +618,26 @@ fn this_repos_own_file_loads_with_the_loop_defaults() {
         Duration::from_secs(5 * 3600)
     );
 }
+
+/// Issue 418 (decision 285): `[fix] resume` turns on resuming the Claude worker's own session in
+/// a fix round; off when absent.
+#[test]
+fn fix_resume_is_off_by_default_and_on_with_the_switch() {
+    let off = TaskConfig::load(repo(MINIMAL, true).path()).unwrap();
+    assert!(!off.fix_resume);
+
+    let on =
+        TaskConfig::load(repo(&format!("{MINIMAL}\n[fix]\nresume = true\n"), true).path()).unwrap();
+    assert!(on.fix_resume);
+
+    let explicit_off =
+        TaskConfig::load(repo(&format!("{MINIMAL}\n[fix]\nresume = false\n"), true).path())
+            .unwrap();
+    assert!(!explicit_off.fix_resume);
+}
+
+#[test]
+fn an_unknown_key_under_fix_is_refused() {
+    let err = load_err(&format!("{MINIMAL}\n[fix]\nresum = true\n"), true);
+    assert!(err.contains("resum"), "{err}");
+}
