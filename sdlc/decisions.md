@@ -1239,6 +1239,39 @@ account. Instead, on each change to Antigravity's interactive path, a person run
 first `open`, a request answers, `stop` then `open` with no second sign-in, a request answers) and records the result
 on the PR. The first such check passed on 2026-11-03 (#384, with `agy` 1.4.12 and the `mcp-gateway` entry present).
 
+285. **Fix rounds go back to the builder's own session (2026-11-04, the fourth retro's proposal 1, an experiment):** a
+fix round of a Claude worker resumes the worker's session instead of starting a fresh one, so the builder's reasoning
+carries over (pattern 1 of `sdlc/retros/2026-11-04-retro.md`: 4 of 9 tasks with a fix round needed a second one). The
+code is issue #418 (size M, open points first). Trial: the next three tasks with a fix round after it merges; measure:
+tasks needing a second fix round (4 of 9), repeat must-fix (4 in 3 of 10 tasks), the fix round's cost.
+
+286. **One worker for a group of related issues (2026-11-04, the fourth retro's proposal 2, an experiment):** issues
+that touch the same code and are to be done in order go to one worker as one spec, with every issue's acceptance
+checks, one review loop and one PR (`sdlc-issue-flow`, "Ready the issue"). Trial: two groups, #402-#404 then
+#375-#376; measure: hours from start to merged and review rounds per group, against the window's M tasks (median 43.5
+min to first `ready`, median 1 round, one PR each), and round-1 must-fix per 1,000 changed lines.
+
+287. **Each retro removes one rule; first, AGENTS.md's code layout (2026-11-04, the fourth retro's proposal 3, an
+experiment):** `sdlc-retro` section 4 now asks every retro to propose removing one rule or harness component, naming
+the assumption it encodes. This retro's: the "Code layout" section of `AGENTS.md` (31 KB of 50 KB, loaded by every
+session and worker) became one paragraph; the assumption tested is that agents need a prose map to find code. Trial:
+the next three tasks; measure: worker time to first `ready` (median 20.5 min) and round-1 must-fix per task (0.73);
+the section is restored from git if both get worse.
+
+288. **Decision 164 decided: no separate PRD and spec (2026-11-04, the user chose option D at the fourth retro; #344):**
+counted over four milestones (distinct review findings per 1,000 changed lines: M2a 0.33, M2b with a PRD and spec
+1.84, M3 2.92, M4 0.36), the PRD and spec didn't lower findings; most of M2b's were failure modes and trust
+boundaries the spec was silent on, and in M3 and M4 the numbered decisions did the spec's job. A milestone plan with
+numbered decisions is the spec. Kept from option B: every milestone plan lists its failure modes and trust boundaries
+(`sdlc-planning`, step 5, item 4b). Ends the skill freeze of [140] and [164].
+
+289. **Decision 251 adopted without the written self-review (2026-11-04, the fourth retro):** the late-commit half
+stays (a commit pushed after a PR's last review gets a narrow re-review or is named unreviewed; 2 slipped in the
+window, #382 and #400). The self-review before a hand-made PR's review stays a habit, but recording it in the PR
+description (asked by the third retro) is dropped: 10 of 11 hand-made PRs didn't, and round-1 must-fix on hand-made
+PRs stayed at 1 of 12 (#354). The other experiments the retro judged are kept as they are: 272, 273, 274, 278, 279
+and the living backlog #405; the `waiting-on-trigger` label is judged at the next retro.
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.

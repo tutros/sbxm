@@ -20,6 +20,9 @@ build sbxm tasks run with (a machine's own wrapper; never a fresh `cargo run`).
   **body** (a worker reads the body, not the comments). Then confirm or change the size (body line and label).
 - Decision 244: if the change has a limit, a size or an identity, the body lists the boundary cases.
 - Decision 273: if it depends on an external tool's behavior a spike recorded, re-run that check by hand first.
+- Decision 286 (an experiment, two groups): issues that touch the same code and are to be done in order go to one
+  worker as one spec (`task run --spec`), with every issue's acceptance checks; the PR closes all of them. Each
+  issue is readied as above first.
 
 ## 3. Check the machine
 
