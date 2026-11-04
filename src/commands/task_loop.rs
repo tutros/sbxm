@@ -10,7 +10,7 @@
 //! The phases go through [`Steps`] so the loop's rules are tested without sandboxes;
 //! [`TaskSteps`] runs the real commands.
 
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -32,7 +32,7 @@ use crate::task::gates::HostRunner;
 use crate::task::queue::{self, READY_LABEL, Report, Row, Skipped};
 use crate::task::record::{self, Kind, Process, ProcessProbe, Record, Stage};
 use crate::task::runlog::{RunLog, Tee};
-use crate::task::{findings, pipeline};
+use crate::task::{findings, lock, pipeline};
 
 /// How many open PRs the loop opened may await the user before it pauses (decision 245(e)).
 pub const PR_CAP: usize = 5;
@@ -216,6 +216,54 @@ enum End {
     Parked { ready: Option<u64>, outcome: String },
     /// Refused before anything was written: not a task.
     Refused(String),
+    /// Its lock is held by a live command run by hand (issue 409): left as it is, nothing
+    /// written, and tried again after the loop's next task.
+    Held(Retry),
+}
+
+/// Where a task whose lock was held goes on from when it is tried again.
+#[derive(Clone, Copy)]
+enum Retry {
+    /// Its claim and `task finish`; `ready`: when it reached ready.
+    Finish { ready: u64 },
+    /// Its `task resume`, after this many failures in a row.
+    Resume { failures: u32 },
+}
+
+/// A task left for a lock held by hand, with what its log row needs once it ends.
+struct Held {
+    issue: u32,
+    title: String,
+    size: Option<String>,
+    started: u64,
+    stops: Vec<(String, u64)>,
+    retry: Retry,
+}
+
+impl Held {
+    /// The line naming what is left when the loop stops before trying it again.
+    fn left(&self) -> String {
+        let issue = self.issue;
+        let command = match self.retry {
+            Retry::Finish { .. } => "finish",
+            Retry::Resume { .. } => "resume",
+        };
+        format!(
+            "#{issue} was not tried again after its lock was held; continue it with `sbxm task \
+             {command} --issue {issue}`"
+        )
+    }
+}
+
+/// The line for a task whose `phase` was skipped because a live command holds its lock.
+fn held_line(issue: u32, phase: &str, e: &anyhow::Error) -> String {
+    let why = e
+        .downcast_ref::<lock::InUse>()
+        .map_or_else(|| format!("{e:#}"), lock::InUse::describe);
+    format!(
+        "#{issue}: its `task {phase}` is skipped for now: {why}; the loop tries it again after \
+         its next task"
+    )
 }
 
 /// Why the whole loop stops early.
@@ -233,6 +281,7 @@ struct Loop<'a> {
     settings: crate::task::config::Loop,
     steps: &'a dyn Steps,
     github: &'a dyn GitHubBackend,
+    probe: &'a dyn ProcessProbe,
     env: &'a Env<'a>,
     /// The waits in a row for a usage limit (decision 6).
     usage_waited: Duration,
@@ -545,16 +594,18 @@ impl Loop<'_> {
 
     /// One task, to its PR or its parking (decision 245(d)). `label`: its issue has the loop's
     /// label, taken off once the task exists.
+    /// `failures`: the failures in a row it already had, for one tried again after its lock was
+    /// held.
     fn task(
         &mut self,
         issue: u32,
         mut label: bool,
+        mut failures: u32,
         stops: &mut Vec<(String, u64)>,
         out: &mut dyn Write,
         warn: &mut dyn Write,
     ) -> std::result::Result<End, Halt> {
         let io = |e: std::io::Error| Halt::Error(e.into());
-        let mut failures = 0;
         let mut pending: Option<(String, u64)> = None;
         loop {
             let Some(paused) = self.wait_for_room(out).map_err(Halt::Error)? else {
@@ -599,11 +650,17 @@ impl Loop<'_> {
             let e = match (result, ready) {
                 (Ok(()), Some(_)) => {
                     self.usage_waited = Duration::ZERO;
-                    return self.finish(issue, out, warn).map_err(Halt::Error);
+                    return self.finish(issue, None, out, warn).map_err(Halt::Error);
                 }
                 (Ok(()), None) => anyhow!("the task did not reach ready"),
                 (Err(e), _) => e,
             };
+            // A live command run by hand holds the task (issue 409): its resume is skipped, not
+            // failed, and the loop moves on.
+            if resuming && e.is::<lock::InUse>() {
+                writeln!(out, "{}", held_line(issue, "resume", &e)).map_err(io)?;
+                return Ok(End::Held(Retry::Resume { failures }));
+            }
             if e.is::<pipeline::MissingSecret>() {
                 return Err(Halt::Error(e));
             }
@@ -667,7 +724,10 @@ impl Loop<'_> {
 
     /// Marks a ready task as the loop's before its `task finish`, so a PR that finish opens counts
     /// toward [`PR_CAP`], after a restart too ([`opened_by_loop`]).
+    /// Holds the task's lock (issue 58) around the read and the write, and gives it up before
+    /// `task finish` takes its own (issue 409); a live holder refuses with [`lock::InUse`].
     fn claim(&self, issue: u32) -> Result<()> {
+        let _lock = pipeline::lock_task(&self.base_dir, &format!("issue-{issue}"), self.probe)?;
         let dir = self.task_dir(issue);
         let mut rec = record::read(&dir.join("task.json"))?;
         record::write_change(&dir, &mut rec, |r| {
@@ -678,9 +738,16 @@ impl Loop<'_> {
         })
     }
 
-    /// A ready task: `task finish`, then for a clean one its findings filed.
-    fn finish(&mut self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<End> {
-        let ready = self.now();
+    /// A ready task: `task finish`, then for a clean one its findings filed. `ready`: when it
+    /// reached ready, for one tried again after its lock was held; now otherwise.
+    fn finish(
+        &mut self,
+        issue: u32,
+        ready: Option<u64>,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<End> {
+        let ready = ready.unwrap_or_else(|| self.now());
         let rec = self.record(issue);
         let must_fix = rec
             .as_ref()
@@ -689,6 +756,10 @@ impl Loop<'_> {
         let stopped = rec.as_ref().and_then(|r| r.stopped);
         let clean = must_fix == 0 && stopped.is_none();
         if let Err(e) = self.claim(issue) {
+            if e.is::<lock::InUse>() {
+                writeln!(out, "{}", held_line(issue, "finish", &e))?;
+                return Ok(End::Held(Retry::Finish { ready }));
+            }
             self.warn_once(
                 warn,
                 format!(
@@ -797,6 +868,7 @@ pub fn run(
         settings,
         steps,
         github,
+        probe,
         env,
         usage_waited: Duration::ZERO,
         warned: HashSet::new(),
@@ -813,62 +885,105 @@ pub fn run(
     let mut tasks_run = 0u32;
     let mut parked_in_row = 0;
     let mut idle_from: Option<u64> = None;
+    // Tasks whose lock a command run by hand held (issue 409): `held` waits for the loop's next
+    // task, then moves to `due`, tried before the next new issue. A task held again goes back to
+    // `held`, so the loop never tries one twice with nothing run in between.
+    let mut held: Vec<Held> = Vec::new();
+    let mut due: VecDeque<Held> = VecDeque::new();
+    let left = |held: &[Held], due: &VecDeque<Held>, out: &mut dyn Write| -> Result<()> {
+        for h in due.iter().chain(held) {
+            writeln!(out, "{}", h.left())?;
+        }
+        Ok(())
+    };
     loop {
         if (env.stop_requested)() {
             writeln!(out, "stopped on request")?;
+            left(&held, &due, out)?;
             return Ok(());
         }
         if opts.cap.is_some_and(|cap| tasks_run >= cap) {
             writeln!(out, "--cap {} reached", opts.cap.unwrap_or_default())?;
+            left(&held, &due, out)?;
             return Ok(());
         }
         if !lp.wait_for_prs(out, warn)? {
             writeln!(out, "stopped on request")?;
+            left(&held, &due, out)?;
             return Ok(());
         }
-        let open = github.issues_open(&lp.repo)?;
-        let (next, waiting) = lp.next(&open, &opts.issues, &mut tried, &mut refused, out)?;
-        let Some(issue) = next else {
-            let skipped: Vec<Skipped> = refused.iter().chain(&waiting).cloned().collect();
-            if opts.issues.is_empty() {
-                writeln!(out, "the queue is empty; the loop stops")?;
-                write!(
-                    out,
-                    "{}",
-                    queue::report(&Report {
-                        open: &open,
-                        skipped: &skipped,
-                    })
-                )?;
-            } else {
-                writeln!(
-                    out,
-                    "every named issue was taken or skipped; the loop stops"
-                )?;
-            }
-            return Ok(());
-        };
-        let found = open.iter().find(|i| i.number == issue);
-        let title = found.map_or_else(|| format!("issue {issue}"), |i| i.title.clone());
-        let size = found
-            .and_then(|i| queue::size(&i.labels))
-            .map(str::to_owned);
-        let labeled = found.is_some_and(|i| i.labels.iter().any(|l| l == READY_LABEL));
+        let (issue, title, size, started, stops, ended) = if let Some(again) = due.pop_front() {
+            let Held {
+                issue,
+                title,
+                size,
+                started,
+                mut stops,
+                retry,
+            } = again;
+            writeln!(
+                out,
+                "task {}: #{issue} {title} (size {}), tried again",
+                tasks_run + 1,
+                size.as_deref().unwrap_or("unknown")
+            )?;
+            let ended = match retry {
+                Retry::Finish { ready } => lp
+                    .finish(issue, Some(ready), out, warn)
+                    .map_err(Halt::Error),
+                Retry::Resume { failures } => {
+                    lp.task(issue, false, failures, &mut stops, out, warn)
+                }
+            };
+            (issue, title, size, started, stops, ended)
+        } else {
+            let open = github.issues_open(&lp.repo)?;
+            let (next, waiting) = lp.next(&open, &opts.issues, &mut tried, &mut refused, out)?;
+            let Some(issue) = next else {
+                let skipped: Vec<Skipped> = refused.iter().chain(&waiting).cloned().collect();
+                if opts.issues.is_empty() {
+                    writeln!(out, "the queue is empty; the loop stops")?;
+                    write!(
+                        out,
+                        "{}",
+                        queue::report(&Report {
+                            open: &open,
+                            skipped: &skipped,
+                        })
+                    )?;
+                } else {
+                    writeln!(
+                        out,
+                        "every named issue was taken or skipped; the loop stops"
+                    )?;
+                }
+                left(&held, &due, out)?;
+                return Ok(());
+            };
+            let found = open.iter().find(|i| i.number == issue);
+            let title = found.map_or_else(|| format!("issue {issue}"), |i| i.title.clone());
+            let size = found
+                .and_then(|i| queue::size(&i.labels))
+                .map(str::to_owned);
+            let labeled = found.is_some_and(|i| i.labels.iter().any(|l| l == READY_LABEL));
 
-        let started = lp.now();
-        writeln!(
-            out,
-            "task {}: #{issue} {title} (size {})",
-            tasks_run + 1,
-            size.as_deref().unwrap_or("unknown")
-        )?;
-        let mut stops = Vec::new();
-        let ended = lp.task(issue, labeled, &mut stops, out, warn);
+            let started = lp.now();
+            writeln!(
+                out,
+                "task {}: #{issue} {title} (size {})",
+                tasks_run + 1,
+                size.as_deref().unwrap_or("unknown")
+            )?;
+            let mut stops = Vec::new();
+            let ended = lp.task(issue, labeled, 0, &mut stops, out, warn);
+            (issue, title, size, started, stops, ended)
+        };
         let end = match ended {
             Ok(end) => end,
             Err(Halt::Error(e)) => return Err(e),
             Err(Halt::Stopped) => {
                 writeln!(out, "stopped on request")?;
+                left(&held, &due, out)?;
                 return Ok(());
             }
             Err(Halt::UsageLimit(total)) => {
@@ -907,9 +1022,21 @@ pub fn run(
                 });
                 continue;
             }
+            End::Held(retry) => {
+                held.push(Held {
+                    issue,
+                    title,
+                    size,
+                    started,
+                    stops,
+                    retry,
+                });
+                continue;
+            }
             End::Done { ready, outcome } => (Some(ready), outcome, false),
             End::Parked { ready, outcome } => (ready, outcome, true),
         };
+        due.extend(held.drain(..));
         tasks_run += 1;
         let rec = lp.record(issue);
         let duration = |agent: Option<&record::Agent>| agent?.run.as_ref().map(|r| r.duration_s);
@@ -991,10 +1118,14 @@ impl TaskSteps<'_> {
     /// Gives up this process's own claim on `issue-<n>`'s record before `task resume` (review
     /// M-1): the phase that left it ran here and has returned, so the loop being alive doesn't
     /// mean the task is running. A task another process owns keeps its owner, and `task resume`
-    /// refuses it while that process lives.
+    /// refuses it while that process lives. The task's lock (issue 58) is held around the read
+    /// and the write and given up before `task resume` takes its own (issue 409); a live holder
+    /// refuses with [`lock::InUse`], writing nothing.
     fn release(&self, issue: u32) -> Result<()> {
         let base_dir = GlobalConfig::load(self.config_dir)?.base_dir;
-        let dir = record::task_dir(&base_dir, &format!("issue-{issue}"));
+        let id = format!("issue-{issue}");
+        let _lock = pipeline::lock_task(&base_dir, &id, self.probe)?;
+        let dir = record::task_dir(&base_dir, &id);
         let Ok(mut rec) = record::read(&dir.join("task.json")) else {
             return Ok(());
         };

@@ -45,13 +45,22 @@ pub struct InUse {
     holder: Process,
 }
 
+impl InUse {
+    /// What is locked and who holds it, without the advice to run the command again.
+    pub fn describe(&self) -> String {
+        format!(
+            "{} is in use by another sbxm command (process {}, started {})",
+            self.what, self.holder.pid, self.holder.started_at
+        )
+    }
+}
+
 impl std::fmt::Display for InUse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} is in use by another sbxm command (process {}, started {}); wait for it to \
-             finish, then run this command again",
-            self.what, self.holder.pid, self.holder.started_at
+            "{}; wait for it to finish, then run this command again",
+            self.describe()
         )
     }
 }
