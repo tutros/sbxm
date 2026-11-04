@@ -23,18 +23,54 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
+    # A pull request checks out its merge commit; depth 2 brings in its first parent, the base.
     - uses: actions/checkout@v4
+      with:
+        fetch-depth: 2
+    # Docs-only: every changed file is a `*.md` outside `prompts/` (compiled into the binary)
+    # and outside `.github/`. Then the Windows job skips the rest and still reports success; Ubuntu
+    # runs everything, docs tests included (issue 406). A push runs everything.
+    - name: List changed files
+      id: changes
+      shell: bash
+      run: |
+        docs_only=false
+        if [ "${{ github.event_name }}" = pull_request ]; then
+          # --no-renames lists a rename's old and new paths, so both must be docs.
+          files=$(git diff --name-only --no-renames HEAD^1 HEAD)
+          echo "$files"
+          if [ -n "$files" ]; then
+            docs_only=true
+            while IFS= read -r f; do
+              case "$f" in
+                prompts/*|.github/*) docs_only=false ;;
+                *.md) ;;
+                *) docs_only=false ;;
+              esac
+            done <<< "$files"
+          fi
+        fi
+        build=true
+        if [ "$docs_only" = true ] && [ "${{ matrix.os }}" = windows-latest ]; then
+          build=false
+        fi
+        echo "docs_only=$docs_only build=$build"
+        echo "build=$build" >> "$GITHUB_OUTPUT"
     # Third-party actions are pinned to a full commit SHA, the release tag in the comment (issue 395).
     # Its default key is the OS, the rustc version and Cargo.lock.
     - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      if: steps.changes.outputs.build == 'true'
     - uses: taiki-e/install-action@b80e2bb2635f28eb98b9fce1e2f0887e1535c6b2 # v2.90.0
+      if: steps.changes.outputs.build == 'true'
       with:
         tool: cargo-nextest
     # No separate `cargo build`: the tests build the binary they run themselves.
     # nextest runs every test binary at once, one process per test; `cargo test` ran the
     # binaries one after another.
     - name: Run tests
+      if: steps.changes.outputs.build == 'true'
       run: cargo nextest run
     # nextest doesn't run doc tests.
     - name: Run doc tests
+      if: steps.changes.outputs.build == 'true'
       run: cargo test --doc
