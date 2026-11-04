@@ -297,10 +297,11 @@ sandbox's own policy, so it runs after `create` and before any agent, and remove
 
 A worker can fix a PR's review finding from a spec. The branch to fix must be where the worker can start from:
 
-1. Push the branch to `origin` if it isn't there yet (`git push -u origin <branch>`). `--base` names a branch of
-   `origin`; a branch that only exists in your checkout or in a task's `repo.git` is not found.
-2. Under a strict warm template, merge `main` into the branch first when its lock files (`Cargo.lock`) are behind
+1. Under a strict warm template, merge `main` into the branch first when its lock files (`Cargo.lock`) are behind
    `main`'s: the template was warmed with `main`'s, and a branch with different ones is refused.
+2. Push the branch to `origin` after that merge (`git push -u origin <branch>`), also when the branch is already
+   there: the worker starts from the branch on `origin`, so a merge that is only in your checkout is never seen,
+   and `--base` can't find a branch that only exists in your checkout or in a task's `repo.git`.
 3. Write a complete spec file. A worker can't ask or look anything up, so put in it every fact it needs (the finding,
    the files, the expected behavior, the boundary cases, the checks).
 4. `sbxm task run --spec FILE --base <branch>`. Without `--base`, a spec task starts from the checkout's
