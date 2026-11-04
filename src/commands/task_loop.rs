@@ -219,6 +219,23 @@ enum End {
     /// Its lock is held by a live command run by hand (issue 409): left as it is, nothing
     /// written, and tried again after the loop's next task.
     Held(Retry),
+    /// Finished or removed by a command run by hand while its lock was held (review M-1 of issue
+    /// 409): that command's, so no row, not counted and not parked. The line saying why.
+    Taken(String),
+}
+
+/// What a claim found under the task's lock.
+enum Claimed {
+    /// Marked as the loop's.
+    Marked,
+    /// Already finished, by a command run by hand: not marked. Its PR, when one is recorded.
+    Finished(Option<String>),
+}
+
+/// The line for a task a command run by hand finished, into `pr` when one is recorded.
+fn finished_by_hand(issue: u32, pr: Option<&str>) -> String {
+    let into = pr.map_or_else(String::new, |url| format!(" into {url}"));
+    format!("#{issue}: finished by a command run by hand{into}; the loop leaves it to that command")
 }
 
 /// Where a task whose lock was held goes on from when it is tried again.
@@ -726,16 +743,54 @@ impl Loop<'_> {
     /// toward [`PR_CAP`], after a restart too ([`opened_by_loop`]).
     /// Holds the task's lock (issue 58) around the read and the write, and gives it up before
     /// `task finish` takes its own (issue 409); a live holder refuses with [`lock::InUse`].
-    fn claim(&self, issue: u32) -> Result<()> {
+    /// A task already finished, by a command run by hand that held the lock, is left unmarked
+    /// (review M-1 of issue 409).
+    fn claim(&self, issue: u32) -> Result<Claimed> {
         let _lock = pipeline::lock_task(&self.base_dir, &format!("issue-{issue}"), self.probe)?;
         let dir = self.task_dir(issue);
         let mut rec = record::read(&dir.join("task.json"))?;
+        if rec.pr.is_some() || rec.stage == Stage::Finished {
+            return Ok(Claimed::Finished(rec.pr));
+        }
         record::write_change(&dir, &mut rec, |r| {
             if !r.hooks.is_object() {
                 r.hooks = serde_json::Value::Object(serde_json::Map::new());
             }
             r.hooks[LOOP_HOOK] = serde_json::Value::Bool(true);
-        })
+        })?;
+        Ok(Claimed::Marked)
+    }
+
+    /// A task whose lock was held, tried again (issue 409): it goes on from what its record says
+    /// now, not from where the loop left it, since the command that held it may have moved it on
+    /// (review M-1). Removed or finished: left to that command. Ready: its finish. Otherwise its
+    /// resume.
+    fn again(
+        &mut self,
+        issue: u32,
+        retry: Retry,
+        stops: &mut Vec<(String, u64)>,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> std::result::Result<End, Halt> {
+        let Some(rec) = self.record(issue) else {
+            return Ok(End::Taken(format!(
+                "#{issue}: its task was removed by a command run by hand; the loop leaves it"
+            )));
+        };
+        if rec.pr.is_some() || rec.stage == Stage::Finished {
+            return Ok(End::Taken(finished_by_hand(issue, rec.pr.as_deref())));
+        }
+        match (rec.stage, retry) {
+            (Stage::Ready, Retry::Finish { ready }) => self
+                .finish(issue, Some(ready), out, warn)
+                .map_err(Halt::Error),
+            (Stage::Ready, Retry::Resume { .. }) => {
+                self.finish(issue, None, out, warn).map_err(Halt::Error)
+            }
+            (_, Retry::Finish { .. }) => self.task(issue, false, 0, stops, out, warn),
+            (_, Retry::Resume { failures }) => self.task(issue, false, failures, stops, out, warn),
+        }
     }
 
     /// A ready task: `task finish`, then for a clean one its findings filed. `ready`: when it
@@ -755,18 +810,22 @@ impl Loop<'_> {
             .map_or(0, |r| r.must_fix);
         let stopped = rec.as_ref().and_then(|r| r.stopped);
         let clean = must_fix == 0 && stopped.is_none();
-        if let Err(e) = self.claim(issue) {
-            if e.is::<lock::InUse>() {
+        match self.claim(issue) {
+            Ok(Claimed::Marked) => {}
+            Ok(Claimed::Finished(pr)) => {
+                return Ok(End::Taken(finished_by_hand(issue, pr.as_deref())));
+            }
+            Err(e) if e.is::<lock::InUse>() => {
                 writeln!(out, "{}", held_line(issue, "finish", &e))?;
                 return Ok(End::Held(Retry::Finish { ready }));
             }
-            self.warn_once(
+            Err(e) => self.warn_once(
                 warn,
                 format!(
                     "#{issue} could not be marked as the loop's ({e:#}); its PR won't count \
                      among the PRs awaiting you"
                 ),
-            )?;
+            )?,
         }
         if let Err(e) = self.steps.finish(issue, out, warn) {
             writeln!(
@@ -927,14 +986,7 @@ pub fn run(
                 tasks_run + 1,
                 size.as_deref().unwrap_or("unknown")
             )?;
-            let ended = match retry {
-                Retry::Finish { ready } => lp
-                    .finish(issue, Some(ready), out, warn)
-                    .map_err(Halt::Error),
-                Retry::Resume { failures } => {
-                    lp.task(issue, false, failures, &mut stops, out, warn)
-                }
-            };
+            let ended = lp.again(issue, retry, &mut stops, out, warn);
             (issue, title, size, started, stops, ended)
         } else {
             let open = github.issues_open(&lp.repo)?;
@@ -1020,6 +1072,10 @@ pub fn run(
                     issue,
                     reason: format!("refused before any write: {reason}"),
                 });
+                continue;
+            }
+            End::Taken(line) => {
+                writeln!(out, "{line}")?;
                 continue;
             }
             End::Held(retry) => {

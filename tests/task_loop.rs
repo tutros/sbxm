@@ -75,8 +75,23 @@ struct Script {
     /// Issues whose task continues an open PR (decision 169), with that PR's number.
     continues: RefCell<HashMap<u32, u32>>,
     /// When this call is made, the command run by hand on this issue's task ends, freeing its
-    /// lock.
-    unlock_on: RefCell<Option<(String, u32)>>,
+    /// lock, after leaving the task as [`Hand`] says.
+    unlock_on: RefCell<Option<(String, u32, Hand)>>,
+}
+
+/// What the command run by hand leaves of the task when it ends (review M-1 of issue 409).
+#[derive(Clone, Copy, PartialEq)]
+enum Hand {
+    /// The task as it found it.
+    Unchanged,
+    /// Finished into a PR, as `task finish` does.
+    Finished,
+    /// At `ready`, as `task resume` does.
+    Ready,
+    /// Gone, as `task rm` does.
+    Removed,
+    /// Stopped at `working`, as a failed `task resume --rounds` leaves it.
+    Working,
 }
 
 impl Script {
@@ -95,7 +110,11 @@ impl Script {
     }
 
     fn unlocking(self, call: &str, issue: u32) -> Self {
-        *self.unlock_on.borrow_mut() = Some((call.to_owned(), issue));
+        self.hand_ends(call, issue, Hand::Unchanged)
+    }
+
+    fn hand_ends(self, call: &str, issue: u32, hand: Hand) -> Self {
+        *self.unlock_on.borrow_mut() = Some((call.to_owned(), issue, hand));
         self
     }
 
@@ -116,12 +135,28 @@ impl Script {
     }
 
     fn note(&self, call: String) {
-        if let Some((_, locked)) = self
+        if let Some((_, locked, hand)) = self
             .unlock_on
             .borrow()
             .as_ref()
-            .filter(|(when, _)| *when == call)
+            .filter(|(when, ..)| *when == call)
         {
+            let dir = record::task_dir(&self.base, &format!("issue-{locked}"));
+            match hand {
+                Hand::Unchanged => {}
+                Hand::Finished => {
+                    write_record(
+                        &self.base,
+                        *locked,
+                        Stage::Finished,
+                        None,
+                        Some(500 + locked),
+                    );
+                }
+                Hand::Ready => write_record(&self.base, *locked, Stage::Ready, Some(0), None),
+                Hand::Removed => fs::remove_dir_all(&dir).unwrap(),
+                Hand::Working => write_record(&self.base, *locked, Stage::Working, None, None),
+            }
             let _ = fs::remove_file(lock_file(&self.base, *locked));
         }
         self.calls.borrow_mut().push(call);
@@ -803,6 +838,147 @@ fn a_task_held_with_nothing_else_to_run_ends_the_loop_naming_its_resume() {
         "{}",
         run.out
     );
+}
+
+/// Review M-1: a task the command run by hand finished while the loop waited is that command's:
+/// no claim, no second finish, no row and not parked.
+#[test]
+fn a_held_finish_whose_holder_finished_the_task_is_left_to_it() {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S"), labeled(4, "size:M")]);
+    let script = Script::new(&f.base())
+        .plays(3, &[Act::ReadyLocked(true)])
+        .hand_ends("run 4", 3, Hand::Finished);
+
+    let run = run_loop(&f, opts(&f), &script, &gh);
+
+    run.result.unwrap();
+    assert_eq!(
+        phases(&script),
+        ["run 3", "run 4", "finish 4", "file-findings 4"]
+    );
+    assert_eq!(
+        loops_hook(&f.base(), 3),
+        None,
+        "a PR opened by hand is not the loop's"
+    );
+    assert!(!run.out.contains("parked"), "{}", run.out);
+    let line = run
+        .out
+        .lines()
+        .find(|l| l.starts_with("#3: ") && l.contains("finished by a command run by hand"))
+        .unwrap_or_else(|| panic!("{}", run.out));
+    assert!(line.contains("pull/503"), "{line}");
+    assert!(!f.log_text().contains("| #3 "), "{}", f.log_text());
+    assert!(
+        !run.out.contains("sbxm task finish --issue 3"),
+        "{}",
+        run.out
+    );
+}
+
+#[test]
+fn a_held_resume_whose_holder_finished_the_task_is_left_to_it() {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S"), labeled(4, "size:M")]);
+    let script = Script::new(&f.base())
+        .plays(3, &[Act::Fail("sbx stopped answering", true), Act::Held])
+        .hand_ends("run 4", 3, Hand::Finished);
+
+    let run = run_loop(&f, opts(&f), &script, &gh);
+
+    run.result.unwrap();
+    assert_eq!(
+        phases(&script),
+        ["run 3", "resume 3", "run 4", "finish 4", "file-findings 4"]
+    );
+    assert_eq!(loops_hook(&f.base(), 3), None);
+    assert!(!run.out.contains("parked"), "{}", run.out);
+    assert!(
+        run.out.contains("finished by a command run by hand"),
+        "{}",
+        run.out
+    );
+}
+
+#[test]
+fn a_held_resume_whose_holder_got_the_task_ready_goes_on_to_its_finish() {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S"), labeled(4, "size:M")]);
+    let script = Script::new(&f.base())
+        .plays(3, &[Act::Fail("sbx stopped answering", true), Act::Held])
+        .hand_ends("run 4", 3, Hand::Ready);
+
+    let run = run_loop(&f, opts(&f), &script, &gh);
+
+    run.result.unwrap();
+    assert_eq!(
+        phases(&script),
+        [
+            "run 3",
+            "resume 3",
+            "run 4",
+            "finish 4",
+            "file-findings 4",
+            "finish 3",
+            "file-findings 3"
+        ],
+        "a ready task is not resumed again"
+    );
+    assert_eq!(
+        loops_hook(&f.base(), 3),
+        Some(serde_json::Value::Bool(true))
+    );
+}
+
+#[test]
+fn a_held_finish_whose_holder_left_the_task_short_of_ready_resumes_it() {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S"), labeled(4, "size:M")]);
+    let script = Script::new(&f.base())
+        .plays(3, &[Act::ReadyLocked(true), Act::Ready(0)])
+        .hand_ends("run 4", 3, Hand::Working);
+
+    run_loop(&f, opts(&f), &script, &gh).result.unwrap();
+
+    assert_eq!(
+        phases(&script),
+        [
+            "run 3",
+            "run 4",
+            "finish 4",
+            "file-findings 4",
+            "resume 3",
+            "finish 3",
+            "file-findings 3"
+        ]
+    );
+}
+
+#[test]
+fn a_held_task_its_holder_removed_is_left_to_it() {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S"), labeled(4, "size:M")]);
+    let script = Script::new(&f.base())
+        .plays(3, &[Act::ReadyLocked(true)])
+        .hand_ends("run 4", 3, Hand::Removed);
+
+    let run = run_loop(&f, opts(&f), &script, &gh);
+
+    run.result.unwrap();
+    assert_eq!(
+        phases(&script),
+        ["run 3", "run 4", "finish 4", "file-findings 4"],
+        "neither finished nor run again"
+    );
+    assert!(!run.out.contains("parked"), "{}", run.out);
+    assert!(
+        run.out
+            .contains("#3: its task was removed by a command run by hand"),
+        "{}",
+        run.out
+    );
+    assert!(!f.log_text().contains("| #3 "), "{}", f.log_text());
 }
 
 #[test]
