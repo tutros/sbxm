@@ -7,6 +7,10 @@ harness = "claude"             # claude | codex | antigravity
 # model = "claude-opus-5-5"    # the harness's default when absent
 time_limit = "2h"
 
+# The worker's fix rounds continue its own Claude session (decision 285, a trial; issue 418).
+[fix]
+resume = true
+
 # The reviewer defaults to a harness different from the worker's.
 [reviewer]
 # harness = "codex"

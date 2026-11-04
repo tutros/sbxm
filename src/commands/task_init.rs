@@ -19,6 +19,11 @@ harness = "claude"             # claude | codex | antigravity
 time_limit = "2h"
 # fix_rounds = 3                # the round budget; 0 stops at the first must-fix finding or gate failure
 
+# A Claude worker's fix rounds continue its own session (`claude -p --resume`) instead of a
+# fresh one; the session is kept in the task's folder, and a fix round runs fresh when it can't be.
+# [fix]
+# resume = false
+
 # The reviewer defaults to a harness different from the worker's.
 [reviewer]
 # harness = "codex"

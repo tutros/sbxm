@@ -145,6 +145,9 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
     issue task's own `task.json` on this machine decides, never a comment on GitHub; with no task folder recording
     the PR, the review runs as before. A task that continued an open PR and spec tasks (which open no PR) are
     unchanged.
+  - `[fix] resume = true` (off by default; this repo sets it for the decision 285 trial) makes a Claude worker's fix
+    rounds continue its own session, kept in the task's folder as `worker-session.jsonl`, instead of a fresh one;
+    when it can't (no session kept, over 64 MiB, unknown to the CLI), the round runs fresh and says why.
   - `[worker] fix_rounds` (default 3) bounds the review-fix-review loop; a gate that ran and failed spends a round too
     (one that could not run at all stops the task without spending any). Rounds
     after the first review only the commits made since the last one, and one more review of everything confirms a

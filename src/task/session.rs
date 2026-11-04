@@ -156,19 +156,13 @@ fn copy_out(
         ));
     }
     let read = match prepared.record.location {
-        Location::Local => {
-            let read = repo::read_agent_file(&prepared.workspace, FILE, CAP);
-            // The copy in the workspace goes; the task's folder keeps its own.
-            let _ = fs::remove_file(prepared.workspace.join(AGENT_DIR).join(FILE));
-            read
-        }
-        Location::Cloud => {
-            let read = copy_out_staged(backend, &prepared.meta, sandbox, &clone, FILE)
-                .and_then(|staged| repo::read_agent_file(staged.dir(), FILE, CAP));
-            let _ = backend.exec(sandbox, &script("rm -f -- \"$1\"", &[&in_clone]));
-            read
-        }
+        Location::Local => repo::read_agent_file(&prepared.workspace, FILE, CAP),
+        Location::Cloud => copy_out_staged(backend, &prepared.meta, sandbox, &clone, FILE)
+            .and_then(|staged| repo::read_agent_file(staged.dir(), FILE, CAP)),
     };
+    // The copy in the clone goes (the task's folder keeps its own), removed inside the sandbox:
+    // the clone is the agent's, so the host never deletes through what it may have linked there.
+    let _ = backend.exec(sandbox, &script("rm -f -- \"$1\"", &[&in_clone]));
     match read {
         Ok(AgentFile::Text(text)) if text.is_empty() => Err("it is empty".to_owned()),
         Ok(AgentFile::Text(text)) => Ok(text),
@@ -277,8 +271,15 @@ fn place(
 
 /// Whether a resumed run failed because the CLI had no such session: the round runs again fresh.
 pub(super) fn not_found(result: &HeadlessResult) -> bool {
-    matches!(&result.status, RunStatus::Failed(why) if why.contains(NOT_FOUND))
-        || result.transcript.contains(NOT_FOUND)
+    let RunStatus::Failed(why) = &result.status else {
+        return false;
+    };
+    // On stderr it is in the failure; on stdout it is a plain line, not inside a JSON event.
+    why.contains(NOT_FOUND)
+        || result
+            .transcript
+            .lines()
+            .any(|line| line.trim_start().starts_with(NOT_FOUND))
 }
 
 /// `sh -c <script> sh <args…>`, with no working folder: the values are positional arguments,
@@ -307,6 +308,34 @@ mod tests {
             project_dir("/home/agent/work/issue_4.x"),
             "-home-agent-work-issue-4-x"
         );
+    }
+
+    fn failed(why: &str, transcript: &str) -> HeadlessResult {
+        HeadlessResult {
+            status: RunStatus::Failed(why.to_owned()),
+            answer: String::new(),
+            transcript: transcript.to_owned(),
+            usage: crate::headless::Usage {
+                input_tokens: 0,
+                output_tokens: 0,
+                cost_usd: None,
+            },
+            session_id: None,
+        }
+    }
+
+    #[test]
+    fn only_the_clis_own_message_on_a_failed_run_is_a_session_not_found() {
+        let message = "No conversation found with session ID: 92ae7cb6";
+        // On stderr (the failure says it) or as a plain line on stdout.
+        assert!(not_found(&failed(&format!("exit code 1: {message}"), "")));
+        assert!(not_found(&failed("exit code 1", &format!("{message}\n"))));
+        // A run that completed, or failed for another reason, whose conversation only mentions it.
+        let quoted = format!("{{\"type\":\"assistant\",\"text\":\"{message}\"}}\n");
+        let mut completed = failed("", &quoted);
+        completed.status = RunStatus::Completed;
+        assert!(!not_found(&completed));
+        assert!(!not_found(&failed("exit code 1", &quoted)));
     }
 
     #[test]

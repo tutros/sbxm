@@ -186,6 +186,15 @@ fn the_workers_session_is_kept_in_the_task_folder() {
         .unwrap()
         .1;
     assert!(save.argv.iter().any(|a| a == SESSION), "{:?}", save.argv);
+    // The copy left in the clone is removed inside the sandbox, never by the host.
+    let copy = save.argv.last().unwrap().clone();
+    assert!(
+        backend.execs().iter().any(
+            |(_, s)| s.argv.get(2).is_some_and(|a| a.starts_with("rm -f"))
+                && s.argv.last() == Some(&copy)
+        ),
+        "{copy}"
+    );
 }
 
 #[test]
@@ -481,4 +490,37 @@ fn a_cloud_fix_round_resumes_the_session_kept_in_the_task_folder() {
             .exists()
     );
     assert!(!ran.out.contains("fresh"), "{}", ran.out);
+}
+
+/// The fallback line is printed, so `run.log` (a copy of what a task command prints) has it.
+#[test]
+fn a_fix_round_that_runs_fresh_says_so_in_the_commands_output() {
+    use common::cloud_task::{self, HOME};
+    let f = fixture_with(
+        "[sandbox]\nprofile = \"default\"\nlocation = \"local\"\n\n[gates]\n\
+         sandbox = [\"cargo test\"]\n\n[fix]\nresume = true\n",
+    );
+    let (spec, id) = cloud_task::spec(&f);
+    let root = f.env.tmp.path().join("cloud-fs");
+    let backend =
+        cloud_task::cloud_backend_listing(&root, &id, &[cloud_task::ONE, cloud_task::CLEAN], false);
+    // No session file anywhere under the sandbox's `~/.claude/projects`.
+    fs::create_dir_all(
+        root.join(HOME.trim_start_matches('/'))
+            .join(".claude/projects"),
+    )
+    .unwrap();
+
+    let ran = cloud_task::task_run(&f, spec, Some(sbxm::backend::Location::Cloud), &backend);
+
+    ran.result.unwrap();
+    assert_eq!(resumes(&fix_runs(&backend)[0]), None);
+    for line in [
+        format!("{id}: the worker's session was not kept ("),
+        format!("{id}: the fix round runs fresh: no session of the worker was kept"),
+    ] {
+        assert!(ran.out.contains(&line), "{line}\n{}", ran.out);
+    }
+    let record = cloud_task::task_record(&f, &id);
+    assert_eq!(record.stage, Stage::Ready);
 }
