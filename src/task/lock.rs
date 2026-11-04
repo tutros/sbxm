@@ -27,6 +27,49 @@ pub const FILE_NAME: &str = "lock.json";
 const ATTEMPTS: u32 = 50;
 const PAUSE: Duration = Duration::from_millis(10);
 
+/// How many times in all `create_new` of the lock or of its takeover claim is tried while it
+/// fails with `PermissionDenied`, and how long it waits between two tries (issue 407): on Windows
+/// a file another command is still deleting refuses to be made with "Access is denied", so what
+/// a later try sees decides, and only a denial on every try is reported as one.
+const DENIED_ATTEMPTS: u32 = 5;
+const DENIED_PAUSE: Duration = Duration::from_millis(50);
+
+/// Making a file that must not exist yet, and waiting before trying again; tests replace both.
+trait CreateFiles {
+    fn create_new(&self, path: &Path) -> std::io::Result<fs::File>;
+    fn sleep(&self, pause: Duration);
+}
+
+struct RealFiles;
+
+impl CreateFiles for RealFiles {
+    fn create_new(&self, path: &Path) -> std::io::Result<fs::File> {
+        fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+    }
+
+    fn sleep(&self, pause: Duration) {
+        std::thread::sleep(pause);
+    }
+}
+
+/// `create_new` of `path`, tried again after a `PermissionDenied` up to [`DENIED_ATTEMPTS`] in
+/// all; any other outcome, or the last try's denial, is returned as it is.
+fn create_new(path: &Path, files: &dyn CreateFiles) -> std::io::Result<fs::File> {
+    let mut attempt = 1;
+    loop {
+        match files.create_new(path) {
+            Err(err) if err.kind() == ErrorKind::PermissionDenied && attempt < DENIED_ATTEMPTS => {
+                files.sleep(DENIED_PAUSE);
+                attempt += 1;
+            }
+            outcome => return outcome,
+        }
+    }
+}
+
 /// What the lock file holds.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct Holder {
@@ -36,6 +79,36 @@ struct Holder {
     /// moved), so a lock is only ever removed by the value that made it.
     token: String,
 }
+
+/// The refusal of a lock whose holder is alive, typed so a caller that would rather skip the
+/// locked thing than fail (`task loop`, issue 409) can tell it from any other error.
+#[derive(Debug)]
+pub struct InUse {
+    what: String,
+    holder: Process,
+}
+
+impl InUse {
+    /// What is locked and who holds it, without the advice to run the command again.
+    pub fn describe(&self) -> String {
+        format!(
+            "{} is in use by another sbxm command (process {}, started {})",
+            self.what, self.holder.pid, self.holder.started_at
+        )
+    }
+}
+
+impl std::fmt::Display for InUse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}; wait for it to finish, then run this command again",
+            self.describe()
+        )
+    }
+}
+
+impl std::error::Error for InUse {}
 
 /// Held while a command changes a task; dropping it (on return, an error or a panic) removes the
 /// lock file if it still names this lock. A crash without unwinding leaves the file, naming a
@@ -70,6 +143,15 @@ impl ProcessLock {
     /// takeover itself is claimed with `create_new` (`lock.json.takeover`), and the other then
     /// finds the winner's live lock and refuses.
     pub fn acquire(dir: &Path, what: &str, probe: &dyn ProcessProbe) -> Result<Self> {
+        Self::acquire_with(dir, what, probe, &RealFiles)
+    }
+
+    fn acquire_with(
+        dir: &Path,
+        what: &str,
+        probe: &dyn ProcessProbe,
+        files: &dyn CreateFiles,
+    ) -> Result<Self> {
         let path = dir.join(FILE_NAME);
         let me = serde_json::to_string(&Holder {
             process: Process::current(probe),
@@ -79,11 +161,7 @@ impl ProcessLock {
             if attempt > 0 {
                 std::thread::sleep(PAUSE);
             }
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
+            match create_new(&path, files) {
                 Ok(mut file) => {
                     let lock = Self {
                         path,
@@ -117,14 +195,13 @@ impl ProcessLock {
                 continue;
             };
             if held.process.alive(probe) {
-                bail!(
-                    "{what} is in use by another sbxm command (process {}, started {}); wait for \
-                     it to finish, then run this command again",
-                    held.process.pid,
-                    held.process.started_at
-                );
+                return Err(InUse {
+                    what: what.to_owned(),
+                    holder: held.process,
+                }
+                .into());
             }
-            take_over_stale(&path, &text)?;
+            take_over_stale(&path, &text, files)?;
         }
         let claim = takeover_path(&path);
         if claim.exists() {
@@ -157,13 +234,9 @@ fn takeover_path(path: &Path) -> PathBuf {
 
 /// Removes the stale lock at `path` if it still reads `stale`, under the takeover claim; a claim
 /// held by another command leaves it to that command.
-fn take_over_stale(path: &Path, stale: &str) -> Result<()> {
+fn take_over_stale(path: &Path, stale: &str, files: &dyn CreateFiles) -> Result<()> {
     let claim = takeover_path(path);
-    match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&claim)
-    {
+    match create_new(&claim, files) {
         Ok(_) => {}
         Err(err) if err.kind() == ErrorKind::AlreadyExists => return Ok(()),
         Err(err) => return Err(err).with_context(|| format!("cannot create {}", claim.display())),
@@ -250,6 +323,16 @@ mod tests {
             fs::read_to_string(dir.path().join(FILE_NAME)).unwrap(),
             text
         );
+    }
+
+    #[test]
+    fn a_live_holders_refusal_is_typed_so_a_caller_can_skip_instead_of_failing() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = 4_000_007;
+        write_holder(dir.path(), other, 2000);
+        let err = ProcessLock::acquire(dir.path(), "task issue-1", &Probe { other: Some(other) })
+            .unwrap_err();
+        assert!(err.is::<InUse>(), "{err:#}");
     }
 
     #[test]
@@ -389,5 +472,180 @@ mod tests {
                 "{refused:#}"
             );
         }
+    }
+
+    /// Real files, except that the first `denials` creations of the file called `name` fail with
+    /// `PermissionDenied`, each after running `on_deny` (what a racing command did meanwhile);
+    /// pauses are recorded instead of slept.
+    struct Denying<'a> {
+        name: &'static str,
+        denials: u32,
+        on_deny: &'a dyn Fn(),
+        calls: std::cell::Cell<u32>,
+        pauses: std::cell::RefCell<Vec<Duration>>,
+    }
+
+    impl<'a> Denying<'a> {
+        fn new(name: &'static str, denials: u32, on_deny: &'a dyn Fn()) -> Self {
+            Self {
+                name,
+                denials,
+                on_deny,
+                calls: std::cell::Cell::new(0),
+                pauses: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl CreateFiles for Denying<'_> {
+        fn create_new(&self, path: &Path) -> std::io::Result<fs::File> {
+            if path.file_name().is_some_and(|n| n == self.name) {
+                let call = self.calls.get() + 1;
+                self.calls.set(call);
+                if call <= self.denials {
+                    (self.on_deny)();
+                    return Err(ErrorKind::PermissionDenied.into());
+                }
+            }
+            RealFiles.create_new(path)
+        }
+
+        fn sleep(&self, pause: Duration) {
+            self.pauses.borrow_mut().push(pause);
+        }
+    }
+
+    const CLAIM: &str = "lock.json.takeover";
+
+    fn holder_pid(dir: &Path) -> u32 {
+        let held: Holder =
+            serde_json::from_str(&fs::read_to_string(dir.join(FILE_NAME)).unwrap()).unwrap();
+        held.process.pid
+    }
+
+    #[test]
+    fn a_denied_lock_that_then_exists_is_in_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = 4_000_010;
+        let race = || {
+            write_holder(dir.path(), other, 2000);
+        };
+        let files = Denying::new(FILE_NAME, 1, &race);
+        let err = ProcessLock::acquire_with(
+            dir.path(),
+            "task issue-1",
+            &Probe { other: Some(other) },
+            &files,
+        )
+        .unwrap_err();
+        assert!(err.is::<InUse>(), "{err:#}");
+        assert_eq!(files.calls.get(), 2);
+        assert_eq!(*files.pauses.borrow(), vec![DENIED_PAUSE]);
+    }
+
+    #[test]
+    fn a_denied_takeover_claim_that_then_exists_is_in_use() {
+        let dir = tempfile::tempdir().unwrap();
+        write_holder(dir.path(), 4_000_011, 2000);
+        let other = 4_000_012;
+        // The other taker claimed the takeover and took the lock meanwhile.
+        let race = || {
+            fs::write(dir.path().join(CLAIM), "").unwrap();
+            write_holder(dir.path(), other, 2000);
+        };
+        let files = Denying::new(CLAIM, 1, &race);
+        let err = ProcessLock::acquire_with(
+            dir.path(),
+            "task issue-1",
+            &Probe { other: Some(other) },
+            &files,
+        )
+        .unwrap_err();
+        assert!(err.is::<InUse>(), "{err:#}");
+        assert_eq!(files.calls.get(), 2);
+    }
+
+    #[test]
+    fn a_lock_denied_once_then_created_is_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = Denying::new(FILE_NAME, 1, &|| {});
+        let lock = ProcessLock::acquire_with(dir.path(), "task issue-1", &ME, &files).unwrap();
+        assert_eq!(holder_pid(dir.path()), std::process::id());
+        assert_eq!(files.calls.get(), 2);
+        drop(lock);
+        assert!(!dir.path().join(FILE_NAME).exists());
+    }
+
+    #[test]
+    fn a_takeover_claim_denied_once_then_created_takes_the_stale_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        write_holder(dir.path(), 4_000_013, 2000);
+        let files = Denying::new(CLAIM, 1, &|| {});
+        let _lock = ProcessLock::acquire_with(dir.path(), "task issue-1", &ME, &files).unwrap();
+        assert_eq!(holder_pid(dir.path()), std::process::id());
+        assert_eq!(files.calls.get(), 2);
+        assert!(!dir.path().join(CLAIM).exists());
+    }
+
+    #[test]
+    fn a_lock_denied_four_times_then_created_on_the_last_attempt_is_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = Denying::new(FILE_NAME, DENIED_ATTEMPTS - 1, &|| {});
+        let _lock = ProcessLock::acquire_with(dir.path(), "task issue-1", &ME, &files).unwrap();
+        assert_eq!(holder_pid(dir.path()), std::process::id());
+        assert_eq!(files.calls.get(), DENIED_ATTEMPTS);
+        assert_eq!(
+            *files.pauses.borrow(),
+            vec![DENIED_PAUSE; DENIED_ATTEMPTS as usize - 1]
+        );
+    }
+
+    #[test]
+    fn a_takeover_claim_denied_four_times_then_created_takes_the_stale_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        write_holder(dir.path(), 4_000_014, 2000);
+        let files = Denying::new(CLAIM, DENIED_ATTEMPTS - 1, &|| {});
+        let _lock = ProcessLock::acquire_with(dir.path(), "task issue-1", &ME, &files).unwrap();
+        assert_eq!(holder_pid(dir.path()), std::process::id());
+        assert_eq!(files.calls.get(), DENIED_ATTEMPTS);
+    }
+
+    #[test]
+    fn a_lock_denied_on_every_attempt_reports_the_real_error_naming_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = Denying::new(FILE_NAME, u32::MAX, &|| {});
+        let err = ProcessLock::acquire_with(dir.path(), "task issue-1", &ME, &files).unwrap_err();
+        assert!(!err.is::<InUse>(), "{err:#}");
+        assert_eq!(
+            err.to_string(),
+            format!("cannot create {}", dir.path().join(FILE_NAME).display())
+        );
+        assert_eq!(
+            err.root_cause().to_string(),
+            std::io::Error::from(ErrorKind::PermissionDenied).to_string()
+        );
+        assert_eq!(files.calls.get(), DENIED_ATTEMPTS);
+        assert_eq!(
+            *files.pauses.borrow(),
+            vec![DENIED_PAUSE; DENIED_ATTEMPTS as usize - 1]
+        );
+    }
+
+    #[test]
+    fn a_takeover_claim_denied_on_every_attempt_reports_the_real_error_naming_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = write_holder(dir.path(), 4_000_015, 2000);
+        let files = Denying::new(CLAIM, u32::MAX, &|| {});
+        let err = ProcessLock::acquire_with(dir.path(), "task issue-1", &ME, &files).unwrap_err();
+        assert!(!err.is::<InUse>(), "{err:#}");
+        assert_eq!(
+            err.to_string(),
+            format!("cannot create {}", dir.path().join(CLAIM).display())
+        );
+        assert_eq!(files.calls.get(), DENIED_ATTEMPTS);
+        assert_eq!(
+            fs::read_to_string(dir.path().join(FILE_NAME)).unwrap(),
+            stale
+        );
     }
 }
