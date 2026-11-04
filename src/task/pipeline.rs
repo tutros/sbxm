@@ -27,6 +27,7 @@ use super::rewrite;
 use super::risk;
 use super::secrets;
 use super::select::{self, Selection};
+use super::session;
 use crate::backend::{CreateSpec, ExecSpec, Location, SandboxBackend, ScopedSecret, Stdin};
 use crate::config::{self, GlobalConfig, Profile, Resources};
 use crate::github::{GitHubBackend, Issue, IssueText, PrInfo, PrState};
@@ -1316,6 +1317,7 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
             memory: Some(kit_set.resources.memory.clone()),
             template: plan.template.clone(),
             run: None,
+            session: None,
         });
         record::write(&meta, task)?;
 
@@ -2852,6 +2854,8 @@ pub(super) fn work(env: &TaskEnv, prepared: &mut Prepared) -> Result<Worked> {
     let transcripts = prepared.meta.join("transcripts");
     fs::create_dir_all(&transcripts)?;
     fs::write(transcripts.join("worker.jsonl"), &result.transcript)?;
+    // While the sandbox is still there: it may be released or removed before a fix round.
+    session::keep(env, prepared, &sandbox, result.session_id.as_deref())?;
     if let Some(agent) = prepared.record.worker.as_mut() {
         agent.run = Some(RunInfo {
             status: run_label(&result.status),
@@ -3974,21 +3978,38 @@ fn fix(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
         .context("the task has no worker")?
         .sandbox
         .clone();
-    let result = match headless::run(
-        env.backend,
-        &sandbox,
-        &prepared.sandbox_clone(),
-        worker.harness,
-        FIX_PROMPT,
-        &HeadlessOpts {
-            model: worker.model.clone(),
-            high_effort: false,
-            budget_usd: None,
-            is_git_repo: true,
-            resume: None,
-        },
-        worker.time_limit,
-    ) {
+    let clone = prepared.sandbox_clone();
+    let run = |resume: Option<String>| {
+        headless::run(
+            env.backend,
+            &sandbox,
+            &clone,
+            worker.harness,
+            FIX_PROMPT,
+            &HeadlessOpts {
+                model: worker.model.clone(),
+                high_effort: false,
+                budget_usd: None,
+                is_git_repo: true,
+                resume,
+            },
+            worker.time_limit,
+        )
+    };
+    // The worker's own session, with `[fix] resume` (issue 418); fresh when there is none.
+    let resume = session::restore(env, prepared, &sandbox);
+    let mut ran = run(resume.clone());
+    if let (Some(id), Ok(result)) = (&resume, &ran)
+        && session::not_found(result)
+    {
+        prepared.events.push(format!(
+            "{}: the worker's session {id} could not be resumed (the CLI has no such session); \
+             the fix round runs fresh",
+            prepared.record.id
+        ));
+        ran = run(None);
+    }
+    let result = match ran {
         Ok(result) => result,
         Err(e) => {
             prepared.record.finish(Status::Failed)?;
@@ -3999,6 +4020,7 @@ fn fix(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
     let transcripts = prepared.meta.join("transcripts");
     fs::create_dir_all(&transcripts)?;
     fs::write(transcripts.join("fix.jsonl"), &result.transcript)?;
+    session::keep(env, prepared, &sandbox, result.session_id.as_deref())?;
     let mut status = result.status;
     prepared.record.finish(match &status {
         RunStatus::Completed => Status::Completed,
@@ -4532,6 +4554,7 @@ fn reviewer_agent(env: &TaskEnv, sandbox: &str, workspace: String, plan: &Sandbo
         memory: None,
         template: plan.template.clone(),
         run: None,
+        session: None,
     }
 }
 

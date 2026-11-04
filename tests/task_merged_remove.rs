@@ -168,6 +168,8 @@ fn archiving_copies_only_the_text_records_that_exist() {
     // Never archived: a transcript and the clones.
     fs::write(dir.join("worker.transcript.jsonl"), "{}\n").unwrap();
     fs::create_dir_all(dir.join("repo.git")).unwrap();
+    // Nor the worker's kept session (issue 418, decided point 2).
+    fs::write(dir.join("worker-session.jsonl"), "{}\n").unwrap();
 
     let archive = archive_task(&f.env.base_dir(), "issue-41").unwrap();
 
@@ -184,6 +186,7 @@ fn archiving_copies_only_the_text_records_that_exist() {
         assert!(archive.join(name).is_file(), "{name} missing from archive");
     }
     assert!(!archive.join("worker.transcript.jsonl").exists());
+    assert!(!archive.join("worker-session.jsonl").exists());
     assert!(!archive.join("repo.git").exists());
     assert_eq!(
         fs::read_to_string(archive.join("review-2.md")).unwrap(),
