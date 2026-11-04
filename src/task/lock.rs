@@ -37,6 +37,27 @@ struct Holder {
     token: String,
 }
 
+/// The refusal of a lock whose holder is alive, typed so a caller that would rather skip the
+/// locked thing than fail (`task loop`, issue 409) can tell it from any other error.
+#[derive(Debug)]
+pub struct InUse {
+    what: String,
+    holder: Process,
+}
+
+impl std::fmt::Display for InUse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} is in use by another sbxm command (process {}, started {}); wait for it to \
+             finish, then run this command again",
+            self.what, self.holder.pid, self.holder.started_at
+        )
+    }
+}
+
+impl std::error::Error for InUse {}
+
 /// Held while a command changes a task; dropping it (on return, an error or a panic) removes the
 /// lock file if it still names this lock. A crash without unwinding leaves the file, naming a
 /// process that is gone, and the next command takes it over.
@@ -117,12 +138,11 @@ impl ProcessLock {
                 continue;
             };
             if held.process.alive(probe) {
-                bail!(
-                    "{what} is in use by another sbxm command (process {}, started {}); wait for \
-                     it to finish, then run this command again",
-                    held.process.pid,
-                    held.process.started_at
-                );
+                return Err(InUse {
+                    what: what.to_owned(),
+                    holder: held.process,
+                }
+                .into());
             }
             take_over_stale(&path, &text)?;
         }
@@ -250,6 +270,16 @@ mod tests {
             fs::read_to_string(dir.path().join(FILE_NAME)).unwrap(),
             text
         );
+    }
+
+    #[test]
+    fn a_live_holders_refusal_is_typed_so_a_caller_can_skip_instead_of_failing() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = 4_000_007;
+        write_holder(dir.path(), other, 2000);
+        let err = ProcessLock::acquire(dir.path(), "task issue-1", &Probe { other: Some(other) })
+            .unwrap_err();
+        assert!(err.is::<InUse>(), "{err:#}");
     }
 
     #[test]
