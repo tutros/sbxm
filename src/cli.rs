@@ -464,8 +464,8 @@ pub enum TaskCommand {
         /// The sandbox profile (default: sbxm-task.toml).
         #[arg(long)]
         profile: Option<String>,
-        /// The branch to start from (default: the repo's default branch; a spec task reads it
-        /// from the checkout instead, with no GitHub call).
+        /// The branch to start from (default: the repo's default branch; a spec task reads the
+        /// checkout's origin/HEAD instead, not the branch checked out, with no GitHub call).
         #[arg(long)]
         base: Option<String>,
         /// The GitHub repo, owner/name (default: this checkout's origin).

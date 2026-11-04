@@ -17,7 +17,7 @@ Milestone 1 complete (slices 0–21, end-to-end check passed 2026-09-27). Milest
 
 ## Workflow
 
-The repo is `tutros/sbxm` on GitHub (public since 2026-09-27, `MIT OR Apache-2.0`; `origin`, branch `main`). Code review findings are GitHub issues there (decision 79); close them from fix commits with `Fixes #n`. Every change, docs and planning files included, goes to a branch and a PR after an initial code review, and the independent reviewer runs on the PR before the user merges: for a PR `sbxm task finish` opened, that is the in-task review it posts while the PR's head is the reviewed commit, and `sbxm task review --pr N` for any later commit and every other PR; never push to `main` (decisions 86, 187). A low-risk PR (the reviewer's level and the path-rule floor) whose latest review covered its head commit with 0 must-fix is merged by GitHub's auto-merge without the user, armed with `--match-head-commit` set to that commit and disarmed before any later push (decisions 266, 280; medium and high risk stay the user's; a break found after an auto-merge pauses it until the user decides). A PR made in the session, not by a worker, first goes
+The repo is `tutros/sbxm` on GitHub (public since 2026-09-27, `MIT OR Apache-2.0`; `origin`, branch `main`). Code review findings are GitHub issues there (decision 79); close them from fix commits with `Fixes #n`. Every change, docs and planning files included, goes to a branch and a PR after an initial code review, and the independent reviewer runs on the PR before the user merges: for a PR `sbxm task finish` opened, that is the in-task review it posts while the PR's head is the reviewed commit, and `sbxm task review --pr N` for any later commit and every other PR; never push to `main` (decisions 86, 187). A low-risk PR (the reviewer's level and the path-rule floor) whose latest review covered its head commit with 0 must-fix is merged by GitHub's auto-merge without the user, armed with `--match-head-commit` set to that commit and disarmed before any later push (decisions 266, 280; medium and high risk stay the user's; a break found after an auto-merge pauses it until the user decides). To fix an open PR with a worker, follow `docs/workflow.md`, "Fix an open PR (or a task's branch) with a worker". A PR made in the session, not by a worker, first goes
 through the self-review in `sdlc-implementation` ("Before reporting a change done"), and a commit pushed after a PR's
 last review gets a narrow re-review or is named in the PR as unreviewed (decision 251, an experiment for the next three
 hand-made PRs).
@@ -46,7 +46,7 @@ cargo build
 cargo run -- --help                          # run the CLI
 cargo test                                   # all tests (no Docker needed)
 cargo test --test cli help_prints_usage      # a single test
-$env:SBXM_REAL_BASE_DIR='E:\sbxm-it'; cargo test --test real_sbx -- --ignored   # real sbx; needs `sbx login`, dir not on C: (decision 56)
+$env:SBXM_REAL_BASE_DIR='H:\sbxm-it'; cargo test --test real_sbx -- --ignored   # real sbx; needs `sbx login`, dir not on C: (decision 56)
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 just script-test                             # Pester 5 tests for scripts/deploy-profiles.ps1 (decision 136)

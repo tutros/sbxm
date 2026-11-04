@@ -86,7 +86,7 @@ check:
     just script-test
 
 # Run the tests against the real sbx (needs `sbx login` and a base dir not on C:).
-real-test base_dir='E:\sbxm-it':
+real-test base_dir='H:\sbxm-it':
     $env:SBXM_REAL_BASE_DIR = '{{base_dir}}'; cargo test --test real_sbx -- --ignored
 
 # Compare the pinned Pi and Antigravity kit tags in src/harness.rs with the newest dated tag on Docker Hub (M2a P8). Changes nothing; re-pinning is a manual step.
