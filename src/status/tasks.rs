@@ -68,7 +68,7 @@ pub fn rows(base: &Path, probe: &dyn ProcessProbe) -> Result<Vec<TaskRow>> {
 
 /// The last line of `run.log` that isn't a header (`# ...`), with its leading timestamp removed;
 /// `None` if the file doesn't exist, or has no such line.
-fn last_log_line(path: &Path) -> Option<String> {
+pub(crate) fn last_log_line(path: &Path) -> Option<String> {
     let text = fs::read_to_string(path).ok()?;
     let line = text.lines().rev().find(|line| !line.starts_with("# "))?;
     Some(strip_timestamp(line).to_owned())
