@@ -382,8 +382,9 @@ pub enum TaskCommand {
         /// Resume this spec task's file.
         #[arg(long, value_name = "FILE")]
         spec: Option<PathBuf>,
-        /// For a task that stopped ready (its fix rounds used, or a finding repeated): add N
-        /// fix rounds to its budget and start a fix round from its review.md.
+        /// For a task that stopped ready (its fix rounds used, or a finding repeated): N more fix
+        /// rounds from now (its budget becomes the rounds used plus N, whatever the stop), the
+        /// first started from its review.md.
         #[arg(long, value_name = "N")]
         rounds: Option<u32>,
         /// Create the sandbox even when the drive of sbx's sandbox state has less than

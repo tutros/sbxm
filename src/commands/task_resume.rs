@@ -125,7 +125,7 @@ pub fn run(
         writeln!(
             out,
             "{id}: {n} more fix round(s), {} in all (stopped: {})",
-            prepared.record.fix_rounds + n,
+            resume::rounds_cap(&prepared.record, n).unwrap_or(u32::MAX),
             prepared.record.stopped.map_or("", record::Stopped::name)
         )?;
     }

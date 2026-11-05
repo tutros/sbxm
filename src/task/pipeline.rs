@@ -4211,17 +4211,18 @@ pub(super) fn check_cloud_rebuild(
 }
 
 /// The TTL a rebuilt worker sandbox of `record` gets ([`check_cloud_rebuild`]), refused when the
-/// task's budget, with `rounds` added, makes it too large to add up.
+/// cap `--rounds` sets ([`super::resume::rounds_cap`]) is too large to add up.
 fn check_rebuild_ttl(config: &TaskConfig, record: &Record, rounds: Option<u32>) -> Result<()> {
     let Some(n) = rounds else {
         rebuild_ttl(config, record)?;
         return Ok(());
     };
-    let budget = record.fix_rounds.checked_add(n).with_context(|| {
+    let budget = super::resume::rounds_cap(record, n).with_context(|| {
         format!(
-            "--rounds {n} is too many: task {} has {} fix rounds, and the total can be at most {}",
+            "--rounds {n} is too many: task {} has used {} fix rounds, and the total can be at \
+             most {}",
             record.id,
-            record.fix_rounds,
+            record.round,
             u32::MAX
         )
     })?;
