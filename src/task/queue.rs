@@ -22,6 +22,11 @@ pub const READY_LABEL: &str = "ready-for-worker";
 /// toward the loop's cap of PRs awaiting the user (decision 3).
 pub const LOOP_HOOK: &str = "task_loop";
 
+/// `<base>/.sbxm/task-loop.lock`: held while a loop runs (`task loop`), and read by `sbxm status`.
+pub fn lock_path(base_dir: &Path) -> std::path::PathBuf {
+    base_dir.join(".sbxm").join("task-loop.lock")
+}
+
 /// Whether this task's PR is one a loop opened: a loop finished it, and it didn't continue an open
 /// PR (decision 169), whose finish only pushes to it (review M-3, repeat). A continued PR a loop
 /// did open still counts through the record of the task that opened it.

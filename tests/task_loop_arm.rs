@@ -425,3 +425,40 @@ fn a_failed_cleanup_is_a_warning_and_the_loop_goes_on() {
     assert!(run.warn.contains("a task folder is locked"), "{}", run.warn);
     assert!(script.calls().contains(&"finish 3".to_owned()));
 }
+
+#[test]
+fn the_real_cleanup_step_removes_a_finished_task_whose_pr_merged_and_keeps_an_open_one() {
+    let f = fixture();
+    let gh = github(&[])
+        .with_pr(pr(103, PrState::Merged, REVIEWED))
+        .with_pr(pr(104, PrState::Open, REVIEWED));
+    let script = Script::new(&f.base(), LOW_CLEAN);
+    for issue in [3, 4] {
+        script.run(issue, &mut Vec::new(), &mut Vec::new()).unwrap();
+        script
+            .finish(issue, &mut Vec::new(), &mut Vec::new())
+            .unwrap();
+    }
+    let backend = sbxm::backend::FakeBackend::default();
+    let host = sbxm::task::gates::FakeHostRunner::default();
+    let steps = task_loop::TaskSteps {
+        config_dir: &f.env.config_dir(),
+        repo_root: f.repo_root.clone(),
+        repo: Some(REPO.into()),
+        backend: &backend,
+        github: &gh,
+        probe: &Probe,
+        host: &host,
+        disk: sbxm::disk::Guard::default(),
+    };
+
+    steps.rm_merged(&mut Vec::new(), &mut Vec::new()).unwrap();
+
+    assert!(!record::task_dir(&f.base(), "issue-3").exists());
+    assert!(record::task_dir(&f.base(), "issue-4").exists());
+    assert!(
+        sbxm::task::merged::archive_dir(&f.base(), "issue-3")
+            .join("task.json")
+            .is_file()
+    );
+}

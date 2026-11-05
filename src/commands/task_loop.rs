@@ -125,14 +125,10 @@ impl Drop for LoopLock {
     }
 }
 
-fn lock_path(base_dir: &Path) -> PathBuf {
-    base_dir.join(".sbxm").join("task-loop.lock")
-}
-
 /// Takes the loop's lock for this process, as `template build` takes its own (decision 212): a
 /// lock whose process is alive refuses the second loop; one whose process is gone is taken over.
 fn take_lock(base_dir: &Path, probe: &dyn ProcessProbe, warn: &mut dyn Write) -> Result<LoopLock> {
-    let path = lock_path(base_dir);
+    let path = queue::lock_path(base_dir);
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
     }
