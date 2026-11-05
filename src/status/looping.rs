@@ -11,8 +11,10 @@ use std::path::Path;
 use crate::github::GitHubBackend;
 use crate::run::results::parse_timestamp;
 use crate::status::tasks::truncate;
+use crate::task::finish::check_own_folder;
+use crate::task::merged;
 use crate::task::queue::{self, LOOP_HOOK};
-use crate::task::record::{self, Kind, Process, ProcessProbe, Stage, Status};
+use crate::task::record::{self, Kind, Process, ProcessProbe, Record, Stage, Status};
 
 /// The longest queue shown on a terminal; the rest is "… N more". Output that isn't a terminal
 /// shows every issue.
@@ -69,24 +71,38 @@ pub struct Work {
 /// runs its phases in its own process, and its marker (`hooks.task_loop`) is written only when
 /// it claims a ready task for `task finish`, so it can't identify work in progress (decision
 /// 294, approved by the user 2026-11-06). The tasks done are the marked records finished since
-/// the lock's process started.
+/// the lock's process started, the archived ones included: the loop's own merged-task cleanup
+/// archives a task and removes its folder once its PR merges (decision 195), and that task is
+/// still done in this window (review M-1 of PR 437). A task in both places, between the archive
+/// and the removal, counts once; only the active records say which task runs.
 pub fn work(base: &Path, lock: &Process) -> anyhow::Result<Work> {
     let started = parse_timestamp(&lock.started_at);
     let mut out = Work::default();
-    for rec in record::load_all(base)? {
+    let active = record::load_all(base)?;
+    let mut finished = Vec::new();
+    for rec in &active {
         if rec.kind != Kind::Issue {
             continue;
         }
-        let marked = rec.hooks.get(LOOP_HOOK) == Some(&serde_json::Value::Bool(true));
-        if rec.stage != Stage::Finished {
-            if rec.status == Status::Running && rec.process.as_ref() == Some(lock) {
-                out.current = Some(Current {
-                    id: rec.id.clone(),
-                    stage: rec.stage.name(),
-                });
-            }
-            continue;
+        if rec.stage == Stage::Finished {
+            finished.push(rec);
+        } else if rec.status == Status::Running && rec.process.as_ref() == Some(lock) {
+            out.current = Some(Current {
+                id: rec.id.clone(),
+                stage: rec.stage.name(),
+            });
         }
+    }
+    let mut archived = archived(base);
+    archived.retain(|rec| !active.iter().any(|a| a.id == rec.id));
+    finished.extend(
+        archived
+            .iter()
+            .filter(|rec| rec.kind == Kind::Issue && rec.stage == Stage::Finished),
+    );
+    finished.sort_by(|a, b| (a.number, &a.id).cmp(&(b.number, &b.id)));
+    for rec in finished {
+        let marked = rec.hooks.get(LOOP_HOOK) == Some(&serde_json::Value::Bool(true));
         let finished_at = rec
             .stages
             .iter()
@@ -99,6 +115,35 @@ pub fn work(base: &Path, lock: &Process) -> anyhow::Result<Work> {
         }
     }
     Ok(out)
+}
+
+/// The records under [`merged::archive_root`], read as `task rm --merged` reads task folders:
+/// never through a link or a folder whose real place is elsewhere ([`check_own_folder`]), at the
+/// root, a task's folder or its `task.json`. Anything not a plain record, or that can't be read,
+/// is skipped: the archive is history, and one bad entry must not hide the whole section.
+fn archived(base: &Path) -> Vec<Record> {
+    let root = merged::archive_root(base);
+    if fs::symlink_metadata(&root).is_err() || check_own_folder(base, &root).is_err() {
+        return Vec::new();
+    }
+    let Ok(entries) = fs::read_dir(&root) else {
+        return Vec::new();
+    };
+    let mut records = Vec::new();
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        let own = fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir())
+            && check_own_folder(base, &dir).is_ok();
+        let path = dir.join("task.json");
+        let plain = fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_file());
+        if own
+            && plain
+            && let Ok(rec) = record::read(&path)
+        {
+            records.push(rec);
+        }
+    }
+    records
 }
 
 /// One issue in the queue.

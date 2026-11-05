@@ -17,6 +17,7 @@ use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::github::{Issue, PrInfo, PrState};
 use sbxm::run::results::format_timestamp;
 use sbxm::status::looping::{self, Lock, QueueItem, Snapshot, View, Work};
+use sbxm::task::merged;
 use sbxm::task::queue::{LOOP_HOOK, lock_path};
 use sbxm::task::record::{
     self, Kind, NewTask, Process, ProcessProbe, Record, Stage, Stamp, Status,
@@ -357,6 +358,115 @@ fn a_marked_finished_task_is_not_the_running_one() {
     let text = frame(&b, &alive(), &gh, false, 80);
 
     assert!(text.contains("  task: none running\n"), "{text}");
+}
+
+/// What the merged-task cleanup the loop runs before each step does to a task (decision 195):
+/// archives its records under `.sbxm/task-archive/<id>/`, then removes its folder.
+fn archive_and_remove(base: &Path, id: &str) {
+    merged::archive_task(base, id).unwrap();
+    fs::remove_dir_all(record::task_dir(base, id)).unwrap();
+}
+
+/// Review M-1 of PR 437: a task the loop finished in its window is still done after the
+/// cleanup archived and removed it once its PR merged.
+#[test]
+fn a_task_done_in_the_window_stays_done_after_the_merged_cleanup_archives_it() {
+    let base = TestEnv::new();
+    let b = base.base_dir();
+    save(&b, &finished(3, T0 - 10, true));
+    assert_eq!(
+        looping::work(&b, &loop_process()).unwrap().done,
+        ["issue-3"]
+    );
+
+    archive_and_remove(&b, "issue-3");
+
+    assert!(
+        merged::archive_dir(&b, "issue-3")
+            .join("task.json")
+            .is_file()
+    );
+    assert!(!record::task_dir(&b, "issue-3").exists());
+    assert_eq!(
+        looping::work(&b, &loop_process()).unwrap().done,
+        ["issue-3"]
+    );
+}
+
+#[test]
+fn an_archived_task_counts_once_and_only_when_marked_and_finished_in_the_window() {
+    let base = TestEnv::new();
+    let b = base.base_dir();
+    // In both places, as between the archive and the removal: counted once.
+    save(&b, &finished(2, T0 - 10, true));
+    merged::archive_task(&b, "issue-2").unwrap();
+    // Archived and gone: done in the window, before it, and not the loop's.
+    for rec in [
+        finished(3, T0 - 20, true),
+        finished(5, LOOP_START - 5, true),
+        finished(4, T0 - 10, false),
+    ] {
+        save(&b, &rec);
+        archive_and_remove(&b, &rec.id);
+    }
+
+    let work = looping::work(&b, &loop_process()).unwrap();
+
+    assert_eq!(work.done, ["issue-2", "issue-3"]);
+    assert_eq!(work.current, None);
+}
+
+/// An archived task is never the running one, even if its record says running with the lock's
+/// process: only the active records say what runs now.
+#[test]
+fn an_archived_running_record_is_not_the_loops_task() {
+    let base = TestEnv::new();
+    let b = base.base_dir();
+    save(&b, &running(8, Stage::Working));
+    archive_and_remove(&b, "issue-8");
+
+    let work = looping::work(&b, &loop_process()).unwrap();
+
+    assert_eq!(work, Work::default());
+}
+
+/// The archive is read like `task rm --merged` reads task folders: never through a link, at
+/// the archive's root, a task's folder or its `task.json`.
+#[cfg(unix)]
+#[test]
+fn archived_records_behind_a_link_are_not_read() {
+    for link_at in ["root", "folder", "file"] {
+        let base = TestEnv::new();
+        let b = base.base_dir();
+        let elsewhere = base.tmp.path().join("elsewhere");
+        let archive = b.join(".sbxm").join("task-archive");
+        let rec = finished(3, T0 - 10, true);
+        match link_at {
+            "root" => {
+                let folder = elsewhere.join("issue-3");
+                record::write(&folder, &rec).unwrap();
+                fs::create_dir_all(archive.parent().unwrap()).unwrap();
+                common::dir_link(&archive, &elsewhere);
+            }
+            "folder" => {
+                record::write(&elsewhere, &rec).unwrap();
+                fs::create_dir_all(&archive).unwrap();
+                common::dir_link(&archive.join("issue-3"), &elsewhere);
+            }
+            _ => {
+                record::write(&elsewhere, &rec).unwrap();
+                fs::create_dir_all(archive.join("issue-3")).unwrap();
+                common::file_link(
+                    &archive.join("issue-3").join("task.json"),
+                    &elsewhere.join("task.json"),
+                );
+            }
+        }
+
+        let work = looping::work(&b, &loop_process()).unwrap();
+
+        assert!(work.done.is_empty(), "{link_at}: {work:?}");
+    }
 }
 
 #[test]

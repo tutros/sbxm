@@ -464,7 +464,12 @@ pub fn plan_forgetting(
 /// `.sbxm/task-archive/`, so it is on the same drive as the base dir and outside `tasks/` and
 /// `.sbxm/tasks/`, which `task status` and `task rm` scan.
 pub fn archive_dir(base_dir: &Path, id: &str) -> PathBuf {
-    base_dir.join(".sbxm").join("task-archive").join(id)
+    archive_root(base_dir).join(id)
+}
+
+/// The folder holding every [`archive_dir`].
+pub fn archive_root(base_dir: &Path) -> PathBuf {
+    base_dir.join(".sbxm").join("task-archive")
 }
 
 /// The names of a task's text records worth archiving (decision 195 point 2): `review.md`, every
