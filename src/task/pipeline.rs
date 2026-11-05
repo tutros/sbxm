@@ -2314,14 +2314,20 @@ fn copy_in_all(
 /// The task's own text files a worker's clone gets, as `(host file, name in .sbxm-task/)`: the
 /// source (`source.md` for a spec task, `issue.md` otherwise) and the worker's prompt.
 fn worker_files(meta: &Path, kind: Kind) -> Vec<(PathBuf, &'static str)> {
-    let source = match kind {
-        Kind::Spec => "source.md",
-        _ => "issue.md",
-    };
+    let source = source_name(kind);
     vec![
         (meta.join(source), source),
         (meta.join("worker-prompt.md"), "prompt.md"),
     ]
+}
+
+/// The name of a task's source in its folder and in the worker's `.sbxm-task/`: `source.md` for a
+/// spec task, `issue.md` otherwise.
+fn source_name(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Spec => "source.md",
+        _ => "issue.md",
+    }
 }
 
 /// A new, empty host folder under the task's `staging/`, made for one copy out of (or into) a
@@ -2835,10 +2841,7 @@ pub(super) fn restore_worker_input(
             &worker_files(&prepared.meta, prepared.record.kind),
         );
     }
-    let source = match prepared.record.kind {
-        Kind::Spec => "source.md",
-        _ => "issue.md",
-    };
+    let source = source_name(prepared.record.kind);
     let read = |name: &str| {
         fs::read(prepared.meta.join(name))
             .with_context(|| format!("the task's {name} is missing from its folder"))
@@ -3852,22 +3855,27 @@ fn run_fix_round(
     start_fix_round(env, prepared, &input)
 }
 
-/// What a fix round is given: the review or a gate's output, as the file the prompt names, and
-/// the rendered prompt. Read and rendered before the round changes anything, so a missing review
-/// stops it first (issue 118).
+/// What a fix round is given: the review or a gate's output, as the file the prompt names, the
+/// rendered prompt, and the task's source as its folder has it now (issue 435: it may have been
+/// updated since the start). Read and rendered before the round changes anything, so a missing
+/// review stops it first (issue 118).
 pub(super) struct FixInput {
     extra_name: &'static str,
     extra_text: String,
     prompt: String,
+    source_name: &'static str,
+    source_text: Vec<u8>,
 }
 
 impl FixInput {
-    /// Writes the input and the prompt into the worker's clone, refusing a link the agent left;
-    /// into a cloud clone they go by copy, from a fresh staging folder (milestone 4 slice 5).
+    /// Writes the input, the prompt and the source into the worker's clone, refusing a link the
+    /// agent left; into a cloud clone they go by copy, from a fresh staging folder (milestone 4
+    /// slice 5).
     pub(super) fn place(&self, backend: &dyn SandboxBackend, prepared: &Prepared) -> Result<()> {
         let files = [
             (self.extra_name, self.extra_text.as_bytes()),
             ("fix-prompt.md", self.prompt.as_bytes()),
+            (self.source_name, self.source_text.as_slice()),
         ];
         if prepared.record.location == Location::Local {
             return repo::write_agent_files(&prepared.workspace, &files, Existing::Refuse);
@@ -3939,10 +3947,13 @@ pub(super) fn fix_input(
             ("gate_output_path", ".sbxm-task/gate-failure.md"),
         ],
     )?;
+    let (source_name, source_text) = read_source(prepared)?;
     Ok(FixInput {
         extra_name,
         extra_text,
         prompt,
+        source_name,
+        source_text,
     })
 }
 
@@ -4044,11 +4055,22 @@ pub(super) fn rerun_fix_input(prepared: &Prepared) -> Result<FixInput> {
                 .context("the review to fix is missing; run the review again")?,
         )
     };
+    let (source_name, source_text) = read_source(prepared)?;
     Ok(FixInput {
         extra_name,
         extra_text,
         prompt,
+        source_name,
+        source_text,
     })
+}
+
+/// The task's source in its folder, for a fix round's [`FixInput`]: its name and its bytes.
+fn read_source(prepared: &Prepared) -> Result<(&'static str, Vec<u8>)> {
+    let name = source_name(prepared.record.kind);
+    let text = fs::read(prepared.meta.join(name))
+        .with_context(|| format!("the task's {name} is missing from its folder"))?;
+    Ok((name, text))
 }
 
 /// The fix round's run itself, in a task at `fixing/running` whose prompt is in the clone: the
@@ -4211,17 +4233,18 @@ pub(super) fn check_cloud_rebuild(
 }
 
 /// The TTL a rebuilt worker sandbox of `record` gets ([`check_cloud_rebuild`]), refused when the
-/// task's budget, with `rounds` added, makes it too large to add up.
+/// cap `--rounds` sets ([`super::resume::rounds_cap`]) is too large to add up.
 fn check_rebuild_ttl(config: &TaskConfig, record: &Record, rounds: Option<u32>) -> Result<()> {
     let Some(n) = rounds else {
         rebuild_ttl(config, record)?;
         return Ok(());
     };
-    let budget = record.fix_rounds.checked_add(n).with_context(|| {
+    let budget = super::resume::rounds_cap(record, n).with_context(|| {
         format!(
-            "--rounds {n} is too many: task {} has {} fix rounds, and the total can be at most {}",
+            "--rounds {n} is too many: task {} has used {} fix rounds, and the total can be at \
+             most {}",
             record.id,
-            record.fix_rounds,
+            record.round,
             u32::MAX
         )
     })?;

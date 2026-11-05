@@ -84,12 +84,12 @@ pub fn check_can_resume(
         );
     }
     if let Some(n) = rounds
-        && task.fix_rounds.checked_add(n).is_none()
+        && rounds_cap(task, n).is_none()
     {
         bail!(
-            "--rounds {n} is too many: task {id} has {} fix rounds, and the total can be at most \
-             {}",
-            task.fix_rounds,
+            "--rounds {n} is too many: task {id} has used {} fix rounds, and the total can be at \
+             most {}",
+            task.round,
             u32::MAX
         );
     }
@@ -170,6 +170,12 @@ fn target_flag(task: &Record) -> String {
         Kind::Fix => format!("<no flag names fix task {} yet>", task.id),
         _ => format!("--issue {}", task.number),
     }
+}
+
+/// The fix-round cap `--rounds n` sets (issue 436): n more rounds from now, so the rounds already
+/// used plus n, whatever the stop; `None` when that overflows.
+pub fn rounds_cap(task: &Record, n: u32) -> Option<u32> {
+    task.round.checked_add(n)
 }
 
 /// A `ready` task is resumed only when it stopped with something unresolved (spec section 5.2):
@@ -359,11 +365,13 @@ fn resume_checked(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -
                 prepared.record.round += 1;
             }
         }
-        // Stopped `ready`: the budget grows by `--rounds`, `stopped` is cleared (a later stop sets
-        // it again), and a fix round runs from the recorded review.
+        // Stopped `ready`: the budget becomes the rounds used plus `--rounds` ([`rounds_cap`]),
+        // `stopped` is cleared (a later stop sets it again), and a fix round runs from the
+        // recorded review.
         (Stage::Ready, _) => {
             if let Some(n) = rounds {
-                prepared.record.fix_rounds += n;
+                prepared.record.fix_rounds =
+                    rounds_cap(&prepared.record, n).context("--rounds overflows the budget")?;
             }
             let was = prepared.record.stopped.take().map_or("", Stopped::name);
             prepared.record.notes.push(format!(
