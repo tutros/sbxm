@@ -26,6 +26,11 @@ build sbxm tasks run with (a machine's own wrapper; never a fresh `cargo run`).
 - Decision 286 (an experiment, two groups): issues that touch the same code and are to be done in order go to one
   worker as one spec (`task run --spec`), with every issue's acceptance checks; the PR closes all of them. Each
   issue is readied as above first.
+- Decision 296 (an experiment): **same spot, so run them in order.** Before an issue goes into a session or a night
+  run, name the files and the spots it will edit (a module list, a section of `sbxm status`, a match arm, the end of a
+  shared doc), and compare them with every open PR and every other issue in the same run. Two that edit the same spot
+  either go to one worker as one spec (decision 286) or run one after the other, the second started only after the
+  first merges. They never run side by side.
 - Decision 295: **re-check a `ready-for-worker` issue right before its task starts** (and before an unattended
   list): read the body back whole; check every file, function, flag and behavior it names against today's `main`;
   list the PRs merged since it was labeled that touch its area (`gh pr list --state merged --search
