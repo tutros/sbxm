@@ -3187,6 +3187,28 @@ fn pass_gates(
     }
 }
 
+/// Decision 292: a fix task's worker merges the base before it fixes the findings, so the
+/// delivered branch must contain the base's tip as the task fetched it; otherwise nothing is
+/// pushed.
+pub fn check_base_merged(prepared: &Prepared) -> Result<()> {
+    let task = &prepared.record;
+    let repo_git = prepared.meta.join("repo.git");
+    let base = repo::branch_tip(&repo_git, &task.base)?;
+    let tip = repo::branch_tip(&repo_git, &task.branch)?;
+    if !repo::is_ancestor(&repo_git, &base, &tip)? {
+        bail!(
+            "the worker of {} didn't merge {} (at {base}) into {}, so nothing was pushed to PR \
+             #{} (decision 292); see {} for what it handed back",
+            task.id,
+            task.base,
+            task.branch,
+            task.number,
+            prepared.meta.join("result.md").display()
+        );
+    }
+    Ok(())
+}
+
 /// Decision 291: a branch whose commits change the lock files of a strict profile's warm template
 /// stops before its gates, with the hand-back, instead of failing them for want of a crate.
 fn check_branch_locks(env: &TaskEnv, prepared: &Prepared) -> Result<()> {
@@ -3250,6 +3272,8 @@ fn review_checked(
         _ => false,
     };
     if !gates_current {
+        // Decision 291, before the worker's sandbox is made again for the gates.
+        check_branch_locks(env, prepared)?;
         // The gates run in the worker's sandbox, which a local task removed when its last phase
         // ended (issue 341).
         ensure_local_worker(env, prepared)?;

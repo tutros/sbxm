@@ -298,6 +298,18 @@ sandbox's own policy, so it runs after `create` and before any agent, and remove
 
 ## Fix an open PR (or a task's branch) with a worker
 
+`sbxm task fix --pr N` fixes the must-fix findings of your latest sbxm review of PR N in a sandbox, and **merges the
+base first** (decision 292): open PRs conflict with each other once one merges, and every such conflict so far was
+mechanical (keep both sides whole, or merge a README row word by word). The worker merges `main`, resolves, then the
+gates run (a resolution that breaks a test gets a fix round), the result is pushed as a fast-forward, and the in-task
+review covers the merge narrowly. Conflicts are rarer at the source when an issue reserves the number of any
+decision it adds ("this adds decision N", gap G41) and its new tests go in a file or section of their own, never at
+the end of a shared test file; the worker prompts and `sdlc-issue-flow` carry both rules. README rows two PRs edit
+have no rule: they merge word by word. Avoiding tasks whose files overlap an open PR's is not built; its trigger is a
+worker's merge of the base failing its gates twice in one week.
+
+Without a review to fix (a branch of your own, or a task's), use a spec:
+
 A worker can fix a PR's review finding from a spec. The branch to fix must be where the worker can start from:
 
 1. Under a strict warm template, merge `main` into the branch first when its lock files (`Cargo.lock`) are behind

@@ -1275,14 +1275,16 @@ and the living backlog #405; the `waiting-on-trigger` label is judged at the nex
 290. **A strict template made stale by `main`'s lock files is rebuilt from `main`; a branch that changes them stops
 (2026-11-03, the user's answers on issue #402; refines [201] and [203](b), replaces [235]'s hint):** when a strict
 profile's warm template (built for the profile as it is now, its image still in `sbx`) has other lock files than the
-task's base branch at its tip in the task's host-owned `repo.git`, the task's sandbox is not refused: sbxm checks out
-that tip cleanly (as `task::repo` makes checkouts, never an agent's clone), runs `template build --warm` from it, removes
-the checkout and goes on, printing one line with the new tag. Lazily, at the first task sandbox (worker, remade worker
+task's base branch, the task's sandbox is not refused: sbxm fetches the base from `origin` into its host-owned
+`repo.git` (as branch `sbxm-template-base`, apart from the task's own base ref), and when the template's lock files
+differ from that tip too, checks it out cleanly (as `task::repo` makes checkouts, never an agent's clone), runs
+`template build --warm` from it, removes the checkout and goes on, printing one line with the new tag. A task whose
+own base is older than `main` now (a resumed one) never rebuilds the template back to its older lock files. Lazily, at the first task sandbox (worker, remade worker
 or reviewer) that needs the template; no merge watcher. Two tasks needing the same rebuild make one build: the second
 waits on the build lock of [212] instead of being refused, and uses the template the first built when it already holds
 the base's lock files. A rebuild that fails stops the task, naming `sbxm template build <profile> --warm <a clean
 checkout of main>`. Line-ending-only differences rebuild nothing [238]. Then, when the commit the sandbox checks out (a
-task's branch, a PR's head) has lock files other than the base's, the task stops with the hand-back of [291] (after the
+task's branch, a PR's head) has lock files other than the task's own base, the task stops with the hand-back of [291] (after the
 rebuild, when `main` changed too). Warming from agent-written code (a worker's tip, an unmerged PR head) is never
 automatic: a warm build runs `cargo` and its build scripts with network, and the result becomes every later sandbox's
 template. So [235]'s advice (set `strict = false`, or warm a template from the task's tip) is dropped; an issue or spec
@@ -1298,6 +1300,22 @@ before any reviewer or remade worker sandbox), with the same words: "this branch
 decision", and putting the crate on the base in a pull request of its own; [290]'s rebuild refreshes the template once
 that PR merges, and the parked task is resumed. The user approves every new crate; revisit (session approval within
 limits, such as an existing indirect dependency or a dev-only crate) if these hand-backs pile up.
+
+292. **`task fix --pr N` merges the base first, and two rules avoid conflicts (2026-11-03, the user's answers on issue
+#404; uses [251]):** open PRs conflicted with each other once one merged (3 of 6 on 2026-11-03), and every conflict was
+mechanical. (1) The fix task's worker prompt starts with "merge the base": `git merge --no-edit origin/<base>` in the
+sandbox, each conflict resolved by keeping both sides whole (both appended tests, both appended decisions; a README
+row both sides edited gets both edits, word by word), never a rebase, reset or force (the push is a fast-forward); a
+conflict that needs a judgement about behavior is aborted and handed back. A delivered branch that doesn't contain the
+base's tip as the task fetched it is not pushed. The gates then run as for any task (a resolution that breaks a test
+fails them and gets a fix round), and the in-task review, posted on the PR as before, covers the merge narrowly: the
+reviewer prompt says the base's own commits are not the change and to check the merge commit's resolutions
+(`git show --remerge-diff`). A clean merge needs no fix round. A PR whose base moved twice is merged again by the next
+`task fix`. (2) Fewer conflicts at the source, as rules in the worker prompts and `sdlc-issue-flow`: (a) an issue
+reserves the number of any decision it adds when it is readied ("this adds decision N", gap G41); (b) new tests go in
+a section or file of the issue's own, never appended at the end of a shared test file. README rows edited by two PRs
+get no rule. (3) The loop doesn't avoid tasks whose files overlap an open PR's; the trigger to build that is a
+worker's merge of the base failing its gates twice in one week.
 
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
