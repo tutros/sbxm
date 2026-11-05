@@ -181,6 +181,7 @@ fn pr(number: u32, state: PrState, head: &str) -> PrInfo {
         title: "t".into(),
         body: String::new(),
         closing_issues: Vec::new(),
+        base_moved: false,
     }
 }
 

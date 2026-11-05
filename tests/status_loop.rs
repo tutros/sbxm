@@ -124,6 +124,7 @@ fn pr(number: u32) -> PrInfo {
         title: "t".into(),
         body: String::new(),
         closing_issues: Vec::new(),
+        base_moved: false,
     }
 }
 
