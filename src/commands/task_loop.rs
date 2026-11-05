@@ -980,7 +980,8 @@ impl Loop<'_> {
                 self.say_once(
                     out,
                     format!(
-                        "PR #{number} conflicts with its base but is a draft; it awaits you, and                          the loop leaves it"
+                        "PR #{number} conflicts with its base but is a draft; it awaits you, and \
+                         the loop leaves it"
                     ),
                 )?;
                 continue;
@@ -993,16 +994,22 @@ impl Loop<'_> {
                         self.warn_once(
                             warn,
                             format!(
-                                "the base's head could not be read ({e:#}); conflicting PRs are                                  not resolved at this step"
+                                "the base's head could not be read ({e:#}); conflicting PRs are \
+                                 not resolved at this step"
                             ),
                         )?;
                         return Ok(true);
                     }
                 },
             };
-            if !self.resolves.insert((number, tip)) {
+            if self.resolves.contains(&(number, tip.clone())) {
                 continue;
             }
+            // `task fix` would refuse on a low disk: the PR waits for a later step, not failed.
+            if self.steps.room().is_err() {
+                return Ok(true);
+            }
+            self.resolves.insert((number, tip));
             if (self.env.stop_requested)() {
                 return Ok(false);
             }
@@ -1037,7 +1044,10 @@ impl Loop<'_> {
             Err(e) => {
                 return self.warn_once(
                     warn,
-                    format!("PR #{number} can't be read ({e:#}); it is not resolved now"),
+                    format!(
+                        "PR #{number} can't be read ({e:#}); it is not resolved until {branch} \
+                         moves"
+                    ),
                 );
             }
         };
@@ -1050,7 +1060,8 @@ impl Loop<'_> {
                 return self.warn_once(
                     warn,
                     format!(
-                        "auto-merge could not be disarmed on PR #{number} ({e:#}); it is not                          resolved until {branch} moves"
+                        "auto-merge could not be disarmed on PR #{number} ({e:#}); it is not \
+                         resolved until {branch} moves"
                     ),
                 );
             }
@@ -1114,7 +1125,8 @@ impl Loop<'_> {
         self.say_once(
             out,
             format!(
-                "PR #{number} awaits you: {why}; its fix task is kept (see `sbxm task status`),                  and the loop leaves the PR"
+                "PR #{number} awaits you: {why}; its fix task is kept (see `sbxm task status`), \
+                 and the loop leaves the PR"
             ),
         )?;
         Ok(format!("not resolved: {why}"))
@@ -1168,7 +1180,8 @@ impl Loop<'_> {
             Err(e) => return self.arming_failed(number, &e, out, warn),
         };
         if head != reviewed {
-            let note = "auto-merge not armed: the PR's head isn't the commit the resolve's review                         covered";
+            let note = "auto-merge not armed: the PR's head isn't the commit the resolve's review \
+                        covered";
             writeln!(
                 out,
                 "PR #{number}: {note} (reviewed {reviewed}, head {head}); it awaits you"

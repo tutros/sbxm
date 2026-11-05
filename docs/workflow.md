@@ -228,7 +228,7 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
   before the next issue (a pause on the 5 PRs included), the loop reads each open PR it opened and runs
   `task fix --pr N` on the ones GitHub reports conflicting (`mergeable` `CONFLICTING` or `mergeStateStatus` `DIRTY`),
   one at a time in PR-number order. A PR only `BEHIND` is left (`main` has no branch protection, so it still merges);
-  `UNKNOWN` is read again at the next step; a draft is skipped; each PR gets at most one resolve per tip of `main` in
+  `UNKNOWN` is read again at the next step, as is every conflicting PR while the disk is low; a draft is skipped; each PR gets at most one resolve per tip of `main` in
   a run (kept in memory, so a restarted loop may try once more). Auto-merge is disarmed before the fix if armed, and
   armed again on the fix task's new head only when its review is low risk with 0 must-fix and covered that head, and
   the PR was armed or its own task passed the same checks. A failed resolve (handed back, gates failing, must-fix

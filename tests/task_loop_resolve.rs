@@ -66,6 +66,8 @@ struct Script<'a> {
     clock: Cell<u64>,
     /// Run after each `task run`: GitHub changing meanwhile.
     after_run: Box<dyn Fn(&FakeGitHub) + 'a>,
+    /// The answers of the disk check, in order; room once they run out.
+    room: RefCell<Vec<bool>>,
 }
 
 impl<'a> Script<'a> {
@@ -77,6 +79,7 @@ impl<'a> Script<'a> {
             calls: RefCell::default(),
             clock: Cell::new(START),
             after_run: Box::new(|_| {}),
+            room: RefCell::default(),
         }
     }
 
@@ -212,7 +215,12 @@ impl Steps for Script<'_> {
     }
 
     fn room(&self) -> Result<()> {
-        Ok(())
+        let mut room = self.room.borrow_mut();
+        if room.is_empty() || room.remove(0) {
+            Ok(())
+        } else {
+            Err(anyhow!("only 1 GiB free"))
+        }
     }
 }
 
@@ -340,6 +348,14 @@ fn run_loop(f: &Fixture, opts: &Options, script: &Script, gh: &FakeGitHub) -> Ru
     }
 }
 
+/// The loop's lines about PRs have no run of spaces, as a message wrapped badly in the source
+/// would.
+fn assert_one_space(text: &str) {
+    for line in text.lines().filter(|l| l.contains("PR #")) {
+        assert!(!line.contains("  "), "{line}");
+    }
+}
+
 fn arms(gh: &FakeGitHub) -> Vec<GhCall> {
     gh.calls()
         .into_iter()
@@ -402,6 +418,7 @@ fn a_conflicting_draft_pr_is_skipped_and_said_once() {
     assert_eq!(script.fixes_run(), ["run 3"]);
     assert_eq!(run.out.matches("PR #101").count(), 1, "{}", run.out);
     assert!(run.out.contains("draft"), "{}", run.out);
+    assert_one_space(&run.out);
 }
 
 #[test]
@@ -537,6 +554,7 @@ fn a_fix_review_that_did_not_cover_the_new_head_is_not_armed_and_says_why() {
     run.result.unwrap();
     assert!(arms(&gh).is_empty());
     assert!(run.out.contains("not armed"), "{}", run.out);
+    assert_one_space(&run.out);
     assert!(f.log_text().contains("not armed"), "{}", f.log_text());
 }
 
@@ -555,7 +573,24 @@ fn a_failed_disarm_leaves_the_pr_unresolved_with_a_warning() {
     run.result.unwrap();
     assert!(script.fixes_run().is_empty());
     assert!(run.warn.contains("HTTP 502"), "{}", run.warn);
+    assert_one_space(&run.warn);
     assert!(arms(&gh).is_empty());
+}
+
+#[test]
+fn a_low_disk_leaves_a_conflicting_pr_for_a_later_step_not_failed() {
+    let f = fixture();
+    f.loop_pr(1, Level::Low);
+    let gh = github(&[3], &[101]).with_mergeable(101, Mergeable::Conflicting);
+    let script = Script::new(&f.base(), &gh);
+    // Low at the first step's resolve; room again by the next step.
+    script.room.borrow_mut().push(false);
+
+    let run = run_loop(&f, &f.opts(None), &script, &gh);
+
+    run.result.unwrap();
+    assert_eq!(script.fixes_run(), ["run 3", "fix 101"], "{}", run.out);
+    assert!(!run.out.contains("PR #101 awaits you"), "{}", run.out);
 }
 
 // --- A failed resolve ---
@@ -608,6 +643,7 @@ fn a_failed_resolve_leaves_the_pr_and_its_fix_task_is_said_once_and_not_tried_ag
             run.out
         );
         assert!(arms(&gh).is_empty(), "{said}");
+        assert_one_space(&run.out);
         // The fix task stays for the user.
         let id = record::fix_id(101, HEAD).unwrap();
         assert!(record::task_dir(&f.base(), &id).join("task.json").is_file());
