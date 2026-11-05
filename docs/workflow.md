@@ -229,8 +229,10 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
 ```
 sbxm task run --spec idea.md --cloud   # this task's sandboxes in the cloud; the task remembers it
 sbxm task review --pr 69 --local       # this review here, whatever [sandbox] location says
-sbxm status                            # the tasks, the running cloud sandboxes and their time left, the comparison runs,
-                                       # then the Loop (running or not, its task, the PRs awaiting you, the queue; decision 294)
+sbxm status                            # the tasks, the running cloud sandboxes and their time left, the local sandboxes
+                                       # with their owner (task, run, project or orphan), state and age, the comparison runs,
+                                       # the Loop (running or not, its task, the PRs awaiting you, the queue; decision 294),
+                                       # then the free space of base_dir's drive and the sandbox state drive (issue 92)
 ```
 
 `[sandbox] location = "cloud"` in `sbxm-task.toml` makes the cloud a repo's default (`"local"`, or no key, keeps

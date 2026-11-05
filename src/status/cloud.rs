@@ -76,7 +76,7 @@ pub enum Left {
 /// The time until `expires_at` at `now`. The cloud writes fractional seconds
 /// (`...21.604457Z`), which are dropped.
 pub fn time_left(sandbox: &SandboxDetail, now: u64) -> Left {
-    match sandbox.expires_at.as_deref().and_then(expiry) {
+    match sandbox.expires_at.as_deref().and_then(instant) {
         None => Left::Unknown,
         Some(at) if at <= now => Left::Expiring,
         Some(at) => Left::Secs(at - now),
@@ -92,7 +92,8 @@ fn left_cell(left: Left) -> String {
     }
 }
 
-fn expiry(text: &str) -> Option<u64> {
+/// An `sbx` timestamp in Unix seconds, with or without fractional seconds (dropped).
+pub(crate) fn instant(text: &str) -> Option<u64> {
     match text.split_once('.') {
         Some((whole, fraction)) => {
             let digits = fraction.strip_suffix('Z')?;

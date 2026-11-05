@@ -128,6 +128,16 @@ fn pr(number: u32) -> PrInfo {
     }
 }
 
+/// A footer that reads no real drive: 40 GiB free, the state folder on `base_dir`'s drive.
+fn quiet_disk() -> sbxm::status::footer::Disk {
+    sbxm::status::footer::Disk {
+        free_space: |_| Ok(40 * 1024 * 1024 * 1024),
+        same_drive: |_, _| true,
+        state_dir: Some(std::path::PathBuf::from("/state")),
+        min_free_disk: sbxm::disk::DEFAULT_MIN_FREE,
+    }
+}
+
 fn env(terminal: bool, width: usize) -> Env {
     Env {
         now: Box::new(|| T0),
@@ -135,6 +145,7 @@ fn env(terminal: bool, width: usize) -> Env {
         terminal,
         width,
         iterations: None,
+        disk: quiet_disk(),
     }
 }
 
@@ -269,6 +280,8 @@ fn a_running_loop_shows_its_task_its_stage_the_tasks_done_and_the_prs_awaiting()
     let text = frame(&b, &alive(), &gh, false, 80);
 
     let section = text.split("Loop:").nth(1).expect("a Loop section");
+    // The disk footer comes after it (issue 92).
+    let section = section.split("\nFree space:").next().unwrap();
     assert_eq!(
         format!("Loop:{section}"),
         format!(
@@ -651,6 +664,7 @@ fn github_is_called_on_the_first_frame_not_59_seconds_later_and_again_after_61()
         terminal: true,
         width: 80,
         iterations: Some(3),
+        disk: quiet_disk(),
     };
     let source = LoopSource {
         github: &gh,
@@ -708,6 +722,7 @@ fn a_failed_fetch_is_not_retried_inside_the_minute_either() {
     };
     let env = Env {
         iterations: Some(2),
+        disk: quiet_disk(),
         terminal: true,
         ..env(true, 80)
     };

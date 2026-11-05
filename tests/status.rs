@@ -433,6 +433,16 @@ fn a_task_without_a_repo_yet_shows_no_commit_count() {
 
 // ---- the command: writes nothing, the backend is the fake, the watch loop -
 
+/// A footer that reads no real drive: 40 GiB free, the state folder on `base_dir`'s drive.
+fn quiet_disk() -> sbxm::status::footer::Disk {
+    sbxm::status::footer::Disk {
+        free_space: |_| Ok(40 * 1024 * 1024 * 1024),
+        same_drive: |_, _| true,
+        state_dir: Some(std::path::PathBuf::from("/state")),
+        min_free_disk: sbxm::disk::DEFAULT_MIN_FREE,
+    }
+}
+
 fn real_env(terminal: bool, width: usize, iterations: Option<usize>) -> Env {
     Env {
         now: Box::new(|| T0),
@@ -440,6 +450,7 @@ fn real_env(terminal: bool, width: usize, iterations: Option<usize>) -> Env {
         terminal,
         width,
         iterations,
+        disk: quiet_disk(),
     }
 }
 
@@ -532,8 +543,9 @@ fn without_watch_it_prints_once_whether_or_not_it_is_a_terminal() {
         )
         .unwrap();
         let text = String::from_utf8(out).unwrap();
-        // The tasks table (header + row), a blank line and the empty Comparison runs section.
-        assert_eq!(text.lines().count(), 4, "{text}");
+        // The tasks table (header + row), then the empty Sandboxes and Comparison runs
+        // sections and the one-line disk footer, each after a blank line.
+        assert_eq!(text.lines().count(), 8, "{text}");
         assert!(!text.contains('\x1B'), "{text:?}");
     }
 }
@@ -551,6 +563,7 @@ fn watch_on_a_non_terminal_prints_once_and_returns() {
         terminal: false,
         width: 80,
         iterations: None,
+        disk: quiet_disk(),
     };
     let mut out = Vec::new();
 
@@ -565,8 +578,9 @@ fn watch_on_a_non_terminal_prints_once_and_returns() {
     .unwrap();
 
     let text = String::from_utf8(out).unwrap();
-    // The tasks table (header + row), a blank line and the empty Comparison runs section.
-    assert_eq!(text.lines().count(), 4, "{text}");
+    // The tasks table (header + row), then the empty Sandboxes and Comparison runs sections
+    // and the one-line disk footer, each after a blank line.
+    assert_eq!(text.lines().count(), 8, "{text}");
 }
 
 #[test]
@@ -585,6 +599,7 @@ fn watch_on_a_terminal_clears_the_screen_and_sleeps_between_frames() {
         terminal: true,
         width: 80,
         iterations: Some(3),
+        disk: quiet_disk(),
     };
     let mut out = Vec::new();
 
@@ -679,6 +694,7 @@ fn cloud_box(
         cpus,
         memory_mib,
         expires_at: expires.map(str::to_owned),
+        created_at: None,
     }
 }
 
@@ -772,6 +788,16 @@ fn on_a_terminal_each_cloud_line_is_cut_to_the_width() {
     assert!(unreadable.ends_with("…\n"), "{unreadable}");
 }
 
+/// The footer [`quiet_disk`] gives at `base`.
+fn footer_at(base: &Path) -> String {
+    let disk = quiet_disk();
+    sbxm::status::footer::render(
+        &sbxm::status::footer::read(base, &disk),
+        disk.min_free_disk,
+        None,
+    )
+}
+
 fn run_status(backend: &FakeBackend, base: &Path, env: &Env) -> String {
     let mut out = Vec::new();
     status::run(base, backend, &Probe(Some(T0)), env, None, &mut out).unwrap();
@@ -800,7 +826,11 @@ fn status_lists_only_the_cloud_sandboxes_named_sbxm_from_the_cloud_instance() {
          CLOUD SANDBOX        STATUS   SHAPE          LEFT\n\
          sbxm-issue-1-claude  running  2 CPUs, 4 GiB  1h05m\n\
          \n\
+         No local sandboxes.\n\
+         \n\
          No comparison runs.\n"
+            .to_owned()
+            + &footer_at(base.path())
     );
     assert_eq!(backend.locations(), [Location::Cloud]);
     assert_eq!(backend.cloud_list_calls(), 1);
@@ -822,7 +852,11 @@ fn status_with_no_cloud_sandboxes_prints_only_the_tasks() {
     let rows = tasks::rows(base.path(), &Probe(Some(T0))).unwrap();
     assert_eq!(
         text,
-        format!("{}\nNo comparison runs.\n", tasks::render(&rows, T0, None))
+        format!(
+            "{}\nNo local sandboxes.\n\nNo comparison runs.\n{}",
+            tasks::render(&rows, T0, None),
+            footer_at(base.path())
+        )
     );
 }
 
@@ -840,8 +874,9 @@ fn status_with_an_unreadable_cloud_prints_one_line_and_succeeds() {
         text,
         format!(
             "{}\nCloud sandboxes couldn't be read (`sbx --cloud ls --json`): sbxcloud: \
-             unauthorized (401)\n\nNo comparison runs.\n",
-            tasks::render(&rows, T0, None)
+             unauthorized (401)\n\nNo local sandboxes.\n\nNo comparison runs.\n{}",
+            tasks::render(&rows, T0, None),
+            footer_at(base.path())
         )
     );
 }

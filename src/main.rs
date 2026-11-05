@@ -982,7 +982,7 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Status { watch, interval } => {
             let global = config::GlobalConfig::load(&config::config_dir()?)?;
-            let env = commands::status::Env::real();
+            let env = commands::status::Env::real(&global);
             let watch = watch.then(|| std::time::Duration::from_secs(interval.unwrap_or(2)));
             // The Loop section reads the queue of this checkout's repo (decision 294).
             let github = sbxm::github::gh::GhBackend::default();

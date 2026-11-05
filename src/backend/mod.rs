@@ -37,6 +37,23 @@ pub trait SandboxBackend: Send + Sync {
                 cpus: None,
                 memory_mib: None,
                 expires_at: None,
+                created_at: None,
+            })
+            .collect())
+    }
+    /// The same `sbx ls --json` as `list`, with each sandbox's `created_at` where `sbx` reports
+    /// it, for `status`'s Sandboxes section (issue 92). By default, `list` with no `created_at`.
+    fn list_with_created_at(&self) -> Result<Vec<SandboxDetail>> {
+        Ok(self
+            .list()?
+            .into_iter()
+            .map(|info| SandboxDetail {
+                name: info.name,
+                status: info.status,
+                cpus: None,
+                memory_mib: None,
+                expires_at: None,
+                created_at: None,
             })
             .collect())
     }
@@ -273,7 +290,8 @@ pub struct SandboxInfo {
 }
 
 /// One entry of `sbx ls --json` with its shape and lifetime (`cpus`, `memory_mib`, `expires_at`,
-/// which a cloud sandbox has, S14); a field `sbx` leaves out is `None`, other fields are ignored.
+/// which a cloud sandbox has, S14, and `created_at`); a field `sbx` leaves out is `None`, other
+/// fields are ignored.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct SandboxDetail {
     pub name: String,
@@ -284,6 +302,10 @@ pub struct SandboxDetail {
     pub memory_mib: Option<u64>,
     #[serde(default)]
     pub expires_at: Option<String>,
+    /// When `sbx` created it, as `sbx` writes it (`2026-10-24T08:02:25.656712Z`): what `status`
+    /// shows a local sandbox's age from (issue 92).
+    #[serde(default)]
+    pub created_at: Option<String>,
 }
 
 /// What [`SandboxBackend::copy_out`] found at the sandbox's path.
