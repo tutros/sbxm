@@ -290,7 +290,8 @@ pub struct SandboxInfo {
 }
 
 /// One entry of `sbx ls --json` with its shape and lifetime (`cpus`, `memory_mib`, `expires_at`,
-/// which a cloud sandbox has, S14, and `created_at`); a field `sbx` leaves out is `None`, other fields are ignored.
+/// which a cloud sandbox has, S14, and `created_at`); a field `sbx` leaves out is `None`, other
+/// fields are ignored.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct SandboxDetail {
     pub name: String,
