@@ -297,16 +297,17 @@ fn a_task_whose_base_is_older_than_mains_tip_never_rebuilds_the_template_back() 
     );
 }
 
-/// Plays issue 41's worker: on its headless run it commits `Cargo.lock` holding `lock`.
-fn changes_lock(f: &task_fixture::Fixture, lock: &'static str) -> FakeBackend {
+/// Plays issue 41's worker: on its headless run it runs `edit` in its clone and commits all.
+fn edits_files(f: &task_fixture::Fixture, edit: fn(&Path)) -> FakeBackend {
     let workspace = f.env.base_dir().join("tasks").join("issue-41");
     backend().with_exec_hook(move |sandbox, spec| {
         if sandbox.contains("-review-") {
             return;
         }
         if task_fixture::is_headless(spec) {
-            fs::write(workspace.join("Cargo.lock"), lock).unwrap();
-            git(&workspace, &["commit", "-q", "-am", "add a crate"]);
+            edit(&workspace);
+            git(&workspace, &["add", "-A"]);
+            git(&workspace, &["commit", "-q", "-m", "change the lock"]);
             let dir = workspace.join(".sbxm-task");
             fs::create_dir_all(&dir).unwrap();
             fs::write(dir.join("result.md"), "done\n").unwrap();
@@ -322,6 +323,15 @@ fn changes_lock(f: &task_fixture::Fixture, lock: &'static str) -> FakeBackend {
                 ],
             );
         }
+    })
+}
+
+/// ...with `Cargo.lock` holding `lock`.
+fn changes_lock(f: &task_fixture::Fixture, lock: &'static str) -> FakeBackend {
+    // A fn pointer can't capture `lock`; the two contents used are told apart by a marker file.
+    assert_eq!(lock, NEW_CRATE);
+    edits_files(f, |workspace| {
+        fs::write(workspace.join("Cargo.lock"), NEW_CRATE).unwrap();
     })
 }
 
@@ -581,4 +591,114 @@ fn on_demand_gates_of_a_branch_that_changed_the_lock_file_stop_before_running() 
         "{err}"
     );
     assert!(!ran_gates(&backend));
+}
+
+/// Starts issue 41 against `backend` with both templates warm and returns what the start's gates
+/// said.
+fn start_41(f: &task_fixture::Fixture, backend: &FakeBackend) -> anyhow::Result<()> {
+    let (github, source) = (
+        FakeGitHub::default().with_issue_text(task_fixture::issue_text(41)),
+        task_fixture::source(f),
+    );
+    let ctx = task_fixture::ctx(f, &source, backend, &github);
+    let reports = pipeline::start(&ctx, &[41]);
+    let gates = reports[0]
+        .gates
+        .as_ref()
+        .unwrap_or_else(|| panic!("{:?}", reports[0].result.as_ref().map(|_| ())));
+    gates
+        .as_ref()
+        .map(|_| ())
+        .map_err(|e| anyhow::anyhow!("{e:#}"))
+}
+
+/// Decision 291, review M-3: a deleted lock file is a change, not a reason to skip the check.
+#[test]
+fn a_worker_that_deletes_the_lock_file_is_handed_back_before_any_gate() {
+    let f = task_fixture::fixture();
+    f.env.write_profile("default", PROFILE);
+    let backend = edits_files(&f, |workspace| {
+        git(workspace, &["rm", "-q", "Cargo.lock"]);
+    });
+    warmed_both(&f, &backend);
+
+    let err = format!("{:#}", start_41(&f, &backend).unwrap_err());
+
+    for part in [BRANCH_CHANGED, "Needs a decision", "Cargo.lock"] {
+        assert!(err.contains(part), "{part}\n{err}");
+    }
+    assert!(!ran_gates(&backend));
+}
+
+/// ...and decision 236: a lock file over the limit counts as differing, and is not read.
+#[test]
+fn a_worker_whose_lock_file_is_over_the_size_limit_is_handed_back_before_any_gate() {
+    let f = task_fixture::fixture();
+    f.env.write_profile("default", PROFILE);
+    let backend = edits_files(&f, |workspace| {
+        let big = vec![b'#'; template::MAX_LOCK_FILE_BYTES as usize + 1];
+        fs::write(workspace.join("Cargo.lock"), big).unwrap();
+    });
+    warmed_both(&f, &backend);
+
+    let err = format!("{:#}", start_41(&f, &backend).unwrap_err());
+
+    for part in [
+        BRANCH_CHANGED,
+        "Needs a decision",
+        "Cargo.lock",
+        "byte limit",
+    ] {
+        assert!(err.contains(part), "{part}\n{err}");
+    }
+    assert!(!ran_gates(&backend));
+}
+
+/// The process that stopped the task is gone.
+struct Gone;
+
+impl record::ProcessProbe for Gone {
+    fn start_time(&self, _pid: u32) -> Option<u64> {
+        None
+    }
+}
+
+/// Decision 291, review M-2: a task stopped for its lock change resumes once the same bytes are
+/// on main; before that it stops again, before any gate or reviewer.
+#[test]
+fn a_task_stopped_for_its_lock_change_resumes_once_main_has_the_same_change() {
+    let f = task_fixture::fixture();
+    f.env.write_profile("default", PROFILE);
+    let backend = changes_lock(&f, NEW_CRATE);
+    warmed_both(&f, &backend);
+    let (github, source) = (FakeGitHub::default(), task_fixture::source(&f));
+    let ctx = task_fixture::ctx(&f, &source, &backend, &github);
+    let mut prepared = pipeline::prepare(&ctx, &task_fixture::issue_text(41)).unwrap();
+    pipeline::run_worker(&ctx, &mut prepared).unwrap();
+    pipeline::review_issue(&ctx.env(), &mut prepared).unwrap_err();
+    let meta = prepared.meta.clone();
+    let base_before = git(&meta.join("repo.git"), &["rev-parse", "refs/heads/main"]);
+    drop(prepared);
+    let resume = || {
+        let mut prepared =
+            pipeline::Prepared::open_locked(&f.env.base_dir(), "issue-41", &Gone).unwrap();
+        let mut env = ctx.env();
+        env.probe = &Gone;
+        sbxm::task::resume::resume(&env, &mut prepared, None).map(|_| ())
+    };
+
+    let err = format!("{:#}", resume().unwrap_err());
+    assert!(err.contains(BRANCH_CHANGED), "{err}");
+    assert!(!ran_gates(&backend));
+
+    push_lock(&f, "main-new-crate", NEW_CRATE, "refs/heads/main");
+    let result = resume();
+
+    let err = result.err().map(|e| format!("{e:#}")).unwrap_or_default();
+    assert!(!err.contains(BRANCH_CHANGED), "{err}");
+    // The historical base is where it was; only the template's own ref follows main.
+    assert_eq!(
+        git(&meta.join("repo.git"), &["rev-parse", "refs/heads/main"]),
+        base_before
+    );
 }

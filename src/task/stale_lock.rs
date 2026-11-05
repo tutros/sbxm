@@ -17,6 +17,7 @@ use super::repo;
 use crate::backend::SandboxBackend;
 use crate::commands::template_build::{self, Refreshed};
 use crate::config::{GlobalConfig, Profile};
+use crate::disk;
 use crate::harness::Harness;
 use crate::kit;
 use crate::template::{self, Locks};
@@ -35,6 +36,11 @@ pub struct Refresh<'a> {
     pub base: &'a str,
     /// A folder of the task's own, for the base's checkout while a rebuild runs.
     pub scratch: &'a Path,
+    /// The invoking command's free-space check, for the rebuild it may start (decision 194).
+    pub disk: &'a disk::Guard,
+    /// A fix of a pull request (decision 292): its worker merges the base first, so a head that
+    /// only inherits an older lock than main's starts from main's template instead of stopping.
+    pub merges_base: bool,
 }
 
 /// The stop shared by every stage (decisions 290, 291): `commit`'s lock files differ from
@@ -47,11 +53,36 @@ pub fn branch_changed(
 ) -> anyhow::Error {
     anyhow!(
         "the lock files ({}) at commit {commit} differ from {base}'s: {BRANCH_CHANGED}, and a \
-         sandbox of strict profile '{profile_name}' can't fetch crates (decision 291). Needs a \
-         decision: a worker doesn't add, remove or bump a crate, the user approves each one; put \
-         the crate change on {base} in a pull request of its own, naming the crate, its version \
-         and why it's needed, and once it is merged the template is rebuilt from {base} by itself",
-        files.join(", ")
+         sandbox of strict profile '{profile_name}' can't fetch crates (decision 291). {}",
+        files.join(", "),
+        hand_back(base)
+    )
+}
+
+/// The stop for a lock file that can't be read at `commit`, a deleted or oversized one included
+/// (decision 236): not evidence that nothing changed.
+fn lock_unreadable(
+    profile_name: &str,
+    base: &str,
+    commit: &str,
+    files: &[String],
+    why: &anyhow::Error,
+) -> anyhow::Error {
+    anyhow!(
+        "the lock files ({}) can't be read at commit {commit}: {why:#}; that counts as a change \
+         from {base}'s: {BRANCH_CHANGED}, and a sandbox of strict profile '{profile_name}' can't \
+         fetch crates (decision 291). {}",
+        files.join(", "),
+        hand_back(base)
+    )
+}
+
+fn hand_back(base: &str) -> String {
+    format!(
+        "Needs a decision: a worker doesn't add, remove or bump a crate, the user approves each \
+         one; put the crate change on {base} in a pull request of its own, naming the crate, its \
+         version and why it's needed, and once it is merged the template is rebuilt from {base} \
+         by itself"
     )
 }
 
@@ -87,10 +118,65 @@ fn warm_record(
     Ok(Some(record))
 }
 
+/// What a branch did to the lock files of a warm template.
+enum Verdict {
+    /// Its lock files are what it inherited from the base, or what `main` has by now.
+    Fine,
+    /// Its own commits changed them to something `main` doesn't have (yet).
+    Changed,
+    /// They can't be read at the commit: deleted, oversized (decision 236), or damaged. Not
+    /// evidence that nothing changed.
+    Unreadable(anyhow::Error),
+}
+
+/// Judges `commit`'s lock `files`. The branch's own change is a difference from where it left
+/// `base` (their merge base: a pull request made before the base moved inherits an older lock, and
+/// that is not a change of its own), unless `main`'s tip (`fresh`, fetched only when needed) has
+/// those very bytes: the user approved the crate there (decision 291).
+fn judge(
+    repo_git: &Path,
+    base: &str,
+    commit: &str,
+    files: &[String],
+    fresh: &dyn Fn() -> Result<String>,
+) -> Result<Verdict> {
+    let hash = |commit: &str| Locks::Commit { repo_git, commit }.hash(files);
+    let at_commit = match hash(commit) {
+        Ok(hash) => hash,
+        Err(why) => return Ok(Verdict::Unreadable(why)),
+    };
+    let base_tip = repo::branch_tip(repo_git, base)?;
+    let forked = repo::merge_base(repo_git, &base_tip, commit).unwrap_or(base_tip);
+    if hash(&forked).is_ok_and(|at_forked| at_forked == at_commit) {
+        return Ok(Verdict::Fine);
+    }
+    if hash(&fresh()?).is_ok_and(|at_main| at_main == at_commit) {
+        return Ok(Verdict::Fine);
+    }
+    Ok(Verdict::Changed)
+}
+
+/// The stop for a [`Verdict`] that isn't `Fine`.
+fn stop(
+    verdict: Verdict,
+    profile_name: &str,
+    base: &str,
+    commit: &str,
+    files: &[String],
+) -> Result<()> {
+    match verdict {
+        Verdict::Fine => Ok(()),
+        Verdict::Changed => Err(branch_changed(profile_name, base, commit, files)),
+        Verdict::Unreadable(why) => Err(lock_unreadable(profile_name, base, commit, files, &why)),
+    }
+}
+
 /// Before a task's `harness` sandbox is chosen a template for `locks`: a stale warm template of a
 /// strict profile is rebuilt from the base's tip as `origin` has it now (one line for `events`), then
-/// a commit whose lock files differ from the task's base stops with [`branch_changed`]. A lock file that can't be read is
-/// left to [`template::choose`], which names why.
+/// a commit whose own history changes the lock files, or whose lock files can't be read, stops with
+/// [`branch_changed`]. Returns the commit whose lock files the template is to be chosen for when
+/// that isn't `commit`: for a fix that merges the base ([`Refresh::merges_base`]) whose head only
+/// inherits an older lock, main's tip, so the worker starts from main's template to merge it.
 pub fn refresh(
     r: &Refresh,
     profile_name: &str,
@@ -98,15 +184,15 @@ pub fn refresh(
     harness: Harness,
     locks: Locks,
     events: &mut Vec<String>,
-) -> Result<()> {
+) -> Result<Option<String>> {
     let Locks::Commit { repo_git, commit } = locks else {
-        return Ok(());
+        return Ok(None);
     };
     let global = GlobalConfig::load(r.config_dir)?;
     let Some(mut record) =
         warm_record(&global.base_dir, r.backend, profile_name, profile, harness)?
     else {
-        return Ok(());
+        return Ok(None);
     };
     let hash_at = |commit: &str, record: &template::Record| {
         Locks::Commit { repo_git, commit }
@@ -135,28 +221,20 @@ pub fn refresh(
             record = rebuilt;
         }
     }
-    let base_tip = repo::branch_tip(repo_git, r.base)?;
-    // What the task's own commits changed: against the base it started from.
-    let Some(at_task_base) = hash_at(&base_tip, &record) else {
-        return Ok(());
-    };
-    if locks
-        .hash(&record.lock_files)
-        .is_ok_and(|at_commit| at_commit != at_task_base)
-    {
-        return Err(branch_changed(
-            profile_name,
-            r.base,
-            commit,
-            &record.lock_files,
-        ));
-    }
-    Ok(())
+    let verdict = judge(repo_git, r.base, commit, &record.lock_files, &|| {
+        Ok(fresh.clone())
+    })?;
+    stop(verdict, profile_name, r.base, commit, &record.lock_files)?;
+    // Unchanged by the branch but not what the template was warmed with: the base moved on.
+    let inherits_older = r.merges_base
+        && hash_at(&fresh, &record)
+            .is_some_and(|at_main| hash_at(commit, &record) != Some(at_main));
+    Ok(inherits_older.then_some(fresh))
 }
 
-/// Whether `tip`'s lock files differ from `base`'s for any warm template of the strict profile
-/// `profile_name` the task's `harnesses` use: [`branch_changed`] if they do. Checked right after a
-/// worker or fix round, before its gates (decision 291).
+/// Whether `tip`'s lock files are the branch's own change, or can't be read, for any warm template
+/// of the strict profile `profile_name` the task's `harnesses` use: the stop of [`refresh`] if so.
+/// Checked right after a worker or fix round, before its gates (decision 291).
 pub fn check_branch(
     config_dir: &Path,
     backend: &dyn SandboxBackend,
@@ -168,22 +246,15 @@ pub fn check_branch(
 ) -> Result<()> {
     let global = GlobalConfig::load(config_dir)?;
     let profile = Profile::load(global.profiles_dir(), profile_name)?;
-    let base_tip = repo::branch_tip(repo_git, base)?;
     for &harness in harnesses {
         let Some(record) = warm_record(&global.base_dir, backend, profile_name, &profile, harness)?
         else {
             continue;
         };
-        let hash = |commit: &str| {
-            Locks::Commit { repo_git, commit }
-                .hash(&record.lock_files)
-                .ok()
-        };
-        if let (Some(at_base), Some(at_tip)) = (hash(&base_tip), hash(tip))
-            && at_base != at_tip
-        {
-            return Err(branch_changed(profile_name, base, tip, &record.lock_files));
-        }
+        let verdict = judge(repo_git, base, tip, &record.lock_files, &|| {
+            repo::fetch_fresh_base(repo_git).map(|(_, fresh)| fresh)
+        })?;
+        stop(verdict, profile_name, base, tip, &record.lock_files)?;
     }
     Ok(())
 }
@@ -220,6 +291,7 @@ fn rebuild(
                 profile: profile_name.to_owned(),
                 harness,
                 warm: Some(checkout.clone()),
+                disk: r.disk.clone(),
                 ..Default::default()
             },
             base_hash,

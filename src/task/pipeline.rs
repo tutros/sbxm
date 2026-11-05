@@ -30,6 +30,7 @@ use super::select::{self, Selection};
 use super::stale_lock;
 use crate::backend::{CreateSpec, ExecSpec, Location, SandboxBackend, ScopedSecret, Stdin};
 use crate::config::{self, GlobalConfig, Profile, Resources};
+use crate::disk;
 use crate::github::{GitHubBackend, Issue, IssueText, PrInfo, PrState};
 use crate::harness::Harness;
 use crate::headless::{self, HeadlessOpts, RunStatus};
@@ -158,6 +159,9 @@ pub struct Ctx<'a> {
     /// (slice 4, decision 256). Empty in production while P8 (a) holds; tests fill it with a fake
     /// value. No config key or flag reads one.
     pub scoped_secrets: &'a [ScopedSecret],
+    /// The invoking command's free-space check, for a template rebuild a sandbox's creation
+    /// starts (decision 194).
+    pub disk: &'a disk::Guard,
 }
 
 /// A task that is ready for its worker.
@@ -334,6 +338,8 @@ pub struct TaskEnv<'a> {
     /// Where a PR task whose preparation failed before its `repo.git` was made clones it from
     /// (issue 379), as [`Ctx::clone_source`]; `None` where no such clone is needed.
     pub clone_source: Option<&'a str>,
+    /// As [`Ctx::disk`].
+    pub disk: &'a disk::Guard,
 }
 
 impl Ctx<'_> {
@@ -346,6 +352,7 @@ impl Ctx<'_> {
             host: self.host,
             sleep: self.sleep,
             scoped_secrets: self.scoped_secrets,
+            disk: self.disk,
             identity: Some(self.identity),
             clone_source: Some(self.clone_source),
         }
@@ -1246,6 +1253,8 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
                     sleep: ctx.sleep,
                     base: ctx.base_branch,
                     scratch: &meta,
+                    disk: ctx.disk,
+                    merges_base: matches!(source, Source::Fix { .. }),
                 },
                 &ctx.config.sandbox.profile,
                 worker.harness,
@@ -2005,7 +2014,16 @@ pub(super) fn plan_sandbox(
     let profile = Profile::load(global.profiles_dir(), profile_name)?;
     // Decisions 290, 291: a stale warm template is rebuilt from the base, a branch that changes
     // the lock files stops.
-    stale_lock::refresh(refresh, profile_name, &profile, harness, locks, events)?;
+    let inherited = stale_lock::refresh(refresh, profile_name, &profile, harness, locks, events)?;
+    // A fix's head that only inherits an older lock is chosen a template as main's tip, which the
+    // worker then merges (decision 292).
+    let locks = match (&inherited, locks) {
+        (Some(main), Locks::Commit { repo_git, .. }) => Locks::Commit {
+            repo_git,
+            commit: main,
+        },
+        _ => locks,
+    };
     let request = template::Request {
         base_dir: &global.base_dir,
         profile_name,
@@ -2408,6 +2426,8 @@ pub(super) fn ensure_worker_sandbox(
             sleep: env.sleep,
             base: &prepared.record.base,
             scratch: &prepared.meta,
+            disk: env.disk,
+            merges_base: prepared.record.kind == Kind::Fix,
         },
         &profile_name,
         harness,
@@ -4518,6 +4538,8 @@ fn open_review_workspace(
             sleep: env.sleep,
             base: &prepared.record.base,
             scratch: &prepared.meta,
+            disk: env.disk,
+            merges_base: false,
         },
         &env.config.sandbox.profile,
         reviewer.harness,

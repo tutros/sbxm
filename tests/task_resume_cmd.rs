@@ -151,6 +151,7 @@ fn rounds_says_how_many_rounds_the_task_now_has_and_a_new_stop_names_rounds_agai
         host: &FakeHostRunner::default(),
         sleep: &std::thread::sleep,
         scoped_secrets: &[],
+        disk: Box::leak(Box::default()),
         identity: None,
         clone_source: None,
     };
@@ -298,6 +299,7 @@ fn stopped(f: &Fixture) {
         host: &FakeHostRunner::default(),
         sleep: &std::thread::sleep,
         scoped_secrets: &[],
+        disk: Box::leak(Box::default()),
         identity: None,
         clone_source: None,
     };
@@ -359,6 +361,7 @@ fn gates_that_cannot_run_fail_the_resume_with_the_reason_and_no_further_round() 
         host: &FakeHostRunner::default(),
         sleep: &std::thread::sleep,
         scoped_secrets: &[],
+        disk: Box::leak(Box::default()),
         identity: None,
         clone_source: None,
     };

@@ -484,6 +484,13 @@ pub fn is_ancestor(repo_git: &Path, ancestor: &str, tip: &str) -> Result<bool> {
     Ok(out.status.success())
 }
 
+/// The best common ancestor of commits `a` and `b` in `repo_git` (both full ids), where two
+/// lines of work parted.
+pub fn merge_base(repo_git: &Path, a: &str, b: &str) -> Result<String> {
+    let out = git::run(repo_git, Some(repo_git), None, &["merge-base", a, b])?;
+    Ok(out.trim().to_owned())
+}
+
 /// Moves `branch` on GitHub (`origin`) from `from` (a full commit id) to its tip in `repo_git`,
 /// as a fast-forward and only if the remote branch is still at `from` when the push lands: the
 /// tip must descend from `from`, and the push carries `from` as the expected old value

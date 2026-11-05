@@ -119,6 +119,7 @@ pub fn run(
         sleep: &std::thread::sleep,
         // Empty in production while P8 (a) holds (slice 4), as for any task.
         scoped_secrets: &[],
+        disk: &opts.disk,
     };
 
     writeln!(

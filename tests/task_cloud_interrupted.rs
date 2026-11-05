@@ -742,6 +742,7 @@ fn review_with_secrets(
         host: &sbxm::task::gates::FakeHostRunner::default(),
         sleep: &|_| {},
         scoped_secrets: secrets,
+        disk: Box::leak(Box::default()),
         identity: Some(&who),
         clone_source: None,
     };

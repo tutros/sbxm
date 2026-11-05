@@ -248,6 +248,15 @@ fn backend(f: &Fixture, head: &str, merge: bool, failing_gates: usize) -> FakeBa
 }
 
 fn fix(f: &Fixture, backend: &FakeBackend, github: &FakeGitHub) -> (anyhow::Result<()>, String) {
+    fix_with(f, backend, github, Default::default())
+}
+
+fn fix_with(
+    f: &Fixture,
+    backend: &FakeBackend,
+    github: &FakeGitHub,
+    disk: sbxm::disk::Guard,
+) -> (anyhow::Result<()>, String) {
     let mut out = Vec::new();
     let result = run(
         &f.env.config_dir(),
@@ -261,7 +270,7 @@ fn fix(f: &Fixture, backend: &FakeBackend, github: &FakeGitHub) -> (anyhow::Resu
                 name: "Dev".into(),
                 email: "dev@example.com".into(),
             }),
-            disk: Default::default(),
+            disk,
         },
         backend,
         github,
@@ -515,4 +524,282 @@ fn a_clean_pr_with_a_clean_review_is_refused_before_any_write() {
     assert!(backend.creates().is_empty());
     let id = record::fix_id(7, &head).unwrap();
     assert!(!record::task_dir(&f.env.base_dir(), &id).exists());
+}
+
+// Decisions 290, 291, 292: under a strict profile the fix worker starts from the template warmed
+// from main, merges the base, and only then is the branch's lock checked against main.
+
+const STRICT: &str = "[network]\n\
+     allow = [\"archive.ubuntu.com\"]\n\
+     \n\
+     [[setup.install]]\n\
+     command = \"apt-get install -y ripgrep\"\n\
+     \n\
+     [template]\n\
+     strict = true\n\
+     allow = [\"crates.io\"]\n";
+
+const OLD_LOCK: &str = "version = 4\n";
+const NEW_LOCK: &str = "version = 4\n# ctrlc 3.4.5\n";
+
+/// Commits `Cargo.toml` and a `Cargo.lock` holding `lock` on top of `from`, pushing to `to`.
+fn lock_commit(f: &Fixture, name: &str, from: &str, lock: &str, to: &[&str]) -> String {
+    let dir = scratch(f, name, from);
+    fs::write(dir.join("Cargo.toml"), "[package]\nname = \"x\"\n").unwrap();
+    fs::write(dir.join("Cargo.lock"), lock).unwrap();
+    git(&dir, &["add", "-A"]);
+    git(&dir, &["commit", "-q", "-m", name]);
+    for refname in to {
+        git(
+            &dir,
+            &[
+                "push",
+                "-q",
+                "-f",
+                f.origin.to_str().unwrap(),
+                &format!("HEAD:{refname}"),
+            ],
+        );
+    }
+    git(&dir, &["rev-parse", "HEAD"])
+}
+
+/// Warms both strict templates (the worker's claude, the reviewer's codex) from a checkout of main.
+fn warm_both(f: &Fixture, backend: &FakeBackend) {
+    let main = scratch(f, "warm-main", "origin/main");
+    warm_from(f, backend, &main);
+}
+
+fn warm_from(f: &Fixture, backend: &FakeBackend, main: &Path) {
+    for harness in [
+        sbxm::harness::Harness::Claude,
+        sbxm::harness::Harness::Codex,
+    ] {
+        sbxm::commands::template_build::run(
+            &f.env.config_dir(),
+            &sbxm::commands::template_build::Options {
+                profile: "default".into(),
+                harness,
+                warm: Some(main.to_path_buf()),
+                now: Some(1_700_000_000),
+                ..Default::default()
+            },
+            backend,
+            &Probe,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .unwrap();
+    }
+}
+
+/// A strict-profile fix of a docs-only PR (it never touches the lock) made before main's lock
+/// moved; returns what `fix` needs.
+fn strict_docs_pr(f: &Fixture) -> (String, String) {
+    f.env.write_profile("default", STRICT);
+    pr_head_on(f, OLD_LOCK);
+    let head = origin_tip(f, "refs/heads/feature-x");
+    (head, origin_tip(f, "refs/heads/main"))
+}
+
+/// Main holds `docs.md` and the lock `lock`; PR 7 adds a docs line on top of it.
+fn pr_head_on(f: &Fixture, lock: &str) {
+    let base = lock_commit(f, "lock-base", "origin/main", lock, &["refs/heads/main"]);
+    append_and_push(
+        f,
+        "docs-base",
+        &base,
+        "docs.md",
+        "# Docs\n",
+        &["refs/heads/main"],
+    );
+    append_and_push(
+        f,
+        "pr-head",
+        "origin/main",
+        "docs.md",
+        "- the PR's line\n",
+        &["refs/heads/feature-x", "refs/pull/7/head"],
+    );
+}
+
+fn strict_backend(f: &Fixture, head: &str) -> FakeBackend {
+    // The strict codex reviewer's sandbox: sbx reports the kit's allow rule for it.
+    let reviewer = format!(
+        "sbxm-task-{}-review-codex",
+        record::fix_id(7, head).unwrap()
+    );
+    backend(f, head, true, 0)
+        .with_version("0.46.0")
+        .with_exec_output_matching(
+            "cargo metadata",
+            ok(r#"{"packages":[{"name":"x"}],"version":1}"#),
+        )
+        .with_network_rules(vec![sbxm::backend::NetworkRule {
+            name: format!("kit:{reviewer}"),
+            scope: format!("sandbox:{reviewer}"),
+            allow: true,
+            resources: vec!["api.openai.com:443".into(), "chatgpt.com:443".into()],
+        }])
+}
+
+fn merged_lock_reaches_the_pr(f: &Fixture, main: &str) {
+    let tip = origin_tip(f, "refs/heads/feature-x");
+    assert!(is_ancestor(&f.origin, main, &tip));
+    let lock = git(&f.origin, &["show", &format!("{tip}:Cargo.lock")]);
+    assert_eq!(format!("{lock}\n"), NEW_LOCK);
+}
+
+#[test]
+fn a_strict_fix_with_a_clean_review_merges_a_lock_update_from_main() {
+    let f = config();
+    let (head, _) = strict_docs_pr(&f);
+    // The PR was made before this dependency PR reached main.
+    let main = lock_commit(
+        &f,
+        "main-lock",
+        "origin/main",
+        NEW_LOCK,
+        &["refs/heads/main"],
+    );
+    let backend = strict_backend(&f, &head);
+    warm_both(&f, &backend);
+
+    let (result, _) = fix(&f, &backend, &github_with_clean_review(&head, true));
+
+    result.unwrap();
+    merged_lock_reaches_the_pr(&f, &main);
+}
+
+#[test]
+fn a_strict_fix_with_findings_merges_a_lock_update_from_main() {
+    let f = config();
+    let (head, _) = strict_docs_pr(&f);
+    let main = lock_commit(
+        &f,
+        "main-lock",
+        "origin/main",
+        NEW_LOCK,
+        &["refs/heads/main"],
+    );
+    let backend = strict_backend(&f, &head);
+    warm_both(&f, &backend);
+
+    let (result, _) = fix(&f, &backend, &github(&head));
+
+    result.unwrap();
+    merged_lock_reaches_the_pr(&f, &main);
+}
+
+#[test]
+fn a_strict_fix_of_a_pr_that_changed_the_lock_itself_is_handed_back_before_gates() {
+    let f = config();
+    f.env.write_profile("default", STRICT);
+    let base = lock_commit(
+        &f,
+        "lock-base",
+        "origin/main",
+        OLD_LOCK,
+        &["refs/heads/main"],
+    );
+    lock_commit(
+        &f,
+        "pr-head",
+        &base,
+        NEW_LOCK,
+        &["refs/heads/feature-x", "refs/pull/7/head"],
+    );
+    let head = origin_tip(&f, "refs/heads/feature-x");
+    move_main(&f, "main-docs", "docs.md", "- main's line\n");
+    let backend = strict_backend(&f, &head);
+    warm_both(&f, &backend);
+
+    let (result, _) = fix(&f, &backend, &github(&head));
+
+    let err = format!("{:#}", result.unwrap_err());
+    assert!(
+        err.contains(sbxm::task::stale_lock::BRANCH_CHANGED) && err.contains("Needs a decision"),
+        "{err}"
+    );
+    assert!(
+        !backend
+            .execs()
+            .iter()
+            .any(|(s, spec)| s.starts_with("sbxm-task-")
+                && spec.argv.iter().any(|a| a.contains("cargo test")))
+    );
+}
+
+/// A strict fix whose warm template is stale (main's lock moved after it was built), on a machine
+/// whose state drive is under `min_free_disk`: the automatic rebuild is part of the command.
+fn stale_template_on_a_full_drive() -> (Fixture, FakeBackend, FakeGitHub, sbxm::disk::Guard) {
+    let f = config();
+    f.env.write_profile("default", STRICT);
+    let state = f.env.tmp.path().join("sbx-state");
+    fs::create_dir_all(&state).unwrap();
+    f.env.set_config(&format!(
+        "min_free_disk = \"1g\"\nsandbox_state_dir = '{}'",
+        state.display()
+    ));
+    lock_commit(
+        &f,
+        "lock-base",
+        "origin/main",
+        OLD_LOCK,
+        &["refs/heads/main"],
+    );
+    // What the templates will be warmed from, before main's lock moves.
+    let old_main = scratch(&f, "warm-main", "origin/main");
+    lock_commit(
+        &f,
+        "main-lock",
+        "origin/main",
+        NEW_LOCK,
+        &["refs/heads/main"],
+    );
+    append_and_push(
+        &f,
+        "pr-head",
+        "origin/main",
+        "docs.md",
+        "- the PR's line\n",
+        &["refs/heads/feature-x", "refs/pull/7/head"],
+    );
+    let head = origin_tip(&f, "refs/heads/feature-x");
+    let backend = strict_backend(&f, &head);
+    warm_from(&f, &backend, &old_main);
+    let full = sbxm::disk::Guard {
+        free_space: |_| Ok(0),
+        ..Default::default()
+    };
+    (f, backend, github(&head), full)
+}
+
+#[test]
+fn ignore_disk_covers_the_automatic_template_rebuild_of_a_fix() {
+    let (f, backend, github, full) = stale_template_on_a_full_drive();
+
+    let (result, _) = fix_with(
+        &f,
+        &backend,
+        &github,
+        sbxm::disk::Guard {
+            ignore: true,
+            ..full
+        },
+    );
+
+    result.unwrap();
+}
+
+#[test]
+fn without_ignore_disk_the_fix_refuses_before_creating_a_build_sandbox() {
+    let (f, backend, github, full) = stale_template_on_a_full_drive();
+    let before = backend.creates().len();
+
+    let (result, _) = fix_with(&f, &backend, &github, full);
+
+    let err = format!("{:#}", result.unwrap_err());
+    assert!(err.contains("--ignore-disk"), "{err}");
+    assert_eq!(backend.creates().len(), before);
 }

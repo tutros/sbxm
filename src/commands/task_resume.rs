@@ -104,6 +104,7 @@ pub fn run(
         sleep: &std::thread::sleep,
         // Empty in production while P8 (a) holds (slice 4).
         scoped_secrets: &[],
+        disk: &opts.disk,
         identity: identity.as_ref(),
         clone_source: None,
     };

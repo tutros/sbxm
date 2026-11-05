@@ -342,7 +342,11 @@ allow = []         # required: the hosts a sandbox created from the template may
   of a strict profile's warm template, the task stops before its gates and before any reviewer sandbox, with
   `... differ from main's: this branch's own commits change them ... Needs a decision: ...` (an issue or spec task's
   message ends with the `task resume` command). The user approves every new crate: it goes onto `main` in a small PR
-  of its own, the next task's rebuild picks it up, and the parked task is resumed.
+  of its own, the next task's rebuild picks it up, and the parked task is resumed: lock files that are now the very
+  bytes `main` has no longer count as the branch's change. A change is a difference from where the branch left its
+  base, so a PR that never touched the lock but is behind a newer `main` lock isn't stopped: `task fix --pr N`
+  starts its worker from `main`'s template and the worker merges the base. A lock file that is deleted or over the
+  size limit counts as a change. A template rebuild started by a command honors that command's `--ignore-disk`.
 - **Not in a project's `sandbox.toml`:** `[template]` there is refused, and a project that adds `setup.install`,
   `network.allow` or `network.deny` can't use the profile's template (strict: refused; otherwise the warning and the
   install steps).

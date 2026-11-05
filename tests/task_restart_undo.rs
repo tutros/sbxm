@@ -82,6 +82,7 @@ fn env<'a>(f: &'a Fixture, backend: &'a FakeBackend) -> TaskEnv<'a> {
         host: host(),
         sleep: &std::thread::sleep,
         scoped_secrets: &[],
+        disk: Box::leak(Box::default()),
         identity: None,
         clone_source: None,
     }
