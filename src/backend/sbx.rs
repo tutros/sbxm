@@ -622,28 +622,31 @@ fn parse_validate(json: &str) -> Result<KitValidation> {
     parse_json(json, "sbx kit validate --json")
 }
 
-/// Notes about text that followed the JSON of an `sbx ... --json` output, waiting for a caller
-/// with a warning stream (`take_trailer_notes`); the backend never prints them itself.
-static TRAILER_NOTES: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+/// Where the notes about text that followed the JSON of an `sbx ... --json` output go: set once
+/// by the program (`set_trailer_sink`) to its warning stream, so a note is written when it
+/// happens, not when a command returns; the backend never prints them itself.
+static TRAILER_SINK: std::sync::Mutex<Option<TrailerSink>> = std::sync::Mutex::new(None);
+
+type TrailerSink = Box<dyn FnMut(&str) + Send>;
 
 /// The longest part of a trailing line a note shows.
 const TRAILER_SHOWN: usize = 200;
 
-/// The notes `parse_json` kept since the last call, oldest first.
-pub fn take_trailer_notes() -> Vec<String> {
-    std::mem::take(&mut *TRAILER_NOTES.lock().unwrap_or_else(|e| e.into_inner()))
+/// Sends each later note to `sink`, in place of the one before; with none set, a note is dropped.
+pub fn set_trailer_sink(sink: impl FnMut(&str) + Send + 'static) {
+    *TRAILER_SINK.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(sink));
 }
 
 /// The first JSON value of `output` as a `T`, ignoring what follows it (G73: `sbx secret ls
 /// --json` sometimes prints text after its JSON). Text that is not JSON at all is still an error.
-/// A trailer that is not only whitespace leaves a note for `take_trailer_notes`.
+/// A trailer that is not only whitespace is noted to the sink (`set_trailer_sink`).
 fn parse_json<T: DeserializeOwned>(output: &str, command: &str) -> Result<T> {
     let (value, note) = parse_json_noting_trailer(output, command)?;
-    if let Some(note) = note {
-        TRAILER_NOTES
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .push(note);
+    if let (Some(note), Some(sink)) = (
+        note,
+        &mut *TRAILER_SINK.lock().unwrap_or_else(|e| e.into_inner()),
+    ) {
+        sink(&note);
     }
     Ok(value)
 }
@@ -1136,11 +1139,19 @@ mod secret_tests {
         let note = note.unwrap();
         assert!(note.contains("sbx: update available"), "{note}");
         assert!(!note.contains("second line"), "{note}");
-        let notes = take_trailer_notes();
+    }
+
+    #[test]
+    fn a_note_reaches_the_sink_when_it_happens() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_by_sink = std::sync::Arc::clone(&seen);
+        set_trailer_sink(move |note| seen_by_sink.lock().unwrap().push(note.to_owned()));
+        let text = format!("{SECRET_LS}\nsbx: sink test line\n");
+        parse_scoped_secrets(&text, "sbxm-nobody").unwrap();
+        let seen = seen.lock().unwrap();
         assert_eq!(
-            notes
-                .iter()
-                .filter(|n| n.contains("sbx: update available"))
+            seen.iter()
+                .filter(|n| n.contains("sbx: sink test line"))
                 .count(),
             1
         );
