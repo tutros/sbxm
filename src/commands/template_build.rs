@@ -3,7 +3,7 @@
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Error, Result, anyhow, bail};
 
@@ -39,6 +39,64 @@ pub fn run(
     out: &mut dyn Write,
     warn: &mut dyn Write,
 ) -> Result<()> {
+    build(config_dir, options, None, backend, probe, out, warn).map(|_| ())
+}
+
+/// How often a rebuild that waits checks whether the other build's lock is gone.
+pub const WAIT_POLL: Duration = Duration::from_secs(5);
+
+/// What [`refresh`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Refreshed {
+    /// It built this tag.
+    Built(String),
+    /// Another build, which it waited for, had already warmed this tag from the same lock files.
+    Fresh(String),
+}
+
+/// The automatic rebuild of decision 290: `options` names a warm build from a clean checkout of
+/// the base branch, whose lock files hash to `lock_hash`. A build of the same template that is
+/// running is waited for (`sleep` between checks of its lock) instead of refused; once the lock is
+/// taken, a record that already holds `lock_hash` and the template's hash, with its image there,
+/// is used as it is, so two tasks needing the same rebuild make one build.
+#[allow(clippy::too_many_arguments)]
+pub fn refresh(
+    config_dir: &Path,
+    options: &Options,
+    lock_hash: &str,
+    sleep: &dyn Fn(Duration),
+    backend: &dyn SandboxBackend,
+    probe: &dyn ProcessProbe,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<Refreshed> {
+    build(
+        config_dir,
+        options,
+        Some(Waiting { lock_hash, sleep }),
+        backend,
+        probe,
+        out,
+        warn,
+    )
+}
+
+/// A build that waits for a running one, and that a fresh record makes unnecessary.
+#[derive(Clone, Copy)]
+struct Waiting<'a> {
+    lock_hash: &'a str,
+    sleep: &'a dyn Fn(Duration),
+}
+
+fn build(
+    config_dir: &Path,
+    options: &Options,
+    waiting: Option<Waiting>,
+    backend: &dyn SandboxBackend,
+    probe: &dyn ProcessProbe,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<Refreshed> {
     template::check_supported(options.harness)?;
     let config = GlobalConfig::load(config_dir)?;
     let profile = Profile::load(config.profiles_dir(), &options.profile)?;
@@ -102,7 +160,25 @@ pub fn run(
             previous: Vec::new(),
         },
     };
-    let _lock = build.lock(&config.base_dir, backend, probe, warn)?;
+    let _lock = build.lock(
+        &config.base_dir,
+        backend,
+        probe,
+        waiting.map(|w| w.sleep),
+        warn,
+    )?;
+    if let Some(waiting) = waiting
+        && let Some(old) = template::Record::load(&config.base_dir, &build.key)?
+        && old.warm
+        && old.template_hash == build.record.template_hash
+        && old.lock_hash.as_deref() == Some(waiting.lock_hash)
+        && backend
+            .template_ls()?
+            .iter()
+            .any(|t| t.reference() == old.tag)
+    {
+        return Ok(Refreshed::Fresh(old.tag));
+    }
     // Again under the lock: a build that finished since the first check may have saved this tag.
     if backend
         .template_ls()?
@@ -124,6 +200,7 @@ pub fn run(
         .run(&config, &profile, backend, &mut progress, warn)
         .map_err(|err| build.clean_up(backend, &progress, err))?;
     writeln!(out, "{}", record.tag)?;
+    let tag = record.tag.clone();
     let kept = retire_previous(&config.base_dir, &record.previous, backend, out)?;
     if kept != record.previous {
         template::Record {
@@ -132,7 +209,7 @@ pub fn run(
         }
         .save(&config.base_dir, &build.key)?;
     }
-    Ok(())
+    Ok(Refreshed::Built(tag))
 }
 
 /// Removes each earlier tag that no sandbox or task records (decision 205a), once the new record
@@ -352,18 +429,23 @@ impl Build {
     /// Takes `<base>/.sbxm/templates/<key>.build.json` for this process. A lock whose process is
     /// alive refuses the build; one whose process is gone has its build's leftovers removed and
     /// is taken over (decision 212). Created with `create_new`, so two builds can't both take it.
+    /// With `wait`, a live lock is waited for instead (decision 290).
     fn lock(
         &self,
         base_dir: &Path,
         backend: &dyn SandboxBackend,
         probe: &dyn ProcessProbe,
+        wait: Option<&dyn Fn(Duration)>,
         warn: &mut dyn Write,
     ) -> Result<BuildLock> {
         let dir = template::dir(base_dir);
         fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
         let path = dir.join(format!("{}.build.json", self.key));
         let me = serde_json::to_string(&Process::current(probe))?;
-        for _ in 0..3 {
+        // Three tries to take it, not counting the checks made while waiting for a live build.
+        let mut tries = 0;
+        while tries < 3 {
+            tries += 1;
             match fs::OpenOptions::new()
                 .write(true)
                 .create_new(true)
@@ -387,6 +469,11 @@ impl Build {
                 continue;
             };
             if held.alive(probe) {
+                if let Some(sleep) = wait {
+                    sleep(WAIT_POLL);
+                    tries = 0;
+                    continue;
+                }
                 bail!(
                     "a template build of {} is already running (process {}, started {}); wait \
                      for it to finish",

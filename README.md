@@ -326,8 +326,23 @@ allow = []         # required: the hosts a sandbox created from the template may
   lock files differ from the ones it was warmed with), a **strict** profile refuses to create the sandbox, naming the
   `sbxm template build` command that fixes it; a non-strict one prints one warning and creates the sandbox with the
   install steps as before. For a task, the lock files are read at the commit its sandbox checks out, from the task's
-  own `repo.git` (a PR review: the PR's head), so a PR that changes `Cargo.lock` is refused before its reviewer
-  sandbox exists. `sbxm run` decides once per profile and harness, before anything is written.
+  own `repo.git` (a PR review: the PR's head). `sbxm run` decides once per profile and harness, before anything is
+  written.
+- **A strict task's template follows `main` by itself (decision 290):** when the lock files of the task's base branch
+  (`main`) differ from the ones a strict profile's warm template was warmed with, the task's sandbox is not refused:
+  sbxm checks out the base's tip from the task's own `repo.git`, runs `sbxm template build --warm` from that clean
+  checkout, and goes on, printing `... rebuilt it from main's tip <commit> (decision 290): <tag>`. It happens at the
+  first task sandbox (worker, remade worker or reviewer) that needs the template; a second task needing the same
+  rebuild waits for the first build's lock and then uses its template. A line-ending-only difference rebuilds nothing.
+  A failed rebuild stops the task, naming `sbxm template build <profile> --warm <a clean checkout of main>`. A template
+  is never warmed from a worker's or a PR's own code.
+- **A branch that changes the lock files stops, and the crate is handed back (decision 291):** a worker never adds,
+  removes or bumps a crate; its prompt says to hand the crate back under "Needs a decision", naming the crate, its
+  version and why it's needed. When a task's branch (a worker's commits, or a PR's head) still changes the lock files
+  of a strict profile's warm template, the task stops before its gates and before any reviewer sandbox, with
+  `... differ from main's: this branch's own commits change them ... Needs a decision: ...` (an issue or spec task's
+  message ends with the `task resume` command). The user approves every new crate: it goes onto `main` in a small PR
+  of its own, the next task's rebuild picks it up, and the parked task is resumed.
 - **Not in a project's `sandbox.toml`:** `[template]` there is refused, and a project that adds `setup.install`,
   `network.allow` or `network.deny` can't use the profile's template (strict: refused; otherwise the warning and the
   install steps).

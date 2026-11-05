@@ -61,9 +61,12 @@ sbxm template rm sbxm-dev               # refused while a sandbox or task uses i
 
 A profile opts in with `[template]` (README, *Templates*). From then on every sandbox of that profile — `new`, `open`,
 every `sbxm task` sandbox, `sbxm run`'s contestants and judge — starts from the template and gets only
-`[template].allow`. When the template is stale or missing, a `strict` profile refuses and names the command to run;
-the usual one is `sbxm template build <profile> --warm <repo>` after a lock file changed. A non-strict profile warns
-and installs as before. `sbxm doctor` lists the templates and warns about stale ones, missing images and templates
+`[template].allow`. When the template is stale or missing, a `strict` profile refuses and names the command to run.
+One case needs no command (decision 290): when `main`'s lock files changed since a strict warm template was built, the
+first `sbxm task` sandbox that needs it rebuilds it from a clean checkout of `main`'s tip and goes on (about 4.5 min
+per harness), and a second task needing it meanwhile waits for that build. A task whose own branch changes the lock
+files stops instead, with a "Needs a decision" hand-back (decision 291): add the crate to `main` in a small PR of its
+own, merge it, then resume the task. A non-strict profile warns and installs as before. `sbxm doctor` lists the templates and warns about stale ones, missing images and templates
 over 14 days old (the agent inside is frozen at the version it was saved with; rebuild to update it).
 
 Which minimum `sbx` version applies: `min_sbx_version` in `config.toml` (default 0.43.0) for everything, and 0.46.0
@@ -298,7 +301,7 @@ sandbox's own policy, so it runs after `create` and before any agent, and remove
 A worker can fix a PR's review finding from a spec. The branch to fix must be where the worker can start from:
 
 1. Under a strict warm template, merge `main` into the branch first when its lock files (`Cargo.lock`) are behind
-   `main`'s: the template was warmed with `main`'s, and a branch with different ones is refused.
+   `main`'s: the template follows `main`'s (decision 290), and a branch with different ones is stopped (decision 291).
 2. Push the branch to `origin` after that merge (`git push -u origin <branch>`), also when the branch is already
    there: the worker starts from the branch on `origin`, so a merge that is only in your checkout is never seen,
    and `--base` can't find a branch that only exists in your checkout or in a task's `repo.git`.
@@ -377,8 +380,8 @@ same tasks and only reads).
 - **Workers should not install software.** If a worker installs a package itself, its gates pass where a clean
   sandbox fails (`pkg-config` for `openssl-sys` was the case). Put what the build needs in the profile's
   `setup.install`. A strict `[template]` profile makes this hold: its sandboxes reach only `[template].allow`, so a
-  worker can't install what the template doesn't have. A worker that changes `Cargo.lock` then fails its gates inside
-  the sandbox (gap G1, per-task egress).
+  worker can't install what the template doesn't have. A worker doesn't add a crate: it hands it back, and a branch
+  that changes `Cargo.lock` stops before its gates (decision 291; gap G1).
 - **Templates take disk too.** Each is 1 to 3 GB on the same drive as the sandboxes. A build removes the template it
   replaces unless a sandbox or task still records it; `sbxm template ls` shows who does.
 - **Tests after a hand fix.** A hand fix on a task's branch was not gated in a sandbox, so run the checks on the
