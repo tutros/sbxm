@@ -13,7 +13,7 @@ use anyhow::Result;
 
 use crate::backend::SandboxBackend;
 use crate::github::GitHubBackend;
-use crate::status::{cloud, looping, tasks};
+use crate::status::{cloud, looping, runs, tasks};
 use crate::task::record::ProcessProbe;
 
 /// What `sbxm status` needs from the environment, so tests don't depend on real time, real
@@ -92,6 +92,7 @@ pub fn run_with(
     loop {
         let rows = tasks::rows(base, probe)?;
         let sandboxes = cloud::read(backend);
+        let comparisons = runs::read(base, backend);
         let now = (env.now)();
         let width = env.terminal.then_some(env.width);
         if env.terminal && watch.is_some() {
@@ -99,6 +100,7 @@ pub fn run_with(
         }
         write!(out, "{}", tasks::render(&rows, now, width))?;
         write!(out, "{}", cloud::render(&sandboxes, now, width))?;
+        write!(out, "{}", runs::render(&comparisons, now, width))?;
         if let Some(source) = loop_source {
             let view = loop_view(base, probe, source, &mut cache, now);
             write!(out, "{}", looping::render(&view, width))?;
