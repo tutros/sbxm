@@ -8,12 +8,74 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
-use crate::github::Issue;
+use crate::github::{Issue, PrMergeState, PrState};
 use crate::run::results::format_timestamp;
+use crate::task::finish::check_own_folder;
+use crate::task::record::{self, Kind, Record};
 
 /// The label that puts an issue in the loop's queue (decision 245(b)); the loop removes it when a
 /// task starts and never adds it (decision 4).
 pub const READY_LABEL: &str = "ready-for-worker";
+
+/// The key in a task record's free-form `hooks` (decisions 139, 146) marking a task the loop
+/// finished: unless the task continued an open PR, its PR is one the loop opened, which counts
+/// toward the loop's cap of PRs awaiting the user (decision 3).
+pub const LOOP_HOOK: &str = "task_loop";
+
+/// `<base>/.sbxm/task-loop.lock`: held while a loop runs (`task loop`), and read by `sbxm status`.
+pub fn lock_path(base_dir: &Path) -> std::path::PathBuf {
+    base_dir.join(".sbxm").join("task-loop.lock")
+}
+
+/// Whether this task's PR is one a loop opened: a loop finished it, and it didn't continue an open
+/// PR (decision 169), whose finish only pushes to it (review M-3, repeat). A continued PR a loop
+/// did open still counts through the record of the task that opened it.
+pub fn opened_by_loop(rec: &Record) -> bool {
+    rec.continues.is_none() && rec.hooks.get(LOOP_HOOK) == Some(&serde_json::Value::Bool(true))
+}
+
+/// A PR a loop opened, as its task record names it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LoopPr {
+    /// The task's id, `issue-<n>`.
+    pub task: String,
+    pub url: String,
+    /// The PR's number; `None` when the URL doesn't end in one.
+    pub number: Option<u32>,
+}
+
+/// Every PR a loop opened for `repo` that a task record under `base_dir` names (review M-3): a
+/// task finished by hand, a PR task, another repo's task, or a task folder that is not sbxm's own
+/// doesn't count. In the order [`record::task_folders`] lists the tasks.
+pub fn loop_prs(base_dir: &Path, repo: &str) -> Result<Vec<LoopPr>> {
+    let mut found = Vec::new();
+    for dir in record::task_folders(base_dir)? {
+        if check_own_folder(base_dir, &dir).is_err() {
+            continue;
+        }
+        let Ok(rec) = record::read(&dir.join("task.json")) else {
+            continue;
+        };
+        if rec.kind != Kind::Issue || rec.repo != repo || !opened_by_loop(&rec) {
+            continue;
+        }
+        let Some(url) = rec.pr.clone() else {
+            continue;
+        };
+        found.push(LoopPr {
+            task: rec.id.clone(),
+            number: pr_number(&url),
+            url,
+        });
+    }
+    Ok(found)
+}
+
+/// Whether a PR awaits the user (decision 3, 293): it is open and has no auto-merge armed. The
+/// one rule behind the loop's cap and the Loop section of `sbxm status`.
+pub fn awaits_user(state: PrMergeState) -> bool {
+    state.state == PrState::Open && !state.auto_merge
+}
 
 /// An issue's size from its `size:S`, `size:M` or `size:L` label.
 pub fn size(labels: &[String]) -> Option<&'static str> {

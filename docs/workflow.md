@@ -216,12 +216,21 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
   `run.log`, `gates.log`, `task.json`) are archived to `.sbxm/task-archive/<id>/` before its folder goes (a rerun after a failed removal reuses an identical archive; one that differs is refused), and the output names the disk
   given back.
 
+- **`task loop` arms auto-merge (decision 293, issue 375):** for the PR a loop task opens, the loop runs
+  `gh pr merge <N> --auto --merge --match-head-commit <reviewed sha>` when the review's risk (after the path-rule
+  floor) is low, it found 0 must-fix, the PR isn't a draft and the PR's head is still the reviewed commit; it checks
+  no CI itself (GitHub's `--auto` waits for the required checks, `sbxm/review` included). Anything else, and an
+  arming call that fails, leaves the PR to you, counted toward the cap of 5 (the log row says why for a head that
+  moved). Only the loop arms: a PR made by `task finish` or by hand is armed by the session under decision 280.
+  Before each step the loop also runs `task rm --merged --yes`, so a PR GitHub merged is cleaned up.
+
 ### The same tasks in Docker Cloud Sandboxes (milestone 4)
 
 ```
 sbxm task run --spec idea.md --cloud   # this task's sandboxes in the cloud; the task remembers it
 sbxm task review --pr 69 --local       # this review here, whatever [sandbox] location says
-sbxm status                            # the tasks, the running cloud sandboxes and their time left, then the comparison runs
+sbxm status                            # the tasks, the running cloud sandboxes and their time left, the comparison runs,
+                                       # then the Loop (running or not, its task, the PRs awaiting you, the queue; decision 294)
 ```
 
 `[sandbox] location = "cloud"` in `sbxm-task.toml` makes the cloud a repo's default (`"local"`, or no key, keeps

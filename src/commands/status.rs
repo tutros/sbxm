@@ -12,7 +12,8 @@ use std::time::Duration;
 use anyhow::Result;
 
 use crate::backend::SandboxBackend;
-use crate::status::{cloud, runs, tasks};
+use crate::github::GitHubBackend;
+use crate::status::{cloud, looping, runs, tasks};
 use crate::task::record::ProcessProbe;
 
 /// What `sbxm status` needs from the environment, so tests don't depend on real time, real
@@ -47,9 +48,22 @@ impl Env {
 /// dependency (decision 171(a)).
 const CLEAR_SCREEN: &str = "\x1B[2J\x1B[H";
 
-/// Runs the dashboard: one frame, or (with `watch`) a frame every `watch` on a terminal, cleared
-/// and redrawn, until Ctrl+C (or, in a test, `env.iterations` frames). A non-terminal always
-/// prints exactly one frame and returns, whether or not `watch` is set.
+/// What the Loop section needs to read the queue and the PRs awaiting the user (decision 294).
+pub struct LoopSource<'a> {
+    pub github: &'a dyn GitHubBackend,
+    /// The repo the loop works on (`owner/name`, the checkout's origin), or why it is unknown.
+    pub repo: Result<String, String>,
+}
+
+/// The repo of the current directory's checkout (its origin), or the first line of why it can't
+/// be told: what the Loop section's queue is read from.
+pub fn checkout_repo() -> Result<String, String> {
+    let first = |e: String| e.lines().next().unwrap_or_default().to_owned();
+    let dir = std::env::current_dir().map_err(|e| first(e.to_string()))?;
+    super::task_start::resolve_repo(None, &dir).map_err(|e| first(format!("{e:#}")))
+}
+
+/// [`run_with`] without the Loop section: the Tasks table and the cloud sandboxes.
 pub fn run(
     base: &Path,
     backend: &dyn SandboxBackend,
@@ -58,7 +72,23 @@ pub fn run(
     watch: Option<Duration>,
     out: &mut dyn Write,
 ) -> Result<()> {
+    run_with(base, backend, probe, env, watch, None, out)
+}
+
+/// Runs the dashboard: one frame, or (with `watch`) a frame every `watch` on a terminal, cleared
+/// and redrawn, until Ctrl+C (or, in a test, `env.iterations` frames). A non-terminal always
+/// prints exactly one frame and returns, whether or not `watch` is set.
+pub fn run_with(
+    base: &Path,
+    backend: &dyn SandboxBackend,
+    probe: &dyn ProcessProbe,
+    env: &Env,
+    watch: Option<Duration>,
+    loop_source: Option<&LoopSource>,
+    out: &mut dyn Write,
+) -> Result<()> {
     let mut drawn = 0usize;
+    let mut cache = looping::Cache::default();
     loop {
         let rows = tasks::rows(base, probe)?;
         let sandboxes = cloud::read(backend);
@@ -71,6 +101,10 @@ pub fn run(
         write!(out, "{}", tasks::render(&rows, now, width))?;
         write!(out, "{}", cloud::render(&sandboxes, now, width))?;
         write!(out, "{}", runs::render(&comparisons, now, width))?;
+        if let Some(source) = loop_source {
+            let view = loop_view(base, probe, source, &mut cache, now);
+            write!(out, "{}", looping::render(&view, width))?;
+        }
         out.flush()?;
         drawn += 1;
         let Some(interval) = watch else { break };
@@ -83,6 +117,31 @@ pub fn run(
         (env.sleep)(interval);
     }
     Ok(())
+}
+
+/// The Loop section's state at `now`: the lock and the task records, and GitHub's queue and
+/// awaiting PRs whether or not a loop runs, at most once a minute (`cache`). Only the running
+/// task and the tasks done need a live lock.
+fn loop_view(
+    base: &Path,
+    probe: &dyn ProcessProbe,
+    source: &LoopSource,
+    cache: &mut looping::Cache,
+    now: u64,
+) -> looping::View {
+    let lock = looping::read_lock(base, probe);
+    let work = match &lock {
+        looping::Lock::Running(process) => Some(looping::work(base, process).unwrap_or_default()),
+        _ => None,
+    };
+    let snapshot = cache
+        .get(now, || looping::fetch(source.github, &source.repo, base))
+        .clone();
+    looping::View {
+        lock,
+        work,
+        snapshot: Some(snapshot),
+    }
 }
 
 /// The terminal's column count, queried straight from the OS with no new dependency (decision

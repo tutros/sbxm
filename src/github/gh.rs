@@ -333,6 +333,31 @@ impl GitHubBackend for GhBackend {
         })
     }
 
+    fn pr_arm_auto_merge(&self, repo: &str, number: u32, head_commit: &str) -> Result<()> {
+        // The commit goes to `--match-head-commit`, which is what keeps a push after the review
+        // from being merged: only a full commit id is accepted.
+        if !matches!(head_commit.len(), 40 | 64)
+            || !head_commit.bytes().all(|b| b.is_ascii_hexdigit())
+        {
+            bail!("`{head_commit}` is not a full commit id, so auto-merge can't be armed on it");
+        }
+        self.run(
+            &strings(&[
+                "pr",
+                "merge",
+                &number.to_string(),
+                "--repo",
+                repo,
+                "--auto",
+                "--merge",
+                "--match-head-commit",
+                head_commit,
+            ]),
+            None,
+        )?;
+        Ok(())
+    }
+
     fn open_pr_for(&self, repo: &str, head: &str, base: &str) -> Result<Option<ListedPr>> {
         // No `--base`: an open PR of the same head with another base is returned too, so the
         // caller can name it. `--head` matches the branch name only, a fork's included, so the

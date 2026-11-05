@@ -132,6 +132,10 @@ pub trait GitHubBackend: Send + Sync {
     fn issue(&self, repo: &str, number: u32) -> Result<IssueText>;
     fn pr(&self, repo: &str, number: u32) -> Result<PrInfo>;
     fn pr_merge_state(&self, repo: &str, number: u32) -> Result<PrMergeState>;
+    /// Arms GitHub's auto-merge on PR `number` (`gh pr merge --auto --merge --match-head-commit`):
+    /// it merges once the required checks pass, and only if the PR's head is still
+    /// `head_commit`, a full commit id (decisions 266, 280, 293).
+    fn pr_arm_auto_merge(&self, repo: &str, number: u32, head_commit: &str) -> Result<()>;
     /// The open PR of `repo` whose head is the branch `head` of `repo` itself (never a fork's
     /// branch of the same name), with base `base` if there is one, else one with another base,
     /// which the caller reports instead of adopting (issue 60). Closed and merged PRs are never

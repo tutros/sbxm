@@ -20,7 +20,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 
 use super::task_start::resolve_repo;
-use super::{task_file_findings, task_finish, task_log, task_resume, task_run};
+use super::{task_file_findings, task_finish, task_log, task_resume, task_rm, task_run};
 use crate::backend::{Location, SandboxBackend};
 use crate::config::GlobalConfig;
 use crate::disk;
@@ -31,15 +31,13 @@ use crate::task::finish::check_own_folder;
 use crate::task::gates::HostRunner;
 use crate::task::queue::{self, READY_LABEL, Report, Row, Skipped};
 use crate::task::record::{self, Kind, Process, ProcessProbe, Record, Stage};
+use crate::task::risk::Level;
 use crate::task::runlog::{RunLog, Tee};
 use crate::task::{findings, lock, pipeline};
 
 /// How many open PRs the loop opened may await the user before it pauses (decision 245(e)).
 pub const PR_CAP: usize = 5;
-/// The key in a task record's free-form `hooks` (decisions 139, 146) marking a task the loop
-/// finished: unless the task continued an open PR, its PR is one the loop opened, which counts
-/// toward [`PR_CAP`] (decision 3).
-pub const LOOP_HOOK: &str = "task_loop";
+pub use queue::LOOP_HOOK;
 /// How often a pause looks again.
 pub const PAUSE_POLL: Duration = Duration::from_secs(5 * 60);
 /// How often a task's first phase is looked at for its record, to take its label off.
@@ -67,6 +65,9 @@ pub trait Steps {
     /// `task file-findings --issue N --create`: the review's should-fix findings as sized
     /// issues, without the loop's label; nothing when the review has none.
     fn file_findings(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()>;
+    /// `task rm --merged --yes`: removes the tasks whose PRs GitHub merged, archiving their text
+    /// records first (decisions 195, 293).
+    fn rm_merged(&self, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()>;
     /// The free-disk check of `sbx`'s sandbox drive: an error while it is under `min_free_disk`.
     fn room(&self) -> Result<()>;
 }
@@ -124,14 +125,10 @@ impl Drop for LoopLock {
     }
 }
 
-fn lock_path(base_dir: &Path) -> PathBuf {
-    base_dir.join(".sbxm").join("task-loop.lock")
-}
-
 /// Takes the loop's lock for this process, as `template build` takes its own (decision 212): a
 /// lock whose process is alive refuses the second loop; one whose process is gone is taken over.
 fn take_lock(base_dir: &Path, probe: &dyn ProcessProbe, warn: &mut dyn Write) -> Result<LoopLock> {
-    let path = lock_path(base_dir);
+    let path = queue::lock_path(base_dir);
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
     }
@@ -397,43 +394,27 @@ impl Loop<'_> {
     /// warning.
     fn awaiting_prs(&mut self, warn: &mut dyn Write) -> Result<Vec<u32>> {
         let mut awaiting = Vec::new();
-        for dir in record::task_folders(&self.base_dir)? {
-            if check_own_folder(&self.base_dir, &dir).is_err() {
-                continue;
-            }
-            let Ok(rec) = record::read(&dir.join("task.json")) else {
-                continue;
-            };
-            // Only the PRs a loop opened for this repo (review M-3): a task finished by hand, a
-            // PR task, or another repo's task doesn't take this loop's room.
-            if rec.kind != Kind::Issue || rec.repo != self.repo || !opened_by_loop(&rec) {
-                continue;
-            }
-            let Some(url) = rec.pr.as_deref() else {
-                continue;
-            };
-            let Some(number) = queue::pr_number(url) else {
+        for pr in queue::loop_prs(&self.base_dir, &self.repo)? {
+            let Some(number) = pr.number else {
                 self.warn_once(
                     warn,
                     format!(
-                        "task {} names a PR this loop can't read the number of ({url}); not \
+                        "task {} names a PR this loop can't read the number of ({}); not \
                          counted among the PRs awaiting you",
-                        rec.id
+                        pr.task, pr.url
                     ),
                 )?;
                 continue;
             };
-            match self.github.pr_merge_state(&rec.repo, number) {
-                Ok(state) if state.state == PrState::Open && !state.auto_merge => {
-                    awaiting.push(number);
-                }
+            match self.github.pr_merge_state(&self.repo, number) {
+                Ok(state) if queue::awaits_user(state) => awaiting.push(number),
                 Ok(_) => {}
                 Err(e) => self.warn_once(
                     warn,
                     format!(
                         "task {} names PR #{number}, which can't be read ({e:#}); not counted \
                          among the PRs awaiting you",
-                        rec.id
+                        pr.task
                     ),
                 )?,
             }
@@ -846,6 +827,7 @@ impl Loop<'_> {
             .and_then(|r| r.pr)
             .and_then(|url| queue::pr_number(&url))
             .map_or_else(|| "PR".to_owned(), |n| format!("PR #{n}"));
+        let armed = self.arm(issue, out, warn)?;
         let outcome = if clean {
             if let Err(e) = self.steps.file_findings(issue, out, warn) {
                 writeln!(
@@ -854,7 +836,10 @@ impl Loop<'_> {
                      file-findings --issue {issue} --create`"
                 )?;
             }
-            format!("{pr}, clean")
+            match armed {
+                Some(note) => format!("{pr}, clean, {note}"),
+                None => format!("{pr}, clean"),
+            }
         } else {
             let why = match stopped {
                 Some(stopped) => format!("work stop: {}", stopped.name()),
@@ -863,6 +848,100 @@ impl Loop<'_> {
             format!("draft {pr}, {why}, must-fix {must_fix}")
         };
         Ok(End::Done { ready, outcome })
+    }
+
+    /// Removes the tasks whose PRs GitHub merged (decision 293), before the loop's next step. A
+    /// failure is a warning: the tasks stay, and the next step tries again.
+    fn clean_merged(&mut self, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
+        if let Err(e) = self.steps.rm_merged(out, warn) {
+            self.warn_once(
+                warn,
+                format!("merged tasks could not be removed: {e:#}; the loop goes on"),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Arms GitHub's auto-merge on the PR a loop task just opened, under decisions 266, 280 and
+    /// 293: the review's risk (after the path-rule floor) is low, it found 0 must-fix, the task
+    /// ended without a work stop (so its PR isn't a draft), and the PR's head is still the commit
+    /// the review covered. Nothing is checked on CI: GitHub's `--auto` waits for the required
+    /// checks. A PR not armed stays among those awaiting the user, so every refusal is only a
+    /// note. Returns the note for the loop's log row, when there is one.
+    fn arm(
+        &mut self,
+        issue: u32,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<Option<String>> {
+        let Some(rec) = self.record(issue) else {
+            return Ok(None);
+        };
+        let Some(number) = rec.pr.as_deref().and_then(queue::pr_number) else {
+            return Ok(None);
+        };
+        // A task that continued an open PR only pushed to it; the PR isn't the loop's own.
+        if !queue::opened_by_loop(&rec) {
+            return Ok(None);
+        }
+        let Some(review) = rec.review.as_ref() else {
+            return Ok(None);
+        };
+        let waits = |why: String, out: &mut dyn Write| -> Result<Option<String>> {
+            writeln!(out, "PR #{number} awaits you: {why}")?;
+            Ok(None)
+        };
+        if rec.stopped.is_some() || review.must_fix > 0 {
+            return waits("a draft with must-fix left".to_owned(), out);
+        }
+        if review.risk != Level::Low {
+            return waits(format!("risk {}", review.risk.word()), out);
+        }
+        let Some(reviewed) = review.commit.as_deref() else {
+            return waits("the commit the review covered is unknown".to_owned(), out);
+        };
+        let state = match self.github.pr_merge_state(&self.repo, number) {
+            Ok(state) => state,
+            Err(e) => return self.arming_failed(number, &e, out, warn),
+        };
+        if !queue::awaits_user(state) {
+            // Merged, closed, or armed already (by the user, say): left alone.
+            return Ok(None);
+        }
+        let head = match self.github.pr(&self.repo, number) {
+            Ok(pr) => pr.head_oid,
+            Err(e) => return self.arming_failed(number, &e, out, warn),
+        };
+        if head != reviewed {
+            let note = "auto-merge not armed: the PR's head moved after the review";
+            writeln!(
+                out,
+                "PR #{number}: {note} (reviewed {reviewed}, head {head}); it awaits you"
+            )?;
+            return Ok(Some(note.to_owned()));
+        }
+        match self.github.pr_arm_auto_merge(&self.repo, number, reviewed) {
+            Ok(()) => {
+                writeln!(out, "PR #{number}: auto-merge armed on {reviewed}")?;
+                Ok(Some("auto-merge armed".to_owned()))
+            }
+            Err(e) => self.arming_failed(number, &e, out, warn),
+        }
+    }
+
+    fn arming_failed(
+        &mut self,
+        number: u32,
+        e: &anyhow::Error,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<Option<String>> {
+        self.warn_once(
+            warn,
+            format!("auto-merge could not be armed on PR #{number}: {e:#}; it awaits you"),
+        )?;
+        writeln!(out, "PR #{number}: auto-merge not armed: arming failed")?;
+        Ok(Some("auto-merge not armed: arming failed".to_owned()))
     }
 
     fn append(&mut self, row: &Row, warn: &mut dyn Write) -> Result<()> {
@@ -874,13 +953,6 @@ impl Loop<'_> {
         }
         Ok(())
     }
-}
-
-/// Whether this task's PR is one a loop opened: a loop finished it, and it didn't continue an open
-/// PR (decision 169), whose finish only pushes to it (review M-3, repeat). A continued PR a loop
-/// did open still counts through the record of the task that opened it.
-fn opened_by_loop(rec: &Record) -> bool {
-    rec.continues.is_none() && rec.hooks.get(LOOP_HOOK) == Some(&serde_json::Value::Bool(true))
 }
 
 fn first_line(text: &str) -> String {
@@ -966,6 +1038,7 @@ pub fn run(
             left(&held, &due, out)?;
             return Ok(());
         }
+        lp.clean_merged(out, warn)?;
         if !lp.wait_for_prs(out, warn)? {
             writeln!(out, "stopped on request")?;
             left(&held, &due, out)?;
@@ -1301,6 +1374,25 @@ impl Steps for TaskSteps<'_> {
                 warn,
             )
         })
+    }
+
+    fn rm_merged(&self, out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
+        task_rm::run(
+            self.config_dir,
+            &task_rm::Options {
+                target: task_rm::Target::Merged,
+                yes: true,
+                force: false,
+                repo_root: self.repo_root.clone(),
+                dry_run: false,
+                forget_ambiguous: false,
+            },
+            self.backend,
+            self.github,
+            self.probe,
+            &crate::confirm::Terminal,
+            out,
+        )
     }
 
     fn room(&self) -> Result<()> {
