@@ -5,7 +5,8 @@
 //! environment stop and parks it after a second, waits out a usage limit, and stops on an empty
 //! queue (with a read-only report), two parked tasks in a row, `--cap`, the usage waits' total,
 //! or a stop request between phases. One log row per task goes to
-//! `sdlc/batches/<date>-loop.md`.
+//! `sdlc/batches/<date>-loop.md`. Before each new issue it resolves the open PRs it opened that
+//! GitHub reports conflicting with their base, with `task fix --pr N` (decision 298).
 //!
 //! The phases go through [`Steps`] so the loop's rules are tested without sandboxes;
 //! [`TaskSteps`] runs the real commands.
@@ -20,11 +21,11 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 
 use super::task_start::resolve_repo;
-use super::{task_file_findings, task_finish, task_log, task_resume, task_rm, task_run};
+use super::{task_file_findings, task_finish, task_fix, task_log, task_resume, task_rm, task_run};
 use crate::backend::{Location, SandboxBackend};
 use crate::config::GlobalConfig;
 use crate::disk;
-use crate::github::{GitHubBackend, Issue, PrState};
+use crate::github::{GitHubBackend, Issue, Mergeable, PrState};
 use crate::run::results::format_timestamp;
 use crate::task::config::TaskConfig;
 use crate::task::finish::check_own_folder;
@@ -65,6 +66,9 @@ pub trait Steps {
     /// `task file-findings --issue N --create`: the review's should-fix findings as sized
     /// issues, without the loop's label; nothing when the review has none.
     fn file_findings(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()>;
+    /// `task fix --pr N`: the base merged into the PR's branch in a sandbox, the gates and a
+    /// narrow review, then the push (decisions 292, 298).
+    fn fix_pr(&self, pr: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()>;
     /// `task rm --merged --yes`: removes the tasks whose PRs GitHub merged, archiving their text
     /// records first (decisions 195, 293).
     fn rm_merged(&self, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()>;
@@ -303,6 +307,10 @@ struct Loop<'a> {
     warned: HashSet<String>,
     /// Lines already said, so a skip seen again on the next pick isn't repeated.
     said: HashSet<String>,
+    /// The (PR, base tip) pairs a resolve was tried for (decision 298): at most one each.
+    resolves: HashSet<(u32, String)>,
+    /// The PRs whose resolve failed: left to the user for the rest of the run.
+    unresolved: HashSet<u32>,
     log: PathBuf,
 }
 
@@ -944,6 +952,283 @@ impl Loop<'_> {
         Ok(Some("auto-merge not armed: arming failed".to_owned()))
     }
 
+    /// Resolves the open PRs a loop opened that GitHub reports conflicting with their base
+    /// (decision 298), one at a time in PR-number order, before the next issue: at most once per
+    /// (PR, base tip), never a draft, and never again in this run after a failed one. A PR only
+    /// behind is left (it still merges), and one GitHub is still computing is read again at the
+    /// next step. `false`: the user asked to stop meanwhile.
+    fn resolve_conflicts(&mut self, out: &mut dyn Write, warn: &mut dyn Write) -> Result<bool> {
+        let mut prs: Vec<(u32, String)> = queue::loop_prs(&self.base_dir, &self.repo)?
+            .into_iter()
+            .filter_map(|pr| Some((pr.number?, pr.task)))
+            .collect();
+        prs.sort();
+        prs.dedup_by_key(|(number, _)| *number);
+        let mut base: Option<(String, String)> = None;
+        for (number, task) in prs {
+            if self.unresolved.contains(&number) {
+                continue;
+            }
+            // A PR that can't be read is warned about among the PRs awaiting the user.
+            let Ok(state) = self.github.pr_merge_state(&self.repo, number) else {
+                continue;
+            };
+            if state.state != PrState::Open || state.mergeable != Mergeable::Conflicting {
+                continue;
+            }
+            if state.draft {
+                self.say_once(
+                    out,
+                    format!(
+                        "PR #{number} conflicts with its base but is a draft; it awaits you, and \
+                         the loop leaves it"
+                    ),
+                )?;
+                continue;
+            }
+            let (branch, tip) = match &base {
+                Some(base) => base.clone(),
+                None => match self.base_tip() {
+                    Ok(found) => base.insert(found).clone(),
+                    Err(e) => {
+                        self.warn_once(
+                            warn,
+                            format!(
+                                "the base's head could not be read ({e:#}); conflicting PRs are \
+                                 not resolved at this step"
+                            ),
+                        )?;
+                        return Ok(true);
+                    }
+                },
+            };
+            if self.resolves.contains(&(number, tip.clone())) {
+                continue;
+            }
+            // `task fix` would refuse on a low disk: the PR waits for a later step, not failed.
+            if self.steps.room().is_err() {
+                return Ok(true);
+            }
+            self.resolves.insert((number, tip));
+            if (self.env.stop_requested)() {
+                return Ok(false);
+            }
+            self.resolve(number, &task, state.auto_merge, &branch, out, warn)?;
+        }
+        Ok(true)
+    }
+
+    /// The repo's default branch, which `task fix` merges in, and the commit it is at.
+    fn base_tip(&self) -> Result<(String, String)> {
+        let branch = self.github.default_branch(&self.repo)?;
+        let tip = self.github.branch_head(&self.repo, &branch)?;
+        Ok((branch, tip))
+    }
+
+    /// One resolve (decision 298): auto-merge disarmed if `armed`, `task fix --pr N`, then armed
+    /// again on the same checks as [`Self::arm`], read from the fix task's record, for a PR that
+    /// was armed or whose own task and earlier resolves passed them. A failed one is said once and left to the user,
+    /// its fix task too. One log row either way.
+    fn resolve(
+        &mut self,
+        number: u32,
+        task: &str,
+        armed: bool,
+        branch: &str,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<()> {
+        let started = self.now();
+        let head = match self.github.pr(&self.repo, number) {
+            Ok(pr) => pr.head_oid,
+            Err(e) => {
+                return self.warn_once(
+                    warn,
+                    format!(
+                        "PR #{number} can't be read ({e:#}); it is not resolved until {branch} \
+                         moves"
+                    ),
+                );
+            }
+        };
+        writeln!(
+            out,
+            "PR #{number} conflicts with {branch}; resolving it with `sbxm task fix --pr {number}`"
+        )?;
+        if armed {
+            if let Err(e) = self.github.pr_disarm_auto_merge(&self.repo, number) {
+                return self.warn_once(
+                    warn,
+                    format!(
+                        "auto-merge could not be disarmed on PR #{number} ({e:#}); it is not \
+                         resolved until {branch} moves"
+                    ),
+                );
+            }
+            writeln!(out, "PR #{number}: auto-merge disarmed for the resolve")?;
+        }
+        let result = self.steps.fix_pr(number, out, warn);
+        let fix = record::fix_id(number, &head).and_then(|id| {
+            record::read(&record::task_dir(&self.base_dir, &id).join("task.json")).ok()
+        });
+        let review = fix.as_ref().and_then(|r| r.review.clone());
+        let outcome = match (&result, &review) {
+            (Err(e), _) => self.left_to_user(
+                number,
+                &format!("its resolve failed: {}", first_line(&format!("{e:#}"))),
+                out,
+            )?,
+            (Ok(()), Some(review)) if review.must_fix > 0 => self.left_to_user(
+                number,
+                &format!("its resolve's review left {} must-fix", review.must_fix),
+                out,
+            )?,
+            (Ok(()), None) => self.left_to_user(number, "its resolve's review is unknown", out)?,
+            (Ok(()), Some(review)) => {
+                let own = self
+                    .record_of(task)
+                    .is_some_and(|rec| passes_arm_checks(&rec));
+                let current = record::fix_id(number, &head).unwrap_or_default();
+                let eligible = armed || (own && self.earlier_resolves_pass(number, &current));
+                match self.rearm(number, eligible, review, out, warn)? {
+                    Some(note) => format!("resolved, {note}"),
+                    None => "resolved".to_owned(),
+                }
+            }
+        };
+        let duration = |agent: Option<&record::Agent>| agent?.run.as_ref().map(|r| r.duration_s);
+        let row = Row {
+            issue: number,
+            title: format!("resolve: conflicts with {branch} (task {task})"),
+            size: None,
+            started,
+            ready: None,
+            worker_s: fix.as_ref().and_then(|r| duration(r.worker.as_ref())),
+            reviewer_s: fix.as_ref().and_then(|r| duration(r.reviewer.as_ref())),
+            rounds: review.as_ref().map(|r| r.round),
+            must_fix: review.as_ref().map(|r| r.must_fix),
+            outcome: outcome.clone(),
+            stops: Vec::new(),
+            idle_before: None,
+        };
+        writeln!(out, "PR #{number}: {outcome}")?;
+        if let Err(e) = queue::append_resolve_row(&self.log, &row) {
+            self.warn_once(
+                warn,
+                format!("{e:#}; the loop goes on without that log row"),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// A failed resolve: said once, and the PR left to the user for the rest of the run.
+    fn left_to_user(&mut self, number: u32, why: &str, out: &mut dyn Write) -> Result<String> {
+        self.unresolved.insert(number);
+        self.say_once(
+            out,
+            format!(
+                "PR #{number} awaits you: {why}; its fix task is kept (see `sbxm task status`), \
+                 and the loop leaves the PR"
+            ),
+        )?;
+        Ok(format!("not resolved: {why}"))
+    }
+
+    /// Whether every resolve already pushed onto PR `number` (a finished fix task of it other
+    /// than `current`) passed [`Self::arm`]'s checks, as its own task must: a narrow review of a
+    /// later merge doesn't clear the risk an earlier one left (review M-1). Read from the fix
+    /// tasks' records, so a restarted loop sees them too; one that can't be read counts as not
+    /// passing.
+    fn earlier_resolves_pass(&self, number: u32, current: &str) -> bool {
+        let Ok(folders) = record::task_folders(&self.base_dir) else {
+            return false;
+        };
+        let prefix = format!("fix-{number}-");
+        folders.iter().all(|dir| {
+            let Some(id) = dir.file_name().and_then(|n| n.to_str()) else {
+                return true;
+            };
+            if !id.starts_with(&prefix) || id == current {
+                return true;
+            }
+            if check_own_folder(&self.base_dir, dir).is_err() {
+                return false;
+            }
+            match record::read(&dir.join("task.json")) {
+                Ok(rec) if rec.kind != Kind::Fix || rec.repo != self.repo => true,
+                Ok(rec) if rec.stage != Stage::Finished => true,
+                Ok(rec) => passes_arm_checks(&rec),
+                Err(_) => false,
+            }
+        })
+    }
+
+    /// A task's record by its id.
+    fn record_of(&self, id: &str) -> Option<Record> {
+        record::read(&record::task_dir(&self.base_dir, id).join("task.json")).ok()
+    }
+
+    /// Arms auto-merge again after a clean resolve (decision 298): only for a PR that `eligible`
+    /// (armed before, or its own task and every earlier resolve pushed onto it passed
+    /// [`Self::arm`]'s checks), when the fix's review is
+    /// low risk with 0 must-fix and covered the PR's new head. Returns the log row's note.
+    fn rearm(
+        &mut self,
+        number: u32,
+        eligible: bool,
+        review: &record::ReviewResult,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<Option<String>> {
+        if !eligible {
+            writeln!(
+                out,
+                "PR #{number} awaits you: its own review didn't allow auto-merge"
+            )?;
+            return Ok(None);
+        }
+        if review.risk != Level::Low {
+            writeln!(
+                out,
+                "PR #{number} awaits you: its resolve's review is risk {}",
+                review.risk.word()
+            )?;
+            return Ok(Some(format!(
+                "auto-merge not armed: risk {}",
+                review.risk.word()
+            )));
+        }
+        let Some(reviewed) = review.commit.as_deref() else {
+            writeln!(
+                out,
+                "PR #{number} awaits you: the commit its resolve's review covered is unknown"
+            )?;
+            return Ok(Some(
+                "auto-merge not armed: reviewed commit unknown".to_owned(),
+            ));
+        };
+        let head = match self.github.pr(&self.repo, number) {
+            Ok(pr) => pr.head_oid,
+            Err(e) => return self.arming_failed(number, &e, out, warn),
+        };
+        if head != reviewed {
+            let note = "auto-merge not armed: the PR's head isn't the commit the resolve's review \
+                        covered";
+            writeln!(
+                out,
+                "PR #{number}: {note} (reviewed {reviewed}, head {head}); it awaits you"
+            )?;
+            return Ok(Some(note.to_owned()));
+        }
+        match self.github.pr_arm_auto_merge(&self.repo, number, reviewed) {
+            Ok(()) => {
+                writeln!(out, "PR #{number}: auto-merge armed again on {reviewed}")?;
+                Ok(Some("auto-merge armed".to_owned()))
+            }
+            Err(e) => self.arming_failed(number, &e, out, warn),
+        }
+    }
+
     fn append(&mut self, row: &Row, warn: &mut dyn Write) -> Result<()> {
         if let Err(e) = queue::append_row(&self.log, row) {
             self.warn_once(
@@ -953,6 +1238,16 @@ impl Loop<'_> {
         }
         Ok(())
     }
+}
+
+/// [`Loop::arm`]'s checks on a task's record: no work stop, a review with 0 must-fix and low risk
+/// after the path-rule floor.
+fn passes_arm_checks(rec: &Record) -> bool {
+    rec.stopped.is_none()
+        && rec
+            .review
+            .as_ref()
+            .is_some_and(|r| r.must_fix == 0 && r.risk == Level::Low)
 }
 
 fn first_line(text: &str) -> String {
@@ -1004,6 +1299,8 @@ pub fn run(
         usage_waited: Duration::ZERO,
         warned: HashSet::new(),
         said: HashSet::new(),
+        resolves: HashSet::new(),
+        unresolved: HashSet::new(),
         log: opts
             .repo_root
             .join("sdlc")
@@ -1039,7 +1336,7 @@ pub fn run(
             return Ok(());
         }
         lp.clean_merged(out, warn)?;
-        if !lp.wait_for_prs(out, warn)? {
+        if !lp.resolve_conflicts(out, warn)? || !lp.wait_for_prs(out, warn)? {
             writeln!(out, "stopped on request")?;
             left(&held, &due, out)?;
             return Ok(());
@@ -1232,9 +1529,19 @@ impl TaskSteps<'_> {
         warn: &mut dyn Write,
         step: &dyn Fn(&mut dyn Write, &mut dyn Write) -> Result<()>,
     ) -> Result<()> {
+        self.logged_as(format!("issue-{issue}"), out, warn, step)
+    }
+
+    /// `out` and `warn` teed into task `id`'s `run.log`.
+    fn logged_as(
+        &self,
+        id: String,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+        step: &dyn Fn(&mut dyn Write, &mut dyn Write) -> Result<()>,
+    ) -> Result<()> {
         let log: Arc<Mutex<RunLog>> =
-            task_log::open(self.config_dir, vec![format!("issue-{issue}")], None)
-                .unwrap_or_else(|_| task_log::none());
+            task_log::open(self.config_dir, vec![id], None).unwrap_or_else(|_| task_log::none());
         let mut out = Tee::new(out, Arc::clone(&log));
         let mut warn = Tee::new(warn, log);
         let result = step(&mut out, &mut warn);
@@ -1370,6 +1677,35 @@ impl Steps for TaskSteps<'_> {
                     only: only.clone(),
                 },
                 self.github,
+                out,
+                warn,
+            )
+        })
+    }
+
+    fn fix_pr(&self, pr: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
+        // The fix task's id names the PR's head, so its run.log is named before `task fix` runs.
+        let repo = resolve_repo(self.repo.as_deref(), &self.repo_root)?;
+        let head = self.github.pr(&repo, pr)?.head_oid;
+        let Some(id) = record::fix_id(pr, &head) else {
+            bail!("PR #{pr}'s head {head:?} isn't a full commit id; see `gh pr view {pr}`");
+        };
+        self.logged_as(id, out, warn, &|out, warn| {
+            task_fix::run(
+                self.config_dir,
+                &task_fix::Options {
+                    repo_root: self.repo_root.clone(),
+                    pr,
+                    repo: self.repo.clone(),
+                    base: None,
+                    clone_source: None,
+                    identity: None,
+                    disk: self.disk.clone(),
+                },
+                self.backend,
+                self.github,
+                self.probe,
+                self.host,
                 out,
                 warn,
             )

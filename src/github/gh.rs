@@ -8,8 +8,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
 use super::{
-    CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, ListedPr, PrComment, PrInfo,
-    PrMergeState, PrRequest, PrState,
+    CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, ListedPr, Mergeable, PrComment,
+    PrInfo, PrMergeState, PrRequest, PrState,
 };
 
 /// Runs `gh` with arguments and optional stdin, returning stdout.
@@ -153,6 +153,33 @@ struct RawMergeState {
     /// `null` unless auto-merge is armed; its fields aren't read.
     #[serde(default)]
     auto_merge_request: Option<serde_json::Value>,
+    #[serde(default)]
+    is_draft: bool,
+    #[serde(default)]
+    mergeable: String,
+    #[serde(default)]
+    merge_state_status: String,
+}
+
+#[derive(Deserialize)]
+struct RawBranch {
+    commit: RawCommit,
+}
+
+#[derive(Deserialize)]
+struct RawCommit {
+    sha: String,
+}
+
+/// Decision 298: conflicting only; `BEHIND` still merges, so it is mergeable.
+fn mergeable(mergeable: &str, merge_state_status: &str) -> Mergeable {
+    if mergeable == "CONFLICTING" || merge_state_status == "DIRTY" {
+        Mergeable::Conflicting
+    } else if mergeable == "UNKNOWN" || mergeable.is_empty() {
+        Mergeable::Unknown
+    } else {
+        Mergeable::Mergeable
+    }
 }
 
 /// A PR state as `gh` names it.
@@ -325,12 +352,45 @@ impl GitHubBackend for GhBackend {
             "--repo",
             repo,
             "--json",
-            "state,autoMergeRequest",
+            "state,autoMergeRequest,isDraft,mergeable,mergeStateStatus",
         ]))?;
         Ok(PrMergeState {
             state: pr_state(number, &raw.state)?,
             auto_merge: raw.auto_merge_request.is_some_and(|r| !r.is_null()),
+            draft: raw.is_draft,
+            mergeable: mergeable(&raw.mergeable, &raw.merge_state_status),
         })
+    }
+
+    fn pr_disarm_auto_merge(&self, repo: &str, number: u32) -> Result<()> {
+        self.run(
+            &strings(&[
+                "pr",
+                "merge",
+                &number.to_string(),
+                "--repo",
+                repo,
+                "--disable-auto",
+            ]),
+            None,
+        )?;
+        Ok(())
+    }
+
+    fn branch_head(&self, repo: &str, branch: &str) -> Result<String> {
+        // The branch goes into the API path: only a usable branch name is accepted.
+        if !crate::task::repo::valid_ref_name(branch) {
+            bail!("{branch:?} isn't a usable branch name, so its head can't be read");
+        }
+        let raw: RawBranch = self.json(&strings(&[
+            "api",
+            &format!("repos/{repo}/branches/{branch}"),
+        ]))?;
+        let sha = raw.commit.sha;
+        if !matches!(sha.len(), 40 | 64) || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+            bail!("`gh api` named `{sha}` as the head of {branch}, which is not a full commit id");
+        }
+        Ok(sha)
     }
 
     fn pr_arm_auto_merge(&self, repo: &str, number: u32, head_commit: &str) -> Result<()> {

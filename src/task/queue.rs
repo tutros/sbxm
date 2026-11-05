@@ -253,13 +253,23 @@ fn rows_in(text: &str, issue: u32) -> (usize, bool) {
 /// new. Returns `false`, writing nothing, when the issue already has a row there: a loop run
 /// again after being killed doesn't log a task twice.
 pub fn append_row(path: &Path, row: &Row) -> Result<bool> {
+    add_row(path, row, true)
+}
+
+/// Appends a resolve's row (decision 298), even when its PR already has one: each resolve of a PR
+/// gets its own.
+pub fn append_resolve_row(path: &Path, row: &Row) -> Result<()> {
+    add_row(path, row, false).map(|_| ())
+}
+
+fn add_row(path: &Path, row: &Row, once: bool) -> Result<bool> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
         Err(e) => return Err(e).with_context(|| format!("cannot read {}", path.display())),
     };
     let (count, logged) = rows_in(&text, row.issue);
-    if logged {
+    if once && logged {
         return Ok(false);
     }
     let mut add = String::new();
