@@ -78,11 +78,17 @@ fn backend(f: &Fixture, reviews: &[&str], saved: Saved, resumed: ExecOutput) -> 
         "issue-41",
         reviews.iter().map(|s| (*s).to_owned()).collect(),
     );
+    // The local clone is mounted in the sandbox under another path on Windows (`C:\x` is `/c/x`),
+    // so the copy the sandbox makes lands in the host workspace's `.sbxm-task/`, where sbxm reads it.
+    let workspace = f.env.base_dir().join("tasks").join("issue-41");
     FakeBackend::with_secrets(&["anthropic", "openai"])
         .with_exec_responder(move |_sandbox, spec| {
             if is_save(spec) {
-                // `sh -c <script> sh <session> <destination>`
-                let dest = PathBuf::from(spec.argv.last().unwrap());
+                // `sh -c <script> sh <session> <destination in the clone>`
+                let in_clone = PathBuf::from(spec.argv.last().unwrap());
+                let dest = workspace
+                    .join(in_clone.parent().unwrap().file_name().unwrap())
+                    .join(in_clone.file_name().unwrap());
                 return Some(match &saved {
                     Saved::Bytes(bytes) => {
                         fs::create_dir_all(dest.parent().unwrap()).unwrap();
@@ -225,10 +231,11 @@ fn a_fix_round_resumes_the_workers_session_with_the_same_fix_prompt() {
         .unwrap()
         .1;
     assert!(restore.argv.iter().any(|a| a == SESSION));
-    // Under the clone's own project folder: its path with `/` (and every other character but a
-    // letter or digit) turned into `-`.
+    // Under the clone's own project folder: its in-sandbox path (on Windows not the host's: `C:\x`
+    // is mounted as `/c/x`) with `/` (and every other character but a letter or digit) turned
+    // into `-`.
     let clone = prepared
-        .workspace
+        .sandbox_clone()
         .to_string_lossy()
         .replace(|c: char| !c.is_ascii_alphanumeric(), "-");
     assert!(
