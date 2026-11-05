@@ -159,6 +159,8 @@ pub struct FakeBackend {
     cloud_list_failure: Option<String>,
     /// How many times `list_detailed` was called; a read, so it's not in `log`.
     cloud_list_calls: Mutex<usize>,
+    /// The `created_at` of `list`'s sandboxes, by name: what `list_with_created_at` adds.
+    local_created_at: HashMap<String, String>,
     /// What `copy_out` of an in-sandbox path produces, before `sandbox_root` is looked at.
     copy_outs: HashMap<String, FakeCopy>,
     /// A host folder standing in for every sandbox's filesystem: `copy_in` writes
@@ -707,6 +709,18 @@ impl FakeBackend {
         }
     }
 
+    /// Makes `list_with_created_at` report these `(name, created_at)`; a sandbox of `list` not
+    /// named here has no `created_at`.
+    pub fn with_created_at(self, created: &[(&str, &str)]) -> Self {
+        Self {
+            local_created_at: created
+                .iter()
+                .map(|(name, at)| ((*name).to_owned(), (*at).to_owned()))
+                .collect(),
+            ..self
+        }
+    }
+
     /// How many times `list_detailed` was called.
     pub fn cloud_list_calls(&self) -> usize {
         *self.cloud_list_calls.lock().unwrap()
@@ -883,10 +897,27 @@ impl SandboxBackend for FakeBackend {
                     cpus: None,
                     memory_mib: None,
                     expires_at: None,
+                    created_at: None,
                 });
             }
         }
         Ok(listed)
+    }
+
+    /// `list`, with the `created_at` of [`FakeBackend::with_created_at`] (issue 92).
+    fn list_with_created_at(&self) -> Result<Vec<SandboxDetail>> {
+        Ok(self
+            .list()?
+            .into_iter()
+            .map(|info| SandboxDetail {
+                created_at: self.local_created_at.get(&info.name).cloned(),
+                name: info.name,
+                status: info.status,
+                cpus: None,
+                memory_mib: None,
+                expires_at: None,
+            })
+            .collect())
     }
 
     fn version(&self) -> Result<String> {

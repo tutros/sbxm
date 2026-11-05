@@ -532,8 +532,9 @@ fn without_watch_it_prints_once_whether_or_not_it_is_a_terminal() {
         )
         .unwrap();
         let text = String::from_utf8(out).unwrap();
-        // The tasks table (header + row), a blank line and the empty Comparison runs section.
-        assert_eq!(text.lines().count(), 4, "{text}");
+        // The tasks table (header + row), then the empty Sandboxes and Comparison runs
+        // sections, each after a blank line.
+        assert_eq!(text.lines().count(), 6, "{text}");
         assert!(!text.contains('\x1B'), "{text:?}");
     }
 }
@@ -565,8 +566,9 @@ fn watch_on_a_non_terminal_prints_once_and_returns() {
     .unwrap();
 
     let text = String::from_utf8(out).unwrap();
-    // The tasks table (header + row), a blank line and the empty Comparison runs section.
-    assert_eq!(text.lines().count(), 4, "{text}");
+    // The tasks table (header + row), then the empty Sandboxes and Comparison runs sections,
+    // each after a blank line.
+    assert_eq!(text.lines().count(), 6, "{text}");
 }
 
 #[test]
@@ -679,6 +681,7 @@ fn cloud_box(
         cpus,
         memory_mib,
         expires_at: expires.map(str::to_owned),
+        created_at: None,
     }
 }
 
@@ -800,6 +803,8 @@ fn status_lists_only_the_cloud_sandboxes_named_sbxm_from_the_cloud_instance() {
          CLOUD SANDBOX        STATUS   SHAPE          LEFT\n\
          sbxm-issue-1-claude  running  2 CPUs, 4 GiB  1h05m\n\
          \n\
+         No local sandboxes.\n\
+         \n\
          No comparison runs.\n"
     );
     assert_eq!(backend.locations(), [Location::Cloud]);
@@ -822,7 +827,10 @@ fn status_with_no_cloud_sandboxes_prints_only_the_tasks() {
     let rows = tasks::rows(base.path(), &Probe(Some(T0))).unwrap();
     assert_eq!(
         text,
-        format!("{}\nNo comparison runs.\n", tasks::render(&rows, T0, None))
+        format!(
+            "{}\nNo local sandboxes.\n\nNo comparison runs.\n",
+            tasks::render(&rows, T0, None)
+        )
     );
 }
 
@@ -840,7 +848,7 @@ fn status_with_an_unreadable_cloud_prints_one_line_and_succeeds() {
         text,
         format!(
             "{}\nCloud sandboxes couldn't be read (`sbx --cloud ls --json`): sbxcloud: \
-             unauthorized (401)\n\nNo comparison runs.\n",
+             unauthorized (401)\n\nNo local sandboxes.\n\nNo comparison runs.\n",
             tasks::render(&rows, T0, None)
         )
     );

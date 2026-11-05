@@ -1027,6 +1027,7 @@ fn cloud_box(name: &str, expires_at: &str) -> SandboxDetail {
         cpus: Some(2),
         memory_mib: Some(4096),
         expires_at: Some(expires_at.to_owned()),
+        created_at: None,
     }
 }
 

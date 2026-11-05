@@ -154,6 +154,10 @@ impl SandboxBackend for SbxBackend {
         parse_ls_detailed(&self.ls_json()?)
     }
 
+    fn list_with_created_at(&self) -> Result<Vec<SandboxDetail>> {
+        self.list_detailed()
+    }
+
     fn stop(&self, name: &str) -> Result<()> {
         self.run_sbx(stop_args(name), name)
     }
@@ -1728,6 +1732,7 @@ mod cloud_tests {
                 cpus: Some(2),
                 memory_mib: Some(4096),
                 expires_at: Some("2026-10-24T09:02:21.604457Z".into()),
+                created_at: Some("2026-10-24T08:02:25.656712Z".into()),
             }]
         );
         assert_eq!(parse_ls_detailed(CLOUD_LS_EMPTY).unwrap(), []);
@@ -1745,6 +1750,7 @@ mod cloud_tests {
                 cpus: None,
                 memory_mib: None,
                 expires_at: None,
+                created_at: None,
             }]
         );
     }

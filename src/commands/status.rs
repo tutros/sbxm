@@ -1,6 +1,7 @@
 //! `sbxm status [--watch]` (decision 171, issue 90): the Tasks section, then the running cloud
-//! sandboxes (milestone 4 slice 8, decision 259). Reads only: the one `sbx` call is the cloud
-//! instance's `ls`, once per frame, and a cloud that can't be read is one line, not an error
+//! sandboxes (milestone 4 slice 8, decision 259), the local sandboxes (issue 92), the comparison
+//! runs and the Loop. Reads only: the `sbx` calls are the cloud instance's `ls` and the local
+//! instance's, once per frame each, and a list that can't be read is one line, not an error
 //! (P17 (a)).
 
 #[cfg(any(unix, test))]
@@ -13,7 +14,7 @@ use anyhow::Result;
 
 use crate::backend::SandboxBackend;
 use crate::github::GitHubBackend;
-use crate::status::{cloud, looping, runs, tasks};
+use crate::status::{cloud, looping, runs, sandboxes, tasks};
 use crate::task::record::ProcessProbe;
 
 /// What `sbxm status` needs from the environment, so tests don't depend on real time, real
@@ -91,15 +92,22 @@ pub fn run_with(
     let mut cache = looping::Cache::default();
     loop {
         let rows = tasks::rows(base, probe)?;
-        let sandboxes = cloud::read(backend);
-        let comparisons = runs::read(base, backend);
+        let in_cloud = cloud::read(backend);
+        let local = sandboxes::read(backend);
+        let claims = sandboxes::claims(base);
+        // The runs read the same local list, never a second `sbx ls`.
+        let comparisons = runs::read_with(base, &|| match &local {
+            sandboxes::Local::Sandboxes(all) => Some(all.iter().map(|s| s.name.clone()).collect()),
+            sandboxes::Local::Unreadable(_) => None,
+        });
         let now = (env.now)();
         let width = env.terminal.then_some(env.width);
         if env.terminal && watch.is_some() {
             write!(out, "{CLEAR_SCREEN}")?;
         }
         write!(out, "{}", tasks::render(&rows, now, width))?;
-        write!(out, "{}", cloud::render(&sandboxes, now, width))?;
+        write!(out, "{}", cloud::render(&in_cloud, now, width))?;
+        write!(out, "{}", sandboxes::render(&local, &claims, now, width))?;
         write!(out, "{}", runs::render(&comparisons, now, width))?;
         if let Some(source) = loop_source {
             let view = loop_view(base, probe, source, &mut cache, now);
