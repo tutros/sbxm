@@ -74,7 +74,8 @@ build sbxm tasks run with (a machine's own wrapper; never a fresh `cargo run`).
 
 - An open PR that conflicts with `main` after another PR merged: `<sbxm> task fix --pr N` merges `main` in its
   sandbox, resolves, gates, pushes, and its in-task review covers the merge narrowly (decision 292). It needs a
-  must-fix finding to work from.
+  must-fix finding to work from, or else GitHub reporting the PR conflicting or behind its base (then a head-covering
+  review with 0 must-fix is enough).
 
 - Low risk (the reviewer's level and the path-rule floor), 0 must-fix, and the review covered the PR's head
   (`gh pr view N --json headRefOid`): `gh pr merge N --auto --merge --match-head-commit <reviewed sha>` (decisions

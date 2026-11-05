@@ -41,6 +41,7 @@ fn pr() -> PrInfo {
         title: "Add the x feature".into(),
         body: "Adds x.\n\nFixes #4".into(),
         closing_issues: vec![4],
+        base_moved: false,
     }
 }
 
@@ -900,6 +901,7 @@ fn a_second_round_gets_the_prs_current_description_and_issues() {
             title: "Add the x and y features".into(),
             body: "Adds x and now y.\n\nFixes #4, fixes #5".into(),
             closing_issues: vec![4, 5],
+            base_moved: false,
             ..pr()
         })
         .with_issue_text(issue_text(4))

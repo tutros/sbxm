@@ -124,7 +124,7 @@ pub fn review_to_fix(
              head again with `{review_head_again}`"
         );
     };
-    if stated == 0 && must_fix.is_empty() {
+    if stated == 0 && must_fix.is_empty() && !pr.base_moved {
         bail!(
             "the latest sbxm review of PR #{number} (commit {commit}) has no must-fix findings, \
              so there is nothing to fix; file its other findings with `sbxm task file-findings`"
@@ -146,6 +146,12 @@ pub fn review_to_fix(
          Pull request #{number}: {}\nBranch: {}\nReviewed commit: {commit}\n",
         pr.title, pr.head_ref
     );
+    if must_fix.is_empty() {
+        text.push_str(
+            "\nThe review has no must-fix findings: GitHub reports the PR conflicting with its \
+             base or behind it, so the only work is merging the base (decision 292).\n",
+        );
+    }
     for finding in &must_fix {
         text.push('\n');
         text.push_str(finding.trim_end());

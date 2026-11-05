@@ -32,6 +32,7 @@ fn pr(number: u32) -> PrInfo {
         title: "Add the x feature".into(),
         body: "This adds x.\n\nFixes #4".into(),
         closing_issues: vec![4],
+        base_moved: false,
     }
 }
 

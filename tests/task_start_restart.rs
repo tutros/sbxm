@@ -960,6 +960,7 @@ fn pr_7(state: PrState, fork: bool) -> PrInfo {
         title: "Add x".into(),
         body: String::new(),
         closing_issues: vec![],
+        base_moved: false,
     }
 }
 

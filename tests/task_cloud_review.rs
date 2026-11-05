@@ -392,6 +392,7 @@ fn pr_7() -> sbxm::github::PrInfo {
         title: "Add the x feature".into(),
         body: "Adds x.\n\nFixes #4".into(),
         closing_issues: vec![4],
+        base_moved: false,
     }
 }
 

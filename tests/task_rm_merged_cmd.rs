@@ -93,6 +93,7 @@ fn merged_github(number: u32) -> FakeGitHub {
         title: "Fix 41".into(),
         body: String::new(),
         closing_issues: vec![41],
+        base_moved: false,
     })
 }
 

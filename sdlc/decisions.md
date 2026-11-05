@@ -1311,7 +1311,7 @@ base's tip as the task fetched it is not pushed. The gates then run as for any t
 fails them and gets a fix round), and the in-task review, posted on the PR as before, covers the merge narrowly: the
 reviewer prompt says the base's own commits are not the change and to check the merge commit's resolutions
 (`git show --remerge-diff`). A clean merge needs no fix round. A PR whose base moved twice is merged again by the next
-`task fix`. (2) Fewer conflicts at the source, as rules in the worker prompts and `sdlc-issue-flow`: (a) an issue
+`task fix`. A head-covering review with 0 must-fix is accepted when GitHub reports the PR conflicting with its base or behind it (`PrInfo::base_moved`, from `mergeable`/`mergeStateStatus`); any other PR with 0 must-fix is refused before anything is made. (2) Fewer conflicts at the source, as rules in the worker prompts and `sdlc-issue-flow`: (a) an issue
 reserves the number of any decision it adds when it is readied ("this adds decision N", gap G41); (b) new tests go in
 a section or file of the issue's own, never appended at the end of a shared test file. README rows edited by two PRs
 get no rule. (3) The loop doesn't avoid tasks whose files overlap an open PR's; the trigger to build that is a

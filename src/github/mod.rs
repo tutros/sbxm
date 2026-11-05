@@ -48,6 +48,9 @@ pub struct PrInfo {
     pub title: String,
     pub body: String,
     pub closing_issues: Vec<u32>,
+    /// GitHub reports the PR conflicting with its base or behind it (`mergeable` is
+    /// `CONFLICTING`, or `mergeStateStatus` is `BEHIND` or `DIRTY`): it needs the base merged.
+    pub base_moved: bool,
 }
 
 /// A PR's state and whether auto-merge is armed on it (`gh pr view --json

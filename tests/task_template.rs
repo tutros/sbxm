@@ -271,6 +271,7 @@ fn pr_7() -> PrInfo {
         title: "Add the x feature".into(),
         body: "Adds x.".into(),
         closing_issues: vec![],
+        base_moved: false,
     }
 }
 

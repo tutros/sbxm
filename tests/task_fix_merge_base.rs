@@ -43,6 +43,7 @@ fn pr7(head: &str) -> PrInfo {
         title: "Add the x feature".into(),
         body: "This adds x.".into(),
         closing_issues: vec![],
+        base_moved: false,
     }
 }
 
@@ -446,4 +447,65 @@ fn a_worker_that_did_not_merge_the_base_pushes_nothing() {
             .iter()
             .any(|c| c.name.contains("-review-"))
     );
+}
+
+/// A review of `head` with no findings at all, by the user.
+fn clean_review_of(head: &str) -> PrComment {
+    PrComment {
+        author: "tutros".into(),
+        body: pr_comment(
+            7,
+            "",
+            &format!("Must-fix findings: 0\nRisk: low\n\nScope: `0000000..{head}`\n\nNothing.\n"),
+        ),
+    }
+}
+
+fn github_with_clean_review(head: &str, base_moved: bool) -> FakeGitHub {
+    FakeGitHub::default()
+        .with_user("tutros")
+        .with_default_branch("main")
+        .with_pr(PrInfo {
+            base_moved,
+            ..pr7(head)
+        })
+        .with_pr_comments(7, vec![clean_review_of(head)])
+}
+
+/// Issue 404, answer 1: a PR whose latest review has no findings still gets its base merged when
+/// GitHub reports it conflicting or behind.
+#[test]
+fn a_conflicting_pr_with_a_clean_review_gets_its_base_merged_and_pushed() {
+    let f = config();
+    let head = pr_head(&f);
+    let main = move_main(&f, "main-docs", "docs.md", "- main's line\n");
+    let backend = backend(&f, &head, true, 0);
+
+    let (result, _) = fix(&f, &backend, &github_with_clean_review(&head, true));
+
+    result.unwrap();
+    let tip = origin_tip(&f, "refs/heads/feature-x");
+    assert!(is_ancestor(&f.origin, &main, &tip));
+    let docs = git(&f.origin, &["show", &format!("{tip}:docs.md")]);
+    assert!(
+        docs.contains("- the PR's line") && docs.contains("- main's line"),
+        "{docs}"
+    );
+}
+
+/// ...and a PR GitHub doesn't report as conflicting or behind is refused before anything is made.
+#[test]
+fn a_clean_pr_with_a_clean_review_is_refused_before_any_write() {
+    let f = config();
+    let head = pr_head(&f);
+    move_main(&f, "main-docs", "docs.md", "- main's line\n");
+    let backend = backend(&f, &head, true, 0);
+
+    let (result, _) = fix(&f, &backend, &github_with_clean_review(&head, false));
+
+    let err = format!("{:#}", result.unwrap_err());
+    assert!(err.contains("nothing to fix"), "{err}");
+    assert!(backend.creates().is_empty());
+    let id = record::fix_id(7, &head).unwrap();
+    assert!(!record::task_dir(&f.env.base_dir(), &id).exists());
 }
