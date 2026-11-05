@@ -159,7 +159,7 @@ fn fixed_cells(row: &TaskRow, now: u64) -> [String; 7] {
 /// The fixed cells padded to `widths`, each followed by `sep` spaces (2 is the normal, readable
 /// gap; a terminal that's too narrow for even that falls back to 1, then 0, before giving up on
 /// separating columns at all).
-fn build_fixed(cells: &[String; 7], widths: &[usize; 7], sep: usize) -> String {
+fn build_fixed<const N: usize>(cells: &[String; N], widths: &[usize; N], sep: usize) -> String {
     let gap = " ".repeat(sep);
     let mut line = String::new();
     for (cell, width) in cells.iter().zip(widths) {
@@ -174,12 +174,12 @@ fn build_fixed(cells: &[String; 7], widths: &[usize; 7], sep: usize) -> String {
 /// narrow for the fixed cells at the normal 2-space gap, the gap is compacted (1 space, then none)
 /// before the log loses any more than its own `…`; `log_is_real` marks a log worth that guarantee
 /// (a task's actual last line, not the header's "LOG" label or the dash for no log yet).
-fn push_row(
+pub(crate) fn push_row<const N: usize>(
     out: &mut String,
-    cells: &[String; 7],
+    cells: &[String; N],
     log: &str,
     log_is_real: bool,
-    widths: &[usize; 7],
+    widths: &[usize; N],
     total_width: Option<usize>,
 ) {
     let line = match total_width {

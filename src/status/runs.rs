@@ -4,7 +4,7 @@
 //! before it finished; if that fails the flag says "unknown" and the rest still shows. A folder
 //! that can't be read as a run is a row saying so, never an error.
 
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::fs;
 use std::path::Path;
 
@@ -12,14 +12,10 @@ use serde_json::Value;
 
 use crate::backend::SandboxBackend;
 use crate::run::results::parse_timestamp;
-use crate::status::tasks::{display_width, format_duration, last_log_line, pad, truncate};
+use crate::status::tasks::{display_width, format_duration, last_log_line, push_row, truncate};
 
 /// A missing value.
 const DASH: &str = "-";
-
-/// More repeats than this in a `run.json` is a damaged file, not a run (the pairs would be
-/// counted one by one).
-const MAX_REPEAT: u64 = 10_000;
 
 /// Whether a run's unfinished pairs still have their sandbox.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -143,43 +139,63 @@ fn read_run(id: &str, dir: &Path) -> Result<(RunInfo, Vec<String>), String> {
     let repeat = json
         .get("repeat")
         .and_then(Value::as_u64)
-        .filter(|r| (1..=MAX_REPEAT).contains(r))
+        .filter(|r| (1..=u64::from(u32::MAX)).contains(r))
         .ok_or("run.json has no valid repeat")?;
-    let total = contestants.len() as u64 * repeat;
-    let saved = |i: usize, r: u64| {
-        dir.join(i.to_string())
-            .join(r.to_string())
-            .join("result.json")
-            .is_file()
+    let timestamp = |key: &str| match json.get(key) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(text)) => parse_timestamp(text)
+            .map(|_| Some(text.clone()))
+            .ok_or(format!("run.json has an invalid {key}")),
+        Some(_) => Err(format!("run.json has an invalid {key}")),
     };
-    let mut done = 0;
-    let mut wave = Vec::new();
-    for r in 0..repeat {
-        let missing: Vec<usize> = (0..contestants.len()).filter(|&i| !saved(i, r)).collect();
-        done += (contestants.len() - missing.len()) as u64;
-        if wave.is_empty() {
-            wave = missing
-                .into_iter()
-                .map(|i| format!("sbxm-run-{id}-{i}-{r}"))
-                .collect();
-        }
-    }
+    let started_at = timestamp("started_at")?;
+    let completed_at = timestamp("completed_at")?;
+    let total = contestants.len() as u64 * repeat;
+    // Which repeats each contestant has saved: read from the folders that exist, never one probe
+    // per possible pair, since `repeat` can be as large as a `u32`.
+    let saved: Vec<BTreeSet<u64>> = (0..contestants.len())
+        .map(|i| saved_repeats(&dir.join(i.to_string()), repeat))
+        .collect();
+    let done = saved.iter().map(|s| s.len() as u64).sum();
+    // The lowest repeat any contestant hasn't saved: the wave that is running.
+    let running = saved
+        .iter()
+        .map(|s| (0..).find(|r| !s.contains(r)).unwrap_or(repeat))
+        .min()
+        .unwrap_or(repeat);
+    let wave: Vec<String> = if running < repeat {
+        (0..contestants.len())
+            .filter(|&i| !saved[i].contains(&running))
+            .map(|i| format!("sbxm-run-{id}-{i}-{running}"))
+            .collect()
+    } else {
+        Vec::new()
+    };
     let info = RunInfo {
         contestants,
         done,
         total,
-        started_at: json
-            .get("started_at")
-            .and_then(Value::as_str)
-            .and_then(parse_timestamp),
-        completed_at: json
-            .get("completed_at")
-            .and_then(Value::as_str)
-            .map(str::to_owned),
+        started_at: started_at.as_deref().and_then(parse_timestamp),
+        completed_at,
         log_line: last_log_line(&dir.join("run.log")),
         gone: Gone::No,
     };
     Ok((info, wave))
+}
+
+/// The repeats under `contestant_dir` (named `0`, `1`, ...) below `repeat` whose `result.json`
+/// is saved.
+fn saved_repeats(contestant_dir: &Path, repeat: u64) -> BTreeSet<u64> {
+    let Ok(entries) = fs::read_dir(contestant_dir) else {
+        return BTreeSet::new();
+    };
+    entries
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            let n: u64 = entry.file_name().to_str()?.parse().ok()?;
+            (n < repeat && entry.path().join("result.json").is_file()).then_some(n)
+        })
+        .collect()
 }
 
 const HEADER: [&str; 7] = [
@@ -231,39 +247,35 @@ fn cells(row: &RunRow, now: u64) -> [String; 7] {
 }
 
 /// The section, after a blank line: a table of runs, one line saying there are none, or one line
-/// saying the folder can't be read. Each line is cut to `width` on a terminal.
+/// saying the folder can't be read. On a terminal only the last column (the log line) is cut, as
+/// in the Tasks table; a pipe or a file gets every line in full.
 pub fn render(runs: &Runs, now: u64, width: Option<usize>) -> String {
-    let lines: Vec<String> = match runs {
-        Runs::Unreadable(error) => vec![format!("Comparison runs couldn't be read: {error}")],
-        Runs::Rows(rows) if rows.is_empty() => vec!["No comparison runs.".to_owned()],
-        Runs::Rows(rows) => {
-            let data: Vec<[String; 7]> = rows.iter().map(|r| cells(r, now)).collect();
-            let mut widths = HEADER.map(display_width);
-            for row in &data {
-                for (w, cell) in widths.iter_mut().zip(row) {
-                    *w = (*w).max(display_width(cell));
-                }
-            }
-            std::iter::once(HEADER.map(str::to_owned))
-                .chain(data)
-                .map(|cells| {
-                    let mut line = String::new();
-                    for (cell, w) in cells[..6].iter().zip(&widths) {
-                        line.push_str(&pad(cell, *w));
-                        line.push_str("  ");
-                    }
-                    (line + &cells[6]).trim_end().to_owned()
-                })
-                .collect()
+    let mut out = String::from("\n");
+    let rows = match runs {
+        Runs::Rows(rows) if !rows.is_empty() => rows,
+        other => {
+            let line = match other {
+                Runs::Unreadable(error) => format!("Comparison runs couldn't be read: {error}"),
+                Runs::Rows(_) => "No comparison runs.".to_owned(),
+            };
+            out.push_str(&width.map_or(line.clone(), |w| truncate(&line, w)));
+            out.push('\n');
+            return out;
         }
     };
-    let mut out = String::from("\n");
-    for line in lines {
-        match width {
-            Some(width) => out.push_str(&truncate(&line, width)),
-            None => out.push_str(&line),
+    let data: Vec<[String; 7]> = rows.iter().map(|r| cells(r, now)).collect();
+    let fixed = |cells: &[String; 7]| -> [String; 6] { std::array::from_fn(|i| cells[i].clone()) };
+    let mut widths: [usize; 6] = std::array::from_fn(|i| display_width(HEADER[i]));
+    for row in &data {
+        for (w, cell) in widths.iter_mut().zip(row) {
+            *w = (*w).max(display_width(cell));
         }
-        out.push('\n');
+    }
+    let header = HEADER.map(str::to_owned);
+    push_row(&mut out, &fixed(&header), HEADER[6], false, &widths, width);
+    for row in &data {
+        let log_is_real = row[6] != DASH;
+        push_row(&mut out, &fixed(row), &row[6], log_is_real, &widths, width);
     }
     out
 }

@@ -181,7 +181,7 @@ fn malformed_and_half_written_folders_are_rows_not_crashes() {
     fs::create_dir_all(&d).unwrap();
     fs::write(
         d.join("run.json"),
-        r#"{"repeat": 4000000000, "contestants": [{"harness":"claude","model":"m"}]}"#,
+        r#"{"repeat": 5000000000, "contestants": [{"harness":"claude","model":"m"}]}"#,
     )
     .unwrap();
     let e = root.join("e-norepeat");
@@ -237,4 +237,171 @@ fn the_last_log_line_is_shown_without_its_timestamp() {
     .unwrap();
     let row = only_row(runs::read(base.path(), &FakeBackend::default()));
     assert_eq!(info(&row).log_line.as_deref(), Some("[pairs] second"));
+}
+
+// ---- review fixes: M-1 timestamps, M-2 repeat range, M-3 terminal width ---------------------
+
+fn raw_run(base: &Path, id: &str, started: &str, completed: Option<&str>, repeat: u64) {
+    let dir = runs_dir(base).join(id);
+    fs::create_dir_all(&dir).unwrap();
+    let json = serde_json::json!({
+        "started_at": started,
+        "completed_at": completed,
+        "repeat": repeat,
+        "contestants": [
+            {"harness": "claude", "model": "opus"},
+            {"harness": "codex", "model": "gpt"},
+        ],
+    });
+    fs::write(dir.join("run.json"), json.to_string()).unwrap();
+}
+
+#[test]
+fn invalid_or_overflowing_timestamps_are_malformed_rows() {
+    let base = tempfile::tempdir().unwrap();
+    run(base.path(), "good", 1, Some("2026-10-30T10:12:00Z"));
+    let huge = "2026-11-05T18446744073709551615:00:00Z";
+    let bad = [
+        ("a-start-huge", huge, None),
+        ("b-start-month", "2026-13-05T10:00:00Z", None),
+        ("c-start-hour", "2026-11-05T25:00:00Z", None),
+        ("d-start-year", "99999999999-11-05T10:00:00Z", None),
+        ("e-done-huge", START, Some(huge)),
+        ("f-done-junk", START, Some("yesterday")),
+    ];
+    for (id, started, completed) in bad {
+        raw_run(base.path(), id, started, completed, 1);
+    }
+    let found = runs::read(base.path(), &FakeBackend::default());
+    let Runs::Rows(rows) = &found else { panic!() };
+    assert_eq!(rows.len(), 7);
+    for row in rows {
+        match row.id.as_str() {
+            "good" => assert!(matches!(row.state, RunState::Run(_)), "{row:?}"),
+            _ => assert!(matches!(row.state, RunState::Malformed(_)), "{row:?}"),
+        }
+    }
+    let text = runs::render(&found, START_SECS, None);
+    assert!(text.contains("2026-10-30T10:12:00Z"), "{text}");
+}
+
+#[test]
+fn a_completed_at_that_is_not_a_string_is_malformed() {
+    let base = tempfile::tempdir().unwrap();
+    let dir = runs_dir(base.path()).join("r");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("run.json"),
+        r#"{"started_at":"2026-10-30T10:00:00Z","completed_at":5,"repeat":1,"contestants":[{}]}"#,
+    )
+    .unwrap();
+    let row = only_row(runs::read(base.path(), &FakeBackend::default()));
+    assert!(matches!(row.state, RunState::Malformed(_)));
+}
+
+#[test]
+fn repeats_across_the_accepted_range_are_normal_rows_with_correct_totals() {
+    let base = tempfile::tempdir().unwrap();
+    for (id, repeat) in [
+        ("r09999", 9_999u64),
+        ("r10000", 10_000),
+        ("r10001", 10_001),
+        ("rmax", u64::from(u32::MAX)),
+    ] {
+        raw_run(base.path(), id, START, Some("2026-10-30T10:12:00Z"), repeat);
+    }
+    let started = std::time::Instant::now();
+    let Runs::Rows(rows) = runs::read(base.path(), &FakeBackend::default()) else {
+        panic!()
+    };
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    let totals: Vec<u64> = rows.iter().map(|r| info(r).total).collect();
+    assert_eq!(totals, [19_998, 20_000, 20_002, 2 * u64::from(u32::MAX)]);
+}
+
+#[test]
+fn a_sparse_run_with_u32_max_repeats_counts_saved_pairs_and_the_running_wave() {
+    let base = tempfile::tempdir().unwrap();
+    raw_run(base.path(), "r1", START, None, u64::from(u32::MAX));
+    let dir = runs_dir(base.path()).join("r1");
+    save_pair(&dir, 0, 0);
+    save_pair(&dir, 1, 0);
+    save_pair(&dir, 0, 1); // wave 1 is the running one: contestant 1 is unsaved
+    save_pair(&dir, 0, u32::MAX); // out of range (repeats are 0..MAX): not counted
+    let row = only_row(runs::read(base.path(), &FakeBackend::default()));
+    let i = info(&row);
+    assert_eq!(i.done, 3);
+    assert_eq!(i.gone, Gone::Pairs(1));
+}
+
+#[test]
+fn invalid_repeat_values_are_still_malformed() {
+    let base = tempfile::tempdir().unwrap();
+    for (id, repeat) in [
+        ("zero", serde_json::json!(0)),
+        ("toobig", serde_json::json!(u64::from(u32::MAX) + 1)),
+        ("text", serde_json::json!("3")),
+        ("negative", serde_json::json!(-1)),
+    ] {
+        let dir = runs_dir(base.path()).join(id);
+        fs::create_dir_all(&dir).unwrap();
+        let json = serde_json::json!({"started_at": START, "repeat": repeat,
+            "contestants": [{"harness": "claude", "model": "m"}]});
+        fs::write(dir.join("run.json"), json.to_string()).unwrap();
+    }
+    let Runs::Rows(rows) = runs::read(base.path(), &FakeBackend::default()) else {
+        panic!()
+    };
+    assert_eq!(rows.len(), 4);
+    assert!(
+        rows.iter()
+            .all(|r| matches!(r.state, RunState::Malformed(_)))
+    );
+}
+
+#[test]
+fn a_terminal_cuts_only_the_log_cell() {
+    let base = tempfile::tempdir().unwrap();
+    let id = "2026-11-05-abcdef";
+    let dir = runs_dir(base.path()).join(id);
+    fs::create_dir_all(&dir).unwrap();
+    let json = serde_json::json!({
+        "started_at": START, "completed_at": null, "repeat": 1,
+        "contestants": [
+            {"harness": "claude", "model": "claude-sonnet-4-5"},
+            {"harness": "codex", "model": "gpt-5.2-codex"},
+        ],
+    });
+    fs::write(dir.join("run.json"), json.to_string()).unwrap();
+    fs::write(
+        dir.join("run.log"),
+        "2026-10-30T10:02:00Z [pairs] a long last line of the run log\n",
+    )
+    .unwrap();
+    let found = runs::read(base.path(), &FakeBackend::default());
+    let full = runs::render(&found, START_SECS, None);
+    let cut = runs::render(&found, START_SECS, Some(80));
+    assert!(full.contains("sandbox gone") && full.contains("a long last line of the run log"));
+    let row = cut.lines().nth(2).unwrap();
+    assert!(
+        row.contains("0/2") && row.contains("0s") && row.contains("sandbox gone"),
+        "{cut}"
+    );
+    assert!(row.ends_with('…'), "{cut}");
+    assert_eq!(cut.lines().count(), full.lines().count());
+
+    let done = runs::render(&found, START_SECS, Some(10));
+    assert!(
+        done.lines().nth(2).unwrap().contains("sandbox gone"),
+        "{done}"
+    );
+}
+
+#[test]
+fn a_completed_run_keeps_its_completion_stamp_on_a_terminal() {
+    let base = tempfile::tempdir().unwrap();
+    run(base.path(), "r1", 1, Some("2026-10-30T10:12:00Z"));
+    let found = runs::read(base.path(), &FakeBackend::default());
+    let cut = runs::render(&found, START_SECS, Some(40));
+    assert!(cut.contains("2026-10-30T10:12:00Z"), "{cut}");
 }
