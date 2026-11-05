@@ -119,6 +119,7 @@ pub fn run(
         sleep: &std::thread::sleep,
         // Empty in production while P8 (a) holds (slice 4), as for any task.
         scoped_secrets: &[],
+        disk: &opts.disk,
     };
 
     writeln!(
@@ -212,6 +213,8 @@ pub fn run(
             prepared.meta.join("result.md").display()
         );
     }
+    // Decision 292: the worker merged the base first.
+    pipeline::check_base_merged(&prepared)?;
 
     let env = ctx.env();
     let reviewed = pipeline::review_issue(&env, &mut prepared);

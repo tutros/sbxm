@@ -240,6 +240,7 @@ fn run_issue(
         host,
         sleep: &std::thread::sleep,
         scoped_secrets: &[],
+        disk: &opts.disk,
         identity: identity.as_ref(),
         clone_source: None,
     };
@@ -429,6 +430,7 @@ fn run_spec(
         host,
         sleep: &std::thread::sleep,
         scoped_secrets: &[],
+        disk: &opts.disk,
         identity: identity.as_ref(),
         clone_source: None,
     };
@@ -561,6 +563,7 @@ fn run_pr(
         sleep: &std::thread::sleep,
         // Empty in production while P8 (a) holds (slice 4).
         scoped_secrets: &[],
+        disk: &opts.disk,
     };
 
     // A task that already exists is resumed when its review can be tried again (a failed

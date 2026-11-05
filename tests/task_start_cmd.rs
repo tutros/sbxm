@@ -430,6 +430,7 @@ fn pr_in_state(number: u32, state: PrState) -> PrInfo {
         title: format!("PR {number}"),
         body: String::new(),
         closing_issues: Vec::new(),
+        base_moved: false,
     }
 }
 

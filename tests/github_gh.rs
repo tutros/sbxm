@@ -134,7 +134,7 @@ fn a_pr_with_closing_issues_is_parsed() {
             "--repo",
             "tutros/sbxm",
             "--json",
-            "headRefName,headRefOid,headRepository,headRepositoryOwner,isCrossRepository,state,title,body,closingIssuesReferences"
+            "headRefName,headRefOid,headRepository,headRepositoryOwner,isCrossRepository,state,title,body,closingIssuesReferences,mergeable,mergeStateStatus"
         ]
     );
     assert_eq!(pr.number, 34);
@@ -540,4 +540,29 @@ fn no_pr_listed_is_no_open_pr() {
     let (gh, _) = backend(Scripted::answering("[]\n"));
 
     assert_eq!(gh.open_pr_for("o/r", "issue-4", "main").unwrap(), None);
+}
+
+fn pr_json(mergeable: &str, merge_state: &str) -> String {
+    format!(
+        r#"{{"headRefName":"b","headRefOid":"abc","isCrossRepository":false,"state":"OPEN","title":"t","body":"","closingIssuesReferences":[],"mergeable":"{mergeable}","mergeStateStatus":"{merge_state}"}}"#
+    )
+}
+
+#[test]
+fn a_pr_needs_its_base_merged_when_github_says_conflicting_or_behind() {
+    for (mergeable, state, moved) in [
+        ("CONFLICTING", "DIRTY", true),
+        ("MERGEABLE", "BEHIND", true),
+        ("MERGEABLE", "CLEAN", false),
+        ("UNKNOWN", "UNKNOWN", false),
+        ("MERGEABLE", "BLOCKED", false),
+    ] {
+        let json = pr_json(mergeable, state);
+        let (gh, _) = backend(Scripted::answering(&json));
+        assert_eq!(
+            gh.pr("o/r", 7).unwrap().base_moved,
+            moved,
+            "{mergeable} {state}"
+        );
+    }
 }

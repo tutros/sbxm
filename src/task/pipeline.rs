@@ -28,8 +28,10 @@ use super::risk;
 use super::secrets;
 use super::select::{self, Selection};
 use super::session;
+use super::stale_lock;
 use crate::backend::{CreateSpec, ExecSpec, Location, SandboxBackend, ScopedSecret, Stdin};
 use crate::config::{self, GlobalConfig, Profile, Resources};
+use crate::disk;
 use crate::github::{GitHubBackend, Issue, IssueText, PrInfo, PrState};
 use crate::harness::Harness;
 use crate::headless::{self, HeadlessOpts, RunStatus};
@@ -158,6 +160,9 @@ pub struct Ctx<'a> {
     /// (slice 4, decision 256). Empty in production while P8 (a) holds; tests fill it with a fake
     /// value. No config key or flag reads one.
     pub scoped_secrets: &'a [ScopedSecret],
+    /// The invoking command's free-space check, for a template rebuild a sandbox's creation
+    /// starts (decision 194).
+    pub disk: &'a disk::Guard,
 }
 
 /// A task that is ready for its worker.
@@ -334,6 +339,8 @@ pub struct TaskEnv<'a> {
     /// Where a PR task whose preparation failed before its `repo.git` was made clones it from
     /// (issue 379), as [`Ctx::clone_source`]; `None` where no such clone is needed.
     pub clone_source: Option<&'a str>,
+    /// As [`Ctx::disk`].
+    pub disk: &'a disk::Guard,
 }
 
 impl Ctx<'_> {
@@ -346,6 +353,7 @@ impl Ctx<'_> {
             host: self.host,
             sleep: self.sleep,
             scoped_secrets: self.scoped_secrets,
+            disk: self.disk,
             identity: Some(self.identity),
             clone_source: Some(self.clone_source),
         }
@@ -1239,8 +1247,16 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
         };
         let plan = match location {
             Location::Local => plan_sandbox(
-                ctx.config_dir,
-                ctx.backend,
+                &stale_lock::Refresh {
+                    config_dir: ctx.config_dir,
+                    backend: ctx.backend,
+                    probe: ctx.probe,
+                    sleep: ctx.sleep,
+                    base: ctx.base_branch,
+                    scratch: &meta,
+                    disk: ctx.disk,
+                    merges_base: matches!(source, Source::Fix { .. }),
+                },
                 &ctx.config.sandbox.profile,
                 worker.harness,
                 &sandbox,
@@ -1250,7 +1266,7 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
                     repo_git: &repo_git,
                     commit: &start,
                 },
-                &mut warnings,
+                (&mut warnings, &mut events),
             )?,
             Location::Cloud => plan_cloud_sandbox(
                 ctx.config_dir,
@@ -1685,6 +1701,8 @@ pub fn run_gates(
     phase: &str,
     tiers: Tiers,
 ) -> Result<Gated> {
+    // Decision 291, whoever asks for the gates: a start, a fix round, a review or `task gates`.
+    check_branch_locks(env, prepared)?;
     let gates = &env.config.gates;
     let sandbox = prepared
         .record
@@ -1984,18 +2002,30 @@ pub(super) struct SandboxPlan {
 /// warning goes to `warnings`.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn plan_sandbox(
-    config_dir: &Path,
-    backend: &dyn SandboxBackend,
+    refresh: &stale_lock::Refresh,
     profile_name: &str,
     harness: Harness,
     sandbox: &str,
     overrides: &Overrides,
     kits_root: &Path,
     locks: Locks,
-    warnings: &mut Vec<String>,
+    (warnings, events): (&mut Vec<String>, &mut Vec<String>),
 ) -> Result<SandboxPlan> {
+    let (config_dir, backend) = (refresh.config_dir, refresh.backend);
     let global = GlobalConfig::load(config_dir)?;
     let profile = Profile::load(global.profiles_dir(), profile_name)?;
+    // Decisions 290, 291: a stale warm template is rebuilt from the base, a branch that changes
+    // the lock files stops.
+    let inherited = stale_lock::refresh(refresh, profile_name, &profile, harness, locks, events)?;
+    // A fix's head that only inherits an older lock is chosen a template as main's tip, which the
+    // worker then merges (decision 292).
+    let locks = match (&inherited, locks) {
+        (Some(main), Locks::Commit { repo_git, .. }) => Locks::Commit {
+            repo_git,
+            commit: main,
+        },
+        _ => locks,
+    };
     let request = template::Request {
         base_dir: &global.base_dir,
         profile_name,
@@ -2391,8 +2421,16 @@ pub(super) fn ensure_worker_sandbox(
     let repo_git = prepared.meta.join("repo.git");
     let tip = repo::branch_tip(&repo_git, &prepared.record.branch)?;
     let plan = plan_sandbox(
-        env.config_dir,
-        env.backend,
+        &stale_lock::Refresh {
+            config_dir: env.config_dir,
+            backend: env.backend,
+            probe: env.probe,
+            sleep: env.sleep,
+            base: &prepared.record.base,
+            scratch: &prepared.meta,
+            disk: env.disk,
+            merges_base: prepared.record.kind == Kind::Fix,
+        },
         &profile_name,
         harness,
         &sandbox,
@@ -2405,7 +2443,7 @@ pub(super) fn ensure_worker_sandbox(
             repo_git: &repo_git,
             commit: &tip,
         },
-        &mut prepared.warnings,
+        (&mut prepared.warnings, &mut prepared.events),
     )?;
     if replace {
         let _ = env.backend.remove(&sandbox);
@@ -3175,6 +3213,50 @@ fn pass_gates(
     }
 }
 
+/// Decision 292: a fix task's worker merges the base before it fixes the findings, so the
+/// delivered branch must contain the base's tip as the task fetched it; otherwise nothing is
+/// pushed.
+pub fn check_base_merged(prepared: &Prepared) -> Result<()> {
+    let task = &prepared.record;
+    let repo_git = prepared.meta.join("repo.git");
+    let base = repo::branch_tip(&repo_git, &task.base)?;
+    let tip = repo::branch_tip(&repo_git, &task.branch)?;
+    if !repo::is_ancestor(&repo_git, &base, &tip)? {
+        bail!(
+            "the worker of {} didn't merge {} (at {base}) into {}, so nothing was pushed to PR \
+             #{} (decision 292); see {} for what it handed back",
+            task.id,
+            task.base,
+            task.branch,
+            task.number,
+            prepared.meta.join("result.md").display()
+        );
+    }
+    Ok(())
+}
+
+/// Decision 291: a branch whose commits change the lock files of a strict profile's warm template
+/// stops before its gates, with the hand-back, instead of failing them for want of a crate.
+fn check_branch_locks(env: &TaskEnv, prepared: &Prepared) -> Result<()> {
+    if prepared.record.location != Location::Local {
+        return Ok(());
+    }
+    let repo_git = prepared.meta.join("repo.git");
+    let Ok(tip) = repo::branch_tip(&repo_git, &prepared.record.branch) else {
+        return Ok(());
+    };
+    stale_lock::check_branch(
+        env.config_dir,
+        env.backend,
+        &env.config.sandbox.profile,
+        &[env.config.worker.harness, env.config.reviewer.harness],
+        &repo_git,
+        &prepared.record.base,
+        &tip,
+    )
+    .map_err(|e| with_resume_hint(&prepared.record, e))
+}
+
 /// Spec §5.2, issue tasks (issue 117, decisions 173(a)(d)(e), 174): checks first (nothing is
 /// created if a secret is missing), gates when they haven't passed since the last change, then a
 /// reviewer. A review with must-fix findings gets a fix round by the worker, as long as the round
@@ -3218,6 +3300,8 @@ fn review_checked(
         _ => false,
     };
     if !gates_current {
+        // Decision 291, before the worker's sandbox is made again for the gates.
+        check_branch_locks(env, prepared)?;
         // The gates run in the worker's sandbox, which a local task removed when its last phase
         // ended (issue 341).
         ensure_local_worker(env, prepared)?;
@@ -4408,50 +4492,19 @@ fn combined_earlier_reviews(earlier: &[String]) -> Option<String> {
     )
 }
 
-/// Decision 235: an issue or spec task's reviewer refused because the lock files at the delivered
-/// tip differ from the warm template's gets the command that goes on and, when the lock files at
-/// the task's base still match, the task's own change named (gap G1). Any other error, and a PR
-/// task's, is returned as it is.
-fn with_stale_lock_hint(
-    env: &TaskEnv,
-    task: &Record,
-    repo_git: &Path,
-    tip: &str,
-    err: anyhow::Error,
-) -> anyhow::Error {
-    if task.kind == Kind::Pr || !format!("{err:#}").contains("differ from the ones it was warmed") {
+/// Decisions 235, 290: an issue or spec task's reviewer refused for its template, or stopped
+/// because the branch changes the lock files, gets the command that goes on. A PR task's error
+/// is returned as it is.
+fn with_resume_hint(task: &Record, err: anyhow::Error) -> anyhow::Error {
+    let text = format!("{err:#}");
+    if task.kind == Kind::Pr
+        || !(text.contains("differ from the ones it was warmed")
+            || text.contains(stale_lock::BRANCH_CHANGED)
+            || text.contains("rebuilding it from"))
+    {
         return err;
     }
-    let profile = &env.config.sandbox.profile;
-    let key = template::key(profile, env.config.reviewer.harness);
-    let warmed = GlobalConfig::load(env.config_dir)
-        .ok()
-        .and_then(|global| {
-            template::Record::load(&global.base_dir, &key)
-                .ok()
-                .flatten()
-        })
-        .and_then(|record| record.lock_hash.map(|hash| (record.lock_files, hash)));
-    let base_matches = warmed.is_some_and(|(files, hash)| {
-        repo::branch_tip(repo_git, &task.base).is_ok_and(|base| {
-            Locks::Commit {
-                repo_git,
-                commit: &base,
-            }
-            .hash(&files)
-            .is_ok_and(|at_base| at_base == hash)
-        })
-    });
-    let next = format!("then run `{}`", resume_command(task));
-    if base_matches {
-        anyhow::anyhow!(
-            "{err:#}; the lock files changed in this task's own commits (gap G1): set strict = \
-             false in profile '{profile}' to let its review install them, or warm a template \
-             from commit {tip}, {next}"
-        )
-    } else {
-        anyhow::anyhow!("{err:#}; once the template is rebuilt, {next}")
-    }
+    anyhow::anyhow!("{text}; then run `{}`", resume_command(task))
 }
 
 /// The reviewer's clone as its sandbox sees it: the recorded path in a cloud sandbox, else the
@@ -4502,8 +4555,16 @@ fn open_review_workspace(
     let tip = repo::branch_tip(&repo_git, &branch)?;
     let mut warnings = Vec::new();
     let plan = plan_sandbox(
-        env.config_dir,
-        env.backend,
+        &stale_lock::Refresh {
+            config_dir: env.config_dir,
+            backend: env.backend,
+            probe: env.probe,
+            sleep: env.sleep,
+            base: &prepared.record.base,
+            scratch: &prepared.meta,
+            disk: env.disk,
+            merges_base: false,
+        },
         &env.config.sandbox.profile,
         reviewer.harness,
         sandbox,
@@ -4516,9 +4577,9 @@ fn open_review_workspace(
             repo_git: &repo_git,
             commit: &tip,
         },
-        &mut warnings,
+        (&mut warnings, &mut prepared.events),
     )
-    .map_err(|e| with_stale_lock_hint(env, &prepared.record, &repo_git, &tip, e))?;
+    .map_err(|e| with_resume_hint(&prepared.record, e))?;
 
     repo::clean_checkout(&repo_git, &branch, clone)?;
     let info = clone.join(".git").join("info");

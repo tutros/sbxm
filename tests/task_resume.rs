@@ -120,6 +120,7 @@ fn env<'a>(f: &'a Fixture, backend: &'a FakeBackend, probe: &'a dyn ProcessProbe
         host,
         sleep: &std::thread::sleep,
         scoped_secrets: &[],
+        disk: Box::leak(Box::default()),
         identity: None,
         clone_source: None,
     }
@@ -347,6 +348,7 @@ fn the_worker_s_sandbox_is_remade_from_the_profile_recorded_at_start_not_the_cur
         host,
         sleep: &std::thread::sleep,
         scoped_secrets: &[],
+        disk: Box::leak(Box::default()),
         identity: None,
         clone_source: None,
     };

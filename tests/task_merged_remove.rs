@@ -278,6 +278,7 @@ fn found_merged(f: &Fixture, number: u32) -> sbxm::task::merged::MergedPlan {
         title: "Fix 41".into(),
         body: String::new(),
         closing_issues: vec![41],
+        base_moved: false,
     });
     plan(&f.env.base_dir(), &repo_root(f), &github, &Probe).unwrap()
 }

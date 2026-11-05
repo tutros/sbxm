@@ -5,8 +5,10 @@ don't edit tracked files, commit, push or file issues. You may build and run tes
 
 If the repository has a sdlc-code-review skill (.claude/skills/sdlc-code-review/SKILL.md), follow it. Scope: the
 branch's commits (git log {{scope_base}}..HEAD, and git diff {{scope_base}}...HEAD). Check that each finding is
-fixed, and the change against the repository's recorded decisions and its conventions. These checks already passed
-on the change:
+fixed, and the change against the repository's recorded decisions and its conventions. If the author merged
+{{base}} into the branch (`git log --merges {{scope_base}}..HEAD`), the commits that merge brings in from {{base}} are
+not this change: review the merge commit narrowly (`git show --remerge-diff <merge>`), each conflict resolved by
+keeping both sides whole and nothing else changed in it. These checks already passed on the change:
 
 {{gates_sandbox}}
 
