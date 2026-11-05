@@ -108,39 +108,34 @@ pub fn refresh(
     else {
         return Ok(());
     };
-    let base_tip = repo::branch_tip(repo_git, r.base)?;
     let hash_at = |commit: &str, record: &template::Record| {
         Locks::Commit { repo_git, commit }
             .hash(&record.lock_files)
             .ok()
     };
-    let Some(at_task_base) = hash_at(&base_tip, &record) else {
-        return Ok(());
-    };
-    if record.lock_hash.as_deref() != Some(at_task_base.as_str()) {
-        // The task's base may be older than the base is now (a resumed task): the template
-        // follows the base's tip as `origin` has it now, never an older one.
-        let fresh = repo::fetch_fresh_base(repo_git, r.base)?;
-        if let Some(fresh_hash) = hash_at(&fresh, &record)
-            && record.lock_hash.as_deref() != Some(fresh_hash.as_str())
+    // The template follows `main` as `origin` has it now (decision 290), never the task's base: an
+    // unmerged base or an older one (a resumed task) must not decide what every later task inherits.
+    let (main, fresh) = repo::fetch_fresh_base(repo_git)?;
+    if let Some(fresh_hash) = hash_at(&fresh, &record)
+        && record.lock_hash.as_deref() != Some(fresh_hash.as_str())
+    {
+        events.push(rebuild(
+            r,
+            profile_name,
+            harness,
+            repo_git,
+            (&main, &fresh),
+            &fresh_hash,
+            &record.lock_files,
+        )?);
+        // The base's own `[warm]` may name other lock files.
+        if let Some(rebuilt) =
+            template::Record::load(&global.base_dir, &template::key(profile_name, harness))?
         {
-            events.push(rebuild(
-                r,
-                profile_name,
-                harness,
-                repo_git,
-                &fresh,
-                &fresh_hash,
-                &record.lock_files,
-            )?);
-            // The base's own `[warm]` may name other lock files.
-            if let Some(rebuilt) =
-                template::Record::load(&global.base_dir, &template::key(profile_name, harness))?
-            {
-                record = rebuilt;
-            }
+            record = rebuilt;
         }
     }
+    let base_tip = repo::branch_tip(repo_git, r.base)?;
     // What the task's own commits changed: against the base it started from.
     let Some(at_task_base) = hash_at(&base_tip, &record) else {
         return Ok(());
@@ -201,11 +196,11 @@ fn rebuild(
     profile_name: &str,
     harness: Harness,
     repo_git: &Path,
-    base_tip: &str,
+    (main, base_tip): (&str, &str),
     base_hash: &str,
     files: &[String],
 ) -> Result<String> {
-    let base = r.base;
+    let base = main;
     let flag = match harness {
         Harness::Claude => String::new(),
         other => format!(" --harness {}", other.as_str()),

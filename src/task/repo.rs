@@ -302,14 +302,38 @@ pub fn fetch_pr_branch(repo_git: &Path, number: u32, branch: &str) -> Result<Str
     branch_tip(repo_git, branch)
 }
 
-/// The branch of `repo.git` that holds the base's tip as `origin` has it when a template's lock
+/// The branch of `repo.git` that holds `main`'s tip as `origin` has it when a template's lock
 /// files are checked (decision 290), apart from the task's own base ref.
 pub const FRESH_BASE: &str = "sbxm-template-base";
 
-/// Fetches `base` from `origin` into [`FRESH_BASE`] and returns its tip.
-pub fn fetch_fresh_base(repo_git: &Path, base: &str) -> Result<String> {
-    check_ref("base", base)?;
-    let refspec = format!("+refs/heads/{base}:refs/heads/{FRESH_BASE}");
+/// The branch `origin`'s `HEAD` points at (`main`): the one source a template is ever warmed from
+/// (decision 290), whatever base a task started from.
+pub fn origin_default_branch(repo_git: &Path) -> Result<String> {
+    let out = git::user_run(
+        repo_git,
+        &[
+            "--git-dir",
+            text(repo_git)?,
+            "ls-remote",
+            "--symref",
+            "origin",
+            "HEAD",
+        ],
+    )
+    .context("cannot read the default branch of origin to check the template against it")?;
+    let branch = out
+        .lines()
+        .find_map(|line| line.strip_prefix("ref: refs/heads/")?.split('\t').next())
+        .map(str::to_owned)
+        .context("origin names no default branch to check the template against")?;
+    check_ref("default branch", &branch)?;
+    Ok(branch)
+}
+
+/// Fetches origin's default branch into [`FRESH_BASE`] and returns its name and tip.
+pub fn fetch_fresh_base(repo_git: &Path) -> Result<(String, String)> {
+    let main = origin_default_branch(repo_git)?;
+    let refspec = format!("+refs/heads/{main}:refs/heads/{FRESH_BASE}");
     git::user_run(
         repo_git,
         &[
@@ -326,8 +350,9 @@ pub fn fetch_fresh_base(repo_git: &Path, base: &str) -> Result<String> {
             &refspec,
         ],
     )
-    .with_context(|| format!("cannot fetch {base} from origin to check the template against it"))?;
-    branch_tip(repo_git, FRESH_BASE)
+    .with_context(|| format!("cannot fetch {main} from origin to check the template against it"))?;
+    let tip = branch_tip(repo_git, FRESH_BASE)?;
+    Ok((main, tip))
 }
 
 fn fetch_pr_into(repo_git: &Path, number: u32, branch: &str) -> Result<()> {

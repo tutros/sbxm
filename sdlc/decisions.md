@@ -1275,7 +1275,7 @@ and the living backlog #405; the `waiting-on-trigger` label is judged at the nex
 290. **A strict template made stale by `main`'s lock files is rebuilt from `main`; a branch that changes them stops
 (2026-11-03, the user's answers on issue #402; refines [201] and [203](b), replaces [235]'s hint):** when a strict
 profile's warm template (built for the profile as it is now, its image still in `sbx`) has other lock files than the
-task's base branch, the task's sandbox is not refused: sbxm fetches the base from `origin` into its host-owned
+task's base branch, the task's sandbox is not refused: sbxm fetches `main` (origin's default branch, whatever base the task started from) into its host-owned
 `repo.git` (as branch `sbxm-template-base`, apart from the task's own base ref), and when the template's lock files
 differ from that tip too, checks it out cleanly (as `task::repo` makes checkouts, never an agent's clone), runs
 `template build --warm` from it, removes the checkout and goes on, printing one line with the new tag. A task whose

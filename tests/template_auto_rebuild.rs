@@ -466,3 +466,60 @@ fn ran_gates(backend: &FakeBackend) -> bool {
         sandbox.starts_with("sbxm-task-") && spec.argv.iter().any(|a| a.contains("cargo test"))
     })
 }
+
+/// Decision 290: the template follows `main` alone. A task started on an unmerged `--base` never
+/// warms the shared template from it, whatever that branch's lock file holds.
+#[test]
+fn a_task_on_an_unmerged_base_never_warms_the_shared_template_from_it() {
+    let (f, backend, old) = warmed();
+    push_lock(
+        &f,
+        "feature",
+        "version = 4\n# unmerged\n",
+        "refs/heads/feature-x",
+    );
+    let (github, source) = (FakeGitHub::default(), task_fixture::source(&f));
+    let mut ctx = task_fixture::ctx(&f, &source, &backend, &github);
+    ctx.base_branch = "feature-x";
+
+    let prepared = pipeline::prepare(&ctx, &task_fixture::issue_text(41));
+
+    assert_eq!(
+        builds(&backend),
+        1,
+        "{:?}",
+        prepared.as_ref().map(|p| &p.events)
+    );
+    assert_eq!(record_of(&f.env, Harness::Claude).tag, old);
+}
+
+/// ...while a changed lock file on `main` still rebuilds from `main`, whatever the task's base.
+#[test]
+fn a_lock_file_changed_on_main_rebuilds_from_main_for_a_task_on_another_base() {
+    let (f, backend, old) = warmed();
+    let main = push_lock(
+        &f,
+        "main-moved",
+        "version = 4\n# on main\n",
+        "refs/heads/main",
+    );
+    push_lock(
+        &f,
+        "feature",
+        "version = 4\n# unmerged\n",
+        "refs/heads/feature-x",
+    );
+    let (github, source) = (FakeGitHub::default(), task_fixture::source(&f));
+    let mut ctx = task_fixture::ctx(&f, &source, &backend, &github);
+    ctx.base_branch = "feature-x";
+
+    let _ = pipeline::prepare(&ctx, &task_fixture::issue_text(41));
+
+    assert_eq!(builds(&backend), 2);
+    let rebuilt = record_of(&f.env, Harness::Claude);
+    assert_ne!(rebuilt.tag, old);
+    assert_eq!(
+        rebuilt.lock_hash.unwrap(),
+        template::lock_hash(&main, &["Cargo.lock".to_owned()]).unwrap()
+    );
+}
