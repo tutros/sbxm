@@ -1690,6 +1690,8 @@ pub fn run_gates(
     phase: &str,
     tiers: Tiers,
 ) -> Result<Gated> {
+    // Decision 291, whoever asks for the gates: a start, a fix round, a review or `task gates`.
+    check_branch_locks(env, prepared)?;
     let gates = &env.config.gates;
     let sandbox = prepared
         .record
@@ -3163,7 +3165,6 @@ fn pass_gates(
     phase: &str,
 ) -> Result<bool> {
     loop {
-        check_branch_locks(env, prepared)?;
         let gated = run_gates(env, prepared, phase, Tiers::ALL);
         // Each gate run ends the phase of the worker or fix round before it, whatever its
         // outcome: a local worker sandbox goes now, before a reviewer is created, the task stops
@@ -3216,7 +3217,9 @@ fn check_branch_locks(env: &TaskEnv, prepared: &Prepared) -> Result<()> {
         return Ok(());
     }
     let repo_git = prepared.meta.join("repo.git");
-    let tip = repo::branch_tip(&repo_git, &prepared.record.branch)?;
+    let Ok(tip) = repo::branch_tip(&repo_git, &prepared.record.branch) else {
+        return Ok(());
+    };
     stale_lock::check_branch(
         env.config_dir,
         env.backend,

@@ -523,3 +523,61 @@ fn a_lock_file_changed_on_main_rebuilds_from_main_for_a_task_on_another_base() {
         template::lock_hash(&main, &["Cargo.lock".to_owned()]).unwrap()
     );
 }
+
+fn warmed_both(f: &task_fixture::Fixture, backend: &FakeBackend) {
+    let main = push_lock(f, "main-lock", LOCK, "refs/heads/main");
+    build_warm(&f.env, backend, &main, Harness::Claude, BUILT_AT);
+    build_warm(&f.env, backend, &main, Harness::Codex, BUILT_AT);
+}
+
+const NEW_CRATE: &str = "version = 4\n# ctrlc 3.4.5\n";
+
+/// Decision 291 through the entry point of `task start`/`task run`, not only the review's: the
+/// gates right after the worker never run on a branch that changed the lock file.
+#[test]
+fn an_initial_start_whose_worker_changes_the_lock_file_stops_before_its_gates() {
+    let f = task_fixture::fixture();
+    f.env.write_profile("default", PROFILE);
+    let backend = changes_lock(&f, NEW_CRATE);
+    warmed_both(&f, &backend);
+    let (github, source) = (
+        FakeGitHub::default().with_issue_text(task_fixture::issue_text(41)),
+        task_fixture::source(&f),
+    );
+    let ctx = task_fixture::ctx(&f, &source, &backend, &github);
+
+    let reports = pipeline::start(&ctx, &[41]);
+
+    let gates = reports[0]
+        .gates
+        .as_ref()
+        .unwrap_or_else(|| panic!("{:?}", reports[0].result.as_ref().map(|_| ())));
+    let err = format!("{:#}", gates.as_ref().unwrap_err());
+    for part in [BRANCH_CHANGED, "Needs a decision"] {
+        assert!(err.contains(part), "{part}\n{err}");
+    }
+    assert!(!ran_gates(&backend));
+}
+
+/// ...and `task gates` on such a branch.
+#[test]
+fn on_demand_gates_of_a_branch_that_changed_the_lock_file_stop_before_running() {
+    let f = task_fixture::fixture();
+    f.env.write_profile("default", PROFILE);
+    let backend = changes_lock(&f, NEW_CRATE);
+    warmed_both(&f, &backend);
+    let (github, source) = (FakeGitHub::default(), task_fixture::source(&f));
+    let ctx = task_fixture::ctx(&f, &source, &backend, &github);
+    let mut prepared = pipeline::prepare(&ctx, &task_fixture::issue_text(41)).unwrap();
+    pipeline::run_worker(&ctx, &mut prepared).unwrap();
+
+    let err =
+        pipeline::gate_on_demand(&ctx.env(), &mut prepared, pipeline::Tiers::ALL).unwrap_err();
+
+    let err = format!("{err:#}");
+    assert!(
+        err.contains(BRANCH_CHANGED) && err.contains("Needs a decision"),
+        "{err}"
+    );
+    assert!(!ran_gates(&backend));
+}
