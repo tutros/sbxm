@@ -20,6 +20,9 @@ build sbxm tasks run with (a machine's own wrapper; never a fresh `cargo run`).
   **body** (a worker reads the body, not the comments). Then confirm or change the size (body line and label).
 - Decision 244: if the change has a limit, a size or an identity, the body lists the boundary cases.
 - Decision 273: if it depends on an external tool's behavior a spike recorded, re-run that check by hand first.
+- Decision 292: reserve the number of any decision the issue adds now, in the body ("this adds decision N", gap
+  G41), and have its new tests go in a file or section of the issue's own, never appended at the end of a shared
+  test file: two open PRs that append at the same place conflict once one merges.
 - Decision 286 (an experiment, two groups): issues that touch the same code and are to be done in order go to one
   worker as one spec (`task run --spec`), with every issue's acceptance checks; the PR closes all of them. Each
   issue is readied as above first.
@@ -38,11 +41,12 @@ build sbxm tasks run with (a machine's own wrapper; never a fresh `cargo run`).
   `min_free_disk` (about 19 GiB per worker in milestone 4, 2026-10-30 retro; issue 343's worker took about 15 GB on
   2026-10-31 and its sandbox went read-only). Free it by removing finished workers' sandboxes (stage 4), never by
   moving `sbx` state.
-- Local templates (G1): a strict template is stale when the profile or `main`'s lock files changed since it was
-  built; rebuild from a clean checkout of `main`: `<sbxm> template build <profile> --harness <h> --warm <checkout>`,
-  one harness at a time (after a profile change, `just deploy-profiles` first). When the **worker** changed
-  `Cargo.lock`, the review refuses on the task's own commit: warm the reviewer's template from a clean checkout of
-  the commit the refusal names, taken from the task's `repo.git`, not from `main` (decision 235).
+- Local templates (G1): a strict template is stale when the profile changed since it was built; rebuild it:
+  `<sbxm> template build <profile> --harness <h> --warm <a clean checkout of main>`, one harness at a time (after a
+  profile change, `just deploy-profiles` first). When only `main`'s lock files changed, the first task rebuilds it
+  from `main` by itself (decision 290, about 4.5 min per harness). A task whose own branch changes `Cargo.lock`
+  stops with a "Needs a decision" hand-back (decision 291): the user approves the crate, it goes onto `main` in a
+  small PR of its own, then the task is resumed. Never warm a template from a worker's or a PR's commit.
 - Secrets: each provider the task needs is listed (an OAuth login, not a stray API key).
 
 ## 4. Run
@@ -54,8 +58,8 @@ build sbxm tasks run with (a machine's own wrapper; never a fresh `cargo run`).
   append its result to `issue.md` in the task's folder (the reviewer reads that file), then `<sbxm> task review
   --issue N`.
 - Once the worker's commits are saved (`worker completed, N commit`), its local sandbox may go: `sbx rm -f <name>`.
-  A refused review goes on with the command its refusal names (`<sbxm> task resume --issue N` for stale lock
-  files, decision 235; `<sbxm> task review --issue N` after freeing disk).
+  A refused review goes on with the command its refusal names (`<sbxm> task resume --issue N` once a handed-back
+  crate is on `main`, decisions 235, 291; `<sbxm> task review --issue N` after freeing disk).
 
 ## 5. Review loop
 
@@ -73,6 +77,11 @@ build sbxm tasks run with (a machine's own wrapper; never a fresh `cargo run`).
   dismiss it as "used in tests". Secret-shaped test values stay obviously fake.
 
 ## 7. Merge
+
+- An open PR that conflicts with `main` after another PR merged: `<sbxm> task fix --pr N` merges `main` in its
+  sandbox, resolves, gates, pushes, and its in-task review covers the merge narrowly (decision 292). It needs a
+  must-fix finding to work from, or else GitHub reporting the PR conflicting or behind its base (then a head-covering
+  review with 0 must-fix is enough).
 
 - Low risk (the reviewer's level and the path-rule floor), 0 must-fix, and the review covered the PR's head
   (`gh pr view N --json headRefOid`): `gh pr merge N --auto --merge --match-head-commit <reviewed sha>` (decisions

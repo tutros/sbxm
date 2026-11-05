@@ -302,6 +302,59 @@ pub fn fetch_pr_branch(repo_git: &Path, number: u32, branch: &str) -> Result<Str
     branch_tip(repo_git, branch)
 }
 
+/// The branch of `repo.git` that holds `main`'s tip as `origin` has it when a template's lock
+/// files are checked (decision 290), apart from the task's own base ref.
+pub const FRESH_BASE: &str = "sbxm-template-base";
+
+/// The branch `origin`'s `HEAD` points at (`main`): the one source a template is ever warmed from
+/// (decision 290), whatever base a task started from.
+pub fn origin_default_branch(repo_git: &Path) -> Result<String> {
+    let out = git::user_run(
+        repo_git,
+        &[
+            "--git-dir",
+            text(repo_git)?,
+            "ls-remote",
+            "--symref",
+            "origin",
+            "HEAD",
+        ],
+    )
+    .context("cannot read the default branch of origin to check the template against it")?;
+    let branch = out
+        .lines()
+        .find_map(|line| line.strip_prefix("ref: refs/heads/")?.split('\t').next())
+        .map(str::to_owned)
+        .context("origin names no default branch to check the template against")?;
+    check_ref("default branch", &branch)?;
+    Ok(branch)
+}
+
+/// Fetches origin's default branch into [`FRESH_BASE`] and returns its name and tip.
+pub fn fetch_fresh_base(repo_git: &Path) -> Result<(String, String)> {
+    let main = origin_default_branch(repo_git)?;
+    let refspec = format!("+refs/heads/{main}:refs/heads/{FRESH_BASE}");
+    git::user_run(
+        repo_git,
+        &[
+            "--git-dir",
+            text(repo_git)?,
+            "-c",
+            "fetch.fsckObjects=true",
+            "-c",
+            "transfer.fsckObjects=true",
+            "fetch",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "origin",
+            &refspec,
+        ],
+    )
+    .with_context(|| format!("cannot fetch {main} from origin to check the template against it"))?;
+    let tip = branch_tip(repo_git, FRESH_BASE)?;
+    Ok((main, tip))
+}
+
 fn fetch_pr_into(repo_git: &Path, number: u32, branch: &str) -> Result<()> {
     let refspec = format!("+refs/pull/{number}/head:refs/heads/{branch}");
     git::user_run(
@@ -418,6 +471,24 @@ pub fn push_new(repo_git: &Path, branch: &str) -> Result<()> {
         out.status,
         stderr.trim()
     )
+}
+
+/// Whether commit `ancestor` is `tip` or one of its ancestors in `repo_git` (both full ids).
+pub fn is_ancestor(repo_git: &Path, ancestor: &str, tip: &str) -> Result<bool> {
+    let out = git::output(
+        repo_git,
+        Some(repo_git),
+        None,
+        &["merge-base", "--is-ancestor", ancestor, tip],
+    )?;
+    Ok(out.status.success())
+}
+
+/// The best common ancestor of commits `a` and `b` in `repo_git` (both full ids), where two
+/// lines of work parted.
+pub fn merge_base(repo_git: &Path, a: &str, b: &str) -> Result<String> {
+    let out = git::run(repo_git, Some(repo_git), None, &["merge-base", a, b])?;
+    Ok(out.trim().to_owned())
 }
 
 /// Moves `branch` on GitHub (`origin`) from `from` (a full commit id) to its tip in `repo_git`,

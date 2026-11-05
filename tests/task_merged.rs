@@ -111,6 +111,7 @@ fn an_issue_task_whose_pr_is_merged_is_a_candidate() {
         title: "Fix 41".into(),
         body: String::new(),
         closing_issues: vec![41],
+        base_moved: false,
     });
 
     let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
@@ -140,6 +141,7 @@ fn an_issue_task_whose_pr_is_open_is_left_alone() {
         title: "Fix 41".into(),
         body: String::new(),
         closing_issues: vec![41],
+        base_moved: false,
     });
 
     let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
@@ -159,6 +161,7 @@ fn open_pr(number: u32, head_oid: String) -> PrInfo {
         title: "Add the x feature".into(),
         body: "This adds x.".into(),
         closing_issues: vec![],
+        base_moved: false,
     }
 }
 
@@ -188,6 +191,7 @@ fn a_pr_review_task_whose_pr_is_merged_is_a_candidate() {
         title: "Add the x feature".into(),
         body: String::new(),
         closing_issues: vec![],
+        base_moved: false,
     });
 
     let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Gone).unwrap();
@@ -212,6 +216,7 @@ fn a_pr_review_task_whose_pr_is_still_open_is_left_alone() {
         title: "Add the x feature".into(),
         body: String::new(),
         closing_issues: vec![],
+        base_moved: false,
     });
 
     let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Gone).unwrap();
@@ -234,6 +239,7 @@ fn a_running_pr_review_task_whose_pr_is_merged_is_left_alone() {
         title: "Add the x feature".into(),
         body: String::new(),
         closing_issues: vec![],
+        base_moved: false,
     });
 
     // Probe says the process is alive: the task looks like it's still running its review.
@@ -259,6 +265,7 @@ fn an_issue_task_whose_pr_closed_without_merging_is_left_alone() {
         title: "Fix 41".into(),
         body: String::new(),
         closing_issues: vec![41],
+        base_moved: false,
     });
 
     let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
@@ -434,6 +441,7 @@ fn an_issue_candidate_has_no_local_cleanup() {
         title: "Fix 41".into(),
         body: String::new(),
         closing_issues: vec![41],
+        base_moved: false,
     });
 
     let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
@@ -696,6 +704,7 @@ fn a_record_whose_id_is_not_its_folder_is_left_alone_and_selects_nothing() {
             title: "Fix 41".into(),
             body: String::new(),
             closing_issues: vec![41],
+            base_moved: false,
         });
 
     let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
@@ -837,6 +846,7 @@ fn a_gone_base_does_not_stop_the_scan_for_a_merged_task_next_to_it() {
         title: "Fix 41".into(),
         body: String::new(),
         closing_issues: vec![41],
+        base_moved: false,
     });
 
     let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
@@ -939,6 +949,7 @@ fn a_fix_task_whose_pr_is_merged_is_a_candidate() {
         title: "Add the x feature".into(),
         body: String::new(),
         closing_issues: vec![],
+        base_moved: false,
     });
 
     let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Gone).unwrap();

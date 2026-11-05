@@ -408,6 +408,7 @@ fn start(
         sleep: &std::thread::sleep,
         // Empty in production while P8 (a) holds (slice 4), as for a spec task.
         scoped_secrets: &[],
+        disk: &opts.disk,
     };
     // Resolved once, before any task is set aside, and reused for the rest of this function: a
     // second load after the discard could itself fail (issue #207 review M-1) outside the path
@@ -951,6 +952,7 @@ pub(crate) fn run_spec_from(
         host: &ShellHostRunner,
         sleep,
         scoped_secrets,
+        disk: &opts.disk,
     };
     writeln!(out, "Starting a task from {} ...", opts.spec.display())?;
     let prepared =

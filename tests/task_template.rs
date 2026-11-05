@@ -15,6 +15,7 @@ use sbxm::harness::Harness;
 use sbxm::task::gates::FakeHostRunner;
 use sbxm::task::pipeline;
 use sbxm::task::record;
+use sbxm::task::stale_lock::BRANCH_CHANGED;
 use sbxm::template::Locks;
 
 #[test]
@@ -270,6 +271,7 @@ fn pr_7() -> PrInfo {
         title: "Add the x feature".into(),
         body: "Adds x.".into(),
         closing_issues: vec![],
+        base_moved: false,
     }
 }
 
@@ -403,8 +405,9 @@ fn a_pr_head_that_changes_the_lock_file_refuses_a_strict_reviewer_before_its_san
     let (_f, backend, _tag, result) =
         review_pr_7(&strict(PROFILE), "version = 4\n# a new dependency\n");
 
+    // Decision 291: the PR's own change to the lock file is handed back, never warmed.
     let err = result.err().unwrap();
-    assert!(format!("{err:#}").contains("--warm"), "{err:#}");
+    assert!(format!("{err:#}").contains(BRANCH_CHANGED), "{err:#}");
     assert!(reviewer_creates(&backend).is_empty());
 }
 
@@ -749,18 +752,18 @@ fn a_worker_that_changes_the_lock_file_keeps_its_sandbox_and_a_strict_reviewer_i
     assert_eq!(workers.len(), 1, "the worker's sandbox is never remade");
     assert_eq!(workers[0].template.as_deref(), Some(worker_tag.as_str()));
     let err = format!("{:#}", review.err().unwrap());
-    assert!(err.contains("--warm"), "{err}");
     assert!(reviewer_creates(&backend).is_empty());
-    // Decision 235: the refusal names the task's own change, the way round it and the command
-    // that goes on.
+    // Decisions 290, 291: the stop names the task's own change, hands it back and gives the
+    // command that goes on; it never suggests warming a template from the task's tip.
     let tip = git(
         &record::task_dir(&f.env.base_dir(), "issue-41").join("repo.git"),
         &["rev-parse", &prepared.record.branch],
     );
+    assert!(!err.contains("strict = false"), "{err}");
     for part in [
-        "the lock files changed in this task's own commits (gap G1)",
-        "set strict = false in profile 'default'",
-        &format!("warm a template from commit {tip}"),
+        &format!("the lock files (Cargo.lock) at commit {tip} differ from main's"),
+        BRANCH_CHANGED,
+        "Needs a decision",
         "then run `sbxm task resume --issue 41`",
     ] {
         assert!(err.contains(part), "{part}\n{err}");
@@ -839,15 +842,15 @@ fn a_continued_pr_worker_whose_head_changes_the_lock_file_is_refused_when_strict
         .err()
         .unwrap();
 
-    assert!(format!("{err:#}").contains("--warm"), "{err:#}");
+    assert!(format!("{err:#}").contains(BRANCH_CHANGED), "{err:#}");
     assert!(!backend.creates().iter().any(|c| c.name == WORKER));
     assert!(!record::task_dir(&f.env.base_dir(), "issue-41").exists());
 }
 
-/// Decision 235: a reviewer refused for lock files that already differed at the task's base
-/// isn't blamed on the task, but still gets the command that goes on.
+/// Decision 290 (was 235's hint): a reviewer whose warm template has other lock files than the
+/// task's base gets a template rebuilt from the base, and the review goes on.
 #[test]
-fn a_strict_reviewer_whose_template_differs_from_the_base_too_names_the_next_command() {
+fn a_strict_reviewer_whose_template_differs_from_the_base_too_gets_it_rebuilt_from_the_base() {
     let f = task_fixture::fixture();
     f.env.write_profile("default", &strict(PROFILE));
     let main = push_lock(&f, "main-lock", "version = 4\n", "refs/heads/main");
@@ -861,31 +864,62 @@ fn a_strict_reviewer_whose_template_differs_from_the_base_too_names_the_next_com
             bundle_bytes: None,
         },
     );
+    let reviewer = task_fixture::play_reviews(
+        &f.env.base_dir(),
+        "issue-41",
+        vec!["Must-fix findings: 0\n\nNothing found.\n".to_owned()],
+    );
     let backend = FakeBackend::with_secrets(&["anthropic", "openai"])
         .with_version("0.46.0")
         .with_exec_output_matching("claude", task_fixture::ok(task_fixture::CLAUDE_DONE))
+        .with_exec_output_matching("codex", task_fixture::ok(task_fixture::CODEX_DONE))
         .with_exec_output_matching(
             "cargo metadata",
             task_fixture::ok(r#"{"packages":[{"name":"x"}],"version":1}"#),
         )
-        .with_exec_hook(worker);
+        .with_network_rules(codex_rules("sbxm-task-issue-41-review-codex", &CODEX_EXTRA))
+        .with_exec_hook(move |sandbox, spec| {
+            worker(sandbox, spec);
+            reviewer(sandbox, spec);
+        });
     build_warm(&f.env, &backend, &main, Harness::Claude);
-    build_warm(&f.env, &backend, &other, Harness::Codex);
+    // An hour earlier, so the rebuild's tag is a new one (decision 211).
+    let mut out = Vec::new();
+    template_build::run(
+        &f.env.config_dir(),
+        &template_build::Options {
+            profile: "default".into(),
+            harness: Harness::Codex,
+            warm: Some(other),
+            now: Some(1_700_000_000),
+            ..Default::default()
+        },
+        &backend,
+        &sbxm::task::record::SystemProbe,
+        &mut out,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    let old = String::from_utf8(out).unwrap().trim().to_owned();
     let (github, source) = (FakeGitHub::default(), task_fixture::source(&f));
     let ctx = task_fixture::ctx(&f, &source, &backend, &github);
     let mut prepared = pipeline::prepare(&ctx, &task_fixture::issue_text(41)).unwrap();
     pipeline::run_worker(&ctx, &mut prepared).unwrap();
 
-    let review = pipeline::review_issue(&ctx.env(), &mut prepared);
+    pipeline::review_issue(&ctx.env(), &mut prepared).unwrap();
 
-    let err = format!("{:#}", review.err().unwrap());
-    assert!(err.contains("--warm"), "{err}");
+    let creates = reviewer_creates(&backend);
+    assert_eq!(creates.len(), 1, "{creates:?}");
+    let rebuilt = creates[0].template.clone().unwrap();
+    assert_ne!(rebuilt, old);
     assert!(
-        err.contains("then run `sbxm task resume --issue 41`"),
-        "{err}"
+        prepared
+            .events
+            .iter()
+            .any(|e| e.contains("rebuilt it from main's tip") && e.contains(&rebuilt)),
+        "{:?}",
+        prepared.events
     );
-    assert!(!err.contains("own commits"), "{err}");
-    assert!(reviewer_creates(&backend).is_empty());
 }
 
 /// Issue 313 review M-1: `task rm --merged` removes a fix task only once its result was pushed,

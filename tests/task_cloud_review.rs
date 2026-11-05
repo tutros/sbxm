@@ -392,6 +392,7 @@ fn pr_7() -> sbxm::github::PrInfo {
         title: "Add the x feature".into(),
         body: "Adds x.\n\nFixes #4".into(),
         closing_issues: vec![4],
+        base_moved: false,
     }
 }
 
@@ -1371,6 +1372,7 @@ fn a_reviewer_sandbox_gets_the_scoped_secrets_and_its_removal_is_retried_then_th
         host: &sbxm::task::gates::FakeHostRunner::default(),
         sleep: &|d| waits.lock().unwrap().push(d),
         scoped_secrets: &secrets,
+        disk: Box::leak(Box::default()),
         identity: Some(&who),
         clone_source: None,
     };
@@ -1725,6 +1727,7 @@ fn a_strict_reviewer_with_a_host_left_is_removed_then_its_secret_then_refused() 
         host: &sbxm::task::gates::FakeHostRunner::default(),
         sleep: &|_| {},
         scoped_secrets: &secrets,
+        disk: Box::leak(Box::default()),
         identity: Some(&who),
         clone_source: None,
     };
@@ -1806,6 +1809,7 @@ fn a_rebuilt_strict_fix_sandbox_whose_list_cannot_be_read_is_removed_then_refuse
         host: &sbxm::task::gates::FakeHostRunner::default(),
         sleep: &|_| {},
         scoped_secrets: &secrets,
+        disk: Box::leak(Box::default()),
         identity: Some(&who),
         clone_source: None,
     };

@@ -27,6 +27,7 @@ fn pr_info() -> PrInfo {
         title: "t".into(),
         body: "b".into(),
         closing_issues: vec![4],
+        base_moved: false,
     }
 }
 
@@ -148,6 +149,7 @@ fn the_fake_answers_a_pr_merge_state_from_its_scripted_prs() {
         title: "t".into(),
         body: String::new(),
         closing_issues: Vec::new(),
+        base_moved: false,
     };
     let gh = sbxm::github::fake::FakeGitHub::default()
         .with_pr(pr(7, PrState::Open))

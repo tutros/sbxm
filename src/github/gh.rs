@@ -140,6 +140,10 @@ struct RawPr {
     body: String,
     #[serde(default)]
     closing_issues_references: Vec<Number>,
+    #[serde(default)]
+    mergeable: String,
+    #[serde(default)]
+    merge_state_status: String,
 }
 
 #[derive(Deserialize)]
@@ -288,7 +292,7 @@ impl GitHubBackend for GhBackend {
             "--repo",
             repo,
             "--json",
-            "headRefName,headRefOid,headRepository,headRepositoryOwner,isCrossRepository,state,title,body,closingIssuesReferences",
+            "headRefName,headRefOid,headRepository,headRepositoryOwner,isCrossRepository,state,title,body,closingIssuesReferences,mergeable,mergeStateStatus",
         ]))?;
         let state = pr_state(number, &raw.state)?;
         Ok(PrInfo {
@@ -308,6 +312,8 @@ impl GitHubBackend for GhBackend {
                 .into_iter()
                 .map(|n| n.number)
                 .collect(),
+            base_moved: raw.mergeable == "CONFLICTING"
+                || matches!(raw.merge_state_status.as_str(), "BEHIND" | "DIRTY"),
         })
     }
 

@@ -31,6 +31,7 @@ fn pr(number: u32, state: PrState, fork: bool) -> PrInfo {
         title: "Add the x feature".into(),
         body: "This adds x.".into(),
         closing_issues: vec![],
+        base_moved: false,
     }
 }
 

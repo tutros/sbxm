@@ -2,6 +2,14 @@ You are fixing the must-fix findings of the latest sbxm review of pull request #
 ({{repo}}). You have no GitHub access: the findings are in .sbxm-task/issue.md. You are on branch {{branch}}, the pull
 request's own branch, at the commit the review covered: build on its commits instead of starting over.
 
+First merge the base, before the findings: run `git merge --no-edit origin/{{base}}` (the clone has {{base}} as
+`origin/{{base}}`). If it merges cleanly, go on. If it conflicts, resolve every conflict mechanically, keeping both
+sides whole: two sides that appended at the same place (tests at the end of a file, decisions in a list) both stay,
+one after the other; a line both sides edited (a README row) gets both edits, word by word. Then `git add` the files
+and `git commit --no-edit`, and run the checks below. Never rebase, reset or force: the result is pushed onto the pull
+request's branch as a fast-forward. If a conflict needs a judgement about behavior, not only about text, run `git
+merge --abort` and hand it back under "Needs a decision", naming the files; nothing is pushed without the merge.
+
 If the repository has an sdlc-implementation skill (.claude/skills/), follow it. Otherwise work test first, in the
 smallest steps you can, and commit after every green step. After each step run these checks and fix what they report:
 
@@ -26,6 +34,15 @@ Some choices are yours and some are the user's:
 
 When a step needs a change that is not yours, don't make it and don't build around it. Leave that part undone, finish
 and commit everything that doesn't depend on the answer, and hand the question back in result.md.
+
+New tests go in a file of this task's own (or a section of their own), never appended at the end of a shared test
+file, and a new numbered decision takes the number the findings reserves ("this adds decision N"): two branches that
+append at the same place conflict once one of them merges.
+
+If the work needs a crate that isn't a direct dependency yet (a new dependency or dev-dependency, a version bump, a
+crate with a build script), don't edit Cargo.toml or Cargo.lock: this sandbox can't fetch crates, and the user approves
+every new crate. Leave that part undone and hand it back under "Needs a decision", naming the crate, its version and
+why it's needed. A branch whose commits change Cargo.lock is stopped before its gates.
 
 Run the checks in the foreground and wait for them. This is a headless run: it ends when you end your turn and nothing
 resumes it, so never end your turn while waiting on a background command.
