@@ -84,6 +84,18 @@ pub fn cloud_backend_worker(
     listed: bool,
     worker: ExecOutput,
 ) -> FakeBackend {
+    cloud_backend_reviewing(root, ids, reviews, listed, worker, |_| {})
+}
+
+/// [`cloud_backend_worker`], calling `before_review` with the task id before each reviewer run.
+pub fn cloud_backend_reviewing(
+    root: &Path,
+    ids: &[&str],
+    reviews: &[&str],
+    listed: bool,
+    worker: ExecOutput,
+    before_review: impl Fn(&str) + Send + Sync + 'static,
+) -> FakeBackend {
     std::fs::create_dir_all(root.join(HOME.trim_start_matches('/'))).unwrap();
     let inside = root.to_string_lossy().into_owned();
     let map = move |arg: &str| arg.replace(HOME, &format!("{inside}{HOME}"));
@@ -148,6 +160,9 @@ pub fn cloud_backend_worker(
                 );
                 std::fs::write(clone.join(".sbxm-task").join("result.md"), "done\n").unwrap();
             } else {
+                if let Some((id, _)) = sandbox_task(sandbox) {
+                    before_review(&id);
+                }
                 let n = reviewed.fetch_add(1, Ordering::SeqCst);
                 let text = &reviews[n.min(reviews.len() - 1)];
                 std::fs::write(clone.join(".sbxm-task").join("review.md"), text).unwrap();

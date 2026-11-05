@@ -626,11 +626,13 @@ fn an_interrupted_cloud_pr_review_removes_the_recorded_reviewer_of_another_harne
     );
 }
 
-/// A fix round in the worker's clone: its input copied in, the worker, and its collection.
+/// A fix round in the worker's clone: its input copied in (with the spec task's source as the
+/// task folder has it now, issue 435), the worker, and its collection.
 fn fixed(sandbox: &str, clone: &str) -> Vec<String> {
     let mut calls = vec![
         format!("cp-in {sandbox} {clone}/.sbxm-task/review.md"),
         format!("cp-in {sandbox} {clone}/.sbxm-task/fix-prompt.md"),
+        format!("cp-in {sandbox} {clone}/.sbxm-task/source.md"),
     ];
     calls.extend(worked(sandbox, clone));
     calls
