@@ -88,8 +88,8 @@ fn warm_record(
 }
 
 /// Before a task's `harness` sandbox is chosen a template for `locks`: a stale warm template of a
-/// strict profile is rebuilt from the base's tip (one line for `events`), then a commit whose lock
-/// files differ from the base's stops with [`branch_changed`]. A lock file that can't be read is
+/// strict profile is rebuilt from the base's tip as `origin` has it now (one line for `events`), then
+/// a commit whose lock files differ from the task's base stops with [`branch_changed`]. A lock file that can't be read is
 /// left to [`template::choose`], which names why.
 pub fn refresh(
     r: &Refresh,
@@ -109,42 +109,45 @@ pub fn refresh(
         return Ok(());
     };
     let base_tip = repo::branch_tip(repo_git, r.base)?;
-    let at_base = |record: &template::Record| {
-        Locks::Commit {
-            repo_git,
-            commit: &base_tip,
-        }
-        .hash(&record.lock_files)
-        .ok()
+    let hash_at = |commit: &str, record: &template::Record| {
+        Locks::Commit { repo_git, commit }
+            .hash(&record.lock_files)
+            .ok()
     };
-    let Some(mut base_hash) = at_base(&record) else {
+    let Some(at_task_base) = hash_at(&base_tip, &record) else {
         return Ok(());
     };
-    if record.lock_hash.as_deref() != Some(base_hash.as_str()) {
-        events.push(rebuild(
-            r,
-            profile_name,
-            harness,
-            repo_git,
-            &base_tip,
-            &base_hash,
-            &record.lock_files,
-        )?);
-        // The base's own `[warm]` may name other lock files.
-        let Some(rebuilt) =
-            template::Record::load(&global.base_dir, &template::key(profile_name, harness))?
-        else {
-            return Ok(());
-        };
-        record = rebuilt;
-        let Some(hash) = at_base(&record) else {
-            return Ok(());
-        };
-        base_hash = hash;
+    if record.lock_hash.as_deref() != Some(at_task_base.as_str()) {
+        // The task's base may be older than the base is now (a resumed task): the template
+        // follows the base's tip as `origin` has it now, never an older one.
+        let fresh = repo::fetch_fresh_base(repo_git, r.base)?;
+        if let Some(fresh_hash) = hash_at(&fresh, &record)
+            && record.lock_hash.as_deref() != Some(fresh_hash.as_str())
+        {
+            events.push(rebuild(
+                r,
+                profile_name,
+                harness,
+                repo_git,
+                &fresh,
+                &fresh_hash,
+                &record.lock_files,
+            )?);
+            // The base's own `[warm]` may name other lock files.
+            if let Some(rebuilt) =
+                template::Record::load(&global.base_dir, &template::key(profile_name, harness))?
+            {
+                record = rebuilt;
+            }
+        }
     }
+    // What the task's own commits changed: against the base it started from.
+    let Some(at_task_base) = hash_at(&base_tip, &record) else {
+        return Ok(());
+    };
     if locks
         .hash(&record.lock_files)
-        .is_ok_and(|at_commit| at_commit != base_hash)
+        .is_ok_and(|at_commit| at_commit != at_task_base)
     {
         return Err(branch_changed(
             profile_name,
@@ -190,7 +193,8 @@ pub fn check_branch(
     Ok(())
 }
 
-/// Rebuilds the template from a clean checkout of `base_tip` (decision 290) and returns the line
+/// Rebuilds the template from a clean checkout of `base_tip`, the base as just fetched into
+/// [`repo::FRESH_BASE`] (decision 290) and returns the line
 /// that says so; a failed rebuild stops the task, naming the `template build` command.
 fn rebuild(
     r: &Refresh,
@@ -213,7 +217,7 @@ fn rebuild(
         if checkout.exists() {
             fs::remove_dir_all(&checkout)?;
         }
-        repo::clean_checkout(repo_git, base, &checkout)?;
+        repo::clean_checkout(repo_git, repo::FRESH_BASE, &checkout)?;
         let (mut out, mut progress) = (Vec::new(), Vec::new());
         template_build::refresh(
             r.config_dir,

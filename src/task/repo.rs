@@ -302,6 +302,34 @@ pub fn fetch_pr_branch(repo_git: &Path, number: u32, branch: &str) -> Result<Str
     branch_tip(repo_git, branch)
 }
 
+/// The branch of `repo.git` that holds the base's tip as `origin` has it when a template's lock
+/// files are checked (decision 290), apart from the task's own base ref.
+pub const FRESH_BASE: &str = "sbxm-template-base";
+
+/// Fetches `base` from `origin` into [`FRESH_BASE`] and returns its tip.
+pub fn fetch_fresh_base(repo_git: &Path, base: &str) -> Result<String> {
+    check_ref("base", base)?;
+    let refspec = format!("+refs/heads/{base}:refs/heads/{FRESH_BASE}");
+    git::user_run(
+        repo_git,
+        &[
+            "--git-dir",
+            text(repo_git)?,
+            "-c",
+            "fetch.fsckObjects=true",
+            "-c",
+            "transfer.fsckObjects=true",
+            "fetch",
+            "--no-tags",
+            "--no-recurse-submodules",
+            "origin",
+            &refspec,
+        ],
+    )
+    .with_context(|| format!("cannot fetch {base} from origin to check the template against it"))?;
+    branch_tip(repo_git, FRESH_BASE)
+}
+
 fn fetch_pr_into(repo_git: &Path, number: u32, branch: &str) -> Result<()> {
     let refspec = format!("+refs/pull/{number}/head:refs/heads/{branch}");
     git::user_run(
@@ -418,6 +446,17 @@ pub fn push_new(repo_git: &Path, branch: &str) -> Result<()> {
         out.status,
         stderr.trim()
     )
+}
+
+/// Whether commit `ancestor` is `tip` or one of its ancestors in `repo_git` (both full ids).
+pub fn is_ancestor(repo_git: &Path, ancestor: &str, tip: &str) -> Result<bool> {
+    let out = git::output(
+        repo_git,
+        Some(repo_git),
+        None,
+        &["merge-base", "--is-ancestor", ancestor, tip],
+    )?;
+    Ok(out.status.success())
 }
 
 /// Moves `branch` on GitHub (`origin`) from `from` (a full commit id) to its tip in `repo_git`,

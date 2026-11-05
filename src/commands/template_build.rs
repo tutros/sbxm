@@ -130,8 +130,9 @@ fn build(
     let profile_name = options.profile.as_str();
     let template_hash = kit::template_hash(&profile, options.harness, warm.is_some());
     let tag = template::tag(profile_name, options.harness, &template_hash, now);
-    // Saving onto an existing tag replaces it without a word (S11, question 8).
-    if backend.template_ls()?.iter().any(|t| t.reference() == tag) {
+    // Saving onto an existing tag replaces it without a word (S11, question 8). A rebuild that
+    // waits checks only under the lock, after the fresh record that tag may belong to.
+    if waiting.is_none() && backend.template_ls()?.iter().any(|t| t.reference() == tag) {
         bail!("template {tag} already exists; wait a minute and build again");
     }
 

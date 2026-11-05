@@ -249,6 +249,54 @@ fn two_tasks_needing_the_same_rebuild_make_one_build_and_the_second_waits_on_the
     );
 }
 
+/// A later stage of a task that started before `main` moved reads `main` from its own `repo.git`,
+/// as it was then: the template, already rebuilt from today's `main`, is never rebuilt back to it.
+#[test]
+fn a_task_whose_base_is_older_than_mains_tip_never_rebuilds_the_template_back() {
+    let f = task_fixture::fixture();
+    f.env.write_profile("default", PROFILE);
+    let main = push_lock(&f, "main-lock", LOCK, "refs/heads/main");
+    let worker = task_fixture::play_tasks(
+        &f.env.base_dir(),
+        "main",
+        task_fixture::Play {
+            commits: vec!["a.txt".into()],
+            result_md: Some(b"done\n".to_vec()),
+            bundle_bytes: None,
+        },
+    );
+    let backend = backend().with_exec_hook(worker);
+    build_warm(&f.env, &backend, &main, Harness::Claude, BUILT_AT);
+    build_warm(&f.env, &backend, &main, Harness::Codex, BUILT_AT);
+    let (github, source) = (FakeGitHub::default(), task_fixture::source(&f));
+    let ctx = task_fixture::ctx(&f, &source, &backend, &github);
+    let mut prepared = pipeline::prepare(&ctx, &task_fixture::issue_text(41)).unwrap();
+    pipeline::run_worker(&ctx, &mut prepared).unwrap();
+    // Meanwhile `main` moved, and another task rebuilt the codex template from it.
+    let moved = push_lock(
+        &f,
+        "main-moved",
+        "version = 4\n# on main\n",
+        "refs/heads/main",
+    );
+    let current = build_warm(&f.env, &backend, &moved, Harness::Codex, BUILT_AT + 3600);
+
+    let review = pipeline::review_issue(&ctx.env(), &mut prepared);
+
+    assert_eq!(builds(&backend), 3, "no rebuild from the task's older main");
+    assert_eq!(record_of(&f.env, Harness::Codex).tag, current);
+    // The task's own commits didn't touch the lock file, so this is no hand-back: its branch is
+    // behind the template, which refuses it as before.
+    let err = format!("{:#}", review.unwrap_err());
+    assert!(!err.contains(BRANCH_CHANGED), "{err}");
+    assert!(
+        !backend
+            .creates()
+            .iter()
+            .any(|c| c.name.contains("-review-"))
+    );
+}
+
 /// Plays issue 41's worker: on its headless run it commits `Cargo.lock` holding `lock`.
 fn changes_lock(f: &task_fixture::Fixture, lock: &'static str) -> FakeBackend {
     let workspace = f.env.base_dir().join("tasks").join("issue-41");
