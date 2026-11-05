@@ -1288,13 +1288,10 @@ awaiting the user is one function (`queue::awaits_user`), shared with the Loop s
 holds the current issue and stage):** (1) State comes from the loop's lock plus the task records, no new state file
 and no new write. The lock (`<base>/.sbxm/task-loop.lock`, the loop's process identity) says whether a loop runs; a
 lock whose process is gone (the pid and start-time check of `run.log`, [163]) shows as `not running`, naming the
-stale lock. The running task and its stage are the issue task still `running` whose process is the lock's: the
-loop's marker (`hooks.task_loop`) is written only when a ready task is claimed for `task finish` ([245]), so it
-can't tell the task the worker is on. The tasks done are the marked records finished since the lock's process
+stale lock. The running task and its stage come from the `task.json` that carries the loop's marker (`hooks.task_loop`) and is still running (the user's answer of 2026-11-04). OPEN, for the user: the loop writes that marker only when a ready task is claimed for `task finish` ([245]), so by that rule no task shows while the worker or the reviewer is on it. Until the user decides, the build selects the issue task still `running` whose process is the lock's (the loop runs its phases in its own process), which is the implementer's substitution, not an approved decision; the other options are to write the marker when the loop starts a task (a new write) or to accept that rule's gap. The tasks done are the marked records finished since the lock's process
 started. The loop's log is not read: `status` reads only the base folder. (2) The queue needs a GitHub call, at most
 one per minute, kept in memory between `--watch` frames (a plain `status` calls once); the snapshot holds the queue
-and the PRs awaiting the user, and a failure is cached for the minute too. It is made only while a loop runs, so a
-`status` with no loop calls nothing. A failed call shows `queue: unreadable (<first line>)` and the rest still
+and the PRs awaiting the user, and a failure is cached for the minute too. It is made whether or not a loop runs, so the queue and the PRs awaiting you show after the loop stops too. A failed call shows `queue: unreadable (<first line>)` and the rest still
 shows, as the cloud section does. (3) The PRs awaiting the user are counted by the loop's own rule
 (`queue::awaits_user`, [293]). On a terminal each line is cut to the width and the queue shows 10 issues, then
 `… N more`; a non-terminal is never cut. The queue is the label queue until the continuous-loop queue the user

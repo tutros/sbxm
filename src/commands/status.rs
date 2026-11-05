@@ -117,8 +117,9 @@ pub fn run_with(
     Ok(())
 }
 
-/// The Loop section's state at `now`: the lock and the task records always, GitHub only while a
-/// loop runs, and then at most once a minute (`cache`).
+/// The Loop section's state at `now`: the lock and the task records, and GitHub's queue and
+/// awaiting PRs whether or not a loop runs, at most once a minute (`cache`). Only the running
+/// task and the tasks done need a live lock.
 fn loop_view(
     base: &Path,
     probe: &dyn ProcessProbe,
@@ -127,20 +128,16 @@ fn loop_view(
     now: u64,
 ) -> looping::View {
     let lock = looping::read_lock(base, probe);
-    let looping::Lock::Running(process) = &lock else {
-        return looping::View {
-            lock,
-            work: None,
-            snapshot: None,
-        };
+    let work = match &lock {
+        looping::Lock::Running(process) => Some(looping::work(base, process).unwrap_or_default()),
+        _ => None,
     };
-    let work = looping::work(base, process).unwrap_or_default();
     let snapshot = cache
         .get(now, || looping::fetch(source.github, &source.repo, base))
         .clone();
     looping::View {
         lock,
-        work: Some(work),
+        work,
         snapshot: Some(snapshot),
     }
 }

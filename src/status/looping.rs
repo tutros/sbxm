@@ -186,7 +186,6 @@ pub struct View {
     pub lock: Lock,
     /// Only for a running loop.
     pub work: Option<Work>,
-    /// Only for a running loop.
     pub snapshot: Option<Snapshot>,
 }
 

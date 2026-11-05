@@ -163,32 +163,64 @@ fn issues_open_calls(gh: &FakeGitHub) -> usize {
 }
 
 #[test]
-fn no_lock_file_is_a_loop_not_running_and_github_is_not_asked() {
+fn no_lock_file_is_a_loop_not_running_and_the_queue_and_awaiting_prs_still_show() {
     let base = TestEnv::new();
-    let gh = FakeGitHub::default();
+    let b = base.base_dir();
+    save(&b, &finished(2, T0 - 10, true));
+    let gh = FakeGitHub::default()
+        .with_open_issues(vec![labeled(4, "Four", "size:S")])
+        .with_pr(pr(102));
 
-    let text = frame(&base.base_dir(), &alive(), &gh, false, 80);
+    let text = frame(&b, &alive(), &gh, false, 80);
 
     assert!(text.contains("\nLoop: not running\n"), "{text}");
-    assert!(!text.contains("queue:"), "{text}");
-    assert!(gh.calls().is_empty());
+    assert!(
+        text.contains("  awaiting you: 1 of 5 PRs (#102)\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("  queue: 1 issue\n    #4 Four (size S)\n"),
+        "{text}"
+    );
+    assert!(!text.contains("  task:"), "{text}");
+    assert_eq!(issues_open_calls(&gh), 1);
 }
 
 #[test]
-fn a_lock_whose_process_is_gone_is_not_running_and_names_the_stale_lock() {
+fn a_lock_whose_process_is_gone_is_not_running_names_the_stale_lock_and_shows_the_queue() {
     let base = TestEnv::new();
     write_lock(&base.base_dir());
-    let gh = FakeGitHub::default();
-
     for probe in [Probe(None), Probe(Some(LOOP_START + 5))] {
+        let gh = FakeGitHub::default().with_open_issues(vec![labeled(4, "Four", "size:S")]);
+
         let text = frame(&base.base_dir(), &probe, &gh, false, 80);
+
         assert!(
             text.contains("Loop: not running (stale lock: process 1, started "),
             "{text}"
         );
         assert!(text.contains(&format_timestamp(LOOP_START)), "{text}");
+        assert!(
+            text.contains("  queue: 1 issue\n    #4 Four (size S)\n"),
+            "{text}"
+        );
+        assert!(!text.contains("  task:"), "{text}");
+        assert_eq!(issues_open_calls(&gh), 1);
     }
-    assert!(gh.calls().is_empty());
+}
+
+#[test]
+fn without_a_loop_a_lookup_failure_is_unreadable_and_the_rest_still_shows() {
+    let base = TestEnv::new();
+    let b = base.base_dir();
+    save(&b, &running(7, Stage::Working));
+    let gh = FakeGitHub::default().failing("boom");
+
+    let text = frame(&b, &alive(), &gh, false, 80);
+
+    assert!(text.contains("Loop: not running"), "{text}");
+    assert!(text.contains("  queue: unreadable (boom)\n"), "{text}");
+    assert!(text.contains("issue-7"), "{text}");
 }
 
 #[test]
