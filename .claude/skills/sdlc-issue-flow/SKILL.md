@@ -27,7 +27,8 @@ build sbxm tasks run with (a machine's own wrapper; never a fresh `cargo run`).
   list): read the body back whole; check every file, function, flag and behavior it names against today's `main`;
   list the PRs merged since it was labeled that touch its area (`gh pr list --state merged --search
   "merged:>=<label date>"`); and check its acceptance list agrees with its own answers. A point that no longer holds
-  goes back to the user as a question, with the label removed until it is answered.
+  goes back to the user as a question, with the label removed until it is answered. Ready issues just in time:
+  only those for the next session or night run, not the whole backlog, so less code changes under them.
 
 ## 3. Check the machine
 

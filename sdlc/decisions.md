@@ -1280,7 +1280,8 @@ doesn't have). So `sdlc-issue-flow` stage 2 now re-checks a ready issue before i
 what it names checked against `main`, the PRs merged since its label listed, and its acceptance list checked against
 its answers; a point that no longer holds goes back to the user and the label comes off until it's answered. The
 automated version is a third job of the scheduled check (#327). Rejected: a date check in `task loop` alone, which
-can't tell a stale issue from a valid one.
+can't tell a stale issue from a valid one. And issues are readied just in time (the user, 2026-11-05): only those
+for the next session or night run, not the whole backlog, so fewer points reopen as the code changes.
 
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
