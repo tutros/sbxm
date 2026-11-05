@@ -163,7 +163,7 @@ fn another_merged_pr_parses_too() {
 #[test]
 fn an_unknown_pr_state_is_an_error() {
     let (gh, _) = backend(Scripted::answering(
-        r#"{"headRefName":"b","headRefOid":"abc","isCrossRepository":false,"state":"WEIRD","title":"t","body":"","closingIssuesReferences,mergeable,mergeStateStatus":[]}"#,
+        r#"{"headRefName":"b","headRefOid":"abc","isCrossRepository":false,"state":"WEIRD","title":"t","body":"","closingIssuesReferences":[]}"#,
     ));
     let message = format!("{:#}", gh.pr("o/r", 2).unwrap_err());
     assert!(message.contains("WEIRD"), "{message}");

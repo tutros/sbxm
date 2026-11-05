@@ -38,7 +38,11 @@ const BASE_LOCK: &str = "version = 4\n\n\
 #[test]
 fn every_worker_prompt_says_to_hand_a_missing_crate_back_instead_of_adding_it() {
     for role in [Role::Worker, Role::WorkerSpec, Role::WorkerPrFix] {
-        let text = prompts::template(role, &Prompts::default()).unwrap().text;
+        // A Windows checkout gives the prompt files CRLF line endings.
+        let text = prompts::template(role, &Prompts::default())
+            .unwrap()
+            .text
+            .replace("\r\n", "\n");
         for part in [
             "don't edit Cargo.toml or Cargo.lock",
             "the user approves\nevery new crate",

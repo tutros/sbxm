@@ -280,9 +280,11 @@ fn task_of(f: &Fixture, head: &str) -> record::Record {
 
 #[test]
 fn the_fix_prompts_merge_the_base_first_and_the_review_covers_the_merge_narrowly() {
+    // A Windows checkout gives the prompt files CRLF line endings.
     let worker = prompts::template(Role::WorkerPrFix, &Prompts::default())
         .unwrap()
-        .text;
+        .text
+        .replace("\r\n", "\n");
     for part in [
         "First merge the base, before the findings: run `git merge --no-edit origin/{{base}}`",
         "keeping both\nsides whole",
@@ -294,7 +296,8 @@ fn the_fix_prompts_merge_the_base_first_and_the_review_covers_the_merge_narrowly
     }
     let reviewer = prompts::template(Role::ReviewerPrFix, &Prompts::default())
         .unwrap()
-        .text;
+        .text
+        .replace("\r\n", "\n");
     for part in [
         "`git log --merges {{scope_base}}..HEAD`",
         "the commits that merge brings in from {{base}} are\nnot this change",
@@ -307,7 +310,11 @@ fn the_fix_prompts_merge_the_base_first_and_the_review_covers_the_merge_narrowly
 #[test]
 fn every_worker_prompt_keeps_new_tests_and_decisions_out_of_shared_ends() {
     for role in [Role::Worker, Role::WorkerSpec, Role::WorkerPrFix] {
-        let text = prompts::template(role, &Prompts::default()).unwrap().text;
+        // A Windows checkout gives the prompt files CRLF line endings.
+        let text = prompts::template(role, &Prompts::default())
+            .unwrap()
+            .text
+            .replace("\r\n", "\n");
         for part in [
             "New tests go in a file of this task's own",
             "never appended at the end of a shared test\nfile",
@@ -316,7 +323,7 @@ fn every_worker_prompt_keeps_new_tests_and_decisions_out_of_shared_ends() {
             assert!(text.contains(part), "{role:?}: {part}");
         }
     }
-    let skill = include_str!("../.claude/skills/sdlc-issue-flow/SKILL.md");
+    let skill = include_str!("../.claude/skills/sdlc-issue-flow/SKILL.md").replace("\r\n", "\n");
     for part in [
         "Decision 292: reserve the number of any decision the issue adds now",
         "never appended at the end of a shared\n  test file",
