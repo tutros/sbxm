@@ -93,6 +93,13 @@ build sbxm tasks run with (a machine's own wrapper; never a fresh `cargo run`).
   266, 280). Before any later push: `gh pr merge N --disable-auto`, push, review the new head, arm again.
 - Medium or high risk: the user merges. While a review runs say **don't merge yet**; when done say **ready to
   merge**, and mark a draft ready yourself (`gh pr ready N`).
+- Watch CI without being asked (decision 297, an experiment): after every push to a PR and every arm, start a
+  background watch that ends on the PR merged, any check failed, or the PR closed; after a merge, watch `main`'s
+  run of the merge commit too. On a failure, read the log (`gh run view <id> --log-failed`) the same turn: a runner
+  fault or a known flake gets one re-run of the failed job (`gh run rerun <id> --failed`) and an issue if it is new;
+  a real failure on an open PR is fixed on its branch (auto-merge disarmed first) and gets a narrow re-review; a
+  real failure of the merge commit's run on `main` is a break after the merge: stage 8 and decision 280 (pause
+  auto-merge, the user decides), never a push to the merged PR. Tell the user what failed and what was done.
 
 ## 8. After the merge
 
