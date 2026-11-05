@@ -46,6 +46,11 @@ fn task_writers(
                 commands::task_log::none()
             })
     };
+    // Notes about text after `sbx`'s JSON go through the same log as the other warnings.
+    let mut notes = Tee::new(std::io::stderr(), Arc::clone(&log));
+    sbxm::backend::set_trailer_sink(move |note| {
+        let _ = writeln!(notes, "warning: {note}");
+    });
     Ok((
         Tee::new(std::io::stdout(), Arc::clone(&log)),
         Tee::new(std::io::stderr(), log),
@@ -109,6 +114,7 @@ fn finish_task(
 }
 
 fn main() -> anyhow::Result<()> {
+    sbxm::backend::set_trailer_sink(|note| eprintln!("warning: {note}"));
     // `Cli::parse()` sugars over this, but `task run`'s list needs the raw matches too: clap's
     // derive API has no field that carries the relative order of two different repeated flags
     // (`--issue`/`--spec`), so it's read back from them directly (`cli::run_target_order`).
