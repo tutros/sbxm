@@ -378,7 +378,7 @@ fn a_pr_merge_state_reads_the_state_and_whether_auto_merge_is_armed() {
             "--repo",
             "o/r",
             "--json",
-            "state,autoMergeRequest"
+            "state,autoMergeRequest,isDraft,mergeable,mergeStateStatus"
         ]
     );
 }

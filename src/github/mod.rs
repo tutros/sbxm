@@ -54,12 +54,27 @@ pub struct PrInfo {
 }
 
 /// A PR's state and whether auto-merge is armed on it (`gh pr view --json
-/// state,autoMergeRequest`): what `task loop` needs to count the PRs awaiting the user (issue 320,
-/// decision 3).
+/// state,autoMergeRequest,isDraft,mergeable,mergeStateStatus`): what `task loop` needs to count
+/// the PRs awaiting the user (issue 320, decision 3) and to resolve the conflicting ones (issue
+/// 432, decision 298).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PrMergeState {
     pub state: PrState,
     pub auto_merge: bool,
+    pub draft: bool,
+    pub mergeable: Mergeable,
+}
+
+/// Whether GitHub can merge a PR into its base (decision 298): only a conflict needs the base
+/// merged; a PR that is only behind still merges, so it counts as mergeable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Mergeable {
+    #[default]
+    Mergeable,
+    /// `mergeable` is `CONFLICTING` or `mergeStateStatus` is `DIRTY`.
+    Conflicting,
+    /// GitHub is still computing it (`mergeable` is `UNKNOWN`), as for a while after a merge.
+    Unknown,
 }
 
 /// An open pull request as `gh pr list` lists it, for finding the PR a branch already has
@@ -136,6 +151,12 @@ pub trait GitHubBackend: Send + Sync {
     /// it merges once the required checks pass, and only if the PR's head is still
     /// `head_commit`, a full commit id (decisions 266, 280, 293).
     fn pr_arm_auto_merge(&self, repo: &str, number: u32, head_commit: &str) -> Result<()>;
+    /// Disarms GitHub's auto-merge on PR `number` (`gh pr merge --disable-auto`), before `task
+    /// loop` pushes a resolve onto it (decision 298).
+    fn pr_disarm_auto_merge(&self, repo: &str, number: u32) -> Result<()>;
+    /// The commit branch `branch` of `repo` is at, a full commit id (`gh api
+    /// repos/<repo>/branches/<branch>`).
+    fn branch_head(&self, repo: &str, branch: &str) -> Result<String>;
     /// The open PR of `repo` whose head is the branch `head` of `repo` itself (never a fork's
     /// branch of the same name), with base `base` if there is one, else one with another base,
     /// which the caller reports instead of adopting (issue 60). Closed and merged PRs are never

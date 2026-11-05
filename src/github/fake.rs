@@ -5,8 +5,8 @@ use std::sync::Mutex;
 use anyhow::{Result, anyhow};
 
 use super::{
-    CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, ListedPr, PrComment, PrInfo,
-    PrMergeState, PrRequest, PrState,
+    CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, ListedPr, Mergeable, PrComment,
+    PrInfo, PrMergeState, PrRequest, PrState,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,6 +19,9 @@ pub enum GhCall {
     PrMergeState(String, u32),
     /// Repo, number, head commit.
     PrArmAutoMerge(String, u32, String),
+    PrDisarmAutoMerge(String, u32),
+    /// Repo, branch.
+    BranchHead(String, String),
     /// Repo, head, base.
     OpenPrFor(String, String, String),
     PrCreate(String, PrRequest),
@@ -40,9 +43,16 @@ pub struct FakeGitHub {
     default_branch: String,
     open_issues: Mutex<Vec<Issue>>,
     issue_texts: Vec<IssueText>,
-    prs: Vec<PrInfo>,
+    prs: Mutex<Vec<PrInfo>>,
     /// The scripted PRs with auto-merge armed.
     auto_merge: Mutex<Vec<u32>>,
+    /// The scripted draft PRs.
+    drafts: Vec<u32>,
+    /// What `pr_merge_state` says of a PR's mergeability; mergeable when not scripted.
+    mergeable: Mutex<Vec<(u32, Mergeable)>>,
+    /// What `branch_head` answers, by branch.
+    branch_heads: Mutex<Vec<(String, String)>>,
+    disarm_failure: Option<String>,
     /// What `open_pr_for` searches: repo, PR, state. `pr_create` adds the PRs it opens.
     listed: Mutex<Vec<(String, ListedPr, PrState)>>,
     lookups: Mutex<usize>,
@@ -96,8 +106,53 @@ impl FakeGitHub {
         self
     }
 
-    pub fn with_pr(mut self, pr: PrInfo) -> Self {
-        self.prs.push(pr);
+    pub fn with_pr(self, pr: PrInfo) -> Self {
+        self.prs.lock().unwrap().push(pr);
+        self
+    }
+
+    /// Moves the scripted PR `number`'s head to `head`, as a push onto its branch does.
+    pub fn set_pr_head(&self, number: u32, head: &str) {
+        for pr in self.prs.lock().unwrap().iter_mut() {
+            if pr.number == number {
+                pr.head_oid = head.to_owned();
+            }
+        }
+    }
+
+    /// Marks the scripted PR `number` a draft.
+    pub fn with_draft(mut self, number: u32) -> Self {
+        self.drafts.push(number);
+        self
+    }
+
+    /// What `pr_merge_state` says of PR `number`'s mergeability from now on.
+    pub fn set_mergeable(&self, number: u32, mergeable: Mergeable) {
+        let mut all = self.mergeable.lock().unwrap();
+        all.retain(|(n, _)| *n != number);
+        all.push((number, mergeable));
+    }
+
+    pub fn with_mergeable(self, number: u32, mergeable: Mergeable) -> Self {
+        self.set_mergeable(number, mergeable);
+        self
+    }
+
+    /// What `branch_head` answers for `branch` from now on.
+    pub fn set_branch_head(&self, branch: &str, head: &str) {
+        let mut all = self.branch_heads.lock().unwrap();
+        all.retain(|(b, _)| b != branch);
+        all.push((branch.to_owned(), head.to_owned()));
+    }
+
+    pub fn with_branch_head(self, branch: &str, head: &str) -> Self {
+        self.set_branch_head(branch, head);
+        self
+    }
+
+    /// Only `pr_disarm_auto_merge` fails (and is still recorded).
+    pub fn failing_disarm(mut self, message: &str) -> Self {
+        self.disarm_failure = Some(message.to_owned());
         self
     }
 
@@ -232,6 +287,8 @@ impl GitHubBackend for FakeGitHub {
     fn pr(&self, repo: &str, number: u32) -> Result<PrInfo> {
         self.record(GhCall::Pr(repo.to_owned(), number))?;
         self.prs
+            .lock()
+            .unwrap()
             .iter()
             .find(|p| p.number == number)
             .cloned()
@@ -240,15 +297,46 @@ impl GitHubBackend for FakeGitHub {
 
     fn pr_merge_state(&self, repo: &str, number: u32) -> Result<PrMergeState> {
         self.record(GhCall::PrMergeState(repo.to_owned(), number))?;
-        let pr = self
+        let state = self
             .prs
+            .lock()
+            .unwrap()
             .iter()
             .find(|p| p.number == number)
+            .map(|p| p.state)
             .ok_or_else(|| anyhow!("FakeGitHub: pr {number} is not scripted"))?;
         Ok(PrMergeState {
-            state: pr.state,
+            state,
             auto_merge: self.auto_merge.lock().unwrap().contains(&number),
+            draft: self.drafts.contains(&number),
+            mergeable: self
+                .mergeable
+                .lock()
+                .unwrap()
+                .iter()
+                .find(|(n, _)| *n == number)
+                .map_or(Mergeable::Mergeable, |(_, m)| *m),
         })
+    }
+
+    fn pr_disarm_auto_merge(&self, repo: &str, number: u32) -> Result<()> {
+        self.record(GhCall::PrDisarmAutoMerge(repo.to_owned(), number))?;
+        if let Some(message) = &self.disarm_failure {
+            return Err(anyhow!("{message}"));
+        }
+        self.auto_merge.lock().unwrap().retain(|n| *n != number);
+        Ok(())
+    }
+
+    fn branch_head(&self, repo: &str, branch: &str) -> Result<String> {
+        self.record(GhCall::BranchHead(repo.to_owned(), branch.to_owned()))?;
+        self.branch_heads
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(b, _)| b == branch)
+            .map(|(_, head)| head.clone())
+            .ok_or_else(|| anyhow!("FakeGitHub: branch {branch} is not scripted"))
     }
 
     fn pr_arm_auto_merge(&self, repo: &str, number: u32, head_commit: &str) -> Result<()> {

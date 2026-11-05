@@ -119,6 +119,10 @@ impl Steps for Script {
         Ok(())
     }
 
+    fn fix_pr(&self, pr: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
+        Err(anyhow!("unexpected resolve of PR #{pr}"))
+    }
+
     fn rm_merged(&self, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
         self.calls.borrow_mut().push("rm-merged".to_owned());
         if self.rm_fails {
