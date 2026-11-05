@@ -1,14 +1,14 @@
 //! The Sandboxes section of `sbxm status` (decision 171(b), issue 92): every local sandbox in
 //! `sbx ls --json`, with its owner, its state and its age. The owner comes from the name and the
-//! host-side state files: a task folder (`sbxm-task-<id>-...`), a run folder
-//! (`sbxm-run-<id>-<contestant>-<repeat>`), a project's `state.json`, else an orphan. The cloud
-//! sandboxes keep their own list ([`super::cloud`]). A list that can't be read is one line, never
-//! a failure.
-
+//! host-side state files: a task folder (`sbxm-task-<id>-...`), a run folder (any name
+//! [`crate::run::sandbox_name`] makes: a contestant's, the judge's or Jev's), a project's
+//! `state.json`, else an orphan. The cloud sandboxes keep their own list ([`super::cloud`]). A
+//! list that can't be read is one line, never a failure.
 use std::fs;
 use std::path::Path;
 
 use crate::backend::{SandboxBackend, SandboxDetail};
+use crate::run;
 use crate::status::cloud::instant;
 use crate::status::tasks::{display_width, format_duration, pad, truncate};
 use crate::task::record;
@@ -134,21 +134,14 @@ pub fn owner(claims: &Claims, name: &str) -> Owner {
     if let Some(id) = task {
         return Owner::Task(id.clone());
     }
-    let run = claims.runs.iter().find(|id| {
-        name.strip_prefix("sbxm-run-")
-            .and_then(|rest| rest.strip_prefix(id.as_str()))
-            .and_then(|rest| rest.strip_prefix('-'))
-            .and_then(|rest| rest.split_once('-'))
-            .is_some_and(|(contestant, repeat)| digits(contestant) && digits(repeat))
-    });
+    let run = claims
+        .runs
+        .iter()
+        .find(|id| run::names_sandbox_of(name, id));
     match run {
         Some(id) => Owner::Run(id.clone()),
         None => Owner::Orphan,
     }
-}
-
-fn digits(text: &str) -> bool {
-    !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
 }
 
 /// A sandbox's age at `now`: `now` minus its `created_at`; `None` when `sbx` didn't report one,

@@ -91,7 +91,7 @@ pub fn execute_with(
                         contestant,
                         index: i,
                         repeat,
-                        sandbox: format!("sbxm-run-{}-{i}-{repeat}", roots.id),
+                        sandbox: super::sandbox_name(&roots.id, &i.to_string(), repeat),
                         workspace: roots
                             .workspaces
                             .join(i.to_string())

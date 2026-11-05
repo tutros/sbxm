@@ -92,6 +92,32 @@ fn a_task_run_and_project_sandbox_get_their_owner_and_anything_else_is_an_orphan
     assert_eq!(owner("spike-s6-codex"), Owner::Orphan);
 }
 
+// ---- owners: a run's evaluator sandboxes (review M-1) ------------------------------------
+
+#[test]
+fn a_runs_judge_and_jev_sandboxes_belong_to_it_and_without_its_folder_are_orphans() {
+    let base = tempfile::tempdir().unwrap();
+    run_folder(base.path(), "20261105-120000");
+    let claims = sandboxes::claims(base.path());
+
+    let owner = |name: &str| sandboxes::owner(&claims, name);
+    let run = Owner::Run("20261105-120000".into());
+    assert_eq!(owner("sbxm-run-20261105-120000-0-0"), run);
+    assert_eq!(owner("sbxm-run-20261105-120000-judge-0"), run);
+    assert_eq!(owner("sbxm-run-20261105-120000-jev-2"), run);
+    // The names the run commands make, not copies of them.
+    assert_eq!(
+        owner(&sbxm::run::sandbox_name("20261105-120000", "3", 1)),
+        run
+    );
+    assert_eq!(owner(&sbxm::eval::jev::names("20261105-120000", 1).0), run);
+    // No run folder, or a part no run sandbox has, or no repeat: orphans.
+    assert_eq!(owner("sbxm-run-20261105-130000-judge-0"), Owner::Orphan);
+    assert_eq!(owner("sbxm-run-20261105-120000-jury-0"), Owner::Orphan);
+    assert_eq!(owner("sbxm-run-20261105-120000-judge-"), Owner::Orphan);
+    assert_eq!(owner("sbxm-run-20261105-120000-judge-x"), Owner::Orphan);
+}
+
 #[test]
 fn a_task_folder_without_task_json_claims_nothing() {
     let base = tempfile::tempdir().unwrap();
