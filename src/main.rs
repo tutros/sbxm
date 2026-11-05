@@ -100,6 +100,9 @@ fn finish_task(
     mut warn: Tee<std::io::Stderr>,
 ) -> ! {
     let failed = result.is_err();
+    for note in sbxm::backend::take_trailer_notes() {
+        let _ = writeln!(warn, "warning: {note}");
+    }
     if let Err(err) = result {
         let _ = writeln!(warn, "Error: {err:?}");
     }
@@ -109,6 +112,14 @@ fn finish_task(
 }
 
 fn main() -> anyhow::Result<()> {
+    let result = run_command();
+    for note in sbxm::backend::take_trailer_notes() {
+        eprintln!("warning: {note}");
+    }
+    result
+}
+
+fn run_command() -> anyhow::Result<()> {
     // `Cli::parse()` sugars over this, but `task run`'s list needs the raw matches too: clap's
     // derive API has no field that carries the relative order of two different repeated flags
     // (`--issue`/`--spec`), so it's read back from them directly (`cli::run_target_order`).
