@@ -278,6 +278,11 @@ pub struct Agent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template: Option<String>,
     pub run: Option<RunInfo>,
+    /// The worker's Claude session kept in the task's folder as `worker-session.jsonl` (issue
+    /// 418), which its fix rounds resume; `None` when none was kept (the switch off, another
+    /// harness, or a session that couldn't be), and always on the reviewer's `Agent`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

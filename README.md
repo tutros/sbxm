@@ -563,6 +563,15 @@ or `repeat-finding`; a task left with must-fix findings is a draft too); nothing
 an issue unless you run `task file-findings`. To keep going instead, `task resume --issue <n> --rounds 1` gives a
 stopped task one more fix round (a `repeat-finding` stop with rounds left needs no `--rounds`).
 
+A fix round is a fresh agent session by default. With `[fix] resume = true` in `sbxm-task.toml`, a Claude worker's
+fix rounds continue its own session instead (`claude -p --resume <session>`, decision 285), given the same fix
+prompt: after each run of the worker, while its sandbox is still there, the session's file is copied out of
+`~/.claude/projects/` into the task's folder as `worker-session.jsonl` (the session's id goes in `task.json`), so it
+survives the sandbox's removal, and before a fix round it is put back under the clone's own project folder. A
+session that can't be kept or resumed (none found, empty, over 64 MiB, or unknown to the CLI, which says `No
+conversation found`) makes that round run fresh as before, with a line saying why (in `run.log` too); it never fails
+the task. Other harnesses always run fresh. `task rm --merged` doesn't archive the session file.
+
 A worker's sandbox holds a lot of disk (a Rust build is 15-20 GiB), so a local task removes it as soon as the phase
 that uses it ends: after the worker and its gates, and after each fix round and its gates, whatever the outcome,
 and always before a reviewer's sandbox is created. `task.json`'s `sandboxes` list records each one's `removed_at`.

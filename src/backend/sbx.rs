@@ -5,6 +5,7 @@ use std::process::{Command, Stdio};
 use anyhow::{Context, Result, bail};
 
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 
 use std::path::Path;
 
@@ -255,7 +256,10 @@ impl SandboxBackend for SbxBackend {
                 String::from_utf8_lossy(&output.stderr).trim()
             );
         }
-        serde_json::from_slice(&output.stdout).context("unexpected `sbx skills ls --json` output")
+        parse_json(
+            &String::from_utf8_lossy(&output.stdout),
+            "sbx skills ls --json",
+        )
     }
 
     fn validate_kit(&self, dir: &Path) -> Result<KitValidation> {
@@ -523,8 +527,7 @@ fn parse_scoped_secrets(json: &str, sandbox: &str) -> Result<Vec<String>> {
         scope: String,
         name: String,
     }
-    let ls: SecretLs =
-        serde_json::from_str(json).context("unexpected `sbx secret ls --json` output")?;
+    let ls: SecretLs = parse_json(json, "sbx secret ls --json")?;
     if sandbox == "global" {
         return Ok(Vec::new());
     }
@@ -593,8 +596,7 @@ fn parse_custom_secrets(json: &str) -> Result<Vec<CustomSecret>> {
         #[serde(default)]
         custom_secrets: Vec<CustomSecret>,
     }
-    let ls: SecretLs =
-        serde_json::from_str(json).context("unexpected `sbx secret ls --json` output")?;
+    let ls: SecretLs = parse_json(json, "sbx secret ls --json")?;
     Ok(ls.custom_secrets)
 }
 
@@ -617,7 +619,65 @@ fn validate_args(dir: &Path) -> Vec<OsString> {
 }
 
 fn parse_validate(json: &str) -> Result<KitValidation> {
-    serde_json::from_str(json).context("unexpected `sbx kit validate --json` output")
+    parse_json(json, "sbx kit validate --json")
+}
+
+/// Where the notes about text that followed the JSON of an `sbx ... --json` output go: set once
+/// by the program (`set_trailer_sink`) to its warning stream, so a note is written when it
+/// happens, not when a command returns; the backend never prints them itself.
+static TRAILER_SINK: std::sync::Mutex<Option<TrailerSink>> = std::sync::Mutex::new(None);
+
+type TrailerSink = Box<dyn FnMut(&str) + Send>;
+
+/// The longest part of a trailing line a note shows.
+const TRAILER_SHOWN: usize = 200;
+
+/// Sends each later note to `sink`, in place of the one before; with none set, a note is dropped.
+pub fn set_trailer_sink(sink: impl FnMut(&str) + Send + 'static) {
+    *TRAILER_SINK.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::new(sink));
+}
+
+/// The first JSON value of `output` as a `T`, ignoring what follows it (G73: `sbx secret ls
+/// --json` sometimes prints text after its JSON). Text that is not JSON at all is still an error.
+/// A trailer that is not only whitespace is noted to the sink (`set_trailer_sink`).
+fn parse_json<T: DeserializeOwned>(output: &str, command: &str) -> Result<T> {
+    let (value, note) = parse_json_noting_trailer(output, command)?;
+    if let (Some(note), Some(sink)) = (
+        note,
+        &mut *TRAILER_SINK.lock().unwrap_or_else(|e| e.into_inner()),
+    ) {
+        sink(&note);
+    }
+    Ok(value)
+}
+
+/// `parse_json` and the note about the trailer, if it has one. The note shows the first
+/// non-empty trailing line, cut to `TRAILER_SHOWN` characters, unless that line looks like a
+/// secret (`task::runlog::redact` changes it): then the note leaves the text out.
+fn parse_json_noting_trailer<T: DeserializeOwned>(
+    output: &str,
+    command: &str,
+) -> Result<(T, Option<String>)> {
+    let mut stream = serde_json::Deserializer::from_str(output).into_iter::<T>();
+    let value = match stream.next() {
+        Some(value) => value,
+        None => serde_json::from_str::<T>(output),
+    }
+    .with_context(|| format!("unexpected `{command}` output"))?;
+    let trailer = &output[stream.byte_offset()..];
+    let note = trailer
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|line| {
+            let shown = if crate::task::runlog::redact(line) != line {
+                "the text is not shown: it looks like a secret".to_owned()
+            } else {
+                line.chars().take(TRAILER_SHOWN).collect()
+            };
+            format!("`{command}` printed text after its JSON, ignored: {shown}")
+        });
+    Ok((value, note))
 }
 
 const SBX_MISSING: &str = "cannot run `sbx`; is Docker Sandboxes installed and on PATH?";
@@ -668,8 +728,7 @@ fn parse_secret_ls(json: &str) -> Result<Vec<String>> {
         kind: String,
         name: String,
     }
-    let ls: SecretLs =
-        serde_json::from_str(json).context("unexpected `sbx secret ls --json` output")?;
+    let ls: SecretLs = parse_json(json, "sbx secret ls --json")?;
     Ok(ls
         .secrets
         .into_iter()
@@ -692,8 +751,7 @@ fn parse_version(json: &str) -> Result<String> {
     struct Client {
         version: String,
     }
-    let version: Version =
-        serde_json::from_str(json).context("unexpected `sbx version --json` output")?;
+    let version: Version = parse_json(json, "sbx version --json")?;
     let client = version.client.version;
     Ok(client.strip_prefix('v').unwrap_or(&client).to_owned())
 }
@@ -730,7 +788,7 @@ fn parse_policy_ls(json: &str) -> Result<Vec<NetworkRule>> {
         #[serde(default)]
         resources: Vec<String>,
     }
-    let ls: Ls = serde_json::from_str(json).context("unexpected `sbx policy ls --json` output")?;
+    let ls: Ls = parse_json(json, "sbx policy ls --json")?;
     ls.rules
         .into_iter()
         .filter(|rule| rule.resource_type == "network")
@@ -769,8 +827,7 @@ fn parse_cloud_policy_ls(json: &str) -> Result<Vec<String>> {
         #[serde(rename = "allowNetworks")]
         allow_networks: Vec<String>,
     }
-    let ls: Ls =
-        serde_json::from_str(json).context("unexpected `sbx --cloud policy ls --json` output")?;
+    let ls: Ls = parse_json(json, "sbx --cloud policy ls --json")?;
     Ok(ls.allow_networks)
 }
 
@@ -779,8 +836,7 @@ fn parse_template_ls(json: &str) -> Result<Vec<TemplateImage>> {
     struct Ls {
         images: Vec<TemplateImage>,
     }
-    let ls: Ls =
-        serde_json::from_str(json).context("unexpected `sbx template ls --json` output")?;
+    let ls: Ls = parse_json(json, "sbx template ls --json")?;
     Ok(ls.images)
 }
 
@@ -789,7 +845,7 @@ fn parse_ls(json: &str) -> Result<Vec<SandboxInfo>> {
     struct Ls {
         sandboxes: Vec<SandboxInfo>,
     }
-    let ls: Ls = serde_json::from_str(json).context("unexpected `sbx ls --json` output")?;
+    let ls: Ls = parse_json(json, "sbx ls --json")?;
     Ok(ls.sandboxes)
 }
 
@@ -798,7 +854,7 @@ fn parse_ls_detailed(json: &str) -> Result<Vec<SandboxDetail>> {
     struct Ls {
         sandboxes: Vec<SandboxDetail>,
     }
-    let ls: Ls = serde_json::from_str(json).context("unexpected `sbx ls --json` output")?;
+    let ls: Ls = parse_json(json, "sbx ls --json")?;
     Ok(ls.sandboxes)
 }
 
@@ -1055,6 +1111,82 @@ mod secret_tests {
     /// `{scope, targets[], env, placeholder, secret?}`; a `--command` secret has no `secret`):
     /// a global `--value` secret and one scoped to a sandbox, with the S9 fake values.
     const SECRET_LS_CUSTOM: &str = include_str!("fixtures/sbx-secret-ls-custom.json");
+
+    #[test]
+    fn secret_ls_json_is_unchanged_without_a_trailer() {
+        let (names, note) =
+            parse_json_noting_trailer::<serde_json::Value>(SECRET_LS, "sbx secret ls --json")
+                .unwrap();
+        assert!(names.is_object());
+        assert_eq!(note, None);
+        // Whitespace after the JSON is not a trailer.
+        let padded = format!("{SECRET_LS}\n\n  \n");
+        let (_, note) =
+            parse_json_noting_trailer::<serde_json::Value>(&padded, "sbx secret ls --json")
+                .unwrap();
+        assert_eq!(note, None);
+    }
+
+    #[test]
+    fn a_trailing_line_is_ignored_and_noted_once() {
+        let text = format!("{SECRET_LS}\n\nsbx: update available\nsecond line\n");
+        assert_eq!(
+            parse_scoped_secrets(&text, "sbxm-nobody").unwrap(),
+            Vec::<String>::new()
+        );
+        let (_, note) =
+            parse_json_noting_trailer::<serde_json::Value>(&text, "sbx secret ls --json").unwrap();
+        let note = note.unwrap();
+        assert!(note.contains("sbx: update available"), "{note}");
+        assert!(!note.contains("second line"), "{note}");
+    }
+
+    #[test]
+    fn a_note_reaches_the_sink_when_it_happens() {
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let seen_by_sink = std::sync::Arc::clone(&seen);
+        set_trailer_sink(move |note| seen_by_sink.lock().unwrap().push(note.to_owned()));
+        let text = format!("{SECRET_LS}\nsbx: sink test line\n");
+        parse_scoped_secrets(&text, "sbxm-nobody").unwrap();
+        let seen = seen.lock().unwrap();
+        assert_eq!(
+            seen.iter()
+                .filter(|n| n.contains("sbx: sink test line"))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn a_secret_shaped_trailer_is_noted_without_its_text() {
+        let text = format!("{SECRET_LS}\nsk-abcdefghijklmnopqrstuvwx\n");
+        let (_, note) =
+            parse_json_noting_trailer::<serde_json::Value>(&text, "sbx secret ls --json").unwrap();
+        let note = note.unwrap();
+        assert!(!note.contains("sk-"), "{note}");
+        assert!(note.contains("printed text after its JSON"), "{note}");
+    }
+
+    #[test]
+    fn a_long_trailer_is_cut() {
+        let text = format!("{SECRET_LS}\n{}\n", "Z".repeat(500));
+        let (_, note) =
+            parse_json_noting_trailer::<serde_json::Value>(&text, "sbx secret ls --json").unwrap();
+        assert!(note.unwrap().matches('Z').count() == TRAILER_SHOWN);
+    }
+
+    #[test]
+    fn text_that_is_not_json_is_still_an_error() {
+        for text in ["not json at all", "", "  \n"] {
+            let err = parse_json::<serde_json::Value>(text, "sbx secret ls --json").unwrap_err();
+            assert!(
+                format!("{err:#}").contains("unexpected `sbx secret ls --json` output"),
+                "{err:#}"
+            );
+        }
+        // Text before the JSON is not ignored.
+        assert!(parse_json::<serde_json::Value>("hi\n{}", "sbx ls --json").is_err());
+    }
 
     #[test]
     fn parses_custom_secrets_and_their_scope() {

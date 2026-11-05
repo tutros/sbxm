@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 pub use fake::{ExecGate, FakeBackend, FakeCopy};
 
-pub use sbx::SbxBackend;
+pub use sbx::{SbxBackend, set_trailer_sink};
 
 pub trait SandboxBackend: Send + Sync {
     /// The backend for sandboxes at `location` (P3 (a), decision 262(c)): a task gets the

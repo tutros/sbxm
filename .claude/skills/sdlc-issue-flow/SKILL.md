@@ -26,6 +26,12 @@ build sbxm tasks run with (a machine's own wrapper; never a fresh `cargo run`).
 - Decision 286 (an experiment, two groups): issues that touch the same code and are to be done in order go to one
   worker as one spec (`task run --spec`), with every issue's acceptance checks; the PR closes all of them. Each
   issue is readied as above first.
+- Decision 295: **re-check a `ready-for-worker` issue right before its task starts** (and before an unattended
+  list): read the body back whole; check every file, function, flag and behavior it names against today's `main`;
+  list the PRs merged since it was labeled that touch its area (`gh pr list --state merged --search
+  "merged:>=<label date>"`); and check its acceptance list agrees with its own answers. A point that no longer holds
+  goes back to the user as a question, with the label removed until it is answered. Ready issues just in time:
+  only those for the next session or night run, not the whole backlog, so less code changes under them.
 
 ## 3. Check the machine
 

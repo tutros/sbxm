@@ -22,4 +22,5 @@ pub mod risk;
 pub mod runlog;
 pub mod secrets;
 pub mod select;
+pub mod session;
 pub mod stale_lock;

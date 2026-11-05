@@ -61,6 +61,9 @@ pub struct HeadlessOpts {
     /// Whether the workspace is a git repository (seeded runs); unseeded
     /// ones aren't (decision 113).
     pub is_git_repo: bool,
+    /// A session to continue (`claude -p --resume <id>`, issue 418): the prompt is its next turn.
+    /// Only Claude has one; the others ignore it.
+    pub resume: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -89,6 +92,8 @@ pub struct HeadlessResult {
     /// The raw output, kept as-is.
     pub transcript: String,
     pub usage: Usage,
+    /// The session the run used, where the harness names one (Claude's `session_id`, issue 418).
+    pub session_id: Option<String>,
 }
 
 /// `SandboxBackend::exec` returning `Err` means "`sbx` itself couldn't run" (its own doc comment),
@@ -175,10 +180,14 @@ pub(crate) fn parse_claude(raw: &str) -> HeadlessResult {
         cost_usd: None,
     };
     let mut status = RunStatus::Failed(NO_RESULT.into());
+    let mut session_id = None;
     for event in raw
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
     {
+        if let Some(id) = event["session_id"].as_str() {
+            session_id = Some(id.to_owned());
+        }
         match event["type"].as_str() {
             Some("assistant") => {
                 let message = &event["message"];
@@ -209,6 +218,7 @@ pub(crate) fn parse_claude(raw: &str) -> HeadlessResult {
         answer,
         transcript: raw.to_owned(),
         usage,
+        session_id,
     }
 }
 
@@ -299,6 +309,7 @@ pub(crate) fn parse_codex(raw: &str) -> HeadlessResult {
         answer,
         transcript: raw.to_owned(),
         usage,
+        session_id: None,
     }
 }
 
@@ -377,6 +388,7 @@ pub(crate) fn parse_antigravity(raw: &str) -> HeadlessResult {
         answer,
         transcript: raw.to_owned(),
         usage,
+        session_id: None,
     }
 }
 
