@@ -239,6 +239,10 @@ impl Steps for Script {
         Ok(())
     }
 
+    fn rm_merged(&self, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
+        Ok(())
+    }
+
     fn room(&self) -> Result<()> {
         self.calls.borrow_mut().push("room".into());
         match self.room.borrow_mut().pop_front() {
@@ -1828,6 +1832,10 @@ fn the_issues_own_words_about_a_usage_limit_are_not_a_usage_limit() {
         ) -> Result<()> {
             self.0.file_findings(issue, out, warn)
         }
+        fn rm_merged(&self, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
+            Ok(())
+        }
+
         fn room(&self) -> Result<()> {
             self.0.room()
         }
@@ -2100,6 +2108,10 @@ impl Steps for LabelWatch<'_> {
     fn file_findings(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
         self.script.file_findings(issue, out, warn)
     }
+    fn rm_merged(&self, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
+        Ok(())
+    }
+
     fn room(&self) -> Result<()> {
         self.script.room()
     }

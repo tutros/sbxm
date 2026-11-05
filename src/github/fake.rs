@@ -17,6 +17,8 @@ pub enum GhCall {
     Issue(String, u32),
     Pr(String, u32),
     PrMergeState(String, u32),
+    /// Repo, number, head commit.
+    PrArmAutoMerge(String, u32, String),
     /// Repo, head, base.
     OpenPrFor(String, String, String),
     PrCreate(String, PrRequest),
@@ -40,7 +42,7 @@ pub struct FakeGitHub {
     issue_texts: Vec<IssueText>,
     prs: Vec<PrInfo>,
     /// The scripted PRs with auto-merge armed.
-    auto_merge: Vec<u32>,
+    auto_merge: Mutex<Vec<u32>>,
     /// What `open_pr_for` searches: repo, PR, state. `pr_create` adds the PRs it opens.
     listed: Mutex<Vec<(String, ListedPr, PrState)>>,
     lookups: Mutex<usize>,
@@ -59,6 +61,7 @@ pub struct FakeGitHub {
     failure: Option<String>,
     comment_failure: Option<String>,
     status_failure: Option<String>,
+    arm_failure: Option<String>,
     calls: Mutex<Vec<GhCall>>,
 }
 
@@ -99,8 +102,8 @@ impl FakeGitHub {
     }
 
     /// Arms auto-merge on the scripted PR `number`, as `pr_merge_state` reports it.
-    pub fn with_auto_merge(mut self, number: u32) -> Self {
-        self.auto_merge.push(number);
+    pub fn with_auto_merge(self, number: u32) -> Self {
+        self.auto_merge.lock().unwrap().push(number);
         self
     }
 
@@ -176,6 +179,12 @@ impl FakeGitHub {
         self
     }
 
+    /// Only `pr_arm_auto_merge` fails (and is still recorded).
+    pub fn failing_arm(mut self, message: &str) -> Self {
+        self.arm_failure = Some(message.to_owned());
+        self
+    }
+
     /// Every call fails with `message` (and is still recorded).
     pub fn failing(mut self, message: &str) -> Self {
         self.failure = Some(message.to_owned());
@@ -238,8 +247,21 @@ impl GitHubBackend for FakeGitHub {
             .ok_or_else(|| anyhow!("FakeGitHub: pr {number} is not scripted"))?;
         Ok(PrMergeState {
             state: pr.state,
-            auto_merge: self.auto_merge.contains(&number),
+            auto_merge: self.auto_merge.lock().unwrap().contains(&number),
         })
+    }
+
+    fn pr_arm_auto_merge(&self, repo: &str, number: u32, head_commit: &str) -> Result<()> {
+        self.record(GhCall::PrArmAutoMerge(
+            repo.to_owned(),
+            number,
+            head_commit.to_owned(),
+        ))?;
+        if let Some(message) = &self.arm_failure {
+            return Err(anyhow!("{message}"));
+        }
+        self.auto_merge.lock().unwrap().push(number);
+        Ok(())
     }
 
     fn open_pr_for(&self, repo: &str, head: &str, base: &str) -> Result<Option<ListedPr>> {
