@@ -109,6 +109,7 @@ fn ok_pair(contestant: usize, repeat: u32, answer: &str) -> PairOutcome {
                 output_tokens: 0,
                 cost_usd: None,
             },
+            session_id: None,
         }),
         diff: None,
         checks: Vec::new(),

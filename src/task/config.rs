@@ -57,6 +57,9 @@ pub struct TaskConfig {
     /// `[worker] fix_rounds` (decision 173(a)): the worker's round budget for `task review`; 0
     /// means the first review that finds anything stops the task at once.
     pub fix_rounds: u32,
+    /// `[fix] resume` (issue 418, decision 285): a fix round of a Claude worker resumes the
+    /// worker's own session instead of starting a fresh one; off when absent.
+    pub fix_resume: bool,
     /// Whether the reviewer's harness was chosen (in the file or by a flag) rather than defaulted.
     reviewer_chosen: bool,
     pub sandbox: Sandbox,
@@ -153,6 +156,8 @@ struct RawConfig {
     prompts: RawPrompts,
     #[serde(default)]
     finish: RawFinish,
+    #[serde(default)]
+    fix: RawFix,
     risk: Option<RawRisk>,
     warm: Option<RawWarm>,
     #[serde(default, rename = "loop")]
@@ -178,6 +183,13 @@ struct RawWarm {
 struct RawFinish {
     #[serde(default)]
     sink: Sink,
+}
+
+#[derive(Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+struct RawFix {
+    #[serde(default)]
+    resume: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -380,6 +392,7 @@ impl Validator<'_> {
             worker,
             reviewer,
             fix_rounds,
+            fix_resume: raw.fix.resume,
             reviewer_chosen: chosen_reviewer.is_some(),
             sandbox,
             gates,

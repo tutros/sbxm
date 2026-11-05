@@ -261,6 +261,7 @@ fn live_jev_call() {
                 output_tokens: 0,
                 cost_usd: None,
             },
+            session_id: None,
         }),
         diff: Some(Ok(Diff {
             patch: "diff --git a/src/lib.rs b/src/lib.rs\n--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -0,0 +1 @@\n+pub fn add(a: i32, b: i32) -> i32 { a + b }\n".into(),

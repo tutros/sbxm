@@ -299,6 +299,7 @@ pub fn judge_repeat(
             high_effort: false,
             budget_usd: None,
             is_git_repo: false,
+            resume: None,
         };
         let reply = headless::run(
             backend,

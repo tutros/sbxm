@@ -270,6 +270,7 @@ impl Pair<'_> {
             high_effort: false,
             budget_usd: self.run_config.run.budget_usd,
             is_git_repo: seed.is_some(),
+            resume: None,
         };
         let result = headless::run(
             self.backend,

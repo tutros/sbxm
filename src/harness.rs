@@ -144,6 +144,9 @@ impl Harness {
             }
             _ => {
                 let mut argv: Vec<String> = ["claude", "-p", prompt].map(str::to_owned).into();
+                if let Some(session) = &opts.resume {
+                    argv.extend(["--resume".to_owned(), session.clone()]);
+                }
                 argv.extend(model_flag("--model"));
                 argv.extend(["--output-format", "stream-json", "--verbose"].map(str::to_owned));
                 argv

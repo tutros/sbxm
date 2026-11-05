@@ -141,6 +141,7 @@ fn kind_task_uses(
         memory: None,
         template: Some(tag.into()),
         run: None,
+        session: None,
     });
     record::write(&record::task_dir(&env.base_dir(), &task.id), &task).unwrap();
     task.id
