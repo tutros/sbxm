@@ -1026,8 +1026,8 @@ impl Loop<'_> {
     }
 
     /// One resolve (decision 298): auto-merge disarmed if `armed`, `task fix --pr N`, then armed
-    /// again on the same checks as [`Self::arm`], read from the fix task's record, for a PR whose
-    /// own task passed them or that was armed. A failed one is said once and left to the user,
+    /// again on the same checks as [`Self::arm`], read from the fix task's record, for a PR that
+    /// was armed or whose own task and earlier resolves passed them. A failed one is said once and left to the user,
     /// its fix task too. One log row either way.
     fn resolve(
         &mut self,
@@ -1088,7 +1088,9 @@ impl Loop<'_> {
                 let own = self
                     .record_of(task)
                     .is_some_and(|rec| passes_arm_checks(&rec));
-                match self.rearm(number, armed || own, review, out, warn)? {
+                let current = record::fix_id(number, &head).unwrap_or_default();
+                let eligible = armed || (own && self.earlier_resolves_pass(number, &current));
+                match self.rearm(number, eligible, review, out, warn)? {
                     Some(note) => format!("resolved, {note}"),
                     None => "resolved".to_owned(),
                 }
@@ -1132,13 +1134,43 @@ impl Loop<'_> {
         Ok(format!("not resolved: {why}"))
     }
 
+    /// Whether every resolve already pushed onto PR `number` (a finished fix task of it other
+    /// than `current`) passed [`Self::arm`]'s checks, as its own task must: a narrow review of a
+    /// later merge doesn't clear the risk an earlier one left (review M-1). Read from the fix
+    /// tasks' records, so a restarted loop sees them too; one that can't be read counts as not
+    /// passing.
+    fn earlier_resolves_pass(&self, number: u32, current: &str) -> bool {
+        let Ok(folders) = record::task_folders(&self.base_dir) else {
+            return false;
+        };
+        let prefix = format!("fix-{number}-");
+        folders.iter().all(|dir| {
+            let Some(id) = dir.file_name().and_then(|n| n.to_str()) else {
+                return true;
+            };
+            if !id.starts_with(&prefix) || id == current {
+                return true;
+            }
+            if check_own_folder(&self.base_dir, dir).is_err() {
+                return false;
+            }
+            match record::read(&dir.join("task.json")) {
+                Ok(rec) if rec.kind != Kind::Fix || rec.repo != self.repo => true,
+                Ok(rec) if rec.stage != Stage::Finished => true,
+                Ok(rec) => passes_arm_checks(&rec),
+                Err(_) => false,
+            }
+        })
+    }
+
     /// A task's record by its id.
     fn record_of(&self, id: &str) -> Option<Record> {
         record::read(&record::task_dir(&self.base_dir, id).join("task.json")).ok()
     }
 
     /// Arms auto-merge again after a clean resolve (decision 298): only for a PR that `eligible`
-    /// (armed before, or its own task passed [`Self::arm`]'s checks), when the fix's review is
+    /// (armed before, or its own task and every earlier resolve pushed onto it passed
+    /// [`Self::arm`]'s checks), when the fix's review is
     /// low risk with 0 must-fix and covered the PR's new head. Returns the log row's note.
     fn rearm(
         &mut self,
@@ -1208,8 +1240,8 @@ impl Loop<'_> {
     }
 }
 
-/// [`Loop::arm`]'s checks on a task's own record: no work stop, a review with 0 must-fix and low
-/// risk after the path-rule floor.
+/// [`Loop::arm`]'s checks on a task's record: no work stop, a review with 0 must-fix and low risk
+/// after the path-rule floor.
 fn passes_arm_checks(rec: &Record) -> bool {
     rec.stopped.is_none()
         && rec

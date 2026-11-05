@@ -231,7 +231,7 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
   `UNKNOWN` is read again at the next step, as is every conflicting PR while the disk is low; a draft is skipped; each PR gets at most one resolve per tip of `main` in
   a run (kept in memory, so a restarted loop may try once more). Auto-merge is disarmed before the fix if armed, and
   armed again on the fix task's new head only when its review is low risk with 0 must-fix and covered that head, and
-  the PR was armed or its own task passed the same checks. A failed resolve (handed back, gates failing, must-fix
+  the PR was armed, or its own task and every resolve already pushed onto it passed the same checks. A failed resolve (handed back, gates failing, must-fix
   left) leaves the PR and its fix task to you: said once, counted toward the cap, not tried again in that run.
   Resolves don't count toward `--cap`; each gets its own row in the loop's log.
 

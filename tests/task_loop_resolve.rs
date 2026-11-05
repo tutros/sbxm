@@ -62,6 +62,8 @@ struct Script<'a> {
     base: PathBuf,
     gh: &'a FakeGitHub,
     fixes: HashMap<u32, Fix>,
+    /// What the next resolves do, in order, before `fixes` is asked.
+    queued: RefCell<Vec<Fix>>,
     calls: RefCell<Vec<String>>,
     clock: Cell<u64>,
     /// Run after each `task run`: GitHub changing meanwhile.
@@ -76,6 +78,7 @@ impl<'a> Script<'a> {
             base: base.to_owned(),
             gh,
             fixes: HashMap::new(),
+            queued: RefCell::default(),
             calls: RefCell::default(),
             clock: Cell::new(START),
             after_run: Box::new(|_| {}),
@@ -183,20 +186,27 @@ impl Steps for Script<'_> {
         self.clock.set(self.clock.get() + 200);
         let head = self.gh.pr(REPO, pr)?.head_oid;
         let id = record::fix_id(pr, &head).unwrap();
-        match self.fixes.get(&pr).copied().unwrap_or(CLEAN) {
+        let queued = {
+            let mut queued = self.queued.borrow_mut();
+            (!queued.is_empty()).then(|| queued.remove(0))
+        };
+        match queued.unwrap_or_else(|| self.fixes.get(&pr).copied().unwrap_or(CLEAN)) {
             Fix::Pushed {
                 risk,
                 must_fix,
                 commit,
                 conflicting,
             } => {
-                write_task(
+                // `task fix` finishes the fix task with its push.
+                let (dir, mut rec) = write_task(
                     &self.base,
                     Kind::Fix,
                     pr,
                     Some(&id),
                     Some((risk, must_fix, commit)),
                 );
+                rec.stage = Stage::Finished;
+                record::write(&dir, &rec).unwrap();
                 self.gh.set_pr_head(pr, PUSHED);
                 if !conflicting {
                     self.gh.set_mergeable(pr, Mergeable::Mergeable);
@@ -591,6 +601,91 @@ fn a_low_disk_leaves_a_conflicting_pr_for_a_later_step_not_failed() {
     run.result.unwrap();
     assert_eq!(script.fixes_run(), ["run 3", "fix 101"], "{}", run.out);
     assert!(!run.out.contains("PR #101 awaits you"), "{}", run.out);
+}
+
+#[test]
+fn an_earlier_medium_or_high_risk_resolve_keeps_the_pr_unarmed_through_a_later_low_risk_one() {
+    for risk in [Level::Medium, Level::High] {
+        let f = fixture();
+        f.loop_pr(1, Level::Low);
+        let gh = github(&[3], &[101])
+            .with_mergeable(101, Mergeable::Conflicting)
+            .with_auto_merge(101);
+        let mut script = Script::new(&f.base(), &gh);
+        script.queued.borrow_mut().extend([
+            Fix::Pushed {
+                risk,
+                must_fix: 0,
+                commit: PUSHED,
+                conflicting: false,
+            },
+            CLEAN,
+        ]);
+        // `main` moves and the PR conflicts again by the next step.
+        script.after_run = Box::new(|gh| {
+            gh.set_branch_head("main", MAIN_2);
+            gh.set_mergeable(101, Mergeable::Conflicting);
+        });
+
+        let run = run_loop(&f, &f.opts(None), &script, &gh);
+
+        run.result.unwrap();
+        assert_eq!(
+            script.fixes_run(),
+            ["fix 101", "run 3", "fix 101"],
+            "{risk:?}: {}",
+            run.out
+        );
+        assert!(arms(&gh).is_empty(), "{risk:?}: {}", run.out);
+    }
+}
+
+#[test]
+fn an_earlier_risky_resolve_keeps_the_pr_unarmed_after_a_loop_restart() {
+    let f = fixture();
+    f.loop_pr(1, Level::Low);
+    let gh = github(&[], &[101])
+        .with_mergeable(101, Mergeable::Conflicting)
+        .with_auto_merge(101);
+    let first = Script::new(&f.base(), &gh).fix(
+        101,
+        Fix::Pushed {
+            risk: Level::High,
+            must_fix: 0,
+            commit: PUSHED,
+            conflicting: false,
+        },
+    );
+    run_loop(&f, &f.opts(None), &first, &gh).result.unwrap();
+    // A new loop, after `main` moved and the PR conflicts again.
+    gh.set_branch_head("main", MAIN_2);
+    gh.set_mergeable(101, Mergeable::Conflicting);
+    let second = Script::new(&f.base(), &gh);
+
+    let run = run_loop(&f, &f.opts(None), &second, &gh);
+
+    run.result.unwrap();
+    assert_eq!(second.fixes_run(), ["fix 101"], "{}", run.out);
+    assert!(arms(&gh).is_empty(), "{}", run.out);
+}
+
+#[test]
+fn earlier_clean_low_risk_resolves_still_let_a_pr_be_armed_again() {
+    let f = fixture();
+    f.loop_pr(1, Level::Low);
+    let gh = github(&[3], &[101])
+        .with_mergeable(101, Mergeable::Conflicting)
+        .with_auto_merge(101);
+    let mut script = Script::new(&f.base(), &gh);
+    script.after_run = Box::new(|gh| {
+        gh.set_branch_head("main", MAIN_2);
+        gh.set_mergeable(101, Mergeable::Conflicting);
+    });
+
+    run_loop(&f, &f.opts(None), &script, &gh).result.unwrap();
+
+    assert_eq!(script.fixes_run(), ["fix 101", "run 3", "fix 101"]);
+    assert_eq!(arms(&gh).len(), 2);
 }
 
 // --- A failed resolve ---
