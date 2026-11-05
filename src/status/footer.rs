@@ -98,17 +98,20 @@ pub fn render(lines: &[Line], min_free_disk: u64, width: Option<usize>) -> Strin
                                    platform; set sandbox_state_dir in config.toml to show its \
                                    drive"
                 .to_owned(),
+            // The verdict and what the drive holds come before its path, so cutting a long path
+            // to the terminal's width never cuts the warning (review M-2).
             Line::Drive(drive) => {
-                let place = format!("{} ({})", describe(&drive.dir), drive.holds.label());
-                match &drive.free {
-                    Err(why) => format!("Free space: {place} couldn't be read: {why}"),
+                let holds = drive.holds.label();
+                let verdict = match &drive.free {
+                    Err(why) => format!("couldn't be read for {holds} ({why})"),
                     Ok(free) if *free < min_free_disk => format!(
-                        "Free space: {} on {place}; warning: under min_free_disk {}",
+                        "warning, {} is under min_free_disk {} for {holds}",
                         gib(*free),
                         gib(min_free_disk)
                     ),
-                    Ok(free) => format!("Free space: {} on {place}", gib(*free)),
-                }
+                    Ok(free) => format!("{} for {holds}", gib(*free)),
+                };
+                format!("Free space: {verdict}, on {}", describe(&drive.dir))
             }
         };
         match width {

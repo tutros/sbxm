@@ -126,12 +126,12 @@ fn exactly_min_free_disk_is_no_warning_and_one_byte_under_is() {
 
     assert_eq!(
         footer::render(&at, DEFAULT_MIN_FREE, None),
-        "\nFree space: 10.0 GiB on the drive of /s (sbx's sandbox state)\n"
+        "\nFree space: 10.0 GiB for sbx's sandbox state, on the drive of /s\n"
     );
     assert_eq!(
         footer::render(&under, DEFAULT_MIN_FREE, None),
-        "\nFree space: 10.0 GiB on the drive of /s (sbx's sandbox state); warning: under \
-         min_free_disk 10.0 GiB\n"
+        "\nFree space: warning, 10.0 GiB is under min_free_disk 10.0 GiB for sbx's sandbox \
+         state, on the drive of /s\n"
     );
 }
 
@@ -141,7 +141,7 @@ fn min_free_disk_zero_never_warns() {
 
     assert_eq!(
         footer::render(&lines, 0, None),
-        "\nFree space: 0.0 GiB on the drive of /b (base_dir)\n"
+        "\nFree space: 0.0 GiB for base_dir, on the drive of /b\n"
     );
 }
 
@@ -156,8 +156,8 @@ fn every_kind_of_line() {
     assert_eq!(
         footer::render(&lines, DEFAULT_MIN_FREE, None),
         "\n\
-         Free space: 40.0 GiB on the drive of /b (base_dir and sbx's sandbox state)\n\
-         Free space: the drive of /g (sbx's sandbox state) couldn't be read: no statvfs\n\
+         Free space: 40.0 GiB for base_dir and sbx's sandbox state, on the drive of /b\n\
+         Free space: couldn't be read for sbx's sandbox state (no statvfs), on the drive of /g\n\
          Free space: sbx's sandbox state folder isn't known on this platform; set \
          sandbox_state_dir in config.toml to show its drive\n"
     );
@@ -172,6 +172,37 @@ fn a_terminal_cuts_each_line_to_its_width() {
         let line: &str = line;
         assert!(line.chars().count() <= 30, "{line:?}");
     }
+}
+
+// ---- rendering: a terminal keeps the verdict (review M-2) ---------------------------------
+
+/// A path long enough that the verdict after it would be cut at 80 columns.
+const LONG: &str = "/home/someone/projects/sandboxes/sbxm-base-dir-with-a-rather-long-name";
+
+#[test]
+fn one_byte_under_still_warns_on_an_eighty_column_terminal_with_a_long_path() {
+    let under = [drive(LONG, Holds::Both, Ok(DEFAULT_MIN_FREE - 1))];
+    let at = [drive(LONG, Holds::Both, Ok(DEFAULT_MIN_FREE))];
+
+    let warned = footer::render(&under, DEFAULT_MIN_FREE, Some(80));
+    let line = warned.lines().nth(1).unwrap();
+    assert!(line.chars().count() <= 80, "{line:?}");
+    assert!(line.contains("warning"), "{line:?}");
+    assert!(line.contains("under min_free_disk 10.0 GiB"), "{line:?}");
+    let fine = footer::render(&at, DEFAULT_MIN_FREE, Some(80));
+    assert!(!fine.contains("warning"), "{fine:?}");
+    let never = footer::render(&under, 0, Some(80));
+    assert!(!never.contains("warning"), "{never:?}");
+}
+
+#[test]
+fn an_unreadable_drive_says_so_on_an_eighty_column_terminal_with_a_long_path() {
+    let lines = [drive(LONG, Holds::Both, Err("no statvfs"))];
+
+    let text = footer::render(&lines, DEFAULT_MIN_FREE, Some(80));
+    let line = text.lines().nth(1).unwrap();
+    assert!(line.chars().count() <= 80, "{line:?}");
+    assert!(line.contains("couldn't be read"), "{line:?}");
 }
 
 // ---- the command: the footer comes last ----------------------------------------------------
@@ -210,8 +241,8 @@ fn status_ends_with_the_footer_after_the_loop_section() {
 
     let text = String::from_utf8(out).unwrap();
     let footer = format!(
-        "\nFree space: the drive of {} (base_dir) couldn't be read: no statvfs\n\
-         Free space: 10.0 GiB on the drive of /state (sbx's sandbox state)\n",
+        "\nFree space: couldn't be read for base_dir (no statvfs), on the drive of {}\n\
+         Free space: 10.0 GiB for sbx's sandbox state, on the drive of /state\n",
         base.path().display()
     );
     assert!(text.ends_with(&footer), "{text}");
@@ -235,7 +266,9 @@ fn a_drive_that_cannot_be_read_never_fails_status() {
 
     let text = String::from_utf8(out).unwrap();
     assert!(
-        text.contains("the drive of /gone (sbx's sandbox state) couldn't be read"),
+        text.contains(
+            "couldn't be read for sbx's sandbox state (no statvfs), on the drive of /gone"
+        ),
         "{text}"
     );
 }
@@ -260,9 +293,9 @@ fn the_cli_warns_under_min_free_disk_on_the_state_drive() {
 
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(stdout.contains("(base_dir"), "{stdout}");
+    assert!(stdout.contains("for base_dir"), "{stdout}");
     assert!(
-        stdout.contains("warning: under min_free_disk 1024000.0 GiB"),
+        stdout.contains("is under min_free_disk 1024000.0 GiB for "),
         "{stdout}"
     );
 }
