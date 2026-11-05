@@ -10,7 +10,7 @@ use common::{Env as TestEnv, toml_path};
 use sbxm::backend::FakeBackend;
 use sbxm::commands::status::{self, Env, LoopSource};
 use sbxm::config::GlobalConfig;
-use sbxm::disk::DEFAULT_MIN_FREE;
+use sbxm::disk::{DEFAULT_MIN_FREE, describe};
 use sbxm::github::fake::FakeGitHub;
 use sbxm::status::footer::{self, Disk, Drive, Holds, Line};
 use sbxm::task::record::ProcessProbe;
@@ -240,10 +240,11 @@ fn status_ends_with_the_footer_after_the_loop_section() {
     .unwrap();
 
     let text = String::from_utf8(out).unwrap();
+    // A real temp dir: on Windows it has a drive prefix, so name it as the footer does.
     let footer = format!(
-        "\nFree space: couldn't be read for base_dir (no statvfs), on the drive of {}\n\
+        "\nFree space: couldn't be read for base_dir (no statvfs), on {}\n\
          Free space: 10.0 GiB for sbx's sandbox state, on the drive of /state\n",
-        base.path().display()
+        describe(base.path())
     );
     assert!(text.ends_with(&footer), "{text}");
     let loop_at = text.find("\nLoop").expect(&text);
