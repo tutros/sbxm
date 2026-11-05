@@ -1,8 +1,8 @@
 //! `sbxm status [--watch]` (decision 171, issue 90): the Tasks section, then the running cloud
 //! sandboxes (milestone 4 slice 8, decision 259), the local sandboxes (issue 92), the comparison
-//! runs and the Loop. Reads only: the `sbx` calls are the cloud instance's `ls` and the local
-//! instance's, once per frame each, and a list that can't be read is one line, not an error
-//! (P17 (a)).
+//! runs, the Loop and the disk footer. Reads only: the `sbx` calls are the cloud instance's `ls`
+//! and the local instance's, once per frame each, and a list that can't be read is one line, not
+//! an error (P17 (a)).
 
 #[cfg(any(unix, test))]
 use std::ffi::c_ulong;
@@ -13,8 +13,9 @@ use std::time::Duration;
 use anyhow::Result;
 
 use crate::backend::SandboxBackend;
+use crate::config::GlobalConfig;
 use crate::github::GitHubBackend;
-use crate::status::{cloud, looping, runs, sandboxes, tasks};
+use crate::status::{cloud, footer, looping, runs, sandboxes, tasks};
 use crate::task::record::ProcessProbe;
 
 /// What `sbxm status` needs from the environment, so tests don't depend on real time, real
@@ -31,16 +32,19 @@ pub struct Env {
     /// Test-only: stop the watch loop after this many frames instead of running until the
     /// process is killed. `None` in [`Env::real`].
     pub iterations: Option<usize>,
+    /// What the disk footer reads the drives with (issue 92).
+    pub disk: footer::Disk,
 }
 
 impl Env {
-    pub fn real() -> Self {
+    pub fn real(config: &GlobalConfig) -> Self {
         Self {
             now: Box::new(crate::run::results::now),
             sleep: Box::new(std::thread::sleep),
             terminal: std::io::stdout().is_terminal(),
             width: terminal_width().unwrap_or(80),
             iterations: None,
+            disk: footer::Disk::real(config),
         }
     }
 }
@@ -113,6 +117,12 @@ pub fn run_with(
             let view = loop_view(base, probe, source, &mut cache, now);
             write!(out, "{}", looping::render(&view, width))?;
         }
+        let drives = footer::read(base, &env.disk);
+        write!(
+            out,
+            "{}",
+            footer::render(&drives, env.disk.min_free_disk, width)
+        )?;
         out.flush()?;
         drawn += 1;
         let Some(interval) = watch else { break };

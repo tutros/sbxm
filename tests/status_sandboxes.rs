@@ -275,6 +275,16 @@ fn read_turns_a_failing_list_into_its_first_line() {
     );
 }
 
+/// A footer that reads no real drive: 40 GiB free, the state folder on `base_dir`'s drive.
+fn quiet_disk() -> sbxm::status::footer::Disk {
+    sbxm::status::footer::Disk {
+        free_space: |_| Ok(40 * 1024 * 1024 * 1024),
+        same_drive: |_, _| true,
+        state_dir: Some(std::path::PathBuf::from("/state")),
+        min_free_disk: sbxm::disk::DEFAULT_MIN_FREE,
+    }
+}
+
 fn env() -> Env {
     Env {
         now: Box::new(|| T0),
@@ -282,6 +292,7 @@ fn env() -> Env {
         terminal: false,
         width: 80,
         iterations: None,
+        disk: quiet_disk(),
     }
 }
 
