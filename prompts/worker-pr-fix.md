@@ -27,6 +27,11 @@ Some choices are yours and some are the user's:
 When a step needs a change that is not yours, don't make it and don't build around it. Leave that part undone, finish
 and commit everything that doesn't depend on the answer, and hand the question back in result.md.
 
+If the work needs a crate that isn't a direct dependency yet (a new dependency or dev-dependency, a version bump, a
+crate with a build script), don't edit Cargo.toml or Cargo.lock: this sandbox can't fetch crates, and the user approves
+every new crate. Leave that part undone and hand it back under "Needs a decision", naming the crate, its version and
+why it's needed. A branch whose commits change Cargo.lock is stopped before its gates.
+
 Run the checks in the foreground and wait for them. This is a headless run: it ends when you end your turn and nothing
 resumes it, so never end your turn while waiting on a background command.
 
