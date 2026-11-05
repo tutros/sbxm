@@ -63,6 +63,17 @@ pub fn parse_timestamp(s: &str) -> Option<u64> {
     if time_parts.next().is_some() {
         return None;
     }
+    // The text may come from a file `sbxm` didn't write: check every part's range before any
+    // arithmetic, so a huge number is `None` and not an overflow.
+    if !(1970..=9999).contains(&year)
+        || !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
     let days = days_from_civil(year, month, day);
     let secs = days
         .checked_mul(86_400)?

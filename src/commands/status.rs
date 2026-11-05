@@ -12,7 +12,7 @@ use std::time::Duration;
 use anyhow::Result;
 
 use crate::backend::SandboxBackend;
-use crate::status::{cloud, tasks};
+use crate::status::{cloud, runs, tasks};
 use crate::task::record::ProcessProbe;
 
 /// What `sbxm status` needs from the environment, so tests don't depend on real time, real
@@ -62,6 +62,7 @@ pub fn run(
     loop {
         let rows = tasks::rows(base, probe)?;
         let sandboxes = cloud::read(backend);
+        let comparisons = runs::read(base, backend);
         let now = (env.now)();
         let width = env.terminal.then_some(env.width);
         if env.terminal && watch.is_some() {
@@ -69,6 +70,7 @@ pub fn run(
         }
         write!(out, "{}", tasks::render(&rows, now, width))?;
         write!(out, "{}", cloud::render(&sandboxes, now, width))?;
+        write!(out, "{}", runs::render(&comparisons, now, width))?;
         out.flush()?;
         drawn += 1;
         let Some(interval) = watch else { break };
