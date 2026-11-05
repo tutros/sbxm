@@ -5,7 +5,8 @@
 //! environment stop and parks it after a second, waits out a usage limit, and stops on an empty
 //! queue (with a read-only report), two parked tasks in a row, `--cap`, the usage waits' total,
 //! or a stop request between phases. One log row per task goes to
-//! `sdlc/batches/<date>-loop.md`.
+//! `sdlc/batches/<date>-loop.md`. Before each new issue it resolves the open PRs it opened that
+//! GitHub reports conflicting with their base, with `task fix --pr N` (decision 298).
 //!
 //! The phases go through [`Steps`] so the loop's rules are tested without sandboxes;
 //! [`TaskSteps`] runs the real commands.
