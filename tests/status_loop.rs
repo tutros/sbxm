@@ -72,12 +72,13 @@ fn save(base: &Path, rec: &Record) {
     record::write(&record::task_dir(base, &rec.id), rec).unwrap();
 }
 
-/// A task the loop is working on: its process is the loop's.
+/// A task the loop is working on: still running, marked as the loop's (`hooks.task_loop`).
 fn running(number: u32, stage: Stage) -> Record {
     let mut rec = task(number);
     rec.stage = stage;
     rec.status = Status::Running;
     rec.process = Some(loop_process());
+    rec.hooks = serde_json::json!({ LOOP_HOOK: true });
     rec
 }
 
@@ -289,13 +290,41 @@ fn a_running_loop_with_no_task_running_says_so() {
 }
 
 #[test]
-fn a_task_of_another_process_is_not_the_loops() {
+fn a_running_task_without_the_loops_marker_is_not_the_loops_even_with_its_process() {
     let base = TestEnv::new();
     let b = base.base_dir();
     write_lock(&b);
-    let mut other = running(8, Stage::Working);
-    other.process = Some(Process::new(99, T0));
-    save(&b, &other);
+    let mut unmarked = running(8, Stage::Working);
+    unmarked.hooks = serde_json::Value::Null;
+    save(&b, &unmarked);
+    let gh = FakeGitHub::default().with_open_issues(Vec::new());
+
+    let text = frame(&b, &alive(), &gh, false, 80);
+
+    assert!(text.contains("  task: none running\n"), "{text}");
+}
+
+#[test]
+fn a_marked_task_whose_process_is_gone_is_not_still_running() {
+    let base = TestEnv::new();
+    let b = base.base_dir();
+    write_lock(&b);
+    let mut gone = running(8, Stage::Working);
+    gone.process = Some(Process::new(99, T0));
+    save(&b, &gone);
+    let gh = FakeGitHub::default().with_open_issues(Vec::new());
+
+    let text = frame(&b, &alive(), &gh, false, 80);
+
+    assert!(text.contains("  task: none running\n"), "{text}");
+}
+
+#[test]
+fn a_marked_finished_task_is_not_the_running_one() {
+    let base = TestEnv::new();
+    let b = base.base_dir();
+    write_lock(&b);
+    save(&b, &finished(9, T0 - 10, true));
     let gh = FakeGitHub::default().with_open_issues(Vec::new());
 
     let text = frame(&b, &alive(), &gh, false, 80);
