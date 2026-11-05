@@ -290,28 +290,55 @@ fn a_running_loop_with_no_task_running_says_so() {
 }
 
 #[test]
-fn a_running_task_without_the_loops_marker_is_not_the_loops_even_with_its_process() {
-    let base = TestEnv::new();
-    let b = base.base_dir();
-    write_lock(&b);
-    let mut unmarked = running(8, Stage::Working);
-    unmarked.hooks = serde_json::Value::Null;
-    save(&b, &unmarked);
-    let gh = FakeGitHub::default().with_open_issues(Vec::new());
+fn an_unmarked_running_task_with_the_locks_process_is_the_loops_during_work_and_review() {
+    for stage in [Stage::Working, Stage::Reviewing] {
+        let base = TestEnv::new();
+        let b = base.base_dir();
+        write_lock(&b);
+        let mut unmarked = running(8, stage);
+        unmarked.hooks = serde_json::Value::Null;
+        save(&b, &unmarked);
+        let gh = FakeGitHub::default().with_open_issues(Vec::new());
 
-    let text = frame(&b, &alive(), &gh, false, 80);
+        let text = frame(&b, &alive(), &gh, false, 80);
 
-    assert!(text.contains("  task: none running\n"), "{text}");
+        assert!(
+            text.contains(&format!("  task: issue-8 at {}\n", stage.name())),
+            "{text}"
+        );
+    }
 }
 
 #[test]
-fn a_marked_task_whose_process_is_gone_is_not_still_running() {
+fn a_marked_running_task_of_another_process_is_not_the_loops() {
+    // A different pid, and the lock's pid started at another time.
+    for other in [
+        Process::new(99, LOOP_START),
+        Process::new(1, LOOP_START + 5),
+    ] {
+        let base = TestEnv::new();
+        let b = base.base_dir();
+        write_lock(&b);
+        let mut foreign = running(8, Stage::Working);
+        foreign.process = Some(other);
+        save(&b, &foreign);
+        let gh = FakeGitHub::default().with_open_issues(Vec::new());
+
+        // Alive under every pid, so only the identity decides.
+        let text = frame(&b, &Probe(Some(LOOP_START)), &gh, false, 80);
+
+        assert!(text.contains("  task: none running\n"), "{text}");
+    }
+}
+
+#[test]
+fn a_task_that_is_not_running_is_not_the_loops_even_with_its_process() {
     let base = TestEnv::new();
     let b = base.base_dir();
     write_lock(&b);
-    let mut gone = running(8, Stage::Working);
-    gone.process = Some(Process::new(99, T0));
-    save(&b, &gone);
+    let mut failed = running(8, Stage::Working);
+    failed.status = Status::Failed;
+    save(&b, &failed);
     let gh = FakeGitHub::default().with_open_issues(Vec::new());
 
     let text = frame(&b, &alive(), &gh, false, 80);

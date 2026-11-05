@@ -129,9 +129,7 @@ fn loop_view(
 ) -> looping::View {
     let lock = looping::read_lock(base, probe);
     let work = match &lock {
-        looping::Lock::Running(process) => {
-            Some(looping::work(base, process, probe).unwrap_or_default())
-        }
+        looping::Lock::Running(process) => Some(looping::work(base, process).unwrap_or_default()),
         _ => None,
     };
     let snapshot = cache

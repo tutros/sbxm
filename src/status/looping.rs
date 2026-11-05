@@ -65,10 +65,12 @@ pub struct Work {
 }
 
 /// The loop's task and the tasks it finished, from the records under `base` (never `sbx`).
-/// The task is the marked (`hooks.task_loop`) issue task still running: `running` with its
-/// process alive (decision 294). The tasks done are the marked records finished since the lock's
-/// process started.
-pub fn work(base: &Path, lock: &Process, probe: &dyn ProcessProbe) -> anyhow::Result<Work> {
+/// The task is the issue task still `running` whose recorded process equals the lock's: the loop
+/// runs its phases in its own process, and its marker (`hooks.task_loop`) is written only when
+/// it claims a ready task for `task finish`, so it can't identify work in progress (decision
+/// 294, approved by the user 2026-11-06). The tasks done are the marked records finished since
+/// the lock's process started.
+pub fn work(base: &Path, lock: &Process) -> anyhow::Result<Work> {
     let started = parse_timestamp(&lock.started_at);
     let mut out = Work::default();
     for rec in record::load_all(base)? {
@@ -77,7 +79,7 @@ pub fn work(base: &Path, lock: &Process, probe: &dyn ProcessProbe) -> anyhow::Re
         }
         let marked = rec.hooks.get(LOOP_HOOK) == Some(&serde_json::Value::Bool(true));
         if rec.stage != Stage::Finished {
-            if marked && rec.status == Status::Running && !rec.is_interrupted(probe) {
+            if rec.status == Status::Running && rec.process.as_ref() == Some(lock) {
                 out.current = Some(Current {
                     id: rec.id.clone(),
                     stage: rec.stage.name(),
