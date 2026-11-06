@@ -6,7 +6,10 @@
 //! queue (with a read-only report), two parked tasks in a row, `--cap`, the usage waits' total,
 //! or a stop request between phases. One log row per task goes to
 //! `sdlc/batches/<date>-loop.md`. Before each new issue it resolves the open PRs it opened that
-//! GitHub reports conflicting with their base, with `task fix --pr N` (decision 298).
+//! GitHub reports conflicting with their base, with `task fix --pr N` (decision 298), then reads
+//! the workflow runs of its PRs and of `main` (decision 299): a failed run is re-run once; a
+//! second failure disarms the PR, or on `main` sets the pause that stops all arming until the
+//! user runs `task loop --clear-pause`.
 //!
 //! The phases go through [`Steps`] so the loop's rules are tested without sandboxes;
 //! [`TaskSteps`] runs the real commands.
@@ -25,11 +28,12 @@ use super::{task_file_findings, task_finish, task_fix, task_log, task_resume, ta
 use crate::backend::{Location, SandboxBackend};
 use crate::config::GlobalConfig;
 use crate::disk;
-use crate::github::{GitHubBackend, Issue, Mergeable, PrState};
+use crate::github::{GitHubBackend, Issue, Mergeable, PrState, RunStatus, WorkflowRun};
 use crate::run::results::format_timestamp;
 use crate::task::config::TaskConfig;
 use crate::task::finish::check_own_folder;
 use crate::task::gates::HostRunner;
+use crate::task::loop_pause::{self, Pause};
 use crate::task::queue::{self, READY_LABEL, Report, Row, Skipped};
 use crate::task::record::{self, Kind, Process, ProcessProbe, Record, Stage};
 use crate::task::risk::Level;
@@ -311,6 +315,18 @@ struct Loop<'a> {
     resolves: HashSet<(u32, String)>,
     /// The PRs whose resolve failed: left to the user for the rest of the run.
     unresolved: HashSet<u32>,
+    /// The PRs this run armed, watched for their merge commit (decision 299, answer 4).
+    armed: HashSet<u32>,
+    /// The commits of `main` watched until each of their runs is over and acted on (review M-1
+    /// to M-3): merge commits of PRs this run armed, and every tip seen.
+    watched: Vec<Watched>,
+    /// The runs whose failed jobs this run re-ran, so a lagging answer isn't re-run twice.
+    reruns: HashSet<u64>,
+    /// The (PR, run) second failures already acted on: said once.
+    failed_twice: HashSet<(u32, u64)>,
+    /// The (commit, run) second failures on `main` already paused for (or found paused): a pause
+    /// the user cleared isn't set again for the same run.
+    paused_for: HashSet<(String, u64)>,
     log: PathBuf,
 }
 
@@ -908,6 +924,9 @@ impl Loop<'_> {
         let Some(reviewed) = review.commit.as_deref() else {
             return waits("the commit the review covered is unknown".to_owned(), out);
         };
+        if self.paused(warn)? {
+            return Ok(Some(Self::not_armed_paused(number, out)?));
+        }
         let state = match self.github.pr_merge_state(&self.repo, number) {
             Ok(state) => state,
             Err(e) => return self.arming_failed(number, &e, out, warn),
@@ -930,6 +949,7 @@ impl Loop<'_> {
         }
         match self.github.pr_arm_auto_merge(&self.repo, number, reviewed) {
             Ok(()) => {
+                self.armed.insert(number);
                 writeln!(out, "PR #{number}: auto-merge armed on {reviewed}")?;
                 Ok(Some("auto-merge armed".to_owned()))
             }
@@ -1187,6 +1207,9 @@ impl Loop<'_> {
             )?;
             return Ok(None);
         }
+        if self.paused(warn)? {
+            return Ok(Some(Self::not_armed_paused(number, out)?));
+        }
         if review.risk != Level::Low {
             writeln!(
                 out,
@@ -1222,11 +1245,383 @@ impl Loop<'_> {
         }
         match self.github.pr_arm_auto_merge(&self.repo, number, reviewed) {
             Ok(()) => {
+                self.armed.insert(number);
                 writeln!(out, "PR #{number}: auto-merge armed again on {reviewed}")?;
                 Ok(Some("auto-merge armed".to_owned()))
             }
             Err(e) => self.arming_failed(number, &e, out, warn),
         }
+    }
+
+    /// Whether the loop is paused on a red `main` (decision 299), read from the pause file each
+    /// time, so the user's `--clear-pause` counts at once. A file that can't be read counts as a
+    /// pause, with a warning naming it.
+    fn paused(&mut self, warn: &mut dyn Write) -> Result<bool> {
+        match loop_pause::read(&self.base_dir) {
+            loop_pause::State::None => Ok(false),
+            loop_pause::State::Set(_) => Ok(true),
+            loop_pause::State::Unreadable(why) => {
+                self.warn_once(
+                    warn,
+                    format!(
+                        "{why}; counted as a pause on a red main: nothing is armed until you run \
+                         `sbxm task loop --clear-pause`"
+                    ),
+                )?;
+                Ok(true)
+            }
+        }
+    }
+
+    /// A PR not armed because of the pause: said, and the log row's note.
+    fn not_armed_paused(number: u32, out: &mut dyn Write) -> Result<String> {
+        writeln!(
+            out,
+            "PR #{number} awaits you: the loop is paused on a red main and arms nothing until you \
+             run `sbxm task loop --clear-pause`"
+        )?;
+        Ok("auto-merge not armed: paused on a red main".to_owned())
+    }
+
+    /// The pass over workflow runs (decision 299), after the resolves and before the wait for
+    /// PRs: `main` first, so a pause set now disarms the PRs in the same pass.
+    fn check_runs(&mut self, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
+        self.check_main(out, warn)?;
+        if let loop_pause::State::Set(pause) = loop_pause::read(&self.base_dir) {
+            self.paused_for.insert((pause.commit.clone(), pause.run_id));
+            self.say_once(out, paused_line(&pause))?;
+        }
+        self.check_prs(out, warn)
+    }
+
+    /// Reads `commit`'s runs (`what` names it in messages): the failed jobs of a run's first
+    /// failure are re-run once. `None` when the runs can't be read.
+    fn read_runs(
+        &mut self,
+        commit: &str,
+        what: &str,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<Option<RunsRead>> {
+        let runs = match self.github.commit_runs(&self.repo, commit) {
+            Ok(runs) => runs,
+            Err(e) => {
+                self.warn_once(
+                    warn,
+                    format!(
+                        "the workflow runs of {what} ({commit}) can't be read ({e:#}); they are \
+                         read again at the next pass"
+                    ),
+                )?;
+                return Ok(None);
+            }
+        };
+        let mut failed = Vec::new();
+        let listed = !runs.is_empty();
+        let mut over = listed;
+        for run in runs {
+            match run.status {
+                RunStatus::Passed => {}
+                RunStatus::Going => over = false,
+                RunStatus::Failed if run.attempt > 1 => failed.push(run),
+                RunStatus::Failed => {
+                    over = false;
+                    if self.reruns.contains(&run.id) {
+                        continue;
+                    }
+                    match self.github.run_rerun_failed(&self.repo, run.id) {
+                        Ok(()) => {
+                            self.reruns.insert(run.id);
+                            writeln!(
+                                out,
+                                "{what}: {} failed ({}); its failed jobs are re-run once",
+                                run.workflow, run.url
+                            )?;
+                        }
+                        Err(e) => self.warn_once(
+                            warn,
+                            format!(
+                                "the failed jobs of {what}'s run {} could not be re-run ({e:#}); \
+                                 tried again at the next pass",
+                                run.url
+                            ),
+                        )?,
+                    }
+                }
+            }
+        }
+        Ok(Some(RunsRead {
+            failed,
+            over,
+            listed,
+        }))
+    }
+
+    /// `main`'s side of the pass (decision 299, answer 4): the merge commits of the PRs this run
+    /// armed that merged since, and `main`'s tip whoever merged it. A second failure sets the
+    /// pause. Each such commit stays watched, after `main` moves on too, until every run on it is
+    /// over and each second failure got its pause (review M-1 to M-3).
+    fn check_main(&mut self, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
+        let mut armed: Vec<u32> = self.armed.iter().copied().collect();
+        armed.sort_unstable();
+        for number in armed {
+            match self.github.pr_merge_commit(&self.repo, number) {
+                Ok(Some(commit)) => {
+                    self.armed.remove(&number);
+                    self.watch(commit, Some(number));
+                }
+                Ok(None) => {}
+                Err(e) => self.warn_once(
+                    warn,
+                    format!(
+                        "PR #{number}'s merge can't be read ({e:#}); it is read again at the next \
+                         pass"
+                    ),
+                )?,
+            }
+        }
+        match self.base_tip() {
+            Ok((_, tip)) => self.watch(tip, None),
+            Err(e) => self.warn_once(
+                warn,
+                format!(
+                    "the base's head could not be read ({e:#}); its workflow runs are read at a \
+                     later pass"
+                ),
+            )?,
+        }
+        let commits: Vec<(String, Option<u32>)> = self
+            .watched
+            .iter()
+            .map(|w| (w.commit.clone(), w.pr))
+            .collect();
+        for (commit, pr) in commits {
+            let what = match pr {
+                Some(number) => format!("PR #{number}'s merge commit"),
+                None => format!("main's commit {commit}"),
+            };
+            let Some(read) = self.read_runs(&commit, &what, out, warn)? else {
+                continue;
+            };
+            for run in &read.failed {
+                self.pause(&commit, pr, run, out)?;
+            }
+            let acted = read
+                .failed
+                .iter()
+                .all(|run| self.paused_for.contains(&(commit.clone(), run.id)));
+            self.note_listing(&commit, read.listed, out)?;
+            if read.over && acted {
+                self.watched.retain(|w| w.commit != commit);
+            }
+        }
+        Ok(())
+    }
+
+    /// Adds `commit` to the commits of `main` read at every pass, once; `pr`: the PR this run
+    /// armed that merged into it.
+    fn watch(&mut self, commit: String, pr: Option<u32>) {
+        match self.watched.iter_mut().find(|w| w.commit == commit) {
+            Some(watched) => watched.pr = watched.pr.or(pr),
+            None => {
+                let since = self.now();
+                self.watched.push(Watched {
+                    commit,
+                    pr,
+                    since,
+                    runs_seen: false,
+                    said_no_runs: false,
+                });
+            }
+        }
+    }
+
+    /// Notes whether a read listed runs for the watched `commit`; one with none listed ever,
+    /// [`NO_RUNS_AFTER`] after the loop first watched it, is said once and stays watched.
+    fn note_listing(&mut self, commit: &str, listed: bool, out: &mut dyn Write) -> Result<()> {
+        let now = self.now();
+        let Some(watched) = self.watched.iter_mut().find(|w| w.commit == commit) else {
+            return Ok(());
+        };
+        if listed {
+            watched.runs_seen = true;
+            return Ok(());
+        }
+        if watched.runs_seen
+            || watched.said_no_runs
+            || now.saturating_sub(watched.since) < NO_RUNS_AFTER
+        {
+            return Ok(());
+        }
+        watched.said_no_runs = true;
+        writeln!(
+            out,
+            "no CI runs seen for {commit} after 1 h; still watching"
+        )?;
+        Ok(())
+    }
+
+    /// Sets the pause for `run`, which failed again on `main`'s `commit` (`pr`: the PR this run
+    /// armed that merged into it), unless a pause is there already or the user cleared one for
+    /// this run. A pause that can't be written stops the loop, so nothing more is armed.
+    fn pause(
+        &mut self,
+        commit: &str,
+        pr: Option<u32>,
+        run: &WorkflowRun,
+        out: &mut dyn Write,
+    ) -> Result<()> {
+        // Only the run a pause is for is marked (review M-3): another run's failure seen while a
+        // pause stands gets its own pause once the user clears this one.
+        if self.paused_for.contains(&(commit.to_owned(), run.id))
+            || loop_pause::read(&self.base_dir).paused()
+        {
+            return Ok(());
+        }
+        let merged_by = match pr {
+            Some(number) => format!("the loop's auto-merge of PR #{number}"),
+            None if run.actor.is_empty() => "someone unknown".to_owned(),
+            None => run.actor.clone(),
+        };
+        let pause = Pause {
+            commit: commit.to_owned(),
+            run_id: run.id,
+            run_url: run.url.clone(),
+            workflow: run.workflow.clone(),
+            merged_by,
+            at: format_timestamp(self.now()),
+        };
+        loop_pause::write(&self.base_dir, &pause).context(
+            "main failed again after a re-run but the loop can't record its pause; the loop \
+             stops so that nothing more is armed",
+        )?;
+        self.paused_for.insert((commit.to_owned(), run.id));
+        self.say_once(out, paused_line(&pause))
+    }
+
+    /// The PRs' side of the pass (decision 299): every open PR the loop opened, drafts included.
+    /// While paused, armed ones are disarmed. A run that failed again after its re-run disarms
+    /// the PR if armed; the PR then awaits the user, said once with a log row.
+    fn check_prs(&mut self, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
+        let paused = self.paused(warn)?;
+        let mut prs: Vec<u32> = queue::loop_prs(&self.base_dir, &self.repo)?
+            .into_iter()
+            .filter_map(|pr| pr.number)
+            .collect();
+        prs.sort_unstable();
+        prs.dedup();
+        for number in prs {
+            // A PR that can't be read is warned about among the PRs awaiting the user.
+            let Ok(state) = self.github.pr_merge_state(&self.repo, number) else {
+                continue;
+            };
+            if state.state != PrState::Open {
+                continue;
+            }
+            let mut armed = state.auto_merge;
+            if armed && paused {
+                match self.github.pr_disarm_auto_merge(&self.repo, number) {
+                    Ok(()) => {
+                        self.armed.remove(&number);
+                        armed = false;
+                        writeln!(
+                            out,
+                            "PR #{number}: auto-merge disarmed while the loop is paused on a red \
+                             main"
+                        )?;
+                    }
+                    Err(e) => self.warn_once(
+                        warn,
+                        format!(
+                            "auto-merge could not be disarmed on PR #{number} while the loop is \
+                             paused ({e:#}); tried again at the next pass"
+                        ),
+                    )?,
+                }
+            }
+            let head = match self.github.pr(&self.repo, number) {
+                Ok(pr) => pr.head_oid,
+                Err(e) => {
+                    self.warn_once(
+                        warn,
+                        format!(
+                            "PR #{number} can't be read ({e:#}); its workflow runs are read at a \
+                             later pass"
+                        ),
+                    )?;
+                    continue;
+                }
+            };
+            let what = format!("PR #{number}");
+            let Some(read) = self.read_runs(&head, &what, out, warn)? else {
+                continue;
+            };
+            // Each second failure once (review M-3): one already said doesn't hide a newer one.
+            let new: Vec<WorkflowRun> = read
+                .failed
+                .into_iter()
+                .filter(|run| !self.failed_twice.contains(&(number, run.id)))
+                .collect();
+            let Some(run) = new.first() else {
+                continue;
+            };
+            if armed {
+                if let Err(e) = self.github.pr_disarm_auto_merge(&self.repo, number) {
+                    self.warn_once(
+                        warn,
+                        format!(
+                            "auto-merge could not be disarmed on PR #{number}, whose {} failed \
+                             again after a re-run ({e:#}); tried again at the next pass",
+                            run.workflow
+                        ),
+                    )?;
+                    continue;
+                }
+                self.armed.remove(&number);
+            }
+            for (i, run) in new.iter().enumerate() {
+                // The disarm goes with the first new failure's line and row.
+                let disarmed = armed && i == 0;
+                self.failed_twice.insert((number, run.id));
+                writeln!(
+                    out,
+                    "PR #{number} awaits you: its {} failed again after a re-run ({}){}",
+                    run.workflow,
+                    run.url,
+                    if disarmed {
+                        "; auto-merge disarmed"
+                    } else {
+                        ""
+                    }
+                )?;
+                let row = Row {
+                    issue: number,
+                    title: format!("checks: {} failed again after a re-run", run.workflow),
+                    size: None,
+                    started: self.now(),
+                    ready: None,
+                    worker_s: None,
+                    reviewer_s: None,
+                    rounds: None,
+                    must_fix: None,
+                    outcome: if disarmed {
+                        "auto-merge disarmed; awaits you"
+                    } else {
+                        "awaits you"
+                    }
+                    .to_owned(),
+                    stops: Vec::new(),
+                    idle_before: None,
+                };
+                if let Err(e) = queue::append_resolve_row(&self.log, &row) {
+                    self.warn_once(
+                        warn,
+                        format!("{e:#}; the loop goes on without that log row"),
+                    )?;
+                }
+            }
+        }
+        Ok(())
     }
 
     fn append(&mut self, row: &Row, warn: &mut dyn Write) -> Result<()> {
@@ -1240,6 +1635,34 @@ impl Loop<'_> {
     }
 }
 
+/// A commit of `main` the loop reads at every pass until it is done with it (decision 299).
+struct Watched {
+    commit: String,
+    /// The PR this run armed that merged into it.
+    pr: Option<u32>,
+    /// When the loop first watched it, kept while it stays watched, after `main` moves on too.
+    since: u64,
+    /// Whether any read listed a run for it.
+    runs_seen: bool,
+    /// Whether [`NO_RUNS_AFTER`]'s line was said for it.
+    said_no_runs: bool,
+}
+
+/// How long a watched commit may go without any run listed before the loop says so, once, and
+/// goes on watching (the user's answer on issue 442, 2026-11-05).
+const NO_RUNS_AFTER: u64 = 60 * 60;
+
+/// What one read of a commit's runs found.
+struct RunsRead {
+    /// The runs that failed again after a re-run.
+    failed: Vec<WorkflowRun>,
+    /// At least one run listed, none going and none just re-run. A commit with no runs listed
+    /// isn't over: GitHub lists them some time after the push (review M-2), so its watch goes on.
+    over: bool,
+    /// At least one run listed.
+    listed: bool,
+}
+
 /// [`Loop::arm`]'s checks on a task's record: no work stop, a review with 0 must-fix and low risk
 /// after the path-rule floor.
 fn passes_arm_checks(rec: &Record) -> bool {
@@ -1248,6 +1671,22 @@ fn passes_arm_checks(rec: &Record) -> bool {
             .review
             .as_ref()
             .is_some_and(|r| r.must_fix == 0 && r.risk == Level::Low)
+}
+
+/// The line saying the loop is paused on a red `main`.
+fn paused_line(pause: &Pause) -> String {
+    format!(
+        "paused on a red main: {}; the loop arms nothing until you run `sbxm task loop \
+         --clear-pause`",
+        pause.describe()
+    )
+}
+
+/// `sbxm task loop --clear-pause` (decision 299): lifts the pause a red `main` set, saying what
+/// it removed, or that there was none.
+pub fn clear_pause(config_dir: &Path, out: &mut dyn Write) -> Result<()> {
+    let base_dir = GlobalConfig::load(config_dir)?.base_dir;
+    loop_pause::clear(&base_dir, out)
 }
 
 fn first_line(text: &str) -> String {
@@ -1301,6 +1740,11 @@ pub fn run(
         said: HashSet::new(),
         resolves: HashSet::new(),
         unresolved: HashSet::new(),
+        armed: HashSet::new(),
+        watched: Vec::new(),
+        reruns: HashSet::new(),
+        failed_twice: HashSet::new(),
+        paused_for: HashSet::new(),
         log: opts
             .repo_root
             .join("sdlc")
@@ -1336,7 +1780,11 @@ pub fn run(
             return Ok(());
         }
         lp.clean_merged(out, warn)?;
-        if !lp.resolve_conflicts(out, warn)? || !lp.wait_for_prs(out, warn)? {
+        let go_on = lp.resolve_conflicts(out, warn)? && {
+            lp.check_runs(out, warn)?;
+            lp.wait_for_prs(out, warn)?
+        };
+        if !go_on {
             writeln!(out, "stopped on request")?;
             left(&held, &due, out)?;
             return Ok(());

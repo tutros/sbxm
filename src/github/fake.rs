@@ -6,7 +6,7 @@ use anyhow::{Result, anyhow};
 
 use super::{
     CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, ListedPr, Mergeable, PrComment,
-    PrInfo, PrMergeState, PrRequest, PrState,
+    PrInfo, PrMergeState, PrRequest, PrState, RunStatus, WorkflowRun,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -35,6 +35,11 @@ pub enum GhCall {
     IssueLabels(String, u32, Vec<String>, Vec<String>),
     /// Repo, commit, status.
     CommitStatus(String, String, CommitStatus),
+    /// Repo, commit.
+    CommitRuns(String, String),
+    /// Repo, run id.
+    RunRerunFailed(String, u64),
+    PrMergeCommit(String, u32),
 }
 
 #[derive(Default)]
@@ -72,6 +77,10 @@ pub struct FakeGitHub {
     comment_failure: Option<String>,
     status_failure: Option<String>,
     arm_failure: Option<String>,
+    /// What `commit_runs` answers, by commit; no runs for a commit not scripted.
+    runs: Mutex<Vec<(String, Vec<WorkflowRun>)>>,
+    /// What `pr_merge_commit` answers, by PR; not merged when not scripted.
+    merge_commits: Mutex<Vec<(u32, String)>>,
     calls: Mutex<Vec<GhCall>>,
 }
 
@@ -238,6 +247,31 @@ impl FakeGitHub {
     pub fn failing_arm(mut self, message: &str) -> Self {
         self.arm_failure = Some(message.to_owned());
         self
+    }
+
+    /// What `commit_runs` answers for `sha` from now on.
+    pub fn set_runs(&self, sha: &str, runs: Vec<WorkflowRun>) {
+        let mut all = self.runs.lock().unwrap();
+        all.retain(|(s, _)| s != sha);
+        all.push((sha.to_owned(), runs));
+    }
+
+    pub fn with_runs(self, sha: &str, runs: Vec<WorkflowRun>) -> Self {
+        self.set_runs(sha, runs);
+        self
+    }
+
+    /// Merges the scripted PR `number` into `sha`: `pr_merge_commit` names it, and `pr` and
+    /// `pr_merge_state` say merged.
+    pub fn set_merged(&self, number: u32, sha: &str) {
+        let mut all = self.merge_commits.lock().unwrap();
+        all.retain(|(n, _)| *n != number);
+        all.push((number, sha.to_owned()));
+        for pr in self.prs.lock().unwrap().iter_mut() {
+            if pr.number == number {
+                pr.state = PrState::Merged;
+            }
+        }
     }
 
     /// Every call fails with `message` (and is still recorded).
@@ -535,5 +569,40 @@ impl GitHubBackend for FakeGitHub {
             Some(message) => Err(anyhow!("{message}")),
             None => Ok(()),
         }
+    }
+
+    fn commit_runs(&self, repo: &str, sha: &str) -> Result<Vec<WorkflowRun>> {
+        self.record(GhCall::CommitRuns(repo.to_owned(), sha.to_owned()))?;
+        Ok(self
+            .runs
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(s, _)| s == sha)
+            .map(|(_, runs)| runs.clone())
+            .unwrap_or_default())
+    }
+
+    /// As GitHub does: the run's next attempt, queued.
+    fn run_rerun_failed(&self, repo: &str, id: u64) -> Result<()> {
+        self.record(GhCall::RunRerunFailed(repo.to_owned(), id))?;
+        for (_, runs) in self.runs.lock().unwrap().iter_mut() {
+            for run in runs.iter_mut().filter(|r| r.id == id) {
+                run.attempt += 1;
+                run.status = RunStatus::Going;
+            }
+        }
+        Ok(())
+    }
+
+    fn pr_merge_commit(&self, repo: &str, number: u32) -> Result<Option<String>> {
+        self.record(GhCall::PrMergeCommit(repo.to_owned(), number))?;
+        Ok(self
+            .merge_commits
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(n, _)| *n == number)
+            .map(|(_, sha)| sha.clone()))
     }
 }

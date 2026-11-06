@@ -554,7 +554,9 @@ pub enum TaskCommand {
     /// doesn't count) or the disk is low; resumes a task once after an environment stop and parks
     /// it after a second; waits out a usage limit ([loop] in sbxm-task.toml). Stops on an empty
     /// queue (with a report of the almost-ready issues), two parked tasks in a row, or --cap. One
-    /// log row per task goes to sdlc/batches/<date>-loop.md.
+    /// log row per task goes to sdlc/batches/<date>-loop.md. Re-runs a failed workflow run of its
+    /// PRs and of main once; on a second failure disarms the PR, or pauses all arming on a red
+    /// main until --clear-pause.
     Loop {
         /// Run at most this many tasks.
         #[arg(long, value_name = "N")]
@@ -562,6 +564,9 @@ pub enum TaskCommand {
         /// Run these issues in this order instead of the queue (repeatable).
         #[arg(long = "issue", value_name = "N")]
         issues: Vec<u32>,
+        /// Lift the pause a red main set (it says what it removed) and run nothing.
+        #[arg(long, conflicts_with_all = ["cap", "issues"])]
+        clear_pause: bool,
     },
     /// Print a task's run.log (decision 170, part 1). Read-only: never writes to the log itself.
     #[command(group(clap::ArgGroup::new("logs_target").required(true).args(["issue", "pr", "spec"])))]

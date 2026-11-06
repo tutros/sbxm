@@ -140,6 +140,33 @@ pub struct CommitStatus {
     pub description: String,
 }
 
+/// Where a workflow run stands (issue 442, decision 299).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunStatus {
+    /// Queued, waiting or in progress.
+    Going,
+    /// Completed with any conclusion but a failure (success, skipped, neutral, cancelled...).
+    Passed,
+    /// Completed as `failure`, `timed_out` or `startup_failure`.
+    Failed,
+}
+
+/// A GitHub Actions workflow run of a commit, at its latest attempt (`gh api
+/// repos/<repo>/actions/runs?head_sha=<sha>`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkflowRun {
+    pub id: u64,
+    /// The workflow's name.
+    pub workflow: String,
+    /// GitHub's attempt number: 1 for the first run, 2 after one re-run.
+    pub attempt: u32,
+    pub status: RunStatus,
+    pub url: String,
+    /// The login of who triggered the run's first attempt (for a push to `main`, who merged);
+    /// empty when GitHub didn't say.
+    pub actor: String,
+}
+
 pub trait GitHubBackend: Send + Sync {
     fn whoami(&self) -> Result<String>;
     fn default_branch(&self, repo: &str) -> Result<String>;
@@ -184,4 +211,13 @@ pub trait GitHubBackend: Send + Sync {
     ) -> Result<()>;
     /// Posts `status` on commit `sha` (a full commit id).
     fn commit_status(&self, repo: &str, sha: &str, status: &CommitStatus) -> Result<()>;
+    /// Every workflow run of commit `sha` (a full commit id), each at its latest attempt (issue
+    /// 442).
+    fn commit_runs(&self, repo: &str, sha: &str) -> Result<Vec<WorkflowRun>>;
+    /// Re-runs the failed jobs of run `id` (`gh run rerun <id> --failed`), which makes its next
+    /// attempt (issue 442).
+    fn run_rerun_failed(&self, repo: &str, id: u64) -> Result<()>;
+    /// The merge commit of PR `number` once GitHub merged it, a full commit id; `None` while it
+    /// isn't merged (issue 442).
+    fn pr_merge_commit(&self, repo: &str, number: u32) -> Result<Option<String>>;
 }
