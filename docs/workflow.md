@@ -236,6 +236,17 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
   left) leaves the PR and its fix task to you: said once, counted toward the cap, not tried again in that run.
   Resolves don't count toward `--cap`; each gets its own row in the loop's log.
 
+- **`task loop` watches the checks (decision 299, issue 442):** on each pass, after the resolves and before the wait
+  on 5 PRs, the loop reads the workflow runs of the head of each open PR it opened (drafts too), of the merge commit
+  of each PR it armed that merged since the last pass, and of `main`'s tip. A run still going is left for the next
+  pass. A failed run at attempt 1 gets its failed jobs re-run once (`gh run rerun <id> --failed`); a re-run that
+  passes ends it. A second failure (attempt 2 or later) on a PR disarms its auto-merge if armed: the PR awaits you,
+  said once with a row in the loop's log. A second failure on `main` writes `<base_dir>\.sbxm\loop-pause.json`
+  (the commit, the run, who merged it, when): while it is there the loop still runs tasks and opens PRs, but arms
+  nothing, a resolve's re-arm included, and disarms every loop PR that has auto-merge armed. `sbxm status` shows it in
+  the Loop section. Only you lift it, after looking at `main`: `sbxm task loop --clear-pause` (it says what it
+  removed). A pause file that can't be read counts as a pause, with a warning.
+
 ### The same tasks in Docker Cloud Sandboxes (milestone 4)
 
 ```
