@@ -166,10 +166,10 @@ fn repo_decision_files() -> Vec<(String, String)> {
     files
 }
 
-fn tracked_md_and_rs_files() -> Vec<String> {
+fn tracked_md_and_rs_files(root: &Path) -> Vec<String> {
     let output = Command::new("git")
         .arg("-C")
-        .arg(repo())
+        .arg(root)
         .args(["ls-files", "-z", "--", "*.md", "*.rs"])
         .output()
         .expect("git runs");
@@ -181,6 +181,10 @@ fn tracked_md_and_rs_files() -> Vec<String> {
         .map(str::to_string)
         .collect()
 }
+
+/// The word a reference starts with. The tests build their deliberately missing references from
+/// it, so this file holds no literal reference that the repo scan would read as a real one.
+const WORD: &str = "decision";
 
 fn named(files: &[(&str, &str)]) -> Vec<(String, String)> {
     files
@@ -213,20 +217,22 @@ fn allow_listed_numbers_really_have_no_file() {
     }
 }
 
+/// Every unresolved reference in the tracked `.md` and `.rs` files of the git checkout at `root`.
+fn reference_problems(root: &Path, known: &BTreeMap<u32, String>) -> Vec<String> {
+    let mut problems = Vec::new();
+    for path in tracked_md_and_rs_files(root) {
+        let Ok(text) = std::fs::read_to_string(root.join(&path)) else {
+            continue; // deleted in the working tree, or not UTF-8
+        };
+        problems.extend(unresolved_references(&path, &text, known));
+    }
+    problems
+}
+
 #[test]
 fn every_reference_to_a_decision_in_tracked_files_resolves_to_a_file() {
     let numbers = check_files(&repo_decision_files()).unwrap();
-    let mut problems = Vec::new();
-    for path in tracked_md_and_rs_files() {
-        // This file's own test inputs name numbers that have no file on purpose.
-        if path == "tests/decisions.rs" {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(repo().join(&path)) else {
-            continue; // deleted in the working tree, or not UTF-8
-        };
-        problems.extend(unresolved_references(&path, &text, &numbers));
-    }
+    let problems = reference_problems(repo(), &numbers);
     assert!(problems.is_empty(), "{problems:#?}");
 }
 
@@ -395,20 +401,23 @@ fn a_reference_to_a_number_with_no_file_names_the_file_and_line() {
 #[test]
 fn four_digit_references_are_checked_like_any_other() {
     let none = BTreeMap::new();
+    let missing = |path: &str, line: usize, n: u32| {
+        format!("{path}:{line}: {WORD} {n} has no file in sdlc/decisions/")
+    };
     assert_eq!(
-        unresolved_references("docs/probe.md", "x\ndecision 1000\n", &none),
-        ["docs/probe.md:2: decision 1000 has no file in sdlc/decisions/"]
+        unresolved_references("docs/probe.md", &format!("x\n{WORD} 1000\n"), &none),
+        [missing("docs/probe.md", 2, 1000)]
     );
     for line in [
-        "decisions 9998, 9999",
-        "decisions 9998-9999",
-        "[9998][9999]",
+        format!("{WORD}s 9998, 9999"),
+        format!("{WORD}s 9998-9999"),
+        "[9998][9999]".to_string(),
     ] {
         assert_eq!(
-            unresolved_references("sdlc/probe.md", line, &none),
+            unresolved_references("sdlc/probe.md", &line, &none),
             [
-                "sdlc/probe.md:1: decision 9998 has no file in sdlc/decisions/",
-                "sdlc/probe.md:1: decision 9999 has no file in sdlc/decisions/",
+                missing("sdlc/probe.md", 1, 9998),
+                missing("sdlc/probe.md", 1, 9999)
             ],
             "{line}"
         );
@@ -419,8 +428,8 @@ fn four_digit_references_are_checked_like_any_other() {
         ("9999-c.md", "9999. **C:** text\n"),
     ]))
     .unwrap();
-    let text = "decision 1000\ndecisions 9998, 9999\ndecisions 9998-9999\n";
-    assert!(unresolved_references("docs/probe.md", text, &known).is_empty());
+    let text = format!("{WORD} 1000\n{WORD}s 9998, 9999\n{WORD}s 9998-9999\n");
+    assert!(unresolved_references("docs/probe.md", &text, &known).is_empty());
 }
 
 #[test]
@@ -435,6 +444,32 @@ fn a_date_right_after_a_reference_is_still_no_reference() {
     );
     assert_eq!(references_in_line("decision 7, 2026-10", false), [7]);
     assert!(references_in_line("decision 2026-10-22", false).is_empty());
+}
+
+// Review M-2: the scan reads every tracked file, this test file included.
+#[test]
+fn the_repo_scan_reads_every_tracked_file_this_test_file_included() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    std::fs::create_dir_all(dir.join("tests")).unwrap();
+    std::fs::create_dir_all(dir.join("docs")).unwrap();
+    let missing = format!("// This follows {WORD} 1000.\n");
+    std::fs::write(dir.join("tests/decisions.rs"), &missing).unwrap();
+    std::fs::write(dir.join("docs/a.md"), format!("x\n{missing}")).unwrap();
+    std::fs::write(dir.join("docs/untracked.md"), &missing).unwrap();
+    git(dir, &["init", "-q"]);
+    git(dir, &["add", "tests/decisions.rs", "docs/a.md"]);
+
+    let mut problems = reference_problems(dir, &BTreeMap::new());
+    problems.sort();
+
+    assert_eq!(
+        problems,
+        [
+            format!("docs/a.md:2: {WORD} 1000 has no file in sdlc/decisions/"),
+            format!("tests/decisions.rs:1: {WORD} 1000 has no file in sdlc/decisions/"),
+        ]
+    );
 }
 
 // --- Two branches adding a decision each ---
