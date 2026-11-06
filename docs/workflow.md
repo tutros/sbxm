@@ -386,7 +386,7 @@ A worker can fix a PR's review finding from a spec. The branch to fix must be wh
 
 ## How a change to sbxm itself goes
 
-1. Plan with the `sdlc-planning` skill: numbered decisions in `sdlc/decisions.md`, spikes for unknowns.
+1. Plan with the `sdlc-planning` skill: numbered decisions in `sdlc/decisions/` (a new decision is a new file), spikes for unknowns.
 2. File the work as issues; run `task start` and `task review`, then `task finish`.
 3. The independent review: for a PR `task finish` opened, the in-task review it posted is that review (decision
    187); run `task review --pr N` after any later commit on the PR, and on a PR made some other way. Fix what it

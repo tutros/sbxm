@@ -9,7 +9,8 @@ Planning turns a brief (e.g. `sdlc/idea.md`) into three artifacts:
 
 | Artifact | Contents |
 |---|---|
-| `sdlc/decisions.md` | Numbered decisions, grouped by round with dates; spike results; open spikes |
+| `sdlc/decisions/` | Numbered decisions, one file each (`NNNN-<slug>.md`, decision 303) |
+| `sdlc/decisions.md` | Rounds with dates (each names its decisions); spike results; open spikes |
 | `milestone-N.md` | The implementation plan for one milestone |
 | `CLAUDE.md` | The durable constraints that future sessions must know (points to the two files above) |
 
@@ -35,8 +36,9 @@ Also:
 
 ## Step 3: Log decisions right away
 
-After each round, before asking the next, append to `sdlc/decisions.md`:
-- `## Round N (YYYY-MM-DD)` with one numbered entry per decision. Include the user's actual choice, not the lean, when they differ, plus any nuance they added.
+After each round, before asking the next, record it:
+- A new decision is a new file in `sdlc/decisions/`: `NNNN-<slug>.md`, the number padded to 4 digits (the next free one: one above the highest file, or the one an issue reserved), a short lowercase slug of its title (`[a-z0-9-]`, at most 50 characters), and the entry as its text, first line `N. **Title (YYYY-MM-DD, ...):** text`. Include the user's actual choice, not the lean, when they differ, plus any nuance they added. `cargo test --test decisions` checks the names, numbers and references.
+- In `sdlc/decisions.md`, a `## Round N (YYYY-MM-DD)` heading with one line naming its decisions ("Decisions N-M: `sdlc/decisions/`").
 - Facts learned from docs or research that affect the design, as a separate subsection, with source links.
 - Never rewrite a past decision silently. When one changes, add a new numbered decision that says which earlier numbers it supersedes.
 

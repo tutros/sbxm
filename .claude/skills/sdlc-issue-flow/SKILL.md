@@ -21,7 +21,7 @@ build sbxm tasks run with (a machine's own wrapper; never a fresh `cargo run`).
 - Decision 244: if the change has a limit, a size or an identity, the body lists the boundary cases.
 - Decision 273: if it depends on an external tool's behavior a spike recorded, re-run that check by hand first.
 - Decision 292: reserve the number of any decision the issue adds now, in the body ("this adds decision N", gap
-  G41), and have its new tests go in a file or section of the issue's own, never appended at the end of a shared
+  G41; a new decision is a new file in `sdlc/decisions/`, decision 303), and have its new tests go in a file or section of the issue's own, never appended at the end of a shared
   test file: two open PRs that append at the same place conflict once one merges.
 - Decision 286 (an experiment, two groups): issues that touch the same code and are to be done in order go to one
   worker as one spec (`task run --spec`), with every issue's acceptance checks; the PR closes all of them. Each
