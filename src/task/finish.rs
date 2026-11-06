@@ -1869,7 +1869,8 @@ fn post_issue_summaries(
             Some(id) => {
                 if let Err(e) = github.issue_comment_edit(&repo, id, &body) {
                     warnings.push(format!(
-                        "the summary of the review rounds on issue #{issue} (comment {id})                          couldn't be updated: {e:#}"
+                        "the summary of the review rounds on issue #{issue} (comment {id}) \
+                         couldn't be updated: {e:#}"
                     ));
                 }
             }
@@ -1881,7 +1882,8 @@ fn post_issue_summaries(
                         .push(record::IssueComment { issue, id });
                     if let Err(e) = record::write(&prepared.meta, &prepared.record) {
                         warnings.push(format!(
-                            "the summary of the review rounds is posted on issue #{issue}, but                              task.json couldn't record it ({e:#}); a later finish posts another"
+                            "the summary of the review rounds is posted on issue #{issue}, but \
+                             task.json couldn't record it ({e:#}); a later finish posts another"
                         ));
                     }
                 }

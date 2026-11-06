@@ -347,9 +347,9 @@ fn a_failing_edit_is_a_warning_and_the_finish_succeeds() {
     let done = finish(&f.env.base_dir(), "issue-41", &github, &Probe).unwrap();
 
     assert!(
-        done.warnings
-            .iter()
-            .any(|w| w.contains("issue #41") && w.contains("comment 77")),
+        done.warnings.iter().any(
+            |w| w.contains("issue #41 (comment 77) couldn't be updated: ") && !w.contains("  ")
+        ),
         "{:?}",
         done.warnings
     );
