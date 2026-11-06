@@ -9,7 +9,8 @@
 //! GitHub reports conflicting with their base, with `task fix --pr N` (decision 298), then reads
 //! the workflow runs of its PRs and of `main` (decision 299): a failed run is re-run once; a
 //! second failure disarms the PR, or on `main` sets the pause that stops all arming until the
-//! user runs `task loop --clear-pause`.
+//! user runs `task loop --clear-pause`. A PR's second failure first gets one log-fix, ever, with
+//! `task fix --pr N --check-run <id>` (decision 300).
 //!
 //! The phases go through [`Steps`] so the loop's rules are tested without sandboxes;
 //! [`TaskSteps`] runs the real commands.

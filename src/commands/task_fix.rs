@@ -1,5 +1,6 @@
 //! `sbxm task fix --pr N` (issue 313): a task on an open PR's own branch whose worker fixes the
-//! must-fix findings of the PR's latest sbxm review, followed by the gates and the in-task review
+//! must-fix findings of the PR's latest sbxm review (or, with `--check-run`, a failed run of its head
+//! from the run's log; decision 300), followed by the gates and the in-task review
 //! of any task, and whose result is pushed onto the PR's branch as a fast-forward, with that
 //! review posted as the new head's. Every refusal but the push's comes before any write.
 

@@ -723,3 +723,30 @@ mod prompt {
         );
     }
 }
+
+mod cli {
+    use assert_cmd::Command;
+
+    #[test]
+    fn task_fix_help_names_check_run() {
+        let out = Command::cargo_bin("sbxm")
+            .unwrap()
+            .args(["task", "fix", "--help"])
+            .output()
+            .unwrap();
+        let text = String::from_utf8(out.stdout).unwrap();
+        assert!(text.contains("--check-run <RUN_ID>"), "{text}");
+    }
+
+    #[test]
+    fn a_check_run_that_is_not_a_number_is_refused_by_the_parser() {
+        let out = Command::cargo_bin("sbxm")
+            .unwrap()
+            .args(["task", "fix", "--pr", "7", "--check-run", "abc"])
+            .output()
+            .unwrap();
+        assert!(!out.status.success());
+        let text = String::from_utf8(out.stderr).unwrap();
+        assert!(text.contains("--check-run"), "{text}");
+    }
+}

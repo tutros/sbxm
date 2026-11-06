@@ -1,7 +1,8 @@
 //! `sbxm task fix --pr N` (issue 313): which review of a pull request its worker fixes. The
 //! latest comment by the authenticated `gh` user that carries sbxm's review header counts; any
 //! other comment is never read into a prompt. Its `Scope:` range must end at the PR's head, and
-//! only its must-fix findings are the worker's input.
+//! only its must-fix findings are the worker's input. With `--check-run` (issue 448, decision 300)
+//! a failed run of the PR's head is the work instead, and its trimmed log the worker's input.
 
 use anyhow::{Result, bail};
 
