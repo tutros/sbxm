@@ -657,6 +657,51 @@ impl std::fmt::Display for SbxUnavailable {
 
 impl std::error::Error for SbxUnavailable {}
 
+/// The words a harness's lapsed sign-in is recorded with (issue 445, answer 2), lowercase: Claude
+/// Code's "OAuth session expired and could not be refreshed" (G64, 2026-10-27).
+const HARNESS_SIGNED_OUT: [&str; 1] = ["oauth session expired"];
+
+/// Whether a failed run's reason is a harness's lapsed sign-in, one of [`HARNESS_SIGNED_OUT`].
+/// Any other text is a plain failure, as before.
+pub fn says_harness_signed_out(why: &str) -> bool {
+    let why = why.to_lowercase();
+    HARNESS_SIGNED_OUT.iter().any(|said| why.contains(said))
+}
+
+/// The sign-in failure of `who`'s `harness` with its fix (issue 445): sign in again, or rebuild
+/// an aged template (README, Troubleshooting); the task stays resumable as `flag` names it.
+pub fn harness_sign_in_lapsed(
+    who: &str,
+    harness: Harness,
+    profile: &str,
+    flag: &str,
+    why: &str,
+) -> String {
+    format!(
+        "{who}'s {} sign-in has lapsed ({why}); sign in again (`sbx setup`, or `sbx secret set \
+         {}`) and continue with `sbxm task resume {flag}`; if a plain sandbox signs in and this \
+         task's doesn't, rebuild profile '{profile}''s template (`sbxm template build {profile} \
+         --harness {}`) and start the task again",
+        harness.as_str(),
+        harness.provider_secret(),
+        harness.as_str()
+    )
+}
+
+/// Issue 445: a worker, fix round or reviewer run failed with a harness's lapsed sign-in. The
+/// task is left as any failed run leaves it, resumable; a `task run` list and `task loop` stop for
+/// it, since every later task would fail the same way.
+#[derive(Debug)]
+pub struct HarnessSignedOut(pub String);
+
+impl std::fmt::Display for HarnessSignedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for HarnessSignedOut {}
+
 /// Issue 445: `sbx` is not signed in to Docker, found by [`check_signed_in`] before anything is
 /// created. Like [`SbxUnavailable`], it stops a whole `task run` list and `task loop` (decision
 /// 193): a lapsed sign-in never fixes itself. `then` is the command, or commands, that go on once
@@ -1974,6 +2019,16 @@ fn task_flag(record: &Record) -> String {
     }
 }
 
+/// The profile the task's worker sandbox was built with, else the config's (a record from before
+/// issue 118 saved none): only for naming a template to rebuild.
+fn recorded_profile(env: &TaskEnv, record: &Record) -> String {
+    record
+        .worker
+        .as_ref()
+        .and_then(|w| w.profile.clone())
+        .unwrap_or_else(|| env.config.sandbox.profile.clone())
+}
+
 /// The recorded worker, and the profile its sandbox was built with: `None` only in a record
 /// written before issue 118's resume fix (M-2, PR 163 review), which never saved one. Refused with
 /// a one-line recovery instead of guessing a profile the task never ran under.
@@ -3011,6 +3066,17 @@ pub(super) fn work(env: &TaskEnv, prepared: &mut Prepared) -> Result<Worked> {
     record::write(&prepared.meta, &prepared.record)?;
 
     let mut notes = Vec::new();
+    if let RunStatus::Failed(why) = &status
+        && says_harness_signed_out(why)
+    {
+        notes.push(harness_sign_in_lapsed(
+            "the worker",
+            worker.harness,
+            &recorded_profile(env, &prepared.record),
+            &task_flag(&prepared.record),
+            why,
+        ));
+    }
     let commits = collect(env.backend, prepared, &sandbox, &mut status, &mut notes)?;
     prepared.record.notes.extend(notes.iter().cloned());
     record::write(&prepared.meta, &prepared.record)?;
@@ -4235,6 +4301,16 @@ fn fix(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
     })?;
     record::write(&prepared.meta, &prepared.record)?;
     if let RunStatus::Failed(why) = &status {
+        if says_harness_signed_out(why) {
+            return Err(HarnessSignedOut(harness_sign_in_lapsed(
+                "the fix round",
+                env.config.worker.harness,
+                &recorded_profile(env, &prepared.record),
+                &task_flag(&prepared.record),
+                why,
+            ))
+            .into());
+        }
         bail!("the fix round failed ({why}); the worker's clone keeps whatever it did");
     }
 
@@ -5108,6 +5184,16 @@ fn run_review_agent(
             "the reviewer hit its time limit ({}s), so its review isn't used",
             reviewer.time_limit.as_secs()
         ),
+        RunStatus::Failed(why) if says_harness_signed_out(why) => {
+            return Err(HarnessSignedOut(harness_sign_in_lapsed(
+                "the reviewer",
+                reviewer.harness,
+                &env.config.sandbox.profile,
+                &task_flag(&prepared.record),
+                why,
+            ))
+            .into());
+        }
         RunStatus::Failed(why) => bail!("the reviewer failed ({why}), so its review isn't used"),
     }
 

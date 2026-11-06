@@ -342,3 +342,121 @@ fn doctor_fails_signed_out_naming_sbx_login() {
     assert!(text.contains("; run `sbx login`"), "{text}");
     assert!(!text.contains("sbx daemon:"), "{text}");
 }
+
+// A harness's own sign-in lapsing is recognized after its run fails (answer 2).
+
+/// Claude's stream for a run that failed with `result`, exiting 1.
+fn claude_failed(result: &str) -> sbxm::backend::ExecOutput {
+    let event = serde_json::json!({
+        "type": "result",
+        "subtype": "success",
+        "is_error": true,
+        "result": result,
+        "session_id": "s-1",
+    });
+    sbxm::backend::ExecOutput {
+        stdout: format!("{event}\n"),
+        stderr: String::new(),
+        exit_code: Some(1),
+    }
+}
+
+const OAUTH_EXPIRED: &str = "OAuth session expired and could not be refreshed";
+
+/// Boundary case 5 of 7: a worker whose output matches a recorded sign-in message stops as a
+/// sign-in failure naming the fix, stays resumable, and the list goes no further.
+#[test]
+fn a_worker_failing_on_a_lapsed_harness_sign_in_is_a_sign_in_stop() {
+    let f = config();
+    let b = backend_from(
+        &f,
+        FakeBackend::default().with_exec_output_matching("claude", claude_failed(OAUTH_EXPIRED)),
+    );
+    let gh = github();
+    let targets = [Target::Issue(41), Target::Issue(42)];
+
+    let out = go(&f, &targets, &b, &gh);
+
+    let e = out.result.unwrap_err();
+    assert!(
+        e.is::<sbxm::task::pipeline::HarnessSignedOut>(),
+        "{e:#}\n{}",
+        out.out
+    );
+    let text = &out.out;
+    assert!(
+        text.contains("note: the worker's claude sign-in has lapsed (claude reported an error: OAuth session expired"),
+        "{text}"
+    );
+    assert!(
+        text.contains("sign in again (`sbx setup`, or `sbx secret set anthropic`) and continue with `sbxm task resume --issue 41`"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "rebuild profile 'default''s template (`sbxm template build default --harness claude`)"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("--issue 42: not started; the list stopped"),
+        "{text}"
+    );
+    assert!(!exists(&f, "issue-42"));
+    // Resumable: the failed worker's task is kept as any failed worker's is.
+    assert_eq!(stage(&f, "issue-41"), (Stage::Working, Status::Failed));
+}
+
+/// Boundary case 6 of 7: a failure matching no recorded message stays a plain failure, and the
+/// list goes on past it as before.
+#[test]
+fn a_worker_failing_otherwise_is_a_plain_failure() {
+    let f = config();
+    let b = backend_from(
+        &f,
+        FakeBackend::default().with_exec_output_matching("claude", claude_failed("disk on fire")),
+    );
+    let gh = github();
+    let targets = [Target::Issue(41), Target::Issue(42)];
+
+    let out = go(&f, &targets, &b, &gh);
+
+    let e = out.result.unwrap_err();
+    assert!(!e.is::<sbxm::task::pipeline::HarnessSignedOut>(), "{e:#}");
+    let text = &out.out;
+    assert!(!text.contains("sign-in"), "{text}");
+    assert!(text.contains("task 2 of 2: --issue 42"), "{text}");
+    assert!(exists(&f, "issue-42"));
+}
+
+/// The reviewer's harness sign-in lapsing is a sign-in stop too, naming the reviewer's fix.
+#[test]
+fn a_reviewer_failing_on_a_lapsed_harness_sign_in_is_a_sign_in_stop() {
+    let f = fixture_with(
+        "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = [\"cargo test\"]\n\n\
+         [reviewer]\nharness = \"claude\"\n\n[worker]\nharness = \"codex\"\n",
+    );
+    let b = backend_from(
+        &f,
+        FakeBackend::default().with_exec_output_matching("claude", claude_failed(OAUTH_EXPIRED)),
+    );
+    let gh = github();
+
+    let out = go(&f, &[Target::Issue(41)], &b, &gh);
+
+    let e = out.result.unwrap_err();
+    assert!(
+        e.is::<sbxm::task::pipeline::HarnessSignedOut>(),
+        "{e:#}\n{}",
+        out.out
+    );
+    let text = format!("{e:#}");
+    assert!(
+        text.contains("the reviewer's claude sign-in has lapsed"),
+        "{text}"
+    );
+    assert!(
+        text.contains("continue with `sbxm task resume --issue 41`"),
+        "{text}"
+    );
+}

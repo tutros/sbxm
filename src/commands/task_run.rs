@@ -829,6 +829,7 @@ fn queue_wide_stop(e: &anyhow::Error) -> bool {
     e.is::<pipeline::MissingSecret>()
         || e.is::<pipeline::SbxUnavailable>()
         || e.is::<pipeline::NotSignedIn>()
+        || e.is::<pipeline::HarnessSignedOut>()
         || e.is::<crate::headless::ExecUnavailable>()
 }
 
@@ -970,6 +971,7 @@ pub fn run_list(
 
     let mut summaries: Vec<(String, bool)> = Vec::new();
     let mut signed_out: Option<pipeline::NotSignedIn> = None;
+    let mut harness_signed_out: Option<String> = None;
     for (i, target) in targets.iter().enumerate() {
         writeln!(
             out,
@@ -1047,7 +1049,13 @@ pub fn run_list(
                 signed_out = Some(stop.then(then));
                 anyhow::Error::new(stop.then(Vec::new()))
             }
-            None => e,
+            None => {
+                if let Some(lapsed) = e.downcast_ref::<pipeline::HarnessSignedOut>() {
+                    harness_signed_out =
+                        Some(format!("{} stopped the list: {lapsed}", target.flag()));
+                }
+                e
+            }
         });
         summaries.push(summary_line(
             config_dir,
@@ -1076,6 +1084,9 @@ pub fn run_list(
 
     if let Some(stop) = signed_out {
         return Err(stop.into());
+    }
+    if let Some(stop) = harness_signed_out {
+        return Err(pipeline::HarnessSignedOut(stop).into());
     }
     let not_ready = summaries.iter().filter(|(_, ready)| !ready).count();
     if not_ready > 0 {
