@@ -502,6 +502,8 @@ fn start(
     let total = reports.len();
 
     let (mut failed, mut gates_failed, mut exec_unavailable, mut restored) = (0, 0, 0, 0);
+    // Workers that failed on their harness's lapsed sign-in (issue 445).
+    let mut signed_out = 0;
     // Each issue task's own combined recovery error (preparation failure, restore failure, the
     // set-aside folder), kept so the final returned error can carry them too (decision 185(c)),
     // not only the screen text they are also written to, which can be lost (decision 185(e)).
@@ -533,7 +535,12 @@ fn start(
                     // A timed-out cloud worker stops the task, as a spec task's (milestone 4
                     // slice 3, behavior 2).
                     RunStatus::TimedOut => ("timed out".to_owned(), location == Location::Cloud),
-                    RunStatus::Failed(why) => (format!("failed: {why}"), true),
+                    RunStatus::Failed(why) => {
+                        if pipeline::says_harness_signed_out(why) {
+                            signed_out += 1;
+                        }
+                        (format!("failed: {why}"), true)
+                    }
                 };
                 writeln!(
                     out,
@@ -695,6 +702,13 @@ fn start(
         // task whose preparation never completed (restarted and put back) never got this far.
         if failed == exec_unavailable && restored == 0 {
             return Err(crate::headless::ExecUnavailable(message).into());
+        }
+        // Issue 445: every failure a harness's lapsed sign-in, each named with its fix above.
+        if failed == signed_out && restored == 0 {
+            return Err(pipeline::HarnessSignedOut(format!(
+                "{message}: the worker's sign-in has lapsed"
+            ))
+            .into());
         }
         return Err(with_restore_notes(message, &restore_notes));
     }
@@ -1057,6 +1071,15 @@ pub(crate) fn run_spec_from(
             writeln!(out, "  note: {note}")?;
         }
         if bad {
+            // Issue 445: the worker's note above names the fix.
+            if let RunStatus::Failed(why) = &worked.status
+                && pipeline::says_harness_signed_out(why)
+            {
+                return Err(pipeline::HarnessSignedOut(format!(
+                    "{id}: the worker {label}; its sign-in has lapsed (see the note above)"
+                ))
+                .into());
+            }
             bail!(
                 "{id}: the worker {label}; see `sbxm task status` and the task's folder for what it left"
             );

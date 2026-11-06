@@ -228,6 +228,48 @@ fn a_pr_review_runs_gates_then_the_reviewer_posts_the_review_and_ends_ready() {
     assert!(!f.env.base_dir().join("tasks").join("pr-7").exists());
 }
 
+// Issue 445, review M-1: a PR reviewer's lapsed harness sign-in names `task review --pr N` to go
+// on, the way a PR task continues (decision 282(a)), never a `task resume --pr` the CLI rejects.
+
+#[test]
+fn a_pr_reviewers_lapsed_sign_in_names_task_review_pr_to_go_on() {
+    let f = fixture_with(
+        "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = [\"cargo test\"]\n\n\
+         [reviewer]\nharness = \"claude\"\n",
+    );
+    add_pr_head(&f, 7);
+    let event = serde_json::json!({
+        "type": "result",
+        "subtype": "success",
+        "is_error": true,
+        "result": "OAuth session expired and could not be refreshed",
+        "session_id": "s-1",
+    });
+    let backend = FakeBackend::with_secrets(&["anthropic", "openai"]).with_exec_output_matching(
+        "claude",
+        ExecOutput {
+            stdout: format!("{event}\n"),
+            stderr: String::new(),
+            exit_code: Some(1),
+        },
+    );
+
+    let (result, _, _) = run_it(&f, &backend, &github());
+
+    let e = result.unwrap_err();
+    assert!(e.is::<pipeline::HarnessSignedOut>(), "{e:#}");
+    let message = format!("{e:#}");
+    assert!(
+        message.contains("the reviewer's claude sign-in has lapsed"),
+        "{message}"
+    );
+    assert!(
+        message.contains("continue with `sbxm task review --pr 7`"),
+        "{message}"
+    );
+    assert!(!message.contains("task resume"), "{message}");
+}
+
 #[test]
 fn the_sandbox_gates_run_inside_the_reviewers_sandbox_before_the_reviewer_does() {
     let f = config("");

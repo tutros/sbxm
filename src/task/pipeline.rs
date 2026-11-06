@@ -657,8 +657,135 @@ impl std::fmt::Display for SbxUnavailable {
 
 impl std::error::Error for SbxUnavailable {}
 
+/// The words a harness's lapsed sign-in is recorded with (issue 445, answer 2), lowercase: Claude
+/// Code's "OAuth session expired and could not be refreshed" (G64, 2026-10-27).
+const HARNESS_SIGNED_OUT: [&str; 1] = ["oauth session expired"];
+
+/// Whether a failed run's reason is a harness's lapsed sign-in, one of [`HARNESS_SIGNED_OUT`].
+/// Any other text is a plain failure, as before.
+pub fn says_harness_signed_out(why: &str) -> bool {
+    let why = why.to_lowercase();
+    HARNESS_SIGNED_OUT.iter().any(|said| why.contains(said))
+}
+
+/// The sign-in failure of `who`'s `harness` with its fix (issue 445): sign in again, or rebuild
+/// an aged template (README, Troubleshooting); the task stays resumable, as [`goes_on`] names it.
+pub fn harness_sign_in_lapsed(
+    who: &str,
+    harness: Harness,
+    profile: &str,
+    record: &Record,
+    why: &str,
+) -> String {
+    format!(
+        "{who}'s {} sign-in has lapsed ({why}); sign in again (`sbx setup`, or `sbx secret set \
+         {}`) and {}; if a plain sandbox signs in and this task's doesn't, rebuild profile \
+         '{profile}''s template (`sbxm template build {profile} --harness {}`) and start the task \
+         again",
+        harness.as_str(),
+        harness.provider_secret(),
+        goes_on(record),
+        harness.as_str()
+    )
+}
+
+/// How a stopped task goes on, by its kind (issue 445 review M-1): `task resume` continues an
+/// issue or spec task; a PR task has no resume and goes on with `task review --pr N` (decision
+/// 282(a)); no command names a fix task yet (issue 313), so its status is what to look at.
+fn goes_on(record: &Record) -> String {
+    match record.kind {
+        Kind::Issue => format!("continue with `sbxm task resume --issue {}`", record.number),
+        Kind::Spec => "continue with `sbxm task resume --spec <file>`".to_owned(),
+        Kind::Pr => format!("continue with `sbxm task review --pr {}`", record.number),
+        Kind::Fix => format!(
+            "see `sbxm task status` for fix task {} (no command continues one yet)",
+            record.id
+        ),
+    }
+}
+
+/// Issue 445: a worker, fix round or reviewer run failed with a harness's lapsed sign-in. The
+/// task is left as any failed run leaves it, resumable; a `task run` list and `task loop` stop for
+/// it, since every later task would fail the same way.
+#[derive(Debug)]
+pub struct HarnessSignedOut(pub String);
+
+impl std::fmt::Display for HarnessSignedOut {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for HarnessSignedOut {}
+
+/// Issue 445: `sbx` is not signed in to Docker, found by [`check_signed_in`] before anything is
+/// created. Like [`SbxUnavailable`], it stops a whole `task run` list and `task loop` (decision
+/// 193): a lapsed sign-in never fixes itself. `then` is the command, or commands, that go on once
+/// the user has signed in again; each caller that knows them names them.
+#[derive(Debug)]
+pub struct NotSignedIn {
+    /// `sbx`'s own words.
+    said: String,
+    pub then: Vec<String>,
+}
+
+impl NotSignedIn {
+    /// `sbx` said `said`, and no next command is named yet.
+    pub fn new(said: impl Into<String>) -> NotSignedIn {
+        NotSignedIn {
+            said: said.into(),
+            then: Vec::new(),
+        }
+    }
+
+    /// The same stop, going on with `then` instead.
+    pub fn then(&self, then: Vec<String>) -> NotSignedIn {
+        NotSignedIn {
+            said: self.said.clone(),
+            then,
+        }
+    }
+}
+
+impl std::fmt::Display for NotSignedIn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "sbx is not signed in ({}); run `sbx login`", self.said)?;
+        for command in &self.then {
+            write!(f, ", then `{command}`")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for NotSignedIn {}
+
+/// Whether a failing `sbx` call's words say it isn't signed in to Docker (issue 445, answer 1):
+/// `sbx ls --json` run with stdin closed says `Not authenticated to Docker`, and every call once
+/// signed out answers `401 Unauthorized: user is not authenticated to Docker`.
+pub fn says_not_signed_in(text: &str) -> bool {
+    let text = text.to_lowercase();
+    text.contains("not authenticated") || text.contains("401 unauthorized")
+}
+
+/// Issue 445: `sbx ls --json` answers, signed in. Signed out is [`NotSignedIn`]; any other
+/// failure is decision 193's "`sbx` not answering", [`SbxUnavailable`].
+fn check_signed_in(backend: &dyn SandboxBackend) -> Result<()> {
+    match backend.list() {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let said = format!("{e:#}");
+            if says_not_signed_in(&said) {
+                Err(NotSignedIn::new(said).into())
+            } else {
+                Err(SbxUnavailable(said).into())
+            }
+        }
+    }
+}
+
 /// The harness's provider secret and the profile's own `secrets.services` must all be stored in
-/// `sbx` before anything is created; the error says which and how to add it.
+/// `sbx` before anything is created; the error says which and how to add it. `sbx`'s sign-in is
+/// checked first (issue 445): signed out, `sbx` answers nothing else either.
 fn check_secrets(
     backend: &dyn SandboxBackend,
     harness: Harness,
@@ -666,6 +793,7 @@ fn check_secrets(
     profile_name: &str,
     profile: &Profile,
 ) -> Result<()> {
+    check_signed_in(backend)?;
     let stored = backend
         .secret_services()
         .map_err(|e| SbxUnavailable(format!("{e:#}")))?;
@@ -1911,6 +2039,16 @@ fn task_flag(record: &Record) -> String {
     }
 }
 
+/// The profile the task's worker sandbox was built with, else the config's (a record from before
+/// issue 118 saved none): only for naming a template to rebuild.
+fn recorded_profile(env: &TaskEnv, record: &Record) -> String {
+    record
+        .worker
+        .as_ref()
+        .and_then(|w| w.profile.clone())
+        .unwrap_or_else(|| env.config.sandbox.profile.clone())
+}
+
 /// The recorded worker, and the profile its sandbox was built with: `None` only in a record
 /// written before issue 118's resume fix (M-2, PR 163 review), which never saved one. Refused with
 /// a one-line recovery instead of guessing a profile the task never ran under.
@@ -2948,6 +3086,17 @@ pub(super) fn work(env: &TaskEnv, prepared: &mut Prepared) -> Result<Worked> {
     record::write(&prepared.meta, &prepared.record)?;
 
     let mut notes = Vec::new();
+    if let RunStatus::Failed(why) = &status
+        && says_harness_signed_out(why)
+    {
+        notes.push(harness_sign_in_lapsed(
+            "the worker",
+            worker.harness,
+            &recorded_profile(env, &prepared.record),
+            &prepared.record,
+            why,
+        ));
+    }
     let commits = collect(env.backend, prepared, &sandbox, &mut status, &mut notes)?;
     prepared.record.notes.extend(notes.iter().cloned());
     record::write(&prepared.meta, &prepared.record)?;
@@ -4172,6 +4321,16 @@ fn fix(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
     })?;
     record::write(&prepared.meta, &prepared.record)?;
     if let RunStatus::Failed(why) = &status {
+        if says_harness_signed_out(why) {
+            return Err(HarnessSignedOut(harness_sign_in_lapsed(
+                "the fix round",
+                env.config.worker.harness,
+                &recorded_profile(env, &prepared.record),
+                &prepared.record,
+                why,
+            ))
+            .into());
+        }
         bail!("the fix round failed ({why}); the worker's clone keeps whatever it did");
     }
 
@@ -5045,6 +5204,16 @@ fn run_review_agent(
             "the reviewer hit its time limit ({}s), so its review isn't used",
             reviewer.time_limit.as_secs()
         ),
+        RunStatus::Failed(why) if says_harness_signed_out(why) => {
+            return Err(HarnessSignedOut(harness_sign_in_lapsed(
+                "the reviewer",
+                reviewer.harness,
+                &env.config.sandbox.profile,
+                &prepared.record,
+                why,
+            ))
+            .into());
+        }
         RunStatus::Failed(why) => bail!("the reviewer failed ({why}), so its review isn't used"),
     }
 

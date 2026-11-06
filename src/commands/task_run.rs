@@ -150,10 +150,12 @@ pub fn run(
     out: &mut dyn Write,
     warn: &mut dyn Write,
 ) -> Result<()> {
+    let target = Target::Issue(opts.issue);
     if restart.is_none() {
         return run_issue(
             config_dir, opts, None, backend, github, probe, host, out, warn,
-        );
+        )
+        .map_err(|e| sign_in_goes_on(config_dir, &target, false, e));
     }
     // As in `task_start::run_with`: a restart's screen output can't stop it on the way.
     let (mut out, mut warn) = (finish::Unfailing::new(out), finish::Unfailing::new(warn));
@@ -161,6 +163,35 @@ pub fn run(
         config_dir, opts, restart, backend, github, probe, host, &mut out, &mut warn,
     );
     finish::after_output(result, [out.into_error(), warn.into_error()])
+        .map_err(|e| sign_in_goes_on(config_dir, &target, true, e))
+}
+
+/// The command that goes on with `target` once `sbx` is signed in again (issue 445): `task resume`
+/// for a task that exists, else the same `task run` again, since nothing was created.
+fn goes_on(config_dir: &Path, target: &Target, restart: bool) -> String {
+    let flag = target.flag();
+    if restart {
+        format!("sbxm task run --restart {flag}")
+    } else if read_record(config_dir, target).is_some() {
+        format!("sbxm task resume {flag}")
+    } else {
+        format!("sbxm task run {flag}")
+    }
+}
+
+/// A [`pipeline::NotSignedIn`] stop that names no next command yet names `target`'s.
+fn sign_in_goes_on(
+    config_dir: &Path,
+    target: &Target,
+    restart: bool,
+    e: anyhow::Error,
+) -> anyhow::Error {
+    match e.downcast_ref::<pipeline::NotSignedIn>() {
+        Some(stop) if stop.then.is_empty() => {
+            stop.then(vec![goes_on(config_dir, target, restart)]).into()
+        }
+        _ => e,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -379,10 +410,12 @@ pub fn run_spec(
     out: &mut dyn Write,
     warn: &mut dyn Write,
 ) -> Result<()> {
+    let target = Target::Spec(opts.spec.clone());
     if restart.is_none() {
         return run_spec_task(
             config_dir, opts, None, backend, github, probe, host, out, warn,
-        );
+        )
+        .map_err(|e| sign_in_goes_on(config_dir, &target, false, e));
     }
     // As in `task_start::run_with`: a restart's screen output can't stop it on the way.
     let (mut out, mut warn) = (finish::Unfailing::new(out), finish::Unfailing::new(warn));
@@ -390,6 +423,7 @@ pub fn run_spec(
         config_dir, opts, restart, backend, github, probe, host, &mut out, &mut warn,
     );
     finish::after_output(result, [out.into_error(), warn.into_error()])
+        .map_err(|e| sign_in_goes_on(config_dir, &target, true, e))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -794,6 +828,8 @@ fn summary_line(
 fn queue_wide_stop(e: &anyhow::Error) -> bool {
     e.is::<pipeline::MissingSecret>()
         || e.is::<pipeline::SbxUnavailable>()
+        || e.is::<pipeline::NotSignedIn>()
+        || e.is::<pipeline::HarnessSignedOut>()
         || e.is::<crate::headless::ExecUnavailable>()
 }
 
@@ -934,6 +970,8 @@ pub fn run_list(
     preflight_targets(config_dir, opts, targets, github)?;
 
     let mut summaries: Vec<(String, bool)> = Vec::new();
+    let mut signed_out: Option<pipeline::NotSignedIn> = None;
+    let mut harness_signed_out: Option<String> = None;
     for (i, target) in targets.iter().enumerate() {
         writeln!(
             out,
@@ -994,6 +1032,31 @@ pub fn run_list(
         // Decision 193(a) (issue 201 review M-2): a missing shared secret or `sbx` itself not
         // answering stops the whole list, rather than being asked again for every later target.
         let stop = result.as_ref().err().is_some_and(queue_wide_stop);
+        // A sign-in stop (issue 445) names the list's own way on, once, at the end.
+        let result = result.map_err(|e| match e.downcast_ref::<pipeline::NotSignedIn>() {
+            Some(stop) => {
+                let mut then = Vec::new();
+                let mut rerun: Vec<String> = Vec::new();
+                if read_record(config_dir, target).is_some() {
+                    then.push(format!("sbxm task resume {}", target.flag()));
+                } else {
+                    rerun.push(target.flag());
+                }
+                rerun.extend(targets[i + 1..].iter().map(Target::flag));
+                if !rerun.is_empty() {
+                    then.push(format!("sbxm task run {}", rerun.join(" ")));
+                }
+                signed_out = Some(stop.then(then));
+                anyhow::Error::new(stop.then(Vec::new()))
+            }
+            None => {
+                if let Some(lapsed) = e.downcast_ref::<pipeline::HarnessSignedOut>() {
+                    harness_signed_out =
+                        Some(format!("{} stopped the list: {lapsed}", target.flag()));
+                }
+                e
+            }
+        });
         summaries.push(summary_line(
             config_dir,
             target,
@@ -1019,6 +1082,12 @@ pub fn run_list(
         writeln!(out, "  {line}")?;
     }
 
+    if let Some(stop) = signed_out {
+        return Err(stop.into());
+    }
+    if let Some(stop) = harness_signed_out {
+        return Err(pipeline::HarnessSignedOut(stop).into());
+    }
     let not_ready = summaries.iter().filter(|(_, ready)| !ready).count();
     if not_ready > 0 {
         bail!(

@@ -36,6 +36,8 @@ enum Act {
     Fail(&'static str, bool),
     /// `sbx` couldn't run, before any record.
     ExecUnavailable,
+    /// `sbx` isn't signed in (issue 445), leaving the task's record at `working` when `true`.
+    SignedOut(bool),
     /// Reaches `ready`, and a command run by hand then holds the task's lock (issue 409):
     /// a live holder when `true`, a gone one otherwise.
     ReadyLocked(bool),
@@ -194,6 +196,16 @@ impl Script {
             Act::ExecUnavailable => Err(anyhow::Error::new(sbxm::headless::ExecUnavailable(
                 "sbx exec failed".into(),
             ))),
+            Act::SignedOut(leaves_record) => {
+                if leaves_record {
+                    write_record(&self.base, issue, Stage::Working, None, None);
+                }
+                Err(
+                    sbxm::task::pipeline::NotSignedIn::new("Not authenticated to Docker")
+                        .then(vec![format!("sbxm task run --issue {issue}")])
+                        .into(),
+                )
+            }
             Act::ReadyLocked(live) => {
                 write_record(&self.base, issue, Stage::Ready, Some(0), None);
                 plant_lock(&self.base, issue, live);
@@ -1048,6 +1060,82 @@ fn an_environment_failure_before_any_record_is_run_again_once() {
     run_loop(&f, opts(&f), &script, &gh).result.unwrap();
 
     assert_eq!(runs(&script), ["run 3", "run 3"]);
+}
+
+// Issue 445: a lapsed sign-in stops the loop at once, naming the steps on.
+
+/// Boundary case 7 of 7: `sbx` signed out while a task runs: the loop exits, logs the stop as
+/// `sign-in`, and names `sbx login`, the task's resume and a new loop.
+#[test]
+fn a_sign_in_stop_exits_the_loop_with_the_three_steps() {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S"), labeled(4, "size:M")]);
+    let script = Script::new(&f.base()).plays(3, &[Act::SignedOut(true)]);
+
+    let run = run_loop(&f, opts(&f), &script, &gh);
+
+    let e = run.result.unwrap_err();
+    assert_eq!(runs(&script), ["run 3"]);
+    assert_eq!(
+        format!("{e:#}"),
+        "the loop stops: sbx is not signed in (Not authenticated to Docker); run `sbx login`, \
+         then `sbxm task resume --issue 3`, then `sbxm task loop`"
+    );
+    let log = f.log_text();
+    assert!(log.contains("stopped at working: sign-in"), "{log}");
+}
+
+/// Signed out before the task's record exists: its label stays, so a new loop picks it up and no
+/// resume is named.
+#[test]
+fn a_sign_in_stop_before_any_record_names_only_the_new_loop() {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S")]);
+    let script = Script::new(&f.base()).plays(3, &[Act::SignedOut(false)]);
+
+    let run = run_loop(&f, opts(&f), &script, &gh);
+
+    let e = run.result.unwrap_err();
+    assert_eq!(runs(&script), ["run 3"]);
+    assert_eq!(
+        format!("{e:#}"),
+        "the loop stops: sbx is not signed in (Not authenticated to Docker); run `sbx login`, \
+         then `sbxm task loop`"
+    );
+    assert!(f.log_text().contains("stopped at no record: sign-in"));
+}
+
+/// A harness's lapsed sign-in, said in the phase's failure, stops the loop the same way rather
+/// than being resumed once.
+#[test]
+fn a_harness_sign_in_failure_exits_the_loop_without_a_resume() {
+    let f = fixture();
+    let gh = github(vec![labeled(3, "size:S"), labeled(4, "size:M")]);
+    let script = Script::new(&f.base()).plays(
+        3,
+        &[Act::Fail(
+            "issue-3: the worker failed: claude reported an error: OAuth session expired and \
+             could not be refreshed",
+            true,
+        )],
+    );
+
+    let run = run_loop(&f, opts(&f), &script, &gh);
+
+    let e = run.result.unwrap_err();
+    assert_eq!(runs(&script), ["run 3"]);
+    let text = format!("{e:#}");
+    assert!(
+        text.starts_with("the loop stops: issue-3: the worker failed"),
+        "{text}"
+    );
+    assert!(
+        text.ends_with(
+            "once signed in again, run `sbxm task resume --issue 3`, then `sbxm task loop`"
+        ),
+        "{text}"
+    );
+    assert!(f.log_text().contains("stopped at working: sign-in"));
 }
 
 #[test]

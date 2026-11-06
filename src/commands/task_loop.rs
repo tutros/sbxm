@@ -301,6 +301,8 @@ enum Halt {
     /// A stop was asked before the task started: nothing to log.
     Stopped,
     UsageLimit(Duration),
+    /// A lapsed sign-in, `sbx`'s or a harness's (issue 445): it never fixes itself.
+    SignIn(anyhow::Error),
     Error(anyhow::Error),
 }
 
@@ -727,6 +729,10 @@ impl Loop<'_> {
             }
             if e.is::<pipeline::MissingSecret>() {
                 return Err(Halt::Error(e));
+            }
+            if says_sign_in(&e, &String::from_utf8_lossy(&captured)) {
+                stops.push(("sign-in".to_owned(), 0));
+                return Err(Halt::SignIn(e));
             }
             if queue::failure_says_usage_limit(
                 &format!("{e:#}"),
@@ -1957,6 +1963,35 @@ struct RunsRead {
     listed: bool,
 }
 
+/// Whether a failed phase stopped on a lapsed sign-in (issue 445): `sbx`'s, or a harness's, said
+/// in its error or, as a usage limit is, in a line of its output that reports a failure.
+fn says_sign_in(e: &anyhow::Error, output: &str) -> bool {
+    e.downcast_ref::<pipeline::NotSignedIn>().is_some()
+        || e.downcast_ref::<pipeline::HarnessSignedOut>().is_some()
+        || pipeline::says_harness_signed_out(&format!("{e:#}"))
+        || output.lines().any(|line| {
+            line.to_lowercase().contains("failed") && pipeline::says_harness_signed_out(line)
+        })
+}
+
+/// The loop's last words on a sign-in stop (issue 445, answer 3): sign in, then `task resume` for
+/// the stopped task when it exists (its label is gone, so a new loop wouldn't pick it up), then
+/// `task loop` for the rest. A task refused before its record keeps its label.
+fn sign_in_stop(e: anyhow::Error, issue: u32, exists: bool) -> anyhow::Error {
+    let mut then = Vec::new();
+    if exists {
+        then.push(format!("sbxm task resume --issue {issue}"));
+    }
+    then.push("sbxm task loop".to_owned());
+    match e.downcast_ref::<pipeline::NotSignedIn>() {
+        Some(stop) => anyhow!("the loop stops: {}", stop.then(then)),
+        None => anyhow!(
+            "the loop stops: {e:#}; once signed in again, run `{}`",
+            then.join("`, then `")
+        ),
+    }
+}
+
 /// [`Loop::arm`]'s checks on a task's record: no work stop, a review with 0 must-fix and low risk
 /// after the path-rule floor.
 fn passes_arm_checks(rec: &Record) -> bool {
@@ -2179,6 +2214,31 @@ pub fn run(
                 writeln!(out, "stopped on request")?;
                 left(&held, &due, out)?;
                 return Ok(());
+            }
+            Err(Halt::SignIn(e)) => {
+                let rec = lp.record(issue);
+                let stage = rec
+                    .as_ref()
+                    .map_or("no record".to_owned(), |r| r.stage.name().to_owned());
+                lp.append(
+                    &Row {
+                        issue,
+                        title,
+                        size,
+                        started,
+                        ready: None,
+                        worker_s: None,
+                        reviewer_s: None,
+                        rounds: None,
+                        must_fix: None,
+                        outcome: format!("stopped at {stage}: sign-in"),
+                        stops,
+                        idle_before: idle_from.map(|end| started.saturating_sub(end)),
+                    },
+                    warn,
+                )?;
+                left(&held, &due, out)?;
+                return Err(sign_in_stop(e, issue, rec.is_some()));
             }
             Err(Halt::UsageLimit(total)) => {
                 let rec = lp.record(issue);

@@ -156,8 +156,12 @@ pub fn run(config_dir: &Path, backend: &dyn SandboxBackend, host: &Host) -> Repo
         Err(err) => report.fail(format!("sbx version: {err:#}")),
     }
 
+    // The local sign-in (issue 445), from the same `sbx ls --json` a task checks it with.
     match backend.list() {
-        Ok(_) => report.pass("sbx daemon answers".into()),
+        Ok(_) => report.pass("sbx daemon answers, signed in".into()),
+        Err(err) if crate::task::pipeline::says_not_signed_in(&format!("{err:#}")) => {
+            report.fail(format!("sbx is not signed in ({err:#}); run `sbx login`"))
+        }
         Err(err) => report.fail(format!("sbx daemon: {err:#}")),
     }
     check_cloud(&mut report, backend, host);
