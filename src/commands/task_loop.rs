@@ -332,6 +332,9 @@ struct Loop<'a> {
     /// The PRs a log-fix was tried for in this run (decision 300), whether or not it got as far
     /// as a task record: one per PR, ever, with the records counting across runs.
     log_fixed: HashSet<u32>,
+    /// The PRs disarmed on a second failure whose log-fix is still to come (review M-1): they
+    /// count as armed for its re-arm (decision 298).
+    disarmed_for_log_fix: HashSet<u32>,
     /// The (commit, run) second failures on `main` already paused for (or found paused): a pause
     /// the user cleared isn't set again for the same run.
     paused_for: HashSet<(String, u64)>,
@@ -1576,12 +1579,8 @@ impl Loop<'_> {
             let Some(run) = new.first().cloned() else {
                 continue;
             };
-            // One log-fix per PR, ever (decision 300): tried before the PR is left to the user. A
-            // low disk or a stop request leaves the failure for a later pass.
+            // One log-fix per PR, ever (decision 300): tried before the PR is left to the user.
             let log_fix = !self.log_fixed.contains(&number) && !self.has_log_fix(number);
-            if log_fix && (self.steps.room().is_err() || (self.env.stop_requested)()) {
-                continue;
-            }
             if armed {
                 if let Err(e) = self.github.pr_disarm_auto_merge(&self.repo, number) {
                     self.warn_once(
@@ -1595,8 +1594,39 @@ impl Loop<'_> {
                     continue;
                 }
                 self.armed.remove(&number);
+                if log_fix {
+                    self.disarmed_for_log_fix.insert(number);
+                }
+            }
+            // A low disk or a stop request leaves the log-fix for a later pass, never the disarm
+            // (review M-1).
+            if log_fix {
+                let waits = if self.steps.room().is_err() {
+                    Some("room on the disk")
+                } else if (self.env.stop_requested)() {
+                    Some("the next loop (this one is stopping)")
+                } else {
+                    None
+                };
+                if let Some(waits) = waits {
+                    self.say_once(
+                        out,
+                        format!(
+                            "PR #{number}: its {} failed twice ({}){}; its log-fix waits for {waits}",
+                            run.workflow,
+                            run.url,
+                            if self.disarmed_for_log_fix.contains(&number) {
+                                "; auto-merge disarmed"
+                            } else {
+                                ""
+                            }
+                        ),
+                    )?;
+                    continue;
+                }
             }
             if log_fix {
+                let armed = armed || self.disarmed_for_log_fix.remove(&number);
                 for run in &new {
                     self.failed_twice.insert((number, run.id));
                 }
@@ -1897,6 +1927,7 @@ pub fn run(
         reruns: HashSet::new(),
         failed_twice: HashSet::new(),
         log_fixed: HashSet::new(),
+        disarmed_for_log_fix: HashSet::new(),
         paused_for: HashSet::new(),
         log: opts
             .repo_root

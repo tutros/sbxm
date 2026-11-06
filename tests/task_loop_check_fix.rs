@@ -54,6 +54,8 @@ struct Script<'a> {
     clock: Cell<u64>,
     /// Run after a `task run`: GitHub changing meanwhile.
     after_run: Box<dyn Fn(&FakeGitHub) + 'a>,
+    /// How many `room()` checks still find the disk low.
+    low_disk: Cell<u32>,
 }
 
 /// The head of the PR a scripted `task run` opens.
@@ -68,6 +70,7 @@ impl<'a> Script<'a> {
             calls: RefCell::default(),
             clock: Cell::new(START),
             after_run: Box::new(|_| {}),
+            low_disk: Cell::new(0),
         }
     }
 
@@ -205,7 +208,13 @@ impl Steps for Script<'_> {
     }
 
     fn room(&self) -> Result<()> {
-        Ok(())
+        match self.low_disk.get() {
+            0 => Ok(()),
+            n => {
+                self.low_disk.set(n - 1);
+                Err(anyhow!("the disk is low"))
+            }
+        }
     }
 }
 
@@ -550,4 +559,47 @@ fn a_log_fix_refused_before_its_task_is_not_tried_again_in_the_same_run() {
     assert_eq!(said.len(), 2, "{}", ran.out);
     assert!(said[0].contains("its log-fix failed"), "{}", said[0]);
     assert!(said[1].contains("runs/8"), "{}", said[1]);
+}
+
+// --- Review M-1: a low disk defers the log-fix, never the disarm ---
+
+#[test]
+fn a_low_disk_still_disarms_a_twice_failed_pr_and_defers_its_log_fix() {
+    let f = fixture();
+    let gh = github();
+    let script = Script::new(&f.base(), &gh, Ends::Clean(Level::Low));
+    script.low_disk.set(u32::MAX);
+
+    let ran = run_loop(&f, &script, &gh);
+
+    ran.result.unwrap();
+    assert_eq!(disarms(&gh), [101], "{}", ran.out);
+    assert!(script.log_fixes().is_empty(), "{}", ran.out);
+    assert!(arms(&gh).is_empty(), "{}", ran.out);
+    let said: Vec<&str> = ran
+        .out
+        .lines()
+        .filter(|l| l.contains("PR #101") && l.contains("log-fix waits"))
+        .collect();
+    assert_eq!(said.len(), 1, "{}", ran.out);
+    assert!(said[0].contains("auto-merge disarmed"), "{}", said[0]);
+}
+
+#[test]
+fn a_log_fix_deferred_for_a_low_disk_runs_once_there_is_room_again() {
+    let f = fixture();
+    // Issue 3 gives the loop a second pass, by when the disk has room again.
+    let gh = github()
+        .with_issue_text(issue_text(3))
+        .with_pr(pr(103, HEAD))
+        .with_open_issues(vec![open_issue(3, &["ready-for-worker", "size:S"], "")]);
+    let script = Script::new(&f.base(), &gh, Ends::Clean(Level::Low));
+    script.low_disk.set(1);
+
+    let ran = run_loop(&f, &script, &gh);
+
+    ran.result.unwrap();
+    assert_eq!(script.log_fixes(), ["log-fix 101 7"], "{}", ran.out);
+    assert_eq!(disarms(&gh), [101], "{}", ran.out);
+    assert!(arms(&gh).contains(&(101, PUSHED.to_owned())), "{}", ran.out);
 }
