@@ -22,7 +22,7 @@ For how the commands fit together (sandboxes, comparisons, working on GitHub iss
 - [Rust](https://rustup.rs/) to build sbxm. [`just`](https://github.com/casey/just) is optional, for the recipes in
   the `justfile`.
 - A base folder for projects that `sbx` can mount. Not under `%TEMP%` or `AppData`. On the machine sbxm was built on,
-  workspaces on `C:` failed to mount, so projects live on `E:`.
+  workspaces on `C:` failed to mount, so projects live on another drive.
 
 sbxm is developed on Windows 10 with PowerShell; paths are handled portably, but other platforms are untested.
 
