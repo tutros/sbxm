@@ -533,7 +533,7 @@ for a task. Check `sbx ls` for stopped leftovers.
 ## Development
 
 `just check` runs formatting, lints, the Rust tests and the script (Pester) tests, with no Docker needed;
-`just real-test` runs the tests against the real `sbx`. See [The `justfile`](#the-justfile) for every recipe. Design decisions are numbered in `sdlc/decisions.md`, the milestone plan is `sdlc/milestone-1.md`, and
+`just real-test` runs the tests against the real `sbx`. See [The `justfile`](#the-justfile) for every recipe. Design decisions are numbered, one file each, in `sdlc/decisions/`, the milestone plan is `sdlc/milestone-1.md`, and
 `AGENTS.md` describes the code layout and workflow for coding agents.
 
 ### Working on issues with `sbxm task`

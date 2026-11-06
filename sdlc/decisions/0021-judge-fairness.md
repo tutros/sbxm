@@ -1,0 +1,1 @@
+21. **Judge fairness:** Judge model is set per comparison, with a warning when it shares a provider with a contestant. Contestant labels are anonymized (A/B/C) for the judge and humans; the mapping is revealed only in the final report.

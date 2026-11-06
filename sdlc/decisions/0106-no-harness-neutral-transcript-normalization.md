@@ -1,0 +1,1 @@
+106. **No harness-neutral transcript normalization (confirmed by the user 2026-09-29):** decision 21's A/B/C anonymization uses each contestant's raw final-answer text and diff as-is (already harness-neutral per decision 20); no extra transcript-summary normalization layer across Claude/Codex/Antigravity's differently-shaped outputs [S5].

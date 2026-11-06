@@ -1,0 +1,1 @@
+101. **M2a launches with Claude, Codex and Gemini as contestant harnesses (confirmed by the user 2026-09-29):** all three together from the first working comparison slice, once S5's continuation [93] verifies Codex and Gemini's headless behavior. Pi stays out of M2a's contestant set (deferred with its spike [93]).

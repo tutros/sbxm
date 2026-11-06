@@ -1,0 +1,1 @@
+97. **Run results live under `.sbxm/<project>/runs/` (confirmed by the user 2026-09-29):** extends decision 40's rationale (never mounted, so no contestant sandbox can read or tamper with its own or another contestant's results) to `runs/<run-id>/<contestant>/{answer.md, diff.patch, transcript.jsonl, evals.json}` [24].

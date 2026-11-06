@@ -1,0 +1,1 @@
+152. **When gates run and what a failure does (confirmed by the user 2026-10-01):** after the worker exits, after the fix round, and on demand (`task gates`), always before the reviewer starts [84]. A failing gate marks the task `gates-failed` and stops it (parity). Feeding the gate log back to the worker as an automatic fix round is a natural next step but not in M2b.

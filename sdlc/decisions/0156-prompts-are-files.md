@@ -1,0 +1,1 @@
+156. **Prompts are files (confirmed by the user 2026-10-01):** the worker, reviewer and fix-round prompts move out of the script into `prompts/` in the sbxm repo, embedded into the binary at build time. `sbxm-task.toml` can point to a file in the target repo to override any of them.

@@ -1,0 +1,1 @@
+77. **Unknown keys in `config.toml` (after slice 21, confirmed by the user 2026-09-27):** as for profiles [51], unknown keys in the global `config.toml` (top level and `[resources]`) are errors naming the key and the file, so a typo such as `default_profle` never silently falls back to a default [11]. `default_harness` keeps its own message [76].

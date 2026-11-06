@@ -1,0 +1,1 @@
+93. **S5 scope (confirmed by the user 2026-09-29):** extends beyond Claude (done) to Codex and Gemini before the milestone plan is written; Pi is deferred (its `sbx exec` path is less proven and lower priority for the first comparison contestants).

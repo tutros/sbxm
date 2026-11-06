@@ -1,0 +1,1 @@
+158. **`task run`, and PR vs issue tasks (confirmed by the user 2026-10-01):** M2b includes `sbxm task run --issue N`, a thin composition of `start` and `review` (gates, review, the one fix round) that stops before `finish`, which needs a human. A PR review task (`pr-<n>`) and an issue task (`issue-<n>`) are separate tasks; `task.json` has a `related` field linking them.

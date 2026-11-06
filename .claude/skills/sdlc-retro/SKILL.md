@@ -38,7 +38,7 @@ Read only; nothing is written in this step. For every task and PR in the window:
 | Hand fixes after a task finished, and why | commits on the PR after `review.posted`, the session handoffs in memory |
 | CI failures and their real cause (read the log, don't guess) | `gh run list`, `gh run view --log-failed` |
 | Gaps logged, and gaps fixed | `sdlc/evals-workflow-notes.md` (G-numbers added or closed in the window) |
-| Decisions made, and decisions changed | `sdlc/decisions.md` |
+| Decisions made, and decisions changed | `sdlc/decisions/` (one file each) |
 | Lessons and corrections from the user | the handoff and feedback memories in the window |
 
 Put the numbers in one table per task: issue, size, rounds, must-fix per round, wall time, latest agent runs, hand
@@ -86,7 +86,7 @@ A change to the sbxm code itself is a GitHub issue with a size, not an experimen
 2. Give the user a short summary: the proposals, one line each (none is fine when no pattern
    has two instances), nothing else.
 3. Ask about each proposal on its own, with a recommendation (step 1 of N, 2 of N...).
-4. Record each answer in the retro file. An adopted experiment gets a numbered decision in `sdlc/decisions.md`;
+4. Record each answer in the retro file. An adopted experiment gets a numbered decision, a new file in `sdlc/decisions/`;
    a code change gets an issue.
 5. Everything goes through a branch and a PR with the independent review, like any other docs change.
 

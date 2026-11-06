@@ -1,0 +1,1 @@
+116. **P3 confirmed (the LLM judge runs through the shared headless primitive):** settles P3 in `sdlc/milestone-2.md`, per an independent review's recommendation (below) — no longer an open plan-level choice.

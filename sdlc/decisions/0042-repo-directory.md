@@ -1,0 +1,1 @@
+42. **Repo directory (P3):** Rename `model_compare/` to `sbxm/` (done by the user outside the session, since VS Code holds the folder open). Git repo initialized on `main` (2026-09-24); no commits yet. The scaffold in milestone 1 step 1 will be the first commit, together with the planning docs.

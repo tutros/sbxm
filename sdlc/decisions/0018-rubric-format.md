@@ -1,0 +1,1 @@
+18. **Rubric format:** Structured. Each criterion has `id`, `kind` (`pass_fail` → Jev Noul, `scale` with described levels → Jev Score), `weight` and optional free-text `notes` for the LLM judge and humans. All evaluators score against the same criteria.

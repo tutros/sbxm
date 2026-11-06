@@ -1,0 +1,1 @@
+11. **Config across harnesses:** Option (c) for now: shared instructions file, shared egress/secrets, hooks/guardrails per harness. Long-term goal is (a): one canonical config with per-harness adapters. Warn loudly when a harness can't support a configured feature.

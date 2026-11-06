@@ -24,7 +24,7 @@ Plus the lifecycle commands (`new`, `open`, `list`, `stop`, `rm`, `config`, `doc
 | Need | Read |
 |---|---|
 | Code layout, commands, constraints, working rules | `AGENTS.md` |
-| Any design question | `sdlc/decisions.md` (numbered; add new ones, never depart silently; the next free number is after the last entry) |
+| Any design question | `sdlc/decisions/` (numbered, one file each; never depart silently: a new decision is a new file in `sdlc/decisions/`, numbered one above the highest file or as its issue reserved) and `sdlc/decisions.md` (the rounds and spikes) |
 | `sbxm task` behavior | `sdlc/spec-m2b.md`, `sdlc/prd-m2b.md` |
 | Templates milestone | `sdlc/milestone-3.md`, decisions 199-218 and 221, `sdlc/spikes/S11.md` |
 | Task state machine | `sdlc/specs/task-state-machine.md`, `sdlc/spikes/state-table.md`, `src/task/machine.rs` |

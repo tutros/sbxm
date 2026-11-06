@@ -1,0 +1,1 @@
+102. **Contestant seeding shares `src/seed.rs` (confirmed by the user 2026-09-29):** reuses `new --seed`'s directory/symlink validation and copy step [47]; a new function wraps it with `git init` plus one baseline commit (no seed history or remotes), since that stricter rule [14] is specific to comparison contestants and not part of `new --seed`'s contract.

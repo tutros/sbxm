@@ -1,0 +1,1 @@
+92. **Milestone 2 scope (confirmed by the user 2026-09-29):** covers both comparisons (sdlc/idea.md's original ask) and the issue-worker migration [88][90], as one plan with two sub-milestones — **M2a** (comparisons) and **M2b** (folding `scripts/issue-workers.ps1` into sbxm) — sharing the headless-execution primitive [94] so it's built once.

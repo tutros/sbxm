@@ -1,0 +1,1 @@
+115. **Per-contestant profiles deferred (confirmed by the user 2026-09-29):** M2a's first working slice applies one profile to every contestant in a run, named at the run level. An optional per-contestant profile override (completing decision 10's "config variant") is a later slice, not part of the first vertical slice.

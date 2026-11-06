@@ -1,0 +1,1 @@
+78. **Skills store and Pi (milestone 1 review Q1, confirmed by the user 2026-09-27):** extends [72] to Pi: the `sbx` skills store serves neither Gemini CLI nor Pi [46], so `new`/`open` warn for a Pi sandbox whenever `skills.store` isn't `off`. Issue #8.

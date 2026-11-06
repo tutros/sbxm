@@ -42,7 +42,7 @@ reviewed as a new finding that names the listed issue it supersedes.
 ## 3. Checklist: does it do what was agreed?
 
 - **Plan and decisions.** The change does what its slice row says, and nothing it doesn't. Any departure from
-  `sdlc/decisions.md` has a new numbered decision the user confirmed. New behavior no decision covers is a finding, even
+  `sdlc/decisions/` has a new numbered decision (a new file) the user confirmed. New behavior no decision covers is a finding, even
   if it looks right.
 - **Silent drops (decision 11).** Every configured setting either takes effect or produces a loud warning. Look for:
   settings that are written or accepted but never read (e.g. a key `config init` writes that no code uses), unknown
@@ -64,7 +64,7 @@ The most common miss in this project is a change applied in one place but not in
 - **State and hash.** Anything that changes what a sandbox is built from joins the config hash (decisions 55, 69), and
   anything stored in `state.json` survives old state files (`#[serde(default)]`).
 - **Docs.** `README.md` (user-facing behavior), `AGENTS.md` (commands, constraints, the short code layout), `sdlc/milestone-1.md` (progress) and
-  `sdlc/decisions.md` are updated in the same change. Example commands in docs are ones that actually run.
+  `sdlc/decisions/` (a new decision is a new file) are updated in the same change. Example commands in docs are ones that actually run.
 
 ## 5. Checklist: tests
 
@@ -309,7 +309,7 @@ when it needs to build and run the tests. Nothing here needs GitHub access.
 3. Give Codex this prompt (it reads `AGENTS.md` but not `.claude/skills/`, so it names the skill file):
    "Review <scope, e.g. milestone 2a> of this repo. Follow `.claude/skills/sdlc-code-review/SKILL.md`: the checklist
    plus the cross-cutting sweep, and run `cargo fmt --check`, `cargo clippy --all-targets -- -D warnings` and
-   `cargo test`. Scope: `git diff origin/main..HEAD`. Read `sdlc/milestone-2.md`, `sdlc/decisions.md` and `AGENTS.md` first. Write
+   `cargo test`. Scope: `git diff origin/main..HEAD`. Read `sdlc/milestone-2.md`, `sdlc/decisions/` and `AGENTS.md` first. Write
    `sdlc/reviews/<date>-<scope>.md` in the **Review file format** of section 8, including acceptance criteria for every
    must-fix and should-fix finding. Don't edit code."
 4. Copy the review file out of the clone into the real repo's `sdlc/reviews/`, check its evidence yourself (the main
