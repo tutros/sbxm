@@ -241,3 +241,118 @@ fn a_run_still_going_is_refused_naming_what_to_pass() {
     assert!(message.contains("still going"), "{message}");
     assert!(message.contains("--check-run"), "{message}");
 }
+
+mod gh_backend {
+    //! `GhBackend::run_failed_log`: the failed jobs from `gh run view --json jobs`, each with its
+    //! lines of `gh run view --log-failed` (written by hand in the shape `gh` 2.83 prints them:
+    //! `<job>\t<step>\t<timestamp> <text>`; no GitHub access where issue 448 was built).
+
+    use std::sync::Mutex;
+
+    use anyhow::{Result, bail};
+    use sbxm::github::gh::{GhBackend, GhRunner};
+    use sbxm::github::{GitHubBackend, JobLog};
+
+    struct Scripted {
+        calls: Mutex<Vec<Vec<String>>>,
+        outputs: Mutex<Vec<String>>,
+    }
+
+    impl GhRunner for &'static Scripted {
+        fn run(&self, args: &[String], _stdin: Option<&str>) -> Result<String> {
+            self.calls.lock().unwrap().push(args.to_vec());
+            match self.outputs.lock().unwrap().pop() {
+                Some(out) => Ok(out),
+                None => bail!("no scripted output left"),
+            }
+        }
+    }
+
+    fn backend(outputs: &[&str]) -> (GhBackend, &'static Scripted) {
+        let script: &'static Scripted = Box::leak(Box::new(Scripted {
+            calls: Mutex::default(),
+            outputs: Mutex::new(outputs.iter().rev().map(|s| (*s).to_owned()).collect()),
+        }));
+        (GhBackend::with_runner(Box::new(script)), script)
+    }
+
+    const JOBS: &str = r#"{"jobs":[
+        {"name":"lint","conclusion":"success","status":"completed"},
+        {"name":"setup","conclusion":"failure","status":"completed"},
+        {"name":"test","conclusion":"failure","status":"completed"}
+    ]}"#;
+
+    #[test]
+    fn each_failed_job_gets_its_own_lines_and_one_with_none_an_empty_log() {
+        let log = "test\tRun tests\t2026-11-05T10:00:00.0000000Z running 3 tests\n\
+                   test\tRun tests\t2026-11-05T10:00:01.0000000Z test a ... FAILED\n";
+        let (gh, script) = backend(&[JOBS, log]);
+
+        let jobs = gh.run_failed_log("o/r", 42).unwrap();
+
+        assert_eq!(
+            jobs,
+            vec![
+                JobLog {
+                    job: "setup".into(),
+                    log: String::new(),
+                },
+                JobLog {
+                    job: "test".into(),
+                    log: log.into(),
+                },
+            ]
+        );
+        let calls = script.calls.lock().unwrap().clone();
+        assert_eq!(
+            calls,
+            vec![
+                ["run", "view", "42", "--repo", "o/r", "--json", "jobs"]
+                    .map(str::to_owned)
+                    .to_vec(),
+                ["run", "view", "42", "--repo", "o/r", "--log-failed"]
+                    .map(str::to_owned)
+                    .to_vec(),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_job_in_the_log_that_the_jobs_list_missed_is_kept() {
+        let (gh, _) = backend(&[r#"{"jobs":[]}"#, "build\tstep\tline\n"]);
+
+        let jobs = gh.run_failed_log("o/r", 42).unwrap();
+
+        assert_eq!(
+            jobs,
+            vec![JobLog {
+                job: "build".into(),
+                log: "build\tstep\tline\n".into(),
+            }]
+        );
+    }
+}
+
+mod fake_backend {
+    use sbxm::github::fake::{FakeGitHub, GhCall};
+    use sbxm::github::{GitHubBackend, JobLog};
+
+    #[test]
+    fn the_fake_answers_the_scripted_log_and_records_the_call() {
+        let jobs = vec![JobLog {
+            job: "test".into(),
+            log: "boom\n".into(),
+        }];
+        let gh = FakeGitHub::default().with_run_log(42, jobs.clone());
+
+        assert_eq!(gh.run_failed_log("o/r", 42).unwrap(), jobs);
+        assert!(gh.run_failed_log("o/r", 43).unwrap().is_empty());
+        assert_eq!(
+            gh.calls(),
+            vec![
+                GhCall::RunFailedLog("o/r".into(), 42),
+                GhCall::RunFailedLog("o/r".into(), 43)
+            ]
+        );
+    }
+}

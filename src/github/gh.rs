@@ -8,8 +8,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
 use super::{
-    CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, ListedPr, Mergeable, PrComment,
-    PrInfo, PrMergeState, PrRequest, PrState, RunStatus, WorkflowRun,
+    CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, JobLog, ListedPr, Mergeable,
+    PrComment, PrInfo, PrMergeState, PrRequest, PrState, RunStatus, WorkflowRun,
 };
 
 /// Runs `gh` with arguments and optional stdin, returning stdout.
@@ -206,6 +206,21 @@ fn run_status(status: Option<&str>, conclusion: Option<&str>) -> RunStatus {
         Some("failure" | "timed_out" | "startup_failure") => RunStatus::Failed,
         _ => RunStatus::Passed,
     }
+}
+
+#[derive(Deserialize)]
+struct RawJobs {
+    #[serde(default)]
+    jobs: Vec<RawJob>,
+}
+
+#[derive(Deserialize)]
+struct RawJob {
+    name: String,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    conclusion: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -655,6 +670,55 @@ impl GitHubBackend for GhBackend {
             None,
         )?;
         Ok(())
+    }
+
+    fn run_failed_log(&self, repo: &str, id: u64) -> Result<Vec<JobLog>> {
+        let id = id.to_string();
+        let raw: RawJobs = self.json(&strings(&[
+            "run", "view", &id, "--repo", repo, "--json", "jobs",
+        ]))?;
+        let mut jobs: Vec<JobLog> = raw
+            .jobs
+            .into_iter()
+            .filter(|j| {
+                run_status(j.status.as_deref(), j.conclusion.as_deref()) == RunStatus::Failed
+            })
+            .map(|j| JobLog {
+                job: j.name,
+                log: String::new(),
+            })
+            .collect();
+        let log = self.run(
+            &strings(&["run", "view", &id, "--repo", repo, "--log-failed"]),
+            None,
+        )?;
+        // Each line starts with its job's name and a tab; a line without one goes with the line
+        // before it.
+        let mut last = None;
+        for line in log.split_inclusive('\n') {
+            let at = match line.split_once('\t') {
+                Some((name, _)) => match jobs.iter().position(|j| j.job == name) {
+                    Some(at) => at,
+                    None => {
+                        jobs.push(JobLog {
+                            job: name.to_owned(),
+                            log: String::new(),
+                        });
+                        jobs.len() - 1
+                    }
+                },
+                None => match last {
+                    Some(at) => at,
+                    None => continue,
+                },
+            };
+            last = Some(at);
+            jobs[at].log.push_str(line);
+            if !line.ends_with('\n') {
+                jobs[at].log.push('\n');
+            }
+        }
+        Ok(jobs)
     }
 
     fn pr_merge_commit(&self, repo: &str, number: u32) -> Result<Option<String>> {
