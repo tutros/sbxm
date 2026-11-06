@@ -49,6 +49,9 @@ pub enum Role {
     /// The worker of a fix task (issue 313): the source is a pull request review's must-fix
     /// findings (`.sbxm-task/issue.md`), on the pull request's own branch.
     WorkerPrFix,
+    /// The worker of a log-fix (decision 300): the source is a failed workflow run's log
+    /// (`.sbxm-task/check-log.md`), on the pull request's own branch.
+    WorkerPrFixCheck,
     /// The reviewer of a fix task: checks the findings are fixed.
     ReviewerPrFix,
     /// The fix round of a fix task after a review found must-fix findings.
@@ -74,6 +77,7 @@ const REVIEWER_SPEC: &str = include_str!("../../prompts/reviewer-spec.md");
 const FIX_SPEC: &str = include_str!("../../prompts/fix-spec.md");
 const FIX_GATE_SPEC: &str = include_str!("../../prompts/fix-gate-spec.md");
 const WORKER_PR_FIX: &str = include_str!("../../prompts/worker-pr-fix.md");
+const WORKER_PR_FIX_CHECK: &str = include_str!("../../prompts/worker-pr-fix-check.md");
 const REVIEWER_PR_FIX: &str = include_str!("../../prompts/reviewer-pr-fix.md");
 const FIX_PR_FIX: &str = include_str!("../../prompts/fix-pr-fix.md");
 const FIX_GATE_PR_FIX: &str = include_str!("../../prompts/fix-gate-pr-fix.md");
@@ -100,6 +104,11 @@ pub fn template(role: Role, prompts: &Prompts) -> Result<Template> {
         Role::FixGateSpec => ("fix-gate-spec.md", FIX_GATE_SPEC, prompts.fix.as_deref()),
         // A fix task (issue 313) takes the same override keys again.
         Role::WorkerPrFix => ("worker-pr-fix.md", WORKER_PR_FIX, prompts.worker.as_deref()),
+        Role::WorkerPrFixCheck => (
+            "worker-pr-fix-check.md",
+            WORKER_PR_FIX_CHECK,
+            prompts.worker.as_deref(),
+        ),
         Role::ReviewerPrFix => (
             "reviewer-pr-fix.md",
             REVIEWER_PR_FIX,

@@ -2149,6 +2149,7 @@ impl Steps for TaskSteps<'_> {
                     clone_source: None,
                     identity: None,
                     disk: self.disk.clone(),
+                    check_run: None,
                 },
                 self.backend,
                 self.github,
