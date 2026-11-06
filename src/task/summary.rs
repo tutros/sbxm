@@ -8,6 +8,7 @@ use std::path::Path;
 
 use serde_json::Value;
 
+use super::findings;
 use super::record::{Record, RunInfo};
 use super::review::{self, COMMENT_CAP};
 
@@ -80,14 +81,45 @@ fn run_line(run: Option<&RunInfo>) -> String {
     format!("{} s, {cost}", run.duration_s)
 }
 
+/// The first finding of `rounds` whose id or title, as the review wrote it, looks like a secret:
+/// where it is and the kind, never the text (review M-2). Checked before anything is cut,
+/// stripped or left out for length, since a cut can keep a value and drop what made it look
+/// like one.
+fn secret_finding(rounds: &[Round]) -> Option<String> {
+    rounds.iter().find_map(|round| {
+        round.findings.iter().find_map(|(id, title)| {
+            let kind = findings::secret_kind(id).or_else(|| findings::secret_kind(title))?;
+            Some(format!(
+                "a must-fix finding of review-{}.md looks like a secret ({kind})",
+                round.number
+            ))
+        })
+    })
+}
+
 /// The comment on an issue the PR at `pr_url` closes, from `task` and the review files in its
 /// folder `meta`. It stays below what GitHub accepts: findings that don't fit are counted.
-pub fn issue_comment(task: &Record, meta: &Path, pr_url: &str) -> String {
+/// `Err` says why there is none, never with the text that caused it: a finding's id or title as
+/// the review wrote it, or a line of the comment itself, looks like a secret.
+pub fn issue_comment(task: &Record, meta: &Path, pr_url: &str) -> Result<String, String> {
+    let rounds = rounds(meta);
+    if let Some(why) = secret_finding(&rounds) {
+        return Err(why);
+    }
+    let body = render(task, &rounds, pr_url);
+    match body.lines().find_map(findings::secret_kind) {
+        Some(kind) => Err(format!(
+            "a line of the comment looks like a secret ({kind})"
+        )),
+        None => Ok(body),
+    }
+}
+
+fn render(task: &Record, rounds: &[Round], pr_url: &str) -> String {
     let mut head = format!(
         "**sbxm task finish**: the in-task review and fix rounds of task `{}`.\n\n",
         task.id
     );
-    let rounds = rounds(meta);
     if rounds.is_empty() {
         head.push_str("- No review round is saved in the task's folder.\n");
     }
@@ -119,7 +151,7 @@ pub fn issue_comment(task: &Record, meta: &Path, pr_url: &str) -> String {
 
     let mut body = head;
     let mut left = 0;
-    for round in &rounds {
+    for round in rounds {
         let line = match round.must_fix {
             Some(count) => format!(
                 "- Review round {}: {count} must-fix, {} `Repeat of:`\n",

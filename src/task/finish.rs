@@ -1850,13 +1850,15 @@ fn post_issue_summaries(
     if issues.is_empty() {
         return warnings;
     }
-    let body = summary::issue_comment(&prepared.record, &prepared.meta, url);
-    if let Some(found) = secret_line("the issue comment", &body) {
-        warnings.push(format!(
-            "no summary of the review rounds was posted on the issue: {found}"
-        ));
-        return warnings;
-    }
+    let body = match summary::issue_comment(&prepared.record, &prepared.meta, url) {
+        Ok(body) => body,
+        Err(why) => {
+            warnings.push(format!(
+                "no summary of the review rounds was posted on the issue: {why}"
+            ));
+            return warnings;
+        }
+    };
     let repo = prepared.record.repo.clone();
     for &issue in issues {
         let recorded = prepared

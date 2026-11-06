@@ -114,7 +114,7 @@ fn the_rounds_are_listed_in_order_with_their_must_fix_findings_and_repeat_counts
         },
     ];
 
-    let body = issue_comment(&task, meta.path(), "https://github.com/o/r/pull/9");
+    let body = issue_comment(&task, meta.path(), "https://github.com/o/r/pull/9").unwrap();
 
     let r1 = body
         .find("- Review round 1: 2 must-fix, 0 `Repeat of:`\n")
@@ -156,7 +156,7 @@ fn a_round_with_no_findings_and_a_task_with_no_fix_round() {
     let meta = meta_with(&[&review(&[])]);
     let task = record_of(Kind::Issue);
 
-    let body = issue_comment(&task, meta.path(), "https://github.com/o/r/pull/9");
+    let body = issue_comment(&task, meta.path(), "https://github.com/o/r/pull/9").unwrap();
 
     assert!(
         body.contains("- Review round 1: 0 must-fix, 0 `Repeat of:`\n"),
@@ -177,7 +177,7 @@ fn a_task_that_stopped_shows_its_stop_reason() {
     task.round = 1;
     task.stopped = Some(Stopped::RepeatFinding);
 
-    let body = issue_comment(&task, meta.path(), "u");
+    let body = issue_comment(&task, meta.path(), "u").unwrap();
 
     assert!(body.contains("- Stopped: repeat-finding\n"), "{body}");
     // An older record has no fix run recorded for the round.
@@ -211,7 +211,7 @@ fn the_worker_and_latest_review_times_and_costs_are_shown() {
         duration_s: 300,
     })));
 
-    let body = issue_comment(&task, meta.path(), "u");
+    let body = issue_comment(&task, meta.path(), "u").unwrap();
 
     assert!(body.contains("- Worker: 812 s, $1.23\n"), "{body}");
     assert!(
@@ -394,6 +394,104 @@ fn an_issue_task_whose_post_fails_warns_and_still_opens_the_pr() {
     assert_eq!(task.stage, Stage::Finished);
     assert!(task.pr.is_some());
     assert!(task.issue_comments.is_empty());
+}
+
+// --- Secret-looking text is checked before it is cut (review M-2) ------------------------------
+
+/// A synthetic token assignment whose closing quote is character `TITLE_CAP + 1` of the title, so
+/// the cut drops the quote and keeps the whole value. Built from parts so no file holds it whole.
+fn title_hiding_a_secret() -> (String, &'static str) {
+    let value = "SYNTHETIC_SECRET_VALUE";
+    let suffix = [" token ", "= '", value, "'"].concat();
+    let title = format!(
+        "{}{suffix}",
+        "x".repeat(TITLE_CAP + 1 - suffix.chars().count())
+    );
+    assert_eq!(title.chars().count(), TITLE_CAP + 1);
+    assert!(sbxm::task::findings::secret_kind(&title).is_some());
+    // Cut as the comment cuts it, it no longer looks like a secret: only the uncut check sees it.
+    assert!(sbxm::task::findings::secret_kind(&inert(&title)).is_none());
+    (title, value)
+}
+
+#[test]
+fn a_title_whose_secret_survives_the_cut_is_refused_without_its_value() {
+    let (title, value) = title_hiding_a_secret();
+    let meta = meta_with(&[&review(&[("M-1", &title, None)]), &review(&[])]);
+
+    let why = issue_comment(&record_of(Kind::Issue), meta.path(), "u").unwrap_err();
+
+    assert!(why.contains("review-1.md"), "{why}");
+    assert!(!why.contains(value), "{why}");
+}
+
+#[test]
+fn a_finding_id_that_looks_like_a_secret_is_refused() {
+    let id = ["ghp_", &"a".repeat(36)].concat();
+    let meta = meta_with(&[&review(&[(&id, "A title", None)])]);
+
+    let why = issue_comment(&record_of(Kind::Issue), meta.path(), "u").unwrap_err();
+
+    assert!(!why.contains(&id), "{why}");
+}
+
+#[test]
+fn a_secret_in_a_finding_left_out_for_length_is_still_refused() {
+    let (title, _) = title_hiding_a_secret();
+    let mut findings: Vec<(String, String)> = (1..=800)
+        .map(|n| (format!("M-{n}"), "y".repeat(90)))
+        .collect();
+    findings.push(("M-801".into(), title));
+    let listed: Vec<(&str, &str, Option<&str>)> = findings
+        .iter()
+        .map(|(id, title)| (id.as_str(), title.as_str(), None))
+        .collect();
+    let task = record_of(Kind::Issue);
+    // Without the secret, the list is too long to show whole: the last findings are counted.
+    let clean = meta_with(&[&review(&listed[..800])]);
+    let body = issue_comment(&task, clean.path(), "u").unwrap();
+    assert!(
+        body.contains("more must-fix finding(s), not listed here"),
+        "{body}"
+    );
+
+    let meta = meta_with(&[&review(&listed)]);
+    assert!(issue_comment(&task, meta.path(), "u").is_err());
+}
+
+#[test]
+fn a_finish_whose_earlier_review_hides_a_secret_title_posts_nothing_and_warns() {
+    let (title, value) = title_hiding_a_secret();
+    let f = fixture();
+    let prepared = ready(&f);
+    fs::write(
+        prepared.meta.join("review-1.md"),
+        review(&[("M-1", &title, None)]),
+    )
+    .unwrap();
+    fs::write(prepared.meta.join("review-2.md"), REVIEW_CLEAN).unwrap();
+    let github = FakeGitHub::default();
+
+    let done = finish(&f.env.base_dir(), "issue-41", &github, &Probe).unwrap();
+
+    assert!(comments(&github).is_empty(), "{:?}", github.calls());
+    assert!(
+        github
+            .calls()
+            .iter()
+            .all(|c| !format!("{c:?}").contains(value)),
+        "{:?}",
+        github.calls()
+    );
+    let [warning] = done.warnings.as_slice() else {
+        panic!("{:?}", done.warnings)
+    };
+    assert!(
+        warning.contains("no summary of the review rounds was posted"),
+        "{warning}"
+    );
+    assert!(!warning.contains(value), "{warning}");
+    assert_eq!(reread(&prepared.meta).stage, Stage::Finished);
 }
 
 // --- A spec task's finish ------------------------------------------------------------------------
