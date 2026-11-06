@@ -72,6 +72,15 @@ fn numbers_of(line: &str) -> Option<Vec<u32>> {
     Some(numbers)
 }
 
+/// The numbers of `text`'s `Fixes:` line ([`parse`]), each checked to be an open issue of `repo`
+/// ([`check_open_issues`]): the start's check of a spec under the `pr` sink, also made for each
+/// spec target of a `task run` list before the first one starts (decision 193).
+pub fn check_spec(github: &dyn GitHubBackend, repo: &str, text: &str) -> Result<Vec<u32>> {
+    let numbers = parse(text)?;
+    check_open_issues(github, repo, &numbers)?;
+    Ok(numbers)
+}
+
 /// Refuses, naming it, the first of `numbers` that isn't an open issue of `repo`: one `gh` can't
 /// read as an issue (it doesn't exist), a closed one, or a pull request. Checked at the start,
 /// before any sandbox, so the PR's `Fixes` lines never close something else.

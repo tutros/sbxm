@@ -728,8 +728,9 @@ pub struct SpecOptions {
 
 /// Every input [`run_spec`] resolves before it does anything with the backend or writes
 /// anything: the worker config, the repo, the committer identity, the base branch and the spec
-/// file itself (and, under the `pr` sink, its `Fixes:` line). Shared with `task_run::run_spec` (issue #194 review finding M-1) so a `--restart`
-/// discard there happens only after all of this has been checked, the same as `run_with`
+/// file itself (and, under the `pr` sink, its `Fixes:` line). Shared with `task_run::run_spec`
+/// (issue #194 review finding M-1) so a `--restart` discard there happens only after all of this
+/// has been checked, the same as `run_with`
 /// validates every start input before its own `discard_existing` call. `source_text`, `id` and
 /// `title` are this snapshot's read of the spec file: a caller that discards an existing task
 /// between resolving and starting resolves again after the discard and hands that snapshot to
@@ -836,15 +837,15 @@ fn check_pr_sink(
     text: &str,
     warnings: &mut Vec<String>,
 ) -> Result<()> {
-    let numbers = fixes::parse(text)?;
+    // The line's form is checked first: a malformed one needs no GitHub call to refuse.
+    fixes::parse(text)?;
     github.default_branch(repo).map_err(|e| {
         anyhow!(
             "[finish] sink = \"pr\" opens the spec task's PR on GitHub, but gh can't reach {repo} \
              ({e:#}); check `gh auth status` and the repo, or set another [finish] sink"
         )
     })?;
-    fixes::check_open_issues(github, repo, &numbers)?;
-    if numbers.is_empty() {
+    if fixes::check_spec(github, repo, text)?.is_empty() {
         warnings.push(fixes::NO_LINE_WARNING.to_owned());
     }
     Ok(())

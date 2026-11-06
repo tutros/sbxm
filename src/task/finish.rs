@@ -1469,8 +1469,8 @@ pub fn pr_number(url: &str) -> Option<u32> {
 
 /// The local issue task (or spec task under the `pr` sink, issue 438) that opened PR `number` of
 /// `repo` with `task finish`, and the commit its in-task review covered (issue 198), read only
-/// from the task folders on this machine. A task
-/// that continued the PR doesn't count: its review covered only its own commits, not the PR.
+/// from the task folders on this machine. A task that continued the PR doesn't count: its review
+/// covered only its own commits, not the PR.
 /// Only `review.posted` counts, which `task finish` records once GitHub accepted the comment (PR
 /// 226's review): a task that had no `review.md` to post, whose post failed, or that was
 /// interrupted before the post has none, so its PR is reviewed as usual. A folder whose

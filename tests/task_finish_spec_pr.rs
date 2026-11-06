@@ -651,3 +651,66 @@ fn a_failed_pr_create_names_the_spec_retry() {
     assert!(!message.contains("--issue"), "{message}");
     assert_eq!(reread(&f, &id).stage, Stage::Ready);
 }
+
+// --- This repo's own setting --------------------------------------------------------------------
+
+#[test]
+fn this_repos_sbxm_task_toml_sets_the_pr_sink() {
+    let config =
+        sbxm::task::config::TaskConfig::load(Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+    assert_eq!(config.sink, sbxm::task::config::Sink::Pr);
+}
+
+// --- A `task run` list (decision 193) -----------------------------------------------------------
+
+#[test]
+fn a_list_refuses_a_later_specs_closed_issue_before_the_first_target_starts() {
+    use sbxm::commands::task_run::{ListOptions, Target as RunTarget, run_list};
+    let f = pr_fixture();
+    let first = f.env.tmp.path().join("first.md");
+    fs::write(&first, "Fixes: #435\n").unwrap();
+    let second = f.env.tmp.path().join("second.md");
+    fs::write(&second, "# Second\nFixes: #436\n").unwrap();
+    let backend = FakeBackend::with_secrets(&["anthropic", "openai"]);
+    let github = FakeGitHub::default()
+        .with_issue_text(issue_text(435))
+        .with_issue_text(closed_issue(436));
+    let opts = ListOptions {
+        repo_root: f.env.tmp.path().join("target-repo"),
+        worker_harness: None,
+        worker_model: None,
+        reviewer_harness: None,
+        reviewer_model: None,
+        time_limit: None,
+        reviewer_time_limit: None,
+        profile: None,
+        base: Some("main".into()),
+        repo: Some("o/r".into()),
+        clone_source: Some(source(&f)),
+        identity: Some(Identity {
+            name: "Dev".into(),
+            email: "dev@example.com".into(),
+        }),
+        disk: Default::default(),
+        location: None,
+    };
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let result = run_list(
+        &f.env.config_dir(),
+        &opts,
+        &[RunTarget::Spec(first), RunTarget::Spec(second)],
+        None,
+        &backend,
+        &github,
+        &Probe,
+        &sbxm::task::gates::FakeHostRunner::default(),
+        &mut out,
+        &mut warn,
+    );
+    let message = format!("{:#}", result.unwrap_err());
+    assert!(
+        message.contains("second.md") && message.contains("#436"),
+        "{message}"
+    );
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+}
