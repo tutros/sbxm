@@ -298,3 +298,47 @@ fn sbx_ls_failing_otherwise_is_still_sbx_not_answering() {
         "{summary}"
     );
 }
+
+// `doctor` reports the local sign-in the way it reports the cloud's.
+
+fn doctor_host() -> sbxm::commands::doctor::Host {
+    sbxm::commands::doctor::Host {
+        free_space: |_| Ok(20 * 1024 * 1024 * 1024),
+        writable: |_| Ok(()),
+        temp_dirs: Vec::new(),
+        sandbox_state_dir: None,
+        now: || 1_800_000_000,
+        current_dir: None,
+    }
+}
+
+#[test]
+fn doctor_says_signed_in_when_sbx_ls_answers() {
+    let env = common::Env::new();
+
+    let report =
+        sbxm::commands::doctor::run(&env.config_dir(), &FakeBackend::default(), &doctor_host());
+
+    let text = report.render();
+    assert!(
+        text.contains("ok   sbx daemon answers, signed in"),
+        "{text}"
+    );
+}
+
+#[test]
+fn doctor_fails_signed_out_naming_sbx_login() {
+    let env = common::Env::new();
+    let b = FakeBackend::default().failing_list_with(SIGNED_OUT);
+
+    let report = sbxm::commands::doctor::run(&env.config_dir(), &b, &doctor_host());
+
+    assert!(report.failed());
+    let text = report.render();
+    assert!(
+        text.contains("FAIL sbx is not signed in (`sbx ls --json` failed"),
+        "{text}"
+    );
+    assert!(text.contains("; run `sbx login`"), "{text}");
+    assert!(!text.contains("sbx daemon:"), "{text}");
+}
