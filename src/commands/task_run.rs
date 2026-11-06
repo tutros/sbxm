@@ -17,8 +17,9 @@ use crate::disk;
 use crate::github::GitHubBackend;
 use crate::harness::Harness;
 use crate::run::config::{check_model_flag, headless_harness, parse_duration};
-use crate::task::config::TaskConfig;
+use crate::task::config::{Sink, TaskConfig};
 use crate::task::finish;
+use crate::task::fixes;
 use crate::task::gates::HostRunner;
 use crate::task::pipeline;
 use crate::task::record::{self, ProcessProbe};
@@ -467,7 +468,7 @@ fn run_spec_task(
     // identity, base or spec file is caught here too: `--restart`'s discard below must not cost
     // the old task its result over an input that was always going to be rejected (issue #194
     // review finding M-1).
-    let mut resolved = task_start::resolve_spec_start(&start)?;
+    let mut resolved = task_start::resolve_spec_start(&start, github)?;
     // The worker's secret, checked the same way the reviewer's already is above, before anything
     // is discarded: a missing one must not be found only after the old task is gone (issue #194
     // review finding M-2).
@@ -497,7 +498,7 @@ fn run_spec_task(
             // Either way the old task, set aside rather than deleted (decision 185), is put back:
             // its preparation never got far enough to need it gone for good.
             let discarded = resolved.id.clone();
-            let refreshed = task_start::resolve_spec_start(&start)
+            let refreshed = task_start::resolve_spec_start(&start, github)
                 .context("the old task was discarded, but the new one could not be started")
                 .and_then(|fresh| {
                     if fresh.id == discarded {
@@ -794,7 +795,8 @@ fn queue_wide_stop(e: &anyhow::Error) -> bool {
 
 /// Checks every target's own identity before the first one's sandbox is created (decision 193,
 /// issue 201 review M-1): an issue that doesn't exist, isn't open, already has a task, or names a
-/// PR that can't be continued; a spec file that can't be read or already has a task. Skipped, not
+/// PR that can't be continued; a spec file that can't be read or already has a task, or, under the
+/// `pr` sink, whose `Fixes:` line is malformed or names something not an open issue. Skipped, not
 /// an error, when the list's shared repo can't even be resolved (no `--repo` and no git origin):
 /// each target then discovers that the same way a single `task run` always has, one at a time as
 /// the loop below reaches it — decision 193 point 1 still applies to that shared failure, and the
@@ -823,6 +825,8 @@ fn preflight_targets(
     } else {
         pipeline::preflight_issues(config_dir, &repo, github, &issue_numbers)?
     };
+    // A config that can't be read is left to each target's own start, which reports it.
+    let pr_sink = TaskConfig::load(&opts.repo_root).is_ok_and(|c| c.sink == Sink::Pr);
     let mut problems = Vec::new();
     for target in targets {
         match target {
@@ -832,7 +836,15 @@ fn preflight_targets(
                 }
             }
             Target::Spec(path) => {
-                if let Err(e) = pipeline::preflight_spec(config_dir, path) {
+                let checked = pipeline::preflight_spec(config_dir, path).and_then(|()| {
+                    // Under the `pr` sink, the spec's `Fixes:` line too (decision 301).
+                    if pr_sink {
+                        let text = pipeline::validate_spec_file(path)?;
+                        fixes::check_spec(github, &repo, &text)?;
+                    }
+                    Ok(())
+                });
+                if let Err(e) = checked {
                     problems.push(format!("{}: {e:#}", target.flag()));
                 }
             }

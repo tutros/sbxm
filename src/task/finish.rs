@@ -1114,11 +1114,33 @@ pub fn pr_body(
     result: Option<&str>,
     review: Option<&str>,
 ) -> (String, Vec<String>) {
+    pr_body_fixing(&[number], risk, unresolved, result, review)
+}
+
+/// The line a PR body has in place of its `Fixes` lines when it closes no issue: a spec task
+/// whose spec has no `Fixes:` line (issue 438, decision 301).
+pub const CLOSES_NO_ISSUE: &str = "This PR closes no issue: its spec has no `Fixes:` line.";
+
+/// [`pr_body`] with one `Fixes #n` line per number of `fixes`, in its order, or
+/// [`CLOSES_NO_ISSUE`] when it is empty (a spec task's PR, issue 438).
+pub fn pr_body_fixing(
+    fixes: &[u32],
+    risk: &str,
+    unresolved: Option<&str>,
+    result: Option<&str>,
+    review: Option<&str>,
+) -> (String, Vec<String>) {
     // Everything but the `Fixes #N` line is agent text, neutralised before any cut so a cut can't
     // separate a keyword from its zero-width space and leave the reference active. The risk
     // section is the same text the in-task review comment opens with (issue 228).
     let (risk, risk_cut) = review::published_risk(risk);
-    let mut body = format!("{}\nFixes #{number}\n", risk.trim_end());
+    let mut body = format!("{}\n", risk.trim_end());
+    for number in fixes {
+        body.push_str(&format!("Fixes #{number}\n"));
+    }
+    if fixes.is_empty() {
+        body.push_str(&format!("{CLOSES_NO_ISSUE}\n"));
+    }
     let mut cuts: Vec<String> = risk_cut.into_iter().collect();
     for name in HANDBACK_SECTIONS {
         let Some(text) = result.and_then(|r| handback_section(r, name)) else {
@@ -1445,9 +1467,10 @@ pub fn pr_number(url: &str) -> Option<u32> {
     number.parse().ok()
 }
 
-/// The local issue task that opened PR `number` of `repo` with `task finish`, and the commit its
-/// in-task review covered (issue 198), read only from the task folders on this machine. A task
-/// that continued the PR doesn't count: its review covered only its own commits, not the PR.
+/// The local issue task (or spec task under the `pr` sink, issue 438) that opened PR `number` of
+/// `repo` with `task finish`, and the commit its in-task review covered (issue 198), read only
+/// from the task folders on this machine. A task that continued the PR doesn't count: its review
+/// covered only its own commits, not the PR.
 /// Only `review.posted` counts, which `task finish` records once GitHub accepted the comment (PR
 /// 226's review): a task that had no `review.md` to post, whose post failed, or that was
 /// interrupted before the post has none, so its PR is reviewed as usual. A folder whose
@@ -1457,9 +1480,14 @@ pub fn reviewed_pr_task(base_dir: &Path, repo: &str, number: u32) -> Option<(Str
     let entries = fs::read_dir(record::tasks_root(base_dir)).ok()?;
     let mut found: Vec<(String, String)> = entries
         .flatten()
-        .filter(|e| e.file_name().to_string_lossy().starts_with("issue-"))
+        .filter(|e| {
+            let name = e.file_name();
+            let name = name.to_string_lossy();
+            name.starts_with("issue-") || name.starts_with("spec-")
+        })
         .filter_map(|e| record::read(&e.path().join("task.json")).ok())
-        .filter(|t| t.kind == record::Kind::Issue && t.continues.is_none())
+        .filter(|t| matches!(t.kind, record::Kind::Issue | record::Kind::Spec))
+        .filter(|t| t.continues.is_none())
         .filter(|t| {
             t.pr.as_deref()
                 .is_some_and(|pr| pr.trim().eq_ignore_ascii_case(&url))
@@ -1595,9 +1623,39 @@ pub fn finish(
     github: &dyn GitHubBackend,
     probe: &dyn ProcessProbe,
 ) -> Result<Finished> {
+    open_task_pr(base_dir, id, None, github, probe)
+}
+
+/// The `pr` sink for a spec task (issue 438, decision 301): [`finish`], as for an issue task,
+/// but the PR closes the issues of the spec's `Fixes:` line, read from the copy its start saved
+/// (`source.md`) before anything is pushed, and its title is the spec's first heading. `retry` is
+/// the `--spec <FILE>` the refusals name.
+pub fn finish_spec_pr(
+    base_dir: &Path,
+    id: &str,
+    retry: &str,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+) -> Result<Finished> {
+    open_task_pr(base_dir, id, Some(retry), github, probe)
+}
+
+/// [`finish`] for an issue task (`spec` is `None`), or [`finish_spec_pr`] for a spec task, whose
+/// `--spec <FILE>` flag `spec` is.
+fn open_task_pr(
+    base_dir: &Path,
+    id: &str,
+    spec: Option<&str>,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+) -> Result<Finished> {
     let mut prepared = Prepared::open(base_dir, id)?;
-    if prepared.record.kind == record::Kind::Spec {
+    let is_spec = prepared.record.kind == record::Kind::Spec;
+    if is_spec && spec.is_none() {
         bail!("task {id} is a spec task; it finishes through its [finish] sink, never a PR");
+    }
+    if !is_spec && spec.is_some() {
+        bail!("task {id} isn't a spec task; only a spec task has a [finish] sink");
     }
     if prepared.record.kind == record::Kind::Fix {
         bail!("task {id} is a fix task; `sbxm task fix` pushes it onto its PR's branch itself");
@@ -1627,6 +1685,31 @@ pub fn finish(
     if let Some(continued) = &task.continues {
         return finish_continued(prepared, &repo_git, continued, github, probe);
     }
+    // What the PR closes, its title, and the flag a retry names: the issue's, or the spec's.
+    let (fixes, title, retry) = match spec {
+        None => (
+            vec![task.number],
+            task.title.clone(),
+            format!("--issue {}", task.number),
+        ),
+        Some(flag) => {
+            let source = prepared.meta.join("source.md");
+            let text = fs::read_to_string(&source).with_context(|| {
+                format!(
+                    "task {id} has no readable source.md, the spec as its start saved it, so its \
+                     Fixes line can't be read; nothing was pushed"
+                )
+            })?;
+            let fixes = super::fixes::parse(&text).with_context(|| {
+                format!("task {id}'s spec, as its start saved it in source.md; nothing was pushed")
+            })?;
+            (
+                fixes,
+                super::fixes::title(&text, &task.title),
+                flag.to_owned(),
+            )
+        }
+    };
     let result = read_capped(&prepared.meta.join("result.md"))?;
     let review = read_capped(&prepared.meta.join("review.md"))?;
     for (name, text) in [("result.md", &result), ("review.md", &review)] {
@@ -1649,8 +1732,8 @@ pub fn finish(
     }
     let risk_text = risk_section(&task, &unresolved);
     refuse_secrets("the risk section", &risk_text)?;
-    let (body, cuts) = pr_body(
-        task.number,
+    let (body, cuts) = pr_body_fixing(
+        &fixes,
         &risk_text,
         section.as_deref(),
         result.as_deref(),
@@ -1663,24 +1746,23 @@ pub fn finish(
     // Issue 60: an open PR of this branch is looked for before anything is pushed. One into the
     // task's base is adopted rather than opened again; one into another base is named and left
     // alone, since pushing would move its head.
-    let existing = open_pr(github, &task)?;
+    let existing = open_pr(github, &task, &retry)?;
     if let Some(Found::OtherBase(pr)) = &existing {
         bail!(
             "{} is already open for branch {} but into {}, not {}; nothing was pushed and no \
-             second PR was opened; close or retarget that PR, then run `sbxm task finish --issue \
-             {}` again",
+             second PR was opened; close or retarget that PR, then run `sbxm task finish {retry}` \
+             again",
             pr.url,
             task.branch,
             pr.base_ref,
             task.base,
-            task.number
         );
     }
     repo::push(&repo_git, &task.branch)?;
     let request = PrRequest {
         head: task.branch.clone(),
         base: task.base.clone(),
-        title: task.title.clone(),
+        title,
         body,
         draft,
     };
@@ -1690,7 +1772,7 @@ pub fn finish(
             Ok(url) => (url, false),
             // A failed create is decided by reading the PR state again, never by its error
             // text (the lesson of #319): GitHub may have opened the PR and lost only its answer.
-            Err(e) => match open_pr(github, &task) {
+            Err(e) => match open_pr(github, &task, &retry) {
                 Ok(Some(Found::Matching(pr))) => (pr.url, true),
                 _ => {
                     if !prepared.record.notes.iter().any(|n| n == PUSHED_NOTE) {
@@ -1698,8 +1780,8 @@ pub fn finish(
                         let _ = record::write(&prepared.meta, &prepared.record);
                     }
                     return Err(e).context(format!(
-                        "pushed {} but could not open the PR; run `sbxm task finish --issue {}` again, which only retries the PR",
-                        task.branch, task.number
+                        "pushed {} but could not open the PR; run `sbxm task finish {retry}` again, which only retries the PR",
+                        task.branch
                     ));
                 }
             },
@@ -1761,14 +1843,18 @@ enum Found {
 
 /// The open PR of `task`'s branch, by repo, head and base (issue 60); a failed lookup says which
 /// call failed.
-fn open_pr(github: &dyn GitHubBackend, task: &record::Record) -> Result<Option<Found>> {
+fn open_pr(
+    github: &dyn GitHubBackend,
+    task: &record::Record,
+    retry: &str,
+) -> Result<Option<Found>> {
     let found = github
         .open_pr_for(&task.repo, &task.branch, &task.base)
         .with_context(|| {
             format!(
                 "could not look up an open PR of branch {}; nothing was opened; run `sbxm task \
-                 finish --issue {}` again",
-                task.branch, task.number
+                 finish {retry}` again",
+                task.branch
             )
         })?;
     Ok(found
@@ -1799,7 +1885,12 @@ fn post_in_task_review(
     let task = &prepared.record;
     let posted = match pr_number(url) {
         Some(pr) => {
-            let body = super::review::in_task_pr_comment(task.number, commit, risk_text, review);
+            let body = match task.kind {
+                record::Kind::Spec => {
+                    super::review::in_task_spec_pr_comment(&task.id, commit, risk_text, review)
+                }
+                _ => super::review::in_task_pr_comment(task.number, commit, risk_text, review),
+            };
             github
                 .pr_comment(&task.repo, pr, &body)
                 .map(|_| pr)

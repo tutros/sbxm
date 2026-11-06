@@ -4,6 +4,7 @@
 pub mod config;
 pub mod findings;
 pub mod finish;
+pub mod fixes;
 pub mod gates;
 pub mod lifetime;
 pub mod lock;

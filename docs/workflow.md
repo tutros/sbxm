@@ -170,10 +170,17 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
     loop, and `task run --spec FILE` does both in one go, stopping before `finish` (with `--restart`, the spec is
     read again after you confirm: a valid edit at the same path is used, and a file that disappeared, became
     unusable or now names another task fails the start after the old task is gone; decision 184).
-    `review.md` is its review (no PR, no GitHub call anywhere). `task finish --spec FILE` delivers it through
-    `[finish] sink` in `sbxm-task.toml`: `local` (the default) keeps the branch in the task's `repo.git` and prints
-    the `git fetch` command; `push` pushes it to `origin` as a new branch, no PR (refused while the task stopped or has
-    must-fix findings left, unless `--push-unresolved`). `task rm --spec FILE` refuses to delete a result you haven't
+    `review.md` is its review (no PR, and no GitHub call but the `pr` sink's). `task finish --spec FILE` delivers it
+    through `[finish] sink` in `sbxm-task.toml`: `local` (the default) keeps the branch in the task's `repo.git` and
+    prints the `git fetch` command; `push` pushes it to `origin` as a new branch, no PR (refused while the task stopped
+    or has must-fix findings left, unless `--push-unresolved`); `pr` (decision 301, this repo's setting) pushes it and
+    opens the PR as for an issue task, a draft when something is unresolved, with the in-task review posted as the
+    PR's review and the `sbxm/review` status, so no second `task review --pr N` runs on that head. The PR closes the
+    issues of the spec's `Fixes:` line, one plain line anywhere in the spec: `Fixes: #435, #436`. Under `pr`,
+    `task start --spec` and `task run --spec` refuse before any sandbox when `gh` can't reach the repo, when that
+    line is malformed or there are two, or when a number on it isn't an open issue (closed, a PR, missing); with no
+    such line the start warns and the PR says it closes no issue. A group of issues (decision 286) is one spec with
+    one `Fixes:` line naming them all. `task rm --spec FILE` refuses to delete a result you haven't
     fetched into the checkout yet, unless `--force`.
   - **A list of tasks, one command (decision 193, issue 201):** `--issue`/`--spec` are repeatable and may be
     combined (`--issue 210 --issue 202 --spec sdlc/specs/x.md`), run in the order written; the other flags apply to
@@ -371,7 +378,8 @@ A worker can fix a PR's review finding from a spec. The branch to fix must be wh
 4. `sbxm task run --spec FILE --base <branch>`. Without `--base`, a spec task starts from the checkout's
    `origin/HEAD` (the default branch), not from the branch you have checked out, and finds nothing to fix.
 5. `sbxm task finish --spec FILE` (the `local` sink keeps the result in the task's `repo.git` and prints the
-   `git fetch` command).
+   `git fetch` command; this repo's `pr` sink opens a new PR instead, which is not what this flow wants: set
+   `[finish] sink = "local"` in your checkout's `sbxm-task.toml` for it, without committing that).
 6. Fetch the branch from the task's `repo.git` with that command, check the diff, fast-forward the PR branch to it
    and push.
 7. `sbxm task review --pr N` reviews the new head.
