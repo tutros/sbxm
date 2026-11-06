@@ -1,0 +1,18 @@
+# The sbxm-task.toml of the factory check's dedicated checkout (<base_dir>/factory/checkout,
+# issue 327): scripts/factory-check.ps1 writes this file there before every run, so edit it here.
+# The worker only writes draft.md from the spec the script gives it (decision 269(d)).
+
+[worker]
+harness = "claude"             # Claude with its default model (issue 327 decision 5)
+time_limit = "45m"
+
+[sandbox]
+profile = "factory"            # profiles/factory: the model provider only
+
+# Set explicitly: a repo with a Cargo.toml gets the default cargo gates without it.
+[gates]
+sandbox = []
+
+# The draft is read out of the task's repo.git; nothing is pushed and no PR is opened.
+[finish]
+sink = "local"
