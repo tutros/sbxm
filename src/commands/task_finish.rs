@@ -159,6 +159,9 @@ fn publish(
         for reason in &done.unresolved {
             writeln!(out, "  unresolved: {reason}")?;
         }
+        for warning in &done.warnings {
+            writeln!(out, "warning: {warning}")?;
+        }
         writeln!(
             out,
             "  next: review PR #{pr} again with: {}; after the merge, clean up with: sbxm task rm \

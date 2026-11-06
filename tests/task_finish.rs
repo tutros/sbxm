@@ -1592,6 +1592,7 @@ fn writes(github: &FakeGitHub) -> Vec<GhCall> {
     github
         .calls()
         .into_iter()
-        .filter(|c| !matches!(c, GhCall::OpenPrFor(..)))
+        // The comment on the issue (issue 430) is `task_finish_issue_comment.rs`'s to test.
+        .filter(|c| !matches!(c, GhCall::OpenPrFor(..) | GhCall::IssueComment(..)))
         .collect()
 }

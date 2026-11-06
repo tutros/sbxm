@@ -390,6 +390,68 @@ fn with_the_switch_off_nothing_is_kept_and_fix_rounds_run_fresh() {
     assert!(!said(&prepared).contains("fresh"), "{}", said(&prepared));
 }
 
+// --- Issue 430: how each fix round ran is recorded for the issue comment ----------------------
+
+fn recorded_fix_runs(f: &Fixture) -> Vec<record::FixRun> {
+    record::read(&meta(f).join("task.json")).unwrap().fix_runs
+}
+
+#[test]
+fn a_fix_round_that_resumed_the_session_is_recorded_as_resumed() {
+    let f = config(true);
+    let backend = backend(&f, &[ONE, CLEAN], bytes(10), ok(CLAUDE_DONE));
+    let mut prepared = worked_task(&f, &backend);
+
+    review(&f, &backend, &mut prepared).unwrap();
+
+    assert_eq!(
+        recorded_fix_runs(&f),
+        [record::FixRun {
+            round: 1,
+            resumed: true
+        }]
+    );
+}
+
+#[test]
+fn a_fix_round_whose_session_the_cli_cannot_find_is_recorded_as_fresh() {
+    let f = config(true);
+    let not_found = ExecOutput {
+        stdout: String::new(),
+        stderr: format!("No conversation found with session ID: {SESSION}\n"),
+        exit_code: Some(1),
+    };
+    let backend = backend(&f, &[ONE, CLEAN], bytes(10), not_found);
+    let mut prepared = worked_task(&f, &backend);
+
+    review(&f, &backend, &mut prepared).unwrap();
+
+    assert_eq!(
+        recorded_fix_runs(&f),
+        [record::FixRun {
+            round: 1,
+            resumed: false
+        }]
+    );
+}
+
+#[test]
+fn a_fix_round_with_the_switch_off_is_recorded_as_fresh() {
+    let f = config(false);
+    let backend = backend(&f, &[ONE, CLEAN], bytes(10), ok(CLAUDE_DONE));
+    let mut prepared = worked_task(&f, &backend);
+
+    review(&f, &backend, &mut prepared).unwrap();
+
+    assert_eq!(
+        recorded_fix_runs(&f),
+        [record::FixRun {
+            round: 1,
+            resumed: false
+        }]
+    );
+}
+
 /// A Codex worker with a Claude reviewer: the reviewer writes `review.md` in its clone.
 fn codex_worker_backend(f: &Fixture, reviews: Vec<&'static str>) -> FakeBackend {
     let worker = play_tasks(

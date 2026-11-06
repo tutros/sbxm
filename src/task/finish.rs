@@ -21,6 +21,7 @@ use super::record::{self, OpenFinding, Process, ProcessProbe, Record};
 use super::repo;
 use super::review::{self, COMMENT_CAP, defang, defang_mentions};
 use super::risk;
+use super::summary;
 use crate::backend::{Location, SandboxBackend};
 use crate::confirm::Confirm;
 use crate::github::{GitHubBackend, ListedPr, PrRequest};
@@ -1796,7 +1797,8 @@ fn open_task_pr(
         format!("the PR is open at {url} but task.json couldn't be updated; note the URL")
     })?;
     let pr = pr_number(&url).map_or_else(|| "<N>".to_owned(), |n| n.to_string());
-    let mut warnings = Vec::new();
+    // Issue 430: before the in-task review, whose failed post fails the finish.
+    let mut warnings = post_issue_summaries(&mut prepared, &fixes, &url, github);
     let review_posted = match posting {
         Some((commit, text)) => {
             post_in_task_review(&mut prepared, &url, &commit, &risk_text, &text, github)?;
@@ -1831,6 +1833,65 @@ fn open_task_pr(
         review_posted,
         warnings,
     })
+}
+
+/// Posts the [`summary::issue_comment`] on each of `issues`, in order (issue 430), or edits the
+/// one `task.json` recorded for that issue: only the task's own record says which comment is its,
+/// never a marker in the issue's comments (decision 187(d)). A comment's id is recorded once
+/// GitHub accepted it. Nothing here fails the finish: every failure is a warning returned, and
+/// the other issues still get theirs.
+fn post_issue_summaries(
+    prepared: &mut Prepared,
+    issues: &[u32],
+    url: &str,
+    github: &dyn GitHubBackend,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    if issues.is_empty() {
+        return warnings;
+    }
+    let body = summary::issue_comment(&prepared.record, &prepared.meta, url);
+    if let Some(found) = secret_line("the issue comment", &body) {
+        warnings.push(format!(
+            "no summary of the review rounds was posted on the issue: {found}"
+        ));
+        return warnings;
+    }
+    let repo = prepared.record.repo.clone();
+    for &issue in issues {
+        let recorded = prepared
+            .record
+            .issue_comments
+            .iter()
+            .find(|c| c.issue == issue)
+            .map(|c| c.id);
+        match recorded {
+            Some(id) => {
+                if let Err(e) = github.issue_comment_edit(&repo, id, &body) {
+                    warnings.push(format!(
+                        "the summary of the review rounds on issue #{issue} (comment {id})                          couldn't be updated: {e:#}"
+                    ));
+                }
+            }
+            None => match github.issue_comment(&repo, issue, &body) {
+                Ok(id) => {
+                    prepared
+                        .record
+                        .issue_comments
+                        .push(record::IssueComment { issue, id });
+                    if let Err(e) = record::write(&prepared.meta, &prepared.record) {
+                        warnings.push(format!(
+                            "the summary of the review rounds is posted on issue #{issue}, but                              task.json couldn't record it ({e:#}); a later finish posts another"
+                        ));
+                    }
+                }
+                Err(e) => warnings.push(format!(
+                    "the summary of the review rounds couldn't be posted on issue #{issue}: {e:#}"
+                )),
+            },
+        }
+    }
+    warnings
 }
 
 /// What [`open_pr`] found for a task's branch.
@@ -2334,6 +2395,7 @@ fn finish_continued(
     prepared.record.pr = Some(url.clone());
     record::write(&prepared.meta, &prepared.record)
         .with_context(|| format!("{id} is pushed to PR #{pr} but task.json couldn't be updated"))?;
+    let warnings = post_issue_summaries(&mut prepared, &[task.number], &url, github);
     Ok(Finished {
         // The task's base is the one it was started with, not necessarily the PR's: the review
         // diffs against the repo's default branch, as before, unless `--base` is added.
@@ -2346,6 +2408,6 @@ fn finish_continued(
         draft: false,
         unresolved,
         review_posted: None,
-        warnings: Vec::new(),
+        warnings,
     })
 }
