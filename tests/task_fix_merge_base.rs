@@ -271,6 +271,7 @@ fn fix_with(
                 email: "dev@example.com".into(),
             }),
             disk,
+            check_run: None,
         },
         backend,
         github,

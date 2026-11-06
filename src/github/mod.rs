@@ -167,6 +167,16 @@ pub struct WorkflowRun {
     pub actor: String,
 }
 
+/// One failed job of a workflow run and its log, as `gh run view <id> --log-failed` prints it
+/// (issue 448).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobLog {
+    /// The job's name.
+    pub job: String,
+    /// Its log lines, each ending in a newline; empty when the job printed none.
+    pub log: String,
+}
+
 pub trait GitHubBackend: Send + Sync {
     fn whoami(&self) -> Result<String>;
     fn default_branch(&self, repo: &str) -> Result<String>;
@@ -217,6 +227,10 @@ pub trait GitHubBackend: Send + Sync {
     /// Re-runs the failed jobs of run `id` (`gh run rerun <id> --failed`), which makes its next
     /// attempt (issue 442).
     fn run_rerun_failed(&self, repo: &str, id: u64) -> Result<()>;
+    /// The failed jobs of run `id` at its latest attempt, in the run's order, each with its lines
+    /// of `gh run view <id> --log-failed`; a failed job that printed none has an empty log (issue
+    /// 448).
+    fn run_failed_log(&self, repo: &str, id: u64) -> Result<Vec<JobLog>>;
     /// The merge commit of PR `number` once GitHub merged it, a full commit id; `None` while it
     /// isn't merged (issue 442).
     fn pr_merge_commit(&self, repo: &str, number: u32) -> Result<Option<String>>;

@@ -220,6 +220,16 @@ impl Steps for Script<'_> {
         }
     }
 
+    fn fix_check(
+        &self,
+        pr: u32,
+        run: u64,
+        _out: &mut dyn Write,
+        _warn: &mut dyn Write,
+    ) -> Result<()> {
+        Err(anyhow!("unexpected log-fix of PR #{pr} from run {run}"))
+    }
+
     fn rm_merged(&self, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
         Ok(())
     }

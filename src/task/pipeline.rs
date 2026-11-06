@@ -15,7 +15,7 @@ use super::gates::{self, GateOutcome, HostRunner};
 use super::lifetime;
 use super::lock::ProcessLock;
 use super::machine;
-use super::pr_fix::ReviewToFix;
+use super::pr_fix::{self, ReviewToFix};
 use super::prompts::{self, Role};
 use super::record::{
     self, Agent, GateResult, GateRun, Kind, NewTask, OpenFinding, PrBranch, Process, ProcessProbe,
@@ -1058,9 +1058,14 @@ pub fn prepare_fix(
     prepare_source(ctx, &id, Source::Fix { pr, review }, location)
 }
 
-/// The fix task's worker prompt, rendered.
-fn pr_fix_worker_prompt(ctx: &Ctx, pr: &PrInfo) -> Result<String> {
-    let template = prompts::template(Role::WorkerPrFix, &ctx.config.prompts)?;
+/// The fix task's worker prompt, rendered: a log-fix's (decision 300) names `check-log.md`.
+fn pr_fix_worker_prompt(ctx: &Ctx, pr: &PrInfo, from_log: bool) -> Result<String> {
+    let role = if from_log {
+        Role::WorkerPrFixCheck
+    } else {
+        Role::WorkerPrFix
+    };
+    let template = prompts::template(role, &ctx.config.prompts)?;
     prompts::render(
         &template.name,
         &template.text,
@@ -1180,8 +1185,13 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
             pr.title.as_str(),
             "issue.md",
             review.text.as_str(),
-            pr_fix_worker_prompt(ctx, pr)?,
+            pr_fix_worker_prompt(ctx, pr, review.check_log.is_some())?,
         ),
+    };
+    // A log-fix's failed run log (decision 300), a file of its own next to the source.
+    let check_log = match &source {
+        Source::Fix { review, .. } => review.check_log.as_deref(),
+        _ => None,
     };
     // The head a fix task's review covered: the fetched branch must still be there.
     let expected_start = match &source {
@@ -1287,17 +1297,20 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
             let info = workspace.join(".git").join("info");
             fs::create_dir_all(&info)?;
             fs::write(info.join("exclude"), format!("# sbxm\n{AGENT_DIR}/\n"))?;
-            repo::write_agent_files(
-                &workspace,
-                &[
-                    (source_file, text.as_bytes()),
-                    ("prompt.md", prompt.as_bytes()),
-                ],
-                Existing::Replace,
-            )?;
+            let mut files = vec![
+                (source_file, text.as_bytes()),
+                ("prompt.md", prompt.as_bytes()),
+            ];
+            if let Some(log) = check_log {
+                files.push((pr_fix::CHECK_LOG, log.as_bytes()));
+            }
+            repo::write_agent_files(&workspace, &files, Existing::Replace)?;
         }
         fs::write(meta.join(source_file), text)?;
         fs::write(meta.join("worker-prompt.md"), &prompt)?;
+        if let Some(log) = check_log {
+            fs::write(meta.join(pr_fix::CHECK_LOG), log)?;
+        }
 
         // The record goes first: sandbox setup takes minutes, and `status` (and a restart after a
         // kill) must see the task during it.
@@ -2315,10 +2328,16 @@ fn copy_in_all(
 /// source (`source.md` for a spec task, `issue.md` otherwise) and the worker's prompt.
 fn worker_files(meta: &Path, kind: Kind) -> Vec<(PathBuf, &'static str)> {
     let source = source_name(kind);
-    vec![
+    let mut files = vec![
         (meta.join(source), source),
         (meta.join("worker-prompt.md"), "prompt.md"),
-    ]
+    ];
+    // A log-fix's failed run log (decision 300).
+    let log = meta.join(pr_fix::CHECK_LOG);
+    if kind == Kind::Fix && log.is_file() {
+        files.push((log, pr_fix::CHECK_LOG));
+    }
+    files
 }
 
 /// The name of a task's source in its folder and in the worker's `.sbxm-task/`: `source.md` for a
@@ -2847,11 +2866,12 @@ pub(super) fn restore_worker_input(
             .with_context(|| format!("the task's {name} is missing from its folder"))
     };
     let (prompt, text) = (read("worker-prompt.md")?, read(source)?);
-    repo::write_agent_files(
-        &prepared.workspace,
-        &[(source, &text), ("prompt.md", &prompt)],
-        Existing::Refuse,
-    )
+    let mut files: Vec<(&str, Vec<u8>)> = vec![(source, text), ("prompt.md", prompt)];
+    if prepared.record.kind == Kind::Fix && prepared.meta.join(pr_fix::CHECK_LOG).is_file() {
+        files.push((pr_fix::CHECK_LOG, read(pr_fix::CHECK_LOG)?));
+    }
+    let files: Vec<(&str, &[u8])> = files.iter().map(|(n, b)| (*n, b.as_slice())).collect();
+    repo::write_agent_files(&prepared.workspace, &files, Existing::Refuse)
 }
 
 /// The worker's run itself, in a task already at `working/running` (written): the headless agent,
@@ -4688,6 +4708,12 @@ fn review_files(
         &prompt,
     )?;
     let mut files = vec![(source_file, issue), ("prompt.md", prompt)];
+    // A log-fix's reviewer checks the fix against the failed run's log (decision 300).
+    if prepared.record.kind == Kind::Fix
+        && let Ok(log) = fs::read_to_string(prepared.meta.join(pr_fix::CHECK_LOG))
+    {
+        files.push((pr_fix::CHECK_LOG, log));
+    }
     if let Some(text) = combined_earlier_reviews(earlier) {
         files.push(("previous-review.md", text));
     }

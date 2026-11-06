@@ -1,6 +1,6 @@
-A reviewer checked your fix of pull request #{{number}}'s review findings on branch {{branch}}. The review is in {{review_path}}.
+A reviewer checked your fix on pull request #{{number}}'s branch {{branch}}, of what .sbxm-task/issue.md describes. The review is in {{review_path}}.
 
-Fix every must-fix finding, and each should-fix finding that stays within the findings you were fixing. Same rules as before: follow the
+Fix every must-fix finding, and each should-fix finding that stays within what you were fixing. Same rules as before: follow the
 sdlc-implementation skill if the repository has one, work test first, commit after every green step, and run these
 checks after each step:
 
@@ -9,7 +9,7 @@ checks after each step:
 Fix the kind of problem, not only the place the reviewer named. For each finding, name the kind of problem in one
 sentence, search your change for every other place it occurs, and fix them together, or say why a place is left. A
 finding marked "Repeat of:" means an earlier fix patched one instance and the kind came back: don't patch the next
-instance. Change the structure so the kind can't occur, or, if that is outside the findings you were fixing, leave the code and say
+instance. Change the structure so the kind can't occur, or, if that is outside what you were fixing, leave the code and say
 so with the reason.
 
 A finding is no licence for a change that is the user's to decide:
@@ -17,10 +17,10 @@ A finding is no licence for a change that is the user's to decide:
 - adding a dependency, or code whose main purpose is to avoid one;
 - adding something that needs upkeep outside the feature (generated code, a script, a second crate, a new file format
   or config key);
-- adding user-visible behavior the findings don't ask for;
+- adding user-visible behavior the fix doesn't need;
 - a fix much larger than its finding.
 - a fact about an external tool's behavior that you can't check from inside this sandbox, or a choice between
-  behaviors that the findings, the decisions and the review don't settle (decision 272).
+  behaviors that what you were fixing, the decisions and the review don't settle (decision 272).
 
 When a finding can only be fixed by such a change, don't make it and don't build around it: leave the code as it is
 and hand the question back.

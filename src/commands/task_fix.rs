@@ -1,5 +1,6 @@
 //! `sbxm task fix --pr N` (issue 313): a task on an open PR's own branch whose worker fixes the
-//! must-fix findings of the PR's latest sbxm review, followed by the gates and the in-task review
+//! must-fix findings of the PR's latest sbxm review (or, with `--check-run`, a failed run of its head
+//! from the run's log; decision 300), followed by the gates and the in-task review
 //! of any task, and whose result is pushed onto the PR's branch as a fast-forward, with that
 //! review posted as the new head's. Every refusal but the push's comes before any write.
 
@@ -38,6 +39,9 @@ pub struct Options {
     pub identity: Option<Identity>,
     /// The free-space check of the sandbox drive before a sandbox is created (decision 194).
     pub disk: disk::Guard,
+    /// `--check-run <id>` (decision 300): the worker fixes this failed run of the PR's head from
+    /// its log instead of the review's must-fix findings.
+    pub check_run: Option<u64>,
 }
 
 fn print_released(out: &mut dyn Write, warn: &mut dyn Write, said: &[lifetime::Released]) {
@@ -84,9 +88,19 @@ pub fn run(
 
     let pr = github.pr(&repo_name, number)?;
     pr_fix::check_fixable(&pr, &repo_name, opts.base.as_deref())?;
-    let user = github.whoami()?;
-    let comments = github.pr_comments(&repo_name, number)?;
-    let review = pr_fix::review_to_fix(&pr, &repo_name, opts.base.as_deref(), &user, &comments)?;
+    let review = match opts.check_run {
+        Some(id) => {
+            let runs = github.commit_runs(&repo_name, &pr.head_oid)?;
+            let run = pr_fix::failed_run(&pr, &repo_name, id, &runs)?;
+            let jobs = github.run_failed_log(&repo_name, id)?;
+            pr_fix::log_to_fix(&pr, &run, &jobs)
+        }
+        None => {
+            let user = github.whoami()?;
+            let comments = github.pr_comments(&repo_name, number)?;
+            pr_fix::review_to_fix(&pr, &repo_name, opts.base.as_deref(), &user, &comments)?
+        }
+    };
     let base_branch = match &opts.base {
         Some(base) => base.clone(),
         None => github.default_branch(&repo_name)?,
@@ -122,11 +136,18 @@ pub fn run(
         disk: &opts.disk,
     };
 
-    writeln!(
-        out,
-        "PR #{number}: fixing {} must-fix finding(s) of the sbxm review of {}",
-        review.must_fix, review.commit
-    )?;
+    match opts.check_run {
+        Some(id) => writeln!(
+            out,
+            "PR #{number}: fixing the failed run {id} of {} from its log",
+            review.commit
+        )?,
+        None => writeln!(
+            out,
+            "PR #{number}: fixing {} must-fix finding(s) of the sbxm review of {}",
+            review.must_fix, review.commit
+        )?,
+    }
     let prepared = pipeline::prepare_fix(&ctx, &pr, &review, location);
     let mut prepared = match prepared {
         Ok(prepared) => prepared,

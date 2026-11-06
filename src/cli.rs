@@ -353,8 +353,8 @@ pub enum TaskCommand {
         #[arg(long)]
         ignore_disk: bool,
     },
-    /// Fix the must-fix findings of an open PR's latest sbxm review (by you, covering its head) in
-    /// a sandbox, then gates and an in-task review; the result is pushed onto the PR's own branch
+    /// Fix the must-fix findings of an open PR's latest sbxm review (by you, covering its head),
+    /// or with --check-run a failed run of its head, in a sandbox, then gates and an in-task review; the result is pushed onto the PR's own branch
     /// as a fast-forward (never a force) and the review posted as the new head's.
     Fix {
         /// The open pull request, from a branch of this repo.
@@ -370,6 +370,10 @@ pub enum TaskCommand {
         /// min_free_disk free.
         #[arg(long)]
         ignore_disk: bool,
+        /// Fix this failed workflow run of the PR's head from its log (the last 64 KiB), instead
+        /// of the review's must-fix findings.
+        #[arg(long, value_name = "RUN_ID")]
+        check_run: Option<u64>,
     },
     /// Continue a task from its recorded stage, keeping its clone and commits: a failed or
     /// interrupted preparation, worker, review or fix round runs again, and the task goes on to

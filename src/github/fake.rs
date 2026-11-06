@@ -5,8 +5,8 @@ use std::sync::Mutex;
 use anyhow::{Result, anyhow};
 
 use super::{
-    CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, ListedPr, Mergeable, PrComment,
-    PrInfo, PrMergeState, PrRequest, PrState, RunStatus, WorkflowRun,
+    CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, JobLog, ListedPr, Mergeable,
+    PrComment, PrInfo, PrMergeState, PrRequest, PrState, RunStatus, WorkflowRun,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -39,6 +39,8 @@ pub enum GhCall {
     CommitRuns(String, String),
     /// Repo, run id.
     RunRerunFailed(String, u64),
+    /// Repo, run id.
+    RunFailedLog(String, u64),
     PrMergeCommit(String, u32),
 }
 
@@ -79,6 +81,8 @@ pub struct FakeGitHub {
     arm_failure: Option<String>,
     /// What `commit_runs` answers, by commit; no runs for a commit not scripted.
     runs: Mutex<Vec<(String, Vec<WorkflowRun>)>>,
+    /// What `run_failed_log` answers, by run; no failed jobs for a run not scripted.
+    run_logs: Mutex<Vec<(u64, Vec<JobLog>)>>,
     /// What `pr_merge_commit` answers, by PR; not merged when not scripted.
     merge_commits: Mutex<Vec<(u32, String)>>,
     calls: Mutex<Vec<GhCall>>,
@@ -258,6 +262,12 @@ impl FakeGitHub {
 
     pub fn with_runs(self, sha: &str, runs: Vec<WorkflowRun>) -> Self {
         self.set_runs(sha, runs);
+        self
+    }
+
+    /// What `run_failed_log` answers for run `id`.
+    pub fn with_run_log(self, id: u64, jobs: Vec<JobLog>) -> Self {
+        self.run_logs.lock().unwrap().push((id, jobs));
         self
     }
 
@@ -593,6 +603,18 @@ impl GitHubBackend for FakeGitHub {
             }
         }
         Ok(())
+    }
+
+    fn run_failed_log(&self, repo: &str, id: u64) -> Result<Vec<JobLog>> {
+        self.record(GhCall::RunFailedLog(repo.to_owned(), id))?;
+        Ok(self
+            .run_logs
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(i, _)| *i == id)
+            .map(|(_, jobs)| jobs.clone())
+            .unwrap_or_default())
     }
 
     fn pr_merge_commit(&self, repo: &str, number: u32) -> Result<Option<String>> {

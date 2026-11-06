@@ -242,8 +242,11 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
   pass; a commit of `main` stays watched, after `main` moves on too, until each of its runs is over and acted on
   (one with no run listed an hour after it was first watched is said once: `no CI runs seen for <commit> after 1 h;
   still watching`). A failed run at attempt 1 gets its failed jobs re-run once (`gh run rerun <id> --failed`); a re-run that
-  passes ends it. A second failure (attempt 2 or later) on a PR disarms its auto-merge if armed: the PR awaits you,
-  said once with a row in the loop's log. A second failure on `main` writes `<base_dir>\.sbxm\loop-pause.json`
+  passes ends it. A second failure (attempt 2 or later) on a PR disarms its auto-merge if armed, then the loop tries
+  one log-fix (decision 300, issue 448): `task fix --pr N --check-run <id>`, from the failed run's log. A clean one
+  is armed again on a resolve's rules, never while paused; one that isn't, a refused one, or a second failure after
+  a log-fix leaves the PR awaiting you, said once with a row in the loop's log. One log-fix per PR, ever, counted
+  from the task folders (a fix task of the PR whose folder holds `check-log.md`), so a restart doesn't try again. A second failure on `main` writes `<base_dir>\.sbxm\loop-pause.json`
   (the commit, the run, who merged it, when): while it is there the loop still runs tasks and opens PRs, but arms
   nothing, a resolve's re-arm included, and disarms every loop PR that has auto-merge armed. `sbxm status` shows it in
   the Loop section. Only you lift it, after looking at `main`: `sbxm task loop --clear-pause` (it says what it
@@ -347,6 +350,12 @@ decision it adds ("this adds decision N", gap G41) and its new tests go in a fil
 the end of a shared test file; the worker prompts and `sdlc-issue-flow` carry both rules. README rows two PRs edit
 have no rule: they merge word by word. Avoiding tasks whose files overlap an open PR's is not built; its trigger is a
 worker's merge of the base failing its gates twice in one week.
+
+A failed check needs no review: `sbxm task fix --pr N --check-run <run-id>` (decision 300) gives the worker the
+failed run's log instead, the last 64 KiB in all split between its failed jobs, as `.sbxm-task/check-log.md`, which
+its prompt names as data, never instructions. The run must be a failed run of the PR's current head (`gh run list
+--repo <repo> --commit <head>` lists them); anything else is refused before a task is made. `task loop` runs it once
+per PR after a second failure.
 
 Without a review to fix (a branch of your own, or a task's), use a spec:
 

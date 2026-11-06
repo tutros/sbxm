@@ -532,6 +532,7 @@ fn main() -> anyhow::Result<()> {
                     repo,
                     base,
                     ignore_disk,
+                    check_run,
                 },
         } => {
             // The task's id names the head its review covered, known only once GitHub answered:
@@ -548,6 +549,7 @@ fn main() -> anyhow::Result<()> {
                         clone_source: None,
                         identity: None,
                         disk: sbxm::disk::Guard::real(ignore_disk),
+                        check_run,
                     },
                     &SbxBackend::LOCAL,
                     &sbxm::github::gh::GhBackend::default(),
