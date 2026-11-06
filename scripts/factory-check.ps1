@@ -280,7 +280,7 @@ function Read-Draft([string]$repoGit, [string]$branch) {
             '--no-pager', 'show', '--no-textconv', "refs/heads/$branch`:draft.md")) { $info.ArgumentList.Add($a) }
     foreach ($name in @($info.Environment.Keys)) { if ($name -like 'GIT_*') { [void]$info.Environment.Remove($name) } }
     $info.Environment['GIT_CONFIG_NOSYSTEM'] = '1'
-    $info.Environment['GIT_CONFIG_GLOBAL'] = $(if ($IsWindows) { 'NUL' } else { '/dev/null' })
+    $info.Environment['GIT_CONFIG_GLOBAL'] = '/dev/null'   # Git for Windows maps it; it rejects NUL
     $info.Environment['GIT_TERMINAL_PROMPT'] = '0'
     $info.RedirectStandardOutput = $true
     $info.RedirectStandardError = $true

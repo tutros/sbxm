@@ -41,8 +41,14 @@ BeforeAll {
         if (-not $draft) { $draft = if ($markers) { ($markers | ForEach-Object { "$_`nDraft for $_" }) -join "`n" } else { 'The retro draft' } }
         $repoGit = Join-Path $dir 'repo.git'
         git init --quiet --bare $repoGit
-        $blob = $draft | git --git-dir $repoGit hash-object -w --stdin
-        $tree = "100644 blob $blob`tdraft.md" | git --git-dir $repoGit mktree
+        # No pipes into git: on Windows, PowerShell ends piped input with CRLF, which mktree keeps in the file name.
+        $draftFile = Join-Path $dir 'draft.md'
+        [IO.File]::WriteAllText($draftFile, $draft)
+        $blob = git --git-dir $repoGit hash-object -w -- $draftFile
+        $env:GIT_INDEX_FILE = Join-Path $dir 'index'
+        git --git-dir $repoGit update-index --add --cacheinfo "100644,$blob,draft.md"
+        $tree = git --git-dir $repoGit write-tree
+        Remove-Item Env:GIT_INDEX_FILE; Remove-Item -LiteralPath $draftFile, (Join-Path $dir 'index')
         $commit = git --git-dir $repoGit -c user.name=t -c user.email=t@example.com commit-tree $tree -m draft
         git --git-dir $repoGit update-ref "refs/heads/$id" $commit
         @{ title = (Split-Path $specPath -Leaf); branch = $id; worker = @{ run = @{ usage = @{ cost_usd = 0.5 }; duration_s = 125 } } } |
@@ -188,7 +194,7 @@ Describe 'factory-check.ps1' {
             $old = Join-Path $script:drafts '2026-11-01'
             New-Item -ItemType Directory $old | Out-Null
             Set-Content -LiteralPath (Join-Path $old 'issue-7.md') 'old draft'
-            (Get-Item -LiteralPath (Join-Path $old 'issue-7.md')).LastWriteTimeUtc = [datetime]::new(2026, 11, 2, 0, 0, 0, 'Utc')
+            (Get-Item -LiteralPath (Join-Path $old 'issue-7.md')).LastWriteTimeUtc = [datetime]::new(2026, 11, 2, 0, 0, 0, [DateTimeKind]::Utc)
             $script:ghAnswers['^issue list '] = ConvertTo-IssueJson @(New-ListedIssue 7 '2026-10-01T00:00:00Z' @() '2026-11-01T00:00:00Z')
 
             Invoke-Check
