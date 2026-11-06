@@ -826,7 +826,18 @@ fn main() -> anyhow::Result<()> {
             finish_task(result, out, warn)
         }
         Command::Task {
-            command: TaskCommand::Loop { cap, issues },
+            command: TaskCommand::Loop {
+                clear_pause: true, ..
+            },
+        } => {
+            let (mut out, warn) = task_writers(Vec::new(), None)?;
+            let result = (|| -> anyhow::Result<()> {
+                commands::task_loop::clear_pause(&config::config_dir()?, &mut out)
+            })();
+            finish_task(result, out, warn)
+        }
+        Command::Task {
+            command: TaskCommand::Loop { cap, issues, .. },
         } => {
             // Each task's own phases log into its `run.log` (`TaskSteps`); the loop's lines
             // between tasks belong to none.

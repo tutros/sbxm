@@ -159,6 +159,7 @@ fn loop_view(
         lock,
         work,
         snapshot: Some(snapshot),
+        pause: crate::task::loop_pause::read(base),
     }
 }
 

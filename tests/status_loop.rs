@@ -784,6 +784,7 @@ fn render_is_pure_over_its_view() {
             }]),
             awaiting: Ok(vec![1, 2]),
         }),
+        pause: sbxm::task::loop_pause::State::None,
     };
 
     let text = looping::render(&view, None);

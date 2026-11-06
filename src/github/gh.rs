@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use super::{
     CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, ListedPr, Mergeable, PrComment,
-    PrInfo, PrMergeState, PrRequest, PrState,
+    PrInfo, PrMergeState, PrRequest, PrState, RunStatus, WorkflowRun,
 };
 
 /// Runs `gh` with arguments and optional stdin, returning stdout.
@@ -169,6 +169,59 @@ struct RawBranch {
 #[derive(Deserialize)]
 struct RawCommit {
     sha: String,
+}
+
+#[derive(Deserialize)]
+struct RawRuns {
+    #[serde(default)]
+    workflow_runs: Vec<RawRun>,
+}
+
+#[derive(Deserialize)]
+struct RawRun {
+    id: u64,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    run_attempt: Option<u32>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    conclusion: Option<String>,
+    #[serde(default)]
+    html_url: String,
+    #[serde(default)]
+    actor: Option<Login>,
+}
+
+/// A run's status and conclusion as GitHub names them (issue 442): anything not completed is
+/// still going; only a failure, a time-out or a run that couldn't start counts as failed.
+fn run_status(status: Option<&str>, conclusion: Option<&str>) -> RunStatus {
+    if status != Some("completed") {
+        return RunStatus::Going;
+    }
+    match conclusion {
+        Some("failure" | "timed_out" | "startup_failure") => RunStatus::Failed,
+        _ => RunStatus::Passed,
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RawMerged {
+    state: String,
+    #[serde(default)]
+    merge_commit: Option<RawOid>,
+}
+
+#[derive(Deserialize)]
+struct RawOid {
+    oid: String,
+}
+
+/// A full commit id: 40 or 64 hex digits.
+fn full_commit(sha: &str) -> bool {
+    matches!(sha.len(), 40 | 64) && sha.bytes().all(|b| b.is_ascii_hexdigit())
 }
 
 /// Decision 298: conflicting only; `BEHIND` still merges, so it is mergeable.
@@ -560,5 +613,61 @@ impl GitHubBackend for GhBackend {
             None,
         )?;
         Ok(())
+    }
+
+    fn commit_runs(&self, repo: &str, sha: &str) -> Result<Vec<WorkflowRun>> {
+        // The sha goes into the API path: only a full commit id is accepted.
+        if !full_commit(sha) {
+            bail!("`{sha}` is not a full commit id, so its workflow runs can't be read");
+        }
+        let raw: RawRuns = self.json(&strings(&[
+            "api",
+            &format!("repos/{repo}/actions/runs?head_sha={sha}&per_page=100"),
+        ]))?;
+        Ok(raw
+            .workflow_runs
+            .into_iter()
+            .map(|r| WorkflowRun {
+                id: r.id,
+                workflow: r.name.unwrap_or_default(),
+                attempt: r.run_attempt.unwrap_or(1),
+                status: run_status(r.status.as_deref(), r.conclusion.as_deref()),
+                url: r.html_url,
+                actor: r.actor.map(|a| a.login).unwrap_or_default(),
+            })
+            .collect())
+    }
+
+    fn run_rerun_failed(&self, repo: &str, id: u64) -> Result<()> {
+        self.run(
+            &strings(&["run", "rerun", &id.to_string(), "--failed", "--repo", repo]),
+            None,
+        )?;
+        Ok(())
+    }
+
+    fn pr_merge_commit(&self, repo: &str, number: u32) -> Result<Option<String>> {
+        let raw: RawMerged = self.json(&strings(&[
+            "pr",
+            "view",
+            &number.to_string(),
+            "--repo",
+            repo,
+            "--json",
+            "state,mergeCommit",
+        ]))?;
+        if pr_state(number, &raw.state)? != PrState::Merged {
+            return Ok(None);
+        }
+        let Some(commit) = raw.merge_commit else {
+            bail!("`gh pr view {number}` reported it merged without a merge commit");
+        };
+        if !full_commit(&commit.oid) {
+            bail!(
+                "`gh pr view {number}` named `{}` as its merge commit, which is not a full commit id",
+                commit.oid
+            );
+        }
+        Ok(Some(commit.oid))
     }
 }

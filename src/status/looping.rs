@@ -1,8 +1,8 @@
 //! The Loop section of `sbxm status` (decision 294, issue 376): whether a `task loop` runs, the
 //! task it is on and its stage, the tasks it finished, the PRs awaiting the user (the loop's cap
 //! of 5, counted by the same [`queue::awaits_user`] the loop pauses on) and the queue of labeled
-//! issues in the order the loop takes them. State comes from the loop's lock and the task
-//! records alone, no new file and no write; only the queue and the PR count need GitHub, one
+//! issues in the order the loop takes them, and the pause on a red `main` (issue 442). State
+//! comes from the loop's lock, its pause file and the task records alone, with no write; only the queue and the PR count need GitHub, one
 //! fetch at most once a minute ([`Cache`]), made only while a loop runs.
 
 use std::fs;
@@ -12,6 +12,7 @@ use crate::github::GitHubBackend;
 use crate::run::results::parse_timestamp;
 use crate::status::tasks::truncate;
 use crate::task::finish::check_own_folder;
+use crate::task::loop_pause;
 use crate::task::merged;
 use crate::task::queue::{self, LOOP_HOOK};
 use crate::task::record::{self, Kind, Process, ProcessProbe, Record, Stage, Status};
@@ -234,6 +235,8 @@ pub struct View {
     /// Only for a running loop.
     pub work: Option<Work>,
     pub snapshot: Option<Snapshot>,
+    /// The pause on a red `main` (issue 442), whether or not a loop runs.
+    pub pause: loop_pause::State,
 }
 
 fn process(p: &Process) -> String {
@@ -253,6 +256,17 @@ pub fn render(view: &View, width: Option<usize>) -> String {
         )),
         Lock::Unreadable(why) => lines.push(format!("Loop: lock unreadable ({why})")),
         Lock::Running(p) => lines.push(format!("Loop: running ({})", process(p))),
+    }
+    match &view.pause {
+        loop_pause::State::None => {}
+        loop_pause::State::Set(pause) => lines.push(format!(
+            "  paused: {}; nothing is armed until you run `sbxm task loop --clear-pause`",
+            pause.describe()
+        )),
+        loop_pause::State::Unreadable(why) => lines.push(format!(
+            "  paused: the pause file can't be read ({why}); nothing is armed until you run \
+             `sbxm task loop --clear-pause`"
+        )),
     }
     if let Some(work) = &view.work {
         lines.push(match &work.current {
