@@ -19,6 +19,8 @@ const DASH: &str = "-";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskRow {
     pub id: String,
+    /// The title `task.json` stored (issue 246); empty for a record without one.
+    pub title: String,
     pub stage: &'static str,
     /// `"interrupted"` when the task says "working" (or any other running status) with no live
     /// process, else the status name, exactly as `sbxm task status` decides it.
@@ -54,6 +56,7 @@ pub fn rows(base: &Path, probe: &dyn ProcessProbe) -> Result<Vec<TaskRow>> {
                 .and_then(|stamp| parse_timestamp(&stamp.at));
             Ok(TaskRow {
                 id: record.id.clone(),
+                title: record.title.clone(),
                 stage: record.stage.name(),
                 status,
                 stage_entered_at,
@@ -207,9 +210,49 @@ pub(crate) fn push_row<const N: usize>(
     out.push('\n');
 }
 
+/// The fewest columns the title is shown in on a terminal (issue 246): with less left, the column
+/// is dropped and the ID alone names the task.
+const MIN_TITLE: usize = 10;
+
+/// The title column's width, or `None` to leave it out: off a terminal (`total_width` `None`) as
+/// wide as the longest title, never cut; on one, at most the space left after the other fixed
+/// columns, the title's own gap and one column for the log's `…`, and dropped below
+/// [`MIN_TITLE`]. Left out too when no task has a title (records from before issue 246).
+fn title_width(rows: &[TaskRow], fixed: &[usize; 7], total_width: Option<usize>) -> Option<usize> {
+    let longest = rows
+        .iter()
+        .map(|row| display_width(row.title.trim()))
+        .max()
+        .filter(|&w| w > 0)?
+        .max(display_width(TITLE));
+    let Some(total) = total_width else {
+        return Some(longest);
+    };
+    let others = fixed.iter().map(|w| w + 2).sum::<usize>();
+    let left = total.saturating_sub(others + 2 + 1);
+    (left >= MIN_TITLE).then(|| longest.min(left))
+}
+
+const TITLE: &str = "TITLE";
+
+/// The cells of one line with the title (cut to `width`) after the ID.
+fn with_title(cells: &[String; 7], title: &str, width: usize) -> [String; 8] {
+    let [id, stage, status, time, ahead, findings, pr] = cells.clone();
+    [
+        id,
+        truncate(title, width),
+        stage,
+        status,
+        time,
+        ahead,
+        findings,
+        pr,
+    ]
+}
+
 /// The Tasks table: pure and total over `rows`, given `now` (the clock) and `width` (the
 /// terminal's column count, `None` when output isn't a terminal). No tasks prints the same line
-/// `sbxm task status` does.
+/// `sbxm task status` does. A title column follows the ID (issue 246; see [`title_width`]).
 pub fn render(rows: &[TaskRow], now: u64, width: Option<usize>) -> String {
     if rows.is_empty() {
         return "No tasks yet; start one with `sbxm task start --issue <n>`.\n".to_owned();
@@ -221,19 +264,33 @@ pub fn render(rows: &[TaskRow], now: u64, width: Option<usize>) -> String {
             *width = (*width).max(display_width(cell));
         }
     }
+    let titles = title_width(rows, &widths, width);
+    let line =
+        |out: &mut String, cells: &[String; 7], title: &str, log: &str, real: bool| match titles {
+            Some(tw) => {
+                let [id, stage, status, time, ahead, findings, pr] = widths;
+                let widths = [id, tw, stage, status, time, ahead, findings, pr];
+                push_row(
+                    out,
+                    &with_title(cells, title, tw),
+                    log,
+                    real,
+                    &widths,
+                    width,
+                );
+            }
+            None => push_row(out, cells, log, real, &widths, width),
+        };
     let mut out = String::new();
-    push_row(
-        &mut out,
-        &HEADER.map(str::to_owned),
-        "LOG",
-        false,
-        &widths,
-        width,
-    );
+    line(&mut out, &HEADER.map(str::to_owned), TITLE, "LOG", false);
     for (cells, row) in data.iter().zip(rows) {
         let log_is_real = row.log_line.as_deref().is_some_and(|line| !line.is_empty());
         let log = row.log_line.as_deref().unwrap_or(DASH);
-        push_row(&mut out, cells, log, log_is_real, &widths, width);
+        let title = match row.title.trim() {
+            "" => DASH,
+            title => title,
+        };
+        line(&mut out, cells, title, log, log_is_real);
     }
     out
 }

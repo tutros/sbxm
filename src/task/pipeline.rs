@@ -1011,10 +1011,12 @@ pub fn prepare_spec_resolved(
     title: &str,
     location: Location,
 ) -> Result<Prepared> {
+    // The spec's first heading, else its file name (issue 246).
+    let title = crate::title::spec_title(text, title);
     let source = Source::Spec {
         path: source_path,
         text,
-        title,
+        title: &title,
     };
     prepare_source(ctx, id, source, location)
 }
