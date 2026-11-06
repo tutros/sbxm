@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use common::{Env, git, task_fixture};
-use sbxm::backend::FakeBackend;
+use sbxm::backend::{FakeBackend, NetworkRule, SandboxInfo};
 use sbxm::commands::template_build;
 use sbxm::github::fake::FakeGitHub;
 use sbxm::github::{PrInfo, PrState};
@@ -297,33 +297,51 @@ fn a_task_whose_base_is_older_than_mains_tip_never_rebuilds_the_template_back() 
     );
 }
 
-/// Plays issue 41's worker: on its headless run it runs `edit` in its clone and commits all.
+/// The strict codex reviewer's sandbox: its kit rule must be there for its setup (issue 429).
+const REVIEWER: &str = "sbxm-task-issue-41-review-codex";
+
+/// Plays issue 41's worker: on its headless run it runs `edit` in its clone and commits all. Its
+/// reviewer has its kit's network rule and writes a clean review.
 fn edits_files(f: &task_fixture::Fixture, edit: fn(&Path)) -> FakeBackend {
     let workspace = f.env.base_dir().join("tasks").join("issue-41");
-    backend().with_exec_hook(move |sandbox, spec| {
-        if sandbox.contains("-review-") {
-            return;
-        }
-        if task_fixture::is_headless(spec) {
-            edit(&workspace);
-            git(&workspace, &["add", "-A"]);
-            git(&workspace, &["commit", "-q", "-m", "change the lock"]);
-            let dir = workspace.join(".sbxm-task");
-            fs::create_dir_all(&dir).unwrap();
-            fs::write(dir.join("result.md"), "done\n").unwrap();
-        } else if task_fixture::is_bundle(spec) {
-            git(
-                &workspace,
-                &[
-                    "bundle",
-                    "create",
-                    ".sbxm-task/branch.bundle",
-                    "issue-41",
-                    "^origin/main",
-                ],
-            );
-        }
-    })
+    let reviewer = task_fixture::play_reviews(
+        &f.env.base_dir(),
+        "issue-41",
+        vec![task_fixture::CLEAN_REVIEW.to_owned()],
+    );
+    let kit = NetworkRule {
+        name: format!("kit:{REVIEWER}"),
+        scope: format!("sandbox:{REVIEWER}"),
+        allow: true,
+        resources: vec!["api.openai.com:443".into(), "chatgpt.com:443".into()],
+    };
+    backend()
+        .with_network_rules(vec![kit])
+        .with_exec_hook(move |sandbox, spec| {
+            if sandbox.contains("-review-") {
+                reviewer(sandbox, spec);
+                return;
+            }
+            if task_fixture::is_headless(spec) {
+                edit(&workspace);
+                git(&workspace, &["add", "-A"]);
+                git(&workspace, &["commit", "-q", "-m", "change the lock"]);
+                let dir = workspace.join(".sbxm-task");
+                fs::create_dir_all(&dir).unwrap();
+                fs::write(dir.join("result.md"), "done\n").unwrap();
+            } else if task_fixture::is_bundle(spec) {
+                git(
+                    &workspace,
+                    &[
+                        "bundle",
+                        "create",
+                        ".sbxm-task/branch.bundle",
+                        "issue-41",
+                        "^origin/main",
+                    ],
+                );
+            }
+        })
 }
 
 /// ...with `Cargo.lock` holding `lock`.
@@ -664,12 +682,33 @@ impl record::ProcessProbe for Gone {
 }
 
 /// Decision 291, review M-2: a task stopped for its lock change resumes once the same bytes are
-/// on main; before that it stops again, before any gate or reviewer.
+/// on main; before that it stops again, before any gate or reviewer. Issue 429: the resume after
+/// the approval succeeds, with its gates and a clean review, while the worker's sandbox is still
+/// there...
 #[test]
 fn a_task_stopped_for_its_lock_change_resumes_once_main_has_the_same_change() {
+    resumes_once_main_has_the_same_change(true);
+}
+
+/// ...and once it is gone, as it is after a public `task start`.
+#[test]
+fn a_task_stopped_for_its_lock_change_resumes_without_its_worker_sandbox() {
+    resumes_once_main_has_the_same_change(false);
+}
+
+fn resumes_once_main_has_the_same_change(worker_kept: bool) {
+    const WORKER: &str = "sbxm-task-issue-41-claude";
     let f = task_fixture::fixture();
     f.env.write_profile("default", PROFILE);
-    let backend = changes_lock(&f, NEW_CRATE);
+    // The fake lists only the sandboxes it is given: without this one the worker's is gone.
+    let mut backend = changes_lock(&f, NEW_CRATE);
+    if worker_kept {
+        backend = backend.and_sandboxes(vec![SandboxInfo {
+            name: WORKER.into(),
+            agent: "claude".into(),
+            status: "running".into(),
+        }]);
+    }
     warmed_both(&f, &backend);
     let (github, source) = (FakeGitHub::default(), task_fixture::source(&f));
     let ctx = task_fixture::ctx(&f, &source, &backend, &github);
@@ -684,18 +723,39 @@ fn a_task_stopped_for_its_lock_change_resumes_once_main_has_the_same_change() {
             pipeline::Prepared::open_locked(&f.env.base_dir(), "issue-41", &Gone).unwrap();
         let mut env = ctx.env();
         env.probe = &Gone;
-        sbxm::task::resume::resume(&env, &mut prepared, None).map(|_| ())
+        sbxm::task::resume::resume(&env, &mut prepared, None)
     };
 
-    let err = format!("{:#}", resume().unwrap_err());
+    let err = format!("{:#}", resume().map(|_| ()).unwrap_err());
     assert!(err.contains(BRANCH_CHANGED), "{err}");
     assert!(!ran_gates(&backend));
+    assert!(!backend.creates().iter().any(|c| c.name == REVIEWER));
 
+    let creates_before = backend.creates().len();
     push_lock(&f, "main-new-crate", NEW_CRATE, "refs/heads/main");
-    let result = resume();
+    let resumed = resume().unwrap_or_else(|e| panic!("{e:#}"));
 
-    let err = result.err().map(|e| format!("{e:#}")).unwrap_or_default();
-    assert!(!err.contains(BRANCH_CHANGED), "{err}");
+    let review = resumed.review.expect("the resume reviewed the task");
+    assert!(review.gates_failed.is_none() && review.gates_could_not_run.is_none());
+    assert_eq!(review.must_fix_left, 0);
+    assert_eq!(review.rounds.len(), 1);
+    assert!(ran_gates(&backend));
+    let created: Vec<String> = backend.creates()[creates_before..]
+        .iter()
+        .map(|c| c.name.clone())
+        .collect();
+    assert!(created.contains(&REVIEWER.to_owned()), "{created:?}");
+    // A worker sandbox that is gone is made again for the gates; one that is there is kept.
+    assert_eq!(
+        created.contains(&WORKER.to_owned()),
+        !worker_kept,
+        "{created:?}"
+    );
+    let saved = record::read(&meta.join("task.json")).unwrap();
+    assert_eq!(
+        (saved.stage, saved.status),
+        (record::Stage::Ready, record::Status::Ok)
+    );
     // The historical base is where it was; only the template's own ref follows main.
     assert_eq!(
         git(&meta.join("repo.git"), &["rev-parse", "refs/heads/main"]),
