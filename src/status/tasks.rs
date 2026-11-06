@@ -217,7 +217,7 @@ const MIN_TITLE: usize = 10;
 /// The title column's width, or `None` to leave it out: off a terminal (`total_width` `None`) as
 /// wide as the longest title, never cut; on one, at most the space left after the other fixed
 /// columns, the title's own gap and one column for the log's `…`, and dropped below
-/// [`MIN_TITLE`]. Left out too when no task has a title (records from before issue 246).
+/// [`MIN_TITLE`]. Left out too when no task has a title (a record written without one).
 fn title_width(rows: &[TaskRow], fixed: &[usize; 7], total_width: Option<usize>) -> Option<usize> {
     let longest = rows
         .iter()
