@@ -30,7 +30,7 @@ fn decisions_dir() -> PathBuf {
 
 /// The number a decision file's name gives, or why the name is refused.
 fn number_from_name(name: &str) -> Result<u32, String> {
-    let pattern = Regex::new(r"^(\d{4})-[a-z0-9-]{1,50}\.md$").unwrap();
+    let pattern = Regex::new(&format!(r"^({NUMBER})-[a-z0-9-]{{1,50}}\.md$")).unwrap();
     let captures = pattern.captures(name).ok_or_else(|| {
         format!("{name}: the name is not NNNN-<slug>.md (slug [a-z0-9-], at most 50 characters)")
     })?;
@@ -81,25 +81,32 @@ fn check_files(files: &[(String, String)]) -> Result<BTreeMap<u32, String>, Vec<
     }
 }
 
+// A decision number as file names write it (4 digits) and as references write it (1 to 4).
+const NUMBER: &str = r"\d{4}";
+const REFERENCE_NUMBER: &str = r"\d{1,4}";
+
 // A separator between list items; "and"/"or" come first so ", and " isn't read as ",".
 const SEPARATOR_PATTERN: &str = r",?\s+(?:and|or)\s+|,\s*";
 
-static BRACKET: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\[(\d{1,4})\]").unwrap());
+static BRACKET: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(&format!(r"\[({REFERENCE_NUMBER})\]")).unwrap());
 static WORDS: LazyLock<Regex> = LazyLock::new(|| {
-    let item = r"\d{1,3}\b(?:\s*[-–]\s*\d{1,3}\b)?";
+    let item = format!(r"{REFERENCE_NUMBER}\b(?:\s*[-–]\s*{REFERENCE_NUMBER}\b)?");
     Regex::new(&format!(
         r"\b[Dd]ecisions? ({item}(?:(?:{SEPARATOR_PATTERN}){item})*)"
     ))
     .unwrap()
 });
 static SEPARATOR: LazyLock<Regex> = LazyLock::new(|| Regex::new(SEPARATOR_PATTERN).unwrap());
+// A date (`2026-10-22`) or a month (`2026-10`): blanked out before word references are read.
+static DATE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b\d{4}-\d{2}(?:-\d{2})?\b").unwrap());
 static RANGE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^(\d+)\s*[-–]\s*(\d+)$").unwrap());
 
 /// Every decision number a line refers to: `[n]` (only counted in `sdlc/`, and not right after a
 /// word character, so `contestants[0]` is no reference), and "decision N", "decisions N, M",
-/// "decisions N and M", "decisions N-M" anywhere. A range counts every number in it; four-digit
-/// numbers are not read, so a date after a reference (`decision 241, 2026-10-22`) is not a
-/// reference.
+/// "decisions N and M", "decisions N-M" anywhere. A range counts every number in it. Dates and
+/// months are blanked out first, so a date after a reference (`decision 241, 2026-10-22`) is not
+/// read as one.
 fn references_in_line(line: &str, brackets: bool) -> Vec<u32> {
     let mut numbers = Vec::new();
     if brackets {
@@ -112,7 +119,8 @@ fn references_in_line(line: &str, brackets: bool) -> Vec<u32> {
             numbers.push(captures[1].parse().unwrap());
         }
     }
-    for captures in WORDS.captures_iter(line) {
+    let without_dates = DATE.replace_all(line, |c: &regex::Captures| " ".repeat(c[0].len()));
+    for captures in WORDS.captures_iter(&without_dates) {
         for part in SEPARATOR.split(&captures[1]) {
             match RANGE.captures(part) {
                 Some(r) => {
@@ -210,6 +218,10 @@ fn every_reference_to_a_decision_in_tracked_files_resolves_to_a_file() {
     let numbers = check_files(&repo_decision_files()).unwrap();
     let mut problems = Vec::new();
     for path in tracked_md_and_rs_files() {
+        // This file's own test inputs name numbers that have no file on purpose.
+        if path == "tests/decisions.rs" {
+            continue;
+        }
         let Ok(text) = std::fs::read_to_string(repo().join(&path)) else {
             continue; // deleted in the working tree, or not UTF-8
         };
@@ -377,6 +389,52 @@ fn a_reference_to_a_number_with_no_file_names_the_file_and_line() {
         unresolved_references("sdlc/y.md", "[1]\n[9]\n", &known),
         ["sdlc/y.md:2: decision 9 has no file in sdlc/decisions/"]
     );
+}
+
+// Review M-1: four-digit numbers are read like any other, as the file names allow them.
+#[test]
+fn four_digit_references_are_checked_like_any_other() {
+    let none = BTreeMap::new();
+    assert_eq!(
+        unresolved_references("docs/probe.md", "x\ndecision 1000\n", &none),
+        ["docs/probe.md:2: decision 1000 has no file in sdlc/decisions/"]
+    );
+    for line in [
+        "decisions 9998, 9999",
+        "decisions 9998-9999",
+        "[9998][9999]",
+    ] {
+        assert_eq!(
+            unresolved_references("sdlc/probe.md", line, &none),
+            [
+                "sdlc/probe.md:1: decision 9998 has no file in sdlc/decisions/",
+                "sdlc/probe.md:1: decision 9999 has no file in sdlc/decisions/",
+            ],
+            "{line}"
+        );
+    }
+    let known = check_files(&named(&[
+        ("1000-a.md", "1000. **A:** text\n"),
+        ("9998-b.md", "9998. **B:** text\n"),
+        ("9999-c.md", "9999. **C:** text\n"),
+    ]))
+    .unwrap();
+    let text = "decision 1000\ndecisions 9998, 9999\ndecisions 9998-9999\n";
+    assert!(unresolved_references("docs/probe.md", text, &known).is_empty());
+}
+
+#[test]
+fn a_date_right_after_a_reference_is_still_no_reference() {
+    assert_eq!(
+        references_in_line("(decision 241, 2026-10-22)", false),
+        [241]
+    );
+    assert_eq!(
+        references_in_line("decisions 12 and 2026-10-22", false),
+        [12]
+    );
+    assert_eq!(references_in_line("decision 7, 2026-10", false), [7]);
+    assert!(references_in_line("decision 2026-10-22", false).is_empty());
 }
 
 // --- Two branches adding a decision each ---
