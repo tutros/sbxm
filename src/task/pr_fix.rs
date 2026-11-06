@@ -7,7 +7,7 @@ use anyhow::{Result, bail};
 
 use super::findings;
 use super::review::{CUT_NOTE_START, review_pr_command};
-use crate::github::{PrComment, PrInfo, PrState};
+use crate::github::{JobLog, PrComment, PrInfo, PrState, RunStatus, WorkflowRun};
 
 /// The review a fix task works from.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -18,6 +18,9 @@ pub struct ReviewToFix {
     pub must_fix: usize,
     /// The worker's input: the PR named, then each must-fix finding as the review wrote it.
     pub text: String,
+    /// A log-fix's `check-log.md` (decision 300): the failed run's log, which `text` names
+    /// instead of findings.
+    pub check_log: Option<String>,
 }
 
 /// The first line of a comment `task review --pr` posts, and the start of the one `task finish`
@@ -161,5 +164,106 @@ pub fn review_to_fix(
         commit,
         must_fix: must_fix.len(),
         text,
+        check_log: None,
     })
+}
+
+/// How much of a failed run's log a fix task gets, in all (decision 300): split evenly between
+/// the run's failed jobs.
+pub const CHECK_LOG_LIMIT: usize = 64 * 1024;
+
+/// The file in the task's folder and in the worker's `.sbxm-task/` that holds a failed run's
+/// log; a fix task whose folder has it is its PR's log-fix (decision 300).
+pub const CHECK_LOG: &str = "check-log.md";
+
+/// The run `id` among `runs`, the workflow runs of `pr`'s head, when it failed: refused, naming
+/// what to pass, for a run the head doesn't list (one of an older head or of another repo), one
+/// that passed and one still going (decision 300, answer 3).
+pub fn failed_run(pr: &PrInfo, repo: &str, id: u64, runs: &[WorkflowRun]) -> Result<WorkflowRun> {
+    let number = pr.number;
+    let head = &pr.head_oid;
+    let list = format!("`gh run list --repo {repo} --commit {head}`");
+    let Some(run) = runs.iter().find(|r| r.id == id) else {
+        bail!(
+            "run {id} isn't a workflow run of PR #{number}'s head {head} in {repo} (a run of an \
+             older head or of another repo is refused); pass a failed run of that head with \
+             --check-run, see {list}"
+        );
+    };
+    match run.status {
+        RunStatus::Failed => Ok(run.clone()),
+        RunStatus::Passed => bail!(
+            "run {id} of PR #{number}'s head {head} passed, so it has no failure to fix; pass a \
+             failed run of that head with --check-run, see {list}"
+        ),
+        RunStatus::Going => bail!(
+            "run {id} of PR #{number}'s head {head} is still going; once it has failed, pass it \
+             with --check-run, see {list}"
+        ),
+    }
+}
+
+/// `text` on one line: a name from GitHub never breaks the header it goes into.
+fn one_line(text: &str) -> String {
+    text.chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect()
+}
+
+/// The tail of `log` that fits in `share` bytes, cut at a line boundary when one is in reach and
+/// never inside a UTF-8 character; with how many whole lines were dropped from the start and
+/// whether part of one more was.
+fn tail(log: &str, share: usize) -> (&str, usize, bool) {
+    if log.len() <= share {
+        return (log, 0, false);
+    }
+    let mut start = log.len() - share;
+    while !log.is_char_boundary(start) {
+        start += 1;
+    }
+    let bytes = log.as_bytes();
+    if bytes[start - 1] != b'\n'
+        && let Some(at) = log[start..].find('\n')
+        && start + at + 1 < log.len()
+    {
+        start += at + 1;
+    }
+    let dropped = log[..start].matches('\n').count();
+    (&log[start..], dropped, bytes[start - 1] != b'\n')
+}
+
+/// `check-log.md` for failed `run` (decision 300, answer 2): the last [`CHECK_LOG_LIMIT`] bytes
+/// in all, split evenly between `jobs` (an unused share isn't passed on). Each job's part starts
+/// with a line naming the run, the job and how many lines were dropped from its start; a job with
+/// an empty log is that line alone.
+pub fn check_log(run: &WorkflowRun, jobs: &[JobLog]) -> String {
+    let named = format!(
+        "Failed run {} ({}, attempt {}, {})",
+        run.id,
+        one_line(&run.workflow),
+        run.attempt,
+        run.url
+    );
+    if jobs.is_empty() {
+        return format!("{named}: no failed job's log could be read\n");
+    }
+    let share = CHECK_LOG_LIMIT / jobs.len();
+    let mut text = String::new();
+    for job in jobs {
+        let name = one_line(&job.job);
+        if job.log.is_empty() {
+            text.push_str(&format!("{named}, job {name}: its log is empty\n"));
+            continue;
+        }
+        let (kept, dropped, partial) = tail(&job.log, share);
+        let part = if partial { " and part of one more" } else { "" };
+        text.push_str(&format!(
+            "{named}, job {name}: {dropped} line(s) dropped from the start{part}\n"
+        ));
+        text.push_str(kept);
+        if !kept.ends_with('\n') {
+            text.push('\n');
+        }
+    }
+    text
 }

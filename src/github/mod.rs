@@ -167,6 +167,16 @@ pub struct WorkflowRun {
     pub actor: String,
 }
 
+/// One failed job of a workflow run and its log, as `gh run view <id> --log-failed` prints it
+/// (issue 448).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JobLog {
+    /// The job's name.
+    pub job: String,
+    /// Its log lines, each ending in a newline; empty when the job printed none.
+    pub log: String,
+}
+
 pub trait GitHubBackend: Send + Sync {
     fn whoami(&self) -> Result<String>;
     fn default_branch(&self, repo: &str) -> Result<String>;
