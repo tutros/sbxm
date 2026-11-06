@@ -1268,6 +1268,14 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
                     scratch: &meta,
                     disk: ctx.disk,
                     merges_base: matches!(source, Source::Fix { .. }),
+                    task: stale_lock::Task {
+                        kind,
+                        number,
+                        pr: continues
+                            .as_ref()
+                            .map(|(pr, _)| *pr)
+                            .or((kind == Kind::Fix).then_some(number)),
+                    },
                 },
                 &ctx.config.sandbox.profile,
                 worker.harness,
@@ -2457,6 +2465,7 @@ pub(super) fn ensure_worker_sandbox(
             scratch: &prepared.meta,
             disk: env.disk,
             merges_base: prepared.record.kind == Kind::Fix,
+            task: stale_lock::Task::of(&prepared.record),
         },
         &profile_name,
         harness,
@@ -4615,6 +4624,7 @@ fn open_review_workspace(
             scratch: &prepared.meta,
             disk: env.disk,
             merges_base: false,
+            task: stale_lock::Task::of(&prepared.record),
         },
         &env.config.sandbox.profile,
         reviewer.harness,

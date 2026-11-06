@@ -345,7 +345,10 @@ allow = []         # required: the hosts a sandbox created from the template may
   of its own, the next task's rebuild picks it up, and the parked task is resumed: lock files that are now the very
   bytes `main` has no longer count as the branch's change. A change is a difference from where the branch left its
   base, so a PR that never touched the lock but is behind a newer `main` lock isn't stopped: `task fix --pr N`
-  starts its worker from `main`'s template and the worker merges the base. A lock file that is deleted or over the
+  starts its worker from `main`'s template and the worker merges the base. Any other sandbox of such a branch (its
+  reviewer, or a worker sandbox `task resume` makes again) is refused, since a template rebuild wouldn't last: the
+  message names `sbxm task fix --pr N` for a task with a PR, else `sbxm task run --restart --issue N` (or
+  `--spec <file>`), never `template build` (issue 424). A lock file that is deleted or over the
   size limit counts as a change. A template rebuild started by a command honors that command's `--ignore-disk`.
 - **Not in a project's `sandbox.toml`:** `[template]` there is refused, and a project that adds `setup.install`,
   `network.allow` or `network.deny` can't use the profile's template (strict: refused; otherwise the warning and the

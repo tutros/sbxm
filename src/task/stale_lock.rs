@@ -12,7 +12,8 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 
-use super::record::ProcessProbe;
+use super::finish;
+use super::record::{Kind, ProcessProbe, Record};
 use super::repo;
 use crate::backend::SandboxBackend;
 use crate::commands::template_build::{self, Refreshed};
@@ -41,6 +42,73 @@ pub struct Refresh<'a> {
     /// A fix of a pull request (decision 292): its worker merges the base first, so a head that
     /// only inherits an older lock than main's starts from main's template instead of stopping.
     pub merges_base: bool,
+    /// The task the sandbox is for, so a branch behind the template is told its way out.
+    pub task: Task,
+}
+
+/// What [`refresh`] needs to name the way out for a task whose branch only inherits older lock
+/// files than the template's (issue 424).
+#[derive(Debug, Clone, Copy)]
+pub struct Task {
+    pub kind: Kind,
+    /// The issue's number; unused for a spec task.
+    pub number: u32,
+    /// The pull request the task has (its `task.json` records one), if any.
+    pub pr: Option<u32>,
+}
+
+impl Task {
+    /// The task `record` is: its PR is the one `task finish` opened, else the one it continues, else
+    /// the one a PR or fix task is of.
+    pub fn of(record: &Record) -> Self {
+        let pr = record
+            .pr
+            .as_deref()
+            .and_then(finish::pr_number)
+            .or_else(|| record.continues.as_ref().map(|c| c.pr))
+            .or_else(|| matches!(record.kind, Kind::Pr | Kind::Fix).then_some(record.number));
+        Self {
+            kind: record.kind,
+            number: record.number,
+            pr,
+        }
+    }
+
+    /// The command that brings the task's branch up to `main`'s lock files.
+    fn way_out(&self, main: &str) -> String {
+        let restart = match (self.pr, self.kind) {
+            (Some(pr), _) => {
+                return format!(
+                    "merge {main} into its branch with `sbxm task fix --pr {pr}` (decision 292)"
+                );
+            }
+            (None, Kind::Spec) => "--spec <file>".to_owned(),
+            (None, _) => format!("--issue {}", self.number),
+        };
+        format!(
+            "start it again from {main} with `sbxm task run --restart {restart}` (its old task is \
+             set aside, and put back if the restart fails: decision 185)"
+        )
+    }
+}
+
+/// The stop for a commit whose lock files are the ones its branch forked with, older than the
+/// ones the template follows now: no rebuild helps, since the next task would rebuild it back.
+fn behind_main(
+    profile_name: &str,
+    harness: Harness,
+    main: &str,
+    commit: &str,
+    files: &[String],
+    task: &Task,
+) -> anyhow::Error {
+    anyhow!(
+        "the template of profile '{profile_name}' for {} follows {main}'s lock files now \
+         (decision 290), and commit {commit} has the older ones ({}) its branch forked with; {}",
+        harness.as_str(),
+        files.join(", "),
+        task.way_out(main)
+    )
 }
 
 /// The stop shared by every stage (decisions 290, 291): `commit`'s lock files differ from
@@ -225,6 +293,21 @@ pub fn refresh(
         Ok(fresh.clone())
     })?;
     stop(verdict, profile_name, r.base, commit, &record.lock_files)?;
+    // Inherited, and older than what the template was warmed with: `template::choose` would refuse
+    // it, so the refusal names what brings the branch up to main instead (issue 424).
+    if !r.merges_base
+        && record.warm
+        && hash_at(commit, &record).as_deref() != record.lock_hash.as_deref()
+    {
+        return Err(behind_main(
+            profile_name,
+            harness,
+            &main,
+            commit,
+            &record.lock_files,
+            &r.task,
+        ));
+    }
     // Unchanged by the branch but not what the template was warmed with: the base moved on.
     let inherits_older = r.merges_base
         && hash_at(&fresh, &record)
