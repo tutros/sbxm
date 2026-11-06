@@ -1404,7 +1404,8 @@ before the wait on 5 PRs, the loop reads the workflow runs (`gh api repos/<repo>
 workflow, CodeQL included) of the head of every open PR it opened (drafts too; a PR it didn't open is not read), of
 the merge commit of every PR it armed in this run that merged since the last pass (decision 280's case), and of
 `main`'s tip whoever merged it. After a restart only `main`'s tip and the open loop PRs are read. (2) A run still
-queued or in progress: nothing this pass; a merge commit whose runs aren't over is read again next pass. A failed run
+queued or in progress: nothing this pass; a commit of `main` (a merge commit, or a tip after `main` moved on) whose
+runs aren't over, or whose runs weren't listed yet at its first read, is read again next pass, in memory only. A failed run
 (`failure`, `timed_out`, `startup_failure`; `cancelled` is not a failure) at attempt 1 gets its failed jobs re-run
 once (`gh run rerun <id> --failed`); a pass after the re-run ends it (a runner fault isn't a break). GitHub's attempt
 number is the only state: `attempt` > 1 failed is the second failure, so a restart re-runs nothing twice. (3) A second
@@ -1415,7 +1416,8 @@ opening PRs but arms nothing (neither [293]'s arm nor [298]'s re-arm), and disar
 has it armed. Only the user lifts it, with `sbxm task loop --clear-pause` (it says what it removed, or that there was
 none, and runs nothing); the loop never does, not even when `main` turns green ([280]). A pause file that can't be
 read counts as a pause, with a warning naming it. A pause the user cleared isn't set again by the same loop for the
-same run; a restarted loop that still finds it red sets it again. A pause that can't be written stops the loop.
+same run, but another run's second failure on it gets its own pause; a restarted loop that still finds it red sets
+it again. A pause that can't be written stops the loop.
 Polling inside the loop's pass for now; a push-based event bus is the direction once more than one machine or several
 cloud workers run at once, or polling delay costs real time (the user, 2026-11-06).
 

@@ -971,3 +971,170 @@ fn gh_stops_at_an_empty_page_of_runs() {
     assert_eq!(gh.commit_runs(REPO, MAIN).unwrap().len(), 100);
     assert_eq!(script.calls.lock().unwrap().len(), 2);
 }
+
+// --- Review of issue 442: a commit stays watched until each of its runs is over and acted on
+// (M-1, M-2, M-3) ---
+
+/// `main`'s tip after it moved.
+const MAIN_B: &str = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee";
+
+#[test]
+fn a_tip_with_a_run_going_is_still_read_after_main_moves() {
+    let f = fixture();
+    let gh = github(&[3], &[]).with_runs(MAIN, vec![run(9, 2, RunStatus::Going)]);
+    let mut script = Script::new(&f.base(), &gh);
+    script.after_run = Box::new(|_, gh| {
+        gh.set_branch_head("main", MAIN_B);
+        gh.set_runs(MAIN, vec![run(9, 2, RunStatus::Failed)]);
+    });
+
+    let ran = run_loop(&f, &script, &gh);
+
+    ran.result.unwrap();
+    let State::Set(pause) = f.pause() else {
+        panic!("not paused: {}", ran.out);
+    };
+    assert_eq!(pause.commit, MAIN);
+    assert_eq!(disarms(&gh), [103], "{}", ran.out);
+}
+
+#[test]
+fn a_tip_whose_failure_was_re_run_is_still_read_after_main_moves() {
+    let f = fixture();
+    let gh = github(&[3], &[]).with_runs(MAIN, vec![run(9, 1, RunStatus::Failed)]);
+    let mut script = Script::new(&f.base(), &gh);
+    script.after_run = Box::new(|_, gh| {
+        gh.set_branch_head("main", MAIN_B);
+        gh.set_runs(MAIN, vec![run(9, 2, RunStatus::Failed)]);
+    });
+
+    let ran = run_loop(&f, &script, &gh);
+
+    ran.result.unwrap();
+    assert_eq!(reruns(&gh), [9]);
+    let State::Set(pause) = f.pause() else {
+        panic!("not paused: {}", ran.out);
+    };
+    assert_eq!(pause.commit, MAIN);
+}
+
+#[test]
+fn a_loop_merge_with_no_runs_yet_is_read_again_until_they_appear() {
+    let f = fixture();
+    let gh = github(&[1, 2, 3], &[]);
+    let mut script = Script::new(&f.base(), &gh);
+    script.after_run = Box::new(|issue, gh| match issue {
+        // 101 merges, and main moves past it before its runs are listed.
+        2 => {
+            gh.set_merged(101, MERGE_1);
+            gh.set_branch_head("main", MAIN_B);
+        }
+        3 => gh.set_runs(MERGE_1, vec![run(11, 2, RunStatus::Failed)]),
+        _ => {}
+    });
+
+    let ran = run_loop(&f, &script, &gh);
+
+    ran.result.unwrap();
+    let State::Set(pause) = f.pause() else {
+        panic!("not paused: {}", ran.out);
+    };
+    assert_eq!(pause.commit, MERGE_1);
+}
+
+#[test]
+fn a_loop_merge_with_no_runs_at_two_passes_is_no_longer_read() {
+    let f = fixture();
+    let gh = github(&[1, 2, 3, 4], &[]);
+    let mut script = Script::new(&f.base(), &gh);
+    script.after_run = Box::new(|issue, gh| {
+        if issue == 2 {
+            gh.set_merged(101, MERGE_1);
+            gh.set_branch_head("main", MAIN_B);
+        }
+    });
+
+    run_loop(&f, &script, &gh).result.unwrap();
+
+    // Read before tasks 3 and 4, not at the last pass.
+    let read = runs_read(&gh);
+    assert_eq!(read.iter().filter(|c| *c == MERGE_1).count(), 2, "{read:?}");
+}
+
+#[test]
+fn a_new_second_failure_on_main_pauses_again_after_the_user_cleared_an_earlier_one() {
+    let f = fixture();
+    let gh = github(&[3], &[]).with_runs(
+        MAIN,
+        vec![run(9, 2, RunStatus::Failed), run(10, 2, RunStatus::Going)],
+    );
+    let mut script = Script::new(&f.base(), &gh);
+    let base = f.base();
+    script.after_run = Box::new(move |_, gh| {
+        loop_pause::clear(&base, &mut Vec::new()).unwrap();
+        gh.set_runs(
+            MAIN,
+            vec![run(9, 2, RunStatus::Failed), run(10, 2, RunStatus::Failed)],
+        );
+    });
+
+    let ran = run_loop(&f, &script, &gh);
+
+    ran.result.unwrap();
+    let State::Set(pause) = f.pause() else {
+        panic!("not paused again: {}", ran.out);
+    };
+    assert_eq!(pause.run_id, 10);
+}
+
+#[test]
+fn two_runs_failed_twice_at_once_on_main_each_get_their_pause() {
+    let f = fixture();
+    let gh = github(&[3], &[]).with_runs(
+        MAIN,
+        vec![run(9, 2, RunStatus::Failed), run(10, 2, RunStatus::Failed)],
+    );
+    let mut script = Script::new(&f.base(), &gh);
+    let base = f.base();
+    // The user clears the first pause; run 10 is still a break they haven't seen.
+    script.after_run = Box::new(move |_, _| {
+        loop_pause::clear(&base, &mut Vec::new()).unwrap();
+    });
+
+    let ran = run_loop(&f, &script, &gh);
+
+    ran.result.unwrap();
+    let State::Set(pause) = f.pause() else {
+        panic!("not paused again: {}", ran.out);
+    };
+    assert_eq!(pause.run_id, 10);
+}
+
+#[test]
+fn a_new_second_failure_on_a_loop_pr_is_said_after_an_earlier_one() {
+    let f = fixture();
+    f.loop_pr(1);
+    let gh = github(&[3], &[101]).with_auto_merge(101).with_runs(
+        OTHER,
+        vec![run(7, 2, RunStatus::Failed), run(8, 2, RunStatus::Going)],
+    );
+    let mut script = Script::new(&f.base(), &gh);
+    script.after_run = Box::new(|_, gh| {
+        gh.set_runs(
+            OTHER,
+            vec![run(7, 2, RunStatus::Failed), run(8, 2, RunStatus::Failed)],
+        );
+    });
+
+    let ran = run_loop(&f, &script, &gh);
+
+    ran.result.unwrap();
+    let said: Vec<&str> = ran
+        .out
+        .lines()
+        .filter(|l| l.contains("PR #101") && l.contains("again after a re-run"))
+        .collect();
+    assert_eq!(said.len(), 2, "{}", ran.out);
+    assert!(said[1].contains("runs/8"), "{}", said[1]);
+    assert_eq!(disarms(&gh), [101]);
+}

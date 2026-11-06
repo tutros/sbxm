@@ -317,8 +317,9 @@ struct Loop<'a> {
     unresolved: HashSet<u32>,
     /// The PRs this run armed, watched for their merge commit (decision 299, answer 4).
     armed: HashSet<u32>,
-    /// Merge commits of PRs this run armed whose runs are still to be read to their end.
-    merges: Vec<(u32, String)>,
+    /// The commits of `main` watched until each of their runs is over and acted on (review M-1
+    /// to M-3): merge commits of PRs this run armed, and every tip seen.
+    watched: Vec<Watched>,
     /// The runs whose failed jobs this run re-ran, so a lagging answer isn't re-run twice.
     reruns: HashSet<u64>,
     /// The (PR, run) second failures already acted on: said once.
@@ -1294,15 +1295,14 @@ impl Loop<'_> {
     }
 
     /// Reads `commit`'s runs (`what` names it in messages): the failed jobs of a run's first
-    /// failure are re-run once. Returns the runs that failed again after a re-run, and whether
-    /// every run is over (none going, none just re-run); `None` when the runs can't be read.
+    /// failure are re-run once. `None` when the runs can't be read.
     fn read_runs(
         &mut self,
         commit: &str,
         what: &str,
         out: &mut dyn Write,
         warn: &mut dyn Write,
-    ) -> Result<Option<(Vec<WorkflowRun>, bool)>> {
+    ) -> Result<Option<RunsRead>> {
         let runs = match self.github.commit_runs(&self.repo, commit) {
             Ok(runs) => runs,
             Err(e) => {
@@ -1318,6 +1318,7 @@ impl Loop<'_> {
         };
         let mut failed = Vec::new();
         let mut over = true;
+        let empty = runs.is_empty();
         for run in runs {
             match run.status {
                 RunStatus::Passed => {}
@@ -1349,12 +1350,17 @@ impl Loop<'_> {
                 }
             }
         }
-        Ok(Some((failed, over)))
+        Ok(Some(RunsRead {
+            failed,
+            over,
+            empty,
+        }))
     }
 
     /// `main`'s side of the pass (decision 299, answer 4): the merge commits of the PRs this run
     /// armed that merged since, and `main`'s tip whoever merged it. A second failure sets the
-    /// pause; a merge commit whose runs aren't over is read again at the next pass.
+    /// pause. Each such commit stays watched, after `main` moves on too, until every run on it is
+    /// over and each second failure got its pause (review M-1 to M-3).
     fn check_main(&mut self, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
         let mut armed: Vec<u32> = self.armed.iter().copied().collect();
         armed.sort_unstable();
@@ -1362,7 +1368,7 @@ impl Loop<'_> {
             match self.github.pr_merge_commit(&self.repo, number) {
                 Ok(Some(commit)) => {
                     self.armed.remove(&number);
-                    self.merges.push((number, commit));
+                    self.watch(commit, Some(number));
                 }
                 Ok(None) => {}
                 Err(e) => self.warn_once(
@@ -1374,17 +1380,8 @@ impl Loop<'_> {
                 )?,
             }
         }
-        let mut commits: Vec<(String, Option<u32>)> = self
-            .merges
-            .iter()
-            .map(|(number, commit)| (commit.clone(), Some(*number)))
-            .collect();
         match self.base_tip() {
-            Ok((_, tip)) => {
-                if !commits.iter().any(|(commit, _)| *commit == tip) {
-                    commits.push((tip, None));
-                }
-            }
+            Ok((_, tip)) => self.watch(tip, None),
             Err(e) => self.warn_once(
                 warn,
                 format!(
@@ -1393,22 +1390,51 @@ impl Loop<'_> {
                 ),
             )?,
         }
+        let commits: Vec<(String, Option<u32>)> = self
+            .watched
+            .iter()
+            .map(|w| (w.commit.clone(), w.pr))
+            .collect();
         for (commit, pr) in commits {
             let what = match pr {
                 Some(number) => format!("PR #{number}'s merge commit"),
-                None => "main's tip".to_owned(),
+                None => format!("main's commit {commit}"),
             };
-            let Some((failed, over)) = self.read_runs(&commit, &what, out, warn)? else {
+            let Some(read) = self.read_runs(&commit, &what, out, warn)? else {
                 continue;
             };
-            if let Some(run) = failed.first() {
+            for run in &read.failed {
                 self.pause(&commit, pr, run, out)?;
             }
-            if over || !failed.is_empty() {
-                self.merges.retain(|(_, c)| *c != commit);
+            let acted = read
+                .failed
+                .iter()
+                .all(|run| self.paused_for.contains(&(commit.clone(), run.id)));
+            let Some(watched) = self.watched.iter_mut().find(|w| w.commit == commit) else {
+                continue;
+            };
+            if read.empty {
+                watched.empty_reads += 1;
+            }
+            let seen = !read.empty || watched.empty_reads >= EMPTY_READS_TO_END;
+            if read.over && acted && seen {
+                self.watched.retain(|w| w.commit != commit);
             }
         }
         Ok(())
+    }
+
+    /// Adds `commit` to the commits of `main` read at every pass, once; `pr`: the PR this run
+    /// armed that merged into it.
+    fn watch(&mut self, commit: String, pr: Option<u32>) {
+        match self.watched.iter_mut().find(|w| w.commit == commit) {
+            Some(watched) => watched.pr = watched.pr.or(pr),
+            None => self.watched.push(Watched {
+                commit,
+                pr,
+                empty_reads: 0,
+            }),
+        }
     }
 
     /// Sets the pause for `run`, which failed again on `main`'s `commit` (`pr`: the PR this run
@@ -1421,10 +1447,11 @@ impl Loop<'_> {
         run: &WorkflowRun,
         out: &mut dyn Write,
     ) -> Result<()> {
-        if !self.paused_for.insert((commit.to_owned(), run.id)) {
-            return Ok(());
-        }
-        if loop_pause::read(&self.base_dir).paused() {
+        // Only the run a pause is for is marked (review M-3): another run's failure seen while a
+        // pause stands gets its own pause once the user clears this one.
+        if self.paused_for.contains(&(commit.to_owned(), run.id))
+            || loop_pause::read(&self.base_dir).paused()
+        {
             return Ok(());
         }
         let merged_by = match pr {
@@ -1444,6 +1471,7 @@ impl Loop<'_> {
             "main failed again after a re-run but the loop can't record its pause; the loop \
              stops so that nothing more is armed",
         )?;
+        self.paused_for.insert((commit.to_owned(), run.id));
         self.say_once(out, paused_line(&pause))
     }
 
@@ -1501,15 +1529,18 @@ impl Loop<'_> {
                 }
             };
             let what = format!("PR #{number}");
-            let Some((failed, _)) = self.read_runs(&head, &what, out, warn)? else {
+            let Some(read) = self.read_runs(&head, &what, out, warn)? else {
                 continue;
             };
-            let Some(run) = failed.first() else {
+            // Each second failure once (review M-3): one already said doesn't hide a newer one.
+            let new: Vec<WorkflowRun> = read
+                .failed
+                .into_iter()
+                .filter(|run| !self.failed_twice.contains(&(number, run.id)))
+                .collect();
+            let Some(run) = new.first() else {
                 continue;
             };
-            if self.failed_twice.contains(&(number, run.id)) {
-                continue;
-            }
             if armed {
                 if let Err(e) = self.github.pr_disarm_auto_merge(&self.repo, number) {
                     self.warn_once(
@@ -1524,38 +1555,46 @@ impl Loop<'_> {
                 }
                 self.armed.remove(&number);
             }
-            self.failed_twice.insert((number, run.id));
-            let outcome = if armed {
-                "auto-merge disarmed; awaits you"
-            } else {
-                "awaits you"
-            };
-            writeln!(
-                out,
-                "PR #{number} awaits you: its {} failed again after a re-run ({}){}",
-                run.workflow,
-                run.url,
-                if armed { "; auto-merge disarmed" } else { "" }
-            )?;
-            let row = Row {
-                issue: number,
-                title: format!("checks: {} failed again after a re-run", run.workflow),
-                size: None,
-                started: self.now(),
-                ready: None,
-                worker_s: None,
-                reviewer_s: None,
-                rounds: None,
-                must_fix: None,
-                outcome: outcome.to_owned(),
-                stops: Vec::new(),
-                idle_before: None,
-            };
-            if let Err(e) = queue::append_resolve_row(&self.log, &row) {
-                self.warn_once(
-                    warn,
-                    format!("{e:#}; the loop goes on without that log row"),
+            for (i, run) in new.iter().enumerate() {
+                // The disarm goes with the first new failure's line and row.
+                let disarmed = armed && i == 0;
+                self.failed_twice.insert((number, run.id));
+                writeln!(
+                    out,
+                    "PR #{number} awaits you: its {} failed again after a re-run ({}){}",
+                    run.workflow,
+                    run.url,
+                    if disarmed {
+                        "; auto-merge disarmed"
+                    } else {
+                        ""
+                    }
                 )?;
+                let row = Row {
+                    issue: number,
+                    title: format!("checks: {} failed again after a re-run", run.workflow),
+                    size: None,
+                    started: self.now(),
+                    ready: None,
+                    worker_s: None,
+                    reviewer_s: None,
+                    rounds: None,
+                    must_fix: None,
+                    outcome: if disarmed {
+                        "auto-merge disarmed; awaits you"
+                    } else {
+                        "awaits you"
+                    }
+                    .to_owned(),
+                    stops: Vec::new(),
+                    idle_before: None,
+                };
+                if let Err(e) = queue::append_resolve_row(&self.log, &row) {
+                    self.warn_once(
+                        warn,
+                        format!("{e:#}; the loop goes on without that log row"),
+                    )?;
+                }
             }
         }
         Ok(())
@@ -1571,6 +1610,29 @@ impl Loop<'_> {
         Ok(())
     }
 }
+
+/// A commit of `main` the loop reads at every pass until it is done with it (decision 299).
+struct Watched {
+    commit: String,
+    /// The PR this run armed that merged into it.
+    pr: Option<u32>,
+    /// The passes at which it had no runs at all ([`EMPTY_READS_TO_END`]).
+    empty_reads: u32,
+}
+
+/// What one read of a commit's runs found.
+struct RunsRead {
+    /// The runs that failed again after a re-run.
+    failed: Vec<WorkflowRun>,
+    /// No run going and none just re-run.
+    over: bool,
+    /// No runs at all.
+    empty: bool,
+}
+
+/// The passes at which a watched commit of `main` had no runs at all before its watch ends
+/// (review M-2): GitHub lists a commit's runs a moment after the push.
+const EMPTY_READS_TO_END: u32 = 2;
 
 /// [`Loop::arm`]'s checks on a task's record: no work stop, a review with 0 must-fix and low risk
 /// after the path-rule floor.
@@ -1650,7 +1712,7 @@ pub fn run(
         resolves: HashSet::new(),
         unresolved: HashSet::new(),
         armed: HashSet::new(),
-        merges: Vec::new(),
+        watched: Vec::new(),
         reruns: HashSet::new(),
         failed_twice: HashSet::new(),
         paused_for: HashSet::new(),
