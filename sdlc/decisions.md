@@ -1436,7 +1436,9 @@ that PR (`fix-<N>-*`, sbxm's own folder, a record of this repo or one that can't
 before it created a task isn't tried again in the same run. After a clean log-fix, auto-merge is armed again only on
 [298]'s re-arm rules (the fix task's review low risk after the path-rule floor, 0 must-fix, covering the new head; the
 PR armed before, or its own task and every earlier fix task pushed onto it passing the same checks) and never while
-[299]'s pause stands. A low disk or a stop request leaves the failure for a later pass. One log row either way. (2)
+[299]'s pause stands. A log-fix that didn't end clean keeps the PR with the user through later passes (no resolve of
+it in that run) and after a restart (a later resolve doesn't re-arm a PR whose log-fix record isn't finished and
+clean). A low disk or a stop request leaves the log-fix for a later pass, never the disarm. One log row either way. (2)
 **The log: the last 64 KiB in all, as data.** From `gh run view <id> --json jobs` (the failed jobs, in the run's
 order) and `gh run view <id> --log-failed` (each line goes to the job its first field names): the last 64 KiB in
 total, split evenly between the run's failed jobs (an unused share isn't passed on), cut at a line boundary (a

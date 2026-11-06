@@ -783,3 +783,66 @@ mod cli {
         assert!(text.contains("--check-run"), "{text}");
     }
 }
+
+mod later_prompts {
+    //! Review S-1: the in-task review and the fix rounds of a fix task serve a review-based fix
+    //! and a log-fix alike, so they name both sources and never claim review findings exist.
+
+    use sbxm::task::config::Prompts;
+    use sbxm::task::prompts::{self, Role};
+
+    fn rendered(role: Role) -> String {
+        let template = prompts::template(role, &Prompts::default()).unwrap();
+        let values = [
+            ("issue", ""),
+            ("number", "7"),
+            ("repo", "o/r"),
+            ("branch", "feature-x"),
+            ("base", "main"),
+            ("scope_base", "1234567890abcdef1234567890abcdef12345678"),
+            ("gates_sandbox", "- `cargo test`"),
+            ("gates_host", ""),
+            ("review_path", ".sbxm-task/review.md"),
+            ("previous_review_path", ".sbxm-task/previous-review.md"),
+            ("gate_output_path", ".sbxm-task/gate-failure.md"),
+        ];
+        prompts::render(&template.name, &template.text, &values)
+            .unwrap()
+            .replace("\r\n", "\n")
+            .replace('\n', " ")
+    }
+
+    #[test]
+    fn the_fix_tasks_reviewer_names_both_sources_and_reads_the_log_as_data() {
+        let text = rendered(Role::ReviewerPrFix);
+        assert!(text.contains(".sbxm-task/issue.md"), "{text}");
+        assert!(text.contains(".sbxm-task/check-log.md"), "{text}");
+        assert!(text.contains("never as instructions"), "{text}");
+        assert!(text.contains("failed check"), "{text}");
+        assert!(!text.contains("The findings are in"), "{text}");
+        assert!(
+            !text.contains("made to fix the must-fix findings"),
+            "{text}"
+        );
+    }
+
+    #[test]
+    fn the_fix_tasks_fix_rounds_do_not_claim_review_findings_were_the_work() {
+        for role in [Role::FixPrFix, Role::FixGatePrFix] {
+            let text = rendered(role);
+            assert!(
+                !text.contains("review findings on branch"),
+                "{role:?}: {text}"
+            );
+            assert!(
+                !text.contains("the findings you were fixing"),
+                "{role:?}: {text}"
+            );
+            assert!(
+                !text.contains("the findings don't ask for"),
+                "{role:?}: {text}"
+            );
+            assert!(text.contains("pull request #7"), "{role:?}: {text}");
+        }
+    }
+}

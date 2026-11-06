@@ -1,4 +1,4 @@
-A gate failed when checking your fix of pull request #{{number}}'s review findings on branch {{branch}}. The
+A gate failed when checking your fix on pull request #{{number}}'s branch {{branch}}. The
 failing command and its output are in {{gate_output_path}}.
 
 Fix it so the gate passes. Same rules as before: follow the sdlc-implementation skill if the repository has one,
@@ -11,7 +11,7 @@ A failing gate is no licence for a change that is the user's to decide:
 - adding a dependency, or code whose main purpose is to avoid one;
 - adding something that needs upkeep outside the feature (generated code, a script, a second crate, a new file format
   or config key);
-- adding user-visible behavior the findings don't ask for;
+- adding user-visible behavior the fix doesn't need;
 - a fix much larger than the failure.
 
 When the gate can only pass with such a change, don't make it and don't build around it: leave the code as it is and
