@@ -27,16 +27,19 @@ pub const FILE_NAME: &str = "lock.json";
 const ATTEMPTS: u32 = 50;
 const PAUSE: Duration = Duration::from_millis(10);
 
-/// How many times in all `create_new` of the lock or of its takeover claim is tried while it
-/// fails with `PermissionDenied`, and how long it waits between two tries (issue 407): on Windows
-/// a file another command is still deleting refuses to be made with "Access is denied", so what
-/// a later try sees decides, and only a denial on every try is reported as one.
+/// How many times in all `create_new` of the lock or of its takeover claim, or the read of the
+/// lock's holder, is tried while it fails with `PermissionDenied`, and how long it waits between
+/// two tries (issues 407, 441): on Windows a file another command is still deleting refuses to be
+/// made or opened with "Access is denied", so what a later try sees decides, and only a denial on
+/// every try is reported as one.
 const DENIED_ATTEMPTS: u32 = 5;
 const DENIED_PAUSE: Duration = Duration::from_millis(50);
 
-/// Making a file that must not exist yet, and waiting before trying again; tests replace both.
+/// Making a file that must not exist yet, reading the holder's file, and waiting before trying
+/// again; tests replace all three.
 trait CreateFiles {
     fn create_new(&self, path: &Path) -> std::io::Result<fs::File>;
+    fn read_to_string(&self, path: &Path) -> std::io::Result<String>;
     fn sleep(&self, pause: Duration);
 }
 
@@ -50,6 +53,10 @@ impl CreateFiles for RealFiles {
             .open(path)
     }
 
+    fn read_to_string(&self, path: &Path) -> std::io::Result<String> {
+        fs::read_to_string(path)
+    }
+
     fn sleep(&self, pause: Duration) {
         std::thread::sleep(pause);
     }
@@ -58,9 +65,24 @@ impl CreateFiles for RealFiles {
 /// `create_new` of `path`, tried again after a `PermissionDenied` up to [`DENIED_ATTEMPTS`] in
 /// all; any other outcome, or the last try's denial, is returned as it is.
 fn create_new(path: &Path, files: &dyn CreateFiles) -> std::io::Result<fs::File> {
+    retry_denied(files, || files.create_new(path))
+}
+
+/// Reading the holder's file at `path`, retried like [`create_new`] (issue 441): on Windows a
+/// file another command is replacing or deleting refuses to open with "Access is denied" too.
+fn read_to_string(path: &Path, files: &dyn CreateFiles) -> std::io::Result<String> {
+    retry_denied(files, || files.read_to_string(path))
+}
+
+/// `op`, tried again after a `PermissionDenied` up to [`DENIED_ATTEMPTS`] in all, with
+/// [`DENIED_PAUSE`] between two tries.
+fn retry_denied<T>(
+    files: &dyn CreateFiles,
+    op: impl Fn() -> std::io::Result<T>,
+) -> std::io::Result<T> {
     let mut attempt = 1;
     loop {
-        match files.create_new(path) {
+        match op() {
             Err(err) if err.kind() == ErrorKind::PermissionDenied && attempt < DENIED_ATTEMPTS => {
                 files.sleep(DENIED_PAUSE);
                 attempt += 1;
@@ -176,7 +198,7 @@ impl ProcessLock {
                     return Err(err).with_context(|| format!("cannot create {}", path.display()));
                 }
             }
-            let text = match fs::read_to_string(&path) {
+            let text = match read_to_string(&path, files) {
                 Ok(text) => text,
                 Err(err) if err.kind() == ErrorKind::NotFound => continue,
                 Err(err) => {
@@ -510,6 +532,10 @@ mod tests {
             RealFiles.create_new(path)
         }
 
+        fn read_to_string(&self, path: &Path) -> std::io::Result<String> {
+            RealFiles.read_to_string(path)
+        }
+
         fn sleep(&self, pause: Duration) {
             self.pauses.borrow_mut().push(pause);
         }
@@ -643,6 +669,154 @@ mod tests {
             format!("cannot create {}", dir.path().join(CLAIM).display())
         );
         assert_eq!(files.calls.get(), DENIED_ATTEMPTS);
+        assert_eq!(
+            fs::read_to_string(dir.path().join(FILE_NAME)).unwrap(),
+            stale
+        );
+    }
+
+    // Issue 441: the read of the holder's file, retried after `PermissionDenied` like the create.
+
+    /// Real files, except that the first `denials` reads of the lock file fail with `kind`, each
+    /// after running `on_deny` (what a racing command did meanwhile); pauses are recorded instead
+    /// of slept.
+    struct DenyingReads<'a> {
+        kind: ErrorKind,
+        denials: u32,
+        on_deny: &'a dyn Fn(),
+        reads: std::cell::Cell<u32>,
+        pauses: std::cell::RefCell<Vec<Duration>>,
+    }
+
+    impl<'a> DenyingReads<'a> {
+        fn new(kind: ErrorKind, denials: u32, on_deny: &'a dyn Fn()) -> Self {
+            Self {
+                kind,
+                denials,
+                on_deny,
+                reads: std::cell::Cell::new(0),
+                pauses: std::cell::RefCell::new(Vec::new()),
+            }
+        }
+    }
+
+    impl CreateFiles for DenyingReads<'_> {
+        fn create_new(&self, path: &Path) -> std::io::Result<fs::File> {
+            RealFiles.create_new(path)
+        }
+
+        fn read_to_string(&self, path: &Path) -> std::io::Result<String> {
+            let read = self.reads.get() + 1;
+            self.reads.set(read);
+            if read <= self.denials {
+                (self.on_deny)();
+                return Err(self.kind.into());
+            }
+            RealFiles.read_to_string(path)
+        }
+
+        fn sleep(&self, pause: Duration) {
+            self.pauses.borrow_mut().push(pause);
+        }
+    }
+
+    #[test]
+    fn a_read_denied_four_times_then_naming_a_live_holder_is_in_use() {
+        let dir = tempfile::tempdir().unwrap();
+        let other = 4_000_020;
+        let text = write_holder(dir.path(), other, 2000);
+        let files = DenyingReads::new(ErrorKind::PermissionDenied, DENIED_ATTEMPTS - 1, &|| {});
+        let err = ProcessLock::acquire_with(
+            dir.path(),
+            "task issue-1",
+            &Probe { other: Some(other) },
+            &files,
+        )
+        .unwrap_err();
+        assert!(err.is::<InUse>(), "{err:#}");
+        assert_eq!(files.reads.get(), DENIED_ATTEMPTS);
+        assert_eq!(
+            *files.pauses.borrow(),
+            vec![DENIED_PAUSE; DENIED_ATTEMPTS as usize - 1]
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join(FILE_NAME)).unwrap(),
+            text
+        );
+    }
+
+    #[test]
+    fn a_read_denied_four_times_then_naming_a_stale_holder_takes_it_over() {
+        let dir = tempfile::tempdir().unwrap();
+        write_holder(dir.path(), 4_000_021, 2000);
+        let files = DenyingReads::new(ErrorKind::PermissionDenied, DENIED_ATTEMPTS - 1, &|| {});
+        let _lock = ProcessLock::acquire_with(dir.path(), "task issue-1", &ME, &files).unwrap();
+        assert_eq!(holder_pid(dir.path()), std::process::id());
+        assert_eq!(files.reads.get(), DENIED_ATTEMPTS);
+        assert_eq!(
+            *files.pauses.borrow(),
+            vec![DENIED_PAUSE; DENIED_ATTEMPTS as usize - 1]
+        );
+        assert!(!dir.path().join(CLAIM).exists());
+    }
+
+    #[test]
+    fn a_read_denied_once_then_gone_takes_the_lock() {
+        let dir = tempfile::tempdir().unwrap();
+        write_holder(dir.path(), 4_000_022, 2000);
+        // The other command released the lock meanwhile.
+        let race = || fs::remove_file(dir.path().join(FILE_NAME)).unwrap();
+        let files = DenyingReads::new(ErrorKind::PermissionDenied, 1, &race);
+        let lock = ProcessLock::acquire_with(dir.path(), "task issue-1", &ME, &files).unwrap();
+        assert_eq!(holder_pid(dir.path()), std::process::id());
+        assert_eq!(files.reads.get(), 2);
+        assert_eq!(*files.pauses.borrow(), vec![DENIED_PAUSE]);
+        drop(lock);
+        assert!(!dir.path().join(FILE_NAME).exists());
+    }
+
+    #[test]
+    fn a_read_denied_on_every_attempt_reports_the_real_error_naming_the_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = write_holder(dir.path(), 4_000_023, 2000);
+        let files = DenyingReads::new(ErrorKind::PermissionDenied, u32::MAX, &|| {});
+        let err = ProcessLock::acquire_with(dir.path(), "task issue-1", &ME, &files).unwrap_err();
+        assert!(!err.is::<InUse>(), "{err:#}");
+        assert_eq!(
+            err.to_string(),
+            format!("cannot read {}", dir.path().join(FILE_NAME).display())
+        );
+        assert_eq!(
+            err.root_cause().to_string(),
+            std::io::Error::from(ErrorKind::PermissionDenied).to_string()
+        );
+        assert_eq!(files.reads.get(), DENIED_ATTEMPTS);
+        assert_eq!(
+            *files.pauses.borrow(),
+            vec![DENIED_PAUSE; DENIED_ATTEMPTS as usize - 1]
+        );
+        assert_eq!(
+            fs::read_to_string(dir.path().join(FILE_NAME)).unwrap(),
+            stale
+        );
+    }
+
+    #[test]
+    fn a_read_failing_otherwise_is_reported_at_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let stale = write_holder(dir.path(), 4_000_024, 2000);
+        let files = DenyingReads::new(ErrorKind::InvalidData, 1, &|| {});
+        let err = ProcessLock::acquire_with(dir.path(), "task issue-1", &ME, &files).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            format!("cannot read {}", dir.path().join(FILE_NAME).display())
+        );
+        assert_eq!(
+            err.root_cause().to_string(),
+            std::io::Error::from(ErrorKind::InvalidData).to_string()
+        );
+        assert_eq!(files.reads.get(), 1);
+        assert!(files.pauses.borrow().is_empty());
         assert_eq!(
             fs::read_to_string(dir.path().join(FILE_NAME)).unwrap(),
             stale
