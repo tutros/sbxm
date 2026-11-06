@@ -420,6 +420,10 @@ pub struct Record {
     pub kind: Kind,
     pub number: u32,
     pub repo: String,
+    /// The issue's or PR's title from GitHub, or a spec task's first heading (issue 246): shown
+    /// with the task wherever sbxm names it ([`crate::title`]). Empty in a record written without
+    /// one, which then shows the number alone.
+    #[serde(default)]
     pub title: String,
     pub base: String,
     pub branch: String,

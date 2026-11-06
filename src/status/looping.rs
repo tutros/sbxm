@@ -65,6 +65,8 @@ pub struct Work {
     pub current: Option<Current>,
     /// The tasks the loop finished since it started, by id.
     pub done: Vec<String>,
+    /// The title of the current task and of each one done, by id (issue 246).
+    pub titles: std::collections::BTreeMap<String, String>,
 }
 
 /// The loop's task and the tasks it finished, from the records under `base` (never `sbx`).
@@ -92,6 +94,7 @@ pub fn work(base: &Path, lock: &Process) -> anyhow::Result<Work> {
                 id: rec.id.clone(),
                 stage: rec.stage.name(),
             });
+            out.titles.insert(rec.id.clone(), rec.title.clone());
         }
     }
     let mut archived = archived(base);
@@ -113,6 +116,7 @@ pub fn work(base: &Path, lock: &Process) -> anyhow::Result<Work> {
         let since = matches!((finished_at, started), (Some(at), Some(from)) if at >= from);
         if since && marked {
             out.done.push(rec.id.clone());
+            out.titles.insert(rec.id.clone(), rec.title.clone());
         }
     }
     Ok(out)
@@ -160,6 +164,9 @@ pub struct QueueItem {
 pub struct Snapshot {
     pub queue: Result<Vec<QueueItem>, String>,
     pub awaiting: Result<Vec<u32>, String>,
+    /// The title of each PR in `awaiting` that a task record still names (issue 246), from
+    /// [`crate::title::pr_title`]; one whose record is gone has none.
+    pub pr_titles: std::collections::BTreeMap<u32, String>,
 }
 
 fn first_line(error: &anyhow::Error) -> String {
@@ -178,6 +185,7 @@ pub fn fetch(github: &dyn GitHubBackend, repo: &Result<String, String>, base: &P
             return Snapshot {
                 queue: Err(why.clone()),
                 awaiting: Err(why.clone()),
+                pr_titles: Default::default(),
             };
         }
     };
@@ -204,9 +212,15 @@ pub fn fetch(github: &dyn GitHubBackend, repo: &Result<String, String>, base: &P
         awaiting.dedup();
         Ok(awaiting)
     })();
+    let pr_titles = awaiting
+        .iter()
+        .flatten()
+        .filter_map(|&n| Some((n, crate::title::pr_title(base, repo, n)?)))
+        .collect();
     Snapshot {
         queue: queue.map_err(|e| first_line(&e)),
         awaiting: awaiting.map_err(|e| first_line(&e)),
+        pr_titles,
     }
 }
 
@@ -269,20 +283,29 @@ pub fn render(view: &View, width: Option<usize>) -> String {
         )),
     }
     if let Some(work) = &view.work {
+        let named =
+            |id: &str| crate::title::named(id, work.titles.get(id).map_or("", String::as_str));
         lines.push(match &work.current {
-            Some(c) => format!("  task: {} at {}", c.id, c.stage),
+            Some(c) => format!("  task: {} at {}", named(&c.id), c.stage),
             None => "  task: none running".to_owned(),
         });
         lines.push(if work.done.is_empty() {
             "  done: none yet".to_owned()
         } else {
-            format!("  done: {} ({})", work.done.len(), work.done.join(", "))
+            let done: Vec<String> = work.done.iter().map(|id| named(id)).collect();
+            format!("  done: {} ({})", work.done.len(), done.join(", "))
         });
     }
     if let Some(snapshot) = &view.snapshot {
         lines.push(match &snapshot.awaiting {
             Ok(prs) => {
-                let list: Vec<String> = prs.iter().map(|n| format!("#{n}")).collect();
+                let list: Vec<String> = prs
+                    .iter()
+                    .map(|n| {
+                        let title = snapshot.pr_titles.get(n).map_or("", String::as_str);
+                        crate::title::titled(&format!("#{n}"), title)
+                    })
+                    .collect();
                 if prs.is_empty() {
                     format!(
                         "  awaiting you: 0 of {} PRs",
@@ -311,7 +334,9 @@ pub fn render(view: &View, width: Option<usize>) -> String {
                 };
                 for item in &items[..shown] {
                     let size = item.size.map_or(String::new(), |s| format!(" (size {s})"));
-                    lines.push(format!("    #{} {}{size}", item.number, item.title));
+                    let item_titled =
+                        crate::title::titled(&format!("#{}", item.number), &item.title);
+                    lines.push(format!("    {item_titled}{size}"));
                 }
                 if shown < items.len() {
                     lines.push(format!("    … {} more", items.len() - shown));

@@ -619,10 +619,18 @@ fn start(
                     // 180) — but only for a gate that ran and failed; one that could not run at
                     // all would give the review nothing to react to (issue 186).
                     if !gate_could_not_run {
-                        writeln!(out, "  next: sbxm task review --issue {number}")?;
+                        writeln!(
+                            out,
+                            "  next: sbxm task review --issue {number}{}",
+                            crate::title::hint_comment_of(&base_dir, &id)
+                        )?;
                     }
                 } else {
-                    writeln!(out, "  next: sbxm task review --issue {number}")?;
+                    writeln!(
+                        out,
+                        "  next: sbxm task review --issue {number}{}",
+                        crate::title::hint_comment_of(&base_dir, &id)
+                    )?;
                 }
             }
             Err(e) => {
@@ -1066,7 +1074,12 @@ pub(crate) fn run_spec_from(
             } else {
                 writeln!(out, "  gates: passed")?;
             }
-            writeln!(out, "  next: sbxm task review {}", spec_flag(&opts.spec))?;
+            writeln!(
+                out,
+                "  next: sbxm task review {}{}",
+                spec_flag(&opts.spec),
+                crate::title::hint_comment(&prepared.record)
+            )?;
             Ok(())
         } else {
             let first = gated
@@ -1101,8 +1114,9 @@ pub(crate) fn run_spec_from(
                     writeln!(
                         out,
                         "  next: sbxm task review {} (it reruns the gates and gives a failure to a \
-                         fix round)",
-                        spec_flag(&opts.spec)
+                         fix round){}",
+                        spec_flag(&opts.spec),
+                        crate::title::hint_comment(&prepared.record)
                     )?;
                     // A gate that ran and failed goes on to the review, which reruns it and gives a
                     // failure to a fix round (decision 180): `task run --spec` catches this typed

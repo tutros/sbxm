@@ -395,7 +395,7 @@ fn disarms(gh: &FakeGitHub) -> Vec<u32> {
 /// The lines saying PR 101 awaits the user.
 fn awaits(out: &str) -> Vec<&str> {
     out.lines()
-        .filter(|l| l.contains("PR #101 awaits you"))
+        .filter(|l| l.contains("PR #101 (Fix 1) awaits you"))
         .collect()
 }
 
@@ -413,7 +413,8 @@ fn a_second_failure_with_no_log_fix_yet_runs_one_and_a_clean_one_is_armed_again(
     assert_eq!(disarms(&gh), [101], "{}", ran.out);
     assert_eq!(arms(&gh), [(101, PUSHED.to_owned())], "{}", ran.out);
     assert!(
-        ran.out.contains("--check-run 7`") && ran.out.contains("PR #101: fixed from its log"),
+        ran.out.contains("--check-run 7`")
+            && ran.out.contains("PR #101 (Fix 1): fixed from its log"),
         "{}",
         ran.out
     );
@@ -513,7 +514,7 @@ fn a_log_fix_while_paused_runs_and_is_not_armed_again() {
     assert!(
         ran.out
             .lines()
-            .any(|l| l.contains("PR #101 awaits you") && l.contains("paused")),
+            .any(|l| l.contains("PR #101 (Fix 1) awaits you") && l.contains("paused")),
         "{}",
         ran.out
     );

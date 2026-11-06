@@ -1011,10 +1011,12 @@ pub fn prepare_spec_resolved(
     title: &str,
     location: Location,
 ) -> Result<Prepared> {
+    // The spec's first heading, else its file name (issue 246): the title its PR gets too.
+    let title = super::fixes::title(text, title);
     let source = Source::Spec {
         path: source_path,
         text,
-        title,
+        title: &title,
     };
     prepare_source(ctx, id, source, location)
 }
@@ -3593,12 +3595,15 @@ pub fn review_pr(
         ..PrReview::default()
     };
     let mut context = None;
+    let mut title = None;
     if prepared.record.stage == Stage::Ready || restart {
         // The PR may have been closed, or its description and issues changed, since the last
         // round: checked and rebuilt like a new task's, but written only after every refusal.
         let pr = github.pr(&prepared.record.repo, number)?;
         check_pr_reviewable(&pr, &prepared.record.repo)?;
         context = Some(pr_context(github, &prepared.record.repo, &pr)?);
+        // A renamed PR's title is taken from this read too (issue 246); no read of its own.
+        title = Some(pr.title.clone()).filter(|t| !t.trim().is_empty());
         if restart && !repo_git.exists() {
             let source = env
                 .clone_source
@@ -3632,6 +3637,9 @@ pub fn review_pr(
     let round = next_review_round(prepared)?;
     if let Some(context) = context {
         fs::write(prepared.meta.join("issue.md"), context)?;
+    }
+    if let Some(title) = title {
+        prepared.record.title = title;
     }
     let reviewer = &env.config.reviewer;
     let gates = &env.config.gates;

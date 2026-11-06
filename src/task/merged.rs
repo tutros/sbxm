@@ -74,6 +74,8 @@ pub struct MergedPlan {
     /// `--forget-ambiguous` (decision 268): each candidate's plan drops an ambiguous cloud create
     /// from its record instead of leaving the task alone for it.
     forget_ambiguous: bool,
+    /// Each scanned task's title, by id (issue 246), as its record stored it.
+    titles: std::collections::BTreeMap<String, String>,
 }
 
 impl MergedPlan {
@@ -82,7 +84,7 @@ impl MergedPlan {
     pub fn listing(&self) -> String {
         let mut lines = Vec::new();
         for c in &self.candidates {
-            lines.push(format!("task {}: {}", c.id, c.reason));
+            lines.push(format!("{}: {}", self.task_named(&c.id), c.reason));
             for line in c.plan.listing().lines() {
                 lines.push(format!("  {line}"));
             }
@@ -93,9 +95,21 @@ impl MergedPlan {
             }
         }
         for l in &self.left_alone {
-            lines.push(format!("left alone, task {}: {}", l.id, l.reason));
+            lines.push(format!(
+                "left alone, {}: {}",
+                self.task_named(&l.id),
+                l.reason
+            ));
         }
         lines.join("\n")
+    }
+
+    /// `task issue-41 (Add titles)`: the task with its title, or its id alone without one.
+    fn task_named(&self, id: &str) -> String {
+        crate::title::named(
+            &format!("task {id}"),
+            self.titles.get(id).map_or("", String::as_str),
+        )
     }
 
     pub fn is_empty(&self) -> bool {
@@ -440,6 +454,7 @@ pub fn plan_forgetting(
         ..MergedPlan::default()
     };
     for task in load_own(base_dir, &mut out)? {
+        out.titles.insert(task.id.clone(), task.title.clone());
         // Nothing below runs through a task folder that is a link, or sits under one: not the
         // spec check's fetch into its `repo.git`, not the archive (README's removal contract).
         // `load_own` checked the folder it read; this checks the one the record names.

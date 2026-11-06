@@ -50,9 +50,13 @@ pub enum Owner {
 }
 
 impl Owner {
-    fn cell(&self) -> String {
+    /// The owner as its cell shows it: a task with its title (issue 246), from `claims`.
+    fn cell(&self, claims: &Claims) -> String {
         match self {
-            Owner::Task(id) => format!("task {id}"),
+            Owner::Task(id) => crate::title::named(
+                &format!("task {id}"),
+                claims.titles.get(id).map_or("", String::as_str),
+            ),
             Owner::Run(id) => format!("run {id}"),
             Owner::Project(name) => format!("project {name}"),
             Owner::Orphan => "orphan".to_owned(),
@@ -65,6 +69,8 @@ impl Owner {
 pub struct Claims {
     /// The task ids with a `task.json`.
     tasks: Vec<String>,
+    /// Each task's title, by id, from its `task.json` (issue 246); none for one unreadable.
+    titles: std::collections::BTreeMap<String, String>,
     /// The run ids with a folder under `runs/`.
     runs: Vec<String>,
     /// `(sandbox, project)` from each project's `state.json`.
@@ -74,11 +80,18 @@ pub struct Claims {
 /// The claims of `base`'s state files. A file or folder that can't be read claims nothing.
 pub fn claims(base: &Path) -> Claims {
     let root = base.join(".sbxm");
-    let tasks = record::task_folders(base)
+    let tasks: Vec<String> = record::task_folders(base)
         .unwrap_or_default()
         .into_iter()
         .filter(|dir| dir.join("task.json").is_file())
         .filter_map(|dir| Some(dir.file_name()?.to_str()?.to_owned()))
+        .collect();
+    let titles = tasks
+        .iter()
+        .filter_map(|id| {
+            let rec = record::read(&record::task_dir(base, id).join("task.json")).ok()?;
+            Some((id.clone(), rec.title))
+        })
         .collect();
     let runs = folder_names(&root.join("runs"));
     let projects = folder_names(&root)
@@ -97,6 +110,7 @@ pub fn claims(base: &Path) -> Claims {
         .collect();
     Claims {
         tasks,
+        titles,
         runs,
         projects,
     }
@@ -172,7 +186,7 @@ pub fn render(local: &Local, claims: &Claims, now: u64, width: Option<usize>) ->
                 .map(|s| {
                     [
                         s.name.clone(),
-                        owner(claims, &s.name).cell(),
+                        owner(claims, &s.name).cell(claims),
                         s.status.clone(),
                         age(s, now).map_or_else(|| DASH.to_owned(), format_duration),
                     ]

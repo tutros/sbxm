@@ -189,11 +189,11 @@ fn no_lock_file_is_a_loop_not_running_and_the_queue_and_awaiting_prs_still_show(
 
     assert!(text.contains("\nLoop: not running\n"), "{text}");
     assert!(
-        text.contains("  awaiting you: 1 of 5 PRs (#102)\n"),
+        text.contains("  awaiting you: 1 of 5 PRs (#102: title 2)\n"),
         "{text}"
     );
     assert!(
-        text.contains("  queue: 1 issue\n    #4 Four (size S)\n"),
+        text.contains("  queue: 1 issue\n    #4: Four (size S)\n"),
         "{text}"
     );
     assert!(!text.contains("  task:"), "{text}");
@@ -215,7 +215,7 @@ fn a_lock_whose_process_is_gone_is_not_running_names_the_stale_lock_and_shows_th
         );
         assert!(text.contains(&format_timestamp(LOOP_START)), "{text}");
         assert!(
-            text.contains("  queue: 1 issue\n    #4 Four (size S)\n"),
+            text.contains("  queue: 1 issue\n    #4: Four (size S)\n"),
             "{text}"
         );
         assert!(!text.contains("  task:"), "{text}");
@@ -285,8 +285,9 @@ fn a_running_loop_shows_its_task_its_stage_the_tasks_done_and_the_prs_awaiting()
     assert_eq!(
         format!("Loop:{section}"),
         format!(
-            "Loop: running (process 1, started {})\n  task: issue-7 at reviewing\n  done: 2 \
-             (issue-2, issue-3)\n  awaiting you: 1 of 5 PRs (#102)\n  queue: empty\n",
+            "Loop: running (process 1, started {})\n  task: issue-7 (title 7) at reviewing\n  done: 2 \
+             (issue-2 (title 2), issue-3 (title 3))\n  awaiting you: 1 of 5 PRs (#102: title 2)\n  \
+             queue: empty\n",
             format_timestamp(LOOP_START)
         )
     );
@@ -318,7 +319,7 @@ fn an_unmarked_running_task_with_the_locks_process_is_the_loops_during_work_and_
         let text = frame(&b, &alive(), &gh, false, 80);
 
         assert!(
-            text.contains(&format!("  task: issue-8 at {}\n", stage.name())),
+            text.contains(&format!("  task: issue-8 (title 8) at {}\n", stage.name())),
             "{text}"
         );
     }
@@ -496,7 +497,7 @@ fn the_queue_lists_the_labeled_issues_in_the_order_the_loop_takes_them() {
     let text = frame(&base.base_dir(), &alive(), &gh, false, 80);
 
     assert!(
-        text.contains("  queue: 2 issues\n    #4 Four (size S)\n    #9 Nine (size M)\n"),
+        text.contains("  queue: 2 issues\n    #4: Four (size S)\n    #9: Nine (size M)\n"),
         "{text}"
     );
 }
@@ -533,15 +534,15 @@ fn more_issues_than_fit_show_the_first_lines_and_how_many_more() {
         "{text}"
     );
     assert!(
-        text.contains("    #1 Issue number 1 with a title (size S)\n"),
+        text.contains("    #1: Issue number 1 with a title (size S)\n"),
         "{text}"
     );
     assert!(
-        text.contains(&format!("    #{} Issue", looping::MAX_QUEUE_LINES)),
+        text.contains(&format!("    #{}: Issue", looping::MAX_QUEUE_LINES)),
         "{text}"
     );
     assert!(
-        !text.contains(&format!("    #{} Issue", looping::MAX_QUEUE_LINES + 1)),
+        !text.contains(&format!("    #{}: Issue", looping::MAX_QUEUE_LINES + 1)),
         "{text}"
     );
     assert!(text.contains("    … 3 more\n"), "{text}");
@@ -561,7 +562,7 @@ fn on_a_terminal_a_long_line_ends_in_an_ellipsis_and_fits() {
 
     let line = text
         .lines()
-        .find(|l| l.contains("#1 "))
+        .find(|l| l.contains("#1: "))
         .expect("the issue line");
     assert_eq!(line.chars().count(), 20, "{line}");
     assert!(line.ends_with('…'), "{line}");
@@ -580,11 +581,11 @@ fn on_a_non_terminal_nothing_is_cut() {
     let text = frame(&base.base_dir(), &alive(), &gh, false, 20);
 
     assert!(
-        text.contains(&format!("    #1 {title} (size S)\n")),
+        text.contains(&format!("    #1: {title} (size S)\n")),
         "{text}"
     );
     assert!(
-        text.contains(&format!("    #{count} x (size S)\n")),
+        text.contains(&format!("    #{count}: x (size S)\n")),
         "{text}"
     );
     assert!(!text.contains("more\n"), "{text}");
@@ -607,7 +608,10 @@ fn a_github_failure_shows_the_queue_unreadable_and_the_rest_of_status_still_show
     );
     assert!(!text.contains("second line"), "{text}");
     assert!(text.contains("issue-7"), "the Tasks table: {text}");
-    assert!(text.contains("  task: issue-7 at working\n"), "{text}");
+    assert!(
+        text.contains("  task: issue-7 (title 7) at working\n"),
+        "{text}"
+    );
 }
 
 #[test]
@@ -699,6 +703,7 @@ fn the_cache_reuses_a_snapshot_under_a_minute_old_and_refetches_at_a_minute() {
         Snapshot {
             queue: Ok(Vec::<QueueItem>::new()),
             awaiting: Ok(Vec::new()),
+            pr_titles: Default::default(),
         }
     };
 
@@ -783,6 +788,7 @@ fn render_is_pure_over_its_view() {
                 size: None,
             }]),
             awaiting: Ok(vec![1, 2]),
+            pr_titles: Default::default(),
         }),
         pause: sbxm::task::loop_pause::State::None,
     };
@@ -793,5 +799,5 @@ fn render_is_pure_over_its_view() {
         text.contains("  awaiting you: 2 of 5 PRs (#1, #2)\n"),
         "{text}"
     );
-    assert!(text.contains("  queue: 1 issue\n    #4 Four\n"), "{text}");
+    assert!(text.contains("  queue: 1 issue\n    #4: Four\n"), "{text}");
 }

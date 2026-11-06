@@ -17,3 +17,4 @@ pub mod state;
 pub mod status;
 pub mod task;
 pub mod template;
+pub mod title;

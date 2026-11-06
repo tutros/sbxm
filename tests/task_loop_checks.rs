@@ -423,7 +423,11 @@ fn a_second_failure_on_an_unarmed_loop_pr_is_said_without_a_disarm() {
 
     ran.result.unwrap();
     assert!(disarms(&gh).is_empty());
-    assert!(ran.out.contains("PR #101 awaits you"), "{}", ran.out);
+    assert!(
+        ran.out.contains("PR #101 (Fix 1) awaits you"),
+        "{}",
+        ran.out
+    );
 }
 
 #[test]

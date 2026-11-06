@@ -66,7 +66,7 @@ fn it_prints_the_existing_run_log_with_utf8_bytes_intact() {
     result.unwrap();
     assert_eq!(
         out,
-        "# header\n2026-10-13T00:00:00Z [working] café \u{1F600}\n"
+        "# task issue-41: title\n# header\n2026-10-13T00:00:00Z [working] café \u{1F600}\n"
     );
 }
 
@@ -80,7 +80,7 @@ fn a_pr_task_s_log_is_read_the_same_way() {
     let (result, out) = run_logs(&env, Target::Pr(7), false, &task_logs::Env::real());
 
     result.unwrap();
-    assert_eq!(out, "# header\nline\n");
+    assert_eq!(out, "# task pr-7: title\n# header\nline\n");
 }
 
 #[test]
@@ -101,7 +101,7 @@ fn a_spec_task_s_log_is_read_the_same_way() {
     let (result, out) = run_logs(&env, Target::Spec(spec), false, &task_logs::Env::real());
 
     result.unwrap();
-    assert_eq!(out, "# header\nspec line\n");
+    assert_eq!(out, format!("# task {id}: title\n# header\nspec line\n"));
 }
 
 #[test]
@@ -145,7 +145,7 @@ fn without_follow_it_does_not_wait_for_new_lines() {
     let (result, out) = run_logs(&env, Target::Issue(41), false, &follow_env);
 
     result.unwrap();
-    assert_eq!(out, "one\n");
+    assert_eq!(out, "# task issue-41: title\none\n");
     assert!(!slept.get());
 }
 
@@ -175,7 +175,7 @@ fn follow_prints_lines_appended_after_it_starts_until_the_test_stops_it() {
     let (result, out) = run_logs(&env, Target::Issue(41), true, &follow_env);
 
     result.unwrap();
-    assert_eq!(out, "one\ntwo\n");
+    assert_eq!(out, "# task issue-41: title\none\ntwo\n");
 }
 
 #[test]
@@ -207,7 +207,10 @@ fn the_cli_command_never_writes_to_the_run_log_it_prints() {
         .unwrap();
 
     assert!(output.status.success());
-    assert_eq!(output.stdout, before);
+    assert_eq!(
+        output.stdout,
+        [b"# task issue-41: title\n".as_slice(), &before].concat()
+    );
     assert_eq!(fs::read(&log).unwrap(), before);
 }
 
@@ -352,6 +355,6 @@ fn logs_are_not_blocked_by_a_held_lock_and_take_none() {
     let (result, out) = run_logs(&env, Target::Issue(41), false, &task_logs::Env::real());
 
     result.unwrap();
-    assert_eq!(out, "# header\nline\n");
+    assert_eq!(out, "# task issue-41: title\n# header\nline\n");
     assert_eq!(fs::read(meta.join("lock.json")).unwrap(), lock);
 }

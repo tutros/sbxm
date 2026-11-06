@@ -162,21 +162,26 @@ fn publish(
         writeln!(
             out,
             "  next: review PR #{pr} again with: {}; after the merge, clean up with: sbxm task rm \
-             --issue {}",
-            done.review_again, number
+             --issue {}{}",
+            done.review_again,
+            number,
+            crate::title::hint_comment_of(&base_dir, &id)
         )?;
         return Ok(());
     }
-    print_opened(out, &id, &done, &format!("--issue {number}"))
+    let comment = crate::title::hint_comment_of(&base_dir, &id);
+    print_opened(out, &id, &done, &format!("--issue {number}"), &comment)
 }
 
 /// What a `finish` that opened (or adopted) a PR did, for an issue task or a spec task under the
 /// `pr` sink; `cleanup` is the `task rm` flag that removes the task once the PR is merged.
+/// `comment` ends the `next:` hint ([`crate::title::hint_comment`]).
 fn print_opened(
     out: &mut dyn Write,
     id: &str,
     done: &finish::Finished,
     cleanup: &str,
+    comment: &str,
 ) -> Result<()> {
     let branch = &done.branch;
     if done.draft {
@@ -217,7 +222,7 @@ fn print_opened(
     }
     writeln!(
         out,
-        "  next: after it is merged, clean up with: sbxm task rm {cleanup}"
+        "  next: after it is merged, clean up with: sbxm task rm {cleanup}{comment}"
     )?;
     Ok(())
 }
@@ -242,7 +247,8 @@ fn finish_spec(
         for cut in &done.cuts {
             writeln!(out, "  note: {cut}")?;
         }
-        return print_opened(out, id, &done, &flag);
+        let comment = crate::title::hint_comment_of(base_dir, id);
+        return print_opened(out, id, &done, &flag, &comment);
     }
     if sink == Sink::Push {
         let pushed = finish::finish_push(base_dir, id, opts.push_unresolved, probe)?;
@@ -250,8 +256,9 @@ fn finish_spec(
         writeln!(out, "{id}: pushed {branch} to origin; no PR was opened")?;
         writeln!(
             out,
-            "  next: fetch it with: git fetch origin {branch}; then clean up with: sbxm task rm {}",
-            spec_flag(spec)
+            "  next: fetch it with: git fetch origin {branch}; then clean up with: sbxm task rm {}{}",
+            spec_flag(spec),
+            crate::title::hint_comment_of(base_dir, id)
         )?;
         return Ok(());
     }
@@ -264,8 +271,9 @@ fn finish_spec(
     )?;
     writeln!(
         out,
-        "  next: fetch it into your checkout with: git fetch {} {branch}:{branch}",
-        path_arg(&kept.repo_git)
+        "  next: fetch it into your checkout with: git fetch {} {branch}:{branch}{}",
+        path_arg(&kept.repo_git),
+        crate::title::hint_comment_of(base_dir, id)
     )?;
     Ok(())
 }
