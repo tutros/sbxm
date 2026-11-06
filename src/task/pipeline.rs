@@ -669,23 +669,39 @@ pub fn says_harness_signed_out(why: &str) -> bool {
 }
 
 /// The sign-in failure of `who`'s `harness` with its fix (issue 445): sign in again, or rebuild
-/// an aged template (README, Troubleshooting); the task stays resumable as `flag` names it.
+/// an aged template (README, Troubleshooting); the task stays resumable, as [`goes_on`] names it.
 pub fn harness_sign_in_lapsed(
     who: &str,
     harness: Harness,
     profile: &str,
-    flag: &str,
+    record: &Record,
     why: &str,
 ) -> String {
     format!(
         "{who}'s {} sign-in has lapsed ({why}); sign in again (`sbx setup`, or `sbx secret set \
-         {}`) and continue with `sbxm task resume {flag}`; if a plain sandbox signs in and this \
-         task's doesn't, rebuild profile '{profile}''s template (`sbxm template build {profile} \
-         --harness {}`) and start the task again",
+         {}`) and {}; if a plain sandbox signs in and this task's doesn't, rebuild profile \
+         '{profile}''s template (`sbxm template build {profile} --harness {}`) and start the task \
+         again",
         harness.as_str(),
         harness.provider_secret(),
+        goes_on(record),
         harness.as_str()
     )
+}
+
+/// How a stopped task goes on, by its kind (issue 445 review M-1): `task resume` continues an
+/// issue or spec task; a PR task has no resume and goes on with `task review --pr N` (decision
+/// 282(a)); no command names a fix task yet (issue 313), so its status is what to look at.
+fn goes_on(record: &Record) -> String {
+    match record.kind {
+        Kind::Issue => format!("continue with `sbxm task resume --issue {}`", record.number),
+        Kind::Spec => "continue with `sbxm task resume --spec <file>`".to_owned(),
+        Kind::Pr => format!("continue with `sbxm task review --pr {}`", record.number),
+        Kind::Fix => format!(
+            "see `sbxm task status` for fix task {} (no command continues one yet)",
+            record.id
+        ),
+    }
 }
 
 /// Issue 445: a worker, fix round or reviewer run failed with a harness's lapsed sign-in. The
@@ -3077,7 +3093,7 @@ pub(super) fn work(env: &TaskEnv, prepared: &mut Prepared) -> Result<Worked> {
             "the worker",
             worker.harness,
             &recorded_profile(env, &prepared.record),
-            &task_flag(&prepared.record),
+            &prepared.record,
             why,
         ));
     }
@@ -4310,7 +4326,7 @@ fn fix(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
                 "the fix round",
                 env.config.worker.harness,
                 &recorded_profile(env, &prepared.record),
-                &task_flag(&prepared.record),
+                &prepared.record,
                 why,
             ))
             .into());
@@ -5193,7 +5209,7 @@ fn run_review_agent(
                 "the reviewer",
                 reviewer.harness,
                 &env.config.sandbox.profile,
-                &task_flag(&prepared.record),
+                &prepared.record,
                 why,
             ))
             .into());
