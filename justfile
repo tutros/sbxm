@@ -64,6 +64,16 @@ demo project="just-demo":
     {{sbxm}} new {{project}} --harness pi
     {{sbxm}} list
 
+# ---- Running tasks -----------------------------------------------------------
+
+# Long task runs use a recorded build of sbxm, not `cargo run` (docs/workflow.md): set SBXM_TASK_BIN
+# to it (an .exe or a wrapper script); without it, the `sbxm` on PATH runs.
+task_sbxm := env_var_or_default("SBXM_TASK_BIN", "sbxm")
+
+# Run `sbxm task loop` over the ready-for-worker issues, from this checkout; extra flags pass through.
+task-loop *flags:
+    & '{{task_sbxm}}' task loop {{flags}}
+
 # ---- Developing sbxm --------------------------------------------------------
 
 # Build the debug binary.
