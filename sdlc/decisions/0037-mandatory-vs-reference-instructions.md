@@ -1,0 +1,1 @@
+37. **Mandatory vs. reference instructions:** Each per-harness mixin (`requires.agent`) writes mandatory rules to that harness's always-loaded user-level instructions file (e.g. `~/.claude/CLAUDE.md` via `files/home/`). The kit `agentInstructions` field is only for optional reference material, because `sbx` surfaces it on demand. Paths for Codex, Gemini CLI and Pi are unverified.

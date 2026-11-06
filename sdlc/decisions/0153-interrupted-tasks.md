@@ -1,0 +1,1 @@
+153. **Interrupted tasks (confirmed by the user 2026-10-01):** every stage change is written to `task.json` before the work starts. `task start` on a task already in progress refuses with a hint. `task status` shows a task as "interrupted" when its recorded process is gone. `task start --restart` discards the work and starts over. No automatic resume in M2b.

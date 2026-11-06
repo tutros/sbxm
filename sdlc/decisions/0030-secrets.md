@@ -1,0 +1,1 @@
+30. **Secrets:** Config names secrets and never contains values. Verify each named secret exists before launch. Secret values are never written to results. Scan transcripts and diffs for secret values if `sbx` exposes them; otherwise rely on `sbx` redaction.

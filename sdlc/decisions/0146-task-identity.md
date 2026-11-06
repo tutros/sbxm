@@ -1,0 +1,1 @@
+146. **Task identity (confirmed by the user 2026-10-01):** the id is `issue-<n>`, or `pr-<n>` for a PR review; in M2b a task is one GitHub issue or PR. A task without an issue is later work. `task.json` carries a `stage` field and a free-form `hooks` section as the places later lifecycle stages attach [139].

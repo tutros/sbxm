@@ -1,0 +1,1 @@
+110. **One `sdlc/milestone-2.md` (confirmed by the user 2026-09-29):** covers both M2a and M2b, following `sdlc/milestone-1.md`'s precedent. M2a gets full vertical-slice detail; M2b gets goal, plan-level choices and a rough slice outline, to be refined into full detail once M2a's shared headless-execution primitive [94] exists to build on.

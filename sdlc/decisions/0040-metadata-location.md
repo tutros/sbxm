@@ -1,0 +1,1 @@
+40. **Metadata location (P1, changes paths in 5, 24, 27):** The workspace is `<base>/<project>`. All sbxm metadata lives in `<base>/.sbxm/<project>/` (`sandbox.toml`, `state.json`, generated kits, and in M2 `runs/`), which is never mounted into a sandbox, so agents can't read or edit their own config.

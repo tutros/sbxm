@@ -1,0 +1,1 @@
+50. **`open` on a sandbox without sbxm state (slice 9):** Refuse, with a message naming the sandbox and how to remove it (`sbx rm <sandbox>`, which deletes its session history) before running `sbxm open` again. sbxm doesn't attach to a sandbox it has no record of creating, since it may lack sbxm's config. Confirmed by the user 2026-09-24.

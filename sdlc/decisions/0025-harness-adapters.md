@@ -1,0 +1,1 @@
+25. **Harness adapters:** We define an adapter per harness (headless command, transcript parsing, native config file names), whether or not `sbx` supports the harness natively. Pi runs through the official Pi kit for `sbx`.

@@ -1,0 +1,1 @@
+12. **Caps/auth:** Caps are best effort (harness flags where available); the timeout is the only guaranteed limit. Standalone sandboxes can use existing subscriptions. Comparisons may later require API keys plus budgets (undecided).

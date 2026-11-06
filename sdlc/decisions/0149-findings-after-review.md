@@ -1,0 +1,1 @@
+149. **Findings after review (confirmed by the user 2026-10-01):** parity with [84][134]: must-fix findings trigger exactly one fix round and a re-review; everything else stays in `review.md`. Filing findings as issues is `sbxm task file-findings`, a dry run by default and `--create` to publish; nothing is filed automatically in M2b.

@@ -1,0 +1,1 @@
+36. **sbxm's role:** `sbx` enforces egress, secrets and isolation. sbxm compiles its TOML config into v2 kits, calls `sbx create --kit …`, and keeps host-side state (projects, runs, config hashes) plus evals. sbxm does no enforcement of its own.

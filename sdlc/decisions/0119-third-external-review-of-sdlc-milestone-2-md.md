@@ -1,0 +1,6 @@
+119. **Third external review of `sdlc/milestone-2.md` (Codex gpt-5.6-sol on PR #29, 2026-09-29): four must-fix findings applied, three await the user.** Applied:
+    - **Timed-out runs couldn't be represented:** `HeadlessResult` gains `status: RunStatus { Completed, TimedOut, Failed }`; exit 124/137 returns `Ok(TimedOut)` with best-effort partial answer/usage rather than an error, so [16] holds; persisted in a per-pair `result.json`; slices 1–3, 10 and 11 gain exit-124 tests.
+    - **No slice generated and validated run kits [95]:** new `run::kits` module and slice 5a (kits under `.sbxm/runs/<run-id>/kits/`, effective hash including resource overrides, validation before any create, kit refs into `run.json`).
+    - **The judge's secret wasn't preflighted:** the preflight and slice 4 cover `[eval.judge]`'s provider as well as contestants'.
+    - **Repeat wording:** `repeat` is run-level, so the end-to-end check now repeats every contestant.
+    Still open, needing the user: code-side ranking/aggregation semantics [19] (incl. repeat pairing for judge/cosine), the exact immutable Antigravity kit tag [104] (needs a live check), and how host-side Jev authenticates given `sbx` never reveals secret values.

@@ -1,0 +1,1 @@
+27. **Config format:** TOML with three layers: global (`~/.config/sbxm/config.toml`) → named profile (`default`, plus others such as `strict`) → project (`<base>/<project>/sandbox.toml`). Comparison config variants reference profiles.

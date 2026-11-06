@@ -1,0 +1,1 @@
+105. **No cost estimation for token-only harnesses (confirmed by the user 2026-09-29):** Codex and Antigravity report token usage but no dollar cost (unlike Claude's `total_cost_usd` [S5]); results show token usage always, and a dollar cost only when the harness reports one natively. sbxm maintains no per-model price table.

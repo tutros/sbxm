@@ -23,7 +23,10 @@ fn agents_md_does_not_call_slice_13_pending() {
 fn the_prd_is_not_a_draft_and_the_experiment_has_a_report_and_a_decision() {
     assert!(!read("sdlc/prd-m2b.md").contains("Status: draft"));
     assert!(read("sdlc/m2b-experiment-report.md").contains("Options for the user"));
-    assert!(read("sdlc/decisions.md").contains("164. **M2b PRD/spec experiment assessed"));
+    assert!(
+        read("sdlc/decisions/0164-m2b-prd-spec-experiment-assessed-the-user-s.md")
+            .starts_with("164. **M2b PRD/spec experiment assessed")
+    );
 }
 
 #[test]
@@ -41,12 +44,12 @@ fn the_spec_does_not_send_readers_to_the_deleted_pester_tests() {
     assert!(details.contains("tests/fixtures/review-findings"));
 }
 
+// One file per decision (decision 303).
+const DECISION_165: &str = "sdlc/decisions/0165-the-two-task-scripts-are-deleted.md";
+
 #[test]
 fn decision_165_says_it_allows_factual_skill_updates_but_not_the_methodology() {
-    let decisions = read("sdlc/decisions.md");
-    let at = decisions.find("165. **").expect("decision 165 exists");
-
-    let text = &decisions[at..];
+    let text = read(DECISION_165);
 
     assert!(text.contains("factual command and path updates"));
     assert!(text.contains("methodology stays frozen"));

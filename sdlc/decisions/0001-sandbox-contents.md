@@ -1,0 +1,1 @@
+1. **Sandbox contents:** Each sandbox runs a full agent harness (as Docker Sandboxes does today), with no loss of functionality. Comparisons can vary both harness and model, e.g. two models on the same harness plus a third model on a different harness.

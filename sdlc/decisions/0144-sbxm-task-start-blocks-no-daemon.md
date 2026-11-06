@@ -1,0 +1,1 @@
+144. **`sbxm task start` blocks; no daemon (confirmed by the user 2026-10-01):** like `sbxm run`, the command stays until its agents finish, and several tasks run in parallel threads in one process (`--workers N`); `status` reads the task records from another terminal. `--detach` is a later addition if wanted. This fits the `headless` primitive, which blocks until the agent ends.

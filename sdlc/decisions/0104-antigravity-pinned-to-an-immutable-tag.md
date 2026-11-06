@@ -1,0 +1,1 @@
+104. **Antigravity pinned to an immutable tag (confirmed by the user 2026-09-29):** follows decision 73's pattern for Pi — the exact tag (and how it's discovered/verified) is a milestone-plan detail, not `latest`, so a run's config hash [55] means the same kit forever.

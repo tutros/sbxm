@@ -1,0 +1,1 @@
+148. **The reviewer defaults to a different harness than the worker (confirmed by the user 2026-10-01):** keeps [85]'s reason (no shared blind spots) now that the worker's harness is configurable. Choosing the same harness for both explicitly is allowed with a warning.

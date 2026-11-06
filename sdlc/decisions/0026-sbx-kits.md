@@ -1,0 +1,1 @@
+26. **sbx kits:** Unknown whether a kit can carry instructions, hooks, egress rules and secret references. Part of the milestone 1 spike. If it can, compile the common config into a kit instead of applying it at launch.
