@@ -83,9 +83,28 @@ function Invoke-Tool([string]$name, [scriptblock]$command, [string[]]$arguments,
 
 function Invoke-Gh([string[]]$arguments) { (Invoke-Tool 'gh' $Gh $arguments).Out }
 
+# The config folder every sbxm call gets as SBXM_CONFIG_DIR: -ConfigDir, else SBXM_CONFIG_DIR, else ~/.config/sbxm.
+$SelectedConfigDir = if ($ConfigDir) { $ConfigDir } elseif ($env:SBXM_CONFIG_DIR) { $env:SBXM_CONFIG_DIR } else { Join-Path $HOME '.config/sbxm' }
+
+# Every sbxm call goes through here, so the config check, `task start` and `task rm` all read the config whose
+# base_dir the script uses; the caller's SBXM_CONFIG_DIR is put back afterwards, also on failure.
+function Invoke-Sbxm([string[]]$arguments) {
+    $saved = $env:SBXM_CONFIG_DIR
+    try {
+        $env:SBXM_CONFIG_DIR = $SelectedConfigDir
+        Invoke-Tool 'sbxm' $Sbxm $arguments -AllowFailure
+    }
+    finally { $env:SBXM_CONFIG_DIR = $saved }
+}
+
+# How to run an sbxm command by hand against the same config, for the hints in the summary.
+function Format-SbxmHint([string]$command) {
+    if ($ConfigDir) { "`$env:SBXM_CONFIG_DIR = '$($SelectedConfigDir.Replace("'", "''"))'; $command" } else { $command }
+}
+
 function Invoke-GhJson([string[]]$arguments) {
     $text = Invoke-Gh $arguments
-    if (-not $text.Trim()) { return @() }
+    if (-not $text.Trim()) { return }
     @($text | ConvertFrom-Json)
 }
 
@@ -136,13 +155,8 @@ function ConvertFrom-Size([string]$text) {
 # base_dir, min_free_disk and the sandbox state folder. sbxm reads config.toml first (`config profiles-dir`
 # loads it), so an invalid one stops the run with sbxm's own message.
 function Read-SbxmConfig {
-    $dir = if ($ConfigDir) { $ConfigDir } elseif ($env:SBXM_CONFIG_DIR) { $env:SBXM_CONFIG_DIR } else { Join-Path $HOME '.config/sbxm' }
-    $saved = $env:SBXM_CONFIG_DIR
-    try {
-        $env:SBXM_CONFIG_DIR = $dir
-        $check = Invoke-Tool 'sbxm' $Sbxm @('config', 'profiles-dir') -AllowFailure
-    }
-    finally { $env:SBXM_CONFIG_DIR = $saved }
+    $dir = $SelectedConfigDir
+    $check = Invoke-Sbxm @('config', 'profiles-dir')
     if ($check.Code -ne 0) { throw "sbxm can't read its config (exit code $($check.Code)): $($check.Err) $($check.Out)" }
     $keys = Read-TopLevelStrings (Join-Path $dir 'config.toml')
     if (-not $keys['base_dir']) { throw "no base_dir in $(Join-Path $dir 'config.toml')" }
@@ -286,7 +300,8 @@ function Find-Task([string]$baseDir, [string]$specPath) {
     if ($found) { $found[0] } else { $null }
 }
 
-# One agent run: the spec in, the drafts out, the task removed once they are written. Returns the log rows.
+# One agent run: the spec in, the drafts out with their log rows in summary.md at once (decision 6 of the issue),
+# and the task removed only after both are written.
 function Invoke-DraftJob($ctx, [string]$job, [string]$specText, [System.Collections.IDictionary]$outputs) {
     $stamp = $Now.ToString('yyyyMMdd-HHmmss')
     $specs = Join-Path $ctx.Config.BaseDir '.sbxm/factory/specs'
@@ -297,7 +312,7 @@ function Invoke-DraftJob($ctx, [string]$job, [string]$specText, [System.Collecti
 
     $started = Get-Date
     Push-Location -LiteralPath $ctx.Checkout
-    try { $run = Invoke-Tool 'sbxm' $Sbxm @('task', 'start', '--spec', $specPath) -AllowFailure }
+    try { $run = Invoke-Sbxm @('task', 'start', '--spec', $specPath) }
     finally { Pop-Location }
     [IO.File]::WriteAllText("$specPath.log", "exit code $($run.Code)`n$($run.Out)`n$($run.Err)")
     $elapsed = [int]((Get-Date) - $started).TotalSeconds
@@ -312,32 +327,37 @@ function Invoke-DraftJob($ctx, [string]$job, [string]$specText, [System.Collecti
 
     $draft = Read-Draft (Join-Path $task.FullName 'repo.git') $branch
     if ($null -eq $draft) {
-        throw "task $($task.Name) has no draft.md; it is kept for a look (remove it with: sbxm task rm --spec $specPath --yes --force)"
+        throw "task $($task.Name) has no draft.md; it is kept for a look (remove it with: $(Format-SbxmHint "sbxm task rm --spec '$specPath' --yes --force"))"
     }
     $parts = if ($outputs.Count -eq 1 -and $outputs.Contains('*')) { @{ '*' = $draft } } else { Split-Draft $draft @($outputs.Keys) }
 
     New-Item -ItemType Directory -Force $ctx.Today | Out-Null
-    $rows = @()
     $costText = if ($null -ne $cost) { [string]::Format([cultureinfo]::InvariantCulture, '${0:F2}', [double]$cost) } else { 'unknown' }
     $share = if ($parts.Count -gt 1) { " (one run for $($parts.Count) drafts)" } else { '' }
     $missing = @()
+    $rows = @()
     foreach ($key in $outputs.Keys) {
         $file = $outputs[$key]
         if (-not $parts.Contains($key)) { $missing += $file; continue }
         [IO.File]::WriteAllText((Join-Path $ctx.Today $file), $parts[$key])
         $rows += "| $($ctx.Date) | $file | $job | $($task.Name) | $costText$share | $([math]::Floor($seconds / 60))m $($seconds % 60)s | | |"
     }
-    if ($missing) {
+    if ($rows) {
+        Add-Summary $ctx "`nLog lines for sdlc/batches/$($ctx.Date)-factory.md (the last two columns are filled in when the draft is worked through):`n"
+        Add-Summary $ctx '| Date | Draft | Job | Task | Cost | Time | Recommended answers accepted unchanged | Draft to ready-for-worker |'
+        Add-Summary $ctx '|---|---|---|---|---|---|---|---|'
         foreach ($row in $rows) { Add-Summary $ctx $row }
-        throw "draft.md of task $($task.Name) has no section for $($missing -join ', '); the task is kept for a look (remove it with: sbxm task rm --spec $specPath --yes --force)"
+        Add-Summary $ctx ''
+    }
+    if ($missing) {
+        throw "draft.md of task $($task.Name) has no section for $($missing -join ', '); the task is kept for a look (remove it with: $(Format-SbxmHint "sbxm task rm --spec '$specPath' --yes --force"))"
     }
 
     # Every draft is written, so removing the task loses nothing (its result is read out, never fetched, hence --force).
     Push-Location -LiteralPath $ctx.Checkout
-    try { $rm = Invoke-Tool 'sbxm' $Sbxm @('task', 'rm', '--spec', $specPath, '--yes', '--force') -AllowFailure }
+    try { $rm = Invoke-Sbxm @('task', 'rm', '--spec', $specPath, '--yes', '--force') }
     finally { Pop-Location }
     if ($rm.Code -ne 0) { Add-Summary $ctx "  - task rm failed for $($task.Name) (exit code $($rm.Code)): $($rm.Err) $($rm.Out)" }
-    $rows
 }
 
 # ---- Jobs -------------------------------------------------------------------------------------------------------
@@ -356,7 +376,7 @@ function Get-ReadinessCandidates($ctx) {
 
 function Invoke-Readiness($ctx) {
     $chosen = @(Get-ReadinessCandidates $ctx)
-    if (-not $chosen) { Add-Summary $ctx '- readiness: no issue needs a draft'; return @() }
+    if (-not $chosen) { Add-Summary $ctx '- readiness: no issue needs a draft'; return }
     $issues = @($chosen | ForEach-Object { Get-Issue ([int]$_.number) })
     $outputs = [ordered]@{}
     foreach ($i in $issues) { $outputs["issue-$($i.number)"] = "issue-$($i.number).md" }
@@ -390,7 +410,7 @@ function Format-Prs([object[]]$prs, [switch]$Files) {
 function Invoke-Recheck($ctx) {
     $ready = Invoke-GhJson @('issue', 'list', '--repo', $Repo, '--state', 'open', '--label', $ReadyLabel, '--limit', "$ListLimit", '--json', 'number,title,createdAt,updatedAt')
     Assert-NotCut $ready 'ready issues'
-    if (-not $ready) { Add-Summary $ctx '- recheck: no ready issue'; return @() }
+    if (-not $ready) { Add-Summary $ctx '- recheck: no ready issue'; return }
     $since = @{}
     foreach ($i in $ready) {
         $labeled = Get-LabelTime ([int]$i.number)
@@ -398,7 +418,7 @@ function Invoke-Recheck($ctx) {
         $drafted = Get-DraftTime $ctx.DraftsRoot "recheck-$($i.number).md"
         $since[[int]$i.number] = if ($null -ne $drafted -and $drafted -gt $labeled) { $drafted } else { $labeled }
     }
-    if (-not $since.Count) { return @() }
+    if (-not $since.Count) { return }
     $earliest = @(@($since.Values) | Sort-Object)[0]
     $prs = Invoke-GhJson @('pr', 'list', '--repo', $Repo, '--state', 'merged', '--search', "merged:>=$($earliest.ToString('yyyy-MM-dd'))",
         '--limit', "$ListLimit", '--json', 'number,title,mergedAt,files')
@@ -407,7 +427,7 @@ function Invoke-Recheck($ctx) {
             $from = $since[[int]$_.number]
             @($prs | Where-Object { (ConvertTo-Utc $_.mergedAt) -gt $from }).Count -gt 0
         } | Sort-Object { ConvertTo-Utc $_.createdAt }, { [int]$_.number } | Select-Object -First $MaxIssues)
-    if (-not $chosen) { Add-Summary $ctx '- recheck: no PR merged under a ready issue'; return @() }
+    if (-not $chosen) { Add-Summary $ctx '- recheck: no PR merged under a ready issue'; return }
 
     $outputs = [ordered]@{}
     $inputs = @()
@@ -439,13 +459,13 @@ function Get-LastRetro($ctx) {
 function Invoke-Retro($ctx) {
     $last = Get-LastRetro $ctx
     $file = if ($last) { "retro-after-$($last.End).md" } else { 'retro-first.md' }
-    if ($null -ne (Get-DraftTime $ctx.DraftsRoot $file)) { Add-Summary $ctx "- retro: $file is already drafted"; return @() }
+    if ($null -ne (Get-DraftTime $ctx.DraftsRoot $file)) { Add-Summary $ctx "- retro: $file is already drafted"; return }
     # With no record, the latest 100 merged PRs are the agent's input; it proposes the window.
     $search = @('pr', 'list', '--repo', $Repo, '--state', 'merged', '--json', 'number,title,mergedAt,url')
     if ($last) { $search += @('--limit', "$ListLimit", '--search', "merged:>$($last.End)") } else { $search += @('--limit', '100') }
     $prs = @(Invoke-GhJson $search)
     if ($last) { Assert-NotCut $prs 'merged PRs' }
-    if ($last -and $prs.Count -lt $RetroDue) { Add-Summary $ctx "- retro: not due ($($prs.Count) PRs merged since $($last.End))"; return @() }
+    if ($last -and $prs.Count -lt $RetroDue) { Add-Summary $ctx "- retro: not due ($($prs.Count) PRs merged since $($last.End))"; return }
     $window = if ($last) { "the day after $($last.End) (the window end of $($last.Path)) to $($ctx.Date)" } else { "no retro record exists yet; propose a window start, to $($ctx.Date)" }
     $spec = New-SpecText 'retro' @{ date = $ctx.Date; repo = $Repo; window = $window; count = "$($prs.Count)" } (Format-Prs $prs)
     Invoke-DraftJob $ctx 'retro' $spec ([ordered]@{ '*' = $file })
@@ -492,26 +512,19 @@ if (-not $Repo) {
 }
 Copy-Item -LiteralPath (Join-Path $TemplateDir 'sbxm-task.toml') -Destination (Join-Path $ctx.Checkout 'sbxm-task.toml') -Force
 
-$rows = @()
 $failed = $false
 foreach ($job in @('readiness', 'recheck', 'retro')) {
     if (Test-RanToday $ctx $job) { Add-Summary $ctx "- $job`: already ran today"; continue }
     try {
-        $rows += @(switch ($job) {
-                'readiness' { Invoke-Readiness $ctx }
-                'recheck' { Invoke-Recheck $ctx }
-                'retro' { Invoke-Retro $ctx }
-            })
+        switch ($job) {
+            'readiness' { Invoke-Readiness $ctx }
+            'recheck' { Invoke-Recheck $ctx }
+            'retro' { Invoke-Retro $ctx }
+        }
     }
     catch {
         $failed = $true
         Add-Summary $ctx "- $job`: failed: $_"
     }
-}
-if ($rows) {
-    Add-Summary $ctx "`nLog lines for sdlc/batches/$date-factory.md (the last two columns are filled in when the draft is worked through):`n"
-    Add-Summary $ctx '| Date | Draft | Job | Task | Cost | Time | Recommended answers accepted unchanged | Draft to ready-for-worker |'
-    Add-Summary $ctx '|---|---|---|---|---|---|---|---|'
-    foreach ($row in $rows) { Add-Summary $ctx $row }
 }
 if ($failed) { exit 1 }

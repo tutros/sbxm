@@ -4,11 +4,13 @@ BeforeAll {
 
     # A stand-in command: logs each call's arguments as one line to $log, and answers from $answers with the
     # first pattern (in order) that matches the joined arguments. An answer is text, @{ out = ...; code = ... },
-    # or a scriptblock given the arguments that returns one of those.
-    function New-Tool([string]$log, [System.Collections.IDictionary]$answers) {
+    # or a scriptblock given the arguments that returns one of those. With $envLog, each call also logs the
+    # SBXM_CONFIG_DIR it sees there, as `<arguments> => <value>`.
+    function New-Tool([string]$log, [System.Collections.IDictionary]$answers, [string]$envLog) {
         {
             $line = $args -join ' '
             Add-Content -LiteralPath $log -Value $line
+            if ($envLog) { Add-Content -LiteralPath $envLog -Value "$line => $env:SBXM_CONFIG_DIR" }
             foreach ($pattern in $answers.Keys) {
                 if ($line -match $pattern) {
                     $answer = $answers[$pattern]
@@ -61,7 +63,7 @@ BeforeAll {
             Repo        = 'owner/repo'
             TemplateDir = $script:templates
             Now         = [datetime]'2026-11-06T07:00:00'
-            Sbxm        = New-Tool $script:sbxmLog $script:sbxmAnswers
+            Sbxm        = New-Tool $script:sbxmLog $script:sbxmAnswers $script:sbxmEnvLog
             Sbx         = New-Tool $script:sbxLog $script:sbxAnswers
             Gh          = New-Tool $script:ghLog $script:ghAnswers
             Git         = New-Tool $script:gitLog $script:gitAnswers
@@ -95,6 +97,7 @@ Describe 'factory-check.ps1' {
         $script:specs = Join-Path $script:base '.sbxm/factory/specs'
 
         $script:sbxmLog = Join-Path $root 'sbxm.log'
+        $script:sbxmEnvLog = Join-Path $root 'sbxm-env.log'
         $script:sbxLog = Join-Path $root 'sbx.log'
         $script:ghLog = Join-Path $root 'gh.log'
         $script:gitLog = Join-Path $root 'git.log'
@@ -387,6 +390,59 @@ Describe 'factory-check.ps1' {
 
             Get-Log $script:sbxLog | Should -HaveCount 0
             Test-Path -LiteralPath $script:drafts | Should -BeFalse
+        }
+    }
+
+    Context 'the selected config folder (review M-1)' {
+        BeforeEach {
+            $script:savedConfigDir = $env:SBXM_CONFIG_DIR
+            $script:ghAnswers['^issue list '] = ConvertTo-IssueJson @(New-ListedIssue 1 '2026-10-01T00:00:00Z')
+        }
+        AfterEach { $env:SBXM_CONFIG_DIR = $script:savedConfigDir }
+
+        It 'hands -ConfigDir to every sbxm call when SBXM_CONFIG_DIR is <case>, and restores it' -ForEach @(
+            @{ case = 'unset'; incoming = $null }
+            @{ case = 'another folder'; incoming = 'elsewhere-config' }
+        ) {
+            $env:SBXM_CONFIG_DIR = $incoming
+
+            Invoke-Check
+
+            $calls = @(Get-Log $script:sbxmEnvLog)
+            @($calls | Where-Object { $_ -match '^task start ' }) | Should -HaveCount 1
+            @($calls | Where-Object { $_ -match '^task rm ' }) | Should -HaveCount 1
+            foreach ($call in $calls) { $call | Should -BeLike "* => $($script:cfg)" }
+            Test-Path -LiteralPath (Join-Path $script:today 'issue-1.md') | Should -BeTrue
+            $env:SBXM_CONFIG_DIR | Should -Be $incoming
+        }
+
+        It 'restores SBXM_CONFIG_DIR when an sbxm call fails' {
+            $env:SBXM_CONFIG_DIR = 'elsewhere-config'
+            $script:sbxmAnswers['^task start --spec '] = { throw 'injected start failure' }
+
+            Invoke-Check
+
+            $LASTEXITCODE | Should -Be 1
+            @(Get-Log $script:sbxmEnvLog | Where-Object { $_ -match '^task start ' }) | Should -BeLike "* => $($script:cfg)"
+            $env:SBXM_CONFIG_DIR | Should -Be 'elsewhere-config'
+        }
+    }
+
+    Context 'measurements written at once (review M-2)' {
+        It 'has the draft''s cost and time in the summary before its task is removed and before the next job' {
+            $script:ghAnswers['^issue list '] = ConvertTo-IssueJson @(New-ListedIssue 1 '2026-10-01T00:00:00Z')
+            # The next job, recheck, fails at its first GitHub read.
+            $script:ghAnswers['^issue list .*--label ready-for-worker'] = @{ out = 'gh: rate limited'; code = 1 }
+            $summary = Join-Path $script:today 'summary.md'
+            $atRm = Join-Path $TestDrive "at-rm-$([guid]::NewGuid())"
+            $script:sbxmAnswers['^task rm --spec '] = { Copy-Item -LiteralPath $summary -Destination $atRm; 'removed' }.GetNewClosure()
+
+            Invoke-Check
+
+            $row = '| 2026-11-06 | issue-1.md | readiness | spec-factory-readiness-20261106-070000-abc123 | $0.50 | 2m 5s | | |'
+            @(Get-Content -LiteralPath $atRm) | Should -Contain $row
+            @(Get-Content -LiteralPath $summary | Where-Object { $_ -eq $row }) | Should -HaveCount 1
+            Get-Content -LiteralPath $summary -Raw | Should -Match 'recheck: failed'
         }
     }
 
