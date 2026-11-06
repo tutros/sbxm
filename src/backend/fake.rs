@@ -116,6 +116,9 @@ pub struct FakeBackend {
     /// Flipped (via [`FakeBackend::secret_services_failure`]) to make `secret_services` fail from
     /// then on, modeling `sbx` not answering (issue #201 review M-2).
     fail_secret_services: Arc<std::sync::atomic::AtomicBool>,
+    /// Set (via [`FakeBackend::list_failure_switch`]) to make `list` fail with these words from
+    /// then on, modeling a sign-in that lapses between two tasks (issue 445).
+    list_failure_switch: Arc<Mutex<Option<String>>>,
     /// What `template_ls` returns; `template_save` adds to it, `template_rm` takes away.
     templates: Mutex<Vec<TemplateImage>>,
     /// What `network_rules` returns, for every sandbox.
@@ -546,6 +549,11 @@ impl FakeBackend {
         self.fail_secret_services.clone()
     }
 
+    /// A handle that, once set, makes `list` fail with its words from that call on.
+    pub fn list_failure_switch(&self) -> Arc<Mutex<Option<String>>> {
+        self.list_failure_switch.clone()
+    }
+
     /// A backend whose `template_ls` starts with these.
     pub fn with_templates(self, templates: Vec<TemplateImage>) -> Self {
         *self.templates.lock().unwrap() = templates;
@@ -860,6 +868,9 @@ impl SandboxBackend for FakeBackend {
     fn list(&self) -> Result<Vec<SandboxInfo>> {
         if self.no_sbx {
             bail!("fake: sbx not found");
+        }
+        if let Some(message) = self.list_failure_switch.lock().unwrap().as_ref() {
+            bail!("{message}");
         }
         if self.fail_list {
             match &self.list_failure {

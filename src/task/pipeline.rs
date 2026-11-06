@@ -657,8 +657,70 @@ impl std::fmt::Display for SbxUnavailable {
 
 impl std::error::Error for SbxUnavailable {}
 
+/// Issue 445: `sbx` is not signed in to Docker, found by [`check_signed_in`] before anything is
+/// created. Like [`SbxUnavailable`], it stops a whole `task run` list and `task loop` (decision
+/// 193): a lapsed sign-in never fixes itself. `then` is the command, or commands, that go on once
+/// the user has signed in again; each caller that knows them names them.
+#[derive(Debug)]
+pub struct NotSignedIn {
+    /// `sbx`'s own words.
+    said: String,
+    pub then: Vec<String>,
+}
+
+impl NotSignedIn {
+    /// The same stop, going on with `then` instead.
+    pub fn then(&self, then: Vec<String>) -> NotSignedIn {
+        NotSignedIn {
+            said: self.said.clone(),
+            then,
+        }
+    }
+}
+
+impl std::fmt::Display for NotSignedIn {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "sbx is not signed in ({}); run `sbx login`", self.said)?;
+        for command in &self.then {
+            write!(f, ", then `{command}`")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for NotSignedIn {}
+
+/// Whether a failing `sbx` call's words say it isn't signed in to Docker (issue 445, answer 1):
+/// `sbx ls --json` run with stdin closed says `Not authenticated to Docker`, and every call once
+/// signed out answers `401 Unauthorized: user is not authenticated to Docker`.
+pub fn says_not_signed_in(text: &str) -> bool {
+    let text = text.to_lowercase();
+    text.contains("not authenticated") || text.contains("401 unauthorized")
+}
+
+/// Issue 445: `sbx ls --json` answers, signed in. Signed out is [`NotSignedIn`]; any other
+/// failure is decision 193's "`sbx` not answering", [`SbxUnavailable`].
+fn check_signed_in(backend: &dyn SandboxBackend) -> Result<()> {
+    match backend.list() {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            let said = format!("{e:#}");
+            if says_not_signed_in(&said) {
+                Err(NotSignedIn {
+                    said,
+                    then: Vec::new(),
+                }
+                .into())
+            } else {
+                Err(SbxUnavailable(said).into())
+            }
+        }
+    }
+}
+
 /// The harness's provider secret and the profile's own `secrets.services` must all be stored in
-/// `sbx` before anything is created; the error says which and how to add it.
+/// `sbx` before anything is created; the error says which and how to add it. `sbx`'s sign-in is
+/// checked first (issue 445): signed out, `sbx` answers nothing else either.
 fn check_secrets(
     backend: &dyn SandboxBackend,
     harness: Harness,
@@ -666,6 +728,7 @@ fn check_secrets(
     profile_name: &str,
     profile: &Profile,
 ) -> Result<()> {
+    check_signed_in(backend)?;
     let stored = backend
         .secret_services()
         .map_err(|e| SbxUnavailable(format!("{e:#}")))?;
