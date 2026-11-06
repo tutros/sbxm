@@ -714,6 +714,14 @@ pub struct NotSignedIn {
 }
 
 impl NotSignedIn {
+    /// `sbx` said `said`, and no next command is named yet.
+    pub fn new(said: impl Into<String>) -> NotSignedIn {
+        NotSignedIn {
+            said: said.into(),
+            then: Vec::new(),
+        }
+    }
+
     /// The same stop, going on with `then` instead.
     pub fn then(&self, then: Vec<String>) -> NotSignedIn {
         NotSignedIn {
@@ -751,11 +759,7 @@ fn check_signed_in(backend: &dyn SandboxBackend) -> Result<()> {
         Err(e) => {
             let said = format!("{e:#}");
             if says_not_signed_in(&said) {
-                Err(NotSignedIn {
-                    said,
-                    then: Vec::new(),
-                }
-                .into())
+                Err(NotSignedIn::new(said).into())
             } else {
                 Err(SbxUnavailable(said).into())
             }
