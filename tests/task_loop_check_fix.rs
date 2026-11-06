@@ -17,7 +17,7 @@ use common::Env as TestEnv;
 use common::task_fixture::{Probe, issue_text, open_issue};
 use sbxm::commands::task_loop::{self, Env, Options, Steps};
 use sbxm::github::fake::{FakeGitHub, GhCall};
-use sbxm::github::{GitHubBackend, PrInfo, PrState, RunStatus, WorkflowRun};
+use sbxm::github::{GitHubBackend, Mergeable, PrInfo, PrState, RunStatus, WorkflowRun};
 use sbxm::task::loop_pause::{self, Pause};
 use sbxm::task::record::{self, Kind, NewTask, Process, Record, ReviewResult, Stage, Status};
 use sbxm::task::risk::Level;
@@ -57,6 +57,9 @@ struct Script<'a> {
     /// How many `room()` checks still find the disk low.
     low_disk: Cell<u32>,
 }
+
+/// The PR's head after a scripted resolve pushed onto it.
+const RESOLVED: &str = "5555555555555555555555555555555555555555";
 
 /// The head of the PR a scripted `task run` opens.
 const HEAD: &str = "0123456789abcdef0123456789abcdef01234567";
@@ -167,8 +170,22 @@ impl Steps for Script<'_> {
         Ok(())
     }
 
+    /// A clean low-risk resolve that pushes [`RESOLVED`].
     fn fix_pr(&self, pr: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
-        Err(anyhow!("unexpected resolve of PR #{pr}"))
+        self.calls.borrow_mut().push(format!("resolve {pr}"));
+        let head = self.gh.pr(REPO, pr)?.head_oid;
+        let id = record::fix_id(pr, &head).unwrap();
+        // As `task fix` does: a task of the same id is refused before anything is written.
+        if record::task_dir(&self.base, &id).exists() {
+            return Err(anyhow!("task {id} exists"));
+        }
+        let (dir, mut rec) =
+            write_task(&self.base, Kind::Fix, pr, Some(&id), (Level::Low, RESOLVED));
+        rec.stage = Stage::Finished;
+        record::write(&dir, &rec).unwrap();
+        self.gh.set_pr_head(pr, RESOLVED);
+        self.gh.set_mergeable(pr, Mergeable::Mergeable);
+        Ok(())
     }
 
     fn fix_check(
@@ -195,7 +212,12 @@ impl Steps for Script<'_> {
                  - Should the flaky test be skipped? I would keep it.\n",
             )
             .unwrap(),
-            Ends::Fails => return Err(anyhow!("gates failed for fix-{pr}")),
+            Ends::Fails => {
+                // Its gates failed: the task never got to `finished`.
+                rec.stage = Stage::Ready;
+                record::write(&dir, &rec).unwrap();
+                return Err(anyhow!("gates failed for fix-{pr}"));
+            }
             Ends::Refused => unreachable!(),
         }
         record::write(&dir, &rec).unwrap();
@@ -602,4 +624,80 @@ fn a_log_fix_deferred_for_a_low_disk_runs_once_there_is_room_again() {
     assert_eq!(script.log_fixes(), ["log-fix 101 7"], "{}", ran.out);
     assert_eq!(disarms(&gh), [101], "{}", ran.out);
     assert!(arms(&gh).contains(&(101, PUSHED.to_owned())), "{}", ran.out);
+}
+
+// --- Review M-2: a log-fix that isn't clean stays with the user, whatever fix comes next ---
+
+fn resolves(script: &Script) -> Vec<String> {
+    script
+        .calls
+        .borrow()
+        .iter()
+        .filter(|c| c.starts_with("resolve"))
+        .cloned()
+        .collect()
+}
+
+#[test]
+fn after_a_log_fix_hands_a_question_back_a_later_conflict_in_the_run_is_not_resolved() {
+    let f = fixture();
+    // Issue 3 gives the loop a second pass, by when PR 101 conflicts with main.
+    let gh = github()
+        .with_issue_text(issue_text(3))
+        .with_pr(pr(103, HEAD))
+        .with_open_issues(vec![open_issue(3, &["ready-for-worker", "size:S"], "")]);
+    let mut script = Script::new(&f.base(), &gh, Ends::HandsBack);
+    script.after_run = Box::new(|gh| gh.set_mergeable(101, Mergeable::Conflicting));
+
+    let ran = run_loop(&f, &script, &gh);
+
+    ran.result.unwrap();
+    assert_eq!(script.log_fixes(), ["log-fix 101 7"], "{}", ran.out);
+    assert!(resolves(&script).is_empty(), "{}", ran.out);
+    assert!(!arms(&gh).iter().any(|(n, _)| *n == 101), "{}", ran.out);
+}
+
+/// A first loop whose log-fix ended as `ends`, then a restarted one that resolves PR 101's
+/// conflict cleanly: whether the resolve armed PR 101 again.
+fn rearmed_by_a_resolve_after_a_restart(ends: Ends) -> bool {
+    let f = fixture();
+    let gh = github();
+    let first = Script::new(&f.base(), &gh, ends);
+    run_loop(&f, &first, &gh).result.unwrap();
+    assert_eq!(first.log_fixes(), ["log-fix 101 7"]);
+    // A failed log-fix pushed nothing: someone pushed by hand meanwhile, so the resolve is a new
+    // task, not a refused one of the same head.
+    if matches!(ends, Ends::Fails) {
+        gh.set_pr_head(101, "6666666666666666666666666666666666666666");
+    }
+    gh.set_mergeable(101, Mergeable::Conflicting);
+
+    let again = Script::new(&f.base(), &gh, Ends::Clean(Level::Low));
+    let ran = run_loop(&f, &again, &gh);
+
+    ran.result.unwrap();
+    assert_eq!(resolves(&again), ["resolve 101"], "{}", ran.out);
+    arms(&gh).contains(&(101, RESOLVED.to_owned()))
+}
+
+#[test]
+fn after_a_restart_a_resolve_does_not_rearm_a_pr_whose_log_fix_handed_a_question_back() {
+    assert!(!rearmed_by_a_resolve_after_a_restart(Ends::HandsBack));
+}
+
+#[test]
+fn after_a_restart_a_resolve_does_not_rearm_a_pr_whose_log_fix_failed() {
+    assert!(!rearmed_by_a_resolve_after_a_restart(Ends::Fails));
+}
+
+#[test]
+fn after_a_restart_a_resolve_does_not_rearm_a_pr_whose_log_fix_left_must_fix() {
+    assert!(!rearmed_by_a_resolve_after_a_restart(Ends::MustFix));
+}
+
+#[test]
+fn after_a_restart_a_resolve_still_rearms_a_pr_whose_log_fix_was_clean() {
+    assert!(rearmed_by_a_resolve_after_a_restart(Ends::Clean(
+        Level::Low
+    )));
 }

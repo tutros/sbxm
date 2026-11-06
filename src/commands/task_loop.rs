@@ -1187,6 +1187,11 @@ impl Loop<'_> {
             }
             match record::read(&dir.join("task.json")) {
                 Ok(rec) if rec.kind != Kind::Fix || rec.repo != self.repo => true,
+                // A log-fix that isn't clean left the PR to the user, whatever came after it
+                // (review M-2): it passes only finished and clean.
+                Ok(rec) if dir.join(pr_fix::CHECK_LOG).is_file() => {
+                    log_fix_left(dir, Some(&rec)).is_none() && passes_arm_checks(&rec)
+                }
                 Ok(rec) if rec.stage != Stage::Finished => true,
                 Ok(rec) => passes_arm_checks(&rec),
                 Err(_) => false,
@@ -1739,24 +1744,20 @@ impl Loop<'_> {
             .as_ref()
             .and_then(|dir| record::read(&dir.join("task.json")).ok());
         let review = fix.as_ref().and_then(|r| r.review.clone());
-        let handed_back = dir
-            .as_ref()
-            .and_then(|dir| fs::read_to_string(dir.join("result.md")).ok())
-            .is_some_and(|text| finish::hands_back(&text));
-        let clean = match (&result, &review) {
+        let clean = match (&result, &dir) {
             (Err(e), _) => Err(format!("failed: {}", first_line(&format!("{e:#}")))),
-            (Ok(()), _) if fix.as_ref().is_some_and(|r| r.stopped.is_some()) => {
-                Err("stopped before its review was clean".to_owned())
-            }
-            (Ok(()), None) => Err("has no review result".to_owned()),
-            (Ok(()), Some(review)) if review.must_fix > 0 => {
-                Err(format!("left {} must-fix", review.must_fix))
-            }
-            (Ok(()), Some(_)) if handed_back => Err("handed a question back".to_owned()),
-            (Ok(()), Some(review)) => Ok(review),
+            (Ok(()), None) => Err("has no task folder".to_owned()),
+            (Ok(()), Some(dir)) => match log_fix_left(dir, fix.as_ref()) {
+                Some(why) => Err(why),
+                None => review
+                    .as_ref()
+                    .ok_or_else(|| "has no review result".to_owned()),
+            },
         };
         let outcome = match clean {
             Err(why) => {
+                // Left to the user for the rest of the run: no resolve of it either (review M-2).
+                self.unresolved.insert(number);
                 writeln!(
                     out,
                     "PR #{number} awaits you: its {} failed again after a re-run ({}) and its \
@@ -1853,6 +1854,34 @@ fn passes_arm_checks(rec: &Record) -> bool {
             .review
             .as_ref()
             .is_some_and(|r| r.must_fix == 0 && r.risk == Level::Low)
+}
+
+/// Why the log-fix task in `dir`, recorded as `rec`, didn't end clean (decision 300), in words
+/// that follow "its log-fix"; `None` when it did: finished, no stop, a review with 0 must-fix and
+/// no question handed back in its `result.md`. The one rule for the log-fix's own outcome and for
+/// every later re-arm that looks back at it (review M-2).
+fn log_fix_left(dir: &Path, rec: Option<&Record>) -> Option<String> {
+    let Some(rec) = rec else {
+        return Some("has no readable record".to_owned());
+    };
+    if rec.stopped.is_some() {
+        return Some("stopped before its review was clean".to_owned());
+    }
+    let Some(review) = &rec.review else {
+        return Some("has no review result".to_owned());
+    };
+    if review.must_fix > 0 {
+        return Some(format!("left {} must-fix", review.must_fix));
+    }
+    let handed_back =
+        fs::read_to_string(dir.join("result.md")).is_ok_and(|text| finish::hands_back(&text));
+    if handed_back {
+        return Some("handed a question back".to_owned());
+    }
+    if rec.stage != Stage::Finished {
+        return Some(format!("stopped at {}", rec.stage.name()));
+    }
+    None
 }
 
 /// The line saying the loop is paused on a red `main`.
