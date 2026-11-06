@@ -1,5 +1,6 @@
 //! The short title sbxm shows with a task, an issue or a pull request (issue 246): the issue's or
-//! PR's title from GitHub as the task's record stored it, or a spec task's first heading. Every
+//! PR's title from GitHub as the task's record stored it, or a spec task's first `# ` heading
+//! ([`crate::task::fixes::title`], the same as its PR's). Every
 //! output that names one goes through [`titled`] (an item that heads its line or cell) or
 //! [`named`] (an item inside a sentence), so a record without a title shows the number alone
 //! everywhere alike. Reads only the task records; never calls GitHub.
@@ -29,21 +30,6 @@ pub fn named(label: &str, title: &str) -> String {
         title if title.is_empty() => label.to_owned(),
         title => format!("{label} ({title})"),
     }
-}
-
-/// A spec task's title: the text of the spec's first markdown heading (`# ...` at any level),
-/// else `file_name` when it has none or the heading is empty.
-pub fn spec_title(text: &str, file_name: &str) -> String {
-    text.lines()
-        .map(str::trim_start)
-        .find_map(|line| {
-            let rest = line.trim_start_matches('#');
-            let level = line.len() - rest.len();
-            ((1..=6).contains(&level) && (rest.is_empty() || rest.starts_with([' ', '\t'])))
-                .then(|| rest.trim().trim_end_matches('#').trim().to_owned())
-        })
-        .filter(|heading| !heading.is_empty())
-        .unwrap_or_else(|| file_name.to_owned())
 }
 
 /// The label of the GitHub item (or spec) a task is about: `#41` for an issue, `#9` for a PR or a

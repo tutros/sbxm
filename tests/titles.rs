@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use common::task_fixture::{Fixture, backend, ctx, fixture, source};
 use sbxm::github::fake::FakeGitHub;
 use sbxm::status::tasks::{self, TaskRow};
-use sbxm::task::pipeline;
 use sbxm::task::record::{self, Kind, NewTask, Process, Record};
+use sbxm::task::{fixes, pipeline};
 use sbxm::title;
 
 const T0: u64 = 1_790_000_000;
@@ -65,17 +65,19 @@ fn a_very_long_title_is_shown_in_full_on_one_line() {
 
 #[test]
 fn a_spec_title_is_its_first_heading() {
-    let text = "Some intro.\n\n## Make status show titles ##\n\n# Later heading\n";
-    assert_eq!(
-        title::spec_title(text, "idea.md"),
-        "Make status show titles"
-    );
+    let text = "Some intro.\n\n## A section\n\n# Make status show titles\n\n# Later heading\n";
+    assert_eq!(fixes::title(text, "idea.md"), "Make status show titles");
 }
 
 #[test]
 fn a_spec_with_no_heading_is_titled_by_its_file_name() {
-    for text in ["Build a thing.\n", "#hashtag is not a heading\n", "#\n", ""] {
-        assert_eq!(title::spec_title(text, "idea.md"), "idea.md", "{text:?}");
+    for text in [
+        "Build a thing.\n",
+        "#hashtag is not a heading\n",
+        "# \n",
+        "",
+    ] {
+        assert_eq!(fixes::title(text, "idea.md"), "idea.md", "{text:?}");
     }
 }
 
@@ -247,4 +249,103 @@ fn status_rows_read_the_title_from_task_json() {
     let rows = tasks::rows(tmp.path(), &Dead).unwrap();
 
     assert_eq!(rows[0].title, "Add titles");
+}
+
+// ---- a renamed PR (answer 4) -------------------------------------------------
+
+mod renamed {
+    use super::*;
+    use common::task_fixture::{
+        CODEX_DONE, add_pr_head, ctx_with_host, fixture_with, issue_text, ok, play_reviews,
+    };
+    use sbxm::backend::FakeBackend;
+    use sbxm::github::{PrInfo, PrState};
+    use sbxm::task::gates::FakeHostRunner;
+    use sbxm::task::pipeline::Prepared;
+
+    const CLEAN: &str = "Must-fix findings: 0\n\nNothing found.\n";
+
+    fn pr(title: &str) -> PrInfo {
+        PrInfo {
+            number: 7,
+            head_ref: "feature-x".into(),
+            head_oid: "0".repeat(40),
+            is_cross_repository: false,
+            head_repo: String::new(),
+            state: PrState::Open,
+            title: title.into(),
+            body: "Adds x.\n\nFixes #4".into(),
+            closing_issues: vec![4],
+            base_moved: false,
+        }
+    }
+
+    fn github(title: &str) -> FakeGitHub {
+        FakeGitHub::default()
+            .with_pr(pr(title))
+            .with_issue_text(issue_text(4))
+    }
+
+    fn reviewed_once(f: &Fixture, backend: &FakeBackend) -> Prepared {
+        add_pr_head(f, 7);
+        let source = source(f);
+        let github = github("Add the x feature");
+        let mut prepared =
+            pipeline::prepare_pr(&ctx(f, &source, backend, &github), &pr("Add the x feature"))
+                .unwrap();
+        review(f, backend, &github, &mut prepared).unwrap();
+        prepared
+    }
+
+    fn review(
+        f: &Fixture,
+        backend: &FakeBackend,
+        github: &FakeGitHub,
+        prepared: &mut Prepared,
+    ) -> anyhow::Result<pipeline::PrReview> {
+        let source = source(f);
+        let host = FakeHostRunner::default();
+        let context = ctx_with_host(f, &source, backend, github, &host);
+        pipeline::review_pr(&context.env(), github, prepared, true)
+    }
+
+    fn setup() -> (Fixture, FakeBackend) {
+        let f = fixture_with(
+            "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = [\"cargo test\"]\n\n\
+             [reviewer]\nharness = \"codex\"\n",
+        );
+        let backend = FakeBackend::with_secrets(&["anthropic", "openai"])
+            .with_exec_output_matching("codex", ok(CODEX_DONE))
+            .with_exec_hook(play_reviews(
+                &f.env.base_dir(),
+                "pr-7",
+                vec![CLEAN.to_owned(), CLEAN.to_owned()],
+            ));
+        (f, backend)
+    }
+
+    fn saved(f: &Fixture) -> Record {
+        record::read(&record::task_dir(&f.env.base_dir(), "pr-7").join("task.json")).unwrap()
+    }
+
+    #[test]
+    fn a_review_again_takes_the_renamed_prs_title_from_its_own_read() {
+        let (f, backend) = setup();
+        let mut prepared = reviewed_once(&f, &backend);
+        assert_eq!(saved(&f).title, "Add the x feature");
+
+        review(&f, &backend, &github("Add the y feature"), &mut prepared).unwrap();
+
+        assert_eq!(saved(&f).title, "Add the y feature");
+    }
+
+    #[test]
+    fn a_failed_read_keeps_the_stored_title() {
+        let (f, backend) = setup();
+        let mut prepared = reviewed_once(&f, &backend);
+
+        review(&f, &backend, &FakeGitHub::default(), &mut prepared).unwrap_err();
+
+        assert_eq!(saved(&f).title, "Add the x feature");
+    }
 }

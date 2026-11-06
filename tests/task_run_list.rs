@@ -190,11 +190,15 @@ fn two_issues_run_in_order_and_both_reach_ready() {
     assert_eq!(stage(&f, "issue-42"), (Stage::Ready, Status::Ok));
     assert!(text.contains("summary:"), "{text}");
     assert!(
-        text.contains("--issue 41: stage ready, must-fix 0; next: sbxm task finish --issue 41"),
+        text.contains(
+            "--issue 41 (Fix 41): stage ready, must-fix 0; next: sbxm task finish --issue 41"
+        ),
         "{text}"
     );
     assert!(
-        text.contains("--issue 42: stage ready, must-fix 0; next: sbxm task finish --issue 42"),
+        text.contains(
+            "--issue 42 (Fix 42): stage ready, must-fix 0; next: sbxm task finish --issue 42"
+        ),
         "{text}"
     );
 }
@@ -233,7 +237,9 @@ fn a_failed_task_does_not_stop_the_list() {
     );
     assert_eq!(stage(&f, "issue-42"), (Stage::Ready, Status::Ok));
     assert!(
-        text.contains("--issue 42: stage ready, must-fix 0; next: sbxm task finish --issue 42"),
+        text.contains(
+            "--issue 42 (Fix 42): stage ready, must-fix 0; next: sbxm task finish --issue 42"
+        ),
         "{text}"
     );
 }
@@ -476,7 +482,9 @@ fn sbx_becoming_unreachable_after_an_earlier_task_stops_the_list_and_keeps_its_r
     let text = &out.out;
     assert_eq!(stage(&f, "issue-41"), (Stage::Ready, Status::Ok));
     assert!(
-        text.contains("--issue 41: stage ready, must-fix 0; next: sbxm task finish --issue 41"),
+        text.contains(
+            "--issue 41 (Fix 41): stage ready, must-fix 0; next: sbxm task finish --issue 41"
+        ),
         "{text}"
     );
     assert!(text.contains("--issue 42: not started:"), "{text}");
@@ -504,7 +512,9 @@ fn a_target_repeated_in_the_same_list_reports_the_refusal_not_the_other_copys_st
     let text = &out.out;
     assert_eq!(stage(&f, "issue-41"), (Stage::Ready, Status::Ok));
     assert!(
-        text.contains("--issue 41: stage ready, must-fix 0; next: sbxm task finish --issue 41"),
+        text.contains(
+            "--issue 41 (Fix 41): stage ready, must-fix 0; next: sbxm task finish --issue 41"
+        ),
         "{text}"
     );
     assert!(text.contains("already has a task"), "{text}");

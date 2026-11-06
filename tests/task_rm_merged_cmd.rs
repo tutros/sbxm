@@ -234,7 +234,7 @@ fn with_nothing_merged_a_left_alone_spec_task_is_still_named_with_its_reason() {
 
     result.unwrap();
     assert!(
-        out.contains(&format!("left alone, task {id}: not merged")),
+        out.contains(&format!("left alone, task {id} (idea.md): not merged")),
         "{out}"
     );
     assert!(out.contains("sbxm task rm --spec"), "{out}");
@@ -257,9 +257,9 @@ fn yes_still_lists_each_task_and_its_reason_once() {
 
     result.unwrap();
     assert!(confirm.prompts.borrow().is_empty());
-    let merged_line = format!("task issue-41: PR #{number} is merged");
+    let merged_line = format!("task issue-41 (Fix 41): PR #{number} is merged");
     assert_eq!(out.matches(&merged_line).count(), 1, "{out}");
-    let left_line = format!("left alone, task {id}: not merged");
+    let left_line = format!("left alone, task {id} (idea.md): not merged");
     assert_eq!(out.matches(&left_line).count(), 1, "{out}");
     assert!(!meta(&f).exists(), "{out}");
     assert!(record::task_dir(&f.env.base_dir(), &id).exists(), "{out}");

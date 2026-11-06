@@ -824,7 +824,8 @@ fn a_spec_task_whose_base_is_gone_on_origin_is_left_alone_with_its_removal_comma
     assert!(reason.contains("sbxm task rm --spec"), "{reason}");
     let listing = found.listing();
     assert!(
-        listing.contains(&format!("left alone, task {id}: ")) && listing.contains("gone on origin"),
+        listing.contains(&format!("left alone, task {id} (idea.md): "))
+            && listing.contains("gone on origin"),
         "{listing}"
     );
 }
