@@ -420,3 +420,67 @@ fn task_logs_of_an_old_record_without_a_title_names_the_task_alone() {
 
     assert_eq!(logs(&env, 41), "# task issue-41\nline\n");
 }
+
+// ---- `sbxm status`'s Sandboxes and Loop sections (answer 5) ------------------
+
+#[test]
+fn a_tasks_sandbox_names_its_owner_with_the_title() {
+    use sbxm::backend::SandboxDetail;
+    use sbxm::status::sandboxes::{self, Local};
+    let tmp = tempfile::tempdir().unwrap();
+    save(tmp.path(), &task(Kind::Issue, 41, "Add titles"));
+    save(tmp.path(), &task(Kind::Issue, 42, ""));
+    let sandbox = |name: &str| SandboxDetail {
+        name: name.to_owned(),
+        status: "running".to_owned(),
+        cpus: None,
+        memory_mib: None,
+        expires_at: None,
+        created_at: None,
+    };
+    let local = Local::Sandboxes(vec![
+        sandbox("sbxm-task-issue-41-claude"),
+        sandbox("sbxm-task-issue-42-claude"),
+    ]);
+
+    let text = sandboxes::render(&local, &sandboxes::claims(tmp.path()), 0, None);
+
+    assert!(text.contains("task issue-41 (Add titles)"), "{text}");
+    assert!(text.contains("task issue-42  "), "{text}");
+}
+
+#[test]
+fn the_loop_section_titles_its_task_and_the_prs_awaiting_but_not_one_whose_record_is_gone() {
+    use sbxm::status::looping::{self, Current, Lock, Snapshot, View, Work};
+    let mut work = Work {
+        current: Some(Current {
+            id: "issue-41".to_owned(),
+            stage: "working",
+        }),
+        done: vec!["issue-40".to_owned()],
+        ..Work::default()
+    };
+    work.titles
+        .insert("issue-41".to_owned(), "Add titles".to_owned());
+    work.titles
+        .insert("issue-40".to_owned(), "Earlier".to_owned());
+    let view = View {
+        lock: Lock::Running(Process::new(1, T0)),
+        work: Some(work),
+        snapshot: Some(Snapshot {
+            queue: Ok(Vec::new()),
+            awaiting: Ok(vec![9, 13]),
+            pr_titles: [(9, "Earlier".to_owned())].into_iter().collect(),
+        }),
+        pause: sbxm::task::loop_pause::State::None,
+    };
+
+    let text = looping::render(&view, None);
+
+    assert!(
+        text.contains("  task: issue-41 (Add titles) at working\n"),
+        "{text}"
+    );
+    assert!(text.contains("  done: 1 (issue-40 (Earlier))\n"), "{text}");
+    assert!(text.contains("PRs (#9: Earlier, #13)\n"), "{text}");
+}
