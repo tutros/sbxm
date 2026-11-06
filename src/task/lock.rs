@@ -34,9 +34,11 @@ const PAUSE: Duration = Duration::from_millis(10);
 const DENIED_ATTEMPTS: u32 = 5;
 const DENIED_PAUSE: Duration = Duration::from_millis(50);
 
-/// Making a file that must not exist yet, and waiting before trying again; tests replace both.
+/// Making a file that must not exist yet, reading the holder's file, and waiting before trying
+/// again; tests replace all three.
 trait CreateFiles {
     fn create_new(&self, path: &Path) -> std::io::Result<fs::File>;
+    fn read_to_string(&self, path: &Path) -> std::io::Result<String>;
     fn sleep(&self, pause: Duration);
 }
 
@@ -48,6 +50,10 @@ impl CreateFiles for RealFiles {
             .write(true)
             .create_new(true)
             .open(path)
+    }
+
+    fn read_to_string(&self, path: &Path) -> std::io::Result<String> {
+        fs::read_to_string(path)
     }
 
     fn sleep(&self, pause: Duration) {
@@ -176,7 +182,7 @@ impl ProcessLock {
                     return Err(err).with_context(|| format!("cannot create {}", path.display()));
                 }
             }
-            let text = match fs::read_to_string(&path) {
+            let text = match files.read_to_string(&path) {
                 Ok(text) => text,
                 Err(err) if err.kind() == ErrorKind::NotFound => continue,
                 Err(err) => {
@@ -508,6 +514,10 @@ mod tests {
                 }
             }
             RealFiles.create_new(path)
+        }
+
+        fn read_to_string(&self, path: &Path) -> std::io::Result<String> {
+            RealFiles.read_to_string(path)
         }
 
         fn sleep(&self, pause: Duration) {
