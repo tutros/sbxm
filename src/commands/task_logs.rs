@@ -1,7 +1,8 @@
 //! `sbxm task logs (--issue N | --pr N | --spec FILE) [--follow]` (decision 189, issue 88, part
 //! 2 of 6 of decisions 170/171): prints a task's `run.log` (decision 170, part 1). Read-only:
 //! never writes to the log itself, with or without `--follow` (decided point 3), and does not
-//! use `task_writers` / `RunLog`, which would.
+//! use `task_writers` / `RunLog`, which would. A first line names the task with its title (issue
+//! 246).
 
 use std::fs::File;
 use std::io::{ErrorKind, Read, Write};
@@ -71,6 +72,10 @@ pub fn run(config_dir: &Path, opts: &Options, env: &Env, out: &mut dyn Write) ->
     let mut buf = Vec::new();
     file.read_to_end(&mut buf)
         .map_err(|e| open_error(&id, &dir, &log, &e))?;
+    // Which task this is, with its title (issue 246), in the log's own header form; the log
+    // itself follows unchanged.
+    let title = record::read(&dir.join("task.json")).map_or_else(|_| String::new(), |r| r.title);
+    writeln!(out, "# task {}", crate::title::titled(&id, &title))?;
     out.write_all(&buf)?;
     out.flush()?;
     if !opts.follow {

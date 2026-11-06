@@ -349,3 +349,74 @@ mod renamed {
         assert_eq!(saved(&f).title, "Add the x feature");
     }
 }
+
+// ---- `next:` hints and `task logs` -------------------------------------------
+
+#[test]
+fn a_next_hint_ends_with_the_tasks_title_as_a_shell_comment() {
+    assert_eq!(
+        title::hint_comment(&task(Kind::Issue, 41, "Add titles")),
+        "  # #41: Add titles"
+    );
+    assert_eq!(
+        title::hint_comment(&task(Kind::Pr, 9, "Review me")),
+        "  # #9: Review me"
+    );
+    assert_eq!(title::hint_comment(&task(Kind::Issue, 41, "")), "");
+}
+
+#[test]
+fn a_spec_tasks_hint_names_its_id_and_heading() {
+    let mut spec = task(Kind::Spec, 0, "Build a thing");
+    spec.id = "spec-idea-1fa7c2".to_owned();
+    assert_eq!(
+        title::hint_comment(&spec),
+        "  # spec-idea-1fa7c2: Build a thing"
+    );
+}
+
+fn logs(base_env: &common::Env, number: u32) -> String {
+    use sbxm::commands::task_logs::{self, Options, Target};
+    let mut out = Vec::new();
+    task_logs::run(
+        &base_env.config_dir(),
+        &Options {
+            target: Target::Issue(number),
+            follow: false,
+        },
+        &task_logs::Env::real(),
+        &mut out,
+    )
+    .unwrap();
+    String::from_utf8(out).unwrap()
+}
+
+#[test]
+fn task_logs_names_the_task_with_its_title_first() {
+    let env = common::Env::new();
+    let record = task(Kind::Issue, 41, "Add titles");
+    save(&env.base_dir(), &record);
+    fs::write(
+        record::task_dir(&env.base_dir(), "issue-41").join("run.log"),
+        "# header\nline\n",
+    )
+    .unwrap();
+
+    assert_eq!(
+        logs(&env, 41),
+        "# task issue-41: Add titles\n# header\nline\n"
+    );
+}
+
+#[test]
+fn task_logs_of_an_old_record_without_a_title_names_the_task_alone() {
+    let env = common::Env::new();
+    save(&env.base_dir(), &task(Kind::Issue, 41, ""));
+    fs::write(
+        record::task_dir(&env.base_dir(), "issue-41").join("run.log"),
+        "line\n",
+    )
+    .unwrap();
+
+    assert_eq!(logs(&env, 41), "# task issue-41\nline\n");
+}

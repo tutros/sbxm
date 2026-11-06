@@ -70,3 +70,20 @@ pub fn pr_named(base: &Path, number: u32) -> String {
         &pr_title(base, number).unwrap_or_default(),
     )
 }
+
+/// What a `next:` hint ends with to say which task it is for (issue 246): two spaces and the
+/// task's item with its title as a shell comment (`  # #41: Add titles`), which bash and
+/// PowerShell alike ignore, so the line still runs when copied whole; empty without a title.
+pub fn hint_comment(record: &Record) -> String {
+    match one_line(&record.title) {
+        title if title.is_empty() => String::new(),
+        title => format!("  # {}", titled(&reference(record), &title)),
+    }
+}
+
+/// [`hint_comment`] for the task `id` under `base`, read from its record; empty when the record
+/// can't be read.
+pub fn hint_comment_of(base: &Path, id: &str) -> String {
+    record::read(&record::task_dir(base, id).join("task.json"))
+        .map_or_else(|_| String::new(), |r| hint_comment(&r))
+}
