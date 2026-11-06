@@ -67,12 +67,12 @@ demo project="just-demo":
 # ---- Running tasks -----------------------------------------------------------
 
 # Long task runs use a recorded build of sbxm, not `cargo run` (docs/workflow.md): set SBXM_TASK_BIN
-# to it (an .exe or a wrapper script); without it, the `sbxm` on PATH runs.
-task_sbxm := env_var_or_default("SBXM_TASK_BIN", "sbxm")
+# to it (an .exe or a wrapper script); without it, the `sbxm` on PATH runs. PowerShell reads the
+# variable itself, so a path with a quote or a space in it is never pasted into the command.
 
 # Run `sbxm task loop` over the ready-for-worker issues, from this checkout; extra flags pass through.
 task-loop *flags:
-    & '{{task_sbxm}}' task loop {{flags}}
+    & $(if ($env:SBXM_TASK_BIN) { $env:SBXM_TASK_BIN } else { 'sbxm' }) task loop {{flags}}
 
 # ---- Developing sbxm --------------------------------------------------------
 
