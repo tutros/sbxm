@@ -221,10 +221,12 @@ fn allow_listed_numbers_really_have_no_file() {
 fn reference_problems(root: &Path, known: &BTreeMap<u32, String>) -> Vec<String> {
     let mut problems = Vec::new();
     for path in tracked_md_and_rs_files(root) {
-        let Ok(text) = std::fs::read_to_string(root.join(&path)) else {
-            continue; // deleted in the working tree, or not UTF-8
-        };
-        problems.extend(unresolved_references(&path, &text, known));
+        match std::fs::read_to_string(root.join(&path)) {
+            Ok(text) => problems.extend(unresolved_references(&path, &text, known)),
+            // Deleted in the working tree: nothing there to check.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => problems.push(format!("{path}: cannot be read as UTF-8 text: {e}")),
+        }
     }
     problems
 }
@@ -469,6 +471,26 @@ fn the_repo_scan_reads_every_tracked_file_this_test_file_included() {
             format!("docs/a.md:2: {WORD} 1000 has no file in sdlc/decisions/"),
             format!("tests/decisions.rs:1: {WORD} 1000 has no file in sdlc/decisions/"),
         ]
+    );
+}
+
+#[test]
+fn a_tracked_file_the_scan_cannot_read_is_a_problem_not_skipped() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    std::fs::write(dir.join("latin1.md"), b"caf\xe9\n").unwrap();
+    std::fs::write(dir.join("gone.md"), "x\n").unwrap();
+    git(dir, &["init", "-q"]);
+    git(dir, &["add", "latin1.md", "gone.md"]);
+    // Deleted in the working tree, not yet committed: nothing there to check.
+    std::fs::remove_file(dir.join("gone.md")).unwrap();
+
+    let problems = reference_problems(dir, &BTreeMap::new());
+
+    assert_eq!(problems.len(), 1, "{problems:?}");
+    assert!(
+        problems[0].starts_with("latin1.md: cannot be read"),
+        "{problems:?}"
     );
 }
 
