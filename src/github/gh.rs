@@ -103,6 +103,12 @@ impl GhBackend {
     }
 }
 
+/// The part of a posted comment sbxm reads back (issue 430).
+#[derive(Deserialize)]
+struct RawPosted {
+    id: u64,
+}
+
 #[derive(Deserialize)]
 struct Named {
     name: String,
@@ -579,6 +585,40 @@ impl GitHubBackend for GhBackend {
                 body: c.body,
             })
             .collect())
+    }
+
+    fn issue_comment(&self, repo: &str, number: u32, body: &str) -> Result<u64> {
+        let input = serde_json::json!({ "body": body }).to_string();
+        let out = self.run(
+            &strings(&[
+                "api",
+                &format!("repos/{repo}/issues/{number}/comments"),
+                "--method",
+                "POST",
+                "--input",
+                "-",
+            ]),
+            Some(&input),
+        )?;
+        let posted: RawPosted = serde_json::from_str(&out)
+            .context("could not read the comment's id from the output of `gh api`")?;
+        Ok(posted.id)
+    }
+
+    fn issue_comment_edit(&self, repo: &str, id: u64, body: &str) -> Result<()> {
+        let input = serde_json::json!({ "body": body }).to_string();
+        self.run(
+            &strings(&[
+                "api",
+                &format!("repos/{repo}/issues/comments/{id}"),
+                "--method",
+                "PATCH",
+                "--input",
+                "-",
+            ]),
+            Some(&input),
+        )?;
+        Ok(())
     }
 
     fn issue_create(&self, repo: &str, request: &IssueRequest) -> Result<u32> {

@@ -204,6 +204,11 @@ pub trait GitHubBackend: Send + Sync {
     fn pr_comment(&self, repo: &str, number: u32, body: &str) -> Result<()>;
     /// Every comment on PR `number`'s conversation, oldest first.
     fn pr_comments(&self, repo: &str, number: u32) -> Result<Vec<PrComment>>;
+    /// Posts `body` as a comment on issue `number` and returns the comment's id, which
+    /// [`issue_comment_edit`](Self::issue_comment_edit) takes (issue 430).
+    fn issue_comment(&self, repo: &str, number: u32, body: &str) -> Result<u64>;
+    /// Replaces the body of the issue comment `id` of `repo` (issue 430).
+    fn issue_comment_edit(&self, repo: &str, id: u64, body: &str) -> Result<()>;
     /// Returns the new issue's number.
     fn issue_create(&self, repo: &str, request: &IssueRequest) -> Result<u32>;
     fn labels(&self, repo: &str) -> Result<Vec<String>>;
