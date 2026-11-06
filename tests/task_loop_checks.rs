@@ -155,6 +155,18 @@ impl Steps for Script<'_> {
         Ok(())
     }
 
+    /// A log-fix refused before it creates anything: the PR awaits the user as before it.
+    fn fix_check(
+        &self,
+        pr: u32,
+        run: u64,
+        _out: &mut dyn Write,
+        _warn: &mut dyn Write,
+    ) -> Result<()> {
+        self.calls.borrow_mut().push(format!("log-fix {pr} {run}"));
+        Err(anyhow!("no log-fix in this script"))
+    }
+
     fn rm_merged(&self, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
         Ok(())
     }

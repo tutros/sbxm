@@ -123,6 +123,16 @@ impl Steps for Script {
         Err(anyhow!("unexpected resolve of PR #{pr}"))
     }
 
+    fn fix_check(
+        &self,
+        pr: u32,
+        run: u64,
+        _out: &mut dyn Write,
+        _warn: &mut dyn Write,
+    ) -> Result<()> {
+        Err(anyhow!("unexpected log-fix of PR #{pr} from run {run}"))
+    }
+
     fn rm_merged(&self, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
         self.calls.borrow_mut().push("rm-merged".to_owned());
         if self.rm_fails {

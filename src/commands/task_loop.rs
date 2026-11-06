@@ -38,7 +38,7 @@ use crate::task::queue::{self, READY_LABEL, Report, Row, Skipped};
 use crate::task::record::{self, Kind, Process, ProcessProbe, Record, Stage};
 use crate::task::risk::Level;
 use crate::task::runlog::{RunLog, Tee};
-use crate::task::{findings, lock, pipeline};
+use crate::task::{findings, finish, lock, pipeline, pr_fix};
 
 /// How many open PRs the loop opened may await the user before it pauses (decision 245(e)).
 pub const PR_CAP: usize = 5;
@@ -73,6 +73,10 @@ pub trait Steps {
     /// `task fix --pr N`: the base merged into the PR's branch in a sandbox, the gates and a
     /// narrow review, then the push (decisions 292, 298).
     fn fix_pr(&self, pr: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()>;
+    /// `task fix --pr N --check-run <run>`: the PR's failed run fixed from its log in a sandbox,
+    /// the gates and the in-task review, then the push (decision 300).
+    fn fix_check(&self, pr: u32, run: u64, out: &mut dyn Write, warn: &mut dyn Write)
+    -> Result<()>;
     /// `task rm --merged --yes`: removes the tasks whose PRs GitHub merged, archiving their text
     /// records first (decisions 195, 293).
     fn rm_merged(&self, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()>;
@@ -324,6 +328,9 @@ struct Loop<'a> {
     reruns: HashSet<u64>,
     /// The (PR, run) second failures already acted on: said once.
     failed_twice: HashSet<(u32, u64)>,
+    /// The PRs a log-fix was tried for in this run (decision 300), whether or not it got as far
+    /// as a task record: one per PR, ever, with the records counting across runs.
+    log_fixed: HashSet<u32>,
     /// The (commit, run) second failures on `main` already paused for (or found paused): a pause
     /// the user cleared isn't set again for the same run.
     paused_for: HashSet<(String, u64)>,
@@ -1110,7 +1117,7 @@ impl Loop<'_> {
                     .is_some_and(|rec| passes_arm_checks(&rec));
                 let current = record::fix_id(number, &head).unwrap_or_default();
                 let eligible = armed || (own && self.earlier_resolves_pass(number, &current));
-                match self.rearm(number, eligible, review, out, warn)? {
+                match self.rearm(number, "resolve", eligible, review, out, warn)? {
                     Some(note) => format!("resolved, {note}"),
                     None => "resolved".to_owned(),
                 }
@@ -1188,13 +1195,15 @@ impl Loop<'_> {
         record::read(&record::task_dir(&self.base_dir, id).join("task.json")).ok()
     }
 
-    /// Arms auto-merge again after a clean resolve (decision 298): only for a PR that `eligible`
+    /// Arms auto-merge again after a clean resolve (decision 298) or log-fix (decision 300; `what`
+    /// names which in its lines): only for a PR that `eligible`
     /// (armed before, or its own task and every earlier resolve pushed onto it passed
     /// [`Self::arm`]'s checks), when the fix's review is
     /// low risk with 0 must-fix and covered the PR's new head. Returns the log row's note.
     fn rearm(
         &mut self,
         number: u32,
+        what: &str,
         eligible: bool,
         review: &record::ReviewResult,
         out: &mut dyn Write,
@@ -1213,7 +1222,7 @@ impl Loop<'_> {
         if review.risk != Level::Low {
             writeln!(
                 out,
-                "PR #{number} awaits you: its resolve's review is risk {}",
+                "PR #{number} awaits you: its {what}'s review is risk {}",
                 review.risk.word()
             )?;
             return Ok(Some(format!(
@@ -1224,7 +1233,7 @@ impl Loop<'_> {
         let Some(reviewed) = review.commit.as_deref() else {
             writeln!(
                 out,
-                "PR #{number} awaits you: the commit its resolve's review covered is unknown"
+                "PR #{number} awaits you: the commit its {what}'s review covered is unknown"
             )?;
             return Ok(Some(
                 "auto-merge not armed: reviewed commit unknown".to_owned(),
@@ -1235,13 +1244,14 @@ impl Loop<'_> {
             Err(e) => return self.arming_failed(number, &e, out, warn),
         };
         if head != reviewed {
-            let note = "auto-merge not armed: the PR's head isn't the commit the resolve's review \
-                        covered";
+            let note = format!(
+                "auto-merge not armed: the PR's head isn't the commit the {what}'s review covered"
+            );
             writeln!(
                 out,
                 "PR #{number}: {note} (reviewed {reviewed}, head {head}); it awaits you"
             )?;
-            return Ok(Some(note.to_owned()));
+            return Ok(Some(note));
         }
         match self.github.pr_arm_auto_merge(&self.repo, number, reviewed) {
             Ok(()) => {
@@ -1504,13 +1514,13 @@ impl Loop<'_> {
     /// the PR if armed; the PR then awaits the user, said once with a log row.
     fn check_prs(&mut self, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
         let paused = self.paused(warn)?;
-        let mut prs: Vec<u32> = queue::loop_prs(&self.base_dir, &self.repo)?
+        let mut prs: Vec<(u32, String)> = queue::loop_prs(&self.base_dir, &self.repo)?
             .into_iter()
-            .filter_map(|pr| pr.number)
+            .filter_map(|pr| Some((pr.number?, pr.task)))
             .collect();
-        prs.sort_unstable();
-        prs.dedup();
-        for number in prs {
+        prs.sort();
+        prs.dedup_by_key(|(number, _)| *number);
+        for (number, task) in prs {
             // A PR that can't be read is warned about among the PRs awaiting the user.
             let Ok(state) = self.github.pr_merge_state(&self.repo, number) else {
                 continue;
@@ -1562,9 +1572,15 @@ impl Loop<'_> {
                 .into_iter()
                 .filter(|run| !self.failed_twice.contains(&(number, run.id)))
                 .collect();
-            let Some(run) = new.first() else {
+            let Some(run) = new.first().cloned() else {
                 continue;
             };
+            // One log-fix per PR, ever (decision 300): tried before the PR is left to the user. A
+            // low disk or a stop request leaves the failure for a later pass.
+            let log_fix = !self.log_fixed.contains(&number) && !self.has_log_fix(number);
+            if log_fix && (self.steps.room().is_err() || (self.env.stop_requested)()) {
+                continue;
+            }
             if armed {
                 if let Err(e) = self.github.pr_disarm_auto_merge(&self.repo, number) {
                     self.warn_once(
@@ -1578,6 +1594,13 @@ impl Loop<'_> {
                     continue;
                 }
                 self.armed.remove(&number);
+            }
+            if log_fix {
+                for run in &new {
+                    self.failed_twice.insert((number, run.id));
+                }
+                self.log_fix(number, &task, armed, &head, &run, out, warn)?;
+                continue;
             }
             for (i, run) in new.iter().enumerate() {
                 // The disarm goes with the first new failure's line and row.
@@ -1620,6 +1643,134 @@ impl Loop<'_> {
                     )?;
                 }
             }
+        }
+        Ok(())
+    }
+
+    /// Whether PR `number` had its log-fix (decision 300): a fix task of it whose folder holds
+    /// `check-log.md`, read from the task folders so a restarted loop sees it too. A folder that
+    /// isn't sbxm's own doesn't count; one whose record can't be read does, so a PR is never tried
+    /// twice.
+    fn has_log_fix(&self, number: u32) -> bool {
+        let Ok(folders) = record::task_folders(&self.base_dir) else {
+            return true;
+        };
+        let prefix = format!("fix-{number}-");
+        folders.iter().any(|dir| {
+            let named = dir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|id| id.starts_with(&prefix));
+            if !named
+                || check_own_folder(&self.base_dir, dir).is_err()
+                || !dir.join(pr_fix::CHECK_LOG).is_file()
+            {
+                return false;
+            }
+            match record::read(&dir.join("task.json")) {
+                Ok(rec) => rec.kind == Kind::Fix && rec.repo == self.repo,
+                Err(_) => true,
+            }
+        })
+    }
+
+    /// The one log-fix of PR `number` (decision 300), after its `run` of `head` failed again
+    /// after a re-run (auto-merge already disarmed if `armed`): `task fix --pr N --check-run
+    /// <id>`, then armed again on [`Self::resolve`]'s rules, read from the fix task's record. One
+    /// that doesn't end clean (an error, a stop, must-fix left, a question handed back) leaves the
+    /// PR to the user. One log row either way.
+    #[allow(clippy::too_many_arguments)]
+    fn log_fix(
+        &mut self,
+        number: u32,
+        task: &str,
+        armed: bool,
+        head: &str,
+        run: &WorkflowRun,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<()> {
+        self.log_fixed.insert(number);
+        let started = self.now();
+        writeln!(
+            out,
+            "PR #{number}: its {} failed twice ({}){}; fixing it once from the run's log with \
+             `sbxm task fix --pr {number} --check-run {}`",
+            run.workflow,
+            run.url,
+            if armed { "; auto-merge disarmed" } else { "" },
+            run.id
+        )?;
+        let result = self.steps.fix_check(number, run.id, out, warn);
+        let id = record::fix_id(number, head);
+        let dir = id.as_deref().map(|id| record::task_dir(&self.base_dir, id));
+        let fix = dir
+            .as_ref()
+            .and_then(|dir| record::read(&dir.join("task.json")).ok());
+        let review = fix.as_ref().and_then(|r| r.review.clone());
+        let handed_back = dir
+            .as_ref()
+            .and_then(|dir| fs::read_to_string(dir.join("result.md")).ok())
+            .is_some_and(|text| finish::hands_back(&text));
+        let clean = match (&result, &review) {
+            (Err(e), _) => Err(format!("failed: {}", first_line(&format!("{e:#}")))),
+            (Ok(()), _) if fix.as_ref().is_some_and(|r| r.stopped.is_some()) => {
+                Err("stopped before its review was clean".to_owned())
+            }
+            (Ok(()), None) => Err("has no review result".to_owned()),
+            (Ok(()), Some(review)) if review.must_fix > 0 => {
+                Err(format!("left {} must-fix", review.must_fix))
+            }
+            (Ok(()), Some(_)) if handed_back => Err("handed a question back".to_owned()),
+            (Ok(()), Some(review)) => Ok(review),
+        };
+        let outcome = match clean {
+            Err(why) => {
+                writeln!(
+                    out,
+                    "PR #{number} awaits you: its {} failed again after a re-run ({}) and its \
+                     log-fix {why}; its fix task is kept (see `sbxm task status`)",
+                    run.workflow, run.url
+                )?;
+                format!("log-fix {why}; awaits you")
+            }
+            Ok(review) => {
+                let own = self
+                    .record_of(task)
+                    .is_some_and(|rec| passes_arm_checks(&rec));
+                let current = id.clone().unwrap_or_default();
+                let eligible = armed || (own && self.earlier_resolves_pass(number, &current));
+                let outcome = match self.rearm(number, "log-fix", eligible, review, out, warn)? {
+                    Some(note) => format!("fixed from its log, {note}"),
+                    None => "fixed from its log".to_owned(),
+                };
+                writeln!(out, "PR #{number}: {outcome}")?;
+                outcome
+            }
+        };
+        let duration = |agent: Option<&record::Agent>| agent?.run.as_ref().map(|r| r.duration_s);
+        let row = Row {
+            issue: number,
+            title: format!(
+                "checks: {} failed again after a re-run; log-fix (task {task})",
+                run.workflow
+            ),
+            size: None,
+            started,
+            ready: None,
+            worker_s: fix.as_ref().and_then(|r| duration(r.worker.as_ref())),
+            reviewer_s: fix.as_ref().and_then(|r| duration(r.reviewer.as_ref())),
+            rounds: review.as_ref().map(|r| r.round),
+            must_fix: review.as_ref().map(|r| r.must_fix),
+            outcome,
+            stops: Vec::new(),
+            idle_before: None,
+        };
+        if let Err(e) = queue::append_resolve_row(&self.log, &row) {
+            self.warn_once(
+                warn,
+                format!("{e:#}; the loop goes on without that log row"),
+            )?;
         }
         Ok(())
     }
@@ -1744,6 +1895,7 @@ pub fn run(
         watched: Vec::new(),
         reruns: HashSet::new(),
         failed_twice: HashSet::new(),
+        log_fixed: HashSet::new(),
         paused_for: HashSet::new(),
         log: opts
             .repo_root
@@ -1999,6 +2151,44 @@ impl TaskSteps<'_> {
         result
     }
 
+    /// `task fix --pr N`, from the review or with `check_run` a failed run's log, teed into the
+    /// fix task's `run.log`. Its id names the PR's head, so the log is named before `task fix`
+    /// runs.
+    fn task_fix(
+        &self,
+        pr: u32,
+        check_run: Option<u64>,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<()> {
+        let repo = resolve_repo(self.repo.as_deref(), &self.repo_root)?;
+        let head = self.github.pr(&repo, pr)?.head_oid;
+        let Some(id) = record::fix_id(pr, &head) else {
+            bail!("PR #{pr}'s head {head:?} isn't a full commit id; see `gh pr view {pr}`");
+        };
+        self.logged_as(id, out, warn, &|out, warn| {
+            task_fix::run(
+                self.config_dir,
+                &task_fix::Options {
+                    repo_root: self.repo_root.clone(),
+                    pr,
+                    repo: self.repo.clone(),
+                    base: None,
+                    clone_source: None,
+                    identity: None,
+                    disk: self.disk.clone(),
+                    check_run,
+                },
+                self.backend,
+                self.github,
+                self.probe,
+                self.host,
+                out,
+                warn,
+            )
+        })
+    }
+
     /// Gives up this process's own claim on `issue-<n>`'s record before `task resume` (review
     /// M-1): the phase that left it ran here and has returned, so the loop being alive doesn't
     /// mean the task is running. A task another process owns keeps its owner, and `task resume`
@@ -2132,33 +2322,17 @@ impl Steps for TaskSteps<'_> {
     }
 
     fn fix_pr(&self, pr: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
-        // The fix task's id names the PR's head, so its run.log is named before `task fix` runs.
-        let repo = resolve_repo(self.repo.as_deref(), &self.repo_root)?;
-        let head = self.github.pr(&repo, pr)?.head_oid;
-        let Some(id) = record::fix_id(pr, &head) else {
-            bail!("PR #{pr}'s head {head:?} isn't a full commit id; see `gh pr view {pr}`");
-        };
-        self.logged_as(id, out, warn, &|out, warn| {
-            task_fix::run(
-                self.config_dir,
-                &task_fix::Options {
-                    repo_root: self.repo_root.clone(),
-                    pr,
-                    repo: self.repo.clone(),
-                    base: None,
-                    clone_source: None,
-                    identity: None,
-                    disk: self.disk.clone(),
-                    check_run: None,
-                },
-                self.backend,
-                self.github,
-                self.probe,
-                self.host,
-                out,
-                warn,
-            )
-        })
+        self.task_fix(pr, None, out, warn)
+    }
+
+    fn fix_check(
+        &self,
+        pr: u32,
+        run: u64,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<()> {
+        self.task_fix(pr, Some(run), out, warn)
     }
 
     fn rm_merged(&self, out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {

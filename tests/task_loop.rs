@@ -243,6 +243,16 @@ impl Steps for Script {
         Err(anyhow!("unexpected resolve of PR #{pr}"))
     }
 
+    fn fix_check(
+        &self,
+        pr: u32,
+        run: u64,
+        _out: &mut dyn Write,
+        _warn: &mut dyn Write,
+    ) -> Result<()> {
+        Err(anyhow!("unexpected log-fix of PR #{pr} from run {run}"))
+    }
+
     fn rm_merged(&self, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
         Ok(())
     }
@@ -1841,6 +1851,16 @@ fn the_issues_own_words_about_a_usage_limit_are_not_a_usage_limit() {
             Err(anyhow!("unexpected resolve of PR #{pr}"))
         }
 
+        fn fix_check(
+            &self,
+            pr: u32,
+            run: u64,
+            _out: &mut dyn Write,
+            _warn: &mut dyn Write,
+        ) -> Result<()> {
+            Err(anyhow!("unexpected log-fix of PR #{pr} from run {run}"))
+        }
+
         fn rm_merged(&self, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
             Ok(())
         }
@@ -2119,6 +2139,16 @@ impl Steps for LabelWatch<'_> {
     }
     fn fix_pr(&self, pr: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
         Err(anyhow!("unexpected resolve of PR #{pr}"))
+    }
+
+    fn fix_check(
+        &self,
+        pr: u32,
+        run: u64,
+        _out: &mut dyn Write,
+        _warn: &mut dyn Write,
+    ) -> Result<()> {
+        Err(anyhow!("unexpected log-fix of PR #{pr} from run {run}"))
     }
 
     fn rm_merged(&self, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {

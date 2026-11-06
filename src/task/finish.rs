@@ -1176,6 +1176,12 @@ pub fn pr_body(
 /// order there (issue 220, decision 283).
 const HANDBACK_SECTIONS: [&str; 2] = ["Needs a decision", "Choices made"];
 
+/// Whether `result` (a worker's `result.md`) hands a question back: its "Needs a decision"
+/// section has something in it (issue 448).
+pub fn hands_back(result: &str) -> bool {
+    handback_section(result, "Needs a decision").is_some()
+}
+
 /// The text of `result`'s section called `name` (issue 220, decision 283): under a heading of any
 /// level whose text is `name` in any case, with bold or italic marks and a trailing colon allowed
 /// (`## Needs a decision: none` starts its text with `none`), up to the next heading at its level
