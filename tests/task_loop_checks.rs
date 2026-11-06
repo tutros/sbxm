@@ -807,9 +807,14 @@ impl GhRunner for &'static Scripted {
 }
 
 fn gh_answering(output: &str) -> (GhBackend, &'static Scripted) {
+    gh_answering_in_turn(&[output])
+}
+
+/// `gh` answering `outputs` in order, one per call.
+fn gh_answering_in_turn(outputs: &[&str]) -> (GhBackend, &'static Scripted) {
     let script: &'static Scripted = Box::leak(Box::new(Scripted {
         calls: Mutex::default(),
-        outputs: Mutex::new(vec![output.to_owned()]),
+        outputs: Mutex::new(outputs.iter().rev().map(|s| (*s).to_owned()).collect()),
     }));
     (GhBackend::with_runner(Box::new(script)), script)
 }
@@ -833,7 +838,7 @@ fn gh_reads_a_commits_runs_with_their_attempts() {
         script.calls.lock().unwrap()[0],
         [
             "api".to_owned(),
-            format!("repos/{REPO}/actions/runs?head_sha={MAIN}&per_page=100")
+            format!("repos/{REPO}/actions/runs?head_sha={MAIN}&per_page=100&page=1")
         ]
     );
     let got: Vec<(u64, u32, RunStatus, &str)> = runs
@@ -896,4 +901,73 @@ fn gh_reads_a_merged_prs_merge_commit_and_none_for_an_open_one() {
 
     let (gh, _) = gh_answering(r#"{"state":"OPEN","mergeCommit":null}"#);
     assert_eq!(gh.pr_merge_commit(REPO, 5).unwrap(), None);
+}
+
+// --- Review of issue 442: every page of a commit's runs (M-4) ---
+
+/// A page of `count` passing runs numbered from `first`, out of `total`.
+fn runs_page(total: usize, first: u64, count: u64, extra: &str) -> String {
+    let mut runs: Vec<String> = (first..first + count)
+        .map(|id| {
+            format!(
+                r#"{{"id":{id},"name":"ci","run_attempt":1,"status":"completed","conclusion":"success","html_url":"u{id}"}}"#
+            )
+        })
+        .collect();
+    if !extra.is_empty() {
+        runs.push(extra.to_owned());
+    }
+    format!(
+        r#"{{"total_count":{total},"workflow_runs":[{}]}}"#,
+        runs.join(",")
+    )
+}
+
+fn page_url(page: u32) -> Vec<String> {
+    vec![
+        "api".to_owned(),
+        format!("repos/{REPO}/actions/runs?head_sha={MAIN}&per_page=100&page={page}"),
+    ]
+}
+
+#[test]
+fn gh_reads_exactly_100_runs_in_one_page() {
+    let (gh, script) = gh_answering(&runs_page(100, 1, 100, ""));
+
+    let runs = gh.commit_runs(REPO, MAIN).unwrap();
+
+    assert_eq!(runs.len(), 100);
+    assert_eq!(*script.calls.lock().unwrap(), [page_url(1)]);
+}
+
+#[test]
+fn gh_reads_the_second_page_of_101_runs() {
+    let red = r#"{"id":101,"name":"CodeQL","run_attempt":2,"status":"completed","conclusion":"failure","html_url":"u101"}"#;
+    let (gh, script) =
+        gh_answering_in_turn(&[&runs_page(101, 1, 100, ""), &runs_page(101, 0, 0, red)]);
+
+    let runs = gh.commit_runs(REPO, MAIN).unwrap();
+
+    assert_eq!(runs.len(), 101);
+    assert_eq!(runs[100].status, RunStatus::Failed);
+    assert_eq!(runs[100].workflow, "CodeQL");
+    assert_eq!(*script.calls.lock().unwrap(), [page_url(1), page_url(2)]);
+}
+
+#[test]
+fn gh_fails_when_a_later_page_of_runs_cant_be_read() {
+    // The second call has no scripted answer: `gh` fails.
+    let (gh, _) = gh_answering(&runs_page(101, 1, 100, ""));
+
+    assert!(gh.commit_runs(REPO, MAIN).is_err());
+}
+
+#[test]
+fn gh_stops_at_an_empty_page_of_runs() {
+    // GitHub counted more runs than it lists (a run deleted meanwhile): no endless paging.
+    let (gh, script) =
+        gh_answering_in_turn(&[&runs_page(150, 1, 100, ""), &runs_page(150, 0, 0, "")]);
+
+    assert_eq!(gh.commit_runs(REPO, MAIN).unwrap().len(), 100);
+    assert_eq!(script.calls.lock().unwrap().len(), 2);
 }

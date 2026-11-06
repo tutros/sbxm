@@ -174,6 +174,8 @@ struct RawCommit {
 #[derive(Deserialize)]
 struct RawRuns {
     #[serde(default)]
+    total_count: usize,
+    #[serde(default)]
     workflow_runs: Vec<RawRun>,
 }
 
@@ -620,12 +622,21 @@ impl GitHubBackend for GhBackend {
         if !full_commit(sha) {
             bail!("`{sha}` is not a full commit id, so its workflow runs can't be read");
         }
-        let raw: RawRuns = self.json(&strings(&[
-            "api",
-            &format!("repos/{repo}/actions/runs?head_sha={sha}&per_page=100"),
-        ]))?;
-        Ok(raw
-            .workflow_runs
+        // Every page (review M-4): a page that can't be read fails the whole read, and an empty
+        // page ends it even if GitHub counted more (a run deleted meanwhile).
+        let mut all = Vec::new();
+        for page in 1u32.. {
+            let raw: RawRuns = self.json(&strings(&[
+                "api",
+                &format!("repos/{repo}/actions/runs?head_sha={sha}&per_page=100&page={page}"),
+            ]))?;
+            let empty = raw.workflow_runs.is_empty();
+            all.extend(raw.workflow_runs);
+            if empty || all.len() >= raw.total_count {
+                break;
+            }
+        }
+        Ok(all
             .into_iter()
             .map(|r| WorkflowRun {
                 id: r.id,
