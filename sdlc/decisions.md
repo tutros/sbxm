@@ -1439,8 +1439,8 @@ PR armed before, or its own task and every earlier fix task pushed onto it passi
 [299]'s pause stands. A low disk or a stop request leaves the failure for a later pass. One log row either way. (2)
 **The log: the last 64 KiB in all, as data.** From `gh run view <id> --json jobs` (the failed jobs, in the run's
 order) and `gh run view <id> --log-failed` (each line goes to the job its first field names): the last 64 KiB in
-total, split evenly between the run's failed jobs (an unused share isn't passed on), cut at a line boundary when one
-is in reach and never inside a UTF-8 character. Each job's part starts with a line naming the run, the job and how
+total, split evenly between the run's failed jobs (an unused share isn't passed on), cut at a line boundary (a
+line longer than its job's share is dropped whole) and never inside a UTF-8 character. Each job's part starts with a line naming the run, the job and how
 many lines were dropped from its start; a failed job with an empty log is that line alone. It goes to the worker (and
 the in-task reviewer) as a file, `.sbxm-task/check-log.md`, kept in the task's folder too; `issue.md` names the PR,
 the run and that file, and the worker's prompt (`prompts/worker-pr-fix-check.md`, the `[prompts] worker` override

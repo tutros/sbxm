@@ -109,26 +109,59 @@ fn a_cut_lands_on_a_line_boundary() {
 
 #[test]
 fn a_multi_byte_character_across_the_cut_is_not_split() {
-    // One line longer than the whole share, so no line boundary is in reach: the cut falls in
-    // the middle of a 4-byte character and moves past it.
+    // Lines of 25 four-byte characters and a newline: the raw cut falls inside a character, and
+    // the kept part starts at the next line instead.
+    let line = format!("{}\n", "😀".repeat(25));
     let mut log = String::new();
-    while log.len() < CHECK_LOG_LIMIT + 2 {
-        log.push('😀');
+    while log.len() < CHECK_LOG_LIMIT + 50 {
+        log.push_str(&line);
     }
-    log.push_str("a\n");
-    let start = log.len() - CHECK_LOG_LIMIT;
+    let raw = log.len() - CHECK_LOG_LIMIT;
     assert!(
-        !log.is_char_boundary(start),
+        !log.is_char_boundary(raw),
         "the test must cut inside a character"
     );
 
     let text = check_log(&run(5, RunStatus::Failed), &[job("test", &log)]);
 
-    // The text is a `String`, so it is valid UTF-8; the kept part is the log's own tail.
-    let kept = &sections(&text)[0].1;
+    let (header, kept) = &sections(&text)[0];
     assert!(log.ends_with(kept.as_str()));
-    assert!(kept.len() <= CHECK_LOG_LIMIT && kept.len() > CHECK_LOG_LIMIT - 4);
-    assert!(sections(&text)[0].0.contains("part of"), "{text:.200}");
+    assert!(kept.len() <= CHECK_LOG_LIMIT);
+    assert!(kept.len() > CHECK_LOG_LIMIT - line.len());
+    assert!(kept.starts_with(&line), "{kept:.200}");
+    let dropped = (log.len() - kept.len()) / line.len();
+    assert!(
+        header.ends_with(&format!(": {dropped} line(s) dropped from the start")),
+        "{header}"
+    );
+}
+
+#[test]
+fn a_line_longer_than_the_share_is_dropped_whole_never_cut() {
+    let log = format!("{}\n", "x".repeat(CHECK_LOG_LIMIT + 1));
+
+    let text = check_log(&run(5, RunStatus::Failed), &[job("test", &log)]);
+
+    let (header, kept) = &sections(&text)[0];
+    assert_eq!(kept, "", "{text:.200}");
+    assert!(
+        header.ends_with(": 1 line(s) dropped from the start"),
+        "{header}"
+    );
+}
+
+#[test]
+fn a_last_line_longer_than_the_share_without_a_newline_is_dropped_whole_too() {
+    let log = format!("y\n{}", "x".repeat(CHECK_LOG_LIMIT + 3));
+
+    let text = check_log(&run(5, RunStatus::Failed), &[job("test", &log)]);
+
+    let (header, kept) = &sections(&text)[0];
+    assert_eq!(kept, "", "{text:.200}");
+    assert!(
+        header.ends_with(": 2 line(s) dropped from the start"),
+        "{header}"
+    );
 }
 
 #[test]

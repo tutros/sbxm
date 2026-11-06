@@ -237,32 +237,29 @@ fn one_line(text: &str) -> String {
         .collect()
 }
 
-/// The tail of `log` that fits in `share` bytes, cut at a line boundary when one is in reach and
-/// never inside a UTF-8 character; with how many whole lines were dropped from the start and
-/// whether part of one more was.
-fn tail(log: &str, share: usize) -> (&str, usize, bool) {
+/// The tail of `log` that fits in `share` bytes, cut at a line boundary (decision 300): a line
+/// is kept whole or dropped whole, so a line longer than `share` leaves nothing, and no cut falls
+/// inside a UTF-8 character. With how many lines were dropped from the start.
+fn tail(log: &str, share: usize) -> (&str, usize) {
     if log.len() <= share {
-        return (log, 0, false);
+        return (log, 0);
     }
-    let mut start = log.len() - share;
-    while !log.is_char_boundary(start) {
-        start += 1;
-    }
-    let bytes = log.as_bytes();
-    if bytes[start - 1] != b'\n'
-        && let Some(at) = log[start..].find('\n')
-        && start + at + 1 < log.len()
-    {
-        start += at + 1;
-    }
-    let dropped = log[..start].matches('\n').count();
-    (&log[start..], dropped, bytes[start - 1] != b'\n')
+    let raw = log.len() - share;
+    // The first line starting at or after `raw`; none means every line is dropped. Searched as
+    // bytes: `raw` may fall inside a character, and a newline never does.
+    let start = log.as_bytes()[raw - 1..]
+        .iter()
+        .position(|b| *b == b'\n')
+        .map_or(log.len(), |at| raw + at);
+    let dropped = &log[..start];
+    let lines = dropped.matches('\n').count() + usize::from(!dropped.ends_with('\n'));
+    (&log[start..], lines)
 }
 
 /// `check-log.md` for failed `run` (decision 300, answer 2): the last [`CHECK_LOG_LIMIT`] bytes
-/// in all, split evenly between `jobs` (an unused share isn't passed on). Each job's part starts
-/// with a line naming the run, the job and how many lines were dropped from its start; a job with
-/// an empty log is that line alone.
+/// in all, split evenly between `jobs` (an unused share isn't passed on), cut at line boundaries
+/// ([`tail`]). Each job's part starts with a line naming the run, the job and how many lines were
+/// dropped from its start; a job with an empty log is that line alone.
 pub fn check_log(run: &WorkflowRun, jobs: &[JobLog]) -> String {
     let named = format!(
         "Failed run {} ({}, attempt {}, {})",
@@ -282,13 +279,12 @@ pub fn check_log(run: &WorkflowRun, jobs: &[JobLog]) -> String {
             text.push_str(&format!("{named}, job {name}: its log is empty\n"));
             continue;
         }
-        let (kept, dropped, partial) = tail(&job.log, share);
-        let part = if partial { " and part of one more" } else { "" };
+        let (kept, dropped) = tail(&job.log, share);
         text.push_str(&format!(
-            "{named}, job {name}: {dropped} line(s) dropped from the start{part}\n"
+            "{named}, job {name}: {dropped} line(s) dropped from the start\n"
         ));
         text.push_str(kept);
-        if !kept.ends_with('\n') {
+        if !kept.is_empty() && !kept.ends_with('\n') {
             text.push('\n');
         }
     }
