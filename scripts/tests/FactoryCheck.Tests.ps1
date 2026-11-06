@@ -317,6 +317,17 @@ Describe 'factory-check.ps1' {
             Get-Content -LiteralPath (Join-Path $script:today 'summary.md') -Raw | Should -Match 'stopped: only 1073741823 bytes free'
         }
 
+        It 'runs, and says so in the summary, when the sandbox state folder is unknown' {
+            $config = Join-Path $script:cfg 'config.toml'
+            Set-Content -LiteralPath $config -Value @(Get-Content -LiteralPath $config | Where-Object { $_ -notmatch '^sandbox_state_dir' })
+            $script:freeSpace = { param($path) throw 'not read' }
+
+            Invoke-Check -extra @{ DefaultStateDir = '' }
+
+            Get-Starts 'readiness' | Should -HaveCount 1
+            Get-Content -LiteralPath (Join-Path $script:today 'summary.md') -Raw | Should -Match 'sandbox drive not checked'
+        }
+
         It 'skips the run while an sbxm- sandbox is running' {
             $script:sbxAnswers['^ls --json$'] = '{"sandboxes": [{"name": "other", "status": "running"}, {"name": "sbxm-task-issue-1-claude", "status": "running"}]}'
 

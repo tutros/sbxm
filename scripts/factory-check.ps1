@@ -179,10 +179,11 @@ function Get-SkipReason($config) {
 }
 
 # Why the run stops (too little free disk), or nothing. Like sbxm, an unknown or missing state folder isn't checked.
-function Get-StopReason($config) {
+function Get-StopReason($ctx) {
+    $config = $ctx.Config
     if ($config.MinFreeDisk -eq 0) { return $null }
     if (-not $config.StateDir -or -not (Test-Path -LiteralPath $config.StateDir)) {
-        Write-Host "  sandbox drive not checked: no sandbox state folder (set sandbox_state_dir in config.toml)"
+        Add-Summary $ctx "- sandbox drive not checked: no sandbox state folder `"$($config.StateDir)`"; set sandbox_state_dir in $(Join-Path $config.ConfigDir 'config.toml')"
         return $null
     }
     $free = [decimal](& $FreeSpace $config.StateDir)
@@ -478,7 +479,7 @@ $ctx = [pscustomobject]@{
 Add-Summary $ctx "`n## Run at $($Now.ToString('HH:mm:ss'))`n"
 $skip = Get-SkipReason $config
 if ($skip) { Add-Summary $ctx "- skipped: $skip"; exit 0 }
-$stop = Get-StopReason $config
+$stop = Get-StopReason $ctx
 if ($stop) { Add-Summary $ctx "- stopped: $stop"; exit 0 }
 
 if (-not (Test-Path -LiteralPath (Join-Path $ctx.Checkout '.git'))) {
