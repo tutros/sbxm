@@ -215,7 +215,7 @@ pub fn fetch(github: &dyn GitHubBackend, repo: &Result<String, String>, base: &P
     let pr_titles = awaiting
         .iter()
         .flatten()
-        .filter_map(|&n| Some((n, crate::title::pr_title(base, n)?)))
+        .filter_map(|&n| Some((n, crate::title::pr_title(base, repo, n)?)))
         .collect();
     Snapshot {
         queue: queue.map_err(|e| first_line(&e)),

@@ -555,7 +555,7 @@ impl Loop<'_> {
     /// `PR #9 (Add titles)`: the PR with the title of the task record that names it (issue 246),
     /// or its number alone once that record is gone.
     fn pr_named(&self, number: u32) -> String {
-        crate::title::pr_named(&self.base_dir, number)
+        crate::title::pr_named(&self.base_dir, &self.repo, number)
     }
 
     /// `#41 (Add titles)`: the issue with its task's title (issue 246), or its number alone
@@ -568,7 +568,7 @@ impl Loop<'_> {
     /// A PR's log row text (the row shows `#<number>` before it): `what`, after the PR's title
     /// in brackets when a task record still names it (issue 246), as [`Self::pr_named`] shows it.
     fn pr_row(&self, number: u32, what: String) -> String {
-        match crate::title::pr_title(&self.base_dir, number) {
+        match crate::title::pr_title(&self.base_dir, &self.repo, number) {
             Some(title) => format!("({title}) {what}"),
             None => what,
         }

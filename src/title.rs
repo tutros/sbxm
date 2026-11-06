@@ -41,33 +41,51 @@ pub fn reference(record: &Record) -> String {
     }
 }
 
-/// The title of PR `number` from the task records under `base`: the record of the task that
-/// opened it (its recorded PR URL ends in `/pull/<number>`), else a PR task's or a fix task's of
-/// that number. `None` when no record names it (its task was removed, decision 195) or the one
-/// that does has no title.
-pub fn pr_title(base: &Path, number: u32) -> Option<String> {
-    let records = record::load_all(base).ok()?;
-    let opened = records.iter().find(|r| {
-        r.pr.as_deref()
-            .and_then(crate::task::finish::pr_number)
-            .is_some_and(|n| n == number)
-    });
-    let reviewed = || {
-        records
-            .iter()
-            .find(|r| matches!(r.kind, Kind::Pr | Kind::Fix) && r.number == number)
-    };
-    opened
-        .or_else(reviewed)
-        .map(|r| one_line(&r.title))
-        .filter(|t| !t.is_empty())
+/// The title of PR `number` of `repo` from the task records under `base` (PR numbers are per
+/// repository, so a record of another `repo` never counts): the record of the issue or spec task
+/// that opened it (its recorded PR URL ends in `/pull/<number>`; a task that only continued it,
+/// decision 169, didn't open it, and its title is its own issue's), else a PR task's or a fix
+/// task's of that number. Each record is read on its own, as `queue::loop_prs` reads them: a
+/// folder that isn't sbxm's own or a record that can't be read is skipped, never the whole
+/// lookup. `None` when no record names it (its task was removed, decision 195) or the one that
+/// does has no title. Among several openers (which sbxm never makes) the lowest id wins.
+pub fn pr_title(base: &Path, repo: &str, number: u32) -> Option<String> {
+    let mut opened: Option<(String, String)> = None;
+    let mut reviewed: Option<(String, String)> = None;
+    for dir in record::task_folders(base).ok()? {
+        if crate::task::finish::check_own_folder(base, &dir).is_err() {
+            continue;
+        }
+        let Ok(rec) = record::read(&dir.join("task.json")) else {
+            continue;
+        };
+        let title = one_line(&rec.title);
+        if rec.repo != repo || title.is_empty() {
+            continue;
+        }
+        let slot = match rec.kind {
+            Kind::Issue | Kind::Spec
+                if rec.continues.is_none()
+                    && rec.pr.as_deref().and_then(crate::task::finish::pr_number)
+                        == Some(number) =>
+            {
+                &mut opened
+            }
+            Kind::Pr | Kind::Fix if rec.number == number => &mut reviewed,
+            _ => continue,
+        };
+        if slot.as_ref().is_none_or(|(id, _)| rec.id < *id) {
+            *slot = Some((rec.id, title));
+        }
+    }
+    opened.or(reviewed).map(|(_, title)| title)
 }
 
 /// `PR #9 (Add titles)` with the title from [`pr_title`], or `PR #9` without one.
-pub fn pr_named(base: &Path, number: u32) -> String {
+pub fn pr_named(base: &Path, repo: &str, number: u32) -> String {
     named(
         &format!("PR #{number}"),
-        &pr_title(base, number).unwrap_or_default(),
+        &pr_title(base, repo, number).unwrap_or_default(),
     )
 }
 

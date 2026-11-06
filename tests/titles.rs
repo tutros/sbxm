@@ -144,10 +144,115 @@ fn a_pr_is_titled_from_the_task_record_that_opened_it() {
     save(base, &opened);
     save(base, &task(Kind::Pr, 12, "Review me"));
 
-    assert_eq!(title::pr_named(base, 9), "PR #9 (Add titles)");
-    assert_eq!(title::pr_named(base, 12), "PR #12 (Review me)");
+    assert_eq!(title::pr_named(base, "o/r", 9), "PR #9 (Add titles)");
+    assert_eq!(title::pr_named(base, "o/r", 12), "PR #12 (Review me)");
     // Its task record is gone (`task rm --merged`): the number alone.
-    assert_eq!(title::pr_named(base, 13), "PR #13");
+    assert_eq!(title::pr_named(base, "o/r", 13), "PR #13");
+}
+
+/// A task of `repo` with `title` that recorded PR `url`.
+fn with_pr(kind: Kind, number: u32, repo: &str, title: &str, url: &str) -> Record {
+    let mut rec = task(kind, number, title);
+    rec.repo = repo.to_owned();
+    rec.pr = Some(url.to_owned());
+    rec
+}
+
+/// Review M-1: PR numbers are per repository, so another repository's task naming its own PR #9
+/// never titles this one's, whichever record is read first.
+#[test]
+fn a_pr_is_titled_only_from_its_own_repositorys_records() {
+    for other_first in [true, false] {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        // Ids sort the other repository's task first or last.
+        let (theirs, ours) = if other_first { (1, 41) } else { (41, 1) };
+        save(
+            base,
+            &with_pr(
+                Kind::Issue,
+                theirs,
+                "other/repo",
+                "Other repository's work",
+                "https://github.com/other/repo/pull/9",
+            ),
+        );
+        save(
+            base,
+            &with_pr(
+                Kind::Issue,
+                ours,
+                "o/r",
+                "Correct PR title",
+                "https://github.com/o/r/pull/9",
+            ),
+        );
+
+        assert_eq!(title::pr_named(base, "o/r", 9), "PR #9 (Correct PR title)");
+        assert_eq!(
+            title::pr_named(base, "other/repo", 9),
+            "PR #9 (Other repository's work)"
+        );
+    }
+}
+
+/// Review M-1: the PR-task and fix-task fallback is per repository too.
+#[test]
+fn a_pr_or_fix_task_of_another_repository_never_titles_the_pr() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
+    let mut theirs = task(Kind::Pr, 9, "Their PR");
+    theirs.repo = "other/repo".to_owned();
+    save(base, &theirs);
+
+    assert_eq!(title::pr_named(base, "o/r", 9), "PR #9");
+    assert_eq!(title::pr_named(base, "other/repo", 9), "PR #9 (Their PR)");
+}
+
+/// Review M-2: a task that continued the PR (decision 169) didn't open it; its title is its own
+/// issue's, never the PR's.
+#[test]
+fn a_task_that_continued_the_pr_never_titles_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
+    let url = "https://github.com/o/r/pull/9";
+    let mut opener = with_pr(Kind::Spec, 0, "o/r", "Build the feature", url);
+    opener.id = "spec-feature-abc123".to_owned();
+    save(base, &opener);
+    let mut continued = with_pr(Kind::Issue, 41, "o/r", "M-1: Fix a review finding", url);
+    continued.continues = Some(record::PrBranch {
+        pr: 9,
+        branch: "spec-feature-abc123".to_owned(),
+        base: "0".repeat(40),
+    });
+    save(base, &continued);
+
+    assert_eq!(title::pr_named(base, "o/r", 9), "PR #9 (Build the feature)");
+
+    fs::remove_dir_all(record::task_dir(base, "spec-feature-abc123")).unwrap();
+    assert_eq!(title::pr_named(base, "o/r", 9), "PR #9");
+}
+
+/// Review S-1: an unreadable record of another task doesn't take a readable PR's title away.
+#[test]
+fn an_unreadable_unrelated_record_keeps_the_prs_title() {
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
+    save(
+        base,
+        &with_pr(
+            Kind::Issue,
+            41,
+            "o/r",
+            "Add titles",
+            "https://github.com/o/r/pull/9",
+        ),
+    );
+    let broken = record::task_dir(base, "issue-99");
+    fs::create_dir_all(&broken).unwrap();
+    fs::write(broken.join("task.json"), "broken").unwrap();
+
+    assert_eq!(title::pr_named(base, "o/r", 9), "PR #9 (Add titles)");
 }
 
 // ---- `sbxm status`'s title column ------------------------------------------
@@ -653,4 +758,54 @@ mod looped {
             "{log}"
         );
     }
+}
+
+/// Review M-1, through the Loop section: the PR awaiting the user in `o/r` is titled from
+/// `o/r`'s record, never from another repository's task naming its own PR #9.
+#[test]
+fn the_loop_sections_awaiting_pr_is_titled_from_its_own_repository() {
+    use sbxm::github::{PrInfo, PrState};
+    use sbxm::status::looping;
+    let tmp = tempfile::tempdir().unwrap();
+    let base = tmp.path();
+    let mut theirs = with_pr(
+        Kind::Issue,
+        1,
+        "other/repo",
+        "Other repository's work",
+        "https://github.com/other/repo/pull/9",
+    );
+    theirs.hooks = serde_json::json!({ sbxm::task::queue::LOOP_HOOK: true });
+    save(base, &theirs);
+    let mut ours = with_pr(
+        Kind::Issue,
+        41,
+        "o/r",
+        "Correct PR title",
+        "https://github.com/o/r/pull/9",
+    );
+    ours.hooks = serde_json::json!({ sbxm::task::queue::LOOP_HOOK: true });
+    save(base, &ours);
+    let github = FakeGitHub::default()
+        .with_open_issues(Vec::new())
+        .with_pr(PrInfo {
+            number: 9,
+            head_ref: "b9".into(),
+            head_oid: "abc".into(),
+            is_cross_repository: false,
+            head_repo: String::new(),
+            state: PrState::Open,
+            title: "t".into(),
+            body: String::new(),
+            closing_issues: Vec::new(),
+            base_moved: false,
+        });
+
+    let snapshot = looping::fetch(&github, &Ok("o/r".to_owned()), base);
+
+    assert_eq!(snapshot.awaiting, Ok(vec![9]));
+    assert_eq!(
+        snapshot.pr_titles.get(&9).map(String::as_str),
+        Some("Correct PR title")
+    );
 }
