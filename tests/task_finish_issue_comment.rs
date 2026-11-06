@@ -720,3 +720,240 @@ fn a_task_that_updates_an_open_pr_posts_on_its_issue_after_the_pr_comment() {
         [IssueComment { issue: 41, id: 5 }]
     );
 }
+
+// --- A second finish of a finished task (review M-1 of PR 465) ----------------------------------
+
+/// The GitHub calls of a second finish that are anything but the issue summary: there must be
+/// none, since the retry never pushes, opens, adopts or reviews a PR.
+fn not_summaries(github: &FakeGitHub) -> Vec<GhCall> {
+    github
+        .calls()
+        .into_iter()
+        .filter(|c| !matches!(c, GhCall::IssueComment(..) | GhCall::IssueCommentEdit(..)))
+        .collect()
+}
+
+fn origin_tip(f: &Fixture, branch: &str) -> String {
+    common::git(&f.origin, &["rev-parse", branch])
+}
+
+#[test]
+fn finishing_an_issue_task_twice_edits_its_recorded_comment_and_publishes_nothing_else() {
+    let f = fixture();
+    let prepared = ready(&f);
+    let first = FakeGitHub::default().with_next_comment_id(900);
+    let opened = finish(&f.env.base_dir(), "issue-41", &first, &Probe).unwrap();
+    let tip = origin_tip(&f, "issue-41");
+    let second = FakeGitHub::default().with_next_comment_id(901);
+
+    let done = finish(&f.env.base_dir(), "issue-41", &second, &Probe).unwrap();
+
+    let calls = comments(&second);
+    let [GhCall::IssueCommentEdit(repo, 900, body)] = calls.as_slice() else {
+        panic!("{:?}", second.calls())
+    };
+    assert_eq!(repo, "o/r");
+    assert!(body.contains(&format!("- PR: {}\n", opened.url)), "{body}");
+    assert!(not_summaries(&second).is_empty(), "{:?}", second.calls());
+    assert!(done.summaries_only);
+    assert_eq!(done.url, opened.url);
+    assert_eq!(done.review_posted, None);
+    assert_eq!(origin_tip(&f, "issue-41"), tip);
+    let task = reread(&prepared.meta);
+    assert_eq!(task.issue_comments, [IssueComment { issue: 41, id: 900 }]);
+    assert_eq!(task.pr.as_deref(), Some(opened.url.as_str()));
+    assert_eq!(task.stage, Stage::Finished);
+}
+
+#[test]
+fn finishing_a_spec_pr_task_twice_edits_each_recorded_comment_in_the_fixes_order() {
+    let f = fixture();
+    let id = ready_spec(&f, "# Batch\n\nFixes: #436, #435\n");
+    finish_spec(&f, &id, &FakeGitHub::default().with_next_comment_id(10));
+    let second = FakeGitHub::default().with_next_comment_id(20);
+
+    let done = finish_spec(&f, &id, &second);
+
+    let calls = comments(&second);
+    let [
+        GhCall::IssueCommentEdit(_, 10, _),
+        GhCall::IssueCommentEdit(_, 11, _),
+    ] = calls.as_slice()
+    else {
+        panic!("{:?}", second.calls())
+    };
+    assert!(not_summaries(&second).is_empty(), "{:?}", second.calls());
+    assert!(done.summaries_only);
+    assert_eq!(done.summarized, [436, 435]);
+    assert_eq!(
+        reread(&meta(&f, &id)).issue_comments,
+        [
+            IssueComment { issue: 436, id: 10 },
+            IssueComment { issue: 435, id: 11 }
+        ]
+    );
+}
+
+#[test]
+fn finishing_a_task_that_continued_a_pr_twice_edits_its_recorded_comment() {
+    let f = fixture();
+    let prepared = ready_continuing(&f);
+    finish(
+        &f.env.base_dir(),
+        "issue-41",
+        &FakeGitHub::default().with_next_comment_id(5),
+        &Probe,
+    )
+    .unwrap();
+    let tip = origin_tip(&f, "feature-x");
+    let second = FakeGitHub::default().with_next_comment_id(6);
+
+    let done = finish(&f.env.base_dir(), "issue-41", &second, &Probe).unwrap();
+
+    let calls = comments(&second);
+    let [GhCall::IssueCommentEdit(_, 5, body)] = calls.as_slice() else {
+        panic!("{:?}", second.calls())
+    };
+    assert!(
+        body.contains("- PR: https://github.com/o/r/pull/7\n"),
+        "{body}"
+    );
+    assert!(not_summaries(&second).is_empty(), "{:?}", second.calls());
+    assert!(done.summaries_only);
+    assert_eq!(done.continued, Some(7));
+    assert_eq!(origin_tip(&f, "feature-x"), tip);
+    assert_eq!(
+        reread(&prepared.meta).issue_comments,
+        [IssueComment { issue: 41, id: 5 }]
+    );
+}
+
+#[test]
+fn a_second_finish_posts_the_summary_a_failed_post_left_out_and_records_it() {
+    let f = fixture();
+    let prepared = ready(&f);
+    finish(
+        &f.env.base_dir(),
+        "issue-41",
+        &FakeGitHub::default().failing_issue_comments_on(41),
+        &Probe,
+    )
+    .unwrap();
+    assert!(reread(&prepared.meta).issue_comments.is_empty());
+    let second = FakeGitHub::default().with_next_comment_id(902);
+
+    let done = finish(&f.env.base_dir(), "issue-41", &second, &Probe).unwrap();
+
+    let calls = comments(&second);
+    let [GhCall::IssueComment(_, 41, _)] = calls.as_slice() else {
+        panic!("{:?}", second.calls())
+    };
+    assert!(not_summaries(&second).is_empty(), "{:?}", second.calls());
+    assert!(done.warnings.is_empty(), "{:?}", done.warnings);
+    assert_eq!(
+        reread(&prepared.meta).issue_comments,
+        [IssueComment { issue: 41, id: 902 }]
+    );
+}
+
+#[test]
+fn a_second_spec_finish_posts_the_missing_summary_and_edits_the_one_that_was_posted() {
+    let f = fixture();
+    let id = ready_spec(&f, "# Batch\n\nFixes: #436, #435\n");
+    finish_spec(
+        &f,
+        &id,
+        &FakeGitHub::default()
+            .with_next_comment_id(10)
+            .failing_issue_comments_on(435),
+    );
+    let second = FakeGitHub::default().with_next_comment_id(30);
+
+    finish_spec(&f, &id, &second);
+
+    let calls = comments(&second);
+    let [
+        GhCall::IssueCommentEdit(_, 10, _),
+        GhCall::IssueComment(_, 435, _),
+    ] = calls.as_slice()
+    else {
+        panic!("{:?}", second.calls())
+    };
+    assert!(not_summaries(&second).is_empty(), "{:?}", second.calls());
+    assert_eq!(
+        reread(&meta(&f, &id)).issue_comments,
+        [
+            IssueComment { issue: 436, id: 10 },
+            IssueComment { issue: 435, id: 30 }
+        ]
+    );
+}
+
+#[test]
+fn a_second_finish_still_warns_when_the_summary_still_cant_be_posted() {
+    let f = fixture();
+    ready(&f);
+    let down = FakeGitHub::default().failing_issue_comments_on(41);
+    finish(&f.env.base_dir(), "issue-41", &down, &Probe).unwrap();
+
+    let done = finish(&f.env.base_dir(), "issue-41", &down, &Probe).unwrap();
+
+    assert!(
+        done.warnings
+            .iter()
+            .any(|w| w.contains("couldn't be posted on issue #41")),
+        "{:?}",
+        done.warnings
+    );
+}
+
+#[test]
+fn a_second_spec_finish_whose_saved_spec_is_gone_is_refused_before_any_call() {
+    let f = fixture();
+    let id = ready_spec(&f, "# Batch\n\nFixes: #435\n");
+    finish_spec(&f, &id, &FakeGitHub::default().with_next_comment_id(10));
+    fs::remove_file(meta(&f, &id).join("source.md")).unwrap();
+    let second = FakeGitHub::default();
+
+    let err =
+        finish_spec_pr(&f.env.base_dir(), &id, "--spec idea.md", &second, &Probe).unwrap_err();
+
+    assert!(format!("{err:#}").contains("source.md"), "{err:#}");
+    assert!(second.calls().is_empty(), "{:?}", second.calls());
+}
+
+#[test]
+fn the_command_says_a_second_finish_only_updated_the_summary() {
+    let f = fixture();
+    ready(&f);
+    let run = |github: &FakeGitHub| {
+        let mut out = Vec::new();
+        task_finish::run(
+            &f.env.config_dir(),
+            &task_finish::Options {
+                target: Target::Issue(41),
+                repo_root: f.env.tmp.path().join("target-repo"),
+                push_unresolved: false,
+            },
+            &sbxm::backend::FakeBackend::default(),
+            github,
+            &Probe,
+            &mut out,
+        )
+        .unwrap();
+        String::from_utf8(out).unwrap()
+    };
+    run(&FakeGitHub::default().with_next_comment_id(900));
+
+    let out = run(&FakeGitHub::default());
+
+    assert!(
+        out.contains("issue-41: already finished with https://github.com/o/r/pull/"),
+        "{out}"
+    );
+    assert!(
+        out.contains("posted or updated the summary of the review rounds on issue #41"),
+        "{out}"
+    );
+    assert!(!out.contains("pushed issue-41"), "{out}");
+}

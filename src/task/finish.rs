@@ -1459,6 +1459,12 @@ pub struct Finished {
     /// The `sbxm task review --pr` command for the PR's next commit
     /// ([`review::review_pr_command`]).
     pub review_again: String,
+    /// The task was already finished with its PR, so this finish only posted or edited the
+    /// summaries on `summarized` (issue 430): nothing was pushed, opened or reviewed.
+    pub summaries_only: bool,
+    /// The issues whose summary this finish posted or edited, in order (failures are in
+    /// `warnings`).
+    pub summarized: Vec<u32>,
 }
 
 /// The number at the end of a PR's URL (`https://github.com/o/r/pull/7`), as `gh pr create`
@@ -1661,6 +1667,15 @@ fn open_task_pr(
     if prepared.record.kind == record::Kind::Fix {
         bail!("task {id} is a fix task; `sbxm task fix` pushes it onto its PR's branch itself");
     }
+    if prepared.record.stage == record::Stage::Finished
+        && prepared.record.pr.is_some()
+        && matches!(
+            prepared.record.kind,
+            record::Kind::Issue | record::Kind::Spec
+        )
+    {
+        return retry_summaries(prepared, github);
+    }
     check_can_finish(&prepared.record)?;
     let task = prepared.record.clone();
     crate::commands::task_start::check_repo(&task.repo)?;
@@ -1694,16 +1709,7 @@ fn open_task_pr(
             format!("--issue {}", task.number),
         ),
         Some(flag) => {
-            let source = prepared.meta.join("source.md");
-            let text = fs::read_to_string(&source).with_context(|| {
-                format!(
-                    "task {id} has no readable source.md, the spec as its start saved it, so its \
-                     Fixes line can't be read; nothing was pushed"
-                )
-            })?;
-            let fixes = super::fixes::parse(&text).with_context(|| {
-                format!("task {id}'s spec, as its start saved it in source.md; nothing was pushed")
-            })?;
+            let (fixes, text) = saved_fixes(&prepared)?;
             (
                 fixes,
                 super::fixes::title(&text, &task.title),
@@ -1798,7 +1804,7 @@ fn open_task_pr(
     })?;
     let pr = pr_number(&url).map_or_else(|| "<N>".to_owned(), |n| n.to_string());
     // Issue 430: before the in-task review, whose failed post fails the finish.
-    let mut warnings = post_issue_summaries(&mut prepared, &fixes, &url, github);
+    let (summarized, mut warnings) = post_issue_summaries(&mut prepared, &fixes, &url, github);
     let review_posted = match posting {
         Some((commit, text)) => {
             post_in_task_review(&mut prepared, &url, &commit, &risk_text, &text, github)?;
@@ -1832,6 +1838,57 @@ fn open_task_pr(
         unresolved,
         review_posted,
         warnings,
+        summaries_only: false,
+        summarized,
+    })
+}
+
+/// The issues a spec task's PR closes, from the `Fixes:` line of the spec as its start saved it
+/// (`source.md`), and that saved text.
+fn saved_fixes(prepared: &Prepared) -> Result<(Vec<u32>, String)> {
+    let id = &prepared.record.id;
+    let text = fs::read_to_string(prepared.meta.join("source.md")).with_context(|| {
+        format!(
+            "task {id} has no readable source.md, the spec as its start saved it, so its Fixes \
+             line can't be read; nothing was pushed"
+        )
+    })?;
+    let fixes = super::fixes::parse(&text).with_context(|| {
+        format!("task {id}'s spec, as its start saved it in source.md; nothing was pushed")
+    })?;
+    Ok((fixes, text))
+}
+
+/// A finish of a task already finished with its PR (issue 430): it only posts the summary of the
+/// review rounds on each issue the PR closes, or edits the comment `task.json` recorded for it,
+/// so a summary whose post failed can be retried and a recorded one updated. The PR comes from
+/// `task.json`, the issues from the task's number or its saved spec, both read before any call;
+/// nothing is pushed, no PR is looked up or opened, and no review or status is posted again.
+fn retry_summaries(mut prepared: Prepared, github: &dyn GitHubBackend) -> Result<Finished> {
+    let task = prepared.record.clone();
+    crate::commands::task_start::check_repo(&task.repo)?;
+    let url = task.pr.clone().unwrap_or_default();
+    let issues = match task.kind {
+        record::Kind::Spec => saved_fixes(&prepared)?.0,
+        _ => vec![task.number],
+    };
+    let (summarized, warnings) = post_issue_summaries(&mut prepared, &issues, &url, github);
+    let pr = pr_number(&url).map_or_else(|| "<N>".to_owned(), |n| n.to_string());
+    let continued = task.continues.as_ref().map(|c| c.pr);
+    let base = continued.is_none().then_some(task.base.as_str());
+    Ok(Finished {
+        review_again: review::review_pr_command(pr, &task.repo, base, false),
+        url,
+        branch: task.branch,
+        cuts: Vec::new(),
+        continued,
+        adopted: false,
+        draft: false,
+        unresolved: Vec::new(),
+        review_posted: None,
+        warnings,
+        summaries_only: true,
+        summarized,
     })
 }
 
@@ -1839,16 +1896,17 @@ fn open_task_pr(
 /// one `task.json` recorded for that issue: only the task's own record says which comment is its,
 /// never a marker in the issue's comments (decision 187(d)). A comment's id is recorded once
 /// GitHub accepted it. Nothing here fails the finish: every failure is a warning returned, and
-/// the other issues still get theirs.
+/// the other issues still get theirs. Returns the issues whose comment GitHub accepted, in
+/// order, and the warnings.
 fn post_issue_summaries(
     prepared: &mut Prepared,
     issues: &[u32],
     url: &str,
     github: &dyn GitHubBackend,
-) -> Vec<String> {
-    let mut warnings = Vec::new();
+) -> (Vec<u32>, Vec<String>) {
+    let (mut done, mut warnings) = (Vec::new(), Vec::new());
     if issues.is_empty() {
-        return warnings;
+        return (done, warnings);
     }
     let body = match summary::issue_comment(&prepared.record, &prepared.meta, url) {
         Ok(body) => body,
@@ -1856,7 +1914,7 @@ fn post_issue_summaries(
             warnings.push(format!(
                 "no summary of the review rounds was posted on the issue: {why}"
             ));
-            return warnings;
+            return (done, warnings);
         }
     };
     let repo = prepared.record.repo.clone();
@@ -1868,16 +1926,16 @@ fn post_issue_summaries(
             .find(|c| c.issue == issue)
             .map(|c| c.id);
         match recorded {
-            Some(id) => {
-                if let Err(e) = github.issue_comment_edit(&repo, id, &body) {
-                    warnings.push(format!(
-                        "the summary of the review rounds on issue #{issue} (comment {id}) \
+            Some(id) => match github.issue_comment_edit(&repo, id, &body) {
+                Ok(()) => done.push(issue),
+                Err(e) => warnings.push(format!(
+                    "the summary of the review rounds on issue #{issue} (comment {id}) \
                          couldn't be updated: {e:#}"
-                    ));
-                }
-            }
+                )),
+            },
             None => match github.issue_comment(&repo, issue, &body) {
                 Ok(id) => {
+                    done.push(issue);
                     prepared
                         .record
                         .issue_comments
@@ -1895,7 +1953,7 @@ fn post_issue_summaries(
             },
         }
     }
-    warnings
+    (done, warnings)
 }
 
 /// What [`open_pr`] found for a task's branch.
@@ -2399,7 +2457,7 @@ fn finish_continued(
     prepared.record.pr = Some(url.clone());
     record::write(&prepared.meta, &prepared.record)
         .with_context(|| format!("{id} is pushed to PR #{pr} but task.json couldn't be updated"))?;
-    let warnings = post_issue_summaries(&mut prepared, &[task.number], &url, github);
+    let (summarized, warnings) = post_issue_summaries(&mut prepared, &[task.number], &url, github);
     Ok(Finished {
         // The task's base is the one it was started with, not necessarily the PR's: the review
         // diffs against the repo's default branch, as before, unless `--base` is added.
@@ -2413,5 +2471,7 @@ fn finish_continued(
         unresolved,
         review_posted: None,
         warnings,
+        summaries_only: false,
+        summarized,
     })
 }

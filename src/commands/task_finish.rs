@@ -146,6 +146,11 @@ fn publish(
     };
     let base_dir = GlobalConfig::load(config_dir)?.base_dir;
     let done = finish::finish(&base_dir, &id, github, probe)?;
+    let cleanup = format!("--issue {number}");
+    if done.summaries_only {
+        let comment = crate::title::hint_comment_of(&base_dir, &id);
+        return print_summaries_only(out, &id, &done, &cleanup, &comment);
+    }
     for cut in &done.cuts {
         writeln!(out, "  note: {cut}")?;
     }
@@ -173,7 +178,39 @@ fn publish(
         return Ok(());
     }
     let comment = crate::title::hint_comment_of(&base_dir, &id);
-    print_opened(out, &id, &done, &format!("--issue {number}"), &comment)
+    print_opened(out, &id, &done, &cleanup, &comment)
+}
+
+/// What a `finish` of a task already finished with its PR did (issue 430): only the summaries of
+/// the review rounds on its issues, posted or edited; nothing was pushed, opened or reviewed.
+fn print_summaries_only(
+    out: &mut dyn Write,
+    id: &str,
+    done: &finish::Finished,
+    cleanup: &str,
+    comment: &str,
+) -> Result<()> {
+    writeln!(
+        out,
+        "{id}: already finished with {}; nothing was pushed and no PR was opened or reviewed again",
+        done.url
+    )?;
+    if !done.summarized.is_empty() {
+        let issues: Vec<String> = done.summarized.iter().map(|n| format!("#{n}")).collect();
+        writeln!(
+            out,
+            "  posted or updated the summary of the review rounds on issue {}",
+            issues.join(", ")
+        )?;
+    }
+    for warning in &done.warnings {
+        writeln!(out, "warning: {warning}")?;
+    }
+    writeln!(
+        out,
+        "  next: after it is merged, clean up with: sbxm task rm {cleanup}{comment}"
+    )?;
+    Ok(())
 }
 
 /// What a `finish` that opened (or adopted) a PR did, for an issue task or a spec task under the
@@ -247,6 +284,10 @@ fn finish_spec(
     if sink == Sink::Pr {
         let flag = spec_flag(spec);
         let done = finish::finish_spec_pr(base_dir, id, &flag, github, probe)?;
+        if done.summaries_only {
+            let comment = crate::title::hint_comment_of(base_dir, id);
+            return print_summaries_only(out, id, &done, &flag, &comment);
+        }
         for cut in &done.cuts {
             writeln!(out, "  note: {cut}")?;
         }

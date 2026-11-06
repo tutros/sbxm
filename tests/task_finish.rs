@@ -369,16 +369,17 @@ fn a_task_that_is_not_ready_is_refused_before_anything_is_pushed_or_opened() {
 }
 
 #[test]
-fn a_task_with_a_pr_is_refused_and_nothing_is_pushed_again() {
+fn a_task_with_a_pr_pushes_and_opens_nothing_again() {
     let f = fixture();
     ready(&f);
     let github = FakeGitHub::default();
     run(&f, &github).unwrap();
     let before = git(&f.origin, &["rev-parse", "issue-41"]);
 
-    let err = run(&f, &github).unwrap_err();
+    // Issue 430: the second finish only updates the issue's summary.
+    let done = run(&f, &github).unwrap();
 
-    assert!(format!("{err:#}").contains("already has a PR"), "{err:#}");
+    assert!(done.summaries_only);
     assert_eq!(writes(&github).len(), 1);
     assert_eq!(git(&f.origin, &["rev-parse", "issue-41"]), before);
 }
@@ -1593,6 +1594,11 @@ fn writes(github: &FakeGitHub) -> Vec<GhCall> {
         .calls()
         .into_iter()
         // The comment on the issue (issue 430) is `task_finish_issue_comment.rs`'s to test.
-        .filter(|c| !matches!(c, GhCall::OpenPrFor(..) | GhCall::IssueComment(..)))
+        .filter(|c| {
+            !matches!(
+                c,
+                GhCall::OpenPrFor(..) | GhCall::IssueComment(..) | GhCall::IssueCommentEdit(..)
+            )
+        })
         .collect()
 }
