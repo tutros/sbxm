@@ -484,3 +484,173 @@ fn the_loop_section_titles_its_task_and_the_prs_awaiting_but_not_one_whose_recor
     assert!(text.contains("  done: 1 (issue-40 (Earlier))\n"), "{text}");
     assert!(text.contains("PRs (#9: Earlier, #13)\n"), "{text}");
 }
+
+// ---- `task loop`'s lines and log rows (answer 5) -----------------------------
+
+mod looped {
+    use super::*;
+    use std::cell::Cell;
+    use std::io::Write;
+    use std::time::Duration;
+
+    use anyhow::{Result, anyhow};
+    use common::task_fixture::Probe;
+    use sbxm::commands::task_loop::{self, Env, Options, Steps};
+    use sbxm::github::{PrInfo, PrState, RunStatus, WorkflowRun};
+    use sbxm::task::record::{ReviewResult, Stage, Status};
+    use sbxm::task::risk::Level;
+
+    const REPO: &str = "o/r";
+    const HEAD: &str = "2222222222222222222222222222222222222222";
+    const START: u64 = 1_793_613_600;
+
+    /// No issue is ever run: the loop only looks after the PRs it opened, then stops.
+    struct Idle;
+
+    impl Steps for Idle {
+        fn run(&self, issue: u32, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+            Err(anyhow!("unexpected run of {issue}"))
+        }
+        fn resume(&self, issue: u32, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+            Err(anyhow!("unexpected resume of {issue}"))
+        }
+        fn finish(&self, issue: u32, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+            Err(anyhow!("unexpected finish of {issue}"))
+        }
+        fn file_findings(&self, _: u32, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+            Ok(())
+        }
+        fn fix_pr(&self, pr: u32, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+            Err(anyhow!("unexpected fix of {pr}"))
+        }
+        fn fix_check(&self, pr: u32, _: u64, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+            Err(anyhow!("no log-fix of {pr} here"))
+        }
+        fn rm_merged(&self, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+            Ok(())
+        }
+        fn room(&self) -> Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Issue 1's task, which a loop finished into PR #101, titled `title`.
+    fn loop_pr(base: &Path, title: &str) {
+        let mut rec = task(Kind::Issue, 1, title);
+        rec.stage = Stage::Finished;
+        rec.status = Status::Ok;
+        rec.review = Some(ReviewResult {
+            round: 1,
+            commit: Some(HEAD.to_owned()),
+            risk: Level::Low,
+            ..ReviewResult::default()
+        });
+        rec.pr = Some(format!("https://github.com/{REPO}/pull/101"));
+        rec.hooks = serde_json::json!({ task_loop::LOOP_HOOK: true });
+        save(base, &rec);
+    }
+
+    /// PR #101, whose `ci` failed again after a re-run (attempt 3).
+    fn github() -> FakeGitHub {
+        FakeGitHub::default()
+            .with_user("me")
+            .with_default_branch("main")
+            .with_branch_head("main", &"a".repeat(40))
+            .with_pr(PrInfo {
+                number: 101,
+                head_ref: "b101".into(),
+                head_oid: HEAD.into(),
+                is_cross_repository: false,
+                head_repo: String::new(),
+                state: PrState::Open,
+                title: "t".into(),
+                body: String::new(),
+                closing_issues: Vec::new(),
+                base_moved: false,
+            })
+            .with_runs(
+                HEAD,
+                vec![WorkflowRun {
+                    id: 7,
+                    workflow: "ci".into(),
+                    attempt: 3,
+                    status: RunStatus::Failed,
+                    url: "https://github.com/o/r/actions/runs/7".into(),
+                    actor: "alice".into(),
+                }],
+            )
+            .with_open_issues(Vec::new())
+    }
+
+    /// The loop's output and its log file.
+    fn run_loop(title: &str) -> (String, String) {
+        let env = common::Env::new();
+        let repo_root = env.tmp.path().join("repo");
+        fs::create_dir_all(&repo_root).unwrap();
+        fs::write(
+            repo_root.join("sbxm-task.toml"),
+            "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = []\n",
+        )
+        .unwrap();
+        loop_pr(&env.base_dir(), title);
+        let clock = Cell::new(START);
+        let now = || clock.get();
+        let sleep = |d: Duration| clock.set(clock.get() + d.as_secs());
+        let stop = || clock.get() > START;
+        let (mut out, mut warn) = (Vec::new(), Vec::new());
+        task_loop::run(
+            &env.config_dir(),
+            &Options {
+                repo_root: repo_root.clone(),
+                issues: Vec::new(),
+                cap: None,
+                repo: Some(REPO.into()),
+            },
+            &Idle,
+            &github(),
+            &Probe,
+            &Env {
+                now: &now,
+                sleep: &sleep,
+                stop_requested: &stop,
+            },
+            &mut out,
+            &mut warn,
+        )
+        .unwrap();
+        let log = fs::read_dir(repo_root.join("sdlc").join("batches"))
+            .ok()
+            .and_then(|mut d| d.next())
+            .and_then(|e| fs::read_to_string(e.ok()?.path()).ok())
+            .unwrap_or_default();
+        (String::from_utf8(out).unwrap(), log)
+    }
+
+    #[test]
+    fn a_pr_the_loop_names_is_titled_from_the_task_that_opened_it() {
+        let (out, log) = run_loop("Add titles");
+
+        assert!(
+            out.contains("PR #101 (Add titles) awaits you: its ci failed again after a re-run"),
+            "{out}"
+        );
+        assert!(
+            log.contains("| #101 (Add titles) checks: ci failed again after a re-run"),
+            "{log}"
+        );
+    }
+
+    #[test]
+    fn a_pr_whose_task_has_no_title_is_named_by_its_number_alone() {
+        let (out, log) = run_loop("");
+
+        assert!(
+            out.contains("PR #101 awaits you: its ci failed again after a re-run"),
+            "{out}"
+        );
+        assert!(
+            log.contains("| #101 checks: ci failed again after a re-run"),
+            "{log}"
+        );
+    }
+}

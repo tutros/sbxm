@@ -242,10 +242,11 @@ enum Claimed {
     Finished(Option<String>),
 }
 
-/// The line for a task a command run by hand finished, into `pr` when one is recorded.
-fn finished_by_hand(issue: u32, pr: Option<&str>) -> String {
+/// The line for a task a command run by hand finished, into `pr` when one is recorded; `named`
+/// is its issue with the title (issue 246).
+fn finished_by_hand(named: &str, pr: Option<&str>) -> String {
     let into = pr.map_or_else(String::new, |url| format!(" into {url}"));
-    format!("#{issue}: finished by a command run by hand{into}; the loop leaves it to that command")
+    format!("{named}: finished by a command run by hand{into}; the loop leaves it to that command")
 }
 
 /// Where a task whose lock was held goes on from when it is tried again.
@@ -276,19 +277,21 @@ impl Held {
             Retry::Resume { .. } => "resume",
         };
         format!(
-            "#{issue} was not tried again after its lock was held; continue it with `sbxm task \
-             {command} --issue {issue}`"
+            "{} was not tried again after its lock was held; continue it with `sbxm task \
+             {command} --issue {issue}`",
+            crate::title::named(&format!("#{issue}"), &self.title)
         )
     }
 }
 
-/// The line for a task whose `phase` was skipped because a live command holds its lock.
-fn held_line(issue: u32, phase: &str, e: &anyhow::Error) -> String {
+/// The line for a task whose `phase` was skipped because a live command holds its lock; `named`
+/// is its issue with the title (issue 246).
+fn held_line(named: &str, phase: &str, e: &anyhow::Error) -> String {
     let why = e
         .downcast_ref::<lock::InUse>()
         .map_or_else(|| format!("{e:#}"), lock::InUse::describe);
     format!(
-        "#{issue}: its `task {phase}` is skipped for now: {why}; the loop tries it again after \
+        "{named}: its `task {phase}` is skipped for now: {why}; the loop tries it again after \
          its next task"
     )
 }
@@ -410,7 +413,10 @@ impl Loop<'_> {
         if let Err(e) = removed {
             self.warn_once(
                 warn,
-                format!("#{issue}'s {READY_LABEL} label could not be removed: {e:#}"),
+                format!(
+                    "{issue_named}'s {READY_LABEL} label could not be removed: {e:#}",
+                    issue_named = self.issue_named(issue)
+                ),
             )?;
         }
         Ok(true)
@@ -447,9 +453,10 @@ impl Loop<'_> {
                 Err(e) => self.warn_once(
                     warn,
                     format!(
-                        "task {} names PR #{number}, which can't be read ({e:#}); not counted \
+                        "task {} names {pr_named}, which can't be read ({e:#}); not counted \
                          among the PRs awaiting you",
-                        pr.task
+                        pr.task,
+                        pr_named = self.pr_named(number)
                     ),
                 )?,
             }
@@ -529,10 +536,11 @@ impl Loop<'_> {
     }
 
     /// A task cut short by a stop request: says how to continue it.
-    fn stopped(issue: u32, out: &mut dyn Write) -> std::io::Result<End> {
+    fn stopped(&self, issue: u32, out: &mut dyn Write) -> std::io::Result<End> {
         writeln!(
             out,
-            "#{issue}: stopped on request; continue it with `sbxm task resume --issue {issue}`"
+            "{}: stopped on request; continue it with `sbxm task resume --issue {issue}`",
+            self.issue_named(issue)
         )?;
         Ok(End::Parked {
             ready: None,
@@ -542,6 +550,28 @@ impl Loop<'_> {
 
     fn task_dir(&self, issue: u32) -> PathBuf {
         record::task_dir(&self.base_dir, &format!("issue-{issue}"))
+    }
+
+    /// `PR #9 (Add titles)`: the PR with the title of the task record that names it (issue 246),
+    /// or its number alone once that record is gone.
+    fn pr_named(&self, number: u32) -> String {
+        crate::title::pr_named(&self.base_dir, number)
+    }
+
+    /// `#41 (Add titles)`: the issue with its task's title (issue 246), or its number alone
+    /// without a task record.
+    fn issue_named(&self, issue: u32) -> String {
+        let title = self.record(issue).map(|r| r.title).unwrap_or_default();
+        crate::title::named(&format!("#{issue}"), &title)
+    }
+
+    /// A PR's log row text (the row shows `#<number>` before it): `what`, after the PR's title
+    /// in brackets when a task record still names it (issue 246), as [`Self::pr_named`] shows it.
+    fn pr_row(&self, number: u32, what: String) -> String {
+        match crate::title::pr_title(&self.base_dir, number) {
+            Some(title) => format!("({title}) {what}"),
+            None => what,
+        }
     }
 
     fn record(&self, issue: u32) -> Option<Record> {
@@ -645,7 +675,7 @@ impl Loop<'_> {
                 if self.record(issue).is_none() {
                     return Err(Halt::Stopped);
                 }
-                return Self::stopped(issue, out).map_err(io);
+                return self.stopped(issue, out).map_err(io);
             };
             if paused > 0 {
                 stops.push(("disk".to_owned(), paused));
@@ -691,7 +721,8 @@ impl Loop<'_> {
             // A live command run by hand holds the task (issue 409): its resume is skipped, not
             // failed, and the loop moves on.
             if resuming && e.is::<lock::InUse>() {
-                writeln!(out, "{}", held_line(issue, "resume", &e)).map_err(io)?;
+                writeln!(out, "{}", held_line(&self.issue_named(issue), "resume", &e))
+                    .map_err(io)?;
                 return Ok(End::Held(Retry::Resume { failures }));
             }
             if e.is::<pipeline::MissingSecret>() {
@@ -708,18 +739,17 @@ impl Loop<'_> {
                 let wait = self.settings.usage_wait;
                 writeln!(
                     out,
-                    "#{issue}: usage limit; waiting {} before `task resume` ({} of {} waited in a \
+                    "{issue_named}: usage limit; waiting {} before `task resume` ({} of {} waited in a \
                      row)",
                     queue::span(wait.as_secs()),
                     queue::span(self.usage_waited.as_secs()),
-                    queue::span(total.as_secs())
-                )
+                    queue::span(total.as_secs()), issue_named = self.issue_named(issue))
                 .map_err(io)?;
                 let (slept, asked) = self.usage_sleep(wait);
                 self.usage_waited += slept;
                 stops.push(("usage limit".to_owned(), slept.as_secs()));
                 if asked {
-                    return Self::stopped(issue, out).map_err(io);
+                    return self.stopped(issue, out).map_err(io);
                 }
                 continue;
             }
@@ -738,19 +768,23 @@ impl Loop<'_> {
                     .map_or("no record".to_owned(), |r| r.stage.name().to_owned());
                 writeln!(
                     out,
-                    "#{issue}: parked at {stage} after a second failure: {e:#}; see `sbxm task \
-                     status --issue {issue}`"
-                )
+                    "{issue_named}: parked at {stage} after a second failure: {e:#}; see `sbxm task \
+                     status --issue {issue}`", issue_named = self.issue_named(issue))
                 .map_err(io)?;
                 return Ok(End::Parked {
                     ready: None,
                     outcome: format!("parked at {stage}"),
                 });
             }
-            writeln!(out, "#{issue}: stopped ({e:#}); resuming it once").map_err(io)?;
+            writeln!(
+                out,
+                "{issue_named}: stopped ({e:#}); resuming it once",
+                issue_named = self.issue_named(issue)
+            )
+            .map_err(io)?;
             pending = Some((cause, self.now()));
             if (self.env.stop_requested)() {
-                return Self::stopped(issue, out).map_err(io);
+                return self.stopped(issue, out).map_err(io);
             }
         }
     }
@@ -791,11 +825,15 @@ impl Loop<'_> {
     ) -> std::result::Result<End, Halt> {
         let Some(rec) = self.record(issue) else {
             return Ok(End::Taken(format!(
-                "#{issue}: its task was removed by a command run by hand; the loop leaves it"
+                "{issue_named}: its task was removed by a command run by hand; the loop leaves it",
+                issue_named = self.issue_named(issue)
             )));
         };
         if rec.pr.is_some() || rec.stage == Stage::Finished {
-            return Ok(End::Taken(finished_by_hand(issue, rec.pr.as_deref())));
+            return Ok(End::Taken(finished_by_hand(
+                &self.issue_named(issue),
+                rec.pr.as_deref(),
+            )));
         }
         match (rec.stage, retry) {
             (Stage::Ready, Retry::Finish { ready }) => self
@@ -829,25 +867,30 @@ impl Loop<'_> {
         match self.claim(issue) {
             Ok(Claimed::Marked) => {}
             Ok(Claimed::Finished(pr)) => {
-                return Ok(End::Taken(finished_by_hand(issue, pr.as_deref())));
+                return Ok(End::Taken(finished_by_hand(
+                    &self.issue_named(issue),
+                    pr.as_deref(),
+                )));
             }
             Err(e) if e.is::<lock::InUse>() => {
-                writeln!(out, "{}", held_line(issue, "finish", &e))?;
+                writeln!(out, "{}", held_line(&self.issue_named(issue), "finish", &e))?;
                 return Ok(End::Held(Retry::Finish { ready }));
             }
             Err(e) => self.warn_once(
                 warn,
                 format!(
-                    "#{issue} could not be marked as the loop's ({e:#}); its PR won't count \
-                     among the PRs awaiting you"
+                    "{issue_named} could not be marked as the loop's ({e:#}); its PR won't count \
+                     among the PRs awaiting you",
+                    issue_named = self.issue_named(issue)
                 ),
             )?,
         }
         if let Err(e) = self.steps.finish(issue, out, warn) {
             writeln!(
                 out,
-                "#{issue}: parked at ready, its finish failed: {e:#}; run `sbxm task finish \
-                 --issue {issue}`"
+                "{issue_named}: parked at ready, its finish failed: {e:#}; run `sbxm task finish \
+                 --issue {issue}`",
+                issue_named = self.issue_named(issue)
             )?;
             return Ok(End::Parked {
                 ready: Some(ready),
@@ -867,8 +910,9 @@ impl Loop<'_> {
             if let Err(e) = self.steps.file_findings(issue, out, warn) {
                 writeln!(
                     warn,
-                    "warning: #{issue}'s findings were not filed: {e:#}; run `sbxm task \
-                     file-findings --issue {issue} --create`"
+                    "warning: {issue_named}'s findings were not filed: {e:#}; run `sbxm task \
+                     file-findings --issue {issue} --create`",
+                    issue_named = self.issue_named(issue)
                 )?;
             }
             match armed {
@@ -923,7 +967,11 @@ impl Loop<'_> {
             return Ok(None);
         };
         let waits = |why: String, out: &mut dyn Write| -> Result<Option<String>> {
-            writeln!(out, "PR #{number} awaits you: {why}")?;
+            writeln!(
+                out,
+                "{pr_named} awaits you: {why}",
+                pr_named = self.pr_named(number)
+            )?;
             Ok(None)
         };
         if rec.stopped.is_some() || review.must_fix > 0 {
@@ -936,7 +984,7 @@ impl Loop<'_> {
             return waits("the commit the review covered is unknown".to_owned(), out);
         };
         if self.paused(warn)? {
-            return Ok(Some(Self::not_armed_paused(number, out)?));
+            return Ok(Some(self.not_armed_paused(number, out)?));
         }
         let state = match self.github.pr_merge_state(&self.repo, number) {
             Ok(state) => state,
@@ -954,14 +1002,19 @@ impl Loop<'_> {
             let note = "auto-merge not armed: the PR's head moved after the review";
             writeln!(
                 out,
-                "PR #{number}: {note} (reviewed {reviewed}, head {head}); it awaits you"
+                "{pr_named}: {note} (reviewed {reviewed}, head {head}); it awaits you",
+                pr_named = self.pr_named(number)
             )?;
             return Ok(Some(note.to_owned()));
         }
         match self.github.pr_arm_auto_merge(&self.repo, number, reviewed) {
             Ok(()) => {
                 self.armed.insert(number);
-                writeln!(out, "PR #{number}: auto-merge armed on {reviewed}")?;
+                writeln!(
+                    out,
+                    "{pr_named}: auto-merge armed on {reviewed}",
+                    pr_named = self.pr_named(number)
+                )?;
                 Ok(Some("auto-merge armed".to_owned()))
             }
             Err(e) => self.arming_failed(number, &e, out, warn),
@@ -977,9 +1030,16 @@ impl Loop<'_> {
     ) -> Result<Option<String>> {
         self.warn_once(
             warn,
-            format!("auto-merge could not be armed on PR #{number}: {e:#}; it awaits you"),
+            format!(
+                "auto-merge could not be armed on {pr_named}: {e:#}; it awaits you",
+                pr_named = self.pr_named(number)
+            ),
         )?;
-        writeln!(out, "PR #{number}: auto-merge not armed: arming failed")?;
+        writeln!(
+            out,
+            "{pr_named}: auto-merge not armed: arming failed",
+            pr_named = self.pr_named(number)
+        )?;
         Ok(Some("auto-merge not armed: arming failed".to_owned()))
     }
 
@@ -1011,8 +1071,9 @@ impl Loop<'_> {
                 self.say_once(
                     out,
                     format!(
-                        "PR #{number} conflicts with its base but is a draft; it awaits you, and \
-                         the loop leaves it"
+                        "{pr_named} conflicts with its base but is a draft; it awaits you, and \
+                         the loop leaves it",
+                        pr_named = self.pr_named(number)
                     ),
                 )?;
                 continue;
@@ -1076,27 +1137,34 @@ impl Loop<'_> {
                 return self.warn_once(
                     warn,
                     format!(
-                        "PR #{number} can't be read ({e:#}); it is not resolved until {branch} \
-                         moves"
+                        "{pr_named} can't be read ({e:#}); it is not resolved until {branch} \
+                         moves",
+                        pr_named = self.pr_named(number)
                     ),
                 );
             }
         };
         writeln!(
             out,
-            "PR #{number} conflicts with {branch}; resolving it with `sbxm task fix --pr {number}`"
+            "{pr_named} conflicts with {branch}; resolving it with `sbxm task fix --pr {number}`",
+            pr_named = self.pr_named(number)
         )?;
         if armed {
             if let Err(e) = self.github.pr_disarm_auto_merge(&self.repo, number) {
                 return self.warn_once(
                     warn,
                     format!(
-                        "auto-merge could not be disarmed on PR #{number} ({e:#}); it is not \
-                         resolved until {branch} moves"
+                        "auto-merge could not be disarmed on {pr_named} ({e:#}); it is not \
+                         resolved until {branch} moves",
+                        pr_named = self.pr_named(number)
                     ),
                 );
             }
-            writeln!(out, "PR #{number}: auto-merge disarmed for the resolve")?;
+            writeln!(
+                out,
+                "{pr_named}: auto-merge disarmed for the resolve",
+                pr_named = self.pr_named(number)
+            )?;
         }
         let result = self.steps.fix_pr(number, out, warn);
         let fix = record::fix_id(number, &head).and_then(|id| {
@@ -1130,7 +1198,10 @@ impl Loop<'_> {
         let duration = |agent: Option<&record::Agent>| agent?.run.as_ref().map(|r| r.duration_s);
         let row = Row {
             issue: number,
-            title: format!("resolve: conflicts with {branch} (task {task})"),
+            title: self.pr_row(
+                number,
+                format!("resolve: conflicts with {branch} (task {task})"),
+            ),
             size: None,
             started,
             ready: None,
@@ -1142,7 +1213,11 @@ impl Loop<'_> {
             stops: Vec::new(),
             idle_before: None,
         };
-        writeln!(out, "PR #{number}: {outcome}")?;
+        writeln!(
+            out,
+            "{pr_named}: {outcome}",
+            pr_named = self.pr_named(number)
+        )?;
         if let Err(e) = queue::append_resolve_row(&self.log, &row) {
             self.warn_once(
                 warn,
@@ -1158,8 +1233,9 @@ impl Loop<'_> {
         self.say_once(
             out,
             format!(
-                "PR #{number} awaits you: {why}; its fix task is kept (see `sbxm task status`), \
-                 and the loop leaves the PR"
+                "{pr_named} awaits you: {why}; its fix task is kept (see `sbxm task status`), \
+                 and the loop leaves the PR",
+                pr_named = self.pr_named(number)
             ),
         )?;
         Ok(format!("not resolved: {why}"))
@@ -1221,18 +1297,20 @@ impl Loop<'_> {
         if !eligible {
             writeln!(
                 out,
-                "PR #{number} awaits you: its own review didn't allow auto-merge"
+                "{pr_named} awaits you: its own review didn't allow auto-merge",
+                pr_named = self.pr_named(number)
             )?;
             return Ok(None);
         }
         if self.paused(warn)? {
-            return Ok(Some(Self::not_armed_paused(number, out)?));
+            return Ok(Some(self.not_armed_paused(number, out)?));
         }
         if review.risk != Level::Low {
             writeln!(
                 out,
-                "PR #{number} awaits you: its {what}'s review is risk {}",
-                review.risk.word()
+                "{pr_named} awaits you: its {what}'s review is risk {}",
+                review.risk.word(),
+                pr_named = self.pr_named(number)
             )?;
             return Ok(Some(format!(
                 "auto-merge not armed: risk {}",
@@ -1242,7 +1320,8 @@ impl Loop<'_> {
         let Some(reviewed) = review.commit.as_deref() else {
             writeln!(
                 out,
-                "PR #{number} awaits you: the commit its {what}'s review covered is unknown"
+                "{pr_named} awaits you: the commit its {what}'s review covered is unknown",
+                pr_named = self.pr_named(number)
             )?;
             return Ok(Some(
                 "auto-merge not armed: reviewed commit unknown".to_owned(),
@@ -1258,14 +1337,19 @@ impl Loop<'_> {
             );
             writeln!(
                 out,
-                "PR #{number}: {note} (reviewed {reviewed}, head {head}); it awaits you"
+                "{pr_named}: {note} (reviewed {reviewed}, head {head}); it awaits you",
+                pr_named = self.pr_named(number)
             )?;
             return Ok(Some(note));
         }
         match self.github.pr_arm_auto_merge(&self.repo, number, reviewed) {
             Ok(()) => {
                 self.armed.insert(number);
-                writeln!(out, "PR #{number}: auto-merge armed again on {reviewed}")?;
+                writeln!(
+                    out,
+                    "{pr_named}: auto-merge armed again on {reviewed}",
+                    pr_named = self.pr_named(number)
+                )?;
                 Ok(Some("auto-merge armed".to_owned()))
             }
             Err(e) => self.arming_failed(number, &e, out, warn),
@@ -1293,11 +1377,12 @@ impl Loop<'_> {
     }
 
     /// A PR not armed because of the pause: said, and the log row's note.
-    fn not_armed_paused(number: u32, out: &mut dyn Write) -> Result<String> {
+    fn not_armed_paused(&self, number: u32, out: &mut dyn Write) -> Result<String> {
         writeln!(
             out,
-            "PR #{number} awaits you: the loop is paused on a red main and arms nothing until you \
-             run `sbxm task loop --clear-pause`"
+            "{} awaits you: the loop is paused on a red main and arms nothing until you \
+             run `sbxm task loop --clear-pause`",
+            self.pr_named(number)
         )?;
         Ok("auto-merge not armed: paused on a red main".to_owned())
     }
@@ -1393,8 +1478,9 @@ impl Loop<'_> {
                 Err(e) => self.warn_once(
                     warn,
                     format!(
-                        "PR #{number}'s merge can't be read ({e:#}); it is read again at the next \
-                         pass"
+                        "{pr_named}'s merge can't be read ({e:#}); it is read again at the next \
+                         pass",
+                        pr_named = self.pr_named(number)
                     ),
                 )?,
             }
@@ -1416,7 +1502,10 @@ impl Loop<'_> {
             .collect();
         for (commit, pr) in commits {
             let what = match pr {
-                Some(number) => format!("PR #{number}'s merge commit"),
+                Some(number) => format!(
+                    "{pr_named}'s merge commit",
+                    pr_named = self.pr_named(number)
+                ),
                 None => format!("main's commit {commit}"),
             };
             let Some(read) = self.read_runs(&commit, &what, out, warn)? else {
@@ -1498,7 +1587,10 @@ impl Loop<'_> {
             return Ok(());
         }
         let merged_by = match pr {
-            Some(number) => format!("the loop's auto-merge of PR #{number}"),
+            Some(number) => format!(
+                "the loop's auto-merge of {pr_named}",
+                pr_named = self.pr_named(number)
+            ),
             None if run.actor.is_empty() => "someone unknown".to_owned(),
             None => run.actor.clone(),
         };
@@ -1545,15 +1637,17 @@ impl Loop<'_> {
                         armed = false;
                         writeln!(
                             out,
-                            "PR #{number}: auto-merge disarmed while the loop is paused on a red \
-                             main"
+                            "{pr_named}: auto-merge disarmed while the loop is paused on a red \
+                             main",
+                            pr_named = self.pr_named(number)
                         )?;
                     }
                     Err(e) => self.warn_once(
                         warn,
                         format!(
-                            "auto-merge could not be disarmed on PR #{number} while the loop is \
-                             paused ({e:#}); tried again at the next pass"
+                            "auto-merge could not be disarmed on {pr_named} while the loop is \
+                             paused ({e:#}); tried again at the next pass",
+                            pr_named = self.pr_named(number)
                         ),
                     )?,
                 }
@@ -1564,14 +1658,15 @@ impl Loop<'_> {
                     self.warn_once(
                         warn,
                         format!(
-                            "PR #{number} can't be read ({e:#}); its workflow runs are read at a \
-                             later pass"
+                            "{pr_named} can't be read ({e:#}); its workflow runs are read at a \
+                             later pass",
+                            pr_named = self.pr_named(number)
                         ),
                     )?;
                     continue;
                 }
             };
-            let what = format!("PR #{number}");
+            let what = self.pr_named(number);
             let Some(read) = self.read_runs(&head, &what, out, warn)? else {
                 continue;
             };
@@ -1591,9 +1686,10 @@ impl Loop<'_> {
                     self.warn_once(
                         warn,
                         format!(
-                            "auto-merge could not be disarmed on PR #{number}, whose {} failed \
+                            "auto-merge could not be disarmed on {pr_named}, whose {} failed \
                              again after a re-run ({e:#}); tried again at the next pass",
-                            run.workflow
+                            run.workflow,
+                            pr_named = self.pr_named(number)
                         ),
                     )?;
                     continue;
@@ -1617,14 +1713,15 @@ impl Loop<'_> {
                     self.say_once(
                         out,
                         format!(
-                            "PR #{number}: its {} failed twice ({}){}; its log-fix waits for {waits}",
+                            "{pr_named}: its {} failed twice ({}){}; its log-fix waits for {waits}",
                             run.workflow,
                             run.url,
                             if self.disarmed_for_log_fix.contains(&number) {
                                 "; auto-merge disarmed"
                             } else {
                                 ""
-                            }
+                            },
+                            pr_named = self.pr_named(number)
                         ),
                     )?;
                     continue;
@@ -1644,18 +1741,22 @@ impl Loop<'_> {
                 self.failed_twice.insert((number, run.id));
                 writeln!(
                     out,
-                    "PR #{number} awaits you: its {} failed again after a re-run ({}){}",
+                    "{pr_named} awaits you: its {} failed again after a re-run ({}){}",
                     run.workflow,
                     run.url,
                     if disarmed {
                         "; auto-merge disarmed"
                     } else {
                         ""
-                    }
+                    },
+                    pr_named = self.pr_named(number)
                 )?;
                 let row = Row {
                     issue: number,
-                    title: format!("checks: {} failed again after a re-run", run.workflow),
+                    title: self.pr_row(
+                        number,
+                        format!("checks: {} failed again after a re-run", run.workflow),
+                    ),
                     size: None,
                     started: self.now(),
                     ready: None,
@@ -1730,12 +1831,13 @@ impl Loop<'_> {
         let started = self.now();
         writeln!(
             out,
-            "PR #{number}: its {} failed twice ({}){}; fixing it once from the run's log with \
+            "{pr_named}: its {} failed twice ({}){}; fixing it once from the run's log with \
              `sbxm task fix --pr {number} --check-run {}`",
             run.workflow,
             run.url,
             if armed { "; auto-merge disarmed" } else { "" },
-            run.id
+            run.id,
+            pr_named = self.pr_named(number)
         )?;
         let result = self.steps.fix_check(number, run.id, out, warn);
         let id = record::fix_id(number, head);
@@ -1760,9 +1862,11 @@ impl Loop<'_> {
                 self.unresolved.insert(number);
                 writeln!(
                     out,
-                    "PR #{number} awaits you: its {} failed again after a re-run ({}) and its \
+                    "{pr_named} awaits you: its {} failed again after a re-run ({}) and its \
                      log-fix {why}; its fix task is kept (see `sbxm task status`)",
-                    run.workflow, run.url
+                    run.workflow,
+                    run.url,
+                    pr_named = self.pr_named(number)
                 )?;
                 format!("log-fix {why}; awaits you")
             }
@@ -1776,16 +1880,23 @@ impl Loop<'_> {
                     Some(note) => format!("fixed from its log, {note}"),
                     None => "fixed from its log".to_owned(),
                 };
-                writeln!(out, "PR #{number}: {outcome}")?;
+                writeln!(
+                    out,
+                    "{pr_named}: {outcome}",
+                    pr_named = self.pr_named(number)
+                )?;
                 outcome
             }
         };
         let duration = |agent: Option<&record::Agent>| agent?.run.as_ref().map(|r| r.duration_s);
         let row = Row {
             issue: number,
-            title: format!(
-                "checks: {} failed again after a re-run; log-fix (task {task})",
-                run.workflow
+            title: self.pr_row(
+                number,
+                format!(
+                    "checks: {} failed again after a re-run; log-fix (task {task})",
+                    run.workflow
+                ),
             ),
             size: None,
             started,
@@ -2098,6 +2209,7 @@ pub fn run(
         };
         let (ready, outcome, parked) = match end {
             End::Refused(reason) => {
+                // The line before named the issue with its title already.
                 writeln!(out, "skipped #{issue}: refused before any write: {reason}")?;
                 refused.push(Skipped {
                     issue,
@@ -2147,7 +2259,7 @@ pub fn run(
             stops,
             idle_before: idle_from.map(|end| started.saturating_sub(end)),
         };
-        writeln!(out, "#{issue}: {outcome}")?;
+        writeln!(out, "{}: {outcome}", lp.issue_named(issue))?;
         lp.append(&row, warn)?;
         // Idle runs from a task's ready to the next start (decision 249, review S-1), so the
         // loop's own finish and findings filing count, a failed finish too; a task that never got
