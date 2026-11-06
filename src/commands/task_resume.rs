@@ -184,11 +184,14 @@ pub fn run(
             ),
         }
     }
+    let comment = crate::title::hint_comment(&prepared.record);
     match (report.must_fix_left, &opts.target) {
-        (0, _) | (_, Target::Spec(_)) => writeln!(out, "  next: sbxm task finish {flag}")?,
+        (0, _) | (_, Target::Spec(_)) => {
+            writeln!(out, "  next: sbxm task finish {flag}{comment}")?;
+        }
         (_, Target::Issue(n)) => writeln!(
             out,
-            "  next: fix them by hand, or file them: sbxm task file-findings --issue {n}"
+            "  next: fix them by hand, or file them: sbxm task file-findings --issue {n}{comment}"
         )?,
     }
     if let Some(hint) = resume_hint(&prepared.record, &flag) {

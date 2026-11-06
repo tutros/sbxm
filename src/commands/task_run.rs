@@ -757,15 +757,19 @@ fn summary_line(
     let flag = target.flag();
     let record = read_record(config_dir, target);
     let unchanged = matches!((&record, pre_record), (Some(r), Some(p)) if r == p);
+    // The target with its task's title (issue 246), once it has a record to take it from.
+    let named = record
+        .as_ref()
+        .map_or_else(|| flag.clone(), |r| crate::title::named(&flag, &r.title));
     let line = match (&record, result) {
-        (Some(_), Err(e)) if unchanged => format!("{flag}: not started: {e:#}"),
+        (Some(_), Err(e)) if unchanged => format!("{named}: not started: {e:#}"),
         (Some(record), _) => {
             let must_fix = record
                 .review
                 .as_ref()
                 .map_or_else(|| "-".to_owned(), |r| r.must_fix.to_string());
             format!(
-                "{flag}: stage {}, must-fix {must_fix}; next: {}",
+                "{named}: stage {}, must-fix {must_fix}; next: {}",
                 record.stage.name(),
                 next_command(record, &flag)
             )

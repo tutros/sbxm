@@ -261,11 +261,12 @@ fn run_issue(
             ),
         }
     }
+    let comment = crate::title::hint_comment(&prepared.record);
     match report.must_fix_left {
-        0 => writeln!(out, "  next: sbxm task finish --issue {number}")?,
+        0 => writeln!(out, "  next: sbxm task finish --issue {number}{comment}")?,
         _ => writeln!(
             out,
-            "  next: fix them by hand, or file them: sbxm task file-findings --issue {number}"
+            "  next: fix them by hand, or file them: sbxm task file-findings --issue {number}{comment}"
         )?,
     }
     if let Some(hint) = resume_hint(&prepared.record, &format!("--issue {number}")) {
@@ -453,7 +454,12 @@ fn run_spec(
             ),
         }
     }
-    writeln!(out, "  next: sbxm task finish {}", spec_flag(path))?;
+    writeln!(
+        out,
+        "  next: sbxm task finish {}{}",
+        spec_flag(path),
+        crate::title::hint_comment(&prepared.record)
+    )?;
     if let Some(hint) = resume_hint(&prepared.record, &spec_flag(path)) {
         writeln!(out, "{hint}")?;
     }

@@ -713,7 +713,7 @@ fn a_lock_held_at_the_claim_skips_the_finish_and_the_task_is_tried_after_the_nex
         .lines()
         .find(|l| l.contains("in use by another sbxm command"))
         .unwrap_or_else(|| panic!("{}", run.out));
-    assert!(line.starts_with("#3: "), "{line}");
+    assert!(line.starts_with("#3 (Fix 3): "), "{line}");
     assert!(line.contains(&format!("process {HAND}")), "{line}");
     assert!(line.contains("task finish"), "{line}");
     assert_eq!(
@@ -810,7 +810,7 @@ fn a_lock_held_at_the_resume_skips_it_and_the_task_is_tried_after_the_next_one()
         .lines()
         .find(|l| l.contains("in use by another sbxm command"))
         .unwrap_or_else(|| panic!("{}", run.out));
-    assert!(line.starts_with("#3: "), "{line}");
+    assert!(line.starts_with("#3 (Fix 3): "), "{line}");
     assert!(line.contains("task resume"), "{line}");
     assert!(!run.out.contains("parked"), "{}", run.out);
 }
@@ -838,7 +838,7 @@ fn a_held_resume_is_not_a_failure_so_the_retry_still_counts_the_first_one() {
         ["run 3", "resume 3", "run 4", "resume 3"],
         "the retry's failure is the task's second: parked, not resumed again"
     );
-    assert!(run.out.contains("#3: parked"), "{}", run.out);
+    assert!(run.out.contains("#3 (Fix 3): parked"), "{}", run.out);
 }
 
 #[test]
@@ -885,7 +885,7 @@ fn a_held_finish_whose_holder_finished_the_task_is_left_to_it() {
     let line = run
         .out
         .lines()
-        .find(|l| l.starts_with("#3: ") && l.contains("finished by a command run by hand"))
+        .find(|l| l.starts_with("#3 (Fix 3): ") && l.contains("finished by a command run by hand"))
         .unwrap_or_else(|| panic!("{}", run.out));
     assert!(line.contains("pull/503"), "{line}");
     assert!(!f.log_text().contains("| #3 "), "{}", f.log_text());

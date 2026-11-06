@@ -610,7 +610,11 @@ fn a_low_disk_leaves_a_conflicting_pr_for_a_later_step_not_failed() {
 
     run.result.unwrap();
     assert_eq!(script.fixes_run(), ["run 3", "fix 101"], "{}", run.out);
-    assert!(!run.out.contains("PR #101 awaits you"), "{}", run.out);
+    assert!(
+        !run.out.contains("PR #101 (Fix 1) awaits you"),
+        "{}",
+        run.out
+    );
 }
 
 #[test]
@@ -742,7 +746,7 @@ fn a_failed_resolve_leaves_the_pr_and_its_fix_task_is_said_once_and_not_tried_ag
         assert_eq!(script.fixes_run(), ["fix 101", "run 3", "run 4"], "{said}");
         assert!(run.out.contains(said), "{said}: {}", run.out);
         assert_eq!(
-            run.out.matches("PR #101 awaits you").count(),
+            run.out.matches("PR #101 (Fix 1) awaits you").count(),
             1,
             "{said}: {}",
             run.out

@@ -61,6 +61,7 @@ fn working(number: u32) -> Record {
 fn row(id: &str, stage: &'static str, status: &str) -> TaskRow {
     TaskRow {
         id: id.to_owned(),
+        title: String::new(),
         stage,
         status: status.to_owned(),
         stage_entered_at: None,
@@ -96,6 +97,7 @@ fn every_missing_value_shows_a_dash() {
 fn present_values_fill_every_column() {
     let r = TaskRow {
         id: "issue-7".to_owned(),
+        title: String::new(),
         stage: "reviewing",
         status: "running".to_owned(),
         stage_entered_at: Some(40),
@@ -183,6 +185,7 @@ fn a_narrow_width_still_produces_one_line_per_row() {
 fn a_full_row_at_terminal_width_still_shows_an_ellipsis_instead_of_losing_the_log() {
     let r = TaskRow {
         id: "issue-7".to_owned(),
+        title: String::new(),
         stage: "reviewing",
         status: "running".to_owned(),
         stage_entered_at: Some(60),
