@@ -5,12 +5,16 @@ BeforeAll {
     # A stand-in command: logs each call's arguments as one line to $log, and answers from $answers with the
     # first pattern (in order) that matches the joined arguments. An answer is text, @{ out = ...; code = ... },
     # or a scriptblock given the arguments that returns one of those. With $envLog, each call also logs the
-    # SBXM_CONFIG_DIR it sees there, as `<arguments> => <value>`.
+    # SBXM_CONFIG_DIR it sees there, as `<arguments> => <value>`, resolved against the location it is called in
+    # (as sbxm resolves a relative one).
     function New-Tool([string]$log, [System.Collections.IDictionary]$answers, [string]$envLog) {
         {
             $line = $args -join ' '
             Add-Content -LiteralPath $log -Value $line
-            if ($envLog) { Add-Content -LiteralPath $envLog -Value "$line => $env:SBXM_CONFIG_DIR" }
+            if ($envLog) {
+                $seen = if ($env:SBXM_CONFIG_DIR) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($env:SBXM_CONFIG_DIR) }
+                Add-Content -LiteralPath $envLog -Value "$line => $seen"
+            }
             foreach ($pattern in $answers.Keys) {
                 if ($line -match $pattern) {
                     $answer = $answers[$pattern]
@@ -70,7 +74,8 @@ BeforeAll {
             FreeSpace   = $script:freeSpace
             ProcessName = $script:processName
         }
-        foreach ($key in $extra.Keys) { $params[$key] = $extra[$key] }
+        # A $null value leaves that parameter out.
+        foreach ($key in $extra.Keys) { if ($null -eq $extra[$key]) { $params.Remove($key) } else { $params[$key] = $extra[$key] } }
         & $script:check @params 6>$null
     }
 
@@ -425,6 +430,69 @@ Describe 'factory-check.ps1' {
             $LASTEXITCODE | Should -Be 1
             @(Get-Log $script:sbxmEnvLog | Where-Object { $_ -match '^task start ' }) | Should -BeLike "* => $($script:cfg)"
             $env:SBXM_CONFIG_DIR | Should -Be 'elsewhere-config'
+        }
+    }
+
+    Context 'a relative config folder (review round 2, M-1)' {
+        BeforeEach {
+            $script:savedConfigDir = $env:SBXM_CONFIG_DIR
+            $script:ghAnswers['^issue list '] = ConvertTo-IssueJson @(New-ListedIssue 1 '2026-10-01T00:00:00Z')
+            # The launch folder holds config/; the dedicated checkout has a config/ of its own that must not be read.
+            Push-Location -LiteralPath (Split-Path $script:cfg -Parent)
+            New-Item -ItemType Directory (Join-Path $script:base 'factory/checkout/config') | Out-Null
+        }
+        AfterEach {
+            Pop-Location
+            $env:SBXM_CONFIG_DIR = $script:savedConfigDir
+        }
+
+        It 'resolves a relative <case> in the launch folder for every sbxm call, also inside the checkout' -ForEach @(
+            @{ case = '-ConfigDir'; param = 'config'; incoming = 'elsewhere-config' }
+            @{ case = 'SBXM_CONFIG_DIR'; param = $null; incoming = 'config' }
+        ) {
+            $env:SBXM_CONFIG_DIR = $incoming
+
+            Invoke-Check @{ ConfigDir = $param }
+
+            $calls = @(Get-Log $script:sbxmEnvLog)
+            @($calls | Where-Object { $_ -match '^config profiles-dir =>' }) | Should -HaveCount 1
+            @($calls | Where-Object { $_ -match '^task start ' }) | Should -HaveCount 1
+            @($calls | Where-Object { $_ -match '^task rm ' }) | Should -HaveCount 1
+            foreach ($call in $calls) { $call | Should -BeLike "* => $($script:cfg)" }
+            Test-Path -LiteralPath (Join-Path $script:today 'issue-1.md') | Should -BeTrue
+            $env:SBXM_CONFIG_DIR | Should -Be $incoming
+        }
+
+        It 'resolves a relative SBXM_CONFIG_DIR in the launch folder and restores it when an sbxm call fails' {
+            $env:SBXM_CONFIG_DIR = 'config'
+            $script:sbxmAnswers['^task start --spec '] = { throw 'injected start failure' }
+
+            Invoke-Check @{ ConfigDir = $null }
+
+            $LASTEXITCODE | Should -Be 1
+            @(Get-Log $script:sbxmEnvLog | Where-Object { $_ -match '^task start ' }) | Should -BeLike "* => $($script:cfg)"
+            $env:SBXM_CONFIG_DIR | Should -Be 'config'
+        }
+
+        It 'resolves a relative -TemplateDir in the launch folder' {
+            Copy-Item -Recurse -LiteralPath $script:templates -Destination (Join-Path (Split-Path $script:cfg -Parent) 'templates')
+
+            Invoke-Check @{ TemplateDir = 'templates' }
+
+            $LASTEXITCODE | Should -Be 0
+            Test-Path -LiteralPath (Join-Path $script:base 'factory/checkout/sbxm-task.toml') | Should -BeTrue
+            Test-Path -LiteralPath (Join-Path $script:today 'issue-1.md') | Should -BeTrue
+        }
+
+        It 'names the resolved config folder in a hint' {
+            $fakeBase = $script:base
+            $makeTask = ${function:New-FakeTask}
+            $script:sbxmAnswers['^task start --spec '] = { & $makeTask $fakeBase $args[3] 'no section'; 'started' }.GetNewClosure()
+
+            Invoke-Check @{ ConfigDir = 'config' }
+
+            $LASTEXITCODE | Should -Be 1
+            Get-Content -Raw -LiteralPath (Join-Path $script:today 'summary.md') | Should -BeLike "*SBXM_CONFIG_DIR = '$($script:cfg)'*"
         }
     }
 

@@ -83,8 +83,17 @@ function Invoke-Tool([string]$name, [scriptblock]$command, [string[]]$arguments,
 
 function Invoke-Gh([string[]]$arguments) { (Invoke-Tool 'gh' $Gh $arguments).Out }
 
+# A path as an absolute one, resolved in the folder the script was started in. The sbxm task calls run inside the
+# dedicated checkout and .NET reads resolve against the process's folder, so a relative path would change meaning.
+function Resolve-LaunchPath([string]$path) {
+    if (-not $path) { return $path }
+    $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($path)
+}
+
 # The config folder every sbxm call gets as SBXM_CONFIG_DIR: -ConfigDir, else SBXM_CONFIG_DIR, else ~/.config/sbxm.
-$SelectedConfigDir = if ($ConfigDir) { $ConfigDir } elseif ($env:SBXM_CONFIG_DIR) { $env:SBXM_CONFIG_DIR } else { Join-Path $HOME '.config/sbxm' }
+$SelectedConfigDir = Resolve-LaunchPath $(if ($ConfigDir) { $ConfigDir } elseif ($env:SBXM_CONFIG_DIR) { $env:SBXM_CONFIG_DIR } else { Join-Path $HOME '.config/sbxm' })
+$TemplateDir = Resolve-LaunchPath $TemplateDir
+$DefaultStateDir = Resolve-LaunchPath $DefaultStateDir
 
 # Every sbxm call goes through here, so the config check, `task start` and `task rm` all read the config whose
 # base_dir the script uses; the caller's SBXM_CONFIG_DIR is put back afterwards, also on failure.
