@@ -123,7 +123,8 @@ pub struct Gates {
     pub timeout: Duration,
 }
 
-/// Where `task finish` puts a spec task's branch (decision 174(e)); an issue task always opens a PR.
+/// Where `task finish` puts a spec task's branch (decisions 174(e), 301); an issue task always opens
+/// a PR.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Sink {
@@ -132,6 +133,10 @@ pub enum Sink {
     Local,
     /// The branch is pushed to `origin`, and no PR is opened.
     Push,
+    /// The branch is pushed and a PR opened, with the in-task review posted as its review, as
+    /// for an issue task (issue 438, decision 301); the spec's `Fixes:` line names the issues it
+    /// closes.
+    Pr,
 }
 
 /// Override files, as absolute paths inside the repo, checked to exist.

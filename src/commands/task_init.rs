@@ -51,7 +51,8 @@ timeout = "20m"                # per command
 
 # Where `task finish --spec` puts a spec task's branch (an issue task always opens a PR):
 # "local" keeps it in the task's repo.git and prints how to fetch it; "push" pushes it to
-# origin as a new branch and opens no PR.
+# origin as a new branch and opens no PR; "pr" pushes it and opens a PR with the in-task review,
+# closing the issues of the spec's `Fixes: #435, #436` line.
 # [finish]
 # sink = "local"
 

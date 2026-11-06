@@ -16,8 +16,9 @@ use crate::github::GitHubBackend;
 use crate::harness::Harness;
 use crate::headless::RunStatus;
 use crate::run::config::{check_model_flag, headless_harness, parse_duration};
-use crate::task::config::TaskConfig;
+use crate::task::config::{Sink, TaskConfig};
 use crate::task::finish;
+use crate::task::fixes;
 use crate::task::gates::ShellHostRunner;
 use crate::task::lifetime;
 use crate::task::pipeline::{self, Ctx};
@@ -727,7 +728,7 @@ pub struct SpecOptions {
 
 /// Every input [`run_spec`] resolves before it does anything with the backend or writes
 /// anything: the worker config, the repo, the committer identity, the base branch and the spec
-/// file itself. Shared with `task_run::run_spec` (issue #194 review finding M-1) so a `--restart`
+/// file itself (and, under the `pr` sink, its `Fixes:` line). Shared with `task_run::run_spec` (issue #194 review finding M-1) so a `--restart`
 /// discard there happens only after all of this has been checked, the same as `run_with`
 /// validates every start input before its own `discard_existing` call. `source_text`, `id` and
 /// `title` are this snapshot's read of the spec file: a caller that discards an existing task
@@ -745,9 +746,14 @@ pub(crate) struct SpecStart {
     pub source_text: String,
     pub id: String,
     pub title: String,
+    /// What the start says once and carries on from: a `pr` sink's spec with no `Fixes:` line.
+    pub warnings: Vec<String>,
 }
 
-pub(crate) fn resolve_spec_start(opts: &SpecOptions) -> Result<SpecStart> {
+pub(crate) fn resolve_spec_start(
+    opts: &SpecOptions,
+    github: &dyn GitHubBackend,
+) -> Result<SpecStart> {
     let mut config = TaskConfig::load(&opts.repo_root)?;
     if let Some(harness) = opts.worker_harness {
         let harness = headless_harness("--worker-harness", harness.as_str(), "tasks")
@@ -773,8 +779,9 @@ pub(crate) fn resolve_spec_start(opts: &SpecOptions) -> Result<SpecStart> {
         Some(identity) => identity.clone(),
         None => Identity::read_from(None)?,
     };
-    // A spec task makes no GitHub call, so an omitted base is read from the checkout (`origin/HEAD`,
-    // which `git clone` sets), not asked of GitHub.
+    // A spec task asks GitHub nothing about its base (only the `pr` sink makes GitHub calls, its
+    // checks below), so an omitted base is read from the checkout (`origin/HEAD`, which `git
+    // clone` sets).
     let base_branch = match &opts.base {
         Some(base) => base.clone(),
         None => {
@@ -794,6 +801,10 @@ pub(crate) fn resolve_spec_start(opts: &SpecOptions) -> Result<SpecStart> {
     }
     let source_text = pipeline::validate_spec_file(&opts.spec)?;
     let (id, title) = record::spec_id(&opts.spec)?;
+    let mut warnings = Vec::new();
+    if config.sink == Sink::Pr {
+        check_pr_sink(github, &repo_name, &source_text, &mut warnings)?;
+    }
     // Rendered here only as a check; the start renders it again from the same inputs.
     pipeline::spec_worker_prompt(&config, &id, &base_branch, &repo_name)?;
     let clone_source = opts
@@ -811,11 +822,37 @@ pub(crate) fn resolve_spec_start(opts: &SpecOptions) -> Result<SpecStart> {
         source_text,
         id,
         title,
+        warnings,
     })
 }
 
+/// The checks of a spec task's start under `[finish] sink = "pr"` (issue 438, decision 301), all
+/// before any sandbox: the spec's `Fixes:` line is well formed, `gh` reaches the repo the PR will
+/// be opened on (as an issue task's start does), and every number on the line is an open issue
+/// of it. A spec with no such line is allowed, with a warning.
+fn check_pr_sink(
+    github: &dyn GitHubBackend,
+    repo: &str,
+    text: &str,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
+    let numbers = fixes::parse(text)?;
+    github.default_branch(repo).map_err(|e| {
+        anyhow!(
+            "[finish] sink = \"pr\" opens the spec task's PR on GitHub, but gh can't reach {repo} \
+             ({e:#}); check `gh auth status` and the repo, or set another [finish] sink"
+        )
+    })?;
+    fixes::check_open_issues(github, repo, &numbers)?;
+    if numbers.is_empty() {
+        warnings.push(fixes::NO_LINE_WARNING.to_owned());
+    }
+    Ok(())
+}
+
 /// Starts a spec task: prepares it, runs the worker, then the gates (as `run` does for an issue
-/// task), and prints what happened. No GitHub call is made anywhere in this path.
+/// task), and prints what happened. No GitHub call is made anywhere in this path but the checks
+/// of a `[finish] sink = "pr"` spec ([`check_pr_sink`]).
 #[allow(clippy::too_many_arguments)]
 pub fn run_spec(
     config_dir: &std::path::Path,
@@ -881,7 +918,7 @@ pub fn run_spec_with_seams(
     sleep: &(dyn Fn(std::time::Duration) + Sync),
     scoped_secrets: &[ScopedSecret],
 ) -> Result<()> {
-    let start = resolve_spec_start(opts)?;
+    let start = resolve_spec_start(opts, github)?;
     // A cloud sandbox doesn't use the drive holding `sbx`'s local sandbox state (P11, decision
     // 262(h)); `--ignore-disk` is still accepted there and does nothing more.
     if start.location == Location::Local {
@@ -932,8 +969,9 @@ pub(crate) fn run_spec_from(
         source_text,
         id: spec_id,
         title,
+        warnings,
     } = start;
-    for warning in &config.warnings {
+    for warning in config.warnings.iter().chain(&warnings) {
         writeln!(warn, "warning: {warning}")?;
     }
 

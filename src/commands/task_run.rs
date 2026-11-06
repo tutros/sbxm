@@ -467,7 +467,7 @@ fn run_spec_task(
     // identity, base or spec file is caught here too: `--restart`'s discard below must not cost
     // the old task its result over an input that was always going to be rejected (issue #194
     // review finding M-1).
-    let mut resolved = task_start::resolve_spec_start(&start)?;
+    let mut resolved = task_start::resolve_spec_start(&start, github)?;
     // The worker's secret, checked the same way the reviewer's already is above, before anything
     // is discarded: a missing one must not be found only after the old task is gone (issue #194
     // review finding M-2).
@@ -497,7 +497,7 @@ fn run_spec_task(
             // Either way the old task, set aside rather than deleted (decision 185), is put back:
             // its preparation never got far enough to need it gone for good.
             let discarded = resolved.id.clone();
-            let refreshed = task_start::resolve_spec_start(&start)
+            let refreshed = task_start::resolve_spec_start(&start, github)
                 .context("the old task was discarded, but the new one could not be started")
                 .and_then(|fresh| {
                     if fresh.id == discarded {

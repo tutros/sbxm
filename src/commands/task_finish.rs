@@ -141,7 +141,7 @@ fn publish(
         Target::Spec(path) => {
             let id = record::spec_id(path)?.0;
             let base_dir = GlobalConfig::load(config_dir)?.base_dir;
-            return finish_spec(&base_dir, &id, path, opts, probe, out);
+            return finish_spec(&base_dir, &id, path, opts, github, probe, out);
         }
     };
     let base_dir = GlobalConfig::load(config_dir)?.base_dir;
@@ -167,19 +167,35 @@ fn publish(
         )?;
         return Ok(());
     }
+    print_opened(out, &id, &done, &format!("--issue {number}"))
+}
+
+/// What a `finish` that opened (or adopted) a PR did, for an issue task or a spec task under the
+/// `pr` sink; `cleanup` is the `task rm` flag that removes the task once the PR is merged.
+fn print_opened(
+    out: &mut dyn Write,
+    id: &str,
+    done: &finish::Finished,
+    cleanup: &str,
+) -> Result<()> {
+    let branch = &done.branch;
     if done.draft {
-        writeln!(out, "{id}: pushed {id} and opened draft PR {}", done.url)?;
+        writeln!(
+            out,
+            "{id}: pushed {branch} and opened draft PR {}",
+            done.url
+        )?;
         for reason in &done.unresolved {
             writeln!(out, "  unresolved: {reason}")?;
         }
     } else if done.adopted {
         writeln!(
             out,
-            "{id}: pushed {id} and found {} already open for it; recorded it as the task's PR",
+            "{id}: pushed {branch} and found {} already open for it; recorded it as the task's PR",
             done.url
         )?;
     } else {
-        writeln!(out, "{id}: pushed {id} and opened {}", done.url)?;
+        writeln!(out, "{id}: pushed {branch} and opened {}", done.url)?;
     }
     if let (Some(commit), Some(pr)) = (&done.review_posted, finish::pr_number(&done.url)) {
         writeln!(
@@ -201,24 +217,34 @@ fn publish(
     }
     writeln!(
         out,
-        "  next: after it is merged, clean up with: sbxm task rm --issue {}",
-        number
+        "  next: after it is merged, clean up with: sbxm task rm {cleanup}"
     )?;
     Ok(())
 }
 
-/// A spec task goes to the `[finish] sink` named in the checkout's `sbxm-task.toml` (decision
-/// 174(e)): `local` keeps the branch in the task's `repo.git` and says how to fetch it; `push`
-/// pushes it to `origin` as a new branch, opening no PR.
+/// A spec task goes to the `[finish] sink` named in the checkout's `sbxm-task.toml` (decisions
+/// 174(e), 301): `local` keeps the branch in the task's `repo.git` and says how to fetch it;
+/// `push` pushes it to `origin` as a new branch, opening no PR; `pr` pushes it and opens a PR
+/// with the in-task review, as for an issue task.
 fn finish_spec(
     base_dir: &Path,
     id: &str,
     spec: &Path,
     opts: &Options,
+    github: &dyn GitHubBackend,
     probe: &dyn ProcessProbe,
     out: &mut dyn Write,
 ) -> Result<()> {
-    if TaskConfig::load(&opts.repo_root)?.sink == Sink::Push {
+    let sink = TaskConfig::load(&opts.repo_root)?.sink;
+    if sink == Sink::Pr {
+        let flag = spec_flag(spec);
+        let done = finish::finish_spec_pr(base_dir, id, &flag, github, probe)?;
+        for cut in &done.cuts {
+            writeln!(out, "  note: {cut}")?;
+        }
+        return print_opened(out, id, &done, &flag);
+    }
+    if sink == Sink::Push {
         let pushed = finish::finish_push(base_dir, id, opts.push_unresolved, probe)?;
         let branch = &pushed.branch;
         writeln!(out, "{id}: pushed {branch} to origin; no PR was opened")?;
