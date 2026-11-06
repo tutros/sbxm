@@ -1,0 +1,16 @@
+description = "The scheduled factory check's drafting agent (decision 269): the model provider only, nothing installed"
+
+# Egress is deny-by-default. Nothing is listed: the sandbox reaches only its harness's own hosts
+# (the model provider), never GitHub or crates.io, because the issue text it reads is untrusted
+# (decision 269(c), issue 327 decision 4). scripts/factory-check.ps1 gathers every input on the host.
+[network]
+allow = []
+deny = []
+
+[env]
+
+# Secret services that must exist in `sbx secret ls`. Values stay in sbx.
+[secrets]
+services = ["anthropic"]
+
+# No [[setup.install]] steps: the agent only reads the repo and writes draft.md.

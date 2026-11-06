@@ -421,6 +421,16 @@ check creates and removes a file in the base dir, and its kit check writes and r
 `task status` (it appends its output to the `run.log` of each task it shows, decision 170; `sbxm status` shows the
 same tasks and only reads).
 
+## Recurring preparation: the scheduled factory check (an experiment)
+
+`scripts/factory-check.ps1` (decision 269, issue 327) prepares drafts while you are away: readiness drafts for issues
+that aren't ready yet, "still valid?" drafts for ready issues that PRs merged under (decision 295), and a retro draft
+once 10 PRs have merged since the last one. It only writes local files in `<base_dir>/.sbxm/factory/drafts/<date>/`;
+work through them in a session (`sdlc-issue-flow` stage 2 for an issue, `sdlc-retro` for the retro), set the labels
+and write the answers there, then copy the summary's log lines into `sdlc/batches/<date>-factory.md`, filling in the
+share of recommended answers you accepted unchanged and the time from the draft to `ready-for-worker`. The README
+has the setup ("The scheduled factory check").
+
 ## Practical notes
 
 - **Which config and which binary.** `task` commands only see the tasks of the config dir they were started with
