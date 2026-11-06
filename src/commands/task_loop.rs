@@ -1317,7 +1317,8 @@ impl Loop<'_> {
             }
         };
         let mut failed = Vec::new();
-        let mut over = !runs.is_empty();
+        let listed = !runs.is_empty();
+        let mut over = listed;
         for run in runs {
             match run.status {
                 RunStatus::Passed => {}
@@ -1349,7 +1350,11 @@ impl Loop<'_> {
                 }
             }
         }
-        Ok(Some(RunsRead { failed, over }))
+        Ok(Some(RunsRead {
+            failed,
+            over,
+            listed,
+        }))
     }
 
     /// `main`'s side of the pass (decision 299, answer 4): the merge commits of the PRs this run
@@ -1405,6 +1410,7 @@ impl Loop<'_> {
                 .failed
                 .iter()
                 .all(|run| self.paused_for.contains(&(commit.clone(), run.id)));
+            self.note_listing(&commit, read.listed, out)?;
             if read.over && acted {
                 self.watched.retain(|w| w.commit != commit);
             }
@@ -1417,8 +1423,42 @@ impl Loop<'_> {
     fn watch(&mut self, commit: String, pr: Option<u32>) {
         match self.watched.iter_mut().find(|w| w.commit == commit) {
             Some(watched) => watched.pr = watched.pr.or(pr),
-            None => self.watched.push(Watched { commit, pr }),
+            None => {
+                let since = self.now();
+                self.watched.push(Watched {
+                    commit,
+                    pr,
+                    since,
+                    runs_seen: false,
+                    said_no_runs: false,
+                });
+            }
         }
+    }
+
+    /// Notes whether a read listed runs for the watched `commit`; one with none listed ever,
+    /// [`NO_RUNS_AFTER`] after the loop first watched it, is said once and stays watched.
+    fn note_listing(&mut self, commit: &str, listed: bool, out: &mut dyn Write) -> Result<()> {
+        let now = self.now();
+        let Some(watched) = self.watched.iter_mut().find(|w| w.commit == commit) else {
+            return Ok(());
+        };
+        if listed {
+            watched.runs_seen = true;
+            return Ok(());
+        }
+        if watched.runs_seen
+            || watched.said_no_runs
+            || now.saturating_sub(watched.since) < NO_RUNS_AFTER
+        {
+            return Ok(());
+        }
+        watched.said_no_runs = true;
+        writeln!(
+            out,
+            "no CI runs seen for {commit} after 1 h; still watching"
+        )?;
+        Ok(())
     }
 
     /// Sets the pause for `run`, which failed again on `main`'s `commit` (`pr`: the PR this run
@@ -1600,7 +1640,17 @@ struct Watched {
     commit: String,
     /// The PR this run armed that merged into it.
     pr: Option<u32>,
+    /// When the loop first watched it, kept while it stays watched, after `main` moves on too.
+    since: u64,
+    /// Whether any read listed a run for it.
+    runs_seen: bool,
+    /// Whether [`NO_RUNS_AFTER`]'s line was said for it.
+    said_no_runs: bool,
 }
+
+/// How long a watched commit may go without any run listed before the loop says so, once, and
+/// goes on watching (the user's answer on issue 442, 2026-11-05).
+const NO_RUNS_AFTER: u64 = 60 * 60;
 
 /// What one read of a commit's runs found.
 struct RunsRead {
@@ -1609,6 +1659,8 @@ struct RunsRead {
     /// At least one run listed, none going and none just re-run. A commit with no runs listed
     /// isn't over: GitHub lists them some time after the push (review M-2), so its watch goes on.
     over: bool,
+    /// At least one run listed.
+    listed: bool,
 }
 
 /// [`Loop::arm`]'s checks on a task's record: no work stop, a review with 0 must-fix and low risk

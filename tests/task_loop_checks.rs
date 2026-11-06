@@ -52,6 +52,8 @@ struct Script<'a> {
     clock: Cell<u64>,
     /// Run after each `task run`, with its issue: GitHub changing meanwhile.
     after_run: AfterRun<'a>,
+    /// How long each `task run` takes, by issue; 300 s when not given.
+    run_secs: Vec<(u32, u64)>,
 }
 
 impl<'a> Script<'a> {
@@ -62,6 +64,7 @@ impl<'a> Script<'a> {
             calls: RefCell::default(),
             clock: Cell::new(START),
             after_run: Box::new(|_, _| {}),
+            run_secs: Vec::new(),
         }
     }
 }
@@ -105,7 +108,12 @@ fn write_task(
 impl Steps for Script<'_> {
     fn run(&self, issue: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
         self.calls.borrow_mut().push(format!("run {issue}"));
-        self.clock.set(self.clock.get() + 300);
+        let secs = self
+            .run_secs
+            .iter()
+            .find(|(n, _)| *n == issue)
+            .map_or(300, |(_, secs)| *secs);
+        self.clock.set(self.clock.get() + secs);
         write_task(&self.base, Kind::Issue, issue, None, (Level::Low, HEAD));
         (self.after_run)(issue, self.gh);
         Ok(())
@@ -1168,4 +1176,99 @@ fn a_new_second_failure_on_a_loop_pr_is_said_after_an_earlier_one() {
     assert_eq!(said.len(), 2, "{}", ran.out);
     assert!(said[1].contains("runs/8"), "{}", said[1]);
     assert_eq!(disarms(&gh), [101]);
+}
+
+// --- Review of issue 442, round 3: a commit with no runs an hour after it was first watched ---
+
+const NO_RUNS: &str = "no CI runs seen for";
+
+/// Durations that put the passes before tasks 2, 3 and after 3 at 59 min, 60 min and 2 h after
+/// the first pass, which first watched `main`'s tip.
+fn hourly(script: &mut Script) {
+    script.run_secs = vec![(1, 59 * 60), (2, 60), (3, 3600)];
+}
+
+/// The lines of `out` from the one starting `task <n>:` up to the next task's.
+fn after_task(out: &str, n: u32) -> String {
+    let start = format!("task {n}:");
+    let next = format!("task {}:", n + 1);
+    out.lines()
+        .skip_while(|l| !l.starts_with(&start))
+        .take_while(|l| !l.starts_with(&next))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[test]
+fn no_runs_an_hour_after_the_first_watch_is_said_once_and_the_watch_goes_on() {
+    let f = fixture();
+    let gh = github(&[1, 2, 3], &[]);
+    let mut script = Script::new(&f.base(), &gh);
+    hourly(&mut script);
+
+    let ran = run_loop(&f, &script, &gh);
+
+    ran.result.unwrap();
+    // Said at the pass after task 2 (60 min), not after task 1 (59 min), nor again at 2 h.
+    assert!(!after_task(&ran.out, 1).contains(NO_RUNS), "{}", ran.out);
+    let line = format!("{NO_RUNS} {MAIN} after 1 h; still watching");
+    assert!(after_task(&ran.out, 2).contains(&line), "{}", ran.out);
+    assert_eq!(ran.out.matches(NO_RUNS).count(), 1, "{}", ran.out);
+    // Still read at every pass.
+    let read = runs_read(&gh);
+    assert_eq!(read.iter().filter(|c| *c == MAIN).count(), 4, "{read:?}");
+}
+
+#[test]
+fn runs_that_appear_after_the_hour_line_are_still_acted_on() {
+    let f = fixture();
+    let gh = github(&[1, 2, 3], &[]);
+    let mut script = Script::new(&f.base(), &gh);
+    hourly(&mut script);
+    script.after_run = Box::new(|issue, gh| {
+        if issue == 3 {
+            gh.set_runs(MAIN, vec![run(9, 2, RunStatus::Failed)]);
+        }
+    });
+
+    let ran = run_loop(&f, &script, &gh);
+
+    ran.result.unwrap();
+    assert_eq!(ran.out.matches(NO_RUNS).count(), 1, "{}", ran.out);
+    let State::Set(pause) = f.pause() else {
+        panic!("not paused: {}", ran.out);
+    };
+    assert_eq!(pause.commit, MAIN);
+}
+
+#[test]
+fn runs_listed_before_the_hour_and_still_going_say_nothing() {
+    let f = fixture();
+    let gh = github(&[1, 2, 3], &[]).with_runs(MAIN, vec![run(9, 1, RunStatus::Going)]);
+    let mut script = Script::new(&f.base(), &gh);
+    hourly(&mut script);
+
+    let ran = run_loop(&f, &script, &gh);
+
+    ran.result.unwrap();
+    assert!(!ran.out.contains(NO_RUNS), "{}", ran.out);
+}
+
+#[test]
+fn runs_seen_once_before_the_hour_say_nothing_though_none_are_listed_later() {
+    let f = fixture();
+    let gh = github(&[1, 2, 3], &[]).with_runs(MAIN, vec![run(9, 1, RunStatus::Going)]);
+    let mut script = Script::new(&f.base(), &gh);
+    hourly(&mut script);
+    // GitHub lists none for a while (a lagging answer): runs were seen, so it isn't "no runs".
+    script.after_run = Box::new(|issue, gh| {
+        if issue == 1 {
+            gh.set_runs(MAIN, Vec::new());
+        }
+    });
+
+    let ran = run_loop(&f, &script, &gh);
+
+    ran.result.unwrap();
+    assert!(!ran.out.contains(NO_RUNS), "{}", ran.out);
 }

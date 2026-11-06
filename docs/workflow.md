@@ -239,7 +239,9 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
 - **`task loop` watches the checks (decision 299, issue 442):** on each pass, after the resolves and before the wait
   on 5 PRs, the loop reads the workflow runs of the head of each open PR it opened (drafts too), of the merge commit
   of each PR it armed that merged since the last pass, and of `main`'s tip. A run still going is left for the next
-  pass; a commit of `main` stays watched, after `main` moves on too, until each of its runs is over and acted on. A failed run at attempt 1 gets its failed jobs re-run once (`gh run rerun <id> --failed`); a re-run that
+  pass; a commit of `main` stays watched, after `main` moves on too, until each of its runs is over and acted on
+  (one with no run listed an hour after it was first watched is said once: `no CI runs seen for <commit> after 1 h;
+  still watching`). A failed run at attempt 1 gets its failed jobs re-run once (`gh run rerun <id> --failed`); a re-run that
   passes ends it. A second failure (attempt 2 or later) on a PR disarms its auto-merge if armed: the PR awaits you,
   said once with a row in the loop's log. A second failure on `main` writes `<base_dir>\.sbxm\loop-pause.json`
   (the commit, the run, who merged it, when): while it is there the loop still runs tasks and opens PRs, but arms
