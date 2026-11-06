@@ -63,9 +63,11 @@ impl SbxBackend {
         command
     }
 
-    /// `sbx ls --json`'s output; a failing `ls` is an error with `sbx`'s own message.
+    /// `sbx ls --json`'s output; a failing `ls` is an error with `sbx`'s own message. Signed out,
+    /// `ls` run from a terminal starts the interactive sign-in and waits; with stdin closed it
+    /// fails at once with `Not authenticated to Docker` (issue 445), which the sign-in check needs.
     fn ls_json(&self) -> Result<String> {
-        let output = self.ls_command().output().context(SBX_MISSING)?;
+        let output = unprompted_output(self.ls_command()).context(SBX_MISSING)?;
         if !output.status.success() {
             bail!(
                 "`sbx ls --json` failed ({}): {}",
@@ -120,6 +122,12 @@ impl SbxBackend {
         }
         Ok(())
     }
+}
+
+/// Runs `command` with stdin closed and its output captured, whatever stdin it was set up with:
+/// `sbx` can't wait on a question (or a sign-in flow) the user never sees.
+fn unprompted_output(mut command: Command) -> std::io::Result<std::process::Output> {
+    command.stdin(Stdio::null()).output()
 }
 
 impl SandboxBackend for SbxBackend {
@@ -1861,6 +1869,25 @@ mod cloud_tests {
             b"error: sbxcloud: temporarily unavailable"
         ));
         assert!(!secret_gone(b"", b""));
+    }
+}
+
+// Issue 445: the sign-in check's `sbx ls --json` keeps stdin closed, so a signed-out `sbx` fails
+// instead of starting its interactive sign-in and waiting.
+#[cfg(all(test, target_os = "linux"))]
+mod sign_in_tests {
+    use super::*;
+
+    #[test]
+    fn the_ls_command_runs_with_stdin_closed_even_when_set_up_otherwise() {
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "readlink /proc/self/fd/0"])
+            .stdin(Stdio::piped());
+
+        let output = unprompted_output(command).unwrap();
+
+        assert_eq!(String::from_utf8_lossy(&output.stdout).trim(), "/dev/null");
     }
 }
 
