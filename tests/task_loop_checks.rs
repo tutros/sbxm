@@ -1042,23 +1042,54 @@ fn a_loop_merge_with_no_runs_yet_is_read_again_until_they_appear() {
     assert_eq!(pause.commit, MERGE_1);
 }
 
-#[test]
-fn a_loop_merge_with_no_runs_at_two_passes_is_no_longer_read() {
+/// Issues 1 to 5; PR #101 merges into [`MERGE_1`] while task 2 runs and `main` moves past it;
+/// its runs are listed only while task 4 runs, as `late`.
+fn late_runs(late: Vec<WorkflowRun>) -> (Fixture, FakeGitHub, impl Fn(u32, &FakeGitHub)) {
     let f = fixture();
-    let gh = github(&[1, 2, 3, 4], &[]);
-    let mut script = Script::new(&f.base(), &gh);
-    script.after_run = Box::new(|issue, gh| {
-        if issue == 2 {
+    let gh = github(&[1, 2, 3, 4, 5], &[]);
+    let after = move |issue: u32, gh: &FakeGitHub| match issue {
+        2 => {
             gh.set_merged(101, MERGE_1);
             gh.set_branch_head("main", MAIN_B);
         }
-    });
+        4 => gh.set_runs(MERGE_1, late.clone()),
+        _ => {}
+    };
+    (f, gh, after)
+}
 
-    run_loop(&f, &script, &gh).result.unwrap();
+#[test]
+fn a_loop_merge_whose_runs_appear_after_two_empty_reads_has_a_first_failure_re_run() {
+    let (f, gh, after) = late_runs(vec![run(11, 1, RunStatus::Failed)]);
+    let mut script = Script::new(&f.base(), &gh);
+    script.after_run = Box::new(after);
 
-    // Read before tasks 3 and 4, not at the last pass.
+    let ran = run_loop(&f, &script, &gh);
+
+    ran.result.unwrap();
     let read = runs_read(&gh);
-    assert_eq!(read.iter().filter(|c| *c == MERGE_1).count(), 2, "{read:?}");
+    assert!(
+        read.iter().filter(|c| *c == MERGE_1).count() >= 3,
+        "{read:?}"
+    );
+    assert_eq!(reruns(&gh), [11], "{}", ran.out);
+}
+
+#[test]
+fn a_loop_merge_whose_runs_appear_after_two_empty_reads_pauses_on_a_second_failure() {
+    let (f, gh, after) = late_runs(vec![run(11, 2, RunStatus::Failed)]);
+    let mut script = Script::new(&f.base(), &gh);
+    script.after_run = Box::new(after);
+
+    let ran = run_loop(&f, &script, &gh);
+
+    ran.result.unwrap();
+    let State::Set(pause) = f.pause() else {
+        panic!("not paused: {}", ran.out);
+    };
+    assert_eq!(pause.commit, MERGE_1);
+    // Every loop PR still open and armed when the runs were seen.
+    assert_eq!(disarms(&gh), [102, 103, 104], "{}", ran.out);
 }
 
 #[test]

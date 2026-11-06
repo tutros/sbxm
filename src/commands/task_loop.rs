@@ -1317,8 +1317,7 @@ impl Loop<'_> {
             }
         };
         let mut failed = Vec::new();
-        let mut over = true;
-        let empty = runs.is_empty();
+        let mut over = !runs.is_empty();
         for run in runs {
             match run.status {
                 RunStatus::Passed => {}
@@ -1350,11 +1349,7 @@ impl Loop<'_> {
                 }
             }
         }
-        Ok(Some(RunsRead {
-            failed,
-            over,
-            empty,
-        }))
+        Ok(Some(RunsRead { failed, over }))
     }
 
     /// `main`'s side of the pass (decision 299, answer 4): the merge commits of the PRs this run
@@ -1410,14 +1405,7 @@ impl Loop<'_> {
                 .failed
                 .iter()
                 .all(|run| self.paused_for.contains(&(commit.clone(), run.id)));
-            let Some(watched) = self.watched.iter_mut().find(|w| w.commit == commit) else {
-                continue;
-            };
-            if read.empty {
-                watched.empty_reads += 1;
-            }
-            let seen = !read.empty || watched.empty_reads >= EMPTY_READS_TO_END;
-            if read.over && acted && seen {
+            if read.over && acted {
                 self.watched.retain(|w| w.commit != commit);
             }
         }
@@ -1429,11 +1417,7 @@ impl Loop<'_> {
     fn watch(&mut self, commit: String, pr: Option<u32>) {
         match self.watched.iter_mut().find(|w| w.commit == commit) {
             Some(watched) => watched.pr = watched.pr.or(pr),
-            None => self.watched.push(Watched {
-                commit,
-                pr,
-                empty_reads: 0,
-            }),
+            None => self.watched.push(Watched { commit, pr }),
         }
     }
 
@@ -1616,23 +1600,16 @@ struct Watched {
     commit: String,
     /// The PR this run armed that merged into it.
     pr: Option<u32>,
-    /// The passes at which it had no runs at all ([`EMPTY_READS_TO_END`]).
-    empty_reads: u32,
 }
 
 /// What one read of a commit's runs found.
 struct RunsRead {
     /// The runs that failed again after a re-run.
     failed: Vec<WorkflowRun>,
-    /// No run going and none just re-run.
+    /// At least one run listed, none going and none just re-run. A commit with no runs listed
+    /// isn't over: GitHub lists them some time after the push (review M-2), so its watch goes on.
     over: bool,
-    /// No runs at all.
-    empty: bool,
 }
-
-/// The passes at which a watched commit of `main` had no runs at all before its watch ends
-/// (review M-2): GitHub lists a commit's runs a moment after the push.
-const EMPTY_READS_TO_END: u32 = 2;
 
 /// [`Loop::arm`]'s checks on a task's record: no work stop, a review with 0 must-fix and low risk
 /// after the path-rule floor.

@@ -1405,7 +1405,8 @@ workflow, CodeQL included) of the head of every open PR it opened (drafts too; a
 the merge commit of every PR it armed in this run that merged since the last pass (decision 280's case), and of
 `main`'s tip whoever merged it. After a restart only `main`'s tip and the open loop PRs are read. (2) A run still
 queued or in progress: nothing this pass; a commit of `main` (a merge commit, or a tip after `main` moved on) whose
-runs aren't over, or whose runs weren't listed yet at its first read, is read again next pass, in memory only. A failed run
+runs aren't over, or that has no runs listed yet (GitHub lists them some time after the push), is read again next
+pass, in memory only. A failed run
 (`failure`, `timed_out`, `startup_failure`; `cancelled` is not a failure) at attempt 1 gets its failed jobs re-run
 once (`gh run rerun <id> --failed`); a pass after the re-run ends it (a runner fault isn't a break). GitHub's attempt
 number is the only state: `attempt` > 1 failed is the second failure, so a restart re-runs nothing twice. (3) A second
