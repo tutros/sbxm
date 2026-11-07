@@ -405,6 +405,13 @@ fn a_branch_that_exists_is_refused_and_no_agent_ref_is_made() {
 /// `create_branch`, then one agent commit on it in a clone, bundled into the task's workspace as
 /// the sandbox leaves it. Returns the workspace and the agent's commit.
 fn agent_bundle(f: &Fixture, message: &str) -> (PathBuf, String) {
+    agent_bundle_with(f, |clone| {
+        git(clone, &["commit", "-q", "--allow-empty", "-m", message]);
+    })
+}
+
+/// [`agent_bundle`] where `work` is what the agent does in its clone.
+fn agent_bundle_with(f: &Fixture, work: impl FnOnce(&Path)) -> (PathBuf, String) {
     repo::create_branch(&f.repo_git, "issue-4", "main").unwrap();
     let clone = f._tmp.path().join("agent");
     git(
@@ -418,7 +425,7 @@ fn agent_bundle(f: &Fixture, message: &str) -> (PathBuf, String) {
             clone.to_str().unwrap(),
         ],
     );
-    git(&clone, &["commit", "-q", "--allow-empty", "-m", message]);
+    work(&clone);
     let tip = git(&clone, &["rev-parse", "HEAD"]);
     let workspace = f._tmp.path().join("task").join("workspace");
     fs::create_dir_all(workspace.join(".sbxm-task")).unwrap();
@@ -441,7 +448,7 @@ fn fetching_and_rebuilding_delivers_the_bundles_commits() {
     let f = fixture();
     let (workspace, tip) = agent_bundle(&f, "a plain message");
 
-    rewrite::fetch_and_rebuild(
+    let ahead = rewrite::fetch_and_rebuild(
         &f.repo_git,
         &workspace,
         "refs/heads/main",
@@ -459,6 +466,7 @@ fn fetching_and_rebuilding_delivers_the_bundles_commits() {
         git(&f.repo_git, &["rev-parse", "refs/sbxm/rebuilt/issue-4"]),
         tip
     );
+    assert_eq!(ahead, 1);
 }
 
 #[test]
@@ -483,4 +491,80 @@ fn a_start_that_does_not_resolve_is_refused_before_the_fetch() {
         main
     );
     assert_eq!(git(&f.repo_git, &["rev-parse", "refs/heads/issue-4"]), main);
+}
+
+/// What `fetch_and_rebuild` says the branch is ahead by, and what `git rev-list --count` says.
+fn ahead_both_ways(f: &Fixture, work: impl FnOnce(&Path)) -> (u32, u32) {
+    use sbxm::task::rewrite;
+    let (workspace, _) = agent_bundle_with(f, work);
+    let ahead = rewrite::fetch_and_rebuild(
+        &f.repo_git,
+        &workspace,
+        "refs/heads/main",
+        "issue-4",
+        1 << 20,
+    )
+    .unwrap();
+    let counted = git(&f.repo_git, &["rev-list", "--count", "main..issue-4"]);
+    (ahead, counted.parse().unwrap())
+}
+
+#[test]
+fn the_count_of_a_linear_branch_with_a_defanged_commit_is_exact() {
+    let f = fixture();
+    let (ahead, counted) = ahead_both_ways(&f, |clone| {
+        git(clone, &["commit", "-q", "--allow-empty", "-m", "one"]);
+        git(
+            clone,
+            &["commit", "-q", "--allow-empty", "-m", "thanks @someone"],
+        );
+        git(clone, &["commit", "-q", "--allow-empty", "-m", "three"]);
+    });
+    assert_eq!((ahead, counted), (3, 3));
+}
+
+#[test]
+fn the_count_includes_the_commits_of_another_branch_the_agent_merged() {
+    let f = fixture();
+    let main = git(&f.repo_git, &["rev-parse", "refs/heads/main"]);
+    let tree = git(&f.repo_git, &["rev-parse", &format!("{main}^{{tree}}")]);
+    let mut other = main;
+    for message in ["o1", "o2"] {
+        other = git(
+            &f.repo_git,
+            &["commit-tree", &tree, "-p", &other, "-m", message],
+        );
+    }
+    git(&f.repo_git, &["update-ref", "refs/heads/other", &other]);
+
+    let (ahead, counted) = ahead_both_ways(&f, |clone| {
+        git(clone, &["commit", "-q", "--allow-empty", "-m", "mine"]);
+        git(
+            clone,
+            &["merge", "-q", "--no-ff", "-m", "merge", "origin/other"],
+        );
+    });
+    assert_eq!((ahead, counted), (4, 4));
+}
+
+#[test]
+fn the_count_includes_a_root_commit_the_agent_merged_in() {
+    let f = fixture();
+    let (ahead, counted) = ahead_both_ways(&f, |clone| {
+        git(clone, &["checkout", "-q", "--orphan", "loose"]);
+        git(clone, &["commit", "-q", "--allow-empty", "-m", "root"]);
+        git(clone, &["checkout", "-q", "issue-4"]);
+        git(
+            clone,
+            &[
+                "merge",
+                "-q",
+                "--allow-unrelated-histories",
+                "-m",
+                "merge",
+                "loose",
+            ],
+        );
+    });
+    assert_eq!((ahead, counted), (2, 2));
 }

@@ -105,21 +105,23 @@ pub fn rebuild(repo_git: &Path, start: &str, branch: &str) -> Result<()> {
             old_tip: found[2].clone(),
             last_rebuilt: found[3].clone(),
         },
-    )
+    )?;
+    Ok(())
 }
 
 /// Fetches the agent's bundle from `workspace` onto its agent ref
 /// ([`super::repo::fetch_bundle`]) and [`rebuild`]s the delivered branch from it, with one lookup
 /// for both (issue #444): the refs the rebuild needs are read before the fetch, which moves only
 /// the agent ref, and the agent ref's new tip is the one the bundle names. A `start` that doesn't
-/// resolve is refused before the fetch.
+/// resolve is refused before the fetch. Returns how many commits the delivered branch now has
+/// past `start`, from the rebuild's own range where that tells, else counted.
 pub fn fetch_and_rebuild(
     repo_git: &Path,
     workspace: &Path,
     start: &str,
     branch: &str,
     cap: u64,
-) -> Result<()> {
+) -> Result<u32> {
     check_ref("branch", branch)?;
     let marker = rebuilt_marker(branch);
     let fetched = super::repo::fetch_bundle_resolving(
@@ -130,16 +132,21 @@ pub fn fetch_and_rebuild(
         &[start, &marker],
         |found| start_commit(start, &found[0]).map(|_| ()),
     )?;
-    rebuild_from(
+    let start_id = start_commit(start, &fetched.extra[0])?;
+    let ahead = rebuild_from(
         repo_git,
         branch,
         Read {
-            start_id: start_commit(start, &fetched.extra[0])?,
+            start_id: start_id.clone(),
             agent_tip: fetched.agent_tip,
             old_tip: fetched.branch_tip,
             last_rebuilt: fetched.extra[1].clone(),
         },
-    )
+    )?;
+    match ahead {
+        Some(ahead) => Ok(ahead),
+        None => super::repo::commits_since(repo_git, &start_id, branch),
+    }
 }
 
 /// `start` resolved, or the error naming it.
@@ -158,8 +165,8 @@ struct Read {
     last_rebuilt: Option<String>,
 }
 
-/// [`rebuild`] from refs its caller already read.
-fn rebuild_from(repo_git: &Path, branch: &str, read: Read) -> Result<()> {
+/// [`rebuild`] from refs its caller already read; returns [`ahead_from_range`].
+fn rebuild_from(repo_git: &Path, branch: &str, read: Read) -> Result<Option<u32>> {
     let Read {
         start_id,
         agent_tip,
@@ -172,8 +179,9 @@ fn rebuild_from(repo_git: &Path, branch: &str, read: Read) -> Result<()> {
         format!("{branch} isn't in the task repo; the task record may be damaged")
     })?;
 
-    let range = commit_range(repo_git, &start_id, &agent_tip, branch)?;
-    let checked = check_range(repo_git, &agent_tip, &range)?;
+    let listed = commit_range(repo_git, &start_id, &agent_tip, branch)?;
+    let range = &listed.commits;
+    let checked = check_range(repo_git, &agent_tip, range)?;
     let mut rebuilt: HashMap<String, String> = HashMap::new();
     // Bodies are read a batch at a time, each batch within `BATCH_BYTES` (a commit over
     // `MAX_COMMIT_BYTES` was refused by `check_range`, so one always fits), and dropped before the
@@ -241,7 +249,8 @@ fn rebuild_from(repo_git: &Path, branch: &str, read: Read) -> Result<()> {
         &marker,
         last_rebuilt.as_deref(),
         &agent_tip,
-    )
+    )?;
+    Ok(ahead_from_range(&listed, &start_id, &rebuilt))
 }
 
 /// Whether commit `ancestor` is `tip` or one of its ancestors in `repo_git`.
@@ -266,12 +275,7 @@ fn is_ancestor(repo_git: &Path, ancestor: &str, tip: &str) -> Result<bool> {
 /// defanging, and that id is still the agent's own commit to rebuild again, not an outside one
 /// to protect. Oldest first and with every parent before its children (so a mapped parent is
 /// always ready when a merge commit needs it).
-fn commit_range(
-    repo_git: &Path,
-    start: &str,
-    tip: &str,
-    branch: &str,
-) -> Result<Vec<(String, Vec<String>)>> {
+fn commit_range(repo_git: &Path, start: &str, tip: &str, branch: &str) -> Result<Range> {
     let out = git::run(
         repo_git,
         Some(repo_git),
@@ -281,6 +285,7 @@ fn commit_range(
             "--reverse",
             "--topo-order",
             "--parents",
+            "--boundary",
             tip,
             "--exclude",
             branch,
@@ -291,15 +296,44 @@ fn commit_range(
         ],
     )?;
     // `<id> <parent> <parent>...` per line (issue #444: the parents come with the range, so the
-    // existence check needs no second look at each commit).
-    Ok(out
-        .lines()
-        .map(|line| {
-            let mut ids = line.split_whitespace().map(str::to_owned);
-            let id = ids.next().unwrap_or_default();
-            (id, ids.collect())
-        })
-        .collect())
+    // existence check needs no second look at each commit), and `-<id>` for a boundary commit.
+    let mut range = Range::default();
+    for line in out.lines() {
+        let mut ids = line.split_whitespace().map(str::to_owned);
+        let id = ids.next().unwrap_or_default();
+        match id.strip_prefix('-') {
+            Some(boundary) => range.boundary.push(boundary.to_owned()),
+            None => range.commits.push((id, ids.collect())),
+        }
+    }
+    Ok(range)
+}
+
+/// What [`commit_range`] lists: the commits to rebuild, and the boundary (`--boundary`): every
+/// commit outside the range that is a parent of one inside it.
+#[derive(Default)]
+struct Range {
+    commits: Vec<(String, Vec<String>)>,
+    boundary: Vec<String>,
+}
+
+/// How many commits the rebuilt branch has past `start_id`, when the range alone tells (issue
+/// #444): every commit outside the range that one inside it builds on is `start_id` itself, and
+/// every commit inside it has a parent (so each descends from `start_id`, and so does its rebuilt
+/// copy, which can't then be reachable from `start_id`), and no two commits were rebuilt into the
+/// same one. The rebuilt branch then holds exactly the rebuilt range on top of `start_id`. `None`
+/// otherwise (an agent-made merge of another branch, a root commit, an empty range): count it.
+fn ahead_from_range(
+    range: &Range,
+    start_id: &str,
+    rebuilt: &HashMap<String, String>,
+) -> Option<u32> {
+    let only_start = !range.boundary.is_empty() && range.boundary.iter().all(|b| b == start_id);
+    let no_roots = range.commits.iter().all(|(_, parents)| !parents.is_empty());
+    let distinct = rebuilt.values().collect::<HashSet<_>>().len() == rebuilt.len();
+    (only_start && no_roots && distinct && rebuilt.len() == range.commits.len())
+        .then(|| u32::try_from(range.commits.len()).ok())
+        .flatten()
 }
 
 /// One git start for everything `rebuild` must know before it reads a body or writes anything
@@ -1377,5 +1411,40 @@ mod tests {
 
         assert_eq!(git(&dir, &["rev-parse", "refs/heads/issue-4"]), base);
         assert!(ref_missing(&dir, "refs/sbxm/rebuilt/issue-4"));
+    }
+
+    #[test]
+    fn the_range_tells_the_count_only_when_it_sits_on_the_start_alone() {
+        let range = |boundary: &[&str], commits: &[(&str, &[&str])]| Range {
+            commits: commits
+                .iter()
+                .map(|(id, parents)| {
+                    (
+                        (*id).to_owned(),
+                        parents.iter().map(|p| (*p).to_owned()).collect(),
+                    )
+                })
+                .collect(),
+            boundary: boundary.iter().map(|b| (*b).to_owned()).collect(),
+        };
+        let rebuilt = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
+            pairs
+                .iter()
+                .map(|(a, b)| ((*a).to_owned(), (*b).to_owned()))
+                .collect()
+        };
+        let linear = range(&["s"], &[("a", &["s"]), ("b", &["a"])]);
+        let two = rebuilt(&[("a", "a2"), ("b", "b2")]);
+
+        assert_eq!(ahead_from_range(&linear, "s", &two), Some(2));
+        // Another branch's commit under the range, a root commit, two commits rebuilt into one,
+        // and an empty range: each is counted instead.
+        let merged = range(&["s", "o"], &[("a", &["s"]), ("b", &["a", "o"])]);
+        assert_eq!(ahead_from_range(&merged, "s", &two), None);
+        let rooted = range(&["s"], &[("a", &[]), ("b", &["a", "s"])]);
+        assert_eq!(ahead_from_range(&rooted, "s", &two), None);
+        let same = rebuilt(&[("a", "x"), ("b", "x")]);
+        assert_eq!(ahead_from_range(&linear, "s", &same), None);
+        assert_eq!(ahead_from_range(&range(&[], &[]), "s", &rebuilt(&[])), None);
     }
 }

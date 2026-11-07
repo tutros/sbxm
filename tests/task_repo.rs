@@ -522,6 +522,7 @@ fn tip(repo_git: &Path, branch: &str) -> String {
 /// rebuilds the delivered branch from it (issue 244), matching what `pipeline.rs` does.
 fn collect(f: &Fixture, cap: u64) -> anyhow::Result<()> {
     rewrite::fetch_and_rebuild(&f.repo_git, &f.workspace, "refs/heads/main", "issue-4", cap)
+        .map(|_| ())
 }
 
 /// The path the sandbox writes the bundle to, with its folder made.

@@ -3160,7 +3160,7 @@ fn bundle_and_fetch(
     if out.exit_code == Some(0) {
         let repo_git = prepared.meta.join("repo.git");
         let start = prepared.record.rewrite_start();
-        match prepared.record.location {
+        let ahead = match prepared.record.location {
             Location::Local => rewrite::fetch_and_rebuild(
                 &repo_git,
                 &prepared.workspace,
@@ -3173,8 +3173,8 @@ fn bundle_and_fetch(
                     copy_out_staged(backend, &prepared.meta, sandbox, &ws, "branch.bundle")?;
                 rewrite::fetch_and_rebuild(&repo_git, staged.dir(), &start, &branch, BUNDLE_CAP)?
             }
-        }
-        Ok(Bundled::Commits(prepared.record.commits_ahead(&repo_git)?))
+        };
+        Ok(Bundled::Commits(ahead))
     } else if out.stderr.contains("empty bundle") {
         Ok(Bundled::Nothing)
     } else {
