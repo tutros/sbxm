@@ -780,7 +780,11 @@ fn a_task_repo_from_before_the_agent_ref_existed_backfills_it_and_the_fix_round_
     let f = fixture();
     prepared(&f);
     // The old binary: the agent's first, unrewritten commit landed straight on the delivered
-    // branch, and there was never an agent ref.
+    // branch, and there was never an agent ref (today's `create_branch` makes one: removed).
+    git(
+        &f.repo_git,
+        &["update-ref", "-d", "refs/sbxm/agent/issue-4"],
+    );
     agent_commits(&f, &["a.txt"]);
     git(
         &f.repo_git,

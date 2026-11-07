@@ -104,11 +104,18 @@ pub fn create_branch(repo_git: &Path, branch: &str, base: &str) -> Result<String
              it, before starting this task again"
         );
     }
-    git::run(
+    // The agent ref starts where the branch does, in the same start and transaction (issue
+    // #444): [`ensure_agent_ref`] then finds it and has nothing to write on the first collect.
+    let stdin = format!(
+        "create refs/heads/{branch} {base_tip}\ncreate {} {base_tip}\n",
+        agent_ref(branch)
+    );
+    git::run_with_stdin(
         repo_git,
         Some(repo_git),
         None,
-        &["branch", "--", branch, &base_ref],
+        &["-c", &no_hooks_config(repo_git)?, "update-ref", "--stdin"],
+        stdin.as_bytes(),
     )?;
     Ok(base_tip)
 }
@@ -627,9 +634,9 @@ pub fn agent_ref(branch: &str) -> String {
 
 /// Creates the agent ref at the delivered branch's current tip when it is missing (issue 244): a
 /// task made before this ref existed collected the agent's unrewritten commits straight onto the
-/// delivered branch, so that is where its own commits begin; a brand-new task's delivered branch
-/// is still at its base, which is exactly where its agent ref should start too. A no-op once the
-/// agent ref exists.
+/// delivered branch, so that is where its own commits begin; a task continuing a PR's branch gets
+/// it here at the PR head it fetched. [`create_branch`] makes it together with a new branch. A
+/// no-op once the agent ref exists.
 pub fn ensure_agent_ref(repo_git: &Path, branch: &str) -> Result<()> {
     check_ref("branch", branch)?;
     let agent = agent_ref(branch);

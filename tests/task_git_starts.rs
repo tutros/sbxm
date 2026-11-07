@@ -371,3 +371,33 @@ fn a_rebuild_of_twenty_big_commits_stays_within_a_small_address_space() {
         parent
     );
 }
+
+// Review round of PR #482 (M-1): the starts that were still over the stop line.
+
+#[test]
+fn creating_a_branch_starts_its_agent_ref_at_the_same_commit() {
+    let f = fixture();
+
+    let start = repo::create_branch(&f.repo_git, "issue-4", "main").unwrap();
+
+    assert_eq!(
+        git(&f.repo_git, &["rev-parse", "refs/sbxm/agent/issue-4"]),
+        start
+    );
+}
+
+#[test]
+fn a_branch_that_exists_is_refused_and_no_agent_ref_is_made() {
+    let f = fixture();
+    let main = git(&f.repo_git, &["rev-parse", "refs/heads/main"]);
+    git(&f.repo_git, &["update-ref", "refs/heads/issue-4", &main]);
+
+    let err = repo::create_branch(&f.repo_git, "issue-4", "main").unwrap_err();
+
+    assert!(format!("{err:#}").contains("already exists"), "{err:#}");
+    let agent = git(
+        &f.repo_git,
+        &["for-each-ref", "--format=%(refname)", "refs/sbxm/"],
+    );
+    assert_eq!(agent, "");
+}
