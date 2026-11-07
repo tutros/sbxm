@@ -641,3 +641,27 @@ fn the_changed_paths_at_a_commit_ignore_where_the_branch_has_moved_since() {
     let err = repo::changed_paths_at(&f.repo_git, "refs/heads/main", "issue-4").unwrap_err();
     assert!(format!("{err:#}").contains("issue-4"), "{err:#}");
 }
+
+#[test]
+fn a_missing_delivered_branch_is_refused_before_the_fetch() {
+    use sbxm::task::rewrite;
+    let f = fixture();
+    let (workspace, _) = agent_bundle(&f, "a plain message");
+    let main = git(&f.repo_git, &["rev-parse", "refs/heads/main"]);
+    git(&f.repo_git, &["update-ref", "-d", "refs/heads/issue-4"]);
+
+    let err = rewrite::fetch_and_rebuild(
+        &f.repo_git,
+        &workspace,
+        "refs/heads/main",
+        "issue-4",
+        1 << 20,
+    )
+    .unwrap_err();
+
+    assert!(format!("{err:#}").contains("issue-4"), "{err:#}");
+    assert_eq!(
+        git(&f.repo_git, &["rev-parse", "refs/sbxm/agent/issue-4"]),
+        main
+    );
+}

@@ -113,7 +113,7 @@ pub fn rebuild(repo_git: &Path, start: &str, branch: &str) -> Result<()> {
 /// ([`super::repo::fetch_bundle`]) and [`rebuild`]s the delivered branch from it, with one lookup
 /// for both (issue #444): the refs the rebuild needs are read before the fetch, which moves only
 /// the agent ref, and the agent ref's new tip is the one the bundle names. A `start` that doesn't
-/// resolve is refused before the fetch.
+/// resolve, or a delivered branch that is missing, is refused before the fetch.
 pub fn fetch_and_rebuild(
     repo_git: &Path,
     workspace: &Path,
@@ -123,13 +123,17 @@ pub fn fetch_and_rebuild(
 ) -> Result<Rebuilt> {
     check_ref("branch", branch)?;
     let marker = rebuilt_marker(branch);
+    let branch_ref = format!("refs/heads/{branch}");
     let fetched = super::repo::fetch_bundle_resolving(
         repo_git,
         workspace,
         branch,
         cap,
-        &[start, &marker],
-        |found| start_commit(start, &found[0]).map(|_| ()),
+        &[start, &branch_ref, &marker],
+        |found| {
+            start_commit(start, &found[0])?;
+            branch_tip(branch, &found[1]).map(|_| ())
+        },
     )?;
     let start_id = start_commit(start, &fetched.extra[0])?;
     let (tip, ahead) = rebuild_from(
@@ -138,8 +142,8 @@ pub fn fetch_and_rebuild(
         Read {
             start_id: start_id.clone(),
             agent_tip: fetched.agent_tip,
-            old_tip: fetched.branch_tip,
-            last_rebuilt: fetched.extra[1].clone(),
+            old_tip: fetched.extra[1].clone(),
+            last_rebuilt: fetched.extra[2].clone(),
         },
     )?;
     let ahead = match ahead {
@@ -157,6 +161,13 @@ pub struct Rebuilt {
     pub ahead: u32,
     /// The branch's tip, as the rebuild moved it.
     pub tip: String,
+}
+
+/// The delivered branch's tip, or the error naming the branch.
+fn branch_tip(branch: &str, found: &Option<String>) -> Result<String> {
+    found
+        .clone()
+        .with_context(|| format!("{branch} isn't in the task repo; the task record may be damaged"))
 }
 
 /// `start` resolved, or the error naming it.
@@ -186,9 +197,7 @@ fn rebuild_from(repo_git: &Path, branch: &str, read: Read) -> Result<(String, Op
     } = read;
     let agent = agent_ref(branch);
     let marker = rebuilt_marker(branch);
-    let old_tip = old_tip.with_context(|| {
-        format!("{branch} isn't in the task repo; the task record may be damaged")
-    })?;
+    let old_tip = branch_tip(branch, &old_tip)?;
 
     let listed = commit_range(repo_git, &start_id, &agent_tip, branch)?;
     let range = &listed.commits;
