@@ -3840,10 +3840,26 @@ pub fn review_pr(
                 .record
                 .begin_review(now(), Process::current(env.probe))?;
             record::write(&prepared.meta, &prepared.record)?;
-            opened = open_review_workspace(env, prepared, round, &clone, &sandbox, &earlier)?;
+            opened = open_review_workspace(
+                env,
+                prepared,
+                round,
+                &clone,
+                &sandbox,
+                &earlier,
+                tip.as_deref(),
+            )?;
             return Ok(None);
         }
-        opened = open_review_workspace(env, prepared, round, &clone, &sandbox, &earlier)?;
+        opened = open_review_workspace(
+            env,
+            prepared,
+            round,
+            &clone,
+            &sandbox,
+            &earlier,
+            tip.as_deref(),
+        )?;
         let mut outcomes = gates::run_sandbox_tier(
             env.backend,
             &sandbox,
@@ -4616,7 +4632,15 @@ pub fn run_reviewer(env: &TaskEnv, prepared: &mut Prepared, round: u32) -> Resul
         .begin_review(now(), Process::current(env.probe))?;
     record::write(&prepared.meta, &prepared.record)?;
 
-    let result = review_round(env, prepared, round, &clone, &sandbox, &earlier);
+    let result = review_round(
+        env,
+        prepared,
+        round,
+        &clone,
+        &sandbox,
+        &earlier,
+        tip.as_deref(),
+    );
 
     // Always: the reviewer's sandbox and clone are gone, whatever happened.
     remove_reviewer(env, prepared, &sandbox, &clone);
@@ -4700,8 +4724,9 @@ fn review_round(
     clone: &Path,
     sandbox: &str,
     earlier: &[String],
+    tip: Option<&str>,
 ) -> Result<ReviewOutcome> {
-    let warnings = open_review_workspace(env, prepared, round, clone, sandbox, earlier)?;
+    let warnings = open_review_workspace(env, prepared, round, clone, sandbox, earlier, tip)?;
     let mut outcome = run_review_agent(env, prepared, round, clone, sandbox, earlier)?;
     outcome.warnings.splice(0..0, warnings);
     Ok(outcome)
@@ -4769,6 +4794,7 @@ fn open_review_workspace(
     clone: &Path,
     sandbox: &str,
     earlier: &[String],
+    known_tip: Option<&str>,
 ) -> Result<Vec<String>> {
     if prepared.record.location == Location::Cloud {
         return open_cloud_review(env, prepared, round, sandbox, earlier);
@@ -4785,7 +4811,11 @@ fn open_review_workspace(
     }
     // The commit the reviewer checks out: the delivered branch's tip, or the PR's fetched head
     // (decision 216).
-    let tip = repo::branch_tip(&repo_git, &branch)?;
+    // The caller has just read it (issue #444: one git start less per round).
+    let tip = match known_tip {
+        Some(tip) => tip.to_owned(),
+        None => repo::branch_tip(&repo_git, &branch)?,
+    };
     let mut warnings = Vec::new();
     let plan = plan_sandbox(
         &stale_lock::Refresh {
