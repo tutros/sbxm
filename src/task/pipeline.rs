@@ -4842,7 +4842,8 @@ fn open_review_workspace(
     )
     .map_err(|e| with_resume_hint(&prepared.record, e))?;
 
-    repo::clean_checkout(&repo_git, &branch, clone)?;
+    // `tip` above resolved the branch itself, so it exists.
+    repo::clean_checkout_existing(&repo_git, &branch, clone)?;
     let info = clone.join(".git").join("info");
     fs::create_dir_all(&info)?;
     fs::write(info.join("exclude"), format!("# sbxm\n{AGENT_DIR}/\n"))?;

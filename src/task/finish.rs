@@ -950,8 +950,7 @@ pub fn check_spec_result_fetched(base_dir: &Path, id: &str, checkout: &Path) -> 
     if task.commits_ahead(&repo_git)? == 0 {
         return Ok(());
     }
-    let tip = repo::branch_tip(&repo_git, &task.branch)?;
-    let start = repo::resolve_commit(&repo_git, &task.rewrite_start())?;
+    let (tip, start) = repo::branch_tip_and_commit(&repo_git, &task.branch, &task.rewrite_start())?;
     if holds_result(checkout, &start, &tip) {
         return Ok(());
     }

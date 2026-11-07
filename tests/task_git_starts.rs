@@ -217,3 +217,29 @@ fn a_commit_with_a_mention_is_rebuilt_and_written() {
     assert_ne!(rebuilt, agent);
     assert_eq!(git(&f.repo_git, &["cat-file", "-t", &rebuilt]), "commit");
 }
+
+#[test]
+fn a_branch_tip_and_a_rev_come_back_together() {
+    let f = fixture();
+    repo::create_branch(&f.repo_git, "issue-4", "main").unwrap();
+    let main = git(&f.repo_git, &["rev-parse", "refs/heads/main"]);
+
+    let (tip, commit) = repo::branch_tip_and_commit(&f.repo_git, "issue-4", "main").unwrap();
+
+    assert_eq!(tip, main);
+    assert_eq!(commit, main);
+}
+
+#[test]
+fn a_missing_branch_or_rev_is_named_and_an_option_like_rev_is_only_a_name() {
+    let f = fixture();
+    repo::create_branch(&f.repo_git, "issue-4", "main").unwrap();
+
+    let no_branch = repo::branch_tip_and_commit(&f.repo_git, "nope", "main").unwrap_err();
+    let no_rev = repo::branch_tip_and_commit(&f.repo_git, "issue-4", "gone").unwrap_err();
+    let option = repo::branch_tip_and_commit(&f.repo_git, "issue-4", "--all").unwrap_err();
+
+    assert!(format!("{no_branch:#}").contains("nope"), "{no_branch:#}");
+    assert!(format!("{no_rev:#}").contains("gone"), "{no_rev:#}");
+    assert!(format!("{option:#}").contains("--all"), "{option:#}");
+}

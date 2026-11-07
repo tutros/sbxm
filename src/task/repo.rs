@@ -251,14 +251,22 @@ pub fn bundle_agent_for_clone(
 /// merely left lying around reaches it. `dest` must not exist.
 pub fn clean_checkout(repo_git: &Path, branch: &str, dest: &Path) -> Result<()> {
     check_ref("branch", branch)?;
+    if !dest.exists() && !has_branch(repo_git, branch)? {
+        bail!("branch {branch} isn't in the task repo; collect the worker's commits first");
+    }
+    clean_checkout_existing(repo_git, branch, dest)
+}
+
+/// [`clean_checkout`] for a caller that has just resolved `refs/heads/<branch>` itself (so the
+/// branch is known to exist, and a tag of the same name can't stand in for it): one git start
+/// less (issue #444).
+pub fn clean_checkout_existing(repo_git: &Path, branch: &str, dest: &Path) -> Result<()> {
+    check_ref("branch", branch)?;
     if dest.exists() {
         bail!(
             "{} already exists; remove it or let the previous run finish",
             dest.display()
         );
-    }
-    if !has_branch(repo_git, branch)? {
-        bail!("branch {branch} isn't in the task repo; collect the worker's commits first");
     }
     let parent = dest.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent)
@@ -412,6 +420,20 @@ pub fn branch_tip(repo_git: &Path, branch: &str) -> Result<String> {
         ],
     )?;
     Ok(out.trim().to_owned())
+}
+
+/// The commit `branch` points at and `rev` resolved to a full commit id, both from one `git`
+/// start (issue #444); an error names whichever is missing.
+pub fn branch_tip_and_commit(repo_git: &Path, branch: &str, rev: &str) -> Result<(String, String)> {
+    check_ref("branch", branch)?;
+    let found = resolve_commits(repo_git, &[&format!("refs/heads/{branch}"), rev])?;
+    let tip = found[0]
+        .clone()
+        .with_context(|| format!("branch {branch} isn't in the task repo"))?;
+    let commit = found[1]
+        .clone()
+        .with_context(|| format!("{rev} doesn't resolve to a commit in the task repo"))?;
+    Ok((tip, commit))
 }
 
 /// `rev` resolved to a full commit id in `repo_git`.
