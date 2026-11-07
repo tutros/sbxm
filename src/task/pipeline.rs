@@ -3428,9 +3428,6 @@ fn check_branch_locks(env: &TaskEnv, prepared: &Prepared) -> Result<()> {
         return Ok(());
     }
     let repo_git = prepared.meta.join("repo.git");
-    let Ok(tip) = repo::branch_tip(&repo_git, &prepared.record.branch) else {
-        return Ok(());
-    };
     stale_lock::check_branch(
         env.config_dir,
         env.backend,
@@ -3438,7 +3435,7 @@ fn check_branch_locks(env: &TaskEnv, prepared: &Prepared) -> Result<()> {
         &[env.config.worker.harness, env.config.reviewer.harness],
         &repo_git,
         &prepared.record.base,
-        &tip,
+        &|| repo::branch_tip(&repo_git, &prepared.record.branch).ok(),
     )
     .map_err(|e| with_resume_hint(&prepared.record, e))
 }
