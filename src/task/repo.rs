@@ -86,26 +86,18 @@ pub fn clone_bare(source: &str, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Creates `branch` at the tip of `base` in `repo_git`.
-pub fn create_branch(repo_git: &Path, branch: &str, base: &str) -> Result<()> {
+/// Creates `branch` at the tip of `base` in `repo_git`; returns the commit it starts at.
+pub fn create_branch(repo_git: &Path, branch: &str, base: &str) -> Result<String> {
     check_ref("branch", branch)?;
     check_ref("base", base)?;
     let base_ref = format!("refs/heads/{base}");
-    let found = git::output(
-        repo_git,
-        Some(repo_git),
-        None,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("{base_ref}^{{commit}}"),
-        ],
-    )?;
-    if !found.status.success() {
+    // One start answers both: the base must exist and the new branch must not.
+    let found = resolve_commits(repo_git, &[&base_ref, &format!("refs/heads/{branch}")])?;
+    let (base_tip, existing) = (found[0].clone(), found[1].is_some());
+    let Some(base_tip) = base_tip else {
         bail!("base branch {base} not found in the repo; check --base");
-    }
-    if has_branch(repo_git, branch)? {
+    };
+    if existing {
         bail!(
             "branch {branch} already exists in the repo (a clone has every branch of origin, so it \
              was probably pushed by an earlier `sbxm task finish`); delete it on GitHub, or merge \
@@ -118,7 +110,20 @@ pub fn create_branch(repo_git: &Path, branch: &str, base: &str) -> Result<()> {
         None,
         &["branch", "--", branch, &base_ref],
     )?;
-    Ok(())
+    Ok(base_tip)
+}
+
+/// Each of `revs` resolved to a full commit id in `repo_git`, in order, with one `git` start
+/// (issue #444): `None` for one that doesn't resolve to a commit, without failing the others.
+/// No `revs`, no start.
+pub fn resolve_commits(repo_git: &Path, revs: &[&str]) -> Result<Vec<Option<String>>> {
+    let names: Vec<String> = revs.iter().map(|rev| format!("{rev}^{{commit}}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let found = git::check_objects(repo_git, Some(repo_git), None, &names)?;
+    Ok(found
+        .into_iter()
+        .map(|object| object.filter(|o| o.kind == "commit").map(|o| o.id))
+        .collect())
 }
 
 /// Clones `repo_git` into `workspace` on `branch`, for the agent to work in. Git objects are

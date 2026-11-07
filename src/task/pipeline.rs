@@ -1359,19 +1359,22 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
     let built = (|| -> Result<HarnessKits> {
         let repo_git = meta.join("repo.git");
         repo::clone_bare(ctx.clone_source, &repo_git)?;
-        let continued = match &continues {
-            Some((pr, pr_branch)) => Some(PrBranch {
-                pr: *pr,
-                branch: pr_branch.clone(),
-                base: repo::fetch_pr_branch(&repo_git, *pr, pr_branch)?,
-            }),
-            None => {
-                repo::create_branch(&repo_git, &branch, ctx.base_branch)?;
-                None
-            }
-        };
         // The worker's starting commit, or the PR head it continues from (decision 216).
-        let start = repo::branch_tip(&repo_git, &branch)?;
+        let (continued, start) = match &continues {
+            Some((pr, pr_branch)) => {
+                let base = repo::fetch_pr_branch(&repo_git, *pr, pr_branch)?;
+                let continued = PrBranch {
+                    pr: *pr,
+                    branch: pr_branch.clone(),
+                    base: base.clone(),
+                };
+                (Some(continued), base)
+            }
+            None => (
+                None,
+                repo::create_branch(&repo_git, &branch, ctx.base_branch)?,
+            ),
+        };
         if let Some(expected) = expected_start
             && start != expected
         {
