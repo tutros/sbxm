@@ -9,7 +9,7 @@ use anyhow::Result;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::run::results::parse_timestamp;
-use crate::task::record::{self, ProcessProbe};
+use crate::task::record::{self, ProcessProbe, Stage};
 
 /// A missing value (no commits yet, no review yet, no PR, no `run.log`).
 const DASH: &str = "-";
@@ -25,9 +25,8 @@ pub struct TaskRow {
     /// `"interrupted"` when the task says "working" (or any other running status) with no live
     /// process, else the status name, exactly as `sbxm task status` decides it.
     pub status: String,
-    /// When the task entered `stage` (its last stage stamp in `task.json`); `None` only for a
-    /// stamp this build can't parse (never happens for a stamp `sbxm` itself wrote).
-    pub stage_entered_at: Option<u64>,
+    /// What the TIME column shows (issue 484).
+    pub time: TaskTime,
     pub commits_ahead: Option<u32>,
     /// From the last review recorded in `task.json` (`review.must_fix`), not re-derived from
     /// `review.md`.
@@ -36,6 +35,37 @@ pub struct TaskRow {
     pub pr: Option<String>,
     /// The last `run.log` line that isn't a header, without its timestamp.
     pub log_line: Option<String>,
+}
+
+/// The TIME column of one task (issue 484).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskTime {
+    /// A task still going: when it entered its stage (its last stage stamp in `task.json`), shown
+    /// as the time since then; `None` only for a stamp this build can't parse (never happens for
+    /// a stamp `sbxm` itself wrote).
+    InStage(Option<u64>),
+    /// A task that has ended (`finished`, or stopped at `ready`): its total run time in seconds,
+    /// from its first `prepared` stamp to the stamp of the stage it ended in, fixed whatever the
+    /// clock says; `None` when the record lacks either stamp (an older `task.json`).
+    Took(Option<u64>),
+}
+
+/// `record`'s [`TaskTime`]: a total for a task that is `finished`, or `ready` with `stopped` set
+/// (it ended there with something unresolved), else the time in its current stage.
+fn task_time(record: &record::Record) -> TaskTime {
+    let ended = record.stage == Stage::Finished
+        || (record.stage == Stage::Ready && record.stopped.is_some());
+    if !ended {
+        let entered = record
+            .stages
+            .last()
+            .and_then(|stamp| parse_timestamp(&stamp.at));
+        return TaskTime::InStage(entered);
+    }
+    let at = |stamp: Option<&record::Stamp>| stamp.and_then(|stamp| parse_timestamp(&stamp.at));
+    let start = at(record.stages.iter().find(|s| s.stage == Stage::Prepared));
+    let end = at(record.stages.iter().rev().find(|s| s.stage == record.stage));
+    TaskTime::Took(start.zip(end).map(|(start, end)| end.saturating_sub(start)))
 }
 
 /// Every task's row, in the same order `sbxm task status` lists them (`record::load_all`'s own
@@ -50,16 +80,12 @@ pub fn rows(base: &Path, probe: &dyn ProcessProbe) -> Result<Vec<TaskRow>> {
             } else {
                 record.status.name().to_owned()
             };
-            let stage_entered_at = record
-                .stages
-                .last()
-                .and_then(|stamp| parse_timestamp(&stamp.at));
             Ok(TaskRow {
                 id: record.id.clone(),
                 title: record.title.clone(),
                 stage: record.stage.name(),
                 status,
-                stage_entered_at,
+                time: task_time(&record),
                 commits_ahead: crate::commands::commits_ahead(base, &record),
                 must_fix: record.review.as_ref().map(|r| r.must_fix),
                 pr: record.pr.clone(),
@@ -147,10 +173,11 @@ fn fixed_cells(row: &TaskRow, now: u64) -> [String; 7] {
         row.id.clone(),
         row.stage.to_owned(),
         row.status.clone(),
-        row.stage_entered_at.map_or_else(
-            || DASH.to_owned(),
-            |at| format_duration(now.saturating_sub(at)),
-        ),
+        match row.time {
+            TaskTime::InStage(at) => at.map(|at| now.saturating_sub(at)),
+            TaskTime::Took(secs) => secs,
+        }
+        .map_or_else(|| DASH.to_owned(), format_duration),
         row.commits_ahead
             .map_or_else(|| DASH.to_owned(), |n| n.to_string()),
         row.must_fix

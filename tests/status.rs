@@ -16,7 +16,7 @@ use common::Env as TestEnv;
 use sbxm::backend::{FakeBackend, Location, SandboxDetail};
 use sbxm::commands::status::{self, Env};
 use sbxm::status::cloud::{self, Cloud};
-use sbxm::status::tasks::{self, TaskRow};
+use sbxm::status::tasks::{self, TaskRow, TaskTime};
 use sbxm::task::record::{self, Kind, NewTask, Process, ProcessProbe, Record, Stage, Status};
 
 const T0: u64 = 1_790_000_000;
@@ -64,7 +64,7 @@ fn row(id: &str, stage: &'static str, status: &str) -> TaskRow {
         title: String::new(),
         stage,
         status: status.to_owned(),
-        stage_entered_at: None,
+        time: TaskTime::InStage(None),
         commits_ahead: None,
         must_fix: None,
         pr: None,
@@ -100,7 +100,7 @@ fn present_values_fill_every_column() {
         title: String::new(),
         stage: "reviewing",
         status: "running".to_owned(),
-        stage_entered_at: Some(40),
+        time: TaskTime::InStage(Some(40)),
         commits_ahead: Some(2),
         must_fix: Some(1),
         pr: Some("https://github.com/o/r/pull/9".to_owned()),
@@ -139,7 +139,7 @@ fn time_formats_seconds_minutes_hours_and_days() {
     ];
     for (elapsed, expect) in cases {
         let mut r = row("issue-1", "working", "running");
-        r.stage_entered_at = Some(0);
+        r.time = TaskTime::InStage(Some(0));
         let text = tasks::render(&[r], elapsed, None);
         let line = text.lines().nth(1).unwrap();
         let time_cell = line.split_whitespace().nth(3).unwrap();
@@ -188,7 +188,7 @@ fn a_full_row_at_terminal_width_still_shows_an_ellipsis_instead_of_losing_the_lo
         title: String::new(),
         stage: "reviewing",
         status: "running".to_owned(),
-        stage_entered_at: Some(60),
+        time: TaskTime::InStage(Some(60)),
         commits_ahead: Some(2),
         must_fix: Some(1),
         pr: Some("https://github.com/tutros/sbxm/pull/999".to_owned()),
