@@ -611,21 +611,13 @@ pub fn agent_ref(branch: &str) -> String {
 pub fn ensure_agent_ref(repo_git: &Path, branch: &str) -> Result<()> {
     check_ref("branch", branch)?;
     let agent = agent_ref(branch);
-    let found = git::output(
-        repo_git,
-        Some(repo_git),
-        None,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("{agent}^{{commit}}"),
-        ],
-    )?;
-    if found.status.success() {
+    let found = resolve_commits(repo_git, &[&agent, &format!("refs/heads/{branch}")])?;
+    if found[0].is_some() {
         return Ok(());
     }
-    let tip = branch_tip(repo_git, branch)?;
+    let tip = found[1]
+        .clone()
+        .with_context(|| format!("branch {branch} isn't in the task repo; cannot start {agent}"))?;
     git::run(
         repo_git,
         Some(repo_git),
