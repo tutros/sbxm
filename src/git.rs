@@ -58,6 +58,11 @@ fn permission_denied(out: &Output) -> bool {
     !out.status.success() && String::from_utf8_lossy(&out.stderr).contains("Permission denied")
 }
 
+/// Keeps git from leaving a detached `git maintenance run --auto` behind (a `git fetch` does), which
+/// could repack or prune a repo's objects while a later `git clone --no-hardlinks` copies them
+/// (issue 468).
+const NO_MAINTENANCE: [&str; 4] = ["-c", "maintenance.auto=false", "-c", "gc.auto=0"];
+
 /// `git <args>` with a hardened environment. `git_dir` and `work_tree` are
 /// passed as `--git-dir`/`--work-tree` when given; `cwd` is where it runs.
 /// Retries when git is refused access to a file (see [`retry`]).
@@ -112,6 +117,7 @@ fn command(
         "-c",
         "protocol.allow=never",
     ]);
+    cmd.args(NO_MAINTENANCE);
     cmd.args(args);
     // Nothing inherited may point git somewhere else or make it run code.
     cmd.env_clear();
@@ -295,7 +301,7 @@ fn user_command(
     environment: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Command {
     let mut cmd = Command::new("git");
-    cmd.current_dir(cwd).args(args);
+    cmd.current_dir(cwd).args(NO_MAINTENANCE).args(args);
     cmd.env_clear();
     cmd.envs(environment.into_iter().filter(|(name, _)| {
         !is_askpass_variable(name)
@@ -717,5 +723,26 @@ mod tests {
 
         assert!(out.status.success());
         assert!(String::from_utf8_lossy(&out.stdout).starts_with("git version"));
+    }
+
+    // Issue 468: `git fetch` leaves a detached `git maintenance run --auto` behind, which can
+    // repack or prune `repo.git`'s objects while a later `git clone --no-hardlinks` copies them.
+    fn args_of(cmd: &Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn no_git_call_leaves_background_maintenance_behind() {
+        let cwd = Path::new(".");
+        let hardened = args_of(&command(cwd, None, None, &["status"], []));
+        let user = args_of(&user_command(cwd, &["status"], &[], []));
+
+        for args in [hardened, user] {
+            for setting in ["maintenance.auto=false", "gc.auto=0"] {
+                assert!(args.iter().any(|a| a == setting), "{setting} in {args:?}");
+            }
+        }
     }
 }
