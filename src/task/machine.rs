@@ -419,7 +419,7 @@ pub const TABLE: &[Row] = &[
         kinds: &[Kind::Issue, Kind::Spec],
         event: Event::FinishSummaries,
         to: Some(Stage::Finished),
-        action: "post or edit the issue summaries only (no push, no new PR, no PR review)",
+        action: "with a recorded PR: post or edit the issue summaries only (no push, no new PR, no PR review)",
     },
     // `task resume` (decisions 173(c), 175; issue 118), a task with a worker: a failed or
     // interrupted stage runs again in the task's own clone, and the task goes on to `ready`.
