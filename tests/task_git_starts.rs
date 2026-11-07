@@ -57,3 +57,41 @@ fn creating_a_branch_returns_the_commit_it_starts_at() {
     assert_eq!(start, git(&f.repo_git, &["rev-parse", "refs/heads/main"]));
     assert_eq!(start, repo::branch_tip(&f.repo_git, "issue-4").unwrap());
 }
+
+/// A commit object written straight to the repo (`hash-object` doesn't check what it names).
+fn raw_commit(f: &Fixture, tree: &str, parent: &str) -> String {
+    let body = format!(
+        "tree {tree}\nparent {parent}\nauthor t <t@t> 1700000000 +0000\ncommitter t <t@t> 1700000000 +0000\n\nmsg\n"
+    );
+    let path = f._tmp.path().join("raw-commit");
+    fs::write(&path, body).unwrap();
+    git(
+        &f.repo_git,
+        &["hash-object", "-t", "commit", "-w", path.to_str().unwrap()],
+    )
+}
+
+#[test]
+fn a_rebuild_over_a_commit_whose_tree_is_missing_writes_nothing() {
+    use sbxm::task::rewrite;
+    let f = fixture();
+    let base = git(&f.repo_git, &["rev-parse", "refs/heads/main"]);
+    let missing_tree = "1".repeat(40);
+    let agent = raw_commit(&f, &missing_tree, &base);
+    git(
+        &f.repo_git,
+        &["update-ref", "refs/sbxm/agent/issue-4", &agent],
+    );
+    git(&f.repo_git, &["update-ref", "refs/heads/issue-4", &base]);
+    let before = git(&f.repo_git, &["count-objects"]);
+
+    let err = rewrite::rebuild(&f.repo_git, "main", "issue-4").unwrap_err();
+
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("tree") && message.contains(&missing_tree),
+        "{message}"
+    );
+    assert_eq!(git(&f.repo_git, &["rev-parse", "refs/heads/issue-4"]), base);
+    assert_eq!(git(&f.repo_git, &["count-objects"]), before);
+}
