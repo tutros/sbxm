@@ -540,6 +540,12 @@ impl Record {
         }
     }
 
+    /// The branch's tip when it has commits past where [`commits_ahead`](Self::commits_ahead)
+    /// counts from, `None` when it has none: both from one git start (issue #444).
+    pub fn tip_if_ahead(&self, repo_git: &Path) -> Result<Option<String>> {
+        super::repo::tip_if_ahead(repo_git, &self.rewrite_start(), &self.branch)
+    }
+
     /// The paths the task's own commits change: past the PR head it started from when it
     /// continues a PR, else past where it left its base branch.
     pub fn changed_paths(&self, repo_git: &Path) -> Result<Vec<String>> {

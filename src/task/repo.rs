@@ -429,20 +429,6 @@ pub fn branch_tip(repo_git: &Path, branch: &str) -> Result<String> {
     Ok(out.trim().to_owned())
 }
 
-/// The commit `branch` points at and `rev` resolved to a full commit id, both from one `git`
-/// start (issue #444); an error names whichever is missing.
-pub fn branch_tip_and_commit(repo_git: &Path, branch: &str, rev: &str) -> Result<(String, String)> {
-    check_ref("branch", branch)?;
-    let found = resolve_commits(repo_git, &[&format!("refs/heads/{branch}"), rev])?;
-    let tip = found[0]
-        .clone()
-        .with_context(|| format!("branch {branch} isn't in the task repo"))?;
-    let commit = found[1]
-        .clone()
-        .with_context(|| format!("{rev} doesn't resolve to a commit in the task repo"))?;
-    Ok((tip, commit))
-}
-
 /// `rev` resolved to a full commit id in `repo_git`.
 pub fn resolve_commit(repo_git: &Path, rev: &str) -> Result<String> {
     let out = git::run(
@@ -457,17 +443,26 @@ pub fn resolve_commit(repo_git: &Path, rev: &str) -> Result<String> {
 /// Pushes `branch` (and only it) from `repo_git` to GitHub, never forcing.
 pub fn push(repo_git: &Path, branch: &str) -> Result<()> {
     check_ref("branch", branch)?;
+    let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+    let pushed = git::user_run(
+        repo_git,
+        &["--git-dir", text(repo_git)?, "push", "origin", &refspec],
+    );
+    if let Err(e) = pushed {
+        refuse_missing_branch(repo_git, branch)?;
+        return Err(e).with_context(|| {
+            format!("cannot push {branch}; check `gh auth status` and your access to the repo")
+        });
+    }
+    Ok(())
+}
+
+/// For a push that failed: says so when `branch` isn't in `repo_git` at all. Looked for only
+/// then (issue #444): a push of a ref that doesn't exist changes nothing anywhere.
+fn refuse_missing_branch(repo_git: &Path, branch: &str) -> Result<()> {
     if !has_branch(repo_git, branch)? {
         bail!("branch {branch} isn't in the task repo; nothing to push");
     }
-    let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
-    git::user_run(
-        repo_git,
-        &["--git-dir", text(repo_git)?, "push", "origin", &refspec],
-    )
-    .with_context(|| {
-        format!("cannot push {branch}; check `gh auth status` and your access to the repo")
-    })?;
     Ok(())
 }
 
@@ -476,9 +471,6 @@ pub fn push(repo_git: &Path, branch: &str) -> Result<()> {
 /// the remote when it lands, so it never moves or overwrites anyone's branch.
 pub fn push_new(repo_git: &Path, branch: &str) -> Result<()> {
     check_ref("branch", branch)?;
-    if !has_branch(repo_git, branch)? {
-        bail!("branch {branch} isn't in the task repo; nothing to push");
-    }
     let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
     let lease = format!("--force-with-lease=refs/heads/{branch}:");
     let out = git::user_output(
@@ -496,6 +488,7 @@ pub fn push_new(repo_git: &Path, branch: &str) -> Result<()> {
     if out.status.success() {
         return Ok(());
     }
+    refuse_missing_branch(repo_git, branch)?;
     let stderr = String::from_utf8_lossy(&out.stderr);
     if stderr.contains("stale info") {
         bail!("{branch} appeared on the remote after sbxm checked it; nothing was pushed");
@@ -568,6 +561,7 @@ pub fn push_from(repo_git: &Path, branch: &str, from: &str) -> Result<()> {
     if out.status.success() {
         return Ok(());
     }
+    refuse_missing_branch(repo_git, branch)?;
     let stderr = String::from_utf8_lossy(&out.stderr);
     if stderr.contains("stale info") {
         bail!(
@@ -1105,6 +1099,32 @@ pub fn is_ancestor_of_remote_base(repo_git: &Path, commit: &str, base: &str) -> 
         ],
     )?;
     Ok(out.status.success())
+}
+
+/// `branch`'s tip when it has commits past `from` (`refs/heads/<base>` or a full commit id),
+/// `None` when it has none, from one git start (issue #444): `rev-list --topo-order` lists no
+/// commit before its children, and every commit it lists is the tip or one of the tip's
+/// ancestors, so the tip comes first.
+pub fn tip_if_ahead(repo_git: &Path, from: &str, branch: &str) -> Result<Option<String>> {
+    match from.strip_prefix("refs/heads/") {
+        Some(base) => check_ref("base", base)?,
+        None if is_commit_id(from) => {}
+        None => bail!("{from:?} isn't a full commit id; the task record may be damaged"),
+    }
+    check_ref("branch", branch)?;
+    let out = git::run(
+        repo_git,
+        Some(repo_git),
+        None,
+        &[
+            "rev-list",
+            "--topo-order",
+            "--max-count=1",
+            &format!("{from}..refs/heads/{branch}"),
+        ],
+    )
+    .with_context(|| format!("cannot list the commits of {branch} past {from}"))?;
+    Ok(out.lines().next().map(str::to_owned))
 }
 
 /// How many commits `branch` has that `base` doesn't.

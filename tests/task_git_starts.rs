@@ -219,29 +219,18 @@ fn a_commit_with_a_mention_is_rebuilt_and_written() {
 }
 
 #[test]
-fn a_branch_tip_and_a_rev_come_back_together() {
+fn revs_resolve_together_and_an_option_like_rev_is_only_a_name() {
     let f = fixture();
     repo::create_branch(&f.repo_git, "issue-4", "main").unwrap();
     let main = git(&f.repo_git, &["rev-parse", "refs/heads/main"]);
 
-    let (tip, commit) = repo::branch_tip_and_commit(&f.repo_git, "issue-4", "main").unwrap();
+    let found = repo::resolve_commits(
+        &f.repo_git,
+        &["refs/heads/issue-4", "main", "gone", "--all"],
+    )
+    .unwrap();
 
-    assert_eq!(tip, main);
-    assert_eq!(commit, main);
-}
-
-#[test]
-fn a_missing_branch_or_rev_is_named_and_an_option_like_rev_is_only_a_name() {
-    let f = fixture();
-    repo::create_branch(&f.repo_git, "issue-4", "main").unwrap();
-
-    let no_branch = repo::branch_tip_and_commit(&f.repo_git, "nope", "main").unwrap_err();
-    let no_rev = repo::branch_tip_and_commit(&f.repo_git, "issue-4", "gone").unwrap_err();
-    let option = repo::branch_tip_and_commit(&f.repo_git, "issue-4", "--all").unwrap_err();
-
-    assert!(format!("{no_branch:#}").contains("nope"), "{no_branch:#}");
-    assert!(format!("{no_rev:#}").contains("gone"), "{no_rev:#}");
-    assert!(format!("{option:#}").contains("--all"), "{option:#}");
+    assert_eq!(found, vec![Some(main.clone()), Some(main), None, None]);
 }
 
 /// Runs `work` on its own thread and fails the test when it hasn't finished in `secs`.
@@ -567,4 +556,53 @@ fn the_count_includes_a_root_commit_the_agent_merged_in() {
         );
     });
     assert_eq!((ahead, counted), (2, 2));
+}
+
+#[test]
+fn a_branch_with_commits_past_its_base_gives_its_tip() {
+    let f = fixture();
+    repo::create_branch(&f.repo_git, "issue-4", "main").unwrap();
+    assert_eq!(
+        repo::tip_if_ahead(&f.repo_git, "refs/heads/main", "issue-4").unwrap(),
+        None
+    );
+    let main = git(&f.repo_git, &["rev-parse", "refs/heads/main"]);
+    let tree = git(&f.repo_git, &["rev-parse", &format!("{main}^{{tree}}")]);
+    // A merge on top, so the tip is not the newest commit by date order alone.
+    let one = git(
+        &f.repo_git,
+        &["commit-tree", &tree, "-p", &main, "-m", "one"],
+    );
+    let two = git(
+        &f.repo_git,
+        &["commit-tree", &tree, "-p", &main, "-m", "two"],
+    );
+    let tip = git(
+        &f.repo_git,
+        &["commit-tree", &tree, "-p", &one, "-p", &two, "-m", "merge"],
+    );
+    git(&f.repo_git, &["update-ref", "refs/heads/issue-4", &tip]);
+
+    assert_eq!(
+        repo::tip_if_ahead(&f.repo_git, "refs/heads/main", "issue-4").unwrap(),
+        Some(tip.clone())
+    );
+    assert_eq!(
+        repo::tip_if_ahead(&f.repo_git, &one, "issue-4").unwrap(),
+        Some(tip)
+    );
+}
+
+#[test]
+fn a_missing_branch_has_no_tip_to_give() {
+    let f = fixture();
+    let err = repo::tip_if_ahead(&f.repo_git, "refs/heads/main", "issue-9").unwrap_err();
+    assert!(format!("{err:#}").contains("issue-9"), "{err:#}");
+}
+
+#[test]
+fn pushing_a_missing_branch_as_new_is_an_error_naming_it() {
+    let f = fixture();
+    let err = repo::push_new(&f.repo_git, "issue-9").unwrap_err();
+    assert!(format!("{err:#}").contains("issue-9"), "{err:#}");
 }
