@@ -53,6 +53,15 @@ struct Original {
 /// commit is never close to this.
 pub const MAX_COMMIT_BYTES: u64 = 1024 * 1024;
 
+/// The most commit-object bytes [`rebuild`] reads in one `cat-file --batch` (issue #444).
+const BATCH_BYTES: u64 = 4 * MAX_COMMIT_BYTES;
+
+/// What [`check_range`] learned about one commit before its body is read.
+struct Checked {
+    tree: String,
+    size: u64,
+}
+
 /// The ref recording the agent tip whose rebuild is on the delivered branch right now (issue 244
 /// review round 2, M-1). It moves only together with the delivered branch, in the same atomic
 /// `update-ref --stdin` transaction [`move_branch`] runs, so it can never point past a rebuild
@@ -95,26 +104,40 @@ pub fn rebuild(repo_git: &Path, start: &str, branch: &str) -> Result<()> {
     let last_rebuilt = found[3].clone();
 
     let range = commit_range(repo_git, &start_id, &agent_tip, branch)?;
-    let trees = check_range(repo_git, &range)?;
-    let ids: Vec<String> = range.iter().map(|(id, _)| id.clone()).collect();
-    let originals = read_commits(repo_git, &ids)?;
-    for (((id, parents), tree), original) in range.iter().zip(&trees).zip(&originals) {
-        if &original.tree != tree || &original.parents != parents {
-            bail!(
-                "commit {id} doesn't read the same through git's two views of it; the commit being rebuilt is damaged"
-            );
-        }
-    }
+    let checked = check_range(repo_git, &range)?;
     let mut rebuilt: HashMap<String, String> = HashMap::new();
-    for (id, original) in ids.iter().zip(&originals) {
-        let parents: Vec<String> = original
-            .parents
+    // Bodies are read a batch at a time, each batch within `BATCH_BYTES` (a commit over
+    // `MAX_COMMIT_BYTES` was refused by `check_range`, so one always fits), and dropped before the
+    // next: the memory held stays bounded however long the history is (decision 198).
+    let mut from = 0;
+    while from < range.len() {
+        let mut to = from;
+        let mut bytes = 0;
+        while to < range.len() && (to == from || bytes + checked[to].size <= BATCH_BYTES) {
+            bytes += checked[to].size;
+            to += 1;
+        }
+        let ids: Vec<String> = range[from..to].iter().map(|(id, _)| id.clone()).collect();
+        let originals = read_commits(repo_git, &ids)?;
+        for ((id, parents), (checked, original)) in range[from..to]
             .iter()
-            .map(|p| rebuilt.get(p).cloned().unwrap_or_else(|| p.clone()))
-            .collect();
-        let message = defang_bytes(&original.message);
-        let new_id = build_commit(repo_git, id, original, &parents, &message)?;
-        rebuilt.insert(id.clone(), new_id);
+            .zip(checked[from..to].iter().zip(&originals))
+        {
+            if original.tree != checked.tree || &original.parents != parents {
+                bail!(
+                    "commit {id} doesn't read the same through git's two views of it; the commit being rebuilt is damaged"
+                );
+            }
+            let parents: Vec<String> = original
+                .parents
+                .iter()
+                .map(|p| rebuilt.get(p).cloned().unwrap_or_else(|| p.clone()))
+                .collect();
+            let message = defang_bytes(&original.message);
+            let new_id = build_commit(repo_git, id, original, &parents, &message)?;
+            rebuilt.insert(id.clone(), new_id);
+        }
+        from = to;
     }
     // A commit outside the rebuilt range (the start itself, or one `commit_range` left out as
     // already on another branch -- the agent tip too, when the worker only fast-forwarded to an
@@ -217,8 +240,8 @@ fn commit_range(
 /// the tree and parents before it wrote anything; this keeps that guarantee for
 /// [`build_commit`]'s `hash-object`: a commit whose tree or a parent is missing -- the way a
 /// partial, corrupted range would be -- fails before anything is written. Returns each commit's
-/// tree id, for [`rebuild`] to compare with the one it reads from the commit itself.
-fn check_range(repo_git: &Path, range: &[(String, Vec<String>)]) -> Result<Vec<String>> {
+/// tree id (for [`rebuild`] to compare with the one it reads from the commit itself) and size.
+fn check_range(repo_git: &Path, range: &[(String, Vec<String>)]) -> Result<Vec<Checked>> {
     let in_range: HashSet<&str> = range.iter().map(|(id, _)| id.as_str()).collect();
     let outside: BTreeSet<&str> = range
         .iter()
@@ -259,9 +282,12 @@ fn check_range(repo_git: &Path, range: &[(String, Vec<String>)]) -> Result<Vec<S
     }
     range
         .iter()
-        .zip(trees)
-        .map(|((id, _), object)| match object {
-            Some(tree) if tree.kind == "tree" => Ok(tree.id.clone()),
+        .zip(commits.iter().zip(trees))
+        .map(|((id, _), (commit, tree))| match (commit, tree) {
+            (Some(commit), Some(tree)) if tree.kind == "tree" => Ok(Checked {
+                tree: tree.id.clone(),
+                size: commit.size,
+            }),
             _ => bail!(
                 "the tree of commit {id} doesn't exist in the task repo; the commit being rebuilt is damaged"
             ),

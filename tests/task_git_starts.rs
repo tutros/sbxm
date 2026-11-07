@@ -314,3 +314,60 @@ fn a_rebuild_of_a_two_thousand_commit_branch_completes() {
 
     assert_eq!(git(&f.repo_git, &["rev-parse", "refs/heads/issue-4"]), tip);
 }
+
+/// Decision 198: the memory a rebuild holds is bounded by a batch, not by the history. Twenty-five commits
+/// of about 900 KiB each (every one under the per-commit cap, the bundle of them tiny) are
+/// rebuilt in a child limited to 96 MiB of address space; the parent builds the repo outside it.
+#[cfg(unix)]
+#[test]
+fn a_rebuild_of_twenty_big_commits_stays_within_a_small_address_space() {
+    use sbxm::task::rewrite;
+    if let Some(dir) = std::env::var_os("SBXM_MEMORY_CHILD") {
+        rewrite::rebuild(Path::new(&dir), "main", "issue-4").unwrap();
+        return;
+    }
+    let f = fixture();
+    let base = git(&f.repo_git, &["rev-parse", "refs/heads/main"]);
+    let tree = git(&f.repo_git, &["rev-parse", &format!("{base}^{{tree}}")]);
+    let message = f._tmp.path().join("message");
+    fs::write(&message, "x".repeat(900_000)).unwrap();
+    let mut parent = base.clone();
+    for _ in 0..25 {
+        parent = git(
+            &f.repo_git,
+            &[
+                "commit-tree",
+                &tree,
+                "-p",
+                &parent,
+                "-F",
+                message.to_str().unwrap(),
+            ],
+        );
+    }
+    git(
+        &f.repo_git,
+        &["update-ref", "refs/sbxm/agent/issue-4", &parent],
+    );
+    git(&f.repo_git, &["update-ref", "refs/heads/issue-4", &base]);
+
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg("ulimit -v 98304; exec \"$0\" a_rebuild_of_twenty_big_commits_stays_within_a_small_address_space --exact --test-threads=1 --nocapture")
+        .arg(std::env::current_exe().unwrap())
+        .arg("")
+        .env("SBXM_MEMORY_CHILD", &f.repo_git)
+        .output()
+        .unwrap();
+
+    assert!(
+        out.status.success(),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        git(&f.repo_git, &["rev-parse", "refs/heads/issue-4"]),
+        parent
+    );
+}
