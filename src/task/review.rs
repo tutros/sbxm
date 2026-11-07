@@ -526,6 +526,15 @@ pub fn repeats_a_must_fix_finding(current: &str, earlier_reviews: &[&str]) -> bo
         .any(|(_, claim)| matches!(claim, Claim::Valid))
 }
 
+/// How many must-fix findings of `current` validly claim `Repeat of:` a must-fix finding of
+/// `earlier_reviews`, as [`repeats_a_must_fix_finding`] matches them (issue 430).
+pub fn repeat_count(current: &str, earlier_reviews: &[&str]) -> usize {
+    classify_current(current, earlier_reviews)
+        .iter()
+        .filter(|(_, claim)| matches!(claim, Claim::Valid))
+        .count()
+}
+
 /// One warning per must-fix finding of `current` whose `Repeat of:` claim is invalid (decision
 /// 177(e)): it names an id no earlier round has a must-fix finding for, or one in a different
 /// file. `Repeat of: new` and a missing marker are ordinary new findings and never warned about,

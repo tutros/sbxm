@@ -153,7 +153,7 @@ fn a_continued_task_is_pushed_to_the_pr_branch_with_a_comment_and_no_new_pr() {
     );
     // No issue-41 branch went anywhere.
     assert!(git(&f.origin, &["branch", "--list", "issue-41"]).is_empty());
-    let calls = github.calls();
+    let calls = pr_calls(&github);
     let [GhCall::PrComment(repo, 7, body)] = calls.as_slice() else {
         panic!("{calls:?}")
     };
@@ -259,7 +259,7 @@ fn a_comment_that_fails_after_the_push_leaves_the_task_ready_and_a_rerun_only_co
 
     assert_eq!(origin_head(&f), tip);
     assert!(
-        matches!(up.calls().as_slice(), [GhCall::PrComment(_, 7, _)]),
+        matches!(pr_calls(&up).as_slice(), [GhCall::PrComment(_, 7, _)]),
         "{:?}",
         up.calls()
     );
@@ -394,8 +394,18 @@ fn reword_tip(prepared: &Prepared, message: &str) -> String {
     tip
 }
 
+/// Every call but the comment on the issue (issue 430), which `task_finish_issue_comment.rs`
+/// tests.
+fn pr_calls(github: &FakeGitHub) -> Vec<GhCall> {
+    github
+        .calls()
+        .into_iter()
+        .filter(|c| !matches!(c, GhCall::IssueComment(..)))
+        .collect()
+}
+
 fn posted_comment(github: &FakeGitHub) -> String {
-    let calls = github.calls();
+    let calls = pr_calls(github);
     let [GhCall::PrComment(_, 7, body)] = calls.as_slice() else {
         panic!("{calls:?}")
     };

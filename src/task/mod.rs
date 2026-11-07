@@ -26,3 +26,4 @@ pub mod secrets;
 pub mod select;
 pub mod session;
 pub mod stale_lock;
+pub mod summary;

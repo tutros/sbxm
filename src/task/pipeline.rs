@@ -4290,6 +4290,7 @@ fn fix(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
     };
     // The worker's own session, with `[fix] resume` (issue 418); fresh when there is none.
     let resume = session::restore(env, prepared, &sandbox);
+    let mut resumed = resume.is_some();
     let mut ran = run(resume.clone());
     if let (Some(id), Ok(result)) = (&resume, &ran)
         && session::not_found(result)
@@ -4300,6 +4301,17 @@ fn fix(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
             prepared.record.id
         ));
         ran = run(None);
+        resumed = false;
+    }
+    if ran.is_ok() {
+        // Issue 430: `task finish` says on the issue how each fix round ran. `round` counts the
+        // rounds before this one; a round run again by `task resume` replaces its entry.
+        let round = prepared.record.round + 1;
+        prepared.record.fix_runs.retain(|r| r.round != round);
+        prepared
+            .record
+            .fix_runs
+            .push(record::FixRun { round, resumed });
     }
     let result = match ran {
         Ok(result) => result,

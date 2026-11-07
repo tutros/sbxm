@@ -165,6 +165,13 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
     section that is absent, empty or "none" is left out; one over 2,500 characters is cut (the whole of it
     stays in `result.md` in the task folder). The worker never stops to wait for an answer: it picks, flags the pick and goes on, and the user answers
     on the PR. The review comment is unchanged.
+  - **The issue gets a summary of the in-task rounds (issue 430):** `task finish` posts one comment on the issue
+    (on each issue of a spec task's `Fixes:` line under `sink = "pr"`): the review rounds with their must-fix counts,
+    `Repeat of:` counts and finding ids and titles (inert code spans, never review text), the fix rounds and whether
+    each resumed the worker's session, the stop reason, the worker's and latest review's time and cost, and the PR
+    link. So the rounds outlive `task rm` and its local archive. A later finish edits the comment whose id
+    `task.json` recorded; a failed post is a warning, and `task finish` run again on the finished task posts the
+    missing summary and edits the others, pushing nothing and opening or reviewing no PR again.
   - `task start --spec FILE` makes a task from a file instead of a GitHub issue (id `spec-<name>-<hash>`,
     `source.md` in place of `issue.md`); `task review --spec FILE` continues it through the same gates/review/fix
     loop, and `task run --spec FILE` does both in one go, stopping before `finish` (with `--restart`, the spec is

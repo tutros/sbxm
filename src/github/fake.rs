@@ -27,6 +27,10 @@ pub enum GhCall {
     PrCreate(String, PrRequest),
     PrComment(String, u32, String),
     PrComments(String, u32),
+    /// Repo, issue, body.
+    IssueComment(String, u32, String),
+    /// Repo, comment id, body.
+    IssueCommentEdit(String, u64, String),
     IssueCreate(String, IssueRequest),
     Labels(String),
     IssuesAll(String, u32),
@@ -77,6 +81,11 @@ pub struct FakeGitHub {
     fail_issues_all: bool,
     failure: Option<String>,
     comment_failure: Option<String>,
+    /// The id the next `issue_comment` returns; 1 when not scripted.
+    next_comment_id: Mutex<u64>,
+    /// The issues whose `issue_comment` fails.
+    failing_issue_comments: Vec<u32>,
+    failing_comment_edits: bool,
     status_failure: Option<String>,
     arm_failure: Option<String>,
     /// What `commit_runs` answers, by commit; no runs for a commit not scripted.
@@ -238,6 +247,24 @@ impl FakeGitHub {
     /// Only `pr_comment` fails (and is still recorded).
     pub fn failing_comments(mut self, message: &str) -> Self {
         self.comment_failure = Some(message.to_owned());
+        self
+    }
+
+    /// The id the next `issue_comment` returns; each one after it is one higher.
+    pub fn with_next_comment_id(self, id: u64) -> Self {
+        *self.next_comment_id.lock().unwrap() = id;
+        self
+    }
+
+    /// `issue_comment` on issue `number` fails (and is still recorded).
+    pub fn failing_issue_comments_on(mut self, number: u32) -> Self {
+        self.failing_issue_comments.push(number);
+        self
+    }
+
+    /// Every `issue_comment_edit` fails (and is still recorded).
+    pub fn failing_issue_comment_edits(mut self) -> Self {
+        self.failing_comment_edits = true;
         self
     }
 
@@ -468,6 +495,33 @@ impl GitHubBackend for FakeGitHub {
             .find(|(n, _)| *n == number)
             .map(|(_, comments)| comments.clone())
             .unwrap_or_default())
+    }
+
+    fn issue_comment(&self, repo: &str, number: u32, body: &str) -> Result<u64> {
+        self.record(GhCall::IssueComment(
+            repo.to_owned(),
+            number,
+            body.to_owned(),
+        ))?;
+        if self.failing_issue_comments.contains(&number) {
+            return Err(anyhow!("FakeGitHub: the comment on issue {number} fails"));
+        }
+        let mut next = self.next_comment_id.lock().unwrap();
+        let id = (*next).max(1);
+        *next = id + 1;
+        Ok(id)
+    }
+
+    fn issue_comment_edit(&self, repo: &str, id: u64, body: &str) -> Result<()> {
+        self.record(GhCall::IssueCommentEdit(
+            repo.to_owned(),
+            id,
+            body.to_owned(),
+        ))?;
+        if self.failing_comment_edits {
+            return Err(anyhow!("FakeGitHub: the edit of comment {id} fails"));
+        }
+        Ok(())
     }
 
     fn issue_create(&self, repo: &str, request: &IssueRequest) -> Result<u32> {

@@ -367,6 +367,25 @@ pub struct OpenFinding {
     pub place: Option<String>,
 }
 
+/// A comment `task finish` posted on an issue (issue 430): recorded only once GitHub accepted
+/// it, so a later finish edits this one rather than posting another. Only this record says which
+/// comment is the task's, never a marker found in the issue's comments (decision 187(d)).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IssueComment {
+    pub issue: u32,
+    /// The id GitHub gave the comment.
+    pub id: u64,
+}
+
+/// Whether a fix round resumed the worker's own session (issue 430; the session of issue 418)
+/// or ran fresh, recorded once its run ended.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FixRun {
+    /// The fix round, counted from 1.
+    pub round: u32,
+    pub resumed: bool,
+}
+
 /// What a cloud sandbox of a task was for (P7 (a)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -469,6 +488,13 @@ pub struct Record {
     /// The PR's URL once `finish` opened it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr: Option<String>,
+    /// The comments `task finish` posted on issues, one per issue (issue 430); absent in older
+    /// records and until a post is accepted.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issue_comments: Vec<IssueComment>,
+    /// How each fix round ran (issue 430), in order; absent in older records, which recorded none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fix_runs: Vec<FixRun>,
     /// Set when the task continues an open PR's branch; absent in older records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continues: Option<PrBranch>,
@@ -675,6 +701,8 @@ impl Record {
             gates: Vec::new(),
             gate_run: None,
             pr: None,
+            issue_comments: Vec::new(),
+            fix_runs: Vec::new(),
             continues: None,
             related: Vec::new(),
             notes: Vec::new(),
