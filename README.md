@@ -602,8 +602,9 @@ One-time setup:
 - `just deploy-profiles` copies `profiles/sbxm-dev` into your `profiles_dir` (again after the profile changes). It
   installs Rust and a C toolchain with `pkg-config` and the OpenSSL headers (`openssl-sys` needs them), allows
   crates.io and `cdn.pyke.io` (the ONNX Runtime download of the `fastembed` build), and needs the `anthropic` secret;
-  a Codex reviewer also needs `openai` (`sbx secret ls`). It leaves out PowerShell, Pester and `just` to keep sandbox
-  setup short, so `just script-test` runs on the host only. A worker should not install software itself: what a build needs belongs in the
+  a Codex reviewer also needs `openai` (`sbx secret ls`). It also installs PowerShell, Pester and `just`, pinned to the
+  host's versions (decision 302): the install runs once, when the template is built, so every sandbox made from the
+  template can run `just script-test`. The task gates don't run the Pester tests yet (issue 455). A worker should not install software itself: what a build needs belongs in the
   profile's `setup.install`, or a clean sandbox (such as a PR review's) fails where the worker's passed.
 - `sbxm task init` writes `sbxm-task.toml` in the repo's root: the worker, reviewer, profile, gates and time limits.
 - `[risk]` in `sbxm-task.toml` adds to the risk assessment's built-in path-rule floor (decision 176(d)): `medium =
