@@ -27,6 +27,20 @@ pub fn lock_path(base_dir: &Path) -> std::path::PathBuf {
     base_dir.join(".sbxm").join("task-loop.lock")
 }
 
+/// What [`lock_path`] holds: the loop's process and, for a loop started with `--issue` (issue
+/// 477), its list in the user's order and its `--cap`. A lock without the list (a labeled-queue
+/// loop, or one an older binary wrote) reads with an empty list, and an older binary reads this
+/// one as its process alone, so either reads the other's lock.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LockFile {
+    #[serde(flatten)]
+    pub process: record::Process,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issues: Vec<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cap: Option<u32>,
+}
+
 /// Whether this task's PR is one a loop opened: a loop finished it, and it didn't continue an open
 /// PR (decision 169), whose finish only pushes to it (review M-3, repeat). A continued PR a loop
 /// did open still counts through the record of the task that opened it.

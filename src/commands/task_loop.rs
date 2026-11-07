@@ -140,12 +140,24 @@ impl Drop for LoopLock {
 
 /// Takes the loop's lock for this process, as `template build` takes its own (decision 212): a
 /// lock whose process is alive refuses the second loop; one whose process is gone is taken over.
-fn take_lock(base_dir: &Path, probe: &dyn ProcessProbe, warn: &mut dyn Write) -> Result<LoopLock> {
+/// A loop started with `--issue` writes its list and its `--cap` into the lock too, for `sbxm
+/// status` (issue 477); a labeled-queue loop writes its process alone, as before.
+fn take_lock(
+    base_dir: &Path,
+    opts: &Options,
+    probe: &dyn ProcessProbe,
+    warn: &mut dyn Write,
+) -> Result<LoopLock> {
     let path = queue::lock_path(base_dir);
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
     }
-    let me = serde_json::to_string(&Process::current(probe))?;
+    let listed = !opts.issues.is_empty();
+    let me = serde_json::to_string(&queue::LockFile {
+        process: Process::current(probe),
+        issues: opts.issues.clone(),
+        cap: opts.cap.filter(|_| listed),
+    })?;
     for _ in 0..3 {
         match fs::OpenOptions::new()
             .write(true)
@@ -2078,7 +2090,7 @@ pub fn run(
     if fs::symlink_metadata(&tasks).is_ok() {
         check_own_folder(&base_dir, &tasks)?;
     }
-    let _lock = take_lock(&base_dir, probe, warn)?;
+    let _lock = take_lock(&base_dir, opts, probe, warn)?;
 
     let started_at = (env.now)();
     let date = format_timestamp(started_at);

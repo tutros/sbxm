@@ -576,6 +576,7 @@ fn the_loop_section_titles_its_task_and_the_prs_awaiting_but_not_one_whose_recor
             queue: Ok(Vec::new()),
             awaiting: Ok(vec![9, 13]),
             pr_titles: [(9, "Earlier".to_owned())].into_iter().collect(),
+            issue_titles: Default::default(),
         }),
         pause: sbxm::task::loop_pause::State::None,
     };

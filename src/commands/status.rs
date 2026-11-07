@@ -147,9 +147,11 @@ fn loop_view(
     cache: &mut looping::Cache,
     now: u64,
 ) -> looping::View {
-    let lock = looping::read_lock(base, probe);
-    let work = match &lock {
-        looping::Lock::Running(process) => Some(looping::work(base, process).unwrap_or_default()),
+    let (lock, file) = looping::read_lock_file(base, probe);
+    let work = match (&lock, &file) {
+        (looping::Lock::Running(_), Some(file)) => {
+            Some(looping::work_for(base, file).unwrap_or_default())
+        }
         _ => None,
     };
     let snapshot = cache
