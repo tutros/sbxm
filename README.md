@@ -604,9 +604,8 @@ One-time setup:
   crates.io and `cdn.pyke.io` (the ONNX Runtime download of the `fastembed` build), and needs the `anthropic` secret;
   a Codex reviewer also needs `openai` (`sbx secret ls`). It also installs PowerShell, Pester and `just`, pinned to the
   host's versions (decision 302): the install runs once, when the template is built, so every sandbox made from the
-  template can run `just script-test`. This repo's `sbxm-task.toml` has a gate that runs it when the change
-  against the default branch touches `scripts/` (and when that base can't be found), about 2.5 minutes on Linux
-  (issue 455). A worker should not install software itself: what a build needs belongs in the
+  template can run `just script-test`. This repo's `sbxm-task.toml` has a gate that runs it on every task, whatever
+  the change touches, about 10-13 s in the template (issue 455). A worker should not install software itself: what a build needs belongs in the
   profile's `setup.install`, or a clean sandbox (such as a PR review's) fails where the worker's passed.
 - `sbxm task init` writes `sbxm-task.toml` in the repo's root: the worker, reviewer, profile, gates and time limits.
 - `[risk]` in `sbxm-task.toml` adds to the risk assessment's built-in path-rule floor (decision 176(d)): `medium =
