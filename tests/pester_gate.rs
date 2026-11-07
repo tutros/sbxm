@@ -188,6 +188,38 @@ fn an_uncommitted_change_under_scripts_runs_the_tests() {
 }
 
 #[test]
+fn an_untracked_script_alone_runs_the_tests() {
+    let s = scratch(true);
+    write(&s.work, "scripts/new.ps1", "untracked\n");
+    assert_eq!(s.run_gate(), (true, true));
+}
+
+// Git quotes a path with a non-ASCII character or a tab in its output (`core.quotePath`), so the
+// gate must select `scripts/` by pathspec, never by matching the printed names (review M-1).
+#[test]
+fn a_committed_script_with_an_accented_name_runs_the_tests() {
+    let s = scratch(true);
+    write(&s.work, "scripts/café.ps1", "new\n");
+    s.commit("accent");
+    assert_eq!(s.run_gate(), (true, true));
+}
+
+#[test]
+fn an_untracked_script_with_an_accented_name_runs_the_tests() {
+    let s = scratch(true);
+    write(&s.work, "scripts/café.ps1", "untracked\n");
+    assert_eq!(s.run_gate(), (true, true));
+}
+
+#[test]
+fn a_script_with_a_tab_in_its_name_runs_the_tests() {
+    let s = scratch(true);
+    write(&s.work, "scripts/a\tb.ps1", "new\n");
+    s.commit("tab");
+    assert_eq!(s.run_gate(), (true, true));
+}
+
+#[test]
 fn a_missing_base_runs_the_tests() {
     let s = scratch(false);
     write(&s.work, "src/lib.rs", "changed\n");
