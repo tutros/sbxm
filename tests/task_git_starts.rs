@@ -401,3 +401,86 @@ fn a_branch_that_exists_is_refused_and_no_agent_ref_is_made() {
     );
     assert_eq!(agent, "");
 }
+
+/// `create_branch`, then one agent commit on it in a clone, bundled into the task's workspace as
+/// the sandbox leaves it. Returns the workspace and the agent's commit.
+fn agent_bundle(f: &Fixture, message: &str) -> (PathBuf, String) {
+    repo::create_branch(&f.repo_git, "issue-4", "main").unwrap();
+    let clone = f._tmp.path().join("agent");
+    git(
+        f._tmp.path(),
+        &[
+            "clone",
+            "-q",
+            "-b",
+            "issue-4",
+            f.repo_git.to_str().unwrap(),
+            clone.to_str().unwrap(),
+        ],
+    );
+    git(&clone, &["commit", "-q", "--allow-empty", "-m", message]);
+    let tip = git(&clone, &["rev-parse", "HEAD"]);
+    let workspace = f._tmp.path().join("task").join("workspace");
+    fs::create_dir_all(workspace.join(".sbxm-task")).unwrap();
+    git(
+        &clone,
+        &[
+            "bundle",
+            "create",
+            workspace.join(".sbxm-task/branch.bundle").to_str().unwrap(),
+            "^origin/main",
+            "refs/heads/issue-4",
+        ],
+    );
+    (workspace, tip)
+}
+
+#[test]
+fn fetching_and_rebuilding_delivers_the_bundles_commits() {
+    use sbxm::task::rewrite;
+    let f = fixture();
+    let (workspace, tip) = agent_bundle(&f, "a plain message");
+
+    rewrite::fetch_and_rebuild(
+        &f.repo_git,
+        &workspace,
+        "refs/heads/main",
+        "issue-4",
+        1 << 20,
+    )
+    .unwrap();
+
+    assert_eq!(
+        git(&f.repo_git, &["rev-parse", "refs/sbxm/agent/issue-4"]),
+        tip
+    );
+    assert_eq!(git(&f.repo_git, &["rev-parse", "refs/heads/issue-4"]), tip);
+    assert_eq!(
+        git(&f.repo_git, &["rev-parse", "refs/sbxm/rebuilt/issue-4"]),
+        tip
+    );
+}
+
+#[test]
+fn a_start_that_does_not_resolve_is_refused_before_the_fetch() {
+    use sbxm::task::rewrite;
+    let f = fixture();
+    let (workspace, _) = agent_bundle(&f, "a plain message");
+    let main = git(&f.repo_git, &["rev-parse", "refs/heads/main"]);
+
+    let err = rewrite::fetch_and_rebuild(
+        &f.repo_git,
+        &workspace,
+        "refs/heads/gone",
+        "issue-4",
+        1 << 20,
+    )
+    .unwrap_err();
+
+    assert!(format!("{err:#}").contains("refs/heads/gone"), "{err:#}");
+    assert_eq!(
+        git(&f.repo_git, &["rev-parse", "refs/sbxm/agent/issue-4"]),
+        main
+    );
+    assert_eq!(git(&f.repo_git, &["rev-parse", "refs/heads/issue-4"]), main);
+}

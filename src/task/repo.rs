@@ -638,11 +638,29 @@ pub fn agent_ref(branch: &str) -> String {
 /// it here at the PR head it fetched. [`create_branch`] makes it together with a new branch. A
 /// no-op once the agent ref exists.
 pub fn ensure_agent_ref(repo_git: &Path, branch: &str) -> Result<()> {
+    ensure_agent_ref_resolving(repo_git, branch, &[], |_| Ok(())).map(|_| ())
+}
+
+/// [`ensure_agent_ref`] whose one lookup also resolves `extra` (issue #444), handed to `check`
+/// before anything is written: returns the delivered branch's tip and each of `extra` as a full
+/// commit id, `None` where one doesn't resolve to a commit (the branch's tip too, when the agent
+/// ref was already there).
+fn ensure_agent_ref_resolving(
+    repo_git: &Path,
+    branch: &str,
+    extra: &[&str],
+    check: impl FnOnce(&[Option<String>]) -> Result<()>,
+) -> Result<(Option<String>, Vec<Option<String>>)> {
     check_ref("branch", branch)?;
     let agent = agent_ref(branch);
-    let found = resolve_commits(repo_git, &[&agent, &format!("refs/heads/{branch}")])?;
+    let branch_ref = format!("refs/heads/{branch}");
+    let mut revs = vec![agent.as_str(), branch_ref.as_str()];
+    revs.extend_from_slice(extra);
+    let mut found = resolve_commits(repo_git, &revs)?;
+    let extra = found.split_off(2);
+    check(&extra)?;
     if found[0].is_some() {
-        return Ok(());
+        return Ok((found[1].clone(), extra));
     }
     let tip = found[1]
         .clone()
@@ -659,7 +677,7 @@ pub fn ensure_agent_ref(repo_git: &Path, branch: &str) -> Result<()> {
             &tip,
         ],
     )?;
-    Ok(())
+    Ok((Some(tip), extra))
 }
 
 /// A `-c` value pointing `core.hooksPath` at an empty, host-owned folder next to `repo_git`, so
@@ -865,6 +883,32 @@ pub fn read_file_in(workspace: &Path, folder: &str, name: &str, cap: u64) -> Res
 /// workspace. [`ensure_agent_ref`] backfills the agent ref first, for a task whose `repo.git`
 /// still has only the delivered branch (made before this ref existed).
 pub fn fetch_bundle(repo_git: &Path, workspace: &Path, branch: &str, cap: u64) -> Result<()> {
+    fetch_bundle_resolving(repo_git, workspace, branch, cap, &[], |_| Ok(())).map(|_| ())
+}
+
+/// What [`fetch_bundle_resolving`] read on its way, so its caller needs no lookup of its own.
+#[derive(Debug)]
+pub struct Fetched {
+    /// The commit the bundle's branch names, which [`agent_ref`] now points at.
+    pub agent_tip: String,
+    /// The delivered branch's tip, as read before the fetch (which never moves it); `None` only
+    /// when it is missing while the agent ref was already there.
+    pub branch_tip: Option<String>,
+    /// Each extra revision as a full commit id, read before the fetch.
+    pub extra: Vec<Option<String>>,
+}
+
+/// [`fetch_bundle`] whose one lookup before the fetch (issue #444) also resolves `extra`, handed
+/// to `check` before the agent ref is backfilled or fetched into: an error there leaves both refs
+/// as they were.
+pub fn fetch_bundle_resolving(
+    repo_git: &Path,
+    workspace: &Path,
+    branch: &str,
+    cap: u64,
+    extra: &[&str],
+    check: impl FnOnce(&[Option<String>]) -> Result<()>,
+) -> Result<Fetched> {
     use std::io::Read;
 
     check_ref("branch", branch)?;
@@ -905,14 +949,15 @@ pub fn fetch_bundle(repo_git: &Path, workspace: &Path, branch: &str, cap: u64) -
     )
     .context("the bundle failed verification (damaged, or built on commits the task repo lacks)")?;
     let wanted = format!("refs/heads/{branch}");
-    if !heads
-        .lines()
-        .any(|line| line.split_whitespace().nth(1) == Some(wanted.as_str()))
-    {
+    let Some(agent_tip) = heads.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let id = fields.next()?;
+        (fields.next() == Some(wanted.as_str())).then(|| id.to_owned())
+    }) else {
         bail!("the bundle has no branch {branch}; the agent must commit on {branch}");
-    }
+    };
 
-    ensure_agent_ref(repo_git, branch)?;
+    let (branch_tip, extra) = ensure_agent_ref_resolving(repo_git, branch, extra, check)?;
     let agent = agent_ref(branch);
     let refspec = format!("{wanted}:{agent}");
     let out = git::output(
@@ -948,7 +993,11 @@ pub fn fetch_bundle(repo_git: &Path, workspace: &Path, branch: &str, cap: u64) -
         }
         bail!("`git fetch` from the bundle failed: {}", stderr.trim());
     }
-    Ok(())
+    Ok(Fetched {
+        agent_tip,
+        branch_tip,
+        extra,
+    })
 }
 
 /// The paths `branch` changes relative to where it left `base` (added, changed or deleted; a rename

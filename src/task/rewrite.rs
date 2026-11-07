@@ -92,19 +92,88 @@ pub fn rebuild(repo_git: &Path, start: &str, branch: &str) -> Result<()> {
     let branch_ref = format!("refs/heads/{branch}");
     // One git start answers all four lookups; each missing one is reported by its own message.
     let found = resolve_commits(repo_git, &[start, &agent, &branch_ref, &marker])?;
-    let start_id = found[0].clone().with_context(|| {
-        format!("cannot resolve {start} in the task repo; the task record may be damaged")
-    })?;
+    let start_id = start_commit(start, &found[0])?;
     let agent_tip = found[1].clone().with_context(|| {
         format!("{agent} is missing; collect the agent's commits before rewriting them")
     })?;
-    let old_tip = found[2].clone().with_context(|| {
+    rebuild_from(
+        repo_git,
+        branch,
+        Read {
+            start_id,
+            agent_tip,
+            old_tip: found[2].clone(),
+            last_rebuilt: found[3].clone(),
+        },
+    )
+}
+
+/// Fetches the agent's bundle from `workspace` onto its agent ref
+/// ([`super::repo::fetch_bundle`]) and [`rebuild`]s the delivered branch from it, with one lookup
+/// for both (issue #444): the refs the rebuild needs are read before the fetch, which moves only
+/// the agent ref, and the agent ref's new tip is the one the bundle names. A `start` that doesn't
+/// resolve is refused before the fetch.
+pub fn fetch_and_rebuild(
+    repo_git: &Path,
+    workspace: &Path,
+    start: &str,
+    branch: &str,
+    cap: u64,
+) -> Result<()> {
+    check_ref("branch", branch)?;
+    let marker = rebuilt_marker(branch);
+    let fetched = super::repo::fetch_bundle_resolving(
+        repo_git,
+        workspace,
+        branch,
+        cap,
+        &[start, &marker],
+        |found| start_commit(start, &found[0]).map(|_| ()),
+    )?;
+    rebuild_from(
+        repo_git,
+        branch,
+        Read {
+            start_id: start_commit(start, &fetched.extra[0])?,
+            agent_tip: fetched.agent_tip,
+            old_tip: fetched.branch_tip,
+            last_rebuilt: fetched.extra[1].clone(),
+        },
+    )
+}
+
+/// `start` resolved, or the error naming it.
+fn start_commit(start: &str, found: &Option<String>) -> Result<String> {
+    found.clone().with_context(|| {
+        format!("cannot resolve {start} in the task repo; the task record may be damaged")
+    })
+}
+
+/// What [`rebuild_from`] starts from, read by its caller in one lookup.
+struct Read {
+    start_id: String,
+    /// The agent ref's tip; [`move_branch`] moves nothing unless the agent ref is still there.
+    agent_tip: String,
+    old_tip: Option<String>,
+    last_rebuilt: Option<String>,
+}
+
+/// [`rebuild`] from refs its caller already read.
+fn rebuild_from(repo_git: &Path, branch: &str, read: Read) -> Result<()> {
+    let Read {
+        start_id,
+        agent_tip,
+        old_tip,
+        last_rebuilt,
+    } = read;
+    let agent = agent_ref(branch);
+    let marker = rebuilt_marker(branch);
+    let old_tip = old_tip.with_context(|| {
         format!("{branch} isn't in the task repo; the task record may be damaged")
     })?;
-    let last_rebuilt = found[3].clone();
 
     let range = commit_range(repo_git, &start_id, &agent_tip, branch)?;
-    let checked = check_range(repo_git, &range)?;
+    let checked = check_range(repo_git, &agent_tip, &range)?;
     let mut rebuilt: HashMap<String, String> = HashMap::new();
     // Bodies are read a batch at a time, each batch within `BATCH_BYTES` (a commit over
     // `MAX_COMMIT_BYTES` was refused by `check_range`, so one always fits), and dropped before the
@@ -233,7 +302,8 @@ fn commit_range(
         .collect())
 }
 
-/// One git start for everything `rebuild` must know before it reads a body or writes anything:
+/// One git start for everything `rebuild` must know before it reads a body or writes anything
+/// (the agent's `tip` itself is a commit, too):
 /// every commit of `range` is a commit within [`MAX_COMMIT_BYTES`] (refused before it is read,
 /// PR 250 review, M-1), its tree exists, and so does every parent outside the range (a parent
 /// inside it is rebuilt, so its new id exists by the time it is used). `commit-tree` would check
@@ -241,7 +311,11 @@ fn commit_range(
 /// [`build_commit`]'s `hash-object`: a commit whose tree or a parent is missing -- the way a
 /// partial, corrupted range would be -- fails before anything is written. Returns each commit's
 /// tree id (for [`rebuild`] to compare with the one it reads from the commit itself) and size.
-fn check_range(repo_git: &Path, range: &[(String, Vec<String>)]) -> Result<Vec<Checked>> {
+fn check_range(
+    repo_git: &Path,
+    tip: &str,
+    range: &[(String, Vec<String>)],
+) -> Result<Vec<Checked>> {
     let in_range: HashSet<&str> = range.iter().map(|(id, _)| id.as_str()).collect();
     let outside: BTreeSet<&str> = range
         .iter()
@@ -252,10 +326,20 @@ fn check_range(repo_git: &Path, range: &[(String, Vec<String>)]) -> Result<Vec<C
     let mut names: Vec<String> = range.iter().map(|(id, _)| id.clone()).collect();
     names.extend(range.iter().map(|(id, _)| format!("{id}^{{tree}}")));
     names.extend(outside.iter().map(|parent| format!("{parent}^{{commit}}")));
+    names.push(tip.to_owned());
     let names: Vec<&str> = names.iter().map(String::as_str).collect();
-    let found = git::check_objects(repo_git, Some(repo_git), None, &names)
+    let mut found = git::check_objects(repo_git, Some(repo_git), None, &names)
         .context("cannot read the commits in the task repo")?;
 
+    // The agent's tip as the bundle named it, not peeled (issue #444): it becomes the delivered
+    // branch's tip as it is when nothing in the range needs rebuilding, so it must be a commit.
+    if found
+        .pop()
+        .flatten()
+        .is_none_or(|object| object.kind != "commit")
+    {
+        bail!("the agent's tip {tip} isn't a commit in the task repo");
+    }
     let (commits, rest) = found.split_at(range.len());
     let (trees, parents) = rest.split_at(range.len());
     for ((id, _), object) in range.iter().zip(commits) {
@@ -486,7 +570,8 @@ fn build_commit(
 /// move, or neither does. Each carries its own compare-and-swap (`old_tip` for the branch,
 /// `old_marker` for the marker, which is created instead when `None`), so a mismatch on either
 /// -- something else having moved the branch, or a concurrent rebuild having moved the marker --
-/// refuses the whole transaction and changes nothing.
+/// refuses the whole transaction and changes nothing; so does the agent ref no longer being at
+/// `new_marker`, the tip that was rebuilt.
 fn move_branch(
     repo_git: &Path,
     branch: &str,
@@ -497,7 +582,12 @@ fn move_branch(
     new_marker: &str,
 ) -> Result<()> {
     let delivered = format!("refs/heads/{branch}");
-    let mut stdin = format!("update {delivered} {new_tip} {old_tip}\n");
+    // The agent ref must still be at the tip that was rebuilt: read before a fetch, it is checked
+    // here, in the same transaction (issue #444).
+    let mut stdin = format!(
+        "verify {} {new_marker}\nupdate {delivered} {new_tip} {old_tip}\n",
+        agent_ref(branch)
+    );
     match old_marker {
         Some(old) => stdin.push_str(&format!("update {marker} {new_marker} {old}\n")),
         None => stdin.push_str(&format!("create {marker} {new_marker}\n")),
@@ -1130,6 +1220,7 @@ mod tests {
         let other = git(&dir, &["commit-tree", &empty_tree, "-m", "elsewhere"]);
         let new = git(&dir, &["commit-tree", &empty_tree, "-m", "new"]);
         git(&dir, &["update-ref", "refs/heads/issue-4", &other]);
+        git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &new]);
 
         let message = format!(
             "{:#}",
@@ -1259,5 +1350,32 @@ mod tests {
             rewritten,
             git(&clean_dir, &["rev-parse", "refs/heads/issue-4"])
         );
+    }
+
+    // PR #482 review round (M-1): the agent ref is read before the fetch, so the move pins it.
+
+    #[test]
+    fn move_branch_refuses_when_the_agent_ref_is_not_at_the_rebuilt_tip() {
+        let (_tmp, dir) = repo();
+        let empty_tree = git(&dir, &["hash-object", "-t", "tree", "--stdin"]);
+        let base = git(&dir, &["commit-tree", &empty_tree, "-m", "base"]);
+        let new = git(&dir, &["commit-tree", &empty_tree, "-m", "new"]);
+        let later = git(&dir, &["commit-tree", &empty_tree, "-m", "later"]);
+        git(&dir, &["update-ref", "refs/heads/issue-4", &base]);
+        git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &later]);
+
+        move_branch(
+            &dir,
+            "issue-4",
+            &new,
+            &base,
+            "refs/sbxm/rebuilt/issue-4",
+            None,
+            &new,
+        )
+        .unwrap_err();
+
+        assert_eq!(git(&dir, &["rev-parse", "refs/heads/issue-4"]), base);
+        assert!(ref_missing(&dir, "refs/sbxm/rebuilt/issue-4"));
     }
 }

@@ -521,8 +521,7 @@ fn tip(repo_git: &Path, branch: &str) -> String {
 /// Collects the bundle the sandbox left in the workspace at `.sbxm-task/branch.bundle`, then
 /// rebuilds the delivered branch from it (issue 244), matching what `pipeline.rs` does.
 fn collect(f: &Fixture, cap: u64) -> anyhow::Result<()> {
-    repo::fetch_bundle(&f.repo_git, &f.workspace, "issue-4", cap)?;
-    rewrite::rebuild(&f.repo_git, "refs/heads/main", "issue-4")
+    rewrite::fetch_and_rebuild(&f.repo_git, &f.workspace, "refs/heads/main", "issue-4", cap)
 }
 
 /// The path the sandbox writes the bundle to, with its folder made.
