@@ -306,9 +306,9 @@ fn check_spec(
         });
         return Ok(());
     }
-    if task.commits_ahead(&repo_git)? == 0 {
+    let Some(tip) = task.tip_if_ahead(&repo_git)? else {
         return Ok(());
-    }
+    };
     if let Err(fetch) = repo::fetch_base(&repo_git, &task.base) {
         let context = format!(
             "task {}: cannot check whether its branch is merged into {}",
@@ -338,7 +338,6 @@ fn check_spec(
             ))),
         };
     }
-    let tip = repo::branch_tip(&repo_git, &task.branch)?;
     if !repo::is_ancestor_of_remote_base(&repo_git, &tip, &task.base)? {
         out.left_alone.push(LeftAlone {
             id: task.id.clone(),
@@ -350,7 +349,7 @@ fn check_spec(
         });
         return Ok(());
     }
-    if let Err(e) = finish::check_spec_result_fetched(base_dir, &task.id, repo_root) {
+    if let Err(e) = finish::check_result_held(&task.id, task, &repo_git, &tip, repo_root) {
         out.left_alone.push(LeftAlone {
             id: task.id.clone(),
             reason: format!("{e:#}"),

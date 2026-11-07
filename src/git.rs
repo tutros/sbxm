@@ -228,23 +228,146 @@ pub(crate) fn output_with_stdin(
             .stderr(Stdio::piped())
             .spawn()
             .context("cannot run `git`; is Git installed and on PATH?")?;
-        // A broken pipe means git exited without reading everything (a bad argument, say):
-        // its own status and stderr below say why, which is the failure worth reporting.
-        match child
-            .stdin
-            .take()
-            .expect("stdin is piped")
-            .write_all(stdin_data)
-        {
-            Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => {
-                return Err(e).context("cannot write to git's stdin");
+        // Written while stdout and stderr are drained: `cat-file --batch*` answers as it reads, so
+        // writing everything first deadlocks once both pipes are full (issue #444). A broken pipe
+        // means git exited without reading everything (a bad argument, say): its own status and
+        // stderr say why, which is the failure worth reporting.
+        let mut stdin = child.stdin.take().expect("stdin is piped");
+        std::thread::scope(|scope| {
+            let writer = scope.spawn(move || match stdin.write_all(stdin_data) {
+                Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(e),
+                _ => Ok(()),
+            });
+            let out = child
+                .wait_with_output()
+                .context("cannot run `git`; is Git installed and on PATH?");
+            match writer.join() {
+                Ok(Err(e)) => Err(e).context("cannot write to git's stdin"),
+                _ => out,
             }
-            _ => {}
-        }
-        child
-            .wait_with_output()
-            .context("cannot run `git`; is Git installed and on PATH?")
+        })
     })
+}
+
+/// What `git cat-file --batch-check` says about one object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Object {
+    /// The full object id the name resolved to (a peeled one for `<rev>^{tree}`).
+    pub id: String,
+    /// `commit`, `tree`, `blob` or `tag`.
+    pub kind: String,
+    pub size: u64,
+}
+
+/// Looks up every one of `names` (object ids or revisions such as `refs/heads/x^{commit}`) with a
+/// single `git cat-file --batch-check` (issue #444): one answer per name, in order, `None` for a
+/// name that doesn't resolve. A missing name doesn't fail the call, unlike
+/// `rev-parse --verify a b`. The names go in on stdin, one per line, so none can be read as an
+/// option; a name that is empty or holds a line break (it would be read as two names) is refused
+/// before git starts. No names, no git start.
+pub(crate) fn check_objects(
+    cwd: &Path,
+    git_dir: Option<&Path>,
+    work_tree: Option<&Path>,
+    names: &[&str],
+) -> Result<Vec<Option<Object>>> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let input = batch_input(names)?;
+    let args = ["cat-file", "--batch-check"];
+    let out = output_with_stdin(cwd, git_dir, work_tree, &args, input.as_bytes())?;
+    if !out.status.success() {
+        bail!(failure_message(&args, &out));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() != names.len() {
+        bail!(
+            "`git cat-file --batch-check` answered {} lines for {} names",
+            lines.len(),
+            names.len()
+        );
+    }
+    lines.into_iter().map(parse_check_line).collect()
+}
+
+/// The raw body of every one of `names` (object ids or revisions), in order, from a single
+/// `git cat-file --batch` (issue #444). A name that doesn't resolve fails the call, naming it.
+/// Names are checked and passed as for [`check_objects`]. No names, no git start. Callers that
+/// must bound memory check sizes first with [`check_objects`].
+pub(crate) fn read_objects(
+    cwd: &Path,
+    git_dir: Option<&Path>,
+    work_tree: Option<&Path>,
+    names: &[&str],
+) -> Result<Vec<Vec<u8>>> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let input = batch_input(names)?;
+    let args = ["cat-file", "--batch"];
+    let out = output_with_stdin(cwd, git_dir, work_tree, &args, input.as_bytes())?;
+    if !out.status.success() {
+        bail!(failure_message(&args, &out));
+    }
+    // Per name: a `<id> <type> <size>` line (or `<name> missing`), then `size` bytes and a newline.
+    let mut rest = out.stdout.as_slice();
+    let mut bodies = Vec::with_capacity(names.len());
+    for name in names {
+        let end = rest
+            .iter()
+            .position(|&b| b == b'\n')
+            .with_context(|| format!("`git cat-file --batch` stopped before {name}"))?;
+        let header = String::from_utf8_lossy(&rest[..end]).into_owned();
+        rest = &rest[end + 1..];
+        let Some(object) = parse_check_line(&header)? else {
+            bail!("{name} doesn't exist in the repository");
+        };
+        let size = usize::try_from(object.size).context("object too large")?;
+        if rest.len() < size + 1 {
+            bail!("`git cat-file --batch` gave less than the {size} bytes it announced for {name}");
+        }
+        bodies.push(rest[..size].to_vec());
+        rest = &rest[size + 1..];
+    }
+    Ok(bodies)
+}
+
+/// One name per line for a `cat-file --batch*` stdin; refuses a name that is empty or holds a
+/// line break (it would read as two names).
+fn batch_input(names: &[&str]) -> Result<String> {
+    let mut input = String::new();
+    for name in names {
+        if name.is_empty() {
+            bail!("cannot look up an empty name in git");
+        }
+        if name.contains(['\n', '\r', '\0']) {
+            bail!("cannot look up {name:?} in git: it holds a newline");
+        }
+        input.push_str(name);
+        input.push('\n');
+    }
+    Ok(input)
+}
+
+/// `<id> <type> <size>`, or `<name> missing` / `<name> ambiguous` (both are `None`).
+fn parse_check_line(line: &str) -> Result<Option<Object>> {
+    let mut fields = line.rsplitn(3, ' ');
+    let (size, kind, id) = (fields.next(), fields.next(), fields.next());
+    if let (Some(size), Some(kind), Some(id)) = (size, kind, id)
+        && let Ok(size) = size.parse::<u64>()
+    {
+        return Ok(Some(Object {
+            id: id.to_owned(),
+            kind: kind.to_owned(),
+            size,
+        }));
+    }
+    if line.ends_with(" missing") || line.ends_with(" ambiguous") {
+        return Ok(None);
+    }
+    bail!("unexpected `git cat-file --batch-check` output: {line}")
 }
 
 /// The `GIT_*` variables that keep working for [`user_output`]: where the user's own
@@ -392,6 +515,9 @@ pub(crate) fn baseline_commit(cwd: &Path, git_dir: &Path, work_tree: &Path) -> R
     let id = run(cwd, Some(git_dir), Some(work_tree), &["rev-parse", "HEAD"])?;
     Ok(id.trim().to_owned())
 }
+
+#[cfg(test)]
+mod check_objects_tests;
 
 #[cfg(test)]
 mod tests {

@@ -86,39 +86,51 @@ pub fn clone_bare(source: &str, dest: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Creates `branch` at the tip of `base` in `repo_git`.
-pub fn create_branch(repo_git: &Path, branch: &str, base: &str) -> Result<()> {
+/// Creates `branch` at the tip of `base` in `repo_git`; returns the commit it starts at.
+pub fn create_branch(repo_git: &Path, branch: &str, base: &str) -> Result<String> {
     check_ref("branch", branch)?;
     check_ref("base", base)?;
     let base_ref = format!("refs/heads/{base}");
-    let found = git::output(
-        repo_git,
-        Some(repo_git),
-        None,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("{base_ref}^{{commit}}"),
-        ],
-    )?;
-    if !found.status.success() {
+    // One start answers both: the base must exist and the new branch must not.
+    let found = resolve_commits(repo_git, &[&base_ref, &format!("refs/heads/{branch}")])?;
+    let (base_tip, existing) = (found[0].clone(), found[1].is_some());
+    let Some(base_tip) = base_tip else {
         bail!("base branch {base} not found in the repo; check --base");
-    }
-    if has_branch(repo_git, branch)? {
+    };
+    if existing {
         bail!(
             "branch {branch} already exists in the repo (a clone has every branch of origin, so it \
              was probably pushed by an earlier `sbxm task finish`); delete it on GitHub, or merge \
              it, before starting this task again"
         );
     }
-    git::run(
+    // The agent ref starts where the branch does, in the same start and transaction (issue
+    // #444): [`ensure_agent_ref`] then finds it and has nothing to write on the first collect.
+    let stdin = format!(
+        "create refs/heads/{branch} {base_tip}\ncreate {} {base_tip}\n",
+        agent_ref(branch)
+    );
+    git::run_with_stdin(
         repo_git,
         Some(repo_git),
         None,
-        &["branch", "--", branch, &base_ref],
+        &["-c", &no_hooks_config(repo_git)?, "update-ref", "--stdin"],
+        stdin.as_bytes(),
     )?;
-    Ok(())
+    Ok(base_tip)
+}
+
+/// Each of `revs` resolved to a full commit id in `repo_git`, in order, with one `git` start
+/// (issue #444): `None` for one that doesn't resolve to a commit, without failing the others.
+/// No `revs`, no start.
+pub fn resolve_commits(repo_git: &Path, revs: &[&str]) -> Result<Vec<Option<String>>> {
+    let names: Vec<String> = revs.iter().map(|rev| format!("{rev}^{{commit}}")).collect();
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let found = git::check_objects(repo_git, Some(repo_git), None, &names)?;
+    Ok(found
+        .into_iter()
+        .map(|object| object.filter(|o| o.kind == "commit").map(|o| o.id))
+        .collect())
 }
 
 /// Clones `repo_git` into `workspace` on `branch`, for the agent to work in. Git objects are
@@ -246,14 +258,22 @@ pub fn bundle_agent_for_clone(
 /// merely left lying around reaches it. `dest` must not exist.
 pub fn clean_checkout(repo_git: &Path, branch: &str, dest: &Path) -> Result<()> {
     check_ref("branch", branch)?;
+    if !dest.exists() && !has_branch(repo_git, branch)? {
+        bail!("branch {branch} isn't in the task repo; collect the worker's commits first");
+    }
+    clean_checkout_existing(repo_git, branch, dest)
+}
+
+/// [`clean_checkout`] for a caller that has just resolved `refs/heads/<branch>` itself (so the
+/// branch is known to exist, and a tag of the same name can't stand in for it): one git start
+/// less (issue #444).
+pub fn clean_checkout_existing(repo_git: &Path, branch: &str, dest: &Path) -> Result<()> {
+    check_ref("branch", branch)?;
     if dest.exists() {
         bail!(
             "{} already exists; remove it or let the previous run finish",
             dest.display()
         );
-    }
-    if !has_branch(repo_git, branch)? {
-        bail!("branch {branch} isn't in the task repo; collect the worker's commits first");
     }
     let parent = dest.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(parent)
@@ -423,17 +443,26 @@ pub fn resolve_commit(repo_git: &Path, rev: &str) -> Result<String> {
 /// Pushes `branch` (and only it) from `repo_git` to GitHub, never forcing.
 pub fn push(repo_git: &Path, branch: &str) -> Result<()> {
     check_ref("branch", branch)?;
+    let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
+    let pushed = git::user_run(
+        repo_git,
+        &["--git-dir", text(repo_git)?, "push", "origin", &refspec],
+    );
+    if let Err(e) = pushed {
+        refuse_missing_branch(repo_git, branch)?;
+        return Err(e).with_context(|| {
+            format!("cannot push {branch}; check `gh auth status` and your access to the repo")
+        });
+    }
+    Ok(())
+}
+
+/// For a push that failed: says so when `branch` isn't in `repo_git` at all. Looked for only
+/// then (issue #444): a push of a ref that doesn't exist changes nothing anywhere.
+fn refuse_missing_branch(repo_git: &Path, branch: &str) -> Result<()> {
     if !has_branch(repo_git, branch)? {
         bail!("branch {branch} isn't in the task repo; nothing to push");
     }
-    let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
-    git::user_run(
-        repo_git,
-        &["--git-dir", text(repo_git)?, "push", "origin", &refspec],
-    )
-    .with_context(|| {
-        format!("cannot push {branch}; check `gh auth status` and your access to the repo")
-    })?;
     Ok(())
 }
 
@@ -442,9 +471,6 @@ pub fn push(repo_git: &Path, branch: &str) -> Result<()> {
 /// the remote when it lands, so it never moves or overwrites anyone's branch.
 pub fn push_new(repo_git: &Path, branch: &str) -> Result<()> {
     check_ref("branch", branch)?;
-    if !has_branch(repo_git, branch)? {
-        bail!("branch {branch} isn't in the task repo; nothing to push");
-    }
     let refspec = format!("refs/heads/{branch}:refs/heads/{branch}");
     let lease = format!("--force-with-lease=refs/heads/{branch}:");
     let out = git::user_output(
@@ -462,6 +488,7 @@ pub fn push_new(repo_git: &Path, branch: &str) -> Result<()> {
     if out.status.success() {
         return Ok(());
     }
+    refuse_missing_branch(repo_git, branch)?;
     let stderr = String::from_utf8_lossy(&out.stderr);
     if stderr.contains("stale info") {
         bail!("{branch} appeared on the remote after sbxm checked it; nothing was pushed");
@@ -600,27 +627,36 @@ pub fn agent_ref(branch: &str) -> String {
 
 /// Creates the agent ref at the delivered branch's current tip when it is missing (issue 244): a
 /// task made before this ref existed collected the agent's unrewritten commits straight onto the
-/// delivered branch, so that is where its own commits begin; a brand-new task's delivered branch
-/// is still at its base, which is exactly where its agent ref should start too. A no-op once the
-/// agent ref exists.
+/// delivered branch, so that is where its own commits begin; a task continuing a PR's branch gets
+/// it here at the PR head it fetched. [`create_branch`] makes it together with a new branch. A
+/// no-op once the agent ref exists.
 pub fn ensure_agent_ref(repo_git: &Path, branch: &str) -> Result<()> {
+    ensure_agent_ref_resolving(repo_git, branch, &[], |_| Ok(())).map(|_| ())
+}
+
+/// [`ensure_agent_ref`] whose one lookup also resolves `extra` (issue #444), handed to `check`
+/// before anything is written: returns each of `extra` as a full commit id, `None` where one
+/// doesn't resolve to a commit.
+fn ensure_agent_ref_resolving(
+    repo_git: &Path,
+    branch: &str,
+    extra: &[&str],
+    check: impl FnOnce(&[Option<String>]) -> Result<()>,
+) -> Result<Vec<Option<String>>> {
     check_ref("branch", branch)?;
     let agent = agent_ref(branch);
-    let found = git::output(
-        repo_git,
-        Some(repo_git),
-        None,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("{agent}^{{commit}}"),
-        ],
-    )?;
-    if found.status.success() {
-        return Ok(());
+    let branch_ref = format!("refs/heads/{branch}");
+    let mut revs = vec![agent.as_str(), branch_ref.as_str()];
+    revs.extend_from_slice(extra);
+    let mut found = resolve_commits(repo_git, &revs)?;
+    let extra = found.split_off(2);
+    check(&extra)?;
+    if found[0].is_some() {
+        return Ok(extra);
     }
-    let tip = branch_tip(repo_git, branch)?;
+    let tip = found[1]
+        .clone()
+        .with_context(|| format!("branch {branch} isn't in the task repo; cannot start {agent}"))?;
     git::run(
         repo_git,
         Some(repo_git),
@@ -633,7 +669,7 @@ pub fn ensure_agent_ref(repo_git: &Path, branch: &str) -> Result<()> {
             &tip,
         ],
     )?;
-    Ok(())
+    Ok(extra)
 }
 
 /// A `-c` value pointing `core.hooksPath` at an empty, host-owned folder next to `repo_git`, so
@@ -839,6 +875,29 @@ pub fn read_file_in(workspace: &Path, folder: &str, name: &str, cap: u64) -> Res
 /// workspace. [`ensure_agent_ref`] backfills the agent ref first, for a task whose `repo.git`
 /// still has only the delivered branch (made before this ref existed).
 pub fn fetch_bundle(repo_git: &Path, workspace: &Path, branch: &str, cap: u64) -> Result<()> {
+    fetch_bundle_resolving(repo_git, workspace, branch, cap, &[], |_| Ok(())).map(|_| ())
+}
+
+/// What [`fetch_bundle_resolving`] read on its way, so its caller needs no lookup of its own.
+#[derive(Debug)]
+pub struct Fetched {
+    /// The commit the bundle's branch names, which [`agent_ref`] now points at.
+    pub agent_tip: String,
+    /// Each extra revision as a full commit id, read before the fetch.
+    pub extra: Vec<Option<String>>,
+}
+
+/// [`fetch_bundle`] whose one lookup before the fetch (issue #444) also resolves `extra`, handed
+/// to `check` before the agent ref is backfilled or fetched into: an error there leaves both refs
+/// as they were.
+pub fn fetch_bundle_resolving(
+    repo_git: &Path,
+    workspace: &Path,
+    branch: &str,
+    cap: u64,
+    extra: &[&str],
+    check: impl FnOnce(&[Option<String>]) -> Result<()>,
+) -> Result<Fetched> {
     use std::io::Read;
 
     check_ref("branch", branch)?;
@@ -869,28 +928,25 @@ pub fn fetch_bundle(repo_git: &Path, workspace: &Path, branch: &str, cap: u64) -
     }
     let copy_text = text(&copy)?;
 
-    git::run(
+    // `verify` lists the bundle's refs on stdout, one `<id> <ref>` per line, as `list-heads` does:
+    // one git start for both (issue #444).
+    let heads = git::run(
         repo_git,
         Some(repo_git),
         None,
         &["bundle", "verify", copy_text],
     )
     .context("the bundle failed verification (damaged, or built on commits the task repo lacks)")?;
-    let heads = git::run(
-        repo_git,
-        Some(repo_git),
-        None,
-        &["bundle", "list-heads", copy_text],
-    )?;
     let wanted = format!("refs/heads/{branch}");
-    if !heads
-        .lines()
-        .any(|line| line.split_whitespace().nth(1) == Some(wanted.as_str()))
-    {
+    let Some(agent_tip) = heads.lines().find_map(|line| {
+        let mut fields = line.split_whitespace();
+        let id = fields.next()?;
+        (fields.next() == Some(wanted.as_str())).then(|| id.to_owned())
+    }) else {
         bail!("the bundle has no branch {branch}; the agent must commit on {branch}");
-    }
+    };
 
-    ensure_agent_ref(repo_git, branch)?;
+    let extra = ensure_agent_ref_resolving(repo_git, branch, extra, check)?;
     let agent = agent_ref(branch);
     let refspec = format!("{wanted}:{agent}");
     let out = git::output(
@@ -926,7 +982,7 @@ pub fn fetch_bundle(repo_git: &Path, workspace: &Path, branch: &str, cap: u64) -
         }
         bail!("`git fetch` from the bundle failed: {}", stderr.trim());
     }
-    Ok(())
+    Ok(Fetched { agent_tip, extra })
 }
 
 /// The paths `branch` changes relative to where it left `base` (added, changed or deleted; a rename
@@ -947,17 +1003,15 @@ pub fn changed_paths_since(repo_git: &Path, commit: &str, branch: &str) -> Resul
 
 fn diff_names(repo_git: &Path, from: &str, branch: &str) -> Result<Vec<String>> {
     check_ref("branch", branch)?;
+    diff_range(repo_git, &format!("{from}...refs/heads/{branch}"))
+}
+
+fn diff_range(repo_git: &Path, range: &str) -> Result<Vec<String>> {
     let out = git::run(
         repo_git,
         Some(repo_git),
         None,
-        &[
-            "diff",
-            "--name-only",
-            "-z",
-            "--no-renames",
-            &format!("{from}...refs/heads/{branch}"),
-        ],
+        &["diff", "--name-only", "-z", "--no-renames", range],
     )?;
     Ok(out
         .split('\0')
@@ -1034,6 +1088,48 @@ pub fn is_ancestor_of_remote_base(repo_git: &Path, commit: &str, base: &str) -> 
         ],
     )?;
     Ok(out.status.success())
+}
+
+/// `branch`'s tip when it has commits past `from` (`refs/heads/<base>` or a full commit id),
+/// `None` when it has none, from one git start (issue #444): `rev-list --topo-order` lists no
+/// commit before its children, and every commit it lists is the tip or one of the tip's
+/// ancestors, so the tip comes first.
+pub fn tip_if_ahead(repo_git: &Path, from: &str, branch: &str) -> Result<Option<String>> {
+    check_start(from)?;
+    check_ref("branch", branch)?;
+    let out = git::run(
+        repo_git,
+        Some(repo_git),
+        None,
+        &[
+            "rev-list",
+            "--topo-order",
+            "--max-count=1",
+            &format!("{from}..refs/heads/{branch}"),
+        ],
+    )
+    .with_context(|| format!("cannot list the commits of {branch} past {from}"))?;
+    Ok(out.lines().next().map(str::to_owned))
+}
+
+/// A task's starting point as [`super::record::Record::rewrite_start`] names it:
+/// `refs/heads/<base>` or a full commit id, nothing git could read as an option.
+fn check_start(from: &str) -> Result<()> {
+    match from.strip_prefix("refs/heads/") {
+        Some(base) => check_ref("base", base),
+        None if is_commit_id(from) => Ok(()),
+        None => bail!("{from:?} isn't a full commit id; the task record may be damaged"),
+    }
+}
+
+/// The paths `commit` (a full commit id) changes past where it left `from` (as for
+/// [`tip_if_ahead`]): [`changed_paths`] for a commit rather than for the branch's tip now.
+pub fn changed_paths_at(repo_git: &Path, from: &str, commit: &str) -> Result<Vec<String>> {
+    check_start(from)?;
+    if !is_commit_id(commit) {
+        bail!("{commit:?} isn't a full commit id");
+    }
+    diff_range(repo_git, &format!("{from}...{commit}"))
 }
 
 /// How many commits `branch` has that `base` doesn't.

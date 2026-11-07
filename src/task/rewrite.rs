@@ -18,12 +18,12 @@
 //! ever following it through (the rebuild crashed, or failed for a reason since fixed) is never
 //! mistaken for a rebuild that did.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
-use super::repo::{agent_ref, check_ref, no_hooks_config, resolve_commit};
+use super::repo::{agent_ref, check_ref, no_hooks_config, resolve_commits};
 use super::review::defang;
 use crate::git;
 
@@ -42,6 +42,9 @@ struct Original {
     parents: Vec<String>,
     header_lines: Vec<Vec<u8>>,
     message: Vec<u8>,
+    /// The object exactly as git stores it: a rebuild that comes out byte for byte the same is
+    /// already in the repo, so nothing needs writing (issue #444).
+    raw: Vec<u8>,
 }
 
 /// The largest commit object (header plus message) [`rebuild`] reads (PR 250 review, M-1;
@@ -49,6 +52,15 @@ struct Original {
 /// rebuilding holds several copies of it, so a bigger commit is refused before it is read. A real
 /// commit is never close to this.
 pub const MAX_COMMIT_BYTES: u64 = 1024 * 1024;
+
+/// The most commit-object bytes [`rebuild`] reads in one `cat-file --batch` (issue #444).
+const BATCH_BYTES: u64 = 4 * MAX_COMMIT_BYTES;
+
+/// What [`check_range`] learned about one commit before its body is read.
+struct Checked {
+    tree: String,
+    size: u64,
+}
 
 /// The ref recording the agent tip whose rebuild is on the delivered branch right now (issue 244
 /// review round 2, M-1). It moves only together with the delivered branch, in the same atomic
@@ -75,31 +87,154 @@ fn rebuilt_marker(branch: &str) -> String {
 /// before.
 pub fn rebuild(repo_git: &Path, start: &str, branch: &str) -> Result<()> {
     check_ref("branch", branch)?;
-    let start_id = resolve_commit(repo_git, start).with_context(|| {
-        format!("cannot resolve {start} in the task repo; the task record may be damaged")
-    })?;
     let agent = agent_ref(branch);
-    let agent_tip = resolve_commit(repo_git, &agent).with_context(|| {
+    let marker = rebuilt_marker(branch);
+    let branch_ref = format!("refs/heads/{branch}");
+    // One git start answers all four lookups; each missing one is reported by its own message.
+    let found = resolve_commits(repo_git, &[start, &agent, &branch_ref, &marker])?;
+    let start_id = start_commit(start, &found[0])?;
+    let agent_tip = found[1].clone().with_context(|| {
         format!("{agent} is missing; collect the agent's commits before rewriting them")
     })?;
-    let old_tip = resolve_commit(repo_git, &format!("refs/heads/{branch}")).with_context(|| {
-        format!("{branch} isn't in the task repo; the task record may be damaged")
-    })?;
-    let marker = rebuilt_marker(branch);
-    let last_rebuilt = resolve_optional(repo_git, &marker)?;
+    rebuild_from(
+        repo_git,
+        branch,
+        Read {
+            start_id,
+            agent_tip,
+            old_tip: found[2].clone(),
+            last_rebuilt: found[3].clone(),
+        },
+    )?;
+    Ok(())
+}
 
-    let ids = commit_range(repo_git, &start_id, &agent_tip, branch)?;
+/// Fetches the agent's bundle from `workspace` onto its agent ref
+/// ([`super::repo::fetch_bundle`]) and [`rebuild`]s the delivered branch from it, with one lookup
+/// for both (issue #444): the refs the rebuild needs are read before the fetch, which moves only
+/// the agent ref, and the agent ref's new tip is the one the bundle names. A `start` that doesn't
+/// resolve, or a delivered branch that is missing, is refused before the fetch.
+pub fn fetch_and_rebuild(
+    repo_git: &Path,
+    workspace: &Path,
+    start: &str,
+    branch: &str,
+    cap: u64,
+) -> Result<Rebuilt> {
+    check_ref("branch", branch)?;
+    let marker = rebuilt_marker(branch);
+    let branch_ref = format!("refs/heads/{branch}");
+    let fetched = super::repo::fetch_bundle_resolving(
+        repo_git,
+        workspace,
+        branch,
+        cap,
+        &[start, &branch_ref, &marker],
+        |found| {
+            start_commit(start, &found[0])?;
+            branch_tip(branch, &found[1]).map(|_| ())
+        },
+    )?;
+    let start_id = start_commit(start, &fetched.extra[0])?;
+    let (tip, ahead) = rebuild_from(
+        repo_git,
+        branch,
+        Read {
+            start_id: start_id.clone(),
+            agent_tip: fetched.agent_tip,
+            old_tip: fetched.extra[1].clone(),
+            last_rebuilt: fetched.extra[2].clone(),
+        },
+    )?;
+    let ahead = match ahead {
+        Some(ahead) => ahead,
+        None => super::repo::commits_since(repo_git, &start_id, branch)?,
+    };
+    Ok(Rebuilt { ahead, tip })
+}
+
+/// What [`fetch_and_rebuild`] left the delivered branch at.
+#[derive(Debug)]
+pub struct Rebuilt {
+    /// How many commits the branch has past the start: from the rebuild's own range where that
+    /// tells ([`ahead_from_range`]), else counted.
+    pub ahead: u32,
+    /// The branch's tip, as the rebuild moved it.
+    pub tip: String,
+}
+
+/// The delivered branch's tip, or the error naming the branch.
+fn branch_tip(branch: &str, found: &Option<String>) -> Result<String> {
+    found
+        .clone()
+        .with_context(|| format!("{branch} isn't in the task repo; the task record may be damaged"))
+}
+
+/// `start` resolved, or the error naming it.
+fn start_commit(start: &str, found: &Option<String>) -> Result<String> {
+    found.clone().with_context(|| {
+        format!("cannot resolve {start} in the task repo; the task record may be damaged")
+    })
+}
+
+/// What [`rebuild_from`] starts from, read by its caller in one lookup.
+struct Read {
+    start_id: String,
+    /// The agent ref's tip; [`move_branch`] moves nothing unless the agent ref is still there.
+    agent_tip: String,
+    old_tip: Option<String>,
+    last_rebuilt: Option<String>,
+}
+
+/// [`rebuild`] from refs its caller already read; returns the delivered branch's new tip and
+/// [`ahead_from_range`].
+fn rebuild_from(repo_git: &Path, branch: &str, read: Read) -> Result<(String, Option<u32>)> {
+    let Read {
+        start_id,
+        agent_tip,
+        old_tip,
+        last_rebuilt,
+    } = read;
+    let agent = agent_ref(branch);
+    let marker = rebuilt_marker(branch);
+    let old_tip = branch_tip(branch, &old_tip)?;
+
+    let listed = commit_range(repo_git, &start_id, &agent_tip, branch)?;
+    let range = &listed.commits;
+    let checked = check_range(repo_git, &agent_tip, range)?;
     let mut rebuilt: HashMap<String, String> = HashMap::new();
-    for id in &ids {
-        let original = read_commit(repo_git, id)?;
-        let parents: Vec<String> = original
-            .parents
+    // Bodies are read a batch at a time, each batch within `BATCH_BYTES` (a commit over
+    // `MAX_COMMIT_BYTES` was refused by `check_range`, so one always fits), and dropped before the
+    // next: the memory held stays bounded however long the history is (decision 198).
+    let mut from = 0;
+    while from < range.len() {
+        let mut to = from;
+        let mut bytes = 0;
+        while to < range.len() && (to == from || bytes + checked[to].size <= BATCH_BYTES) {
+            bytes += checked[to].size;
+            to += 1;
+        }
+        let ids: Vec<String> = range[from..to].iter().map(|(id, _)| id.clone()).collect();
+        let originals = read_commits(repo_git, &ids)?;
+        for ((id, parents), (checked, original)) in range[from..to]
             .iter()
-            .map(|p| rebuilt.get(p).cloned().unwrap_or_else(|| p.clone()))
-            .collect();
-        let message = defang_bytes(&original.message);
-        let new_id = build_commit(repo_git, &original, &parents, &message)?;
-        rebuilt.insert(id.clone(), new_id);
+            .zip(checked[from..to].iter().zip(&originals))
+        {
+            if original.tree != checked.tree || &original.parents != parents {
+                bail!(
+                    "commit {id} doesn't read the same through git's two views of it; the commit being rebuilt is damaged"
+                );
+            }
+            let parents: Vec<String> = original
+                .parents
+                .iter()
+                .map(|p| rebuilt.get(p).cloned().unwrap_or_else(|| p.clone()))
+                .collect();
+            let message = defang_bytes(&original.message);
+            let new_id = build_commit(repo_git, id, original, &parents, &message)?;
+            rebuilt.insert(id.clone(), new_id);
+        }
+        from = to;
     }
     // A commit outside the rebuilt range (the start itself, or one `commit_range` left out as
     // already on another branch -- the agent tip too, when the worker only fast-forwarded to an
@@ -134,7 +269,9 @@ pub fn rebuild(repo_git: &Path, start: &str, branch: &str) -> Result<()> {
         &marker,
         last_rebuilt.as_deref(),
         &agent_tip,
-    )
+    )?;
+    let ahead = ahead_from_range(&listed, &start_id, &rebuilt);
+    Ok((new_tip, ahead))
 }
 
 /// Whether commit `ancestor` is `tip` or one of its ancestors in `repo_git`.
@@ -148,25 +285,6 @@ fn is_ancestor(repo_git: &Path, ancestor: &str, tip: &str) -> Result<bool> {
     Ok(out.status.success())
 }
 
-/// Like [`resolve`], but `None` instead of an error when `rev` doesn't exist yet.
-fn resolve_optional(repo_git: &Path, rev: &str) -> Result<Option<String>> {
-    let out = git::output(
-        repo_git,
-        Some(repo_git),
-        None,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("{rev}^{{commit}}"),
-        ],
-    )?;
-    if !out.status.success() {
-        return Ok(None);
-    }
-    Ok(Some(String::from_utf8_lossy(&out.stdout).trim().to_owned()))
-}
-
 /// The commits reachable from `tip` but not from `start` and not already reachable from any
 /// *other* branch or tag in `repo_git` (review round 2, M-2): a commit an agent-made merge brings
 /// in from a branch that already existed -- already on GitHub, or another task's own -- is not
@@ -178,7 +296,7 @@ fn resolve_optional(repo_git: &Path, rev: &str) -> Result<Option<String>> {
 /// defanging, and that id is still the agent's own commit to rebuild again, not an outside one
 /// to protect. Oldest first and with every parent before its children (so a mapped parent is
 /// always ready when a merge commit needs it).
-fn commit_range(repo_git: &Path, start: &str, tip: &str, branch: &str) -> Result<Vec<String>> {
+fn commit_range(repo_git: &Path, start: &str, tip: &str, branch: &str) -> Result<Range> {
     let out = git::run(
         repo_git,
         Some(repo_git),
@@ -187,6 +305,8 @@ fn commit_range(repo_git: &Path, start: &str, tip: &str, branch: &str) -> Result
             "rev-list",
             "--reverse",
             "--topo-order",
+            "--parents",
+            "--boundary",
             tip,
             "--exclude",
             branch,
@@ -196,7 +316,122 @@ fn commit_range(repo_git: &Path, start: &str, tip: &str, branch: &str) -> Result
             "--tags",
         ],
     )?;
-    Ok(out.lines().map(str::to_owned).collect())
+    // `<id> <parent> <parent>...` per line (issue #444: the parents come with the range, so the
+    // existence check needs no second look at each commit), and `-<id>` for a boundary commit.
+    let mut range = Range::default();
+    for line in out.lines() {
+        let mut ids = line.split_whitespace().map(str::to_owned);
+        let id = ids.next().unwrap_or_default();
+        match id.strip_prefix('-') {
+            Some(boundary) => range.boundary.push(boundary.to_owned()),
+            None => range.commits.push((id, ids.collect())),
+        }
+    }
+    Ok(range)
+}
+
+/// What [`commit_range`] lists: the commits to rebuild, and the boundary (`--boundary`): every
+/// commit outside the range that is a parent of one inside it.
+#[derive(Default)]
+struct Range {
+    commits: Vec<(String, Vec<String>)>,
+    boundary: Vec<String>,
+}
+
+/// How many commits the rebuilt branch has past `start_id`, when the range alone tells (issue
+/// #444): every commit outside the range that one inside it builds on is `start_id` itself, and
+/// every commit inside it has a parent (so each descends from `start_id`, and so does its rebuilt
+/// copy, which can't then be reachable from `start_id`), and no two commits were rebuilt into the
+/// same one. The rebuilt branch then holds exactly the rebuilt range on top of `start_id`. `None`
+/// otherwise (an agent-made merge of another branch, a root commit, an empty range): count it.
+fn ahead_from_range(
+    range: &Range,
+    start_id: &str,
+    rebuilt: &HashMap<String, String>,
+) -> Option<u32> {
+    let only_start = !range.boundary.is_empty() && range.boundary.iter().all(|b| b == start_id);
+    let no_roots = range.commits.iter().all(|(_, parents)| !parents.is_empty());
+    let distinct = rebuilt.values().collect::<HashSet<_>>().len() == rebuilt.len();
+    (only_start && no_roots && distinct && rebuilt.len() == range.commits.len())
+        .then(|| u32::try_from(range.commits.len()).ok())
+        .flatten()
+}
+
+/// One git start for everything `rebuild` must know before it reads a body or writes anything
+/// (the agent's `tip` itself is a commit, too):
+/// every commit of `range` is a commit within [`MAX_COMMIT_BYTES`] (refused before it is read,
+/// PR 250 review, M-1), its tree exists, and so does every parent outside the range (a parent
+/// inside it is rebuilt, so its new id exists by the time it is used). `commit-tree` would check
+/// the tree and parents before it wrote anything; this keeps that guarantee for
+/// [`build_commit`]'s `hash-object`: a commit whose tree or a parent is missing -- the way a
+/// partial, corrupted range would be -- fails before anything is written. Returns each commit's
+/// tree id (for [`rebuild`] to compare with the one it reads from the commit itself) and size.
+fn check_range(
+    repo_git: &Path,
+    tip: &str,
+    range: &[(String, Vec<String>)],
+) -> Result<Vec<Checked>> {
+    let in_range: HashSet<&str> = range.iter().map(|(id, _)| id.as_str()).collect();
+    let outside: BTreeSet<&str> = range
+        .iter()
+        .flat_map(|(_, parents)| parents)
+        .map(String::as_str)
+        .filter(|parent| !in_range.contains(parent))
+        .collect();
+    let mut names: Vec<String> = range.iter().map(|(id, _)| id.clone()).collect();
+    names.extend(range.iter().map(|(id, _)| format!("{id}^{{tree}}")));
+    names.extend(outside.iter().map(|parent| format!("{parent}^{{commit}}")));
+    names.push(tip.to_owned());
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let mut found = git::check_objects(repo_git, Some(repo_git), None, &names)
+        .context("cannot read the commits in the task repo")?;
+
+    // The agent's tip as the bundle named it, not peeled (issue #444): it becomes the delivered
+    // branch's tip as it is when nothing in the range needs rebuilding, so it must be a commit.
+    if found
+        .pop()
+        .flatten()
+        .is_none_or(|object| object.kind != "commit")
+    {
+        bail!("the agent's tip {tip} isn't a commit in the task repo");
+    }
+    let (commits, rest) = found.split_at(range.len());
+    let (trees, parents) = rest.split_at(range.len());
+    for ((id, _), object) in range.iter().zip(commits) {
+        let object = object
+            .as_ref()
+            .with_context(|| format!("cannot read the size of commit {id} in the task repo"))?;
+        if object.kind != "commit" {
+            bail!("{id} is a {}, not a commit, in the task repo", object.kind);
+        }
+        if object.size > MAX_COMMIT_BYTES {
+            bail!(
+                "commit {id} is {} bytes, over the {MAX_COMMIT_BYTES}-byte limit for one commit; \
+                 ask the agent for a shorter commit message",
+                object.size
+            );
+        }
+    }
+    for (parent, object) in outside.iter().zip(parents) {
+        if object.is_none() {
+            bail!(
+                "commit {parent} doesn't exist in the task repo; the commit being rebuilt is damaged"
+            );
+        }
+    }
+    range
+        .iter()
+        .zip(commits.iter().zip(trees))
+        .map(|((id, _), (commit, tree))| match (commit, tree) {
+            (Some(commit), Some(tree)) if tree.kind == "tree" => Ok(Checked {
+                tree: tree.id.clone(),
+                size: commit.size,
+            }),
+            _ => bail!(
+                "the tree of commit {id} doesn't exist in the task repo; the commit being rebuilt is damaged"
+            ),
+        })
+        .collect()
 }
 
 /// Reads commit `id`'s tree, parents, every header line and the message straight from the object
@@ -212,21 +447,17 @@ fn commit_range(repo_git: &Path, start: &str, tip: &str, branch: &str) -> Result
 /// otherwise) -- survives untouched, and so does every header line (review round 4, M-2: an
 /// author name need not be UTF-8 either); only the tree and parent ids, which git always writes
 /// as ASCII hex, are decoded.
-fn read_commit(repo_git: &Path, id: &str) -> Result<Original> {
-    let size = git::run(repo_git, Some(repo_git), None, &["cat-file", "-s", id])
-        .with_context(|| format!("cannot read the size of commit {id} in the task repo"))?;
-    let size: u64 = size
-        .trim()
-        .parse()
-        .with_context(|| format!("git gave no size for commit {id}"))?;
-    if size > MAX_COMMIT_BYTES {
-        bail!(
-            "commit {id} is {size} bytes, over the {MAX_COMMIT_BYTES}-byte limit for one commit; \
-             ask the agent for a shorter commit message"
-        );
-    }
-    let raw = git::run_bytes(repo_git, Some(repo_git), None, &["cat-file", "-p", id])
-        .with_context(|| format!("cannot read commit {id} in the task repo"))?;
+fn read_commits(repo_git: &Path, ids: &[String]) -> Result<Vec<Original>> {
+    let names: Vec<&str> = ids.iter().map(String::as_str).collect();
+    let bodies = git::read_objects(repo_git, Some(repo_git), None, &names)
+        .context("cannot read the commits in the task repo")?;
+    ids.iter()
+        .zip(&bodies)
+        .map(|(id, raw)| parse_commit(id, raw))
+        .collect()
+}
+
+fn parse_commit(id: &str, raw: &[u8]) -> Result<Original> {
     let sep = raw
         .windows(2)
         .position(|w| w == b"\n\n")
@@ -261,6 +492,7 @@ fn read_commit(repo_git: &Path, id: &str) -> Result<Original> {
         parents,
         header_lines,
         message,
+        raw: raw.to_vec(),
     })
 }
 
@@ -348,21 +580,15 @@ fn push_chars(text: &str, base: usize, decoded: &mut String, spans: &mut Vec<(us
 /// Built and hashed directly, rather than through `git commit-tree -F <file>`: `commit-tree`
 /// quietly reencodes a message that isn't valid UTF-8 (issue 244's encoding edge case) even when
 /// it is given verbatim from a file, where `hash-object` stores exactly the bytes it is given.
-/// `commit-tree` also checks that the tree and every parent exist before it writes anything, so
-/// [`check_object_exists`] does that check here instead, keeping the same guarantee: a commit
-/// whose tree or a parent is missing -- the way a partial, corrupted range would be -- fails
-/// before anything is written for it.
+/// `commit-tree` also checks that the tree and every parent exist before it writes anything;
+/// [`check_range`] does that check instead, once for the whole range.
 fn build_commit(
     repo_git: &Path,
+    id: &str,
     original: &Original,
     parents: &[String],
     message: &[u8],
 ) -> Result<String> {
-    check_object_exists(repo_git, &original.tree, "tree")?;
-    for parent in parents {
-        check_object_exists(repo_git, parent, "commit")?;
-    }
-
     let mut object = Vec::new();
     let mut rebuilt_parents = parents.iter();
     for line in &original.header_lines {
@@ -378,6 +604,11 @@ fn build_commit(
     }
     object.push(b'\n');
     object.extend_from_slice(message);
+    // Nothing to defang, no parent rebuilt, no signature dropped: the rebuilt commit is the
+    // original, which the repo already holds (issue #444).
+    if object == original.raw {
+        return Ok(id.to_owned());
+    }
 
     let out = git::run_with_stdin(
         repo_git,
@@ -389,31 +620,13 @@ fn build_commit(
     Ok(out.trim().to_owned())
 }
 
-/// `id` exists in `repo_git` as an object of the given git type (`tree` or `commit`).
-fn check_object_exists(repo_git: &Path, id: &str, kind: &str) -> Result<()> {
-    let out = git::output(
-        repo_git,
-        Some(repo_git),
-        None,
-        &[
-            "rev-parse",
-            "--verify",
-            "--quiet",
-            &format!("{id}^{{{kind}}}"),
-        ],
-    )?;
-    if !out.status.success() {
-        bail!("{kind} {id} doesn't exist in the task repo; the commit being rebuilt is damaged");
-    }
-    Ok(())
-}
-
 /// Moves the delivered branch `branch` to `new_tip` and [`rebuilt_marker`] to `new_marker`
 /// (this rebuild's agent tip) together, as one atomic `git update-ref --stdin` transaction: both
 /// move, or neither does. Each carries its own compare-and-swap (`old_tip` for the branch,
 /// `old_marker` for the marker, which is created instead when `None`), so a mismatch on either
 /// -- something else having moved the branch, or a concurrent rebuild having moved the marker --
-/// refuses the whole transaction and changes nothing.
+/// refuses the whole transaction and changes nothing; so does the agent ref no longer being at
+/// `new_marker`, the tip that was rebuilt.
 fn move_branch(
     repo_git: &Path,
     branch: &str,
@@ -424,7 +637,12 @@ fn move_branch(
     new_marker: &str,
 ) -> Result<()> {
     let delivered = format!("refs/heads/{branch}");
-    let mut stdin = format!("update {delivered} {new_tip} {old_tip}\n");
+    // The agent ref must still be at the tip that was rebuilt: read before a fetch, it is checked
+    // here, in the same transaction (issue #444).
+    let mut stdin = format!(
+        "verify {} {new_marker}\nupdate {delivered} {new_tip} {old_tip}\n",
+        agent_ref(branch)
+    );
     match old_marker {
         Some(old) => stdin.push_str(&format!("update {marker} {new_marker} {old}\n")),
         None => stdin.push_str(&format!("create {marker} {new_marker}\n")),
@@ -1057,6 +1275,7 @@ mod tests {
         let other = git(&dir, &["commit-tree", &empty_tree, "-m", "elsewhere"]);
         let new = git(&dir, &["commit-tree", &empty_tree, "-m", "new"]);
         git(&dir, &["update-ref", "refs/heads/issue-4", &other]);
+        git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &new]);
 
         let message = format!(
             "{:#}",
@@ -1186,5 +1405,67 @@ mod tests {
             rewritten,
             git(&clean_dir, &["rev-parse", "refs/heads/issue-4"])
         );
+    }
+
+    // PR #482 review round (M-1): the agent ref is read before the fetch, so the move pins it.
+
+    #[test]
+    fn move_branch_refuses_when_the_agent_ref_is_not_at_the_rebuilt_tip() {
+        let (_tmp, dir) = repo();
+        let empty_tree = git(&dir, &["hash-object", "-t", "tree", "--stdin"]);
+        let base = git(&dir, &["commit-tree", &empty_tree, "-m", "base"]);
+        let new = git(&dir, &["commit-tree", &empty_tree, "-m", "new"]);
+        let later = git(&dir, &["commit-tree", &empty_tree, "-m", "later"]);
+        git(&dir, &["update-ref", "refs/heads/issue-4", &base]);
+        git(&dir, &["update-ref", "refs/sbxm/agent/issue-4", &later]);
+
+        move_branch(
+            &dir,
+            "issue-4",
+            &new,
+            &base,
+            "refs/sbxm/rebuilt/issue-4",
+            None,
+            &new,
+        )
+        .unwrap_err();
+
+        assert_eq!(git(&dir, &["rev-parse", "refs/heads/issue-4"]), base);
+        assert!(ref_missing(&dir, "refs/sbxm/rebuilt/issue-4"));
+    }
+
+    #[test]
+    fn the_range_tells_the_count_only_when_it_sits_on_the_start_alone() {
+        let range = |boundary: &[&str], commits: &[(&str, &[&str])]| Range {
+            commits: commits
+                .iter()
+                .map(|(id, parents)| {
+                    (
+                        (*id).to_owned(),
+                        parents.iter().map(|p| (*p).to_owned()).collect(),
+                    )
+                })
+                .collect(),
+            boundary: boundary.iter().map(|b| (*b).to_owned()).collect(),
+        };
+        let rebuilt = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
+            pairs
+                .iter()
+                .map(|(a, b)| ((*a).to_owned(), (*b).to_owned()))
+                .collect()
+        };
+        let linear = range(&["s"], &[("a", &["s"]), ("b", &["a"])]);
+        let two = rebuilt(&[("a", "a2"), ("b", "b2")]);
+
+        assert_eq!(ahead_from_range(&linear, "s", &two), Some(2));
+        // Another branch's commit under the range, a root commit, two commits rebuilt into one,
+        // and an empty range: each is counted instead.
+        let merged = range(&["s", "o"], &[("a", &["s"]), ("b", &["a", "o"])]);
+        assert_eq!(ahead_from_range(&merged, "s", &two), None);
+        let rooted = range(&["s"], &[("a", &[]), ("b", &["a", "s"])]);
+        assert_eq!(ahead_from_range(&rooted, "s", &two), None);
+        let same = rebuilt(&[("a", "x"), ("b", "x")]);
+        assert_eq!(ahead_from_range(&linear, "s", &same), None);
+        assert_eq!(ahead_from_range(&range(&[], &[]), "s", &rebuilt(&[])), None);
     }
 }

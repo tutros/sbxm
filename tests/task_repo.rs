@@ -521,8 +521,8 @@ fn tip(repo_git: &Path, branch: &str) -> String {
 /// Collects the bundle the sandbox left in the workspace at `.sbxm-task/branch.bundle`, then
 /// rebuilds the delivered branch from it (issue 244), matching what `pipeline.rs` does.
 fn collect(f: &Fixture, cap: u64) -> anyhow::Result<()> {
-    repo::fetch_bundle(&f.repo_git, &f.workspace, "issue-4", cap)?;
-    rewrite::rebuild(&f.repo_git, "refs/heads/main", "issue-4")
+    rewrite::fetch_and_rebuild(&f.repo_git, &f.workspace, "refs/heads/main", "issue-4", cap)
+        .map(|_| ())
 }
 
 /// The path the sandbox writes the bundle to, with its folder made.
@@ -780,7 +780,11 @@ fn a_task_repo_from_before_the_agent_ref_existed_backfills_it_and_the_fix_round_
     let f = fixture();
     prepared(&f);
     // The old binary: the agent's first, unrewritten commit landed straight on the delivered
-    // branch, and there was never an agent ref.
+    // branch, and there was never an agent ref (today's `create_branch` makes one: removed).
+    git(
+        &f.repo_git,
+        &["update-ref", "-d", "refs/sbxm/agent/issue-4"],
+    );
     agent_commits(&f, &["a.txt"]);
     git(
         &f.repo_git,
