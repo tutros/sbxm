@@ -4,7 +4,9 @@
 use std::fs;
 use std::path::Path;
 
-use crate::github::{CommitStatus, StatusState};
+use anyhow::Result;
+
+use crate::github::{CommitStatus, GitHubBackend, StatusState};
 
 use super::findings;
 use super::record::OpenFinding;
@@ -678,4 +680,37 @@ pub fn open_after(
     };
     open.extend(must_fix_findings(current, round));
     open
+}
+
+/// What [`publish`] did (issue 469).
+pub struct Published {
+    /// The comment post: its error is the caller's to word, since what a failed post means differs
+    /// (`task review --pr` keeps the review, `finish` and `fix` fail). No status was tried when
+    /// it failed: the review is not on the PR.
+    pub comment: Result<()>,
+    /// Why the `sbxm/review` status wasn't posted, if it wasn't (see [`super::pipeline::post_status`]).
+    pub warnings: Vec<String>,
+}
+
+/// Posts a review on PR `number` and then its `sbxm/review` status (issue 469), the only way any
+/// command posts a review: `task review --pr`, `task finish` and `task fix --pr` all end here,
+/// so none can post a review without its status. `body` is the comment the caller built; `again`
+/// is the command a warning names to review the PR again.
+pub fn publish(
+    github: &dyn GitHubBackend,
+    repo: &str,
+    number: u32,
+    body: &str,
+    reviewed: &super::pipeline::StatusInput,
+    again: &str,
+) -> Published {
+    let comment = github.pr_comment(repo, number, body);
+    let warnings = if comment.is_ok() {
+        super::pipeline::post_status(github, repo, reviewed, again)
+            .into_iter()
+            .collect()
+    } else {
+        Vec::new()
+    };
+    Published { comment, warnings }
 }
