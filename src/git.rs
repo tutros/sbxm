@@ -272,17 +272,7 @@ pub(crate) fn check_objects(
     if names.is_empty() {
         return Ok(Vec::new());
     }
-    let mut input = String::new();
-    for name in names {
-        if name.is_empty() {
-            bail!("cannot look up an empty name in git");
-        }
-        if name.contains(['\n', '\r', '\0']) {
-            bail!("cannot look up {name:?} in git: it holds a newline");
-        }
-        input.push_str(name);
-        input.push('\n');
-    }
+    let input = batch_input(names)?;
     let args = ["cat-file", "--batch-check"];
     let out = output_with_stdin(cwd, git_dir, work_tree, &args, input.as_bytes())?;
     if !out.status.success() {
@@ -298,6 +288,65 @@ pub(crate) fn check_objects(
         );
     }
     lines.into_iter().map(parse_check_line).collect()
+}
+
+/// The raw body of every one of `names` (object ids or revisions), in order, from a single
+/// `git cat-file --batch` (issue #444). A name that doesn't resolve fails the call, naming it.
+/// Names are checked and passed as for [`check_objects`]. No names, no git start. Callers that
+/// must bound memory check sizes first with [`check_objects`].
+pub(crate) fn read_objects(
+    cwd: &Path,
+    git_dir: Option<&Path>,
+    work_tree: Option<&Path>,
+    names: &[&str],
+) -> Result<Vec<Vec<u8>>> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let input = batch_input(names)?;
+    let args = ["cat-file", "--batch"];
+    let out = output_with_stdin(cwd, git_dir, work_tree, &args, input.as_bytes())?;
+    if !out.status.success() {
+        bail!(failure_message(&args, &out));
+    }
+    // Per name: a `<id> <type> <size>` line (or `<name> missing`), then `size` bytes and a newline.
+    let mut rest = out.stdout.as_slice();
+    let mut bodies = Vec::with_capacity(names.len());
+    for name in names {
+        let end = rest
+            .iter()
+            .position(|&b| b == b'\n')
+            .with_context(|| format!("`git cat-file --batch` stopped before {name}"))?;
+        let header = String::from_utf8_lossy(&rest[..end]).into_owned();
+        rest = &rest[end + 1..];
+        let Some(object) = parse_check_line(&header)? else {
+            bail!("{name} doesn't exist in the repository");
+        };
+        let size = usize::try_from(object.size).context("object too large")?;
+        if rest.len() < size + 1 {
+            bail!("`git cat-file --batch` gave less than the {size} bytes it announced for {name}");
+        }
+        bodies.push(rest[..size].to_vec());
+        rest = &rest[size + 1..];
+    }
+    Ok(bodies)
+}
+
+/// One name per line for a `cat-file --batch*` stdin; refuses a name that is empty or holds a
+/// line break (it would read as two names).
+fn batch_input(names: &[&str]) -> Result<String> {
+    let mut input = String::new();
+    for name in names {
+        if name.is_empty() {
+            bail!("cannot look up an empty name in git");
+        }
+        if name.contains(['\n', '\r', '\0']) {
+            bail!("cannot look up {name:?} in git: it holds a newline");
+        }
+        input.push_str(name);
+        input.push('\n');
+    }
+    Ok(input)
 }
 
 /// `<id> <type> <size>`, or `<name> missing` / `<name> ambiguous` (both are `None`).

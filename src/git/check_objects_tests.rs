@@ -161,3 +161,89 @@ fn a_tree_name_peels_to_the_tree_and_reports_its_kind() {
     assert_eq!(found[0].as_ref().unwrap().kind, "tree");
     assert_eq!(found[1].as_ref().unwrap().kind, "commit");
 }
+
+#[test]
+fn read_objects_returns_each_object_body_in_order() {
+    let (_tmp, dir, ids) = chain(3);
+    let names: Vec<&str> = ids.iter().map(String::as_str).collect();
+
+    let bodies = read_objects(&dir, Some(&dir), None, &names).unwrap();
+
+    assert_eq!(bodies.len(), 3);
+    for (n, body) in bodies.iter().enumerate() {
+        let text = String::from_utf8(body.clone()).unwrap();
+        assert!(text.starts_with("tree "), "{text}");
+        assert!(text.ends_with(&format!("commit {n}\n")), "{text:?}");
+        assert_eq!(
+            body.as_slice(),
+            git_bytes(&dir, &["cat-file", "commit", &ids[n]]).as_slice()
+        );
+    }
+}
+
+#[test]
+fn read_objects_keeps_bytes_that_are_not_utf8() {
+    let (_tmp, dir, _ids) = chain(1);
+    let blob = Command::new("git")
+        .current_dir(&dir)
+        .args(["hash-object", "-w", "--stdin"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(b"a\n\n\xff\xfe\nb\n")?;
+            child.wait_with_output()
+        })
+        .unwrap();
+    let id = String::from_utf8(blob.stdout).unwrap().trim().to_owned();
+
+    let bodies = read_objects(&dir, Some(&dir), None, &[&id, &id]).unwrap();
+
+    assert_eq!(bodies[0], b"a\n\n\xff\xfe\nb\n");
+    assert_eq!(bodies[1], b"a\n\n\xff\xfe\nb\n");
+}
+
+#[test]
+fn read_objects_fails_when_one_object_is_missing() {
+    let (_tmp, dir, ids) = chain(1);
+
+    let err = read_objects(&dir, Some(&dir), None, &[&ids[0], "refs/heads/nope"]).unwrap_err();
+
+    assert!(format!("{err:#}").contains("refs/heads/nope"), "{err:#}");
+}
+
+#[test]
+fn read_objects_with_no_names_starts_no_git() {
+    let missing = Path::new("/nonexistent/for/read_objects");
+
+    assert!(
+        read_objects(Path::new("."), Some(missing), None, &[])
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn read_objects_refuses_a_name_with_a_newline() {
+    let (_tmp, dir, ids) = chain(1);
+
+    let err = read_objects(&dir, Some(&dir), None, &[&ids[0], "a\nb"]).unwrap_err();
+
+    assert!(format!("{err:#}").contains("newline"), "{err:#}");
+}
+
+fn git_bytes(dir: &Path, args: &[&str]) -> Vec<u8> {
+    Command::new("git")
+        .current_dir(dir)
+        .args(args)
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_NOSYSTEM", "1")
+        .output()
+        .unwrap()
+        .stdout
+}
