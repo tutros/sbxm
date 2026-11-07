@@ -247,6 +247,78 @@ pub(crate) fn output_with_stdin(
     })
 }
 
+/// What `git cat-file --batch-check` says about one object.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Object {
+    /// The full object id the name resolved to (a peeled one for `<rev>^{tree}`).
+    pub id: String,
+    /// `commit`, `tree`, `blob` or `tag`.
+    pub kind: String,
+    pub size: u64,
+}
+
+/// Looks up every one of `names` (object ids or revisions such as `refs/heads/x^{commit}`) with a
+/// single `git cat-file --batch-check` (issue #444): one answer per name, in order, `None` for a
+/// name that doesn't resolve. A missing name doesn't fail the call, unlike
+/// `rev-parse --verify a b`. The names go in on stdin, one per line, so none can be read as an
+/// option; a name that is empty or holds a line break (it would be read as two names) is refused
+/// before git starts. No names, no git start.
+pub(crate) fn check_objects(
+    cwd: &Path,
+    git_dir: Option<&Path>,
+    work_tree: Option<&Path>,
+    names: &[&str],
+) -> Result<Vec<Option<Object>>> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut input = String::new();
+    for name in names {
+        if name.is_empty() {
+            bail!("cannot look up an empty name in git");
+        }
+        if name.contains(['\n', '\r', '\0']) {
+            bail!("cannot look up {name:?} in git: it holds a newline");
+        }
+        input.push_str(name);
+        input.push('\n');
+    }
+    let args = ["cat-file", "--batch-check"];
+    let out = output_with_stdin(cwd, git_dir, work_tree, &args, input.as_bytes())?;
+    if !out.status.success() {
+        bail!(failure_message(&args, &out));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = text.lines().collect();
+    if lines.len() != names.len() {
+        bail!(
+            "`git cat-file --batch-check` answered {} lines for {} names",
+            lines.len(),
+            names.len()
+        );
+    }
+    lines.into_iter().map(parse_check_line).collect()
+}
+
+/// `<id> <type> <size>`, or `<name> missing` / `<name> ambiguous` (both are `None`).
+fn parse_check_line(line: &str) -> Result<Option<Object>> {
+    let mut fields = line.rsplitn(3, ' ');
+    let (size, kind, id) = (fields.next(), fields.next(), fields.next());
+    if let (Some(size), Some(kind), Some(id)) = (size, kind, id)
+        && let Ok(size) = size.parse::<u64>()
+    {
+        return Ok(Some(Object {
+            id: id.to_owned(),
+            kind: kind.to_owned(),
+            size,
+        }));
+    }
+    if line.ends_with(" missing") || line.ends_with(" ambiguous") {
+        return Ok(None);
+    }
+    bail!("unexpected `git cat-file --batch-check` output: {line}")
+}
+
 /// The `GIT_*` variables that keep working for [`user_output`]: where the user's own
 /// config and credentials come from. Every other one (`GIT_DIR`, `GIT_CONFIG_COUNT`, ...)
 /// could point git elsewhere or make it run code, so it is dropped.
@@ -392,6 +464,9 @@ pub(crate) fn baseline_commit(cwd: &Path, git_dir: &Path, work_tree: &Path) -> R
     let id = run(cwd, Some(git_dir), Some(work_tree), &["rev-parse", "HEAD"])?;
     Ok(id.trim().to_owned())
 }
+
+#[cfg(test)]
+mod check_objects_tests;
 
 #[cfg(test)]
 mod tests {
