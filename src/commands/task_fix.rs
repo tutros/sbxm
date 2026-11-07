@@ -279,6 +279,9 @@ pub fn run(
             pushed.commit, pushed.review_again
         )?;
     }
+    for warning in &pushed.warnings {
+        writeln!(out, "warning: {warning}")?;
+    }
     if !pushed.unresolved.is_empty() {
         writeln!(
             out,

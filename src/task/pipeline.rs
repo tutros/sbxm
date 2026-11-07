@@ -3933,7 +3933,15 @@ pub fn review_pr(
     let (repo, number) = (prepared.record.repo.clone(), prepared.record.number);
     let risk_section = risk::render_section(risk, &risk_reasons);
     let comment = review::pr_comment(number, &risk_section, &text);
-    match github.pr_comment(&repo, number, &comment) {
+    let again = review::review_pr_command(number, &repo, Some(&prepared.record.base), true);
+    let reviewed = StatusInput {
+        commit: tip.as_deref(),
+        must_fix,
+        text: &text,
+        risk,
+    };
+    let published = review::publish(github, &repo, number, &comment, &reviewed, &again);
+    match published.comment {
         Ok(()) => {
             report.posted = true;
             prepared
@@ -3941,16 +3949,7 @@ pub fn review_pr(
                 .notes
                 .push(format!("the review was posted on PR #{number}"));
             record::write(&prepared.meta, &prepared.record)?;
-            let again = review::review_pr_command(number, &repo, Some(&prepared.record.base), true);
-            let reviewed = StatusInput {
-                commit: tip.as_deref(),
-                must_fix,
-                text: &text,
-                risk,
-            };
-            report
-                .warnings
-                .extend(post_status(github, &repo, &reviewed, &again));
+            report.warnings.extend(published.warnings);
             Ok(report)
         }
         Err(e) => {

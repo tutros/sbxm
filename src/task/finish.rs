@@ -1807,9 +1807,6 @@ fn open_task_pr(
     let (summarized, mut warnings) = post_issue_summaries(&mut prepared, &fixes, &url, github);
     let review_posted = match posting {
         Some((commit, text)) => {
-            post_in_task_review(&mut prepared, &url, &commit, &risk_text, &text, github)?;
-            // Issue 317: the review is the PR head's now, so only `--force` reviews it again.
-            let again = review::review_pr_command(&pr, &task.repo, Some(&task.base), true);
             let (must_fix, level) = task
                 .review
                 .as_ref()
@@ -1820,9 +1817,13 @@ fn open_task_pr(
                 text: &text,
                 risk: level,
             };
-            warnings.extend(super::pipeline::post_status(
-                github, &task.repo, &reviewed, &again,
-            ));
+            warnings.extend(post_in_task_review(
+                &mut prepared,
+                &url,
+                &reviewed,
+                &risk_text,
+                github,
+            )?);
             Some(commit)
         }
         None => None,
@@ -2000,45 +2001,55 @@ fn open_pr(
 fn post_in_task_review(
     prepared: &mut Prepared,
     url: &str,
-    commit: &str,
+    reviewed: &super::pipeline::StatusInput,
     risk_text: &str,
-    review: &str,
     github: &dyn GitHubBackend,
-) -> Result<()> {
+) -> Result<Vec<String>> {
+    let commit = reviewed.commit.unwrap_or_default();
     let task = &prepared.record;
+    let review_pr =
+        |pr: &str, force: bool| review::review_pr_command(pr, &task.repo, Some(&task.base), force);
+    let mut warnings = Vec::new();
     let posted = match pr_number(url) {
         Some(pr) => {
             let body = match task.kind {
-                record::Kind::Spec => {
-                    super::review::in_task_spec_pr_comment(&task.id, commit, risk_text, review)
+                record::Kind::Spec => super::review::in_task_spec_pr_comment(
+                    &task.id,
+                    commit,
+                    risk_text,
+                    reviewed.text,
+                ),
+                _ => {
+                    super::review::in_task_pr_comment(task.number, commit, risk_text, reviewed.text)
                 }
-                _ => super::review::in_task_pr_comment(task.number, commit, risk_text, review),
             };
-            github
-                .pr_comment(&task.repo, pr, &body)
-                .map(|_| pr)
-                .map_err(|e| (Some(pr), e))
+            // Issue 317: the review is the PR head's now, so only `--force` reviews it again.
+            let again = review_pr(&pr.to_string(), true);
+            let published = review::publish(github, &task.repo, pr, &body, reviewed, &again);
+            warnings = published.warnings;
+            published.comment.map(|_| pr).map_err(|e| (Some(pr), e))
         }
         None => Err((None, anyhow::anyhow!("{url} doesn't end in a PR number"))),
     };
-    let review_pr = |pr: &str| review::review_pr_command(pr, &task.repo, Some(&task.base), false);
     let (pr, e) = match posted {
         Ok(pr) => {
-            let hint = review_pr(&pr.to_string());
+            let hint = review_pr(&pr.to_string(), false);
             if let Some(review) = &mut prepared.record.review {
                 review.posted = Some(commit.to_owned());
             }
-            return record::write(&prepared.meta, &prepared.record).with_context(|| {
-                format!(
-                    "the in-task review is posted on {url}, but task.json couldn't be updated \
-                     to say so; `{hint}` will review the PR again"
-                )
-            });
+            return record::write(&prepared.meta, &prepared.record)
+                .with_context(|| {
+                    format!(
+                        "the in-task review is posted on {url}, but task.json couldn't be updated \
+                         to say so; `{hint}` will review the PR again"
+                    )
+                })
+                .map(|()| warnings);
         }
         Err(failed) => failed,
     };
     let pr = pr.map_or_else(|| "<N>".to_owned(), |n| n.to_string());
-    let hint = review_pr(&pr);
+    let hint = review_pr(&pr, false);
     prepared.record.notes.push(format!(
         "the in-task review was not posted on PR #{pr}: {e:#}"
     ));
@@ -2065,6 +2076,8 @@ pub struct FixPushed {
     pub review_posted: bool,
     /// The `sbxm task review --pr` command for the PR's head.
     pub review_again: String,
+    /// Why the `sbxm/review` status wasn't posted on the new head, when it wasn't (issue 469).
+    pub warnings: Vec<String>,
 }
 
 /// The line that says where a fix task's result stays when it can't be pushed (issue 313,
@@ -2173,10 +2186,24 @@ pub fn finish_fix(
     prepared.record.pr = Some(url.clone());
     record::write(&prepared.meta, &prepared.record)
         .with_context(|| format!("{id} is pushed to PR #{pr} but task.json couldn't be updated"))?;
+    let mut warnings = Vec::new();
     let review_posted = match posting {
         Some((commit, text)) => {
             let body = review::in_task_fix_comment(pr, &commit, &risk_text, &text);
-            if let Err(e) = github.pr_comment(&task.repo, pr, &body) {
+            let (must_fix, level) = task
+                .review
+                .as_ref()
+                .map_or((0, risk::Level::default()), |r| (r.must_fix, r.risk));
+            let reviewed = super::pipeline::StatusInput {
+                commit: Some(&commit),
+                must_fix,
+                text: &text,
+                risk: level,
+            };
+            // Issue 469: the new head is reviewed now, so only `--force` reviews it again.
+            let force = review::review_pr_command(pr, &task.repo, Some(&task.base), true);
+            let published = review::publish(github, &task.repo, pr, &body, &reviewed, &force);
+            if let Err(e) = published.comment {
                 prepared.record.notes.push(format!(
                     "the in-task review was not posted on PR #{pr}: {e:#}"
                 ));
@@ -2186,6 +2213,7 @@ pub fn finish_fix(
                      it; review the new head with `{review_again}`"
                 )));
             }
+            warnings = published.warnings;
             if let Some(review) = &mut prepared.record.review {
                 review.posted = Some(commit);
             }
@@ -2207,6 +2235,7 @@ pub fn finish_fix(
         unresolved,
         review_posted,
         review_again,
+        warnings,
     })
 }
 
