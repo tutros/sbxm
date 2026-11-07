@@ -16,6 +16,10 @@ pub enum Event {
     Review,
     /// `task finish`.
     Finish,
+    /// `task finish` again on a finished task that has a PR (issue 467): only the issue
+    /// summaries are retried or edited. The PR itself is not part of a table state; see
+    /// `finish::check_can_retry_summaries`.
+    FinishSummaries,
     /// `task rm` and `task start --restart`.
     Rm,
     /// `task resume` (decisions 173(c), 175; issue 118): continue a task from its recorded stage,
@@ -404,6 +408,18 @@ pub const TABLE: &[Row] = &[
         event: Event::Finish,
         to: Some(Stage::Finished),
         action: "push the branch onto the PR's own branch, a fast-forward or nothing",
+    },
+    // `task finish` on a finished issue or spec task whose PR is recorded (issues 430, 467): the
+    // table cannot see `pr` or the spec's sink, so `check_can_retry_summaries` also needs a
+    // recorded PR (a `local` or `push` spec task has none).
+    Row {
+        stages: &[Stage::Finished],
+        statuses: &[Status::Ok],
+        live: Live::Any,
+        kinds: &[Kind::Issue, Kind::Spec],
+        event: Event::FinishSummaries,
+        to: Some(Stage::Finished),
+        action: "post or edit the issue summaries only (no push, no new PR, no PR review)",
     },
     // `task resume` (decisions 173(c), 175; issue 118), a task with a worker: a failed or
     // interrupted stage runs again in the task's own clone, and the task goes on to `ready`.

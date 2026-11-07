@@ -7,7 +7,7 @@
 
 use std::collections::BTreeSet;
 
-use sbxm::task::finish::{check_can_finish, plan_removal};
+use sbxm::task::finish::{check_can_finish, check_can_retry_summaries, plan_removal};
 use sbxm::task::machine::{Event, STAGES, State, dead_ends, matching, states, verdict};
 use sbxm::task::pipeline::{check_can_gate, check_can_review, check_can_review_pr};
 use sbxm::task::record::{self, Kind, NewTask, Process, ProcessProbe, Record, Stage, Stopped};
@@ -63,6 +63,13 @@ fn guard(state: &State, event: Event) -> bool {
             Kind::Pr => check_can_review_pr(&record, &probe).is_ok(),
         },
         Event::Finish => check_can_finish(&record).is_ok(),
+        // Asked with a recorded PR, which no table state carries; the PR-less case is in
+        // `tests/task_finish_retry_states.rs`.
+        Event::FinishSummaries => {
+            let mut record = record;
+            record.pr = Some("https://github.com/o/r/pull/9".to_owned());
+            check_can_retry_summaries(&record).is_ok()
+        }
         Event::Rm => {
             let base = tempfile::tempdir().unwrap();
             record::write(&record::task_dir(base.path(), &record.id), &record).unwrap();
@@ -96,6 +103,7 @@ fn events() -> Vec<Event> {
         Event::Gates,
         Event::Review,
         Event::Finish,
+        Event::FinishSummaries,
         Event::Rm,
         Event::Resume,
     ];

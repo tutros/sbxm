@@ -61,6 +61,7 @@ fn event_cell(event: Event) -> &'static str {
         Event::Gates => "task gates",
         Event::Review => "task review",
         Event::Finish => "task finish",
+        Event::FinishSummaries => "task finish",
         Event::Rm => "task rm",
         Event::Resume => "task resume",
         Event::Advance(_) => "advance",
