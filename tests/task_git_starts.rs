@@ -89,7 +89,7 @@ fn a_rebuild_over_a_commit_whose_tree_is_missing_writes_nothing() {
 
     let message = format!("{err:#}");
     assert!(
-        message.contains("tree") && message.contains(&missing_tree),
+        message.contains("tree") && message.contains(&agent),
         "{message}"
     );
     assert_eq!(git(&f.repo_git, &["rev-parse", "refs/heads/issue-4"]), base);
@@ -172,4 +172,48 @@ fn a_bundle_with_the_task_branch_is_fetched_onto_the_agent_ref() {
         git(&f.repo_git, &["rev-parse", "refs/sbxm/agent/issue-4"]),
         tip
     );
+}
+
+fn agent_commit(f: &Fixture, message: &str) -> String {
+    let base = git(&f.repo_git, &["rev-parse", "refs/heads/main"]);
+    let tree = git(&f.repo_git, &["rev-parse", &format!("{base}^{{tree}}")]);
+    let agent = git(
+        &f.repo_git,
+        &["commit-tree", &tree, "-p", &base, "-m", message],
+    );
+    git(
+        &f.repo_git,
+        &["update-ref", "refs/sbxm/agent/issue-4", &agent],
+    );
+    git(&f.repo_git, &["update-ref", "refs/heads/issue-4", &base]);
+    agent
+}
+
+#[test]
+fn a_commit_with_nothing_to_defang_is_not_written_again() {
+    use sbxm::task::rewrite;
+    let f = fixture();
+    let agent = agent_commit(&f, "a plain message");
+    let before = git(&f.repo_git, &["count-objects"]);
+
+    rewrite::rebuild(&f.repo_git, "main", "issue-4").unwrap();
+
+    assert_eq!(
+        git(&f.repo_git, &["rev-parse", "refs/heads/issue-4"]),
+        agent
+    );
+    assert_eq!(git(&f.repo_git, &["count-objects"]), before);
+}
+
+#[test]
+fn a_commit_with_a_mention_is_rebuilt_and_written() {
+    use sbxm::task::rewrite;
+    let f = fixture();
+    let agent = agent_commit(&f, "thanks @someone for #12");
+
+    rewrite::rebuild(&f.repo_git, "main", "issue-4").unwrap();
+
+    let rebuilt = git(&f.repo_git, &["rev-parse", "refs/heads/issue-4"]);
+    assert_ne!(rebuilt, agent);
+    assert_eq!(git(&f.repo_git, &["cat-file", "-t", &rebuilt]), "commit");
 }

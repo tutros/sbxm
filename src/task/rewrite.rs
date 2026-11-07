@@ -42,6 +42,9 @@ struct Original {
     parents: Vec<String>,
     header_lines: Vec<Vec<u8>>,
     message: Vec<u8>,
+    /// The object exactly as git stores it: a rebuild that comes out byte for byte the same is
+    /// already in the repo, so nothing needs writing (issue #444).
+    raw: Vec<u8>,
 }
 
 /// The largest commit object (header plus message) [`rebuild`] reads (PR 250 review, M-1;
@@ -91,9 +94,17 @@ pub fn rebuild(repo_git: &Path, start: &str, branch: &str) -> Result<()> {
     })?;
     let last_rebuilt = found[3].clone();
 
-    let ids = commit_range(repo_git, &start_id, &agent_tip, branch)?;
+    let range = commit_range(repo_git, &start_id, &agent_tip, branch)?;
+    let trees = check_range(repo_git, &range)?;
+    let ids: Vec<String> = range.iter().map(|(id, _)| id.clone()).collect();
     let originals = read_commits(repo_git, &ids)?;
-    check_inputs_exist(repo_git, &ids, &originals)?;
+    for (((id, parents), tree), original) in range.iter().zip(&trees).zip(&originals) {
+        if &original.tree != tree || &original.parents != parents {
+            bail!(
+                "commit {id} doesn't read the same through git's two views of it; the commit being rebuilt is damaged"
+            );
+        }
+    }
     let mut rebuilt: HashMap<String, String> = HashMap::new();
     for (id, original) in ids.iter().zip(&originals) {
         let parents: Vec<String> = original
@@ -102,7 +113,7 @@ pub fn rebuild(repo_git: &Path, start: &str, branch: &str) -> Result<()> {
             .map(|p| rebuilt.get(p).cloned().unwrap_or_else(|| p.clone()))
             .collect();
         let message = defang_bytes(&original.message);
-        let new_id = build_commit(repo_git, original, &parents, &message)?;
+        let new_id = build_commit(repo_git, id, original, &parents, &message)?;
         rebuilt.insert(id.clone(), new_id);
     }
     // A commit outside the rebuilt range (the start itself, or one `commit_range` left out as
@@ -163,7 +174,12 @@ fn is_ancestor(repo_git: &Path, ancestor: &str, tip: &str) -> Result<bool> {
 /// defanging, and that id is still the agent's own commit to rebuild again, not an outside one
 /// to protect. Oldest first and with every parent before its children (so a mapped parent is
 /// always ready when a merge commit needs it).
-fn commit_range(repo_git: &Path, start: &str, tip: &str, branch: &str) -> Result<Vec<String>> {
+fn commit_range(
+    repo_git: &Path,
+    start: &str,
+    tip: &str,
+    branch: &str,
+) -> Result<Vec<(String, Vec<String>)>> {
     let out = git::run(
         repo_git,
         Some(repo_git),
@@ -172,6 +188,7 @@ fn commit_range(repo_git: &Path, start: &str, tip: &str, branch: &str) -> Result
             "rev-list",
             "--reverse",
             "--topo-order",
+            "--parents",
             tip,
             "--exclude",
             branch,
@@ -181,7 +198,75 @@ fn commit_range(repo_git: &Path, start: &str, tip: &str, branch: &str) -> Result
             "--tags",
         ],
     )?;
-    Ok(out.lines().map(str::to_owned).collect())
+    // `<id> <parent> <parent>...` per line (issue #444: the parents come with the range, so the
+    // existence check needs no second look at each commit).
+    Ok(out
+        .lines()
+        .map(|line| {
+            let mut ids = line.split_whitespace().map(str::to_owned);
+            let id = ids.next().unwrap_or_default();
+            (id, ids.collect())
+        })
+        .collect())
+}
+
+/// One git start for everything `rebuild` must know before it reads a body or writes anything:
+/// every commit of `range` is a commit within [`MAX_COMMIT_BYTES`] (refused before it is read,
+/// PR 250 review, M-1), its tree exists, and so does every parent outside the range (a parent
+/// inside it is rebuilt, so its new id exists by the time it is used). `commit-tree` would check
+/// the tree and parents before it wrote anything; this keeps that guarantee for
+/// [`build_commit`]'s `hash-object`: a commit whose tree or a parent is missing -- the way a
+/// partial, corrupted range would be -- fails before anything is written. Returns each commit's
+/// tree id, for [`rebuild`] to compare with the one it reads from the commit itself.
+fn check_range(repo_git: &Path, range: &[(String, Vec<String>)]) -> Result<Vec<String>> {
+    let in_range: HashSet<&str> = range.iter().map(|(id, _)| id.as_str()).collect();
+    let outside: BTreeSet<&str> = range
+        .iter()
+        .flat_map(|(_, parents)| parents)
+        .map(String::as_str)
+        .filter(|parent| !in_range.contains(parent))
+        .collect();
+    let mut names: Vec<String> = range.iter().map(|(id, _)| id.clone()).collect();
+    names.extend(range.iter().map(|(id, _)| format!("{id}^{{tree}}")));
+    names.extend(outside.iter().map(|parent| format!("{parent}^{{commit}}")));
+    let names: Vec<&str> = names.iter().map(String::as_str).collect();
+    let found = git::check_objects(repo_git, Some(repo_git), None, &names)
+        .context("cannot read the commits in the task repo")?;
+
+    let (commits, rest) = found.split_at(range.len());
+    let (trees, parents) = rest.split_at(range.len());
+    for ((id, _), object) in range.iter().zip(commits) {
+        let object = object
+            .as_ref()
+            .with_context(|| format!("cannot read the size of commit {id} in the task repo"))?;
+        if object.kind != "commit" {
+            bail!("{id} is a {}, not a commit, in the task repo", object.kind);
+        }
+        if object.size > MAX_COMMIT_BYTES {
+            bail!(
+                "commit {id} is {} bytes, over the {MAX_COMMIT_BYTES}-byte limit for one commit; \
+                 ask the agent for a shorter commit message",
+                object.size
+            );
+        }
+    }
+    for (parent, object) in outside.iter().zip(parents) {
+        if object.is_none() {
+            bail!(
+                "commit {parent} doesn't exist in the task repo; the commit being rebuilt is damaged"
+            );
+        }
+    }
+    range
+        .iter()
+        .zip(trees)
+        .map(|((id, _), object)| match object {
+            Some(tree) if tree.kind == "tree" => Ok(tree.id.clone()),
+            _ => bail!(
+                "the tree of commit {id} doesn't exist in the task repo; the commit being rebuilt is damaged"
+            ),
+        })
+        .collect()
 }
 
 /// Reads commit `id`'s tree, parents, every header line and the message straight from the object
@@ -199,24 +284,6 @@ fn commit_range(repo_git: &Path, start: &str, tip: &str, branch: &str) -> Result
 /// as ASCII hex, are decoded.
 fn read_commits(repo_git: &Path, ids: &[String]) -> Result<Vec<Original>> {
     let names: Vec<&str> = ids.iter().map(String::as_str).collect();
-    // Sizes first, so a commit over the limit is refused before any body is read.
-    let sizes = git::check_objects(repo_git, Some(repo_git), None, &names)
-        .context("cannot read the size of the commits in the task repo")?;
-    for (id, object) in ids.iter().zip(&sizes) {
-        let object = object
-            .as_ref()
-            .with_context(|| format!("cannot read the size of commit {id} in the task repo"))?;
-        if object.kind != "commit" {
-            bail!("{id} is a {}, not a commit, in the task repo", object.kind);
-        }
-        if object.size > MAX_COMMIT_BYTES {
-            bail!(
-                "commit {id} is {} bytes, over the {MAX_COMMIT_BYTES}-byte limit for one commit; \
-                 ask the agent for a shorter commit message",
-                object.size
-            );
-        }
-    }
     let bodies = git::read_objects(repo_git, Some(repo_git), None, &names)
         .context("cannot read the commits in the task repo")?;
     ids.iter()
@@ -260,6 +327,7 @@ fn parse_commit(id: &str, raw: &[u8]) -> Result<Original> {
         parents,
         header_lines,
         message,
+        raw: raw.to_vec(),
     })
 }
 
@@ -348,9 +416,10 @@ fn push_chars(text: &str, base: usize, decoded: &mut String, spans: &mut Vec<(us
 /// quietly reencodes a message that isn't valid UTF-8 (issue 244's encoding edge case) even when
 /// it is given verbatim from a file, where `hash-object` stores exactly the bytes it is given.
 /// `commit-tree` also checks that the tree and every parent exist before it writes anything;
-/// [`check_inputs_exist`] does that check instead, once for the whole range.
+/// [`check_range`] does that check instead, once for the whole range.
 fn build_commit(
     repo_git: &Path,
+    id: &str,
     original: &Original,
     parents: &[String],
     message: &[u8],
@@ -370,6 +439,11 @@ fn build_commit(
     }
     object.push(b'\n');
     object.extend_from_slice(message);
+    // Nothing to defang, no parent rebuilt, no signature dropped: the rebuilt commit is the
+    // original, which the repo already holds (issue #444).
+    if object == original.raw {
+        return Ok(id.to_owned());
+    }
 
     let out = git::run_with_stdin(
         repo_git,
@@ -379,36 +453,6 @@ fn build_commit(
         &object,
     )?;
     Ok(out.trim().to_owned())
-}
-
-/// Checks, with one git start and before anything is written, that every tree of `originals` and
-/// every parent outside the rebuilt range exists in `repo_git` (a parent inside the range is
-/// rebuilt, so its new id exists by the time it is used). `commit-tree` would check this before it
-/// wrote anything; this keeps the same guarantee for [`build_commit`]'s `hash-object`: a commit
-/// whose tree or a parent is missing -- the way a partial, corrupted range would be -- fails
-/// before anything is written.
-fn check_inputs_exist(repo_git: &Path, ids: &[String], originals: &[Original]) -> Result<()> {
-    let in_range: HashSet<&str> = ids.iter().map(String::as_str).collect();
-    let mut wanted: BTreeSet<(String, &str)> = BTreeSet::new();
-    for original in originals {
-        wanted.insert((format!("{}^{{tree}}", original.tree), "tree"));
-        for parent in &original.parents {
-            if !in_range.contains(parent.as_str()) {
-                wanted.insert((format!("{parent}^{{commit}}"), "commit"));
-            }
-        }
-    }
-    let names: Vec<&str> = wanted.iter().map(|(name, _)| name.as_str()).collect();
-    let found = git::check_objects(repo_git, Some(repo_git), None, &names)?;
-    for ((name, kind), object) in wanted.iter().zip(found) {
-        if object.is_none() {
-            let id = name.split('^').next().unwrap_or(name);
-            bail!(
-                "{kind} {id} doesn't exist in the task repo; the commit being rebuilt is damaged"
-            );
-        }
-    }
-    Ok(())
 }
 
 /// Moves the delivered branch `branch` to `new_tip` and [`rebuilt_marker`] to `new_marker`
