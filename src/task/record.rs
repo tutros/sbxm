@@ -555,6 +555,12 @@ impl Record {
         }
     }
 
+    /// [`changed_paths`](Self::changed_paths) for `commit` (a full commit id) rather than for
+    /// the branch's tip now.
+    pub fn changed_paths_at(&self, repo_git: &Path, commit: &str) -> Result<Vec<String>> {
+        super::repo::changed_paths_at(repo_git, &self.rewrite_start(), commit)
+    }
+
     /// What `git bundle create` excludes in the worker's clone: the commit a continued PR's
     /// branch started from, else the base branch's remote ref.
     pub fn bundle_exclusion(&self) -> String {

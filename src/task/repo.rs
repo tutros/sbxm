@@ -1012,17 +1012,15 @@ pub fn changed_paths_since(repo_git: &Path, commit: &str, branch: &str) -> Resul
 
 fn diff_names(repo_git: &Path, from: &str, branch: &str) -> Result<Vec<String>> {
     check_ref("branch", branch)?;
+    diff_range(repo_git, &format!("{from}...refs/heads/{branch}"))
+}
+
+fn diff_range(repo_git: &Path, range: &str) -> Result<Vec<String>> {
     let out = git::run(
         repo_git,
         Some(repo_git),
         None,
-        &[
-            "diff",
-            "--name-only",
-            "-z",
-            "--no-renames",
-            &format!("{from}...refs/heads/{branch}"),
-        ],
+        &["diff", "--name-only", "-z", "--no-renames", range],
     )?;
     Ok(out
         .split('\0')
@@ -1106,11 +1104,7 @@ pub fn is_ancestor_of_remote_base(repo_git: &Path, commit: &str, base: &str) -> 
 /// commit before its children, and every commit it lists is the tip or one of the tip's
 /// ancestors, so the tip comes first.
 pub fn tip_if_ahead(repo_git: &Path, from: &str, branch: &str) -> Result<Option<String>> {
-    match from.strip_prefix("refs/heads/") {
-        Some(base) => check_ref("base", base)?,
-        None if is_commit_id(from) => {}
-        None => bail!("{from:?} isn't a full commit id; the task record may be damaged"),
-    }
+    check_start(from)?;
     check_ref("branch", branch)?;
     let out = git::run(
         repo_git,
@@ -1125,6 +1119,26 @@ pub fn tip_if_ahead(repo_git: &Path, from: &str, branch: &str) -> Result<Option<
     )
     .with_context(|| format!("cannot list the commits of {branch} past {from}"))?;
     Ok(out.lines().next().map(str::to_owned))
+}
+
+/// A task's starting point as [`super::record::Record::rewrite_start`] names it:
+/// `refs/heads/<base>` or a full commit id, nothing git could read as an option.
+fn check_start(from: &str) -> Result<()> {
+    match from.strip_prefix("refs/heads/") {
+        Some(base) => check_ref("base", base),
+        None if is_commit_id(from) => Ok(()),
+        None => bail!("{from:?} isn't a full commit id; the task record may be damaged"),
+    }
+}
+
+/// The paths `commit` (a full commit id) changes past where it left `from` (as for
+/// [`tip_if_ahead`]): [`changed_paths`] for a commit rather than for the branch's tip now.
+pub fn changed_paths_at(repo_git: &Path, from: &str, commit: &str) -> Result<Vec<String>> {
+    check_start(from)?;
+    if !is_commit_id(commit) {
+        bail!("{commit:?} isn't a full commit id");
+    }
+    diff_range(repo_git, &format!("{from}...{commit}"))
 }
 
 /// How many commits `branch` has that `base` doesn't.

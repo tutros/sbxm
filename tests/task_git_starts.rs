@@ -444,7 +444,8 @@ fn fetching_and_rebuilding_delivers_the_bundles_commits() {
         "issue-4",
         1 << 20,
     )
-    .unwrap();
+    .unwrap()
+    .ahead;
 
     assert_eq!(
         git(&f.repo_git, &["rev-parse", "refs/sbxm/agent/issue-4"]),
@@ -493,7 +494,8 @@ fn ahead_both_ways(f: &Fixture, work: impl FnOnce(&Path)) -> (u32, u32) {
         "issue-4",
         1 << 20,
     )
-    .unwrap();
+    .unwrap()
+    .ahead;
     let counted = git(&f.repo_git, &["rev-list", "--count", "main..issue-4"]);
     (ahead, counted.parse().unwrap())
 }
@@ -605,4 +607,37 @@ fn pushing_a_missing_branch_as_new_is_an_error_naming_it() {
     let f = fixture();
     let err = repo::push_new(&f.repo_git, "issue-9").unwrap_err();
     assert!(format!("{err:#}").contains("issue-9"), "{err:#}");
+}
+
+#[test]
+fn the_changed_paths_at_a_commit_ignore_where_the_branch_has_moved_since() {
+    let f = fixture();
+    let (workspace, _) = agent_bundle_with(&f, |clone| {
+        fs::write(clone.join("a.txt"), "a\n").unwrap();
+        git(clone, &["add", "a.txt"]);
+        git(clone, &["commit", "-q", "-m", "a"]);
+    });
+    let collected = sbxm::task::rewrite::fetch_and_rebuild(
+        &f.repo_git,
+        &workspace,
+        "refs/heads/main",
+        "issue-4",
+        1 << 20,
+    )
+    .unwrap();
+    let main = git(&f.repo_git, &["rev-parse", "refs/heads/main"]);
+    git(&f.repo_git, &["update-ref", "refs/heads/issue-4", &main]);
+
+    assert_eq!(
+        repo::changed_paths_at(&f.repo_git, "refs/heads/main", &collected.tip).unwrap(),
+        vec!["a.txt".to_owned()]
+    );
+    assert_eq!(
+        repo::changed_paths_at(&f.repo_git, &main, &collected.tip).unwrap(),
+        vec!["a.txt".to_owned()]
+    );
+    let err = repo::changed_paths_at(&f.repo_git, "--all", &collected.tip).unwrap_err();
+    assert!(format!("{err:#}").contains("--all"), "{err:#}");
+    let err = repo::changed_paths_at(&f.repo_git, "refs/heads/main", "issue-4").unwrap_err();
+    assert!(format!("{err:#}").contains("issue-4"), "{err:#}");
 }

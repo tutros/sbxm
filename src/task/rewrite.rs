@@ -113,15 +113,14 @@ pub fn rebuild(repo_git: &Path, start: &str, branch: &str) -> Result<()> {
 /// ([`super::repo::fetch_bundle`]) and [`rebuild`]s the delivered branch from it, with one lookup
 /// for both (issue #444): the refs the rebuild needs are read before the fetch, which moves only
 /// the agent ref, and the agent ref's new tip is the one the bundle names. A `start` that doesn't
-/// resolve is refused before the fetch. Returns how many commits the delivered branch now has
-/// past `start`, from the rebuild's own range where that tells, else counted.
+/// resolve is refused before the fetch.
 pub fn fetch_and_rebuild(
     repo_git: &Path,
     workspace: &Path,
     start: &str,
     branch: &str,
     cap: u64,
-) -> Result<u32> {
+) -> Result<Rebuilt> {
     check_ref("branch", branch)?;
     let marker = rebuilt_marker(branch);
     let fetched = super::repo::fetch_bundle_resolving(
@@ -133,7 +132,7 @@ pub fn fetch_and_rebuild(
         |found| start_commit(start, &found[0]).map(|_| ()),
     )?;
     let start_id = start_commit(start, &fetched.extra[0])?;
-    let ahead = rebuild_from(
+    let (tip, ahead) = rebuild_from(
         repo_git,
         branch,
         Read {
@@ -143,10 +142,21 @@ pub fn fetch_and_rebuild(
             last_rebuilt: fetched.extra[1].clone(),
         },
     )?;
-    match ahead {
-        Some(ahead) => Ok(ahead),
-        None => super::repo::commits_since(repo_git, &start_id, branch),
-    }
+    let ahead = match ahead {
+        Some(ahead) => ahead,
+        None => super::repo::commits_since(repo_git, &start_id, branch)?,
+    };
+    Ok(Rebuilt { ahead, tip })
+}
+
+/// What [`fetch_and_rebuild`] left the delivered branch at.
+#[derive(Debug)]
+pub struct Rebuilt {
+    /// How many commits the branch has past the start: from the rebuild's own range where that
+    /// tells ([`ahead_from_range`]), else counted.
+    pub ahead: u32,
+    /// The branch's tip, as the rebuild moved it.
+    pub tip: String,
 }
 
 /// `start` resolved, or the error naming it.
@@ -165,8 +175,9 @@ struct Read {
     last_rebuilt: Option<String>,
 }
 
-/// [`rebuild`] from refs its caller already read; returns [`ahead_from_range`].
-fn rebuild_from(repo_git: &Path, branch: &str, read: Read) -> Result<Option<u32>> {
+/// [`rebuild`] from refs its caller already read; returns the delivered branch's new tip and
+/// [`ahead_from_range`].
+fn rebuild_from(repo_git: &Path, branch: &str, read: Read) -> Result<(String, Option<u32>)> {
     let Read {
         start_id,
         agent_tip,
@@ -250,7 +261,8 @@ fn rebuild_from(repo_git: &Path, branch: &str, read: Read) -> Result<Option<u32>
         last_rebuilt.as_deref(),
         &agent_tip,
     )?;
-    Ok(ahead_from_range(&listed, &start_id, &rebuilt))
+    let ahead = ahead_from_range(&listed, &start_id, &rebuilt);
+    Ok((new_tip, ahead))
 }
 
 /// Whether commit `ancestor` is `tip` or one of its ancestors in `repo_git`.
