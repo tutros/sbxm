@@ -209,6 +209,7 @@ kept here as the design for issues #117-121 to build toward.
 | ready ok (issue) | task finish | finished | push the branch and open the PR |
 | ready ok (spec) | task finish | finished | deliver the branch through the [finish] sink |
 | ready ok (fix) | task finish | finished | push the branch onto the PR's own branch, a fast-forward or nothing |
+| finished ok (issue/spec) | task finish | finished | post or edit the issue summaries only (no push, no new PR, no PR review) |
 | prepared running (issue/spec/fix), interrupted | task resume | working | make the worker's sandbox again, then run the worker and review |
 | prepared failed (issue/spec/fix) | task resume | working | make the worker's sandbox again, then run the worker and review |
 | working running (issue/spec/fix), interrupted | task resume | working | run the worker again in its clone, then review |
