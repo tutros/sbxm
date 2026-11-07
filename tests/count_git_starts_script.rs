@@ -11,6 +11,11 @@ use std::process::{Command, Output};
 /// Runs the script with a fake `cargo` that logs `sbxm` starts of `rev-parse` and `fixture`
 /// starts of `commit`.
 fn run(sbxm: u32, fixture: u32, max: Option<&str>) -> Output {
+    run_with(sbxm, fixture, max, false)
+}
+
+/// Like [`run`]; `fails` makes the fake test run exit 1 after logging its starts.
+fn run_with(sbxm: u32, fixture: u32, max: Option<&str>, fails: bool) -> Output {
     let tmp = tempfile::tempdir().unwrap();
     let bin = tmp.path().join("bin");
     fs::create_dir_all(&bin).unwrap();
@@ -20,7 +25,9 @@ fn run(sbxm: u32, fixture: u32, max: Option<&str>) -> Output {
         "#!/bin/sh\n\
          case \"$*\" in *--no-run*) exit 0;; esac\n\
          i=0; while [ $i -lt \"$FAKE_SBXM\" ]; do echo \"sbxm rev-parse\" >> \"$COUNTLOG_GITSTARTS\"; i=$((i+1)); done\n\
-         i=0; while [ $i -lt \"$FAKE_FIXTURE\" ]; do echo \"fixture commit\" >> \"$COUNTLOG_GITSTARTS\"; i=$((i+1)); done\n",
+         i=0; while [ $i -lt \"$FAKE_FIXTURE\" ]; do echo \"fixture commit\" >> \"$COUNTLOG_GITSTARTS\"; i=$((i+1)); done\n\
+         [ \"$FAKE_FAIL\" = 1 ] && exit 1\n\
+         exit 0\n",
     )
     .unwrap();
     fs::set_permissions(&cargo, fs::Permissions::from_mode(0o755)).unwrap();
@@ -36,7 +43,8 @@ fn run(sbxm: u32, fixture: u32, max: Option<&str>) -> Output {
         .arg("anything")
         .env("PATH", path)
         .env("FAKE_SBXM", sbxm.to_string())
-        .env("FAKE_FIXTURE", fixture.to_string());
+        .env("FAKE_FIXTURE", fixture.to_string())
+        .env("FAKE_FAIL", if fails { "1" } else { "0" });
     if let Some(max) = max {
         command.arg(max);
     }
@@ -88,4 +96,24 @@ fn a_max_that_is_not_a_number_is_refused_before_anything_runs() {
 
     assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("lots"));
+}
+
+#[test]
+fn a_failing_test_run_fails_the_script_without_a_limit_and_still_prints_the_counts() {
+    let out = run_with(7, 3, None, true);
+
+    assert!(!out.status.success());
+    assert!(stdout(&out).contains("7 sbxm"), "{}", stdout(&out));
+}
+
+#[test]
+fn a_failing_test_run_never_passes_the_limit() {
+    let out = run_with(1, 1, Some("395"), true);
+
+    assert!(!out.status.success());
+    assert!(
+        !stdout(&out).contains("within the limit"),
+        "{}",
+        stdout(&out)
+    );
 }
