@@ -4535,6 +4535,7 @@ fn rebuild_ttl(config: &TaskConfig, record: &Record) -> Result<Duration> {
 
 /// The changed-paths part of [`check_reviewer`], for a caller that must make it after fetching
 /// new commits but its other checks before ([`review_pr`] on a `ready` task).
+///
 /// Listed for the commit this process's collect left the branch at when there is one, and
 /// returned with it for [`keep_listed`].
 fn check_changed_paths(task: &Prepared) -> Result<Listed> {
