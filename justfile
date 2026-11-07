@@ -88,6 +88,10 @@ test:
 script-test:
     Import-Module Pester -MinimumVersion 5.0.0; Invoke-Pester scripts/tests -Output Minimal -CI
 
+# Count the `git` process starts of one test file (e.g. `just count-git-starts task_merged`) by caller (fixture or sbxm) and subcommand; with `max`, fails when sbxm's own starts are over it. Needs `sh`; run by hand, never in CI (issue #444).
+count-git-starts test max="":
+    sh scripts/count-git-starts.sh {{test}} {{max}}
+
 # Everything that must pass before a commit.
 check:
     cargo fmt --check

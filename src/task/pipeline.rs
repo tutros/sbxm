@@ -184,6 +184,17 @@ pub struct Prepared {
     /// the start that made the folder and by [`Prepared::open_locked`]; `None` from
     /// [`Prepared::open`], which only reads.
     pub lock: Option<ProcessLock>,
+    /// The commit this process's last collect left the delivered branch at, and the paths it
+    /// changes once [`check_changed_paths`] listed them (issue #444): in memory only, so a review
+    /// right after its collect lists them once. A review uses them only for that very commit.
+    collected: Option<Collected>,
+}
+
+/// See [`Prepared::collected`].
+#[derive(Debug)]
+struct Collected {
+    tip: String,
+    paths: Option<Vec<String>>,
 }
 
 impl Prepared {
@@ -215,6 +226,7 @@ impl Prepared {
             warnings: Vec::new(),
             events: Vec::new(),
             lock: None,
+            collected: None,
         })
     }
 
@@ -461,6 +473,7 @@ pub fn prepare_pr_at(ctx: &Ctx, pr: &PrInfo, location: Location) -> Result<Prepa
             warnings,
             events: Vec::new(),
             lock: Some(lock),
+            collected: None,
         }),
         Err(e) => {
             let _ = fs::remove_dir_all(&meta);
@@ -1359,19 +1372,22 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
     let built = (|| -> Result<HarnessKits> {
         let repo_git = meta.join("repo.git");
         repo::clone_bare(ctx.clone_source, &repo_git)?;
-        let continued = match &continues {
-            Some((pr, pr_branch)) => Some(PrBranch {
-                pr: *pr,
-                branch: pr_branch.clone(),
-                base: repo::fetch_pr_branch(&repo_git, *pr, pr_branch)?,
-            }),
-            None => {
-                repo::create_branch(&repo_git, &branch, ctx.base_branch)?;
-                None
-            }
-        };
         // The worker's starting commit, or the PR head it continues from (decision 216).
-        let start = repo::branch_tip(&repo_git, &branch)?;
+        let (continued, start) = match &continues {
+            Some((pr, pr_branch)) => {
+                let base = repo::fetch_pr_branch(&repo_git, *pr, pr_branch)?;
+                let continued = PrBranch {
+                    pr: *pr,
+                    branch: pr_branch.clone(),
+                    base: base.clone(),
+                };
+                (Some(continued), base)
+            }
+            None => (
+                None,
+                repo::create_branch(&repo_git, &branch, ctx.base_branch)?,
+            ),
+        };
         if let Some(expected) = expected_start
             && start != expected
         {
@@ -1538,6 +1554,7 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
             warnings,
             events,
             lock: Some(lock),
+            collected: None,
         }),
         Err(e) => {
             // Back to nothing: the sandbox and the folders this start made. A local start
@@ -3116,8 +3133,8 @@ pub(super) fn work(env: &TaskEnv, prepared: &mut Prepared) -> Result<Worked> {
 
 /// What the bundle step found in the worker's clone.
 enum Bundled {
-    /// The branch's commits ahead of the base now in `repo.git`.
-    Commits(u32),
+    /// The branch's commits ahead of the base now in `repo.git`, and its tip.
+    Commits(rewrite::Rebuilt),
     /// Nothing ahead of the base.
     Nothing,
 }
@@ -3156,18 +3173,22 @@ fn bundle_and_fetch(
     )?;
     if out.exit_code == Some(0) {
         let repo_git = prepared.meta.join("repo.git");
-        match prepared.record.location {
-            Location::Local => {
-                repo::fetch_bundle(&repo_git, &prepared.workspace, &branch, BUNDLE_CAP)?
-            }
+        let start = prepared.record.rewrite_start();
+        let rebuilt = match prepared.record.location {
+            Location::Local => rewrite::fetch_and_rebuild(
+                &repo_git,
+                &prepared.workspace,
+                &start,
+                &branch,
+                BUNDLE_CAP,
+            )?,
             Location::Cloud => {
                 let staged =
                     copy_out_staged(backend, &prepared.meta, sandbox, &ws, "branch.bundle")?;
-                repo::fetch_bundle(&repo_git, staged.dir(), &branch, BUNDLE_CAP)?
+                rewrite::fetch_and_rebuild(&repo_git, staged.dir(), &start, &branch, BUNDLE_CAP)?
             }
-        }
-        rewrite::rebuild(&repo_git, &prepared.record.rewrite_start(), &branch)?;
-        Ok(Bundled::Commits(prepared.record.commits_ahead(&repo_git)?))
+        };
+        Ok(Bundled::Commits(rebuilt))
     } else if out.stderr.contains("empty bundle") {
         Ok(Bundled::Nothing)
     } else {
@@ -3214,8 +3235,15 @@ fn collect(
     };
 
     let mut commits = 0;
+    prepared.collected = None;
     match bundle_and_fetch(backend, prepared, sandbox) {
-        Ok(Bundled::Commits(n)) => commits = n,
+        Ok(Bundled::Commits(rebuilt)) => {
+            commits = rebuilt.ahead;
+            prepared.collected = Some(Collected {
+                tip: rebuilt.tip,
+                paths: None,
+            });
+        }
         Ok(Bundled::Nothing) => notes.push("the worker made no commits".to_owned()),
         Err(e) => {
             let why = format!("{e:#}");
@@ -3425,9 +3453,6 @@ fn check_branch_locks(env: &TaskEnv, prepared: &Prepared) -> Result<()> {
         return Ok(());
     }
     let repo_git = prepared.meta.join("repo.git");
-    let Ok(tip) = repo::branch_tip(&repo_git, &prepared.record.branch) else {
-        return Ok(());
-    };
     stale_lock::check_branch(
         env.config_dir,
         env.backend,
@@ -3435,7 +3460,7 @@ fn check_branch_locks(env: &TaskEnv, prepared: &Prepared) -> Result<()> {
         &[env.config.worker.harness, env.config.reviewer.harness],
         &repo_git,
         &prepared.record.base,
-        &tip,
+        &|| repo::branch_tip(&repo_git, &prepared.record.branch).ok(),
     )
     .map_err(|e| with_resume_hint(&prepared.record, e))
 }
@@ -3455,8 +3480,10 @@ fn check_branch_locks(env: &TaskEnv, prepared: &Prepared) -> Result<()> {
 /// says is in `prepared.events` and `prepared.warnings`.
 pub fn review_issue(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewReport> {
     check_can_review(&prepared.record, env.probe)?;
+    let (warnings, listed) = check_reviewer_listing(env, prepared)?;
+    keep_listed(prepared, listed);
     let report = ReviewReport {
-        warnings: check_reviewer(env, prepared)?,
+        warnings,
         ..ReviewReport::default()
     };
     // Refused before the gates run when no review round number is left (worked out again after
@@ -3791,7 +3818,8 @@ pub fn review_pr(
             );
         }
     }
-    check_changed_paths(prepared)?;
+    let listed = check_changed_paths(prepared)?;
+    keep_listed(prepared, listed);
     let round = next_review_round(prepared)?;
     if let Some(context) = context {
         fs::write(prepared.meta.join("issue.md"), context)?;
@@ -3837,10 +3865,26 @@ pub fn review_pr(
                 .record
                 .begin_review(now(), Process::current(env.probe))?;
             record::write(&prepared.meta, &prepared.record)?;
-            opened = open_review_workspace(env, prepared, round, &clone, &sandbox, &earlier)?;
+            opened = open_review_workspace(
+                env,
+                prepared,
+                round,
+                &clone,
+                &sandbox,
+                &earlier,
+                tip.as_deref(),
+            )?;
             return Ok(None);
         }
-        opened = open_review_workspace(env, prepared, round, &clone, &sandbox, &earlier)?;
+        opened = open_review_workspace(
+            env,
+            prepared,
+            round,
+            &clone,
+            &sandbox,
+            &earlier,
+            tip.as_deref(),
+        )?;
         let mut outcomes = gates::run_sandbox_tier(
             env.backend,
             &sandbox,
@@ -3890,7 +3934,15 @@ pub fn review_pr(
 
     // The reviewer: a PR task always covers the whole diff (it has no worker to fix anything and
     // so never narrows a later round, and so never repeats a finding of an earlier one either).
-    let ran = run_review_agent(env, prepared, round, &clone, &sandbox, &earlier);
+    let ran = run_review_agent(
+        env,
+        prepared,
+        round,
+        &clone,
+        &sandbox,
+        &earlier,
+        tip.as_deref(),
+    );
     cleanup(prepared);
     let outcome = match ran {
         Ok(outcome) => outcome,
@@ -4382,7 +4434,12 @@ pub struct Reviewed {
 /// profile's secrets are stored, the profile loads, and the task's changed paths can be listed
 /// (the risk floor needs them; decision 176). Returns the warnings to print.
 pub fn check_reviewer(env: &TaskEnv, task: &Prepared) -> Result<Vec<String>> {
-    check_changed_paths(task)?;
+    Ok(check_reviewer_listing(env, task)?.0)
+}
+
+/// [`check_reviewer`], also returning what [`check_changed_paths`] listed.
+fn check_reviewer_listing(env: &TaskEnv, task: &Prepared) -> Result<(Vec<String>, Listed)> {
+    let listed = check_changed_paths(task)?;
     let warnings = check_reviewer_inputs(
         env.config_dir,
         env.backend,
@@ -4392,7 +4449,7 @@ pub fn check_reviewer(env: &TaskEnv, task: &Prepared) -> Result<Vec<String>> {
     if task.record.location == Location::Cloud && may_fix(&task.record) {
         check_cloud_rebuild(env, &task.record, None)?;
     }
-    Ok(warnings)
+    Ok((warnings, listed))
 }
 
 /// Whether a review of this task may still run a fix round: it has a worker and fix rounds left
@@ -4478,11 +4535,38 @@ fn rebuild_ttl(config: &TaskConfig, record: &Record) -> Result<Duration> {
 
 /// The changed-paths part of [`check_reviewer`], for a caller that must make it after fetching
 /// new commits but its other checks before ([`review_pr`] on a `ready` task).
-fn check_changed_paths(task: &Prepared) -> Result<()> {
-    task.record
-        .changed_paths(&task.meta.join("repo.git"))
-        .context("cannot list the task's changed paths for the risk floor")?;
-    Ok(())
+///
+/// Listed for the commit this process's collect left the branch at when there is one, and
+/// returned with it for [`keep_listed`].
+fn check_changed_paths(task: &Prepared) -> Result<Listed> {
+    let repo_git = task.meta.join("repo.git");
+    let context = "cannot list the task's changed paths for the risk floor";
+    match &task.collected {
+        Some(collected) => {
+            let paths = task
+                .record
+                .changed_paths_at(&repo_git, &collected.tip)
+                .context(context)?;
+            Ok(Some((collected.tip.clone(), paths)))
+        }
+        None => {
+            task.record.changed_paths(&repo_git).context(context)?;
+            Ok(None)
+        }
+    }
+}
+
+/// What [`check_changed_paths`] listed: the paths, and the commit they are for, when that was the
+/// commit this process's collect left the branch at.
+type Listed = Option<(String, Vec<String>)>;
+
+/// Keeps what [`check_changed_paths`] listed for the review of that same commit (issue #444).
+fn keep_listed(task: &mut Prepared, listed: Listed) {
+    if let (Some((tip, paths)), Some(collected)) = (listed, task.collected.as_mut())
+        && collected.tip == tip
+    {
+        collected.paths = Some(paths);
+    }
 }
 
 /// The checks of [`check_reviewer`] without a task, so `task run` can make them before its worker
@@ -4613,7 +4697,15 @@ pub fn run_reviewer(env: &TaskEnv, prepared: &mut Prepared, round: u32) -> Resul
         .begin_review(now(), Process::current(env.probe))?;
     record::write(&prepared.meta, &prepared.record)?;
 
-    let result = review_round(env, prepared, round, &clone, &sandbox, &earlier);
+    let result = review_round(
+        env,
+        prepared,
+        round,
+        &clone,
+        &sandbox,
+        &earlier,
+        tip.as_deref(),
+    );
 
     // Always: the reviewer's sandbox and clone are gone, whatever happened.
     remove_reviewer(env, prepared, &sandbox, &clone);
@@ -4697,9 +4789,10 @@ fn review_round(
     clone: &Path,
     sandbox: &str,
     earlier: &[String],
+    tip: Option<&str>,
 ) -> Result<ReviewOutcome> {
-    let warnings = open_review_workspace(env, prepared, round, clone, sandbox, earlier)?;
-    let mut outcome = run_review_agent(env, prepared, round, clone, sandbox, earlier)?;
+    let warnings = open_review_workspace(env, prepared, round, clone, sandbox, earlier, tip)?;
+    let mut outcome = run_review_agent(env, prepared, round, clone, sandbox, earlier, tip)?;
     outcome.warnings.splice(0..0, warnings);
     Ok(outcome)
 }
@@ -4766,6 +4859,7 @@ fn open_review_workspace(
     clone: &Path,
     sandbox: &str,
     earlier: &[String],
+    known_tip: Option<&str>,
 ) -> Result<Vec<String>> {
     if prepared.record.location == Location::Cloud {
         return open_cloud_review(env, prepared, round, sandbox, earlier);
@@ -4782,7 +4876,11 @@ fn open_review_workspace(
     }
     // The commit the reviewer checks out: the delivered branch's tip, or the PR's fetched head
     // (decision 216).
-    let tip = repo::branch_tip(&repo_git, &branch)?;
+    // The caller has just read it (issue #444: one git start less per round).
+    let tip = match known_tip {
+        Some(tip) => tip.to_owned(),
+        None => repo::branch_tip(&repo_git, &branch)?,
+    };
     let mut warnings = Vec::new();
     let plan = plan_sandbox(
         &stale_lock::Refresh {
@@ -4812,7 +4910,8 @@ fn open_review_workspace(
     )
     .map_err(|e| with_resume_hint(&prepared.record, e))?;
 
-    repo::clean_checkout(&repo_git, &branch, clone)?;
+    // `tip` above resolved the branch itself, so it exists.
+    repo::clean_checkout_existing(&repo_git, &branch, clone)?;
     let info = clone.join(".git").join("info");
     fs::create_dir_all(&info)?;
     fs::write(info.join("exclude"), format!("# sbxm\n{AGENT_DIR}/\n"))?;
@@ -5164,14 +5263,23 @@ fn run_review_agent(
     clone: &Path,
     sandbox: &str,
     earlier: &[String],
+    tip: Option<&str>,
 ) -> Result<ReviewOutcome> {
     let reviewer = &env.config.reviewer;
-    // Listed again here, as a fix round may have added commits since `check_reviewer` did; a git
-    // error must stop the review, never drop the floor.
-    let changed_paths = prepared
-        .record
-        .changed_paths(&prepared.meta.join("repo.git"))
-        .context("cannot list the task's changed paths for the risk floor")?;
+    // Listed again here for `tip`, the commit under review, as a fix round may have added commits
+    // since `check_reviewer` did; kept from it only when it listed them for that very commit
+    // (issue #444). A git error must stop the review, never drop the floor.
+    let repo_git = prepared.meta.join("repo.git");
+    let kept = match (tip, &prepared.collected) {
+        (Some(tip), Some(Collected { tip: at, paths })) if at == tip => paths.clone(),
+        _ => None,
+    };
+    let changed_paths = match (kept, tip) {
+        (Some(paths), _) => Ok(paths),
+        (None, Some(tip)) => prepared.record.changed_paths_at(&repo_git, tip),
+        (None, None) => prepared.record.changed_paths(&repo_git),
+    }
+    .context("cannot list the task's changed paths for the risk floor")?;
     let started = Instant::now();
     let workdir = reviewer_clone(prepared, clone);
     let result = headless::run(

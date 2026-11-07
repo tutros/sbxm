@@ -325,14 +325,20 @@ pub fn check_branch(
     harnesses: &[Harness],
     repo_git: &Path,
     base: &str,
-    tip: &str,
+    tip_fn: &dyn Fn() -> Option<String>,
 ) -> Result<()> {
     let global = GlobalConfig::load(config_dir)?;
     let profile = Profile::load(global.profiles_dir(), profile_name)?;
+    // The branch tip is read (one git start) only once a warm template needs judging (issue #444);
+    // a branch that isn't there has no lock files to stop on.
+    let tip: std::cell::OnceCell<Option<String>> = std::cell::OnceCell::new();
     for &harness in harnesses {
         let Some(record) = warm_record(&global.base_dir, backend, profile_name, &profile, harness)?
         else {
             continue;
+        };
+        let Some(tip) = tip.get_or_init(tip_fn).as_deref() else {
+            return Ok(());
         };
         let verdict = judge(repo_git, base, tip, &record.lock_files, &|| {
             repo::fetch_fresh_base(repo_git).map(|(_, fresh)| fresh)

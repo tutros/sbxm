@@ -947,12 +947,27 @@ pub fn check_spec_result_fetched(base_dir: &Path, id: &str, checkout: &Path) -> 
             task.branch
         );
     }
-    if task.commits_ahead(&repo_git)? == 0 {
+    let Some(tip) = task.tip_if_ahead(&repo_git)? else {
         return Ok(());
-    }
-    let tip = repo::branch_tip(&repo_git, &task.branch)?;
-    let start = repo::resolve_commit(&repo_git, &task.rewrite_start())?;
-    if holds_result(checkout, &start, &tip) {
+    };
+    check_result_held(id, &task, &repo_git, &tip, checkout)
+}
+
+/// [`check_spec_result_fetched`] for a caller that has read `task` and its branch's `tip` (which
+/// has commits past its start) itself.
+pub(crate) fn check_result_held(
+    id: &str,
+    task: &record::Record,
+    repo_git: &Path,
+    tip: &str,
+    checkout: &Path,
+) -> Result<()> {
+    let force = "or pass --force to delete it anyway";
+    let rev = task.rewrite_start();
+    let start = repo::resolve_commits(repo_git, &[&rev])?
+        .remove(0)
+        .with_context(|| format!("{rev} doesn't resolve to a commit in the task repo"))?;
+    if holds_result(checkout, &start, tip) {
         return Ok(());
     }
     let branch = &task.branch;
@@ -960,7 +975,7 @@ pub fn check_spec_result_fetched(base_dir: &Path, id: &str, checkout: &Path) -> 
         "task {id}'s result, branch {branch}, exists only in {}, which `task rm` deletes; fetch it \
          first with: git fetch {} {branch}:{branch} (in your checkout), {force}",
         repo_git.display(),
-        crate::commands::task_start::path_arg(&repo_git)
+        crate::commands::task_start::path_arg(repo_git)
     )
 }
 
@@ -1710,16 +1725,16 @@ fn open_task_pr(
     if !repo_git.is_dir() {
         bail!("task {id} has no repo.git, so there is nothing to push; see `sbxm task status`");
     }
-    if task.commits_ahead(&repo_git)? == 0 {
+    let Some(tip) = task.tip_if_ahead(&repo_git)? else {
         let from = task.continues.as_ref().map_or(&task.base, |c| &c.base);
         bail!(
             "task {id} has no commits on {} beyond {from}, so there is nothing to publish",
             task.branch,
         );
-    }
+    };
     refuse_workflow_changes(id, &task.changed_paths(&repo_git)?)?;
     if let Some(continued) = &task.continues {
-        return finish_continued(prepared, &repo_git, continued, github, probe);
+        return finish_continued(prepared, &repo_git, continued, &tip, github, probe);
     }
     // What the PR closes, its title, and the flag a retry names: the issue's, or the spec's.
     let (fixes, title, retry) = match spec {
@@ -1767,7 +1782,6 @@ fn open_task_pr(
         review.as_deref(),
     );
     // Issue 198: the in-task review becomes the PR's review when it covered the head pushed now.
-    let tip = repo::branch_tip(&repo_git, &task.branch)?;
     let posting = reviewed_head(&task, &tip).zip(review.clone());
 
     // Issue 60: an open PR of this branch is looked for before anything is pushed. One into the
@@ -2141,16 +2155,15 @@ pub fn finish_fix(
     if !repo_git.is_dir() {
         bail!("task {id} has no repo.git, so there is nothing to push; see `sbxm task status`");
     }
-    if task.commits_ahead(&repo_git)? == 0 {
+    let Some(tip) = task.tip_if_ahead(&repo_git)? else {
         bail!(
             "task {id} has no commits on {branch} beyond {}, so there is nothing to push to PR \
              #{pr}; see result.md in {}",
             continued.base,
             prepared.meta.display()
         );
-    }
+    };
     refuse_workflow_changes(id, &task.changed_paths(&repo_git)?)?;
-    let tip = repo::branch_tip(&repo_git, branch)?;
     let commits = repo::commit_lines(&repo_git, &continued.base, branch)?;
     let review = read_capped(&prepared.meta.join("review.md"))?;
     let unresolved = unresolved_reasons(&task, review.as_deref());
@@ -2270,7 +2283,7 @@ pub struct Kept {
 /// host-owned `repo.git` and the task becomes `finished`. Nothing is pushed and nothing leaves
 /// the machine; the caller says how to fetch the branch.
 pub fn finish_local(base_dir: &Path, id: &str, probe: &dyn ProcessProbe) -> Result<Kept> {
-    let (mut prepared, kept) = open_spec_result(base_dir, id, "keep")?;
+    let (mut prepared, kept, _) = open_spec_result(base_dir, id, "keep")?;
     record_finished(&mut prepared, probe)?;
     Ok(kept)
 }
@@ -2287,7 +2300,7 @@ pub fn finish_push(
     push_unresolved: bool,
     probe: &dyn ProcessProbe,
 ) -> Result<Kept> {
-    let (mut prepared, kept) = open_spec_result(base_dir, id, "push")?;
+    let (mut prepared, kept, tip) = open_spec_result(base_dir, id, "push")?;
     let (branch, repo_git) = (&kept.branch, &kept.repo_git);
     if !push_unresolved {
         let unresolved = |what: String| {
@@ -2312,7 +2325,6 @@ pub fn finish_push(
         }
     }
     refuse_workflow_changes(id, &prepared.record.changed_paths(repo_git)?)?;
-    let tip = repo::branch_tip(repo_git, branch)?;
     match repo::remote_branch_head(repo_git, branch)? {
         Some(head) if head == tip => {}
         Some(head) => bail!(
@@ -2326,9 +2338,9 @@ pub fn finish_push(
     Ok(kept)
 }
 
-/// A ready spec task with a branch worth delivering, for either sink: `what` names the action in
-/// the refusals.
-fn open_spec_result(base_dir: &Path, id: &str, what: &str) -> Result<(Prepared, Kept)> {
+/// A ready spec task with a branch worth delivering, for either sink, and the branch's tip:
+/// `what` names the action in the refusals.
+fn open_spec_result(base_dir: &Path, id: &str, what: &str) -> Result<(Prepared, Kept, String)> {
     let prepared = Prepared::open(base_dir, id)?;
     if prepared.record.kind != record::Kind::Spec {
         bail!("task {id} isn't a spec task; only a spec task has a [finish] sink");
@@ -2344,13 +2356,13 @@ fn open_spec_result(base_dir: &Path, id: &str, what: &str) -> Result<(Prepared, 
     if !repo_git.is_dir() {
         bail!("task {id} has no repo.git, so there is no result to {what}; see `sbxm task status`");
     }
-    if prepared.record.commits_ahead(&repo_git)? == 0 {
+    let Some(tip) = prepared.record.tip_if_ahead(&repo_git)? else {
         bail!(
             "task {id} has no commits on {branch} beyond {}, so there is nothing to {what}",
             prepared.record.base
         );
-    }
-    Ok((prepared, Kept { branch, repo_git }))
+    };
+    Ok((prepared, Kept { branch, repo_git }, tip))
 }
 
 fn record_finished(prepared: &mut Prepared, probe: &dyn ProcessProbe) -> Result<()> {
@@ -2425,12 +2437,13 @@ fn finish_continued(
     mut prepared: Prepared,
     repo_git: &Path,
     continued: &record::PrBranch,
+    tip: &str,
     github: &dyn GitHubBackend,
     probe: &dyn ProcessProbe,
 ) -> Result<Finished> {
     let task = prepared.record.clone();
     let (id, pr, branch) = (&task.id, continued.pr, &task.branch);
-    let tip = repo::branch_tip(repo_git, branch)?;
+    let tip = tip.to_owned();
     let commits = repo::commit_lines(repo_git, &continued.base, branch)?;
     let review = read_capped(&prepared.meta.join("review.md"))?;
     let unresolved = unresolved_reasons(&task, review.as_deref());
