@@ -243,3 +243,74 @@ fn a_missing_branch_or_rev_is_named_and_an_option_like_rev_is_only_a_name() {
     assert!(format!("{no_rev:#}").contains("gone"), "{no_rev:#}");
     assert!(format!("{option:#}").contains("--all"), "{option:#}");
 }
+
+/// Runs `work` on its own thread and fails the test when it hasn't finished in `secs`.
+fn within<T: Send + 'static>(secs: u64, work: impl FnOnce() -> T + Send + 'static) -> T {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(work());
+    });
+    rx.recv_timeout(std::time::Duration::from_secs(secs))
+        .expect("timed out: the batch call is blocked on a full pipe")
+}
+
+#[test]
+fn a_batch_larger_than_both_pipes_resolves_every_answer_in_order() {
+    let f = fixture();
+    let main = git(&f.repo_git, &["rev-parse", "refs/heads/main"]);
+    let repo_git = f.repo_git.clone();
+
+    let found = within(20, move || {
+        let revs = vec!["refs/heads/main"; 20_000];
+        repo::resolve_commits(&repo_git, &revs).unwrap()
+    });
+
+    assert_eq!(found.len(), 20_000);
+    assert!(found.iter().all(|c| c.as_deref() == Some(main.as_str())));
+}
+
+#[test]
+fn a_rebuild_of_a_two_thousand_commit_branch_completes() {
+    use sbxm::task::rewrite;
+    let f = fixture();
+    let base = git(&f.repo_git, &["rev-parse", "refs/heads/main"]);
+    let tree = git(&f.repo_git, &["rev-parse", &format!("{base}^{{tree}}")]);
+    let mut script = String::new();
+    for n in 0..2000 {
+        script.push_str(&format!(
+            "commit refs/heads/many\ncommitter t <t@t> {} +0000\ndata 2\nc\n{}\nM 040000 {tree} \n\n",
+            1_700_000_000 + n,
+            if n == 0 { format!("from {base}") } else { String::new() }
+        ));
+    }
+    let path = f._tmp.path().join("import");
+    fs::write(&path, script).unwrap();
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg(format!(
+            "git fast-import --quiet < '{}'",
+            path.to_str().unwrap()
+        ))
+        .current_dir(&f.repo_git)
+        .env("GIT_DIR", &f.repo_git)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let tip = git(&f.repo_git, &["rev-parse", "refs/heads/many"]);
+    git(
+        &f.repo_git,
+        &["update-ref", "refs/sbxm/agent/issue-4", &tip],
+    );
+    git(&f.repo_git, &["update-ref", "refs/heads/issue-4", &base]);
+    let repo_git = f.repo_git.clone();
+
+    within(60, move || {
+        rewrite::rebuild(&repo_git, "main", "issue-4").unwrap()
+    });
+
+    assert_eq!(git(&f.repo_git, &["rev-parse", "refs/heads/issue-4"]), tip);
+}

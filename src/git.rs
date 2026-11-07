@@ -228,22 +228,24 @@ pub(crate) fn output_with_stdin(
             .stderr(Stdio::piped())
             .spawn()
             .context("cannot run `git`; is Git installed and on PATH?")?;
-        // A broken pipe means git exited without reading everything (a bad argument, say):
-        // its own status and stderr below say why, which is the failure worth reporting.
-        match child
-            .stdin
-            .take()
-            .expect("stdin is piped")
-            .write_all(stdin_data)
-        {
-            Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => {
-                return Err(e).context("cannot write to git's stdin");
+        // Written while stdout and stderr are drained: `cat-file --batch*` answers as it reads, so
+        // writing everything first deadlocks once both pipes are full (issue #444). A broken pipe
+        // means git exited without reading everything (a bad argument, say): its own status and
+        // stderr say why, which is the failure worth reporting.
+        let mut stdin = child.stdin.take().expect("stdin is piped");
+        std::thread::scope(|scope| {
+            let writer = scope.spawn(move || match stdin.write_all(stdin_data) {
+                Err(e) if e.kind() != std::io::ErrorKind::BrokenPipe => Err(e),
+                _ => Ok(()),
+            });
+            let out = child
+                .wait_with_output()
+                .context("cannot run `git`; is Git installed and on PATH?");
+            match writer.join() {
+                Ok(Err(e)) => Err(e).context("cannot write to git's stdin"),
+                _ => out,
             }
-            _ => {}
-        }
-        child
-            .wait_with_output()
-            .context("cannot run `git`; is Git installed and on PATH?")
+        })
     })
 }
 
