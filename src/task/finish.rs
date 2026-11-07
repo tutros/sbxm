@@ -1514,6 +1514,32 @@ fn reviewed_head(task: &Record, tip: &str) -> Option<String> {
         .filter(|commit| commit == tip)
 }
 
+/// Whether `task finish` on this task is the summary-only retry of issue 430: a finished issue or
+/// spec task with a recorded PR. Decided through `machine::TABLE` once the `pr` field is checked;
+/// a spec task under the `local` or `push` sink records no PR, and a fix task is never a PR of
+/// its own.
+pub fn check_can_retry_summaries(task: &Record) -> Result<()> {
+    let id = &task.id;
+    if task.pr.is_none() {
+        bail!("task {id} has no recorded PR, so there are no summaries to retry");
+    }
+    let state = machine::State {
+        stage: task.stage,
+        status: task.status,
+        interrupted: false,
+        kind: task.kind,
+    };
+    if machine::verdict(&state, machine::Event::FinishSummaries) {
+        Ok(())
+    } else {
+        bail!(
+            "task {id} ({:?} task, stage {}) has no summaries to retry",
+            task.kind,
+            task.stage.name()
+        )
+    }
+}
+
 /// Whether the task may be finished now. Decided through `machine::TABLE` once the `pr` field (not
 /// part of a table state; see `sdlc/spikes/state-table.md`) is checked. The reason for a refusal
 /// says what to do.
@@ -1667,13 +1693,7 @@ fn open_task_pr(
     if prepared.record.kind == record::Kind::Fix {
         bail!("task {id} is a fix task; `sbxm task fix` pushes it onto its PR's branch itself");
     }
-    if prepared.record.stage == record::Stage::Finished
-        && prepared.record.pr.is_some()
-        && matches!(
-            prepared.record.kind,
-            record::Kind::Issue | record::Kind::Spec
-        )
-    {
+    if check_can_retry_summaries(&prepared.record).is_ok() {
         return retry_summaries(prepared, github);
     }
     check_can_finish(&prepared.record)?;
