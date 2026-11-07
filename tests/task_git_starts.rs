@@ -95,3 +95,81 @@ fn a_rebuild_over_a_commit_whose_tree_is_missing_writes_nothing() {
     assert_eq!(git(&f.repo_git, &["rev-parse", "refs/heads/issue-4"]), base);
     assert_eq!(git(&f.repo_git, &["count-objects"]), before);
 }
+
+/// A workspace whose `.sbxm-task/branch.bundle` is a bundle of `refs` made in a clone of the
+/// fixture's repo.
+fn workspace_with_bundle(f: &Fixture, refs: &[&str]) -> PathBuf {
+    let workspace = f._tmp.path().join("task").join("workspace");
+    fs::create_dir_all(workspace.join(".sbxm-task")).unwrap();
+    let bundle = workspace.join(".sbxm-task/branch.bundle");
+    let mut args = vec!["bundle", "create", bundle.to_str().unwrap()];
+    args.extend_from_slice(refs);
+    git(&f.repo_git, &args);
+    workspace
+}
+
+#[test]
+fn a_bundle_without_the_task_branch_is_refused_by_name() {
+    let f = fixture();
+    repo::create_branch(&f.repo_git, "issue-4", "main").unwrap();
+    let workspace = workspace_with_bundle(&f, &["refs/heads/main"]);
+
+    let err = repo::fetch_bundle(&f.repo_git, &workspace, "issue-4", 1 << 20).unwrap_err();
+
+    assert!(format!("{err:#}").contains("no branch issue-4"), "{err:#}");
+}
+
+#[test]
+fn a_damaged_bundle_fails_verification() {
+    let f = fixture();
+    repo::create_branch(&f.repo_git, "issue-4", "main").unwrap();
+    let workspace = workspace_with_bundle(&f, &["refs/heads/issue-4"]);
+    fs::write(workspace.join(".sbxm-task/branch.bundle"), b"not a bundle").unwrap();
+
+    let err = repo::fetch_bundle(&f.repo_git, &workspace, "issue-4", 1 << 20).unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains("failed verification"),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn a_bundle_with_the_task_branch_is_fetched_onto_the_agent_ref() {
+    let f = fixture();
+    repo::create_branch(&f.repo_git, "issue-4", "main").unwrap();
+    // The agent's commit lives in a clone; its bundle goes to the workspace.
+    let clone = f._tmp.path().join("agent");
+    git(
+        f._tmp.path(),
+        &[
+            "clone",
+            "-q",
+            "-b",
+            "issue-4",
+            f.repo_git.to_str().unwrap(),
+            clone.to_str().unwrap(),
+        ],
+    );
+    git(&clone, &["commit", "-q", "--allow-empty", "-m", "work"]);
+    let tip = git(&clone, &["rev-parse", "HEAD"]);
+    let workspace = f._tmp.path().join("task").join("workspace");
+    fs::create_dir_all(workspace.join(".sbxm-task")).unwrap();
+    git(
+        &clone,
+        &[
+            "bundle",
+            "create",
+            workspace.join(".sbxm-task/branch.bundle").to_str().unwrap(),
+            "^origin/main",
+            "refs/heads/issue-4",
+        ],
+    );
+
+    repo::fetch_bundle(&f.repo_git, &workspace, "issue-4", 1 << 20).unwrap();
+
+    assert_eq!(
+        git(&f.repo_git, &["rev-parse", "refs/sbxm/agent/issue-4"]),
+        tip
+    );
+}

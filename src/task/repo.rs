@@ -866,19 +866,15 @@ pub fn fetch_bundle(repo_git: &Path, workspace: &Path, branch: &str, cap: u64) -
     }
     let copy_text = text(&copy)?;
 
-    git::run(
+    // `verify` lists the bundle's refs on stdout, one `<id> <ref>` per line, as `list-heads` does:
+    // one git start for both (issue #444).
+    let heads = git::run(
         repo_git,
         Some(repo_git),
         None,
         &["bundle", "verify", copy_text],
     )
     .context("the bundle failed verification (damaged, or built on commits the task repo lacks)")?;
-    let heads = git::run(
-        repo_git,
-        Some(repo_git),
-        None,
-        &["bundle", "list-heads", copy_text],
-    )?;
     let wanted = format!("refs/heads/{branch}");
     if !heads
         .lines()
