@@ -477,9 +477,11 @@ pub fn render(view: &View, width: Option<usize>) -> String {
             }
             Err(why) => format!("  awaiting you: unreadable ({why})"),
         });
-        // A loop over an `--issue` list doesn't take the labeled queue (issue 477).
+        // A loop over an `--issue` list doesn't take the labeled queue (issue 477), but the same
+        // read gives its pending issues' titles, so its failure is still said (review M-1).
         let listed = view.work.as_ref().is_some_and(|w| w.listed.is_some());
         match &snapshot.queue {
+            Err(why) if listed => lines.push(format!("  issue titles: unreadable ({why})")),
             _ if listed => {}
             Err(why) => lines.push(format!("  queue: unreadable ({why})")),
             Ok(items) if items.is_empty() => lines.push("  queue: empty".to_owned()),
