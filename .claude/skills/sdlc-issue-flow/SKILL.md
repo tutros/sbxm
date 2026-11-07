@@ -18,7 +18,9 @@ build sbxm tasks run with (a machine's own wrapper; never a fresh `cargo run`).
 
 - Every "to decide" point answered with the user, one at a time with a recommendation, and written into the issue
   **body** (a worker reads the body, not the comments). Then confirm or change the size (body line and label).
-- Decision 244: if the change has a limit, a size or an identity, the body lists the boundary cases.
+- Decision 244: if the change has a limit, a size or an identity, the body lists the boundary cases. A change that
+  takes a path lists relative, absolute and missing paths among them, and a fix round tests the exact variant a
+  finding names (issue 455, an experiment).
 - Decision 273: if it depends on an external tool's behavior a spike recorded, re-run that check by hand first.
 - Decision 292: reserve the number of any decision the issue adds now, in the body ("this adds decision N", gap
   G41; a new decision is a new file in `sdlc/decisions/`, decision 303), and have its new tests go in a file or section of the issue's own, never appended at the end of a shared
