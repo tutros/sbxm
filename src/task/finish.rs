@@ -427,11 +427,54 @@ pub fn remove(plan: &RemovalPlan, backend: &dyn SandboxBackend) -> RemovalReport
 }
 
 /// [`remove`], with `sleep` called for each wait between a cloud sandbox's removal retries (P6
-/// (a)) instead of really sleeping.
+/// (a)), and between a folder delete's tries ([`delete_folder`]), instead of really sleeping.
 pub fn remove_with_sleep(
     plan: &RemovalPlan,
     backend: &dyn SandboxBackend,
     sleep: &dyn Fn(Duration),
+) -> RemovalReport {
+    remove_with_delete(plan, backend, sleep, &|folder| fs::remove_dir_all(folder))
+}
+
+/// How many times in all a folder's delete is tried while Windows refuses it as in use, and how
+/// long it waits between two tries (issue 503): a file another process still has open (os error
+/// 32) can let `remove_dir_all` delete part of the folder and then fail, and a later try
+/// continues from what is left.
+const DELETE_ATTEMPTS: u32 = 5;
+const DELETE_PAUSE: Duration = Duration::from_secs(1);
+
+/// `delete` of `folder`, tried again after a sharing violation (os error 32) or a
+/// `PermissionDenied`, up to [`DELETE_ATTEMPTS`] in all with [`DELETE_PAUSE`] between two tries,
+/// like the lock's `retry_denied` (issue 441). Any other error, or the last try's, is returned
+/// as it is.
+fn delete_folder(
+    folder: &Path,
+    delete: &dyn Fn(&Path) -> std::io::Result<()>,
+    sleep: &dyn Fn(Duration),
+) -> std::io::Result<()> {
+    let mut attempt = 1;
+    loop {
+        match delete(folder) {
+            Err(e)
+                if (e.raw_os_error() == Some(32)
+                    || e.kind() == std::io::ErrorKind::PermissionDenied)
+                    && attempt < DELETE_ATTEMPTS =>
+            {
+                sleep(DELETE_PAUSE);
+                attempt += 1;
+            }
+            outcome => return outcome,
+        }
+    }
+}
+
+/// [`remove_with_sleep`], with `delete` in place of `fs::remove_dir_all` for each folder, so
+/// tests can make it fail.
+pub fn remove_with_delete(
+    plan: &RemovalPlan,
+    backend: &dyn SandboxBackend,
+    sleep: &dyn Fn(Duration),
+    delete: &dyn Fn(&Path) -> std::io::Result<()>,
 ) -> RemovalReport {
     let mut report = RemovalReport::default();
     // `--forget-ambiguous` drops the ambiguous create from `task.json` before anything is removed
@@ -471,7 +514,7 @@ pub fn remove_with_sleep(
             continue;
         }
         let done = check_own_folder(&plan.base_dir, folder).and_then(|()| {
-            fs::remove_dir_all(folder)
+            delete_folder(folder, delete, sleep)
                 .map_err(|e| anyhow::anyhow!("cannot delete {}: {e}", folder.display()))
         });
         match done {
