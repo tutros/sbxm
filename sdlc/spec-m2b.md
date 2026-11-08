@@ -140,6 +140,8 @@ Rules:
   compares the PR's current head against to refuse an unchanged one unless `--force` (decision 190). `review.posted`
   (decision 187; optional, not in the example above) is the commit whose review `task finish` posted on the PR it
   opened, written only after the comment was accepted; it alone makes `task review --pr` refuse that head.
+- `ended_at` (issue 492; optional, not in the example above) is when the current stage ended `failed`, in the stage
+  stamps' format; every stage that starts (again) clears it. `sbxm status` shows a failed task's run time up to it.
 
 ## 4. Commands [143][157][158]
 

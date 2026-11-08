@@ -9,7 +9,7 @@ use anyhow::Result;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::run::results::parse_timestamp;
-use crate::task::record::{self, ProcessProbe, Stage};
+use crate::task::record::{self, ProcessProbe, Stage, Status};
 
 /// A missing value (no commits yet, no review yet, no PR, no `run.log`).
 const DASH: &str = "-";
@@ -44,27 +44,27 @@ pub enum TaskTime {
     /// as the time since then; `None` only for a stamp this build can't parse (never happens for
     /// a stamp `sbxm` itself wrote).
     InStage(Option<u64>),
-    /// A task that has ended (`finished`, or stopped at `ready`): its total run time in seconds,
-    /// from its first `prepared` stamp to the stamp of the stage it ended in, fixed whatever the
-    /// clock says; `None` when the record lacks either stamp (an older `task.json`).
+    /// A task that has ended (`finished`, stopped at `ready`, or `failed`): its total run time in
+    /// seconds, from its first `prepared` stamp to the stamp of the stage it ended in (a failed
+    /// task's `ended_at`, issue 492), fixed whatever the clock says; `None` when the record lacks
+    /// either time (an older `task.json`).
     Took(Option<u64>),
 }
 
-/// `record`'s [`TaskTime`]: a total for a task that is `finished`, or `ready` with `stopped` set
-/// (it ended there with something unresolved), else the time in its current stage.
+/// `record`'s [`TaskTime`]: a total for a task that is `finished`, `ready` with `stopped` set (it
+/// ended there with something unresolved) or `failed`, else the time in its current stage.
 fn task_time(record: &record::Record) -> TaskTime {
-    let ended = record.stage == Stage::Finished
-        || (record.stage == Stage::Ready && record.stopped.is_some());
-    if !ended {
-        let entered = record
-            .stages
-            .last()
-            .and_then(|stamp| parse_timestamp(&stamp.at));
-        return TaskTime::InStage(entered);
-    }
     let at = |stamp: Option<&record::Stamp>| stamp.and_then(|stamp| parse_timestamp(&stamp.at));
+    let end = if record.status == Status::Failed {
+        record.ended_at.as_deref().and_then(parse_timestamp)
+    } else if record.stage == Stage::Finished
+        || (record.stage == Stage::Ready && record.stopped.is_some())
+    {
+        at(record.stages.iter().rev().find(|s| s.stage == record.stage))
+    } else {
+        return TaskTime::InStage(at(record.stages.last()));
+    };
     let start = at(record.stages.iter().find(|s| s.stage == Stage::Prepared));
-    let end = at(record.stages.iter().rev().find(|s| s.stage == record.stage));
     TaskTime::Took(start.zip(end).map(|(start, end)| end.saturating_sub(start)))
 }
 

@@ -724,7 +724,7 @@ mod looped {
             &mut warn,
         )
         .unwrap();
-        let log = fs::read_dir(repo_root.join("sdlc").join("batches"))
+        let log = fs::read_dir(env.base_dir().join(".sbxm").join("loop-logs"))
             .ok()
             .and_then(|mut d| d.next())
             .and_then(|e| fs::read_to_string(e.ok()?.path()).ok())

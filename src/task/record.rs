@@ -454,6 +454,11 @@ pub struct Record {
     pub stage: Stage,
     pub status: Status,
     pub stages: Vec<Stamp>,
+    /// When the current stage ended `failed` (issue 492): `sbxm status` shows a failed task's
+    /// total run time up to it. Cleared whenever a stage starts (again); absent in older records,
+    /// and while the task isn't failed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ended_at: Option<String>,
     pub process: Option<Process>,
     pub worker: Option<Agent>,
     pub reviewer: Option<Agent>,
@@ -701,6 +706,7 @@ impl Record {
                 stage: Stage::Prepared,
                 at: format_timestamp(now),
             }],
+            ended_at: None,
             process: Some(process),
             worker: None,
             reviewer: None,
@@ -750,6 +756,7 @@ impl Record {
         }
         self.stage = stage;
         self.status = stage.statuses()[0];
+        self.ended_at = None;
         self.stages.push(Stamp {
             stage,
             at: format_timestamp(now),
@@ -772,6 +779,7 @@ impl Record {
         }
         self.status = Status::Running;
         self.gate_run = None;
+        self.ended_at = None;
         self.stages.push(Stamp {
             stage: Stage::Gating,
             at: format_timestamp(now),
@@ -794,6 +802,7 @@ impl Record {
             );
         }
         self.status = Status::Running;
+        self.ended_at = None;
         self.stages.push(Stamp {
             stage: Stage::Reviewing,
             at: format_timestamp(now),
@@ -828,6 +837,7 @@ impl Record {
         self.stage = Stage::Gating;
         self.status = Status::Running;
         self.gate_run = None;
+        self.ended_at = None;
         self.stages.push(Stamp {
             stage: Stage::Gating,
             at: format_timestamp(now),
@@ -848,6 +858,7 @@ impl Record {
     ) -> bool {
         if self.stage == Stage::Gating && self.is_interrupted(probe) {
             self.gate_run = None;
+            self.ended_at = None;
             self.stages.push(Stamp {
                 stage: Stage::Gating,
                 at: format_timestamp(now),
@@ -858,8 +869,15 @@ impl Record {
         false
     }
 
-    /// Ends the current stage with `status`, which must belong to the stage.
+    /// Ends the current stage with `status`, which must belong to the stage, now:
+    /// [`finish_at`](Self::finish_at) with the clock.
     pub fn finish(&mut self, status: Status) -> Result<()> {
+        self.finish_at(status, crate::run::results::now())
+    }
+
+    /// Ends the current stage with `status`, which must belong to the stage; a `failed` one
+    /// records `now` as the task's end (issue 492).
+    pub fn finish_at(&mut self, status: Status, now: u64) -> Result<()> {
         if !self.stage.statuses().contains(&status) {
             bail!(
                 "status {} doesn't belong to stage {} of task {}",
@@ -869,6 +887,7 @@ impl Record {
             );
         }
         self.status = status;
+        self.ended_at = (status == Status::Failed).then(|| format_timestamp(now));
         Ok(())
     }
 
@@ -894,6 +913,7 @@ impl Record {
             );
         }
         self.status = self.stage.statuses()[0];
+        self.ended_at = None;
         self.stages.push(Stamp {
             stage: self.stage,
             at: format_timestamp(now),
