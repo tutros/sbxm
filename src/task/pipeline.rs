@@ -2082,7 +2082,11 @@ fn worker_profile<'a>(record: &'a Record, worker: &'a Agent) -> Result<&'a str> 
 /// of substituting today's global defaults for a task that never ran under them.
 fn worker_resources(record: &Record, worker: &Agent) -> Result<Resources> {
     match (worker.cpus, worker.memory.clone()) {
-        (Some(cpus), Some(memory)) => Ok(Resources { cpus, memory }),
+        (Some(cpus), Some(memory)) => Ok(Resources {
+            cpus,
+            memory,
+            sandbox_slots: None,
+        }),
         _ => Err(anyhow::anyhow!(
             "task {}'s record has no saved sandbox resources (it predates issue 118's resume \
              fix); remove it and start it again: `sbxm task rm {}`",

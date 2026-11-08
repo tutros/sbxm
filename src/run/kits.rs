@@ -182,6 +182,7 @@ fn build_pairs(
             .memory
             .clone()
             .unwrap_or_else(|| global.resources.memory.clone()),
+        sandbox_slots: None,
     };
 
     // Every profile loads before anything is written, so an unknown one
