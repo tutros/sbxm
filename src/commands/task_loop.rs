@@ -2148,7 +2148,7 @@ pub fn run(
         logged: false,
     };
 
-    let result = work(&mut lp, opts, out, warn);
+    let result = work(&mut lp, &mut lock, opts, out, warn);
     // Only rows this loop wrote are posted: a loop that ran no task posts nothing (decision 305).
     if lp.logged {
         let stop = match &result {
@@ -2192,6 +2192,7 @@ fn free_log(base_dir: &Path, env: &Env) -> Result<(u64, PathBuf)> {
 /// The loop itself, from its first task to its stop; returns the stop's message.
 fn work(
     lp: &mut Loop,
+    lock: &mut LoopLock,
     opts: &Options,
     out: &mut dyn Write,
     warn: &mut dyn Write,
@@ -2250,7 +2251,7 @@ fn work(
                 tasks_run + 1,
                 size.as_deref().unwrap_or("unknown")
             )?;
-            note(&mut lock, &mut lp, warn, |p| p.start(issue))?;
+            note(lock, lp, warn, |p| p.start(issue))?;
             let ended = lp.again(issue, retry, &mut stops, out, warn);
             (issue, title, size, started, stops, ended)
         } else {
@@ -2291,7 +2292,7 @@ fn work(
                 tasks_run + 1,
                 size.as_deref().unwrap_or("unknown")
             )?;
-            note(&mut lock, &mut lp, warn, |p| {
+            note(lock, lp, warn, |p| {
                 for skipped in refused.iter().chain(&waiting) {
                     p.set(skipped.issue, Outcome::Skipped);
                 }
@@ -2367,7 +2368,7 @@ fn work(
             End::Refused(_) | End::Taken(_) => Outcome::Skipped,
             End::Held(_) => Outcome::Held,
         };
-        note(&mut lock, &mut lp, warn, |p| {
+        note(lock, lp, warn, |p| {
             p.current = None;
             p.set(issue, recorded);
             if matches!(recorded, Outcome::Done | Outcome::Parked) {
