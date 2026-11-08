@@ -124,7 +124,7 @@ fn command(
     cmd.envs(
         environment
             .into_iter()
-            .filter(|(name, _)| !is_git_variable(name)),
+            .filter(|(name, _)| !is_git_variable(name) || is_trace_variable(name)),
     );
     cmd.env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -137,6 +137,14 @@ fn command(
         .env("GIT_COMMITTER_EMAIL", "sbxm@localhost")
         .env("GIT_COMMITTER_DATE", BASELINE_DATE);
     cmd
+}
+
+/// `GIT_TRACE2_EVENT`, passed through when set: the tests that rebuild a template point it at a
+/// file of their own, so a flaky clone failure shows what git did (issue 468). It only names
+/// where git writes its trace; it can't point git at another repository or make it run code.
+fn is_trace_variable(name: &OsStr) -> bool {
+    name.to_string_lossy()
+        .eq_ignore_ascii_case("GIT_TRACE2_EVENT")
 }
 
 fn is_git_variable(name: &OsStr) -> bool {
@@ -429,6 +437,7 @@ fn user_command(
     cmd.envs(environment.into_iter().filter(|(name, _)| {
         !is_askpass_variable(name)
             && (!is_git_variable(name)
+                || is_trace_variable(name)
                 || USER_GIT_VARIABLES
                     .iter()
                     .any(|allowed| name.to_string_lossy().eq_ignore_ascii_case(allowed)))
@@ -869,6 +878,46 @@ mod tests {
             for setting in ["maintenance.auto=false", "gc.auto=0"] {
                 assert!(args.iter().any(|a| a == setting), "{setting} in {args:?}");
             }
+        }
+    }
+
+    // Issue 468: the tests that rebuild a template capture git's trace, so a flaky clone failure
+    // shows what git did. The variable reaches git only when it is set.
+    #[test]
+    fn a_set_trace2_event_target_reaches_every_git_call() {
+        let cwd = Path::new(".");
+        let inherited = || {
+            [("GIT_TRACE2_EVENT", "/tmp/trace.json")]
+                .map(|(name, value)| (OsString::from(name), OsString::from(value)))
+        };
+        let hardened = command(cwd, None, None, &["status"], inherited());
+        let user = user_command(cwd, &["status"], &[], inherited());
+
+        for cmd in [hardened, user] {
+            let env: Vec<_> = cmd.get_envs().collect();
+            assert!(
+                env.contains(&(
+                    OsStr::new("GIT_TRACE2_EVENT"),
+                    Some(OsStr::new("/tmp/trace.json"))
+                )),
+                "{env:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unset_trace2_event_target_is_not_invented() {
+        let cwd = Path::new(".");
+        let hardened = command(cwd, None, None, &["status"], []);
+        let user = user_command(cwd, &["status"], &[], []);
+
+        for cmd in [hardened, user] {
+            assert!(
+                !cmd.get_envs()
+                    .any(|(name, _)| name.to_string_lossy().starts_with("GIT_TRACE")),
+                "{:?}",
+                cmd.get_envs().collect::<Vec<_>>()
+            );
         }
     }
 }
