@@ -1,7 +1,8 @@
 //! The Loop section of `sbxm status` (decision 294, issue 376): whether a `task loop` runs, the
 //! task it is on and its stage, the tasks it finished, the PRs awaiting the user (the loop's cap
 //! of 5, counted by the same [`queue::awaits_user`] the loop pauses on) and the queue of labeled
-//! issues in the order the loop takes them, and the pause on a red `main` (issue 442). State
+//! issues in the order the loop takes them (for a loop started with `--issue`, its list from the
+//! lock instead, as [`Listed`], issue 477), and the pause on a red `main` (issue 442). State
 //! comes from the loop's lock, its pause file and the task records alone, with no write; only the queue and the PR count need GitHub, one
 //! fetch at most once a minute ([`Cache`]), made only while a loop runs.
 
@@ -14,7 +15,7 @@ use crate::status::tasks::truncate;
 use crate::task::finish::check_own_folder;
 use crate::task::loop_pause;
 use crate::task::merged;
-use crate::task::queue::{self, LOOP_HOOK};
+use crate::task::queue::{self, LOOP_HOOK, LockFile};
 use crate::task::record::{self, Kind, Process, ProcessProbe, Record, Stage, Status};
 
 /// The longest queue shown on a terminal; the rest is "… N more". Output that isn't a terminal
@@ -39,16 +40,30 @@ pub enum Lock {
 
 /// Reads `<base>/.sbxm/task-loop.lock`.
 pub fn read_lock(base: &Path, probe: &dyn ProcessProbe) -> Lock {
+    read_lock_file(base, probe).0
+}
+
+/// [`read_lock`], with the whole lock file it read when that parsed: for a loop started with
+/// `--issue`, its list and its `--cap` too (issue 477). One read, so the list is the process's.
+pub fn read_lock_file(base: &Path, probe: &dyn ProcessProbe) -> (Lock, Option<LockFile>) {
     let path = queue::lock_path(base);
     let text = match fs::read_to_string(&path) {
         Ok(text) => text,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Lock::Absent,
-        Err(e) => return Lock::Unreadable(format!("cannot read {}: {e}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (Lock::Absent, None),
+        Err(e) => {
+            return (
+                Lock::Unreadable(format!("cannot read {}: {e}", path.display())),
+                None,
+            );
+        }
     };
-    match serde_json::from_str::<Process>(&text) {
-        Ok(held) if held.alive(probe) => Lock::Running(held),
-        Ok(held) => Lock::Stale(held),
-        Err(e) => Lock::Unreadable(format!("cannot parse {}: {e}", path.display())),
+    match serde_json::from_str::<LockFile>(&text) {
+        Ok(file) if file.process.alive(probe) => (Lock::Running(file.process.clone()), Some(file)),
+        Ok(file) => (Lock::Stale(file.process.clone()), Some(file)),
+        Err(e) => (
+            Lock::Unreadable(format!("cannot parse {}: {e}", path.display())),
+            None,
+        ),
     }
 }
 
@@ -67,6 +82,48 @@ pub struct Work {
     pub done: Vec<String>,
     /// The title of the current task and of each one done, by id (issue 246).
     pub titles: std::collections::BTreeMap<String, String>,
+    /// For a loop started with `--issue` (issue 477): where it is in its list. `None` for a loop
+    /// over the labeled queue, or one whose lock an older binary wrote.
+    pub listed: Option<Listed>,
+}
+
+/// Where a loop started with `--issue` is in its list (issue 477), each issue by number in the
+/// list's order. The lock holds the list alone, so the task records say what happened to each:
+/// the issue running, the ones finished (as [`Work::done`]) and the ones parked (a task left
+/// short of finished by the loop's process). The furthest of those in the list is how far the
+/// loop got: an issue before it with none of these was skipped (refused, waiting on a
+/// dependency, or taken by a command run by hand), never pending; the issues after it are
+/// pending, as many as `--cap` leaves to run, and the rest are not run.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Listed {
+    pub current: Option<u32>,
+    pub done: Vec<u32>,
+    pub parked: Vec<u32>,
+    pub skipped: Vec<u32>,
+    pub pending: Vec<u32>,
+    /// The issues past `--cap`.
+    pub not_run: Vec<u32>,
+    pub cap: Option<u32>,
+    /// Each listed issue's title from its task record, where it has one (issue 246).
+    pub titles: std::collections::BTreeMap<u32, String>,
+}
+
+impl Listed {
+    /// The tasks the loop ran from the list so far, the running one not counted.
+    fn ran(&self) -> usize {
+        self.done.len() + self.parked.len()
+    }
+
+    /// M of "task N of M": the tasks the loop runs from the list, those it ran, the one running
+    /// and the ones pending; skipped and not-run issues are not counted.
+    pub fn total(&self) -> usize {
+        self.ran() + usize::from(self.current.is_some()) + self.pending.len()
+    }
+
+    /// N of "task N of M", while a task runs.
+    pub fn position(&self) -> Option<usize> {
+        self.current.map(|_| self.ran() + 1)
+    }
 }
 
 /// The loop's task and the tasks it finished, from the records under `base` (never `sbx`).
@@ -79,6 +136,19 @@ pub struct Work {
 /// still done in this window (review M-1 of PR 437). A task in both places, between the archive
 /// and the removal, counts once; only the active records say which task runs.
 pub fn work(base: &Path, lock: &Process) -> anyhow::Result<Work> {
+    work_for(
+        base,
+        &LockFile {
+            process: lock.clone(),
+            issues: Vec::new(),
+            cap: None,
+        },
+    )
+}
+
+/// [`work`] for the whole lock file: with [`Work::listed`] for a loop started with `--issue`.
+pub fn work_for(base: &Path, file: &LockFile) -> anyhow::Result<Work> {
+    let lock = &file.process;
     let started = parse_timestamp(&lock.started_at);
     let mut out = Work::default();
     let active = record::load_all(base)?;
@@ -119,7 +189,70 @@ pub fn work(base: &Path, lock: &Process) -> anyhow::Result<Work> {
             out.titles.insert(rec.id.clone(), rec.title.clone());
         }
     }
+    if !file.issues.is_empty() {
+        out.listed = Some(listed(file, &out, &active, &archived));
+    }
     Ok(out)
+}
+
+/// [`Listed`] from the lock's list, the records and what [`work_for`] found.
+fn listed(file: &LockFile, work: &Work, active: &[Record], archived: &[Record]) -> Listed {
+    let issue_of = |id: &str| {
+        active
+            .iter()
+            .chain(archived)
+            .find(|r| r.id == id && r.kind == Kind::Issue)
+            .map(|r| r.number)
+    };
+    let current = work.current.as_ref().and_then(|c| issue_of(&c.id));
+    let done: Vec<u32> = work.done.iter().filter_map(|id| issue_of(id)).collect();
+    let parked = |n: u32| {
+        active.iter().any(|r| {
+            r.kind == Kind::Issue
+                && r.number == n
+                && r.stage != Stage::Finished
+                && r.status != Status::Running
+                && r.process.as_ref() == Some(&file.process)
+        })
+    };
+    let reached = file
+        .issues
+        .iter()
+        .rposition(|&n| Some(n) == current || done.contains(&n) || parked(n));
+    let mut out = Listed {
+        current: current.filter(|n| file.issues.contains(n)),
+        cap: file.cap,
+        ..Listed::default()
+    };
+    let mut later = Vec::new();
+    for (i, &n) in file.issues.iter().enumerate() {
+        if Some(n) == out.current || out.done.contains(&n) || out.parked.contains(&n) {
+            continue;
+        }
+        if done.contains(&n) {
+            out.done.push(n);
+        } else if parked(n) {
+            out.parked.push(n);
+        } else if reached.is_some_and(|r| i < r) {
+            out.skipped.push(n);
+        } else if !later.contains(&n) {
+            later.push(n);
+        }
+    }
+    let left = file.cap.map_or(usize::MAX, |cap| {
+        (cap as usize).saturating_sub(out.ran() + usize::from(out.current.is_some()))
+    });
+    let shown = later.len().min(left);
+    out.not_run = later.split_off(shown);
+    out.pending = later;
+    for rec in active.iter().chain(archived) {
+        if rec.kind == Kind::Issue && file.issues.contains(&rec.number) && !rec.title.is_empty() {
+            out.titles
+                .entry(rec.number)
+                .or_insert_with(|| rec.title.clone());
+        }
+    }
+    out
 }
 
 /// The records under [`merged::archive_root`], read as `task rm --merged` reads task folders:
@@ -167,6 +300,9 @@ pub struct Snapshot {
     /// The title of each PR in `awaiting` that a task record still names (issue 246), from
     /// [`crate::title::pr_title`]; one whose record is gone has none.
     pub pr_titles: std::collections::BTreeMap<u32, String>,
+    /// The title of every open issue, by number, from the same fetch as `queue`: for the issues
+    /// of a loop's `--issue` list that have no task record yet (issue 477).
+    pub issue_titles: std::collections::BTreeMap<u32, String>,
 }
 
 fn first_line(error: &anyhow::Error) -> String {
@@ -186,10 +322,17 @@ pub fn fetch(github: &dyn GitHubBackend, repo: &Result<String, String>, base: &P
                 queue: Err(why.clone()),
                 awaiting: Err(why.clone()),
                 pr_titles: Default::default(),
+                issue_titles: Default::default(),
             };
         }
     };
-    let queue = github.issues_open(repo).map(|open| {
+    let open = github.issues_open(repo);
+    let issue_titles = open
+        .iter()
+        .flatten()
+        .map(|i| (i.number, i.title.clone()))
+        .collect();
+    let queue = open.map(|open| {
         queue::queue_order(&open)
             .into_iter()
             .filter_map(|n| open.iter().find(|i| i.number == n))
@@ -221,6 +364,7 @@ pub fn fetch(github: &dyn GitHubBackend, repo: &Result<String, String>, base: &P
         queue: queue.map_err(|e| first_line(&e)),
         awaiting: awaiting.map_err(|e| first_line(&e)),
         pr_titles,
+        issue_titles,
     }
 }
 
@@ -285,9 +429,17 @@ pub fn render(view: &View, width: Option<usize>) -> String {
     if let Some(work) = &view.work {
         let named =
             |id: &str| crate::title::named(id, work.titles.get(id).map_or("", String::as_str));
-        lines.push(match &work.current {
-            Some(c) => format!("  task: {} at {}", named(&c.id), c.stage),
-            None => "  task: none running".to_owned(),
+        let of = work.listed.as_ref().map(|l| (l.position(), l.total()));
+        lines.push(match (&work.current, of) {
+            (Some(c), Some((Some(n), m))) => {
+                format!("  task: {} at {}, task {n} of {m}", named(&c.id), c.stage)
+            }
+            (Some(c), _) => format!("  task: {} at {}", named(&c.id), c.stage),
+            (None, Some((_, m))) => format!(
+                "  task: none running, {} of {m} run",
+                work.listed.as_ref().map_or(0, Listed::ran)
+            ),
+            (None, None) => "  task: none running".to_owned(),
         });
         lines.push(if work.done.is_empty() {
             "  done: none yet".to_owned()
@@ -295,6 +447,9 @@ pub fn render(view: &View, width: Option<usize>) -> String {
             let done: Vec<String> = work.done.iter().map(|id| named(id)).collect();
             format!("  done: {} ({})", work.done.len(), done.join(", "))
         });
+        if let Some(listed) = &work.listed {
+            list_lines(listed, view.snapshot.as_ref(), width, &mut lines);
+        }
     }
     if let Some(snapshot) = &view.snapshot {
         lines.push(match &snapshot.awaiting {
@@ -322,7 +477,12 @@ pub fn render(view: &View, width: Option<usize>) -> String {
             }
             Err(why) => format!("  awaiting you: unreadable ({why})"),
         });
+        // A loop over an `--issue` list doesn't take the labeled queue (issue 477), but the same
+        // read gives its pending issues' titles, so its failure is still said (review M-1).
+        let listed = view.work.as_ref().is_some_and(|w| w.listed.is_some());
         match &snapshot.queue {
+            Err(why) if listed => lines.push(format!("  issue titles: unreadable ({why})")),
+            _ if listed => {}
             Err(why) => lines.push(format!("  queue: unreadable ({why})")),
             Ok(items) if items.is_empty() => lines.push("  queue: empty".to_owned()),
             Ok(items) => {
@@ -353,6 +513,66 @@ pub fn render(view: &View, width: Option<usize>) -> String {
         out.push('\n');
     }
     out
+}
+
+/// The lines of a loop's `--issue` list (issue 477): its parked, skipped, pending and not-run
+/// issues, each with its title from its task record or else from GitHub (issue 246). The pending
+/// issues head their own lines, as the queue's do, at most [`MAX_QUEUE_LINES`] on a terminal.
+fn list_lines(
+    listed: &Listed,
+    snapshot: Option<&Snapshot>,
+    width: Option<usize>,
+    lines: &mut Vec<String>,
+) {
+    let title = |n: u32| {
+        listed
+            .titles
+            .get(&n)
+            .or_else(|| snapshot.and_then(|s| s.issue_titles.get(&n)))
+            .map_or("", String::as_str)
+    };
+    let inline = |issues: &[u32]| {
+        issues
+            .iter()
+            .map(|&n| crate::title::named(&format!("#{n}"), title(n)))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    if !listed.parked.is_empty() {
+        lines.push(format!("  parked: {}", inline(&listed.parked)));
+    }
+    if !listed.skipped.is_empty() {
+        lines.push(format!("  skipped: {}", inline(&listed.skipped)));
+    }
+    if listed.pending.is_empty() {
+        lines.push("  pending: none".to_owned());
+    } else {
+        lines.push(format!(
+            "  pending: {}",
+            plural(listed.pending.len(), "issue")
+        ));
+        let shown = if width.is_some() {
+            listed.pending.len().min(MAX_QUEUE_LINES)
+        } else {
+            listed.pending.len()
+        };
+        for &n in &listed.pending[..shown] {
+            lines.push(format!(
+                "    {}",
+                crate::title::titled(&format!("#{n}"), title(n))
+            ));
+        }
+        if shown < listed.pending.len() {
+            lines.push(format!("    … {} more", listed.pending.len() - shown));
+        }
+    }
+    if !listed.not_run.is_empty() {
+        lines.push(format!(
+            "  not run (--cap {}): {}",
+            listed.cap.unwrap_or_default(),
+            inline(&listed.not_run)
+        ));
+    }
 }
 
 fn plural(n: usize, noun: &str) -> String {

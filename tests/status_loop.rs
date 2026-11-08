@@ -704,6 +704,7 @@ fn the_cache_reuses_a_snapshot_under_a_minute_old_and_refetches_at_a_minute() {
             queue: Ok(Vec::<QueueItem>::new()),
             awaiting: Ok(Vec::new()),
             pr_titles: Default::default(),
+            issue_titles: Default::default(),
         }
     };
 
@@ -789,6 +790,7 @@ fn render_is_pure_over_its_view() {
             }]),
             awaiting: Ok(vec![1, 2]),
             pr_titles: Default::default(),
+            issue_titles: Default::default(),
         }),
         pause: sbxm::task::loop_pause::State::None,
     };
