@@ -15,7 +15,7 @@ use crate::status::tasks::truncate;
 use crate::task::finish::check_own_folder;
 use crate::task::loop_pause;
 use crate::task::merged;
-use crate::task::queue::{self, LOOP_HOOK, LockFile};
+use crate::task::queue::{self, LOOP_HOOK, LockFile, Outcome, Progress};
 use crate::task::record::{self, Kind, Process, ProcessProbe, Record, Stage, Status};
 
 /// The longest queue shown on a terminal; the rest is "… N more". Output that isn't a terminal
@@ -88,7 +88,9 @@ pub struct Work {
 }
 
 /// Where a loop started with `--issue` is in its list (issue 477), each issue by number in the
-/// list's order. The lock holds the list alone, so the task records say what happened to each:
+/// list's order. A lock with the loop's recorded [`Progress`] (issue 493) says what happened to
+/// each, and how many tasks `--cap` counted; see [`recorded`]. For a lock without it (an older
+/// binary's), the list alone, the task records say what happened to each:
 /// the issue running, the ones finished (as [`Work::done`]) and the ones parked (a task left
 /// short of finished by the loop's process). The furthest of those in the list is how far the
 /// loop got: an issue before it with none of these was skipped (refused, waiting on a
@@ -100,10 +102,15 @@ pub struct Listed {
     pub done: Vec<u32>,
     pub parked: Vec<u32>,
     pub skipped: Vec<u32>,
+    /// Issues whose task's lock a command run by hand held, tried again after the running task
+    /// (issue 493), as many as `--cap` leaves to run; only from a recorded [`Progress`].
+    pub held: Vec<u32>,
     pub pending: Vec<u32>,
     /// The issues past `--cap`.
     pub not_run: Vec<u32>,
     pub cap: Option<u32>,
+    /// The tasks counted toward `--cap`, as the loop recorded it (issue 493).
+    pub counted: Option<u32>,
     /// Each listed issue's title from its task record, where it has one (issue 246).
     pub titles: std::collections::BTreeMap<u32, String>,
 }
@@ -111,13 +118,14 @@ pub struct Listed {
 impl Listed {
     /// The tasks the loop ran from the list so far, the running one not counted.
     fn ran(&self) -> usize {
-        self.done.len() + self.parked.len()
+        self.counted
+            .map_or(self.done.len() + self.parked.len(), |n| n as usize)
     }
 
-    /// M of "task N of M": the tasks the loop runs from the list, those it ran, the one running
-    /// and the ones pending; skipped and not-run issues are not counted.
+    /// M of "task N of M": the tasks the loop runs from the list, those it ran, the one running,
+    /// the held ones and the ones pending; skipped and not-run issues are not counted.
     pub fn total(&self) -> usize {
-        self.ran() + usize::from(self.current.is_some()) + self.pending.len()
+        self.ran() + usize::from(self.current.is_some()) + self.held.len() + self.pending.len()
     }
 
     /// N of "task N of M", while a task runs.
@@ -142,6 +150,7 @@ pub fn work(base: &Path, lock: &Process) -> anyhow::Result<Work> {
             process: lock.clone(),
             issues: Vec::new(),
             cap: None,
+            progress: None,
         },
     )
 }
@@ -190,9 +199,104 @@ pub fn work_for(base: &Path, file: &LockFile) -> anyhow::Result<Work> {
         }
     }
     if !file.issues.is_empty() {
-        out.listed = Some(listed(file, &out, &active, &archived));
+        out.listed = Some(match &file.progress {
+            Some(progress) => recorded(file, progress, &mut out, &active, &archived),
+            None => listed(file, &out, &active, &archived),
+        });
     }
     Ok(out)
+}
+
+/// [`Listed`] from the outcomes the loop recorded in its lock (issue 493), which also say the
+/// tasks done ([`Work::done`]) and, when no record shows it running, the issue the loop is on:
+/// a resume clears the record's process before it takes the task again. The issues with no
+/// outcome are still to come: the held ones first, in the order the loop recorded them, which is
+/// the order it tries them again in, before a new issue (review M-1); then the rest in the list's
+/// order; as many as `--cap` leaves to run, and the others are not run.
+fn recorded(
+    file: &LockFile,
+    progress: &Progress,
+    work: &mut Work,
+    active: &[Record],
+    archived: &[Record],
+) -> Listed {
+    let record_of = |n: u32| {
+        active
+            .iter()
+            .chain(archived)
+            .find(|r| r.kind == Kind::Issue && r.number == n)
+    };
+    let current = progress.current.filter(|n| file.issues.contains(n));
+    if work.current.is_none()
+        && let Some(rec) = current.and_then(|n| {
+            active
+                .iter()
+                .find(|r| r.kind == Kind::Issue && r.number == n)
+        })
+    {
+        work.current = Some(Current {
+            id: rec.id.clone(),
+            stage: rec.stage.name(),
+        });
+        work.titles.insert(rec.id.clone(), rec.title.clone());
+    }
+    let mut out = Listed {
+        current,
+        cap: file.cap,
+        counted: Some(progress.counted),
+        ..Listed::default()
+    };
+    work.done.clear();
+    let held: Vec<u32> = progress
+        .outcomes
+        .iter()
+        .filter(|o| o.outcome == Outcome::Held && Some(o.issue) != current)
+        .map(|o| o.issue)
+        .filter(|n| file.issues.contains(n))
+        .collect();
+    let mut later = Vec::new();
+    for &n in &file.issues {
+        let seen = [&out.done, &out.parked, &out.skipped, &held, &later];
+        if Some(n) == current || seen.iter().any(|list| list.contains(&n)) {
+            continue;
+        }
+        match progress.outcome(n) {
+            Some(Outcome::Done) => {
+                out.done.push(n);
+                let (id, title) = record_of(n).map_or_else(
+                    || (format!("issue-{n}"), String::new()),
+                    |r| (r.id.clone(), r.title.clone()),
+                );
+                work.titles.insert(id.clone(), title);
+                work.done.push(id);
+            }
+            Some(Outcome::Parked) => out.parked.push(n),
+            Some(Outcome::Skipped) => out.skipped.push(n),
+            Some(Outcome::Held) => {}
+            None => later.push(n),
+        }
+    }
+    let mut left = file.cap.map_or(usize::MAX, |cap| {
+        (cap as usize).saturating_sub(out.ran() + usize::from(current.is_some()))
+    });
+    for (to_come, shown) in [(held, &mut out.held), (later, &mut out.pending)] {
+        for n in to_come {
+            if left > 0 {
+                left -= 1;
+                shown.push(n);
+            } else {
+                out.not_run.push(n);
+            }
+        }
+    }
+    out.not_run
+        .sort_by_key(|n| file.issues.iter().position(|i| i == n));
+    for &n in &file.issues {
+        if let Some(rec) = record_of(n).filter(|r| !r.title.is_empty()) {
+            out.titles.entry(n).or_insert_with(|| rec.title.clone());
+        }
+    }
+    out
 }
 
 /// [`Listed`] from the lock's list, the records and what [`work_for`] found.
@@ -435,6 +539,23 @@ pub fn render(view: &View, width: Option<usize>) -> String {
                 format!("  task: {} at {}, task {n} of {m}", named(&c.id), c.stage)
             }
             (Some(c), _) => format!("  task: {} at {}", named(&c.id), c.stage),
+            // The loop's recorded issue before its task record exists (issue 493).
+            (None, Some((Some(n), m))) => {
+                let issue = work.listed.as_ref().and_then(|l| l.current);
+                let title = issue
+                    .and_then(|i| {
+                        work.listed
+                            .as_ref()
+                            .and_then(|l| l.titles.get(&i))
+                            .or_else(|| view.snapshot.as_ref()?.issue_titles.get(&i))
+                    })
+                    .map_or("", String::as_str);
+                let issue = issue.map_or_else(String::new, |i| format!("#{i}"));
+                format!(
+                    "  task: {}, task {n} of {m}",
+                    crate::title::named(&issue, title)
+                )
+            }
             (None, Some((_, m))) => format!(
                 "  task: none running, {} of {m} run",
                 work.listed.as_ref().map_or(0, Listed::ran)
@@ -543,6 +664,12 @@ fn list_lines(
     }
     if !listed.skipped.is_empty() {
         lines.push(format!("  skipped: {}", inline(&listed.skipped)));
+    }
+    if !listed.held.is_empty() {
+        lines.push(format!(
+            "  held: {}, tried again after the running task",
+            inline(&listed.held)
+        ));
     }
     if listed.pending.is_empty() {
         lines.push("  pending: none".to_owned());
