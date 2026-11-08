@@ -621,6 +621,7 @@ fn resume_41(
             forget_ambiguous: false,
         },
         backend,
+        &sbxm::github::fake::FakeGitHub::default(),
         &Gone,
         &FakeHostRunner::default(),
         &mut out,

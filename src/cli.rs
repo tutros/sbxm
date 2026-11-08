@@ -377,8 +377,9 @@ pub enum TaskCommand {
     },
     /// Continue a task from its recorded stage, keeping its clone and commits: a failed or
     /// interrupted preparation, worker, review or fix round runs again, and the task goes on to
-    /// ready like `task review`. Refused while the sbxm process that recorded it is still running.
-    #[command(group(clap::ArgGroup::new("resume_target").required(true).args(["issue", "spec"])))]
+    /// ready like `task review` (a `task fix` task on to its push). Refused while the sbxm process
+    /// that recorded it is still running.
+    #[command(group(clap::ArgGroup::new("resume_target").required(true).args(["issue", "spec", "pr"])))]
     Resume {
         /// Resume this issue's task.
         #[arg(long, value_name = "N")]
@@ -386,6 +387,10 @@ pub enum TaskCommand {
         /// Resume this spec task's file.
         #[arg(long, value_name = "FILE")]
         spec: Option<PathBuf>,
+        /// Resume the `task fix --pr N` task made for this PR's current head, then push its result
+        /// onto the PR's branch as `task fix` does.
+        #[arg(long, value_name = "N")]
+        pr: Option<u32>,
         /// For a task that stopped ready (its fix rounds used, or a finding repeated): N more fix
         /// rounds from now (its budget becomes the rounds used plus N, whatever the stop), the
         /// first started from its review.md.
@@ -522,7 +527,9 @@ pub enum TaskCommand {
         /// The issue's task.
         #[arg(long, value_name = "N")]
         issue: Option<u32>,
-        /// The PR's task.
+        /// The PR's tasks: its review task and every `task fix --pr N` task, whatever head each
+        /// was made for. A fix task whose commits were never pushed to the PR's branch is kept,
+        /// and named, unless --force; the others are still removed.
         #[arg(long, value_name = "N")]
         pr: Option<u32>,
         /// The spec task's file (decision 174(d)). Refused while its result exists only in the
@@ -539,7 +546,8 @@ pub enum TaskCommand {
         /// Don't ask; delete.
         #[arg(long)]
         yes: bool,
-        /// Delete a spec task's result even though it was never fetched out of its repo.git.
+        /// Delete a spec task's result even though it was never fetched out of its repo.git, or a
+        /// fix task's commits that were never pushed to its PR's branch.
         #[arg(long, conflicts_with = "merged")]
         force: bool,
         /// Drop a cloud sandbox whose create was started but never heard back from (sbxm can't

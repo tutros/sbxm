@@ -76,6 +76,7 @@ fn resume_rounds(f: &Fixture, spec: PathBuf, rounds: Option<u32>, backend: &Fake
             forget_ambiguous: false,
         },
         backend,
+        &sbxm::github::fake::FakeGitHub::default(),
         &Gone,
         &sbxm::task::gates::FakeHostRunner::default(),
         &mut out,

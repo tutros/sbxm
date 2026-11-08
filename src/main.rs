@@ -57,6 +57,15 @@ fn task_writers(
     ))
 }
 
+/// The ids of PR `pr`'s fix tasks under the configured base dir, for the run log (issue 485);
+/// none when the config can't be read (the command then reports that itself).
+fn fix_task_ids(pr: u32) -> Vec<String> {
+    config::config_dir()
+        .and_then(|dir| config::GlobalConfig::load(&dir))
+        .and_then(|global| task::finish::fix_tasks_of(&global.base_dir, pr))
+        .unwrap_or_default()
+}
+
 /// A targeted log construction failed (unlike the explicit no-target case above, which never
 /// calls this): reports it once on the real stderr, naming the ids and, when the base dir could
 /// still be resolved, each one's `run.log` path, so the command's own later, likely identical,
@@ -630,21 +639,26 @@ fn main() -> anyhow::Result<()> {
                 TaskCommand::Resume {
                     issue,
                     spec,
+                    pr,
                     rounds,
                     ignore_disk,
                     forget_ambiguous,
                 },
         } => {
-            let target = match (issue, spec) {
-                (Some(n), _) => commands::task_resume::Target::Issue(n),
-                (None, Some(path)) => commands::task_resume::Target::Spec(path),
-                (None, None) => unreachable!("clap requires --issue or --spec"),
+            let target = match (issue, spec, pr) {
+                (Some(n), _, _) => commands::task_resume::Target::Issue(n),
+                (None, Some(path), _) => commands::task_resume::Target::Spec(path),
+                (None, None, Some(n)) => commands::task_resume::Target::Pr(n),
+                (None, None, None) => unreachable!("clap requires --issue, --spec or --pr"),
             };
             let ids = match &target {
                 commands::task_resume::Target::Issue(n) => vec![format!("issue-{n}")],
                 commands::task_resume::Target::Spec(path) => task::record::spec_id(path)
                     .map(|(id, _)| vec![id])
                     .unwrap_or_default(),
+                // Which fix task is resumed is known only once GitHub names the PR's head: the
+                // log goes into each fix task of the PR (issue 485).
+                commands::task_resume::Target::Pr(n) => fix_task_ids(*n),
             };
             let (mut out, mut warn) = task_writers(ids, None)?;
             let result = (|| -> anyhow::Result<()> {
@@ -659,6 +673,7 @@ fn main() -> anyhow::Result<()> {
                         forget_ambiguous,
                     },
                     &SbxBackend::LOCAL,
+                    &sbxm::github::gh::GhBackend::default(),
                     &task::record::SystemProbe,
                     &task::gates::ShellHostRunner,
                     &mut out,
@@ -799,7 +814,9 @@ fn main() -> anyhow::Result<()> {
             };
             let ids = match &target {
                 commands::task_rm::Target::Issue(n) => vec![format!("issue-{n}")],
-                commands::task_rm::Target::Pr(n) => vec![format!("pr-{n}")],
+                commands::task_rm::Target::Pr(n) => std::iter::once(format!("pr-{n}"))
+                    .chain(fix_task_ids(*n))
+                    .collect(),
                 commands::task_rm::Target::Spec(path) => task::record::spec_id(path)
                     .map(|(id, _)| vec![id])
                     .unwrap_or_default(),

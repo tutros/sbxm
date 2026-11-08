@@ -179,6 +179,7 @@ fn resume(
             forget_ambiguous: forget,
         },
         backend,
+        &sbxm::github::fake::FakeGitHub::default(),
         &Gone,
         &sbxm::task::gates::FakeHostRunner::default(),
         &mut Vec::new(),
