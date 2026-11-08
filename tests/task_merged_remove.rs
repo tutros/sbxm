@@ -984,6 +984,113 @@ fn archiving_still_refuses_an_archive_that_differs_from_the_task() {
     );
 }
 
+// Issue 503: a retry after a removal that deleted part of the task folder reuses the archive when
+// every record still in the folder equals the archive's copy, byte for byte.
+
+#[test]
+fn a_rerun_reuses_an_archive_that_matches_the_folder_exactly() {
+    let f = fixture();
+    finished_task(&f);
+    fs::write(meta(&f).join("gates.log"), "gate output\n").unwrap();
+    let archive = archive_task(&f.env.base_dir(), "issue-41").unwrap();
+
+    assert_eq!(
+        archive_task(&f.env.base_dir(), "issue-41").unwrap(),
+        archive
+    );
+}
+
+#[test]
+fn a_rerun_reuses_the_archive_when_the_folder_lost_one_record_and_the_removal_finishes() {
+    let f = fixture();
+    let url = finished_task(&f);
+    let number = sbxm::task::finish::pr_number(&url).unwrap();
+    fs::write(meta(&f).join("gates.log"), "gate output\n").unwrap();
+    let archive = archive_task(&f.env.base_dir(), "issue-41").unwrap();
+    // The first removal deleted gates.log before it failed on a file in use.
+    fs::remove_file(meta(&f).join("gates.log")).unwrap();
+
+    remove(
+        &f.env.base_dir(),
+        &found_merged(&f, number),
+        true,
+        &FakeBackend::with_secrets(&["anthropic"]),
+        &Yes::new(),
+        rising_free_space,
+        None,
+        &mut Vec::new(),
+    )
+    .unwrap();
+
+    assert!(
+        !meta(&f).exists(),
+        "the rerun did not remove the task folder"
+    );
+    assert_eq!(
+        fs::read_to_string(archive.join("gates.log")).unwrap(),
+        "gate output\n",
+        "the archive's copy was touched"
+    );
+}
+
+#[test]
+fn a_rerun_reuses_the_archive_when_the_folder_lost_every_record() {
+    let f = fixture();
+    finished_task(&f);
+    fs::create_dir_all(meta(&f).join("repo.git")).unwrap();
+    let archive = archive_task(&f.env.base_dir(), "issue-41").unwrap();
+    for entry in fs::read_dir(meta(&f)).unwrap() {
+        let path = entry.unwrap().path();
+        if path.is_file() {
+            fs::remove_file(path).unwrap();
+        }
+    }
+
+    assert_eq!(
+        archive_task(&f.env.base_dir(), "issue-41").unwrap(),
+        archive
+    );
+    assert!(archive.join("task.json").is_file());
+}
+
+#[test]
+fn a_rerun_refuses_an_archive_whose_record_differs_by_one_byte() {
+    let f = fixture();
+    finished_task(&f);
+    fs::write(meta(&f).join("gates.log"), "gate output\n").unwrap();
+    let archive = archive_task(&f.env.base_dir(), "issue-41").unwrap();
+    fs::remove_file(meta(&f).join("result.md")).unwrap();
+    fs::write(meta(&f).join("gates.log"), "gate outpuT\n").unwrap();
+
+    let err = archive_task(&f.env.base_dir(), "issue-41").unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains(&archive.display().to_string()),
+        "{err:#}"
+    );
+    assert_eq!(
+        fs::read_to_string(archive.join("gates.log")).unwrap(),
+        "gate output\n"
+    );
+}
+
+#[test]
+fn a_rerun_refuses_an_archive_that_lacks_a_record_the_folder_has() {
+    let f = fixture();
+    finished_task(&f);
+    let archive = archive_task(&f.env.base_dir(), "issue-41").unwrap();
+    fs::remove_file(meta(&f).join("result.md")).unwrap();
+    fs::write(meta(&f).join("gates.log"), "gate output\n").unwrap();
+
+    let err = archive_task(&f.env.base_dir(), "issue-41").unwrap_err();
+
+    assert!(
+        format!("{err:#}").contains(&archive.display().to_string()),
+        "{err:#}"
+    );
+    assert!(!archive.join("gates.log").exists());
+}
+
 /// Keeps `path` unreadable until dropped: an exclusive share lock on Windows, no permissions on
 /// Unix (`None` when that can't stop a read here, e.g. running as root).
 struct Unreadable {
