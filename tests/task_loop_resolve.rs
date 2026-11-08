@@ -678,6 +678,8 @@ fn an_earlier_risky_resolve_keeps_the_pr_unarmed_after_a_loop_restart() {
     gh.set_branch_head("main", MAIN_2);
     gh.set_mergeable(101, Mergeable::Conflicting);
     let second = Script::new(&f.base(), &gh);
+    // A restart comes later than the first loop started: its own log file (decision 305).
+    second.clock.set(first.clock.get() + 60);
 
     let run = run_loop(&f, &f.opts(None), &second, &gh);
 

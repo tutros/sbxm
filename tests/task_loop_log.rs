@@ -493,3 +493,108 @@ fn a_loop_that_runs_no_task_posts_nothing() {
     assert_eq!(creates(&gh), []);
     assert_eq!(f.log_files(), Vec::<PathBuf>::new());
 }
+
+// --- Review M-2: loops that start in the same second ---
+
+#[test]
+fn a_loop_starting_in_the_second_of_an_earlier_log_takes_the_next_free_name() {
+    let f = fixture();
+    let gh = github(vec![loop_log_issue(40)]);
+    run_loop(&f, &Script::new(START), &gh).result.unwrap();
+    gh.set_open_issues(vec![
+        open_issue(5, &[READY, "size:S"], ""),
+        loop_log_issue(40),
+    ]);
+    let gh = gh.with_issue_text(issue_text(5));
+
+    // The second loop's clock starts at the same second as the first's.
+    let run = run_loop(&f, &Script::new(START), &gh);
+
+    run.result.unwrap();
+    let files = f.log_files();
+    assert_eq!(
+        files,
+        [
+            f.logs().join("2026-11-08-100000-loop.md"),
+            f.logs().join("2026-11-08-100001-loop.md"),
+        ]
+    );
+    let first = fs::read_to_string(&files[0]).unwrap();
+    assert!(!first.contains("#5 "), "{first}");
+    let second = fs::read_to_string(&files[1]).unwrap();
+    assert!(second.contains("| 1 | #5 "), "{second}");
+    assert!(!second.contains("#3 "), "{second}");
+    let posted = comments(&gh);
+    assert_eq!(posted.len(), 2);
+    assert!(
+        posted[1].1.contains("2026-11-08T10:00:01Z"),
+        "{}",
+        posted[1].1
+    );
+    assert!(!posted[1].1.contains("#3 "), "{}", posted[1].1);
+}
+
+#[test]
+fn a_loop_that_runs_no_task_never_posts_an_earlier_loops_log() {
+    let f = fixture();
+    let gh = github(vec![loop_log_issue(40)]);
+    run_loop(&f, &Script::new(START), &gh).result.unwrap();
+    gh.set_open_issues(vec![
+        open_issue(5, &[READY, "size:S"], ""),
+        loop_log_issue(40),
+    ]);
+    let gh = gh.with_issue_text(issue_text(5));
+    let mut script = Script::new(START);
+    script.refused.push(5);
+
+    let run = run_loop(&f, &script, &gh);
+
+    run.result.unwrap();
+    assert_eq!(comments(&gh).len(), 1, "only the first loop's");
+    assert_eq!(f.log_files().len(), 1);
+}
+
+/// Plants earlier loops' logs for the `n` seconds from `START` on.
+fn plant_logs(f: &Fixture, n: u64) {
+    fs::create_dir_all(f.logs()).unwrap();
+    for s in 0..n {
+        fs::write(loop_log::path(&f.env.base_dir(), START + s), "earlier\n").unwrap();
+    }
+}
+
+#[test]
+fn with_four_names_taken_the_loop_uses_the_fifth_second() {
+    let f = fixture();
+    plant_logs(&f, 4);
+    let gh = github(vec![loop_log_issue(40)]);
+
+    run_loop(&f, &Script::new(START), &gh).result.unwrap();
+
+    let file = f.logs().join("2026-11-08-100004-loop.md");
+    assert!(fs::read_to_string(file).unwrap().contains("| 1 | #3 "));
+    assert_eq!(comments(&gh).len(), 1);
+}
+
+#[test]
+fn with_five_names_taken_the_loop_refuses_before_any_task_and_posts_nothing() {
+    let f = fixture();
+    plant_logs(&f, 5);
+    let gh = github(vec![loop_log_issue(40)]);
+
+    let run = run_loop(&f, &Script::new(START), &gh);
+
+    let err = format!("{:#}", run.result.unwrap_err());
+    assert!(err.contains("loop-logs"), "{err}");
+    assert_eq!(f.log_files().len(), 5);
+    assert!(
+        f.log_files()
+            .iter()
+            .all(|p| fs::read_to_string(p).unwrap() == "earlier\n")
+    );
+    assert_eq!(gh.calls(), []);
+    assert!(!loop_lock(&f).exists(), "the lock is released");
+}
+
+fn loop_lock(f: &Fixture) -> PathBuf {
+    f.env.base_dir().join(".sbxm").join("task-loop.lock")
+}

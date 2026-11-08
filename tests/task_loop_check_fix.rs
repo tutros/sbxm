@@ -492,6 +492,8 @@ fn a_loop_restart_after_a_log_fix_does_not_try_again() {
     gh.set_runs(PUSHED, vec![run(8, 2, RunStatus::Failed)]);
 
     let again = Script::new(&f.base(), &gh, Ends::Clean(Level::Low));
+    // A restart comes later than the first loop started: its own log file (decision 305).
+    again.clock.set(first.clock.get() + 60);
     let ran = run_loop(&f, &again, &gh);
 
     ran.result.unwrap();
@@ -677,6 +679,8 @@ fn rearmed_by_a_resolve_after_a_restart(ends: Ends) -> bool {
     gh.set_mergeable(101, Mergeable::Conflicting);
 
     let again = Script::new(&f.base(), &gh, Ends::Clean(Level::Low));
+    // A restart comes later than the first loop started: its own log file (decision 305).
+    again.clock.set(first.clock.get() + 60);
     let ran = run_loop(&f, &again, &gh);
 
     ran.result.unwrap();

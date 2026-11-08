@@ -1698,6 +1698,7 @@ fn a_rerun_after_a_kill_runs_no_task_twice_and_logs_none_twice() {
 
     // Killed after `task finish` of #3 and before #4 started; then run again, naming #3 too.
     let again = Script::new(&f.base());
+    again.clock.set(script.clock.get() + 60);
     let run = run_loop(
         &f,
         Options {
@@ -1710,8 +1711,15 @@ fn a_rerun_after_a_kill_runs_no_task_twice_and_logs_none_twice() {
 
     run.result.unwrap();
     assert_eq!(runs(&again), ["run 4"]);
-    assert_eq!(f.log_text().matches("| #3 ").count(), 1, "{}", f.log_text());
-    assert_eq!(f.log_text().matches("| #4 ").count(), 1, "{}", f.log_text());
+    // Each loop has its own log (decision 305): #3 in the first's, #4 in the second's.
+    let logs: Vec<String> = fs::read_dir(f.log().parent().unwrap())
+        .unwrap()
+        .map(|e| fs::read_to_string(e.unwrap().path()).unwrap())
+        .collect();
+    assert_eq!(logs.len(), 2);
+    let all = logs.concat();
+    assert_eq!(all.matches("| #3 ").count(), 1, "{all}");
+    assert_eq!(all.matches("| #4 ").count(), 1, "{all}");
 }
 
 #[test]
@@ -1736,8 +1744,9 @@ fn a_linked_tasks_folder_is_refused_before_the_first_task() {
 #[test]
 fn a_log_that_cannot_be_written_is_a_warning_and_the_loop_goes_on() {
     let f = fixture();
-    // A folder where the log file should be.
-    fs::create_dir_all(f.log()).unwrap();
+    // A file where the logs' folder should be.
+    fs::create_dir_all(f.log().parent().unwrap().parent().unwrap()).unwrap();
+    fs::write(f.log().parent().unwrap(), "").unwrap();
     let gh = github(vec![labeled(3, "size:S"), labeled(4, "size:S")]);
     let script = Script::new(&f.base());
 
@@ -1746,7 +1755,7 @@ fn a_log_that_cannot_be_written_is_a_warning_and_the_loop_goes_on() {
     run.result.unwrap();
     assert_eq!(runs(&script), ["run 3", "run 4"]);
     assert!(run.warn.contains("cannot"), "{}", run.warn);
-    assert!(run.warn.contains("loop.md"), "{}", run.warn);
+    assert!(run.warn.contains("loop-logs"), "{}", run.warn);
 }
 
 struct Alive;

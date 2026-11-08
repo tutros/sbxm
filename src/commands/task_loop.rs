@@ -357,6 +357,8 @@ struct Loop<'a> {
     /// the user cleared isn't set again for the same run.
     paused_for: HashSet<(String, u64)>,
     log: PathBuf,
+    /// Whether this loop wrote a row to [`log`](Self::log): only then is it posted.
+    logged: bool,
 }
 
 impl Loop<'_> {
@@ -1237,12 +1239,7 @@ impl Loop<'_> {
             "{pr_named}: {outcome}",
             pr_named = self.pr_named(number)
         )?;
-        if let Err(e) = queue::append_resolve_row(&self.log, &row) {
-            self.warn_once(
-                warn,
-                format!("{e:#}; the loop goes on without that log row"),
-            )?;
-        }
+        self.log_row(&row, false, warn)?;
         Ok(())
     }
 
@@ -1792,12 +1789,7 @@ impl Loop<'_> {
                     stops: Vec::new(),
                     idle_before: None,
                 };
-                if let Err(e) = queue::append_resolve_row(&self.log, &row) {
-                    self.warn_once(
-                        warn,
-                        format!("{e:#}; the loop goes on without that log row"),
-                    )?;
-                }
+                self.log_row(&row, false, warn)?;
             }
         }
         Ok(())
@@ -1928,21 +1920,29 @@ impl Loop<'_> {
             stops: Vec::new(),
             idle_before: None,
         };
-        if let Err(e) = queue::append_resolve_row(&self.log, &row) {
-            self.warn_once(
-                warn,
-                format!("{e:#}; the loop goes on without that log row"),
-            )?;
-        }
+        self.log_row(&row, false, warn)?;
         Ok(())
     }
 
     fn append(&mut self, row: &Row, warn: &mut dyn Write) -> Result<()> {
-        if let Err(e) = queue::append_row(&self.log, row) {
-            self.warn_once(
+        self.log_row(row, true, warn)
+    }
+
+    /// Every row of the loop's log is written here, so [`logged`](Self::logged) says whether this
+    /// loop wrote one. `once`: a task's row, skipped when its issue has one already; a resolve's
+    /// or a log-fix's row is written each time.
+    fn log_row(&mut self, row: &Row, once: bool, warn: &mut dyn Write) -> Result<()> {
+        let written = if once {
+            queue::append_row(&self.log, row)
+        } else {
+            queue::append_resolve_row(&self.log, row).map(|()| true)
+        };
+        match written {
+            Ok(written) => self.logged |= written,
+            Err(e) => self.warn_once(
                 warn,
                 format!("{e:#}; the loop goes on without that log row"),
-            )?;
+            )?,
         }
         Ok(())
     }
@@ -2093,8 +2093,7 @@ pub fn run(
     }
     let _lock = take_lock(&base_dir, opts, probe, warn)?;
 
-    let started_at = (env.now)();
-    let log = loop_log::path(&base_dir, started_at);
+    let (started_at, log) = free_log(&base_dir, env)?;
     let mut lp = Loop {
         config_dir,
         base_dir,
@@ -2117,11 +2116,12 @@ pub fn run(
         disarmed_for_log_fix: HashSet::new(),
         paused_for: HashSet::new(),
         log,
+        logged: false,
     };
 
     let result = work(&mut lp, opts, out, warn);
-    // A loop that ran no task has no log, and posts nothing (decision 305).
-    if lp.log.is_file() {
+    // Only rows this loop wrote are posted: a loop that ran no task posts nothing (decision 305).
+    if lp.logged {
         let stop = match &result {
             Ok(stop) => stop.clone(),
             Err(e) => first_line(&format!("{e:#}")),
@@ -2136,6 +2136,28 @@ pub fn run(
         }
     }
     result.map(drop)
+}
+
+/// How many seconds the loop waits at most for a log name no earlier loop took.
+const LOG_NAME_TRIES: u32 = 5;
+
+/// The loop's start and its own log file (decision 305): a name an earlier loop that started in
+/// the same second took is never shared, the loop waits for the next second instead (review M-2
+/// of issue 463). Called under the loop lock, so no other loop takes the name meanwhile.
+fn free_log(base_dir: &Path, env: &Env) -> Result<(u64, PathBuf)> {
+    for _ in 0..LOG_NAME_TRIES {
+        let started_at = (env.now)();
+        let log = loop_log::path(base_dir, started_at);
+        if fs::symlink_metadata(&log).is_err() {
+            return Ok((started_at, log));
+        }
+        (env.sleep)(Duration::from_secs(1));
+    }
+    bail!(
+        "every log name of the last {LOG_NAME_TRIES} seconds under {} is taken by an earlier \
+         loop; try again",
+        base_dir.join(".sbxm").join("loop-logs").display()
+    )
 }
 
 /// The loop itself, from its first task to its stop; returns the stop's message.
