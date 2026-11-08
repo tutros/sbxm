@@ -414,6 +414,41 @@ fn a_low_sandbox_drive_refuses_before_resuming() {
     assert!(!out.out.contains("resuming"), "{}", out.out);
 }
 
+// The machine's sandbox slot (issue 504, decision 304).
+
+#[test]
+fn a_resume_with_no_free_slot_and_no_wait_refuses_before_resuming() {
+    let f = config();
+    leave_in(&f, Stage::Working, Status::Failed);
+    let task_json = record::task_dir(&f.env.base_dir(), "issue-41").join("task.json");
+    let before = std::fs::read(&task_json).unwrap();
+    let backend = backend(&f, &[CLEAN]);
+    let mut opts = options(&f, None);
+    opts.disk = common::slot::full(&f.env, true);
+
+    let out = go(&f, &opts, &backend, &Gone);
+
+    let err = format!("{:#}", out.result.unwrap_err());
+    assert!(err.starts_with(&common::slot::refusal()), "{err}");
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert_eq!(std::fs::read(&task_json).unwrap(), before);
+}
+
+#[test]
+fn a_resume_waits_for_the_slot_then_resumes() {
+    let f = config();
+    leave_in(&f, Stage::Working, Status::Failed);
+    let backend = backend(&f, &[CLEAN]);
+    let mut opts = options(&f, None);
+    opts.disk = common::slot::full_until_first_wait(&f.env);
+
+    let out = go(&f, &opts, &backend, &Gone);
+
+    out.result.unwrap();
+    assert!(out.out.contains("resuming"), "{}", out.out);
+    assert!(common::slot::holder(&f.env).is_none());
+}
+
 #[test]
 fn a_refused_resume_is_refused_for_its_own_reason_first() {
     let f = config();

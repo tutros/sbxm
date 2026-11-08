@@ -19,6 +19,7 @@ use crate::disk;
 use crate::github::GitHubBackend;
 use crate::harness::Harness;
 use crate::headless::RunStatus;
+use crate::slot;
 use crate::task::config::TaskConfig;
 use crate::task::finish;
 use crate::task::gates::HostRunner;
@@ -126,9 +127,14 @@ pub fn run(
     resume::check_ambiguous(&prepared.record, opts.forget_ambiguous)?;
     // A cloud sandbox doesn't use the drive of `sbx`'s local sandbox state (P11, decision
     // 262(h)).
-    if location == Location::Local {
-        disk::require(&global, config_dir, &opts.disk)?;
-    }
+    // Held until the resumed task ends (decision 304); a cloud task takes none.
+    let _slot = match location {
+        Location::Local => {
+            disk::require(&global, config_dir, &opts.disk)?;
+            slot::take(&global, &opts.disk.slot, Some(&id), warn)?
+        }
+        Location::Cloud => slot::Slot::none(),
+    };
     if resume::only_push_left(&prepared.record) {
         writeln!(
             out,

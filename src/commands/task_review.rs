@@ -15,6 +15,7 @@ use crate::disk;
 use crate::github::GitHubBackend;
 use crate::harness::Harness;
 use crate::run::config::{check_model_flag, headless_harness, parse_duration};
+use crate::slot;
 use crate::task::config::TaskConfig;
 use crate::task::finish;
 use crate::task::gates::HostRunner;
@@ -167,13 +168,22 @@ pub fn run(
     }
 }
 
-/// The free-space check of the sandbox drive (decision 194), for a review whose sandboxes run
-/// here: a cloud sandbox doesn't use that drive (P11, decision 262(h)).
-fn check_disk(config_dir: &std::path::Path, opts: &Options, location: Location) -> Result<()> {
+/// The free-space check of the sandbox drive (decision 194), then the machine's sandbox slot
+/// for task `id`, held until the review ends (decision 304), for a review whose sandboxes run
+/// here: a cloud sandbox uses neither (P11, decision 262(h)).
+fn check_disk(
+    config_dir: &std::path::Path,
+    opts: &Options,
+    location: Location,
+    id: &str,
+    warn: &mut dyn Write,
+) -> Result<slot::Slot> {
     if location == Location::Local {
-        disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?;
+        let global = GlobalConfig::load(config_dir)?;
+        disk::require(&global, config_dir, &opts.disk)?;
+        return slot::take(&global, &opts.disk.slot, Some(id), warn);
     }
-    Ok(())
+    Ok(slot::Slot::none())
 }
 
 /// The committer identity a cloud worker sandbox made again for a fix round gives its clone
@@ -218,7 +228,7 @@ fn run_issue(
     let mut prepared = Prepared::open_locked(&base_dir, &id, probe)?;
     // The task's sandboxes run where it was started (decision 253).
     let location = prepared.record.location;
-    check_disk(config_dir, opts, location)?;
+    let _slot = check_disk(config_dir, opts, location, &id, warn)?;
     let identity = cloud_identity(opts, &prepared.record)?;
     let backend = backend.located(location);
     // The worker is whoever the task recorded: a flag of `task start`/`run` may have chosen it, and
@@ -412,7 +422,7 @@ fn run_spec(
     let mut prepared = Prepared::open_locked(&base_dir, &id, probe)?;
     // As `run_issue`: where the task was started, and the worker it recorded.
     let location = prepared.record.location;
-    check_disk(config_dir, opts, location)?;
+    let _slot = check_disk(config_dir, opts, location, &id, warn)?;
     let identity = cloud_identity(opts, &prepared.record)?;
     let backend = backend.located(location);
     let mut config = config.clone();
@@ -515,7 +525,7 @@ fn run_pr(
             recorded
         }
     };
-    check_disk(config_dir, opts, location)?;
+    let _slot = check_disk(config_dir, opts, location, &id, warn)?;
     let backend = backend.located(location);
     let repo_name = resolve_repo(opts.repo.as_deref(), &opts.repo_root)?;
     // Checked before the refusal below, which prints it in a command.

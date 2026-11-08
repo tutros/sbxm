@@ -567,6 +567,53 @@ fn ignore_disk_runs_anyway() {
     .unwrap();
 }
 
+// ---- The machine's sandbox slot (issue 504, decision 304) ----
+
+fn run_with_disk(env: &Env, disk: &sbxm::disk::Guard, backend: &FakeBackend) -> Ran {
+    let path = env.tmp.path().join("run.toml");
+    std::fs::write(&path, format!("{TASK}{TWO_CLAUDES}")).unwrap();
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let result = run::run(&env.config_dir(), &path, disk, backend, &mut out, &mut warn);
+    Ran {
+        result,
+        out: String::from_utf8(out).unwrap(),
+        warn: String::from_utf8(warn).unwrap(),
+    }
+}
+
+#[test]
+fn a_run_with_no_free_slot_and_no_wait_refuses_before_its_folder_or_a_sandbox() {
+    let env = Env::new();
+    let backend = pong();
+
+    let ran = run_with_disk(&env, &common::slot::full(&env, true), &backend);
+
+    let err = format!("{:#}", ran.result.unwrap_err());
+    assert!(err.starts_with(&common::slot::refusal()), "{err}");
+    assert!(backend.creates().is_empty(), "{:?}", backend.log());
+    nothing_written(&env);
+}
+
+#[test]
+fn a_run_holds_one_slot_for_all_its_contestants_and_gives_it_back() {
+    let env = Env::new();
+    let slot = common::slot::slot_file(&env);
+    let first = std::sync::Mutex::new(None::<String>);
+    let backend = pong().with_create_hook(move |_| {
+        let held: sbxm::slot::Holder =
+            serde_json::from_str(&std::fs::read_to_string(&slot).unwrap()).unwrap();
+        let mut first = first.lock().unwrap();
+        assert_eq!(first.get_or_insert(held.token.clone()), &held.token);
+    });
+
+    let ran = run_with_disk(&env, &common::slot::free(&env), &backend);
+
+    ran.result.unwrap();
+    assert_eq!(backend.creates().len(), 2);
+    assert!(common::slot::holder(&env).is_none());
+    assert!(!ran.warn.contains("sandbox slot"), "{}", ran.warn);
+}
+
 #[test]
 fn run_takes_ignore_disk() {
     let env = Env::new();

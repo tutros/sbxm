@@ -453,6 +453,7 @@ fn real_env(terminal: bool, width: usize, iterations: Option<usize>) -> Env {
         terminal,
         width,
         iterations,
+        slots: None,
         disk: quiet_disk(),
     }
 }
@@ -566,6 +567,7 @@ fn watch_on_a_non_terminal_prints_once_and_returns() {
         terminal: false,
         width: 80,
         iterations: None,
+        slots: None,
         disk: quiet_disk(),
     };
     let mut out = Vec::new();
@@ -602,6 +604,7 @@ fn watch_on_a_terminal_clears_the_screen_and_sleeps_between_frames() {
         terminal: true,
         width: 80,
         iterations: Some(3),
+        slots: None,
         disk: quiet_disk(),
     };
     let mut out = Vec::new();

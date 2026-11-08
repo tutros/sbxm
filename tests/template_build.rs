@@ -111,6 +111,22 @@ fn too_little_free_disk_is_refused_before_any_write() {
     assert!(message.contains(LOW_DISK), "{message}");
 }
 
+/// Issue 504: `template build` takes the machine's sandbox slot (decision 304); with `--no-wait`
+/// and no free slot it refuses before any write or `sbx` call.
+#[test]
+fn no_free_slot_with_no_wait_is_refused_before_any_write() {
+    let env = Env::new();
+    env.write_profile("default", OPTED_IN);
+    let options = template_build::Options {
+        disk: common::slot::full(&env, true),
+        ..options(Harness::Claude)
+    };
+
+    let message = refused(&env, &options, &sbx_046());
+
+    assert!(message.starts_with(&common::slot::refusal()), "{message}");
+}
+
 #[test]
 fn the_cli_runs_template_build_and_reports_a_refusal() {
     let env = Env::new();

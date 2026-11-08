@@ -123,6 +123,12 @@ fn build(
     let sbx_version = backend.version()?;
     template::check_sbx_version(&sbx_version)?;
     disk::require(&config, config_dir, &options.disk)?;
+    // `template build` holds the machine's sandbox slot until it ends (decision 304); a rebuild
+    // inside a task (`waiting`) runs under the task's own.
+    let _slot = match waiting {
+        None => crate::slot::take(&config, &options.disk.slot, None, warn)?,
+        Some(_) => crate::slot::Slot::none(),
+    };
     let now = match options.now {
         Some(now) => now,
         None => SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs(),

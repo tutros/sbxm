@@ -214,6 +214,7 @@ fn env(disk: Disk) -> Env {
         terminal: false,
         width: 80,
         iterations: None,
+        slots: None,
         disk,
     }
 }

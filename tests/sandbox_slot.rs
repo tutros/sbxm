@@ -265,6 +265,52 @@ fn two_waiting_commands_start_in_arrival_order() {
     );
 }
 
+/// `task loop` takes the slot per task: a command started by hand while the loop's task holds it
+/// gets it when that task ends, and the loop's next task waits behind it.
+#[test]
+fn a_hand_command_runs_between_two_loop_tasks_and_the_next_one_waits() {
+    let env = Env::new();
+    let config = config(&env, Some(1));
+    let dir = slots_dir(&env);
+    let (first, _) = gate(&env, vec![(B, 3000)], |_| panic!("the first task waited"));
+    let task_1 = slot::take(&config, &first, Some("issue-1"), &mut Vec::new()).unwrap();
+    // The hand command, started meanwhile, waits in line.
+    let hand = dir
+        .join("queue")
+        .join(format!("{:032}-{B:010}-000000.json", 1u64));
+    let b = holder(B, 3000, "sbxm task review --pr 5", Some("pr-5"));
+    write(&hand, &b);
+    drop(task_1);
+
+    let (slot_path, ticket) = (slot_file(&dir, 1), hand.clone());
+    let (second, sleeps) = gate(&env, vec![(B, 3000)], move |n| match n {
+        // The hand command takes the free slot first.
+        0 => {
+            assert!(!slot_path.exists(), "the loop's next task jumped the line");
+            write(&slot_path, &b);
+            std::fs::remove_file(&ticket).unwrap();
+        }
+        // ... and ends.
+        1 => std::fs::remove_file(&slot_path).unwrap(),
+        _ => {}
+    });
+    let mut warn = Vec::new();
+    let task_2 = slot::take(&config, &second, Some("issue-2"), &mut warn).unwrap();
+    assert_eq!(sleeps.lock().unwrap().len(), 2);
+    assert_eq!(
+        read_holder(task_2.path().unwrap()).task.as_deref(),
+        Some("issue-2")
+    );
+    let line = "sbxm task review --pr 5 (task pr-5, process 4100002, since 2026-11-08T10:00:00Z)";
+    assert_eq!(
+        String::from_utf8(warn).unwrap(),
+        format!(
+            "waiting for a sandbox slot: {line} is waiting ahead of it\nwaiting for a sandbox \
+             slot: held by {line}\n"
+        )
+    );
+}
+
 #[test]
 fn two_slots_let_two_commands_run_and_a_third_waits() {
     let env = Env::new();
@@ -475,18 +521,34 @@ fn ctrl_c_while_holding_a_slot_gives_it_back() {
 }
 
 #[test]
-fn status_names_the_holder_when_slots_are_set() {
+fn status_names_the_holder_in_one_line() {
     let env = Env::new();
     let (gate, _) = gate(&env, vec![(A, 2000)], |_| {});
-    assert_eq!(slot::status_line(&config(&env, None), &gate), None);
-    let config = config(&env, Some(1));
+    assert_eq!(slot::status_line(1, &gate), "sandbox slots: 0 of 1 held");
+    let dir = slots_dir(&env);
+    write(&slot_file(&dir, 1), &a_holder());
     assert_eq!(
-        slot::status_line(&config, &gate).as_deref(),
-        Some("sandbox slots: 0 of 1 held")
+        slot::status_line(1, &gate),
+        format!("sandbox slots: 1 of 1 held by {A_LINE}")
     );
-    write(&slot_file(&slots_dir(&env), 1), &a_holder());
+    // A gone waiter's ticket is neither counted nor removed: status only reads.
+    let dead = dir
+        .join("queue")
+        .join(format!("{:032}-{DEAD:010}-000000.json", 1u64));
+    write(&dead, &holder(DEAD, 2000, "sbxm run eval.toml", None));
+    write(
+        &dir.join("queue")
+            .join(format!("{:032}-{B:010}-000000.json", 2u64)),
+        &holder(B, 3000, "sbxm run eval.toml", None),
+    );
+    let (gate, _) = gate_with(&env, vec![(A, 2000), (B, 3000)]);
     assert_eq!(
-        slot::status_line(&config, &gate),
-        Some(format!("sandbox slots: 1 of 1 held by {A_LINE}"))
+        slot::status_line(1, &gate),
+        format!("sandbox slots: 1 of 1 held by {A_LINE}, 1 waiting")
     );
+    assert!(dead.exists());
+}
+
+fn gate_with(env: &Env, others: Vec<(u32, u64)>) -> (Gate, Sleeps) {
+    gate(env, others, |_| {})
 }

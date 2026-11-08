@@ -161,6 +161,68 @@ fn run_into(
     )
 }
 
+// ---- The machine's sandbox slot (issue 504, decision 304) ----
+
+fn run_with_disk(
+    f: &Fixture,
+    disk: sbxm::disk::Guard,
+    backend: &FakeBackend,
+    github: &FakeGitHub,
+) -> (anyhow::Result<()>, String) {
+    let mut warn = Vec::new();
+    let result = run(
+        &f.env.config_dir(),
+        &Options {
+            disk,
+            ..options(f, 7)
+        },
+        backend,
+        github,
+        &Probe,
+        &FakeHostRunner::default(),
+        &mut Vec::new(),
+        &mut warn,
+    );
+    (result, String::from_utf8(warn).unwrap())
+}
+
+#[test]
+fn a_pr_review_with_no_free_slot_and_no_wait_refuses_creating_nothing() {
+    let f = config("");
+    let (backend, github) = (backend(&f, &[CLEAN]), github());
+
+    let (result, _) = run_with_disk(&f, common::slot::full(&f.env, true), &backend, &github);
+
+    let err = format!("{:#}", result.unwrap_err());
+    assert!(err.starts_with(&common::slot::refusal()), "{err}");
+    assert!(backend.creates().is_empty(), "{:?}", backend.log());
+    assert!(!meta(&f).exists());
+}
+
+#[test]
+fn a_pr_review_waits_for_the_slot_then_reviews_and_gives_it_back() {
+    let f = config("");
+    add_pr_head(&f, 7);
+    let (backend, github) = (backend(&f, &[CLEAN]), github());
+
+    let (result, warn) = run_with_disk(
+        &f,
+        common::slot::full_until_first_wait(&f.env),
+        &backend,
+        &github,
+    );
+
+    result.unwrap();
+    let wait = format!(
+        "waiting for a sandbox slot: held by {}\n",
+        common::slot::HOLDER
+    );
+    assert!(warn.starts_with(&wait), "{warn}");
+    assert_eq!(warn.matches("sandbox slot").count(), 1, "{warn}");
+    assert_eq!(count(&backend, "codex"), 1);
+    assert!(common::slot::holder(&f.env).is_none());
+}
+
 /// A `Write` that always fails, modeling output that can't be delivered (e.g. a closed pipe).
 struct FailingWrite;
 

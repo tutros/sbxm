@@ -470,6 +470,33 @@ fn rebuild_codex_leaves_claude_alone() {
     );
 }
 
+// Issue 504: `open` takes no sandbox slot (decision 304), even when it creates the sandbox and
+// the slot is full.
+
+#[test]
+fn open_takes_no_sandbox_slot_while_the_slot_is_full() {
+    let env = Env::new();
+    let backend = FakeBackend::default();
+
+    open::run(
+        &env.config_dir(),
+        "demo",
+        &open::Options {
+            disk: common::slot::full(&env, true),
+            ..Default::default()
+        },
+        &backend,
+        &mut Vec::new(),
+    )
+    .unwrap();
+
+    assert_eq!(backend.creates().len(), 1);
+    assert_eq!(
+        common::slot::holder(&env).unwrap().process.pid,
+        common::slot::HOLDER_PID
+    );
+}
+
 // Issue 210: `open` refuses on a low sandbox drive only when it would create a sandbox.
 
 fn open_low(env: &Env, backend: &FakeBackend, rebuild: bool) -> (anyhow::Result<()>, String) {

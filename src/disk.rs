@@ -129,6 +129,9 @@ pub struct Guard {
     pub ignore: bool,
     /// How a check that waits for space to come back sleeps between reads (issue 389).
     pub sleep: fn(Duration),
+    /// The machine-wide sandbox slot the command takes (decision 304), carried here since it
+    /// guards the same commands, the ones creating a local sandbox.
+    pub slot: crate::slot::Gate,
 }
 
 impl Default for Guard {
@@ -138,6 +141,7 @@ impl Default for Guard {
             default_state_dir: None,
             ignore: false,
             sleep: std::thread::sleep,
+            slot: crate::slot::Gate::default(),
         }
     }
 }
@@ -147,8 +151,15 @@ impl Guard {
         Guard {
             default_state_dir: platform_state_dir(),
             ignore,
+            slot: crate::slot::Gate::real(false),
             ..Guard::default()
         }
+    }
+
+    /// The same guard, whose slot refuses at once instead of waiting (`--no-wait`, decision 304).
+    pub fn no_wait(mut self, no_wait: bool) -> Self {
+        self.slot.no_wait = no_wait;
+        self
     }
 }
 

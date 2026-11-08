@@ -558,10 +558,13 @@ fn live_tickets(
     Ok(live)
 }
 
-/// Who holds the slots of `config` now, for `sbxm status`: `None` when `sandbox_slots` is unset.
-pub fn status_line(config: &GlobalConfig, gate: &Gate) -> Option<String> {
-    let count = config.resources.sandbox_slots?;
-    let dir = gate.dir().ok()?;
+/// Who holds the `count` slots of `gate`'s folder now, in one line for `sbxm status`. Reads only.
+pub fn status_line(count: u32, gate: &Gate) -> String {
+    let mut line = "sandbox slots: ".to_owned();
+    let Ok(dir) = gate.dir() else {
+        line.push_str(&format!("{count}, in a folder that can't be found"));
+        return line;
+    };
     let slots = Slots {
         dir: &dir,
         count,
@@ -574,15 +577,13 @@ pub fn status_line(config: &GlobalConfig, gate: &Gate) -> Option<String> {
             _ => None,
         })
         .collect();
-    let waiting = live_tickets(&dir.join(QUEUE), None, &*gate.probe, false)
-        .map(|t| t.len())
-        .unwrap_or(0);
-    let mut line = format!("sandbox slots: {} of {count} held", holders.len());
+    line.push_str(&format!("{} of {count} held", holders.len()));
     if !holders.is_empty() {
         line.push_str(&format!(" by {}", holders.join("; ")));
     }
+    let waiting = live_tickets(&dir.join(QUEUE), None, &*gate.probe, false).map_or(0, |t| t.len());
     if waiting > 0 {
         line.push_str(&format!(", {waiting} waiting"));
     }
-    Some(line)
+    line
 }

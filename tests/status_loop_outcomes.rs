@@ -269,6 +269,7 @@ fn section(base: &Path) -> String {
         terminal: false,
         width: 200,
         iterations: None,
+        slots: None,
         disk: sbxm::status::footer::Disk {
             free_space: |_| Ok(40 * 1024 * 1024 * 1024),
             same_drive: |_, _| true,

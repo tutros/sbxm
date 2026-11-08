@@ -12,6 +12,7 @@ use crate::config::GlobalConfig;
 use crate::disk;
 use crate::harness::Harness;
 use crate::run::orchestrate::in_sandbox_path;
+use crate::slot;
 use crate::task::config::TaskConfig;
 use crate::task::gates::HostRunner;
 use crate::task::pipeline::{self, Prepared, TaskEnv, Tiers};
@@ -75,8 +76,9 @@ pub fn run(
     // The gates run where the task's record says (decision 253), whatever the config says now.
     let location = prepared.record.location;
     // A local task whose worker sandbox went when its last phase ended makes it again for the
-    // gates (issue 341), so the drive of `sbx`'s sandbox state is checked first (decision 194).
-    if location == Location::Local
+    // gates (issue 341), so the drive of `sbx`'s sandbox state is checked first (decision 194),
+    // and the machine's sandbox slot is held until the gates end (decision 304).
+    let _slot = if location == Location::Local
         && prepared
             .record
             .worker
@@ -84,7 +86,10 @@ pub fn run(
             .is_some_and(|w| !prepared.record.has_open_sandbox(&w.sandbox))
     {
         disk::require(&global, config_dir, &opts.disk)?;
-    }
+        slot::take(&global, &opts.disk.slot, Some(&id), out)?
+    } else {
+        slot::Slot::none()
+    };
     let identity = match (location, &opts.identity) {
         (Location::Local, _) => None,
         (Location::Cloud, Some(identity)) => Some(identity.clone()),

@@ -178,6 +178,64 @@ fn refused(f: &Fixture, github: &FakeGitHub) -> String {
     message
 }
 
+// ---- The machine's sandbox slot (issue 504, decision 304) ----
+
+#[test]
+fn a_fix_with_no_free_slot_and_no_wait_refuses_creating_nothing() {
+    let f = config();
+    let head = pr_head(&f);
+    let github = github(pr7(&head), vec![posted_by("tutros", &head, 1)]);
+    let backend = backend(&f, &head, || {});
+
+    let result = run(
+        &f.env.config_dir(),
+        &Options {
+            disk: common::slot::full(&f.env, true),
+            ..options(&f)
+        },
+        &backend,
+        &github,
+        &Probe,
+        &FakeHostRunner::default(),
+        &mut Vec::new(),
+        &mut Vec::new(),
+    );
+
+    let err = format!("{:#}", result.unwrap_err());
+    assert!(err.starts_with(&common::slot::refusal()), "{err}");
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert!(!record::tasks_root(&f.env.base_dir()).exists());
+    assert_eq!(origin_head(&f), head);
+}
+
+#[test]
+fn a_fix_holds_the_slot_while_it_runs_and_gives_it_back() {
+    let f = config();
+    let head = pr_head(&f);
+    let github = github(pr7(&head), vec![posted_by("tutros", &head, 1)]);
+    let env_slot = common::slot::slot_file(&f.env);
+    let backend = backend(&f, &head, move || {
+        assert!(env_slot.exists(), "the reviewer ran without the slot");
+    });
+
+    let result = run(
+        &f.env.config_dir(),
+        &Options {
+            disk: common::slot::free(&f.env),
+            ..options(&f)
+        },
+        &backend,
+        &github,
+        &Probe,
+        &FakeHostRunner::default(),
+        &mut Vec::new(),
+        &mut Vec::new(),
+    );
+
+    result.unwrap();
+    assert!(common::slot::holder(&f.env).is_none());
+}
+
 #[test]
 fn one_must_fix_is_fixed_gated_reviewed_and_pushed_and_the_pr_gets_a_review_of_the_new_head() {
     let f = config();

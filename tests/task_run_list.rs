@@ -208,6 +208,36 @@ fn two_issues_run_in_order_and_both_reach_ready() {
 /// failed status (`SandboxBackend::exec` itself still ran): an ordinary per-task stop, unlike
 /// `sbx` itself failing to run a command (issue 201 review M-2, repeat of M-2; see
 /// `sbx_exec_failing_for_the_worker_stops_the_list` below).
+// Issue 504: the whole list holds one sandbox slot, through every target (decision 304).
+
+#[test]
+fn a_list_holds_one_slot_through_every_target() {
+    let f = config();
+    let slot = common::slot::slot_file(&f.env);
+    let first = std::sync::Mutex::new(None::<String>);
+    let b = backend(&f).with_create_hook(move |spec| {
+        let held: sbxm::slot::Holder =
+            serde_json::from_str(&std::fs::read_to_string(&slot).unwrap()).unwrap();
+        let mut first = first.lock().unwrap();
+        assert_eq!(
+            first.get_or_insert(held.token.clone()),
+            &held.token,
+            "{}",
+            spec.name
+        );
+    });
+    let gh = github();
+    let mut options = opts(&f);
+    options.disk = common::slot::free(&f.env);
+    let targets = [Target::Issue(41), Target::Issue(42)];
+
+    let out = go(&f, &options, &targets, None, &b, &gh);
+
+    out.result.unwrap();
+    assert!(b.creates().len() >= 4, "{:?}", b.creates().len());
+    assert!(common::slot::holder(&f.env).is_none());
+}
+
 #[test]
 fn a_failed_task_does_not_stop_the_list() {
     let f = config();
@@ -316,6 +346,7 @@ fn a_low_disk_before_a_later_task_stops_the_list_and_keeps_the_earlier_result() 
         default_state_dir: Some(state),
         ignore: false,
         sleep: |_| {},
+        slot: Default::default(),
     };
     let targets = [Target::Issue(41), Target::Issue(42)];
 
