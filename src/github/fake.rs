@@ -14,6 +14,8 @@ pub enum GhCall {
     Whoami,
     DefaultBranch(String),
     IssuesOpen(String),
+    /// Repo, label.
+    IssuesOpenLabeled(String, String),
     Issue(String, u32),
     Pr(String, u32),
     PrMergeState(String, u32),
@@ -344,6 +346,25 @@ impl GitHubBackend for FakeGitHub {
     fn issues_open(&self, repo: &str) -> Result<Vec<Issue>> {
         self.record(GhCall::IssuesOpen(repo.to_owned()))?;
         Ok(self.open_issues.lock().unwrap().clone())
+    }
+
+    /// The scripted open issues and the open ones created through the fake, with the label.
+    fn issues_open_labeled(&self, repo: &str, label: &str) -> Result<Vec<Issue>> {
+        self.record(GhCall::IssuesOpenLabeled(repo.to_owned(), label.to_owned()))?;
+        let mut found: Vec<Issue> = Vec::new();
+        let open = self.open_issues.lock().unwrap().clone();
+        let created = self.all_issues.lock().unwrap().clone();
+        for issue in open
+            .into_iter()
+            .chain(created.into_iter().filter(|i| i.open))
+        {
+            if issue.labels.iter().any(|l| l == label)
+                && !found.iter().any(|f| f.number == issue.number)
+            {
+                found.push(issue);
+            }
+        }
+        Ok(found)
     }
 
     fn issue(&self, repo: &str, number: u32) -> Result<IssueText> {

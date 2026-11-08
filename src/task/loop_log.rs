@@ -87,10 +87,9 @@ pub fn post(
         "Loop started {start}, stopped: {stop}. Local file: `{}`",
         log.display()
     );
-    let open = github.issues_open(repo)?;
-    let found = open
+    let found = github
+        .issues_open_labeled(repo, LABEL)?
         .iter()
-        .filter(|i| i.labels.iter().any(|l| l == LABEL))
         .map(|i| i.number)
         .min();
     let number = match found {

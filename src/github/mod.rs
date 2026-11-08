@@ -181,6 +181,10 @@ pub trait GitHubBackend: Send + Sync {
     fn whoami(&self) -> Result<String>;
     fn default_branch(&self, repo: &str) -> Result<String>;
     fn issues_open(&self, repo: &str) -> Result<Vec<Issue>>;
+    /// Every open issue labeled `label`, the label being the listing's own filter, so none is
+    /// missed behind newer issues without it; an error rather than a partial list when there may
+    /// be more than the listing's limit (review M-1 of issue 463).
+    fn issues_open_labeled(&self, repo: &str, label: &str) -> Result<Vec<Issue>>;
     fn issue(&self, repo: &str, number: u32) -> Result<IssueText>;
     fn pr(&self, repo: &str, number: u32) -> Result<PrInfo>;
     fn pr_merge_state(&self, repo: &str, number: u32) -> Result<PrMergeState>;
