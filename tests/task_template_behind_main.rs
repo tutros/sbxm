@@ -2,12 +2,16 @@
 //! warm template that follows `main` (decision 290), is refused by `stale_lock::refresh` with the
 //! way out that exists for it (`task fix --pr N`, or `task run --restart`), never a template
 //! rebuild the next task would undo. When sbxm refuses doesn't change. One test per boundary case.
+//!
+//! The tests whose `main` moves rebuild the template, whose clone failed now and then on Linux CI
+//! (issue 468): they run [`traced`], so a failure ends with the last lines of git's trace.
 
 mod common;
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use common::git_trace::traced;
 use common::{Env, git, task_fixture};
 use sbxm::backend::FakeBackend;
 use sbxm::commands::{new, template_build};
@@ -154,71 +158,86 @@ fn refused(review: anyhow::Result<()>) -> String {
 
 #[test]
 fn an_issue_task_with_a_recorded_pr_behind_main_names_task_fix_with_that_pr() {
-    let (_f, backend, review) = review_41(&["a.txt"], Some(MOVED), |task| {
-        task.pr = Some("https://github.com/o/r/pull/9".into());
-    });
+    traced(
+        "an_issue_task_with_a_recorded_pr_behind_main_names_task_fix_with_that_pr",
+        || {
+            let (_f, backend, review) = review_41(&["a.txt"], Some(MOVED), |task| {
+                task.pr = Some("https://github.com/o/r/pull/9".into());
+            });
 
-    let err = refused(review);
-    assert!(err.contains("`sbxm task fix --pr 9`"), "{err}");
-    assert!(err.contains("decision 290"), "{err}");
-    assert!(!err.contains("template build"), "{err}");
-    assert!(!err.contains("task resume"), "{err}");
-    assert!(!err.contains("--restart"), "{err}");
-    assert!(!review_sandbox_made(&backend));
+            let err = refused(review);
+            assert!(err.contains("`sbxm task fix --pr 9`"), "{err}");
+            assert!(err.contains("decision 290"), "{err}");
+            assert!(!err.contains("template build"), "{err}");
+            assert!(!err.contains("task resume"), "{err}");
+            assert!(!err.contains("--restart"), "{err}");
+            assert!(!review_sandbox_made(&backend));
+        },
+    );
 }
 
 #[test]
 fn an_issue_task_without_a_pr_behind_main_names_task_run_restart_issue() {
-    let (_f, backend, review) = review_41(&["a.txt"], Some(MOVED), |_| {});
+    traced(
+        "an_issue_task_without_a_pr_behind_main_names_task_run_restart_issue",
+        || {
+            let (_f, backend, review) = review_41(&["a.txt"], Some(MOVED), |_| {});
 
-    let err = refused(review);
-    assert!(
-        err.contains("`sbxm task run --restart --issue 41`"),
-        "{err}"
+            let err = refused(review);
+            assert!(
+                err.contains("`sbxm task run --restart --issue 41`"),
+                "{err}"
+            );
+            assert!(!err.contains("template build"), "{err}");
+            assert!(!err.contains("task resume"), "{err}");
+            assert!(!err.contains("task fix"), "{err}");
+            assert!(!err.contains(BRANCH_CHANGED), "{err}");
+            assert!(!review_sandbox_made(&backend));
+        },
     );
-    assert!(!err.contains("template build"), "{err}");
-    assert!(!err.contains("task resume"), "{err}");
-    assert!(!err.contains("task fix"), "{err}");
-    assert!(!err.contains(BRANCH_CHANGED), "{err}");
-    assert!(!review_sandbox_made(&backend));
 }
 
 #[test]
 fn a_spec_task_without_a_pr_behind_main_names_task_run_restart_spec() {
-    let f = task_fixture::fixture();
-    f.env.write_profile("default", PROFILE);
-    let main = push_main_lock(&f, "main-lock", LOCK);
-    let spec = task_fixture::spec_file(&f, "Build a thing.\n");
-    let (id, _) = record::spec_id(&spec).unwrap();
-    let worker = task_fixture::play(
-        &f.env.base_dir().join("tasks").join(&id),
-        "main",
-        &id,
-        task_fixture::Play {
-            commits: vec!["a.txt".into()],
-            result_md: Some(b"done\n".to_vec()),
-            bundle_bytes: None,
+    traced(
+        "a_spec_task_without_a_pr_behind_main_names_task_run_restart_spec",
+        || {
+            let f = task_fixture::fixture();
+            f.env.write_profile("default", PROFILE);
+            let main = push_main_lock(&f, "main-lock", LOCK);
+            let spec = task_fixture::spec_file(&f, "Build a thing.\n");
+            let (id, _) = record::spec_id(&spec).unwrap();
+            let worker = task_fixture::play(
+                &f.env.base_dir().join("tasks").join(&id),
+                "main",
+                &id,
+                task_fixture::Play {
+                    commits: vec!["a.txt".into()],
+                    result_md: Some(b"done\n".to_vec()),
+                    bundle_bytes: None,
+                },
+            );
+            let backend = backend().with_exec_hook(worker);
+            build_warm(&f.env, &backend, &main, Harness::Claude);
+            build_warm(&f.env, &backend, &main, Harness::Codex);
+            let (github, source) = (FakeGitHub::default(), task_fixture::source(&f));
+            let ctx = task_fixture::ctx(&f, &source, &backend, &github);
+            let mut prepared = pipeline::prepare_spec(&ctx, &spec).unwrap();
+            pipeline::run_worker(&ctx, &mut prepared).unwrap();
+            push_main_lock(&f, "main-moved", MOVED);
+
+            let err = refused(pipeline::review_issue(&ctx.env(), &mut prepared).map(|_| ()));
+
+            assert!(
+                err.contains("`sbxm task run --restart --spec <file>`"),
+                "{err}"
+            );
+            assert!(!err.contains("template build"), "{err}");
+            assert!(!err.contains("task resume"), "{err}");
+            assert!(!err.contains("--issue"), "{err}");
+            assert!(!review_sandbox_made(&backend));
         },
     );
-    let backend = backend().with_exec_hook(worker);
-    build_warm(&f.env, &backend, &main, Harness::Claude);
-    build_warm(&f.env, &backend, &main, Harness::Codex);
-    let (github, source) = (FakeGitHub::default(), task_fixture::source(&f));
-    let ctx = task_fixture::ctx(&f, &source, &backend, &github);
-    let mut prepared = pipeline::prepare_spec(&ctx, &spec).unwrap();
-    pipeline::run_worker(&ctx, &mut prepared).unwrap();
-    push_main_lock(&f, "main-moved", MOVED);
-
-    let err = refused(pipeline::review_issue(&ctx.env(), &mut prepared).map(|_| ()));
-
-    assert!(
-        err.contains("`sbxm task run --restart --spec <file>`"),
-        "{err}"
-    );
-    assert!(!err.contains("template build"), "{err}");
-    assert!(!err.contains("task resume"), "{err}");
-    assert!(!err.contains("--issue"), "{err}");
-    assert!(!review_sandbox_made(&backend));
 }
 
 #[test]
@@ -237,13 +256,18 @@ fn a_branch_whose_lock_equals_the_templates_is_not_refused() {
 /// Decision 291, unchanged: the branch's own lock change is the hand-back, not the new hint.
 #[test]
 fn a_branch_that_changes_the_lock_itself_gets_the_hand_back_unchanged() {
-    let (_f, backend, review) = review_41(&["Cargo.lock"], Some(MOVED), |_| {});
+    traced(
+        "a_branch_that_changes_the_lock_itself_gets_the_hand_back_unchanged",
+        || {
+            let (_f, backend, review) = review_41(&["Cargo.lock"], Some(MOVED), |_| {});
 
-    let err = refused(review);
-    assert!(err.contains(BRANCH_CHANGED), "{err}");
-    assert!(err.contains("Needs a decision"), "{err}");
-    assert!(!err.contains("task run --restart"), "{err}");
-    assert!(!review_sandbox_made(&backend));
+            let err = refused(review);
+            assert!(err.contains(BRANCH_CHANGED), "{err}");
+            assert!(err.contains("Needs a decision"), "{err}");
+            assert!(!err.contains("task run --restart"), "{err}");
+            assert!(!review_sandbox_made(&backend));
+        },
+    );
 }
 
 /// `sbxm new` behind a strict warm template with other lock files: `template::choose`'s refusal,

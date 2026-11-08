@@ -6,7 +6,8 @@
 //! repository (`--git-dir`) is always a folder sbxm made outside it, the
 //! workspace is only ever a `--work-tree`, and the user's global and system
 //! git config and inherited `GIT_*` variables are switched off so results
-//! don't depend on the machine either.
+//! don't depend on the machine either (all but `GIT_TRACE2_EVENT`, which only
+//! says where git writes its trace).
 
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
@@ -57,6 +58,11 @@ fn retry(
 fn permission_denied(out: &Output) -> bool {
     !out.status.success() && String::from_utf8_lossy(&out.stderr).contains("Permission denied")
 }
+
+/// Keeps git from leaving a detached `git maintenance run --auto` behind (a `git fetch` does), which
+/// could repack or prune a repo's objects while a later `git clone --no-hardlinks` copies them
+/// (issue 468).
+const NO_MAINTENANCE: [&str; 4] = ["-c", "maintenance.auto=false", "-c", "gc.auto=0"];
 
 /// `git <args>` with a hardened environment. `git_dir` and `work_tree` are
 /// passed as `--git-dir`/`--work-tree` when given; `cwd` is where it runs.
@@ -112,13 +118,14 @@ fn command(
         "-c",
         "protocol.allow=never",
     ]);
+    cmd.args(NO_MAINTENANCE);
     cmd.args(args);
     // Nothing inherited may point git somewhere else or make it run code.
     cmd.env_clear();
     cmd.envs(
         environment
             .into_iter()
-            .filter(|(name, _)| !is_git_variable(name)),
+            .filter(|(name, _)| !is_git_variable(name) || is_trace_variable(name)),
     );
     cmd.env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
@@ -131,6 +138,14 @@ fn command(
         .env("GIT_COMMITTER_EMAIL", "sbxm@localhost")
         .env("GIT_COMMITTER_DATE", BASELINE_DATE);
     cmd
+}
+
+/// `GIT_TRACE2_EVENT`, passed through when set: the tests that rebuild a template point it at a
+/// file of their own, so a flaky clone failure shows what git did (issue 468). It only names
+/// where git writes its trace; it can't point git at another repository or make it run code.
+fn is_trace_variable(name: &OsStr) -> bool {
+    name.to_string_lossy()
+        .eq_ignore_ascii_case("GIT_TRACE2_EVENT")
 }
 
 fn is_git_variable(name: &OsStr) -> bool {
@@ -372,7 +387,8 @@ fn parse_check_line(line: &str) -> Result<Option<Object>> {
 
 /// The `GIT_*` variables that keep working for [`user_output`]: where the user's own
 /// config and credentials come from. Every other one (`GIT_DIR`, `GIT_CONFIG_COUNT`, ...)
-/// could point git elsewhere or make it run code, so it is dropped.
+/// could point git elsewhere or make it run code, so it is dropped (but `GIT_TRACE2_EVENT`, see
+/// [`is_trace_variable`]).
 const USER_GIT_VARIABLES: [&str; 7] = [
     "GIT_SSH",
     "GIT_SSH_COMMAND",
@@ -418,11 +434,12 @@ fn user_command(
     environment: impl IntoIterator<Item = (OsString, OsString)>,
 ) -> Command {
     let mut cmd = Command::new("git");
-    cmd.current_dir(cwd).args(args);
+    cmd.current_dir(cwd).args(NO_MAINTENANCE).args(args);
     cmd.env_clear();
     cmd.envs(environment.into_iter().filter(|(name, _)| {
         !is_askpass_variable(name)
             && (!is_git_variable(name)
+                || is_trace_variable(name)
                 || USER_GIT_VARIABLES
                     .iter()
                     .any(|allowed| name.to_string_lossy().eq_ignore_ascii_case(allowed)))
@@ -843,5 +860,66 @@ mod tests {
 
         assert!(out.status.success());
         assert!(String::from_utf8_lossy(&out.stdout).starts_with("git version"));
+    }
+
+    // Issue 468: `git fetch` leaves a detached `git maintenance run --auto` behind, which can
+    // repack or prune `repo.git`'s objects while a later `git clone --no-hardlinks` copies them.
+    fn args_of(cmd: &Command) -> Vec<String> {
+        cmd.get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect()
+    }
+
+    #[test]
+    fn no_git_call_leaves_background_maintenance_behind() {
+        let cwd = Path::new(".");
+        let hardened = args_of(&command(cwd, None, None, &["status"], []));
+        let user = args_of(&user_command(cwd, &["status"], &[], []));
+
+        for args in [hardened, user] {
+            for setting in ["maintenance.auto=false", "gc.auto=0"] {
+                assert!(args.iter().any(|a| a == setting), "{setting} in {args:?}");
+            }
+        }
+    }
+
+    // Issue 468: the tests that rebuild a template capture git's trace, so a flaky clone failure
+    // shows what git did. The variable reaches git only when it is set.
+    #[test]
+    fn a_set_trace2_event_target_reaches_every_git_call() {
+        let cwd = Path::new(".");
+        let inherited = || {
+            [("GIT_TRACE2_EVENT", "/tmp/trace.json")]
+                .map(|(name, value)| (OsString::from(name), OsString::from(value)))
+        };
+        let hardened = command(cwd, None, None, &["status"], inherited());
+        let user = user_command(cwd, &["status"], &[], inherited());
+
+        for cmd in [hardened, user] {
+            let env: Vec<_> = cmd.get_envs().collect();
+            assert!(
+                env.contains(&(
+                    OsStr::new("GIT_TRACE2_EVENT"),
+                    Some(OsStr::new("/tmp/trace.json"))
+                )),
+                "{env:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_unset_trace2_event_target_is_not_invented() {
+        let cwd = Path::new(".");
+        let hardened = command(cwd, None, None, &["status"], []);
+        let user = user_command(cwd, &["status"], &[], []);
+
+        for cmd in [hardened, user] {
+            assert!(
+                !cmd.get_envs()
+                    .any(|(name, _)| name.to_string_lossy().starts_with("GIT_TRACE")),
+                "{:?}",
+                cmd.get_envs().collect::<Vec<_>>()
+            );
+        }
     }
 }
