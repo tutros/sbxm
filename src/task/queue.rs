@@ -67,12 +67,12 @@ impl Progress {
             .map(|o| o.outcome)
     }
 
-    /// Records `outcome` for `issue`, replacing the one it had.
+    /// Records `outcome` for `issue`, replacing the one it had. It goes last, so the outcomes are
+    /// in the order the loop reached them: the held ones in the order it tries them again
+    /// (review M-1).
     pub fn set(&mut self, issue: u32, outcome: Outcome) {
-        match self.outcomes.iter_mut().find(|o| o.issue == issue) {
-            Some(o) => o.outcome = outcome,
-            None => self.outcomes.push(IssueOutcome { issue, outcome }),
-        }
+        self.outcomes.retain(|o| o.issue != issue);
+        self.outcomes.push(IssueOutcome { issue, outcome });
     }
 
     /// Makes `issue` the one the loop is on; an outcome it had (held, or skipped while it waited

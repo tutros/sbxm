@@ -210,8 +210,9 @@ pub fn work_for(base: &Path, file: &LockFile) -> anyhow::Result<Work> {
 /// [`Listed`] from the outcomes the loop recorded in its lock (issue 493), which also say the
 /// tasks done ([`Work::done`]) and, when no record shows it running, the issue the loop is on:
 /// a resume clears the record's process before it takes the task again. The issues with no
-/// outcome are still to come: the held ones first, as the loop tries them before a new issue,
-/// then the rest in the list's order, as many as `--cap` leaves to run; the others are not run.
+/// outcome are still to come: the held ones first, in the order the loop recorded them, which is
+/// the order it tries them again in, before a new issue (review M-1); then the rest in the list's
+/// order; as many as `--cap` leaves to run, and the others are not run.
 fn recorded(
     file: &LockFile,
     progress: &Progress,
@@ -246,7 +247,13 @@ fn recorded(
         ..Listed::default()
     };
     work.done.clear();
-    let mut held = Vec::new();
+    let held: Vec<u32> = progress
+        .outcomes
+        .iter()
+        .filter(|o| o.outcome == Outcome::Held && Some(o.issue) != current)
+        .map(|o| o.issue)
+        .filter(|n| file.issues.contains(n))
+        .collect();
     let mut later = Vec::new();
     for &n in &file.issues {
         let seen = [&out.done, &out.parked, &out.skipped, &held, &later];
@@ -265,7 +272,7 @@ fn recorded(
             }
             Some(Outcome::Parked) => out.parked.push(n),
             Some(Outcome::Skipped) => out.skipped.push(n),
-            Some(Outcome::Held) => held.push(n),
+            Some(Outcome::Held) => {}
             None => later.push(n),
         }
     }

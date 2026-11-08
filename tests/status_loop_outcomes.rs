@@ -59,8 +59,8 @@ struct Seen {
 struct Script {
     base: PathBuf,
     acts: RefCell<HashMap<u32, VecDeque<Act>>>,
-    /// On `run <a>`, the lock planted on `issue-<b>` is freed.
-    unlock_on: Option<(u32, u32)>,
+    /// On `run <a>`, the lock planted on `issue-<b>` is freed, for each `(a, b)`.
+    unlock_on: Vec<(u32, u32)>,
     seen: RefCell<Vec<Seen>>,
 }
 
@@ -102,7 +102,7 @@ impl Script {
         Self {
             base: base.to_owned(),
             acts: RefCell::default(),
-            unlock_on: None,
+            unlock_on: Vec::new(),
             seen: RefCell::default(),
         }
     }
@@ -115,7 +115,7 @@ impl Script {
     }
 
     fn unlocking(mut self, on_run_of: u32, held: u32) -> Self {
-        self.unlock_on = Some((on_run_of, held));
+        self.unlock_on.push((on_run_of, held));
         self
     }
 
@@ -139,11 +139,10 @@ impl Script {
     }
 
     fn act(&self, what: &str, issue: u32) -> Result<()> {
-        if what == "run"
-            && let Some((on, held)) = self.unlock_on
-            && on == issue
-        {
-            let _ = fs::remove_file(task_dir(&self.base, held).join("lock.json"));
+        if what == "run" {
+            for &(_, held) in self.unlock_on.iter().filter(|(on, _)| *on == issue) {
+                let _ = fs::remove_file(task_dir(&self.base, held).join("lock.json"));
+            }
         }
         let act = self
             .acts
@@ -208,6 +207,7 @@ impl Steps for Script {
     }
 
     fn finish(&self, issue: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
+        self.look(format!("finish {issue}"));
         write(&self.base, issue, |r| {
             r.stage = Stage::Finished;
             r.stages.push(Stamp {
@@ -479,7 +479,13 @@ fn a_cap_one_under_the_list_leaves_the_last_issue_not_run() {
     let (text, _) = script.at("run 2");
     assert!(text.contains(", task 2 of 2\n"), "{text}");
     assert!(text.contains("  not run (--cap 2): #3\n"), "{text}");
-    assert_eq!(script.seen.borrow().len(), 2);
+    let runs = script
+        .seen
+        .borrow()
+        .iter()
+        .filter(|s| s.call.starts_with("run "))
+        .count();
+    assert_eq!(runs, 2);
 }
 
 /// Boundary: `--cap` one over the list's length is the list's length.
@@ -625,5 +631,69 @@ fn the_lock_records_an_empty_progress_before_the_first_task() {
             current: Some(1),
             outcomes: Vec::new(),
         })
+    );
+}
+
+// --- review M-1: held issues fit under `--cap` in the order the loop tries them ---
+
+/// Issues 1, 2 and 3 are held at their claims and 4 is done; 2 and 3 are freed, 1 stays held,
+/// so its retry is held again and goes behind 2 and 3. During 2's finish, the one slot `--cap 3`
+/// leaves goes to 3, the loop's next retry, and 1 is not run.
+#[test]
+fn a_retry_held_again_goes_behind_the_retries_already_due() {
+    let env = TestEnv::new();
+    let script = Script::new(&env.base_dir())
+        .plays(1, &[Act::ReadyHeld])
+        .plays(2, &[Act::ReadyHeld])
+        .plays(3, &[Act::ReadyHeld])
+        .unlocking(4, 2)
+        .unlocking(4, 3);
+
+    let run = run_loop(&script, env, &[1, 2, 3, 4], Some(3));
+
+    let (text, lock) = script.at("finish 2");
+    assert_eq!(
+        lock.progress,
+        Some(Progress {
+            counted: 1,
+            current: Some(2),
+            outcomes: outcomes(&[(3, Outcome::Held), (4, Outcome::Done), (1, Outcome::Held)]),
+        })
+    );
+    assert!(
+        text.contains("  task: issue-2 (Fix 2) at ready, task 2 of 3\n"),
+        "{text}"
+    );
+    assert!(
+        text.contains("  held: #3 (Fix 3), tried again after the running task\n"),
+        "{text}"
+    );
+    assert!(text.contains("  pending: none\n"), "{text}");
+    assert!(text.contains("  not run (--cap 3): #1 (Fix 1)\n"), "{text}");
+    assert!(
+        run.out.contains("task 3: #3 Fix 3 (size S), tried again"),
+        "{}",
+        run.out
+    );
+    assert!(
+        run.out
+            .contains("#1 (Fix 1) was not tried again after its lock was held"),
+        "{}",
+        run.out
+    );
+}
+
+/// An outcome recorded again moves to the end: the outcomes stay in the order the loop reached
+/// them, which is the order held issues are tried again in.
+#[test]
+fn an_outcome_set_again_moves_to_the_end() {
+    let mut progress = Progress::default();
+    progress.set(1, Outcome::Held);
+    progress.set(2, Outcome::Held);
+    progress.set(1, Outcome::Held);
+
+    assert_eq!(
+        progress.outcomes,
+        outcomes(&[(2, Outcome::Held), (1, Outcome::Held)])
     );
 }
