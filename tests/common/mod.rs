@@ -3,6 +3,7 @@
 
 pub mod cloud_task;
 pub mod fix_task;
+pub mod git_trace;
 pub mod task_fixture;
 
 use std::path::{Path, PathBuf};
