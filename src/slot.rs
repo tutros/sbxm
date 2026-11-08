@@ -397,14 +397,27 @@ impl Slots<'_> {
         Ok(None)
     }
 
-    /// `--no-wait`: a free slot that no waiting command is in line for, or a refusal naming the
+    /// The one admission rule, waiting or not: a free slot, but only while the commands in line
+    /// before this one (`ahead`) leave one free for it, so they keep their turn (decision 304).
+    fn take_admitted(
+        &self,
+        states: &[State],
+        ahead: &[Holder],
+        warn: &mut dyn Write,
+    ) -> Result<Option<Owned>> {
+        let free = states.iter().filter(|s| s.is_free()).count();
+        if ahead.len() < free {
+            return self.take_free(states, warn);
+        }
+        Ok(None)
+    }
+
+    /// `--no-wait`: a free slot that the waiting commands in line leave over, or a refusal naming the
     /// holder, writing nothing.
     fn take_now(&self, warn: &mut dyn Write) -> Result<Owned> {
         let ahead = live_tickets(&self.dir.join(QUEUE), None, &*self.gate.probe, true)?;
         let states = self.states(&mut HashMap::new())?;
-        if ahead.is_empty()
-            && let Some(owned) = self.take_free(&states, warn)?
-        {
+        if let Some(owned) = self.take_admitted(&states, &ahead, warn)? {
             return Ok(owned);
         }
         let why = blocker(&states, &ahead)
@@ -428,10 +441,7 @@ impl Slots<'_> {
         loop {
             let ahead = live_tickets(&queue, Some(&name), &*self.gate.probe, true)?;
             let states = self.states(&mut unreadable)?;
-            let free = states.iter().filter(|s| s.is_free()).count();
-            if ahead.len() < free
-                && let Some(owned) = self.take_free(&states, warn)?
-            {
+            if let Some(owned) = self.take_admitted(&states, &ahead, warn)? {
                 drop(ticket);
                 return Ok(owned);
             }

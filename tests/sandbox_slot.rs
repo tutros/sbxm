@@ -399,6 +399,55 @@ fn no_wait_does_not_jump_ahead_of_a_waiting_command() {
 }
 
 #[test]
+fn no_wait_takes_a_free_slot_the_older_waiters_do_not_need() {
+    let env = Env::new();
+    let config = config(&env, Some(2));
+    let dir = slots_dir(&env);
+    let ticket = dir
+        .join("queue")
+        .join(format!("{:032}-{B:010}-000000.json", 1u64));
+    write(&ticket, &holder(B, 3000, "sbxm run eval.toml", None));
+    let (mut gate, _) = gate(&env, vec![(B, 3000)], |_| panic!("--no-wait waited"));
+    gate.no_wait = true;
+
+    let slot = slot::take(&config, &gate, None, &mut Vec::new()).unwrap();
+
+    assert_eq!(slot.path(), Some(slot_file(&dir, 1).as_path()));
+    assert!(
+        !slot_file(&dir, 2).exists(),
+        "the older waiter's slot stays free"
+    );
+    assert!(ticket.exists(), "the older waiter is still in line");
+    assert_eq!(queue(&dir).len(), 1, "--no-wait writes no ticket");
+}
+
+#[test]
+fn no_wait_refuses_when_the_older_waiters_need_every_free_slot() {
+    let env = Env::new();
+    let config = config(&env, Some(2));
+    let dir = slots_dir(&env);
+    write(&slot_file(&dir, 1), &a_holder());
+    write(
+        &dir.join("queue")
+            .join(format!("{:032}-{B:010}-000000.json", 1u64)),
+        &holder(B, 3000, "sbxm run eval.toml", None),
+    );
+    let (mut gate, _) = gate(&env, vec![(A, 2000), (B, 3000)], |_| {
+        panic!("--no-wait waited")
+    });
+    gate.no_wait = true;
+
+    let err = format!(
+        "{:#}",
+        slot::take(&config, &gate, None, &mut Vec::new()).unwrap_err()
+    );
+
+    assert!(err.starts_with("no free sandbox slot"), "{err}");
+    assert!(!slot_file(&dir, 2).exists());
+    assert_eq!(queue(&dir).len(), 1);
+}
+
+#[test]
 fn a_slot_whose_holder_is_gone_is_taken_over_at_once_with_one_line() {
     let env = Env::new();
     let config = config(&env, Some(1));
