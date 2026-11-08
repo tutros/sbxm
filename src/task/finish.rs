@@ -138,6 +138,74 @@ pub fn exists(base_dir: &Path, id: &str) -> bool {
         })
 }
 
+/// The ids of PR `pr`'s fix tasks (`fix-<pr>-<head>`, issue 485), whatever head each was made
+/// for, sorted: every name under `<base>/.sbxm/tasks/` and `<base>/tasks/` that is one, or is one
+/// with a reviewer's or gates' `-review`/`-gates` suffix, so a task a failed start left only a
+/// workspace of is found too. Only names are read; [`exists`] and [`plan_removal`] check the
+/// folders.
+pub fn fix_tasks_of(base_dir: &Path, pr: u32) -> Result<Vec<String>> {
+    let prefix = format!("fix-{pr}-");
+    let mut ids = Vec::new();
+    for root in [record::tasks_root(base_dir), base_dir.join("tasks")] {
+        let entries = match fs::read_dir(&root) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(e) => return Err(e).with_context(|| format!("cannot read {}", root.display())),
+        };
+        for entry in entries {
+            let name = entry?.file_name().to_string_lossy().into_owned();
+            let id = ["-review", "-gates"]
+                .iter()
+                .find_map(|suffix| name.strip_suffix(suffix))
+                .filter(|id| record::is_valid_id(id))
+                .unwrap_or(&name);
+            if id.starts_with(&prefix) && record::is_valid_id(id) {
+                ids.push(id.to_owned());
+            }
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    Ok(ids)
+}
+
+/// A fix task's result lives in its `repo.git` until `task fix` pushes it onto its PR's branch
+/// (issue 485): refused while the task isn't `finished` (pushed) and its branch has commits past
+/// the PR head it started from, or when that can't be told, so `task rm --pr` never deletes the
+/// only copy by accident; the caller skips this for `--force`. Only reads.
+pub fn check_fix_result_pushed(base_dir: &Path, id: &str) -> Result<()> {
+    let force = "pass --force to delete it anyway";
+    let meta = record::task_dir(base_dir, id);
+    let repo_git = meta.join("repo.git");
+    // Checked without following it (decision 159), as `task rm --merged` does.
+    if fs::symlink_metadata(&repo_git).is_err() {
+        return Ok(());
+    }
+    let task = record::read(&meta.join("task.json"))
+        .with_context(|| format!("cannot tell whether task {id}'s result was pushed; {force}"))?;
+    if task.stage == record::Stage::Finished {
+        return Ok(());
+    }
+    let number = task.number;
+    let ahead = check_own_folder(base_dir, &repo_git)
+        .and_then(|()| task.commits_ahead(&repo_git))
+        .with_context(|| {
+            format!(
+                "whether task {id}'s result reached PR #{number}'s branch can't be checked; \
+                 {force}"
+            )
+        })?;
+    if ahead > 0 {
+        bail!(
+            "task {id} has {ahead} commit(s) on {} that were never pushed to PR #{number}'s \
+             branch; they exist only in {}, which `task rm` deletes; {force}",
+            task.branch,
+            repo_git.display()
+        );
+    }
+    Ok(())
+}
+
 /// Checks that `id` can be discarded and lists what that removes. The id is validated before any
 /// path is built from it; a task whose process is alive is refused.
 pub fn plan_removal(base_dir: &Path, id: &str, probe: &dyn ProcessProbe) -> Result<RemovalPlan> {
@@ -1054,9 +1122,68 @@ pub fn discard_many(
         .map(|id| plan_removal_forgetting(base_dir, id, probe, forget_ambiguous))
         .collect::<Result<Vec<_>>>()?;
     check()?;
+    remove_planned(&plans, &[], yes, backend, confirm, out, sleep)
+}
+
+/// [`discard_many`], where `check` is asked about each task once every one is planned, under its
+/// lock (`task rm --pr`, issue 485): a task it refuses is kept, named with the reason before the
+/// question and in the error at the end, and the others are still removed. Nothing is removed,
+/// and nothing asked, when it refuses them all.
+#[allow(clippy::too_many_arguments)]
+pub fn discard_each(
+    base_dir: &Path,
+    ids: &[String],
+    yes: bool,
+    forget_ambiguous: bool,
+    backend: &dyn SandboxBackend,
+    probe: &dyn ProcessProbe,
+    confirm: &dyn Confirm,
+    out: &mut dyn Write,
+    sleep: &dyn Fn(Duration),
+    check: &dyn Fn(&str) -> Result<()>,
+) -> Result<()> {
+    let plans = ids
+        .iter()
+        .map(|id| plan_removal_forgetting(base_dir, id, probe, forget_ambiguous))
+        .collect::<Result<Vec<_>>>()?;
+    let mut kept = Vec::new();
+    let mut removed = Vec::new();
+    for plan in plans {
+        match check(&plan.id) {
+            Ok(()) => removed.push(plan),
+            Err(e) => kept.push(format!("kept: task {}: {e:#}", plan.id)),
+        }
+    }
+    if removed.is_empty() {
+        bail!("nothing was removed:\n{}", kept.join("\n"));
+    }
+    remove_planned(&removed, &kept, yes, backend, confirm, out, sleep)?;
+    if !kept.is_empty() {
+        bail!(
+            "{} task(s) kept, the others removed:\n{}",
+            kept.len(),
+            kept.join("\n")
+        );
+    }
+    Ok(())
+}
+
+/// Lists `plans` (and the `kept` lines after them), asks (unless `yes`), removes them and says
+/// what went and what stayed: the part [`discard_many`] and [`discard_each`] share.
+fn remove_planned(
+    plans: &[RemovalPlan],
+    kept: &[String],
+    yes: bool,
+    backend: &dyn SandboxBackend,
+    confirm: &dyn Confirm,
+    out: &mut dyn Write,
+    sleep: &dyn Fn(Duration),
+) -> Result<()> {
+    let ids: Vec<&str> = plans.iter().map(|p| p.id.as_str()).collect();
     let listing = plans
         .iter()
         .map(RemovalPlan::listing)
+        .chain(kept.iter().cloned())
         .collect::<Vec<_>>()
         .join("\n");
     let names = ids.join(", ");
@@ -1076,7 +1203,7 @@ pub fn discard_many(
         }
     }
     let mut stayed = 0;
-    for plan in &plans {
+    for plan in plans {
         let report = remove_with_sleep(plan, backend, sleep);
         for line in &report.removed {
             writeln!(out, "removed {line}")?;
