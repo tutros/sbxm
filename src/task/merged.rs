@@ -517,9 +517,10 @@ fn own_folder_or_create(base_dir: &Path, dir: &Path) -> Result<()> {
 /// link), or if the archive path already exists in any form (a directory from an earlier archive
 /// of the same id, a plain file, or a symlink or junction, checked without following it):
 /// "nothing deletes an archive" means nothing overwrites one either. The one exception writes
-/// nothing: an archive holding exactly this task's records, byte for byte ([`same_records`]), is
-/// the one an earlier run made before its removal failed, and is reused as it is. Returns the
-/// archive folder.
+/// nothing: an archive holding every record still in the task folder, byte for byte
+/// ([`holds_records`]), is the one an earlier run made before its removal failed (perhaps part
+/// way, after deleting some records, issue 503), and is reused as it is. Returns the archive
+/// folder.
 pub fn archive_task(base_dir: &Path, id: &str) -> Result<PathBuf> {
     let meta = record::task_dir(base_dir, id);
     if fs::symlink_metadata(&meta).is_ok() {
@@ -531,9 +532,10 @@ pub fn archive_task(base_dir: &Path, id: &str) -> Result<PathBuf> {
     let archive = archive_dir(base_dir, id);
     if fs::symlink_metadata(&archive).is_ok() {
         // A rerun after a removal that left something behind finds the archive it made the
-        // first time: reused when it holds exactly the task's records, byte for byte, so the
-        // retry the error asks for can finish. Anything else is still never overwritten.
-        if same_records(base_dir, &meta, &archive)? {
+        // first time: reused when it holds every record still in the task folder, byte for
+        // byte, so the retry the error asks for can finish even after a delete that stopped part
+        // way. Anything else is still never overwritten.
+        if holds_records(base_dir, &meta, &archive)? {
             return Ok(archive);
         }
         bail!(
@@ -564,35 +566,30 @@ pub fn archive_task(base_dir: &Path, id: &str) -> Result<PathBuf> {
 }
 
 /// Whether `archive` is a plain folder of `base_dir` (never followed if it is a link) holding
-/// exactly the plain files [`archive_task`] would copy from `meta`, each with the same bytes.
-fn same_records(base_dir: &Path, meta: &Path, archive: &Path) -> Result<bool> {
+/// only plain files, among them every plain file [`archive_task`] would copy from `meta`, each
+/// with the same bytes (issue 503). The archive may hold records `meta` no longer has: a removal
+/// that stopped part way deleted them after they were archived.
+fn holds_records(base_dir: &Path, meta: &Path, archive: &Path) -> Result<bool> {
     if finish::check_own_folder(base_dir, archive).is_err() || !archive.is_dir() {
         return Ok(false);
     }
-    let mut wanted = Vec::new();
-    for name in archive_names(meta) {
-        let src = meta.join(&name);
-        if fs::symlink_metadata(&src).is_ok_and(|m| m.file_type().is_file()) {
-            wanted.push(name);
-        }
-    }
-    let mut present = Vec::new();
     for entry in
         fs::read_dir(archive).with_context(|| format!("cannot read {}", archive.display()))?
     {
-        let entry = entry?;
-        if !entry.file_type()?.is_file() {
+        if !entry?.file_type()?.is_file() {
             return Ok(false);
         }
-        present.push(entry.file_name().to_string_lossy().into_owned());
     }
-    wanted.sort();
-    present.sort();
-    if wanted != present {
-        return Ok(false);
-    }
-    for name in &wanted {
-        if fs::read(meta.join(name))? != fs::read(archive.join(name))? {
+    for name in archive_names(meta) {
+        let src = meta.join(&name);
+        if !fs::symlink_metadata(&src).is_ok_and(|m| m.file_type().is_file()) {
+            continue;
+        }
+        let copy = archive.join(&name);
+        if !fs::symlink_metadata(&copy).is_ok_and(|m| m.file_type().is_file()) {
+            return Ok(false);
+        }
+        if fs::read(&src)? != fs::read(&copy)? {
             return Ok(false);
         }
     }
