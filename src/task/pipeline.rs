@@ -704,16 +704,14 @@ pub fn harness_sign_in_lapsed(
 
 /// How a stopped task goes on, by its kind (issue 445 review M-1): `task resume` continues an
 /// issue or spec task; a PR task has no resume and goes on with `task review --pr N` (decision
-/// 282(a)); no command names a fix task yet (issue 313), so its status is what to look at.
+/// 282(a)); a fix task of PR N goes on with `task resume --pr N` (issue 485; issue 502), which
+/// refuses with its own way on if the PR moved since.
 fn goes_on(record: &Record) -> String {
     match record.kind {
         Kind::Issue => format!("continue with `sbxm task resume --issue {}`", record.number),
         Kind::Spec => "continue with `sbxm task resume --spec <file>`".to_owned(),
         Kind::Pr => format!("continue with `sbxm task review --pr {}`", record.number),
-        Kind::Fix => format!(
-            "see `sbxm task status` for fix task {} (no command continues one yet)",
-            record.id
-        ),
+        Kind::Fix => format!("continue with `sbxm task resume --pr {}`", record.number),
     }
 }
 
