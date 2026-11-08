@@ -6,7 +6,8 @@
 //! repository (`--git-dir`) is always a folder sbxm made outside it, the
 //! workspace is only ever a `--work-tree`, and the user's global and system
 //! git config and inherited `GIT_*` variables are switched off so results
-//! don't depend on the machine either.
+//! don't depend on the machine either (all but `GIT_TRACE2_EVENT`, which only
+//! says where git writes its trace).
 
 use std::ffi::{OsStr, OsString};
 use std::path::Path;
@@ -386,7 +387,8 @@ fn parse_check_line(line: &str) -> Result<Option<Object>> {
 
 /// The `GIT_*` variables that keep working for [`user_output`]: where the user's own
 /// config and credentials come from. Every other one (`GIT_DIR`, `GIT_CONFIG_COUNT`, ...)
-/// could point git elsewhere or make it run code, so it is dropped.
+/// could point git elsewhere or make it run code, so it is dropped (but `GIT_TRACE2_EVENT`, see
+/// [`is_trace_variable`]).
 const USER_GIT_VARIABLES: [&str; 7] = [
     "GIT_SSH",
     "GIT_SSH_COMMAND",
