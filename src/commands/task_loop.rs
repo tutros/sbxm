@@ -35,7 +35,7 @@ use crate::task::config::TaskConfig;
 use crate::task::finish::check_own_folder;
 use crate::task::gates::HostRunner;
 use crate::task::loop_pause::{self, Pause};
-use crate::task::queue::{self, READY_LABEL, Report, Row, Skipped};
+use crate::task::queue::{self, Outcome, READY_LABEL, Report, Row, Skipped};
 use crate::task::record::{self, Kind, Process, ProcessProbe, Record, Stage};
 use crate::task::risk::Level;
 use crate::task::runlog::{RunLog, Tee};
@@ -128,6 +128,32 @@ impl StopFlag {
 struct LoopLock {
     path: PathBuf,
     me: String,
+    file: queue::LockFile,
+}
+
+impl LoopLock {
+    /// Changes the progress a loop started with `--issue` records (issue 493) and rewrites the
+    /// lock, through a temporary file renamed over it, since `sbxm status` reads it meanwhile.
+    /// A labeled-queue loop records none, so nothing is written. A lock no longer this process's
+    /// (removed by hand) is not written again.
+    fn record(&mut self, change: impl FnOnce(&mut queue::Progress)) -> Result<()> {
+        let Some(progress) = self.file.progress.as_mut() else {
+            return Ok(());
+        };
+        change(progress);
+        if !fs::read_to_string(&self.path).is_ok_and(|text| text == self.me) {
+            return Ok(());
+        }
+        let me = serde_json::to_string(&self.file)?;
+        let tmp = self.path.with_extension("lock.tmp");
+        fs::write(&tmp, &me).with_context(|| format!("cannot write {}", tmp.display()))?;
+        if let Err(e) = fs::rename(&tmp, &self.path) {
+            let _ = fs::remove_file(&tmp);
+            return Err(e).with_context(|| format!("cannot write {}", self.path.display()));
+        }
+        self.me = me;
+        Ok(())
+    }
 }
 
 impl Drop for LoopLock {
@@ -153,11 +179,13 @@ fn take_lock(
         fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
     }
     let listed = !opts.issues.is_empty();
-    let me = serde_json::to_string(&queue::LockFile {
+    let contents = queue::LockFile {
         process: Process::current(probe),
         issues: opts.issues.clone(),
         cap: opts.cap.filter(|_| listed),
-    })?;
+        progress: listed.then(queue::Progress::default),
+    };
+    let me = serde_json::to_string(&contents)?;
     for _ in 0..3 {
         match fs::OpenOptions::new()
             .write(true)
@@ -168,6 +196,7 @@ fn take_lock(
                 let lock = LoopLock {
                     path,
                     me: me.clone(),
+                    file: contents.clone(),
                 };
                 file.write_all(me.as_bytes())
                     .with_context(|| format!("cannot write {}", lock.path.display()))?;
@@ -2090,7 +2119,7 @@ pub fn run(
     if fs::symlink_metadata(&tasks).is_ok() {
         check_own_folder(&base_dir, &tasks)?;
     }
-    let _lock = take_lock(&base_dir, opts, probe, warn)?;
+    let mut lock = take_lock(&base_dir, opts, probe, warn)?;
 
     let started_at = (env.now)();
     let date = format_timestamp(started_at);
@@ -2175,6 +2204,7 @@ pub fn run(
                 tasks_run + 1,
                 size.as_deref().unwrap_or("unknown")
             )?;
+            note(&mut lock, &mut lp, warn, |p| p.start(issue))?;
             let ended = lp.again(issue, retry, &mut stops, out, warn);
             (issue, title, size, started, stops, ended)
         } else {
@@ -2215,6 +2245,12 @@ pub fn run(
                 tasks_run + 1,
                 size.as_deref().unwrap_or("unknown")
             )?;
+            note(&mut lock, &mut lp, warn, |p| {
+                for skipped in refused.iter().chain(&waiting) {
+                    p.set(skipped.issue, Outcome::Skipped);
+                }
+                p.start(issue);
+            })?;
             let mut stops = Vec::new();
             let ended = lp.task(issue, labeled, 0, &mut stops, out, warn);
             (issue, title, size, started, stops, ended)
@@ -2279,6 +2315,19 @@ pub fn run(
                 );
             }
         };
+        let recorded = match &end {
+            End::Done { .. } => Outcome::Done,
+            End::Parked { .. } => Outcome::Parked,
+            End::Refused(_) | End::Taken(_) => Outcome::Skipped,
+            End::Held(_) => Outcome::Held,
+        };
+        note(&mut lock, &mut lp, warn, |p| {
+            p.current = None;
+            p.set(issue, recorded);
+            if matches!(recorded, Outcome::Done | Outcome::Parked) {
+                p.counted += 1;
+            }
+        })?;
         let (ready, outcome, parked) = match end {
             End::Refused(reason) => {
                 // The line before named the issue with its title already.
@@ -2349,6 +2398,26 @@ pub fn run(
             parked_in_row = 0;
         }
     }
+}
+
+/// Records the loop's progress in its lock (issue 493). A lock that can't be written is a warning,
+/// not a stop: it only keeps `sbxm status` up to date.
+fn note(
+    lock: &mut LoopLock,
+    lp: &mut Loop,
+    warn: &mut dyn Write,
+    change: impl FnOnce(&mut queue::Progress),
+) -> Result<()> {
+    if let Err(e) = lock.record(change) {
+        lp.warn_once(
+            warn,
+            format!(
+                "the loop's progress could not be written into its lock ({e:#}); `sbxm status` \
+                 may show it behind"
+            ),
+        )?;
+    }
+    Ok(())
 }
 
 /// The real phases: the `task` commands themselves, each teeing its output into its task's

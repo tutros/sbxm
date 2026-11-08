@@ -39,6 +39,69 @@ pub struct LockFile {
     pub issues: Vec<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cap: Option<u32>,
+    /// What the loop did with its list so far (issue 493), rewritten after each issue. `None` in
+    /// a labeled-queue loop's lock and in one an older binary wrote, which `sbxm status` reads
+    /// from the task records instead.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub progress: Option<Progress>,
+}
+
+/// Where a loop started with `--issue` is in its list, as the loop itself records it (issue 493):
+/// the tasks counted toward `--cap`, the issue it is on and what became of each other issue it
+/// got to. An issue with no outcome and not current is still to come.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Progress {
+    pub counted: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub current: Option<u32>,
+    #[serde(default)]
+    pub outcomes: Vec<IssueOutcome>,
+}
+
+impl Progress {
+    /// What became of `issue`, if the loop recorded anything.
+    pub fn outcome(&self, issue: u32) -> Option<Outcome> {
+        self.outcomes
+            .iter()
+            .find(|o| o.issue == issue)
+            .map(|o| o.outcome)
+    }
+
+    /// Records `outcome` for `issue`, replacing the one it had.
+    pub fn set(&mut self, issue: u32, outcome: Outcome) {
+        match self.outcomes.iter_mut().find(|o| o.issue == issue) {
+            Some(o) => o.outcome = outcome,
+            None => self.outcomes.push(IssueOutcome { issue, outcome }),
+        }
+    }
+
+    /// Makes `issue` the one the loop is on; an outcome it had (held, or skipped while it waited
+    /// on a dependency) no longer holds.
+    pub fn start(&mut self, issue: u32) {
+        self.current = Some(issue);
+        self.outcomes.retain(|o| o.issue != issue);
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct IssueOutcome {
+    pub issue: u32,
+    pub outcome: Outcome,
+}
+
+/// What became of one listed issue (issue 493).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Outcome {
+    /// Finished into a PR: counted toward `--cap`.
+    Done,
+    /// Left for the user, with or without a task record: counted toward `--cap`.
+    Parked,
+    /// Refused, waiting on a dependency, or taken by a command run by hand: not counted.
+    Skipped,
+    /// Its task's lock was held by a command run by hand: tried again after the loop's next task,
+    /// not counted until then.
+    Held,
 }
 
 /// Whether this task's PR is one a loop opened: a loop finished it, and it didn't continue an open
