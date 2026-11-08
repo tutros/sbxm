@@ -2618,6 +2618,7 @@ impl Steps for TaskSteps<'_> {
                     forget_ambiguous: false,
                 },
                 self.backend,
+                self.github,
                 self.probe,
                 self.host,
                 out,

@@ -84,6 +84,7 @@ fn go(f: &Fixture, opts: &Options, backend: &FakeBackend, probe: &dyn ProcessPro
         &f.env.config_dir(),
         opts,
         backend,
+        &sbxm::github::fake::FakeGitHub::default(),
         probe,
         &FakeHostRunner::default(),
         &mut out,

@@ -1234,12 +1234,11 @@ fn fix_startable(base_dir: &Path, id: &str, pr: &PrInfo) -> Result<(u32, String)
             .map(|r| r.stage.name().to_owned())
             .unwrap_or_else(|_| "no readable record".to_owned());
         bail!(
-            "task {id} exists (stage {stage}): a fix of PR #{} at this head was started before, \
-             and its folder may hold its only result; see `sbxm task status`, and remove {} and \
-             {} by hand to start it again",
-            pr.number,
-            meta.display(),
-            workspace.display()
+            "task {id} exists (stage {stage}): a fix of PR #{n} at this head was started before, \
+             and its folder may hold its only result; see `sbxm task status`, then continue it \
+             with `sbxm task resume --pr {n}`, or remove it with `sbxm task rm --pr {n}` to start \
+             it again",
+            n = pr.number
         );
     }
     if !repo::valid_ref_name(&pr.head_ref) {
@@ -2050,9 +2049,8 @@ fn task_flag(record: &Record) -> String {
         Kind::Pr => format!("--pr {}", record.number),
         Kind::Spec => "--spec <file>".to_owned(),
         Kind::Issue => format!("--issue {}", record.number),
-        // No flag names a fix task yet (issue 313): the placeholder says so, never another
-        // task's flag.
-        Kind::Fix => format!("<no flag names fix task {} yet>", record.id),
+        // `--pr N` names the PR's fix task of its current head (issue 485).
+        Kind::Fix => format!("--pr {}", record.number),
     }
 }
 

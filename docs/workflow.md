@@ -371,6 +371,12 @@ its prompt names as data, never instructions. The run must be a failed run of th
 --repo <repo> --commit <head>` lists them); anything else is refused before a task is made. `task loop` runs it once
 per PR after a second failure.
 
+A `task fix` that was cut off (the host ran low on memory, the runner stopped) leaves its task `fix-N-<head>`
+interrupted (issue 485). `sbxm task resume --pr N` continues the one made for the PR's current head and pushes its
+result as `task fix` would; once the PR has moved on, `sbxm task rm --pr N` removes it (with the review task and
+every other fix task of the PR; one with unpushed commits only with `--force`) and `sbxm task fix --pr N` starts
+the new head's. No task folder needs deleting by hand.
+
 Without a review to fix (a branch of your own, or a task's), use a spec:
 
 A worker can fix a PR's review finding from a spec. The branch to fix must be where the worker can start from:

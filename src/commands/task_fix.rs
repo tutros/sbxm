@@ -258,6 +258,19 @@ pub fn run(
     }
 
     let pushed = finish::finish_fix(&global.base_dir, &id, github, probe)?;
+    print_pushed(out, &id, number, &repo_name, &pushed)
+}
+
+/// What [`finish::finish_fix`] did for fix task `id` of PR `number` in `repo`: the push, the
+/// review posted (or the command that reviews the new head) and what is left. `task resume --pr`
+/// says the same (issue 485).
+pub(crate) fn print_pushed(
+    out: &mut dyn Write,
+    id: &str,
+    number: u32,
+    repo_name: &str,
+    pushed: &finish::FixPushed,
+) -> Result<()> {
     writeln!(
         out,
         "{id}: pushed {} commit(s) onto PR #{number}'s branch {}, now at {}: {}",

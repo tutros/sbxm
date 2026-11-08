@@ -90,6 +90,7 @@ fn resume(f: &Fixture, rounds: u32, backend: &FakeBackend) -> String {
         &f.env.config_dir(),
         &opts,
         backend,
+        &sbxm::github::fake::FakeGitHub::default(),
         &Gone,
         &FakeHostRunner::default(),
         &mut out,

@@ -1,16 +1,23 @@
 //! `sbxm task resume` (issue 118; decisions 173(c), 175; spec `sdlc/specs/task-state-machine.md`
 //! section 5.2): continues an issue or spec task from its recorded stage, keeping its clone and
 //! commits, and carries it on to `ready` the way `task review` would. Refused while the recorded
-//! `sbxm` process is alive, and for a PR task (no worker; `task review --pr` moves it on). Decided through
+//! `sbxm` process is alive, and for a PR task (no worker; `task review --pr` moves it on). A
+//! `task fix --pr N` task is named by `--pr N` (issue 485): the one made for the PR's current
+//! head ([`fix_task_for_head`]). Decided through
 //! `machine::TABLE`'s `Resume` rows; the refusal text for each state lives here.
+
+use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
+use super::finish;
 use super::lifetime;
 use super::machine::{self, Event};
 use super::pipeline::{self, Prepared, ReviewReport, TaskEnv, Worked};
+use super::pr_fix;
 use super::record::{self, Kind, Process, ProcessProbe, Record, Stage, Status, Stopped};
 use crate::backend::Location;
+use crate::github::GitHubBackend;
 use crate::headless::RunStatus;
 use crate::run::results::now;
 
@@ -34,6 +41,70 @@ fn status_hint(task: &Record) -> String {
         Kind::Spec | Kind::Fix => "sbxm task status".to_owned(),
         _ => format!("sbxm task status --issue {}", task.number),
     }
+}
+
+/// The fix task `task resume --pr N` resumes (issue 485): the one PR `pr`'s fix tasks hold for the
+/// PR's head as GitHub has it now, read from the repo they record. Refused, naming the way on,
+/// when PR `pr` has no fix task, when the PR is closed, merged or from a fork (as `task fix`
+/// refuses it), and when its only fix tasks were made for an older head: an old task is never
+/// moved onto a new head. Reads only.
+pub fn fix_task_for_head(base_dir: &Path, pr: u32, github: &dyn GitHubBackend) -> Result<String> {
+    let fixes = finish::fix_tasks_of(base_dir, pr)?;
+    if fixes.is_empty() {
+        let review = format!("pr-{pr}");
+        if finish::exists(base_dir, &review) {
+            bail!(
+                "PR #{pr} has no fix task, only its review task {review}, which has no worker to \
+                 resume; to review the PR again, run `sbxm task review --pr {pr}`, or fix it with \
+                 `sbxm task fix --pr {pr}`"
+            );
+        }
+        bail!("no fix task of PR #{pr}; start one with `sbxm task fix --pr {pr}`");
+    }
+    let mut repos: Vec<String> = fixes
+        .iter()
+        .filter_map(|id| record::read(&record::task_dir(base_dir, id).join("task.json")).ok())
+        .filter(|task| task.kind == Kind::Fix && task.number == pr)
+        .map(|task| task.repo)
+        .collect();
+    repos.sort();
+    repos.dedup();
+    let list = fixes.join(", ");
+    if repos.is_empty() {
+        bail!(
+            "the fix task(s) of PR #{pr} ({list}) have no readable task.json, so which repo's PR \
+             they fix can't be told; see `sbxm task status`, or remove them with `sbxm task rm \
+             --pr {pr}`"
+        );
+    }
+    let mut heads = Vec::new();
+    for repo in &repos {
+        let info = github
+            .pr(repo, pr)
+            .with_context(|| format!("cannot read PR #{pr} of {repo}"))?;
+        pr_fix::check_fixable(&info, repo, None)?;
+        if let Some(id) = record::fix_id(pr, &info.head_oid)
+            && fixes.contains(&id)
+        {
+            return Ok(id);
+        }
+        heads.push(info.head_oid);
+    }
+    bail!(
+        "PR #{pr}'s head is now {}, and no fix task was made for it: {list} {} made for an older \
+         head, and sbxm doesn't move a task onto a new head; remove {} with `sbxm task rm --pr \
+         {pr}`, then fix the new head with `sbxm task fix --pr {pr}`",
+        heads.join(", "),
+        if fixes.len() == 1 { "was" } else { "were" },
+        if fixes.len() == 1 { "it" } else { "them" },
+    )
+}
+
+/// Whether all that is left of a fix task is its push onto its PR's branch (issue 485): it is
+/// `ready` without a stop (the push didn't happen, or its process was gone before it), so
+/// `task resume --pr` pushes it instead of resuming a stage.
+pub fn only_push_left(task: &Record) -> bool {
+    task.kind == Kind::Fix && task.stage == Stage::Ready && task.stopped.is_none()
 }
 
 /// Whether `task resume` (with `--rounds`, when given) may continue this task now. Every refusal
@@ -166,8 +237,8 @@ fn recovery(task: &Record) -> String {
 fn target_flag(task: &Record) -> String {
     match task.kind {
         Kind::Spec => "--spec <file>".to_owned(),
-        // No flag names a fix task yet (issue 313): never another task's flag.
-        Kind::Fix => format!("<no flag names fix task {} yet>", task.id),
+        // The fix task of the PR's current head (issue 485).
+        Kind::Fix => format!("--pr {}", task.number),
         _ => format!("--issue {}", task.number),
     }
 }
@@ -184,6 +255,16 @@ pub fn rounds_cap(task: &Record, n: u32) -> Option<u32> {
 fn check_stopped(task: &Record, rounds: Option<u32>) -> Result<()> {
     let (id, flag) = (&task.id, target_flag(task));
     let Some(stopped) = task.stopped else {
+        // Its push onto the PR's branch is what is left: `task resume --pr` makes it (issue 485).
+        if task.kind == Kind::Fix {
+            if rounds.is_some() {
+                bail!(
+                    "task {id} is ready and did not stop on anything unresolved, so it needs no \
+                     more fix rounds; push it with `sbxm task resume {flag}`"
+                );
+            }
+            return Ok(());
+        }
         bail!(
             "task {id} is ready and did not stop on anything unresolved, so there is nothing to \
              resume; publish it with `sbxm task finish {flag}`"
@@ -240,6 +321,15 @@ pub fn resume_forgetting(
 ) -> Result<Resumed> {
     check_can_resume(&prepared.record, env.probe, rounds)?;
     check_ambiguous(&prepared.record, forget)?;
+    if only_push_left(&prepared.record) {
+        bail!(
+            "task {} is ready with nothing unresolved: only its push onto PR #{}'s branch is \
+             left, which `sbxm task resume --pr {}` makes",
+            prepared.record.id,
+            prepared.record.number,
+            prepared.record.number
+        );
+    }
     pipeline::check_reviewer(env, prepared)?;
     let cloud = prepared.record.location == Location::Cloud;
     if cloud {
