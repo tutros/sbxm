@@ -280,7 +280,7 @@ fn found_merged(f: &Fixture, number: u32) -> sbxm::task::merged::MergedPlan {
         closing_issues: vec![41],
         base_moved: false,
     });
-    plan(&f.env.base_dir(), &repo_root(f), &github, &Probe).unwrap()
+    plan(&f.env.base_dir(), &github, &Probe).unwrap()
 }
 
 #[test]
@@ -458,9 +458,9 @@ fn merged_spec_task(f: &Fixture) -> (String, std::path::PathBuf) {
 #[test]
 fn removing_a_merged_spec_task_names_its_worktree_and_branch_cleanup_commands() {
     let f = fixture();
-    let (id, checkout) = merged_spec_task(&f);
+    let (id, _) = merged_spec_task(&f);
     let github = FakeGitHub::default();
-    let found = plan(&f.env.base_dir(), &checkout, &github, &Probe).unwrap();
+    let found = plan(&f.env.base_dir(), &github, &Probe).unwrap();
     assert_eq!(found.candidates.len(), 1, "{found:?}");
     let confirm = Yes::new();
     let mut out = Vec::new();

@@ -272,13 +272,13 @@ fn check_fix(
 /// reviewing or fixing is left alone by the removal-state check inside [`add_merged`], the same
 /// one that protects a running issue or PR-review task, so this doesn't duplicate that check. A
 /// squash or rebase merge isn't detected, so a task that looks not-merged by this test is listed,
-/// not dropped silently, naming the plain command to remove it by hand. A result that counts as
-/// merged but was never fetched into `repo_root` is left alone too (decision 178's protection,
-/// reused as-is).
+/// not dropped silently, naming the plain command to remove it by hand. A tip reachable from
+/// `origin/<base>` is on origin, so decision 178's held-in-the-checkout guard isn't asked too
+/// (issue 495): after a PR merge no ref in the checkout points at the tip, and the result exists
+/// not only in `repo.git`, which is all that guard protects. A plain `task rm --spec` keeps it.
 fn check_spec(
     base_dir: &Path,
     task: &Record,
-    repo_root: &Path,
     probe: &dyn ProcessProbe,
     out: &mut MergedPlan,
 ) -> Result<()> {
@@ -346,13 +346,6 @@ fn check_spec(
                  `sbxm task rm --spec` naming its file if you're sure it's done",
                 task.base
             ),
-        });
-        return Ok(());
-    }
-    if let Err(e) = finish::check_result_held(&task.id, task, &repo_git, &tip, repo_root) {
-        out.left_alone.push(LeftAlone {
-            id: task.id.clone(),
-            reason: format!("{e:#}"),
         });
         return Ok(());
     }
@@ -431,11 +424,10 @@ fn folder_name(dir: &Path) -> String {
 /// removed; the caller shows [`MergedPlan::listing`], confirms, then calls [`remove`].
 pub fn plan(
     base_dir: &Path,
-    repo_root: &Path,
     github: &dyn GitHubBackend,
     probe: &dyn ProcessProbe,
 ) -> Result<MergedPlan> {
-    plan_forgetting(base_dir, repo_root, github, probe, false)
+    plan_forgetting(base_dir, github, probe, false)
 }
 
 /// [`plan`], with `--forget-ambiguous` when `forget` (decision 268): a merged task whose record
@@ -443,7 +435,6 @@ pub fn plan(
 /// unless `forget`, when its plan drops that create from the record and removes the rest.
 pub fn plan_forgetting(
     base_dir: &Path,
-    repo_root: &Path,
     github: &dyn GitHubBackend,
     probe: &dyn ProcessProbe,
     forget: bool,
@@ -468,7 +459,7 @@ pub fn plan_forgetting(
             Kind::Issue => check_issue(base_dir, &task, github, probe, &mut out)?,
             Kind::Pr => check_pr_review(base_dir, &task, github, probe, &mut out)?,
             Kind::Fix => check_fix(base_dir, &task, github, probe, &mut out)?,
-            Kind::Spec => check_spec(base_dir, &task, repo_root, probe, &mut out)?,
+            Kind::Spec => check_spec(base_dir, &task, probe, &mut out)?,
         }
     }
     Ok(out)

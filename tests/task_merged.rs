@@ -90,7 +90,7 @@ fn an_issue_task_with_no_pr_yet_is_not_a_candidate() {
     common::task_fixture::worked_task(&f, &b);
     let github = FakeGitHub::default();
 
-    let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
+    let found = plan(&f.env.base_dir(), &github, &Probe).unwrap();
 
     assert!(found.is_empty(), "{found:?}");
     assert!(found.left_alone.is_empty(), "{found:?}");
@@ -114,7 +114,7 @@ fn an_issue_task_whose_pr_is_merged_is_a_candidate() {
         base_moved: false,
     });
 
-    let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
+    let found = plan(&f.env.base_dir(), &github, &Probe).unwrap();
 
     assert_eq!(found.candidates.len(), 1, "{found:?}");
     assert_eq!(found.candidates[0].id, "issue-41");
@@ -144,7 +144,7 @@ fn an_issue_task_whose_pr_is_open_is_left_alone() {
         base_moved: false,
     });
 
-    let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
+    let found = plan(&f.env.base_dir(), &github, &Probe).unwrap();
 
     assert!(found.is_empty(), "{found:?}");
     assert!(found.left_alone.is_empty(), "{found:?}");
@@ -194,7 +194,7 @@ fn a_pr_review_task_whose_pr_is_merged_is_a_candidate() {
         base_moved: false,
     });
 
-    let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Gone).unwrap();
+    let found = plan(&f.env.base_dir(), &github, &Gone).unwrap();
 
     assert_eq!(found.candidates.len(), 1, "{found:?}");
     assert_eq!(found.candidates[0].id, "pr-7");
@@ -219,7 +219,7 @@ fn a_pr_review_task_whose_pr_is_still_open_is_left_alone() {
         base_moved: false,
     });
 
-    let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Gone).unwrap();
+    let found = plan(&f.env.base_dir(), &github, &Gone).unwrap();
 
     assert!(found.is_empty(), "{found:?}");
     assert!(found.left_alone.is_empty(), "{found:?}");
@@ -243,7 +243,7 @@ fn a_running_pr_review_task_whose_pr_is_merged_is_left_alone() {
     });
 
     // Probe says the process is alive: the task looks like it's still running its review.
-    let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
+    let found = plan(&f.env.base_dir(), &github, &Probe).unwrap();
 
     assert!(found.candidates.is_empty(), "{found:?}");
     assert_eq!(found.left_alone.len(), 1, "{found:?}");
@@ -268,7 +268,7 @@ fn an_issue_task_whose_pr_closed_without_merging_is_left_alone() {
         base_moved: false,
     });
 
-    let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
+    let found = plan(&f.env.base_dir(), &github, &Probe).unwrap();
 
     assert!(found.is_empty(), "{found:?}");
     assert!(found.left_alone.is_empty(), "{found:?}");
@@ -292,32 +292,6 @@ fn kept_spec_task(f: &Fixture) -> (std::path::PathBuf, String) {
     )
     .unwrap();
     (spec, id)
-}
-
-/// A checkout of `f.origin` with `id`'s branch fetched out of its `repo.git` (decision 178's
-/// protection satisfied).
-fn fetched_checkout(f: &Fixture, id: &str) -> std::path::PathBuf {
-    let checkout = f.env.tmp.path().join("checkout");
-    common::git(
-        f.env.tmp.path(),
-        &[
-            "clone",
-            "-q",
-            f.origin.to_str().unwrap(),
-            checkout.to_str().unwrap(),
-        ],
-    );
-    let repo_git = record::task_dir(&f.env.base_dir(), id).join("repo.git");
-    common::git(
-        &checkout,
-        &[
-            "fetch",
-            "-q",
-            repo_git.to_str().unwrap(),
-            &format!("{id}:{id}"),
-        ],
-    );
-    checkout
 }
 
 /// Fast-forward merges `id`'s branch (from its `repo.git`) into `main` on `f.origin`, as a real
@@ -351,10 +325,9 @@ fn merge_into_origin_main(f: &Fixture, id: &str) {
 fn a_finished_spec_task_not_yet_merged_is_left_alone_as_not_merged() {
     let f = fixture();
     let (_spec, id) = kept_spec_task(&f);
-    let checkout = fetched_checkout(&f, &id);
     let github = FakeGitHub::default();
 
-    let found = plan(&f.env.base_dir(), &checkout, &github, &Probe).unwrap();
+    let found = plan(&f.env.base_dir(), &github, &Probe).unwrap();
 
     assert!(found.candidates.is_empty(), "{found:?}");
     assert_eq!(found.left_alone.len(), 1, "{found:?}");
@@ -375,11 +348,10 @@ fn a_finished_spec_task_not_yet_merged_is_left_alone_as_not_merged() {
 fn a_merged_and_fetched_spec_task_is_a_candidate() {
     let f = fixture();
     let (_spec, id) = kept_spec_task(&f);
-    let checkout = fetched_checkout(&f, &id);
     merge_into_origin_main(&f, &id);
     let github = FakeGitHub::default();
 
-    let found = plan(&f.env.base_dir(), &checkout, &github, &Probe).unwrap();
+    let found = plan(&f.env.base_dir(), &github, &Probe).unwrap();
 
     assert_eq!(found.candidates.len(), 1, "{found:?}");
     assert_eq!(found.candidates[0].id, id);
@@ -398,11 +370,10 @@ fn a_merged_and_fetched_spec_task_is_a_candidate() {
 fn a_merged_spec_candidate_names_its_worktree_and_branch_cleanup_commands() {
     let f = fixture();
     let (_spec, id) = kept_spec_task(&f);
-    let checkout = fetched_checkout(&f, &id);
     merge_into_origin_main(&f, &id);
     let github = FakeGitHub::default();
 
-    let found = plan(&f.env.base_dir(), &checkout, &github, &Probe).unwrap();
+    let found = plan(&f.env.base_dir(), &github, &Probe).unwrap();
 
     assert_eq!(found.candidates.len(), 1, "{found:?}");
     let cleanup = found.candidates[0]
@@ -444,30 +415,10 @@ fn an_issue_candidate_has_no_local_cleanup() {
         base_moved: false,
     });
 
-    let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
+    let found = plan(&f.env.base_dir(), &github, &Probe).unwrap();
 
     assert_eq!(found.candidates.len(), 1, "{found:?}");
     assert!(found.candidates[0].local_cleanup.is_none(), "{found:?}");
-}
-
-#[test]
-fn a_merged_but_unfetched_spec_task_is_left_alone_protected() {
-    let f = fixture();
-    let (_spec, id) = kept_spec_task(&f);
-    merge_into_origin_main(&f, &id);
-    let github = FakeGitHub::default();
-
-    // repo_root here is the sbxm-task.toml checkout, which never fetched the branch.
-    let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
-
-    assert!(found.candidates.is_empty(), "{found:?}");
-    assert_eq!(found.left_alone.len(), 1, "{found:?}");
-    assert_eq!(found.left_alone[0].id, id);
-    assert!(
-        found.left_alone[0].reason.contains("git fetch"),
-        "{}",
-        found.left_alone[0].reason
-    );
 }
 
 #[test]
@@ -479,7 +430,7 @@ fn a_spec_task_with_no_commits_yet_is_not_a_candidate() {
     let source = source(&f);
     pipeline::prepare_spec(&ctx(&f, &source, &backend, &github), &spec).unwrap();
 
-    let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
+    let found = plan(&f.env.base_dir(), &github, &Probe).unwrap();
 
     assert!(found.is_empty(), "{found:?}");
     assert!(found.left_alone.is_empty(), "{found:?}");
@@ -493,7 +444,7 @@ fn a_ready_but_unfinished_spec_task_not_yet_merged_is_left_alone_as_not_merged()
     let (_spec, id) = ready_spec_task(&f);
     let github = FakeGitHub::default();
 
-    let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
+    let found = plan(&f.env.base_dir(), &github, &Probe).unwrap();
 
     assert!(found.candidates.is_empty(), "{found:?}");
     assert_eq!(found.left_alone.len(), 1, "{found:?}");
@@ -517,11 +468,10 @@ fn a_ready_but_unfinished_spec_task_not_yet_merged_is_left_alone_as_not_merged()
 fn a_ready_but_unfinished_spec_task_whose_branch_is_merged_is_a_candidate() {
     let f = fixture();
     let (_spec, id) = ready_spec_task(&f);
-    let checkout = fetched_checkout(&f, &id);
     merge_into_origin_main(&f, &id);
     let github = FakeGitHub::default();
 
-    let found = plan(&f.env.base_dir(), &checkout, &github, &Probe).unwrap();
+    let found = plan(&f.env.base_dir(), &github, &Probe).unwrap();
 
     assert_eq!(found.candidates.len(), 1, "{found:?}");
     assert_eq!(found.candidates[0].id, id);
@@ -547,7 +497,7 @@ fn a_spec_task_whose_folder_is_a_link_is_left_alone_without_fetching_through_it(
     let before = fs::read(&fetch_head).ok();
     let github = FakeGitHub::default();
 
-    let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
+    let found = plan(&f.env.base_dir(), &github, &Probe).unwrap();
 
     assert!(found.candidates.is_empty(), "{found:?}");
     assert_eq!(found.left_alone.len(), 1, "{found:?}");
@@ -581,7 +531,7 @@ fn a_linked_task_folder_is_left_alone_without_reading_its_record() {
     common::dir_link(&linked, &elsewhere);
     let github = FakeGitHub::default();
 
-    let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
+    let found = plan(&f.env.base_dir(), &github, &Probe).unwrap();
 
     let ids: Vec<&str> = found.left_alone.iter().map(|l| l.id.as_str()).collect();
     assert!(ids.contains(&"issue-41"), "{found:?}");
@@ -611,7 +561,7 @@ fn a_task_record_that_is_a_link_is_left_alone_without_reading_it() {
     common::file_link(&folder.join("task.json"), &elsewhere);
     let github = FakeGitHub::default();
 
-    let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
+    let found = plan(&f.env.base_dir(), &github, &Probe).unwrap();
 
     assert_eq!(found.left_alone.len(), 1, "{found:?}");
     assert_eq!(found.left_alone[0].id, "issue-41");
@@ -640,7 +590,7 @@ fn a_linked_tasks_root_refuses_the_scan() {
     common::dir_link(&root, &elsewhere);
     let github = FakeGitHub::default();
 
-    let err = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap_err();
+    let err = plan(&f.env.base_dir(), &github, &Probe).unwrap_err();
 
     assert!(format!("{err:#}").contains("link"), "{err:#}");
 }
@@ -651,7 +601,6 @@ fn a_linked_tasks_root_refuses_the_scan() {
 fn a_linked_repo_git_is_left_alone_without_fetching_through_it() {
     let f = fixture();
     let (_spec, id) = ready_spec_task(&f);
-    let checkout = fetched_checkout(&f, &id);
     merge_into_origin_main(&f, &id);
     let repo_git = record::task_dir(&f.env.base_dir(), &id).join("repo.git");
     let elsewhere = f.env.tmp.path().join("elsewhere-repo.git");
@@ -661,7 +610,7 @@ fn a_linked_repo_git_is_left_alone_without_fetching_through_it() {
     let before = fs::read(&fetch_head).ok();
     let github = FakeGitHub::default();
 
-    let found = plan(&f.env.base_dir(), &checkout, &github, &Probe).unwrap();
+    let found = plan(&f.env.base_dir(), &github, &Probe).unwrap();
 
     assert!(found.candidates.is_empty(), "{found:?}");
     assert_eq!(found.left_alone.len(), 1, "{found:?}");
@@ -707,77 +656,13 @@ fn a_record_whose_id_is_not_its_folder_is_left_alone_and_selects_nothing() {
             base_moved: false,
         });
 
-    let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
+    let found = plan(&f.env.base_dir(), &github, &Probe).unwrap();
 
     assert!(found.candidates.is_empty(), "{found:?}");
     assert_eq!(found.left_alone.len(), 1, "{found:?}");
     assert_eq!(found.left_alone[0].id, "issue-99");
     assert!(
         found.left_alone[0].reason.contains("issue-41"),
-        "{}",
-        found.left_alone[0].reason
-    );
-}
-
-/// Issue 324 (gap G63): a merged spec task whose fetch into the checkout failed partway, leaving
-/// the tip commit object and a ref to it but not its tree, is left alone, not removed.
-#[test]
-fn a_merged_spec_task_whose_tip_tree_is_missing_from_the_checkout_is_left_alone() {
-    let f = fixture();
-    let (_spec, id) = kept_spec_task(&f);
-    let checkout = f.env.tmp.path().join("checkout");
-    common::git(
-        f.env.tmp.path(),
-        &[
-            "clone",
-            "-q",
-            f.origin.to_str().unwrap(),
-            checkout.to_str().unwrap(),
-        ],
-    );
-    let repo_git = record::task_dir(&f.env.base_dir(), &id).join("repo.git");
-    common::plant_tip_commit_only(&repo_git, &checkout, &id);
-    merge_into_origin_main(&f, &id);
-
-    let found = plan(&f.env.base_dir(), &checkout, &FakeGitHub::default(), &Probe).unwrap();
-
-    assert!(found.candidates.is_empty(), "{found:?}");
-    assert_eq!(found.left_alone.len(), 1, "{found:?}");
-    assert_eq!(found.left_alone[0].id, id);
-    assert!(
-        found.left_alone[0].reason.contains("git fetch"),
-        "{}",
-        found.left_alone[0].reason
-    );
-}
-
-/// Issue 324: a merged spec task whose history is complete in the checkout but that no ref there
-/// points at is left alone too.
-#[test]
-fn a_merged_spec_task_whose_tip_no_checkout_ref_points_at_is_left_alone() {
-    let f = fixture();
-    let (_spec, id) = kept_spec_task(&f);
-    let checkout = f.env.tmp.path().join("checkout");
-    common::git(
-        f.env.tmp.path(),
-        &[
-            "clone",
-            "-q",
-            f.origin.to_str().unwrap(),
-            checkout.to_str().unwrap(),
-        ],
-    );
-    let repo_git = record::task_dir(&f.env.base_dir(), &id).join("repo.git");
-    common::fetch_without_ref(&repo_git, &checkout, &id);
-    merge_into_origin_main(&f, &id);
-
-    let found = plan(&f.env.base_dir(), &checkout, &FakeGitHub::default(), &Probe).unwrap();
-
-    assert!(found.candidates.is_empty(), "{found:?}");
-    assert_eq!(found.left_alone.len(), 1, "{found:?}");
-    assert_eq!(found.left_alone[0].id, id);
-    assert!(
-        found.left_alone[0].reason.contains("git fetch"),
         "{}",
         found.left_alone[0].reason
     );
@@ -807,13 +692,7 @@ fn a_spec_task_whose_base_is_gone_on_origin_is_left_alone_with_its_removal_comma
     let (_spec, id) = ready_spec_task(&f);
     rebase_record_onto(&f, &id, "m4-plan");
 
-    let found = plan(
-        &f.env.base_dir(),
-        &repo_root(&f),
-        &FakeGitHub::default(),
-        &Probe,
-    )
-    .unwrap();
+    let found = plan(&f.env.base_dir(), &FakeGitHub::default(), &Probe).unwrap();
 
     assert!(found.candidates.is_empty(), "{found:?}");
     assert_eq!(found.left_alone.len(), 1, "{found:?}");
@@ -850,7 +729,7 @@ fn a_gone_base_does_not_stop_the_scan_for_a_merged_task_next_to_it() {
         base_moved: false,
     });
 
-    let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Probe).unwrap();
+    let found = plan(&f.env.base_dir(), &github, &Probe).unwrap();
 
     assert_eq!(found.candidates.len(), 1, "{found:?}");
     assert_eq!(found.candidates[0].id, "issue-41");
@@ -873,13 +752,7 @@ fn a_fetch_failing_while_the_base_is_still_on_origin_stops_the_scan() {
     fs::create_dir_all(repo_git.join("refs/remotes/origin")).unwrap();
     fs::write(repo_git.join("refs/remotes/origin/main.lock"), "").unwrap();
 
-    let err = plan(
-        &f.env.base_dir(),
-        &repo_root(&f),
-        &FakeGitHub::default(),
-        &Probe,
-    )
-    .unwrap_err();
+    let err = plan(&f.env.base_dir(), &FakeGitHub::default(), &Probe).unwrap_err();
 
     let text = format!("{err:#}");
     assert!(text.contains("cannot fetch main from origin"), "{text}");
@@ -904,13 +777,7 @@ fn a_failing_ls_remote_after_a_failed_fetch_stops_the_scan() {
         ],
     );
 
-    let err = plan(
-        &f.env.base_dir(),
-        &repo_root(&f),
-        &FakeGitHub::default(),
-        &Probe,
-    )
-    .unwrap_err();
+    let err = plan(&f.env.base_dir(), &FakeGitHub::default(), &Probe).unwrap_err();
 
     let text = format!("{err:#}");
     assert!(text.contains(&id), "{text}");
@@ -953,7 +820,7 @@ fn a_fix_task_whose_pr_is_merged_is_a_candidate() {
         base_moved: false,
     });
 
-    let found = plan(&f.env.base_dir(), &repo_root(&f), &github, &Gone).unwrap();
+    let found = plan(&f.env.base_dir(), &github, &Gone).unwrap();
 
     assert_eq!(found.candidates.len(), 1, "{found:?}");
     assert_eq!(found.candidates[0].id, id);

@@ -219,11 +219,11 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
   - `task gates` is refused once a task is `ready`.
 - **Cleanup in one command (decision 195, issue 202):** `task rm --merged` finds every task whose work is merged
   (an issue's task or a PR-review task whose PR merged on GitHub, a spec task whose branch is reachable from its
-  base after a fetch) and removes it after one confirmation, instead of a `task rm` typed by hand per task. A task
+  base after a fetch, which puts its result on origin, so it needn't be fetched into your checkout first, issue
+  495) and removes it after one confirmation, instead of a `task rm` typed by hand per task. A task
   whose PR is still open or was closed without merging is skipped without a word. Every other task left alone is
   named with the reason, `--yes` or not: a spec task's merge can't be told from "not yet merged" (a squash or rebase
-  merge isn't detected), its result was never fetched out of its own `repo.git` (decision 178's protection, which
-  still applies), or its task folder, its `task.json` or a spec task's `repo.git` is a link, or its `task.json` names another task than its folder (never followed, nothing behind it read; a linked `.sbxm/tasks`
+  merge isn't detected), or its task folder, its `task.json` or a spec task's `repo.git` is a link, or its `task.json` names another task than its folder (never followed, nothing behind it read; a linked `.sbxm/tasks`
   refuses the whole command). For a spec task with
   the `local` sink, the worktree and the local branch in your own checkout are never deleted either; the dry run and
   the removal summary both name the two `git` commands that do, instead of running them. `--dry-run` only

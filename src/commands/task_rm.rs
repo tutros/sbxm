@@ -95,13 +95,7 @@ pub fn run_with_sleep(
             id
         }
         Target::Merged => {
-            let found = merged::plan_forgetting(
-                &base_dir,
-                &opts.repo_root,
-                github,
-                probe,
-                opts.forget_ambiguous,
-            )?;
+            let found = merged::plan_forgetting(&base_dir, github, probe, opts.forget_ambiguous)?;
             if opts.dry_run {
                 if found.is_empty() && found.left_alone.is_empty() {
                     writeln!(out, "no merged tasks to remove")?;

@@ -368,7 +368,7 @@ fn an_unpushed_fix_result_is_left_alone_by_task_rm_merged_once_its_pr_merges() {
     .unwrap_err();
     let github = FakeGitHub::default().with_pr(merged(&pr7(&head)));
 
-    let found = merged::plan(&f.env.base_dir(), &f.env.base_dir(), &github, &Probe).unwrap();
+    let found = merged::plan(&f.env.base_dir(), &github, &Probe).unwrap();
 
     assert!(found.candidates.is_empty(), "{found:?}");
     let [left] = found.left_alone.as_slice() else {
@@ -402,7 +402,7 @@ fn a_pushed_fix_task_is_a_task_rm_merged_candidate_once_its_pr_merges() {
     .unwrap();
     let github = FakeGitHub::default().with_pr(merged(&pr7(&head)));
 
-    let found = merged::plan(&f.env.base_dir(), &f.env.base_dir(), &github, &Probe).unwrap();
+    let found = merged::plan(&f.env.base_dir(), &github, &Probe).unwrap();
 
     assert!(found.left_alone.is_empty(), "{found:?}");
     let [candidate] = found.candidates.as_slice() else {
@@ -432,7 +432,7 @@ fn a_merged_task_another_command_holds_is_left_alone_by_rm_merged() {
     )
     .unwrap();
 
-    let found = merged::plan(&f.env.base_dir(), &f.env.base_dir(), &github, &Probe).unwrap();
+    let found = merged::plan(&f.env.base_dir(), &github, &Probe).unwrap();
 
     assert!(found.candidates.is_empty(), "{found:?}");
     let [left] = found.left_alone.as_slice() else {
