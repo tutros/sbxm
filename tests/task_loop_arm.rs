@@ -169,8 +169,11 @@ impl Fixture {
     }
 
     fn log_text(&self) -> String {
-        fs::read_to_string(self.repo_root.join("sdlc/batches/2026-11-02-loop.md"))
-            .unwrap_or_default()
+        fs::read_to_string(
+            self.base()
+                .join(".sbxm/loop-logs/2026-11-02-100000-loop.md"),
+        )
+        .unwrap_or_default()
     }
 
     fn opts(&self, cap: Option<u32>) -> Options {

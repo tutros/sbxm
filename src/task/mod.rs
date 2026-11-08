@@ -8,6 +8,7 @@ pub mod fixes;
 pub mod gates;
 pub mod lifetime;
 pub mod lock;
+pub mod loop_log;
 pub mod loop_pause;
 pub mod machine;
 pub mod merged;

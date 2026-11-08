@@ -4,8 +4,9 @@
 //! task. It pauses while 5 PRs await the user or the disk is low, resumes a task once after an
 //! environment stop and parks it after a second, waits out a usage limit, and stops on an empty
 //! queue (with a read-only report), two parked tasks in a row, `--cap`, the usage waits' total,
-//! or a stop request between phases. One log row per task goes to
-//! `sdlc/batches/<date>-loop.md`. Before each new issue it resolves the open PRs it opened that
+//! or a stop request between phases. One log row per task goes to the loop's own file under
+//! `<base>/.sbxm/loop-logs/`, posted at the stop to the open `loop-log` issue (decision 305,
+//! [`loop_log`]). Before each new issue it resolves the open PRs it opened that
 //! GitHub reports conflicting with their base, with `task fix --pr N` (decision 298), then reads
 //! the workflow runs of its PRs and of `main` (decision 299): a failed run is re-run once; a
 //! second failure disarms the PR, or on `main` sets the pause that stops all arming until the
@@ -39,7 +40,7 @@ use crate::task::queue::{self, READY_LABEL, Report, Row, Skipped};
 use crate::task::record::{self, Kind, Process, ProcessProbe, Record, Stage};
 use crate::task::risk::Level;
 use crate::task::runlog::{RunLog, Tee};
-use crate::task::{findings, finish, lock, pipeline, pr_fix};
+use crate::task::{findings, finish, lock, loop_log, pipeline, pr_fix};
 
 /// How many open PRs the loop opened may await the user before it pauses (decision 245(e)).
 pub const PR_CAP: usize = 5;
@@ -50,7 +51,7 @@ pub const PAUSE_POLL: Duration = Duration::from_secs(5 * 60);
 const LABEL_POLL: Duration = Duration::from_secs(2);
 
 pub struct Options {
-    /// The target repo's root, where `sbxm-task.toml` is and the log is written.
+    /// The target repo's root, where `sbxm-task.toml` is (the loop writes nothing there).
     pub repo_root: PathBuf,
     /// `--issue N`, in the user's order; empty means the `ready-for-worker` queue.
     pub issues: Vec<u32>,
@@ -356,6 +357,8 @@ struct Loop<'a> {
     /// the user cleared isn't set again for the same run.
     paused_for: HashSet<(String, u64)>,
     log: PathBuf,
+    /// Whether this loop wrote a row to [`log`](Self::log): only then is it posted.
+    logged: bool,
 }
 
 impl Loop<'_> {
@@ -1236,12 +1239,7 @@ impl Loop<'_> {
             "{pr_named}: {outcome}",
             pr_named = self.pr_named(number)
         )?;
-        if let Err(e) = queue::append_resolve_row(&self.log, &row) {
-            self.warn_once(
-                warn,
-                format!("{e:#}; the loop goes on without that log row"),
-            )?;
-        }
+        self.log_row(&row, false, warn)?;
         Ok(())
     }
 
@@ -1791,12 +1789,7 @@ impl Loop<'_> {
                     stops: Vec::new(),
                     idle_before: None,
                 };
-                if let Err(e) = queue::append_resolve_row(&self.log, &row) {
-                    self.warn_once(
-                        warn,
-                        format!("{e:#}; the loop goes on without that log row"),
-                    )?;
-                }
+                self.log_row(&row, false, warn)?;
             }
         }
         Ok(())
@@ -1927,21 +1920,29 @@ impl Loop<'_> {
             stops: Vec::new(),
             idle_before: None,
         };
-        if let Err(e) = queue::append_resolve_row(&self.log, &row) {
-            self.warn_once(
-                warn,
-                format!("{e:#}; the loop goes on without that log row"),
-            )?;
-        }
+        self.log_row(&row, false, warn)?;
         Ok(())
     }
 
     fn append(&mut self, row: &Row, warn: &mut dyn Write) -> Result<()> {
-        if let Err(e) = queue::append_row(&self.log, row) {
-            self.warn_once(
+        self.log_row(row, true, warn)
+    }
+
+    /// Every row of the loop's log is written here, so [`logged`](Self::logged) says whether this
+    /// loop wrote one. `once`: a task's row, skipped when its issue has one already; a resolve's
+    /// or a log-fix's row is written each time.
+    fn log_row(&mut self, row: &Row, once: bool, warn: &mut dyn Write) -> Result<()> {
+        let written = if once {
+            queue::append_row(&self.log, row)
+        } else {
+            queue::append_resolve_row(&self.log, row).map(|()| true)
+        };
+        match written {
+            Ok(written) => self.logged |= written,
+            Err(e) => self.warn_once(
                 warn,
                 format!("{e:#}; the loop goes on without that log row"),
-            )?;
+            )?,
         }
         Ok(())
     }
@@ -2092,9 +2093,7 @@ pub fn run(
     }
     let _lock = take_lock(&base_dir, opts, probe, warn)?;
 
-    let started_at = (env.now)();
-    let date = format_timestamp(started_at);
-    let date = date.split_once('T').map_or(date.as_str(), |(d, _)| d);
+    let (started_at, log) = free_log(&base_dir, env)?;
     let mut lp = Loop {
         config_dir,
         base_dir,
@@ -2116,13 +2115,59 @@ pub fn run(
         log_fixed: HashSet::new(),
         disarmed_for_log_fix: HashSet::new(),
         paused_for: HashSet::new(),
-        log: opts
-            .repo_root
-            .join("sdlc")
-            .join("batches")
-            .join(format!("{date}-loop.md")),
+        log,
+        logged: false,
     };
 
+    let result = work(&mut lp, opts, out, warn);
+    // Only rows this loop wrote are posted: a loop that ran no task posts nothing (decision 305).
+    if lp.logged {
+        let stop = match &result {
+            Ok(stop) => stop.clone(),
+            Err(e) => first_line(&format!("{e:#}")),
+        };
+        if let Err(e) = loop_log::post(github, &lp.repo, &lp.log, started_at, &stop) {
+            // Never in place of the loop's own result: its exit code stays as it was.
+            let _ = writeln!(
+                warn,
+                "could not post the loop's log to GitHub: {e:#}; it stays at {}",
+                lp.log.display()
+            );
+        }
+    }
+    result.map(drop)
+}
+
+/// How many seconds the loop waits at most for a log name no earlier loop took.
+const LOG_NAME_TRIES: u32 = 5;
+
+/// The loop's start and its own log file (decision 305): a name an earlier loop that started in
+/// the same second took is never shared, the loop waits for the next second instead (review M-2
+/// of issue 463). Called under the loop lock, so no other loop takes the name meanwhile.
+fn free_log(base_dir: &Path, env: &Env) -> Result<(u64, PathBuf)> {
+    for _ in 0..LOG_NAME_TRIES {
+        let started_at = (env.now)();
+        let log = loop_log::path(base_dir, started_at);
+        if fs::symlink_metadata(&log).is_err() {
+            return Ok((started_at, log));
+        }
+        (env.sleep)(Duration::from_secs(1));
+    }
+    bail!(
+        "every log name of the last {LOG_NAME_TRIES} seconds under {} is taken by an earlier \
+         loop; try again",
+        base_dir.join(".sbxm").join("loop-logs").display()
+    )
+}
+
+/// The loop itself, from its first task to its stop; returns the stop's message.
+fn work(
+    lp: &mut Loop,
+    opts: &Options,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<String> {
+    let (github, env) = (lp.github, lp.env);
     let mut tried = HashSet::new();
     let mut refused = Vec::new();
     let mut tasks_run = 0u32;
@@ -2143,12 +2188,13 @@ pub fn run(
         if (env.stop_requested)() {
             writeln!(out, "stopped on request")?;
             left(&held, &due, out)?;
-            return Ok(());
+            return Ok("stopped on request".to_owned());
         }
         if opts.cap.is_some_and(|cap| tasks_run >= cap) {
-            writeln!(out, "--cap {} reached", opts.cap.unwrap_or_default())?;
+            let stop = format!("--cap {} reached", opts.cap.unwrap_or_default());
+            writeln!(out, "{stop}")?;
             left(&held, &due, out)?;
-            return Ok(());
+            return Ok(stop);
         }
         lp.clean_merged(out, warn)?;
         let go_on = lp.resolve_conflicts(out, warn)? && {
@@ -2158,7 +2204,7 @@ pub fn run(
         if !go_on {
             writeln!(out, "stopped on request")?;
             left(&held, &due, out)?;
-            return Ok(());
+            return Ok("stopped on request".to_owned());
         }
         let (issue, title, size, started, stops, ended) = if let Some(again) = due.pop_front() {
             let Held {
@@ -2182,8 +2228,13 @@ pub fn run(
             let (next, waiting) = lp.next(&open, &opts.issues, &mut tried, &mut refused, out)?;
             let Some(issue) = next else {
                 let skipped: Vec<Skipped> = refused.iter().chain(&waiting).cloned().collect();
+                let stop = if opts.issues.is_empty() {
+                    "the queue is empty; the loop stops"
+                } else {
+                    "every named issue was taken or skipped; the loop stops"
+                };
+                writeln!(out, "{stop}")?;
                 if opts.issues.is_empty() {
-                    writeln!(out, "the queue is empty; the loop stops")?;
                     write!(
                         out,
                         "{}",
@@ -2192,14 +2243,9 @@ pub fn run(
                             skipped: &skipped,
                         })
                     )?;
-                } else {
-                    writeln!(
-                        out,
-                        "every named issue was taken or skipped; the loop stops"
-                    )?;
                 }
                 left(&held, &due, out)?;
-                return Ok(());
+                return Ok(stop.to_owned());
             };
             let found = open.iter().find(|i| i.number == issue);
             let title = found.map_or_else(|| format!("issue {issue}"), |i| i.title.clone());
@@ -2225,7 +2271,7 @@ pub fn run(
             Err(Halt::Stopped) => {
                 writeln!(out, "stopped on request")?;
                 left(&held, &due, out)?;
-                return Ok(());
+                return Ok("stopped on request".to_owned());
             }
             Err(Halt::SignIn(e)) => {
                 let rec = lp.record(issue);

@@ -43,6 +43,10 @@ impl GhRunner for Process {
     }
 }
 
+/// How many issues [`GitHubBackend::issues_open_labeled`] lists at most; a listing that reaches it
+/// may have been cut off, so it is an error.
+pub const LABELED_LIMIT: u32 = 1000;
+
 pub struct GhBackend {
     runner: Box<dyn GhRunner>,
 }
@@ -78,18 +82,27 @@ impl GhBackend {
     }
 
     fn list_issues(&self, repo: &str, state: &str, limit: u32) -> Result<Vec<Issue>> {
-        let raw: Vec<RawIssue> = self.json(&strings(&[
-            "issue",
-            "list",
-            "--repo",
-            repo,
-            "--state",
-            state,
+        self.list_issues_with(repo, state, &[], limit)
+    }
+
+    /// `gh issue list` with `filter` (such as `--label <name>`) before its limit.
+    fn list_issues_with(
+        &self,
+        repo: &str,
+        state: &str,
+        filter: &[&str],
+        limit: u32,
+    ) -> Result<Vec<Issue>> {
+        let mut args = strings(&["issue", "list", "--repo", repo, "--state", state]);
+        args.extend(strings(filter));
+        let limit = limit.to_string();
+        args.extend(strings(&[
             "--limit",
-            &limit.to_string(),
+            &limit,
             "--json",
             "number,title,labels,body,state",
-        ]))?;
+        ]));
+        let raw: Vec<RawIssue> = self.json(&args)?;
         Ok(raw
             .into_iter()
             .map(|i| Issue {
@@ -325,6 +338,18 @@ impl GitHubBackend for GhBackend {
 
     fn issues_open(&self, repo: &str) -> Result<Vec<Issue>> {
         self.list_issues(repo, "open", 200)
+    }
+
+    fn issues_open_labeled(&self, repo: &str, label: &str) -> Result<Vec<Issue>> {
+        let issues = self.list_issues_with(repo, "open", &["--label", label], LABELED_LIMIT)?;
+        if issues.len() >= LABELED_LIMIT as usize {
+            bail!(
+                "{repo} has {LABELED_LIMIT} or more open issues labeled `{label}`; `gh issue list` \
+                 lists at most {LABELED_LIMIT}, so the lowest-numbered can't be told; close the \
+                 extra ones"
+            );
+        }
+        Ok(issues)
     }
 
     fn issues_all(&self, repo: &str, limit: u32) -> Result<Vec<Issue>> {
