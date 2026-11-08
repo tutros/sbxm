@@ -345,7 +345,8 @@ impl Fixture {
     }
 
     fn log(&self) -> PathBuf {
-        self.repo_root.join("sdlc/batches/2026-11-02-loop.md")
+        self.base()
+            .join(".sbxm/loop-logs/2026-11-02-100000-loop.md")
     }
 
     fn log_text(&self) -> String {

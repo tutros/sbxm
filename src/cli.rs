@@ -558,7 +558,8 @@ pub enum TaskCommand {
     /// doesn't count) or the disk is low; resumes a task once after an environment stop and parks
     /// it after a second; waits out a usage limit ([loop] in sbxm-task.toml). Stops on an empty
     /// queue (with a report of the almost-ready issues), two parked tasks in a row, or --cap. One
-    /// log row per task goes to sdlc/batches/<date>-loop.md. Re-runs a failed workflow run of its
+    /// log row per task goes to <base_dir>/.sbxm/loop-logs/<date>-<HHMMSS>-loop.md, posted at the
+    /// stop to the open issue labeled loop-log. Re-runs a failed workflow run of its
     /// PRs and of main once; on a second failure disarms the PR, or pauses all arming on a red
     /// main until --clear-pause.
     Loop {

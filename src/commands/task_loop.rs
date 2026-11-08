@@ -4,8 +4,9 @@
 //! task. It pauses while 5 PRs await the user or the disk is low, resumes a task once after an
 //! environment stop and parks it after a second, waits out a usage limit, and stops on an empty
 //! queue (with a read-only report), two parked tasks in a row, `--cap`, the usage waits' total,
-//! or a stop request between phases. One log row per task goes to
-//! `sdlc/batches/<date>-loop.md`. Before each new issue it resolves the open PRs it opened that
+//! or a stop request between phases. One log row per task goes to the loop's own file under
+//! `<base>/.sbxm/loop-logs/`, posted at the stop to the open `loop-log` issue (decision 305,
+//! [`loop_log`]). Before each new issue it resolves the open PRs it opened that
 //! GitHub reports conflicting with their base, with `task fix --pr N` (decision 298), then reads
 //! the workflow runs of its PRs and of `main` (decision 299): a failed run is re-run once; a
 //! second failure disarms the PR, or on `main` sets the pause that stops all arming until the
@@ -39,7 +40,7 @@ use crate::task::queue::{self, READY_LABEL, Report, Row, Skipped};
 use crate::task::record::{self, Kind, Process, ProcessProbe, Record, Stage};
 use crate::task::risk::Level;
 use crate::task::runlog::{RunLog, Tee};
-use crate::task::{findings, finish, lock, pipeline, pr_fix};
+use crate::task::{findings, finish, lock, loop_log, pipeline, pr_fix};
 
 /// How many open PRs the loop opened may await the user before it pauses (decision 245(e)).
 pub const PR_CAP: usize = 5;
@@ -50,7 +51,7 @@ pub const PAUSE_POLL: Duration = Duration::from_secs(5 * 60);
 const LABEL_POLL: Duration = Duration::from_secs(2);
 
 pub struct Options {
-    /// The target repo's root, where `sbxm-task.toml` is and the log is written.
+    /// The target repo's root, where `sbxm-task.toml` is (the loop writes nothing there).
     pub repo_root: PathBuf,
     /// `--issue N`, in the user's order; empty means the `ready-for-worker` queue.
     pub issues: Vec<u32>,
@@ -2093,8 +2094,7 @@ pub fn run(
     let _lock = take_lock(&base_dir, opts, probe, warn)?;
 
     let started_at = (env.now)();
-    let date = format_timestamp(started_at);
-    let date = date.split_once('T').map_or(date.as_str(), |(d, _)| d);
+    let log = loop_log::path(&base_dir, started_at);
     let mut lp = Loop {
         config_dir,
         base_dir,
@@ -2116,13 +2116,36 @@ pub fn run(
         log_fixed: HashSet::new(),
         disarmed_for_log_fix: HashSet::new(),
         paused_for: HashSet::new(),
-        log: opts
-            .repo_root
-            .join("sdlc")
-            .join("batches")
-            .join(format!("{date}-loop.md")),
+        log,
     };
 
+    let result = work(&mut lp, opts, out, warn);
+    // A loop that ran no task has no log, and posts nothing (decision 305).
+    if lp.log.is_file() {
+        let stop = match &result {
+            Ok(stop) => stop.clone(),
+            Err(e) => first_line(&format!("{e:#}")),
+        };
+        if let Err(e) = loop_log::post(github, &lp.repo, &lp.log, started_at, &stop) {
+            // Never in place of the loop's own result: its exit code stays as it was.
+            let _ = writeln!(
+                warn,
+                "could not post the loop's log to GitHub: {e:#}; it stays at {}",
+                lp.log.display()
+            );
+        }
+    }
+    result.map(drop)
+}
+
+/// The loop itself, from its first task to its stop; returns the stop's message.
+fn work(
+    lp: &mut Loop,
+    opts: &Options,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<String> {
+    let (github, env) = (lp.github, lp.env);
     let mut tried = HashSet::new();
     let mut refused = Vec::new();
     let mut tasks_run = 0u32;
@@ -2143,12 +2166,13 @@ pub fn run(
         if (env.stop_requested)() {
             writeln!(out, "stopped on request")?;
             left(&held, &due, out)?;
-            return Ok(());
+            return Ok("stopped on request".to_owned());
         }
         if opts.cap.is_some_and(|cap| tasks_run >= cap) {
-            writeln!(out, "--cap {} reached", opts.cap.unwrap_or_default())?;
+            let stop = format!("--cap {} reached", opts.cap.unwrap_or_default());
+            writeln!(out, "{stop}")?;
             left(&held, &due, out)?;
-            return Ok(());
+            return Ok(stop);
         }
         lp.clean_merged(out, warn)?;
         let go_on = lp.resolve_conflicts(out, warn)? && {
@@ -2158,7 +2182,7 @@ pub fn run(
         if !go_on {
             writeln!(out, "stopped on request")?;
             left(&held, &due, out)?;
-            return Ok(());
+            return Ok("stopped on request".to_owned());
         }
         let (issue, title, size, started, stops, ended) = if let Some(again) = due.pop_front() {
             let Held {
@@ -2182,8 +2206,13 @@ pub fn run(
             let (next, waiting) = lp.next(&open, &opts.issues, &mut tried, &mut refused, out)?;
             let Some(issue) = next else {
                 let skipped: Vec<Skipped> = refused.iter().chain(&waiting).cloned().collect();
+                let stop = if opts.issues.is_empty() {
+                    "the queue is empty; the loop stops"
+                } else {
+                    "every named issue was taken or skipped; the loop stops"
+                };
+                writeln!(out, "{stop}")?;
                 if opts.issues.is_empty() {
-                    writeln!(out, "the queue is empty; the loop stops")?;
                     write!(
                         out,
                         "{}",
@@ -2192,14 +2221,9 @@ pub fn run(
                             skipped: &skipped,
                         })
                     )?;
-                } else {
-                    writeln!(
-                        out,
-                        "every named issue was taken or skipped; the loop stops"
-                    )?;
                 }
                 left(&held, &due, out)?;
-                return Ok(());
+                return Ok(stop.to_owned());
             };
             let found = open.iter().find(|i| i.number == issue);
             let title = found.map_or_else(|| format!("issue {issue}"), |i| i.title.clone());
@@ -2225,7 +2249,7 @@ pub fn run(
             Err(Halt::Stopped) => {
                 writeln!(out, "stopped on request")?;
                 left(&held, &due, out)?;
-                return Ok(());
+                return Ok("stopped on request".to_owned());
             }
             Err(Halt::SignIn(e)) => {
                 let rec = lp.record(issue);

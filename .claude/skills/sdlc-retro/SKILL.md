@@ -31,6 +31,7 @@ Read only; nothing is written in this step. For every task and PR in the window:
 |------|-------|
 | Merged PRs, their issues and sizes | `gh pr list --state merged --search "merged:<start>..<end>" --limit 500`, the issues' `size:` labels; if the count it returns equals the limit, raise the limit and run it again, so no PR is cut off |
 | Review rounds and must-fix counts per round, `Repeat of:` findings, stop reasons | each task's `run.log` and `review-<n>.md` under `<base>/.sbxm/tasks/` (or `task-archive/`), PR review comments |
+| `task loop` runs: each task's row, outcome, stops and idle time, and each loop's stop reason | the comments on the open issue labeled `loop-log` (`gh issue list --label loop-log`; one comment per loop, decision 305), and `sdlc/batches/*-loop.md` for loops before 2026-11-08 |
 | Wall time per command (each `run.log` header to that command's last line) and per task (first header to `ready`) | `run.log` timestamps |
 | Time from each stop to the next command (a command's last line to the next header), per task, with the stop's cause, and the total per cause (decision 243) | `run.log` timestamps; the cause from the stopping command's last lines |
 | Time the latest worker or fix-round run and the latest reviewer run took | `duration_s` of `worker.run` and `reviewer.run` in `task.json`: each keeps only its latest run |
@@ -82,7 +83,10 @@ A change to the sbxm code itself is a GitHub issue with a size, not an experimen
 ## 5. Write it down and decide
 
 1. Write `sdlc/retros/<date>-retro.md` (create the folder for the first one): the `Window:` line, the per-task table, the patterns, last retro's experiments and
-   their outcome, and the proposals. Keep security-tool details out of it (it goes to GitHub).
+   their outcome, and the proposals, and a link to the open `loop-log` issue it read. Keep security-tool details out
+   of it (it goes to GitHub). Then close that issue with a comment naming the retro record
+   (`gh issue close <n> --comment "Read by sdlc/retros/<date>-retro.md"`): the next loop opens a new one for the next
+   window (decision 305).
 2. Give the user a short summary: the proposals, one line each (none is fine when no pattern
    has two instances), nothing else.
 3. Ask about each proposal on its own, with a recommendation (step 1 of N, 2 of N...).
