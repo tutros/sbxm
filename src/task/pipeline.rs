@@ -3249,7 +3249,7 @@ fn collect(
             let why = format!("{e:#}");
             notes.push(format!("could not collect the worker's commits: {why}"));
             *status = RunStatus::Failed(why);
-            prepared.record.status = Status::Failed;
+            prepared.record.finish(Status::Failed)?;
         }
     }
 

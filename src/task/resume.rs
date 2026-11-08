@@ -332,7 +332,7 @@ fn resume_checked(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -
         // resume.
         (Stage::Prepared, _) => {
             if let Err(e) = pipeline::ensure_worker_sandbox(env, prepared, true) {
-                prepared.record.status = Status::Failed;
+                prepared.record.finish(Status::Failed)?;
                 prepared
                     .record
                     .notes
