@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 
 use common::task_fixture::{Fixture, backend, ctx, fixture, source};
 use sbxm::github::fake::FakeGitHub;
-use sbxm::status::tasks::{self, TaskRow};
+use sbxm::status::tasks::{self, TaskRow, TaskTime};
 use sbxm::task::record::{self, Kind, NewTask, Process, Record};
 use sbxm::task::{fixes, pipeline};
 use sbxm::title;
@@ -265,7 +265,7 @@ fn row(title: &str) -> TaskRow {
         title: title.to_owned(),
         stage: "working",
         status: "running".to_owned(),
-        stage_entered_at: None,
+        time: TaskTime::InStage(None),
         commits_ahead: None,
         must_fix: None,
         pr: None,

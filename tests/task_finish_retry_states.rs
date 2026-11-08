@@ -83,12 +83,14 @@ fn a_task_that_is_not_finished_is_refused() {
 }
 
 #[test]
-fn task_states_documents_the_retry_without_a_publication() {
+fn task_states_documents_the_retry_without_a_publication_and_only_with_a_pr() {
     let text = task_states::render();
     let row = text
         .lines()
         .find(|l| l.contains("finished ok (issue/spec)") && l.contains("task finish"))
         .expect("no summary-only retry row");
+    // A finished `local` or `push` spec task records no PR and is refused (issue 480).
+    assert!(row.contains("with a recorded PR"), "{row}");
     assert!(row.contains("summaries only"), "{row}");
     assert!(row.contains("no push, no new PR, no PR review"), "{row}");
 }
