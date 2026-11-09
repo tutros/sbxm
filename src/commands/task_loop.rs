@@ -340,12 +340,21 @@ struct Held {
     started: u64,
     stops: Vec<(String, u64)>,
     retry: Retry,
+    /// Cut off when a loop died (decision 310): marked as resumed when the loop takes it.
+    cut_off: bool,
 }
 
 impl Held {
     /// The line naming what is left when the loop stops before trying it again.
     fn left(&self) -> String {
         let issue = self.issue;
+        if self.cut_off {
+            return format!(
+                "{} was cut off when a loop stopped and not resumed; continue it with `sbxm task \
+                 resume --issue {issue}`",
+                crate::title::named(&format!("#{issue}"), &self.title)
+            );
+        }
         let command = match self.retry {
             Retry::Finish { .. } => "finish",
             Retry::Resume { .. } => "resume",
@@ -886,10 +895,10 @@ impl Loop<'_> {
 
     /// The tasks the loop of process `dead`, whose lock this loop took over, was running when it
     /// died (decision 310): this repo's issue tasks not finished, interrupted as `task status`
-    /// decides it, and recorded as worked on by that process. Each is marked as resumed
-    /// ([`RESUMED_HOOK`]) and returned to be continued once, as the loop's one resume after an
-    /// environment stop; one already marked is parked with its log row instead. A task whose lock
-    /// a live command run by hand holds is left to it.
+    /// decides it, and recorded as worked on by that process. Each is returned to be continued
+    /// once, as the loop's one resume after an environment stop, and marked as resumed
+    /// ([`RESUMED_HOOK`]) only when the loop takes it; one already marked is parked with its log
+    /// row instead.
     fn cut_off(
         &mut self,
         dead: Option<&Process>,
@@ -951,13 +960,6 @@ impl Loop<'_> {
                 )?;
                 continue;
             }
-            if let Err(e) = self.mark_resumed(issue) {
-                let Some(in_use) = e.downcast_ref::<lock::InUse>() else {
-                    return Err(e);
-                };
-                writeln!(out, "{named}: {}; the loop leaves it", in_use.describe())?;
-                continue;
-            }
             writeln!(
                 out,
                 "{named}: cut off at {stage} when the loop stopped; resuming it once"
@@ -969,6 +971,7 @@ impl Loop<'_> {
                 started: self.now(),
                 stops: vec![("loop stopped".to_owned(), 0)],
                 retry: Retry::Resume { failures: 1 },
+                cut_off: true,
             });
         }
         Ok(due)
@@ -2571,7 +2574,21 @@ fn work(
                 started,
                 mut stops,
                 retry,
+                cut_off,
             } = again;
+            // Marked only now, so a loop that stops before it leaves the task to be resumed.
+            if cut_off && let Err(e) = lp.mark_resumed(issue) {
+                let Some(in_use) = e.downcast_ref::<lock::InUse>() else {
+                    return Err(e);
+                };
+                writeln!(
+                    out,
+                    "{}: its resume is skipped: {}; the loop leaves it to that command",
+                    crate::title::named(&format!("#{issue}"), &title),
+                    in_use.describe()
+                )?;
+                continue;
+            }
             writeln!(
                 out,
                 "task {}: #{issue} {title} (size {}), tried again",
@@ -2739,6 +2756,7 @@ fn work(
                     started,
                     stops,
                     retry,
+                    cut_off: false,
                 });
                 continue;
             }

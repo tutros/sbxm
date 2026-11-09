@@ -742,3 +742,29 @@ fn with_no_dead_loop_nothing_is_resumed() {
     run.result.unwrap();
     assert!(script.calls().is_empty(), "{:?}", script.calls());
 }
+
+#[test]
+fn a_cut_off_task_the_loop_stops_before_resuming_is_not_marked_as_resumed() {
+    let f = fixture();
+    plant_loop_lock(&f.base());
+    let dir = cut_off(&f.base(), 3, Stage::Working, DEAD_LOOP);
+    let gh = github(Vec::new());
+    let script = Script::new(&f.base());
+
+    let run = run_loop(&f, f.opts(), &script, &gh, &GONE, &|_| {}, &|| true);
+
+    run.result.unwrap();
+    assert!(script.calls().is_empty(), "{:?}", script.calls());
+    let rec = record::read(&dir.join("task.json")).unwrap();
+    assert!(
+        rec.hooks.get("task_loop_resumed").is_none(),
+        "{:?}",
+        rec.hooks
+    );
+    assert!(
+        run.out
+            .contains("was cut off when a loop stopped and not resumed; continue it with `sbxm task resume --issue 3`"),
+        "{}",
+        run.out
+    );
+}
