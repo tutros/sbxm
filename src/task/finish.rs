@@ -1316,6 +1316,20 @@ pub fn pr_body_fixing(
     result: Option<&str>,
     review: Option<&str>,
 ) -> (String, Vec<String>) {
+    pr_body_referring(fixes, &[], risk, unresolved, result, review)
+}
+
+/// [`pr_body_fixing`] with a `Refs #n` line after the `Fixes` lines for each number of `refs`:
+/// an issue the PR names but leaves open (`**Closes on merge:** no`, issue 506). A body with
+/// only `refs` says nothing about closing no issue.
+pub fn pr_body_referring(
+    fixes: &[u32],
+    refs: &[u32],
+    risk: &str,
+    unresolved: Option<&str>,
+    result: Option<&str>,
+    review: Option<&str>,
+) -> (String, Vec<String>) {
     // Everything but the `Fixes #N` line is agent text, neutralised before any cut so a cut can't
     // separate a keyword from its zero-width space and leave the reference active. The risk
     // section is the same text the in-task review comment opens with (issue 228).
@@ -1324,7 +1338,10 @@ pub fn pr_body_fixing(
     for number in fixes {
         body.push_str(&format!("Fixes #{number}\n"));
     }
-    if fixes.is_empty() {
+    for number in refs {
+        body.push_str(&format!("Refs #{number}\n"));
+    }
+    if fixes.is_empty() && refs.is_empty() {
         body.push_str(&format!("{CLOSES_NO_ISSUE}\n"));
     }
     let mut cuts: Vec<String> = risk_cut.into_iter().collect();
@@ -1650,6 +1667,9 @@ pub struct Finished {
     /// The issues whose summary this finish posted or edited, in order (failures are in
     /// `warnings`).
     pub summarized: Vec<u32>,
+    /// The issues the PR's description refers to with `Refs #N` and leaves open, as their body's
+    /// `**Closes on merge:** no` asks (issue 506); empty for a PR that fixes its issue.
+    pub left_open: Vec<u32>,
 }
 
 /// The number at the end of a PR's URL (`https://github.com/o/r/pull/7`), as `gh pr create`
@@ -1907,16 +1927,27 @@ fn open_task_pr(
         return finish_continued(prepared, &repo_git, continued, &tip, github, probe);
     }
     // What the PR closes, its title, and the flag a retry names: the issue's, or the spec's.
-    let (fixes, title, retry) = match spec {
-        None => (
-            vec![task.number],
-            task.title.clone(),
-            format!("--issue {}", task.number),
-        ),
+    // An issue whose body says `**Closes on merge:** no` is referred to, not fixed (issue 506).
+    let (fixes, refs, title, retry) = match spec {
+        None => {
+            let issue = vec![task.number];
+            let (fixes, refs) = if issue_leaves_open(&prepared)? {
+                (Vec::new(), issue)
+            } else {
+                (issue, Vec::new())
+            };
+            (
+                fixes,
+                refs,
+                task.title.clone(),
+                format!("--issue {}", task.number),
+            )
+        }
         Some(flag) => {
             let (fixes, text) = saved_fixes(&prepared)?;
             (
                 fixes,
+                Vec::new(),
                 super::fixes::title(&text, &task.title),
                 flag.to_owned(),
             )
@@ -1944,8 +1975,9 @@ fn open_task_pr(
     }
     let risk_text = risk_section(&task, &unresolved);
     refuse_secrets("the risk section", &risk_text)?;
-    let (body, cuts) = pr_body_fixing(
+    let (body, cuts) = pr_body_referring(
         &fixes,
+        &refs,
         &risk_text,
         section.as_deref(),
         result.as_deref(),
@@ -2008,7 +2040,8 @@ fn open_task_pr(
     })?;
     let pr = pr_number(&url).map_or_else(|| "<N>".to_owned(), |n| n.to_string());
     // Issue 430: before the in-task review, whose failed post fails the finish.
-    let (summarized, mut warnings) = post_issue_summaries(&mut prepared, &fixes, &url, github);
+    let issues: Vec<u32> = fixes.iter().chain(&refs).copied().collect();
+    let (summarized, mut warnings) = post_issue_summaries(&mut prepared, &issues, &url, github);
     let review_posted = match posting {
         Some((commit, text)) => {
             let (must_fix, level) = task
@@ -2045,7 +2078,26 @@ fn open_task_pr(
         warnings,
         summaries_only: false,
         summarized,
+        left_open: refs,
     })
+}
+
+/// Whether the issue text an issue task's start saved (`issue.md`) asks for the PR to leave the
+/// issue open ([`super::closes::leaves_open`], issue 506). A task folder without it closes the
+/// issue, as before; one that can't be read is refused before anything is pushed.
+fn issue_leaves_open(prepared: &Prepared) -> Result<bool> {
+    let path = prepared.meta.join("issue.md");
+    match fs::read_to_string(&path) {
+        Ok(text) => Ok(super::closes::leaves_open(&text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e).with_context(|| {
+            format!(
+                "cannot read {}, the issue as the task's start saved it, to see whether the PR \
+                 closes it; nothing was pushed",
+                path.display()
+            )
+        }),
+    }
 }
 
 /// The issues a spec task's PR closes, from the `Fixes:` line of the spec as its start saved it
@@ -2094,6 +2146,7 @@ fn retry_summaries(mut prepared: Prepared, github: &dyn GitHubBackend) -> Result
         warnings,
         summaries_only: true,
         summarized,
+        left_open: Vec::new(),
     })
 }
 
@@ -2705,5 +2758,6 @@ fn finish_continued(
         warnings,
         summaries_only: false,
         summarized,
+        left_open: Vec::new(),
     })
 }

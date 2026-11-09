@@ -9,7 +9,7 @@ use anyhow::{Context, Result, bail};
 use super::config::Prompts;
 
 /// The names a template may use; anything else is an error, so a typo is caught before a run.
-const KNOWN: [&str; 13] = [
+const KNOWN: [&str; 14] = [
     "issue",
     "number",
     "branch",
@@ -23,6 +23,7 @@ const KNOWN: [&str; 13] = [
     "review_path",
     "previous_review_path",
     "gate_output_path",
+    "closing_line",
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

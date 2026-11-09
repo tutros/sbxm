@@ -1029,6 +1029,7 @@ fn issue_worker_prompt(
             )
         },
     );
+    let closing_line = closing_line(issue);
     prompts::render(
         &template.name,
         &template.text,
@@ -1042,8 +1043,25 @@ fn issue_worker_prompt(
             ("branch_context", &branch_context),
             ("gates_sandbox", &bullets(&ctx.config.gates.sandbox)),
             ("gates_host", &bullets(&ctx.config.gates.host)),
+            ("closing_line", &closing_line),
         ],
     )
+}
+
+/// The worker prompt's sentence on how the commits name the issue: `Fixes #N` in the last one,
+/// or, for an issue whose body says `**Closes on merge:** no`, `Refs #N` and no closing keyword
+/// (issue 506).
+fn closing_line(issue: &IssueText) -> String {
+    let n = issue.number;
+    if super::closes::leaves_open(&issue.text) {
+        format!(
+            "This issue stays open after its PR is merged (its body says `**Closes on merge:** \
+             no`): write \"Refs #{n}\" in your commit messages, and never a closing keyword \
+             (Fixes, Closes, Resolves, in any form) before #{n}."
+        )
+    } else {
+        format!("The last commit message must contain \"Fixes #{n}\".")
+    }
 }
 
 /// Checks that `source_path` is a plain, readable UTF-8 file and returns its text: the part of

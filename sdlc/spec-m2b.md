@@ -413,7 +413,7 @@ the task continues, decision 169; empty otherwise), `branch_context` (where the 
 branch {{branch}}, ...": "which started from <base>." for a new branch, or, for a task that continues a PR, that it is
 the PR's own branch with commits already on it, decision 169 and issue 107; the embedded worker prompt uses it instead
 of `base` and `pr_context`, which stay available to a repo's override), `gates_sandbox`,
-`gates_host`, `review_path`, `previous_review_path`. An unknown placeholder, or a placeholder with no value, is an
+`gates_host`, `review_path`, `previous_review_path`, `closing_line` (the worker's sentence on how its commits name the issue: `Fixes #N` in the last one, or `Refs #N` and no closing keyword for an issue whose body says `**Closes on merge:** no`, issue 506). An unknown placeholder, or a placeholder with no value, is an
 error naming the template. The rendered prompt is written to the task folder so a run can be audited.
 
 ## 11. File-findings [134][149]

@@ -35,7 +35,7 @@ why it's needed. A branch whose commits change Cargo.lock is stopped before its 
 Run the checks in the foreground and wait for them. This is a headless run: it ends when you end your turn and nothing
 resumes it, so never end your turn while waiting on a background command.
 
-The last commit message must contain "Fixes #{{number}}".
+{{closing_line}}
 
 Before you report done, review your own change the way the reviewer will. Read your whole diff against {{base}} and
 check it against "What counts as must-fix" in the sdlc-code-review skill (.claude/skills/), if the repository has
