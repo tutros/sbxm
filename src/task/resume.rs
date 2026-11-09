@@ -154,6 +154,9 @@ pub fn check_can_resume_with(
             process.started_at
         );
     }
+    if should_fix {
+        check_should_fix_rounds(task, rounds)?;
+    }
     if rounds == Some(0) {
         bail!("--rounds adds fix rounds to the task's budget; give 1 or more");
     }
@@ -208,12 +211,7 @@ pub fn check_can_resume_with(
 /// Reads only; every refusal says why and what to do instead.
 pub fn check_should_fix(task: &Record, meta: &Path, rounds: Option<u32>) -> Result<Vec<Finding>> {
     let (id, flag) = (&task.id, target_flag(task));
-    if rounds.is_none() {
-        bail!(
-            "--should-fix runs one fix round, which --rounds gives: run `sbxm task resume {flag} \
-             --rounds 1 --should-fix`"
-        );
-    }
+    check_should_fix_rounds(task, rounds)?;
     if task.stage != Stage::Ready {
         bail!(
             "--should-fix is for a task that stopped ready with a clean review; task {id} is at {} \
@@ -253,6 +251,22 @@ pub fn check_should_fix(task: &Record, meta: &Path, rounds: Option<u32>) -> Resu
         );
     }
     Ok(small)
+}
+
+/// A should-fix round is exactly one fix round (issue 510, answers 1 and 3; review M-1): its
+/// review's new must-fix is a work stop, which a larger budget would turn into another fix round.
+fn check_should_fix_rounds(task: &Record, rounds: Option<u32>) -> Result<()> {
+    if rounds == Some(1) {
+        return Ok(());
+    }
+    let flag = target_flag(task);
+    let given = rounds.map_or_else(|| "no --rounds".to_owned(), |n| format!("--rounds {n}"));
+    bail!(
+        "--should-fix runs exactly one fix round, so it takes --rounds 1 ({given} was given): run \
+         `sbxm task resume {flag} --rounds 1 --should-fix`; a must-fix that round's review raises \
+         stops the task, and more rounds for it are an ordinary `sbxm task resume {flag} --rounds \
+         N` after that stop"
+    )
 }
 
 /// The review a should-fix round's worker is given (issue 510): `findings`, taken whole from the

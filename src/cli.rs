@@ -416,9 +416,10 @@ pub enum TaskCommand {
         /// first started from its review.md.
         #[arg(long, value_name = "N")]
         rounds: Option<u32>,
-        /// For a task that stopped ready with a clean review (0 must-fix, no stop): the fix round
-        /// works on its review's should-fix findings sized S only (at most one such round per
-        /// task); the others are filed as today.
+        /// With --rounds 1 (no other count), for a task that stopped ready with a clean review (0
+        /// must-fix, no stop): that one fix round works on its review's should-fix findings sized S
+        /// only (at most one such round per task), and a must-fix its review raises stops the
+        /// task; the others are filed as today.
         #[arg(long, requires = "rounds")]
         should_fix: bool,
         /// Create the sandbox even when the drive of sbx's sandbox state has less than

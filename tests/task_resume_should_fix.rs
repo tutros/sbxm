@@ -14,7 +14,10 @@ use sbxm::backend::FakeBackend;
 use sbxm::commands::task_resume::{Options, Target, run};
 use sbxm::task::config::ShouldFix;
 use sbxm::task::gates::FakeHostRunner;
-use sbxm::task::record::{self, ProcessProbe, Stage, Stopped};
+use sbxm::task::record::{
+    self, Kind, NewTask, Process, ProcessProbe, Record, Stage, Status, Stopped,
+};
+use sbxm::task::resume::check_should_fix;
 
 const CLEAN: &str = "Must-fix findings: 0\n";
 const MUST: &str = "Must-fix findings: 1\n\n## Must fix\n\n### M-1 - a.txt:1 wrong.\n";
@@ -283,6 +286,76 @@ fn should_fix_without_rounds_is_refused() {
     let err = format!("{:#}", resume(&f, None, &backend).unwrap_err());
 
     assert!(err.contains("--rounds 1"), "{err}");
+}
+
+/// Review M-1: the should-fix round is one round (answer 1), so its new must-fix is a work stop
+/// (answer 3); a larger budget would let a further round fix it instead.
+#[test]
+fn should_fix_with_a_budget_other_than_one_is_refused_and_touches_nothing() {
+    for rounds in [0, 2, u32::MAX] {
+        let f = config();
+        reviewed(&f, S_ONE);
+        let before = fs::read_to_string(task_json(&f)).unwrap();
+        let (backend, seen) = backend(&f, &[MUST, CLEAN, CLEAN]);
+
+        let err = format!("{:#}", resume(&f, Some(rounds), &backend).unwrap_err());
+
+        assert!(err.contains("--rounds 1"), "{rounds}: {err}");
+        assert_eq!(
+            fs::read_to_string(task_json(&f)).unwrap(),
+            before,
+            "{rounds}"
+        );
+        assert!(seen.lock().unwrap().is_empty(), "{rounds}");
+        assert!(
+            backend.execs().is_empty(),
+            "{rounds}: {:?}",
+            backend.execs()
+        );
+        assert!(backend.creates().is_empty(), "{rounds}");
+    }
+}
+
+/// The same budget rule for a spec task and a `task fix --pr` task, whose checks are the same
+/// function: refused on the budget before `review.md` is even read.
+#[test]
+fn the_one_round_rule_holds_for_spec_and_fix_tasks_too() {
+    let dir = tempfile::tempdir().unwrap();
+    for kind in [Kind::Spec, Kind::Fix, Kind::Issue] {
+        let mut task = Record::new(
+            &NewTask {
+                kind,
+                number: 9,
+                repo: "o/r",
+                title: "t",
+                base: "main",
+                branch: "b",
+                config_hash: "h",
+                id: Some("t-9"),
+            },
+            0,
+            Process::new(1, 0),
+        );
+        task.stage = Stage::Ready;
+        task.status = Status::Ok;
+        for rounds in [2, u32::MAX] {
+            let err = format!(
+                "{:#}",
+                check_should_fix(&task, dir.path(), Some(rounds)).unwrap_err()
+            );
+            assert!(
+                err.contains("--rounds 1 --should-fix"),
+                "{kind:?} {rounds}: {err}"
+            );
+        }
+        // Budget 1 gets past the budget rule: refused only for the missing review.
+        let err = format!(
+            "{:#}",
+            check_should_fix(&task, dir.path(), Some(1)).unwrap_err()
+        );
+        assert!(err.contains("review"), "{kind:?}: {err}");
+        assert!(!err.contains("--rounds 1"), "{kind:?}: {err}");
+    }
 }
 
 #[test]
