@@ -173,6 +173,7 @@ fn loop_view(
         work,
         snapshot: Some(snapshot),
         pause: crate::task::loop_pause::read(base),
+        jobs: looping::read_jobs(base),
     }
 }
 

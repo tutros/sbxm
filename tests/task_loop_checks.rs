@@ -776,6 +776,7 @@ fn the_status_loop_section_shows_the_pause() {
         work: None,
         snapshot: None,
         pause: loop_pause::read(&f.base()),
+        jobs: Default::default(),
     };
 
     let text = looping::render(&view, None);
@@ -796,6 +797,7 @@ fn the_status_loop_section_shows_an_unreadable_pause() {
         work: None,
         snapshot: None,
         pause: State::Unreadable("cannot parse /b/.sbxm/loop-pause.json".into()),
+        jobs: Default::default(),
     };
 
     let text = looping::render(&view, None);
@@ -810,6 +812,7 @@ fn the_status_loop_section_has_no_pause_line_without_a_pause() {
         work: None,
         snapshot: None,
         pause: State::None,
+        jobs: Default::default(),
     };
 
     assert!(!looping::render(&view, None).contains("paused"));
