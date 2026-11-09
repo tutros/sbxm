@@ -489,13 +489,13 @@ impl Loop<'_> {
             let resume = resume.and_then(|(id, command)| self.record_of(id).map(|_| command));
             let stop = sign_in_stop(e, resume);
             return Err(Ended {
-                halt: Some(anyhow!("{stop:#}")),
+                halt: Some(needs_user(anyhow!("{stop:#}"))),
                 ..Ended::new(Outcome::Stopped, format!("{stop:#}"))
             });
         }
         if e.is::<pipeline::MissingSecret>() {
             return Err(Ended {
-                halt: Some(anyhow!("{e:#}")),
+                halt: Some(needs_user(anyhow!("{e:#}"))),
                 ..Ended::new(Outcome::Failed, format!("{what}{e:#}"))
             });
         }
