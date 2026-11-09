@@ -288,6 +288,11 @@ fn clock(secs: u64) -> String {
 }
 
 fn render(number: usize, row: &Row) -> String {
+    render_as(number, &format!("#{} {}", row.issue, cell(&row.title)), row)
+}
+
+/// [`render`] with `item` in the Issue column.
+fn render_as(number: usize, item: &str, row: &Row) -> String {
     let opt = |v: Option<u64>| v.map_or_else(|| "-".to_owned(), |v| v.to_string());
     let ready = row.ready.map_or_else(
         || "-".to_owned(),
@@ -318,9 +323,7 @@ fn render(number: usize, row: &Row) -> String {
             .join("; ")
     };
     format!(
-        "| {number} | #{} {} | {} | {} | {ready} | {durations} | {rounds} | {} | {} | {} | unknown |\n",
-        row.issue,
-        cell(&row.title),
+        "| {number} | {item} | {} | {} | {ready} | {durations} | {rounds} | {} | {} | {} | unknown |\n",
         row.size.as_deref().unwrap_or("unknown"),
         clock(row.started),
         cell(&row.outcome),
@@ -361,7 +364,17 @@ pub fn append_resolve_row(path: &Path, row: &Row) -> Result<()> {
     add_row(path, row, false).map(|_| ())
 }
 
+/// Appends a queued job's row (issue 525), its Issue column naming the job (`job review #465`)
+/// instead of an issue; `row.issue` is unused. Each job gets its own row.
+pub fn append_job_row(path: &Path, job: &str, row: &Row) -> Result<()> {
+    add_any(path, Some(&cell(job)), row, false).map(|_| ())
+}
+
 fn add_row(path: &Path, row: &Row, once: bool) -> Result<bool> {
+    add_any(path, None, row, once)
+}
+
+fn add_any(path: &Path, item: Option<&str>, row: &Row, once: bool) -> Result<bool> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -377,7 +390,10 @@ fn add_row(path: &Path, row: &Row, once: bool) -> Result<bool> {
     } else if !text.ends_with('\n') {
         add.push('\n');
     }
-    add.push_str(&render(count + 1, row));
+    add.push_str(&match item {
+        Some(item) => render_as(count + 1, item, row),
+        None => render(count + 1, row),
+    });
     if let Some(parent) = path.parent().filter(|p| !p.as_os_str().is_empty()) {
         fs::create_dir_all(parent)
             .with_context(|| format!("cannot create {}", parent.display()))?;
