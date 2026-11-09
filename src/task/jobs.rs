@@ -19,6 +19,7 @@ use serde_json::Value;
 use super::finish::{check_own_folder, pr_number};
 use super::merged::archive_root;
 use super::record::{self, Record};
+use crate::config::{GlobalConfig, Profile};
 use crate::harness::Harness;
 
 /// One queued job (answers 1 and 2 of issue 525): its kind and its fields, nothing else.
@@ -152,6 +153,49 @@ fn check_spec_name(file: &str) -> std::result::Result<(), String> {
         "not a job: {why}; a spec job names a plain file name in specs_dir, like \
          {{\"kind\": \"spec\", \"file\": \"retro.md\"}}"
     ))
+}
+
+/// Where a spec job's `file` is and its task's id (issue 524): a plain file in `specs_dir`, the
+/// loop's check when it takes the job and `task queue spec`'s before it writes one. The error says
+/// why the job is refused.
+pub fn spec_file(
+    config_dir: &Path,
+    config: &GlobalConfig,
+    file: &str,
+) -> std::result::Result<(PathBuf, String), String> {
+    let Some(dir) = &config.specs_dir else {
+        return Err(format!(
+            "no specs_dir is set in {}, so no spec job runs; set specs_dir to the folder of the \
+             spec files",
+            config_dir.join("config.toml").display()
+        ));
+    };
+    let spec = dir.join(file);
+    match fs::symlink_metadata(&spec) {
+        Ok(meta) if meta.is_file() => {}
+        Ok(_) => return Err(format!("{} isn't a plain file", spec.display())),
+        Err(e) => {
+            return Err(format!(
+                "{} cannot be read ({e}); a spec job names a file in specs_dir {}",
+                spec.display(),
+                dir.display()
+            ));
+        }
+    }
+    let (id, _) = record::spec_id(&spec).map_err(|e| format!("{e:#}"))?;
+    Ok((spec, id))
+}
+
+/// Refuses a template job of a profile that doesn't load or has no `[template]` table (issue
+/// 524, answer 3): the loop's check when it takes the job and `task queue template`'s.
+pub fn template_profile(config: &GlobalConfig, profile: &str) -> std::result::Result<(), String> {
+    match Profile::load(config.profiles_dir(), profile) {
+        Err(e) => Err(format!("{e:#}")),
+        Ok(found) if found.template.is_none() => Err(format!(
+            "profile '{profile}' has no [template] table, so it has no template to build"
+        )),
+        Ok(_) => Ok(()),
+    }
 }
 
 /// `<base>/.sbxm/queue`.
