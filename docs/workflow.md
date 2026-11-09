@@ -405,8 +405,12 @@ A worker can fix a PR's review finding from a spec. The branch to fix must be wh
 
 ## Queue a job
 
-To have a long command run without your terminal or a watcher in the agent's session, write a job file to
-`<base_dir>/.sbxm/queue/` and let `sbxm task loop` run it (decision 309): `{"kind": "review", "pr": N}`, `{"kind":
+To have a long command run without your terminal or a watcher in the agent's session, queue a job with `sbxm task
+queue` (issue 529): `run --issue N`, `review --pr N`, `fix --pr N [--check-run ID]`, `rm-merged`, `spec --file NAME`
+or `template <profile> [--harness h] [--warm]`. It makes the loop's checks at once (below) and refuses with the reason,
+writing nothing, as it does a job of the same kind and target already in `queue/` or `queue/running/`; else it
+writes the file as described next and prints its path. It is one command an allow rule can name. By hand, write a job
+file to `<base_dir>/.sbxm/queue/` and let `sbxm task loop` run it (decision 309): `{"kind": "review", "pr": N}`, `{"kind":
 "fix", "pr": N}` (optionally `"check_run": ID`), `{"kind": "run", "issue": N}`, `{"kind": "rm-merged"}`, `{"kind":
 "spec", "file": "<name>.md"}` (a plain file name in `specs_dir`, set in `config.toml`; finished and armed like an
 issue's task when it ends ready with 0 must-fix, else `stopped` with its next command) or `{"kind": "template",
