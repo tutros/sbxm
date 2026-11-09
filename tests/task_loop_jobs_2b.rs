@@ -19,6 +19,7 @@ use sbxm::github::fake::FakeGitHub;
 use sbxm::github::{PrInfo, PrState};
 use sbxm::harness::Harness;
 use sbxm::task::jobs::{self, Job, JobHarness};
+use sbxm::task::pipeline::{HarnessSignedOut, NotSignedIn};
 use sbxm::task::queue;
 use sbxm::task::record::{self, Kind, NewTask, Process, Record, ReviewResult, Stage, Status};
 use sbxm::task::risk::Level;
@@ -55,6 +56,19 @@ struct Script {
     spec: SpecEnd,
     /// The review a spec task's run leaves.
     review: &'static str,
+    /// The phases that fail with a lapsed sign-in, and how it shows.
+    signed_out: Vec<(String, SignedOut)>,
+}
+
+/// How a phase's lapsed sign-in shows (issue 445).
+#[derive(Clone, Copy)]
+enum SignedOut {
+    /// `sbx`'s, as a typed error.
+    Sbx,
+    /// A harness's, as a typed error.
+    Harness,
+    /// A harness's, only in the phase's output.
+    Printed,
 }
 
 impl Script {
@@ -66,6 +80,36 @@ impl Script {
             fail: Vec::new(),
             spec: SpecEnd::Clean(Level::Low),
             review: CLEAN,
+            signed_out: Vec::new(),
+        }
+    }
+
+    fn signing_out(mut self, call: &str, how: SignedOut) -> Self {
+        self.signed_out.push((call.to_owned(), how));
+        self
+    }
+
+    /// [`Self::call`] for a phase that can fail with a lapsed sign-in, saying it on `out`.
+    fn call_out(&self, call: String, out: &mut dyn Write) -> Result<()> {
+        let how = self
+            .signed_out
+            .iter()
+            .find(|(f, _)| call.starts_with(f.as_str()))
+            .map(|(_, how)| *how);
+        let Some(how) = how else {
+            return self.call(call);
+        };
+        self.calls.borrow_mut().push(call.clone());
+        match how {
+            SignedOut::Sbx => Err(NotSignedIn::new("Not authenticated to Docker").into()),
+            SignedOut::Harness => Err(HarnessSignedOut("OAuth session expired".into()).into()),
+            SignedOut::Printed => {
+                writeln!(
+                    out,
+                    "worker failed: OAuth session expired and could not be refreshed"
+                )?;
+                bail!("{call} failed")
+            }
         }
     }
 
@@ -196,10 +240,10 @@ impl Steps for Script {
     fn should_fix_spec(
         &self,
         spec: &Path,
-        _out: &mut dyn Write,
+        out: &mut dyn Write,
         _warn: &mut dyn Write,
     ) -> Result<()> {
-        self.call(format!("should-fix spec {}", file_name(spec)))?;
+        self.call_out(format!("should-fix spec {}", file_name(spec)), out)?;
         let dir = record::task_dir(&self.base, &spec_id(spec));
         let mut rec = record::read(&dir.join("task.json")).unwrap();
         rec.should_fix_round = true;
@@ -247,11 +291,14 @@ impl Steps for Script {
         profile: &str,
         harness: Harness,
         warm: Option<&Path>,
-        _out: &mut dyn Write,
+        out: &mut dyn Write,
         _warn: &mut dyn Write,
     ) -> Result<String> {
         let warm = warm.map_or_else(|| "cold".to_owned(), |p| format!("warm {}", p.display()));
-        self.call(format!("template {profile} {} {warm}", harness.as_str()))?;
+        self.call_out(
+            format!("template {profile} {} {warm}", harness.as_str()),
+            out,
+        )?;
         Ok(format!("sbxm-tpl-{profile}-{}:1", harness.as_str()))
     }
 
@@ -878,4 +925,81 @@ fn an_interrupted_spec_job_names_the_resume_of_its_real_spec_path() {
         result["next"],
         format!("sbxm task resume --spec {}", spec.display())
     );
+}
+
+// --- A lapsed sign-in stops the loop (issue 445), in every phase of a queued job ---
+
+#[test]
+fn a_lapsed_sign_in_in_a_spec_should_fix_round_stops_the_loop_leaving_the_next_job_queued() {
+    for how in [SignedOut::Sbx, SignedOut::Harness, SignedOut::Printed] {
+        let f = spec_fixture("\n[loop]\nshould_fix = \"fix\"\n");
+        f.queue_job("s.json", &spec_job("retro.md"), 20);
+        let later = f.queue_job(
+            "t.json",
+            r#"{"kind": "template", "profile": "sbxm-dev"}"#,
+            10,
+        );
+        let mut script = Script::new(&f.base()).signing_out("should-fix spec", how);
+        script.review = S_ONE;
+        let run = run_loop(&f, &script, &github(&[SPEC_PR]));
+        let e = run
+            .result
+            .expect_err("the loop goes on after a lapsed sign-in");
+        assert_eq!(
+            script.calls(),
+            ["spec retro.md", "should-fix spec retro.md"]
+        );
+        let result = f.result("s.json");
+        assert_eq!(result["outcome"], "stopped", "{result}");
+        let (spec, _) = f.retro();
+        let resume = format!("sbxm task resume --spec {}", spec.display());
+        assert!(format!("{e:#}").contains(&resume), "{e:#}");
+        assert!(f.reason("s.json").contains(&resume), "{result}");
+        assert!(later.is_file(), "the later job was taken");
+    }
+}
+
+#[test]
+fn an_ordinary_should_fix_failure_is_failed_and_the_next_job_runs() {
+    let f = spec_fixture("\n[loop]\nshould_fix = \"fix\"\n");
+    f.queue_job("s.json", &spec_job("retro.md"), 20);
+    f.queue_job(
+        "t.json",
+        r#"{"kind": "template", "profile": "sbxm-dev"}"#,
+        10,
+    );
+    let mut script = Script::new(&f.base()).failing("should-fix spec");
+    script.review = S_ONE;
+    run_loop(&f, &script, &github(&[SPEC_PR])).result.unwrap();
+    assert_eq!(
+        script.calls(),
+        [
+            "spec retro.md",
+            "should-fix spec retro.md",
+            "template sbxm-dev claude cold"
+        ]
+    );
+    assert_eq!(f.result("s.json")["outcome"], "failed");
+    assert_eq!(f.result("t.json")["outcome"], "done");
+}
+
+#[test]
+fn a_lapsed_sign_in_in_a_template_build_stops_the_loop_leaving_the_next_job_queued() {
+    let f = fixture();
+    f.env.write_profile("other", "[template]\nallow = []\n");
+    f.queue_job(
+        "a.json",
+        r#"{"kind": "template", "profile": "sbxm-dev"}"#,
+        20,
+    );
+    let later = f.queue_job("b.json", r#"{"kind": "template", "profile": "other"}"#, 10);
+    let script = Script::new(&f.base()).signing_out("template sbxm-dev", SignedOut::Sbx);
+    let run = run_loop(&f, &script, &github(&[]));
+    let e = run
+        .result
+        .expect_err("the loop goes on after a lapsed sign-in");
+    assert!(format!("{e:#}").contains("sbx login"), "{e:#}");
+    assert_eq!(script.calls(), ["template sbxm-dev claude cold"]);
+    assert_eq!(f.result("a.json")["outcome"], "stopped");
+    assert!(later.is_file(), "the later job was taken");
 }

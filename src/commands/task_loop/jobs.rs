@@ -8,7 +8,9 @@ use std::path::Path;
 
 use anyhow::{Result, anyhow};
 
-use super::{Capture, Claimed, End, Halt, Loop, check, first_line, says_sign_in, sign_in_stop};
+use super::{
+    Capture, Claimed, End, Halt, Loop, Steps, check, first_line, says_sign_in, sign_in_stop,
+};
 use crate::commands::task_start::spec_flag;
 use crate::config::{GlobalConfig, Profile};
 use crate::github::PrState;
@@ -355,45 +357,22 @@ impl Loop<'_> {
         warn: &mut dyn Write,
     ) -> Result<Ended> {
         let flag = spec_flag(spec);
-        let mut captured = Vec::new();
-        let result = {
-            let mut out = Capture {
-                inner: out,
-                text: Vec::new(),
-            };
-            let mut warn = Capture {
-                inner: warn,
-                text: Vec::new(),
-            };
-            let result = self.steps.run_spec(spec, &mut out, &mut warn);
-            captured.extend(out.text);
-            captured.extend(warn.text);
-            result
-        };
-        if let Err(e) = result {
-            let exists = self.record_of(id).is_some();
-            if says_sign_in(&e, &String::from_utf8_lossy(&captured)) {
-                let stop = sign_in_stop(e, exists.then(|| format!("sbxm task resume {flag}")));
-                return Ok(Ended {
-                    halt: Some(anyhow!("{stop:#}")),
-                    ..Ended::new(Outcome::Stopped, format!("{stop:#}"))
-                });
-            }
-            if e.is::<pipeline::MissingSecret>() {
-                return Ok(Ended {
-                    halt: Some(anyhow!("{e:#}")),
-                    ..Ended::new(Outcome::Failed, format!("{e:#}"))
-                });
-            }
-            return Ok(Ended::new(Outcome::Failed, format!("{e:#}")));
+        let resume = Some((id, format!("sbxm task resume {flag}")));
+        if let Err(ended) = self.phase("", resume.clone(), out, warn, |steps, out, warn| {
+            steps.run_spec(spec, out, warn)
+        }) {
+            return Ok(ended);
         }
         if self.should_fix_due_of(id)
-            && let Err(e) = self.steps.should_fix_spec(spec, out, warn)
+            && let Err(ended) = self.phase(
+                "its should-fix round failed: ",
+                resume,
+                out,
+                warn,
+                |steps, out, warn| steps.should_fix_spec(spec, out, warn),
+            )
         {
-            return Ok(Ended::new(
-                Outcome::Failed,
-                format!("its should-fix round failed: {e:#}"),
-            ));
+            return Ok(ended);
         }
         let Some(rec) = self.record_of(id) else {
             return Ok(Ended::new(
@@ -444,11 +423,15 @@ impl Loop<'_> {
                 ),
             )?,
         }
-        if let Err(e) = self.steps.finish_spec(spec, out, warn) {
-            return Ok(Ended::new(
-                Outcome::Failed,
-                format!("its finish failed: {e:#}"),
-            ));
+        let finish = Some((id, format!("sbxm task finish {flag}")));
+        if let Err(ended) = self.phase(
+            "its finish failed: ",
+            finish,
+            out,
+            warn,
+            |steps, out, warn| steps.finish_spec(spec, out, warn),
+        ) {
+            return Ok(ended);
         }
         let armed = self.arm(id, out, warn)?;
         let pr = self
@@ -499,14 +482,63 @@ impl Loop<'_> {
         let repo_root = self.repo_root.clone();
         let warm = warm.then_some(repo_root.as_path());
         Ok(
-            match self
-                .steps
-                .template_build(profile, harness.harness(), warm, out, warn)
-            {
+            match self.phase("", None, out, warn, |steps, out, warn| {
+                steps.template_build(profile, harness.harness(), warm, out, warn)
+            }) {
                 Ok(tag) => Ended::new(Outcome::Done, format!("built template {tag}")),
-                Err(e) => Ended::new(Outcome::Failed, format!("{e:#}")),
+                Err(ended) => ended,
             },
         )
+    }
+
+    /// Runs one phase of a queued `spec` or `template` job (issue 524) with its output captured,
+    /// and ends the job on its error as the loop ends a task's: a lapsed sign-in, `sbx`'s or a
+    /// harness's, typed or only in the output (issue 445), is `stopped` and stops the loop; a
+    /// missing secret (decision 193(a)) is `failed` and stops it; anything else is `failed`, with
+    /// `what` before the error, and the loop goes on. `resume`: the task the phase works on and
+    /// the command that continues it, named in a sign-in stop once that task's record exists.
+    fn phase<T>(
+        &self,
+        what: &str,
+        resume: Option<(&str, String)>,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+        step: impl FnOnce(&dyn Steps, &mut dyn Write, &mut dyn Write) -> Result<T>,
+    ) -> std::result::Result<T, Ended> {
+        let mut captured = Vec::new();
+        let result = {
+            let mut out = Capture {
+                inner: out,
+                text: Vec::new(),
+            };
+            let mut warn = Capture {
+                inner: warn,
+                text: Vec::new(),
+            };
+            let result = step(self.steps, &mut out, &mut warn);
+            captured.extend(out.text);
+            captured.extend(warn.text);
+            result
+        };
+        let e = match result {
+            Ok(value) => return Ok(value),
+            Err(e) => e,
+        };
+        if says_sign_in(&e, &String::from_utf8_lossy(&captured)) {
+            let resume = resume.and_then(|(id, command)| self.record_of(id).map(|_| command));
+            let stop = sign_in_stop(e, resume);
+            return Err(Ended {
+                halt: Some(anyhow!("{stop:#}")),
+                ..Ended::new(Outcome::Stopped, format!("{stop:#}"))
+            });
+        }
+        if e.is::<pipeline::MissingSecret>() {
+            return Err(Ended {
+                halt: Some(anyhow!("{e:#}")),
+                ..Ended::new(Outcome::Failed, format!("{what}{e:#}"))
+            });
+        }
+        Err(Ended::new(Outcome::Failed, format!("{what}{e:#}")))
     }
 
     /// A `review` or (`fix`) `fix` job of PR `pr`: only of a PR sbxm opened (answer 4), skipped
