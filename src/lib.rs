@@ -10,6 +10,7 @@ pub mod github;
 pub mod harness;
 pub mod headless;
 pub mod kit;
+pub mod notify;
 pub mod project;
 pub mod run;
 pub mod seed;
