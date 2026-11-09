@@ -810,7 +810,7 @@ impl Loop<'_> {
                 return Ok(End::Held(Retry::Resume { failures }));
             }
             if e.is::<pipeline::MissingSecret>() {
-                return Err(Halt::Error(e));
+                return Err(Halt::Error(needs_user(e)));
             }
             if says_sign_in(&e, &String::from_utf8_lossy(&captured)) {
                 stops.push(("sign-in".to_owned(), 0));
@@ -2079,6 +2079,46 @@ fn sign_in_stop(e: anyhow::Error, issue: u32, exists: bool) -> anyhow::Error {
     }
 }
 
+/// A stop of the loop that needs the user (decision 310): a lapsed sign-in, a missing secret, two
+/// parked tasks in a row or the usage waits' total. `task loop` exits [`NEEDS_USER`] for it, so
+/// the scheduled start doesn't restart it. It reads as the error it wraps.
+#[derive(Debug)]
+pub struct NeedsUser(anyhow::Error);
+
+impl std::fmt::Display for NeedsUser {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        std::fmt::Display::fmt(&self.0, f)
+    }
+}
+
+impl std::error::Error for NeedsUser {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.0.source()
+    }
+}
+
+/// The exit code of a loop that stopped on [`NeedsUser`] (decision 310).
+pub const NEEDS_USER: i32 = 3;
+
+/// `e` marked as a stop that needs the user.
+fn needs_user(e: anyhow::Error) -> anyhow::Error {
+    if e.is::<NeedsUser>() {
+        e
+    } else {
+        anyhow::Error::new(NeedsUser(e))
+    }
+}
+
+/// The exit code of `task loop` for its result (decision 310): 0 when it stopped as asked or on an
+/// empty queue, [`NEEDS_USER`] for a stop that needs the user, 1 for any other error.
+pub fn exit_code(result: &Result<()>) -> i32 {
+    match result {
+        Ok(()) => 0,
+        Err(e) if e.is::<NeedsUser>() => NEEDS_USER,
+        Err(_) => 1,
+    }
+}
+
 /// [`Loop::arm`]'s checks on a task's record: no work stop, a review with 0 must-fix and low risk
 /// after the path-rule floor.
 fn passes_arm_checks(rec: &Record) -> bool {
@@ -2521,7 +2561,7 @@ fn work(
                     warn,
                 )?;
                 left(&held, &due, out)?;
-                return Err(sign_in_stop(e, issue, rec.is_some()));
+                return Err(needs_user(sign_in_stop(e, issue, rec.is_some())));
             }
             Err(Halt::UsageLimit(total)) => {
                 let rec = lp.record(issue);
@@ -2543,11 +2583,11 @@ fn work(
                     },
                     warn,
                 )?;
-                bail!(
+                return Err(needs_user(anyhow!(
                     "the usage limit held through {} of waits in a row; the loop stops; continue \
                      with `sbxm task resume --issue {issue}` once it resets",
                     queue::span(total.as_secs())
-                );
+                )));
             }
         };
         let recorded = match &end {
@@ -2624,10 +2664,10 @@ fn work(
         if parked {
             parked_in_row += 1;
             if parked_in_row >= 2 {
-                bail!(
+                return Err(needs_user(anyhow!(
                     "two tasks parked in a row; the loop stops; see `sbxm task status` for what \
                      each left"
-                );
+                )));
             }
         } else {
             parked_in_row = 0;

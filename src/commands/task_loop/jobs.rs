@@ -8,7 +8,7 @@ use std::path::Path;
 
 use anyhow::{Result, anyhow};
 
-use super::{End, Halt, Loop, check, first_line, sign_in_stop};
+use super::{End, Halt, Loop, NeedsUser, check, first_line, needs_user, sign_in_stop};
 use crate::github::PrState;
 use crate::run::results::format_timestamp;
 use crate::task::jobs::{self, AsRead, Job, JobResult, Outcome, Running};
@@ -372,14 +372,19 @@ impl Loop<'_> {
             Ok(End::Taken(line)) => Ended::new(Outcome::Skipped, line),
             Err(Halt::Stopped) => Ended::new(Outcome::Stopped, "stopped on request"),
             Err(Halt::Error(e)) => Ended {
-                halt: Some(anyhow!("{e:#}")),
+                // A missing secret stays a stop that needs the user (decision 310).
+                halt: Some(if e.is::<NeedsUser>() {
+                    needs_user(anyhow!("{e:#}"))
+                } else {
+                    anyhow!("{e:#}")
+                }),
                 ..Ended::new(Outcome::Failed, format!("{e:#}"))
             },
             Err(Halt::SignIn(e)) => {
                 let exists = self.record(issue).is_some();
                 let stop = sign_in_stop(e, issue, exists);
                 Ended {
-                    halt: Some(anyhow!("{stop:#}")),
+                    halt: Some(needs_user(anyhow!("{stop:#}"))),
                     ..Ended::new(Outcome::Stopped, format!("{stop:#}"))
                 }
             }
@@ -390,7 +395,7 @@ impl Loop<'_> {
                     queue::span(total.as_secs())
                 );
                 Ended {
-                    halt: Some(anyhow!("{stop}")),
+                    halt: Some(needs_user(anyhow!("{stop}"))),
                     ..Ended::new(Outcome::Stopped, stop)
                 }
             }

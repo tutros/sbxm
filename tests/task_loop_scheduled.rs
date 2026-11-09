@@ -27,13 +27,17 @@ const READY: &str = "ready-for-worker";
 /// 2026-11-02T10:00:00Z.
 const START: u64 = 1_793_613_600;
 
+/// The error a scripted phase fails with.
+type Failure = fn() -> anyhow::Error;
+
 /// Plays `task run`, `task resume` and `task finish` for the loop, recording each call; a call
 /// named in `fail` fails, leaving the task at `working`.
 struct Script {
     base: PathBuf,
     calls: RefCell<Vec<String>>,
     clock: Cell<u64>,
-    fail: RefCell<Vec<String>>,
+    /// The calls that fail, with the error each gives, every time it is made.
+    fail: RefCell<Vec<(String, Failure)>>,
 }
 
 impl Script {
@@ -46,6 +50,11 @@ impl Script {
         }
     }
 
+    fn failing(self, call: &str, error: Failure) -> Self {
+        self.fail.borrow_mut().push((call.to_owned(), error));
+        self
+    }
+
     fn calls(&self) -> Vec<String> {
         self.calls.borrow().clone()
     }
@@ -53,9 +62,9 @@ impl Script {
     fn phase(&self, call: String, issue: u32) -> Result<()> {
         self.clock.set(self.clock.get() + 60);
         self.calls.borrow_mut().push(call.clone());
-        if self.fail.borrow().contains(&call) {
+        if let Some((_, error)) = self.fail.borrow().iter().find(|(c, _)| *c == call) {
             write_record(&self.base, issue, Stage::Working, Status::Failed, None);
-            return Err(anyhow!("{call} failed"));
+            return Err(error());
         }
         write_record(&self.base, issue, Stage::Ready, Status::Ok, None);
         Ok(())
@@ -484,4 +493,123 @@ fn the_cli_stop_with_no_loop_running_says_so_and_exits_0() {
         "{stdout}"
     );
     assert!(!task_loop::stop_path(&env.base_dir()).exists());
+}
+
+// --- Exit codes ---
+
+fn signed_out() -> anyhow::Error {
+    sbxm::task::pipeline::NotSignedIn::new("Not authenticated to Docker")
+        .then(vec!["sbxm task run --issue 3".to_owned()])
+        .into()
+}
+
+fn no_secret() -> anyhow::Error {
+    sbxm::task::pipeline::MissingSecret::new("the cloud has no global 'github' login").into()
+}
+
+fn usage_limit() -> anyhow::Error {
+    anyhow!("worker claude failed: usage limit reached")
+}
+
+fn boom() -> anyhow::Error {
+    anyhow!("boom")
+}
+
+fn exit_code(run: &Run) -> i32 {
+    task_loop::exit_code(&run.result)
+}
+
+#[test]
+fn a_lapsed_sign_in_exits_3() {
+    let f = fixture();
+    let gh = github(vec![labeled(3)]);
+    let script = Script::new(&f.base()).failing("run 3", signed_out);
+
+    let run = run_loop(&f, f.opts(), &script, &gh, &Probe, &|_| {}, &|| false);
+
+    assert_eq!(exit_code(&run), 3, "{:?}", run.result);
+}
+
+#[test]
+fn a_missing_secret_exits_3() {
+    let f = fixture();
+    let gh = github(vec![labeled(3)]);
+    let script = Script::new(&f.base()).failing("run 3", no_secret);
+
+    let run = run_loop(&f, f.opts(), &script, &gh, &Probe, &|_| {}, &|| false);
+
+    assert_eq!(exit_code(&run), 3, "{:?}", run.result);
+    let e = run.result.unwrap_err();
+    assert!(
+        format!("{e:#}").contains("no global 'github' login"),
+        "{e:#}"
+    );
+}
+
+#[test]
+fn two_parked_tasks_in_a_row_exit_3() {
+    let f = fixture();
+    let gh = github(vec![labeled(3), labeled(4)]);
+    let script = Script::new(&f.base())
+        .failing("run 3", boom)
+        .failing("resume 3", boom)
+        .failing("run 4", boom)
+        .failing("resume 4", boom);
+
+    let run = run_loop(&f, f.opts(), &script, &gh, &Probe, &|_| {}, &|| false);
+
+    assert_eq!(exit_code(&run), 3, "{:?}", run.result);
+    let e = run.result.unwrap_err();
+    assert!(format!("{e:#}").contains("two tasks parked"), "{e:#}");
+}
+
+#[test]
+fn the_usage_waits_total_exits_3() {
+    let f = fixture();
+    let gh = github(vec![labeled(3)]);
+    let script = Script::new(&f.base())
+        .failing("run 3", usage_limit)
+        .failing("resume 3", usage_limit);
+
+    let run = run_loop(&f, f.opts(), &script, &gh, &Probe, &|_| {}, &|| false);
+
+    assert_eq!(exit_code(&run), 3, "{:?}", run.result);
+    let e = run.result.unwrap_err();
+    assert!(format!("{e:#}").contains("usage limit held"), "{e:#}");
+}
+
+#[test]
+fn a_queued_run_jobs_lapsed_sign_in_exits_3() {
+    let f = fixture();
+    let gh = github(vec![labeled(3)]);
+    f.queue_job("a.json", r#"{"kind": "run", "issue": 3}"#);
+    let script = Script::new(&f.base()).failing("run 3", signed_out);
+
+    let run = run_loop(&f, f.opts(), &script, &gh, &Probe, &|_| {}, &|| false);
+
+    assert_eq!(script.calls(), ["run 3"], "{}", run.out);
+    assert_eq!(exit_code(&run), 3, "{:?}", run.result);
+}
+
+#[test]
+fn another_error_exits_1() {
+    let f = fixture();
+    let gh = github(vec![labeled(3)]).failing("GitHub is down");
+    let script = Script::new(&f.base());
+
+    let run = run_loop(&f, f.opts(), &script, &gh, &Probe, &|_| {}, &|| false);
+
+    assert_eq!(exit_code(&run), 1, "{:?}", run.result);
+}
+
+#[test]
+fn a_stop_request_exits_0() {
+    let f = fixture();
+    let gh = github(vec![labeled(3)]);
+    let script = Script::new(&f.base());
+
+    let run = run_loop(&f, f.opts(), &script, &gh, &Probe, &|_| {}, &|| true);
+
+    assert_eq!(exit_code(&run), 0, "{:?}", run.result);
+    assert!(run.out.contains("stopped on request"), "{}", run.out);
 }

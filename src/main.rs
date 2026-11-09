@@ -111,15 +111,25 @@ fn warn_log_open_failed(ids: &[String], err: &anyhow::Error) {
 fn finish_task(
     result: anyhow::Result<()>,
     out: Tee<std::io::Stdout>,
+    warn: Tee<std::io::Stderr>,
+) -> ! {
+    let code = if result.is_err() { 1 } else { 0 };
+    finish_task_with(result, code, out, warn)
+}
+
+/// [`finish_task`] with the exit code given, for `task loop`'s 3 (decision 310).
+fn finish_task_with(
+    result: anyhow::Result<()>,
+    code: i32,
+    out: Tee<std::io::Stdout>,
     mut warn: Tee<std::io::Stderr>,
 ) -> ! {
-    let failed = result.is_err();
     if let Err(err) = result {
         let _ = writeln!(warn, "Error: {err:?}");
     }
     drop(out);
     drop(warn);
-    std::process::exit(if failed { 1 } else { 0 });
+    std::process::exit(code);
 }
 
 /// The stack the CLI runs on. clap's derive builds every argument of `sbxm task` in one stack
@@ -987,7 +997,9 @@ fn run() -> anyhow::Result<()> {
                     &mut warn,
                 )
             })();
-            finish_task(result, out, warn)
+            // A stop that needs the user exits 3, so the scheduled start doesn't restart it.
+            let code = commands::task_loop::exit_code(&result);
+            finish_task_with(result, code, out, warn)
         }
         Command::Task {
             command:
