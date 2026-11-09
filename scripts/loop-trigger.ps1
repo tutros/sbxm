@@ -95,7 +95,8 @@ foreach ($step in @('fetch'), @('checkout', '--detach', 'origin/main')) {
 }
 
 # Step 2: true once `sbx ls` succeeds, false after 10 minutes of failures.
-# Measured on the clock, so the time each `sbx ls` takes counts too; no sleep runs past the deadline.
+# Measured on the clock, so the time each `sbx ls` takes counts too; no sleep runs past the deadline and no
+# check starts at or after it. A check started before it counts, whenever it ends (issue 527, answer 5).
 function Wait-Sbx {
     $deadline = (& $Now).AddSeconds($sbxWait)
     while ($true) {
@@ -104,6 +105,7 @@ function Wait-Sbx {
         $left = [int][Math]::Ceiling(($deadline - (& $Now)).TotalSeconds)
         if ($left -le 0) { return $false }
         & $Sleep ([Math]::Min($sbxPoll, $left))
+        if ((& $Now) -ge $deadline) { return $false }
     }
 }
 

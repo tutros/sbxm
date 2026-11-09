@@ -116,16 +116,16 @@ Describe 'loop-trigger.ps1: the start' {
     }
 
     It 'counts sbx ls failing for 10 minutes as an error under the restart rule' {
-        # Down for the first 21 checks (0 s to 600 s, 30 s apart), then up.
+        # Down for the first 20 checks (0 s to 570 s, 30 s apart; the 20th sleep reaches 600 s), then up.
         $script:tries = 0
-        $sbx = { $script:tries++; @{ code = $(if ($script:tries -gt 21) { 0 } else { 1 }) } }
+        $sbx = { $script:tries++; @{ code = $(if ($script:tries -gt 20) { 0 } else { 1 }) } }
         $run = Invoke-Trigger @('0') -sbx $sbx
         $run.code | Should -Be 0
         $run.output | Should -Match 'sbx ls still fails'
         $run.output | Should -Match 'restart 1 of 3'
         @($run.calls | Where-Object { $_ -eq 'sleep 30' }).Count | Should -Be 20
         @($run.calls | Where-Object { $_ -eq 'sleep 600' }).Count | Should -Be 1
-        @($run.calls | Where-Object { $_ -eq 'sbx ls' }).Count | Should -Be 22
+        @($run.calls | Where-Object { $_ -eq 'sbx ls' }).Count | Should -Be 21
         (Get-Loops $run).Count | Should -Be 1
     }
 
@@ -145,20 +145,43 @@ Describe 'loop-trigger.ps1: the start' {
         (Get-Loops $run).Count | Should -Be 1
     }
 
-    It 'never sleeps past the 10 minutes' {
+    It 'never sleeps past the 10 minutes, and starts no check at or after them' {
         # Each check takes 25 s and each cycle 55 s: the 11th check ends at 575 s, 25 s before the deadline, so the
-        # last sleep is 25 s, and the 12th check (ending at 625 s) times the attempt out. Then sbx is up.
+        # last sleep is 25 s and reaches 600 s, where the attempt times out with no 12th check. The restart's
+        # first check (the 12th, at 600 s + 600 s) passes.
         $script:tries = 0
+        $global:sbxStarts = @()
         $sbx = {
             $script:tries++
+            $global:sbxStarts += ($global:fakeClock - [datetime]'2026-11-09T08:00:00').TotalSeconds
             $global:fakeClock = $global:fakeClock.AddSeconds(25)
-            @{ code = $(if ($script:tries -gt 12) { 0 } else { 1 }) }
+            @{ code = $(if ($script:tries -ge 12) { 0 } else { 1 }) }
         }
         $run = Invoke-Trigger @('0') -sbx $sbx
         $run.output | Should -Match 'sbx ls still fails after 10 minutes'
         @($run.calls | Where-Object { $_ -eq 'sleep 30' }).Count | Should -Be 10
         $run.calls | Should -Contain 'sleep 25'
-        @($run.calls | Where-Object { $_ -eq 'sbx ls' }).Count | Should -Be 13
+        @($run.calls | Where-Object { $_ -eq 'sleep 600' }).Count | Should -Be 1
+        $global:sbxStarts.Count | Should -Be 12
+        $global:sbxStarts[10] | Should -Be 550
+        $global:sbxStarts[11] | Should -Be 1200
+        (Get-Loops $run).Count | Should -Be 1
+    }
+
+    It 'starts the loop when a check that began before the 10 minutes succeeds after them' {
+        # The 1st check takes 560 s and fails; after a 30 s sleep the 2nd starts at 590 s and succeeds at 615 s.
+        $script:tries = 0
+        $sbx = {
+            $script:tries++
+            $global:fakeClock = $global:fakeClock.AddSeconds($(if ($script:tries -eq 1) { 560 } else { 25 }))
+            @{ code = $(if ($script:tries -ge 2) { 0 } else { 1 }) }
+        }
+        $run = Invoke-Trigger @('0') -sbx $sbx
+        $run.code | Should -Be 0
+        $run.output | Should -Not -Match 'sbx ls still fails'
+        @($run.calls | Where-Object { $_ -eq 'sbx ls' }).Count | Should -Be 2
+        $run.calls | Should -Not -Contain 'sleep 600'
+        (Get-Loops $run).Count | Should -Be 1
     }
 
     It 'starts the loop once sbx ls succeeds on the 3rd try' {
