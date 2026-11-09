@@ -318,6 +318,7 @@ fn env() -> Env {
         terminal: false,
         width: 80,
         iterations: None,
+        slots: None,
         disk: quiet_disk(),
     }
 }

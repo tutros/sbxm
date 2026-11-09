@@ -657,6 +657,24 @@ fn task_gates_that_would_make_the_sandbox_again_refuse_on_low_disk() {
     );
 }
 
+/// Issue 504: `task gates` that would make the worker's sandbox again takes the machine's sandbox
+/// slot (decision 304); with `--no-wait` and no free slot it refuses before any `sbx` call.
+#[test]
+fn task_gates_that_would_make_the_sandbox_again_refuse_with_no_free_slot_and_no_wait() {
+    let f = config(1);
+    let backend = gates(backend(&f, &[CLEAN]), &[]);
+    start(&f, &backend);
+    let calls = backend.log().len();
+
+    let err = task_gates_cmd(&f, &backend, common::slot::full(&f.env, true)).unwrap_err();
+
+    assert!(
+        format!("{err:#}").starts_with(&common::slot::refusal()),
+        "{err:#}"
+    );
+    assert_eq!(backend.log().len(), calls, "{:?}", backend.log());
+}
+
 /// M-1: `--ignore-disk` lets it make the sandbox again.
 #[test]
 fn task_gates_with_ignore_disk_make_the_sandbox_again_on_low_disk() {

@@ -723,6 +723,149 @@ fn a_missing_reviewer_secret_is_refused_before_the_worker_creates_anything() {
     );
 }
 
+// ---- The machine's sandbox slot (issue 504, decision 304) ----
+
+/// [`backend`], whose every `exec` also checks that this command holds the slot.
+fn backend_checking_slot(f: &Fixture, reviews: &[&str]) -> FakeBackend {
+    let worker = play_tasks(
+        &f.env.base_dir(),
+        "main",
+        Play {
+            commits: vec!["a.txt".into()],
+            result_md: Some(b"done\n".to_vec()),
+            bundle_bytes: None,
+        },
+    );
+    let reviewer = play_reviews(
+        &f.env.base_dir(),
+        "issue-41",
+        reviews.iter().map(|s| (*s).to_owned()).collect(),
+    );
+    let slot = common::slot::slot_file(&f.env);
+    // The token of the slot file the first `exec` found: one take for the whole command.
+    let first = std::sync::Mutex::new(None::<String>);
+    FakeBackend::with_secrets(&["anthropic", "openai"])
+        .with_exec_output_matching("claude", ok(CLAUDE_DONE))
+        .with_exec_output_matching("codex", ok(CODEX_DONE))
+        .with_exec_hook(move |sandbox, spec| {
+            let held: sbxm::slot::Holder =
+                serde_json::from_str(&std::fs::read_to_string(&slot).unwrap()).unwrap();
+            assert_eq!(held.process.pid, std::process::id(), "{sandbox}");
+            assert_eq!(held.task.as_deref(), Some("issue-41"));
+            let mut first = first.lock().unwrap();
+            assert_eq!(
+                first.get_or_insert(held.token.clone()),
+                &held.token,
+                "{sandbox}"
+            );
+            worker(sandbox, spec);
+            reviewer(sandbox, spec);
+        })
+}
+
+#[test]
+fn a_task_run_holds_one_slot_through_its_worker_and_review_never_waiting_on_itself() {
+    let f = config();
+    let (b, gh) = (backend_checking_slot(&f, &[CLEAN]), github());
+    let mut opts = options(&f);
+    // Its gate panics on any wait.
+    opts.disk = common::slot::free(&f.env);
+
+    let out = go(&f, &opts, None, &b, &gh);
+
+    out.result.unwrap();
+    assert_eq!(count(&b, "claude"), 1);
+    assert_eq!(count(&b, "codex"), 1);
+    assert!(
+        !out.warn.contains("waiting for a sandbox slot"),
+        "{}",
+        out.warn
+    );
+    assert!(
+        common::slot::holder(&f.env).is_none(),
+        "given back at the end"
+    );
+    assert!(common::slot::queue(&f.env).is_empty());
+}
+
+#[test]
+fn a_task_run_with_no_free_slot_and_no_wait_refuses_creating_nothing() {
+    let f = config();
+    let (b, gh) = (backend(&f, &[CLEAN]), github());
+    let mut opts = options(&f);
+    opts.disk = common::slot::full(&f.env, true);
+
+    let out = go(&f, &opts, None, &b, &gh);
+
+    let err = format!("{:#}", out.result.unwrap_err());
+    assert!(err.starts_with(&common::slot::refusal()), "{err}");
+    assert!(b.creates().is_empty(), "{:?}", b.log());
+    assert!(gh.calls().is_empty(), "{:?}", gh.calls());
+    assert!(!record::task_dir(&f.env.base_dir(), "issue-41").exists());
+    assert_eq!(
+        common::slot::holder(&f.env).unwrap().process.pid,
+        common::slot::HOLDER_PID
+    );
+    assert!(common::slot::queue(&f.env).is_empty());
+}
+
+#[test]
+fn a_task_run_with_no_free_slot_waits_naming_the_holder_then_runs() {
+    let f = config();
+    let (b, gh) = (backend(&f, &[CLEAN]), github());
+    let mut opts = options(&f);
+    opts.disk = common::slot::full_until_first_wait(&f.env);
+
+    let out = go(&f, &opts, None, &b, &gh);
+
+    out.result.unwrap();
+    assert_eq!(
+        out.warn
+            .matches(&format!(
+                "waiting for a sandbox slot: held by {}\n",
+                common::slot::HOLDER
+            ))
+            .count(),
+        1,
+        "{}",
+        out.warn
+    );
+    assert_eq!(count(&b, "codex"), 1, "it went on to its review");
+    assert!(common::slot::holder(&f.env).is_none());
+}
+
+#[test]
+fn a_cloud_task_run_takes_no_slot_while_the_slot_is_full() {
+    let f = common::task_fixture::fixture_with(
+        "[sandbox]\nprofile = \"default\"\nlocation = \"local\"\n\n[gates]\nsandbox = [\"cargo test\"]\n",
+    );
+    let (spec, id) = common::cloud_task::spec(&f);
+    let root = f.env.tmp.path().join("cloud-fs");
+    let b = common::cloud_task::cloud_backend(&root, &id, &[common::cloud_task::CLEAN]);
+    let mut opts = common::cloud_task::run_options(&f, spec, Some(sbxm::backend::Location::Cloud));
+    // Refused at once if it asked for a slot.
+    opts.disk = common::slot::full(&f.env, true);
+
+    let result = sbxm::commands::task_run::run_spec(
+        &f.env.config_dir(),
+        &opts,
+        None,
+        &b,
+        &FakeGitHub::default(),
+        &Probe,
+        &FakeHostRunner::default(),
+        &mut Vec::new(),
+        &mut Vec::new(),
+    );
+
+    result.unwrap();
+    assert!(!b.creates().is_empty());
+    assert_eq!(
+        common::slot::holder(&f.env).unwrap().process.pid,
+        common::slot::HOLDER_PID
+    );
+}
+
 // Issue 210: a low sandbox drive refuses before the worker, the reviewer or GitHub.
 
 #[test]

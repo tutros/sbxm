@@ -1094,6 +1094,26 @@ fn a_low_sandbox_drive_refuses_before_the_review() {
     assert_eq!(std::fs::read(meta(&f).join("task.json")).unwrap(), before);
 }
 
+// Issue 504: no free sandbox slot with `--no-wait` refuses before the review, leaving the task as
+// it was (decision 304).
+
+#[test]
+fn no_free_slot_with_no_wait_refuses_before_the_review() {
+    let f = config("codex");
+    worked_task(&f, &backend(&f, &[CLEAN]));
+    let before = std::fs::read(meta(&f).join("task.json")).unwrap();
+    let backend = backend(&f, &[CLEAN]);
+    let mut opts = options(&f);
+    opts.disk = common::slot::full(&f.env, true);
+
+    let out = go(&f, &opts, &backend);
+
+    let err = format!("{:#}", out.result.unwrap_err());
+    assert!(err.starts_with(&common::slot::refusal()), "{err}");
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert_eq!(std::fs::read(meta(&f).join("task.json")).unwrap(), before);
+}
+
 const AGY_DONE: &str = include_str!("../src/fixtures/antigravity-stream-json-pong.jsonl");
 
 /// Issue 314: an Antigravity reviewer with no model runs Antigravity's default, and the record and

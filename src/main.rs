@@ -122,7 +122,21 @@ fn finish_task(
     std::process::exit(if failed { 1 } else { 0 });
 }
 
+/// The stack the CLI runs on. clap's derive builds every argument of `sbxm task` in one stack
+/// frame, which in a debug build outgrew the 1 MiB main-thread stack Windows gives (PR 515), so
+/// the CLI runs on a thread of its own with a stack that doesn't depend on the platform.
+const CLI_STACK_SIZE: usize = 8 * 1024 * 1024;
+
 fn main() -> anyhow::Result<()> {
+    let cli = std::thread::Builder::new()
+        .name("main".into())
+        .stack_size(CLI_STACK_SIZE)
+        .spawn(run)?;
+    // A panic has already printed its message on the thread; exit as a panicking main would.
+    cli.join().unwrap_or_else(|_| std::process::exit(101))
+}
+
+fn run() -> anyhow::Result<()> {
     sbxm::backend::set_trailer_sink(|note| eprintln!("warning: {note}"));
     // `Cli::parse()` sugars over this, but `task run`'s list needs the raw matches too: clap's
     // derive API has no field that carries the relative order of two different repeated flags
@@ -225,11 +239,12 @@ fn main() -> anyhow::Result<()> {
             command: None,
             config: Some(config_path),
             ignore_disk,
+            no_wait,
         }) => {
             commands::run::run(
                 &config::config_dir()?,
                 &config_path,
-                &sbxm::disk::Guard::real(ignore_disk),
+                &sbxm::disk::Guard::real(ignore_disk).no_wait(no_wait),
                 &SbxBackend::LOCAL,
                 &mut std::io::stdout(),
                 &mut std::io::stderr(),
@@ -355,6 +370,7 @@ fn main() -> anyhow::Result<()> {
                     yes: _,
                     spec: Some(spec),
                     ignore_disk,
+                    no_wait,
                     cloud,
                     local,
                 },
@@ -378,7 +394,7 @@ fn main() -> anyhow::Result<()> {
                         repo,
                         clone_source: None,
                         identity: None,
-                        disk: sbxm::disk::Guard::real(ignore_disk),
+                        disk: sbxm::disk::Guard::real(ignore_disk).no_wait(no_wait),
                         location: sbxm::cli::location_flag(cloud, local),
                     },
                     &SbxBackend::LOCAL,
@@ -405,6 +421,7 @@ fn main() -> anyhow::Result<()> {
                     yes,
                     spec: None,
                     ignore_disk,
+                    no_wait,
                     cloud,
                     local,
                 },
@@ -427,7 +444,7 @@ fn main() -> anyhow::Result<()> {
                         repo,
                         clone_source: None,
                         identity: None,
-                        disk: sbxm::disk::Guard::real(ignore_disk),
+                        disk: sbxm::disk::Guard::real(ignore_disk).no_wait(no_wait),
                         location: sbxm::cli::location_flag(cloud, local),
                     },
                     restart.then_some(&commands::task_start::Restart {
@@ -450,6 +467,7 @@ fn main() -> anyhow::Result<()> {
                     tier,
                     dry_run,
                     ignore_disk,
+                    no_wait,
                 },
         } => {
             let (mut out, warn) = task_writers(vec![format!("issue-{issue}")], None)?;
@@ -466,7 +484,7 @@ fn main() -> anyhow::Result<()> {
                         },
                         dry_run,
                         identity: None,
-                        disk: sbxm::disk::Guard::real(ignore_disk),
+                        disk: sbxm::disk::Guard::real(ignore_disk).no_wait(no_wait),
                     },
                     &SbxBackend::LOCAL,
                     &task::record::SystemProbe,
@@ -541,6 +559,7 @@ fn main() -> anyhow::Result<()> {
                     repo,
                     base,
                     ignore_disk,
+                    no_wait,
                     check_run,
                 },
         } => {
@@ -557,7 +576,7 @@ fn main() -> anyhow::Result<()> {
                         base,
                         clone_source: None,
                         identity: None,
-                        disk: sbxm::disk::Guard::real(ignore_disk),
+                        disk: sbxm::disk::Guard::real(ignore_disk).no_wait(no_wait),
                         check_run,
                     },
                     &SbxBackend::LOCAL,
@@ -585,6 +604,7 @@ fn main() -> anyhow::Result<()> {
                     profile,
                     force,
                     ignore_disk,
+                    no_wait,
                     cloud,
                     local,
                 },
@@ -620,7 +640,7 @@ fn main() -> anyhow::Result<()> {
                         profile,
                         resolved_spec_id: None,
                         force,
-                        disk: sbxm::disk::Guard::real(ignore_disk),
+                        disk: sbxm::disk::Guard::real(ignore_disk).no_wait(no_wait),
                         location: sbxm::cli::location_flag(cloud, local),
                         identity: None,
                     },
@@ -642,6 +662,7 @@ fn main() -> anyhow::Result<()> {
                     pr,
                     rounds,
                     ignore_disk,
+                    no_wait,
                     forget_ambiguous,
                 },
         } => {
@@ -668,7 +689,7 @@ fn main() -> anyhow::Result<()> {
                         repo_root: std::env::current_dir()?,
                         target,
                         rounds,
-                        disk: sbxm::disk::Guard::real(ignore_disk),
+                        disk: sbxm::disk::Guard::real(ignore_disk).no_wait(no_wait),
                         identity: None,
                         forget_ambiguous,
                     },
@@ -699,6 +720,7 @@ fn main() -> anyhow::Result<()> {
                     restart,
                     yes,
                     ignore_disk,
+                    no_wait,
                     cloud,
                     local,
                 },
@@ -736,7 +758,7 @@ fn main() -> anyhow::Result<()> {
                         repo,
                         clone_source: None,
                         identity: None,
-                        disk: sbxm::disk::Guard::real(ignore_disk),
+                        disk: sbxm::disk::Guard::real(ignore_disk).no_wait(no_wait),
                         location: sbxm::cli::location_flag(cloud, local),
                     },
                     &targets,
@@ -884,7 +906,11 @@ fn main() -> anyhow::Result<()> {
                     commands::task_loop::Press::First => {
                         eprintln!("stopping after the current task; press Ctrl-C again to stop now")
                     }
-                    commands::task_loop::Press::Again => std::process::exit(130),
+                    commands::task_loop::Press::Again => {
+                        // The task's sandbox slot (or its place in line) goes with it (decision 304).
+                        sbxm::slot::release_all();
+                        std::process::exit(130)
+                    }
                 }) {
                     writeln!(
                         warn,
@@ -945,13 +971,14 @@ fn main() -> anyhow::Result<()> {
                     harness,
                     warm,
                     ignore_disk,
+                    no_wait,
                 },
         } => commands::template_build::run(
             &config::config_dir()?,
             &commands::template_build::Options {
                 profile,
                 harness,
-                disk: sbxm::disk::Guard::real(ignore_disk),
+                disk: sbxm::disk::Guard::real(ignore_disk).no_wait(no_wait),
                 now: None,
                 warm,
             },

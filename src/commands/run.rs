@@ -209,6 +209,9 @@ fn run_logged(
             config_dir.join("config.toml").display()
         );
     }
+    // One sandbox slot for all the contestants, judge and Jev sandboxes, held until the run ends
+    // (decision 304); taken once everything is checked, before the run's folder is made.
+    let _slot = crate::slot::take(&global, &disk.slot, None, warn)?;
 
     let roots = id::reserve(&global.base_dir)?;
     if let Ok(mut log) = log.lock() {

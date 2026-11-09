@@ -82,6 +82,10 @@ fn default_min_sbx_version() -> String {
 pub struct Resources {
     pub cpus: u32,
     pub memory: String,
+    /// How many commands that create a local sandbox may run on this machine at once (decision
+    /// 304); unset means no limit. Not per sandbox, so not part of any config hash.
+    #[serde(default, skip_serializing)]
+    pub sandbox_slots: Option<u32>,
 }
 
 impl GlobalConfig {
@@ -114,6 +118,13 @@ impl GlobalConfig {
                 )
             })?,
         };
+        if config.resources.sandbox_slots == Some(0) {
+            bail!(
+                "sandbox_slots = 0 in [resources] of {} leaves no command a sandbox; set 1 or \
+                 more, or delete the line for no limit",
+                path.display()
+            );
+        }
         config
             .profiles_dir
             .get_or_insert_with(|| config_dir.join("profiles"));
@@ -808,6 +819,7 @@ mod agent_kit_tests {
         let resources = Resources {
             cpus: 4,
             memory: "8g".into(),
+            sandbox_slots: None,
         };
         let hash = |kit| config_hash_with_kit("default", &profile, &resources, Harness::Pi, kit);
 
@@ -822,6 +834,7 @@ mod agent_kit_tests {
         let resources = Resources {
             cpus: 4,
             memory: "8g".into(),
+            sandbox_slots: None,
         };
         for harness in [Harness::Pi, Harness::Antigravity] {
             let toml = hash_input_toml("default", &profile, &resources, harness, false).unwrap();
@@ -836,6 +849,7 @@ mod agent_kit_tests {
         let resources = Resources {
             cpus: 4,
             memory: "8g".into(),
+            sandbox_slots: None,
         };
         for harness in [Harness::Claude, Harness::Codex] {
             let toml = hash_input_toml("default", &profile, &resources, harness, false).unwrap();

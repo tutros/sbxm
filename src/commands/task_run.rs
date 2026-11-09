@@ -17,6 +17,7 @@ use crate::disk;
 use crate::github::GitHubBackend;
 use crate::harness::Harness;
 use crate::run::config::{check_model_flag, headless_harness, parse_duration};
+use crate::slot;
 use crate::task::config::{Sink, TaskConfig};
 use crate::task::finish;
 use crate::task::fixes;
@@ -100,6 +101,26 @@ fn wait_for_room(config_dir: &Path, guard: &disk::Guard, warn: &mut dyn Write) -
         waited += DISK_WAIT_STEP;
     }
     Ok(())
+}
+
+/// The machine's sandbox slot for a command whose sandboxes run at `location` (decision 304): a
+/// cloud one takes none.
+fn take_slot(
+    config_dir: &Path,
+    guard: &disk::Guard,
+    location: Location,
+    task: Option<String>,
+    warn: &mut dyn Write,
+) -> Result<slot::Slot> {
+    match location {
+        Location::Local => slot::take(
+            &GlobalConfig::load(config_dir)?,
+            &guard.slot,
+            task.as_deref(),
+            warn,
+        ),
+        Location::Cloud => Ok(slot::Slot::none()),
+    }
 }
 
 /// Drops the `next:` hint of a step that isn't the last one.
@@ -253,6 +274,14 @@ fn run_issue(
         pipeline::check_reviewer_inputs(config_dir, backend.located(location), &config, location)?;
         location
     };
+    // The machine's sandbox slot is held through the worker and the review (decision 304).
+    let _slot = take_slot(
+        config_dir,
+        &opts.disk,
+        location,
+        Some(format!("issue-{}", opts.issue)),
+        warn,
+    )?;
 
     let start = task_start::Options {
         repo_root: opts.repo_root.clone(),
@@ -482,6 +511,14 @@ fn run_spec_task(
         pipeline::check_reviewer_inputs(config_dir, backend.located(location), &config, location)?;
         location
     };
+    // As for `--issue`: held through the worker and the review (decision 304).
+    let _slot = take_slot(
+        config_dir,
+        &opts.disk,
+        location,
+        record::spec_id(&opts.spec).ok().map(|(id, _)| id),
+        warn,
+    )?;
 
     let start = task_start::SpecOptions {
         repo_root: opts.repo_root.clone(),
@@ -968,6 +1005,8 @@ pub fn run_list(
         ..opts.clone()
     };
     preflight_targets(config_dir, opts, targets, github)?;
+    // The whole list holds one sandbox slot, through every target (decision 304).
+    let _slot = take_slot(config_dir, &opts.disk, location, None, warn)?;
 
     let mut summaries: Vec<(String, bool)> = Vec::new();
     let mut signed_out: Option<pipeline::NotSignedIn> = None;

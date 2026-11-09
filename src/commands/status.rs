@@ -15,6 +15,7 @@ use anyhow::Result;
 use crate::backend::SandboxBackend;
 use crate::config::GlobalConfig;
 use crate::github::GitHubBackend;
+use crate::slot;
 use crate::status::{cloud, footer, looping, runs, sandboxes, tasks};
 use crate::task::record::ProcessProbe;
 
@@ -34,6 +35,9 @@ pub struct Env {
     pub iterations: Option<usize>,
     /// What the disk footer reads the drives with (issue 92).
     pub disk: footer::Disk,
+    /// `sandbox_slots` and the slots' folder, when set: one line names who holds them
+    /// (decision 304).
+    pub slots: Option<(u32, slot::Gate)>,
 }
 
 impl Env {
@@ -45,6 +49,10 @@ impl Env {
             width: terminal_width().unwrap_or(80),
             iterations: None,
             disk: footer::Disk::real(config),
+            slots: config
+                .resources
+                .sandbox_slots
+                .map(|count| (count, slot::Gate::default())),
         }
     }
 }
@@ -116,6 +124,9 @@ pub fn run_with(
         if let Some(source) = loop_source {
             let view = loop_view(base, probe, source, &mut cache, now);
             write!(out, "{}", looping::render(&view, width))?;
+        }
+        if let Some((count, gate)) = &env.slots {
+            writeln!(out, "{}", slot::status_line(*count, gate))?;
         }
         let drives = footer::read(base, &env.disk);
         write!(

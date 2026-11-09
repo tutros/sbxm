@@ -398,6 +398,27 @@ fn invalid_kit_without_a_sandbox_toml_names_only_the_profile() {
     assert!(!message.contains("network entries"), "{message}");
 }
 
+// Issue 504: `new` creates a long-lived interactive sandbox, so it takes no sandbox slot
+// (decision 304), even when the slot is full.
+
+#[test]
+fn new_takes_no_sandbox_slot_while_the_slot_is_full() {
+    let env = Env::new();
+    let backend = FakeBackend::default();
+    let options = new::Options {
+        disk: common::slot::full(&env, true),
+        ..Default::default()
+    };
+
+    env.run_with("demo", &options, &backend).unwrap();
+
+    assert_eq!(backend.creates().len(), 1);
+    assert_eq!(
+        common::slot::holder(&env).unwrap().process.pid,
+        common::slot::HOLDER_PID
+    );
+}
+
 // Issue 210: a low sandbox drive refuses before anything is written or created.
 
 #[test]

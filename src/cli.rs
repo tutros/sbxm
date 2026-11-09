@@ -156,6 +156,10 @@ pub enum TemplateCommand {
         /// Build even when the drive of sbx's sandbox state has less than min_free_disk free.
         #[arg(long)]
         ignore_disk: bool,
+        /// When sandbox_slots in config.toml has no free slot, refuse at once, naming its holder,
+        /// instead of waiting for one.
+        #[arg(long)]
+        no_wait: bool,
     },
     /// List the templates sbxm built, with their size, age and how many sandboxes and tasks
     /// use them.
@@ -183,6 +187,10 @@ pub struct RunArgs {
     /// Run even when the drive of sbx's sandbox state has less than min_free_disk free.
     #[arg(long)]
     pub ignore_disk: bool,
+    /// When sandbox_slots in config.toml has no free slot, refuse at once, naming its holder,
+    /// instead of waiting for one.
+    #[arg(long)]
+    pub no_wait: bool,
 }
 
 #[derive(Debug, Subcommand)]
@@ -291,6 +299,10 @@ pub enum TaskCommand {
         /// min_free_disk free.
         #[arg(long)]
         ignore_disk: bool,
+        /// When sandbox_slots in config.toml has no free slot, refuse at once, naming its holder,
+        /// instead of waiting for one.
+        #[arg(long)]
+        no_wait: bool,
         /// Run the task's sandboxes in Docker Cloud Sandboxes (default: [sandbox] location in
         /// sbxm-task.toml, else here). The task remembers where it runs.
         #[arg(long, conflicts_with = "local")]
@@ -352,6 +364,10 @@ pub enum TaskCommand {
         /// min_free_disk free.
         #[arg(long)]
         ignore_disk: bool,
+        /// When sandbox_slots in config.toml has no free slot, refuse at once, naming its holder,
+        /// instead of waiting for one.
+        #[arg(long)]
+        no_wait: bool,
     },
     /// Fix the must-fix findings of an open PR's latest sbxm review (by you, covering its head),
     /// or with --check-run a failed run of its head, in a sandbox, then gates and an in-task review; the result is pushed onto the PR's own branch
@@ -370,6 +386,10 @@ pub enum TaskCommand {
         /// min_free_disk free.
         #[arg(long)]
         ignore_disk: bool,
+        /// When sandbox_slots in config.toml has no free slot, refuse at once, naming its holder,
+        /// instead of waiting for one.
+        #[arg(long)]
+        no_wait: bool,
         /// Fix this failed workflow run of the PR's head from its log (the last 64 KiB), instead
         /// of the review's must-fix findings.
         #[arg(long, value_name = "RUN_ID")]
@@ -400,6 +420,10 @@ pub enum TaskCommand {
         /// min_free_disk free.
         #[arg(long)]
         ignore_disk: bool,
+        /// When sandbox_slots in config.toml has no free slot, refuse at once, naming its holder,
+        /// instead of waiting for one.
+        #[arg(long)]
+        no_wait: bool,
         /// Drop a cloud sandbox whose create was started but never heard back from (sbxm can't
         /// tell whether it made it) from the task's record, touching nothing in the cloud, then
         /// resume; remove or keep that sandbox by hand first (decision 268).
@@ -422,6 +446,10 @@ pub enum TaskCommand {
         /// less than min_free_disk free.
         #[arg(long)]
         ignore_disk: bool,
+        /// When sandbox_slots in config.toml has no free slot, refuse at once, naming its holder,
+        /// instead of waiting for one.
+        #[arg(long)]
+        no_wait: bool,
     },
     /// Print the task state machine's transition table (states, events, next state), generated
     /// from the code (decision 174's "code is the documentation"; spec section 5.2).
@@ -492,6 +520,10 @@ pub enum TaskCommand {
         /// min_free_disk free.
         #[arg(long)]
         ignore_disk: bool,
+        /// When sandbox_slots in config.toml has no free slot, refuse at once, naming its holder,
+        /// instead of waiting for one.
+        #[arg(long)]
+        no_wait: bool,
         /// Run the tasks' sandboxes in Docker Cloud Sandboxes (default: [sandbox] location in
         /// sbxm-task.toml, else here). Each task remembers where it runs.
         #[arg(long, conflicts_with = "local")]

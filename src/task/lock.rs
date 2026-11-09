@@ -150,7 +150,7 @@ impl Drop for ProcessLock {
     }
 }
 
-fn token() -> String {
+pub(crate) fn token() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -247,6 +247,21 @@ impl ProcessLock {
     pub fn moved_to(&mut self, dir: &Path) {
         self.path = dir.join(FILE_NAME);
     }
+}
+
+/// [`create_new`] of the real file system, for the sandbox slots (decision 304).
+pub(crate) fn create_new_file(path: &Path) -> std::io::Result<fs::File> {
+    create_new(path, &RealFiles)
+}
+
+/// [`read_to_string`] of the real file system, for the sandbox slots (decision 304).
+pub(crate) fn read_file(path: &Path) -> std::io::Result<String> {
+    read_to_string(path, &RealFiles)
+}
+
+/// [`take_over_stale`] of the real file system, for the sandbox slots (decision 304).
+pub(crate) fn take_over_stale_file(path: &Path, stale: &str) -> Result<()> {
+    take_over_stale(path, stale, &RealFiles)
 }
 
 /// The takeover claim next to the lock at `path`: `lock.json.takeover`.

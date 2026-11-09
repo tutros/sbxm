@@ -96,6 +96,42 @@ fn github() -> FakeGitHub {
         ])
 }
 
+// ---- The machine's sandbox slot (issue 504, decision 304) ----
+
+#[test]
+fn a_start_with_no_free_slot_and_no_wait_refuses_creating_nothing() {
+    let f = fixture();
+    let backend = playing(&f);
+    let mut opts = options(&f);
+    opts.disk = common::slot::full(&f.env, true);
+
+    let out = run(&f, &opts, &backend, &github());
+
+    let err = format!("{:#}", out.result.unwrap_err());
+    assert!(err.starts_with(&common::slot::refusal()), "{err}");
+    assert!(backend.creates().is_empty(), "{:?}", backend.log());
+    assert!(!sbxm::task::record::task_dir(&f.env.base_dir(), "issue-41").exists());
+}
+
+#[test]
+fn a_start_takes_the_free_slot_naming_its_issue_and_gives_it_back() {
+    let f = fixture();
+    let slot = common::slot::slot_file(&f.env);
+    let backend = playing(&f).with_create_hook(move |_| {
+        let held: sbxm::slot::Holder =
+            serde_json::from_str(&std::fs::read_to_string(&slot).unwrap()).unwrap();
+        assert_eq!(held.task.as_deref(), Some("issue-41"));
+    });
+    let mut opts = options(&f);
+    opts.disk = common::slot::free(&f.env);
+
+    let out = run(&f, &opts, &backend, &github());
+
+    out.result.unwrap();
+    assert!(!backend.creates().is_empty());
+    assert!(common::slot::holder(&f.env).is_none());
+}
+
 #[test]
 fn github_urls_become_owner_slash_name() {
     for (url, want) in [

@@ -4,6 +4,7 @@
 pub mod cloud_task;
 pub mod fix_task;
 pub mod git_trace;
+pub mod slot;
 pub mod task_fixture;
 
 use std::path::{Path, PathBuf};
@@ -122,6 +123,7 @@ pub fn low_disk(env: &Env) -> sbxm::disk::Guard {
         ignore: false,
         // A wait for space to come back takes no real time (issue 389).
         sleep: |_| {},
+        slot: Default::default(),
     }
 }
 

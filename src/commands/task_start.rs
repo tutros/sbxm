@@ -16,6 +16,7 @@ use crate::github::GitHubBackend;
 use crate::harness::Harness;
 use crate::headless::RunStatus;
 use crate::run::config::{check_model_flag, headless_harness, parse_duration};
+use crate::slot;
 use crate::task::config::{Sink, TaskConfig};
 use crate::task::finish;
 use crate::task::fixes;
@@ -366,15 +367,23 @@ fn start(
     }
     // The task's sandboxes run where it was started (decision 253).
     let backend = backend.located(location);
-    match location {
-        Location::Local => disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?,
+    // The machine's sandbox slot is held until the start ends, by all its workers (decision 304).
+    let _slot = match location {
+        Location::Local => {
+            let global = GlobalConfig::load(config_dir)?;
+            disk::require(&global, config_dir, &opts.disk)?;
+            let ids: Vec<String> = opts.issues.iter().map(|n| format!("issue-{n}")).collect();
+            let task = (!ids.is_empty()).then(|| ids.join(", "));
+            slot::take(&global, &opts.disk.slot, task.as_deref(), warn)?
+        }
         // A cloud sandbox doesn't use the drive of `sbx`'s local sandbox state (P11, decision
-        // 262(h)). Every worker is preflighted here, before any is created (P15 (a)): they share
-        // the harness and the profile, so one check covers them all.
+        // 262(h)), nor a slot. Every worker is preflighted here, before any is created (P15 (a)):
+        // they share the harness and the profile, so one check covers them all.
         Location::Cloud => {
             pipeline::check_worker_inputs(config_dir, backend, &config, location)?;
+            slot::Slot::none()
         }
-    }
+    };
     let repo_name = resolve_repo(opts.repo.as_deref(), &opts.repo_root)?;
     let identity = match &opts.identity {
         Some(identity) => identity.clone(),
@@ -943,10 +952,16 @@ pub fn run_spec_with_seams(
 ) -> Result<()> {
     let start = resolve_spec_start(opts, github)?;
     // A cloud sandbox doesn't use the drive holding `sbx`'s local sandbox state (P11, decision
-    // 262(h)); `--ignore-disk` is still accepted there and does nothing more.
-    if start.location == Location::Local {
-        disk::require(&GlobalConfig::load(config_dir)?, config_dir, &opts.disk)?;
-    }
+    // 262(h)), nor a slot; `--ignore-disk` is still accepted there and does nothing more. A local
+    // one holds the machine's sandbox slot until the start ends (decision 304).
+    let _slot = match start.location {
+        Location::Local => {
+            let global = GlobalConfig::load(config_dir)?;
+            disk::require(&global, config_dir, &opts.disk)?;
+            slot::take(&global, &opts.disk.slot, Some(&start.id), warn)?
+        }
+        Location::Cloud => slot::Slot::none(),
+    };
     run_spec_from(
         config_dir,
         opts,

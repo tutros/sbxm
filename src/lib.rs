@@ -13,6 +13,7 @@ pub mod kit;
 pub mod project;
 pub mod run;
 pub mod seed;
+pub mod slot;
 pub mod state;
 pub mod status;
 pub mod task;

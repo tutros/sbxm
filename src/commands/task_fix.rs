@@ -16,6 +16,7 @@ use crate::config::GlobalConfig;
 use crate::disk;
 use crate::github::GitHubBackend;
 use crate::headless::RunStatus;
+use crate::slot;
 use crate::task::config::TaskConfig;
 use crate::task::finish;
 use crate::task::gates::HostRunner;
@@ -81,9 +82,19 @@ pub fn run(
     }
     let location = pipeline::choose_location(None, &config);
     let global = GlobalConfig::load(config_dir)?;
-    if location == Location::Local {
-        disk::require(&global, config_dir, &opts.disk)?;
-    }
+    // Held until the fix ends (decision 304); a cloud fix takes none.
+    let _slot = match location {
+        Location::Local => {
+            disk::require(&global, config_dir, &opts.disk)?;
+            slot::take(
+                &global,
+                &opts.disk.slot,
+                Some(&format!("fix of PR #{number}")),
+                warn,
+            )?
+        }
+        Location::Cloud => slot::Slot::none(),
+    };
     let backend = backend.located(location);
 
     let pr = github.pr(&repo_name, number)?;
