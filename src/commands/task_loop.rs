@@ -28,7 +28,10 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 
 use super::task_start::resolve_repo;
-use super::{task_file_findings, task_finish, task_fix, task_log, task_resume, task_rm, task_run};
+use super::{
+    task_file_findings, task_finish, task_fix, task_log, task_resume, task_review, task_rm,
+    task_run,
+};
 use crate::backend::{Location, SandboxBackend};
 use crate::config::GlobalConfig;
 use crate::disk;
@@ -45,6 +48,7 @@ use crate::task::runlog::{RunLog, Tee};
 use crate::task::{findings, finish, lock, loop_log, pipeline, pr_fix, resume};
 
 mod check;
+mod jobs;
 pub use check::check;
 
 /// How many open PRs the loop opened may await the user before it pauses (decision 245(e)).
@@ -95,6 +99,11 @@ pub trait Steps {
     /// `task rm --merged --yes`: removes the tasks whose PRs GitHub merged, archiving their text
     /// records first (decisions 195, 293).
     fn rm_merged(&self, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()>;
+    /// `task review --pr N`, for a queued `review` job (issue 525). A `Steps` that never runs
+    /// one needs no other.
+    fn review_pr(&self, pr: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
+        bail!("no review of PR #{pr} here")
+    }
     /// The free-disk check of `sbx`'s sandbox drive: an error while it is under `min_free_disk`.
     fn room(&self) -> Result<()>;
 }
@@ -2193,6 +2202,8 @@ pub fn run(
     if fs::symlink_metadata(&tasks).is_ok() {
         check_own_folder(&base_dir, &tasks)?;
     }
+    // The job queue's folders too (issue 525): every job file is read through them.
+    crate::task::jobs::check_queue(&base_dir)?;
     let mut lock = take_lock(&base_dir, opts, probe, warn)?;
 
     let (started_at, log) = free_log(&base_dir, env)?;
@@ -2221,7 +2232,9 @@ pub fn run(
         logged: false,
     };
 
-    let result = work(&mut lp, &mut lock, opts, out, warn);
+    let result = lp
+        .interrupted_jobs(out, warn)
+        .and_then(|()| work(&mut lp, &mut lock, opts, out, warn));
     // Only rows this loop wrote are posted: a loop that ran no task posts nothing (decision 305).
     if lp.logged {
         let stop = match &result {
@@ -2300,9 +2313,11 @@ fn work(
             return Ok(stop);
         }
         lp.clean_merged(out, warn)?;
+        // The queued jobs run after the resolves and the checks of the runs, before the pause
+        // for PRs awaiting the user, so a queued review or fix isn't held up by it (issue 525).
         let go_on = lp.resolve_conflicts(out, warn)? && {
             lp.check_runs(out, warn)?;
-            lp.wait_for_prs(out, warn)?
+            lp.drain_jobs(out, warn)? && lp.wait_for_prs(out, warn)?
         };
         if !go_on {
             writeln!(out, "stopped on request")?;
@@ -2804,6 +2819,37 @@ impl Steps for TaskSteps<'_> {
             &crate::confirm::Terminal,
             out,
         )
+    }
+
+    fn review_pr(&self, pr: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
+        self.logged_as(format!("pr-{pr}"), out, warn, &|out, warn| {
+            task_review::run(
+                self.config_dir,
+                &task_review::Options {
+                    repo_root: self.repo_root.clone(),
+                    target: task_review::Target::Pr(pr),
+                    repo: self.repo.clone(),
+                    base: None,
+                    clone_source: None,
+                    reviewer_harness: None,
+                    reviewer_model: None,
+                    reviewer_time_limit: None,
+                    time_limit: None,
+                    profile: None,
+                    resolved_spec_id: None,
+                    force: false,
+                    disk: self.disk.clone(),
+                    location: None,
+                    identity: None,
+                },
+                self.backend,
+                self.github,
+                self.probe,
+                self.host,
+                out,
+                warn,
+            )
+        })
     }
 
     fn room(&self) -> Result<()> {
