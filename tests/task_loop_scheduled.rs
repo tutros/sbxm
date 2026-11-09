@@ -743,28 +743,82 @@ fn with_no_dead_loop_nothing_is_resumed() {
     assert!(script.calls().is_empty(), "{:?}", script.calls());
 }
 
+/// Whether `dir`'s task is marked as resumed by the loop (the resume taken, not only owed).
+fn resume_taken(dir: &Path) -> bool {
+    let rec = record::read(&dir.join("task.json")).unwrap();
+    rec.hooks.get("task_loop_resumed") == Some(&serde_json::json!(true))
+}
+
 #[test]
-fn a_cut_off_task_the_loop_stops_before_resuming_is_not_marked_as_resumed() {
+fn a_cut_off_task_the_loop_stops_before_resuming_is_resumed_by_the_next_loop() {
     let f = fixture();
     plant_loop_lock(&f.base());
     let dir = cut_off(&f.base(), 3, Stage::Working, DEAD_LOOP);
     let gh = github(Vec::new());
     let script = Script::new(&f.base());
 
-    let run = run_loop(&f, f.opts(), &script, &gh, &GONE, &|_| {}, &|| true);
+    let first = run_loop(&f, f.opts(), &script, &gh, &GONE, &|_| {}, &|| true);
+
+    first.result.unwrap();
+    assert!(script.calls().is_empty(), "{:?}", script.calls());
+    assert!(!resume_taken(&dir));
+    assert!(
+        first.out.contains(
+            "was cut off when a loop stopped and not resumed yet; the next loop resumes it, or \
+             continue it with `sbxm task resume --issue 3`"
+        ),
+        "{}",
+        first.out
+    );
+
+    // The first loop stopped cleanly: no lock is left naming the loop that died.
+    assert!(!sbxm::task::queue::lock_path(&f.base()).exists());
+    let second = run_loop(&f, f.opts(), &script, &gh, &GONE, &|_| {}, &|| false);
+
+    second.result.unwrap();
+    assert_eq!(script.calls(), ["resume 3", "finish 3"], "{}", second.out);
+    assert!(resume_taken(&dir));
+}
+
+#[test]
+fn a_cut_off_task_survives_a_queued_jobs_error_before_its_resume() {
+    let f = fixture();
+    plant_loop_lock(&f.base());
+    let dir = cut_off(&f.base(), 3, Stage::Working, DEAD_LOOP);
+    let gh = github(vec![labeled(4)]);
+    f.queue_job("a.json", r#"{"kind": "run", "issue": 4}"#);
+    let script = Script::new(&f.base()).failing("run 4", no_secret);
+
+    let first = run_loop(&f, f.opts(), &script, &gh, &GONE, &|_| {}, &|| false);
+
+    assert_eq!(exit_code(&first), 3, "{:?}", first.result);
+    assert_eq!(script.calls(), ["run 4"], "{}", first.out);
+    assert!(!resume_taken(&dir));
+
+    // The secret is stored again; issue 4 is the user's now.
+    gh.set_open_issues(Vec::new());
+    let script = Script::new(&f.base());
+    let second = run_loop(&f, f.opts(), &script, &gh, &GONE, &|_| {}, &|| false);
+
+    second.result.unwrap();
+    assert_eq!(script.calls(), ["resume 3", "finish 3"], "{}", second.out);
+}
+
+#[test]
+fn a_cut_off_task_resumed_by_hand_before_the_next_loop_is_left_alone() {
+    let f = fixture();
+    plant_loop_lock(&f.base());
+    cut_off(&f.base(), 3, Stage::Working, DEAD_LOOP);
+    let gh = github(Vec::new());
+    let script = Script::new(&f.base());
+    run_loop(&f, f.opts(), &script, &gh, &GONE, &|_| {}, &|| true)
+        .result
+        .unwrap();
+    // A `task resume` run by hand took it, and was cut off in its turn.
+    cut_off(&f.base(), 3, Stage::Fixing, DEAD_HAND);
+
+    let run = run_loop(&f, f.opts(), &script, &gh, &GONE, &|_| {}, &|| false);
 
     run.result.unwrap();
     assert!(script.calls().is_empty(), "{:?}", script.calls());
-    let rec = record::read(&dir.join("task.json")).unwrap();
-    assert!(
-        rec.hooks.get("task_loop_resumed").is_none(),
-        "{:?}",
-        rec.hooks
-    );
-    assert!(
-        run.out
-            .contains("was cut off when a loop stopped and not resumed; continue it with `sbxm task resume --issue 3`"),
-        "{}",
-        run.out
-    );
 }

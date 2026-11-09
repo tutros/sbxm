@@ -54,9 +54,30 @@ pub use check::check;
 /// How many open PRs the loop opened may await the user before it pauses (decision 245(e)).
 pub const PR_CAP: usize = 5;
 pub use queue::LOOP_HOOK;
-/// The key in a task record's `hooks` marking a task the loop resumed after a loop died while
-/// running it (decision 310): one cut off again is parked, never resumed a second time.
+/// The key in a task record's `hooks` for a task a loop was running when it died (decision 310):
+/// the dead process while its one resume is owed, `true` once the loop took it. One cut off again
+/// after that is parked, never resumed a second time.
 pub const RESUMED_HOOK: &str = "task_loop_resumed";
+
+/// What a task record's [`RESUMED_HOOK`] says.
+enum Owed {
+    /// Nothing: no loop owes it a resume.
+    None,
+    /// Its resume is owed, for the cut-off process named.
+    Due(Process),
+    /// The loop took its resume already.
+    Taken,
+}
+
+impl Owed {
+    fn of(rec: &Record) -> Self {
+        match rec.hooks.get(RESUMED_HOOK) {
+            Some(serde_json::Value::Bool(true)) => Self::Taken,
+            Some(value) => serde_json::from_value(value.clone()).map_or(Self::None, Self::Due),
+            None => Self::None,
+        }
+    }
+}
 /// How often a pause looks again.
 pub const PAUSE_POLL: Duration = Duration::from_secs(5 * 60);
 /// How often a task's first phase is looked at for its record, to take its label off.
@@ -340,7 +361,7 @@ struct Held {
     started: u64,
     stops: Vec<(String, u64)>,
     retry: Retry,
-    /// Cut off when a loop died (decision 310): marked as resumed when the loop takes it.
+    /// Cut off when a loop died (decision 310): marked as taken when the loop takes it.
     cut_off: bool,
 }
 
@@ -350,8 +371,8 @@ impl Held {
         let issue = self.issue;
         if self.cut_off {
             return format!(
-                "{} was cut off when a loop stopped and not resumed; continue it with `sbxm task \
-                 resume --issue {issue}`",
+                "{} was cut off when a loop stopped and not resumed yet; the next loop resumes it, \
+                 or continue it with `sbxm task resume --issue {issue}`",
                 crate::title::named(&format!("#{issue}"), &self.title)
             );
         }
@@ -893,22 +914,19 @@ impl Loop<'_> {
         }
     }
 
-    /// The tasks the loop of process `dead`, whose lock this loop took over, was running when it
-    /// died (decision 310): this repo's issue tasks not finished, interrupted as `task status`
-    /// decides it, and recorded as worked on by that process. Each is returned to be continued
-    /// once, as the loop's one resume after an environment stop, and marked as resumed
-    /// ([`RESUMED_HOOK`]) only when the loop takes it; one already marked is parked with its log
-    /// row instead.
+    /// The tasks a loop was running when it died (decision 310), to be continued once, as the
+    /// loop's one resume after an environment stop: this repo's issue tasks not finished and
+    /// interrupted as `task status` decides it, that are either recorded as worked on by `dead`,
+    /// the loop whose lock this loop took over, or still owed their resume from an earlier start
+    /// ([`Owed`]). A newly found one is marked as owed, under its lock, before anything else
+    /// runs, so a loop that stops or fails before the resume leaves it to the next loop. One whose
+    /// resume was taken already, and was cut off again, is parked with its log row instead.
     fn cut_off(
         &mut self,
         dead: Option<&Process>,
         out: &mut dyn Write,
         warn: &mut dyn Write,
     ) -> Result<VecDeque<Held>> {
-        let mut due = VecDeque::new();
-        let Some(dead) = dead else {
-            return Ok(due);
-        };
         let mut found = Vec::new();
         for dir in record::task_folders(&self.base_dir)? {
             if check_own_folder(&self.base_dir, &dir).is_err() {
@@ -920,49 +938,68 @@ impl Loop<'_> {
             let ours = rec.kind == Kind::Issue
                 && rec.repo == self.repo
                 && rec.id == format!("issue-{}", rec.number)
-                && rec.process.as_ref() == Some(dead);
-            if ours
                 && rec.stage != Stage::Finished
                 && rec.pr.is_none()
-                && rec.is_interrupted(self.probe)
-            {
-                found.push(rec);
+                && rec.is_interrupted(self.probe);
+            let owed = Owed::of(&rec);
+            let by_dead = dead.is_some() && rec.process.as_ref() == dead;
+            // Owed for the process still recorded: a command run by hand since then took it.
+            let owed_here = matches!(&owed, Owed::Due(p) if rec.process.as_ref() == Some(p));
+            if ours && (by_dead || owed_here) {
+                found.push((rec, owed));
             }
         }
-        found.sort_by_key(|rec| rec.number);
-        for rec in found {
+        found.sort_by_key(|(rec, _)| rec.number);
+        let mut due = VecDeque::new();
+        for (rec, owed) in found {
             let issue = rec.number;
             let named = crate::title::named(&format!("#{issue}"), &rec.title);
             let stage = rec.stage.name();
-            if rec.hooks.get(RESUMED_HOOK) == Some(&serde_json::Value::Bool(true)) {
-                writeln!(
-                    out,
-                    "{named}: cut off at {stage} again after the loop resumed it once; parked, see \
-                     `sbxm task status --issue {issue}`"
-                )?;
-                let now = self.now();
-                self.append(
-                    &Row {
-                        issue,
-                        title: rec.title.clone(),
-                        size: None,
-                        started: now,
-                        ready: None,
-                        worker_s: None,
-                        reviewer_s: None,
-                        rounds: None,
-                        must_fix: None,
-                        outcome: format!("parked at {stage}: cut off again after its resume"),
-                        stops: Vec::new(),
-                        idle_before: None,
-                    },
-                    warn,
-                )?;
-                continue;
+            match owed {
+                Owed::Taken => {
+                    writeln!(
+                        out,
+                        "{named}: cut off at {stage} again after the loop resumed it once; \
+                         parked, see `sbxm task status --issue {issue}`"
+                    )?;
+                    let now = self.now();
+                    self.append(
+                        &Row {
+                            issue,
+                            title: rec.title.clone(),
+                            size: None,
+                            started: now,
+                            ready: None,
+                            worker_s: None,
+                            reviewer_s: None,
+                            rounds: None,
+                            must_fix: None,
+                            outcome: format!("parked at {stage}: cut off again after its resume"),
+                            stops: Vec::new(),
+                            idle_before: None,
+                        },
+                        warn,
+                    )?;
+                    continue;
+                }
+                Owed::Due(_) => {}
+                Owed::None => {
+                    let Some(process) = rec.process.as_ref() else {
+                        continue;
+                    };
+                    let owe = serde_json::to_value(process)?;
+                    if let Err(e) = self.mark_resume(issue, owe) {
+                        let Some(in_use) = e.downcast_ref::<lock::InUse>() else {
+                            return Err(e);
+                        };
+                        writeln!(out, "{named}: {}; the loop leaves it", in_use.describe())?;
+                        continue;
+                    }
+                }
             }
             writeln!(
                 out,
-                "{named}: cut off at {stage} when the loop stopped; resuming it once"
+                "{named}: cut off at {stage} when a loop stopped; resuming it once"
             )?;
             due.push_back(Held {
                 issue,
@@ -977,9 +1014,9 @@ impl Loop<'_> {
         Ok(due)
     }
 
-    /// Marks a task as resumed by the loop after it was cut off ([`RESUMED_HOOK`]), under the
-    /// task's lock, as [`Self::claim`] marks one.
-    fn mark_resumed(&self, issue: u32) -> Result<()> {
+    /// Sets the task's [`RESUMED_HOOK`] to `value` under the task's lock, as [`Self::claim`]
+    /// marks one: the process its resume is owed for, or `true` once the loop takes it.
+    fn mark_resume(&self, issue: u32, value: serde_json::Value) -> Result<()> {
         let _lock = pipeline::lock_task(&self.base_dir, &format!("issue-{issue}"), self.probe)?;
         let dir = self.task_dir(issue);
         let mut rec = record::read(&dir.join("task.json"))?;
@@ -987,7 +1024,7 @@ impl Loop<'_> {
             if !r.hooks.is_object() {
                 r.hooks = serde_json::Value::Object(serde_json::Map::new());
             }
-            r.hooks[RESUMED_HOOK] = serde_json::Value::Bool(true);
+            r.hooks[RESUMED_HOOK] = value;
         })?;
         Ok(())
     }
@@ -2459,8 +2496,9 @@ pub fn run(
         logged: false,
     };
 
-    let result = lp.interrupted_jobs(out, warn).and_then(|()| {
-        let due = lp.cut_off(dead.as_ref(), out, warn)?;
+    // The cut-off tasks first: their owed resumes are written before anything else can fail.
+    let result = lp.cut_off(dead.as_ref(), out, warn).and_then(|due| {
+        lp.interrupted_jobs(out, warn)?;
         work(&mut lp, &mut lock, opts, due, out, warn)
     });
     // Only rows this loop wrote are posted: a loop that ran no task posts nothing (decision 305).
@@ -2576,8 +2614,8 @@ fn work(
                 retry,
                 cut_off,
             } = again;
-            // Marked only now, so a loop that stops before it leaves the task to be resumed.
-            if cut_off && let Err(e) = lp.mark_resumed(issue) {
+            // Taken only now: a loop that stops before this leaves the resume owed, for the next.
+            if cut_off && let Err(e) = lp.mark_resume(issue, serde_json::Value::Bool(true)) {
                 let Some(in_use) = e.downcast_ref::<lock::InUse>() else {
                     return Err(e);
                 };

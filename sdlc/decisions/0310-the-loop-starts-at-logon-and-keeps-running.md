@@ -21,8 +21,12 @@ issue tasks of its repo that loop was running: not finished, `interrupted` as `t
 as worked on by that dead loop's process (how [294] finds the loop's running task; the loop's claim, `hooks.task_loop`,
 is written only at a ready task's finish, so it can't name a task being worked on). It continues each with `task
 resume` (its finish, for one cut off at `ready`), counting as the loop's one resume after an environment stop: a
-second failure parks it as before. Before the resume the loop marks the record (`hooks.task_loop_resumed`, under the
-task's lock); a marked task cut off again is parked, never resumed a second time. Each gets a log row. Never `task run`
+second failure parks it as before. Found, the task is marked at once, under its lock, as owed its resume
+(`hooks.task_loop_resumed` holds the cut-off process), so a loop that stops or fails before the resume (a stop
+request, a queued job's error) leaves it to the next loop, which resumes a task still owed for the process its record
+names even with no stale lock left (review M-1); a command run by hand that took the task since then makes it the
+user's. When the loop takes the resume the mark becomes `true`; a task marked `true` and cut off again is parked,
+never resumed a second time. Each gets a log row. Never `task run`
 again; a task run by hand, or a finished one, is left alone. (5) **Starts at logon, only while the user is logged on**
 (Docker Desktop and `sbx` run in the user's session). Before each start of the loop the script waits up to 10 minutes
 for `sbx ls` to succeed, checking every 30 seconds; still failing counts as an error under (3). A loop started by
