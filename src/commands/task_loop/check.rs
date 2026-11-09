@@ -72,21 +72,16 @@ pub fn check(
 
     let mut taken = Vec::new();
     for &number in &issues {
-        let Some(issue) = open.iter().find(|i| i.number == number) else {
-            writeln!(out, "#{number}: skip: isn't an open issue")?;
-            continue;
-        };
-        let reasons = reasons(config_dir, &repo, github, &open, issue)?;
-        if reasons.is_empty() {
-            writeln!(out, "#{number} {}: take", issue.title)?;
-            taken.push(number);
-        } else {
-            writeln!(
-                out,
-                "#{number} {}: skip: {}",
-                issue.title,
-                reasons.join("; also: ")
-            )?;
+        let named = open.iter().find(|i| i.number == number).map_or_else(
+            || format!("#{number}"),
+            |i| format!("#{number} {}", i.title),
+        );
+        match skip_reason(&base_dir, &repo, github, &open, number)? {
+            None => {
+                writeln!(out, "{named}: take")?;
+                taken.push(number);
+            }
+            Some(why) => writeln!(out, "{named}: skip: {why}")?,
         }
     }
 
@@ -102,12 +97,41 @@ pub fn check(
     Ok(taken.len() == issues.len())
 }
 
+/// Why the loop would pass issue `number` over, every reason joined as `--check` prints it after
+/// `skip: `, or `None` when it would take it; `open` is the open issues. Also what `sbxm status`
+/// shows on a queued issue's line (issue 536).
+pub(crate) fn skip_reason(
+    base_dir: &Path,
+    repo: &str,
+    github: &dyn GitHubBackend,
+    open: &[Issue],
+    number: u32,
+) -> Result<Option<String>> {
+    let Some(issue) = open.iter().find(|i| i.number == number) else {
+        return Ok(Some("isn't an open issue".to_owned()));
+    };
+    let reasons = reasons_in(base_dir, repo, github, open, issue)?;
+    Ok((!reasons.is_empty()).then(|| reasons.join("; also: ")))
+}
+
+/// [`reasons_in`] under the `base_dir` of the config in `config_dir`.
+pub(crate) fn reasons(
+    config_dir: &Path,
+    repo: &str,
+    github: &dyn GitHubBackend,
+    open: &[Issue],
+    issue: &Issue,
+) -> Result<Vec<String>> {
+    let base_dir = GlobalConfig::load(config_dir)?.base_dir;
+    reasons_in(&base_dir, repo, github, open, issue)
+}
+
 /// Every reason the loop would pass `issue` over, or none: the label and the size, the open
 /// points, then the loop's own checks in its order (an unmerged dependency, else what `task run`
 /// would refuse before any write), then a branch of the task's name already on origin, which
 /// `task finish` would refuse to push over.
-pub(crate) fn reasons(
-    config_dir: &Path,
+fn reasons_in(
+    base_dir: &Path,
     repo: &str,
     github: &dyn GitHubBackend,
     open: &[Issue],
@@ -126,7 +150,7 @@ pub(crate) fn reasons(
     }
     let unmerged = unmerged_dependencies(github, repo, open, &issue.body);
     if unmerged.is_empty() {
-        let problems = pipeline::preflight_issues(config_dir, repo, github, &[number])?;
+        let problems = pipeline::preflight_issues_in(base_dir, repo, github, open, &[number])?;
         if let Some(reason) = problems.get(&number) {
             reasons.push(refused_reason(reason));
         }

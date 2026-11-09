@@ -409,6 +409,10 @@ pub struct Snapshot {
     /// The title of every open issue, by number, from the same fetch as `queue`: for the issues
     /// of a loop's `--issue` list that have no task record yet (issue 477).
     pub issue_titles: std::collections::BTreeMap<u32, String>,
+    /// Why the loop would pass each issue checked over (issue 536): the text `task loop --check`
+    /// gives after `skip: `, or `unknown (<first line of the error>)` when the check fails. An
+    /// issue it would take has no entry.
+    pub blocked: std::collections::BTreeMap<u32, String>,
 }
 
 fn first_line(error: &anyhow::Error) -> String {
@@ -419,8 +423,20 @@ fn first_line(error: &anyhow::Error) -> String {
         .to_owned()
 }
 
-/// Asks GitHub for the queue (`gh issue list`) and for the state of each PR a loop opened.
+/// Asks GitHub for the queue (`gh issue list`) and for the state of each PR a loop opened, and
+/// checks each queued issue as `task loop --check` does.
 pub fn fetch(github: &dyn GitHubBackend, repo: &Result<String, String>, base: &Path) -> Snapshot {
+    fetch_checking(github, repo, base, None)
+}
+
+/// [`fetch`], checking the issues of `listed` (a loop's `--issue` list still to come, issue 536)
+/// instead of the queue's when given.
+pub fn fetch_checking(
+    github: &dyn GitHubBackend,
+    repo: &Result<String, String>,
+    base: &Path,
+    listed: Option<&[u32]>,
+) -> Snapshot {
     let repo = match repo {
         Ok(repo) => repo,
         Err(why) => {
@@ -429,6 +445,7 @@ pub fn fetch(github: &dyn GitHubBackend, repo: &Result<String, String>, base: &P
                 awaiting: Err(why.clone()),
                 pr_titles: Default::default(),
                 issue_titles: Default::default(),
+                blocked: Default::default(),
             };
         }
     };
@@ -438,6 +455,22 @@ pub fn fetch(github: &dyn GitHubBackend, repo: &Result<String, String>, base: &P
         .flatten()
         .map(|i| (i.number, i.title.clone()))
         .collect();
+    let blocked = open
+        .as_ref()
+        .map(|open| {
+            let checked = listed.map_or_else(|| queue::queue_order(open), <[u32]>::to_vec);
+            checked
+                .into_iter()
+                .filter_map(|n| {
+                    match crate::commands::task_loop::skip_reason(base, repo, github, open, n) {
+                        Ok(None) => None,
+                        Ok(Some(why)) => Some((n, why)),
+                        Err(e) => Some((n, format!("unknown ({})", first_line(&e)))),
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
     let queue = open.map(|open| {
         queue::queue_order(&open)
             .into_iter()
@@ -471,6 +504,7 @@ pub fn fetch(github: &dyn GitHubBackend, repo: &Result<String, String>, base: &P
         awaiting: awaiting.map_err(|e| first_line(&e)),
         pr_titles,
         issue_titles,
+        blocked,
     }
 }
 
@@ -744,7 +778,12 @@ pub fn render(view: &View, width: Option<usize>) -> String {
             Err(why) => lines.push(format!("  queue: unreadable ({why})")),
             Ok(items) if items.is_empty() => lines.push("  queue: empty".to_owned()),
             Ok(items) => {
-                lines.push(format!("  queue: {}", plural(items.len(), "issue")));
+                let numbers: Vec<u32> = items.iter().map(|i| i.number).collect();
+                lines.push(format!(
+                    "  queue: {}{}",
+                    plural(items.len(), "issue"),
+                    blocked_count(&numbers, Some(snapshot))
+                ));
                 let shown = if width.is_some() {
                     items.len().min(MAX_QUEUE_LINES)
                 } else {
@@ -754,7 +793,8 @@ pub fn render(view: &View, width: Option<usize>) -> String {
                     let size = item.size.map_or(String::new(), |s| format!(" (size {s})"));
                     let item_titled =
                         crate::title::titled(&format!("#{}", item.number), &item.title);
-                    lines.push(format!("    {item_titled}{size}"));
+                    let why = blocked(item.number, Some(snapshot));
+                    lines.push(format!("    {item_titled}{size}{why}"));
                 }
                 if shown < items.len() {
                     lines.push(format!("    … {} more", items.len() - shown));
@@ -812,8 +852,9 @@ fn list_lines(
         lines.push("  pending: none".to_owned());
     } else {
         lines.push(format!(
-            "  pending: {}",
-            plural(listed.pending.len(), "issue")
+            "  pending: {}{}",
+            plural(listed.pending.len(), "issue"),
+            blocked_count(&listed.pending, snapshot)
         ));
         let shown = if width.is_some() {
             listed.pending.len().min(MAX_QUEUE_LINES)
@@ -822,8 +863,9 @@ fn list_lines(
         };
         for &n in &listed.pending[..shown] {
             lines.push(format!(
-                "    {}",
-                crate::title::titled(&format!("#{n}"), title(n))
+                "    {}{}",
+                crate::title::titled(&format!("#{n}"), title(n)),
+                blocked(n, snapshot)
             ));
         }
         if shown < listed.pending.len() {
@@ -837,6 +879,27 @@ fn list_lines(
             inline(&listed.not_run)
         ));
     }
+}
+
+/// ` (N blocked)` for the issues of `numbers` the loop would pass over, or nothing when none is
+/// (issue 536).
+fn blocked_count(numbers: &[u32], snapshot: Option<&Snapshot>) -> String {
+    let n = numbers
+        .iter()
+        .filter(|n| snapshot.is_some_and(|s| s.blocked.contains_key(n)))
+        .count();
+    if n == 0 {
+        String::new()
+    } else {
+        format!(" ({n} blocked)")
+    }
+}
+
+/// ` — blocked: <why>` after an issue the loop would pass over, or nothing (issue 536).
+fn blocked(number: u32, snapshot: Option<&Snapshot>) -> String {
+    snapshot
+        .and_then(|s| s.blocked.get(&number))
+        .map_or_else(String::new, |why| format!(" — blocked: {why}"))
 }
 
 fn plural(n: usize, noun: &str) -> String {

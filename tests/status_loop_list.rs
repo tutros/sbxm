@@ -17,8 +17,8 @@ use common::task_fixture::{issue_text, open_issue};
 use sbxm::backend::FakeBackend;
 use sbxm::commands::status::{self, LoopSource};
 use sbxm::commands::task_loop::{self, Options, Steps};
-use sbxm::github::Issue;
 use sbxm::github::fake::FakeGitHub;
+use sbxm::github::{Issue, IssueText};
 use sbxm::run::results::format_timestamp;
 use sbxm::task::queue::{LOOP_HOOK, LockFile, lock_path};
 use sbxm::task::record::{
@@ -303,8 +303,20 @@ fn github(open: &[u32]) -> FakeGitHub {
         labels: vec!["ready-for-worker".into(), "size:S".into()],
         body: String::new(),
     });
-    FakeGitHub::default().with_open_issues(issues)
+    let mut gh = FakeGitHub::default();
+    for i in &issues {
+        gh = gh.with_issue_text(IssueText {
+            number: i.number,
+            title: i.title.clone(),
+            state: "OPEN".into(),
+            text: String::new(),
+        });
+    }
+    gh.with_open_issues(issues)
 }
+
+/// What `task loop --check` says of an `Open n` issue, which isn't labeled (issue 536).
+const NOT_LABELED: &str = " — blocked: not labeled ready-for-worker";
 
 fn frame(base: &Path, gh: &FakeGitHub) -> String {
     let source = LoopSource {
@@ -368,7 +380,10 @@ fn five_issues_two_done_and_the_third_running() {
         "{text}"
     );
     assert!(
-        text.contains("  pending: 2 issues\n    #444: Open 444\n    #455: Open 455\n"),
+        text.contains(&format!(
+            "  pending: 2 issues (2 blocked)\n    #444: Open 444{NOT_LABELED}\n    #455: Open \
+             455{NOT_LABELED}\n"
+        )),
         "{text}"
     );
     assert!(!text.contains("queue"), "{text}");
@@ -433,7 +448,10 @@ fn nothing_started_yet_shows_the_whole_list_pending() {
         "{text}"
     );
     assert!(
-        text.contains("  pending: 2 issues\n    #1: Open 1\n    #2: Open 2\n"),
+        text.contains(&format!(
+            "  pending: 2 issues (2 blocked)\n    #1: Open 1{NOT_LABELED}\n    #2: Open \
+             2{NOT_LABELED}\n"
+        )),
         "{text}"
     );
 }
@@ -453,7 +471,9 @@ fn a_skipped_issue_and_a_parked_one_are_never_pending() {
     assert!(text.contains("  skipped: #2 (Open 2)\n"), "{text}");
     assert!(text.contains(", task 2 of 3\n"), "{text}");
     assert!(
-        text.contains("  pending: 1 issue\n    #4: Open 4\n"),
+        text.contains(&format!(
+            "  pending: 1 issue (1 blocked)\n    #4: Open 4{NOT_LABELED}\n"
+        )),
         "{text}"
     );
 }
@@ -470,7 +490,9 @@ fn a_cap_smaller_than_the_list_counts_only_the_tasks_it_runs() {
 
     assert!(text.contains(", task 2 of 3\n"), "{text}");
     assert!(
-        text.contains("  pending: 1 issue\n    #3: Open 3\n"),
+        text.contains(&format!(
+            "  pending: 1 issue (1 blocked)\n    #3: Open 3{NOT_LABELED}\n"
+        )),
         "{text}"
     );
     assert!(
