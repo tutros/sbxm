@@ -998,7 +998,7 @@ fn run() -> anyhow::Result<()> {
                         "warning: Ctrl-C can't be caught ({e}); it stops the loop at once"
                     )?;
                 }
-                commands::task_loop::run(
+                commands::task_loop::run_notifying(
                     &config_dir,
                     &commands::task_loop::Options {
                         repo_root,
@@ -1015,6 +1015,8 @@ fn run() -> anyhow::Result<()> {
                         sleep: &std::thread::sleep,
                         stop_requested: &|| stop.requested(),
                     },
+                    // The loop's toasts (issue 530): only here is the real notifier wired.
+                    &sbxm::notify::Toast::real(),
                     &mut out,
                     &mut warn,
                 )

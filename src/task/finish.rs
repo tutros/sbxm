@@ -1407,6 +1407,12 @@ pub fn hands_back(result: &str) -> bool {
     handback_section(result, "Needs a decision").is_some()
 }
 
+/// The question `result` (a worker's `result.md`) hands back: its "Needs a decision" section's
+/// text, `None` when it has none (issue 530).
+pub fn handed_back(result: &str) -> Option<String> {
+    handback_section(result, "Needs a decision")
+}
+
 /// The text of `result`'s section called `name` (issue 220, decision 283): under a heading of any
 /// level whose text is `name` in any case, with bold or italic marks and a trailing colon allowed
 /// (`## Needs a decision: none` starts its text with `none`), up to the next heading at its level

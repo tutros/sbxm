@@ -9,12 +9,13 @@ use std::path::Path;
 use anyhow::{Result, anyhow};
 
 use super::{
-    Capture, Claimed, End, Halt, Loop, NeedsUser, Steps, check, first_line, needs_user,
+    Capture, Cause, Claimed, End, Halt, Loop, NeedsUser, Steps, check, first_line, needs_user,
     says_sign_in, sign_in_stop,
 };
 use crate::commands::task_start::spec_flag;
 use crate::config::GlobalConfig;
 use crate::github::PrState;
+use crate::notify::Notification;
 use crate::run::results::format_timestamp;
 use crate::task::jobs::{self, AsRead, Job, JobHarness, JobResult, Outcome, Running};
 use crate::task::queue::{self, Row};
@@ -234,6 +235,7 @@ impl Loop<'_> {
             stops: Vec::new(),
             idle_before: None,
         };
+        self.notify_job(taken, label, result, out, warn)?;
         if let Err(e) = queue::append_job_row(&self.log, label, &row) {
             self.warn_once(
                 warn,
@@ -243,6 +245,56 @@ impl Loop<'_> {
             self.logged = true;
         }
         Ok(())
+    }
+
+    /// (b) of issue 530: a notification for a job that ended `failed`, `stopped`, `refused` or
+    /// `interrupted`, keyed by its file name. The click opens the PR or issue the job names.
+    fn notify_job(
+        &mut self,
+        taken: &Path,
+        label: &str,
+        result: &JobResult,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<()> {
+        if matches!(result.outcome, Outcome::Done | Outcome::Skipped) {
+            return Ok(());
+        }
+        let file = taken
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let named = |field: &str| {
+            result
+                .read
+                .job
+                .as_ref()
+                .and_then(|job| job.get(field))
+                .and_then(serde_json::Value::as_u64)
+        };
+        let click = result
+            .url
+            .clone()
+            .or_else(|| named("pr").map(|n| format!("https://github.com/{}/pull/{n}", self.repo)))
+            .or_else(|| {
+                named("issue").map(|n| format!("https://github.com/{}/issues/{n}", self.repo))
+            })
+            .unwrap_or_else(|| self.log_click());
+        let mut title = label.to_owned();
+        if let Some(first) = title.get_mut(..1) {
+            first.make_ascii_uppercase();
+        }
+        let next = match &result.next {
+            Some(next) => format!("; next: `{next}`"),
+            None => String::new(),
+        };
+        let note = Notification {
+            key: format!("job:{file}"),
+            title: format!("{title} {}", result.outcome.name()),
+            body: format!("{}{next}", first_line(&result.reason)),
+            click,
+        };
+        self.notify(note, out, warn)
     }
 
     /// Marks the running file with the task the job starts, so a stop meanwhile names it.
@@ -405,6 +457,7 @@ impl Loop<'_> {
             return Ok(ended);
         }
         let armed = self.arm(id, out, warn)?;
+        self.notify_question(id, out, warn)?;
         let pr = self
             .record_of(id)
             .and_then(|r| r.pr)
@@ -489,13 +542,13 @@ impl Loop<'_> {
             let resume = resume.and_then(|(id, command)| self.record_of(id).map(|_| command));
             let stop = sign_in_stop(e, resume);
             return Err(Ended {
-                halt: Some(needs_user(anyhow!("{stop:#}"))),
+                halt: Some(needs_user(Cause::SignIn, anyhow!("{stop:#}"))),
                 ..Ended::new(Outcome::Stopped, format!("{stop:#}"))
             });
         }
         if e.is::<pipeline::MissingSecret>() {
             return Err(Ended {
-                halt: Some(needs_user(anyhow!("{e:#}"))),
+                halt: Some(needs_user(Cause::Secret, anyhow!("{e:#}"))),
                 ..Ended::new(Outcome::Failed, format!("{what}{e:#}"))
             });
         }
@@ -622,11 +675,13 @@ impl Loop<'_> {
             Err(Halt::Stopped) => Ended::new(Outcome::Stopped, "stopped on request"),
             Err(Halt::Error(e)) => Ended {
                 // A missing secret stays a stop that needs the user (decision 310).
-                halt: Some(if e.is::<NeedsUser>() {
-                    needs_user(anyhow!("{e:#}"))
-                } else {
-                    anyhow!("{e:#}")
-                }),
+                halt: Some(
+                    if let Some(NeedsUser(cause, _)) = e.downcast_ref::<NeedsUser>() {
+                        needs_user(*cause, anyhow!("{e:#}"))
+                    } else {
+                        anyhow!("{e:#}")
+                    },
+                ),
                 ..Ended::new(Outcome::Failed, format!("{e:#}"))
             },
             Err(Halt::SignIn(e)) => {
@@ -636,7 +691,7 @@ impl Loop<'_> {
                     exists.then(|| format!("sbxm task resume --issue {issue}")),
                 );
                 Ended {
-                    halt: Some(needs_user(anyhow!("{stop:#}"))),
+                    halt: Some(needs_user(Cause::SignIn, anyhow!("{stop:#}"))),
                     ..Ended::new(Outcome::Stopped, format!("{stop:#}"))
                 }
             }
@@ -647,7 +702,7 @@ impl Loop<'_> {
                     queue::span(total.as_secs())
                 );
                 Ended {
-                    halt: Some(needs_user(anyhow!("{stop}"))),
+                    halt: Some(needs_user(Cause::UsageLimit, anyhow!("{stop}"))),
                     ..Ended::new(Outcome::Stopped, stop)
                 }
             }
