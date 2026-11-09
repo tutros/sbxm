@@ -247,6 +247,40 @@ fn each_kind_shows_its_kind_and_target() {
     );
 }
 
+#[test]
+fn a_spec_job_and_a_template_job_show_their_kind_and_target() {
+    let base = TestEnv::new();
+    let b = base.base_dir();
+    queued(
+        &b,
+        "1.json",
+        r#"{"kind": "spec", "file": "retro-2026-11-08.md"}"#,
+        T0 - 30,
+    );
+    queued(
+        &b,
+        "2.json",
+        r#"{"kind": "template", "profile": "sbxm-dev"}"#,
+        T0 - 20,
+    );
+    queued(
+        &b,
+        "3.json",
+        r#"{"kind": "template", "profile": "sbxm-dev", "harness": "codex", "warm": true}"#,
+        T0 - 10,
+    );
+
+    let text = frame(&b, &alive(), false);
+
+    assert!(
+        text.contains(
+            "  jobs: 3 jobs\n    spec retro-2026-11-08.md\n    template sbxm-dev\n    template \
+             sbxm-dev --harness codex --warm\n"
+        ),
+        "{text}"
+    );
+}
+
 /// A running file as the loop's `mark` writes it once the job started.
 fn running_file(base: &Path, secs: u64) {
     file_at(

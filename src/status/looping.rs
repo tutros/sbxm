@@ -524,7 +524,8 @@ impl Default for Jobs {
     }
 }
 
-/// A job's kind and target: `run #524`, `fix #465 (check run 42452742075)`, `rm-merged`.
+/// A job's kind and target: `run #524`, `fix #465 (check run 42452742075)`, `rm-merged`,
+/// `spec <file>`, `template <profile>`.
 fn job_text(job: &Job) -> String {
     match job {
         Job::Run { issue } => format!("run #{issue}"),
@@ -538,6 +539,12 @@ fn job_text(job: &Job) -> String {
             check_run: Some(run),
         } => format!("fix #{pr} (check run {run})"),
         Job::RmMerged {} => "rm-merged".to_owned(),
+        // The loop's own label (`job spec <file>`, `job template <profile> --harness codex
+        // --warm`) less its `job ` prefix.
+        Job::Spec { .. } | Job::Template { .. } => {
+            let label = job.label();
+            label.strip_prefix("job ").unwrap_or(&label).to_owned()
+        }
     }
 }
 
