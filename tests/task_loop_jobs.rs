@@ -353,7 +353,7 @@ fn the_four_shapes_parse() {
 fn every_other_shape_is_refused() {
     for text in [
         "{not json",
-        r#"{"kind": "spec", "file": "x.md"}"#,
+        r#"{"kind": "build", "file": "x.md"}"#,
         r#"{"kind":"review","pr":1,"force":true}"#,
         r#"{"kind":"review"}"#,
         r#"{"kind":"review","pr":"465"}"#,
@@ -426,7 +426,7 @@ fn a_job_outside_the_shapes_is_refused_with_a_result_file_and_runs_nothing() {
     f.opened(1, 11, REPO);
     let bad = [
         ("bad.json", "{not json"),
-        ("unknown.json", r#"{"kind":"spec","file":"x.md"}"#),
+        ("unknown.json", r#"{"kind":"build","file":"x.md"}"#),
         ("extra.json", r#"{"kind":"review","pr":11,"force":true}"#),
         ("missing.json", r#"{"kind":"review"}"#),
         ("type.json", r#"{"kind":"review","pr":"11"}"#),

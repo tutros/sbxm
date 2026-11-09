@@ -31,3 +31,21 @@ goes to `<job>-2.json`, and on. **The loop's log** (305) gets one row per job, i
 review #465`). A `run` job that stops the loop (a lapsed sign-in, the usage limit, an error) writes its result first.
 Every folder of the queue is refused before the loop's lock when it is a link, isn't really under the base dir, or
 isn't a folder.
+
+**(7) Two more kinds, `spec` and `template` (2026-11-09, the user's answers on issue #524, slice 2b of #476; uses
+[293], [301], [304], [306]).** Same file format, order, result files and interrupted-job rule as (2) to (6). **`spec`:**
+`{"kind": "spec", "file": "retro-2026-11-08.md"}`, where `file` is a plain file name in the folder of a new
+`config.toml` setting, `specs_dir` (this machine `H:\sbxm-e2e\specs`). A name with `/` or `\`, `..`, a colon (a drive
+letter), a control character, an empty name, a file that isn't a plain file there, or no `specs_dir` set is refused.
+It runs `task run --spec <specs_dir>/<file>`; a task ready with 0 must-fix and no work stop goes on as the loop's
+issues do: its should-fix round with `[loop] should_fix = "fix"` (306), `task finish --spec` through the checkout's
+`[finish] sink` (301), and auto-merge armed on 293's rules; the loop marks it as its own, so its PR counts toward the
+5 awaiting the user and gets the loop's conflict resolves and checks of the runs (298, 299) like an issue's PR. A task
+that stops short of ready, or ready with must-fix left, is not finished: outcome `stopped`, `next` naming the command
+that continues it. Unlike an issue, a spec task isn't resumed once on a failure: its `task run` failing is `failed`,
+with `next` naming its `task resume --spec`. **`template`:** `{"kind": "template", "profile": "sbxm-dev",
+"harness": "claude", "warm": true}`: `profile` an existing profile with a `[template]` table, `harness` `claude`,
+`codex` or `pi` (default `claude`), `warm` (default `false`) warming from the loop's own checkout. It runs `template
+build` and its result's `reason` names the new tag. No repo path, `--ignore-disk` or `--no-wait` can be queued: a low
+disk refuses the build as the command does (outcome `failed`), and the job waits for the sandbox slot (304). An older
+binary rejects `specs_dir` as an unknown key, so set it only once the binary is rebuilt.
