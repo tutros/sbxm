@@ -1,7 +1,9 @@
 //! `sbxm task loop [--cap N] [--issue N ...]` (issue 320, decision 245 (b) to (h)): works through
 //! the open issues labeled `ready-for-worker` one task at a time, end to end: `task run`, then
 //! `task finish` (a draft PR for a work stop), then `task file-findings --create` for a clean
-//! task. It pauses while 5 PRs await the user or the disk is low, resumes a task once after an
+//! task; with `[loop] should_fix = "fix"` a clean task with should-fix findings sized S first gets
+//! one fix round on them, `task resume --rounds 1 --should-fix` (decision 306, issue 510). It
+//! pauses while 5 PRs await the user or the disk is low, resumes a task once after an
 //! environment stop and parks it after a second, waits out a usage limit, and stops on an empty
 //! queue (with a read-only report), two parked tasks in a row, `--cap`, the usage waits' total,
 //! or a stop request between phases. One log row per task goes to the loop's own file under
@@ -732,8 +734,9 @@ impl Loop<'_> {
     ) -> std::result::Result<End, Halt> {
         let io = |e: std::io::Error| Halt::Error(e.into());
         let mut pending: Option<(String, u64)> = None;
-        // Whether this call already ran the task's should-fix round (issue 510): never twice,
-        // whatever its record says after it.
+        // Whether this call already ran the task's should-fix round (issue 510): once it ended
+        // `ready`, never again, whatever its record says. One that failed is tried again while
+        // it is still due, as any failed phase is (once, then parked).
         let mut should_fix_ran = false;
         loop {
             let Some(paused) = self.wait_for_room(out).map_err(Halt::Error)? else {
@@ -749,7 +752,7 @@ impl Loop<'_> {
                 stops.push((cause, self.now().saturating_sub(since)));
             }
             let resuming = self.record(issue).is_some();
-            let should_fix = !should_fix_ran && self.should_fix_due(issue);
+            let should_fix = self.should_fix_due(issue);
             should_fix_ran |= should_fix;
             let mut captured = Vec::new();
             let result = {

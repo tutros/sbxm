@@ -47,6 +47,8 @@ struct Script {
     after: After,
     /// The record says the task already had its should-fix round.
     had_round: bool,
+    /// How many should-fix steps fail first, refused before they write anything.
+    should_fix_fails: Cell<u32>,
     calls: RefCell<Vec<String>>,
     clock: Cell<u64>,
 }
@@ -61,6 +63,7 @@ impl Script {
                 must_fix: 0,
             },
             had_round: false,
+            should_fix_fails: Cell::new(0),
             calls: RefCell::default(),
             clock: Cell::new(START),
         }
@@ -113,6 +116,10 @@ impl Steps for Script {
 
     fn should_fix(&self, issue: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
         self.calls.borrow_mut().push(format!("should-fix {issue}"));
+        if self.should_fix_fails.get() > 0 {
+            self.should_fix_fails.set(self.should_fix_fails.get() - 1);
+            return Err(anyhow!("refused before any write"));
+        }
         let dir = self.dir(issue);
         let mut rec = record::read(&dir.join("task.json")).unwrap();
         rec.should_fix_round = true;
@@ -353,6 +360,28 @@ fn a_task_that_already_had_its_should_fix_round_never_gets_a_second() {
     assert_eq!(
         script.calls(),
         ["run 7", "finish 7", "file-findings 7 [S-1]"],
+        "{out}"
+    );
+}
+
+#[test]
+fn a_should_fix_round_refused_before_any_write_is_tried_once_more_like_any_phase() {
+    let f = fixture(Some("fix"));
+    let script = Script::new(&f.env.base_dir(), S_ONE);
+    script.should_fix_fails.set(1);
+
+    let (result, out) = run_loop(&f, &script);
+
+    result.unwrap();
+    assert_eq!(
+        script.calls(),
+        [
+            "run 7",
+            "should-fix 7",
+            "should-fix 7",
+            "finish 7",
+            "file-findings 7 []"
+        ],
         "{out}"
     );
 }
