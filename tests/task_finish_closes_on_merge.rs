@@ -12,8 +12,8 @@ use common::task_fixture::{
     worked_task,
 };
 use sbxm::commands::task_finish::{Options, Target, run};
-use sbxm::github::PrRequest;
 use sbxm::github::fake::{FakeGitHub, GhCall};
+use sbxm::github::{ListedPr, PrRequest, PrState};
 use sbxm::task::closes::leaves_open;
 use sbxm::task::pipeline::{self, Prepared};
 use sbxm::task::record::{self, Process, Stage, Status};
@@ -209,9 +209,13 @@ fn an_issue_that_stays_open_is_referred_to_and_the_output_says_so() {
         assert!(body.lines().any(|l| l == "Refs #41"), "{value}: {body}");
         assert_eq!(closing_references(&body), Vec::<String>::new(), "{body}");
         assert!(
-            out.contains("the PR leaves #41 open (Closes on merge: no)"),
+            out.contains(
+                "  the PR leaves #41 open (Closes on merge: no): its description refers to it \
+                 with Refs #41\n"
+            ),
             "{value}: {out}"
         );
+        assert!(!out.contains("left unchanged"), "{value}: {out}");
     }
 }
 
@@ -253,6 +257,43 @@ fn a_task_folder_without_its_issue_text_is_fixed_by_its_pr() {
 
     let body = created(&github).body;
     assert!(body.lines().any(|l| l == "Fixes #41"), "{body}");
+}
+
+// --- An adopted PR (issue 521) -----------------------------------------------------------------
+
+/// An adopted PR's description is neither read nor changed, so the output doesn't claim it says
+/// `Refs #41`: it says the description was left unchanged and asks the user to check it.
+#[test]
+fn an_adopted_pr_of_an_issue_that_stays_open_is_not_claimed_to_refer_to_it() {
+    let f = fixture();
+    ready(&f, &issue("**Closes on merge:** no\n\nDo it.\n"));
+    let pr = ListedPr {
+        number: 9,
+        url: "https://github.com/o/r/pull/9".into(),
+        head_ref: "issue-41".into(),
+        base_ref: "main".into(),
+        is_cross_repository: false,
+    };
+    let github = FakeGitHub::default().with_listed_pr("o/r", pr, PrState::Open);
+
+    let (result, out) = go(&f, &github);
+
+    result.unwrap();
+    assert!(out.contains("already open for it"), "{out}");
+    assert!(!out.contains("Refs #41"), "{out}");
+    assert!(!out.contains("leaves #41 open"), "{out}");
+    assert!(
+        out.contains(
+            "  the PR's description was left unchanged (an existing PR was adopted): check that \
+             it refers to #41 with Refs, not Fixes, or the merge will close it\n"
+        ),
+        "{out}"
+    );
+    let calls = github.calls();
+    assert!(
+        !calls.iter().any(|c| matches!(c, GhCall::PrCreate(..))),
+        "{calls:?}"
+    );
 }
 
 // --- The worker prompt -------------------------------------------------------------------------

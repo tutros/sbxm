@@ -169,7 +169,8 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
     (at the start of a line, outside a code fence, the value in any case) makes `task finish` write `Refs #N`
     instead of `Fixes #N` and say "the PR leaves #N open (Closes on merge: no)"; the worker is told to write
     `Refs #N`, not a closing keyword, in its commits. Use it for a fix whose issue closes only later (a flake
-    watched for two weeks, say).
+    watched for two weeks, say). An existing PR that `task finish` adopts keeps its description as it is: the output
+    says so and asks you to check that it refers to #N with `Refs`, not `Fixes` (issue 521).
   - **The issue gets a summary of the in-task rounds (issue 430):** `task finish` posts one comment on the issue
     (on each issue of a spec task's `Fixes:` line under `sink = "pr"`): the review rounds with their must-fix counts,
     `Repeat of:` counts and finding ids and titles (inert code spans, never review text), the fix rounds and whether
