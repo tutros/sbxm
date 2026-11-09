@@ -31,14 +31,21 @@ pub fn resume(record: &Record) -> String {
 }
 
 /// The next step of a task its review left `ready`, with `flag` naming it (the real spec path
-/// where the caller has one, else [`record_flag`]); `None` at any other stage.
+/// where the caller has one, else [`record_flag`]); `None` at any other stage, and for a clean PR
+/// review, which leaves nothing for sbxm to run. A spec task is finished whatever its review
+/// left, as `task review --spec` says: `task file-findings` takes no `--spec`. A fix task's
+/// result is pushed by `task resume --pr N` (issue 485).
 pub fn ready(record: &Record, flag: &str) -> Option<String> {
     if record.stage != Stage::Ready {
         return None;
     }
     let must_fix = record.review.as_ref().map_or(0, |r| r.must_fix);
-    Some(match must_fix {
-        0 => format!("sbxm task finish {flag}"),
-        _ => format!("fix them by hand, or file them: sbxm task file-findings {flag}"),
-    })
+    match (record.kind, must_fix) {
+        (Kind::Fix, _) => Some(resume(record)),
+        (Kind::Pr, 0) => None,
+        (Kind::Spec, _) | (Kind::Issue, 0) => Some(format!("sbxm task finish {flag}")),
+        (Kind::Issue | Kind::Pr, _) => Some(format!(
+            "fix them by hand, or file them: sbxm task file-findings {flag}"
+        )),
+    }
 }
