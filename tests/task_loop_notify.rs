@@ -40,6 +40,8 @@ struct Script {
     must_fix: u32,
     /// A "Needs a decision" the worker's `result.md` hands back.
     question: Option<&'static str>,
+    /// A question finding the reviewer's `review.md` asks, as `### Q-1 - <it>`.
+    review_question: Option<&'static str>,
     /// `task run` fails on a missing secret.
     no_secret: bool,
     clock: Cell<u64>,
@@ -52,6 +54,7 @@ impl Script {
             risk,
             must_fix: 0,
             question: None,
+            review_question: None,
             no_secret: false,
             clock: Cell::new(START),
         }
@@ -97,6 +100,17 @@ impl Steps for Script {
                 dir.join("result.md"),
                 format!(
                     "# Result\n\n## Choices made\n\nnone\n\n## Needs a decision\n\n{question}\n"
+                ),
+            )
+            .unwrap();
+        }
+        if let Some(question) = self.review_question {
+            fs::write(
+                dir.join("review.md"),
+                format!(
+                    "Must-fix findings: 0\n\nRisk: low\n\n## Questions\n\n### Q-1 - {question}\n\n\
+                     **Where:** `src/a.rs:1`\n**What happens:** it isn't said\n**Why it matters:** \
+                     decision 1\n**Recommendation:** keep it\n"
                 ),
             )
             .unwrap();
@@ -671,4 +685,84 @@ fn the_loop_without_a_notifier_writes_no_notified_file() {
     .unwrap();
 
     assert!(!shown_path(&f.base()).exists());
+}
+
+// --- review of issue 530: a later fix's risk, and the reviewer's questions ---
+
+/// A finished loop task `issue-3` reviewed low at [`HEAD`] into PR #103, and the resolve task of
+/// PR #103 started at [`HEAD`] whose review covered [`PUSHED`] at `risk`.
+fn low_task_with_a_fix(f: &Fixture, risk: Level) {
+    let script = Script::new(&f.base(), Level::Low);
+    script.run(3, &mut Vec::new(), &mut Vec::new()).unwrap();
+    script.finish(3, &mut Vec::new(), &mut Vec::new()).unwrap();
+    let dir = record::task_dir(&f.base(), "issue-3");
+    let mut rec = record::read(&dir.join("task.json")).unwrap();
+    rec.hooks = serde_json::json!({ task_loop::LOOP_HOOK: true });
+    record::write(&dir, &rec).unwrap();
+    let id = record::fix_id(103, HEAD).unwrap();
+    let mut fix = Record::new(
+        &NewTask {
+            kind: Kind::Fix,
+            number: 103,
+            repo: REPO,
+            title: "Fix 3",
+            base: "main",
+            branch: "b103",
+            config_hash: "h",
+            id: Some(&id),
+        },
+        START,
+        Process::new(1, 0),
+    );
+    fix.stage = Stage::Finished;
+    fix.status = Status::Ok;
+    fix.review = Some(ReviewResult {
+        round: 1,
+        commit: Some(PUSHED.to_owned()),
+        must_fix: 0,
+        risk,
+        ..ReviewResult::default()
+    });
+    record::write(&record::task_dir(&f.base(), &id), &fix).unwrap();
+}
+
+#[test]
+fn a_low_risk_pr_left_unarmed_by_a_medium_risk_fix_notifies_once_for_its_new_head() {
+    let f = fixture();
+    low_task_with_a_fix(&f, Level::Medium);
+    let script = Script::new(&f.base(), Level::Low);
+    let gh = github(&[], HEAD).with_pr(pr(103, PUSHED));
+    let notifier = FakeNotifier::default();
+
+    run_loop(&f, &f.opts(), &script, &gh, &notifier)
+        .result
+        .unwrap();
+
+    let shown = notifier.shown();
+    assert_eq!(titles(&shown), ["PR #103 awaits your merge (medium)"]);
+    assert_eq!(shown[0].key, format!("pr:103:{PUSHED}"));
+    assert_eq!(shown[0].click, "https://github.com/o/r/pull/103");
+
+    // Restarted at the same head: not again.
+    let again = FakeNotifier::default();
+    let gh = github(&[], HEAD).with_pr(pr(103, PUSHED));
+    run_loop(&f, &f.opts(), &script, &gh, &again)
+        .result
+        .unwrap();
+    assert!(again.shown().is_empty(), "{:?}", again.shown());
+}
+
+#[test]
+fn a_low_risk_fix_of_a_low_risk_pr_stays_quiet() {
+    let f = fixture();
+    low_task_with_a_fix(&f, Level::Low);
+    let script = Script::new(&f.base(), Level::Low);
+    let gh = github(&[], HEAD).with_pr(pr(103, PUSHED));
+    let notifier = FakeNotifier::default();
+
+    run_loop(&f, &f.opts(), &script, &gh, &notifier)
+        .result
+        .unwrap();
+
+    assert!(notifier.shown().is_empty(), "{:?}", notifier.shown());
 }

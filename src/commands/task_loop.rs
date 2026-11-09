@@ -668,9 +668,26 @@ impl Loop<'_> {
             if !queue::awaits_user(state) {
                 continue;
             }
-            let Some(rec) = self.record_of(&pr.task) else {
+            let Some(own) = self.record_of(&pr.task) else {
                 continue;
             };
+            let head = match self.github.pr(&self.repo, number) {
+                Ok(info) => info.head_oid,
+                Err(e) => {
+                    self.warn_once(
+                        warn,
+                        format!(
+                            "{pr_named}'s head can't be read ({e:#}); its notification waits for \
+                             the next step",
+                            pr_named = self.pr_named(number)
+                        ),
+                    )?;
+                    continue;
+                }
+            };
+            // The PR's state is that of the task whose review covered its head (review M-1 of
+            // issue 530): a resolve or log-fix pushed onto it, else the task that opened it.
+            let rec = self.fix_covering(number, &head).unwrap_or(own);
             let Some(review) = rec.review.as_ref() else {
                 continue;
             };
@@ -690,20 +707,6 @@ impl Loop<'_> {
                         format!("risk {word} after the path rules, so the loop doesn't arm it");
                     (word, reason, "review it, then merge or close it".to_owned())
                 };
-            let head = match self.github.pr(&self.repo, number) {
-                Ok(info) => info.head_oid,
-                Err(e) => {
-                    self.warn_once(
-                        warn,
-                        format!(
-                            "{pr_named}'s head can't be read ({e:#}); its notification waits for \
-                             the next step",
-                            pr_named = self.pr_named(number)
-                        ),
-                    )?;
-                    continue;
-                }
-            };
             let note = Notification {
                 key: format!("pr:{number}:{head}"),
                 title: format!("PR #{number} awaits your merge ({what})"),
@@ -713,6 +716,30 @@ impl Loop<'_> {
             self.notify(note, out, warn)?;
         }
         Ok(())
+    }
+
+    /// The fix task of PR `number` (a resolve or a log-fix, `fix-<n>-<head>`) of this repo whose
+    /// review covered `head`, in a task folder that is sbxm's own.
+    fn fix_covering(&self, number: u32, head: &str) -> Option<Record> {
+        let prefix = format!("fix-{number}-");
+        record::task_folders(&self.base_dir)
+            .ok()?
+            .into_iter()
+            .filter(|dir| {
+                dir.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|id| id.starts_with(&prefix))
+                    && check_own_folder(&self.base_dir, dir).is_ok()
+            })
+            .filter_map(|dir| record::read(&dir.join("task.json")).ok())
+            .find(|rec| {
+                rec.kind == Kind::Fix
+                    && rec.repo == self.repo
+                    && rec
+                        .review
+                        .as_ref()
+                        .is_some_and(|r| r.commit.as_deref() == Some(head))
+            })
     }
 
     /// (e) of issue 530: a notification when task `id`'s worker handed a question back in its
