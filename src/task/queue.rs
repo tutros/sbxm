@@ -187,6 +187,28 @@ pub fn depends_on(body: &str) -> Vec<u32> {
     super::select::field_numbers(body, "Depends on")
 }
 
+/// Whether an issue's body still has a `## Open points` heading (issue 511): a readied issue
+/// renames it `## Answered`. Only a level-2 heading at a line's start counts, outside a fenced
+/// code block, so a body that quotes the heading in prose or in an example is not held back.
+pub fn has_open_points(body: &str) -> bool {
+    let mut fenced = false;
+    for line in body.lines() {
+        if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
+            fenced = !fenced;
+            continue;
+        }
+        if fenced {
+            continue;
+        }
+        if let Some(heading) = line.strip_prefix("## ")
+            && heading.trim().eq_ignore_ascii_case("open points")
+        {
+            return true;
+        }
+    }
+    false
+}
+
 /// Whether a failure's text is a harness's usage limit (decision 6): Claude Code's "usage limit
 /// reached" and Codex's "hit your usage limit" both carry these two words.
 pub fn is_usage_limit(text: &str) -> bool {
