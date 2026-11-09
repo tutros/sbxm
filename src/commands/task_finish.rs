@@ -242,12 +242,22 @@ fn print_opened(
     } else {
         writeln!(out, "{id}: pushed {branch} and opened {}", done.url)?;
     }
+    // An adopted PR's description is neither read nor changed (issue 521), so only a PR this
+    // finish opened is said to refer to its issue with `Refs #N`.
     for number in &done.left_open {
-        writeln!(
-            out,
-            "  the PR leaves #{number} open (Closes on merge: no): its description refers \
-             to it with Refs #{number}"
-        )?;
+        if done.adopted {
+            writeln!(
+                out,
+                "  the PR's description was left unchanged (an existing PR was adopted): check \
+                 that it refers to #{number} with Refs, not Fixes, or the merge will close it"
+            )?;
+        } else {
+            writeln!(
+                out,
+                "  the PR leaves #{number} open (Closes on merge: no): its description refers \
+                 to it with Refs #{number}"
+            )?;
+        }
     }
     if let (Some(commit), Some(pr)) = (&done.review_posted, finish::pr_number(&done.url)) {
         writeln!(

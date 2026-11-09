@@ -1668,7 +1668,9 @@ pub struct Finished {
     /// `warnings`).
     pub summarized: Vec<u32>,
     /// The issues the PR's description refers to with `Refs #N` and leaves open, as their body's
-    /// `**Closes on merge:** no` asks (issue 506); empty for a PR that fixes its issue.
+    /// `**Closes on merge:** no` asks (issue 506); empty for a PR that fixes its issue. For an
+    /// `adopted` PR they are only the issues meant to stay open: its description wasn't read or
+    /// changed (issue 521).
     pub left_open: Vec<u32>,
 }
 
