@@ -15,6 +15,7 @@ use super::findings::{self, Finding};
 use super::finish;
 use super::lifetime;
 use super::machine::{self, Event};
+use super::next;
 use super::pipeline::{self, Prepared, ReviewReport, TaskEnv, Worked};
 use super::pr_fix;
 use super::record::{self, Kind, Process, ProcessProbe, Record, Stage, Status, Stopped};
@@ -330,19 +331,8 @@ fn recovery(task: &Record) -> String {
             "once you have removed it or decided to keep it, run `sbxm task resume {} \
              --forget-ambiguous`, which drops it from task.json and touches nothing in the \
              cloud",
-            target_flag(task)
+            next::record_flag(task)
         ),
-    }
-}
-
-/// The flag that names a task on the command line again: a spec task's file isn't recorded, so
-/// it is named by its placeholder.
-fn target_flag(task: &Record) -> String {
-    match task.kind {
-        Kind::Spec => "--spec <file>".to_owned(),
-        // The fix task of the PR's current head (issue 485).
-        Kind::Fix => format!("--pr {}", task.number),
-        _ => format!("--issue {}", task.number),
     }
 }
 
@@ -356,7 +346,7 @@ pub fn rounds_cap(task: &Record, n: u32) -> Option<u32> {
 /// `--rounds N` adds rounds from any stop, and without it a repeat stop needs rounds left in the
 /// budget (decision 177(q)).
 fn check_stopped(task: &Record, rounds: Option<u32>) -> Result<()> {
-    let (id, flag) = (&task.id, target_flag(task));
+    let (id, flag) = (&task.id, next::record_flag(task));
     let Some(stopped) = task.stopped else {
         // Its push onto the PR's branch is what is left: `task resume --pr` makes it (issue 485).
         if task.kind == Kind::Fix {
