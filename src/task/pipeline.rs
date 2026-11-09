@@ -15,6 +15,7 @@ use super::gates::{self, GateOutcome, HostRunner};
 use super::lifetime;
 use super::lock::ProcessLock;
 use super::machine;
+use super::next;
 use super::pr_fix::{self, ReviewToFix};
 use super::prompts::{self, Role};
 use super::record::{
@@ -702,17 +703,10 @@ pub fn harness_sign_in_lapsed(
     )
 }
 
-/// How a stopped task goes on, by its kind (issue 445 review M-1): `task resume` continues an
-/// issue or spec task; a PR task has no resume and goes on with `task review --pr N` (decision
-/// 282(a)); a fix task of PR N goes on with `task resume --pr N` (issue 485; issue 502), which
-/// refuses with its own way on if the PR moved since.
+/// How a stopped task goes on, by its kind (issue 445 review M-1; issue 512): the command
+/// [`next::resume`] gives.
 fn goes_on(record: &Record) -> String {
-    match record.kind {
-        Kind::Issue => format!("continue with `sbxm task resume --issue {}`", record.number),
-        Kind::Spec => "continue with `sbxm task resume --spec <file>`".to_owned(),
-        Kind::Pr => format!("continue with `sbxm task review --pr {}`", record.number),
-        Kind::Fix => format!("continue with `sbxm task resume --pr {}`", record.number),
-    }
+    format!("continue with `{}`", next::resume(record))
 }
 
 /// Issue 445: a worker, fix round or reviewer run failed with a harness's lapsed sign-in. The
@@ -2040,18 +2034,6 @@ fn remove_with_retries(dir: &Path) -> std::io::Result<()> {
     last
 }
 
-/// The flag that names a task again on the command line, for a one-line recovery hint: a spec
-/// task has no path recorded, so it gets a placeholder (as `task resume`'s own flag does).
-fn task_flag(record: &Record) -> String {
-    match record.kind {
-        Kind::Pr => format!("--pr {}", record.number),
-        Kind::Spec => "--spec <file>".to_owned(),
-        Kind::Issue => format!("--issue {}", record.number),
-        // `--pr N` names the PR's fix task of its current head (issue 485).
-        Kind::Fix => format!("--pr {}", record.number),
-    }
-}
-
 /// The profile the task's worker sandbox was built with, else the config's (a record from before
 /// issue 118 saved none): only for naming a template to rebuild.
 fn recorded_profile(env: &TaskEnv, record: &Record) -> String {
@@ -2071,7 +2053,7 @@ fn worker_profile<'a>(record: &'a Record, worker: &'a Agent) -> Result<&'a str> 
             "task {}'s record has no saved sandbox profile (it predates issue 118's resume fix); \
              remove it and start it again: `sbxm task rm {}`",
             record.id,
-            task_flag(record)
+            next::record_flag(record)
         )
     })
 }
@@ -2091,7 +2073,7 @@ fn worker_resources(record: &Record, worker: &Agent) -> Result<Resources> {
             "task {}'s record has no saved sandbox resources (it predates issue 118's resume \
              fix); remove it and start it again: `sbxm task rm {}`",
             record.id,
-            task_flag(record)
+            next::record_flag(record)
         )),
     }
 }
@@ -2102,7 +2084,7 @@ fn worker_resources(record: &Record, worker: &Agent) -> Result<Resources> {
 fn restart_hint(record: &Record) -> String {
     match record.kind {
         Kind::Issue => format!("sbxm task start --restart --issue {}", record.number),
-        _ => format!("sbxm task rm {}", task_flag(record)),
+        _ => format!("sbxm task rm {}", next::record_flag(record)),
     }
 }
 
@@ -3317,7 +3299,7 @@ pub fn check_can_review(task: &Record, probe: &dyn ProcessProbe) -> Result<()> {
         _ => format!("sbxm task status --issue {}", task.number),
     };
     // What continues a failed or interrupted stage (issue 118).
-    let resume = resume_command(task);
+    let resume = next::resume(task);
     let state = machine::State {
         stage: task.stage,
         status: task.status,
@@ -4827,7 +4809,7 @@ fn with_resume_hint(task: &Record, err: anyhow::Error) -> anyhow::Error {
     {
         return err;
     }
-    anyhow::anyhow!("{text}; then run `{}`", resume_command(task))
+    anyhow::anyhow!("{text}; then run `{}`", next::resume(task))
 }
 
 /// The reviewer's clone as its sandbox sees it: the recorded path in a cloud sandbox, else the
@@ -4836,15 +4818,6 @@ fn reviewer_clone(prepared: &Prepared, clone: &Path) -> PathBuf {
     match (prepared.record.location, &prepared.record.reviewer) {
         (Location::Cloud, Some(reviewer)) => PathBuf::from(&reviewer.workspace),
         _ => in_sandbox_path(clone),
-    }
-}
-
-/// The command that continues a task's failed or interrupted stage (issue 118).
-fn resume_command(task: &Record) -> String {
-    match task.kind {
-        Kind::Spec => "sbxm task resume --spec <file>".to_owned(),
-        Kind::Fix => format!("sbxm task resume {}", task_flag(task)),
-        _ => format!("sbxm task resume --issue {}", task.number),
     }
 }
 

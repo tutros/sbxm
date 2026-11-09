@@ -22,6 +22,7 @@ use crate::task::config::{Sink, TaskConfig};
 use crate::task::finish;
 use crate::task::fixes;
 use crate::task::gates::HostRunner;
+use crate::task::next;
 use crate::task::pipeline;
 use crate::task::record::{self, ProcessProbe};
 use crate::task::repo::Identity;
@@ -793,11 +794,10 @@ impl ListOptions {
 /// The command's next step for a task at `record`'s stage, as the summary line names it: the
 /// same wording `task review` itself prints when a task reaches `ready` (decision 193).
 fn next_command(record: &record::Record, flag: &str) -> String {
+    if let Some(ready) = next::ready(record, flag) {
+        return ready;
+    }
     match record.stage {
-        record::Stage::Ready => match record.review.as_ref().map_or(0, |r| r.must_fix) {
-            0 => format!("sbxm task finish {flag}"),
-            _ => format!("fix them by hand, or file them: sbxm task file-findings {flag}"),
-        },
         record::Stage::Finished => "already finished".to_owned(),
         _ => "see `sbxm task status` and the task's folder for what it left".to_owned(),
     }
