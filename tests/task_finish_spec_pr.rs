@@ -546,6 +546,20 @@ fn one_number_gives_one_fixes_line() {
     assert_eq!(fixes_lines(&created(&github).body), ["Fixes #435"]);
 }
 
+// Issue 506: `**Closes on merge:** no` is an issue body's line; a spec's PR is unchanged by it.
+#[test]
+fn a_spec_with_a_closes_on_merge_no_line_still_fixes_its_numbers() {
+    let f = fixture();
+    let (spec, _) = ready_with_spec(&f, "**Closes on merge:** no\n\nFixes: #435\n");
+    let github = FakeGitHub::default();
+    let (result, out) = finish(&f, &spec, &github);
+    result.unwrap();
+    let body = created(&github).body;
+    assert_eq!(fixes_lines(&body), ["Fixes #435"]);
+    assert!(!body.contains("Refs #"), "{body}");
+    assert!(!out.contains("leaves #"), "{out}");
+}
+
 #[test]
 fn no_fixes_line_opens_a_pr_that_says_it_closes_no_issue() {
     let f = fixture();

@@ -92,6 +92,7 @@ fn every_documented_name_is_known() {
         "gates_host",
         "review_path",
         "previous_review_path",
+        "closing_line",
     ];
     for name in all {
         let template = format!("{{{{{name}}}}}");
@@ -113,6 +114,10 @@ fn values() -> Vec<(&'static str, &'static str)> {
         ("pr_context", ""),
         ("branch_context", "which started from main."),
         ("gates_sandbox", "- `cargo test`"),
+        (
+            "closing_line",
+            "The last commit message must contain \"Fixes #41\".",
+        ),
     ]
 }
 

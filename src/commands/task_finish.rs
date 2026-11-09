@@ -242,6 +242,13 @@ fn print_opened(
     } else {
         writeln!(out, "{id}: pushed {branch} and opened {}", done.url)?;
     }
+    for number in &done.left_open {
+        writeln!(
+            out,
+            "  the PR leaves #{number} open (Closes on merge: no): its description refers \
+             to it with Refs #{number}"
+        )?;
+    }
     if let (Some(commit), Some(pr)) = (&done.review_posted, finish::pr_number(&done.url)) {
         writeln!(
             out,
