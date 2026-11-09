@@ -122,7 +122,21 @@ fn finish_task(
     std::process::exit(if failed { 1 } else { 0 });
 }
 
+/// The stack the CLI runs on. clap's derive builds every argument of `sbxm task` in one stack
+/// frame, which in a debug build outgrew the 1 MiB main-thread stack Windows gives (PR 515), so
+/// the CLI runs on a thread of its own with a stack that doesn't depend on the platform.
+const CLI_STACK_SIZE: usize = 8 * 1024 * 1024;
+
 fn main() -> anyhow::Result<()> {
+    let cli = std::thread::Builder::new()
+        .name("main".into())
+        .stack_size(CLI_STACK_SIZE)
+        .spawn(run)?;
+    // A panic has already printed its message on the thread; exit as a panicking main would.
+    cli.join().unwrap_or_else(|_| std::process::exit(101))
+}
+
+fn run() -> anyhow::Result<()> {
     sbxm::backend::set_trailer_sink(|note| eprintln!("warning: {note}"));
     // `Cli::parse()` sugars over this, but `task run`'s list needs the raw matches too: clap's
     // derive API has no field that carries the relative order of two different repeated flags
