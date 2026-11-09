@@ -106,7 +106,7 @@ pub fn check(
 /// points, then the loop's own checks in its order (an unmerged dependency, else what `task run`
 /// would refuse before any write), then a branch of the task's name already on origin, which
 /// `task finish` would refuse to push over.
-pub(super) fn reasons(
+pub(crate) fn reasons(
     config_dir: &Path,
     repo: &str,
     github: &dyn GitHubBackend,

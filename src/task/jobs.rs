@@ -56,7 +56,7 @@ pub enum Job {
 }
 
 /// The harnesses a template can be built for (`template build`'s own refusal of the others).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum JobHarness {
     #[default]
@@ -103,6 +103,53 @@ impl Job {
                 let warm = if *warm { " --warm" } else { "" };
                 format!("job template {profile}{harness}{warm}")
             }
+        }
+    }
+}
+
+impl Job {
+    /// The job's kind and target in a queued file's name (issue 529): `run-524`, `review-465`,
+    /// `fix-465`, `rm-merged`, `spec-<file stem>`, `template-<profile>-<harness>`.
+    pub fn file_part(&self) -> String {
+        match self {
+            Self::Review { pr } => format!("review-{pr}"),
+            Self::Fix { pr, .. } => format!("fix-{pr}"),
+            Self::Run { issue } => format!("run-{issue}"),
+            Self::RmMerged {} => "rm-merged".to_owned(),
+            Self::Spec { file } => {
+                let stem = Path::new(file)
+                    .file_stem()
+                    .map_or_else(|| file.clone(), |s| s.to_string_lossy().into_owned());
+                format!("spec-{stem}")
+            }
+            Self::Template {
+                profile, harness, ..
+            } => format!("template-{profile}-{}", harness.harness().as_str()),
+        }
+    }
+
+    /// Whether `other` is a job of the same kind and target (issue 529, answer 2): a fix's check
+    /// run and a template's `warm` are not part of the target, and two `rm-merged` are the same.
+    pub fn same_target(&self, other: &Job) -> bool {
+        match (self, other) {
+            (Self::Review { pr: a }, Self::Review { pr: b })
+            | (Self::Fix { pr: a, .. }, Self::Fix { pr: b, .. })
+            | (Self::Run { issue: a }, Self::Run { issue: b }) => a == b,
+            (Self::RmMerged {}, Self::RmMerged {}) => true,
+            (Self::Spec { file: a }, Self::Spec { file: b }) => a == b,
+            (
+                Self::Template {
+                    profile: a,
+                    harness: ha,
+                    ..
+                },
+                Self::Template {
+                    profile: b,
+                    harness: hb,
+                    ..
+                },
+            ) => a == b && ha == hb,
+            _ => false,
         }
     }
 }

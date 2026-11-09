@@ -51,6 +51,7 @@ use crate::task::{findings, finish, lock, loop_log, pipeline, pr_fix, resume};
 mod check;
 mod jobs;
 pub use check::check;
+pub(crate) use check::reasons;
 
 /// How many open PRs the loop opened may await the user before it pauses (decision 245(e)).
 pub const PR_CAP: usize = 5;

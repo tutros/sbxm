@@ -623,6 +623,14 @@ pub enum TaskCommand {
         #[arg(long, conflicts_with_all = ["cap", "clear_pause"])]
         check: bool,
     },
+    /// Add one job to the loop's queue (<base_dir>/.sbxm/queue/, decision 309) after the checks
+    /// the loop makes when it takes it: refused at once with the reason, writing nothing, when the
+    /// loop would refuse it or the same job already waits or runs. Prints the file it wrote. To
+    /// list the queue use `sbxm status`; to remove a job delete its file.
+    Queue {
+        #[command(subcommand)]
+        job: QueueCommand,
+    },
     /// Print a task's run.log (decision 170, part 1). Read-only: never writes to the log itself.
     #[command(group(clap::ArgGroup::new("logs_target").required(true).args(["issue", "pr", "spec"])))]
     Logs {
@@ -668,6 +676,72 @@ pub enum TaskCommand {
         #[arg(long)]
         repo: Option<String>,
     },
+}
+
+/// The jobs `task queue` adds, one per kind the loop runs (issue 529).
+#[derive(Debug, Subcommand)]
+pub enum QueueCommand {
+    /// `task run --issue N`, then its finish, as the loop runs an issue it picked (only an issue
+    /// `task loop --check` would take).
+    Run {
+        #[arg(long, value_name = "N")]
+        issue: u32,
+    },
+    /// `task review --pr N` of a PR a task of this repo opened, still open.
+    Review {
+        #[arg(long, value_name = "N")]
+        pr: u32,
+    },
+    /// `task fix --pr N [--check-run ID]` of a PR a task of this repo opened, still open.
+    Fix {
+        #[arg(long, value_name = "N")]
+        pr: u32,
+        #[arg(long, value_name = "ID")]
+        check_run: Option<u64>,
+    },
+    /// `task rm --merged --yes`.
+    RmMerged,
+    /// `task run --spec <specs_dir>/<NAME>`, then its finish; NAME is a plain file name in
+    /// specs_dir.
+    Spec {
+        #[arg(long, value_name = "NAME")]
+        file: String,
+    },
+    /// `template build <profile> --harness <h>` of a profile with a [template] table; with --warm
+    /// warmed from the loop's checkout.
+    Template {
+        /// The profile, in profiles_dir.
+        profile: String,
+        /// The harness to build it for.
+        #[arg(long, value_enum, default_value_t)]
+        harness: crate::task::jobs::JobHarness,
+        /// Warm it from the loop's checkout (template build --warm).
+        #[arg(long)]
+        warm: bool,
+    },
+}
+
+impl QueueCommand {
+    /// The job this command queues.
+    pub fn job(self) -> crate::task::jobs::Job {
+        use crate::task::jobs::Job;
+        match self {
+            Self::Run { issue } => Job::Run { issue },
+            Self::Review { pr } => Job::Review { pr },
+            Self::Fix { pr, check_run } => Job::Fix { pr, check_run },
+            Self::RmMerged => Job::RmMerged {},
+            Self::Spec { file } => Job::Spec { file },
+            Self::Template {
+                profile,
+                harness,
+                warm,
+            } => Job::Template {
+                profile,
+                harness,
+                warm,
+            },
+        }
+    }
 }
 
 /// One target of `task run`'s list (decision 193): an issue or a spec file.
