@@ -579,6 +579,7 @@ fn the_loop_section_titles_its_task_and_the_prs_awaiting_but_not_one_whose_recor
             issue_titles: Default::default(),
         }),
         pause: sbxm::task::loop_pause::State::None,
+        jobs: Default::default(),
     };
 
     let text = looping::render(&view, None);

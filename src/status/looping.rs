@@ -2,17 +2,19 @@
 //! task it is on and its stage, the tasks it finished, the PRs awaiting the user (the loop's cap
 //! of 5, counted by the same [`queue::awaits_user`] the loop pauses on) and the queue of labeled
 //! issues in the order the loop takes them (for a loop started with `--issue`, its list from the
-//! lock instead, as [`Listed`], issue 477), and the pause on a red `main` (issue 442). State
-//! comes from the loop's lock, its pause file and the task records alone, with no write; only the queue and the PR count need GitHub, one
+//! lock instead, as [`Listed`], issue 477), the pause on a red `main` (issue 442) and the
+//! loop's job files, queued and running ([`Jobs`], issue 528). State
+//! comes from the loop's lock, its pause file, its job files and the task records alone, with no write; only the queue and the PR count need GitHub, one
 //! fetch at most once a minute ([`Cache`]), made only while a loop runs.
 
 use std::fs;
 use std::path::Path;
 
 use crate::github::GitHubBackend;
-use crate::run::results::parse_timestamp;
+use crate::run::results::{format_timestamp, parse_timestamp};
 use crate::status::tasks::truncate;
 use crate::task::finish::check_own_folder;
+use crate::task::jobs::{self, Job, Running};
 use crate::task::loop_pause;
 use crate::task::merged;
 use crate::task::queue::{self, LOOP_HOOK, LockFile, Outcome, Progress};
@@ -499,6 +501,137 @@ pub struct View {
     pub snapshot: Option<Snapshot>,
     /// The pause on a red `main` (issue 442), whether or not a loop runs.
     pub pause: loop_pause::State,
+    /// The job files in the queue folder (issue 528), whether or not a loop runs.
+    pub jobs: Jobs,
+}
+
+/// What the loop's job queue holds (issue 528, decision 309), read from its files alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Jobs {
+    /// Each queued job's text, in the order the loop takes them ([`jobs::pending`]), or why the
+    /// folder can't be read.
+    pub queued: Result<Vec<String>, String>,
+    /// Each job in `queue/running/`: its text and its file's modified time.
+    pub running: Vec<(String, u64)>,
+}
+
+impl Default for Jobs {
+    fn default() -> Self {
+        Self {
+            queued: Ok(Vec::new()),
+            running: Vec::new(),
+        }
+    }
+}
+
+/// A job's kind and target: `run #524`, `fix #465 (check run 42452742075)`, `rm-merged`,
+/// `spec <file>`, `template <profile>`.
+fn job_text(job: &Job) -> String {
+    match job {
+        Job::Run { issue } => format!("run #{issue}"),
+        Job::Review { pr } => format!("review #{pr}"),
+        Job::Fix {
+            pr,
+            check_run: None,
+        } => format!("fix #{pr}"),
+        Job::Fix {
+            pr,
+            check_run: Some(run),
+        } => format!("fix #{pr} (check run {run})"),
+        Job::RmMerged {} => "rm-merged".to_owned(),
+        // The loop's own label (`job spec <file>`, `job template <profile> --harness codex
+        // --warm`) less its `job ` prefix.
+        Job::Spec { .. } | Job::Template { .. } => {
+            let label = job.label();
+            label.strip_prefix("job ").unwrap_or(&label).to_owned()
+        }
+    }
+}
+
+fn file_name(path: &Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
+}
+
+fn modified_secs(path: &Path) -> u64 {
+    fs::symlink_metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(std::time::SystemTime::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs())
+}
+
+/// Reads `<base>/.sbxm/queue/` and its `running/` folder (issue 528); writes nothing. A queued
+/// file that isn't a job is named as one the loop will refuse.
+pub fn read_jobs(base: &Path) -> Jobs {
+    let queued = jobs::check_queue(base)
+        .and_then(|()| jobs::pending(base))
+        .map_err(|e| first_line(&e))
+        .map(|paths| {
+            paths
+                .iter()
+                .map(|path| {
+                    // Read as the loop reads it, so it says what the loop will do.
+                    match fs::read(path)
+                        .map_err(|e| e.to_string())
+                        .and_then(|bytes| jobs::parse(&String::from_utf8_lossy(&bytes)))
+                    {
+                        Ok(job) => job_text(&job),
+                        Err(_) => format!("{} (not a job: will be refused)", file_name(path)),
+                    }
+                })
+                .collect()
+        });
+    let running = match &queued {
+        Err(_) => Vec::new(),
+        Ok(_) => jobs::left_running(base)
+            .unwrap_or_default()
+            .iter()
+            .map(|path| {
+                let text = fs::read(path)
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                    .unwrap_or_default();
+                let job = Running::read(&text)
+                    .read
+                    .job
+                    .and_then(|v| serde_json::from_value::<Job>(v).ok());
+                let shown = job.map_or_else(|| file_name(path), |job| job_text(&job));
+                (shown, modified_secs(path))
+            })
+            .collect(),
+    };
+    Jobs { queued, running }
+}
+
+/// The `job:` lines of the jobs in `running/` and the `jobs:` line of the queued ones, at most
+/// [`MAX_QUEUE_LINES`] on a terminal (issue 528).
+fn job_lines(jobs: &Jobs, loop_runs: bool, width: Option<usize>, lines: &mut Vec<String>) {
+    for (job, since) in &jobs.running {
+        lines.push(if loop_runs {
+            format!("  job: {job} (since {})", format_timestamp(*since))
+        } else {
+            format!("  job: {job} (interrupted: the next loop reports it)")
+        });
+    }
+    match &jobs.queued {
+        Err(why) => lines.push(format!("  jobs: unreadable ({why})")),
+        Ok(queued) if queued.is_empty() => lines.push("  jobs: none".to_owned()),
+        Ok(queued) => {
+            lines.push(format!("  jobs: {}", plural(queued.len(), "job")));
+            let shown = if width.is_some() {
+                queued.len().min(MAX_QUEUE_LINES)
+            } else {
+                queued.len()
+            };
+            for job in &queued[..shown] {
+                lines.push(format!("    {job}"));
+            }
+            if shown < queued.len() {
+                lines.push(format!("    … {} more", queued.len() - shown));
+            }
+        }
+    }
 }
 
 fn process(p: &Process) -> String {
@@ -568,9 +701,13 @@ pub fn render(view: &View, width: Option<usize>) -> String {
             let done: Vec<String> = work.done.iter().map(|id| named(id)).collect();
             format!("  done: {} ({})", work.done.len(), done.join(", "))
         });
+        job_lines(&view.jobs, true, width, &mut lines);
         if let Some(listed) = &work.listed {
             list_lines(listed, view.snapshot.as_ref(), width, &mut lines);
         }
+    } else {
+        let loop_runs = matches!(view.lock, Lock::Running(_));
+        job_lines(&view.jobs, loop_runs, width, &mut lines);
     }
     if let Some(snapshot) = &view.snapshot {
         lines.push(match &snapshot.awaiting {

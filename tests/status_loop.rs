@@ -287,7 +287,7 @@ fn a_running_loop_shows_its_task_its_stage_the_tasks_done_and_the_prs_awaiting()
         format!("Loop:{section}"),
         format!(
             "Loop: running (process 1, started {})\n  task: issue-7 (title 7) at reviewing\n  done: 2 \
-             (issue-2 (title 2), issue-3 (title 3))\n  awaiting you: 1 of 5 PRs (#102: title 2)\n  \
+             (issue-2 (title 2), issue-3 (title 3))\n  jobs: none\n  awaiting you: 1 of 5 PRs (#102: title 2)\n  \
              queue: empty\n",
             format_timestamp(LOOP_START)
         )
@@ -796,6 +796,7 @@ fn render_is_pure_over_its_view() {
             issue_titles: Default::default(),
         }),
         pause: sbxm::task::loop_pause::State::None,
+        jobs: Default::default(),
     };
 
     let text = looping::render(&view, None);
