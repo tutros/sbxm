@@ -54,6 +54,9 @@ pub use check::check;
 /// How many open PRs the loop opened may await the user before it pauses (decision 245(e)).
 pub const PR_CAP: usize = 5;
 pub use queue::LOOP_HOOK;
+/// The key in a task record's `hooks` marking a task the loop resumed after a loop died while
+/// running it (decision 310): one cut off again is parked, never resumed a second time.
+pub const RESUMED_HOOK: &str = "task_loop_resumed";
 /// How often a pause looks again.
 pub const PAUSE_POLL: Duration = Duration::from_secs(5 * 60);
 /// How often a task's first phase is looked at for its record, to take its label off.
@@ -194,12 +197,14 @@ impl Drop for LoopLock {
 /// lock whose process is alive refuses the second loop; one whose process is gone is taken over.
 /// A loop started with `--issue` writes its list and its `--cap` into the lock too, for `sbxm
 /// status` (issue 477); a labeled-queue loop writes its process alone, as before.
+/// Returns the lock and, when it took over a lock whose process is gone, that dead loop's
+/// process (decision 310: the tasks it was running are resumed).
 fn take_lock(
     base_dir: &Path,
     opts: &Options,
     probe: &dyn ProcessProbe,
     warn: &mut dyn Write,
-) -> Result<LoopLock> {
+) -> Result<(LoopLock, Option<Process>)> {
     let path = queue::lock_path(base_dir);
     if let Some(dir) = path.parent() {
         fs::create_dir_all(dir).with_context(|| format!("cannot create {}", dir.display()))?;
@@ -212,6 +217,7 @@ fn take_lock(
         progress: listed.then(queue::Progress::default),
     };
     let me = serde_json::to_string(&contents)?;
+    let mut dead = None;
     for _ in 0..3 {
         match fs::OpenOptions::new()
             .write(true)
@@ -226,7 +232,7 @@ fn take_lock(
                 };
                 file.write_all(me.as_bytes())
                     .with_context(|| format!("cannot write {}", lock.path.display()))?;
-                return Ok(lock);
+                return Ok((lock, dead));
             }
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(e) => return Err(e).with_context(|| format!("cannot create {}", path.display())),
@@ -258,6 +264,7 @@ fn take_lock(
                 "took over the lock of a loop that is no longer running (process {}, started {})",
                 held.pid, held.started_at
             )?;
+            dead = Some(held);
         }
     }
     bail!(
@@ -875,6 +882,118 @@ impl Loop<'_> {
                 return self.stopped(issue, out).map_err(io);
             }
         }
+    }
+
+    /// The tasks the loop of process `dead`, whose lock this loop took over, was running when it
+    /// died (decision 310): this repo's issue tasks not finished, interrupted as `task status`
+    /// decides it, and recorded as worked on by that process. Each is marked as resumed
+    /// ([`RESUMED_HOOK`]) and returned to be continued once, as the loop's one resume after an
+    /// environment stop; one already marked is parked with its log row instead. A task whose lock
+    /// a live command run by hand holds is left to it.
+    fn cut_off(
+        &mut self,
+        dead: Option<&Process>,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<VecDeque<Held>> {
+        let mut due = VecDeque::new();
+        let Some(dead) = dead else {
+            return Ok(due);
+        };
+        let mut found = Vec::new();
+        for dir in record::task_folders(&self.base_dir)? {
+            if check_own_folder(&self.base_dir, &dir).is_err() {
+                continue;
+            }
+            let Ok(rec) = record::read(&dir.join("task.json")) else {
+                continue;
+            };
+            let ours = rec.kind == Kind::Issue
+                && rec.repo == self.repo
+                && rec.id == format!("issue-{}", rec.number)
+                && rec.process.as_ref() == Some(dead);
+            if ours
+                && rec.stage != Stage::Finished
+                && rec.pr.is_none()
+                && rec.is_interrupted(self.probe)
+            {
+                found.push(rec);
+            }
+        }
+        found.sort_by_key(|rec| rec.number);
+        for rec in found {
+            let issue = rec.number;
+            let named = crate::title::named(&format!("#{issue}"), &rec.title);
+            let stage = rec.stage.name();
+            if rec.hooks.get(RESUMED_HOOK) == Some(&serde_json::Value::Bool(true)) {
+                writeln!(
+                    out,
+                    "{named}: cut off at {stage} again after the loop resumed it once; parked, see \
+                     `sbxm task status --issue {issue}`"
+                )?;
+                let now = self.now();
+                self.append(
+                    &Row {
+                        issue,
+                        title: rec.title.clone(),
+                        size: None,
+                        started: now,
+                        ready: None,
+                        worker_s: None,
+                        reviewer_s: None,
+                        rounds: None,
+                        must_fix: None,
+                        outcome: format!("parked at {stage}: cut off again after its resume"),
+                        stops: Vec::new(),
+                        idle_before: None,
+                    },
+                    warn,
+                )?;
+                continue;
+            }
+            match self.mark_resumed(issue) {
+                Ok(()) => {}
+                Err(e) if e.is::<lock::InUse>() => {
+                    writeln!(
+                        out,
+                        "{named}: {}; the loop leaves it",
+                        lock::InUse::describe(
+                            e.downcast_ref::<lock::InUse>().expect("checked above")
+                        )
+                    )?;
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+            writeln!(
+                out,
+                "{named}: cut off at {stage} when the loop stopped; resuming it once"
+            )?;
+            due.push_back(Held {
+                issue,
+                title: rec.title,
+                size: None,
+                started: self.now(),
+                stops: vec![("loop stopped".to_owned(), 0)],
+                retry: Retry::Resume { failures: 1 },
+            });
+        }
+        Ok(due)
+    }
+
+    /// Marks a task as resumed by the loop after it was cut off ([`RESUMED_HOOK`]), under the
+    /// task's lock, as [`Self::claim`] marks one.
+    fn mark_resumed(&self, issue: u32) -> Result<()> {
+        let _lock = pipeline::lock_task(&self.base_dir, &format!("issue-{issue}"), self.probe)?;
+        let dir = self.task_dir(issue);
+        let mut rec = record::read(&dir.join("task.json"))?;
+        record::write_change(&dir, &mut rec, |r| {
+            if !r.hooks.is_object() {
+                r.hooks = serde_json::Value::Object(serde_json::Map::new());
+            }
+            r.hooks[RESUMED_HOOK] = serde_json::Value::Bool(true);
+        })?;
+        Ok(())
     }
 
     /// Marks a ready task as the loop's before its `task finish`, so a PR that finish opens counts
@@ -2298,7 +2417,7 @@ pub fn run(
     }
     // The job queue's folders too (issue 525): every job file is read through them.
     crate::task::jobs::check_queue(&base_dir)?;
-    let mut lock = take_lock(&base_dir, opts, probe, warn)?;
+    let (mut lock, dead) = take_lock(&base_dir, opts, probe, warn)?;
     // Under the lock, so no loop is running that a request left here could be for.
     let stop_file = stop_path(&base_dir);
     match fs::remove_file(&stop_file) {
@@ -2344,9 +2463,10 @@ pub fn run(
         logged: false,
     };
 
-    let result = lp
-        .interrupted_jobs(out, warn)
-        .and_then(|()| work(&mut lp, &mut lock, opts, out, warn));
+    let result = lp.interrupted_jobs(out, warn).and_then(|()| {
+        let due = lp.cut_off(dead.as_ref(), out, warn)?;
+        work(&mut lp, &mut lock, opts, due, out, warn)
+    });
     // Only rows this loop wrote are posted: a loop that ran no task posts nothing (decision 305).
     if lp.logged {
         let stop = match &result {
@@ -2399,10 +2519,12 @@ fn free_log(base_dir: &Path, env: &Env) -> Result<(u64, PathBuf)> {
 }
 
 /// The loop itself, from its first task to its stop; returns the stop's message.
+/// `due`: the tasks a dead loop was running, resumed first (decision 310).
 fn work(
     lp: &mut Loop,
     lock: &mut LoopLock,
     opts: &Options,
+    mut due: VecDeque<Held>,
     out: &mut dyn Write,
     warn: &mut dyn Write,
 ) -> Result<String> {
@@ -2418,7 +2540,6 @@ fn work(
     // task, then moves to `due`, tried before the next new issue. A task held again goes back to
     // `held`, so the loop never tries one twice with nothing run in between.
     let mut held: Vec<Held> = Vec::new();
-    let mut due: VecDeque<Held> = VecDeque::new();
     let left = |held: &[Held], due: &VecDeque<Held>, out: &mut dyn Write| -> Result<()> {
         for h in due.iter().chain(held) {
             writeln!(out, "{}", h.left())?;

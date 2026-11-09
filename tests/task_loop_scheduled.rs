@@ -357,8 +357,8 @@ fn the_cli_refuses_wait_with_issue() {
 
 // --- `--stop` ---
 
-/// Plants the loop lock of a loop whose process `Probe` reports alive.
-fn plant_live_loop(base: &Path) {
+/// Plants the loop lock of the loop of process 77: alive under `Probe`, gone under `GONE`.
+fn plant_loop_lock(base: &Path) {
     let path = sbxm::task::queue::lock_path(base);
     fs::create_dir_all(path.parent().unwrap()).unwrap();
     fs::write(&path, serde_json::to_string(&Process::new(77, 0)).unwrap()).unwrap();
@@ -384,9 +384,9 @@ fn stop_with_no_loop_running_says_so_and_writes_nothing() {
 #[test]
 fn stop_with_a_dead_loop_lock_says_so_and_writes_nothing() {
     let f = fixture();
-    plant_live_loop(&f.base());
+    plant_loop_lock(&f.base());
 
-    let (result, out) = stop_loop(&f, &Gone(77));
+    let (result, out) = stop_loop(&f, &Gone(&[77]));
 
     result.unwrap();
     assert!(out.contains("no `sbxm task loop` is running"), "{out}");
@@ -396,7 +396,7 @@ fn stop_with_a_dead_loop_lock_says_so_and_writes_nothing() {
 #[test]
 fn stop_with_a_loop_running_writes_the_request_next_to_its_lock() {
     let f = fixture();
-    plant_live_loop(&f.base());
+    plant_loop_lock(&f.base());
 
     let (result, out) = stop_loop(&f, &Probe);
 
@@ -468,12 +468,12 @@ fn a_stale_stop_request_is_removed_at_start_and_not_obeyed() {
     );
 }
 
-/// A probe for which process `.0` is gone and every other is alive.
-struct Gone(u32);
+/// A probe for which the processes in `.0` are gone and every other is alive.
+struct Gone(&'static [u32]);
 
 impl record::ProcessProbe for Gone {
     fn start_time(&self, pid: u32) -> Option<u64> {
-        (pid != self.0).then_some(0)
+        (!self.0.contains(&pid)).then_some(0)
     }
 }
 
@@ -612,4 +612,133 @@ fn a_stop_request_exits_0() {
 
     assert_eq!(exit_code(&run), 0, "{:?}", run.result);
     assert!(run.out.contains("stopped on request"), "{}", run.out);
+}
+
+// --- A task cut off when the loop died ---
+
+/// The process of the loop that died, as its lock and its tasks name it.
+const DEAD_LOOP: u32 = 77;
+/// A command run by hand that died too.
+const DEAD_HAND: u32 = 88;
+
+const GONE: Gone = Gone(&[DEAD_LOOP, DEAD_HAND]);
+
+/// `issue-<n>` at `stage`, running in `pid`'s process, as a phase left it when that process died.
+fn cut_off(base: &Path, issue: u32, stage: Stage, pid: u32) -> PathBuf {
+    write_record(
+        base,
+        issue,
+        stage,
+        Status::Running,
+        Some(Process::new(pid, 0)),
+    );
+    record::task_dir(base, &format!("issue-{issue}"))
+}
+
+fn mark_resumed(dir: &Path) {
+    let mut rec = record::read(&dir.join("task.json")).unwrap();
+    rec.hooks = serde_json::json!({ "task_loop_resumed": true });
+    record::write(dir, &rec).unwrap();
+}
+
+fn log_text(base: &Path) -> String {
+    fs::read_dir(base.join(".sbxm/loop-logs"))
+        .map(|entries| {
+            entries
+                .filter_map(|e| fs::read_to_string(e.ok()?.path()).ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+fn a_task_the_dead_loop_was_running_is_resumed_once_at_start() {
+    let f = fixture();
+    plant_loop_lock(&f.base());
+    let dir = cut_off(&f.base(), 3, Stage::Working, DEAD_LOOP);
+    let gh = github(Vec::new());
+    let script = Script::new(&f.base());
+
+    let run = run_loop(&f, f.opts(), &script, &gh, &GONE, &|_| {}, &|| false);
+
+    run.result.unwrap();
+    assert_eq!(script.calls(), ["resume 3", "finish 3"], "{}", run.out);
+    assert!(run.out.contains("resuming it once"), "{}", run.out);
+    let rec = record::read(&dir.join("task.json")).unwrap();
+    assert_eq!(rec.hooks["task_loop_resumed"], serde_json::json!(true));
+    assert!(log_text(&f.base()).contains("#3"), "a log row");
+}
+
+#[test]
+fn a_resumed_task_that_fails_again_is_parked() {
+    let f = fixture();
+    plant_loop_lock(&f.base());
+    cut_off(&f.base(), 3, Stage::Working, DEAD_LOOP);
+    let gh = github(Vec::new());
+    let script = Script::new(&f.base()).failing("resume 3", boom);
+
+    let run = run_loop(&f, f.opts(), &script, &gh, &GONE, &|_| {}, &|| false);
+
+    run.result.unwrap();
+    assert_eq!(script.calls(), ["resume 3"], "{}", run.out);
+    assert!(run.out.contains("parked at working"), "{}", run.out);
+}
+
+#[test]
+fn a_task_already_resumed_once_by_the_loop_is_parked_not_resumed() {
+    let f = fixture();
+    plant_loop_lock(&f.base());
+    let dir = cut_off(&f.base(), 3, Stage::Working, DEAD_LOOP);
+    mark_resumed(&dir);
+    let gh = github(Vec::new());
+    let script = Script::new(&f.base());
+
+    let run = run_loop(&f, f.opts(), &script, &gh, &GONE, &|_| {}, &|| false);
+
+    run.result.unwrap();
+    assert!(script.calls().is_empty(), "{:?}", script.calls());
+    assert!(run.out.contains("parked"), "{}", run.out);
+    assert!(log_text(&f.base()).contains("parked"), "a log row");
+}
+
+#[test]
+fn an_interrupted_task_run_by_hand_is_left_alone() {
+    let f = fixture();
+    plant_loop_lock(&f.base());
+    cut_off(&f.base(), 3, Stage::Working, DEAD_HAND);
+    let gh = github(Vec::new());
+    let script = Script::new(&f.base());
+
+    let run = run_loop(&f, f.opts(), &script, &gh, &GONE, &|_| {}, &|| false);
+
+    run.result.unwrap();
+    assert!(script.calls().is_empty(), "{:?}", script.calls());
+}
+
+#[test]
+fn a_finished_task_of_the_dead_loop_is_left_alone() {
+    let f = fixture();
+    plant_loop_lock(&f.base());
+    cut_off(&f.base(), 3, Stage::Finished, DEAD_LOOP);
+    let gh = github(Vec::new());
+    let script = Script::new(&f.base());
+
+    let run = run_loop(&f, f.opts(), &script, &gh, &GONE, &|_| {}, &|| false);
+
+    run.result.unwrap();
+    assert!(script.calls().is_empty(), "{:?}", script.calls());
+}
+
+#[test]
+fn with_no_dead_loop_nothing_is_resumed() {
+    let f = fixture();
+    // A task interrupted in the loop's process, but no lock left: no loop died holding it.
+    cut_off(&f.base(), 3, Stage::Working, DEAD_LOOP);
+    let gh = github(Vec::new());
+    let script = Script::new(&f.base());
+
+    let run = run_loop(&f, f.opts(), &script, &gh, &GONE, &|_| {}, &|| false);
+
+    run.result.unwrap();
+    assert!(script.calls().is_empty(), "{:?}", script.calls());
 }
