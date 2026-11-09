@@ -850,7 +850,9 @@ nothing; it also refuses a job of the same kind and target already waiting in `q
 the same target; two `rm-merged` are the same). Otherwise it writes `<UTC time>-<kind>-<target>.json`, for example
 `20261109T191500Z-run-524.json`, `...-rm-merged.json`, `...-spec-<file stem>.json` or
 `...-template-<profile>-<harness>.json`, as `.json.tmp` renamed to `.json`, and prints its path; a name taken in the
-same second waits for the next one (up to 5). The loop checks the job again when it takes it. There is no list (that
+same second waits for the next one (up to 5). Two `task queue` commands at once take turns (a lock in
+`<base_dir>\.sbxm\queue-lock\`), so the same job is never queued twice and no file is overwritten. The loop checks
+the job again when it takes it. There is no list (that
 is `sbxm status`) and no remove (delete the file). One job per `*.json` file, in one of six shapes and nothing else:
 
 ```json

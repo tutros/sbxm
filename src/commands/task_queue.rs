@@ -3,7 +3,10 @@
 //! reason and writing nothing. The job is serialized from [`Job`], the type the loop parses, to
 //! `<base>/.sbxm/queue/<UTC time>-<kind>-<target>.json`, written as `.json.tmp` and renamed. A job
 //! of the same kind and target waiting in `queue/` or `queue/running/` is refused, naming its
-//! file. The loop checks the job again when it takes it.
+//! file. The duplicate check, the file name and the write happen under one lock,
+//! `<base>/.sbxm/queue-lock/lock.json` (review M-1), so two commands that overlap can neither
+//! both queue the same job nor share or overwrite a file name. The loop checks the job again when
+//! it takes it.
 
 use std::fs;
 use std::io::Write;
@@ -19,9 +22,16 @@ use crate::github::{GitHubBackend, PrState};
 use crate::run::results::format_timestamp;
 use crate::task::finish::check_own_folder;
 use crate::task::jobs::{self, Job, Running};
+use crate::task::lock::{self, ProcessLock};
+use crate::task::record::ProcessProbe;
 
 /// How many seconds `add` waits at most for a file name no other job took, as the loop's log name.
 const NAME_TRIES: u32 = 5;
+
+/// How often, and how long apart, `add` looks again at a queue lock another command holds: 10
+/// seconds in all, more than a name wait.
+const LOCK_TRIES: u32 = 200;
+const LOCK_PAUSE: Duration = Duration::from_millis(50);
 
 pub struct Options {
     /// The checkout whose origin names the GitHub repo, as the loop's.
@@ -32,11 +42,13 @@ pub struct Options {
 
 /// Queues `job`: checks it as the loop would, refuses a duplicate, then writes its file and
 /// prints its path. Returns the path.
+#[allow(clippy::too_many_arguments)]
 pub fn add(
     config_dir: &Path,
     opts: &Options,
     job: &Job,
     github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
     now: &dyn Fn() -> u64,
     sleep: &dyn Fn(Duration),
     out: &mut dyn Write,
@@ -51,8 +63,10 @@ pub fn add(
         check_own_folder(base_dir, &sbxm_dir)?;
     }
     jobs::check_queue(base_dir)?;
-    refuse_duplicate(base_dir, job)?;
     check(config_dir, &config, opts, job, github)?;
+
+    // Held to the end of the write: the duplicate check and the name stay true until then.
+    let _lock = queue_lock(base_dir, probe)?;
     let name = free_name(base_dir, job, now, sleep)?;
 
     let queue = jobs::queue_dir(base_dir);
@@ -158,8 +172,28 @@ fn refuse_duplicate(base_dir: &Path, job: &Job) -> Result<()> {
     Ok(())
 }
 
+/// Takes the lock every `task queue` holds from its duplicate check to its file's rename,
+/// waiting while another command holds it (each holds it for a moment, at most the
+/// [`NAME_TRIES`] seconds of a name wait).
+fn queue_lock(base_dir: &Path, probe: &dyn ProcessProbe) -> Result<ProcessLock> {
+    let dir = base_dir.join(".sbxm").join("queue-lock");
+    fs::create_dir_all(&dir).with_context(|| format!("cannot create {}", dir.display()))?;
+    check_own_folder(base_dir, &dir)?;
+    let mut tries = 0;
+    loop {
+        match ProcessLock::acquire(&dir, "the loop's job queue", probe) {
+            Err(e) if e.is::<lock::InUse>() && tries < LOCK_TRIES => {
+                tries += 1;
+                std::thread::sleep(LOCK_PAUSE);
+            }
+            result => return result,
+        }
+    }
+}
+
 /// `<UTC time>-<kind>-<target>.json`, a name no job in `queue/` or `queue/running/` has: one
-/// taken waits for the next second, at most [`NAME_TRIES`] times.
+/// taken waits for the next second, at most [`NAME_TRIES`] times. Each try first refuses a
+/// duplicate of `job`, so one queued during a wait is found too.
 fn free_name(
     base_dir: &Path,
     job: &Job,
@@ -167,6 +201,7 @@ fn free_name(
     sleep: &dyn Fn(Duration),
 ) -> Result<String> {
     for _ in 0..NAME_TRIES {
+        refuse_duplicate(base_dir, job)?;
         let stamp: String = format_timestamp(now())
             .chars()
             .filter(|c| !matches!(c, '-' | ':'))

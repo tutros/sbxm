@@ -79,6 +79,7 @@ impl Fixture {
             &self.opts(),
             job,
             gh,
+            &Probe,
             &|| clock.get(),
             &|d: Duration| {
                 sleeps.set(sleeps.get() + 1);
@@ -573,6 +574,99 @@ fn a_linked_sbxm_folder_is_refused_before_anything_is_written() {
     assert!(f.names(&elsewhere).is_empty());
 }
 
+// --- commands that overlap (review M-1) ---
+
+/// Queues `jobs` at once, one thread each, every clock at [`START`] and moving one second per
+/// sleep: each command's result, in `jobs`' order.
+fn race(f: &Fixture, jobs: &[Job]) -> Vec<Result<PathBuf>> {
+    let barrier = std::sync::Barrier::new(jobs.len());
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = jobs
+            .iter()
+            .map(|job| {
+                let barrier = &barrier;
+                scope.spawn(move || {
+                    let gh = github(Vec::new(), &[]);
+                    let clock = Cell::new(START);
+                    barrier.wait();
+                    task_queue::add(
+                        &f.env.config_dir(),
+                        &f.opts(),
+                        job,
+                        &gh,
+                        &Probe,
+                        &|| clock.get(),
+                        &|d: Duration| clock.set(clock.get() + d.as_secs()),
+                        &mut Vec::new(),
+                    )
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    })
+}
+
+/// Many waiting jobs of other targets, so each command's scan of the queue takes a while.
+fn crowd(f: &Fixture) {
+    for n in 0..300 {
+        f.put(
+            &f.queue(),
+            &format!("other-{n}.json"),
+            r#"{"kind": "run", "issue": 9}"#,
+        );
+    }
+}
+
+#[test]
+fn overlapping_commands_for_the_same_job_queue_it_once_and_the_others_name_it() {
+    let f = fixture();
+    crowd(&f);
+
+    let results = race(&f, &vec![Job::RmMerged {}; 8]);
+
+    let written: Vec<&PathBuf> = results.iter().filter_map(|r| r.as_ref().ok()).collect();
+    assert_eq!(written.len(), 1, "{results:?}");
+    let queued: Vec<String> = f
+        .names(&f.queue())
+        .into_iter()
+        .filter(|n| n.ends_with("rm-merged.json"))
+        .collect();
+    assert_eq!(queued.len(), 1, "{queued:?}");
+    for e in results.iter().filter_map(|r| r.as_ref().err()) {
+        let e = format!("{e:#}");
+        assert!(e.contains(&written[0].display().to_string()), "{e}");
+    }
+    assert!(!f.names(&f.queue()).iter().any(|n| n.ends_with(".tmp")));
+}
+
+#[test]
+fn overlapping_commands_with_the_same_file_name_never_share_or_overwrite_it() {
+    let f = fixture();
+    crowd(&f);
+    let specs = f.env.tmp.path().join("specs");
+    let files = ["a.md", "a.txt", "a.json", "a.toml"];
+    for file in files {
+        fs::write(specs.join(file), "# A\n").unwrap();
+    }
+    let queued: Vec<Job> = files.iter().map(|file| spec(file)).collect();
+
+    let results = race(&f, &queued);
+
+    let mut paths: Vec<PathBuf> = results
+        .into_iter()
+        .map(|r| r.unwrap_or_else(|e| panic!("{e:#}")))
+        .collect();
+    for (path, job) in paths.iter().zip(&queued) {
+        assert_eq!(
+            jobs::parse(&fs::read_to_string(path).unwrap()),
+            Ok(job.clone())
+        );
+    }
+    paths.sort();
+    paths.dedup();
+    assert_eq!(paths.len(), files.len(), "{paths:?}");
+}
+
 // --- the loop takes it ---
 
 /// The loop's phases: `task run` fails before any record, so the loop moves on.
@@ -698,4 +792,38 @@ fn the_command_refuses_a_harness_template_build_does_not_take() {
         .assert()
         .failure();
     assert!(f.names(&f.queue()).is_empty());
+}
+
+#[test]
+fn a_duplicate_queued_during_a_name_wait_is_refused() {
+    let f = fixture();
+    let gh = github(Vec::new(), &[]);
+    f.put(
+        &f.queue(),
+        &format!("{STAMP}-rm-merged.json"),
+        r#"{"kind": "run", "issue": 9}"#,
+    );
+    let clock = Cell::new(START);
+
+    let result = task_queue::add(
+        &f.env.config_dir(),
+        &f.opts(),
+        &Job::RmMerged {},
+        &gh,
+        &Probe,
+        &|| clock.get(),
+        &|d: Duration| {
+            // Written by hand while the command waits for the next second.
+            f.put(&f.queue(), "by-hand.json", r#"{"kind": "rm-merged"}"#);
+            clock.set(clock.get() + d.as_secs());
+        },
+        &mut Vec::new(),
+    );
+
+    let e = format!("{:#}", result.unwrap_err());
+    assert!(e.contains("by-hand.json"), "{e}");
+    assert_eq!(
+        f.names(&f.queue()),
+        [format!("{STAMP}-rm-merged.json"), "by-hand.json".to_owned()]
+    );
 }

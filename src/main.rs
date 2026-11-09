@@ -892,6 +892,7 @@ fn run() -> anyhow::Result<()> {
                     },
                     &job.job(),
                     &sbxm::github::gh::GhBackend::default(),
+                    &task::record::SystemProbe,
                     &sbxm::run::results::now,
                     &std::thread::sleep,
                     &mut out,
