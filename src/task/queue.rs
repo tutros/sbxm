@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 
 use crate::github::{Issue, PrMergeState, PrState};
 use crate::run::results::format_timestamp;
-use crate::task::finish::check_own_folder;
+use crate::task::finish::{check_own_folder, next_fence};
 use crate::task::record::{self, Kind, Record};
 
 /// The label that puts an issue in the loop's queue (decision 245(b)); the loop removes it when a
@@ -185,6 +185,28 @@ pub fn queue_order(open: &[Issue]) -> Vec<u32> {
 /// Every `#<n>` on an issue body's `**Depends on:**` line, in order.
 pub fn depends_on(body: &str) -> Vec<u32> {
     super::select::field_numbers(body, "Depends on")
+}
+
+/// Whether an issue's body still has a `## Open points` heading (issue 511): a readied issue
+/// renames it `## Answered`. Only a level-2 heading at a line's start counts, outside a fenced
+/// code block, so a body that quotes the heading in prose or in an example is not held back.
+pub fn has_open_points(body: &str) -> bool {
+    // The fence that is open, by character and length (review M-1): a shorter fence or one of
+    // the other character inside it is the example's content, not its end.
+    let mut open = None;
+    for line in body.lines() {
+        let before = open;
+        open = next_fence(open, line);
+        if before.is_some() || open.is_some() {
+            continue;
+        }
+        if let Some(heading) = line.strip_prefix("## ")
+            && heading.trim().eq_ignore_ascii_case("open points")
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Whether a failure's text is a harness's usage limit (decision 6): Claude Code's "usage limit

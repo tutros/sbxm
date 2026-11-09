@@ -880,6 +880,37 @@ fn run() -> anyhow::Result<()> {
             finish_task(result, out, warn)
         }
         Command::Task {
+            command:
+                TaskCommand::Loop {
+                    check: true,
+                    issues,
+                    ..
+                },
+        } => {
+            let (mut out, warn) = task_writers(Vec::new(), None)?;
+            let result = (|| -> anyhow::Result<bool> {
+                commands::task_loop::check(
+                    &config::config_dir()?,
+                    &commands::task_loop::Options {
+                        repo_root: std::env::current_dir()?,
+                        issues,
+                        cap: None,
+                        repo: None,
+                    },
+                    &sbxm::github::gh::GhBackend::default(),
+                    &task::record::SystemProbe,
+                    &mut out,
+                )
+            })();
+            // A skipped issue is exit 1 with no error of its own: its line said why.
+            if let Ok(false) = result {
+                drop(out);
+                drop(warn);
+                std::process::exit(1);
+            }
+            finish_task(result.map(drop), out, warn)
+        }
+        Command::Task {
             command: TaskCommand::Loop { cap, issues, .. },
         } => {
             // Each task's own phases log into its `run.log` (`TaskSteps`); the loop's lines

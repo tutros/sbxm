@@ -24,6 +24,8 @@ pub enum GhCall {
     PrDisarmAutoMerge(String, u32),
     /// Repo, branch.
     BranchHead(String, String),
+    /// Repo, branch.
+    BranchExists(String, String),
     /// Repo, head, base.
     OpenPrFor(String, String, String),
     PrCreate(String, PrRequest),
@@ -429,6 +431,17 @@ impl GitHubBackend for FakeGitHub {
             .find(|(b, _)| b == branch)
             .map(|(_, head)| head.clone())
             .ok_or_else(|| anyhow!("FakeGitHub: branch {branch} is not scripted"))
+    }
+
+    /// The branches `branch_head` answers for are the ones that exist.
+    fn branch_exists(&self, repo: &str, branch: &str) -> Result<bool> {
+        self.record(GhCall::BranchExists(repo.to_owned(), branch.to_owned()))?;
+        Ok(self
+            .branch_heads
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(b, _)| b == branch))
     }
 
     fn pr_arm_auto_merge(&self, repo: &str, number: u32, head_commit: &str) -> Result<()> {

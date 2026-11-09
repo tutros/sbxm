@@ -198,6 +198,10 @@ pub trait GitHubBackend: Send + Sync {
     /// The commit branch `branch` of `repo` is at, a full commit id (`gh api
     /// repos/<repo>/branches/<branch>`).
     fn branch_head(&self, repo: &str, branch: &str) -> Result<String>;
+    /// Whether `repo` has a branch named exactly `branch` (`gh api
+    /// repos/<repo>/git/matching-refs/heads/<branch>`), read before a task of that name would
+    /// push it (issue 511).
+    fn branch_exists(&self, repo: &str, branch: &str) -> Result<bool>;
     /// The open PR of `repo` whose head is the branch `head` of `repo` itself (never a fork's
     /// branch of the same name), with base `base` if there is one, else one with another base,
     /// which the caller reports instead of adopting (issue 60). Closed and merged PRs are never
