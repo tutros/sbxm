@@ -39,7 +39,21 @@ pub fn run(
     out: &mut dyn Write,
     warn: &mut dyn Write,
 ) -> Result<()> {
-    build(config_dir, options, None, backend, probe, out, warn).map(|_| ())
+    build_tag(config_dir, options, backend, probe, out, warn).map(|_| ())
+}
+
+/// [`run`], returning the tag it built (a queued `template` job's result names it, issue 524).
+pub fn build_tag(
+    config_dir: &Path,
+    options: &Options,
+    backend: &dyn SandboxBackend,
+    probe: &dyn ProcessProbe,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<String> {
+    match build(config_dir, options, None, backend, probe, out, warn)? {
+        Refreshed::Built(tag) | Refreshed::Fresh(tag) => Ok(tag),
+    }
 }
 
 /// How often a rebuild that waits checks whether the other build's lock is gone.

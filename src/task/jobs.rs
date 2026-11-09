@@ -1,7 +1,7 @@
 //! The loop's job queue (issue 525, decision 309): `<base>/.sbxm/queue/*.json`, one job file each,
 //! written by the agent or the user and drained by `sbxm task loop` before each new issue. A job
-//! is one of four fixed shapes ([`Job`]), parsed with no unknown field allowed, so no free-form
-//! flag can be queued. Taking a job moves its file to `queue/running/`; its end writes
+//! is one of the fixed shapes ([`Job`]; `template` and `spec` from issue 524), parsed with no
+//! unknown field allowed, so no free-form flag can be queued. Taking a job moves its file to `queue/running/`; its end writes
 //! `queue/done/<job>.json` ([`JobResult`]) and removes the running file. A file still in
 //! `running/` when a loop starts was interrupted, and is reported, never run again.
 //!
@@ -19,6 +19,7 @@ use serde_json::Value;
 use super::finish::{check_own_folder, pr_number};
 use super::merged::archive_root;
 use super::record::{self, Record};
+use crate::harness::Harness;
 
 /// One queued job (answers 1 and 2 of issue 525): its kind and its fields, nothing else.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,6 +39,36 @@ pub enum Job {
     Run { issue: u32 },
     /// `task rm --merged --yes`.
     RmMerged {},
+    /// `template build <profile> --harness <harness>`, with `warm` `--warm <the loop's
+    /// checkout>` (issue 524, answer 3). No repo path, `--ignore-disk` or `--no-wait` can be
+    /// queued.
+    Template {
+        profile: String,
+        #[serde(default)]
+        harness: JobHarness,
+        #[serde(default)]
+        warm: bool,
+    },
+}
+
+/// The harnesses a template can be built for (`template build`'s own refusal of the others).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JobHarness {
+    #[default]
+    Claude,
+    Codex,
+    Pi,
+}
+
+impl JobHarness {
+    pub fn harness(self) -> Harness {
+        match self {
+            Self::Claude => Harness::Claude,
+            Self::Codex => Harness::Codex,
+            Self::Pi => Harness::Pi,
+        }
+    }
 }
 
 impl Job {
@@ -55,6 +86,18 @@ impl Job {
             } => format!("job fix #{pr} --check-run {run}"),
             Self::Run { issue } => format!("job run #{issue}"),
             Self::RmMerged {} => "job rm-merged".to_owned(),
+            Self::Template {
+                profile,
+                harness,
+                warm,
+            } => {
+                let harness = match harness {
+                    JobHarness::Claude => String::new(),
+                    other => format!(" --harness {}", other.harness().as_str()),
+                };
+                let warm = if *warm { " --warm" } else { "" };
+                format!("job template {profile}{harness}{warm}")
+            }
         }
     }
 }
@@ -66,7 +109,9 @@ pub fn parse(text: &str) -> std::result::Result<Job, String> {
         format!(
             "not a job: {e}; a job is one of {{\"kind\": \"review\", \"pr\": N}}, {{\"kind\": \
              \"fix\", \"pr\": N}} (optionally with \"check_run\": ID), {{\"kind\": \"run\", \
-             \"issue\": N}} or {{\"kind\": \"rm-merged\"}}"
+             \"issue\": N}}, {{\"kind\": \"rm-merged\"}} or {{\"kind\": \"template\", \
+             \"profile\": P}} (optionally with \"harness\": \"claude\", \"codex\" or \"pi\", \
+             and \"warm\": true)"
         )
     })?;
     match job {

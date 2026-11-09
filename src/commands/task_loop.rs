@@ -30,12 +30,13 @@ use anyhow::{Context, Result, anyhow, bail};
 use super::task_start::resolve_repo;
 use super::{
     task_file_findings, task_finish, task_fix, task_log, task_resume, task_review, task_rm,
-    task_run,
+    task_run, template_build,
 };
 use crate::backend::{Location, SandboxBackend};
 use crate::config::GlobalConfig;
 use crate::disk;
 use crate::github::{GitHubBackend, Issue, Mergeable, PrState, RunStatus, WorkflowRun};
+use crate::harness::Harness;
 use crate::run::results::format_timestamp;
 use crate::task::config::{ShouldFix, TaskConfig};
 use crate::task::finish::check_own_folder;
@@ -103,6 +104,19 @@ pub trait Steps {
     /// one needs no other.
     fn review_pr(&self, pr: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
         bail!("no review of PR #{pr} here")
+    }
+    /// `template build <profile> --harness <harness>`, with `warm` `--warm <repo>`, for a queued
+    /// `template` job (issue 524): the new template's tag. A `Steps` that never runs one needs no
+    /// other.
+    fn template_build(
+        &self,
+        profile: &str,
+        _harness: Harness,
+        _warm: Option<&Path>,
+        _out: &mut dyn Write,
+        _warn: &mut dyn Write,
+    ) -> Result<String> {
+        bail!("no template build of {profile} here")
     }
     /// The free-disk check of `sbx`'s sandbox drive: an error while it is under `min_free_disk`.
     fn room(&self) -> Result<()>;
@@ -372,6 +386,8 @@ enum Halt {
 
 struct Loop<'a> {
     config_dir: &'a Path,
+    /// The checkout the loop runs from: a queued warm template build warms from it (issue 524).
+    repo_root: PathBuf,
     base_dir: PathBuf,
     repo: String,
     settings: crate::task::config::Loop,
@@ -2209,6 +2225,7 @@ pub fn run(
     let (started_at, log) = free_log(&base_dir, env)?;
     let mut lp = Loop {
         config_dir,
+        repo_root: opts.repo_root.clone(),
         base_dir,
         repo,
         settings,
@@ -2850,6 +2867,30 @@ impl Steps for TaskSteps<'_> {
                 warn,
             )
         })
+    }
+
+    fn template_build(
+        &self,
+        profile: &str,
+        harness: Harness,
+        warm: Option<&Path>,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<String> {
+        template_build::build_tag(
+            self.config_dir,
+            &template_build::Options {
+                profile: profile.to_owned(),
+                harness,
+                disk: self.disk.clone(),
+                now: None,
+                warm: warm.map(Path::to_path_buf),
+            },
+            self.backend,
+            self.probe,
+            out,
+            warn,
+        )
     }
 
     fn room(&self) -> Result<()> {

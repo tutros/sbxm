@@ -9,9 +9,10 @@ use std::path::Path;
 use anyhow::{Result, anyhow};
 
 use super::{End, Halt, Loop, check, first_line, sign_in_stop};
+use crate::config::{GlobalConfig, Profile};
 use crate::github::PrState;
 use crate::run::results::format_timestamp;
-use crate::task::jobs::{self, AsRead, Job, JobResult, Outcome, Running};
+use crate::task::jobs::{self, AsRead, Job, JobHarness, JobResult, Outcome, Running};
 use crate::task::next;
 use crate::task::queue::{self, Row};
 use crate::task::record::{self, Kind, Record, Stage};
@@ -250,7 +251,58 @@ impl Loop<'_> {
                     Err(e) => Ended::new(Outcome::Failed, format!("{e:#}")),
                 })
             }
+            Job::Template {
+                ref profile,
+                harness,
+                warm,
+            } => self.template_job(profile, harness, warm, taken, read, started, out, warn),
         }
+    }
+
+    /// A `template` job (issue 524, answer 3): only of an existing profile with a `[template]`
+    /// table, warmed from the loop's own checkout when `warm`. A low disk or a busy sandbox slot
+    /// is `template build`'s own: it refuses, or waits for the slot.
+    #[allow(clippy::too_many_arguments)]
+    fn template_job(
+        &mut self,
+        profile: &str,
+        harness: JobHarness,
+        warm: bool,
+        taken: &Path,
+        read: &AsRead,
+        started: u64,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<Ended> {
+        let config = match GlobalConfig::load(self.config_dir) {
+            Ok(config) => config,
+            Err(e) => return Ok(Ended::new(Outcome::Failed, format!("{e:#}"))),
+        };
+        match Profile::load(config.profiles_dir(), profile) {
+            Err(e) => return Ok(Ended::new(Outcome::Refused, format!("{e:#}"))),
+            Ok(found) if found.template.is_none() => {
+                return Ok(Ended::new(
+                    Outcome::Refused,
+                    format!(
+                        "profile '{profile}' has no [template] table, so it has no template to \
+                         build"
+                    ),
+                ));
+            }
+            Ok(_) => {}
+        }
+        self.mark(taken, read, started, None)?;
+        let repo_root = self.repo_root.clone();
+        let warm = warm.then_some(repo_root.as_path());
+        Ok(
+            match self
+                .steps
+                .template_build(profile, harness.harness(), warm, out, warn)
+            {
+                Ok(tag) => Ended::new(Outcome::Done, format!("built template {tag}")),
+                Err(e) => Ended::new(Outcome::Failed, format!("{e:#}")),
+            },
+        )
     }
 
     /// A `review` or (`fix`) `fix` job of PR `pr`: only of a PR sbxm opened (answer 4), skipped
