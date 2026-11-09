@@ -12,7 +12,7 @@ use super::{
     Capture, Claimed, End, Halt, Loop, Steps, check, first_line, says_sign_in, sign_in_stop,
 };
 use crate::commands::task_start::spec_flag;
-use crate::config::{GlobalConfig, Profile};
+use crate::config::GlobalConfig;
 use crate::github::PrState;
 use crate::run::results::format_timestamp;
 use crate::task::jobs::{self, AsRead, Job, JobHarness, JobResult, Outcome, Running};
@@ -306,39 +306,9 @@ impl Loop<'_> {
             Ok(config) => config,
             Err(e) => return Ok(Ended::new(Outcome::Failed, format!("{e:#}"))),
         };
-        let Some(dir) = config.specs_dir else {
-            return Ok(Ended::new(
-                Outcome::Refused,
-                format!(
-                    "no specs_dir is set in {}, so no spec job runs; set specs_dir to the folder \
-                     of the spec files",
-                    self.config_dir.join("config.toml").display()
-                ),
-            ));
-        };
-        let spec = dir.join(file);
-        match std::fs::symlink_metadata(&spec) {
-            Ok(meta) if meta.is_file() => {}
-            Ok(_) => {
-                return Ok(Ended::new(
-                    Outcome::Refused,
-                    format!("{} isn't a plain file", spec.display()),
-                ));
-            }
-            Err(e) => {
-                return Ok(Ended::new(
-                    Outcome::Refused,
-                    format!(
-                        "{} cannot be read ({e}); a spec job names a file in specs_dir {}",
-                        spec.display(),
-                        dir.display()
-                    ),
-                ));
-            }
-        }
-        let id = match record::spec_id(&spec) {
-            Ok((id, _)) => id,
-            Err(e) => return Ok(Ended::new(Outcome::Refused, format!("{e:#}"))),
+        let (spec, id) = match jobs::spec_file(self.config_dir, &config, file) {
+            Ok(found) => found,
+            Err(why) => return Ok(Ended::new(Outcome::Refused, why)),
         };
         self.mark(taken, read, started, Some(id.clone()))?;
         let ended = self.spec_task(&spec, &id, out, warn)?;
@@ -465,18 +435,8 @@ impl Loop<'_> {
             Ok(config) => config,
             Err(e) => return Ok(Ended::new(Outcome::Failed, format!("{e:#}"))),
         };
-        match Profile::load(config.profiles_dir(), profile) {
-            Err(e) => return Ok(Ended::new(Outcome::Refused, format!("{e:#}"))),
-            Ok(found) if found.template.is_none() => {
-                return Ok(Ended::new(
-                    Outcome::Refused,
-                    format!(
-                        "profile '{profile}' has no [template] table, so it has no template to \
-                         build"
-                    ),
-                ));
-            }
-            Ok(_) => {}
+        if let Err(why) = jobs::template_profile(&config, profile) {
+            return Ok(Ended::new(Outcome::Refused, why));
         }
         self.mark(taken, read, started, None)?;
         let repo_root = self.repo_root.clone();

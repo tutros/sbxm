@@ -19,6 +19,7 @@ use serde_json::Value;
 use super::finish::{check_own_folder, pr_number};
 use super::merged::archive_root;
 use super::record::{self, Record};
+use crate::config::{GlobalConfig, Profile};
 use crate::harness::Harness;
 
 /// One queued job (answers 1 and 2 of issue 525): its kind and its fields, nothing else.
@@ -55,7 +56,7 @@ pub enum Job {
 }
 
 /// The harnesses a template can be built for (`template build`'s own refusal of the others).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum JobHarness {
     #[default]
@@ -106,6 +107,53 @@ impl Job {
     }
 }
 
+impl Job {
+    /// The job's kind and target in a queued file's name (issue 529): `run-524`, `review-465`,
+    /// `fix-465`, `rm-merged`, `spec-<file stem>`, `template-<profile>-<harness>`.
+    pub fn file_part(&self) -> String {
+        match self {
+            Self::Review { pr } => format!("review-{pr}"),
+            Self::Fix { pr, .. } => format!("fix-{pr}"),
+            Self::Run { issue } => format!("run-{issue}"),
+            Self::RmMerged {} => "rm-merged".to_owned(),
+            Self::Spec { file } => {
+                let stem = Path::new(file)
+                    .file_stem()
+                    .map_or_else(|| file.clone(), |s| s.to_string_lossy().into_owned());
+                format!("spec-{stem}")
+            }
+            Self::Template {
+                profile, harness, ..
+            } => format!("template-{profile}-{}", harness.harness().as_str()),
+        }
+    }
+
+    /// Whether `other` is a job of the same kind and target (issue 529, answer 2): a fix's check
+    /// run and a template's `warm` are not part of the target, and two `rm-merged` are the same.
+    pub fn same_target(&self, other: &Job) -> bool {
+        match (self, other) {
+            (Self::Review { pr: a }, Self::Review { pr: b })
+            | (Self::Fix { pr: a, .. }, Self::Fix { pr: b, .. })
+            | (Self::Run { issue: a }, Self::Run { issue: b }) => a == b,
+            (Self::RmMerged {}, Self::RmMerged {}) => true,
+            (Self::Spec { file: a }, Self::Spec { file: b }) => a == b,
+            (
+                Self::Template {
+                    profile: a,
+                    harness: ha,
+                    ..
+                },
+                Self::Template {
+                    profile: b,
+                    harness: hb,
+                    ..
+                },
+            ) => a == b && ha == hb,
+            _ => false,
+        }
+    }
+}
+
 /// Parses a job file's text: one of [`Job`]'s shapes, numbers from 1. The error says why it is
 /// refused.
 pub fn parse(text: &str) -> std::result::Result<Job, String> {
@@ -152,6 +200,49 @@ fn check_spec_name(file: &str) -> std::result::Result<(), String> {
         "not a job: {why}; a spec job names a plain file name in specs_dir, like \
          {{\"kind\": \"spec\", \"file\": \"retro.md\"}}"
     ))
+}
+
+/// Where a spec job's `file` is and its task's id (issue 524): a plain file in `specs_dir`, the
+/// loop's check when it takes the job and `task queue spec`'s before it writes one. The error says
+/// why the job is refused.
+pub fn spec_file(
+    config_dir: &Path,
+    config: &GlobalConfig,
+    file: &str,
+) -> std::result::Result<(PathBuf, String), String> {
+    let Some(dir) = &config.specs_dir else {
+        return Err(format!(
+            "no specs_dir is set in {}, so no spec job runs; set specs_dir to the folder of the \
+             spec files",
+            config_dir.join("config.toml").display()
+        ));
+    };
+    let spec = dir.join(file);
+    match fs::symlink_metadata(&spec) {
+        Ok(meta) if meta.is_file() => {}
+        Ok(_) => return Err(format!("{} isn't a plain file", spec.display())),
+        Err(e) => {
+            return Err(format!(
+                "{} cannot be read ({e}); a spec job names a file in specs_dir {}",
+                spec.display(),
+                dir.display()
+            ));
+        }
+    }
+    let (id, _) = record::spec_id(&spec).map_err(|e| format!("{e:#}"))?;
+    Ok((spec, id))
+}
+
+/// Refuses a template job of a profile that doesn't load or has no `[template]` table (issue
+/// 524, answer 3): the loop's check when it takes the job and `task queue template`'s.
+pub fn template_profile(config: &GlobalConfig, profile: &str) -> std::result::Result<(), String> {
+    match Profile::load(config.profiles_dir(), profile) {
+        Err(e) => Err(format!("{e:#}")),
+        Ok(found) if found.template.is_none() => Err(format!(
+            "profile '{profile}' has no [template] table, so it has no template to build"
+        )),
+        Ok(_) => Ok(()),
+    }
 }
 
 /// `<base>/.sbxm/queue`.

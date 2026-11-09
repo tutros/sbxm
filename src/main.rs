@@ -880,6 +880,28 @@ fn run() -> anyhow::Result<()> {
             finish_task(result, out, warn)
         }
         Command::Task {
+            command: TaskCommand::Queue { job },
+        } => {
+            let (mut out, warn) = task_writers(Vec::new(), None)?;
+            let result = (|| -> anyhow::Result<()> {
+                commands::task_queue::add(
+                    &config::config_dir()?,
+                    &commands::task_queue::Options {
+                        repo_root: std::env::current_dir()?,
+                        repo: None,
+                    },
+                    &job.job(),
+                    &sbxm::github::gh::GhBackend::default(),
+                    &task::record::SystemProbe,
+                    &sbxm::run::results::now,
+                    &std::thread::sleep,
+                    &mut out,
+                )
+                .map(drop)
+            })();
+            finish_task(result, out, warn)
+        }
+        Command::Task {
             command:
                 TaskCommand::Loop {
                     check: true,
