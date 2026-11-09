@@ -89,6 +89,7 @@ fn opts(f: &Fixture, issues: &[u32]) -> Options {
         issues: issues.to_vec(),
         cap: None,
         repo: Some(REPO.into()),
+        wait: false,
     }
 }
 

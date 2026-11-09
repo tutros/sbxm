@@ -9,7 +9,8 @@ use std::path::Path;
 use anyhow::{Result, anyhow};
 
 use super::{
-    Capture, Claimed, End, Halt, Loop, Steps, check, first_line, says_sign_in, sign_in_stop,
+    Capture, Claimed, End, Halt, Loop, NeedsUser, Steps, check, first_line, needs_user,
+    says_sign_in, sign_in_stop,
 };
 use crate::commands::task_start::spec_flag;
 use crate::config::GlobalConfig;
@@ -488,13 +489,13 @@ impl Loop<'_> {
             let resume = resume.and_then(|(id, command)| self.record_of(id).map(|_| command));
             let stop = sign_in_stop(e, resume);
             return Err(Ended {
-                halt: Some(anyhow!("{stop:#}")),
+                halt: Some(needs_user(anyhow!("{stop:#}"))),
                 ..Ended::new(Outcome::Stopped, format!("{stop:#}"))
             });
         }
         if e.is::<pipeline::MissingSecret>() {
             return Err(Ended {
-                halt: Some(anyhow!("{e:#}")),
+                halt: Some(needs_user(anyhow!("{e:#}"))),
                 ..Ended::new(Outcome::Failed, format!("{what}{e:#}"))
             });
         }
@@ -620,7 +621,12 @@ impl Loop<'_> {
             Ok(End::Taken(line)) => Ended::new(Outcome::Skipped, line),
             Err(Halt::Stopped) => Ended::new(Outcome::Stopped, "stopped on request"),
             Err(Halt::Error(e)) => Ended {
-                halt: Some(anyhow!("{e:#}")),
+                // A missing secret stays a stop that needs the user (decision 310).
+                halt: Some(if e.is::<NeedsUser>() {
+                    needs_user(anyhow!("{e:#}"))
+                } else {
+                    anyhow!("{e:#}")
+                }),
                 ..Ended::new(Outcome::Failed, format!("{e:#}"))
             },
             Err(Halt::SignIn(e)) => {
@@ -630,7 +636,7 @@ impl Loop<'_> {
                     exists.then(|| format!("sbxm task resume --issue {issue}")),
                 );
                 Ended {
-                    halt: Some(anyhow!("{stop:#}")),
+                    halt: Some(needs_user(anyhow!("{stop:#}"))),
                     ..Ended::new(Outcome::Stopped, format!("{stop:#}"))
                 }
             }
@@ -641,7 +647,7 @@ impl Loop<'_> {
                     queue::span(total.as_secs())
                 );
                 Ended {
-                    halt: Some(anyhow!("{stop}")),
+                    halt: Some(needs_user(anyhow!("{stop}"))),
                     ..Ended::new(Outcome::Stopped, stop)
                 }
             }

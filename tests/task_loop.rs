@@ -438,6 +438,7 @@ fn opts(f: &Fixture) -> Options {
         issues: Vec::new(),
         cap: None,
         repo: Some(REPO.into()),
+        wait: false,
     }
 }
 

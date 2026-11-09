@@ -732,6 +732,7 @@ fn a_queued_run_is_taken_by_the_loop() {
             issues: vec![999],
             cap: None,
             repo: Some(REPO.into()),
+            wait: false,
         },
         &script,
         &gh,

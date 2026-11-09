@@ -321,6 +321,7 @@ fn run_loop(script: &Script, env: TestEnv, issues: &[u32], cap: Option<u32>) -> 
             issues: issues.to_vec(),
             cap,
             repo: Some(REPO.into()),
+            wait: false,
         },
         script,
         &gh,

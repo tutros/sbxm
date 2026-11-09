@@ -225,6 +225,7 @@ fn run_loop(f: &Fixture, script: &Script) -> (Result<()>, String) {
         issues: Vec::new(),
         cap: Some(1),
         repo: Some(REPO.into()),
+        wait: false,
     };
     let (mut out, mut warn) = (Vec::new(), Vec::new());
     let result = task_loop::run(

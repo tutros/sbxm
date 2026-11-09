@@ -622,6 +622,14 @@ pub enum TaskCommand {
         /// why not, then print the loop command for those it would take. Exit 1 if any is skipped.
         #[arg(long, conflicts_with_all = ["cap", "clear_pause"])]
         check: bool,
+        /// On an empty queue, check again every 5 minutes for a job file or a labelled issue
+        /// instead of stopping, until `task loop --stop` (the scheduled start uses it).
+        #[arg(long, conflicts_with_all = ["issues", "clear_pause", "check"])]
+        wait: bool,
+        /// Ask the running loop to stop, as Ctrl-C does: after its current task, or within 5
+        /// minutes while it waits or is paused. Says so when no loop is running.
+        #[arg(long, conflicts_with_all = ["cap", "issues", "clear_pause", "check", "wait"])]
+        stop: bool,
     },
     /// Add one job to the loop's queue (<base_dir>/.sbxm/queue/, decision 309) after the checks
     /// the loop makes when it takes it: refused at once with the reason, writing nothing, when the

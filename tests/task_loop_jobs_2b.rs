@@ -19,7 +19,7 @@ use sbxm::github::fake::FakeGitHub;
 use sbxm::github::{PrInfo, PrState};
 use sbxm::harness::Harness;
 use sbxm::task::jobs::{self, Job, JobHarness};
-use sbxm::task::pipeline::{HarnessSignedOut, NotSignedIn};
+use sbxm::task::pipeline::{HarnessSignedOut, MissingSecret, NotSignedIn};
 use sbxm::task::queue;
 use sbxm::task::record::{self, Kind, NewTask, Process, Record, ReviewResult, Stage, Status};
 use sbxm::task::risk::Level;
@@ -58,6 +58,8 @@ struct Script {
     review: &'static str,
     /// The phases that fail with a lapsed sign-in, and how it shows.
     signed_out: Vec<(String, SignedOut)>,
+    /// The phases that fail on a missing secret.
+    secret_missing: Vec<String>,
 }
 
 /// How a phase's lapsed sign-in shows (issue 445).
@@ -81,6 +83,7 @@ impl Script {
             spec: SpecEnd::Clean(Level::Low),
             review: CLEAN,
             signed_out: Vec::new(),
+            secret_missing: Vec::new(),
         }
     }
 
@@ -113,6 +116,11 @@ impl Script {
         }
     }
 
+    fn missing_secret(mut self, call: &str) -> Self {
+        self.secret_missing.push(call.to_owned());
+        self
+    }
+
     fn failing(mut self, call: &str) -> Self {
         self.fail.push(call.to_owned());
         self
@@ -137,6 +145,13 @@ impl Script {
         self.clock.set(self.clock.get() + 60);
         let failing = self.fail.iter().any(|f| call.starts_with(f.as_str()));
         self.calls.borrow_mut().push(call.clone());
+        if self
+            .secret_missing
+            .iter()
+            .any(|f| call.starts_with(f.as_str()))
+        {
+            return Err(MissingSecret::new("the secret `anthropic` is not set").into());
+        }
         if failing {
             bail!("{call} failed");
         }
@@ -368,6 +383,7 @@ impl Fixture {
             issues: Vec::new(),
             cap: None,
             repo: Some(REPO.into()),
+            wait: false,
         }
     }
 
@@ -942,6 +958,8 @@ fn a_lapsed_sign_in_in_a_spec_should_fix_round_stops_the_loop_leaving_the_next_j
         let mut script = Script::new(&f.base()).signing_out("should-fix spec", how);
         script.review = S_ONE;
         let run = run_loop(&f, &script, &github(&[SPEC_PR]));
+        // A stop that needs the user (decision 310).
+        assert_eq!(task_loop::exit_code(&run.result), task_loop::NEEDS_USER);
         let e = run
             .result
             .expect_err("the loop goes on after a lapsed sign-in");
@@ -957,6 +975,22 @@ fn a_lapsed_sign_in_in_a_spec_should_fix_round_stops_the_loop_leaving_the_next_j
         assert!(f.reason("s.json").contains(&resume), "{result}");
         assert!(later.is_file(), "the later job was taken");
     }
+}
+
+// --- A missing secret in a queued job stops the loop as one that needs the user (decision 310) ---
+
+#[test]
+fn a_missing_secret_in_a_template_build_stops_the_loop_as_needing_the_user() {
+    let f = fixture();
+    f.queue_job(
+        "a.json",
+        r#"{"kind": "template", "profile": "sbxm-dev"}"#,
+        20,
+    );
+    let script = Script::new(&f.base()).missing_secret("template sbxm-dev");
+    let run = run_loop(&f, &script, &github(&[]));
+    assert_eq!(task_loop::exit_code(&run.result), task_loop::NEEDS_USER);
+    assert_eq!(f.result("a.json")["outcome"], "failed");
 }
 
 #[test]
@@ -995,6 +1029,7 @@ fn a_lapsed_sign_in_in_a_template_build_stops_the_loop_leaving_the_next_job_queu
     let later = f.queue_job("b.json", r#"{"kind": "template", "profile": "other"}"#, 10);
     let script = Script::new(&f.base()).signing_out("template sbxm-dev", SignedOut::Sbx);
     let run = run_loop(&f, &script, &github(&[]));
+    assert_eq!(task_loop::exit_code(&run.result), task_loop::NEEDS_USER);
     let e = run
         .result
         .expect_err("the loop goes on after a lapsed sign-in");

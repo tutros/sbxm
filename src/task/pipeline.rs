@@ -652,6 +652,12 @@ pub fn require_picks(selection: Selection) -> Result<Selection> {
 #[derive(Debug)]
 pub struct MissingSecret(String);
 
+impl MissingSecret {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self(text.into())
+    }
+}
+
 impl std::fmt::Display for MissingSecret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
