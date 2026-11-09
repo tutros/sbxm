@@ -147,6 +147,36 @@ impl Steps for Script {
         Ok(())
     }
 
+    /// A queued review of PR `pr`: its PR task `pr-<n>`, reviewed low, asking a question.
+    fn review_pr(&self, pr: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
+        let dir = record::task_dir(&self.base, &format!("pr-{pr}"));
+        let mut rec = Record::new(
+            &NewTask {
+                kind: Kind::Pr,
+                number: pr,
+                repo: REPO,
+                title: "t",
+                base: "main",
+                branch: &format!("b{pr}"),
+                config_hash: "h",
+                id: None,
+            },
+            START,
+            Process::new(1, 0),
+        );
+        rec.stage = Stage::Ready;
+        rec.status = Status::Ok;
+        record::write(&dir, &rec).unwrap();
+        fs::write(
+            dir.join("review.md"),
+            "Must-fix findings: 0\n\n## Questions\n\n### Q-1 - Is the old name still used?\n\n\
+             **Where:** `src/a.rs:1`\n**What happens:** unclear\n**Why it matters:** decision 1\n\
+             **Recommendation:** check\n",
+        )
+        .unwrap();
+        Ok(())
+    }
+
     fn room(&self) -> Result<()> {
         Ok(())
     }
@@ -765,4 +795,85 @@ fn a_low_risk_fix_of_a_low_risk_pr_stays_quiet() {
         .unwrap();
 
     assert!(notifier.shown().is_empty(), "{:?}", notifier.shown());
+}
+
+#[test]
+fn a_reviewers_question_notifies_once_naming_the_task_and_opening_its_pr() {
+    let f = fixture();
+    let mut script = Script::new(&f.base(), Level::Low);
+    script.review_question = Some("Needs a decision: keep the old setting?");
+    let notifier = FakeNotifier::default();
+
+    run_loop(&f, &f.opts(), &script, &github(&[3], HEAD), &notifier)
+        .result
+        .unwrap();
+
+    let shown = notifier.shown();
+    assert_eq!(titles(&shown), ["Task issue-3 has a question for you"]);
+    assert_eq!(shown[0].click, "https://github.com/o/r/pull/103");
+    assert!(
+        shown[0].body.contains("keep the old setting?"),
+        "{}",
+        shown[0].body
+    );
+    assert!(shown[0].body.contains("Q-1"), "{}", shown[0].body);
+    assert!(
+        shown[0].key.starts_with("question:issue-3:"),
+        "{}",
+        shown[0].key
+    );
+}
+
+#[test]
+fn a_workers_and_a_reviewers_question_of_one_task_notify_once_each() {
+    let f = fixture();
+    let mut script = Script::new(&f.base(), Level::Low);
+    script.question = Some("- Which name?");
+    script.review_question = Some("Keep the old setting?");
+    let notifier = FakeNotifier::default();
+
+    run_loop(&f, &f.opts(), &script, &github(&[3], HEAD), &notifier)
+        .result
+        .unwrap();
+
+    let shown = notifier.shown();
+    assert_eq!(shown.len(), 2, "{shown:?}");
+    assert_ne!(shown[0].key, shown[1].key);
+    assert!(shown.iter().any(|n| n.body.starts_with("Which name?")));
+    assert!(
+        shown
+            .iter()
+            .any(|n| n.body.contains("Keep the old setting?"))
+    );
+}
+
+#[test]
+fn a_reviewers_question_in_a_queued_review_job_notifies_with_the_pr_as_the_click() {
+    let f = fixture();
+    // PR #103 was opened by a loop task, so a review job of it runs.
+    let script = Script::new(&f.base(), Level::Low);
+    script.run(3, &mut Vec::new(), &mut Vec::new()).unwrap();
+    script.finish(3, &mut Vec::new(), &mut Vec::new()).unwrap();
+    f.queue("r1.json", r#"{"kind": "review", "pr": 103}"#);
+    let gh = github(&[], HEAD)
+        .with_pr(pr(103, HEAD))
+        .with_auto_merge(103);
+    let notifier = FakeNotifier::default();
+
+    let ran = run_loop(&f, &f.opts(), &script, &gh, &notifier);
+
+    ran.result.unwrap();
+    let shown = notifier.shown();
+    assert_eq!(
+        titles(&shown),
+        ["Task pr-103 has a question for you"],
+        "{}",
+        ran.out
+    );
+    assert_eq!(shown[0].click, "https://github.com/o/r/pull/103");
+    assert!(
+        shown[0].body.contains("Q-1 Is the old name still used?"),
+        "{}",
+        shown[0].body
+    );
 }

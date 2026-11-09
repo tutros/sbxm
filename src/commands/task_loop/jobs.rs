@@ -236,6 +236,10 @@ impl Loop<'_> {
             idle_before: None,
         };
         self.notify_job(taken, label, result, out, warn)?;
+        // The task a job ran may hand a question back whatever its outcome (review M-2).
+        if let Some(id) = result.task.as_deref() {
+            self.notify_question(id, out, warn)?;
+        }
         if let Err(e) = queue::append_job_row(&self.log, label, &row) {
             self.warn_once(
                 warn,

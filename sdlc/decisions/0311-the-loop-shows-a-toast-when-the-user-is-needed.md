@@ -2,11 +2,13 @@
 of #476; uses [293], [299], [309], [310]; the toast of `scripts/factory-trigger.ps1`, [269]):** with the loop
 started at logon (310) no terminal shows its lines, so the user learns it needs them from a toast; clean low-risk
 work stays quiet. (1) **A toast only when the user has something to do:** (a) a PR a loop opened or continued awaits
-the user's merge: a risk above low after the path-rule floor, or a draft (a work stop, must-fix left); (b) a queued
+the user's merge: a risk above low after the path-rule floor, or a draft (a work stop, must-fix left), read from the
+review that covered the PR's head (a resolve's or log-fix's when one was pushed onto it); (b) a queued
 job ends `failed`, `stopped`, `refused` or `interrupted` (309); (c) the loop stops on a cause that needs the user: a
 lapsed sign-in, a missing secret, two parked tasks in a row, the usage waits' total (310's exit 3); (d) `main`'s second
-CI failure pauses arming (299); (e) a task hands a question back in its `result.md`'s "Needs a decision". Quiet: clean
-low-risk work, auto-merges, jobs ending `done` or `skipped`, a loop stopped on request, an empty queue. (2) **The loop
+CI failure pauses arming (299); (e) a task the loop ran (an issue or spec task, a resolve or log-fix, a queued
+job's task) hands a question back: its reviewer's question findings in `review.md`, or its worker's "Needs a
+decision" in `result.md`. Quiet: clean low-risk work, auto-merges, jobs ending `done` or `skipped`, a loop stopped on request, an empty queue. (2) **The loop
 shows them itself, through a `Notifier` trait** (`src/notify.rs`, like `SandboxBackend` and `GitHubBackend`): the
 rules of when are the loop's code only. The Windows notifier runs `powershell.exe` (Windows PowerShell 5.1, where
 the WinRT types load) with the toast snippet of `factory-trigger.ps1`; the toast's XML, its text XML-escaped, goes in

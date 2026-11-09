@@ -742,8 +742,9 @@ impl Loop<'_> {
             })
     }
 
-    /// (e) of issue 530: a notification when task `id`'s worker handed a question back in its
-    /// `result.md`, once per task and question. The click opens its PR, else its issue.
+    /// (e) of issue 530: a notification for each question task `id` hands the user, once per
+    /// task and question: its worker's "Needs a decision" in `result.md`, and each question
+    /// finding of its reviewer's `review.md` (review M-2). The click opens its PR, else its issue.
     fn notify_question(
         &mut self,
         id: &str,
@@ -754,34 +755,52 @@ impl Loop<'_> {
             return Ok(());
         }
         let dir = record::task_dir(&self.base_dir, id);
-        let Some(question) = fs::read_to_string(dir.join("result.md"))
+        // (what hashes into the key, the body's line, where to answer it)
+        let mut questions: Vec<(String, String, &str)> = Vec::new();
+        if let Some(question) = fs::read_to_string(dir.join("result.md"))
             .ok()
             .and_then(|text| finish::handed_back(&text))
-        else {
+        {
+            let first = question
+                .lines()
+                .map(|line| line.trim().trim_start_matches(['-', '*']).trim())
+                .find(|line| !line.is_empty())
+                .unwrap_or_default()
+                .to_owned();
+            questions.push((question, first, "the PR's \"Needs a decision\""));
+        }
+        if let Ok(text) = fs::read_to_string(dir.join("review.md")) {
+            for finding in findings::parse(&text).findings {
+                if finding.label == "question" {
+                    let line = format!("{} {}", finding.id, finding.title);
+                    questions.push((format!("review: {line}"), line, "the PR's review"));
+                }
+            }
+        }
+        if questions.is_empty() {
             return Ok(());
-        };
-        let rec = self.record_of(id);
-        let click = match &rec {
-            Some(rec) if rec.pr.is_some() => rec.pr.clone().unwrap_or_default(),
+        }
+        let click = match self.record_of(id) {
+            Some(Record { pr: Some(url), .. }) => url,
+            Some(rec) if matches!(rec.kind, Kind::Pr | Kind::Fix) => {
+                format!("https://github.com/{}/pull/{}", rec.repo, rec.number)
+            }
             Some(rec) if rec.kind == Kind::Issue => {
                 format!("https://github.com/{}/issues/{}", rec.repo, rec.number)
             }
             _ => self.log_click(),
         };
-        let hash = crate::config::sha256_hex(question.as_bytes());
-        let first = question
-            .lines()
-            .map(|line| line.trim().trim_start_matches(['-', '*']).trim())
-            .find(|line| !line.is_empty())
-            .unwrap_or_default()
-            .to_owned();
-        let note = Notification {
-            key: format!("question:{id}:{}", &hash[..16]),
-            title: format!("Task {id} has a question for you"),
-            body: format!("{first}; next: answer it in the PR's \"Needs a decision\""),
-            click,
-        };
-        self.notify(note, out, warn)
+        for (keyed, line, place) in questions {
+            let hash = crate::config::sha256_hex(keyed.as_bytes());
+            let note = Notification {
+                key: format!("question:{id}:{}", &hash[..16]),
+                title: format!("Task {id} has a question for you"),
+                body: format!("{line}; next: answer it in {place}"),
+                click: click.clone(),
+            };
+            self.notify(note, out, warn)?;
+        }
+        Ok(())
     }
 
     /// Waits while [`PR_CAP`] PRs await the user. `false`: the user asked to stop meanwhile.
@@ -1633,6 +1652,9 @@ impl Loop<'_> {
             )?;
         }
         let result = self.steps.fix_pr(number, out, warn);
+        if let Some(id) = record::fix_id(number, &head) {
+            self.notify_question(&id, out, warn)?;
+        }
         let fix = record::fix_id(number, &head).and_then(|id| {
             record::read(&record::task_dir(&self.base_dir, &id).join("task.json")).ok()
         });
@@ -2314,6 +2336,9 @@ impl Loop<'_> {
         )?;
         let result = self.steps.fix_check(number, run.id, out, warn);
         let id = record::fix_id(number, head);
+        if let Some(id) = id.as_deref() {
+            self.notify_question(id, out, warn)?;
+        }
         let dir = id.as_deref().map(|id| record::task_dir(&self.base_dir, id));
         let fix = dir
             .as_ref()
