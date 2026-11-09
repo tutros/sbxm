@@ -49,6 +49,8 @@ pub use queue::LOOP_HOOK;
 pub const PAUSE_POLL: Duration = Duration::from_secs(5 * 60);
 /// How often a task's first phase is looked at for its record, to take its label off.
 const LABEL_POLL: Duration = Duration::from_secs(2);
+/// Why an issue whose body still has a `## Open points` heading is passed over (issue 511).
+const OPEN_POINTS: &str = "open points not answered";
 
 pub struct Options {
     /// The target repo's root, where `sbxm-task.toml` is (the loop writes nothing there).
@@ -649,6 +651,17 @@ impl Loop<'_> {
             let found = open.iter().find(|i| i.number == number);
             let title = found.map_or_else(String::new, |i| format!(" {}", i.title));
             let body = found.map_or("", |i| i.body.as_str());
+            // The label alone isn't enough (issue 511): a worker can't answer open points.
+            if queue::has_open_points(body) {
+                tried.insert(number);
+                let reason = OPEN_POINTS.to_owned();
+                writeln!(out, "skipped #{number}{title}: {reason}")?;
+                refused.push(Skipped {
+                    issue: number,
+                    reason,
+                });
+                continue;
+            }
             let unmerged = self.unmerged_dependencies(open, body);
             if !unmerged.is_empty() {
                 let reason = format!("depends on {}, not merged", unmerged.join(", "));
