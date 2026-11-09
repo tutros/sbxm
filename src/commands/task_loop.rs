@@ -42,6 +42,9 @@ use crate::task::risk::Level;
 use crate::task::runlog::{RunLog, Tee};
 use crate::task::{findings, finish, lock, loop_log, pipeline, pr_fix};
 
+mod check;
+pub use check::check;
+
 /// How many open PRs the loop opened may await the user before it pauses (decision 245(e)).
 pub const PR_CAP: usize = 5;
 pub use queue::LOOP_HOOK;
@@ -49,6 +52,8 @@ pub use queue::LOOP_HOOK;
 pub const PAUSE_POLL: Duration = Duration::from_secs(5 * 60);
 /// How often a task's first phase is looked at for its record, to take its label off.
 const LABEL_POLL: Duration = Duration::from_secs(2);
+/// Why an issue whose body still has a `## Open points` heading is passed over (issue 511).
+const OPEN_POINTS: &str = "open points not answered";
 
 pub struct Options {
     /// The target repo's root, where `sbxm-task.toml` is (the loop writes nothing there).
@@ -649,9 +654,20 @@ impl Loop<'_> {
             let found = open.iter().find(|i| i.number == number);
             let title = found.map_or_else(String::new, |i| format!(" {}", i.title));
             let body = found.map_or("", |i| i.body.as_str());
+            // The label alone isn't enough (issue 511): a worker can't answer open points.
+            if queue::has_open_points(body) {
+                tried.insert(number);
+                let reason = OPEN_POINTS.to_owned();
+                writeln!(out, "skipped #{number}{title}: {reason}")?;
+                refused.push(Skipped {
+                    issue: number,
+                    reason,
+                });
+                continue;
+            }
             let unmerged = self.unmerged_dependencies(open, body);
             if !unmerged.is_empty() {
-                let reason = format!("depends on {}, not merged", unmerged.join(", "));
+                let reason = waiting_reason(&unmerged);
                 self.say_once(out, format!("skipped #{number}{title}: {reason}"))?;
                 waiting.push(Skipped {
                     issue: number,
@@ -663,7 +679,7 @@ impl Loop<'_> {
             let problems =
                 pipeline::preflight_issues(self.config_dir, &self.repo, self.github, &[number])?;
             if let Some(reason) = problems.get(&number) {
-                let reason = format!("refused before any write: {reason}");
+                let reason = refused_reason(reason);
                 writeln!(out, "skipped #{number}{title}: {reason}")?;
                 refused.push(Skipped {
                     issue: number,
@@ -676,29 +692,8 @@ impl Loop<'_> {
         Ok((None, waiting))
     }
 
-    /// The `Depends on:` numbers that are an open issue or a PR not merged. A number that is
-    /// neither an open issue nor a readable PR is taken for a closed issue.
     fn unmerged_dependencies(&self, open: &[Issue], body: &str) -> Vec<String> {
-        queue::depends_on(body)
-            .into_iter()
-            .filter_map(|n| {
-                if open.iter().any(|i| i.number == n) {
-                    return Some(format!("#{n} (an open issue)"));
-                }
-                match self.github.pr(&self.repo, n) {
-                    Ok(pr) if pr.state == PrState::Merged => None,
-                    Ok(pr) => Some(format!(
-                        "#{n} (a {} PR)",
-                        if pr.state == PrState::Open {
-                            "open"
-                        } else {
-                            "closed"
-                        }
-                    )),
-                    Err(_) => None,
-                }
-            })
-            .collect()
+        unmerged_dependencies(self.github, &self.repo, open, body)
     }
 
     /// One task, to its PR or its parking (decision 245(d)). `label`: its issue has the loop's
@@ -2079,6 +2074,46 @@ fn paused_line(pause: &Pause) -> String {
          --clear-pause`",
         pause.describe()
     )
+}
+
+/// Why an issue waiting on [`unmerged_dependencies`] is passed over.
+fn waiting_reason(unmerged: &[String]) -> String {
+    format!("depends on {}, not merged", unmerged.join(", "))
+}
+
+/// Why an issue `task run` would refuse before any write is passed over.
+fn refused_reason(reason: &str) -> String {
+    format!("refused before any write: {reason}")
+}
+
+/// The `Depends on:` numbers that are an open issue or a PR not merged. A number that is
+/// neither an open issue nor a readable PR is taken for a closed issue.
+fn unmerged_dependencies(
+    github: &dyn GitHubBackend,
+    repo: &str,
+    open: &[Issue],
+    body: &str,
+) -> Vec<String> {
+    queue::depends_on(body)
+        .into_iter()
+        .filter_map(|n| {
+            if open.iter().any(|i| i.number == n) {
+                return Some(format!("#{n} (an open issue)"));
+            }
+            match github.pr(repo, n) {
+                Ok(pr) if pr.state == PrState::Merged => None,
+                Ok(pr) => Some(format!(
+                    "#{n} (a {} PR)",
+                    if pr.state == PrState::Open {
+                        "open"
+                    } else {
+                        "closed"
+                    }
+                )),
+                Err(_) => None,
+            }
+        })
+        .collect()
 }
 
 /// `sbxm task loop --clear-pause` (decision 299): lifts the pause a red `main` set, saying what

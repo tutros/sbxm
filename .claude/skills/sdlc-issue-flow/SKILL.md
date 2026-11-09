@@ -39,10 +39,10 @@ build sbxm tasks run with (a machine's own wrapper; never a fresh `cargo run`).
   "merged:>=<label date>"`); and check its acceptance list agrees with its own answers. A point that no longer holds
   goes back to the user as a question, with the label removed until it is answered. Ready issues just in time:
   only those for the next session or night run, not the whole backlog, so less code changes under them.
-- **Check before handing over a loop (decision 307, an experiment):** once `sbxm task loop --check` exists (#511), run
-  it with the issues you readied and hand the user only the command it prints; an issue it would skip is fixed first
-  (its Depends line, a branch of the task's name already on origin, an existing task). Until then, check those three
-  by hand.
+- **Check before handing over a loop (decision 307, an experiment):** run `sbxm task loop --check --issue N ...` with
+  the issues you readied (#511) and hand the user only the command it prints; an issue it would skip is fixed first
+  (its Depends line, a branch of the task's name already on origin, an existing task, its label or size, an
+  `## Open points` heading not yet renamed `## Answered`).
 
 ## 3. Check the machine
 

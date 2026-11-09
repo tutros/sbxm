@@ -612,6 +612,10 @@ pub enum TaskCommand {
         /// Lift the pause a red main set (it says what it removed) and run nothing.
         #[arg(long, conflicts_with_all = ["cap", "issues"])]
         clear_pause: bool,
+        /// Run nothing: say for each issue (--issue, or the queue) whether the loop would take it or
+        /// why not, then print the loop command for those it would take. Exit 1 if any is skipped.
+        #[arg(long, conflicts_with_all = ["cap", "clear_pause"])]
+        check: bool,
     },
     /// Print a task's run.log (decision 170, part 1). Read-only: never writes to the log itself.
     #[command(group(clap::ArgGroup::new("logs_target").required(true).args(["issue", "pr", "spec"])))]

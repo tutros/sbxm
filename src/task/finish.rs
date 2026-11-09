@@ -1461,7 +1461,7 @@ fn named_text<'a>(text: &'a str, name: &str) -> Option<&'a str> {
 
 /// The code fence open after `line`, given the one open before it (a run of three or more
 /// backticks or tildes opens one; the same character, at least as many, alone closes it).
-fn next_fence(open: Option<(char, usize)>, line: &str) -> Option<(char, usize)> {
+pub(crate) fn next_fence(open: Option<(char, usize)>, line: &str) -> Option<(char, usize)> {
     let trimmed = line.trim_start_matches(' ');
     if line.len() - trimmed.len() > 3 {
         return open;
