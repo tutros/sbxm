@@ -76,15 +76,13 @@ impl Task {
 
     /// The command that brings the task's branch up to `main`'s lock files.
     fn way_out(&self, main: &str) -> String {
-        let restart = match (self.pr, self.kind) {
-            (Some(pr), _) => {
-                return format!(
-                    "merge {main} into its branch with `sbxm task fix --pr {pr}` (decision 292)"
-                );
-            }
-            (None, Kind::Spec) => "--spec <file>".to_owned(),
-            (None, _) => format!("--issue {}", self.number),
-        };
+        if let Some(pr) = self.pr {
+            return format!(
+                "merge {main} into its branch with `sbxm task fix --pr {pr}` (decision 292)"
+            );
+        }
+        // Without a PR it is an issue or spec task: [`Task::of`] gives a PR or fix task its own.
+        let restart = super::next::flag(self.kind, self.number);
         format!(
             "start it again from {main} with `sbxm task run --restart {restart}` (its old task is \
              set aside, and put back if the restart fails: decision 185)"

@@ -12,6 +12,7 @@ pub mod loop_log;
 pub mod loop_pause;
 pub mod machine;
 pub mod merged;
+pub mod next;
 pub mod pipeline;
 pub mod pr_fix;
 pub mod prompts;
