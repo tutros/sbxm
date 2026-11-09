@@ -13,8 +13,10 @@ fn read(path: &str) -> String {
 
 const RECORD: &str = "sdlc/reviews/2026-10-27-m4-end-to-end.md";
 
+/// Since decision 308 the status sources are pointers, not history: they need not link the
+/// record, but they must not call the check pending, and the record itself is kept.
 #[test]
-fn project_and_agents_say_the_end_to_end_check_passed_and_link_its_record() {
+fn project_and_agents_do_not_call_the_end_to_end_check_pending() {
     for path in ["docs/project.md", "AGENTS.md"] {
         let text = read(path);
         for stale in [
@@ -24,10 +26,16 @@ fn project_and_agents_say_the_end_to_end_check_passed_and_link_its_record() {
         ] {
             assert!(!text.contains(stale), "{path} still says {stale:?}");
         }
-        assert!(text.contains(RECORD), "{path} doesn't link {RECORD}");
     }
+    assert!(read(RECORD).contains("2026-10-27"), "{RECORD} is missing");
     // Round 6, S-1: the state section is dated no earlier than the check it records.
-    assert!(read("docs/project.md").contains("## State (as of 2026-10-27)"));
+    let project = read("docs/project.md");
+    let date = project
+        .split("## State (as of ")
+        .nth(1)
+        .and_then(|rest| rest.split(')').next())
+        .expect("docs/project.md has a dated state section");
+    assert!(date >= "2026-10-27", "the state section is dated {date}");
 }
 
 #[test]

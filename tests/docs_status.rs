@@ -16,7 +16,8 @@ fn agents_md_does_not_call_slice_13_pending() {
     for stale in ["built through slice 12 of 14", "left are slice 13"] {
         assert!(!agents.contains(stale), "AGENTS.md still says {stale:?}");
     }
-    assert!(agents.contains("m2b-experiment-report.md"));
+    // Since decision 308 AGENTS.md's Status section is pointers only; the report itself is
+    // checked below.
 }
 
 #[test]
