@@ -848,3 +848,34 @@ fn a_spec_and_a_template_job_run_before_the_next_issue_oldest_first() {
     assert_eq!(f.result("s.json")["outcome"], "done");
     assert_eq!(f.result("t.json")["outcome"], "done");
 }
+
+// --- Interrupted ---
+
+#[test]
+fn an_interrupted_spec_job_names_the_resume_of_its_real_spec_path() {
+    let f = spec_fixture("");
+    let (spec, _) = f.retro();
+    let id = spec_id(&spec);
+    let dir = write_task(&f.base(), Kind::Spec, 0, &id, Level::Low);
+    let mut rec = record::read(&dir.join("task.json")).unwrap();
+    rec.stage = Stage::Working;
+    rec.status = Status::Running;
+    record::write(&dir, &rec).unwrap();
+    let running = jobs::running_dir(&f.base());
+    fs::create_dir_all(&running).unwrap();
+    let text = serde_json::json!({
+        "job": {"kind": "spec", "file": "retro.md"},
+        "started_at": "2026-11-09T10:00:00Z",
+        "task": id,
+    });
+    fs::write(running.join("s.json"), text.to_string()).unwrap();
+    let script = Script::new(&f.base());
+    run_loop(&f, &script, &github(&[])).result.unwrap();
+    assert!(script.calls().is_empty(), "{:?}", script.calls());
+    let result = f.result("s.json");
+    assert_eq!(result["outcome"], "interrupted", "{result}");
+    assert_eq!(
+        result["next"],
+        format!("sbxm task resume --spec {}", spec.display())
+    );
+}

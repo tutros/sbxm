@@ -91,12 +91,12 @@ impl Loop<'_> {
                 .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
                 .unwrap_or_default();
             let running = Running::read(&text);
-            let label = running
+            let job = running
                 .read
                 .job
                 .as_ref()
-                .and_then(|v| serde_json::from_value::<Job>(v.clone()).ok())
-                .map_or_else(|| file_label(&taken), |job| job.label());
+                .and_then(|v| jobs::parse(&v.to_string()).ok());
+            let label = job.as_ref().map_or_else(|| file_label(&taken), Job::label);
             // A task id only, never a path, whatever the file says.
             let rec = running
                 .task
@@ -129,11 +129,28 @@ impl Loop<'_> {
                 ended_at: now,
                 task: rec.as_ref().map(|r| r.id.clone()),
                 url: rec.as_ref().and_then(|r| self.url_of(r)),
-                next: rec.as_ref().and_then(|rec| next_of(rec, None)),
+                next: rec.as_ref().and_then(|rec| {
+                    let flag = match &job {
+                        Some(Job::Spec { file }) => self.spec_flag_of(file, rec),
+                        _ => None,
+                    };
+                    next_of(rec, flag.as_deref())
+                }),
             };
             self.ended(&taken, &label, &result, self.now(), out, warn)?;
         }
         Ok(())
+    }
+
+    /// The `--spec` flag of a spec job's `file` in `specs_dir`, when it is still `rec`'s spec
+    /// (`specs_dir` may have changed since the job started).
+    fn spec_flag_of(&self, file: &str, rec: &Record) -> Option<String> {
+        let spec = GlobalConfig::load(self.config_dir)
+            .ok()?
+            .specs_dir?
+            .join(file);
+        let (id, _) = record::spec_id(&spec).ok()?;
+        (id == rec.id).then(|| spec_flag(&spec))
     }
 
     /// One job, from its file in the queue folder to its result file.
