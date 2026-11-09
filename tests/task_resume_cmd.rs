@@ -67,6 +67,7 @@ fn options(f: &Fixture, rounds: Option<u32>) -> Options {
         repo_root: f.env.tmp.path().join("target-repo"),
         target: Target::Issue(41),
         rounds,
+        should_fix: false,
         disk: Default::default(),
         identity: None,
         forget_ambiguous: false,

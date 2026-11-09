@@ -10,6 +10,7 @@ use anyhow::{Context, Result, anyhow, bail};
 use std::time::{Duration, Instant};
 
 use super::config::TaskConfig;
+use super::findings;
 use super::finish;
 use super::gates::{self, GateOutcome, HostRunner};
 use super::lifetime;
@@ -42,6 +43,8 @@ use crate::template::{self, Locks};
 
 /// Folder inside the workspace for sbxm's files (the issue, the prompt, `result.md`, the bundle).
 pub const AGENT_DIR: &str = ".sbxm-task";
+/// A should-fix round's input in the task's folder (issue 510), for a retry of the round.
+const SHOULD_FIX_COPY: &str = "should-fix.md";
 
 /// The `sbx` version the cloud was spiked with (S14, S17, P2); older is refused for a cloud task
 /// (P12, decision 262). The counterpart of `template::MIN_SBX_VERSION`; the global
@@ -4099,6 +4102,10 @@ fn run_fix_round(
 pub(super) struct FixInput {
     extra_name: &'static str,
     extra_text: String,
+    /// A should-fix round's (issue 510): `extra_text` is only the review's should-fix findings
+    /// sized S, kept in the task's folder as `should-fix.md` so a retry of the round is given the
+    /// same.
+    should_fix: bool,
     prompt: String,
     source_name: &'static str,
     source_text: Vec<u8>,
@@ -4188,10 +4195,24 @@ pub(super) fn fix_input(
     Ok(FixInput {
         extra_name,
         extra_text,
+        should_fix: false,
         prompt,
         source_name,
         source_text,
     })
+}
+
+/// A should-fix round's [`FixInput`] (issue 510, decision 306): a review fix round's, given as its
+/// `review.md` only `small`, the review's should-fix findings sized S.
+pub(super) fn should_fix_input(
+    env: &TaskEnv,
+    prepared: &Prepared,
+    small: &[findings::Finding],
+) -> Result<FixInput> {
+    let mut input = fix_input(env, prepared, None)?;
+    input.extra_text = super::resume::should_fix_review(&input.extra_text, small);
+    input.should_fix = true;
+    Ok(input)
 }
 
 /// Starts a fix round with its input: the task goes to `fixing/running`, the input is kept in the
@@ -4215,6 +4236,12 @@ pub(super) fn start_fix_round(
         fs::write(&gate_copy, &input.extra_text)?;
     } else {
         let _ = fs::remove_file(&gate_copy);
+    }
+    let should_fix_copy = prepared.meta.join(SHOULD_FIX_COPY);
+    if input.should_fix {
+        fs::write(&should_fix_copy, &input.extra_text)?;
+    } else {
+        let _ = fs::remove_file(&should_fix_copy);
     }
     fs::write(prepared.meta.join("fix-prompt.md"), &input.prompt)?;
     // A fix round runs in the task's worker sandbox, made again when it is gone: a cloud one as
@@ -4283,8 +4310,12 @@ pub(super) fn rerun_fix_input(prepared: &Prepared) -> Result<FixInput> {
     let prompt = fs::read_to_string(prepared.meta.join("fix-prompt.md"))
         .context("the failed fix round's prompt (fix-prompt.md) is missing from the task folder")?;
     let gate_copy = prepared.meta.join("gate-failure.md");
+    let should_fix_copy = prepared.meta.join(SHOULD_FIX_COPY);
+    let should_fix = !gate_copy.is_file() && should_fix_copy.is_file();
     let (extra_name, extra_text) = if gate_copy.is_file() {
         ("gate-failure.md", fs::read_to_string(&gate_copy)?)
+    } else if should_fix {
+        ("review.md", fs::read_to_string(&should_fix_copy)?)
     } else {
         (
             "review.md",
@@ -4296,6 +4327,7 @@ pub(super) fn rerun_fix_input(prepared: &Prepared) -> Result<FixInput> {
     Ok(FixInput {
         extra_name,
         extra_text,
+        should_fix,
         prompt,
         source_name,
         source_text,

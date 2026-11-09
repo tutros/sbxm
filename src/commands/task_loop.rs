@@ -32,7 +32,7 @@ use crate::config::GlobalConfig;
 use crate::disk;
 use crate::github::{GitHubBackend, Issue, Mergeable, PrState, RunStatus, WorkflowRun};
 use crate::run::results::format_timestamp;
-use crate::task::config::TaskConfig;
+use crate::task::config::{ShouldFix, TaskConfig};
 use crate::task::finish::check_own_folder;
 use crate::task::gates::HostRunner;
 use crate::task::loop_pause::{self, Pause};
@@ -40,7 +40,7 @@ use crate::task::queue::{self, Outcome, READY_LABEL, Report, Row, Skipped};
 use crate::task::record::{self, Kind, Process, ProcessProbe, Record, Stage};
 use crate::task::risk::Level;
 use crate::task::runlog::{RunLog, Tee};
-use crate::task::{findings, finish, lock, loop_log, pipeline, pr_fix};
+use crate::task::{findings, finish, lock, loop_log, pipeline, pr_fix, resume};
 
 /// How many open PRs the loop opened may await the user before it pauses (decision 245(e)).
 pub const PR_CAP: usize = 5;
@@ -67,6 +67,12 @@ pub trait Steps {
     fn run(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()>;
     /// `task resume --issue N`: the task again from its recorded stage, to `ready`.
     fn resume(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()>;
+    /// `task resume --issue N --rounds 1 --should-fix` (issue 510, decision 306): one fix round
+    /// on a clean ready task's should-fix findings sized S, to `ready` again. Only called with
+    /// `[loop] should_fix = "fix"`; a `Steps` that never runs with it needs no other.
+    fn should_fix(&self, issue: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
+        bail!("no should-fix round for #{issue} here")
+    }
     /// `task finish --issue N`: its PR, a draft when something is left unresolved.
     fn finish(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()>;
     /// `task file-findings --issue N --create`: the review's should-fix findings as sized
@@ -624,6 +630,16 @@ impl Loop<'_> {
         record::read(&self.task_dir(issue).join("task.json")).ok()
     }
 
+    /// Whether the task's next phase is its should-fix round (issue 510, decision 306): `[loop]
+    /// should_fix = "fix"`, and `task resume --rounds 1 --should-fix` would take it (it is
+    /// `ready` with a clean review that has should-fix findings sized S, and had no such round).
+    fn should_fix_due(&self, issue: u32) -> bool {
+        self.settings.should_fix == ShouldFix::Fix
+            && self.record(issue).is_some_and(|rec| {
+                resume::check_should_fix(&rec, &self.task_dir(issue), Some(1)).is_ok()
+            })
+    }
+
     /// The next issue to start (decision 2, 245(e)), and the labeled ones waiting on an unmerged
     /// `Depends on:` issue or PR, looked at again on every call: a dependency merged meanwhile
     /// frees its issue. One that `task run` would refuse before any write is reported into
@@ -716,6 +732,9 @@ impl Loop<'_> {
     ) -> std::result::Result<End, Halt> {
         let io = |e: std::io::Error| Halt::Error(e.into());
         let mut pending: Option<(String, u64)> = None;
+        // Whether this call already ran the task's should-fix round (issue 510): never twice,
+        // whatever its record says after it.
+        let mut should_fix_ran = false;
         loop {
             let Some(paused) = self.wait_for_room(out).map_err(Halt::Error)? else {
                 if self.record(issue).is_none() {
@@ -730,6 +749,8 @@ impl Loop<'_> {
                 stops.push((cause, self.now().saturating_sub(since)));
             }
             let resuming = self.record(issue).is_some();
+            let should_fix = !should_fix_ran && self.should_fix_due(issue);
+            should_fix_ran |= should_fix;
             let mut captured = Vec::new();
             let result = {
                 let mut out = Capture {
@@ -740,7 +761,9 @@ impl Loop<'_> {
                     inner: warn,
                     text: Vec::new(),
                 };
-                let (result, removed) = if resuming {
+                let (result, removed) = if should_fix {
+                    (self.steps.should_fix(issue, &mut out, &mut warn), None)
+                } else if resuming {
                     (self.steps.resume(issue, &mut out, &mut warn), None)
                 } else if label {
                     self.run_unlabeling(issue, || self.steps.run(issue, &mut out, &mut warn))
@@ -759,6 +782,11 @@ impl Loop<'_> {
             let e = match (result, ready) {
                 (Ok(()), Some(_)) => {
                     self.usage_waited = Duration::ZERO;
+                    // A clean task with should-fix findings sized S gets its one should-fix
+                    // round first (decision 306), as the next phase of this loop.
+                    if !should_fix_ran && self.should_fix_due(issue) {
+                        continue;
+                    }
                     return self.finish(issue, None, out, warn).map_err(Halt::Error);
                 }
                 (Ok(()), None) => anyhow!("the task did not reach ready"),
@@ -886,6 +914,13 @@ impl Loop<'_> {
             )));
         }
         match (rec.stage, retry) {
+            // Its should-fix round comes before its finish (issue 510).
+            (Stage::Ready, Retry::Finish { .. }) if self.should_fix_due(issue) => {
+                self.task(issue, false, 0, stops, out, warn)
+            }
+            (Stage::Ready, Retry::Resume { failures }) if self.should_fix_due(issue) => {
+                self.task(issue, false, failures, stops, out, warn)
+            }
             (Stage::Ready, Retry::Finish { ready }) => self
                 .finish(issue, Some(ready), out, warn)
                 .map_err(Halt::Error),
@@ -2569,6 +2604,38 @@ impl TaskSteps<'_> {
         }
         Ok(())
     }
+
+    /// `task resume --issue N`, or with `should_fix` its should-fix round, `--rounds 1
+    /// --should-fix` (issue 510).
+    fn resume_with(
+        &self,
+        issue: u32,
+        should_fix: bool,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<()> {
+        self.release(issue)?;
+        self.logged(issue, out, warn, &|out, warn| {
+            task_resume::run(
+                self.config_dir,
+                &task_resume::Options {
+                    repo_root: self.repo_root.clone(),
+                    target: task_resume::Target::Issue(issue),
+                    rounds: should_fix.then_some(1),
+                    should_fix,
+                    disk: self.disk.clone(),
+                    identity: None,
+                    forget_ambiguous: false,
+                },
+                self.backend,
+                self.github,
+                self.probe,
+                self.host,
+                out,
+                warn,
+            )
+        })
+    }
 }
 
 impl Steps for TaskSteps<'_> {
@@ -2605,26 +2672,11 @@ impl Steps for TaskSteps<'_> {
     }
 
     fn resume(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
-        self.release(issue)?;
-        self.logged(issue, out, warn, &|out, warn| {
-            task_resume::run(
-                self.config_dir,
-                &task_resume::Options {
-                    repo_root: self.repo_root.clone(),
-                    target: task_resume::Target::Issue(issue),
-                    rounds: None,
-                    disk: self.disk.clone(),
-                    identity: None,
-                    forget_ambiguous: false,
-                },
-                self.backend,
-                self.github,
-                self.probe,
-                self.host,
-                out,
-                warn,
-            )
-        })
+        self.resume_with(issue, false, out, warn)
+    }
+
+    fn should_fix(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
+        self.resume_with(issue, true, out, warn)
     }
 
     fn finish(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {

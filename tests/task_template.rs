@@ -616,6 +616,7 @@ fn resume_41(
             repo_root: f.env.tmp.path().join("target-repo"),
             target: task_resume::Target::Issue(41),
             rounds: None,
+            should_fix: false,
             disk: Default::default(),
             identity: None,
             forget_ambiguous: false,

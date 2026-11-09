@@ -49,6 +49,9 @@ high = ["src/git.rs", "src/task/repo.rs", "src/kit.rs", "src/task/record.rs", "s
 [loop]
 usage_wait = "30m"
 usage_wait_total = "5h"
+# A clean task's should-fix findings sized S get one more fix round before `task finish`; the
+# rest are filed as issues (decision 306, a trial; issue 510). "file" (the default) files them all.
+should_fix = "fix"
 
 # A spec task's `task finish --spec` pushes its branch and opens the PR with the in-task review,
 # closing the issues of the spec's `Fixes: #435, #436` line (decision 301, issue 438).

@@ -6,10 +6,12 @@
 //! head ([`fix_task_for_head`]). Decided through
 //! `machine::TABLE`'s `Resume` rows; the refusal text for each state lives here.
 
+use std::fs;
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
+use super::findings::{self, Finding};
 use super::finish;
 use super::lifetime;
 use super::machine::{self, Event};
@@ -114,6 +116,17 @@ pub fn check_can_resume(
     probe: &dyn ProcessProbe,
     rounds: Option<u32>,
 ) -> Result<()> {
+    check_can_resume_with(task, probe, rounds, false)
+}
+
+/// [`check_can_resume`], for `--should-fix` too when `should_fix` (issue 510): a clean `ready`
+/// task then has something to resume, which [`check_should_fix`] checks.
+pub fn check_can_resume_with(
+    task: &Record,
+    probe: &dyn ProcessProbe,
+    rounds: Option<u32>,
+    should_fix: bool,
+) -> Result<()> {
     let id = &task.id;
     let state = machine::State {
         stage: task.stage,
@@ -166,6 +179,9 @@ pub fn check_can_resume(
     }
     if machine::verdict(&state, Event::Resume) {
         return if task.stage == Stage::Ready {
+            if should_fix && task.stopped.is_none() {
+                return Ok(());
+            }
             check_stopped(task, rounds)
         } else {
             Ok(())
@@ -183,6 +199,79 @@ pub fn check_can_resume(
             status_hint(task)
         ),
     }
+}
+
+/// Whether `task resume --rounds N --should-fix` may run on this task now (issue 510, decision
+/// 306), and if so the findings that are its fix round's work: the should-fix findings of the
+/// task's `review.md` whose reviewer gave them `**Size:** S` (one without a size line counts as
+/// not S). Only for a task that stopped `ready` clean (0 must-fix, no stop), at most once per task.
+/// Reads only; every refusal says why and what to do instead.
+pub fn check_should_fix(task: &Record, meta: &Path, rounds: Option<u32>) -> Result<Vec<Finding>> {
+    let (id, flag) = (&task.id, target_flag(task));
+    if rounds.is_none() {
+        bail!(
+            "--should-fix runs one fix round, which --rounds gives: run `sbxm task resume {flag} \
+             --rounds 1 --should-fix`"
+        );
+    }
+    if task.stage != Stage::Ready {
+        bail!(
+            "--should-fix is for a task that stopped ready with a clean review; task {id} is at {} \
+             ({}), so resume it without --should-fix",
+            task.stage.name(),
+            task.status.name()
+        );
+    }
+    let must_fix = task.review.as_ref().map_or(0, |r| r.must_fix);
+    if task.stopped.is_some() || must_fix > 0 {
+        bail!(
+            "--should-fix is for a clean task (0 must-fix, no stop); task {id} stopped ready ({}) \
+             with {must_fix} must-fix finding(s), so resume it without --should-fix",
+            task.stopped.map_or("no stop", Stopped::name)
+        );
+    }
+    if task.should_fix_round {
+        bail!(
+            "task {id} already had its should-fix round, and a task gets at most one; finish it \
+             with `sbxm task finish {flag}`, and what is left is filed with `sbxm task \
+             file-findings`"
+        );
+    }
+    let path = meta.join("review.md");
+    let text = fs::read_to_string(&path)
+        .with_context(|| format!("cannot read task {id}'s review, {}", path.display()))?;
+    let small: Vec<Finding> = findings::parse(&text)
+        .findings
+        .into_iter()
+        .filter(|f| f.label == "should-fix" && f.size() == Ok("S"))
+        .collect();
+    if small.is_empty() {
+        bail!(
+            "task {id}'s review has no should-fix finding sized S (one without a **Size:** line \
+             counts as not S), so there is no should-fix round to run; finish it with `sbxm task \
+             finish {flag}`, then file its findings with `sbxm task file-findings`"
+        );
+    }
+    Ok(small)
+}
+
+/// The review a should-fix round's worker is given (issue 510): `findings`, taken whole from the
+/// task's `review` text, under a heading that says they are the round's only work.
+pub fn should_fix_review(review: &str, findings: &[Finding]) -> String {
+    let lines = findings::lines_of(review);
+    let mut text = String::from(
+        "# Review: the should-fix findings sized S\n\nThe review found no must-fix finding. This \
+         fix round's work is the review's should-fix findings sized S, below; its other findings \
+         are filed as issues once the task finishes.\n",
+    );
+    for finding in findings {
+        let end = finding.end_line.min(lines.len());
+        let start = finding.start_line.saturating_sub(1).min(end);
+        text.push('\n');
+        text.push_str(lines[start..end].join("\n").trim_end());
+        text.push('\n');
+    }
+    text
 }
 
 /// Refuses to resume a task whose record holds a cloud create that was started and never
@@ -307,21 +396,31 @@ fn resume_runs_worker(task: &Record) -> bool {
 /// profile and a bundle of the branch (P5 (d)), the task's input goes into it by `cp`, and it is
 /// removed when the task stops, whichever way the resume ends after the checks.
 pub fn resume(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Result<Resumed> {
-    resume_forgetting(env, prepared, rounds, false)
+    resume_forgetting(env, prepared, rounds, false, false)
 }
 
 /// [`resume`], with `--forget-ambiguous` when `forget` (decision 268): a cloud create that was
 /// started and never recorded as returned is refused ([`check_ambiguous`]) unless `forget`, when
 /// it is dropped from `task.json` once every other check passed, with no cloud call for it.
+///
+/// With `should_fix` (`--should-fix`, issue 510, decision 306), a clean `ready` task's fix round
+/// is given only its review's should-fix findings sized S ([`check_should_fix`]), and the record
+/// says it had its should-fix round.
 pub fn resume_forgetting(
     env: &TaskEnv,
     prepared: &mut Prepared,
     rounds: Option<u32>,
     forget: bool,
+    should_fix: bool,
 ) -> Result<Resumed> {
-    check_can_resume(&prepared.record, env.probe, rounds)?;
+    check_can_resume_with(&prepared.record, env.probe, rounds, should_fix)?;
     check_ambiguous(&prepared.record, forget)?;
-    if only_push_left(&prepared.record) {
+    let small = if should_fix {
+        Some(check_should_fix(&prepared.record, &prepared.meta, rounds)?)
+    } else {
+        None
+    };
+    if small.is_none() && only_push_left(&prepared.record) {
         bail!(
             "task {} is ready with nothing unresolved: only its push onto PR #{}'s branch is \
              left, which `sbxm task resume --pr {}` makes",
@@ -351,7 +450,7 @@ pub fn resume_forgetting(
              cloud was touched for it"
         ));
     }
-    let resumed = resume_checked(env, prepared, rounds);
+    let resumed = resume_checked(env, prepared, rounds, small.as_deref());
     // The task stops here, whichever way: a cloud worker sandbox goes (P5 (d), decision 263).
     // A local one goes where the phase that used it ends (issue 341), never after a refusal.
     pipeline::stop_cloud_worker(env, prepared);
@@ -359,7 +458,12 @@ pub fn resume_forgetting(
 }
 
 /// [`resume`] once its checks have passed.
-fn resume_checked(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -> Result<Resumed> {
+fn resume_checked(
+    env: &TaskEnv,
+    prepared: &mut Prepared,
+    rounds: Option<u32>,
+    should_fix: Option<&[Finding]>,
+) -> Result<Resumed> {
     let cloud = prepared.record.location == Location::Cloud;
     let mut resumed = Resumed {
         from: (prepared.record.stage, prepared.record.status),
@@ -384,7 +488,10 @@ fn resume_checked(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -
     // A failed fix round's retry is given the input it had, read and placed the same way, before
     // a local sandbox is made again (issue 341: it is usually gone by then).
     let fix_input = match (prepared.record.stage, prepared.record.status) {
-        (Stage::Ready, _) => Some(pipeline::fix_input(env, prepared, None)?),
+        (Stage::Ready, _) => Some(match should_fix {
+            Some(small) => pipeline::should_fix_input(env, prepared, small)?,
+            None => pipeline::fix_input(env, prepared, None)?,
+        }),
         (Stage::Fixing, Status::Running | Status::Failed) => {
             Some(pipeline::rerun_fix_input(prepared)?)
         }
@@ -463,11 +570,24 @@ fn resume_checked(env: &TaskEnv, prepared: &mut Prepared, rounds: Option<u32>) -
                 prepared.record.fix_rounds =
                     rounds_cap(&prepared.record, n).context("--rounds overflows the budget")?;
             }
-            let was = prepared.record.stopped.take().map_or("", Stopped::name);
-            prepared.record.notes.push(format!(
-                "resume: stopped {was}; another fix round, {} of {} used so far",
-                prepared.record.round, prepared.record.fix_rounds
-            ));
+            if let Some(small) = should_fix {
+                // At most one per task (decision 306): recorded with the round's start below.
+                prepared.record.should_fix_round = true;
+                let ids: Vec<&str> = small.iter().map(|f| f.id.as_str()).collect();
+                prepared.record.notes.push(format!(
+                    "resume: a should-fix round on the should-fix findings sized S ({}), {} of \
+                     {} fix rounds used so far",
+                    ids.join(", "),
+                    prepared.record.round,
+                    prepared.record.fix_rounds
+                ));
+            } else {
+                let was = prepared.record.stopped.take().map_or("", Stopped::name);
+                prepared.record.notes.push(format!(
+                    "resume: stopped {was}; another fix round, {} of {} used so far",
+                    prepared.record.round, prepared.record.fix_rounds
+                ));
+            }
             let input = fix_input.context("the fix round's input was not read")?;
             resumed.review = Some(pipeline::fix_from_ready(env, prepared, &input)?);
             return Ok(resumed);

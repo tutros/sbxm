@@ -174,6 +174,7 @@ fn resume(
             repo_root: f.env.tmp.path().join("target-repo"),
             target: sbxm::commands::task_resume::Target::Spec(spec.to_path_buf()),
             rounds,
+            should_fix: false,
             disk: Default::default(),
             identity: Some(identity()),
             forget_ambiguous: forget,

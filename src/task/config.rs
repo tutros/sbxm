@@ -84,6 +84,21 @@ pub struct TaskConfig {
 pub struct Loop {
     pub usage_wait: Duration,
     pub usage_wait_total: Duration,
+    /// `should_fix` (issue 510, decision 306): what the loop does with a clean task's should-fix
+    /// findings sized S.
+    pub should_fix: ShouldFix,
+}
+
+/// `[loop] should_fix` (issue 510, decision 306).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ShouldFix {
+    /// Every should-fix finding of a clean task is filed as an issue after `task finish`.
+    #[default]
+    File,
+    /// A clean task with should-fix findings sized S gets one more fix round on them (`task
+    /// resume --rounds 1 --should-fix`) before `task finish`; the rest are filed.
+    Fix,
 }
 
 /// How `template build --warm` fills a template's caches from this repo (decision 207).
@@ -174,6 +189,8 @@ struct RawConfig {
 struct RawLoop {
     usage_wait: Option<String>,
     usage_wait_total: Option<String>,
+    #[serde(default)]
+    should_fix: ShouldFix,
 }
 
 #[derive(Deserialize)]
@@ -428,6 +445,7 @@ impl Validator<'_> {
         Ok(Loop {
             usage_wait,
             usage_wait_total,
+            should_fix: raw.should_fix,
         })
     }
 

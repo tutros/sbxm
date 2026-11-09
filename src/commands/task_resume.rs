@@ -1,6 +1,8 @@
-//! `sbxm task resume (--issue N | --spec FILE | --pr N) [--rounds N]` (issue 118; decisions
-//! 173(c), 175; spec `sdlc/specs/task-state-machine.md` section 5.2): continues a task from its
-//! recorded stage, keeping its clone and commits, and carries it on to `ready` like `task review`.
+//! `sbxm task resume (--issue N | --spec FILE | --pr N) [--rounds N [--should-fix]]` (issue 118;
+//! decisions 173(c), 175; spec `sdlc/specs/task-state-machine.md` section 5.2): continues a task
+//! from its recorded stage, keeping its clone and commits, and carries it on to `ready` like `task
+//! review`. `--should-fix` (issue 510, decision 306) gives a clean `ready` task one fix round on
+//! its review's should-fix findings sized S.
 //! The worker is whoever the task recorded; the reviewer and the gates come from `sbxm-task.toml`.
 //! `--pr N` (issue 485) resumes the `task fix --pr N` task of the PR's current head and, as
 //! `task fix` does, pushes its result onto the PR's branch once its gates pass.
@@ -44,6 +46,9 @@ pub struct Options {
     pub target: Target,
     /// `--rounds N`: N more fix rounds for a task that stopped `ready`.
     pub rounds: Option<u32>,
+    /// `--should-fix` (issue 510, decision 306): the first of those rounds, on a clean `ready`
+    /// task, works on its review's should-fix findings sized S only.
+    pub should_fix: bool,
     /// The free-space check of the sandbox drive before a sandbox is created (decision 194).
     pub disk: disk::Guard,
     /// For tests: the committer identity a cloud worker sandbox made again gives its clone,
@@ -123,8 +128,13 @@ pub fn run(
         identity: identity.as_ref(),
         clone_source: None,
     };
-    resume::check_can_resume(&prepared.record, probe, opts.rounds)?;
+    resume::check_can_resume_with(&prepared.record, probe, opts.rounds, opts.should_fix)?;
     resume::check_ambiguous(&prepared.record, opts.forget_ambiguous)?;
+    let small = if opts.should_fix {
+        resume::check_should_fix(&prepared.record, &prepared.meta, opts.rounds)?
+    } else {
+        Vec::new()
+    };
     // A cloud sandbox doesn't use the drive of `sbx`'s local sandbox state (P11, decision
     // 262(h)).
     // Held until the resumed task ends (decision 304); a cloud task takes none.
@@ -135,7 +145,7 @@ pub fn run(
         }
         Location::Cloud => slot::Slot::none(),
     };
-    if resume::only_push_left(&prepared.record) {
+    if !opts.should_fix && resume::only_push_left(&prepared.record) {
         writeln!(
             out,
             "{id}: resuming from ready: its push onto PR #{}'s branch",
@@ -157,8 +167,21 @@ pub fn run(
             prepared.record.stopped.map_or("", record::Stopped::name)
         )?;
     }
-    let resumed =
-        resume::resume_forgetting(&env, &mut prepared, opts.rounds, opts.forget_ambiguous);
+    if !small.is_empty() {
+        let ids: Vec<&str> = small.iter().map(|f| f.id.as_str()).collect();
+        writeln!(
+            out,
+            "{id}: a should-fix round on its review's should-fix findings sized S: {}",
+            ids.join(", ")
+        )?;
+    }
+    let resumed = resume::resume_forgetting(
+        &env,
+        &mut prepared,
+        opts.rounds,
+        opts.forget_ambiguous,
+        opts.should_fix,
+    );
     // What the cloud sandboxes did (their creates and removals, decision 265) and a remade
     // sandbox's warnings (a template it couldn't use), even when the resume then failed.
     for line in prepared.events.drain(..) {
