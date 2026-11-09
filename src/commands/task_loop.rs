@@ -70,6 +70,9 @@ pub struct Options {
     pub cap: Option<u32>,
     /// For tests: the GitHub repo, `owner/name`, instead of the checkout's origin.
     pub repo: Option<String>,
+    /// `--wait` (issue 527, decision 310): on an empty queue, check again every [`PAUSE_POLL`]
+    /// for a job file or a labelled issue instead of stopping, until a stop request.
+    pub wait: bool,
 }
 
 /// One task's phases, as the loop runs them. Each writes its own screen output.
@@ -2163,6 +2166,54 @@ fn unmerged_dependencies(
         .collect()
 }
 
+/// `<base>/.sbxm/task-loop.stop`, next to the loop lock: a stop request `task loop --stop` writes
+/// for the running loop (issue 527, decision 310), which treats it as a first Ctrl-C press and
+/// removes it when it stops. One left from before, when no loop ran, is removed at the next start.
+pub fn stop_path(base_dir: &Path) -> PathBuf {
+    base_dir.join(".sbxm").join("task-loop.stop")
+}
+
+/// `sbxm task loop --stop` (issue 527, decision 310): asks the running loop to stop, by writing
+/// [`stop_path`]. With no loop running (no lock, or one whose process is gone) it says so and
+/// writes nothing.
+pub fn stop(config_dir: &Path, probe: &dyn ProcessProbe, out: &mut dyn Write) -> Result<()> {
+    let base_dir = GlobalConfig::load(config_dir)?.base_dir;
+    let lock = queue::lock_path(&base_dir);
+    let text = match fs::read_to_string(&lock) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            writeln!(out, "no `sbxm task loop` is running; nothing to stop")?;
+            return Ok(());
+        }
+        Err(e) => return Err(e).with_context(|| format!("cannot read {}", lock.display())),
+    };
+    let held: Process = serde_json::from_str(&text).with_context(|| {
+        format!(
+            "cannot read the loop lock {}; if no `sbxm task loop` is running, delete it",
+            lock.display()
+        )
+    })?;
+    if !held.alive(probe) {
+        writeln!(
+            out,
+            "no `sbxm task loop` is running (its lock names process {}, which is gone); nothing \
+             to stop",
+            held.pid
+        )?;
+        return Ok(());
+    }
+    let path = stop_path(&base_dir);
+    fs::write(&path, "").with_context(|| format!("cannot write {}", path.display()))?;
+    writeln!(
+        out,
+        "asked the `sbxm task loop` of process {} to stop: it stops after its current task, or \
+         within {} while it waits or is paused",
+        held.pid,
+        queue::span(PAUSE_POLL.as_secs())
+    )?;
+    Ok(())
+}
+
 /// `sbxm task loop --clear-pause` (decision 299): lifts the pause a red `main` set, saying what
 /// it removed, or that there was none.
 pub fn clear_pause(config_dir: &Path, out: &mut dyn Write) -> Result<()> {
@@ -2194,6 +2245,9 @@ pub fn run(
     if opts.issues.contains(&0) {
         bail!("issue numbers start at 1; pass --issue <n>");
     }
+    if opts.wait && !opts.issues.is_empty() {
+        bail!("--wait can't be used with --issue: a list of issues has an end");
+    }
     let settings = TaskConfig::load(&opts.repo_root)?.task_loop;
     let base_dir = GlobalConfig::load(config_dir)?.base_dir;
     let repo = resolve_repo(opts.repo.as_deref(), &opts.repo_root)?;
@@ -2205,6 +2259,24 @@ pub fn run(
     // The job queue's folders too (issue 525): every job file is read through them.
     crate::task::jobs::check_queue(&base_dir)?;
     let mut lock = take_lock(&base_dir, opts, probe, warn)?;
+    // Under the lock, so no loop is running that a request left here could be for.
+    let stop_file = stop_path(&base_dir);
+    match fs::remove_file(&stop_file) {
+        Ok(()) => writeln!(
+            out,
+            "removed a stop request left from before, when no loop was running ({}); not obeyed",
+            stop_file.display()
+        )?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e).with_context(|| format!("cannot remove {}", stop_file.display())),
+    }
+    // `task loop --stop`'s request counts as a first Ctrl-C press.
+    let asked = || (env.stop_requested)() || fs::symlink_metadata(&stop_file).is_ok();
+    let env = &Env {
+        now: env.now,
+        sleep: env.sleep,
+        stop_requested: &asked,
+    };
 
     let (started_at, log) = free_log(&base_dir, env)?;
     let mut lp = Loop {
@@ -2250,6 +2322,17 @@ pub fn run(
             );
         }
     }
+    // The request is the loop's to remove once it stops (decision 310), whatever stopped it.
+    if let Err(e) = fs::remove_file(&stop_file)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        let _ = writeln!(
+            warn,
+            "warning: cannot remove the stop request {}: {e}; the next loop removes it at its \
+             start",
+            stop_file.display()
+        );
+    }
     result.map(drop)
 }
 
@@ -2289,6 +2372,8 @@ fn work(
     let mut tasks_run = 0u32;
     let mut parked_in_row = 0;
     let mut idle_from: Option<u64> = None;
+    // Whether a `--wait` loop has said it waits on an empty queue since its last task.
+    let mut idle = false;
     // Tasks whose lock a command run by hand held (issue 409): `held` waits for the loop's next
     // task, then moves to `due`, tried before the next new issue. A task held again goes back to
     // `held`, so the loop never tries one twice with nothing run in between.
@@ -2346,6 +2431,20 @@ fn work(
             let open = github.issues_open(&lp.repo)?;
             let (next, waiting) = lp.next(&open, &opts.issues, &mut tried, &mut refused, out)?;
             let Some(issue) = next else {
+                if opts.wait {
+                    // Said once per idle spell: the next task, or the next stop, ends it.
+                    if !idle {
+                        writeln!(
+                            out,
+                            "the queue is empty; checking again every {} for a job file or a \
+                             labelled issue",
+                            queue::span(PAUSE_POLL.as_secs())
+                        )?;
+                        idle = true;
+                    }
+                    (env.sleep)(PAUSE_POLL);
+                    continue;
+                }
                 let skipped: Vec<Skipped> = refused.iter().chain(&waiting).cloned().collect();
                 let stop = if opts.issues.is_empty() {
                     "the queue is empty; the loop stops"
@@ -2366,6 +2465,7 @@ fn work(
                 left(&held, &due, out)?;
                 return Ok(stop.to_owned());
             };
+            idle = false;
             let found = open.iter().find(|i| i.number == issue);
             let title = found.map_or_else(|| format!("issue {issue}"), |i| i.title.clone());
             let size = found

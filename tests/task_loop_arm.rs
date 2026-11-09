@@ -182,6 +182,7 @@ impl Fixture {
             issues: Vec::new(),
             cap,
             repo: Some(REPO.into()),
+            wait: false,
         }
     }
 }

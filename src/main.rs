@@ -880,6 +880,19 @@ fn run() -> anyhow::Result<()> {
             finish_task(result, out, warn)
         }
         Command::Task {
+            command: TaskCommand::Loop { stop: true, .. },
+        } => {
+            let (mut out, warn) = task_writers(Vec::new(), None)?;
+            let result = (|| -> anyhow::Result<()> {
+                commands::task_loop::stop(
+                    &config::config_dir()?,
+                    &task::record::SystemProbe,
+                    &mut out,
+                )
+            })();
+            finish_task(result, out, warn)
+        }
+        Command::Task {
             command:
                 TaskCommand::Loop {
                     check: true,
@@ -896,6 +909,7 @@ fn run() -> anyhow::Result<()> {
                         issues,
                         cap: None,
                         repo: None,
+                        wait: false,
                     },
                     &sbxm::github::gh::GhBackend::default(),
                     &task::record::SystemProbe,
@@ -911,7 +925,9 @@ fn run() -> anyhow::Result<()> {
             finish_task(result.map(drop), out, warn)
         }
         Command::Task {
-            command: TaskCommand::Loop { cap, issues, .. },
+            command: TaskCommand::Loop {
+                cap, issues, wait, ..
+            },
         } => {
             // Each task's own phases log into its `run.log` (`TaskSteps`); the loop's lines
             // between tasks belong to none.
@@ -957,6 +973,7 @@ fn run() -> anyhow::Result<()> {
                         issues,
                         cap,
                         repo: None,
+                        wait,
                     },
                     &steps,
                     &github,

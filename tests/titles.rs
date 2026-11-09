@@ -711,6 +711,7 @@ mod looped {
                 issues: Vec::new(),
                 cap: None,
                 repo: Some(REPO.into()),
+                wait: false,
             },
             &Idle,
             &github(),
