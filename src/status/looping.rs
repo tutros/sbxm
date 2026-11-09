@@ -2,8 +2,9 @@
 //! task it is on and its stage, the tasks it finished, the PRs awaiting the user (the loop's cap
 //! of 5, counted by the same [`queue::awaits_user`] the loop pauses on) and the queue of labeled
 //! issues in the order the loop takes them (for a loop started with `--issue`, its list from the
-//! lock instead, as [`Listed`], issue 477), and the pause on a red `main` (issue 442). State
-//! comes from the loop's lock, its pause file and the task records alone, with no write; only the queue and the PR count need GitHub, one
+//! lock instead, as [`Listed`], issue 477), the pause on a red `main` (issue 442) and the
+//! loop's job files, queued and running ([`Jobs`], issue 528). State
+//! comes from the loop's lock, its pause file, its job files and the task records alone, with no write; only the queue and the PR count need GitHub, one
 //! fetch at most once a minute ([`Cache`]), made only while a loop runs.
 
 use std::fs;
@@ -564,9 +565,10 @@ pub fn read_jobs(base: &Path) -> Jobs {
             paths
                 .iter()
                 .map(|path| {
-                    match fs::read_to_string(path)
+                    // Read as the loop reads it, so it says what the loop will do.
+                    match fs::read(path)
                         .map_err(|e| e.to_string())
-                        .and_then(|text| jobs::parse(&text))
+                        .and_then(|bytes| jobs::parse(&String::from_utf8_lossy(&bytes)))
                     {
                         Ok(job) => job_text(&job),
                         Err(_) => format!("{} (not a job: will be refused)", file_name(path)),
@@ -580,7 +582,9 @@ pub fn read_jobs(base: &Path) -> Jobs {
             .unwrap_or_default()
             .iter()
             .map(|path| {
-                let text = fs::read_to_string(path).unwrap_or_default();
+                let text = fs::read(path)
+                    .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+                    .unwrap_or_default();
                 let job = Running::read(&text)
                     .read
                     .job
