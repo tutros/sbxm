@@ -766,3 +766,55 @@ fn a_queue_folder_that_is_a_file_refuses_the_loop_before_its_lock() {
     assert!(run.result.is_err(), "{}", run.out);
     assert!(!sbxm::task::queue::lock_path(&f.base()).exists());
 }
+
+#[cfg(unix)]
+#[test]
+fn a_job_file_that_cannot_be_read_is_refused_with_a_result_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let f = fixture();
+    let path = f.queue_job("locked.json", r#"{"kind": "rm-merged"}"#, 10);
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+    if fs::read(&path).is_ok() {
+        return; // root reads it anyway: nothing to check here
+    }
+    let script = Script::new(&f.base());
+    let run = run_loop(&f, &script, &github(&[]), None);
+    run.result.unwrap();
+    assert!(script.calls().is_empty(), "{:?}", script.calls());
+    let result = f.result("locked.json");
+    assert_eq!(result["outcome"], "refused", "{result}");
+    assert!(
+        result["reason"].as_str().unwrap().contains("cannot read"),
+        "{result}"
+    );
+    assert_eq!(
+        fs::read_dir(jobs::running_dir(&f.base())).unwrap().count(),
+        0
+    );
+}
+
+#[test]
+fn a_running_file_naming_a_path_instead_of_a_task_id_names_no_task() {
+    let f = fixture();
+    // A record outside the task folders, which the running file points at.
+    let outside = f.base().join("elsewhere");
+    write_task(&f.base(), Kind::Pr, 465, None, REPO);
+    fs::create_dir_all(&outside).unwrap();
+    fs::copy(
+        record::task_dir(&f.base(), "pr-465").join("task.json"),
+        outside.join("task.json"),
+    )
+    .unwrap();
+    let running = jobs::running_dir(&f.base());
+    fs::create_dir_all(&running).unwrap();
+    fs::write(
+        running.join("r.json"),
+        r#"{"job": {"kind": "review", "pr": 465}, "started_at": "2026-11-09T10:00:00Z", "task": "../../elsewhere"}"#,
+    )
+    .unwrap();
+    let script = Script::new(&f.base());
+    run_loop(&f, &script, &github(&[465]), None).result.unwrap();
+    let result = f.result("r.json");
+    assert_eq!(result["outcome"], "interrupted");
+    assert_eq!(result["task"], Value::Null, "{result}");
+}

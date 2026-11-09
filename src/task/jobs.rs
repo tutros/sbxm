@@ -171,8 +171,12 @@ fn own_folder(base_dir: &Path, dir: &Path) -> Result<()> {
 }
 
 /// Takes the job at `path`: moves it to `running/` (created when needed) and returns its new
-/// place and its text, as read.
-pub fn take(base_dir: &Path, path: &Path) -> Result<(PathBuf, String)> {
+/// place and its text, as read, or why it can't be read (the job is then refused, not left
+/// there).
+pub fn take(
+    base_dir: &Path,
+    path: &Path,
+) -> Result<(PathBuf, std::result::Result<String, String>)> {
     let running = running_dir(base_dir);
     own_folder(base_dir, &running)?;
     let name = path
@@ -181,8 +185,10 @@ pub fn take(base_dir: &Path, path: &Path) -> Result<(PathBuf, String)> {
     let taken = running.join(name);
     fs::rename(path, &taken)
         .with_context(|| format!("cannot move {} to {}", path.display(), running.display()))?;
-    let bytes = fs::read(&taken).with_context(|| format!("cannot read {}", taken.display()))?;
-    Ok((taken, String::from_utf8_lossy(&bytes).into_owned()))
+    let text = fs::read(&taken)
+        .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
+        .map_err(|e| format!("cannot read {}: {e}", taken.display()));
+    Ok((taken, text))
 }
 
 /// What a job file held: its JSON when it is JSON, else its raw text.

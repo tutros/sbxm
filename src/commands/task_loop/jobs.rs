@@ -88,9 +88,14 @@ impl Loop<'_> {
                 .as_ref()
                 .and_then(|v| serde_json::from_value::<Job>(v.clone()).ok())
                 .map_or_else(|| file_label(&taken), |job| job.label());
-            let rec = running.task.as_deref().and_then(|id| {
-                record::read(&record::task_dir(&self.base_dir, id).join("task.json")).ok()
-            });
+            // A task id only, never a path, whatever the file says.
+            let rec = running
+                .task
+                .as_deref()
+                .filter(|id| record::is_valid_id(id))
+                .and_then(|id| {
+                    record::read(&record::task_dir(&self.base_dir, id).join("task.json")).ok()
+                });
             let reason = match &rec {
                 Some(rec) => format!(
                     "the loop stopped while it ran; it started task {} ({} {}), not run again",
@@ -126,8 +131,8 @@ impl Loop<'_> {
     fn job(&mut self, path: &Path, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
         let (taken, text) = jobs::take(&self.base_dir, path)?;
         let started = self.now();
-        let read = AsRead::new(&text);
-        let (label, ended) = match jobs::parse(&text) {
+        let read = AsRead::new(text.as_deref().unwrap_or_default());
+        let (label, ended) = match text.and_then(|text| jobs::parse(&text)) {
             Err(why) => (file_label(&taken), Ended::new(Outcome::Refused, why)),
             Ok(job) => {
                 writeln!(out, "{}: started", job.label())?;
