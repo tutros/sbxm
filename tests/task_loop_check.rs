@@ -8,14 +8,16 @@ use std::cell::RefCell;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use common::Env as TestEnv;
 use common::task_fixture::{Probe, issue_text, open_issue};
 use sbxm::commands::task_loop::{self, Env, Options, Steps};
-use sbxm::github::Issue;
-use sbxm::github::fake::FakeGitHub;
+use sbxm::github::fake::{FakeGitHub, GhCall};
+use sbxm::github::gh::{GhBackend, GhRunner};
+use sbxm::github::{GitHubBackend, Issue};
 use sbxm::task::queue::has_open_points;
 
 const REPO: &str = "o/r";
@@ -190,5 +192,70 @@ fn the_loop_passes_over_a_named_issue_with_open_points() {
     assert!(
         out.contains("skipped #3 Fix 3: open points not answered"),
         "{out}"
+    );
+}
+
+// --- a branch on origin, through `gh` ---
+
+/// Plays `gh`: records every call and answers with the queued outputs in order.
+struct Scripted {
+    calls: Mutex<Vec<Vec<String>>>,
+    outputs: Mutex<Vec<String>>,
+}
+
+impl GhRunner for &'static Scripted {
+    fn run(&self, args: &[String], _stdin: Option<&str>) -> Result<String> {
+        self.calls.lock().unwrap().push(args.to_vec());
+        self.outputs
+            .lock()
+            .unwrap()
+            .pop()
+            .ok_or_else(|| anyhow!("no scripted output left"))
+    }
+}
+
+fn gh_answering(outputs: &[&str]) -> (GhBackend, &'static Scripted) {
+    let script: &'static Scripted = Box::leak(Box::new(Scripted {
+        calls: Mutex::default(),
+        outputs: Mutex::new(outputs.iter().rev().map(|s| (*s).to_owned()).collect()),
+    }));
+    (GhBackend::with_runner(Box::new(script)), script)
+}
+
+#[test]
+fn a_branch_on_origin_is_found_by_its_exact_ref() {
+    // The shape of `gh api repos/<repo>/git/matching-refs/heads/<branch>` (written by hand, no
+    // GitHub access where issue 511 was built): every ref the name starts, so only an exact
+    // match counts.
+    let (gh, script) = gh_answering(&[
+        r#"[{"ref":"refs/heads/issue-468","object":{"sha":"abc","type":"commit"}}]"#,
+        r#"[{"ref":"refs/heads/issue-4680","object":{"sha":"abc","type":"commit"}}]"#,
+        "[]",
+    ]);
+
+    assert!(gh.branch_exists(REPO, "issue-468").unwrap());
+    assert!(!gh.branch_exists(REPO, "issue-468").unwrap());
+    assert!(!gh.branch_exists(REPO, "issue-468").unwrap());
+    assert_eq!(
+        script.calls.lock().unwrap()[0],
+        ["api", "repos/o/r/git/matching-refs/heads/issue-468"]
+    );
+}
+
+#[test]
+fn a_bad_branch_name_is_refused_before_gh_runs() {
+    let (gh, script) = gh_answering(&[]);
+    assert!(gh.branch_exists(REPO, "../x").is_err());
+    assert!(script.calls.lock().unwrap().is_empty());
+}
+
+#[test]
+fn the_fake_has_the_branches_a_test_scripted() {
+    let gh = FakeGitHub::default().with_branch_head("issue-468", "abc");
+    assert!(gh.branch_exists(REPO, "issue-468").unwrap());
+    assert!(!gh.branch_exists(REPO, "issue-469").unwrap());
+    assert_eq!(
+        gh.calls()[0],
+        GhCall::BranchExists(REPO.into(), "issue-468".into())
     );
 }

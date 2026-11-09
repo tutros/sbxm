@@ -186,6 +186,12 @@ struct RawBranch {
 }
 
 #[derive(Deserialize)]
+struct RawRef {
+    #[serde(rename = "ref")]
+    name: String,
+}
+
+#[derive(Deserialize)]
 struct RawCommit {
     sha: String,
 }
@@ -492,6 +498,20 @@ impl GitHubBackend for GhBackend {
             bail!("`gh api` named `{sha}` as the head of {branch}, which is not a full commit id");
         }
         Ok(sha)
+    }
+
+    fn branch_exists(&self, repo: &str, branch: &str) -> Result<bool> {
+        // The branch goes into the API path: only a usable branch name is accepted.
+        if !crate::task::repo::valid_ref_name(branch) {
+            bail!("{branch:?} isn't a usable branch name, so it can't be looked up");
+        }
+        // Every ref whose name starts with this one: `issue-4` matches `issue-468` too.
+        let refs: Vec<RawRef> = self.json(&strings(&[
+            "api",
+            &format!("repos/{repo}/git/matching-refs/heads/{branch}"),
+        ]))?;
+        let wanted = format!("refs/heads/{branch}");
+        Ok(refs.iter().any(|r| r.name == wanted))
     }
 
     fn pr_arm_auto_merge(&self, repo: &str, number: u32, head_commit: &str) -> Result<()> {
