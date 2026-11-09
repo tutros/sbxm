@@ -211,7 +211,7 @@ pub fn check_can_resume_with(
 /// not S). Only for a task that stopped `ready` clean (0 must-fix, no stop), at most once per task.
 /// Reads only; every refusal says why and what to do instead.
 pub fn check_should_fix(task: &Record, meta: &Path, rounds: Option<u32>) -> Result<Vec<Finding>> {
-    let (id, flag) = (&task.id, target_flag(task));
+    let (id, flag) = (&task.id, next::record_flag(task));
     check_should_fix_rounds(task, rounds)?;
     if task.stage != Stage::Ready {
         bail!(
@@ -260,7 +260,7 @@ fn check_should_fix_rounds(task: &Record, rounds: Option<u32>) -> Result<()> {
     if rounds == Some(1) {
         return Ok(());
     }
-    let flag = target_flag(task);
+    let flag = next::record_flag(task);
     let given = rounds.map_or_else(|| "no --rounds".to_owned(), |n| format!("--rounds {n}"));
     bail!(
         "--should-fix runs exactly one fix round, so it takes --rounds 1 ({given} was given): run \
