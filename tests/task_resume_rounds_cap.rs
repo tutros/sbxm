@@ -81,6 +81,7 @@ fn resume(f: &Fixture, rounds: u32, backend: &FakeBackend) -> String {
         repo_root: f.env.tmp.path().join("target-repo"),
         target: Target::Issue(41),
         rounds: Some(rounds),
+        should_fix: false,
         disk: Default::default(),
         identity: None,
         forget_ambiguous: false,

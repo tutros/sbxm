@@ -39,6 +39,7 @@ fn resume_rounds(
             repo_root: f.env.tmp.path().join("target-repo"),
             target: task_resume::Target::Pr(7),
             rounds,
+            should_fix: false,
             disk: Default::default(),
             identity: None,
             forget_ambiguous: false,

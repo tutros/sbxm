@@ -71,6 +71,7 @@ fn resume_rounds(f: &Fixture, spec: PathBuf, rounds: Option<u32>, backend: &Fake
             repo_root: f.env.tmp.path().join("target-repo"),
             target: Target::Spec(spec),
             rounds,
+            should_fix: false,
             disk: Default::default(),
             identity: Some(identity()),
             forget_ambiguous: false,

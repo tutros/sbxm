@@ -500,6 +500,10 @@ pub struct Record {
     /// How each fix round ran (issue 430), in order; absent in older records, which recorded none.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub fix_runs: Vec<FixRun>,
+    /// Set when the task's should-fix round starts (`task resume --should-fix`, issue 510,
+    /// decision 306): a task gets at most one. Absent in older records and until then.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub should_fix_round: bool,
     /// Set when the task continues an open PR's branch; absent in older records.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub continues: Option<PrBranch>,
@@ -721,6 +725,7 @@ impl Record {
             pr: None,
             issue_comments: Vec::new(),
             fix_runs: Vec::new(),
+            should_fix_round: false,
             continues: None,
             related: Vec::new(),
             notes: Vec::new(),

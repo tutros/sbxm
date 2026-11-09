@@ -36,6 +36,7 @@ fn resume(f: &Fixture, target: Target, backend: &FakeBackend) -> String {
         repo_root: f.env.tmp.path().join("target-repo"),
         target,
         rounds: Some(1),
+        should_fix: false,
         disk: Default::default(),
         identity: Some(identity()),
         forget_ambiguous: false,

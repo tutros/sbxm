@@ -69,6 +69,9 @@ timeout = "20m"                # per command
 # [loop]
 # usage_wait = "30m"
 # usage_wait_total = "5h"
+# What the loop does with a clean task's should-fix findings: "file" files them as issues;
+# "fix" first gives those sized S one more fix round, then files the rest.
+# should_fix = "file"
 
 # Replace a built-in prompt with a file inside this repo:
 # [prompts]
