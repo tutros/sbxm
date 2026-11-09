@@ -8,14 +8,15 @@ use std::path::Path;
 
 use anyhow::{Result, anyhow};
 
-use super::{End, Halt, Loop, check, first_line, sign_in_stop};
+use super::{Capture, Claimed, End, Halt, Loop, check, first_line, says_sign_in, sign_in_stop};
+use crate::commands::task_start::spec_flag;
 use crate::config::{GlobalConfig, Profile};
 use crate::github::PrState;
 use crate::run::results::format_timestamp;
 use crate::task::jobs::{self, AsRead, Job, JobHarness, JobResult, Outcome, Running};
-use crate::task::next;
 use crate::task::queue::{self, Row};
 use crate::task::record::{self, Kind, Record, Stage};
+use crate::task::{lock, next, pipeline};
 
 /// How one job ended, before its result file.
 struct Ended {
@@ -26,6 +27,9 @@ struct Ended {
     /// What stops the whole loop after the job's result is written (a run job's sign-in, usage
     /// limit or error, as for a task the loop picked itself).
     halt: Option<anyhow::Error>,
+    /// The flag naming the task in its `next` step, when its record's own can't (a spec task's
+    /// real path, issue 524).
+    flag: Option<String>,
 }
 
 impl Ended {
@@ -35,6 +39,7 @@ impl Ended {
             reason: reason.into(),
             task: None,
             halt: None,
+            flag: None,
         }
     }
 
@@ -45,12 +50,15 @@ impl Ended {
 }
 
 /// The next step sbxm names for `rec`: none for a finished task, its `ready` step, or the command
-/// that continues it (issue 512).
-fn next_of(rec: &Record) -> Option<String> {
-    match rec.stage {
-        Stage::Finished => None,
-        Stage::Ready => next::ready(rec, &next::record_flag(rec)),
-        _ => Some(next::resume(rec)),
+/// that continues it (issue 512). `flag` names the task instead of its record's own flag (a spec
+/// task's real path).
+fn next_of(rec: &Record, flag: Option<&str>) -> Option<String> {
+    match (rec.stage, flag) {
+        (Stage::Finished, _) => None,
+        (Stage::Ready, Some(flag)) => next::ready(rec, flag),
+        (Stage::Ready, None) => next::ready(rec, &next::record_flag(rec)),
+        (_, Some(flag)) => Some(format!("sbxm task resume {flag}")),
+        (_, None) => Some(next::resume(rec)),
     }
 }
 
@@ -121,7 +129,7 @@ impl Loop<'_> {
                 ended_at: now,
                 task: rec.as_ref().map(|r| r.id.clone()),
                 url: rec.as_ref().and_then(|r| self.url_of(r)),
-                next: rec.as_ref().and_then(next_of),
+                next: rec.as_ref().and_then(|rec| next_of(rec, None)),
             };
             self.ended(&taken, &label, &result, self.now(), out, warn)?;
         }
@@ -152,7 +160,9 @@ impl Loop<'_> {
             ended_at: format_timestamp(self.now()),
             task: rec.as_ref().map(|r| r.id.clone()),
             url: rec.as_ref().and_then(|r| self.url_of(r)),
-            next: rec.as_ref().and_then(next_of),
+            next: rec
+                .as_ref()
+                .and_then(|rec| next_of(rec, ended.flag.as_deref())),
         };
         self.ended(&taken, &label, &result, started, out, warn)?;
         match ended.halt {
@@ -256,7 +266,184 @@ impl Loop<'_> {
                 harness,
                 warm,
             } => self.template_job(profile, harness, warm, taken, read, started, out, warn),
+            Job::Spec { ref file } => self.spec_job(file, taken, read, started, out, warn),
         }
+    }
+
+    /// A `spec` job (issue 524, answers 1 and 2): a plain existing file in `specs_dir`, run with
+    /// `task run --spec`; then, as for the loop's issues, a task ready with 0 must-fix gets its
+    /// should-fix round (decision 306), its finish and its auto-merge (decision 293). A task
+    /// that stops short of ready, or with must-fix left, is not finished: `stopped`.
+    fn spec_job(
+        &mut self,
+        file: &str,
+        taken: &Path,
+        read: &AsRead,
+        started: u64,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<Ended> {
+        let config = match GlobalConfig::load(self.config_dir) {
+            Ok(config) => config,
+            Err(e) => return Ok(Ended::new(Outcome::Failed, format!("{e:#}"))),
+        };
+        let Some(dir) = config.specs_dir else {
+            return Ok(Ended::new(
+                Outcome::Refused,
+                format!(
+                    "no specs_dir is set in {}, so no spec job runs; set specs_dir to the folder \
+                     of the spec files",
+                    self.config_dir.join("config.toml").display()
+                ),
+            ));
+        };
+        let spec = dir.join(file);
+        match std::fs::symlink_metadata(&spec) {
+            Ok(meta) if meta.is_file() => {}
+            Ok(_) => {
+                return Ok(Ended::new(
+                    Outcome::Refused,
+                    format!("{} isn't a plain file", spec.display()),
+                ));
+            }
+            Err(e) => {
+                return Ok(Ended::new(
+                    Outcome::Refused,
+                    format!(
+                        "{} cannot be read ({e}); a spec job names a file in specs_dir {}",
+                        spec.display(),
+                        dir.display()
+                    ),
+                ));
+            }
+        }
+        let id = match record::spec_id(&spec) {
+            Ok((id, _)) => id,
+            Err(e) => return Ok(Ended::new(Outcome::Refused, format!("{e:#}"))),
+        };
+        self.mark(taken, read, started, Some(id.clone()))?;
+        let ended = self.spec_task(&spec, &id, out, warn)?;
+        Ok(Ended {
+            flag: Some(spec_flag(&spec)),
+            ..ended.task(id)
+        })
+    }
+
+    /// A spec job's task `id` of file `spec`, from its run to its PR or its stop.
+    fn spec_task(
+        &mut self,
+        spec: &Path,
+        id: &str,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<Ended> {
+        let flag = spec_flag(spec);
+        let mut captured = Vec::new();
+        let result = {
+            let mut out = Capture {
+                inner: out,
+                text: Vec::new(),
+            };
+            let mut warn = Capture {
+                inner: warn,
+                text: Vec::new(),
+            };
+            let result = self.steps.run_spec(spec, &mut out, &mut warn);
+            captured.extend(out.text);
+            captured.extend(warn.text);
+            result
+        };
+        if let Err(e) = result {
+            let exists = self.record_of(id).is_some();
+            if says_sign_in(&e, &String::from_utf8_lossy(&captured)) {
+                let stop = sign_in_stop(e, exists.then(|| format!("sbxm task resume {flag}")));
+                return Ok(Ended {
+                    halt: Some(anyhow!("{stop:#}")),
+                    ..Ended::new(Outcome::Stopped, format!("{stop:#}"))
+                });
+            }
+            if e.is::<pipeline::MissingSecret>() {
+                return Ok(Ended {
+                    halt: Some(anyhow!("{e:#}")),
+                    ..Ended::new(Outcome::Failed, format!("{e:#}"))
+                });
+            }
+            return Ok(Ended::new(Outcome::Failed, format!("{e:#}")));
+        }
+        if self.should_fix_due_of(id)
+            && let Err(e) = self.steps.should_fix_spec(spec, out, warn)
+        {
+            return Ok(Ended::new(
+                Outcome::Failed,
+                format!("its should-fix round failed: {e:#}"),
+            ));
+        }
+        let Some(rec) = self.record_of(id) else {
+            return Ok(Ended::new(
+                Outcome::Failed,
+                "`task run` ended without a task record",
+            ));
+        };
+        if rec.stage != Stage::Ready {
+            return Ok(Ended::new(
+                Outcome::Stopped,
+                format!(
+                    "it stopped at {} ({}) short of ready; not finished",
+                    rec.stage.name(),
+                    rec.status.name()
+                ),
+            ));
+        }
+        let must_fix = rec.review.as_ref().map_or(0, |r| r.must_fix);
+        if must_fix > 0 || rec.stopped.is_some() {
+            let stop = rec
+                .stopped
+                .map_or_else(String::new, |s| format!(", work stop: {}", s.name()));
+            return Ok(Ended::new(
+                Outcome::Stopped,
+                format!("ready with {must_fix} must-fix left{stop}; not finished"),
+            ));
+        }
+        match self.claim(id) {
+            Ok(Claimed::Marked) => {}
+            Ok(Claimed::Finished(pr)) => {
+                let into = pr.map_or_else(String::new, |url| format!(" into {url}"));
+                return Ok(Ended::new(
+                    Outcome::Skipped,
+                    format!("finished by a command run by hand{into}"),
+                ));
+            }
+            Err(e) if e.is::<lock::InUse>() => {
+                return Ok(Ended::new(
+                    Outcome::Failed,
+                    "its lock is held by a command run by hand; finish it once that ends",
+                ));
+            }
+            Err(e) => self.warn_once(
+                warn,
+                format!(
+                    "task {id} could not be marked as the loop's ({e:#}); its PR won't count \
+                     among the PRs awaiting you"
+                ),
+            )?,
+        }
+        if let Err(e) = self.steps.finish_spec(spec, out, warn) {
+            return Ok(Ended::new(
+                Outcome::Failed,
+                format!("its finish failed: {e:#}"),
+            ));
+        }
+        let armed = self.arm(id, out, warn)?;
+        let pr = self
+            .record_of(id)
+            .and_then(|r| r.pr)
+            .and_then(|url| queue::pr_number(&url));
+        let what = match (pr, armed) {
+            (None, _) => "finished; its [finish] sink opened no PR".to_owned(),
+            (Some(n), Some(note)) => format!("PR #{n}, clean, {note}"),
+            (Some(n), None) => format!("PR #{n}, clean"),
+        };
+        Ok(Ended::new(Outcome::Done, what))
     }
 
     /// A `template` job (issue 524, answer 3): only of an existing profile with a `[template]`
@@ -429,7 +616,10 @@ impl Loop<'_> {
             },
             Err(Halt::SignIn(e)) => {
                 let exists = self.record(issue).is_some();
-                let stop = sign_in_stop(e, issue, exists);
+                let stop = sign_in_stop(
+                    e,
+                    exists.then(|| format!("sbxm task resume --issue {issue}")),
+                );
                 Ended {
                     halt: Some(anyhow!("{stop:#}")),
                     ..Ended::new(Outcome::Stopped, format!("{stop:#}"))

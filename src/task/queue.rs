@@ -114,15 +114,16 @@ pub fn opened_by_loop(rec: &Record) -> bool {
 /// A PR a loop opened, as its task record names it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoopPr {
-    /// The task's id, `issue-<n>`.
+    /// The task's id, `issue-<n>` or a spec task's.
     pub task: String,
     pub url: String,
     /// The PR's number; `None` when the URL doesn't end in one.
     pub number: Option<u32>,
 }
 
-/// Every PR a loop opened for `repo` that a task record under `base_dir` names (review M-3): a
-/// task finished by hand, a PR task, another repo's task, or a task folder that is not sbxm's own
+/// Every PR a loop opened for `repo` that a task record under `base_dir` names (review M-3), an
+/// issue task's or a queued spec job's (issue 524): a task finished by hand, a PR task, another
+/// repo's task, or a task folder that is not sbxm's own
 /// doesn't count. In the order [`record::task_folders`] lists the tasks.
 pub fn loop_prs(base_dir: &Path, repo: &str) -> Result<Vec<LoopPr>> {
     let mut found = Vec::new();
@@ -133,7 +134,11 @@ pub fn loop_prs(base_dir: &Path, repo: &str) -> Result<Vec<LoopPr>> {
         let Ok(rec) = record::read(&dir.join("task.json")) else {
             continue;
         };
-        if rec.kind != Kind::Issue || rec.repo != repo || !opened_by_loop(&rec) {
+        // A queued spec job's PR counts like an issue's (issue 524).
+        if !matches!(rec.kind, Kind::Issue | Kind::Spec)
+            || rec.repo != repo
+            || !opened_by_loop(&rec)
+        {
             continue;
         }
         let Some(url) = rec.pr.clone() else {
