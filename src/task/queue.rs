@@ -10,7 +10,7 @@ use anyhow::{Context, Result};
 
 use crate::github::{Issue, PrMergeState, PrState};
 use crate::run::results::format_timestamp;
-use crate::task::finish::check_own_folder;
+use crate::task::finish::{check_own_folder, next_fence};
 use crate::task::record::{self, Kind, Record};
 
 /// The label that puts an issue in the loop's queue (decision 245(b)); the loop removes it when a
@@ -191,13 +191,13 @@ pub fn depends_on(body: &str) -> Vec<u32> {
 /// renames it `## Answered`. Only a level-2 heading at a line's start counts, outside a fenced
 /// code block, so a body that quotes the heading in prose or in an example is not held back.
 pub fn has_open_points(body: &str) -> bool {
-    let mut fenced = false;
+    // The fence that is open, by character and length (review M-1): a shorter fence or one of
+    // the other character inside it is the example's content, not its end.
+    let mut open = None;
     for line in body.lines() {
-        if line.trim_start().starts_with("```") || line.trim_start().starts_with("~~~") {
-            fenced = !fenced;
-            continue;
-        }
-        if fenced {
+        let before = open;
+        open = next_fence(open, line);
+        if before.is_some() || open.is_some() {
             continue;
         }
         if let Some(heading) = line.strip_prefix("## ")

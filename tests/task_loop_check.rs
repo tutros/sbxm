@@ -153,6 +153,26 @@ fn open_points_in_a_code_block_or_not_at_a_line_start_do_not_count() {
     assert!(has_open_points("```\nx\n```\n## Open points\n"));
 }
 
+/// Review M-1: a real heading after a four-backtick example that holds a shorter fence.
+const AFTER_NESTED_FENCE: &str =
+    "````md\n```rust\nlet x = 1;\n````\n\n## Open points\n1. Which option?\n";
+/// Review M-1: a quoted heading inside a four-backtick example that holds a shorter fence.
+const INSIDE_NESTED_FENCE: &str = "````md\n```md\n## Open points\n```\n````\n\n## Answered\n";
+
+#[test]
+fn a_shorter_fence_or_the_other_character_does_not_close_an_open_block() {
+    assert!(has_open_points(AFTER_NESTED_FENCE));
+    assert!(!has_open_points(INSIDE_NESTED_FENCE));
+    // Tildes inside a backtick block, and backticks inside a tilde block, are content.
+    assert!(!has_open_points("```\n~~~\n## Open points\n~~~\n```\n"));
+    assert!(!has_open_points("~~~~\n```\n## Open points\n```\n~~~~\n"));
+    assert!(has_open_points("~~~\n```\n~~~\n## Open points\n"));
+    // A closing fence takes nothing after it: `````rust` inside a block opens nothing.
+    assert!(!has_open_points("```\n```rust\n## Open points\n```\n"));
+    // A longer closing fence closes it.
+    assert!(has_open_points("```\nx\n`````\n## Open points\n"));
+}
+
 // --- the loop passes over an issue with open points ---
 
 #[test]
@@ -458,6 +478,42 @@ fn check_takes_an_issue_whose_open_points_heading_is_only_quoted() {
 
     assert!(result.unwrap(), "{out}");
     assert!(out.starts_with("#3 Fix 3: take\n"), "{out}");
+}
+
+#[test]
+fn check_skips_a_real_heading_after_a_nested_fence_and_takes_one_inside_it() {
+    let f = fixture();
+    let gh = github(vec![
+        open_issue(3, &SIZED, AFTER_NESTED_FENCE),
+        open_issue(4, &SIZED, INSIDE_NESTED_FENCE),
+    ]);
+
+    let (result, out) = check(&f, &[3], &gh);
+    assert!(!result.unwrap(), "{out}");
+    assert!(
+        out.starts_with("#3 Fix 3: skip: open points not answered\n"),
+        "{out}"
+    );
+
+    let (result, out) = check(&f, &[4], &gh);
+    assert!(result.unwrap(), "{out}");
+    assert!(out.starts_with("#4 Fix 4: take\n"), "{out}");
+}
+
+#[test]
+fn the_loop_never_runs_an_issue_whose_heading_follows_a_nested_fence() {
+    let f = fixture();
+    let gh = github(vec![open_issue(3, &SIZED, AFTER_NESTED_FENCE)]);
+    let script = Script::default();
+
+    let (result, out) = run_loop(&f, &opts(&f, &[3]), &script, &gh);
+
+    result.unwrap();
+    assert!(script.calls.borrow().is_empty(), "{out}");
+    assert!(
+        out.contains("skipped #3 Fix 3: open points not answered"),
+        "{out}"
+    );
 }
 
 #[test]
