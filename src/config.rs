@@ -47,6 +47,10 @@ pub struct GlobalConfig {
     /// Where `sbx` keeps its sandboxes, overriding the platform default (decision 194).
     #[serde(default)]
     pub sandbox_state_dir: Option<PathBuf>,
+    /// The folder of the spec files a queued `spec` job names by file name (issue 524); unset
+    /// refuses every spec job.
+    #[serde(default)]
+    pub specs_dir: Option<PathBuf>,
     /// How an interactive Antigravity sandbox signs in (decision 281, issue 384). Account-level,
     /// so it's not in the config hash.
     #[serde(default)]

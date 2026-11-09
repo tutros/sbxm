@@ -405,16 +405,24 @@ A worker can fix a PR's review finding from a spec. The branch to fix must be wh
 
 ## Queue a job
 
-To have a long command run without your terminal or a watcher in the agent's session, write a job file to
-`<base_dir>/.sbxm/queue/` and let `sbxm task loop` run it (decision 309): `{"kind": "review", "pr": N}`, `{"kind":
-"fix", "pr": N}` (optionally `"check_run": ID`), `{"kind": "run", "issue": N}` or `{"kind": "rm-merged"}`. Write it
-as `<name>.json.tmp` and rename it, so the loop never reads half a file. The loop runs every queued job before its
-next issue, oldest first, and writes the result to `queue/done/<name>.json`: read its `outcome`, `reason`, `url` and
-`next`. A job outside the four shapes, a `review` or `fix` of a PR sbxm didn't open, or a `run` of an issue `task loop
---check` would skip is refused, running nothing. A job a stopped loop left in `queue/running/` is reported
-`interrupted` with the command that continues its task, and never re-run; queue a new file to run it again. With
-nothing queued and no ready issue a loop without `--wait` stops, so start `sbxm task loop` after queuing, or keep one
-running with the scheduled start below.
+To have a long command run without your terminal or a watcher in the agent's session, queue a job with `sbxm task
+queue` (issue 529): `run --issue N`, `review --pr N`, `fix --pr N [--check-run ID]`, `rm-merged`, `spec --file NAME`
+or `template <profile> [--harness h] [--warm]`. It makes the loop's checks at once (below) and refuses with the reason,
+writing nothing, as it does a job of the same kind and target already in `queue/` or `queue/running/`; else it
+writes the file as described next and prints its path. It is one command an allow rule can name. By hand, write a job
+file to `<base_dir>/.sbxm/queue/` and let `sbxm task loop` run it (decision 309): `{"kind": "review", "pr": N}`, `{"kind":
+"fix", "pr": N}` (optionally `"check_run": ID`), `{"kind": "run", "issue": N}`, `{"kind": "rm-merged"}`, `{"kind":
+"spec", "file": "<name>.md"}` (a plain file name in `specs_dir`, set in `config.toml`; finished and armed like an
+issue's task when it ends ready with 0 must-fix, else `stopped` with its next command) or `{"kind": "template",
+"profile": P}` (optionally `"harness": "codex"` or `"pi"`, and `"warm": true` to warm from the loop's checkout; the
+result names the new tag; issue 524). Write it as `<name>.json.tmp` and rename it, so the loop never reads half a
+file. The loop runs every queued job before its next issue, oldest first, and writes the result to
+`queue/done/<name>.json`: read its `outcome`, `reason`, `url` and `next`. A job outside the six shapes, a `spec` file
+not in `specs_dir`, a `template` of a profile without `[template]`, a `review` or `fix` of a PR sbxm didn't open, or a
+`run` of an issue `task loop --check` would skip is refused, running nothing. A job a stopped loop left in
+`queue/running/` is reported `interrupted` with the command that continues its task, and never re-run; queue a new
+file to run it again. With nothing queued and no ready issue a loop without `--wait` stops, so start `sbxm task loop`
+after queuing, or keep one running with the scheduled start below.
 
 ## The loop at logon
 

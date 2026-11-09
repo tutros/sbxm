@@ -30,12 +30,13 @@ use anyhow::{Context, Result, anyhow, bail};
 use super::task_start::resolve_repo;
 use super::{
     task_file_findings, task_finish, task_fix, task_log, task_resume, task_review, task_rm,
-    task_run,
+    task_run, template_build,
 };
 use crate::backend::{Location, SandboxBackend};
 use crate::config::GlobalConfig;
 use crate::disk;
 use crate::github::{GitHubBackend, Issue, Mergeable, PrState, RunStatus, WorkflowRun};
+use crate::harness::Harness;
 use crate::run::results::format_timestamp;
 use crate::task::config::{ShouldFix, TaskConfig};
 use crate::task::finish::check_own_folder;
@@ -50,6 +51,7 @@ use crate::task::{findings, finish, lock, loop_log, pipeline, pr_fix, resume};
 mod check;
 mod jobs;
 pub use check::check;
+pub(crate) use check::reasons;
 
 /// How many open PRs the loop opened may await the user before it pauses (decision 245(e)).
 pub const PR_CAP: usize = 5;
@@ -130,6 +132,38 @@ pub trait Steps {
     /// one needs no other.
     fn review_pr(&self, pr: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
         bail!("no review of PR #{pr} here")
+    }
+    /// `template build <profile> --harness <harness>`, with `warm` `--warm <repo>`, for a queued
+    /// `template` job (issue 524): the new template's tag. A `Steps` that never runs one needs no
+    /// other.
+    fn template_build(
+        &self,
+        profile: &str,
+        _harness: Harness,
+        _warm: Option<&Path>,
+        _out: &mut dyn Write,
+        _warn: &mut dyn Write,
+    ) -> Result<String> {
+        bail!("no template build of {profile} here")
+    }
+    /// `task run --spec FILE`, for a queued `spec` job (issue 524): to `ready` or a stop. A
+    /// `Steps` that never runs one needs none of the spec steps.
+    fn run_spec(&self, spec: &Path, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
+        bail!("no spec task of {} here", spec.display())
+    }
+    /// `task resume --spec FILE --rounds 1 --should-fix`: a spec job's should-fix round
+    /// (decision 306).
+    fn should_fix_spec(
+        &self,
+        spec: &Path,
+        _out: &mut dyn Write,
+        _warn: &mut dyn Write,
+    ) -> Result<()> {
+        bail!("no should-fix round of {} here", spec.display())
+    }
+    /// `task finish --spec FILE`: through the `[finish] sink` of the checkout's `sbxm-task.toml`.
+    fn finish_spec(&self, spec: &Path, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
+        bail!("no finish of {} here", spec.display())
     }
     /// The free-disk check of `sbx`'s sandbox drive: an error while it is under `min_free_disk`.
     fn room(&self) -> Result<()>;
@@ -412,6 +446,8 @@ enum Halt {
 
 struct Loop<'a> {
     config_dir: &'a Path,
+    /// The checkout the loop runs from: a queued warm template build warms from it (issue 524).
+    repo_root: PathBuf,
     base_dir: PathBuf,
     repo: String,
     settings: crate::task::config::Loop,
@@ -690,9 +726,15 @@ impl Loop<'_> {
     /// should_fix = "fix"`, and `task resume --rounds 1 --should-fix` would take it (it is
     /// `ready` with a clean review that has should-fix findings sized S, and had no such round).
     fn should_fix_due(&self, issue: u32) -> bool {
+        self.should_fix_due_of(&format!("issue-{issue}"))
+    }
+
+    /// [`Self::should_fix_due`] of task `id`, an issue's or a queued spec job's (issue 524).
+    fn should_fix_due_of(&self, id: &str) -> bool {
         self.settings.should_fix == ShouldFix::Fix
-            && self.record(issue).is_some_and(|rec| {
-                resume::check_should_fix(&rec, &self.task_dir(issue), Some(1)).is_ok()
+            && self.record_of(id).is_some_and(|rec| {
+                let dir = record::task_dir(&self.base_dir, id);
+                resume::check_should_fix(&rec, &dir, Some(1)).is_ok()
             })
     }
 
@@ -1035,9 +1077,10 @@ impl Loop<'_> {
     /// `task finish` takes its own (issue 409); a live holder refuses with [`lock::InUse`].
     /// A task already finished, by a command run by hand that held the lock, is left unmarked
     /// (review M-1 of issue 409).
-    fn claim(&self, issue: u32) -> Result<Claimed> {
-        let _lock = pipeline::lock_task(&self.base_dir, &format!("issue-{issue}"), self.probe)?;
-        let dir = self.task_dir(issue);
+    /// `id`: the task's id, `issue-<n>` or a queued spec job's (issue 524).
+    fn claim(&self, id: &str) -> Result<Claimed> {
+        let _lock = pipeline::lock_task(&self.base_dir, id, self.probe)?;
+        let dir = record::task_dir(&self.base_dir, id);
         let mut rec = record::read(&dir.join("task.json"))?;
         if rec.pr.is_some() || rec.stage == Stage::Finished {
             return Ok(Claimed::Finished(rec.pr));
@@ -1111,7 +1154,7 @@ impl Loop<'_> {
             .map_or(0, |r| r.must_fix);
         let stopped = rec.as_ref().and_then(|r| r.stopped);
         let clean = must_fix == 0 && stopped.is_none();
-        match self.claim(issue) {
+        match self.claim(&format!("issue-{issue}")) {
             Ok(Claimed::Marked) => {}
             Ok(Claimed::Finished(pr)) => {
                 return Ok(End::Taken(finished_by_hand(
@@ -1152,7 +1195,7 @@ impl Loop<'_> {
             .and_then(|r| r.pr)
             .and_then(|url| queue::pr_number(&url))
             .map_or_else(|| "PR".to_owned(), |n| format!("PR #{n}"));
-        let armed = self.arm(issue, out, warn)?;
+        let armed = self.arm(&format!("issue-{issue}"), out, warn)?;
         let outcome = if clean {
             if let Err(e) = self.steps.file_findings(issue, out, warn) {
                 writeln!(
@@ -1193,14 +1236,15 @@ impl Loop<'_> {
     /// ended without a work stop (so its PR isn't a draft), and the PR's head is still the commit
     /// the review covered. Nothing is checked on CI: GitHub's `--auto` waits for the required
     /// checks. A PR not armed stays among those awaiting the user, so every refusal is only a
-    /// note. Returns the note for the loop's log row, when there is one.
+    /// note. Returns the note for the loop's log row, when there is one. `id`: the task's id,
+    /// `issue-<n>` or a queued spec job's (issue 524).
     fn arm(
         &mut self,
-        issue: u32,
+        id: &str,
         out: &mut dyn Write,
         warn: &mut dyn Write,
     ) -> Result<Option<String>> {
-        let Some(rec) = self.record(issue) else {
+        let Some(rec) = self.record_of(id) else {
             return Ok(None);
         };
         let Some(number) = rec.pr.as_deref().and_then(queue::pr_number) else {
@@ -2216,10 +2260,10 @@ fn says_sign_in(e: &anyhow::Error, output: &str) -> bool {
 /// The loop's last words on a sign-in stop (issue 445, answer 3): sign in, then `task resume` for
 /// the stopped task when it exists (its label is gone, so a new loop wouldn't pick it up), then
 /// `task loop` for the rest. A task refused before its record keeps its label.
-fn sign_in_stop(e: anyhow::Error, issue: u32, exists: bool) -> anyhow::Error {
+fn sign_in_stop(e: anyhow::Error, resume: Option<String>) -> anyhow::Error {
     let mut then = Vec::new();
-    if exists {
-        then.push(format!("sbxm task resume --issue {issue}"));
+    if let Some(resume) = resume {
+        then.push(resume);
     }
     then.push("sbxm task loop".to_owned());
     match e.downcast_ref::<pipeline::NotSignedIn>() {
@@ -2473,6 +2517,7 @@ pub fn run(
     let (started_at, log) = free_log(&base_dir, env)?;
     let mut lp = Loop {
         config_dir,
+        repo_root: opts.repo_root.clone(),
         base_dir,
         repo,
         settings,
@@ -2730,7 +2775,11 @@ fn work(
                     warn,
                 )?;
                 left(&held, &due, out)?;
-                return Err(needs_user(sign_in_stop(e, issue, rec.is_some())));
+                return Err(needs_user(sign_in_stop(
+                    e,
+                    rec.is_some()
+                        .then(|| format!("sbxm task resume --issue {issue}")),
+                )));
             }
             Err(Halt::UsageLimit(total)) => {
                 let rec = lp.record(issue);
@@ -2954,11 +3003,10 @@ impl TaskSteps<'_> {
     /// refuses it while that process lives. The task's lock (issue 58) is held around the read
     /// and the write and given up before `task resume` takes its own (issue 409); a live holder
     /// refuses with [`lock::InUse`], writing nothing.
-    fn release(&self, issue: u32) -> Result<()> {
+    fn release(&self, id: &str) -> Result<()> {
         let base_dir = GlobalConfig::load(self.config_dir)?.base_dir;
-        let id = format!("issue-{issue}");
-        let _lock = pipeline::lock_task(&base_dir, &id, self.probe)?;
-        let dir = record::task_dir(&base_dir, &id);
+        let _lock = pipeline::lock_task(&base_dir, id, self.probe)?;
+        let dir = record::task_dir(&base_dir, id);
         let Ok(mut rec) = record::read(&dir.join("task.json")) else {
             return Ok(());
         };
@@ -2977,7 +3025,7 @@ impl TaskSteps<'_> {
         out: &mut dyn Write,
         warn: &mut dyn Write,
     ) -> Result<()> {
-        self.release(issue)?;
+        self.release(&format!("issue-{issue}"))?;
         self.logged(issue, out, warn, &|out, warn| {
             task_resume::run(
                 self.config_dir,
@@ -3160,6 +3208,111 @@ impl Steps for TaskSteps<'_> {
                 warn,
             )
         })
+    }
+
+    fn run_spec(&self, spec: &Path, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
+        let id = record::spec_id(spec)?.0;
+        self.logged_as(id, out, warn, &|out, warn| {
+            task_run::run_spec(
+                self.config_dir,
+                &task_run::SpecOptions {
+                    repo_root: self.repo_root.clone(),
+                    spec: spec.to_owned(),
+                    worker_harness: None,
+                    worker_model: None,
+                    reviewer_harness: None,
+                    reviewer_model: None,
+                    time_limit: None,
+                    reviewer_time_limit: None,
+                    profile: None,
+                    base: None,
+                    repo: self.repo.clone(),
+                    clone_source: None,
+                    identity: None,
+                    disk: self.disk.clone(),
+                    location: None,
+                },
+                None,
+                self.backend,
+                self.github,
+                self.probe,
+                self.host,
+                out,
+                warn,
+            )
+        })
+    }
+
+    fn should_fix_spec(
+        &self,
+        spec: &Path,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<()> {
+        let id = record::spec_id(spec)?.0;
+        self.release(&id)?;
+        self.logged_as(id, out, warn, &|out, warn| {
+            task_resume::run(
+                self.config_dir,
+                &task_resume::Options {
+                    repo_root: self.repo_root.clone(),
+                    target: task_resume::Target::Spec(spec.to_owned()),
+                    rounds: Some(1),
+                    should_fix: true,
+                    disk: self.disk.clone(),
+                    identity: None,
+                    forget_ambiguous: false,
+                },
+                self.backend,
+                self.github,
+                self.probe,
+                self.host,
+                out,
+                warn,
+            )
+        })
+    }
+
+    fn finish_spec(&self, spec: &Path, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
+        let id = record::spec_id(spec)?.0;
+        self.logged_as(id, out, warn, &|out, _warn| {
+            task_finish::run(
+                self.config_dir,
+                &task_finish::Options {
+                    target: task_finish::Target::Spec(spec.to_owned()),
+                    repo_root: self.repo_root.clone(),
+                    push_unresolved: false,
+                },
+                self.backend,
+                self.github,
+                self.probe,
+                out,
+            )
+        })
+    }
+
+    fn template_build(
+        &self,
+        profile: &str,
+        harness: Harness,
+        warm: Option<&Path>,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<String> {
+        template_build::build_tag(
+            self.config_dir,
+            &template_build::Options {
+                profile: profile.to_owned(),
+                harness,
+                disk: self.disk.clone(),
+                now: None,
+                warm: warm.map(Path::to_path_buf),
+            },
+            self.backend,
+            self.probe,
+            out,
+            warn,
+        )
     }
 
     fn room(&self) -> Result<()> {

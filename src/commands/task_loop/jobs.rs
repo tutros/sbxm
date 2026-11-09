@@ -8,13 +8,18 @@ use std::path::Path;
 
 use anyhow::{Result, anyhow};
 
-use super::{End, Halt, Loop, NeedsUser, check, first_line, needs_user, sign_in_stop};
+use super::{
+    Capture, Claimed, End, Halt, Loop, NeedsUser, Steps, check, first_line, needs_user,
+    says_sign_in, sign_in_stop,
+};
+use crate::commands::task_start::spec_flag;
+use crate::config::GlobalConfig;
 use crate::github::PrState;
 use crate::run::results::format_timestamp;
-use crate::task::jobs::{self, AsRead, Job, JobResult, Outcome, Running};
-use crate::task::next;
+use crate::task::jobs::{self, AsRead, Job, JobHarness, JobResult, Outcome, Running};
 use crate::task::queue::{self, Row};
 use crate::task::record::{self, Kind, Record, Stage};
+use crate::task::{lock, next, pipeline};
 
 /// How one job ended, before its result file.
 struct Ended {
@@ -25,6 +30,9 @@ struct Ended {
     /// What stops the whole loop after the job's result is written (a run job's sign-in, usage
     /// limit or error, as for a task the loop picked itself).
     halt: Option<anyhow::Error>,
+    /// The flag naming the task in its `next` step, when its record's own can't (a spec task's
+    /// real path, issue 524).
+    flag: Option<String>,
 }
 
 impl Ended {
@@ -34,6 +42,7 @@ impl Ended {
             reason: reason.into(),
             task: None,
             halt: None,
+            flag: None,
         }
     }
 
@@ -44,12 +53,15 @@ impl Ended {
 }
 
 /// The next step sbxm names for `rec`: none for a finished task, its `ready` step, or the command
-/// that continues it (issue 512).
-fn next_of(rec: &Record) -> Option<String> {
-    match rec.stage {
-        Stage::Finished => None,
-        Stage::Ready => next::ready(rec, &next::record_flag(rec)),
-        _ => Some(next::resume(rec)),
+/// that continues it (issue 512). `flag` names the task instead of its record's own flag (a spec
+/// task's real path).
+fn next_of(rec: &Record, flag: Option<&str>) -> Option<String> {
+    match (rec.stage, flag) {
+        (Stage::Finished, _) => None,
+        (Stage::Ready, Some(flag)) => next::ready(rec, flag),
+        (Stage::Ready, None) => next::ready(rec, &next::record_flag(rec)),
+        (_, Some(flag)) => Some(format!("sbxm task resume {flag}")),
+        (_, None) => Some(next::resume(rec)),
     }
 }
 
@@ -82,12 +94,12 @@ impl Loop<'_> {
                 .map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
                 .unwrap_or_default();
             let running = Running::read(&text);
-            let label = running
+            let job = running
                 .read
                 .job
                 .as_ref()
-                .and_then(|v| serde_json::from_value::<Job>(v.clone()).ok())
-                .map_or_else(|| file_label(&taken), |job| job.label());
+                .and_then(|v| jobs::parse(&v.to_string()).ok());
+            let label = job.as_ref().map_or_else(|| file_label(&taken), Job::label);
             // A task id only, never a path, whatever the file says.
             let rec = running
                 .task
@@ -120,11 +132,28 @@ impl Loop<'_> {
                 ended_at: now,
                 task: rec.as_ref().map(|r| r.id.clone()),
                 url: rec.as_ref().and_then(|r| self.url_of(r)),
-                next: rec.as_ref().and_then(next_of),
+                next: rec.as_ref().and_then(|rec| {
+                    let flag = match &job {
+                        Some(Job::Spec { file }) => self.spec_flag_of(file, rec),
+                        _ => None,
+                    };
+                    next_of(rec, flag.as_deref())
+                }),
             };
             self.ended(&taken, &label, &result, self.now(), out, warn)?;
         }
         Ok(())
+    }
+
+    /// The `--spec` flag of a spec job's `file` in `specs_dir`, when it is still `rec`'s spec
+    /// (`specs_dir` may have changed since the job started).
+    fn spec_flag_of(&self, file: &str, rec: &Record) -> Option<String> {
+        let spec = GlobalConfig::load(self.config_dir)
+            .ok()?
+            .specs_dir?
+            .join(file);
+        let (id, _) = record::spec_id(&spec).ok()?;
+        (id == rec.id).then(|| spec_flag(&spec))
     }
 
     /// One job, from its file in the queue folder to its result file.
@@ -151,7 +180,9 @@ impl Loop<'_> {
             ended_at: format_timestamp(self.now()),
             task: rec.as_ref().map(|r| r.id.clone()),
             url: rec.as_ref().and_then(|r| self.url_of(r)),
-            next: rec.as_ref().and_then(next_of),
+            next: rec
+                .as_ref()
+                .and_then(|rec| next_of(rec, ended.flag.as_deref())),
         };
         self.ended(&taken, &label, &result, started, out, warn)?;
         match ended.halt {
@@ -250,7 +281,225 @@ impl Loop<'_> {
                     Err(e) => Ended::new(Outcome::Failed, format!("{e:#}")),
                 })
             }
+            Job::Template {
+                ref profile,
+                harness,
+                warm,
+            } => self.template_job(profile, harness, warm, taken, read, started, out, warn),
+            Job::Spec { ref file } => self.spec_job(file, taken, read, started, out, warn),
         }
+    }
+
+    /// A `spec` job (issue 524, answers 1 and 2): a plain existing file in `specs_dir`, run with
+    /// `task run --spec`; then, as for the loop's issues, a task ready with 0 must-fix gets its
+    /// should-fix round (decision 306), its finish and its auto-merge (decision 293). A task
+    /// that stops short of ready, or with must-fix left, is not finished: `stopped`.
+    fn spec_job(
+        &mut self,
+        file: &str,
+        taken: &Path,
+        read: &AsRead,
+        started: u64,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<Ended> {
+        let config = match GlobalConfig::load(self.config_dir) {
+            Ok(config) => config,
+            Err(e) => return Ok(Ended::new(Outcome::Failed, format!("{e:#}"))),
+        };
+        let (spec, id) = match jobs::spec_file(self.config_dir, &config, file) {
+            Ok(found) => found,
+            Err(why) => return Ok(Ended::new(Outcome::Refused, why)),
+        };
+        self.mark(taken, read, started, Some(id.clone()))?;
+        let ended = self.spec_task(&spec, &id, out, warn)?;
+        Ok(Ended {
+            flag: Some(spec_flag(&spec)),
+            ..ended.task(id)
+        })
+    }
+
+    /// A spec job's task `id` of file `spec`, from its run to its PR or its stop.
+    fn spec_task(
+        &mut self,
+        spec: &Path,
+        id: &str,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<Ended> {
+        let flag = spec_flag(spec);
+        let resume = Some((id, format!("sbxm task resume {flag}")));
+        if let Err(ended) = self.phase("", resume.clone(), out, warn, |steps, out, warn| {
+            steps.run_spec(spec, out, warn)
+        }) {
+            return Ok(ended);
+        }
+        if self.should_fix_due_of(id)
+            && let Err(ended) = self.phase(
+                "its should-fix round failed: ",
+                resume,
+                out,
+                warn,
+                |steps, out, warn| steps.should_fix_spec(spec, out, warn),
+            )
+        {
+            return Ok(ended);
+        }
+        let Some(rec) = self.record_of(id) else {
+            return Ok(Ended::new(
+                Outcome::Failed,
+                "`task run` ended without a task record",
+            ));
+        };
+        if rec.stage != Stage::Ready {
+            return Ok(Ended::new(
+                Outcome::Stopped,
+                format!(
+                    "it stopped at {} ({}) short of ready; not finished",
+                    rec.stage.name(),
+                    rec.status.name()
+                ),
+            ));
+        }
+        let must_fix = rec.review.as_ref().map_or(0, |r| r.must_fix);
+        if must_fix > 0 || rec.stopped.is_some() {
+            let stop = rec
+                .stopped
+                .map_or_else(String::new, |s| format!(", work stop: {}", s.name()));
+            return Ok(Ended::new(
+                Outcome::Stopped,
+                format!("ready with {must_fix} must-fix left{stop}; not finished"),
+            ));
+        }
+        match self.claim(id) {
+            Ok(Claimed::Marked) => {}
+            Ok(Claimed::Finished(pr)) => {
+                let into = pr.map_or_else(String::new, |url| format!(" into {url}"));
+                return Ok(Ended::new(
+                    Outcome::Skipped,
+                    format!("finished by a command run by hand{into}"),
+                ));
+            }
+            Err(e) if e.is::<lock::InUse>() => {
+                return Ok(Ended::new(
+                    Outcome::Failed,
+                    "its lock is held by a command run by hand; finish it once that ends",
+                ));
+            }
+            Err(e) => self.warn_once(
+                warn,
+                format!(
+                    "task {id} could not be marked as the loop's ({e:#}); its PR won't count \
+                     among the PRs awaiting you"
+                ),
+            )?,
+        }
+        let finish = Some((id, format!("sbxm task finish {flag}")));
+        if let Err(ended) = self.phase(
+            "its finish failed: ",
+            finish,
+            out,
+            warn,
+            |steps, out, warn| steps.finish_spec(spec, out, warn),
+        ) {
+            return Ok(ended);
+        }
+        let armed = self.arm(id, out, warn)?;
+        let pr = self
+            .record_of(id)
+            .and_then(|r| r.pr)
+            .and_then(|url| queue::pr_number(&url));
+        let what = match (pr, armed) {
+            (None, _) => "finished; its [finish] sink opened no PR".to_owned(),
+            (Some(n), Some(note)) => format!("PR #{n}, clean, {note}"),
+            (Some(n), None) => format!("PR #{n}, clean"),
+        };
+        Ok(Ended::new(Outcome::Done, what))
+    }
+
+    /// A `template` job (issue 524, answer 3): only of an existing profile with a `[template]`
+    /// table, warmed from the loop's own checkout when `warm`. A low disk or a busy sandbox slot
+    /// is `template build`'s own: it refuses, or waits for the slot.
+    #[allow(clippy::too_many_arguments)]
+    fn template_job(
+        &mut self,
+        profile: &str,
+        harness: JobHarness,
+        warm: bool,
+        taken: &Path,
+        read: &AsRead,
+        started: u64,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<Ended> {
+        let config = match GlobalConfig::load(self.config_dir) {
+            Ok(config) => config,
+            Err(e) => return Ok(Ended::new(Outcome::Failed, format!("{e:#}"))),
+        };
+        if let Err(why) = jobs::template_profile(&config, profile) {
+            return Ok(Ended::new(Outcome::Refused, why));
+        }
+        self.mark(taken, read, started, None)?;
+        let repo_root = self.repo_root.clone();
+        let warm = warm.then_some(repo_root.as_path());
+        Ok(
+            match self.phase("", None, out, warn, |steps, out, warn| {
+                steps.template_build(profile, harness.harness(), warm, out, warn)
+            }) {
+                Ok(tag) => Ended::new(Outcome::Done, format!("built template {tag}")),
+                Err(ended) => ended,
+            },
+        )
+    }
+
+    /// Runs one phase of a queued `spec` or `template` job (issue 524) with its output captured,
+    /// and ends the job on its error as the loop ends a task's: a lapsed sign-in, `sbx`'s or a
+    /// harness's, typed or only in the output (issue 445), is `stopped` and stops the loop; a
+    /// missing secret (decision 193(a)) is `failed` and stops it; anything else is `failed`, with
+    /// `what` before the error, and the loop goes on. `resume`: the task the phase works on and
+    /// the command that continues it, named in a sign-in stop once that task's record exists.
+    fn phase<T>(
+        &self,
+        what: &str,
+        resume: Option<(&str, String)>,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+        step: impl FnOnce(&dyn Steps, &mut dyn Write, &mut dyn Write) -> Result<T>,
+    ) -> std::result::Result<T, Ended> {
+        let mut captured = Vec::new();
+        let result = {
+            let mut out = Capture {
+                inner: out,
+                text: Vec::new(),
+            };
+            let mut warn = Capture {
+                inner: warn,
+                text: Vec::new(),
+            };
+            let result = step(self.steps, &mut out, &mut warn);
+            captured.extend(out.text);
+            captured.extend(warn.text);
+            result
+        };
+        let e = match result {
+            Ok(value) => return Ok(value),
+            Err(e) => e,
+        };
+        if says_sign_in(&e, &String::from_utf8_lossy(&captured)) {
+            let resume = resume.and_then(|(id, command)| self.record_of(id).map(|_| command));
+            let stop = sign_in_stop(e, resume);
+            return Err(Ended {
+                halt: Some(anyhow!("{stop:#}")),
+                ..Ended::new(Outcome::Stopped, format!("{stop:#}"))
+            });
+        }
+        if e.is::<pipeline::MissingSecret>() {
+            return Err(Ended {
+                halt: Some(anyhow!("{e:#}")),
+                ..Ended::new(Outcome::Failed, format!("{what}{e:#}"))
+            });
+        }
+        Err(Ended::new(Outcome::Failed, format!("{what}{e:#}")))
     }
 
     /// A `review` or (`fix`) `fix` job of PR `pr`: only of a PR sbxm opened (answer 4), skipped
@@ -382,7 +631,10 @@ impl Loop<'_> {
             },
             Err(Halt::SignIn(e)) => {
                 let exists = self.record(issue).is_some();
-                let stop = sign_in_stop(e, issue, exists);
+                let stop = sign_in_stop(
+                    e,
+                    exists.then(|| format!("sbxm task resume --issue {issue}")),
+                );
                 Ended {
                     halt: Some(needs_user(anyhow!("{stop:#}"))),
                     ..Ended::new(Outcome::Stopped, format!("{stop:#}"))
