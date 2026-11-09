@@ -413,8 +413,26 @@ next issue, oldest first, and writes the result to `queue/done/<name>.json`: rea
 `next`. A job outside the four shapes, a `review` or `fix` of a PR sbxm didn't open, or a `run` of an issue `task loop
 --check` would skip is refused, running nothing. A job a stopped loop left in `queue/running/` is reported
 `interrupted` with the command that continues its task, and never re-run; queue a new file to run it again. With
-nothing queued and no ready issue the loop stops, so start `sbxm task loop` after queuing (waiting for new work is a
-later slice of #476).
+nothing queued and no ready issue a loop without `--wait` stops, so start `sbxm task loop` after queuing, or keep one
+running with the scheduled start below.
+
+## The loop at logon
+
+`scripts/loop-trigger.ps1` (decision 310, issue 527) keeps a loop running without your terminal or the agent's
+session: a Task Scheduler job at your logon runs `sbxm task loop --wait` in a checkout of its own, through a wrapper of
+the binary you built, and waits for job files and labelled issues.
+
+1. Register it once: `./scripts/loop-trigger.ps1 -Register -Checkout H:\sbxm-e2e\loop-checkout -Sbxm
+   H:\sbxm-e2e\sbxm.ps1` (again replaces it). Keep the checkout free of local changes: a start refuses one that has
+   any, and otherwise moves it to `origin/main`.
+2. It starts at each logon, once `sbx ls` answers (it waits up to 10 minutes). After an error it starts the loop
+   again 10 minutes later, at most 3 times in an hour; a stop that needs you (exit 3: a lapsed sign-in, a missing
+   secret, two parked tasks, the usage waits' total) leaves it down: fix the cause, then run
+   `./scripts/loop-trigger.ps1` by hand or wait for the next logon. A task the loop was running when it died is
+   resumed once at the next start.
+3. Stop it with `sbxm task loop --stop`: it stops after the current task, or within 5 minutes while it waits, and
+   comes back at the next logon.
+4. Remove it with `./scripts/loop-trigger.ps1 -Unregister`, then `sbxm task loop --stop` for the one running.
 
 ## How a change to sbxm itself goes
 

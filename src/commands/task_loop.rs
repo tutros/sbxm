@@ -951,19 +951,12 @@ impl Loop<'_> {
                 )?;
                 continue;
             }
-            match self.mark_resumed(issue) {
-                Ok(()) => {}
-                Err(e) if e.is::<lock::InUse>() => {
-                    writeln!(
-                        out,
-                        "{named}: {}; the loop leaves it",
-                        lock::InUse::describe(
-                            e.downcast_ref::<lock::InUse>().expect("checked above")
-                        )
-                    )?;
-                    continue;
-                }
-                Err(e) => return Err(e),
+            if let Err(e) = self.mark_resumed(issue) {
+                let Some(in_use) = e.downcast_ref::<lock::InUse>() else {
+                    return Err(e);
+                };
+                writeln!(out, "{named}: {}; the loop leaves it", in_use.describe())?;
+                continue;
             }
             writeln!(
                 out,
