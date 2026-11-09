@@ -476,7 +476,10 @@ fn a_cap_one_under_the_list_leaves_the_last_issue_not_run() {
 
     let (text, _) = script.at("run 1");
     assert!(text.contains(", task 1 of 2\n"), "{text}");
-    assert!(text.contains("  pending: 1 issue\n    #2\n"), "{text}");
+    assert!(
+        text.contains("  pending: 1 issue (1 blocked)\n    #2 — blocked: isn't an open issue\n"),
+        "{text}"
+    );
     assert!(text.contains("  not run (--cap 2): #3\n"), "{text}");
     let (text, _) = script.at("run 2");
     assert!(text.contains(", task 2 of 2\n"), "{text}");
@@ -501,7 +504,10 @@ fn a_cap_one_over_the_list_is_the_list() {
     let (text, _) = script.at("run 1");
     assert!(text.contains(", task 1 of 3\n"), "{text}");
     assert!(
-        text.contains("  pending: 2 issues\n    #2\n    #3\n"),
+        text.contains(
+            "  pending: 2 issues (2 blocked)\n    #2 — blocked: isn't an open issue\n    #3 — \
+             blocked: isn't an open issue\n"
+        ),
         "{text}"
     );
     let (text, _) = script.at("run 3");
@@ -529,7 +535,10 @@ fn an_issue_held_then_retried_and_done() {
         text.contains("  held: #1 (Fix 1), tried again after the running task\n"),
         "{text}"
     );
-    assert!(text.contains("  pending: 1 issue\n    #3\n"), "{text}");
+    assert!(
+        text.contains("  pending: 1 issue (1 blocked)\n    #3 — blocked: isn't an open issue\n"),
+        "{text}"
+    );
     let (text, lock) = script.at("run 3");
     assert_eq!(
         lock.progress,
@@ -578,7 +587,10 @@ fn a_lock_without_outcomes_is_read_from_the_records() {
 
     assert!(text.contains(", task 2 of 3\n"), "{text}");
     assert!(text.contains("  parked: #1 (Fix 1)\n"), "{text}");
-    assert!(text.contains("  pending: 1 issue\n    #3\n"), "{text}");
+    assert!(
+        text.contains("  pending: 1 issue (1 blocked)\n    #3 — blocked: isn't an open issue\n"),
+        "{text}"
+    );
 }
 
 /// A recorded progress whose current issue has no task record yet still shows the issue and

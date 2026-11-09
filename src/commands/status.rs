@@ -165,8 +165,15 @@ fn loop_view(
         }
         _ => None,
     };
+    // A loop's `--issue` list has its own issues to check, not the queue's (issue 536).
+    let pending = work
+        .as_ref()
+        .and_then(|w| w.listed.as_ref())
+        .map(|l| l.pending.clone());
     let snapshot = cache
-        .get(now, || looping::fetch(source.github, &source.repo, base))
+        .get(now, || {
+            looping::fetch_checking(source.github, &source.repo, base, pending.as_deref())
+        })
         .clone();
     looping::View {
         lock,

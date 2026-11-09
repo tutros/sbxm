@@ -965,12 +965,25 @@ pub fn preflight_issues(
 ) -> Result<HashMap<u32, String>> {
     let base_dir = GlobalConfig::load(config_dir)?.base_dir;
     let open = github.issues_open(repo)?;
-    let taken: Vec<u32> = record::load_all(&base_dir)?
+    preflight_issues_in(&base_dir, repo, github, &open, numbers)
+}
+
+/// [`preflight_issues`] under a `base_dir` already known and over the `open` issues already read:
+/// what `task loop --check` and `sbxm status` check an issue with (issue 536), with no config
+/// read and no second issue list of their own.
+pub fn preflight_issues_in(
+    base_dir: &Path,
+    repo: &str,
+    github: &dyn GitHubBackend,
+    open: &[Issue],
+    numbers: &[u32],
+) -> Result<HashMap<u32, String>> {
+    let taken: Vec<u32> = record::load_all(base_dir)?
         .into_iter()
         .filter(|r| r.kind == Kind::Issue)
         .map(|r| r.number)
         .collect();
-    let selection = select::select(&open, &taken, Some(numbers), numbers.len(), &HashMap::new());
+    let selection = select::select(open, &taken, Some(numbers), numbers.len(), &HashMap::new());
     let mut problems: HashMap<u32, String> = selection
         .not_open
         .iter()
@@ -984,7 +997,7 @@ pub fn preflight_issues(
             continue;
         }
         let issue = github.issue(repo, n)?;
-        if let Err(e) = issue_startable(&base_dir, repo, github, &issue) {
+        if let Err(e) = issue_startable(base_dir, repo, github, &issue) {
             problems.insert(n, format!("{e:#}"));
         }
     }

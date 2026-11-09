@@ -14,7 +14,7 @@ use common::Env as TestEnv;
 use sbxm::backend::FakeBackend;
 use sbxm::commands::status::{self, Env, LoopSource};
 use sbxm::github::fake::{FakeGitHub, GhCall};
-use sbxm::github::{Issue, PrInfo, PrState};
+use sbxm::github::{Issue, IssueText, PrInfo, PrState};
 use sbxm::run::results::format_timestamp;
 use sbxm::status::looping::{self, Lock, QueueItem, Snapshot, View, Work};
 use sbxm::task::merged;
@@ -109,6 +109,21 @@ fn issue(number: u32, title: &str, labels: &[&str]) -> Issue {
     }
 }
 
+/// GitHub with these open issues, each one's text scripted, so `task run`'s check of a queued
+/// issue passes (issue 536).
+fn open_github(issues: Vec<Issue>) -> FakeGitHub {
+    let mut gh = FakeGitHub::default();
+    for i in &issues {
+        gh = gh.with_issue_text(IssueText {
+            number: i.number,
+            title: i.title.clone(),
+            state: "OPEN".into(),
+            text: String::new(),
+        });
+    }
+    gh.with_open_issues(issues)
+}
+
 fn labeled(number: u32, title: &str, size: &str) -> Issue {
     issue(number, title, &["ready-for-worker", size])
 }
@@ -182,9 +197,7 @@ fn no_lock_file_is_a_loop_not_running_and_the_queue_and_awaiting_prs_still_show(
     let base = TestEnv::new();
     let b = base.base_dir();
     save(&b, &finished(2, T0 - 10, true));
-    let gh = FakeGitHub::default()
-        .with_open_issues(vec![labeled(4, "Four", "size:S")])
-        .with_pr(pr(102));
+    let gh = open_github(vec![labeled(4, "Four", "size:S")]).with_pr(pr(102));
 
     let text = frame(&b, &alive(), &gh, false, 80);
 
@@ -206,7 +219,7 @@ fn a_lock_whose_process_is_gone_is_not_running_names_the_stale_lock_and_shows_th
     let base = TestEnv::new();
     write_lock(&base.base_dir());
     for probe in [Probe(None), Probe(Some(LOOP_START + 5))] {
-        let gh = FakeGitHub::default().with_open_issues(vec![labeled(4, "Four", "size:S")]);
+        let gh = open_github(vec![labeled(4, "Four", "size:S")]);
 
         let text = frame(&base.base_dir(), &probe, &gh, false, 80);
 
@@ -267,8 +280,7 @@ fn a_running_loop_shows_its_task_its_stage_the_tasks_done_and_the_prs_awaiting()
     save(&b, &finished(2, T0 - 10, true));
     save(&b, &finished(5, LOOP_START - 5, true));
     save(&b, &finished(4, T0 - 10, false));
-    let gh = FakeGitHub::default()
-        .with_open_issues(Vec::new())
+    let gh = open_github(Vec::new())
         .with_pr(pr(102))
         .with_pr(pr(103))
         .with_auto_merge(103)
@@ -298,7 +310,7 @@ fn a_running_loop_shows_its_task_its_stage_the_tasks_done_and_the_prs_awaiting()
 fn a_running_loop_with_no_task_running_says_so() {
     let base = TestEnv::new();
     write_lock(&base.base_dir());
-    let gh = FakeGitHub::default().with_open_issues(Vec::new());
+    let gh = open_github(Vec::new());
 
     let text = frame(&base.base_dir(), &alive(), &gh, false, 80);
 
@@ -315,7 +327,7 @@ fn an_unmarked_running_task_with_the_locks_process_is_the_loops_during_work_and_
         let mut unmarked = running(8, stage);
         unmarked.hooks = serde_json::Value::Null;
         save(&b, &unmarked);
-        let gh = FakeGitHub::default().with_open_issues(Vec::new());
+        let gh = open_github(Vec::new());
 
         let text = frame(&b, &alive(), &gh, false, 80);
 
@@ -339,7 +351,7 @@ fn a_marked_running_task_of_another_process_is_not_the_loops() {
         let mut foreign = running(8, Stage::Working);
         foreign.process = Some(other);
         save(&b, &foreign);
-        let gh = FakeGitHub::default().with_open_issues(Vec::new());
+        let gh = open_github(Vec::new());
 
         // Alive under every pid, so only the identity decides.
         let text = frame(&b, &Probe(Some(LOOP_START)), &gh, false, 80);
@@ -356,7 +368,7 @@ fn a_task_that_is_not_running_is_not_the_loops_even_with_its_process() {
     let mut failed = running(8, Stage::Working);
     failed.status = Status::Failed;
     save(&b, &failed);
-    let gh = FakeGitHub::default().with_open_issues(Vec::new());
+    let gh = open_github(Vec::new());
 
     let text = frame(&b, &alive(), &gh, false, 80);
 
@@ -369,7 +381,7 @@ fn a_marked_finished_task_is_not_the_running_one() {
     let b = base.base_dir();
     write_lock(&b);
     save(&b, &finished(9, T0 - 10, true));
-    let gh = FakeGitHub::default().with_open_issues(Vec::new());
+    let gh = open_github(Vec::new());
 
     let text = frame(&b, &alive(), &gh, false, 80);
 
@@ -489,7 +501,7 @@ fn archived_records_behind_a_link_are_not_read() {
 fn the_queue_lists_the_labeled_issues_in_the_order_the_loop_takes_them() {
     let base = TestEnv::new();
     write_lock(&base.base_dir());
-    let gh = FakeGitHub::default().with_open_issues(vec![
+    let gh = open_github(vec![
         labeled(9, "Nine", "size:M"),
         labeled(4, "Four", "size:S"),
         issue(5, "Not labeled", &["size:S"]),
@@ -507,7 +519,7 @@ fn the_queue_lists_the_labeled_issues_in_the_order_the_loop_takes_them() {
 fn a_queue_of_zero_is_empty() {
     let base = TestEnv::new();
     write_lock(&base.base_dir());
-    let gh = FakeGitHub::default().with_open_issues(vec![issue(5, "Not labeled", &[])]);
+    let gh = open_github(vec![issue(5, "Not labeled", &[])]);
 
     let text = frame(&base.base_dir(), &alive(), &gh, false, 80);
 
@@ -515,7 +527,7 @@ fn a_queue_of_zero_is_empty() {
 }
 
 fn long_queue(count: u32) -> FakeGitHub {
-    FakeGitHub::default().with_open_issues(
+    open_github(
         (1..=count)
             .map(|n| labeled(n, &format!("Issue number {n} with a title"), "size:S"))
             .collect(),
@@ -553,7 +565,7 @@ fn more_issues_than_fit_show_the_first_lines_and_how_many_more() {
 fn on_a_terminal_a_long_line_ends_in_an_ellipsis_and_fits() {
     let base = TestEnv::new();
     write_lock(&base.base_dir());
-    let gh = FakeGitHub::default().with_open_issues(vec![labeled(
+    let gh = open_github(vec![labeled(
         1,
         "A title that is far too long to fit in twenty columns",
         "size:S",
@@ -577,7 +589,7 @@ fn on_a_non_terminal_nothing_is_cut() {
     let count = looping::MAX_QUEUE_LINES as u32 + 3;
     let mut issues = vec![labeled(1, title, "size:S")];
     issues.extend((2..=count).map(|n| labeled(n, "x", "size:S")));
-    let gh = FakeGitHub::default().with_open_issues(issues);
+    let gh = open_github(issues);
 
     let text = frame(&base.base_dir(), &alive(), &gh, false, 20);
 
@@ -650,7 +662,7 @@ fn a_repo_that_cannot_be_told_makes_the_queue_unreadable() {
 fn github_is_called_on_the_first_frame_not_59_seconds_later_and_again_after_61() {
     let base = TestEnv::new();
     write_lock(&base.base_dir());
-    let gh = FakeGitHub::default().with_open_issues(Vec::new());
+    let gh = open_github(Vec::new());
     let clock = Rc::new(Cell::new(T0));
     let steps = Rc::new(std::cell::RefCell::new(vec![2u64, 59]));
     let env = Env {
@@ -707,6 +719,7 @@ fn the_cache_reuses_a_snapshot_under_a_minute_old_and_refetches_at_a_minute() {
             awaiting: Ok(Vec::new()),
             pr_titles: Default::default(),
             issue_titles: Default::default(),
+            blocked: Default::default(),
         }
     };
 
@@ -757,7 +770,7 @@ fn the_section_writes_nothing_and_never_calls_sbx() {
     let b = base.base_dir();
     write_lock(&b);
     save(&b, &running(7, Stage::Working));
-    let gh = FakeGitHub::default().with_open_issues(Vec::new());
+    let gh = open_github(Vec::new());
     let backend = FakeBackend::default();
     let before = fs::read(lock_path(&b)).unwrap();
     let source = LoopSource {
@@ -794,6 +807,7 @@ fn render_is_pure_over_its_view() {
             awaiting: Ok(vec![1, 2]),
             pr_titles: Default::default(),
             issue_titles: Default::default(),
+            blocked: Default::default(),
         }),
         pause: sbxm::task::loop_pause::State::None,
         jobs: Default::default(),
