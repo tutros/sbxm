@@ -52,7 +52,7 @@ use crate::task::{findings, finish, lock, loop_log, next, pipeline, pr_fix, resu
 mod check;
 mod jobs;
 pub use check::check;
-pub(crate) use check::reasons;
+pub(crate) use check::{reasons, skip_reason};
 
 /// How many open PRs the loop opened may await the user before it pauses (decision 245(e)).
 pub const PR_CAP: usize = 5;
