@@ -198,7 +198,16 @@ impl Steps for Script<'_> {
         _out: &mut dyn Write,
         _warn: &mut dyn Write,
     ) -> Result<()> {
-        self.calls.borrow_mut().push(format!("log-fix {pr} {run}"));
+        // The PR's labels as the log-fix starts, when it has any (issue 548).
+        let labels = self.gh.pr_labels_now(pr);
+        let labels = if labels.is_empty() {
+            String::new()
+        } else {
+            format!(" {labels:?}")
+        };
+        self.calls
+            .borrow_mut()
+            .push(format!("log-fix {pr} {run}{labels}"));
         if matches!(self.ends, Ends::Refused) {
             return Err(anyhow!("task fix-{pr} exists"));
         }
@@ -347,6 +356,7 @@ fn github() -> FakeGitHub {
 struct Ran {
     result: Result<()>,
     out: String,
+    warn: String,
 }
 
 fn run_loop(f: &Fixture, script: &Script, gh: &FakeGitHub) -> Ran {
@@ -376,6 +386,7 @@ fn run_loop(f: &Fixture, script: &Script, gh: &FakeGitHub) -> Ran {
     Ran {
         result,
         out: String::from_utf8(out).unwrap(),
+        warn: String::from_utf8(warn).unwrap(),
     }
 }
 
@@ -670,6 +681,56 @@ fn a_log_fix_refused_before_its_task_is_not_tried_again_in_the_same_run() {
     assert_eq!(said.len(), 2, "{}", ran.out);
     assert!(said[0].contains("its log-fix failed"), "{}", said[0]);
     assert!(said[1].contains("runs/8"), "{}", said[1]);
+}
+
+// --- Issue 548: a log-fix removes `go` before its push ---
+
+#[test]
+fn a_log_fix_removes_go_before_its_push_and_keeps_hold() {
+    let f = fixture();
+    let gh = github().with_pr_labels(101, &["Go", "Hold"]);
+    let script = Script::new(&f.base(), &gh, Ends::Clean(Level::Low));
+
+    let ran = run_loop(&f, &script, &gh);
+
+    ran.result.unwrap();
+    assert_eq!(
+        script.log_fixes(),
+        [r#"log-fix 101 7 ["Hold"]"#],
+        "{}",
+        ran.out
+    );
+    assert!(
+        gh.calls()
+            .contains(&GhCall::PrRemoveLabel(REPO.into(), 101, "Go".into())),
+        "{:?}",
+        gh.calls()
+    );
+    assert!(ran.warn.is_empty(), "{}", ran.warn);
+}
+
+#[test]
+fn a_go_that_cant_be_removed_before_a_log_fix_is_a_warning_and_the_log_fix_goes_on() {
+    let f = fixture();
+    let gh = github()
+        .with_pr_labels(101, &["go"])
+        .failing_label_removal("HTTP 403");
+    let script = Script::new(&f.base(), &gh, Ends::Clean(Level::Low));
+
+    let ran = run_loop(&f, &script, &gh);
+
+    ran.result.unwrap();
+    assert_eq!(
+        script.log_fixes(),
+        [r#"log-fix 101 7 ["go"]"#],
+        "{}",
+        ran.out
+    );
+    assert!(
+        ran.warn.contains("PR #101") && ran.warn.contains("HTTP 403"),
+        "{}",
+        ran.warn
+    );
 }
 
 // --- Review M-1: a low disk defers the log-fix, never the disarm ---

@@ -158,6 +158,18 @@ pub struct CommitStatus {
     pub description: String,
 }
 
+/// A status posted on a commit, with when it was posted (`gh api
+/// repos/<repo>/commits/<sha>/statuses`): the veto window of a medium-risk PR starts at its
+/// head's latest `sbxm/review` status (issue 548).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostedStatus {
+    pub context: String,
+    /// As GitHub names it: `success`, `failure`, `error` or `pending`.
+    pub state: String,
+    /// Seconds since the epoch (`created_at`).
+    pub at: u64,
+}
+
 /// Where a workflow run stands (issue 442, decision 299).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunStatus {
@@ -273,4 +285,14 @@ pub trait GitHubBackend: Send + Sync {
     /// its `changed_files` count (`gh api repos/<repo>/pulls/<n>`), read before a medium-risk PR
     /// would be armed (issue 549).
     fn pr_files(&self, repo: &str, number: u32) -> Result<PrFiles>;
+    /// The labels on PR `number`, every page (`gh api repos/<repo>/issues/<n>/labels
+    /// --paginate`), read for its `hold` and `go` labels (issue 548).
+    fn pr_labels(&self, repo: &str, number: u32) -> Result<Vec<String>>;
+    /// Removes the label named exactly `label` from PR `number` (`gh api --method DELETE
+    /// repos/<repo>/issues/<n>/labels/<label>`), as the loop does to `go` before it pushes onto
+    /// the PR (issue 548).
+    fn pr_remove_label(&self, repo: &str, number: u32, label: &str) -> Result<()>;
+    /// Every status posted on commit `sha` (a full commit id), every page, newest first as GitHub
+    /// lists them (issue 548).
+    fn commit_statuses(&self, repo: &str, sha: &str) -> Result<Vec<PostedStatus>>;
 }

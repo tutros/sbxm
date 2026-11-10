@@ -9,7 +9,8 @@ use serde::Deserialize;
 
 use super::{
     CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, JobLog, ListedPr, Mergeable,
-    PrComment, PrFile, PrFiles, PrInfo, PrMergeState, PrRequest, PrState, RunStatus, WorkflowRun,
+    PostedStatus, PrComment, PrFile, PrFiles, PrInfo, PrMergeState, PrRequest, PrState, RunStatus,
+    WorkflowRun,
 };
 
 /// Runs `gh` with arguments and optional stdin, returning stdout.
@@ -275,6 +276,36 @@ struct RawPrFile {
     filename: String,
     #[serde(default)]
     previous_filename: Option<String>,
+}
+
+/// One entry of `gh api repos/<repo>/commits/<sha>/statuses` (issue 548).
+#[derive(Deserialize)]
+struct RawPostedStatus {
+    state: String,
+    context: String,
+    created_at: String,
+}
+
+/// `text`, `--paginate`'s output of one JSON array per page, read page by page.
+fn pages<T: for<'de> Deserialize<'de>>(text: &str, path: &str) -> Result<Vec<T>> {
+    let mut all = Vec::new();
+    for page in serde_json::Deserializer::from_str(text).into_iter::<Vec<T>>() {
+        all.extend(page.with_context(|| format!("could not parse the output of `gh api {path}`"))?);
+    }
+    Ok(all)
+}
+
+/// `text` as one segment of an API path: every byte but the unreserved ones percent-encoded.
+fn path_segment(text: &str) -> String {
+    let mut encoded = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 #[derive(Deserialize)]
@@ -889,5 +920,54 @@ impl GitHubBackend for GhBackend {
             changed_files: raw.changed_files,
             files: listed,
         })
+    }
+
+    fn pr_labels(&self, repo: &str, number: u32) -> Result<Vec<String>> {
+        let path = format!("repos/{repo}/issues/{number}/labels");
+        let out = self.run(&strings(&["api", &path, "--paginate"]), None)?;
+        let labels: Vec<Named> = pages(&out, &path)?;
+        Ok(labels.into_iter().map(|l| l.name).collect())
+    }
+
+    fn pr_remove_label(&self, repo: &str, number: u32, label: &str) -> Result<()> {
+        self.run(
+            &strings(&[
+                "api",
+                &format!(
+                    "repos/{repo}/issues/{number}/labels/{}",
+                    path_segment(label)
+                ),
+                "--method",
+                "DELETE",
+                "--silent",
+            ]),
+            None,
+        )?;
+        Ok(())
+    }
+
+    fn commit_statuses(&self, repo: &str, sha: &str) -> Result<Vec<PostedStatus>> {
+        // The sha goes into the API path: only a full commit id is accepted.
+        if !full_commit(sha) {
+            bail!("`{sha}` is not a full commit id, so its statuses can't be read");
+        }
+        let path = format!("repos/{repo}/commits/{sha}/statuses");
+        let out = self.run(&strings(&["api", &path, "--paginate"]), None)?;
+        let raw: Vec<RawPostedStatus> = pages(&out, &path)?;
+        raw.into_iter()
+            .map(|s| {
+                let at = crate::run::results::parse_timestamp(&s.created_at).ok_or_else(|| {
+                    anyhow!(
+                        "`gh api {path}` gave a status time `{}` that can't be read",
+                        s.created_at
+                    )
+                })?;
+                Ok(PostedStatus {
+                    context: s.context,
+                    state: s.state,
+                    at,
+                })
+            })
+            .collect()
     }
 }

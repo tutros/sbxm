@@ -48,7 +48,7 @@ use crate::task::record::{self, Kind, Process, ProcessProbe, Record, Stage};
 use crate::task::risk::Level;
 use crate::task::runlog::{RunLog, Tee};
 use crate::task::{
-    findings, finish, lock, loop_log, medium, next, pipeline, pr_fix, real_check, resume,
+    findings, finish, lock, loop_log, medium, next, pipeline, pr_fix, real_check, resume, window,
 };
 
 mod check;
@@ -483,6 +483,10 @@ struct Loop<'a> {
     /// The PRs disarmed on a second failure whose log-fix is still to come (review M-1): they
     /// count as armed for its re-arm (decision 298).
     disarmed_for_log_fix: HashSet<u32>,
+    /// The PRs whose `go` label couldn't be taken off (or whose labels couldn't be read) before a
+    /// resolve or log-fix pushed onto them (issue 548): their `go` counts as absent, for the
+    /// window #550 arms by ([`window::decide`]'s `go_ignored`).
+    go_unremoved: HashSet<u32>,
     /// The (commit, run) second failures on `main` already paused for (or found paused): a pause
     /// the user cleared isn't set again for the same run.
     paused_for: HashSet<(String, u64)>,
@@ -1829,6 +1833,7 @@ impl Loop<'_> {
                 pr_named = self.pr_named(number)
             )?;
         }
+        self.drop_go(number, warn)?;
         let result = self.steps.fix_pr(number, out, warn);
         if let Some(id) = record::fix_id(number, &head) {
             self.notify_question(&id, out, warn)?;
@@ -1886,6 +1891,37 @@ impl Loop<'_> {
         )?;
         self.log_row(&row, false, warn)?;
         Ok(())
+    }
+
+    /// Takes PR `number`'s `go` label off, in whatever case it has it, before a resolve or a
+    /// log-fix pushes onto the PR (issue 548, answer 3): new code gets the full veto window unless
+    /// the user says `go` again; `hold` stays. Labels that can't be read or a `go` that can't be
+    /// removed is a warning, and the PR's `go` counts as absent.
+    fn drop_go(&mut self, number: u32, warn: &mut dyn Write) -> Result<()> {
+        let removed = self
+            .github
+            .pr_labels(&self.repo, number)
+            .and_then(
+                |labels| match window::find_label(&labels, window::GO_LABEL) {
+                    Some(go) => self.github.pr_remove_label(&self.repo, number, go),
+                    None => Ok(()),
+                },
+            );
+        let Err(e) = removed else {
+            self.go_unremoved.remove(&number);
+            return Ok(());
+        };
+        self.go_unremoved.insert(number);
+        self.warn_once(
+            warn,
+            format!(
+                "{pr_named}'s `{go}` label could not be removed before the push ({}); it counts \
+                 as not `{go}`",
+                first_line(&format!("{e:#}")),
+                go = window::GO_LABEL,
+                pr_named = self.pr_named(number)
+            ),
+        )
     }
 
     /// A failed resolve: said once, and the PR left to the user for the rest of the run.
@@ -2579,6 +2615,7 @@ impl Loop<'_> {
             run.id,
             pr_named = self.pr_named(number)
         )?;
+        self.drop_go(number, warn)?;
         let result = self.steps.fix_check(number, run.id, out, warn);
         let id = record::fix_id(number, head);
         if let Some(id) = id.as_deref() {
@@ -3160,6 +3197,7 @@ fn run_loop(
         failed_twice: HashSet::new(),
         log_fixed: HashSet::new(),
         disarmed_for_log_fix: HashSet::new(),
+        go_unremoved: HashSet::new(),
         paused_for: HashSet::new(),
         log,
         logged: false,

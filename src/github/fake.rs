@@ -6,7 +6,8 @@ use anyhow::{Result, anyhow};
 
 use super::{
     CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, JobLog, ListedPr, Mergeable,
-    PrComment, PrFiles, PrInfo, PrMergeState, PrRequest, PrState, RunStatus, WorkflowRun,
+    PostedStatus, PrComment, PrFiles, PrInfo, PrMergeState, PrRequest, PrState, RunStatus,
+    WorkflowRun,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -53,6 +54,11 @@ pub enum GhCall {
     RunFailedLog(String, u64),
     PrMergeCommit(String, u32),
     PrFiles(String, u32),
+    PrLabels(String, u32),
+    /// Repo, number, label.
+    PrRemoveLabel(String, u32, String),
+    /// Repo, commit.
+    CommitStatuses(String, String),
 }
 
 #[derive(Default)]
@@ -106,6 +112,14 @@ pub struct FakeGitHub {
     merge_commits: Mutex<Vec<(u32, String)>>,
     /// What `pr_files` answers, by PR; an error for a PR not scripted.
     pr_files: Vec<(u32, PrFiles)>,
+    /// What `pr_labels` answers, by PR; none for a PR not scripted. `pr_remove_label` takes
+    /// from it.
+    pr_labels: Mutex<Vec<(u32, Vec<String>)>>,
+    pr_labels_failure: Option<String>,
+    remove_label_failure: Option<String>,
+    /// What `commit_statuses` answers, by commit; none for a commit not scripted.
+    posted_statuses: Vec<(String, Vec<PostedStatus>)>,
+    statuses_failure: Option<String>,
     calls: Mutex<Vec<GhCall>>,
 }
 
@@ -142,6 +156,54 @@ impl FakeGitHub {
 
     pub fn with_pr_files(mut self, number: u32, files: PrFiles) -> Self {
         self.pr_files.push((number, files));
+        self
+    }
+
+    /// The labels PR `number` has (issue 548).
+    pub fn with_pr_labels(self, number: u32, labels: &[&str]) -> Self {
+        self.set_pr_labels(number, labels);
+        self
+    }
+
+    /// The labels PR `number` has from now on, as the user labelling it does.
+    pub fn set_pr_labels(&self, number: u32, labels: &[&str]) {
+        let mut all = self.pr_labels.lock().unwrap();
+        all.retain(|(n, _)| *n != number);
+        all.push((number, labels.iter().map(|l| (*l).to_owned()).collect()));
+    }
+
+    /// The labels PR `number` has now.
+    pub fn pr_labels_now(&self, number: u32) -> Vec<String> {
+        self.pr_labels
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(n, _)| *n == number)
+            .map(|(_, labels)| labels.clone())
+            .unwrap_or_default()
+    }
+
+    /// Only `pr_labels` fails (and is still recorded).
+    pub fn failing_pr_labels(mut self, message: &str) -> Self {
+        self.pr_labels_failure = Some(message.to_owned());
+        self
+    }
+
+    /// Only `pr_remove_label` fails (and is still recorded).
+    pub fn failing_label_removal(mut self, message: &str) -> Self {
+        self.remove_label_failure = Some(message.to_owned());
+        self
+    }
+
+    /// The statuses posted on commit `sha`, newest first (issue 548).
+    pub fn with_statuses(mut self, sha: &str, statuses: Vec<PostedStatus>) -> Self {
+        self.posted_statuses.push((sha.to_owned(), statuses));
+        self
+    }
+
+    /// Only `commit_statuses` fails (and is still recorded).
+    pub fn failing_commit_statuses(mut self, message: &str) -> Self {
+        self.statuses_failure = Some(message.to_owned());
         self
     }
 
@@ -758,5 +820,46 @@ impl GitHubBackend for FakeGitHub {
             .find(|(n, _)| *n == number)
             .map(|(_, files)| files.clone())
             .ok_or_else(|| anyhow!("FakeGitHub: the files of pr {number} are not scripted"))
+    }
+
+    fn pr_labels(&self, repo: &str, number: u32) -> Result<Vec<String>> {
+        self.record(GhCall::PrLabels(repo.to_owned(), number))?;
+        if let Some(message) = &self.pr_labels_failure {
+            return Err(anyhow!("{message}"));
+        }
+        Ok(self.pr_labels_now(number))
+    }
+
+    fn pr_remove_label(&self, repo: &str, number: u32, label: &str) -> Result<()> {
+        self.record(GhCall::PrRemoveLabel(
+            repo.to_owned(),
+            number,
+            label.to_owned(),
+        ))?;
+        if let Some(message) = &self.remove_label_failure {
+            return Err(anyhow!("{message}"));
+        }
+        let mut all = self.pr_labels.lock().unwrap();
+        let labels = all
+            .iter_mut()
+            .find(|(n, _)| *n == number)
+            .map(|(_, labels)| labels)
+            .filter(|labels| labels.iter().any(|l| l == label))
+            .ok_or_else(|| anyhow!("FakeGitHub: PR {number} has no label {label}"))?;
+        labels.retain(|l| l != label);
+        Ok(())
+    }
+
+    fn commit_statuses(&self, repo: &str, sha: &str) -> Result<Vec<PostedStatus>> {
+        self.record(GhCall::CommitStatuses(repo.to_owned(), sha.to_owned()))?;
+        if let Some(message) = &self.statuses_failure {
+            return Err(anyhow!("{message}"));
+        }
+        Ok(self
+            .posted_statuses
+            .iter()
+            .find(|(s, _)| s == sha)
+            .map(|(_, statuses)| statuses.clone())
+            .unwrap_or_default())
     }
 }
