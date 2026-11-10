@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use super::{
     CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, JobLog, ListedPr, Mergeable,
-    PrComment, PrInfo, PrMergeState, PrRequest, PrState, RunStatus, WorkflowRun,
+    PrComment, PrFile, PrFiles, PrInfo, PrMergeState, PrRequest, PrState, RunStatus, WorkflowRun,
 };
 
 /// Runs `gh` with arguments and optional stdin, returning stdout.
@@ -254,6 +254,20 @@ struct RawMerged {
     state: String,
     #[serde(default)]
     merge_commit: Option<RawOid>,
+}
+
+/// The part of `gh api repos/<repo>/pulls/<n>` read for its file count (issue 549).
+#[derive(Deserialize)]
+struct RawPull {
+    changed_files: u32,
+}
+
+/// One entry of `gh api repos/<repo>/pulls/<n>/files` (issue 549).
+#[derive(Deserialize)]
+struct RawPrFile {
+    filename: String,
+    #[serde(default)]
+    previous_filename: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -829,5 +843,26 @@ impl GitHubBackend for GhBackend {
             );
         }
         Ok(Some(commit.oid))
+    }
+
+    fn pr_files(&self, repo: &str, number: u32) -> Result<PrFiles> {
+        let pull = format!("repos/{repo}/pulls/{number}");
+        let files = format!("{pull}/files");
+        // `--paginate` prints each page's array in turn, `[...][...]`: read them one by one.
+        let out = self.run(&strings(&["api", &files, "--paginate"]), None)?;
+        let mut listed = Vec::new();
+        for page in serde_json::Deserializer::from_str(&out).into_iter::<Vec<RawPrFile>>() {
+            let page =
+                page.with_context(|| format!("could not parse the output of `gh api {files}`"))?;
+            listed.extend(page.into_iter().map(|f| PrFile {
+                filename: f.filename,
+                previous_filename: f.previous_filename,
+            }));
+        }
+        let raw: RawPull = self.json(&strings(&["api", &pull]))?;
+        Ok(PrFiles {
+            changed_files: raw.changed_files,
+            files: listed,
+        })
     }
 }

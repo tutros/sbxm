@@ -13,6 +13,7 @@ pub mod lock;
 pub mod loop_log;
 pub mod loop_pause;
 pub mod machine;
+pub mod medium;
 pub mod merged;
 pub mod next;
 pub mod pipeline;

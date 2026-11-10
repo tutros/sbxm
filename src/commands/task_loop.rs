@@ -47,7 +47,7 @@ use crate::task::queue::{self, Outcome, READY_LABEL, Report, Row, Skipped};
 use crate::task::record::{self, Kind, Process, ProcessProbe, Record, Stage};
 use crate::task::risk::Level;
 use crate::task::runlog::{RunLog, Tee};
-use crate::task::{findings, finish, lock, loop_log, next, pipeline, pr_fix, resume};
+use crate::task::{findings, finish, lock, loop_log, medium, next, pipeline, pr_fix, resume};
 
 mod check;
 mod jobs;
@@ -690,14 +690,9 @@ impl Loop<'_> {
             // Its risk is the highest of its whole review history, the task that opened it and
             // every fix pushed onto it: a later narrow review doesn't clear the risk an earlier
             // one left (decision 298(3), second review of issue 530).
-            let fixes = self.fixes_of(number);
-            let risk = fixes
-                .iter()
-                .filter(|fix| fix.stage == Stage::Finished)
-                .chain([&own])
-                .filter_map(|rec| rec.review.as_ref().map(|r| r.risk))
-                .max_by_key(|&risk| awaiting_rank(risk));
-            let rec = fixes
+            let risk = self.history_risk(number, Some(&own));
+            let rec = self
+                .fixes_of(number)
                 .into_iter()
                 .find(|fix| {
                     fix.review
@@ -738,6 +733,18 @@ impl Loop<'_> {
             self.notify(note, out, warn)?;
         }
         Ok(())
+    }
+
+    /// The highest risk of PR `number`'s review history after the path rules: its own task's
+    /// review (`own`) and every finished fix pushed onto it (decision 298(3)); `None` with no
+    /// review. A later narrow review doesn't clear the risk an earlier one left.
+    fn history_risk(&self, number: u32, own: Option<&Record>) -> Option<Level> {
+        self.fixes_of(number)
+            .iter()
+            .filter(|fix| fix.stage == Stage::Finished)
+            .chain(own)
+            .filter_map(|rec| rec.review.as_ref().map(|r| r.risk))
+            .max_by_key(|&risk| awaiting_rank(risk))
     }
 
     /// The fix tasks of PR `number` (resolves and log-fixes, `fix-<n>-<head>`) of this repo, in
@@ -1444,7 +1451,8 @@ impl Loop<'_> {
     /// Arms GitHub's auto-merge on the PR a loop task just opened, under decisions 266, 280 and
     /// 293: the review's risk (after the path-rule floor) is low, it found 0 must-fix, the task
     /// ended without a work stop (so its PR isn't a draft), and the PR's head is still the commit
-    /// the review covered. Nothing is checked on CI: GitHub's `--auto` waits for the required
+    /// the review covered. A medium-risk PR's note also gives [`medium::refusals`] (issue 549).
+    /// Nothing is checked on CI: GitHub's `--auto` waits for the required
     /// checks. A PR not armed stays among those awaiting the user, so every refusal is only a
     /// note. Returns the note for the loop's log row, when there is one. `id`: the task's id,
     /// `issue-<n>` or a queued spec job's (issue 524).
@@ -1479,13 +1487,18 @@ impl Loop<'_> {
             return waits("a draft with must-fix left".to_owned(), out);
         }
         if review.risk != Level::Low {
-            return waits(format!("risk {}", review.risk.word()), out);
+            let reasons = self.medium_reasons(review.risk, medium_source(&rec), number);
+            return waits(
+                with_reasons(format!("risk {}", review.risk.word()), &reasons),
+                out,
+            );
         }
         let Some(reviewed) = review.commit.as_deref() else {
             return waits("the commit the review covered is unknown".to_owned(), out);
         };
         if self.paused(warn)? {
-            return Ok(Some(self.not_armed_paused(number, out)?));
+            // Only a low-risk PR gets here: nothing else keeps it from being armed.
+            return Ok(Some(self.not_armed_paused(number, &[], out)?));
         }
         let state = match self.github.pr_merge_state(&self.repo, number) {
             Ok(state) => state,
@@ -1519,6 +1532,17 @@ impl Loop<'_> {
                 Ok(Some("auto-merge armed".to_owned()))
             }
             Err(e) => self.arming_failed(number, &e, out, warn),
+        }
+    }
+
+    /// For a PR of `risk` medium, every reason of [`medium::refusals`] not to arm it besides its
+    /// risk (issue 549); none for any other risk. Until #550 a medium PR is never armed either
+    /// way, so these only go into its "awaits you" line.
+    fn medium_reasons(&self, risk: Level, source: medium::Source, number: u32) -> Vec<String> {
+        if risk == Level::Medium {
+            medium::refusals(self.github, &self.repo, source, number)
+        } else {
+            Vec::new()
         }
     }
 
@@ -1693,7 +1717,7 @@ impl Loop<'_> {
                     .is_some_and(|rec| passes_arm_checks(&rec));
                 let current = record::fix_id(number, &head).unwrap_or_default();
                 let eligible = armed || (own && self.earlier_resolves_pass(number, &current));
-                match self.rearm(number, "resolve", eligible, review, out, warn)? {
+                match self.rearm(number, task, "resolve", eligible, review, out, warn)? {
                     Some(note) => format!("resolved, {note}"),
                     None => "resolved".to_owned(),
                 }
@@ -1783,32 +1807,60 @@ impl Loop<'_> {
     /// names which in its lines): only for a PR that `eligible`
     /// (armed before, or its own task and every earlier resolve pushed onto it passed
     /// [`Self::arm`]'s checks), when the fix's review is
-    /// low risk with 0 must-fix and covered the PR's new head. Returns the log row's note.
+    /// low risk with 0 must-fix and covered the PR's new head. Returns the log row's note. `task`:
+    /// the PR's own task, whose issue gives a medium PR's size (issue 549).
+    #[allow(clippy::too_many_arguments)]
     fn rearm(
         &mut self,
         number: u32,
+        task: &str,
         what: &str,
         eligible: bool,
         review: &record::ReviewResult,
         out: &mut dyn Write,
         warn: &mut dyn Write,
     ) -> Result<Option<String>> {
+        // A medium PR's reasons go into every line below that leaves it to the user (review S-1
+        // of issue 549), for its risk over its whole review history, this fix's included.
+        let own = self.record_of(task);
+        let source = own.as_ref().map_or(medium::Source::Unknown, medium_source);
+        let risk = self
+            .history_risk(number, own.as_ref())
+            .into_iter()
+            .chain([review.risk])
+            .max_by_key(|&risk| awaiting_rank(risk))
+            .unwrap_or(review.risk);
         if !eligible {
+            let why = with_reasons(
+                "its own review didn't allow auto-merge".to_owned(),
+                &self.medium_reasons(risk, source, number),
+            );
             writeln!(
                 out,
-                "{pr_named} awaits you: its own review didn't allow auto-merge",
+                "{pr_named} awaits you: {why}",
                 pr_named = self.pr_named(number)
             )?;
             return Ok(None);
         }
         if self.paused(warn)? {
-            return Ok(Some(self.not_armed_paused(number, out)?));
+            let reasons = self.medium_reasons(risk, source, number);
+            let also: Vec<String> = if reasons.is_empty() {
+                Vec::new()
+            } else {
+                std::iter::once(format!("risk {}", risk.word()))
+                    .chain(reasons)
+                    .collect()
+            };
+            return Ok(Some(self.not_armed_paused(number, &also, out)?));
         }
         if review.risk != Level::Low {
+            let why = with_reasons(
+                format!("its {what}'s review is risk {}", review.risk.word()),
+                &self.medium_reasons(risk, source, number),
+            );
             writeln!(
                 out,
-                "{pr_named} awaits you: its {what}'s review is risk {}",
-                review.risk.word(),
+                "{pr_named} awaits you: {why}",
                 pr_named = self.pr_named(number)
             )?;
             return Ok(Some(format!(
@@ -1876,13 +1928,20 @@ impl Loop<'_> {
     }
 
     /// A PR not armed because of the pause: said, and the log row's note.
-    fn not_armed_paused(&self, number: u32, out: &mut dyn Write) -> Result<String> {
-        writeln!(
-            out,
-            "{} awaits you: the loop is paused on a red main and arms nothing until you \
-             run `sbxm task loop --clear-pause`",
-            self.pr_named(number)
-        )?;
+    /// `also`: what else keeps the PR from being armed, said after the pause (issue 549).
+    fn not_armed_paused(
+        &self,
+        number: u32,
+        also: &[String],
+        out: &mut dyn Write,
+    ) -> Result<String> {
+        let why = with_reasons(
+            "the loop is paused on a red main and arms nothing until you run `sbxm task loop \
+             --clear-pause`"
+                .to_owned(),
+            also,
+        );
+        writeln!(out, "{} awaits you: {why}", self.pr_named(number))?;
         Ok("auto-merge not armed: paused on a red main".to_owned())
     }
 
@@ -2390,10 +2449,11 @@ impl Loop<'_> {
                     .is_some_and(|rec| passes_arm_checks(&rec));
                 let current = id.clone().unwrap_or_default();
                 let eligible = armed || (own && self.earlier_resolves_pass(number, &current));
-                let outcome = match self.rearm(number, "log-fix", eligible, review, out, warn)? {
-                    Some(note) => format!("fixed from its log, {note}"),
-                    None => "fixed from its log".to_owned(),
-                };
+                let outcome =
+                    match self.rearm(number, task, "log-fix", eligible, review, out, warn)? {
+                        Some(note) => format!("fixed from its log, {note}"),
+                        None => "fixed from its log".to_owned(),
+                    };
                 writeln!(
                     out,
                     "{pr_named}: {outcome}",
@@ -2576,6 +2636,23 @@ pub fn exit_code(result: &Result<()>) -> i32 {
         Ok(()) => 0,
         Err(e) if e.is::<NeedsUser>() => NEEDS_USER,
         Err(_) => 1,
+    }
+}
+
+/// `why`, then each of `reasons`, separated by `; `.
+fn with_reasons(why: String, reasons: &[String]) -> String {
+    std::iter::once(why)
+        .chain(reasons.iter().cloned())
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Where the task `rec` came from, for the size [`medium::refusals`] reads.
+fn medium_source(rec: &Record) -> medium::Source {
+    match rec.kind {
+        Kind::Issue => medium::Source::Issue(rec.number),
+        Kind::Spec => medium::Source::Spec,
+        Kind::Pr | Kind::Fix => medium::Source::Unknown,
     }
 }
 
