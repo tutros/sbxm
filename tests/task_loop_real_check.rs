@@ -22,6 +22,7 @@ use sbxm::github::{
     CommitStatus, GitHubBackend, Mergeable, PrFile, PrFiles, PrInfo, PrState, StatusState,
 };
 use sbxm::notify::{FakeNotifier, Notification};
+use sbxm::task::loop_pause::{self, Pause};
 use sbxm::task::record::{self, Kind, NewTask, Process, Record, ReviewResult, Stage, Status};
 use sbxm::task::risk::Level;
 
@@ -50,6 +51,8 @@ struct Script<'a> {
     base: PathBuf,
     gh: &'a FakeGitHub,
     risk: Level,
+    /// The risk of every resolve's review.
+    fix_risk: Level,
     /// The issue's body; no `issue.md` at all for `None`.
     body: Option<String>,
     calls: RefCell<Vec<String>>,
@@ -62,6 +65,7 @@ impl<'a> Script<'a> {
             base: base.to_owned(),
             gh,
             risk: Level::Low,
+            fix_risk: Level::Low,
             body,
             calls: RefCell::default(),
             clock: Cell::new(START),
@@ -70,6 +74,11 @@ impl<'a> Script<'a> {
 
     fn risk(mut self, risk: Level) -> Self {
         self.risk = risk;
+        self
+    }
+
+    fn fix_risk(mut self, risk: Level) -> Self {
+        self.fix_risk = risk;
         self
     }
 }
@@ -163,7 +172,7 @@ impl Steps for Script<'_> {
             Kind::Fix,
             pr,
             Some(&id),
-            (Level::Low, PUSHED),
+            (self.fix_risk, PUSHED),
             None,
         );
         rec.stage = Stage::Finished;
@@ -229,12 +238,17 @@ impl Fixture {
     /// A task of issue `issue` a loop finished into PR `100 + issue`, its clean low-risk review
     /// of [`HEAD`], its issue text `body`.
     fn loop_pr(&self, issue: u32, body: &str) {
+        self.loop_pr_at(issue, body, Level::Low);
+    }
+
+    /// [`Self::loop_pr`] with its own task's review at `risk`.
+    fn loop_pr_at(&self, issue: u32, body: &str, risk: Level) {
         let (dir, mut rec) = write_task(
             &self.base(),
             Kind::Issue,
             issue,
             None,
-            (Level::Low, HEAD),
+            (risk, HEAD),
             Some(body),
         );
         rec.stage = Stage::Finished;
@@ -511,6 +525,131 @@ fn failure_on_the_resolves_head_is_not_armed_again_and_says_failed() {
     ran.result.unwrap();
     assert!(arms.is_empty(), "{}", ran.out);
     assert!(log.contains("not armed: real check failed"), "{log}");
+}
+
+// --- Review S-1: a refusal that comes first still names the real check ---
+
+/// Runs the loop on issue 3, its task's review at `risk`, its issue naming the check, after
+/// `statuses` were posted on PR #103's head; with `paused`, on a loop paused on a red `main`.
+fn held_first(risk: Level, statuses: &[StatusState], paused: bool) -> (Ran, Vec<GhCall>, String) {
+    let f = fixture();
+    if paused {
+        loop_pause::write(
+            &f.base(),
+            &Pause {
+                commit: MAIN.into(),
+                run_id: 9,
+                run_url: "https://github.com/o/r/actions/runs/9".into(),
+                workflow: "ci".into(),
+                merged_by: "alice".into(),
+                at: "2026-11-01T10:00:00Z".into(),
+            },
+        )
+        .unwrap();
+    }
+    let gh = github(&[3], &[]);
+    for &state in statuses {
+        post(&gh, HEAD, state);
+    }
+    let script = Script::new(&f.base(), &gh, Some(needs_check())).risk(risk);
+    let ran = run_loop(&f, &script, &gh, &FakeNotifier::default());
+    let log = f.log_text();
+    (ran, arms(&gh), log)
+}
+
+#[test]
+fn a_medium_risk_pr_names_its_real_check_not_recorded() {
+    let (ran, arms, log) = held_first(Level::Medium, &[], false);
+    ran.result.unwrap();
+    assert!(arms.is_empty(), "{}", ran.out);
+    assert!(
+        ran.out.contains(
+            "PR #103 (Fix 3) awaits you: auto-merge not armed: real check not recorded; risk medium"
+        ),
+        "{}",
+        ran.out
+    );
+    assert!(
+        log.contains("PR #103, clean, auto-merge not armed: real check not recorded; risk medium"),
+        "{log}"
+    );
+}
+
+#[test]
+fn a_medium_risk_pr_names_its_real_check_failed() {
+    let (ran, arms, log) = held_first(Level::Medium, &[StatusState::Failure], false);
+    ran.result.unwrap();
+    assert!(arms.is_empty(), "{}", ran.out);
+    assert!(
+        log.contains("not armed: real check failed; risk medium"),
+        "{log}"
+    );
+}
+
+#[test]
+fn a_medium_risk_pr_with_success_on_its_head_says_only_its_risk() {
+    let (ran, arms, log) = held_first(Level::Medium, &[StatusState::Success], false);
+    ran.result.unwrap();
+    assert!(arms.is_empty(), "{}", ran.out);
+    assert!(
+        ran.out.contains("PR #103 (Fix 3) awaits you: risk medium"),
+        "{}",
+        ran.out
+    );
+    assert!(!log.contains("real check"), "{log}");
+}
+
+#[test]
+fn a_paused_loop_still_names_a_low_risk_prs_real_check() {
+    let (ran, arms, log) = held_first(Level::Low, &[], true);
+    ran.result.unwrap();
+    assert!(arms.is_empty(), "{}", ran.out);
+    assert!(
+        log.contains("not armed: paused on a red main; real check not recorded"),
+        "{log}"
+    );
+}
+
+/// PR #101 of a task whose own review was `own`, armed when `armed`, resolved by a fix whose
+/// review is `fix`; nothing posted on any commit.
+fn resolved_held(own: Level, armed: bool, fix: Level) -> (Ran, Vec<GhCall>, String) {
+    let f = fixture();
+    f.loop_pr_at(1, &needs_check(), own);
+    let mut gh = github(&[], &[101]).with_mergeable(101, Mergeable::Conflicting);
+    if armed {
+        gh = gh.with_auto_merge(101);
+    }
+    let script = Script::new(&f.base(), &gh, None).fix_risk(fix);
+    let ran = run_loop(&f, &script, &gh, &FakeNotifier::default());
+    let log = f.log_text();
+    (ran, arms(&gh), log)
+}
+
+#[test]
+fn a_medium_risk_resolve_names_the_real_check() {
+    let (ran, arms, log) = resolved_held(Level::Low, true, Level::Medium);
+    ran.result.unwrap();
+    assert!(arms.is_empty(), "{}", ran.out);
+    assert!(
+        ran.out.contains(
+            "PR #101 (Fix 1) awaits you after its resolve: auto-merge not armed: real check not \
+             recorded"
+        ),
+        "{}",
+        ran.out
+    );
+    assert!(
+        log.contains("not armed: real check not recorded; risk medium"),
+        "{log}"
+    );
+}
+
+#[test]
+fn a_resolve_of_a_pr_its_own_review_kept_unarmed_names_the_real_check() {
+    let (ran, arms, log) = resolved_held(Level::Medium, false, Level::Low);
+    ran.result.unwrap();
+    assert!(arms.is_empty(), "{}", ran.out);
+    assert!(log.contains("not armed: real check not recorded"), "{log}");
 }
 
 // --- The toast ---

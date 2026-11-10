@@ -1494,10 +1494,12 @@ impl Loop<'_> {
             return Ok(None);
         };
         // Worked out first, so a refusal that comes before its own check still names it (review
-        // S-1 of issue 545).
+        // S-1 of issues 545 and 547): the checks not run, then the real check.
         let not_run = not_run_reason(review);
+        let real = self.real_check_now(Some(&rec), number, warn)?;
+        let leading = leading_reasons(not_run.as_deref(), real.as_deref());
         let waits = |why: String, out: &mut dyn Write| -> Result<Option<String>> {
-            let note = not_run.as_deref().map(|n| not_armed(n, Some(&why)));
+            let note = leading.as_deref().map(|n| not_armed(n, Some(&why)));
             writeln!(
                 out,
                 "{pr_named} awaits you: {}",
@@ -1516,8 +1518,8 @@ impl Loop<'_> {
                 out,
             );
         }
-        if let Some(not_run) = not_run.as_deref() {
-            let note = not_armed(not_run, None);
+        if let (Some(_), Some(leading)) = (&not_run, leading.as_deref()) {
+            let note = not_armed(leading, None);
             writeln!(
                 out,
                 "{pr_named} awaits you: {note}",
@@ -1529,8 +1531,10 @@ impl Loop<'_> {
             return waits("the commit the review covered is unknown".to_owned(), out);
         };
         if self.paused(warn)? {
-            // Only a low-risk PR gets here: nothing else keeps it from being armed.
-            return Ok(Some(self.not_armed_paused(number, &[], out)?));
+            // Only a low-risk PR gets here: nothing else but its real check keeps it unarmed.
+            let also: Vec<String> = real.iter().cloned().collect();
+            let note = self.not_armed_paused(number, &also, out)?;
+            return Ok(Some(with_reasons(note, &also)));
         }
         let state = match self.github.pr_merge_state(&self.repo, number) {
             Ok(state) => state,
@@ -1545,13 +1549,16 @@ impl Loop<'_> {
             Err(e) => return self.arming_failed(number, &e, out, warn),
         };
         if head != reviewed {
-            let note = "auto-merge not armed: the PR's head moved after the review";
+            let note = with_reasons(
+                "auto-merge not armed: the PR's head moved after the review".to_owned(),
+                &real.iter().cloned().collect::<Vec<_>>(),
+            );
             writeln!(
                 out,
                 "{pr_named}: {note} (reviewed {reviewed}, head {head}); it awaits you",
                 pr_named = self.pr_named(number)
             )?;
-            return Ok(Some(note.to_owned()));
+            return Ok(Some(note));
         }
         if let Some(why) = self.real_check_refusal(Some(&rec), number, &head, warn)? {
             let note = not_armed(&why, None);
@@ -1584,6 +1591,35 @@ impl Loop<'_> {
             medium::refusals(self.github, &self.repo, source, number)
         } else {
             Vec::new()
+        }
+    }
+
+    /// [`Self::real_check_refusal`] on PR `number`'s head as GitHub has it now, read only when the
+    /// issue of its own task `own` names a real check: for the refusals that come before arming
+    /// reads the head itself (review S-1 of issue 547), so they name it too.
+    fn real_check_now(
+        &mut self,
+        own: Option<&Record>,
+        number: u32,
+        warn: &mut dyn Write,
+    ) -> Result<Option<String>> {
+        match real_check_of(&self.base_dir, own) {
+            Ok(None) => return Ok(None),
+            Ok(Some(_)) => {}
+            Err(why) => return Ok(Some(why)),
+        }
+        match self.github.pr(&self.repo, number) {
+            Ok(pr) => self.real_check_refusal(own, number, &pr.head_oid, warn),
+            Err(e) => {
+                self.warn_once(
+                    warn,
+                    format!(
+                        "{pr_named}'s head can't be read for its real check: {e:#}; it awaits you",
+                        pr_named = self.pr_named(number)
+                    ),
+                )?;
+                Ok(Some("real check status unreadable".to_owned()))
+            }
         }
     }
 
@@ -1901,23 +1937,25 @@ impl Loop<'_> {
         warn: &mut dyn Write,
     ) -> Result<Option<String>> {
         // Worked out first, so a refusal that comes before its own check still names it (review
-        // S-1 of issue 545): said on a line of its own, and first in the log row's note.
+        // S-1 of issues 545 and 547): said on a line of its own, and first in the log row's note.
+        let own = self.record_of(task);
         let not_run = not_run_reason(review);
+        let real = self.real_check_now(own.as_ref(), number, warn)?;
+        let leading = leading_reasons(not_run.as_deref(), real.as_deref());
         let refused = |this: &Self, why: Option<&str>, out: &mut dyn Write| {
-            let Some(not_run) = not_run.as_deref() else {
+            let Some(leading) = leading.as_deref() else {
                 return Ok(why.map(|w| not_armed(w, None)));
             };
             writeln!(
                 out,
                 "{pr_named} awaits you after its {what}: {}",
-                not_armed(not_run, None),
+                not_armed(leading, None),
                 pr_named = this.pr_named(number)
             )?;
-            Ok::<_, anyhow::Error>(Some(not_armed(not_run, why)))
+            Ok::<_, anyhow::Error>(Some(not_armed(leading, why)))
         };
         // A medium PR's reasons go into every line below that leaves it to the user (review S-1
         // of issue 549), for its risk over its whole review history, this fix's included.
-        let own = self.record_of(task);
         let source = own.as_ref().map_or(medium::Source::Unknown, medium_source);
         let risk = self
             .history_risk(number, own.as_ref())
@@ -1970,17 +2008,22 @@ impl Loop<'_> {
                 "{pr_named} awaits you: the commit its {what}'s review covered is unknown",
                 pr_named = self.pr_named(number)
             )?;
-            return Ok(Some(
+            return Ok(Some(with_reasons(
                 "auto-merge not armed: reviewed commit unknown".to_owned(),
-            ));
+                &real.iter().cloned().collect::<Vec<_>>(),
+            )));
         };
         let head = match self.github.pr(&self.repo, number) {
             Ok(pr) => pr.head_oid,
             Err(e) => return self.arming_failed(number, &e, out, warn),
         };
         if head != reviewed {
-            let note = format!(
-                "auto-merge not armed: the PR's head isn't the commit the {what}'s review covered"
+            let note = with_reasons(
+                format!(
+                    "auto-merge not armed: the PR's head isn't the commit the {what}'s review \
+                     covered"
+                ),
+                &real.iter().cloned().collect::<Vec<_>>(),
             );
             writeln!(
                 out,
@@ -2750,6 +2793,14 @@ fn with_reasons(why: String, reasons: &[String]) -> String {
         .chain(reasons.iter().cloned())
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// The refusals that every "not armed" note of a PR starts with, worked out before the other
+/// checks (review S-1 of issues 545 and 547): its checks not run, then its real check; `None`
+/// with neither.
+fn leading_reasons(not_run: Option<&str>, real: Option<&str>) -> Option<String> {
+    let parts: Vec<&str> = not_run.into_iter().chain(real).collect();
+    (!parts.is_empty()).then(|| parts.join("; "))
 }
 
 /// The real check the issue of a PR's own task `own` names (issue 547), from the issue text its
