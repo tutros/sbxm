@@ -2,7 +2,11 @@
 //! gave the reviewer, replacing any the reviewer wrote, so a typo in commits sbxm already knows
 //! can't keep the `sbxm/review` status from being posted.
 
+use sbxm::github::StatusState;
+use sbxm::github::fake::{FakeGitHub, GhCall};
+use sbxm::task::pipeline::{StatusInput, post_status};
 use sbxm::task::review::{check_scope_end, with_scope};
+use sbxm::task::risk::Level;
 
 const BASE: &str = "dd5587cb721bccab6d07e046ace75309c4f539c5";
 const HEAD: &str = "8919ef53358e21138b676e611e5418e37d3c0e7d";
@@ -30,7 +34,8 @@ fn a_base_one_character_too_long_is_replaced_and_the_scope_ends_at_the_head() {
     let text = with_scope(&typed, BASE, HEAD);
     assert_eq!(scope_lines(&text), [sbxm_line()]);
     assert_eq!(check_scope_end(&text, HEAD), Ok(()));
-    assert_eq!(text, review(&format!("{}\n", sbxm_line())));
+    // sbxm's line always goes right after the Risk line, set off by a blank line (review M-1).
+    assert_eq!(text, review(&format!("{}\n\n", sbxm_line())));
 }
 
 #[test]
@@ -95,4 +100,62 @@ fn windows_line_endings_are_kept() {
             sbxm_line()
         )
     );
+}
+
+// Review M-1: sbxm's line must be the first Scope line the parser reads, so it goes at the top
+// even when a quoted range comes before the reviewer's own line.
+
+const QUOTED_FIRST: &str = "Must-fix findings: 0\nRisk: low\n\nAn earlier review used this range:\n```\nScope: `1111111..2222222`\n```\n\nScope: `3333333..4444444`\nIssues: pending\n";
+
+#[test]
+fn a_quoted_scope_before_the_reviewers_own_is_kept_below_sbxms() {
+    let text = with_scope(QUOTED_FIRST, BASE, HEAD);
+
+    assert!(
+        text.contains("```\nScope: `1111111..2222222`\n```\n"),
+        "{text}"
+    );
+    assert!(!text.contains("3333333..4444444"), "{text}");
+    assert!(
+        text.starts_with(&format!(
+            "Must-fix findings: 0\nRisk: low\n\n{}\n",
+            sbxm_line()
+        )),
+        "{text}"
+    );
+    assert_eq!(check_scope_end(&text, HEAD), Ok(()));
+}
+
+#[test]
+fn a_quoted_scope_before_the_reviewers_own_still_lets_the_status_be_posted() {
+    let text = with_scope(QUOTED_FIRST, BASE, HEAD);
+    let github = FakeGitHub::default();
+
+    let warning = post_status(
+        &github,
+        "o/r",
+        &StatusInput {
+            commit: Some(HEAD),
+            must_fix: 0,
+            text: &text,
+            risk: Level::Low,
+        },
+        "sbxm task review --pr 7 --force",
+    );
+
+    assert_eq!(warning, None);
+    let calls = github.calls();
+    let [GhCall::CommitStatus(_, sha, status)] = calls.as_slice() else {
+        panic!("{calls:?}");
+    };
+    assert_eq!(sha, HEAD);
+    assert_eq!(status.state, StatusState::Success);
+}
+
+#[test]
+fn a_scope_line_before_the_must_fix_count_is_left_so_the_review_is_still_refused() {
+    let typed = format!("Scope: `{BASE}..{HEAD}`\nMust-fix findings: 0\n\nNothing.\n");
+    let text = with_scope(&typed, BASE, HEAD);
+    assert!(text.starts_with("Scope: "), "{text}");
+    assert_eq!(sbxm::task::review::must_fix_count(&text), None);
 }
