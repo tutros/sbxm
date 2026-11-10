@@ -1467,13 +1467,18 @@ impl Loop<'_> {
         let Some(review) = rec.review.as_ref() else {
             return Ok(None);
         };
+        // Worked out first, so a refusal that comes before its own check still names it (review
+        // S-1 of issue 545).
+        let not_run = not_run_reason(review);
         let waits = |why: String, out: &mut dyn Write| -> Result<Option<String>> {
+            let note = not_run.as_deref().map(|n| not_armed(n, Some(&why)));
             writeln!(
                 out,
-                "{pr_named} awaits you: {why}",
+                "{pr_named} awaits you: {}",
+                note.as_deref().unwrap_or(&why),
                 pr_named = self.pr_named(number)
             )?;
-            Ok(None)
+            Ok(note)
         };
         if rec.stopped.is_some() || review.must_fix > 0 {
             return waits("a draft with must-fix left".to_owned(), out);
@@ -1481,7 +1486,8 @@ impl Loop<'_> {
         if review.risk != Level::Low {
             return waits(format!("risk {}", review.risk.word()), out);
         }
-        if let Some(note) = not_run_note(review) {
+        if let Some(not_run) = not_run.as_deref() {
+            let note = not_armed(not_run, None);
             writeln!(
                 out,
                 "{pr_named} awaits you: {note}",
@@ -1801,16 +1807,32 @@ impl Loop<'_> {
         out: &mut dyn Write,
         warn: &mut dyn Write,
     ) -> Result<Option<String>> {
+        // Worked out first, so a refusal that comes before its own check still names it (review
+        // S-1 of issue 545): said on a line of its own, and first in the log row's note.
+        let not_run = not_run_reason(review);
+        let refused = |this: &Self, why: Option<&str>, out: &mut dyn Write| {
+            let Some(not_run) = not_run.as_deref() else {
+                return Ok(why.map(|w| not_armed(w, None)));
+            };
+            writeln!(
+                out,
+                "{pr_named} awaits you after its {what}: {}",
+                not_armed(not_run, None),
+                pr_named = this.pr_named(number)
+            )?;
+            Ok::<_, anyhow::Error>(Some(not_armed(not_run, why)))
+        };
         if !eligible {
             writeln!(
                 out,
                 "{pr_named} awaits you: its own review didn't allow auto-merge",
                 pr_named = self.pr_named(number)
             )?;
-            return Ok(None);
+            return refused(self, None, out);
         }
         if self.paused(warn)? {
-            return Ok(Some(self.not_armed_paused(number, out)?));
+            self.not_armed_paused(number, out)?;
+            return refused(self, Some(PAUSED_REASON), out);
         }
         if review.risk != Level::Low {
             writeln!(
@@ -1819,18 +1841,10 @@ impl Loop<'_> {
                 review.risk.word(),
                 pr_named = self.pr_named(number)
             )?;
-            return Ok(Some(format!(
-                "auto-merge not armed: risk {}",
-                review.risk.word()
-            )));
+            return refused(self, Some(&format!("risk {}", review.risk.word())), out);
         }
-        if let Some(note) = not_run_note(review) {
-            writeln!(
-                out,
-                "{pr_named} awaits you after its {what}: {note}",
-                pr_named = self.pr_named(number)
-            )?;
-            return Ok(Some(note));
+        if not_run.is_some() {
+            return refused(self, None, out);
         }
         let Some(reviewed) = review.commit.as_deref() else {
             writeln!(
@@ -1899,7 +1913,7 @@ impl Loop<'_> {
              run `sbxm task loop --clear-pause`",
             self.pr_named(number)
         )?;
-        Ok("auto-merge not armed: paused on a red main".to_owned())
+        Ok(not_armed(PAUSED_REASON, None))
     }
 
     /// The pass over workflow runs (decision 299), after the resolves and before the wait for
@@ -2602,23 +2616,32 @@ fn passes_arm_checks(rec: &Record) -> bool {
         && rec
             .review
             .as_ref()
-            .is_some_and(|r| r.must_fix == 0 && r.risk == Level::Low && not_run_note(r).is_none())
+            .is_some_and(|r| r.must_fix == 0 && r.risk == Level::Low && not_run_reason(r).is_none())
 }
 
 /// Why `review`'s `## Not run` list keeps auto-merge unarmed (issue 545), at any risk: a check
 /// neither the reviewer nor CI ran, or a list that is unknown (missing, empty, or a record from
 /// before the list). `None` for the empty list, `- none`.
-fn not_run_note(review: &record::ReviewResult) -> Option<String> {
+fn not_run_reason(review: &record::ReviewResult) -> Option<String> {
     match review.not_run.as_deref() {
-        None => Some("auto-merge not armed: not-run list unknown".to_owned()),
+        None => Some("not-run list unknown".to_owned()),
         Some([]) => None,
-        Some([_]) => Some("auto-merge not armed: 1 check not run".to_owned()),
-        Some(checks) => Some(format!(
-            "auto-merge not armed: {} checks not run",
-            checks.len()
-        )),
+        Some([_]) => Some("1 check not run".to_owned()),
+        Some(checks) => Some(format!("{} checks not run", checks.len())),
     }
 }
+
+/// The log row's note for a PR not armed for `reason`, then `also` when another refusal holds too
+/// (review S-1 of issue 545): `auto-merge not armed: 1 check not run; risk medium`.
+fn not_armed(reason: &str, also: Option<&str>) -> String {
+    match also {
+        Some(also) => format!("auto-merge not armed: {reason}; {also}"),
+        None => format!("auto-merge not armed: {reason}"),
+    }
+}
+
+/// Why a PR isn't armed while the loop is paused on a red `main` (decision 299).
+const PAUSED_REASON: &str = "paused on a red main";
 
 /// How far `risk` keeps a PR from the loop's arming, for the highest of its review history: an
 /// unknown risk fails [`passes_arm_checks`] as medium does, so it outranks low (where

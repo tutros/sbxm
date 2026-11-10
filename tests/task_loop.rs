@@ -312,6 +312,7 @@ fn write_record(base: &Path, issue: u32, stage: Stage, must_fix: Option<u32>, pr
         rec.review = Some(ReviewResult {
             round: 1,
             must_fix,
+            not_run: Some(Vec::new()),
             ..ReviewResult::default()
         });
     }

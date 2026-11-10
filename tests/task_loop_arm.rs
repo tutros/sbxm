@@ -393,6 +393,53 @@ mod not_run {
         assert!(arms(&gh).is_empty(), "{}", run.out);
     }
 
+    /// Review S-1: a refusal that comes first (risk, a draft) doesn't hide the not-run reason.
+    #[test]
+    fn a_higher_risk_or_draft_pr_still_names_its_checks_not_run() {
+        let cases = [
+            (
+                Level::Medium,
+                0,
+                Some(&["Pester tests: no pwsh"][..]),
+                "1 check not run",
+                "risk medium",
+            ),
+            (Level::High, 0, None, "not-run list unknown", "risk high"),
+            (
+                Level::Medium,
+                0,
+                None,
+                "not-run list unknown",
+                "risk medium",
+            ),
+            (
+                Level::Low,
+                1,
+                Some(&["a: x", "b: y"][..]),
+                "2 checks not run",
+                "a draft",
+            ),
+        ];
+        for (risk, must_fix, not_run, said, other) in cases {
+            let (run, arms, log) = go(Review {
+                risk,
+                must_fix,
+                ..low_with(not_run)
+            });
+            run.result.unwrap();
+            assert!(arms.is_empty(), "{risk:?}: {}", run.out);
+            let line = format!("awaits you: auto-merge not armed: {said}; {other}");
+            assert!(run.out.contains(&line), "{line}\n{}", run.out);
+            // A draft's log row is its work stop's, with no arming note.
+            if must_fix == 0 {
+                assert!(
+                    log.contains(&format!("not armed: {said}")),
+                    "{risk:?}: {log}"
+                );
+            }
+        }
+    }
+
     #[test]
     fn a_medium_risk_pr_with_none_not_run_still_waits_for_its_risk() {
         let (run, arms, _) = go(Review {

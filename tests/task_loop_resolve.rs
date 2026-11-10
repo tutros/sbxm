@@ -645,6 +645,95 @@ mod not_run {
         assert!(log.contains("not armed: not-run list unknown"), "{log}");
     }
 
+    /// Review S-1: a refusal that comes first (the resolve's risk, the PR not eligible, a pause)
+    /// doesn't hide the resolve review's not-run reason.
+    #[test]
+    fn a_medium_risk_resolve_still_names_its_checks_not_run() {
+        for (not_run, said) in [
+            (Some(&["Pester tests: no pwsh"][..]), "1 check not run"),
+            (None, "not-run list unknown"),
+        ] {
+            let f = fixture();
+            f.loop_pr(1, Level::Low);
+            let gh = github(&[], &[101])
+                .with_mergeable(101, Mergeable::Conflicting)
+                .with_auto_merge(101);
+            let script = Script::new(&f.base(), &gh)
+                .fix(
+                    101,
+                    Fix::Pushed {
+                        risk: Level::Medium,
+                        must_fix: 0,
+                        commit: PUSHED,
+                        conflicting: false,
+                    },
+                )
+                .fix_not_run(not_run);
+
+            let run = run_loop(&f, &f.opts(None), &script, &gh);
+
+            run.result.unwrap();
+            assert!(arms(&gh).is_empty(), "{}", run.out);
+            let line = format!("awaits you after its resolve: auto-merge not armed: {said}");
+            assert!(run.out.contains(&line), "{line}\n{}", run.out);
+            let note = format!("not armed: {said}; risk medium");
+            assert!(f.log_text().contains(&note), "{note}\n{}", f.log_text());
+        }
+    }
+
+    #[test]
+    fn an_ineligible_pr_still_names_its_resolves_checks_not_run() {
+        let f = fixture();
+        f.loop_pr(1, Level::Medium);
+        let gh = github(&[], &[101]).with_mergeable(101, Mergeable::Conflicting);
+        let script = Script::new(&f.base(), &gh).fix_not_run(Some(&["Pester tests: no pwsh"]));
+
+        let run = run_loop(&f, &f.opts(None), &script, &gh);
+
+        run.result.unwrap();
+        assert!(arms(&gh).is_empty(), "{}", run.out);
+        assert!(
+            run.out
+                .contains("awaits you after its resolve: auto-merge not armed: 1 check not run"),
+            "{}",
+            run.out
+        );
+        assert!(
+            f.log_text().contains("not armed: 1 check not run"),
+            "{}",
+            f.log_text()
+        );
+    }
+
+    #[test]
+    fn a_paused_loop_still_names_a_resolves_checks_not_run() {
+        let f = fixture();
+        f.loop_pr(1, Level::Low);
+        sbxm::task::loop_pause::write(
+            &f.base(),
+            &sbxm::task::loop_pause::Pause {
+                commit: MAIN_1.into(),
+                run_id: 9,
+                run_url: "https://github.com/o/r/actions/runs/9".into(),
+                workflow: "ci".into(),
+                merged_by: "alice".into(),
+                at: "2026-11-01T10:00:00Z".into(),
+            },
+        )
+        .unwrap();
+        let gh = github(&[], &[101])
+            .with_mergeable(101, Mergeable::Conflicting)
+            .with_auto_merge(101);
+        let script = Script::new(&f.base(), &gh).fix_not_run(None);
+
+        let run = run_loop(&f, &f.opts(None), &script, &gh);
+
+        run.result.unwrap();
+        assert!(arms(&gh).is_empty(), "{}", run.out);
+        let note = "not armed: not-run list unknown; paused on a red main";
+        assert!(f.log_text().contains(note), "{}\n{}", run.out, f.log_text());
+    }
+
     /// The PR's own review left a check not run, so it was never armed: a clean resolve doesn't
     /// clear that.
     #[test]
