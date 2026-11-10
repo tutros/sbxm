@@ -19,7 +19,7 @@ use common::task_fixture::{Probe, issue_text, open_issue};
 use sbxm::commands::task_loop::{self, Env, Options, Steps};
 use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::github::gh::{GhBackend, GhRunner};
-use sbxm::github::{GitHubBackend, Mergeable, PrInfo, PrState};
+use sbxm::github::{GitHubBackend, Mergeable, PrFile, PrFiles, PrInfo, PrState};
 use sbxm::task::record::{self, Kind, NewTask, Process, Record, ReviewResult, Stage, Status};
 use sbxm::task::risk::Level;
 
@@ -567,6 +567,98 @@ fn a_conflicting_medium_or_high_risk_pr_is_resolved_and_not_armed() {
         assert!(run.out.contains("awaits you"), "{}", run.out);
         assert!(!gh.pr_merge_state(REPO, 101).unwrap().auto_merge);
     }
+}
+
+// Issue 549 (#460 guardrail 6): a medium-risk resolve's note also gives the size of the PR's own
+// task's issue and its `Cargo.lock` change.
+
+#[test]
+fn a_medium_risk_resolve_says_its_size_and_cargo_lock_reasons() {
+    let f = fixture();
+    f.loop_pr(1, Level::Low);
+    let mut text = issue_text(1);
+    text.text = "title:\tFix 1\nstate:\tOPEN\nlabels:\tsize:L\n--\nbody\n".to_owned();
+    let gh = github(&[], &[101])
+        .with_mergeable(101, Mergeable::Conflicting)
+        .with_auto_merge(101)
+        .with_issue_text(text)
+        .with_pr_files(
+            101,
+            PrFiles {
+                changed_files: 1,
+                files: vec![PrFile {
+                    filename: "crates/x/Cargo.lock".to_owned(),
+                    previous_filename: None,
+                }],
+            },
+        );
+    let script = Script::new(&f.base(), &gh).fix(
+        101,
+        Fix::Pushed {
+            risk: Level::Medium,
+            must_fix: 0,
+            commit: PUSHED,
+            conflicting: false,
+        },
+    );
+
+    let run = run_loop(&f, &f.opts(None), &script, &gh);
+
+    run.result.unwrap();
+    assert!(arms(&gh).is_empty(), "{}", run.out);
+    assert!(
+        run.out.contains(
+            "awaits you: its resolve's review is risk medium; its issue #1 is size L; it changes \
+             crates/x/Cargo.lock\n"
+        ),
+        "{}",
+        run.out
+    );
+}
+
+#[test]
+fn an_unarmed_medium_risk_pr_says_its_size_and_cargo_lock_reasons_after_a_resolve() {
+    // Review S-1 of issue 549: its own review was medium, so it was never eligible to be armed
+    // again; the line still says why it couldn't be under the medium rules.
+    let f = fixture();
+    f.loop_pr(1, Level::Medium);
+    let mut text = issue_text(1);
+    text.text = "title:\tFix 1\nstate:\tOPEN\nlabels:\tsize:L\n--\nbody\n".to_owned();
+    let gh = github(&[], &[101])
+        .with_mergeable(101, Mergeable::Conflicting)
+        .with_issue_text(text)
+        .with_pr_files(
+            101,
+            PrFiles {
+                changed_files: 1,
+                files: vec![PrFile {
+                    filename: "crates/x/Cargo.lock".to_owned(),
+                    previous_filename: None,
+                }],
+            },
+        );
+    let script = Script::new(&f.base(), &gh).fix(
+        101,
+        Fix::Pushed {
+            risk: Level::Medium,
+            must_fix: 0,
+            commit: PUSHED,
+            conflicting: false,
+        },
+    );
+
+    let run = run_loop(&f, &f.opts(None), &script, &gh);
+
+    run.result.unwrap();
+    assert!(arms(&gh).is_empty(), "{}", run.out);
+    assert!(
+        run.out.contains(
+            "awaits you: its own review didn't allow auto-merge; its issue #1 is size L; it \
+             changes crates/x/Cargo.lock\n"
+        ),
+        "{}",
+        run.out
+    );
 }
 
 #[test]

@@ -6,7 +6,7 @@ use anyhow::{Result, anyhow};
 
 use super::{
     CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, JobLog, ListedPr, Mergeable,
-    PrComment, PrInfo, PrMergeState, PrRequest, PrState, RunStatus, WorkflowRun,
+    PrComment, PrFiles, PrInfo, PrMergeState, PrRequest, PrState, RunStatus, WorkflowRun,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,6 +50,7 @@ pub enum GhCall {
     /// Repo, run id.
     RunFailedLog(String, u64),
     PrMergeCommit(String, u32),
+    PrFiles(String, u32),
 }
 
 #[derive(Default)]
@@ -98,6 +99,8 @@ pub struct FakeGitHub {
     run_logs: Mutex<Vec<(u64, Vec<JobLog>)>>,
     /// What `pr_merge_commit` answers, by PR; not merged when not scripted.
     merge_commits: Mutex<Vec<(u32, String)>>,
+    /// What `pr_files` answers, by PR; an error for a PR not scripted.
+    pr_files: Vec<(u32, PrFiles)>,
     calls: Mutex<Vec<GhCall>>,
 }
 
@@ -129,6 +132,11 @@ impl FakeGitHub {
 
     pub fn with_issue_text(mut self, text: IssueText) -> Self {
         self.issue_texts.push(text);
+        self
+    }
+
+    pub fn with_pr_files(mut self, number: u32, files: PrFiles) -> Self {
+        self.pr_files.push((number, files));
         self
     }
 
@@ -714,5 +722,14 @@ impl GitHubBackend for FakeGitHub {
             .iter()
             .find(|(n, _)| *n == number)
             .map(|(_, sha)| sha.clone()))
+    }
+
+    fn pr_files(&self, repo: &str, number: u32) -> Result<PrFiles> {
+        self.record(GhCall::PrFiles(repo.to_owned(), number))?;
+        self.pr_files
+            .iter()
+            .find(|(n, _)| *n == number)
+            .map(|(_, files)| files.clone())
+            .ok_or_else(|| anyhow!("FakeGitHub: the files of pr {number} are not scripted"))
     }
 }

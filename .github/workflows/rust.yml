@@ -74,3 +74,22 @@ jobs:
     - name: Run doc tests
       if: steps.changes.outputs.build == 'true'
       run: cargo test --doc
+
+  # The Pester tests of `scripts/` (issue 546): a job of its own, so it is its own required check, not behind the Rust
+  # build. It runs on every pull request and push, with no docs-only skip, so the check is never missing.
+  pester:
+
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v4
+    # Pinned, like the worker template's Pester (issue 455).
+    - name: Install Pester
+      shell: pwsh
+      run: Install-Module Pester -RequiredVersion 5.5.0 -Force -SkipPublisherCheck -Scope CurrentUser
+    # The command of `just script-test`; `-CI` makes a failing test fail the job.
+    - name: Run Pester tests
+      shell: pwsh
+      run: |
+        Import-Module Pester -RequiredVersion 5.5.0
+        Invoke-Pester scripts/tests -Output Minimal -CI

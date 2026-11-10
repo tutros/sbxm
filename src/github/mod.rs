@@ -89,6 +89,24 @@ pub struct ListedPr {
     pub is_cross_repository: bool,
 }
 
+/// One file of a pull request's diff, as `gh api repos/<repo>/pulls/<n>/files` lists it (issue
+/// 549).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrFile {
+    /// The file's path in the PR's head.
+    pub filename: String,
+    /// The path it had before, for a renamed file.
+    pub previous_filename: Option<String>,
+}
+
+/// A pull request's file list, every page of it, and the number of changed files GitHub reports
+/// for the PR (`changed_files`): a list shorter than that is incomplete (issue 549).
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PrFiles {
+    pub changed_files: u32,
+    pub files: Vec<PrFile>,
+}
+
 /// A comment on a pull request's conversation, as `gh pr view --json comments` lists it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrComment {
@@ -247,4 +265,8 @@ pub trait GitHubBackend: Send + Sync {
     /// The merge commit of PR `number` once GitHub merged it, a full commit id; `None` while it
     /// isn't merged (issue 442).
     fn pr_merge_commit(&self, repo: &str, number: u32) -> Result<Option<String>>;
+    /// PR `number`'s files, every page (`gh api repos/<repo>/pulls/<n>/files --paginate`), and
+    /// its `changed_files` count (`gh api repos/<repo>/pulls/<n>`), read before a medium-risk PR
+    /// would be armed (issue 549).
+    fn pr_files(&self, repo: &str, number: u32) -> Result<PrFiles>;
 }

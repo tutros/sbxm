@@ -15,7 +15,7 @@ use common::Env as TestEnv;
 use common::task_fixture::{Probe, issue_text, open_issue};
 use sbxm::commands::task_loop::{self, Env, Options, Steps};
 use sbxm::github::fake::{FakeGitHub, GhCall};
-use sbxm::github::{PrInfo, PrState};
+use sbxm::github::{PrFile, PrFiles, PrInfo, PrState};
 use sbxm::task::record::{self, Kind, NewTask, Process, Record, ReviewResult, Stage, Status};
 use sbxm::task::risk::Level;
 
@@ -482,6 +482,88 @@ fn a_medium_or_high_risk_pr_waits_for_the_user_and_counts_toward_the_cap() {
         assert!(run.out.contains("5 PRs await you"), "{}", run.out);
         assert!(!script.calls().contains(&"run 4".to_owned()));
     }
+}
+
+// Issue 549 (#460 guardrail 6): a medium-risk PR's note also gives its size and `Cargo.lock`
+// reasons; it is still never armed (until #550). Low risk keeps its rules.
+
+/// `github(&[3])` with issue 3 labeled `labels` and PR 103's files scripted.
+fn github_medium(labels: &str, files: &[&str]) -> FakeGitHub {
+    let mut text = issue_text(3);
+    text.text = format!("title:\tFix 3\nstate:\tOPEN\nlabels:\t{labels}\n--\nbody\n");
+    let files: Vec<PrFile> = files
+        .iter()
+        .map(|name| PrFile {
+            filename: (*name).to_owned(),
+            previous_filename: None,
+        })
+        .collect();
+    FakeGitHub::default()
+        .with_user("me")
+        .with_default_branch("main")
+        .with_issue_text(text)
+        .with_open_issues(vec![open_issue(3, &[READY, "size:S"], "")])
+        .with_pr(pr(103, PrState::Open, REVIEWED))
+        .with_pr_files(
+            103,
+            PrFiles {
+                changed_files: u32::try_from(files.len()).unwrap(),
+                files,
+            },
+        )
+}
+
+const MEDIUM_CLEAN: Review = Review {
+    risk: Level::Medium,
+    ..LOW_CLEAN
+};
+
+#[test]
+fn a_medium_pr_of_size_l_changing_cargo_lock_awaits_you_with_both_reasons() {
+    let f = fixture();
+    let gh = github_medium("ready-for-worker, size:L", &["src/a.rs", "Cargo.lock"]);
+    let script = Script::new(&f.base(), MEDIUM_CLEAN);
+
+    let run = run_loop(&f, &f.opts(None), &script, &gh);
+
+    run.result.unwrap();
+    assert!(arms(&gh).is_empty());
+    assert!(
+        run.out
+            .contains("awaits you: risk medium; its issue #3 is size L; it changes Cargo.lock\n"),
+        "{}",
+        run.out
+    );
+}
+
+#[test]
+fn a_medium_pr_that_passes_both_checks_still_awaits_you() {
+    let f = fixture();
+    let gh = github_medium("size:M", &["src/a.rs"]);
+    let script = Script::new(&f.base(), MEDIUM_CLEAN);
+
+    let run = run_loop(&f, &f.opts(None), &script, &gh);
+
+    run.result.unwrap();
+    assert!(arms(&gh).is_empty());
+    assert!(run.out.contains("awaits you: risk medium\n"), "{}", run.out);
+    assert!(gh.calls().contains(&GhCall::PrFiles(REPO.into(), 103)));
+}
+
+#[test]
+fn a_low_risk_pr_of_size_l_changing_cargo_lock_is_armed_as_before() {
+    let f = fixture();
+    let gh = github_medium("size:L", &["Cargo.lock"]);
+    let script = Script::new(&f.base(), LOW_CLEAN);
+
+    let run = run_loop(&f, &f.opts(None), &script, &gh);
+
+    run.result.unwrap();
+    assert_eq!(
+        arms(&gh),
+        [GhCall::PrArmAutoMerge(REPO.into(), 103, REVIEWED.into())]
+    );
+    assert!(!gh.calls().contains(&GhCall::PrFiles(REPO.into(), 103)));
 }
 
 #[test]
