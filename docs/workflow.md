@@ -287,6 +287,8 @@ sbxm status                            # the tasks, the running cloud sandboxes 
 
 `[sandbox] location = "cloud"` in `sbxm-task.toml` makes the cloud a repo's default (`"local"`, or no key, keeps
 it here); `--cloud`/`--local` on `task start`, `task run` and `task review --pr N` override it for that command.
+`[sandbox] cloud_shape` (micro, small, medium, large or xl) sizes the cloud sandboxes; without it the local CPUs and
+memory must be exactly one of those shapes, or a cloud task is refused before anything is made (issue 559).
 After that, `task.json`'s `location` decides for every command of the task. The phases are the same as locally;
 what differs is how the work gets in and out (bundles copied by `sbx --cloud cp`, a clone under `$HOME/work/<id>`),
 how long each sandbox lives, and what is refused up front. README, *Running tasks in Docker Cloud Sandboxes*, has

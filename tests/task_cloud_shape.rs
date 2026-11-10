@@ -68,6 +68,13 @@ fn the_key_absent_loads_as_none() {
     assert_eq!(config.sandbox.cloud_shape, None);
 }
 
+/// This repo's own `sbxm-task.toml` sizes its cloud tasks large: sbxm's tests need its memory.
+#[test]
+fn this_repo_s_cloud_tasks_are_large() {
+    let config = TaskConfig::load(std::path::Path::new(env!("CARGO_MANIFEST_DIR"))).unwrap();
+    assert_eq!(config.sandbox.cloud_shape, Some(Shape::Large));
+}
+
 // A cloud task's sandboxes.
 
 use common::cloud_task::{

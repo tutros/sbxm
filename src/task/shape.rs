@@ -49,10 +49,6 @@ impl Shape {
             .unwrap()
     }
 
-    pub fn name(self) -> &'static str {
-        self.row().1
-    }
-
     pub fn cpus(self) -> u32 {
         self.row().2
     }

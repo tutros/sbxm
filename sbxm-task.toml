@@ -25,6 +25,9 @@ time_limit = "45m"
 profile = "sbxm-dev"
 # cpus = 4
 # memory = "8g"
+# Every cloud sandbox of a task (worker, reviewer, fix rounds): micro, small, medium, large or xl
+# (issue 559). sbxm's tests need the large shape's memory; local sandboxes keep [resources].
+cloud_shape = "large"
 
 # Without [gates] sandbox, a repo with a Cargo.toml gets the three cargo commands below;
 # any other repo must list its own. An empty list means no sandbox gates.
