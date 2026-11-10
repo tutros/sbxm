@@ -126,6 +126,18 @@ pub struct LoopPr {
 /// repo's task, or a task folder that is not sbxm's own
 /// doesn't count. In the order [`record::task_folders`] lists the tasks.
 pub fn loop_prs(base_dir: &Path, repo: &str) -> Result<Vec<LoopPr>> {
+    prs_where(base_dir, repo, opened_by_loop)
+}
+
+/// Every PR a loop finished a task into for `repo`, as [`loop_prs`] finds them but with the PRs a
+/// loop task continued too (issue 530, answer 1(a)): those await the user's merge as well.
+pub fn loop_finished_prs(base_dir: &Path, repo: &str) -> Result<Vec<LoopPr>> {
+    prs_where(base_dir, repo, |rec| {
+        rec.hooks.get(LOOP_HOOK) == Some(&serde_json::Value::Bool(true))
+    })
+}
+
+fn prs_where(base_dir: &Path, repo: &str, keep: fn(&Record) -> bool) -> Result<Vec<LoopPr>> {
     let mut found = Vec::new();
     for dir in record::task_folders(base_dir)? {
         if check_own_folder(base_dir, &dir).is_err() {
@@ -135,10 +147,7 @@ pub fn loop_prs(base_dir: &Path, repo: &str) -> Result<Vec<LoopPr>> {
             continue;
         };
         // A queued spec job's PR counts like an issue's (issue 524).
-        if !matches!(rec.kind, Kind::Issue | Kind::Spec)
-            || rec.repo != repo
-            || !opened_by_loop(&rec)
-        {
+        if !matches!(rec.kind, Kind::Issue | Kind::Spec) || rec.repo != repo || !keep(&rec) {
             continue;
         }
         let Some(url) = rec.pr.clone() else {

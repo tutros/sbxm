@@ -55,6 +55,9 @@ pub struct GlobalConfig {
     /// so it's not in the config hash.
     #[serde(default)]
     pub antigravity_auth: AntigravityAuth,
+    /// `[notify]`: the loop's toasts (issue 530, decision 311).
+    #[serde(default)]
+    pub notify: Notify,
     /// Written by `config init` before decision 76 but never read; refused
     /// by [`GlobalConfig::load`] rather than silently ignored.
     #[serde(default)]
@@ -71,6 +74,25 @@ pub enum AntigravityAuth {
     ApiKey,
     /// The user signs in inside the sandbox once; `agy` keeps and refreshes the token itself.
     Login,
+}
+
+/// `[notify]` of `config.toml` (issue 530, decision 311).
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Notify {
+    /// `toasts = false` turns the loop's toasts off on this machine; on when unset.
+    #[serde(default = "yes")]
+    pub toasts: bool,
+}
+
+impl Default for Notify {
+    fn default() -> Self {
+        Self { toasts: true }
+    }
+}
+
+fn yes() -> bool {
+    true
 }
 
 fn default_profile_name() -> String {

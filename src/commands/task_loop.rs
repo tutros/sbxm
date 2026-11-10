@@ -37,6 +37,7 @@ use crate::config::GlobalConfig;
 use crate::disk;
 use crate::github::{GitHubBackend, Issue, Mergeable, PrState, RunStatus, WorkflowRun};
 use crate::harness::Harness;
+use crate::notify::{self, Notification, Notifier, Shown};
 use crate::run::results::format_timestamp;
 use crate::task::config::{ShouldFix, TaskConfig};
 use crate::task::finish::check_own_folder;
@@ -46,7 +47,7 @@ use crate::task::queue::{self, Outcome, READY_LABEL, Report, Row, Skipped};
 use crate::task::record::{self, Kind, Process, ProcessProbe, Record, Stage};
 use crate::task::risk::Level;
 use crate::task::runlog::{RunLog, Tee};
-use crate::task::{findings, finish, lock, loop_log, pipeline, pr_fix, resume};
+use crate::task::{findings, finish, lock, loop_log, next, pipeline, pr_fix, resume};
 
 mod check;
 mod jobs;
@@ -486,11 +487,49 @@ struct Loop<'a> {
     log: PathBuf,
     /// Whether this loop wrote a row to [`log`](Self::log): only then is it posted.
     logged: bool,
+    /// The notifier and the keys shown (issue 530); `None` with `[notify] toasts = false` or no
+    /// notifier wired: nothing shown, nothing written.
+    notify: Option<(&'a dyn Notifier, Shown)>,
 }
 
 impl Loop<'_> {
     fn now(&self) -> u64 {
         (self.env.now)()
+    }
+
+    /// Shows `note` unless its key was shown before (issue 530, answer 4). A notification that
+    /// fails to show is one warning, and its key is recorded all the same (answer 5).
+    fn notify(
+        &mut self,
+        note: Notification,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<()> {
+        let Some((notifier, shown)) = self.notify.as_mut() else {
+            return Ok(());
+        };
+        if shown.contains(&note.key) {
+            return Ok(());
+        }
+        if let Err(e) = notifier.show(&note, out) {
+            writeln!(
+                warn,
+                "warning: the notification \"{}\" could not be shown: {e:#}; the loop goes on",
+                note.title
+            )?;
+        }
+        if let Err(e) = shown.record(&note.key) {
+            self.warn_once(
+                warn,
+                format!("{e:#}; a notification may be shown again after a restart"),
+            )?;
+        }
+        Ok(())
+    }
+
+    /// What a notification's click opens when it has no URL: the loop's log file.
+    fn log_click(&self) -> String {
+        notify::file_url(&self.log)
     }
 
     fn say_once(&mut self, out: &mut dyn Write, text: String) -> Result<()> {
@@ -608,6 +647,176 @@ impl Loop<'_> {
         awaiting.sort_unstable();
         awaiting.dedup();
         Ok(awaiting)
+    }
+
+    /// (a) of issue 530: a notification for each PR a loop opened or continued that awaits the
+    /// user's merge because the loop won't arm it: a draft, or a risk above low after the path
+    /// rules. Keyed by the PR and its head, so a new push after a fix round notifies again. A PR
+    /// that can't be read is left for the next step ([`awaiting_prs`](Self::awaiting_prs) warns
+    /// about it).
+    fn notify_awaiting(&mut self, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
+        if self.notify.is_none() {
+            return Ok(());
+        }
+        for pr in queue::loop_finished_prs(&self.base_dir, &self.repo)? {
+            let Some(number) = pr.number else {
+                continue;
+            };
+            let Ok(state) = self.github.pr_merge_state(&self.repo, number) else {
+                continue;
+            };
+            if !queue::awaits_user(state) {
+                continue;
+            }
+            let Some(own) = self.record_of(&pr.task) else {
+                continue;
+            };
+            let head = match self.github.pr(&self.repo, number) {
+                Ok(info) => info.head_oid,
+                Err(e) => {
+                    self.warn_once(
+                        warn,
+                        format!(
+                            "{pr_named}'s head can't be read ({e:#}); its notification waits for \
+                             the next step",
+                            pr_named = self.pr_named(number)
+                        ),
+                    )?;
+                    continue;
+                }
+            };
+            // The PR's draft state is that of the task whose review covered its head (review M-1
+            // of issue 530): a resolve or log-fix pushed onto it, else the task that opened it.
+            // Its risk is the highest of its whole review history, the task that opened it and
+            // every fix pushed onto it: a later narrow review doesn't clear the risk an earlier
+            // one left (decision 298(3), second review of issue 530).
+            let fixes = self.fixes_of(number);
+            let risk = fixes
+                .iter()
+                .filter(|fix| fix.stage == Stage::Finished)
+                .chain([&own])
+                .filter_map(|rec| rec.review.as_ref().map(|r| r.risk))
+                .max_by_key(|&risk| awaiting_rank(risk));
+            let rec = fixes
+                .into_iter()
+                .find(|fix| {
+                    fix.review
+                        .as_ref()
+                        .is_some_and(|r| r.commit.as_deref() == Some(head.as_str()))
+                })
+                .unwrap_or(own);
+            let Some(review) = rec.review.as_ref() else {
+                continue;
+            };
+            let risk = risk
+                .into_iter()
+                .chain([review.risk])
+                .max_by_key(|&risk| awaiting_rank(risk))
+                .unwrap_or(review.risk);
+            let (what, reason, next) =
+                if state.draft || rec.stopped.is_some() || review.must_fix > 0 {
+                    let reason = match rec.stopped {
+                        Some(stopped) => format!("a draft: work stop {}", stopped.name()),
+                        None => format!("a draft with {} must-fix left", review.must_fix),
+                    };
+                    let next = format!("see `sbxm task status {}`", next::record_flag(&rec));
+                    ("draft", reason, next)
+                } else if risk == Level::Low {
+                    continue;
+                } else {
+                    let word = risk.word();
+                    let reason =
+                        format!("risk {word} after the path rules, so the loop doesn't arm it");
+                    (word, reason, "review it, then merge or close it".to_owned())
+                };
+            let note = Notification {
+                key: format!("pr:{number}:{head}"),
+                title: format!("PR #{number} awaits your merge ({what})"),
+                body: format!("{reason}; next: {next}"),
+                click: pr.url.clone(),
+            };
+            self.notify(note, out, warn)?;
+        }
+        Ok(())
+    }
+
+    /// The fix tasks of PR `number` (resolves and log-fixes, `fix-<n>-<head>`) of this repo, in
+    /// task folders that are sbxm's own; a record that can't be read is left out.
+    fn fixes_of(&self, number: u32) -> Vec<Record> {
+        let prefix = format!("fix-{number}-");
+        record::task_folders(&self.base_dir)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|dir| {
+                dir.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|id| id.starts_with(&prefix))
+                    && check_own_folder(&self.base_dir, dir).is_ok()
+            })
+            .filter_map(|dir| record::read(&dir.join("task.json")).ok())
+            .filter(|rec| rec.kind == Kind::Fix && rec.repo == self.repo)
+            .collect()
+    }
+
+    /// (e) of issue 530: a notification for each question task `id` hands the user, once per
+    /// task and question: its worker's "Needs a decision" in `result.md`, and each question
+    /// finding of its reviewer's `review.md` (review M-2). The click opens its PR, else its issue.
+    fn notify_question(
+        &mut self,
+        id: &str,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<()> {
+        if self.notify.is_none() {
+            return Ok(());
+        }
+        let dir = record::task_dir(&self.base_dir, id);
+        // (what hashes into the key, the body's line, where to answer it)
+        let mut questions: Vec<(String, String, &str)> = Vec::new();
+        if let Some(question) = fs::read_to_string(dir.join("result.md"))
+            .ok()
+            .and_then(|text| finish::handed_back(&text))
+        {
+            let first = question
+                .lines()
+                .map(|line| line.trim().trim_start_matches(['-', '*']).trim())
+                .find(|line| !line.is_empty())
+                .unwrap_or_default()
+                .to_owned();
+            questions.push((question, first, "the PR's \"Needs a decision\""));
+        }
+        if let Ok(text) = fs::read_to_string(dir.join("review.md")) {
+            for finding in findings::parse(&text).findings {
+                if finding.label == "question" {
+                    let line = format!("{} {}", finding.id, finding.title);
+                    questions.push((format!("review: {line}"), line, "the PR's review"));
+                }
+            }
+        }
+        if questions.is_empty() {
+            return Ok(());
+        }
+        let click = match self.record_of(id) {
+            Some(Record { pr: Some(url), .. }) => url,
+            Some(rec) if matches!(rec.kind, Kind::Pr | Kind::Fix) => {
+                format!("https://github.com/{}/pull/{}", rec.repo, rec.number)
+            }
+            Some(rec) if rec.kind == Kind::Issue => {
+                format!("https://github.com/{}/issues/{}", rec.repo, rec.number)
+            }
+            _ => self.log_click(),
+        };
+        for (keyed, line, place) in questions {
+            let hash = crate::config::sha256_hex(keyed.as_bytes());
+            let note = Notification {
+                key: format!("question:{id}:{}", &hash[..16]),
+                title: format!("Task {id} has a question for you"),
+                body: format!("{line}; next: answer it in {place}"),
+                click: click.clone(),
+            };
+            self.notify(note, out, warn)?;
+        }
+        Ok(())
     }
 
     /// Waits while [`PR_CAP`] PRs await the user. `false`: the user asked to stop meanwhile.
@@ -889,7 +1098,7 @@ impl Loop<'_> {
                 return Ok(End::Held(Retry::Resume { failures }));
             }
             if e.is::<pipeline::MissingSecret>() {
-                return Err(Halt::Error(needs_user(e)));
+                return Err(Halt::Error(needs_user(Cause::Secret, e)));
             }
             if says_sign_in(&e, &String::from_utf8_lossy(&captured)) {
                 stops.push(("sign-in".to_owned(), 0));
@@ -1196,6 +1405,7 @@ impl Loop<'_> {
             .and_then(|url| queue::pr_number(&url))
             .map_or_else(|| "PR".to_owned(), |n| format!("PR #{n}"));
         let armed = self.arm(&format!("issue-{issue}"), out, warn)?;
+        self.notify_question(&format!("issue-{issue}"), out, warn)?;
         let outcome = if clean {
             if let Err(e) = self.steps.file_findings(issue, out, warn) {
                 writeln!(
@@ -1458,6 +1668,9 @@ impl Loop<'_> {
             )?;
         }
         let result = self.steps.fix_pr(number, out, warn);
+        if let Some(id) = record::fix_id(number, &head) {
+            self.notify_question(&id, out, warn)?;
+        }
         let fix = record::fix_id(number, &head).and_then(|id| {
             record::read(&record::task_dir(&self.base_dir, &id).join("task.json")).ok()
         });
@@ -1798,7 +2011,7 @@ impl Loop<'_> {
                 continue;
             };
             for run in &read.failed {
-                self.pause(&commit, pr, run, out)?;
+                self.pause(&commit, pr, run, out, warn)?;
             }
             let acted = read
                 .failed
@@ -1864,6 +2077,7 @@ impl Loop<'_> {
         pr: Option<u32>,
         run: &WorkflowRun,
         out: &mut dyn Write,
+        warn: &mut dyn Write,
     ) -> Result<()> {
         // Only the run a pause is for is marked (review M-3): another run's failure seen while a
         // pause stands gets its own pause once the user clears this one.
@@ -1893,7 +2107,23 @@ impl Loop<'_> {
              stops so that nothing more is armed",
         )?;
         self.paused_for.insert((commit.to_owned(), run.id));
-        self.say_once(out, paused_line(&pause))
+        self.say_once(out, paused_line(&pause))?;
+        // (d) of issue 530: once per commit of `main`.
+        let note = Notification {
+            key: format!("main:{commit}"),
+            title: "main is red: auto-merge paused".to_owned(),
+            body: format!(
+                "{} failed again after a re-run; next: fix main, then run `sbxm task loop \
+                 --clear-pause`",
+                pause.describe()
+            ),
+            click: if run.url.is_empty() {
+                self.log_click()
+            } else {
+                run.url.clone()
+            },
+        };
+        self.notify(note, out, warn)
     }
 
     /// The PRs' side of the pass (decision 299): every open PR the loop opened, drafts included.
@@ -2122,6 +2352,9 @@ impl Loop<'_> {
         )?;
         let result = self.steps.fix_check(number, run.id, out, warn);
         let id = record::fix_id(number, head);
+        if let Some(id) = id.as_deref() {
+            self.notify_question(id, out, warn)?;
+        }
         let dir = id.as_deref().map(|id| record::task_dir(&self.base_dir, id));
         let fix = dir
             .as_ref()
@@ -2279,29 +2512,60 @@ fn sign_in_stop(e: anyhow::Error, resume: Option<String>) -> anyhow::Error {
 /// parked tasks in a row or the usage waits' total. `task loop` exits [`NEEDS_USER`] for it, so
 /// the scheduled start doesn't restart it. It reads as the error it wraps.
 #[derive(Debug)]
-pub struct NeedsUser(anyhow::Error);
+pub struct NeedsUser(Cause, anyhow::Error);
+
+/// What a [`NeedsUser`] stop is for, named in its toast's title (issue 530).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Cause {
+    SignIn,
+    Secret,
+    Parked,
+    UsageLimit,
+}
+
+impl Cause {
+    /// The key's word for it.
+    fn key(self) -> &'static str {
+        match self {
+            Self::SignIn => "sign-in",
+            Self::Secret => "secret",
+            Self::Parked => "parked",
+            Self::UsageLimit => "usage-limit",
+        }
+    }
+
+    /// The toast's title.
+    fn title(self) -> &'static str {
+        match self {
+            Self::SignIn => "Loop stopped: sbx sign-in lapsed",
+            Self::Secret => "Loop stopped: a secret is missing",
+            Self::Parked => "Loop stopped: two tasks parked in a row",
+            Self::UsageLimit => "Loop stopped: the usage limit held",
+        }
+    }
+}
 
 impl std::fmt::Display for NeedsUser {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Display::fmt(&self.0, f)
+        std::fmt::Display::fmt(&self.1, f)
     }
 }
 
 impl std::error::Error for NeedsUser {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.0.source()
+        self.1.source()
     }
 }
 
 /// The exit code of a loop that stopped on [`NeedsUser`] (decision 310).
 pub const NEEDS_USER: i32 = 3;
 
-/// `e` marked as a stop that needs the user.
-fn needs_user(e: anyhow::Error) -> anyhow::Error {
+/// `e` marked as a stop that needs the user, for `cause`.
+fn needs_user(cause: Cause, e: anyhow::Error) -> anyhow::Error {
     if e.is::<NeedsUser>() {
         e
     } else {
-        anyhow::Error::new(NeedsUser(e))
+        anyhow::Error::new(NeedsUser(cause, e))
     }
 }
 
@@ -2323,6 +2587,18 @@ fn passes_arm_checks(rec: &Record) -> bool {
             .review
             .as_ref()
             .is_some_and(|r| r.must_fix == 0 && r.risk == Level::Low)
+}
+
+/// How far `risk` keeps a PR from the loop's arming, for the highest of its review history: an
+/// unknown risk fails [`passes_arm_checks`] as medium does, so it outranks low (where
+/// [`Level`]'s own order puts it below).
+fn awaiting_rank(risk: Level) -> u8 {
+    match risk {
+        Level::Low => 0,
+        Level::Unknown => 1,
+        Level::Medium => 2,
+        Level::High => 3,
+    }
 }
 
 /// Why the log-fix task in `dir`, recorded as `rec`, didn't end clean (decision 300), in words
@@ -2461,8 +2737,8 @@ fn first_line(text: &str) -> String {
     text.lines().next().unwrap_or_default().to_owned()
 }
 
-/// Runs the loop (issue 320). Everything is checked before the first write: the config, the
-/// repo, the task folders, then the lock is taken.
+/// Runs the loop (issue 320) with no notifications. Everything is checked before the first
+/// write: the config, the repo, the task folders, then the lock is taken.
 #[allow(clippy::too_many_arguments)]
 pub fn run(
     config_dir: &Path,
@@ -2471,6 +2747,48 @@ pub fn run(
     github: &dyn GitHubBackend,
     probe: &dyn ProcessProbe,
     env: &Env,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<()> {
+    run_loop(config_dir, opts, steps, github, probe, env, None, out, warn)
+}
+
+/// [`run`], showing the user what needs them through `notifier` (issue 530, decision 311) unless
+/// `config.toml` sets `[notify] toasts = false`. Only `main` passes the real one.
+#[allow(clippy::too_many_arguments)]
+pub fn run_notifying(
+    config_dir: &Path,
+    opts: &Options,
+    steps: &dyn Steps,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    env: &Env,
+    notifier: &dyn Notifier,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<()> {
+    run_loop(
+        config_dir,
+        opts,
+        steps,
+        github,
+        probe,
+        env,
+        Some(notifier),
+        out,
+        warn,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_loop(
+    config_dir: &Path,
+    opts: &Options,
+    steps: &dyn Steps,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    env: &Env,
+    notifier: Option<&dyn Notifier>,
     out: &mut dyn Write,
     warn: &mut dyn Write,
 ) -> Result<()> {
@@ -2485,7 +2803,9 @@ pub fn run(
         bail!("--wait can't be used with --issue: a list of issues has an end");
     }
     let settings = TaskConfig::load(&opts.repo_root)?.task_loop;
-    let base_dir = GlobalConfig::load(config_dir)?.base_dir;
+    let global = GlobalConfig::load(config_dir)?;
+    let notifier = notifier.filter(|_| global.notify.toasts);
+    let base_dir = global.base_dir;
     let repo = resolve_repo(opts.repo.as_deref(), &opts.repo_root)?;
     // As `task rm --merged` refuses it (decision 195): every task folder is read through it.
     let tasks = record::tasks_root(&base_dir);
@@ -2515,6 +2835,10 @@ pub fn run(
     };
 
     let (started_at, log) = free_log(&base_dir, env)?;
+    let notify = match notifier {
+        Some(notifier) => Some((notifier, Shown::load(&base_dir, warn)?)),
+        None => None,
+    };
     let mut lp = Loop {
         config_dir,
         repo_root: opts.repo_root.clone(),
@@ -2539,6 +2863,7 @@ pub fn run(
         paused_for: HashSet::new(),
         log,
         logged: false,
+        notify,
     };
 
     // The cut-off tasks first: their owed resumes are written before anything else can fail.
@@ -2546,6 +2871,24 @@ pub fn run(
         lp.interrupted_jobs(out, warn)?;
         work(&mut lp, &mut lock, opts, due, out, warn)
     });
+    // What waits for the user as the loop stops (issue 530): a PR it left, the stop itself.
+    if let Err(e) = lp.notify_awaiting(out, warn) {
+        let _ = writeln!(
+            warn,
+            "warning: the PRs awaiting you were not checked for notifications: {e:#}"
+        );
+    }
+    if let Err(e) = &result
+        && let Some(NeedsUser(cause, _)) = e.downcast_ref::<NeedsUser>()
+    {
+        let note = Notification {
+            key: format!("stop:{started_at}:{}", cause.key()),
+            title: cause.title().to_owned(),
+            body: first_line(&format!("{e:#}")),
+            click: lp.log_click(),
+        };
+        let _ = lp.notify(note, out, warn);
+    }
     // Only rows this loop wrote are posted: a loop that ran no task posts nothing (decision 305).
     if lp.logged {
         let stop = match &result {
@@ -2642,7 +2985,10 @@ fn work(
         // for PRs awaiting the user, so a queued review or fix isn't held up by it (issue 525).
         let go_on = lp.resolve_conflicts(out, warn)? && {
             lp.check_runs(out, warn)?;
-            lp.drain_jobs(out, warn)? && lp.wait_for_prs(out, warn)?
+            lp.drain_jobs(out, warn)? && {
+                lp.notify_awaiting(out, warn)?;
+                lp.wait_for_prs(out, warn)?
+            }
         };
         if !go_on {
             writeln!(out, "stopped on request")?;
@@ -2775,11 +3121,14 @@ fn work(
                     warn,
                 )?;
                 left(&held, &due, out)?;
-                return Err(needs_user(sign_in_stop(
-                    e,
-                    rec.is_some()
-                        .then(|| format!("sbxm task resume --issue {issue}")),
-                )));
+                return Err(needs_user(
+                    Cause::SignIn,
+                    sign_in_stop(
+                        e,
+                        rec.is_some()
+                            .then(|| format!("sbxm task resume --issue {issue}")),
+                    ),
+                ));
             }
             Err(Halt::UsageLimit(total)) => {
                 let rec = lp.record(issue);
@@ -2801,11 +3150,14 @@ fn work(
                     },
                     warn,
                 )?;
-                return Err(needs_user(anyhow!(
-                    "the usage limit held through {} of waits in a row; the loop stops; continue \
+                return Err(needs_user(
+                    Cause::UsageLimit,
+                    anyhow!(
+                        "the usage limit held through {} of waits in a row; the loop stops; continue \
                      with `sbxm task resume --issue {issue}` once it resets",
-                    queue::span(total.as_secs())
-                )));
+                        queue::span(total.as_secs())
+                    ),
+                ));
             }
         };
         let recorded = match &end {
@@ -2883,10 +3235,13 @@ fn work(
         if parked {
             parked_in_row += 1;
             if parked_in_row >= 2 {
-                return Err(needs_user(anyhow!(
-                    "two tasks parked in a row; the loop stops; see `sbxm task status` for what \
+                return Err(needs_user(
+                    Cause::Parked,
+                    anyhow!(
+                        "two tasks parked in a row; the loop stops; see `sbxm task status` for what \
                      each left"
-                )));
+                    ),
+                ));
             }
         } else {
             parked_in_row = 0;

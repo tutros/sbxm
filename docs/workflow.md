@@ -441,6 +441,10 @@ the binary you built, and waits for job files and labelled issues.
 3. Stop it with `sbxm task loop --stop`: it stops after the current task, or within 5 minutes while it waits, and
    comes back at the next logon.
 4. Remove it with `./scripts/loop-trigger.ps1 -Unregister`, then `sbxm task loop --stop` for the one running.
+5. While it runs you hear from it through toasts (decision 311, issue 530), only when it needs you: a PR awaiting
+   your merge (medium or high risk, or a draft), a queued job that failed, stopped, was refused or interrupted, a stop
+   that needs you, `main` red pausing auto-merge, a task's question. Each shows once (`<base_dir>\.sbxm\notified.json`)
+   and a click opens the PR or issue, or the loop's log. Turn them off with `[notify] toasts = false` in `config.toml`.
 
 ## How a change to sbxm itself goes
 
