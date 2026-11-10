@@ -17,6 +17,7 @@ use sbxm::github::fake::FakeGitHub;
 use sbxm::task::gates::FakeHostRunner;
 use sbxm::task::pipeline::{self, Prepared, Tiers};
 use sbxm::task::record::{self, Stage, Status};
+use sbxm::task::review::with_scope;
 
 fn config() -> Fixture {
     fixture_with(
@@ -92,7 +93,16 @@ fn a_reviewer_round_saves_the_review_under_the_reviewers_name_and_cleans_up() {
     let reviewed = round(&f, &backend, &mut prepared, 1).unwrap();
 
     assert_eq!((reviewed.round, reviewed.must_fix), (1, 0));
-    let expected = format!("Reviewer: codex (default model)\n\n{CLEAN}");
+    // The reviewer's text with sbxm's Scope line, the range the prompt gave it (issue 565).
+    let repo_git = meta(&f).join("repo.git");
+    let (base, tip) = (
+        git(&repo_git, &["rev-parse", "refs/heads/main"]),
+        git(&repo_git, &["rev-parse", "refs/heads/issue-41"]),
+    );
+    let expected = format!(
+        "Reviewer: codex (default model)\n\n{}",
+        with_scope(CLEAN, &base, &tip)
+    );
     assert_eq!(
         fs::read_to_string(meta(&f).join("review.md")).unwrap(),
         expected

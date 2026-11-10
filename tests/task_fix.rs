@@ -163,9 +163,16 @@ fn a_ready_fix_task_is_pushed_as_a_fast_forward_and_its_review_posted_as_the_new
     assert!(pushed.review_posted);
     assert_eq!(pushed.commits.len(), 1, "{:?}", pushed.commits);
     let calls = github.calls();
-    let [GhCall::PrComment(repo, 7, body)] = calls.as_slice() else {
+    // The review carries sbxm's Scope line, ending at the commit reviewed, so the status follows
+    // the comment (issue 565).
+    let [
+        GhCall::PrComment(repo, 7, body),
+        GhCall::CommitStatus(_, sha, _),
+    ] = calls.as_slice()
+    else {
         panic!("{calls:?}");
     };
+    assert_eq!(sha, &tip);
     assert_eq!(repo, "o/r");
     assert!(
         body.contains(&format!(

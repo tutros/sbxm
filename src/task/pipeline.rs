@@ -5372,6 +5372,19 @@ fn said(prepared: &mut Prepared, stopped: lifetime::Stopped) {
 /// 176): the reviewer's own `Risk:` line (`Level::Unknown`, with a warning, when it is missing or
 /// unparseable), raised to the path-rule floor computed from the task's own changed paths, but
 /// never lowered.
+/// The base of the range a review round's prompt gives the reviewer ([`review_files`]'s
+/// `scope_base`), resolved to a full commit in `repo_git`: the last reviewed commit for a narrow
+/// round, else where the task's own commits start.
+fn review_scope_base(prepared: &Prepared, repo_git: &Path) -> Result<String> {
+    let rev = prepared
+        .record
+        .last_reviewed_commit
+        .clone()
+        .unwrap_or_else(|| prepared.record.rewrite_start());
+    repo::resolve_commit(repo_git, &rev)
+        .with_context(|| format!("cannot resolve {rev}, the base of the review's Scope line"))
+}
+
 fn run_review_agent(
     env: &TaskEnv,
     prepared: &mut Prepared,
@@ -5402,6 +5415,12 @@ fn run_review_agent(
         (None, None) => prepared.record.changed_paths(&repo_git),
     }
     .context("cannot list the task's changed paths for the risk floor")?;
+    // The range the prompt gave the reviewer, as full commits: sbxm writes the review's Scope
+    // line from it (issue 565), so it is resolved before the reviewer runs.
+    let scope = match tip {
+        Some(tip) => Some((review_scope_base(prepared, &repo_git)?, tip)),
+        None => None,
+    };
     let started = Instant::now();
     let workdir = reviewer_clone(prepared, clone);
     let result = headless::run(
@@ -5473,6 +5492,10 @@ fn run_review_agent(
         AgentFile::TooLarge(_) => {
             bail!("the reviewer's review.md is larger than 1 MiB, so it isn't used")
         }
+    };
+    let text = match scope {
+        Some((base, tip)) => review::with_scope(&text, &base, tip),
+        None => text,
     };
     let model = reviewer.harness.model_or_default(reviewer.model.as_deref());
     let saved = review::with_header(reviewer.harness.as_str(), model.as_deref(), &text);

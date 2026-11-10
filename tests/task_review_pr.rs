@@ -1523,68 +1523,60 @@ fn a_failed_status_is_a_warning_naming_the_commit_and_the_command_and_the_review
     );
 }
 
-/// Review M-1: a review that declares it covered an older head A certifies nothing on the
-/// fetched head B; neither gets a status, and the warning says why and how to review again.
+/// Issue 565: whatever Scope line the reviewer wrote, the review posted carries sbxm's, from the
+/// PR's base to the commit the reviewer was given, and the status is posted on that commit.
+fn assert_rescoped_and_posted(
+    f: &Fixture,
+    (backend, github): (&FakeBackend, &FakeGitHub),
+    prepared: &mut Prepared,
+) {
+    let report = review_it(f, backend, github, &FakeHostRunner::default(), prepared).unwrap();
+
+    let reviewed = saved(f).review.unwrap().commit.unwrap();
+    let base = common::git(&f.origin, &["rev-parse", "main"]);
+    let line = format!("Scope: `{base}..{reviewed}`");
+    assert!(report.posted);
+    assert!(report.warnings.is_empty(), "{:?}", report.warnings);
+    let calls = github.calls();
+    let comment = calls
+        .iter()
+        .find_map(|c| match c {
+            GhCall::PrComment(_, _, body) => Some(body.clone()),
+            _ => None,
+        })
+        .unwrap();
+    let scopes: Vec<&str> = comment
+        .lines()
+        .filter(|l| l.starts_with("Scope:"))
+        .collect();
+    assert_eq!(scopes, [line.as_str()], "{comment}");
+    let [(_, sha, status)] = statuses(github).try_into().unwrap();
+    assert_eq!(sha, reviewed);
+    assert_eq!(status.state, sbxm::github::StatusState::Success);
+}
+
+/// Review M-1 still holds for a review sbxm saved for another commit (`task_finish_cmd.rs`); a
+/// reviewer's Scope naming an older head A no longer decides it (issue 565): the review covered
+/// the fetched head B it was given, so it is posted with sbxm's line and B gets the status.
 #[test]
-fn a_review_scoped_to_an_older_head_posts_no_status_on_the_fetched_one() {
+fn a_review_scoped_to_an_older_head_is_posted_with_sbxms_scope_and_its_status() {
     let f = config("");
     let older = add_pr_head(&f, 7);
     let review = scoped(&f, CLEAN, &older);
     let (backend, github) = (backend(&f, &[&review]), github());
     let mut prepared = prepared(&f, &backend, &github);
 
-    let report = review_it(
-        &f,
-        &backend,
-        &github,
-        &FakeHostRunner::default(),
-        &mut prepared,
-    )
-    .unwrap();
-
-    let reviewed = saved(&f).review.unwrap().commit.unwrap();
-    assert_ne!(reviewed, older);
-    assert!(report.posted);
-    assert!(statuses(&github).is_empty(), "{:?}", github.calls());
-    let [warning] = report.warnings.as_slice() else {
-        panic!("{:?}", report.warnings)
-    };
-    assert!(
-        warning.contains(&format!(
-            "the sbxm/review status wasn't posted: the review's Scope ends at {older}, not at \
-             the reviewed commit {reviewed}"
-        )),
-        "{warning}"
-    );
-    assert!(
-        warning.contains("`sbxm task review --pr 7 --repo o/r --base main --force`"),
-        "{warning}"
-    );
+    assert_rescoped_and_posted(&f, (&backend, &github), &mut prepared);
+    assert_ne!(saved(&f).review.unwrap().commit.unwrap(), older);
 }
 
 #[test]
-fn a_review_without_a_scope_posts_no_status() {
+fn a_review_without_a_scope_is_posted_with_sbxms_and_its_status() {
     let f = config("");
     let (backend, github) = (backend(&f, &[CLEAN]), github());
     let mut prepared = prepared(&f, &backend, &github);
 
-    let report = review_it(
-        &f,
-        &backend,
-        &github,
-        &FakeHostRunner::default(),
-        &mut prepared,
-    )
-    .unwrap();
-
-    assert!(statuses(&github).is_empty());
-    let [warning] = report.warnings.as_slice() else {
-        panic!("{:?}", report.warnings)
-    };
-    assert!(
-        warning.contains("the review has no `Scope: <base>..<head>` line"),
-        "{warning}"
-    );
+    assert_rescoped_and_posted(&f, (&backend, &github), &mut prepared);
 }
 
 #[test]
@@ -1610,7 +1602,7 @@ fn a_scope_ending_in_the_reviewed_commits_abbreviation_still_posts_on_the_full_c
 }
 
 #[test]
-fn a_scope_ending_in_a_7_digit_prefix_of_another_commit_posts_nothing() {
+fn a_scope_ending_in_a_7_digit_prefix_of_another_commit_is_replaced_by_sbxms() {
     let f = config("");
     let head = add_pr_head(&f, 7);
     let other: String = head[..6].to_owned() + if &head[6..7] == "0" { "1" } else { "0" };
@@ -1618,21 +1610,11 @@ fn a_scope_ending_in_a_7_digit_prefix_of_another_commit_posts_nothing() {
     let (backend, github) = (backend(&f, &[&review]), github());
     let mut prepared = prepared_on_head(&f, &backend, &github);
 
-    let report = review_it(
-        &f,
-        &backend,
-        &github,
-        &FakeHostRunner::default(),
-        &mut prepared,
-    )
-    .unwrap();
-
-    assert!(statuses(&github).is_empty());
-    assert_eq!(report.warnings.len(), 1, "{:?}", report.warnings);
+    assert_rescoped_and_posted(&f, (&backend, &github), &mut prepared);
 }
 
 #[test]
-fn a_scope_ending_at_a_revision_of_the_reviewed_commit_posts_nothing() {
+fn a_scope_ending_at_a_revision_of_the_reviewed_commit_is_replaced_by_sbxms() {
     for suffix in ["^1", "~1"] {
         let f = config("");
         let head = add_pr_head(&f, 7);
@@ -1640,24 +1622,6 @@ fn a_scope_ending_at_a_revision_of_the_reviewed_commit_posts_nothing() {
         let (backend, github) = (backend(&f, &[&review]), github());
         let mut prepared = prepared_on_head(&f, &backend, &github);
 
-        let report = review_it(
-            &f,
-            &backend,
-            &github,
-            &FakeHostRunner::default(),
-            &mut prepared,
-        )
-        .unwrap();
-
-        assert!(statuses(&github).is_empty(), "{suffix}");
-        let [warning] = report.warnings.as_slice() else {
-            panic!("{suffix}: {:?}", report.warnings)
-        };
-        assert!(warning.contains(&format!("{head}{suffix}")), "{warning}");
-        assert!(
-            warning.contains(&format!("the reviewed commit {head}")),
-            "{warning}"
-        );
-        assert!(warning.contains("sbxm task review --pr"), "{warning}");
+        assert_rescoped_and_posted(&f, (&backend, &github), &mut prepared);
     }
 }
