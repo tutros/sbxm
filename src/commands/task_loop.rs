@@ -47,7 +47,7 @@ use crate::task::queue::{self, Outcome, READY_LABEL, Report, Row, Skipped};
 use crate::task::record::{self, Kind, Process, ProcessProbe, Record, Stage};
 use crate::task::risk::Level;
 use crate::task::runlog::{RunLog, Tee};
-use crate::task::{findings, finish, lock, loop_log, next, pipeline, pr_fix, resume};
+use crate::task::{findings, finish, lock, loop_log, medium, next, pipeline, pr_fix, resume};
 
 mod check;
 mod jobs;
@@ -1444,7 +1444,8 @@ impl Loop<'_> {
     /// Arms GitHub's auto-merge on the PR a loop task just opened, under decisions 266, 280 and
     /// 293: the review's risk (after the path-rule floor) is low, it found 0 must-fix, the task
     /// ended without a work stop (so its PR isn't a draft), and the PR's head is still the commit
-    /// the review covered. Nothing is checked on CI: GitHub's `--auto` waits for the required
+    /// the review covered. A medium-risk PR's note also gives [`medium::refusals`] (issue 549).
+    /// Nothing is checked on CI: GitHub's `--auto` waits for the required
     /// checks. A PR not armed stays among those awaiting the user, so every refusal is only a
     /// note. Returns the note for the loop's log row, when there is one. `id`: the task's id,
     /// `issue-<n>` or a queued spec job's (issue 524).
@@ -1479,7 +1480,8 @@ impl Loop<'_> {
             return waits("a draft with must-fix left".to_owned(), out);
         }
         if review.risk != Level::Low {
-            return waits(format!("risk {}", review.risk.word()), out);
+            let why = self.risk_why(review.risk, medium_source(&rec), number);
+            return waits(why, out);
         }
         let Some(reviewed) = review.commit.as_deref() else {
             return waits("the commit the review covered is unknown".to_owned(), out);
@@ -1520,6 +1522,16 @@ impl Loop<'_> {
             }
             Err(e) => self.arming_failed(number, &e, out, warn),
         }
+    }
+
+    /// Why a PR of `risk` above low isn't armed: its risk and, for medium, every reason of
+    /// [`medium::refusals`] (issue 549). Until #550 a medium PR is never armed either way.
+    fn risk_why(&self, risk: Level, source: medium::Source, number: u32) -> String {
+        let mut why = vec![format!("risk {}", risk.word())];
+        if risk == Level::Medium {
+            why.extend(medium::refusals(self.github, &self.repo, source, number));
+        }
+        why.join("; ")
     }
 
     fn arming_failed(
@@ -1693,7 +1705,7 @@ impl Loop<'_> {
                     .is_some_and(|rec| passes_arm_checks(&rec));
                 let current = record::fix_id(number, &head).unwrap_or_default();
                 let eligible = armed || (own && self.earlier_resolves_pass(number, &current));
-                match self.rearm(number, "resolve", eligible, review, out, warn)? {
+                match self.rearm(number, task, "resolve", eligible, review, out, warn)? {
                     Some(note) => format!("resolved, {note}"),
                     None => "resolved".to_owned(),
                 }
@@ -1783,10 +1795,13 @@ impl Loop<'_> {
     /// names which in its lines): only for a PR that `eligible`
     /// (armed before, or its own task and every earlier resolve pushed onto it passed
     /// [`Self::arm`]'s checks), when the fix's review is
-    /// low risk with 0 must-fix and covered the PR's new head. Returns the log row's note.
+    /// low risk with 0 must-fix and covered the PR's new head. Returns the log row's note. `task`:
+    /// the PR's own task, whose issue gives a medium PR's size (issue 549).
+    #[allow(clippy::too_many_arguments)]
     fn rearm(
         &mut self,
         number: u32,
+        task: &str,
         what: &str,
         eligible: bool,
         review: &record::ReviewResult,
@@ -1805,10 +1820,13 @@ impl Loop<'_> {
             return Ok(Some(self.not_armed_paused(number, out)?));
         }
         if review.risk != Level::Low {
+            let source = self
+                .record_of(task)
+                .map_or(medium::Source::Unknown, |rec| medium_source(&rec));
             writeln!(
                 out,
-                "{pr_named} awaits you: its {what}'s review is risk {}",
-                review.risk.word(),
+                "{pr_named} awaits you: its {what}'s review is {}",
+                self.risk_why(review.risk, source, number),
                 pr_named = self.pr_named(number)
             )?;
             return Ok(Some(format!(
@@ -2390,10 +2408,11 @@ impl Loop<'_> {
                     .is_some_and(|rec| passes_arm_checks(&rec));
                 let current = id.clone().unwrap_or_default();
                 let eligible = armed || (own && self.earlier_resolves_pass(number, &current));
-                let outcome = match self.rearm(number, "log-fix", eligible, review, out, warn)? {
-                    Some(note) => format!("fixed from its log, {note}"),
-                    None => "fixed from its log".to_owned(),
-                };
+                let outcome =
+                    match self.rearm(number, task, "log-fix", eligible, review, out, warn)? {
+                        Some(note) => format!("fixed from its log, {note}"),
+                        None => "fixed from its log".to_owned(),
+                    };
                 writeln!(
                     out,
                     "{pr_named}: {outcome}",
@@ -2576,6 +2595,15 @@ pub fn exit_code(result: &Result<()>) -> i32 {
         Ok(()) => 0,
         Err(e) if e.is::<NeedsUser>() => NEEDS_USER,
         Err(_) => 1,
+    }
+}
+
+/// Where the task `rec` came from, for the size [`medium::refusals`] reads.
+fn medium_source(rec: &Record) -> medium::Source {
+    match rec.kind {
+        Kind::Issue => medium::Source::Issue(rec.number),
+        Kind::Spec => medium::Source::Spec,
+        Kind::Pr | Kind::Fix => medium::Source::Unknown,
     }
 }
 
