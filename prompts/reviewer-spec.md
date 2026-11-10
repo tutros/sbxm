@@ -37,9 +37,7 @@ finding; high is security-sensitive or cross-cutting code (a trust boundary, sec
 change with no test, or must-fix findings left.
 
 There is no pull request to comment on and no issue to file findings against: review.md is the only output, so use
-this shape so a human can act on it directly:
-
-Scope: `<base sha>..<head sha>`
+this shape so a human can act on it directly (sbxm writes the review's `Scope:` line itself, so don't write one):
 
 ## Risk
 

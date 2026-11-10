@@ -503,7 +503,6 @@ fn both_reviewer_prompts_ask_for_the_shape_file_findings_reads() {
 
         for needle in [
             "\"Must-fix findings: <count>\"",
-            "Scope: `<base sha>..<head sha>`",
             "Issues: pending",
             "## Must fix",
             "**Acceptance criteria:**",
@@ -762,10 +761,10 @@ fn the_pr_fix_worker_prompt_points_at_the_findings_and_says_not_to_push() {
 }
 
 #[test]
-fn the_pr_fix_reviewer_prompt_keeps_the_scope_line_and_the_repeat_marker() {
+fn the_pr_fix_reviewer_prompt_keeps_the_repeat_marker() {
+    // Its Scope line is sbxm's now (issue 565, `tests/task_review_scope_line.rs`).
     let template = prompts::template(Role::ReviewerPrFix, &Prompts::default()).unwrap();
     let text = prompts::render(&template.name, &template.text, &pr_fix_values()).unwrap();
-    assert!(text.contains("Scope: `<base sha>..<head sha>`"), "{text}");
     assert!(text.contains("Repeat of:"), "{text}");
     assert!(text.contains("git log 1234567890abcdef"), "{text}");
 }

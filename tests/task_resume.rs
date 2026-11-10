@@ -908,7 +908,13 @@ fn a_record_without_the_result_reviews_again_under_a_new_round_and_keeps_every_e
         (read(1), read(2), read(3)),
         (ONE.to_owned(), "second\n".to_owned(), "third\n".to_owned())
     );
-    assert!(read(4).ends_with(CLEAN), "{}", read(4));
+    // sbxm's Scope line goes into the reviewer's text (issue 565); the rest is the reviewer's.
+    let tip = repo::branch_tip(&meta(&f).join("repo.git"), "issue-41").unwrap();
+    assert!(
+        read(4).ends_with(&format!("..{tip}`\n\nNothing found.\n")),
+        "{}",
+        read(4)
+    );
     let seen = seen.lock().unwrap();
     assert_eq!(seen.len(), 1);
     for earlier in [ONE, "second\n", "third\n"] {

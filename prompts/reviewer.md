@@ -35,9 +35,8 @@ blank line between the two is fine, but nothing else) is exactly "Risk: low", "R
 docs, tests or a contained change with tests; medium is a behavior change in one area, or a failed/unresolved
 finding; high is security-sensitive or cross-cutting code (a trust boundary, secrets, egress, the state format), a
 change with no test, or must-fix findings left. Then, so the findings can be filed as GitHub issues later, use this
-shape:
+shape; sbxm writes the review's `Scope:` line itself, from the commits it gave you, so don't write one:
 
-Scope: `<base sha>..<head sha>`
 Issues: pending
 
 ## Risk
