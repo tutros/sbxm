@@ -95,6 +95,10 @@ Number 271 is taken by issue 330's HTTP transport (`ureq`), recorded on the park
 
 Decisions 272 onwards: `sdlc/decisions/`. New decisions go there too, each as a new file.
 
+## Round 17: auto-merge guardrails (2026-11-10)
+
+Decisions 316: `sdlc/decisions/` (issue #460's planning interview).
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.
