@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, anyhow, bail};
 
+use super::task_log;
 use crate::backend::{Location, SandboxBackend, ScopedSecret};
 use crate::config::GlobalConfig;
 use crate::confirm::Confirm;
@@ -475,12 +476,9 @@ fn start(
             .map(|n| format!("issue-{n}"))
             .collect();
         writeln!(out, "Starting {} ...", names.join(", "))?;
-        Ok(pipeline::start_at(
-            &ctx,
-            &selection.picks,
-            location,
-            &on_prepared,
-        ))
+        Ok(task_log::live(out, |progress| {
+            pipeline::start_at(&ctx, &selection.picks, location, &on_prepared, progress)
+        }))
     })();
 
     for warning in settle_warnings.into_inner().unwrap() {
@@ -1068,7 +1066,9 @@ pub(crate) fn run_spec_from(
         for event in &prepared.events {
             writeln!(out, "{event}")?;
         }
-        let worked = pipeline::run_worker(&ctx, &mut prepared)?;
+        let worked = task_log::live(out, |progress| {
+            pipeline::run_worker_in(&ctx.env_with(progress), &mut prepared)
+        })?;
         let (label, bad) = match &worked.status {
             RunStatus::Completed => ("completed".to_owned(), false),
             // A timed-out cloud worker stops the task, keeping its partial commits (slice 3 of
@@ -1100,12 +1100,14 @@ pub(crate) fn run_spec_from(
             );
         }
 
-        let gated = pipeline::run_gates(
-            &ctx.env(),
-            &mut prepared,
-            "after-worker",
-            pipeline::Tiers::ALL,
-        )?;
+        let gated = task_log::live(out, |progress| {
+            pipeline::run_gates(
+                &ctx.env_with(progress),
+                &mut prepared,
+                "after-worker",
+                pipeline::Tiers::ALL,
+            )
+        })?;
         if gated.passed {
             if gated.outcomes.is_empty() {
                 writeln!(out, "  gates: none configured")?;

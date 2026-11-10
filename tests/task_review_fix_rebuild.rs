@@ -285,6 +285,7 @@ fn resume(f: &Fixture, backend: &FakeBackend, prepared: &mut Prepared) -> anyhow
     let ctx = ctx(f, &source, backend, &github);
     // The failed run's process is over.
     let env = sbxm::task::pipeline::TaskEnv {
+        progress: &sbxm::task::pipeline::quiet,
         probe: &Gone,
         ..ctx.env()
     };

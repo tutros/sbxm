@@ -9,6 +9,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, bail};
 
+use super::task_log;
 use super::task_review::print_review;
 use super::task_start::resolve_repo;
 use crate::backend::{Location, SandboxBackend};
@@ -189,7 +190,9 @@ pub fn run(
         writeln!(out, "{event}")?;
     }
 
-    let worked = pipeline::run_worker(&ctx, &mut prepared);
+    let worked = task_log::live(out, |progress| {
+        pipeline::run_worker_in(&ctx.env_with(progress), &mut prepared)
+    });
     let stops = match &worked {
         Ok(worked) => match &worked.status {
             RunStatus::Completed => false,
@@ -248,8 +251,9 @@ pub fn run(
     // Decision 292: the worker merged the base first.
     pipeline::check_base_merged(&prepared)?;
 
-    let env = ctx.env();
-    let reviewed = pipeline::review_issue(&env, &mut prepared);
+    let reviewed = task_log::live(out, |progress| {
+        pipeline::review_issue(&ctx.env_with(progress), &mut prepared)
+    });
     for line in prepared.events.drain(..) {
         writeln!(out, "{line}")?;
     }

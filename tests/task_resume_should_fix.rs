@@ -85,6 +85,7 @@ fn reviewed(f: &Fixture, review: &str) {
     let (first, _) = backend(f, &[review]);
     let mut prepared = worked_task(f, &first);
     let env = sbxm::task::pipeline::TaskEnv {
+        progress: &sbxm::task::pipeline::quiet,
         config_dir: &f.env.config_dir(),
         config: &f.config,
         backend: &first,

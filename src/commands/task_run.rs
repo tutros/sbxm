@@ -124,13 +124,58 @@ fn take_slot(
     }
 }
 
-/// Drops the `next:` hint of a step that isn't the last one.
-fn without_next(text: &[u8]) -> String {
-    String::from_utf8_lossy(text)
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("next:"))
-        .map(|line| format!("{line}\n"))
-        .collect()
+/// Drops the `next:` hint of a step that isn't the last one, passing every other line on as soon
+/// as it is whole (issue 538): `task run`'s start lines reach the screen, and so `run.log`, when
+/// printed, not once the start is over.
+struct WithoutNext<'a> {
+    inner: &'a mut dyn Write,
+    line: Vec<u8>,
+}
+
+impl<'a> WithoutNext<'a> {
+    fn new(inner: &'a mut dyn Write) -> Self {
+        Self {
+            inner,
+            line: Vec::new(),
+        }
+    }
+
+    fn pass(&mut self, line: &[u8]) -> std::io::Result<()> {
+        if String::from_utf8_lossy(line)
+            .trim_start()
+            .starts_with("next:")
+        {
+            return Ok(());
+        }
+        self.inner.write_all(line)
+    }
+
+    /// Passes on a last line that had no newline, with one.
+    fn finish(mut self) -> std::io::Result<()> {
+        let mut rest = std::mem::take(&mut self.line);
+        if rest.is_empty() {
+            return Ok(());
+        }
+        rest.push(b'\n');
+        self.pass(&rest)
+    }
+}
+
+impl Write for WithoutNext<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        for &byte in buf {
+            self.line.push(byte);
+            if byte == b'\n' {
+                let line = std::mem::take(&mut self.line);
+                self.pass(&line)?;
+            }
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
 }
 
 /// Passes each line on once: `start` and `review` both say the config's warnings.
@@ -305,7 +350,7 @@ fn run_issue(
         seen: Vec::new(),
         line: Vec::new(),
     };
-    let mut started = Vec::new();
+    let mut started = WithoutNext::new(out);
     let result = task_start::run_with(
         config_dir,
         &start,
@@ -316,7 +361,7 @@ fn run_issue(
         &mut started,
         &mut warn,
     );
-    out.write_all(without_next(&started).as_bytes())?;
+    started.finish()?;
     // Gates that failed after the worker go on to the review, which reruns them and gives a
     // failure to a fix round (decision 180); every other failure stops here.
     if let Err(e) = result
@@ -615,7 +660,7 @@ fn run_spec_task(
             ));
         }
     };
-    let mut started = Vec::new();
+    let mut started = WithoutNext::new(out);
     let result = task_start::run_spec_from(
         config_dir,
         &start,
@@ -630,7 +675,7 @@ fn run_spec_task(
         // Empty in production while P8 (a) holds (slice 4).
         &[],
     );
-    out.write_all(without_next(&started).as_bytes())?;
+    started.finish()?;
 
     if let Some(warning) = settle_warning.into_inner() {
         writeln!(warn, "warning: {warning}")?;

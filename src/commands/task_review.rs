@@ -8,6 +8,7 @@ use std::path::PathBuf;
 
 use anyhow::{Result, anyhow, bail};
 
+use super::task_log;
 use super::task_start::{resolve_repo, spec_flag};
 use crate::backend::{Location, SandboxBackend};
 use crate::config::GlobalConfig;
@@ -253,8 +254,11 @@ fn run_issue(
         disk: &opts.disk,
         identity: identity.as_ref(),
         clone_source: None,
+        progress: &pipeline::quiet,
     };
-    let reviewed = pipeline::review_issue(&env, &mut prepared);
+    let reviewed = task_log::live(out, |progress| {
+        pipeline::review_issue(&TaskEnv { progress, ..env }, &mut prepared)
+    });
     print_said(out, warn, &mut prepared);
     let report = reviewed?;
     let meta = record::task_dir(&base_dir, &id);
@@ -321,6 +325,11 @@ fn reviewed_by(record: &record::Record) -> String {
     })
 }
 
+/// ` — <meta>/review-<n>.md` for a review round line: the round's own findings file (issue 538).
+fn review_file(meta: &std::path::Path, round: u32) -> String {
+    format!(" — {}", meta.join(format!("review-{round}.md")).display())
+}
+
 /// Prints how the review of a task with a worker went (`task review`, `task resume`): warnings
 /// not already printed, each review round, the fix rounds, and where the task ended. When the
 /// gates stopped it, prints that instead of the ready line and returns the failed gate, so the
@@ -352,8 +361,10 @@ pub(super) fn print_review<'a>(
         for round in &report.rounds {
             writeln!(
                 out,
-                "{id}: review round {}{by}: {} must-fix finding(s)",
-                round.round, round.must_fix
+                "{id}: review round {}{by}: {} must-fix finding(s){}",
+                round.round,
+                round.must_fix,
+                review_file(meta, round.round)
             )?;
             print_risk_warning(warn, round.risk)?;
         }
@@ -363,10 +374,11 @@ pub(super) fn print_review<'a>(
     for round in &report.rounds {
         writeln!(
             out,
-            "{id}: review round {}{by}: {} must-fix finding(s){}",
+            "{id}: review round {}{by}: {} must-fix finding(s){}{}",
             round.round,
             round.must_fix,
-            if round.full { "" } else { " (narrow)" }
+            if round.full { "" } else { " (narrow)" },
+            review_file(meta, round.round)
         )?;
         print_risk_warning(warn, round.risk)?;
     }
@@ -444,8 +456,11 @@ fn run_spec(
         disk: &opts.disk,
         identity: identity.as_ref(),
         clone_source: None,
+        progress: &pipeline::quiet,
     };
-    let reviewed = pipeline::review_issue(&env, &mut prepared);
+    let reviewed = task_log::live(out, |progress| {
+        pipeline::review_issue(&TaskEnv { progress, ..env }, &mut prepared)
+    });
     print_said(out, warn, &mut prepared);
     let report = reviewed?;
     let meta = record::task_dir(&base_dir, &id);
@@ -605,7 +620,9 @@ fn run_pr(
     };
 
     let meta = record::task_dir(&base_dir, &id);
-    let reviewed = pipeline::review_pr(&ctx.env(), github, &mut prepared, opts.force);
+    let reviewed = task_log::live(out, |progress| {
+        pipeline::review_pr(&ctx.env_with(progress), github, &mut prepared, opts.force)
+    });
     print_said(out, warn, &mut prepared);
     let report = reviewed?;
     for warning in report
@@ -632,10 +649,11 @@ fn run_pr(
     if let Some(reviewed) = &report.reviewed {
         match writeln!(
             out,
-            "{id}: review round {}{}: {} must-fix finding(s)",
+            "{id}: review round {}{}: {} must-fix finding(s){}",
             reviewed.round,
             reviewed_by(&prepared.record),
-            reviewed.must_fix
+            reviewed.must_fix,
+            review_file(&meta, reviewed.round)
         ) {
             Ok(()) => write_err = print_risk_warning(warn, reviewed.risk).err(),
             Err(e) => write_err = Some(e.into()),

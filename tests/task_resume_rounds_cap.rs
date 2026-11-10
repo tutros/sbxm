@@ -58,6 +58,7 @@ fn stopped(f: &Fixture) {
     let first = backend(f, &[ONE, ONE]);
     let mut prepared = worked_task(f, &first);
     let env = sbxm::task::pipeline::TaskEnv {
+        progress: &sbxm::task::pipeline::quiet,
         config_dir: &f.env.config_dir(),
         config: &f.config,
         backend: &first,

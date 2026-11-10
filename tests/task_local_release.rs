@@ -476,6 +476,7 @@ fn task_resume_on_a_task_whose_sandbox_was_removed_makes_it_again() {
     let mut prepared = Prepared::open(&f.env.base_dir(), "issue-41").unwrap();
     let ctx = ctx(&f, &source, &backend, &github);
     let env = pipeline::TaskEnv {
+        progress: &sbxm::task::pipeline::quiet,
         probe: &Gone,
         ..ctx.env()
     };
@@ -513,6 +514,7 @@ fn task_resume_of_a_failed_review_whose_sandbox_was_removed_does_not_make_it_aga
     let mut prepared = Prepared::open(&f.env.base_dir(), "issue-41").unwrap();
     let ctx = ctx(&f, &source, &backend, &github);
     let env = pipeline::TaskEnv {
+        progress: &sbxm::task::pipeline::quiet,
         probe: &Gone,
         ..ctx.env()
     };
