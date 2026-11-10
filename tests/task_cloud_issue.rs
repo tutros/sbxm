@@ -21,7 +21,7 @@ const CLOUD_TOML: &str = "[sandbox]\nprofile = \"default\"\nlocation = \"cloud\"
 /// The cloud sandbox's home, as `printenv HOME` reports it in the fake.
 const HOME: &str = "/home/agent";
 
-const CLEAN: &str = "Must-fix findings: 0\n\nRisk: low\n\nNothing found.\n";
+const CLEAN: &str = "Must-fix findings: 0\n\nRisk: low\n\n## Not run\n\n- none\n\nNothing found.\n";
 
 /// The cloud minimum (P12).
 const CLOUD_MIN: &str = "0.46.0";

@@ -178,6 +178,7 @@ fn the_recorded_risk_level_is_shown() {
         repeat: false,
         risk: sbxm::task::risk::Level::High,
         risk_reasons: vec!["touches the git trust boundary".to_owned()],
+        not_run: None,
     });
     save(base.path(), &with_review);
 

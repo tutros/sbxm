@@ -351,6 +351,12 @@ pub struct ReviewResult {
     /// the path rule's reason when it raised the level above what the reviewer wrote.
     #[serde(default)]
     pub risk_reasons: Vec<String>,
+    /// The checks neither the reviewer nor CI could run (issue 545), from the review's `## Not
+    /// run` section: empty for `- none`. `None`, unknown, for a review without a readable list
+    /// and for a record from before this field existed; the loop arms auto-merge only on an
+    /// empty list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub not_run: Option<Vec<String>>,
 }
 
 /// A must-fix finding still open, as the review that found it (or, for a repeat, last found it)

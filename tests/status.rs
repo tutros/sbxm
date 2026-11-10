@@ -325,6 +325,7 @@ fn must_fix_comes_from_the_last_recorded_review() {
         repeat: false,
         risk: sbxm::task::risk::Level::Medium,
         risk_reasons: vec![],
+        not_run: None,
     });
     save(base.path(), &record);
 

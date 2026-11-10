@@ -291,12 +291,23 @@ fn run_issue(
 
 /// A warning when a review round's risk (decision 176(e)) couldn't be read: never silently
 /// `low`, and never folded into `report.warnings`, so it doesn't change the count of `Repeat of:`
-/// warnings a round without a readable `Risk:` line would otherwise still have none of.
-fn print_risk_warning(warn: &mut dyn Write, risk: risk::Level) -> Result<()> {
+/// warnings a round without a readable `Risk:` line would otherwise still have none of. Likewise
+/// when its `## Not run` list (issue 545) couldn't be read: the loop never arms such a PR.
+fn print_risk_warning(
+    warn: &mut dyn Write,
+    risk: risk::Level,
+    not_run: Option<&[String]>,
+) -> Result<()> {
     if risk == risk::Level::Unknown {
         writeln!(
             warn,
             "warning: the reviewer's review.md has no readable 'Risk: low|medium|high' line; its risk is \"unknown\""
+        )?;
+    }
+    if not_run.is_none() {
+        writeln!(
+            warn,
+            "warning: the reviewer's review.md has no '## Not run' section with a bullet in it; its not-run list is unknown, so auto-merge is never armed on it"
         )?;
     }
     Ok(())
@@ -366,7 +377,7 @@ pub(super) fn print_review<'a>(
                 round.must_fix,
                 review_file(meta, round.round)
             )?;
-            print_risk_warning(warn, round.risk)?;
+            print_risk_warning(warn, round.risk, round.not_run.as_deref())?;
         }
         return Ok(Some(failed));
     }
@@ -380,7 +391,7 @@ pub(super) fn print_review<'a>(
             if round.full { "" } else { " (narrow)" },
             review_file(meta, round.round)
         )?;
-        print_risk_warning(warn, round.risk)?;
+        print_risk_warning(warn, round.risk, round.not_run.as_deref())?;
     }
     if report.fix_ran {
         writeln!(
@@ -655,7 +666,10 @@ fn run_pr(
             reviewed.must_fix,
             review_file(&meta, reviewed.round)
         ) {
-            Ok(()) => write_err = print_risk_warning(warn, reviewed.risk).err(),
+            Ok(()) => {
+                write_err =
+                    print_risk_warning(warn, reviewed.risk, reviewed.not_run.as_deref()).err()
+            }
             Err(e) => write_err = Some(e.into()),
         }
     }

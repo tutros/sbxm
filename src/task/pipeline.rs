@@ -4046,6 +4046,7 @@ pub fn review_pr(
         repeat: false,
         risk: outcome.risk,
         risk_reasons: outcome.risk_reasons,
+        not_run: outcome.not_run.clone(),
     });
     prepared.record.finish(Status::Completed)?;
     prepared
@@ -4059,6 +4060,7 @@ pub fn review_pr(
         repeat: false,
         warnings: outcome.warnings,
         risk,
+        not_run: outcome.not_run,
     });
 
     let review_path = prepared.meta.join("review.md");
@@ -4544,6 +4546,9 @@ pub struct Reviewed {
     /// The risk level (decision 176): the reviewer's own `Risk:` line, raised to the path-rule
     /// floor but never lowered; `Level::Unknown` for a review with no readable `Risk:` line.
     pub risk: risk::Level,
+    /// The checks the review couldn't run ([`review::not_run`], issue 545); `None` when its
+    /// `## Not run` list is missing or empty.
+    pub not_run: Option<Vec<String>>,
 }
 
 /// Checks before a review creates anything (spec §5.2): the reviewer's provider secret and the
@@ -4839,6 +4844,7 @@ pub fn run_reviewer(env: &TaskEnv, prepared: &mut Prepared, round: u32) -> Resul
                 repeat: outcome.repeat,
                 risk: outcome.risk,
                 risk_reasons: outcome.risk_reasons,
+                not_run: outcome.not_run.clone(),
             });
             prepared.record.finish(Status::Completed)?;
             record::write(&prepared.meta, &prepared.record)?;
@@ -4849,6 +4855,7 @@ pub fn run_reviewer(env: &TaskEnv, prepared: &mut Prepared, round: u32) -> Resul
                 repeat: outcome.repeat,
                 warnings: outcome.warnings,
                 risk: outcome.risk,
+                not_run: outcome.not_run,
             })
         }
         Err(e) => {
@@ -4895,6 +4902,8 @@ struct ReviewOutcome {
     /// never lowered.
     risk: risk::Level,
     risk_reasons: Vec<String>,
+    /// The checks the review couldn't run ([`review::not_run`], issue 545); `None` when unknown.
+    not_run: Option<Vec<String>>,
 }
 
 /// One review round: its workspace, then the reviewer.
@@ -5516,5 +5525,6 @@ fn run_review_agent(
         open,
         risk: risk_level,
         risk_reasons,
+        not_run: review::not_run(&text),
     })
 }

@@ -145,6 +145,7 @@ fn a_recorded_risk_level_opens_the_pr_description() {
         repeat: false,
         risk: sbxm::task::risk::Level::High,
         risk_reasons: vec!["touches the git trust boundary".to_owned()],
+        not_run: None,
     });
     record::write(&prepared.meta, &record).unwrap();
     let github = FakeGitHub::default();
@@ -516,6 +517,7 @@ fn a_drafts_reason_survives_the_cap_of_a_long_risk_section() {
         repeat: false,
         risk: Level::High,
         risk_reasons: vec!["x".repeat(4_000)],
+        not_run: None,
     });
     let section = risk_section(&task, &["2 must-fix finding(s) left".to_owned()]);
 
@@ -961,6 +963,7 @@ fn reviewed_at(prepared: &mut Prepared, commit: &str, must_fix: u32, review: &st
         repeat: false,
         risk: Level::High,
         risk_reasons: vec!["touches the git trust boundary".to_owned()],
+        not_run: None,
     });
     record::write(&prepared.meta, &prepared.record).unwrap();
     fs::write(prepared.meta.join("review.md"), review).unwrap();
