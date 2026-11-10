@@ -146,6 +146,7 @@ fn rounds_says_how_many_rounds_the_task_now_has_and_a_new_stop_names_rounds_agai
     let first = backend(&f, &[ONE, ONE]);
     let mut prepared = worked_task(&f, &first);
     let env = sbxm::task::pipeline::TaskEnv {
+        progress: &sbxm::task::pipeline::quiet,
         config_dir: &f.env.config_dir(),
         config: &f.config,
         backend: &first,
@@ -294,6 +295,7 @@ fn stopped(f: &Fixture) {
     let first = backend(f, &[ONE, ONE]);
     let mut prepared = worked_task(f, &first);
     let env = sbxm::task::pipeline::TaskEnv {
+        progress: &sbxm::task::pipeline::quiet,
         config_dir: &f.env.config_dir(),
         config: &f.config,
         backend: &first,
@@ -356,6 +358,7 @@ fn gates_that_cannot_run_fail_the_resume_with_the_reason_and_no_further_round() 
     let first = backend(&f, &[ONE, ONE]);
     let mut prepared = worked_task(&f, &first);
     let env = sbxm::task::pipeline::TaskEnv {
+        progress: &sbxm::task::pipeline::quiet,
         config_dir: &f.env.config_dir(),
         config: &f.config,
         backend: &first,

@@ -357,10 +357,22 @@ pub struct TaskEnv<'a> {
     pub clone_source: Option<&'a str>,
     /// As [`Ctx::disk`].
     pub disk: &'a disk::Guard,
+    /// Prints a line the moment a phase starts (issue 538): the worker, the gates, a review
+    /// round, a fix round. The command's `out`, so the line reaches `run.log` then too.
+    pub progress: &'a dyn Fn(&str),
 }
 
+/// A [`TaskEnv::progress`] that prints nothing.
+pub fn quiet(_line: &str) {}
+
 impl Ctx<'_> {
+    /// The task's environment, printing no phase start line.
     pub fn env(&self) -> TaskEnv<'_> {
+        self.env_with(&quiet)
+    }
+
+    /// The task's environment, printing each phase start line through `progress`.
+    pub fn env_with<'b>(&'b self, progress: &'b dyn Fn(&str)) -> TaskEnv<'b> {
         TaskEnv {
             config_dir: self.config_dir,
             config: self.config,
@@ -372,6 +384,7 @@ impl Ctx<'_> {
             disk: self.disk,
             identity: Some(self.identity),
             clone_source: Some(self.clone_source),
+            progress,
         }
     }
 }
@@ -1722,23 +1735,44 @@ pub fn start_with(
     numbers: &[u32],
     on_prepared: &(dyn Fn(u32) + Sync),
 ) -> Vec<TaskReport> {
-    start_at(ctx, numbers, Location::Local, on_prepared)
+    start_at(ctx, numbers, Location::Local, on_prepared, &quiet)
 }
 
 /// [`start_with`] at `location` (milestone 4 slice 5b): in the cloud, each issue gets its own cloud
 /// worker sandbox (P15 (a)), and `ctx`'s backend is the cloud instance. The caller makes the cloud
-/// preflight before this, so every worker is checked before any is created.
+/// preflight before this, so every worker is checked before any is created. Each phase start
+/// line (issue 538) goes to `progress` on this thread while the tasks run, as it happens.
 pub fn start_at(
     ctx: &Ctx,
     numbers: &[u32],
     location: Location,
     on_prepared: &(dyn Fn(u32) + Sync),
+    progress: &dyn Fn(&str),
 ) -> Vec<TaskReport> {
+    // Each line comes with a channel to say it was printed: its phase starts only then.
+    let (said, lines) = std::sync::mpsc::channel::<(String, std::sync::mpsc::Sender<()>)>();
     std::thread::scope(|scope| {
         let handles: Vec<_> = numbers
             .iter()
-            .map(|&number| scope.spawn(move || start_one(ctx, number, location, on_prepared)))
+            .map(|&number| {
+                let said = said.clone();
+                scope.spawn(move || {
+                    let progress = |line: &str| {
+                        let (printed, done) = std::sync::mpsc::channel();
+                        if said.send((line.to_owned(), printed)).is_ok() {
+                            let _ = done.recv();
+                        }
+                    };
+                    start_one(ctx, number, location, on_prepared, &progress)
+                })
+            })
             .collect();
+        // Every thread's sender gone ends the lines: each task has run.
+        drop(said);
+        for (line, printed) in lines {
+            progress(&line);
+            let _ = printed.send(());
+        }
         handles
             .into_iter()
             .zip(numbers)
@@ -1770,7 +1804,9 @@ fn start_one(
     number: u32,
     location: Location,
     on_prepared: &(dyn Fn(u32) + Sync),
+    progress: &dyn Fn(&str),
 ) -> TaskReport {
+    let env = ctx.env_with(progress);
     let mut warnings = Vec::new();
     let mut gates = None;
     let mut events = Vec::new();
@@ -1781,7 +1817,7 @@ fn start_one(
         warnings.clone_from(&prepared.warnings);
         events = std::mem::take(&mut prepared.events);
         on_prepared(number);
-        let worked = run_worker(ctx, prepared)?;
+        let worked = run_worker_in(&env, prepared)?;
         // A failed worker is not gated; a timed-out one is (its partial commits count), except in
         // the cloud, where it stops the task (milestone 4 slice 3, behavior 2), as a spec task's.
         let stops = match worked.status {
@@ -1790,7 +1826,7 @@ fn start_one(
             RunStatus::Completed => false,
         };
         if !stops {
-            gates = Some(run_gates(&ctx.env(), prepared, "after-worker", Tiers::ALL));
+            gates = Some(run_gates(&env, prepared, "after-worker", Tiers::ALL));
         }
         Ok(worked)
     })();
@@ -1902,6 +1938,7 @@ pub fn run_gates(
 ) -> Result<Gated> {
     // Decision 291, whoever asks for the gates: a start, a fix round, a review or `task gates`.
     check_branch_locks(env, prepared)?;
+    (env.progress)(&format!("{}: gates started", prepared.record.id));
     let gates = &env.config.gates;
     let sandbox = prepared
         .record
@@ -3009,10 +3046,20 @@ fn run_label(status: &RunStatus) -> String {
     }
 }
 
+/// `<harness>, <model>` for a phase start line (issue 538).
+fn started_by(harness: &str, model: Option<&str>) -> String {
+    format!("{harness}, {}", model.unwrap_or("default model"))
+}
+
 /// Spec §5.1 steps 3 and 4: runs the worker, then collects what it left, whatever its status
 /// (a timed-out or failed run keeps its partial commits). The stage is written before the agent
 /// starts; a write failure stops the command. `Err` means the run couldn't be attempted.
 pub fn run_worker(ctx: &Ctx, prepared: &mut Prepared) -> Result<Worked> {
+    run_worker_in(&ctx.env(), prepared)
+}
+
+/// [`run_worker`] in `env`, which prints the worker's start line (issue 538).
+pub fn run_worker_in(env: &TaskEnv, prepared: &mut Prepared) -> Result<Worked> {
     prepared
         .record
         .worker
@@ -3020,9 +3067,9 @@ pub fn run_worker(ctx: &Ctx, prepared: &mut Prepared) -> Result<Worked> {
         .context("the task has no worker")?;
     prepared
         .record
-        .advance(Stage::Working, now(), Process::current(ctx.probe))?;
+        .advance(Stage::Working, now(), Process::current(env.probe))?;
     record::write(&prepared.meta, &prepared.record)?;
-    work(&ctx.env(), prepared)
+    work(env, prepared)
 }
 
 /// Writes the task's input (`prompt.md`, and `issue.md` or a spec task's `source.md`) into the
@@ -3074,6 +3121,11 @@ pub(super) fn work(env: &TaskEnv, prepared: &mut Prepared) -> Result<Worked> {
         .context("the task has no worker")?
         .sandbox
         .clone();
+    (env.progress)(&format!(
+        "{}: worker started ({})",
+        prepared.record.id,
+        started_by(worker.harness.as_str(), worker.model.as_deref())
+    ));
 
     let started = Instant::now();
     let opts = HeadlessOpts {
@@ -4372,6 +4424,12 @@ fn fix(env: &TaskEnv, prepared: &mut Prepared) -> Result<()> {
         .context("the task has no worker")?
         .sandbox
         .clone();
+    // The caller counts the round once it is over.
+    (env.progress)(&format!(
+        "{}: fix round {} started",
+        prepared.record.id,
+        prepared.record.round.saturating_add(1)
+    ));
     let clone = prepared.sandbox_clone();
     let run = |resume: Option<String>| {
         headless::run(
@@ -4842,6 +4900,12 @@ fn review_round(
     earlier: &[String],
     tip: Option<&str>,
 ) -> Result<ReviewOutcome> {
+    let reviewer = &env.config.reviewer;
+    (env.progress)(&format!(
+        "{}: review round {round} started ({})",
+        prepared.record.id,
+        started_by(reviewer.harness.as_str(), reviewer.model.as_deref())
+    ));
     let warnings = open_review_workspace(env, prepared, round, clone, sandbox, earlier, tip)?;
     let mut outcome = run_review_agent(env, prepared, round, clone, sandbox, earlier, tip)?;
     outcome.warnings.splice(0..0, warnings);

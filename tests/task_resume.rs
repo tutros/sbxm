@@ -113,6 +113,7 @@ fn backend(f: &Fixture, reviews: &[&str]) -> FakeBackend {
 fn env<'a>(f: &'a Fixture, backend: &'a FakeBackend, probe: &'a dyn ProcessProbe) -> TaskEnv<'a> {
     let host: &'static FakeHostRunner = Box::leak(Box::default());
     TaskEnv {
+        progress: &sbxm::task::pipeline::quiet,
         config_dir: Box::leak(Box::new(f.env.config_dir())),
         config: &f.config,
         backend,
@@ -341,6 +342,7 @@ fn the_worker_s_sandbox_is_remade_from_the_profile_recorded_at_start_not_the_cur
     let backend = backend(&f, &[CLEAN]);
     let host: &'static FakeHostRunner = Box::leak(Box::default());
     let env = TaskEnv {
+        progress: &sbxm::task::pipeline::quiet,
         config_dir: Box::leak(Box::new(f.env.config_dir())),
         config: &current_config,
         backend: &backend,

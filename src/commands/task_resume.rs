@@ -13,6 +13,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Result, bail};
 
 use super::task_fix::print_pushed;
+use super::task_log;
 use super::task_review::{print_review, resume_hint};
 use super::task_start::spec_flag;
 use crate::backend::{Location, SandboxBackend};
@@ -127,6 +128,7 @@ pub fn run(
         disk: &opts.disk,
         identity: identity.as_ref(),
         clone_source: None,
+        progress: &pipeline::quiet,
     };
     resume::check_can_resume_with(&prepared.record, probe, opts.rounds, opts.should_fix)?;
     resume::check_ambiguous(&prepared.record, opts.forget_ambiguous)?;
@@ -175,13 +177,15 @@ pub fn run(
             ids.join(", ")
         )?;
     }
-    let resumed = resume::resume_forgetting(
-        &env,
-        &mut prepared,
-        opts.rounds,
-        opts.forget_ambiguous,
-        opts.should_fix,
-    );
+    let resumed = task_log::live(out, |progress| {
+        resume::resume_forgetting(
+            &TaskEnv { progress, ..env },
+            &mut prepared,
+            opts.rounds,
+            opts.forget_ambiguous,
+            opts.should_fix,
+        )
+    });
     // What the cloud sandboxes did (their creates and removals, decision 265) and a remade
     // sandbox's warnings (a template it couldn't use), even when the resume then failed.
     for line in prepared.events.drain(..) {

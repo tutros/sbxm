@@ -98,6 +98,7 @@ fn a_local_issue_task_s_fix_round_gets_the_issue_md_updated_since_the_start() {
     let first = issue_backend(&f, &[ONE, ONE]);
     let mut prepared = worked_task(&f, &first);
     let env = sbxm::task::pipeline::TaskEnv {
+        progress: &sbxm::task::pipeline::quiet,
         config_dir: &f.env.config_dir(),
         config: &f.config,
         backend: &first,

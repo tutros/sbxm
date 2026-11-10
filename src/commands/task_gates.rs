@@ -115,6 +115,7 @@ pub fn run(
         disk: &opts.disk,
         identity: identity.as_ref(),
         clone_source: None,
+        progress: &pipeline::quiet,
     };
     let gated = pipeline::gate_on_demand(&env, &mut prepared, opts.tiers);
     for line in prepared.events.drain(..) {

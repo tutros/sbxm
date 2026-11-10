@@ -737,6 +737,7 @@ fn review_with_secrets(
     let mut prepared = sbxm::task::pipeline::Prepared::open(&f.env.base_dir(), id)?;
     let who = identity();
     let env = sbxm::task::pipeline::TaskEnv {
+        progress: &sbxm::task::pipeline::quiet,
         config_dir: &f.env.config_dir(),
         config: &f.config,
         backend,

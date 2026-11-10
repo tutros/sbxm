@@ -2,6 +2,8 @@
 //! (decision 170, part 1). The log logic itself is `task::runlog`; this adds what only a running
 //! command knows: the command line, the executable and its hash, the clock and the base folder.
 
+use std::cell::RefCell;
+use std::io::Write;
 use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -62,6 +64,16 @@ pub fn header() -> Result<String> {
         option_env!("SBXM_COMMIT"),
         std::process::id(),
     ))
+}
+
+/// Runs `phase` with a sink that prints each line it is given to `out` at once (issue 538): a
+/// phase's start line is on the screen, and so in `run.log`, when the phase starts, not when the
+/// command next prints. A line that can't be written is dropped: the phase must not fail for it.
+pub fn live<R>(out: &mut dyn Write, phase: impl FnOnce(&dyn Fn(&str)) -> R) -> R {
+    let out = RefCell::new(out);
+    phase(&|line: &str| {
+        let _ = writeln!(out.borrow_mut(), "{line}");
+    })
 }
 
 /// A log that writes nowhere: for a command with no task folder to log into, and for a command
