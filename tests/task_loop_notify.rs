@@ -891,6 +891,16 @@ fn an_earlier_medium_risk_fix_keeps_notifying_through_a_later_low_risk_one() {
 }
 
 #[test]
+fn an_unknown_risk_pr_whose_low_risk_fix_covered_its_head_notifies_unknown() {
+    let f = fixture();
+    task_with_fixes(&f, Level::Unknown, &[(HEAD, PUSHED, Level::Low)]);
+
+    let (shown, _) = notified_then_restarted(&f, PUSHED);
+
+    assert_eq!(titles(&shown), ["PR #103 awaits your merge (unknown)"]);
+}
+
+#[test]
 fn an_all_low_review_history_with_two_fixes_stays_quiet() {
     let f = fixture();
     task_with_fixes(

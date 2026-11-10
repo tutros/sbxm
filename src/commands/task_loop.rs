@@ -696,7 +696,7 @@ impl Loop<'_> {
                 .filter(|fix| fix.stage == Stage::Finished)
                 .chain([&own])
                 .filter_map(|rec| rec.review.as_ref().map(|r| r.risk))
-                .max();
+                .max_by_key(|&risk| awaiting_rank(risk));
             let rec = fixes
                 .into_iter()
                 .find(|fix| {
@@ -708,7 +708,11 @@ impl Loop<'_> {
             let Some(review) = rec.review.as_ref() else {
                 continue;
             };
-            let risk = risk.unwrap_or(review.risk).max(review.risk);
+            let risk = risk
+                .into_iter()
+                .chain([review.risk])
+                .max_by_key(|&risk| awaiting_rank(risk))
+                .unwrap_or(review.risk);
             let (what, reason, next) =
                 if state.draft || rec.stopped.is_some() || review.must_fix > 0 {
                     let reason = match rec.stopped {
@@ -2583,6 +2587,18 @@ fn passes_arm_checks(rec: &Record) -> bool {
             .review
             .as_ref()
             .is_some_and(|r| r.must_fix == 0 && r.risk == Level::Low)
+}
+
+/// How far `risk` keeps a PR from the loop's arming, for the highest of its review history: an
+/// unknown risk fails [`passes_arm_checks`] as medium does, so it outranks low (where
+/// [`Level`]'s own order puts it below).
+fn awaiting_rank(risk: Level) -> u8 {
+    match risk {
+        Level::Low => 0,
+        Level::Unknown => 1,
+        Level::Medium => 2,
+        Level::High => 3,
+    }
 }
 
 /// Why the log-fix task in `dir`, recorded as `rec`, didn't end clean (decision 300), in words
