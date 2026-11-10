@@ -39,10 +39,14 @@ build sbxm tasks run with (a machine's own wrapper; never a fresh `cargo run`).
   "merged:>=<label date>"`); and check its acceptance list agrees with its own answers. A point that no longer holds
   goes back to the user as a question, with the label removed until it is answered. Ready issues just in time:
   only those for the next session or night run, not the whole backlog, so less code changes under them.
-- **Check before handing over a loop (decision 307, an experiment):** run `sbxm task loop --check --issue N ...` with
-  the issues you readied (#511) and hand the user only the command it prints; an issue it would skip is fixed first
-  (its Depends line, a branch of the task's name already on origin, an existing task, its label or size, an
-  `## Open points` heading not yet renamed `## Answered`).
+- **Queue, then report (decision 312, an experiment):** a readied issue the running loop won't take by its label
+  alone, or a fix job after the user's decision on a stopped PR, is queued with `<sbxm> task queue ...` without asking
+  the user first; then tell the user what was queued. `task queue` refuses what the loop would refuse, with the
+  reason.
+- **Loop commands (decisions 307, 313):** once the scheduled start is registered
+  (`scripts/loop-trigger.ps1 -Register`, decision 310), the loop is not handed over as a command: it takes labelled
+  issues and queued jobs by itself. Until then, or for a loop started by hand, run
+  `<sbxm> task loop --check --issue N ...` and hand the user only the command it prints.
 
 ## 3. Check the machine
 
@@ -120,4 +124,5 @@ build sbxm tasks run with (a machine's own wrapper; never a fresh `cargo run`).
 - Every promise made to the user that isn't done in the same turn goes to GitHub at once: a checkbox under
   `## Follow-ups` in its open home issue, else an issue labelled `follow-up` with a size. Done means ticked or closed.
 - An agent's memory holds only pointers and facts local to one machine. Before a session ends, write a short
-  handoff: what is done, in flight (log paths), next.
+  handoff: what is done, in flight (log paths), next; each entry's time comes from `date -u` when it is written,
+  never from the session's sense of time (decision 314).

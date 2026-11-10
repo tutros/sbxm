@@ -1,0 +1,1 @@
+314. **Handoff times from the clock (2026-11-09, the retro, proposal 3; a rule):** 4 handoff entries in 2026-11-09 had times hours off, written from the session's sense of time, so a retro couldn't use them for timing. **Change:** each handoff entry's time comes from `date -u` when it is written. `sdlc-issue-flow` section 9.
