@@ -190,9 +190,17 @@ impl Steps for Script<'_> {
 
     fn fix_pr(&self, pr: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
         let armed = self.gh.pr_merge_state(REPO, pr)?.auto_merge;
-        self.calls
-            .borrow_mut()
-            .push(format!("fix {pr}{}", if armed { " (armed)" } else { "" }));
+        // The PR's labels as the fix starts, when it has any (issue 548).
+        let labels = self.gh.pr_labels_now(pr);
+        let labels = if labels.is_empty() {
+            String::new()
+        } else {
+            format!(" {labels:?}")
+        };
+        self.calls.borrow_mut().push(format!(
+            "fix {pr}{}{labels}",
+            if armed { " (armed)" } else { "" }
+        ));
         self.clock.set(self.clock.get() + 200);
         let head = self.gh.pr(REPO, pr)?.head_oid;
         let id = record::fix_id(pr, &head).unwrap();
@@ -971,6 +979,105 @@ fn earlier_clean_low_risk_resolves_still_let_a_pr_be_armed_again() {
 
     assert_eq!(script.fixes_run(), ["fix 101", "run 3", "fix 101"]);
     assert_eq!(arms(&gh).len(), 2);
+}
+
+// --- Issue 548: a resolve removes `go` before its push ---
+
+#[test]
+fn a_resolve_removes_go_before_its_push_and_keeps_hold() {
+    let f = fixture();
+    f.loop_pr(1, Level::Low);
+    let gh = github(&[], &[101])
+        .with_mergeable(101, Mergeable::Conflicting)
+        .with_pr_labels(101, &["size:M", "GO", "hold"]);
+    let script = Script::new(&f.base(), &gh);
+
+    let run = run_loop(&f, &f.opts(None), &script, &gh);
+
+    run.result.unwrap();
+    // Gone, in its own case, before the fix pushed; `hold` stays until the user removes it.
+    assert_eq!(
+        script.fixes_run(),
+        [r#"fix 101 ["size:M", "hold"]"#],
+        "{}",
+        run.out
+    );
+    let removed: Vec<GhCall> = gh
+        .calls()
+        .into_iter()
+        .filter(|c| matches!(c, GhCall::PrRemoveLabel(..)))
+        .collect();
+    assert_eq!(
+        removed,
+        [GhCall::PrRemoveLabel(REPO.into(), 101, "GO".into())]
+    );
+    assert!(run.warn.is_empty(), "{}", run.warn);
+}
+
+#[test]
+fn a_resolve_of_a_pr_without_go_removes_no_label() {
+    let f = fixture();
+    f.loop_pr(1, Level::Low);
+    let gh = github(&[], &[101])
+        .with_mergeable(101, Mergeable::Conflicting)
+        .with_pr_labels(101, &["hold"]);
+    let script = Script::new(&f.base(), &gh);
+
+    run_loop(&f, &f.opts(None), &script, &gh).result.unwrap();
+
+    assert_eq!(script.fixes_run(), [r#"fix 101 ["hold"]"#]);
+    assert!(
+        !gh.calls()
+            .iter()
+            .any(|c| matches!(c, GhCall::PrRemoveLabel(..))),
+        "{:?}",
+        gh.calls()
+    );
+}
+
+#[test]
+fn a_go_that_cant_be_removed_is_a_warning_and_the_resolve_goes_on() {
+    let f = fixture();
+    f.loop_pr(1, Level::Low);
+    let gh = github(&[], &[101])
+        .with_mergeable(101, Mergeable::Conflicting)
+        .with_pr_labels(101, &["go"])
+        .failing_label_removal("HTTP 403");
+    let script = Script::new(&f.base(), &gh);
+
+    let run = run_loop(&f, &f.opts(None), &script, &gh);
+
+    run.result.unwrap();
+    assert_eq!(script.fixes_run(), [r#"fix 101 ["go"]"#], "{}", run.out);
+    assert!(
+        run.warn.contains("PR #101")
+            && run.warn.contains("`go`")
+            && run.warn.contains("HTTP 403")
+            && run.warn.contains("not `go`"),
+        "{}",
+        run.warn
+    );
+    assert_eq!(run.warn.lines().count(), 1, "{}", run.warn);
+}
+
+#[test]
+fn labels_that_cant_be_read_before_a_resolve_are_a_warning_and_the_resolve_goes_on() {
+    let f = fixture();
+    f.loop_pr(1, Level::Low);
+    let gh = github(&[], &[101])
+        .with_mergeable(101, Mergeable::Conflicting)
+        .failing_pr_labels("HTTP 502");
+    let script = Script::new(&f.base(), &gh);
+
+    let run = run_loop(&f, &f.opts(None), &script, &gh);
+
+    run.result.unwrap();
+    assert_eq!(script.fixes_run(), ["fix 101"], "{}", run.out);
+    assert!(
+        run.warn.contains("PR #101") && run.warn.contains("HTTP 502"),
+        "{}",
+        run.warn
+    );
 }
 
 // --- A failed resolve ---
