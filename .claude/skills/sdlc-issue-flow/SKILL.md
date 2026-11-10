@@ -22,6 +22,10 @@ build sbxm tasks run with (a machine's own wrapper; never a fresh `cargo run`).
   takes a path lists relative, absolute and missing paths among them, and a fix round tests the exact variant a
   finding names (issue 455, an experiment).
 - Decision 273: if it depends on an external tool's behavior a spike recorded, re-run that check by hand first.
+  If its PR needs a real check that only runs on the host (an ignored real test, many runs on Windows), write a
+  body line `**Real check:** <what to run; what counts as a pass>` (issue 547): the loop then never arms the PR,
+  at any risk, until `<sbxm> task real-check --pr N --pass "<note>"` is posted on its head. No line, or `none`,
+  means no real check.
 - Decision 292: reserve the number of any decision the issue adds now, in the body ("this adds decision N", gap
   G41; a new decision is a new file in `sdlc/decisions/`, decision 303), and have its new tests go in a file or section of the issue's own, never appended at the end of a shared
   test file: two open PRs that append at the same place conflict once one merges.

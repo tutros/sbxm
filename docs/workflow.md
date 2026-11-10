@@ -171,6 +171,12 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
     `Refs #N`, not a closing keyword, in its commits. Use it for a fix whose issue closes only later (a flake
     watched for two weeks, say). An existing PR that `task finish` adopts keeps its description as it is: the output
     says so and asks you to check that it refers to #N with `Refs`, not `Fixes` (issue 521).
+  - **An issue can name a real check its PR needs (issue 547, decision 273):** a line `**Real check:** <what to
+    run; what counts as a pass>` in the issue body (at the start of a line, outside a code fence; `none` in any case
+    means none) keeps `task loop` from arming the PR, at any risk, until the PR's head has the status
+    `sbxm/real-check` = `success`. Run the check, then `sbxm task real-check --pr N --pass "<note>"` (or `--fail`);
+    a later push moves the head, so run and post it again. Until the loop re-checks waiting PRs (#550), merge by hand
+    after the check.
   - **The issue gets a summary of the in-task rounds (issue 430):** `task finish` posts one comment on the issue
     (on each issue of a spec task's `Fixes:` line under `sink = "pr"`): the review rounds with their must-fix counts,
     `Repeat of:` counts and finding ids and titles (inert code spans, never review text), the fix rounds and whether

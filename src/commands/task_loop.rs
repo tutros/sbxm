@@ -47,7 +47,9 @@ use crate::task::queue::{self, Outcome, READY_LABEL, Report, Row, Skipped};
 use crate::task::record::{self, Kind, Process, ProcessProbe, Record, Stage};
 use crate::task::risk::Level;
 use crate::task::runlog::{RunLog, Tee};
-use crate::task::{findings, finish, lock, loop_log, medium, next, pipeline, pr_fix, resume};
+use crate::task::{
+    findings, finish, lock, loop_log, medium, next, pipeline, pr_fix, real_check, resume,
+};
 
 mod check;
 mod jobs;
@@ -691,6 +693,7 @@ impl Loop<'_> {
             // every fix pushed onto it: a later narrow review doesn't clear the risk an earlier
             // one left (decision 298(3), second review of issue 530).
             let risk = self.history_risk(number, Some(&own));
+            let check = real_check_of(&self.base_dir, Some(&own)).ok().flatten();
             let rec = self
                 .fixes_of(number)
                 .into_iter()
@@ -717,7 +720,22 @@ impl Loop<'_> {
                     let next = format!("see `sbxm task status {}`", next::record_flag(&rec));
                     ("draft", reason, next)
                 } else if risk == Level::Low {
-                    continue;
+                    // Held for its real check (issue 547): one named, and no `success` on the head.
+                    let Some(check) = check else {
+                        continue;
+                    };
+                    match self
+                        .github
+                        .commit_status_state(&self.repo, &head, real_check::CONTEXT)
+                    {
+                        Ok(Some(state)) if state == "success" => continue,
+                        Ok(_) => {}
+                        // Read again at the next step.
+                        Err(_) => continue,
+                    }
+                    let next =
+                        format!("run it, then sbxm task real-check --pr {number} --pass \"...\"");
+                    ("real check", format!("real check: {check}"), next)
                 } else {
                     let word = risk.word();
                     let reason =
@@ -1535,6 +1553,15 @@ impl Loop<'_> {
             )?;
             return Ok(Some(note.to_owned()));
         }
+        if let Some(why) = self.real_check_refusal(Some(&rec), number, &head, warn)? {
+            let note = not_armed(&why, None);
+            writeln!(
+                out,
+                "{pr_named} awaits you: {note}",
+                pr_named = self.pr_named(number)
+            )?;
+            return Ok(Some(note));
+        }
         match self.github.pr_arm_auto_merge(&self.repo, number, reviewed) {
             Ok(()) => {
                 self.armed.insert(number);
@@ -1557,6 +1584,45 @@ impl Loop<'_> {
             medium::refusals(self.github, &self.repo, source, number)
         } else {
             Vec::new()
+        }
+    }
+
+    /// Why PR `number`'s real check keeps it unarmed, at any risk (issue 547): the issue of its
+    /// own task `own` names one ([`real_check::required`]) and its head `head` hasn't
+    /// [`real_check::CONTEXT`] = `success` as its latest status of that context. `None` when it
+    /// may be armed as far as the real check goes.
+    fn real_check_refusal(
+        &mut self,
+        own: Option<&Record>,
+        number: u32,
+        head: &str,
+        warn: &mut dyn Write,
+    ) -> Result<Option<String>> {
+        match real_check_of(&self.base_dir, own) {
+            Ok(None) => return Ok(None),
+            Ok(Some(_)) => {}
+            Err(why) => return Ok(Some(why)),
+        }
+        match self
+            .github
+            .commit_status_state(&self.repo, head, real_check::CONTEXT)
+        {
+            Ok(Some(state)) if state == "success" => Ok(None),
+            Ok(Some(state)) if state == "failure" || state == "error" => {
+                Ok(Some("real check failed".to_owned()))
+            }
+            Ok(_) => Ok(Some("real check not recorded".to_owned())),
+            Err(e) => {
+                self.warn_once(
+                    warn,
+                    format!(
+                        "{pr_named}'s {} status can't be read: {e:#}; it awaits you",
+                        real_check::CONTEXT,
+                        pr_named = self.pr_named(number)
+                    ),
+                )?;
+                Ok(Some("real check status unreadable".to_owned()))
+            }
         }
     }
 
@@ -1919,6 +1985,15 @@ impl Loop<'_> {
             writeln!(
                 out,
                 "{pr_named}: {note} (reviewed {reviewed}, head {head}); it awaits you",
+                pr_named = self.pr_named(number)
+            )?;
+            return Ok(Some(note));
+        }
+        if let Some(why) = self.real_check_refusal(own.as_ref(), number, &head, warn)? {
+            let note = not_armed(&why, None);
+            writeln!(
+                out,
+                "{pr_named} awaits you: {note}",
                 pr_named = self.pr_named(number)
             )?;
             return Ok(Some(note));
@@ -2675,6 +2750,27 @@ fn with_reasons(why: String, reasons: &[String]) -> String {
         .chain(reasons.iter().cloned())
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// The real check the issue of a PR's own task `own` names (issue 547), from the issue text its
+/// start saved (`issue.md`), as `task finish` reads `**Closes on merge:**`: `None` for a task of
+/// another kind or without the file. `Err` with the refusal when it can't be known: no readable
+/// task, or a file that can't be read.
+fn real_check_of(
+    base_dir: &Path,
+    own: Option<&Record>,
+) -> std::result::Result<Option<String>, String> {
+    let Some(own) = own else {
+        return Err("real check unknown: the PR's task can't be read".to_owned());
+    };
+    if own.kind != Kind::Issue {
+        return Ok(None);
+    }
+    match fs::read_to_string(record::task_dir(base_dir, &own.id).join("issue.md")) {
+        Ok(text) => Ok(real_check::required(&text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err("real check unknown: its issue text can't be read".to_owned()),
+    }
 }
 
 /// Where the task `rec` came from, for the size [`medium::refusals`] reads.
