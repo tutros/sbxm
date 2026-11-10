@@ -652,8 +652,9 @@ impl Loop<'_> {
     }
 
     /// (a) of issue 530: a notification for each PR a loop opened or continued that awaits the
-    /// user's merge because the loop won't arm it: a draft, or a risk above low after the path
-    /// rules. Keyed by the PR and its head, so a new push after a fix round notifies again. A PR
+    /// user's merge because the loop won't arm it: a draft, a risk above low after the path
+    /// rules, or a low risk whose review left checks not run or an unknown not-run list (issue
+    /// 555). Keyed by the PR and its head, so a new push after a fix round notifies again. A PR
     /// that can't be read is left for the next step ([`awaiting_prs`](Self::awaiting_prs) warns
     /// about it).
     fn notify_awaiting(&mut self, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
@@ -711,16 +712,36 @@ impl Loop<'_> {
                 .chain([review.risk])
                 .max_by_key(|&risk| awaiting_rank(risk))
                 .unwrap_or(review.risk);
-            let (what, reason, next) =
-                if state.draft || rec.stopped.is_some() || review.must_fix > 0 {
-                    let reason = match rec.stopped {
-                        Some(stopped) => format!("a draft: work stop {}", stopped.name()),
-                        None => format!("a draft with {} must-fix left", review.must_fix),
+            let (what, reason, next) = if state.draft
+                || rec.stopped.is_some()
+                || review.must_fix > 0
+            {
+                let reason = match rec.stopped {
+                    Some(stopped) => format!("a draft: work stop {}", stopped.name()),
+                    None => format!("a draft with {} must-fix left", review.must_fix),
+                };
+                let next = format!("see `sbxm task status {}`", next::record_flag(&rec));
+                ("draft", reason, next)
+            } else if risk == Level::Low {
+                // Issue 555: held back only by its not-run list, through the arm paths'
+                // own check so the toast and the arming can't disagree. Only a review of the
+                // PR's head speaks for it (review M-1): a head no review covered stays quiet.
+                let covers_head = review.commit.as_deref() == Some(head.as_str());
+                if covers_head && not_run_reason(review).is_some() {
+                    let (reason, next) = match review.not_run.as_deref() {
+                        Some(checks @ [first, ..]) => (
+                            format!("{} check(s) not run: {first}", checks.len()),
+                            "run them, then merge",
+                        ),
+                        _ => (
+                            "the review's not-run list is unknown".to_owned(),
+                            "read the review, then merge",
+                        ),
                     };
-                    let next = format!("see `sbxm task status {}`", next::record_flag(&rec));
-                    ("draft", reason, next)
-                } else if risk == Level::Low {
-                    // Held for its real check (issue 547): one named, and no `success` on the head.
+                    ("checks not run", reason, next.to_owned())
+                } else {
+                    // Held for its real check (issue 547): one named, and no `success` on
+                    // the head.
                     let Some(check) = check else {
                         continue;
                     };
@@ -736,12 +757,13 @@ impl Loop<'_> {
                     let next =
                         format!("run it, then sbxm task real-check --pr {number} --pass \"...\"");
                     ("real check", format!("real check: {check}"), next)
-                } else {
-                    let word = risk.word();
-                    let reason =
-                        format!("risk {word} after the path rules, so the loop doesn't arm it");
-                    (word, reason, "review it, then merge or close it".to_owned())
-                };
+                }
+            } else {
+                let word = risk.word();
+                let reason =
+                    format!("risk {word} after the path rules, so the loop doesn't arm it");
+                (word, reason, "review it, then merge or close it".to_owned())
+            };
             let note = Notification {
                 key: format!("pr:{number}:{head}"),
                 title: format!("PR #{number} awaits your merge ({what})"),
