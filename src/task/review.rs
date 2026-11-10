@@ -220,6 +220,65 @@ pub fn check_scope_end(review: &str, commit: &str) -> Result<(), String> {
     }
 }
 
+/// `review` with sbxm's own `Scope:` line, `base..head`, the range sbxm gave the reviewer (issue
+/// 565): it takes the place of the reviewer's first `Scope:` line, and every other one goes, so a
+/// typo in commits sbxm already knows can't keep the review from certifying `head`. A review
+/// with no `Scope:` line gets it after its `Risk:` line (or its first line), set off by a blank
+/// line. Lines inside a fenced code block (a quoted Scope line) are left alone, and the review's
+/// own line ending is kept.
+pub fn with_scope(review: &str, base: &str, head: &str) -> String {
+    let newline = if review.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let scope = format!("Scope: `{base}..{head}`{newline}");
+    let lines: Vec<&str> = review.split_inclusive('\n').collect();
+    let mut out = String::with_capacity(review.len() + scope.len());
+    let (mut fenced, mut placed) = (false, false);
+    for line in &lines {
+        if line.trim_start().starts_with("```") {
+            fenced = !fenced;
+        }
+        let is_scope = !fenced
+            && line
+                .get(..6)
+                .is_some_and(|start| start.eq_ignore_ascii_case("scope:"));
+        if !is_scope {
+            out.push_str(line);
+        } else if !placed {
+            out.push_str(&scope);
+            placed = true;
+        }
+    }
+    if placed {
+        return out;
+    }
+    // No Scope line: after the Risk line, which follows the must-fix line (one blank line between
+    // them is fine), else after the first line.
+    let after = lines
+        .iter()
+        .take(3)
+        .position(|l| l.starts_with("Risk:"))
+        .unwrap_or(0)
+        + 1;
+    let mut out = String::with_capacity(review.len() + scope.len() + 2);
+    for (i, line) in lines.iter().enumerate() {
+        out.push_str(line);
+        if i + 1 == after {
+            if !line.ends_with('\n') {
+                out.push_str(newline);
+            }
+            out.push_str(newline);
+            out.push_str(&scope);
+        }
+    }
+    if lines.is_empty() {
+        out.push_str(&scope);
+    }
+    out
+}
+
 /// The whole token of `scope` holding the first `range` in it: up to the nearest whitespace or
 /// backtick on each side, or the end of `scope`.
 fn range_token<'a>(scope: &'a str, range: &str) -> &'a str {
