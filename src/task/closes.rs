@@ -13,21 +13,30 @@ pub const LABEL: &str = "**Closes on merge:**";
 /// outside a code fence. Any other value, or no such line, closes the issue as before. Text
 /// without a `--` line is all body.
 pub fn leaves_open(issue: &str) -> bool {
-    let body = match issue.lines().position(|line| line.trim_end() == "--") {
-        Some(at) => issue.lines().skip(at + 1).collect::<Vec<_>>(),
-        None => issue.lines().collect(),
-    };
-    let mut fence = None;
     let mut open = false;
-    for line in body {
-        let inside = fence.is_some();
-        fence = next_fence(fence, line);
-        if inside || fence.is_some() {
-            continue;
-        }
+    for line in body_lines(issue) {
         if let Some(value) = line.strip_prefix(LABEL) {
             open = value.trim().eq_ignore_ascii_case("no");
         }
     }
     open
+}
+
+/// The lines of `issue`'s body (after its `--` line; all of it without one) that are outside a
+/// code fence, fence lines left out: where a `**Label:**` line of the body is read.
+pub(crate) fn body_lines(issue: &str) -> Vec<&str> {
+    let body = match issue.lines().position(|line| line.trim_end() == "--") {
+        Some(at) => issue.lines().skip(at + 1).collect::<Vec<_>>(),
+        None => issue.lines().collect(),
+    };
+    let mut fence = None;
+    let mut lines = Vec::new();
+    for line in body {
+        let inside = fence.is_some();
+        fence = next_fence(fence, line);
+        if !(inside || fence.is_some()) {
+            lines.push(line);
+        }
+    }
+    lines
 }
