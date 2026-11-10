@@ -2,8 +2,9 @@
 of #476; uses [293], [299], [309], [310]; the toast of `scripts/factory-trigger.ps1`, [269]):** with the loop
 started at logon (310) no terminal shows its lines, so the user learns it needs them from a toast; clean low-risk
 work stays quiet. (1) **A toast only when the user has something to do:** (a) a PR a loop opened or continued awaits
-the user's merge: a risk above low after the path-rule floor, or a draft (a work stop, must-fix left), read from the
-review that covered the PR's head (a resolve's or log-fix's when one was pushed onto it); (b) a queued
+the user's merge: a risk above low after the path-rule floor in any of its reviews (its own task's and every
+resolve's or log-fix's pushed onto it, since a later narrow review doesn't clear an earlier risk, [298] (3), [300]), or
+a draft (a work stop, must-fix left), read from the review that covered the PR's head; (b) a queued
 job ends `failed`, `stopped`, `refused` or `interrupted` (309); (c) the loop stops on a cause that needs the user: a
 lapsed sign-in, a missing secret, two parked tasks in a row, the usage waits' total (310's exit 3); (d) `main`'s second
 CI failure pauses arming (299); (e) a task the loop ran (an issue or spec task, a resolve or log-fix, a queued

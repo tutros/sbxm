@@ -797,6 +797,113 @@ fn a_low_risk_fix_of_a_low_risk_pr_stays_quiet() {
     assert!(notifier.shown().is_empty(), "{:?}", notifier.shown());
 }
 
+// --- second review of issue 530: the risk of the whole review history, not only the latest ---
+
+const THIRD: &str = "2222222222222222222222222222222222222222";
+
+/// A finished loop task `issue-3` reviewed at `own` into PR #103, then a finished fix task of
+/// PR #103 for each `(started at, review covered, risk)` in `fixes`.
+fn task_with_fixes(f: &Fixture, own: Level, fixes: &[(&str, &str, Level)]) {
+    let script = Script::new(&f.base(), own);
+    script.run(3, &mut Vec::new(), &mut Vec::new()).unwrap();
+    script.finish(3, &mut Vec::new(), &mut Vec::new()).unwrap();
+    let dir = record::task_dir(&f.base(), "issue-3");
+    let mut rec = record::read(&dir.join("task.json")).unwrap();
+    rec.hooks = serde_json::json!({ task_loop::LOOP_HOOK: true });
+    record::write(&dir, &rec).unwrap();
+    for &(started, covered, risk) in fixes {
+        let id = record::fix_id(103, started).unwrap();
+        let mut fix = Record::new(
+            &NewTask {
+                kind: Kind::Fix,
+                number: 103,
+                repo: REPO,
+                title: "Fix 3",
+                base: "main",
+                branch: "b103",
+                config_hash: "h",
+                id: Some(&id),
+            },
+            START,
+            Process::new(1, 0),
+        );
+        fix.stage = Stage::Finished;
+        fix.status = Status::Ok;
+        fix.review = Some(ReviewResult {
+            round: 1,
+            commit: Some(covered.to_owned()),
+            must_fix: 0,
+            risk,
+            ..ReviewResult::default()
+        });
+        record::write(&record::task_dir(&f.base(), &id), &fix).unwrap();
+    }
+}
+
+/// Runs the loop once against PR #103 at `head`, then again as a restart at the same head.
+fn notified_then_restarted(f: &Fixture, head: &str) -> (Vec<Notification>, Vec<Notification>) {
+    let script = Script::new(&f.base(), Level::Low);
+    let first = FakeNotifier::default();
+    let gh = github(&[], HEAD).with_pr(pr(103, head));
+    run_loop(f, &f.opts(), &script, &gh, &first).result.unwrap();
+    let again = FakeNotifier::default();
+    let gh = github(&[], HEAD).with_pr(pr(103, head));
+    run_loop(f, &f.opts(), &script, &gh, &again).result.unwrap();
+    (first.shown(), again.shown())
+}
+
+#[test]
+fn a_medium_risk_pr_whose_low_risk_fix_covered_its_head_notifies_once() {
+    let f = fixture();
+    task_with_fixes(&f, Level::Medium, &[(HEAD, PUSHED, Level::Low)]);
+
+    let (shown, again) = notified_then_restarted(&f, PUSHED);
+
+    assert_eq!(titles(&shown), ["PR #103 awaits your merge (medium)"]);
+    assert_eq!(shown[0].key, format!("pr:103:{PUSHED}"));
+    assert!(again.is_empty(), "{again:?}");
+}
+
+#[test]
+fn a_high_risk_pr_whose_low_risk_fix_covered_its_head_notifies_high() {
+    let f = fixture();
+    task_with_fixes(&f, Level::High, &[(HEAD, PUSHED, Level::Low)]);
+
+    let (shown, _) = notified_then_restarted(&f, PUSHED);
+
+    assert_eq!(titles(&shown), ["PR #103 awaits your merge (high)"]);
+}
+
+#[test]
+fn an_earlier_medium_risk_fix_keeps_notifying_through_a_later_low_risk_one() {
+    let f = fixture();
+    task_with_fixes(
+        &f,
+        Level::Low,
+        &[(HEAD, PUSHED, Level::Medium), (PUSHED, THIRD, Level::Low)],
+    );
+
+    let (shown, again) = notified_then_restarted(&f, THIRD);
+
+    assert_eq!(titles(&shown), ["PR #103 awaits your merge (medium)"]);
+    assert_eq!(shown[0].key, format!("pr:103:{THIRD}"));
+    assert!(again.is_empty(), "{again:?}");
+}
+
+#[test]
+fn an_all_low_review_history_with_two_fixes_stays_quiet() {
+    let f = fixture();
+    task_with_fixes(
+        &f,
+        Level::Low,
+        &[(HEAD, PUSHED, Level::Low), (PUSHED, THIRD, Level::Low)],
+    );
+
+    let (shown, _) = notified_then_restarted(&f, THIRD);
+
+    assert!(shown.is_empty(), "{shown:?}");
+}
+
 #[test]
 fn a_reviewers_question_notifies_once_naming_the_task_and_opening_its_pr() {
     let f = fixture();

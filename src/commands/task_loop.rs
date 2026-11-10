@@ -685,12 +685,30 @@ impl Loop<'_> {
                     continue;
                 }
             };
-            // The PR's state is that of the task whose review covered its head (review M-1 of
-            // issue 530): a resolve or log-fix pushed onto it, else the task that opened it.
-            let rec = self.fix_covering(number, &head).unwrap_or(own);
+            // The PR's draft state is that of the task whose review covered its head (review M-1
+            // of issue 530): a resolve or log-fix pushed onto it, else the task that opened it.
+            // Its risk is the highest of its whole review history, the task that opened it and
+            // every fix pushed onto it: a later narrow review doesn't clear the risk an earlier
+            // one left (decision 298(3), second review of issue 530).
+            let fixes = self.fixes_of(number);
+            let risk = fixes
+                .iter()
+                .filter(|fix| fix.stage == Stage::Finished)
+                .chain([&own])
+                .filter_map(|rec| rec.review.as_ref().map(|r| r.risk))
+                .max();
+            let rec = fixes
+                .into_iter()
+                .find(|fix| {
+                    fix.review
+                        .as_ref()
+                        .is_some_and(|r| r.commit.as_deref() == Some(head.as_str()))
+                })
+                .unwrap_or(own);
             let Some(review) = rec.review.as_ref() else {
                 continue;
             };
+            let risk = risk.unwrap_or(review.risk).max(review.risk);
             let (what, reason, next) =
                 if state.draft || rec.stopped.is_some() || review.must_fix > 0 {
                     let reason = match rec.stopped {
@@ -699,10 +717,10 @@ impl Loop<'_> {
                     };
                     let next = format!("see `sbxm task status {}`", next::record_flag(&rec));
                     ("draft", reason, next)
-                } else if review.risk == Level::Low {
+                } else if risk == Level::Low {
                     continue;
                 } else {
-                    let word = review.risk.word();
+                    let word = risk.word();
                     let reason =
                         format!("risk {word} after the path rules, so the loop doesn't arm it");
                     (word, reason, "review it, then merge or close it".to_owned())
@@ -718,12 +736,12 @@ impl Loop<'_> {
         Ok(())
     }
 
-    /// The fix task of PR `number` (a resolve or a log-fix, `fix-<n>-<head>`) of this repo whose
-    /// review covered `head`, in a task folder that is sbxm's own.
-    fn fix_covering(&self, number: u32, head: &str) -> Option<Record> {
+    /// The fix tasks of PR `number` (resolves and log-fixes, `fix-<n>-<head>`) of this repo, in
+    /// task folders that are sbxm's own; a record that can't be read is left out.
+    fn fixes_of(&self, number: u32) -> Vec<Record> {
         let prefix = format!("fix-{number}-");
         record::task_folders(&self.base_dir)
-            .ok()?
+            .unwrap_or_default()
             .into_iter()
             .filter(|dir| {
                 dir.file_name()
@@ -732,14 +750,8 @@ impl Loop<'_> {
                     && check_own_folder(&self.base_dir, dir).is_ok()
             })
             .filter_map(|dir| record::read(&dir.join("task.json")).ok())
-            .find(|rec| {
-                rec.kind == Kind::Fix
-                    && rec.repo == self.repo
-                    && rec
-                        .review
-                        .as_ref()
-                        .is_some_and(|r| r.commit.as_deref() == Some(head))
-            })
+            .filter(|rec| rec.kind == Kind::Fix && rec.repo == self.repo)
+            .collect()
     }
 
     /// (e) of issue 530: a notification for each question task `id` hands the user, once per
