@@ -366,8 +366,39 @@ pub fn saved_risk_level(saved: &str) -> Option<Level> {
 /// heading. A heading inside a fenced (```` ``` ````, `~~~`) or indented code block is quoted text,
 /// never the section.
 pub fn risk_reasons(review: &str) -> Vec<String> {
-    let mut reasons = Vec::new();
+    section_bullets(review, "risk").unwrap_or_default()
+}
+
+/// The checks the review couldn't run, nor CI (issue 545): one per bullet under the first
+/// `## Not run` heading, read as [`risk_reasons`] reads its section. The single bullet `- none`
+/// (any case) is an empty list; next to another bullet it is left out. `None`, unknown, for a
+/// review without the section or with no bullet in it.
+pub fn not_run(review: &str) -> Option<Vec<String>> {
+    let bullets = section_bullets(review, "not run")?;
+    if bullets.is_empty() {
+        return None;
+    }
+    Some(
+        bullets
+            .into_iter()
+            .filter(|b| !b.eq_ignore_ascii_case("none"))
+            .collect(),
+    )
+}
+
+/// [`not_run`] of a saved `review.md`, read past the [`with_header`] line.
+pub fn saved_not_run(saved: &str) -> Option<Vec<String>> {
+    not_run(past_header(saved))
+}
+
+/// The bullets (`- ` or `* `) under the first `## <name>` heading (any case), in file order,
+/// until the next `##` heading or the end of the file; `None` when there is no such heading. A
+/// heading inside a fenced (```` ``` ````, `~~~`) or indented code block is quoted text, never the
+/// section.
+fn section_bullets(review: &str, name: &str) -> Option<Vec<String>> {
+    let mut bullets = Vec::new();
     let mut in_section = false;
+    let mut found = false;
     // The open fence's character and length: only a line of at least as many of the same
     // character, and nothing else, closes it (CommonMark).
     let mut fence: Option<(char, usize)> = None;
@@ -390,24 +421,25 @@ pub fn risk_reasons(review: &str) -> Vec<String> {
         if fence.is_some() {
             continue;
         }
-        if !is_code_indent && let Some(name) = trimmed.strip_prefix("## ") {
+        if !is_code_indent && let Some(heading) = trimmed.strip_prefix("## ") {
             if in_section {
                 break;
             }
-            in_section = name.trim().eq_ignore_ascii_case("risk");
+            in_section = heading.trim().eq_ignore_ascii_case(name);
+            found |= in_section;
             continue;
         }
         if !in_section {
             continue;
         }
-        if let Some(reason) = trimmed
+        if let Some(bullet) = trimmed
             .strip_prefix("- ")
             .or_else(|| trimmed.strip_prefix("* "))
         {
-            reasons.push(reason.trim().to_owned());
+            bullets.push(bullet.trim().to_owned());
         }
     }
-    reasons
+    found.then_some(bullets)
 }
 
 /// The fence character and run length when `trimmed` starts a code fence (three or more
