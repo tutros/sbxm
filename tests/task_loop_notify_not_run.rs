@@ -321,3 +321,17 @@ fn a_low_risk_pr_with_checks_not_run_notifies_while_the_loop_is_paused() {
     assert_eq!(shown.len(), 1, "{shown:?}");
     assert_eq!(shown[0].title, TITLE);
 }
+
+#[test]
+fn a_head_no_review_covered_stays_quiet() {
+    // Review M-1: the PR moved past its only review; that review's list says nothing of the new
+    // head, so the PR waits for a review of it, not on a toast.
+    for not_run in [Some(&["old check"][..]), None] {
+        let env = TestEnv::new();
+        loop_task(&env.base_dir(), review(HEAD, Level::Low, not_run));
+
+        let shown = notified(&env, PUSHED);
+
+        assert!(shown.is_empty(), "{shown:?}");
+    }
+}

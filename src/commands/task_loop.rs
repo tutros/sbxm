@@ -719,8 +719,10 @@ impl Loop<'_> {
                     ("draft", reason, next)
                 } else if risk == Level::Low {
                     // Issue 555: held back only by its not-run list, through the arm paths'
-                    // own check so the toast and the arming can't disagree.
-                    if not_run_reason(review).is_none() {
+                    // own check so the toast and the arming can't disagree. Only a review of the
+                    // PR's head speaks for it (review M-1): a head no review covered stays quiet.
+                    let covers_head = review.commit.as_deref() == Some(head.as_str());
+                    if !covers_head || not_run_reason(review).is_none() {
                         continue;
                     }
                     let (reason, next) = match review.not_run.as_deref() {
