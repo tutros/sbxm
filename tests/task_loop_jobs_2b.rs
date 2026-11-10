@@ -183,6 +183,7 @@ fn write_task(base: &Path, kind: Kind, number: u32, id: &str, risk: Level) -> Pa
         commit: Some(HEAD.to_owned()),
         must_fix: 0,
         risk,
+        not_run: Some(Vec::new()),
         ..ReviewResult::default()
     });
     record::write(&dir, &rec).unwrap();

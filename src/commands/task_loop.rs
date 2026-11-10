@@ -1475,13 +1475,18 @@ impl Loop<'_> {
         let Some(review) = rec.review.as_ref() else {
             return Ok(None);
         };
+        // Worked out first, so a refusal that comes before its own check still names it (review
+        // S-1 of issue 545).
+        let not_run = not_run_reason(review);
         let waits = |why: String, out: &mut dyn Write| -> Result<Option<String>> {
+            let note = not_run.as_deref().map(|n| not_armed(n, Some(&why)));
             writeln!(
                 out,
-                "{pr_named} awaits you: {why}",
+                "{pr_named} awaits you: {}",
+                note.as_deref().unwrap_or(&why),
                 pr_named = self.pr_named(number)
             )?;
-            Ok(None)
+            Ok(note)
         };
         if rec.stopped.is_some() || review.must_fix > 0 {
             return waits("a draft with must-fix left".to_owned(), out);
@@ -1492,6 +1497,15 @@ impl Loop<'_> {
                 with_reasons(format!("risk {}", review.risk.word()), &reasons),
                 out,
             );
+        }
+        if let Some(not_run) = not_run.as_deref() {
+            let note = not_armed(not_run, None);
+            writeln!(
+                out,
+                "{pr_named} awaits you: {note}",
+                pr_named = self.pr_named(number)
+            )?;
+            return Ok(Some(note));
         }
         let Some(reviewed) = review.commit.as_deref() else {
             return waits("the commit the review covered is unknown".to_owned(), out);
@@ -1820,6 +1834,21 @@ impl Loop<'_> {
         out: &mut dyn Write,
         warn: &mut dyn Write,
     ) -> Result<Option<String>> {
+        // Worked out first, so a refusal that comes before its own check still names it (review
+        // S-1 of issue 545): said on a line of its own, and first in the log row's note.
+        let not_run = not_run_reason(review);
+        let refused = |this: &Self, why: Option<&str>, out: &mut dyn Write| {
+            let Some(not_run) = not_run.as_deref() else {
+                return Ok(why.map(|w| not_armed(w, None)));
+            };
+            writeln!(
+                out,
+                "{pr_named} awaits you after its {what}: {}",
+                not_armed(not_run, None),
+                pr_named = this.pr_named(number)
+            )?;
+            Ok::<_, anyhow::Error>(Some(not_armed(not_run, why)))
+        };
         // A medium PR's reasons go into every line below that leaves it to the user (review S-1
         // of issue 549), for its risk over its whole review history, this fix's included.
         let own = self.record_of(task);
@@ -1840,7 +1869,7 @@ impl Loop<'_> {
                 "{pr_named} awaits you: {why}",
                 pr_named = self.pr_named(number)
             )?;
-            return Ok(None);
+            return refused(self, None, out);
         }
         if self.paused(warn)? {
             let reasons = self.medium_reasons(risk, source, number);
@@ -1851,7 +1880,8 @@ impl Loop<'_> {
                     .chain(reasons)
                     .collect()
             };
-            return Ok(Some(self.not_armed_paused(number, &also, out)?));
+            self.not_armed_paused(number, &also, out)?;
+            return refused(self, Some(PAUSED_REASON), out);
         }
         if review.risk != Level::Low {
             let why = with_reasons(
@@ -1863,10 +1893,10 @@ impl Loop<'_> {
                 "{pr_named} awaits you: {why}",
                 pr_named = self.pr_named(number)
             )?;
-            return Ok(Some(format!(
-                "auto-merge not armed: risk {}",
-                review.risk.word()
-            )));
+            return refused(self, Some(&format!("risk {}", review.risk.word())), out);
+        }
+        if not_run.is_some() {
+            return refused(self, None, out);
         }
         let Some(reviewed) = review.commit.as_deref() else {
             writeln!(
@@ -1942,7 +1972,7 @@ impl Loop<'_> {
             also,
         );
         writeln!(out, "{} awaits you: {why}", self.pr_named(number))?;
-        Ok("auto-merge not armed: paused on a red main".to_owned())
+        Ok(not_armed(PAUSED_REASON, None))
     }
 
     /// The pass over workflow runs (decision 299), after the resolves and before the wait for
@@ -2656,15 +2686,39 @@ fn medium_source(rec: &Record) -> medium::Source {
     }
 }
 
-/// [`Loop::arm`]'s checks on a task's record: no work stop, a review with 0 must-fix and low risk
-/// after the path-rule floor.
+/// [`Loop::arm`]'s checks on a task's record: no work stop, a review with 0 must-fix, low risk
+/// after the path-rule floor and no check left not run.
 fn passes_arm_checks(rec: &Record) -> bool {
     rec.stopped.is_none()
         && rec
             .review
             .as_ref()
-            .is_some_and(|r| r.must_fix == 0 && r.risk == Level::Low)
+            .is_some_and(|r| r.must_fix == 0 && r.risk == Level::Low && not_run_reason(r).is_none())
 }
+
+/// Why `review`'s `## Not run` list keeps auto-merge unarmed (issue 545), at any risk: a check
+/// neither the reviewer nor CI ran, or a list that is unknown (missing, empty, or a record from
+/// before the list). `None` for the empty list, `- none`.
+fn not_run_reason(review: &record::ReviewResult) -> Option<String> {
+    match review.not_run.as_deref() {
+        None => Some("not-run list unknown".to_owned()),
+        Some([]) => None,
+        Some([_]) => Some("1 check not run".to_owned()),
+        Some(checks) => Some(format!("{} checks not run", checks.len())),
+    }
+}
+
+/// The log row's note for a PR not armed for `reason`, then `also` when another refusal holds too
+/// (review S-1 of issue 545): `auto-merge not armed: 1 check not run; risk medium`.
+fn not_armed(reason: &str, also: Option<&str>) -> String {
+    match also {
+        Some(also) => format!("auto-merge not armed: {reason}; {also}"),
+        None => format!("auto-merge not armed: {reason}"),
+    }
+}
+
+/// Why a PR isn't armed while the loop is paused on a red `main` (decision 299).
+const PAUSED_REASON: &str = "paused on a red main";
 
 /// How far `risk` keeps a PR from the loop's arming, for the highest of its review history: an
 /// unknown risk fails [`passes_arm_checks`] as medium does, so it outranks low (where

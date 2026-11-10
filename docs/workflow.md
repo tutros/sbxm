@@ -239,10 +239,11 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
 
 - **`task loop` arms auto-merge (decision 293, issue 375):** for the PR a loop task opens, the loop runs
   `gh pr merge <N> --auto --merge --match-head-commit <reviewed sha>` when the review's risk (after the path-rule
-  floor) is low, it found 0 must-fix, the PR isn't a draft and the PR's head is still the reviewed commit; it checks
-  no CI itself (GitHub's `--auto` waits for the required checks, `sbxm/review` included). Anything else, and an
-  arming call that fails, leaves the PR to you, counted toward the cap of 5 (the log row says why for a head that
-  moved). Only the loop arms: a PR made by `task finish` or by hand is armed by the session under decision 280.
+  floor) is low, it found 0 must-fix, its `## Not run` list is `- none`, the PR isn't a draft and the PR's head is
+  still the reviewed commit; it checks no CI itself (GitHub's `--auto` waits for the required checks, `sbxm/review`
+  included). Anything else, and an arming call that fails, leaves the PR to you, counted toward the cap of 5 (the log
+  row says why for a head that moved, and for checks the review couldn't run: `not armed: <n> checks not run`, or
+  `not armed: not-run list unknown` for a review without the list or a record from before it; issue 545). Only the loop arms: a PR made by `task finish` or by hand is armed by the session under decision 280.
   Before each step the loop also runs `task rm --merged --yes`, so a PR GitHub merged is cleaned up.
 
 - **`task loop` resolves its conflicting PRs (decision 298, issue 432):** after the merged tasks are removed and
@@ -251,7 +252,8 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
   one at a time in PR-number order. A PR only `BEHIND` is left (`main` has no branch protection, so it still merges);
   `UNKNOWN` is read again at the next step, as is every conflicting PR while the disk is low; a draft is skipped; each PR gets at most one resolve per tip of `main` in
   a run (kept in memory, so a restarted loop may try once more). Auto-merge is disarmed before the fix if armed, and
-  armed again on the fix task's new head only when its review is low risk with 0 must-fix and covered that head, and
+  armed again on the fix task's new head only when its review is low risk with 0 must-fix, an empty `## Not run`
+  list, and covered that head, and
   the PR was armed, or its own task and every resolve already pushed onto it passed the same checks. A failed resolve (handed back, gates failing, must-fix
   left) leaves the PR and its fix task to you: said once, counted toward the cap, not tried again in that run.
   Resolves don't count toward `--cap`; each gets its own row in the loop's log.

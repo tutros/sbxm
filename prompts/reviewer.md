@@ -44,6 +44,10 @@ Issues: pending
 
 - one bullet per reason for the level above
 
+## Not run
+
+- <check>: <why it couldn't run>   (one bullet per check, or the single bullet "- none")
+
 ## Must fix  (then "## Should fix" and "## Questions"; leave out a heading with no findings)
 
 ### <ID> - <what happens, in plain words>   (<ID> unique in the file: M-1, S-1, Q-1)
@@ -63,3 +67,9 @@ the full table is "Size" in section 8 of .claude/skills/sdlc-code-review/SKILL.m
 
 Nits go in a "## Nits" section, one "- Nit:" line each. Only this change's problems count; put problems it didn't
 cause under "## Outside this change". If there are no findings, say what you checked under "## Summary".
+
+Always write the "## Not run" section: the checks that neither you nor CI runs, when the change adds or touches them or
+the task asks for them, one bullet each, `- <check>: <why it couldn't run>`, or the single bullet `- none`. Read
+.github/workflows/ to see what CI runs. For example: Pester tests are listed while CI has no Pester job; a
+`#[cfg(windows)]` test is not (CI's Windows build runs it); an ignored `real_sbx` test the change touches is listed. A
+review without this section, or with no bullet in it, never lets the change merge without the user.

@@ -119,6 +119,7 @@ fn write_task(
         commit: Some(review.1.to_owned()),
         must_fix: 0,
         risk: review.0,
+        not_run: Some(Vec::new()),
         ..ReviewResult::default()
     });
     record::write(&dir, &rec).unwrap();

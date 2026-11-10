@@ -15,7 +15,7 @@ const LOCAL_TOML: &str = "[sandbox]\nprofile = \"default\"\nlocation = \"local\"
 /// The cloud sandbox's home, as `printenv HOME` reports it in the fake.
 const HOME: &str = "/home/agent";
 
-const CLEAN: &str = "Must-fix findings: 0\n\nRisk: low\n\nNothing found.\n";
+const CLEAN: &str = "Must-fix findings: 0\n\nRisk: low\n\n## Not run\n\n- none\n\nNothing found.\n";
 const ONE: &str = "Must-fix findings: 1\n\nRisk: low\n\n## Must fix\n\n### M-1 - a.txt:1 does the \
                    wrong thing.\n";
 
