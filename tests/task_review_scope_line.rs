@@ -14,9 +14,11 @@ use common::task_fixture::{
 use sbxm::backend::{FakeBackend, Location};
 use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::github::{PrComment, PrInfo, PrState, StatusState};
+use sbxm::task::config::Prompts;
 use sbxm::task::finish::finish_fix;
 use sbxm::task::pipeline::{self, Prepared};
 use sbxm::task::pr_fix::review_to_fix;
+use sbxm::task::prompts::{self, Role};
 use sbxm::task::record::{self, Stage, Status};
 use sbxm::task::review::pr_comment;
 
@@ -156,4 +158,26 @@ fn a_review_without_a_scope_line_is_saved_with_sbxms() {
 
     let saved = fs::read_to_string(prepared.meta.join("review.md")).unwrap();
     assert_eq!(scope_lines(&saved), [format!("Scope: `{base}..{tip}`")]);
+}
+
+// The reviewer prompts (issue 565): sbxm writes the Scope line, so no prompt asks for it.
+
+#[test]
+fn no_reviewer_prompt_asks_for_a_scope_line_and_each_says_sbxm_writes_it() {
+    for role in [
+        Role::Reviewer,
+        Role::ReviewerPr,
+        Role::ReviewerSpec,
+        Role::ReviewerPrFix,
+    ] {
+        let text = prompts::template(role, &Prompts::default()).unwrap().text;
+        assert!(
+            !text.contains("Scope: `<base sha>..<head sha>`"),
+            "{role:?} prompt still asks for the Scope line"
+        );
+        assert!(
+            text.contains("sbxm writes the review's `Scope:` line itself"),
+            "{role:?} prompt doesn't say sbxm writes the Scope line"
+        );
+    }
 }

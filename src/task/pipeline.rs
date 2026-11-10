@@ -5366,12 +5366,6 @@ fn said(prepared: &mut Prepared, stopped: lifetime::Stopped) {
     }
 }
 
-/// Runs the reviewer in its (already open) sandbox, saves its transcript, and reads and saves what
-/// it wrote: `review-<round>.md` (and `review.md` when its first line has the count). The
-/// must-fix claims, repeats and findings are [`ReviewOutcome`]'s, as is the risk level (decision
-/// 176): the reviewer's own `Risk:` line (`Level::Unknown`, with a warning, when it is missing or
-/// unparseable), raised to the path-rule floor computed from the task's own changed paths, but
-/// never lowered.
 /// The base of the range a review round's prompt gives the reviewer ([`review_files`]'s
 /// `scope_base`), resolved to a full commit in `repo_git`: the last reviewed commit for a narrow
 /// round, else where the task's own commits start.
@@ -5385,6 +5379,13 @@ fn review_scope_base(prepared: &Prepared, repo_git: &Path) -> Result<String> {
         .with_context(|| format!("cannot resolve {rev}, the base of the review's Scope line"))
 }
 
+/// Runs the reviewer in its (already open) sandbox, saves its transcript, and reads and saves what
+/// it wrote: `review-<round>.md` (and `review.md` when its first line has the count), with sbxm's
+/// own `Scope:` line from the round's base to `tip` ([`review::with_scope`], issue 565). The
+/// must-fix claims, repeats and findings are [`ReviewOutcome`]'s, as is the risk level (decision
+/// 176): the reviewer's own `Risk:` line (`Level::Unknown`, with a warning, when it is missing or
+/// unparseable), raised to the path-rule floor computed from the task's own changed paths, but
+/// never lowered.
 fn run_review_agent(
     env: &TaskEnv,
     prepared: &mut Prepared,
