@@ -650,8 +650,9 @@ impl Loop<'_> {
     }
 
     /// (a) of issue 530: a notification for each PR a loop opened or continued that awaits the
-    /// user's merge because the loop won't arm it: a draft, or a risk above low after the path
-    /// rules. Keyed by the PR and its head, so a new push after a fix round notifies again. A PR
+    /// user's merge because the loop won't arm it: a draft, a risk above low after the path
+    /// rules, or a low risk whose review left checks not run or an unknown not-run list (issue
+    /// 555). Keyed by the PR and its head, so a new push after a fix round notifies again. A PR
     /// that can't be read is left for the next step ([`awaiting_prs`](Self::awaiting_prs) warns
     /// about it).
     fn notify_awaiting(&mut self, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
@@ -717,7 +718,22 @@ impl Loop<'_> {
                     let next = format!("see `sbxm task status {}`", next::record_flag(&rec));
                     ("draft", reason, next)
                 } else if risk == Level::Low {
-                    continue;
+                    // Issue 555: held back only by its not-run list, through the arm paths'
+                    // own check so the toast and the arming can't disagree.
+                    if not_run_reason(review).is_none() {
+                        continue;
+                    }
+                    let (reason, next) = match review.not_run.as_deref() {
+                        Some(checks @ [first, ..]) => (
+                            format!("{} check(s) not run: {first}", checks.len()),
+                            "run them, then merge",
+                        ),
+                        _ => (
+                            "the review's not-run list is unknown".to_owned(),
+                            "read the review, then merge",
+                        ),
+                    };
+                    ("checks not run", reason, next.to_owned())
                 } else {
                     let word = risk.word();
                     let reason =
