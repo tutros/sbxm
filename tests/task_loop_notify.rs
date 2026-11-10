@@ -92,6 +92,7 @@ impl Steps for Script {
             commit: Some(HEAD.to_owned()),
             must_fix: self.must_fix,
             risk: self.risk,
+            not_run: Some(Vec::new()),
             ..ReviewResult::default()
         });
         record::write(&dir, &rec).unwrap();
@@ -751,6 +752,7 @@ fn low_task_with_a_fix(f: &Fixture, risk: Level) {
         commit: Some(PUSHED.to_owned()),
         must_fix: 0,
         risk,
+        not_run: Some(Vec::new()),
         ..ReviewResult::default()
     });
     record::write(&record::task_dir(&f.base(), &id), &fix).unwrap();
@@ -834,6 +836,7 @@ fn task_with_fixes(f: &Fixture, own: Level, fixes: &[(&str, &str, Level)]) {
             commit: Some(covered.to_owned()),
             must_fix: 0,
             risk,
+            not_run: Some(Vec::new()),
             ..ReviewResult::default()
         });
         record::write(&record::task_dir(&f.base(), &id), &fix).unwrap();

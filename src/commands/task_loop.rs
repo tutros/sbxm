@@ -1481,6 +1481,14 @@ impl Loop<'_> {
         if review.risk != Level::Low {
             return waits(format!("risk {}", review.risk.word()), out);
         }
+        if let Some(note) = not_run_note(review) {
+            writeln!(
+                out,
+                "{pr_named} awaits you: {note}",
+                pr_named = self.pr_named(number)
+            )?;
+            return Ok(Some(note));
+        }
         let Some(reviewed) = review.commit.as_deref() else {
             return waits("the commit the review covered is unknown".to_owned(), out);
         };
@@ -1815,6 +1823,14 @@ impl Loop<'_> {
                 "auto-merge not armed: risk {}",
                 review.risk.word()
             )));
+        }
+        if let Some(note) = not_run_note(review) {
+            writeln!(
+                out,
+                "{pr_named} awaits you after its {what}: {note}",
+                pr_named = self.pr_named(number)
+            )?;
+            return Ok(Some(note));
         }
         let Some(reviewed) = review.commit.as_deref() else {
             writeln!(
@@ -2579,14 +2595,29 @@ pub fn exit_code(result: &Result<()>) -> i32 {
     }
 }
 
-/// [`Loop::arm`]'s checks on a task's record: no work stop, a review with 0 must-fix and low risk
-/// after the path-rule floor.
+/// [`Loop::arm`]'s checks on a task's record: no work stop, a review with 0 must-fix, low risk
+/// after the path-rule floor and no check left not run.
 fn passes_arm_checks(rec: &Record) -> bool {
     rec.stopped.is_none()
         && rec
             .review
             .as_ref()
-            .is_some_and(|r| r.must_fix == 0 && r.risk == Level::Low)
+            .is_some_and(|r| r.must_fix == 0 && r.risk == Level::Low && not_run_note(r).is_none())
+}
+
+/// Why `review`'s `## Not run` list keeps auto-merge unarmed (issue 545), at any risk: a check
+/// neither the reviewer nor CI ran, or a list that is unknown (missing, empty, or a record from
+/// before the list). `None` for the empty list, `- none`.
+fn not_run_note(review: &record::ReviewResult) -> Option<String> {
+    match review.not_run.as_deref() {
+        None => Some("auto-merge not armed: not-run list unknown".to_owned()),
+        Some([]) => None,
+        Some([_]) => Some("auto-merge not armed: 1 check not run".to_owned()),
+        Some(checks) => Some(format!(
+            "auto-merge not armed: {} checks not run",
+            checks.len()
+        )),
+    }
 }
 
 /// How far `risk` keeps a PR from the loop's arming, for the highest of its review history: an

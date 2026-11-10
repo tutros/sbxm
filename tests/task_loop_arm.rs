@@ -33,12 +33,15 @@ struct Review {
     must_fix: u32,
     /// The commit the review covered.
     commit: &'static str,
+    /// The checks it couldn't run (issue 545); `None` when its list is unknown.
+    not_run: Option<&'static [&'static str]>,
 }
 
 const LOW_CLEAN: Review = Review {
     risk: Level::Low,
     must_fix: 0,
     commit: REVIEWED,
+    not_run: Some(&[]),
 };
 
 /// Plays `task run`, `task finish`, `task file-findings` and `task rm --merged`.
@@ -92,6 +95,10 @@ impl Steps for Script {
             commit: Some(self.review.commit.to_owned()),
             must_fix: self.review.must_fix,
             risk: self.review.risk,
+            not_run: self
+                .review
+                .not_run
+                .map(|checks| checks.iter().map(|c| (*c).to_owned()).collect()),
             ..ReviewResult::default()
         });
         record::write(&dir, &rec).unwrap();
@@ -298,6 +305,104 @@ fn an_unknown_risk_is_not_armed() {
     run_loop(&f, &f.opts(None), &script, &gh).result.unwrap();
 
     assert!(arms(&gh).is_empty());
+}
+
+// --- Issue 545: the checks a review couldn't run ---
+
+mod not_run {
+    use super::*;
+
+    fn low_with(not_run: Option<&'static [&'static str]>) -> Review {
+        Review {
+            not_run,
+            ..LOW_CLEAN
+        }
+    }
+
+    /// Runs the loop on issue 3 with `review`; returns the run and the PR's arm calls.
+    fn go(review: Review) -> (Run, Vec<GhCall>, String) {
+        let f = fixture();
+        let gh = github(&[3]).with_pr(pr(103, PrState::Open, REVIEWED));
+        let script = Script::new(&f.base(), review);
+        let run = run_loop(&f, &f.opts(None), &script, &gh);
+        let log = f.log_text();
+        (run, arms(&gh), log)
+    }
+
+    #[test]
+    fn low_risk_with_none_not_run_is_armed() {
+        let (run, arms, _) = go(low_with(Some(&[])));
+        run.result.unwrap();
+        assert_eq!(
+            arms,
+            [GhCall::PrArmAutoMerge(REPO.into(), 103, REVIEWED.into())]
+        );
+    }
+
+    #[test]
+    fn low_risk_with_one_check_not_run_is_not_armed_and_says_so() {
+        let (run, arms, log) = go(low_with(Some(&["Pester tests: no pwsh"])));
+        run.result.unwrap();
+        assert!(arms.is_empty(), "{}", run.out);
+        assert!(
+            run.out
+                .contains("PR #103 (Fix 3) awaits you: auto-merge not armed: 1 check not run"),
+            "{}",
+            run.out
+        );
+        assert!(log.contains("not armed: 1 check not run"), "{log}");
+    }
+
+    #[test]
+    fn several_checks_not_run_are_counted() {
+        let (run, arms, log) = go(low_with(Some(&["a: x", "b: y"])));
+        run.result.unwrap();
+        assert!(arms.is_empty(), "{}", run.out);
+        assert!(log.contains("not armed: 2 checks not run"), "{log}");
+    }
+
+    #[test]
+    fn low_risk_with_an_unknown_list_is_not_armed_and_says_so() {
+        let (run, arms, log) = go(low_with(None));
+        run.result.unwrap();
+        assert!(arms.is_empty(), "{}", run.out);
+        assert!(
+            run.out
+                .contains("awaits you: auto-merge not armed: not-run list unknown"),
+            "{}",
+            run.out
+        );
+        assert!(log.contains("not armed: not-run list unknown"), "{log}");
+    }
+
+    /// A record from before the list has no `not_run` key: the same file an unknown list
+    /// writes, so it is read back as unknown and not armed.
+    #[test]
+    fn a_record_from_before_the_list_is_not_armed() {
+        let f = fixture();
+        let gh = github(&[3]).with_pr(pr(103, PrState::Open, REVIEWED));
+        let script = Script::new(&f.base(), low_with(None));
+
+        let run = run_loop(&f, &f.opts(None), &script, &gh);
+
+        run.result.unwrap();
+        let file = record::task_dir(&f.base(), "issue-3").join("task.json");
+        let json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(&file).unwrap()).unwrap();
+        assert!(json["review"].get("not_run").is_none(), "{json}");
+        assert!(arms(&gh).is_empty(), "{}", run.out);
+    }
+
+    #[test]
+    fn a_medium_risk_pr_with_none_not_run_still_waits_for_its_risk() {
+        let (run, arms, _) = go(Review {
+            risk: Level::Medium,
+            ..low_with(Some(&[]))
+        });
+        run.result.unwrap();
+        assert!(arms.is_empty(), "{}", run.out);
+        assert!(run.out.contains("awaits you: risk medium"), "{}", run.out);
+    }
 }
 
 #[test]
