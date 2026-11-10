@@ -639,6 +639,23 @@ pub enum TaskCommand {
         #[command(subcommand)]
         job: QueueCommand,
     },
+    /// Record the result of an issue's real check (its `**Real check:**` line) on its PR: posts
+    /// the commit status sbxm/real-check on the PR's head, which `task loop` reads before it arms
+    /// the PR. A later push moves the head: run the check and post it again.
+    #[command(group(clap::ArgGroup::new("real_check_result").required(true).args(["pass", "fail"])))]
+    RealCheck {
+        /// The PR the check ran on.
+        #[arg(long, value_name = "N")]
+        pr: u32,
+        /// The check passed (`success`).
+        #[arg(long)]
+        pass: bool,
+        /// The check failed (`failure`).
+        #[arg(long)]
+        fail: bool,
+        /// What was run and what came out of it, at most 140 characters.
+        note: String,
+    },
     /// Print a task's run.log (decision 170, part 1). Read-only: never writes to the log itself.
     #[command(group(clap::ArgGroup::new("logs_target").required(true).args(["issue", "pr", "spec"])))]
     Logs {
