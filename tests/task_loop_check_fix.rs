@@ -17,7 +17,9 @@ use common::Env as TestEnv;
 use common::task_fixture::{Probe, issue_text, open_issue};
 use sbxm::commands::task_loop::{self, Env, Options, Steps};
 use sbxm::github::fake::{FakeGitHub, GhCall};
-use sbxm::github::{GitHubBackend, Mergeable, PrInfo, PrState, RunStatus, WorkflowRun};
+use sbxm::github::{
+    GitHubBackend, Mergeable, PrFile, PrFiles, PrInfo, PrState, RunStatus, WorkflowRun,
+};
 use sbxm::task::loop_pause::{self, Pause};
 use sbxm::task::record::{self, Kind, NewTask, Process, Record, ReviewResult, Stage, Status};
 use sbxm::task::risk::Level;
@@ -561,6 +563,85 @@ fn a_failed_log_fix_leaves_the_pr_to_the_user() {
 #[test]
 fn a_clean_log_fix_of_medium_risk_is_not_armed_again() {
     not_clean(Ends::Clean(Level::Medium), "risk medium");
+}
+
+// Review S-1 of issue 549: a PR whose own review was medium is never armed again, and its line
+// says the medium rules' reasons too: its issue's size and a `Cargo.lock` change.
+
+#[test]
+fn an_unarmed_medium_risk_pr_says_its_size_and_cargo_lock_reasons_after_a_log_fix() {
+    let f = fixture();
+    let dir = record::task_dir(&f.base(), "issue-1");
+    let mut rec = record::read(&dir.join("task.json")).unwrap();
+    rec.review.as_mut().unwrap().risk = Level::Medium;
+    record::write(&dir, &rec).unwrap();
+    let mut text = issue_text(1);
+    text.text = "title:\tFix 1\nstate:\tOPEN\nlabels:\tsize:L\n--\nbody\n".to_owned();
+    let gh = FakeGitHub::default()
+        .with_user("me")
+        .with_default_branch("main")
+        .with_branch_head("main", MAIN)
+        .with_pr(pr(101, OTHER))
+        .with_runs(OTHER, vec![run(7, 2, RunStatus::Failed)])
+        .with_issue_text(text)
+        .with_pr_files(
+            101,
+            PrFiles {
+                changed_files: 1,
+                files: vec![PrFile {
+                    filename: "Cargo.lock".to_owned(),
+                    previous_filename: None,
+                }],
+            },
+        );
+    let script = Script::new(&f.base(), &gh, Ends::Clean(Level::Medium));
+
+    let ran = run_loop(&f, &script, &gh);
+
+    ran.result.unwrap();
+    assert_eq!(script.log_fixes(), ["log-fix 101 7"], "{}", ran.out);
+    assert!(arms(&gh).is_empty(), "{}", ran.out);
+    assert!(
+        ran.out.contains(
+            "PR #101 (Fix 1) awaits you: its own review didn't allow auto-merge; its issue #1 is \
+             size L; it changes Cargo.lock\n"
+        ),
+        "{}",
+        ran.out
+    );
+}
+
+#[test]
+fn a_medium_risk_log_fix_while_paused_says_the_pause_and_its_reasons() {
+    let f = fixture();
+    f.write_pause();
+    let mut text = issue_text(1);
+    text.text = "title:\tFix 1\nstate:\tOPEN\nlabels:\tsize:L\n--\nbody\n".to_owned();
+    let gh = github().with_issue_text(text).with_pr_files(
+        101,
+        PrFiles {
+            changed_files: 1,
+            files: vec![PrFile {
+                filename: "Cargo.lock".to_owned(),
+                previous_filename: None,
+            }],
+        },
+    );
+    let script = Script::new(&f.base(), &gh, Ends::Clean(Level::Medium));
+
+    let ran = run_loop(&f, &script, &gh);
+
+    ran.result.unwrap();
+    assert!(arms(&gh).is_empty(), "{}", ran.out);
+    assert!(
+        ran.out
+            .lines()
+            .any(|l| l.contains("PR #101 (Fix 1) awaits you")
+                && l.contains("paused")
+                && l.ends_with("; risk medium; its issue #1 is size L; it changes Cargo.lock")),
+        "{}",
+        ran.out
+    );
 }
 
 #[test]
