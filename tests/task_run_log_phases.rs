@@ -15,8 +15,8 @@ use common::task_fixture::{
     CLAUDE_DONE, CODEX_DONE, Fixture, Play, Probe, add_pr_head, fixture_with, is_headless,
     issue_text, ok, open_issue, play, play_reviews, play_tasks, source,
 };
-use sbxm::backend::FakeBackend;
-use sbxm::commands::{task_fix, task_log, task_run};
+use sbxm::backend::{ExecSpec, FakeBackend};
+use sbxm::commands::{task_fix, task_log, task_review, task_run};
 use sbxm::github::fake::FakeGitHub;
 use sbxm::github::{PrComment, PrInfo, PrState};
 use sbxm::task::gates::FakeHostRunner;
@@ -353,4 +353,137 @@ fn a_fix_tasks_review_line_names_its_file() {
         screen.contains(&format!("{id}: worker started (claude, default model)")),
         "{screen}"
     );
+}
+
+// ---- `task review --pr N`: its gates and its reviewer say when they start (review M-1) ----
+
+fn pr_review_github() -> FakeGitHub {
+    FakeGitHub::default()
+        .with_default_branch("main")
+        .with_pr(PrInfo {
+            number: 7,
+            head_ref: "feature-x".into(),
+            head_oid: "0000000000000000000000000000000000000000".into(),
+            is_cross_repository: false,
+            head_repo: String::new(),
+            state: PrState::Open,
+            title: "Add the x feature".into(),
+            body: "Adds x.\n\nFixes #4".into(),
+            closing_issues: vec![4],
+            base_moved: false,
+        })
+        .with_issue_text(issue_text(4))
+}
+
+fn pr_review_backend(f: &Fixture, reviews: &[&str]) -> FakeBackend {
+    FakeBackend::with_secrets(&["anthropic", "openai"])
+        .with_exec_output_matching("codex", ok(CODEX_DONE))
+        .with_exec_hook(play_reviews(
+            &f.env.base_dir(),
+            "pr-7",
+            reviews.iter().map(|s| (*s).to_owned()).collect(),
+        ))
+}
+
+/// `task review --pr 7` teed into `pr-7`'s `run.log`, as the loop runs it; the result and the
+/// screen output.
+fn review_pr_logged(f: &Fixture, backend: &FakeBackend) -> (anyhow::Result<()>, String) {
+    let log: Arc<Mutex<RunLog>> =
+        task_log::open(&f.env.config_dir(), vec!["pr-7".into()], None).unwrap();
+    let mut screen = Vec::new();
+    let result = {
+        let mut out = Tee::new(&mut screen, Arc::clone(&log));
+        let mut warn = Tee::new(Vec::new(), log);
+        task_review::run(
+            &f.env.config_dir(),
+            &task_review::Options {
+                repo_root: f.env.tmp.path().join("target-repo"),
+                target: task_review::Target::Pr(7),
+                repo: Some("o/r".into()),
+                base: None,
+                clone_source: Some(source(f)),
+                reviewer_harness: None,
+                reviewer_model: None,
+                reviewer_time_limit: None,
+                time_limit: None,
+                profile: None,
+                resolved_spec_id: None,
+                force: false,
+                disk: Default::default(),
+                location: None,
+                identity: None,
+            },
+            backend,
+            &pr_review_github(),
+            &Probe,
+            &FakeHostRunner::default(),
+            &mut out,
+            &mut warn,
+        )
+    };
+    (result, String::from_utf8(screen).unwrap())
+}
+
+/// `run.log` of `pr-7` read while the first exec `held` picks out waits at a barrier.
+fn pr_log_while(held: impl Fn(&ExecSpec) -> bool + Send + Sync + 'static) -> String {
+    let f = config();
+    add_pr_head(&f, 7);
+    let barrier = Arc::new(Barrier::new(2));
+    let once = Arc::new(AtomicBool::new(false));
+    let blocking = {
+        let (barrier, once) = (Arc::clone(&barrier), Arc::clone(&once));
+        pr_review_backend(&f, &[CLEAN]).with_exec_responder(move |_, spec| {
+            if held(spec) && !once.swap(true, SeqCst) {
+                barrier.wait();
+                barrier.wait();
+            }
+            None
+        })
+    };
+    std::thread::scope(|scope| {
+        let handle = scope.spawn(|| review_pr_logged(&f, &blocking));
+        barrier.wait();
+        let log = run_log(&f, "pr-7");
+        barrier.wait();
+        let (result, screen) = handle.join().unwrap();
+        result.unwrap_or_else(|e| panic!("{e:#}: {screen}"));
+        log
+    })
+}
+
+#[test]
+fn a_pr_reviews_gates_start_line_is_in_run_log_while_its_gate_runs() {
+    let log = pr_log_while(|spec| spec.argv.iter().any(|a| a.contains("cargo test")));
+
+    assert!(log.starts_with("# "), "the header first: {log}");
+    assert!(log.contains("pr-7: gates started"), "{log}");
+    assert!(!log.contains("review round 1 started"), "{log}");
+}
+
+#[test]
+fn a_pr_reviews_review_start_line_is_in_run_log_once_while_its_reviewer_runs() {
+    let log = pr_log_while(is_headless);
+
+    let line = "pr-7: review round 1 started (codex, default model)";
+    assert_eq!(log.matches(line).count(), 1, "{log}");
+    let gates = log.find("pr-7: gates started").expect(&log);
+    assert!(gates < log.find(line).unwrap(), "{log}");
+    assert!(!log.contains("must-fix finding(s)"), "{log}");
+}
+
+#[test]
+fn a_retried_pr_review_says_its_review_starts_but_no_gates() {
+    let f = config();
+    add_pr_head(&f, 7);
+    let (first, _) = review_pr_logged(&f, &pr_review_backend(&f, &["Looks fine.\n"]));
+    assert!(first.is_err(), "the first reviewer wrote no usable review");
+
+    let (result, screen) = review_pr_logged(&f, &pr_review_backend(&f, &[CLEAN]));
+
+    result.unwrap_or_else(|e| panic!("{e:#}: {screen}"));
+    assert!(
+        screen.contains("pr-7: review round 2 started (codex, default model)"),
+        "{screen}"
+    );
+    assert!(!screen.contains("gates started"), "{screen}");
 }

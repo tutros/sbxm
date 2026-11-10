@@ -1938,7 +1938,7 @@ pub fn run_gates(
 ) -> Result<Gated> {
     // Decision 291, whoever asks for the gates: a start, a fix round, a review or `task gates`.
     check_branch_locks(env, prepared)?;
-    (env.progress)(&format!("{}: gates started", prepared.record.id));
+    gates_started(env, prepared);
     let gates = &env.config.gates;
     let sandbox = prepared
         .record
@@ -3046,6 +3046,12 @@ fn run_label(status: &RunStatus) -> String {
     }
 }
 
+/// The gates' start line (issue 538), for each place that runs them: [`run_gates`] and a PR's
+/// review, which gates in its reviewer's sandbox.
+fn gates_started(env: &TaskEnv, prepared: &Prepared) {
+    (env.progress)(&format!("{}: gates started", prepared.record.id));
+}
+
 /// `<harness>, <model>` for a phase start line (issue 538).
 fn started_by(harness: &str, model: Option<&str>) -> String {
     format!("{harness}, {}", model.unwrap_or("default model"))
@@ -3959,6 +3965,7 @@ pub fn review_pr(
             &earlier,
             tip.as_deref(),
         )?;
+        gates_started(env, prepared);
         let mut outcomes = gates::run_sandbox_tier(
             env.backend,
             &sandbox,
@@ -4900,12 +4907,6 @@ fn review_round(
     earlier: &[String],
     tip: Option<&str>,
 ) -> Result<ReviewOutcome> {
-    let reviewer = &env.config.reviewer;
-    (env.progress)(&format!(
-        "{}: review round {round} started ({})",
-        prepared.record.id,
-        started_by(reviewer.harness.as_str(), reviewer.model.as_deref())
-    ));
     let warnings = open_review_workspace(env, prepared, round, clone, sandbox, earlier, tip)?;
     let mut outcome = run_review_agent(env, prepared, round, clone, sandbox, earlier, tip)?;
     outcome.warnings.splice(0..0, warnings);
@@ -5372,6 +5373,12 @@ fn run_review_agent(
     tip: Option<&str>,
 ) -> Result<ReviewOutcome> {
     let reviewer = &env.config.reviewer;
+    // Here, where every review's reviewer runs (an issue's, a spec's, a PR's), so none is silent.
+    (env.progress)(&format!(
+        "{}: review round {round} started ({})",
+        prepared.record.id,
+        started_by(reviewer.harness.as_str(), reviewer.model.as_deref())
+    ));
     // Listed again here for `tip`, the commit under review, as a fix round may have added commits
     // since `check_reviewer` did; kept from it only when it listed them for that very commit
     // (issue #444). A git error must stop the review, never drop the floor.
