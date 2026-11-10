@@ -5,6 +5,13 @@
 //! one of the five; never a hidden default. If Docker changes the list, `sbx` still refuses at
 //! create time with its own message.
 
+use anyhow::{Result, bail};
+
+use crate::backend::Location;
+use crate::config::Resources;
+use crate::run::kits::Overrides;
+use crate::task::config::Sandbox;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Shape {
     Micro,
@@ -54,4 +61,62 @@ impl Shape {
     pub fn memory(self) -> String {
         format!("{}g", self.row().3 / 1024)
     }
+
+    /// The shape `cpus` and `memory` are exactly (`8192m` and `8g` are both 8 GiB), if any.
+    pub fn of(cpus: u32, memory: &str) -> Option<Shape> {
+        let mib = memory_mib(memory)?;
+        TABLE
+            .iter()
+            .find(|(_, _, c, m)| *c == cpus && *m == mib)
+            .map(|(shape, _, _, _)| *shape)
+    }
+}
+
+/// The MiB a `--memory` value names: a whole number with an optional `k`, `m`, `g` or `t`
+/// suffix, any case, and an optional `b` after it (`8g`, `8192m`, `8GB`); a bare number is
+/// bytes. `None` when it can't be read or isn't a whole number of MiB.
+fn memory_mib(memory: &str) -> Option<u64> {
+    let text = memory.trim().to_ascii_lowercase();
+    let text = text.strip_suffix('b').unwrap_or(&text);
+    let (digits, unit) = match text.char_indices().last()? {
+        (i, 'k') => (&text[..i], 1u64 << 10),
+        (i, 'm') => (&text[..i], 1 << 20),
+        (i, 'g') => (&text[..i], 1 << 30),
+        (i, 't') => (&text[..i], 1 << 40),
+        _ => (text, 1),
+    };
+    if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let bytes = digits.parse::<u64>().ok()?.checked_mul(unit)?;
+    (bytes % (1 << 20) == 0).then_some(bytes >> 20)
+}
+
+/// The cpus and memory a task's sandbox at `location` is created with: locally the `[sandbox]`
+/// overrides (the global `[resources]` fill in the rest), in the cloud `[sandbox] cloud_shape`,
+/// else the local values resolved against `global` when they are exactly a shape. Refused
+/// otherwise, naming the key: called before anything of the task is written or created.
+pub fn overrides(sandbox: &Sandbox, global: &Resources, location: Location) -> Result<Overrides> {
+    if location == Location::Local {
+        return Ok(Overrides {
+            cpus: sandbox.cpus,
+            memory: sandbox.memory.clone(),
+        });
+    }
+    let cpus = sandbox.cpus.unwrap_or(global.cpus);
+    let memory = sandbox.memory.as_deref().unwrap_or(&global.memory);
+    let Some(shape) = sandbox.cloud_shape.or_else(|| Shape::of(cpus, memory)) else {
+        let cpus = match cpus {
+            1 => "1 CPU".to_owned(),
+            n => format!("{n} CPUs"),
+        };
+        bail!(
+            "{cpus} / {memory} isn't a cloud shape; set [sandbox] cloud_shape in sbxm-task.toml \
+             to {NAMES}"
+        );
+    };
+    Ok(Overrides {
+        cpus: Some(shape.cpus()),
+        memory: Some(shape.memory()),
+    })
 }
