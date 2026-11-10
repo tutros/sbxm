@@ -264,6 +264,10 @@ pub trait GitHubBackend: Send + Sync {
     ) -> Result<()>;
     /// Posts `status` on commit `sha` (a full commit id).
     fn commit_status(&self, repo: &str, sha: &str, status: &CommitStatus) -> Result<()>;
+    /// The state of the latest status of `context` on commit `sha` (a full commit id), as GitHub
+    /// reports it (`success`, `failure`, `error` or `pending`); `None` when it has none (issue
+    /// 547).
+    fn commit_status_state(&self, repo: &str, sha: &str, context: &str) -> Result<Option<String>>;
     /// Every workflow run of commit `sha` (a full commit id), each at its latest attempt (issue
     /// 442).
     fn commit_runs(&self, repo: &str, sha: &str) -> Result<Vec<WorkflowRun>>;

@@ -263,6 +263,13 @@ struct RawPull {
     changed_files: u32,
 }
 
+/// One entry of `gh api repos/<repo>/commits/<sha>/statuses` (issue 547), newest first.
+#[derive(Deserialize)]
+struct RawStatus {
+    state: String,
+    context: String,
+}
+
 /// One entry of `gh api repos/<repo>/pulls/<n>/files` (issue 549).
 #[derive(Deserialize)]
 struct RawPrFile {
@@ -273,7 +280,7 @@ struct RawPrFile {
 
 /// One entry of `gh api repos/<repo>/commits/<sha>/statuses` (issue 548).
 #[derive(Deserialize)]
-struct RawStatus {
+struct RawPostedStatus {
     state: String,
     context: String,
     created_at: String,
@@ -762,6 +769,24 @@ impl GitHubBackend for GhBackend {
         Ok(())
     }
 
+    fn commit_status_state(&self, repo: &str, sha: &str, context: &str) -> Result<Option<String>> {
+        // The sha goes into the API path: only a full commit id is accepted.
+        if !full_commit(sha) {
+            bail!("`{sha}` is not a full commit id, so its statuses can't be read");
+        }
+        // Newest first, every page: the first of `context` is its latest.
+        let path = format!("repos/{repo}/commits/{sha}/statuses?per_page=100");
+        let out = self.run(&strings(&["api", &path, "--paginate"]), None)?;
+        for page in serde_json::Deserializer::from_str(&out).into_iter::<Vec<RawStatus>>() {
+            let page =
+                page.with_context(|| format!("could not parse the output of `gh api {path}`"))?;
+            if let Some(status) = page.into_iter().find(|s| s.context == context) {
+                return Ok(Some(status.state));
+            }
+        }
+        Ok(None)
+    }
+
     fn commit_runs(&self, repo: &str, sha: &str) -> Result<Vec<WorkflowRun>> {
         // The sha goes into the API path: only a full commit id is accepted.
         if !full_commit(sha) {
@@ -928,7 +953,7 @@ impl GitHubBackend for GhBackend {
         }
         let path = format!("repos/{repo}/commits/{sha}/statuses");
         let out = self.run(&strings(&["api", &path, "--paginate"]), None)?;
-        let raw: Vec<RawStatus> = pages(&out, &path)?;
+        let raw: Vec<RawPostedStatus> = pages(&out, &path)?;
         raw.into_iter()
             .map(|s| {
                 let at = crate::run::results::parse_timestamp(&s.created_at).ok_or_else(|| {

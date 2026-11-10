@@ -44,6 +44,8 @@ pub enum GhCall {
     IssueLabels(String, u32, Vec<String>, Vec<String>),
     /// Repo, commit, status.
     CommitStatus(String, String, CommitStatus),
+    /// Repo, commit, context.
+    CommitStatusState(String, String, String),
     /// Repo, commit.
     CommitRuns(String, String),
     /// Repo, run id.
@@ -98,6 +100,9 @@ pub struct FakeGitHub {
     failing_issue_comments: Vec<u32>,
     failing_comment_edits: bool,
     status_failure: Option<String>,
+    /// The statuses `commit_status` posted, by commit, oldest first: what `commit_status_state`
+    /// reads.
+    statuses: Mutex<Vec<(String, CommitStatus)>>,
     arm_failure: Option<String>,
     /// What `commit_runs` answers, by commit; no runs for a commit not scripted.
     runs: Mutex<Vec<(String, Vec<WorkflowRun>)>>,
@@ -113,7 +118,7 @@ pub struct FakeGitHub {
     pr_labels_failure: Option<String>,
     remove_label_failure: Option<String>,
     /// What `commit_statuses` answers, by commit; none for a commit not scripted.
-    statuses: Vec<(String, Vec<PostedStatus>)>,
+    posted_statuses: Vec<(String, Vec<PostedStatus>)>,
     statuses_failure: Option<String>,
     calls: Mutex<Vec<GhCall>>,
 }
@@ -192,7 +197,7 @@ impl FakeGitHub {
 
     /// The statuses posted on commit `sha`, newest first (issue 548).
     pub fn with_statuses(mut self, sha: &str, statuses: Vec<PostedStatus>) -> Self {
-        self.statuses.push((sha.to_owned(), statuses));
+        self.posted_statuses.push((sha.to_owned(), statuses));
         self
     }
 
@@ -735,8 +740,30 @@ impl GitHubBackend for FakeGitHub {
         ))?;
         match &self.status_failure {
             Some(message) => Err(anyhow!("{message}")),
-            None => Ok(()),
+            None => {
+                self.statuses
+                    .lock()
+                    .unwrap()
+                    .push((sha.to_owned(), status.clone()));
+                Ok(())
+            }
         }
+    }
+
+    fn commit_status_state(&self, repo: &str, sha: &str, context: &str) -> Result<Option<String>> {
+        self.record(GhCall::CommitStatusState(
+            repo.to_owned(),
+            sha.to_owned(),
+            context.to_owned(),
+        ))?;
+        Ok(self
+            .statuses
+            .lock()
+            .unwrap()
+            .iter()
+            .rev()
+            .find(|(s, status)| s == sha && status.context == context)
+            .map(|(_, status)| status.state.word().to_owned()))
     }
 
     fn commit_runs(&self, repo: &str, sha: &str) -> Result<Vec<WorkflowRun>> {
@@ -829,7 +856,7 @@ impl GitHubBackend for FakeGitHub {
             return Err(anyhow!("{message}"));
         }
         Ok(self
-            .statuses
+            .posted_statuses
             .iter()
             .find(|(s, _)| s == sha)
             .map(|(_, statuses)| statuses.clone())

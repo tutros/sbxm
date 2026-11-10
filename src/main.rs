@@ -903,6 +903,25 @@ fn run() -> anyhow::Result<()> {
             finish_task(result, out, warn)
         }
         Command::Task {
+            command: TaskCommand::RealCheck { pr, pass, note, .. },
+        } => {
+            let (mut out, warn) = task_writers(Vec::new(), None)?;
+            let result = (|| -> anyhow::Result<()> {
+                commands::task_real_check::run(
+                    &commands::task_real_check::Options {
+                        repo_root: std::env::current_dir()?,
+                        repo: None,
+                        pr,
+                        pass,
+                        note,
+                    },
+                    &sbxm::github::gh::GhBackend::default(),
+                    &mut out,
+                )
+            })();
+            finish_task(result, out, warn)
+        }
+        Command::Task {
             command: TaskCommand::Queue { job },
         } => {
             let (mut out, warn) = task_writers(Vec::new(), None)?;

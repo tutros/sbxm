@@ -48,7 +48,7 @@ use crate::task::record::{self, Kind, Process, ProcessProbe, Record, Stage};
 use crate::task::risk::Level;
 use crate::task::runlog::{RunLog, Tee};
 use crate::task::{
-    findings, finish, lock, loop_log, medium, next, pipeline, pr_fix, resume, window,
+    findings, finish, lock, loop_log, medium, next, pipeline, pr_fix, real_check, resume, window,
 };
 
 mod check;
@@ -698,6 +698,7 @@ impl Loop<'_> {
             // every fix pushed onto it: a later narrow review doesn't clear the risk an earlier
             // one left (decision 298(3), second review of issue 530).
             let risk = self.history_risk(number, Some(&own));
+            let check = real_check_of(&self.base_dir, Some(&own)).ok().flatten();
             let rec = self
                 .fixes_of(number)
                 .into_iter()
@@ -715,22 +716,22 @@ impl Loop<'_> {
                 .chain([review.risk])
                 .max_by_key(|&risk| awaiting_rank(risk))
                 .unwrap_or(review.risk);
-            let (what, reason, next) =
-                if state.draft || rec.stopped.is_some() || review.must_fix > 0 {
-                    let reason = match rec.stopped {
-                        Some(stopped) => format!("a draft: work stop {}", stopped.name()),
-                        None => format!("a draft with {} must-fix left", review.must_fix),
-                    };
-                    let next = format!("see `sbxm task status {}`", next::record_flag(&rec));
-                    ("draft", reason, next)
-                } else if risk == Level::Low {
-                    // Issue 555: held back only by its not-run list, through the arm paths'
-                    // own check so the toast and the arming can't disagree. Only a review of the
-                    // PR's head speaks for it (review M-1): a head no review covered stays quiet.
-                    let covers_head = review.commit.as_deref() == Some(head.as_str());
-                    if !covers_head || not_run_reason(review).is_none() {
-                        continue;
-                    }
+            let (what, reason, next) = if state.draft
+                || rec.stopped.is_some()
+                || review.must_fix > 0
+            {
+                let reason = match rec.stopped {
+                    Some(stopped) => format!("a draft: work stop {}", stopped.name()),
+                    None => format!("a draft with {} must-fix left", review.must_fix),
+                };
+                let next = format!("see `sbxm task status {}`", next::record_flag(&rec));
+                ("draft", reason, next)
+            } else if risk == Level::Low {
+                // Issue 555: held back only by its not-run list, through the arm paths'
+                // own check so the toast and the arming can't disagree. Only a review of the
+                // PR's head speaks for it (review M-1): a head no review covered stays quiet.
+                let covers_head = review.commit.as_deref() == Some(head.as_str());
+                if covers_head && not_run_reason(review).is_some() {
                     let (reason, next) = match review.not_run.as_deref() {
                         Some(checks @ [first, ..]) => (
                             format!("{} check(s) not run: {first}", checks.len()),
@@ -743,11 +744,30 @@ impl Loop<'_> {
                     };
                     ("checks not run", reason, next.to_owned())
                 } else {
-                    let word = risk.word();
-                    let reason =
-                        format!("risk {word} after the path rules, so the loop doesn't arm it");
-                    (word, reason, "review it, then merge or close it".to_owned())
-                };
+                    // Held for its real check (issue 547): one named, and no `success` on
+                    // the head.
+                    let Some(check) = check else {
+                        continue;
+                    };
+                    match self
+                        .github
+                        .commit_status_state(&self.repo, &head, real_check::CONTEXT)
+                    {
+                        Ok(Some(state)) if state == "success" => continue,
+                        Ok(_) => {}
+                        // Read again at the next step.
+                        Err(_) => continue,
+                    }
+                    let next =
+                        format!("run it, then sbxm task real-check --pr {number} --pass \"...\"");
+                    ("real check", format!("real check: {check}"), next)
+                }
+            } else {
+                let word = risk.word();
+                let reason =
+                    format!("risk {word} after the path rules, so the loop doesn't arm it");
+                (word, reason, "review it, then merge or close it".to_owned())
+            };
             let note = Notification {
                 key: format!("pr:{number}:{head}"),
                 title: format!("PR #{number} awaits your merge ({what})"),
@@ -1500,10 +1520,12 @@ impl Loop<'_> {
             return Ok(None);
         };
         // Worked out first, so a refusal that comes before its own check still names it (review
-        // S-1 of issue 545).
+        // S-1 of issues 545 and 547): the checks not run, then the real check.
         let not_run = not_run_reason(review);
+        let real = self.real_check_now(Some(&rec), number, warn)?;
+        let leading = leading_reasons(not_run.as_deref(), real.as_deref());
         let waits = |why: String, out: &mut dyn Write| -> Result<Option<String>> {
-            let note = not_run.as_deref().map(|n| not_armed(n, Some(&why)));
+            let note = leading.as_deref().map(|n| not_armed(n, Some(&why)));
             writeln!(
                 out,
                 "{pr_named} awaits you: {}",
@@ -1522,8 +1544,8 @@ impl Loop<'_> {
                 out,
             );
         }
-        if let Some(not_run) = not_run.as_deref() {
-            let note = not_armed(not_run, None);
+        if let (Some(_), Some(leading)) = (&not_run, leading.as_deref()) {
+            let note = not_armed(leading, None);
             writeln!(
                 out,
                 "{pr_named} awaits you: {note}",
@@ -1535,8 +1557,10 @@ impl Loop<'_> {
             return waits("the commit the review covered is unknown".to_owned(), out);
         };
         if self.paused(warn)? {
-            // Only a low-risk PR gets here: nothing else keeps it from being armed.
-            return Ok(Some(self.not_armed_paused(number, &[], out)?));
+            // Only a low-risk PR gets here: nothing else but its real check keeps it unarmed.
+            let also: Vec<String> = real.iter().cloned().collect();
+            let note = self.not_armed_paused(number, &also, out)?;
+            return Ok(Some(with_reasons(note, &also)));
         }
         let state = match self.github.pr_merge_state(&self.repo, number) {
             Ok(state) => state,
@@ -1551,13 +1575,25 @@ impl Loop<'_> {
             Err(e) => return self.arming_failed(number, &e, out, warn),
         };
         if head != reviewed {
-            let note = "auto-merge not armed: the PR's head moved after the review";
+            let note = with_reasons(
+                "auto-merge not armed: the PR's head moved after the review".to_owned(),
+                &real.iter().cloned().collect::<Vec<_>>(),
+            );
             writeln!(
                 out,
                 "{pr_named}: {note} (reviewed {reviewed}, head {head}); it awaits you",
                 pr_named = self.pr_named(number)
             )?;
-            return Ok(Some(note.to_owned()));
+            return Ok(Some(note));
+        }
+        if let Some(why) = self.real_check_refusal(Some(&rec), number, &head, warn)? {
+            let note = not_armed(&why, None);
+            writeln!(
+                out,
+                "{pr_named} awaits you: {note}",
+                pr_named = self.pr_named(number)
+            )?;
+            return Ok(Some(note));
         }
         match self.github.pr_arm_auto_merge(&self.repo, number, reviewed) {
             Ok(()) => {
@@ -1581,6 +1617,74 @@ impl Loop<'_> {
             medium::refusals(self.github, &self.repo, source, number)
         } else {
             Vec::new()
+        }
+    }
+
+    /// [`Self::real_check_refusal`] on PR `number`'s head as GitHub has it now, read only when the
+    /// issue of its own task `own` names a real check: for the refusals that come before arming
+    /// reads the head itself (review S-1 of issue 547), so they name it too.
+    fn real_check_now(
+        &mut self,
+        own: Option<&Record>,
+        number: u32,
+        warn: &mut dyn Write,
+    ) -> Result<Option<String>> {
+        match real_check_of(&self.base_dir, own) {
+            Ok(None) => return Ok(None),
+            Ok(Some(_)) => {}
+            Err(why) => return Ok(Some(why)),
+        }
+        match self.github.pr(&self.repo, number) {
+            Ok(pr) => self.real_check_refusal(own, number, &pr.head_oid, warn),
+            Err(e) => {
+                self.warn_once(
+                    warn,
+                    format!(
+                        "{pr_named}'s head can't be read for its real check: {e:#}; it awaits you",
+                        pr_named = self.pr_named(number)
+                    ),
+                )?;
+                Ok(Some("real check status unreadable".to_owned()))
+            }
+        }
+    }
+
+    /// Why PR `number`'s real check keeps it unarmed, at any risk (issue 547): the issue of its
+    /// own task `own` names one ([`real_check::required`]) and its head `head` hasn't
+    /// [`real_check::CONTEXT`] = `success` as its latest status of that context. `None` when it
+    /// may be armed as far as the real check goes.
+    fn real_check_refusal(
+        &mut self,
+        own: Option<&Record>,
+        number: u32,
+        head: &str,
+        warn: &mut dyn Write,
+    ) -> Result<Option<String>> {
+        match real_check_of(&self.base_dir, own) {
+            Ok(None) => return Ok(None),
+            Ok(Some(_)) => {}
+            Err(why) => return Ok(Some(why)),
+        }
+        match self
+            .github
+            .commit_status_state(&self.repo, head, real_check::CONTEXT)
+        {
+            Ok(Some(state)) if state == "success" => Ok(None),
+            Ok(Some(state)) if state == "failure" || state == "error" => {
+                Ok(Some("real check failed".to_owned()))
+            }
+            Ok(_) => Ok(Some("real check not recorded".to_owned())),
+            Err(e) => {
+                self.warn_once(
+                    warn,
+                    format!(
+                        "{pr_named}'s {} status can't be read: {e:#}; it awaits you",
+                        real_check::CONTEXT,
+                        pr_named = self.pr_named(number)
+                    ),
+                )?;
+                Ok(Some("real check status unreadable".to_owned()))
+            }
         }
     }
 
@@ -1891,23 +1995,25 @@ impl Loop<'_> {
         warn: &mut dyn Write,
     ) -> Result<Option<String>> {
         // Worked out first, so a refusal that comes before its own check still names it (review
-        // S-1 of issue 545): said on a line of its own, and first in the log row's note.
+        // S-1 of issues 545 and 547): said on a line of its own, and first in the log row's note.
+        let own = self.record_of(task);
         let not_run = not_run_reason(review);
+        let real = self.real_check_now(own.as_ref(), number, warn)?;
+        let leading = leading_reasons(not_run.as_deref(), real.as_deref());
         let refused = |this: &Self, why: Option<&str>, out: &mut dyn Write| {
-            let Some(not_run) = not_run.as_deref() else {
+            let Some(leading) = leading.as_deref() else {
                 return Ok(why.map(|w| not_armed(w, None)));
             };
             writeln!(
                 out,
                 "{pr_named} awaits you after its {what}: {}",
-                not_armed(not_run, None),
+                not_armed(leading, None),
                 pr_named = this.pr_named(number)
             )?;
-            Ok::<_, anyhow::Error>(Some(not_armed(not_run, why)))
+            Ok::<_, anyhow::Error>(Some(not_armed(leading, why)))
         };
         // A medium PR's reasons go into every line below that leaves it to the user (review S-1
         // of issue 549), for its risk over its whole review history, this fix's included.
-        let own = self.record_of(task);
         let source = own.as_ref().map_or(medium::Source::Unknown, medium_source);
         let risk = self
             .history_risk(number, own.as_ref())
@@ -1960,21 +2066,35 @@ impl Loop<'_> {
                 "{pr_named} awaits you: the commit its {what}'s review covered is unknown",
                 pr_named = self.pr_named(number)
             )?;
-            return Ok(Some(
+            return Ok(Some(with_reasons(
                 "auto-merge not armed: reviewed commit unknown".to_owned(),
-            ));
+                &real.iter().cloned().collect::<Vec<_>>(),
+            )));
         };
         let head = match self.github.pr(&self.repo, number) {
             Ok(pr) => pr.head_oid,
             Err(e) => return self.arming_failed(number, &e, out, warn),
         };
         if head != reviewed {
-            let note = format!(
-                "auto-merge not armed: the PR's head isn't the commit the {what}'s review covered"
+            let note = with_reasons(
+                format!(
+                    "auto-merge not armed: the PR's head isn't the commit the {what}'s review \
+                     covered"
+                ),
+                &real.iter().cloned().collect::<Vec<_>>(),
             );
             writeln!(
                 out,
                 "{pr_named}: {note} (reviewed {reviewed}, head {head}); it awaits you",
+                pr_named = self.pr_named(number)
+            )?;
+            return Ok(Some(note));
+        }
+        if let Some(why) = self.real_check_refusal(own.as_ref(), number, &head, warn)? {
+            let note = not_armed(&why, None);
+            writeln!(
+                out,
+                "{pr_named} awaits you: {note}",
                 pr_named = self.pr_named(number)
             )?;
             return Ok(Some(note));
@@ -2732,6 +2852,35 @@ fn with_reasons(why: String, reasons: &[String]) -> String {
         .chain(reasons.iter().cloned())
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+/// The refusals that every "not armed" note of a PR starts with, worked out before the other
+/// checks (review S-1 of issues 545 and 547): its checks not run, then its real check; `None`
+/// with neither.
+fn leading_reasons(not_run: Option<&str>, real: Option<&str>) -> Option<String> {
+    let parts: Vec<&str> = not_run.into_iter().chain(real).collect();
+    (!parts.is_empty()).then(|| parts.join("; "))
+}
+
+/// The real check the issue of a PR's own task `own` names (issue 547), from the issue text its
+/// start saved (`issue.md`), as `task finish` reads `**Closes on merge:**`: `None` for a task of
+/// another kind or without the file. `Err` with the refusal when it can't be known: no readable
+/// task, or a file that can't be read.
+fn real_check_of(
+    base_dir: &Path,
+    own: Option<&Record>,
+) -> std::result::Result<Option<String>, String> {
+    let Some(own) = own else {
+        return Err("real check unknown: the PR's task can't be read".to_owned());
+    };
+    if own.kind != Kind::Issue {
+        return Ok(None);
+    }
+    match fs::read_to_string(record::task_dir(base_dir, &own.id).join("issue.md")) {
+        Ok(text) => Ok(real_check::required(&text)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(_) => Err("real check unknown: its issue text can't be read".to_owned()),
+    }
 }
 
 /// Where the task `rec` came from, for the size [`medium::refusals`] reads.

@@ -21,6 +21,7 @@ pub mod task_log;
 pub mod task_logs;
 pub mod task_loop;
 pub mod task_queue;
+pub mod task_real_check;
 pub mod task_resume;
 pub mod task_review;
 pub mod task_rm;
