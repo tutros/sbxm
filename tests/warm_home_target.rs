@@ -4,9 +4,10 @@
 mod common;
 
 use common::Env;
-use sbxm::backend::FakeBackend;
+use sbxm::backend::{FakeBackend, Location};
 use sbxm::commands::doctor;
 use sbxm::commands::template_build::warm_steps;
+use sbxm::task::config::TaskConfig;
 
 const HOME_ENV: &str = "CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR=$HOME/target";
 
@@ -42,11 +43,14 @@ fn host(dir: std::path::PathBuf) -> doctor::Host {
     }
 }
 
-/// The doctor's `/tmp` warnings for a repo holding `toml` as its `sbxm-task.toml`.
+/// The doctor's `/tmp` warnings for a repo holding `toml` as its `sbxm-task.toml`, which must
+/// run in the cloud, or the warnings it checks are never looked for.
 fn tmp_warnings(env: &Env, toml: &str) -> Vec<String> {
     let repo = env.tmp.path().join("repo");
     std::fs::create_dir_all(&repo).unwrap();
     std::fs::write(repo.join("sbxm-task.toml"), toml).unwrap();
+    let config = TaskConfig::load(&repo).unwrap();
+    assert_eq!(config.sandbox.location, Location::Cloud, "{toml}");
     let backend = FakeBackend::default().with_version("0.46.0");
     doctor::run(&env.config_dir(), &backend, &host(repo))
         .render()
@@ -56,39 +60,51 @@ fn tmp_warnings(env: &Env, toml: &str) -> Vec<String> {
         .collect()
 }
 
-/// This repo's own `sbxm-task.toml`, moved to the cloud.
-fn own_toml_in_the_cloud() -> String {
+/// This repo's own `sbxm-task.toml` as a checkout with `newline` line endings holds it (a
+/// Windows checkout can have CRLF).
+fn own_toml(newline: &str) -> String {
     let own = std::fs::read_to_string(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("sbxm-task.toml"),
     )
     .unwrap();
-    assert!(!own.contains("location ="), "{own}");
-    own.replacen("[sandbox]\n", "[sandbox]\nlocation = \"cloud\"\n", 1)
+    own.replace("\r\n", "\n").replace('\n', newline)
 }
+
+/// `toml` moved to the cloud. Matches no line ending, so LF and CRLF files both work.
+fn in_the_cloud(toml: &str) -> String {
+    assert!(!toml.contains("location ="), "{toml}");
+    toml.replacen("[sandbox]", "[sandbox]\nlocation = \"cloud\"", 1)
+}
+
+const NEWLINES: [&str; 2] = ["\n", "\r\n"];
 
 #[test]
 fn doctor_gives_no_tmp_warning_for_this_repos_own_gates_in_the_cloud() {
-    let env = Env::new();
+    for newline in NEWLINES {
+        let env = Env::new();
 
-    let warnings = tmp_warnings(&env, &own_toml_in_the_cloud());
+        let warnings = tmp_warnings(&env, &in_the_cloud(&own_toml(newline)));
 
-    assert!(warnings.is_empty(), "{warnings:?}");
+        assert!(warnings.is_empty(), "{newline:?}: {warnings:?}");
+    }
 }
 
 #[test]
 fn a_gate_naming_tmp_target_still_warns_in_the_cloud() {
-    let env = Env::new();
-    let toml = own_toml_in_the_cloud().replacen(
-        "sandbox = [",
-        "sandbox = [\"CARGO_TARGET_DIR=/tmp/target cargo test\", ",
-        1,
-    );
+    for newline in NEWLINES {
+        let env = Env::new();
+        let toml = in_the_cloud(&own_toml(newline)).replacen(
+            "sandbox = [",
+            "sandbox = [\"CARGO_TARGET_DIR=/tmp/target cargo test\", ",
+            1,
+        );
 
-    let warnings = tmp_warnings(&env, &toml);
+        let warnings = tmp_warnings(&env, &toml);
 
-    assert_eq!(warnings.len(), 1, "{warnings:?}");
-    assert!(
-        warnings[0].contains("gate `CARGO_TARGET_DIR=/tmp/target cargo test`"),
-        "{warnings:?}"
-    );
+        assert_eq!(warnings.len(), 1, "{newline:?}: {warnings:?}");
+        assert!(
+            warnings[0].contains("gate `CARGO_TARGET_DIR=/tmp/target cargo test`"),
+            "{newline:?}: {warnings:?}"
+        );
+    }
 }
