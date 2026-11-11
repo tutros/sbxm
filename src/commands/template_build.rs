@@ -310,7 +310,9 @@ const CARGO_STEPS: [&str; 3] = [
     "cargo clippy --all-targets --locked",
     "cargo test --no-run --locked",
 ];
-const CARGO_STEP_ENV: &str = "CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR=/tmp/target";
+/// Under `$HOME`, never `/tmp` (decision 257, issue 575): `$HOME` is left for the sandbox's shell
+/// to expand.
+const CARGO_STEP_ENV: &str = "CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR=$HOME/target";
 
 /// One step of a warm-up: the name it is announced by, and the command that runs.
 #[derive(Debug, Clone, PartialEq, Eq)]

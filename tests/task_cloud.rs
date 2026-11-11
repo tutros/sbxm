@@ -1935,7 +1935,7 @@ fn a_strict_cloud_worker_is_warmed_at_the_base_then_denied_then_checked_out() {
         let command = spec.argv.last().unwrap();
         assert!(
             command.ends_with(&format!(
-                "CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR=/tmp/target {step}"
+                "CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR=$HOME/target {step}"
             )),
             "{command}"
         );
