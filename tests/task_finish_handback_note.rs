@@ -110,3 +110,27 @@ fn of_a_none_with_a_note_and_a_real_question_only_the_real_one_is_shown() {
     );
     assert!(!head.contains("Just a note"), "{head}");
 }
+
+// --- review M-1: only a first line that is "none" makes a note ---
+
+#[test]
+fn a_divider_before_a_real_question_is_still_a_question() {
+    for divider in ["---", "***", "___"] {
+        let result = format!("## Needs a decision\n\n{divider}\n\nShould we pick A or B?\n");
+        assert_eq!(
+            handed_back(&result).as_deref(),
+            Some(format!("{divider}\n\nShould we pick A or B?").as_str()),
+            "{result}"
+        );
+        assert!(hands_back(&result), "{result}");
+        let head = head_of(&result);
+        assert!(head.contains("Should we pick A or B?"), "{head}");
+        assert!(!head.contains("None. Note:"), "{head}");
+    }
+}
+
+#[test]
+fn a_section_of_only_a_divider_is_no_question() {
+    let result = "## Needs a decision\n\n---\n\n## Self-review\n\nok\n";
+    assert_no_question(result);
+}

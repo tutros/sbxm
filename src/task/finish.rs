@@ -1508,7 +1508,10 @@ fn handback_parts(result: &str, name: &str) -> (Vec<String>, Vec<String>) {
     for part in &parts {
         let part = part.trim();
         let (first, rest) = part.split_once('\n').unwrap_or((part, ""));
-        if !is_none(first) {
+        if is_none(part) {
+            continue;
+        }
+        if !says_none(first) {
             said.push(part.to_owned());
         } else if !is_none(rest) {
             notes.push(rest.trim().to_owned());
@@ -1572,8 +1575,19 @@ pub(crate) fn next_fence(open: Option<(char, usize)>, line: &str) -> Option<(cha
 /// Whether a section's text says nothing: empty, or "none" give or take list, bold and italic
 /// marks and a full stop.
 fn is_none(text: &str) -> bool {
-    let plain = text.trim_matches(|c: char| c.is_whitespace() || "-*_+.".contains(c));
+    let plain = without_marks(text);
     plain.is_empty() || plain.eq_ignore_ascii_case("none")
+}
+
+/// Whether `line` is the word "none" itself, give or take the same marks; unlike [`is_none`], a
+/// line of only marks, such as a `---` divider, is not (issue 585, review M-1).
+fn says_none(line: &str) -> bool {
+    without_marks(line).eq_ignore_ascii_case("none")
+}
+
+/// `text` without its surrounding white space, list, bold and italic marks and full stops.
+fn without_marks(text: &str) -> &str {
+    text.trim_matches(|c: char| c.is_whitespace() || "-*_+.".contains(c))
 }
 
 /// Why task `task`'s PR must be a draft (decision 173(b)), one line per reason; empty when it is

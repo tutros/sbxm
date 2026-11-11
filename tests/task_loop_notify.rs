@@ -711,6 +711,21 @@ fn a_none_section_with_a_note_raises_no_question() {
     );
 }
 
+#[test]
+fn a_divider_before_a_real_question_still_raises_the_question() {
+    let f = fixture();
+    let mut script = Script::new(&f.base(), Level::Low);
+    script.question = Some("---\n\nShould we pick A or B?");
+    let notifier = FakeNotifier::default();
+
+    run_loop(&f, &f.opts(), &script, &github(&[3], HEAD), &notifier)
+        .result
+        .unwrap();
+
+    let shown = notifier.shown();
+    assert_eq!(titles(&shown), ["Task issue-3 has a question for you"]);
+}
+
 // --- no notifier ---
 
 #[test]
