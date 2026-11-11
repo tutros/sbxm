@@ -1001,6 +1001,39 @@ pub fn changed_paths_since(repo_git: &Path, commit: &str, branch: &str) -> Resul
     diff_names(repo_git, commit, branch)
 }
 
+/// Those of `paths` whose content (or presence) at `branch`'s tip differs from `base`'s tip in
+/// `repo_git` (issue #569), as git prints them; none when `paths` is empty.
+pub fn paths_differing_from_base(
+    repo_git: &Path,
+    base: &str,
+    branch: &str,
+    paths: &[String],
+) -> Result<Vec<String>> {
+    check_ref("base", base)?;
+    check_ref("branch", branch)?;
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let (from, to) = (format!("refs/heads/{base}"), format!("refs/heads/{branch}"));
+    let mut args = vec![
+        "--literal-pathspecs",
+        "diff",
+        "--name-only",
+        "-z",
+        "--no-renames",
+        &from,
+        &to,
+        "--",
+    ];
+    args.extend(paths.iter().map(String::as_str));
+    let out = git::run(repo_git, Some(repo_git), None, &args)?;
+    Ok(out
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
+
 fn diff_names(repo_git: &Path, from: &str, branch: &str) -> Result<Vec<String>> {
     check_ref("branch", branch)?;
     diff_range(repo_git, &format!("{from}...refs/heads/{branch}"))

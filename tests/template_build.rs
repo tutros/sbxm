@@ -1166,7 +1166,7 @@ fn exec_commands(backend: &FakeBackend) -> Vec<String> {
         .collect()
 }
 
-const STEP_ENV: &str = "CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR=/tmp/target";
+const STEP_ENV: &str = "CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR=$HOME/target";
 
 #[test]
 fn a_warm_build_runs_the_cargo_steps_before_the_stop() {

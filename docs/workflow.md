@@ -523,7 +523,7 @@ has the setup ("The scheduled factory check").
 - **Disk.** `base_dir` only decides where the *workspace* lives. Each sandbox's own disk (about 20 GB for `/`, plus a
   Docker volume) lives in `sbx`'s state folder on the system drive, and `sbx` has no setting to move it. A debug build
   of a large dependency tree (fastembed, ONNX Runtime) can fill it: `/tmp/target` reached 17 GB. Keep over 10 GB free
-  before starting a sandbox, run one sandbox at a time unless over 25 GB is free, and delete `/tmp/target` in a
+  before starting a sandbox, run one sandbox at a time unless over 25 GB is free, and delete `$HOME/target` in a
   sandbox you keep. Deleting files inside a sandbox does not return space to the host; removing the sandbox does.
   sbxm checks this for you: `doctor` reports that drive's free space, and `new`, `open` (when it creates or rebuilds),
   `run`, `template build`, `task start`, `task review`, `task run` and `task resume` refuse before writing anything when it is under

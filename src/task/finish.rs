@@ -655,6 +655,42 @@ impl SetAside {
         (self.base_dir.join(rel), self.folder().join(rel))
     }
 
+    /// Removes the task folder the failed replacement kept where the old task goes back, when it
+    /// holds only what a failed warm-up keeps for `task resume` (issue 560, review M-2): a record
+    /// `prepared/failed` whose every sandbox is removed, with no ambiguous create. The old task
+    /// comes back instead (decision 185), and the start's error, printed after, keeps the warm-up's
+    /// output. Anything else there, a record still holding a sandbox above all, is left for
+    /// [`restore`](Self::restore) to refuse.
+    fn clear_failed_start(&self) -> Result<()> {
+        let meta = record::task_dir(&self.base_dir, &self.id);
+        let moved = meta
+            .strip_prefix(&self.base_dir)
+            .is_ok_and(|rel| self.moved.iter().any(|m| m == rel));
+        if !moved
+            || !meta
+                .symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_dir())
+        {
+            return Ok(());
+        }
+        let Ok(task) = record::read(&meta.join("task.json")) else {
+            return Ok(());
+        };
+        let kept_for_resume = (task.stage, task.status)
+            == (record::Stage::Prepared, record::Status::Failed)
+            && task.sandboxes.iter().all(|s| s.removed_at.is_some())
+            && task.ambiguous_create().is_none();
+        if kept_for_resume {
+            fs::remove_dir_all(&meta).with_context(|| {
+                format!(
+                    "cannot remove {}, the failed start's own folder",
+                    meta.display()
+                )
+            })?;
+        }
+        Ok(())
+    }
+
     /// Moves every folder back to where it was, so the old task is exactly as it was before
     /// [`set_aside_many`] moved it aside (its sandboxes are not restored; decision 185 point 2).
     /// If one folder can't move back, whatever was already moved back in this call is moved aside
@@ -731,7 +767,7 @@ impl SetAside {
 /// also fails, the error names both failures and the folder it is still at, so nothing more is
 /// deleted (decision 185 point 4).
 pub fn restore_after_failed_start(aside: &SetAside, start_failed: anyhow::Error) -> anyhow::Error {
-    match aside.restore() {
+    match aside.clear_failed_start().and_then(|()| aside.restore()) {
         Ok(None) => start_failed.context(format!("the old task {} was put back", aside.id())),
         Ok(Some(warning)) => start_failed.context(warning),
         Err(restore_failed) => anyhow::anyhow!(
@@ -1822,6 +1858,23 @@ fn is_ci_path(path: &str) -> bool {
     lower.starts_with(".github/workflows/") || lower.starts_with(".github/actions/")
 }
 
+/// The CI files ([`is_ci_path`]) the task's own commits change. For a task that continues a PR,
+/// those commits can include a merge of the base branch (a resolve), which brings the base's own
+/// CI changes along; a file identical to the base branch's tip in `repo_git` already runs there,
+/// so only one that differs from it counts (issue #569). A task's own edit, addition or deletion
+/// still differs.
+fn ci_changes(task: &Record, repo_git: &Path) -> Result<Vec<String>> {
+    let ci: Vec<String> = task
+        .changed_paths(repo_git)?
+        .into_iter()
+        .filter(|p| is_ci_path(p))
+        .collect();
+    if task.continues.is_none() {
+        return Ok(ci);
+    }
+    repo::paths_differing_from_base(repo_git, &task.base, &task.branch, &ci)
+}
+
 /// The agent's commits are untrusted (decision 127): a same-repo branch that adds or edits a
 /// workflow would run it, with secrets, on the push, before anyone has read it. So `finish`
 /// refuses, naming the files, and the user can review and push the branch by hand if it is meant.
@@ -1930,7 +1983,7 @@ fn open_task_pr(
             task.branch,
         );
     };
-    refuse_workflow_changes(id, &task.changed_paths(&repo_git)?)?;
+    refuse_workflow_changes(id, &ci_changes(&task, &repo_git)?)?;
     if let Some(continued) = &task.continues {
         return finish_continued(prepared, &repo_git, continued, &tip, github, probe);
     }
@@ -2394,7 +2447,7 @@ pub fn finish_fix(
             prepared.meta.display()
         );
     };
-    refuse_workflow_changes(id, &task.changed_paths(&repo_git)?)?;
+    refuse_workflow_changes(id, &ci_changes(&task, &repo_git)?)?;
     let commits = repo::commit_lines(&repo_git, &continued.base, branch)?;
     let review = read_capped(&prepared.meta.join("review.md"))?;
     let unresolved = unresolved_reasons(&task, review.as_deref());
@@ -2555,7 +2608,7 @@ pub fn finish_push(
             }
         }
     }
-    refuse_workflow_changes(id, &prepared.record.changed_paths(repo_git)?)?;
+    refuse_workflow_changes(id, &ci_changes(&prepared.record, repo_git)?)?;
     match repo::remote_branch_head(repo_git, branch)? {
         Some(head) if head == tip => {}
         Some(head) => bail!(

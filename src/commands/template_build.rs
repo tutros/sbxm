@@ -310,7 +310,38 @@ const CARGO_STEPS: [&str; 3] = [
     "cargo clippy --all-targets --locked",
     "cargo test --no-run --locked",
 ];
-const CARGO_STEP_ENV: &str = "CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR=/tmp/target";
+/// Under `$HOME`, never `/tmp` (decision 257, issue 575): `$HOME` is left for the sandbox's shell
+/// to expand.
+const CARGO_STEP_ENV: &str = "CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR=$HOME/target";
+
+/// One step of a warm-up: the name it is announced by, and the command that runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WarmStep {
+    pub name: String,
+    pub command: String,
+}
+
+/// The steps of a warm-up (decision 207): a repo's `[warm]` `commands` as they are, else the
+/// built-in cargo steps in the default gates' environment. `template build --warm` runs them, and
+/// so does a strict cloud sandbox before sbxm's deny (issue 560).
+pub fn warm_steps(commands: Option<&[String]>) -> Vec<WarmStep> {
+    match commands {
+        Some(commands) => commands
+            .iter()
+            .map(|command| WarmStep {
+                name: command.clone(),
+                command: command.clone(),
+            })
+            .collect(),
+        None => CARGO_STEPS
+            .iter()
+            .map(|step| WarmStep {
+                name: (*step).to_owned(),
+                command: format!("{CARGO_STEP_ENV} {step}"),
+            })
+            .collect(),
+    }
+}
 
 /// What `--warm <repo>` warms the template with, checked before any write.
 #[derive(Clone)]
@@ -680,22 +711,16 @@ impl Build {
                 None => Ok(()),
             }
         };
-        if let Some(commands) = &warm.commands {
-            for (i, command) in commands.iter().enumerate() {
-                announce(
-                    warn,
-                    &format!("warm-up {} of {}: {command}", i + 1, commands.len()),
-                )?;
-                run(command.clone())?;
-            }
-            return Ok(());
-        }
-        for (i, step) in CARGO_STEPS.iter().enumerate() {
+        let steps = warm_steps(warm.commands.as_deref());
+        for (i, step) in steps.iter().enumerate() {
             announce(
                 warn,
-                &format!("warm-up {} of {}: {step}", i + 1, CARGO_STEPS.len()),
+                &format!("warm-up {} of {}: {}", i + 1, steps.len(), step.name),
             )?;
-            run(format!("{CARGO_STEP_ENV} {step}"))?;
+            run(step.command.clone())?;
+        }
+        if warm.commands.is_some() {
+            return Ok(());
         }
         announce(warn, "warm-up: cargo metadata --no-deps")?;
         let packages = self.packages(repo, backend, &workdir)?;
