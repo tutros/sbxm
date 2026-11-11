@@ -249,6 +249,16 @@ impl ProcessLock {
     }
 }
 
+/// Whether `<dir>/lock.json` names a process that is still running (issue 579): a resume takes
+/// the lock before it records its own process in `task.json`, so a task whose recorded process
+/// is gone is still being worked on while this is true. A missing or unreadable lock is `false`.
+pub fn held_alive(dir: &Path, probe: &dyn ProcessProbe) -> bool {
+    fs::read_to_string(dir.join(FILE_NAME))
+        .ok()
+        .and_then(|text| serde_json::from_str::<Holder>(&text).ok())
+        .is_some_and(|held| held.process.alive(probe))
+}
+
 /// [`create_new`] of the real file system, for the sandbox slots (decision 304).
 pub(crate) fn create_new_file(path: &Path) -> std::io::Result<fs::File> {
     create_new(path, &RealFiles)
