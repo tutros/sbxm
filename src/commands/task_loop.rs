@@ -508,6 +508,8 @@ struct Loop<'a> {
     /// The medium-risk PRs this run armed that merged: a red `main` on their merge commit is a
     /// break of the trial (answer 3).
     medium_merged: HashSet<u32>,
+    /// The trial comments still to post, tried again at each pass until they are (review M-4).
+    trial_pending: Vec<waiting::Pending>,
     log: PathBuf,
     /// Whether this loop wrote a row to [`log`](Self::log): only then is it posted.
     logged: bool,
@@ -922,7 +924,8 @@ impl Loop<'_> {
         Ok(())
     }
 
-    /// Waits while [`PR_CAP`] PRs await the user. `false`: the user asked to stop meanwhile.
+    /// Waits while [`PR_CAP`] PRs await the user, checking the runs and the waiting PRs at each
+    /// poll. `false`: the user asked to stop meanwhile.
     fn wait_for_prs(&mut self, out: &mut dyn Write, warn: &mut dyn Write) -> Result<bool> {
         let mut since = None;
         loop {
@@ -950,6 +953,11 @@ impl Loop<'_> {
             if (self.env.stop_requested)() {
                 return Ok(false);
             }
+            // Issue 550 (review M-2): no task runs while the loop waits here, so each poll is a
+            // check between tasks: the runs first (a red `main` pauses), then the waiting PRs,
+            // whose windows and real checks may arm some and end the wait.
+            self.check_runs(out, warn)?;
+            self.recheck_waiting(out, warn)?;
         }
     }
 
@@ -1934,7 +1942,7 @@ impl Loop<'_> {
             pr_named = self.pr_named(number)
         )?;
         if armed {
-            if let Err(e) = self.github.pr_disarm_auto_merge(&self.repo, number) {
+            if let Err(e) = self.disarm(number) {
                 return self.warn_once(
                     warn,
                     format!(
@@ -2089,6 +2097,18 @@ impl Loop<'_> {
         })
     }
 
+    /// Disarms PR `number`'s auto-merge for one of the loop's own reasons (a push, a pause, a
+    /// failed run, `hold`), and forgets what this run kept of its arming (issue 550, review M-1
+    /// and M-3): its trial record, and the head the step that re-checks waiting PRs won't arm
+    /// again, so a later guarded arming starts afresh. Every disarm of the loop goes through it.
+    fn disarm(&mut self, number: u32) -> Result<()> {
+        self.github.pr_disarm_auto_merge(&self.repo, number)?;
+        self.armed.remove(&number);
+        self.medium_armed.remove(&number);
+        self.armed_heads.retain(|(n, _)| *n != number);
+        Ok(())
+    }
+
     /// A task's record by its id.
     fn record_of(&self, id: &str) -> Option<Record> {
         record::read(&record::task_dir(&self.base_dir, id).join("task.json")).ok()
@@ -2173,6 +2193,18 @@ impl Loop<'_> {
                 pr_named = self.pr_named(number)
             )?;
             return refused(self, Some(&format!("risk {}", review.risk.word())), out);
+        }
+        // Issue 550 (review M-1): a low-risk fix doesn't clear the medium risk its PR's history
+        // left; only its veto window arms it, from this review of the new head, under every
+        // medium rule (the step that re-checks waiting PRs, later in this pass).
+        if risk == Level::Medium {
+            let why = "risk medium; only its veto window arms it, from this review";
+            writeln!(
+                out,
+                "{pr_named} awaits you after its {what}: {why}",
+                pr_named = self.pr_named(number)
+            )?;
+            return refused(self, Some(why), out);
         }
         if not_run.is_some() {
             return refused(self, None, out);
@@ -2356,7 +2388,7 @@ impl Loop<'_> {
                     self.armed.remove(&number);
                     self.watch(commit, Some(number));
                     if let Some(armed) = self.medium_armed.remove(&number) {
-                        self.record_trial_merge(number, armed, warn)?;
+                        self.record_trial_merge(number, armed);
                     }
                 }
                 Ok(None) => {}
@@ -2408,7 +2440,8 @@ impl Loop<'_> {
                 self.watched.retain(|w| w.commit != commit);
             }
         }
-        Ok(())
+        // The trial's comments these merges and pauses made, and any a failure left (M-4).
+        self.post_trial_pending(warn)
     }
 
     /// Adds `commit` to the commits of `main` read at every pass, once; `pr`: the PR this run
@@ -2495,7 +2528,7 @@ impl Loop<'_> {
         self.paused_for.insert((commit.to_owned(), run.id));
         self.say_once(out, paused_line(&pause))?;
         if let Some(number) = pr.filter(|n| self.medium_merged.contains(n)) {
-            self.record_trial_break(number, &pause.describe(), warn)?;
+            self.record_trial_break(number, &pause.describe());
         }
         // (d) of issue 530: once per commit of `main`.
         let note = Notification {
@@ -2536,9 +2569,8 @@ impl Loop<'_> {
             }
             let mut armed = state.auto_merge;
             if armed && paused {
-                match self.github.pr_disarm_auto_merge(&self.repo, number) {
+                match self.disarm(number) {
                     Ok(()) => {
-                        self.armed.remove(&number);
                         armed = false;
                         writeln!(
                             out,
@@ -2588,7 +2620,7 @@ impl Loop<'_> {
             // One log-fix per PR, ever (decision 300): tried before the PR is left to the user.
             let log_fix = !self.log_fixed.contains(&number) && !self.has_log_fix(number);
             if armed {
-                if let Err(e) = self.github.pr_disarm_auto_merge(&self.repo, number) {
+                if let Err(e) = self.disarm(number) {
                     self.warn_once(
                         warn,
                         format!(
@@ -2600,7 +2632,6 @@ impl Loop<'_> {
                     )?;
                     continue;
                 }
-                self.armed.remove(&number);
                 if log_fix {
                     self.disarmed_for_log_fix.insert(number);
                 }
@@ -3386,6 +3417,7 @@ fn run_loop(
         ci_left: HashSet::new(),
         medium_armed: HashMap::new(),
         medium_merged: HashSet::new(),
+        trial_pending: Vec::new(),
         log,
         logged: false,
         notify,

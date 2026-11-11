@@ -433,10 +433,8 @@ impl Loop<'_> {
         if window::find_label(&labels, window::HOLD_LABEL).is_none() {
             return Ok(());
         }
-        match self.github.pr_disarm_auto_merge(&self.repo, number) {
+        match self.disarm(number) {
             Ok(()) => {
-                self.armed.remove(&number);
-                self.medium_armed.remove(&number);
                 writeln!(
                     out,
                     "{pr_named}: auto-merge disarmed: labelled `{}`",
@@ -461,70 +459,120 @@ impl Loop<'_> {
         }
     }
 
-    /// Posts the trial's merge comment for medium-risk PR `number`, which this run armed as
-    /// `armed` and GitHub merged (answer 2). Anything that can't be read or posted is a warning.
-    pub(super) fn record_trial_merge(
-        &mut self,
-        number: u32,
-        armed: Armed,
-        warn: &mut dyn Write,
-    ) -> Result<()> {
+    /// Keeps the trial's merge comment for medium-risk PR `number`, which this run armed as
+    /// `armed` and GitHub merged (answer 2), to post with the others pending.
+    pub(super) fn record_trial_merge(&mut self, number: u32, armed: Armed) {
         self.medium_merged.insert(number);
-        let holds = match self.github.label_events(&self.repo, number) {
-            Ok(events) => trial::holds(&events),
-            Err(e) => {
-                self.warn_once(
-                    warn,
-                    format!(
-                        "{pr_named}'s label history can't be read ({e:#}); its trial comment \
-                         counts 0 holds",
-                        pr_named = self.pr_named(number)
-                    ),
-                )?;
-                0
-            }
-        };
-        let merged_at = match self.github.pr_merged_at(&self.repo, number) {
-            Ok(Some(at)) => at,
-            _ => self.now(),
-        };
-        let body = trial::merge_comment(&Merge {
-            pr: number,
-            armed,
-            holds,
-            merged_at,
-        });
-        self.post_trial(&body, &format!("the merge of PR #{number}"), warn)
+        self.trial_pending.push(Pending::Merge(number, armed));
     }
 
-    /// Posts the trial's break comment for a red `main` after the medium auto-merge of PR
-    /// `number` (answer 3), `what` naming the red run.
-    pub(super) fn record_trial_break(
-        &mut self,
-        number: u32,
-        what: &str,
-        warn: &mut dyn Write,
-    ) -> Result<()> {
+    /// Keeps the trial's break comment for a red `main` after the medium auto-merge of PR
+    /// `number` (answer 3), `what` naming the red run, to post with the others pending.
+    pub(super) fn record_trial_break(&mut self, number: u32, what: &str) {
         let body = trial::break_comment(&format!(
             "main went red after the medium auto-merge of PR #{number}: {what}"
         ));
-        self.post_trial(&body, &format!("the break after PR #{number}"), warn)
+        self.trial_pending.push(Pending::Break(number, body));
     }
 
-    fn post_trial(&mut self, body: &str, what: &str, warn: &mut dyn Write) -> Result<()> {
-        match trial::post(self.github, &self.repo, body) {
-            Ok(Some(_)) => Ok(()),
-            Ok(None) => self.warn_once(
-                warn,
-                format!(
-                    "no open issue is labelled {}, so {what} isn't recorded there",
-                    trial::LABEL
-                ),
-            ),
-            Err(e) => self.warn_once(
-                warn,
-                format!("{what} could not be recorded on the medium trial's issue: {e:#}"),
-            ),
+    /// Posts every pending trial comment it can, oldest first (review M-4): one whose reads or
+    /// post fail stays pending, with a warning, and is tried again at the next pass; one already
+    /// on the trial's issue (a post whose answer was lost) isn't posted again. With no open
+    /// trial issue nothing is posted, said once, and the comments are dropped (answer 2).
+    pub(super) fn post_trial_pending(&mut self, warn: &mut dyn Write) -> Result<()> {
+        let pending = std::mem::take(&mut self.trial_pending);
+        for record in pending {
+            if !self.post_one(&record, warn)? {
+                self.trial_pending.push(record);
+            }
+        }
+        Ok(())
+    }
+
+    /// `true` once `record` is done with: posted, found posted, or with nowhere to go.
+    fn post_one(&mut self, record: &Pending, warn: &mut dyn Write) -> Result<bool> {
+        let (number, what) = match record {
+            Pending::Merge(number, _) => (*number, format!("the merge of PR #{number}")),
+            Pending::Break(number, _) => (*number, format!("the break after PR #{number}")),
+        };
+        let issue = match trial::open_issue(self.github, &self.repo) {
+            Ok(Some(issue)) => issue,
+            Ok(None) => {
+                self.warn_once(
+                    warn,
+                    format!(
+                        "no open issue is labelled {}, so {what} isn't recorded there",
+                        trial::LABEL
+                    ),
+                )?;
+                return Ok(true);
+            }
+            Err(why) => return self.not_yet(&what, &why, warn),
+        };
+        let bodies = match self.github.issue_comment_bodies(&self.repo, issue) {
+            Ok(bodies) => bodies,
+            Err(e) => return self.not_yet(&what, &format!("{e:#}"), warn),
+        };
+        let body = match record {
+            Pending::Merge(_, armed) => {
+                if trial::has_merge_of(&bodies, number) {
+                    return Ok(true);
+                }
+                let holds = match self.github.label_events(&self.repo, number) {
+                    Ok(events) => trial::holds(&events),
+                    Err(e) => {
+                        let why = format!("its label history can't be read: {e:#}");
+                        return self.not_yet(&what, &why, warn);
+                    }
+                };
+                let merged_at = match self.github.pr_merged_at(&self.repo, number) {
+                    Ok(Some(at)) => at,
+                    Ok(None) => {
+                        return self.not_yet(&what, "GitHub gives no merge time yet", warn);
+                    }
+                    Err(e) => {
+                        let why = format!("its merge time can't be read: {e:#}");
+                        return self.not_yet(&what, &why, warn);
+                    }
+                };
+                trial::merge_comment(&Merge {
+                    pr: number,
+                    armed: *armed,
+                    holds,
+                    merged_at,
+                })
+            }
+            Pending::Break(_, body) => {
+                if bodies.iter().any(|b| b == body) {
+                    return Ok(true);
+                }
+                body.clone()
+            }
+        };
+        match self.github.issue_comment(&self.repo, issue, &body) {
+            Ok(_) => Ok(true),
+            Err(e) => self.not_yet(&what, &format!("{e:#}"), warn),
         }
     }
+
+    /// A pending trial comment that waits for the next pass, `why` said once.
+    fn not_yet(&mut self, what: &str, why: &str, warn: &mut dyn Write) -> Result<bool> {
+        self.warn_once(
+            warn,
+            format!(
+                "{what} could not be recorded on the medium trial's issue yet ({why}); tried again \
+                 at the next pass"
+            ),
+        )?;
+        Ok(false)
+    }
+}
+
+/// A trial comment waiting to be posted (review M-4): kept in memory for the run, as what the
+/// trial records of an arming is.
+pub(super) enum Pending {
+    /// A medium PR this run armed that merged, as it was armed.
+    Merge(u32, Armed),
+    /// A red `main` after one's merge: the PR and the comment.
+    Break(u32, String),
 }

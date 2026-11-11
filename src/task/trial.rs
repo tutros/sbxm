@@ -94,6 +94,14 @@ pub fn merges(bodies: &[String]) -> usize {
         .count()
 }
 
+/// Whether one of `bodies` is the merge comment of PR `pr`, whoever posted it.
+pub fn has_merge_of(bodies: &[String], pr: u32) -> bool {
+    let line = format!("{MERGE_MARK} of PR #{pr}");
+    bodies
+        .iter()
+        .any(|body| body.lines().next().map(str::trim) == Some(line.as_str()))
+}
+
 /// Whether `merges` merge comments end the trial.
 pub fn full(merges: usize) -> bool {
     merges >= SIZE
@@ -135,7 +143,7 @@ impl Trial {
 /// Reads the trial: the oldest open issue labelled [`LABEL`] and its merge comments. Why it can't
 /// be read otherwise.
 pub fn read(github: &dyn GitHubBackend, repo: &str) -> Result<Trial, String> {
-    let Some(issue) = issue(github, repo)? else {
+    let Some(issue) = open_issue(github, repo)? else {
         return Ok(Trial::NoIssue);
     };
     let bodies = github.issue_comment_bodies(repo, issue).map_err(|e| {
@@ -152,14 +160,15 @@ pub fn read(github: &dyn GitHubBackend, repo: &str) -> Result<Trial, String> {
 
 /// Posts `body` on the trial's issue; `None` when there is none open.
 pub fn post(github: &dyn GitHubBackend, repo: &str, body: &str) -> anyhow::Result<Option<u32>> {
-    let Some(issue) = issue(github, repo).map_err(anyhow::Error::msg)? else {
+    let Some(issue) = open_issue(github, repo).map_err(anyhow::Error::msg)? else {
         return Ok(None);
     };
     github.issue_comment(repo, issue, body)?;
     Ok(Some(issue))
 }
 
-fn issue(github: &dyn GitHubBackend, repo: &str) -> Result<Option<u32>, String> {
+/// The oldest open issue labelled [`LABEL`]; `None` when none is open, why otherwise.
+pub fn open_issue(github: &dyn GitHubBackend, repo: &str) -> Result<Option<u32>, String> {
     let issues = github.issues_open_labeled(repo, LABEL).map_err(|e| {
         format!(
             "the open issue labelled {LABEL} can't be listed: {}",

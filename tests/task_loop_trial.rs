@@ -21,8 +21,8 @@ use common::task_fixture::{Probe, issue_text};
 use sbxm::commands::task_loop::{self, Env, Options, Steps};
 use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::github::{
-    CommitStatus, GitHubBackend, Issue, LabelEvent, PostedStatus, PrFile, PrFiles, PrInfo, PrState,
-    RunStatus, StatusState, WorkflowRun,
+    CommitStatus, GitHubBackend, Issue, LabelEvent, Mergeable, PostedStatus, PrFile, PrFiles,
+    PrInfo, PrState, RunStatus, StatusState, WorkflowRun,
 };
 use sbxm::notify::FakeNotifier;
 use sbxm::task::loop_pause::{self, MediumPause};
@@ -242,6 +242,18 @@ fn run_passes(
     passes: usize,
     between: &dyn Fn(usize),
 ) -> Ran {
+    run_with(f, gh, notifier, passes, between, &Script)
+}
+
+/// [`run_passes`] with the phases `steps`.
+fn run_with(
+    f: &Fixture,
+    gh: &FakeGitHub,
+    notifier: &FakeNotifier,
+    passes: usize,
+    between: &dyn Fn(usize),
+    steps: &dyn Steps,
+) -> Ran {
     let clock = Cell::new(START);
     let sleeps = Cell::new(0usize);
     let now = || clock.get();
@@ -267,7 +279,7 @@ fn run_passes(
     let result = task_loop::run_notifying(
         &f.env.config_dir(),
         &opts,
-        &Script,
+        steps,
         gh,
         &Probe,
         &env,
@@ -1003,4 +1015,355 @@ fn a_medium_pr_in_its_window_gets_only_the_windows_toast_after_its_real_check_pa
     let titles: Vec<String> = notifier.shown().iter().map(|n| n.title.clone()).collect();
     assert_eq!(titles.len(), 1, "{titles:?}");
     assert!(titles[0].starts_with("PR #120 arms at"), "{titles:?}");
+}
+
+// --- Review of issue 550 ---
+
+/// Plays `task fix --pr N` (a resolve) and `task fix --pr N --check-run <id>` (a log-fix): a
+/// clean low-risk fix whose review covers [`PUSHED`], pushed onto the PR.
+struct Fixer<'a> {
+    gh: &'a FakeGitHub,
+    base: PathBuf,
+}
+
+impl Fixer<'_> {
+    fn push(&self, pr: u32, log: bool) -> Result<()> {
+        let head = self.gh.pr(REPO, pr)?.head_oid;
+        let id = record::fix_id(pr, &head).unwrap();
+        let dir = record::task_dir(&self.base, &id);
+        let mut rec = Record::new(
+            &NewTask {
+                kind: Kind::Fix,
+                number: pr,
+                repo: REPO,
+                title: &format!("Fix {pr}"),
+                base: "main",
+                branch: &format!("b{pr}"),
+                config_hash: "h",
+                id: Some(&id),
+            },
+            START,
+            Process::new(1, 0),
+        );
+        rec.stage = Stage::Finished;
+        rec.status = Status::Ok;
+        rec.review = Some(ReviewResult {
+            round: 1,
+            commit: Some(PUSHED.to_owned()),
+            must_fix: 0,
+            risk: Level::Low,
+            not_run: Some(Vec::new()),
+            ..ReviewResult::default()
+        });
+        record::write(&dir, &rec).unwrap();
+        if log {
+            fs::write(dir.join("check-log.md"), "Failed run 7 (ci): ...\n").unwrap();
+        }
+        self.gh.set_pr_head(pr, PUSHED);
+        self.gh.set_mergeable(pr, Mergeable::Mergeable);
+        Ok(())
+    }
+}
+
+impl Steps for Fixer<'_> {
+    fn run(&self, issue: u32, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+        Err(anyhow!("unexpected run of {issue}"))
+    }
+    fn resume(&self, issue: u32, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+        Err(anyhow!("unexpected resume of {issue}"))
+    }
+    fn finish(&self, issue: u32, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+        Err(anyhow!("unexpected finish of {issue}"))
+    }
+    fn file_findings(&self, _: u32, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+        Ok(())
+    }
+    fn fix_pr(&self, pr: u32, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+        self.push(pr, false)
+    }
+    fn fix_check(&self, pr: u32, _: u64, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+        self.push(pr, true)
+    }
+    fn rm_merged(&self, _: &mut dyn Write, _: &mut dyn Write) -> Result<()> {
+        Ok(())
+    }
+    fn room(&self) -> Result<()> {
+        Ok(())
+    }
+}
+
+fn failed_twice() -> Vec<WorkflowRun> {
+    vec![WorkflowRun {
+        id: 7,
+        workflow: "ci".into(),
+        attempt: 2,
+        status: RunStatus::Failed,
+        url: "https://run/7".into(),
+        actor: "me".into(),
+    }]
+}
+
+/// PR #120 armed at its window's end in the first pass; then `push` makes the loop push a
+/// clean low-risk fix onto it, whose review of [`PUSHED`] was posted at `pushed_review_at`;
+/// `before` runs first. Returns the run and every arming call.
+fn armed_then_fixed(
+    push: &dyn Fn(&FakeGitHub),
+    pushed_review_at: u64,
+    before: &dyn Fn(&Fixture),
+) -> (Ran, Vec<GhCall>) {
+    let f = fixture();
+    f.medium_pr();
+    let gh = github(&[20], HEAD, 0, START - 3 * WINDOW)
+        .with_statuses(PUSHED, reviewed_at(pushed_review_at));
+    let fixer = Fixer {
+        gh: &gh,
+        base: f.base(),
+    };
+    let ran = run_with(
+        &f,
+        &gh,
+        &FakeNotifier::default(),
+        2,
+        &|pass| {
+            if pass == 1 {
+                before(&f);
+                push(&gh);
+            }
+        },
+        &fixer,
+    );
+    let arms = arms(&gh);
+    (ran, arms)
+}
+
+fn conflicts(gh: &FakeGitHub) {
+    gh.set_mergeable(PR, Mergeable::Conflicting);
+}
+
+fn ci_fails(gh: &FakeGitHub) {
+    gh.set_runs(HEAD, failed_twice());
+}
+
+#[test]
+fn a_resolve_of_a_medium_pr_waits_for_the_new_heads_window() {
+    let (ran, arms) = armed_then_fixed(&conflicts, START + 300, &|_| {});
+    ran.result.unwrap();
+    assert!(ran.out.contains("disarmed for the resolve"), "{}", ran.out);
+    assert_eq!(arms, [armed(PR)], "{}", ran.out);
+}
+
+#[test]
+fn a_log_fix_of_a_medium_pr_waits_for_the_new_heads_window() {
+    let (ran, arms) = armed_then_fixed(&ci_fails, START + 300, &|_| {});
+    ran.result.unwrap();
+    assert!(
+        ran.out.contains("fixing it once from the run's log"),
+        "{}",
+        ran.out
+    );
+    assert_eq!(arms, [armed(PR)], "{}", ran.out);
+}
+
+fn medium_paused(f: &Fixture) {
+    loop_pause::write_medium(
+        &f.base(),
+        &MediumPause {
+            why: "a break".into(),
+            at: "t".into(),
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_resolve_of_a_medium_pr_obeys_the_medium_pause() {
+    // The new head's window is over already: only the pause holds it.
+    let (ran, arms) = armed_then_fixed(&conflicts, START - 3 * WINDOW, &medium_paused);
+    ran.result.unwrap();
+    assert_eq!(arms, [armed(PR)], "{}", ran.out);
+}
+
+#[test]
+fn a_log_fix_of_a_medium_pr_obeys_the_medium_pause() {
+    let (ran, arms) = armed_then_fixed(&ci_fails, START - 3 * WINDOW, &medium_paused);
+    ran.result.unwrap();
+    assert_eq!(arms, [armed(PR)], "{}", ran.out);
+}
+
+#[test]
+fn a_resolved_medium_pr_is_armed_on_its_new_head_once_its_window_is_over() {
+    let (ran, arms) = armed_then_fixed(&conflicts, START - 3 * WINDOW, &|_| {});
+    ran.result.unwrap();
+    assert_eq!(
+        arms,
+        [
+            armed(PR),
+            GhCall::PrArmAutoMerge(REPO.into(), PR, PUSHED.into())
+        ],
+        "{}",
+        ran.out
+    );
+}
+
+/// Five medium PRs, #120 to #124, whose windows end 1 second after the loop's start.
+fn five_waiting() -> (Fixture, FakeGitHub) {
+    let f = fixture();
+    for issue in 20..25 {
+        f.loop_pr(issue, Level::Medium, "Do it.\n");
+    }
+    let gh = github(&[20, 21, 22, 23, 24], HEAD, 0, START - WINDOW + 1);
+    (f, gh)
+}
+
+#[test]
+fn five_waiting_prs_are_rechecked_while_the_loop_waits_at_the_cap() {
+    let (f, gh) = five_waiting();
+
+    let ran = run_passes(&f, &gh, &FakeNotifier::default(), 3, &|_| {});
+
+    ran.result.unwrap();
+    assert!(ran.out.contains("5 PRs await you"), "{}", ran.out);
+    assert_eq!(arms(&gh).len(), 5, "{}", ran.out);
+}
+
+#[test]
+fn a_real_check_that_passes_during_the_cap_wait_arms_its_pr() {
+    let f = fixture();
+    for issue in 20..25 {
+        f.loop_pr(issue, Level::High, "Do it.\n");
+    }
+    f.loop_pr(25, Level::Low, "**Real check:** run it\n");
+    let gh = github(&[20, 21, 22, 23, 24, 25], HEAD, 0, START);
+
+    let ran = run_passes(&f, &gh, &FakeNotifier::default(), 3, &|pass| {
+        if pass == 1 {
+            real_check_passed(&gh, HEAD);
+        }
+    });
+
+    ran.result.unwrap();
+    assert!(ran.out.contains("PRs await you"), "{}", ran.out);
+    assert_eq!(arms(&gh), [armed(125)], "{}", ran.out);
+}
+
+#[test]
+fn removing_hold_and_adding_go_arms_the_same_head_again() {
+    let f = fixture();
+    f.medium_pr();
+    let gh = github(&[20], HEAD, 0, START - 3 * WINDOW);
+
+    let ran = run_passes(&f, &gh, &FakeNotifier::default(), 3, &|pass| match pass {
+        1 => label(&gh, &["hold"]),
+        2 => label(&gh, &["go"]),
+        _ => {}
+    });
+
+    ran.result.unwrap();
+    assert!(ran.out.contains("disarmed: labelled `hold`"), "{}", ran.out);
+    assert_eq!(arms(&gh), [armed(PR), armed(PR)], "{}", ran.out);
+}
+
+/// PR #120 armed at its window's end in pass 1 and merged before pass 2; `fail(pass, gh)` sets
+/// which GitHub calls fail in each later pass.
+fn merged_with_failures(passes: usize, fail: &dyn Fn(usize, &FakeGitHub)) -> (Ran, FakeGitHub) {
+    let f = fixture();
+    f.medium_pr();
+    let review_at = START - WINDOW - 600;
+    let gh = github(&[20], HEAD, 0, review_at);
+    gh.set_label_events(PR, vec![hold(true), hold(false)]);
+    let ran = run_passes(&f, &gh, &FakeNotifier::default(), passes, &|pass| {
+        if pass == 1 {
+            gh.set_merged(PR, MERGED);
+            gh.set_merged_at(PR, START + 1_800);
+        }
+        fail(pass, &gh);
+    });
+    (ran, gh)
+}
+
+#[test]
+fn a_failed_trial_post_is_tried_again_and_posted_once() {
+    let (ran, gh) = merged_with_failures(3, &|pass, gh| {
+        gh.set_issue_comments_failing(TRIAL, pass == 1);
+    });
+    ran.result.unwrap();
+    let comments = gh.issue_comments_now(TRIAL);
+    assert_eq!(trial::merges(&comments), 1, "{comments:?}\n{}", ran.out);
+    assert!(comments[0].contains("- holds: 1\n"), "{comments:?}");
+    assert!(
+        comments[0].contains("- clean review to merge: 160 min"),
+        "{comments:?}"
+    );
+}
+
+#[test]
+fn an_unreadable_label_history_is_read_again_instead_of_counting_zero_holds() {
+    let (ran, gh) = merged_with_failures(3, &|pass, gh| {
+        gh.set_label_events_failure((pass == 1).then_some("HTTP 502"));
+    });
+    ran.result.unwrap();
+    let comments = gh.issue_comments_now(TRIAL);
+    assert_eq!(comments.len(), 1, "{comments:?}\n{}", ran.out);
+    assert!(comments[0].contains("- holds: 1\n"), "{comments:?}");
+}
+
+#[test]
+fn a_merge_comment_already_posted_for_the_pr_is_not_posted_again() {
+    // An earlier post went through but its answer was lost: the comment is on the issue, and the
+    // loop's record of it still pending.
+    let (ran, gh) = merged_with_failures(3, &|pass, gh| match pass {
+        1 => gh.set_issue_comments_failing(TRIAL, true),
+        2 => {
+            gh.set_issue_comments_failing(TRIAL, false);
+            let posted = trial::merge_comment(&Merge {
+                pr: PR,
+                armed: Armed {
+                    how: How::WindowEnd,
+                    late_min: 10,
+                    review_at: START - WINDOW - 600,
+                },
+                holds: 1,
+                merged_at: START + 1_800,
+            });
+            gh.issue_comment(REPO, TRIAL, &posted).unwrap();
+        }
+        _ => {}
+    });
+    ran.result.unwrap();
+    assert_eq!(gh.issue_comments_now(TRIAL).len(), 1, "{}", ran.out);
+}
+
+#[test]
+fn a_tenth_merge_recorded_after_a_failure_stops_medium_arming() {
+    let f = fixture();
+    f.medium_pr();
+    f.loop_pr(21, Level::Medium, "Do it.\n");
+    let gh = github(&[20, 21], HEAD, 9, START - 3 * WINDOW);
+    gh.set_pr_labels(121, &["hold"]);
+
+    let ran = run_passes(&f, &gh, &FakeNotifier::default(), 4, &|pass| match pass {
+        1 => {
+            gh.set_merged(PR, MERGED);
+            gh.set_merged_at(PR, START + 600);
+            gh.set_issue_comments_failing(TRIAL, true);
+        }
+        2 => gh.set_issue_comments_failing(TRIAL, false),
+        3 => gh.set_pr_labels(121, &["go"]),
+        _ => {}
+    });
+
+    ran.result.unwrap();
+    assert_eq!(
+        trial::merges(&gh.issue_comments_now(TRIAL)),
+        10,
+        "{}",
+        ran.out
+    );
+    assert_eq!(arms(&gh), [armed(PR)], "{}", ran.out);
+    assert!(
+        ran.out
+            .contains("PR #121 (Fix 21) awaits you: risk medium; the medium trial has its 10"),
+        "{}",
+        ran.out
+    );
 }

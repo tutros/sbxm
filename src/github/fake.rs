@@ -100,7 +100,7 @@ pub struct FakeGitHub {
     /// The id the next `issue_comment` returns; 1 when not scripted.
     next_comment_id: Mutex<u64>,
     /// The issues whose `issue_comment` fails.
-    failing_issue_comments: Vec<u32>,
+    failing_issue_comments: Mutex<Vec<u32>>,
     failing_comment_edits: bool,
     status_failure: Option<String>,
     /// The statuses `commit_status` posted, by commit, oldest first: what `commit_status_state`
@@ -129,6 +129,7 @@ pub struct FakeGitHub {
     issue_comments_failure: Option<String>,
     /// What `label_events` answers, by PR; none for a PR not scripted.
     label_events: Mutex<Vec<(u32, Vec<LabelEvent>)>>,
+    label_events_failure: Mutex<Option<String>>,
     /// What `pr_merged_at` answers, by PR; not merged when not scripted.
     merged_at: Mutex<Vec<(u32, u64)>>,
     calls: Mutex<Vec<GhCall>>,
@@ -347,8 +348,8 @@ impl FakeGitHub {
     }
 
     /// `issue_comment` on issue `number` fails (and is still recorded).
-    pub fn failing_issue_comments_on(mut self, number: u32) -> Self {
-        self.failing_issue_comments.push(number);
+    pub fn failing_issue_comments_on(self, number: u32) -> Self {
+        self.set_issue_comments_failing(number, true);
         self
     }
 
@@ -419,6 +420,20 @@ impl FakeGitHub {
             .filter(|(n, _)| *n == number)
             .map(|(_, body)| body.clone())
             .collect()
+    }
+
+    /// From now on `issue_comment` on issue `number` fails, or no longer does (issue 550).
+    pub fn set_issue_comments_failing(&self, number: u32, failing: bool) {
+        let mut all = self.failing_issue_comments.lock().unwrap();
+        all.retain(|n| *n != number);
+        if failing {
+            all.push(number);
+        }
+    }
+
+    /// From now on `label_events` fails with `message`, or no longer does (issue 550).
+    pub fn set_label_events_failure(&self, message: Option<&str>) {
+        *self.label_events_failure.lock().unwrap() = message.map(str::to_owned);
     }
 
     /// Only `issue_comment_bodies` fails (and is still recorded).
@@ -663,7 +678,12 @@ impl GitHubBackend for FakeGitHub {
             number,
             body.to_owned(),
         ))?;
-        if self.failing_issue_comments.contains(&number) {
+        if self
+            .failing_issue_comments
+            .lock()
+            .unwrap()
+            .contains(&number)
+        {
             return Err(anyhow!("FakeGitHub: the comment on issue {number} fails"));
         }
         self.issue_comments
@@ -928,6 +948,9 @@ impl GitHubBackend for FakeGitHub {
 
     fn label_events(&self, repo: &str, number: u32) -> Result<Vec<LabelEvent>> {
         self.record(GhCall::LabelEvents(repo.to_owned(), number))?;
+        if let Some(message) = self.label_events_failure.lock().unwrap().as_ref() {
+            return Err(anyhow!("{message}"));
+        }
         Ok(self
             .label_events
             .lock()
