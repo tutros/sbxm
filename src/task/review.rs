@@ -147,6 +147,21 @@ pub fn pr_comment(number: u32, risk_section: &str, review: &str) -> String {
 /// ruleset can require.
 pub const STATUS_CONTEXT: &str = "sbxm/review";
 
+/// Whether a head a recorded review covered still counts as reviewed (issue 586): only when that
+/// review's `sbxm/review` status is on it. `None` when there is none, so the head is reviewed
+/// again with no `--force`; else what the refusal adds after "already reviewed at `<head>`",
+/// empty for a posted status and naming the error when it couldn't be read (never a silent
+/// re-review).
+pub fn still_reviewed(github: &dyn GitHubBackend, repo: &str, head: &str) -> Option<String> {
+    match github.commit_status_state(repo, head, STATUS_CONTEXT) {
+        Ok(None) => None,
+        Ok(Some(_)) => Some(String::new()),
+        Err(e) => Some(format!(
+            " (its `{STATUS_CONTEXT}` status could not be read: {e:#})"
+        )),
+    }
+}
+
 /// GitHub's limit on a commit status's description, in characters.
 pub const STATUS_DESCRIPTION_CAP: usize = 140;
 

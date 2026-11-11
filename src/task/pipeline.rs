@@ -3911,7 +3911,8 @@ pub fn check_can_review_pr(task: &Record, probe: &dyn ProcessProbe) -> Result<()
 /// posted; a failed post keeps the saved review and says how to post it by hand.
 ///
 /// A task left `ready` by an earlier round is reviewed again (issue 195, gap G34): refused while
-/// the PR's head is still the commit that round's review covered, unless `force`. That refusal,
+/// the PR's head is still the commit that round's review covered and that review's `sbxm/review`
+/// status is on it (or can't be read; issue 586), unless `force`. That refusal,
 /// the reviewer's checks and the fetch of the PR's new head all happen before anything is
 /// written, so a refused attempt or a failed fetch leaves `issue.md`, `review.md` and `task.json`
 /// as they were (only the fetched ref in `repo.git` moves). Once it proceeds,
@@ -3973,9 +3974,13 @@ pub fn review_pr(
             .review
             .as_ref()
             .and_then(|r| r.commit.as_deref());
-        if !force && reviewed == Some(head.as_str()) {
+        if !force
+            && reviewed == Some(head.as_str())
+            && let Some(unread) = review::still_reviewed(github, &prepared.record.repo, &head)
+        {
             bail!(
-                "PR #{number} is already reviewed at `{head}`; to review it again anyway, run `{}`",
+                "PR #{number} is already reviewed at `{head}`{unread}; to review it again anyway, \
+                 run `{}`",
                 review::review_pr_command(
                     number,
                     &prepared.record.repo,

@@ -99,6 +99,10 @@ Decisions 272 onwards: `sdlc/decisions/`. New decisions go there too, each as a 
 
 Decisions 316: `sdlc/decisions/` (issue #460's planning interview).
 
+## Round 18: local and cloud tasks at once (2026-11-11)
+
+Decision 317: `sdlc/decisions/` (issue #561's planning interview; evidence from #390).
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.

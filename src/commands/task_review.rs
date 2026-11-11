@@ -567,7 +567,8 @@ fn run_pr(
         check_base(base)?;
     }
     // Issue 198: a head the local issue task's in-task review covered has its review already.
-    // Only the task folders on this machine decide; nothing on GitHub but the head is read.
+    // Only the task folders on this machine decide which commit that is; on GitHub only the head
+    // and its `sbxm/review` status are read (issue 586: a review with no status counts as none).
     let mut pr_info = None;
     if !opts.force
         && let Some((task, commit)) = finish::reviewed_pr_task(&base_dir, &repo_name, number)
@@ -575,9 +576,11 @@ fn run_pr(
         let pr = github.pr(&repo_name, number)?;
         // Issue 229: a closed, merged or fork PR is refused as such, never with a `--force` hint.
         pipeline::check_pr_reviewable(&pr, &repo_name)?;
-        if pr.head_oid == commit {
+        if pr.head_oid == commit
+            && let Some(unread) = review::still_reviewed(github, &repo_name, &commit)
+        {
             bail!(
-                "PR #{number} is already reviewed at `{commit}`: its head is the commit task \
+                "PR #{number} is already reviewed at `{commit}`{unread}: its head is the commit task \
                  {task}'s in-task review covered, which `sbxm task finish` posted as the PR's \
                  review; to review it again anyway, run `{}`",
                 review::review_pr_command(number, &repo_name, opts.base.as_deref(), true)

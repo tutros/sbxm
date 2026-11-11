@@ -1382,7 +1382,7 @@ pub fn pr_body_referring(
     }
     let mut cuts: Vec<String> = risk_cut.into_iter().collect();
     for name in HANDBACK_SECTIONS {
-        let Some(text) = result.and_then(|r| handback_section(r, name)) else {
+        let Some(text) = result.and_then(|r| handback_shown(r, name)) else {
             continue;
         };
         let text = defang(&text);
@@ -1449,12 +1449,36 @@ pub fn handed_back(result: &str) -> Option<String> {
     handback_section(result, "Needs a decision")
 }
 
-/// The text of `result`'s section called `name` (issue 220, decision 283): under a heading of any
-/// level whose text is `name` in any case, with bold or italic marks and a trailing colon allowed
-/// (`## Needs a decision: none` starts its text with `none`), up to the next heading at its level
-/// or above; a heading inside a code fence neither starts nor ends a section. Several such
-/// sections are joined. `None` when there is none, or all of it is empty or "none".
+/// The text of `result`'s sections called `name` that say something: several are joined. `None`
+/// when there is none, or each is empty or opens with a "none" line ([`handback_parts`]).
 fn handback_section(result: &str, name: &str) -> Option<String> {
+    let (said, _) = handback_parts(result, name);
+    (!said.is_empty()).then(|| said.join("\n\n"))
+}
+
+/// What the PR body shows of `result`'s sections called `name`: [`handback_section`], else the
+/// notes of its "none" sections, each as `None. Note: <note>` (issue 585).
+fn handback_shown(result: &str, name: &str) -> Option<String> {
+    let (said, notes) = handback_parts(result, name);
+    let parts = if said.is_empty() {
+        notes
+            .iter()
+            .map(|note| format!("None. Note: {note}"))
+            .collect()
+    } else {
+        said
+    };
+    (!parts.is_empty()).then(|| parts.join("\n\n"))
+}
+
+/// The sections of `result` called `name` (issue 220, decision 283): under a heading of any level
+/// whose text is `name` in any case, with bold or italic marks and a trailing colon allowed
+/// (`## Needs a decision: none` starts its text with `none`), up to the next heading at its level
+/// or above; a heading inside a code fence neither starts nor ends a section. Returns the text of
+/// each section that says something, then the note of each whose first non-empty line is "none"
+/// and has more lines after it (issue 585); an empty section, or one that is only "none", is in
+/// neither.
+fn handback_parts(result: &str, name: &str) -> (Vec<String>, Vec<String>) {
     let mut parts = Vec::new();
     let mut current: Option<(usize, Vec<&str>)> = None;
     let mut fence: Option<(char, usize)> = None;
@@ -1480,12 +1504,20 @@ fn handback_section(result: &str, name: &str) -> Option<String> {
         }
     }
     parts.extend(current.map(|(_, lines)| lines.join("\n")));
-    let parts: Vec<&str> = parts
-        .iter()
-        .map(|p| p.trim())
-        .filter(|p| !is_none(p))
-        .collect();
-    (!parts.is_empty()).then(|| parts.join("\n\n"))
+    let (mut said, mut notes) = (Vec::new(), Vec::new());
+    for part in &parts {
+        let part = part.trim();
+        let (first, rest) = part.split_once('\n').unwrap_or((part, ""));
+        if is_none(part) {
+            continue;
+        }
+        if !says_none(first) {
+            said.push(part.to_owned());
+        } else if !is_none(rest) {
+            notes.push(rest.trim().to_owned());
+        }
+    }
+    (said, notes)
 }
 
 /// An ATX heading's level and text (`### Text ##` is level 3, `Text`).
@@ -1543,8 +1575,19 @@ pub(crate) fn next_fence(open: Option<(char, usize)>, line: &str) -> Option<(cha
 /// Whether a section's text says nothing: empty, or "none" give or take list, bold and italic
 /// marks and a full stop.
 fn is_none(text: &str) -> bool {
-    let plain = text.trim_matches(|c: char| c.is_whitespace() || "-*_+.".contains(c));
+    let plain = without_marks(text);
     plain.is_empty() || plain.eq_ignore_ascii_case("none")
+}
+
+/// Whether `line` is the word "none" itself, give or take the same marks; unlike [`is_none`], a
+/// line of only marks, such as a `---` divider, is not (issue 585, review M-1).
+fn says_none(line: &str) -> bool {
+    without_marks(line).eq_ignore_ascii_case("none")
+}
+
+/// `text` without its surrounding white space, list, bold and italic marks and full stops.
+fn without_marks(text: &str) -> &str {
+    text.trim_matches(|c: char| c.is_whitespace() || "-*_+.".contains(c))
 }
 
 /// Why task `task`'s PR must be a draft (decision 173(b)), one line per reason; empty when it is

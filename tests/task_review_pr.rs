@@ -713,6 +713,85 @@ fn an_unchanged_pr_head_is_refused_unless_forced() {
     );
 }
 
+// ---- Issue 586: a head counts as reviewed only with its `sbxm/review` status on it ----
+
+/// The first round posted its review but not its status (as after PR #564): the head is reviewed
+/// again with no `--force`.
+#[test]
+fn an_unchanged_head_with_no_review_status_is_reviewed_again_without_force() {
+    let f = config("");
+    let backend = backend(&f, &[CLEAN, ONE]);
+    let unposted = github().failing_statuses("HTTP 403");
+    let mut prepared = prepared(&f, &backend, &unposted);
+    review_it(
+        &f,
+        &backend,
+        &unposted,
+        &FakeHostRunner::default(),
+        &mut prepared,
+    )
+    .unwrap();
+    let head = saved(&f).review.unwrap().commit.unwrap();
+    let github = github();
+
+    let report = review_it(
+        &f,
+        &backend,
+        &github,
+        &FakeHostRunner::default(),
+        &mut prepared,
+    )
+    .unwrap();
+
+    assert_eq!(report.reviewed.unwrap().round, 2);
+    assert!(github.calls().contains(&GhCall::CommitStatusState(
+        "o/r".into(),
+        head,
+        review::STATUS_CONTEXT.into()
+    )));
+}
+
+/// A status that can't be read refuses as a posted one does, and says so: no silent re-review.
+#[test]
+fn an_unchanged_head_whose_review_status_cannot_be_read_is_refused_and_says_so() {
+    let f = config("");
+    let (backend, github) = (
+        backend(&f, &[CLEAN, ONE]),
+        github().failing_status_state("HTTP 502"),
+    );
+    let mut prepared = prepared(&f, &backend, &github);
+    review_it(
+        &f,
+        &backend,
+        &github,
+        &FakeHostRunner::default(),
+        &mut prepared,
+    )
+    .unwrap();
+    let before = saved(&f);
+
+    let message = format!(
+        "{:#}",
+        review_it(
+            &f,
+            &backend,
+            &github,
+            &FakeHostRunner::default(),
+            &mut prepared
+        )
+        .unwrap_err()
+    );
+
+    assert!(message.contains("already reviewed"), "{message}");
+    assert!(
+        message.contains("status could not be read") && message.contains("HTTP 502"),
+        "{message}"
+    );
+    assert!(message.contains("--force"), "{message}");
+    assert_eq!(saved(&f), before, "task.json is unchanged");
+    assert_eq!(review::saved_rounds(&meta(&f)), vec![1]);
+}
+
 /// Issue 195, decision 190(d): a failed fetch of the PR's new head leaves the task exactly as
 /// the first round's review left it.
 #[test]
