@@ -8,9 +8,9 @@ use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
 use super::{
-    CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, JobLog, ListedPr, Mergeable,
-    PostedStatus, PrComment, PrFile, PrFiles, PrInfo, PrMergeState, PrRequest, PrState, RunStatus,
-    WorkflowRun,
+    CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, JobLog, LabelEvent, ListedPr,
+    Mergeable, PostedStatus, PrComment, PrFile, PrFiles, PrInfo, PrMergeState, PrRequest, PrState,
+    RunStatus, WorkflowRun,
 };
 
 /// Runs `gh` with arguments and optional stdin, returning stdout.
@@ -284,6 +284,29 @@ struct RawPostedStatus {
     state: String,
     context: String,
     created_at: String,
+}
+
+/// One comment of `gh api repos/<repo>/issues/<n>/comments` (issue 550).
+#[derive(Deserialize)]
+struct RawIssueComment {
+    #[serde(default)]
+    body: String,
+}
+
+/// One event of `gh api repos/<repo>/issues/<n>/events` (issue 550); only label events have a
+/// label.
+#[derive(Deserialize)]
+struct RawIssueEvent {
+    event: String,
+    #[serde(default)]
+    label: Option<Named>,
+    created_at: String,
+}
+
+/// `gh api repos/<repo>/pulls/<n>`'s merge time (issue 550).
+#[derive(Deserialize)]
+struct RawMergedAt {
+    merged_at: Option<String>,
 }
 
 /// `text`, `--paginate`'s output of one JSON array per page, read page by page.
@@ -969,5 +992,53 @@ impl GitHubBackend for GhBackend {
                 })
             })
             .collect()
+    }
+
+    fn issue_comment_bodies(&self, repo: &str, number: u32) -> Result<Vec<String>> {
+        let path = format!("repos/{repo}/issues/{number}/comments");
+        let out = self.run(&strings(&["api", &path, "--paginate"]), None)?;
+        let comments: Vec<RawIssueComment> = pages(&out, &path)?;
+        Ok(comments.into_iter().map(|c| c.body).collect())
+    }
+
+    fn label_events(&self, repo: &str, number: u32) -> Result<Vec<LabelEvent>> {
+        let path = format!("repos/{repo}/issues/{number}/events");
+        let out = self.run(&strings(&["api", &path, "--paginate"]), None)?;
+        let raw: Vec<RawIssueEvent> = pages(&out, &path)?;
+        let mut events = Vec::new();
+        for event in raw {
+            let added = match event.event.as_str() {
+                "labeled" => true,
+                "unlabeled" => false,
+                _ => continue,
+            };
+            let Some(label) = event.label else {
+                continue;
+            };
+            let at = crate::run::results::parse_timestamp(&event.created_at).ok_or_else(|| {
+                anyhow!(
+                    "`gh api {path}` gave an event time `{}` that can't be read",
+                    event.created_at
+                )
+            })?;
+            events.push(LabelEvent {
+                label: label.name,
+                added,
+                at,
+            });
+        }
+        Ok(events)
+    }
+
+    fn pr_merged_at(&self, repo: &str, number: u32) -> Result<Option<u64>> {
+        let path = format!("repos/{repo}/pulls/{number}");
+        let raw: RawMergedAt = self.json(&strings(&["api", &path]))?;
+        raw.merged_at
+            .map(|at| {
+                crate::run::results::parse_timestamp(&at).ok_or_else(|| {
+                    anyhow!("`gh api {path}` gave a merge time `{at}` that can't be read")
+                })
+            })
+            .transpose()
     }
 }

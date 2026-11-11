@@ -170,6 +170,18 @@ pub struct PostedStatus {
     pub at: u64,
 }
 
+/// A label added to or taken off an issue or PR, as its events list it (`gh api
+/// repos/<repo>/issues/<n>/events`): the medium-risk trial counts a PR's `hold` labellings and
+/// reads when it was labelled `go` (issue 550).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LabelEvent {
+    pub label: String,
+    /// `true` when it was added, `false` when it was taken off.
+    pub added: bool,
+    /// Seconds since the epoch (`created_at`).
+    pub at: u64,
+}
+
 /// Where a workflow run stands (issue 442, decision 299).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunStatus {
@@ -295,4 +307,14 @@ pub trait GitHubBackend: Send + Sync {
     /// Every status posted on commit `sha` (a full commit id), every page, newest first as GitHub
     /// lists them (issue 548).
     fn commit_statuses(&self, repo: &str, sha: &str) -> Result<Vec<PostedStatus>>;
+    /// The body of every comment on issue `number`, every page, oldest first (`gh api
+    /// repos/<repo>/issues/<n>/comments --paginate`): the medium-risk trial counts its merges
+    /// there (issue 550).
+    fn issue_comment_bodies(&self, repo: &str, number: u32) -> Result<Vec<String>>;
+    /// Every label added to or taken off issue or PR `number`, every page, oldest first (`gh api
+    /// repos/<repo>/issues/<n>/events --paginate`), other events left out (issue 550).
+    fn label_events(&self, repo: &str, number: u32) -> Result<Vec<LabelEvent>>;
+    /// When PR `number` merged, in seconds since the epoch; `None` while it isn't merged (`gh api
+    /// repos/<repo>/pulls/<n>`, issue 550).
+    fn pr_merged_at(&self, repo: &str, number: u32) -> Result<Option<u64>>;
 }
