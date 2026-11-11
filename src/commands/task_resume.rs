@@ -23,7 +23,7 @@ use crate::github::GitHubBackend;
 use crate::harness::Harness;
 use crate::headless::RunStatus;
 use crate::slot;
-use crate::task::config::TaskConfig;
+use crate::task::config;
 use crate::task::finish;
 use crate::task::gates::HostRunner;
 use crate::task::pipeline::{self, Prepared, TaskEnv};
@@ -88,7 +88,13 @@ pub fn run(
     if opts.target == Target::Pr(0) {
         bail!("PR numbers start at 1");
     }
-    let mut config = TaskConfig::load(&opts.repo_root)?;
+    let named = match &opts.target {
+        Target::Issue(n) => Some(format!("issue-{n}")),
+        Target::Spec(path) => record::spec_id(path).ok().map(|(id, _)| id),
+        // The fix task of the PR's current head is only known once GitHub is asked.
+        Target::Pr(_) => None,
+    };
+    let mut config = config::load_for_task(&opts.repo_root, config_dir, named.as_deref())?;
     let global = GlobalConfig::load(config_dir)?;
     let base_dir = global.base_dir.clone();
     let id = match &opts.target {

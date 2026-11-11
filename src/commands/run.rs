@@ -146,7 +146,7 @@ fn run_with(
         Ok(header) => RunFolderLog::new(
             header,
             Box::new(results::now),
-            Box::new(|msg| eprintln!("{msg}")),
+            Box::new(|msg| eprint!("{}", crate::hint::local(&format!("{msg}\n")))),
         ),
         Err(e) => {
             writeln!(warn, "warning: cannot open the run log: {e:#}")?;

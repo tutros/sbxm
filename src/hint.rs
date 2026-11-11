@@ -15,6 +15,7 @@
 use std::ffi::OsString;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The top-level subcommands of `sbxm` (`crate::cli::Command`; a test keeps the two in step):
@@ -99,10 +100,11 @@ pub struct Context {
 }
 
 impl Context {
-    /// This process's context.
+    /// This process's context: the directory [`set_dir`] named, else the working directory.
     pub fn current() -> Self {
+        let named = DIR.lock().ok().and_then(|dir| dir.clone());
         Self {
-            dir: std::env::current_dir().ok(),
+            dir: named.or_else(|| std::env::current_dir().ok()),
             exe: std::env::current_exe().ok(),
             config_dir: std::env::var_os("SBXM_CONFIG_DIR"),
         }
@@ -183,6 +185,19 @@ pub fn block(context: &Context, shell: Shell) -> String {
 
 /// Set once this process printed a rewritten command, so [`take_block`] gives the block.
 static REWROTE: AtomicBool = AtomicBool::new(false);
+
+/// The directory the block names instead of the working directory, see [`set_dir`].
+static DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
+
+/// Names `dir` as where this command should have run: the checkout a task was started in, when
+/// it was run where there is no `sbxm-task.toml`. The block then names it, and is printed even
+/// if no command was named.
+pub fn set_dir(dir: &Path) {
+    if let Ok(mut named) = DIR.lock() {
+        *named = Some(dir.to_owned());
+    }
+    REWROTE.store(true, Ordering::Relaxed);
+}
 
 /// [`rewrite`] for the executable `exe` in `shell`'s syntax; `None` when `text` holds no command,
 /// and when there is no executable to name (`current_exe` failed), so the bare `sbxm` stays.
