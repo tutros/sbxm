@@ -26,10 +26,11 @@ fn workdir(env: &Env) -> std::path::PathBuf {
 }
 
 /// `path` as the process sees itself: links resolved (`current_exe` and `current_dir` do on
-/// Unix), but no `\\?\` prefix on Windows, where they keep the path as given.
+/// Unix), but no `\\?\` prefix on Windows, where only the separators are made the platform's
+/// own (cargo names the binary `target\debug/sbxm.exe`, `current_exe` gives all backslashes).
 fn real_path(path: std::path::PathBuf) -> std::path::PathBuf {
     if cfg!(windows) {
-        path
+        path.components().collect()
     } else {
         std::fs::canonicalize(path).unwrap()
     }
