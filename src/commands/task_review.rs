@@ -17,7 +17,7 @@ use crate::github::GitHubBackend;
 use crate::harness::Harness;
 use crate::run::config::{check_model_flag, headless_harness, parse_duration};
 use crate::slot;
-use crate::task::config::TaskConfig;
+use crate::task::config::{self, TaskConfig};
 use crate::task::finish;
 use crate::task::gates::HostRunner;
 use crate::task::pipeline::{self, Ctx, Prepared, TaskEnv};
@@ -117,7 +117,15 @@ pub fn run(
         bail!("issue and PR numbers start at 1");
     }
     // Every input is checked before anything is created.
-    let mut config = TaskConfig::load(&opts.repo_root)?;
+    let named = match &opts.target {
+        Target::Issue(n) => Some(format!("issue-{n}")),
+        Target::Pr(n) => Some(format!("pr-{n}")),
+        Target::Spec(path) => opts
+            .resolved_spec_id
+            .clone()
+            .or_else(|| record::spec_id(path).ok().map(|(id, _)| id)),
+    };
+    let mut config = config::load_for_task(&opts.repo_root, config_dir, named.as_deref())?;
     if opts.location.is_some() && !matches!(opts.target, Target::Pr(_)) {
         bail!(
             "--cloud and --local go with --pr only; a task under review runs where its task.json \

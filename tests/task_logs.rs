@@ -229,7 +229,7 @@ fn the_cli_command_refuses_an_unknown_task_and_writes_nothing() {
 
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-    assert!(stderr.contains("no task issue-41") && stderr.contains("sbxm task status"));
+    assert!(stderr.contains("no task issue-41") && stderr.contains(" task status`"));
     assert!(!record::task_dir(&env.base_dir(), "issue-41").exists());
 }
 

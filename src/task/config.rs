@@ -53,6 +53,8 @@ fn same_harness_warning(harness: Harness) -> String {
 
 #[derive(Debug, Clone)]
 pub struct TaskConfig {
+    /// The repo root this was read from (issue 574): a task started from it records it.
+    pub repo_root: PathBuf,
     pub worker: Role,
     pub reviewer: Role,
     /// `[worker] fix_rounds` (decision 173(a)): the worker's round budget for `task review`; 0
@@ -307,6 +309,13 @@ impl TaskConfig {
     /// Reads and validates `<repo_root>/sbxm-task.toml`.
     pub fn load(repo_root: &Path) -> Result<Self> {
         let path = repo_root.join(FILE_NAME);
+        if !path.exists() {
+            bail!(
+                "there is no {FILE_NAME} in {}; run this from the root of the task's repo, or \
+                 create one with `sbxm task init`",
+                repo_root.display()
+            );
+        }
         let text = std::fs::read_to_string(&path).with_context(|| {
             format!(
                 "cannot read {}; create one with `sbxm task init` or run from the repo's root",
@@ -320,6 +329,35 @@ impl TaskConfig {
         }
         .validate(raw)
     }
+}
+
+/// [`TaskConfig::load`] for a command on the existing task `id` (issue 574): when `repo_root` has
+/// no `sbxm-task.toml` and the task's record names the checkout it was started in, the error
+/// names that checkout, and so does the block that says where to run the command again.
+pub fn load_for_task(repo_root: &Path, config_dir: &Path, id: Option<&str>) -> Result<TaskConfig> {
+    if !repo_root.join(FILE_NAME).exists()
+        && let Some(id) = id
+        && let Some(checkout) = recorded_checkout(config_dir, id)
+        && checkout != repo_root
+    {
+        crate::hint::set_dir(&checkout);
+        bail!(
+            "there is no {FILE_NAME} in {}; task {id} was started in {}: run this from there",
+            repo_root.display(),
+            checkout.display()
+        );
+    }
+    TaskConfig::load(repo_root)
+}
+
+/// The checkout task `id`'s record names, if the config, the record and the field are all there.
+fn recorded_checkout(config_dir: &Path, id: &str) -> Option<PathBuf> {
+    let base_dir = crate::config::GlobalConfig::load(config_dir).ok()?.base_dir;
+    let path = crate::task::record::task_dir(&base_dir, id).join("task.json");
+    crate::task::record::read(&path)
+        .ok()?
+        .checkout
+        .map(PathBuf::from)
 }
 
 /// `[warm]` of `<repo_root>/sbxm-task.toml`, or `None` when there is no such file or table
@@ -416,6 +454,7 @@ impl Validator<'_> {
         let warm = raw.warm.map(|w| self.warm(w)).transpose()?;
         let task_loop = self.task_loop(raw.task_loop)?;
         Ok(TaskConfig {
+            repo_root: self.repo_root.to_owned(),
             worker,
             reviewer,
             fix_rounds,

@@ -155,6 +155,10 @@ pub fn run_with(
         }
         let drives = footer::read(base, &env.disk);
         frame.section(&footer::render(&drives, env.disk.min_free_disk, width))?;
+        // Where to run the frame's hints, in every frame that has one: the next draws over it.
+        if let Some(block) = crate::hint::take_frame_block() {
+            frame.section(&format!("\n{block}"))?;
+        }
         frame.finish()?;
         drawn += 1;
         let Some(interval) = watch else { break };

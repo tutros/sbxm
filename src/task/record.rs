@@ -452,6 +452,10 @@ pub struct Record {
     pub title: String,
     pub base: String,
     pub branch: String,
+    /// The checkout the task was started in, whose `sbxm-task.toml` its commands read (issue
+    /// 574): named when one of them is run where there is none. Absent in older records.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout: Option<String>,
     /// Where the task's sandboxes run (decisions 253, 265): chosen once at its start, and read by
     /// every later command of the task, whatever the config or a flag says then. A record from
     /// before milestone 4 has none and is local.
@@ -709,6 +713,7 @@ impl Record {
             title: task.title.to_owned(),
             base: task.base.to_owned(),
             branch: task.branch.to_owned(),
+            checkout: None,
             location: Location::Local,
             stage: Stage::Prepared,
             status: Status::Running,

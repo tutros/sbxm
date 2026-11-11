@@ -13,7 +13,7 @@ use crate::disk;
 use crate::harness::Harness;
 use crate::run::orchestrate::in_sandbox_path;
 use crate::slot;
-use crate::task::config::TaskConfig;
+use crate::task::config::{self, TaskConfig};
 use crate::task::gates::HostRunner;
 use crate::task::pipeline::{self, Prepared, TaskEnv, Tiers};
 use crate::task::record::ProcessProbe;
@@ -62,10 +62,10 @@ pub fn run(
     if opts.issue == 0 {
         bail!("issue numbers start at 1; pass --issue <n>");
     }
-    let config = TaskConfig::load(&opts.repo_root)?;
+    let id = format!("issue-{}", opts.issue);
+    let config = config::load_for_task(&opts.repo_root, config_dir, Some(&id))?;
     let global = GlobalConfig::load(config_dir)?;
     let base_dir = global.base_dir.clone();
-    let id = format!("issue-{}", opts.issue);
     if opts.dry_run {
         return dry_run(&config, &base_dir, &id, opts, out);
     }

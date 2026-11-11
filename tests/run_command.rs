@@ -503,7 +503,7 @@ fn run_with_a_missing_file_names_it_and_points_at_run_init() {
 
     let stderr = String::from_utf8(output.stderr).unwrap();
     assert!(
-        stderr.contains("nope.toml") && stderr.contains("sbxm run init"),
+        stderr.contains("nope.toml") && stderr.contains(" run init nope.toml`"),
         "{stderr}"
     );
 }

@@ -466,6 +466,7 @@ pub fn prepare_pr_at(ctx: &Ctx, pr: &PrInfo, location: Location) -> Result<Prepa
         );
         // A PR task has no worker, so it never fixes anything (decision 173(d)).
         task.fix_rounds = 0;
+        task.checkout = Some(ctx.config.repo_root.to_string_lossy().into_owned());
         task.location = location;
         // An issue task for something this PR closes is related work (spec §5.2).
         task.related = pr
@@ -1526,6 +1527,7 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
             Process::current(ctx.probe),
         ));
         task.continues = continued;
+        task.checkout = Some(ctx.config.repo_root.to_string_lossy().into_owned());
         task.fix_rounds = ctx.config.fix_rounds;
         task.location = location;
         task.worker = Some(Agent {

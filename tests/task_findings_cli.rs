@@ -93,7 +93,8 @@ fn a_task_that_does_not_exist_is_refused_in_one_line() {
         .clone();
     let stderr = String::from_utf8(out.stderr).unwrap();
     assert!(
-        stderr.contains("no task issue-12; run `sbxm task status` to list the tasks"),
+        stderr.contains("no task issue-12; run `")
+            && stderr.contains(" task status` to list the tasks"),
         "{stderr}"
     );
 }

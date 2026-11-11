@@ -18,7 +18,7 @@ fn every_command_parses_within_a_one_mib_main_thread_stack() {
         assert!(!stderr.contains("overflowed its stack"), "{args}: {stderr}");
         // `list` without a config fails on purpose, naming `sbxm config init`; the help succeeds.
         assert!(
-            output.status.success() || stderr.contains("sbxm config init"),
+            output.status.success() || stderr.contains(" config init`"),
             "{args}: {:?}\n{stderr}",
             output.status
         );

@@ -653,9 +653,19 @@ fn the_cli_runs_template_ls() {
         .unwrap();
 
     assert!(output.status.success(), "{output:?}");
-    assert_eq!(
-        String::from_utf8(output.stdout).unwrap(),
-        "no templates; build one with `sbxm template build <profile>`\n"
+    // The hint names the running executable (issue 574).
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        stdout.starts_with("no templates; build one with `"),
+        "{stdout}"
+    );
+    assert!(
+        stdout
+            .lines()
+            .next()
+            .unwrap()
+            .ends_with(" template build <profile>`"),
+        "{stdout}"
     );
 }
 
