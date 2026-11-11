@@ -302,6 +302,9 @@ sbxm status                            # the tasks, the running cloud sandboxes 
 
 `[sandbox] location = "cloud"` in `sbxm-task.toml` makes the cloud a repo's default (`"local"`, or no key, keeps
 it here); `--cloud`/`--local` on `task start`, `task run` and `task review --pr N` override it for that command.
+Tasks on this repo run in the cloud (proven end to end on 2026-11-11, issue #350) with `cloud_shape = "large"` or
+bigger; the cloud stays opt-in per command, `sbxm-task.toml` keeps the local default. Build output must go under
+`$HOME` (the gates and sbxm's warm-up do since #575), because `/tmp` is a RAM-backed tmpfs of half the shape's memory.
 `[sandbox] cloud_shape` (micro, small, medium, large or xl) sizes the cloud sandboxes; without it the local CPUs and
 memory must be exactly one of those shapes, or a cloud task is refused before anything is made (issue 559).
 After that, `task.json`'s `location` decides for every command of the task. The phases are the same as locally;
