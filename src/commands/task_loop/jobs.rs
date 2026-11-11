@@ -676,7 +676,9 @@ impl Loop<'_> {
                 "its lock is held by a command run by hand; queue it again once that ends",
             ),
             Ok(End::Taken(line)) => Ended::new(Outcome::Skipped, line),
-            Err(Halt::Stopped) => Ended::new(Outcome::Stopped, "stopped on request"),
+            Ok(End::Stopped(_)) | Err(Halt::Stopped) => {
+                Ended::new(Outcome::Stopped, "stopped on request")
+            }
             Err(Halt::Error(e)) => Ended {
                 // A missing secret stays a stop that needs the user (decision 310).
                 halt: Some(

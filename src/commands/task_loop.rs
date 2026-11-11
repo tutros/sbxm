@@ -365,6 +365,9 @@ enum End {
     /// Finished or removed by a command run by hand while its lock was held (review M-1 of issue
     /// 409): that command's, so no row, not counted and not parked. The line saying why.
     Taken(String),
+    /// Cut short by a stop request after one of its phases ran: logged, never counted as parked
+    /// (a requested stop exits 0, decision 310; review M-1 of issue 570).
+    Stopped(String),
 }
 
 /// What a claim found under the task's lock.
@@ -942,15 +945,17 @@ impl Loop<'_> {
 
     /// A task cut short by a stop request: says how to continue it.
     fn stopped(&self, issue: u32, out: &mut dyn Write) -> std::io::Result<End> {
-        writeln!(
-            out,
+        writeln!(out, "{}", self.stopped_line(issue))?;
+        Ok(End::Stopped(
+            "stopped on request before its resume".to_owned(),
+        ))
+    }
+
+    fn stopped_line(&self, issue: u32) -> String {
+        format!(
             "{}: stopped on request; continue it with `sbxm task resume --issue {issue}`",
             self.issue_named(issue)
-        )?;
-        Ok(End::Parked {
-            ready: None,
-            outcome: "stopped on request before its resume".to_owned(),
-        })
+        )
     }
 
     fn task_dir(&self, issue: u32) -> PathBuf {
@@ -1085,9 +1090,13 @@ impl Loop<'_> {
         // `ready`, never again, whatever its record says. One that failed is tried again while
         // it is still due, as any failed phase is (once, then parked).
         let mut should_fix_ran = false;
+        // Whether a phase of this call ran. A stop before the first one leaves the task as it
+        // was, for the loop to say what is left (review M-2 of issue 570); after it, the task is
+        // cut short and logged.
+        let mut ran = false;
         loop {
             let Some(paused) = self.wait_for_room(out).map_err(Halt::Error)? else {
-                if self.record(issue).is_none() {
+                if !ran {
                     return Err(Halt::Stopped);
                 }
                 return self.stopped(issue, out).map_err(io);
@@ -1131,11 +1140,12 @@ impl Loop<'_> {
             // A stop asked while the phase waited for the machine's sandbox slot (issue 570):
             // it created nothing, so the task stands as it was before the phase.
             if result.as_ref().is_err_and(|e| e.is::<slot::Stopped>()) {
-                if self.record(issue).is_none() {
+                if !ran {
                     return Err(Halt::Stopped);
                 }
                 return self.stopped(issue, out).map_err(io);
             }
+            ran = true;
             let ready = self.record(issue).filter(|r| r.stage == Stage::Ready);
             let e = match (result, ready) {
                 (Ok(()), Some(_)) => {
@@ -3347,7 +3357,9 @@ fn work(
             left(&held, &due, out)?;
             return Ok("stopped on request".to_owned());
         }
-        let (issue, title, size, started, stops, ended) = if let Some(again) = due.pop_front() {
+        let (issue, title, size, started, stops, ended, retried) = if let Some(again) =
+            due.pop_front()
+        {
             let Held {
                 issue,
                 title,
@@ -3357,6 +3369,10 @@ fn work(
                 retry,
                 cut_off,
             } = again;
+            // What it owed before it is taken, put back if a stop comes before its resume runs.
+            let owed = cut_off
+                .then(|| lp.record(issue)?.hooks.get(RESUMED_HOOK).cloned())
+                .flatten();
             // Taken only now: a loop that stops before this leaves the resume owed, for the next.
             if cut_off && let Err(e) = lp.mark_resume(issue, serde_json::Value::Bool(true)) {
                 let Some(in_use) = e.downcast_ref::<lock::InUse>() else {
@@ -3378,7 +3394,8 @@ fn work(
             )?;
             note(lock, lp, warn, |p| p.start(issue))?;
             let ended = lp.again(issue, retry, &mut stops, out, warn);
-            (issue, title, size, started, stops, ended)
+            let retried = Some((retry, cut_off, owed));
+            (issue, title, size, started, stops, ended, retried)
         } else {
             let open = github.issues_open(&lp.repo)?;
             let (next, waiting) = lp.next(&open, &opts.issues, &mut tried, &mut refused, out)?;
@@ -3440,12 +3457,41 @@ fn work(
             })?;
             let mut stops = Vec::new();
             let ended = lp.task(issue, labeled, 0, &mut stops, out, warn);
-            (issue, title, size, started, stops, ended)
+            (issue, title, size, started, stops, ended, None)
         };
         let end = match ended {
             Ok(end) => end,
             Err(Halt::Error(e)) => return Err(e),
+            // Stopped before any phase of it ran (review M-2 of issue 570): no row, and it is left
+            // as it was, a cut-off task's resume still owed to the next loop.
             Err(Halt::Stopped) => {
+                match retried {
+                    Some((retry, cut_off, owed)) => {
+                        if let Some(owed) = owed
+                            && let Err(e) = lp.mark_resume(issue, owed)
+                        {
+                            writeln!(
+                                warn,
+                                "warning: {}'s resume could not be marked as owed again ({e:#}); \
+                                 continue it with `sbxm task resume --issue {issue}`",
+                                lp.issue_named(issue)
+                            )?;
+                        }
+                        due.push_front(Held {
+                            issue,
+                            title,
+                            size,
+                            started,
+                            stops,
+                            retry,
+                            cut_off,
+                        });
+                    }
+                    None if lp.record(issue).is_some() => {
+                        writeln!(out, "{}", lp.stopped_line(issue))?;
+                    }
+                    None => {}
+                }
                 writeln!(out, "stopped on request")?;
                 left(&held, &due, out)?;
                 return Ok("stopped on request".to_owned());
@@ -3514,7 +3560,7 @@ fn work(
         };
         let recorded = match &end {
             End::Done { .. } => Outcome::Done,
-            End::Parked { .. } => Outcome::Parked,
+            End::Parked { .. } | End::Stopped(_) => Outcome::Parked,
             End::Refused(_) | End::Taken(_) => Outcome::Skipped,
             End::Held(_) => Outcome::Held,
         };
@@ -3553,6 +3599,7 @@ fn work(
             }
             End::Done { ready, outcome } => (Some(ready), outcome, false),
             End::Parked { ready, outcome } => (ready, outcome, true),
+            End::Stopped(outcome) => (None, outcome, false),
         };
         due.extend(held.drain(..));
         tasks_run += 1;
