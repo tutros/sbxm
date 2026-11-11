@@ -28,8 +28,8 @@ fn yes_no(present: bool) -> &'static str {
 }
 
 /// `which`: show just that task (an error when it doesn't exist). The second part of the result
-/// is the ids of the tasks the text names, in the order shown: the caller logs the output to each
-/// (`main`'s `task_writers`), so a task with nothing to show (no tasks yet) gets no log entry.
+/// is the ids of the tasks the text names, in the order shown. Nothing is logged: `task status`
+/// only reads (issue 576).
 pub fn render(
     base: &Path,
     which: Option<(Kind, u32)>,

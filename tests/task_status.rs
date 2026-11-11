@@ -1,13 +1,10 @@
 //! M2b slice 4: `sbxm task status` (spec §4): one line per task with stage, status,
 //! `interrupted` and which of `result.md`/`review.md` exist; `--json` prints the records.
-//! Issue 129, M-1: its displayed output also reaches each displayed task's `run.log`.
-
-mod common;
+//! Issue 576: it writes to no task's `run.log` (`tests/task_status_no_log.rs`).
 
 use std::fs;
 use std::path::Path;
 
-use common::Env;
 use sbxm::backend::Location;
 use sbxm::commands::task_status;
 use sbxm::task::record::{self, Kind, NewTask, Process, ProcessProbe, Record, Stage, Status};
@@ -486,75 +483,6 @@ fn a_stopped_task_shows_the_reason() {
 
     assert!(lines[0].contains("stopped: repeat-finding"), "{text}");
     assert!(!lines[1].contains("stopped:"), "{text}");
-}
-
-#[test]
-fn the_cli_appends_a_selected_issues_output_to_its_run_log() {
-    let env = Env::new();
-    save(&env.base_dir(), &working(41, None));
-
-    let output = assert_cmd::Command::cargo_bin("sbxm")
-        .unwrap()
-        .env("SBXM_CONFIG_DIR", env.config_dir())
-        .args(["task", "status", "--issue", "41"])
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    assert!(stdout.starts_with("issue-41"), "{stdout}");
-
-    let log =
-        fs::read_to_string(record::task_dir(&env.base_dir(), "issue-41").join("run.log")).unwrap();
-    assert!(log.starts_with("# "), "{log}");
-    assert!(log.contains(stdout.trim_end()), "{log}");
-}
-
-#[test]
-fn the_cli_appends_a_selected_prs_output_to_its_run_log() {
-    let env = Env::new();
-    let mut pr = task(Kind::Pr, 2, "a pr");
-    pr.advance(Stage::Reviewing, T0, Process::new(1, T0))
-        .unwrap();
-    save(&env.base_dir(), &pr);
-
-    let output = assert_cmd::Command::cargo_bin("sbxm")
-        .unwrap()
-        .env("SBXM_CONFIG_DIR", env.config_dir())
-        .args(["task", "status", "--pr", "2"])
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    let log =
-        fs::read_to_string(record::task_dir(&env.base_dir(), "pr-2").join("run.log")).unwrap();
-    assert!(log.starts_with("# "), "{log}");
-    assert!(log.contains("reviewing"), "{log}");
-}
-
-#[test]
-fn the_cli_appends_unfiltered_output_to_every_displayed_tasks_run_log() {
-    let env = Env::new();
-    save(&env.base_dir(), &working(41, None));
-    save(&env.base_dir(), &working(7, Some(Status::Completed)));
-
-    let output = assert_cmd::Command::cargo_bin("sbxm")
-        .unwrap()
-        .env("SBXM_CONFIG_DIR", env.config_dir())
-        .args(["task", "status"])
-        .output()
-        .unwrap();
-
-    assert!(output.status.success());
-    let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
-    for id in ["issue-7", "issue-41"] {
-        let log =
-            fs::read_to_string(record::task_dir(&env.base_dir(), id).join("run.log")).unwrap();
-        assert!(log.starts_with("# "), "{id}: {log}");
-        for line in stdout.lines() {
-            assert!(log.contains(line), "{id}: missing {line:?} in {log}");
-        }
-    }
 }
 
 /// Issue 58: `task status` only reads, so a task another command holds is still listed, and its
