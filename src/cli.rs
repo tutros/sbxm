@@ -358,7 +358,8 @@ pub enum TaskCommand {
         local: bool,
         /// Review the pull request even though its head is already reviewed: the commit a local
         /// issue task's in-task review covered (posted by `task finish` as the PR's review), or
-        /// the commit the PR task's own last review covered.
+        /// the commit the PR task's own last review covered, with that review's sbxm/review
+        /// status on it (a head without one is reviewed again with no --force).
         #[arg(long, conflicts_with_all = ["issue", "spec"])]
         force: bool,
         /// Create the sandbox even when the drive of sbx's sandbox state has less than
