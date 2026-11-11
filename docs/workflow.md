@@ -282,6 +282,12 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
   nothing, a resolve's re-arm included, and disarms every loop PR that has auto-merge armed. `sbxm status` shows it in
   the Loop section. Only you lift it, after looking at `main`: `sbxm task loop --clear-pause` (it says what it
   removed). A pause file that can't be read counts as a pause, with a warning.
+- Medium-risk PRs (decision 316, issue 550): the loop re-checks its unarmed PRs between tasks and arms a clean
+  medium one at its veto window's end (two hours from its head's `sbxm/review` success) or at once on a `go`
+  label; `hold` keeps it unarmed and disarms it if armed. Each merge of one it armed gets a comment on the open
+  `medium-trial` issue; at 10 the loop stops arming medium PRs until the retro decides. For a break the loop
+  can't see (a merged medium PR that needed a fix): `sbxm task loop --pause-medium "PR #N needed a fix"`, which
+  stops medium arming only and posts a break comment; `--clear-pause` lifts it with the red-`main` pause.
 
 ### The same tasks in Docker Cloud Sandboxes (milestone 4)
 
@@ -470,8 +476,10 @@ the binary you built, and waits for job files and labelled issues.
 4. A low-risk PR (the reviewer's level and the path-rule floor) whose latest review covered its head commit with
    0 must-fix is merged by GitHub's auto-merge, armed with `gh pr merge <N> --auto --merge --match-head-commit <sha>`
    for that reviewed commit; before any later push, disarm it (`gh pr merge <N> --disable-auto`) and review the new
-   head before arming it again (decisions 266, 280). The user merges a medium- or high-risk PR. Never push
-   to `main`; every change, docs included, goes through a PR.
+   head before arming it again (decisions 266, 280). `task loop` also arms a medium-risk PR it opened once its
+   two-hour veto window ends or you label it `go` (never while labelled `hold`), for a trial of 10 such merges
+   recorded on the open `medium-trial` issue (decision 316, issue 550); the user merges a high-risk PR, and a
+   medium one outside the trial. Never push to `main`; every change, docs included, goes through a PR.
 5. `task rm` the finished task, which also gives back the disk its sandbox used.
 
 Work in a sandbox needs no approval of single commands; work an agent session does on the host asks for each one.

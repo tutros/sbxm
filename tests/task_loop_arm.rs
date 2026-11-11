@@ -536,8 +536,9 @@ fn a_medium_pr_of_size_l_changing_cargo_lock_awaits_you_with_both_reasons() {
     );
 }
 
+/// Issue 550: it waits for its veto window, which needs a clean `sbxm/review` status on its head.
 #[test]
-fn a_medium_pr_that_passes_both_checks_still_awaits_you() {
+fn a_medium_pr_that_passes_both_checks_waits_for_its_window() {
     let f = fixture();
     let gh = github_medium("size:M", &["src/a.rs"]);
     let script = Script::new(&f.base(), MEDIUM_CLEAN);
@@ -546,7 +547,13 @@ fn a_medium_pr_that_passes_both_checks_still_awaits_you() {
 
     run.result.unwrap();
     assert!(arms(&gh).is_empty());
-    assert!(run.out.contains("awaits you: risk medium\n"), "{}", run.out);
+    assert!(
+        run.out.contains(
+            "awaits you: risk medium; no veto window: its head has no `sbxm/review` status\n"
+        ),
+        "{}",
+        run.out
+    );
     assert!(gh.calls().contains(&GhCall::PrFiles(REPO.into(), 103)));
 }
 

@@ -616,7 +616,8 @@ pub enum TaskCommand {
         /// Run these issues in this order instead of the queue (repeatable).
         #[arg(long = "issue", value_name = "N")]
         issues: Vec<u32>,
-        /// Lift the pause a red main set (it says what it removed) and run nothing.
+        /// Lift the pause a red main set and the medium pause --pause-medium set (it says what it
+        /// removed) and run nothing.
         #[arg(long, conflicts_with_all = ["cap", "issues"])]
         clear_pause: bool,
         /// Run nothing: say for each issue (--issue, or the queue) whether the loop would take it or

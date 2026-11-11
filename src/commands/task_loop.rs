@@ -18,7 +18,7 @@
 //! The phases go through [`Steps`] so the loop's rules are tested without sandboxes;
 //! [`TaskSteps`] runs the real commands.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -55,6 +55,7 @@ use crate::task::{
 
 mod check;
 mod jobs;
+mod waiting;
 pub use check::check;
 pub(crate) use check::{reasons, skip_reason};
 
@@ -495,6 +496,18 @@ struct Loop<'a> {
     /// The (commit, run) second failures on `main` already paused for (or found paused): a pause
     /// the user cleared isn't set again for the same run.
     paused_for: HashSet<(String, u64)>,
+    /// The (PR, head) pairs this run armed (issue 550): the step that re-checks waiting PRs
+    /// doesn't arm the same head again after the user disarmed it.
+    armed_heads: HashSet<(u32, String)>,
+    /// The (PR, head) pairs whose run failed again after a re-run (decision 299): left to the
+    /// user, never armed by the step that re-checks waiting PRs (issue 550).
+    ci_left: HashSet<(u32, String)>,
+    /// The medium-risk PRs this run armed, with what the trial records of them, until their
+    /// merge is recorded on the trial's issue (issue 550, answer 2).
+    medium_armed: HashMap<u32, trial::Armed>,
+    /// The medium-risk PRs this run armed that merged: a red `main` on their merge commit is a
+    /// break of the trial (answer 3).
+    medium_merged: HashSet<u32>,
     log: PathBuf,
     /// Whether this loop wrote a row to [`log`](Self::log): only then is it posted.
     logged: bool,
@@ -704,6 +717,7 @@ impl Loop<'_> {
             // one left (decision 298(3), second review of issue 530).
             let risk = self.history_risk(number, Some(&own));
             let check = real_check_of(&self.base_dir, Some(&own)).ok().flatten();
+            let source = medium_source(&own);
             let rec = self
                 .fixes_of(number)
                 .into_iter()
@@ -767,6 +781,33 @@ impl Loop<'_> {
                         format!("run it, then sbxm task real-check --pr {number} --pass \"...\"");
                     ("real check", format!("real check: {check}"), next)
                 }
+            } else if risk == Level::Medium
+                && check.is_none()
+                && review.commit.as_deref() == Some(head.as_str())
+                && not_run_reason(review).is_none()
+            {
+                // Issue 550: a medium PR the loop arms by its window says why it isn't armed,
+                // and none while its window runs (the window's own notice speaks then).
+                let reason = if self.paused(warn)? {
+                    "the loop is paused on a red main, so it arms nothing".to_owned()
+                } else {
+                    let verdict = self.medium_verdict(number, &head, source, warn)?;
+                    if matches!(
+                        verdict,
+                        waiting::Medium::Window(window::Window::Waiting { .. }, _)
+                    ) {
+                        continue;
+                    }
+                    match verdict.reason(&waiting::zone()) {
+                        Some(reason) => format!("risk medium; {reason}"),
+                        None => continue,
+                    }
+                };
+                (
+                    "medium",
+                    reason,
+                    "review it, then merge or close it".to_owned(),
+                )
             } else {
                 let word = risk.word();
                 let reason =
@@ -1557,6 +1598,9 @@ impl Loop<'_> {
         if rec.stopped.is_some() || review.must_fix > 0 {
             return waits("a draft with must-fix left".to_owned(), out);
         }
+        if review.risk == Level::Medium && leading.is_none() {
+            return self.arm_medium_pr(&rec, number, review.commit.as_deref(), out, warn);
+        }
         if review.risk != Level::Low {
             let reasons = self.medium_reasons(review.risk, medium_source(&rec), number);
             return waits(
@@ -1618,6 +1662,7 @@ impl Loop<'_> {
         match self.github.pr_arm_auto_merge(&self.repo, number, reviewed) {
             Ok(()) => {
                 self.armed.insert(number);
+                self.armed_heads.insert((number, reviewed.to_owned()));
                 writeln!(
                     out,
                     "{pr_named}: auto-merge armed on {reviewed}",
@@ -1629,9 +1674,55 @@ impl Loop<'_> {
         }
     }
 
+    /// [`Self::arm`] for a medium-risk PR `number` of task `rec`, clean and with no checks left
+    /// not run nor a real check missing (issue 550): not while paused on a red `main`, and only
+    /// while its head is still `reviewed`; then as its [`waiting::Medium`] verdict says, armed at
+    /// once only for `go` (its window starts with this review).
+    fn arm_medium_pr(
+        &mut self,
+        rec: &Record,
+        number: u32,
+        reviewed: Option<&str>,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<Option<String>> {
+        let pr_named = self.pr_named(number);
+        let Some(reviewed) = reviewed else {
+            let why = "risk medium; the commit the review covered is unknown";
+            writeln!(out, "{pr_named} awaits you: {why}")?;
+            return Ok(Some(not_armed(why, None)));
+        };
+        if self.paused(warn)? {
+            let note = self.not_armed_paused(number, &["risk medium".to_owned()], out)?;
+            return Ok(Some(with_reasons(note, &["risk medium".to_owned()])));
+        }
+        let state = match self.github.pr_merge_state(&self.repo, number) {
+            Ok(state) => state,
+            Err(e) => return self.arming_failed(number, &e, out, warn),
+        };
+        if !queue::awaits_user(state) {
+            return Ok(None);
+        }
+        let head = match self.github.pr(&self.repo, number) {
+            Ok(pr) => pr.head_oid,
+            Err(e) => return self.arming_failed(number, &e, out, warn),
+        };
+        if head != reviewed {
+            let note = not_armed("risk medium; the PR's head moved after the review", None);
+            writeln!(
+                out,
+                "{pr_named}: {note} (reviewed {reviewed}, head {head}); it awaits you"
+            )?;
+            return Ok(Some(note));
+        }
+        let verdict = self.medium_verdict(number, &head, medium_source(rec), warn)?;
+        let url = rec.pr.clone().unwrap_or_default();
+        self.act_on_medium(number, &head, &url, verdict, out, warn)
+    }
+
     /// For a PR of `risk` medium, every reason of [`medium::refusals`] not to arm it besides its
-    /// risk (issue 549); none for any other risk. Until #550 a medium PR is never armed either
-    /// way, so these only go into its "awaits you" line.
+    /// risk (issue 549); none for any other risk. For the lines of a medium PR left to the user
+    /// for another reason; the arming itself reads them through its window (issue 550).
     fn medium_reasons(&self, risk: Level, source: medium::Source, number: u32) -> Vec<String> {
         if risk == Level::Medium {
             medium::refusals(self.github, &self.repo, source, number)
@@ -2122,6 +2213,7 @@ impl Loop<'_> {
         match self.github.pr_arm_auto_merge(&self.repo, number, reviewed) {
             Ok(()) => {
                 self.armed.insert(number);
+                self.armed_heads.insert((number, reviewed.to_owned()));
                 writeln!(
                     out,
                     "{pr_named}: auto-merge armed again on {reviewed}",
@@ -2257,6 +2349,9 @@ impl Loop<'_> {
                 Ok(Some(commit)) => {
                     self.armed.remove(&number);
                     self.watch(commit, Some(number));
+                    if let Some(armed) = self.medium_armed.remove(&number) {
+                        self.record_trial_merge(number, armed, warn)?;
+                    }
                 }
                 Ok(None) => {}
                 Err(e) => self.warn_once(
@@ -2393,6 +2488,9 @@ impl Loop<'_> {
         )?;
         self.paused_for.insert((commit.to_owned(), run.id));
         self.say_once(out, paused_line(&pause))?;
+        if let Some(number) = pr.filter(|n| self.medium_merged.contains(n)) {
+            self.record_trial_break(number, &pause.describe(), warn)?;
+        }
         // (d) of issue 530: once per commit of `main`.
         let note = Notification {
             key: format!("main:{commit}"),
@@ -2480,6 +2578,7 @@ impl Loop<'_> {
             let Some(run) = new.first().cloned() else {
                 continue;
             };
+            self.ci_left.insert((number, head.clone()));
             // One log-fix per PR, ever (decision 300): tried before the PR is left to the user.
             let log_fix = !self.log_fixed.contains(&number) && !self.has_log_fix(number);
             if armed {
@@ -3277,6 +3376,10 @@ fn run_loop(
         disarmed_for_log_fix: HashSet::new(),
         go_unremoved: HashSet::new(),
         paused_for: HashSet::new(),
+        armed_heads: HashSet::new(),
+        ci_left: HashSet::new(),
+        medium_armed: HashMap::new(),
+        medium_merged: HashSet::new(),
         log,
         logged: false,
         notify,
@@ -3401,6 +3504,7 @@ fn work(
         // for PRs awaiting the user, so a queued review or fix isn't held up by it (issue 525).
         let go_on = lp.resolve_conflicts(out, warn)? && {
             lp.check_runs(out, warn)?;
+            lp.recheck_waiting(out, warn)?;
             lp.drain_jobs(out, warn)? && {
                 lp.notify_awaiting(out, warn)?;
                 lp.wait_for_prs(out, warn)?

@@ -3,8 +3,8 @@
 //! status is a success. A `hold` label keeps the PR unarmed, a `go` label arms it at once, neither
 //! arms it when the window ends; labels match case-insensitively, as GitHub's do. `go` only skips
 //! the wait: the other arming rules ([`crate::task::medium`], the not-run list...) come first.
-//! The window's start is read from GitHub each time, so no state of sbxm's holds it. Nothing
-//! calls this before #550, which arms by it; low risk never comes here (decisions 266, 280).
+//! The window's start is read from GitHub each time, so no state of sbxm's holds it. `task loop`
+//! arms by it (#550); low risk never comes here (decisions 266, 280).
 
 use std::io::Write;
 

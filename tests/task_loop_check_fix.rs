@@ -572,9 +572,27 @@ fn a_failed_log_fix_leaves_the_pr_to_the_user() {
     not_clean(Ends::Fails, "gates failed");
 }
 
+/// Issue 550: the step that re-checks waiting PRs then says why its window can't arm it either.
 #[test]
 fn a_clean_log_fix_of_medium_risk_is_not_armed_again() {
-    not_clean(Ends::Clean(Level::Medium), "risk medium");
+    let f = fixture();
+    let gh = github();
+    let script = Script::new(&f.base(), &gh, Ends::Clean(Level::Medium));
+
+    let ran = run_loop(&f, &script, &gh);
+
+    ran.result.unwrap();
+    assert_eq!(script.log_fixes(), ["log-fix 101 7"], "{}", ran.out);
+    assert_eq!(disarms(&gh), [101], "{}", ran.out);
+    assert!(arms(&gh).is_empty(), "{}", ran.out);
+    let said = awaits(&ran.out);
+    assert_eq!(said.len(), 2, "{}", ran.out);
+    assert!(
+        said[0].contains("its log-fix's review is risk medium"),
+        "{}",
+        said[0]
+    );
+    assert!(said[1].contains("awaits you: risk medium; "), "{}", said[1]);
 }
 
 // Review S-1 of issue 549: a PR whose own review was medium is never armed again, and its line
