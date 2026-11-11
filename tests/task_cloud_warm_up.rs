@@ -257,6 +257,16 @@ fn a_worker_sandbox_made_again_for_a_fix_round_is_warmed_at_the_base() {
 
 /// `task resume --spec FILE --rounds N` (the process that ran the task is gone).
 fn resume_rounds(f: &Fixture, spec: std::path::PathBuf, rounds: u32, backend: &FakeBackend) {
+    resume_rounds_or_not(f, spec, Some(rounds), backend);
+}
+
+/// `task resume --spec FILE`, with `--rounds` when given.
+fn resume_rounds_or_not(
+    f: &Fixture,
+    spec: std::path::PathBuf,
+    rounds: Option<u32>,
+    backend: &FakeBackend,
+) {
     struct Gone;
     impl sbxm::task::record::ProcessProbe for Gone {
         fn start_time(&self, _pid: u32) -> Option<u64> {
@@ -269,7 +279,7 @@ fn resume_rounds(f: &Fixture, spec: std::path::PathBuf, rounds: u32, backend: &F
         &sbxm::commands::task_resume::Options {
             repo_root: f.env.tmp.path().join("target-repo"),
             target: sbxm::commands::task_resume::Target::Spec(spec),
-            rounds: Some(rounds),
+            rounds,
             should_fix: false,
             disk: Default::default(),
             identity: Some(identity()),
@@ -316,5 +326,103 @@ fn a_worker_sandbox_made_again_by_resume_is_warmed_at_the_base() {
     let resumed = &agent_heads(&seen, &worker)[0];
     assert_eq!(resumed.branch.as_deref(), Some(id.as_str()));
     assert_ne!(resumed.commit, base);
+    assert_eq!(task_record(&f, &id).stage, Stage::Ready);
+}
+
+// Review M-1: a first start whose warm-up fails keeps its task, `prepared/failed`, so its
+// `run.log` holds the failed step and `task resume` makes the sandbox afresh.
+
+/// `task run --spec FILE --cloud` with the command's writers teed into the task's `run.log`, as
+/// `main` does, and its error written the way `main` ends a failed task command.
+fn task_run_logged(f: &Fixture, spec: std::path::PathBuf, id: &str, backend: &FakeBackend) {
+    use sbxm::task::runlog::{RunLog, Tee};
+
+    let log = Arc::new(Mutex::new(RunLog::new(
+        &f.env.base_dir(),
+        "# header".to_owned(),
+        vec![id.to_owned()],
+        None,
+        Box::new(sbxm::run::results::now),
+        Box::new(sbxm::task::runlog::recorded_stage),
+        Box::new(|_| {}),
+    )));
+    let mut out = Tee::new(Vec::new(), Arc::clone(&log));
+    let mut warn = Tee::new(Vec::new(), log);
+    let result = sbxm::commands::task_run::run_spec(
+        &f.env.config_dir(),
+        &common::cloud_task::run_options(f, spec, Some(Location::Cloud)),
+        None,
+        backend,
+        &sbxm::github::fake::FakeGitHub::default(),
+        &common::task_fixture::Probe,
+        &sbxm::task::gates::FakeHostRunner::default(),
+        &mut out,
+        &mut warn,
+    );
+    let err = result.expect_err("the warm-up fails the run");
+    use std::io::Write;
+    writeln!(warn, "Error: {err:?}").unwrap();
+}
+
+/// `lines` numbered lines of output.
+fn numbered(lines: usize) -> String {
+    (1..=lines).map(|i| format!("out line {i}\n")).collect()
+}
+
+#[test]
+fn a_first_start_whose_warm_up_fails_keeps_its_log_and_is_resumed_afresh() {
+    let f = fixture_with(LOCAL_TOML);
+    f.env.write_profile("default", STRICT_PROFILE);
+    let base = cargo_base(&f);
+    let (spec, id) = spec(&f);
+    let worker = worker_sandbox(&id);
+    let (failing, _) = strict_backend(&f, &id, &[CLEAN], false);
+    let failing = failing.with_exec_output_matching(
+        "cargo fetch",
+        sbxm::backend::ExecOutput {
+            stdout: numbered(50),
+            stderr: String::new(),
+            exit_code: Some(101),
+        },
+    );
+
+    task_run_logged(&f, spec.clone(), &id, &failing);
+
+    // The sandbox went, no agent ran, and the task stays `prepared/failed` with its folder.
+    assert!(failing.log().contains(&format!("rm {worker}")));
+    assert!(
+        !failing.execs().iter().any(|(_, spec)| is_headless(spec)),
+        "an agent ran"
+    );
+    let task = task_record(&f, &id);
+    assert_eq!(
+        (task.stage, task.status),
+        (Stage::Prepared, sbxm::task::record::Status::Failed)
+    );
+    assert!(task.sandboxes.iter().all(|e| e.removed_at.is_some()));
+    let run_log = std::fs::read_to_string(
+        sbxm::task::record::task_dir(&f.env.base_dir(), &id).join("run.log"),
+    )
+    .unwrap();
+    assert!(
+        run_log.contains("warm-up step 1 of 3 `cargo fetch --locked` failed with exit 101"),
+        "{run_log}"
+    );
+    assert!(
+        run_log.contains("out line 11") && run_log.contains("out line 50"),
+        "{run_log}"
+    );
+
+    // The failure gone, `task resume` makes the sandbox afresh: warmed at the base, held, then
+    // the worker, and the task goes on to `ready`.
+    let (fresh, seen) = strict_backend(&f, &id, &[CLEAN], false);
+    resume_rounds_or_not(&f, spec, None, &fresh);
+
+    assert_eq!(makes(&fresh, &worker)[0], WARMED.to_vec());
+    let at_base = Head {
+        commit: base,
+        branch: None,
+    };
+    assert_eq!(warm_heads(&seen, &worker), vec![at_base; 3]);
     assert_eq!(task_record(&f, &id).stage, Stage::Ready);
 }

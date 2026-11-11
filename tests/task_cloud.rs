@@ -2053,7 +2053,8 @@ fn numbered(lines: usize) -> String {
 
 /// Asserts a warm-up that stopped at step `step` (from 1) failed the start before any agent:
 /// the steps up to it, then the sandbox removed, then its scoped secret; no deny, no checkout,
-/// no agent; the task folder gone; the error ends with the last 40 lines of the step's output.
+/// no agent; the task kept `prepared/failed`; the error ends with the last 40 lines of the step's
+/// output.
 fn assert_warm_up_failed(
     f: &common::task_fixture::Fixture,
     id: &str,
@@ -2084,7 +2085,17 @@ fn assert_warm_up_failed(
         "an agent ran"
     );
     assert_eq!(backend.cloud_secrets(), Vec::<(String, String)>::new());
-    assert!(!sbxm::task::record::task_dir(&f.env.base_dir(), id).exists());
+    // Review M-1: the task stays, `prepared/failed` with its sandbox's entry closed, for `task
+    // resume` (and its `run.log`, `tests/task_cloud_warm_up.rs`).
+    let task = task_record(f, id);
+    assert_eq!(
+        (task.stage, task.status),
+        (
+            sbxm::task::record::Stage::Prepared,
+            sbxm::task::record::Status::Failed
+        )
+    );
+    assert!(task.sandboxes.iter().all(|e| e.removed_at.is_some()));
     assert_start_lines(started, &sandbox, "removed");
     let message = format!("{:#}", started.result.as_ref().unwrap_err());
     assert!(message.contains(&sandbox), "{message}");

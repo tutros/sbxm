@@ -11,7 +11,7 @@
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 
 use super::config::Warm;
 use super::gates::{self, GateOutcome};
@@ -24,6 +24,24 @@ pub const LIMIT: Duration = Duration::from_secs(20 * 60);
 
 /// How many lines of a failed step's output its error keeps.
 pub const TAIL_LINES: usize = 40;
+
+/// The error [`run`] returns: a step that failed, couldn't run or ran out of time. Its own type, so
+/// a first start that fails here keeps its task for `task resume` (review M-1 of issue 560).
+#[derive(Debug)]
+pub struct Failed(String);
+
+impl std::fmt::Display for Failed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for Failed {}
+
+/// Whether `err` is, or was caused by, a warm-up that failed.
+pub fn failed(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| cause.is::<Failed>())
+}
 
 /// The steps a strict cloud sandbox warms up with: the task config's `[warm]` commands, else the
 /// built-in cargo steps when the base commit `base` of `repo_git` has a `Cargo.toml`, else none.
@@ -54,11 +72,12 @@ pub fn run(
         let which = format!("{} of {} `{}`", i + 1, steps.len(), step.name);
         let left = limit.saturating_sub(started.elapsed());
         if left < Duration::from_secs(1) {
-            return Err(anyhow!(
+            return Err(Failed(format!(
                 "warm-up timed out after {} in strict cloud sandbox {sandbox} before step \
                  {which}; no agent ran",
                 minutes(limit)
-            ));
+            ))
+            .into());
         }
         let outcome = gates::run_sandbox_tier(
             backend,
@@ -70,14 +89,14 @@ pub fn run(
         )
         .remove(0);
         if !outcome.result.passed {
-            return Err(failed(sandbox, &which, &outcome, limit));
+            return Err(step_failed(sandbox, &which, &outcome, limit).into());
         }
     }
     Ok(())
 }
 
 /// Why step `which` stopped the warm-up, with the end of its output.
-fn failed(sandbox: &str, which: &str, outcome: &GateOutcome, limit: Duration) -> anyhow::Error {
+fn step_failed(sandbox: &str, which: &str, outcome: &GateOutcome, limit: Duration) -> Failed {
     let what = if outcome.timed_out {
         format!("warm-up timed out after {} at step {which}", minutes(limit))
     } else if outcome.could_not_run {
@@ -88,11 +107,11 @@ fn failed(sandbox: &str, which: &str, outcome: &GateOutcome, limit: Duration) ->
             None => format!("warm-up step {which} failed"),
         }
     };
-    anyhow!(
+    Failed(format!(
         "{what} in strict cloud sandbox {sandbox}; no agent ran (`sbxm task resume` makes the \
          sandbox afresh); its output ends:\n{}",
         last_lines(&outcome.output_tail, TAIL_LINES)
-    )
+    ))
 }
 
 /// `20m` for twenty minutes.

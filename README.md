@@ -752,7 +752,8 @@ What changes in the cloud:
   round in the kept worker sandbox isn't warmed again. A step that fails, or a warm-up past 20 minutes (enforced
   inside the sandbox), fails the task before any agent runs: the sandbox is removed, then its scoped secrets, and the
   error names the step (or says `warm-up timed out after 20m`) with the last 40 lines of its output, which go to
-  `run.log`. There is no automatic retry: `task resume` makes the sandbox afresh.
+  `run.log`. A task whose first start fails this way keeps its folder, `prepared/failed`. There is no automatic
+  retry: `task resume` makes the sandbox afresh.
 - **Secrets.** The provider logins stay global in the cloud: `sbx secret set anthropic --oauth --cloud` and `sbx
   secret set openai --oauth --cloud`. Their values never enter a sandbox. No other secret has a value source in the
   cloud yet, so a profile whose `secrets.services` names anything else is refused for a cloud task.

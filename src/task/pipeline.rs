@@ -1655,7 +1655,23 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
                     lifetime::Released::Warning(warning) => warnings.push(warning),
                 }
             }
-            if kept.is_none() {
+            if warm_up::failed(&e) {
+                // Issue 560, review M-1: a failed warm-up keeps the task, `prepared/failed`, so
+                // `run.log` gets the step's output and `task resume` makes the sandbox afresh.
+                task.notes.push(
+                    "start: the strict cloud sandbox's warm-up failed; `sbxm task resume` makes \
+                     the sandbox afresh"
+                        .to_owned(),
+                );
+                if let Err(w) = task
+                    .finish(Status::Failed)
+                    .and_then(|()| record::write(&meta, task))
+                {
+                    warnings.push(format!(
+                        "task.json couldn't record the failed warm-up: {w:#}"
+                    ));
+                }
+            } else if kept.is_none() {
                 let _ = fs::remove_dir_all(&meta);
             }
             Err(e.context(FailedAfterCreate {
@@ -1681,7 +1697,8 @@ pub struct FailedAfterCreate {
     pub events: Vec<String>,
     /// Why the task's folder stays, as the warning to show: the sandbox's removal failed (or
     /// couldn't be recorded), so `task.json`, its only record, keeps the entry open. `None` when
-    /// the sandbox is gone and the folder went with it.
+    /// the sandbox is gone and the folder went with it, or stays `prepared/failed` after a failed
+    /// warm-up (issue 560) for `task resume`.
     pub kept: Option<String>,
     /// A scoped secret that couldn't be removed, or a secret list the cloud wouldn't give: one
     /// warning each, never dropped. The folder doesn't stay for them: `task.json` records no
