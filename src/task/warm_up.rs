@@ -14,9 +14,11 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 
 use super::config::Warm;
-use super::gates::{self, GateOutcome};
+use super::gates::CARGO_ENV;
 use crate::backend::SandboxBackend;
 use crate::commands::template_build::{self, WarmStep};
+use crate::headless::hit_timeout;
+use crate::run::checks::timed_exec;
 
 /// The whole warm-up's time limit, enforced inside the sandbox: each step's `timeout` is what is
 /// left of it.
@@ -79,38 +81,42 @@ pub fn run(
             ))
             .into());
         }
-        let outcome = gates::run_sandbox_tier(
-            backend,
-            sandbox,
+        // Not through the gates' runner: its 8 KiB tail could cut the last 40 lines (review S-1).
+        let spec = timed_exec(
             Path::new(clone),
-            "warm",
-            std::slice::from_ref(&step.command),
-            left,
-        )
-        .remove(0);
-        if !outcome.result.passed {
-            return Err(step_failed(sandbox, &which, &outcome, limit).into());
-        }
+            left.as_secs().max(1),
+            &format!("{CARGO_ENV}{}", step.command),
+        );
+        let what = match backend.exec(sandbox, &spec) {
+            Ok(out) if out.exit_code == Some(0) => continue,
+            Ok(out) => {
+                let what = if hit_timeout(out.exit_code, &out.stderr) {
+                    format!("warm-up timed out after {} at step {which}", minutes(limit))
+                } else {
+                    match out.exit_code {
+                        Some(code) => format!("warm-up step {which} failed with exit {code}"),
+                        None => format!("warm-up step {which} failed"),
+                    }
+                };
+                (what, format!("{}{}", out.stdout, out.stderr))
+            }
+            Err(e) => (
+                format!("warm-up step {which} could not run"),
+                format!("{e:#}"),
+            ),
+        };
+        return Err(step_failed(sandbox, what).into());
     }
     Ok(())
 }
 
-/// Why step `which` stopped the warm-up, with the end of its output.
-fn step_failed(sandbox: &str, which: &str, outcome: &GateOutcome, limit: Duration) -> Failed {
-    let what = if outcome.timed_out {
-        format!("warm-up timed out after {} at step {which}", minutes(limit))
-    } else if outcome.could_not_run {
-        format!("warm-up step {which} could not run")
-    } else {
-        match outcome.result.exit {
-            Some(code) => format!("warm-up step {which} failed with exit {code}"),
-            None => format!("warm-up step {which} failed"),
-        }
-    };
+/// Why a step stopped the warm-up, `(what happened, its whole output)`, with the end of its
+/// output.
+fn step_failed(sandbox: &str, (what, output): (String, String)) -> Failed {
     Failed(format!(
         "{what} in strict cloud sandbox {sandbox}; no agent ran (`sbxm task resume` makes the \
          sandbox afresh); its output ends:\n{}",
-        last_lines(&outcome.output_tail, TAIL_LINES)
+        last_lines(&output, TAIL_LINES)
     ))
 }
 

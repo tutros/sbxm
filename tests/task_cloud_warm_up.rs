@@ -426,3 +426,37 @@ fn a_first_start_whose_warm_up_fails_keeps_its_log_and_is_resumed_afresh() {
     assert_eq!(warm_heads(&seen, &worker), vec![at_base; 3]);
     assert_eq!(task_record(&f, &id).stage, Stage::Ready);
 }
+
+/// Review S-1: a failed step's last 40 lines are taken from all of its output, not from the
+/// gates' 8 KiB tail: 60 lines of about 310 bytes each keep their whole last 40.
+#[test]
+fn a_failed_step_keeps_its_last_40_lines_whole_however_long() {
+    let pad = "x".repeat(300);
+    let lines: String = (1..=60).map(|i| format!("long line {i} {pad}\n")).collect();
+    assert!(lines.len() > 16 * 1024);
+    let backend = FakeBackend::default().with_default_exec_output(sbxm::backend::ExecOutput {
+        stdout: lines,
+        stderr: String::new(),
+        exit_code: Some(1),
+    });
+    let steps = sbxm::commands::template_build::warm_steps(None);
+
+    let err = sbxm::task::warm_up::run(
+        &backend,
+        "sbxm-task-x-claude",
+        "/home/agent/work/x",
+        &steps,
+        sbxm::task::warm_up::LIMIT,
+    )
+    .unwrap_err();
+
+    let message = format!("{err:#}");
+    for i in 21..=60 {
+        assert!(
+            message.contains(&format!("long line {i} {pad}")),
+            "line {i} isn't whole: {message}"
+        );
+    }
+    assert!(!message.contains("long line 20 "), "{message}");
+    assert!(sbxm::task::warm_up::failed(&err));
+}
