@@ -283,7 +283,7 @@ fn with_title(cells: &[String; 7], title: &str, width: usize) -> [String; 8] {
 /// `sbxm task status` does. A title column follows the ID (issue 246; see [`title_width`]).
 pub fn render(rows: &[TaskRow], now: u64, width: Option<usize>) -> String {
     if rows.is_empty() {
-        return "No tasks yet; start one with `sbxm task start --issue <n>`.\n".to_owned();
+        return crate::hint::named("No tasks yet; start one with `sbxm task start --issue <n>`.\n");
     }
     let data: Vec<[String; 7]> = rows.iter().map(|row| fixed_cells(row, now)).collect();
     let mut widths = HEADER.map(display_width);

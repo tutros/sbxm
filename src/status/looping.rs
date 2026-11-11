@@ -688,14 +688,14 @@ pub fn render(view: &View, width: Option<usize>) -> String {
     }
     match &view.pause {
         loop_pause::State::None => {}
-        loop_pause::State::Set(pause) => lines.push(format!(
+        loop_pause::State::Set(pause) => lines.push(crate::hint::named(&format!(
             "  paused: {}; nothing is armed until you run `sbxm task loop --clear-pause`",
             pause.describe()
-        )),
-        loop_pause::State::Unreadable(why) => lines.push(format!(
+        ))),
+        loop_pause::State::Unreadable(why) => lines.push(crate::hint::named(&format!(
             "  paused: the pause file can't be read ({why}); nothing is armed until you run \
              `sbxm task loop --clear-pause`"
-        )),
+        ))),
     }
     if let Some(work) = &view.work {
         let named =

@@ -151,7 +151,9 @@ fn the_block_is_empty_with_nothing_to_say() {
 }
 
 #[test]
-fn the_writer_rewrites_whole_lines_and_a_partial_one_on_flush() {
+/// The block follows the first rewritten line at once, so a command that goes on running shows
+/// it while it runs (review M-3), and only once.
+fn the_writer_rewrites_whole_lines_and_a_partial_one_on_flush_with_the_block_once() {
     let mut out = Vec::new();
     {
         let mut local = Local::new(&mut out);
@@ -163,7 +165,9 @@ fn the_writer_rewrites_whole_lines_and_a_partial_one_on_flush() {
     }
     let exe = std::env::current_exe().unwrap();
     let program = Shell::HOST.program(&exe.to_string_lossy());
-    let mut expected = format!("run: `{program} task status`\nnext: {program} status").into_bytes();
+    let block = hint::block(&Context::current(), Shell::HOST);
+    let mut expected =
+        format!("run: `{program} task status`\n{block}next: {program} status").into_bytes();
     expected.extend_from_slice(b"\xff sbxm task\n");
     assert_eq!(out, expected);
 }

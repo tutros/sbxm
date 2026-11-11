@@ -51,7 +51,7 @@ pub fn render(
     }
     if records.is_empty() {
         return Ok((
-            "No tasks yet; start one with `sbxm task start --issue <n>`.\n".to_owned(),
+            crate::hint::named("No tasks yet; start one with `sbxm task start --issue <n>`.\n"),
             ids,
         ));
     }

@@ -130,7 +130,8 @@ fn finish_task_with(
     mut warn: TaskWarn,
 ) -> ! {
     if let Err(err) = result {
-        let _ = writeln!(warn, "Error: {err:?}");
+        // One write, so the block (owed by a command it names) follows the whole error.
+        let _ = warn.write_all(format!("Error: {err:?}\n").as_bytes());
     }
     // The screen's last partial line goes out before the block asks whether anything was named.
     let _ = out.flush();
@@ -170,12 +171,17 @@ fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `text` on stdout, its commands named by the running executable (issue 574).
+/// `text` on stdout, its commands named by the running executable (issue 574), then the block
+/// that says where to run them, the first time one is named.
 fn say(text: &str) {
     print!("{}", hint::local(text));
+    if let Some(block) = hint::take_block() {
+        print!("{block}");
+    }
 }
 
 fn run() -> anyhow::Result<()> {
+    hint::enable();
     sbxm::backend::set_trailer_sink(|note| {
         eprint!("{}", hint::local(&format!("warning: {note}\n")))
     });
@@ -289,7 +295,8 @@ fn run() -> anyhow::Result<()> {
                 &config_path,
                 &sbxm::disk::Guard::real(ignore_disk).no_wait(no_wait),
                 &SbxBackend::LOCAL,
-                &mut Local::new(std::io::stdout()),
+                // The rankings and Jev's answers, shown as saved, like `run show`.
+                &mut std::io::stdout(),
                 &mut Local::new(std::io::stderr()),
             )?;
             Ok(())
@@ -303,7 +310,8 @@ fn run() -> anyhow::Result<()> {
                 &run_id,
                 &commands::run_show::Options { full_diff: diff },
             )?;
-            say(&text);
+            // The saved run as it is: its answers and patches are the contestants' (review M-2).
+            print!("{text}");
             Ok(())
         }
         Command::Run(RunArgs {
@@ -315,10 +323,10 @@ fn run() -> anyhow::Result<()> {
                 }),
             ..
         }) => {
-            say(&commands::run_review::submit(
-                &config::config_dir()?,
-                &run_id,
-            )?);
+            print!(
+                "{}",
+                commands::run_review::submit(&config::config_dir()?, &run_id)?
+            );
             Ok(())
         }
         Command::Run(RunArgs {
@@ -366,12 +374,8 @@ fn run() -> anyhow::Result<()> {
                 json,
                 &task::record::SystemProbe,
             )?;
-            // The JSON is data, printed as it is; the table's hints name the executable.
-            if json {
-                print!("{text}");
-            } else {
-                say(&text);
-            }
+            // Printed as it is: its own hint is already named (`hint::named`), and titles stay.
+            print!("{text}");
             Ok(())
         }
         Command::Task {
@@ -1103,7 +1107,8 @@ fn run() -> anyhow::Result<()> {
                 &config::config_dir()?,
                 &commands::task_logs::Options { target, follow },
                 &commands::task_logs::Env::real(),
-                &mut Local::new(std::io::stdout()),
+                // The log as it was written, by whichever command and executable wrote it.
+                &mut std::io::stdout(),
             )
         }
         Command::Run(_) => unreachable!("clap requires a config or a subcommand"),
@@ -1197,7 +1202,8 @@ fn run() -> anyhow::Result<()> {
                 &env,
                 watch,
                 Some(&source),
-                &mut Local::new(std::io::stdout()),
+                // Its LOG column and titles are stored text; its own hints use `hint::named`.
+                &mut std::io::stdout(),
             )
         }
     }

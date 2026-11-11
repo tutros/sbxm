@@ -659,7 +659,14 @@ fn the_cli_runs_template_ls() {
         stdout.starts_with("no templates; build one with `"),
         "{stdout}"
     );
-    assert!(stdout.ends_with(" template build <profile>`\n"), "{stdout}");
+    assert!(
+        stdout
+            .lines()
+            .next()
+            .unwrap()
+            .ends_with(" template build <profile>`"),
+        "{stdout}"
+    );
 }
 
 #[test]
