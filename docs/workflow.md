@@ -167,7 +167,9 @@ sbxm task run --issue 210 --issue 202 --spec sdlc/specs/x.md   # a list, one aft
   - **The worker's hand-backs are on the PR (decision 283):** the PR description `task finish` opens, a draft's too,
     has the `Needs a decision` and `Choices made` sections of the worker's `result.md` right after the risk section
     and `Fixes #N`, in that order, so a choice the worker flagged is seen without reading the whole result. A
-    section that is absent, empty or "none" is left out; one over 2,500 characters is cut (the whole of it
+    section that is absent, empty or "none" is left out; one whose first line is "none" and goes on with a note
+    hands no question back (no toast, no "handed a question back") and the PR shows its note as `None. Note: …`
+    (issue 585), unless another section of that name asks a real question; one over 2,500 characters is cut (the whole of it
     stays in `result.md` in the task folder). The worker never stops to wait for an answer: it picks, flags the pick and goes on, and the user answers
     on the PR. The review comment is unchanged.
   - **An issue can stay open after its PR merges (issue 506):** a line `**Closes on merge:** no` in the issue body
