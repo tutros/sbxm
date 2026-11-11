@@ -607,7 +607,8 @@ pub enum TaskCommand {
     /// log row per task goes to <base_dir>/.sbxm/loop-logs/<date>-<HHMMSS>-loop.md, posted at the
     /// stop to the open issue labeled loop-log. Re-runs a failed workflow run of its
     /// PRs and of main once; on a second failure disarms the PR, or pauses all arming on a red
-    /// main until --clear-pause.
+    /// main until --clear-pause. Arms a medium-risk PR once its veto window ends or it is labelled
+    /// go, until the medium-trial issue records 10 such merges.
     Loop {
         /// Run at most this many tasks.
         #[arg(long, value_name = "N")]
@@ -615,7 +616,8 @@ pub enum TaskCommand {
         /// Run these issues in this order instead of the queue (repeatable).
         #[arg(long = "issue", value_name = "N")]
         issues: Vec<u32>,
-        /// Lift the pause a red main set (it says what it removed) and run nothing.
+        /// Lift the pause a red main set and the medium pause --pause-medium set (it says what it
+        /// removed) and run nothing.
         #[arg(long, conflicts_with_all = ["cap", "issues"])]
         clear_pause: bool,
         /// Run nothing: say for each issue (--issue, or the queue) whether the loop would take it or
@@ -630,6 +632,15 @@ pub enum TaskCommand {
         /// minutes while it waits or is paused. Says so when no loop is running.
         #[arg(long, conflicts_with_all = ["cap", "issues", "clear_pause", "check", "wait"])]
         stop: bool,
+        /// Record a break after a medium-risk auto-merge that the loop can't see (a merged PR that
+        /// needed a fix): stops arming medium-risk PRs (low risk still arms) until --clear-pause,
+        /// and posts a break comment on the open issue labelled medium-trial. Runs nothing.
+        #[arg(
+            long,
+            value_name = "WHY",
+            conflicts_with_all = ["cap", "issues", "clear_pause", "check", "wait", "stop"]
+        )]
+        pause_medium: Option<String>,
     },
     /// Add one job to the loop's queue (<base_dir>/.sbxm/queue/, decision 309) after the checks
     /// the loop makes when it takes it: refused at once with the reason, writing nothing, when the

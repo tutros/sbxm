@@ -5,9 +5,9 @@ use std::sync::Mutex;
 use anyhow::{Result, anyhow};
 
 use super::{
-    CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, JobLog, ListedPr, Mergeable,
-    PostedStatus, PrComment, PrFiles, PrInfo, PrMergeState, PrRequest, PrState, RunStatus,
-    WorkflowRun,
+    CommitStatus, GitHubBackend, Issue, IssueRequest, IssueText, JobLog, LabelEvent, ListedPr,
+    Mergeable, PostedStatus, PrComment, PrFiles, PrInfo, PrMergeState, PrRequest, PrState,
+    RunStatus, WorkflowRun,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,6 +59,9 @@ pub enum GhCall {
     PrRemoveLabel(String, u32, String),
     /// Repo, commit.
     CommitStatuses(String, String),
+    IssueCommentBodies(String, u32),
+    LabelEvents(String, u32),
+    PrMergedAt(String, u32),
 }
 
 #[derive(Default)]
@@ -97,7 +100,7 @@ pub struct FakeGitHub {
     /// The id the next `issue_comment` returns; 1 when not scripted.
     next_comment_id: Mutex<u64>,
     /// The issues whose `issue_comment` fails.
-    failing_issue_comments: Vec<u32>,
+    failing_issue_comments: Mutex<Vec<u32>>,
     failing_comment_edits: bool,
     status_failure: Option<String>,
     /// The statuses `commit_status` posted, by commit, oldest first: what `commit_status_state`
@@ -120,6 +123,15 @@ pub struct FakeGitHub {
     /// What `commit_statuses` answers, by commit; none for a commit not scripted.
     posted_statuses: Vec<(String, Vec<PostedStatus>)>,
     statuses_failure: Option<String>,
+    /// What `issue_comment_bodies` answers, by issue, oldest first: the scripted ones, then those
+    /// `issue_comment` posted (issue 550).
+    issue_comments: Mutex<Vec<(u32, String)>>,
+    issue_comments_failure: Option<String>,
+    /// What `label_events` answers, by PR; none for a PR not scripted.
+    label_events: Mutex<Vec<(u32, Vec<LabelEvent>)>>,
+    label_events_failure: Mutex<Option<String>>,
+    /// What `pr_merged_at` answers, by PR; not merged when not scripted.
+    merged_at: Mutex<Vec<(u32, u64)>>,
     calls: Mutex<Vec<GhCall>>,
 }
 
@@ -336,8 +348,8 @@ impl FakeGitHub {
     }
 
     /// `issue_comment` on issue `number` fails (and is still recorded).
-    pub fn failing_issue_comments_on(mut self, number: u32) -> Self {
-        self.failing_issue_comments.push(number);
+    pub fn failing_issue_comments_on(self, number: u32) -> Self {
+        self.set_issue_comments_failing(number, true);
         self
     }
 
@@ -388,6 +400,60 @@ impl FakeGitHub {
                 pr.state = PrState::Merged;
             }
         }
+    }
+
+    /// The comments issue `number` has, oldest first (issue 550).
+    pub fn with_issue_comments(self, number: u32, bodies: &[&str]) -> Self {
+        self.issue_comments
+            .lock()
+            .unwrap()
+            .extend(bodies.iter().map(|b| (number, (*b).to_owned())));
+        self
+    }
+
+    /// The comments issue `number` has now, oldest first.
+    pub fn issue_comments_now(&self, number: u32) -> Vec<String> {
+        self.issue_comments
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(n, _)| *n == number)
+            .map(|(_, body)| body.clone())
+            .collect()
+    }
+
+    /// From now on `issue_comment` on issue `number` fails, or no longer does (issue 550).
+    pub fn set_issue_comments_failing(&self, number: u32, failing: bool) {
+        let mut all = self.failing_issue_comments.lock().unwrap();
+        all.retain(|n| *n != number);
+        if failing {
+            all.push(number);
+        }
+    }
+
+    /// From now on `label_events` fails with `message`, or no longer does (issue 550).
+    pub fn set_label_events_failure(&self, message: Option<&str>) {
+        *self.label_events_failure.lock().unwrap() = message.map(str::to_owned);
+    }
+
+    /// Only `issue_comment_bodies` fails (and is still recorded).
+    pub fn failing_issue_comment_reads(mut self, message: &str) -> Self {
+        self.issue_comments_failure = Some(message.to_owned());
+        self
+    }
+
+    /// PR `number`'s label history, oldest first (issue 550).
+    pub fn set_label_events(&self, number: u32, events: Vec<LabelEvent>) {
+        let mut all = self.label_events.lock().unwrap();
+        all.retain(|(n, _)| *n != number);
+        all.push((number, events));
+    }
+
+    /// When PR `number` merged (issue 550).
+    pub fn set_merged_at(&self, number: u32, at: u64) {
+        let mut all = self.merged_at.lock().unwrap();
+        all.retain(|(n, _)| *n != number);
+        all.push((number, at));
     }
 
     /// Every call fails with `message` (and is still recorded).
@@ -612,9 +678,18 @@ impl GitHubBackend for FakeGitHub {
             number,
             body.to_owned(),
         ))?;
-        if self.failing_issue_comments.contains(&number) {
+        if self
+            .failing_issue_comments
+            .lock()
+            .unwrap()
+            .contains(&number)
+        {
             return Err(anyhow!("FakeGitHub: the comment on issue {number} fails"));
         }
+        self.issue_comments
+            .lock()
+            .unwrap()
+            .push((number, body.to_owned()));
         let mut next = self.next_comment_id.lock().unwrap();
         let id = (*next).max(1);
         *next = id + 1;
@@ -861,5 +936,39 @@ impl GitHubBackend for FakeGitHub {
             .find(|(s, _)| s == sha)
             .map(|(_, statuses)| statuses.clone())
             .unwrap_or_default())
+    }
+
+    fn issue_comment_bodies(&self, repo: &str, number: u32) -> Result<Vec<String>> {
+        self.record(GhCall::IssueCommentBodies(repo.to_owned(), number))?;
+        if let Some(message) = &self.issue_comments_failure {
+            return Err(anyhow!("{message}"));
+        }
+        Ok(self.issue_comments_now(number))
+    }
+
+    fn label_events(&self, repo: &str, number: u32) -> Result<Vec<LabelEvent>> {
+        self.record(GhCall::LabelEvents(repo.to_owned(), number))?;
+        if let Some(message) = self.label_events_failure.lock().unwrap().as_ref() {
+            return Err(anyhow!("{message}"));
+        }
+        Ok(self
+            .label_events
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(n, _)| *n == number)
+            .map(|(_, events)| events.clone())
+            .unwrap_or_default())
+    }
+
+    fn pr_merged_at(&self, repo: &str, number: u32) -> Result<Option<u64>> {
+        self.record(GhCall::PrMergedAt(repo.to_owned(), number))?;
+        Ok(self
+            .merged_at
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(n, _)| *n == number)
+            .map(|(_, at)| *at))
     }
 }

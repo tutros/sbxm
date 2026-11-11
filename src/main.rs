@@ -890,6 +890,28 @@ fn run() -> anyhow::Result<()> {
             finish_task(result, out, warn)
         }
         Command::Task {
+            command:
+                TaskCommand::Loop {
+                    pause_medium: Some(why),
+                    ..
+                },
+        } => {
+            let (mut out, mut warn) = task_writers(Vec::new(), None)?;
+            let result = (|| -> anyhow::Result<()> {
+                commands::task_loop::pause_medium(
+                    &config::config_dir()?,
+                    &std::env::current_dir()?,
+                    None,
+                    &why,
+                    &sbxm::github::gh::GhBackend::default(),
+                    &sbxm::run::results::now,
+                    &mut out,
+                    &mut warn,
+                )
+            })();
+            finish_task(result, out, warn)
+        }
+        Command::Task {
             command: TaskCommand::Loop { stop: true, .. },
         } => {
             let (mut out, warn) = task_writers(Vec::new(), None)?;
