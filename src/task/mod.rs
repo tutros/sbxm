@@ -34,4 +34,5 @@ pub mod session;
 pub mod shape;
 pub mod stale_lock;
 pub mod summary;
+pub mod trial;
 pub mod window;
