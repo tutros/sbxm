@@ -71,6 +71,16 @@ const ALLOWED_HOST: &str = "example.com";
 /// built-in list (S17) that the strict removal denies.
 const DENIED_HOSTS: [&str; 2] = ["www.wikipedia.org", "github.com"];
 
+/// Issue 560: the build hosts the walk's profile allows at create, for its warm-up, which sbxm
+/// denies after it, before any agent runs.
+const BUILD_HOSTS: [&str; 2] = ["index.crates.io", "static.crates.io"];
+
+/// The walk's `[warm]` command: it fetches one crate and its index entry from crates.io into the
+/// sandbox, as `cargo fetch` would (a `[warm]` command, so the sandbox needs no Rust toolchain).
+const WARM_COMMAND: &str = "mkdir -p \"$HOME/sbxm-it-warm\" && curl -fsSL \
+     https://index.crates.io/cf/g-/cfg-if -o \"$HOME/sbxm-it-warm/cfg-if.index\" && curl -fsSL \
+     https://static.crates.io/crates/cfg-if/cfg-if-1.0.0.crate -o \"$HOME/sbxm-it-warm/cfg-if.crate\"";
+
 /// The environment variable the fake scoped secret's placeholder is in.
 const SECRET_ENV: &str = "SBXM_IT_FAKE";
 
@@ -124,8 +134,8 @@ fn curl(sandbox: &str, url: &str) -> (Option<i32>, String) {
     (out.status.code(), stdout)
 }
 
-/// What the walk saw inside the worker sandbox while it ran, read before its first `exec` (after
-/// sbxm's strict check, which comes before any `exec`, decision 255).
+/// What the walk saw inside the worker sandbox while it ran, read before its agent's run: after
+/// sbxm's warm-up and strict check, which come before any agent (decision 255, issue 560).
 #[derive(Debug, Default)]
 struct Live {
     /// `sbx --cloud ls`'s entry for it: expiry, CPUs, memory.
@@ -136,8 +146,11 @@ struct Live {
     allowed_hosts: Option<Result<Vec<String>, String>>,
     /// `<http_code> <http_connect>` from [`ALLOWED_HOST`].
     allowed_answer: String,
-    /// Each of [`DENIED_HOSTS`] with the refusal shape it showed (`None`: not refused).
+    /// Each of [`DENIED_HOSTS`] and [`BUILD_HOSTS`] with the refusal shape it showed (`None`: not
+    /// refused).
     denied: Vec<(String, Option<&'static str>, String)>,
+    /// Whether the files [`WARM_COMMAND`] fetched are in the sandbox (issue 560).
+    warmed: bool,
     /// The fake secret's placeholder in [`SECRET_ENV`], the files the agent can read that hold
     /// its value, and the count of process environments holding it.
     placeholder: String,
@@ -250,7 +263,8 @@ fn classify_scan(exec_ok: bool, stdout: &str) -> FileScan {
 /// The cloud instance of [`SbxBackend`], watched: it records each create (name and TTL), sets the
 /// fake scoped secret before the worker's create (as sbxm does for a scoped secret, slice 4, which
 /// P8 (a) gives no production value yet), runs the [`Live`] checks before the worker sandbox's
-/// first `exec`, and saves a removal error that says "temporarily unavailable" (decision 267).
+/// agent runs (its clone and warm-up come before sbxm's deny, issue 560), and saves a removal
+/// error that says "temporarily unavailable" (decision 267).
 struct Watched {
     worker: String,
     secret: ScopedSecret,
@@ -289,11 +303,19 @@ impl Watched {
                 .map_err(|e| format!("{e:#}")),
         );
         live.allowed_answer = curl(sandbox, &format!("https://{ALLOWED_HOST}")).1;
-        for host in DENIED_HOSTS {
+        for host in DENIED_HOSTS.iter().chain(&BUILD_HOSTS) {
             let (exit, codes) = curl(sandbox, &format!("https://{host}"));
             live.denied
-                .push((host.to_owned(), refusal_shape(exit, &codes), codes));
+                .push(((*host).to_owned(), refusal_shape(exit, &codes), codes));
         }
+        let warmed = sbx_cloud(&[
+            "exec",
+            sandbox,
+            "sh",
+            "-c",
+            "test -s \"$HOME/sbxm-it-warm/cfg-if.index\" && test -s \"$HOME/sbxm-it-warm/cfg-if.crate\"",
+        ]);
+        live.warmed = warmed.status.success();
         let half = self.secret.value.len() / 2;
         let script = format!("echo \"placeholder=${{{SECRET_ENV}:-}}\"\n{SCAN_SCRIPT}");
         let out = sbx_cloud(&[
@@ -394,7 +416,7 @@ impl SandboxBackend for Watched {
         CLOUD.version()
     }
     fn exec(&self, sandbox: &str, spec: &ExecSpec) -> Result<ExecOutput> {
-        if sandbox == self.worker {
+        if sandbox == self.worker && spec.argv.iter().any(|a| a == "claude") {
             let mut live = self.live.lock().unwrap();
             if live.is_none() {
                 *live = Some(self.observe(sandbox));
@@ -675,8 +697,9 @@ fn cloud_walk_against_real_sbx() {
     std::fs::write(
         profile_dir.join("profile.toml"),
         format!(
-            "description = \"real cloud test\"\n\n[network]\nallow = [\"{ALLOWED_HOST}\"]\n\n\
-             [template]\nstrict = true\nallow = [\"{ALLOWED_HOST}\"]\n"
+            "description = \"real cloud test\"\n\n[network]\nallow = [\"{ALLOWED_HOST}\", \
+             \"{}\", \"{}\"]\n\n[template]\nstrict = true\nallow = [\"{ALLOWED_HOST}\"]\n",
+            BUILD_HOSTS[0], BUILD_HOSTS[1]
         ),
     )
     .unwrap();
@@ -694,10 +717,15 @@ fn cloud_walk_against_real_sbx() {
     real_git(&seed, &["push", origin.to_str().unwrap(), "main"]);
     let target = tmp.path().join("target");
     std::fs::create_dir_all(&target).unwrap();
+    // Issue 560: a strict sandbox is warmed up with the repo's `[warm]` before sbxm's deny.
     std::fs::write(
         target.join("sbxm-task.toml"),
-        "[sandbox]\nprofile = \"default\"\ncpus = 2\nmemory = \"4g\"\n\n[gates]\nsandbox = []\n\n\
-         [prompts]\nworker = \"worker.md\"\nreviewer = \"reviewer.md\"\n",
+        format!(
+            "[sandbox]\nprofile = \"default\"\ncpus = 2\nmemory = \"4g\"\n\n[gates]\nsandbox = []\n\n\
+             [prompts]\nworker = \"worker.md\"\nreviewer = \"reviewer.md\"\n\n\
+             [warm]\ncommands = [{}]\nlock_files = []\n",
+            toml::Value::String(WARM_COMMAND.to_owned())
+        ),
     )
     .unwrap();
     std::fs::write(target.join("worker.md"), WORKER_PROMPT).unwrap();
@@ -798,6 +826,19 @@ fn cloud_walk_against_real_sbx() {
     for entry in hosts {
         let host = entry.split(':').next().unwrap_or(entry);
         assert!(RUNTIME_HOSTS.contains(&host), "{host} allowed: {hosts:?}");
+    }
+
+    // Issue 560: the warm-up fetched its crate while the build hosts were allowed, and the agent
+    // can't reach them after sbxm's deny (they are among `denied`, checked below).
+    assert!(live.warmed, "the warm-up's files are missing: {live:?}");
+    for host in BUILD_HOSTS {
+        assert!(
+            run_log.contains(&format!("strict cloud sandbox {worker}: sbxm denied"))
+                && run_log
+                    .lines()
+                    .any(|l| l.contains("sbxm denied") && l.contains(host)),
+            "{host} not denied: {run_log}"
+        );
     }
 
     // Egress: the allowed host answers, the denied ones fail in any of S14's three shapes.

@@ -58,6 +58,16 @@ fn cloud_backend_with(
     id: &str,
     worker: sbxm::backend::ExecOutput,
 ) -> sbxm::backend::FakeBackend {
+    cloud_backend_observing(root, id, worker, |_, _| {})
+}
+
+/// [`cloud_backend_with`] that shows `observe` every `exec` first, with the clone's host path.
+fn cloud_backend_observing(
+    root: &std::path::Path,
+    id: &str,
+    worker: sbxm::backend::ExecOutput,
+    observe: impl Fn(&std::path::Path, &sbxm::backend::ExecSpec) + Send + Sync + 'static,
+) -> sbxm::backend::FakeBackend {
     use common::task_fixture::{is_headless, ok};
 
     std::fs::create_dir_all(root.join(HOME.trim_start_matches('/'))).unwrap();
@@ -65,6 +75,7 @@ fn cloud_backend_with(
     let map = move |arg: &str| arg.replace(HOME, &format!("{inside}{HOME}"));
     let worker_map = map.clone();
     let clone = format!("{HOME}/work/{id}");
+    let observed = std::path::PathBuf::from(map(&clone));
     cloud_ready()
         .with_sandbox_root(root)
         .with_exec_output_matching("printenv", ok(&format!("{HOME}\n")))
@@ -79,6 +90,7 @@ fn cloud_backend_with(
             }
         })
         .with_exec_responder(move |_sandbox, spec| {
+            observe(&observed, spec);
             if !matches!(spec.argv[0].as_str(), "sh" | "git" | "mkdir") {
                 return None;
             }
@@ -169,8 +181,12 @@ fn described_log(backend: &sbxm::backend::FakeBackend) -> Vec<String> {
                 "bundle"
             } else if argv.contains("status --porcelain") {
                 "status"
+            } else if argv.contains("--locked") || argv.contains(WARM_MARK) {
+                "warm"
             } else if argv.contains("cargo test") {
                 "gate"
+            } else if argv.contains("checkout") {
+                "checkout"
             } else {
                 "other"
             };
@@ -1735,6 +1751,417 @@ fn task_run_issue_local_overrides_a_cloud_config_for_the_start_too() {
     );
 }
 
+// Issue 560: a strict cloud sandbox is warmed up before sbxm's deny. Its clone is checked out at
+// the task's base, detached; the warm-up of `sbxm template build --warm` runs there (the
+// `[warm]` commands, else the built-in cargo steps for a base with a `Cargo.toml`); then the
+// deny and its check; only then the task's branch, and the agent. A failed step fails the start
+// before any agent, on the path a failed strict check takes.
+
+/// A `[warm]` command the tests can tell apart in the backend log.
+const WARM_MARK: &str = "make warm-deps";
+
+/// The cargo steps of the built-in warm-up, in order.
+const CARGO_STEPS: [&str; 3] = [
+    "cargo fetch --locked",
+    "cargo clippy --all-targets --locked",
+    "cargo test --no-run --locked",
+];
+
+/// The list a strict worker sandbox of these tests starts out allowing: the runtime list, the
+/// build hosts sbxm denies, and one more.
+fn warm_list() -> Vec<&'static str> {
+    let mut list = CLAUDE_HOSTS.to_vec();
+    list.extend([
+        "crates.io",
+        "index.crates.io",
+        "static.crates.io",
+        "github.com",
+    ]);
+    list
+}
+
+/// The hosts of [`warm_list`] sbxm denies.
+const WARM_DENIED: [&str; 3] = ["index.crates.io", "static.crates.io", "github.com"];
+
+/// Adds a `Cargo.toml` and its lock to `main` in the fixture's origin; returns the new tip, the
+/// base every task then starts from.
+fn cargo_base(f: &common::task_fixture::Fixture) -> String {
+    let seed = f.env.tmp.path().join("origin-cargo");
+    common::git(
+        f.env.tmp.path(),
+        &[
+            "clone",
+            "-q",
+            &common::task_fixture::source(f),
+            seed.to_str().unwrap(),
+        ],
+    );
+    std::fs::write(seed.join("Cargo.toml"), "[package]\nname = \"t\"\n").unwrap();
+    std::fs::write(seed.join("Cargo.lock"), "version = 4\n").unwrap();
+    common::git(&seed, &["add", "-A"]);
+    common::git(&seed, &["commit", "-q", "-m", "cargo"]);
+    common::git(&seed, &["push", "-q", "origin", "main"]);
+    common::git(&seed, &["rev-parse", "HEAD"]).trim().to_owned()
+}
+
+/// Where the clone's HEAD was when an `exec` ran: its commit, and the branch it was on (`None`
+/// when detached).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Head {
+    commit: String,
+    branch: Option<String>,
+}
+
+fn head_of(clone: &std::path::Path) -> Head {
+    let run = |args: &[&str]| {
+        std::process::Command::new("git")
+            .arg("-C")
+            .arg(clone)
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let commit = String::from_utf8(run(&["rev-parse", "HEAD"]).stdout).unwrap();
+    let branch = run(&["symbolic-ref", "-q", "--short", "HEAD"]);
+    Head {
+        commit: commit.trim().to_owned(),
+        branch: branch
+            .status
+            .success()
+            .then(|| String::from_utf8(branch.stdout).unwrap().trim().to_owned()),
+    }
+}
+
+/// Each warm-up step and worker run, in order, with the clone's [`Head`] then.
+type Seen = std::sync::Arc<std::sync::Mutex<Vec<(String, Head)>>>;
+
+/// [`cloud_backend`] that records the clone's [`Head`] at each warm-up step and the worker.
+fn warm_backend(root: &std::path::Path, id: &str) -> (sbxm::backend::FakeBackend, Seen) {
+    use common::task_fixture::{CLAUDE_DONE, is_headless, ok};
+
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let record = seen.clone();
+    let backend = cloud_backend_observing(root, id, ok(CLAUDE_DONE), move |clone, spec| {
+        let argv = spec.argv.join(" ");
+        let what = if is_headless(spec) {
+            "worker".to_owned()
+        } else if let Some(step) = CARGO_STEPS.iter().find(|s| argv.contains(*s)) {
+            (*step).to_owned()
+        } else if argv.contains(WARM_MARK) {
+            WARM_MARK.to_owned()
+        } else {
+            return;
+        };
+        record.lock().unwrap().push((what, head_of(clone)));
+    });
+    (backend, seen)
+}
+
+/// The calls of a strict worker start up to its agent: the create, the clone, the `warm` steps,
+/// the deny of [`WARM_DENIED`] and its check, the branch's checkout, the task's files, the agent.
+fn warmed_start(id: &str, warm: usize) -> Vec<String> {
+    let sandbox = format!("sbxm-task-{id}-claude");
+    let clone = format!("{HOME}/work/{id}");
+    let mut calls = vec![
+        format!("create {sandbox}"),
+        "exec printenv HOME".to_owned(),
+        format!("cp-in {sandbox} {HOME}/.sbxm-task-{id}.bundle"),
+        "exec clone".to_owned(),
+    ];
+    calls.extend((0..warm).map(|_| "exec warm".to_owned()));
+    calls.push(format!("policy-ls {sandbox}"));
+    calls.extend(
+        WARM_DENIED
+            .iter()
+            .map(|h| format!("policy-deny {sandbox} {h}")),
+    );
+    calls.extend([
+        format!("policy-ls {sandbox}"),
+        "exec checkout".to_owned(),
+        "exec mkdir".to_owned(),
+        format!("cp-in {sandbox} {clone}/.sbxm-task/source.md"),
+        format!("cp-in {sandbox} {clone}/.sbxm-task/prompt.md"),
+        "exec worker".to_owned(),
+    ]);
+    calls
+}
+
+/// Boundary (order): create, the clone at the base, each cargo step, the deny, the policy check,
+/// the branch's checkout, then the agent. The steps run detached at the base commit, in the
+/// clone, in the gates' environment, under what is left of the 20-minute limit; the agent runs on
+/// the task's branch.
+#[test]
+fn a_strict_cloud_worker_is_warmed_at_the_base_then_denied_then_checked_out() {
+    let f = fixture_with(LOCAL_TOML);
+    f.env.write_profile("default", STRICT_PROFILE);
+    let base = cargo_base(&f);
+    let id = spec_id(&f);
+    let sandbox = format!("sbxm-task-{id}-claude");
+    let clone = format!("{HOME}/work/{id}");
+    let (backend, seen) = warm_backend(&f.env.tmp.path().join("cloud-fs"), &id);
+    let backend = backend.with_cloud_allow(&warm_list());
+
+    let (result, out) = start_spec(&f, &backend, Some(Location::Cloud));
+
+    result.unwrap();
+    let log = described_log(&backend);
+    let expected = warmed_start(&id, 3);
+    assert_eq!(log[..expected.len()], expected[..], "{log:?}");
+    let detached = Head {
+        commit: base.clone(),
+        branch: None,
+    };
+    let seen = seen.lock().unwrap().clone();
+    let want: Vec<(String, Head)> = CARGO_STEPS
+        .iter()
+        .map(|s| ((*s).to_owned(), detached.clone()))
+        .collect();
+    assert_eq!(seen[..3], want[..]);
+    // The agent runs on the task's branch (its fake run has just committed there).
+    assert_eq!(seen[3].0, "worker");
+    assert_eq!(seen[3].1.branch.as_deref(), Some(id.as_str()));
+    assert_eq!(seen.len(), 4, "{seen:?}");
+    let steps: Vec<_> = backend
+        .execs()
+        .into_iter()
+        .filter(|(_, spec)| spec.argv.join(" ").contains("--locked"))
+        .collect();
+    assert_eq!(steps.len(), 3);
+    let mut limits = Vec::new();
+    for ((name, spec), step) in steps.iter().zip(CARGO_STEPS) {
+        assert_eq!(name, &sandbox);
+        assert_eq!(spec.workdir.as_deref(), Some(std::path::Path::new(&clone)));
+        assert_eq!(spec.argv[0], "timeout", "{:?}", spec.argv);
+        let command = spec.argv.last().unwrap();
+        assert!(
+            command.ends_with(&format!(
+                "CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR=/tmp/target {step}"
+            )),
+            "{command}"
+        );
+        limits.push(spec.argv[3].parse::<u64>().unwrap());
+    }
+    assert!(limits[0] <= 1200 && limits[0] >= 1190, "{limits:?}");
+    assert!(limits.windows(2).all(|w| w[1] <= w[0]), "{limits:?}");
+    assert_eq!(
+        out.matches(&denied_line(&sandbox, &WARM_DENIED)).count(),
+        1,
+        "{out}"
+    );
+}
+
+/// Boundary: a repo with `[warm]` runs its commands, not the cargo steps, though its base has a
+/// `Cargo.toml`.
+#[test]
+fn a_strict_cloud_worker_of_a_repo_with_warm_runs_its_commands() {
+    let f = fixture_with(&format!(
+        "{LOCAL_TOML}\n[warm]\ncommands = [\"{WARM_MARK}\"]\nlock_files = []\n"
+    ));
+    f.env.write_profile("default", STRICT_PROFILE);
+    let base = cargo_base(&f);
+    let id = spec_id(&f);
+    let (backend, seen) = warm_backend(&f.env.tmp.path().join("cloud-fs"), &id);
+    let backend = backend.with_cloud_allow(&warm_list());
+
+    let (result, _) = start_spec(&f, &backend, Some(Location::Cloud));
+
+    result.unwrap();
+    let log = described_log(&backend);
+    let expected = warmed_start(&id, 1);
+    assert_eq!(log[..expected.len()], expected[..], "{log:?}");
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(
+        seen[0],
+        (
+            WARM_MARK.to_owned(),
+            Head {
+                commit: base,
+                branch: None
+            }
+        )
+    );
+    assert!(
+        !backend
+            .execs()
+            .iter()
+            .any(|(_, spec)| spec.argv.join(" ").contains("--locked")),
+        "a cargo step ran"
+    );
+}
+
+/// Boundary: a repo with neither `[warm]` nor a `Cargo.toml` gets no warm-up; the order is
+/// otherwise the same: the clone at the base, the deny, the branch's checkout, the agent.
+#[test]
+fn a_strict_cloud_worker_of_a_repo_with_nothing_to_warm_runs_no_step() {
+    let f = fixture_with(LOCAL_TOML);
+    f.env.write_profile("default", STRICT_PROFILE);
+    let id = spec_id(&f);
+    let (backend, seen) = warm_backend(&f.env.tmp.path().join("cloud-fs"), &id);
+    let backend = backend.with_cloud_allow(&warm_list());
+
+    let (result, _) = start_spec(&f, &backend, Some(Location::Cloud));
+
+    result.unwrap();
+    let log = described_log(&backend);
+    let expected = warmed_start(&id, 0);
+    assert_eq!(log[..expected.len()], expected[..], "{log:?}");
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!(seen[0].1.branch.as_deref(), Some(id.as_str()));
+}
+
+/// Boundary: a profile that isn't strict is unchanged: no warm-up, no deny, the branch cloned
+/// as it is, though the base has a `Cargo.toml`.
+#[test]
+fn a_cloud_worker_of_a_profile_that_is_not_strict_is_not_warmed() {
+    let f = fixture_with(LOCAL_TOML);
+    cargo_base(&f);
+    let id = spec_id(&f);
+    let sandbox = format!("sbxm-task-{id}-claude");
+    let (backend, seen) = warm_backend(&f.env.tmp.path().join("cloud-fs"), &id);
+    let backend = backend.with_cloud_allow(&warm_list());
+
+    let (result, _) = start_spec(&f, &backend, Some(Location::Cloud));
+
+    result.unwrap();
+    let log = described_log(&backend);
+    assert_eq!(
+        log[..5],
+        [
+            format!("create {sandbox}"),
+            "exec printenv HOME".to_owned(),
+            format!("cp-in {sandbox} {HOME}/.sbxm-task-{id}.bundle"),
+            "exec clone".to_owned(),
+            "exec mkdir".to_owned(),
+        ],
+        "{log:?}"
+    );
+    assert!(
+        !log.iter()
+            .any(|c| c.starts_with("policy-") || c == "exec warm" || c == "exec checkout"),
+        "{log:?}"
+    );
+    let seen = seen.lock().unwrap().clone();
+    assert_eq!(seen.len(), 1, "{seen:?}");
+    assert_eq!(seen[0].1.branch.as_deref(), Some(id.as_str()));
+}
+
+/// `lines` lines of output, numbered from 1.
+fn numbered(lines: usize) -> String {
+    (1..=lines).map(|i| format!("out line {i}\n")).collect()
+}
+
+/// Asserts a warm-up that stopped at step `step` (from 1) failed the start before any agent:
+/// the steps up to it, then the sandbox removed, then its scoped secret; no deny, no checkout,
+/// no agent; the task kept `prepared/failed`; the error ends with the last 40 lines of the step's
+/// output.
+fn assert_warm_up_failed(
+    f: &common::task_fixture::Fixture,
+    id: &str,
+    backend: &sbxm::backend::FakeBackend,
+    started: &Started,
+    step: usize,
+) -> String {
+    let sandbox = format!("sbxm-task-{id}-claude");
+    let mut expected = vec![
+        format!("secret-set {sandbox} {FAKE_NAME}"),
+        format!("create {sandbox}"),
+        "exec printenv HOME".to_owned(),
+        format!("cp-in {sandbox} {HOME}/.sbxm-task-{id}.bundle"),
+        "exec clone".to_owned(),
+    ];
+    expected.extend((0..step).map(|_| "exec warm".to_owned()));
+    expected.extend([
+        format!("rm {sandbox}"),
+        format!("secret-ls {sandbox}"),
+        format!("secret-rm {sandbox} {FAKE_NAME}"),
+    ]);
+    assert_eq!(described_log(backend), expected, "{}", started.out);
+    assert!(
+        !backend
+            .execs()
+            .iter()
+            .any(|(_, spec)| common::task_fixture::is_headless(spec)),
+        "an agent ran"
+    );
+    assert_eq!(backend.cloud_secrets(), Vec::<(String, String)>::new());
+    // Review M-1: the task stays, `prepared/failed` with its sandbox's entry closed, for `task
+    // resume` (and its `run.log`, `tests/task_cloud_warm_up.rs`).
+    let task = task_record(f, id);
+    assert_eq!(
+        (task.stage, task.status),
+        (
+            sbxm::task::record::Stage::Prepared,
+            sbxm::task::record::Status::Failed
+        )
+    );
+    assert!(task.sandboxes.iter().all(|e| e.removed_at.is_some()));
+    assert_start_lines(started, &sandbox, "removed");
+    let message = format!("{:#}", started.result.as_ref().unwrap_err());
+    assert!(message.contains(&sandbox), "{message}");
+    assert!(message.contains("out line 11\n"), "{message}");
+    assert!(!message.contains("out line 10\n"), "{message}");
+    message
+}
+
+/// Boundary: each cargo step failing (the fetch, clippy, the test build) fails the start before
+/// any agent, the sandbox then its scoped secret removed, the step named, and the last 40 lines
+/// of its output in the error, so in `run.log`.
+#[test]
+fn each_failing_warm_up_step_fails_the_start_before_any_agent() {
+    for (i, step) in CARGO_STEPS.iter().enumerate() {
+        let f = fixture_with(LOCAL_TOML);
+        f.env.write_profile("default", STRICT_PROFILE);
+        cargo_base(&f);
+        let id = spec_id(&f);
+        let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &id)
+            .with_cloud_allow(&warm_list())
+            .with_exec_output_matching(
+                step,
+                sbxm::backend::ExecOutput {
+                    stdout: numbered(30),
+                    stderr: numbered(50)[numbered(30).len()..].to_owned(),
+                    exit_code: Some(101),
+                },
+            );
+
+        let started = start_cloud_with_secrets(&f, &backend, &[fake_secret()]);
+
+        let message = assert_warm_up_failed(&f, &id, &backend, &started, i + 1);
+        let named = format!("warm-up step {} of 3 `{step}` failed with exit 101", i + 1);
+        assert!(message.contains(&named), "{message}");
+        assert!(message.ends_with("out line 50"), "{message}");
+    }
+}
+
+/// Boundary: the 20-minute limit passed (the in-sandbox `timeout` stopped a step) takes the same
+/// path, saying the warm-up timed out.
+#[test]
+fn a_warm_up_past_its_limit_fails_the_start_saying_it_timed_out() {
+    let f = fixture_with(LOCAL_TOML);
+    f.env.write_profile("default", STRICT_PROFILE);
+    cargo_base(&f);
+    let id = spec_id(&f);
+    let backend = cloud_backend(&f.env.tmp.path().join("cloud-fs"), &id)
+        .with_cloud_allow(&warm_list())
+        .with_exec_output_matching(
+            "cargo clippy",
+            sbxm::backend::ExecOutput {
+                stdout: numbered(49),
+                stderr: "timeout: sending signal TERM to command 'sh'\n".into(),
+                exit_code: Some(124),
+            },
+        );
+
+    let started = start_cloud_with_secrets(&f, &backend, &[fake_secret()]);
+
+    let message = assert_warm_up_failed(&f, &id, &backend, &started, 2);
+    assert!(
+        message.contains("warm-up timed out after 20m at step 2 of 3 `cargo clippy"),
+        "{message}"
+    );
+}
+
 // Slice 7: strict mode in the cloud (`sdlc/milestone-4.md` P9, P10, "After create: the
 // strict-policy check fails closed"; decisions 255, 264). A strict sandbox is created with the
 // build allow list, every allowed host outside the runtime list (the harness's provider hosts plus
@@ -1769,6 +2196,25 @@ fn denied_line(sandbox: &str, hosts: &[&str]) -> String {
     }
 }
 
+/// [`cloud_ready`] whose `printenv HOME` answers [`HOME`], so a sandbox's clone is made (every
+/// other `exec` passes with no output) and the strict hold after it is reached (issue 560).
+fn cloud_seeding() -> sbxm::backend::FakeBackend {
+    cloud_ready()
+        .with_exec_output_matching("printenv", common::task_fixture::ok(&format!("{HOME}\n")))
+}
+
+/// Asserts no agent ran and the task's branch was never checked out: only the clone's seeding
+/// ran in the sandbox.
+fn assert_no_agent(backend: &sbxm::backend::FakeBackend) {
+    for (_, spec) in backend.execs() {
+        let argv = spec.argv.join(" ");
+        assert!(
+            argv.contains("printenv HOME") || argv.contains("git clone"),
+            "{argv}"
+        );
+    }
+}
+
 /// Boundary: a list that is exactly the runtime list passes with no deny, and the agent runs.
 #[test]
 fn a_strict_cloud_worker_whose_list_is_the_runtime_list_runs_the_agent() {
@@ -1783,14 +2229,20 @@ fn a_strict_cloud_worker_whose_list_is_the_runtime_list_runs_the_agent() {
     let (result, out) = start_spec(&f, &backend, Some(Location::Cloud));
 
     result.unwrap();
+    // The clone (issue 560: before the deny, with nothing to warm up here), the check, then
+    // the task's branch.
     let log = described_log(&backend);
     assert_eq!(
-        log[..4],
+        log[..8],
         [
             format!("create {sandbox}"),
-            format!("policy-ls {sandbox}"),
-            format!("policy-ls {sandbox}"),
             "exec printenv HOME".to_owned(),
+            format!("cp-in {sandbox} {HOME}/.sbxm-task-{id}.bundle"),
+            "exec clone".to_owned(),
+            format!("policy-ls {sandbox}"),
+            format!("policy-ls {sandbox}"),
+            "exec checkout".to_owned(),
+            "exec mkdir".to_owned(),
         ]
     );
     assert!(log.contains(&"exec worker".to_owned()), "{log:?}");
@@ -1827,12 +2279,15 @@ fn a_strict_cloud_worker_denies_every_host_outside_the_runtime_list_and_keeps_th
     // `*.example.org` covers hosts under the domain, not the domain itself (as [232]).
     let mut denied = BUILT_IN_OTHERS.to_vec();
     denied.extend(["example.org", "postman-echo.com"]);
-    let mut expected = vec![format!("create {sandbox}"), format!("policy-ls {sandbox}")];
-    expected.extend(denied.iter().map(|h| format!("policy-deny {sandbox} {h}")));
-    expected.extend([
-        format!("policy-ls {sandbox}"),
+    let mut expected = vec![
+        format!("create {sandbox}"),
         "exec printenv HOME".to_owned(),
-    ]);
+        format!("cp-in {sandbox} {HOME}/.sbxm-task-{id}.bundle"),
+        "exec clone".to_owned(),
+        format!("policy-ls {sandbox}"),
+    ];
+    expected.extend(denied.iter().map(|h| format!("policy-deny {sandbox} {h}")));
+    expected.extend([format!("policy-ls {sandbox}"), "exec checkout".to_owned()]);
     let log = described_log(&backend);
     assert_eq!(log[..expected.len()], expected[..], "{log:?}");
     assert!(log.contains(&"exec worker".to_owned()), "{log:?}");
@@ -1860,7 +2315,7 @@ fn a_strict_cloud_codex_worker_keeps_the_openai_hosts() {
     ];
     let mut list = openai.to_vec();
     list.extend(["github.com", "api.anthropic.com"]);
-    let backend = cloud_ready()
+    let backend = cloud_seeding()
         .and_secrets(&["openai"])
         .with_cloud_allow(&list);
     let spec = common::task_fixture::spec_file(&f, "Build a thing.\n");
@@ -1868,7 +2323,7 @@ fn a_strict_cloud_codex_worker_keeps_the_openai_hosts() {
     options.worker_harness = Some(sbxm::harness::Harness::Codex);
     let mut out = Vec::new();
 
-    // The fake's `printenv HOME` answers nothing, so the start fails after the check passed.
+    // The fake's worker leaves nothing to collect, so the start fails after the check passed.
     let _ = sbxm::commands::task_start::run_spec(
         &f.env.config_dir(),
         &options,
@@ -1882,26 +2337,30 @@ fn a_strict_cloud_codex_worker_keeps_the_openai_hosts() {
     let out = String::from_utf8(out).unwrap();
     let log = described_log(&backend);
     assert_eq!(
-        log[..5],
+        log[..9],
         [
             format!("create {sandbox}"),
+            "exec printenv HOME".to_owned(),
+            format!("cp-in {sandbox} {HOME}/.sbxm-task-{id}.bundle"),
+            "exec clone".to_owned(),
             format!("policy-ls {sandbox}"),
             format!("policy-deny {sandbox} github.com"),
             format!("policy-deny {sandbox} api.anthropic.com"),
             format!("policy-ls {sandbox}"),
+            "exec checkout".to_owned(),
         ],
         "{log:?}"
     );
-    assert_eq!(log[5], "exec printenv HOME", "{log:?}");
     assert!(
         out.contains(&denied_line(&sandbox, &["github.com", "api.anthropic.com"])),
         "{out}"
     );
 }
 
-/// Asserts the fail-closed order (behavior 4): `secret-set`, `create`, the first `policy ls`, the
-/// denies, the `policy ls` that fails the check, the sandbox's `rm`, the cloud's secret list and
-/// `secret-rm`; no `exec` at all, so no agent ran. The task folder goes with the sandbox, as a
+/// Asserts the fail-closed order (behavior 4): `secret-set`, `create`, the clone (issue 560: made
+/// before the deny), the first `policy ls`, the denies, the `policy ls` that fails the check, the
+/// sandbox's `rm`, the cloud's secret list and `secret-rm`; no agent ran, and the branch was
+/// never checked out. The task folder goes with the sandbox, as a
 /// local strict `codex` start that [232] refuses leaves it.
 fn assert_failed_closed(
     f: &common::task_fixture::Fixture,
@@ -1915,6 +2374,9 @@ fn assert_failed_closed(
     let mut expected = vec![
         format!("secret-set {sandbox} {FAKE_NAME}"),
         format!("create {sandbox}"),
+        "exec printenv HOME".to_owned(),
+        format!("cp-in {sandbox} {HOME}/.sbxm-task-{id}.bundle"),
+        "exec clone".to_owned(),
         format!("policy-ls {sandbox}"),
     ];
     expected.extend(denies.iter().map(|h| format!("policy-deny {sandbox} {h}")));
@@ -1927,7 +2389,7 @@ fn assert_failed_closed(
         format!("secret-rm {sandbox} {FAKE_NAME}"),
     ]);
     assert_eq!(described_log(backend), expected);
-    assert!(backend.execs().is_empty());
+    assert_no_agent(backend);
     assert_eq!(backend.cloud_secrets(), Vec::<(String, String)>::new());
     assert!(!sbxm::task::record::task_dir(&f.env.base_dir(), id).exists());
     assert_start_lines(started, &sandbox, "removed");
@@ -1947,7 +2409,7 @@ fn a_host_left_after_the_denies_removes_the_sandbox_then_the_secret_then_refuses
     let sandbox = format!("sbxm-task-{id}-claude");
     let mut list = CLAUDE_HOSTS.to_vec();
     list.extend(["api.x.ai", "github.com"]);
-    let backend = cloud_ready()
+    let backend = cloud_seeding()
         .with_cloud_allow(&list)
         .with_undeniable_cloud_host("api.x.ai");
 
@@ -1984,7 +2446,7 @@ fn an_unreadable_policy_list_removes_the_sandbox_then_the_secret_then_refuses() 
         let sandbox = format!("sbxm-task-{id}-claude");
         let mut list = CLAUDE_HOSTS.to_vec();
         list.push("github.com");
-        let backend = cloud_ready()
+        let backend = cloud_seeding()
             .with_cloud_allow(&list)
             .failing_cloud_policy_ls_from(from);
 
@@ -2052,7 +2514,7 @@ fn a_strict_refusal_whose_removal_fails_keeps_the_record_and_reports_it() {
     let error = unavailable(&sandbox);
     let mut list = CLAUDE_HOSTS.to_vec();
     list.push("api.x.ai");
-    let backend = cloud_ready()
+    let backend = cloud_seeding()
         .with_cloud_allow(&list)
         .with_undeniable_cloud_host("api.x.ai")
         .with_remove_errors(&[&error, &error, &error, &error]);
@@ -2066,7 +2528,7 @@ fn a_strict_refusal_whose_removal_fails_keeps_the_record_and_reports_it() {
     );
     assert_eq!(backend.removes().len(), 4);
     assert_eq!(started.waits, secs(&[5, 10, 20]));
-    assert!(backend.execs().is_empty());
+    assert_no_agent(&backend);
     assert_eq!(
         backend.log().last(),
         Some(&format!("secret-rm {sandbox} {FAKE_NAME}"))

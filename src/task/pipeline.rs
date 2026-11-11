@@ -32,7 +32,9 @@ use super::select::{self, Selection};
 use super::session;
 use super::shape;
 use super::stale_lock;
+use super::warm_up;
 use crate::backend::{CreateSpec, ExecSpec, Location, SandboxBackend, ScopedSecret, Stdin};
+use crate::commands::template_build::WarmStep;
 use crate::config::{self, GlobalConfig, Profile, Resources};
 use crate::disk;
 use crate::github::{GitHubBackend, Issue, IssueText, PrInfo, PrState};
@@ -1553,6 +1555,7 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
                 record::write(&meta, task)?;
             }
             Some(ttl) => {
+                let hold = Hold::of(&plan, worker.harness, ctx.config, &repo_git, task)?;
                 create_recorded(
                     ctx.backend,
                     &meta,
@@ -1565,8 +1568,6 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
                     (&mut events, &mut cleanup_warnings),
                 )?;
                 events.push(lifetime::created_line(&sandbox, SandboxRole::Worker, ttl));
-                plan.hold_strict(ctx.backend, &sandbox, worker.harness, &mut events)?;
-                let repo_git = meta.join("repo.git");
                 let clone = seed_cloud_clone(
                     ctx.backend,
                     &meta,
@@ -1576,6 +1577,7 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
                     &|dest| repo::bundle_for_clone(&repo_git, &task.branch, &task.base, dest),
                     ctx.identity,
                     &worker_files(&meta, task.kind),
+                    (&hold, &mut events),
                 )?;
                 if let Some(agent) = task.worker.as_mut() {
                     agent.workspace = clone;
@@ -1653,7 +1655,23 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
                     lifetime::Released::Warning(warning) => warnings.push(warning),
                 }
             }
-            if kept.is_none() {
+            if warm_up::failed(&e) {
+                // Issue 560, review M-1: a failed warm-up keeps the task, `prepared/failed`, so
+                // `run.log` gets the step's output and `task resume` makes the sandbox afresh.
+                task.notes.push(
+                    "start: the strict cloud sandbox's warm-up failed; `sbxm task resume` makes \
+                     the sandbox afresh"
+                        .to_owned(),
+                );
+                if let Err(w) = task
+                    .finish(Status::Failed)
+                    .and_then(|()| record::write(&meta, task))
+                {
+                    warnings.push(format!(
+                        "task.json couldn't record the failed warm-up: {w:#}"
+                    ));
+                }
+            } else if kept.is_none() {
                 let _ = fs::remove_dir_all(&meta);
             }
             Err(e.context(FailedAfterCreate {
@@ -1679,7 +1697,8 @@ pub struct FailedAfterCreate {
     pub events: Vec<String>,
     /// Why the task's folder stays, as the warning to show: the sandbox's removal failed (or
     /// couldn't be recorded), so `task.json`, its only record, keeps the entry open. `None` when
-    /// the sandbox is gone and the folder went with it.
+    /// the sandbox is gone and the folder went with it, or stays `prepared/failed` after a failed
+    /// warm-up (issue 560) for `task resume`.
     pub kept: Option<String>,
     /// A scoped secret that couldn't be removed, or a secret list the cloud wouldn't give: one
     /// warning each, never dropped. The folder doesn't stay for them: `task.json` records no
@@ -2455,22 +2474,66 @@ fn exec_in(
 
 /// What clones a cloud task's branch inside its sandbox, run by `sh -c` with the values as
 /// positional arguments (never pasted into the script): `$1` the bundle, `$2` the clone, `$3` the
-/// branch, `$4`/`$5` the committer's name and email. Like `repo::clone_workspace`, no hooks come
-/// along, and `.sbxm-task/` is excluded so the agent's `git add -A` leaves sbxm's files alone.
+/// branch, `$4`/`$5` the committer's name and email, and `$6`, when not empty, the commit the
+/// clone is then checked out at, detached (a strict sandbox's base, issue 560). Like
+/// `repo::clone_workspace`, no hooks come along, and `.sbxm-task/` is excluded so the agent's
+/// `git add -A` leaves sbxm's files alone.
 const CLONE_SCRIPT: &str = concat!(
     "set -e; ",
     "git clone --quiet --template= --branch \"$3\" -- \"$1\" \"$2\"; ",
     "git -C \"$2\" config user.name \"$4\"; ",
     "git -C \"$2\" config user.email \"$5\"; ",
     "mkdir -p \"$2/.git/info\"; ",
-    "printf '# sbxm\\n.sbxm-task/\\n' >> \"$2/.git/info/exclude\"",
+    "printf '# sbxm\\n.sbxm-task/\\n' >> \"$2/.git/info/exclude\"; ",
+    "if [ -n \"$6\" ]; then git -C \"$2\" checkout --quiet --detach \"$6\"; fi",
 );
+
+/// How a cloud sandbox is held to its runtime list once its clone is made (decisions 255, 264;
+/// issue 560), worked out before its create so nothing after the create can fail on it.
+struct Hold<'a> {
+    plan: &'a SandboxPlan,
+    harness: Harness,
+    /// A strict profile's base commit, at which the clone is warmed up with these steps (none for
+    /// a repo with neither `[warm]` nor a `Cargo.toml`) before sbxm's deny; `None` for a profile
+    /// that isn't strict, whose clone is the branch from the start.
+    warm: Option<(String, Vec<WarmStep>)>,
+}
+
+impl<'a> Hold<'a> {
+    /// The hold of a sandbox of `record`'s task made from `plan`: for a strict profile, the base
+    /// commit where the agent's own commits start, resolved in `repo_git`, and the warm-up's steps
+    /// there ([`warm_up::steps`]).
+    fn of(
+        plan: &'a SandboxPlan,
+        harness: Harness,
+        config: &TaskConfig,
+        repo_git: &Path,
+        record: &Record,
+    ) -> Result<Self> {
+        let strict = plan.profile.template.as_ref().is_some_and(|t| t.strict);
+        let warm = if strict {
+            let base = repo::resolve_commit(repo_git, &record.rewrite_start())?;
+            let steps = warm_up::steps(config.warm.as_ref(), repo_git, &base)?;
+            Some((base, steps))
+        } else {
+            None
+        };
+        Ok(Self {
+            plan,
+            harness,
+            warm,
+        })
+    }
+}
 
 /// Clones a cloud task's branch inside its sandbox (P4 (a), decision 262(d)) and returns the
 /// clone's path: `$HOME` is read once (`printenv HOME`), a bundle of `branch` and its base, which
 /// `bundle` makes on the host from `repo.git` (never from an agent's clone, decision 159), is
-/// copied in and cloned under `$HOME/work/<name>`, and each of `files` (a host file, the name it
-/// gets) goes into the clone's `.sbxm-task/` by copy.
+/// copied in and cloned under `$HOME/work/<name>`, then the sandbox is held as `hold` says (its
+/// line to `lines`), and each of `files` (a host file, the name it gets) goes into the clone's
+/// `.sbxm-task/` by copy. A strict sandbox's clone is checked out at the base, detached, warmed
+/// up there while the build hosts are still allowed, and checked out at `branch` only once sbxm's
+/// deny is checked (issue 560): no agent's commit is built before the deny.
 #[allow(clippy::too_many_arguments)]
 fn seed_cloud_clone(
     backend: &dyn SandboxBackend,
@@ -2481,6 +2544,7 @@ fn seed_cloud_clone(
     bundle: &dyn Fn(&Path) -> Result<()>,
     identity: &Identity,
     files: &[(PathBuf, &str)],
+    (hold, lines): (&Hold, &mut Vec<String>),
 ) -> Result<String> {
     let reported = exec_in(backend, sandbox, "read $HOME", &["printenv", "HOME"])?;
     let home = reported.trim_end_matches(['\n', '\r']);
@@ -2516,8 +2580,24 @@ fn seed_cloud_clone(
             branch,
             &identity.name,
             &identity.email,
+            hold.warm.as_ref().map_or("", |(base, _)| base.as_str()),
         ],
     )?;
+    if let Some((_, steps)) = &hold.warm {
+        warm_up::run(backend, sandbox, &clone, steps, warm_up::LIMIT)?;
+    }
+    hold.plan
+        .hold_strict(backend, sandbox, hold.harness, lines)?;
+    if hold.warm.is_some() {
+        exec_in(
+            backend,
+            sandbox,
+            "check out the task's branch",
+            &[
+                "git", "-C", &clone, "checkout", "--quiet", "--force", branch, "--",
+            ],
+        )?;
+    }
     let control = format!("{clone}/{AGENT_DIR}");
     exec_in(
         backend,
@@ -2883,6 +2963,14 @@ fn ensure_cloud_worker_as(
         &prepared.meta.join("kits"),
         &mut prepared.warnings,
     )?;
+    let repo_git = prepared.meta.join("repo.git");
+    let hold = Hold::of(
+        &plan,
+        env.config.worker.harness,
+        env.config,
+        &repo_git,
+        &prepared.record,
+    )?;
     if prepared.record.sandbox_removed(&sandbox, now()) {
         record::write(&prepared.meta, &prepared.record)?;
         prepared.events.push(format!(
@@ -2891,7 +2979,6 @@ fn ensure_cloud_worker_as(
     }
     create_cloud_sandbox(env, prepared, &plan, &sandbox, role, ttl)?;
     let (meta, record) = (&prepared.meta, &prepared.record);
-    let repo_git = meta.join("repo.git");
     let clone = seed_cloud_clone(
         env.backend,
         meta,
@@ -2910,6 +2997,7 @@ fn ensure_cloud_worker_as(
         },
         identity,
         &worker_files(meta, record.kind),
+        (&hold, &mut prepared.events),
     )?;
     if let Some(agent) = prepared.record.worker.as_mut() {
         agent.workspace = clone;
@@ -5146,9 +5234,6 @@ fn open_cloud_review(
     let ttl = lifetime::reviewer_ttl(env.config)?;
     let global = GlobalConfig::load(env.config_dir)?;
     let overrides = shape::overrides(&env.config.sandbox, &global.resources, Location::Cloud)?;
-    if prepared.record.has_open_sandbox(sandbox) {
-        release_cloud_sandbox(env, prepared, sandbox);
-    }
     let mut warnings = Vec::new();
     let plan = plan_cloud_sandbox(
         env.config_dir,
@@ -5161,6 +5246,18 @@ fn open_cloud_review(
         &mut warnings,
     )?;
     let files = review_files(env, prepared, round, earlier)?;
+    let repo_git = prepared.meta.join("repo.git");
+    let hold = Hold::of(
+        &plan,
+        reviewer.harness,
+        env.config,
+        &repo_git,
+        &prepared.record,
+    )?;
+    // Once every input is read: the leftover goes just before its successor is made.
+    if prepared.record.has_open_sandbox(sandbox) {
+        release_cloud_sandbox(env, prepared, sandbox);
+    }
 
     // The record goes first, as for a local reviewer; the clone's path is known once the sandbox
     // answers `printenv HOME`.
@@ -5175,7 +5272,6 @@ fn open_cloud_review(
         fs::write(&host, text).with_context(|| format!("cannot write {}", host.display()))?;
         staged.push((host, *name));
     }
-    let repo_git = prepared.meta.join("repo.git");
     let (id, branch, base) = (
         prepared.record.id.clone(),
         prepared.record.branch.clone(),
@@ -5190,6 +5286,7 @@ fn open_cloud_review(
         &|dest| repo::bundle_for_clone(&repo_git, &branch, &base, dest),
         &reviewer_identity(),
         &staged,
+        (&hold, &mut prepared.events),
     )?;
     drop(staging);
     if let Some(agent) = prepared.record.reviewer.as_mut() {
@@ -5230,7 +5327,7 @@ fn create_cloud_sandbox(
     prepared
         .events
         .push(lifetime::created_line(sandbox, role, ttl));
-    plan.hold_strict(env.backend, sandbox, harness, &mut prepared.events)
+    Ok(())
 }
 
 /// Refuses a cloud sandbox name that `sbx --cloud ls` already lists, before any secret is scoped
