@@ -230,7 +230,10 @@ fn deleting_a_workflow_main_still_has_is_refused() {
 }
 
 const ACTION: &str = ".github/actions/setup/action.yml";
-const MIXED: &str = ".GitHub/Workflows/other.yml";
+// Mixed case below `.github` only: one checkout holds both files, and on a case-insensitive
+// filesystem (Windows) a `.GitHub` folder next to `.github` is the same folder, so git would
+// record the file under `.github` and the refusal would name that path.
+const MIXED: &str = ".github/Workflows/other.yml";
 
 #[test]
 fn an_action_and_a_mixed_case_workflow_identical_to_mains_are_pushed() {
