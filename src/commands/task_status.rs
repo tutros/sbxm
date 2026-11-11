@@ -6,6 +6,7 @@ use std::path::Path;
 use anyhow::{Result, bail};
 use serde_json::Value;
 
+use crate::task::lock;
 use crate::task::record::{self, Kind, ProcessProbe, Record};
 
 /// `--issue`/`--pr` only; a spec task has no number to filter by (issue 142 is start-only for
@@ -58,7 +59,7 @@ pub fn render(
     let mut out = String::new();
     for record in &records {
         let dir = record::task_dir(base, &record.id);
-        let status = if record.is_interrupted(probe) {
+        let status = if record.is_interrupted(probe) && !lock::held_alive(&dir, probe) {
             "interrupted"
         } else {
             record.status.name()
@@ -96,7 +97,9 @@ fn render_json(base: &Path, records: &[Record], probe: &dyn ProcessProbe) -> Res
         .iter()
         .map(|record| {
             let mut value = serde_json::to_value(record)?;
-            value["interrupted"] = Value::Bool(record.is_interrupted(probe));
+            let dir = record::task_dir(base, &record.id);
+            value["interrupted"] =
+                Value::Bool(record.is_interrupted(probe) && !lock::held_alive(&dir, probe));
             value["commits_ahead"] =
                 super::commits_ahead(base, record).map_or(Value::Null, Value::from);
             Ok(value)

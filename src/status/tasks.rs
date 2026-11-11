@@ -9,6 +9,7 @@ use anyhow::Result;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::run::results::parse_timestamp;
+use crate::task::lock;
 use crate::task::record::{self, ProcessProbe, Stage, Status};
 
 /// A missing value (no commits yet, no review yet, no PR, no `run.log`).
@@ -75,7 +76,7 @@ pub fn rows(base: &Path, probe: &dyn ProcessProbe) -> Result<Vec<TaskRow>> {
         .into_iter()
         .map(|record| {
             let dir = record::task_dir(base, &record.id);
-            let status = if record.is_interrupted(probe) {
+            let status = if record.is_interrupted(probe) && !lock::held_alive(&dir, probe) {
                 "interrupted".to_owned()
             } else {
                 record.status.name().to_owned()
