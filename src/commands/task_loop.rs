@@ -718,6 +718,12 @@ impl Loop<'_> {
             let risk = self.history_risk(number, Some(&own));
             let check = real_check_of(&self.base_dir, Some(&own)).ok().flatten();
             let source = medium_source(&own);
+            // A medium PR's real check, when its issue names one, held as the arm paths hold it.
+            let real_held = risk == Some(Level::Medium)
+                && check.is_some()
+                && self
+                    .real_check_refusal(Some(&own), number, &head, warn)?
+                    .is_some();
             let rec = self
                 .fixes_of(number)
                 .into_iter()
@@ -782,7 +788,7 @@ impl Loop<'_> {
                     ("real check", format!("real check: {check}"), next)
                 }
             } else if risk == Level::Medium
-                && check.is_none()
+                && !real_held
                 && review.commit.as_deref() == Some(head.as_str())
                 && not_run_reason(review).is_none()
             {

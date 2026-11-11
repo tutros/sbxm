@@ -237,8 +237,8 @@ impl Loop<'_> {
         Ok(note)
     }
 
-    /// Arms PR `number` on `head` for the reason `why` (said in brackets): the line and a log
-    /// row. Returns the note.
+    /// Arms PR `number` on `head` for the reason `why` (said in brackets), and says so. Returns
+    /// the note for the log row.
     fn arm_head(
         &mut self,
         number: u32,

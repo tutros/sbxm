@@ -987,3 +987,20 @@ fn the_step_doesnt_arm_the_same_head_twice_after_the_user_disarmed_it() {
 
     assert_eq!(arms(&gh), [armed(PR)]);
 }
+
+// --- Toasts ---
+
+#[test]
+fn a_medium_pr_in_its_window_gets_only_the_windows_toast_after_its_real_check_passed() {
+    let f = fixture();
+    f.loop_pr(20, Level::Medium, "**Real check:** run it\n");
+    let gh = github(&[20], HEAD, 0, START - 60);
+    real_check_passed(&gh, HEAD);
+    let notifier = FakeNotifier::default();
+
+    run_passes(&f, &gh, &notifier, 1, &|_| {}).result.unwrap();
+
+    let titles: Vec<String> = notifier.shown().iter().map(|n| n.title.clone()).collect();
+    assert_eq!(titles.len(), 1, "{titles:?}");
+    assert!(titles[0].starts_with("PR #120 arms at"), "{titles:?}");
+}
