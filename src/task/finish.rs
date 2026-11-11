@@ -1822,6 +1822,23 @@ fn is_ci_path(path: &str) -> bool {
     lower.starts_with(".github/workflows/") || lower.starts_with(".github/actions/")
 }
 
+/// The CI files ([`is_ci_path`]) the task's own commits change. For a task that continues a PR,
+/// those commits can include a merge of the base branch (a resolve), which brings the base's own
+/// CI changes along; a file identical to the base branch's tip in `repo_git` already runs there,
+/// so only one that differs from it counts (issue #569). A task's own edit, addition or deletion
+/// still differs.
+fn ci_changes(task: &Record, repo_git: &Path) -> Result<Vec<String>> {
+    let ci: Vec<String> = task
+        .changed_paths(repo_git)?
+        .into_iter()
+        .filter(|p| is_ci_path(p))
+        .collect();
+    if task.continues.is_none() {
+        return Ok(ci);
+    }
+    repo::paths_differing_from_base(repo_git, &task.base, &task.branch, &ci)
+}
+
 /// The agent's commits are untrusted (decision 127): a same-repo branch that adds or edits a
 /// workflow would run it, with secrets, on the push, before anyone has read it. So `finish`
 /// refuses, naming the files, and the user can review and push the branch by hand if it is meant.
@@ -1930,7 +1947,7 @@ fn open_task_pr(
             task.branch,
         );
     };
-    refuse_workflow_changes(id, &task.changed_paths(&repo_git)?)?;
+    refuse_workflow_changes(id, &ci_changes(&task, &repo_git)?)?;
     if let Some(continued) = &task.continues {
         return finish_continued(prepared, &repo_git, continued, &tip, github, probe);
     }
@@ -2394,7 +2411,7 @@ pub fn finish_fix(
             prepared.meta.display()
         );
     };
-    refuse_workflow_changes(id, &task.changed_paths(&repo_git)?)?;
+    refuse_workflow_changes(id, &ci_changes(&task, &repo_git)?)?;
     let commits = repo::commit_lines(&repo_git, &continued.base, branch)?;
     let review = read_capped(&prepared.meta.join("review.md"))?;
     let unresolved = unresolved_reasons(&task, review.as_deref());
@@ -2555,7 +2572,7 @@ pub fn finish_push(
             }
         }
     }
-    refuse_workflow_changes(id, &prepared.record.changed_paths(repo_git)?)?;
+    refuse_workflow_changes(id, &ci_changes(&prepared.record, repo_git)?)?;
     match repo::remote_branch_head(repo_git, branch)? {
         Some(head) if head == tip => {}
         Some(head) => bail!(
