@@ -468,7 +468,7 @@ fn a_missing_config_file_says_how_to_make_one() {
 
 use common::task_fixture::{add_pr_head, issue_text, source};
 use sbxm::github::fake::GhCall;
-use sbxm::github::{PrInfo, PrState};
+use sbxm::github::{CommitStatus, PrInfo, PrState, StatusState};
 
 fn pr_info() -> PrInfo {
     PrInfo {
@@ -818,8 +818,21 @@ fn finished_issue_task(f: &Fixture, pr: &str, commit: &str, continues: bool) {
     std::fs::write(meta.join("review.md"), CLEAN).unwrap();
 }
 
-/// [`pr_github`] with PR 7's head at `head`, and a body that looks like a posted review.
+/// [`pr_github`] with PR 7's head at `head`, a body that looks like a posted review, and the
+/// review's `sbxm/review` status on the head.
 fn pr_github_at(head: &str) -> FakeGitHub {
+    pr_github_unposted_at(head).with_commit_status(
+        head,
+        CommitStatus {
+            state: StatusState::Success,
+            context: "sbxm/review".into(),
+            description: "0 must-fix".into(),
+        },
+    )
+}
+
+/// [`pr_github_at`] with no `sbxm/review` status on the head (issue 586).
+fn pr_github_unposted_at(head: &str) -> FakeGitHub {
     let mut pr = pr_info();
     pr.head_oid = head.to_owned();
     pr.body = format!("sbxm in-task review of issue #4's task, at commit {head}\n");
@@ -908,6 +921,58 @@ fn a_new_commit_on_the_pr_is_reviewed_without_force() {
 
     out.result.unwrap();
     assert!(posted(&github));
+}
+
+// ---- Issue 586: the in-task review counts only with its `sbxm/review` status on the head ----
+
+/// The #564 case: the in-task review covered the head but posted no `sbxm/review` status, so
+/// the head is reviewed again with no `--force`, as a queued `review` job (which passes none)
+/// runs it.
+#[test]
+fn a_pr_head_the_in_task_review_covered_without_its_status_is_reviewed_without_force() {
+    let f = config("codex");
+    add_pr_head(&f, 7);
+    finished_issue_task(&f, "https://github.com/o/r/pull/7", REVIEWED, false);
+    let github = pr_github_unposted_at(REVIEWED);
+
+    let out = go_pr(&f, &pr_options(&f), &pr_backend(&f, &[CLEAN]), &github);
+
+    out.result.unwrap();
+    assert!(posted(&github));
+    assert!(github.calls().contains(&GhCall::CommitStatusState(
+        "o/r".into(),
+        REVIEWED.into(),
+        "sbxm/review".into()
+    )));
+}
+
+/// A status that can't be read refuses as a posted one does, and says so, before anything.
+#[test]
+fn a_pr_head_whose_review_status_cannot_be_read_is_refused_and_says_so() {
+    let f = config("codex");
+    add_pr_head(&f, 7);
+    finished_issue_task(&f, "https://github.com/o/r/pull/7", REVIEWED, false);
+    let github = pr_github_unposted_at(REVIEWED).failing_status_state("HTTP 502");
+    let backend = pr_backend(&f, &[CLEAN]);
+
+    let out = go_pr(&f, &pr_options(&f), &backend, &github);
+
+    let message = format!("{:#}", out.result.unwrap_err());
+    assert!(
+        message.contains(&format!("already reviewed at `{REVIEWED}`")),
+        "{message}"
+    );
+    assert!(
+        message.contains("status could not be read") && message.contains("HTTP 502"),
+        "{message}"
+    );
+    assert!(
+        message.contains("`sbxm task review --pr 7 --repo o/r --force`"),
+        "{message}"
+    );
+    assert!(backend.creates().is_empty() && backend.execs().is_empty());
+    assert!(!pr_meta(&f).exists());
+    assert!(!posted(&github));
 }
 
 /// Issue 229: [`pr_github_at`] with PR 7 in `state` and from a fork or not.

@@ -103,6 +103,7 @@ pub struct FakeGitHub {
     failing_issue_comments: Mutex<Vec<u32>>,
     failing_comment_edits: bool,
     status_failure: Option<String>,
+    status_state_failure: Option<String>,
     /// The statuses `commit_status` posted, by commit, oldest first: what `commit_status_state`
     /// reads.
     statuses: Mutex<Vec<(String, CommitStatus)>>,
@@ -362,6 +363,19 @@ impl FakeGitHub {
     /// Only `commit_status` fails (and is still recorded).
     pub fn failing_statuses(mut self, message: &str) -> Self {
         self.status_failure = Some(message.to_owned());
+        self
+    }
+
+    /// A status already posted on commit `sha`, as if `commit_status` had posted it: what
+    /// `commit_status_state` reads (issue 586).
+    pub fn with_commit_status(self, sha: &str, status: CommitStatus) -> Self {
+        self.statuses.lock().unwrap().push((sha.to_owned(), status));
+        self
+    }
+
+    /// Only `commit_status_state` fails (and is still recorded).
+    pub fn failing_status_state(mut self, message: &str) -> Self {
+        self.status_state_failure = Some(message.to_owned());
         self
     }
 
@@ -831,6 +845,9 @@ impl GitHubBackend for FakeGitHub {
             sha.to_owned(),
             context.to_owned(),
         ))?;
+        if let Some(message) = &self.status_state_failure {
+            return Err(anyhow!("{message}"));
+        }
         Ok(self
             .statuses
             .lock()
