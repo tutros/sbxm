@@ -71,6 +71,7 @@ fn env(terminal: bool) -> Env {
         terminal,
         width: 200,
         iterations: None,
+        monotonic: Box::new(|| std::time::Duration::ZERO),
         slots: None,
         disk: sbxm::status::footer::Disk {
             free_space: |_| Ok(40 * 1024 * 1024 * 1024),

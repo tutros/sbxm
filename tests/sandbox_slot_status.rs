@@ -25,6 +25,7 @@ fn env(slots: Option<(u32, sbxm::slot::Gate)>) -> Env {
         terminal: false,
         width: 80,
         iterations: None,
+        monotonic: Box::new(|| std::time::Duration::ZERO),
         disk: Disk {
             free_space: |_| Ok(u64::MAX),
             same_drive: |_, _| true,

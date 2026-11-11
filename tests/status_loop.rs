@@ -160,6 +160,7 @@ fn env(terminal: bool, width: usize) -> Env {
         terminal,
         width,
         iterations: None,
+        monotonic: Box::new(|| std::time::Duration::ZERO),
         slots: None,
         disk: quiet_disk(),
     }
@@ -681,6 +682,7 @@ fn github_is_called_on_the_first_frame_not_59_seconds_later_and_again_after_61()
         terminal: true,
         width: 80,
         iterations: Some(3),
+        monotonic: Box::new(|| std::time::Duration::ZERO),
         slots: None,
         disk: quiet_disk(),
     };
@@ -743,6 +745,7 @@ fn a_failed_fetch_is_not_retried_inside_the_minute_either() {
     };
     let env = Env {
         iterations: Some(2),
+        monotonic: Box::new(|| std::time::Duration::ZERO),
         slots: None,
         disk: quiet_disk(),
         terminal: true,

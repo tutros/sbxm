@@ -24,6 +24,9 @@ use crate::task::record::ProcessProbe;
 pub struct Env {
     pub now: Box<dyn Fn() -> u64>,
     pub sleep: Box<dyn Fn(Duration)>,
+    /// A monotonic reading (from any fixed origin) that the wait to the next draw is measured
+    /// with: `now` counts whole epoch seconds, too coarse for a draw of a few seconds (issue 577).
+    pub monotonic: Box<dyn Fn() -> Duration>,
     /// Whether the output is a terminal: decides both whether the last column is cut to `width`
     /// (decided point 1) and whether `--watch` has any effect at all (decided point 7 of the
     /// "Smaller points" list: a non-terminal always prints exactly once).
@@ -45,6 +48,10 @@ impl Env {
         Self {
             now: Box::new(crate::run::results::now),
             sleep: Box::new(std::thread::sleep),
+            monotonic: {
+                let origin = std::time::Instant::now();
+                Box::new(move || origin.elapsed())
+            },
             terminal: std::io::stdout().is_terminal(),
             width: terminal_width().unwrap_or(80),
             iterations: None,
@@ -108,6 +115,7 @@ pub fn run_with(
     let mut cache = looping::Cache::default();
     loop {
         let started = (env.now)();
+        let started_at = (env.monotonic)();
         let width = env.terminal.then_some(env.width);
         // Only a terminal's `--watch` redraws; the first frame clears the screen, later ones
         // overwrite the previous frame in place (issue 577).
@@ -122,16 +130,14 @@ pub fn run_with(
         frame.start()?;
         let rows = tasks::rows(base, probe)?;
         frame.section(&tasks::render(&rows, started, width))?;
-        // The two listings run side by side; each section is written as its read returns.
-        let (in_cloud, local) = std::thread::scope(|scope| {
-            let cloud_read = scope.spawn(|| cloud::read(backend));
-            let local = sandboxes::read(backend);
-            (
-                cloud_read.join().expect("the cloud listing panicked"),
-                local,
-            )
-        });
-        frame.section(&cloud::render(&in_cloud, started, width))?;
+        // The two listings run side by side; the local one in a worker, so the cloud section is
+        // written as soon as its read returns, whatever the local one still takes.
+        let local = std::thread::scope(|scope| -> Result<_> {
+            let local_read = scope.spawn(|| sandboxes::read(backend));
+            let in_cloud = cloud::read(backend);
+            frame.section(&cloud::render(&in_cloud, started, width))?;
+            Ok(local_read.join().expect("the local listing panicked"))
+        })?;
         let claims = sandboxes::claims(base);
         frame.section(&sandboxes::render(&local, &claims, started, width))?;
         // The runs read the same local list, never a second `sbx ls`.
@@ -159,7 +165,7 @@ pub fn run_with(
             break;
         }
         // The period is `interval` from the start of a draw, as far as the reads allow.
-        let elapsed = Duration::from_secs((env.now)().saturating_sub(started));
+        let elapsed = (env.monotonic)().saturating_sub(started_at);
         (env.sleep)(interval.saturating_sub(elapsed));
     }
     Ok(())

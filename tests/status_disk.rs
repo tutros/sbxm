@@ -214,6 +214,7 @@ fn env(disk: Disk) -> Env {
         terminal: false,
         width: 80,
         iterations: None,
+        monotonic: Box::new(|| std::time::Duration::ZERO),
         slots: None,
         disk,
     }

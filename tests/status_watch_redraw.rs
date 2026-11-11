@@ -43,6 +43,7 @@ fn env(terminal: bool, iterations: Option<usize>) -> Env {
         terminal,
         width: 80,
         iterations,
+        monotonic: Box::new(|| std::time::Duration::ZERO),
         slots: None,
         disk: disk(),
     }
@@ -88,20 +89,30 @@ impl Write for LogWriter {
 
 // ---- timing (acceptance 1, 2) -----------------------------------------------
 
-/// The sleeps of a two-frame `--watch` at `interval` seconds, when the local listing takes
-/// `local` seconds and the cloud one `cloud`, on a clock the listings advance.
-fn sleeps(interval: u64, local: u64, cloud: u64) -> Vec<Duration> {
+/// The sleeps of a two-frame `--watch` at `interval` ms, when the local listing takes `local` ms
+/// and the cloud one `cloud`, on a monotonic clock the listings advance. The whole-second epoch
+/// clock `now` stays at `epoch` (a draw may cross a second boundary: `epoch_after`).
+fn sleeps_ms(interval: u64, local: u64, cloud: u64, epoch: (u64, u64)) -> Vec<Duration> {
     let base = tempfile::tempdir().unwrap();
-    let clock = Arc::new(AtomicU64::new(T0));
+    let clock = Arc::new(AtomicU64::new(0));
     let hook_clock = Arc::clone(&clock);
     let backend = FakeBackend::default().with_listing_hook(move |which| {
         let took = if which == "local" { local } else { cloud };
-        hook_clock.fetch_max(T0 + took, Ordering::SeqCst);
+        hook_clock.fetch_max(took, Ordering::SeqCst);
     });
     let slept = Arc::new(Mutex::new(Vec::new()));
-    let (now_clock, sleep_log) = (Arc::clone(&clock), Arc::clone(&slept));
+    let (now_clock, mono_clock, sleep_log) =
+        (Arc::clone(&clock), Arc::clone(&clock), Arc::clone(&slept));
     let mut env = env(true, Some(2));
-    env.now = Box::new(move || now_clock.load(Ordering::SeqCst));
+    // The epoch seconds move with the same clock, from `epoch.0`, to `epoch.1` once it passes 0.
+    env.now = Box::new(move || {
+        if now_clock.load(Ordering::SeqCst) == 0 {
+            epoch.0
+        } else {
+            epoch.1
+        }
+    });
+    env.monotonic = Box::new(move || Duration::from_millis(mono_clock.load(Ordering::SeqCst)));
     env.sleep = Box::new(move |d| sleep_log.lock().unwrap().push(d));
     let mut out = Vec::new();
     status::run(
@@ -109,11 +120,15 @@ fn sleeps(interval: u64, local: u64, cloud: u64) -> Vec<Duration> {
         &backend,
         &Probe,
         &env,
-        Some(Duration::from_secs(interval)),
+        Some(Duration::from_millis(interval)),
         &mut out,
     )
     .unwrap();
     std::mem::take(&mut *slept.lock().unwrap())
+}
+
+fn sleeps(interval: u64, local: u64, cloud: u64) -> Vec<Duration> {
+    sleeps_ms(interval * 1000, local * 1000, cloud * 1000, (T0, T0))
 }
 
 #[test]
@@ -136,6 +151,28 @@ fn the_sleep_is_zero_when_the_draw_took_exactly_the_interval() {
 #[test]
 fn a_draw_that_took_no_time_sleeps_the_whole_interval() {
     assert_eq!(sleeps(2, 0, 0), vec![Duration::from_secs(2)]);
+}
+
+#[test]
+fn a_subsecond_draw_is_subtracted_from_the_interval() {
+    // 400 ms at --interval 2 sleeps 1600 ms, whether or not the epoch second changed meanwhile.
+    for epoch in [(T0, T0), (T0, T0 + 1)] {
+        assert_eq!(
+            sleeps_ms(2000, 400, 300, epoch),
+            vec![Duration::from_millis(1600)],
+            "{epoch:?}"
+        );
+    }
+}
+
+#[test]
+fn fractional_draws_below_at_and_above_the_interval() {
+    assert_eq!(
+        sleeps_ms(2000, 1999, 0, (T0, T0)),
+        vec![Duration::from_millis(1)]
+    );
+    assert_eq!(sleeps_ms(2000, 2000, 0, (T0, T0)), vec![Duration::ZERO]);
+    assert_eq!(sleeps_ms(2000, 2001, 0, (T0, T0)), vec![Duration::ZERO]);
 }
 
 #[test]
@@ -217,6 +254,58 @@ fn the_tasks_section_is_written_before_the_first_sbx_listing() {
         .position(|e| e.contains("No local sandboxes") || e.contains("SANDBOX"))
         .expect("sandboxes");
     assert!(first_call < sandboxes, "{log:?}");
+}
+
+#[test]
+fn a_ready_cloud_section_is_written_while_the_local_listing_is_still_pending() {
+    let base = tempfile::tempdir().unwrap();
+    let log = Arc::new(Mutex::new(Vec::<String>::new()));
+    let hook_log = Arc::clone(&log);
+    // The local listing waits (3 s at most) until the writer has received the cloud section.
+    let backend = FakeBackend::default()
+        .failing_cloud_list("cloud ready error")
+        .with_listing_hook(move |which| {
+            if which != "local" {
+                return;
+            }
+            for _ in 0..300 {
+                if hook_log
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e.contains("cloud ready error"))
+                {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            let seen = hook_log
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|e| e.contains("cloud ready error"));
+            hook_log
+                .lock()
+                .unwrap()
+                .push(format!("local done; cloud seen: {seen}"));
+        });
+    status::run(
+        base.path(),
+        &backend,
+        &Probe,
+        &env(false, None),
+        None,
+        &mut LogWriter(Arc::clone(&log)),
+    )
+    .unwrap();
+    let log = log.lock().unwrap().clone();
+    assert!(
+        log.contains(&"local done; cloud seen: true".to_owned()),
+        "{log:?}"
+    );
+    // The order of the sections is unchanged: tasks, cloud, then the local one.
+    let at = |needle: &str| log.iter().position(|e| e.contains(needle)).expect(needle);
+    assert!(at("No tasks") < at("cloud ready error") && at("cloud ready error") < at("local done"));
 }
 
 // ---- in-place redraw (acceptance 4, 5, 6) ------------------------------------------
