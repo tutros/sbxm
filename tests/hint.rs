@@ -117,6 +117,7 @@ fn each_shell_escapes_a_single_quote_its_own_way() {
 fn context(config_dir: Option<&str>) -> Context {
     Context {
         dir: Some(PathBuf::from("/work/my repo")),
+        cwd: Some(PathBuf::from("/work/my repo")),
         exe: Some(PathBuf::from("/opt/sbxm")),
         config_dir: config_dir.map(OsString::from),
     }
@@ -207,6 +208,7 @@ fn fixture(exe_name: &str, script: &str) -> Fixture {
 fn printed(shell: Shell, fx: &Fixture, config_dir: &str) -> String {
     let context = Context {
         dir: Some(fx.dir.clone()),
+        cwd: None,
         exe: Some(fx.exe.clone()),
         config_dir: Some(config_dir.into()),
     };
