@@ -590,7 +590,7 @@ fn watch_on_a_non_terminal_prints_once_and_returns() {
 }
 
 #[test]
-fn watch_on_a_terminal_clears_the_screen_and_sleeps_between_frames() {
+fn watch_on_a_terminal_clears_the_screen_once_and_sleeps_between_frames() {
     let base = tempfile::tempdir().unwrap();
     save(base.path(), &working(1));
     let backend = FakeBackend::default();
@@ -621,7 +621,9 @@ fn watch_on_a_terminal_clears_the_screen_and_sleeps_between_frames() {
     .unwrap();
 
     let text = String::from_utf8(out).unwrap();
-    assert_eq!(text.matches("\x1B[2J\x1B[H").count(), 3, "{text:?}");
+    // Only the first frame clears the screen; the later ones overwrite it in place (issue 577).
+    assert_eq!(text.matches("\x1B[2J\x1B[H").count(), 1, "{text:?}");
+    assert_eq!(text.matches("\x1B[J").count(), 2, "{text:?}");
     assert_eq!(
         sleep_calls.load(Ordering::SeqCst),
         2,
