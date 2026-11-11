@@ -1277,6 +1277,7 @@ fn the_real_fix_step_runs_task_fix_on_that_pr() {
         probe: &Probe,
         host: &host,
         disk: sbxm::disk::Guard::default(),
+        stop: None,
     };
 
     let e = steps

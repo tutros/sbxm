@@ -2026,6 +2026,7 @@ fn the_real_file_findings_step_files_only_should_fix_findings() {
         probe: &Probe,
         host: &host,
         disk: sbxm::disk::Guard::default(),
+        stop: None,
     };
 
     steps
@@ -2068,6 +2069,7 @@ fn the_real_file_findings_step_files_nothing_for_a_review_without_should_fix() {
         probe: &Probe,
         host: &host,
         disk: sbxm::disk::Guard::default(),
+        stop: None,
     };
 
     steps
@@ -2111,6 +2113,7 @@ fn resume_locked(
         probe: &Probe,
         host: &host,
         disk: sbxm::disk::Guard::default(),
+        stop: None,
     };
     let result = steps.resume(3, &mut Vec::new(), &mut Vec::new());
     let error = match &result {

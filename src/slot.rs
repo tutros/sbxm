@@ -16,7 +16,9 @@
 //! once, and again when the holder changes. `--no-wait` ([`Gate::no_wait`]) refuses instead,
 //! naming the holder, without writing anything. A slot or ticket whose process is gone is taken
 //! over, a slot with one line naming the dead holder. Ctrl-C while waiting removes this process's
-//! ticket (and any slot it holds) and exits.
+//! ticket (and any slot it holds) and exits. In `task loop` the wait also polls the loop's stop
+//! request ([`Gate::stop`], issue 570): a stop gives up the ticket, or the slot just taken, and
+//! the command fails with [`Stopped`], having created nothing.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -69,6 +71,10 @@ pub struct Gate {
     pub catch_ctrl_c: bool,
     /// The files this process wrote, removed on Ctrl-C.
     pub registry: Arc<Registry>,
+    /// `task loop`'s stop request (issue 570): asked before the wait, at each look while waiting
+    /// and once more after the slot is taken; when it says stop, the ticket and the slot are given
+    /// up and [`take`] fails with [`Stopped`]. `None` for every other command.
+    pub stop: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 
 impl Default for Gate {
@@ -81,6 +87,7 @@ impl Default for Gate {
             command: command_line(),
             catch_ctrl_c: false,
             registry: Arc::clone(&GLOBAL),
+            stop: None,
         }
     }
 }
@@ -101,7 +108,25 @@ impl Gate {
             None => slots_dir(),
         }
     }
+
+    /// Whether the loop this command runs in asked to stop.
+    fn stop_asked(&self) -> bool {
+        self.stop.as_ref().is_some_and(|stop| stop())
+    }
 }
+
+/// [`take`] given up on `task loop`'s stop request (issue 570): no slot is held, no ticket is
+/// left, and nothing was created.
+#[derive(Debug)]
+pub struct Stopped;
+
+impl std::fmt::Display for Stopped {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("stopped on request while waiting for a sandbox slot; nothing was created")
+    }
+}
+
+impl std::error::Error for Stopped {}
 
 impl std::fmt::Debug for Gate {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -266,6 +291,9 @@ pub fn take(
     if let Some(held) = HELD.with(|held| held.borrow().upgrade()) {
         return Ok(Slot(Some(held)));
     }
+    if gate.stop_asked() {
+        return Err(Stopped.into());
+    }
     let dir = gate.dir()?;
     let queue = dir.join(QUEUE);
     fs::create_dir_all(&queue)
@@ -288,6 +316,11 @@ pub fn take(
     } else {
         slots.wait(warn)?
     };
+    // A stop that came in as the slot was taken: given back before anything is created.
+    if gate.stop_asked() {
+        drop(owned);
+        return Err(Stopped.into());
+    }
     let owned = Arc::new(owned);
     HELD.with(|held| *held.borrow_mut() = Arc::downgrade(&owned));
     Ok(Slot(Some(owned)))
@@ -450,6 +483,10 @@ impl Slots<'_> {
             {
                 writeln!(warn, "waiting for a sandbox slot: {why}")?;
                 shown = Some(why);
+            }
+            // Dropping the ticket gives up this command's place in line.
+            if self.gate.stop_asked() {
+                return Err(Stopped.into());
             }
             if self.gate.catch_ctrl_c {
                 catch_ctrl_c();

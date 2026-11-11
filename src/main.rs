@@ -987,6 +987,10 @@ fn run() -> anyhow::Result<()> {
                 let config_dir = config::config_dir()?;
                 let repo_root = std::env::current_dir()?;
                 let github = sbxm::github::gh::GhBackend::default();
+                // Ctrl-C (the user's answer, 2026-11-02): the first press stops the loop after the
+                // current task, a second stops it now. On Windows the press also reaches the `sbx`
+                // children, so the current phase fails and the loop parks that task.
+                let stop = std::sync::Arc::new(commands::task_loop::StopFlag::default());
                 let steps = commands::task_loop::TaskSteps {
                     config_dir: &config_dir,
                     repo_root: repo_root.clone(),
@@ -996,11 +1000,8 @@ fn run() -> anyhow::Result<()> {
                     probe: &task::record::SystemProbe,
                     host: &task::gates::ShellHostRunner,
                     disk: sbxm::disk::Guard::real(false),
+                    stop: Some(std::sync::Arc::clone(&stop)),
                 };
-                // Ctrl-C (the user's answer, 2026-11-02): the first press stops the loop after the
-                // current task, a second stops it now. On Windows the press also reaches the `sbx`
-                // children, so the current phase fails and the loop parks that task.
-                let stop = std::sync::Arc::new(commands::task_loop::StopFlag::default());
                 let pressed = std::sync::Arc::clone(&stop);
                 if let Err(e) = ctrlc::set_handler(move || match pressed.press() {
                     commands::task_loop::Press::First => {
