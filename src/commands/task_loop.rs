@@ -49,7 +49,8 @@ use crate::task::record::{self, Kind, Process, ProcessProbe, Record, Stage};
 use crate::task::risk::Level;
 use crate::task::runlog::{RunLog, Tee};
 use crate::task::{
-    findings, finish, lock, loop_log, medium, next, pipeline, pr_fix, real_check, resume, window,
+    findings, finish, lock, loop_log, medium, next, pipeline, pr_fix, real_check, resume, trial,
+    window,
 };
 
 mod check;
@@ -3092,6 +3093,59 @@ pub fn stop(config_dir: &Path, probe: &dyn ProcessProbe, out: &mut dyn Write) ->
 pub fn clear_pause(config_dir: &Path, out: &mut dyn Write) -> Result<()> {
     let base_dir = GlobalConfig::load(config_dir)?.base_dir;
     loop_pause::clear(&base_dir, out)
+}
+
+/// `sbxm task loop --pause-medium "<why>"` (issue 550, answer 3): records a break after a medium
+/// auto-merge that the loop can't see. Sets the medium pause, which stops the arming of
+/// medium-risk PRs only until `--clear-pause` (replacing one already set, and saying so), then
+/// posts a break comment on the open `medium-trial` issue; a comment that can't be posted, or no
+/// such issue, is a warning. The reason, the config and the repo are checked before the write.
+#[allow(clippy::too_many_arguments)]
+pub fn pause_medium(
+    config_dir: &Path,
+    repo_root: &Path,
+    repo: Option<&str>,
+    why: &str,
+    github: &dyn GitHubBackend,
+    now: &dyn Fn() -> u64,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<()> {
+    let why = why.trim();
+    if why.is_empty() {
+        bail!(
+            "--pause-medium needs the break it records, as in --pause-medium \"PR #9 needed a fix\""
+        );
+    }
+    let base_dir = GlobalConfig::load(config_dir)?.base_dir;
+    let repo = resolve_repo(repo, repo_root)?;
+    if let loop_pause::MediumState::Set(old) = loop_pause::read_medium(&base_dir) {
+        writeln!(out, "this replaces the medium pause: {}", old.why)?;
+    }
+    let pause = loop_pause::MediumPause {
+        why: why.to_owned(),
+        at: format_timestamp(now()),
+    };
+    loop_pause::write_medium(&base_dir, &pause)?;
+    writeln!(
+        out,
+        "medium auto-merge paused: {why}; low-risk PRs still arm; lift it with `sbxm task loop \
+         --clear-pause`"
+    )?;
+    match trial::post(github, &repo, &trial::break_comment(why)) {
+        Ok(Some(issue)) => writeln!(out, "the break is recorded on #{issue}")?,
+        Ok(None) => writeln!(
+            warn,
+            "warning: no open issue is labelled {}, so the break isn't recorded there",
+            trial::LABEL
+        )?,
+        Err(e) => writeln!(
+            warn,
+            "warning: the break comment could not be posted on the medium trial's issue: {}",
+            first_line(&format!("{e:#}"))
+        )?,
+    }
+    Ok(())
 }
 
 fn first_line(text: &str) -> String {
