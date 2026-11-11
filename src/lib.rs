@@ -9,6 +9,7 @@ pub(crate) mod git;
 pub mod github;
 pub mod harness;
 pub mod headless;
+pub mod hint;
 pub mod kit;
 pub mod notify;
 pub mod project;
