@@ -60,6 +60,16 @@ impl ExecGate {
     }
 }
 
+/// A test's hook on the `status` listings (see [`FakeBackend::with_listing_hook`]).
+#[derive(Clone)]
+struct ListingHook(Arc<dyn Fn(&str) + Send + Sync>);
+
+impl std::fmt::Debug for ListingHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("ListingHook")
+    }
+}
+
 /// Records calls instead of running `sbx`. Used by tests.
 #[derive(Debug, Default)]
 pub struct FakeBackend {
@@ -162,6 +172,9 @@ pub struct FakeBackend {
     cloud_list_failure: Option<String>,
     /// How many times `list_detailed` was called; a read, so it's not in `log`.
     cloud_list_calls: Mutex<usize>,
+    /// Called at the start of each `status` listing, with `"cloud"` (`list_detailed`) or
+    /// `"local"` (`list_with_created_at`): lets a test order, time or overlap the two reads.
+    listing_hook: Option<ListingHook>,
     /// The `created_at` of `list`'s sandboxes, by name: what `list_with_created_at` adds.
     local_created_at: HashMap<String, String>,
     /// What `copy_out` of an in-sandbox path produces, before `sandbox_root` is looked at.
@@ -729,6 +742,15 @@ impl FakeBackend {
         }
     }
 
+    /// Calls `hook` at the start of every `list_detailed` (`"cloud"`) and `list_with_created_at`
+    /// (`"local"`), from whichever thread lists.
+    pub fn with_listing_hook(self, hook: impl Fn(&str) + Send + Sync + 'static) -> Self {
+        Self {
+            listing_hook: Some(ListingHook(Arc::new(hook))),
+            ..self
+        }
+    }
+
     /// How many times `list_detailed` was called.
     pub fn cloud_list_calls(&self) -> usize {
         *self.cloud_list_calls.lock().unwrap()
@@ -893,6 +915,9 @@ impl SandboxBackend for FakeBackend {
 
     fn list_detailed(&self) -> Result<Vec<SandboxDetail>> {
         *self.cloud_list_calls.lock().unwrap() += 1;
+        if let Some(hook) = &self.listing_hook {
+            (hook.0)("cloud");
+        }
         if self.no_sbx {
             bail!("fake: sbx not found");
         }
@@ -917,6 +942,9 @@ impl SandboxBackend for FakeBackend {
 
     /// `list`, with the `created_at` of [`FakeBackend::with_created_at`] (issue 92).
     fn list_with_created_at(&self) -> Result<Vec<SandboxDetail>> {
+        if let Some(hook) = &self.listing_hook {
+            (hook.0)("local");
+        }
         Ok(self
             .list()?
             .into_iter()

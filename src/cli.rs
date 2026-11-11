@@ -101,7 +101,8 @@ pub enum Command {
         command: TemplateCommand,
     },
     /// Show the Tasks dashboard: stage, status, time in stage, commits ahead, must-fix findings
-    /// left, PR link and the last run.log line. Reads only; never calls `sbx`.
+    /// left, PR link and the last run.log line. Reads only and changes nothing, but lists the
+    /// sandboxes through `sbx` (local and cloud) on every draw.
     Status {
         /// Redraw every --interval seconds until Ctrl+C; on a terminal only (a pipe or a file
         /// always prints once and exits).
