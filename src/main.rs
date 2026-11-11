@@ -324,46 +324,17 @@ fn run() -> anyhow::Result<()> {
                 (None, Some(n)) => Some((task::record::Kind::Pr, n)),
                 (None, None) => None,
             };
-            match which {
-                // The target is known from the CLI alone, so the writer is opened before the
-                // fallible config load and render, and any failure of either still reaches it
-                // (issue 129 M-2).
-                Some((kind, number)) => {
-                    let (mut out, warn) = task_writers(vec![task_id(kind, number)], None)?;
-                    let result = (|| -> anyhow::Result<()> {
-                        let global = config::GlobalConfig::load(&config::config_dir()?)?;
-                        let (text, _ids) = commands::task_status::render(
-                            &global.base_dir,
-                            which,
-                            json,
-                            &task::record::SystemProbe,
-                        )?;
-                        write!(out, "{text}")?;
-                        Ok(())
-                    })();
-                    finish_task(result, out, warn)
-                }
-                // Unfiltered: there is no target yet until render says which tasks it displayed,
-                // so there is nothing to log a load/render failure into either way.
-                None => {
-                    let rendered =
-                        config::GlobalConfig::load(&config::config_dir()?).and_then(|global| {
-                            commands::task_status::render(
-                                &global.base_dir,
-                                None,
-                                json,
-                                &task::record::SystemProbe,
-                            )
-                        });
-                    let ids = rendered
-                        .as_ref()
-                        .map_or_else(|_| Vec::new(), |(_, ids)| ids.clone());
-                    let (mut out, warn) = task_writers(ids, None)?;
-                    let result =
-                        rendered.and_then(|(text, _)| write!(out, "{text}").map_err(Into::into));
-                    finish_task(result, out, warn)
-                }
-            }
+            // Read-only, like `task logs` (decision 189 (c)): it writes to no task's `run.log`,
+            // so the dashboard's LOG column keeps each task's own last line (issue 576).
+            let global = config::GlobalConfig::load(&config::config_dir()?)?;
+            let (text, _ids) = commands::task_status::render(
+                &global.base_dir,
+                which,
+                json,
+                &task::record::SystemProbe,
+            )?;
+            print!("{text}");
+            Ok(())
         }
         Command::Task {
             command:
@@ -480,7 +451,13 @@ fn run() -> anyhow::Result<()> {
                     no_wait,
                 },
         } => {
-            let (mut out, warn) = task_writers(vec![format!("issue-{issue}")], None)?;
+            // A dry run changes nothing, its task's `run.log` included (issue 576).
+            let ids = if dry_run {
+                Vec::new()
+            } else {
+                vec![format!("issue-{issue}")]
+            };
+            let (mut out, warn) = task_writers(ids, None)?;
             let result = (|| -> anyhow::Result<()> {
                 commands::task_gates::run(
                     &config::config_dir()?,

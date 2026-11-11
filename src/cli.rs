@@ -445,7 +445,8 @@ pub enum TaskCommand {
         /// Which gates: the sandbox tier, the host tier (on this machine), or both.
         #[arg(long, value_enum, default_value_t)]
         tier: GateTier,
-        /// Print the commands, where they run and which tiers are off; run nothing.
+        /// Print the commands, where they run and which tiers are off; run nothing and write no
+        /// run.log.
         #[arg(long)]
         dry_run: bool,
         /// Make a removed worker sandbox again even when the drive of sbx's sandbox state has
@@ -461,6 +462,7 @@ pub enum TaskCommand {
     /// from the code (decision 174's "code is the documentation"; spec section 5.2).
     States,
     /// Show the tasks: stage, status, commits ahead of the base, and whether one was interrupted.
+    /// Read-only: never writes to a run.log.
     Status {
         /// Only the task for this issue.
         #[arg(long, conflicts_with = "pr")]

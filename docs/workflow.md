@@ -500,10 +500,10 @@ build, rewritten by whatever makes that build, and one allow rule per report com
 `.claude/settings.local.json`, which is not checked in because it names a path of one machine. Claude Code refuses
 to let an agent session edit its own permission settings, so you add the rules yourself. Whoever can edit the
 wrapper decides what the allowed command does: keep it outside any folder an agent's sandbox mounts. Two commands
-that look like reports are left out on purpose and keep asking, because they write: `doctor` (its writability
-check creates and removes a file in the base dir, and its kit check writes and removes kits in the temp dir) and
-`task status` (it appends its output to the `run.log` of each task it shows, decision 170; `sbxm status` shows the
-same tasks and only reads).
+that look like reports are left out on purpose and keep asking: `doctor`, because it writes (its writability
+check creates and removes a file in the base dir, and its kit check writes and removes kits in the temp dir), and
+`task status` (decision 192 (b), taken while it appended its output to the `run.log` of each task it shows; since
+issue 576 it only reads, and `sbxm status` shows the same tasks).
 
 ## Recurring preparation: the scheduled factory check (an experiment)
 

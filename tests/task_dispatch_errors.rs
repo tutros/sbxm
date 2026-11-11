@@ -72,14 +72,19 @@ fn a_failing_gates_command_appends_its_header_and_error_to_the_existing_log() {
 fn a_second_invocation_that_fails_still_gets_its_own_header() {
     let env = Env::new();
     save_task(&env, 41);
+    let repo_root = env.tmp.path().join("no-config-here");
+    fs::create_dir_all(&repo_root).unwrap();
+    let gates = || {
+        Command::cargo_bin("sbxm")
+            .unwrap()
+            .env("SBXM_CONFIG_DIR", env.config_dir())
+            .current_dir(&repo_root)
+            .args(["task", "gates", "--issue", "41"])
+            .output()
+            .unwrap()
+    };
 
-    let status = Command::cargo_bin("sbxm")
-        .unwrap()
-        .env("SBXM_CONFIG_DIR", env.config_dir())
-        .args(["task", "status", "--issue", "41"])
-        .output()
-        .unwrap();
-    assert!(status.status.success());
+    assert!(!gates().status.success());
     assert_eq!(
         run_log(&env, "issue-41")
             .lines()
@@ -88,16 +93,7 @@ fn a_second_invocation_that_fails_still_gets_its_own_header() {
         1
     );
 
-    let repo_root = env.tmp.path().join("no-config-here");
-    fs::create_dir_all(&repo_root).unwrap();
-    let output = Command::cargo_bin("sbxm")
-        .unwrap()
-        .env("SBXM_CONFIG_DIR", env.config_dir())
-        .current_dir(&repo_root)
-        .args(["task", "gates", "--issue", "41"])
-        .output()
-        .unwrap();
-    assert!(!output.status.success());
+    assert!(!gates().status.success());
 
     let log = run_log(&env, "issue-41");
     assert_eq!(
@@ -153,7 +149,8 @@ fn a_task_log_that_cannot_be_constructed_warns_once_on_real_stderr() {
     let output = Command::cargo_bin("sbxm")
         .unwrap()
         .env("SBXM_CONFIG_DIR", env.config_dir())
-        .args(["task", "status", "--issue", "41"])
+        .current_dir(env.tmp.path())
+        .args(["task", "gates", "--issue", "41"])
         .output()
         .unwrap();
 
