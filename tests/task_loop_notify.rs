@@ -689,6 +689,28 @@ fn a_question_handed_back_notifies_with_its_pr_as_the_click() {
     );
 }
 
+// --- issue 585: a "none" first line and a note is no question ---
+
+#[test]
+fn a_none_section_with_a_note_raises_no_question() {
+    let f = fixture();
+    let mut script = Script::new(&f.base(), Level::Low);
+    // The shape of PR #553's result.md.
+    script.question = Some("none\n\nThe flag could be renamed later; nothing depends on it.");
+    let notifier = FakeNotifier::default();
+
+    let ran = run_loop(&f, &f.opts(), &script, &github(&[3], HEAD), &notifier);
+
+    ran.result.unwrap();
+    let shown = notifier.shown();
+    assert!(
+        !titles(&shown).iter().any(|t| t.contains("question")),
+        "{:?}\n{}",
+        titles(&shown),
+        ran.out
+    );
+}
+
 // --- no notifier ---
 
 #[test]
