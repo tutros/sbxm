@@ -742,6 +742,17 @@ What changes in the cloud:
   again: a host still allowed outside the runtime list, or a list it can't read, removes the sandbox (then its scoped
   secrets) and refuses, naming the host. This holds for worker, reviewer and fix-round sandboxes alike. A strict
   profile with a harness other than `claude` or `codex` is refused before anything is created.
+- **A strict sandbox is warmed up before the deny (issue 560).** A cloud sandbox has no warm template, so its
+  caches are empty. Before denying, while the build hosts are still allowed, sbxm checks the clone out at the task's
+  base commit, detached, and runs the same warm-up as `sbxm template build --warm`: the repo's `[warm]` commands, else,
+  for a base with a `Cargo.toml`, `cargo fetch --locked`, `cargo clippy --all-targets --locked` and `cargo test
+  --no-run --locked` in `CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR=/tmp/target`. A repo with neither gets no warm-up.
+  Only after the deny and its check is the task's branch checked out and the agent started, so only the base is built
+  while the build hosts are allowed; a branch that changes `Cargo.lock` can't fetch its new crates, as locally. A fix
+  round in the kept worker sandbox isn't warmed again. A step that fails, or a warm-up past 20 minutes (enforced
+  inside the sandbox), fails the task before any agent runs: the sandbox is removed, then its scoped secrets, and the
+  error names the step (or says `warm-up timed out after 20m`) with the last 40 lines of its output, which go to
+  `run.log`. There is no automatic retry: `task resume` makes the sandbox afresh.
 - **Secrets.** The provider logins stay global in the cloud: `sbx secret set anthropic --oauth --cloud` and `sbx
   secret set openai --oauth --cloud`. Their values never enter a sandbox. No other secret has a value source in the
   cloud yet, so a profile whose `secrets.services` names anything else is refused for a cloud task.
