@@ -72,9 +72,13 @@ impl Shell {
         }
     }
 
-    /// The line that changes to `dir`.
+    /// The line that changes to `dir`. PowerShell's `cd` takes a path as a wildcard pattern even
+    /// single-quoted (a folder named `[repo]` matches nothing), so it gets `-LiteralPath`.
     pub fn cd(self, dir: &str) -> String {
-        format!("cd {}", self.quote(dir))
+        match self {
+            Shell::PowerShell => format!("cd -LiteralPath {}", self.quote(dir)),
+            Shell::Sh => format!("cd {}", self.quote(dir)),
+        }
     }
 
     /// The line that sets `SBXM_CONFIG_DIR` to `value`.

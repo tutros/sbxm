@@ -140,7 +140,7 @@ fn the_block_sets_sbxm_config_dir_as_given() {
     );
     assert_eq!(
         hint::block(&context(Some(r"H:\sbxm cfg")), Shell::PowerShell),
-        "to run the commands above as this one ran, first:\n  cd '/work/my repo'\n  \
+        "to run the commands above as this one ran, first:\n  cd -LiteralPath '/work/my repo'\n  \
          $env:SBXM_CONFIG_DIR='H:\\sbxm cfg'\n"
     );
 }
@@ -181,8 +181,8 @@ struct Fixture {
 
 fn fixture(exe_name: &str, script: &str) -> Fixture {
     let tmp = tempfile::TempDir::new().unwrap();
-    let dir = tmp.path().join("work dir 'q");
-    let bin = tmp.path().join("bin dir 'q");
+    let dir = tmp.path().join("work [dir] 'q");
+    let bin = tmp.path().join("bin [dir] 'q");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::create_dir_all(&bin).unwrap();
     let exe = bin.join(exe_name);
@@ -229,10 +229,10 @@ fn expected_output(fx: &Fixture, config_dir: &str) -> String {
 #[test]
 fn the_sh_lines_run_as_written() {
     let fx = fixture(
-        "my sbxm 'q",
+        "my [sbxm] 'q",
         "#!/bin/sh\npwd\nfor a in \"$@\"; do echo \"$a\"; done\necho \"$SBXM_CONFIG_DIR\"\n",
     );
-    let config_dir = "/cfg dir 'q";
+    let config_dir = "/cfg [dir] 'q";
     let script = printed(Shell::Sh, &fx, config_dir);
     let output = Command::new("sh").arg("-c").arg(&script).output().unwrap();
     assert!(output.status.success(), "{script}\n{output:?}");
@@ -262,10 +262,10 @@ fn the_powershell_lines_run_as_written() {
         return;
     };
     let fx = fixture(
-        "my sbxm 'q",
+        "my [sbxm] 'q",
         "#!/bin/sh\npwd\nfor a in \"$@\"; do echo \"$a\"; done\necho \"$SBXM_CONFIG_DIR\"\n",
     );
-    let config_dir = "/cfg dir 'q";
+    let config_dir = "/cfg [dir] 'q";
     let script = printed(Shell::PowerShell, &fx, config_dir);
     let output = Command::new(pwsh)
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
