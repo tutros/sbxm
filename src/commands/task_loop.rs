@@ -39,6 +39,7 @@ use crate::github::{GitHubBackend, Issue, Mergeable, PrState, RunStatus, Workflo
 use crate::harness::Harness;
 use crate::notify::{self, Notification, Notifier, Shown};
 use crate::run::results::format_timestamp;
+use crate::slot;
 use crate::task::config::{ShouldFix, TaskConfig};
 use crate::task::finish::check_own_folder;
 use crate::task::gates::HostRunner;
@@ -1126,6 +1127,14 @@ impl Loop<'_> {
             let (result, removed) = result;
             if label && self.unlabeled(issue, removed, warn).map_err(Halt::Error)? {
                 label = false;
+            }
+            // A stop asked while the phase waited for the machine's sandbox slot (issue 570):
+            // it created nothing, so the task stands as it was before the phase.
+            if result.as_ref().is_err_and(|e| e.is::<slot::Stopped>()) {
+                if self.record(issue).is_none() {
+                    return Err(Halt::Stopped);
+                }
+                return self.stopped(issue, out).map_err(io);
             }
             let ready = self.record(issue).filter(|r| r.stage == Stage::Ready);
             let e = match (result, ready) {
@@ -3022,6 +3031,11 @@ pub fn stop_path(base_dir: &Path) -> PathBuf {
     base_dir.join(".sbxm").join("task-loop.stop")
 }
 
+/// Whether `task loop --stop` left its request at `path` ([`stop_path`]).
+fn stop_file_left(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
 /// `sbxm task loop --stop` (issue 527, decision 310): asks the running loop to stop, by writing
 /// [`stop_path`]. With no loop running (no lock, or one whose process is gone) it says so and
 /// writes nothing.
@@ -3164,7 +3178,7 @@ fn run_loop(
         Err(e) => return Err(e).with_context(|| format!("cannot remove {}", stop_file.display())),
     }
     // `task loop --stop`'s request counts as a first Ctrl-C press.
-    let asked = || (env.stop_requested)() || fs::symlink_metadata(&stop_file).is_ok();
+    let asked = || (env.stop_requested)() || stop_file_left(&stop_file);
     let env = &Env {
         now: env.now,
         sleep: env.sleep,
@@ -3619,9 +3633,26 @@ pub struct TaskSteps<'a> {
     pub host: &'a dyn HostRunner,
     /// The free-space check of the sandbox drive (decision 194).
     pub disk: disk::Guard,
+    /// The loop's Ctrl-C presses (issue 570): with them, a task's slot wait polls the loop's stop
+    /// request, these and the stop file `task loop --stop` writes, as the loop does between tasks.
+    pub stop: Option<Arc<StopFlag>>,
 }
 
 impl TaskSteps<'_> {
+    /// The disk guard of a task's first phase (`task run`, `task resume`): with [`Self::stop`],
+    /// its slot wait polls the loop's stop request (issue 570), so a stop asked while it waits
+    /// ends it creating nothing. A task's should-fix round, part of the task the loop finishes
+    /// before it stops, and the loop's other steps (jobs, resolves, log fixes) wait as before.
+    fn task_disk(&self) -> Result<disk::Guard> {
+        let mut guard = self.disk.clone();
+        if let Some(flag) = &self.stop {
+            let flag = Arc::clone(flag);
+            let file = stop_path(&GlobalConfig::load(self.config_dir)?.base_dir);
+            guard.slot.stop = Some(Arc::new(move || flag.requested() || stop_file_left(&file)));
+        }
+        Ok(guard)
+    }
+
     /// `out` and `warn` teed into `issue-<n>`'s `run.log`, as `main` does for a `task` command.
     fn logged(
         &self,
@@ -3646,8 +3677,15 @@ impl TaskSteps<'_> {
         let mut out = Tee::new(out, Arc::clone(&log));
         let mut warn = Tee::new(warn, log);
         let result = step(&mut out, &mut warn);
-        if let Err(e) = &result {
-            let _ = writeln!(warn, "Error: {e:#}");
+        match &result {
+            // Not a failure: the loop says it stopped on request.
+            Err(e) if e.is::<slot::Stopped>() => {
+                let _ = writeln!(warn, "{e:#}");
+            }
+            Err(e) => {
+                let _ = writeln!(warn, "Error: {e:#}");
+            }
+            Ok(()) => {}
         }
         result
     }
@@ -3720,6 +3758,11 @@ impl TaskSteps<'_> {
     ) -> Result<()> {
         self.release(&format!("issue-{issue}"))?;
         self.logged(issue, out, warn, &|out, warn| {
+            let disk = if should_fix {
+                self.disk.clone()
+            } else {
+                self.task_disk()?
+            };
             task_resume::run(
                 self.config_dir,
                 &task_resume::Options {
@@ -3727,7 +3770,7 @@ impl TaskSteps<'_> {
                     target: task_resume::Target::Issue(issue),
                     rounds: should_fix.then_some(1),
                     should_fix,
-                    disk: self.disk.clone(),
+                    disk,
                     identity: None,
                     forget_ambiguous: false,
                 },
@@ -3745,6 +3788,7 @@ impl TaskSteps<'_> {
 impl Steps for TaskSteps<'_> {
     fn run(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
         self.logged(issue, out, warn, &|out, warn| {
+            let disk = self.task_disk()?;
             task_run::run(
                 self.config_dir,
                 &task_run::Options {
@@ -3761,7 +3805,7 @@ impl Steps for TaskSteps<'_> {
                     repo: self.repo.clone(),
                     clone_source: None,
                     identity: None,
-                    disk: self.disk.clone(),
+                    disk,
                     location: None,
                 },
                 None,

@@ -451,8 +451,8 @@ the binary you built, and waits for job files and labelled issues.
    secret, two parked tasks, the usage waits' total) leaves it down: fix the cause, then run
    `./scripts/loop-trigger.ps1` by hand or wait for the next logon. A task the loop was running when it died is
    resumed once at the next start.
-3. Stop it with `sbxm task loop --stop`: it stops after the current task, or within 5 minutes while it waits, and
-   comes back at the next logon.
+3. Stop it with `sbxm task loop --stop`: it stops after the current task, or within 5 minutes while it waits (5
+   seconds while its next task waits for a sandbox slot, creating nothing), and comes back at the next logon.
 4. Remove it with `./scripts/loop-trigger.ps1 -Unregister`, then `sbxm task loop --stop` for the one running.
 5. While it runs you hear from it through toasts (decision 311, issue 530), only when it needs you: a PR awaiting
    your merge (medium or high risk, a draft, or a low risk with checks not run; issue 555), a queued job that
