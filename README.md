@@ -745,6 +745,16 @@ What changes in the cloud:
 - **Secrets.** The provider logins stay global in the cloud: `sbx secret set anthropic --oauth --cloud` and `sbx
   secret set openai --oauth --cloud`. Their values never enter a sandbox. No other secret has a value source in the
   cloud yet, so a profile whose `secrets.services` names anything else is refused for a cloud task.
+- **A billable shape.** A cloud sandbox comes in five shapes only, picked by `--cpus` and `--memory`: micro (1 CPU,
+  2 GiB), small (2, 4 GiB), medium (4, 8 GiB), large (8, 16 GiB) and xl (16, 32 GiB). `[sandbox] cloud_shape =
+  "large"` in `sbxm-task.toml` sizes every cloud sandbox of a task, worker, reviewer and fix rounds, whatever
+  `[resources]` and `[sandbox] cpus / memory` say (those keep sizing local sandboxes). The name is matched in any
+  case (`Large` is large); any other value, or an empty one, is an error when the file loads, naming the five. Without
+  the key, the local CPUs and memory (`[sandbox] cpus / memory`, else the global `[resources]`) are used when they are
+  exactly one of the five (`8192m` and `8g` are both medium); otherwise the task is refused before anything is
+  written or created: `8 CPUs / 4g isn't a cloud shape; set [sandbox] cloud_shape in sbxm-task.toml to micro, small,
+  medium, large or xl`. `task.json` records the CPUs and memory the worker's sandbox was created with, so `task
+  resume` and a fix round make it again with those, not with what the key says by then.
 - **No free-disk check.** The `min_free_disk` check of the sandbox drive is skipped for a cloud task.
 - **`task start --workers N`** works as it does locally.
 
