@@ -11,6 +11,7 @@ use sbxm::cli::{
 use sbxm::commands;
 use sbxm::config;
 use sbxm::confirm::Terminal;
+use sbxm::hint::{self, Local};
 use sbxm::task;
 use sbxm::task::runlog::Tee;
 
@@ -26,13 +27,19 @@ fn task_id(kind: task::record::Kind, number: u32) -> String {
     }
 }
 
+/// A `sbxm task` command's screen writer: its hints name the commands they suggest with the
+/// running executable (issue 574), on the screen and in the `run.log`.
+type TaskOut = Local<Tee<std::io::Stdout>>;
+/// A `sbxm task` command's warning writer, rewritten like [`TaskOut`].
+type TaskWarn = Local<Tee<std::io::Stderr>>;
+
 /// The screen and warning writers of a `sbxm task` command, each copying its lines to the
 /// `run.log` of the tasks `ids` (and, with `discover`, of every task this process's own identity
 /// — pid and start time — turns up in, since `task start` picks its issues itself).
 fn task_writers(
     ids: Vec<String>,
     discover: Option<&dyn task::record::ProcessProbe>,
-) -> anyhow::Result<(Tee<std::io::Stdout>, Tee<std::io::Stderr>)> {
+) -> anyhow::Result<(TaskOut, TaskWarn)> {
     // The explicit no-target case (`task init`, `file-findings --file`) stays inert on purpose:
     // there is nothing to log into, and that is not a failure.
     let log = if ids.is_empty() && discover.is_none() {
@@ -47,13 +54,13 @@ fn task_writers(
             })
     };
     // Notes about text after `sbx`'s JSON go through the same log as the other warnings.
-    let mut notes = Tee::new(std::io::stderr(), Arc::clone(&log));
+    let mut notes = Local::new(Tee::new(std::io::stderr(), Arc::clone(&log)));
     sbxm::backend::set_trailer_sink(move |note| {
         let _ = writeln!(notes, "warning: {note}");
     });
     Ok((
-        Tee::new(std::io::stdout(), Arc::clone(&log)),
-        Tee::new(std::io::stderr(), log),
+        Local::new(Tee::new(std::io::stdout(), Arc::clone(&log))),
+        Local::new(Tee::new(std::io::stderr(), log)),
     ))
 }
 
@@ -106,13 +113,11 @@ fn warn_log_open_failed(ids: &[String], err: &anyhow::Error) {
 /// through `warn` the exact text `main`'s own `anyhow::Result<()>` return would otherwise print to
 /// the real, un-teed stderr (`Error: {err:?}`), so the task's `run.log` gets the header (written as
 /// a side effect of this being the first line, if nothing else was) and the error exactly once,
-/// then exits with the status that printing would have produced. `out` and `warn` are dropped
-/// (flushing any partial line) before the process exits, since `std::process::exit` skips `Drop`.
-fn finish_task(
-    result: anyhow::Result<()>,
-    out: Tee<std::io::Stdout>,
-    warn: Tee<std::io::Stderr>,
-) -> ! {
+/// then exits with the status that printing would have produced. After an error or a hint that
+/// named a command, the block saying where to run it follows, once (issue 574). `out` and `warn`
+/// are dropped (flushing any partial line) before the process exits, since `std::process::exit`
+/// skips `Drop`.
+fn finish_task(result: anyhow::Result<()>, out: TaskOut, warn: TaskWarn) -> ! {
     let code = if result.is_err() { 1 } else { 0 };
     finish_task_with(result, code, out, warn)
 }
@@ -121,11 +126,17 @@ fn finish_task(
 fn finish_task_with(
     result: anyhow::Result<()>,
     code: i32,
-    out: Tee<std::io::Stdout>,
-    mut warn: Tee<std::io::Stderr>,
+    mut out: TaskOut,
+    mut warn: TaskWarn,
 ) -> ! {
     if let Err(err) = result {
         let _ = writeln!(warn, "Error: {err:?}");
+    }
+    // The screen's last partial line goes out before the block asks whether anything was named.
+    let _ = out.flush();
+    let _ = warn.flush();
+    if let Some(block) = hint::take_block() {
+        let _ = write!(warn, "{block}");
     }
     drop(out);
     drop(warn);
@@ -143,11 +154,31 @@ fn main() -> anyhow::Result<()> {
         .stack_size(CLI_STACK_SIZE)
         .spawn(run)?;
     // A panic has already printed its message on the thread; exit as a panicking main would.
-    cli.join().unwrap_or_else(|_| std::process::exit(101))
+    let result = cli.join().unwrap_or_else(|_| std::process::exit(101));
+    // The error as `main`'s own return would print it, with its commands named by the running
+    // executable, then the block saying where to run them (issue 574).
+    let _ = std::io::stdout().flush();
+    if let Err(err) = &result {
+        eprint!("{}", hint::local(&format!("Error: {err:?}\n")));
+    }
+    if let Some(block) = hint::take_block() {
+        eprint!("{block}");
+    }
+    if result.is_err() {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+/// `text` on stdout, its commands named by the running executable (issue 574).
+fn say(text: &str) {
+    print!("{}", hint::local(text));
 }
 
 fn run() -> anyhow::Result<()> {
-    sbxm::backend::set_trailer_sink(|note| eprintln!("warning: {note}"));
+    sbxm::backend::set_trailer_sink(|note| {
+        eprint!("{}", hint::local(&format!("warning: {note}\n")))
+    });
     // `Cli::parse()` sugars over this, but `task run`'s list needs the raw matches too: clap's
     // derive API has no field that carries the relative order of two different repeated flags
     // (`--issue`/`--spec`), so it's read back from them directly (`cli::run_target_order`).
@@ -171,16 +202,15 @@ fn run() -> anyhow::Result<()> {
                 ..Default::default()
             },
             &SbxBackend::LOCAL,
-            &mut std::io::stderr(),
+            &mut Local::new(std::io::stderr()),
         ),
         Command::List { json } => {
             let entries = commands::list::entries(&config::config_dir()?, &SbxBackend::LOCAL)?;
-            let render = if json {
-                commands::list::render_json
+            if json {
+                print!("{}", commands::list::render_json(&entries));
             } else {
-                commands::list::render_table
-            };
-            print!("{}", render(&entries));
+                say(&commands::list::render_table(&entries));
+            }
             Ok(())
         }
         Command::Open {
@@ -197,7 +227,7 @@ fn run() -> anyhow::Result<()> {
                 disk: sbxm::disk::Guard::real(ignore_disk),
             },
             &SbxBackend::LOCAL,
-            &mut std::io::stderr(),
+            &mut Local::new(std::io::stderr()),
         ),
         Command::Stop { project, harness } => commands::stop::run(
             &config::config_dir()?,
@@ -227,8 +257,11 @@ fn run() -> anyhow::Result<()> {
                 &SbxBackend::LOCAL,
                 &commands::doctor::Host::real(),
             );
-            print!("{}", report.render());
+            say(&report.render());
             if report.failed() {
+                if let Some(block) = hint::take_block() {
+                    eprint!("{block}");
+                }
                 std::process::exit(1);
             }
             Ok(())
@@ -256,8 +289,8 @@ fn run() -> anyhow::Result<()> {
                 &config_path,
                 &sbxm::disk::Guard::real(ignore_disk).no_wait(no_wait),
                 &SbxBackend::LOCAL,
-                &mut std::io::stdout(),
-                &mut std::io::stderr(),
+                &mut Local::new(std::io::stdout()),
+                &mut Local::new(std::io::stderr()),
             )?;
             Ok(())
         }
@@ -270,7 +303,7 @@ fn run() -> anyhow::Result<()> {
                 &run_id,
                 &commands::run_show::Options { full_diff: diff },
             )?;
-            print!("{text}");
+            say(&text);
             Ok(())
         }
         Command::Run(RunArgs {
@@ -282,10 +315,10 @@ fn run() -> anyhow::Result<()> {
                 }),
             ..
         }) => {
-            print!(
-                "{}",
-                commands::run_review::submit(&config::config_dir()?, &run_id)?
-            );
+            say(&commands::run_review::submit(
+                &config::config_dir()?,
+                &run_id,
+            )?);
             Ok(())
         }
         Command::Run(RunArgs {
@@ -313,7 +346,7 @@ fn run() -> anyhow::Result<()> {
         Command::Task {
             command: TaskCommand::States,
         } => {
-            print!("{}", commands::task_states::render());
+            say(&commands::task_states::render());
             Ok(())
         }
         Command::Task {
@@ -333,7 +366,12 @@ fn run() -> anyhow::Result<()> {
                 json,
                 &task::record::SystemProbe,
             )?;
-            print!("{text}");
+            // The JSON is data, printed as it is; the table's hints name the executable.
+            if json {
+                print!("{text}");
+            } else {
+                say(&text);
+            }
             Ok(())
         }
         Command::Task {
@@ -1065,7 +1103,7 @@ fn run() -> anyhow::Result<()> {
                 &config::config_dir()?,
                 &commands::task_logs::Options { target, follow },
                 &commands::task_logs::Env::real(),
-                &mut std::io::stdout(),
+                &mut Local::new(std::io::stdout()),
             )
         }
         Command::Run(_) => unreachable!("clap requires a config or a subcommand"),
@@ -1089,8 +1127,8 @@ fn run() -> anyhow::Result<()> {
             },
             &SbxBackend::LOCAL,
             &sbxm::task::record::SystemProbe,
-            &mut std::io::stdout(),
-            &mut std::io::stderr(),
+            &mut Local::new(std::io::stdout()),
+            &mut Local::new(std::io::stderr()),
         ),
         Command::Template {
             command: TemplateCommand::Ls,
@@ -1098,7 +1136,7 @@ fn run() -> anyhow::Result<()> {
             &config::config_dir()?,
             &commands::template_ls::Options::default(),
             &SbxBackend::LOCAL,
-            &mut std::io::stdout(),
+            &mut Local::new(std::io::stdout()),
         ),
         Command::Template {
             command: TemplateCommand::Rm { profile, harness },
@@ -1106,7 +1144,7 @@ fn run() -> anyhow::Result<()> {
             &config::config_dir()?,
             &commands::template_rm::Options { profile, harness },
             &SbxBackend::LOCAL,
-            &mut std::io::stdout(),
+            &mut Local::new(std::io::stdout()),
         ),
         Command::Config {
             command: ConfigCommand::Init,
@@ -1159,7 +1197,7 @@ fn run() -> anyhow::Result<()> {
                 &env,
                 watch,
                 Some(&source),
-                &mut std::io::stdout(),
+                &mut Local::new(std::io::stdout()),
             )
         }
     }

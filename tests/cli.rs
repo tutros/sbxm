@@ -40,7 +40,7 @@ fn commands_without_config_point_to_config_init() {
             .get_output()
             .clone();
         let stderr = String::from_utf8(output.stderr).unwrap();
-        assert!(stderr.contains("sbxm config init"), "{args:?}: {stderr}");
+        assert!(stderr.contains(" config init` first"), "{args:?}: {stderr}");
     }
 }
 

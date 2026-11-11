@@ -127,7 +127,7 @@ fn the_block_has_no_config_line_when_sbxm_config_dir_is_unset() {
     let block = hint::block(&context(None), Shell::Sh);
     assert_eq!(
         block,
-        "run the sbxm commands above after:\n  cd '/work/my repo'\n"
+        "to run the commands above as this one ran, first:\n  cd '/work/my repo'\n"
     );
 }
 
@@ -135,12 +135,12 @@ fn the_block_has_no_config_line_when_sbxm_config_dir_is_unset() {
 fn the_block_sets_sbxm_config_dir_as_given() {
     assert_eq!(
         hint::block(&context(Some("./cfg dir")), Shell::Sh),
-        "run the sbxm commands above after:\n  cd '/work/my repo'\n  \
+        "to run the commands above as this one ran, first:\n  cd '/work/my repo'\n  \
          export SBXM_CONFIG_DIR='./cfg dir'\n"
     );
     assert_eq!(
         hint::block(&context(Some(r"H:\sbxm cfg")), Shell::PowerShell),
-        "run the sbxm commands above after:\n  cd '/work/my repo'\n  \
+        "to run the commands above as this one ran, first:\n  cd '/work/my repo'\n  \
          $env:SBXM_CONFIG_DIR='H:\\sbxm cfg'\n"
     );
 }
@@ -277,4 +277,17 @@ fn the_powershell_lines_run_as_written() {
         expected_output(&fx, config_dir),
         "{script}"
     );
+}
+
+#[test]
+fn a_posted_pr_comment_keeps_the_bare_sbxm() {
+    // The comment `task finish` posts names a command in backticks, as a hint would; the rewrite
+    // is only applied by the local writers, never to what is posted.
+    let posted = sbxm::task::review::in_task_pr_comment(7, "abc1234", "", "no findings");
+    assert!(
+        posted.contains("(this PR's head when `sbxm task finish` opened it)"),
+        "{posted}"
+    );
+    assert!(hint::local(&posted).contains(" task finish` opened it"));
+    assert!(!hint::local(&posted).contains("`sbxm task finish`"));
 }

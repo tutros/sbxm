@@ -54,14 +54,14 @@ fn a_failing_gates_command_appends_its_header_and_error_to_the_existing_log() {
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     assert!(stderr.starts_with("Error: "), "{stderr}");
     assert!(
-        stderr.contains("sbxm-task.toml") && stderr.contains("sbxm task init"),
+        stderr.contains("sbxm-task.toml") && stderr.contains(" task init`"),
         "{stderr}"
     );
 
     let log = run_log(&env, "issue-41");
     assert!(log.starts_with("# "), "{log}");
     assert!(
-        log.contains("sbxm-task.toml") && log.contains("sbxm task init"),
+        log.contains("sbxm-task.toml") && log.contains(" task init`"),
         "{log}"
     );
 }

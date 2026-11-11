@@ -172,7 +172,7 @@ pub fn block(context: &Context, shell: Shell) -> String {
     if lines.is_empty() {
         return String::new();
     }
-    let mut text = "run the sbxm commands above after:\n".to_owned();
+    let mut text = "to run the commands above as this one ran, first:\n".to_owned();
     for line in lines {
         text.push_str("  ");
         text.push_str(&line);

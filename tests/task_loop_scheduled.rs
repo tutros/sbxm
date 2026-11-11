@@ -488,10 +488,7 @@ fn the_cli_stop_with_no_loop_running_says_so_and_exits_0() {
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert_eq!(output.status.code(), Some(0), "{stdout}");
-    assert!(
-        stdout.contains("no `sbxm task loop` is running"),
-        "{stdout}"
-    );
+    assert!(stdout.contains(" task loop` is running"), "{stdout}");
     assert!(!task_loop::stop_path(&env.base_dir()).exists());
 }
 

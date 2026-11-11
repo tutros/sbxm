@@ -541,6 +541,15 @@ for a task. Check `sbx ls` for stopped leftovers.
 ## Troubleshooting
 
 - **Start with `sbxm doctor`.** Each failure says what's wrong and how to fix it.
+- **Where and with what to run a hint's command** (issue 574): an error or hint that names a command (at a line's
+  start, after `next: `, or in backticks) names it by the full path of the executable that printed it, quoted for this
+  platform's shell (`& 'H:\sbxm-e2e\sbxm-a4571ff.exe' task resume --issue 468` in PowerShell on Windows,
+  `'/path/to/sbxm' task resume --issue 468` in sh elsewhere), and is followed once by the lines to run first: `cd` into
+  the directory the command ran in (for a `task` command, the repo root whose `sbxm-task.toml` it read) and, when
+  `SBXM_CONFIG_DIR` is set, the line that sets it as it was. Only local output does this (the screen, `run.log`, the
+  `next:` lines of `sbxm status` and `task status`); what sbxm posts to GitHub and the loop's toasts keep the bare
+  `sbxm`, and so does `--json` output. A `task` command run where there is no `sbxm-task.toml` says so, and names the
+  directory a task was started from when its `task.json` records one.
 - **`sbx` says `try: sbx login` although you are logged in:** the drive `sbx` keeps its sandboxes on may be full.
   `sbxm doctor` shows its free space; remove sandboxes you no longer need (`sbxm rm`, `sbxm task rm`).
 - **`sbx create` fails with `failed to run sandbox container`:** check the workspace isn't on a drive `sbx` can't
