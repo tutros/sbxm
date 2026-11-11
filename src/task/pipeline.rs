@@ -30,6 +30,7 @@ use super::risk;
 use super::secrets;
 use super::select::{self, Selection};
 use super::session;
+use super::shape;
 use super::stale_lock;
 use crate::backend::{CreateSpec, ExecSpec, Location, SandboxBackend, ScopedSecret, Stdin};
 use crate::config::{self, GlobalConfig, Profile, Resources};
@@ -420,6 +421,7 @@ pub fn prepare_pr_at(ctx: &Ctx, pr: &PrInfo, location: Location) -> Result<Prepa
     let reviewer = &ctx.config.reviewer;
     secrets::check(location, ctx.scoped_secrets)?;
     let warnings = check_reviewer_inputs(ctx.config_dir, ctx.backend, ctx.config, location)?;
+    let overrides = shape::overrides(&ctx.config.sandbox, &global.resources, location)?;
 
     let parent = meta.parent().unwrap_or(Path::new("."));
     fs::create_dir_all(parent).with_context(|| format!("cannot create {}", parent.display()))?;
@@ -430,10 +432,7 @@ pub fn prepare_pr_at(ctx: &Ctx, pr: &PrInfo, location: Location) -> Result<Prepa
             ctx.config_dir,
             &ctx.config.sandbox.profile,
             &[reviewer.harness],
-            &Overrides {
-                cpus: ctx.config.sandbox.cpus,
-                memory: ctx.config.sandbox.memory.clone(),
-            },
+            &overrides,
             None,
             &meta.join("kits-review"),
             ctx.backend,
@@ -1313,6 +1312,8 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
         Source::Fix { pr, .. } => Some(fix_startable(&global.base_dir, id, pr)?),
     };
     secrets::check(location, ctx.scoped_secrets)?;
+    // A cloud worker's shape (issue 559), also checked before anything is written.
+    let overrides = shape::overrides(&ctx.config.sandbox, &global.resources, location)?;
     let worker = &ctx.config.worker;
     let profile = Profile::load(global.profiles_dir(), &ctx.config.sandbox.profile)?;
     // A cloud worker's TTL (P5 (d)), checked with the rest before anything is written.
@@ -1441,10 +1442,6 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
                 review::review_pr_command(number, ctx.repo, Some(ctx.base_branch), false)
             );
         }
-        let overrides = Overrides {
-            cpus: ctx.config.sandbox.cpus,
-            memory: ctx.config.sandbox.memory.clone(),
-        };
         let plan = match location {
             Location::Local => plan_sandbox(
                 &stale_lock::Refresh {
@@ -4726,6 +4723,7 @@ pub fn check_reviewer_inputs(
             )?;
             template::check_strict_cloud(profile_name, &profile, reviewer.harness)?;
             lifetime::reviewer_ttl(config)?;
+            shape::overrides(&config.sandbox, &global.resources, location)?;
         }
     }
     let mut warnings = config.warnings.clone();
@@ -4773,6 +4771,7 @@ pub fn check_worker_inputs(
             )?;
             template::check_strict_cloud(profile_name, &profile, worker.harness)?;
             lifetime::worker_ttl_or(config, config.fix_rounds, lifetime::new_task_fix)?;
+            shape::overrides(&config.sandbox, &global.resources, location)?;
         }
     }
     let mut warnings = config.warnings.clone();
@@ -5145,6 +5144,8 @@ fn open_cloud_review(
 ) -> Result<Vec<String>> {
     let reviewer = &env.config.reviewer;
     let ttl = lifetime::reviewer_ttl(env.config)?;
+    let global = GlobalConfig::load(env.config_dir)?;
+    let overrides = shape::overrides(&env.config.sandbox, &global.resources, Location::Cloud)?;
     if prepared.record.has_open_sandbox(sandbox) {
         release_cloud_sandbox(env, prepared, sandbox);
     }
@@ -5155,10 +5156,7 @@ fn open_cloud_review(
         &env.config.sandbox.profile,
         reviewer.harness,
         sandbox,
-        &Overrides {
-            cpus: env.config.sandbox.cpus,
-            memory: env.config.sandbox.memory.clone(),
-        },
+        &overrides,
         &prepared.meta.join("kits-review"),
         &mut warnings,
     )?;

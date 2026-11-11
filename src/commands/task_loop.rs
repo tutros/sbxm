@@ -39,6 +39,7 @@ use crate::github::{GitHubBackend, Issue, Mergeable, PrState, RunStatus, Workflo
 use crate::harness::Harness;
 use crate::notify::{self, Notification, Notifier, Shown};
 use crate::run::results::format_timestamp;
+use crate::slot;
 use crate::task::config::{ShouldFix, TaskConfig};
 use crate::task::finish::check_own_folder;
 use crate::task::gates::HostRunner;
@@ -364,6 +365,9 @@ enum End {
     /// Finished or removed by a command run by hand while its lock was held (review M-1 of issue
     /// 409): that command's, so no row, not counted and not parked. The line saying why.
     Taken(String),
+    /// Cut short by a stop request after one of its phases ran: logged, never counted as parked
+    /// (a requested stop exits 0, decision 310; review M-1 of issue 570).
+    Stopped(String),
 }
 
 /// What a claim found under the task's lock.
@@ -941,15 +945,17 @@ impl Loop<'_> {
 
     /// A task cut short by a stop request: says how to continue it.
     fn stopped(&self, issue: u32, out: &mut dyn Write) -> std::io::Result<End> {
-        writeln!(
-            out,
+        writeln!(out, "{}", self.stopped_line(issue))?;
+        Ok(End::Stopped(
+            "stopped on request before its resume".to_owned(),
+        ))
+    }
+
+    fn stopped_line(&self, issue: u32) -> String {
+        format!(
             "{}: stopped on request; continue it with `sbxm task resume --issue {issue}`",
             self.issue_named(issue)
-        )?;
-        Ok(End::Parked {
-            ready: None,
-            outcome: "stopped on request before its resume".to_owned(),
-        })
+        )
     }
 
     fn task_dir(&self, issue: u32) -> PathBuf {
@@ -1084,9 +1090,13 @@ impl Loop<'_> {
         // `ready`, never again, whatever its record says. One that failed is tried again while
         // it is still due, as any failed phase is (once, then parked).
         let mut should_fix_ran = false;
+        // Whether a phase of this call ran. A stop before the first one leaves the task as it
+        // was, for the loop to say what is left (review M-2 of issue 570); after it, the task is
+        // cut short and logged.
+        let mut ran = false;
         loop {
             let Some(paused) = self.wait_for_room(out).map_err(Halt::Error)? else {
-                if self.record(issue).is_none() {
+                if !ran {
                     return Err(Halt::Stopped);
                 }
                 return self.stopped(issue, out).map_err(io);
@@ -1127,6 +1137,15 @@ impl Loop<'_> {
             if label && self.unlabeled(issue, removed, warn).map_err(Halt::Error)? {
                 label = false;
             }
+            // A stop asked while the phase waited for the machine's sandbox slot (issue 570):
+            // it created nothing, so the task stands as it was before the phase.
+            if result.as_ref().is_err_and(|e| e.is::<slot::Stopped>()) {
+                if !ran {
+                    return Err(Halt::Stopped);
+                }
+                return self.stopped(issue, out).map_err(io);
+            }
+            ran = true;
             let ready = self.record(issue).filter(|r| r.stage == Stage::Ready);
             let e = match (result, ready) {
                 (Ok(()), Some(_)) => {
@@ -3022,6 +3041,11 @@ pub fn stop_path(base_dir: &Path) -> PathBuf {
     base_dir.join(".sbxm").join("task-loop.stop")
 }
 
+/// Whether `task loop --stop` left its request at `path` ([`stop_path`]).
+fn stop_file_left(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
 /// `sbxm task loop --stop` (issue 527, decision 310): asks the running loop to stop, by writing
 /// [`stop_path`]. With no loop running (no lock, or one whose process is gone) it says so and
 /// writes nothing.
@@ -3164,7 +3188,7 @@ fn run_loop(
         Err(e) => return Err(e).with_context(|| format!("cannot remove {}", stop_file.display())),
     }
     // `task loop --stop`'s request counts as a first Ctrl-C press.
-    let asked = || (env.stop_requested)() || fs::symlink_metadata(&stop_file).is_ok();
+    let asked = || (env.stop_requested)() || stop_file_left(&stop_file);
     let env = &Env {
         now: env.now,
         sleep: env.sleep,
@@ -3333,7 +3357,9 @@ fn work(
             left(&held, &due, out)?;
             return Ok("stopped on request".to_owned());
         }
-        let (issue, title, size, started, stops, ended) = if let Some(again) = due.pop_front() {
+        let (issue, title, size, started, stops, ended, retried) = if let Some(again) =
+            due.pop_front()
+        {
             let Held {
                 issue,
                 title,
@@ -3343,6 +3369,10 @@ fn work(
                 retry,
                 cut_off,
             } = again;
+            // What it owed before it is taken, put back if a stop comes before its resume runs.
+            let owed = cut_off
+                .then(|| lp.record(issue)?.hooks.get(RESUMED_HOOK).cloned())
+                .flatten();
             // Taken only now: a loop that stops before this leaves the resume owed, for the next.
             if cut_off && let Err(e) = lp.mark_resume(issue, serde_json::Value::Bool(true)) {
                 let Some(in_use) = e.downcast_ref::<lock::InUse>() else {
@@ -3364,7 +3394,8 @@ fn work(
             )?;
             note(lock, lp, warn, |p| p.start(issue))?;
             let ended = lp.again(issue, retry, &mut stops, out, warn);
-            (issue, title, size, started, stops, ended)
+            let retried = Some((retry, cut_off, owed));
+            (issue, title, size, started, stops, ended, retried)
         } else {
             let open = github.issues_open(&lp.repo)?;
             let (next, waiting) = lp.next(&open, &opts.issues, &mut tried, &mut refused, out)?;
@@ -3426,12 +3457,41 @@ fn work(
             })?;
             let mut stops = Vec::new();
             let ended = lp.task(issue, labeled, 0, &mut stops, out, warn);
-            (issue, title, size, started, stops, ended)
+            (issue, title, size, started, stops, ended, None)
         };
         let end = match ended {
             Ok(end) => end,
             Err(Halt::Error(e)) => return Err(e),
+            // Stopped before any phase of it ran (review M-2 of issue 570): no row, and it is left
+            // as it was, a cut-off task's resume still owed to the next loop.
             Err(Halt::Stopped) => {
+                match retried {
+                    Some((retry, cut_off, owed)) => {
+                        if let Some(owed) = owed
+                            && let Err(e) = lp.mark_resume(issue, owed)
+                        {
+                            writeln!(
+                                warn,
+                                "warning: {}'s resume could not be marked as owed again ({e:#}); \
+                                 continue it with `sbxm task resume --issue {issue}`",
+                                lp.issue_named(issue)
+                            )?;
+                        }
+                        due.push_front(Held {
+                            issue,
+                            title,
+                            size,
+                            started,
+                            stops,
+                            retry,
+                            cut_off,
+                        });
+                    }
+                    None if lp.record(issue).is_some() => {
+                        writeln!(out, "{}", lp.stopped_line(issue))?;
+                    }
+                    None => {}
+                }
                 writeln!(out, "stopped on request")?;
                 left(&held, &due, out)?;
                 return Ok("stopped on request".to_owned());
@@ -3500,7 +3560,7 @@ fn work(
         };
         let recorded = match &end {
             End::Done { .. } => Outcome::Done,
-            End::Parked { .. } => Outcome::Parked,
+            End::Parked { .. } | End::Stopped(_) => Outcome::Parked,
             End::Refused(_) | End::Taken(_) => Outcome::Skipped,
             End::Held(_) => Outcome::Held,
         };
@@ -3539,6 +3599,7 @@ fn work(
             }
             End::Done { ready, outcome } => (Some(ready), outcome, false),
             End::Parked { ready, outcome } => (ready, outcome, true),
+            End::Stopped(outcome) => (None, outcome, false),
         };
         due.extend(held.drain(..));
         tasks_run += 1;
@@ -3619,9 +3680,26 @@ pub struct TaskSteps<'a> {
     pub host: &'a dyn HostRunner,
     /// The free-space check of the sandbox drive (decision 194).
     pub disk: disk::Guard,
+    /// The loop's Ctrl-C presses (issue 570): with them, a task's slot wait polls the loop's stop
+    /// request, these and the stop file `task loop --stop` writes, as the loop does between tasks.
+    pub stop: Option<Arc<StopFlag>>,
 }
 
 impl TaskSteps<'_> {
+    /// The disk guard of a task's first phase (`task run`, `task resume`): with [`Self::stop`],
+    /// its slot wait polls the loop's stop request (issue 570), so a stop asked while it waits
+    /// ends it creating nothing. A task's should-fix round, part of the task the loop finishes
+    /// before it stops, and the loop's other steps (jobs, resolves, log fixes) wait as before.
+    fn task_disk(&self) -> Result<disk::Guard> {
+        let mut guard = self.disk.clone();
+        if let Some(flag) = &self.stop {
+            let flag = Arc::clone(flag);
+            let file = stop_path(&GlobalConfig::load(self.config_dir)?.base_dir);
+            guard.slot.stop = Some(Arc::new(move || flag.requested() || stop_file_left(&file)));
+        }
+        Ok(guard)
+    }
+
     /// `out` and `warn` teed into `issue-<n>`'s `run.log`, as `main` does for a `task` command.
     fn logged(
         &self,
@@ -3646,8 +3724,15 @@ impl TaskSteps<'_> {
         let mut out = Tee::new(out, Arc::clone(&log));
         let mut warn = Tee::new(warn, log);
         let result = step(&mut out, &mut warn);
-        if let Err(e) = &result {
-            let _ = writeln!(warn, "Error: {e:#}");
+        match &result {
+            // Not a failure: the loop says it stopped on request.
+            Err(e) if e.is::<slot::Stopped>() => {
+                let _ = writeln!(warn, "{e:#}");
+            }
+            Err(e) => {
+                let _ = writeln!(warn, "Error: {e:#}");
+            }
+            Ok(()) => {}
         }
         result
     }
@@ -3720,6 +3805,11 @@ impl TaskSteps<'_> {
     ) -> Result<()> {
         self.release(&format!("issue-{issue}"))?;
         self.logged(issue, out, warn, &|out, warn| {
+            let disk = if should_fix {
+                self.disk.clone()
+            } else {
+                self.task_disk()?
+            };
             task_resume::run(
                 self.config_dir,
                 &task_resume::Options {
@@ -3727,7 +3817,7 @@ impl TaskSteps<'_> {
                     target: task_resume::Target::Issue(issue),
                     rounds: should_fix.then_some(1),
                     should_fix,
-                    disk: self.disk.clone(),
+                    disk,
                     identity: None,
                     forget_ambiguous: false,
                 },
@@ -3745,6 +3835,7 @@ impl TaskSteps<'_> {
 impl Steps for TaskSteps<'_> {
     fn run(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
         self.logged(issue, out, warn, &|out, warn| {
+            let disk = self.task_disk()?;
             task_run::run(
                 self.config_dir,
                 &task_run::Options {
@@ -3761,7 +3852,7 @@ impl Steps for TaskSteps<'_> {
                     repo: self.repo.clone(),
                     clone_source: None,
                     identity: None,
-                    disk: self.disk.clone(),
+                    disk,
                     location: None,
                 },
                 None,

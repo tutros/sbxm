@@ -79,6 +79,7 @@ pub fn gate(env: &Env, no_wait: bool) -> Gate {
         command: "sbxm under test".to_owned(),
         catch_ctrl_c: false,
         registry: Arc::new(Registry::default()),
+        stop: None,
     }
 }
 

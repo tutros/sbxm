@@ -72,6 +72,7 @@ fn gate(
         command: "sbxm task review --pr 9".to_owned(),
         catch_ctrl_c: false,
         registry: Arc::new(Registry::default()),
+        stop: None,
     };
     (gate, sleeps)
 }

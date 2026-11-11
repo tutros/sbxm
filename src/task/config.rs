@@ -14,6 +14,7 @@ use crate::harness::Harness;
 use crate::run::config::{headless_harness, parse_duration};
 use crate::task::record::DEFAULT_FIX_ROUNDS;
 use crate::task::risk::{self, Level, PathRule};
+use crate::task::shape::{self, Shape};
 
 pub const FILE_NAME: &str = "sbxm-task.toml";
 
@@ -126,6 +127,9 @@ pub struct Sandbox {
     pub location: Location,
     pub cpus: Option<u32>,
     pub memory: Option<String>,
+    /// `[sandbox] cloud_shape` (issue 559): the shape of every cloud sandbox of a task, in place
+    /// of the local cpus/memory; see [`super::shape`].
+    pub cloud_shape: Option<Shape>,
 }
 
 #[derive(Debug, Clone)]
@@ -241,6 +245,7 @@ struct RawSandbox {
     location: Location,
     cpus: Option<u32>,
     memory: Option<String>,
+    cloud_shape: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -520,11 +525,21 @@ impl Validator<'_> {
         if raw.cpus == Some(0) {
             return Err(self.err("sandbox.cpus is 0; it must be at least 1"));
         }
+        let cloud_shape = match raw.cloud_shape {
+            None => None,
+            Some(name) => Some(Shape::parse(&name).ok_or_else(|| {
+                self.err(format!(
+                    "sandbox.cloud_shape {name:?} isn't a cloud shape; use {}",
+                    shape::NAMES
+                ))
+            })?),
+        };
         Ok(Sandbox {
             profile,
             location: raw.location,
             cpus: raw.cpus,
             memory: raw.memory,
+            cloud_shape,
         })
     }
 
