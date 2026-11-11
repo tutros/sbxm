@@ -655,6 +655,42 @@ impl SetAside {
         (self.base_dir.join(rel), self.folder().join(rel))
     }
 
+    /// Removes the task folder the failed replacement kept where the old task goes back, when it
+    /// holds only what a failed warm-up keeps for `task resume` (issue 560, review M-2): a record
+    /// `prepared/failed` whose every sandbox is removed, with no ambiguous create. The old task
+    /// comes back instead (decision 185), and the start's error, printed after, keeps the warm-up's
+    /// output. Anything else there, a record still holding a sandbox above all, is left for
+    /// [`restore`](Self::restore) to refuse.
+    fn clear_failed_start(&self) -> Result<()> {
+        let meta = record::task_dir(&self.base_dir, &self.id);
+        let moved = meta
+            .strip_prefix(&self.base_dir)
+            .is_ok_and(|rel| self.moved.iter().any(|m| m == rel));
+        if !moved
+            || !meta
+                .symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_dir())
+        {
+            return Ok(());
+        }
+        let Ok(task) = record::read(&meta.join("task.json")) else {
+            return Ok(());
+        };
+        let kept_for_resume = (task.stage, task.status)
+            == (record::Stage::Prepared, record::Status::Failed)
+            && task.sandboxes.iter().all(|s| s.removed_at.is_some())
+            && task.ambiguous_create().is_none();
+        if kept_for_resume {
+            fs::remove_dir_all(&meta).with_context(|| {
+                format!(
+                    "cannot remove {}, the failed start's own folder",
+                    meta.display()
+                )
+            })?;
+        }
+        Ok(())
+    }
+
     /// Moves every folder back to where it was, so the old task is exactly as it was before
     /// [`set_aside_many`] moved it aside (its sandboxes are not restored; decision 185 point 2).
     /// If one folder can't move back, whatever was already moved back in this call is moved aside
@@ -731,7 +767,7 @@ impl SetAside {
 /// also fails, the error names both failures and the folder it is still at, so nothing more is
 /// deleted (decision 185 point 4).
 pub fn restore_after_failed_start(aside: &SetAside, start_failed: anyhow::Error) -> anyhow::Error {
-    match aside.restore() {
+    match aside.clear_failed_start().and_then(|()| aside.restore()) {
         Ok(None) => start_failed.context(format!("the old task {} was put back", aside.id())),
         Ok(Some(warning)) => start_failed.context(warning),
         Err(restore_failed) => anyhow::anyhow!(

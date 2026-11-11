@@ -335,7 +335,31 @@ fn a_worker_sandbox_made_again_by_resume_is_warmed_at_the_base() {
 /// `task run --spec FILE --cloud` with the command's writers teed into the task's `run.log`, as
 /// `main` does, and its error written the way `main` ends a failed task command.
 fn task_run_logged(f: &Fixture, spec: std::path::PathBuf, id: &str, backend: &FakeBackend) {
+    let err = logged(f, id, |out, warn| {
+        sbxm::commands::task_run::run_spec(
+            &f.env.config_dir(),
+            &common::cloud_task::run_options(f, spec, Some(Location::Cloud)),
+            None,
+            backend,
+            &sbxm::github::fake::FakeGitHub::default(),
+            &common::task_fixture::Probe,
+            &sbxm::task::gates::FakeHostRunner::default(),
+            out,
+            warn,
+        )
+    });
+    assert!(err.is_some(), "the warm-up fails the run");
+}
+
+/// Runs `command` with its writers teed into task `id`'s `run.log`, as `main` does, and writes
+/// its error the way `main` ends a failed task command; returns that error.
+fn logged(
+    f: &Fixture,
+    id: &str,
+    command: impl FnOnce(&mut dyn std::io::Write, &mut dyn std::io::Write) -> anyhow::Result<()>,
+) -> Option<anyhow::Error> {
     use sbxm::task::runlog::{RunLog, Tee};
+    use std::io::Write;
 
     let log = Arc::new(Mutex::new(RunLog::new(
         &f.env.base_dir(),
@@ -348,20 +372,9 @@ fn task_run_logged(f: &Fixture, spec: std::path::PathBuf, id: &str, backend: &Fa
     )));
     let mut out = Tee::new(Vec::new(), Arc::clone(&log));
     let mut warn = Tee::new(Vec::new(), log);
-    let result = sbxm::commands::task_run::run_spec(
-        &f.env.config_dir(),
-        &common::cloud_task::run_options(f, spec, Some(Location::Cloud)),
-        None,
-        backend,
-        &sbxm::github::fake::FakeGitHub::default(),
-        &common::task_fixture::Probe,
-        &sbxm::task::gates::FakeHostRunner::default(),
-        &mut out,
-        &mut warn,
-    );
-    let err = result.expect_err("the warm-up fails the run");
-    use std::io::Write;
+    let err = command(&mut out, &mut warn).err()?;
     writeln!(warn, "Error: {err:?}").unwrap();
+    Some(err)
 }
 
 /// `lines` numbered lines of output.
@@ -459,4 +472,199 @@ fn a_failed_step_keeps_its_last_40_lines_whole_however_long() {
     }
     assert!(!message.contains("long line 20 "), "{message}");
     assert!(sbxm::task::warm_up::failed(&err));
+}
+
+// Review M-2: a `--restart` whose replacement fails its warm-up puts the old task back (decision
+// 185): the replacement's kept `prepared/failed` folder doesn't stand in its way, and the warm-up's
+// output is in the restored task's `run.log`.
+
+/// Says yes to the `--restart` question.
+struct Yes;
+
+impl sbxm::confirm::Confirm for Yes {
+    fn is_interactive(&self) -> bool {
+        true
+    }
+
+    fn confirm(&self, _prompt: &str) -> anyhow::Result<bool> {
+        Ok(true)
+    }
+}
+
+const RESTART: sbxm::commands::task_start::Restart = sbxm::commands::task_start::Restart {
+    confirm: &Yes,
+    yes: true,
+};
+
+/// [`strict_backend`] whose `cargo fetch` fails with 50 lines of output.
+fn fetch_failing(f: &Fixture, id: &str) -> FakeBackend {
+    strict_backend(f, id, &[CLEAN], false)
+        .0
+        .with_exec_output_matching(
+            "cargo fetch",
+            sbxm::backend::ExecOutput {
+                stdout: numbered(50),
+                stderr: String::new(),
+                exit_code: Some(101),
+            },
+        )
+}
+
+/// The old task `id`, which a marker file in its folder tells apart, failed its own warm-up, so it
+/// is `prepared/failed` with every sandbox removed, as its replacement will be.
+fn marked_failed_task(f: &Fixture, id: &str, start: impl FnOnce(&FakeBackend)) {
+    start(&fetch_failing(f, id));
+    let meta = sbxm::task::record::task_dir(&f.env.base_dir(), id);
+    assert_eq!(
+        task_record(f, id).status,
+        sbxm::task::record::Status::Failed
+    );
+    std::fs::write(meta.join("old-task-marker"), "old\n").unwrap();
+}
+
+/// Asserts the old task is back whole, with no leftover set aside, and that its `run.log` holds the
+/// replacement's warm-up failure.
+fn assert_old_task_back(f: &Fixture, id: &str, err: Option<anyhow::Error>) {
+    let message = format!("{:#}", err.expect("the restart fails"));
+    assert!(message.contains("was put back"), "{message}");
+    let meta = sbxm::task::record::task_dir(&f.env.base_dir(), id);
+    assert!(
+        meta.join("old-task-marker").is_file(),
+        "the old task isn't back"
+    );
+    assert!(!sbxm::task::finish::has_leftover(&f.env.base_dir(), id));
+    let run_log = std::fs::read_to_string(meta.join("run.log")).unwrap();
+    assert!(
+        run_log.contains("warm-up step 1 of 3 `cargo fetch --locked` failed with exit 101")
+            && run_log.contains("out line 50"),
+        "{run_log}"
+    );
+}
+
+#[test]
+fn a_spec_restart_whose_warm_up_fails_puts_the_old_task_back() {
+    let f = fixture_with(LOCAL_TOML);
+    f.env.write_profile("default", STRICT_PROFILE);
+    cargo_base(&f);
+    let (spec, id) = spec(&f);
+    let run = |backend: &FakeBackend, restart: Option<&sbxm::commands::task_start::Restart>| {
+        logged(&f, &id, |out, warn| {
+            sbxm::commands::task_run::run_spec(
+                &f.env.config_dir(),
+                &common::cloud_task::run_options(&f, spec.clone(), Some(Location::Cloud)),
+                restart,
+                backend,
+                &sbxm::github::fake::FakeGitHub::default(),
+                &common::task_fixture::Probe,
+                &sbxm::task::gates::FakeHostRunner::default(),
+                out,
+                warn,
+            )
+        })
+    };
+    marked_failed_task(&f, &id, |backend| {
+        run(backend, None);
+    });
+
+    let err = run(&fetch_failing(&f, &id), Some(&RESTART));
+
+    assert_old_task_back(&f, &id, err);
+}
+
+#[test]
+fn an_issue_restart_whose_warm_up_fails_puts_the_old_task_back() {
+    use common::task_fixture::{issue_text, open_issue};
+
+    let f = fixture_with(LOCAL_TOML);
+    f.env.write_profile("default", STRICT_PROFILE);
+    cargo_base(&f);
+    let id = "issue-41";
+    let github = sbxm::github::fake::FakeGitHub::default()
+        .with_default_branch("main")
+        .with_issue_text(issue_text(41))
+        .with_open_issues(vec![open_issue(41, &["should-fix"], "")]);
+    let options = sbxm::commands::task_start::Options {
+        repo_root: f.env.tmp.path().join("target-repo"),
+        issues: vec![41],
+        workers: None,
+        worker_harness: None,
+        worker_model: None,
+        time_limit: None,
+        reviewer_time_limit: None,
+        profile: None,
+        base: None,
+        repo: Some("o/r".into()),
+        clone_source: Some(common::task_fixture::source(&f)),
+        identity: Some(identity()),
+        disk: Default::default(),
+        location: Some(Location::Cloud),
+    };
+    let start = |backend: &FakeBackend, restart: Option<&sbxm::commands::task_start::Restart>| {
+        logged(&f, id, |out, warn| {
+            sbxm::commands::task_start::run_with(
+                &f.env.config_dir(),
+                &options,
+                restart,
+                backend,
+                &github,
+                &common::task_fixture::Probe,
+                out,
+                warn,
+            )
+        })
+    };
+    marked_failed_task(&f, id, |backend| {
+        start(backend, None);
+    });
+
+    let err = start(&fetch_failing(&f, id), Some(&RESTART));
+
+    assert_old_task_back(&f, id, err);
+}
+
+/// The other side of M-2: when the replacement's sandbox can't be removed, its record is the only
+/// trace of a sandbox that may still run, so it stays, entry open, and the old task stays set aside
+/// (decision 185 point 4), as before.
+#[test]
+fn a_restart_whose_failed_sandbox_cannot_be_removed_keeps_its_record_and_the_old_task_aside() {
+    let f = fixture_with(LOCAL_TOML);
+    f.env.write_profile("default", STRICT_PROFILE);
+    cargo_base(&f);
+    let (spec, id) = spec(&f);
+    let run = |backend: &FakeBackend, restart: Option<&sbxm::commands::task_start::Restart>| {
+        logged(&f, &id, |out, warn| {
+            sbxm::commands::task_run::run_spec(
+                &f.env.config_dir(),
+                &common::cloud_task::run_options(&f, spec.clone(), Some(Location::Cloud)),
+                restart,
+                backend,
+                &sbxm::github::fake::FakeGitHub::default(),
+                &common::task_fixture::Probe,
+                &sbxm::task::gates::FakeHostRunner::default(),
+                out,
+                warn,
+            )
+        })
+    };
+    marked_failed_task(&f, &id, |backend| {
+        run(backend, None);
+    });
+    let worker = worker_sandbox(&id);
+    // An error that isn't retried, so the test waits for no retry.
+    let error = format!("`sbx rm` failed for sandbox {worker} (exit status: 1): error: boom");
+    let stuck = fetch_failing(&f, &id).with_remove_errors(&[&error]);
+
+    let err = run(&stuck, Some(&RESTART));
+
+    let message = format!("{:#}", err.expect("the restart fails"));
+    assert!(message.contains("back failed too"), "{message}");
+    assert!(sbxm::task::finish::has_leftover(&f.env.base_dir(), &id));
+    let meta = sbxm::task::record::task_dir(&f.env.base_dir(), &id);
+    assert!(!meta.join("old-task-marker").exists());
+    let task = task_record(&f, &id);
+    assert!(
+        task.sandboxes.iter().any(|e| e.removed_at.is_none()),
+        "{:?}",
+        task.sandboxes
+    );
 }
