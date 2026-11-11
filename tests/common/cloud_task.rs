@@ -96,10 +96,43 @@ pub fn cloud_backend_reviewing(
     worker: ExecOutput,
     before_review: impl Fn(&str) + Send + Sync + 'static,
 ) -> FakeBackend {
+    cloud_backend_seeing(
+        root,
+        ids,
+        reviews,
+        listed,
+        worker,
+        before_review,
+        |_, _, _| {},
+    )
+}
+
+/// [`cloud_backend_worker`] that shows `observe` every `exec` before it runs (after the agent's
+/// own work for a headless run): the sandbox, the host path of the clone it works in, the spec.
+pub fn cloud_backend_observing(
+    root: &Path,
+    ids: &[&str],
+    reviews: &[&str],
+    listed: bool,
+    worker: ExecOutput,
+    observe: impl Fn(&str, &Path, &sbxm::backend::ExecSpec) + Send + Sync + 'static,
+) -> FakeBackend {
+    cloud_backend_seeing(root, ids, reviews, listed, worker, |_| {}, observe)
+}
+
+fn cloud_backend_seeing(
+    root: &Path,
+    ids: &[&str],
+    reviews: &[&str],
+    listed: bool,
+    worker: ExecOutput,
+    before_review: impl Fn(&str) + Send + Sync + 'static,
+    observe: impl Fn(&str, &Path, &sbxm::backend::ExecSpec) + Send + Sync + 'static,
+) -> FakeBackend {
     std::fs::create_dir_all(root.join(HOME.trim_start_matches('/'))).unwrap();
     let inside = root.to_string_lossy().into_owned();
     let map = move |arg: &str| arg.replace(HOME, &format!("{inside}{HOME}"));
-    let (hook_map, fresh_map) = (map.clone(), map.clone());
+    let (hook_map, fresh_map, seen_map) = (map.clone(), map.clone(), map.clone());
     // The clone a sandbox of this name works in.
     let clone_of = |sandbox: &str| {
         sandbox_task(sandbox).map(|(id, review)| match review {
@@ -168,7 +201,10 @@ pub fn cloud_backend_reviewing(
                 std::fs::write(clone.join(".sbxm-task").join("review.md"), text).unwrap();
             }
         })
-        .with_exec_responder(move |_sandbox, spec| {
+        .with_exec_responder(move |sandbox, spec| {
+            if let Some(clone) = clone_of(sandbox).map(|c| PathBuf::from(seen_map(&c))) {
+                observe(sandbox, &clone, spec);
+            }
             if !matches!(spec.argv[0].as_str(), "sh" | "git" | "mkdir") {
                 return None;
             }
@@ -274,8 +310,12 @@ pub fn described_log(backend: &FakeBackend) -> Vec<String> {
                 "bundle"
             } else if argv.contains("status --porcelain") {
                 "status"
+            } else if argv.contains("--locked") {
+                "warm"
             } else if argv.contains("cargo test") {
                 "gate"
+            } else if argv.contains("checkout") {
+                "checkout"
             } else {
                 "other"
             };

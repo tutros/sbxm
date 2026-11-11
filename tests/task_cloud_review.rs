@@ -239,8 +239,12 @@ fn described_log(backend: &FakeBackend) -> Vec<String> {
                 "bundle"
             } else if argv.contains("status --porcelain") {
                 "status"
+            } else if argv.contains("--locked") {
+                "warm"
             } else if argv.contains("cargo test") {
                 "gate"
+            } else if argv.contains("checkout") {
+                "checkout"
             } else {
                 "other"
             };
@@ -1570,7 +1574,7 @@ fn strict_list() -> Vec<&'static str> {
     list
 }
 
-/// The calls that hold `sandbox` to its runtime list right after its create.
+/// The calls that hold `sandbox` to its runtime list once its clone is made.
 fn held(sandbox: &str, denied: &[&str]) -> Vec<String> {
     let mut calls = vec![format!("policy-ls {sandbox}")];
     calls.extend(denied.iter().map(|h| format!("policy-deny {sandbox} {h}")));
@@ -1587,16 +1591,24 @@ fn denied_line(sandbox: &str, denied: &[&str]) -> String {
 }
 
 /// `log` with the calls of [`held`] for every create of a sandbox in `held_by` inserted right
-/// after that create.
+/// after its clone, then the checkout of the task's branch (issue 560: the clone is made at the
+/// base before the deny, and the branch checked out after it).
 fn with_holds(log: Vec<String>, held_by: &[(&str, Vec<&str>)]) -> Vec<String> {
     let mut out = Vec::new();
+    let mut pending = None;
     for call in log {
-        let hold = held_by
+        let created = held_by
             .iter()
             .find(|(sandbox, _)| call == format!("create {sandbox}"));
+        let cloned = call == "exec clone";
         out.push(call);
-        if let Some((sandbox, denied)) = hold {
+        if created.is_some() {
+            pending = created;
+        }
+        if let Some((sandbox, denied)) = pending.filter(|_| cloned) {
             out.extend(held(sandbox, denied));
+            out.push("exec checkout".to_owned());
+            pending = None;
         }
     }
     out
@@ -1748,6 +1760,9 @@ fn a_strict_reviewer_with_a_host_left_is_removed_then_its_secret_then_refused() 
     let mut expected = vec![
         format!("secret-set {reviewer} postman-echo-com"),
         format!("create {reviewer}"),
+        format!("exec {reviewer}"),
+        format!("cp-in {reviewer} {HOME}/.sbxm-task-{id}-review.bundle"),
+        format!("exec {reviewer}"),
     ];
     expected.extend(held(&reviewer, &denied));
     expected.extend([
@@ -1764,13 +1779,14 @@ fn a_strict_reviewer_with_a_host_left_is_removed_then_its_secret_then_refused() 
         .cloned()
         .collect();
     assert_eq!(log, expected);
-    assert!(
-        !backend
-            .execs()
-            .iter()
-            .any(|(sandbox, _)| *sandbox == reviewer),
-        "an exec ran in the reviewer's sandbox"
-    );
+    // Only the clone's seeding ran there (issue 560): no reviewer, no checkout of the branch.
+    for (sandbox, spec) in backend.execs() {
+        let argv = spec.argv.join(" ");
+        assert!(
+            sandbox != reviewer || argv.contains("printenv HOME") || argv.contains("git clone"),
+            "{argv}"
+        );
+    }
     assert!(
         prepared.events.contains(&denied_line(&reviewer, &denied)),
         "{:?}",
@@ -1844,6 +1860,9 @@ fn a_rebuilt_strict_fix_sandbox_whose_list_cannot_be_read_is_removed_then_refuse
         [
             format!("secret-set {worker} postman-echo-com"),
             format!("create {worker}"),
+            format!("exec {worker}"),
+            format!("cp-in {worker} {HOME}/.sbxm-task-{id}.bundle"),
+            format!("exec {worker}"),
             format!("policy-ls {worker}"),
             format!("rm {worker}"),
             format!("secret-ls {worker}"),
