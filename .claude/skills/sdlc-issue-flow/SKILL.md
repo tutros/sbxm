@@ -111,7 +111,10 @@ build sbxm tasks run with (a machine's own wrapper; never a fresh `cargo run`).
   background watch that ends on the PR merged, any check failed, or the PR closed; after a merge, watch `main`'s
   run of the merge commit too. On a failure, read the log (`gh run view <id> --log-failed`) the same turn: a runner
   fault or a known flake gets one re-run of the failed job (`gh run rerun <id> --failed`) and an issue if it is new;
-  a real failure on an open PR is fixed on its branch (auto-merge disarmed first) and gets a narrow re-review; a
+  a real failure on an open PR the loop opened is left to the loop, which re-runs it once and then fixes it from the
+  log (decisions 299, 300): report it, queue nothing (decision 320); a real failure on any other open PR is fixed on
+  its branch (auto-merge disarmed first, `task queue fix --pr N --check-run <id>` once that run has finished failing)
+  and gets a narrow re-review; a
   real failure of the merge commit's run on `main` is a break after the merge: stage 8 and decision 280 (pause
   auto-merge, the user decides), never a push to the merged PR. Tell the user what failed and what was done.
 

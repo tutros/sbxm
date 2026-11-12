@@ -27,6 +27,11 @@ New tests go in a file of this task's own (or a section of their own), never app
 file, and a new numbered decision takes the number the issue reserves ("this adds decision N"): two branches that
 append at the same place conflict once one of them merges.
 
+This sandbox is Linux, but the CI also runs every test on Windows. In a test, build an expected path with `Path::join`
+(or compare `Path` values), never by gluing strings with `/` or `\`; when a test reads a file from disk whose line
+endings matter (a checked-in fixture, a config), make it pass with both LF and CRLF line endings; and don't make a
+test depend on the case of a file or folder name (Windows file systems ignore it).
+
 If the work needs a crate that isn't a direct dependency yet (a new dependency or dev-dependency, a version bump, a
 crate with a build script), don't edit Cargo.toml or Cargo.lock: this sandbox can't fetch crates, and the user approves
 every new crate. Leave that part undone and hand it back under "Needs a decision", naming the crate, its version and

@@ -27,6 +27,8 @@ decide, one at a time, and an adopted one goes through the normal branch and PR.
 
 Read only; nothing is written in this step. For every task and PR in the window:
 
+Gather with the Read, Grep and Glob tools and single plain commands that are already allowed (`gh pr list`, `gh pr view`, `gh issue view N --comments`, `gh issue list`, `gh run list`, `gh run view`, with `--json`/`--jq` inside `gh`, no pipes): no Python or shell scripts, heredocs, `;`/`|`/`&&` chains, and never the session transcripts (`*.jsonl`). An agent gathering for you gets this in its brief. A fact only a transcript would show is written "unknown (not in records)" (decision 319).
+
 | What | Where |
 |------|-------|
 | Merged PRs, their issues and sizes | `gh pr list --state merged --search "merged:<start>..<end>" --limit 500`, the issues' `size:` labels; if the count it returns equals the limit, raise the limit and run it again, so no PR is cut off |
