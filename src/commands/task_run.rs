@@ -23,6 +23,7 @@ use crate::task::finish;
 use crate::task::fixes;
 use crate::task::gates::HostRunner;
 use crate::task::next;
+use crate::task::outcome;
 use crate::task::pipeline;
 use crate::task::record::{self, ProcessProbe};
 use crate::task::repo::Identity;
@@ -208,6 +209,27 @@ impl Write for Once<'_> {
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
+    config_dir: &Path,
+    opts: &Options,
+    restart: Option<&Restart>,
+    backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    host: &dyn HostRunner,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<()> {
+    // Its outcome as it ends (decision 321(2)), for the loop that started it or anyone after.
+    outcome::recorded(out, warn, |recorder, out, warn| {
+        recorder.at_config(config_dir, &format!("issue-{}", opts.issue))?;
+        run_unrecorded(
+            config_dir, opts, restart, backend, github, probe, host, out, warn,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_unrecorded(
     config_dir: &Path,
     opts: &Options,
     restart: Option<&Restart>,
@@ -477,6 +499,28 @@ fn discard_existing_spec(
 /// [`run_spec`], optionally discarding an existing spec task first (`--restart`, as for `--issue`).
 #[allow(clippy::too_many_arguments)]
 pub fn run_spec(
+    config_dir: &Path,
+    opts: &SpecOptions,
+    restart: Option<&Restart>,
+    backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    host: &dyn HostRunner,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<()> {
+    outcome::recorded(out, warn, |recorder, out, warn| {
+        if let Ok((id, _)) = record::spec_id(&opts.spec) {
+            recorder.at_config(config_dir, &id)?;
+        }
+        run_spec_unrecorded(
+            config_dir, opts, restart, backend, github, probe, host, out, warn,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_spec_unrecorded(
     config_dir: &Path,
     opts: &SpecOptions,
     restart: Option<&Restart>,

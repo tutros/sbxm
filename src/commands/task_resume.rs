@@ -26,6 +26,7 @@ use crate::slot;
 use crate::task::config;
 use crate::task::finish;
 use crate::task::gates::HostRunner;
+use crate::task::outcome;
 use crate::task::pipeline::{self, Prepared, TaskEnv};
 use crate::task::record::{self, ProcessProbe};
 use crate::task::repo::Identity;
@@ -82,6 +83,36 @@ pub fn run(
     out: &mut dyn Write,
     warn: &mut dyn Write,
 ) -> Result<()> {
+    // Its outcome as it ends (decision 321(2)), for the loop that started it or anyone after.
+    outcome::recorded(out, warn, |recorder, out, warn| {
+        // Named at once where the id is known, so an early refusal is recorded too.
+        match &opts.target {
+            Target::Issue(n) if *n > 0 => recorder.at_config(config_dir, &format!("issue-{n}"))?,
+            Target::Spec(path) => {
+                if let Ok((id, _)) = record::spec_id(path) {
+                    recorder.at_config(config_dir, &id)?;
+                }
+            }
+            _ => {}
+        }
+        run_unrecorded(
+            config_dir, opts, backend, github, probe, host, recorder, out, warn,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_unrecorded(
+    config_dir: &Path,
+    opts: &Options,
+    backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    host: &dyn HostRunner,
+    recorder: &outcome::Recorder,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<()> {
     if opts.target == Target::Issue(0) {
         bail!("issue numbers start at 1");
     }
@@ -102,6 +133,7 @@ pub fn run(
         Target::Spec(path) => record::spec_id(path)?.0,
         Target::Pr(n) => resume::fix_task_for_head(&base_dir, *n, github)?,
     };
+    recorder.at(&base_dir, &id)?;
     let mut prepared = Prepared::open_locked(&base_dir, &id, probe)?;
     // The worker is whoever the task recorded, as for `task review`: its sandbox and clone are
     // that harness's, and the default reviewer must differ from it (decision 148).

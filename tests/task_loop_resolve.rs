@@ -1278,6 +1278,7 @@ fn the_real_fix_step_runs_task_fix_on_that_pr() {
         host: &host,
         disk: sbxm::disk::Guard::default(),
         stop: None,
+        spawner: &common::child::NoChild::default(),
     };
 
     let e = steps

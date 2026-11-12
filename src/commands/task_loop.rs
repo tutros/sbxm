@@ -16,7 +16,9 @@
 //! `task fix --pr N --check-run <id>` (decision 300).
 //!
 //! The phases go through [`Steps`] so the loop's rules are tested without sandboxes;
-//! [`TaskSteps`] runs the real commands.
+//! [`TaskSteps`] runs the real commands: an issue task's `task run` and `task resume` as child
+//! `sbxm` processes ([`child`], issue 612), whose `outcome.json` and task record are all the loop
+//! reads of how they ended (decision 321(2)); the other steps in this process.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
@@ -44,6 +46,7 @@ use crate::task::config::{ShouldFix, TaskConfig};
 use crate::task::finish::check_own_folder;
 use crate::task::gates::HostRunner;
 use crate::task::loop_pause::{self, Pause};
+use crate::task::outcome;
 use crate::task::queue::{self, Outcome, READY_LABEL, Report, Row, Skipped};
 use crate::task::record::{self, Kind, Process, ProcessProbe, Record, Stage};
 use crate::task::risk::Level;
@@ -54,6 +57,7 @@ use crate::task::{
 };
 
 mod check;
+pub mod child;
 mod jobs;
 mod waiting;
 pub use check::check;
@@ -131,6 +135,28 @@ pub trait Steps {
     fn should_fix(&self, issue: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
         bail!("no should-fix round for #{issue} here")
     }
+    /// [`Self::run_at`] as the loop runs it (issue 612): how it ended, read from its outcome.
+    /// [`TaskSteps`] runs it as a child `sbxm` process; this default runs it here and reads its
+    /// result as the command's own `outcome.json` would say it, for a `Steps` that plays phases.
+    fn run_task(
+        &self,
+        issue: u32,
+        location: Option<Location>,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> PhaseEnd {
+        PhaseEnd::here(out, warn, |out, warn| {
+            self.run_at(issue, location, out, warn)
+        })
+    }
+    /// [`Self::resume`] as the loop runs it: see [`Self::run_task`].
+    fn resume_task(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> PhaseEnd {
+        PhaseEnd::here(out, warn, |out, warn| self.resume(issue, out, warn))
+    }
+    /// [`Self::should_fix`] as the loop runs it: see [`Self::run_task`].
+    fn should_fix_task(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> PhaseEnd {
+        PhaseEnd::here(out, warn, |out, warn| self.should_fix(issue, out, warn))
+    }
     /// `task finish --issue N`: its PR, a draft when something is left unresolved.
     fn finish(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()>;
     /// `task file-findings --issue N --create`: the review's should-fix findings as sized
@@ -192,6 +218,125 @@ pub trait Steps {
     fn room_for(&self, location: Option<Location>) -> Result<()> {
         let _ = location;
         self.room()
+    }
+}
+
+/// How a task's phase ended, as the loop reads it (issue 612, decision 321(2)): the outcome its
+/// command wrote, never its error type or its output.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PhaseEnd {
+    /// The `outcome.json` the phase's command wrote as it ended.
+    Outcome(outcome::Outcome),
+    /// No outcome once the child exited: it was killed or crashed, an interrupted run. What is
+    /// known of its end.
+    Missing(String),
+    /// An `outcome.json` that doesn't parse or names an unknown kind: its text and why. Read as a
+    /// failure, quoting the text, and trusted no further.
+    Unreadable { text: String, why: String },
+}
+
+impl PhaseEnd {
+    /// A phase run in this process, ended as its command's `outcome.json` would say.
+    pub fn here(
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+        step: impl FnOnce(&mut dyn Write, &mut dyn Write) -> Result<()>,
+    ) -> Self {
+        let mut out = Capture {
+            inner: out,
+            text: Vec::new(),
+        };
+        let mut warn = Capture {
+            inner: warn,
+            text: Vec::new(),
+        };
+        let result = step(&mut out, &mut warn);
+        let mut text = out.text;
+        text.extend(warn.text);
+        Self::Outcome(outcome::Outcome::of(
+            &result,
+            &String::from_utf8_lossy(&text),
+        ))
+        .masked()
+    }
+
+    /// Every text it carries masked as `run.log` masks it (`runlog::redact`): what the loop
+    /// says and logs of it never shows a secret value.
+    fn masked(self) -> Self {
+        let redact = |text: &str| crate::task::runlog::redact(text);
+        match self {
+            Self::Outcome(o) => Self::Outcome(outcome::Outcome {
+                detail: redact(&o.detail),
+                ..o
+            }),
+            Self::Missing(why) => Self::Missing(redact(&why)),
+            Self::Unreadable { text, why } => Self::Unreadable {
+                text: redact(&text),
+                why: redact(&why),
+            },
+        }
+    }
+
+    /// What `outcome.json` in the task folder `dir` says, once the phase's child has exited, or
+    /// for a task with no folder the file `elsewhere` the loop named to it; `exit` says how it
+    /// exited, for one that left neither.
+    pub fn read(dir: &Path, elsewhere: &Path, exit: &str) -> Self {
+        let read = match outcome::read(dir) {
+            outcome::Read::Missing => outcome::read_file(elsewhere),
+            read => read,
+        };
+        match read {
+            outcome::Read::Outcome(o) => Self::Outcome(o),
+            outcome::Read::Missing => {
+                Self::Missing(format!("the task's child sbxm {exit} and wrote no outcome"))
+            }
+            outcome::Read::Unreadable { text, why } => Self::Unreadable { text, why },
+        }
+        .masked()
+    }
+
+    /// The window's word for it: the outcome's kind, or why there is none.
+    fn summary(&self) -> String {
+        match self {
+            Self::Outcome(o) => o.end.name().to_owned(),
+            Self::Missing(why) => format!("no outcome: {why}"),
+            Self::Unreadable { why, .. } => format!("an unreadable outcome: {why}"),
+        }
+    }
+
+    /// As a command's result: `Ok` when ready.
+    fn result(&self) -> Result<()> {
+        match self.kind() {
+            outcome::Kind::Ready => Ok(()),
+            _ => Err(self.error()),
+        }
+    }
+
+    /// The kind it is read as: a missing or unreadable outcome is a failure.
+    fn kind(&self) -> outcome::Kind {
+        match self {
+            Self::Outcome(o) => o.end,
+            Self::Missing(_) | Self::Unreadable { .. } => outcome::Kind::Failed,
+        }
+    }
+
+    /// The error the loop's lines and rows quote. `sbx`'s lapsed sign-in is rebuilt from `sbx`'s
+    /// words, so the loop's stop names the commands that go on, as before.
+    fn error(&self) -> anyhow::Error {
+        match self {
+            Self::Outcome(o)
+                if o.end == outcome::Kind::SignedOut
+                    && o.provider.as_deref() == Some(outcome::SBX) =>
+            {
+                pipeline::NotSignedIn::new(o.detail.clone()).into()
+            }
+            Self::Outcome(o) if o.end == outcome::Kind::Ready => {
+                anyhow!("the task did not reach ready")
+            }
+            Self::Outcome(o) => anyhow!("{}", o.detail),
+            Self::Missing(why) => anyhow!("{why}"),
+            Self::Unreadable { text, why } => anyhow!("{why}; it said {:?}", text.trim()),
+        }
     }
 }
 
@@ -596,11 +741,7 @@ impl Loop<'_> {
     /// the worker's sandbox is made, so the label is gone while the worker runs. A run refused
     /// before any write leaves the issue in the queue. Returns the phase's result and, if the
     /// label was taken off meanwhile, how that went.
-    fn run_unlabeling(
-        &self,
-        issue: u32,
-        step: impl FnOnce() -> Result<()>,
-    ) -> (Result<()>, Option<Result<()>>) {
+    fn run_unlabeling<T>(&self, issue: u32, step: impl FnOnce() -> T) -> (T, Option<Result<()>>) {
         let task_json = self.task_dir(issue).join("task.json");
         let (github, repo) = (self.github, self.repo.as_str());
         let (done, ended) = mpsc::channel::<()>();
@@ -1223,39 +1364,28 @@ impl Loop<'_> {
             let resuming = self.record(issue).is_some();
             let should_fix = self.should_fix_due(issue);
             should_fix_ran |= should_fix;
-            let mut captured = Vec::new();
-            let result = {
-                let mut out = Capture {
-                    inner: out,
-                    text: Vec::new(),
-                };
-                let mut warn = Capture {
-                    inner: warn,
-                    text: Vec::new(),
-                };
-                let (result, removed) = if should_fix {
-                    (self.steps.should_fix(issue, &mut out, &mut warn), None)
-                } else if resuming {
-                    (self.steps.resume(issue, &mut out, &mut warn), None)
+            let (ended, removed) = if should_fix {
+                (self.steps.should_fix_task(issue, out, warn), None)
+            } else if resuming {
+                (self.steps.resume_task(issue, out, warn), None)
+            } else {
+                let mut run = || self.steps.run_task(issue, location, out, warn);
+                if label {
+                    self.run_unlabeling(issue, run)
                 } else {
-                    let mut run = || self.steps.run_at(issue, location, &mut out, &mut warn);
-                    if label {
-                        self.run_unlabeling(issue, run)
-                    } else {
-                        (run(), None)
-                    }
-                };
-                captured.extend(out.text);
-                captured.extend(warn.text);
-                (result, removed)
+                    (run(), None)
+                }
             };
-            let (result, removed) = result;
             if label && self.unlabeled(issue, removed, warn).map_err(Halt::Error)? {
                 label = false;
             }
+            // The loop decides from the outcome and the record alone (decision 321(2)), and
+            // shows and logs its text masked, whatever `Steps` gave it.
+            let ended = ended.masked();
+            let kind = ended.kind();
             // A stop asked while the phase waited for the machine's sandbox slot (issue 570):
             // it created nothing, so the task stands as it was before the phase.
-            if result.as_ref().is_err_and(|e| e.is::<slot::Stopped>()) {
+            if kind == outcome::Kind::Stopped {
                 if !ran {
                     return Err(Halt::Stopped);
                 }
@@ -1263,37 +1393,31 @@ impl Loop<'_> {
             }
             ran = true;
             let ready = self.record(issue).filter(|r| r.stage == Stage::Ready);
-            let e = match (result, ready) {
-                (Ok(()), Some(_)) => {
-                    self.usage_waited = Duration::ZERO;
-                    // A clean task with should-fix findings sized S gets its one should-fix
-                    // round first (decision 306), as the next phase of this loop.
-                    if !should_fix_ran && self.should_fix_due(issue) {
-                        continue;
-                    }
-                    return self.finish(issue, None, out, warn).map_err(Halt::Error);
+            if kind == outcome::Kind::Ready && ready.is_some() {
+                self.usage_waited = Duration::ZERO;
+                // A clean task with should-fix findings sized S gets its one should-fix
+                // round first (decision 306), as the next phase of this loop.
+                if !should_fix_ran && self.should_fix_due(issue) {
+                    continue;
                 }
-                (Ok(()), None) => anyhow!("the task did not reach ready"),
-                (Err(e), _) => e,
-            };
+                return self.finish(issue, None, out, warn).map_err(Halt::Error);
+            }
+            let e = ended.error();
             // A live command run by hand holds the task (issue 409): its resume is skipped, not
             // failed, and the loop moves on.
-            if resuming && e.is::<lock::InUse>() {
+            if resuming && kind == outcome::Kind::Held {
                 writeln!(out, "{}", held_line(&self.issue_named(issue), "resume", &e))
                     .map_err(io)?;
                 return Ok(End::Held(Retry::Resume { failures }));
             }
-            if e.is::<pipeline::MissingSecret>() {
+            if kind == outcome::Kind::MissingSecret {
                 return Err(Halt::Error(needs_user(Cause::Secret, e)));
             }
-            if says_sign_in(&e, &String::from_utf8_lossy(&captured)) {
+            if kind == outcome::Kind::SignedOut {
                 stops.push(("sign-in".to_owned(), 0));
                 return Err(Halt::SignIn(e));
             }
-            if queue::failure_says_usage_limit(
-                &format!("{e:#}"),
-                &String::from_utf8_lossy(&captured),
-            ) {
+            if kind == outcome::Kind::UsageLimit {
                 let total = self.settings.usage_wait_total;
                 if self.usage_waited >= total {
                     return Err(Halt::UsageLimit(total));
@@ -1316,9 +1440,12 @@ impl Loop<'_> {
                 continue;
             }
             self.usage_waited = Duration::ZERO;
-            let environment =
-                e.is::<pipeline::SbxUnavailable>() || e.is::<crate::headless::ExecUnavailable>();
-            if self.record(issue).is_none() && !environment {
+            // Only a command that said how it ended can have refused: a child that wrote no
+            // outcome, or one that can't be read, was interrupted (decision 321(2)), and is run
+            // again once like an environment stop.
+            let environment = kind == outcome::Kind::Environment;
+            let said = matches!(ended, PhaseEnd::Outcome(_));
+            if self.record(issue).is_none() && said && !environment {
                 return Ok(End::Refused(format!("{e:#}")));
             }
             failures += 1;
@@ -3977,24 +4104,13 @@ pub struct TaskSteps<'a> {
     pub disk: disk::Guard,
     /// The loop's Ctrl-C presses (issue 570): with them, a task's slot wait polls the loop's stop
     /// request, these and the stop file `task loop --stop` writes, as the loop does between tasks.
+    /// A child's slot wait polls the stop file alone, which the loop writes on a first press.
     pub stop: Option<Arc<StopFlag>>,
+    /// Starts an issue task's `task run` and `task resume` as child `sbxm` processes (issue 612).
+    pub spawner: &'a dyn child::Spawner,
 }
 
 impl TaskSteps<'_> {
-    /// The disk guard of a task's first phase (`task run`, `task resume`): with [`Self::stop`],
-    /// its slot wait polls the loop's stop request (issue 570), so a stop asked while it waits
-    /// ends it creating nothing. A task's should-fix round, part of the task the loop finishes
-    /// before it stops, and the loop's other steps (jobs, resolves, log fixes) wait as before.
-    fn task_disk(&self) -> Result<disk::Guard> {
-        let mut guard = self.disk.clone();
-        if let Some(flag) = &self.stop {
-            let flag = Arc::clone(flag);
-            let file = stop_path(&GlobalConfig::load(self.config_dir)?.base_dir);
-            guard.slot.stop = Some(Arc::new(move || flag.requested() || stop_file_left(&file)));
-        }
-        Ok(guard)
-    }
-
     /// `out` and `warn` teed into `issue-<n>`'s `run.log`, as `main` does for a `task` command.
     fn logged(
         &self,
@@ -4092,41 +4208,124 @@ impl TaskSteps<'_> {
         Ok(())
     }
 
-    /// `task resume --issue N`, or with `should_fix` its should-fix round, `--rounds 1
-    /// --should-fix` (issue 510).
-    fn resume_with(
+    /// `task resume --issue N` as a child, or with `should_fix` its should-fix round, `--rounds 1
+    /// --should-fix` (issue 510). A should-fix round, part of the task the loop finishes before it
+    /// stops, waits for its slot whatever the loop's stop request says.
+    fn resume_child(
         &self,
         issue: u32,
         should_fix: bool,
         out: &mut dyn Write,
         warn: &mut dyn Write,
-    ) -> Result<()> {
-        self.release(&format!("issue-{issue}"))?;
-        self.logged(issue, out, warn, &|out, warn| {
-            let disk = if should_fix {
-                self.disk.clone()
-            } else {
-                self.task_disk()?
-            };
-            task_resume::run(
-                self.config_dir,
-                &task_resume::Options {
-                    repo_root: self.repo_root.clone(),
-                    target: task_resume::Target::Issue(issue),
-                    rounds: should_fix.then_some(1),
-                    should_fix,
-                    disk,
-                    identity: None,
-                    forget_ambiguous: false,
-                },
-                self.backend,
-                self.github,
-                self.probe,
-                self.host,
-                out,
-                warn,
-            )
-        })
+    ) -> PhaseEnd {
+        if let Err(e) = self.release(&format!("issue-{issue}")) {
+            return PhaseEnd::Outcome(outcome::Outcome::of(&Err(e), ""));
+        }
+        let mut args = vec!["task".to_owned(), "resume".to_owned()];
+        args.extend(["--issue".to_owned(), issue.to_string()]);
+        if should_fix {
+            args.extend(["--rounds", "1", "--should-fix"].map(str::to_owned));
+        }
+        let what = if should_fix {
+            "should-fix round"
+        } else {
+            "task resume"
+        };
+        self.child(issue, None, what, args, !should_fix, out, warn)
+    }
+
+    /// Runs a task's phase, `sbxm <args>`, as a child (issue 612) and reads how it ended from the
+    /// `outcome.json` it wrote: an earlier run's is removed first, so it is never read as this
+    /// one's. `location`: where a `task run` runs (`None`: its record says, for a resume).
+    /// `obey_stop`: its slot wait ends on the loop's stop request.
+    #[allow(clippy::too_many_arguments)]
+    fn child(
+        &self,
+        issue: u32,
+        location: Option<Location>,
+        what: &str,
+        args: Vec<String>,
+        obey_stop: bool,
+        out: &mut dyn Write,
+        _warn: &mut dyn Write,
+    ) -> PhaseEnd {
+        let here = |e: anyhow::Error| PhaseEnd::Outcome(outcome::Outcome::of(&Err(e), ""));
+        let id = format!("issue-{issue}");
+        let base_dir = match GlobalConfig::load(self.config_dir) {
+            Ok(global) => global.base_dir,
+            Err(e) => return here(e),
+        };
+        let dir = record::task_dir(&base_dir, &id);
+        // Where a child whose task has no folder writes its outcome.
+        let elsewhere = outcome::loop_file(&base_dir, &id);
+        let cleared = || -> Result<()> {
+            if fs::symlink_metadata(&dir).is_ok() {
+                check_own_folder(&base_dir, &dir)?;
+                outcome::remove(&dir)?;
+            }
+            if let Some(parent) = elsewhere.parent() {
+                fs::create_dir_all(parent)
+                    .with_context(|| format!("cannot create {}", parent.display()))?;
+            }
+            outcome::remove_file(&elsewhere)
+        };
+        if let Err(e) = cleared() {
+            return here(e);
+        }
+        let slot = match location {
+            Some(location) => location,
+            None => record::read(&dir.join("task.json")).map_or(Location::Local, |r| r.location),
+        };
+        let label = format!("[{id} {}]", slot.as_str());
+        let stop_file = stop_path(&base_dir);
+        let mut env = vec![
+            (
+                "SBXM_CONFIG_DIR".to_owned(),
+                self.config_dir.display().to_string(),
+            ),
+            (
+                outcome::LOOP_FILE_ENV.to_owned(),
+                elsewhere.display().to_string(),
+            ),
+        ];
+        if obey_stop {
+            env.push((
+                child::STOP_FILE_ENV.to_owned(),
+                stop_file.display().to_string(),
+            ));
+        }
+        let spec = child::Child {
+            args,
+            dir: self.repo_root.clone(),
+            env,
+        };
+        // A first Ctrl-C reaches the child's slot wait through the stop file.
+        let tick = || {
+            if obey_stop
+                && self.stop.as_ref().is_some_and(|flag| flag.requested())
+                && !stop_file_left(&stop_file)
+            {
+                let _ = fs::write(&stop_file, "");
+            }
+        };
+        let _ = writeln!(out, "{label} {what} started");
+        let ended = match self.spawner.run(&spec, &tick) {
+            Ok(exit) => {
+                let mut ended = PhaseEnd::read(&dir, &elsewhere, &exit.how);
+                // Only quoted, for a child that couldn't say how it ended.
+                if let (PhaseEnd::Missing(why), Some(error)) =
+                    (&mut ended, child::last_error(&exit.errors))
+                {
+                    why.push_str(&format!(" (it said: {error})"));
+                }
+                let _ = outcome::remove_file(&elsewhere);
+                ended
+            }
+            Err(e) => here(e),
+        }
+        .masked();
+        let _ = writeln!(out, "{label} {what} ended: {}", ended.summary());
+        ended
     }
 }
 
@@ -4142,44 +4341,48 @@ impl Steps for TaskSteps<'_> {
         out: &mut dyn Write,
         warn: &mut dyn Write,
     ) -> Result<()> {
-        self.logged(issue, out, warn, &|out, warn| {
-            let disk = self.task_disk()?;
-            task_run::run(
-                self.config_dir,
-                &task_run::Options {
-                    repo_root: self.repo_root.clone(),
-                    issue,
-                    worker_harness: None,
-                    worker_model: None,
-                    reviewer_harness: None,
-                    reviewer_model: None,
-                    time_limit: None,
-                    reviewer_time_limit: None,
-                    profile: None,
-                    base: None,
-                    repo: self.repo.clone(),
-                    clone_source: None,
-                    identity: None,
-                    disk,
-                    location,
-                },
-                None,
-                self.backend,
-                self.github,
-                self.probe,
-                self.host,
-                out,
-                warn,
-            )
-        })
+        self.run_task(issue, location, out, warn).result()
     }
 
     fn resume(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
-        self.resume_with(issue, false, out, warn)
+        self.resume_task(issue, out, warn).result()
     }
 
     fn should_fix(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
-        self.resume_with(issue, true, out, warn)
+        self.should_fix_task(issue, out, warn).result()
+    }
+
+    fn run_task(
+        &self,
+        issue: u32,
+        location: Option<Location>,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> PhaseEnd {
+        let mut args = vec!["task".to_owned(), "run".to_owned()];
+        args.extend(["--issue".to_owned(), issue.to_string()]);
+        match location {
+            Some(Location::Cloud) => args.push("--cloud".to_owned()),
+            Some(Location::Local) => args.push("--local".to_owned()),
+            None => {}
+        }
+        if let Some(repo) = &self.repo {
+            args.extend(["--repo".to_owned(), repo.clone()]);
+        }
+        // Where it runs, for the window's lines: as `task run` chooses it.
+        let slot = match TaskConfig::load(&self.repo_root) {
+            Ok(config) => pipeline::choose_location(location, &config),
+            Err(_) => location.unwrap_or_default(),
+        };
+        self.child(issue, Some(slot), "task run", args, true, out, warn)
+    }
+
+    fn resume_task(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> PhaseEnd {
+        self.resume_child(issue, false, out, warn)
+    }
+
+    fn should_fix_task(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> PhaseEnd {
+        self.resume_child(issue, true, out, warn)
     }
 
     fn finish(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {

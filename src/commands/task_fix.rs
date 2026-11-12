@@ -23,6 +23,7 @@ use crate::task::finish;
 use crate::task::gates::HostRunner;
 use crate::task::lifetime;
 use crate::task::location;
+use crate::task::outcome;
 use crate::task::pipeline::{self, Ctx};
 use crate::task::pr_fix;
 use crate::task::record::{self, ProcessProbe};
@@ -70,6 +71,26 @@ pub fn run(
     out: &mut dyn Write,
     warn: &mut dyn Write,
 ) -> Result<()> {
+    // Its outcome as it ends (decision 321(2)), in the fix task's folder once its id is known.
+    outcome::recorded(out, warn, |recorder, out, warn| {
+        run_unrecorded(
+            config_dir, opts, backend, github, probe, host, recorder, out, warn,
+        )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_unrecorded(
+    config_dir: &std::path::Path,
+    opts: &Options,
+    backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    host: &dyn HostRunner,
+    recorder: &outcome::Recorder,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<()> {
     let number = opts.pr;
     if number == 0 {
         bail!("PR numbers start at 1");
@@ -114,6 +135,9 @@ pub fn run(
     let backend = backend.located(location);
 
     let pr = github.pr(&repo_name, number)?;
+    if let Some(id) = record::fix_id(number, &pr.head_oid) {
+        recorder.at(&global.base_dir, &id)?;
+    }
     pr_fix::check_fixable(&pr, &repo_name, opts.base.as_deref())?;
     let review = match opts.check_run {
         Some(id) => {

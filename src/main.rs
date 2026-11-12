@@ -723,7 +723,11 @@ fn run() -> anyhow::Result<()> {
                         target,
                         rounds,
                         should_fix,
-                        disk: sbxm::disk::Guard::real(ignore_disk).no_wait(no_wait),
+                        // Started by a loop, its slot wait obeys the loop's stop (issue 612).
+                        disk: commands::task_loop::child::obeying_loop_stop(
+                            sbxm::disk::Guard::real(ignore_disk).no_wait(no_wait),
+                            commands::task_loop::child::loop_stop_file(),
+                        ),
                         identity: None,
                         forget_ambiguous,
                     },
@@ -792,7 +796,11 @@ fn run() -> anyhow::Result<()> {
                         repo,
                         clone_source: None,
                         identity: None,
-                        disk: sbxm::disk::Guard::real(ignore_disk).no_wait(no_wait),
+                        // Started by a loop, its slot wait obeys the loop's stop (issue 612).
+                        disk: commands::task_loop::child::obeying_loop_stop(
+                            sbxm::disk::Guard::real(ignore_disk).no_wait(no_wait),
+                            commands::task_loop::child::loop_stop_file(),
+                        ),
                         location: sbxm::cli::location_flag(cloud, local),
                     },
                     &targets,
@@ -1032,9 +1040,12 @@ fn run() -> anyhow::Result<()> {
                 let repo_root = std::env::current_dir()?;
                 let github = sbxm::github::gh::GhBackend::default();
                 // Ctrl-C (the user's answer, 2026-11-02): the first press stops the loop after the
-                // current task, a second stops it now. On Windows the press also reaches the `sbx`
-                // children, so the current phase fails and the loop parks that task.
+                // current task, a second stops it now. The task's child runs in a process group of
+                // its own, so a first press doesn't reach it (issue 612).
                 let stop = std::sync::Arc::new(commands::task_loop::StopFlag::default());
+                // Each issue task's `task run` and `task resume` runs as a child (issue 612).
+                let spawner =
+                    std::sync::Arc::new(commands::task_loop::child::ChildSpawner::current()?);
                 let steps = commands::task_loop::TaskSteps {
                     config_dir: &config_dir,
                     repo_root: repo_root.clone(),
@@ -1045,13 +1056,18 @@ fn run() -> anyhow::Result<()> {
                     host: &task::gates::ShellHostRunner,
                     disk: sbxm::disk::Guard::real(false),
                     stop: Some(std::sync::Arc::clone(&stop)),
+                    spawner: spawner.as_ref(),
                 };
                 let pressed = std::sync::Arc::clone(&stop);
+                let child = std::sync::Arc::clone(&spawner);
                 if let Err(e) = ctrlc::set_handler(move || match pressed.press() {
                     commands::task_loop::Press::First => {
                         eprintln!("stopping after the current task; press Ctrl-C again to stop now")
                     }
                     commands::task_loop::Press::Again => {
+                        // The running task's child goes with the loop (issue 612).
+                        use commands::task_loop::child::Spawner;
+                        child.stop();
                         // The task's sandbox slot (or its place in line) goes with it (decision 304).
                         sbxm::slot::release_all();
                         std::process::exit(130)
