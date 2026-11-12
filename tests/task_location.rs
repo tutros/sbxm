@@ -636,3 +636,116 @@ fn a_queued_run_job_of_a_run_cloud_issue_is_refused_while_cloud_slots_is_unset()
     assert!(result.contains("\"refused\""), "{result}\n{out}");
     assert!(result.contains(NEEDS_CLOUD_SLOTS), "{result}");
 }
+
+// --- review of issue 600, M-2: only the task that opened the PR decides a fix's location ---
+
+/// Writes a record under `dir` naming PR 7 of [`REPO`] as its `pr`: kind `kind`, run at `at`,
+/// and with `continues` the PR it continued.
+fn named_pr7(dir: &std::path::Path, kind: Kind, id: &str, at: Location, continues: bool) {
+    let mut rec = Record::new(
+        &NewTask {
+            kind,
+            number: if kind == Kind::Fix { 7 } else { 41 },
+            repo: REPO,
+            title: "",
+            base: "main",
+            branch: "feature-x",
+            config_hash: "h",
+            id: Some(id),
+        },
+        0,
+        Process::new(1, 1),
+    );
+    rec.location = at;
+    rec.pr = Some(format!("https://github.com/{REPO}/pull/7"));
+    if continues {
+        rec.continues = Some(record::PrBranch {
+            pr: 7,
+            branch: "feature-x".into(),
+            base: "a".repeat(40),
+        });
+    }
+    fs::create_dir_all(dir).unwrap();
+    record::write(dir, &rec).unwrap();
+}
+
+const FIX_ID: &str = "fix-7-aaaaaaaaaaaa";
+
+fn labeled_41(label: &str) -> FakeGitHub {
+    FakeGitHub::default()
+        .with_pr(pr7_closing(vec![41]))
+        .with_open_issues(vec![open_issue(41, &[label], "")])
+}
+
+#[test]
+fn a_previous_fix_is_not_the_task_that_opened_the_pr() {
+    for (fix_at, label, expected) in [
+        (Location::Local, RUN_CLOUD_LABEL, Location::Cloud),
+        (Location::Cloud, RUN_LOCAL_LABEL, Location::Local),
+    ] {
+        let env = common::Env::new();
+        let base = env.base_dir();
+        named_pr7(
+            &record::task_dir(&base, FIX_ID),
+            Kind::Fix,
+            FIX_ID,
+            fix_at,
+            false,
+        );
+
+        assert_eq!(location::recorded(&base, REPO, 7), None);
+        assert_eq!(
+            location::of_pr(&base, REPO, 7, &labeled_41(label)).unwrap(),
+            Some(expected)
+        );
+    }
+}
+
+#[test]
+fn a_task_that_continued_the_pr_is_not_the_one_that_opened_it() {
+    let env = common::Env::new();
+    let base = env.base_dir();
+    named_pr7(
+        &record::task_dir(&base, "issue-41"),
+        Kind::Issue,
+        "issue-41",
+        Location::Local,
+        true,
+    );
+
+    assert_eq!(location::recorded(&base, REPO, 7), None);
+    assert_eq!(
+        location::of_pr(&base, REPO, 7, &labeled_41(RUN_CLOUD_LABEL)).unwrap(),
+        Some(Location::Cloud)
+    );
+}
+
+#[test]
+fn the_opener_wins_over_a_later_fix_live_or_archived() {
+    for archived in [false, true] {
+        let env = common::Env::new();
+        let base = env.base_dir();
+        // Ids on both sides of the opener's, so no listing order can put the fix first only.
+        for id in ["fix-7-000000000000", FIX_ID, "fix-7-ffffffffffff"] {
+            named_pr7(
+                &record::task_dir(&base, id),
+                Kind::Fix,
+                id,
+                Location::Local,
+                false,
+            );
+        }
+        let opener = if archived {
+            sbxm::task::merged::archive_root(&base).join("issue-41")
+        } else {
+            record::task_dir(&base, "issue-41")
+        };
+        named_pr7(&opener, Kind::Issue, "issue-41", Location::Cloud, false);
+
+        assert_eq!(
+            location::recorded(&base, REPO, 7),
+            Some(Location::Cloud),
+            "archived: {archived}"
+        );
+    }
+}

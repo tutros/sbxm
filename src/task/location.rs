@@ -58,10 +58,11 @@ pub fn of_pr(
     labeled(github, repo, &github.pr(repo, pr)?)
 }
 
-/// The location recorded by the task that opened PR `pr` of `repo` ([`jobs::opener`], an archived
-/// record too); `None` without one (a hand-made PR, or the task removed).
+/// The location recorded by the task that opened PR `pr` of `repo` ([`jobs::first_opener`], an
+/// archived record too; never a fix or a task that continued the PR); `None` without one (a
+/// hand-made PR, or the task removed).
 pub fn recorded(base_dir: &Path, repo: &str, pr: u32) -> Option<Location> {
-    jobs::opener(base_dir, repo, pr).map(|rec| rec.location)
+    jobs::first_opener(base_dir, repo, pr).map(|rec| rec.location)
 }
 
 /// The location the `run-cloud` or `run-local` label of the first open issue `pr` closes pins;
