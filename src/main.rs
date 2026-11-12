@@ -1040,8 +1040,8 @@ fn run() -> anyhow::Result<()> {
                 let repo_root = std::env::current_dir()?;
                 let github = sbxm::github::gh::GhBackend::default();
                 // Ctrl-C (the user's answer, 2026-11-02): the first press stops the loop after the
-                // current task, a second stops it now. On Windows the press also reaches the `sbx`
-                // children, so the current phase fails and the loop parks that task.
+                // current task, a second stops it now. The task's child runs in a process group of
+                // its own, so a first press doesn't reach it (issue 612).
                 let stop = std::sync::Arc::new(commands::task_loop::StopFlag::default());
                 // Each issue task's `task run` and `task resume` runs as a child (issue 612).
                 let spawner =
