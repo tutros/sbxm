@@ -330,6 +330,7 @@ fn a_fix_tasks_review_line_names_its_file() {
                 }),
                 disk: Default::default(),
                 check_run: None,
+                location: None,
             },
             &backend,
             &github,

@@ -4035,6 +4035,8 @@ impl TaskSteps<'_> {
                     identity: None,
                     disk: self.disk.clone(),
                     check_run,
+                    // Where the PR's task ran (issue 600).
+                    location: None,
                 },
                 self.backend,
                 self.github,

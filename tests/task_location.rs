@@ -12,9 +12,11 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 
-use sbxm::backend::Location;
+use sbxm::backend::{FakeBackend, Location};
+use sbxm::commands::task_fix;
 use sbxm::commands::task_loop::{self, Env, Options, Steps};
 use sbxm::github::fake::FakeGitHub;
+use sbxm::task::gates::FakeHostRunner;
 use sbxm::task::location::{self, NEEDS_CLOUD_SLOTS, RUN_CLOUD_LABEL, RUN_LOCAL_LABEL};
 use sbxm::task::record::{self, Kind, NewTask, Process, Record};
 
@@ -447,4 +449,155 @@ fn status_says_why_a_queued_run_cloud_issue_waits_while_cloud_slots_is_unset() {
         Some(NEEDS_CLOUD_SLOTS)
     );
     assert_eq!(set.blocked.get(&3), None, "{:?}", set.blocked);
+}
+
+// --- `task fix --pr N` ---
+//
+// Both pools are full and refuse at once: a fix that would run in the cloud is refused by the
+// cloud slot, one that would run locally by the sandbox slot, each before it creates anything.
+
+/// PR 7 at a new head, its latest review by the user posted, closing `closing`.
+fn fix_github(f: &common::task_fixture::Fixture, closing: Vec<u32>) -> FakeGitHub {
+    let head = common::fix_task::new_head(f);
+    let mut pr = common::fix_task::pr7(&head);
+    pr.closing_issues = closing;
+    FakeGitHub::default()
+        .with_user("tutros")
+        .with_default_branch("main")
+        .with_pr(pr)
+        .with_pr_comments(7, vec![common::fix_task::posted_review(&head)])
+}
+
+fn full_pools(f: &common::task_fixture::Fixture) -> sbxm::disk::Guard {
+    let _ = common::slot::full(&f.env, true);
+    common::cloud_slot::full(&f.env, true)
+}
+
+fn cloud_ready_backend() -> FakeBackend {
+    FakeBackend::with_secrets(&["anthropic", "openai"]).with_version(common::cloud_task::CLOUD_MIN)
+}
+
+/// `task fix --pr 7` with `flag` as `--cloud`/`--local`; the error it ends with.
+fn fix(f: &common::task_fixture::Fixture, flag: Option<Location>, gh: &FakeGitHub) -> String {
+    let backend = cloud_ready_backend();
+    let result = task_fix::run(
+        &f.env.config_dir(),
+        &task_fix::Options {
+            repo_root: f.env.tmp.path().join("target-repo"),
+            pr: 7,
+            repo: Some(REPO.into()),
+            base: None,
+            clone_source: Some(common::task_fixture::source(f)),
+            identity: Some(common::cloud_task::identity()),
+            disk: full_pools(f),
+            check_run: None,
+            location: flag,
+        },
+        &backend,
+        gh,
+        &Probe,
+        &FakeHostRunner::default(),
+        &mut Vec::new(),
+        &mut Vec::new(),
+    );
+    assert!(backend.creates().is_empty(), "{:?}", backend.log());
+    format!("{:#}", result.unwrap_err())
+}
+
+fn assert_ran_in_the_cloud(err: &str) {
+    assert!(err.starts_with(&common::cloud_slot::refusal()), "{err}");
+}
+
+fn assert_ran_locally(err: &str) {
+    assert!(err.starts_with(&common::slot::refusal()), "{err}");
+}
+
+#[test]
+fn a_fix_of_a_cloud_tasks_pr_runs_in_the_cloud_and_of_a_local_ones_locally() {
+    let f = common::fix_task::config();
+    opened_pr7(&f.env.base_dir(), REPO, Location::Cloud);
+    assert_ran_in_the_cloud(&fix(&f, None, &fix_github(&f, vec![])));
+
+    let f = common::fix_task::config();
+    opened_pr7(&f.env.base_dir(), REPO, Location::Local);
+    // The record wins over the issue's label.
+    let gh =
+        fix_github(&f, vec![41]).with_open_issues(vec![open_issue(41, &[RUN_CLOUD_LABEL], "")]);
+    assert_ran_locally(&fix(&f, None, &gh));
+}
+
+#[test]
+fn a_fix_with_no_task_record_follows_its_issues_label() {
+    let f = common::fix_task::config();
+    let gh =
+        fix_github(&f, vec![41]).with_open_issues(vec![open_issue(41, &[RUN_CLOUD_LABEL], "")]);
+    assert_ran_in_the_cloud(&fix(&f, None, &gh));
+
+    let f = common::fix_task::config();
+    let gh = fix_github(&f, vec![41]).with_open_issues(vec![open_issue(41, &["size:S"], "")]);
+    assert_ran_locally(&fix(&f, None, &gh));
+}
+
+#[test]
+fn a_flag_wins_over_the_pr_tasks_location() {
+    let f = common::fix_task::config();
+    opened_pr7(&f.env.base_dir(), REPO, Location::Cloud);
+    assert_ran_locally(&fix(&f, Some(Location::Local), &fix_github(&f, vec![])));
+
+    let f = common::fix_task::config();
+    opened_pr7(&f.env.base_dir(), REPO, Location::Local);
+    assert_ran_in_the_cloud(&fix(&f, Some(Location::Cloud), &fix_github(&f, vec![])));
+}
+
+/// The loop's resolve (and log-fix) of a PR goes through `task fix` with no flag.
+#[test]
+fn the_loops_resolve_of_a_cloud_tasks_pr_runs_in_the_cloud() {
+    let f = common::fix_task::config();
+    opened_pr7(&f.env.base_dir(), REPO, Location::Cloud);
+    let gh = fix_github(&f, vec![]);
+    let backend = cloud_ready_backend();
+    let host = FakeHostRunner::default();
+    let steps = task_loop::TaskSteps {
+        config_dir: &f.env.config_dir(),
+        repo_root: f.env.tmp.path().join("target-repo"),
+        repo: Some(REPO.into()),
+        backend: &backend,
+        github: &gh,
+        probe: &Probe,
+        host: &host,
+        disk: full_pools(&f),
+        stop: None,
+    };
+
+    let err = steps
+        .fix_pr(7, &mut Vec::new(), &mut Vec::new())
+        .unwrap_err();
+
+    // A local fix is refused by the full sandbox slot first thing. The loop's own identity is
+    // the user's git config, read just before the cloud slot: where git has none, that read is
+    // the refusal instead.
+    let err = format!("{err:#}");
+    assert!(
+        err.starts_with(&common::cloud_slot::refusal()) || err.contains("git has no user."),
+        "{err}"
+    );
+    assert!(backend.creates().is_empty(), "{:?}", backend.log());
+}
+
+#[test]
+fn task_fix_cloud_and_local_conflict() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let output = assert_cmd::Command::cargo_bin("sbxm")
+        .unwrap()
+        .env("SBXM_CONFIG_DIR", tmp.path())
+        .args(["task", "fix", "--pr", "7", "--cloud", "--local"])
+        .assert()
+        .failure()
+        .get_output()
+        .clone();
+    let stderr = String::from_utf8(output.stderr).unwrap();
+    assert!(
+        stderr.contains("'--cloud' cannot be used with '--local'"),
+        "{stderr}"
+    );
 }

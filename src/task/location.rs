@@ -10,7 +10,7 @@ use super::finish::check_own_folder;
 use super::queue::pr_number;
 use super::record::{self, Kind};
 use crate::backend::Location;
-use crate::github::GitHubBackend;
+use crate::github::{GitHubBackend, PrInfo};
 
 /// The label that runs an issue's task in the cloud.
 pub const RUN_CLOUD_LABEL: &str = "run-cloud";
@@ -45,15 +45,24 @@ pub fn for_loop(labels: &[String], cloud_slots: Option<u32>) -> Result<Option<Lo
 }
 
 /// Where a fix of PR `pr` of `repo` runs with neither `--cloud` nor `--local`: the location
-/// recorded by the issue or spec task that opened it; with no such record (a hand-made PR, or
-/// the task removed), the one its closing issue's label pins; else `None`, the default. The
-/// cloud needs no `cloud_slots` here: only the loop's own choice of it does.
+/// [`recorded`] by the task that opened it, else the one its closing issue's label pins
+/// ([`labeled`]); else `None`, the default. The cloud needs no `cloud_slots` here: only the
+/// loop's own choice of it does.
 pub fn of_pr(
     base_dir: &Path,
     repo: &str,
     pr: u32,
     github: &dyn GitHubBackend,
 ) -> Result<Option<Location>> {
+    if let Some(location) = recorded(base_dir, repo, pr)? {
+        return Ok(Some(location));
+    }
+    labeled(github, repo, &github.pr(repo, pr)?)
+}
+
+/// The location recorded by the issue or spec task under `base_dir` that opened PR `pr` of
+/// `repo`; `None` without one (a hand-made PR, or the task removed).
+pub fn recorded(base_dir: &Path, repo: &str, pr: u32) -> Result<Option<Location>> {
     for dir in record::task_folders(base_dir)? {
         if check_own_folder(base_dir, &dir).is_err() {
             continue;
@@ -68,12 +77,17 @@ pub fn of_pr(
             return Ok(Some(rec.location));
         }
     }
-    let closing = github.pr(repo, pr)?.closing_issues;
-    if closing.is_empty() {
+    Ok(None)
+}
+
+/// The location the `run-cloud` or `run-local` label of the first open issue `pr` closes pins;
+/// `None` for no such issue, neither label or both.
+pub fn labeled(github: &dyn GitHubBackend, repo: &str, pr: &PrInfo) -> Result<Option<Location>> {
+    if pr.closing_issues.is_empty() {
         return Ok(None);
     }
     let open = github.issues_open(repo)?;
-    Ok(closing.iter().find_map(|n| {
+    Ok(pr.closing_issues.iter().find_map(|n| {
         let issue = open.iter().find(|i| i.number == *n)?;
         pinned(&issue.labels).ok().flatten()
     }))

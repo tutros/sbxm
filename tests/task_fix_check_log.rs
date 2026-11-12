@@ -528,6 +528,7 @@ mod command {
             }),
             disk: Default::default(),
             check_run: Some(check_run),
+            location: None,
         }
     }
 

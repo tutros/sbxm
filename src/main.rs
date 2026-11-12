@@ -590,6 +590,8 @@ fn run() -> anyhow::Result<()> {
                     ignore_disk,
                     no_wait,
                     check_run,
+                    cloud,
+                    local,
                 },
         } => {
             // The task's id names the head its review covered, known only once GitHub answered:
@@ -607,6 +609,7 @@ fn run() -> anyhow::Result<()> {
                         identity: None,
                         disk: sbxm::disk::Guard::real(ignore_disk).no_wait(no_wait),
                         check_run,
+                        location: sbxm::cli::location_flag(cloud, local),
                     },
                     &SbxBackend::LOCAL,
                     &sbxm::github::gh::GhBackend::default(),
