@@ -224,23 +224,30 @@ fn print_opened(
     comment: &str,
 ) -> Result<()> {
     let branch = &done.branch;
+    // Issue 598: a branch already on origin at the task's tip was not pushed again. After a
+    // finish that pushed it and couldn't open its PR, it may be that push, so it isn't "yours".
+    let pushed = match (&done.branch_adopted, done.retried) {
+        (Some(tip), false) => {
+            format!("adopted the branch you pushed: {branch} at {tip}, pushing nothing,")
+        }
+        (Some(tip), true) => {
+            format!("adopted the branch already on origin: {branch} at {tip}, pushing nothing,")
+        }
+        (None, _) => format!("pushed {branch}"),
+    };
     if done.draft {
-        writeln!(
-            out,
-            "{id}: pushed {branch} and opened draft PR {}",
-            done.url
-        )?;
+        writeln!(out, "{id}: {pushed} and opened draft PR {}", done.url)?;
         for reason in &done.unresolved {
             writeln!(out, "  unresolved: {reason}")?;
         }
     } else if done.adopted {
         writeln!(
             out,
-            "{id}: pushed {branch} and found {} already open for it; recorded it as the task's PR",
+            "{id}: {pushed} and found {} already open for it; recorded it as the task's PR",
             done.url
         )?;
     } else {
-        writeln!(out, "{id}: pushed {branch} and opened {}", done.url)?;
+        writeln!(out, "{id}: {pushed} and opened {}", done.url)?;
     }
     // An adopted PR's description is neither read nor changed (issue 521), so only a PR this
     // finish opened is said to refer to its issue with `Refs #N`.

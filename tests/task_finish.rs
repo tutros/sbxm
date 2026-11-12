@@ -425,8 +425,10 @@ fn a_failed_push_opens_no_pr_and_leaves_the_record_as_it_was() {
 
     let err = run(&f, &github).unwrap_err();
 
+    // Issue 598: the branch on the remote is read before the push, so a gone remote fails there;
+    // a push that fails after that read is `task_finish_adopt_branch.rs`'s to test.
     assert!(
-        format!("{err:#}").contains("cannot push issue-41"),
+        format!("{err:#}").contains("cannot read issue-41 on the remote"),
         "{err:#}"
     );
     assert!(writes(&github).is_empty());
