@@ -148,6 +148,7 @@ fn status_env(terminal: bool, iterations: Option<usize>) -> status::Env {
         iterations,
         monotonic: Box::new(|| std::time::Duration::ZERO),
         slots: None,
+        cloud_slots: None,
         disk: sbxm::status::footer::Disk {
             free_space: |_| Ok(40 * 1024 * 1024 * 1024),
             same_drive: |_, _| true,

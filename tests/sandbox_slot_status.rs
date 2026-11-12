@@ -33,6 +33,7 @@ fn env(slots: Option<(u32, sbxm::slot::Gate)>) -> Env {
             min_free_disk: 0,
         },
         slots,
+        cloud_slots: None,
     }
 }
 
