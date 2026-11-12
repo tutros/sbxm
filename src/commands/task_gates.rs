@@ -16,7 +16,7 @@ use crate::slot;
 use crate::task::config::{self, TaskConfig};
 use crate::task::gates::HostRunner;
 use crate::task::pipeline::{self, Prepared, TaskEnv, Tiers};
-use crate::task::record::ProcessProbe;
+use crate::task::record::{self, ProcessProbe};
 use crate::task::repo::Identity;
 
 pub struct Options {
@@ -192,7 +192,10 @@ fn dry_run(
             in_sandbox_path(&workspace),
         ),
         None => (
-            format!("sandbox sbxm-task-{id}-{}", config.worker.harness.as_str()),
+            format!(
+                "sandbox {}",
+                record::sandbox_name(id, config.worker.harness.as_str())
+            ),
             in_sandbox_path(&workspace),
         ),
     };

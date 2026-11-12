@@ -139,11 +139,7 @@ pub fn owner(claims: &Claims, name: &str) -> Owner {
     let task = claims
         .tasks
         .iter()
-        .filter(|id| {
-            name.strip_prefix("sbxm-task-")
-                .and_then(|rest| rest.strip_prefix(id.as_str()))
-                .is_some_and(|rest| rest.len() > 1 && rest.starts_with('-'))
-        })
+        .filter(|id| crate::task::record::sandbox_role(name, id).is_some())
         .max_by_key(|id| id.len());
     if let Some(id) = task {
         return Owner::Task(id.clone());

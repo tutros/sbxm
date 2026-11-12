@@ -1086,6 +1086,27 @@ pub fn spec_id_for_canonical(canonical: &Path) -> Result<(String, String)> {
     Ok((id, file_name))
 }
 
+/// The start of every task sandbox's name.
+const SANDBOX_STEM: &str = "sbxm-task-";
+
+/// Task `id`'s sandbox for `role` (`claude`, `review-codex`): `sbxm-task-<id>-<role>`, capped at
+/// 63 characters (issue 556). Made once, when the sandbox is created, and recorded: later commands
+/// use the recorded name.
+pub fn sandbox_name(id: &str, role: &str) -> String {
+    crate::sandbox_name::capped(SANDBOX_STEM, id, &format!("-{role}"))
+}
+
+/// The role in `name` when it is one of task `id`'s sandbox names ([`sandbox_name`]): a
+/// non-empty tail of `[a-z0-9-]`; `None` for any other name.
+pub fn sandbox_role(name: &str, id: &str) -> Option<String> {
+    let role = crate::sandbox_name::after_id(name, SANDBOX_STEM, id)?.strip_prefix('-')?;
+    let plain = !role.is_empty()
+        && role
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-');
+    plain.then(|| role.to_owned())
+}
+
 pub fn tasks_root(base: &Path) -> PathBuf {
     base.join(".sbxm").join("tasks")
 }

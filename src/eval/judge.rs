@@ -234,7 +234,7 @@ pub fn judge_repeat(
         })
         .collect();
 
-    let sandbox = crate::run::sandbox_name(&roots.id, crate::run::JUDGE, repeat);
+    let sandbox = crate::run::sandbox_name(&roots.id, crate::run::JUDGE, repeat.into());
     let workspace = roots.workspaces.join("judge").join(repeat.to_string());
     let mut run = JudgeRun {
         repeat,

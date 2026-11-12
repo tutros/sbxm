@@ -105,6 +105,8 @@ pub struct FakeBackend {
     default_exec_output: Option<ExecOutput>,
     fail_create_for: Vec<String>,
     fail_create_matching: Vec<String>,
+    /// What a failing `create` says, as `sbx create`'s stderr would; a fixed text when `None`.
+    create_failure: Option<String>,
     fail_exec_for: Vec<String>,
     gate: Option<ExecGate>,
     /// Only sandboxes whose name ends with this are held at the gate.
@@ -425,6 +427,12 @@ impl FakeBackend {
     /// Makes `create` of this one sandbox record the call and then fail.
     pub fn with_failing_create_for(mut self, sandbox: &str) -> Self {
         self.fail_create_for.push(sandbox.to_owned());
+        self
+    }
+
+    /// Makes a failing `create` fail with `text`, as `sbx create` says it on stderr.
+    pub fn with_create_failure_text(mut self, text: &str) -> Self {
+        self.create_failure = Some(text.to_owned());
         self
     }
 
@@ -873,7 +881,12 @@ impl SandboxBackend for FakeBackend {
                 .iter()
                 .any(|n| spec.name.contains(n.as_str()))
         {
-            bail!("fake create failure");
+            bail!(
+                "{}",
+                self.create_failure
+                    .as_deref()
+                    .unwrap_or("fake create failure")
+            );
         }
         if let Some(live) = &self.live_cloud {
             let mut live = live.lock().unwrap();

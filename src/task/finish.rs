@@ -112,14 +112,7 @@ fn schema_too_new(path: &Path) -> bool {
 /// A sandbox name from `task.json` is only removed if it is one of this task's (`task.json` is a
 /// file on disk, and the name goes to `sbx rm`).
 fn check_sandbox_name(id: &str, name: &str) -> Result<()> {
-    let prefix = format!("sbxm-task-{id}-");
-    let tail = name.strip_prefix(&prefix);
-    let plain = tail.is_some_and(|t| {
-        !t.is_empty()
-            && t.bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-    });
-    if !plain {
+    if record::sandbox_role(name, id).is_none() {
         bail!(
             "task.json of {id} names sandbox {name:?}, which isn't one of its sandboxes; \
              fix or delete {id}'s task folder by hand"
@@ -275,7 +268,8 @@ pub fn plan_removal_forgetting(
         }
         Err(e) => {
             note = Some(format!(
-                "task.json can't be read ({e:#}), so its sandboxes can't be named; check `sbx ls`, and `sbx --cloud ls` for a cloud task, for sbxm-task-{id}-*"
+                "task.json can't be read ({e:#}), so its sandboxes can't be named; check `sbx ls`, and `sbx --cloud ls` for a cloud task, for sbxm-task-{id}-* (sbxm-task-*-{}-* for a name capped at 63 characters)",
+                crate::sandbox_name::hash(id)
             ));
         }
     }

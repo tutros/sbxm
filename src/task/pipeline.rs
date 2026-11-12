@@ -1475,7 +1475,7 @@ fn prepare_source(ctx: &Ctx, id: &str, source: Source, location: Location) -> Re
         return Err(e).with_context(|| format!("cannot reserve {}", workspace.display()));
     }
 
-    let sandbox = format!("sbxm-task-{id}-{}", worker.harness.as_str());
+    let sandbox = record::sandbox_name(id, worker.harness.as_str());
     // What this start did that the screen (and so `run.log`) should show: a cloud create.
     let mut events = Vec::new();
     // What a cloud create that failed had to say about the secrets it took back (slice 4).
@@ -4086,7 +4086,7 @@ pub fn review_pr(
     let reviewer = &env.config.reviewer;
     let gates = &env.config.gates;
     let clone = prepared.workspace.with_file_name(format!("{id}-review"));
-    let sandbox = format!("sbxm-task-{id}-review-{}", reviewer.harness.as_str());
+    let sandbox = record::sandbox_name(&id, &format!("review-{}", reviewer.harness.as_str()));
     let earlier: Vec<String> = review::saved_rounds(&prepared.meta)
         .into_iter()
         .filter(|&r| r > 0 && r < round)
@@ -4974,7 +4974,7 @@ pub fn run_reviewer(env: &TaskEnv, prepared: &mut Prepared, round: u32) -> Resul
     let id = prepared.record.id.clone();
     let reviewer = &env.config.reviewer;
     let clone = prepared.workspace.with_file_name(format!("{id}-review"));
-    let sandbox = format!("sbxm-task-{id}-review-{}", reviewer.harness.as_str());
+    let sandbox = record::sandbox_name(&id, &format!("review-{}", reviewer.harness.as_str()));
     let full = prepared.record.last_reviewed_commit.is_none();
     let tip = repo::branch_tip(&prepared.meta.join("repo.git"), &prepared.record.branch).ok();
 

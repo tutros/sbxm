@@ -161,7 +161,7 @@ fn build(
     let mut build = Build {
         profile_name: profile_name.to_owned(),
         harness: options.harness,
-        sandbox: format!("sbxm-template-{key}"),
+        sandbox: template::sandbox_name(profile_name, options.harness),
         warm: warm.clone(),
         workspace: build_dir.join(&key),
         kits_dir: build_dir.join(format!("{key}.kits")),

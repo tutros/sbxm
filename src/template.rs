@@ -53,6 +53,12 @@ pub fn key(profile: &str, harness: Harness) -> String {
     format!("{profile}-{}", harness.as_str())
 }
 
+/// The sandbox a template is built in: `sbxm-template-<profile>-<harness>`, capped at 63
+/// characters (issue 556).
+pub fn sandbox_name(profile: &str, harness: Harness) -> String {
+    crate::sandbox_name::capped("sbxm-template-", profile, &format!("-{}", harness.as_str()))
+}
+
 /// `sbxm-<profile>-<harness>:<hash12>-<yyyymmdd>t<hhmm>` in UTC (decision 211).
 pub fn tag(profile: &str, harness: Harness, template_hash: &str, now: u64) -> String {
     let stamp: String = format_timestamp(now)
