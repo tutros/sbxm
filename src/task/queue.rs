@@ -279,9 +279,13 @@ pub struct Row {
     pub idle_before: Option<u64>,
 }
 
-const HEADER: &str = "# Loop log (decision 245(h))
+const TITLE: &str = "# Loop log (decision 245(h))\n\n";
 
-Times UTC. Written by `sbxm task loop`, one row per task; `unknown` where not measured.
+/// The line naming the loop's repository, `owner/name` after it (issue 602).
+pub const REPOSITORY: &str = "Repository: ";
+
+const HEADER: &str =
+    "Times UTC. Written by `sbxm task loop`, one row per task; `unknown` where not measured.
 
 | # | Issue | Size | Started | Ready (time to ready) | Worker / reviewer s | Rounds (must-fix) | \
 Outcome | Stops (cause, duration) | Idle before | User interventions |
@@ -365,30 +369,30 @@ fn rows_in(text: &str, issue: u32) -> (usize, bool) {
     (rows.len(), logged)
 }
 
-/// Appends `row` to the log at `path` (decision 245(h)), with the header first when the file is
-/// new. Returns `false`, writing nothing, when the issue already has a row there: a loop run
-/// again after being killed doesn't log a task twice.
-pub fn append_row(path: &Path, row: &Row) -> Result<bool> {
-    add_row(path, row, true)
+/// Appends `row` to the log at `path` (decision 245(h)), with the header naming `repo` first when
+/// the file is new. Returns `false`, writing nothing, when the issue already has a row there: a
+/// loop run again after being killed doesn't log a task twice.
+pub fn append_row(path: &Path, repo: &str, row: &Row) -> Result<bool> {
+    add_row(path, repo, row, true)
 }
 
 /// Appends a resolve's row (decision 298), even when its PR already has one: each resolve of a PR
 /// gets its own.
-pub fn append_resolve_row(path: &Path, row: &Row) -> Result<()> {
-    add_row(path, row, false).map(|_| ())
+pub fn append_resolve_row(path: &Path, repo: &str, row: &Row) -> Result<()> {
+    add_row(path, repo, row, false).map(|_| ())
 }
 
 /// Appends a queued job's row (issue 525), its Issue column naming the job (`job review #465`)
 /// instead of an issue; `row.issue` is unused. Each job gets its own row.
-pub fn append_job_row(path: &Path, job: &str, row: &Row) -> Result<()> {
-    add_any(path, Some(&cell(job)), row, false).map(|_| ())
+pub fn append_job_row(path: &Path, repo: &str, job: &str, row: &Row) -> Result<()> {
+    add_any(path, repo, Some(&cell(job)), row, false).map(|_| ())
 }
 
-fn add_row(path: &Path, row: &Row, once: bool) -> Result<bool> {
-    add_any(path, None, row, once)
+fn add_row(path: &Path, repo: &str, row: &Row, once: bool) -> Result<bool> {
+    add_any(path, repo, None, row, once)
 }
 
-fn add_any(path: &Path, item: Option<&str>, row: &Row, once: bool) -> Result<bool> {
+fn add_any(path: &Path, repo: &str, item: Option<&str>, row: &Row, once: bool) -> Result<bool> {
     let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
@@ -400,6 +404,8 @@ fn add_any(path: &Path, item: Option<&str>, row: &Row, once: bool) -> Result<boo
     }
     let mut add = String::new();
     if text.is_empty() {
+        add.push_str(TITLE);
+        add.push_str(&format!("{REPOSITORY}{}\n\n", cell(repo)));
         add.push_str(HEADER);
     } else if !text.ends_with('\n') {
         add.push('\n');

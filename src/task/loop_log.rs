@@ -3,14 +3,18 @@
 //! on the open issue labeled `loop-log`, split between rows when it is longer than one comment.
 //! A posted log gets a marker next to it; at its start a loop posts, late, every earlier log
 //! with rows that has none, so the log of a loop ended without its stop isn't lost (issue 594).
+//! Loops of every repository share the folder, so each log's header names its repository and a
+//! loop recovers only its own repository's logs (issue 602).
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use crate::commands::task_start::check_repo;
 use crate::github::{GitHubBackend, IssueRequest};
 use crate::run::results::format_timestamp;
+use crate::task::queue::REPOSITORY;
 
 /// The label of the issue the loop's logs are posted to, one issue per retro window.
 pub const LABEL: &str = "loop-log";
@@ -105,45 +109,67 @@ pub fn post(
     post_text(github, repo, &heading, &text, &start)
 }
 
-/// Posts, oldest first, every earlier loop log under `base_dir` with rows and no marker, each
-/// headed by the late note naming this loop's start, and marks it posted; one without rows is
-/// only marked. A log the comments of a `loop-log` issue (open or closed) already name, as the
-/// stop of a loop from before the markers posted it (review M-1), gets only the rows none of
-/// those comments has, so a split log whose post stopped after some parts is completed and one
-/// fully posted is only marked (review M-3).
-/// `own` (this loop's log) is never posted here. Returns the errors, each naming its log: a log
-/// that fails stays unmarked for the next start and the later ones are still tried (review M-2).
+/// What [`post_late`] did not post: the errors, each naming its log, and the logs skipped for
+/// naming no repository.
+#[derive(Debug, Default)]
+pub struct Late {
+    /// A log that fails stays unmarked for the next start and the later ones are still tried
+    /// (review M-2 of issue 594).
+    pub failed: Vec<anyhow::Error>,
+    /// The logs with rows and no well-formed repository line (written before issue 602): never
+    /// posted to any repository, and marked so no later start looks at them again.
+    pub skipped: Vec<PathBuf>,
+}
+
+/// Posts, oldest first, every earlier loop log under `base_dir` whose header names `repo`, with
+/// rows and no marker, each headed by the late note naming this loop's start, and marks it
+/// posted; one without rows is only marked. A log naming another repository is left alone for
+/// that repository's loop; one naming none is skipped and marked (issue 602). A log the comments
+/// of a `loop-log` issue (open or closed) already name, as the stop of a loop from before the
+/// markers posted it (review M-1), gets only the rows none of those comments has, so a split log
+/// whose post stopped after some parts is completed and one fully posted is only marked (review
+/// M-3). `own` (this loop's log) is never posted here.
 pub fn post_late(
     github: &dyn GitHubBackend,
     repo: &str,
     base_dir: &Path,
     own: &Path,
     started_at: u64,
-) -> Vec<anyhow::Error> {
-    let mut failed = Vec::new();
+) -> Late {
+    let mut late = Late::default();
     let logs = match unmarked_logs(base_dir, own) {
         Ok(logs) => logs,
-        Err(e) => return vec![e],
+        Err(e) => {
+            late.failed.push(e);
+            return late;
+        }
     };
     // The logs with rows, read before anything is asked of GitHub.
     let mut due: Vec<(PathBuf, String)> = Vec::new();
     for log in logs {
         let read = fs::read_to_string(&log)
             .with_context(|| format!("cannot read {}", log.display()))
-            .and_then(|text| {
-                if has_rows(&text) {
+            .and_then(|text| match repository(&text) {
+                Some(named) if !named.eq_ignore_ascii_case(repo) => Ok(()),
+                Some(_) if has_rows(&text) => {
                     due.push((log.clone(), text));
                     Ok(())
-                } else {
-                    mark_posted(&log)
                 }
+                None if has_rows(&text) => {
+                    mark_skipped(&log)?;
+                    late.skipped.push(log.clone());
+                    Ok(())
+                }
+                _ => mark_posted(&log),
             });
         if let Err(e) = read {
-            failed.push(e.context(format!("{} stays unposted", log.display())));
+            late.failed
+                .push(e.context(format!("{} stays unposted", log.display())));
         }
     }
+    let failed = &mut late.failed;
     if due.is_empty() {
-        return failed;
+        return late;
     }
     let on_github = match posted_comments(github, repo) {
         Ok(bodies) => bodies,
@@ -151,7 +177,7 @@ pub fn post_late(
             failed.push(e.context(
                 "cannot tell which earlier logs are already on GitHub, so none was posted",
             ));
-            return failed;
+            return late;
         }
     };
     let now = format_timestamp(started_at);
@@ -183,7 +209,25 @@ pub fn post_late(
             failed.push(e.context(format!("{} stays unposted", log.display())));
         }
     }
-    failed
+    late
+}
+
+/// The `owner/name` a log's header names, before its table; `None` when it names none or the
+/// line isn't a well-formed `owner/name`.
+pub fn repository(text: &str) -> Option<&str> {
+    let named = text
+        .lines()
+        .take_while(|line| !line.starts_with("|---"))
+        .find_map(|line| line.strip_prefix(REPOSITORY))?
+        .trim_end();
+    check_repo(named).is_ok().then_some(named)
+}
+
+/// Records that `log` names no repository, so no loop posts it or looks at it again.
+fn mark_skipped(log: &Path) -> Result<()> {
+    let marker = marker(log);
+    fs::write(&marker, "skipped: no repository line\n")
+        .with_context(|| format!("cannot write {}", marker.display()))
 }
 
 /// The earlier logs under `base_dir` without a marker, oldest first, `own` left out.
