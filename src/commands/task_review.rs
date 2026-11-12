@@ -638,10 +638,15 @@ fn run_pr(
             Location::Local => slot::Slot::none(),
             Location::Cloud => {
                 pipeline::check_pr_reviewable(&pr, &repo_name)?;
-                pipeline::check_reviewer_inputs(config_dir, backend, config, location)?;
-                slot::take_cloud(
-                    &GlobalConfig::load(config_dir)?,
-                    &opts.disk.slot,
+                pipeline::take_cloud_slot_checked(
+                    config_dir,
+                    backend,
+                    config,
+                    pipeline::Makes {
+                        worker: false,
+                        reviewer: true,
+                    },
+                    &opts.disk,
                     Some(&id),
                     warn,
                 )?

@@ -384,6 +384,36 @@ pub fn take_cloud_slot(env: &TaskEnv, record: &Record) -> Result<crate::slot::Sl
     crate::slot::take_cloud(&global, &env.disk.slot, Some(&record.id), &mut lines)
 }
 
+/// The cloud sandboxes a starting command goes on to make, for [`take_cloud_slot_checked`].
+#[derive(Debug, Clone, Copy)]
+pub struct Makes {
+    pub worker: bool,
+    pub reviewer: bool,
+}
+
+/// A starting cloud command's cloud slot (issue 599): first the cloud preflight of every sandbox
+/// `makes` names (decision 261), so what no free slot could fix (a missing login, a profile, a
+/// TTL) is refused before any wait, then the slot. `backend` is the cloud instance. The command
+/// checks its other inputs before calling this, and the preparation checks again before it writes.
+#[allow(clippy::too_many_arguments)]
+pub fn take_cloud_slot_checked(
+    config_dir: &Path,
+    backend: &dyn SandboxBackend,
+    config: &TaskConfig,
+    makes: Makes,
+    guard: &disk::Guard,
+    task: Option<&str>,
+    warn: &mut dyn std::io::Write,
+) -> Result<crate::slot::Slot> {
+    if makes.worker {
+        check_worker_inputs(config_dir, backend, config, Location::Cloud)?;
+    }
+    if makes.reviewer {
+        check_reviewer_inputs(config_dir, backend, config, Location::Cloud)?;
+    }
+    crate::slot::take_cloud(&GlobalConfig::load(config_dir)?, &guard.slot, task, warn)
+}
+
 /// Passes each whole line written to it on to `say`.
 struct Lines<'a> {
     say: &'a dyn Fn(&str),

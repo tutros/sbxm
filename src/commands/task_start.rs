@@ -379,13 +379,9 @@ fn start(
             slot::take(&global, &opts.disk.slot, task.as_deref(), warn)?
         }
         // A cloud sandbox doesn't use the drive of `sbx`'s local sandbox state (P11, decision
-        // 262(h)). Every worker is preflighted here, before any is created (P15 (a)): they share
-        // the harness and the profile, so one check covers them all. Its cloud slot is taken
-        // below, once every input is checked.
-        Location::Cloud => {
-            pipeline::check_worker_inputs(config_dir, backend, &config, location)?;
-            slot::Slot::none()
-        }
+        // 262(h)). Its workers' preflight and its cloud slot come below, once every other input
+        // is checked.
+        Location::Cloud => slot::Slot::none(),
     };
     let repo_name = resolve_repo(opts.repo.as_deref(), &opts.repo_root)?;
     let identity = match &opts.identity {
@@ -400,10 +396,22 @@ fn start(
         bail!("base {base_branch:?} isn't a usable branch name; pass --base <branch>");
     }
     // Every input checked, before a `--restart` discards anything: a cloud start's cloud slot
-    // (issue 599).
+    // (issue 599). Every worker is preflighted first, before any is created (P15 (a)): they share
+    // the harness and the profile, so one check covers them all.
     let _cloud_slot = match location {
         Location::Local => slot::Slot::none(),
-        Location::Cloud => slot::take_cloud(&global, &opts.disk.slot, task.as_deref(), warn)?,
+        Location::Cloud => pipeline::take_cloud_slot_checked(
+            config_dir,
+            backend,
+            &config,
+            pipeline::Makes {
+                worker: true,
+                reviewer: false,
+            },
+            &opts.disk,
+            task.as_deref(),
+            warn,
+        )?,
     };
     let clone_source = opts
         .clone_source
@@ -967,8 +975,9 @@ pub fn run_spec_with_seams(
             disk::require(&global, config_dir, &opts.disk)?;
             slot::take(&global, &opts.disk.slot, Some(&start.id), warn)?
         }
-        // Its flags, base and spec file were all checked in resolving it, above.
-        Location::Cloud => slot::take_cloud(&global, &opts.disk.slot, Some(&start.id), warn)?,
+        // Its flags, base and spec file were checked in resolving it, above; its worker's
+        // preflight and its cloud slot come in `run_spec_from` (issue 599).
+        Location::Cloud => slot::Slot::none(),
     };
     run_spec_from(
         config_dir,
@@ -1023,6 +1032,23 @@ pub(crate) fn run_spec_from(
 
     // The task's sandboxes run where it was started (decision 253).
     let backend = backend.located(location);
+    // A cloud start's cloud slot, once its worker's preflight passes and before anything is
+    // made (issue 599); `task run --spec` took it already, so this finds it held.
+    let _cloud_slot = match location {
+        Location::Local => slot::Slot::none(),
+        Location::Cloud => pipeline::take_cloud_slot_checked(
+            config_dir,
+            backend,
+            &config,
+            pipeline::Makes {
+                worker: true,
+                reviewer: false,
+            },
+            &opts.disk,
+            Some(&spec_id),
+            warn,
+        )?,
+    };
     let ctx = Ctx {
         config_dir,
         repo: &repo_name,

@@ -124,10 +124,22 @@ pub fn run(
         Some(identity) => identity.clone(),
         None => Identity::read_from(None)?,
     };
-    // Every input checked: a cloud fix's cloud slot, held until it ends (issue 599).
+    // Every input checked: a cloud fix's cloud slot, held until it ends, once its worker's and
+    // reviewer's cloud preflights pass (issue 599).
     let _cloud_slot = match location {
         Location::Local => slot::Slot::none(),
-        Location::Cloud => slot::take_cloud(&global, &opts.disk.slot, Some(&task), warn)?,
+        Location::Cloud => pipeline::take_cloud_slot_checked(
+            config_dir,
+            backend,
+            &config,
+            pipeline::Makes {
+                worker: true,
+                reviewer: true,
+            },
+            &opts.disk,
+            Some(&task),
+            warn,
+        )?,
     };
     let clone_source = opts
         .clone_source

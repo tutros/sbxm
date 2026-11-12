@@ -893,3 +893,163 @@ fn a_cloud_resume_that_makes_a_sandbox_still_waits_for_the_cloud_slot() {
     assert_refused(&ran);
     assert!(b.creates().is_empty(), "{:?}", b.log());
 }
+
+// ---- Second review of issue 599, M-1 (repeat): the worker's cloud preflight comes before the
+// cloud slot too ----
+
+/// What the cloud says when the worker's (claude) login isn't stored.
+const NO_WORKER_LOGIN: &str = "no global 'anthropic' login";
+
+fn fix_without_worker_login(
+    f: &Fixture,
+    head: &str,
+    no_wait: bool,
+) -> (anyhow::Result<()>, FakeBackend) {
+    // Only the reviewer's (codex) login is stored.
+    let backend =
+        FakeBackend::with_secrets(&["openai"]).with_version(common::cloud_task::CLOUD_MIN);
+    let github = common::fix_task::github_at(head)
+        .with_pr_comments(7, vec![common::fix_task::posted_review(head)]);
+    let result = sbxm::commands::task_fix::run(
+        &f.env.config_dir(),
+        &sbxm::commands::task_fix::Options {
+            repo_root: f.env.tmp.path().join("target-repo"),
+            pr: 7,
+            repo: Some("o/r".into()),
+            base: None,
+            clone_source: Some(common::task_fixture::source(f)),
+            identity: Some(identity()),
+            disk: cloud_slot::full(&f.env, no_wait),
+            check_run: None,
+        },
+        &backend,
+        &github,
+        &Probe,
+        &FakeHostRunner::default(),
+        &mut Vec::new(),
+        &mut Vec::new(),
+    );
+    (result, backend)
+}
+
+#[test]
+fn a_cloud_fix_without_its_worker_s_login_says_so_before_the_cloud_slot() {
+    for no_wait in [false, true] {
+        let f = fixture_with(CLOUD_TOML);
+        let head = common::fix_task::new_head(&f);
+
+        let (result, backend) = fix_without_worker_login(&f, &head, no_wait);
+
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(err.contains(NO_WORKER_LOGIN), "no_wait {no_wait}: {err}");
+        assert!(backend.creates().is_empty(), "{:?}", backend.log());
+        assert!(!record::tasks_root(&f.env.base_dir()).exists());
+        assert_no_ticket(&f);
+    }
+}
+
+#[test]
+fn a_cloud_spec_start_without_its_worker_s_login_says_so_before_the_cloud_slot() {
+    for no_wait in [false, true] {
+        let f = fixture_with(LOCAL_TOML);
+        let (spec, id) = spec(&f);
+        let b = FakeBackend::with_secrets(&["openai"]).with_version(common::cloud_task::CLOUD_MIN);
+        let opts = sbxm::commands::task_start::SpecOptions {
+            repo_root: f.env.tmp.path().join("target-repo"),
+            spec,
+            worker_harness: None,
+            worker_model: None,
+            time_limit: None,
+            reviewer_time_limit: None,
+            profile: None,
+            base: Some("main".into()),
+            repo: Some("o/r".into()),
+            clone_source: Some(common::task_fixture::source(&f)),
+            identity: Some(identity()),
+            disk: cloud_slot::full(&f.env, no_wait),
+            location: Some(Location::Cloud),
+        };
+
+        let result = sbxm::commands::task_start::run_spec(
+            &f.env.config_dir(),
+            &opts,
+            &b,
+            &FakeGitHub::default(),
+            &Probe,
+            &mut Vec::new(),
+            &mut Vec::new(),
+        );
+
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(err.contains(NO_WORKER_LOGIN), "no_wait {no_wait}: {err}");
+        assert!(b.creates().is_empty(), "{:?}", b.log());
+        assert!(!record::task_dir(&f.env.base_dir(), &id).exists());
+        assert_no_ticket(&f);
+    }
+}
+
+/// A valid cloud fix still meets the cloud limit, and keeps its one slot through its worker and
+/// its review.
+#[test]
+fn a_valid_cloud_fix_holds_one_cloud_slot_through_worker_and_review() {
+    let f = fixture_with(CLOUD_TOML);
+    let head = common::fix_task::new_head(&f);
+    let id = record::fix_id(7, &head).unwrap();
+    let slot = cloud_slot::cloud_slot_file(&f.env);
+    let tokens = std::sync::Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+    let seen = std::sync::Arc::clone(&tokens);
+    let b = cloud_backend_observing(
+        &cloud_fs(&f),
+        &[&id],
+        &[CLEAN],
+        true,
+        ok(CLAUDE_DONE),
+        move |sandbox, _, spec| {
+            if !is_headless(spec) {
+                return;
+            }
+            let held: sbxm::slot::Holder =
+                serde_json::from_str(&std::fs::read_to_string(&slot).unwrap()).unwrap();
+            assert_eq!(held.process.pid, std::process::id(), "{sandbox}");
+            seen.lock().unwrap().push((sandbox.to_owned(), held.token));
+        },
+    );
+    let github = common::fix_task::github_at(&head)
+        .with_pr_comments(7, vec![common::fix_task::posted_review(&head)]);
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+
+    let result = sbxm::commands::task_fix::run(
+        &f.env.config_dir(),
+        &sbxm::commands::task_fix::Options {
+            repo_root: f.env.tmp.path().join("target-repo"),
+            pr: 7,
+            repo: Some("o/r".into()),
+            base: None,
+            clone_source: Some(common::task_fixture::source(&f)),
+            identity: Some(identity()),
+            disk: cloud_slot::free(&f.env),
+            check_run: None,
+        },
+        &b,
+        &github,
+        &Probe,
+        &FakeHostRunner::default(),
+        &mut out,
+        &mut warn,
+    );
+
+    let ran = ran(result, out, warn);
+    let tokens = tokens.lock().unwrap();
+    assert!(!tokens.is_empty(), "{}\n{}", ran.out, ran.warn);
+    assert!(tokens.iter().all(|(_, t)| *t == tokens[0].1), "{tokens:?}");
+    assert!(
+        tokens.iter().any(|(s, _)| s.contains("-review-")),
+        "{tokens:?}\n{}\n{}",
+        ran.out,
+        ran.warn
+    );
+    assert!(
+        cloud_slot::holder(&f.env).is_none(),
+        "given back at the end"
+    );
+}

@@ -591,19 +591,21 @@ fn run_spec_task(
     // The worker's secret, checked the same way the reviewer's already is above, before anything
     // is discarded: a missing one must not be found only after the old task is gone (issue #194
     // review finding M-2).
-    pipeline::check_worker_inputs(
-        config_dir,
-        backend.located(location),
-        &resolved.config,
-        location,
-    )?;
+    let located = backend.located(location);
+    pipeline::check_worker_inputs(config_dir, located, &resolved.config, location)?;
     // Every input checked, before `--restart` discards anything: a cloud run's cloud slot, held
     // through the worker and the review (issue 599).
     let _cloud_slot = match location {
         Location::Local => slot::Slot::none(),
-        Location::Cloud => slot::take_cloud(
-            &GlobalConfig::load(config_dir)?,
-            &opts.disk.slot,
+        Location::Cloud => pipeline::take_cloud_slot_checked(
+            config_dir,
+            located,
+            &resolved.config,
+            pipeline::Makes {
+                worker: true,
+                reviewer: false,
+            },
+            &opts.disk,
             Some(&resolved.id),
             warn,
         )?,
