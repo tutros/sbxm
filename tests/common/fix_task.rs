@@ -140,6 +140,9 @@ pub fn interrupted_fix(f: &Fixture, head: &str, backend: &FakeBackend) -> String
     let mut prepared = pipeline::prepare_fix(&context, &pr, &review, Location::Local).unwrap();
     prepared.record.stage = Stage::Working;
     prepared.record.status = Status::Running;
+    // Its process was cut off mid-run: the lock goes without the run's end (issue 597), so the
+    // record keeps naming it.
+    prepared.lock = None;
     record::write(&prepared.meta, &prepared.record).unwrap();
     prepared.record.id.clone()
 }

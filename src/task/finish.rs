@@ -14,7 +14,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 use super::lifetime::{self, Removal};
-use super::lock::ProcessLock;
+use super::lock::TaskLock;
 use super::machine;
 use super::merged;
 use super::pipeline::{self, Prepared};
@@ -48,7 +48,7 @@ pub struct RemovalPlan {
     pub forget: Option<String>,
     /// The task's mutation lock (issue 58), taken before its record was read and held until the
     /// plan is dropped; `None` when the task has no `.sbxm/tasks/<id>/` folder to lock.
-    lock: Option<ProcessLock>,
+    lock: Option<TaskLock>,
 }
 
 impl RemovalPlan {

@@ -14,7 +14,7 @@ use super::findings;
 use super::finish;
 use super::gates::{self, GateOutcome, HostRunner};
 use super::lifetime;
-use super::lock::ProcessLock;
+use super::lock::TaskLock;
 use super::machine;
 use super::next;
 use super::pr_fix::{self, ReviewToFix};
@@ -190,7 +190,7 @@ pub struct Prepared {
     /// The task's mutation lock (issue 58), held while this command changes the task: taken by
     /// the start that made the folder and by [`Prepared::open_locked`]; `None` from
     /// [`Prepared::open`], which only reads.
-    pub lock: Option<ProcessLock>,
+    pub lock: Option<TaskLock>,
     /// The commit this process's last collect left the delivered branch at, and the paths it
     /// changes once [`check_changed_paths`] listed them (issue #444): in memory only, so a review
     /// right after its collect lists them once. A review uses them only for that very commit.
@@ -251,11 +251,7 @@ impl Prepared {
 /// Takes task `id`'s mutation lock (issue 58); `None` when the task has no folder, so there is
 /// nothing to lock (the caller's own read then says there is no task). The id is checked before
 /// any path is built from it.
-pub fn lock_task(
-    base_dir: &Path,
-    id: &str,
-    probe: &dyn ProcessProbe,
-) -> Result<Option<ProcessLock>> {
+pub fn lock_task(base_dir: &Path, id: &str, probe: &dyn ProcessProbe) -> Result<Option<TaskLock>> {
     if !record::is_valid_id(id) {
         bail!("{id:?} isn't a task id; task ids look like issue-41 or pr-7");
     }
@@ -276,9 +272,9 @@ fn lock_folder(
     meta: &Path,
     id: &str,
     probe: &dyn ProcessProbe,
-) -> Result<ProcessLock> {
+) -> Result<TaskLock> {
     finish::check_own_folder(base_dir, meta)?;
-    ProcessLock::acquire(meta, &format!("task {id}"), probe)
+    TaskLock::acquire(meta, &format!("task {id}"), probe)
 }
 
 /// Reserves `meta`, a new task's folder (`create_dir` fails if it appeared meanwhile), and takes
@@ -289,7 +285,7 @@ fn reserve_locked(
     meta: &Path,
     id: &str,
     probe: &dyn ProcessProbe,
-) -> Result<ProcessLock> {
+) -> Result<TaskLock> {
     fs::create_dir(meta).with_context(|| format!("cannot reserve {}", meta.display()))?;
     lock_folder(base_dir, meta, id, probe).inspect_err(|_| {
         let _ = fs::remove_dir(meta);
