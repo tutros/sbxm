@@ -19,6 +19,11 @@
 //! ticket (and any slot it holds) and exits. In `task loop` the wait also polls the loop's stop
 //! request ([`Gate::stop`], issue 570): a stop gives up the ticket, or the slot just taken, and
 //! the command fails with [`Stopped`], having created nothing.
+//!
+//! `[resources] cloud_slots = N` (issue 599, decision 317) limits the commands that create a
+//! cloud sandbox the same way, in a pool of its own ([`Pool::Cloud`], taken with [`take_cloud`]):
+//! its own folder next to the sandbox slots' ([`cloud_slots_dir`]), and its own held slot per
+//! thread, so a cloud command and a local one never wait on each other.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -43,21 +48,78 @@ pub const POLL: Duration = Duration::from_secs(5);
 /// The folder of the waiting commands' tickets, inside the slots folder.
 const QUEUE: &str = "queue";
 
+/// The two pools of slots: a command creating local sandboxes takes a sandbox slot, one creating
+/// cloud sandboxes a cloud slot, never both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pool {
+    /// `sandbox_slots` (decision 304).
+    Local,
+    /// `cloud_slots` (issue 599, decision 317).
+    Cloud,
+}
+
+impl Pool {
+    /// The `[resources]` setting that sizes it.
+    fn setting(self) -> &'static str {
+        match self {
+            Pool::Local => "sandbox_slots",
+            Pool::Cloud => "cloud_slots",
+        }
+    }
+
+    /// One of its slots, in messages.
+    fn noun(self) -> &'static str {
+        match self {
+            Pool::Local => "sandbox slot",
+            Pool::Cloud => "cloud slot",
+        }
+    }
+
+    /// Its folder's name, inside `<per-user local data folder>/sbxm`.
+    fn folder(self) -> &'static str {
+        match self {
+            Pool::Local => "slots",
+            Pool::Cloud => "cloud-slots",
+        }
+    }
+
+    fn count(self, config: &GlobalConfig) -> Option<u32> {
+        match self {
+            Pool::Local => config.resources.sandbox_slots,
+            Pool::Cloud => config.resources.cloud_slots,
+        }
+    }
+
+    fn real_dir(self) -> Result<PathBuf> {
+        dirs::data_local_dir()
+            .map(|dir| dir.join("sbxm").join(self.folder()))
+            .with_context(|| {
+                format!(
+                    "cannot find the per-user local data folder the {}s live in; delete {} from \
+                     [resources] of config.toml to run without a limit",
+                    self.noun(),
+                    self.setting()
+                )
+            })
+    }
+}
+
 /// `<per-user local data folder>/sbxm/slots` (`%LOCALAPPDATA%\sbxm\slots` on Windows).
 pub fn slots_dir() -> Result<PathBuf> {
-    dirs::data_local_dir()
-        .map(|dir| dir.join("sbxm").join("slots"))
-        .context(
-            "cannot find the per-user local data folder the sandbox slots live in; delete \
-             sandbox_slots from [resources] of config.toml to run without a limit",
-        )
+    Pool::Local.real_dir()
+}
+
+/// `<per-user local data folder>/sbxm/cloud-slots`, next to [`slots_dir`].
+pub fn cloud_slots_dir() -> Result<PathBuf> {
+    Pool::Cloud.real_dir()
 }
 
 /// What a sandbox-creating command takes its slot with; tests replace the folder, the probe, the
 /// waiting and the files' registry.
 #[derive(Clone)]
 pub struct Gate {
-    /// The slots folder; `None` is [`slots_dir`].
+    /// The sandbox slots folder; `None` is [`slots_dir`]. The cloud slots live next to it, in
+    /// `cloud-slots`.
     pub dir: Option<PathBuf>,
     /// `--no-wait`: refuse at once instead of waiting for a free slot.
     pub no_wait: bool,
@@ -102,10 +164,11 @@ impl Gate {
         }
     }
 
-    fn dir(&self) -> Result<PathBuf> {
-        match &self.dir {
-            Some(dir) => Ok(dir.clone()),
-            None => slots_dir(),
+    fn dir(&self, pool: Pool) -> Result<PathBuf> {
+        match (&self.dir, pool) {
+            (Some(dir), Pool::Local) => Ok(dir.clone()),
+            (Some(dir), Pool::Cloud) => Ok(dir.with_file_name(Pool::Cloud.folder())),
+            (None, pool) => pool.real_dir(),
         }
     }
 
@@ -122,7 +185,7 @@ pub struct Stopped;
 
 impl std::fmt::Display for Stopped {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("stopped on request while waiting for a sandbox slot; nothing was created")
+        f.write_str("stopped on request while waiting for a slot; nothing was created")
     }
 }
 
@@ -272,8 +335,15 @@ impl Slot {
 }
 
 thread_local! {
-    /// The slot this thread's command holds, so a nested [`take`] is the same slot.
-    static HELD: RefCell<Weak<Owned>> = const { RefCell::new(Weak::new()) };
+    /// The slot of each pool this thread's command holds, so a nested take is the same slot.
+    static HELD: RefCell<[Weak<Owned>; 2]> = const { RefCell::new([Weak::new(), Weak::new()]) };
+}
+
+fn held_index(pool: Pool) -> usize {
+    match pool {
+        Pool::Local => 0,
+        Pool::Cloud => 1,
+    }
 }
 
 /// Takes a sandbox slot for the command `gate` describes, working on `task` when it has one:
@@ -285,19 +355,45 @@ pub fn take(
     task: Option<&str>,
     warn: &mut dyn Write,
 ) -> Result<Slot> {
-    let Some(slots) = config.resources.sandbox_slots else {
+    take_in(Pool::Local, config, gate, task, warn)
+}
+
+/// [`take`] for a command that creates cloud sandboxes: a slot of `cloud_slots`, nothing when it
+/// is unset (issue 599).
+pub fn take_cloud(
+    config: &GlobalConfig,
+    gate: &Gate,
+    task: Option<&str>,
+    warn: &mut dyn Write,
+) -> Result<Slot> {
+    take_in(Pool::Cloud, config, gate, task, warn)
+}
+
+fn take_in(
+    pool: Pool,
+    config: &GlobalConfig,
+    gate: &Gate,
+    task: Option<&str>,
+    warn: &mut dyn Write,
+) -> Result<Slot> {
+    let Some(slots) = pool.count(config) else {
         return Ok(Slot(None));
     };
-    if let Some(held) = HELD.with(|held| held.borrow().upgrade()) {
+    if let Some(held) = HELD.with(|held| held.borrow()[held_index(pool)].upgrade()) {
         return Ok(Slot(Some(held)));
     }
     if gate.stop_asked() {
         return Err(Stopped.into());
     }
-    let dir = gate.dir()?;
+    let dir = gate.dir(pool)?;
     let queue = dir.join(QUEUE);
-    fs::create_dir_all(&queue)
-        .with_context(|| format!("cannot create the sandbox slots folder {}", queue.display()))?;
+    fs::create_dir_all(&queue).with_context(|| {
+        format!(
+            "cannot create the {}s folder {}",
+            pool.noun(),
+            queue.display()
+        )
+    })?;
     let me = serde_json::to_string(&Holder {
         process: Process::current(&*gate.probe),
         token: lock::token(),
@@ -306,6 +402,7 @@ pub fn take(
         since: format_timestamp(now()),
     })?;
     let slots = Slots {
+        pool,
         dir: &dir,
         count: slots,
         gate,
@@ -322,7 +419,7 @@ pub fn take(
         return Err(Stopped.into());
     }
     let owned = Arc::new(owned);
-    HELD.with(|held| *held.borrow_mut() = Arc::downgrade(&owned));
+    HELD.with(|held| held.borrow_mut()[held_index(pool)] = Arc::downgrade(&owned));
     Ok(Slot(Some(owned)))
 }
 
@@ -344,6 +441,7 @@ impl State {
 
 /// The slots of one folder, as one command sees them.
 struct Slots<'a> {
+    pool: Pool,
     dir: &'a Path,
     count: u32,
     gate: &'a Gate,
@@ -407,7 +505,8 @@ impl Slots<'_> {
                 if let State::Stale(dead, _) = state {
                     writeln!(
                         warn,
-                        "took over sandbox slot {k} of {}, which is no longer running",
+                        "took over {} {k} of {}, which is no longer running",
+                        self.pool.noun(),
                         dead.describe()
                     )?;
                 }
@@ -456,8 +555,10 @@ impl Slots<'_> {
         let why = blocker(&states, &ahead)
             .unwrap_or_else(|| "another command taking the last one".to_owned());
         bail!(
-            "no free sandbox slot (sandbox_slots = {} in config.toml): {why}; run this command \
-             again once it ends, or without --no-wait to wait for a slot",
+            "no free {} ({} = {} in config.toml): {why}; run this command again once it ends, or \
+             without --no-wait to wait for a slot",
+            self.pool.noun(),
+            self.pool.setting(),
             self.count
         )
     }
@@ -481,7 +582,7 @@ impl Slots<'_> {
             if let Some(why) = blocker(&states, &ahead)
                 && shown.as_ref() != Some(&why)
             {
-                writeln!(warn, "waiting for a sandbox slot: {why}")?;
+                writeln!(warn, "waiting for a {}: {why}", self.pool.noun())?;
                 shown = Some(why);
             }
             // Dropping the ticket gives up this command's place in line.
@@ -520,7 +621,7 @@ fn catch_ctrl_c() {
         let _ = ctrlc::set_handler(|| {
             release_all();
             if WAITING.load(Ordering::SeqCst) > 0 {
-                eprintln!("stopped while waiting for a sandbox slot; nothing was created");
+                eprintln!("stopped while waiting for a slot; nothing was created");
             }
             std::process::exit(130);
         });
@@ -605,14 +706,25 @@ fn live_tickets(
     Ok(live)
 }
 
-/// Who holds the `count` slots of `gate`'s folder now, in one line for `sbxm status`. Reads only.
+/// Who holds the `count` sandbox slots of `gate`'s folder now, in one line for `sbxm status`.
+/// Reads only.
 pub fn status_line(count: u32, gate: &Gate) -> String {
-    let mut line = "sandbox slots: ".to_owned();
-    let Ok(dir) = gate.dir() else {
+    status_line_in(Pool::Local, count, gate)
+}
+
+/// [`status_line`] for the `count` cloud slots (issue 599).
+pub fn cloud_status_line(count: u32, gate: &Gate) -> String {
+    status_line_in(Pool::Cloud, count, gate)
+}
+
+fn status_line_in(pool: Pool, count: u32, gate: &Gate) -> String {
+    let mut line = format!("{}s: ", pool.noun());
+    let Ok(dir) = gate.dir(pool) else {
         line.push_str(&format!("{count}, in a folder that can't be found"));
         return line;
     };
     let slots = Slots {
+        pool,
         dir: &dir,
         count,
         gate,
