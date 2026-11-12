@@ -243,6 +243,7 @@ fn live_jev_call() {
             cpus: 2,
             memory: "2g".into(),
             sandbox_slots: None,
+            cloud_slots: None,
         },
         &backend,
     )

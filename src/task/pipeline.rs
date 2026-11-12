@@ -2163,6 +2163,7 @@ fn worker_resources(record: &Record, worker: &Agent) -> Result<Resources> {
             cpus,
             memory,
             sandbox_slots: None,
+            cloud_slots: None,
         }),
         _ => Err(anyhow::anyhow!(
             "task {}'s record has no saved sandbox resources (it predates issue 118's resume \
