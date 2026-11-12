@@ -16,7 +16,9 @@
 //! `task fix --pr N --check-run <id>` (decision 300).
 //!
 //! The phases go through [`Steps`] so the loop's rules are tested without sandboxes;
-//! [`TaskSteps`] runs the real commands.
+//! [`TaskSteps`] runs the real commands: an issue task's `task run` and `task resume` as child
+//! `sbxm` processes ([`child`], issue 612), whose `outcome.json` and task record are all the loop
+//! reads of how they ended (decision 321(2)); the other steps in this process.
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;
