@@ -195,6 +195,8 @@ impl Fixture {
         let mut files: Vec<PathBuf> = fs::read_dir(self.logs())
             .map(|d| d.map(|e| e.unwrap().path()).collect())
             .unwrap_or_default();
+        // The logs only, not the markers of the posted ones (issue 594).
+        files.retain(|p| p.extension().is_some_and(|e| e == "md"));
         files.sort();
         files
     }
@@ -494,6 +496,171 @@ fn a_loop_that_runs_no_task_posts_nothing() {
     assert_eq!(comments(&gh), []);
     assert_eq!(creates(&gh), []);
     assert_eq!(f.log_files(), Vec::<PathBuf>::new());
+}
+
+// --- Issue 594: earlier logs a loop never posted are posted late at the next start ---
+
+const LATE: &str = "Posted late by the loop started 2026-11-08T10:00:00Z: the loop that wrote it \
+                    ended without its stop (Ctrl-C, a crash or a restart).";
+
+/// An earlier loop's log, started `ago` seconds before `START`, with `rows` rows.
+fn plant_earlier(f: &Fixture, ago: u64, rows: usize) -> PathBuf {
+    fs::create_dir_all(f.logs()).unwrap();
+    let path = loop_log::path(&f.env.base_dir(), START - ago);
+    let rows: String = (1..=rows).map(|n| row(n, 40)).collect();
+    fs::write(&path, format!("{TABLE}{rows}")).unwrap();
+    path
+}
+
+/// A loop that runs no task of its own, so it posts nothing at its stop.
+fn idle_script() -> Script {
+    let mut script = Script::new(START);
+    script.refused.push(3);
+    script
+}
+
+#[test]
+fn with_no_earlier_log_nothing_is_posted_late() {
+    let f = fixture();
+    let gh = github(vec![loop_log_issue(40)]);
+
+    let run = run_loop(&f, &Script::new(START), &gh);
+
+    run.result.unwrap();
+    let posted = comments(&gh);
+    assert_eq!(posted.len(), 1, "only its own at the stop");
+    assert!(!posted[0].1.contains("Posted late"), "{}", posted[0].1);
+    assert_eq!(run.warn, "");
+}
+
+#[test]
+fn an_unposted_earlier_log_with_rows_is_posted_once_with_the_late_marker() {
+    let f = fixture();
+    let earlier = plant_earlier(&f, 86_400, 2);
+    let gh = github(vec![loop_log_issue(40)]);
+
+    let run = run_loop(&f, &idle_script(), &gh);
+
+    run.result.unwrap();
+    let posted = comments(&gh);
+    assert_eq!(posted.len(), 1);
+    assert_eq!(posted[0].0, 40);
+    let body = &posted[0].1;
+    assert!(body.starts_with(&format!("{LATE}\n")), "{body}");
+    assert!(body.contains("2026-11-07T10:00:00Z"), "{body}");
+    assert!(body.contains(&earlier.display().to_string()), "{body}");
+    assert!(
+        body.ends_with(&fs::read_to_string(&earlier).unwrap()),
+        "{body}"
+    );
+    assert!(loop_log::marker(&earlier).exists());
+    assert_eq!(run.warn, "");
+
+    run_loop(&f, &idle_script(), &gh).result.unwrap();
+
+    assert_eq!(comments(&gh).len(), 1, "not posted twice");
+}
+
+#[test]
+fn an_earlier_log_without_rows_is_not_posted_and_is_marked() {
+    let f = fixture();
+    let earlier = plant_earlier(&f, 600, 0);
+    let gh = github(vec![loop_log_issue(40)]);
+
+    run_loop(&f, &idle_script(), &gh).result.unwrap();
+
+    assert_eq!(comments(&gh), []);
+    assert_eq!(creates(&gh), []);
+    assert!(loop_log::marker(&earlier).exists());
+}
+
+#[test]
+fn a_log_posted_at_its_stop_is_marked_and_not_posted_again() {
+    let f = fixture();
+    let gh = github(vec![loop_log_issue(40)]);
+    run_loop(&f, &Script::new(START - 3_600), &gh)
+        .result
+        .unwrap();
+    assert!(loop_log::marker(&f.log_files()[0]).exists());
+
+    run_loop(&f, &idle_script(), &gh).result.unwrap();
+
+    assert_eq!(comments(&gh).len(), 1, "only the stop's post");
+}
+
+#[test]
+fn several_unposted_logs_are_posted_oldest_first_one_comment_each_before_any_task() {
+    let f = fixture();
+    let middle = plant_earlier(&f, 3_600, 1);
+    let oldest = plant_earlier(&f, 86_400, 1);
+    let newest = plant_earlier(&f, 60, 3);
+    let gh = github(vec![loop_log_issue(40)]);
+
+    run_loop(&f, &Script::new(START), &gh).result.unwrap();
+
+    let posted = comments(&gh);
+    assert_eq!(posted.len(), 4, "three late, then its own");
+    for (comment, log) in posted.iter().zip([&oldest, &middle, &newest]) {
+        assert!(comment.1.starts_with(LATE), "{}", comment.1);
+        assert!(
+            comment.1.contains(&log.display().to_string()),
+            "{}",
+            comment.1
+        );
+    }
+    assert!(!posted[3].1.contains("Posted late"), "{}", posted[3].1);
+    assert!(posted[3].1.contains("| 1 | #3 "), "{}", posted[3].1);
+}
+
+#[test]
+fn a_failed_late_post_is_a_warning_the_log_stays_unposted_and_the_next_start_posts_it() {
+    let f = fixture();
+    let earlier = plant_earlier(&f, 86_400, 1);
+    let gh = github(vec![loop_log_issue(40)]).failing_issue_comments_on(40);
+
+    let run = run_loop(&f, &idle_script(), &gh);
+
+    run.result.unwrap();
+    assert!(run.out.contains("the queue is empty"), "{}", run.out);
+    assert_eq!(run.warn.lines().count(), 1, "{}", run.warn);
+    assert!(
+        run.warn.contains(&earlier.display().to_string()),
+        "{}",
+        run.warn
+    );
+    assert!(
+        run.warn.contains("comment on issue 40 fails"),
+        "{}",
+        run.warn
+    );
+    assert!(!loop_log::marker(&earlier).exists());
+
+    gh.set_issue_comments_failing(40, false);
+    let run = run_loop(&f, &idle_script(), &gh);
+
+    run.result.unwrap();
+    let posted = comments(&gh);
+    assert_eq!(posted.len(), 2, "the failed one, then the retry");
+    assert!(posted[1].1.starts_with(LATE), "{}", posted[1].1);
+    assert!(loop_log::marker(&earlier).exists());
+    assert_eq!(run.warn, "");
+}
+
+#[test]
+fn with_no_open_loop_log_issue_a_late_post_creates_one_as_the_stop_does() {
+    let f = fixture();
+    plant_earlier(&f, 86_400, 1);
+    plant_earlier(&f, 60, 1);
+    let gh = github(Vec::new());
+
+    run_loop(&f, &idle_script(), &gh).result.unwrap();
+
+    let created = creates(&gh);
+    assert_eq!(created.len(), 1, "one issue for both");
+    assert_eq!(created[0].title, "Loop logs since 2026-11-07");
+    assert_eq!(created[0].labels, ["loop-log"]);
+    let posted: Vec<u32> = comments(&gh).into_iter().map(|(n, _)| n).collect();
+    assert_eq!(posted, [900, 900]);
 }
 
 // --- Review M-2: loops that start in the same second ---

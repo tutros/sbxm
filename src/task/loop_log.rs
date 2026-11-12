@@ -1,6 +1,8 @@
 //! Where `task loop`'s log lives and how it reaches GitHub (issue 463, decision 305): one file
 //! per loop under `<base>/.sbxm/loop-logs/`, never in a checkout, posted at the stop as a comment
 //! on the open issue labeled `loop-log`, split between rows when it is longer than one comment.
+//! A posted log gets a marker next to it; at its start a loop posts, late, every earlier log
+//! with rows that has none, so the log of a loop ended without its stop isn't lost (issue 594).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -72,8 +74,21 @@ pub fn comments(heading: &str, log: &str) -> Vec<String> {
         .collect()
 }
 
+/// The marker of a log that was posted, or had no rows to post (issue 594):
+/// `<date>-<HHMMSS>-loop.posted` next to the log.
+pub fn marker(log: &Path) -> PathBuf {
+    log.with_extension("posted")
+}
+
+/// Records that `log` needs no post any more.
+pub fn mark_posted(log: &Path) -> Result<()> {
+    let marker = marker(log);
+    fs::write(&marker, "posted\n").with_context(|| format!("cannot write {}", marker.display()))
+}
+
 /// Posts the log at `log` to the open `loop-log` issue with the lowest number, creating one
-/// titled by the loop's start date when there is none. Nothing is retried.
+/// titled by the loop's start date when there is none. Nothing is retried; the caller marks it
+/// posted ([`mark_posted`]).
 pub fn post(
     github: &dyn GitHubBackend,
     repo: &str,
@@ -87,6 +102,97 @@ pub fn post(
         "Loop started {start}, stopped: {stop}. Local file: `{}`",
         log.display()
     );
+    post_text(github, repo, &heading, &text, &start)
+}
+
+/// Posts, oldest first, every earlier loop log under `base_dir` with rows and no marker, each
+/// headed by the late note naming this loop's start, and marks it posted; one without rows is
+/// only marked. `own` (this loop's log) is never posted here. Stops at the first error, leaving
+/// that log and the later ones for the next start; the error names the log.
+pub fn post_late(
+    github: &dyn GitHubBackend,
+    repo: &str,
+    base_dir: &Path,
+    own: &Path,
+    started_at: u64,
+) -> Result<()> {
+    let dir = base_dir.join(".sbxm").join("loop-logs");
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).with_context(|| format!("cannot read {}", dir.display())),
+    };
+    let mut logs: Vec<PathBuf> = Vec::new();
+    for entry in entries {
+        let entry = entry.with_context(|| format!("cannot read {}", dir.display()))?;
+        let name = entry.file_name();
+        let is_log = name.to_str().is_some_and(|n| n.ends_with("-loop.md"));
+        if is_log && entry.file_type().is_ok_and(|t| t.is_file()) {
+            logs.push(entry.path());
+        }
+    }
+    // `<date>-<HHMMSS>` names sort by start.
+    logs.sort();
+    let now = format_timestamp(started_at);
+    for log in logs
+        .iter()
+        .filter(|l| l.as_path() != own && fs::symlink_metadata(marker(l)).is_err())
+    {
+        post_one_late(github, repo, log, &now)
+            .with_context(|| format!("{} stays unposted", log.display()))?;
+    }
+    Ok(())
+}
+
+fn post_one_late(github: &dyn GitHubBackend, repo: &str, log: &Path, now: &str) -> Result<()> {
+    let text = fs::read_to_string(log).with_context(|| format!("cannot read {}", log.display()))?;
+    if has_rows(&text) {
+        let start = start_of(log);
+        let heading = format!(
+            "Posted late by the loop started {now}: the loop that wrote it ended without its \
+             stop (Ctrl-C, a crash or a restart).\n\nLoop started {start}. Local file: `{}`",
+            log.display()
+        );
+        post_text(github, repo, &heading, &text, &start)?;
+    }
+    mark_posted(log)
+}
+
+/// Whether `text` has a table row: a line whose first cell is a number.
+fn has_rows(text: &str) -> bool {
+    text.lines().any(|line| {
+        line.starts_with('|')
+            && line
+                .split('|')
+                .nth(1)
+                .is_some_and(|n| n.trim().parse::<usize>().is_ok())
+    })
+}
+
+/// `2026-11-08T10:00:00Z` from a log named `2026-11-08-100000-loop.md`, else its file name.
+fn start_of(log: &Path) -> String {
+    let name = log
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let stem = name.strip_suffix("-loop.md").unwrap_or(&name);
+    match stem.rsplit_once('-') {
+        Some((date, time)) if time.len() == 6 && time.bytes().all(|b| b.is_ascii_digit()) => {
+            format!("{date}T{}:{}:{}Z", &time[..2], &time[2..4], &time[4..])
+        }
+        _ => name,
+    }
+}
+
+/// Posts `text` under `heading` to the open `loop-log` issue with the lowest number, creating
+/// one titled by the date of `start` when there is none.
+fn post_text(
+    github: &dyn GitHubBackend,
+    repo: &str,
+    heading: &str,
+    text: &str,
+    start: &str,
+) -> Result<()> {
     let found = github
         .issues_open_labeled(repo, LABEL)?
         .iter()
@@ -95,7 +201,7 @@ pub fn post(
     let number = match found {
         Some(number) => number,
         None => {
-            let date = start.split_once('T').map_or(start.as_str(), |(d, _)| d);
+            let date = start.split_once('T').map_or(start, |(d, _)| d);
             github.issue_create(
                 repo,
                 &IssueRequest {
@@ -106,7 +212,7 @@ pub fn post(
             )?
         }
     };
-    for comment in comments(&heading, &text) {
+    for comment in comments(heading, text) {
         github.issue_comment(repo, number, &comment)?;
     }
     Ok(())

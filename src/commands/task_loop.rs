@@ -3390,6 +3390,13 @@ fn run_loop(
         Some(notifier) => Some((notifier, Shown::load(&base_dir, warn)?)),
         None => None,
     };
+    // Before any work, the logs of earlier loops that ended without their stop (issue 594).
+    if let Err(e) = loop_log::post_late(github, &repo, &base_dir, &log, started_at) {
+        let _ = writeln!(
+            warn,
+            "warning: an earlier loop's log was not posted: {e:#}; the next loop tries again"
+        );
+    }
     let mut lp = Loop {
         config_dir,
         repo_root: opts.repo_root.clone(),
@@ -3452,13 +3459,25 @@ fn run_loop(
             Ok(stop) => stop.clone(),
             Err(e) => first_line(&format!("{e:#}")),
         };
-        if let Err(e) = loop_log::post(github, &lp.repo, &lp.log, started_at, &stop) {
-            // Never in place of the loop's own result: its exit code stays as it was.
-            let _ = writeln!(
-                warn,
-                "could not post the loop's log to GitHub: {e:#}; it stays at {}",
-                lp.log.display()
-            );
+        match loop_log::post(github, &lp.repo, &lp.log, started_at, &stop) {
+            // Never in place of the loop's own result: its exit code stays as it was. Unmarked,
+            // the next loop posts it late (issue 594).
+            Err(e) => {
+                let _ = writeln!(
+                    warn,
+                    "could not post the loop's log to GitHub: {e:#}; it stays at {}",
+                    lp.log.display()
+                );
+            }
+            Ok(()) => {
+                if let Err(e) = loop_log::mark_posted(&lp.log) {
+                    let _ = writeln!(
+                        warn,
+                        "warning: the loop's log was posted but not marked so: {e:#}; the next \
+                         loop posts it again"
+                    );
+                }
+            }
         }
     }
     // The request is the loop's to remove once it stops (decision 310), whatever stopped it.
