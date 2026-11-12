@@ -510,6 +510,8 @@ fn a_running_task_is_not_restarted() {
     started(&f);
     let mut task = record::read(&meta(&f).join("task.json")).unwrap();
     task.status = Status::Running;
+    // Another process still works on it (issue 597: a run that ended names none).
+    task.process = Some(record::Process::new(1, 0));
     record::write(&meta(&f), &task).unwrap();
     let b = playing(&f);
 

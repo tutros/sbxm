@@ -4011,7 +4011,8 @@ impl TaskSteps<'_> {
     /// mean the task is running. A task another process owns keeps its owner, and `task resume`
     /// refuses it while that process lives. The task's lock (issue 58) is held around the read
     /// and the write and given up before `task resume` takes its own (issue 409); a live holder
-    /// refuses with [`lock::InUse`], writing nothing.
+    /// refuses with [`lock::InUse`], writing nothing. Since issue 597 the phase's own lock clears
+    /// that claim when the phase returns, so this only finds one in a record written otherwise.
     fn release(&self, id: &str) -> Result<()> {
         let base_dir = GlobalConfig::load(self.config_dir)?.base_dir;
         let _lock = pipeline::lock_task(&base_dir, id, self.probe)?;
