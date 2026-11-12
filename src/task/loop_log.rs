@@ -7,7 +7,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 
 use crate::github::{GitHubBackend, IssueRequest};
 use crate::run::results::format_timestamp;
@@ -105,14 +105,12 @@ pub fn post(
     post_text(github, repo, &heading, &text, &start)
 }
 
-/// The most issues read when looking for the logs already on GitHub, as `task file-findings`
-/// reads them.
-const ISSUE_LIST_LIMIT: u32 = 1000;
-
 /// Posts, oldest first, every earlier loop log under `base_dir` with rows and no marker, each
 /// headed by the late note naming this loop's start, and marks it posted; one without rows is
-/// only marked, and one already on GitHub (a `loop-log` issue's comment names its file, as the
-/// stop of a loop from before the markers posted it; review M-1) is marked without a comment.
+/// only marked. A log the comments of a `loop-log` issue (open or closed) already name, as the
+/// stop of a loop from before the markers posted it (review M-1), gets only the rows none of
+/// those comments has, so a split log whose post stopped after some parts is completed and one
+/// fully posted is only marked (review M-3).
 /// `own` (this loop's log) is never posted here. Returns the errors, each naming its log: a log
 /// that fails stays unmarked for the next start and the later ones are still tried (review M-2).
 pub fn post_late(
@@ -163,10 +161,23 @@ pub fn post_late(
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
         let named = format!("{name}`");
-        let result = if on_github.iter().any(|body| body.contains(&named)) {
+        let earlier: Vec<&String> = on_github.iter().filter(|b| b.contains(&named)).collect();
+        let missing: Vec<&str> = rows(&text)
+            .into_iter()
+            .filter(|row| !earlier.iter().any(|b| b.lines().any(|l| l == *row)))
+            .collect();
+        let result = if missing.is_empty() {
             mark_posted(&log)
+        } else if earlier.is_empty() {
+            post_one_late(github, repo, &log, &text, &now, "")
         } else {
-            post_one_late(github, repo, &log, &text, &now)
+            let mut rest = header(&text).to_owned();
+            for row in missing {
+                rest.push_str(row);
+                rest.push('\n');
+            }
+            let note = ", the rows its earlier post left out";
+            post_one_late(github, repo, &log, &rest, &now, note)
         };
         if let Err(e) = result {
             failed.push(e.context(format!("{} stays unposted", log.display())));
@@ -200,49 +211,61 @@ fn unmarked_logs(base_dir: &Path, own: &Path) -> Result<Vec<PathBuf>> {
 
 /// Every comment on the repository's `loop-log` issues, open or closed.
 fn posted_comments(github: &dyn GitHubBackend, repo: &str) -> Result<Vec<String>> {
-    let issues = github.issues_all(repo, ISSUE_LIST_LIMIT)?;
-    if issues.len() >= ISSUE_LIST_LIMIT as usize {
-        bail!(
-            "the issue list has {} issues, the most read at once",
-            issues.len()
-        );
-    }
     let mut bodies = Vec::new();
-    for issue in issues
-        .iter()
-        .filter(|i| i.labels.iter().any(|l| l == LABEL))
-    {
+    for issue in github.issues_labeled(repo, LABEL)? {
         bodies.extend(github.issue_comment_bodies(repo, issue.number)?);
     }
     Ok(bodies)
 }
 
+/// Posts `text`, the log at `log` or the rows of it still missing on GitHub, headed by the late
+/// note and `note` after the file, then marks the log posted.
 fn post_one_late(
     github: &dyn GitHubBackend,
     repo: &str,
     log: &Path,
     text: &str,
     now: &str,
+    note: &str,
 ) -> Result<()> {
     let start = start_of(log);
     let heading = format!(
         "Posted late by the loop started {now}: the loop that wrote it ended without its \
-         stop (Ctrl-C, a crash or a restart).\n\nLoop started {start}. Local file: `{}`",
+         stop (Ctrl-C, a crash or a restart).\n\nLoop started {start}. Local file: `{}`{note}",
         log.display()
     );
     post_text(github, repo, &heading, text, &start)?;
     mark_posted(log)
 }
 
-/// Whether `text` has a table row: a line whose first cell is a number.
+/// Whether `text` has a table row.
 fn has_rows(text: &str) -> bool {
-    text.lines().any(|line| {
-        line.starts_with('|')
-            && line
-                .split('|')
-                .nth(1)
-                .is_some_and(|n| n.trim().parse::<usize>().is_ok())
-    })
+    !rows(text).is_empty()
+}
+
+/// The table rows of `text`: the lines whose first cell is a number.
+fn rows(text: &str) -> Vec<&str> {
+    text.lines()
+        .filter(|line| {
+            line.starts_with('|')
+                && line
+                    .split('|')
+                    .nth(1)
+                    .is_some_and(|n| n.trim().parse::<usize>().is_ok())
+        })
+        .collect()
+}
+
+/// `text` up to and including its table's separator line, as [`comments`] repeats it.
+fn header(text: &str) -> &str {
+    let mut end = 0;
+    for line in text.split_inclusive('\n') {
+        end += line.len();
+        if line.starts_with("|---") {
+            return &text[..end];
+        }
+    }
+    ""
 }
 
 /// `2026-11-08T10:00:00Z` from a log named `2026-11-08-100000-loop.md`, else its file name.
