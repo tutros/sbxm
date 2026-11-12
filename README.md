@@ -532,8 +532,9 @@ settings, the *contents* of referenced files, resources and sbxm's version. A se
 Sandbox names are `sbxm-<project>-<harness>`. A task's are `sbxm-task-issue-<n>-<harness>` for its worker and
 `sbxm-task-<id>-review-<harness>` for a reviewer (`<id>` is `issue-<n>` or `pr-<n>`). No sandbox name sbxm makes
 is longer than 63 characters (issue 556): a longer one (a long spec task's, say) keeps its start and its role
-(`-claude`, `-review-codex`) and shortens the id to its leading part and a 6-digit hash of the whole id, and `task.json`
-records the name used. When `sbx create` fails, the error (and `run.log`) carries what `sbx` said on stderr.
+(`-claude`, `-review-codex`) and shortens the id to its leading part, its own hash or number (a spec id's `-0b24b8`)
+and a 6-digit hash of the whole id (12 digits for an id with no hash of its own), and `task.json` records the name
+used. When `sbx create` fails, the error (and `run.log`) carries what `sbx` said on stderr.
 
 **What is it doing right now?**
 

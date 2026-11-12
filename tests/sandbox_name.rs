@@ -58,8 +58,9 @@ fn the_2026_11_10_reviewer_name_is_capped() {
     assert_eq!(format!("sbxm-task-{id}-review-codex").len(), 65);
     let name = record::sandbox_name(id, "review-codex");
     assert_eq!(name.len(), 63, "{name}");
+    assert!(name.starts_with("sbxm-task-spec-decision-316-"), "{name}");
     assert!(
-        name.starts_with("sbxm-task-spec-decision-316-medium-auto-"),
+        name.ends_with(&format!("-0b24b8-{}-review-codex", hash(id))),
         "{name}"
     );
     assert!(name.ends_with("-review-codex"), "{name}");
@@ -101,7 +102,7 @@ fn two_long_ids_sharing_their_first_50_characters_get_different_names() {
 #[test]
 fn a_cut_that_ends_on_a_hyphen_leaves_no_double_hyphen() {
     // `room` lands right after a `-` of the id.
-    let name = capped("s-", "ab-cdefghijklmnop", &"r".repeat(MAX_LEN - 2 - 3 - 7));
+    let name = capped("s-", "ab-cdefghijklmnop", &"r".repeat(MAX_LEN - 2 - 3 - 13));
     assert!(name.starts_with("s-ab-"), "{name}");
     assert!(!name.contains("--"), "{name}");
     assert!(name.len() <= MAX_LEN, "{name}");
@@ -183,4 +184,45 @@ fn only_the_exact_capped_form_counts_as_a_tasks_capped_name() {
     let name = record::sandbox_name(&other, "claude");
     assert_eq!(record::sandbox_role(&name, id), None, "{name}");
     assert_eq!(after_id(&name, "sbxm-task-", id), None, "{name}");
+}
+
+// ---- review M-1: a capped name keeps the id's own hash or number --------------------------
+
+/// Two valid spec ids (of real paths) whose whole-id hashes share their first 6 hex digits.
+const SAME_HASH6: [&str; 2] = [
+    "spec-ssssssssssssssssssssssssssssssssssssssss-0ecd72",
+    "spec-ssssssssssssssssssssssssssssssssssssssss-8dc4e8",
+];
+
+#[test]
+fn ids_whose_hashes_share_6_digits_keep_their_own_hash_and_differ() {
+    let [a, b] = SAME_HASH6;
+    assert_eq!(hash(a), hash(b));
+    let (na, nb) = (
+        record::sandbox_name(a, "claude"),
+        record::sandbox_name(b, "claude"),
+    );
+    assert_ne!(na, nb);
+    assert!(na.len() <= MAX_LEN && nb.len() <= MAX_LEN, "{na} {nb}");
+    assert!(na.contains("-0ecd72-") && na.ends_with("-claude"), "{na}");
+    assert!(nb.contains("-8dc4e8-") && nb.ends_with("-claude"), "{nb}");
+    assert_eq!(record::sandbox_role(&na, b), None);
+    assert_eq!(record::sandbox_role(&nb, a), None);
+    assert_eq!(record::sandbox_role(&na, a).as_deref(), Some("claude"));
+}
+
+#[test]
+fn an_id_without_its_own_hash_gets_a_longer_one() {
+    // A template's profile name ends in no hash: the capped name carries 12 hex digits.
+    let profile = "p".repeat(60);
+    let name = capped("sbxm-template-", &profile, "-claude");
+    assert!(name.len() <= MAX_LEN, "{name}");
+    let marker = name
+        .strip_suffix("-claude")
+        .and_then(|n| n.rsplit_once('-'))
+        .map(|(_, m)| m.to_owned())
+        .unwrap();
+    assert_eq!(marker.len(), 12, "{name}");
+    assert!(marker.starts_with(&hash(&profile)), "{name}");
+    assert_eq!(after_id(&name, "sbxm-template-", &profile), Some("-claude"));
 }
