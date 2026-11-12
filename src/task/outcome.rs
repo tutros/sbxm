@@ -5,9 +5,11 @@
 //! process boundary. The matching that finds a usage limit or a lapsed sign-in is done here, by
 //! the command that writes the file.
 //!
-//! The file is removed when the command names its task and written last, atomically (a temp file
-//! and a rename), so one left from an earlier run is never read as this run's. A command refused
-//! before its task has a folder writes none: nothing is created for it.
+//! The file is written last, atomically (a temp file and a rename), replacing an earlier run's;
+//! `task loop` removes it before it starts a child, so one left from an earlier run is never read
+//! as the child's. A command refused before its task has a folder creates none for it: a child of
+//! the loop writes its outcome where the loop said instead ([`LOOP_FILE_ENV`]). A command refused
+//! because a live command holds the task leaves the task's outcome to that command.
 
 use std::cell::RefCell;
 use std::fs;
@@ -244,21 +246,16 @@ pub struct Recorder {
 }
 
 impl Recorder {
-    /// The command works on task `id` under `base_dir`: an outcome left in its folder by an
-    /// earlier run is removed now, and this run's is written there as it ends. A folder that isn't
-    /// the task's own (a link, or one resolving elsewhere) gets none: the command refuses it.
+    /// The command works on task `id` under `base_dir`: its outcome is written in that task's
+    /// folder as it ends, replacing an earlier run's. A folder that isn't the task's own (a link,
+    /// or one resolving elsewhere) gets none: the command refuses it.
     pub fn at(&self, base_dir: &Path, id: &str) -> Result<()> {
         if !record::is_valid_id(id) {
             return Ok(());
         }
         let dir = record::task_dir(base_dir, id);
-        if dir.symlink_metadata().is_ok() {
-            if check_own_folder(base_dir, &dir).is_err() {
-                return Ok(());
-            }
-            if dir.is_dir() {
-                remove(&dir)?;
-            }
+        if dir.symlink_metadata().is_ok() && check_own_folder(base_dir, &dir).is_err() {
+            return Ok(());
         }
         *self.at.borrow_mut() = Some((base_dir.to_owned(), dir));
         Ok(())
@@ -306,18 +303,22 @@ pub fn recorded_with(
         .into_inner()
         .filter(|(base_dir, dir)| dir.is_dir() && check_own_folder(base_dir, dir).is_ok())
         .map(|(_, dir)| dir);
+    let mut text = out.text;
+    text.extend(warn.text);
+    let mut outcome = Outcome::of(&result, &String::from_utf8_lossy(&text));
+    let has_record = own
+        .as_ref()
+        .is_some_and(|dir| dir.join("task.json").is_file());
+    if outcome.end == Kind::Failed && !has_record {
+        outcome.end = Kind::Refused;
+    }
+    // A live command holds the task: its folder's outcome is that command's to write.
+    let own = own.filter(|_| outcome.end != Kind::Held);
     let file = match (&own, elsewhere) {
         (Some(dir), _) => path(dir),
         (None, Some(file)) => file,
         (None, None) => return result,
     };
-    let mut text = out.text;
-    text.extend(warn.text);
-    let mut outcome = Outcome::of(&result, &String::from_utf8_lossy(&text));
-    let has_record = own.is_some_and(|dir| dir.join("task.json").is_file());
-    if outcome.end == Kind::Failed && !has_record {
-        outcome.end = Kind::Refused;
-    }
     if let Err(e) = write_file(&file, &outcome) {
         let _ = writeln!(
             warn.inner,
@@ -482,19 +483,27 @@ mod tests {
     }
 
     #[test]
-    fn recorded_removes_a_stale_outcome_and_writes_none_without_a_folder() {
+    fn recorded_replaces_an_earlier_outcome_and_writes_none_without_a_folder() {
         let base = tempfile::tempdir().unwrap();
         let dir = record::task_dir(base.path(), "issue-3");
         fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("task.json"), "{}").unwrap();
         write(&dir, &Outcome::new(Kind::Ready, None, "")).unwrap();
-        let gone = record::task_dir(base.path(), "issue-4");
-        let r = recorded(&mut Vec::new(), &mut Vec::new(), |rec, _, _| {
+        recorded_with(None, &mut Vec::new(), &mut Vec::new(), |rec, _, _| {
             rec.at(base.path(), "issue-3")?;
-            assert_eq!(read(&dir), Read::Missing, "removed as the task is named");
+            Err(anyhow!("boom"))
+        })
+        .unwrap_err();
+        assert_eq!(
+            read(&dir),
+            Read::Outcome(Outcome::new(Kind::Failed, None, "boom"))
+        );
+        let gone = record::task_dir(base.path(), "issue-4");
+        recorded_with(None, &mut Vec::new(), &mut Vec::new(), |rec, _, _| {
             rec.at(base.path(), "issue-4")?;
             Err(anyhow!("refused"))
-        });
-        assert!(r.is_err());
+        })
+        .unwrap_err();
         assert!(!gone.exists(), "nothing created");
     }
 

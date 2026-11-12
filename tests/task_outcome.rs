@@ -173,3 +173,72 @@ fn a_command_that_fails_to_name_its_task_leaves_an_earlier_outcome_alone_only_fo
 
     assert_eq!(outcome::read(&other), Read::Outcome(kept));
 }
+
+// --- a command refused by the lock another live command holds ---
+
+/// Plants `issue-41`'s lock as a live command run by hand holds it.
+fn plant_live_lock(f: &Fixture) {
+    let mut held = serde_json::to_value(sbxm::task::record::Process::new(4242, 0)).unwrap();
+    held["token"] = "hand".into();
+    fs::write(dir(f).join("lock.json"), held.to_string()).unwrap();
+}
+
+#[test]
+fn a_command_refused_by_a_live_holder_leaves_the_tasks_outcome_to_the_holder() {
+    let f = config();
+    task_run(&f, &backend(&f)).unwrap();
+    let holders = Outcome::new(Kind::Ready, None, "");
+    plant_live_lock(&f);
+
+    let e = sbxm::commands::task_resume::run(
+        &f.env.config_dir(),
+        &sbxm::commands::task_resume::Options {
+            repo_root: f.env.tmp.path().join("target-repo"),
+            target: sbxm::commands::task_resume::Target::Issue(41),
+            rounds: None,
+            should_fix: false,
+            disk: Default::default(),
+            identity: None,
+            forget_ambiguous: false,
+        },
+        &backend(&f),
+        &github(),
+        &Probe,
+        &FakeHostRunner::default(),
+        &mut Vec::new(),
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+
+    assert!(e.is::<sbxm::task::lock::InUse>(), "{e:#}");
+    assert_eq!(outcome::read(&dir(&f)), Read::Outcome(holders));
+}
+
+#[test]
+fn a_held_outcome_goes_only_where_the_loop_said() {
+    let f = config();
+    task_run(&f, &backend(&f)).unwrap();
+    plant_live_lock(&f);
+    let elsewhere = f.env.tmp.path().join("issue-41.json");
+
+    let r = outcome::recorded_with(
+        Some(elsewhere.clone()),
+        &mut Vec::new(),
+        &mut Vec::new(),
+        |rec, _, _| {
+            rec.at(&f.env.base_dir(), "issue-41")?;
+            sbxm::task::pipeline::lock_task(&f.env.base_dir(), "issue-41", &Probe).map(drop)
+        },
+    );
+
+    assert!(r.is_err());
+    assert_eq!(
+        outcome::read(&dir(&f)),
+        Read::Outcome(Outcome::new(Kind::Ready, None, ""))
+    );
+    assert!(
+        matches!(outcome::read_file(&elsewhere), Read::Outcome(o) if o.end == Kind::Held),
+        "{:?}",
+        outcome::read_file(&elsewhere)
+    );
+}

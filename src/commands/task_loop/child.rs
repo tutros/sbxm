@@ -26,6 +26,9 @@ pub const STOP_FILE_ENV: &str = "SBXM_LOOP_STOP_FILE";
 /// How often a running child is looked at.
 const POLL: Duration = Duration::from_millis(200);
 
+/// How many polls the end of a child's error output is waited for once it exited.
+const READER_GRACE_POLLS: u32 = 10;
+
 /// How much of a child's error output is kept, for a child that wrote no outcome.
 const KEPT: usize = 16 * 1024;
 
@@ -98,7 +101,13 @@ impl Spawner for ChildSpawner {
             .with_context(|| format!("cannot start {}", self.exe.display()))?;
         let stderr = running.stderr.take();
         *self.running.lock().unwrap_or_else(|e| e.into_inner()) = Some(running);
-        let reader = std::thread::spawn(move || kept_tail(stderr));
+        // Read on a thread of its own: a process the child started may keep the pipe open after
+        // the child exits, so the child's end is never waited on through it.
+        let kept = Arc::new(Mutex::new(Vec::new()));
+        let reader = std::thread::spawn({
+            let kept = Arc::clone(&kept);
+            move || keep_tail(stderr, &kept)
+        });
         let status = loop {
             let polled = {
                 let mut guard = self.running.lock().unwrap_or_else(|e| e.into_inner());
@@ -122,7 +131,14 @@ impl Spawner for ChildSpawner {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .take();
-        let errors = reader.join().unwrap_or_default();
+        for _ in 0..READER_GRACE_POLLS {
+            if reader.is_finished() {
+                break;
+            }
+            std::thread::sleep(POLL);
+        }
+        let errors =
+            String::from_utf8_lossy(&kept.lock().unwrap_or_else(|e| e.into_inner())).into_owned();
         Ok(match status {
             Some(status) => Exit {
                 success: status.success(),
@@ -172,23 +188,23 @@ fn own_group(command: &mut Command) {
 #[cfg(not(any(unix, windows)))]
 fn own_group(_command: &mut Command) {}
 
-/// The last [`KEPT`] bytes read from `stream`, as text.
-fn kept_tail(stream: Option<impl Read>) -> String {
+/// Keeps the last [`KEPT`] bytes read from `stream` in `kept`, as they come.
+fn keep_tail(stream: Option<impl Read>, kept: &Mutex<Vec<u8>>) {
     let Some(mut stream) = stream else {
-        return String::new();
+        return;
     };
-    let mut kept: Vec<u8> = Vec::new();
     let mut buf = [0u8; 4096];
     while let Ok(n) = stream.read(&mut buf) {
         if n == 0 {
             break;
         }
+        let mut kept = kept.lock().unwrap_or_else(|e| e.into_inner());
         kept.extend_from_slice(&buf[..n]);
         if kept.len() > KEPT {
-            kept.drain(..kept.len() - KEPT);
+            let over = kept.len() - KEPT;
+            kept.drain(..over);
         }
     }
-    String::from_utf8_lossy(&kept).into_owned()
 }
 
 /// The last error a child printed (`Error: …` to the end), on one line, for a child that wrote no

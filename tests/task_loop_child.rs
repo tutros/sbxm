@@ -750,3 +750,32 @@ fn the_real_binary_refused_before_any_folder_writes_its_outcome_where_the_loop_s
         "read, then removed"
     );
 }
+
+/// A child whose own child keeps its error output open after it exits (as a daemon `sbx` starts
+/// might) is still seen to have ended.
+#[cfg(unix)]
+#[test]
+fn a_child_is_done_when_it_exits_whatever_keeps_its_output_open() {
+    let tmp = tempfile::tempdir().unwrap();
+    let spawner = ChildSpawner::new(PathBuf::from("/bin/sh"));
+    let child = Child {
+        args: vec![
+            "-c".into(),
+            "echo 'Error: gone' >&2; sleep 30 >&2 & exit 3".into(),
+        ],
+        dir: tmp.path().to_owned(),
+        env: Vec::new(),
+    };
+    let started = std::time::Instant::now();
+
+    let exit = spawner.run(&child, &|| {}).unwrap();
+
+    assert!(
+        started.elapsed() < Duration::from_secs(20),
+        "{:?}",
+        started.elapsed()
+    );
+    assert!(!exit.success);
+    assert_eq!(exit.how, "exited with code 3");
+    assert!(exit.errors.contains("Error: gone"), "{exit:?}");
+}
