@@ -4284,11 +4284,13 @@ impl TaskSteps<'_> {
         let _ = writeln!(out, "{label} {what} started");
         let ended = match self.spawner.run(&spec, &tick) {
             Ok(exit) => {
-                let mut how = exit.how;
-                if let Some(error) = child::last_error(&exit.errors) {
-                    how = format!("{how} (it said: {error})");
+                let mut ended = PhaseEnd::read(&dir, &elsewhere, &exit.how);
+                // Only quoted, for a child that couldn't say how it ended.
+                if let (PhaseEnd::Missing(why), Some(error)) =
+                    (&mut ended, child::last_error(&exit.errors))
+                {
+                    why.push_str(&format!(" (it said: {error})"));
                 }
-                let ended = PhaseEnd::read(&dir, &elsewhere, &how);
                 let _ = outcome::remove_file(&elsewhere);
                 ended
             }
