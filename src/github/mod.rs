@@ -227,6 +227,10 @@ pub trait GitHubBackend: Send + Sync {
     /// missed behind newer issues without it; an error rather than a partial list when there may
     /// be more than the listing's limit (review M-1 of issue 463).
     fn issues_open_labeled(&self, repo: &str, label: &str) -> Result<Vec<Issue>>;
+    /// Every issue labeled `label` in any state, open or closed, the label being the listing's own
+    /// filter as in [`Self::issues_open_labeled`], so the repository's other issues never cut it
+    /// short; an error when there may be more than the listing's limit (issue 594, review M-4).
+    fn issues_labeled(&self, repo: &str, label: &str) -> Result<Vec<Issue>>;
     fn issue(&self, repo: &str, number: u32) -> Result<IssueText>;
     fn pr(&self, repo: &str, number: u32) -> Result<PrInfo>;
     fn pr_merge_state(&self, repo: &str, number: u32) -> Result<PrMergeState>;

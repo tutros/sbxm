@@ -729,8 +729,12 @@ mod looped {
         .unwrap();
         let log = fs::read_dir(env.base_dir().join(".sbxm").join("loop-logs"))
             .ok()
-            .and_then(|mut d| d.next())
-            .and_then(|e| fs::read_to_string(e.ok()?.path()).ok())
+            // The log, not the marker of its post (issue 594).
+            .and_then(|d| {
+                d.filter_map(|e| e.ok().map(|e| e.path()))
+                    .find(|p| p.extension().is_some_and(|e| e == "md"))
+            })
+            .and_then(|p| fs::read_to_string(p).ok())
             .unwrap_or_default();
         (String::from_utf8(out).unwrap(), log)
     }
