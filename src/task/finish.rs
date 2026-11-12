@@ -14,8 +14,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, bail};
 
 use super::lifetime::{self, Removal};
-use super::lock::ProcessLock;
+use super::lock::TaskLock;
 use super::machine;
+use super::merged;
 use super::pipeline::{self, Prepared};
 use super::record::{self, OpenFinding, Process, ProcessProbe, Record};
 use super::repo;
@@ -47,7 +48,7 @@ pub struct RemovalPlan {
     pub forget: Option<String>,
     /// The task's mutation lock (issue 58), taken before its record was read and held until the
     /// plan is dropped; `None` when the task has no `.sbxm/tasks/<id>/` folder to lock.
-    lock: Option<ProcessLock>,
+    lock: Option<TaskLock>,
 }
 
 impl RemovalPlan {
@@ -1248,7 +1249,11 @@ pub fn discard_each(
 }
 
 /// Lists `plans` (and the `kept` lines after them), asks (unless `yes`), removes them and says
-/// what went and what stayed: the part [`discard_many`] and [`discard_each`] share.
+/// what went and what stayed: the part [`discard_many`] and [`discard_each`] share. Each task's
+/// text records are archived first, as `--merged` archives them (issue 595): the folder is worked
+/// out and named in the listing before the question, and a task whose archive fails is left
+/// entirely as it is, named in the error with its archive path. A task without a
+/// `.sbxm/tasks/<id>/` folder (what a failed start left behind) has no records to archive.
 fn remove_planned(
     plans: &[RemovalPlan],
     kept: &[String],
@@ -1259,9 +1264,23 @@ fn remove_planned(
     sleep: &dyn Fn(Duration),
 ) -> Result<()> {
     let ids: Vec<&str> = plans.iter().map(|p| p.id.as_str()).collect();
+    let archives = plans
+        .iter()
+        .map(|plan| {
+            let meta = record::task_dir(&plan.base_dir, &plan.id);
+            if !plan.folders.contains(&meta) {
+                return Ok(None);
+            }
+            merged::archive_target(&plan.base_dir, &plan.id).map(Some)
+        })
+        .collect::<Result<Vec<_>>>()?;
     let listing = plans
         .iter()
-        .map(RemovalPlan::listing)
+        .zip(&archives)
+        .map(|(plan, archive)| match archive {
+            Some(archive) => format!("{}\n{}", plan.listing(), merged::archive_line(archive)),
+            None => plan.listing(),
+        })
         .chain(kept.iter().cloned())
         .collect::<Vec<_>>()
         .join("\n");
@@ -1282,7 +1301,23 @@ fn remove_planned(
         }
     }
     let mut stayed = 0;
-    for plan in plans {
+    let mut unarchived = Vec::new();
+    for (plan, archive) in plans.iter().zip(&archives) {
+        if let Some(planned) = archive {
+            match merged::archive_task(&plan.base_dir, &plan.id) {
+                Ok(archive) => writeln!(out, "archived task {} to {}", plan.id, archive.display())?,
+                Err(e) => {
+                    let line = format!(
+                        "could not archive task {} to {}, so none of it was removed: {e:#}",
+                        plan.id,
+                        planned.display()
+                    );
+                    writeln!(out, "{line}")?;
+                    unarchived.push(line);
+                    continue;
+                }
+            }
+        }
         let report = remove_with_sleep(plan, backend, sleep);
         for line in &report.removed {
             writeln!(out, "removed {line}")?;
@@ -1291,6 +1326,18 @@ fn remove_planned(
             writeln!(out, "could not remove {line}")?;
         }
         stayed += report.stayed.len();
+    }
+    if !unarchived.is_empty() {
+        bail!(
+            "{} task(s) of {what} stayed whole{}:\n{}",
+            unarchived.len(),
+            if stayed > 0 {
+                format!(" and {stayed} other thing(s) stayed")
+            } else {
+                String::new()
+            },
+            unarchived.join("\n")
+        );
     }
     if stayed > 0 {
         bail!("{stayed} thing(s) of {what} stayed; fix that, then run `sbxm task rm` again");

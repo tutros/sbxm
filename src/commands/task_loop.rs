@@ -2859,9 +2859,9 @@ impl Loop<'_> {
     /// or a log-fix's row is written each time.
     fn log_row(&mut self, row: &Row, once: bool, warn: &mut dyn Write) -> Result<()> {
         let written = if once {
-            queue::append_row(&self.log, row)
+            queue::append_row(&self.log, &self.repo, row)
         } else {
-            queue::append_resolve_row(&self.log, row).map(|()| true)
+            queue::append_resolve_row(&self.log, &self.repo, row).map(|()| true)
         };
         match written {
             Ok(written) => self.logged |= written,
@@ -3391,10 +3391,26 @@ fn run_loop(
         None => None,
     };
     // Before any work, the logs of earlier loops that ended without their stop (issue 594).
-    for e in loop_log::post_late(github, &repo, &base_dir, &log, started_at) {
+    let late = loop_log::post_late(github, &repo, &base_dir, &log, started_at);
+    for e in late.failed {
         let _ = writeln!(
             warn,
             "warning: an earlier loop's log was not posted: {e:#}; the next loop tries again"
+        );
+    }
+    // Logs from before they named their repository (issue 602): which repository's they are is
+    // unknown, so none is published anywhere.
+    if !late.skipped.is_empty() {
+        let names: Vec<String> = late
+            .skipped
+            .iter()
+            .map(|l| l.display().to_string())
+            .collect();
+        let _ = writeln!(
+            warn,
+            "warning: earlier loop logs that name no repository were skipped, not posted to any \
+             repository, and marked so no loop looks at them again: {}",
+            names.join(", ")
         );
     }
     let mut lp = Loop {
@@ -3995,7 +4011,8 @@ impl TaskSteps<'_> {
     /// mean the task is running. A task another process owns keeps its owner, and `task resume`
     /// refuses it while that process lives. The task's lock (issue 58) is held around the read
     /// and the write and given up before `task resume` takes its own (issue 409); a live holder
-    /// refuses with [`lock::InUse`], writing nothing.
+    /// refuses with [`lock::InUse`], writing nothing. Since issue 597 the phase's own lock clears
+    /// that claim when the phase returns, so this only finds one in a record written otherwise.
     fn release(&self, id: &str) -> Result<()> {
         let base_dir = GlobalConfig::load(self.config_dir)?.base_dir;
         let _lock = pipeline::lock_task(&base_dir, id, self.probe)?;

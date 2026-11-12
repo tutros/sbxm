@@ -23,6 +23,12 @@ use sbxm::task::record::{self, Process, Stage, Status};
 /// As `review::with_header` saves it: the reviewer's line, a blank line, then the review.
 const REVIEW: &str = "Reviewer: codex (default)\n\nMust-fix findings: 0\n\nNothing found.\n";
 
+/// The `n`th numbered archive folder next to `archive` (issue 595).
+fn numbered(archive: &Path, n: u32) -> PathBuf {
+    let name = archive.file_name().unwrap().to_string_lossy();
+    archive.with_file_name(format!("{name}-{n}"))
+}
+
 fn meta(f: &Fixture) -> std::path::PathBuf {
     record::task_dir(&f.env.base_dir(), "issue-41")
 }
@@ -210,9 +216,10 @@ fn archiving_a_task_with_no_optional_files_copies_what_it_has() {
 }
 
 /// Issue 202's M-2: a second archive of the same task id (a spec task re-run from the same file
-/// gets the same deterministic id) must not touch or mix into the first archive.
+/// gets the same deterministic id) must not touch or mix into the first archive; since issue 595
+/// it goes under the next numbered name instead of being refused.
 #[test]
-fn archiving_refuses_when_the_archive_directory_already_exists() {
+fn archiving_never_touches_an_archive_directory_that_already_exists() {
     let f = fixture();
     finished_task(&f);
     let archive = archive_task(&f.env.base_dir(), "issue-41").unwrap();
@@ -222,12 +229,10 @@ fn archiving_refuses_when_the_archive_directory_already_exists() {
     fs::write(meta(&f).join("result.md"), "a different result\n").unwrap();
     fs::write(meta(&f).join("gates.log"), "gate output\n").unwrap();
 
-    let err = archive_task(&f.env.base_dir(), "issue-41").unwrap_err();
+    let second = archive_task(&f.env.base_dir(), "issue-41").unwrap();
 
-    assert!(
-        format!("{err:#}").contains(&archive.display().to_string()),
-        "{err:#}"
-    );
+    assert_eq!(second, numbered(&archive, 2));
+    assert!(second.join("gates.log").is_file());
     assert_eq!(
         fs::read_to_string(archive.join("result.md")).unwrap(),
         first_result,
@@ -239,10 +244,10 @@ fn archiving_refuses_when_the_archive_directory_already_exists() {
     );
 }
 
-/// Issue 202's M-2: an archive destination that is a symlink or junction is refused without
-/// following it, so nothing is ever written through it.
+/// Issue 202's M-2: an archive destination that is a symlink or junction is passed over without
+/// following it (issue 595: for the next numbered name), so nothing is ever written through it.
 #[test]
-fn archiving_refuses_a_symlinked_archive_destination() {
+fn archiving_passes_over_a_symlinked_archive_destination() {
     let f = fixture();
     finished_task(&f);
     let archive = archive_dir(&f.env.base_dir(), "issue-41");
@@ -251,12 +256,9 @@ fn archiving_refuses_a_symlinked_archive_destination() {
     fs::create_dir_all(&elsewhere).unwrap();
     dir_link(&archive, &elsewhere);
 
-    let err = archive_task(&f.env.base_dir(), "issue-41").unwrap_err();
+    let written = archive_task(&f.env.base_dir(), "issue-41").unwrap();
 
-    assert!(
-        format!("{err:#}").contains(&archive.display().to_string()),
-        "{err:#}"
-    );
+    assert_eq!(written, numbered(&archive, 2));
     assert!(
         fs::read_dir(&elsewhere).unwrap().next().is_none(),
         "something was written through the symlink"
@@ -968,19 +970,25 @@ fn a_rerun_after_a_failed_removal_reuses_its_own_identical_archive() {
 }
 
 /// The other side of the same rule: an archive that differs from the task's records (a later run
-/// of a task with the same id) is still never overwritten.
+/// of a task with the same id) is still never overwritten; the records go under the next
+/// numbered name (issue 595).
 #[test]
-fn archiving_still_refuses_an_archive_that_differs_from_the_task() {
+fn archiving_never_overwrites_an_archive_that_differs_from_the_task() {
     let f = fixture();
     finished_task(&f);
     let archive = archive_task(&f.env.base_dir(), "issue-41").unwrap();
     fs::write(meta(&f).join("result.md"), "a different result\n").unwrap();
 
-    let err = archive_task(&f.env.base_dir(), "issue-41").unwrap_err();
+    let second = archive_task(&f.env.base_dir(), "issue-41").unwrap();
 
-    assert!(
-        format!("{err:#}").contains(&archive.display().to_string()),
-        "{err:#}"
+    assert_eq!(second, numbered(&archive, 2));
+    assert_eq!(
+        fs::read_to_string(second.join("result.md")).unwrap(),
+        "a different result\n"
+    );
+    assert_ne!(
+        fs::read_to_string(archive.join("result.md")).unwrap(),
+        "a different result\n"
     );
 }
 
@@ -1054,7 +1062,7 @@ fn a_rerun_reuses_the_archive_when_the_folder_lost_every_record() {
 }
 
 #[test]
-fn a_rerun_refuses_an_archive_whose_record_differs_by_one_byte() {
+fn a_rerun_passes_over_an_archive_whose_record_differs_by_one_byte() {
     let f = fixture();
     finished_task(&f);
     fs::write(meta(&f).join("gates.log"), "gate output\n").unwrap();
@@ -1062,12 +1070,9 @@ fn a_rerun_refuses_an_archive_whose_record_differs_by_one_byte() {
     fs::remove_file(meta(&f).join("result.md")).unwrap();
     fs::write(meta(&f).join("gates.log"), "gate outpuT\n").unwrap();
 
-    let err = archive_task(&f.env.base_dir(), "issue-41").unwrap_err();
+    let second = archive_task(&f.env.base_dir(), "issue-41").unwrap();
 
-    assert!(
-        format!("{err:#}").contains(&archive.display().to_string()),
-        "{err:#}"
-    );
+    assert_eq!(second, numbered(&archive, 2));
     assert_eq!(
         fs::read_to_string(archive.join("gates.log")).unwrap(),
         "gate output\n"
@@ -1075,19 +1080,17 @@ fn a_rerun_refuses_an_archive_whose_record_differs_by_one_byte() {
 }
 
 #[test]
-fn a_rerun_refuses_an_archive_that_lacks_a_record_the_folder_has() {
+fn a_rerun_passes_over_an_archive_that_lacks_a_record_the_folder_has() {
     let f = fixture();
     finished_task(&f);
     let archive = archive_task(&f.env.base_dir(), "issue-41").unwrap();
     fs::remove_file(meta(&f).join("result.md")).unwrap();
     fs::write(meta(&f).join("gates.log"), "gate output\n").unwrap();
 
-    let err = archive_task(&f.env.base_dir(), "issue-41").unwrap_err();
+    let second = archive_task(&f.env.base_dir(), "issue-41").unwrap();
 
-    assert!(
-        format!("{err:#}").contains(&archive.display().to_string()),
-        "{err:#}"
-    );
+    assert_eq!(second, numbered(&archive, 2));
+    assert!(second.join("gates.log").is_file());
     assert!(!archive.join("gates.log").exists());
 }
 

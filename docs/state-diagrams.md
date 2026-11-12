@@ -159,8 +159,9 @@ flowchart TD
   FN -- PR task --> PRREF([refused: a PR task has no finish])
   ANY([any non-running task]) --> RM{task rm}
   RM -- unfetched spec result --> RMREF([refused])
-  RM --> GONE([sandboxes, secrets, folders removed])
-  MERGED([task rm --merged]) --> ARCH[archive text records to<br/>.sbxm/task-archive/id] --> GONE
+  RM --> ARCH[archive text records to<br/>.sbxm/task-archive/id, or id-2, id-3...]
+  ARCH --> GONE([sandboxes, secrets, folders removed])
+  MERGED([task rm --merged]) --> ARCH
 ```
 
 ## 6. Comparison run (`sbxm run <config>`)

@@ -195,7 +195,9 @@ pub fn work_for(base: &Path, file: &LockFile) -> anyhow::Result<Work> {
             .find(|s| s.stage == Stage::Finished)
             .and_then(|s| parse_timestamp(&s.at));
         let since = matches!((finished_at, started), (Some(at), Some(from)) if at >= from);
-        if since && marked {
+        // One task can have several archives (`<id>`, `<id>-2`, ..., issue 595): it is done once,
+        // checked after the window and the marker so an archive outside them never hides it.
+        if since && marked && !out.done.contains(&rec.id) {
             out.done.push(rec.id.clone());
             out.titles.insert(rec.id.clone(), rec.title.clone());
         }

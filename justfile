@@ -57,11 +57,14 @@ purge project:
 show project="" harness="claude":
     {{sbxm}} config show {{project}} --harness {{harness}} --kits
 
-# Create one project with a sandbox for every harness, then list them.
+# Create one project with a sandbox for every harness, stopping each right after it is created (one running sandbox at a time, decision 304), then list them.
 demo project="just-demo":
     {{sbxm}} new {{project}} --harness claude
+    {{sbxm}} stop {{project}} --harness claude
     {{sbxm}} new {{project}} --harness codex
+    {{sbxm}} stop {{project}} --harness codex
     {{sbxm}} new {{project}} --harness pi
+    {{sbxm}} stop {{project}} --harness pi
     {{sbxm}} list
 
 # ---- Running tasks -----------------------------------------------------------
@@ -74,6 +77,35 @@ demo project="just-demo":
 task-loop *flags:
     & $(if ($env:SBXM_TASK_BIN) { $env:SBXM_TASK_BIN } else { 'sbxm' }) task loop {{flags}}
 
+# Show every task at once, e.g. `just status --watch`.
+status *flags:
+    & $(if ($env:SBXM_TASK_BIN) { $env:SBXM_TASK_BIN } else { 'sbxm' }) status {{flags}}
+
+# Print one task's run.log, e.g. `just logs --issue 574` (also `--pr N`, `--spec FILE`).
+logs *flags:
+    & $(if ($env:SBXM_TASK_BIN) { $env:SBXM_TASK_BIN } else { 'sbxm' }) task logs {{flags}}
+
+# Queue a job for the loop, e.g. `just queue run --issue 594` or `just queue spec --file NAME`.
+queue *args:
+    & $(if ($env:SBXM_TASK_BIN) { $env:SBXM_TASK_BIN } else { 'sbxm' }) task queue {{args}}
+
+# Register the scheduled task `sbxm task loop`, which runs the loop at logon (decision 310; scripts/loop-trigger.ps1).
+loop-register:
+    ./scripts/loop-trigger.ps1 -Register
+
+# Start the registered loop now, outside any terminal.
+loop-start:
+    Start-ScheduledTask -TaskName 'sbxm task loop'
+
+# Stop the loop: after its current task, or within 5 minutes while it waits.
+loop-stop:
+    & $(if ($env:SBXM_TASK_BIN) { $env:SBXM_TASK_BIN } else { 'sbxm' }) task loop --stop
+
+# Rebuild both warm templates of a profile from this checkout, claude then codex, one at a time.
+templates profile="sbxm-dev":
+    & $(if ($env:SBXM_TASK_BIN) { $env:SBXM_TASK_BIN } else { 'sbxm' }) template build {{profile}} --harness claude --warm .
+    & $(if ($env:SBXM_TASK_BIN) { $env:SBXM_TASK_BIN } else { 'sbxm' }) template build {{profile}} --harness codex --warm .
+
 # ---- Developing sbxm --------------------------------------------------------
 
 # Build the debug binary.
@@ -84,7 +116,7 @@ build:
 test:
     cargo test
 
-# Pester tests for scripts/deploy-profiles.ps1 (needs Pester 5: `Install-Module Pester -MinimumVersion 5 -Scope CurrentUser`).
+# Pester tests for the scripts in scripts/ (needs Pester 5: `Install-Module Pester -MinimumVersion 5 -Scope CurrentUser`).
 script-test:
     Import-Module Pester -MinimumVersion 5.0.0; Invoke-Pester scripts/tests -Output Minimal -CI
 
@@ -102,6 +134,10 @@ check:
 # Run the tests against the real sbx (needs `sbx login` and a base dir not on C:).
 real-test base_dir='H:\sbxm-it':
     $env:SBXM_REAL_BASE_DIR = '{{base_dir}}'; cargo test --test real_sbx -- --ignored
+
+# Run the tests against the real Docker Cloud Sandboxes. Costs money; needs `sbx` logged in to the cloud (see tests/real_sbx_cloud.rs).
+real-test-cloud base_dir='H:\sbxm-it':
+    $env:SBXM_REAL_CLOUD = '1'; $env:SBXM_REAL_BASE_DIR = '{{base_dir}}'; cargo test --test real_sbx_cloud -- --ignored
 
 # Compare the pinned Pi and Antigravity kit tags in src/harness.rs with the newest dated tag on Docker Hub (M2a P8). Changes nothing; re-pinning is a manual step.
 kit-tags:

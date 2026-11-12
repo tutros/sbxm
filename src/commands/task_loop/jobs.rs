@@ -240,7 +240,7 @@ impl Loop<'_> {
         if let Some(id) = result.task.as_deref() {
             self.notify_question(id, out, warn)?;
         }
-        if let Err(e) = queue::append_job_row(&self.log, label, &row) {
+        if let Err(e) = queue::append_job_row(&self.log, &self.repo, label, &row) {
             self.warn_once(
                 warn,
                 format!("{e:#}; the loop goes on without that log row"),
