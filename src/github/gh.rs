@@ -44,7 +44,8 @@ impl GhRunner for Process {
     }
 }
 
-/// How many issues [`GitHubBackend::issues_open_labeled`] lists at most; a listing that reaches it
+/// How many issues [`GitHubBackend::issues_open_labeled`] and [`GitHubBackend::issues_labeled`]
+/// list at most; a listing that reaches it
 /// may have been cut off, so it is an error.
 pub const LABELED_LIMIT: u32 = 1000;
 
@@ -428,6 +429,17 @@ impl GitHubBackend for GhBackend {
                 "{repo} has {LABELED_LIMIT} or more open issues labeled `{label}`; `gh issue list` \
                  lists at most {LABELED_LIMIT}, so the lowest-numbered can't be told; close the \
                  extra ones"
+            );
+        }
+        Ok(issues)
+    }
+
+    fn issues_labeled(&self, repo: &str, label: &str) -> Result<Vec<Issue>> {
+        let issues = self.list_issues_with(repo, "all", &["--label", label], LABELED_LIMIT)?;
+        if issues.len() >= LABELED_LIMIT as usize {
+            bail!(
+                "{repo} has {LABELED_LIMIT} or more issues labeled `{label}`; `gh issue list` lists \
+                 at most {LABELED_LIMIT}, so some may be missed; remove the label from the old ones"
             );
         }
         Ok(issues)

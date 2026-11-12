@@ -103,7 +103,11 @@ Decisions 316: `sdlc/decisions/` (issue #460's planning interview).
 
 Decision 317: `sdlc/decisions/` (issue #561's planning interview; evidence from #390).
 
-## Round 19: milestone 5 plan choices (2026-11-11)
+## Round 19: the 2026-11-11 retro (2026-11-11)
+
+Decisions 318-320: `sdlc/decisions/` (`sdlc/retros/2026-11-11-retro.md`).
+
+## Round 20: milestone 5 plan choices (2026-11-11)
 
 Decision 321: `sdlc/decisions/` (issue #561, `sdlc/milestone-5.md`).
 

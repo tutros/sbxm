@@ -1714,9 +1714,12 @@ fn a_rerun_after_a_kill_runs_no_task_twice_and_logs_none_twice() {
     run.result.unwrap();
     assert_eq!(runs(&again), ["run 4"]);
     // Each loop has its own log (decision 305): #3 in the first's, #4 in the second's.
+    // The logs only, not the markers of the posted ones (issue 594).
     let logs: Vec<String> = fs::read_dir(f.log().parent().unwrap())
         .unwrap()
-        .map(|e| fs::read_to_string(e.unwrap().path()).unwrap())
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.extension().is_some_and(|e| e == "md"))
+        .map(|p| fs::read_to_string(p).unwrap())
         .collect();
     assert_eq!(logs.len(), 2);
     let all = logs.concat();

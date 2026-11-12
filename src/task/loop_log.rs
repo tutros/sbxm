@@ -1,6 +1,8 @@
 //! Where `task loop`'s log lives and how it reaches GitHub (issue 463, decision 305): one file
 //! per loop under `<base>/.sbxm/loop-logs/`, never in a checkout, posted at the stop as a comment
 //! on the open issue labeled `loop-log`, split between rows when it is longer than one comment.
+//! A posted log gets a marker next to it; at its start a loop posts, late, every earlier log
+//! with rows that has none, so the log of a loop ended without its stop isn't lost (issue 594).
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -72,8 +74,21 @@ pub fn comments(heading: &str, log: &str) -> Vec<String> {
         .collect()
 }
 
+/// The marker of a log that was posted, or had no rows to post (issue 594):
+/// `<date>-<HHMMSS>-loop.posted` next to the log.
+pub fn marker(log: &Path) -> PathBuf {
+    log.with_extension("posted")
+}
+
+/// Records that `log` needs no post any more.
+pub fn mark_posted(log: &Path) -> Result<()> {
+    let marker = marker(log);
+    fs::write(&marker, "posted\n").with_context(|| format!("cannot write {}", marker.display()))
+}
+
 /// Posts the log at `log` to the open `loop-log` issue with the lowest number, creating one
-/// titled by the loop's start date when there is none. Nothing is retried.
+/// titled by the loop's start date when there is none. Nothing is retried; the caller marks it
+/// posted ([`mark_posted`]).
 pub fn post(
     github: &dyn GitHubBackend,
     repo: &str,
@@ -87,6 +102,196 @@ pub fn post(
         "Loop started {start}, stopped: {stop}. Local file: `{}`",
         log.display()
     );
+    post_text(github, repo, &heading, &text, &start)
+}
+
+/// Posts, oldest first, every earlier loop log under `base_dir` with rows and no marker, each
+/// headed by the late note naming this loop's start, and marks it posted; one without rows is
+/// only marked. A log the comments of a `loop-log` issue (open or closed) already name, as the
+/// stop of a loop from before the markers posted it (review M-1), gets only the rows none of
+/// those comments has, so a split log whose post stopped after some parts is completed and one
+/// fully posted is only marked (review M-3).
+/// `own` (this loop's log) is never posted here. Returns the errors, each naming its log: a log
+/// that fails stays unmarked for the next start and the later ones are still tried (review M-2).
+pub fn post_late(
+    github: &dyn GitHubBackend,
+    repo: &str,
+    base_dir: &Path,
+    own: &Path,
+    started_at: u64,
+) -> Vec<anyhow::Error> {
+    let mut failed = Vec::new();
+    let logs = match unmarked_logs(base_dir, own) {
+        Ok(logs) => logs,
+        Err(e) => return vec![e],
+    };
+    // The logs with rows, read before anything is asked of GitHub.
+    let mut due: Vec<(PathBuf, String)> = Vec::new();
+    for log in logs {
+        let read = fs::read_to_string(&log)
+            .with_context(|| format!("cannot read {}", log.display()))
+            .and_then(|text| {
+                if has_rows(&text) {
+                    due.push((log.clone(), text));
+                    Ok(())
+                } else {
+                    mark_posted(&log)
+                }
+            });
+        if let Err(e) = read {
+            failed.push(e.context(format!("{} stays unposted", log.display())));
+        }
+    }
+    if due.is_empty() {
+        return failed;
+    }
+    let on_github = match posted_comments(github, repo) {
+        Ok(bodies) => bodies,
+        Err(e) => {
+            failed.push(e.context(
+                "cannot tell which earlier logs are already on GitHub, so none was posted",
+            ));
+            return failed;
+        }
+    };
+    let now = format_timestamp(started_at);
+    for (log, text) in due {
+        let name = log
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let named = format!("{name}`");
+        let earlier: Vec<&String> = on_github.iter().filter(|b| b.contains(&named)).collect();
+        let missing: Vec<&str> = rows(&text)
+            .into_iter()
+            .filter(|row| !earlier.iter().any(|b| b.lines().any(|l| l == *row)))
+            .collect();
+        let result = if missing.is_empty() {
+            mark_posted(&log)
+        } else if earlier.is_empty() {
+            post_one_late(github, repo, &log, &text, &now, "")
+        } else {
+            let mut rest = header(&text).to_owned();
+            for row in missing {
+                rest.push_str(row);
+                rest.push('\n');
+            }
+            let note = ", the rows its earlier post left out";
+            post_one_late(github, repo, &log, &rest, &now, note)
+        };
+        if let Err(e) = result {
+            failed.push(e.context(format!("{} stays unposted", log.display())));
+        }
+    }
+    failed
+}
+
+/// The earlier logs under `base_dir` without a marker, oldest first, `own` left out.
+fn unmarked_logs(base_dir: &Path, own: &Path) -> Result<Vec<PathBuf>> {
+    let dir = base_dir.join(".sbxm").join("loop-logs");
+    let entries = match fs::read_dir(&dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e).with_context(|| format!("cannot read {}", dir.display())),
+    };
+    let mut logs: Vec<PathBuf> = Vec::new();
+    for entry in entries {
+        let entry = entry.with_context(|| format!("cannot read {}", dir.display()))?;
+        let name = entry.file_name();
+        let is_log = name.to_str().is_some_and(|n| n.ends_with("-loop.md"));
+        if is_log && entry.file_type().is_ok_and(|t| t.is_file()) {
+            logs.push(entry.path());
+        }
+    }
+    // `<date>-<HHMMSS>` names sort by start.
+    logs.sort();
+    logs.retain(|l| l.as_path() != own && fs::symlink_metadata(marker(l)).is_err());
+    Ok(logs)
+}
+
+/// Every comment on the repository's `loop-log` issues, open or closed.
+fn posted_comments(github: &dyn GitHubBackend, repo: &str) -> Result<Vec<String>> {
+    let mut bodies = Vec::new();
+    for issue in github.issues_labeled(repo, LABEL)? {
+        bodies.extend(github.issue_comment_bodies(repo, issue.number)?);
+    }
+    Ok(bodies)
+}
+
+/// Posts `text`, the log at `log` or the rows of it still missing on GitHub, headed by the late
+/// note and `note` after the file, then marks the log posted.
+fn post_one_late(
+    github: &dyn GitHubBackend,
+    repo: &str,
+    log: &Path,
+    text: &str,
+    now: &str,
+    note: &str,
+) -> Result<()> {
+    let start = start_of(log);
+    let heading = format!(
+        "Posted late by the loop started {now}: the loop that wrote it ended without its \
+         stop (Ctrl-C, a crash or a restart).\n\nLoop started {start}. Local file: `{}`{note}",
+        log.display()
+    );
+    post_text(github, repo, &heading, text, &start)?;
+    mark_posted(log)
+}
+
+/// Whether `text` has a table row.
+fn has_rows(text: &str) -> bool {
+    !rows(text).is_empty()
+}
+
+/// The table rows of `text`: the lines whose first cell is a number.
+fn rows(text: &str) -> Vec<&str> {
+    text.lines()
+        .filter(|line| {
+            line.starts_with('|')
+                && line
+                    .split('|')
+                    .nth(1)
+                    .is_some_and(|n| n.trim().parse::<usize>().is_ok())
+        })
+        .collect()
+}
+
+/// `text` up to and including its table's separator line, as [`comments`] repeats it.
+fn header(text: &str) -> &str {
+    let mut end = 0;
+    for line in text.split_inclusive('\n') {
+        end += line.len();
+        if line.starts_with("|---") {
+            return &text[..end];
+        }
+    }
+    ""
+}
+
+/// `2026-11-08T10:00:00Z` from a log named `2026-11-08-100000-loop.md`, else its file name.
+fn start_of(log: &Path) -> String {
+    let name = log
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let stem = name.strip_suffix("-loop.md").unwrap_or(&name);
+    match stem.rsplit_once('-') {
+        Some((date, time)) if time.len() == 6 && time.bytes().all(|b| b.is_ascii_digit()) => {
+            format!("{date}T{}:{}:{}Z", &time[..2], &time[2..4], &time[4..])
+        }
+        _ => name,
+    }
+}
+
+/// Posts `text` under `heading` to the open `loop-log` issue with the lowest number, creating
+/// one titled by the date of `start` when there is none.
+fn post_text(
+    github: &dyn GitHubBackend,
+    repo: &str,
+    heading: &str,
+    text: &str,
+    start: &str,
+) -> Result<()> {
     let found = github
         .issues_open_labeled(repo, LABEL)?
         .iter()
@@ -95,7 +300,7 @@ pub fn post(
     let number = match found {
         Some(number) => number,
         None => {
-            let date = start.split_once('T').map_or(start.as_str(), |(d, _)| d);
+            let date = start.split_once('T').map_or(start, |(d, _)| d);
             github.issue_create(
                 repo,
                 &IssueRequest {
@@ -106,7 +311,7 @@ pub fn post(
             )?
         }
     };
-    for comment in comments(&heading, &text) {
+    for comment in comments(heading, text) {
         github.issue_comment(repo, number, &comment)?;
     }
     Ok(())
