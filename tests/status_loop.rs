@@ -445,6 +445,49 @@ fn an_archived_task_counts_once_and_only_when_marked_and_finished_in_the_window(
     assert_eq!(work.current, None);
 }
 
+// ---- Numbered archives (issue 595, review M-1): one task archived twice counts once ----
+
+/// A removal that failed after archiving, then a retry: `task rm` tees its output into the
+/// task's `run.log`, so the retry's archive differs and goes under `<id>-2`, with the same
+/// `task.json`.
+#[test]
+fn two_numbered_archives_of_one_finished_task_count_as_one_done_task() {
+    let base = TestEnv::new();
+    let b = base.base_dir();
+    save(&b, &finished(3, T0 - 10, true));
+    merged::archive_task(&b, "issue-3").unwrap();
+    fs::write(
+        record::task_dir(&b, "issue-3").join("run.log"),
+        "removal output\n",
+    )
+    .unwrap();
+    let second = merged::archive_task(&b, "issue-3").unwrap();
+    assert_ne!(second, merged::archive_dir(&b, "issue-3"));
+    fs::remove_dir_all(record::task_dir(&b, "issue-3")).unwrap();
+
+    let work = looping::work(&b, &loop_process()).unwrap();
+
+    assert_eq!(work.done, ["issue-3"]);
+}
+
+/// An older archive of the same id, finished before the loop started, doesn't hide the
+/// numbered archive of the run the loop finished in its window.
+#[test]
+fn an_older_archive_outside_the_window_does_not_hide_a_numbered_one_inside_it() {
+    let base = TestEnv::new();
+    let b = base.base_dir();
+    save(&b, &finished(3, LOOP_START - 5, true));
+    archive_and_remove(&b, "issue-3");
+    save(&b, &finished(3, T0 - 10, true));
+    let second = merged::archive_task(&b, "issue-3").unwrap();
+    assert_ne!(second, merged::archive_dir(&b, "issue-3"));
+    fs::remove_dir_all(record::task_dir(&b, "issue-3")).unwrap();
+
+    let work = looping::work(&b, &loop_process()).unwrap();
+
+    assert_eq!(work.done, ["issue-3"]);
+}
+
 /// An archived task is never the running one, even if its record says running with the lock's
 /// process: only the active records say what runs now.
 #[test]
