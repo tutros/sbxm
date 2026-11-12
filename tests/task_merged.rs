@@ -174,7 +174,10 @@ fn pr_review_task(f: &Fixture, number: u32) {
         .with_pr(pr.clone())
         .with_issue_text(issue_text(4));
     let source = source(f);
-    pipeline::prepare_pr(&ctx(f, &source, &backend, &github), &pr).unwrap();
+    let mut prepared = pipeline::prepare_pr(&ctx(f, &source, &backend, &github), &pr).unwrap();
+    // Its process is still working on it, or was cut off: not a run that ended (issue 597).
+    prepared.lock = None;
+    record::write(&prepared.meta, &prepared.record).unwrap();
 }
 
 #[test]
