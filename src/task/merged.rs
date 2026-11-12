@@ -28,6 +28,8 @@ pub struct Candidate {
     /// branch out; these are the two commands that do it by hand. `None` for an issue or
     /// PR-review task.
     pub local_cleanup: Option<[String; 2]>,
+    /// Where its text records are archived before anything goes ([`archive_target`], issue 595).
+    pub archive: PathBuf,
 }
 
 /// The two git commands that clean up a spec task's result in the user's own checkout (decision
@@ -88,6 +90,7 @@ impl MergedPlan {
             for line in c.plan.listing().lines() {
                 lines.push(format!("  {line}"));
             }
+            lines.push(format!("  {}", archive_line(&c.archive)));
             if let Some(cleanup) = &c.local_cleanup {
                 for line in cleanup_lines(cleanup) {
                     lines.push(format!("  {line}"));
@@ -128,12 +131,15 @@ fn add_merged(
     probe: &dyn ProcessProbe,
     out: &mut MergedPlan,
 ) {
-    match finish::plan_removal_forgetting(base_dir, id, probe, out.forget_ambiguous) {
-        Ok(plan) => out.candidates.push(Candidate {
+    let planned = finish::plan_removal_forgetting(base_dir, id, probe, out.forget_ambiguous)
+        .and_then(|plan| Ok((plan, archive_target(base_dir, id)?)));
+    match planned {
+        Ok((plan, archive)) => out.candidates.push(Candidate {
             id: id.to_owned(),
             reason,
             plan,
             local_cleanup,
+            archive,
         }),
         Err(e) => out.left_alone.push(LeftAlone {
             id: id.to_owned(),
@@ -477,6 +483,15 @@ pub fn archive_root(base_dir: &Path) -> PathBuf {
     base_dir.join(".sbxm").join("task-archive")
 }
 
+/// The listing's line naming the folder a task's text records are archived to (issue 595), for
+/// every `task rm`: indented like [`RemovalPlan::listing`]'s own lines.
+pub fn archive_line(archive: &Path) -> String {
+    format!(
+        "  archive to {} (its text records, copied before anything is removed)",
+        archive.display()
+    )
+}
+
 /// The names of a task's text records worth archiving (decision 195 point 2): `review.md`, every
 /// `review-<n>.md`, `result.md`, `run.log`, `gates.log` and `task.json`. Never transcripts, clones
 /// or `repo.git`: those stay with whatever else `task rm` deletes.
@@ -497,30 +512,73 @@ fn archive_names(meta: &Path) -> Vec<String> {
 }
 
 /// `dir`, a folder under `base_dir`, checked with [`finish::check_own_folder`] if it exists
-/// (never followed if it is a link, refused if its real place is elsewhere), created if it
-/// doesn't.
-fn own_folder_or_create(base_dir: &Path, dir: &Path) -> Result<()> {
+/// (never followed if it is a link, refused if its real place is elsewhere); `false` if it
+/// doesn't exist yet. Writes nothing.
+fn own_folder_exists(base_dir: &Path, dir: &Path) -> Result<bool> {
     match fs::symlink_metadata(dir) {
-        Ok(_) => finish::check_own_folder(base_dir, dir),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            fs::create_dir(dir).with_context(|| format!("cannot create {}", dir.display()))
-        }
+        Ok(_) => finish::check_own_folder(base_dir, dir).map(|()| true),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e).with_context(|| format!("cannot read {}", dir.display())),
     }
 }
 
-/// Copies `id`'s text records into [`archive_dir`] before its folder is removed (decision 195
-/// point 2). Only plain files that exist are copied; a name [`archive_names`] lists but that
-/// isn't there, or is a link, is silently skipped, never an error or followed. Refuses, without
-/// writing anything, if the task folder is a link or isn't really under `base_dir`, if
-/// `.sbxm` or `.sbxm/task-archive` is (both are created one at a time otherwise, never through a
-/// link), or if the archive path already exists in any form (a directory from an earlier archive
-/// of the same id, a plain file, or a symlink or junction, checked without following it):
-/// "nothing deletes an archive" means nothing overwrites one either. The one exception writes
-/// nothing: an archive holding every record still in the task folder, byte for byte
+/// `dir`, a folder under `base_dir`, checked as [`own_folder_exists`] checks it, created if it
+/// doesn't exist.
+fn own_folder_or_create(base_dir: &Path, dir: &Path) -> Result<()> {
+    if own_folder_exists(base_dir, dir)? {
+        return Ok(());
+    }
+    fs::create_dir(dir).with_context(|| format!("cannot create {}", dir.display()))
+}
+
+/// The folder [`archive_task`] archives `id`'s text records to, worked out without writing
+/// anything, for the listing every `task rm` shows before it asks (issue 595). Refuses as
+/// [`archive_task`] does: a task folder, `.sbxm` or `.sbxm/task-archive` that is a link or isn't
+/// really under `base_dir`. The candidates are [`archive_dir`], then `<id>-2`, `<id>-3`, ... in
+/// that order (issue 595: nothing overwrites an archive, decision 195, and the removal goes on):
+/// the first one that holds every record still in the task folder, byte for byte
 /// ([`holds_records`]), is the one an earlier run made before its removal failed (perhaps part
-/// way, after deleting some records, issue 503), and is reused as it is. Returns the archive
-/// folder.
+/// way, issue 503), and is reused; otherwise the first that doesn't exist in any form (a folder,
+/// a plain file, a symlink or junction, checked without following it).
+pub fn archive_target(base_dir: &Path, id: &str) -> Result<PathBuf> {
+    let meta = record::task_dir(base_dir, id);
+    if fs::symlink_metadata(&meta).is_ok() {
+        finish::check_own_folder(base_dir, &meta)?;
+    }
+    let sbxm = base_dir.join(".sbxm");
+    let root = archive_root(base_dir);
+    if !own_folder_exists(base_dir, &sbxm)? || !own_folder_exists(base_dir, &root)? {
+        return Ok(archive_dir(base_dir, id));
+    }
+    for n in 1u32.. {
+        let candidate = if n == 1 {
+            archive_dir(base_dir, id)
+        } else {
+            root.join(format!("{id}-{n}"))
+        };
+        match fs::symlink_metadata(&candidate) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(candidate),
+            Err(e) => {
+                return Err(e).with_context(|| format!("cannot read {}", candidate.display()));
+            }
+            Ok(_) if holds_records(base_dir, &meta, &candidate)? => return Ok(candidate),
+            Ok(_) => {}
+        }
+    }
+    bail!(
+        "no free archive folder for task {id} under {}",
+        root.display()
+    )
+}
+
+/// Copies `id`'s text records into [`archive_target`]'s folder before the task is removed
+/// (decision 195 point 2, issue 595). Only plain files that exist are copied; a name
+/// [`archive_names`] lists but that isn't there, or is a link, is silently skipped, never an
+/// error or followed. Refuses, without writing anything, if the task folder is a link or isn't
+/// really under `base_dir`, or if `.sbxm` or `.sbxm/task-archive` is (both are created one at a
+/// time otherwise, never through a link). An archive that already exists is never written to:
+/// the one [`archive_target`] reuses is returned as it is, and any other is passed over for the
+/// next numbered name. Returns the archive folder.
 pub fn archive_task(base_dir: &Path, id: &str) -> Result<PathBuf> {
     let meta = record::task_dir(base_dir, id);
     if fs::symlink_metadata(&meta).is_ok() {
@@ -529,19 +587,9 @@ pub fn archive_task(base_dir: &Path, id: &str) -> Result<PathBuf> {
     let sbxm = base_dir.join(".sbxm");
     own_folder_or_create(base_dir, &sbxm)?;
     own_folder_or_create(base_dir, &sbxm.join("task-archive"))?;
-    let archive = archive_dir(base_dir, id);
+    let archive = archive_target(base_dir, id)?;
     if fs::symlink_metadata(&archive).is_ok() {
-        // A rerun after a removal that left something behind finds the archive it made the
-        // first time: reused when it holds every record still in the task folder, byte for
-        // byte, so the retry the error asks for can finish even after a delete that stopped part
-        // way. Anything else is still never overwritten.
-        if holds_records(base_dir, &meta, &archive)? {
-            return Ok(archive);
-        }
-        bail!(
-            "{} already exists; move or delete it by hand, then run `sbxm task rm --merged` again",
-            archive.display()
-        );
+        return Ok(archive);
     }
     fs::create_dir(&archive).with_context(|| format!("cannot create {}", archive.display()))?;
     for name in archive_names(&meta) {
@@ -551,13 +599,13 @@ pub fn archive_task(base_dir: &Path, id: &str) -> Result<PathBuf> {
             continue;
         }
         let dest = archive.join(&name);
-        // A copy that fails leaves the archive half-written, which a rerun refuses (it differs
-        // from the task's records): the error names it, so the user can clear it first.
+        // A copy that fails leaves the archive half-written, which a rerun passes over (it
+        // differs from the task's records): the error names it, so the user can clear it.
         fs::copy(&src, &dest)
             .with_context(|| format!("cannot archive {} to {}", src.display(), dest.display()))
             .with_context(|| {
                 format!(
-                    "{} is incomplete; move or delete it, then run `sbxm task rm --merged` again",
+                    "{} is incomplete; move or delete it, then run `sbxm task rm` again",
                     archive.display()
                 )
             })?;
@@ -703,7 +751,12 @@ pub fn remove_with_sleep(
                 archive.display()
             )?,
             Err(e) => {
-                writeln!(out, "could not archive task {}: {e:#}", candidate.id)?;
+                writeln!(
+                    out,
+                    "could not archive task {} to {}, so none of it was removed: {e:#}",
+                    candidate.id,
+                    candidate.archive.display()
+                )?;
                 stayed += 1;
                 continue;
             }

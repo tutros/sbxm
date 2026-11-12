@@ -563,7 +563,8 @@ pub enum TaskCommand {
         push_unresolved: bool,
     },
     /// Delete a task: its sandboxes, its clones and its task folder. Shows exactly what, and asks
-    /// first (without a terminal it needs --yes).
+    /// first (without a terminal it needs --yes). Archives the task's text records first, under
+    /// .sbxm/task-archive/<id>/ (or <id>-2, <id>-3, ... when that exists), and names the folder.
     #[command(group(clap::ArgGroup::new("which").required(true).args(["issue", "pr", "spec", "merged"])))]
     Rm {
         /// The issue's task.
@@ -582,7 +583,7 @@ pub enum TaskCommand {
         /// PR-review or fix task whose PR is merged, or a spec task whose branch is reachable from its
         /// base branch after a fetch. Archives each task's text records first (review.md,
         /// review-<n>.md, result.md, run.log, gates.log, task.json) under
-        /// .sbxm/task-archive/<id>/.
+        /// .sbxm/task-archive/<id>/, as every task rm does.
         #[arg(long)]
         merged: bool,
         /// Don't ask; delete.
