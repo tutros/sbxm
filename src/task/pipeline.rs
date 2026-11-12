@@ -27,6 +27,7 @@ use super::repo::{self, AgentFile, BUNDLE_CAP, Existing, Identity};
 use super::review;
 use super::rewrite;
 use super::risk;
+use super::runlog;
 use super::secrets;
 use super::select::{self, Selection};
 use super::session;
@@ -2014,10 +2015,20 @@ fn gates_log_entry(phase: &str, outcomes: &[GateOutcome]) -> String {
             result.command,
             if result.passed { "passed" } else { "failed" },
             if outcome.timed_out { ", timed out" } else { "" },
-            outcome.output_tail.trim_end(),
+            gate_output(outcome),
         ));
     }
     log
+}
+
+/// The end of a gate's output as `gates.log` shows it, secret-looking values masked as in
+/// `run.log`; a gate stopped at its timeout before printing anything says so (issue 471).
+fn gate_output(outcome: &GateOutcome) -> String {
+    let output = outcome.output_tail.trim_end();
+    if outcome.timed_out && output.trim().is_empty() {
+        return "(no output before the timeout)".to_owned();
+    }
+    runlog::redact(output)
 }
 
 /// Spec §5.1 step 5 and §7: runs the gates of the chosen `tiers`. The sandbox tier runs in the

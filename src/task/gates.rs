@@ -61,6 +61,7 @@ pub fn run_sandbox_tier(
         let could_not_run = verdict.error.is_some();
         let output_tail = match &verdict.error {
             Some(error) => format!("could not run the command: {error}"),
+            None if verdict.timed_out => without_timeout_lines(&verdict.output_tail),
             None => verdict.output_tail.clone(),
         };
         let passed = verdict.passed;
@@ -81,6 +82,14 @@ pub fn run_sandbox_tier(
         }
     }
     outcomes
+}
+
+/// `tail` without the lines `timeout -v` printed when it stopped the gate (issue 471): they are
+/// sbxm's wrapper speaking, not the gate, and `gates.log` already says the gate timed out.
+fn without_timeout_lines(tail: &str) -> String {
+    tail.split_inclusive('\n')
+        .filter(|line| !line.starts_with("timeout: sending signal"))
+        .collect()
 }
 
 /// What a command run on this machine left behind.
@@ -315,7 +324,7 @@ pub struct HostCall {
 #[derive(Clone)]
 enum Scripted {
     Exit(i32, String, String),
-    Timeout,
+    Timeout(String, String),
     StartError(String),
 }
 
@@ -341,8 +350,16 @@ impl FakeHostRunner {
     }
 
     /// Commands containing `needle` hit their timeout.
-    pub fn with_timeout(mut self, needle: &str) -> Self {
-        self.rules.push((needle.to_owned(), Scripted::Timeout));
+    pub fn with_timeout(self, needle: &str) -> Self {
+        self.with_timeout_after(needle, "", "")
+    }
+
+    /// Commands containing `needle` hit their timeout after printing `stdout` and `stderr`.
+    pub fn with_timeout_after(mut self, needle: &str, stdout: &str, stderr: &str) -> Self {
+        self.rules.push((
+            needle.to_owned(),
+            Scripted::Timeout(stdout.to_owned(), stderr.to_owned()),
+        ));
         self
     }
 
@@ -385,9 +402,9 @@ impl HostRunner for FakeHostRunner {
                 exit_code: Some(*code),
                 timed_out: false,
             }),
-            Some(Scripted::Timeout) => Ok(HostOutput {
-                stdout: String::new(),
-                stderr: String::new(),
+            Some(Scripted::Timeout(stdout, stderr)) => Ok(HostOutput {
+                stdout: stdout.clone(),
+                stderr: stderr.clone(),
                 exit_code: None,
                 timed_out: true,
             }),
