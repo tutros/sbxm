@@ -49,8 +49,8 @@ use crate::task::record::{self, Kind, Process, ProcessProbe, Record, Stage};
 use crate::task::risk::Level;
 use crate::task::runlog::{RunLog, Tee};
 use crate::task::{
-    findings, finish, lock, loop_log, medium, next, pipeline, pr_fix, real_check, resume, trial,
-    window,
+    findings, finish, location, lock, loop_log, medium, next, pipeline, pr_fix, real_check, resume,
+    trial, window,
 };
 
 mod check;
@@ -111,6 +111,18 @@ pub struct Options {
 pub trait Steps {
     /// `task run --issue N`: start, gates, review and fix rounds, to `ready` or a stop.
     fn run(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()>;
+    /// [`Self::run`] in `location`, as `--cloud` or `--local` would choose it; `None` leaves it to
+    /// `[sandbox] location` (issue 600). A `Steps` that ignores the location needs no other.
+    fn run_at(
+        &self,
+        issue: u32,
+        location: Option<Location>,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<()> {
+        let _ = location;
+        self.run(issue, out, warn)
+    }
     /// `task resume --issue N`: the task again from its recorded stage, to `ready`.
     fn resume(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()>;
     /// `task resume --issue N --rounds 1 --should-fix` (issue 510, decision 306): one fix round
@@ -516,6 +528,12 @@ struct Loop<'a> {
     /// The notifier and the keys shown (issue 530); `None` with `[notify] toasts = false` or no
     /// notifier wired: nothing shown, nothing written.
     notify: Option<(&'a dyn Notifier, Shown)>,
+    /// `[resources] cloud_slots`: unset, the loop runs no issue in the cloud by its label (decision
+    /// 317(3), issue 600).
+    cloud_slots: Option<u32>,
+    /// Where each issue taken runs, from its labels when it was taken (issue 600): read by its
+    /// `task run`; `None` (or absent) leaves it to `[sandbox] location`.
+    locations: HashMap<u32, Option<Location>>,
 }
 
 impl Loop<'_> {
@@ -1096,6 +1114,20 @@ impl Loop<'_> {
                 });
                 continue;
             }
+            // Its location's labels (issue 600): a refusal is the issue's to fix, as above.
+            let labels = found.map_or(&[][..], |i| i.labels.as_slice());
+            let location = match location::for_loop(labels, self.cloud_slots) {
+                Ok(location) => location,
+                Err(reason) => {
+                    tried.insert(number);
+                    writeln!(out, "skipped #{number}{title}: {reason}")?;
+                    refused.push(Skipped {
+                        issue: number,
+                        reason,
+                    });
+                    continue;
+                }
+            };
             let unmerged = self.unmerged_dependencies(open, body);
             if !unmerged.is_empty() {
                 let reason = waiting_reason(&unmerged);
@@ -1118,6 +1150,7 @@ impl Loop<'_> {
                 });
                 continue;
             }
+            self.locations.insert(number, location);
             return Ok((Some(number), waiting));
         }
         Ok((None, waiting))
@@ -1180,10 +1213,14 @@ impl Loop<'_> {
                     (self.steps.should_fix(issue, &mut out, &mut warn), None)
                 } else if resuming {
                     (self.steps.resume(issue, &mut out, &mut warn), None)
-                } else if label {
-                    self.run_unlabeling(issue, || self.steps.run(issue, &mut out, &mut warn))
                 } else {
-                    (self.steps.run(issue, &mut out, &mut warn), None)
+                    let location = self.locations.get(&issue).copied().flatten();
+                    let mut run = || self.steps.run_at(issue, location, &mut out, &mut warn);
+                    if label {
+                        self.run_unlabeling(issue, run)
+                    } else {
+                        (run(), None)
+                    }
                 };
                 captured.extend(out.text);
                 captured.extend(warn.text);
@@ -3356,6 +3393,7 @@ fn run_loop(
     let settings = TaskConfig::load(&opts.repo_root)?.task_loop;
     let global = GlobalConfig::load(config_dir)?;
     let notifier = notifier.filter(|_| global.notify.toasts);
+    let cloud_slots = global.resources.cloud_slots;
     let base_dir = global.base_dir;
     let repo = resolve_repo(opts.repo.as_deref(), &opts.repo_root)?;
     // As `task rm --merged` refuses it (decision 195): every task folder is read through it.
@@ -3444,6 +3482,8 @@ fn run_loop(
         log,
         logged: false,
         notify,
+        cloud_slots,
+        locations: HashMap::new(),
     };
 
     // The cut-off tasks first: their owed resumes are written before anything else can fail.
@@ -4066,6 +4106,16 @@ impl TaskSteps<'_> {
 
 impl Steps for TaskSteps<'_> {
     fn run(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
+        self.run_at(issue, None, out, warn)
+    }
+
+    fn run_at(
+        &self,
+        issue: u32,
+        location: Option<Location>,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<()> {
         self.logged(issue, out, warn, &|out, warn| {
             let disk = self.task_disk()?;
             task_run::run(
@@ -4085,7 +4135,7 @@ impl Steps for TaskSteps<'_> {
                     clone_source: None,
                     identity: None,
                     disk,
-                    location: None,
+                    location,
                 },
                 None,
                 self.backend,

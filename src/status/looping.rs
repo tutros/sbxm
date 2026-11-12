@@ -426,18 +426,20 @@ fn first_line(error: &anyhow::Error) -> String {
 }
 
 /// Asks GitHub for the queue (`gh issue list`) and for the state of each PR a loop opened, and
-/// checks each queued issue as `task loop --check` does.
+/// checks each queued issue as `task loop --check` does, as with `cloud_slots` unset.
 pub fn fetch(github: &dyn GitHubBackend, repo: &Result<String, String>, base: &Path) -> Snapshot {
-    fetch_checking(github, repo, base, None)
+    fetch_checking(github, repo, base, None, None)
 }
 
 /// [`fetch`], checking the issues of `listed` (a loop's `--issue` list still to come, issue 536)
-/// instead of the queue's when given.
+/// instead of the queue's when given, with `cloud_slots` as `[resources]` sets it (issue 600: a
+/// `run-cloud` issue needs it).
 pub fn fetch_checking(
     github: &dyn GitHubBackend,
     repo: &Result<String, String>,
     base: &Path,
     listed: Option<&[u32]>,
+    cloud_slots: Option<u32>,
 ) -> Snapshot {
     let repo = match repo {
         Ok(repo) => repo,
@@ -464,7 +466,14 @@ pub fn fetch_checking(
             checked
                 .into_iter()
                 .filter_map(|n| {
-                    match crate::commands::task_loop::skip_reason(base, repo, github, open, n) {
+                    match crate::commands::task_loop::skip_reason(
+                        base,
+                        cloud_slots,
+                        repo,
+                        github,
+                        open,
+                        n,
+                    ) {
                         Ok(None) => None,
                         Ok(Some(why)) => Some((n, why)),
                         Err(e) => Some((n, format!("unknown ({})", first_line(&e)))),
