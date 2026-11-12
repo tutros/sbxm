@@ -18,7 +18,7 @@ use serde_json::Value;
 
 use super::finish::{check_own_folder, pr_number};
 use super::merged::archive_root;
-use super::record::{self, Record};
+use super::record::{self, Kind, Record};
 use crate::config::{GlobalConfig, Profile};
 use crate::harness::Harness;
 
@@ -498,10 +498,31 @@ pub fn end(base_dir: &Path, taken: &Path, result: &JobResult) -> Result<PathBuf>
 /// task folders, else one archived under `.sbxm/task-archive/`. A folder that isn't sbxm's own,
 /// or a record that can't be read, doesn't count.
 pub fn opener(base_dir: &Path, repo: &str, pr: u32) -> Option<Record> {
+    named_by(base_dir, repo, pr, |_| true)
+}
+
+/// The record of the task that opened PR `pr` of `repo` (issue 600): as [`opener`] finds them,
+/// but only an issue or spec task that didn't continue an open PR. A fix task, or a task that
+/// continued the PR, only pushed to it, and never counts.
+pub fn first_opener(base_dir: &Path, repo: &str, pr: u32) -> Option<Record> {
+    named_by(base_dir, repo, pr, |rec| {
+        matches!(rec.kind, Kind::Issue | Kind::Spec) && rec.continues.is_none()
+    })
+}
+
+/// The first record under the task folders, else the archive, that names PR `pr` of `repo` and
+/// that `keep` accepts.
+fn named_by(
+    base_dir: &Path,
+    repo: &str,
+    pr: u32,
+    keep: impl Fn(&Record) -> bool,
+) -> Option<Record> {
     let opened = |dir: &Path| -> Option<Record> {
         check_own_folder(base_dir, dir).ok()?;
         let rec = record::read(&dir.join("task.json")).ok()?;
-        (rec.repo == repo && rec.pr.as_deref().and_then(pr_number) == Some(pr)).then_some(rec)
+        (rec.repo == repo && rec.pr.as_deref().and_then(pr_number) == Some(pr) && keep(&rec))
+            .then_some(rec)
     };
     let live = record::task_folders(base_dir).unwrap_or_default();
     if let Some(rec) = live.iter().find_map(|dir| opened(dir)) {

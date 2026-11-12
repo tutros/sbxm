@@ -126,6 +126,7 @@ fn options(f: &Fixture) -> Options {
         }),
         disk: Default::default(),
         check_run: None,
+        location: None,
     }
 }
 

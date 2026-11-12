@@ -396,6 +396,14 @@ pub enum TaskCommand {
         /// of the review's must-fix findings.
         #[arg(long, value_name = "RUN_ID")]
         check_run: Option<u64>,
+        /// Run the fix's sandboxes in Docker Cloud Sandboxes (default: where the PR's task ran,
+        /// else as its issue's run-cloud or run-local label says, else [sandbox] location in
+        /// sbxm-task.toml).
+        #[arg(long, conflicts_with = "local")]
+        cloud: bool,
+        /// Run the fix's sandboxes on this machine, wherever the PR's task ran.
+        #[arg(long)]
+        local: bool,
     },
     /// Continue a task from its recorded stage, keeping its clone and commits: a failed or
     /// interrupted preparation, worker, review or fix round runs again, and the task goes on to

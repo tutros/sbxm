@@ -49,8 +49,8 @@ use crate::task::record::{self, Kind, Process, ProcessProbe, Record, Stage};
 use crate::task::risk::Level;
 use crate::task::runlog::{RunLog, Tee};
 use crate::task::{
-    findings, finish, lock, loop_log, medium, next, pipeline, pr_fix, real_check, resume, trial,
-    window,
+    findings, finish, location, lock, loop_log, medium, next, pipeline, pr_fix, real_check, resume,
+    trial, window,
 };
 
 mod check;
@@ -111,6 +111,18 @@ pub struct Options {
 pub trait Steps {
     /// `task run --issue N`: start, gates, review and fix rounds, to `ready` or a stop.
     fn run(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()>;
+    /// [`Self::run`] in `location`, as `--cloud` or `--local` would choose it; `None` leaves it to
+    /// `[sandbox] location` (issue 600). A `Steps` that ignores the location needs no other.
+    fn run_at(
+        &self,
+        issue: u32,
+        location: Option<Location>,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<()> {
+        let _ = location;
+        self.run(issue, out, warn)
+    }
     /// `task resume --issue N`: the task again from its recorded stage, to `ready`.
     fn resume(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()>;
     /// `task resume --issue N --rounds 1 --should-fix` (issue 510, decision 306): one fix round
@@ -173,6 +185,14 @@ pub trait Steps {
     }
     /// The free-disk check of `sbx`'s sandbox drive: an error while it is under `min_free_disk`.
     fn room(&self) -> Result<()>;
+    /// [`Self::room`] for a step that runs in `location` (`None`: as `[sandbox] location` says):
+    /// a cloud step needs no room on this machine (review M-1 of issue 600). The loop asks only
+    /// this one, always with the step's own location. A `Steps` without a disk of its own needs
+    /// no other.
+    fn room_for(&self, location: Option<Location>) -> Result<()> {
+        let _ = location;
+        self.room()
+    }
 }
 
 /// The clock, the waiting and the user's stop request, injected so tests don't wait.
@@ -516,6 +536,12 @@ struct Loop<'a> {
     /// The notifier and the keys shown (issue 530); `None` with `[notify] toasts = false` or no
     /// notifier wired: nothing shown, nothing written.
     notify: Option<(&'a dyn Notifier, Shown)>,
+    /// `[resources] cloud_slots`: unset, the loop runs no issue in the cloud by its label (decision
+    /// 317(3), issue 600).
+    cloud_slots: Option<u32>,
+    /// Where each issue taken runs, from its labels when it was taken (issue 600): read by its
+    /// `task run`; `None` (or absent) leaves it to `[sandbox] location`.
+    locations: HashMap<u32, Option<Location>>,
 }
 
 impl Loop<'_> {
@@ -961,12 +987,16 @@ impl Loop<'_> {
         }
     }
 
-    /// Waits while the disk is low (decision 245(g)); returns how long it waited, or `None` when
-    /// a stop was asked meanwhile.
-    fn wait_for_room(&mut self, out: &mut dyn Write) -> Result<Option<u64>> {
+    /// Waits while the disk is low for a step in `location` (decision 245(g)); returns how long
+    /// it waited, or `None` when a stop was asked meanwhile.
+    fn wait_for_room(
+        &mut self,
+        location: Option<Location>,
+        out: &mut dyn Write,
+    ) -> Result<Option<u64>> {
         let start = self.now();
         let mut said = false;
-        while let Err(e) = self.steps.room() {
+        while let Err(e) = self.steps.room_for(location) {
             if !said {
                 writeln!(
                     out,
@@ -1096,6 +1126,20 @@ impl Loop<'_> {
                 });
                 continue;
             }
+            // Its location's labels (issue 600): a refusal is the issue's to fix, as above.
+            let labels = found.map_or(&[][..], |i| i.labels.as_slice());
+            let location = match location::for_loop(labels, self.cloud_slots) {
+                Ok(location) => location,
+                Err(reason) => {
+                    tried.insert(number);
+                    writeln!(out, "skipped #{number}{title}: {reason}")?;
+                    refused.push(Skipped {
+                        issue: number,
+                        reason,
+                    });
+                    continue;
+                }
+            };
             let unmerged = self.unmerged_dependencies(open, body);
             if !unmerged.is_empty() {
                 let reason = waiting_reason(&unmerged);
@@ -1118,9 +1162,16 @@ impl Loop<'_> {
                 });
                 continue;
             }
+            self.locations.insert(number, location);
             return Ok((Some(number), waiting));
         }
         Ok((None, waiting))
+    }
+
+    /// Where `task fix --pr N` runs PR `pr`'s resolve or log-fix: as the task that opened it
+    /// recorded (issue 600), else as `[sandbox] location` says.
+    fn fix_location(&self, pr: u32) -> Option<Location> {
+        location::recorded(&self.base_dir, &self.repo, pr)
     }
 
     fn unmerged_dependencies(&self, open: &[Issue], body: &str) -> Vec<String> {
@@ -1151,7 +1202,13 @@ impl Loop<'_> {
         // cut short and logged.
         let mut ran = false;
         loop {
-            let Some(paused) = self.wait_for_room(out).map_err(Halt::Error)? else {
+            // Where its next phase runs: its record's location once it exists, else the one its
+            // labels chose (issue 600).
+            let location = match self.record(issue) {
+                Some(rec) => Some(rec.location),
+                None => self.locations.get(&issue).copied().flatten(),
+            };
+            let Some(paused) = self.wait_for_room(location, out).map_err(Halt::Error)? else {
                 if !ran {
                     return Err(Halt::Stopped);
                 }
@@ -1180,10 +1237,13 @@ impl Loop<'_> {
                     (self.steps.should_fix(issue, &mut out, &mut warn), None)
                 } else if resuming {
                     (self.steps.resume(issue, &mut out, &mut warn), None)
-                } else if label {
-                    self.run_unlabeling(issue, || self.steps.run(issue, &mut out, &mut warn))
                 } else {
-                    (self.steps.run(issue, &mut out, &mut warn), None)
+                    let mut run = || self.steps.run_at(issue, location, &mut out, &mut warn);
+                    if label {
+                        self.run_unlabeling(issue, run)
+                    } else {
+                        (run(), None)
+                    }
                 };
                 captured.extend(out.text);
                 captured.extend(warn.text);
@@ -1890,7 +1950,8 @@ impl Loop<'_> {
                 continue;
             }
             // `task fix` would refuse on a low disk: the PR waits for a later step, not failed.
-            if self.steps.room().is_err() {
+            // It runs where the PR's task ran (issue 600).
+            if self.steps.room_for(self.fix_location(number)).is_err() {
                 return Ok(true);
             }
             self.resolves.insert((number, tip));
@@ -2639,7 +2700,7 @@ impl Loop<'_> {
             // A low disk or a stop request leaves the log-fix for a later pass, never the disarm
             // (review M-1).
             if log_fix {
-                let waits = if self.steps.room().is_err() {
+                let waits = if self.steps.room_for(self.fix_location(number)).is_err() {
                     Some("room on the disk")
                 } else if (self.env.stop_requested)() {
                     Some("the next loop (this one is stopping)")
@@ -3356,6 +3417,7 @@ fn run_loop(
     let settings = TaskConfig::load(&opts.repo_root)?.task_loop;
     let global = GlobalConfig::load(config_dir)?;
     let notifier = notifier.filter(|_| global.notify.toasts);
+    let cloud_slots = global.resources.cloud_slots;
     let base_dir = global.base_dir;
     let repo = resolve_repo(opts.repo.as_deref(), &opts.repo_root)?;
     // As `task rm --merged` refuses it (decision 195): every task folder is read through it.
@@ -3444,6 +3506,8 @@ fn run_loop(
         log,
         logged: false,
         notify,
+        cloud_slots,
+        locations: HashMap::new(),
     };
 
     // The cut-off tasks first: their owed resumes are written before anything else can fail.
@@ -3995,6 +4059,8 @@ impl TaskSteps<'_> {
                     identity: None,
                     disk: self.disk.clone(),
                     check_run,
+                    // Where the PR's task ran (issue 600).
+                    location: None,
                 },
                 self.backend,
                 self.github,
@@ -4066,6 +4132,16 @@ impl TaskSteps<'_> {
 
 impl Steps for TaskSteps<'_> {
     fn run(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()> {
+        self.run_at(issue, None, out, warn)
+    }
+
+    fn run_at(
+        &self,
+        issue: u32,
+        location: Option<Location>,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<()> {
         self.logged(issue, out, warn, &|out, warn| {
             let disk = self.task_disk()?;
             task_run::run(
@@ -4085,7 +4161,7 @@ impl Steps for TaskSteps<'_> {
                     clone_source: None,
                     identity: None,
                     disk,
-                    location: None,
+                    location,
                 },
                 None,
                 self.backend,
@@ -4332,8 +4408,12 @@ impl Steps for TaskSteps<'_> {
     }
 
     fn room(&self) -> Result<()> {
+        self.room_for(None)
+    }
+
+    fn room_for(&self, location: Option<Location>) -> Result<()> {
         let config = TaskConfig::load(&self.repo_root)?;
-        if pipeline::choose_location(None, &config) == Location::Cloud {
+        if pipeline::choose_location(location, &config) == Location::Cloud {
             return Ok(());
         }
         disk::require(

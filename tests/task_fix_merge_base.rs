@@ -272,6 +272,7 @@ fn fix_with(
             }),
             disk,
             check_run: None,
+            location: None,
         },
         backend,
         github,

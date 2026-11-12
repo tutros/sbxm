@@ -153,7 +153,8 @@ pub fn run_with(
         });
         frame.section(&runs::render(&comparisons, started, width))?;
         if let Some(source) = loop_source {
-            let view = loop_view(base, probe, source, &mut cache, started);
+            let cloud_slots = env.cloud_slots.as_ref().map(|(count, _)| *count);
+            let view = loop_view(base, probe, source, cloud_slots, &mut cache, started);
             frame.section(&looping::render(&view, width))?;
         }
         if let Some((count, gate)) = &env.slots {
@@ -236,6 +237,7 @@ fn loop_view(
     base: &Path,
     probe: &dyn ProcessProbe,
     source: &LoopSource,
+    cloud_slots: Option<u32>,
     cache: &mut looping::Cache,
     now: u64,
 ) -> looping::View {
@@ -253,7 +255,13 @@ fn loop_view(
         .map(|l| l.pending.clone());
     let snapshot = cache
         .get(now, || {
-            looping::fetch_checking(source.github, &source.repo, base, pending.as_deref())
+            looping::fetch_checking(
+                source.github,
+                &source.repo,
+                base,
+                pending.as_deref(),
+                cloud_slots,
+            )
         })
         .clone();
     looping::View {

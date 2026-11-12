@@ -18,7 +18,7 @@ use crate::task::config::TaskConfig;
 use crate::task::finish::check_own_folder;
 use crate::task::queue::{self, READY_LABEL};
 use crate::task::record::{self, ProcessProbe};
-use crate::task::{findings, pipeline};
+use crate::task::{findings, location, pipeline};
 
 use super::super::task_start::resolve_repo;
 
@@ -38,7 +38,8 @@ pub fn check(
     }
     // What the loop itself would refuse on before its first issue.
     TaskConfig::load(&opts.repo_root)?;
-    let base_dir = GlobalConfig::load(config_dir)?.base_dir;
+    let global = GlobalConfig::load(config_dir)?;
+    let (base_dir, cloud_slots) = (global.base_dir, global.resources.cloud_slots);
     let repo = resolve_repo(opts.repo.as_deref(), &opts.repo_root)?;
     let tasks = record::tasks_root(&base_dir);
     if fs::symlink_metadata(&tasks).is_ok() {
@@ -76,7 +77,7 @@ pub fn check(
             || format!("#{number}"),
             |i| format!("#{number} {}", i.title),
         );
-        match skip_reason(&base_dir, &repo, github, &open, number)? {
+        match skip_reason(&base_dir, cloud_slots, &repo, github, &open, number)? {
             None => {
                 writeln!(out, "{named}: take")?;
                 taken.push(number);
@@ -98,10 +99,11 @@ pub fn check(
 }
 
 /// Why the loop would pass issue `number` over, every reason joined as `--check` prints it after
-/// `skip: `, or `None` when it would take it; `open` is the open issues. Also what `sbxm status`
-/// shows on a queued issue's line (issue 536).
+/// `skip: `, or `None` when it would take it; `open` is the open issues and `cloud_slots` is
+/// `[resources] cloud_slots`. Also what `sbxm status` shows on a queued issue's line (issue 536).
 pub(crate) fn skip_reason(
     base_dir: &Path,
+    cloud_slots: Option<u32>,
     repo: &str,
     github: &dyn GitHubBackend,
     open: &[Issue],
@@ -110,7 +112,7 @@ pub(crate) fn skip_reason(
     let Some(issue) = open.iter().find(|i| i.number == number) else {
         return Ok(Some("isn't an open issue".to_owned()));
     };
-    let reasons = reasons_in(base_dir, repo, github, open, issue)?;
+    let reasons = reasons_in(base_dir, cloud_slots, repo, github, open, issue)?;
     Ok((!reasons.is_empty()).then(|| reasons.join("; also: ")))
 }
 
@@ -122,16 +124,24 @@ pub(crate) fn reasons(
     open: &[Issue],
     issue: &Issue,
 ) -> Result<Vec<String>> {
-    let base_dir = GlobalConfig::load(config_dir)?.base_dir;
-    reasons_in(&base_dir, repo, github, open, issue)
+    let global = GlobalConfig::load(config_dir)?;
+    reasons_in(
+        &global.base_dir,
+        global.resources.cloud_slots,
+        repo,
+        github,
+        open,
+        issue,
+    )
 }
 
 /// Every reason the loop would pass `issue` over, or none: the label and the size, the open
-/// points, then the loop's own checks in its order (an unmerged dependency, else what `task run`
-/// would refuse before any write), then a branch of the task's name already on origin, which
-/// `task finish` would refuse to push over.
+/// points, then the loop's own checks in its order (its location's labels, an unmerged
+/// dependency, else what `task run` would refuse before any write), then a branch of the task's
+/// name already on origin, which `task finish` would refuse to push over.
 fn reasons_in(
     base_dir: &Path,
+    cloud_slots: Option<u32>,
     repo: &str,
     github: &dyn GitHubBackend,
     open: &[Issue],
@@ -147,6 +157,9 @@ fn reasons_in(
     }
     if queue::has_open_points(&issue.body) {
         reasons.push(OPEN_POINTS.to_owned());
+    }
+    if let Err(reason) = location::for_loop(&issue.labels, cloud_slots) {
+        reasons.push(reason);
     }
     let unmerged = unmerged_dependencies(github, repo, open, &issue.body);
     if unmerged.is_empty() {

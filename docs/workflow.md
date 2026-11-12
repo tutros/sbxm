@@ -305,7 +305,11 @@ sbxm status                            # the tasks, the running cloud sandboxes 
 ```
 
 `[sandbox] location = "cloud"` in `sbxm-task.toml` makes the cloud a repo's default (`"local"`, or no key, keeps
-it here); `--cloud`/`--local` on `task start`, `task run` and `task review --pr N` override it for that command.
+it here); `--cloud`/`--local` on `task start`, `task run`, `task review --pr N` and `task fix --pr N` override it
+for that command. The loop runs an issue labeled `run-cloud` in the cloud (only while `[resources] cloud_slots` is
+set; otherwise it skips the issue, saying `run-cloud needs [resources] cloud_slots`) and one labeled `run-local` here;
+an issue with neither runs as the key says, and one with both is skipped (issue 600). A `task fix --pr N` without a
+flag runs where the PR's task ran, so the loop's resolves and log-fixes follow their task.
 Tasks on this repo run in the cloud (proven end to end on 2026-11-11, issue #350) with `cloud_shape = "large"` or
 bigger; the cloud stays opt-in per command, `sbxm-task.toml` keeps the local default. Build output must go under
 `$HOME` (the gates and sbxm's warm-up do since #575), because `/tmp` is a RAM-backed tmpfs of half the shape's memory.
@@ -321,6 +325,8 @@ every detail.
 | `task start`, `task run` | Location from the flag, else the key. The preflight below, then the worker sandbox (the profile's kits, a TTL, `--on-timeout delete`, the strict denies before the agent), bundle and prompt in, worker, sandbox gates, bundle out, verify, fetch, host gates. The worker sandbox goes when the task stops. |
 | `task review --issue/--spec` | The recorded location. A reviewer sandbox per round; a fix round in the worker sandbox, made again from a bundle of the branch if it is gone. |
 | `task review --pr N` | Location as for `start`; the PR's head goes in as a bundle from `repo.git`. |
+| `task fix --pr N` | The flag, else the location the PR's task recorded, else its closing issue's `run-cloud`/`run-local` label, else the key. |
+| `task loop` | An issue's `run-cloud` label (with `cloud_slots` set) or `run-local` label, else the key. |
 | `task resume` | Always in the cloud: the preflight again, then a gone worker sandbox made again from the recorded profile and a bundle of the branch. |
 | `task gates` | In the recorded location; a gone worker sandbox is made again first, and removed when the gates end. |
 | `task finish` | Host-side only; then removes any cloud sandbox of the task still open (one whose removal at the stop failed), retried. |

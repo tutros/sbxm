@@ -22,6 +22,7 @@ use crate::task::config::TaskConfig;
 use crate::task::finish;
 use crate::task::gates::HostRunner;
 use crate::task::lifetime;
+use crate::task::location;
 use crate::task::pipeline::{self, Ctx};
 use crate::task::pr_fix;
 use crate::task::record::{self, ProcessProbe};
@@ -44,6 +45,9 @@ pub struct Options {
     /// `--check-run <id>` (decision 300): the worker fixes this failed run of the PR's head from
     /// its log instead of the review's must-fix findings.
     pub check_run: Option<u64>,
+    /// `--cloud` or `--local`; `None` runs the fix where the PR's task ran (issue 600, see
+    /// [`location::of_pr`]), else as `[sandbox] location` says.
+    pub location: Option<Location>,
 }
 
 fn print_released(out: &mut dyn Write, warn: &mut dyn Write, said: &[lifetime::Released]) {
@@ -81,8 +85,22 @@ pub fn run(
     for warning in &config.warnings {
         writeln!(warn, "warning: {warning}")?;
     }
-    let location = pipeline::choose_location(None, &config);
     let global = GlobalConfig::load(config_dir)?;
+    // A fix follows its PR's task, else its issue's label (issue 600); a flag wins. A PR read
+    // for its issue is checked at once, so one that can't be fixed is refused before any slot
+    // wait; it is read again below, once the slot is held.
+    let pinned = match opts.location {
+        Some(flag) => Some(flag),
+        None => match location::recorded(&global.base_dir, &repo_name, number) {
+            Some(recorded) => Some(recorded),
+            None => {
+                let pr = github.pr(&repo_name, number)?;
+                pr_fix::check_fixable(&pr, &repo_name, opts.base.as_deref())?;
+                location::labeled(github, &repo_name, &pr)?
+            }
+        },
+    };
+    let location = pinned.unwrap_or_else(|| pipeline::choose_location(None, &config));
     // Held until the fix ends (decision 304); a cloud fix takes a cloud slot below, once all its
     // inputs are checked (issue 599).
     let task = format!("fix of PR #{number}");

@@ -20,7 +20,7 @@ use crate::run::results::format_timestamp;
 use crate::task::jobs::{self, AsRead, Job, JobHarness, JobResult, Outcome, Running};
 use crate::task::queue::{self, Row};
 use crate::task::record::{self, Kind, Record, Stage};
-use crate::task::{lock, next, pipeline};
+use crate::task::{location, lock, next, pipeline};
 
 /// How one job ended, before its result file.
 struct Ended {
@@ -661,6 +661,13 @@ impl Loop<'_> {
         if !reasons.is_empty() {
             return Ok(Ended::new(Outcome::Refused, reasons.join("; ")));
         }
+        // Where its labels pin it (issue 600), refused as the loop's own pick refuses it: the
+        // reasons above read `cloud_slots` now, the loop when it started.
+        let location = match location::for_loop(&found.labels, self.cloud_slots) {
+            Ok(location) => location,
+            Err(reason) => return Ok(Ended::new(Outcome::Refused, reason)),
+        };
+        self.locations.insert(issue, location);
         let id = format!("issue-{issue}");
         self.mark(taken, read, started, Some(id.clone()))?;
         let mut stops = Vec::new();
