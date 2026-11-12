@@ -9,6 +9,7 @@ pub mod fixes;
 pub mod gates;
 pub mod jobs;
 pub mod lifetime;
+pub mod location;
 pub mod lock;
 pub mod loop_log;
 pub mod loop_pause;
