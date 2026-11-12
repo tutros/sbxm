@@ -300,8 +300,8 @@ pub enum TaskCommand {
         /// min_free_disk free.
         #[arg(long)]
         ignore_disk: bool,
-        /// When sandbox_slots in config.toml has no free slot, refuse at once, naming its holder,
-        /// instead of waiting for one.
+        /// When sandbox_slots in config.toml (cloud_slots for cloud sandboxes) has no free slot,
+        /// refuse at once, naming its holder, instead of waiting for one.
         #[arg(long)]
         no_wait: bool,
         /// Run the task's sandboxes in Docker Cloud Sandboxes (default: [sandbox] location in
@@ -366,8 +366,8 @@ pub enum TaskCommand {
         /// min_free_disk free.
         #[arg(long)]
         ignore_disk: bool,
-        /// When sandbox_slots in config.toml has no free slot, refuse at once, naming its holder,
-        /// instead of waiting for one.
+        /// When sandbox_slots in config.toml (cloud_slots for cloud sandboxes) has no free slot,
+        /// refuse at once, naming its holder, instead of waiting for one.
         #[arg(long)]
         no_wait: bool,
     },
@@ -388,8 +388,8 @@ pub enum TaskCommand {
         /// min_free_disk free.
         #[arg(long)]
         ignore_disk: bool,
-        /// When sandbox_slots in config.toml has no free slot, refuse at once, naming its holder,
-        /// instead of waiting for one.
+        /// When sandbox_slots in config.toml (cloud_slots for cloud sandboxes) has no free slot,
+        /// refuse at once, naming its holder, instead of waiting for one.
         #[arg(long)]
         no_wait: bool,
         /// Fix this failed workflow run of the PR's head from its log (the last 64 KiB), instead
@@ -428,8 +428,8 @@ pub enum TaskCommand {
         /// min_free_disk free.
         #[arg(long)]
         ignore_disk: bool,
-        /// When sandbox_slots in config.toml has no free slot, refuse at once, naming its holder,
-        /// instead of waiting for one.
+        /// When sandbox_slots in config.toml (cloud_slots for cloud sandboxes) has no free slot,
+        /// refuse at once, naming its holder, instead of waiting for one.
         #[arg(long)]
         no_wait: bool,
         /// Drop a cloud sandbox whose create was started but never heard back from (sbxm can't
@@ -455,8 +455,8 @@ pub enum TaskCommand {
         /// less than min_free_disk free.
         #[arg(long)]
         ignore_disk: bool,
-        /// When sandbox_slots in config.toml has no free slot, refuse at once, naming its holder,
-        /// instead of waiting for one.
+        /// When sandbox_slots in config.toml (cloud_slots for cloud sandboxes) has no free slot,
+        /// refuse at once, naming its holder, instead of waiting for one.
         #[arg(long)]
         no_wait: bool,
     },
@@ -530,8 +530,8 @@ pub enum TaskCommand {
         /// min_free_disk free.
         #[arg(long)]
         ignore_disk: bool,
-        /// When sandbox_slots in config.toml has no free slot, refuse at once, naming its holder,
-        /// instead of waiting for one.
+        /// When sandbox_slots in config.toml (cloud_slots for cloud sandboxes) has no free slot,
+        /// refuse at once, naming its holder, instead of waiting for one.
         #[arg(long)]
         no_wait: bool,
         /// Run the tasks' sandboxes in Docker Cloud Sandboxes (default: [sandbox] location in

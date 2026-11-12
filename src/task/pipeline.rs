@@ -3071,6 +3071,18 @@ fn cloud_worker_gone(env: &TaskEnv, record: &Record) -> Result<bool> {
 /// lifetime entry, P5 (d)), and removed again when the gates end. What that says is in
 /// `prepared.events` and `prepared.warnings`.
 pub fn gate_on_demand(env: &TaskEnv, prepared: &mut Prepared, tiers: Tiers) -> Result<Gated> {
+    gate_on_demand_taking(env, prepared, tiers, &mut || Ok(crate::slot::Slot::none()))
+}
+
+/// [`gate_on_demand`], calling `take_cloud_slot` when a cloud worker sandbox is gone, once its
+/// rebuild's inputs are checked and before it is made, and holding what it gives until the gates
+/// end (issue 599).
+pub fn gate_on_demand_taking(
+    env: &TaskEnv,
+    prepared: &mut Prepared,
+    tiers: Tiers,
+    take_cloud_slot: &mut dyn FnMut() -> Result<crate::slot::Slot>,
+) -> Result<Gated> {
     // Before any listing: a listed name proves nothing about an ambiguous create (decision 268).
     super::resume::refuse_ambiguous(&prepared.record, "run its gates")?;
     if prepared.record.location == Location::Local {
@@ -3088,6 +3100,7 @@ pub fn gate_on_demand(env: &TaskEnv, prepared: &mut Prepared, tiers: Tiers) -> R
         return run_gates(env, prepared, "on-demand", tiers);
     }
     check_cloud_rebuild(env, &prepared.record, None)?;
+    let _slot = take_cloud_slot()?;
     let gated = ensure_cloud_worker(env, prepared, SandboxRole::Worker, "the gates")
         .and_then(|_| run_gates(env, prepared, "on-demand", tiers));
     stop_cloud_worker(env, prepared);

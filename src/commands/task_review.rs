@@ -179,7 +179,7 @@ pub fn run(
 
 /// The free-space check of the sandbox drive (decision 194), then the machine's sandbox slot
 /// for task `id`, held until the review ends (decision 304), for a review whose sandboxes run
-/// here: a cloud sandbox uses neither (P11, decision 262(h)).
+/// here; a cloud review skips the drive (P11, decision 262(h)) and holds a cloud slot (issue 599).
 fn check_disk(
     config_dir: &std::path::Path,
     opts: &Options,
@@ -187,12 +187,14 @@ fn check_disk(
     id: &str,
     warn: &mut dyn Write,
 ) -> Result<slot::Slot> {
-    if location == Location::Local {
-        let global = GlobalConfig::load(config_dir)?;
-        disk::require(&global, config_dir, &opts.disk)?;
-        return slot::take(&global, &opts.disk.slot, Some(id), warn);
+    let global = GlobalConfig::load(config_dir)?;
+    match location {
+        Location::Local => {
+            disk::require(&global, config_dir, &opts.disk)?;
+            slot::take(&global, &opts.disk.slot, Some(id), warn)
+        }
+        Location::Cloud => slot::take_cloud(&global, &opts.disk.slot, Some(id), warn),
     }
-    Ok(slot::Slot::none())
 }
 
 /// The committer identity a cloud worker sandbox made again for a fix round gives its clone

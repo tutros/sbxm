@@ -104,8 +104,8 @@ fn wait_for_room(config_dir: &Path, guard: &disk::Guard, warn: &mut dyn Write) -
     Ok(())
 }
 
-/// The machine's sandbox slot for a command whose sandboxes run at `location` (decision 304): a
-/// cloud one takes none.
+/// The machine's slot for a command whose sandboxes run at `location`: a sandbox slot here
+/// (decision 304), a cloud slot in the cloud (issue 599).
 fn take_slot(
     config_dir: &Path,
     guard: &disk::Guard,
@@ -113,14 +113,10 @@ fn take_slot(
     task: Option<String>,
     warn: &mut dyn Write,
 ) -> Result<slot::Slot> {
+    let config = GlobalConfig::load(config_dir)?;
     match location {
-        Location::Local => slot::take(
-            &GlobalConfig::load(config_dir)?,
-            &guard.slot,
-            task.as_deref(),
-            warn,
-        ),
-        Location::Cloud => Ok(slot::Slot::none()),
+        Location::Local => slot::take(&config, &guard.slot, task.as_deref(), warn),
+        Location::Cloud => slot::take_cloud(&config, &guard.slot, task.as_deref(), warn),
     }
 }
 
@@ -320,7 +316,7 @@ fn run_issue(
         pipeline::check_reviewer_inputs(config_dir, backend.located(location), &config, location)?;
         location
     };
-    // The machine's sandbox slot is held through the worker and the review (decision 304).
+    // The machine's slot is held through the worker and the review (decision 304, issue 599).
     let _slot = take_slot(
         config_dir,
         &opts.disk,
@@ -1050,7 +1046,7 @@ pub fn run_list(
         ..opts.clone()
     };
     preflight_targets(config_dir, opts, targets, github)?;
-    // The whole list holds one sandbox slot, through every target (decision 304).
+    // The whole list holds one slot, through every target (decision 304, issue 599).
     let _slot = take_slot(config_dir, &opts.disk, location, None, warn)?;
 
     let mut summaries: Vec<(String, bool)> = Vec::new();
