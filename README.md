@@ -534,7 +534,8 @@ Sandbox names are `sbxm-<project>-<harness>`. A task's are `sbxm-task-issue-<n>-
 is longer than 63 characters (issue 556): a longer one (a long spec task's, say) keeps its start and its role
 (`-claude`, `-review-codex`) and shortens the id to its leading part, its own hash or number (a spec id's `-0b24b8`)
 and a 6-digit hash of the whole id (12 digits for an id with no hash of its own), and `task.json` records the name
-used. When `sbx create` fails, the error (and `run.log`) carries what `sbx` said on stderr.
+used. When `sbx create` fails, the error carries what `sbx` said on stderr (masked, its last 2000 bytes), and so does `run.log`
+when the task's folder outlives the failure (a new task's first create that fails takes its folder with it).
 
 **What is it doing right now?**
 

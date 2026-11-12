@@ -113,11 +113,7 @@ impl SbxBackend {
                     Ok(n) => {
                         let _ = screen.write_all(&chunk[..n]);
                         let _ = screen.flush();
-                        kept.extend_from_slice(&chunk[..n]);
-                        // Only the end is ever shown: the start of a long output can go.
-                        if kept.len() > 2 * STDERR_KEPT {
-                            kept.drain(..kept.len() - STDERR_KEPT);
-                        }
+                        keep_tail(&mut kept, &chunk[..n]);
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                     Err(_) => break,
@@ -652,12 +648,27 @@ fn parse_custom_secrets(json: &str) -> Result<Vec<CustomSecret>> {
 /// How many bytes of `sbx create`'s stderr its error keeps, from the end.
 const STDERR_KEPT: usize = 2000;
 
-/// The error of an `sbx create` that failed with `status`: `sbx`'s stderr, trimmed, cut to its
-/// last [`STDERR_KEPT`] bytes, and with values that look like secrets masked as `run.log` masks
-/// them, so the error (and `run.log`, which gets it) names the cause (issue 556).
+/// Adds `chunk` to `kept`, the end of `sbx create`'s stderr so far. Only the end is ever shown,
+/// so past twice [`STDERR_KEPT`] the start goes, up to and including the first whitespace after
+/// the cut: a word (a secret, say) the cut lands in goes whole, never leaving a tail the masking
+/// can't recognize (review M-2). One word longer than that goes entirely.
+fn keep_tail(kept: &mut Vec<u8>, chunk: &[u8]) {
+    kept.extend_from_slice(chunk);
+    if kept.len() > 2 * STDERR_KEPT {
+        let cut = kept.len() - STDERR_KEPT;
+        match kept[cut..].iter().position(u8::is_ascii_whitespace) {
+            Some(at) => drop(kept.drain(..=cut + at)),
+            None => kept.clear(),
+        }
+    }
+}
+
+/// The error of an `sbx create` that failed with `status`: `sbx`'s stderr, trimmed, with values
+/// that look like secrets masked as `run.log` masks them, then cut to its last [`STDERR_KEPT`]
+/// bytes, so the error (and `run.log`, which gets it) names the cause (issue 556).
 fn create_failed(sandbox: &str, status: &str, stderr: &[u8]) -> String {
-    let text = String::from_utf8_lossy(stderr);
-    let text = text.trim();
+    // Masked before it is cut, so a cut never leaves part of a secret the mask can't see (M-2).
+    let text = crate::task::runlog::redact(String::from_utf8_lossy(stderr).trim());
     let reason = if text.is_empty() {
         "no output from sbx on stderr".to_owned()
     } else if text.len() > STDERR_KEPT {
@@ -667,12 +678,9 @@ fn create_failed(sandbox: &str, status: &str, stderr: &[u8]) -> String {
         }
         format!("...{}", text[start..].trim_start())
     } else {
-        text.to_owned()
+        text
     };
-    format!(
-        "`sbx create` failed for sandbox {sandbox} ({status}): {}",
-        crate::task::runlog::redact(&reason)
-    )
+    format!("`sbx create` failed for sandbox {sandbox} ({status}): {reason}")
 }
 
 /// `sbx`'s stderr, or its stdout when stderr is empty: S11 didn't check which one carries a
@@ -1510,6 +1518,49 @@ mod template_tests {
         let error = create_failed("s", "exit status: 1", long.as_bytes());
         assert!(error.ends_with("THE END"), "{error}");
         assert!(error.len() < STDERR_KEPT + 100, "{}", error.len());
+    }
+
+    /// Whether `text` has a run of 16 `a`s: a fragment of the dummy token the redactor no longer
+    /// sees as one.
+    fn token_fragment(text: &str) -> bool {
+        text.contains(&"a".repeat(16))
+    }
+
+    fn dummy_token() -> String {
+        format!("sk-{}", "a".repeat(30))
+    }
+
+    #[test]
+    fn a_token_across_the_final_cut_leaves_no_fragment() {
+        let stderr = format!("{}\n{}", dummy_token(), "x".repeat(STDERR_KEPT - 20));
+        let error = create_failed("s", "exit status: 1", stderr.as_bytes());
+        assert!(!token_fragment(&error), "{error}");
+        assert!(error.ends_with("xxxx"), "{error}");
+    }
+
+    #[test]
+    fn a_token_across_the_rolling_cut_leaves_no_fragment() {
+        let mut kept = Vec::new();
+        // The token starts at STDERR_KEPT + 500; the second chunk makes the buffer evict
+        // everything before STDERR_KEPT + 510, inside the token.
+        let first = format!("{} {}\n", "x".repeat(STDERR_KEPT + 499), dummy_token());
+        keep_tail(&mut kept, first.as_bytes());
+        keep_tail(&mut kept, "z".repeat(STDERR_KEPT - 25).as_bytes());
+        assert!(kept.len() <= 2 * STDERR_KEPT, "{}", kept.len());
+        let error = create_failed("s", "exit status: 1", &kept);
+        assert!(!token_fragment(&error), "{error}");
+        assert!(error.ends_with("zzzz"), "{error}");
+    }
+
+    #[test]
+    fn ordinary_stderr_survives_the_rolling_buffer() {
+        let mut kept = Vec::new();
+        for i in 0..1000 {
+            keep_tail(&mut kept, format!("line {i}\n").as_bytes());
+        }
+        assert!(kept.len() <= 2 * STDERR_KEPT, "{}", kept.len());
+        let error = create_failed("s", "exit status: 1", &kept);
+        assert!(error.ends_with("line 999"), "{error}");
     }
 
     #[test]
