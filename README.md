@@ -271,15 +271,16 @@ error. It isn't part of any config hash.
 - **A gone holder:** a slot whose process is gone (or whose pid now belongs to another process) is taken over at once,
   with one line naming the dead holder.
 
-`[resources] cloud_slots = N` (N of 1 or more) does the same for the commands that create a cloud sandbox (issue
-599): `task run`, `task start`, `task review`, `task fix --pr` and `task resume` of a cloud task, and `task gates` when
-it makes a cloud task's gone worker sandbox again. Its slots are a pool of their own, in a `cloud-slots` folder next
-to `slots` (`%LOCALAPPDATA%\sbxm\cloud-slots\` on Windows), so a cloud command and a local one never wait on each
-other, and a cloud command never takes a sandbox slot as well. Everything else is as above: one slot for the whole
-command (a cloud `task run`'s worker and reviewer count once), waiting in line with `waiting for a cloud slot: ...`,
-`--no-wait`, a loop's stop request, and a gone holder taken over. Unset, there is no limit and nothing is written;
-`cloud_slots = 0` is a config error. The count is this machine's: another machine on the same Docker account isn't
-counted.
+`[resources] cloud_slots = N` (N of 1 or more) does the same for the commands that create a cloud sandbox (issue 599):
+`task run`, `task start`, `task review`, `task fix --pr` and `task resume` of a cloud task, and `task gates` when it
+makes a cloud task's gone worker sandbox again. Its slots are a pool of their own, in a `cloud-slots` folder next to
+`slots` (`%LOCALAPPDATA%\sbxm\cloud-slots\` on Windows), so a cloud command and a local one never wait on each other,
+and a cloud command never takes a sandbox slot as well. The slot is taken once the command's inputs are all checked (a
+bad flag, base or PR is refused without waiting), and a `task resume --pr N` that only pushes takes none. Everything
+else is as above: one slot for the whole command (a cloud `task run`'s worker and reviewer count once), waiting in
+line with `waiting for a cloud slot: ...`, `--no-wait`, a loop's stop request, and a gone holder taken over. Unset,
+there is no limit and nothing is written; `cloud_slots = 0` is a config error. The count is this machine's: another
+machine on the same Docker account isn't counted.
 
 ### Profiles: `<profiles_dir>/<name>/profile.toml`
 

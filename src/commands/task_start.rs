@@ -380,10 +380,11 @@ fn start(
         }
         // A cloud sandbox doesn't use the drive of `sbx`'s local sandbox state (P11, decision
         // 262(h)). Every worker is preflighted here, before any is created (P15 (a)): they share
-        // the harness and the profile, so one check covers them all.
+        // the harness and the profile, so one check covers them all. Its cloud slot is taken
+        // below, once every input is checked.
         Location::Cloud => {
             pipeline::check_worker_inputs(config_dir, backend, &config, location)?;
-            slot::take_cloud(&global, &opts.disk.slot, task.as_deref(), warn)?
+            slot::Slot::none()
         }
     };
     let repo_name = resolve_repo(opts.repo.as_deref(), &opts.repo_root)?;
@@ -398,6 +399,12 @@ fn start(
     if !repo::valid_ref_name(&base_branch) {
         bail!("base {base_branch:?} isn't a usable branch name; pass --base <branch>");
     }
+    // Every input checked, before a `--restart` discards anything: a cloud start's cloud slot
+    // (issue 599).
+    let _cloud_slot = match location {
+        Location::Local => slot::Slot::none(),
+        Location::Cloud => slot::take_cloud(&global, &opts.disk.slot, task.as_deref(), warn)?,
+    };
     let clone_source = opts
         .clone_source
         .clone()
@@ -960,6 +967,7 @@ pub fn run_spec_with_seams(
             disk::require(&global, config_dir, &opts.disk)?;
             slot::take(&global, &opts.disk.slot, Some(&start.id), warn)?
         }
+        // Its flags, base and spec file were all checked in resolving it, above.
         Location::Cloud => slot::take_cloud(&global, &opts.disk.slot, Some(&start.id), warn)?,
     };
     run_spec_from(

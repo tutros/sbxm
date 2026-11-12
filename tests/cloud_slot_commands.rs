@@ -299,10 +299,11 @@ fn a_cloud_task_resume_holds_a_cloud_slot_and_gives_it_back() {
     let ran = resume(&f, spec, cloud_slot::full_until_first_wait(&f.env), &b);
 
     ran.result.expect(&ran.out);
+    // The resume takes it once its checks have passed, and says so on its progress lines.
     assert!(
-        ran.warn.contains("waiting for a cloud slot: held by"),
+        ran.out.contains("waiting for a cloud slot: held by"),
         "{}",
-        ran.warn
+        ran.out
     );
     assert_eq!(task_record(&f, &id).stage, Stage::Ready);
     assert!(cloud_slot::holder(&f.env).is_none());
@@ -340,6 +341,14 @@ fn a_cloud_task_review_with_no_free_cloud_slot_and_no_wait_refuses_creating_noth
     let first = cloud_backend(&cloud_fs(&f), &id, &[CLEAN]);
     let done = task_run(&f, spec.clone(), Some(Location::Cloud), &first);
     done.result.expect(&done.out);
+    // A review that failed: tried again, so every check passes and the cloud slot is all that
+    // is left.
+    let meta = record::task_dir(&f.env.base_dir(), &id);
+    let mut task = task_record(&f, &id);
+    task.stage = Stage::Reviewing;
+    task.status = Status::Failed;
+    record::write(&meta, &task).unwrap();
+    let task_json = std::fs::read(meta.join("task.json")).unwrap();
     let b = cloud_backend(&cloud_fs(&f), &id, &[CLEAN]);
     let opts = sbxm::commands::task_review::Options {
         repo_root: f.env.tmp.path().join("target-repo"),
@@ -373,6 +382,7 @@ fn a_cloud_task_review_with_no_free_cloud_slot_and_no_wait_refuses_creating_noth
 
     assert_refused(&ran(result, out, warn));
     assert!(b.creates().is_empty(), "{:?}", b.log());
+    assert_eq!(std::fs::read(meta.join("task.json")).unwrap(), task_json);
     assert_holder_kept(&f);
 }
 
@@ -465,8 +475,12 @@ fn cloud_gates_in_a_worker_sandbox_still_there_take_no_cloud_slot() {
 #[test]
 fn a_cloud_fix_with_no_free_cloud_slot_and_no_wait_refuses_creating_nothing() {
     let f = fixture_with(CLOUD_TOML);
-    let backend = FakeBackend::with_secrets(&["anthropic", "openai"]);
-    let github = FakeGitHub::default();
+    let head = common::fix_task::new_head(&f);
+    // Every input is good: the cloud slot is the only refusal left.
+    let backend = FakeBackend::with_secrets(&["anthropic", "openai"])
+        .with_version(common::cloud_task::CLOUD_MIN);
+    let github = common::fix_task::github_at(&head)
+        .with_pr_comments(7, vec![common::fix_task::posted_review(&head)]);
 
     let result = sbxm::commands::task_fix::run(
         &f.env.config_dir(),
@@ -490,8 +504,392 @@ fn a_cloud_fix_with_no_free_cloud_slot_and_no_wait_refuses_creating_nothing() {
 
     let err = format!("{:#}", result.unwrap_err());
     assert!(err.starts_with(&cloud_slot::refusal()), "{err}");
-    assert!(backend.log().is_empty(), "{:?}", backend.log());
-    assert!(github.calls().is_empty(), "{:?}", github.calls());
+    assert!(backend.creates().is_empty(), "{:?}", backend.log());
     assert!(!record::tasks_root(&f.env.base_dir()).exists());
+    assert_eq!(common::fix_task::origin_head(&f), head);
     assert_holder_kept(&f);
+}
+
+// ---- Review of issue 599, M-1 and M-2: the cloud slot comes after every input check, and only
+// for a command that goes on to make a cloud sandbox ----
+//
+// [`cloud_slot::full`] with `no_wait = false` is a full pool whose gate panics at the first wait:
+// a command that reaches the wait over a bad input fails these tests.
+
+/// The duration error a `--time-limit nonsense` gets.
+const BAD_LIMIT: &str = "--time-limit \"nonsense\" isn't a duration";
+
+fn assert_no_ticket(f: &Fixture) {
+    assert!(
+        cloud_slot::queue(&f.env).is_empty(),
+        "{:?}",
+        cloud_slot::queue(&f.env)
+    );
+    assert_holder_kept(f);
+}
+
+#[test]
+fn a_cloud_spec_run_with_a_bad_time_limit_says_so_before_the_cloud_slot() {
+    for no_wait in [false, true] {
+        let f = fixture_with(LOCAL_TOML);
+        let (spec, id) = spec(&f);
+        let b = cloud_backend(&cloud_fs(&f), &id, &[CLEAN]);
+        let mut opts = run_options(&f, spec, Some(Location::Cloud));
+        opts.time_limit = Some("nonsense".into());
+        opts.disk = cloud_slot::full(&f.env, no_wait);
+
+        let result = sbxm::commands::task_run::run_spec(
+            &f.env.config_dir(),
+            &opts,
+            None,
+            &b,
+            &FakeGitHub::default(),
+            &Probe,
+            &FakeHostRunner::default(),
+            &mut Vec::new(),
+            &mut Vec::new(),
+        );
+
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(err.contains(BAD_LIMIT), "no_wait {no_wait}: {err}");
+        assert!(b.creates().is_empty(), "{:?}", b.log());
+        assert_no_ticket(&f);
+    }
+}
+
+fn issue_github() -> FakeGitHub {
+    FakeGitHub::default()
+        .with_default_branch("main")
+        .with_issue_text(issue_text(41))
+        .with_open_issues(vec![open_issue(41, &["should-fix"], "")])
+}
+
+fn issue_run_options(f: &Fixture, disk: sbxm::disk::Guard) -> sbxm::commands::task_run::Options {
+    sbxm::commands::task_run::Options {
+        repo_root: f.env.tmp.path().join("target-repo"),
+        issue: 41,
+        worker_harness: None,
+        worker_model: None,
+        reviewer_harness: None,
+        reviewer_model: None,
+        time_limit: None,
+        reviewer_time_limit: None,
+        profile: None,
+        base: None,
+        repo: Some("o/r".into()),
+        clone_source: Some(common::task_fixture::source(f)),
+        identity: Some(identity()),
+        disk,
+        location: Some(Location::Cloud),
+    }
+}
+
+fn run_issue(f: &Fixture, opts: &sbxm::commands::task_run::Options, backend: &FakeBackend) -> Ran {
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let result = sbxm::commands::task_run::run(
+        &f.env.config_dir(),
+        opts,
+        None,
+        backend,
+        &issue_github(),
+        &Probe,
+        &FakeHostRunner::default(),
+        &mut out,
+        &mut warn,
+    );
+    ran(result, out, warn)
+}
+
+#[test]
+fn a_cloud_issue_run_with_a_bad_time_limit_or_base_says_so_before_the_cloud_slot() {
+    for (limit, base, expected) in [
+        (Some("nonsense"), None, BAD_LIMIT),
+        (None, Some("a..b"), "isn't a usable branch name"),
+    ] {
+        let f = fixture_with(LOCAL_TOML);
+        let b = cloud_backend_for(&cloud_fs(&f), &["issue-41"], &[CLEAN], true);
+        let mut opts = issue_run_options(&f, cloud_slot::full(&f.env, false));
+        opts.time_limit = limit.map(str::to_owned);
+        opts.base = base.map(str::to_owned);
+
+        let ran = run_issue(&f, &opts, &b);
+
+        let err = format!("{:#}", ran.result.unwrap_err());
+        assert!(err.contains(expected), "{err}");
+        assert!(b.creates().is_empty(), "{:?}", b.log());
+        assert_no_ticket(&f);
+    }
+}
+
+/// The issue run takes its cloud slot inside its start, after the start's own checks, and holds
+/// that one slot on through the review.
+#[test]
+fn a_cloud_issue_run_holds_one_cloud_slot_through_worker_and_review() {
+    let f = fixture_with(LOCAL_TOML);
+    let disk = cloud_slot::free(&f.env);
+    let slot = cloud_slot::cloud_slot_file(&f.env);
+    let tokens = std::sync::Arc::new(Mutex::new(Vec::<(String, String)>::new()));
+    let seen = std::sync::Arc::clone(&tokens);
+    let b = cloud_backend_observing(
+        &cloud_fs(&f),
+        &["issue-41"],
+        &[CLEAN],
+        true,
+        ok(CLAUDE_DONE),
+        move |sandbox, _, spec| {
+            if !is_headless(spec) {
+                return;
+            }
+            let held: sbxm::slot::Holder =
+                serde_json::from_str(&std::fs::read_to_string(&slot).unwrap()).unwrap();
+            assert_eq!(held.process.pid, std::process::id(), "{sandbox}");
+            seen.lock().unwrap().push((sandbox.to_owned(), held.token));
+        },
+    );
+
+    let ran = run_issue(&f, &issue_run_options(&f, disk), &b);
+
+    ran.result.expect(&ran.out);
+    let tokens = tokens.lock().unwrap();
+    assert!(
+        tokens.iter().any(|(s, _)| s.contains("-review-")),
+        "{tokens:?}"
+    );
+    assert!(
+        tokens.iter().any(|(s, _)| !s.contains("-review-")),
+        "{tokens:?}"
+    );
+    assert!(tokens.iter().all(|(_, t)| *t == tokens[0].1), "{tokens:?}");
+    assert!(
+        cloud_slot::holder(&f.env).is_none(),
+        "given back at the end"
+    );
+    assert!(cloud_slot::queue(&f.env).is_empty());
+}
+
+#[test]
+fn a_cloud_issue_start_with_a_bad_base_says_so_before_the_cloud_slot() {
+    let f = fixture_with(LOCAL_TOML);
+    let b = cloud_backend_for(&cloud_fs(&f), &["issue-41"], &[CLEAN], true);
+    let opts = sbxm::commands::task_start::Options {
+        repo_root: f.env.tmp.path().join("target-repo"),
+        issues: vec![41],
+        workers: None,
+        worker_harness: None,
+        worker_model: None,
+        time_limit: None,
+        reviewer_time_limit: None,
+        profile: None,
+        base: Some("a..b".into()),
+        repo: Some("o/r".into()),
+        clone_source: Some(common::task_fixture::source(&f)),
+        identity: Some(identity()),
+        disk: cloud_slot::full(&f.env, false),
+        location: Some(Location::Cloud),
+    };
+
+    let result = sbxm::commands::task_start::run(
+        &f.env.config_dir(),
+        &opts,
+        &b,
+        &issue_github(),
+        &Probe,
+        &mut Vec::new(),
+        &mut Vec::new(),
+    );
+
+    let err = format!("{:#}", result.unwrap_err());
+    assert!(err.contains("isn't a usable branch name"), "{err}");
+    assert!(b.creates().is_empty(), "{:?}", b.log());
+    assert_no_ticket(&f);
+}
+
+#[test]
+fn a_cloud_fix_of_a_closed_pr_says_so_before_the_cloud_slot() {
+    let f = fixture_with(CLOUD_TOML);
+    let backend = FakeBackend::with_secrets(&["anthropic", "openai"]);
+    let github = FakeGitHub::default()
+        .with_user("tutros")
+        .with_default_branch("main")
+        .with_pr(sbxm::github::PrInfo {
+            state: sbxm::github::PrState::Closed,
+            ..common::fix_task::pr7("0123456789abcdef0123456789abcdef01234567")
+        });
+
+    let result = sbxm::commands::task_fix::run(
+        &f.env.config_dir(),
+        &sbxm::commands::task_fix::Options {
+            repo_root: f.env.tmp.path().join("target-repo"),
+            pr: 7,
+            repo: Some("o/r".into()),
+            base: None,
+            clone_source: Some(common::task_fixture::source(&f)),
+            identity: Some(identity()),
+            disk: cloud_slot::full(&f.env, false),
+            check_run: None,
+        },
+        &backend,
+        &github,
+        &Probe,
+        &FakeHostRunner::default(),
+        &mut Vec::new(),
+        &mut Vec::new(),
+    );
+
+    let err = format!("{:#}", result.unwrap_err());
+    assert!(!err.contains("cloud slot"), "{err}");
+    assert!(err.contains("closed"), "{err}");
+    assert!(backend.creates().is_empty(), "{:?}", backend.log());
+    assert_no_ticket(&f);
+}
+
+fn review_spec(
+    f: &Fixture,
+    spec: PathBuf,
+    force: bool,
+    disk: sbxm::disk::Guard,
+    b: &FakeBackend,
+) -> Ran {
+    let opts = sbxm::commands::task_review::Options {
+        repo_root: f.env.tmp.path().join("target-repo"),
+        target: sbxm::commands::task_review::Target::Spec(spec),
+        repo: Some("o/r".into()),
+        base: None,
+        clone_source: Some(common::task_fixture::source(f)),
+        reviewer_harness: None,
+        reviewer_model: None,
+        reviewer_time_limit: None,
+        time_limit: None,
+        profile: None,
+        resolved_spec_id: None,
+        force,
+        disk,
+        location: None,
+        identity: Some(identity()),
+    };
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+    let result = sbxm::commands::task_review::run(
+        &f.env.config_dir(),
+        &opts,
+        b,
+        &FakeGitHub::default(),
+        &Probe,
+        &FakeHostRunner::default(),
+        &mut out,
+        &mut warn,
+    );
+    ran(result, out, warn)
+}
+
+#[test]
+fn a_cloud_review_of_a_task_already_ready_says_so_before_the_cloud_slot() {
+    let f = fixture_with(LOCAL_TOML);
+    let (spec, id) = spec(&f);
+    let first = cloud_backend(&cloud_fs(&f), &id, &[CLEAN]);
+    let done = task_run(&f, spec.clone(), Some(Location::Cloud), &first);
+    done.result.expect(&done.out);
+    let b = cloud_backend(&cloud_fs(&f), &id, &[CLEAN]);
+
+    let ran = review_spec(&f, spec, false, cloud_slot::full(&f.env, false), &b);
+
+    let err = format!("{:#}", ran.result.unwrap_err());
+    assert!(err.contains("already ready"), "{err}");
+    assert!(b.creates().is_empty(), "{:?}", b.log());
+    assert_no_ticket(&f);
+}
+
+#[test]
+fn a_cloud_pr_review_with_a_bad_base_says_so_before_the_cloud_slot() {
+    let f = fixture_with(CLOUD_TOML);
+    let backend = FakeBackend::with_secrets(&["anthropic", "openai"]);
+    let opts = sbxm::commands::task_review::Options {
+        repo_root: f.env.tmp.path().join("target-repo"),
+        target: sbxm::commands::task_review::Target::Pr(7),
+        repo: Some("o/r".into()),
+        base: Some("a..b".into()),
+        clone_source: Some(common::task_fixture::source(&f)),
+        reviewer_harness: None,
+        reviewer_model: None,
+        reviewer_time_limit: None,
+        time_limit: None,
+        profile: None,
+        resolved_spec_id: None,
+        force: false,
+        disk: cloud_slot::full(&f.env, false),
+        location: None,
+        identity: Some(identity()),
+    };
+
+    let result = sbxm::commands::task_review::run(
+        &f.env.config_dir(),
+        &opts,
+        &backend,
+        &FakeGitHub::default(),
+        &Probe,
+        &FakeHostRunner::default(),
+        &mut Vec::new(),
+        &mut Vec::new(),
+    );
+
+    let err = format!("{:#}", result.unwrap_err());
+    assert!(err.contains("isn't a usable branch name"), "{err}");
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert_no_ticket(&f);
+}
+
+/// M-2: a ready cloud fix with only its push left makes no sandbox, so it takes no cloud slot.
+#[test]
+fn a_push_only_resume_of_a_cloud_fix_takes_no_cloud_slot() {
+    let f = common::fix_task::config();
+    let head = common::fix_task::new_head(&f);
+    let id = common::fix_task::ready_fix(&f, &head);
+    let meta = record::task_dir(&f.env.base_dir(), &id);
+    let mut task = task_record(&f, &id);
+    task.location = Location::Cloud;
+    record::write(&meta, &task).unwrap();
+    let backend = FakeBackend::with_secrets(&["anthropic", "openai"]);
+    let (mut out, mut warn) = (Vec::new(), Vec::new());
+
+    let result = sbxm::commands::task_resume::run(
+        &f.env.config_dir(),
+        &sbxm::commands::task_resume::Options {
+            repo_root: f.env.tmp.path().join("target-repo"),
+            target: sbxm::commands::task_resume::Target::Pr(7),
+            rounds: None,
+            should_fix: false,
+            disk: cloud_slot::full(&f.env, true),
+            identity: None,
+            forget_ambiguous: false,
+        },
+        &backend,
+        &common::fix_task::github_at(&head),
+        &Gone,
+        &FakeHostRunner::default(),
+        &mut out,
+        &mut warn,
+    );
+
+    let ran = ran(result, out, warn);
+    ran.result.expect(&ran.out);
+    assert!(
+        ran.out.contains("resuming from ready: its push"),
+        "{}",
+        ran.out
+    );
+    assert!(backend.log().is_empty(), "{:?}", backend.log());
+    assert_no_ticket(&f);
+}
+
+/// A cloud resume that goes on to make a sandbox still meets the cloud limit, once its checks
+/// have passed.
+#[test]
+fn a_cloud_resume_that_makes_a_sandbox_still_waits_for_the_cloud_slot() {
+    let f = fixture_with(LOCAL_TOML);
+    let (spec, id) = failed_cloud_task(&f);
+    let b = common::cloud_task::cloud_backend_listing(&cloud_fs(&f), &id, &[CLEAN], false);
+
+    let ran = resume(&f, spec, cloud_slot::full(&f.env, true), &b);
+
+    assert_refused(&ran);
+    assert!(b.creates().is_empty(), "{:?}", b.log());
 }

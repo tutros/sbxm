@@ -104,8 +104,9 @@ fn wait_for_room(config_dir: &Path, guard: &disk::Guard, warn: &mut dyn Write) -
     Ok(())
 }
 
-/// The machine's slot for a command whose sandboxes run at `location`: a sandbox slot here
-/// (decision 304), a cloud slot in the cloud (issue 599).
+/// The machine's sandbox slot for a command whose sandboxes run at `location` (decision 304). A
+/// cloud one's steps take its cloud slot once their own inputs are checked (issue 599), and the
+/// caller's [`slot::Hold`] keeps it to the end.
 fn take_slot(
     config_dir: &Path,
     guard: &disk::Guard,
@@ -113,10 +114,14 @@ fn take_slot(
     task: Option<String>,
     warn: &mut dyn Write,
 ) -> Result<slot::Slot> {
-    let config = GlobalConfig::load(config_dir)?;
     match location {
-        Location::Local => slot::take(&config, &guard.slot, task.as_deref(), warn),
-        Location::Cloud => slot::take_cloud(&config, &guard.slot, task.as_deref(), warn),
+        Location::Local => slot::take(
+            &GlobalConfig::load(config_dir)?,
+            &guard.slot,
+            task.as_deref(),
+            warn,
+        ),
+        Location::Cloud => Ok(slot::Slot::none()),
     }
 }
 
@@ -317,6 +322,7 @@ fn run_issue(
         location
     };
     // The machine's slot is held through the worker and the review (decision 304, issue 599).
+    let _hold = slot::hold();
     let _slot = take_slot(
         config_dir,
         &opts.disk,
@@ -591,6 +597,17 @@ fn run_spec_task(
         &resolved.config,
         location,
     )?;
+    // Every input checked, before `--restart` discards anything: a cloud run's cloud slot, held
+    // through the worker and the review (issue 599).
+    let _cloud_slot = match location {
+        Location::Local => slot::Slot::none(),
+        Location::Cloud => slot::take_cloud(
+            &GlobalConfig::load(config_dir)?,
+            &opts.disk.slot,
+            Some(&resolved.id),
+            warn,
+        )?,
+    };
 
     let mut aside: Option<finish::SetAside> = None;
     if let Some(restart) = restart {
@@ -1047,6 +1064,7 @@ pub fn run_list(
     };
     preflight_targets(config_dir, opts, targets, github)?;
     // The whole list holds one slot, through every target (decision 304, issue 599).
+    let _hold = slot::hold();
     let _slot = take_slot(config_dir, &opts.disk, location, None, warn)?;
 
     let mut summaries: Vec<(String, bool)> = Vec::new();

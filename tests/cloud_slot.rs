@@ -386,3 +386,56 @@ fn status_names_the_cloud_holders_in_one_line() {
     // The local line reads its own folder only.
     assert_eq!(slot::status_line(1, &gate), "sandbox slots: 0 of 1 held");
 }
+
+// ---- Review of issue 599, M-1: `slot::hold` keeps a step's slot to the end of the command ----
+
+#[test]
+fn a_hold_keeps_a_step_s_slot_until_it_ends_and_the_next_step_reuses_it() {
+    let env = Env::new();
+    let config = config(&env, &["cloud_slots = 1"]);
+    let (gate, _) = gate(&env, vec![], |_| {
+        panic!("the next step waited on its own command")
+    });
+    let path = slot_file(&cloud_dir(&env), 1);
+    let hold = slot::hold();
+    // The start takes it after its own checks, and ends.
+    let start = slot::take_cloud(&config, &gate, Some("issue-1"), &mut Vec::new()).unwrap();
+    drop(start);
+    assert!(path.exists(), "kept between the steps");
+    // The review finds it held.
+    let review = slot::take_cloud(&config, &gate, Some("issue-1"), &mut Vec::new()).unwrap();
+    assert_eq!(review.path(), Some(path.as_path()));
+    drop(review);
+    assert!(path.exists());
+    drop(hold);
+    assert!(!path.exists(), "given back with the hold");
+}
+
+#[test]
+fn without_a_hold_a_step_s_slot_goes_when_it_ends() {
+    let env = Env::new();
+    let config = config(&env, &["cloud_slots = 1"]);
+    let (gate, _) = gate(&env, vec![], |_| panic!("waited"));
+    let path = slot_file(&cloud_dir(&env), 1);
+    {
+        let _hold = slot::hold();
+    }
+    let step = slot::take_cloud(&config, &gate, None, &mut Vec::new()).unwrap();
+    drop(step);
+    assert!(!path.exists());
+}
+
+#[test]
+fn an_inner_hold_gives_back_nothing_the_outer_one_still_keeps() {
+    let env = Env::new();
+    let config = config(&env, &["cloud_slots = 1"]);
+    let (gate, _) = gate(&env, vec![], |_| panic!("waited"));
+    let path = slot_file(&cloud_dir(&env), 1);
+    let outer = slot::hold();
+    let inner = slot::hold();
+    drop(slot::take_cloud(&config, &gate, None, &mut Vec::new()).unwrap());
+    drop(inner);
+    assert!(path.exists(), "the outer hold keeps it");
+    drop(outer);
+    assert!(!path.exists());
+}

@@ -337,6 +337,35 @@ impl Slot {
 thread_local! {
     /// The slot of each pool this thread's command holds, so a nested take is the same slot.
     static HELD: RefCell<[Weak<Owned>; 2]> = const { RefCell::new([Weak::new(), Weak::new()]) };
+    /// The slots this thread took while a [`Hold`] lives, and how many holds are open.
+    static KEPT: RefCell<(usize, Vec<Arc<Owned>>)> = const { RefCell::new((0, Vec::new())) };
+}
+
+/// While it lives, every slot this thread takes stays held, also once the step that took it has
+/// ended (issue 599). A command made of steps that each check their own inputs before taking the
+/// slot (`task run`: a start, then a review) holds one, so its first step's slot carries on
+/// through the rest, and no other command takes it in between.
+#[derive(Debug)]
+pub struct Hold(());
+
+/// Opens a [`Hold`].
+pub fn hold() -> Hold {
+    KEPT.with(|kept| kept.borrow_mut().0 += 1);
+    Hold(())
+}
+
+impl Drop for Hold {
+    fn drop(&mut self) {
+        let given_back = KEPT.with(|kept| {
+            let mut kept = kept.borrow_mut();
+            kept.0 -= 1;
+            match kept.0 {
+                0 => std::mem::take(&mut kept.1),
+                _ => Vec::new(),
+            }
+        });
+        drop(given_back);
+    }
 }
 
 fn held_index(pool: Pool) -> usize {
@@ -420,6 +449,12 @@ fn take_in(
     }
     let owned = Arc::new(owned);
     HELD.with(|held| held.borrow_mut()[held_index(pool)] = Arc::downgrade(&owned));
+    KEPT.with(|kept| {
+        let mut kept = kept.borrow_mut();
+        if kept.0 > 0 {
+            kept.1.push(Arc::clone(&owned));
+        }
+    });
     Ok(Slot(Some(owned)))
 }
 

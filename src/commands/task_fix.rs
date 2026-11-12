@@ -83,15 +83,15 @@ pub fn run(
     }
     let location = pipeline::choose_location(None, &config);
     let global = GlobalConfig::load(config_dir)?;
-    // Held until the fix ends: a sandbox slot (decision 304), a cloud fix's a cloud slot (issue
-    // 599).
+    // Held until the fix ends (decision 304); a cloud fix takes a cloud slot below, once all its
+    // inputs are checked (issue 599).
     let task = format!("fix of PR #{number}");
     let _slot = match location {
         Location::Local => {
             disk::require(&global, config_dir, &opts.disk)?;
             slot::take(&global, &opts.disk.slot, Some(&task), warn)?
         }
-        Location::Cloud => slot::take_cloud(&global, &opts.disk.slot, Some(&task), warn)?,
+        Location::Cloud => slot::Slot::none(),
     };
     let backend = backend.located(location);
 
@@ -123,6 +123,11 @@ pub fn run(
     let identity = match &opts.identity {
         Some(identity) => identity.clone(),
         None => Identity::read_from(None)?,
+    };
+    // Every input checked: a cloud fix's cloud slot, held until it ends (issue 599).
+    let _cloud_slot = match location {
+        Location::Local => slot::Slot::none(),
+        Location::Cloud => slot::take_cloud(&global, &opts.disk.slot, Some(&task), warn)?,
     };
     let clone_source = opts
         .clone_source

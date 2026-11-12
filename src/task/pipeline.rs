@@ -368,6 +368,46 @@ pub struct TaskEnv<'a> {
 /// A [`TaskEnv::progress`] that prints nothing.
 pub fn quiet(_line: &str) {}
 
+/// The machine's cloud slot for a step of a cloud task, taken by the step once its checks have
+/// passed and before it changes anything (issue 599), held until the returned handle (or the
+/// command's [`crate::slot::Hold`]) is dropped. None for a local task: its command took a sandbox
+/// slot (decision 304). A wait's lines go to `env.progress`.
+pub fn take_cloud_slot(env: &TaskEnv, record: &Record) -> Result<crate::slot::Slot> {
+    if record.location != Location::Cloud {
+        return Ok(crate::slot::Slot::none());
+    }
+    let global = GlobalConfig::load(env.config_dir)?;
+    let mut lines = Lines {
+        say: env.progress,
+        line: Vec::new(),
+    };
+    crate::slot::take_cloud(&global, &env.disk.slot, Some(&record.id), &mut lines)
+}
+
+/// Passes each whole line written to it on to `say`.
+struct Lines<'a> {
+    say: &'a dyn Fn(&str),
+    line: Vec<u8>,
+}
+
+impl std::io::Write for Lines<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        for &byte in buf {
+            if byte == b'\n' {
+                (self.say)(&String::from_utf8_lossy(&self.line));
+                self.line.clear();
+            } else {
+                self.line.push(byte);
+            }
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 impl Ctx<'_> {
     /// The task's environment, printing no phase start line.
     pub fn env(&self) -> TaskEnv<'_> {
@@ -3670,6 +3710,7 @@ pub fn review_issue(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewRepo
     // Refused before the gates run when no review round number is left (worked out again after
     // them, as their fix rounds count).
     next_review_round(prepared)?;
+    let _slot = take_cloud_slot(env, &prepared.record)?;
     let reviewed = review_checked(env, prepared, report);
     stop_cloud_worker(env, prepared);
     // A fix round that failed, or gates that stopped the task, end its phase too (issue 341).
@@ -4007,6 +4048,9 @@ pub fn review_pr(
     let listed = check_changed_paths(prepared)?;
     keep_listed(prepared, listed);
     let round = next_review_round(prepared)?;
+    // Every refusal is behind: a cloud review takes its cloud slot (issue 599); a new task's
+    // command took it before preparing it, which this finds held.
+    let _slot = take_cloud_slot(env, &prepared.record)?;
     if let Some(context) = context {
         fs::write(prepared.meta.join("issue.md"), context)?;
     }
