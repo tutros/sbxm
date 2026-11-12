@@ -91,7 +91,7 @@ fn a_new_log_gets_its_header_then_the_row() {
     let tmp = tempfile::TempDir::new().unwrap();
     let path = tmp.path().join("sdlc/batches/2025-10-23-loop.md");
 
-    assert!(append_row(&path, &row(291)).unwrap());
+    assert!(append_row(&path, "o/r", &row(291)).unwrap());
 
     let text = fs::read_to_string(&path).unwrap();
     assert!(text.starts_with("# Loop log"), "{text}");
@@ -115,9 +115,12 @@ fn a_new_log_gets_its_header_then_the_row() {
 fn rows_are_numbered_and_an_issue_already_logged_is_not_logged_again() {
     let tmp = tempfile::TempDir::new().unwrap();
     let path = tmp.path().join("loop.md");
-    assert!(append_row(&path, &row(291)).unwrap());
-    assert!(append_row(&path, &row(292)).unwrap());
-    assert!(!append_row(&path, &row(291)).unwrap(), "already logged");
+    assert!(append_row(&path, "o/r", &row(291)).unwrap());
+    assert!(append_row(&path, "o/r", &row(292)).unwrap());
+    assert!(
+        !append_row(&path, "o/r", &row(291)).unwrap(),
+        "already logged"
+    );
 
     let text = fs::read_to_string(&path).unwrap();
     assert_eq!(text.matches("#291 ").count(), 1, "{text}");
@@ -140,7 +143,7 @@ fn a_task_that_never_got_ready_shows_dashes_and_no_stops_shows_none() {
         idle_before: None,
         ..row(5)
     };
-    append_row(&path, &parked).unwrap();
+    append_row(&path, "o/r", &parked).unwrap();
     let text = fs::read_to_string(&path).unwrap();
     assert!(
         text.contains(

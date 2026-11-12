@@ -107,6 +107,10 @@ Decision 317: `sdlc/decisions/` (issue #561's planning interview; evidence from 
 
 Decisions 318-320: `sdlc/decisions/` (`sdlc/retros/2026-11-11-retro.md`).
 
+## Round 20: milestone 5 plan choices (2026-11-11)
+
+Decision 321: `sdlc/decisions/` (issue #561, `sdlc/milestone-5.md`).
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.

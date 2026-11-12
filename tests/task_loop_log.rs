@@ -239,6 +239,11 @@ struct Run {
 }
 
 fn run_loop(f: &Fixture, script: &Script, gh: &FakeGitHub) -> Run {
+    run_loop_for(f, script, gh, REPO)
+}
+
+/// [`run_loop`] for the repository `repo`.
+fn run_loop_for(f: &Fixture, script: &Script, gh: &FakeGitHub, repo: &str) -> Run {
     let now = || script.clock.get();
     let sleep = |d: Duration| script.clock.set(script.clock.get() + d.as_secs());
     let env = Env {
@@ -253,7 +258,7 @@ fn run_loop(f: &Fixture, script: &Script, gh: &FakeGitHub) -> Run {
             repo_root: f.repo_root.clone(),
             issues: Vec::new(),
             cap: Some(1),
-            repo: Some(REPO.into()),
+            repo: Some(repo.into()),
             wait: false,
         },
         script,
@@ -503,13 +508,23 @@ fn a_loop_that_runs_no_task_posts_nothing() {
 const LATE: &str = "Posted late by the loop started 2026-11-08T10:00:00Z: the loop that wrote it \
                     ended without its stop (Ctrl-C, a crash or a restart).";
 
-/// An earlier loop's log, started `ago` seconds before `START`, with `rows` rows.
+/// An earlier loop's log of [`REPO`], started `ago` seconds before `START`, with `rows` rows.
 fn plant_earlier(f: &Fixture, ago: u64, rows: usize) -> PathBuf {
+    plant_headed(f, ago, rows, &own_table(REPO))
+}
+
+/// An earlier loop's log under `table`, started `ago` seconds before `START`, with `rows` rows.
+fn plant_headed(f: &Fixture, ago: u64, rows: usize, table: &str) -> PathBuf {
     fs::create_dir_all(f.logs()).unwrap();
     let path = loop_log::path(&f.env.base_dir(), START - ago);
     let rows: String = (1..=rows).map(|n| row(n, 40)).collect();
-    fs::write(&path, format!("{TABLE}{rows}")).unwrap();
+    fs::write(&path, format!("{table}{rows}")).unwrap();
     path
+}
+
+/// A log's header naming `repo` (issue 602).
+fn own_table(repo: &str) -> String {
+    format!("# Loop log\n\nRepository: {repo}\n\n| # | Issue |\n|---|---|\n")
 }
 
 /// A loop that runs no task of its own, so it posts nothing at its stop.
@@ -663,6 +678,154 @@ fn with_no_open_loop_log_issue_a_late_post_creates_one_as_the_stop_does() {
     assert_eq!(posted, [900, 900]);
 }
 
+// --- Issue 602: a loop recovers only its own repository's logs ---
+
+/// The repository, issue and body of every `issue_comment`.
+fn comments_to(gh: &FakeGitHub) -> Vec<(String, u32, String)> {
+    gh.calls()
+        .into_iter()
+        .filter_map(|c| match c {
+            GhCall::IssueComment(repo, number, body) => Some((repo, number, body)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_new_logs_header_names_the_loops_repository() {
+    let f = fixture();
+    let gh = github(vec![loop_log_issue(40)]);
+
+    run_loop(&f, &Script::new(START), &gh).result.unwrap();
+
+    let text = fs::read_to_string(&f.log_files()[0]).unwrap();
+    let header = &text[..text.find("|---").unwrap()];
+    assert!(header.contains("\nRepository: o/r\n"), "{text}");
+}
+
+#[test]
+fn an_unposted_log_of_another_repository_is_left_alone() {
+    let f = fixture();
+    let other = plant_headed(&f, 86_400, 2, &own_table("a/other"));
+    let gh = github(vec![loop_log_issue(40)]);
+
+    let run = run_loop(&f, &idle_script(), &gh);
+
+    run.result.unwrap();
+    assert_eq!(comments(&gh), []);
+    assert_eq!(creates(&gh), []);
+    assert!(!loop_log::marker(&other).exists());
+    assert_eq!(run.warn, "");
+}
+
+#[test]
+fn a_log_naming_the_repository_in_other_case_is_recovered() {
+    let f = fixture();
+    let earlier = plant_headed(&f, 86_400, 1, &own_table("O/R"));
+    let gh = github(vec![loop_log_issue(40)]);
+
+    run_loop(&f, &idle_script(), &gh).result.unwrap();
+
+    assert_eq!(comments(&gh).len(), 1);
+    assert!(loop_log::marker(&earlier).exists());
+}
+
+#[test]
+fn an_old_log_without_a_repository_line_is_skipped_with_one_warning_and_marked() {
+    let f = fixture();
+    let first = plant_headed(&f, 86_400, 1, TABLE);
+    let second = plant_headed(&f, 3_600, 2, TABLE);
+    let gh = github(vec![loop_log_issue(40)]);
+
+    let run = run_loop(&f, &idle_script(), &gh);
+
+    run.result.unwrap();
+    assert_eq!(comments(&gh), []);
+    assert_eq!(creates(&gh), []);
+    assert_eq!(run.warn.lines().count(), 1, "{}", run.warn);
+    for log in [&first, &second] {
+        assert!(
+            run.warn.contains(&log.display().to_string()),
+            "{}",
+            run.warn
+        );
+        assert!(loop_log::marker(log).exists());
+    }
+
+    let run = run_loop(&f, &idle_script(), &gh);
+
+    run.result.unwrap();
+    assert_eq!(comments(&gh), []);
+    assert_eq!(run.warn, "", "no warning at the next start");
+}
+
+#[test]
+fn a_malformed_repository_line_is_treated_as_none() {
+    for line in [
+        "Repository: ",
+        "Repository: o",
+        "Repository: o/r/x",
+        "Repository: /r",
+        "Repository: o/",
+        "Repository: o r/x",
+        "Repository: `o/r`",
+    ] {
+        let f = fixture();
+        let table = format!("# Loop log\n\n{line}\n\n| # | Issue |\n|---|---|\n");
+        let log = plant_headed(&f, 86_400, 1, &table);
+        let gh = github(vec![loop_log_issue(40)]);
+
+        let run = run_loop(&f, &idle_script(), &gh);
+
+        run.result.unwrap();
+        assert_eq!(comments(&gh), [], "{line}");
+        assert_eq!(run.warn.lines().count(), 1, "{line}: {}", run.warn);
+        assert!(
+            run.warn.contains(&log.display().to_string()),
+            "{line}: {}",
+            run.warn
+        );
+        assert!(loop_log::marker(&log).exists(), "{line}");
+        assert_eq!(run_loop(&f, &idle_script(), &gh).warn, "", "{line}");
+    }
+}
+
+#[test]
+fn two_repositories_loops_on_one_base_dir_each_post_only_their_own_log() {
+    let f = fixture();
+    let ours = plant_headed(&f, 86_400, 1, &own_table(REPO));
+    let theirs = plant_headed(&f, 3_600, 2, &own_table("a/other"));
+    let gh = github(vec![loop_log_issue(40)]);
+
+    let run = run_loop_for(&f, &idle_script(), &gh, REPO);
+
+    run.result.unwrap();
+    let posted = comments_to(&gh);
+    assert_eq!(posted.len(), 1);
+    assert_eq!(posted[0].0, REPO);
+    assert!(
+        posted[0].2.contains(&ours.display().to_string()),
+        "{}",
+        posted[0].2
+    );
+    assert!(loop_log::marker(&ours).exists());
+    assert!(!loop_log::marker(&theirs).exists());
+
+    let run = run_loop_for(&f, &idle_script(), &gh, "a/other");
+
+    run.result.unwrap();
+    assert_eq!(run.warn, "");
+    let posted = comments_to(&gh);
+    assert_eq!(posted.len(), 2, "theirs, once, after ours");
+    assert_eq!(posted[1].0, "a/other");
+    assert!(
+        posted[1].2.contains(&theirs.display().to_string()),
+        "{}",
+        posted[1].2
+    );
+    assert!(loop_log::marker(&theirs).exists());
+}
+
 // --- Issue 594, review M-1: logs posted before markers existed; review M-2: one bad log ---
 
 /// A log the stop of a loop from before the markers posted: on GitHub, with no marker.
@@ -803,7 +966,7 @@ fn with_999_1000_or_1001_other_issues_logs_are_still_recovered_once() {
 fn plant_split(f: &Fixture) -> (PathBuf, String) {
     fs::create_dir_all(f.logs()).unwrap();
     let path = loop_log::path(&f.env.base_dir(), START - 86_400);
-    let text = format!("{TABLE}{}{}", row(1, 40_000), row(2, 40_000));
+    let text = format!("{}{}{}", own_table(REPO), row(1, 40_000), row(2, 40_000));
     fs::write(&path, &text).unwrap();
     (path, text)
 }
@@ -837,7 +1000,7 @@ fn a_split_log_with_only_its_first_part_on_github_gets_the_missing_rows_posted_l
     assert!(body.contains(&log.display().to_string()));
     assert!(body.contains(&row(2, 40_000)), "the missing row");
     assert!(!body.contains(&row(1, 40_000)), "not the row already there");
-    assert!(body.contains(TABLE), "with the table's header");
+    assert!(body.contains(&own_table(REPO)), "with the table's header");
     assert!(loop_log::marker(&log).exists());
 
     run_loop(&f, &idle_script(), &gh).result.unwrap();
