@@ -711,6 +711,7 @@ fn the_real_cleanup_step_removes_a_finished_task_whose_pr_merged_and_keeps_an_op
         host: &host,
         disk: sbxm::disk::Guard::default(),
         stop: None,
+        spawner: &common::child::NoChild::default(),
     };
 
     steps.rm_merged(&mut Vec::new(), &mut Vec::new()).unwrap();

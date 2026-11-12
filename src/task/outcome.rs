@@ -169,22 +169,23 @@ pub fn path(dir: &Path) -> PathBuf {
 
 /// Removes the outcome an earlier run left in `dir`, if any.
 pub fn remove(dir: &Path) -> Result<()> {
-    let path = path(dir);
-    match fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(e).with_context(|| format!("cannot remove {}", path.display())),
-    }
+    remove_file(&path(dir))
 }
 
 /// Writes `outcome` into the existing task folder `dir`, through a temp file and a rename.
 pub fn write(dir: &Path, outcome: &Outcome) -> Result<()> {
-    let path = path(dir);
-    let tmp = dir.join(format!("{FILE}.tmp"));
+    write_file(&path(dir), outcome)
+}
+
+/// Writes `outcome` as the file `path`, through a temp file next to it and a rename.
+pub fn write_file(path: &Path, outcome: &Outcome) -> Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(".tmp");
+    let tmp = PathBuf::from(tmp);
     let mut text = serde_json::to_string_pretty(outcome)?;
     text.push('\n');
     fs::write(&tmp, text).with_context(|| format!("cannot write {}", tmp.display()))?;
-    fs::rename(&tmp, &path).with_context(|| format!("cannot write {}", path.display()))
+    fs::rename(&tmp, path).with_context(|| format!("cannot write {}", path.display()))
 }
 
 /// What `outcome.json` in a task folder says.
@@ -202,8 +203,12 @@ pub enum Read {
 
 /// Reads `outcome.json` in the task folder `dir`.
 pub fn read(dir: &Path) -> Read {
-    let path = path(dir);
-    let text = match fs::read_to_string(&path) {
+    read_file(&path(dir))
+}
+
+/// Reads the outcome file `path`.
+pub fn read_file(path: &Path) -> Read {
+    let text = match fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Read::Missing,
         Err(e) => {
@@ -219,6 +224,15 @@ pub fn read(dir: &Path) -> Read {
             text,
             why: format!("{} doesn't parse: {e}", path.display()),
         },
+    }
+}
+
+/// Removes the outcome file `path`, if any.
+pub fn remove_file(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e).with_context(|| format!("cannot remove {}", path.display())),
     }
 }
 
@@ -261,10 +275,24 @@ impl Recorder {
 }
 
 /// Runs a task command, `step`, and writes its outcome as it ends into the folder it named with
-/// [`Recorder::at`], if that folder exists then. A command whose task has no record by then is
-/// `refused`, unless its stop is one of the machine's (`environment`, `stopped`, ...). A failure
-/// to write the outcome is a warning: the command's own result stands.
+/// [`Recorder::at`], if that folder exists then; else, for a child of `task loop`, into the file
+/// the loop named in [`LOOP_FILE_ENV`]. A command whose task has no record by then is `refused`,
+/// unless its stop is one of the machine's (`environment`, `stopped`, ...). A failure to write the
+/// outcome is a warning: the command's own result stands.
 pub fn recorded(
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+    step: impl FnOnce(&Recorder, &mut dyn Write, &mut dyn Write) -> Result<()>,
+) -> Result<()> {
+    let elsewhere = std::env::var_os(LOOP_FILE_ENV)
+        .map(PathBuf::from)
+        .filter(|p| !p.as_os_str().is_empty());
+    recorded_with(elsewhere, out, warn, step)
+}
+
+/// [`recorded`], with `elsewhere` the file for an outcome whose task has no folder.
+pub fn recorded_with(
+    elsewhere: Option<PathBuf>,
     out: &mut dyn Write,
     warn: &mut dyn Write,
     step: impl FnOnce(&Recorder, &mut dyn Write, &mut dyn Write) -> Result<()>,
@@ -273,25 +301,44 @@ pub fn recorded(
     let mut out = Capture::new(out);
     let mut warn = Capture::new(warn);
     let result = step(&recorder, &mut out, &mut warn);
-    let Some((base_dir, dir)) = recorder.at.into_inner() else {
-        return result;
+    let own = recorder
+        .at
+        .into_inner()
+        .filter(|(base_dir, dir)| dir.is_dir() && check_own_folder(base_dir, dir).is_ok())
+        .map(|(_, dir)| dir);
+    let file = match (&own, elsewhere) {
+        (Some(dir), _) => path(dir),
+        (None, Some(file)) => file,
+        (None, None) => return result,
     };
-    if !dir.is_dir() || check_own_folder(&base_dir, &dir).is_err() {
-        return result;
-    }
     let mut text = out.text;
     text.extend(warn.text);
     let mut outcome = Outcome::of(&result, &String::from_utf8_lossy(&text));
-    if outcome.end == Kind::Failed && !dir.join("task.json").is_file() {
+    let has_record = own.is_some_and(|dir| dir.join("task.json").is_file());
+    if outcome.end == Kind::Failed && !has_record {
         outcome.end = Kind::Refused;
     }
-    if let Err(e) = write(&dir, &outcome) {
+    if let Err(e) = write_file(&file, &outcome) {
         let _ = writeln!(
             warn.inner,
             "warning: {e:#}; the task's outcome isn't recorded"
         );
     }
     result
+}
+
+/// The environment variable naming, to a child of `task loop`, the file for its outcome when its
+/// task has no folder: a command refused before it made one (a missing secret, `sbx` signed out
+/// or not answering, a stop during its slot wait) creates none, and the loop must still read how
+/// it ended.
+pub const LOOP_FILE_ENV: &str = "SBXM_LOOP_OUTCOME";
+
+/// The file `task loop` names in [`LOOP_FILE_ENV`] for task `id`'s child.
+pub fn loop_file(base_dir: &Path, id: &str) -> PathBuf {
+    base_dir
+        .join(".sbxm")
+        .join("loop-outcomes")
+        .join(format!("{id}.json"))
 }
 
 /// Passes output on and keeps a copy, for the failure lines [`Outcome::of`] reads.
@@ -449,6 +496,40 @@ mod tests {
         });
         assert!(r.is_err());
         assert!(!gone.exists(), "nothing created");
+    }
+
+    #[test]
+    fn with_no_task_folder_the_outcome_goes_where_the_loop_said() {
+        let base = tempfile::tempdir().unwrap();
+        let elsewhere = base.path().join("issue-3.json");
+        let r = recorded_with(
+            Some(elsewhere.clone()),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            |rec, _, _| {
+                rec.at(base.path(), "issue-3")?;
+                Err(pipeline::MissingSecret::new("no anthropic secret").into())
+            },
+        );
+        assert!(r.is_err());
+        assert!(!record::task_dir(base.path(), "issue-3").exists());
+        assert_eq!(
+            read_file(&elsewhere),
+            Read::Outcome(Outcome::new(
+                Kind::MissingSecret,
+                None,
+                "no anthropic secret"
+            ))
+        );
+        // Refused before any folder: refused.
+        recorded_with(
+            Some(elsewhere.clone()),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            |_, _, _| Err(anyhow!("no such issue")),
+        )
+        .unwrap_err();
+        assert!(matches!(read_file(&elsewhere), Read::Outcome(o) if o.end == Kind::Refused));
     }
 
     #[test]

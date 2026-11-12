@@ -2030,6 +2030,7 @@ fn the_real_file_findings_step_files_only_should_fix_findings() {
         host: &host,
         disk: sbxm::disk::Guard::default(),
         stop: None,
+        spawner: &common::child::NoChild::default(),
     };
 
     steps
@@ -2073,6 +2074,7 @@ fn the_real_file_findings_step_files_nothing_for_a_review_without_should_fix() {
         host: &host,
         disk: sbxm::disk::Guard::default(),
         stop: None,
+        spawner: &common::child::NoChild::default(),
     };
 
     steps
@@ -2082,20 +2084,20 @@ fn the_real_file_findings_step_files_nothing_for_a_review_without_should_fix() {
     assert!(gh.calls().is_empty(), "{:?}", gh.calls());
 }
 
-/// Issue 320 review M-1: the loop runs `task run` in its own process, so a failed phase leaves
-/// the task owned by the loop itself; the real resume must take it over once that phase has
-/// returned, and still refuse a task another live process owns.
+/// Issue 320 review M-1: a failed phase may leave the task owned by the loop itself; the real
+/// resume must take it over once that phase has returned, and still refuse a task another live
+/// process owns. Since issue 612 the resume is a child, played here in this process.
 fn resume_owned_by(f: &Fixture, owner: Process) -> (String, Record) {
     resume_locked(f, owner, None).0
 }
 
 /// [`resume_owned_by`] with `issue-3`'s lock planted first by a command run by hand, live or
-/// gone (issue 409); also returns the error itself.
+/// gone (issue 409); also returns how the phase ended and the children started.
 fn resume_locked(
     f: &Fixture,
     owner: Process,
     lock: Option<bool>,
-) -> ((String, Record), Option<anyhow::Error>) {
+) -> ((String, Record), task_loop::PhaseEnd, Vec<Vec<String>>) {
     write_record(&f.base(), 3, Stage::Working, None, None);
     let dir = record::task_dir(&f.base(), "issue-3");
     let mut rec = read_record(&f.base(), 3);
@@ -2107,6 +2109,14 @@ fn resume_locked(
     let gh = FakeGitHub::default().with_user("me");
     let backend = sbxm::backend::FakeBackend::default();
     let host = sbxm::task::gates::FakeHostRunner::default();
+    let children = common::child::InProcess::new(
+        f.env.config_dir(),
+        &backend,
+        &gh,
+        &Probe,
+        &host,
+        sbxm::disk::Guard::default(),
+    );
     let steps = task_loop::TaskSteps {
         config_dir: &f.env.config_dir(),
         repo_root: f.repo_root.clone(),
@@ -2117,13 +2127,14 @@ fn resume_locked(
         host: &host,
         disk: sbxm::disk::Guard::default(),
         stop: None,
+        spawner: &children,
     };
-    let result = steps.resume(3, &mut Vec::new(), &mut Vec::new());
-    let error = match &result {
-        Ok(()) => String::new(),
-        Err(e) => format!("{e:#}"),
+    let ended = steps.resume_task(3, &mut Vec::new(), &mut Vec::new());
+    let error = match &ended {
+        task_loop::PhaseEnd::Outcome(o) => o.detail.clone(),
+        other => format!("{other:?}"),
     };
-    ((error, read_record(&f.base(), 3)), result.err())
+    ((error, read_record(&f.base(), 3)), ended, children.args())
 }
 
 #[test]
@@ -2132,14 +2143,21 @@ fn the_real_release_skips_a_task_whose_lock_a_live_command_holds() {
     let me = Process::current(&Probe);
     let task_json = record::task_dir(&f.base(), "issue-3").join("task.json");
 
-    let ((error, rec), err) = resume_locked(&f, me.clone(), Some(true));
+    let ((error, rec), ended, children) = resume_locked(&f, me.clone(), Some(true));
 
-    let err = err.expect("refused");
-    assert!(
-        err.is::<sbxm::task::lock::InUse>(),
+    let task_loop::PhaseEnd::Outcome(o) = ended else {
+        panic!("{ended:?}")
+    };
+    assert_eq!(
+        o.end,
+        sbxm::task::outcome::Kind::Held,
         "the lock's refusal, not task resume's: {error}"
     );
     assert!(error.contains(&format!("process {HAND}")), "{error}");
+    assert!(
+        children.is_empty(),
+        "task resume never started: {children:?}"
+    );
     assert_eq!(rec.process, Some(me), "nothing written");
     assert!(task_json.is_file());
     let lock: serde_json::Value =
@@ -2156,7 +2174,7 @@ fn the_real_release_skips_a_task_whose_lock_a_live_command_holds() {
 fn the_real_release_takes_over_a_stale_lock_and_frees_it() {
     let f = fixture();
 
-    let ((error, _), _) = resume_locked(&f, Process::current(&Probe), Some(false));
+    let ((error, _), _, _) = resume_locked(&f, Process::current(&Probe), Some(false));
 
     assert!(!error.contains("in use"), "{error}");
     assert!(!error.contains("still running"), "{error}");
@@ -2167,7 +2185,7 @@ fn the_real_release_takes_over_a_stale_lock_and_frees_it() {
 fn the_real_release_leaves_the_lock_free_once_the_loops_own_command_returned() {
     let f = fixture();
 
-    let ((error, _), _) = resume_locked(&f, Process::current(&Probe), None);
+    let ((error, _), _, _) = resume_locked(&f, Process::current(&Probe), None);
 
     assert!(!error.contains("in use"), "{error}");
     assert!(!lock_file(&f.base(), 3).exists());

@@ -1,13 +1,15 @@
 //! Issue 570: `task loop --stop` (or a first Ctrl-C) while the loop's next task waits for the
-//! machine's sandbox slot. The real steps run `task run`, whose slot wait polls the loop's stop
-//! request: the ticket is given up, nothing is created, the issue keeps its `ready-for-worker`
-//! label and the loop ends "stopped on request" with exit 0.
+//! machine's sandbox slot. The real steps run `task run` as a child (issue 612, played in this
+//! process), whose slot wait polls the loop's stop file, which the loop writes on a first Ctrl-C:
+//! the ticket is given up, nothing is created, the issue keeps its `ready-for-worker` label and
+//! the loop ends "stopped on request" with exit 0.
 
 mod common;
 
 use std::fs;
 use std::sync::Arc;
 
+use common::child::InProcess;
 use common::task_fixture::{
     CLAUDE_DONE, CODEX_DONE, Fixture, Play, Probe, fixture_with, issue_text, ok, open_issue,
     play_reviews, play_tasks, worked_task,
@@ -16,6 +18,7 @@ use sbxm::backend::FakeBackend;
 use sbxm::commands::task_loop::{self, Env, Options, Steps, StopFlag};
 use sbxm::github::fake::{FakeGitHub, GhCall};
 use sbxm::task::gates::FakeHostRunner;
+use sbxm::task::outcome::Kind;
 use sbxm::task::record;
 
 const REPO: &str = "o/r";
@@ -30,6 +33,16 @@ fn github() -> FakeGitHub {
         .with_default_branch("main")
         .with_issue_text(issue_text(ISSUE))
         .with_open_issues(vec![open_issue(ISSUE, &["ready-for-worker", "size:S"], "")])
+}
+
+/// Waits a little for `path` to exist, as a real pause would give the loop time to write it.
+fn wait_for(path: &std::path::Path) {
+    for _ in 0..200 {
+        if path.exists() {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
 }
 
 struct Ended {
@@ -49,17 +62,28 @@ fn run_loop(
     let mut disk = common::slot::full(&f.env, false);
     let (pressed, dir) = (Arc::clone(&flag), config_dir.clone());
     let pauses = std::sync::atomic::AtomicU32::new(0);
+    let stop_file = task_loop::stop_path(&f.env.base_dir());
     disk.slot.sleep = Arc::new(move |_| {
         let n = pauses.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         assert!(n < 3, "the wait went on after the stop");
         if n == 0 {
             while_waiting(&dir, &pressed);
+            // The pause lasts until the loop, polling its child, has written its stop file.
+            wait_for(&stop_file);
         }
     });
     let gh = github();
     let backend = FakeBackend::with_secrets(&["anthropic", "openai"]);
     let host = FakeHostRunner::default();
     let repo_root = f.env.tmp.path().join("target-repo");
+    let children = InProcess::new(
+        config_dir.clone(),
+        &backend,
+        &gh,
+        &Probe,
+        &host,
+        disk.clone(),
+    );
     let steps = task_loop::TaskSteps {
         config_dir: &config_dir,
         repo_root: repo_root.clone(),
@@ -70,6 +94,7 @@ fn run_loop(
         host: &host,
         disk,
         stop: Some(Arc::clone(&flag)),
+        spawner: &children,
     };
     let env = Env {
         now: &|| 1_793_613_600,
@@ -254,8 +279,8 @@ fn worked(review: Option<&str>) -> Fixture {
 /// many pauses the wait took.
 fn phase_stopped_while_waiting(
     f: &Fixture,
-    phase: impl Fn(&task_loop::TaskSteps) -> anyhow::Result<()>,
-) -> (anyhow::Result<()>, u32) {
+    phase: impl Fn(&task_loop::TaskSteps) -> task_loop::PhaseEnd,
+) -> (task_loop::PhaseEnd, u32) {
     let flag = Arc::new(StopFlag::default());
     let mut disk = common::slot::full(&f.env, false);
     let pauses = Arc::new(std::sync::atomic::AtomicU32::new(0));
@@ -264,11 +289,13 @@ fn phase_stopped_while_waiting(
         Arc::clone(&flag),
         common::slot::slot_file(&f.env),
     );
+    let stop_file = task_loop::stop_path(&f.env.base_dir());
     disk.slot.sleep = Arc::new(move |_| {
         let n = seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         assert!(n < 3, "the wait went on");
         if n == 0 {
             pressed.press();
+            wait_for(&stop_file);
             // The holder ends too: a wait that goes on takes the slot at its next look.
             fs::remove_file(&slot).unwrap();
         }
@@ -281,6 +308,14 @@ fn phase_stopped_while_waiting(
         .with_exec_output_matching("codex", ok(CODEX_DONE));
     let host = FakeHostRunner::default();
     let config_dir = f.env.config_dir();
+    let children = InProcess::new(
+        config_dir.clone(),
+        &backend,
+        &gh,
+        &Probe,
+        &host,
+        disk.clone(),
+    );
     let steps = task_loop::TaskSteps {
         config_dir: &config_dir,
         repo_root: f.env.tmp.path().join("target-repo"),
@@ -291,6 +326,7 @@ fn phase_stopped_while_waiting(
         host: &host,
         disk,
         stop: Some(flag),
+        spawner: &children,
     };
     let result = phase(&steps);
     (result, pauses.load(std::sync::atomic::Ordering::SeqCst))
@@ -302,12 +338,14 @@ fn a_stop_while_a_resume_waits_for_the_slot_ends_it_changing_nothing() {
     let task_json = record::task_dir(&f.env.base_dir(), "issue-41").join("task.json");
     let before = fs::read_to_string(&task_json).unwrap();
 
-    let (result, pauses) = phase_stopped_while_waiting(&f, |steps| {
-        steps.resume(41, &mut Vec::new(), &mut Vec::new())
+    let (ended, pauses) = phase_stopped_while_waiting(&f, |steps| {
+        steps.resume_task(41, &mut Vec::new(), &mut Vec::new())
     });
 
-    let e = result.expect_err("stopped");
-    assert!(e.is::<sbxm::slot::Stopped>(), "{e:#}");
+    assert!(
+        matches!(&ended, task_loop::PhaseEnd::Outcome(o) if o.end == Kind::Stopped),
+        "{ended:?}"
+    );
     assert_eq!(pauses, 1);
     assert_eq!(
         fs::read_to_string(&task_json).unwrap(),
@@ -326,14 +364,15 @@ fn a_stop_while_a_should_fix_round_waits_for_the_slot_lets_the_round_run() {
     };
     assert!(!rec(&f).should_fix_round, "the round is still due");
 
-    let (result, pauses) = phase_stopped_while_waiting(&f, |steps| {
-        steps.should_fix(41, &mut Vec::new(), &mut Vec::new())
+    let (ended, pauses) = phase_stopped_while_waiting(&f, |steps| {
+        steps.should_fix_task(41, &mut Vec::new(), &mut Vec::new())
     });
 
     // Part of the task the loop finishes before it stops: it waits on, then runs.
-    if let Err(e) = &result {
-        assert!(!e.is::<sbxm::slot::Stopped>(), "{e:#}");
-    }
+    assert!(
+        !matches!(&ended, task_loop::PhaseEnd::Outcome(o) if o.end == Kind::Stopped),
+        "{ended:?}"
+    );
     assert_eq!(pauses, 1, "it took the slot at its next look");
     assert!(rec(&f).should_fix_round, "the round ran");
 }

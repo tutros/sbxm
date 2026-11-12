@@ -567,6 +567,7 @@ fn the_loops_resolve_of_a_cloud_tasks_pr_runs_in_the_cloud() {
         host: &host,
         disk: full_pools(&f),
         stop: None,
+        spawner: &common::child::NoChild::default(),
     };
 
     let err = steps
@@ -839,6 +840,7 @@ fn run_low_disk(
                 ..Default::default()
             },
             stop: None,
+            spawner: &common::child::NoChild::default(),
         },
     };
     let slept = std::cell::Cell::new(false);
