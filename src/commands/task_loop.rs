@@ -3391,7 +3391,7 @@ fn run_loop(
         None => None,
     };
     // Before any work, the logs of earlier loops that ended without their stop (issue 594).
-    if let Err(e) = loop_log::post_late(github, &repo, &base_dir, &log, started_at) {
+    for e in loop_log::post_late(github, &repo, &base_dir, &log, started_at) {
         let _ = writeln!(
             warn,
             "warning: an earlier loop's log was not posted: {e:#}; the next loop tries again"

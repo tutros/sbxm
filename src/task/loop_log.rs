@@ -7,7 +7,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 
 use crate::github::{GitHubBackend, IssueRequest};
 use crate::run::results::format_timestamp;
@@ -105,21 +105,82 @@ pub fn post(
     post_text(github, repo, &heading, &text, &start)
 }
 
+/// The most issues read when looking for the logs already on GitHub, as `task file-findings`
+/// reads them.
+const ISSUE_LIST_LIMIT: u32 = 1000;
+
 /// Posts, oldest first, every earlier loop log under `base_dir` with rows and no marker, each
 /// headed by the late note naming this loop's start, and marks it posted; one without rows is
-/// only marked. `own` (this loop's log) is never posted here. Stops at the first error, leaving
-/// that log and the later ones for the next start; the error names the log.
+/// only marked, and one already on GitHub (a `loop-log` issue's comment names its file, as the
+/// stop of a loop from before the markers posted it; review M-1) is marked without a comment.
+/// `own` (this loop's log) is never posted here. Returns the errors, each naming its log: a log
+/// that fails stays unmarked for the next start and the later ones are still tried (review M-2).
 pub fn post_late(
     github: &dyn GitHubBackend,
     repo: &str,
     base_dir: &Path,
     own: &Path,
     started_at: u64,
-) -> Result<()> {
+) -> Vec<anyhow::Error> {
+    let mut failed = Vec::new();
+    let logs = match unmarked_logs(base_dir, own) {
+        Ok(logs) => logs,
+        Err(e) => return vec![e],
+    };
+    // The logs with rows, read before anything is asked of GitHub.
+    let mut due: Vec<(PathBuf, String)> = Vec::new();
+    for log in logs {
+        let read = fs::read_to_string(&log)
+            .with_context(|| format!("cannot read {}", log.display()))
+            .and_then(|text| {
+                if has_rows(&text) {
+                    due.push((log.clone(), text));
+                    Ok(())
+                } else {
+                    mark_posted(&log)
+                }
+            });
+        if let Err(e) = read {
+            failed.push(e.context(format!("{} stays unposted", log.display())));
+        }
+    }
+    if due.is_empty() {
+        return failed;
+    }
+    let on_github = match posted_comments(github, repo) {
+        Ok(bodies) => bodies,
+        Err(e) => {
+            failed.push(e.context(
+                "cannot tell which earlier logs are already on GitHub, so none was posted",
+            ));
+            return failed;
+        }
+    };
+    let now = format_timestamp(started_at);
+    for (log, text) in due {
+        let name = log
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let named = format!("{name}`");
+        let result = if on_github.iter().any(|body| body.contains(&named)) {
+            mark_posted(&log)
+        } else {
+            post_one_late(github, repo, &log, &text, &now)
+        };
+        if let Err(e) = result {
+            failed.push(e.context(format!("{} stays unposted", log.display())));
+        }
+    }
+    failed
+}
+
+/// The earlier logs under `base_dir` without a marker, oldest first, `own` left out.
+fn unmarked_logs(base_dir: &Path, own: &Path) -> Result<Vec<PathBuf>> {
     let dir = base_dir.join(".sbxm").join("loop-logs");
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e).with_context(|| format!("cannot read {}", dir.display())),
     };
     let mut logs: Vec<PathBuf> = Vec::new();
@@ -133,28 +194,43 @@ pub fn post_late(
     }
     // `<date>-<HHMMSS>` names sort by start.
     logs.sort();
-    let now = format_timestamp(started_at);
-    for log in logs
-        .iter()
-        .filter(|l| l.as_path() != own && fs::symlink_metadata(marker(l)).is_err())
-    {
-        post_one_late(github, repo, log, &now)
-            .with_context(|| format!("{} stays unposted", log.display()))?;
-    }
-    Ok(())
+    logs.retain(|l| l.as_path() != own && fs::symlink_metadata(marker(l)).is_err());
+    Ok(logs)
 }
 
-fn post_one_late(github: &dyn GitHubBackend, repo: &str, log: &Path, now: &str) -> Result<()> {
-    let text = fs::read_to_string(log).with_context(|| format!("cannot read {}", log.display()))?;
-    if has_rows(&text) {
-        let start = start_of(log);
-        let heading = format!(
-            "Posted late by the loop started {now}: the loop that wrote it ended without its \
-             stop (Ctrl-C, a crash or a restart).\n\nLoop started {start}. Local file: `{}`",
-            log.display()
+/// Every comment on the repository's `loop-log` issues, open or closed.
+fn posted_comments(github: &dyn GitHubBackend, repo: &str) -> Result<Vec<String>> {
+    let issues = github.issues_all(repo, ISSUE_LIST_LIMIT)?;
+    if issues.len() >= ISSUE_LIST_LIMIT as usize {
+        bail!(
+            "the issue list has {} issues, the most read at once",
+            issues.len()
         );
-        post_text(github, repo, &heading, &text, &start)?;
     }
+    let mut bodies = Vec::new();
+    for issue in issues
+        .iter()
+        .filter(|i| i.labels.iter().any(|l| l == LABEL))
+    {
+        bodies.extend(github.issue_comment_bodies(repo, issue.number)?);
+    }
+    Ok(bodies)
+}
+
+fn post_one_late(
+    github: &dyn GitHubBackend,
+    repo: &str,
+    log: &Path,
+    text: &str,
+    now: &str,
+) -> Result<()> {
+    let start = start_of(log);
+    let heading = format!(
+        "Posted late by the loop started {now}: the loop that wrote it ended without its \
+         stop (Ctrl-C, a crash or a restart).\n\nLoop started {start}. Local file: `{}`",
+        log.display()
+    );
+    post_text(github, repo, &heading, text, &start)?;
     mark_posted(log)
 }
 
