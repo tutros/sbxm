@@ -1764,9 +1764,15 @@ fn more_line(left: usize) -> String {
     }
 }
 
-/// The note `finish` leaves on a task whose branch is pushed but whose PR isn't open yet.
+/// The note `finish` leaves on a task whose branch it pushed but whose PR isn't open yet.
 const PUSHED_NOTE: &str =
     "the branch is pushed but its PR isn't open; run `sbxm task finish` again";
+
+/// The note `finish` leaves on a task whose branch it found on `origin` (issue 598) but whose PR
+/// isn't open yet. Unlike [`PUSHED_NOTE`] it exempts no retry from the reviewed-tip check: no
+/// finish pushed that branch, so its tip on a retry may be one published since (review M-1).
+const ON_ORIGIN_NOTE: &str =
+    "the branch is on origin but its PR isn't open; run `sbxm task finish` again";
 
 /// What `finish` did.
 #[derive(Debug)]
@@ -1784,8 +1790,8 @@ pub struct Finished {
     /// The task's tip, when the branch was already on `origin` there (issue 598), so this finish
     /// pushed nothing: pushed by hand, or by an earlier finish whose PR couldn't be opened.
     pub branch_adopted: Option<String>,
-    /// An earlier finish of this task got the branch on `origin` (pushed it, or found it there)
-    /// and couldn't open its PR, so who pushed the branch isn't known.
+    /// An earlier finish of this task pushed the branch and couldn't open its PR ([`PUSHED_NOTE`]),
+    /// so who pushed the branch now on `origin` isn't known.
     pub retried: bool,
     /// Whether the PR was opened as a draft, and why ([`unresolved_reasons`]).
     pub draft: bool,
@@ -1997,10 +2003,11 @@ fn refuse_workflow_changes(id: &str, changed: &[String]) -> Result<()> {
 /// refused, naming both, and never pushed onto. A branch that changes CI (`ci`, decision 127) is
 /// never pushed by `finish`: not on `origin`, it is refused. A branch on `origin` at `tip`, with
 /// or without a CI change, is adopted only when the in-task review covered that tip, so the
-/// review posted as the PR's is of the head it has; `retrying` (an earlier finish of this task
-/// passed every check and left [`PUSHED_NOTE`] when its PR couldn't be opened) skips that check,
-/// so a retry after finish's own push of an unreviewed head, which issue 60 allows, still opens
-/// the PR.
+/// review posted as the PR's is of the head it has. `retrying` (an earlier finish of this task
+/// pushed the branch itself and left [`PUSHED_NOTE`] when its PR couldn't be opened) skips that
+/// check for a branch without a CI change, so a retry after finish's own push of an unreviewed
+/// head, which issue 60 allows, still opens the PR. A CI change is never exempt: `finish` can't
+/// have pushed it.
 fn branch_on_origin(
     task: &Record,
     repo_git: &Path,
@@ -2016,7 +2023,7 @@ fn branch_on_origin(
             Ok(false)
         }
         Some(head) if head == tip => {
-            if !retrying && reviewed_head(task, tip).is_none() {
+            if (!retrying || !ci.is_empty()) && reviewed_head(task, tip).is_none() {
                 let covered = task
                     .review
                     .as_ref()
@@ -2228,8 +2235,16 @@ fn open_task_pr(
             Err(e) => match open_pr(github, &task, &retry) {
                 Ok(Some(Found::Matching(pr))) => (pr.url, true),
                 _ => {
-                    if !prepared.record.notes.iter().any(|n| n == PUSHED_NOTE) {
-                        prepared.record.notes.push(PUSHED_NOTE.to_owned());
+                    // Review M-1: an adoption's note never exempts a retry from the review check.
+                    let note = if on_origin {
+                        ON_ORIGIN_NOTE
+                    } else {
+                        PUSHED_NOTE
+                    };
+                    let notes = &mut prepared.record.notes;
+                    if !notes.iter().any(|n| n == PUSHED_NOTE || n == note) {
+                        notes.retain(|n| n != ON_ORIGIN_NOTE);
+                        notes.push(note.to_owned());
                         let _ = record::write(&prepared.meta, &prepared.record);
                     }
                     return Err(e).context(format!(
@@ -2239,7 +2254,10 @@ fn open_task_pr(
             },
         },
     };
-    prepared.record.notes.retain(|n| n != PUSHED_NOTE);
+    prepared
+        .record
+        .notes
+        .retain(|n| n != PUSHED_NOTE && n != ON_ORIGIN_NOTE);
     prepared
         .record
         .advance(record::Stage::Finished, now(), Process::current(probe))?;

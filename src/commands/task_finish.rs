@@ -225,7 +225,7 @@ fn print_opened(
 ) -> Result<()> {
     let branch = &done.branch;
     // Issue 598: a branch already on origin at the task's tip was not pushed again. After a
-    // finish whose PR couldn't be opened, that finish may have pushed it, so it isn't "yours".
+    // finish that pushed it and couldn't open its PR, it may be that push, so it isn't "yours".
     let pushed = match (&done.branch_adopted, done.retried) {
         (Some(tip), false) => {
             format!("adopted the branch you pushed: {branch} at {tip}, pushing nothing,")

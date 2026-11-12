@@ -576,3 +576,110 @@ fn the_command_says_it_adopted_the_branch_and_its_open_pr() {
         "{out}"
     );
 }
+
+// ---- A retry after a failed adoption (review M-1 of PR #610) ----
+
+/// Moves the task's branch in repo.git to a new commit on top of `parent` and pushes it by hand,
+/// past [`forbid_pushes`], which only stops finish's own pushes.
+fn publish_newer_tip(prepared: &Prepared, parent: &str) -> String {
+    let newer = commit_on(prepared, parent);
+    git(
+        &repo_git(prepared),
+        &["update-ref", "refs/heads/issue-41", &newer],
+    );
+    git(
+        &repo_git(prepared),
+        &[
+            "push",
+            "--receive-pack=git-receive-pack",
+            "--quiet",
+            "--force",
+            "origin",
+            &format!("{newer}:refs/heads/issue-41"),
+        ],
+    );
+    newer
+}
+
+/// The adoption of the reviewed tip A failed to open its PR; then a newer tip B was published.
+/// The retry refuses B, whose review covers only A, before any call or write.
+#[test]
+fn a_retry_after_a_failed_adoption_refuses_a_newer_unreviewed_tip() {
+    for files in BOTH {
+        let f = fixture();
+        let (prepared, reviewed) = reviewed_with(&f, files);
+        push_by_hand(&prepared, &reviewed);
+        forbid_pushes(&prepared);
+        let down = FakeGitHub::default().failing_pr_create("gh: HTTP 502", false);
+        run(&f, &down).unwrap_err();
+        let newer = publish_newer_tip(&prepared, &reviewed);
+        assert_eq!(origin_head(&f).as_deref(), Some(newer.as_str()));
+        let before = task_json(&f);
+        let github = FakeGitHub::default();
+
+        let message = format!("{:#}", run(&f, &github).unwrap_err());
+
+        assert!(message.contains(&newer), "{files:?}: {message}");
+        assert!(message.contains(&reviewed), "{files:?}: {message}");
+        assert!(message.contains("task review --pr"), "{files:?}: {message}");
+        assert!(github.calls().is_empty(), "{files:?}: {:?}", github.calls());
+        assert_eq!(task_json(&f), before, "{files:?}");
+        assert_eq!(reread(&f).stage, Stage::Ready, "{files:?}");
+    }
+}
+
+/// A workflow change is never pushed by finish, so even a record carrying the note of finish's
+/// own push doesn't exempt an unreviewed tip of one from the reviewed-tip check.
+#[test]
+fn a_workflow_change_at_an_unreviewed_tip_is_refused_even_with_the_pushed_note() {
+    let f = fixture();
+    let mut prepared = ready_with(&f, &["a.txt", WORKFLOW]);
+    let commit = tip(&prepared);
+    let base = git(&repo_git(&prepared), &["rev-parse", "main"]);
+    reviewed_at(&mut prepared, &base);
+    prepared.record.notes.push(
+        "the branch is pushed but its PR isn't open; run `sbxm task finish` again".to_owned(),
+    );
+    record::write(&prepared.meta, &prepared.record).unwrap();
+    push_by_hand(&prepared, &commit);
+    let before = task_json(&f);
+    let github = FakeGitHub::default();
+
+    let message = format!("{:#}", run(&f, &github).unwrap_err());
+
+    assert!(message.contains(&commit), "{message}");
+    assert!(message.contains("task review --pr"), "{message}");
+    assert!(github.calls().is_empty(), "{:?}", github.calls());
+    assert_eq!(task_json(&f), before);
+}
+
+/// A retry at the unchanged, reviewed tip still completes, pushing nothing, and says the branch
+/// was adopted as pushed by hand, since no finish pushed it.
+#[test]
+fn a_retry_after_a_failed_adoption_at_the_reviewed_tip_completes() {
+    for files in BOTH {
+        let f = fixture();
+        let (prepared, commit) = reviewed_with(&f, files);
+        push_by_hand(&prepared, &commit);
+        forbid_pushes(&prepared);
+        let down = FakeGitHub::default().failing_pr_create("gh: HTTP 502", false);
+        run(&f, &down).unwrap_err();
+        assert_eq!(reread(&f).notes.len(), 1, "{files:?}");
+
+        let out = finish_command(&f, &FakeGitHub::default());
+
+        assert!(
+            out.contains("issue-41: adopted the branch you pushed: issue-41 at "),
+            "{files:?}: {out}"
+        );
+        assert!(out.contains("pushing nothing"), "{files:?}: {out}");
+        let record = reread(&f);
+        assert_eq!(record.stage, Stage::Finished, "{files:?}");
+        assert!(record.notes.is_empty(), "{files:?}: {:?}", record.notes);
+        assert_eq!(
+            record.review.unwrap().posted.as_deref(),
+            Some(commit.as_str()),
+            "{files:?}"
+        );
+    }
+}
