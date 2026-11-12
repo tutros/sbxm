@@ -4,7 +4,7 @@ This file provides guidance to coding agents (Claude Code reads it through `CLAU
 
 ## Status
 
-Milestones 1 to 4 are merged to `main` (M1 sandbox lifecycle; M2a comparisons and M2b `sbxm task`; M3 prebuilt templates; M4 cloud sandboxes). The goals, the current state and the build plan in flight live in one place, `docs/project.md`; the backlog and the work in flight are in issue #405. `README.md` is the user-facing documentation: keep it in step with behavior changes. Sources of truth:
+Milestones 1 to 4 are merged to `main` (M1 sandbox lifecycle; M2a comparisons and M2b `sbxm task`; M3 prebuilt templates; M4 cloud sandboxes). Milestone 5 (the loop runs local and cloud tasks at once, `sdlc/milestone-5.md`) is in progress. The goals, the current state and the build plan in flight live in one place, `docs/project.md`; the backlog and the work in flight are in issue #405. `README.md` is the user-facing documentation: keep it in step with behavior changes. Sources of truth:
 - `sdlc/idea.md`: original brief
 - `sdlc/milestone-1.md`: milestone 1's implementation plan (crate layout, config schema, kit mapping, commands, build order) — done, kept for reference.
 - `sdlc/milestone-2.md`: milestone 2's implementation plan (M2a comparisons, done; M2b issue-worker migration, slices 0–13).
