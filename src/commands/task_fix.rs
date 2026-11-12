@@ -91,7 +91,7 @@ pub fn run(
     // wait; it is read again below, once the slot is held.
     let pinned = match opts.location {
         Some(flag) => Some(flag),
-        None => match location::recorded(&global.base_dir, &repo_name, number)? {
+        None => match location::recorded(&global.base_dir, &repo_name, number) {
             Some(recorded) => Some(recorded),
             None => {
                 let pr = github.pr(&repo_name, number)?;

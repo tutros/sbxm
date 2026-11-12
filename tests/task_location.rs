@@ -601,3 +601,38 @@ fn task_fix_cloud_and_local_conflict() {
         "{stderr}"
     );
 }
+
+// --- a queued `run` job ---
+
+#[test]
+fn a_queued_run_job_of_a_run_cloud_issue_runs_in_the_cloud() {
+    let (env, repo_root) = loop_fixture(Some(2));
+    let queue = sbxm::task::jobs::queue_dir(&env.base_dir());
+    fs::create_dir_all(&queue).unwrap();
+    fs::write(queue.join("r.json"), r#"{"kind": "run", "issue": 3}"#).unwrap();
+
+    let (calls, out) = run_loop(&env, &repo_root, &ready_issue(&[RUN_CLOUD_LABEL]));
+
+    // The job first; the queue then tries the issue again, still labeled.
+    assert_eq!(
+        calls.first().map(String::as_str),
+        Some("run 3 Some(Cloud)"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_queued_run_job_of_a_run_cloud_issue_is_refused_while_cloud_slots_is_unset() {
+    let (env, repo_root) = loop_fixture(None);
+    let queue = sbxm::task::jobs::queue_dir(&env.base_dir());
+    fs::create_dir_all(&queue).unwrap();
+    fs::write(queue.join("r.json"), r#"{"kind": "run", "issue": 3}"#).unwrap();
+
+    let (calls, out) = run_loop(&env, &repo_root, &ready_issue(&[RUN_CLOUD_LABEL]));
+
+    assert!(calls.is_empty(), "{calls:?}");
+    let done = sbxm::task::jobs::done_dir(&env.base_dir()).join("r.json");
+    let result = fs::read_to_string(&done).unwrap();
+    assert!(result.contains("\"refused\""), "{result}\n{out}");
+    assert!(result.contains(NEEDS_CLOUD_SLOTS), "{result}");
+}

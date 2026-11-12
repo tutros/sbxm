@@ -6,9 +6,7 @@ use std::path::Path;
 
 use anyhow::Result;
 
-use super::finish::check_own_folder;
-use super::queue::pr_number;
-use super::record::{self, Kind};
+use super::jobs;
 use crate::backend::Location;
 use crate::github::{GitHubBackend, PrInfo};
 
@@ -54,30 +52,16 @@ pub fn of_pr(
     pr: u32,
     github: &dyn GitHubBackend,
 ) -> Result<Option<Location>> {
-    if let Some(location) = recorded(base_dir, repo, pr)? {
+    if let Some(location) = recorded(base_dir, repo, pr) {
         return Ok(Some(location));
     }
     labeled(github, repo, &github.pr(repo, pr)?)
 }
 
-/// The location recorded by the issue or spec task under `base_dir` that opened PR `pr` of
-/// `repo`; `None` without one (a hand-made PR, or the task removed).
-pub fn recorded(base_dir: &Path, repo: &str, pr: u32) -> Result<Option<Location>> {
-    for dir in record::task_folders(base_dir)? {
-        if check_own_folder(base_dir, &dir).is_err() {
-            continue;
-        }
-        let Ok(rec) = record::read(&dir.join("task.json")) else {
-            continue;
-        };
-        if matches!(rec.kind, Kind::Issue | Kind::Spec)
-            && rec.repo == repo
-            && rec.pr.as_deref().and_then(pr_number) == Some(pr)
-        {
-            return Ok(Some(rec.location));
-        }
-    }
-    Ok(None)
+/// The location recorded by the task that opened PR `pr` of `repo` ([`jobs::opener`], an archived
+/// record too); `None` without one (a hand-made PR, or the task removed).
+pub fn recorded(base_dir: &Path, repo: &str, pr: u32) -> Option<Location> {
+    jobs::opener(base_dir, repo, pr).map(|rec| rec.location)
 }
 
 /// The location the `run-cloud` or `run-local` label of the first open issue `pr` closes pins;

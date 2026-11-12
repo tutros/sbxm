@@ -661,10 +661,12 @@ impl Loop<'_> {
         if !reasons.is_empty() {
             return Ok(Ended::new(Outcome::Refused, reasons.join("; ")));
         }
-        // Where its labels pin it (issue 600); the reasons above refused a pin it can't have.
-        let location = location::for_loop(&found.labels, self.cloud_slots)
-            .ok()
-            .flatten();
+        // Where its labels pin it (issue 600), refused as the loop's own pick refuses it: the
+        // reasons above read `cloud_slots` now, the loop when it started.
+        let location = match location::for_loop(&found.labels, self.cloud_slots) {
+            Ok(location) => location,
+            Err(reason) => return Ok(Ended::new(Outcome::Refused, reason)),
+        };
         self.locations.insert(issue, location);
         let id = format!("issue-{issue}");
         self.mark(taken, read, started, Some(id.clone()))?;
