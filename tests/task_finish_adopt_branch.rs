@@ -310,37 +310,55 @@ fn a_branch_on_origin_at_another_commit_is_refused_naming_both() {
     }
 }
 
+/// The files a task's worker commits: with a workflow change, and without.
+const BOTH: [&[&str]; 2] = [&["a.txt", WORKFLOW], &["a.txt"]];
+
+/// With or without a workflow change, a branch at the tip whose review covered an older commit
+/// is not adopted: the review would not be of the PR's head.
 #[test]
-fn a_workflow_change_at_the_tip_whose_review_covered_an_older_commit_is_refused() {
-    let f = fixture();
-    let mut prepared = ready_with(&f, &["a.txt", WORKFLOW]);
-    let commit = tip(&prepared);
-    let base = git(&repo_git(&prepared), &["rev-parse", "main"]);
-    reviewed_at(&mut prepared, &base);
-    push_by_hand(&prepared, &commit);
-    let before = task_json(&f);
-    let github = FakeGitHub::default();
+fn a_branch_at_the_tip_whose_review_covered_an_older_commit_is_refused() {
+    for files in BOTH {
+        let f = fixture();
+        let mut prepared = ready_with(&f, files);
+        let commit = tip(&prepared);
+        let base = git(&repo_git(&prepared), &["rev-parse", "main"]);
+        reviewed_at(&mut prepared, &base);
+        push_by_hand(&prepared, &commit);
+        let before = task_json(&f);
+        let github = FakeGitHub::default();
 
-    let message = format!("{:#}", run(&f, &github).unwrap_err());
+        let message = format!("{:#}", run(&f, &github).unwrap_err());
 
-    assert!(message.contains(&commit), "{message}");
-    assert!(message.contains("task review --pr"), "{message}");
-    assert!(writes(&github).is_empty(), "{:?}", github.calls());
-    assert_eq!(task_json(&f), before);
+        assert!(message.contains(&commit), "{files:?}: {message}");
+        assert!(message.contains("task review --pr"), "{files:?}: {message}");
+        assert!(
+            writes(&github).is_empty(),
+            "{files:?}: {:?}",
+            github.calls()
+        );
+        assert_eq!(task_json(&f), before, "{files:?}");
+    }
 }
 
 #[test]
-fn a_workflow_change_at_the_tip_with_no_reviewed_commit_is_refused() {
-    let f = fixture();
-    let prepared = ready_with(&f, &["a.txt", WORKFLOW]);
-    push_by_hand(&prepared, &tip(&prepared));
-    let github = FakeGitHub::default();
+fn a_branch_at_the_tip_with_no_reviewed_commit_is_refused() {
+    for files in BOTH {
+        let f = fixture();
+        let prepared = ready_with(&f, files);
+        push_by_hand(&prepared, &tip(&prepared));
+        let before = task_json(&f);
+        let github = FakeGitHub::default();
 
-    let message = format!("{:#}", run(&f, &github).unwrap_err());
+        let message = format!("{:#}", run(&f, &github).unwrap_err());
 
-    assert!(message.contains("task review --pr"), "{message}");
-    assert!(writes(&github).is_empty(), "{:?}", github.calls());
-    assert_eq!(reread(&f).stage, Stage::Ready);
+        assert!(message.contains("task review --pr"), "{files:?}: {message}");
+        assert!(
+            writes(&github).is_empty(),
+            "{files:?}: {:?}",
+            github.calls()
+        );
+        assert_eq!(task_json(&f), before, "{files:?}");
+    }
 }
 
 // ---- A branch without a workflow change ----
@@ -377,19 +395,54 @@ fn a_branch_not_on_origin_is_pushed_and_not_called_adopted() {
     assert_eq!(origin_head(&f).as_deref(), Some(commit.as_str()));
 }
 
-/// A finish whose PR create failed after its own push left a note: the retry finds its own push,
-/// not one by hand.
+/// A finish whose PR create failed after its own push left a note; the retry pushes nothing and
+/// says the branch was already on origin, not that the user pushed it.
 #[test]
-fn a_retry_after_finishs_own_push_is_not_called_adopted() {
+fn a_retry_after_finishs_own_push_says_the_branch_was_already_on_origin() {
     let f = fixture();
-    reviewed_with(&f, &["a.txt"]);
+    let (prepared, commit) = reviewed_with(&f, &["a.txt"]);
     let down = FakeGitHub::default().failing_pr_create("gh: HTTP 502", false);
-    run(&f, &down).unwrap_err();
+    let message = format!("{:#}", run(&f, &down).unwrap_err());
+    assert!(message.contains("pushed issue-41 but"), "{message}");
+    forbid_pushes(&prepared);
 
-    let done = run(&f, &FakeGitHub::default()).unwrap();
+    let out = finish_command(&f, &FakeGitHub::default());
 
-    assert_eq!(done.branch_adopted, None, "{done:?}");
+    assert!(
+        out.contains("issue-41: adopted the branch already on origin: issue-41 at "),
+        "{out}"
+    );
+    assert!(out.contains(&commit[..12]), "{out}");
+    assert!(!out.contains("you pushed"), "{out}");
     assert_eq!(reread(&f).stage, Stage::Finished);
+}
+
+/// Review S-1: an adoption whose PR create failed leaves the same note as finish's own push; its
+/// failure and its retry still say nothing was pushed, with every push refused throughout.
+#[test]
+fn a_retry_after_a_failed_adoption_says_nothing_was_pushed() {
+    let f = fixture();
+    let (prepared, commit) = reviewed_with(&f, &["a.txt", WORKFLOW]);
+    push_by_hand(&prepared, &commit);
+    forbid_pushes(&prepared);
+    let down = FakeGitHub::default().failing_pr_create("gh: HTTP 502", false);
+
+    let message = format!("{:#}", run(&f, &down).unwrap_err());
+
+    assert!(message.contains("nothing was pushed"), "{message}");
+    assert!(!message.contains("pushed issue-41 but"), "{message}");
+
+    let out = finish_command(&f, &FakeGitHub::default());
+
+    assert!(out.contains("issue-41: adopted the branch"), "{out}");
+    assert!(out.contains("pushing nothing"), "{out}");
+    assert!(!out.contains("pushed issue-41 and"), "{out}");
+    let record = reread(&f);
+    assert_eq!(record.stage, Stage::Finished);
+    assert_eq!(
+        record.review.unwrap().posted.as_deref(),
+        Some(commit.as_str())
+    );
 }
 
 /// The read of the remote works but the push fails: nothing is opened and the record stays.

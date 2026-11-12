@@ -224,10 +224,16 @@ fn print_opened(
     comment: &str,
 ) -> Result<()> {
     let branch = &done.branch;
-    // Issue 598: a branch already on origin at the task's tip was not pushed again.
-    let pushed = match &done.branch_adopted {
-        Some(tip) => format!("adopted the branch you pushed: {branch} at {tip}, pushing nothing,"),
-        None => format!("pushed {branch}"),
+    // Issue 598: a branch already on origin at the task's tip was not pushed again. After a
+    // finish whose PR couldn't be opened, that finish may have pushed it, so it isn't "yours".
+    let pushed = match (&done.branch_adopted, done.retried) {
+        (Some(tip), false) => {
+            format!("adopted the branch you pushed: {branch} at {tip}, pushing nothing,")
+        }
+        (Some(tip), true) => {
+            format!("adopted the branch already on origin: {branch} at {tip}, pushing nothing,")
+        }
+        (None, _) => format!("pushed {branch}"),
     };
     if done.draft {
         writeln!(out, "{id}: {pushed} and opened draft PR {}", done.url)?;

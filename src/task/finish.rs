@@ -1781,9 +1781,12 @@ pub struct Finished {
     /// The PR was already open for the branch and base, so it was recorded instead of opened
     /// (issue 60): a create whose answer was lost, or one opened by hand.
     pub adopted: bool,
-    /// The task's tip, when the branch was already on `origin` there, pushed by hand (issue 598),
-    /// so nothing was pushed; `None` when the push there was an earlier finish's own.
+    /// The task's tip, when the branch was already on `origin` there (issue 598), so this finish
+    /// pushed nothing: pushed by hand, or by an earlier finish whose PR couldn't be opened.
     pub branch_adopted: Option<String>,
+    /// An earlier finish of this task got the branch on `origin` (pushed it, or found it there)
+    /// and couldn't open its PR, so who pushed the branch isn't known.
+    pub retried: bool,
     /// Whether the PR was opened as a draft, and why ([`unresolved_reasons`]).
     pub draft: bool,
     pub unresolved: Vec<String>,
@@ -1992,15 +1995,19 @@ fn refuse_workflow_changes(id: &str, changed: &[String]) -> Result<()> {
 /// `finish` pushes nothing and opens or adopts the PR of the branch as it is. Read before any
 /// write. A branch on `origin` at another commit (behind, ahead of or diverged from `tip`) is
 /// refused, naming both, and never pushed onto. A branch that changes CI (`ci`, decision 127) is
-/// never pushed by `finish`: not on `origin`, it is refused; on `origin` at `tip`, the user pushed
-/// it after reading it, and it is adopted only when the in-task review covered that tip, so the
-/// review posted as the PR's is of the head it has.
+/// never pushed by `finish`: not on `origin`, it is refused. A branch on `origin` at `tip`, with
+/// or without a CI change, is adopted only when the in-task review covered that tip, so the
+/// review posted as the PR's is of the head it has; `retrying` (an earlier finish of this task
+/// passed every check and left [`PUSHED_NOTE`] when its PR couldn't be opened) skips that check,
+/// so a retry after finish's own push of an unreviewed head, which issue 60 allows, still opens
+/// the PR.
 fn branch_on_origin(
     task: &Record,
     repo_git: &Path,
     tip: &str,
     ci: &[String],
     retry: &str,
+    retrying: bool,
 ) -> Result<bool> {
     let (id, branch) = (&task.id, &task.branch);
     match repo::remote_branch_head(repo_git, branch)? {
@@ -2009,7 +2016,7 @@ fn branch_on_origin(
             Ok(false)
         }
         Some(head) if head == tip => {
-            if !ci.is_empty() && reviewed_head(task, tip).is_none() {
+            if !retrying && reviewed_head(task, tip).is_none() {
                 let covered = task
                     .review
                     .as_ref()
@@ -2128,7 +2135,8 @@ fn open_task_pr(
     }
     let retry = spec.map_or_else(|| format!("--issue {}", task.number), str::to_owned);
     // Issue 598: a branch already on origin at the task's tip is adopted, with no push.
-    let on_origin = branch_on_origin(&task, &repo_git, &tip, &ci, &retry)?;
+    let retrying = task.notes.iter().any(|n| n == PUSHED_NOTE);
+    let on_origin = branch_on_origin(&task, &repo_git, &tip, &ci, &retry, retrying)?;
     // What the PR closes and its title: the issue's, or the spec's. An issue whose body says
     // `**Closes on merge:** no` is referred to, not fixed (issue 506).
     let (fixes, refs, title) = match spec {
@@ -2197,9 +2205,13 @@ fn open_task_pr(
     if !on_origin {
         repo::push(&repo_git, &task.branch)?;
     }
-    // Pushed by hand, unless the push there was this task's own, by a finish whose PR failed.
-    let branch_adopted =
-        (on_origin && !prepared.record.notes.iter().any(|n| n == PUSHED_NOTE)).then(|| tip.clone());
+    // Review S-1: this finish's own push decides what it says, never the note an earlier one left.
+    let branch_adopted = on_origin.then(|| tip.clone());
+    let pushed = if on_origin {
+        format!("{} is on origin (nothing was pushed)", task.branch)
+    } else {
+        format!("pushed {}", task.branch)
+    };
     let request = PrRequest {
         head: task.branch.clone(),
         base: task.base.clone(),
@@ -2221,8 +2233,7 @@ fn open_task_pr(
                         let _ = record::write(&prepared.meta, &prepared.record);
                     }
                     return Err(e).context(format!(
-                        "pushed {} but could not open the PR; run `sbxm task finish {retry}` again, which only retries the PR",
-                        task.branch
+                        "{pushed} but could not open the PR; run `sbxm task finish {retry}` again, which only retries the PR"
                     ));
                 }
             },
@@ -2271,6 +2282,7 @@ fn open_task_pr(
         continued: None,
         adopted,
         branch_adopted,
+        retried: retrying,
         draft,
         unresolved,
         review_posted,
@@ -2340,6 +2352,7 @@ fn retry_summaries(mut prepared: Prepared, github: &dyn GitHubBackend) -> Result
         continued,
         adopted: false,
         branch_adopted: None,
+        retried: false,
         draft: false,
         unresolved: Vec::new(),
         review_posted: None,
@@ -2953,6 +2966,7 @@ fn finish_continued(
         continued: Some(pr),
         adopted: false,
         branch_adopted: None,
+        retried: false,
         draft: false,
         unresolved,
         review_posted: None,
