@@ -1,6 +1,7 @@
 //! Shared test helpers. Each test crate uses only some of them.
 #![allow(dead_code)]
 
+pub mod cloud_slot;
 pub mod cloud_task;
 pub mod fix_task;
 pub mod git_trace;

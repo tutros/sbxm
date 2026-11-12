@@ -117,7 +117,10 @@ pub fn run(
         clone_source: None,
         progress: &pipeline::quiet,
     };
-    let gated = pipeline::gate_on_demand(&env, &mut prepared, opts.tiers);
+    // A cloud worker sandbox found gone is made again only once a cloud slot is held (issue 599).
+    let mut take_cloud_slot = || slot::take_cloud(&global, &opts.disk.slot, Some(&id), &mut *out);
+    let gated =
+        pipeline::gate_on_demand_taking(&env, &mut prepared, opts.tiers, &mut take_cloud_slot);
     for line in prepared.events.drain(..) {
         writeln!(out, "{line}")?;
     }

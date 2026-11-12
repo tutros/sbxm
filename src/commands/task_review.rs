@@ -179,7 +179,8 @@ pub fn run(
 
 /// The free-space check of the sandbox drive (decision 194), then the machine's sandbox slot
 /// for task `id`, held until the review ends (decision 304), for a review whose sandboxes run
-/// here: a cloud sandbox uses neither (P11, decision 262(h)).
+/// here: a cloud sandbox uses neither (P11, decision 262(h)). A cloud review takes its cloud slot
+/// once its own checks have passed (issue 599): `pipeline::review_issue` and `review_pr` do.
 fn check_disk(
     config_dir: &std::path::Path,
     opts: &Options,
@@ -621,14 +622,35 @@ fn run_pr(
 
     // A task that already exists is resumed when its review can be tried again (a failed
     // reviewer, failed gates); otherwise the refusal says what to do.
-    let mut prepared = if finish::exists(&base_dir, &id) {
+    let (mut prepared, _cloud_slot) = if finish::exists(&base_dir, &id) {
         let prepared = Prepared::open_locked(&base_dir, &id, probe)?;
         pipeline::check_can_review_pr(&prepared.record, probe)?;
-        prepared
+        (prepared, slot::Slot::none())
     } else {
         let pr = match pr_info {
             Some(pr) => pr,
             None => github.pr(&repo_name, number)?,
+        };
+        // A new cloud task's cloud slot (issue 599): once the PR is known reviewable and the
+        // reviewer's cloud preflight passed, before its folder and clone are made; the review
+        // finds it held.
+        let cloud_slot = match location {
+            Location::Local => slot::Slot::none(),
+            Location::Cloud => {
+                pipeline::check_pr_reviewable(&pr, &repo_name)?;
+                pipeline::take_cloud_slot_checked(
+                    config_dir,
+                    backend,
+                    config,
+                    pipeline::Makes {
+                        worker: false,
+                        reviewer: true,
+                    },
+                    &opts.disk,
+                    Some(&id),
+                    warn,
+                )?
+            }
         };
         let prepared = pipeline::prepare_pr_at(&ctx, &pr, location)?;
         for warning in prepared
@@ -638,7 +660,7 @@ fn run_pr(
         {
             writeln!(warn, "warning: {warning}")?;
         }
-        prepared
+        (prepared, cloud_slot)
     };
 
     let meta = record::task_dir(&base_dir, &id);

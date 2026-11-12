@@ -364,6 +364,76 @@ pub struct TaskEnv<'a> {
 /// A [`TaskEnv::progress`] that prints nothing.
 pub fn quiet(_line: &str) {}
 
+/// The machine's cloud slot for a step of a cloud task, taken by the step once its checks have
+/// passed and before it changes anything (issue 599), held until the returned handle (or the
+/// command's [`crate::slot::Hold`]) is dropped. None for a local task: its command took a sandbox
+/// slot (decision 304). A wait's lines go to `env.progress`.
+pub fn take_cloud_slot(env: &TaskEnv, record: &Record) -> Result<crate::slot::Slot> {
+    if record.location != Location::Cloud {
+        return Ok(crate::slot::Slot::none());
+    }
+    let global = GlobalConfig::load(env.config_dir)?;
+    let mut lines = Lines {
+        say: env.progress,
+        line: Vec::new(),
+    };
+    crate::slot::take_cloud(&global, &env.disk.slot, Some(&record.id), &mut lines)
+}
+
+/// The cloud sandboxes a starting command goes on to make, for [`take_cloud_slot_checked`].
+#[derive(Debug, Clone, Copy)]
+pub struct Makes {
+    pub worker: bool,
+    pub reviewer: bool,
+}
+
+/// A starting cloud command's cloud slot (issue 599): first the cloud preflight of every sandbox
+/// `makes` names (decision 261), so what no free slot could fix (a missing login, a profile, a
+/// TTL) is refused before any wait, then the slot. `backend` is the cloud instance. The command
+/// checks its other inputs before calling this, and the preparation checks again before it writes.
+#[allow(clippy::too_many_arguments)]
+pub fn take_cloud_slot_checked(
+    config_dir: &Path,
+    backend: &dyn SandboxBackend,
+    config: &TaskConfig,
+    makes: Makes,
+    guard: &disk::Guard,
+    task: Option<&str>,
+    warn: &mut dyn std::io::Write,
+) -> Result<crate::slot::Slot> {
+    if makes.worker {
+        check_worker_inputs(config_dir, backend, config, Location::Cloud)?;
+    }
+    if makes.reviewer {
+        check_reviewer_inputs(config_dir, backend, config, Location::Cloud)?;
+    }
+    crate::slot::take_cloud(&GlobalConfig::load(config_dir)?, &guard.slot, task, warn)
+}
+
+/// Passes each whole line written to it on to `say`.
+struct Lines<'a> {
+    say: &'a dyn Fn(&str),
+    line: Vec<u8>,
+}
+
+impl std::io::Write for Lines<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        for &byte in buf {
+            if byte == b'\n' {
+                (self.say)(&String::from_utf8_lossy(&self.line));
+                self.line.clear();
+            } else {
+                self.line.push(byte);
+            }
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
 impl Ctx<'_> {
     /// The task's environment, printing no phase start line.
     pub fn env(&self) -> TaskEnv<'_> {
@@ -2159,6 +2229,7 @@ fn worker_resources(record: &Record, worker: &Agent) -> Result<Resources> {
             cpus,
             memory,
             sandbox_slots: None,
+            cloud_slots: None,
         }),
         _ => Err(anyhow::anyhow!(
             "task {}'s record has no saved sandbox resources (it predates issue 118's resume \
@@ -3066,6 +3137,18 @@ fn cloud_worker_gone(env: &TaskEnv, record: &Record) -> Result<bool> {
 /// lifetime entry, P5 (d)), and removed again when the gates end. What that says is in
 /// `prepared.events` and `prepared.warnings`.
 pub fn gate_on_demand(env: &TaskEnv, prepared: &mut Prepared, tiers: Tiers) -> Result<Gated> {
+    gate_on_demand_taking(env, prepared, tiers, &mut || Ok(crate::slot::Slot::none()))
+}
+
+/// [`gate_on_demand`], calling `take_cloud_slot` when a cloud worker sandbox is gone, once its
+/// rebuild's inputs are checked and before it is made, and holding what it gives until the gates
+/// end (issue 599).
+pub fn gate_on_demand_taking(
+    env: &TaskEnv,
+    prepared: &mut Prepared,
+    tiers: Tiers,
+    take_cloud_slot: &mut dyn FnMut() -> Result<crate::slot::Slot>,
+) -> Result<Gated> {
     // Before any listing: a listed name proves nothing about an ambiguous create (decision 268).
     super::resume::refuse_ambiguous(&prepared.record, "run its gates")?;
     if prepared.record.location == Location::Local {
@@ -3083,6 +3166,7 @@ pub fn gate_on_demand(env: &TaskEnv, prepared: &mut Prepared, tiers: Tiers) -> R
         return run_gates(env, prepared, "on-demand", tiers);
     }
     check_cloud_rebuild(env, &prepared.record, None)?;
+    let _slot = take_cloud_slot()?;
     let gated = ensure_cloud_worker(env, prepared, SandboxRole::Worker, "the gates")
         .and_then(|_| run_gates(env, prepared, "on-demand", tiers));
     stop_cloud_worker(env, prepared);
@@ -3652,6 +3736,7 @@ pub fn review_issue(env: &TaskEnv, prepared: &mut Prepared) -> Result<ReviewRepo
     // Refused before the gates run when no review round number is left (worked out again after
     // them, as their fix rounds count).
     next_review_round(prepared)?;
+    let _slot = take_cloud_slot(env, &prepared.record)?;
     let reviewed = review_checked(env, prepared, report);
     stop_cloud_worker(env, prepared);
     // A fix round that failed, or gates that stopped the task, end its phase too (issue 341).
@@ -3989,6 +4074,9 @@ pub fn review_pr(
     let listed = check_changed_paths(prepared)?;
     keep_listed(prepared, listed);
     let round = next_review_round(prepared)?;
+    // Every refusal is behind: a cloud review takes its cloud slot (issue 599); a new task's
+    // command took it before preparing it, which this finds held.
+    let _slot = take_cloud_slot(env, &prepared.record)?;
     if let Some(context) = context {
         fs::write(prepared.meta.join("issue.md"), context)?;
     }

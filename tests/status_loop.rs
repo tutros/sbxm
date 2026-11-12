@@ -162,6 +162,7 @@ fn env(terminal: bool, width: usize) -> Env {
         iterations: None,
         monotonic: Box::new(|| std::time::Duration::ZERO),
         slots: None,
+        cloud_slots: None,
         disk: quiet_disk(),
     }
 }
@@ -727,6 +728,7 @@ fn github_is_called_on_the_first_frame_not_59_seconds_later_and_again_after_61()
         iterations: Some(3),
         monotonic: Box::new(|| std::time::Duration::ZERO),
         slots: None,
+        cloud_slots: None,
         disk: quiet_disk(),
     };
     let source = LoopSource {
@@ -790,6 +792,7 @@ fn a_failed_fetch_is_not_retried_inside_the_minute_either() {
         iterations: Some(2),
         monotonic: Box::new(|| std::time::Duration::ZERO),
         slots: None,
+        cloud_slots: None,
         disk: quiet_disk(),
         terminal: true,
         ..env(true, 80)

@@ -456,6 +456,7 @@ fn real_env(terminal: bool, width: usize, iterations: Option<usize>) -> Env {
         iterations,
         monotonic: Box::new(|| std::time::Duration::ZERO),
         slots: None,
+        cloud_slots: None,
         disk: quiet_disk(),
     }
 }
@@ -571,6 +572,7 @@ fn watch_on_a_non_terminal_prints_once_and_returns() {
         iterations: None,
         monotonic: Box::new(|| std::time::Duration::ZERO),
         slots: None,
+        cloud_slots: None,
         disk: quiet_disk(),
     };
     let mut out = Vec::new();
@@ -609,6 +611,7 @@ fn watch_on_a_terminal_clears_the_screen_once_and_sleeps_between_frames() {
         iterations: Some(3),
         monotonic: Box::new(|| std::time::Duration::ZERO),
         slots: None,
+        cloud_slots: None,
         disk: quiet_disk(),
     };
     let mut out = Vec::new();

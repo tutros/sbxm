@@ -45,6 +45,7 @@ fn env(terminal: bool, iterations: Option<usize>) -> Env {
         iterations,
         monotonic: Box::new(|| std::time::Duration::ZERO),
         slots: None,
+        cloud_slots: None,
         disk: disk(),
     }
 }

@@ -83,16 +83,13 @@ pub fn run(
     }
     let location = pipeline::choose_location(None, &config);
     let global = GlobalConfig::load(config_dir)?;
-    // Held until the fix ends (decision 304); a cloud fix takes none.
+    // Held until the fix ends (decision 304); a cloud fix takes a cloud slot below, once all its
+    // inputs are checked (issue 599).
+    let task = format!("fix of PR #{number}");
     let _slot = match location {
         Location::Local => {
             disk::require(&global, config_dir, &opts.disk)?;
-            slot::take(
-                &global,
-                &opts.disk.slot,
-                Some(&format!("fix of PR #{number}")),
-                warn,
-            )?
+            slot::take(&global, &opts.disk.slot, Some(&task), warn)?
         }
         Location::Cloud => slot::Slot::none(),
     };
@@ -126,6 +123,23 @@ pub fn run(
     let identity = match &opts.identity {
         Some(identity) => identity.clone(),
         None => Identity::read_from(None)?,
+    };
+    // Every input checked: a cloud fix's cloud slot, held until it ends, once its worker's and
+    // reviewer's cloud preflights pass (issue 599).
+    let _cloud_slot = match location {
+        Location::Local => slot::Slot::none(),
+        Location::Cloud => pipeline::take_cloud_slot_checked(
+            config_dir,
+            backend,
+            &config,
+            pipeline::Makes {
+                worker: true,
+                reviewer: true,
+            },
+            &opts.disk,
+            Some(&task),
+            warn,
+        )?,
     };
     let clone_source = opts
         .clone_source

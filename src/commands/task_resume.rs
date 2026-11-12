@@ -145,7 +145,8 @@ pub fn run(
     };
     // A cloud sandbox doesn't use the drive of `sbx`'s local sandbox state (P11, decision
     // 262(h)).
-    // Held until the resumed task ends (decision 304); a cloud task takes none.
+    // Held until the resumed task ends (decision 304). A cloud task's cloud slot is taken by the
+    // resume itself once all its checks have passed, and never for a push alone (issue 599).
     let _slot = match location {
         Location::Local => {
             disk::require(&global, config_dir, &opts.disk)?;

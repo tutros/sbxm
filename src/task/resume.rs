@@ -445,6 +445,9 @@ pub fn resume_forgetting(
     {
         pipeline::check_replay(prepared, result)?;
     }
+    // Every check passed: a cloud task takes its cloud slot now, before anything changes (issue
+    // 599).
+    let _slot = pipeline::take_cloud_slot(env, &prepared.record)?;
     if let Some(name) = prepared.record.ambiguous_create().map(str::to_owned) {
         record::write_change(&prepared.meta, &mut prepared.record, |t| {
             t.forget_ambiguous();

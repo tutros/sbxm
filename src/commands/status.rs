@@ -41,6 +41,8 @@ pub struct Env {
     /// `sandbox_slots` and the slots' folder, when set: one line names who holds them
     /// (decision 304).
     pub slots: Option<(u32, slot::Gate)>,
+    /// `cloud_slots`, when set: a second line names who holds the cloud slots (issue 599).
+    pub cloud_slots: Option<(u32, slot::Gate)>,
 }
 
 impl Env {
@@ -59,6 +61,10 @@ impl Env {
             slots: config
                 .resources
                 .sandbox_slots
+                .map(|count| (count, slot::Gate::default())),
+            cloud_slots: config
+                .resources
+                .cloud_slots
                 .map(|count| (count, slot::Gate::default())),
         }
     }
@@ -152,6 +158,9 @@ pub fn run_with(
         }
         if let Some((count, gate)) = &env.slots {
             frame.section(&format!("{}\n", slot::status_line(*count, gate)))?;
+        }
+        if let Some((count, gate)) = &env.cloud_slots {
+            frame.section(&format!("{}\n", slot::cloud_status_line(*count, gate)))?;
         }
         let drives = footer::read(base, &env.disk);
         frame.section(&footer::render(&drives, env.disk.min_free_disk, width))?;

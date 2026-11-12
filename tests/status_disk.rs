@@ -216,6 +216,7 @@ fn env(disk: Disk) -> Env {
         iterations: None,
         monotonic: Box::new(|| std::time::Duration::ZERO),
         slots: None,
+        cloud_slots: None,
         disk,
     }
 }
