@@ -185,6 +185,14 @@ pub trait Steps {
     }
     /// The free-disk check of `sbx`'s sandbox drive: an error while it is under `min_free_disk`.
     fn room(&self) -> Result<()>;
+    /// [`Self::room`] for a step that runs in `location` (`None`: as `[sandbox] location` says):
+    /// a cloud step needs no room on this machine (review M-1 of issue 600). The loop asks only
+    /// this one, always with the step's own location. A `Steps` without a disk of its own needs
+    /// no other.
+    fn room_for(&self, location: Option<Location>) -> Result<()> {
+        let _ = location;
+        self.room()
+    }
 }
 
 /// The clock, the waiting and the user's stop request, injected so tests don't wait.
@@ -979,12 +987,16 @@ impl Loop<'_> {
         }
     }
 
-    /// Waits while the disk is low (decision 245(g)); returns how long it waited, or `None` when
-    /// a stop was asked meanwhile.
-    fn wait_for_room(&mut self, out: &mut dyn Write) -> Result<Option<u64>> {
+    /// Waits while the disk is low for a step in `location` (decision 245(g)); returns how long
+    /// it waited, or `None` when a stop was asked meanwhile.
+    fn wait_for_room(
+        &mut self,
+        location: Option<Location>,
+        out: &mut dyn Write,
+    ) -> Result<Option<u64>> {
         let start = self.now();
         let mut said = false;
-        while let Err(e) = self.steps.room() {
+        while let Err(e) = self.steps.room_for(location) {
             if !said {
                 writeln!(
                     out,
@@ -1156,6 +1168,12 @@ impl Loop<'_> {
         Ok((None, waiting))
     }
 
+    /// Where `task fix --pr N` runs PR `pr`'s resolve or log-fix: as the task that opened it
+    /// recorded (issue 600), else as `[sandbox] location` says.
+    fn fix_location(&self, pr: u32) -> Option<Location> {
+        location::recorded(&self.base_dir, &self.repo, pr)
+    }
+
     fn unmerged_dependencies(&self, open: &[Issue], body: &str) -> Vec<String> {
         unmerged_dependencies(self.github, &self.repo, open, body)
     }
@@ -1184,7 +1202,13 @@ impl Loop<'_> {
         // cut short and logged.
         let mut ran = false;
         loop {
-            let Some(paused) = self.wait_for_room(out).map_err(Halt::Error)? else {
+            // Where its next phase runs: its record's location once it exists, else the one its
+            // labels chose (issue 600).
+            let location = match self.record(issue) {
+                Some(rec) => Some(rec.location),
+                None => self.locations.get(&issue).copied().flatten(),
+            };
+            let Some(paused) = self.wait_for_room(location, out).map_err(Halt::Error)? else {
                 if !ran {
                     return Err(Halt::Stopped);
                 }
@@ -1214,7 +1238,6 @@ impl Loop<'_> {
                 } else if resuming {
                     (self.steps.resume(issue, &mut out, &mut warn), None)
                 } else {
-                    let location = self.locations.get(&issue).copied().flatten();
                     let mut run = || self.steps.run_at(issue, location, &mut out, &mut warn);
                     if label {
                         self.run_unlabeling(issue, run)
@@ -1927,7 +1950,8 @@ impl Loop<'_> {
                 continue;
             }
             // `task fix` would refuse on a low disk: the PR waits for a later step, not failed.
-            if self.steps.room().is_err() {
+            // It runs where the PR's task ran (issue 600).
+            if self.steps.room_for(self.fix_location(number)).is_err() {
                 return Ok(true);
             }
             self.resolves.insert((number, tip));
@@ -2676,7 +2700,7 @@ impl Loop<'_> {
             // A low disk or a stop request leaves the log-fix for a later pass, never the disarm
             // (review M-1).
             if log_fix {
-                let waits = if self.steps.room().is_err() {
+                let waits = if self.steps.room_for(self.fix_location(number)).is_err() {
                     Some("room on the disk")
                 } else if (self.env.stop_requested)() {
                     Some("the next loop (this one is stopping)")
@@ -4384,8 +4408,12 @@ impl Steps for TaskSteps<'_> {
     }
 
     fn room(&self) -> Result<()> {
+        self.room_for(None)
+    }
+
+    fn room_for(&self, location: Option<Location>) -> Result<()> {
         let config = TaskConfig::load(&self.repo_root)?;
-        if pipeline::choose_location(None, &config) == Location::Cloud {
+        if pipeline::choose_location(location, &config) == Location::Cloud {
             return Ok(());
         }
         disk::require(

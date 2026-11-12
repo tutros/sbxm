@@ -749,3 +749,193 @@ fn the_opener_wins_over_a_later_fix_live_or_archived() {
         );
     }
 }
+
+// --- review of issue 600, M-1: the loop's disk wait is for the step's own location ---
+//
+// The room is `TaskSteps`'s own check, on a sandbox drive with 0 bytes free under the repo's
+// local default; a loop that pauses is stopped at its first look back.
+
+/// Plays the phases as [`Script`] does, and `task fix --pr N` as `fix N`, failing; the room is
+/// `real`'s.
+struct LowDisk<'a> {
+    calls: RefCell<Vec<String>>,
+    real: task_loop::TaskSteps<'a>,
+}
+
+impl Steps for LowDisk<'_> {
+    fn run(&self, issue: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
+        Err(anyhow!("run of #{issue} without a location"))
+    }
+    fn run_at(
+        &self,
+        issue: u32,
+        location: Option<Location>,
+        _out: &mut dyn Write,
+        _warn: &mut dyn Write,
+    ) -> Result<()> {
+        self.calls
+            .borrow_mut()
+            .push(format!("run {issue} {location:?}"));
+        Err(anyhow!("scripted refusal"))
+    }
+    fn resume(&self, issue: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
+        Err(anyhow!("unexpected resume of #{issue}"))
+    }
+    fn finish(&self, issue: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
+        Err(anyhow!("unexpected finish of #{issue}"))
+    }
+    fn file_findings(&self, issue: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
+        Err(anyhow!("unexpected file-findings of #{issue}"))
+    }
+    fn fix_pr(&self, pr: u32, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
+        self.calls.borrow_mut().push(format!("fix {pr}"));
+        Err(anyhow!("scripted fix failure"))
+    }
+    fn fix_check(
+        &self,
+        pr: u32,
+        _: u64,
+        _out: &mut dyn Write,
+        _warn: &mut dyn Write,
+    ) -> Result<()> {
+        Err(anyhow!("unexpected log-fix of PR #{pr}"))
+    }
+    fn rm_merged(&self, _out: &mut dyn Write, _warn: &mut dyn Write) -> Result<()> {
+        Ok(())
+    }
+    fn room(&self) -> Result<()> {
+        self.real.room()
+    }
+    fn room_for(&self, location: Option<Location>) -> Result<()> {
+        self.real.room_for(location)
+    }
+}
+
+/// Runs the loop over the labeled queue with [`LowDisk`]: its calls and output. The first sleep
+/// (a pause) asks it to stop.
+fn run_low_disk(
+    env: &common::Env,
+    repo_root: &std::path::Path,
+    gh: &FakeGitHub,
+) -> (Vec<String>, String) {
+    let state = env.tmp.path().join("sbx-state");
+    fs::create_dir_all(&state).unwrap();
+    let backend = FakeBackend::default();
+    let host = FakeHostRunner::default();
+    let config_dir = env.config_dir();
+    let steps = LowDisk {
+        calls: RefCell::new(Vec::new()),
+        real: task_loop::TaskSteps {
+            config_dir: &config_dir,
+            repo_root: repo_root.to_owned(),
+            repo: Some(REPO.into()),
+            backend: &backend,
+            github: gh,
+            probe: &Probe,
+            host: &host,
+            disk: sbxm::disk::Guard {
+                free_space: |_| Ok(0),
+                default_state_dir: Some(state),
+                ..Default::default()
+            },
+            stop: None,
+        },
+    };
+    let slept = std::cell::Cell::new(false);
+    let loop_env = Env {
+        now: &|| 1_793_613_600,
+        sleep: &|_: Duration| slept.set(true),
+        stop_requested: &|| slept.get(),
+    };
+    let mut out = Vec::new();
+    task_loop::run(
+        &config_dir,
+        &loop_opts(repo_root, &[]),
+        &steps,
+        gh,
+        &Probe,
+        &loop_env,
+        &mut out,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    (steps.calls.take(), String::from_utf8(out).unwrap())
+}
+
+#[test]
+fn a_run_cloud_issue_does_not_wait_for_the_local_disk_and_a_run_local_one_does() {
+    let (env, repo_root) = loop_fixture(Some(2));
+    let (calls, out) = run_low_disk(&env, &repo_root, &ready_issue(&[RUN_CLOUD_LABEL]));
+    assert_eq!(calls, ["run 3 Some(Cloud)"], "{out}");
+    assert!(!out.contains("paused:"), "{out}");
+
+    let (env, repo_root) = loop_fixture(Some(2));
+    let (calls, out) = run_low_disk(&env, &repo_root, &ready_issue(&[RUN_LOCAL_LABEL]));
+    assert!(calls.is_empty(), "{calls:?}");
+    assert!(out.contains("paused: only 0.0 GiB free"), "{out}");
+}
+
+#[test]
+fn a_queued_run_job_of_a_run_cloud_issue_does_not_wait_for_the_local_disk() {
+    let (env, repo_root) = loop_fixture(Some(2));
+    let queue = sbxm::task::jobs::queue_dir(&env.base_dir());
+    fs::create_dir_all(&queue).unwrap();
+    fs::write(queue.join("r.json"), r#"{"kind": "run", "issue": 3}"#).unwrap();
+
+    let (calls, out) = run_low_disk(&env, &repo_root, &ready_issue(&[RUN_CLOUD_LABEL]));
+
+    assert_eq!(
+        calls.first().map(String::as_str),
+        Some("run 3 Some(Cloud)"),
+        "{out}"
+    );
+    assert!(!out.contains("paused:"), "{out}");
+}
+
+/// A finished loop task of issue 1, run at `at`, that opened PR 101; GitHub reports PR 101
+/// conflicting with its base.
+fn conflicting_loop_pr(env: &common::Env, at: Location) -> FakeGitHub {
+    let mut rec = Record::new(
+        &NewTask {
+            kind: Kind::Issue,
+            number: 1,
+            repo: REPO,
+            title: "",
+            base: "main",
+            branch: "issue-1",
+            config_hash: "h",
+            id: None,
+        },
+        0,
+        Process::new(1, 1),
+    );
+    rec.location = at;
+    rec.stage = record::Stage::Finished;
+    rec.pr = Some(format!("https://github.com/{REPO}/pull/101"));
+    rec.hooks = serde_json::json!({ task_loop::LOOP_HOOK: true });
+    let dir = record::task_dir(&env.base_dir(), "issue-1");
+    fs::create_dir_all(&dir).unwrap();
+    record::write(&dir, &rec).unwrap();
+    let mut pr = common::fix_task::pr7(&"0".repeat(40));
+    pr.number = 101;
+    FakeGitHub::default()
+        .with_user("me")
+        .with_default_branch("main")
+        .with_branch_head("main", &"a".repeat(40))
+        .with_pr(pr)
+        .with_mergeable(101, sbxm::github::Mergeable::Conflicting)
+        .with_open_issues(vec![])
+}
+
+#[test]
+fn the_resolve_of_a_cloud_tasks_pr_does_not_wait_for_the_local_disk_and_a_local_ones_does() {
+    let (env, repo_root) = loop_fixture(Some(2));
+    let gh = conflicting_loop_pr(&env, Location::Cloud);
+    let (calls, out) = run_low_disk(&env, &repo_root, &gh);
+    assert_eq!(calls, ["fix 101"], "{out}");
+
+    let (env, repo_root) = loop_fixture(Some(2));
+    let gh = conflicting_loop_pr(&env, Location::Local);
+    let (calls, out) = run_low_disk(&env, &repo_root, &gh);
+    assert!(calls.is_empty(), "{calls:?}\n{out}");
+}
