@@ -512,11 +512,19 @@ fn archive_names(meta: &Path) -> Vec<String> {
 }
 
 /// `dir`, a folder under `base_dir`, checked with [`finish::check_own_folder`] if it exists
-/// (never followed if it is a link, refused if its real place is elsewhere); `false` if it
-/// doesn't exist yet. Writes nothing.
+/// (never followed if it is a link, refused if its real place is elsewhere, or if it is a plain
+/// file: what a path under a plain file reads as differs by OS, "not a directory" on Linux and
+/// "not found" on Windows, so it is refused here); `false` if it doesn't exist yet. Writes
+/// nothing.
 fn own_folder_exists(base_dir: &Path, dir: &Path) -> Result<bool> {
     match fs::symlink_metadata(dir) {
-        Ok(_) => finish::check_own_folder(base_dir, dir).map(|()| true),
+        Ok(m) => {
+            finish::check_own_folder(base_dir, dir)?;
+            if !m.is_dir() {
+                bail!("{} is not a folder; move or delete it", dir.display());
+            }
+            Ok(true)
+        }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e).with_context(|| format!("cannot read {}", dir.display())),
     }

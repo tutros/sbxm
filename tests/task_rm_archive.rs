@@ -394,7 +394,8 @@ fn rm_merged_numbers_its_archive_the_same_way_and_its_dry_run_names_it() {
 // ---- Archiving fails ----
 
 /// A plain file where `.sbxm/task-archive` belongs: refused before the question, naming the
-/// archive path, with nothing deleted.
+/// archive path as not a folder, with nothing deleted. The refusal must not hang on the OS's
+/// error for a path under a plain file: Linux says "not a directory", Windows "not found".
 #[test]
 fn an_archive_that_cannot_be_made_deletes_nothing_and_names_the_archive_path() {
     let f = fixture();
@@ -407,6 +408,7 @@ fn an_archive_that_cannot_be_made_deletes_nothing_and_names_the_archive_path() {
 
     let message = format!("{:#}", result.unwrap_err());
     assert!(message.contains(&root.display().to_string()), "{message}");
+    assert!(message.contains("is not a folder"), "{message}");
     assert!(meta(&f).join("task.json").is_file());
     assert!(f.env.base_dir().join("tasks").join("issue-41").is_dir());
     assert!(confirm.prompts().is_empty(), "refused before the question");
