@@ -45,6 +45,10 @@ enum Act {
     MissingSecret,
     /// Killed after its record was written: no outcome.
     Killed,
+    /// Killed before it wrote its record: no record, no outcome.
+    KilledEarly,
+    /// Refused before any record, saying so in its outcome.
+    Refused(&'static str),
     /// Writes an `outcome.json` that can't be read as one.
     Garbage(&'static str),
     /// Refused before any folder, printing this error, and leaving no outcome at all (as a child
@@ -141,6 +145,12 @@ impl Spawner for Children {
                     errors: String::new(),
                 })
             }
+            Act::Refused(text) => ended(Outcome::new(Kind::Refused, None, text)),
+            Act::KilledEarly => Ok(Exit {
+                success: false,
+                how: "was killed".into(),
+                errors: String::new(),
+            }),
             Act::Garbage(text) => {
                 write_record(&self.base, Stage::Working);
                 fs::write(dir.join("outcome.json"), text).unwrap();
@@ -551,18 +561,35 @@ fn an_outcome_that_does_not_parse_or_names_an_unknown_kind_is_a_failure_quoted()
 }
 
 #[test]
-fn a_child_refused_before_any_record_skips_the_issue_quoting_its_error() {
+fn a_child_that_writes_no_outcome_before_any_record_is_interrupted_quoting_its_error() {
     let f = fixture();
 
-    let run = run_loop(&f, &[Act::RefusedSilently("no such issue")]);
+    let run = run_loop(&f, &[Act::RefusedSilently("no such issue"), Act::Ready]);
+
+    run.result.unwrap();
+    assert_eq!(run.children, [RUN, RUN]);
+    assert!(
+        run.out.contains(
+            "stopped (the task's child sbxm exited with code 1 and wrote no outcome (it said: no \
+             such issue)); resuming it once"
+        ),
+        "{}",
+        run.out
+    );
+    assert_eq!(run.calls, ["finish 3", "file-findings 3"]);
+}
+
+#[test]
+fn a_child_whose_outcome_says_refused_skips_the_issue() {
+    let f = fixture();
+
+    let run = run_loop(&f, &[Act::Refused("no such issue")]);
 
     run.result.unwrap();
     assert_eq!(run.children, [RUN]);
     assert!(
-        run.out.contains(
-            "skipped #3: refused before any write: the task's child sbxm exited with code 1 \
-             and wrote no outcome (it said: no such issue)"
-        ),
+        run.out
+            .contains("skipped #3: refused before any write: no such issue"),
         "{}",
         run.out
     );
@@ -778,4 +805,57 @@ fn a_child_is_done_when_it_exits_whatever_keeps_its_output_open() {
     assert!(!exit.success);
     assert_eq!(exit.how, "exited with code 3");
     assert!(exit.errors.contains("Error: gone"), "{exit:?}");
+}
+
+// --- review of issue 612: a child killed before its record, and secrets in what it says ---
+
+#[test]
+fn a_child_killed_before_its_record_is_run_again_once() {
+    let f = fixture();
+
+    let run = run_loop(&f, &[Act::KilledEarly, Act::Ready]);
+
+    run.result.unwrap();
+    assert_eq!(run.children, [RUN, RUN], "{}", run.out);
+    assert!(!run.out.contains("refused before any write"), "{}", run.out);
+    assert_eq!(run.calls, ["finish 3", "file-findings 3"]);
+}
+
+#[test]
+fn a_child_killed_twice_before_its_record_is_parked() {
+    let f = fixture();
+
+    let run = run_loop(&f, &[Act::KilledEarly, Act::KilledEarly]);
+
+    run.result.unwrap();
+    assert_eq!(run.children, [RUN, RUN], "{}", run.out);
+    assert!(
+        f.log_text().contains("parked at no record"),
+        "{}",
+        f.log_text()
+    );
+}
+
+/// A GitHub-token-shaped value, made up.
+const TOKEN: &str = "ghp_abcdefghijklmnopqrstuvwxyz0123";
+
+#[test]
+fn a_credential_in_what_a_child_says_reaches_neither_the_window_nor_the_log() {
+    for act in [
+        Act::Fail(Box::leak(
+            format!("bad remote https://{TOKEN}@github.com/o/r").into_boxed_str(),
+        )),
+        Act::RefusedSilently(Box::leak(
+            format!("bad repo https://{TOKEN}@x").into_boxed_str(),
+        )),
+        Act::Garbage(Box::leak(format!("{{ not json {TOKEN}").into_boxed_str())),
+    ] {
+        let f = fixture();
+
+        let run = run_loop(&f, &[act.clone(), act]);
+
+        assert!(!run.out.contains(TOKEN), "{}", run.out);
+        assert!(!f.log_text().contains(TOKEN), "{}", f.log_text());
+        assert!(run.out.contains("[redacted]"), "{}", run.out);
+    }
 }

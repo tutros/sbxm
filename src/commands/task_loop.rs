@@ -257,6 +257,24 @@ impl PhaseEnd {
             &result,
             &String::from_utf8_lossy(&text),
         ))
+        .masked()
+    }
+
+    /// Every text it carries masked as `run.log` masks it (`runlog::redact`): what the loop
+    /// says and logs of it never shows a secret value.
+    fn masked(self) -> Self {
+        let redact = |text: &str| crate::task::runlog::redact(text);
+        match self {
+            Self::Outcome(o) => Self::Outcome(outcome::Outcome {
+                detail: redact(&o.detail),
+                ..o
+            }),
+            Self::Missing(why) => Self::Missing(redact(&why)),
+            Self::Unreadable { text, why } => Self::Unreadable {
+                text: redact(&text),
+                why: redact(&why),
+            },
+        }
     }
 
     /// What `outcome.json` in the task folder `dir` says, once the phase's child has exited, or
@@ -274,6 +292,7 @@ impl PhaseEnd {
             }
             outcome::Read::Unreadable { text, why } => Self::Unreadable { text, why },
         }
+        .masked()
     }
 
     /// The window's word for it: the outcome's kind, or why there is none.
@@ -1360,7 +1379,9 @@ impl Loop<'_> {
             if label && self.unlabeled(issue, removed, warn).map_err(Halt::Error)? {
                 label = false;
             }
-            // The loop decides from the outcome and the record alone (decision 321(2)).
+            // The loop decides from the outcome and the record alone (decision 321(2)), and
+            // shows and logs its text masked, whatever `Steps` gave it.
+            let ended = ended.masked();
             let kind = ended.kind();
             // A stop asked while the phase waited for the machine's sandbox slot (issue 570):
             // it created nothing, so the task stands as it was before the phase.
@@ -1419,8 +1440,12 @@ impl Loop<'_> {
                 continue;
             }
             self.usage_waited = Duration::ZERO;
+            // Only a command that said how it ended can have refused: a child that wrote no
+            // outcome, or one that can't be read, was interrupted (decision 321(2)), and is run
+            // again once like an environment stop.
             let environment = kind == outcome::Kind::Environment;
-            if self.record(issue).is_none() && !environment {
+            let said = matches!(ended, PhaseEnd::Outcome(_));
+            if self.record(issue).is_none() && said && !environment {
                 return Ok(End::Refused(format!("{e:#}")));
             }
             failures += 1;
@@ -4297,7 +4322,8 @@ impl TaskSteps<'_> {
                 ended
             }
             Err(e) => here(e),
-        };
+        }
+        .masked();
         let _ = writeln!(out, "{label} {what} ended: {}", ended.summary());
         ended
     }

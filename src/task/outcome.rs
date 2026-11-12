@@ -184,7 +184,12 @@ pub fn write_file(path: &Path, outcome: &Outcome) -> Result<()> {
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".tmp");
     let tmp = PathBuf::from(tmp);
-    let mut text = serde_json::to_string_pretty(outcome)?;
+    // Masked as `run.log` masks it: secret values never reach a results file.
+    let masked = Outcome {
+        detail: super::runlog::redact(&outcome.detail),
+        ..outcome.clone()
+    };
+    let mut text = serde_json::to_string_pretty(&masked)?;
     text.push('\n');
     fs::write(&tmp, text).with_context(|| format!("cannot write {}", tmp.display()))?;
     fs::rename(&tmp, path).with_context(|| format!("cannot write {}", path.display()))
@@ -577,5 +582,38 @@ mod tests {
             (o.end, o.provider.as_deref()),
             (Kind::UsageLimit, Some("anthropic"))
         );
+    }
+
+    /// A GitHub-token-shaped value, made up.
+    const TOKEN: &str = "ghp_abcdefghijklmnopqrstuvwxyz0123";
+
+    #[test]
+    fn a_credential_in_the_detail_is_masked_in_the_folder_and_the_loops_file() {
+        let base = tempfile::tempdir().unwrap();
+        let dir = record::task_dir(base.path(), "issue-3");
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("task.json"), "{}").unwrap();
+        let elsewhere = base.path().join("issue-4.json");
+        let fail = || Err(anyhow!("bad repo https://{TOKEN}@github.com/o/r"));
+        recorded_with(None, &mut Vec::new(), &mut Vec::new(), |rec, _, _| {
+            rec.at(base.path(), "issue-3")?;
+            fail()
+        })
+        .unwrap_err();
+        recorded_with(
+            Some(elsewhere.clone()),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            |rec, _, _| {
+                rec.at(base.path(), "issue-4")?;
+                fail()
+            },
+        )
+        .unwrap_err();
+        for file in [path(&dir), elsewhere] {
+            let text = fs::read_to_string(&file).unwrap();
+            assert!(!text.contains(TOKEN), "{text}");
+            assert!(text.contains("[redacted]"), "{text}");
+        }
     }
 }
