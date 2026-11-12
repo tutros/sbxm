@@ -1,5 +1,5 @@
 use std::ffi::OsString;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result, bail};
@@ -94,6 +94,43 @@ impl SbxBackend {
         Ok(())
     }
 
+    /// Runs `sbx create` with stdin and stdout attached, like [`Self::run_sbx`], and its stderr
+    /// both shown as it comes and kept: a failure's error carries what `sbx` said (issue 556).
+    fn create_keeping_stderr(&self, args: Vec<OsString>, sandbox: &str) -> Result<()> {
+        let mut child = self
+            .command()
+            .args(&args)
+            .stderr(Stdio::piped())
+            .spawn()
+            .context(SBX_MISSING)?;
+        let mut kept = Vec::new();
+        if let Some(mut pipe) = child.stderr.take() {
+            let mut screen = std::io::stderr();
+            let mut chunk = [0u8; 4096];
+            loop {
+                match pipe.read(&mut chunk) {
+                    Ok(0) => break,
+                    Ok(n) => {
+                        let _ = screen.write_all(&chunk[..n]);
+                        let _ = screen.flush();
+                        kept.extend_from_slice(&chunk[..n]);
+                        // Only the end is ever shown: the start of a long output can go.
+                        if kept.len() > 2 * STDERR_KEPT {
+                            kept.drain(..kept.len() - STDERR_KEPT);
+                        }
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                    Err(_) => break,
+                }
+            }
+        }
+        let status = child.wait().context(SBX_MISSING)?;
+        if !status.success() {
+            bail!("{}", create_failed(sandbox, &status.to_string(), &kept));
+        }
+        Ok(())
+    }
+
     /// Refuses a call whose command line or output only the cloud has.
     fn cloud_only(&self, what: &str) -> Result<()> {
         if self.location == Location::Local {
@@ -136,7 +173,7 @@ impl SandboxBackend for SbxBackend {
     }
 
     fn create(&self, spec: &CreateSpec) -> Result<()> {
-        self.run_sbx(create_args(spec, self.location)?, &spec.name)
+        self.create_keeping_stderr(create_args(spec, self.location)?, &spec.name)
     }
 
     fn copy_in(&self, sandbox: &str, host: &Path, path: &str) -> Result<()> {
@@ -610,6 +647,32 @@ fn parse_custom_secrets(json: &str) -> Result<Vec<CustomSecret>> {
     }
     let ls: SecretLs = parse_json(json, "sbx secret ls --json")?;
     Ok(ls.custom_secrets)
+}
+
+/// How many bytes of `sbx create`'s stderr its error keeps, from the end.
+const STDERR_KEPT: usize = 2000;
+
+/// The error of an `sbx create` that failed with `status`: `sbx`'s stderr, trimmed, cut to its
+/// last [`STDERR_KEPT`] bytes, and with values that look like secrets masked as `run.log` masks
+/// them, so the error (and `run.log`, which gets it) names the cause (issue 556).
+fn create_failed(sandbox: &str, status: &str, stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(stderr);
+    let text = text.trim();
+    let reason = if text.is_empty() {
+        "no output from sbx on stderr".to_owned()
+    } else if text.len() > STDERR_KEPT {
+        let mut start = text.len() - STDERR_KEPT;
+        while !text.is_char_boundary(start) {
+            start += 1;
+        }
+        format!("...{}", text[start..].trim_start())
+    } else {
+        text.to_owned()
+    };
+    format!(
+        "`sbx create` failed for sandbox {sandbox} ({status}): {}",
+        crate::task::runlog::redact(&reason)
+    )
 }
 
 /// `sbx`'s stderr, or its stdout when stderr is empty: S11 didn't check which one carries a
@@ -1419,6 +1482,34 @@ mod template_tests {
                 size: 734_437_048,
             }
         );
+    }
+
+    #[test]
+    fn a_failed_create_names_what_sbx_said_on_stderr() {
+        let error = create_failed(
+            "sbxm-task-x-claude",
+            "exit status: 1",
+            b"\nERROR: name too long\n  ",
+        );
+        assert_eq!(
+            error,
+            "`sbx create` failed for sandbox sbxm-task-x-claude (exit status: 1): ERROR: name too long"
+        );
+        let silent = create_failed("s", "exit status: 1", b" \n");
+        assert!(silent.ends_with("no output from sbx on stderr"), "{silent}");
+    }
+
+    #[test]
+    fn a_failed_creates_stderr_is_masked_and_cut_to_its_end() {
+        let secret = format!("token sk-{} rejected", "a".repeat(30));
+        let error = create_failed("s", "exit status: 1", secret.as_bytes());
+        assert!(!error.contains("sk-aaaa"), "{error}");
+        assert!(error.contains("[redacted]"), "{error}");
+
+        let long = format!("{}THE END", "x".repeat(3 * STDERR_KEPT));
+        let error = create_failed("s", "exit status: 1", long.as_bytes());
+        assert!(error.ends_with("THE END"), "{error}");
+        assert!(error.len() < STDERR_KEPT + 100, "{}", error.len());
     }
 
     #[test]

@@ -174,3 +174,13 @@ fn sbxm_status_names_the_task_of_a_capped_sandbox() {
     let name = record::sandbox_name(id, "review-codex");
     assert_eq!(sandboxes::owner(&claims, &name), Owner::Task(id.into()));
 }
+
+#[test]
+fn only_the_exact_capped_form_counts_as_a_tasks_capped_name() {
+    let id = "spec-foo-0b24b8";
+    // Another id that starts with what a capped name of `id` would: its name isn't `id`'s.
+    let other = format!("spec-foo-{}-bar-123456", hash(id));
+    let name = record::sandbox_name(&other, "claude");
+    assert_eq!(record::sandbox_role(&name, id), None, "{name}");
+    assert_eq!(after_id(&name, "sbxm-task-", id), None, "{name}");
+}

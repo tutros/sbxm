@@ -47,14 +47,16 @@ fn shortened(id: &str, keep: usize) -> String {
     }
 }
 
-/// What follows the id part of `name`, when `name` is `<stem>` and then `id` itself or a
-/// shortened form of it that [`capped`] makes; `None` when it is neither.
+/// What follows the id part of `name`, when `name` is `<stem>` and then `id` itself, or exactly
+/// the capped name [`capped`] makes of `id` and that suffix; `None` otherwise (so another id that
+/// merely starts like a capped one never counts as `id`'s).
 pub fn after_id<'a>(name: &'a str, stem: &str, id: &str) -> Option<&'a str> {
     let rest = name.strip_prefix(stem)?;
     if let Some(after) = rest.strip_prefix(id) {
         return Some(after);
     }
-    (0..=id.len())
-        .filter(|&keep| id.is_char_boundary(keep))
-        .find_map(|keep| rest.strip_prefix(shortened(id, keep).as_str()))
+    rest.match_indices(hash(id).as_str()).find_map(|(at, _)| {
+        let after = &rest[at + HASH_LEN..];
+        (capped(stem, id, after) == name).then_some(after)
+    })
 }
