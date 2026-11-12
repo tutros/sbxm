@@ -546,7 +546,8 @@ for a task. Check `sbx ls` for stopped leftovers.
   platform's shell (`& 'H:\sbxm-e2e\sbxm-a4571ff.exe' task resume --issue 468` in PowerShell on Windows,
   `'/path/to/sbxm' task resume --issue 468` in sh elsewhere), and the first one is followed at once by the lines to run
   first: `cd` into the directory the command ran in (`cd -LiteralPath` in PowerShell; for a `task` command, the repo
-  root whose `sbxm-task.toml` it read) and, when `SBXM_CONFIG_DIR` is set, the line that sets it as it was; `sbxm
+  root whose `sbxm-task.toml` it read) and, when `SBXM_CONFIG_DIR` is set, the line that sets it as it was (a relative value, when the `cd` goes to another directory
+  than the command ran in, as the absolute folder it meant there, so the lines load the same config; issue 589); `sbxm
   status --watch` repeats them in every frame with a hint. Only local output does this (the screen and `run.log`, whose
   `next:` lines `sbxm status` then shows as written); what sbxm posts to GitHub and the loop's toasts keep the bare
   `sbxm`, and so does `--json` output. Stored content is shown as stored: `run show` and `sbxm run` print the

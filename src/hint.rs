@@ -98,6 +98,9 @@ pub struct Context {
     /// The directory to run them in: the working directory, which is the repo root whose
     /// `sbxm-task.toml` a task command read. `None` when it can't be read.
     pub dir: Option<PathBuf>,
+    /// The working directory the command ran in, which a relative `config_dir` is relative to;
+    /// `None` when it can't be read.
+    pub cwd: Option<PathBuf>,
     /// The running executable, `None` when `std::env::current_exe` fails (the hint then keeps
     /// the bare `sbxm`).
     pub exe: Option<PathBuf>,
@@ -109,8 +112,10 @@ impl Context {
     /// This process's context: the directory [`set_dir`] named, else the working directory.
     pub fn current() -> Self {
         let named = DIR.lock().ok().and_then(|dir| dir.clone());
+        let cwd = std::env::current_dir().ok();
         Self {
-            dir: named.or_else(|| std::env::current_dir().ok()),
+            dir: named.or_else(|| cwd.clone()),
+            cwd,
             exe: std::env::current_exe().ok(),
             config_dir: std::env::var_os("SBXM_CONFIG_DIR"),
         }
@@ -175,7 +180,7 @@ pub fn block(context: &Context, shell: Shell) -> String {
         lines.push(shell.cd(&dir.to_string_lossy()));
     }
     if let Some(value) = &context.config_dir {
-        lines.push(shell.set_config_dir(&value.to_string_lossy()));
+        lines.push(shell.set_config_dir(&config_dir_value(context, value)));
     }
     if lines.is_empty() {
         return String::new();
@@ -187,6 +192,33 @@ pub fn block(context: &Context, shell: Shell) -> String {
         text.push('\n');
     }
     text
+}
+
+/// The `SBXM_CONFIG_DIR` value the block prints (issue 589): as given, unless it is relative and
+/// the block's `cd` goes to another directory than the one the command ran in; then the working
+/// directory joined with it, so the printed lines select the same config after the `cd`. Only
+/// `.` segments are dropped: a `..` is left for the OS, which resolves it after any link before
+/// it, as it did for the command.
+fn config_dir_value(context: &Context, value: &OsString) -> String {
+    let given = Path::new(value);
+    match (&context.dir, &context.cwd) {
+        (Some(dir), Some(cwd)) if given.is_relative() && !same_dir(dir, cwd) => cwd
+            .join(given)
+            .components()
+            .collect::<PathBuf>()
+            .to_string_lossy()
+            .into_owned(),
+        _ => value.to_string_lossy().into_owned(),
+    }
+}
+
+/// Whether `a` and `b` name one directory: equal, or equal once links are resolved.
+fn same_dir(a: &Path, b: &Path) -> bool {
+    a == b
+        || matches!(
+            (std::fs::canonicalize(a), std::fs::canonicalize(b)),
+            (Ok(a), Ok(b)) if a == b
+        )
 }
 
 /// Set when this process printed a rewritten command (or named a directory) and the block that
