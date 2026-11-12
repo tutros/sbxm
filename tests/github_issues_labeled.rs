@@ -99,6 +99,79 @@ fn a_listing_that_reaches_the_limit_is_an_error_not_a_guess() {
     assert!(err.contains("loop-log"), "{err}");
 }
 
+// --- Issue 594, review M-4: the issues with one label in every state ---
+
+#[test]
+fn the_every_state_listing_filters_by_the_label_with_state_all() {
+    let (gh, script) = backend(listed([52, 41].into_iter()));
+
+    let issues = gh.issues_labeled("o/r", "loop-log").unwrap();
+
+    assert_eq!(
+        script.calls.lock().unwrap()[0],
+        [
+            "issue",
+            "list",
+            "--repo",
+            "o/r",
+            "--state",
+            "all",
+            "--label",
+            "loop-log",
+            "--limit",
+            &LABELED_LIMIT.to_string(),
+            "--json",
+            "number,title,labels,body,state"
+        ]
+    );
+    assert_eq!(
+        issues.iter().map(|i| i.number).collect::<Vec<_>>(),
+        [52, 41]
+    );
+}
+
+#[test]
+fn an_every_state_listing_one_under_the_limit_is_the_whole_list() {
+    let (gh, _) = backend(listed(1..LABELED_LIMIT));
+
+    let issues = gh.issues_labeled("o/r", "loop-log").unwrap();
+
+    assert_eq!(issues.len(), LABELED_LIMIT as usize - 1);
+}
+
+#[test]
+fn an_every_state_listing_that_reaches_the_limit_is_an_error_not_a_guess() {
+    let (gh, _) = backend(listed(1..=LABELED_LIMIT));
+
+    let err = format!("{:#}", gh.issues_labeled("o/r", "loop-log").unwrap_err());
+
+    assert!(err.contains(&LABELED_LIMIT.to_string()), "{err}");
+    assert!(err.contains("loop-log"), "{err}");
+}
+
+#[test]
+fn the_fake_lists_the_open_and_closed_issues_with_the_label() {
+    let issue = |number: u32, open: bool, label: &str| Issue {
+        number,
+        open,
+        title: format!("t{number}"),
+        labels: vec![label.into()],
+        body: String::new(),
+    };
+    let gh = FakeGitHub::default()
+        .with_open_issues(vec![issue(1, true, "loop-log"), issue(2, true, "bug")])
+        .with_issues(vec![issue(3, false, "loop-log"), issue(4, false, "bug")]);
+
+    let issues = gh.issues_labeled("o/r", "loop-log").unwrap();
+
+    let numbers: Vec<u32> = issues.iter().map(|i| i.number).collect();
+    assert_eq!(numbers, [1, 3]);
+    assert!(
+        gh.calls()
+            .contains(&GhCall::IssuesLabeled("o/r".into(), "loop-log".into()))
+    );
+}
+
 #[test]
 fn the_fake_lists_only_the_open_issues_with_the_label_however_many_there_are() {
     let mut open: Vec<Issue> = (1..=300)

@@ -17,6 +17,7 @@ pub enum GhCall {
     IssuesOpen(String),
     /// Repo, label.
     IssuesOpenLabeled(String, String),
+    IssuesLabeled(String, String),
     Issue(String, u32),
     Pr(String, u32),
     PrMergeState(String, u32),
@@ -95,6 +96,7 @@ pub struct FakeGitHub {
     fail_create_at: Option<usize>,
     fail_edit_at: Option<usize>,
     fail_issues_all: bool,
+    issues_labeled_failure: Option<String>,
     failure: Option<String>,
     comment_failure: Option<String>,
     /// The id the next `issue_comment` returns; 1 when not scripted.
@@ -450,6 +452,12 @@ impl FakeGitHub {
         *self.label_events_failure.lock().unwrap() = message.map(str::to_owned);
     }
 
+    /// Only `issues_labeled` fails (and is still recorded).
+    pub fn failing_issues_labeled(mut self, message: &str) -> Self {
+        self.issues_labeled_failure = Some(message.to_owned());
+        self
+    }
+
     /// Only `issue_comment_bodies` fails (and is still recorded).
     pub fn failing_issue_comment_reads(mut self, message: &str) -> Self {
         self.issue_comments_failure = Some(message.to_owned());
@@ -515,6 +523,24 @@ impl GitHubBackend for FakeGitHub {
             .into_iter()
             .chain(created.into_iter().filter(|i| i.open))
         {
+            if issue.labels.iter().any(|l| l == label)
+                && !found.iter().any(|f| f.number == issue.number)
+            {
+                found.push(issue);
+            }
+        }
+        Ok(found)
+    }
+
+    fn issues_labeled(&self, repo: &str, label: &str) -> Result<Vec<Issue>> {
+        self.record(GhCall::IssuesLabeled(repo.to_owned(), label.to_owned()))?;
+        if let Some(message) = &self.issues_labeled_failure {
+            return Err(anyhow!("{message}"));
+        }
+        let mut found: Vec<Issue> = Vec::new();
+        let open = self.open_issues.lock().unwrap().clone();
+        let all = self.all_issues.lock().unwrap().clone();
+        for issue in open.into_iter().chain(all) {
             if issue.labels.iter().any(|l| l == label)
                 && !found.iter().any(|f| f.number == issue.number)
             {
