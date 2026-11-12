@@ -20,6 +20,7 @@ use crate::slot;
 use crate::task::config::{self, TaskConfig};
 use crate::task::finish;
 use crate::task::gates::HostRunner;
+use crate::task::outcome;
 use crate::task::pipeline::{self, Ctx, Prepared, TaskEnv};
 use crate::task::record::{self, GateResult, ProcessProbe};
 use crate::task::repo::{self, Identity};
@@ -104,6 +105,34 @@ fn gates_could_not_run_line(
 
 #[allow(clippy::too_many_arguments)]
 pub fn run(
+    config_dir: &std::path::Path,
+    opts: &Options,
+    backend: &dyn SandboxBackend,
+    github: &dyn GitHubBackend,
+    probe: &dyn ProcessProbe,
+    host: &dyn HostRunner,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<()> {
+    // Its outcome as it ends (decision 321(2)).
+    outcome::recorded(out, warn, |recorder, out, warn| {
+        let id = match &opts.target {
+            Target::Issue(n) => Some(format!("issue-{n}")),
+            Target::Pr(n) => Some(format!("pr-{n}")),
+            Target::Spec(path) => opts
+                .resolved_spec_id
+                .clone()
+                .or_else(|| record::spec_id(path).ok().map(|(id, _)| id)),
+        };
+        if let Some(id) = id.filter(|_| !matches!(opts.target, Target::Issue(0) | Target::Pr(0))) {
+            recorder.at_config(config_dir, &id)?;
+        }
+        run_unrecorded(config_dir, opts, backend, github, probe, host, out, warn)
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_unrecorded(
     config_dir: &std::path::Path,
     opts: &Options,
     backend: &dyn SandboxBackend,

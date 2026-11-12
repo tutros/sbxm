@@ -17,6 +17,7 @@ pub mod machine;
 pub mod medium;
 pub mod merged;
 pub mod next;
+pub mod outcome;
 pub mod pipeline;
 pub mod pr_fix;
 pub mod prompts;

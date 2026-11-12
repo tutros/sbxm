@@ -753,6 +753,12 @@ impl std::error::Error for MissingSecret {}
 #[derive(Debug)]
 pub struct SbxUnavailable(String);
 
+impl SbxUnavailable {
+    pub fn new(text: impl Into<String>) -> Self {
+        Self(text.into())
+    }
+}
+
 impl std::fmt::Display for SbxUnavailable {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
@@ -831,6 +837,11 @@ impl NotSignedIn {
             said: said.into(),
             then: Vec::new(),
         }
+    }
+
+    /// `sbx`'s own words.
+    pub fn said(&self) -> &str {
+        &self.said
     }
 
     /// The same stop, going on with `then` instead.
