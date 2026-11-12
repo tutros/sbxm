@@ -133,7 +133,20 @@ run in the cloud skips this check, since they don't use that drive (`--ignore-di
 | `just purge <project>` | Removes every sandbox of the project and deletes its workspace (asks first). |
 | `just list` | Lists sandboxes with status, config drift and orphans. |
 | `just show [project] [harness]` | Prints the merged config, its hash and the kits, without creating anything. |
-| `just demo [project]` | Creates one project with a sandbox for every harness, then lists them. |
+| `just demo [project]` | Creates one project with a sandbox for every harness, stopping each right after it is created (one running sandbox at a time), then lists them. |
+
+**Running tasks** (these run the recorded build in `SBXM_TASK_BIN`, or the `sbxm` on PATH without it; see `docs/workflow.md`)
+
+| Recipe | What it does |
+|---|---|
+| `just task-loop [flags]` | Runs `sbxm task loop` from this checkout; extra flags pass through. |
+| `just status [flags]` | Shows every task at once (`sbxm status`), e.g. `just status --watch`. |
+| `just logs [flags]` | Prints one task's `run.log` (`sbxm task logs`), e.g. `just logs --issue 574` (also `--pr N`, `--spec FILE`). |
+| `just queue <args>` | Queues a job for the loop (`sbxm task queue`), e.g. `just queue run --issue 594` or `just queue spec --file NAME`. |
+| `just loop-register` | Registers the scheduled task `sbxm task loop`, which runs the loop at logon (`scripts/loop-trigger.ps1 -Register`). |
+| `just loop-start` | Starts the registered loop now, outside any terminal. |
+| `just loop-stop` | Stops the loop (`sbxm task loop --stop`): after its current task, or within 5 minutes while it waits. |
+| `just templates [profile]` | Rebuilds both warm templates of a profile (default `sbxm-dev`) from this checkout, claude then codex, one at a time. |
 
 **Developing sbxm**
 
@@ -141,9 +154,10 @@ run in the cloud skips this check, since they don't use that drive (`--ignore-di
 |---|---|
 | `just build` | Builds the debug binary. |
 | `just test` | Runs the Rust tests (no Docker needed). |
-| `just script-test` | Runs the Pester tests for `scripts/deploy-profiles.ps1` and `scripts/factory-check.ps1` (needs Pester 5). |
+| `just script-test` | Runs the Pester tests for the scripts in `scripts/` (needs Pester 5). |
 | `just check` | Everything that must pass before a commit: `cargo fmt --check`, clippy, `cargo test` and `just script-test`. |
 | `just real-test [base_dir]` | Runs the tests against the real `sbx` (needs `sbx login` and a base dir not on `C:`). |
+| `just real-test-cloud [base_dir]` | Runs the tests against the real Docker Cloud Sandboxes. Costs money; needs `sbx` logged in to the cloud (see `tests/real_sbx_cloud.rs`). |
 
 ## Projects, sandboxes and where things live
 
@@ -519,8 +533,12 @@ Sandbox names are `sbxm-<project>-<harness>`. A task's are `sbxm-task-issue-<n>-
 
 **A task: which file changes when**
 
-A task's files are in `<base_dir>\.sbxm\tasks\<id>\` (`<id>` is `issue-<n>` or `pr-<n>`). `sbxm task status` shows
-the stage; follow a file live with `Get-Content <file> -Tail 20 -Wait`.
+A task's files are in `<base_dir>\.sbxm\tasks\<id>\` (`<id>` is `issue-<n>`, `pr-<n>`, `spec-<name>-<hash>` for a
+spec task or `fix-<PR>-<hash>` for a fix task, as `sbxm task status` names them); a local task's code clone is
+`<base_dir>\tasks\<id>\` (see [Working on issues with `sbxm task`](#working-on-issues-with-sbxm-task)), and a cloud
+task's is in its cloud sandbox. `sbxm task status` shows the stage; `sbxm status --watch` (or `just status --watch`)
+shows every task at once, and `sbxm task logs --issue N` (or `just logs --issue N`) prints one task's `run.log`.
+Follow a file live with `Get-Content <file> -Tail 20 -Wait`.
 
 | File | Written while | Meaning |
 |---|---|---|
