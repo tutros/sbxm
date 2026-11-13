@@ -209,6 +209,52 @@ mod commands {
     }
 
     #[test]
+    fn a_template_build_of_a_profile_name_that_isnt_one_starts_nothing_and_removes_nothing() {
+        let env = common::Env::new();
+        let repo_root = env.tmp.path().join("repo");
+        fs::create_dir_all(&repo_root).unwrap();
+        // Where a name climbing out of the outcome folder would point.
+        let planted = env.base_dir().join(".sbxm").join("x.json");
+        fs::create_dir_all(planted.parent().unwrap()).unwrap();
+        fs::write(&planted, "keep").unwrap();
+        let gh = FakeGitHub::default();
+        let (backend, host) = (FakeBackend::default(), FakeHostRunner::default());
+        let spawner = Instant::default();
+        let config_dir = env.config_dir();
+        let steps = TaskSteps {
+            config_dir: &config_dir,
+            repo_root,
+            repo: None,
+            backend: &backend,
+            github: &gh,
+            probe: &Probe,
+            host: &host,
+            disk: sbxm::disk::Guard::default(),
+            stop: None,
+            spawner: &spawner,
+        };
+        let job = JobStep::Template {
+            profile: "../x".into(),
+            harness: Harness::Claude,
+            warm: None,
+        };
+        let mut out = Vec::new();
+
+        let ended = {
+            let mut started = steps.start_job(&job, Location::Local, &mut out, &mut Vec::new());
+            poll_to_end(started.as_mut(), &mut out)
+        };
+
+        let PhaseEnd::Outcome(o) = &ended else {
+            panic!("{ended:?}")
+        };
+        assert_eq!(o.end, Kind::Failed, "{o:?}");
+        assert!(o.detail.contains("invalid profile name"), "{o:?}");
+        assert!(spawner.started.borrow().is_empty());
+        assert_eq!(fs::read_to_string(&planted).unwrap(), "keep");
+    }
+
+    #[test]
     fn a_template_build_runs_as_a_template_build_child() {
         let warm = PathBuf::from("checkout");
         let job = JobStep::Template {

@@ -4671,6 +4671,8 @@ impl TaskSteps<'_> {
                 harness,
                 warm,
             } => {
+                // The name becomes the outcome file's: a profile's own, checked before any path.
+                crate::config::validate_profile_name(profile).map_err(here)?;
                 let mut args = words(&["template", "build"]);
                 args.extend([
                     profile.clone(),
