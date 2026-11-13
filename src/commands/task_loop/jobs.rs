@@ -2,6 +2,8 @@
 //! resolves and its checks of the runs, the loop runs every job file in `<base>/.sbxm/queue/`,
 //! oldest first ([`jobs::pending`]), each ending with one result file. At its start it reports
 //! the jobs a stopped loop left in `queue/running/` as `interrupted`, without running them again.
+//! With `[resources] cloud_slots` set they run as children instead ([`Loop::start_jobs`], issue
+//! 633), and the loop goes on supervising its other children meanwhile.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};

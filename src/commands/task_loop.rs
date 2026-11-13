@@ -19,7 +19,9 @@
 //! The phases go through [`Steps`] so the loop's rules are tested without sandboxes;
 //! [`TaskSteps`] runs the real commands: an issue task's `task run` and `task resume` as child
 //! `sbxm` processes ([`child`], issue 612), whose `outcome.json` and task record are all the loop
-//! reads of how they ended (decision 321(2)); the other steps in this process.
+//! reads of how they ended (decision 321(2)); the other steps in this process, except that with
+//! `[resources] cloud_slots` set the resolves, log-fixes and queued jobs run as children too
+//! ([`job_children`], issue 633).
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs;

@@ -8,9 +8,10 @@
 //!   `run-local` and `run-cloud` pin it. An issue whose place is full keeps its place in the
 //!   queue, and the first issue in order that fits a free slot starts instead.
 //! - **The loop's own steps never wait for a slot:** a resolve, a log-fix or a queued job whose
-//!   slot a child holds is postponed to a later pass.
+//!   slot a child holds is postponed to a later pass; once free, they start as job children
+//!   ([`super::job_children`], issue 633) before any new issue.
 //! - **Pauses:** no new task while any child waits out a usage limit, or while the PRs awaiting
-//!   the user plus the running children reach [`PR_CAP`] (317(6)).
+//!   the user plus the running task children and `spec` job children reach [`PR_CAP`] (317(6)).
 //! - **Records:** one log row per task as it ends, in finish order, with its slot; children are
 //!   finished one at a time, in this process.
 //! - **Stop:** a stop request, or a stop that needs the user (a lapsed sign-in, two parked in a
