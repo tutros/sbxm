@@ -1480,11 +1480,12 @@ impl Loop<'_> {
 
     /// The tasks a loop was running when it died (decision 310), to be continued once, as the
     /// loop's one resume after an environment stop: this repo's issue tasks not finished and
-    /// interrupted as `task status` decides it, that are either recorded as worked on by `dead`,
-    /// the loop whose lock this loop took over, or still owed their resume from an earlier start
-    /// ([`Owed`]). A newly found one is marked as owed, under its lock, before anything else
-    /// runs, so a loop that stops or fails before the resume leaves it to the next loop. One whose
-    /// resume was taken already, and was cut off again, is parked with its log row instead.
+    /// interrupted as `task status` decides it, that are either owned by `dead`, the loop whose
+    /// lock this loop took over ([`Record::owner`]: the loop its child recorded, else its process,
+    /// decision 322), or still owed their resume from an earlier start ([`Owed`]). A newly found
+    /// one is marked as owed, under its lock, before anything else runs, so a loop that stops or
+    /// fails before the resume leaves it to the next loop. One whose resume was taken already, and
+    /// was cut off again, is parked with its log row instead.
     fn cut_off(
         &mut self,
         dead: Option<&Process>,
@@ -1506,7 +1507,8 @@ impl Loop<'_> {
                 && rec.pr.is_none()
                 && rec.is_interrupted(self.probe);
             let owed = Owed::of(&rec);
-            let by_dead = dead.is_some() && rec.process.as_ref() == dead;
+            // Owned by `dead`: the loop its child recorded, else the process (decision 322).
+            let by_dead = dead.is_some() && rec.owner() == dead;
             // Owed for the process still recorded: a command run by hand since then took it.
             let owed_here = matches!(&owed, Owed::Due(p) if rec.process.as_ref() == Some(p));
             if ours && (by_dead || owed_here) {
@@ -4276,6 +4278,10 @@ impl TaskSteps<'_> {
             Some(location) => location,
             None => record::read(&dir.join("task.json")).map_or(Location::Local, |r| r.location),
         };
+        let loop_process = match serde_json::to_string(&Process::current(self.probe)) {
+            Ok(json) => json,
+            Err(e) => return here(e.into()),
+        };
         let label = format!("[{id} {}]", slot.as_str());
         let stop_file = stop_path(&base_dir);
         let mut env = vec![
@@ -4287,6 +4293,8 @@ impl TaskSteps<'_> {
                 outcome::LOOP_FILE_ENV.to_owned(),
                 elsewhere.display().to_string(),
             ),
+            // The loop that owns the task, for the child to record (decision 322).
+            (record::LOOP_ENV.to_owned(), loop_process),
         ];
         if obey_stop {
             env.push((

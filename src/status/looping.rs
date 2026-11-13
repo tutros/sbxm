@@ -137,14 +137,15 @@ impl Listed {
 }
 
 /// The loop's task and the tasks it finished, from the records under `base` (never `sbx`).
-/// The task is the issue task still `running` whose recorded process equals the lock's: the loop
-/// runs its phases in its own process, and its marker (`hooks.task_loop`) is written only when
-/// it claims a ready task for `task finish`, so it can't identify work in progress (decision
-/// 294, approved by the user 2026-11-06). The tasks done are the marked records finished since
-/// the lock's process started, the archived ones included: the loop's own merged-task cleanup
-/// archives a task and removes its folder once its PR merges (decision 195), and that task is
-/// still done in this window (review M-1 of PR 437). A task in both places, between the archive
-/// and the removal, counts once; only the active records say which task runs.
+/// The task is the issue task still `running` that the lock's process owns: the loop recorded
+/// in it by the loop's child that runs it, else its recorded process (decision 322, amending
+/// 294(1)); the loop's marker (`hooks.task_loop`) is written only when it claims a ready task
+/// for `task finish`, so it can't identify work in progress (decision 294, approved by the user
+/// 2026-11-06). The tasks done are the marked records finished since the lock's process
+/// started, the archived ones included: the loop's own merged-task cleanup archives a task and
+/// removes its folder once its PR merges (decision 195), and that task is still done in this
+/// window (review M-1 of PR 437). A task in both places, between the archive and the removal,
+/// counts once; only the active records say which task runs.
 pub fn work(base: &Path, lock: &Process) -> anyhow::Result<Work> {
     work_for(
         base,
@@ -170,7 +171,7 @@ pub fn work_for(base: &Path, file: &LockFile) -> anyhow::Result<Work> {
         }
         if rec.stage == Stage::Finished {
             finished.push(rec);
-        } else if rec.status == Status::Running && rec.process.as_ref() == Some(lock) {
+        } else if rec.status == Status::Running && rec.owner() == Some(lock) {
             out.current = Some(Current {
                 id: rec.id.clone(),
                 stage: rec.stage.name(),
@@ -320,7 +321,7 @@ fn listed(file: &LockFile, work: &Work, active: &[Record], archived: &[Record]) 
                 && r.number == n
                 && r.stage != Stage::Finished
                 && r.status != Status::Running
-                && r.process.as_ref() == Some(&file.process)
+                && r.owner() == Some(&file.process)
         })
     };
     let reached = file
