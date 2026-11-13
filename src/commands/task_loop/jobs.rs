@@ -148,20 +148,15 @@ impl Loop<'_> {
             if self.stopping() {
                 return Ok(false);
             }
-            match (job, slot) {
-                (
-                    Some(
-                        Job::Review { .. }
-                        | Job::Fix { .. }
-                        | Job::Template { .. }
-                        | Job::Spec { .. }
-                        | Job::Run { .. },
-                    ),
-                    Some(slot),
-                ) => {
+            // Never a whole task in this process while children run: a job whose slot couldn't be
+            // read (a `run` job's issue, say) goes to its default place, and its own checks
+            // refuse it or start it there.
+            match job {
+                Some(Job::RmMerged {}) | None => self.job(&path, out, warn)?,
+                Some(_) => {
+                    let slot = slot.unwrap_or(self.default_location);
                     self.start_queued(&path, slot, out, warn)?;
                 }
-                _ => self.job(&path, out, warn)?,
             }
         }
         Ok(true)
