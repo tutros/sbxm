@@ -1047,8 +1047,8 @@ fn run() -> anyhow::Result<()> {
                 let repo_root = std::env::current_dir()?;
                 let github = sbxm::github::gh::GhBackend::default();
                 // Ctrl-C (the user's answer, 2026-11-02): the first press stops the loop after the
-                // current task, a second stops it now. The task's child runs in a process group of
-                // its own, so a first press doesn't reach it (issue 612).
+                // running tasks, a second stops it now. Each task's child runs in a process group
+                // of its own, so a first press doesn't reach it (issues 612, 615).
                 let stop = std::sync::Arc::new(commands::task_loop::StopFlag::default());
                 // Each issue task's `task run` and `task resume` runs as a child (issue 612).
                 let spawner =
@@ -1069,10 +1069,12 @@ fn run() -> anyhow::Result<()> {
                 let child = std::sync::Arc::clone(&spawner);
                 if let Err(e) = ctrlc::set_handler(move || match pressed.press() {
                     commands::task_loop::Press::First => {
-                        eprintln!("stopping after the current task; press Ctrl-C again to stop now")
+                        eprintln!(
+                            "stopping after the running tasks; press Ctrl-C again to stop now"
+                        )
                     }
                     commands::task_loop::Press::Again => {
-                        // The running task's child goes with the loop (issue 612).
+                        // Every running task's child goes with the loop (issues 612, 615).
                         use commands::task_loop::child::Spawner;
                         child.stop();
                         // The task's sandbox slot (or its place in line) goes with it (decision 304).

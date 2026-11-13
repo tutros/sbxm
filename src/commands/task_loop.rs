@@ -1,5 +1,6 @@
 //! `sbxm task loop [--cap N] [--issue N ...]` (issue 320, decision 245 (b) to (h)): works through
-//! the open issues labeled `ready-for-worker` one task at a time, end to end: `task run`, then
+//! the open issues labeled `ready-for-worker` one task at a time (several at once with
+//! `[resources] cloud_slots` set, [`parallel`], issue 615), end to end: `task run`, then
 //! `task finish` (a draft PR for a work stop), then `task file-findings --create` for a clean
 //! task; with `[loop] should_fix = "fix"` a clean task with should-fix findings sized S first gets
 //! one fix round on them, `task resume --rounds 1 --should-fix` (decision 306, issue 510). It
