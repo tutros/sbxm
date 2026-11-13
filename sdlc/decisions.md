@@ -111,6 +111,10 @@ Decisions 318-320: `sdlc/decisions/` (`sdlc/retros/2026-11-11-retro.md`).
 
 Decision 321: `sdlc/decisions/` (issue #561, `sdlc/milestone-5.md`).
 
+## Round 21: a child task records its loop (2026-11-12)
+
+Decision 322: `sdlc/decisions/` (issue #616, #612's review Q-1).
+
 ## Open research spikes
 - **S1–S4:** Done 2026-09-24; see "Spike results" below.
 - **S6:** Done 2026-09-24 (partial); spec `sdlc/spikes/S6.md`, evidence `sdlc/spikes/S6-results.md`, conclusions in decisions 48 and 49.

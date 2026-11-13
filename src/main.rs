@@ -182,6 +182,13 @@ fn say(text: &str) {
 
 fn run() -> anyhow::Result<()> {
     hint::enable();
+    // A child of `task loop` records the loop in the tasks it takes (decision 322).
+    if let Some(owner) = std::env::var(task::record::LOOP_ENV)
+        .ok()
+        .and_then(|value| task::record::parse_loop(&value))
+    {
+        task::record::started_by_loop(owner);
+    }
     sbxm::backend::set_trailer_sink(|note| {
         eprint!("{}", hint::local(&format!("warning: {note}\n")))
     });

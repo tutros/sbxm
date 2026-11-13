@@ -216,6 +216,26 @@ impl Process {
     }
 }
 
+/// The environment variable in which `task loop` gives a child it starts the loop's own process,
+/// as JSON (`{"pid": .., "started_at": ..}`, decision 322): `main` reads it once, into
+/// [`started_by_loop`].
+pub const LOOP_ENV: &str = "SBXM_LOOP_PROCESS";
+
+/// The loop whose child this process is, if `main` was given one.
+static THIS_LOOP: std::sync::OnceLock<Process> = std::sync::OnceLock::new();
+
+/// Records that this process is a child of the loop `process` (decision 322): every task record
+/// it takes from then on names that loop in [`Record::loop_owner`]. Set once; a later call is
+/// ignored.
+pub fn started_by_loop(process: Process) {
+    let _ = THIS_LOOP.set(process);
+}
+
+/// The loop's process from [`LOOP_ENV`]'s value; `None` for anything else.
+pub fn parse_loop(value: &str) -> Option<Process> {
+    serde_json::from_str(value).ok()
+}
+
 /// Looks a process up by pid (faked in tests).
 pub trait ProcessProbe: Send + Sync {
     /// The start time (seconds since the epoch) of the process with this pid, if it exists.
@@ -470,6 +490,13 @@ pub struct Record {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ended_at: Option<String>,
     pub process: Option<Process>,
+    /// The loop that started the command in `process` as its child (decision 322), which owns the
+    /// task: `sbxm status` and the loop's restart recovery match a task to a loop by this when it
+    /// is there, else by `process` ([`Record::owner`]). Absent for a task run by hand and in
+    /// older records. It follows `process`: a command that takes the task sets it to its own loop,
+    /// or drops it when it has none.
+    #[serde(rename = "loop", default, skip_serializing_if = "Option::is_none")]
+    pub loop_owner: Option<Process>,
     pub worker: Option<Agent>,
     pub reviewer: Option<Agent>,
     /// Fix rounds used so far (issue 117, decision 173(a)); an older record without this field
@@ -723,6 +750,7 @@ impl Record {
             }],
             ended_at: None,
             process: Some(process),
+            loop_owner: THIS_LOOP.get().cloned(),
             worker: None,
             reviewer: None,
             round: 0,
@@ -777,7 +805,7 @@ impl Record {
             stage,
             at: format_timestamp(now),
         });
-        self.process = Some(process);
+        self.take(process);
         Ok(())
     }
 
@@ -800,7 +828,7 @@ impl Record {
             stage: Stage::Gating,
             at: format_timestamp(now),
         });
-        self.process = Some(process);
+        self.take(process);
         Ok(())
     }
 
@@ -823,7 +851,7 @@ impl Record {
             stage: Stage::Reviewing,
             at: format_timestamp(now),
         });
-        self.process = Some(process);
+        self.take(process);
         Ok(())
     }
 
@@ -858,7 +886,7 @@ impl Record {
             stage: Stage::Gating,
             at: format_timestamp(now),
         });
-        self.process = Some(process);
+        self.take(process);
         Ok(())
     }
 
@@ -879,7 +907,7 @@ impl Record {
                 stage: Stage::Gating,
                 at: format_timestamp(now),
             });
-            self.process = Some(process);
+            self.take(process);
             return true;
         }
         false
@@ -934,8 +962,24 @@ impl Record {
             stage: self.stage,
             at: format_timestamp(now),
         });
-        self.process = Some(process);
+        self.take(process);
         Ok(())
+    }
+
+    /// Records `process` as the one working on the task. One that takes it from another
+    /// records its own loop with it, or none for a command run by hand (decision 322); the
+    /// process already recorded keeps the loop it recorded.
+    fn take(&mut self, process: Process) {
+        if self.process.as_ref() != Some(&process) {
+            self.loop_owner = THIS_LOOP.get().cloned();
+        }
+        self.process = Some(process);
+    }
+
+    /// The process a task belongs to (decision 322, amending 294(1) and 310(4)): the loop it
+    /// records when there is one, else the process working on it.
+    pub fn owner(&self) -> Option<&Process> {
+        self.loop_owner.as_ref().or(self.process.as_ref())
     }
 
     /// `running` whose process is gone (no pid, or the pid now belongs to another process).
