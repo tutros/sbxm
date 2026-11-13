@@ -415,7 +415,7 @@ mod play {
     pub struct Play<'a> {
         base: PathBuf,
         /// Each issue's phases, in order: polls before it ends.
-        issues: RefCell<HashMap<u32, VecDeque<u32>>>,
+        issues: RefCell<HashMap<u32, VecDeque<(u32, Killed)>>>,
         /// Each job's runs by its name, in order: polls before it ends, and how.
         jobs: RefCell<HashMap<String, VecDeque<(u32, Kind)>>>,
         pub events: RefCell<Vec<String>>,
@@ -448,11 +448,16 @@ mod play {
         }
 
         pub fn issue(self, issue: u32, polls: u32) -> Self {
+            self.issue_ending(issue, polls, Killed::No)
+        }
+
+        /// An issue's phase that ends after `polls` polls, killed as `killed` says.
+        pub fn issue_ending(self, issue: u32, polls: u32, killed: Killed) -> Self {
             self.issues
                 .borrow_mut()
                 .entry(issue)
                 .or_default()
-                .push_back(polls);
+                .push_back((polls, killed));
             self
         }
 
@@ -572,8 +577,18 @@ mod play {
         record::write(&dir, &rec).unwrap();
     }
 
+    /// How a played issue phase is killed before it writes its outcome.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum Killed {
+        No,
+        /// Before its task's record exists.
+        BeforeRecord,
+        /// After its task's record was written.
+        AfterRecord,
+    }
+
     enum Who {
-        Issue(u32, Location),
+        Issue(u32, Location, Killed),
         Job(String, Kind, JobStep),
     }
 
@@ -591,9 +606,16 @@ mod play {
             }
             self.play.running.set(self.play.running.get() - 1);
             Some(match &self.who {
-                Who::Issue(issue, location) => {
-                    write_ready(&self.play.base, *issue, *location);
+                Who::Issue(issue, location, killed) => {
+                    if *killed != Killed::BeforeRecord {
+                        write_ready(&self.play.base, *issue, *location);
+                    }
                     self.play.events.borrow_mut().push(format!("end {issue}"));
+                    if *killed != Killed::No {
+                        return Some(PhaseEnd::Missing(
+                            "the task's child sbxm was killed and wrote no outcome".into(),
+                        ));
+                    }
                     PhaseEnd::Outcome(Outcome::new(Kind::Ready, None, ""))
                 }
                 Who::Job(name, kind, job) => {
@@ -647,15 +669,15 @@ mod play {
             };
             self.started(format!("start {issue} {}", location.as_str()));
             (self.on_issue)(issue);
-            let polls = self
+            let (polls, killed) = self
                 .issues
                 .borrow_mut()
                 .get_mut(&issue)
                 .and_then(VecDeque::pop_front)
-                .unwrap_or(0);
+                .unwrap_or((0, Killed::No));
             Box::new(Playing {
                 play: self,
-                who: Who::Issue(issue, location),
+                who: Who::Issue(issue, location, killed),
                 polls,
             })
         }
@@ -1374,6 +1396,31 @@ mod specs {
     }
 
     #[test]
+    fn a_second_spec_job_of_the_same_file_waits_for_the_first_to_end() {
+        let f = spec_fixture("");
+        // Two local slots: only the rule of one child per task holds the second back.
+        super::common::slot::set_slots(&f.env, 2);
+        f.queue("s.json", r#"{"kind": "spec", "file": "retro.md"}"#, 1);
+        f.queue("t.json", r#"{"kind": "spec", "file": "retro.md"}"#, 2);
+        let gh = github(&[]).with_pr(pr(SPEC_PR));
+        let play = Play::new(&f.base())
+            .job("spec retro.md", 10, Kind::Ready)
+            .job("spec retro.md", 1, Kind::Failed);
+
+        let run = run_loop(&f, &play, &gh, &never, &[]);
+
+        run.result.unwrap();
+        assert!(
+            run.out.contains(
+                "job spec retro.md: waits for the job running on it; tried again at a later pass"
+            ),
+            "{}",
+            run.out
+        );
+        assert_eq!(play.most.get(), 1, "{:?}", play.events());
+    }
+
+    #[test]
     fn a_spec_job_whose_run_fails_ends_failed_without_its_finish() {
         let f = spec_fixture("");
         f.queue("s.json", r#"{"kind": "spec", "file": "retro.md"}"#, 1);
@@ -1568,6 +1615,161 @@ mod one_at_a_time {
         assert_eq!(
             play.events(),
             ["in-process fix 150", "in-process fix 151"],
+            "{}",
+            run.out
+        );
+    }
+}
+
+// --- review of issue 633 ---
+
+mod review {
+    use std::cell::Cell;
+
+    use sbxm::backend::Location;
+    use sbxm::task::outcome::Kind;
+
+    use super::play::*;
+
+    /// Loop PRs 150 and up awaiting the user, `n` of them, on `gh`.
+    fn awaiting(
+        f: &Fixture,
+        gh: sbxm::github::fake::FakeGitHub,
+        n: u32,
+    ) -> sbxm::github::fake::FakeGitHub {
+        let mut gh = gh;
+        for i in 0..n {
+            loop_pr(&f.base(), 50 + i, 150 + i, Location::Cloud);
+            gh = gh.with_pr(pr(150 + i));
+        }
+        gh
+    }
+
+    // M-1: a queued job that may open a PR is admitted by the 5-PR pause too.
+
+    #[test]
+    fn at_four_awaiting_only_one_of_two_queued_runs_starts() {
+        let f = fixture(Some(2));
+        f.queue("run-8.json", r#"{"kind": "run", "issue": 8}"#, 1);
+        f.queue("run-9.json", r#"{"kind": "run", "issue": 9}"#, 2);
+        let gh = awaiting(&f, github(&[(8, &["run-cloud"]), (9, &["run-cloud"])]), 4)
+            .with_pr(pr(108))
+            .with_pr(pr(109))
+            .with_auto_merge(108)
+            .with_auto_merge(109);
+        let play = Play::new(&f.base()).issue(8, 400).issue(9, 1);
+
+        let run = run_loop(&f, &play, &gh, &never, &[8, 9]);
+
+        run.result.unwrap();
+        assert!(
+            play.at("finish 8") < play.at("start 9 cloud"),
+            "{}",
+            run.out
+        );
+        assert!(
+            run.out
+                .contains("job run #9: waits for room: 4 PRs await you and 1 tasks run, 5 in all"),
+            "{}",
+            run.out
+        );
+    }
+
+    #[test]
+    fn at_five_awaiting_with_nothing_running_a_run_job_waits_and_a_fix_job_starts() {
+        let f = fixture(Some(2));
+        f.queue("run-9.json", r#"{"kind": "run", "issue": 9}"#, 1);
+        f.queue("fix-150.json", r#"{"kind": "fix", "pr": 150}"#, 2);
+        let gh = awaiting(&f, github(&[(9, &["run-cloud"])]), 5);
+        let ended = Cell::new(false);
+        let play = Play::new(&f.base())
+            .job("fix 150", 5, Kind::Ready)
+            .on_job_end(|_| ended.set(true));
+        let stop = || ended.get();
+
+        let run = run_loop(&f, &play, &gh, &stop, &[9]);
+
+        run.result.unwrap();
+        assert_eq!(starts(&play), ["start fix 150 cloud"], "{}", run.out);
+        assert!(f.queued("run-9.json"), "{}", run.out);
+    }
+
+    // M-2: a queued run's child that wrote no outcome is interrupted, never run again.
+
+    fn killed_run(killed: Killed) {
+        let f = fixture(Some(2));
+        f.queue("run-9.json", r#"{"kind": "run", "issue": 9}"#, 1);
+        let gh = github(&[(9, &["run-cloud"])]).with_pr(pr(109));
+        let play = Play::new(&f.base()).issue_ending(9, 2, killed);
+
+        let run = run_loop(&f, &play, &gh, &never, &[9]);
+
+        run.result.unwrap();
+        assert_eq!(starts(&play), ["start 9 cloud"], "{}", run.out);
+        assert!(!play.has("finish 9"), "{}", run.out);
+        assert!(
+            run.out.contains(
+                "job run #9: interrupted: the task's child sbxm was killed and wrote no \
+                 outcome; not run again"
+            ),
+            "{}",
+            run.out
+        );
+    }
+
+    #[test]
+    fn a_queued_run_killed_before_its_record_is_interrupted_and_not_run_again() {
+        killed_run(Killed::BeforeRecord);
+    }
+
+    #[test]
+    fn a_queued_run_killed_after_its_record_is_interrupted_and_not_run_again() {
+        killed_run(Killed::AfterRecord);
+    }
+
+    // M-3: an issue running as a queued run's task is never started again as new work.
+
+    fn queued_and_ready(issues: &[u32]) {
+        let f = fixture(Some(2));
+        f.queue("run-1.json", r#"{"kind": "run", "issue": 1}"#, 1);
+        let gh = github(&[(1, &["run-cloud"])]).with_pr(pr(101));
+        let play = Play::new(&f.base()).issue(1, 5);
+
+        let run = run_loop(&f, &play, &gh, &never, issues);
+
+        run.result.unwrap();
+        assert_eq!(starts(&play), ["start 1 cloud"], "{}", run.out);
+        assert!(run.out.contains("job run #1: done"), "{}", run.out);
+        assert!(!f.log_text().contains("| #1 Fix 1 |"), "{}", f.log_text());
+    }
+
+    #[test]
+    fn a_queued_runs_issue_is_not_picked_again_from_the_labeled_queue() {
+        queued_and_ready(&[]);
+    }
+
+    #[test]
+    fn a_queued_runs_issue_is_not_picked_again_from_the_issue_list() {
+        queued_and_ready(&[1]);
+    }
+
+    #[test]
+    fn a_queued_run_of_an_issue_running_as_a_task_waits_for_it_and_never_starts_it_twice() {
+        let f = fixture(Some(2));
+        let gh = github(&[(1, &["run-cloud"])]).with_pr(pr(101));
+        let play = Play::new(&f.base()).issue(1, 400).on_issue(|issue| {
+            if issue == 1 {
+                f.queue("run-1.json", r#"{"kind": "run", "issue": 1}"#, 1);
+            }
+        });
+
+        let run = run_loop(&f, &play, &gh, &never, &[1]);
+
+        run.result.unwrap();
+        assert_eq!(starts(&play), ["start 1 cloud"], "{}", run.out);
+        assert!(
+            run.out
+                .contains("job run #1: waits for #1's running task; tried again at a later pass"),
             "{}",
             run.out
         );

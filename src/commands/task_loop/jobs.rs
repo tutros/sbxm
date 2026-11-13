@@ -12,7 +12,7 @@ use anyhow::{Result, anyhow};
 
 use super::job_children::{JobChild, Work};
 use super::{
-    Capture, Cause, Claimed, End, Halt, JobStep, Loop, NeedsUser, PhaseEnd, Steps, check,
+    Capture, Cause, Claimed, End, Halt, JobStep, Loop, NeedsUser, PR_CAP, PhaseEnd, Steps, check,
     first_line, needs_user, says_sign_in, sign_in_stop,
 };
 use crate::backend::Location;
@@ -127,6 +127,28 @@ impl Loop<'_> {
                 self.say_once(out, line)?;
                 continue;
             }
+            // One child per issue: a run of an issue a task child runs waits for it (issue 633).
+            if let Some(Job::Run { issue }) = job
+                && (self.running_issues.contains(&issue)
+                    || self.run_jobs.iter().any(|r| r.issue == issue))
+            {
+                let line = format!(
+                    "job run #{issue}: waits for #{issue}'s running task; tried again at a later \
+                     pass"
+                );
+                self.say_once(out, line)?;
+                continue;
+            }
+            // One child per task: a spec job of a file whose job runs waits for it (issue 633).
+            if let Some(Job::Spec { file }) = &job
+                && self.jobs.iter().any(|j| j.runs_spec(file))
+            {
+                let line = format!(
+                    "job spec {file}: waits for the job running on it; tried again at a later pass"
+                );
+                self.say_once(out, line)?;
+                continue;
+            }
             let slot = match self.job_slot(&path) {
                 Some((label, at, task)) => {
                     let place = at.unwrap_or(self.default_location);
@@ -144,6 +166,19 @@ impl Loop<'_> {
                 }
                 None => None,
             };
+            // A job that may open a PR is admitted by the PRs awaiting the user, as a new issue
+            // is (317(6), issue 633); it keeps its place, and the jobs that open none go on.
+            if let Some(job @ (Job::Run { .. } | Job::Spec { .. })) = &job
+                && let Some((awaiting, running)) = self.pr_room_full(warn)?
+            {
+                let line = format!(
+                    "{}: waits for room: {awaiting} PRs await you and {running} tasks run, \
+                     {PR_CAP} in all; tried again at a later pass",
+                    job.label()
+                );
+                self.say_once(out, line)?;
+                continue;
+            }
             // A stop asked during the reads that found its slot: it stays queued.
             if self.stopping() {
                 return Ok(false);
@@ -1148,10 +1183,15 @@ impl Loop<'_> {
         file: JobFile,
         issue: u32,
         end: std::result::Result<End, Halt>,
+        interrupted_by: Option<String>,
         out: &mut dyn Write,
         warn: &mut dyn Write,
     ) -> Result<Option<anyhow::Error>> {
-        let ended = self.run_ended(issue, end).task(format!("issue-{issue}"));
+        let ended = match interrupted_by {
+            Some(why) => interrupted_because(&why),
+            None => self.run_ended(issue, end),
+        };
+        let ended = ended.task(format!("issue-{issue}"));
         self.file_done(file, ended, out, warn)
     }
 }
@@ -1198,6 +1238,12 @@ impl Queued {
     pub(super) fn opens_pr(&self) -> bool {
         matches!(self.what, QueuedWhat::Spec { .. })
     }
+
+    /// Whether it is a `spec` job of `file` in `specs_dir`.
+    pub(super) fn runs_spec(&self, file: &str) -> bool {
+        matches!(&self.what, QueuedWhat::Spec { spec, .. }
+            if spec.file_name() == Some(std::ffi::OsStr::new(file)))
+    }
 }
 
 /// Which queued job a child runs.
@@ -1222,12 +1268,14 @@ enum QueuedWhat {
 /// job a stopped loop left running is, and never run again (issue 633).
 fn interrupted(end: &PhaseEnd) -> Option<Ended> {
     match end {
-        PhaseEnd::Missing(why) => Some(Ended::new(
-            Outcome::Interrupted,
-            format!("{why}; not run again"),
-        )),
+        PhaseEnd::Missing(why) => Some(interrupted_because(why)),
         PhaseEnd::Outcome(_) | PhaseEnd::Unreadable { .. } => None,
     }
+}
+
+/// [`interrupted`], for a child that ended without an outcome for `why`.
+fn interrupted_because(why: &str) -> Ended {
+    Ended::new(Outcome::Interrupted, format!("{why}; not run again"))
 }
 
 /// Queued job `path` as its file says now, without taking it; `None` for one that can't be read

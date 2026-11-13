@@ -66,6 +66,11 @@ impl JobChild<'_> {
     pub fn opens_pr(&self) -> bool {
         matches!(&self.work, Work::Queued(queued) if queued.opens_pr())
     }
+
+    /// Whether it is a `spec` job's child of `file` in `specs_dir`.
+    pub fn runs_spec(&self, file: &str) -> bool {
+        matches!(&self.work, Work::Queued(queued) if queued.runs_spec(file))
+    }
 }
 
 impl<'a> Loop<'a> {
