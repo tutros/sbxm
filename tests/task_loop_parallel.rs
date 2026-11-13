@@ -213,3 +213,64 @@ mod status_children {
         tmp
     }
 }
+
+// --- a child started without waiting for it ---
+
+#[cfg(unix)]
+mod started_child {
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    use sbxm::commands::task_loop::child::{Child, ChildSpawner, Spawner};
+
+    fn sh(script: &str, dir: &std::path::Path) -> Child {
+        Child {
+            args: vec!["-c".into(), script.into()],
+            dir: dir.to_owned(),
+            env: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_started_child_is_polled_until_it_exits() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spawner = ChildSpawner::new(PathBuf::from("/bin/sh"));
+
+        let mut running = spawner
+            .start(&sh("sleep 1; echo 'Error: late' >&2; exit 2", tmp.path()))
+            .unwrap();
+
+        assert_eq!(running.poll().unwrap(), None, "still running");
+        let started = Instant::now();
+        let exit = loop {
+            if let Some(exit) = running.poll().unwrap() {
+                break exit;
+            }
+            assert!(started.elapsed() < Duration::from_secs(20));
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert!(!exit.success);
+        assert_eq!(exit.how, "exited with code 2");
+        assert!(exit.errors.contains("Error: late"), "{exit:?}");
+    }
+
+    #[test]
+    fn two_children_run_at_once_and_a_stop_ends_both() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spawner = ChildSpawner::new(PathBuf::from("/bin/sh"));
+        let mut first = spawner.start(&sh("sleep 30", tmp.path())).unwrap();
+        let mut second = spawner.start(&sh("sleep 30", tmp.path())).unwrap();
+        assert_eq!(first.poll().unwrap(), None);
+        assert_eq!(second.poll().unwrap(), None);
+        let started = Instant::now();
+
+        spawner.stop();
+
+        let first = first.poll().unwrap().expect("stopped");
+        let second = second.poll().unwrap().expect("stopped");
+        assert!(started.elapsed() < Duration::from_secs(20));
+        assert!(!first.success && !second.success);
+        assert_eq!(first.how, "was stopped");
+        assert_eq!(second.how, "was stopped");
+    }
+}

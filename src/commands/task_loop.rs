@@ -157,6 +157,23 @@ pub trait Steps {
     fn should_fix_task(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> PhaseEnd {
         PhaseEnd::here(out, warn, |out, warn| self.should_fix(issue, out, warn))
     }
+    /// A phase of task `issue` started and left running (issue 615), for a loop that runs several
+    /// at once: polled for its end. [`TaskSteps`] starts it as a child `sbxm` process; this
+    /// default runs it to its end here, through [`Self::run_task`] and its siblings.
+    fn start_task(
+        &self,
+        issue: u32,
+        phase: Phase,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Box<dyn Started + '_> {
+        let ended = match phase {
+            Phase::Run(location) => self.run_task(issue, location, out, warn),
+            Phase::Resume => self.resume_task(issue, out, warn),
+            Phase::ShouldFix => self.should_fix_task(issue, out, warn),
+        };
+        Box::new(Ended(Some(ended)))
+    }
     /// `task finish --issue N`: its PR, a draft when something is left unresolved.
     fn finish(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> Result<()>;
     /// `task file-findings --issue N --create`: the review's should-fix findings as sized
@@ -218,6 +235,32 @@ pub trait Steps {
     fn room_for(&self, location: Option<Location>) -> Result<()> {
         let _ = location;
         self.room()
+    }
+}
+
+/// A phase of an issue task, as the loop starts it (issue 615).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Phase {
+    /// `task run`, in this location (`None`: as `[sandbox] location` says).
+    Run(Option<Location>),
+    /// `task resume`.
+    Resume,
+    /// `task resume --rounds 1 --should-fix` (decision 306).
+    ShouldFix,
+}
+
+/// A task's phase the loop started and supervises (issue 615).
+pub trait Started {
+    /// How it ended, once it has, given once; `None` while it runs. `out` is the loop's window.
+    fn poll(&mut self, out: &mut dyn Write) -> Option<PhaseEnd>;
+}
+
+/// A phase that already ended: its end, given once.
+pub struct Ended(pub Option<PhaseEnd>);
+
+impl Started for Ended {
+    fn poll(&mut self, _out: &mut dyn Write) -> Option<PhaseEnd> {
+        self.0.take()
     }
 }
 
@@ -4235,8 +4278,22 @@ impl TaskSteps<'_> {
         out: &mut dyn Write,
         warn: &mut dyn Write,
     ) -> PhaseEnd {
+        let (what, args) = match self.resume_args(issue, should_fix) {
+            Ok(command) => command,
+            Err(ended) => return ended,
+        };
+        self.child(issue, None, what, args, !should_fix, out, warn)
+    }
+
+    /// `task resume`'s words for the window and its arguments, after this process's own claim on
+    /// the task is given up ([`Self::release`]); `Err`: how it ended when that failed.
+    fn resume_args(
+        &self,
+        issue: u32,
+        should_fix: bool,
+    ) -> std::result::Result<(&'static str, Vec<String>), PhaseEnd> {
         if let Err(e) = self.release(&format!("issue-{issue}")) {
-            return PhaseEnd::Outcome(outcome::Outcome::of(&Err(e), ""));
+            return Err(PhaseEnd::Outcome(outcome::Outcome::of(&Err(e), "")));
         }
         let mut args = vec!["task".to_owned(), "resume".to_owned()];
         args.extend(["--issue".to_owned(), issue.to_string()]);
@@ -4248,7 +4305,26 @@ impl TaskSteps<'_> {
         } else {
             "task resume"
         };
-        self.child(issue, None, what, args, !should_fix, out, warn)
+        Ok((what, args))
+    }
+
+    /// `task run`'s arguments, and where it runs, as `task run` chooses it, for the window.
+    fn run_args(&self, issue: u32, location: Option<Location>) -> (Vec<String>, Location) {
+        let mut args = vec!["task".to_owned(), "run".to_owned()];
+        args.extend(["--issue".to_owned(), issue.to_string()]);
+        match location {
+            Some(Location::Cloud) => args.push("--cloud".to_owned()),
+            Some(Location::Local) => args.push("--local".to_owned()),
+            None => {}
+        }
+        if let Some(repo) = &self.repo {
+            args.extend(["--repo".to_owned(), repo.clone()]);
+        }
+        let slot = match TaskConfig::load(&self.repo_root) {
+            Ok(config) => pipeline::choose_location(location, &config),
+            Err(_) => location.unwrap_or_default(),
+        };
+        (args, slot)
     }
 
     /// Runs a task's phase, `sbxm <args>`, as a child (issue 612) and reads how it ended from the
@@ -4266,12 +4342,56 @@ impl TaskSteps<'_> {
         out: &mut dyn Write,
         _warn: &mut dyn Write,
     ) -> PhaseEnd {
+        let prepared = match self.prepare(issue, location, what, args, obey_stop) {
+            Ok(prepared) => prepared,
+            Err(ended) => return ended,
+        };
+        let _ = writeln!(out, "{} {what} started", prepared.label);
+        // A first Ctrl-C reaches the child's slot wait through the stop file.
+        let tick = || prepared.tick(self.stop.as_deref());
+        let exit = self.spawner.run(&prepared.spec, &tick);
+        prepared.ended(exit, out)
+    }
+
+    /// [`Self::child`], started and left running (issue 615): the loop polls it.
+    #[allow(clippy::too_many_arguments)]
+    fn start_child(
+        &self,
+        issue: u32,
+        location: Option<Location>,
+        what: &str,
+        args: Vec<String>,
+        obey_stop: bool,
+        out: &mut dyn Write,
+    ) -> Box<dyn Started + '_> {
+        let prepared = match self.prepare(issue, location, what, args, obey_stop) {
+            Ok(prepared) => prepared,
+            Err(ended) => return Box::new(Ended(Some(ended))),
+        };
+        let _ = writeln!(out, "{} {what} started", prepared.label);
+        match self.spawner.start(&prepared.spec) {
+            Ok(running) => Box::new(ChildPhase {
+                prepared,
+                running,
+                stop: self.stop.clone(),
+            }),
+            Err(e) => Box::new(Ended(Some(prepared.ended(Err(e), out)))),
+        }
+    }
+
+    /// What a phase's child needs before it starts: an earlier run's outcome removed, its
+    /// command, and where it writes its outcome. `Err`: how it ended without starting.
+    fn prepare(
+        &self,
+        issue: u32,
+        location: Option<Location>,
+        what: &str,
+        args: Vec<String>,
+        obey_stop: bool,
+    ) -> std::result::Result<Prepared, PhaseEnd> {
         let here = |e: anyhow::Error| PhaseEnd::Outcome(outcome::Outcome::of(&Err(e), ""));
         let id = format!("issue-{issue}");
-        let base_dir = match GlobalConfig::load(self.config_dir) {
-            Ok(global) => global.base_dir,
-            Err(e) => return here(e),
-        };
+        let base_dir = GlobalConfig::load(self.config_dir).map_err(here)?.base_dir;
         let dir = record::task_dir(&base_dir, &id);
         // Where a child whose task has no folder writes its outcome.
         let elsewhere = outcome::loop_file(&base_dir, &id);
@@ -4286,17 +4406,13 @@ impl TaskSteps<'_> {
             }
             outcome::remove_file(&elsewhere)
         };
-        if let Err(e) = cleared() {
-            return here(e);
-        }
+        cleared().map_err(here)?;
         let slot = match location {
             Some(location) => location,
             None => record::read(&dir.join("task.json")).map_or(Location::Local, |r| r.location),
         };
-        let loop_process = match serde_json::to_string(&Process::current(self.probe)) {
-            Ok(json) => json,
-            Err(e) => return here(e.into()),
-        };
+        let loop_process =
+            serde_json::to_string(&Process::current(self.probe)).map_err(|e| here(e.into()))?;
         let label = format!("[{id} {}]", slot.as_str());
         let stop_file = stop_path(&base_dir);
         let mut env = vec![
@@ -4322,33 +4438,89 @@ impl TaskSteps<'_> {
             dir: self.repo_root.clone(),
             env,
         };
-        // A first Ctrl-C reaches the child's slot wait through the stop file.
-        let tick = || {
-            if obey_stop
-                && self.stop.as_ref().is_some_and(|flag| flag.requested())
-                && !stop_file_left(&stop_file)
-            {
-                let _ = fs::write(&stop_file, "");
-            }
-        };
-        let _ = writeln!(out, "{label} {what} started");
-        let ended = match self.spawner.run(&spec, &tick) {
+        Ok(Prepared {
+            dir,
+            elsewhere,
+            label,
+            what: what.to_owned(),
+            spec,
+            obey_stop,
+            stop_file,
+        })
+    }
+}
+
+/// A phase's child as [`TaskSteps::prepare`] made it ready to start.
+struct Prepared {
+    /// Its task folder, where it writes its outcome.
+    dir: PathBuf,
+    /// Where it writes its outcome when its task has no folder.
+    elsewhere: PathBuf,
+    /// `[issue-3 local]`: the window's prefix for its lines.
+    label: String,
+    /// `task run`, `task resume` or `should-fix round`.
+    what: String,
+    spec: child::Child,
+    obey_stop: bool,
+    stop_file: PathBuf,
+}
+
+impl Prepared {
+    /// While the child runs: a first Ctrl-C reaches its slot wait through the stop file.
+    fn tick(&self, stop: Option<&StopFlag>) {
+        if self.obey_stop
+            && stop.is_some_and(StopFlag::requested)
+            && !stop_file_left(&self.stop_file)
+        {
+            let _ = fs::write(&self.stop_file, "");
+        }
+    }
+
+    /// How the child ended, from the outcome it wrote, once it exited (`exit`).
+    fn ended(&self, exit: Result<child::Exit>, out: &mut dyn Write) -> PhaseEnd {
+        let ended = match exit {
             Ok(exit) => {
-                let mut ended = PhaseEnd::read(&dir, &elsewhere, &exit.how);
+                let mut ended = PhaseEnd::read(&self.dir, &self.elsewhere, &exit.how);
                 // Only quoted, for a child that couldn't say how it ended.
                 if let (PhaseEnd::Missing(why), Some(error)) =
                     (&mut ended, child::last_error(&exit.errors))
                 {
                     why.push_str(&format!(" (it said: {error})"));
                 }
-                let _ = outcome::remove_file(&elsewhere);
+                let _ = outcome::remove_file(&self.elsewhere);
                 ended
             }
-            Err(e) => here(e),
+            Err(e) => PhaseEnd::Outcome(outcome::Outcome::of(&Err(e), "")),
         }
         .masked();
-        let _ = writeln!(out, "{label} {what} ended: {}", ended.summary());
+        let _ = writeln!(
+            out,
+            "{} {} ended: {}",
+            self.label,
+            self.what,
+            ended.summary()
+        );
         ended
+    }
+}
+
+/// A phase's child left running by [`TaskSteps::start_child`].
+struct ChildPhase<'a> {
+    prepared: Prepared,
+    running: Box<dyn child::Running + 'a>,
+    stop: Option<Arc<StopFlag>>,
+}
+
+impl Started for ChildPhase<'_> {
+    fn poll(&mut self, out: &mut dyn Write) -> Option<PhaseEnd> {
+        match self.running.poll() {
+            Ok(None) => {
+                self.prepared.tick(self.stop.as_deref());
+                None
+            }
+            Ok(Some(exit)) => Some(self.prepared.ended(Ok(exit), out)),
+            Err(e) => Some(self.prepared.ended(Err(e), out)),
+        }
     }
 }
 
@@ -4382,22 +4554,30 @@ impl Steps for TaskSteps<'_> {
         out: &mut dyn Write,
         warn: &mut dyn Write,
     ) -> PhaseEnd {
-        let mut args = vec!["task".to_owned(), "run".to_owned()];
-        args.extend(["--issue".to_owned(), issue.to_string()]);
-        match location {
-            Some(Location::Cloud) => args.push("--cloud".to_owned()),
-            Some(Location::Local) => args.push("--local".to_owned()),
-            None => {}
-        }
-        if let Some(repo) = &self.repo {
-            args.extend(["--repo".to_owned(), repo.clone()]);
-        }
-        // Where it runs, for the window's lines: as `task run` chooses it.
-        let slot = match TaskConfig::load(&self.repo_root) {
-            Ok(config) => pipeline::choose_location(location, &config),
-            Err(_) => location.unwrap_or_default(),
-        };
+        let (args, slot) = self.run_args(issue, location);
         self.child(issue, Some(slot), "task run", args, true, out, warn)
+    }
+
+    fn start_task(
+        &self,
+        issue: u32,
+        phase: Phase,
+        out: &mut dyn Write,
+        _warn: &mut dyn Write,
+    ) -> Box<dyn Started + '_> {
+        match phase {
+            Phase::Run(location) => {
+                let (args, slot) = self.run_args(issue, location);
+                self.start_child(issue, Some(slot), "task run", args, true, out)
+            }
+            Phase::Resume | Phase::ShouldFix => {
+                let should_fix = phase == Phase::ShouldFix;
+                match self.resume_args(issue, should_fix) {
+                    Ok((what, args)) => self.start_child(issue, None, what, args, !should_fix, out),
+                    Err(ended) => Box::new(Ended(Some(ended))),
+                }
+            }
+        }
     }
 
     fn resume_task(&self, issue: u32, out: &mut dyn Write, warn: &mut dyn Write) -> PhaseEnd {
