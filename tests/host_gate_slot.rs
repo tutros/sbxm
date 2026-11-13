@@ -549,3 +549,38 @@ fn a_cloud_issue_runs_host_gates_give_the_slot_back_before_the_review_goes_on() 
     );
     assert!(slot::holder(&f.env).is_none());
 }
+
+/// Review M-1 (one lock order, cloud before local): `task gates --tier host` of a cloud task
+/// whose worker sandbox is gone waits for the cloud slot to make it again without holding the
+/// sandbox slot meanwhile, which a running cloud task, holding its cloud slot, may be waiting for.
+#[test]
+fn task_gates_of_a_cloud_task_never_waits_for_a_cloud_slot_holding_the_sandbox_slot() {
+    let f = with_host();
+    cloud_issue_gated(&f);
+    let gone = common::cloud_task::cloud_backend_for(&cloud_fs(&f), &["issue-41"], &[CLEAN], false);
+    slot::set_slots(&f.env, 1);
+    let mut disk = common::cloud_slot::full(&f.env, false);
+    let (local, cloud) = (
+        slot::slot_file(&f.env),
+        common::cloud_slot::cloud_slot_file(&f.env),
+    );
+    disk.slot.sleep = Arc::new(move |_| {
+        assert!(
+            !local.exists(),
+            "waiting for a cloud slot while holding the sandbox slot"
+        );
+        std::fs::remove_file(&cloud).unwrap();
+    });
+    let host = host_seeing_the_slot_held(&f, "issue-41");
+
+    let ran = cloud_gates(&f, &gone, Tiers::HOST, disk, &host);
+
+    ran.result.expect(&ran.out);
+    assert!(ran.out.contains("waiting for a cloud slot"), "{}", ran.out);
+    assert!(
+        !gone.creates().is_empty(),
+        "the worker sandbox was made again"
+    );
+    assert_eq!(host.calls().len(), 1);
+    assert!(slot::holder(&f.env).is_none());
+}

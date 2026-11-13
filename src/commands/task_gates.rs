@@ -89,11 +89,10 @@ pub fn run(
         disk::require(&global, config_dir, &opts.disk)?;
     }
     // The host tier runs in the sandbox slot too (decision 317(5)): a local task's for all its
-    // gates, and any task's when that tier runs alone, taken here so that a refusal comes before
-    // anything is written. A cloud task's sandbox tier runs without it, and its host tier takes
-    // it after that tier passed.
+    // gates, taken here so that a refusal comes before anything is written. A cloud task's takes
+    // it in the pipeline, after any cloud slot (one order for the two pools).
     let host_tier = opts.tiers.host && !config.gates.host.is_empty();
-    let _slot = if remade || (host_tier && (location == Location::Local || !opts.tiers.sandbox)) {
+    let _slot = if remade || (host_tier && location == Location::Local) {
         slot::take(&global, &opts.disk.slot, Some(&id), out)?
     } else {
         slot::Slot::none()

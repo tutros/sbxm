@@ -3242,13 +3242,23 @@ pub fn gate_on_demand_taking(
         release_local_worker_into(env, prepared);
         return gated;
     }
+    // A host tier run alone takes the sandbox slot before anything is written, so that a
+    // `--no-wait` refusal changes nothing; and only after the cloud slot, never before it: a
+    // running cloud task holds its cloud slot while it waits for the sandbox slot (issue 634).
+    let host_alone = tiers.host && !tiers.sandbox && !env.config.gates.host.is_empty();
+    let take_host_slot_alone = |prepared: &Prepared| match host_alone {
+        true => take_host_slot(env, &prepared.record),
+        false => Ok(crate::slot::Slot::none()),
+    };
     let rebuild = cloud_worker_gone(env, &prepared.record)?;
     if !rebuild {
+        let _host_slot = take_host_slot_alone(prepared)?;
         recollect_commits(env, prepared)?;
         return run_gates(env, prepared, "on-demand", tiers);
     }
     check_cloud_rebuild(env, &prepared.record, None)?;
     let _slot = take_cloud_slot()?;
+    let _host_slot = take_host_slot_alone(prepared)?;
     let gated = ensure_cloud_worker(env, prepared, SandboxRole::Worker, "the gates")
         .and_then(|_| run_gates(env, prepared, "on-demand", tiers));
     stop_cloud_worker(env, prepared);
