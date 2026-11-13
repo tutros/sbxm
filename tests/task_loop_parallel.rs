@@ -1493,3 +1493,111 @@ mod admission {
         assert!(started < ended, "{out}");
     }
 }
+
+// --- re-review of issue 615: a stop asked during the awaiting-PR count starts no owed resume ---
+
+mod stop_during_reads {
+    use std::cell::Cell;
+    use std::fs;
+    use std::path::Path;
+
+    use sbxm::backend::Location;
+    use sbxm::commands::task_loop::RESUMED_HOOK;
+    use sbxm::github::fake::GhCall;
+    use sbxm::task::record::{self, Process, Status};
+
+    use super::several::*;
+
+    /// Issue `issue`'s task cut off at `working` in `location` by a loop that died, its resume
+    /// owed (decision 310).
+    fn owed(base: &Path, issue: u32, location: Location) {
+        write_record(base, issue, Act::Fail, location);
+        let dir = record::task_dir(base, &format!("issue-{issue}"));
+        let mut rec = record::read(&dir.join("task.json")).unwrap();
+        let dead = Process::new(77_000 + issue, 5);
+        rec.status = Status::Running;
+        rec.process = Some(dead.clone());
+        rec.hooks = serde_json::json!({ RESUMED_HOOK: dead });
+        record::write(&dir, &rec).unwrap();
+    }
+
+    fn still_owed(base: &Path, issue: u32) -> bool {
+        let dir = record::task_dir(base, &format!("issue-{issue}"));
+        let rec = record::read(&dir.join("task.json")).unwrap();
+        rec.hooks
+            .get(RESUMED_HOOK)
+            .is_some_and(|v| v != &serde_json::Value::Bool(true))
+    }
+
+    #[test]
+    fn a_stop_asked_during_the_awaiting_pr_count_leaves_the_next_owed_resume_owed() {
+        let f = fixture(Some(2));
+        owed(&f.base(), 1, Location::Local);
+        owed(&f.base(), 2, Location::Cloud);
+        loop_pr(&f.base(), 50, 150, Location::Local);
+        let gh = github(&[]).with_pr(pr(150)).with_pr(pr(101));
+        // GitHub's calls made by the time child 1 started: any later one asks the stop.
+        let at_start = Cell::new(None);
+        let play = Play::new(&f.base())
+            .plays(1, &[(3, Act::Ready)])
+            .on_start(|_| {
+                if at_start.get().is_none() {
+                    at_start.set(Some(gh.calls().len()));
+                }
+            });
+        let stop = || at_start.get().is_some_and(|n| gh.calls().len() > n);
+
+        let run = run_loop(&f, &play, &gh, &stop);
+
+        run.result.unwrap();
+        let starts: Vec<String> = play
+            .events()
+            .into_iter()
+            .filter(|e| e.starts_with("start"))
+            .collect();
+        assert_eq!(starts, ["start 1 resume local"], "{}", run.out);
+        play.at("finish 1");
+        assert!(still_owed(&f.base(), 2), "{}", run.out);
+        assert!(run.out.contains("stopped on request\n"), "{}", run.out);
+        assert!(run.out.contains("not resumed yet"), "{}", run.out);
+    }
+
+    #[test]
+    fn a_stop_asked_while_a_queued_runs_slot_is_read_leaves_the_job_queued() {
+        let f = fixture(Some(1));
+        let gh = github(&[(1, &[]), (9, &["run-cloud"])]);
+        let queue = sbxm::task::jobs::queue_dir(&f.base());
+        // GitHub's open-issue reads made by the time the job was queued: the next is the one that
+        // reads the job's labels for its slot, and it asks the stop.
+        let queued = Cell::new(None);
+        let reads = || {
+            gh.calls()
+                .iter()
+                .filter(|c| matches!(c, GhCall::IssuesOpen(_)))
+                .count()
+        };
+        let play = Play::new(&f.base())
+            .plays(1, &[(5, Act::Ready)])
+            .on_start(|issue| {
+                if issue == 1 && queued.get().is_none() {
+                    fs::create_dir_all(&queue).unwrap();
+                    fs::write(queue.join("run-9.json"), r#"{"kind": "run", "issue": 9}"#).unwrap();
+                    queued.set(Some(reads()));
+                }
+            });
+        let stop = || queued.get().is_some_and(|n| reads() > n);
+
+        let run = run_listed(&f, &play, &gh, &stop, &[1]);
+
+        run.result.unwrap();
+        assert!(
+            !play.events().iter().any(|e| e.starts_with("start 9")),
+            "{:?}\n{}",
+            play.events(),
+            run.out
+        );
+        assert!(queue.join("run-9.json").is_file(), "{}", run.out);
+        play.at("finish 1");
+        assert!(run.out.contains("stopped on request\n"), "{}", run.out);
+    }
+}

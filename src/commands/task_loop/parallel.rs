@@ -560,7 +560,7 @@ fn sync(lp: &mut Loop, live: &[Live]) {
 /// Whether a new task may start now, checked before every start, a held or owed task's too
 /// (issue 615): not while the loop stops, a child waits out a usage limit (answer 4), `--cap`
 /// is reached, or the PRs awaiting the user plus the running children reach [`PR_CAP`]
-/// (317(6)). Its slot is checked by the caller.
+/// (317(6)); the stop is asked again after those reads. Its slot is checked by the caller.
 fn may_start(
     lp: &mut Loop,
     opts: &Options,
@@ -586,7 +586,8 @@ fn may_start(
     {
         return Ok(false);
     }
-    lp.awaiting_room(live.len(), out, warn)
+    // A stop asked during the reads that counted the awaiting PRs: nothing starts.
+    Ok(lp.awaiting_room(live.len(), out, warn)? && !lp.stopping())
 }
 
 /// Sleeps one [`TICK`] while children run and none ended in this pass.

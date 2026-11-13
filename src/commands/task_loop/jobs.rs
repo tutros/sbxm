@@ -87,6 +87,10 @@ impl Loop<'_> {
                 self.say_once(out, line)?;
                 return Ok(true);
             }
+            // A stop asked during the reads that found its slot: it stays queued.
+            if (self.env.stop_requested)() {
+                return Ok(false);
+            }
             self.job(path, out, warn)?;
         }
     }
