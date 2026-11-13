@@ -44,6 +44,13 @@ cargo test
 
 commit that step. One commit = one small, working change.
 
+A documentation-only change runs a smaller check (issue #632): a change is documentation-only when every changed file
+is a `.md` file and none is under `prompts/` (those are compiled into the binary by `src/task/prompts.rs`, so they are
+code). For such a step run `cargo fmt --check` and the docs tests, `cargo test --test 'docs_*'` (the `tests/docs_*.rs`
+files read `README.md`, `AGENTS.md`, `docs/*.md` and `sdlc/*.md`, so a docs change can break them). Any other change
+(code, `prompts/`, config, scripts, anything not documentation) runs all three checks above. In an `sbxm task`, the
+gates after the worker still run the full list either way.
+
 - Commit message: imperative subject that says what behavior changed (`Reject reserved Windows names in project names`), plus a short body only if the reason isn't obvious.
 - Never commit with failing tests, lint errors or unformatted code. Never skip hooks.
 - Don't commit a red (failing-test) state on its own; the failing tests go in the same commit as the code that makes them pass.
