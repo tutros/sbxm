@@ -407,6 +407,7 @@ impl Loop<'_> {
             issue: number,
             title: self.pr_row(number, "waiting PR checked again".to_owned()),
             size: None,
+            slot: None,
             started: self.now(),
             ready: None,
             worker_s: None,

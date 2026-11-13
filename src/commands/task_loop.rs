@@ -1215,6 +1215,14 @@ impl Loop<'_> {
         record::read(&self.task_dir(issue).join("task.json")).ok()
     }
 
+    /// Where an issue's task runs, for its log row's "Slot" (issue 615): as its record says, else
+    /// as the loop chose it when it took the issue; `None` when neither says.
+    fn slot_of(&self, issue: u32) -> Option<Location> {
+        self.record(issue)
+            .map(|r| r.location)
+            .or_else(|| self.locations.get(&issue).copied().flatten())
+    }
+
     /// Whether the task's next phase is its should-fix round (issue 510, decision 306): `[loop]
     /// should_fix = "fix"`, and `task resume --rounds 1 --should-fix` would take it (it is
     /// `ready` with a clean review that has should-fix findings sized S, and had no such round).
@@ -1534,6 +1542,7 @@ impl Loop<'_> {
                             issue,
                             title: rec.title.clone(),
                             size: None,
+                            slot: Some(rec.location),
                             started: now,
                             ready: None,
                             worker_s: None,
@@ -2189,6 +2198,7 @@ impl Loop<'_> {
                 format!("resolve: conflicts with {branch} (task {task})"),
             ),
             size: None,
+            slot: fix.as_ref().map(|r| r.location),
             started,
             ready: None,
             worker_s: fix.as_ref().and_then(|r| duration(r.worker.as_ref())),
@@ -2885,6 +2895,7 @@ impl Loop<'_> {
                         format!("checks: {} failed again after a re-run", run.workflow),
                     ),
                     size: None,
+                    slot: None,
                     started: self.now(),
                     ready: None,
                     worker_s: None,
@@ -3026,6 +3037,7 @@ impl Loop<'_> {
                 ),
             ),
             size: None,
+            slot: fix.as_ref().map(|r| r.location),
             started,
             ready: None,
             worker_s: fix.as_ref().and_then(|r| duration(r.worker.as_ref())),
@@ -3930,6 +3942,7 @@ fn work(
                         issue,
                         title,
                         size,
+                        slot: lp.slot_of(issue),
                         started,
                         ready: None,
                         worker_s: None,
@@ -3960,6 +3973,7 @@ fn work(
                         issue,
                         title,
                         size,
+                        slot: lp.slot_of(issue),
                         started,
                         ready: None,
                         worker_s: None,
@@ -4033,6 +4047,7 @@ fn work(
             issue,
             title,
             size,
+            slot: lp.slot_of(issue),
             started,
             ready,
             worker_s: rec.as_ref().and_then(|r| duration(r.worker.as_ref())),

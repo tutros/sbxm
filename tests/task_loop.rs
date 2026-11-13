@@ -627,7 +627,7 @@ fn a_clean_task_is_logged_with_its_pr_and_times() {
 
     let log = f.log_text();
     assert!(
-        log.contains("| 1 | #3 Fix 3 | S | 10:00:00 | 10:05:00 (5m00s) |"),
+        log.contains("| 1 | #3 Fix 3 | S | local | 10:00:00 | 10:05:00 (5m00s) |"),
         "{log}"
     );
     assert!(

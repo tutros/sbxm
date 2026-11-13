@@ -225,6 +225,7 @@ impl Loop<'_> {
             issue: 0,
             title: String::new(),
             size: None,
+            slot: None,
             started,
             ready: None,
             worker_s: None,
