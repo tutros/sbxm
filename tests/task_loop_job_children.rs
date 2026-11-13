@@ -970,7 +970,7 @@ mod queued {
     use std::cell::RefCell;
 
     use sbxm::backend::Location;
-    use sbxm::github::GitHubBackend;
+    use sbxm::github::{GitHubBackend, Mergeable};
     use sbxm::task::outcome::Kind;
 
     use super::play::*;
@@ -1066,6 +1066,33 @@ mod queued {
         assert!(play.at("end review 150") < play.at("start fix 150 cloud"));
         assert_eq!(*heads.borrow(), [NEW_HEAD], "{}", run.out);
         assert!(!f.queued("b-fix-150.json"));
+    }
+
+    #[test]
+    fn a_resolve_waiting_behind_a_fix_that_removed_the_conflict_is_dropped() {
+        let f = fixture(Some(2));
+        loop_pr(&f.base(), 50, 150, Location::Cloud);
+        let gh = github(&[]).with_pr(pr(150));
+        f.queue("fix-150.json", r#"{"kind": "fix", "pr": 150}"#, 1);
+        // The PR conflicts while its queued fix runs, and the fix's merge of main resolves it.
+        // It runs past the loop's next pass of its own steps.
+        let play = Play::new(&f.base())
+            .job("fix 150", 400, Kind::Ready)
+            .on_job(|_| gh.set_mergeable(150, Mergeable::Conflicting))
+            .on_job_end(|_| gh.set_mergeable(150, Mergeable::Mergeable));
+
+        let run = run_loop(&f, &play, &gh, &never, &[]);
+
+        run.result.unwrap();
+        assert!(
+            run.out.contains(
+                "its resolve waits for the job running on it; tried again at a later pass"
+            ),
+            "{}",
+            run.out
+        );
+        assert_eq!(starts(&play), ["start fix 150 cloud"], "{}", run.out);
+        assert!(!run.out.contains("resolving it with"), "{}", run.out);
     }
 
     #[test]
