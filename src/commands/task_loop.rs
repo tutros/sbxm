@@ -1303,6 +1303,19 @@ impl Loop<'_> {
         named: &[u32],
         tried: &mut HashSet<u32>,
         refused: &mut Vec<Skipped>,
+        out: &mut dyn Write,
+    ) -> Result<(Option<u32>, Vec<Skipped>)> {
+        self.next_fitting(open, named, tried, refused, None, out)
+    }
+
+    /// [`Self::next`] for a loop with several children (issue 615): with `fit`, only an issue
+    /// that fits a free slot, and placed in it.
+    fn next_fitting(
+        &mut self,
+        open: &[Issue],
+        named: &[u32],
+        tried: &mut HashSet<u32>,
+        refused: &mut Vec<Skipped>,
         fit: Option<parallel::Free>,
         out: &mut dyn Write,
     ) -> Result<(Option<u32>, Vec<Skipped>)> {
@@ -3889,108 +3902,108 @@ fn work(
             left(&held, &due, out)?;
             return Ok("stopped on request".to_owned());
         }
-        let (issue, title, size, started, stops, ended, retried) =
-            if let Some(again) = due.pop_front() {
-                let Held {
-                    issue,
-                    title,
-                    size,
-                    started,
-                    mut stops,
-                    retry,
-                    cut_off,
-                } = again;
-                // What it owed before it is taken, put back if a stop comes before its resume runs.
-                let owed = cut_off
-                    .then(|| lp.record(issue)?.hooks.get(RESUMED_HOOK).cloned())
-                    .flatten();
-                // Taken only now: a loop that stops before this leaves the resume owed, for the next.
-                if cut_off && let Err(e) = lp.mark_resume(issue, serde_json::Value::Bool(true)) {
-                    let Some(in_use) = e.downcast_ref::<lock::InUse>() else {
-                        return Err(e);
-                    };
-                    writeln!(
-                        out,
-                        "{}: its resume is skipped: {}; the loop leaves it to that command",
-                        crate::title::named(&format!("#{issue}"), &title),
-                        in_use.describe()
-                    )?;
+        let (issue, title, size, started, stops, ended, retried) = if let Some(again) =
+            due.pop_front()
+        {
+            let Held {
+                issue,
+                title,
+                size,
+                started,
+                mut stops,
+                retry,
+                cut_off,
+            } = again;
+            // What it owed before it is taken, put back if a stop comes before its resume runs.
+            let owed = cut_off
+                .then(|| lp.record(issue)?.hooks.get(RESUMED_HOOK).cloned())
+                .flatten();
+            // Taken only now: a loop that stops before this leaves the resume owed, for the next.
+            if cut_off && let Err(e) = lp.mark_resume(issue, serde_json::Value::Bool(true)) {
+                let Some(in_use) = e.downcast_ref::<lock::InUse>() else {
+                    return Err(e);
+                };
+                writeln!(
+                    out,
+                    "{}: its resume is skipped: {}; the loop leaves it to that command",
+                    crate::title::named(&format!("#{issue}"), &title),
+                    in_use.describe()
+                )?;
+                continue;
+            }
+            writeln!(
+                out,
+                "task {}: #{issue} {title} (size {}), tried again",
+                tasks_run + 1,
+                size.as_deref().unwrap_or("unknown")
+            )?;
+            note(lock, lp, warn, |p| p.start(issue))?;
+            let ended = lp.again(issue, retry, &mut stops, out, warn);
+            let retried = Some((retry, cut_off, owed));
+            (issue, title, size, started, stops, ended, retried)
+        } else {
+            let open = github.issues_open(&lp.repo)?;
+            let (next, waiting) = lp.next(&open, &opts.issues, &mut tried, &mut refused, out)?;
+            let Some(issue) = next else {
+                if opts.wait {
+                    // Said once per idle spell: the next task, or the next stop, ends it.
+                    if !idle {
+                        writeln!(
+                            out,
+                            "the queue is empty; checking again every {} for a job file or a \
+                             labelled issue",
+                            queue::span(PAUSE_POLL.as_secs())
+                        )?;
+                        idle = true;
+                    }
+                    (env.sleep)(PAUSE_POLL);
                     continue;
                 }
-                writeln!(
-                    out,
-                    "task {}: #{issue} {title} (size {}), tried again",
-                    tasks_run + 1,
-                    size.as_deref().unwrap_or("unknown")
-                )?;
-                note(lock, lp, warn, |p| p.start(issue))?;
-                let ended = lp.again(issue, retry, &mut stops, out, warn);
-                let retried = Some((retry, cut_off, owed));
-                (issue, title, size, started, stops, ended, retried)
-            } else {
-                let open = github.issues_open(&lp.repo)?;
-                let (next, waiting) =
-                    lp.next(&open, &opts.issues, &mut tried, &mut refused, None, out)?;
-                let Some(issue) = next else {
-                    if opts.wait {
-                        // Said once per idle spell: the next task, or the next stop, ends it.
-                        if !idle {
-                            writeln!(
-                                out,
-                                "the queue is empty; checking again every {} for a job file or a \
-                             labelled issue",
-                                queue::span(PAUSE_POLL.as_secs())
-                            )?;
-                            idle = true;
-                        }
-                        (env.sleep)(PAUSE_POLL);
-                        continue;
-                    }
-                    let skipped: Vec<Skipped> = refused.iter().chain(&waiting).cloned().collect();
-                    let stop = if opts.issues.is_empty() {
-                        "the queue is empty; the loop stops"
-                    } else {
-                        "every named issue was taken or skipped; the loop stops"
-                    };
-                    writeln!(out, "{stop}")?;
-                    if opts.issues.is_empty() {
-                        write!(
-                            out,
-                            "{}",
-                            queue::report(&Report {
-                                open: &open,
-                                skipped: &skipped,
-                            })
-                        )?;
-                    }
-                    left(&held, &due, out)?;
-                    return Ok(stop.to_owned());
+                let skipped: Vec<Skipped> = refused.iter().chain(&waiting).cloned().collect();
+                let stop = if opts.issues.is_empty() {
+                    "the queue is empty; the loop stops"
+                } else {
+                    "every named issue was taken or skipped; the loop stops"
                 };
-                idle = false;
-                let found = open.iter().find(|i| i.number == issue);
-                let title = found.map_or_else(|| format!("issue {issue}"), |i| i.title.clone());
-                let size = found
-                    .and_then(|i| queue::size(&i.labels))
-                    .map(str::to_owned);
-                let labeled = found.is_some_and(|i| i.labels.iter().any(|l| l == READY_LABEL));
-
-                let started = lp.now();
-                writeln!(
-                    out,
-                    "task {}: #{issue} {title} (size {})",
-                    tasks_run + 1,
-                    size.as_deref().unwrap_or("unknown")
-                )?;
-                note(lock, lp, warn, |p| {
-                    for skipped in refused.iter().chain(&waiting) {
-                        p.set(skipped.issue, Outcome::Skipped);
-                    }
-                    p.start(issue);
-                })?;
-                let mut stops = Vec::new();
-                let ended = lp.task(issue, labeled, 0, &mut stops, out, warn);
-                (issue, title, size, started, stops, ended, None)
+                writeln!(out, "{stop}")?;
+                if opts.issues.is_empty() {
+                    write!(
+                        out,
+                        "{}",
+                        queue::report(&Report {
+                            open: &open,
+                            skipped: &skipped,
+                        })
+                    )?;
+                }
+                left(&held, &due, out)?;
+                return Ok(stop.to_owned());
             };
+            idle = false;
+            let found = open.iter().find(|i| i.number == issue);
+            let title = found.map_or_else(|| format!("issue {issue}"), |i| i.title.clone());
+            let size = found
+                .and_then(|i| queue::size(&i.labels))
+                .map(str::to_owned);
+            let labeled = found.is_some_and(|i| i.labels.iter().any(|l| l == READY_LABEL));
+
+            let started = lp.now();
+            writeln!(
+                out,
+                "task {}: #{issue} {title} (size {})",
+                tasks_run + 1,
+                size.as_deref().unwrap_or("unknown")
+            )?;
+            note(lock, lp, warn, |p| {
+                for skipped in refused.iter().chain(&waiting) {
+                    p.set(skipped.issue, Outcome::Skipped);
+                }
+                p.start(issue);
+            })?;
+            let mut stops = Vec::new();
+            let ended = lp.task(issue, labeled, 0, &mut stops, out, warn);
+            (issue, title, size, started, stops, ended, None)
+        };
         let end = match ended {
             Ok(end) => end,
             Err(Halt::Error(e)) => return Err(e),

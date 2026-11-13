@@ -80,12 +80,11 @@ impl Loop<'_> {
             }
             // A job whose slot a child holds waits for a later pass, the jobs after it too, so
             // they still run oldest first (issue 615).
-            if let Some(at) = self.job_slot(path)
+            if let Some((label, at)) = self.job_slot(path)
                 && self.slot_taken(at)
             {
                 let line = format!(
-                    "the queued job {} waits for a free {} slot; tried again at a later pass",
-                    path.display(),
+                    "{label}: waits for a free {} slot; tried again at a later pass",
                     at.unwrap_or(self.default_location).as_str()
                 );
                 self.say_once(out, line)?;

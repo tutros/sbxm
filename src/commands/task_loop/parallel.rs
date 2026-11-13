@@ -30,7 +30,7 @@ use crate::backend::Location;
 use crate::task::outcome;
 use crate::task::queue::{self, Outcome, READY_LABEL, Report, Row, Skipped};
 use crate::task::record::{self, Stage};
-use crate::task::{jobs, lock};
+use crate::task::{jobs, location, lock};
 
 /// How often the running children are looked at.
 pub const TICK: Duration = Duration::from_secs(2);
@@ -625,7 +625,7 @@ fn steps_and_starts<'a>(
             None => open.insert(lp.github.issues_open(&lp.repo)?),
         };
         let free = lp.free();
-        let (next, waiting) = lp.next(
+        let (next, waiting) = lp.next_fitting(
             open,
             &opts.issues,
             &mut pass.tried,
@@ -1016,19 +1016,28 @@ impl Loop<'_> {
         Ok(false)
     }
 
-    /// Where queued job `path` runs, for a loop with several children: `None` for one that
-    /// takes no slot, or whose file can't be read here (the job's own run says why).
-    pub(super) fn job_slot(&self, path: &std::path::Path) -> Option<Option<Location>> {
+    /// Queued job `path`'s label and where it runs (`None`: as `[sandbox] location` says), for
+    /// a loop with several children; `None` for a job that takes no slot, or whose file or issue
+    /// can't be read here (the job's own run says why).
+    pub(super) fn job_slot(&self, path: &std::path::Path) -> Option<(String, Option<Location>)> {
         let meta = std::fs::symlink_metadata(path).ok()?;
         if !meta.is_file() {
             return None;
         }
         let text = std::fs::read_to_string(path).ok()?;
-        match jobs::parse(&text).ok()? {
-            jobs::Job::Review { pr } | jobs::Job::Fix { pr, .. } => Some(self.fix_location(pr)),
-            jobs::Job::Run { .. } | jobs::Job::Spec { .. } => Some(None),
-            jobs::Job::Template { .. } => Some(Some(Location::Local)),
-            jobs::Job::RmMerged {} => None,
-        }
+        let job = jobs::parse(&text).ok()?;
+        let at = match job {
+            jobs::Job::Review { pr } | jobs::Job::Fix { pr, .. } => self.fix_location(pr),
+            // Where its labels pin it, as the job's run reads them.
+            jobs::Job::Run { issue } => {
+                let open = self.github.issues_open(&self.repo).ok()?;
+                let found = open.iter().find(|i| i.number == issue)?;
+                location::for_loop(&found.labels, self.cloud_slots).ok()?
+            }
+            jobs::Job::Spec { .. } => None,
+            jobs::Job::Template { .. } => Some(Location::Local),
+            jobs::Job::RmMerged {} => return None,
+        };
+        Some((job.label(), at))
     }
 }

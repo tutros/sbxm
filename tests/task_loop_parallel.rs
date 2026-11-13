@@ -649,6 +649,17 @@ mod several {
         gh: &FakeGitHub,
         stop: &dyn Fn() -> bool,
     ) -> Run {
+        run_listed(f, steps, gh, stop, &[])
+    }
+
+    /// [`run_loop`] over `issues` (none: the labeled queue).
+    pub fn run_listed(
+        f: &Fixture,
+        steps: &dyn Steps,
+        gh: &FakeGitHub,
+        stop: &dyn Fn() -> bool,
+        issues: &[u32],
+    ) -> Run {
         let clock = Cell::new(START);
         let env = Env {
             now: &|| clock.get(),
@@ -660,7 +671,7 @@ mod several {
             &f.env.config_dir(),
             &Options {
                 repo_root: f.repo_root.clone(),
-                issues: Vec::new(),
+                issues: issues.to_vec(),
                 cap: None,
                 repo: Some(REPO.into()),
                 wait: false,
@@ -872,6 +883,60 @@ mod several {
             "{}",
             run.out
         );
+    }
+
+    #[test]
+    fn a_queued_run_job_pinned_to_the_cloud_runs_while_a_child_holds_the_local_slot() {
+        let f = fixture(Some(1));
+        let gh = github(&[(1, &[]), (9, &["run-cloud"])]);
+        let queue = sbxm::task::jobs::queue_dir(&f.base());
+        // The job is queued once the child holds the local slot.
+        let play = Play::new(&f.base())
+            .plays(1, &[(400, Act::Ready)])
+            .on_start(|issue| {
+                if issue == 1 {
+                    fs::create_dir_all(&queue).unwrap();
+                    fs::write(queue.join("run-9.json"), r#"{"kind": "run", "issue": 9}"#).unwrap();
+                }
+            });
+
+        let run = run_listed(&f, &play, &gh, &never, &[1]);
+
+        run.result.unwrap();
+        assert!(
+            play.at("start 9 run cloud") < play.at("end 1 Ready"),
+            "{}",
+            run.out
+        );
+    }
+
+    #[test]
+    fn a_queued_job_whose_slot_a_child_holds_waits_for_it_to_end() {
+        let f = fixture(Some(1));
+        loop_pr(&f.base(), 50, 150, Location::Local);
+        let gh = github(&[(1, &[])]).with_pr(pr(150)).with_pr(pr(101));
+        let queue = sbxm::task::jobs::queue_dir(&f.base());
+        let play = Play::new(&f.base())
+            .plays(1, &[(400, Act::Ready)])
+            .on_start(|_| {
+                fs::create_dir_all(&queue).unwrap();
+                fs::write(
+                    queue.join("review-150.json"),
+                    r#"{"kind": "review", "pr": 150}"#,
+                )
+                .unwrap();
+            });
+
+        let run = run_listed(&f, &play, &gh, &never, &[1]);
+
+        run.result.unwrap();
+        let out = &run.out;
+        let waits = out
+            .find("job review #150: waits for a free local slot; tried again at a later pass")
+            .unwrap_or_else(|| panic!("{out}"));
+        let ended = out.find("[issue-1 local] #1 (Fix 1)").unwrap();
+        let started = out.find("job review #150: started").unwrap();
+        assert!(waits < ended && ended < started, "{out}");
     }
 
     #[test]
