@@ -103,7 +103,7 @@ impl SbxBackend {
             .stderr(Stdio::piped())
             .spawn()
             .context(SBX_MISSING)?;
-        let mut kept = Vec::new();
+        let mut kept = StderrTail::default();
         if let Some(mut pipe) = child.stderr.take() {
             let mut screen = std::io::stderr();
             let mut chunk = [0u8; 4096];
@@ -113,7 +113,7 @@ impl SbxBackend {
                     Ok(n) => {
                         let _ = screen.write_all(&chunk[..n]);
                         let _ = screen.flush();
-                        keep_tail(&mut kept, &chunk[..n]);
+                        kept.push(&chunk[..n]);
                     }
                     Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
                     Err(_) => break,
@@ -122,7 +122,10 @@ impl SbxBackend {
         }
         let status = child.wait().context(SBX_MISSING)?;
         if !status.success() {
-            bail!("{}", create_failed(sandbox, &status.to_string(), &kept));
+            bail!(
+                "{}",
+                create_failed(sandbox, &status.to_string(), &kept.kept)
+            );
         }
         Ok(())
     }
@@ -648,17 +651,41 @@ fn parse_custom_secrets(json: &str) -> Result<Vec<CustomSecret>> {
 /// How many bytes of `sbx create`'s stderr its error keeps, from the end.
 const STDERR_KEPT: usize = 2000;
 
-/// Adds `chunk` to `kept`, the end of `sbx create`'s stderr so far. Only the end is ever shown,
-/// so past twice [`STDERR_KEPT`] the start goes, up to and including the first whitespace after
-/// the cut: a word (a secret, say) the cut lands in goes whole, never leaving a tail the masking
-/// can't recognize (review M-2). One word longer than that goes entirely.
-fn keep_tail(kept: &mut Vec<u8>, chunk: &[u8]) {
-    kept.extend_from_slice(chunk);
-    if kept.len() > 2 * STDERR_KEPT {
-        let cut = kept.len() - STDERR_KEPT;
-        match kept[cut..].iter().position(u8::is_ascii_whitespace) {
-            Some(at) => drop(kept.drain(..=cut + at)),
-            None => kept.clear(),
+/// The end of `sbx create`'s stderr so far: at most twice [`STDERR_KEPT`] bytes plus one read.
+/// Only whole words are kept: a word whose start was dropped is dropped to its end, across as
+/// many reads as it takes, so the masking never meets a secret's tail without its prefix (review
+/// M-2, twice).
+#[derive(Default)]
+struct StderrTail {
+    kept: Vec<u8>,
+    /// The last byte dropped was inside a word: what comes before the next whitespace is its rest.
+    in_dropped_word: bool,
+}
+
+impl StderrTail {
+    /// Adds `chunk`. Past twice [`STDERR_KEPT`] the start goes, up to and including the first
+    /// whitespace after the cut; with none, all of it goes and the word goes on being dropped.
+    fn push(&mut self, mut chunk: &[u8]) {
+        if self.in_dropped_word {
+            match chunk.iter().position(u8::is_ascii_whitespace) {
+                Some(at) => {
+                    self.in_dropped_word = false;
+                    chunk = &chunk[at + 1..];
+                }
+                None => return,
+            }
+        }
+        let kept = &mut self.kept;
+        kept.extend_from_slice(chunk);
+        if kept.len() > 2 * STDERR_KEPT {
+            let cut = kept.len() - STDERR_KEPT;
+            match kept[cut..].iter().position(u8::is_ascii_whitespace) {
+                Some(at) => drop(kept.drain(..=cut + at)),
+                None => {
+                    kept.clear();
+                    self.in_dropped_word = true;
+                }
+            }
         }
     }
 }
@@ -1540,26 +1567,72 @@ mod template_tests {
 
     #[test]
     fn a_token_across_the_rolling_cut_leaves_no_fragment() {
-        let mut kept = Vec::new();
+        let mut kept = StderrTail::default();
         // The token starts at STDERR_KEPT + 500; the second chunk makes the buffer evict
         // everything before STDERR_KEPT + 510, inside the token.
         let first = format!("{} {}\n", "x".repeat(STDERR_KEPT + 499), dummy_token());
-        keep_tail(&mut kept, first.as_bytes());
-        keep_tail(&mut kept, "z".repeat(STDERR_KEPT - 25).as_bytes());
-        assert!(kept.len() <= 2 * STDERR_KEPT, "{}", kept.len());
-        let error = create_failed("s", "exit status: 1", &kept);
+        kept.push(first.as_bytes());
+        kept.push("z".repeat(STDERR_KEPT - 25).as_bytes());
+        assert!(kept.kept.len() <= 2 * STDERR_KEPT, "{}", kept.kept.len());
+        let error = create_failed("s", "exit status: 1", &kept.kept);
         assert!(!token_fragment(&error), "{error}");
         assert!(error.ends_with("zzzz"), "{error}");
     }
 
+    /// Review M-2 (repeat): `chunks`, read one by one, as the error shows them.
+    fn error_after_reads(chunks: &[Vec<u8>]) -> (String, usize) {
+        let mut kept = StderrTail::default();
+        let mut most = 0;
+        for chunk in chunks {
+            kept.push(chunk);
+            most = most.max(kept.kept.len());
+        }
+        (create_failed("s", "exit status: 1", &kept.kept), most)
+    }
+
+    #[test]
+    fn a_token_cleared_whole_leaves_no_tail_from_the_next_read() {
+        let mut first = b"sk-".to_vec();
+        first.extend(b"a".repeat(4093));
+        let mut second = b"a".repeat(907);
+        second.extend(b"\nERROR synthetic create failed\n");
+        let (error, _) = error_after_reads(&[first, second]);
+        assert!(!token_fragment(&error), "{error}");
+        assert!(error.ends_with("ERROR synthetic create failed"), "{error}");
+    }
+
+    #[test]
+    fn a_token_continued_over_many_reads_leaves_no_tail() {
+        let mut chunks = vec![[b"sk-".to_vec(), b"a".repeat(4093)].concat()];
+        for _ in 0..5 {
+            chunks.push(b"a".repeat(4096));
+        }
+        chunks.push(b"a".repeat(100));
+        chunks.push(b"aaa\tERROR after a long token\n".to_vec());
+        let (error, most) = error_after_reads(&chunks);
+        assert!(!token_fragment(&error), "{error}");
+        assert!(error.ends_with("ERROR after a long token"), "{error}");
+        assert!(most <= 2 * STDERR_KEPT + 4096, "{most}");
+    }
+
+    #[test]
+    fn a_token_cut_while_its_separator_is_still_to_come_leaves_no_tail() {
+        // The eviction cut lands inside a token whose whitespace comes in a later read.
+        let first = format!("{} sk-{}", "x".repeat(STDERR_KEPT), "a".repeat(30));
+        let second = format!("{}\nERROR tail\n", "a".repeat(STDERR_KEPT));
+        let (error, _) = error_after_reads(&[first.into_bytes(), second.into_bytes()]);
+        assert!(!token_fragment(&error), "{error}");
+        assert!(error.ends_with("ERROR tail"), "{error}");
+    }
+
     #[test]
     fn ordinary_stderr_survives_the_rolling_buffer() {
-        let mut kept = Vec::new();
+        let mut kept = StderrTail::default();
         for i in 0..1000 {
-            keep_tail(&mut kept, format!("line {i}\n").as_bytes());
+            kept.push(format!("line {i}\n").as_bytes());
         }
-        assert!(kept.len() <= 2 * STDERR_KEPT, "{}", kept.len());
-        let error = create_failed("s", "exit status: 1", &kept);
+        assert!(kept.kept.len() <= 2 * STDERR_KEPT, "{}", kept.kept.len());
+        let error = create_failed("s", "exit status: 1", &kept.kept);
         assert!(error.ends_with("line 999"), "{error}");
     }
 
