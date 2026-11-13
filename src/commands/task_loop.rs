@@ -1239,6 +1239,10 @@ impl Loop<'_> {
             // whose windows and real checks may arm some and end the wait.
             self.check_runs(out, warn)?;
             self.recheck_waiting(out, warn)?;
+            // A log-fix that started as a child (issue 633): the loop goes back to supervising.
+            if !self.jobs.is_empty() {
+                return Ok(false);
+            }
         }
     }
 
@@ -3042,6 +3046,9 @@ impl Loop<'_> {
             if log_fix {
                 let waits = if self.steps.room_for(self.fix_location(number)).is_err() {
                     Some("room on the disk".to_owned())
+                } else if self.pr_busy(number) {
+                    // One child per PR at a time (issue 633).
+                    Some("the job running on it".to_owned())
                 } else if let Some(waits) = self.wait_reason(self.fix_slot(number), true) {
                     // A child holds its slot or its usage limit holds it back (issue 615): a
                     // later pass, never a wait.
@@ -3074,7 +3081,11 @@ impl Loop<'_> {
                 for run in &new {
                     self.failed_twice.insert((number, run.id));
                 }
-                self.log_fix(number, &task, armed, &head, &run, out, warn)?;
+                if self.slots.is_some() {
+                    self.start_log_fix(number, &task, armed, &head, &run, out, warn)?;
+                } else {
+                    self.log_fix(number, &task, armed, &head, &run, out, warn)?;
+                }
                 continue;
             }
             for (i, run) in new.iter().enumerate() {
@@ -3165,8 +3176,23 @@ impl Loop<'_> {
         out: &mut dyn Write,
         warn: &mut dyn Write,
     ) -> Result<()> {
-        self.log_fixed.insert(number);
         let started = self.now();
+        self.log_fix_begin(number, armed, run, out, warn)?;
+        let result = self.steps.fix_check(number, run.id, out, warn);
+        self.log_fix_end(number, task, armed, head, run, started, result, out, warn)
+    }
+
+    /// A log-fix's steps before its `task fix`: counted as tried, its line, its `go` label
+    /// dropped.
+    fn log_fix_begin(
+        &mut self,
+        number: u32,
+        armed: bool,
+        run: &WorkflowRun,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<()> {
+        self.log_fixed.insert(number);
         writeln!(
             out,
             "{pr_named}: its {} failed twice ({}){}; fixing it once from the run's log with \
@@ -3177,8 +3203,24 @@ impl Loop<'_> {
             run.id,
             pr_named = self.pr_named(number)
         )?;
-        self.drop_go(number, warn)?;
-        let result = self.steps.fix_check(number, run.id, out, warn);
+        self.drop_go(number, warn)
+    }
+
+    /// A log-fix's steps after its `task fix` of `head` ended with `result`: armed again or left
+    /// to the user, and its log row.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn log_fix_end(
+        &mut self,
+        number: u32,
+        task: &str,
+        armed: bool,
+        head: &str,
+        run: &WorkflowRun,
+        started: u64,
+        result: Result<()>,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<()> {
         let id = record::fix_id(number, head);
         if let Some(id) = id.as_deref() {
             self.notify_question(id, out, warn)?;

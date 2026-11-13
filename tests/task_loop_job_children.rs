@@ -863,3 +863,94 @@ mod resolves {
         );
     }
 }
+
+// --- log-fixes ---
+
+mod log_fixes {
+    use sbxm::backend::Location;
+    use sbxm::github::{Mergeable, RunStatus, WorkflowRun};
+    use sbxm::task::outcome::Kind;
+
+    use super::play::*;
+
+    /// PR 150's head, apart from `main`'s.
+    const PR_HEAD: &str = "fedcba9876543210fedcba9876543210fedcba98";
+
+    /// PR 150 at [`PR_HEAD`].
+    fn pr150() -> sbxm::github::PrInfo {
+        sbxm::github::PrInfo {
+            head_oid: PR_HEAD.into(),
+            ..pr(150)
+        }
+    }
+
+    /// PR 150's run on [`PR_HEAD`], failed again after its re-run.
+    fn failed_twice(gh: &sbxm::github::fake::FakeGitHub) {
+        gh.set_runs(
+            PR_HEAD,
+            vec![WorkflowRun {
+                id: 77,
+                workflow: "ci".into(),
+                attempt: 2,
+                status: RunStatus::Failed,
+                url: "https://github.com/o/r/actions/runs/77".into(),
+                actor: "alice".into(),
+            }],
+        );
+    }
+
+    #[test]
+    fn a_log_fix_runs_as_a_child_while_a_task_child_is_finished() {
+        let f = fixture(Some(2));
+        loop_pr(&f.base(), 50, 150, Location::Cloud);
+        let gh = github(&[(1, &[])]).with_pr(pr150()).with_pr(pr(101));
+        failed_twice(&gh);
+        let play = Play::new(&f.base())
+            .issue(1, 3)
+            .job("log-fix 150", 30, Kind::Ready);
+
+        let run = run_loop(&f, &play, &gh, &never, &[1]);
+
+        run.result.unwrap();
+        assert_eq!(
+            starts(&play),
+            ["start log-fix 150 cloud", "start 1 local"],
+            "{}",
+            run.out
+        );
+        assert!(
+            play.at("finish 1") < play.at("end log-fix 150"),
+            "{}",
+            run.out
+        );
+        assert!(!play.has("in-process log-fix 150"), "{}", run.out);
+        let log = f.log_text();
+        assert!(log.contains("log-fix (task issue-50)"), "{log}");
+    }
+
+    #[test]
+    fn a_log_fix_waits_while_a_resolve_runs_on_its_pr_then_runs() {
+        let f = fixture(Some(2));
+        loop_pr(&f.base(), 50, 150, Location::Cloud);
+        let gh = github(&[]).with_pr(pr150());
+        gh.set_mergeable(150, Mergeable::Conflicting);
+        failed_twice(&gh);
+        let play = Play::new(&f.base()).job("fix 150", 5, Kind::Ready);
+
+        let run = run_loop(&f, &play, &gh, &never, &[]);
+
+        run.result.unwrap();
+        assert!(
+            run.out
+                .contains("its log-fix waits for the job running on it"),
+            "{}",
+            run.out
+        );
+        assert!(
+            play.at("end fix 150") < play.at("start log-fix 150 cloud"),
+            "{}",
+            run.out
+        );
+        assert_eq!(play.most.get(), 1, "{:?}", play.events());
+    }
+}

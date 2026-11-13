@@ -22,6 +22,7 @@ use anyhow::Result;
 
 use super::{JobStep, Loop, PhaseEnd, Started};
 use crate::backend::Location;
+use crate::github::WorkflowRun;
 
 /// A job child the loop started and supervises, until it ends.
 pub(super) struct JobChild<'a> {
@@ -44,6 +45,15 @@ enum Work {
         armed: bool,
         branch: String,
         head: String,
+        started: u64,
+    },
+    /// The one log-fix of PR `number` (decision 300), for its `run` of `head`.
+    LogFix {
+        number: u32,
+        task: String,
+        armed: bool,
+        head: String,
+        run: WorkflowRun,
         started: u64,
     },
 }
@@ -87,6 +97,43 @@ impl<'a> Loop<'a> {
                 armed,
                 branch: branch.to_owned(),
                 head,
+                started,
+            },
+            pr: Some(number),
+            slot,
+            phase,
+        });
+        Ok(())
+    }
+
+    /// Starts PR `number`'s log-fix as a child (issue 633): its steps before `task fix` here,
+    /// then `task fix --pr N --check-run <id>` as a child; its end is [`Self::job_ended`]'s.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn start_log_fix(
+        &mut self,
+        number: u32,
+        task: &str,
+        armed: bool,
+        head: &str,
+        run: &WorkflowRun,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<()> {
+        let started = self.now();
+        self.log_fix_begin(number, armed, run, out, warn)?;
+        let slot = self.fix_slot(number).unwrap_or(self.default_location);
+        let job = JobStep::Fix {
+            pr: number,
+            check_run: Some(run.id),
+        };
+        let phase = self.steps.start_job(&job, slot, out, warn);
+        self.jobs.push(JobChild {
+            work: Work::LogFix {
+                number,
+                task: task.to_owned(),
+                armed,
+                head: head.to_owned(),
+                run: run.clone(),
                 started,
             },
             pr: Some(number),
@@ -141,6 +188,20 @@ impl<'a> Loop<'a> {
                 let result = end.result();
                 self.resolve_end(
                     number, &task, armed, &branch, &head, started, result, out, warn,
+                )?;
+                Ok(None)
+            }
+            Work::LogFix {
+                number,
+                task,
+                armed,
+                head,
+                run,
+                started,
+            } => {
+                let result = end.result();
+                self.log_fix_end(
+                    number, &task, armed, &head, &run, started, result, out, warn,
                 )?;
                 Ok(None)
             }
