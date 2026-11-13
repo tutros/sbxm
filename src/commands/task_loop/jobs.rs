@@ -147,7 +147,15 @@ impl Loop<'_> {
                 return Ok(false);
             }
             match (job, slot) {
-                (Some(Job::Review { .. } | Job::Fix { .. } | Job::Template { .. }), Some(slot)) => {
+                (
+                    Some(
+                        Job::Review { .. }
+                        | Job::Fix { .. }
+                        | Job::Template { .. }
+                        | Job::Spec { .. },
+                    ),
+                    Some(slot),
+                ) => {
                     self.start_queued(&path, slot, out, warn)?;
                 }
                 _ => self.job(&path, out, warn)?,
@@ -214,30 +222,59 @@ impl Loop<'_> {
                 };
                 (step, what)
             }
+            Job::Spec { file } => {
+                let (spec, id) = match self.spec_ready(file) {
+                    Ok(found) => found,
+                    Err(ended) => {
+                        return self.halt_after(&taken, &label, read, started, ended, out, warn);
+                    }
+                };
+                self.mark(&taken, &read, started, Some(id.clone()))?;
+                let step = JobStep::RunSpec(spec.clone());
+                let what = QueuedWhat::Spec {
+                    spec,
+                    id,
+                    should_fix: false,
+                };
+                (step, what)
+            }
             _ => {
                 let ended = self.run_job(&job, &taken, &read, started, out, warn)?;
                 return self.halt_after(&taken, &label, read, started, ended, out, warn);
             }
         };
-        let pr = match what {
-            QueuedWhat::Pr { pr, .. } => Some(pr),
-            QueuedWhat::Template { .. } => None,
-        };
-        let phase = self.steps.start_job(&step, slot, out, warn);
         let queued = Queued {
             taken,
             label,
             read,
             started,
+            slot,
             what,
         };
+        self.start_queued_step(queued, &step, out, warn);
+        Ok(())
+    }
+
+    /// Starts `step` of `queued` as its child.
+    fn start_queued_step(
+        &mut self,
+        queued: Queued,
+        step: &JobStep,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) {
+        let pr = match queued.what {
+            QueuedWhat::Pr { pr, .. } => Some(pr),
+            QueuedWhat::Template { .. } | QueuedWhat::Spec { .. } => None,
+        };
+        let slot = queued.slot;
+        let phase = self.steps.start_job(step, slot, out, warn);
         self.jobs.push(JobChild {
             work: Work::Queued(queued),
             pr,
             slot,
             phase,
         });
-        Ok(())
     }
 
     /// [`Self::job_done`], its stop kept for the loop: draining, the running children first.
@@ -267,8 +304,45 @@ impl Loop<'_> {
         out: &mut dyn Write,
         warn: &mut dyn Write,
     ) -> Result<Option<anyhow::Error>> {
-        let ended = match queued.what {
+        let ended = match &queued.what {
+            QueuedWhat::Spec {
+                spec,
+                id,
+                should_fix,
+            } => {
+                let (spec, id, should_fix) = (spec.clone(), id.clone(), *should_fix);
+                let flag = spec_flag(&spec);
+                let resume = Some((id.as_str(), format!("sbxm task resume {flag}")));
+                let what = if should_fix {
+                    "its should-fix round failed: "
+                } else {
+                    ""
+                };
+                let ended = match self.child_failed(what, resume, end) {
+                    Some(ended) => ended,
+                    // Its should-fix round next, as another child (decision 306).
+                    None if !should_fix && self.should_fix_due_of(&id) => {
+                        let step = JobStep::ShouldFixSpec(spec.clone());
+                        let queued = Queued {
+                            what: QueuedWhat::Spec {
+                                spec,
+                                id,
+                                should_fix: true,
+                            },
+                            ..queued
+                        };
+                        self.start_queued_step(queued, &step, out, warn);
+                        return Ok(None);
+                    }
+                    None => self.spec_finish(&spec, &id, out, warn)?,
+                };
+                Ended {
+                    flag: Some(flag),
+                    ..ended.task(id)
+                }
+            }
             QueuedWhat::Pr { pr, fix, task } => {
+                let (pr, fix, task) = (*pr, *fix, task.clone());
                 let command = if fix { "fix" } else { "review" };
                 let ended = match end.kind() {
                     ChildKind::Ready => {
@@ -284,7 +358,7 @@ impl Loop<'_> {
             QueuedWhat::Template { profile, harness } => match self.child_failed("", None, end) {
                 Some(ended) => ended,
                 None => {
-                    let key = crate::template::key(&profile, harness);
+                    let key = crate::template::key(profile, *harness);
                     let built = match crate::template::Record::load(&self.base_dir, &key) {
                         Ok(Some(rec)) => format!("built template {}", rec.tag),
                         _ => format!("built the template of {profile}"),
@@ -628,13 +702,9 @@ impl Loop<'_> {
         out: &mut dyn Write,
         warn: &mut dyn Write,
     ) -> Result<Ended> {
-        let config = match GlobalConfig::load(self.config_dir) {
-            Ok(config) => config,
-            Err(e) => return Ok(Ended::new(Outcome::Failed, format!("{e:#}"))),
-        };
-        let (spec, id) = match jobs::spec_file(self.config_dir, &config, file) {
+        let (spec, id) = match self.spec_ready(file) {
             Ok(found) => found,
-            Err(why) => return Ok(Ended::new(Outcome::Refused, why)),
+            Err(ended) => return Ok(ended),
         };
         self.mark(taken, read, started, Some(id.clone()))?;
         let ended = self.spec_task(&spec, &id, out, warn)?;
@@ -642,6 +712,15 @@ impl Loop<'_> {
             flag: Some(spec_flag(&spec)),
             ..ended.task(id)
         })
+    }
+
+    /// A `spec` job's file `file` in `specs_dir` and its task's id; `Err`: how the job ends
+    /// without running.
+    fn spec_ready(&self, file: &str) -> std::result::Result<(PathBuf, String), Ended> {
+        let config = GlobalConfig::load(self.config_dir)
+            .map_err(|e| Ended::new(Outcome::Failed, format!("{e:#}")))?;
+        jobs::spec_file(self.config_dir, &config, file)
+            .map_err(|why| Ended::new(Outcome::Refused, why))
     }
 
     /// A spec job's task `id` of file `spec`, from its run to its PR or its stop.
@@ -670,6 +749,19 @@ impl Loop<'_> {
         {
             return Ok(ended);
         }
+        self.spec_finish(spec, id, out, warn)
+    }
+
+    /// A spec job's task `id` of file `spec` after its run and its should-fix round: finished,
+    /// with its auto-merge, when it is ready and clean; `stopped` otherwise.
+    fn spec_finish(
+        &mut self,
+        spec: &Path,
+        id: &str,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<Ended> {
+        let flag = spec_flag(spec);
         let Some(rec) = self.record_of(id) else {
             return Ok(Ended::new(
                 Outcome::Failed,
@@ -1003,6 +1095,8 @@ pub(super) struct Queued {
     label: String,
     read: AsRead,
     started: u64,
+    /// The slot its children hold.
+    slot: Location,
     what: QueuedWhat,
 }
 
@@ -1016,6 +1110,12 @@ enum QueuedWhat {
     },
     /// `template build`.
     Template { profile: String, harness: Harness },
+    /// `task run --spec`, then (`should_fix`) its should-fix round; then its finish here.
+    Spec {
+        spec: PathBuf,
+        id: String,
+        should_fix: bool,
+    },
 }
 
 /// Queued job `path` as its file says now, without taking it; `None` for one that can't be read

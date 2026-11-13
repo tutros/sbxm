@@ -381,6 +381,8 @@ mod play {
         on_issue: Box<dyn Fn(u32) + 'a>,
         /// Run as each job ends, by its name.
         on_job_end: Box<dyn Fn(&str) + 'a>,
+        /// The review a spec task's run leaves.
+        pub spec_review: &'static str,
     }
 
     impl<'a> Play<'a> {
@@ -395,6 +397,7 @@ mod play {
                 on_job: Box::new(|_| {}),
                 on_issue: Box::new(|_| {}),
                 on_job_end: Box::new(|_| {}),
+                spec_review: CLEAN,
             }
         }
 
@@ -454,6 +457,43 @@ mod play {
         }
     }
 
+    pub const CLEAN: &str = "Must-fix findings: 0\n";
+    /// A clean review with one should-fix finding sized S.
+    pub const S_ONE: &str = "Must-fix findings: 0\n\n## Should fix\n\n\
+        ### S-1 - a.txt:2 a small slip.\n\n**Where:** a.txt:2\n**Size:** S (one line)\n";
+    /// The PR a spec task's finish opens.
+    pub const SPEC_PR: u32 = 160;
+
+    /// Spec `spec`'s task as its run leaves it: ready, clean, with `review`.
+    fn write_spec(base: &Path, spec: &Path, review: &str) {
+        let id = record::spec_id(spec).unwrap().0;
+        let dir = record::task_dir(base, &id);
+        let mut rec = Record::new(
+            &NewTask {
+                kind: record::Kind::Spec,
+                number: 0,
+                repo: REPO,
+                title: "Retro",
+                base: "main",
+                branch: &format!("sbxm/{id}"),
+                config_hash: "h",
+                id: Some(&id),
+            },
+            START,
+            Process::new(1, 0),
+        );
+        rec.stage = Stage::Ready;
+        rec.status = Status::Ok;
+        rec.review = Some(ReviewResult {
+            round: 1,
+            must_fix: 0,
+            not_run: Some(Vec::new()),
+            ..ReviewResult::default()
+        });
+        record::write(&dir, &rec).unwrap();
+        fs::write(dir.join("review.md"), review).unwrap();
+    }
+
     /// Issue `issue`'s record as a child leaves it, ready, in `location`.
     pub fn write_ready(base: &Path, issue: u32, location: Location) {
         let dir = record::task_dir(base, &format!("issue-{issue}"));
@@ -488,7 +528,7 @@ mod play {
 
     enum Who {
         Issue(u32, Location),
-        Job(String, Kind),
+        Job(String, Kind, JobStep),
     }
 
     struct Playing<'p, 'a> {
@@ -510,7 +550,21 @@ mod play {
                     self.play.events.borrow_mut().push(format!("end {issue}"));
                     PhaseEnd::Outcome(Outcome::new(Kind::Ready, None, ""))
                 }
-                Who::Job(name, kind) => {
+                Who::Job(name, kind, job) => {
+                    match job {
+                        JobStep::RunSpec(spec) if *kind == Kind::Ready => {
+                            write_spec(&self.play.base, spec, self.play.spec_review);
+                        }
+                        JobStep::ShouldFixSpec(spec) if *kind == Kind::Ready => {
+                            let id = record::spec_id(spec).unwrap().0;
+                            let dir = record::task_dir(&self.play.base, &id);
+                            let mut rec = record::read(&dir.join("task.json")).unwrap();
+                            rec.should_fix_round = true;
+                            record::write(&dir, &rec).unwrap();
+                            fs::write(dir.join("review.md"), CLEAN).unwrap();
+                        }
+                        _ => {}
+                    }
                     self.play.events.borrow_mut().push(format!("end {name}"));
                     (self.play.on_job_end)(name);
                     let detail = if *kind == Kind::Ready {
@@ -572,7 +626,7 @@ mod play {
                 .unwrap_or((0, Kind::Ready));
             Box::new(Playing {
                 play: self,
-                who: Job(name, kind),
+                who: Job(name, kind, job.clone()),
                 polls,
             })
         }
@@ -628,6 +682,21 @@ mod play {
             Ok(())
         }
 
+        fn finish_spec(
+            &self,
+            spec: &Path,
+            _out: &mut dyn Write,
+            _warn: &mut dyn Write,
+        ) -> Result<()> {
+            let name = spec.file_name().unwrap().to_string_lossy().into_owned();
+            self.events.borrow_mut().push(format!("finish spec {name}"));
+            let dir = record::task_dir(&self.base, &record::spec_id(spec)?.0);
+            let mut rec = record::read(&dir.join("task.json"))?;
+            rec.stage = Stage::Finished;
+            rec.pr = Some(format!("https://github.com/{REPO}/pull/{SPEC_PR}"));
+            record::write(&dir, &rec)
+        }
+
         fn room(&self) -> Result<()> {
             Ok(())
         }
@@ -677,6 +746,11 @@ mod play {
 
     /// `sandbox_slots` unset (one local), and `cloud_slots` as given.
     pub fn fixture(cloud_slots: Option<u32>) -> Fixture {
+        fixture_with(cloud_slots, "")
+    }
+
+    /// [`fixture`] with `extra` at the end of `sbxm-task.toml`.
+    pub fn fixture_with(cloud_slots: Option<u32>, extra: &str) -> Fixture {
         let env = common::Env::new();
         if let Some(n) = cloud_slots {
             common::cloud_slot::set_cloud_slots(&env, n);
@@ -685,7 +759,7 @@ mod play {
         fs::create_dir_all(&repo_root).unwrap();
         fs::write(
             repo_root.join("sbxm-task.toml"),
-            "[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = []\n",
+            format!("[sandbox]\nprofile = \"default\"\n\n[gates]\nsandbox = []\n{extra}"),
         )
         .unwrap();
         Fixture { env, repo_root }
@@ -1161,5 +1235,78 @@ mod queued {
         assert!(run.out.contains("job fix #150: done"), "{}", run.out);
         assert!(f.queued("b.json") && f.queued("c.json"), "{}", run.out);
         assert!(run.out.ends_with("stopped on request\n"), "{}", run.out);
+    }
+}
+
+// --- spec jobs ---
+
+mod specs {
+    use std::fs;
+
+    use sbxm::task::outcome::Kind;
+
+    use super::play::*;
+
+    /// [`fixture_with`] whose `specs_dir` holds `retro.md`.
+    fn spec_fixture(extra: &str) -> Fixture {
+        let f = fixture_with(Some(2), extra);
+        let specs = f.env.tmp.path().join("specs");
+        fs::create_dir_all(&specs).unwrap();
+        fs::write(specs.join("retro.md"), "# Retro\n").unwrap();
+        let value = toml::Value::String(specs.to_str().unwrap().to_owned());
+        f.env.set_config(&format!("specs_dir = {value}"));
+        f
+    }
+
+    #[test]
+    fn a_spec_job_runs_and_its_should_fix_round_runs_as_children_then_it_is_finished() {
+        let f = spec_fixture("\n[loop]\nshould_fix = \"fix\"\n");
+        f.queue("s.json", r#"{"kind": "spec", "file": "retro.md"}"#, 1);
+        let gh = github(&[(1, &[])]).with_pr(pr(SPEC_PR)).with_pr(pr(101));
+        let mut play = Play::new(&f.base())
+            .issue(1, 3)
+            .job("spec retro.md", 10, Kind::Ready)
+            .job("should-fix retro.md", 10, Kind::Ready);
+        play.spec_review = S_ONE;
+
+        let run = run_loop(&f, &play, &gh, &never, &[1]);
+
+        run.result.unwrap();
+        assert_eq!(
+            starts(&play),
+            [
+                "start spec retro.md local",
+                "start 1 cloud",
+                "start should-fix retro.md local"
+            ],
+            "{}",
+            run.out
+        );
+        // #1 is finished while the spec job's children run.
+        assert!(play.at("finish 1") < play.at("end spec retro.md"));
+        assert!(play.at("end should-fix retro.md") < play.at("finish spec retro.md"));
+        assert!(
+            run.out.contains("job spec retro.md: done: PR #160, clean"),
+            "{}",
+            run.out
+        );
+    }
+
+    #[test]
+    fn a_spec_job_whose_run_fails_ends_failed_without_its_finish() {
+        let f = spec_fixture("");
+        f.queue("s.json", r#"{"kind": "spec", "file": "retro.md"}"#, 1);
+        let gh = github(&[]);
+        let play = Play::new(&f.base()).job("spec retro.md", 2, Kind::Failed);
+
+        let run = run_loop(&f, &play, &gh, &never, &[]);
+
+        run.result.unwrap();
+        assert!(!play.has("finish spec retro.md"), "{}", run.out);
+        assert!(
+            run.out.contains("job spec retro.md: failed: it failed"),
+            "{}",
+            run.out
+        );
     }
 }
