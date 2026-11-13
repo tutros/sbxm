@@ -382,6 +382,22 @@ pub fn take_cloud_slot(env: &TaskEnv, record: &Record) -> Result<crate::slot::Sl
     crate::slot::take_cloud(&global, &env.disk.slot, Some(&record.id), &mut lines)
 }
 
+/// The machine's sandbox slot for a cloud task's host-tier gates (decision 317(5)), held until
+/// the returned handle drops, also inside the command's [`crate::slot::Hold`]: no host build
+/// runs next to a local sandbox. None for a local task: its command holds the slot already
+/// (decision 304). A wait's lines go to `env.progress`.
+fn take_host_slot(env: &TaskEnv, record: &Record) -> Result<crate::slot::Slot> {
+    if record.location != Location::Cloud {
+        return Ok(crate::slot::Slot::none());
+    }
+    let global = GlobalConfig::load(env.config_dir)?;
+    let mut lines = Lines {
+        say: env.progress,
+        line: Vec::new(),
+    };
+    crate::slot::take_for_step(&global, &env.disk.slot, Some(&record.id), &mut lines)
+}
+
 /// The cloud sandboxes a starting command goes on to make, for [`take_cloud_slot_checked`].
 #[derive(Debug, Clone, Copy)]
 pub struct Makes {
@@ -2142,6 +2158,7 @@ pub fn run_gates(
         outcomes.extend(ran);
     }
     if tiers.host && sandbox_ok && !gates.host.is_empty() {
+        let _slot = take_host_slot(env, &prepared.record)?;
         outcomes.extend(host_gate_outcomes(env, prepared, phase));
     }
 
@@ -4216,6 +4233,7 @@ pub fn review_pr(
             gates.timeout,
         );
         if outcomes.iter().all(|o| o.result.passed) && !gates.host.is_empty() {
+            let _slot = take_host_slot(env, &prepared.record)?;
             outcomes.extend(host_gate_outcomes(env, prepared, "pr"));
         }
         Ok(Some(finish_gating(prepared, "pr", outcomes, None)?))
