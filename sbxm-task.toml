@@ -32,9 +32,11 @@ cloud_shape = "large"
 # Without [gates] sandbox, a repo with a Cargo.toml gets the three cargo commands below;
 # any other repo must list its own. An empty list means no sandbox gates.
 [gates]
-sandbox = ["cargo fmt --check", "CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR=$HOME/target cargo clippy --all-targets -- -D warnings", "CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR=$HOME/target cargo test --no-fail-fast > $HOME/t.log 2>&1; r=$?; grep -a -E '^error|No space|FAILED|panicked' -A8 $HOME/t.log | head -80; [ $r -ne 0 ] && tail -n 40 $HOME/t.log | cut -c1-300; df -h \"$HOME\" | tail -1; exit $r", "just script-test"]
+sandbox = ["cargo fmt --check", "CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR=$HOME/target cargo clippy --all-targets -- -D warnings", "{ CARGO_PROFILE_DEV_DEBUG=0 CARGO_TARGET_DIR=$HOME/target cargo test --no-fail-fast 2>&1; echo $? > $HOME/t.rc; } | tee $HOME/t.log | grep --line-buffered -a -E '^ +(Running|Doc-tests) |^error|No space|FAILED|panicked'; r=$(cat $HOME/t.rc); r=${r:-1}; grep -a -E '^error|No space|FAILED|panicked' -A8 $HOME/t.log | head -80; [ $r -ne 0 ] && tail -n 40 $HOME/t.log | cut -c1-300; df -h \"$HOME\" | tail -1; exit $r", "just script-test"]
 # The Pester gate (issue 455) runs `just script-test` on every task, whatever the change touches:
 # it takes about 10-13 s in the template, too little to be worth finding the task's base.
+# The cargo test gate prints each test binary as it starts and each failure line as it happens
+# (issue 619), so a timeout's kept output shows how far it got; the full output is in $HOME/t.log.
 # Optional second tier, run on this machine after the sandbox tier passes. Off while empty.
 # WARNING: host gates run agent-written code on this machine, outside any sandbox. List
 # only commands you would run on a stranger's pull request.
