@@ -946,18 +946,19 @@ for a PR sbxm opened (a task record of the repo, live or archived, names it as i
 skipped. `run` takes an issue as the loop takes one it picked (`task run`, finish, auto-merge, findings filed),
 refused for any reason `task loop --check` would give. `rm-merged` runs `task rm --merged --yes`. `spec` (issue 524)
 runs `task run --spec <specs_dir>\<file>`: `file` is a plain file name in the folder that `specs_dir` in `config.toml`
-names; a name with `/` or `\`, `..`, a colon (a drive letter), an empty name, a file that doesn't exist there, or no
-`specs_dir` set is refused. A task that ends ready with 0 must-fix (and no work stop) goes on as the loop's issues do:
-its should-fix round with `[loop] should_fix = "fix"`, then `task finish --spec` through the checkout's `[finish]
-sink`, and with the `pr` sink auto-merge armed on the same rules; its PR counts toward the 5 awaiting you. One that
-stops short of ready, or ready with must-fix left, is not finished: `stopped`, with `next` naming the command that
-continues it. `template` (issue 524) runs `template build <profile> --harness <harness>` (`harness` `claude`, `codex`
-or `pi`, default `claude`), with `"warm": true` `--warm` the loop's own checkout (default no warm-up); a profile
-without a `[template]` table, or a missing one, is refused. No repo path, `--ignore-disk` or `--no-wait` can be
-queued: a low disk fails the build as the command does, and the job waits for the sandbox slot. Its result's `reason`
-names the new tag. Any other shape (bad JSON, an unknown kind, a missing or extra field, a wrong type) is refused and
-runs nothing; a file not ending in `.json` (write `x.json.tmp`, then rename it) is left alone. Before each new issue
-the loop runs every queued job, oldest first by modified time (ties by name); with nothing queued and no ready issue
+names; a name with `/` or `\`, `..`, a colon (a drive letter), a control character, an empty name, a file that doesn't
+exist there, or no `specs_dir` set is refused. A task that ends ready with 0 must-fix (and no work stop) goes on as
+the loop's issues do: its should-fix round with `[loop] should_fix = "fix"`, then `task finish --spec` through the
+checkout's `[finish] sink`, and with the `pr` sink auto-merge armed on the same rules; its PR counts toward the 5
+awaiting you. One that stops short of ready, or ready with must-fix left, is not finished: `stopped`, with `next`
+naming the command that continues it. `template` (issue 524) runs `template build <profile> --harness <harness>`
+(`harness` `claude`, `codex` or `pi`, default `claude`), with `"warm": true` `--warm` the loop's own checkout (default
+no warm-up); a profile without a `[template]` table, or a missing one, is refused. No repo path, `--ignore-disk` or
+`--no-wait` can be queued: a low disk fails the build as the command does, and the job waits for the sandbox slot. Its
+result's `reason` names the new tag. Any other shape (bad JSON, an unknown kind, a missing or extra field, a wrong
+type, a 0 PR, issue or check-run number) is refused and runs nothing; a file not ending in `.json` (write
+`x.json.tmp`, then rename it) is left alone. Before each new issue the loop runs every queued job, oldest first by
+modified time (ties by name); with nothing queued and no ready issue
 it stops as before, or with `--wait` checks again every 5 minutes. A taken job moves to `queue\running\`; its end writes `queue\done\<job>.json` (`<job>-2.json` when
 that name is taken) with the job as read, `outcome` (`done`, `failed`, `stopped`, `refused`, `skipped` or
 `interrupted`), `reason`, `started_at`, `ended_at`, `task`, `url` and `next`, and the loop's log gets a row (`job
