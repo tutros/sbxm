@@ -4,20 +4,24 @@
 //! the jobs a stopped loop left in `queue/running/` as `interrupted`, without running them again.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
 
+use super::job_children::{JobChild, Work};
 use super::{
-    Capture, Cause, Claimed, End, Halt, Loop, NeedsUser, Steps, check, first_line, needs_user,
-    says_sign_in, sign_in_stop,
+    Capture, Cause, Claimed, End, Halt, JobStep, Loop, NeedsUser, PhaseEnd, Steps, check,
+    first_line, needs_user, says_sign_in, sign_in_stop,
 };
+use crate::backend::Location;
 use crate::commands::task_start::spec_flag;
 use crate::config::GlobalConfig;
 use crate::github::PrState;
+use crate::harness::Harness;
 use crate::notify::Notification;
 use crate::run::results::format_timestamp;
 use crate::task::jobs::{self, AsRead, Job, JobHarness, JobResult, Outcome, Running};
+use crate::task::outcome::Kind as ChildKind;
 use crate::task::queue::{self, Row};
 use crate::task::record::{self, Kind, Record, Stage};
 use crate::task::{location, lock, next, pipeline};
@@ -70,6 +74,9 @@ impl Loop<'_> {
     /// Runs every queued job, oldest first, a job written meanwhile too. `Ok(false)` when a stop
     /// was asked between jobs: the rest stay queued.
     pub(super) fn drain_jobs(&mut self, out: &mut dyn Write, warn: &mut dyn Write) -> Result<bool> {
+        if self.slots.is_some() {
+            return self.start_jobs(out, warn);
+        }
         loop {
             let pending = jobs::pending(&self.base_dir)?;
             let Some(path) = pending.first() else {
@@ -92,6 +99,238 @@ impl Loop<'_> {
                 return Ok(false);
             }
             self.job(path, out, warn)?;
+        }
+    }
+
+    /// [`Self::drain_jobs`] for a loop with several children (issue 633): each queued job,
+    /// oldest first, started as a child while its slot is free, ahead of new issues (317(7)). A
+    /// job whose slot is taken waits, and the jobs after it in the same place wait too, so each
+    /// place runs its jobs oldest first; a job on a PR a job child runs on waits, keeping its
+    /// place, and the jobs after it that fit start. `rm-merged`, and a file that isn't a job,
+    /// run here at once. `Ok(false)` when a stop was asked: the rest stay queued.
+    fn start_jobs(&mut self, out: &mut dyn Write, warn: &mut dyn Write) -> Result<bool> {
+        let mut held: Vec<Location> = Vec::new();
+        for path in jobs::pending(&self.base_dir)? {
+            if self.stopping() {
+                return Ok(false);
+            }
+            let job = peek(&path);
+            if let Some(Job::Review { pr } | Job::Fix { pr, .. }) = job
+                && self.pr_busy(pr)
+            {
+                let line = format!(
+                    "{}: waits for the job running on PR #{pr}; tried again at a later pass",
+                    job.as_ref().map(Job::label).unwrap_or_default()
+                );
+                self.say_once(out, line)?;
+                continue;
+            }
+            let slot = match self.job_slot(&path) {
+                Some((label, at, task)) => {
+                    let place = at.unwrap_or(self.default_location);
+                    if held.contains(&place) {
+                        continue;
+                    }
+                    if let Some(waits) = self.wait_reason(at, task) {
+                        let line =
+                            format!("{label}: waits for {waits}; tried again at a later pass");
+                        self.say_once(out, line)?;
+                        held.push(place);
+                        continue;
+                    }
+                    Some(place)
+                }
+                None => None,
+            };
+            // A stop asked during the reads that found its slot: it stays queued.
+            if self.stopping() {
+                return Ok(false);
+            }
+            match (job, slot) {
+                (Some(Job::Review { .. } | Job::Fix { .. } | Job::Template { .. }), Some(slot)) => {
+                    self.start_queued(&path, slot, out, warn)?;
+                }
+                _ => self.job(&path, out, warn)?,
+            }
+        }
+        Ok(true)
+    }
+
+    /// Starts queued job `path` as a child in `slot` (issue 633), after the checks its run makes
+    /// first; one that ends at those checks, or that isn't a child's, ends here.
+    fn start_queued(
+        &mut self,
+        path: &Path,
+        slot: Location,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<()> {
+        let (taken, text) = jobs::take(&self.base_dir, path)?;
+        let started = self.now();
+        let read = AsRead::new(text.as_deref().unwrap_or_default());
+        let job = match text.and_then(|text| jobs::parse(&text)) {
+            Ok(job) => job,
+            Err(why) => {
+                let label = file_label(&taken);
+                let ended = Ended::new(Outcome::Refused, why);
+                return self.halt_after(&taken, &label, read, started, ended, out, warn);
+            }
+        };
+        let label = job.label();
+        writeln!(out, "{label}: started")?;
+        let (step, what) = match &job {
+            Job::Review { pr } | Job::Fix { pr, .. } => {
+                let (pr, fix) = (*pr, matches!(job, Job::Fix { .. }));
+                let task = match self.pr_job_ready(pr, fix) {
+                    Ok(task) => task,
+                    Err(ended) => {
+                        return self.halt_after(&taken, &label, read, started, ended, out, warn);
+                    }
+                };
+                self.mark(&taken, &read, started, task.clone())?;
+                let step = match job {
+                    Job::Fix { check_run, .. } => JobStep::Fix { pr, check_run },
+                    _ => JobStep::Review { pr },
+                };
+                (step, QueuedWhat::Pr { pr, fix, task })
+            }
+            Job::Template {
+                profile,
+                harness,
+                warm,
+            } => {
+                if let Err(ended) = self.template_ready(profile) {
+                    return self.halt_after(&taken, &label, read, started, ended, out, warn);
+                }
+                self.mark(&taken, &read, started, None)?;
+                let step = JobStep::Template {
+                    profile: profile.clone(),
+                    harness: harness.harness(),
+                    warm: warm.then(|| self.repo_root.clone()),
+                };
+                let what = QueuedWhat::Template {
+                    profile: profile.clone(),
+                    harness: harness.harness(),
+                };
+                (step, what)
+            }
+            _ => {
+                let ended = self.run_job(&job, &taken, &read, started, out, warn)?;
+                return self.halt_after(&taken, &label, read, started, ended, out, warn);
+            }
+        };
+        let pr = match what {
+            QueuedWhat::Pr { pr, .. } => Some(pr),
+            QueuedWhat::Template { .. } => None,
+        };
+        let phase = self.steps.start_job(&step, slot, out, warn);
+        let queued = Queued {
+            taken,
+            label,
+            read,
+            started,
+            what,
+        };
+        self.jobs.push(JobChild {
+            work: Work::Queued(queued),
+            pr,
+            slot,
+            phase,
+        });
+        Ok(())
+    }
+
+    /// [`Self::job_done`], its stop kept for the loop: draining, the running children first.
+    #[allow(clippy::too_many_arguments)]
+    fn halt_after(
+        &mut self,
+        taken: &Path,
+        label: &str,
+        read: AsRead,
+        started: u64,
+        ended: Ended,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<()> {
+        match self.job_done(taken, label, read, started, ended, out, warn)? {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// What a queued job's child's end does (issue 633): its result file, its log row and its
+    /// line, as for one run here. `Some` is the stop of the loop it asks for.
+    pub(super) fn queued_ended(
+        &mut self,
+        queued: Queued,
+        end: &PhaseEnd,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<Option<anyhow::Error>> {
+        let ended = match queued.what {
+            QueuedWhat::Pr { pr, fix, task } => {
+                let command = if fix { "fix" } else { "review" };
+                let ended = match end.kind() {
+                    ChildKind::Ready => {
+                        Ended::new(Outcome::Done, format!("`task {command} --pr {pr}` ended"))
+                    }
+                    _ => Ended::new(Outcome::Failed, format!("{:#}", end.error())),
+                };
+                match task {
+                    Some(id) => ended.task(id),
+                    None => ended,
+                }
+            }
+            QueuedWhat::Template { profile, harness } => match self.child_failed("", None, end) {
+                Some(ended) => ended,
+                None => {
+                    let key = crate::template::key(&profile, harness);
+                    let built = match crate::template::Record::load(&self.base_dir, &key) {
+                        Ok(Some(rec)) => format!("built template {}", rec.tag),
+                        _ => format!("built the template of {profile}"),
+                    };
+                    Ended::new(Outcome::Done, built)
+                }
+            },
+        };
+        self.job_done(
+            &queued.taken,
+            &queued.label,
+            queued.read,
+            queued.started,
+            ended,
+            out,
+            warn,
+        )
+    }
+
+    /// How a job's child ended, as [`Self::phase`] reads a phase run here: `None` when ready; a
+    /// lapsed sign-in is `stopped` and stops the loop; a missing secret is `failed` and stops it;
+    /// anything else is `failed`, with `what` before the error. `resume`: the task the child
+    /// works on and the command that continues it, named in a sign-in stop once its record
+    /// exists.
+    fn child_failed(
+        &self,
+        what: &str,
+        resume: Option<(&str, String)>,
+        end: &PhaseEnd,
+    ) -> Option<Ended> {
+        let e = end.error();
+        match end.kind() {
+            ChildKind::Ready => None,
+            ChildKind::SignedOut => {
+                let resume = resume.and_then(|(id, command)| self.record_of(id).map(|_| command));
+                let stop = sign_in_stop(e, resume);
+                Some(Ended {
+                    halt: Some(needs_user(Cause::SignIn, anyhow!("{stop:#}"))),
+                    ..Ended::new(Outcome::Stopped, format!("{stop:#}"))
+                })
+            }
+            ChildKind::MissingSecret => Some(Ended {
+                halt: Some(needs_user(Cause::Secret, anyhow!("{e:#}"))),
+                ..Ended::new(Outcome::Failed, format!("{what}{e:#}"))
+            }),
+            _ => Some(Ended::new(Outcome::Failed, format!("{what}{e:#}"))),
         }
     }
 
@@ -183,6 +422,25 @@ impl Loop<'_> {
                 (job.label(), ended)
             }
         };
+        match self.job_done(&taken, &label, read, started, ended, out, warn)? {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
+    }
+
+    /// A job's end, in-process or as a child: its result file, its log row and its line; `Some`
+    /// is the stop of the loop it asked for, after its result is written.
+    #[allow(clippy::too_many_arguments)]
+    fn job_done(
+        &mut self,
+        taken: &Path,
+        label: &str,
+        read: AsRead,
+        started: u64,
+        ended: Ended,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<Option<anyhow::Error>> {
         let rec = ended.task.as_deref().and_then(|id| {
             record::read(&record::task_dir(&self.base_dir, id).join("task.json")).ok()
         });
@@ -198,11 +456,8 @@ impl Loop<'_> {
                 .as_ref()
                 .and_then(|rec| next_of(rec, ended.flag.as_deref())),
         };
-        self.ended(&taken, &label, &result, started, out, warn)?;
-        match ended.halt {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        self.ended(taken, label, &result, started, out, warn)?;
+        Ok(ended.halt)
     }
 
     /// The PR a task produced or works on: the PR its finish opened, or a PR or fix task's own.
@@ -503,12 +758,8 @@ impl Loop<'_> {
         out: &mut dyn Write,
         warn: &mut dyn Write,
     ) -> Result<Ended> {
-        let config = match GlobalConfig::load(self.config_dir) {
-            Ok(config) => config,
-            Err(e) => return Ok(Ended::new(Outcome::Failed, format!("{e:#}"))),
-        };
-        if let Err(why) = jobs::template_profile(&config, profile) {
-            return Ok(Ended::new(Outcome::Refused, why));
+        if let Err(ended) = self.template_ready(profile) {
+            return Ok(ended);
         }
         self.mark(taken, read, started, None)?;
         let repo_root = self.repo_root.clone();
@@ -521,6 +772,13 @@ impl Loop<'_> {
                 Err(ended) => ended,
             },
         )
+    }
+
+    /// Whether a `template` job of `profile` may run: `Err` is how it ends without running.
+    fn template_ready(&self, profile: &str) -> std::result::Result<(), Ended> {
+        let config = GlobalConfig::load(self.config_dir)
+            .map_err(|e| Ended::new(Outcome::Failed, format!("{e:#}")))?;
+        jobs::template_profile(&config, profile).map_err(|why| Ended::new(Outcome::Refused, why))
     }
 
     /// Runs one phase of a queued `spec` or `template` job (issue 524) with its output captured,
@@ -588,38 +846,9 @@ impl Loop<'_> {
         warn: &mut dyn Write,
     ) -> Result<Ended> {
         let command = if fix { "fix" } else { "review" };
-        if jobs::opener(&self.base_dir, &self.repo, pr).is_none() {
-            return Ok(Ended::new(
-                Outcome::Refused,
-                format!(
-                    "no task record of {} names PR #{pr} as its PR, live or archived, so sbxm \
-                     didn't open it; run `sbxm task {command} --pr {pr}` by hand instead",
-                    self.repo
-                ),
-            ));
-        }
-        let info = match self.github.pr(&self.repo, pr) {
-            Ok(info) => info,
-            Err(e) => {
-                return Ok(Ended::new(
-                    Outcome::Failed,
-                    format!("PR #{pr} could not be read: {e:#}"),
-                ));
-            }
-        };
-        match info.state {
-            PrState::Merged => {
-                return Ok(Ended::new(Outcome::Skipped, format!("PR #{pr} is merged")));
-            }
-            PrState::Closed => {
-                return Ok(Ended::new(Outcome::Skipped, format!("PR #{pr} is closed")));
-            }
-            PrState::Open => {}
-        }
-        let task = if fix {
-            record::fix_id(pr, &info.head_oid)
-        } else {
-            Some(format!("pr-{pr}"))
+        let task = match self.pr_job_ready(pr, fix) {
+            Ok(task) => task,
+            Err(ended) => return Ok(ended),
         };
         self.mark(taken, read, started, task.clone())?;
         let result = match (fix, check_run) {
@@ -635,6 +864,35 @@ impl Loop<'_> {
             Some(id) => ended.task(id),
             None => ended,
         })
+    }
+
+    /// Whether a `review` or (`fix`) `fix` job of PR `pr` may run: only of a PR sbxm opened
+    /// (answer 4), skipped when it is merged or closed. `Ok`: the task it works on, when known;
+    /// `Err`: how it ends without running.
+    fn pr_job_ready(&self, pr: u32, fix: bool) -> std::result::Result<Option<String>, Ended> {
+        let command = if fix { "fix" } else { "review" };
+        if jobs::opener(&self.base_dir, &self.repo, pr).is_none() {
+            return Err(Ended::new(
+                Outcome::Refused,
+                format!(
+                    "no task record of {} names PR #{pr} as its PR, live or archived, so sbxm \
+                     didn't open it; run `sbxm task {command} --pr {pr}` by hand instead",
+                    self.repo
+                ),
+            ));
+        }
+        let info = self.github.pr(&self.repo, pr).map_err(|e| {
+            Ended::new(
+                Outcome::Failed,
+                format!("PR #{pr} could not be read: {e:#}"),
+            )
+        })?;
+        match info.state {
+            PrState::Merged => Err(Ended::new(Outcome::Skipped, format!("PR #{pr} is merged"))),
+            PrState::Closed => Err(Ended::new(Outcome::Skipped, format!("PR #{pr} is closed"))),
+            PrState::Open if fix => Ok(record::fix_id(pr, &info.head_oid)),
+            PrState::Open => Ok(Some(format!("pr-{pr}"))),
+        }
     }
 
     /// A `run` job: an open issue the loop would take (`task loop --check`'s reasons), then the
@@ -736,6 +994,38 @@ impl Loop<'_> {
         };
         Ok(ended.task(id))
     }
+}
+
+/// A queued job running as a child (issue 633), with what its end needs.
+pub(super) struct Queued {
+    /// Its file in `queue/running/`.
+    taken: PathBuf,
+    label: String,
+    read: AsRead,
+    started: u64,
+    what: QueuedWhat,
+}
+
+/// Which queued job a child runs.
+enum QueuedWhat {
+    /// `task review --pr N`, or (`fix`) `task fix --pr N`; `task`: the task it works on.
+    Pr {
+        pr: u32,
+        fix: bool,
+        task: Option<String>,
+    },
+    /// `template build`.
+    Template { profile: String, harness: Harness },
+}
+
+/// Queued job `path` as its file says now, without taking it; `None` for one that can't be read
+/// or isn't a job (its run says why).
+fn peek(path: &Path) -> Option<Job> {
+    let meta = std::fs::symlink_metadata(path).ok()?;
+    if !meta.is_file() {
+        return None;
+    }
+    jobs::parse(&std::fs::read_to_string(path).ok()?).ok()
 }
 
 /// A job file's text in the log when it isn't a job: `job <file name>`.

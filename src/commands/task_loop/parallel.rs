@@ -168,7 +168,7 @@ impl<'a> Loop<'a> {
 
     /// Whether a running task is to stop short at its next step: a stop request, or a stop of
     /// the loop's that waits for the running children to end.
-    fn stopping(&self) -> bool {
+    pub(super) fn stopping(&self) -> bool {
         self.draining || (self.env.stop_requested)()
     }
 

@@ -653,10 +653,19 @@ mod play {
             .unwrap_or_default()
         }
 
-        pub fn queue(&self, name: &str, text: &str) {
+        /// Queues job file `name`; `order` sets its modified time, so jobs run in its order.
+        pub fn queue(&self, name: &str, text: &str, order: u64) {
             let queue = sbxm::task::jobs::queue_dir(&self.base());
             fs::create_dir_all(&queue).unwrap();
-            fs::write(queue.join(name), text).unwrap();
+            let path = queue.join(name);
+            fs::write(&path, text).unwrap();
+            let at = std::time::UNIX_EPOCH + Duration::from_secs(START + order);
+            fs::File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(at)
+                .unwrap();
         }
 
         pub fn queued(&self, name: &str) -> bool {
@@ -952,5 +961,178 @@ mod log_fixes {
             run.out
         );
         assert_eq!(play.most.get(), 1, "{:?}", play.events());
+    }
+}
+
+// --- queued jobs ---
+
+mod queued {
+    use std::cell::RefCell;
+
+    use sbxm::backend::Location;
+    use sbxm::github::GitHubBackend;
+    use sbxm::task::outcome::Kind;
+
+    use super::play::*;
+
+    const NEW_HEAD: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+
+    #[test]
+    fn a_job_waiting_for_its_slot_goes_before_a_new_issue_there_and_the_other_place_starts() {
+        let f = fixture(Some(1));
+        loop_pr(&f.base(), 50, 150, Location::Local);
+        let gh = github(&[
+            (1, &["run-local"]),
+            (2, &["run-cloud"]),
+            (3, &["run-local"]),
+        ])
+        .with_pr(pr(150))
+        .with_pr(pr(101))
+        .with_pr(pr(102))
+        .with_pr(pr(103));
+        // The review is queued once #1 holds the local slot.
+        let play = Play::new(&f.base())
+            .issue(1, 10)
+            .issue(2, 2)
+            .job("review 150", 10, Kind::Ready)
+            .on_issue(|issue| {
+                if issue == 1 {
+                    f.queue("review-150.json", r#"{"kind": "review", "pr": 150}"#, 1);
+                }
+            });
+
+        let run = run_loop(&f, &play, &gh, &never, &[1, 2, 3]);
+
+        run.result.unwrap();
+        assert!(
+            run.out.contains(
+                "job review #150: waits for a free local slot; tried again at a later pass"
+            ),
+            "{}",
+            run.out
+        );
+        assert!(play.at("start 2 cloud") < play.at("end 1"), "{}", run.out);
+        // Once #1 ends, the review takes the local slot, not #3.
+        assert!(play.at("end 1") < play.at("start review 150 local"));
+        assert!(
+            play.at("end review 150") < play.at("start 3 local"),
+            "{}",
+            run.out
+        );
+        assert!(
+            run.out
+                .contains("job review #150: done: `task review --pr 150` ended"),
+            "{}",
+            run.out
+        );
+    }
+
+    #[test]
+    fn two_jobs_on_one_pr_run_one_after_the_other_and_a_job_on_another_pr_runs_meanwhile() {
+        let f = fixture(Some(2));
+        loop_pr(&f.base(), 50, 150, Location::Cloud);
+        loop_pr(&f.base(), 51, 151, Location::Cloud);
+        let gh = github(&[]).with_pr(pr(150)).with_pr(pr(151));
+        f.queue("a-review-150.json", r#"{"kind": "review", "pr": 150}"#, 1);
+        f.queue("b-fix-150.json", r#"{"kind": "fix", "pr": 150}"#, 2);
+        f.queue("c-fix-151.json", r#"{"kind": "fix", "pr": 151}"#, 3);
+        // The fix of PR 150 reads its head as it starts; the review moved it.
+        let heads = RefCell::new(Vec::new());
+        let play = Play::new(&f.base())
+            .job("review 150", 10, Kind::Ready)
+            .job("fix 151", 2, Kind::Ready)
+            .on_job(|name| {
+                if name == "fix 150" {
+                    heads.borrow_mut().push(gh.pr("o/r", 150).unwrap().head_oid);
+                }
+            })
+            .on_job_end(|name| {
+                if name == "review 150" {
+                    gh.set_pr_head(150, NEW_HEAD);
+                }
+            });
+
+        let run = run_loop(&f, &play, &gh, &never, &[]);
+
+        run.result.unwrap();
+        assert!(
+            run.out.contains(
+                "job fix #150: waits for the job running on PR #150; tried again at a later pass"
+            ),
+            "{}",
+            run.out
+        );
+        assert!(play.at("start fix 151 cloud") < play.at("end review 150"));
+        assert!(play.at("end review 150") < play.at("start fix 150 cloud"));
+        assert_eq!(*heads.borrow(), [NEW_HEAD], "{}", run.out);
+        assert!(!f.queued("b-fix-150.json"));
+    }
+
+    #[test]
+    fn fix_review_and_template_jobs_run_as_children_and_rm_merged_in_the_loop() {
+        let f = fixture(Some(2));
+        f.env.write_profile("rust", "[template]\nallow = []\n");
+        loop_pr(&f.base(), 50, 150, Location::Cloud);
+        loop_pr(&f.base(), 51, 151, Location::Cloud);
+        let gh = github(&[]).with_pr(pr(150)).with_pr(pr(151));
+        f.queue("a.json", r#"{"kind": "fix", "pr": 150}"#, 1);
+        f.queue("b.json", r#"{"kind": "review", "pr": 151}"#, 2);
+        f.queue("c.json", r#"{"kind": "template", "profile": "rust"}"#, 3);
+        f.queue("d.json", r#"{"kind": "rm-merged"}"#, 4);
+        let play = Play::new(&f.base()).job("fix 150", 3, Kind::Ready).job(
+            "template rust",
+            3,
+            Kind::Ready,
+        );
+
+        let run = run_loop(&f, &play, &gh, &never, &[]);
+
+        run.result.unwrap();
+        assert_eq!(
+            starts(&play),
+            [
+                "start fix 150 cloud",
+                "start review 151 local",
+                // The local slot is the review's: the template build waits for it.
+                "start template rust local",
+            ],
+            "{}",
+            run.out
+        );
+        assert!(play.at("end review 151") < play.at("start template rust local"));
+        assert!(
+            run.out
+                .contains("job rm-merged: done: merged tasks removed"),
+            "{}",
+            run.out
+        );
+        assert!(
+            run.out
+                .contains("job template rust: done: built the template of rust"),
+            "{}",
+            run.out
+        );
+    }
+
+    #[test]
+    fn a_stop_while_a_job_child_runs_lets_it_finish_and_leaves_the_queued_jobs_queued() {
+        let f = fixture(Some(2));
+        loop_pr(&f.base(), 50, 150, Location::Cloud);
+        loop_pr(&f.base(), 51, 151, Location::Cloud);
+        let gh = github(&[]).with_pr(pr(150)).with_pr(pr(151));
+        f.queue("a.json", r#"{"kind": "fix", "pr": 150}"#, 1);
+        f.queue("b.json", r#"{"kind": "review", "pr": 150}"#, 2);
+        f.queue("c.json", r#"{"kind": "fix", "pr": 151}"#, 3);
+        let play = Play::new(&f.base()).job("fix 150", 10, Kind::Ready);
+        let stop = || play.has("start fix 150 cloud");
+
+        let run = run_loop(&f, &play, &gh, &stop, &[]);
+
+        run.result.unwrap();
+        assert_eq!(starts(&play), ["start fix 150 cloud"], "{}", run.out);
+        play.at("end fix 150");
+        assert!(run.out.contains("job fix #150: done"), "{}", run.out);
+        assert!(f.queued("b.json") && f.queued("c.json"), "{}", run.out);
+        assert!(run.out.ends_with("stopped on request\n"), "{}", run.out);
     }
 }

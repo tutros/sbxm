@@ -27,17 +27,17 @@ use crate::github::WorkflowRun;
 /// A job child the loop started and supervises, until it ends.
 pub(super) struct JobChild<'a> {
     /// What it is, and what its end does.
-    work: Work,
+    pub work: Work,
     /// The PR it works on: no other job child starts on it meanwhile.
     pub pr: Option<u32>,
     /// The slot it holds.
     pub slot: Location,
     /// Its running command.
-    phase: Box<dyn Started + 'a>,
+    pub phase: Box<dyn Started + 'a>,
 }
 
 /// What a job child is, with what its end needs.
-enum Work {
+pub(super) enum Work {
     /// A resolve of PR `number` (decision 298), its head `head` when it started.
     Resolve {
         number: u32,
@@ -47,6 +47,8 @@ enum Work {
         head: String,
         started: u64,
     },
+    /// A queued job (decision 309).
+    Queued(super::jobs::Queued),
     /// The one log-fix of PR `number` (decision 300), for its `run` of `head`.
     LogFix {
         number: u32,
@@ -205,6 +207,7 @@ impl<'a> Loop<'a> {
                 )?;
                 Ok(None)
             }
+            Work::Queued(queued) => self.queued_ended(queued, &end, out, warn),
         }
     }
 }
