@@ -660,6 +660,18 @@ mod several {
         stop: &dyn Fn() -> bool,
         issues: &[u32],
     ) -> Run {
+        run_capped(f, steps, gh, stop, issues, None)
+    }
+
+    /// [`run_listed`] with `--cap`.
+    pub fn run_capped(
+        f: &Fixture,
+        steps: &dyn Steps,
+        gh: &FakeGitHub,
+        stop: &dyn Fn() -> bool,
+        issues: &[u32],
+        cap: Option<u32>,
+    ) -> Run {
         let clock = Cell::new(START);
         let env = Env {
             now: &|| clock.get(),
@@ -672,7 +684,7 @@ mod several {
             &Options {
                 repo_root: f.repo_root.clone(),
                 issues: issues.to_vec(),
-                cap: None,
+                cap,
                 repo: Some(REPO.into()),
                 wait: false,
             },
@@ -1228,5 +1240,256 @@ mod several {
                 "{out}"
             );
         }
+    }
+}
+
+// --- review of issue 615: every start passes the same admission, every slot is the command's ---
+
+mod admission {
+    use std::fs;
+    use std::path::Path;
+
+    use sbxm::backend::Location;
+    use sbxm::commands::task_loop::RESUMED_HOOK;
+    use sbxm::github::Mergeable;
+    use sbxm::task::record::{self, Kind, NewTask, Process, Record, Stage, Status};
+
+    use super::several::*;
+
+    fn never() -> bool {
+        false
+    }
+
+    /// Issue `issue`'s task cut off at `working` in `location` by a loop that died, its resume
+    /// owed (decision 310).
+    fn owed(base: &Path, issue: u32, location: Location) {
+        write_record(base, issue, Act::Fail, location);
+        let dir = record::task_dir(base, &format!("issue-{issue}"));
+        let mut rec = record::read(&dir.join("task.json")).unwrap();
+        let dead = Process::new(77_000 + issue, 5);
+        rec.status = Status::Running;
+        rec.process = Some(dead.clone());
+        rec.hooks = serde_json::json!({ RESUMED_HOOK: dead });
+        record::write(&dir, &rec).unwrap();
+    }
+
+    fn still_owed(base: &Path, issue: u32) -> bool {
+        let dir = record::task_dir(base, &format!("issue-{issue}"));
+        let rec = record::read(&dir.join("task.json")).unwrap();
+        rec.hooks
+            .get(RESUMED_HOOK)
+            .is_some_and(|v| v != &serde_json::Value::Bool(true))
+    }
+
+    fn starts(play: &Play) -> Vec<String> {
+        play.events()
+            .into_iter()
+            .filter(|e| e.starts_with("start"))
+            .collect()
+    }
+
+    #[test]
+    fn a_stop_asked_as_the_first_child_starts_leaves_the_free_slots_empty() {
+        let f = fixture(Some(2));
+        let gh = github(&[(1, &[]), (2, &[]), (3, &[])]);
+        let play = Play::new(&f.base()).plays(1, &[(3, Act::Ready)]);
+        let stop = || play.most.get() >= 1;
+
+        let run = run_loop(&f, &play, &gh, &stop);
+
+        run.result.unwrap();
+        assert_eq!(starts(&play), ["start 1 run local"], "{}", run.out);
+        play.at("finish 1");
+        assert!(run.out.ends_with("stopped on request\n"), "{}", run.out);
+    }
+
+    #[test]
+    fn a_stop_asked_as_the_first_owed_resume_starts_leaves_the_other_owed() {
+        let f = fixture(Some(2));
+        owed(&f.base(), 1, Location::Local);
+        owed(&f.base(), 2, Location::Cloud);
+        let gh = github(&[]);
+        let play = Play::new(&f.base()).plays(1, &[(3, Act::Ready)]);
+        let stop = || play.most.get() >= 1;
+
+        let run = run_loop(&f, &play, &gh, &stop);
+
+        run.result.unwrap();
+        assert_eq!(starts(&play), ["start 1 resume local"], "{}", run.out);
+        assert!(still_owed(&f.base(), 2), "{}", run.out);
+        assert!(run.out.contains("not resumed yet"), "{}", run.out);
+    }
+
+    #[test]
+    fn with_cap_one_only_one_owed_resume_runs_and_the_other_stays_owed() {
+        let f = fixture(Some(2));
+        owed(&f.base(), 1, Location::Local);
+        owed(&f.base(), 2, Location::Cloud);
+        let gh = github(&[]);
+        let play = Play::new(&f.base());
+
+        let run = run_capped(&f, &play, &gh, &never, &[], Some(1));
+
+        run.result.unwrap();
+        assert_eq!(starts(&play), ["start 1 resume local"], "{}", run.out);
+        assert!(still_owed(&f.base(), 2), "{}", run.out);
+        assert!(run.out.contains("--cap 1 reached"), "{}", run.out);
+    }
+
+    #[test]
+    fn four_awaiting_prs_let_one_owed_resume_run_at_a_time() {
+        let f = fixture(Some(2));
+        owed(&f.base(), 1, Location::Local);
+        owed(&f.base(), 2, Location::Cloud);
+        let mut gh = github(&[]);
+        for (issue, number) in [(50, 150), (51, 151), (52, 152), (53, 153)] {
+            loop_pr(&f.base(), issue, number, Location::Local);
+            gh = gh.with_pr(pr(number));
+        }
+        let gh = gh
+            .with_pr(pr(101))
+            .with_pr(pr(102))
+            .with_auto_merge(101)
+            .with_auto_merge(102);
+        let play = Play::new(&f.base())
+            .plays(1, &[(3, Act::Ready)])
+            .plays(2, &[(3, Act::Ready)]);
+
+        let run = run_loop(&f, &play, &gh, &never);
+
+        run.result.unwrap();
+        assert_eq!(play.most.get(), 1, "{:?}\n{}", play.events(), run.out);
+        assert!(play.at("finish 1") < play.at("start 2 resume cloud"));
+    }
+
+    #[test]
+    fn a_queued_run_waits_while_a_child_waits_out_a_usage_limit() {
+        let f = fixture(Some(2));
+        let gh = github(&[(1, &[]), (2, &[]), (9, &["run-cloud"])]);
+        let queue = sbxm::task::jobs::queue_dir(&f.base());
+        let play = Play::new(&f.base())
+            .plays(1, &[(1, Act::UsageLimit), (1, Act::Ready)])
+            .plays(2, &[(1000, Act::Ready)])
+            .on_start(|issue| {
+                if issue == 1 {
+                    fs::create_dir_all(&queue).unwrap();
+                    fs::write(queue.join("run-9.json"), r#"{"kind": "run", "issue": 9}"#).ok();
+                }
+            });
+
+        let run = run_listed(&f, &play, &gh, &never, &[1, 2]);
+
+        run.result.unwrap();
+        assert!(
+            play.at("end 1 Ready") < play.at("start 9 run cloud"),
+            "{}",
+            run.out
+        );
+        assert!(
+            run.out.contains(
+                "job run #9: waits for #1's usage limit to clear; tried again at a later pass"
+            ),
+            "{}",
+            run.out
+        );
+    }
+
+    #[test]
+    fn a_resolve_waits_while_a_child_waits_out_a_usage_limit() {
+        let f = fixture(Some(2));
+        loop_pr(&f.base(), 50, 150, Location::Cloud);
+        let gh = github(&[(1, &[]), (2, &[])])
+            .with_pr(pr(150))
+            .with_pr(pr(101))
+            .with_pr(pr(102));
+        let play = Play::new(&f.base())
+            .plays(1, &[(1, Act::UsageLimit), (1, Act::Ready)])
+            .plays(2, &[(1000, Act::Ready)])
+            .on_start(|_| gh.set_mergeable(150, Mergeable::Conflicting));
+
+        let run = run_listed(&f, &play, &gh, &never, &[1, 2]);
+
+        run.result.unwrap();
+        assert!(
+            play.at("end 1 Ready") < play.at("resolve 150"),
+            "{}",
+            run.out
+        );
+        assert!(
+            run.out
+                .contains("its resolve waits for #1's usage limit to clear"),
+            "{}",
+            run.out
+        );
+    }
+
+    /// Queues a review of PR 150 once issue 1's child starts.
+    fn queue_review(queue: &Path) {
+        fs::create_dir_all(queue).unwrap();
+        fs::write(
+            queue.join("review-150.json"),
+            r#"{"kind": "review", "pr": 150}"#,
+        )
+        .ok();
+    }
+
+    #[test]
+    fn a_new_review_of_a_cloud_opened_pr_takes_the_default_slot_and_waits_for_it() {
+        let f = fixture(Some(1));
+        loop_pr(&f.base(), 50, 150, Location::Cloud);
+        let gh = github(&[(1, &[])]).with_pr(pr(150)).with_pr(pr(101));
+        let queue = sbxm::task::jobs::queue_dir(&f.base());
+        let play = Play::new(&f.base())
+            .plays(1, &[(400, Act::Ready)])
+            .on_start(|_| queue_review(&queue));
+
+        let run = run_listed(&f, &play, &gh, &never, &[1]);
+
+        run.result.unwrap();
+        let out = &run.out;
+        let ended = out.find("[issue-1 local] #1 (Fix 1)").unwrap();
+        let started = out.find("job review #150: started").unwrap();
+        assert!(ended < started, "{out}");
+        assert!(
+            out.contains("job review #150: waits for a free local slot"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn an_existing_review_takes_the_slot_its_record_names() {
+        let f = fixture(Some(1));
+        loop_pr(&f.base(), 50, 150, Location::Local);
+        // The PR's review task ran in the cloud.
+        let mut rec = Record::new(
+            &NewTask {
+                kind: Kind::Pr,
+                number: 150,
+                repo: REPO,
+                title: "PR 150",
+                base: "main",
+                branch: "sbxm/pr-150",
+                config_hash: "h",
+                id: None,
+            },
+            START,
+            Process::new(1, 0),
+        );
+        rec.location = Location::Cloud;
+        rec.stage = Stage::Ready;
+        record::write(&record::task_dir(&f.base(), &rec.id), &rec).unwrap();
+        let gh = github(&[(1, &[])]).with_pr(pr(150)).with_pr(pr(101));
+        let queue = sbxm::task::jobs::queue_dir(&f.base());
+        let play = Play::new(&f.base())
+            .plays(1, &[(400, Act::Ready)])
+            .on_start(|_| queue_review(&queue));
+
+        let run = run_listed(&f, &play, &gh, &never, &[1]);
+
+        run.result.unwrap();
+        let out = &run.out;
+        let ended = out.find("[issue-1 local] #1 (Fix 1)").unwrap();
+        let started = out.find("job review #150: started").unwrap();
+        assert!(started < ended, "{out}");
     }
 }

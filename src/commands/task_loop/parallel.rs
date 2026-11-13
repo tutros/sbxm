@@ -497,19 +497,19 @@ fn run<'a>(
         let mut ended_any = false;
         let mut i = 0;
         while i < live.len() {
-            lp.children = live.iter().map(|t| t.slot).collect();
+            sync(lp, live);
             let ended = lp.supervise(&mut live[i], out, warn)?;
             match ended {
                 None => i += 1,
                 Some(end) => {
                     let t = live.remove(i);
-                    lp.children = live.iter().map(|t| t.slot).collect();
+                    sync(lp, live);
                     ended_any = true;
                     task_ended(lp, lock, pass, t, end, live.is_empty(), out, warn)?;
                 }
             }
         }
-        lp.children = live.iter().map(|t| t.slot).collect();
+        sync(lp, live);
         if live.is_empty() {
             if let Some(e) = pass.halt.take() {
                 left(pass, out)?;
@@ -551,6 +551,44 @@ fn run<'a>(
     }
 }
 
+/// What the loop's own steps read of the running children: their slots and a usage hold.
+fn sync(lp: &mut Loop, live: &[Live]) {
+    lp.children = live.iter().map(|t| t.slot).collect();
+    lp.usage_hold = live.iter().find(|t| t.limited).map(|t| t.issue);
+}
+
+/// Whether a new task may start now, checked before every start, a held or owed task's too
+/// (issue 615): not while the loop stops, a child waits out a usage limit (answer 4), `--cap`
+/// is reached, or the PRs awaiting the user plus the running children reach [`PR_CAP`]
+/// (317(6)). Its slot is checked by the caller.
+fn may_start(
+    lp: &mut Loop,
+    opts: &Options,
+    pass: &Pass,
+    live: &[Live],
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<bool> {
+    if lp.stopping() {
+        return Ok(false);
+    }
+    if let Some(t) = live.iter().find(|t| t.limited) {
+        let line = format!(
+            "no new task starts while {} waits out a usage limit",
+            lp.issue_named(t.issue)
+        );
+        lp.say_once(out, line)?;
+        return Ok(false);
+    }
+    if opts
+        .cap
+        .is_some_and(|cap| pass.tasks_run + live.len() as u32 >= cap)
+    {
+        return Ok(false);
+    }
+    lp.awaiting_room(live.len(), out, warn)
+}
+
 /// Sleeps one [`TICK`] while children run and none ended in this pass.
 fn continue_or_sleep(lp: &Loop, live: &[Live], ended_any: bool) {
     if !live.is_empty() && !ended_any {
@@ -582,15 +620,6 @@ fn steps_and_starts<'a>(
     if !go_on {
         return Ok(None);
     }
-    // No new task while a child waits out a usage limit (answer 4).
-    if let Some(t) = live.iter().find(|t| t.limited) {
-        let line = format!(
-            "no new task starts while {} waits out a usage limit",
-            lp.issue_named(t.issue)
-        );
-        lp.say_once(out, line)?;
-        return Ok(None);
-    }
     // The PRs awaiting the user (317(6)): with no child running, waited for as before; with
     // some, counted with them before each start ([`Loop::awaiting_room`]).
     if live.is_empty() && !lp.wait_for_prs(out, warn)? {
@@ -603,23 +632,18 @@ fn steps_and_starts<'a>(
         let fits = lp
             .record(again.issue)
             .is_none_or(|rec| !lp.slot_taken(Some(rec.location)));
-        if !fits || started_any && !lp.free().any() {
+        if !fits || !may_start(lp, opts, pass, live, out, warn)? {
             later.push_back(again);
             continue;
         }
         if start_again(lp, lock, pass, live, again, out, warn)? {
             started_any = true;
         }
-        lp.children = live.iter().map(|t| t.slot).collect();
+        sync(lp, live);
     }
     pass.due = later;
     let mut open = None;
-    while lp.free().any()
-        && opts
-            .cap
-            .is_none_or(|cap| pass.tasks_run + (live.len() as u32) < cap)
-        && lp.awaiting_room(live.len(), out, warn)?
-    {
+    while lp.free().any() && may_start(lp, opts, pass, live, out, warn)? {
         let open = match &open {
             Some(open) => open,
             None => open.insert(lp.github.issues_open(&lp.repo)?),
@@ -672,6 +696,10 @@ fn steps_and_starts<'a>(
             }
             return Ok(Some(stop.to_owned()));
         };
+        // A stop asked during the reads that picked it: it isn't started.
+        if lp.stopping() {
+            break;
+        }
         pass.idle = false;
         let found = open.iter().find(|i| i.number == issue);
         let title = found.map_or_else(|| format!("issue {issue}"), |i| i.title.clone());
@@ -728,7 +756,7 @@ fn steps_and_starts<'a>(
             None => live.push(t),
             Some(end) => task_ended(lp, lock, pass, t, end, live.is_empty(), out, warn)?,
         }
-        lp.children = live.iter().map(|t| t.slot).collect();
+        sync(lp, live);
     }
     Ok(None)
 }
@@ -1016,28 +1044,67 @@ impl Loop<'_> {
         Ok(false)
     }
 
-    /// Queued job `path`'s label and where it runs (`None`: as `[sandbox] location` says), for
-    /// a loop with several children; `None` for a job that takes no slot, or whose file or issue
-    /// can't be read here (the job's own run says why).
-    pub(super) fn job_slot(&self, path: &std::path::Path) -> Option<(String, Option<Location>)> {
+    /// Queued job `path`'s label, where it runs (`None`: as `[sandbox] location` says) as the
+    /// job's own command chooses it, and whether it starts a task; `None` for a job that takes no
+    /// slot, or whose file or issue can't be read here (the job's own run says why).
+    pub(super) fn job_slot(
+        &self,
+        path: &std::path::Path,
+    ) -> Option<(String, Option<Location>, bool)> {
         let meta = std::fs::symlink_metadata(path).ok()?;
         if !meta.is_file() {
             return None;
         }
         let text = std::fs::read_to_string(path).ok()?;
         let job = jobs::parse(&text).ok()?;
-        let at = match job {
-            jobs::Job::Review { pr } | jobs::Job::Fix { pr, .. } => self.fix_location(pr),
+        let (at, task) = match job {
+            jobs::Job::Review { pr } => (self.review_slot(pr), true),
+            jobs::Job::Fix { pr, .. } => (self.fix_slot(pr), true),
             // Where its labels pin it, as the job's run reads them.
             jobs::Job::Run { issue } => {
                 let open = self.github.issues_open(&self.repo).ok()?;
                 let found = open.iter().find(|i| i.number == issue)?;
-                location::for_loop(&found.labels, self.cloud_slots).ok()?
+                (
+                    location::for_loop(&found.labels, self.cloud_slots).ok()?,
+                    true,
+                )
             }
-            jobs::Job::Spec { .. } => None,
-            jobs::Job::Template { .. } => Some(Location::Local),
+            jobs::Job::Spec { .. } => (None, true),
+            // A template build makes a sandbox, no task.
+            jobs::Job::Template { .. } => (Some(Location::Local), false),
             jobs::Job::RmMerged {} => return None,
         };
-        Some((job.label(), at))
+        Some((job.label(), at, task))
+    }
+
+    /// Where `task review --pr N` runs PR `pr`'s review with no flag, as it chooses it
+    /// (decision 253): where its `pr-N` task's record says, else `[sandbox] location`.
+    fn review_slot(&self, pr: u32) -> Option<Location> {
+        self.record_of(&format!("pr-{pr}")).map(|rec| rec.location)
+    }
+
+    /// Where `task fix --pr N` runs with no flag, as it chooses it ([`location::of_pr`]): where
+    /// the PR's task ran, else its closing issue's label, else `[sandbox] location`. A failed
+    /// read of GitHub falls back to the recorded place alone.
+    pub(super) fn fix_slot(&self, pr: u32) -> Option<Location> {
+        location::of_pr(&self.base_dir, &self.repo, pr, self.github)
+            .unwrap_or_else(|_| self.fix_location(pr))
+    }
+
+    /// Why a step of the loop's own that runs in `location` waits for a later pass (issue 615):
+    /// its slot is held by children, or, for a step that starts a task (`task`), a child waits out
+    /// a usage limit (answer 4). `None`: it may run now; always so for a loop that runs one task
+    /// at a time.
+    pub(super) fn wait_reason(&self, location: Option<Location>, task: bool) -> Option<String> {
+        self.slots?;
+        if task && let Some(issue) = self.usage_hold {
+            return Some(format!("#{issue}'s usage limit to clear"));
+        }
+        self.slot_taken(location).then(|| {
+            format!(
+                "a free {} slot",
+                location.unwrap_or(self.default_location).as_str()
+            )
+        })
     }
 }

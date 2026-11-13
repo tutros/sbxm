@@ -741,6 +741,9 @@ struct Loop<'a> {
     default_location: Location,
     /// Whether the loop waits for its running children to end before it stops (issue 615).
     draining: bool,
+    /// The issue of a running child that waits out a usage limit: no step of the loop's own
+    /// starts a task meanwhile (issue 615, answer 4).
+    usage_hold: Option<u32>,
 }
 
 impl Loop<'_> {
@@ -2164,14 +2167,11 @@ impl Loop<'_> {
             if self.resolves.contains(&(number, tip.clone())) {
                 continue;
             }
-            // A resolve whose slot a child holds waits for a later pass (issue 615): the loop
-            // never waits for a slot while it supervises its children.
-            if self.slot_taken(self.fix_location(number)) {
+            // A resolve whose slot a child holds, or that a child's usage limit holds back, waits
+            // for a later pass (issue 615): the loop never waits while it supervises children.
+            if let Some(waits) = self.wait_reason(self.fix_slot(number), true) {
                 let line = format!(
-                    "{pr_named}: its resolve waits for a free {} slot; tried again at a later pass",
-                    self.fix_location(number)
-                        .unwrap_or(self.default_location)
-                        .as_str(),
+                    "{pr_named}: its resolve waits for {waits}; tried again at a later pass",
                     pr_named = self.pr_named(number)
                 );
                 self.say_once(out, line)?;
@@ -2930,12 +2930,13 @@ impl Loop<'_> {
             // (review M-1).
             if log_fix {
                 let waits = if self.steps.room_for(self.fix_location(number)).is_err() {
-                    Some("room on the disk")
-                } else if self.slot_taken(self.fix_location(number)) {
-                    // A child holds its slot (issue 615): a later pass, never a wait.
-                    Some("a free slot")
+                    Some("room on the disk".to_owned())
+                } else if let Some(waits) = self.wait_reason(self.fix_slot(number), true) {
+                    // A child holds its slot or its usage limit holds it back (issue 615): a
+                    // later pass, never a wait.
+                    Some(waits)
                 } else if (self.env.stop_requested)() {
-                    Some("the next loop (this one is stopping)")
+                    Some("the next loop (this one is stopping)".to_owned())
                 } else {
                     None
                 };
@@ -3754,6 +3755,7 @@ fn run_loop(
         children: Vec::new(),
         default_location,
         draining: false,
+        usage_hold: None,
     };
 
     // The cut-off tasks first: their owed resumes are written before anything else can fail.
