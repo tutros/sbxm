@@ -801,6 +801,9 @@ struct Loop<'a> {
     usage_hold: Option<u32>,
     /// The job children running (issue 633): resolves, log-fixes and queued jobs.
     jobs: Vec<job_children::JobChild<'a>>,
+    /// The queued `run` jobs taken in this pass, started as task children before any new issue
+    /// (issue 633).
+    run_jobs: Vec<jobs::RunJob>,
 }
 
 impl Loop<'_> {
@@ -3910,6 +3913,7 @@ fn run_loop(
         draining: false,
         usage_hold: None,
         jobs: Vec::new(),
+        run_jobs: Vec::new(),
     };
 
     // The cut-off tasks first: their owed resumes are written before anything else can fail.

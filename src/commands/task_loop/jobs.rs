@@ -152,7 +152,8 @@ impl Loop<'_> {
                         Job::Review { .. }
                         | Job::Fix { .. }
                         | Job::Template { .. }
-                        | Job::Spec { .. },
+                        | Job::Spec { .. }
+                        | Job::Run { .. },
                     ),
                     Some(slot),
                 ) => {
@@ -238,16 +239,44 @@ impl Loop<'_> {
                 };
                 (step, what)
             }
+            Job::Run { issue } => {
+                let issue = *issue;
+                let found = match self.run_ready(issue) {
+                    Ok(found) => found,
+                    Err(ended) => {
+                        return self.halt_after(&taken, &label, read, started, ended, out, warn);
+                    }
+                };
+                self.locations.insert(issue, found.location);
+                self.mark(&taken, &read, started, Some(format!("issue-{issue}")))?;
+                // Started as a task child by the loop's pass, before any new issue.
+                self.run_jobs.push(RunJob {
+                    file: JobFile {
+                        taken,
+                        label,
+                        read,
+                        started,
+                    },
+                    issue,
+                    title: found.title,
+                    size: found.size,
+                    labeled: found.labeled,
+                    slot: found.location.unwrap_or(self.default_location),
+                });
+                return Ok(());
+            }
             _ => {
                 let ended = self.run_job(&job, &taken, &read, started, out, warn)?;
                 return self.halt_after(&taken, &label, read, started, ended, out, warn);
             }
         };
         let queued = Queued {
-            taken,
-            label,
-            read,
-            started,
+            file: JobFile {
+                taken,
+                label,
+                read,
+                started,
+            },
             slot,
             what,
         };
@@ -367,15 +396,24 @@ impl Loop<'_> {
                 }
             },
         };
-        self.job_done(
-            &queued.taken,
-            &queued.label,
-            queued.read,
-            queued.started,
-            ended,
-            out,
-            warn,
-        )
+        self.file_done(queued.file, ended, out, warn)
+    }
+
+    /// [`Self::job_done`] of job `file`.
+    fn file_done(
+        &mut self,
+        file: JobFile,
+        ended: Ended,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<Option<anyhow::Error>> {
+        let JobFile {
+            taken,
+            label,
+            read,
+            started,
+        } = file;
+        self.job_done(&taken, &label, read, started, ended, out, warn)
     }
 
     /// How a job's child ended, as [`Self::phase`] reads a phase run here: `None` when ready; a
@@ -998,44 +1036,58 @@ impl Loop<'_> {
         out: &mut dyn Write,
         warn: &mut dyn Write,
     ) -> Result<Ended> {
-        let open = match self.github.issues_open(&self.repo) {
-            Ok(open) => open,
-            Err(e) => {
-                return Ok(Ended::new(
-                    Outcome::Failed,
-                    format!("the open issues could not be read: {e:#}"),
-                ));
-            }
-        };
-        let Some(found) = open.iter().find(|i| i.number == issue) else {
-            return Ok(Ended::new(
-                Outcome::Refused,
-                format!("#{issue} is not an open issue of {}", self.repo),
-            ));
-        };
-        let reasons = match check::reasons(self.config_dir, &self.repo, self.github, &open, found) {
-            Ok(reasons) => reasons,
-            Err(e) => {
-                return Ok(Ended::new(
-                    Outcome::Failed,
-                    format!("#{issue} could not be checked: {e:#}"),
-                ));
-            }
-        };
-        if !reasons.is_empty() {
-            return Ok(Ended::new(Outcome::Refused, reasons.join("; ")));
-        }
-        // Where its labels pin it (issue 600), refused as the loop's own pick refuses it: the
-        // reasons above read `cloud_slots` now, the loop when it started.
-        let location = match location::for_loop(&found.labels, self.cloud_slots) {
-            Ok(location) => location,
-            Err(reason) => return Ok(Ended::new(Outcome::Refused, reason)),
+        let location = match self.run_ready(issue) {
+            Ok(found) => found.location,
+            Err(ended) => return Ok(ended),
         };
         self.locations.insert(issue, location);
         let id = format!("issue-{issue}");
         self.mark(taken, read, started, Some(id.clone()))?;
         let mut stops = Vec::new();
-        let ended = match self.task(issue, true, 0, &mut stops, out, warn) {
+        let end = self.task(issue, true, 0, &mut stops, out, warn);
+        Ok(self.run_ended(issue, end).task(id))
+    }
+
+    /// Whether a `run` job of `issue` may run: an open issue the loop would take (`task loop
+    /// --check`'s reasons), with where its labels pin it. `Err`: how it ends without running.
+    fn run_ready(&self, issue: u32) -> std::result::Result<RunIssue, Ended> {
+        let open = self.github.issues_open(&self.repo).map_err(|e| {
+            Ended::new(
+                Outcome::Failed,
+                format!("the open issues could not be read: {e:#}"),
+            )
+        })?;
+        let Some(found) = open.iter().find(|i| i.number == issue) else {
+            return Err(Ended::new(
+                Outcome::Refused,
+                format!("#{issue} is not an open issue of {}", self.repo),
+            ));
+        };
+        let reasons = check::reasons(self.config_dir, &self.repo, self.github, &open, found)
+            .map_err(|e| {
+                Ended::new(
+                    Outcome::Failed,
+                    format!("#{issue} could not be checked: {e:#}"),
+                )
+            })?;
+        if !reasons.is_empty() {
+            return Err(Ended::new(Outcome::Refused, reasons.join("; ")));
+        }
+        // Where its labels pin it (issue 600), refused as the loop's own pick refuses it: the
+        // reasons above read `cloud_slots` now, the loop when it started.
+        let location = location::for_loop(&found.labels, self.cloud_slots)
+            .map_err(|reason| Ended::new(Outcome::Refused, reason))?;
+        Ok(RunIssue {
+            location,
+            title: found.title.clone(),
+            size: queue::size(&found.labels).map(str::to_owned),
+            labeled: found.labels.iter().any(|l| l == queue::READY_LABEL),
+        })
+    }
+
+    /// How a `run` job ends, from how its task ended.
+    fn run_ended(&self, issue: u32, end: std::result::Result<End, Halt>) -> Ended {
+        match end {
             Ok(End::Done { outcome, .. }) => Ended::new(Outcome::Done, outcome),
             Ok(End::Parked { .. }) if (self.env.stop_requested)() => {
                 Ended::new(Outcome::Stopped, "stopped on request")
@@ -1083,18 +1135,57 @@ impl Loop<'_> {
                     ..Ended::new(Outcome::Stopped, stop)
                 }
             }
-        };
-        Ok(ended.task(id))
+        }
+    }
+
+    /// What a `run` job's task's end does, once the loop supervised it as a task child (issue
+    /// 633): its result file, its log row and its line. `Some` is the stop of the loop it asks
+    /// for.
+    pub(super) fn run_job_ended(
+        &mut self,
+        file: JobFile,
+        issue: u32,
+        end: std::result::Result<End, Halt>,
+        out: &mut dyn Write,
+        warn: &mut dyn Write,
+    ) -> Result<Option<anyhow::Error>> {
+        let ended = self.run_ended(issue, end).task(format!("issue-{issue}"));
+        self.file_done(file, ended, out, warn)
     }
 }
 
-/// A queued job running as a child (issue 633), with what its end needs.
-pub(super) struct Queued {
+/// A `run` job's issue, as the loop takes it.
+struct RunIssue {
+    location: Option<Location>,
+    title: String,
+    size: Option<String>,
+    labeled: bool,
+}
+
+/// A `run` job taken, for the loop to start as a task child (issue 633).
+pub(super) struct RunJob {
+    pub file: JobFile,
+    pub issue: u32,
+    pub title: String,
+    pub size: Option<String>,
+    /// Its issue has the loop's label.
+    pub labeled: bool,
+    /// Where it runs.
+    pub slot: Location,
+}
+
+/// A queued job taken (issue 633): what its result needs.
+pub(super) struct JobFile {
     /// Its file in `queue/running/`.
     taken: PathBuf,
     label: String,
     read: AsRead,
     started: u64,
+}
+
+/// A queued job running as a child (issue 633), with what its end needs.
+pub(super) struct Queued {
+    file: JobFile,
     /// The slot its children hold.
     slot: Location,
     what: QueuedWhat,

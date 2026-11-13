@@ -1310,3 +1310,42 @@ mod specs {
         );
     }
 }
+
+// --- run jobs ---
+
+mod runs {
+    use super::play::*;
+
+    #[test]
+    fn a_queued_run_job_runs_as_a_task_child_next_to_another_task_and_ends_with_its_result() {
+        let f = fixture(Some(1));
+        let gh = github(&[(1, &[]), (9, &["run-cloud"])])
+            .with_pr(pr(101))
+            .with_pr(pr(109));
+        // Queued once #1 holds the local slot; #1 runs past the loop's next pass of its steps.
+        let play = Play::new(&f.base())
+            .issue(1, 400)
+            .issue(9, 3)
+            .on_issue(|issue| {
+                if issue == 1 {
+                    f.queue("run-9.json", r#"{"kind": "run", "issue": 9}"#, 1);
+                }
+            });
+
+        let run = run_loop(&f, &play, &gh, &never, &[1]);
+
+        run.result.unwrap();
+        assert!(play.at("start 9 cloud") < play.at("end 1"), "{}", run.out);
+        assert!(play.at("finish 9") < play.at("end 1"), "{}", run.out);
+        assert!(
+            run.out.contains("job run #9: done: PR #109, clean"),
+            "{}",
+            run.out
+        );
+        // The job's row, not a task's.
+        let log = f.log_text();
+        assert!(log.contains("job run #9"), "{log}");
+        assert!(!log.contains("| #9 Fix 9 |"), "{log}");
+        assert!(log.contains("#1 Fix 1"), "{log}");
+    }
+}

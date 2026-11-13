@@ -24,7 +24,7 @@ use anyhow::{Result, anyhow};
 
 use super::{
     Cause, End, Halt, Held, Loop, LoopLock, Options, PAUSE_POLL, PR_CAP, Phase, RESUMED_HOOK,
-    Retry, Started, first_line, needs_user, note, sign_in_stop,
+    Retry, Started, first_line, jobs as queued, needs_user, note, sign_in_stop,
 };
 use crate::backend::Location;
 use crate::task::outcome;
@@ -108,6 +108,9 @@ struct Live<'a> {
     /// For a task tried again: how, whether it was cut off, and the resume it owed.
     retried: Option<(Retry, bool, Option<serde_json::Value>)>,
     idle_before: Option<u64>,
+    /// For a queued `run` job's task (issue 633): its job, whose result its end writes instead
+    /// of a task's row.
+    job: Option<queued::JobFile>,
 }
 
 impl Live<'_> {
@@ -154,7 +157,8 @@ impl<'a> Loop<'a> {
             return false;
         };
         let at = location.unwrap_or(self.default_location);
-        let held = self.children.iter().filter(|&&l| l == at).count() + self.jobs_in(at);
+        let taken = self.run_jobs.iter().filter(|r| r.slot == at).count();
+        let held = self.children.iter().filter(|&&l| l == at).count() + self.jobs_in(at) + taken;
         held >= slots.of(at) as usize
     }
 
@@ -434,6 +438,7 @@ impl<'a> Loop<'a> {
             room_since: None,
             retried: Some((again.retry, again.cut_off, None)),
             idle_before: None,
+            job: None,
         }))
     }
 }
@@ -538,7 +543,7 @@ fn run<'a>(
         let stopping = lp.stopping()
             || opts
                 .cap
-                .is_some_and(|cap| pass.tasks_run + live.len() as u32 >= cap);
+                .is_some_and(|cap| pass.tasks_run + tasks(live) >= cap);
         // The loop's own steps and new starts: at the first pass, whenever a child ended or none
         // runs, and every [`PAUSE_POLL`] meanwhile.
         let now = lp.now();
@@ -557,6 +562,12 @@ fn run<'a>(
         }
         continue_or_sleep(lp, live, ended_any);
     }
+}
+
+/// How many of the running task children are the loop's own tasks: a queued `run` job's isn't
+/// one, for `--cap` (issue 633).
+fn tasks(live: &[Live]) -> u32 {
+    live.iter().filter(|t| t.job.is_none()).count() as u32
 }
 
 /// What the loop's own steps read of the running children: their slots and a usage hold.
@@ -590,7 +601,7 @@ fn may_start(
     }
     if opts
         .cap
-        .is_some_and(|cap| pass.tasks_run + live.len() as u32 >= cap)
+        .is_some_and(|cap| pass.tasks_run + tasks(live) >= cap)
     {
         return Ok(false);
     }
@@ -621,7 +632,10 @@ fn steps_and_starts<'a>(
     let go_on = lp.resolve_conflicts(out, warn)? && {
         lp.check_runs(out, warn)?;
         lp.recheck_waiting(out, warn)?;
-        lp.drain_jobs(out, warn)? && {
+        let drained = lp.drain_jobs(out, warn);
+        // The `run` jobs it took start as task children, whatever came after them.
+        start_run_jobs(lp, lock, pass, live, out, warn)?;
+        drained? && {
             lp.notify_awaiting(out, warn)?;
             true
         }
@@ -726,7 +740,7 @@ fn steps_and_starts<'a>(
         writeln!(
             out,
             "task {}: #{issue} {title} (size {}), {}",
-            pass.tasks_run as usize + live.len() + 1,
+            pass.tasks_run + tasks(live) + 1,
             size.as_deref().unwrap_or("unknown"),
             slot.as_str()
         )?;
@@ -759,6 +773,7 @@ fn steps_and_starts<'a>(
                 .is_empty()
                 .then(|| pass.idle_from.map(|end| started.saturating_sub(end)))
                 .flatten(),
+            job: None,
         };
         started_any = true;
         match lp.next_phase(&mut t, out, warn)? {
@@ -768,6 +783,49 @@ fn steps_and_starts<'a>(
         sync(lp, live);
     }
     Ok(None)
+}
+
+/// The queued `run` jobs taken in this pass (issue 633), each started as a task child in the
+/// slot its labels chose, as the loop starts an issue it picked itself; its end writes the job's
+/// result ([`task_ended`]).
+fn start_run_jobs<'a>(
+    lp: &mut Loop<'a>,
+    lock: &mut LoopLock,
+    pass: &mut Pass,
+    live: &mut Vec<Live<'a>>,
+    out: &mut dyn Write,
+    warn: &mut dyn Write,
+) -> Result<()> {
+    for run in std::mem::take(&mut lp.run_jobs) {
+        let mut t = Live {
+            issue: run.issue,
+            title: run.title,
+            size: run.size,
+            started: lp.now(),
+            stops: Vec::new(),
+            slot: run.slot,
+            label: run.labeled,
+            failures: 0,
+            should_fix_ran: false,
+            ran: false,
+            resuming: false,
+            pending: None,
+            phase: None,
+            usage: None,
+            usage_waited: Duration::ZERO,
+            limited: false,
+            room_since: None,
+            retried: None,
+            idle_before: None,
+            job: Some(run.file),
+        };
+        match lp.next_phase(&mut t, out, warn)? {
+            None => live.push(t),
+            Some(end) => task_ended(lp, lock, pass, t, end, live.is_empty(), out, warn)?,
+        }
+        sync(lp, live);
+    }
+    Ok(())
 }
 
 /// A held or cut-off task tried again: started, or ended at once. `true` when it started.
@@ -803,7 +861,7 @@ fn start_again<'a>(
     writeln!(
         out,
         "task {}: #{issue} {} (size {}), tried again",
-        pass.tasks_run as usize + live.len() + 1,
+        pass.tasks_run + tasks(live) + 1,
         again.title,
         again.size.as_deref().unwrap_or("unknown")
     )?;
@@ -844,6 +902,7 @@ fn start_again<'a>(
                 room_since: None,
                 retried: Some((retry, cut_off, owed)),
                 idle_before: None,
+                job: None,
             };
             task_ended(lp, lock, pass, t, end, live.is_empty(), out, warn)?;
             Ok(false)
@@ -866,6 +925,14 @@ fn task_ended(
     warn: &mut dyn Write,
 ) -> Result<()> {
     let issue = t.issue;
+    // A queued `run` job's task (issue 633): its job's result, not a task's row.
+    if let Some(job) = t.job {
+        if let Some(stop) = lp.run_job_ended(job, issue, end, out, warn)? {
+            lp.draining = true;
+            pass.halt.get_or_insert(stop);
+        }
+        return Ok(());
+    }
     let row = |outcome: String, ready: Option<u64>, t: &Live, lp: &Loop| {
         let rec = lp.record(issue);
         let duration = |agent: Option<&record::Agent>| agent?.run.as_ref().map(|r| r.duration_s);
