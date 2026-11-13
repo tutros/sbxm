@@ -78,6 +78,19 @@ impl Loop<'_> {
             if (self.env.stop_requested)() {
                 return Ok(false);
             }
+            // A job whose slot a child holds, or that a child's usage limit holds back, waits for
+            // a later pass, the jobs after it too, so they still run oldest first (issue 615).
+            if let Some((label, at, task)) = self.job_slot(path)
+                && let Some(waits) = self.wait_reason(at, task)
+            {
+                let line = format!("{label}: waits for {waits}; tried again at a later pass");
+                self.say_once(out, line)?;
+                return Ok(true);
+            }
+            // A stop asked during the reads that found its slot: it stays queued.
+            if (self.env.stop_requested)() {
+                return Ok(false);
+            }
             self.job(path, out, warn)?;
         }
     }
@@ -225,6 +238,7 @@ impl Loop<'_> {
             issue: 0,
             title: String::new(),
             size: None,
+            slot: None,
             started,
             ready: None,
             worker_s: None,

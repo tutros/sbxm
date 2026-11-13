@@ -561,6 +561,7 @@ fn the_loop_section_titles_its_task_and_the_prs_awaiting_but_not_one_whose_recor
         current: Some(Current {
             id: "issue-41".to_owned(),
             stage: "working",
+            slot: "local",
         }),
         done: vec!["issue-40".to_owned()],
         ..Work::default()
@@ -586,7 +587,7 @@ fn the_loop_section_titles_its_task_and_the_prs_awaiting_but_not_one_whose_recor
     let text = looping::render(&view, None);
 
     assert!(
-        text.contains("  task: issue-41 (Add titles) at working\n"),
+        text.contains("  task: issue-41 (Add titles) at working, local\n"),
         "{text}"
     );
     assert!(text.contains("  done: 1 (issue-40 (Earlier))\n"), "{text}");

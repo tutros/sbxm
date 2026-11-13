@@ -374,7 +374,7 @@ fn five_issues_two_done_and_the_third_running() {
     let text = section(&b, &github(&[468, 444, 455]));
 
     assert!(
-        text.contains("  task: issue-468 (title 468) at working, task 3 of 5\n"),
+        text.contains("  task: issue-468 (title 468) at working, local, task 3 of 5\n"),
         "{text}"
     );
     assert!(
@@ -517,7 +517,7 @@ fn a_lock_without_a_list_is_shown_as_before() {
 
     assert!(text.contains("Loop: running (process 1, "), "{text}");
     assert!(
-        text.contains("  task: issue-3 (title 3) at working\n"),
+        text.contains("  task: issue-3 (title 3) at working, local\n"),
         "{text}"
     );
     assert!(
@@ -545,7 +545,7 @@ fn a_failed_github_read_is_said_for_a_listed_loop_and_its_progress_still_shows()
         "{text}"
     );
     assert!(
-        text.contains("issue-1 (title 1) at working, task 1 of 2\n"),
+        text.contains("issue-1 (title 1) at working, local, task 1 of 2\n"),
         "{text}"
     );
     assert!(text.contains("  pending: 1 issue\n    #2\n"), "{text}");

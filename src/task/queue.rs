@@ -8,6 +8,7 @@ use std::path::Path;
 
 use anyhow::{Context, Result};
 
+use crate::backend::Location;
 use crate::github::{Issue, PrMergeState, PrState};
 use crate::run::results::format_timestamp;
 use crate::task::finish::{check_own_folder, next_fence};
@@ -264,6 +265,8 @@ pub struct Row {
     pub issue: u32,
     pub title: String,
     pub size: Option<String>,
+    /// Where its task ran (issue 615, decision 317(6)); `None` when unknown, shown as `-`.
+    pub slot: Option<Location>,
     /// Seconds since the epoch.
     pub started: u64,
     pub ready: Option<u64>,
@@ -287,9 +290,9 @@ pub const REPOSITORY: &str = "Repository: ";
 const HEADER: &str =
     "Times UTC. Written by `sbxm task loop`, one row per task; `unknown` where not measured.
 
-| # | Issue | Size | Started | Ready (time to ready) | Worker / reviewer s | Rounds (must-fix) | \
-Outcome | Stops (cause, duration) | Idle before | User interventions |
-|---|---|---|---|---|---|---|---|---|---|---|
+| # | Issue | Size | Slot | Started | Ready (time to ready) | Worker / reviewer s | Rounds \
+(must-fix) | Outcome | Stops (cause, duration) | Idle before | User interventions |
+|---|---|---|---|---|---|---|---|---|---|---|---|
 ";
 
 /// A table cell: one line, with `|` escaped.
@@ -341,8 +344,10 @@ fn render_as(number: usize, item: &str, row: &Row) -> String {
             .join("; ")
     };
     format!(
-        "| {number} | {item} | {} | {} | {ready} | {durations} | {rounds} | {} | {} | {} | unknown |\n",
+        "| {number} | {item} | {} | {} | {} | {ready} | {durations} | {rounds} | {} | {} | {} | \
+         unknown |\n",
         row.size.as_deref().unwrap_or("unknown"),
+        row.slot.map_or("-", Location::as_str),
         clock(row.started),
         cell(&row.outcome),
         cell(&stops),

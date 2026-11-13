@@ -75,12 +75,17 @@ pub fn read_lock_file(base: &Path, probe: &dyn ProcessProbe) -> (Lock, Option<Lo
 pub struct Current {
     pub id: String,
     pub stage: &'static str,
+    /// Where it runs, `local` or `cloud` (issue 615).
+    pub slot: &'static str,
 }
 
 /// What the task records say about a running loop.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Work {
     pub current: Option<Current>,
+    /// The loop's other running tasks, after [`Self::current`] in issue order (issue 615): the
+    /// loop runs several children at once with `cloud_slots` set.
+    pub also: Vec<Current>,
     /// The tasks the loop finished since it started, by id.
     pub done: Vec<String>,
     /// The title of the current task and of each one done, by id (issue 246).
@@ -102,6 +107,8 @@ pub struct Work {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Listed {
     pub current: Option<u32>,
+    /// The other listed issues whose tasks run at once with it (issue 615).
+    pub running: Vec<u32>,
     pub done: Vec<u32>,
     pub parked: Vec<u32>,
     pub skipped: Vec<u32>,
@@ -125,10 +132,14 @@ impl Listed {
             .map_or(self.done.len() + self.parked.len(), |n| n as usize)
     }
 
-    /// M of "task N of M": the tasks the loop runs from the list, those it ran, the one running,
+    /// M of "task N of M": the tasks the loop runs from the list, those it ran, the ones running,
     /// the held ones and the ones pending; skipped and not-run issues are not counted.
     pub fn total(&self) -> usize {
-        self.ran() + usize::from(self.current.is_some()) + self.held.len() + self.pending.len()
+        self.ran()
+            + usize::from(self.current.is_some())
+            + self.running.len()
+            + self.held.len()
+            + self.pending.len()
     }
 
     /// N of "task N of M", while a task runs.
@@ -174,6 +185,7 @@ pub fn work_for(base: &Path, file: &LockFile, probe: &dyn ProcessProbe) -> anyho
     let mut out = Work::default();
     let active = record::load_all(base)?;
     let mut finished = Vec::new();
+    let mut running = Vec::new();
     for rec in &active {
         if rec.kind != Kind::Issue {
             continue;
@@ -184,13 +196,18 @@ pub fn work_for(base: &Path, file: &LockFile, probe: &dyn ProcessProbe) -> anyho
             && rec.owner() == Some(lock)
             && !interrupted(base, rec, probe)
         {
-            out.current = Some(Current {
-                id: rec.id.clone(),
-                stage: rec.stage.name(),
-            });
+            running.push(rec);
             out.titles.insert(rec.id.clone(), rec.title.clone());
         }
     }
+    running.sort_by(|a, b| (a.number, &a.id).cmp(&(b.number, &b.id)));
+    let mut running = running.into_iter().map(|rec| Current {
+        id: rec.id.clone(),
+        stage: rec.stage.name(),
+        slot: rec.location.as_str(),
+    });
+    out.current = running.next();
+    out.also = running.collect();
     let mut archived = archived(base);
     archived.retain(|rec| !active.iter().any(|a| a.id == rec.id));
     finished.extend(
@@ -254,11 +271,13 @@ fn recorded(
         work.current = Some(Current {
             id: rec.id.clone(),
             stage: rec.stage.name(),
+            slot: rec.location.as_str(),
         });
         work.titles.insert(rec.id.clone(), rec.title.clone());
     }
     let mut out = Listed {
         current,
+        running: others(work, active, current, file),
         cap: file.cap,
         counted: Some(progress.counted),
         ..Listed::default()
@@ -267,13 +286,24 @@ fn recorded(
     let held: Vec<u32> = progress
         .outcomes
         .iter()
-        .filter(|o| o.outcome == Outcome::Held && Some(o.issue) != current)
+        .filter(|o| {
+            o.outcome == Outcome::Held
+                && Some(o.issue) != current
+                && !out.running.contains(&o.issue)
+        })
         .map(|o| o.issue)
         .filter(|n| file.issues.contains(n))
         .collect();
     let mut later = Vec::new();
     for &n in &file.issues {
-        let seen = [&out.done, &out.parked, &out.skipped, &held, &later];
+        let seen = [
+            &out.running,
+            &out.done,
+            &out.parked,
+            &out.skipped,
+            &held,
+            &later,
+        ];
         if Some(n) == current || seen.iter().any(|list| list.contains(&n)) {
             continue;
         }
@@ -294,7 +324,8 @@ fn recorded(
         }
     }
     let mut left = file.cap.map_or(usize::MAX, |cap| {
-        (cap as usize).saturating_sub(out.ran() + usize::from(current.is_some()))
+        (cap as usize)
+            .saturating_sub(out.ran() + usize::from(current.is_some()) + out.running.len())
     });
     for (to_come, shown) in [(held, &mut out.held), (later, &mut out.pending)] {
         for n in to_come {
@@ -316,6 +347,21 @@ fn recorded(
     out
 }
 
+/// The listed issues whose tasks [`work_for`] found running, besides `current` (issue 615).
+fn others(work: &Work, active: &[Record], current: Option<u32>, file: &LockFile) -> Vec<u32> {
+    work.current
+        .iter()
+        .chain(&work.also)
+        .filter_map(|c| {
+            active
+                .iter()
+                .find(|r| r.id == c.id && r.kind == Kind::Issue)
+                .map(|r| r.number)
+        })
+        .filter(|n| Some(*n) != current && file.issues.contains(n))
+        .collect()
+}
+
 /// [`Listed`] from the lock's list, the records and what [`work_for`] found.
 fn listed(file: &LockFile, work: &Work, active: &[Record], archived: &[Record]) -> Listed {
     let issue_of = |id: &str| {
@@ -326,6 +372,7 @@ fn listed(file: &LockFile, work: &Work, active: &[Record], archived: &[Record]) 
             .map(|r| r.number)
     };
     let current = work.current.as_ref().and_then(|c| issue_of(&c.id));
+    let running = others(work, active, current, file);
     let done: Vec<u32> = work.done.iter().filter_map(|id| issue_of(id)).collect();
     let parked = |n: u32| {
         active.iter().any(|r| {
@@ -336,18 +383,22 @@ fn listed(file: &LockFile, work: &Work, active: &[Record], archived: &[Record]) 
                 && r.owner() == Some(&file.process)
         })
     };
-    let reached = file
-        .issues
-        .iter()
-        .rposition(|&n| Some(n) == current || done.contains(&n) || parked(n));
+    let reached = file.issues.iter().rposition(|&n| {
+        Some(n) == current || running.contains(&n) || done.contains(&n) || parked(n)
+    });
     let mut out = Listed {
         current: current.filter(|n| file.issues.contains(n)),
+        running,
         cap: file.cap,
         ..Listed::default()
     };
     let mut later = Vec::new();
     for (i, &n) in file.issues.iter().enumerate() {
-        if Some(n) == out.current || out.done.contains(&n) || out.parked.contains(&n) {
+        if Some(n) == out.current
+            || out.running.contains(&n)
+            || out.done.contains(&n)
+            || out.parked.contains(&n)
+        {
             continue;
         }
         if done.contains(&n) {
@@ -361,7 +412,8 @@ fn listed(file: &LockFile, work: &Work, active: &[Record], archived: &[Record]) 
         }
     }
     let left = file.cap.map_or(usize::MAX, |cap| {
-        (cap as usize).saturating_sub(out.ran() + usize::from(out.current.is_some()))
+        (cap as usize)
+            .saturating_sub(out.ran() + usize::from(out.current.is_some()) + out.running.len())
     });
     let shown = later.len().min(left);
     out.not_run = later.split_off(shown);
@@ -726,10 +778,13 @@ pub fn render(view: &View, width: Option<usize>) -> String {
             |id: &str| crate::title::named(id, work.titles.get(id).map_or("", String::as_str));
         let of = work.listed.as_ref().map(|l| (l.position(), l.total()));
         lines.push(match (&work.current, of) {
-            (Some(c), Some((Some(n), m))) => {
-                format!("  task: {} at {}, task {n} of {m}", named(&c.id), c.stage)
-            }
-            (Some(c), _) => format!("  task: {} at {}", named(&c.id), c.stage),
+            (Some(c), Some((Some(n), m))) => format!(
+                "  task: {} at {}, {}, task {n} of {m}",
+                named(&c.id),
+                c.stage,
+                c.slot
+            ),
+            (Some(c), _) => format!("  task: {} at {}, {}", named(&c.id), c.stage, c.slot),
             // The loop's recorded issue before its task record exists (issue 493).
             (None, Some((Some(n), m))) => {
                 let issue = work.listed.as_ref().and_then(|l| l.current);
@@ -753,6 +808,15 @@ pub fn render(view: &View, width: Option<usize>) -> String {
             ),
             (None, None) => "  task: none running".to_owned(),
         });
+        // Every other child the loop runs at once (issue 615), each on its own line.
+        for c in &work.also {
+            lines.push(format!(
+                "  task: {} at {}, {}",
+                named(&c.id),
+                c.stage,
+                c.slot
+            ));
+        }
         lines.push(if work.done.is_empty() {
             "  done: none yet".to_owned()
         } else {

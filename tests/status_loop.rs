@@ -300,7 +300,7 @@ fn a_running_loop_shows_its_task_its_stage_the_tasks_done_and_the_prs_awaiting()
     assert_eq!(
         format!("Loop:{section}"),
         format!(
-            "Loop: running (process 1, started {})\n  task: issue-7 (title 7) at reviewing\n  done: 2 \
+            "Loop: running (process 1, started {})\n  task: issue-7 (title 7) at reviewing, local\n  done: 2 \
              (issue-2 (title 2), issue-3 (title 3))\n  jobs: none\n  awaiting you: 1 of 5 PRs (#102: title 2)\n  \
              queue: empty\n",
             format_timestamp(LOOP_START)
@@ -334,7 +334,10 @@ fn an_unmarked_running_task_with_the_locks_process_is_the_loops_during_work_and_
         let text = frame(&b, &alive(), &gh, false, 80);
 
         assert!(
-            text.contains(&format!("  task: issue-8 (title 8) at {}\n", stage.name())),
+            text.contains(&format!(
+                "  task: issue-8 (title 8) at {}, local\n",
+                stage.name()
+            )),
             "{text}"
         );
     }
@@ -667,7 +670,7 @@ fn a_github_failure_shows_the_queue_unreadable_and_the_rest_of_status_still_show
     assert!(!text.contains("second line"), "{text}");
     assert!(text.contains("issue-7"), "the Tasks table: {text}");
     assert!(
-        text.contains("  task: issue-7 (title 7) at working\n"),
+        text.contains("  task: issue-7 (title 7) at working, local\n"),
         "{text}"
     );
 }

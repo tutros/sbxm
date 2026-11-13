@@ -59,21 +59,45 @@ pub struct Exit {
 pub trait Spawner {
     /// Runs `child` to its exit; `tick` is called while it runs.
     fn run(&self, child: &Child, tick: &dyn Fn()) -> Result<Exit>;
-    /// Ends the running child at once, if one runs: the loop's second Ctrl-C.
+    /// Starts `child` and returns at once (issue 615): its exit is polled through the handle, so
+    /// the loop supervises several at a time. A `Spawner` that only plays children runs it to its
+    /// exit here, as [`Self::run`] does.
+    fn start(&self, child: &Child) -> Result<Box<dyn Running + '_>> {
+        Ok(Box::new(Exited(Some(self.run(child, &|| {})?))))
+    }
+    /// Ends every running child at once: the loop's second Ctrl-C.
     fn stop(&self);
 }
+
+/// A started child, polled for its exit.
+pub trait Running {
+    /// Its exit once it has exited, `None` while it runs.
+    fn poll(&mut self) -> Result<Option<Exit>>;
+}
+
+/// A child that already exited: its exit, given once.
+struct Exited(Option<Exit>);
+
+impl Running for Exited {
+    fn poll(&mut self) -> Result<Option<Exit>> {
+        Ok(self.0.take())
+    }
+}
+
+/// A process the spawner started, until it is reaped; `None` once it is, or once stopped.
+type Slot = Arc<Mutex<Option<std::process::Child>>>;
 
 /// The real children: `exe`, the loop's own executable.
 pub struct ChildSpawner {
     exe: PathBuf,
-    running: Mutex<Option<std::process::Child>>,
+    running: Mutex<Vec<Slot>>,
 }
 
 impl ChildSpawner {
     pub fn new(exe: PathBuf) -> Self {
         Self {
             exe,
-            running: Mutex::new(None),
+            running: Mutex::new(Vec::new()),
         }
     }
 
@@ -87,6 +111,17 @@ impl ChildSpawner {
 
 impl Spawner for ChildSpawner {
     fn run(&self, child: &Child, tick: &dyn Fn()) -> Result<Exit> {
+        let mut running = self.start(child)?;
+        loop {
+            if let Some(exit) = running.poll()? {
+                return Ok(exit);
+            }
+            tick();
+            std::thread::sleep(POLL);
+        }
+    }
+
+    fn start(&self, child: &Child) -> Result<Box<dyn Running + '_>> {
         let mut command = Command::new(&self.exe);
         command
             .args(&child.args)
@@ -96,11 +131,16 @@ impl Spawner for ChildSpawner {
             .stdout(Stdio::null())
             .stderr(Stdio::piped());
         own_group(&mut command);
-        let mut running = command
+        let mut process = command
             .spawn()
             .with_context(|| format!("cannot start {}", self.exe.display()))?;
-        let stderr = running.stderr.take();
-        *self.running.lock().unwrap_or_else(|e| e.into_inner()) = Some(running);
+        let stderr = process.stderr.take();
+        let slot: Slot = Arc::new(Mutex::new(Some(process)));
+        {
+            let mut all = self.running.lock().unwrap_or_else(|e| e.into_inner());
+            all.retain(|s| s.lock().unwrap_or_else(|e| e.into_inner()).is_some());
+            all.push(Arc::clone(&slot));
+        }
         // Read on a thread of its own: a process the child started may keep the pipe open after
         // the child exits, so the child's end is never waited on through it.
         let kept = Arc::new(Mutex::new(Vec::new()));
@@ -108,38 +148,62 @@ impl Spawner for ChildSpawner {
             let kept = Arc::clone(&kept);
             move || keep_tail(stderr, &kept)
         });
-        let status = loop {
-            let polled = {
-                let mut guard = self.running.lock().unwrap_or_else(|e| e.into_inner());
-                match guard.as_mut() {
-                    Some(running) => running.try_wait(),
-                    None => break None,
-                }
-            };
+        Ok(Box::new(Started {
+            slot,
+            reader: Some(reader),
+            kept,
+        }))
+    }
+
+    fn stop(&self) {
+        let all = self.running.lock().unwrap_or_else(|e| e.into_inner());
+        for slot in all.iter() {
+            if let Some(mut running) = slot.lock().unwrap_or_else(|e| e.into_inner()).take() {
+                let _ = running.kill();
+                let _ = running.wait();
+            }
+        }
+    }
+}
+
+/// A child [`ChildSpawner`] started.
+struct Started {
+    slot: Slot,
+    reader: Option<std::thread::JoinHandle<()>>,
+    kept: Arc<Mutex<Vec<u8>>>,
+}
+
+impl Running for Started {
+    fn poll(&mut self) -> Result<Option<Exit>> {
+        let status = {
+            let mut guard = self.slot.lock().unwrap_or_else(|e| e.into_inner());
+            let polled = guard.as_mut().map(|running| running.try_wait());
             match polled {
-                Ok(Some(status)) => break Some(status),
-                Ok(None) => {}
-                Err(e) => {
-                    self.stop();
+                None => None,
+                Some(Ok(None)) => return Ok(None),
+                Some(Ok(Some(status))) => Some(status),
+                Some(Err(e)) => {
+                    if let Some(mut running) = guard.take() {
+                        let _ = running.kill();
+                        let _ = running.wait();
+                    }
                     return Err(e).context("cannot wait for the task's child sbxm");
                 }
             }
-            tick();
-            std::thread::sleep(POLL);
         };
-        self.running
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .take();
-        for _ in 0..READER_GRACE_POLLS {
-            if reader.is_finished() {
-                break;
+        // Reaped, or stopped: no longer the spawner's to stop.
+        self.slot.lock().unwrap_or_else(|e| e.into_inner()).take();
+        if let Some(reader) = self.reader.take() {
+            for _ in 0..READER_GRACE_POLLS {
+                if reader.is_finished() {
+                    break;
+                }
+                std::thread::sleep(POLL);
             }
-            std::thread::sleep(POLL);
         }
-        let errors =
-            String::from_utf8_lossy(&kept.lock().unwrap_or_else(|e| e.into_inner())).into_owned();
-        Ok(match status {
+        let errors = String::from_utf8_lossy(&self.kept.lock().unwrap_or_else(|e| e.into_inner()))
+            .into_owned();
+        Ok(Some(match status {
             Some(status) => Exit {
                 success: status.success(),
                 how: match status.code() {
@@ -153,19 +217,7 @@ impl Spawner for ChildSpawner {
                 how: "was stopped".to_owned(),
                 errors,
             },
-        })
-    }
-
-    fn stop(&self) {
-        if let Some(running) = self
-            .running
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_mut()
-        {
-            let _ = running.kill();
-            let _ = running.wait();
-        }
+        }))
     }
 }
 

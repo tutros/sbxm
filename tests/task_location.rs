@@ -314,9 +314,20 @@ fn run_loop(
     (script.calls.take(), String::from_utf8(out).unwrap())
 }
 
+/// With `cloud_slots` set the loop places an unlabeled issue itself, in the first free slot, local
+/// first (decision 317(4), issue 615); with it unset, `[sandbox] location` does, as before.
 #[test]
-fn the_loop_runs_an_unlabeled_issue_where_it_ran_before() {
+fn the_loop_runs_an_unlabeled_issue_in_the_first_free_slot_local_first() {
     let (env, repo_root) = loop_fixture(Some(2));
+
+    let (calls, out) = run_loop(&env, &repo_root, &ready_issue(&[]));
+
+    assert_eq!(calls, ["run 3 Some(Local)"], "{out}");
+}
+
+#[test]
+fn with_cloud_slots_unset_an_unlabeled_issue_runs_where_sandbox_location_says() {
+    let (env, repo_root) = loop_fixture(None);
 
     let (calls, out) = run_loop(&env, &repo_root, &ready_issue(&[]));
 
